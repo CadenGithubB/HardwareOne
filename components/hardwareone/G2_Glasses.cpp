@@ -14740,8 +14740,6 @@ static void g2EvenAiOnTempleDisconnect(char side,
 // flow: poll micrecord until the VAD auto-stop → micrecord stop (path) →
 // voicefetch → STT → `g2evenai askid <id>` → LLM → tagged reply parts.
 #if ENABLE_MICROPHONE
-extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback,
-                               void* userData);
 
 enum : uint8_t {
   EVENAI_CAP_IDLE     = 0,  // no auto-capture in flight

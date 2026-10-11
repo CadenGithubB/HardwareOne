@@ -26,30 +26,48 @@ static uint32_t supportedResolutions=0;
 CameraCapabilities getCameraCapabilities() {return {"host",supportedResolutions,supportedControls,false,false,0,0};}
 bool cameraSupportsResolution(CameraFrameSize size) {return (supportedResolutions & cameraResolutionBit(size)) != 0;}
 bool cameraSupportsControl(CameraControl control) {return (supportedControls & cameraControlBit(control)) != 0;}
-struct G2CmdCookie {unsigned menuGen=0,seq=0,targetPage=0;uint8_t targetNetSub=0;};
-struct RedrawSpec {void(*render)()=nullptr;};
-enum class LensJobKind {Redraw};
-struct LensUiJob {
-  LensJobKind kind=LensJobKind::Redraw;
-  unsigned submitMenuGen=0,cmdSeq=0,targetPage=0,targetNetSub=0;
-  struct {RedrawSpec* redraw=nullptr;} payload;
-};
+struct G2CmdCookie {uint64_t seq=0;uint32_t menuGen=0;unsigned targetPage=0;uint8_t targetNetSub=0;};
+using Completion = void(*)(bool,const char*,const G2CmdCookie&,void*);
+struct PendingCommand {G2CmdCookie cookie;Completion done;void* userData;};
+struct PendingRedraw {G2CmdCookie cookie;void(*render)();};
+static std::vector<PendingCommand> pendingCommands;
+static std::vector<PendingRedraw> pendingRedraws;
 static std::vector<std::string> shownRows, submitted;
-static bool acceptCommand=true;
-static unsigned page=0;
+static bool acceptCommand=true,acceptRedraw=true;
+static unsigned page=0,menuGen=0,listsShown=0;
+static uint64_t commandSeq=0;
 static constexpr unsigned G2_HIJACK_PAGE_CAMERA_SETTINGS=23;
 bool g2CamStreamSettingsExitRelaunch=false;
 unsigned g2GetHijackPage(){return page;}
-void g2SetHijackPage(unsigned value){page=value;}
-bool g2ShowListPage(const char*const* rows,size_t count){shownRows.assign(rows,rows+count);return true;}
+void g2SetHijackPage(unsigned value){if(page!=value){page=value;++menuGen;}}
+bool g2ShowListPage(const char*const* rows,size_t count){++listsShown;shownRows.assign(rows,rows+count);return true;}
 void g2ReshowSensorsDetail(){}
 bool g2ShowCameraStream(void(*)()){return true;}
-bool g2EnqueueLensJob(LensUiJob* job){delete job->payload.redraw;delete job;return true;}
-bool g2SubmitHijackCommand(const char* command,const G2CmdCookie&,
-                           void(*)(bool,const char*,const G2CmdCookie&,void*),void*) {
+bool g2EnqueueRedraw(const G2CmdCookie& cookie,void(*render)(),const char* tag) {
+  assert(render && tag && strcmp(tag,"Camera settings")==0);
+  if(!acceptRedraw) return false;
+  pendingRedraws.push_back({cookie,render});
+  return true;
+}
+bool g2SubmitHijackCommand(const char* command,const G2CmdCookie& cookie,
+                           Completion done,void* userData) {
   if (!acceptCommand) return false;
   submitted.emplace_back(command);
+  G2CmdCookie captured=cookie;captured.seq=++commandSeq;captured.menuGen=menuGen;
+  pendingCommands.push_back({captured,done,userData});
   return true;
+}
+static G2CmdCookie completeCommand(bool ok,const char* result) {
+  assert(!pendingCommands.empty());
+  const auto command=pendingCommands.front();pendingCommands.erase(pendingCommands.begin());
+  assert(command.done);command.done(ok,result,command.cookie,command.userData);
+  return command.cookie;
+}
+// This boundary explicitly delivers a queued renderer; the real generation
+// fence and queue/allocation ownership are covered by the g2_redraw suite.
+static void flushRedraws() {
+  const auto queued=pendingRedraws;pendingRedraws.clear();
+  for(const auto& redraw:queued) redraw.render();
 }
 // INSERT_PRODUCTION_CAMERA_SETTINGS
 
@@ -115,8 +133,10 @@ int main() {
   // Queue failure leaves persisted state unchanged and no optimistic text.
   acceptCommand=false;
   showSubMenu(CAM_CAT_POSTPROC);
+  const auto pendingBefore=pendingCommands.size();
   g2CameraSettingsHandleTap(1);
   assert(gSettings.cameraQuality==12 && submitted.size()==before);
+  assert(pendingCommands.size()==pendingBefore && pendingRedraws.empty());
 
   // Text output omits unsupported controls and is bounded at every capacity.
   char info[1024];g2BuildCameraSettingsInfo(info,sizeof(info));
@@ -129,5 +149,47 @@ int main() {
     delete[] buffer;
   }
   g2BuildCameraSettingsInfo(nullptr,0);
+
+  // Deliver prior test commands as failures without changing committed state.
+  while(!pendingCommands.empty()) completeCommand(false,"Error: test rejection");
+  flushRedraws();acceptCommand=true;
+
+  showSubMenu(CAM_CAT_POSTPROC);
+  g2CameraSettingsHandleTap(1);
+  assert(shownRows[1]=="Quality: 12");
+  const auto rowsBefore=shownRows;
+  const auto drawsBefore=listsShown;
+  gSettings.cameraQuality=16; // The executor, never the page, commits settings.
+  const auto cookie=completeCommand(true,"SUCCESS");
+  assert(shownRows==rowsBefore && listsShown==drawsBefore && pendingRedraws.size()==1);
+  const auto redraw=pendingRedraws.front();
+  assert(redraw.cookie.seq==cookie.seq && redraw.cookie.menuGen==cookie.menuGen);
+  assert(redraw.cookie.targetPage==cookie.targetPage && redraw.cookie.targetNetSub==cookie.targetNetSub);
+  assert(cookie.targetPage==G2_HIJACK_PAGE_CAMERA_SETTINGS && cookie.targetNetSub==CAM_LEVEL_SUB_POSTPROC);
+  assert(redraw.render==redrawCurrentCameraSettings);
+  flushRedraws();
+  assert(shownRows[1]=="Quality: 16" && listsShown==drawsBefore+1);
+
+  // Completion redraws the current subpage, not the submitted command's level.
+  g2CameraSettingsHandleTap(1);
+  showSubMenu(CAM_CAT_TRANSFORM);
+  completeCommand(false,"Error: rejected");
+  assert(pendingRedraws.size()==1 && gSettings.cameraQuality==16);
+  flushRedraws();
+  assert(gLevel==CAM_LEVEL_SUB_TRANSFORM && shownRows[1]=="No supported controls");
+
+  // Redraw rejection has no inline fallback or optimistic settings mutation.
+  showSubMenu(CAM_CAT_POSTPROC);g2CameraSettingsHandleTap(1);
+  acceptRedraw=false;
+  const auto rejectedDraws=listsShown;
+  completeCommand(true,"SUCCESS");
+  assert(pendingRedraws.empty() && listsShown==rejectedDraws && gSettings.cameraQuality==16);
+  acceptRedraw=true;
+
+  // Even a manually delivered renderer is harmless after leaving the page.
+  g2CameraSettingsHandleTap(1);g2SetHijackPage(99);
+  completeCommand(true,"SUCCESS");
+  const auto awayDraws=listsShown;flushRedraws();
+  assert(listsShown==awayDraws && pendingCommands.empty() && pendingRedraws.empty());
   puts("CAMERA_CONSUMERS PASS");
 }

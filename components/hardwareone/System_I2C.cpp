@@ -1115,7 +1115,6 @@ extern bool thermalPoll();
 // connectedDevices, connectedDeviceCount, discoveryCount defined above
 extern const I2CSensorEntry i2cSensors[];
 extern const size_t i2cSensorsCount;
-extern bool readText(const char* path, String& out);
 
 
 

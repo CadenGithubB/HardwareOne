@@ -42,7 +42,6 @@
 #include "System_WiFi.h"
 #endif
 
-extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
 #if ENABLE_ESPNOW
 extern bool isEspNowInitialized();
 #endif

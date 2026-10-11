@@ -45,12 +45,20 @@ assert load_settings.index("errno != ENOENT") < load_settings.index(
 assert "if (!doc.is<JsonObject>())" in load_settings
 
 save_body = function_body(settings, "bool saveUserSettings(")
-assert save_body.count("measureJson(doc)") == 1
 assert "UserPrefsInvalidateOnExit" in save_body
-assert "written != expected || observed != expected" in save_body
-assert "directWritten == expected && directObserved == expected" in save_body
-assert save_body.index("written != expected || observed != expected") < save_body.index("renameGuarded")
-assert "written > 0" not in save_body
+assert save_body.index("UserPrefsInvalidateOnExit") < save_body.index("if (!filesystemReady)")
+assert save_body.count("writeJsonSnapshot(") == 1
+for forbidden in ("serializeJson(", "openGuarded(", "renameGuarded(",
+                  "SettingsFileWriteGuard", "writeSettingsSnapshot(", "systemEventPost("):
+    assert forbidden not in save_body, f"per-user save duplicates or broadens policy: {forbidden}"
+
+snapshot_core = function_body(settings, "static JsonSnapshotWriteResult writeJsonSnapshot(")
+snapshot_wrapper = function_body(settings, "static bool writeSettingsSnapshot(")
+assert snapshot_core.count("measureJson(doc)") == 1
+assert "getWriteError()" in snapshot_core
+assert "logSystemEvent(" not in snapshot_core and "systemEventPost(" not in snapshot_core
+assert snapshot_wrapper.count("writeJsonSnapshot(") == 1
+assert "SYSEVT_SETTINGS_SAVE_FAILED" in snapshot_wrapper
 
 merge = function_body(settings, "bool mergeAndSaveUserSettings(")
 assert "runUserSettingsTransaction(" in merge

@@ -7,6 +7,7 @@
 #include "System_User.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"
+#include "System_Utils.h"
 #include <ArduinoJson.h>
 
 // External helpers

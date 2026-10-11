@@ -181,6 +181,8 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
       return "";
     }
     path = normalizedPath;
+    String temporary = path;
+    if (temporary.length() != path.length() || !temporary.concat(".tmp")) return "";
     AuthContext sys = VFS::systemAuth(isSD ? "imgmgr.save_sd" : "imgmgr.save_image_lfs");
     FsLockGuard guard("ImageManager.saveImage");
     uint64_t total = 0, used = 0, free = 0;
@@ -194,8 +196,12 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
       return "";
     }
     if (!ensureCaptureFolder(target)) return "";
+    if (VFS::existsGuarded(temporary, sys)) {
+      ERROR_STORAGEF("[ImageManager] Temporary image already exists: %s", temporary.c_str());
+      return "";
+    }
 
-    File f = VFS::openGuarded(path, "w", sys, /*create=*/true);
+    File f = VFS::openGuarded(temporary, "w", sys, /*create=*/true);
     if (!f || f.isDirectory()) return "";
     const size_t written = f.write(data, len);
     f.flush();
@@ -204,14 +210,19 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
     const bool complete = written == len && !f.getWriteError() && f.size() == len;
     f.close();
     if (!isSD && written) VFS::noteLittleFsBytesWritten(written);
-    if (!complete) {
-      ERROR_STORAGEF("[ImageManager] Incomplete image write: %s (%u/%u bytes)",
-                     path.c_str(), (unsigned)written, (unsigned)len);
+    if (!complete || !VFS::replaceFileGuarded(temporary, path, sys)) {
+      if (!complete) {
+        ERROR_STORAGEF("[ImageManager] Incomplete image write: %s (%u/%u bytes)",
+                       temporary.c_str(), (unsigned)written, (unsigned)len);
+      } else {
+        ERROR_STORAGEF("[ImageManager] Failed to replace image: %s%s", path.c_str(),
+                       isSD ? " (a recovery .bak may remain)" : "");
+      }
       if (isSD) VFS::noteSDWriteFailure("image save");
-      // Direct writes may have truncated an existing generated filename.
-      // Remove only this opened file; cleanup failure still means save failure.
-      if (!VFS::removeGuarded(path, sys)) {
-        ERROR_STORAGEF("[ImageManager] Failed to remove incomplete image: %s", path.c_str());
+      // This attempt owns only its temporary; preserve the previous image and
+      // any recovery backup retained by a failed SD promotion.
+      if (!VFS::removeGuarded(temporary, sys)) {
+        ERROR_STORAGEF("[ImageManager] Failed to remove temporary image: %s", temporary.c_str());
       }
       return "";
     }

@@ -13,6 +13,7 @@
 #include "WebServer_Server.h"           // httpd types, JSON_RESPONSE_SIZE, gJsonResponseBuffer, makeWebAuthCtx
 #include "WebServer_Utils.h"            // WEB_AUTH_OR_RETURN, sendJsonResponse
 #include "System_User.h"          // AuthContext, tgRequireAuth
+#include "System_Utils.h"         // urlDecode and shared command utilities
 #include "System_AuthIdentity.h"  // ExecIdentityGuard — run direct handlers under the web user's identity
 #include "System_Debug.h"         // DEBUG_* macros
 #include "System_Settings.h"             // Settings, gSettings
@@ -54,7 +55,6 @@
 #include "System_Dictation.h"
 #include "HAL_Audio.h"
 #include "Transcription_UI_Policy.h"
-#include "System_Utils.h"
 #endif
 #include "System_SensorStubs.h" // Stubs for disabled sensors
 #include "i2csensor_rda5807.h"             // fmRadioEnabled, radioInitialized, fmRadioBuildDataJSON
@@ -488,7 +488,6 @@ esp_err_t handleRemoteSensors(httpd_req_t* req) {
     if (httpd_query_key_value(query, "device", deviceMac, sizeof(deviceMac)) == ESP_OK &&
         httpd_query_key_value(query, "sensor", sensorType, sizeof(sensorType)) == ESP_OK) {
       // URL-decode the MAC (browser sends E8%3A9F%3A... instead of E8:9F:...)
-      extern String urlDecode(const String& s);
       String decodedMac = urlDecode(String(deviceMac));
       strncpy(deviceMac, decodedMac.c_str(), sizeof(deviceMac) - 1);
       deviceMac[sizeof(deviceMac) - 1] = '\0';

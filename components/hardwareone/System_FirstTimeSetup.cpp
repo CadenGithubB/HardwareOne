@@ -61,12 +61,10 @@ extern uint32_t gNTPAnchorId;
 extern uint32_t gBootCounter;
 
 // Utility functions
-extern String waitForSerialInputBlocking();
 extern String hashUserPassword(const String& plaintext);
 #if ENABLE_AUTOMATION
 extern bool writeAutomationsJsonAtomic(const String& json);
 #endif
-extern void runUnifiedSystemCommand(const String& argsInput);
 extern void resolvePendingUserCreationTimes();
 
 // DEBUG_SYSTEMF now defined in debug_system.h with performance optimizations

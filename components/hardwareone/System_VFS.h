@@ -219,6 +219,14 @@ File openGuarded   (const String& path, const char* mode, const AuthContext& ctx
 bool existsGuarded (const String& path, const AuthContext& ctx);
 bool removeGuarded (const String& path, const AuthContext& ctx);
 bool renameGuarded (const String& pathFrom, const String& pathTo, const AuthContext& ctx);
+// Promote a closed, completely checked temporary on the same storage backend.
+// Caller holds FsLockGuard across preparation, this call and failed-temp cleanup.
+// LittleFS replaces directly. SD preserves an existing destination in .bak until
+// promotion succeeds; failed rollback retains that backup for manual recovery.
+// An existing .bak is never overwritten. Successful promotion may leave a backup
+// if its cleanup fails. This is not a power-loss atomicity/durability guarantee.
+bool replaceFileGuarded(const String& temporary, const String& destination,
+                        const AuthContext& ctx);
 bool mkdirGuarded  (const String& path, const AuthContext& ctx);
 bool rmdirGuarded  (const String& path, const AuthContext& ctx);
 

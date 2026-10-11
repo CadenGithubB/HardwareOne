@@ -7,7 +7,9 @@
 #include <ctime>
 #include <functional>
 #include <memory>
+#include <map>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -35,7 +37,7 @@ static struct {
 } gSettings;
 static std::mutex sSensorLogSessionMux;
 static uint32_t sSensorLogSessionId;
-static thread_local unsigned criticalDepth, dataLockDepth;
+static thread_local unsigned criticalDepth, dataLockDepth, fsLockDepth;
 static std::atomic<unsigned> allocations{0}, fsOperations{0};
 static std::atomic<size_t> lastSnapshotBytes{0};
 static std::atomic<unsigned long> now{1000};
@@ -49,7 +51,7 @@ static void portENTER_CRITICAL(std::mutex* mux) { mux->lock(); ++criticalDepth; 
 static void portEXIT_CRITICAL(std::mutex* mux) { --criticalDepth; mux->unlock(); }
 using portMUX_TYPE = std::mutex;
 #define portMUX_INITIALIZER_UNLOCKED {}
-struct StaticSemaphore_t { std::mutex mutex; bool data = false; };
+struct StaticSemaphore_t { std::mutex mutex; bool data = false; bool fs = false; };
 using SemaphoreHandle_t = StaticSemaphore_t*;
 using TickType_t = unsigned;
 static constexpr int pdTRUE = 1;
@@ -57,11 +59,16 @@ static constexpr TickType_t portMAX_DELAY = ~TickType_t(0);
 static SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t* storage) { return storage; }
 static int xSemaphoreTake(SemaphoreHandle_t mutex, TickType_t wait) {
   check(mutex != nullptr, "owner never takes an absent mutex");
+  if (mutex->fs) {
+    boundary("filesystem lock"); check(fsLockDepth == 0, "filesystem guard avoids same-task reentry");
+    mutex->mutex.lock(); ++fsLockDepth; ++fsOperations; return pdTRUE;
+  }
   if (wait == 0) return mutex->mutex.try_lock() ? pdTRUE : 0;
   check(dataLockDepth == 0, "owner does not recursively acquire the data mutex");
   mutex->mutex.lock(); mutex->data = true; ++dataLockDepth; return pdTRUE;
 }
 static void xSemaphoreGive(SemaphoreHandle_t mutex) {
+  if (mutex->fs) { check(fsLockDepth == 1, "filesystem lock balanced"); --fsLockDepth; mutex->mutex.unlock(); return; }
   if (mutex->data) { check(dataLockDepth > 0, "data lock balanced"); --dataLockDepth; }
   mutex->mutex.unlock();
 }
@@ -88,38 +95,105 @@ static void* ps_alloc(size_t size, AllocPref, const char* name) {
 }
 using AuthContext = const char*;
 static AuthContext currentAuthContext() { return "owner"; }
-static std::recursive_mutex fsMutex;
-struct FsLockGuard {
-  explicit FsLockGuard(const char*) { boundary("filesystem lock"); fsMutex.lock(); ++fsOperations; }
-  ~FsLockGuard() { fsMutex.unlock(); }
-};
-static void fsLock(const char*) { boundary("filesystem lock"); fsMutex.lock(); ++fsOperations; }
-static void fsUnlock() { fsMutex.unlock(); }
+static StaticSemaphore_t fsStorage{{}, false, true};
+static SemaphoreHandle_t gFsMutex = &fsStorage;
+static bool isHeldByCurrentTask(SemaphoreHandle_t mutex) { return mutex->fs && fsLockDepth == 1; }
+// INSERT_LOCKS
 static bool fileExists = true, fileOpen = true;
 static std::vector<std::string> inputLines{"1000,37.000000,-122.000000", "2000,37.001000,-122.000000"};
 static std::string written;
-struct File {
-  size_t at = 0;
-  bool writable = false;
-  explicit operator bool() const { return fileOpen; }
-  bool available() const { return at < inputLines.size(); }
-  String readStringUntil(char) { boundary("file read"); return inputLines[at++]; }
-  size_t print(const char* text) { boundary("file write"); written += text; return std::strlen(text); }
-  size_t write(const uint8_t* bytes, size_t count) {
-    boundary("file write"); written.append(reinterpret_cast<const char*>(bytes), count); return count;
-  }
-  void close() { boundary("file close"); }
-};
-namespace VFS {
-static bool existsGuarded(const char*, const char*) { boundary("file exists"); ++fsOperations; return fileExists; }
-static File openGuarded(const char*, const char* mode, const char*, bool = false) {
-  boundary("file open"); ++fsOperations; if (mode[0] == 'w') written.clear(); return {0, mode[0] == 'w'};
+static std::map<std::string, std::string> savedFiles;
+static std::set<std::string> savedDirectories;
+static std::vector<std::string> fileActions;
+static bool directoryExists = true, directoryCreate = true, directoryIsFile = false;
+static bool renameOk = true, removeOk = true, errorAfterFlush = false, writeError = false, tempDirectory = false;
+static size_t failWrite = 0, shortWrite = 0, writeCalls = 0, sizeMismatch = 0, maxWriteRequest = 0, errorWriteCall = 0;
+static unsigned openHandles = 0, saveCases = 0;
+static void fileAction(const std::string& action) {
+  check(fsLockDepth == 1, "file operation remains under filesystem lock"); fileActions.push_back(action);
 }
-static bool removeGuarded(const char*, const char*) { boundary("file remove"); ++fsOperations; return true; }
-static bool mkdirGuarded(const char*, const char*) { boundary("mkdir"); ++fsOperations; return true; }
+namespace fs {
+class File {
+  struct Handle { std::string path; bool writable = false, closed = false, error = false, directory = false; };
+  std::shared_ptr<Handle> handle;
+public:
+  size_t at = 0;
+  File() = default;
+  File(const char* path, bool writable, bool directory = false) : handle(std::make_shared<Handle>()) {
+    handle->path = path; handle->writable = writable; handle->directory = directory; ++openHandles;
+  }
+  explicit operator bool() const { return handle && !handle->closed; }
+  bool available() const { return at < inputLines.size(); }
+  bool isDirectory() const { return handle && handle->directory; }
+  String readStringUntil(char) { boundary("file read"); fileAction("read"); return inputLines[at++]; }
+  size_t print(const char* text) { return write(reinterpret_cast<const uint8_t*>(text), std::strlen(text)); }
+  size_t write(uint8_t byte) { return write(&byte, 1); }
+  size_t write(const uint8_t* bytes, size_t count) {
+    boundary("file write"); fileAction("write:" + std::to_string(count));
+    check(bool(*this) && handle->writable, "write uses open output handle"); ++writeCalls;
+    maxWriteRequest = std::max(maxWriteRequest, count);
+    const size_t accepted = writeCalls == failWrite ? std::min(count, shortWrite) : count;
+    savedFiles[handle->path].append(reinterpret_cast<const char*>(bytes), accepted);
+    written.append(reinterpret_cast<const char*>(bytes), accepted);
+    if (writeError && (!errorWriteCall || errorWriteCall == writeCalls)) handle->error = true;
+    return accepted;
+  }
+  int getWriteError() const { return handle && handle->error; }
+  void flush() {
+    boundary("file flush"); fileAction("flush");
+    // Inject a reported Print error present after flush, not an fsync result.
+    if (errorAfterFlush) handle->error = true;
+  }
+  size_t size() const { fileAction("size"); return savedFiles.at(handle->path).size() + sizeMismatch; }
+  void close() { boundary("file close"); fileAction("close"); check(bool(*this), "close handle once"); handle->closed = true; --openHandles; }
+};
+}
+using fs::File;
+namespace VFS {
+static bool existsGuarded(const char* path, const char*) {
+  boundary("file exists"); fileAction(std::string("exists:") + path); ++fsOperations;
+  if (std::string(path) == "/logging_captures/tracks") return directoryExists;
+  return savedFiles.count(path) || savedDirectories.count(path) || fileExists;
+}
+static File openGuarded(const char* path, const char* mode, const char* context, bool create = false) {
+  boundary("file open"); fileAction(std::string("open:") + path); ++fsOperations;
+  if (!fileOpen || (mode[0] == 'w' && directoryIsFile)) return {};
+  if (mode[0] == 'w') {
+    check(create && std::string(context) == "system", "save preserves system create identity");
+    written.clear();
+    if (tempDirectory) savedDirectories.insert(path);
+    else savedFiles[path].clear();
+  }
+  return File(path, mode[0] == 'w', mode[0] == 'w' ? tempDirectory :
+              std::string(path) == "/logging_captures/tracks" && !directoryIsFile);
+}
+static bool removeGuarded(const char* path, const char*) {
+  boundary("file remove"); fileAction(std::string("remove:") + path); ++fsOperations;
+  check(openHandles == 0, "close before failed-temp cleanup"); if (!removeOk) return false;
+  if (savedDirectories.count(path)) return false; // LittleFS unlink does not remove directories.
+  savedFiles.erase(path); return true;
+}
+static bool renameGuarded(const char* from, const char* to, const char* context) {
+  boundary("file rename"); fileAction(std::string("rename:") + from + ":" + to); ++fsOperations;
+  check(openHandles == 0 && std::string(context) == "system", "close before trusted atomic replacement");
+  if (!renameOk || !savedFiles.count(from)) return false;
+  savedFiles[to] = std::move(savedFiles.at(from)); savedFiles.erase(from); return true;
+}
+static bool mkdirGuarded(const char* path, const char*) {
+  boundary("mkdir"); fileAction(std::string("mkdir:") + path); ++fsOperations;
+    if (directoryCreate) directoryExists = true;
+    return directoryCreate;
+}
 static AuthContext systemAuth(const char*) { return "system"; }
 }
-namespace Clock { static bool isValidEpoch(time_t) { return false; } }
+static bool validEpoch = false;
+static time_t controlledTime(time_t* output) {
+  constexpr time_t epoch = 1700000000;
+  if (output) *output = epoch;
+  return epoch;
+}
+#define time controlledTime
+namespace Clock { static bool isValidEpoch(time_t) { return validEpoch; } }
 struct LoadedMap {
   struct { int32_t minLat = 36000000, minLon = -123000000, maxLat = 38000000, maxLon = -121000000; } header;
 };
@@ -187,6 +261,8 @@ static bool load(const char* path, String& why, bool rejectOutOfBounds = false) 
 }
 
 static void snapshotTests();
+static void saveTests();
+static void saveParity(const char* label, const char* path);
 #if ENABLE_GPS_SENSOR
 static const char* cmd_sensorlog(const String& command) {
   boundary("logger request"); actions.emplace_back(command.c_str());
@@ -208,6 +284,7 @@ static bool success(const char* result) {
   return result && std::string(result).rfind("SUCCESS:", 0) == 0;
 }
 static void reset() {
+  check(fsLockDepth == 0 && openHandles == 0, "previous operation releases file handles and FS lock");
   sensorLogMarkStopped();
   GPSTrackManager::stopLiveTracking();
   check(GPSTrackManager::clearTrack(), "idle track cleared for test");
@@ -221,6 +298,11 @@ static void reset() {
   fileExists = fileOpen = true; mapAvailable = false; failedAllocationName = nullptr;
   inputLines = {"1000,37.000000,-122.000000", "2000,37.001000,-122.000000"};
   boundaryHook = {};
+  savedFiles.clear(); savedDirectories.clear(); written.clear(); fileActions.clear();
+  directoryExists = directoryCreate = renameOk = removeOk = true;
+  directoryIsFile = tempDirectory = errorAfterFlush = writeError = false;
+  validEpoch = false;
+  failWrite = shortWrite = writeCalls = sizeMismatch = maxWriteRequest = errorWriteCall = 0;
 }
 static void imported() {
   String why;
@@ -340,9 +422,10 @@ int main() {
   unchangedPreferences(false, false);
 #endif
   snapshotTests();
+  saveTests();
   reset();
-  std::printf("Map live tracking (GPS=%d): %u production-path assertions passed\n",
-              ENABLE_GPS_SENSOR, checks.load());
+  std::printf("Map live tracking (GPS=%d): %u production-path assertions passed; %u save scenarios\n",
+              ENABLE_GPS_SENSOR, checks.load(), saveCases);
 }
 
 static void snapshotTests() {
@@ -497,6 +580,15 @@ static void snapshotTests() {
   check(capacityFull.pointCount == MAX_TRACK_POINTS &&
         lastSnapshotBytes == MAX_TRACK_POINTS * sizeof(GPSTrackPoint),
         "full read snapshot preserves maximum capacity and allocation length");
+  ++saveCases;
+  char capacityPath[256] = "unchanged"; int capacitySaved = -1;
+  check(GPSTrackManager::saveTrack(capacityPath, sizeof(capacityPath), &capacitySaved) && capacitySaved == MAX_TRACK_POINTS,
+        "maximum 10000-point snapshot saves successfully");
+  check(std::count(written.begin(), written.end(), '\n') == MAX_TRACK_POINTS + 2 && maxWriteRequest <= 64,
+        "maximum save streams bounded header/rows instead of allocating a CSV-sized buffer");
+  check(written.rfind("# GPS Track\n# time,lat,lon\n0,10.000000,-122.000000\n", 0) == 0,
+        "maximum save keeps index and six-decimal CSV format");
+  saveParity("capacity", capacityPath);
   auto capacityTail = capture(500);
   check(capacityTail.pointCount == 500 && capacityTail.status.pointCount == MAX_TRACK_POINTS &&
         lastSnapshotBytes == 500 * sizeof(GPSTrackPoint) &&
@@ -599,4 +691,147 @@ static void snapshotTests() {
         liveView.pointCount == 200 && liveView.status.live && liveView.points.get()[199].lat > 37.19f,
         "live snapshot survives stop, clear and owner buffer release");
 #endif
+}
+
+static const char* saveDestination = "/logging_captures/tracks/track-1000.csv";
+static const char* saveTemporary = "/logging_captures/tracks/track-1000.csv.tmp";
+static const char* normalCsv = "# GPS Track\n# time,lat,lon\n0,37.000000,-122.000000\n1,37.000999,-122.000000\n";
+static void saveParity(const char* label, const char* path) {
+  uint64_t hash = 14695981039346656037ULL;
+  for (unsigned char byte : written) { hash ^= byte; hash *= 1099511628211ULL; }
+  std::printf("PARITY:%s:%s:%zu:%016llx\n", label, path, written.size(), static_cast<unsigned long long>(hash));
+}
+static void prepareSave() {
+  reset(); imported(); ++saveCases; fileActions.clear(); writeCalls = 0; fsOperations = 0;
+}
+static void saveReleased() {
+  check(fsLockDepth == 0 && openHandles == 0, "save releases handles and owned filesystem lock");
+}
+static bool fileActionSeen(const std::string& action) {
+  return std::find(fileActions.begin(), fileActions.end(), action) != fileActions.end();
+}
+static void checkRejected(char* path, size_t length, bool destinationExists = true) {
+  int count = 99;
+  check(!GPSTrackManager::saveTrack(path, length, &count), "detected save failure is reported");
+  check(count == 0, "failed save publishes zero successful points");
+  if (path) check(std::string(path) == "unchanged", "failed save leaves output path unchanged");
+  if (destinationExists) check(savedFiles.at(saveDestination) == "previous saved track", "failure preserves previously saved destination");
+  saveReleased();
+}
+static void saveTests() {
+  char path[256]; int count = -1;
+  prepareSave(); std::strcpy(path, "unchanged");
+  if (!BASELINE) boundaryHook = [&](const char*) {
+    check(std::string(path) == "unchanged" && count == 0,
+          "path and successful count stay unpublished throughout filesystem work");
+  };
+  check(GPSTrackManager::saveTrack(path, sizeof(path), &count) && count == 2,
+        "ordinary save reports exactly its snapshot's point count");
+  boundaryHook = {};
+  check(std::string(path) == saveDestination && savedFiles.at(path) == normalCsv,
+        "ordinary save keeps historical name, comments, zero-based indices and six decimals");
+  check(!savedFiles.count(saveTemporary), "successful save leaves no sibling temporary");
+  saveReleased(); saveParity("normal", path);
+  if (!BASELINE) {
+    check(fileActionSeen("flush") && fileActionSeen("size"), "save verifies flushed output before promotion");
+    const auto close = std::find(fileActions.begin(), fileActions.end(), "close");
+    const auto promotion = std::find(fileActions.begin(), fileActions.end(), std::string("rename:") + saveTemporary + ":" + saveDestination);
+    check(close < promotion && !fileActionSeen(std::string("remove:") + saveDestination),
+          "promotion follows close and never removes the prior destination");
+  }
+  prepareSave(); savedFiles[saveDestination] = "previous saved track"; savedFiles[saveTemporary] = "stale";
+  check(GPSTrackManager::saveTrack(path, sizeof(path), nullptr), "same-name replacement accepts optional count output");
+  check(savedFiles.at(saveDestination) == normalCsv && (BASELINE || !savedFiles.count(saveTemporary)),
+        "complete new generation replaces same-name destination");
+  saveReleased(); saveParity("replace", path);
+  prepareSave(); directoryExists = false;
+  check(GPSTrackManager::saveTrack(path, sizeof(path), &count) && directoryExists && count == 2,
+        "missing export directory is created before saving");
+  saveReleased(); saveParity("mkdir", path);
+  prepareSave(); validEpoch = true;
+  check(GPSTrackManager::saveTrack(path, sizeof(path), &count) && count == 2 &&
+        std::string(path) == "/logging_captures/tracks/track-2023-11-14T22-13-20.csv",
+        "valid clock retains timestamped filename format");
+  saveReleased(); saveParity("timestamp", path);
+  prepareSave(); bool clearedAtLock = false;
+  boundaryHook = [&](const char* event) {
+    if (std::string(event) == "filesystem lock" && !clearedAtLock) {
+      clearedAtLock = true;
+      check(GPSTrackManager::clearTrack(), "snapshot is owned before acquiring filesystem lock");
+    }
+  };
+  check(GPSTrackManager::saveTrack(path, sizeof(path), &count) && clearedAtLock && count == 2 && written == normalCsv,
+        "save survives owner clear at filesystem lock boundary");
+  boundaryHook = {}; saveReleased(); saveParity("clear-at-lock", path);
+  prepareSave(); fsLock("outer");
+  check(GPSTrackManager::saveTrack(path, sizeof(path), &count), "save works under caller-owned filesystem lock");
+  check(fsLockDepth == (BASELINE ? 0U : 1U), "new scoped guard retains caller-owned filesystem lock");
+  if (!BASELINE) fsUnlock(); saveReleased();
+
+  // Baseline characterizes false success without invoking its unsafe null API.
+  if (BASELINE) {
+    for (size_t failed : {size_t(1), size_t(2)}) {
+      prepareSave(); savedFiles[saveDestination] = "previous saved track";
+      failWrite = failed; shortWrite = 1;
+      check(GPSTrackManager::saveTrack(path, sizeof(path), &count) && count == 2,
+            "saved baseline reproduces short-write false success");
+      check(savedFiles.at(saveDestination) != normalCsv && savedFiles.at(saveDestination) != "previous saved track",
+            "saved baseline truncates prior destination before failed write");
+      saveReleased();
+    }
+    return;
+  }
+  for (size_t failed : {size_t(1), size_t(2), size_t(3), size_t(4), size_t(5)}) {
+    for (size_t partial : {size_t(0), size_t(1)}) {
+      if ((failed == 3 || failed == 5) && partial == 1) continue; // complete one-byte LF is not a failure
+      prepareSave(); savedFiles[saveDestination] = "previous saved track";
+      failWrite = failed; shortWrite = partial; std::strcpy(path, "unchanged");
+      checkRejected(path, sizeof(path));
+      check(!savedFiles.count(saveTemporary), "short header/body/LF removes failed temporary");
+      check(writeCalls == (failed == 2 || failed == 4 ? failed + 1 : failed),
+            "failed row still attempts LF, then stops without writing further rows");
+    }
+  }
+  for (size_t errorAt : {size_t(1), size_t(2), size_t(3)}) {
+    prepareSave(); savedFiles[saveDestination] = "previous saved track";
+    writeError = true; errorWriteCall = errorAt; std::strcpy(path, "unchanged"); checkRejected(path, sizeof(path));
+    check(!savedFiles.count(saveTemporary), "reported write error cleans temporary despite full byte counts");
+  }
+  for (unsigned failure = 0; failure < 8; ++failure) {
+    prepareSave(); savedFiles[saveDestination] = "previous saved track"; std::strcpy(path, "unchanged");
+    if (failure == 0) fileOpen = false;
+    if (failure == 1) { directoryExists = false; directoryCreate = false; }
+    if (failure == 2) directoryIsFile = true;
+    if (failure == 3) tempDirectory = true;
+    if (failure == 4) errorAfterFlush = true;
+    if (failure == 5) sizeMismatch = 1;
+    if (failure == 6) renameOk = false;
+    if (failure == 7) { renameOk = false; removeOk = false; }
+    checkRejected(path, sizeof(path));
+    check(!fileActionSeen(std::string("remove:") + saveDestination), "failure cleanup never targets authoritative destination");
+    check(savedFiles.count(saveTemporary) == (failure == 7 ? 1U : 0U), "failed cleanup may leave sibling temporary, preserving original");
+    check(savedDirectories.count(saveTemporary) == (failure == 3 ? 1U : 0U),
+          "temporary directory remains when unlink rejects it, preserving destination");
+  }
+  prepareSave(); savedFiles[saveDestination] = "previous saved track"; failWrite = 2; shortWrite = 2; removeOk = false;
+  std::strcpy(path, "unchanged"); checkRejected(path, sizeof(path));
+  check(savedFiles.count(saveTemporary) && savedFiles.at(saveTemporary) != normalCsv,
+        "short-write cleanup failure leaves partial temp beside unchanged destination");
+  for (unsigned argument = 0; argument < 5; ++argument) {
+    prepareSave(); std::strcpy(path, "unchanged");
+    if (argument == 0) checkRejected(nullptr, sizeof(path), false);
+    if (argument == 1) checkRejected(path, 0, false);
+    if (argument == 2) checkRejected(path, 1, false);
+    if (argument == 3) checkRejected(path, std::strlen(saveDestination), false);
+    if (argument == 4) {
+      count = -1;
+      check(GPSTrackManager::saveTrack(path, std::strlen(saveDestination) + 1, &count) && count == 2 && std::string(path) == saveDestination,
+            "exact output buffer including terminator succeeds");
+      saveReleased();
+    } else check(fsOperations == 0 && savedFiles.empty(), "invalid output capacity fails before touching storage");
+  }
+  prepareSave(); failedAllocationName = "gps.snapshot"; std::strcpy(path, "unchanged");
+  checkRejected(path, sizeof(path), false); check(fsOperations == 0, "snapshot allocation failure never touches filesystem");
+  reset(); ++saveCases; std::strcpy(path, "unchanged"); checkRejected(path, sizeof(path), false);
+  check(fsOperations == 0, "empty track fails before storage");
 }

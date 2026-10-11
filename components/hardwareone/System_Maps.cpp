@@ -3076,48 +3076,71 @@ bool GPSTrackManager::readSnapshot(GPSTrackSnapshot& out, int maxPoints) {
 
 bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize, int* savedPointCount) {
   if (savedPointCount) *savedPointCount = 0;
+  if (!outPath || outPathSize == 0) return false;
   GPSTrackSnapshot snapshot;
   if (!readSnapshot(snapshot) || snapshot.pointCount == 0) return false;
 
-  // Generate timestamped filename
   const char* dir = "/logging_captures/tracks";
-  // /logging_captures/ grants CREATE/WRITE to SYSTEM only (admins get just
-  // READ|DELETE), so create the track file as system — same as gpstrackmerge
-  // and the sensor logger. currentAuthContext() here fails from web/OLED (admin)
-  // with a create denial.
-  const AuthContext sys = VFS::systemAuth("gpstrack.save");
-  fsLock("gpstrack.save");
-  if (!VFS::existsGuarded(dir, sys)) {
-    VFS::mkdirGuarded(dir, sys);
-  }
-
   time_t now = time(nullptr);
   char timestamp[24];
   if (Clock::isValidEpoch(now)) {
     struct tm tmLocal;
-    localtime_r(&now, &tmLocal);
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H-%M-%S", &tmLocal);
+    if (!localtime_r(&now, &tmLocal) ||
+        !strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H-%M-%S", &tmLocal)) return false;
   } else {
-    snprintf(timestamp, sizeof(timestamp), "%lu", millis());
+    const int len = snprintf(timestamp, sizeof(timestamp), "%lu", millis());
+    if (len < 0 || static_cast<size_t>(len) >= sizeof(timestamp)) return false;
   }
 
-  snprintf(outPath, outPathSize, "%s/track-%s.csv", dir, timestamp);
+  char destination[96];
+  const int pathLength = snprintf(destination, sizeof(destination), "%s/track-%s.csv", dir, timestamp);
+  if (pathLength < 0 || static_cast<size_t>(pathLength) >= sizeof(destination) ||
+      static_cast<size_t>(pathLength) >= outPathSize) return false;
+  char temporary[sizeof(destination) + 4];
+  const int tempLength = snprintf(temporary, sizeof(temporary), "%s.tmp", destination);
+  if (tempLength < 0 || static_cast<size_t>(tempLength) >= sizeof(temporary)) return false;
 
-  File f = VFS::openGuarded(outPath, "w", sys, true);
-  if (!f) {
-    fsUnlock();
-    return false;
+  // Keep this system-owned export serialized through promotion and cleanup.
+  // The owned point snapshot needs no track-state lock during filesystem I/O.
+  const AuthContext sys = VFS::systemAuth("gpstrack.save");
+  {
+    FsLockGuard fsGuard("gpstrack.save");
+    if (!VFS::existsGuarded(dir, sys) && !VFS::mkdirGuarded(dir, sys)) return false;
+
+    File file = VFS::openGuarded(temporary, "w", sys, true);
+    bool complete = false;
+    if (file && !file.isDirectory()) {
+      static const char header[] = "# GPS Track\n# time,lat,lon\n";
+      size_t expectedBytes = sizeof(header) - 1;
+      complete = file.write(reinterpret_cast<const uint8_t*>(header), expectedBytes) == expectedBytes &&
+                 !file.getWriteError();
+      char line[64];
+      for (int i = 0; complete && i < snapshot.pointCount; i++) {
+        const int len = snprintf(line, sizeof(line), "%d,%.6f,%.6f", i,
+                                 snapshot.points.get()[i].lat, snapshot.points.get()[i].lon);
+        if (len < 0 || static_cast<size_t>(len) >= sizeof(line)) {
+          complete = false;
+          break;
+        }
+        size_t written = 0;
+        complete = writeLineChecked(file, reinterpret_cast<const uint8_t*>(line), len, written);
+        expectedBytes += static_cast<size_t>(len) + 1;
+      }
+      // File's flush/close do not report backend errors; check the completion
+      // signals available before allowing the temporary to replace a saved track.
+      file.flush();
+      complete = complete && file.size() == expectedBytes && !file.getWriteError();
+    }
+    if (file) file.close();
+    // This fixed capture path uses LittleFS, which supports rename-over-existing.
+    // A same-second save still replaces the previous one, but only when complete.
+    if (!complete || !VFS::renameGuarded(temporary, destination, sys)) {
+      VFS::removeGuarded(temporary, sys);
+      return false;
+    }
   }
 
-  f.print("# GPS Track\n# time,lat,lon\n");
-  char line[64];
-  for (int i = 0; i < snapshot.pointCount; i++) {
-    int len = snprintf(line, sizeof(line), "%d,%.6f,%.6f\n", i, snapshot.points.get()[i].lat, snapshot.points.get()[i].lon);
-    f.write((const uint8_t*)line, len);
-  }
-  f.close();
-  fsUnlock();
-
+  memcpy(outPath, destination, static_cast<size_t>(pathLength) + 1);
   if (savedPointCount) *savedPointCount = snapshot.pointCount;
   INFO_MAPSF("Saved GPS track: %d points to %s", snapshot.pointCount, outPath);
   return true;
@@ -3467,11 +3490,16 @@ const char* cmd_gpstrackmerge(const String& argsInput) {
   if (!(outPath.endsWith(".log") || outPath.endsWith(".csv") || outPath.endsWith(".txt")))
     outPath += ".log";
 
-  // Reads use the caller's identity so a non-admin can't stitch logs they
-  // can't read. The output write uses system identity because the
-  // /logging_captures/ tree grants CREATE/WRITE to SYSTEM only (admins get
-  // just READ|DELETE, per the System_Filesystem.cpp path rules) — this is the
-  // same reason the sensor logger writes here as systemAuth.
+  String normalizedOutput;
+  if (!normalizeFsPath(outPath, normalizedOutput)) return "Error: invalid output path";
+  outPath = normalizedOutput;
+  if (outPath != normalizedOutput) return "Error: output path allocation failed";
+  String temporary = outPath;
+  String backup = outPath;
+  if (temporary.length() != outPath.length() || !temporary.concat(".tmp") ||
+      backup.length() != outPath.length() || !backup.concat(".bak"))
+    return "Error: output path allocation failed";
+
   const AuthContext& ctx    = currentAuthContext();
   // SCOPED — same reasoning as healthlogmerge's sysCtx: an unscoped system
   // identity bypasses pathWithinScope entirely and inherits PERM_ALL on rules
@@ -3483,19 +3511,19 @@ const char* cmd_gpstrackmerge(const String& argsInput) {
   // Validate every input up front (quoted, exists, not the output) so a bad
   // argument never leaves a half-written output behind.
   for (int i = 1; i < a.count(); i++) {
-    String in;
-    const char* e = requireQuotedPath(a, i, in);
+    String requested, in;
+    const char* e = requireQuotedPath(a, i, requested);
     if (e) return e;
+    if (!normalizeFsPath(requested, in)) return "Error: input not found (invalid path)";
     if (in == outPath) return "Error: an input file is the same as the output";
+    if (in == temporary || in == backup) return "Error: input conflicts with output staging paths";
     if (!VFS::existsGuarded(in, ctx)) {
       snprintf(buf, 1024, "Error: input not found: %s", in.c_str());
       return buf;
     }
   }
 
-  // Refuse an out-of-tree output BEFORE the "w" open truncates it — same
-  // reasoning as healthlogmerge's check; sysCtx is scoped, so the open would
-  // fail anyway, but only after the damage and only as "cannot create".
+  // Keep output and its staging files inside the authorized capture tree.
   if (!VFS::pathInCaptureTree(outPath)) {
     snprintf(buf, 1024,
              "Error: output must be inside %s (or its /sd mirror) — got %s",
@@ -3506,45 +3534,64 @@ const char* cmd_gpstrackmerge(const String& argsInput) {
   VFS::mkdirGuarded("/logging_captures", sysCtx);
   VFS::mkdirGuarded("/logging_captures/tracks", sysCtx);
 
-  File out = VFS::openGuarded(outPath, "w", sysCtx, true);
-  if (!out) {
+  if (VFS::existsGuarded(temporary, sysCtx)) {
+    return "Error: output temporary already exists; inspect it before retrying";
+  }
+  File out = VFS::openGuarded(temporary, "w", sysCtx, true);
+  if (!out || out.isDirectory()) {
+    if (out) out.close();
+    VFS::removeGuarded(temporary, sysCtx);
     snprintf(buf, 1024,
              "Error: cannot create output: %s (parent missing, filesystem full, "
              "or path not writable)", outPath.c_str());
     return buf;
   }
 
-  uint8_t chunk[512];
   unsigned long totalBytes = 0;
   int filesDone = 0;
   for (int i = 1; i < a.count(); i++) {
-    String in;
-    requireQuotedPath(a, i, in);  // re-derive the path (already validated above)
-    File f = VFS::openGuarded(in, "r", ctx);
-    if (!f) {
+    String requested, in;
+    requireQuotedPath(a, i, requested);  // re-derive the validated path
+    if (!normalizeFsPath(requested, in)) {
       out.close();
+      VFS::removeGuarded(temporary, sysCtx);
+      return "Error: input path unavailable";
+    }
+    File f = VFS::openGuarded(in, "r", ctx);
+    if (!f || f.isDirectory()) {
+      if (f) f.close();
+      out.close();
+      VFS::removeGuarded(temporary, sysCtx);
       snprintf(buf, 1024, "Error: cannot open input: %s", in.c_str());
       return buf;
     }
     uint8_t lastByte = (uint8_t)'\n';
-    while (f.available()) {
-      int n = f.read(chunk, sizeof(chunk));
-      if (n <= 0) break;
-      if (out.write(chunk, (size_t)n) != (size_t)n) {  // short write == full/failing FS
-        f.close();
-        out.close();
-        snprintf(buf, 1024, "Error: write failed (filesystem full?) after %lu bytes to %s",
-                 totalBytes, outPath.c_str());
-        return buf;
-      }
-      totalBytes += (unsigned long)n;
-      lastByte = chunk[n - 1];
-    }
+    const size_t expectedInputBytes = f.size() - f.position();
+    const unsigned long beforeCopy = totalBytes;
+    bool copied = copyFileContents(f, out, totalBytes, lastByte) &&
+                  totalBytes - beforeCopy == expectedInputBytes;
     f.close();
-    if (lastByte != (uint8_t)'\n') { out.write((uint8_t)'\n'); totalBytes++; }  // clean line boundary
+    if (copied && lastByte != (uint8_t)'\n') {
+      copied = out.write((uint8_t)'\n') == 1;
+      if (copied) totalBytes++;
+    }
+    if (!copied) {
+      out.close();
+      VFS::removeGuarded(temporary, sysCtx);
+      snprintf(buf, 1024, "Error: write failed (filesystem full?) after %lu bytes to %s",
+               totalBytes, outPath.c_str());
+      return buf;
+    }
     filesDone++;
   }
+  out.flush();
+  const bool complete = !out.getWriteError() && out.size() == totalBytes;
   out.close();
+  if (!complete || !VFS::replaceFileGuarded(temporary, outPath, sysCtx)) {
+    VFS::removeGuarded(temporary, sysCtx);
+    snprintf(buf, 1024, "Error: could not complete output: %s (check .bak on SD after a failed restore)", outPath.c_str());
+    return buf;
+  }
 
   snprintf(buf, 1024,
            "Stitched %d files into %s (%lu bytes). Load it: gpstrack load \"%s\"",

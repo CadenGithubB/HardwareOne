@@ -167,8 +167,6 @@ static uint32_t gVoiceArmGeneration = 0;
 static TransportSessionEpoch gVoiceArmEpoch = 0;
 static bool gVoiceArmRequiresEpoch = false;
 
-extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
-
 static portMUX_TYPE gSRMutexInitMux = portMUX_INITIALIZER_UNLOCKED;
 
 static bool ensureSRMutex(SemaphoreHandle_t& slot, bool recursive = false) {
@@ -333,7 +331,6 @@ static bool executeVoiceCommandAsArmedUser(const char* cliCmd, char* out, size_t
   job->command.ctx.timestampMs = millis();
   job->command.ctx.outputMask = MSG_ROUTE_FILE;
   job->command.ctx.behaviorFlags = COMMAND_CONTEXT_MODE_INDEPENDENT;
-  extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
   if (!submitDeferredToCmdExec(runVoiceCommandJob, job)) {
     job->~VoiceCommandJob();
     free(job);

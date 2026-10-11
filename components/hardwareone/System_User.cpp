@@ -166,10 +166,8 @@ bool sessionIdleExpired(CommandSource transport, unsigned long lastInteractionMs
 // File paths
 #define PENDING_USERS_FILE "/system/users/pending_users.json"
 
-// Memory allocation
-// Utility functions from .ino
+// External utility dependencies
 extern String getDeviceEncryptionKey();
-extern String jsonEscape(const String& in);
 extern void fsLock(const char* reason);
 extern void fsUnlock();
 extern void resolvePendingUserCreationTimes();
@@ -271,6 +269,28 @@ TransportSessionEpoch snapshotLegacyShadow(const LegacySessionShadow& shadow,
   portEXIT_CRITICAL(&sLegacySessionShadowMux);
   userOut = user;
   authedOut = authed && epoch != 0;
+  return epoch;
+}
+
+// Serial and local display share lazy anonymous-session creation. Keep the
+// policy by reference: another writer may change it while we wait for the
+// lifecycle lock, so both the session and policy must be read again afterward.
+TransportSessionEpoch snapshotLegacySessionWithAuthPolicy(
+    LegacySessionShadow& shadow, std::atomic_flag& writer,
+    CommandSource source, const bool& requireAuth,
+    String& userOut, bool& authedOut) {
+  TransportSessionEpoch epoch = snapshotLegacyShadow(shadow, userOut, authedOut);
+  if (epoch != 0 || requireAuth) return epoch;
+  AtomicFlagGuard guard(writer);
+  epoch = snapshotLegacyShadow(shadow, userOut, authedOut);
+  if (epoch == 0 && !requireAuth) {
+    epoch = transportSessionOpen(source);
+    if (epoch != 0) {
+      publishLegacyShadow(shadow, epoch, String(), false);
+      userOut = String();
+      authedOut = false;
+    }
+  }
   return epoch;
 }
 }  // namespace
@@ -515,20 +535,9 @@ bool serialTransportSessionClearAndBeginDelivery(
 
 TransportSessionEpoch serialTransportSessionSnapshot(String& userOut,
                                                       bool& authedOut) {
-  TransportSessionEpoch epoch =
-      snapshotLegacyShadow(sSerialSession, userOut, authedOut);
-  if (epoch != 0 || gSettings.serialRequireAuth) return epoch;
-  AtomicFlagGuard guard(sSerialSessionWriter);
-  epoch = snapshotLegacyShadow(sSerialSession, userOut, authedOut);
-  if (epoch == 0 && !gSettings.serialRequireAuth) {
-    epoch = transportSessionOpen(SOURCE_SERIAL);
-    if (epoch != 0) {
-      publishLegacyShadow(sSerialSession, epoch, String(), false);
-      userOut = String();
-      authedOut = false;
-    }
-  }
-  return epoch;
+  return snapshotLegacySessionWithAuthPolicy(
+      sSerialSession, sSerialSessionWriter, SOURCE_SERIAL,
+      gSettings.serialRequireAuth, userOut, authedOut);
 }
 
 void localDisplayTransportSessionCleared() {
@@ -585,20 +594,9 @@ void localDisplayTransportSessionAuthenticated(const String& user) {
 
 TransportSessionEpoch localDisplayTransportSessionSnapshot(String& userOut,
                                                             bool& authedOut) {
-  TransportSessionEpoch epoch =
-      snapshotLegacyShadow(sDisplaySession, userOut, authedOut);
-  if (epoch != 0 || gSettings.localDisplayRequireAuth) return epoch;
-  AtomicFlagGuard guard(sDisplaySessionWriter);
-  epoch = snapshotLegacyShadow(sDisplaySession, userOut, authedOut);
-  if (epoch == 0 && !gSettings.localDisplayRequireAuth) {
-    epoch = transportSessionOpen(SOURCE_LOCAL_DISPLAY);
-    if (epoch != 0) {
-      publishLegacyShadow(sDisplaySession, epoch, String(), false);
-      userOut = String();
-      authedOut = false;
-    }
-  }
-  return epoch;
+  return snapshotLegacySessionWithAuthPolicy(
+      sDisplaySession, sDisplaySessionWriter, SOURCE_LOCAL_DISPLAY,
+      gSettings.localDisplayRequireAuth, userOut, authedOut);
 }
 
 TransportSessionEpoch captureTransportSessionEpoch(const AuthContext& ctx) {
@@ -656,9 +654,6 @@ TransportSessionEpoch captureTransportSessionEpoch(const AuthContext& ctx) {
 extern bool isAuthed(httpd_req_t* req, String& outUser);
 extern esp_err_t sendAuthRequiredResponse(httpd_req_t* req);
 extern void getClientIP(httpd_req_t* req, String& ip);
-
-// File I/O functions
-extern bool readText(const char* path, String& out);
 
 // Debug macros now defined in debug_system.h with performance optimizations
 // DEBUG_USERS, DEBUG_USERSF, DEBUG_CMD_FLOW, DEBUG_CMD_FLOWF, DEBUG_SYSTEM, DEBUG_SYSTEMF

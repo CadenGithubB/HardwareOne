@@ -5,6 +5,7 @@
  */
 
 #include "System_SetupWizard.h"
+#include "System_Utils.h"  // waitForSerialInputBlocking
 #include "System_MemUtil.h"
 #include <esp_attr.h>
 #include <cerrno>
@@ -31,8 +32,6 @@ extern bool oledConnected;
 void handleOLEDESPNowPage(SetupWizardResult& result, bool& running);
 void handleOLEDMQTTPage(SetupWizardResult& result, bool& running);
 #endif
-
-extern String waitForSerialInputBlocking();
 
 // ============================================================================
 // Setup Archetypes (deployment presets) — see System_SetupWizard.h

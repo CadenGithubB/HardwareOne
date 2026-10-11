@@ -80,14 +80,11 @@
 #include "System_Maps.h"           // WP_DIST:<name>: WaypointManager::getDistanceBearingToName()
 #endif
 
-// External dependencies from .ino
+// Validation state is shared with the command executor in HardwareOne.cpp.
 extern bool gCLIValidateOnly;
-// gDebugBuffer, gDebugFlags, ensureDebugBuffer now from debug_system.h
-extern void runUnifiedSystemCommand(const String& argsInput);
 
 // Command types from shared header
 #include "System_CommandTypes.h"
-extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData);
 
 static String redactAutomationCommandForAudit(const String& command);
 

@@ -1,18 +1,124 @@
 # Code simplification plan
 
 Status: incremental implementation started, 2026-10-08; latest focused work
-2026-10-10. The sequence below describes planned work; completion records at the
+2026-10-11. The sequence below describes planned work; completion records at the
 end describe each implemented slice. The shared
 [development guidelines](../CONTRIBUTING.md) remain the source of coding rules.
 
-**Release direction, 2026-10-10:** `0.99.97.x` is the cleanup and unification
+**Release direction, 2026-10-11:** `0.99.97.x` is the cleanup and unification
 series, focused on long-term readability and editability. `0.99.97.1` was the
-first checkpoint; `0.99.97.2` checkpoints the follow-on work through shared
-setup menu organization. Subsequent milestones follow
+first checkpoint; `0.99.97.2` covers shared setup menu organization, and
+`0.99.97.3` covers runtime helper ownership and checked persistence through
+shared per-user JSON settings saves. Subsequent milestones follow
 the [cleanup-series guidance](../CONTRIBUTING.md#the-09997x-cleanup-series), with
 a bounded scope and an explicit completion condition for each change.
 
-**Latest code milestone: shared setup menu organization.**
+**Latest code milestone: shared checked JSON settings saves.**
+
+Main, debug, version-stamp and per-user settings reuse one checked temporary
+JSON writer in Settings. Callers keep their existing document, locking, cache
+and notification policies. Failed replacements preserve the previous file.
+The preceding boot-cleanup milestone uses shared VFS traversal and retains
+header staging files for their owning writers.
+
+**Earlier milestone: checked capture completion and replacement.**
+
+R1 history, sensor/battery headers, capture merges/exports, photos and WAV
+recordings now check their complete output before publishing success. Related
+writers share the guarded VFS replacement operation while retaining their own
+formats and lifecycle. LittleFS replaces directly; SD retains the previous
+destination in a backup until promotion succeeds, with physical SD qualification
+still deferred. Existing nonempty log headers are not rewritten or repaired.
+
+**Previous milestone: checked GPS track saving.**
+
+GPS exports reuse the shared row writer and settings' checked temporary-file
+pattern. The owner verifies the complete streamed CSV before replacing its
+LittleFS destination, then publishes success to the existing Web/OLED callers.
+Snapshot ownership, filename/schema and successful replacement behavior remain
+unchanged; detected failures preserve the previous saved track.
+
+**Previous milestone: shared checked log-row writes.**
+
+Sensor and battery logging share their prepared-row/LF write check in
+`System_Filesystem`. Sensor counters now distinguish completed rows from
+partial bytes, while size accounting and rotation remain active after failures.
+Each logger retains its format, cadence and header policy; battery appends use
+the existing scope-owned filesystem guard.
+
+**Previous milestone: checked capped-log writing.**
+
+The existing capped writer now checks append counts and the complete rotation
+copy before replacing a log. LittleFS uses direct replacement, preserving the
+original if rename fails. CRLF output, trim rules, overflow routing and the
+reused PSRAM buffer remain unchanged; SD retains its existing recovery protocol.
+
+**Previous milestone: shared capture-file copying.**
+
+GPS and health log stitching now share their file-copy loop in
+`System_Filesystem`. Each command retains its path, permission, format and
+message rules. Both now check the separator newline write before counting
+the file as complete or reporting success.
+
+**Previous milestone: shared system-log status and flag formatting.**
+
+The CLI and web Logging page now use one status formatter in `System_Debug`.
+Debug-mask reports reuse its existing formatting owner, and manual log start
+reuses the persisted-mask restore helper. Caller permissions, buffer limits,
+output text and the different manual/boot startup policies remain unchanged.
+
+**Previous milestone: shared runtime log-level application.**
+
+Boot settings and the `loglevel` command now use `applyLogLevel` in
+`System_Debug` for application severity and the Wi-Fi/PHY framework tags.
+Each caller retains its validation, saved-value normalization and persistence
+policy. HTTPS tags still follow the separate `DEBUG_HTTPS` control.
+
+**Previous milestone: canonical shared utility declarations.**
+
+Shared command submission and web execution now have one public declaration
+in `System_Utils.h`. Callers include that header instead of repeating their own
+prototypes. Duplicate utility declarations and two uncalled wrappers were
+removed; active execution, authorization and session behavior are unchanged.
+
+**Previous milestone: shared web command-context preparation.**
+
+The REST command facade, single web CLI handler and batch handler now share
+their common context fields through `makeWebCommandContext` in `System_Utils`.
+Each caller retains its session capture, interaction flags and request lifetime.
+Batch commands still use one captured session generation for the whole request;
+the internal settings finalizer keeps its separate system context.
+
+**Previous milestone: shared command-origin formatting.**
+
+The command feed reuses the private reply-prefix formatter in `HardwareOne.cpp`
+for source, user and address text. Its `$ ` marker remains inside the existing
+128-byte limit. Feed filtering/redaction and reply routing remain separate.
+
+**Previous milestone: shared serial/display session snapshots.**
+
+Serial and local-display session reads share their identical anonymous-session
+creation path inside `System_User.cpp`. Each keeps its own policy, shadow and
+writer lock. The helper preserves the second session/policy read after acquiring
+the writer; serial input admission and display UI synchronization retain their
+different lifetime rules. No public interface or authentication policy changes.
+
+**Previous milestone: shared task-reporting calculations.**
+
+The text and JSON forms of `perftop` share their existing two-sample collection
+and CPU calculation in `System_Utils.cpp`. `taskstats` shares its state labels.
+Timing, output formats, ordering and failure responses remain equivalent;
+OLED sampling and main-loop scheduling retain their existing behavior. Host
+baseline comparisons, both firmware builds and repeated XIAO commands passed.
+
+**Previous milestone: shared settings snapshot replacement.**
+
+Main settings, debug settings and boot version stamping retain their different
+document policies while sharing checked temporary-file replacement. The dated
+record below identifies its intentional failure-handling corrections and
+verification separately from the behavior-preserving reporting cleanup.
+
+**Previous milestone: shared setup menu organization.**
 
 Advanced setup groups compiled options under Connections, Display & Controls,
 Sensors and System. Registry rows are sorted by name, companion settings stay
@@ -3308,3 +3414,1124 @@ those builds. The temporary P4 profile was removed after snapshot comparison.
 The release-scope privacy review found no actionable personal-information or
 credential findings. No firmware was flashed. See the
 [changelog](../CHANGELOG.md#099972---2026-10-10) for the release summary.
+
+## Completed: system-info declaration ownership (2026-10-11)
+
+`buildSystemInfoJson` remains in `System_Utils.cpp`; its public declaration now
+lives in `System_Utils.h` beside system diagnostics. The web-server header no
+longer declares it, and SSE explicitly includes the utility header like the
+other callers. This corrects the interface location without another module or
+changes to the JSON schema, command behavior or feature guards.
+
+The four calling translation units passed syntax compilation with the QT Py
+profile's ESP-IDF toolchain and flags. The existing VFS capacity snapshot
+contract check and whitespace check passed. This declaration-only change did
+not require a new firmware image or hardware test. Version remains `0.99.97.2`;
+the separately planned STT work is untouched.
+
+## Completed: settings snapshot save integration (2026-10-11)
+
+The three settings writers have intentionally different document policies.
+Main settings merge saved sections before applying live values and credentials;
+debug settings keep their own file to avoid rewriting the main document for
+flag changes; boot version stamping changes only the parsed file's version,
+without copying potentially incomplete live state. History review confirmed
+that later locking and complete-write checks reached main/debug but left the
+version writer behind, while older direct-write fallbacks remained.
+
+One private `writeSettingsSnapshot` helper in `System_Settings.cpp` now handles
+checked streaming replacement for all three. It checks JSON overflow, measured
+length, accepted byte count, the file's write-error flag and size after flush.
+The existing filesystem guard spans temporary-file creation through rename or
+failed-temp cleanup. Root temporary paths remain compatible with boot cleanup;
+serialization still writes directly to `File` without a second JSON buffer.
+The three public writers and their document-building policies remain separate.
+
+Intentional failure-handling corrections:
+
+- Failed replacement preserves the previous destination; main/debug no longer
+  fall back to opening it for a destructive direct rewrite.
+- Main settings refuse to rebuild when an existing merge source cannot open,
+  matching the existing refusal for an unparseable source.
+- Version stamping holds the settings writer guard before reading, preventing
+  a stale stamp from overwriting a concurrent full save. Failure retains its
+  pending flag for a later call; this does not add an automatic retry scheduler.
+- Shared replacement failures report the stage and destination path after the
+  filesystem lock is released. Logs contain no document contents.
+
+Main/debug retain their load protections, polling balance, retry bookkeeping
+and bond hash updates after successful replacement. Version stamping remains
+file-derived and neither clears a pending full save nor fires its success hooks.
+The integration plan and production change passed independent ownership and
+lock-order review before verification. No STT files or host-test locations moved.
+
+Verification:
+
+- All **147 registered host suites passed**, with ASan/UBSan and Node checks
+  enabled. The new
+  [settings file-write suite](../components/hardwareone/test/host/test_settings_file_writes.py)
+  executes the production helper, complete writers and both lock guards with
+  vendored ArduinoJson; filesystem/RTOS operations and live document builders
+  are controlled boundaries. Bond support is checked both enabled and disabled.
+- Fault cases cover refused source reads, malformed JSON, allocation overflow,
+  failed temporary opens, short writes, write-error flags, size mismatches,
+  failed rename/cleanup, retained destinations, retry state, successful hooks,
+  polling balance and deterministic overlapping version/full-save attempts.
+- Four tests replayed against the saved pre-change source failed as expected:
+  rename fallback damaged the previous destination, a nonzero short version
+  write replaced it, an unopened merge source was rebuilt from RAM, and version
+  stamping did not hold the writer lock across reading and replacement.
+- QT Py Maps, XIAO default and P4 board-default firmware built successfully.
+  All 5,526 captured production/configuration/tool inputs stayed unchanged
+  during the builds. Effective choices match the `0.99.97.2` checkpoint;
+  each resulting image still embeds that version.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `qtpy-maps-test` | 3,711,216 | 2,273,040 |
+| `xiao-default` | 5,890,640 | 93,616 |
+| P4 X Eye board defaults | 6,496,512 | 929,536 |
+
+The temporary P4 profile was removed after matching its archived and generated
+inputs. No firmware was flashed. Host fault injection does not establish
+physical power-loss durability; Arduino File still exposes no checked result
+for flush/close. Test/build logs, baseline replays and input/image hashes are
+recorded in the private settings-save evidence archive.
+
+## Completed: shared task-reporting calculations (2026-10-11)
+
+The inspected duplication was in `System_Utils.cpp`: `perftop` text and JSON
+each allocated two task snapshots, sampled 750 ms apart, matched task handles,
+rejected unusable deltas and calculated percentages. `taskstats` independently
+translated the same task states for its text and JSON outputs. The OLED's
+500 ms sampling baseline and rounded rejection threshold differ, so they were
+kept outside this milestone.
+
+The reviewed plan was to share the duplicated collection/calculation, share
+state labels, compare the intact old/new handlers under controlled inputs,
+then build and qualify the reporting commands on the connected XIAO.
+
+Implementation stays private to the existing file:
+
+- `TaskCpuSample` owns the two per-command arrays and the common sampling and
+  CPU calculation. Each renderer keeps its output structure, task ordering,
+  IDLE filtering, error messages and loop-metadata timing. Array cleanup keeps
+  its existing order relative to JSON serialization and text footer output.
+- `taskStateLabel` supplies the shared state vocabulary; text column padding
+  stays in the formatter. Task statistics retain their existing sample cache,
+  byte units and optional stack-size field.
+
+No public interface, module, worker or scheduler was added. Main-loop command
+waiting, OLED and periodic stack-report baselines, build selections and the
+STT work remain unchanged. The firmware version remains `0.99.97.2`.
+
+Verification:
+
+- The new [task-reporting suite](../components/hardwareone/test/host/test_task_reporting.py)
+  executes the intact production handlers/helpers with vendored ArduinoJson.
+  RTOS snapshots, allocation, loop profiling and validation mode are controlled
+  boundaries. All 20 scenarios and 1,154 assertions pass under ASan/UBSan on
+  both the saved baseline and the new code; complete text/JSON transcripts are
+  byte-identical. Cases cover changing task order, new/reused handles, counter
+  rollover, cutoff boundaries, wide arithmetic, allocation failures, empty
+  statistics, labels/padding, cache reuse and validation-only calls.
+- All **148 registered host suites passed**, with ASan/UBSan and Node checks
+  enabled. The independent production/test review found no remaining issue.
+- XIAO default and QT Py Maps firmware built successfully, covering ESP32-S3
+  without OLED and classic ESP32 with OLED. Only the XIAO was flashed.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,889,728 | 94,528 |
+| `qtpy-maps-test` | 3,711,072 | 2,273,184 |
+
+The XIAO application-only flash was hash-verified; its partition table and
+filesystem were preserved. Boot confirmed the built ELF identity and firmware
+version. Ten rounds exercised `perftop`, `perftop json`, `taskstats` and
+`taskstats json`: 40 reporting commands, plus login and before/after status,
+passed 1,122 device checks. Reports contained valid CPU percentages, task
+states and unchanged schemas. No command timeout, panic, assertion or watchdog
+crash signature appeared; the crash count stayed zero. Filesystem capacity and
+usage matched before/after, and the serial port was closed after testing.
+
+Host tests qualify calculation/output equivalence; device tests qualify these
+commands on the XIAO. This does not establish safety of borrowed FreeRTOS task
+names during concurrent task deletion, which is unchanged by the refactor.
+Raw serial captures, baseline comparisons and build/image hashes remain in the
+private task-reporting evidence archive.
+
+## Completed: shared serial/display session snapshots (2026-10-11)
+
+The inspected serial and local-display snapshot wrappers in `System_User.cpp`
+had identical logic: read their shadow, return an existing generation or an
+empty required-login result, otherwise take the source's writer lock, reread
+the shadow and policy, and create an anonymous generation if still allowed.
+Existing private shadow helpers and the scope-owned writer guard already
+provided the appropriate implementation boundary.
+
+The reviewed plan was to extract only that duplicated path, retain the public
+wrappers and compare old/new behavior before firmware and device verification.
+One private `snapshotLegacySessionWithAuthPolicy` helper now owns it. The policy
+is passed by reference so a change while waiting for the writer remains visible
+to the second check. Each wrapper binds its own shadow, writer, source and
+policy; the guard spans the second read, registry allocation and publication.
+Full-registry failures and existing-generation fast paths keep their behavior.
+
+Serial input admission still creates a pre-authentication generation separately.
+Display UI synchronization still retains its writer until its paired end call,
+including when no generation exists. Those operations have different contracts
+and were not combined. Downstream command admission, authorization, OLED reads,
+dictation and delivery keep their interfaces. No public API, file relocation,
+authentication policy or scheduling change was introduced; STT remains untouched
+and the firmware version remains `0.99.97.2`.
+
+Verification:
+
+- The new [session-snapshot suite](../components/hardwareone/test/host/test_session_snapshot.py)
+  executes the production boot-local namespace, registry and serial/display
+  lifecycle functions. All **641 assertions** pass under ASan/UBSan on both
+  the saved baseline and new code, with byte-identical state/lifetime transcripts.
+  Cases cover named/anonymous sessions, required/optional login, stale outputs,
+  registry exhaustion/retry, independent source policies and locks, serial
+  pre-authentication and the display's retained UI-sync writer.
+- Deterministic yield hooks change the policy or publish a successor while a
+  snapshot waits for its writer. Critical-entry observations verify that the
+  same writer remains held across the second read, allocation and publication,
+  while fast paths avoid it. These are controlled interleavings, not threaded
+  stress tests or a change to the existing plain-boolean settings contract.
+- All **149 registered host suites passed**, with ASan/UBSan and Node checks
+  enabled. Independent review found no production regression.
+- XIAO default and QT Py Maps firmware built successfully, covering ESP32-S3
+  without OLED and classic ESP32 with OLED.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,889,728 | 94,528 |
+| `qtpy-maps-test` | 3,710,912 | 2,273,344 |
+
+The XIAO application-only flash was hash-verified, and boot matched the built
+ELF and version. Live serial testing passed **72 checks across 23 commands**:
+named login, logout, required-login rejection, replacement login, optional-login
+anonymous reads, rejection of anonymous cross-interface logout and return to a
+named session. The original serial login policy was restored. Status retained
+a zero crash count and the same filesystem capacity; `perftop json` also passed
+as a reporting regression check. No panic, assertion, heap-corruption or watchdog
+signature appeared, and the serial port was closed afterward.
+
+Serial input establishes its generation before command execution, so the host
+suite directly qualifies lazy creation for both wrappers; the device run
+qualifies normal serial session transitions. Physical OLED behavior was not
+tested in this slice. Raw captures, baseline comparisons and build/image hashes
+remain in the private session-snapshot evidence archive.
+
+## Completed: shared command-origin formatting (2026-10-11)
+
+Inspection found the same source/user/address prefix formatting in the command
+feed and the existing private `originPrefix` reply helper in `HardwareOne.cpp`.
+The feed now uses that helper with its `$ ` suffix inside the same 128-byte
+buffer. Empty fields, spacing and truncation remain equivalent. Feed filtering,
+redaction and mirror writes remain separate from reply routing, chunking and
+targeted delivery; no public interface or scheduling behavior changed.
+
+Independent review checked callers and allocation behavior. A private one-off
+comparison executed the old/new formatter and feed with HTTP enabled/disabled:
+92 assertions per version passed, with byte-identical output. Cases include
+optional metadata, long fields, partial marker truncation, suppressed polls and
+an unavailable mirror. All **149 existing host suites passed**, with ASan/UBSan
+and Node checks enabled, including the unchanged STT privacy suite. No new test
+framework or repository test files were needed for this small extraction.
+
+XIAO default and QT Py Maps builds passed, still at `0.99.97.2`:
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,889,280 | 94,976 |
+| `qtpy-maps-test` | 3,710,848 | 2,273,408 |
+
+The XIAO application-only flash was hash-verified and boot matched the built ELF.
+Three rounds of text/JSON reporting, plus login and before/after status, passed
+58 checks across 18 commands. The crash count stayed zero, filesystem usage
+and capacity matched, and no panic/assertion/watchdog signature appeared. No
+settings were changed; the serial port was closed afterward. Host comparisons
+qualify exact prefix/feed formatting; device checks qualify the command path,
+not physical web, UART or BLE presentation. Evidence remains in the private
+command-prefix archive.
+
+## Completed: shared web command-context preparation (2026-10-11)
+
+Inspection found identical context setup in `executeUnifiedWebCommand`,
+`handleCLICommand` and `handleCliBatch`. The existing `buildOLEDCommand` showed
+the same useful boundary: prepare a context for one transport, then let its
+caller choose the operation. The reviewed plan limited this change to the
+common web fields and retained all request-specific decisions.
+
+`makeWebCommandContext` now lives beside the existing web executor in
+`System_Utils.cpp`, with its declaration in `System_Utils.h`. It copies the
+complete authenticated identity, sets web origin and web/file output routes,
+keeps both clock reads, attaches the request and requires a live session when
+a cookie SID is present. Other fields retain their production defaults.
+
+Single requests still capture their session generation at admission. A batch
+still captures once and binds every item to that same generation, including
+the zero/failure case. Callers retain mode independence, interactive behavior,
+validation, output capture and settings-batch identity. The internal settings
+finalizer remains system-originated and unbound to a web session. Result
+redaction, delivery checks, output routing and request cleanup are unchanged.
+No new file, public type, framework, STT edit or version bump was needed;
+firmware remains `0.99.97.2`.
+
+Verification:
+
+- Existing web batch, Map and Health harnesses now use extracted production
+  context types/defaults and execute the actual helper and callers. All pass
+  under ASan/UBSan against current and saved baseline implementations. Web
+  batch has 5,583 current assertions and 5,431 baseline; Map has 1,484 and
+  1,428 respectively for each GPS variant; Health has 154 in each. Additional
+  current assertions directly check the new helper. These are equivalent
+  behavior fixtures, not a claim of identical full transcripts.
+- Tests cover full identity copying, independent request/opaque pointers,
+  stateless Basic Auth, failed cookie-session capture, stale-result rejection,
+  interaction/validation/capture flags, once-per-batch generation binding and
+  the independent system finalizer. No additional test suite was introduced.
+- All **149 registered host suites passed**, with ASan/UBSan and Node checks
+  enabled. Independent production and test review found no actionable issues.
+- XIAO default, QT Py Maps and a temporary XIAO HTTP-disabled profile built
+  successfully. Compiled results confirm HTTP enabled in the normal profiles
+  and disabled with `WEB_FEATURE_LEVEL=0`. The temporary profile was archived
+  privately and removed afterward.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,890,240 | 94,016 |
+| `qtpy-maps-test` | 3,711,216 | 2,273,040 |
+| XIAO HTTP disabled | 4,390,720 | 1,593,536 |
+
+The XIAO application-only flash was hash-verified and boot matched the built
+ELF. Its saved network supported **54 checks across 28 live HTTP requests**:
+Basic Auth and cookie commands, validation without a file write, output capture,
+interactive reads, ordinary batches, REST file creation through the shared
+executor, interactive confirmation, cookie logout/rejection and subsequent
+Basic Auth use. Only uniquely named test files were created; both were removed.
+The crash count stayed zero. Controlled host cases qualify capture failures and
+delivery interleavings; the device run qualifies the real HTTP paths.
+Final serial verification passed 26 checks across eight commands, confirmed
+the same firmware after restart and restored the original disconnected Wi-Fi
+and stopped HTTP state. Saved Wi-Fi/HTTP enablement and required serial login
+were preserved. No panic, assertion, heap-corruption or watchdog signature
+appeared; the serial port was closed afterward.
+
+Raw captures, comparison inputs, source hashes and build evidence remain in the
+private web-context evidence archive.
+
+## Completed: canonical shared utility declarations (2026-10-11)
+
+The audit found shared executor functions implemented in `System_Utils.cpp`
+without public header declarations, leaving callers to repeat prototypes.
+`System_Utils.h` now declares both synchronous overloads, asynchronous and
+deferred submission, trusted system execution and the web command facade.
+It includes the existing `System_CommandTypes.h` for their exact types; no
+new header, callback alias, default argument or execution abstraction was added.
+The comments distinguish command success, completion, queue admission and
+callback ownership, and identify firmware-internal entry points.
+
+Callers now use this declaration owner. Duplicate declarations of file, JSON,
+URL, timestamp and serial-input helpers were also removed, including the stale
+`base64Encode` declaration in the ESP-NOW header. Adjacent outdated location
+comments were corrected. The uncalled `execCommandUnified` and
+`adminRequiredForLine` wrappers and their prototypes were deleted after checking
+repository references. User, wizard, registry and request-lifetime contracts
+remain in their existing headers.
+
+Independent baseline comparison confirmed that active function statements,
+globals, callback types, authorization, session checks and delivery behavior
+were preserved. The QT Py build caught one missing include during migration:
+the sensor web page previously included Utils only with microphone/dictation.
+Its include now covers the whole enabled sensor web page, preserving URL
+decoding when dictation is disabled. The corrected include guards were reviewed
+across all affected callers.
+
+Verification:
+
+- All **149 registered host suites passed** with ASan/UBSan and Node checks.
+  After the include correction, the three affected GPS, presence and network
+  selection suites passed again, as did the existing standalone transcription
+  HTTP/browser tests. No repository tests or test framework were added.
+- **Six actual SDK header-compilation checks passed**, covering both include
+  orders for Utils and the command headers on XIAO, QT Py and HTTP-disabled
+  XIAO. They check both sync overloads, callback signatures, existing call forms
+  and the expected HTTP feature selection.
+- Final XIAO default, QT Py Maps and HTTP-disabled XIAO builds all passed.
+  The temporary disabled profile was archived privately and removed. Firmware
+  remains `0.99.97.2`.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,890,256 | 94,000 |
+| `qtpy-maps-test` | 3,711,216 | 2,273,040 |
+| XIAO HTTP disabled | 4,390,688 | 1,593,568 |
+
+This pass was verified through source review, header compilation, host tests
+and firmware linking; the device was not reflashed. No STT engine or Conversate
+behavior changed, and no files were moved. The only `G2_Glasses.cpp` edit removes
+an existing async-submission prototype outside the Conversate block. Baselines,
+review diffs, build hashes and test results remain in the private declaration
+cleanup evidence archive.
+
+## Completed: shared runtime log-level application — 2026-10-11
+
+**Maintenance problem.** `applySettings` and `cmd_loglevel` independently
+updated DebugManager, translated application severity to ESP-IDF severity and
+selected the same three Wi-Fi/PHY tags. Updating that runtime policy required
+matching edits in Settings and Debug.
+
+**Change.** The existing `System_Debug` implementation and header now own
+`applyLogLevel`. Both callers reuse its manager update and ordered `wifi`,
+`wifi_init`, `phy_init` tag updates. Settings retains saved-value clamping and
+normalization; the command retains parsing, clamping, `setDebugSetting`,
+validation-only handling and its existing responses. Settings no longer needs
+its direct `esp_log.h` include. No new file or configuration rule was added.
+
+HTTPS tags retain their separate `applyHttpsLogLevels` owner and `DEBUG_HTTPS`
+control. The helper accepts an already validated application severity and does
+not persist settings. Boot normalizes the saved value immediately before the
+shared operation; the previous manager setter only assigned its runtime byte,
+so this introduces no intervening callback, logging or persistence operation.
+
+**Verification.**
+
+- Independent review checked both callers, runtime setter, declaration/includes
+  and unconditional source selection. The final production hashes matched the
+  reviewed and tested sources.
+- Temporary ASan/UBSan comparisons executed the actual command, boot severity
+  block, runtime helper, HTTPS helper, validation macro and settings mutator.
+  All **195 scenarios and 1,057 shared assertions per version** passed, with
+  byte-identical recorded responses, runtime calls, final values and persistence
+  attempts. The new helper also passed 16 direct checks. Cases include all
+  levels/aliases, clamping extremes, unchanged values, save-request failure,
+  query/invalid/validation-only paths, buffer failure and HTTPS independence.
+- Four existing host suites passed: settings write-batch core, write-batch
+  contract, write scope and task reporting. This narrow pass did not repeat
+  the prior milestone's complete 149-suite run or add permanent test files.
+- Both saved firmware profiles built and linked successfully. Version remains
+  `0.99.97.2`.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,890,160 | 94,096 |
+| `qtpy-maps-test` | 3,711,152 | 2,273,104 |
+
+**Hardware.** Captured the XIAO baseline, flashed only its application image
+with verified flash data, and confirmed the running ELF identity. All **129
+checks across 38 command exchanges and two commanded reboots** passed: named
+and numeric levels, mixed-case alias, query responses, invalid-input retention,
+HTTPS setting independence, saved level after reboot and original level after
+restoration/reboot. Original `debug` severity, disabled HTTPS debugging, disabled
+verbosity override and offline Wi-Fi/HTTP state were retained or restored.
+Serial authentication remained required, the crash count remained zero and no
+panic, heap corruption, watchdog or assertion signature appeared. Serial access
+was closed afterward. The QT Py was build-tested; runtime ESP-IDF tag calls were
+verified by the host comparison rather than inferred from console verbosity.
+
+Private baseline/diff, test transcripts, build manifests, image hashes and
+hardware evidence were retained outside the repository. No authentication,
+STT, memory-sizing or SD behavior changed.
+
+## Completed: shared system-log status and flag formatting — 2026-10-11
+
+**Maintenance problem.** The CLI and web Logging page independently formatted
+the same system-log state. Debug-mask output also repeated the existing
+four-word formatter, and manual start repeated the saved-mask restore logic
+already used by boot and the setting editor.
+
+**Change.** `System_Debug` now owns `formatSystemLogStatus` beside its existing
+logging operations. The CLI supplies its existing 1,024-byte buffer; the web
+handler supplies its existing 512-byte local buffer and keeps status at result
+index two. Each retains its authorization policy. `formatSystemLogFlags` now
+has a caller-buffer overload used by `debugflags` and manual-start reporting;
+its existing `String` interface delegates to that overload. Manual start also
+calls `systemLogApplyPersistedFlags` when no explicit mask is supplied.
+
+No new file, framework or configuration rule was added. Labels, mask grammar,
+message routing, validation, save requests and operation order remain
+equivalent. Manual and boot startup retain their different file creation and
+truncation behavior. Status still reads the same live globals; this extraction
+does not change their synchronization or promise a consistent snapshot.
+
+**Verification.**
+
+- Independent review checked the complete scoped diff, call ordering, includes,
+  feature guards, buffer ownership and downstream status consumers.
+- Temporary ASan/UBSan comparisons executed the real command handlers,
+  Arduino `String`, argument parser, mask type/catalog and setting mutators.
+  All **380 scenarios and 1,414 shared assertions per version** passed with
+  byte-identical recorded output and side effects. The buffer overload passed
+  **3,750 additional assertions**, including all 256 single-bit masks and
+  boundary/canary checks. Empty and permissively parsed saved masks, early
+  errors, validation-only calls, restoration, and startup ordering were covered.
+- The actual HTTP handler and formatter passed **192 authorized cases and two
+  denied cases per version**, with **3,803 assertions each**, under ASan/UBSan.
+  Complete JSON responses matched, including result ordering, clock wrap,
+  escaped paths and 48 explicit 511-byte outputs. The actual page functions
+  ran **768 times** in Node with matching controls and parsed fields. Transport,
+  authorization decisions and DOM boundaries were mocked in these comparisons.
+- Seven existing suites passed: settings write-batch core/contract, settings
+  write scope, web batch handlers, sensor-log UI/settings and health-log UI.
+- Both saved firmware profiles built and linked. Version remains `0.99.97.2`.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,889,360 | 94,896 |
+| `qtpy-maps-test` | 3,710,784 | 2,273,472 |
+
+**Hardware.** Flashed only the XIAO application, verified flash contents and
+matched the running ELF identity. The serial smoke test passed **56 checks
+across 20 command exchanges**, covering unchanged inactive status/mask output
+and rejected commands before mutation. The live HTTP test passed **51 checks
+across 16 requests** using Basic and cookie authentication: ordered status
+results matched CLI responses, logging settings remained unchanged, and the
+test cookie was logged out and rejected afterward. Final restoration passed
+**16 checks across eight command exchanges**. Original offline Wi-Fi/HTTP
+state, inactive logging, disabled auto-start, live mask and required serial
+authentication were retained or restored; crash count stayed zero with no
+panic, heap corruption, watchdog or assertion signature. Serial access closed.
+
+Successful log-start variants and active/configured status were exercised in
+the host comparisons. No device log was started or capture file created:
+manual start persists its destination, and the existing CLI has no selective
+operation to restore an empty saved destination. QT Py qualification was a
+firmware build. Private test evidence remains outside the repository; no STT,
+memory-sizing, SD or authentication behavior changed.
+
+## Completed: shared capture-file copying — 2026-10-11
+
+**Maintenance problem.** `healthlogmerge` and `gpstrackmerge` duplicated the
+same 512-byte file-copy loop, completed-byte accounting and short-write check.
+Both also counted an inserted newline without checking whether it was written.
+
+**Change.** `copyFileContents` in the existing `System_Filesystem` implementation
+and header now owns the copy loop. It borrows already-open handles and updates
+the callers' completed-byte count and last byte. The callers retain permissions,
+filesystem locking, file lifetime, destinations/extensions, argument handling,
+health sealed/plaintext validation and their different response messages. The
+header forward-declares the file type without adding another driver include.
+
+**Intentional correction.** Each caller closes its input, checks the separator
+write and counts that byte only after success. A failed separator now returns
+the existing write-failure response and stops before opening another input or
+reporting success. Existing partial-output retention and stop-on-nonpositive-read
+behavior are unchanged. No merge framework, new production file, callback or
+configuration switch was introduced.
+
+**Verification.**
+
+- Independent review checked the helper, both callers, close ordering, public
+  declaration, enabled/disabled feature boundaries and downstream Maps UI.
+- The permanent `capture_stitching` host suite executes the actual handlers,
+  copy helper, Arduino `String`, argument/quoted-path parser, normalization,
+  capture-scope helpers and sealed-header reader. Controlled File/VFS, identity
+  and locking boundaries cover empty files, newline boundaries, multiple chunks,
+  partial writes, input validation, retained output, defaults and sealed inputs.
+- ASan/UBSan baseline/current comparison passed **104 handler scenarios per
+  version** (100 parity cases and four separator regressions): 4,414 baseline
+  assertions and 4,390 current assertions, plus 79
+  direct-helper assertions. Unchanged output and operation transcripts matched
+  byte for byte. Separate cases reproduced the old separator false success and
+  verified the new error, count and stop behavior in both commands. Tests also
+  retain the existing ten-token parser limit and nonpositive-read behavior.
+  The registered CTest invocation passed separately.
+- Six existing suites passed: filesystem listing permissions contract, checked
+  text writes, file-read PSRAM, map live UI, sensor-log UI and health-log UI.
+- Both saved firmware profiles built and linked; version remains `0.99.97.2`.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,889,376 | 94,880 |
+| `qtpy-maps-test` | 3,710,848 | 2,273,408 |
+
+**Hardware.** Flashed only the XIAO application, verified flash contents and
+matched the running ELF identity. All **339 checks across 96 command exchanges**
+passed. Both commands produced exact expected bytes from empty, missing-final-
+newline and multi-chunk inputs, retaining their default folders/extensions and
+GPS load hint. Missing/self inputs and out-of-capture destinations preserved
+existing owned output files. Health merging preserved two marked inputs and
+rejected mixed marked/plain input with its existing partial-output behavior.
+Synthetic markers verify detection and byte preservation, not cryptographic
+validity; no encryption setting or capture key was changed.
+
+All source fixtures remained unchanged, and all ten temporary files were
+deleted and verified absent. Original offline Wi-Fi/HTTP state, logging state,
+live debug mask and required serial authentication were retained or restored.
+Crash count remained zero, with no panic, heap-corruption, watchdog or assertion
+signature. Serial access closed afterward. Short writes were injected on the
+host; device storage was not deliberately filled. QT Py qualification was a
+firmware build, and SD testing remains deferred.
+
+Private baselines, scoped diff, build hashes and device evidence remain outside
+the repository. The new host suite stays in the existing test layout; no files
+were moved and no STT engine, Conversate or memory-sizing behavior changed.
+
+## Completed: checked capped-log writing — 2026-10-11
+
+**Maintenance problem.** `appendLineWithCap` already owns capped writing for
+login, error, event, I2C, command-audit and crash logs. It ignored append and
+rotation-copy results, counted requested append bytes on short writes, and
+could replace an intact original with an incomplete temporary copy. Its
+remove-before-rename sequence also needlessly exposed LittleFS originals.
+
+**Change.** The existing writer checks the CRLF append count and Print error,
+accounts accepted bytes, and stops before rotation on a detected append failure.
+For rotation, it checks the reopened source size, rejects premature scan/copy
+reads, verifies the copied tail count and post-flush temporary size/error, and
+cleans failed copies before returning false. LittleFS replaces the original by
+direct rename; a failed rename discards only the temporary copy. No production
+file, public API, configuration switch or logging framework was added.
+
+**Preserved behavior and limits.** CRLF formatting, the append-position fast
+path, rotation only above the cap, 85% target, 4 KiB boundary scan, existing
+EOF/oversized-line policy, overflow routing, filesystem lock and reusable
+1 KiB PSRAM buffer remain intact. The bounded-memory capture-copy helper is
+not reused here because its stack buffer and read-completion policy differ.
+SD retains its existing remove/rename sequence and orphan recovery window,
+now after temporary-copy checks; physical SD qualification remains deferred.
+The unchanged boot recovery list does not cover every capped-log caller.
+
+These are intentional failure-handling corrections. A failed append may still
+leave a partial line. Most callers ignore the returned boolean; this change
+does not add retries or new UI error reporting. Crash-history persistence does
+consume the boolean. Successful LittleFS rotation no longer emits the previous
+misleading canonical-file deletion event through notifications/automation.
+Arduino File's void flush/close API hides some backend errors, so checked byte
+counts and sizes are not a power-loss or durable-storage guarantee.
+
+**Verification.**
+
+- Independent review covered real LittleFS/FatFs rename behavior, File/Print
+  completion signals, caller effects, resource cleanup and the device script.
+- The permanent `capped_log_writes` suite executes production append/rotation
+  and orphan recovery with real Arduino `String`/`Print` and controlled storage,
+  lock and allocation boundaries. ASan/UBSan passed 71 current scenarios
+  (33,766 assertions); the saved baseline ran 42 scenarios (22,621 assertions).
+  Normal output matched byte for byte. Baseline cases reproduce the old short
+  append success, partial-copy promotion and LittleFS original loss.
+- Tests cover body/CRLF/chunk failures, early reads, fragmented reads, empty
+  tails, cap/scan boundaries, allocation/open/seek failures, reported errors,
+  size mismatches, promotion failures, PSRAM reuse and existing recovery policy.
+  SD coverage is a boundary simulation. CTest registration passed separately.
+- Seven existing suites passed: filesystem listing permissions, file-read
+  PSRAM, checked text writes, capture stitching, sensor-log UI, health-log UI
+  and automation logging. Both saved firmware profiles built and linked.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,889,952 | 94,304 |
+| `qtpy-maps-test` | 3,711,200 | 2,273,056 |
+
+**Hardware.** Flashed only the XIAO application, verified its flash hash and
+matched the running ELF identity. All **175 checks across 49 command exchanges**
+passed: current boot anchors in four capped logs, a persisted successful serial
+login, command-audit entries, CRLF endings and readable lifecycle logs. The
+actual LittleFS rename backend replaced an existing uniquely owned destination
+with exact expected bytes. A missing-source command was rejected without
+altering that destination; backend failure injection remains host coverage.
+
+Both temporary files were removed and verified absent. Existing logs were read
+but never seeded, truncated or cleared by the test. No live log was deliberately
+filled to trigger rotation: complete rotation and write-failure coverage came
+from the host suite. Original offline Wi-Fi/HTTP state, inactive logging,
+disabled auto-start, live debug mask and required serial authentication were
+retained or restored. Crash count stayed zero with no panic, heap corruption,
+watchdog or assertion signature, and the serial port was closed afterward.
+QT Py qualification was a build; SD and power-loss qualification remain deferred.
+
+Version remains `0.99.97.2`; no commit or push was made. Private baselines,
+build hashes and device evidence remain outside the repository. No file moves,
+STT/Conversate behavior or memory-sizing changes were included.
+
+## Completed: shared checked log-row writes — 2026-10-11
+
+**Maintenance problem.** Sensor and battery logging independently wrote a
+prepared row followed by LF without checking completion. Sensor logging then
+advanced its successful-write count/time and counted requested bytes even when
+only part of the row had been accepted. These two writers share that byte
+operation, while their formatting, identity, sampling and retention differ.
+
+**Change.** `writeLineChecked` in the existing `System_Filesystem` implementation
+and header borrows an open file, attempts the body and LF in the existing order,
+reports accepted bytes and returns whether both counts completed without a
+reported Print error. Callers retain their locks, file lifetime, buffering,
+formatting, encryption, paths and rotation. No new production file or logging
+framework was added; the separate CRLF capped writer keeps its own contract.
+
+Sensor logging now advances row-success counters/time and success diagnostics
+only on completion. Partial bytes still contribute to size accounting and
+rotation eligibility. On detected failure, it refreshes size from the exact
+active path after close; an unsuccessful reopen retains the estimate plus
+accepted bytes instead of clearing it or selecting another storage tier.
+Battery logging uses the same row check and existing storage diagnostics,
+retaining size-based rotation independently of row success. Its existing
+`FsLockGuard` now scopes the append operation and preserves an outer caller's
+filesystem lock during nested calls.
+
+**Intentional corrections and boundaries.** Short writes no longer count as
+successful sensor rows. Battery row failures gain storage-debug diagnostics,
+and nested battery appends no longer release the caller's lock. Sampling
+cadence still advances on attempts; R1 dedup, heartbeat and TRACK transition
+state remain unchanged. No automatic replay/retry or durable-write guarantee
+was added. Arduino File hides some backend errors through void flush/close.
+
+Header policy is deliberately unchanged. Sensor start-time cleanup, sensor
+append-time partial-header retention and battery's existence-based header rule
+have different failure behavior. Making header recovery reliable when cleanup
+also fails needs a separate lifecycle decision; this pass does not silently
+change enable settings or introduce a failed-file registry.
+
+**Verification.**
+
+- Independent review checked the shared operation, both consumers, size
+  recovery, rotation, nesting, unchanged timing and the existing header limits.
+- The new `log_row_writes` suite executes the production helper, actual sensor
+  append block and header functions, complete battery append/tick/event paths,
+  real Arduino `String`/`Print`, battery state types and filesystem guard code.
+  File/VFS, clocks, crypto and semaphore calls are controlled boundaries.
+- ASan/UBSan passed 79 current scenarios (1,834 assertions), including 17 direct
+  helper cases. The saved baseline passed 62 scenarios (1,482 assertions);
+  normal file bytes, success accounting and rotation output matched exactly.
+  Failure cases reproduce old false-success accounting and nested-lock loss.
+- Coverage includes LF/body/Print failures, accepted-byte counts, exact-tier
+  size recovery and fallback, rotation after partial rows, normal plaintext
+  and sealed-output paths, lock release, battery cadence and unchanged header
+  behavior. Sensor snapshot collection/formatting and scheduling occur before
+  the extracted append block and are outside this new suite; sealing is a
+  boundary substitute, not cryptographic qualification. CTest registration
+  passed separately.
+- Ten existing CTests passed: sensor-log selection/UI/settings, health logging
+  UI, CPU frequency, power-save tick, checked text writes, capture stitching,
+  capped log writes and automation logging. The existing sanitized battery
+  suite also passed its policy, board/backend and OTA-admission cases.
+- Both saved firmware profiles built and linked; version stays `0.99.97.2`.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,891,264 | 92,992 |
+| `qtpy-maps-test` | 3,711,920 | 2,272,336 |
+
+**Hardware.** Flashed only the XIAO application, verified the flash hash and
+matched the running ELF identity. All **112 checks across 31 command exchanges**
+passed. Two temporary TEXT heartbeat sessions, using the existing empty sensor
+selection, wrote six complete LF-terminated rows. Last-write status advanced;
+the second session appended without changing the first session's bytes. No
+sensor readings were fabricated or attached-sensor behavior claimed.
+
+The logger was confirmed stopped before deleting its one uniquely owned capture,
+which was then verified absent. The original saved path was restored; interval,
+format, selection, disabled auto-start, encryption preferences, live debug mask
+and required serial authentication were retained. Offline Wi-Fi/HTTP state was
+restored, crash count remained zero and no panic, heap-corruption, watchdog or
+assertion signature was observed. Serial access closed afterward.
+
+Battery monitoring is disabled in the connected XIAO profile, so battery
+qualification in this pass is host execution and compilation, not a physical
+battery test. Row-write faults and rotation were injected only on the host;
+SD and power-loss qualification remain deferred. Private baselines, device logs
+and build identities remain outside the repository. No commit/push, file moves,
+STT/Conversate behavior changes or memory-sizing work was included.
+
+## Completed: checked GPS track saving — 2026-10-11
+
+**Maintenance problem.** `GPSTrackManager::saveTrack` already copied an owned
+snapshot before filesystem work, but wrote directly over its final destination
+without checking header or point writes. It could report a successful partial
+save and truncate an earlier same-second export. Web and OLED already consumed
+its boolean result; the missing completion check belonged in the GPS owner.
+
+**Change.** Track points now use the existing `writeLineChecked` operation in
+`System_Filesystem`. The GPS owner keeps its CSV formatting and streams a bounded
+row buffer into a sibling `.tmp`, following the settings writer's checked-save
+pattern. It checks header and row writes, reported Print errors and post-flush
+size, closes the file, then promotes it with guarded LittleFS rename. The existing
+`FsLockGuard` covers the temporary's lifetime, including failed cleanup, and
+preserves an outer caller's lock. No new production file or generic save framework
+was added, and no complete CSV string is allocated alongside the point snapshot.
+
+The path still uses the existing system identity and fixed LittleFS capture
+directory. Timestamp filenames, CSV headers, point indices, six-decimal fields,
+LF endings and successful same-second replacement remain unchanged. The snapshot
+continues to release the track-state lock before filesystem work; subsequent
+track changes cannot alter the export. The stale comment about admin capture
+permissions was corrected without changing the identity or permissions.
+
+**Intentional corrections.** Invalid output buffers and truncated formatting
+fail before file mutation. Short writes and failed promotion return false and
+preserve the previous destination; only the temporary is eligible for cleanup.
+Success publishes the completed path and original snapshot count. Failure leaves
+the caller's path unchanged and returns zero through the optional count. Existing
+Web errors and OLED failure feedback therefore work without new UI logic.
+
+**Verification.**
+
+- Independent review covered the owner, guarded VFS permissions, LittleFS
+  replacement behavior, existing Web/OLED consumers and test boundaries.
+- Extended the existing `map_live_tracking` harness, retaining its production
+  owner/parser/session extraction and threaded snapshot checks. The shared row
+  helper and actual filesystem guard are extracted too; File/VFS, clocks and
+  semaphore operations remain controlled boundaries.
+- ASan/UBSan and ThreadSanitizer passed with GPS enabled and disabled, including
+  **68 focused save cases** (34 per configuration). The saved baseline passed
+  its normal cases and demonstrated the old short-write false-success behavior.
+  Six deterministic normal-save path/content comparisons matched per configuration,
+  including a 10,000-point, 268,917-byte CSV and clock/uptime filename paths.
+- Cases cover partial header/body/LF writes, reported Print errors, post-flush
+  size mismatch, open/directory/mkdir failures, failed rename and cleanup,
+  successful same-name replacement, output-buffer boundaries, nested filesystem
+  ownership and clearing the track before/during export. A directory at the temp
+  path is retained when unlink refuses it; it never replaces the destination.
+- Registered Maps ownership and UI tests passed, as did existing checked text,
+  settings-file, capture-stitching and shared-row regression suites.
+- Both saved firmware profiles built and linked; version remains `0.99.97.2`.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,891,888 | 92,368 |
+| `qtpy-maps-test` | 3,712,352 | 2,271,904 |
+
+**Hardware.** Flashed only the XIAO application, verified the flash hash and
+matched its running ELF identity. The existing authenticated Web route passed
+**54 checks across 23 requests**: empty-track save refusal, loading a three-point
+synthetic fixture, saving with the correct point count, exact CSV byte comparison,
+absence of a leftover temporary, and reloading the saved output. No GPS fix was
+needed, and no physical GPS readings were fabricated.
+
+The initial empty-track state was restored and both owned test files were deleted
+and verified absent. The capture-directory listing matched its baseline. Existing
+saved files and settings were preserved; Wi-Fi and HTTP returned to their original
+offline/stopped state. System and sensor logging remained inactive, the live debug
+mask and required serial authentication were retained, and crash count stayed
+unchanged with no observed panic, heap-corruption, watchdog or assertion signature.
+Serial access was closed. QT Py qualification is compilation, not a device test.
+Private baseline, build and hardware evidence remain outside the repository.
+
+**Limits.** Arduino File does not report every backend flush/close failure; the
+checks establish observable completion, not power-loss durability. Failed-temp
+cleanup is best effort, and interrupted track `.tmp` files have no new boot
+recovery policy. Fault injection and same-second replacement are host coverage;
+SD, memory slimming and physical GPS reception are outside this pass. No file
+moves, STT/Conversate behavior changes, version bump, commit or push were included.
+
+## Completed: checked capture completion and replacement — 2026-10-11
+
+**Maintenance problem.** The remaining capture writers checked different parts
+of completion. R1 history could acknowledge a generation with an incorrect final
+size; sensor/battery logs could append behind a partial header; merge/export and
+photo writes could truncate an earlier destination before detecting failure;
+WAV finalization did not check its final size and reported write error.
+
+**Change.** Each writer retains its format, authorization and lifecycle. The
+only new shared public operation is `VFS::replaceFileGuarded`, which promotes a
+closed, checked temporary on the same storage backend. The caller keeps the
+existing filesystem guard across preparation, replacement and failure cleanup.
+LittleFS uses direct rename. For SD, an existing regular destination moves to
+`.bak` before promotion; failure attempts restoration and retains the backup if
+restoration also fails. Existing backups are never overwritten by this helper.
+
+- Sensor and battery headers are written into `.header.tmp`, checked, closed
+  and promoted before rows can append. Sensor startup and later appends reuse
+  one private open operation. Failed staging does not change the saved enabled
+  preference; an unresolved staging file blocks retry instead of being consumed.
+- GPS/health merging and plaintext capture export stage into `.tmp`. They check
+  source read progress, complete writes, reported errors and final size before
+  replacement. Normalized output/staging aliases are rejected before writing.
+  Mixed sealing, caller input permissions and export's undecryptable-row policy
+  retain their existing behavior.
+- Photo saves stage and check each storage tier independently. A failed capture
+  cannot truncate the prior same-name photo; BOTH keeps its existing preferred
+  result, events and retention behavior.
+- R1 history retains its existing recovery protocol and generation retry rules.
+  Its private I/O scope now also owns the filesystem guard, acquired before the
+  private scratch-buffer mutex. Final size and reported errors are checked before
+  the existing publish sequence can acknowledge that generation.
+- WAV finalization flushes and checks the complete header-plus-PCM size and
+  reported error before existing sealing, saved-event and outcome publication.
+  Detected failures use the existing failure/discard cleanup path.
+
+**Verification.** Independent review covered replacement, path aliases,
+directory handling, locking order, callers and completion publication. Host
+fault injection runs production operations with controlled File/VFS, crypto
+and device boundaries, rather than duplicating the completion algorithms.
+
+- Capture stitching/replacement/export: **203 scenarios, 8,292 handler and 75
+  helper assertions**, under ASan/UBSan. All **44 normal byte/reply transcripts**
+  match the saved baseline. Failures include short writes, premature reads,
+  flush-observable errors, size mismatch, stale staging, alias paths, rename,
+  rollback and cleanup failures, including the SD backup sequence.
+- Sensor/battery rows and staged headers: **119 scenarios, 4,340 assertions**;
+  normal bytes and rotation behavior match baseline. GPS startup and sensor
+  ownership checks also pass with the header staging path.
+- R1 history: **38 scenarios, 37,320 assertions**, including actual filesystem
+  guard behavior, interrupted-swap recovery, retry and a newer generation staged
+  during I/O. Normal bytes and paths match all eight baseline transcripts.
+- Photos: **99 scenarios, 2,453 assertions**, including failed same-name saves
+  and independent BOTH outcomes. Saved baseline reproduces collision failures.
+- WAV completion: **54 scenarios, 1,964 assertions**. All 48 unchanged lifecycle
+  scenarios match baseline; baseline reproduces the three new false-success
+  regressions. New completion failures preserve cleanup/publication ordering.
+- All **17 focused CTest suites** passed, covering affected writers, Maps,
+  sensor/health UI, image storage and G2/live-audio completion. The strengthened
+  alias harness was then rerun independently. Supplemental camera lifecycle,
+  consumer and HAL checks passed under ASan/UBSan. The standalone consumer
+  harness had an obsolete redraw-queue stub; updating it to the existing public
+  boundary restored the test and added deferred-callback assertions without
+  changing production UI code. Both firmware profiles built and linked.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,897,056 | 87,200 |
+| `qtpy-maps-test` | 3,716,368 | 2,267,888 |
+
+**Hardware.** Flashed only the XIAO application and verified both the flash
+hash and running ELF identity. The serial capture suite passed **701 checks
+across 140 commands**. An existing empty sensor CSV received exactly its full
+header, with no staging file remaining. No sensor was selected, so the expected
+result was header-only, not fabricated sensor rows. GPS and health merges both
+replaced an earlier owned output with exact multi-chunk bytes; a mixed-sealing
+health merge rejected the input while preserving its previous complete output.
+Capture export replaced an owned destination with exact LF-normalized bytes and
+preserved that output when an unsealed input was rejected. Its synthetic marker
+fixture had no encrypted rows, so this did not test decryption or change keys.
+
+All fixture inputs remained unchanged during the checks, and all test files
+and staging paths were removed afterward. Logger format, selection, path and
+interval were restored and verified along with inactive logging, empty track,
+offline Wi-Fi/HTTP, connectivity state, live debug mask and required serial
+authentication. Crash count matched the pre-flash baseline and no runtime fault
+signature was observed. Private device and build evidence stays outside the
+repository. QT Py verification is compilation only; battery and R1 failure
+paths were exercised on the host.
+
+The media check saved one **2,083-byte JPEG** and a **94,252-byte WAV** containing
+2.944 seconds of 16 kHz mono PCM. The JPEG signature and inventory size matched;
+the WAV's RIFF/data lengths matched its complete stored size before cleanup.
+Only signatures/header metadata were read, not image/audio payloads. Camera
+destination and folder were temporarily changed to an isolated internal-storage
+folder, then restored; SD was not exercised. Owned media files and the temporary
+photo directory were deleted and verified absent.
+
+The initial media restoration assertion expected source `none` after closing
+the mic. Inspection confirmed that the existing HAL retains the last selected
+source (`pdm`) while capture is idle and disconnected. No production change was
+needed. A final clean reboot matched the same ELF and passed **60 restoration
+checks**, including persisted camera/logging preferences, original empty media
+inventories, inactive camera/mic, source `none`, unchanged crash count and
+offline network services. No panic, heap-corruption, watchdog or assertion
+signature appeared during either live test. Serial access was closed.
+
+**Limits.** These checks establish observable completion, not physical
+power-loss durability: Arduino File hides some backend flush/close failures.
+SD behavior has host fault coverage only; physical SD and SD-only video remain
+deferred. If SD rollback fails, the old bytes survive at `.bak`, not necessarily
+at the original path. A backup can also remain after successful promotion if
+cleanup fails; it blocks later replacement until inspected. Existing nonempty
+legacy headers are not repaired or revalidated by this pass. Staging cleanup is
+best effort, and there is no new general boot-recovery service. Version remains
+`0.99.97.2`; no file moves, STT changes, memory slimming, commit or push.
+
+## Completed: bounded boot temporary-file cleanup — 2026-10-11
+
+**Maintenance problem.** The generic startup sweep repeated directory traversal
+instead of using `VFS::DirectoryReader`. It constructed incorrect paths for
+backends returning rooted names, attempted directory removal, counted failed
+deletions as successes, and discarded `.header.tmp` reservations that the recent
+sensor/battery writer changes deliberately retain after failed cleanup.
+
+**Change.** A private helper in `System_Filesystem.cpp` now uses the shared
+reader with one filesystem guard across iteration and deletion. Children are
+closed before removal. It skips directories, virtual entries and `.header.tmp`,
+and reports successful and failed removals separately. The existing direct-child
+directory list and boot ordering remain: capped-log recovery runs first, then
+this sweep, then critical-JSON validation. No new public API or recursive scan.
+Ordinary `.tmp` files in those existing directories remain disposable under the
+legacy policy; the header reservation is the intentional exception.
+
+**Verification.** Independent review checked callers, mutex initialization,
+early logging and the installed LittleFS iterator's deletion behavior. The new
+host suite executes the production helper, directory reader and filesystem
+guard with real Arduino `String` and controlled file/log/semaphore boundaries.
+LLM enabled/disabled variants pass **16 scenarios and 1,139 checks** under
+ASan/UBSan. Six saved-baseline scenarios reproduce the prior defects, while
+ordinary leaf-name deletion results match. All **12 focused CTest suites** pass,
+including listing permissions, consumers, checked snapshots, capped logs,
+sensor/battery rows, capture replacement, images and R1 history.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,896,896 | 87,360 |
+| `qtpy-maps-test` | 3,716,320 | 2,267,936 |
+
+**Hardware.** Read-only preflight passed 128 checks and found no existing
+eligible ordinary `.tmp` files in the sweep directories. Flashed only the XIAO
+application, verified the flash hash and running ELF, and confirmed the queried
+saved settings, media inventories and crash count matched the pre-flash state.
+All 600 recorded production/build inputs still matched the compiled source.
+
+The controlled reboot passed **504 checks across 122 commands**. Root and
+`/maps` ordinary temporary fixtures were removed; the boot log reported exactly
+those two successful removals. Root `.header.tmp`, `.bak` and `.part` fixtures
+retained exact bytes. A directory ending `.tmp` and another nested directory,
+each containing a temporary file, remained intact without recursion. All owned
+fixtures and directories were then removed and verified absent.
+
+Queried saved settings, existing media inventories, inactive loggers/media,
+empty GPS track, offline network services, connectivity state, authentication
+requirement and crash count matched the baseline. No panic, heap-corruption,
+watchdog or assertion signature appeared. Serial access was closed. QT Py
+verification is compilation only; private device evidence stays outside the
+repository. These were controlled reboot checks, not physical power-loss tests.
+
+### Other temporary-file owners
+
+The audit found several distinct lifecycles. Sharing traversal and checked
+publication is useful; deleting everything with a temporary-looking name is not.
+
+| Area | Existing owner and temporary files | Cleanup/recovery responsibility |
+|---|---|---|
+| Configuration snapshots | `System_Settings`: root `settings.tmp`/`debug.tmp` and per-user `.json.tmp`; `System_Utils` checked text saves used by users, automations, notifications, boot anchors and migration restore | Writer removes failed staging; the bounded boot sweep discards leftovers in its existing directories. |
+| Capped logs | `System_Filesystem`: six known system-log `.tmp` files | Existing log recovery runs first; it discards staging when the final exists and attempts promotion when only staging remains. |
+| Capture writers | Sensor/battery `.header.tmp`; Maps track/merge, health merge/export and image `.tmp` files | Writers check and publish their own files. Reserved headers survive this sweep; default capture directories are outside it. |
+| R1 history and replacement backups | `R1_HealthHistoryStore`: `.r1h.tmp`/`.r1h.bak`; `System_VFS`: SD replacement `.bak` | R1 owns interrupted-swap recovery. An unresolved SD backup retains old bytes and blocks replacement; neither belongs in generic deletion. |
+| Capture time index | `System_TimeAnchors`: `logging_captures/sensors/.anchors.tmp` | Index owner rewrites staging; outside the generic sweep. |
+| Quick Notes | `QuickNote_Store`/`QuickNote_Policy`: per-user notes `.tmp` on internal storage or SD | Checked save/restamp keeps the old note until the replacement is verified. Outside the generic sweep. |
+| ESP-NOW snapshots | `System_ESPNow` device-registry `.json.tmp`; `System_ESPNow_Identity` own/peer `identity.tmp` | Save/forget operations own cleanup; nested directories are outside the generic sweep. |
+| ESP-NOW transfers and send scratch | `System_ESPNow_Files`: received `.part-*`; `System_ESPNow`: `_settings_out.json`, `_schema_out.json`, `_manifest_out.json` | Receive release/cancel and its separate boot pass remove owned stages; outgoing scratch follows write/send/remove. The JSON scratch names are not matched by this sweep. |
+| OTA | `System_OTA`: `candidate.part`, `manifest.part`, and resume `.meta` sidecars | Partial uploads deliberately survive disconnect for validated resume; OTA owns abort, completion and promotion. |
+| SD probes and quarantines | `System_VFS`: `HWPRxxxx.TMP`; filesystem/user validation: `.corrupt`/`.bad` | Probe deletes only its chosen unused path. Quarantines are retained recovery copies. |
+| Host tooling | `tools/build_config.py`, SDK preparation, signing, qualification and host tests | Atomic sibling files or scoped temporary directories are removed by their host owner; completed evidence and restore-failure backups are intentionally retained. |
+
+**Follow-ups identified by this audit.** The destructive per-user settings
+fallback after failed rename is addressed in the following milestone.
+ESP-NOW identity saves accept a nonzero partial serialization, and the time-index
+rewrite does not check row writes or promotion. Those are separate writer
+completion fixes. OTA cancel sidecar cleanup and the ESP-NOW boot pass's limit
+of eight received stages are separate ownership questions, not reasons to
+expand this sweep.
+
+**Limits.** Host faults establish observable behavior at the filesystem
+boundary; they do not simulate physical power loss. Existing writer-specific
+recovery policies and ordinary `.tmp` disposal remain in force. Physical SD,
+memory slimming and STT changes remain outside this pass. No file moves,
+version bump, commit or push; version remains `0.99.97.2`.
+
+## Completed: shared checked JSON settings saves — 2026-10-11
+
+**Maintenance problem.** Per-user settings duplicated the measured temporary
+write used by main/debug settings. After a failed rename, that separate path
+opened the live user file with `w`, risking loss of the previous credentials
+and preferences. It also omitted the reported write-error check.
+
+**Change.** `System_Settings.cpp` owns one private `writeJsonSnapshot` operation
+for measured serialization, flush-observable size/error checks, close, rename
+and failed-temp cleanup under the existing filesystem guard. A small private
+result carries completion diagnostics back to the caller. The existing full
+settings wrapper retains its logs and failure events; per-user saves retain
+their boolean result and all-outcome notification-cache invalidation. No public
+interface, module, settings format or temporary path was added or changed.
+
+The destructive per-user fallback is removed: failed staging or replacement
+leaves the previous destination intact and returns failure. The shared helper
+also rejects a directory handle and a reported write error. Main/debug writers
+retain their settings-writer-before-filesystem lock order. Per-user transactions
+retain their single outer filesystem lock through load, mutation, save and cache
+invalidation, without acquiring the main settings writer lock. This prevents
+introducing the opposite lock order while sharing the write mechanics.
+
+**Verification.** Independent review approved the production change and checked
+password/gamepad-password, notification, web and setup callers. The extended
+existing `settings_file_writes` suite executes production save/load/transaction/
+merge operations, guards and vendored ArduinoJson. Its controlled boundaries
+cover files, VFS/stat, Arduino String, semaphores, logging and the invalidation
+callback. Both bonded configurations passed **46,228 checks** under ASan/UBSan.
+Saved-baseline cases reproduce ignored write errors, the successful direct-write
+fallback, and truncation when that fallback itself fails. All **12 normal-save
+byte-count/hash comparisons** match baseline for fresh/existing user files.
+
+Failure coverage includes open/directory errors, short writes, size mismatch,
+reported write errors, failed rename, failed cleanup, retries, unavailable
+storage, overflow, rejected mutations and unchanged unrelated fields. Checks
+require exact invalidation counts, retained outer lock ownership, no per-user
+main-writer lock attempts or main-settings failure events, and correct
+`SaveFailed` propagation. Existing main/debug/restamp diagnostics, retries and
+overlap tests remain intact.
+
+All **six focused CTest suites** passed: settings file writes, user transaction
+guards, initial-admin setup, notification integration guards, settings batch
+contracts and web batch handlers. Both firmware profiles compiled and linked.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,896,176 | 88,080 |
+| `qtpy-maps-test` | 3,715,472 | 2,268,784 |
+
+**Hardware.** The XIAO application was flashed without erasing storage; flash
+hash and running ELF matched the verified build. The live save test passed
+**162 checks across 40 serial commands and seven HTTP requests**. It used the
+existing authenticated, password-filtered user-settings API to change the
+existing theme, confirm that change after reboot, restore the original theme,
+and confirm restoration after a second reboot. Other fields returned by that
+API remained equal by value, and existing credentials continued to authenticate.
+Wi-Fi and HTTP were returned to their original OFF state; crash count stayed
+unchanged and no fatal runtime signature appeared. Hardware verification is
+semantic preference restoration, not raw credential-file byte comparison or
+execution of the notification cache resolver.
+
+A final read-only check passed **129 checks across 34 commands**. Queried
+saved configuration, media inventories, inactive services, connectivity state,
+firmware version and crash count matched the pre-flash baseline. No eligible
+ordinary temporary files remained in the existing boot-sweep directories.
+Serial access was closed. QT Py verification is compilation only; private
+hardware evidence stays outside the repository.
+
+**Limits.** Arduino File cannot report every backend flush/close failure; this
+is checked observable completion, not a power-loss durability guarantee. The
+real notification cache is not executed by the writer harness; its unchanged
+generation fencing is covered by source guards. Existing account-publication
+ordering and the ESP-NOW import caller's ignored save result remain separate
+follow-ups. This pass does not make account creation a multi-file transaction.
+Version remains `0.99.97.2`; no file moves, STT changes, SD qualification,
+memory slimming, commit or push.
+
+## Checkpoint: 0.99.97.3 (2026-10-11)
+
+This checkpoint includes the cleanup after shared setup menu organization:
+canonical utility declarations, shared reporting/session/web helpers, logging
+ownership and checked persistence through per-user JSON settings saves. The
+production source matches the completed milestones above; release preparation
+changes the version and release notes. Historical milestone versions and test
+results remain as recorded. See the
+[changelog](../CHANGELOG.md#099973---2026-10-11) for the release summary.
+
+Checkpoint verification:
+
+- All **155 registered firmware host suites passed**, with ASan/UBSan and Node
+  checks enabled; all **52 OTA tests passed**. No tests failed or were skipped.
+- XIAO default, QT Py Maps and P4 board-default release builds passed. Their
+  application descriptors embed `0.99.97.3`, saved inputs pass compiler
+  verification and the recorded resolved selections match the `.2` checkpoint.
+  All 6,112 captured production/configuration/tool/test inputs stayed unchanged
+  through the builds. The temporary P4 profile was removed after matching the
+  archived and generated inputs.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,896,176 | 88,080 |
+| `qtpy-maps-test` | 3,715,472 | 2,268,784 |
+| P4 X Eye board defaults | 6,500,304 | 925,744 |
+
+No firmware was flashed for the release checkpoint. The dated records above
+distinguish prior XIAO observations from host fault injection and build-only
+coverage. These checks do not establish physical power-loss durability;
+physical SD qualification and memory slimming remain deferred. No additional
+ThreadSanitizer pass or optional decoder-corpus parity run was performed.
+
+The release-scope privacy review found no added personal information or live
+credentials. Raw hardware captures and build evidence remain private. Unrelated
+enclosure work is excluded. No files or host suites moved; STT engine, Conversate,
+P4 SDK staging and experiment tooling behavior remain unchanged for the later
+STT branch integration.

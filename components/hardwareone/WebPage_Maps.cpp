@@ -537,7 +537,6 @@ void registerMapsHandlers(httpd_handle_t server) {
 // =============================================================================
 
 esp_err_t handleWaypointsAPI(httpd_req_t* req) {
-  extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
   WEB_AUTH_OR_RETURN(req, ctx);
   
   // Thread-safe JSON response

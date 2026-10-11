@@ -148,7 +148,8 @@ void logSystemEvent(const char*, const char* format, ...) {
 void systemEventPost(int event, const char*) { systemEvents.push_back(event); }
 unsigned long millis() { return 1234; }
 struct File {
-  explicit operator bool() const { return fileOpenable; }
+  bool prepared = true;
+  explicit operator bool() const { return fileOpenable && prepared; }
   void close() { ++fileCloses; }
 };
 struct FsLockGuard { explicit FsLockGuard(const char*) {} };
@@ -176,6 +177,7 @@ String resolveSessionTarget(const String& path) {
 bool sessionWantsSealing(uint8_t) { return wantsSealing; }
 bool captureCryptoEnsureKey() { return keyAvailable; }
 bool writeHeaderChecked(File&) { return headerWritable; }
+File openSensorLogForAppend(const String&) { return {headerWritable}; }
 void sensorLogClassifyActivePath(const char* path) { classifiedPath = path; }
 size_t sensorLogResolvedSize(const String&) { return 42; }
 String stripSessionShaping(const String& path) { return path; }
@@ -447,7 +449,7 @@ static void healthBootPolicy() {
   }
 }
 static void admissionFailuresAndAdapter() {
-  for (int failure = 0; failure < 4; ++failure) {
+  for (int failure = 0; failure < 6; ++failure) {
     for (bool boot : {false, true}) {
       context = "owner admission failure " + std::to_string(failure);
       reset();
@@ -455,6 +457,8 @@ static void admissionFailuresAndAdapter() {
       if (failure == 1) { wantsSealing = true; keyAvailable = false; }
       if (failure == 2) freeHeap = 8191;
       if (failure == 3) flashFree = 0;
+      if (failure == 4) headerWritable = false;
+      if (failure == 5) fileOpenable = false;
       if (boot) { gSettings.sensorLogAutoStart = true; sensorLogAutoStart(); }
       else check(error(sensorLogStartConfiguredSession()), "admission error hidden");
       check(!gSensorLoggingRunning && gSensorLogPath == "/logs/previous.csv", "failed start published live session");

@@ -34,7 +34,6 @@
 
 // External references
 extern bool gOledRunning;
-extern String waitForSerialInputBlocking();
 extern void updateOLEDDisplay();
 
 // Draw FTS footer at the standard position (matching drawOLEDFooter in the normal program)

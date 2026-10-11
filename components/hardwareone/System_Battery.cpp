@@ -8,6 +8,7 @@
 #include "System_Debug.h"
 #include "System_Notifications.h"
 #include "System_Settings.h"
+#include "System_Filesystem.h"
 #include "System_VFS.h"
 #include "System_AuthIdentity.h"
 #include "System_Mutex.h"
@@ -513,25 +514,56 @@ static void batteryLogAppend(const char* event) {
            state.usbKnown ? (state.usbPresent ? "1" : "0") : "",
            event ? event : "");
 
-  fsLock("batlog.append");
+  FsLockGuard appendGuard("batlog.append");
   // trusted: the system owns its own infrastructure log. Both the periodic
   // sampler and the power-event annotations write as system, regardless of
   // whether a CLI command happened to trigger the event.
   auto ctx = VFS::systemAuth("batlog");
-  const bool fresh = !VFS::existsGuarded(String(kBatteryLogPath), ctx);
   File f = VFS::openGuarded(String(kBatteryLogPath), "a", ctx, true);
+  if (f && f.isDirectory()) {
+    f.close();
+    return;
+  }
   if (f) {
-    if (fresh) {
+    if (f.size() == 0) {
       static const char* kHeader =
         "boot,uptime_ms,epoch_s,datetime,pct[%],voltage[V],crate[%/hr],status,charging,usb,event\n";
-      f.write((const uint8_t*)kHeader, strlen(kHeader));
+      f.close();
+      String temporary;
+      if (!temporary.concat(kBatteryLogPath) || !temporary.concat(".header.tmp") ||
+          VFS::existsGuarded(temporary, ctx)) {
+        if (isDebugFlagSet(DEBUG_STORAGE)) DEBUGF_BROADCAST(DEBUG_STORAGE, "Battery log: header staging unavailable");
+        return;
+      }
+      File header = VFS::openGuarded(temporary, "w", ctx, true);
+      bool complete = false;
+      if (header && !header.isDirectory()) {
+        const size_t length = strlen(kHeader);
+        const size_t written = header.write((const uint8_t*)kHeader, length);
+        header.flush();
+        complete = written == length && !header.getWriteError() && header.size() == length;
+      }
+      if (header) header.close();
+      if (!complete || !VFS::replaceFileGuarded(temporary, String(kBatteryLogPath), ctx)) {
+        VFS::removeGuarded(temporary, ctx);
+        if (isDebugFlagSet(DEBUG_STORAGE)) DEBUGF_BROADCAST(DEBUG_STORAGE, "Battery log: header write failed");
+        return;
+      }
+      f = VFS::openGuarded(String(kBatteryLogPath), "a", ctx, true);
+      if (!f) return;
     }
-    f.write((const uint8_t*)line, strlen(line));
-    f.write((uint8_t)'\n');
+    size_t written = 0;
+    const size_t len = strlen(line);
+    const bool complete = writeLineChecked(f, (const uint8_t*)line, len, written);
     const size_t sz = f.size();
     f.close();
+    if (!complete && isDebugFlagSet(DEBUG_STORAGE)) {
+      DEBUGF_BROADCAST(DEBUG_STORAGE, "Battery log: row write failed (%u/%u bytes)",
+                       (unsigned)written, (unsigned)(len + 1));
+    }
 
-    // Size rotation: drop oldest, shift .i → .(i+1), then base → .1.
+    // Partial rows still consume space. Keep size rotation independent of
+    // row success: drop oldest, shift .i → .(i+1), then base → .1.
     if (sz > kBatteryLogMaxSize) {
       char p[80], q[80];
       snprintf(p, sizeof(p), "%s.%d", kBatteryLogPath, kBatteryLogMaxRotations);
@@ -546,7 +578,6 @@ static void batteryLogAppend(const char* event) {
         VFS::renameGuarded(String(kBatteryLogPath), String(q), ctx);
     }
   }
-  fsUnlock();
 }
 
 void batteryLogTick() {

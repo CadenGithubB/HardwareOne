@@ -1466,12 +1466,10 @@ int webBroadcastSessionsHuman() {
 // HTTP Page Handlers (moved from .ino to fix Arduino preprocessor issues)
 // ============================================================================
 
-// External dependencies from .ino
-// tgRequireAuth is now in user_system.h (included above)
+// Page rendering and authentication dependencies.
 extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
 extern void streamSensorsContent(httpd_req_t* req, const String& username);
 extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
-extern bool readText(const char* path, String& out);
 extern const char* buildSensorStatusJson();
 // gSensorStatusSeq declared below
 extern void streamDashboardContent(httpd_req_t* req, const String& username);
@@ -1492,22 +1490,14 @@ extern void streamChunk(httpd_req_t* req, const char* chunk);
 extern String getLogoutReason(const String& ip);
 extern String getLogoutReasonForAuthPage(httpd_req_t* req);
 extern bool isValidUser(const String& username, const String& password);
-extern String extractFormField(const String& body, const String& key);
-extern String urlDecode(const String& str);
 extern String gSessUser;
-extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmdline, String& out);
 extern int findSessionIndexBySID(const String& sid);
 extern bool sseDequeueNotice(SessionEntry& s, String& out);
-extern String jsonEscape(const String& in);
 // gWebMirror defined in WebServer_Utils.h
 extern unsigned long gWebMirrorSeq;
-// buildSystemInfoJson() now lives in System_Utils.cpp; declared in WebServer_Server.h.
 extern void appendCommandToFeed(const char* origin, const String& cmd, const String& user, const String& ip);
 // Command types from shared header
 #include "System_CommandTypes.h"
-extern bool submitAndExecuteSync(const Command& uc, String& out);
-extern bool submitAndExecuteSync(const Command& uc, String& out,
-                                 bool* completedOut);
 extern bool gMeshActivitySuspended;
 // gBroadcastSkipSessionIdx declared in web_server.h
 
@@ -1600,10 +1590,8 @@ void streamPageWithContent(httpd_req_t* req, const String& activePage, const Str
 
 // Sensor status sequence declared in header (volatile)
 
-// Utility functions (extractFormField and urlDecode declared above)
-// Logging helpers (defined in .ino)
+// Logging helpers.
 extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
-extern void getTimestampPrefixMsCached(char* out, size_t outSize);
 extern void broadcastOutput(const String& s, const CommandContext& ctx);
 
 // handleSensorsPage moved to web_sensors.cpp
@@ -1881,16 +1869,6 @@ String getLogoutReasonForAuthPage(httpd_req_t* req) {
 
   return logoutReason;
 }
-
-// ============================================================================
-// System Info Builder
-// ============================================================================
-
-// Helper: Build system info JSON using ArduinoJson (eliminates String concatenation)
-// buildSystemInfoJson() was moved to System_Utils.cpp (transport-neutral core)
-// so the CLI `status json` can build the same schema without depending on the
-// web server being compiled in. /api/system, SSE, and the migration tool still
-// call it via the declaration in WebServer_Server.h. See System_Utils.cpp.
 
 // NOTE: logAuthAttempt() and recordLoginAttempt() moved to System_Debug.cpp
 // (declared in System_User.h). They have no httpd dependency, and keeping them
@@ -3528,31 +3506,10 @@ static esp_err_t handleLoggingStatus(httpd_req_t* req) {
   runInternalStatusCmd("time", timeBuf, sizeof(timeBuf));
   runInternalStatusCmd("sensorlog status", sensorBuf, sizeof(sensorBuf));
 
-  // `log status` is admin-gated on the CLI; build the same text from globals
-  // so guests/users can still see the Logging page surface.
+  // `log status` is admin-gated on the CLI. Reuse its read-only formatter so
+  // guests/users retain access to this page's status without executing it.
   char logBuf[512];
-  if (gSystemLogRunning && (gOutputFlags & MSG_ROUTE_FILE)) {
-    unsigned long ageSeconds = (millis() - gSystemLogLastWrite) / 1000;
-    snprintf(logBuf, sizeof(logBuf),
-             "System logging ACTIVE\n"
-             "  File: %s\n"
-             "  Last write: %lus ago\n"
-             "  Output flags: 0x%02X\n"
-             "  Auto-start: %s",
-             gSystemLogPath.c_str(), ageSeconds, (unsigned)gOutputFlags,
-             gSettings.systemLogAutoStart ? "ON" : "OFF");
-  } else if (gSystemLogRunning) {
-    snprintf(logBuf, sizeof(logBuf),
-             "System logging CONFIGURED but MSG_ROUTE_FILE flag not set\n"
-             "  File: %s\n"
-             "  Use 'log start' to enable\n"
-             "  Auto-start: %s",
-             gSystemLogPath.c_str(),
-             gSettings.systemLogAutoStart ? "ON" : "OFF");
-  } else {
-    snprintf(logBuf, sizeof(logBuf), "System logging is INACTIVE\n  Auto-start: %s",
-             gSettings.systemLogAutoStart ? "ON" : "OFF");
-  }
+  formatSystemLogStatus(logBuf, sizeof(logBuf));
 
   PSRAM_JSON_DOC(doc);
   doc["success"] = true;
@@ -3638,19 +3595,12 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   }
   DEBUG_CMD_FLOWF("[web.cli] build ctx user=%s originIdx=%d", ctx.user.c_str(), originIdx);
 
-  // Build unified command and execute synchronously (queue to be added later)
+  // Prepare the web context, then bind this request's session and interaction.
   Command uc;
   uc.line = cmd;
   DEBUG_CMD_FLOWF("[web.cli] uc.line.length()=%d after assignment", uc.line.length());
-  uc.ctx.origin = ORIGIN_WEB;
-  uc.ctx.auth = ctx;
-  uc.ctx.id = (uint32_t)millis();
-  uc.ctx.timestampMs = (uint32_t)millis();
-  uc.ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;
+  uc.ctx = makeWebCommandContext(req, ctx);
   uc.ctx.transportSessionEpoch = captureTransportSessionEpoch(ctx);
-  if (ctx.sid.length()) {
-    uc.ctx.behaviorFlags |= COMMAND_CONTEXT_REQUIRE_LIVE_SESSION;
-  }
   // /api/cli is also used by background page controls. Treat it as a machine
   // request unless the human CLI explicitly opts in. Capture controls reply
   // delivery only; it does not by itself imply either interaction or machine
@@ -3660,8 +3610,6 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   }
   uc.ctx.validateOnly = doValidate;
   uc.ctx.captureOutput = doCapture;
-  uc.ctx.replyHandle = nullptr;
-  uc.ctx.httpReq = req;
 
   // Suspend mesh activity during command execution to reduce CPU contention
   gMeshActivitySuspended = true;
@@ -4335,7 +4283,6 @@ extern char* gFileReadBuf;
 extern char* gFileOutBuf;
 extern const size_t kFileReadBufSize;
 extern const size_t kFileOutBufSize;
-extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
 extern void fsLock(const char* tag);
 extern void fsUnlock();
 
@@ -5197,7 +5144,6 @@ esp_err_t handleIconTestPage(httpd_req_t* req) {
 // ============================================================================
 
 // Admin handler dependencies
-extern bool readText(const char* path, String& out);
 extern bool approvePendingUserInternal(const String& username, String& errorOut);
 extern bool denyPendingUserInternal(const String& username, String& errorOut);
 
@@ -5340,12 +5286,6 @@ esp_err_t handleAdminDenyUser(httpd_req_t* req) {
 // ============================================================================
 // Automation Export Handler (Batch 5 - migrated from .ino)
 // ============================================================================
-
-// Automation export dependencies
-extern bool extractArrayByKey(const String& json, const char* key, String& out);
-extern bool extractArrayItem(const String& arrayStr, int& pos, String& out);
-extern bool parseJsonInt(const String& json, const char* key, int& out);
-extern bool parseJsonString(const String& json, const char* key, String& out);
 
 esp_err_t handleAutomationsExport(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
@@ -5742,22 +5682,12 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
 
     Command uc;
     uc.line = cmd;
-    uc.ctx.origin = ORIGIN_WEB;
-    uc.ctx.auth = ctx;
-    uc.ctx.id = (uint32_t)millis();
-    uc.ctx.timestampMs = (uint32_t)millis();
-    uc.ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;
+    uc.ctx = makeWebCommandContext(req, ctx);
     uc.ctx.settingsBatchId = settingsBatchId;
     uc.ctx.transportSessionEpoch = batchSessionEpoch;
-    if (ctx.sid.length()) {
-      uc.ctx.behaviorFlags |= COMMAND_CONTEXT_REQUIRE_LIVE_SESSION;
-    }
     if (!interactiveBatch) {
       uc.ctx.behaviorFlags |= COMMAND_CONTEXT_MODE_INDEPENDENT;
     }
-    uc.ctx.validateOnly = false;
-    uc.ctx.replyHandle = nullptr;
-    uc.ctx.httpReq = req;
 
     String out;
     bool commandCompleted = false;

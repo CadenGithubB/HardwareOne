@@ -54,10 +54,6 @@
 #endif
 #include "WebServer_MigrationTool.h"
 
-// External dependencies (httpd_handle_t server declared in WebServer_Server.h)
-extern bool readText(const char* path, String& out);
-extern bool writeText(const char* path, const String& content);
-
 // File path constants (must match firmware layout)
 static const char* SETTINGS_FILE     = "/system/settings.json";
 static const char* DEBUG_FILE        = "/system/debug.json";  // debug flags split out of settings.json

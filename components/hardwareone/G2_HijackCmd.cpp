@@ -17,11 +17,6 @@
 #include "System_Utils.h"  // redactCmdForAudit
 #include "BLE_Peers.h"     // synchronized G2 paired-owner authority
 
-// Provided by System_Utils.cpp — same function the BLE server uses.
-extern bool submitCommandAsync(const Command& cmd,
-                               ExecAsyncCallback callback,
-                               void* userData);
-
 // =============================================================================
 // Auth identity for hijack-submitted commands.
 //

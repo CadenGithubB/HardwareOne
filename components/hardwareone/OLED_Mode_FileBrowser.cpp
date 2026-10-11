@@ -32,12 +32,10 @@
 #include "System_ESPNow_FsList.h"   // fsListSendRequest / fsGetSendRequest / fsListCancel
 #include "System_BondedPeer.h"      // BondedPeer::isPaired, peerMacBytes
 #include "System_CommandTypes.h"    // ExecReq::DeferredFn (submitDeferredToCmdExec)
-// Narrow interfaces into System_ESPNow.cpp keep its broader header out of this screen.
-//  - sendFileToMac: pump a local file to a peer (multi-second).
-//  - submitDeferredToCmdExec: run a job on cmd_exec_task so the send never blocks
-//    the OLED render/input task.
+#include "System_Utils.h"  // submitDeferredToCmdExec
+// Pump a local file to a peer (multi-second), deferred through the shared
+// executor so the send never blocks the OLED render/input task.
 extern bool sendFileToMac(const uint8_t* mac, const String& localPath);
-extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
 #endif
 
 // Thin wrapper over the shared oledAuthContext() builder — names the file-

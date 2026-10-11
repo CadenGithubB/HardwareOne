@@ -3333,7 +3333,6 @@ static Command buildOLEDCommand(const String& cmdLine) {
 
 bool submitOLEDCommandForSession(const String& line, TransportSessionEpoch epoch,
                                  ExecAsyncCallback callback, void* context) {
-  extern bool submitCommandAsync(const Command&, ExecAsyncCallback, void*);
   Command command = buildOLEDCommand(line);
   command.ctx.behaviorFlags |= COMMAND_CONTEXT_MODE_INDEPENDENT;
   if (!epoch || command.ctx.transportSessionEpoch != epoch) return false;
@@ -3341,8 +3340,6 @@ bool submitOLEDCommandForSession(const String& line, TransportSessionEpoch epoch
 }
 
 void executeOLEDCommand(const String& argsInput) {
-  extern bool submitAndExecuteSync(const Command& cmd, String& out);
-
   Command uc = buildOLEDCommand(argsInput);
   String out;
   bool success = submitAndExecuteSync(uc, out);
@@ -3355,8 +3352,6 @@ void executeOLEDCommand(const String& argsInput) {
 static bool executeOLEDCommandWithResultImpl(
     const String& argsInput, TransportSessionEpoch expectedEpoch,
     bool requireExpectedEpoch, char* out, size_t outSize) {
-  extern bool submitAndExecuteSync(const Command& cmd, String& outStr);
-
   if (!out || outSize == 0) return false;
   out[0] = '\0';
 

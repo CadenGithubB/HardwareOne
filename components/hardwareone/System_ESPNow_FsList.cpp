@@ -17,6 +17,7 @@
 
 #include "System_AuthIdentity.h"   // SYSTEM_IDENTITY_SCOPE, currentAuthContext
 #include "System_CommandTypes.h"   // ExecReq::DeferredFn (signature for submitDeferredToCmdExec)
+#include "System_Utils.h"  // submitDeferredToCmdExec
 #include "System_Debug.h"
 #include "System_ESPNow.h"          // generateMessageId
 #include "System_ESPNow_Tx.h"       // espnowtx::sendAead / sendAeadSync (Step 3c)
@@ -37,13 +38,6 @@ extern bool v4_send_payload_smart(const uint8_t* dst, uint8_t type,
                                   uint16_t flags, uint32_t msgId,
                                   const uint8_t* payload, uint16_t payloadLen,
                                   uint8_t ttl);
-
-// Push a deferred callback onto cmd_exec_task. Used to move heavy FS work
-// (directory scan, file send, JSON build) off espnow_task — see the FS
-// deferred-work refactor comment near captureDeferred() below. Implementation
-// in System_Utils.cpp; defined header-light here to avoid pulling the full
-// cmd_exec_task surface into this translation unit.
-extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
 
 // ============================================================================
 // Sender (client) side — pending request table

@@ -1,4 +1,5 @@
 #include "System_TaskUtils.h"
+#include "System_Utils.h"       // getTimestampPrefixMsCached
 #include "System_Filesystem.h"    // For filesystemReady, isFsLockedByCurrentTask
 #include "System_Mutex.h"  // For isFsLockedByCurrentTask
 #include "System_Debug.h"  // For DEBUG_CLIF macro
@@ -32,11 +33,8 @@ extern "C" __attribute__((weak)) UBaseType_t uxTaskGetSystemState(
   return 0;
 }
 
-// Forward declaration (implemented in HardwareOne.ino)
+// Filesystem log append helper (implemented in System_Filesystem.cpp).
 bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
-
-// External timestamp function
-extern void getTimestampPrefixMsCached(char* buf, size_t bufSize);
 
 // Per-sensor TaskHandle_t and enabled-flag externs come from the sensor
 // headers (each header gates its decls on ENABLE_*_SENSOR; System_SensorStubs.h
