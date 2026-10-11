@@ -27,6 +27,11 @@
 #include <new>
 #include <string>
 #include <vector>
+#if HW1_STT_RESIDENT_MODEL
+// The tree-local ESP-DL's prepared-args pass (dl_module_conv.hpp).
+extern "C" int hw1_dl_prepare_mode;
+extern "C" uint32_t hw1_dl_prepare_gen;
+#endif
 namespace hw1::stt {
 // Per-stage inference time accumulated across segments (sttperf stages).
 static constexpr int kStageProfileMax = 256;
@@ -526,6 +531,21 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     // runs IDLE1 (task watchdog 5 s; IDLE0 is unwatched only inside this
     // scope) and the priority-1 loop task several times a second. Drafts stay
     // preemptible: the cancel check still runs before every stage.
+#if HW1_STT_RESIDENT_MODEL
+    // On the resident model, first build every Conv layer's args in one pass
+    // (no layer computes), so their setup code and tensor metadata come into
+    // the caches once instead of after every layer's weights flushed them;
+    // each layer then runs on its prepared args. Same args, bit-identical
+    // output. The prepared blocks are PSRAM metadata the resident model
+    // keeps. Per-call models (the warm-up) skip the pass, so the LM, which
+    // the warm-up loads lazily at its decode, sees the same PSRAM as before.
+    if(resident) {
+        if(++hw1_dl_prepare_gen==0)++hw1_dl_prepare_gen;
+        hw1_dl_prepare_mode=1;
+        for(int stage=0;stage<identity::kNodeCount;++stage)model->run(identity::kNodeCount,stage,dl::RUNTIME_MODE_MULTI_CORE);
+        hw1_dl_prepare_mode=0;
+    }
+#endif
     constexpr int64_t kYieldBlockUs=250000;
     int64_t lastBlockUs=esp_timer_get_time();
     for(int stage=0;stage<identity::kNodeCount;++stage) {

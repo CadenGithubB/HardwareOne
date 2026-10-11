@@ -13,6 +13,11 @@ dependencies.lock.esp32p4 pins plus tools/p4/esp-dl-3.3.12-hw1.patch:
     block so the sliding window and the block's filter stay in L1, and split
     across the two cores by channel halves at every length instead of by
     rows (bit-identical output: channels are independent);
+  - prepared conv args: while hw1_dl_prepare_mode is set (dl_module_base.cpp)
+    a pass over the model builds every Conv layer's ConvOpArgs and keeps a
+    copy in a per-layer metadata block, and Add, LUT and Relu return; each
+    Conv then runs on its prepared args once (same args, bit-identical
+    output). With the flag never set every module runs as upstream;
   - dl_tool_metadata.{hpp,cpp}: every block a dl::Model keeps for its lifetime
     is requested through one allocator hook. With no hook installed each site
     behaves exactly as upstream; the STT runtime installs an explicit PSRAM
@@ -43,8 +48,8 @@ VERSION = "3.3.12"
 COMPONENT_HASH = "d792e72ab3858d805d8918d1215a862541344625f62134597866834de666fd04"
 SOURCE_TREE_SHA256 = "e5c5155078c46e090ad7f08a7239bb52d456394fab1356d78b4c127eefcb6e86"
 PATCH = ROOT / "esp-dl-3.3.12-hw1.patch"
-PATCH_SHA256 = "6b707907c6e97affd66c3784e49d2c490640375480412136f28efa7765a0db4c"
-PATCHED_TREE_SHA256 = "96b738dfa06e56bf4b61d07c2c01f9549fb2311e42a4b1fc2fd30a6dc35d3bd6"
+PATCH_SHA256 = "e4b93864e4bfbb3154d166e7e5f486e8e9ae67f4ae111448764da30ed55c88c0"
+PATCHED_TREE_SHA256 = "9355db26d0f2b725006ed6584e02fb4eaf29fa60a7478a926e587bf44c377d5f"
 MANIFEST = "hw1-esp-dl-override.json"
 # Present only in component-manager copies; not part of the package itself.
 IGNORED = {".component_hash", MANIFEST}
