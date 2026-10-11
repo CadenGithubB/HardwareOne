@@ -568,7 +568,6 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   
   DEBUG_MQTT_COMMANDSF("Authentication successful for user '%s'", username);
 
-  extern bool submitAndExecuteSync(const Command& cmd, String& out);
   auto executeMqttRegistryLine = [&](const String& line,
                                      String& resultOut) -> bool {
     Command queued;

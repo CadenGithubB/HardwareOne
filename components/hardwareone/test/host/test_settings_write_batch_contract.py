@@ -439,31 +439,21 @@ require(
     and "xSemaphoreGiveRecursive" in settings_cpp,
     "settings writer single-flight lock is not recursive",
 )
-for writer_name, writer in (("main", main_writer), ("debug", debug_writer)):
-    compact_writer = re.sub(r"\s+", " ", cpp_code(writer))
-    write_order = [
-        compact_writer.find("expectedBytes = measureJson(doc)"),
-        compact_writer.find("bytesWritten = serializeJson(doc, file)"),
-        compact_writer.find("file.flush()"),
-        compact_writer.find("observedBytes = file.size()"),
-        compact_writer.find("file.close()"),
-        compact_writer.find(
-            "bytesWritten != expectedBytes || observedBytes != expectedBytes"
-        ),
-        compact_writer.find("renameGuarded("),
-        compact_writer.find("directBytesWritten = serializeJson(doc, directFile)"),
-        compact_writer.find("directFile.flush()"),
-        compact_writer.find("directObservedBytes = directFile.size()"),
-        compact_writer.find("directFile.close()"),
-        compact_writer.find(
-            "directBytesWritten != expectedBytes || directObservedBytes != expectedBytes"
-        ),
-    ]
-    require(
-        all(position >= 0 for position in write_order)
-        and write_order == sorted(write_order),
-        f"{writer_name} rename fallback can report success after a partial direct write",
-    )
+# Detailed short-write, write-error, rename, cleanup and destination-preservation
+# behavior is executed by settings_file_writes against the production helper.
+# Keep this contract focused on all three callers using that one replacement.
+restamp_writer = block_after(settings_cpp, "bool settingsRestampFirmwareVersion(")
+for writer_name, writer in (("main", main_writer), ("debug", debug_writer),
+                            ("restamp", restamp_writer)):
+    writer_code = cpp_code(writer)
+    require(writer_code.count("writeSettingsSnapshot(") == 1,
+            f"{writer_name} does not use the shared checked snapshot replacement")
+    require(not re.search(r"\bserializeJson\s*\(", writer_code) and "renameGuarded(" not in writer_code,
+            f"{writer_name} duplicates the shared file replacement")
+    require("SettingsFileWriteGuard" in writer_code,
+            f"{writer_name} lacks the shared full-operation writer guard")
+require(restamp_writer.find("SettingsFileWriteGuard") < restamp_writer.find("readText("),
+        "version restamp reads before owning the full settings writer operation")
 
 # Batch bookkeeping uses a short portMUX section. Flash/VFS work must always be
 # after the matching exit: filesystem calls can block and are illegal inside a

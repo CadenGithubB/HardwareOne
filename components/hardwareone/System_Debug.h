@@ -324,6 +324,11 @@ inline void setDebugFlag(DebugFlagMask flag) { setDebugFlags(getDebugFlags() | f
 inline void clearDebugFlag(DebugFlagMask flag) { setDebugFlags(getDebugFlags() & ~flag); }
 inline bool isDebugFlagSet(DebugFlagMask flag) { return gDebugVerbose || ((getDebugFlags() & flag) != (DebugFlagMask)0); }
 
+// Apply a validated LOG_LEVEL_* severity to DebugManager and the Wi-Fi/PHY
+// framework tags. Callers own validation and settings persistence. HTTPS tags
+// keep their independent DEBUG_HTTPS policy below.
+void applyLogLevel(uint8_t level);
+
 // Apply the ESP-IDF log-level for the TLS/HTTPS framework tags (esp-tls-mbedtls,
 // esp_https_server, httpd, httpd_txrx). verbose=false → ESP_LOG_NONE (quiet the
 // benign browser-disconnect flood); verbose=true → ESP_LOG_DEBUG. Driven by the
@@ -936,8 +941,15 @@ const char* cmd_log(const String& argsInput);
 // System log auto-start (called from boot)
 void systemLogAutoStart();
 
+// Read-only status text in caller-owned storage. Callers retain access policy
+// and buffer size; the CLI and web page share the same labels and state rules.
+void formatSystemLogStatus(char* out, size_t outSize);
+
 // Parse / format the persisted systemLogFlags hex mask (also used by Settings UI save).
 bool parseSystemLogFlags(const String& flagsStr, DebugFlagMask& out);
+// Buffer form avoids a String allocation for command output. 70 bytes hold
+// the complete four-word mask and NUL; smaller buffers are NUL-terminated.
+void formatSystemLogFlags(DebugFlagMask mask, char* out, size_t outSize);
 String formatSystemLogFlags(DebugFlagMask mask);
 bool systemLogApplyPersistedFlags();  // gSettings.systemLogFlags → gDebugFlags
 

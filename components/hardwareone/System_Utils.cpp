@@ -1,9 +1,7 @@
 /**
  * System Utilities - Shared functions used across modules
  * 
- * This file contains common utility functions that are used by multiple
- * subsystems (automation, commands, etc.) to avoid circular dependencies
- * and work around Arduino IDE's 1MB .ino file symbol export limitation.
+ * Common utilities and command execution shared by subsystems.
  * 
  * Command-module composition lives in System_CommandRegistry.cpp.
  */
@@ -46,6 +44,7 @@ bool isEspNowInitialized() { return false; }
 #include <time.h>
 #include "System_RamFlush.h"
 #include "System_Utils.h"
+#include "System_CommandTypes.h"
 #include "System_Debug.h"
 #include "System_TaskUtils.h"
 #include "System_I2C.h"
@@ -907,9 +906,6 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success,
   logCommandExecutionPrepared(ctx, cmd, redactedCmd, success, result);
 }
 
-// NOTE: processCommand() removed - use executeCommand() directly
-// executeCommand() is defined in main .ino and requires AuthContext
-
 // =========================================================================
 // Audit / Redaction utilities
 // =========================================================================
@@ -1643,11 +1639,8 @@ static const char* resetReasonLabel(uint32_t reason) {
 // ---------------------------------------------------------------------------
 // buildSystemInfoJson — single source of truth for device-info JSON
 // ---------------------------------------------------------------------------
-// Moved here from WebServer_Server.cpp (which is wholly #if ENABLE_HTTP_SERVER)
-// so the CLI `status json` can use it WITHOUT depending on the web server being
-// compiled in. The web / SSE / migration callers still reach it via the
-// declaration in WebServer_Server.h — one schema, one definition, many
-// consumers (CLI status json, /api/system, SSE, migration tool).
+// Declared in System_Utils.h for CLI, HTTP, SSE and migration callers,
+// independently of whether the HTTP server is compiled in.
 //
 // includeDeviceList=false drops the only unbounded section (the I2C deviceList
 // array) so the CLI/MQTT blob stays compact (~800 B) and fits even the 2 KB
@@ -2622,7 +2615,7 @@ bool commandRequiresSuperAdmin(const String& cmdLine) {
 }
 
 // Dispatch command to handler (simple version without auth context)
-// The full executeCommand() in .ino handles auth, logging, help mode, etc.
+// executeCommand() below handles auth, logging, help mode, etc.
 const char* dispatchCommand(const String& argsInput) {
   const CommandEntry* entry = findCommand(argsInput);
   if (!entry) {
@@ -2775,9 +2768,6 @@ size_t calculateSensorSystemMemory() {
 extern volatile UBaseType_t gTofWatermarkNow, gTofWatermarkMin;
 extern volatile UBaseType_t gImuWatermarkNow, gImuWatermarkMin;
 extern volatile UBaseType_t gThermalWatermarkNow, gThermalWatermarkMin;
-
-// Command/context types - shared header eliminates duplication
-#include "System_CommandTypes.h"
 
 // External memory allocation function
 extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
@@ -3466,6 +3456,72 @@ const char* cmd_memreport(const String& argsInput) {
 
 
 
+namespace {
+
+const char* taskStateLabel(eTaskState state) {
+  switch (state) {
+    case eRunning:   return "RUN";
+    case eReady:     return "READY";
+    case eBlocked:   return "BLOCK";
+    case eSuspended: return "SUSP";
+    case eDeleted:   return "DEL";
+    default:         return "UNK";
+  }
+}
+
+// Per-command samples shared by perftop's text and JSON renderers. Owns the
+// arrays only; task-name pointers retain FreeRTOS's existing lifetime contract.
+// OLED and periodic stack reports keep their own sampling intervals/baselines.
+struct TaskCpuSample {
+  TaskStatus_t* before = nullptr;
+  TaskStatus_t* after = nullptr;
+  UBaseType_t beforeCount = 0;
+  UBaseType_t afterCount = 0;
+  uint32_t totalDelta = 0;
+
+  TaskCpuSample(const char* beforeTag, const char* afterTag) {
+    const UBaseType_t capacity = uxTaskGetNumberOfTasks() + 6;
+    before = (TaskStatus_t*)ps_alloc(capacity * sizeof(TaskStatus_t),
+                                   AllocPref::PreferPSRAM, beforeTag);
+    after = (TaskStatus_t*)ps_alloc(capacity * sizeof(TaskStatus_t),
+                                  AllocPref::PreferPSRAM, afterTag);
+    if (!allocated()) return;
+
+    uint32_t beforeTotal = 0, afterTotal = 0;
+    beforeCount = uxTaskGetSystemState(before, capacity, &beforeTotal);
+    vTaskDelay(pdMS_TO_TICKS(750));
+    afterCount = uxTaskGetSystemState(after, capacity, &afterTotal);
+    totalDelta = afterTotal - beforeTotal;
+  }
+
+  ~TaskCpuSample() {
+    if (before) free(before);
+    if (after) free(after);
+  }
+  TaskCpuSample(const TaskCpuSample&) = delete;
+  TaskCpuSample& operator=(const TaskCpuSample&) = delete;
+
+  bool allocated() const { return before && after; }
+  bool available() const {
+    return beforeCount != 0 && afterCount != 0 && totalDelta != 0;
+  }
+
+  // -1 means no usable baseline (new task or suspected handle reuse).
+  int cpuPercent(UBaseType_t index) const {
+    if (!available() || index >= afterCount) return -1;
+    for (UBaseType_t i = 0; i < beforeCount; ++i) {
+      if (before[i].xHandle != after[index].xHandle) continue;
+      const uint32_t delta = after[index].ulRunTimeCounter - before[i].ulRunTimeCounter;
+      if (delta > totalDelta + totalDelta / 4) return -1;
+      const uint32_t percent = (uint32_t)((uint64_t)delta * 100 / totalDelta);
+      return percent > 100 ? 100 : (int)percent;
+    }
+    return -1;
+  }
+};
+
+}  // namespace
+
 const char* cmd_taskstats(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -3506,18 +3562,9 @@ const char* cmd_taskstats(const String& originalCmd) {
     doc["total"]  = (unsigned)taskCount;
     JsonArray arr = doc["tasks"].to<JsonArray>();
     for (UBaseType_t i = 0; i < actualCount; i++) {
-      const char* state;
-      switch (taskArray[i].eCurrentState) {
-        case eRunning:   state = "RUN";   break;
-        case eReady:     state = "READY"; break;
-        case eBlocked:   state = "BLOCK"; break;
-        case eSuspended: state = "SUSP";  break;
-        case eDeleted:   state = "DEL";   break;
-        default:         state = "UNK";   break;
-      }
       JsonObject t = arr.add<JsonObject>();
       t["name"]  = taskArray[i].pcTaskName ? taskArray[i].pcTaskName : "?";
-      t["state"] = state;
+      t["state"] = taskStateLabel(taskArray[i].eCurrentState);
       t["prio"]  = (unsigned)taskArray[i].uxCurrentPriority;
       // usStackHighWaterMark is already BYTES under ESP-IDF — emit raw, never
       // *4 (see System_TaskUtils.h / feedback_task_stack_bytes_not_words).
@@ -3544,17 +3591,9 @@ const char* cmd_taskstats(const String& originalCmd) {
     (unsigned)taskCount);
 
   for (UBaseType_t i = 0; i < actualCount; i++) {
-    const char* state;
-    switch (taskArray[i].eCurrentState) {
-      case eRunning:   state = "RUN  "; break;
-      case eReady:     state = "READY"; break;
-      case eBlocked:   state = "BLOCK"; break;
-      case eSuspended: state = "SUSP "; break;
-      case eDeleted:   state = "DEL  "; break;
-      default:         state = "UNK  "; break;
-    }
-    BROADCAST_PRINTF("%-18.18s %s %4u %5u",
-                     taskArray[i].pcTaskName, state,
+    BROADCAST_PRINTF("%-18.18s %-5s %4u %5u",
+                     taskArray[i].pcTaskName,
+                     taskStateLabel(taskArray[i].eCurrentState),
                      (unsigned)taskArray[i].uxCurrentPriority,
                      (unsigned)taskArray[i].usStackHighWaterMark);
   }
@@ -3565,9 +3604,8 @@ const char* cmd_taskstats(const String& originalCmd) {
 
 // perftop — live performance snapshot. Prints the main-loop health (from the
 // loopHealthTick profiler in HardwareOne.cpp) plus a fresh per-task CPU%
-// sampled over ~0.75 s. Runs on the cmd_exec task, so the short sleep does NOT
-// stall the main loop. uint64 math avoids the *100 overflow that corrupts the
-// lifetime CPU% column.
+// sampled over ~0.75 s on cmd_exec. Synchronous callers wait for this sample.
+// uint64 math avoids the *100 overflow in run-time percentage calculations.
 const char* cmd_perftop(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -3589,53 +3627,27 @@ const char* cmd_perftop(const String& originalCmd) {
     loop["totalStalls"] = (unsigned long)totalStalls;
 
     JsonArray tasks = doc["tasks"].to<JsonArray>();
-    bool cpuValid = false;
-
-    // Two run-time-stat snapshots ~750 ms apart, delta by handle (handle reuse
-    // rejected), identical to the text path. Runs on cmd_exec so the short
-    // sleep never stalls the main loop.
-    UBaseType_t n = uxTaskGetNumberOfTasks() + 6;
-    TaskStatus_t* a = (TaskStatus_t*)ps_alloc(n * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "perftop.ja");
-    TaskStatus_t* b = (TaskStatus_t*)ps_alloc(n * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "perftop.jb");
-    if (a && b) {
-      uint32_t totA = 0, totB = 0;
-      UBaseType_t na = uxTaskGetSystemState(a, n, &totA);
-      vTaskDelay(pdMS_TO_TICKS(750));
-      UBaseType_t nb = uxTaskGetSystemState(b, n, &totB);
-      uint32_t totalDelta = totB - totA;
-      if (totalDelta != 0 && na != 0 && nb != 0) {
-        cpuValid = true;
-        for (UBaseType_t i = 0; i < nb; i++) {
-          const char* nm = b[i].pcTaskName;
-          if (!nm) continue;
-          uint32_t prev = 0; bool found = false;
-          for (UBaseType_t j = 0; j < na; j++) {
-            if (a[j].xHandle == b[i].xHandle) { prev = a[j].ulRunTimeCounter; found = true; break; }
-          }
-          if (!found) continue;                            // task new this interval
-          uint32_t d = b[i].ulRunTimeCounter - prev;       // wrap-safe unsigned
-          if (d > totalDelta + totalDelta / 4) continue;   // handle reuse / wrap → skip
-          uint32_t pct = (uint32_t)((uint64_t)d * 100 / totalDelta);
-          if (pct > 100) pct = 100;
-          bool isIdle = (strncmp(nm, "IDLE", 4) == 0);
-          // Keep IDLE rows (per-core headroom) + non-idle >= 1%, dropping the 0%
-          // noise to bound the payload — same filter as the text/OLED CPU page.
-          if (!isIdle && pct < 1) continue;
-          JsonObject t = tasks.add<JsonObject>();
-          t["name"]   = nm;   // TCB-owned pointer; serialized below while a/b alive
-          t["cpuPct"] = (unsigned long)pct;
-          t["idle"]   = isIdle;
-        }
+    TaskCpuSample sample("perftop.ja", "perftop.jb");
+    if (sample.available()) {
+      for (UBaseType_t i = 0; i < sample.afterCount; i++) {
+        const char* nm = sample.after[i].pcTaskName;
+        if (!nm) continue;
+        const int pct = sample.cpuPercent(i);
+        if (pct < 0) continue;
+        const bool isIdle = (strncmp(nm, "IDLE", 4) == 0);
+        // Keep IDLE rows (per-core headroom) + non-idle >= 1%.
+        if (!isIdle && pct < 1) continue;
+        JsonObject t = tasks.add<JsonObject>();
+        t["name"]   = nm;
+        t["cpuPct"] = (unsigned long)pct;
+        t["idle"]   = isIdle;
       }
     }
-    doc["cpuValid"] = cpuValid;
+    doc["cpuValid"] = sample.available();
 
-    // Serialize BEFORE freeing a/b — the task-name pointers linked into `doc`
-    // reference storage that outlives them (TCB), but a task deleted mid-sample
-    // could dangle; serializing first closes that window entirely.
+    // Retain the sample arrays through serialization. Task names are borrowed
+    // from FreeRTOS; retaining the arrays does not pin a task's TCB.
     serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
-    if (a) free(a);
-    if (b) free(b);
     return getDebugBuffer();
   }
 
@@ -3650,57 +3662,37 @@ const char* cmd_perftop(const String& originalCmd) {
   broadcastOutput("");
   broadcastOutput("[PERFTOP] live task CPU (0.75s sample):");
 
-  UBaseType_t n = uxTaskGetNumberOfTasks() + 6;  // headroom for tasks created mid-sample
-  TaskStatus_t* a = (TaskStatus_t*)ps_alloc(n * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "perftop.a");
-  TaskStatus_t* b = (TaskStatus_t*)ps_alloc(n * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "perftop.b");
-  if (!a || !b) {
-    if (a) free(a);
-    if (b) free(b);
-    broadcastOutput("  (cannot allocate task snapshot buffers)");
-    broadcastOutput("========== END PERFTOP ==========");
-    return "OK";
-  }
-
-  uint32_t totA = 0, totB = 0;
-  UBaseType_t na = uxTaskGetSystemState(a, n, &totA);
-  vTaskDelay(pdMS_TO_TICKS(750));
-  UBaseType_t nb = uxTaskGetSystemState(b, n, &totB);
-  uint32_t totalDelta = totB - totA;
-
-  if (totalDelta == 0 || na == 0 || nb == 0) {
-    broadcastOutput("  (run-time stats unavailable)");
-  } else {
-    // pass 0: IDLE0/IDLE1 (per-core headroom); pass 1: non-idle tasks >= 1%.
-    int shown = 0;
-    for (int pass = 0; pass < 2; pass++) {
-      for (UBaseType_t i = 0; i < nb; i++) {
-        const char* nm = b[i].pcTaskName;
-        if (!nm) continue;
-        bool isIdle = (strncmp(nm, "IDLE", 4) == 0);
-        if (pass == 0 && !isIdle) continue;
-        if (pass == 1 && isIdle) continue;
-        uint32_t prev = 0; bool found = false;
-        for (UBaseType_t j = 0; j < na; j++) {
-          if (a[j].xHandle == b[i].xHandle) { prev = a[j].ulRunTimeCounter; found = true; break; }
-        }
-        if (!found) continue;                            // task new this interval
-        uint32_t d = b[i].ulRunTimeCounter - prev;       // wrap-safe unsigned
-        if (d > totalDelta + totalDelta / 4) continue;   // handle reuse / wrap → skip
-        uint32_t pct = (uint32_t)((uint64_t)d * 100 / totalDelta);
-        if (pct > 100) pct = 100;
-        if (pass == 0) {
-          BROADCAST_PRINTF("  %-16.16s idle %3lu%%", nm, (unsigned long)pct);
-        } else if (pct >= 1) {
-          BROADCAST_PRINTF("  %-16.16s %3lu%%", nm, (unsigned long)pct);
-          shown++;
+  bool allocationFailed = false;
+  {
+    TaskCpuSample sample("perftop.a", "perftop.b");
+    if (!sample.allocated()) {
+      allocationFailed = true;
+    } else if (!sample.available()) {
+      broadcastOutput("  (run-time stats unavailable)");
+    } else {
+      // pass 0: IDLE0/IDLE1 (per-core headroom); pass 1: non-idle tasks >= 1%.
+      int shown = 0;
+      for (int pass = 0; pass < 2; pass++) {
+        for (UBaseType_t i = 0; i < sample.afterCount; i++) {
+          const char* nm = sample.after[i].pcTaskName;
+          if (!nm) continue;
+          bool isIdle = (strncmp(nm, "IDLE", 4) == 0);
+          if (pass == 0 && !isIdle) continue;
+          if (pass == 1 && isIdle) continue;
+          const int pct = sample.cpuPercent(i);
+          if (pct < 0) continue;
+          if (pass == 0) {
+            BROADCAST_PRINTF("  %-16.16s idle %3lu%%", nm, (unsigned long)pct);
+          } else if (pct >= 1) {
+            BROADCAST_PRINTF("  %-16.16s %3lu%%", nm, (unsigned long)pct);
+            shown++;
+          }
         }
       }
+      if (shown == 0) broadcastOutput("  (all non-idle tasks <1% this interval)");
     }
-    if (shown == 0) broadcastOutput("  (all non-idle tasks <1% this interval)");
   }
-
-  free(a);
-  free(b);
+  if (allocationFailed) broadcastOutput("  (cannot allocate task snapshot buffers)");
   broadcastOutput("========== END PERFTOP ==========");
   return "OK";
 }
@@ -3716,18 +3708,11 @@ extern QueueHandle_t gCmdExecQ;
 // External functions
 extern bool handleHelpNavigation(const String& cmd, char* out, size_t outSize);
 extern String exitToNormalBanner();
-extern String redactCmdForAudit(const String& argsInput);
 extern bool hasAdminPrivilege(const AuthContext& ctx);
 extern bool hasSuperAdminPrivilege(const AuthContext& ctx);
 extern bool isAdminUser(const String& user);
 
 // Note: resolveRegistryCommandKey() is now defined in command_system.cpp
-
-// Helper function: check if command requires admin privileges
-bool adminRequiredForLine(const String& line) {
-  // Use centralized commandRequiresAdmin()
-  return commandRequiresAdmin(line);
-}
 
 // Guest accounts may authenticate, but the command surface is caller-local
 // login/logout plus whoami only. View-only UX lives in web/OLED; this is the
@@ -4694,20 +4679,7 @@ bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg) {
   return true;
 }
 
-// Convenience wrapper: execute a command with an existing context and return output
-String execCommandUnified(const CommandContext& baseCtx, const String& line) {
-  const String safeLineForTrace = redactCmdForAudit(line);
-  DEBUG_CMD_FLOWF("[exec] enter origin=%d user=%s path=%s cmd=%s", (int)baseCtx.origin, baseCtx.auth.user.c_str(), baseCtx.auth.path.c_str(), safeLineForTrace.c_str());
-  Command c;
-  c.line = line;
-  c.ctx = baseCtx;
-  String out;
-  (void)submitAndExecuteSync(c, out);
-  DEBUG_CMD_FLOWF("[exec] exit len=%d", out.length());
-  return out;
-}
-
-// Helper: run a command as SYSTEM origin with logging (used during first-time setup and automations)
+// Run trusted firmware/boot actions as SYSTEM origin with logging.
 void runUnifiedSystemCommand(const String& argsInput) {
   AuthContext actx;
   actx.transport = SOURCE_INTERNAL;
@@ -4730,26 +4702,32 @@ void runUnifiedSystemCommand(const String& argsInput) {
   broadcastOutput(out, uc.ctx);
 }
 
+CommandContext makeWebCommandContext(httpd_req_t* req, const AuthContext& auth) {
+  CommandContext ctx;
+  ctx.origin = ORIGIN_WEB;
+  ctx.auth = auth;
+  ctx.id = (uint32_t)millis();
+  ctx.timestampMs = (uint32_t)millis();
+  ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;
+  // Cookie requests require a live session even if the caller's epoch capture
+  // fails. Leave capture to the caller: a batch binds once for all its items.
+  if (auth.sid.length()) {
+    ctx.behaviorFlags |= COMMAND_CONTEXT_REQUIRE_LIVE_SESSION;
+  }
+  ctx.httpReq = req;
+  return ctx;
+}
+
 // Helper used by web settings and other web endpoints to run a CLI-equivalent through unified path
 bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out) {
   Command uc;
   uc.line = cmd;
-  uc.ctx.origin = ORIGIN_WEB;
-  uc.ctx.auth = ctx;
-  uc.ctx.id = (uint32_t)millis();
-  uc.ctx.timestampMs = (uint32_t)millis();
-  uc.ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;
+  uc.ctx = makeWebCommandContext(req, ctx);
   uc.ctx.transportSessionEpoch = captureTransportSessionEpoch(ctx);
-  if (ctx.sid.length()) {
-    uc.ctx.behaviorFlags |= COMMAND_CONTEXT_REQUIRE_LIVE_SESSION;
-  }
   // REST/settings facades are request/response machine calls, not keystrokes.
   // They must never be consumed as an answer to an outstanding prompt or
   // leave an interactive mode behind.
   uc.ctx.behaviorFlags |= COMMAND_CONTEXT_MODE_INDEPENDENT;
-  uc.ctx.validateOnly = false;
-  uc.ctx.replyHandle = nullptr;
-  uc.ctx.httpReq = req;
   bool ok = submitAndExecuteSync(uc, out);
   const bool webSessionStillLive =
       !ctx.sid.length() ||

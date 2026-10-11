@@ -38,12 +38,12 @@ static tm* fakeLocaltime(const time_t*, tm* out) {
 }
 namespace Clock { static bool isValidEpoch(time_t value) { return value != 0; } }
 
-enum class Fault { None, Open, Short, Zero, WriteError, FlushError, SizeMismatch, Directory, Cleanup };
+enum class Fault { None, Open, Short, Zero, WriteError, FlushError, SizeMismatch, Directory, Cleanup, Promotion, PromotionCleanup, RecoveryBackup };
 struct Tier {
   Fault fault = Fault::None;
   bool statsFailed = false, mkdirFailed = false, denied = false, openDenied = false;
   uint64_t free = 8 * 1024 * 1024;
-  unsigned stats = 0, opens = 0, writes = 0, flushes = 0, closes = 0, removes = 0, mkdirs = 0;
+  unsigned stats = 0, opens = 0, writes = 0, flushes = 0, closes = 0, removes = 0, mkdirs = 0, promotions = 0;
 } tiers[2];
 struct AuthContext { String user, reason; };
 struct Access { std::string operation, path, reason; };
@@ -117,7 +117,7 @@ static bool allowed(const char* operation, const String& raw, const AuthContext&
 }
 static bool existsGuarded(const String& raw, const AuthContext& auth) {
   FsLockGuard guard("mock.exists"); String path;
-  return allowed("exists", raw, auth, path) && directories.count(path.c_str());
+  return allowed("exists", raw, auth, path) && (directories.count(path.c_str()) || files.count(path.c_str()));
 }
 static bool mkdirGuarded(const String& raw, const AuthContext& auth) {
   FsLockGuard guard("mock.mkdir"); String path;
@@ -140,7 +140,27 @@ static bool removeGuarded(const String& raw, const AuthContext& auth) {
   const bool admitted = allowed("remove", raw, auth, path);
   auto& tier = tiers[getStorageType(raw)]; ++tier.removes;
   check(activeFiles == 0, "failed output is closed before cleanup removal");
-  return admitted && tier.fault != Fault::Cleanup && files.erase(path.c_str()) != 0;
+  return admitted && tier.fault != Fault::Cleanup && tier.fault != Fault::PromotionCleanup && files.erase(path.c_str()) != 0;
+}
+// Promotion is a tested service boundary here; the VFS suite exercises its
+// actual LittleFS/SD replacement and rollback implementation separately.
+static bool replaceFileGuarded(const String& from, const String& to, const AuthContext& auth) {
+  String source, destination;
+  if (!allowed("replace-from", from, auth, source) || !allowed("replace-to", to, auth, destination)) return false;
+  auto& tier = tiers[getStorageType(source)]; ++tier.promotions;
+  check(activeFiles == 0 && heldFs, "complete temporary closes before promotion under the same lock");
+  check(files.count(source.c_str()) && files.at(source.c_str())->flushed, "promotion receives the flushed temporary");
+  if (tier.fault == Fault::Promotion || tier.fault == Fault::PromotionCleanup) return false;
+  if (tier.fault == Fault::RecoveryBackup) {
+    // A failed SD rollback may retain the old destination as a recovery backup.
+    if (files.count(destination.c_str())) {
+      files[std::string(destination.c_str()) + ".bak"] = files.at(destination.c_str());
+      files.erase(destination.c_str());
+    }
+    return false;
+  }
+  files[destination.c_str()] = files.at(source.c_str()); files.erase(source.c_str());
+  return true;
 }
 static void noteLittleFsBytesWritten(size_t bytes) {
   io(); check(activeFiles == 0 && bytes > 0, "internal write accounting follows close and counts actual positive bytes");
@@ -181,7 +201,7 @@ static void balanced(bool outer = false) {
   check(heldFs == outer && gives + unsigned(outer) == takes, "filesystem scopes preserve external ownership and balance");
 }
 static void clearObservations() {
-  for (auto& tier : tiers) tier.stats = tier.opens = tier.writes = tier.flushes = tier.closes = tier.removes = tier.mkdirs = 0;
+  for (auto& tier : tiers) tier.stats = tier.opens = tier.writes = tier.flushes = tier.closes = tier.removes = tier.mkdirs = tier.promotions = 0;
   accesses.clear(); events.clear(); retentions.clear(); concatCalls = failConcatCall = 0;
   takes = gives = 0; unlockedIo = 0; internalBytesNoted = 0; sdFailureNotes = 0;
 }
@@ -192,6 +212,7 @@ static ImageManager setup(bool internal = true, bool sd = true) {
   ImageManager out; out.init(); clearObservations(); return out;
 }
 static const char* pathFor(bool sd) { return sd ? "/sd/photos/img_000000.jpg" : "/photos/img_000000.jpg"; }
+static std::string writePathFor(bool sd) { return std::string(pathFor(sd)) + (HAS_TEMP_SAVE ? ".tmp" : ""); }
 static ImageStorageLocation locationFor(bool sd) { return sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS; }
 static void hooks(const String& result, ImageStorageLocation location) {
   if (!result.length()) check(events.empty() && retentions.empty(), "failed save must publish no saved event or retention work");
@@ -201,7 +222,7 @@ static void hooks(const String& result, ImageStorageLocation location) {
 static void cleanupIdentity(bool sd) {
   const std::string expected = sd ? "imgmgr.save_sd" : "imgmgr.save_image_lfs";
   for (const auto& access : accesses) {
-    if ((access.operation == "open" || access.operation == "remove") && VFS::getStorageType(access.path.c_str()) == (sd ? VFS::SDCARD : VFS::INTERNAL))
+    if ((access.operation == "open" || access.operation == "remove" || access.operation.find("replace-") == 0) && VFS::getStorageType(access.path.c_str()) == (sd ? VFS::SDCARD : VFS::INTERNAL))
       check(access.reason == expected, "write and failed-output cleanup use the same existing save identity");
   }
 }
@@ -213,9 +234,10 @@ static void incomplete(bool sd, Fault failure) {
   check(tier.opens == 1 && tier.closes == unsigned(failure != Fault::Open), "every acquired output file is closed once");
   const bool writable = failure != Fault::Open && failure != Fault::Directory;
   check(tier.removes == unsigned(writable), "only failed opened regular outputs receive cleanup");
-  if (writable && failure != Fault::Cleanup) check(!files.count(pathFor(sd)), "failed output is removed best-effort");
-  if (failure == Fault::Cleanup) check(files.count(pathFor(sd)) == 1, "cleanup refusal keeps failure visible despite residual partial bytes");
-  if (failure == Fault::Directory) check(files.count(pathFor(sd)) == 1 && !tier.writes, "directory output is never written or removed");
+  if (writable && failure != Fault::Cleanup) check(!files.count(writePathFor(sd)), "failed output is removed best-effort");
+  if (failure == Fault::Cleanup) check(files.count(writePathFor(sd)) == 1, "cleanup refusal keeps failure visible despite residual partial bytes");
+  if (failure == Fault::Directory) check(files.count(writePathFor(sd)) == 1 && !tier.writes, "directory output is never written or removed");
+  check(!tier.promotions, "incomplete bytes never reach promotion");
   const size_t expectedBytes = !writable || failure == Fault::Zero ? 0 :
       failure == Fault::Short || failure == Fault::Cleanup ? 2 : sizeof(jpeg);
   check(internalBytesNoted == (sd ? 0 : expectedBytes) && sdFailureNotes == unsigned(sd && writable),
@@ -355,6 +377,59 @@ static void filenameAndRetention() {
   check(owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_SD) == "/sd/photos/img_20261009_123456.jpg", "valid clock selects timestamp filename; post-save retention failure keeps saved result");
   check(events.size() == 3 && events.back().name == "img_20261009_123456.jpg" && retentions.size() == 3, "generated filename agrees with event payload"); balanced();
 }
+static void collision(bool sd, Fault failure) {
+  auto owner = setup(); fakeNow = 1; tiers[sd].fault = failure;
+  const std::string destination = std::string(sd ? "/sd/photos/" : "/photos/") + "img_20261009_123456.jpg";
+  const std::string temporary = destination + ".tmp";
+  auto original = std::make_shared<Node>(); original->tier = sd; original->bytes = {9, 8, 7};
+  files[destination] = original;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
+  const bool success = failure == Fault::None;
+  check(bool(result.length()) == success, "only a completed and promoted image reports success");
+  if (success) {
+    check(result == destination.c_str() && files.at(destination)->bytes == std::vector<uint8_t>(jpeg, jpeg + sizeof(jpeg)),
+          "same-second successful save replaces the previous image completely");
+  } else if (failure == Fault::RecoveryBackup) {
+    check(!files.count(destination) && files.at(destination + ".bak") == original && original->bytes == std::vector<uint8_t>({9, 8, 7}),
+          "caller preserves old image retained by failed SD rollback");
+  } else {
+    check(files.count(destination) && files.at(destination) == original && original->bytes == std::vector<uint8_t>({9, 8, 7}),
+          "write or promotion failure preserves previous timestamp image bytes");
+  }
+  check(files.count(temporary) == unsigned(failure == Fault::Cleanup || failure == Fault::PromotionCleanup),
+        "owned temporary removed or promoted; cleanup failure leaves identifiable temporary only");
+  if (HAS_TEMP_SAVE) {
+    for (const auto& access : accesses) {
+      if (access.operation == "open") check(access.path == temporary, "write opens only the temporary");
+      if (access.operation == "remove") check(access.path == temporary, "caller removes only its temporary, never destination or backup");
+    }
+  }
+  cleanupIdentity(sd); hooks(result, locationFor(sd)); balanced();
+}
+static void preexistingTemporary(bool sd) {
+  auto owner = setup();
+  auto original = std::make_shared<Node>(); original->tier = sd; original->bytes = {9, 8, 7};
+  auto previousTemp = std::make_shared<Node>(); previousTemp->tier = sd; previousTemp->bytes = {4, 5, 6};
+  files[pathFor(sd)] = original; files[std::string(pathFor(sd)) + ".tmp"] = previousTemp;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
+  check(!result.length() && !tiers[sd].opens && !tiers[sd].removes && !tiers[sd].promotions,
+        "unknown existing temporary refuses save before opening or cleanup");
+  check(files.at(pathFor(sd)) == original && files.at(std::string(pathFor(sd)) + ".tmp") == previousTemp &&
+        original->bytes == std::vector<uint8_t>({9, 8, 7}) && previousTemp->bytes == std::vector<uint8_t>({4, 5, 6}),
+        "prior destination and unrelated temporary stay unchanged");
+  hooks(result, locationFor(sd)); balanced();
+}
+static void bothPromotion(unsigned failedTier) {
+  auto owner = setup(); tiers[failedTier].fault = Fault::Promotion;
+  auto prior = std::make_shared<Node>(); prior->tier = failedTier; prior->bytes = {9, 8, 7}; files[pathFor(failedTier)] = prior;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_BOTH);
+  check(result == pathFor(!failedTier), "BOTH reports the tier whose promotion succeeded");
+  check(files.at(pathFor(failedTier)) == prior && prior->bytes == std::vector<uint8_t>({9, 8, 7}), "BOTH preserves previous image on failed tier");
+  check(files.at(pathFor(!failedTier))->bytes == std::vector<uint8_t>(jpeg, jpeg + sizeof(jpeg)), "other tier independently retains complete image");
+  check(tiers[0].promotions == 1 && tiers[1].promotions == 1, "both eligible tiers attempt promotion independently");
+  check(!files.count(std::string(pathFor(false)) + ".tmp") && !files.count(std::string(pathFor(true)) + ".tmp"), "BOTH leaves no owned temporary after handled promotion failure");
+  hooks(result, IMAGE_STORAGE_BOTH); balanced();
+}
 int main(int argc, char** argv) {
   const std::string selected = argc > 1 ? argv[1] : "all";
   unsigned scenarios = 0, failures = 0;
@@ -376,6 +451,17 @@ int main(int argc, char** argv) {
     run("BOTH neither tier admitted", [] { lowSpaceBoth(0, true); });
   }
   if (selected == "all" || selected == "overflow") run("capacity addition overflow", overflowLength);
+  if (selected == "all" || selected == "collision") {
+    for (bool sd : {false, true}) {
+      const std::string tier = sd ? "SD " : "internal ";
+      for (Fault failure : {Fault::None, Fault::Short, Fault::Zero, Fault::WriteError, Fault::FlushError,
+                            Fault::SizeMismatch, Fault::Cleanup, Fault::Promotion, Fault::PromotionCleanup})
+        run(tier + "timestamp collision " + std::to_string(int(failure)), [=] { collision(sd, failure); });
+      run(tier + "unknown temporary preserved", [=] { preexistingTemporary(sd); });
+      run(tier + "BOTH promotion failure", [=] { bothPromotion(sd); });
+    }
+    run("SD recovery backup belongs to promotion owner", [] { collision(true, Fault::RecoveryBackup); });
+  }
   if (selected == "all") {
     for (bool sd : {false, true}) {
       const std::string tier = sd ? "SD " : "internal ";
@@ -383,7 +469,7 @@ int main(int argc, char** argv) {
         run(tier + "write fault " + std::to_string(int(fault)), [=] { incomplete(sd, fault); });
       for (bool denial : {false, true}) run(tier + (denial ? "denied open preserves prior file" : "failed open preserves prior file"), [=] { preserveBeforeOpen(sd, denial); });
       for (unsigned failure = 0; failure < 3; ++failure) run(tier + "admission case " + std::to_string(failure), [=] { admission(sd, failure); });
-      for (unsigned call = 1; call <= 2; ++call) run(tier + "path allocation " + std::to_string(call), [=] { failedConcat(sd, call); });
+      for (unsigned call = 1; call <= (HAS_TEMP_SAVE ? 3U : 2U); ++call) run(tier + "path allocation " + std::to_string(call), [=] { failedConcat(sd, call); });
     }
     for (auto location : {IMAGE_STORAGE_LITTLEFS, IMAGE_STORAGE_SD, IMAGE_STORAGE_BOTH}) {
       run("successful tier selection " + std::to_string(location), [=] { successful(location); });

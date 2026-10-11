@@ -57,7 +57,9 @@ enum { POLL_UI_IDLE, POLL_UI_ACTIVE };
 static uint8_t sPollUi;
 static unsigned generation, graphPushes, historyRequests, unsupportedNotes;
 static bool refreshSupported = true, loggerActive;
-static uint32_t millis() { return 1234; }
+static unsigned millisCalls;
+static uint32_t nextMillis = 1234;
+static uint32_t millis() { ++millisCalls; return nextMillis++; }
 static void bumpMenuGen() { ++generation; }
 static void g2HealthClearGraphPush() { graphPushes = 0; }
 static void g2HealthArmGraphPush(uint32_t) { ++graphPushes; }
@@ -87,30 +89,36 @@ static bool g2SubmitHijackCommand(const char* command, const G2CmdCookie& cookie
 using esp_err_t = int;
 using TransportSessionEpoch = uint32_t;
 static constexpr int ESP_OK = 0, HTTPD_RESP_USE_STRLEN = -1, HTTPD_SOCK_ERR_TIMEOUT = -2;
-static constexpr int SOURCE_WEB = 1, ORIGIN_WEB = 2, MSG_ROUTE_WEB = 1, MSG_ROUTE_FILE = 2;
-static constexpr int COMMAND_CONTEXT_REQUIRE_LIVE_SESSION = 1, COMMAND_CONTEXT_MODE_INDEPENDENT = 2;
-struct AuthContext { String user = "alice", sid = "session-a", ip = "local"; int transport = SOURCE_WEB; };
-struct CommandContext {
-  int origin = 0, outputMask = 0, behaviorFlags = 0;
-  AuthContext auth;
-  uint32_t id = 0, timestampMs = 0;
-  TransportSessionEpoch transportSessionEpoch = 0;
-  bool validateOnly = false;
-  void* replyHandle = nullptr; void* httpReq = nullptr;
-};
-struct Command { String line; CommandContext ctx; };
 struct httpd_req_t {
   std::string input, output, status = "200 OK", type;
   size_t content_len = 0, received = 0;
   unsigned sends = 0;
 };
-static AuthContext webIdentity;
+static int authOpaqueToken;
+static AuthContext fixtureWebIdentity() {
+  AuthContext auth{};
+  auth.transport = SOURCE_WEB;
+  auth.user = "alice";
+  auth.sid = "session-a";
+  auth.ip = "local";
+  auth.path = "/api/fixture";
+  auth.scope = "/fixture-scope";
+  auth.opaque = &authOpaqueToken; // Deliberately distinct from the request pointer.
+  return auth;
+}
+static AuthContext webIdentity = fixtureWebIdentity();
+static httpd_req_t* expectedRequest;
+static TransportSessionEpoch capturedEpoch = 42;
+static unsigned captureCalls;
 static bool authenticated = true, guestAllowed = true, guestUser, adminUser;
 static bool liveSession = true, revokeOnExecute, commandOk = true;
 static String commandOutput = "SUCCESS: Health logging ON";
 static std::vector<Command> webRequests;
 static std::vector<std::string> broadcasts;
-static AuthContext makeWebAuthCtx(httpd_req_t*) { return webIdentity; }
+static AuthContext makeWebAuthCtx(httpd_req_t* req) {
+  expectedRequest = req;
+  return webIdentity;
+}
 static bool tgRequireAuth(const AuthContext&) { return authenticated; }
 static bool webGuestAccessAllowed(httpd_req_t*, const AuthContext&) { return guestAllowed; }
 static bool isGuestUser(const String&) { return guestUser; }
@@ -124,12 +132,29 @@ static int httpd_req_recv(httpd_req_t* r, char* out, size_t length) {
   return static_cast<int>(count);
 }
 static TransportSessionEpoch captureTransportSessionEpoch(const AuthContext& ctx) {
-  return ctx.sid.length() ? 42 : 0;
+  ++captureCalls;
+  CHECK(ctx.user == webIdentity.user && ctx.sid == webIdentity.sid && ctx.opaque == webIdentity.opaque);
+  return ctx.sid.length() ? capturedEpoch : 0;
 }
-static bool transportSessionEpochIsLive(int source, TransportSessionEpoch epoch) {
-  CHECK(source == SOURCE_WEB && epoch == 42); return liveSession;
+static bool transportSessionEpochIsLive(CommandSource source, TransportSessionEpoch epoch) {
+  CHECK(source == SOURCE_WEB && epoch == capturedEpoch);
+  return epoch != 0 && liveSession;
+}
+static void checkWebExecutionContext(const CommandContext& ctx) {
+  CHECK(ctx.origin == ORIGIN_WEB && ctx.auth.transport == webIdentity.transport);
+  CHECK(ctx.auth.user == webIdentity.user && ctx.auth.sid == webIdentity.sid && ctx.auth.ip == webIdentity.ip);
+  CHECK(ctx.auth.path == webIdentity.path && ctx.auth.scope == webIdentity.scope && ctx.auth.opaque == webIdentity.opaque);
+  CHECK(ctx.httpReq == expectedRequest && static_cast<void*>(ctx.httpReq) != ctx.auth.opaque);
+  CHECK(ctx.outputMask == (MSG_ROUTE_WEB | MSG_ROUTE_FILE));
+  CHECK(ctx.behaviorFlags == (COMMAND_CONTEXT_MODE_INDEPENDENT |
+        (webIdentity.sid.length() ? COMMAND_CONTEXT_REQUIRE_LIVE_SESSION : COMMAND_CONTEXT_DEFAULT)));
+  CHECK(ctx.timestampMs == ctx.id + 1 && nextMillis == ctx.timestampMs + 1);
+  CHECK(!ctx.validateOnly && !ctx.captureOutput && ctx.replyHandle == nullptr);
+  CHECK(ctx.settingsBatchId == 0 && ctx.authoritySessionEpoch == 0 && ctx.authorityId == 0);
+  CHECK(std::all_of(std::begin(ctx.automationName), std::end(ctx.automationName), [](char c) { return c == 0; }));
 }
 static bool submitAndExecuteSync(const Command& command, String& out) {
+  checkWebExecutionContext(command.ctx);
   webRequests.push_back(command); out = commandOutput;
   if (revokeOnExecute) liveSession = false;
   return commandOk;
@@ -171,7 +196,14 @@ enum { INPUT_BUTTON_A = 1, INPUT_BUTTON_X = 2, INPUT_BUTTON_B = 4 };
 
 static httpd_req_t request(const char* body) {
   httpd_req_t r; r.input = body; r.content_len = r.input.size();
-  CHECK(handleR1HealthAction(&r) == ESP_OK); return r;
+  const unsigned beforeMillis = millisCalls, beforeCapture = captureCalls;
+  const size_t beforeCommands = webRequests.size();
+  CHECK(handleR1HealthAction(&r) == ESP_OK);
+  if (webRequests.size() > beforeCommands) {
+    CHECK(webRequests.size() == beforeCommands + 1);
+    CHECK(millisCalls == beforeMillis + 2 && captureCalls == beforeCapture + 1);
+  }
+  return r;
 }
 
 int main() {
@@ -236,6 +268,19 @@ int main() {
   CHECK(r.status == "409 Conflict" && r.output == "Error: web session changed before command result delivery.");
   CHECK(broadcasts.size() == broadcastCount);
   revokeOnExecute = false; liveSession = true;
+  capturedEpoch = 0; commandOk = false;
+  r = request("action=logging-toggle");
+  CHECK(r.status == "409 Conflict" && r.output == "Error: web session changed before command result delivery.");
+  CHECK(webRequests.back().ctx.transportSessionEpoch == 0);
+  CHECK(webRequests.back().ctx.behaviorFlags == (COMMAND_CONTEXT_REQUIRE_LIVE_SESSION | COMMAND_CONTEXT_MODE_INDEPENDENT));
+  CHECK(broadcasts.size() == broadcastCount);
+  webIdentity.sid = ""; capturedEpoch = 42; commandOk = true;
+  r = request("action=logging-toggle");
+  CHECK(r.status == "200 OK" && r.output == "SUCCESS: Health logging OFF");
+  CHECK(webRequests.back().ctx.transportSessionEpoch == 0);
+  CHECK(webRequests.back().ctx.behaviorFlags == COMMAND_CONTEXT_MODE_INDEPENDENT);
+  CHECK(broadcasts.size() == broadcastCount + 1);
+  webIdentity.sid = "session-a";
   const size_t loggingRequests = webRequests.size();
   CHECK(request("action=poll").status == "202 Accepted");
   CHECK(request("action=history-force").status == "403 Forbidden");

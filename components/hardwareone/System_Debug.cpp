@@ -591,24 +591,7 @@ const char* cmd_loglevel(const String& argsInput) {
   if (newLevel > LOG_LEVEL_DEBUG) newLevel = LOG_LEVEL_DEBUG;
 
   setDebugSetting(gSettings.logLevel, newLevel);
-  DEBUG_MANAGER.setLogLevel((uint8_t)newLevel);
-
-  // Also update ESP-IDF framework component log levels
-  {
-    esp_log_level_t espLevel;
-    switch (newLevel) {
-      case LOG_LEVEL_ERROR: espLevel = ESP_LOG_ERROR; break;
-      case LOG_LEVEL_WARN:  espLevel = ESP_LOG_WARN;  break;
-      case LOG_LEVEL_INFO:  espLevel = ESP_LOG_INFO;  break;
-      default:              espLevel = ESP_LOG_DEBUG; break;
-    }
-    // TLS/HTTPS tags (esp-tls-mbedtls, esp_https_server, httpd, httpd_txrx)
-    // are owned by the DEBUG_HTTPS flag (applyHttpsLogLevels), not the global
-    // log level — so `loglevel debug` can't re-enable the disconnect flood.
-    esp_log_level_set("wifi", espLevel);
-    esp_log_level_set("wifi_init", espLevel);
-    esp_log_level_set("phy_init", espLevel);
-  }
+  applyLogLevel((uint8_t)newLevel);
 
   const char* levelName = "unknown";
   switch (gSettings.logLevel) {
@@ -1254,6 +1237,22 @@ const char* cmd_outble(const String& argsInput) {
   #endif
 }
 
+void applyLogLevel(uint8_t level) {
+  DEBUG_MANAGER.setLogLevel(level);
+
+  // App: 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG.
+  esp_log_level_t espLevel;
+  switch (level) {
+    case LOG_LEVEL_ERROR: espLevel = ESP_LOG_ERROR; break;
+    case LOG_LEVEL_WARN:  espLevel = ESP_LOG_WARN;  break;
+    case LOG_LEVEL_INFO:  espLevel = ESP_LOG_INFO;  break;
+    default:             espLevel = ESP_LOG_DEBUG; break;
+  }
+  esp_log_level_set("wifi", espLevel);
+  esp_log_level_set("wifi_init", espLevel);
+  esp_log_level_set("phy_init", espLevel);
+}
+
 // Set the ESP-IDF log level for the TLS/HTTPS framework tags. These emit a
 // flood of benign noise when a browser hits a self-signed cert (handshake
 // rejects, connection resets, per-chunk write errors) — much of it at ERROR
@@ -1348,11 +1347,9 @@ const char* cmd_debugflags(const String& argsInput) {
   }
 
   const DebugFlagMask flags = getDebugFlags();
-  BROADCAST_PRINTF("Debug flags: 0x%016llX:%016llX:%016llX:%016llX",
-                   (unsigned long long)(uint64_t)(flags >> 192),
-                   (unsigned long long)(uint64_t)(flags >> 128),
-                   (unsigned long long)(uint64_t)(flags >> 64),
-                   (unsigned long long)(uint64_t)flags);
+  char flagsText[80];
+  formatSystemLogFlags(flags, flagsText, sizeof(flagsText));
+  BROADCAST_PRINTF("Debug flags: %s", flagsText);
 
   // Resolve each bit on its own so a set sub-flag reports its own name rather
   // than the parent's. Bits with no entry in getDebugCategoryName are counted
@@ -1759,13 +1756,18 @@ bool parseSystemLogFlags(const String& flagsStr, DebugFlagMask& out) {
   return true;
 }
 
-String formatSystemLogFlags(DebugFlagMask mask) {
-  char buf[80];
-  snprintf(buf, sizeof(buf), "0x%016llX:%016llX:%016llX:%016llX",
+void formatSystemLogFlags(DebugFlagMask mask, char* out, size_t outSize) {
+  if (!out || outSize == 0) return;
+  snprintf(out, outSize, "0x%016llX:%016llX:%016llX:%016llX",
            (unsigned long long)(uint64_t)(mask >> 192),
            (unsigned long long)(uint64_t)(mask >> 128),
            (unsigned long long)(uint64_t)(mask >> 64),
            (unsigned long long)(uint64_t)mask);
+}
+
+String formatSystemLogFlags(DebugFlagMask mask) {
+  char buf[80];
+  formatSystemLogFlags(mask, buf, sizeof(buf));
   return String(buf);
 }
 
@@ -1775,6 +1777,32 @@ bool systemLogApplyPersistedFlags() {
   if (!parseSystemLogFlags(gSettings.systemLogFlags, restored)) return false;
   gDebugFlags = restored;
   return true;
+}
+
+void formatSystemLogStatus(char* out, size_t outSize) {
+  if (!out || outSize == 0) return;
+  if (gSystemLogRunning && (gOutputFlags & MSG_ROUTE_FILE)) {
+    unsigned long ageSeconds = (millis() - gSystemLogLastWrite) / 1000;
+    snprintf(out, outSize,
+             "System logging ACTIVE\n"
+             "  File: %s\n"
+             "  Last write: %lus ago\n"
+             "  Output flags: 0x%02X\n"
+             "  Auto-start: %s",
+             gSystemLogPath.c_str(), ageSeconds, (unsigned)gOutputFlags,
+             gSettings.systemLogAutoStart ? "ON" : "OFF");
+  } else if (gSystemLogRunning) {
+    snprintf(out, outSize,
+             "System logging CONFIGURED but MSG_ROUTE_FILE flag not set\n"
+             "  File: %s\n"
+             "  Use 'log start' to enable\n"
+             "  Auto-start: %s",
+             gSystemLogPath.c_str(),
+             gSettings.systemLogAutoStart ? "ON" : "OFF");
+  } else {
+    snprintf(out, outSize, "System logging is INACTIVE\n  Auto-start: %s",
+             gSettings.systemLogAutoStart ? "ON" : "OFF");
+  }
 }
 
 const char* cmd_log(const String& argsInput) {
@@ -1805,28 +1833,7 @@ const char* cmd_log(const String& argsInput) {
   
   // Handle 'status' subcommand
   if (subCmd == "status") {
-    if (gSystemLogRunning && (gOutputFlags & MSG_ROUTE_FILE)) {
-      unsigned long ageSeconds = (millis() - gSystemLogLastWrite) / 1000;
-      snprintf(gDebugBuffer, 1024,
-               "System logging ACTIVE\n"
-               "  File: %s\n"
-               "  Last write: %lus ago\n"
-               "  Output flags: 0x%02X\n"
-               "  Auto-start: %s",
-               gSystemLogPath.c_str(), ageSeconds, (unsigned)gOutputFlags,
-               gSettings.systemLogAutoStart ? "ON" : "OFF");
-    } else if (gSystemLogRunning) {
-      snprintf(gDebugBuffer, 1024,
-               "System logging CONFIGURED but MSG_ROUTE_FILE flag not set\n"
-               "  File: %s\n"
-               "  Use 'log start' to enable\n"
-               "  Auto-start: %s",
-               gSystemLogPath.c_str(),
-               gSettings.systemLogAutoStart ? "ON" : "OFF");
-    } else {
-      snprintf(gDebugBuffer, 1024, "System logging is INACTIVE\n  Auto-start: %s",
-               gSettings.systemLogAutoStart ? "ON" : "OFF");
-    }
+    formatSystemLogStatus(gDebugBuffer, 1024);
     return gDebugBuffer;
   }
   
@@ -1918,19 +1925,13 @@ const char* cmd_log(const String& argsInput) {
     if (flagsSet) {
       gDebugFlags = debugFlags;
       setSetting(gSettings.systemLogFlags, formatSystemLogFlags(debugFlags));
+      char flagsText[80];
+      formatSystemLogFlags(gDebugFlags, flagsText, sizeof(flagsText));
       char flagsMsg[160];
-      snprintf(flagsMsg, sizeof(flagsMsg),
-               "Debug flags set to: 0x%016llX:%016llX:%016llX:%016llX",
-               (unsigned long long)(uint64_t)(gDebugFlags >> 192),
-               (unsigned long long)(uint64_t)(gDebugFlags >> 128),
-               (unsigned long long)(uint64_t)(gDebugFlags >> 64),
-               (unsigned long long)(uint64_t)gDebugFlags);
+      snprintf(flagsMsg, sizeof(flagsMsg), "Debug flags set to: %s", flagsText);
       broadcastOutput(flagsMsg);
-    } else if (gSettings.systemLogFlags.length() > 0) {
-      DebugFlagMask restored = (DebugFlagMask)0;
-      if (parseSystemLogFlags(gSettings.systemLogFlags, restored)) {
-        gDebugFlags = restored;
-      }
+    } else {
+      systemLogApplyPersistedFlags();
     }
     
     // Apply category tags setting (arg overrides, otherwise use persisted setting)
@@ -2332,7 +2333,6 @@ bool DebugManager::getLogCategoryTags() const { return gSystemLogCategoryTags; }
 
 // External dependencies
 extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
-extern void getTimestampPrefixMsCached(char* buf, size_t bufSize);
 
 // Time sync marker flag
 bool gTimeSyncedMarkerWritten = false;

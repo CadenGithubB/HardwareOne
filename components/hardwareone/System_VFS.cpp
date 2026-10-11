@@ -1142,6 +1142,41 @@ bool renameGuarded(const String& pathFrom, const String& pathTo, const AuthConte
   return rename(normFrom, normTo);
 }
 
+bool replaceFileGuarded(const String& temporary, const String& destination,
+                        const AuthContext& ctx) {
+  String from, to;
+  if (!guardedNormalize(temporary, from, "replace(from)", ctx) ||
+      !guardedNormalize(destination, to, "replace(to)", ctx) || from == to) return false;
+  const StorageType storage = getStorageType(from);
+  if (storage != getStorageType(to)) return false;
+
+  FsLockGuard guard("VFS.replace");
+  if (storage != SDCARD || !existsGuarded(to, ctx)) {
+    return renameGuarded(from, to, ctx);
+  }
+
+  File previous = openGuarded(to, "r", ctx);
+  if (!previous) return false;
+  const bool destinationIsDirectory = previous.isDirectory();
+  previous.close();
+  if (destinationIsDirectory) return false;
+
+  // FAT cannot rename over an existing file. Keep its bytes under a sibling
+  // name until promotion completes, and never consume an unresolved backup.
+  String backup = to;
+  if (backup.length() != to.length() || !backup.concat(".bak") ||
+      backup == from || existsGuarded(backup, ctx)) return false;
+  if (!renameGuarded(to, backup, ctx)) return false;
+  if (!renameGuarded(from, to, ctx)) {
+    // If restoration also fails, retain the old file at .bak. The caller may
+    // remove its temporary, but must not delete this remaining recovery copy.
+    renameGuarded(backup, to, ctx);
+    return false;
+  }
+  removeGuarded(backup, ctx);  // Best effort; the complete destination is live.
+  return true;
+}
+
 bool mkdirGuarded(const String& path, const AuthContext& ctx) {
   String norm;
   if (!guardedNormalize(path, norm, "mkdir", ctx)) return false;

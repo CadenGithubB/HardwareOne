@@ -7,6 +7,7 @@
 // Forward declarations
 class String;
 class PsramBuffer;
+namespace fs { class File; }
 
 // ============================================================================
 // Filesystem State
@@ -205,6 +206,21 @@ String quotePath(const String& path);
 // File I/O Helpers
 // ============================================================================
 
+// Write a prepared row followed by LF to a borrowed file. Both writes are
+// attempted; written reports their accepted bytes even on failure. True means
+// both counts were complete with no reported Print error, not durable storage.
+// Callers own locking, file lifetime, formatting, flushing and failure policy.
+bool writeLineChecked(fs::File& file, const uint8_t* data, size_t length,
+                      size_t& written);
+
+// Copy from the input's current position into an already-open output. Callers
+// own permissions, locking and both file lifetimes. Accumulate only fully
+// written chunks in totalBytes; update lastByte only after a complete write
+// (leave it unchanged for empty input). A nonpositive read ends the copy,
+// preserving the capture stitchers' existing behavior; false means short write.
+bool copyFileContents(fs::File& input, fs::File& output,
+                      unsigned long& totalBytes, uint8_t& lastByte);
+
 /**
  * Read up to maxBytes from a file into a String
  * @param path File path
@@ -215,18 +231,22 @@ String quotePath(const String& path);
 bool readTextLimited(const char* path, String& out, size_t maxBytes);
 
 /**
- * Append a line to a file, enforcing a maximum file size
+ * Append a CRLF-terminated line and trim old lines when the size exceeds cap.
+ * Checks accepted append bytes and the complete temporary rotation copy.
+ * LittleFS replacement preserves the original on failure; SD retains its
+ * remove/rename recovery window. A failed append may leave a partial line.
+ * File's void flush/close API cannot establish durable-storage success.
  * @param path File path
  * @param line Line to append
  * @param capBytes Maximum file size in bytes
- * @return true on success
+ * @return false on a detected append or rotation failure
  */
 bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 
 /**
- * Recover a log file from a partial rotation. `appendLineWithCap` rotates by
- * writing a sibling `.tmp` file and renaming over the original, which leaves
- * a small crash-unsafe window. If the reboot hits that window, this call
+ * Recover a log file from a partial rotation. SD rotation (and older LittleFS
+ * firmware) removes the original before renaming a sibling `.tmp` into place,
+ * leaving a small crash-unsafe window. If the reboot hits that window, this call
  * promotes the `.tmp` back to the canonical path (or removes a stale `.tmp`
  * if the original survived). Safe to call even when no orphan exists —
  * it short-circuits on the first `exists()` check.

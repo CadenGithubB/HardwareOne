@@ -17,11 +17,7 @@
 #include "System_VFS.h"       // boot cleanup of orphaned .part staging files
 #include "System_Mutex.h"     // FsLockGuard — the .part writes hold the FS lock
 #include "System_CommandTypes.h"  // ExecReq::DeferredFn — drain/abort jobs on cmd_exec
-
-// Hand a streaming flash write/teardown to cmd_exec_task so it never runs on
-// espnow_task (the RX drain). Defined in System_Utils.cpp; the established pattern
-// for "FS work that must not stall RX" (same as SESSION_OPEN/CONFIRM/REKEY).
-extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
+#include "System_Utils.h"  // submitDeferredToCmdExec
 
 namespace {
 

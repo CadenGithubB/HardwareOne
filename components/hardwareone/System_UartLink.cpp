@@ -410,7 +410,6 @@ bool uartLinkSessionRestrictCm5PresenceIfUser(
 // Defined in HardwareOne.cpp (web-mirror command feed). Declared there with
 // defaulted trailing args; this TU passes all four explicitly.
 extern void appendCommandToFeed(const char* source, const String& cmd, const String& user, const String& ip);
-extern bool submitAndExecuteSync(const Command& cmd, String& out);
 
 static std::atomic<bool> sStarted{false};    // publishes port/mutex lifecycle
 static String sUartCLI;                     // line accumulator

@@ -264,10 +264,6 @@ inline AuthContext makeWebAuthCtx(httpd_req_t* req) {
 // and all authenticated BLE connections. Web entries carry their richer
 // cookie/IP/timestamp metadata; native transport entries carry user+transport.
 void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
-// Defined in System_Utils.cpp (moved out of the web TU so the CLI `status json`
-// can build it without ENABLE_HTTP_SERVER). includeDeviceList=false yields the
-// compact form (drops the unbounded I2C deviceList) for CLI/MQTT.
-void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList = true);
 
 // Logout reason management
 void storeLogoutReason(const String& ip, const String& reason);

@@ -15,17 +15,25 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, require, web_command_types
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
 
-def generated() -> str:
+def generated(baseline: Path | None = None) -> str:
     web = (COMPONENT / "WebPage_Maps.cpp").read_text()
     oled = (COMPONENT / "OLED_Mode_Map.cpp").read_text()
     utils = (COMPONENT / "WebServer_Utils.h").read_text()
-    command = (COMPONENT / "System_Utils.cpp").read_text()
+    command_path = COMPONENT / "System_Utils.cpp"
+    if baseline is not None:
+        command_path = baseline / "System_Utils.before.cpp" if baseline.is_dir() else baseline
+    command = command_path.read_text()
+    has_helper = "CommandContext makeWebCommandContext(" in command
+    web_executor = []
+    if has_helper:
+        web_executor.append(extract_block(command, "CommandContext makeWebCommandContext("))
+    web_executor.append(extract_block(command, "bool executeUnifiedWebCommand("))
     maps = (COMPONENT / "System_Maps.h").read_text()
     auth_start = utils.index("#define WEB_AUTH_OR_RETURN(req, ctx)")
     auth_end = utils.index("\n\n", auth_start)
@@ -39,13 +47,16 @@ def generated() -> str:
     branch = action[action.index("    case MENU_CAT_TRACKS:"):action.index("    case MENU_CAT_INFO:")]
     action = guard + "\n  switch (submenuType) {\n" + branch + "  }\n}"
     production = [utils[auth_start:auth_end],
-                  extract_block(command, "bool executeUnifiedWebCommand("),
+                  *web_executor,
                   extract_block(web, "static esp_err_t handleGPSLiveTrackAction("),
                   handler, action, extract_block(oled, "static void drawTrackStatus(")]
     harness = (HERE / "map_live_ui_harness.cpp").read_text()
     require(harness.count("// INSERT_PRODUCTION") == 1, "missing production marker")
     require(harness.count("// INSERT_TRACK_TYPES") == 1, "missing track types marker")
     types = maps[maps.index("#define MAX_TRACK_POINTS"):maps.index("// GPS Track management")]
+    require(harness.count("// INSERT_COMMAND_TYPES") == 1, "missing command types marker")
+    harness = harness.replace("// INSERT_COMMAND_TYPES", web_command_types())
+    harness = f"#define HAVE_WEB_CONTEXT_HELPER {int(has_helper)}\n" + harness
     return (harness.replace("// INSERT_TRACK_TYPES", types)
             .replace("// INSERT_PRODUCTION", "\n\n".join(production)))
 
@@ -54,16 +65,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
+    parser.add_argument("--baseline", type=Path,
+                        help="Old System_Utils.cpp file, or evidence directory containing System_Utils.before.cpp")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
              "-Wno-unused-parameter", "-I", str(HERE / "web_batch_stubs"),
              "-I", str(COMPONENT.parent / "hardwareone_libs/ArduinoJson/src")]
     if args.sanitize:
-        flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
+        flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-g"]
     with tempfile.TemporaryDirectory(prefix="hw1-map-live-ui-") as directory:
         unit, binary = Path(directory) / "test.cpp", Path(directory) / "test"
-        unit.write_text(generated())
+        unit.write_text(generated(args.baseline))
         for gps in (0, 1):
             subprocess.run([args.cxx, *flags, f"-DENABLE_GPS_SENSOR={gps}", str(unit),
                             "-o", str(binary)], check=True, timeout=120)

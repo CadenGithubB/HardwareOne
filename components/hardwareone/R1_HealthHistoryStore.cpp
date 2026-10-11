@@ -14,6 +14,7 @@
 #include <freertos/semphr.h>
 
 #include "System_CaptureCrypto.h"
+#include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_VFS.h"
 
@@ -58,10 +59,15 @@ class StoreLock {
 
 class StoreIoLock {
  public:
-  StoreIoLock() : locked_(xSemaphoreTake(sStoreIoMutex, portMAX_DELAY) == pdTRUE) {}
+  // Keep each read/recovery/commit sequence indivisible to other filesystem
+  // users. Acquire FS before the private scratch-buffer mutex; nested VFS
+  // calls reuse the FS guard, and destruction releases the private lock first.
+  StoreIoLock() : fsGuard_("r1.history"),
+                  locked_(xSemaphoreTake(sStoreIoMutex, portMAX_DELAY) == pdTRUE) {}
   ~StoreIoLock() { if (locked_) xSemaphoreGive(sStoreIoMutex); }
   bool locked() const { return locked_; }
  private:
+  FsLockGuard fsGuard_;
   bool locked_;
 };
 
@@ -415,6 +421,9 @@ R1HealthHistoryStoreError commitDay(const R1HealthHistoryDay& day,
     ok = lineWriteData(file, sLineBuf, encrypted, bytesWritten);
   }
   file.flush();
+  // File cannot report flush/close failures. Require all exposed completion
+  // signals before the checked temporary may replace the previous generation.
+  ok = ok && file.size() == bytesWritten && !file.getWriteError();
   file.close();
   if (!ok) {
     VFS::removeGuarded(temp, auth);
@@ -422,8 +431,8 @@ R1HealthHistoryStoreError commitDay(const R1HealthHistoryDay& day,
         ? R1_HISTORY_STORE_TOO_LARGE : R1_HISTORY_STORE_WRITE_FAILED;
   }
 
-  // Power-loss-safe publish for filesystems with differing overwrite rules:
-  // durable temp -> old primary to backup -> temp to primary -> cleanup backup.
+  // Keep the existing backup-based publish sequence for interrupted swaps:
+  // checked temp -> old primary to backup -> temp to primary -> cleanup backup.
   const bool hadPrimary = VFS::existsGuarded(primary, auth);
   if (hadPrimary) {
     VFS::removeGuarded(backup, auth);

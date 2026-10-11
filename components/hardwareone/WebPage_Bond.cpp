@@ -1248,8 +1248,6 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
 // API: Bond Stream Control
 // =============================================================================
 
-extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
-
 static esp_err_t handleBondStream(httpd_req_t* req) {
   WEB_AUTH_JSON_OR_RETURN(req, ctx);
 
@@ -1340,9 +1338,6 @@ static esp_err_t handleBondStream(httpd_req_t* req) {
 // =============================================================================
 // API: Bond Command Execution
 // =============================================================================
-
-// Forward declaration for unified command execution
-extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
 
 static esp_err_t handleBondExec(httpd_req_t* req) {
   WEB_AUTH_JSON_OR_RETURN(req, ctx);

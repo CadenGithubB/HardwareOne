@@ -8,6 +8,54 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.97.3] - 2026-10-11
+
+Cleanup checkpoint for shared runtime helpers and checked persistence.
+
+### Changed
+- Put shared utility declarations with their implementation owner and remove
+  duplicate prototypes and unused command wrappers.
+- Share task-report calculations, serial/display session snapshot mechanics,
+  command-origin formatting and authenticated web command-context preparation.
+- Keep runtime log-level application and system-log status with their owners.
+- Reuse checked JSON snapshot writing across main, debug, version-stamp and
+  per-user settings while retaining each writer's document and locking policy.
+- Share checked log-row and capture-copy operations. Use guarded file
+  replacement for completed GPS exports, capture merges/exports and photos.
+- Route the existing bounded boot temporary-file sweep through shared VFS
+  directory traversal and filesystem locking.
+
+### Fixed
+- Preserve previous settings files when replacement fails; reject incomplete
+  temporary output and retain version-stamp retry intent. Serialize version
+  stamping with other settings writers to prevent stale overwrite.
+- Detect partial log appends, rotation copies, GPS exports and capture output
+  before reporting success. Keep successful-write accounting consistent with
+  accepted output and stage headers for new or empty sensor/battery logs before
+  appending rows.
+- Check R1 history output, complete photo writes and final WAV header/size
+  consistency before publishing completion. Retain recoverable backups in the
+  shared SD capture-replacement path when promotion or rollback fails.
+- Preserve header staging files during boot cleanup, handle backend directory
+  names consistently and report failed removals accurately.
+
+### Verification scope
+- All 155 registered firmware host suites passed with ASan/UBSan and Node
+  checks enabled; all 52 OTA tests passed, including release-version and
+  deployment contracts.
+- Release rebuilds for XIAO default, QT Py Maps and P4 board defaults embed
+  `0.99.97.3` and fit their existing application partitions. Saved choices
+  passed compiler verification. No firmware was flashed for this checkpoint.
+- Dated milestone records describe XIAO hardware checks of reporting, sessions,
+  HTTP commands, logging, captures, boot cleanup and per-user settings. Host
+  failure injection checks observable write results; it does not establish
+  physical power-loss durability. Arduino File still has void flush/close APIs.
+- Physical SD qualification and memory slimming remain deferred. Capped-log
+  SD rotation retains its existing remove/rename recovery protocol. No STT
+  engine or Conversate behavior changed, and no files or host suites moved.
+- The release-scope privacy review found no added personal information or
+  live credentials. Unrelated enclosure work is outside this checkpoint.
+
 ## [0.99.97.2] - 2026-10-10
 
 Cleanup checkpoint for shared runtime settings, setup and service ownership.

@@ -11,6 +11,7 @@
 #include "WebPage_R1_Health.h"
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
+#include "System_Utils.h"  // executeUnifiedWebCommand
 
 // ===========================================================================
 // /api/health/status — identical schema to `healthstatus json`

@@ -65,12 +65,6 @@ inline esp_err_t sendJsonResponse(httpd_req_t* req, const char* body, ssize_t le
 struct AuthContext;
 bool webGuestAccessAllowed(httpd_req_t* req, const AuthContext& ctx);
 
-// Execute a request/response command as this authenticated web session. The
-// existing command executor owns authorization, session checks and execution;
-// result text is copied into out before returning to the HTTP handler.
-bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx,
-                              const String& cmd, String& out);
-
 // Authenticate the request and return ESP_OK (unauthenticated) if auth fails.
 // Usage:  WEB_AUTH_OR_RETURN(req, ctx);
 //         ... use ctx.user, ctx.ip etc below ...

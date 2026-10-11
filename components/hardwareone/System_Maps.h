@@ -737,7 +737,8 @@ public:
   // no owner lock is retained while callers render, send, or save the copy.
   static bool readSnapshot(GPSTrackSnapshot& out, int maxPoints = MAX_TRACK_POINTS);
 
-  // Save one snapshot; on success return its filepath and optional point count.
+  // Save one snapshot through a checked temporary file, then replace the destination.
+  // Success publishes its filepath/count; failure leaves outPath unchanged and count zero.
   static bool saveTrack(char* outPath, size_t outPathSize, int* savedPointCount = nullptr);
 
   // Delete a track file

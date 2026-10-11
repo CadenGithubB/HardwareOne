@@ -1355,6 +1355,12 @@ static void recordingTask(void* param) {
           !writeWavHeader(recordingFile, dataSize, gRecSampleRate)) {
         micRecordingMarkFailed("WAV header finalization failed");
       }
+      recordingFile.flush();
+      if (!gRecCaptureFailed &&
+          (recordingFile.getWriteError() ||
+           recordingFile.size() != sizeof(WavHeader) + static_cast<size_t>(dataSize))) {
+        micRecordingMarkFailed("WAV file incomplete");
+      }
       recordingFile.close();
     }
     fileClosed = true;

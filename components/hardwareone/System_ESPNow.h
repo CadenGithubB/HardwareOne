@@ -57,9 +57,8 @@ esp_err_t espnowSelfApMac(uint8_t out[6]);
 extern const CommandEntry espNowCommands[];
 extern const size_t espNowCommandsCount;
 
-// Forward declarations from main system (broadcastOutput provided by System_Debug.h)
+// Settings persistence (broadcastOutput is provided by System_Debug.h).
 bool writeSettingsJson();
-String base64Encode(const uint8_t* data, size_t len);
 
 // Message types
 #define MSG_TYPE_HB "HB"

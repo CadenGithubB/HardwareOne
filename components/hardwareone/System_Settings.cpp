@@ -15,6 +15,7 @@
   #include "System_ESPNow.h" // EspNowMode enum
 #endif
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC macro
+#include "System_Mutex.h"    // FsLockGuard — hold temp writes through promotion
 #include "System_SensorStubs.h" // Network stubs when disabled
 #include "System_Utils.h"    // RETURN_VALID_IF_VALIDATE_CSTR macro
 #include "System_RadioCompanion.h"  // companionSettingsModule (P4X-EYE)
@@ -34,7 +35,6 @@
 #include "System_VFS.h"      // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include <esp_system.h>
 #include <esp_app_desc.h>
-#include <esp_log.h>
 #include "mbedtls/aes.h"
 #include "mbedtls/platform_util.h"
 #include "mbedtls/sha256.h"
@@ -1270,30 +1270,8 @@ void applySettings() {
     int lvl = gSettings.logLevel;
     if (lvl < LOG_LEVEL_ERROR) lvl = LOG_LEVEL_ERROR;
     if (lvl > LOG_LEVEL_DEBUG) lvl = LOG_LEVEL_DEBUG;
-    DEBUG_MANAGER.setLogLevel((uint8_t)lvl);
     gSettings.logLevel = lvl;
-
-    // Map app log level to ESP-IDF log level for noisy framework components
-    // App: 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG
-    // ESP: ESP_LOG_ERROR, ESP_LOG_WARN, ESP_LOG_INFO, ESP_LOG_DEBUG
-    esp_log_level_t espLevel;
-    switch (lvl) {
-      case LOG_LEVEL_ERROR: espLevel = ESP_LOG_ERROR; break;
-      case LOG_LEVEL_WARN:  espLevel = ESP_LOG_WARN;  break;
-      case LOG_LEVEL_INFO:  espLevel = ESP_LOG_INFO;  break;
-      default:              espLevel = ESP_LOG_DEBUG; break;
-    }
-
-    // Suppress noisy ESP-IDF components based on log level.
-    // NOTE: the TLS/HTTPS tags (esp-tls-mbedtls, esp_https_server, httpd,
-    // httpd_txrx) are intentionally NOT set here — they are owned by the
-    // DEBUG_HTTPS flag via applyHttpsLogLevels() below, so a high global
-    // loglevel can't re-spam the benign browser-disconnect flood.
-    // WiFi driver state changes and init parameters
-    esp_log_level_set("wifi", espLevel);
-    esp_log_level_set("wifi_init", espLevel);
-    // PHY calibration warnings
-    esp_log_level_set("phy_init", espLevel);
+    applyLogLevel((uint8_t)lvl);
   }
 
   // TLS/HTTPS framework log verbosity is gated by DEBUG_HTTPS, independent of
@@ -1424,6 +1402,80 @@ bool buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFil
 // Write Settings to JSON File
 // ============================================================================
 
+struct JsonSnapshotWriteResult {
+  const char* failure;
+  size_t expectedBytes;
+  size_t bytesWritten;
+  size_t observedBytes;
+  bool writeError;
+};
+
+// Callers serialize document preparation. The filesystem guard covers the
+// temporary's lifetime and reuses an outer per-user transaction lock. Stream
+// directly to File without allocating a second serialized document.
+static JsonSnapshotWriteResult writeJsonSnapshot(const JsonDocument& doc,
+                                                 const char* destination,
+                                                 const char* temporary,
+                                                 const char* owner) {
+  const char* failure = doc.overflowed() ? "overflow" : nullptr;
+  const size_t expectedBytes = failure ? 0 : measureJson(doc);
+  size_t bytesWritten = 0;
+  size_t observedBytes = 0;
+  bool writeError = false;
+  if (!failure && expectedBytes == 0) failure = "serialize";
+
+  if (!failure) {
+    // One lock covers the fixed temp's lifetime, including failed cleanup.
+    // Guarded VFS calls reuse this lock when called from the same task.
+    FsLockGuard guard(owner);
+    File file = VFS::openGuarded(temporary, "w", VFS::systemAuth(owner));
+    if (!file || file.isDirectory()) {
+      if (file) file.close();
+      failure = "open";
+    } else {
+      bytesWritten = serializeJson(doc, file);
+      file.flush();
+      observedBytes = file.size();
+      writeError = file.getWriteError() != 0;
+      file.close();
+
+      // Arduino File cannot report flush/close success. Check every available
+      // completion signal before allowing the temp to replace the live file.
+      if (bytesWritten != expectedBytes || observedBytes != expectedBytes || writeError) {
+        failure = "serialize";
+      } else if (!VFS::renameGuarded(temporary, destination, VFS::systemAuth(owner))) {
+        failure = "rename";
+      }
+    }
+    if (failure) {
+      // Best-effort cleanup never deletes or rewrites the previous snapshot.
+      VFS::removeGuarded(temporary, VFS::systemAuth(owner));
+    }
+  }
+
+  return {failure, expectedBytes, bytesWritten, observedBytes, writeError};
+}
+
+// Full settings writers hold SettingsFileWriteGuard across preparation and
+// replacement. Their root temporary paths remain covered by boot cleanup.
+// Keep their failure events separate from per-user saves and transactions.
+static bool writeSettingsSnapshot(const JsonDocument& doc,
+                                  const char* destination,
+                                  const char* temporary,
+                                  const char* owner) {
+  const JsonSnapshotWriteResult result = writeJsonSnapshot(doc, destination, temporary, owner);
+  if (!result.failure) return true;
+  // Report after releasing the filesystem lock; never log document contents.
+  ERROR_STORAGEF("Save failed for %s (%s): serialized=%zu, size=%zu, expected=%zu, writeError=%d",
+                 destination, result.failure, result.bytesWritten, result.observedBytes,
+                 result.expectedBytes, result.writeError);
+  logSystemEvent("SETTINGS", "save FAILED for %s (%s): serialized=%zu, size=%zu, expected=%zu, writeError=%d",
+                 destination, result.failure, result.bytesWritten, result.observedBytes,
+                 result.expectedBytes, result.writeError);
+  systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, result.failure, destination);
+  return false;
+}
+
 bool writeSettingsJson() {
   if (!filesystemReady) return false;
 
@@ -1517,6 +1569,14 @@ bool writeSettingsJson() {
       } else {
         INFO_STORAGEF("Loaded existing settings for merge (preserving orphaned sections)");
       }
+    } else {
+      fsUnlock();
+      ERROR_STORAGEF("save REFUSED: cannot open existing settings.json for merge");
+      logSystemEvent("SETTINGS", "save REFUSED - cannot read existing settings.json; file left intact");
+      systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "merge_read_failed",
+                      "cannot open existing settings.json; save refused");
+      pollResume();
+      return false;
     }
     fsUnlock();
   }
@@ -1539,97 +1599,9 @@ bool writeSettingsJson() {
   // or burn the 5120-byte budget. No-op once the on-disk file is already clean.
   { JsonObject sysObj = doc["system"].as<JsonObject>(); if (!sysObj.isNull()) sysObj.remove("debug"); }
 
-  // Check for overflow
-  if (doc.overflowed()) {
-    ERROR_STORAGEF("JSON document overflowed during build (need more than 5120 bytes)");
-    logSystemEvent("SETTINGS", "save FAILED (JSON build overflow) — settings NOT persisted");
-    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "overflow", "settings.json");
+  if (!writeSettingsSnapshot(doc, SETTINGS_JSON_FILE, "/settings.tmp", "settings.write")) {
     pollResume();
     return false;
-  }
-
-  // Arduino FS does not expose a checked flush/fsync result. Verify both the
-  // serializer's accepted-byte count and the size observed after flush before
-  // allowing a temporary file to replace the live settings snapshot.
-  const size_t expectedBytes = measureJson(doc);
-  if (expectedBytes == 0) {
-    ERROR_STORAGEF("Failed to measure settings JSON");
-    logSystemEvent("SETTINGS", "save FAILED (measured 0 bytes) — settings NOT persisted");
-    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "serialize", "settings.json");
-    pollResume();
-    return false;
-  }
-
-  // Atomic write: temp file then rename
-  const char* tmp = "/settings.tmp";
-  
-  fsLock("settings.write");
-  File file = VFS::openGuarded(tmp, "w", VFS::systemAuth("settings.write"));
-  if (!file) {
-    fsUnlock();
-    ERROR_STORAGEF("Failed to open temp file for writing");
-    logSystemEvent("SETTINGS", "save FAILED (cannot open %s) — settings NOT persisted", tmp);
-    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "open", "settings.json");
-    pollResume();
-    return false;
-  }
-
-  // Serialize JSON directly to file (no intermediate buffer)
-  const size_t bytesWritten = serializeJson(doc, file);
-  file.flush();
-  const size_t observedBytes = file.size();
-  file.close();
-  fsUnlock();
-
-  if (bytesWritten != expectedBytes || observedBytes != expectedBytes) {
-    ERROR_STORAGEF("Incomplete settings temp write: serialized=%zu, size=%zu, expected=%zu",
-                   bytesWritten, observedBytes, expectedBytes);
-    logSystemEvent("SETTINGS",
-                   "save FAILED (temp wrote %zu bytes, size %zu, expected %zu) — settings NOT persisted",
-                   bytesWritten, observedBytes, expectedBytes);
-    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "serialize", "settings.json");
-    VFS::removeGuarded(tmp, VFS::systemAuth("settings.write"));
-    pollResume();
-    return false;
-  }
-
-  DEBUG_STORAGEF("[Settings] Wrote %zu bytes to temp file", bytesWritten);
-
-  // Atomic rename (LittleFS rename overwrites destination)
-  fsLock("settings.rename");
-  bool okRename = VFS::renameGuarded(tmp, SETTINGS_JSON_FILE, VFS::systemAuth("settings.write"));
-  fsUnlock();
-
-  if (!okRename) {
-    WARN_STORAGEF("Rename failed, trying direct write");
-    logSystemEvent("SETTINGS", "atomic rename failed — falling back to direct rewrite of %s", SETTINGS_JSON_FILE);
-    // Fallback: write directly
-    fsLock("settings.direct");
-    File directFile = VFS::openGuarded(SETTINGS_JSON_FILE, "w", VFS::systemAuth("settings.write"));
-    if (!directFile) {
-      fsUnlock();
-      logSystemEvent("SETTINGS", "save FAILED (rename and direct open both failed) — settings NOT persisted");
-      systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "rename", "settings.json");
-      pollResume();
-      return false;
-    }
-    const size_t directBytesWritten = serializeJson(doc, directFile);
-    directFile.flush();
-    const size_t directObservedBytes = directFile.size();
-    directFile.close();
-    fsUnlock();
-    if (directBytesWritten != expectedBytes ||
-        directObservedBytes != expectedBytes) {
-      ERROR_STORAGEF("Incomplete direct settings fallback: serialized=%zu, size=%zu, expected=%zu",
-                     directBytesWritten, directObservedBytes, expectedBytes);
-      logSystemEvent("SETTINGS",
-                     "save FAILED (direct fallback wrote %zu bytes, size %zu, expected %zu)",
-                     directBytesWritten, directObservedBytes, expectedBytes);
-      systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "direct_write",
-                      "settings.json");
-      pollResume();
-      return false;
-    }
   }
 
   DEBUG_STORAGEF("[Settings] Write complete");
@@ -1684,83 +1656,9 @@ bool writeDebugJson() {
   PSRAM_JSON_DOC(doc);
   buildDebugJsonDoc(doc);
 
-  if (doc.overflowed()) {
-    ERROR_STORAGEF("Debug JSON overflowed during build (need more than 5120 bytes)");
-    logSystemEvent("SETTINGS", "debug save FAILED (JSON build overflow) — debug flags NOT persisted");
+  if (!writeSettingsSnapshot(doc, DEBUG_JSON_FILE, "/debug.tmp", "settings.write")) {
     pollResume();
     return false;
-  }
-
-  const size_t expectedBytes = measureJson(doc);
-  if (expectedBytes == 0) {
-    ERROR_STORAGEF("Failed to measure debug JSON");
-    logSystemEvent("SETTINGS", "debug save FAILED (measured 0 bytes)");
-    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "serialize",
-                    DEBUG_JSON_FILE);
-    pollResume();
-    return false;
-  }
-
-  // Atomic write: temp at root (swept by the boot .tmp cleanup) then rename.
-  const char* tmp = "/debug.tmp";
-  fsLock("debug.write");
-  File file = VFS::openGuarded(tmp, "w", VFS::systemAuth("settings.write"));
-  if (!file) {
-    fsUnlock();
-    ERROR_STORAGEF("Failed to open temp file for debug write");
-    pollResume();
-    return false;
-  }
-  const size_t bytesWritten = serializeJson(doc, file);
-  file.flush();
-  const size_t observedBytes = file.size();
-  file.close();
-  fsUnlock();
-
-  if (bytesWritten != expectedBytes || observedBytes != expectedBytes) {
-    ERROR_STORAGEF("Incomplete debug temp write: serialized=%zu, size=%zu, expected=%zu",
-                   bytesWritten, observedBytes, expectedBytes);
-    logSystemEvent("SETTINGS",
-                   "debug save FAILED (temp wrote %zu bytes, size %zu, expected %zu)",
-                   bytesWritten, observedBytes, expectedBytes);
-    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "serialize",
-                    DEBUG_JSON_FILE);
-    VFS::removeGuarded(tmp, VFS::systemAuth("settings.write"));
-    pollResume();
-    return false;
-  }
-
-  fsLock("debug.rename");
-  bool okRename = VFS::renameGuarded(tmp, DEBUG_JSON_FILE, VFS::systemAuth("settings.write"));
-  fsUnlock();
-
-  if (!okRename) {
-    WARN_STORAGEF("Debug rename failed, trying direct write");
-    fsLock("debug.direct");
-    File directFile = VFS::openGuarded(DEBUG_JSON_FILE, "w", VFS::systemAuth("settings.write"));
-    if (!directFile) {
-      fsUnlock();
-      logSystemEvent("SETTINGS", "debug save FAILED (rename and direct open both failed)");
-      pollResume();
-      return false;
-    }
-    const size_t directBytesWritten = serializeJson(doc, directFile);
-    directFile.flush();
-    const size_t directObservedBytes = directFile.size();
-    directFile.close();
-    fsUnlock();
-    if (directBytesWritten != expectedBytes ||
-        directObservedBytes != expectedBytes) {
-      ERROR_STORAGEF("Incomplete direct debug fallback: serialized=%zu, size=%zu, expected=%zu",
-                     directBytesWritten, directObservedBytes, expectedBytes);
-      logSystemEvent("SETTINGS",
-                     "debug save FAILED (direct fallback wrote %zu bytes, size %zu, expected %zu)",
-                     directBytesWritten, directObservedBytes, expectedBytes);
-      systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "direct_write",
-                      DEBUG_JSON_FILE);
-      pollResume();
-      return false;
-    }
   }
 
   pollResume();
@@ -1900,9 +1798,9 @@ bool settingsFirmwareVersionRestampPending() {
 // not been populated yet would be persisted as defaults, and
 // putSecretPreserving() writes an empty string for a secret whose plaintext is
 // empty on a healthy load, which would blank a stored credential. This path
-// re-serialises the PARSED FILE with one key changed, so every other byte -
-// including keys this build does not know - survives untouched, and no RAM
-// state is consulted at all.
+// re-serialises the PARSED FILE with one key changed, preserving other JSON
+// values, including keys this build does not know. Formatting may change;
+// no live settings values are consulted.
 //
 // Nuance worth knowing: if this image is an OTA trial that later fails
 // probation, the file briefly claims a version that is no longer running. The
@@ -1910,8 +1808,15 @@ bool settingsFirmwareVersionRestampPending() {
 // itself, so this self-corrects; it is not worth deferring to
 // otaSystemOnImageMarkedValid(), which does not exist on non-OTA builds.
 bool settingsRestampFirmwareVersion() {
+  // Serialize the read as well as the replacement: a full save must not run
+  // between this snapshot and its promotion and then be overwritten by it.
+  SettingsFileWriteGuard writeGuard;
+  if (!writeGuard) {
+    ERROR_STORAGEF("Could not acquire settings file writer lock for version re-stamp");
+    return false;
+  }
   if (!gSettingsVersionRestampPending) return true;
-  gSettingsVersionRestampPending = false;
+  if (!filesystemReady) return false;
 
   String json;
   if (!readText(SETTINGS_JSON_FILE, json) || json.length() == 0) return false;
@@ -1920,29 +1825,10 @@ bool settingsRestampFirmwareVersion() {
   if (deserializeJson(doc, json) != DeserializationError::Ok) return false;
   doc["firmwareVersion"] = SelfDevice::firmwareVersion();
 
-  const char* tmp = "/settings.tmp";
-  fsLock("settings.restamp");
-  File file = VFS::openGuarded(tmp, "w", VFS::systemAuth("settings.restamp"));
-  if (!file) {
-    fsUnlock();
-    logSystemEvent("SETTINGS", "firmwareVersion re-stamp FAILED (cannot open %s)", tmp);
+  if (!writeSettingsSnapshot(doc, SETTINGS_JSON_FILE, "/settings.tmp", "settings.restamp")) {
     return false;
   }
-  const size_t bytesWritten = serializeJson(doc, file);
-  file.flush();
-  file.close();
-  fsUnlock();
-
-  if (bytesWritten == 0) {
-    VFS::removeGuarded(tmp, VFS::systemAuth("settings.restamp"));
-    logSystemEvent("SETTINGS", "firmwareVersion re-stamp FAILED (wrote 0 bytes)");
-    return false;
-  }
-  if (!VFS::renameGuarded(tmp, SETTINGS_JSON_FILE, VFS::systemAuth("settings.restamp"))) {
-    VFS::removeGuarded(tmp, VFS::systemAuth("settings.restamp"));
-    logSystemEvent("SETTINGS", "firmwareVersion re-stamp FAILED (rename)");
-    return false;
-  }
+  gSettingsVersionRestampPending = false;
   logSystemEvent("SETTINGS", "firmwareVersion re-stamped to %s",
                  SelfDevice::firmwareVersion());
   return true;
@@ -4109,9 +3995,8 @@ bool loadUserSettings(uint32_t userId, JsonDocument& doc) {
 namespace {
 
 // Per-user notification preferences are a read-through cache over these files.
-// Invalidate on every save outcome, including failures: a direct-overwrite
-// fallback may already have truncated or partially replaced the destination
-// before the failure becomes observable.
+// Invalidate on every save outcome to fence in-flight cache loads, including
+// failed saves. A transaction's outer filesystem guard remains held here.
 struct UserPrefsInvalidateOnExit {
   ~UserPrefsInvalidateOnExit() { notifUserPrefsInvalidate(); }
 };
@@ -4121,48 +4006,10 @@ struct UserPrefsInvalidateOnExit {
 bool saveUserSettings(uint32_t userId, const JsonDocument& doc) {
   UserPrefsInvalidateOnExit invalidateOnExit;
   if (!filesystemReady) return false;
-  if (doc.overflowed()) return false;
-
-  // Arduino FS does not expose a checked flush/fsync result. One pre-measured
-  // expected length, the serializer's accepted-byte count, and File::size()
-  // after the existing flush are the observable completeness checks available.
-  const size_t expected = measureJson(doc);
-  if (expected == 0) return false;
 
   String path = getUserSettingsPath(userId);
   String tmp = path + ".tmp";
-
-  {
-    FsLockGuard guard("user_settings.save");
-    File f = VFS::openGuarded(tmp.c_str(), "w", VFS::systemAuth("user_settings.save"));
-    if (!f) return false;
-    const size_t written = serializeJson(doc, f);
-    f.flush();
-    const size_t observed = f.size();
-    f.close();
-    if (written != expected || observed != expected) {
-      VFS::removeGuarded(tmp.c_str(), VFS::systemAuth("user_settings.save"));
-      return false;
-    }
-
-    // Atomic rename (LittleFS rename overwrites destination)
-    if (!VFS::renameGuarded(tmp.c_str(), path.c_str(), VFS::systemAuth("user_settings.save"))) {
-      // Rename failed; fallback to direct overwrite
-      File direct = VFS::openGuarded(path.c_str(), "w", VFS::systemAuth("user_settings.save"));
-      if (!direct) {
-        VFS::removeGuarded(tmp.c_str(), VFS::systemAuth("user_settings.save"));
-        return false;
-      }
-      const size_t directWritten = serializeJson(doc, direct);
-      direct.flush();
-      const size_t directObserved = direct.size();
-      direct.close();
-      VFS::removeGuarded(tmp.c_str(), VFS::systemAuth("user_settings.save"));
-      return directWritten == expected && directObserved == expected;
-    }
-  }
-
-  return true;
+  return writeJsonSnapshot(doc, path.c_str(), tmp.c_str(), "user_settings.save").failure == nullptr;
 }
 
 UserSettingsTxnStatus runUserSettingsTransaction(uint32_t userId,

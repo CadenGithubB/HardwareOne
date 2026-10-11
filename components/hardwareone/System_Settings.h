@@ -1228,7 +1228,8 @@ bool readSettingsJson();
 bool writeSettingsJson();
 
 // True when readSettingsJson() found an on-disk firmwareVersion different from
-// the running build. Cleared by settingsRestampFirmwareVersion().
+// the running build. Cleared after settingsRestampFirmwareVersion() succeeds;
+// a failed attempt leaves it pending for a subsequent call or boot.
 bool settingsFirmwareVersionRestampPending();
 
 // Re-stamp ONLY firmwareVersion in the on-disk settings document, by rewriting

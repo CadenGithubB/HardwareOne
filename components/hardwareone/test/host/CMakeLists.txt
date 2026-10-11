@@ -630,6 +630,11 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_settings_write_scope.py
           ${SETTINGS_MUTATION_TEST_ARGS})
+add_test(
+  NAME settings_file_writes
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_settings_file_writes.py
+          ${SETTINGS_MUTATION_TEST_ARGS})
 set(WEB_BATCH_HANDLER_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND WEB_BATCH_HANDLER_TEST_ARGS --sanitize)
@@ -817,7 +822,8 @@ endif()
 foreach(test_name IN ITEMS fileread_psram g2_files_psram filesystem_psram_listing
                            filemanager_directory espnow_directory checked_text_writes
                            upload_lifecycle storage_stats espnow_fs_transcript_privacy
-                           image_storage image_writes)
+                           image_storage image_writes capture_stitching capped_log_writes
+                           log_row_writes r1_history_store mic_wav_completion boot_temp_cleanup)
   add_test(
     NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE}
@@ -971,6 +977,16 @@ add_test(
   NAME automation_log
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_automation_log.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME session_snapshot
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_session_snapshot.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME task_reporting
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_task_reporting.py
           ${SETUP_MQTT_TEST_ARGS})
 add_test(
   NAME raw_allocation_inventory

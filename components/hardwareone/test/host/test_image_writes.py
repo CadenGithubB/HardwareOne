@@ -61,7 +61,7 @@ def generate(baseline: Path | None) -> str:
     }.items():
         require(harness.count(marker) == 1, f"one insertion marker: {marker}")
         harness = harness.replace(marker, value)
-    return harness
+    return f"#define HAS_TEMP_SAVE {int('VFS::replaceFileGuarded(' in source)}\n" + harness
 
 
 def main() -> None:
@@ -69,7 +69,7 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--baseline", type=Path)
-    parser.add_argument("--case", choices=("all", "short", "folder", "capacity", "overflow"), default="all")
+    parser.add_argument("--case", choices=("all", "short", "folder", "capacity", "overflow", "collision"), default="all")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     with tempfile.TemporaryDirectory(prefix="hw1-image-writes-") as directory:

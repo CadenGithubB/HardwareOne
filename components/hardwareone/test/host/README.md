@@ -30,6 +30,20 @@ original copy remains usable, and boundary checks reject holding the track
 state lock across filesystem, renderer or command work. Metadata-only loads
 avoid a point-copy allocation.
 
+Checked GPS saves run the shared row writer and real filesystem guard over
+controlled File/VFS and semaphore boundaries. Save cases cover unchanged CSV
+bytes and timestamp names, a 10,000-point track, owner clear before/during I/O,
+short header/row/newline writes, reported Print errors, post-flush size mismatch,
+open/directory/promotion/cleanup failures, caller-owned locks and output-buffer
+limits. A failed save keeps the prior destination, leaves the output path
+unchanged and publishes zero saved points; successful replacement publishes
+only after the temporary is checked and promoted. The optional
+`--baseline <saved-component-directory>` compares deterministic normal-save
+output with saved source and reproduces its former partial-write false success.
+`--evidence <directory>` retains generated source and run output. File and
+write-error behavior is simulated; these checks do not establish media or
+power-loss durability.
+
 `map_live_ui` executes the HTTP authentication/identity prefix, unified web
 command helper, live/file/save responses, OLED Tracks action branch and status
 drawing. Command submission, snapshots and transport sessions are boundary
@@ -53,6 +67,164 @@ python3 components/hardwareone/test/host/test_map_live_tracking.py --thread-sani
 These checks do not qualify physical GPS fixes, display layout, real filesystem
 writes or device performance with near-capacity tracks. The GPS-start and
 logger-settings suites also exercise the logger lifecycle helpers.
+
+## Capture stitching and plaintext export
+
+`capture_stitching` executes the production GPS and health merge commands,
+`capturecrypt export`, shared copy/row helpers, argument/quoted-path parser,
+sealed-header reader and actual `VFS::replaceFileGuarded` implementation with
+real Arduino `String`. File operations, identity, locking and decryption are
+controlled boundaries. Checks cover exact bytes and counts, empty/multi-chunk
+inputs, command defaults, normalized source/output/staging aliases and mixed
+sealed/plaintext refusal. Faults include incomplete reads, short body/newline
+writes, reported Print errors, post-flush size mismatch, directories, existing
+temporary files, failed promotion and failed cleanup.
+
+Replacement cases exercise LittleFS rename-over-existing and SD's guarded
+backup/promotion/rollback sequence. Failed rollback must retain the previous
+bytes in `.bak`; unresolved backups are never consumed. Plaintext export keeps
+its schema lines and `[UNDECRYPTABLE]` policy, while detecting incomplete output
+before promotion. Failed attempts preserve the previous destination or its
+recovery backup and clean up only their own temporary.
+
+```sh
+python3 components/hardwareone/test/host/test_capture_stitching.py --sanitize
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^capture_stitching$' --output-on-failure
+```
+
+The optional `--baseline <saved-component-directory>` compares normal saved
+bytes and replies against saved source; intentional failure-handling changes
+are checked separately. `--evidence <directory>` retains generated sources and
+results. These tests do not qualify physical storage, encryption validity,
+power-loss durability or the VFS permission engine.
+
+## Capped system log writes
+
+`capped_log_writes` executes the production capped append/rotation helper and
+orphan recovery with real Arduino `String` and `Print`. Controlled File/VFS,
+allocation and locking boundaries cover CRLF accounting, exact caps, the 85%
+trim target, bounded newline scans, fragmented reads, overflow destinations,
+reused PSRAM storage and the existing recovery policies. Faults cover short
+body/newline appends, reported write/flush errors, premature reads, mismatched
+sizes, allocation/open/seek failures and failed promotion. LittleFS replacement
+must retain the original on failure; SD keeps its existing remove/rename orphan
+protocol after the temporary copy has been checked.
+
+```sh
+python3 components/hardwareone/test/host/test_capped_log_writes.py --sanitize
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^capped_log_writes$' --output-on-failure
+```
+
+The optional `--baseline <saved-component-directory>` compares normal file
+contents and reproduces the former append false success, partial-copy promotion
+and LittleFS original deletion. This is fault-injection coverage of observable
+API results, not physical storage, SD qualification or power-loss durability.
+Arduino File's void flush/close calls cannot expose every backend failure.
+
+## Boot temporary-file cleanup
+
+`boot_temp_cleanup` executes the production startup sweep, `VFS::DirectoryReader`
+and `FsLockGuard` with real Arduino `String`. Controlled file, semaphore and log
+boundaries cover rooted/leaf backend names, child close before removal, exact
+directory scope, LLM enabled/disabled, nested caller lock ownership, failed opens
+and removals, and accurate success/failure diagnostics. Directories, virtual
+entries, `.header.tmp`, backups and out-of-scope children must survive the sweep.
+
+```sh
+python3 components/hardwareone/test/host/test_boot_temp_cleanup.py --sanitize
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^boot_temp_cleanup$' --output-on-failure
+```
+
+The optional `--baseline <saved-component-directory>` compares ordinary
+leaf-name deletion results and characterizes the old path, header-preservation,
+success-accounting and traversal-lock defects. `--evidence <directory>` retains
+generated sources and reports. These checks do not qualify physical storage,
+power-loss durability or the recovery policies owned by individual writers.
+
+## Sensor and battery row writes
+
+`log_row_writes` executes the production shared LF-row writer, sensor append
+block and header writers, battery append/tick/event functions, battery status
+formatting and filesystem lock guard. Arduino `String`/`Print` and the battery
+state types are real; file storage, semaphore ownership, clock and sealing are
+controlled boundaries. Checks cover exact row/header bytes, plain and sealed
+rows, trusted file identities, accepted-byte accounting, successful-write
+counters, failure-only size resynchronization, rotation after partial writes,
+close/unlock ordering, nested lock ownership and battery retry cadence.
+Fresh or empty header-bearing files are staged before receiving rows. Header
+faults cover short writes, reported Print errors, post-flush size mismatch,
+failed staging/promotion, append-reopen failure and retries. Failed cleanup or
+an existing `.header.tmp` must block append without consuming that sibling,
+including after a simulated runtime reset. Sealed magic/schema lines remain
+complete before sealed data is appended. Existing empty battery files receive
+their header; nonempty legacy files retain the previous append policy.
+
+```sh
+python3 components/hardwareone/test/host/test_log_row_writes.py --sanitize
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^log_row_writes$' --output-on-failure
+```
+
+The optional `--baseline <saved-component-directory>` compares unchanged file
+contents and rotation, and characterizes former success accounting and nested
+lock-release faults separately. Sensor snapshot acquisition, row formatting and
+sampling cadence precede the extracted append block and are outside this suite.
+`gpslog_start` separately checks that header-preparation refusal prevents
+session publication and settings persistence. Replacement itself is a boundary
+in the row suite; `capture_stitching` exercises its production implementation.
+These checks do not qualify physical storage, SD, cryptographic validity,
+scheduling races or durability.
+
+## R1 history persistence
+
+`r1_history_store` compiles the complete production store, public types and
+filesystem guard with real Arduino `String`/`Print`. VFS, semaphores, crypto and
+time are controlled boundaries. It checks plain/sealed sparse and dense records,
+real serialization/parser round trips, unchanged-content skips, retry timing,
+generation acknowledgement, interrupted-swap recovery and nested lock ownership.
+Short writes, reported Print errors, final-size mismatch, key/sealing failures,
+open failures and failed promotion/rollback must preserve the previous primary
+or recovery backup and leave the new generation pending. The shared filesystem
+guard remains held across complete read/recovery/commit operations.
+
+```sh
+python3 components/hardwareone/test/host/test_r1_history_store.py --sanitize
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^r1_history_store$' --output-on-failure
+```
+
+The optional `--baseline <saved-component-directory>` compares normal paths and
+stored bytes and characterizes prior unchecked completion and lock boundaries.
+`--evidence <directory>` retains generated sources and results. Crypto is a test
+double; these checks do not validate encryption, physical flash, concurrent task
+scheduling or power-loss durability.
+
+## WAV recording completion
+
+`mic_wav_completion` executes the production WAV header writer and recording
+task's complete finalization/publication tail. File I/O, locking, disposition
+sealing, live-audio delivery and external callbacks are observed boundaries.
+Checks cover retained PCM size/rate, header patching, manual/owned recordings,
+discard requests, cleanup failure and G2 source teardown. A short or oversized
+WAV, or a reported Print error present after flush, must follow the existing
+failure path: no saved event or successful live-audio outcome, and correct
+cleanup/result publication after close.
+
+```sh
+python3 components/hardwareone/test/host/test_mic_wav_completion.py --sanitize
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^mic_wav_completion$' --output-on-failure
+```
+
+The optional `--baseline <saved-component-directory>` compares unchanged file
+bytes and lifecycle events and demonstrates the old false-success cases.
+`--evidence <directory>` retains generated sources and results. Arduino File's
+void flush/close APIs do not expose every backend failure; this suite does not
+establish physical storage durability, microphone capture quality or task-race
+behavior.
 
 ## Automation logging
 
@@ -157,6 +329,36 @@ ctest --test-dir /tmp/hw1-hardwareone-host \
   -R '^(display_lifecycle|p4eye_display_lifecycle|oled_without_input)$' --output-on-failure
 ```
 
+## Checked JSON settings saves
+
+`settings_file_writes` executes the production main/debug/restamp writers,
+shared JSON snapshot writer, per-user save/load/transaction/merge functions and
+filesystem/settings writer guards. It uses vendored ArduinoJson with controlled
+File/VFS/stat, Arduino String, semaphore, logging and cache-invalidation
+boundaries. Bonded mode is compiled both enabled and disabled.
+
+Fault cases cover incomplete serialization, observed size mismatch, reported
+write error, open/directory failures, failed rename and failed temporary cleanup.
+Per-user failures must preserve the previous file, invalidate the preference
+cache exactly once, keep an outer transaction lock held and never acquire the
+main settings writer lock or emit its failure events. Retries, absent files,
+unavailable storage, JSON overflow, rejected mutations and preservation of
+unrelated fields are included. Existing main/debug diagnostics, retry behavior
+and overlapping restamp/main-save checks remain covered.
+
+```sh
+python3 components/hardwareone/test/host/test_settings_file_writes.py --sanitize
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^(settings_file_writes|user_settings_transaction_guards|initial_admin_setup|notification_integration_guards)$' \
+  --output-on-failure
+```
+
+`--baseline <saved-System_Settings.cpp> --case user` characterizes the former
+destructive fallback and ignored write errors. `--case user-parity` emits normal
+save byte counts/hashes for comparison between baseline and current sources.
+These tests verify observable API behavior, not physical flash durability,
+the real notification cache or multi-file account-creation transactions.
+
 ## Untrusted web file responses
 
 `web_file_response_policy` compiles the production CSP/header helper and the
@@ -211,10 +413,21 @@ savings, real executor races, or final-String allocation failure on hardware.
 capacity, event and retention boundaries. It checks complete and failed writes
 on each tier, independent BOTH attempts, admission failures, matching the
 configured path to its requested storage, guarded cleanup and success-only
-notifications. Saves still write directly to generated destinations; these
-checks do not establish atomic replacement or power-loss durability. The
-`--baseline <component-directory>` option accepts saved sources to reproduce
-the original failure cases. ASan/UBSan follow `HW1_SANITIZE`.
+notifications. Saves stage a sibling temporary, preserving an existing
+same-timestamp image until verified promotion. Cases cover failed promotion,
+failed cleanup, unresolved temporary refusal, retained SD recovery backups and
+independent BOTH-tier outcomes. Replacement is a service boundary here;
+`capture_stitching` exercises the actual shared replacement implementation.
+The `--baseline <component-directory>` option accepts saved sources;
+`--case collision` reproduces the old destructive overwrite as an expected test
+failure. ASan/UBSan follow `HW1_SANITIZE`. These checks do not qualify a physical
+SD card, camera capture or power-loss durability.
+
+```sh
+python3 components/hardwareone/test/host/test_image_writes.py --sanitize
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^image_writes$' --output-on-failure
+```
 
 `image_storage` runs the actual ImageManager inventory methods, VFS routing,
 directory reader and filesystem guard. It covers SD/internal folder creation,

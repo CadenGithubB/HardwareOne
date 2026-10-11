@@ -769,14 +769,8 @@ static CmdStatusCallbacks sCmdStatusCallbacks;
 // COMMAND PROCESSING
 // =============================================================================
 
-extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
-
 // Command types + ExecAsyncCallback from shared header
 #include "System_CommandTypes.h"
-
-// External async command submission
-extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData);
-extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
 
 struct BleLoginAsyncJob {
   uint16_t connId;

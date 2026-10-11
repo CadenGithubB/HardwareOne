@@ -36,9 +36,6 @@
 #include "System_BleSecureChannel.h"  // bleScSendEncrypted/bleScEstablished — raw-binary `fileread ... bin`
 #endif
 
-// External dependencies
-extern bool readText(const char* path, String& out);
-
 // Forward declarations (none needed — permissions are table-driven)
 
 // ============================================================================
@@ -71,6 +68,51 @@ bool filesystemReady = false;
 // full-erase guard, which has the same "is there anything to lose?" question.
 static bool littlefsPartitionIsBlank(const esp_partition_t* part) {
   return otaSafetyPartitionIsBlank(part);
+}
+
+// Keep the legacy boot sweep limited to these direct-child directories.
+// Staged headers stay reserved for their writers after failure; capped logs,
+// R1 history and other capture stores retain their own recovery policies.
+static void cleanupBootTemporaryFiles() {
+  const char* cleanupDirs[] = {
+      "/", "/system", "/system/users", "/system/users/user_settings", "/maps"
+#if ENABLE_LLM_SOURCE_ONBOARD
+      , "/system/llm"
+#endif
+  };
+  int cleaned = 0;
+  {
+    FsLockGuard guard("fs.init.tmp_cleanup");
+    const AuthContext sys = VFS::systemAuth("fs.init.tmp_cleanup");
+    for (const char* path : cleanupDirs) {
+      File directory = VFS::openGuarded(path, "r", sys);
+      if (!directory) continue;
+      if (!directory.isDirectory()) {
+        directory.close();
+        continue;
+      }
+
+      VFS::DirectoryReader reader(directory, path);
+      VFS::DirectoryEntry entry;
+      while (reader.next(entry)) {
+        if (entry.isFolder || entry.isVirtual || !entry.name.endsWith(".tmp") ||
+            entry.name.endsWith(".header.tmp")) continue;
+        if (VFS::removeGuarded(entry.path, sys)) {
+          ESP_LOGI("FS", "Cleaned orphaned temp file: %s", entry.path.c_str());
+          logSystemEvent("FS", "removed orphaned temp file %s (interrupted write on a previous boot)",
+                         entry.path.c_str());
+          ++cleaned;
+        } else {
+          ESP_LOGW("FS", "Failed to remove orphaned temp file: %s", entry.path.c_str());
+          logSystemEvent("FS", "orphaned temp cleanup failed for %s", entry.path.c_str());
+        }
+      }
+      directory.close();
+    }
+  }
+  if (cleaned > 0) {
+    ESP_LOGI("FS", "Removed %d orphaned .tmp file(s)", cleaned);
+  }
 }
 
 bool initFilesystem() {
@@ -172,41 +214,7 @@ bool initFilesystem() {
 #endif
   }
 
-  // Boot-time cleanup: remove orphaned .tmp files from interrupted writes
-  {
-    AuthContext sys = VFS::systemAuth("fs.init.tmp_cleanup");
-    const char* cleanupDirs[] = {
-        "/", "/system", "/system/users", "/system/users/user_settings", "/maps"
-#if ENABLE_LLM_SOURCE_ONBOARD
-        , "/system/llm"
-#endif
-    };
-    int cleaned = 0;
-    for (const char* dir : cleanupDirs) {
-      File d = VFS::openGuarded(dir, "r", sys);
-      if (!d || !d.isDirectory()) continue;
-      File entry = d.openNextFile();
-      while (entry) {
-        String name = entry.name();
-        entry.close();
-        if (name.endsWith(".tmp")) {
-          String fullPath = String(dir);
-          if (fullPath != "/") fullPath += "/";
-          fullPath += name;
-          VFS::removeGuarded(fullPath.c_str(), sys);
-          ESP_LOGI("FS", "Cleaned orphaned temp file: %s", fullPath.c_str());
-          logSystemEvent("FS", "removed orphaned temp file %s (interrupted write on a previous boot)",
-                         fullPath.c_str());
-          cleaned++;
-        }
-        entry = d.openNextFile();
-      }
-      d.close();
-    }
-    if (cleaned > 0) {
-      ESP_LOGI("FS", "Removed %d orphaned .tmp file(s)", cleaned);
-    }
-  }
+  cleanupBootTemporaryFiles();
 
   // Boot-time JSON validation: warn about corrupt critical config files
   {
@@ -2107,6 +2115,27 @@ bool isAdminOnlyPath(const String& path) {
 // File I/O Helpers (moved from .ino)
 // ============================================================================
 
+bool writeLineChecked(fs::File& file, const uint8_t* data, size_t length,
+                      size_t& written) {
+  const size_t bodyBytes = file.write(data, length);
+  const size_t newlineBytes = file.write((uint8_t)'\n');
+  written = bodyBytes + newlineBytes;
+  return bodyBytes == length && newlineBytes == 1 && !file.getWriteError();
+}
+
+bool copyFileContents(fs::File& input, fs::File& output,
+                      unsigned long& totalBytes, uint8_t& lastByte) {
+  uint8_t chunk[512];
+  while (input.available()) {
+    int n = input.read(chunk, sizeof(chunk));
+    if (n <= 0) break;
+    if (output.write(chunk, (size_t)n) != (size_t)n) return false;
+    totalBytes += (unsigned long)n;
+    lastByte = chunk[n - 1];
+  }
+  return true;
+}
+
 bool readTextLimited(const char* path, String& out, size_t maxBytes) {
   out = "";
   FsLockGuard guard("readTextLimited");
@@ -2148,19 +2177,17 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes) {
 // crashed the debug_out task via a stack overflow.
 //
 // Now:
-//   • Rotate trigger: when the file reaches capBytes (a hard ceiling). File
-//     size never exceeds cap, matching the semantic the cap name implies.
+//   • Rotate trigger: when the appended file exceeds capBytes.
 //   • Trim target:    capBytes * 85/100. Dropping to ~85% gives ~15% of
 //     the cap as write room between rotations, so rotations amortize over
 //     many appends instead of firing on every line past cap.
 //   • Method: stream the surviving tail into a sibling ".tmp" file in 1 KB
-//     chunks, then rename over the original. O(N) work, ~1 KB stack buf,
+//     chunks, then rename over the original. O(N) work, reused PSRAM buffer,
 //     no large heap String allocations.
 //
-// Crash safety: between removing the original and renaming the .tmp in,
-// there is a small window where the log file is missing. `cleanupLogOrphan`
-// (called at boot) recovers this: if dest is missing but dest.tmp exists,
-// it promotes dest.tmp to dest.
+// LittleFS replaces the destination directly. SD retains its remove/rename
+// sequence, which has a window where the log is missing; cleanupLogOrphan
+// can recover a verified .tmp for paths included in boot recovery.
 bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   STACK_TRACEF("appendLineWithCap.enter path=%s line_len=%u cap=%u",
                path ? path : "(null)", (unsigned)line.length(), (unsigned)capBytes);
@@ -2183,11 +2210,14 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   // for a number the append handle already knew. The read handle below is now
   // opened only when a rotation is actually due.
   size_t sz = 0;
+  size_t written = 0;
+  bool appended = false;
   {
     File a = VFS::open(String(dest), "a", true);
     if (!a) { STACK_TRACEF("appendLineWithCap.open_a_failed"); return false; }
     STACK_TRACEF("appendLineWithCap.opened_for_append");
-    a.println(line);
+    written = a.println(line);
+    appended = written == line.length() + 2 && !a.getWriteError();  // CRLF
     STACK_TRACEF("appendLineWithCap.println_done");
     sz = a.position();
     a.close();
@@ -2198,9 +2228,10 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   // LittleFS overhead isn't counted). Lets the overflow decision refresh on
   // the next check if enough cumulative writes have happened, instead of
   // trusting a stale 2s-old reading through a large write burst.
-  VFS::noteLittleFsBytesWritten(line.length() + 2);  // +2 for CRLF
+  VFS::noteLittleFsBytesWritten(written);
+  if (!appended) { STACK_TRACEF("appendLineWithCap.short_append"); return false; }
 
-  // 2. Check size. Rotate only if we've reached the hard cap. The size came
+  // 2. Check size. Rotate only if we've exceeded the cap. The size came
   //    from the append handle above, so the common path (no rotation) now
   //    returns without opening the file a second time.
   STACK_TRACEF("appendLineWithCap.size_checked sz=%u cap=%u", (unsigned)sz, (unsigned)capBytes);
@@ -2209,6 +2240,9 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   // Rotation is due — only now is a read handle worth its open.
   File r = VFS::open(String(dest), "r");
   if (!r) { STACK_TRACEF("appendLineWithCap.open_r_failed"); return false; }
+  // close() cannot report a buffered append failure. Before discarding any
+  // old data, require the reopened file to contain the size we observed.
+  if (r.size() != sz) { r.close(); return false; }
 
   STACK_TRACEF("appendLineWithCap.rotate_begin");
   // 3. Compute trim math. Drop enough bytes that the survivors are ~85% of cap.
@@ -2224,9 +2258,16 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   const size_t MAX_SCAN = 4096;
   for (size_t scanned = 0; scanned < MAX_SCAN; scanned++) {
     int c = r.read();
-    if (c < 0) { r.close(); return true; }   // hit EOF mid-scan — nothing to keep
+    if (c < 0) {
+      const bool atEnd = r.position() == sz;
+      r.close();
+      return atEnd;  // Keep the existing EOF policy; reject a premature read failure.
+    }
     if (c == '\n') break;                    // cursor is now past the \n
   }
+  const size_t tailStart = r.position();
+  if (tailStart > sz) { r.close(); return false; }
+  const size_t tailBytes = sz - tailStart;
 
   // 5. Stream the tail into a temp file. The copy buffer lives in PSRAM and
   //    is allocated once per boot, then reused — keeping it off the debug_out
@@ -2249,27 +2290,40 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   STACK_TRACEF("appendLineWithCap.tmp_opened copying...");
 
   size_t copied = 0;
-  while (true) {
-    int n = r.readBytes((char*)sRotateBuf, ROTATE_BUF_SIZE);
+  while (copied < tailBytes) {
+    const size_t remaining = tailBytes - copied;
+    const size_t chunk = remaining < ROTATE_BUF_SIZE ? remaining : ROTATE_BUF_SIZE;
+    int n = r.readBytes((char*)sRotateBuf, chunk);
     if (n <= 0) break;
-    w.write(sRotateBuf, (size_t)n);
-    copied += n;
+    if (w.write(sRotateBuf, (size_t)n) != (size_t)n) break;
+    copied += (size_t)n;
   }
   r.close();
+  w.flush();
+  const bool complete = copied == tailBytes && !w.getWriteError() &&
+                        w.size() == tailBytes;
   w.close();
   STACK_TRACEF("appendLineWithCap.copy_done bytes=%u", (unsigned)copied);
-
-  // 6. Atomic-ish swap. LittleFS and SD both require the destination to be
-  //    absent before rename, so remove + rename. The vulnerable window is
-  //    recovered by cleanupLogOrphan on next boot.
-  if (!VFS::remove(String(dest))) {
+  if (!complete) {
     VFS::remove(String(tmpPath));
-    STACK_TRACEF("appendLineWithCap.remove_orig_failed");
+    STACK_TRACEF("appendLineWithCap.incomplete_copy");
     return false;
   }
-  STACK_TRACEF("appendLineWithCap.removed_orig");
+
+  // 6. LittleFS can replace the original directly, preserving it on rename
+  // failure. SD's FAT backend requires an absent destination; retain its
+  // existing recovery protocol, now only with a checked complete temp file.
+  const bool onSD = VFS::getStorageType(String(dest)) == VFS::SDCARD;
+  if (onSD) {
+    if (!VFS::remove(String(dest))) {
+      VFS::remove(String(tmpPath));
+      STACK_TRACEF("appendLineWithCap.remove_orig_failed");
+      return false;
+    }
+  }
   if (!VFS::rename(String(tmpPath), String(dest))) {
-    STACK_TRACEF("appendLineWithCap.rename_failed — orphan .tmp left for boot recovery");
+    if (!onSD) VFS::remove(String(tmpPath));
+    STACK_TRACEF("appendLineWithCap.rename_failed");
     return false;
   }
   STACK_TRACEF("appendLineWithCap.rotate_complete");

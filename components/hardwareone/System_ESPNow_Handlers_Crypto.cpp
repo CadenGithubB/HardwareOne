@@ -20,16 +20,12 @@
 #include "System_ESPNow_Sessions.h"
 #include "System_ESPNow_Wire.h"
 #include "System_CommandTypes.h"   // ExecReq::DeferredFn
+#include "System_Utils.h"  // submitDeferredToCmdExec
 #include "System_MemUtil.h"        // ps_alloc
 #include "System_Settings.h"
 
 #include <sodium.h>  // sodium_memzero
 
-// submitDeferredToCmdExec — implemented in System_Utils.cpp. Pushes a
-// callback onto cmd_exec_task's queue so heavy crypto runs there instead
-// of on espnow_task's tighter stack. Declared inline (no header) matching
-// the existing convention used by submitCommandAsync.
-extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
 // Defined in System_ESPNow.cpp. Notifies bond logic the moment a session with
 // `peerMac` reaches ACTIVE so the bonded relationship can use the encrypted
 // session for discovery/sync (replaces plaintext-heartbeat discovery). No-op

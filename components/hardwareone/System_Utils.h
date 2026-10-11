@@ -9,6 +9,7 @@
 #define SYSTEM_UTILS_H
 
 #include <Arduino.h>
+#include "System_CommandTypes.h"
 
 // Kept as a compatibility re-export for existing utility consumers. New
 // command-table consumers should include System_CommandRegistry.h directly.
@@ -71,11 +72,6 @@ void rebootDevice(const char* reason, const char* auditDetail, uint32_t flushDel
 
 // Note: BROADCAST_PRINTF is defined as a macro in debug_system.h, not a function
 
-// ============================================================================
-// Forward declaration for AuthContext (defined in user_system.h)
-// ============================================================================
-struct AuthContext;
-
 // File I/O functions
 bool readText(const char* path, String& out);
 // Trusted internal persistence helpers; callers own authorization. True means
@@ -131,8 +127,40 @@ inline const char* saturationLabel(uint32_t used, uint32_t cap) {
 // Command audit logging (always-on, lightweight)
 void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, const char* result);
 
-// Command execution (implemented in main .ino)
+// ============================================================================
+// Shared command execution (implemented in System_Utils.cpp)
+// ============================================================================
+
+// Low-level authorized dispatch. Transport/UI callers normally use the
+// submission functions below so commands run on the shared executor task.
 bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
+
+// Wait for a command result. The return value reports command success;
+// completedOut distinguishes an executed failure from admission failure or
+// timeout. A timed-out command may still finish on the executor task.
+bool submitAndExecuteSync(const Command& cmd, String& out);
+bool submitAndExecuteSync(const Command& cmd, String& out, bool* completedOut);
+
+// True means queued, not executed. The optional callback runs on cmd_exec_task
+// and must not block; its result pointer is valid only during that callback.
+bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback,
+                        void* userData);
+
+// Firmware-internal work on cmd_exec_task, bypassing command dispatch. On
+// success the callback owns arg's cleanup; on failure the caller retains it.
+bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
+
+// Trusted firmware/boot actions only: submits with the system identity.
+void runUnifiedSystemCommand(const String& argsInput);
+
+// Common web command fields. Callers bind the admitted session epoch before
+// submission and retain their interaction, validation, capture and batch choices.
+CommandContext makeWebCommandContext(httpd_req_t* req, const AuthContext& auth);
+
+// Execute a request/response command as this authenticated web session. The
+// executor owns authorization and session checks; out receives the result.
+bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx,
+                              const String& cmd, String& out);
 
 // Audit / Redaction utilities
 // Centralized redaction for audit logs and debug output
@@ -254,6 +282,10 @@ void getTimestampPrefixMsCached(char* out, size_t outSize);
 // Memory Reporting & System Diagnostics
 // ============================================================================
 
+// Shared system-info JSON for CLI, HTTP, SSE and migration callers; available
+// without the HTTP server. Omit the I2C device list for compact CLI/MQTT replies.
+void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList = true);
+
 // Print breakdown of connected device libraries (returns total via outTotal)
 void printConnectedDevicesLibraries(size_t& outTotal);
 
@@ -265,10 +297,6 @@ void printMemoryReport();
 const char* cmd_memreport(const String& argsInput);
 const char* cmd_taskstats(const String& argsInput);
 const char* cmd_perftop(const String& argsInput);
-
-// Note: Command execution functions (executeCommand, submitAndExecuteSync, etc.) 
-// are implemented in system_utils.cpp but declared in main .ino where the 
-// Command/CommandContext types are defined to avoid circular dependencies
 
 // ============================================================================
 // Input Abstraction Layer

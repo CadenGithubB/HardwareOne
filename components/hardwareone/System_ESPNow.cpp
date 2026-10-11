@@ -3995,11 +3995,6 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
 // isSessionEncrypted, NOT the legacy ESPNOW_V4_FLAG_ENCRYPTED header bit,
 // which nothing sets anymore), admin authentication, and a setting opt-in.
 // All early-rejection paths send their own ACK or CMD_RESP back.
-// Defined in System_Utils.cpp; queues a callback onto cmd_exec_task. Declared
-// here (same extern as System_ESPNow_Handlers_Crypto.cpp) so USER_SYNC can
-// defer its heavy body off espnow_task.
-extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
-
 // ---------------------------------------------------------------------------
 // Failed bond-auth audit — the mirror of the espnow/bond SUCCESS line.
 // A peer presenting a bad/malformed/missing bond token, or sending bond traffic
@@ -6668,9 +6663,6 @@ static String redactEspNowCommandResult(const String& output) {
 }
 
 // ExecAsyncCallback, CommandOrigin, CommandContext, Command defined in System_CommandTypes.h (included above)
-
-// External async command submission
-extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData);
 
 // Async callback for V3 CMD results - called on cmd_exec task (large stack)
 static void v4CmdResultCallback(bool ok, const char* result, void* userData) {

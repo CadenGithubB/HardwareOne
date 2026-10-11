@@ -5,6 +5,7 @@
 #define ARDUINOJSON_ENABLE_ARDUINO_PRINT 0
 #define ARDUINOJSON_ENABLE_PROGMEM 0
 #include <Arduino.h>
+#include <algorithm>
 #include <ArduinoJson.h>
 #include <cstdio>
 #include <cstdlib>
@@ -23,26 +24,29 @@ void webBatchTestStringAppend() {}
 using esp_err_t = int;
 using TransportSessionEpoch = uint32_t;
 static constexpr int ESP_OK = 0, ESP_FAIL = -1;
-static constexpr int SOURCE_WEB = 1, ORIGIN_WEB = 2;
-static constexpr int MSG_ROUTE_WEB = 1, MSG_ROUTE_FILE = 2;
-static constexpr int COMMAND_CONTEXT_REQUIRE_LIVE_SESSION = 1, COMMAND_CONTEXT_MODE_INDEPENDENT = 2;
-struct AuthContext { String user = "alice", sid = "session-a", ip = "local"; int transport = SOURCE_WEB; };
-struct CommandContext {
-  int origin = 0, outputMask = 0, behaviorFlags = 0;
-  AuthContext auth;
-  uint32_t id = 0, timestampMs = 0;
-  TransportSessionEpoch transportSessionEpoch = 0;
-  bool validateOnly = false;
-  void* replyHandle = nullptr;
-  void* httpReq = nullptr;
-};
-struct Command { String line; CommandContext ctx; };
+// INSERT_COMMAND_TYPES
 struct httpd_req_t {
   std::string query, output, status = "200 OK", type;
   unsigned sends = 0, chunks = 0, finishes = 0;
 };
 static std::function<void()> onFirstChunk;
-static AuthContext webIdentity;
+static int authOpaqueToken;
+static AuthContext fixtureWebIdentity() {
+  AuthContext auth{};
+  auth.transport = SOURCE_WEB;
+  auth.user = "alice";
+  auth.sid = "session-a";
+  auth.ip = "local";
+  auth.path = "/api/fixture";
+  auth.scope = "/fixture-scope";
+  auth.opaque = &authOpaqueToken; // Deliberately distinct from the request pointer.
+  return auth;
+}
+static AuthContext webIdentity = fixtureWebIdentity();
+static httpd_req_t* expectedRequest;
+static TransportSessionEpoch capturedEpoch = 42;
+static unsigned captureCalls, millisCalls;
+static uint32_t nextMillis = 1234;
 static bool authenticated = true, guestAllowed = true, liveSession = true;
 static bool revokeOnExecute, commandOk = true;
 static String commandOutput = "SUCCESS: Live tracking started";
@@ -56,8 +60,11 @@ struct ExecIdentityGuard {
   }
   ~ExecIdentityGuard() { installedIdentity = previous; --identityDepth; }
 };
-static uint32_t millis() { return 1234; }
-static AuthContext makeWebAuthCtx(httpd_req_t*) { return webIdentity; }
+static uint32_t millis() { ++millisCalls; return nextMillis++; }
+static AuthContext makeWebAuthCtx(httpd_req_t* req) {
+  expectedRequest = req;
+  return webIdentity;
+}
 static bool tgRequireAuth(const AuthContext&) { return authenticated; }
 static bool webGuestAccessAllowed(httpd_req_t*, const AuthContext&) { return guestAllowed; }
 static void httpd_resp_set_type(httpd_req_t* req, const char* type) { req->type = type; }
@@ -90,12 +97,29 @@ static int httpd_query_key_value(const char* query, const char* key, char* out, 
   return ESP_FAIL;
 }
 static TransportSessionEpoch captureTransportSessionEpoch(const AuthContext& ctx) {
-  return ctx.sid.length() ? 42 : 0;
+  ++captureCalls;
+  CHECK(ctx.user == webIdentity.user && ctx.sid == webIdentity.sid && ctx.opaque == webIdentity.opaque);
+  return ctx.sid.length() ? capturedEpoch : 0;
 }
-static bool transportSessionEpochIsLive(int source, TransportSessionEpoch epoch) {
-  CHECK(source == SOURCE_WEB && epoch == 42); return liveSession;
+static bool transportSessionEpochIsLive(CommandSource source, TransportSessionEpoch epoch) {
+  CHECK(source == SOURCE_WEB && epoch == capturedEpoch);
+  return epoch != 0 && liveSession;
+}
+static void checkWebExecutionContext(const CommandContext& ctx) {
+  CHECK(ctx.origin == ORIGIN_WEB && ctx.auth.transport == webIdentity.transport);
+  CHECK(ctx.auth.user == webIdentity.user && ctx.auth.sid == webIdentity.sid && ctx.auth.ip == webIdentity.ip);
+  CHECK(ctx.auth.path == webIdentity.path && ctx.auth.scope == webIdentity.scope && ctx.auth.opaque == webIdentity.opaque);
+  CHECK(ctx.httpReq == expectedRequest && static_cast<void*>(ctx.httpReq) != ctx.auth.opaque);
+  CHECK(ctx.outputMask == (MSG_ROUTE_WEB | MSG_ROUTE_FILE));
+  CHECK(ctx.behaviorFlags == (COMMAND_CONTEXT_MODE_INDEPENDENT |
+        (webIdentity.sid.length() ? COMMAND_CONTEXT_REQUIRE_LIVE_SESSION : COMMAND_CONTEXT_DEFAULT)));
+  CHECK(ctx.timestampMs == ctx.id + 1 && nextMillis == ctx.timestampMs + 1);
+  CHECK(!ctx.validateOnly && !ctx.captureOutput && ctx.replyHandle == nullptr);
+  CHECK(ctx.settingsBatchId == 0 && ctx.authoritySessionEpoch == 0 && ctx.authorityId == 0);
+  CHECK(std::all_of(std::begin(ctx.automationName), std::end(ctx.automationName), [](char c) { return c == 0; }));
 }
 static bool submitAndExecuteSync(const Command& command, String& out) {
+  checkWebExecutionContext(command.ctx);
   CHECK(identityDepth == 1 && installedIdentity);
   CHECK(installedIdentity->user == command.ctx.auth.user);
   CHECK(installedIdentity->sid == command.ctx.auth.sid);
@@ -197,7 +221,13 @@ static TestDisplay* oledDisplay = &display;
 
 static httpd_req_t request(const char* query) {
   httpd_req_t req; req.query = query;
+  const unsigned beforeMillis = millisCalls, beforeCapture = captureCalls;
+  const size_t beforeCommands = webRequests.size();
   CHECK(handleGPSTracksAPI(&req) == ESP_OK);
+  if (webRequests.size() > beforeCommands) {
+    CHECK(webRequests.size() == beforeCommands + 1);
+    CHECK(millisCalls == beforeMillis + 2 && captureCalls == beforeCapture + 1);
+  }
   CHECK(identityDepth == 0 && installedIdentity == nullptr);
   return req;
 }
@@ -209,6 +239,42 @@ static void checkError(const httpd_req_t& req, const char* expected) {
   CHECK(std::strcmp(parsed["error"].as<const char*>(), expected) == 0);
   CHECK(!parsed["live"].is<bool>() && !parsed["started"].is<bool>() && !parsed["stopped"].is<bool>());
 }
+
+static void webContextHelperTests() {
+#if HAVE_WEB_CONTEXT_HELPER
+  // The factory copies identity and supplies defaults only. Session capture,
+  // mode policy and execution remain with its caller.
+  for (const char* sid : {"session-a", ""}) {
+    for (TransportSessionEpoch epoch : {TransportSessionEpoch(42), TransportSessionEpoch(0)}) {
+      httpd_req_t req;
+      AuthContext auth = fixtureWebIdentity();
+      auth.sid = sid;
+      auth.transport = SOURCE_ESPNOW; // Copy the provided identity without rewriting it.
+      capturedEpoch = epoch;
+      const unsigned beforeCapture = captureCalls, beforeMillis = millisCalls;
+      const uint32_t firstMillis = nextMillis;
+      const auto ctx = makeWebCommandContext(&req, auth);
+      CHECK(captureCalls == beforeCapture && millisCalls == beforeMillis + 2);
+      CHECK(ctx.id == firstMillis && ctx.timestampMs == firstMillis + 1);
+      CHECK(ctx.origin == ORIGIN_WEB && ctx.auth.transport == SOURCE_ESPNOW);
+      CHECK(ctx.auth.user == auth.user && ctx.auth.sid == auth.sid && ctx.auth.ip == auth.ip);
+      CHECK(ctx.auth.path == auth.path && ctx.auth.scope == auth.scope && ctx.auth.opaque == auth.opaque);
+      CHECK(ctx.httpReq == &req && static_cast<void*>(ctx.httpReq) != auth.opaque);
+      CHECK(ctx.outputMask == (MSG_ROUTE_WEB | MSG_ROUTE_FILE));
+      CHECK(ctx.behaviorFlags == (auth.sid.length() ? COMMAND_CONTEXT_REQUIRE_LIVE_SESSION : COMMAND_CONTEXT_DEFAULT));
+      CHECK(ctx.transportSessionEpoch == 0 && ctx.settingsBatchId == 0);
+      CHECK(ctx.authoritySessionEpoch == 0 && ctx.authorityId == 0);
+      CHECK(!ctx.validateOnly && !ctx.captureOutput && ctx.replyHandle == nullptr);
+      CHECK(std::all_of(std::begin(ctx.automationName), std::end(ctx.automationName), [](char c) { return c == 0; }));
+      auth.user = "changed-user"; auth.path = "/changed-path"; auth.scope = "/changed-scope"; auth.sid = "changed-session";
+      CHECK(ctx.auth.user == "alice" && ctx.auth.path == "/api/fixture" && ctx.auth.scope == "/fixture-scope");
+      CHECK(ctx.auth.sid == sid);
+    }
+  }
+#endif
+  capturedEpoch = 42; nextMillis = 1234; captureCalls = millisCalls = 0;
+}
+
 static void webTests() {
   authenticated = false;
   CHECK(request("live=start").sends == 0 && webRequests.empty());
@@ -222,7 +288,7 @@ static void webTests() {
   const auto& ctx = webRequests.back().ctx;
   CHECK(ctx.auth.user == "alice" && ctx.auth.sid == "session-a" && ctx.auth.ip == "local");
   CHECK(ctx.auth.transport == SOURCE_WEB && ctx.origin == ORIGIN_WEB);
-  CHECK(ctx.transportSessionEpoch == 42 && ctx.id == 1234 && ctx.timestampMs == 1234);
+  CHECK(ctx.transportSessionEpoch == 42 && ctx.id == 1234 && ctx.timestampMs == 1235);
   CHECK(ctx.outputMask == (MSG_ROUTE_WEB | MSG_ROUTE_FILE));
   CHECK(ctx.behaviorFlags == (COMMAND_CONTEXT_REQUIRE_LIVE_SESSION | COMMAND_CONTEXT_MODE_INDEPENDENT));
   CHECK(!ctx.validateOnly && !ctx.replyHandle);
@@ -251,6 +317,20 @@ static void webTests() {
   revokeOnExecute = false; liveSession = true;
   webIdentity.sid = ""; commandOk = false; commandOutput = "Error: missing session";
   checkError(request("live=stop"), commandOutput.c_str());
+  CHECK(webRequests.back().ctx.transportSessionEpoch == 0);
+  CHECK(webRequests.back().ctx.behaviorFlags == COMMAND_CONTEXT_MODE_INDEPENDENT);
+  // A cookie whose epoch cannot be captured must still carry REQUIRE. The
+  // executor owns rejection; this facade must also suppress stale delivery.
+  webIdentity.sid = "session-a"; capturedEpoch = 0;
+  const unsigned beforeFailedCapture = broadcasts;
+  checkError(request("live=start"), "Error: web session changed before command result delivery.");
+  CHECK(webRequests.back().ctx.transportSessionEpoch == 0);
+  CHECK(webRequests.back().ctx.behaviorFlags == (COMMAND_CONTEXT_REQUIRE_LIVE_SESSION | COMMAND_CONTEXT_MODE_INDEPENDENT));
+  CHECK(broadcasts == beforeFailedCapture);
+  // Basic Auth remains intentionally stateless and can receive its result.
+  webIdentity.sid = ""; capturedEpoch = 42;
+  commandOk = true; commandOutput = "SUCCESS: Live tracking started";
+  CHECK(request("live=start").output == "{\"live\":true,\"started\":true}");
   CHECK(webRequests.back().ctx.transportSessionEpoch == 0);
   CHECK(webRequests.back().ctx.behaviorFlags == COMMAND_CONTEXT_MODE_INDEPENDENT);
   const size_t count = webRequests.size();
@@ -416,6 +496,6 @@ static void oledTests() {
   CHECK(gShowTrackStatus && toasts.size() == beforeToast + 1);
 }
 int main() {
-  webTests(); dataTests(); oledStatusTests(); oledTests();
+  webContextHelperTests(); webTests(); dataTests(); oledStatusTests(); oledTests();
   std::printf("Map live UI (GPS=%d): %u production-path assertions passed\n", ENABLE_GPS_SENSOR, checks);
 }

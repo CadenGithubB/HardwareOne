@@ -70,23 +70,8 @@ using TransportSessionEpoch = uint32_t;
 static constexpr int ESP_OK = 0, ESP_FAIL = -1;
 static constexpr int HTTPD_500_INTERNAL_SERVER_ERROR = 500;
 static constexpr int HTTPD_RESP_USE_STRLEN = -1;
-static constexpr int SOURCE_WEB = 1, ORIGIN_WEB = 1, ORIGIN_SYSTEM = 2;
-static constexpr int MSG_ROUTE_WEB = 1, MSG_ROUTE_FILE = 2;
-static constexpr int COMMAND_CONTEXT_REQUIRE_LIVE_SESSION = 1;
-static constexpr int COMMAND_CONTEXT_MODE_INDEPENDENT = 2;
 enum class AllocPref { PreferPSRAM };
-struct AuthContext { String sid = "session"; String user = "alice"; String ip = "local"; int transport = SOURCE_WEB; };
-struct CommandContext {
-  int origin = 0;
-  AuthContext auth;
-  uint32_t id = 0, timestampMs = 0, settingsBatchId = 0;
-  int outputMask = 0, behaviorFlags = 0;
-  TransportSessionEpoch transportSessionEpoch = 0;
-  bool validateOnly = false, captureOutput = false;
-  void* replyHandle = nullptr;
-  void* httpReq = nullptr;
-};
-struct Command { String line; CommandContext ctx; };
+// INSERT_COMMAND_TYPES
 struct httpd_req_t {
   std::string input, output, status = "200 OK", contentType;
   size_t content_len = 0, received = 0;
@@ -101,7 +86,11 @@ struct Scenario {
   bool bondMaster = true, finalizerSucceeded = true, revokeOnSerialize = false;
   bool revokeOnFinalizer = false;
   size_t stepIndex = 0;
-  int finalizers = 0, interactions = 0, delays = 0;
+  int finalizers = 0, interactions = 0, delays = 0, captures = 0, feedEntries = 0;
+  uint32_t now = 100;
+  TransportSessionEpoch epoch = 42;
+  bool advanceEpochOnCapture = false;
+  httpd_req_t* expectedReq = nullptr;
   std::vector<Step> steps;
   std::vector<Command> executed;
   std::vector<std::string> broadcasts;
@@ -117,7 +106,10 @@ void webBatchTestStringAppend() {
 }
 static void* ps_alloc(size_t size, AllocPref, const char*) { return std::malloc(size); }
 static AuthContext makeWebAuthCtx(httpd_req_t*) {
-  AuthContext ctx;
+  AuthContext ctx{};
+  ctx.transport = SOURCE_WEB; ctx.user = "alice"; ctx.sid = "session";
+  ctx.ip = "local"; ctx.path = "/test/cli"; ctx.scope = "/test/scope";
+  ctx.opaque = &scenario;
   if (!scenario.stateful) ctx.sid = "";
   return ctx;
 }
@@ -148,19 +140,26 @@ static int httpd_req_recv(httpd_req_t* req, char* destination, size_t length) {
 }
 static bool isBondMaster() { return scenario.bondMaster; }
 static String getCookieSID(httpd_req_t*) { return scenario.stateful ? "session" : ""; }
-static TransportSessionEpoch captureTransportSessionEpoch(const AuthContext&) { return scenario.stateful ? 42 : 0; }
-static bool transportSessionEpochIsLive(int, TransportSessionEpoch) { return scenario.live; }
+static TransportSessionEpoch captureTransportSessionEpoch(const AuthContext&) {
+  ++scenario.captures;
+  const auto epoch = scenario.stateful ? scenario.epoch : 0;
+  if (scenario.advanceEpochOnCapture) ++scenario.epoch;
+  return epoch;
+}
+static bool transportSessionEpochIsLive(int, TransportSessionEpoch epoch) { return epoch != 0 && scenario.live; }
 static bool webNoteSessionInteraction(const String&, TransportSessionEpoch) {
   ++scenario.interactions; return scenario.live;
 }
 static uint32_t allocateSettingsWriteBatchId() { return 73; }
 static int findSessionIndexBySID(const String&) { return 3; }
-static uint32_t millis() { static uint32_t now = 100; now += 100; return now; }
+static uint32_t millis() { scenario.now += 100; return scenario.now; }
 static int pdMS_TO_TICKS(int value) { return value; }
 static void vTaskDelay(int) { ++scenario.delays; }
-static AuthContext systemIdentity(const char*) { return {}; }
+static AuthContext systemIdentity(const char*) {
+  AuthContext ctx{}; ctx.transport = SOURCE_INTERNAL; ctx.user = "system"; return ctx;
+}
 #define ERROR_WEBF(...) ((void)0)
-static void appendCommandToFeed(const char*, const String&, const String&, const String&) {}
+static void appendCommandToFeed(const char*, const String&, const String&, const String&) { ++scenario.feedEntries; }
 static String redactCmdForAudit(const String& text) { return text; }
 static bool cliModeOwnedBySession(int, TransportSessionEpoch) { return false; }
 static void broadcastOutput(const String& output, const CommandContext&) {
@@ -170,6 +169,12 @@ static bool submitAndExecuteSync(const Command& cmd, String& output, bool* compl
   if (cmd.ctx.origin == ORIGIN_SYSTEM) {
     ++scenario.finalizers;
     check(cmd.ctx.settingsBatchId == 73, "finalizer retains request token");
+    check(cmd.ctx.auth.transport == SOURCE_INTERNAL && cmd.ctx.auth.user == "system",
+          "finalizer has system identity");
+    check(cmd.ctx.outputMask == MSG_ROUTE_FILE && cmd.ctx.httpReq == nullptr &&
+          cmd.ctx.transportSessionEpoch == 0 && cmd.ctx.auth.sid.length() == 0 &&
+          cmd.ctx.behaviorFlags == COMMAND_CONTEXT_MODE_INDEPENDENT,
+          "finalizer stays unbound to the HTTP session");
     check(cmd.line == "savesettings", "finalizer uses savesettings command");
     check((cmd.ctx.behaviorFlags & COMMAND_CONTEXT_MODE_INDEPENDENT) != 0,
           "finalizer is mode independent");
@@ -177,6 +182,10 @@ static bool submitAndExecuteSync(const Command& cmd, String& output, bool* compl
     output = scenario.finalizerSucceeded ? "Settings saved" : "Error: finalizer pending";
     if (scenario.revokeOnFinalizer) scenario.live = false;
     return scenario.finalizerSucceeded;
+  }
+  if (scenario.expectedReq) {
+    check(cmd.ctx.httpReq == scenario.expectedReq, "context carries exact HTTP request");
+    check(cmd.ctx.auth.opaque == &scenario, "identity opaque pointer is preserved independently");
   }
   scenario.executed.push_back(cmd);
   Step step;
@@ -216,7 +225,9 @@ static bool submitAndExecuteSync(const Command& cmd, String& output) {
 // INSERT_PRODUCTION_HANDLERS_HERE
 
 static void resetScenario() {
-  requestAllocator.reset(); responseAllocator.reset(); scenario = Scenario{};
+  requestAllocator.reset(); responseAllocator.reset();
+  const auto nextClock = scenario.now + 1000;
+  scenario = Scenario{}; scenario.now = nextClock;
   gSettings.bondModeEnabled = true; server = reinterpret_cast<void*>(1);
   gBroadcastSkipSessionIdx = 17; gMeshActivitySuspended = false;
 }
@@ -229,7 +240,9 @@ static httpd_req_t invoke(bool bond, const std::vector<std::string>& commands,
   httpd_req_t req;
   serializeJson(request, req.input);
   req.content_len = req.input.size();
+  scenario.expectedReq = bond ? nullptr : &req;
   if (bond) handleBondCliBatch(&req); else handleCliBatch(&req);
+  scenario.expectedReq = nullptr;
   check(!gMeshActivitySuspended && gBroadcastSkipSessionIdx == 17,
         "handler exit restores web globals");
   check(requestAllocator.live.empty() && responseAllocator.live.empty(),
@@ -249,6 +262,94 @@ static void expectError(const httpd_req_t& req, const char* status, const char* 
   check(doc["error"] == error, "expected error code");
   check(!doc["results"].is<JsonArray>(), "failure does not expose partial results");
 }
+static void checkWebContext(const CommandContext& ctx, bool stateful,
+                            TransportSessionEpoch epoch, bool independent,
+                            bool validate = false, bool capture = false,
+                            uint32_t batchId = 0) {
+  const auto identity = makeWebAuthCtx(nullptr);
+  check(ctx.origin == ORIGIN_WEB && ctx.auth.transport == identity.transport &&
+        ctx.auth.user == identity.user && ctx.auth.ip == identity.ip &&
+        ctx.auth.path == identity.path && ctx.auth.scope == identity.scope &&
+        ctx.auth.sid == identity.sid && ctx.auth.opaque == identity.opaque,
+        "complete web identity is preserved");
+  check(ctx.id != 0 && ctx.timestampMs == ctx.id + 100,
+        "id and timestamp use two ordered clock reads");
+  check(ctx.outputMask == (MSG_ROUTE_WEB | MSG_ROUTE_FILE), "web plus file routing");
+  const int flags = (stateful ? COMMAND_CONTEXT_REQUIRE_LIVE_SESSION : 0) |
+                    (independent ? COMMAND_CONTEXT_MODE_INDEPENDENT : 0);
+  check(ctx.behaviorFlags == flags, "exact caller-specific behavior flags");
+  check(ctx.transportSessionEpoch == epoch && ctx.settingsBatchId == batchId,
+        "caller supplies session generation and settings token");
+  check(ctx.validateOnly == validate && ctx.captureOutput == capture,
+        "caller retains validation/capture choices");
+  check(ctx.replyHandle == nullptr && ctx.authoritySessionEpoch == 0 &&
+        ctx.authorityId == 0, "unrelated reply and authority defaults preserved");
+  for (char byte : ctx.automationName)
+    check(byte == 0, "automation name remains fully zero initialized");
+}
+static void testContextContracts() {
+#if HAVE_WEB_CONTEXT_HELPER
+  for (bool stateful : {false, true}) {
+    resetScenario(); scenario.stateful = stateful;
+    auto identity = makeWebAuthCtx(nullptr);
+    httpd_req_t req;
+    const auto previousClock = scenario.now;
+    const CommandContext ctx = makeWebCommandContext(&req, identity);
+    checkWebContext(ctx, stateful, 0, false);
+    check(ctx.httpReq == &req && ctx.auth.opaque != ctx.httpReq,
+          "request pointer and supplied auth opaque are distinct");
+    check(scenario.captures == 0 && scenario.now == previousClock + 200,
+          "context preparation reads only two clocks and never captures a session");
+    identity.transport = SOURCE_UART;
+    const CommandContext other = makeWebCommandContext(nullptr, identity);
+    check(other.auth.transport == SOURCE_UART && other.httpReq == nullptr,
+          "context preparation copies supplied identity and request verbatim");
+  }
+#endif
+  struct Options { const char* form; bool independent, validate, capture; };
+  const Options options[] = {{"", true, false, false},
+      {"&capture=1", true, false, true},
+      {"&interactive=true&capture=1", false, false, true},
+      {"&interactive=1&validate=true&capture=1", true, true, true}};
+  for (bool stateful : {false, true}) for (const auto& option : options) {
+    resetScenario(); scenario.stateful = stateful;
+    httpd_req_t req; req.input = std::string("cmd=status") + option.form;
+    req.content_len = req.input.size(); scenario.expectedReq = &req;
+    check(handleCLICommand(&req) == ESP_OK, "single command contract request completes");
+    check(scenario.executed.size() == 1 && scenario.captures == 1,
+          "single command captures once and executes once");
+    checkWebContext(scenario.executed[0].ctx, stateful, stateful ? 42 : 0,
+                    option.independent, option.validate, option.capture);
+    check(scenario.feedEntries == (option.validate ? 0 : 1), "validation skips command feed");
+    check(scenario.broadcasts.size() == (option.validate ? 0u : 1u),
+          "validation does not broadcast command results");
+  }
+  resetScenario(); scenario.epoch = 0;
+  httpd_req_t expired; expired.input = "cmd=status"; expired.content_len = expired.input.size();
+  scenario.expectedReq = &expired;
+  handleCLICommand(&expired);
+  check(scenario.executed.size() == 1 && scenario.captures == 1, "failed epoch capture still submitted to executor guard");
+  checkWebContext(scenario.executed[0].ctx, true, 0, true);
+  check(expired.status == "401 Unauthorized" && scenario.broadcasts.empty(),
+        "cookie with zero epoch is not treated as Basic Auth");
+  for (bool stateful : {false, true}) {
+    resetScenario(); scenario.stateful = stateful; scenario.advanceEpochOnCapture = true;
+    const auto result = decode(invoke(false, {"first", "second", "third"}));
+    check(result["ok"] == true && scenario.executed.size() == 3 && scenario.captures == 1,
+          "batch captures original session exactly once for the whole request");
+    for (const auto& cmd : scenario.executed)
+      checkWebContext(cmd.ctx, stateful, stateful ? 42 : 0, true);
+  }
+  resetScenario(); scenario.advanceEpochOnCapture = true;
+  decode(invoke(false, {"first", "second"}, true));
+  check(scenario.captures == 1, "interactive batch captures once");
+  for (const auto& cmd : scenario.executed) checkWebContext(cmd.ctx, true, 42, false);
+  resetScenario(); scenario.steps = {{"began"}, {"changed", true, true, true}};
+  expectError(invoke(false, {"beginwrite", "set value", "savesettings"}), "401", "web_session_changed");
+  check(scenario.finalizers == 1 && scenario.captures == 1, "session loss finalizes without capturing replacement session");
+  for (const auto& cmd : scenario.executed) checkWebContext(cmd.ctx, true, 42, true, false, false, 73);
+}
+
 static void testNormalAndOwnership() {
   for (bool bond : {false, true}) {
     resetScenario();
@@ -452,6 +553,7 @@ static void testPrivateSTTDirectReplies() {
 
 int main() {
   try {
+    testContextContracts();
     testPrivateSTTDirectReplies();
     testNormalAndOwnership(); testSettingsAndTimeouts(); testInteractive();
     testSessionAndShutdown(); testResponseAllocationFailures();

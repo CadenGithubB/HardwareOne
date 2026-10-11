@@ -14,8 +14,8 @@ struct RouterMetrics;
 extern const CommandEntry commands[];
 extern const size_t commandsCount;
 
-static String originPrefix(const char* source, const String& user, const String& ip);
-void runUnifiedSystemCommand(const String& argsInput);
+static String originPrefix(const char* source, const String& user, const String& ip,
+                           const char* suffix = "");
 
 extern uint32_t gLastHeartbeatSentMs;
 extern const uint32_t MESH_HEARTBEAT_INTERVAL_MS;
@@ -288,12 +288,7 @@ QueueHandle_t gCmdExecQ = nullptr;
 TaskHandle_t gCmdExecTaskHandle = nullptr;
 static std::atomic<uint32_t> sCmdExecHeartbeatMs{0};
 static void commandExecTask(void* pv);
-bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
-bool submitAndExecuteSync(const Command& cmd, String& out);
-String execCommandUnified(const CommandContext& baseCtx, const String& line);
-bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
 String resolveRegistryCommandKey(const String& line);
-bool adminRequiredForLine(const String& line);
 void broadcastOutput(const String& s);
 void broadcastOutput(const char* s);
 void broadcastOutput(const String& s, const CommandContext& ctx);
@@ -456,17 +451,8 @@ void appendCommandToFeed(const char* source, const String& cmd, const String& us
   // transport can evict useful human history with status/capability polls.
   if (cm5PresenceIsProtocolCommand(cmd.c_str()) ||
       liveAudioIsHousekeepingCommand(cmd.c_str())) return;
-  char prefix[128];
-  if (user.length() || ip.length()) {
-    snprintf(prefix, sizeof(prefix), "[%s %s%s%s] $ ",
-             source,
-             user.length() ? user.c_str() : "",
-             ip.length() ? "@" : "",
-             ip.length() ? ip.c_str() : "");
-  } else {
-    snprintf(prefix, sizeof(prefix), "[%s] $ ", source);
-  }
-  String line = String(prefix) + redactCmdForAudit(cmd);
+  String prefix = originPrefix(source, user, ip, "$ ");
+  String line = prefix + redactCmdForAudit(cmd);
   // Write directly to web mirror (command feed, not via debug queue)
   if (gWebMirror.buf) {
     gWebMirror.appendDirect(line.c_str(), line.length(), true);
@@ -474,16 +460,19 @@ void appendCommandToFeed(const char* source, const String& cmd, const String& us
 #endif
 }
 
-static String originPrefix(const char* source, const String& user, const String& ip) {
+static String originPrefix(const char* source, const String& user, const String& ip,
+                           const char* suffix) {
+  // Keep the feed marker inside the same bounded prefix as command replies.
+  // Appending it afterward would change truncation for long source/user/IP text.
   char buf[128];
   if (user.length() || ip.length()) {
-    snprintf(buf, sizeof(buf), "[%s %s%s%s] ",
+    snprintf(buf, sizeof(buf), "[%s %s%s%s] %s",
              source,
              user.length() ? user.c_str() : "",
              ip.length() ? "@" : "",
-             ip.length() ? ip.c_str() : "");
+             ip.length() ? ip.c_str() : "", suffix);
   } else {
-    snprintf(buf, sizeof(buf), "[%s] ", source);
+    snprintf(buf, sizeof(buf), "[%s] %s", source, suffix);
   }
   return String(buf);
 }

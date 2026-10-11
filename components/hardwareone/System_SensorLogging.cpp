@@ -61,9 +61,6 @@
 #include "System_SensorStubs.h"  // Provides stubs for disabled sensors
 #include "System_CaptureCrypto.h"  // at-rest sealing of capture files
 
-// External dependencies
-extern void getTimestampPrefixMsCached(char* out, size_t outSize);
-
 // Modular sensor caches (conditionally available based on enabled sensors)
 
 // ============================================================================
@@ -243,30 +240,60 @@ static const char kTrackHeader[] =
     "# Signal loss: time,---,SIGNAL_LOST\n"
     "# Signal regained: time,~~~,SIGNAL_REGAINED (lost N intervals)\n";
 
-// Write the format-appropriate header into a freshly-created/empty file.
-// TEXT has no header (rows are self-describing). Returns false on a short
-// write so callers can treat the file as unusable instead of shipping a
-// truncated header that would poison every later compatibility compare.
+// Write and check a complete header in an empty staging file. Only the caller
+// may publish it as an append target; partial headers must remain unpublished.
 static bool writeHeaderChecked(File& f) {
+  size_t expected = 0;
+  bool complete = true;
   if (gSensorLogSealed) {
     // Sealed files carry a plaintext magic first line — the at-rest mark every
     // viewer and probe keys off. Data rows are sealed; the schema header below
     // stays plaintext (column names aren't data, and the append-compat compare
     // must stay readable without the key).
     static const char kMagic[] = CAPCRYPT_MAGIC_LINE "\n";
-    if (f.write((const uint8_t*)kMagic, sizeof(kMagic) - 1) != sizeof(kMagic) - 1)
-      return false;
+    expected += sizeof(kMagic) - 1;
+    complete = f.write((const uint8_t*)kMagic, sizeof(kMagic) - 1) == sizeof(kMagic) - 1;
   }
-  if (gSensorLogFormat == SENSOR_LOG_CSV) {
+  if (complete && gSensorLogFormat == SENSOR_LOG_CSV) {
     String h = buildCsvHeader(gSensorLogMask);
-    h += '\n';
-    return f.write((const uint8_t*)h.c_str(), h.length()) == h.length();
+    complete = h.concat('\n');
+    expected += h.length();
+    if (complete) complete = f.write((const uint8_t*)h.c_str(), h.length()) == h.length();
   }
-  if (gSensorLogFormat == SENSOR_LOG_TRACK) {
-    return f.write((const uint8_t*)kTrackHeader, strlen(kTrackHeader)) ==
-           strlen(kTrackHeader);
+  if (complete && gSensorLogFormat == SENSOR_LOG_TRACK) {
+    expected += strlen(kTrackHeader);
+    complete = f.write((const uint8_t*)kTrackHeader, strlen(kTrackHeader)) == strlen(kTrackHeader);
   }
-  return true;  // TEXT: headerless by design (magic line only when sealed)
+  f.flush();
+  return complete && !f.getWriteError() && f.size() == expected;
+}
+
+// Caller holds the filesystem guard and owns the returned append handle.
+// Existing nonempty files retain their current compatibility policy. A new or
+// empty file gets a complete staged header before it can receive any rows.
+static File openSensorLogForAppend(const String& path) {
+  const auto ctx = VFS::systemAuth("senlog.append");
+  File file = VFS::openGuarded(path, "a", ctx, true);
+  if (!file || file.isDirectory()) {
+    if (file) file.close();
+    return File();
+  }
+  if (file.size() != 0 || (!gSensorLogSealed && gSensorLogFormat == SENSOR_LOG_TEXT)) return file;
+  file.close();
+
+  String temporary;
+  if (!temporary.concat(path) || !temporary.concat(".header.tmp") ||
+      VFS::existsGuarded(temporary, ctx)) return File();
+  File header = VFS::openGuarded(temporary, "w", ctx, true);
+  const bool complete = header && !header.isDirectory() && writeHeaderChecked(header);
+  if (header) header.close();
+  if (!complete || !VFS::replaceFileGuarded(temporary, path, ctx)) {
+    // A failed cleanup leaves a visible reserved sibling. Later attempts also
+    // refuse it, including after reboot, rather than appending below bad data.
+    VFS::removeGuarded(temporary, ctx);
+    return File();
+  }
+  return VFS::openGuarded(path, "a", ctx, true);
 }
 
 // Classify the accepted session path into gSensorLogPathMode (+ capture the
@@ -1006,21 +1033,8 @@ void sensorLogTick() {
       bool onSd = VFS::resolveOverflowPath(gSensorLogPath.c_str(),
                                            (size_t)gSensorLogMaxSize,
                                            activePath, sizeof(activePath));
-      File f = VFS::openGuarded(String(activePath), "a", VFS::systemAuth("senlog.append"), true);
+      File f = openSensorLogForAppend(String(activePath));
       if (f) {
-        // Header-on-create: a fresh/empty file at the ACTIVE tier gets its
-        // header before the first row. One check covers three holes: the
-        // post-rotation recreated base file, a mid-session SD-overflow flip
-        // creating the /sd mirror, and rollover targets created right here.
-        // TEXT is headerless by design (writeHeaderChecked no-ops).
-        if (f.size() == 0 && !writeHeaderChecked(f)) {
-          f.close();
-          log_open_fail++;
-          if (isDebugFlagSet(DEBUG_LOGGER)) {
-            DEBUG_LOGGERF("logger: header write failed on %s", activePath);
-          }
-          return;
-        }
         size_t len = strlen(line);
         const uint8_t* rowBytes = (const uint8_t*)line;
         if (gSensorLogSealed) {
@@ -1043,12 +1057,32 @@ void sensorLogTick() {
           rowBytes = (const uint8_t*)gSealBuf;
           len = (size_t)sl;
         }
-        f.write(rowBytes, len);
-        f.write('\n');
+        size_t written = 0;
+        const bool complete = writeLineChecked(f, rowBytes, len, written);
         f.close();
-        gSensorLogLastWrite = millis();
-        log_writes++;
-        gApproxSizeBytes += (len + 1);
+        if (complete) {
+          gSensorLogLastWrite = millis();
+          log_writes++;
+        }
+        // Partial rows still consume space and must not prevent rotation.
+        // On failure, refresh from the exact tier we wrote; a failed reopen
+        // keeps the estimate rather than resetting it or resolving a new tier.
+        gApproxSizeBytes += written;
+        if (!complete) {
+          File sizeFile = VFS::openGuarded(String(activePath), "r", VFS::systemAuth("senlog.size"));
+          if (sizeFile) {
+            gApproxSizeBytes = sizeFile.size();
+            sizeFile.close();
+          }
+          if (isDebugFlagSet(DEBUG_STORAGE)) {
+            DEBUGF_BROADCAST(DEBUG_STORAGE, "Sensor log: row write failed (%u/%u bytes)",
+                             (unsigned)written, (unsigned)(len + 1));
+          }
+          if (isDebugFlagSet(DEBUG_LOGGER)) {
+            DEBUG_LOGGERF("logger: row write failed (%u/%u bytes), approxSize=%uB",
+                          (unsigned)written, (unsigned)(len + 1), (unsigned)gApproxSizeBytes);
+          }
+        }
 
         // Handle log rotation. Rotation runs on whichever tier we're writing
         // to. When overflow is active we rotate inside `/sd/...` and the
@@ -1097,10 +1131,10 @@ void sensorLogTick() {
           }
         }
         
-        if (isDebugFlagSet(DEBUG_STORAGE)) {
+        if (complete && isDebugFlagSet(DEBUG_STORAGE)) {
           DEBUGF_BROADCAST(DEBUG_STORAGE, "Sensor log: wrote %d bytes", (int)len);
         }
-        if (isDebugFlagSet(DEBUG_LOGGER)) {
+        if (complete && isDebugFlagSet(DEBUG_LOGGER)) {
           DEBUG_LOGGERF("logger: wrote %dB, approxSize=%uB, writes=%u", (int)len, (unsigned)gApproxSizeBytes, (unsigned)log_writes);
         }
       } else {
@@ -1338,27 +1372,18 @@ static const char* sensorLogStart(String filepath, uint32_t interval) {
     return "Error: capture encryption key unavailable (NVS) — retry, or 'capturecrypt off' to log unsealed";
   }
 
-  // Create file if needed. Variants/fallbacks stay in the same directory,
-  // so the parent-mkdir walk above already covers them. The append path
-  // additionally header-on-creates empty files (post-rotation base, /sd
-  // overflow mirror), so a file skipped here is still safe.
-  if (!VFS::existsGuarded(filepath, VFS::systemAuth("senlog.setup_create"))) {
+  // Start and append share header preparation, including empty existing files
+  // and the next base created after rotation or an overflow-tier change.
+  {
     FsLockGuard fsGuard("sensorlog.setup_create");
-    File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("senlog.setup_create"), true);
+    const bool created = !VFS::existsGuarded(filepath, VFS::systemAuth("senlog.setup_create"));
+    File f = openSensorLogForAppend(filepath);
     if (!f) {
-      snprintf(getDebugBuffer(), 1024, "Error: Failed to create file: %s", filepath.c_str());
-      return getDebugBuffer();
-    }
-    if (!writeHeaderChecked(f)) {
-      // Short write = truncated header that would poison every later
-      // day-file compatibility compare — remove the husk and fail loudly.
-      f.close();
-      VFS::removeGuarded(filepath, VFS::systemAuth("senlog.setup_create"));
-      snprintf(getDebugBuffer(), 1024, "Error: header write failed for %s (flash full?)", filepath.c_str());
+      snprintf(getDebugBuffer(), 1024, "Error: Failed to prepare log file: %s", filepath.c_str());
       return getDebugBuffer();
     }
     f.close();
-    broadcastOutput("Created log file: " + filepath);
+    if (created) broadcastOutput("Created log file: " + filepath);
   }
 
   if (ESP.getFreeHeap() < 8192) {
@@ -2354,6 +2379,16 @@ const char* cmd_healthlogmerge(const String& argsInput) {
   if (!(outPath.endsWith(".csv") || outPath.endsWith(".log") || outPath.endsWith(".txt")))
     outPath += ".csv";
 
+  String normalizedOutput;
+  if (!normalizeFsPath(outPath, normalizedOutput)) return "Error: invalid output path";
+  outPath = normalizedOutput;
+  if (outPath != normalizedOutput) return "Error: output path allocation failed";
+  String temporary = outPath;
+  String backup = outPath;
+  if (temporary.length() != outPath.length() || !temporary.concat(".tmp") ||
+      backup.length() != outPath.length() || !backup.concat(".bak"))
+    return "Error: output path allocation failed";
+
   const AuthContext& ctx    = currentAuthContext();
   // SCOPED: the unscoped overload leaves ctx.scope empty, pathWithinScope then
   // returns true unconditionally, and permsForRole hands back rule.systemPerms
@@ -2364,19 +2399,19 @@ const char* cmd_healthlogmerge(const String& argsInput) {
   FsLockGuard fsGuard("healthlogmerge");
 
   for (int i = 1; i < a.count(); i++) {
-    String in;
-    const char* e = requireQuotedPath(a, i, in);
+    String requested, in;
+    const char* e = requireQuotedPath(a, i, requested);
     if (e) return e;
+    if (!normalizeFsPath(requested, in)) return "Error: input not found (invalid path)";
     if (in == outPath) return "Error: an input file is the same as the output";
+    if (in == temporary || in == backup) return "Error: input conflicts with output staging paths";
     if (!VFS::existsGuarded(in, ctx)) {
       snprintf(buf, 1024, "Error: input not found: %s", in.c_str());
       return buf;
     }
   }
 
-  // Refuse an out-of-tree output BEFORE the "w" open below truncates it. sysCtx
-  // is scoped to the capture tree so the open would fail regardless, but only
-  // after the damage, and only as a generic "cannot create".
+  // Keep output and its staging files inside the authorized capture tree.
   if (!VFS::pathInCaptureTree(outPath)) {
     snprintf(buf, 1024,
              "Error: output must be inside %s (or its /sd mirror) — got %s",
@@ -2387,24 +2422,35 @@ const char* cmd_healthlogmerge(const String& argsInput) {
   VFS::mkdirGuarded("/logging_captures", sysCtx);
   VFS::mkdirGuarded(CAPTURE_DIR_SENSORS, sysCtx);
 
-  File out = VFS::openGuarded(outPath, "w", sysCtx, true);
-  if (!out) {
+  if (VFS::existsGuarded(temporary, sysCtx)) {
+    return "Error: output temporary already exists; inspect it before retrying";
+  }
+  File out = VFS::openGuarded(temporary, "w", sysCtx, true);
+  if (!out || out.isDirectory()) {
+    if (out) out.close();
+    VFS::removeGuarded(temporary, sysCtx);
     snprintf(buf, 1024,
              "Error: cannot create output: %s (parent missing, filesystem full, "
              "or path not writable)", outPath.c_str());
     return buf;
   }
 
-  uint8_t chunk[512];
   unsigned long totalBytes = 0;
   int filesDone = 0;
   int sealedState = -1;  // -1 unset; else 0/1 — all inputs must match
   for (int i = 1; i < a.count(); i++) {
-    String in;
-    requireQuotedPath(a, i, in);
-    File f = VFS::openGuarded(in, "r", ctx);
-    if (!f) {
+    String requested, in;
+    requireQuotedPath(a, i, requested);
+    if (!normalizeFsPath(requested, in)) {
       out.close();
+      VFS::removeGuarded(temporary, sysCtx);
+      return "Error: input path unavailable";
+    }
+    File f = VFS::openGuarded(in, "r", ctx);
+    if (!f || f.isDirectory()) {
+      if (f) f.close();
+      out.close();
+      VFS::removeGuarded(temporary, sysCtx);
       snprintf(buf, 1024, "Error: cannot open input: %s", in.c_str());
       return buf;
     }
@@ -2418,6 +2464,7 @@ const char* cmd_healthlogmerge(const String& argsInput) {
     } else if ((int)fSealed != sealedState) {
       f.close();
       out.close();
+      VFS::removeGuarded(temporary, sysCtx);
       snprintf(buf, 1024,
                "Error: cannot stitch sealed and plaintext captures together — "
                "decrypt the sealed input first with capturecrypt export (%s)",
@@ -2425,24 +2472,32 @@ const char* cmd_healthlogmerge(const String& argsInput) {
       return buf;
     }
     uint8_t lastByte = (uint8_t)'\n';
-    while (f.available()) {
-      int n = f.read(chunk, sizeof(chunk));
-      if (n <= 0) break;
-      if (out.write(chunk, (size_t)n) != (size_t)n) {
-        f.close();
-        out.close();
-        snprintf(buf, 1024, "Error: write failed (filesystem full?) after %lu bytes to %s",
-                 totalBytes, outPath.c_str());
-        return buf;
-      }
-      totalBytes += (unsigned long)n;
-      lastByte = chunk[n - 1];
-    }
+    const size_t expectedInputBytes = f.size() - f.position();
+    const unsigned long beforeCopy = totalBytes;
+    bool copied = copyFileContents(f, out, totalBytes, lastByte) &&
+                  totalBytes - beforeCopy == expectedInputBytes;
     f.close();
-    if (lastByte != (uint8_t)'\n') { out.write((uint8_t)'\n'); totalBytes++; }
+    if (copied && lastByte != (uint8_t)'\n') {
+      copied = out.write((uint8_t)'\n') == 1;
+      if (copied) totalBytes++;
+    }
+    if (!copied) {
+      out.close();
+      VFS::removeGuarded(temporary, sysCtx);
+      snprintf(buf, 1024, "Error: write failed (filesystem full?) after %lu bytes to %s",
+               totalBytes, outPath.c_str());
+      return buf;
+    }
     filesDone++;
   }
+  out.flush();
+  const bool complete = !out.getWriteError() && out.size() == totalBytes;
   out.close();
+  if (!complete || !VFS::replaceFileGuarded(temporary, outPath, sysCtx)) {
+    VFS::removeGuarded(temporary, sysCtx);
+    snprintf(buf, 1024, "Error: could not complete output: %s (check .bak on SD after a failed restore)", outPath.c_str());
+    return buf;
+  }
 
   snprintf(buf, 1024,
            "Stitched %d files into %s (%lu bytes)",
@@ -2503,14 +2558,26 @@ const char* cmd_capturecrypt(const String& argsInput) {
     // leaves this device's NVS), so sharing plaintext is an explicit act.
     if (a.count() < 3)
       return "Error: Usage: capturecrypt export \"<sealed-in>\" \"<plain-out>\"";
-    String inPath, outName;
-    const char* e1 = requireQuotedPath(a, 1, inPath);
+    String requestedInput, inPath, outName;
+    const char* e1 = requireQuotedPath(a, 1, requestedInput);
     if (e1) return e1;
+    if (!normalizeFsPath(requestedInput, inPath)) return "Error: invalid input path";
     const char* e2 = requireQuotedToken(a, 2, outName);
     if (e2) return e2;
     String outPath = outName;
     if (!outPath.startsWith("/")) outPath = String(CAPTURE_DIR_SENSORS) + "/" + outPath;
+    String normalizedOutput;
+    if (!normalizeFsPath(outPath, normalizedOutput)) return "Error: invalid output path";
+    outPath = normalizedOutput;
+    if (outPath != normalizedOutput) return "Error: output path allocation failed";
+    String temporary = outPath;
+    String backup = outPath;
+    if (temporary.length() != outPath.length() || !temporary.concat(".tmp") ||
+        backup.length() != outPath.length() || !backup.concat(".bak"))
+      return "Error: output path allocation failed";
+
     if (inPath == outPath) return "Error: output is the same as the input";
+    if (inPath == temporary || inPath == backup) return "Error: input conflicts with output staging paths";
     if (!VFS::pathInCaptureTree(outPath)) {
       snprintf(buf, 1024,
                "Error: output must be inside %s (or its /sd mirror) — got %s",
@@ -2524,7 +2591,8 @@ const char* cmd_capturecrypt(const String& argsInput) {
     FsLockGuard fsGuard("capturecrypt.export");
 
     File in = VFS::openGuarded(inPath, "r", ctx);
-    if (!in) {
+    if (!in || in.isDirectory()) {
+      if (in) in.close();
       snprintf(buf, 1024, "Error: cannot open input: %s", inPath.c_str());
       return buf;
     }
@@ -2532,16 +2600,31 @@ const char* cmd_capturecrypt(const String& argsInput) {
       in.close();
       return "Error: input is not a sealed capture (no #HW1ENC magic on line 1)";
     }
-    File out = VFS::openGuarded(outPath, "w", sysCtx, true);
-    if (!out) {
+    if (VFS::existsGuarded(temporary, sysCtx)) {
+      in.close();
+      return "Error: output temporary already exists; inspect it before retrying";
+    }
+    File out = VFS::openGuarded(temporary, "w", sysCtx, true);
+    if (!out || out.isDirectory()) {
+      if (out) out.close();
+      VFS::removeGuarded(temporary, sysCtx);
       in.close();
       snprintf(buf, 1024, "Error: cannot create output: %s", outPath.c_str());
       return buf;
     }
 
     unsigned long rows = 0, failedRows = 0, lineNo = 0;
+    size_t expectedBytes = 0;
+    const size_t expectedInputBytes = in.size();
     while (in.available()) {
+      const size_t beforeRead = in.position();
       String lineStr = in.readStringUntil('\n');
+      if (in.position() == beforeRead) {
+        in.close();
+        out.close();
+        VFS::removeGuarded(temporary, sysCtx);
+        return "Error: input read failed during capture export";
+      }
       lineNo++;
       // The exported copy is PLAINTEXT — dropping the magic line keeps every
       // probe/viewer from mistaking it for a sealed file.
@@ -2550,19 +2633,28 @@ const char* cmd_capturecrypt(const String& argsInput) {
         rows++;
         if (lineStr == CAPCRYPT_UNDECRYPTABLE) failedRows++;
       }
-      if (out.write((const uint8_t*)lineStr.c_str(), lineStr.length()) !=
-              lineStr.length() ||
-          out.write((uint8_t)'\n') != 1) {
+      size_t written = 0;
+      expectedBytes += lineStr.length() + 1;
+      if (!writeLineChecked(out, (const uint8_t*)lineStr.c_str(), lineStr.length(), written)) {
         in.close();
         out.close();
+        VFS::removeGuarded(temporary, sysCtx);
         snprintf(buf, 1024,
                  "Error: write failed (filesystem full?) at line %lu of %s",
                  lineNo, outPath.c_str());
         return buf;
       }
     }
+    const bool inputComplete = in.position() == expectedInputBytes;
     in.close();
+    out.flush();
+    const bool complete = inputComplete && !out.getWriteError() && out.size() == expectedBytes;
     out.close();
+    if (!complete || !VFS::replaceFileGuarded(temporary, outPath, sysCtx)) {
+      VFS::removeGuarded(temporary, sysCtx);
+      snprintf(buf, 1024, "Error: could not complete output: %s (check .bak on SD after a failed restore)", outPath.c_str());
+      return buf;
+    }
     snprintf(buf, 1024,
              "SUCCESS: exported %s -> %s (%lu rows decrypted, %lu undecryptable)",
              inPath.c_str(), outPath.c_str(), rows - failedRows, failedRows);

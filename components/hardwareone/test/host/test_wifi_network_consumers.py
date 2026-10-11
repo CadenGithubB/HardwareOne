@@ -31,7 +31,7 @@ writer = extract_block(settings, "bool writeSettingsJson(")
 failure = extract_block(writer, "if (!buildSettingsJsonDoc(")
 assert "SYSEVT_SETTINGS_SAVE_FAILED" in failure
 assert "pollResume();" in failure and "return false;" in failure
-assert writer.index("if (!buildSettingsJsonDoc(") < writer.index('VFS::openGuarded(tmp, "w"')
+assert writer.index("if (!buildSettingsJsonDoc(") < writer.index("writeSettingsSnapshot(")
 
 web = extract_block(source("WebServer_Server.cpp"), "esp_err_t handleSettingsGet(")
 failure = extract_block(web, "if (!buildSettingsJsonDoc(")
