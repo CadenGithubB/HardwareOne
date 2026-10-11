@@ -1420,10 +1420,13 @@ its default (on): capture-time features (`HW1_STT_CAPTURE_FEATURES`; each cached
 row is compared bit for bit with the real frontend's batch row of the exact,
 possibly trimmed or speculative, input), trailing-silence trim, speculative
 finals (short closes included; promoted on the same input, dropped on resumed
-speech, aborted when the final the worker takes next does not match it), the 1 s
-short close, the publish wake for drafts and finals, the 1.25 s native pause
-feed, feature-pool and task failures, native full queues and restarts, alongside
-the existing keep-warm, per-session source and transcript tests.
+speech, aborted when the final the worker takes next does not match it; the
+snapshot is copied over a running draft as soon as that draft is past its
+frontend, and staged fake drafts hash their input to prove it is never written
+while their frontend reads it), the 1 s short close, the publish wake for drafts
+and finals, the 1.25 s native pause feed, feature-pool and task failures, native
+full queues and restarts, alongside the existing keep-warm, per-session source
+and transcript tests.
 `test_stt_runtime.py` builds the one-shot path with all of those switches off,
 so every off path still compiles.
 
