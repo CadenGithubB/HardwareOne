@@ -57,6 +57,70 @@ struct STTLocalCallBudget {
 class STTLocalSession;
 STTLocalCallBudget sttLocalCallBudget(size_t samples, const STTLocalSession* session = nullptr);
 
+// Speaker labels: an optional speaker-embedding model beside the STT model,
+// "/sd/STT Models/speaker.spk" (format and contract: stt/speaker_model.h), loaded
+// after each run's warm-up and freed when the run ends. Each finished phrase
+// gets a run-local label (0 = the first voice heard, 1, ...) from
+// stt/speaker_cluster.h. Any embedding model works that its file describes.
+// ENABLE_STT_SPEAKER_LABELS comes from System_BuildConfig.h, which System_STT.h
+// and System_STTLocal.cpp include first.
+#if defined(CONFIG_IDF_TARGET_ESP32P4) && defined(ENABLE_STT_SPEAKER_LABELS) && ENABLE_STT_SPEAKER_LABELS
+#define HW1_STT_SPEAKER_LABELS 1
+#else
+#define HW1_STT_SPEAKER_LABELS 0
+#endif
+// Speaker diagnostics (kept, compiled out by default): fixture self-checks at load
+// and every 16th job (TL spkfix), per-phrase voiceprints (TL spke), ESP-DL kernel
+// binds (TL kbind) and per-layer internal-RAM dips (TL spkram). 1 to enable.
+#ifndef HW1_STT_SPEAKER_DIAGNOSTICS
+#define HW1_STT_SPEAKER_DIAGNOSTICS 0
+#endif
+struct STTSpeakerStatus {
+  bool ready = false;
+  size_t bytes = 0;            // speaker.spk size
+  size_t psramUsed = 0;        // PSRAM the loaded model, its arena and workspace hold
+  long internalUsed = 0;       // internal RAM change across the load (should be ~0)
+  uint32_t loadMs = 0;
+  float threshold = 0;         // from the file
+  float fixtureCos = -2;       // cosine to the Mac's embedding of speaker_fixture.bin (-2: none)
+  char why[48] = {};
+  // where the load time and memory went
+  uint32_t readMs = 0, shaUs = 0, buildUs = 0, testUs = 0, fixtureUs = 0;
+  int testResult = -1;         // ESP-DL self-test on the file's test values (0 = pass)
+  size_t arenaPsram = 0, arenaInternal = 0, workspaceBytes = 0;
+  unsigned modules = 0;        // trunk execution-plan modules (layers)
+};
+struct STTSpeakerLabel {
+  int8_t speaker = -1;         // 0-based session label; -1 none
+  float similarity = 0;
+  bool created = false, tentative = false;
+  uint32_t featureUs = 0, trunkUs = 0, headUs = 0, totalUs = 0;
+  // sections: feature = fft + mel + norm; head = sap + pool + fc; cluster = label assignment
+  uint32_t fftUs = 0, melUs = 0, normUs = 0, quantUs = 0, dequantUs = 0, sapUs = 0, poolUs = 0, fcUs = 0, clusterUs = 0;
+  uint16_t frames = 0;         // feature frames computed
+  bool cropped = false;        // phrase longer than the model window (centre 3 s used)
+};
+// Per-layer trunk profile of the loaded speaker model, summed over the session
+// (TL spkstg lines), then reset. No-op without a model.
+void sttSpeakerProfileLog();
+bool sttSpeakerBegin(STTLocalSession* session, size_t maxSamples, STTSpeakerStatus* status);
+// Background labelling: after sttSpeakerBegin, a priority-1 task on core 1
+// (PSRAM stack, single-core trunk) labels submitted phrases while the STT worker
+// is idle, so captions never wait for it. Submit copies the centre window the
+// model uses (<= 96 KB) into one of 4 slots; false = all slots busy (phrase
+// skipped, counted). The task logs TL spk / spkt / spke (embedding) lines.
+// sttSpeakerEnd stops the task and frees the speaker model (before the session is reset
+// or parked); the next run loads it again and starts with fresh labels.
+bool sttSpeakerSubmit(STTLocalSession* session, uint32_t seq, const int16_t* pcm, size_t samples);
+void sttSpeakerEnd(STTLocalSession* session);
+// Labels for the transcript writer (the STT worker): true while a background task labels phrases.
+bool sttSpeakerBackground(STTLocalSession* session);
+// One finished label (non-blocking): speaker -1 = phrase skipped/failed (write it unlabelled).
+bool sttSpeakerTakeLabel(STTLocalSession* session, uint32_t* seq, int8_t* speaker);
+// Wait (bounded) until every submitted phrase has a label; before the session ends.
+void sttSpeakerDrain(STTLocalSession* session, uint32_t timeoutMs);
+bool sttSpeakerLabel(STTLocalSession* session, const int16_t* pcm, size_t samples, STTSpeakerLabel* out);
+
 // Single-worker backend lifetime: one task uses a session at a time. Reset
 // after the final call has returned, including failure/cancellation.
 // FreeRTOS self-deleting tasks must reset explicitly before vTaskDelete().
@@ -91,6 +155,13 @@ class STTLocalSession {
                                 const STTLocalControl&, STTLocalStats&,
                                 char*, size_t, STTLocalSession*, const STTFeaturePrefix*);
   friend STTLocalCallBudget sttLocalCallBudget(size_t, const STTLocalSession*);
+  friend bool sttSpeakerBegin(STTLocalSession*, size_t, STTSpeakerStatus*);
+  friend bool sttSpeakerLabel(STTLocalSession*, const int16_t*, size_t, STTSpeakerLabel*);
+  friend bool sttSpeakerSubmit(STTLocalSession*, uint32_t, const int16_t*, size_t);
+  friend void sttSpeakerEnd(STTLocalSession*);
+  friend bool sttSpeakerBackground(STTLocalSession*);
+  friend bool sttSpeakerTakeLabel(STTLocalSession*, uint32_t*, int8_t*);
+  friend void sttSpeakerDrain(STTLocalSession*, uint32_t);
 };
 
 // Cheap availability check for the configured, fixed model path; does not load

@@ -30,8 +30,12 @@ component manager cache and checked against a pinned digest) with
 single-column depthwise blocks sized for the P4's shared 64 KB L1 data cache,
 a channel-half dual-core split for those depthwise layers, convolution
 arguments prepared in one pass before the model runs, int8 LUT layers whose
-table is exactly ReLU run as a vector max, and an allocator hook for model
-metadata that the local STT runtime points at PSRAM. P4 builds
+table is exactly ReLU run as a vector max, an allocator hook for model
+metadata that the local STT runtime points at PSRAM, and output-channel blocks
+for the speaker-label model's 16-bit 3x3 layers. Speaker labels
+(`ENABLE_STT_SPEAKER_LABELS`, on for this board) also need ESP-IDF's PIE
+context-switch fix, which 5.5.5 lacks: apply
+`tools/p4/idf-patches/` to the IDF (the build stops until it is there). P4 builds
 solve dependencies against a copy of `dependencies.lock.esp32p4` in their build
 directory, because the component manager records the local ESP-DL by its
 absolute path. A P4 build stops with that command if any override is missing.

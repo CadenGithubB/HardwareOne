@@ -26,6 +26,17 @@ dependencies.lock.esp32p4 pins plus tools/p4/esp-dl-3.3.12-hw1.patch:
     is requested through one allocator hook. With no hook installed each site
     behaves exactly as upstream; the STT runtime installs an explicit PSRAM
     request (components/hardwareone/stt/stt_dl_metadata.cpp, ps_alloc);
+  - 16-bit-activation KxK convs whose filter outgrows the cache (the speaker
+    model's 128 -> 128 3x3 layers: 147 KB per output pixel) run per block of
+    output channels whose filter slice fits hw1_dl_conv_block_bytes (24 KB);
+    each output is the same kernel's full reduction (bit-identical); int8
+    layers are untouched;
+  - Model::module_count() and module_name(i) (execution-plan size and names),
+    for the speaker model's per-layer profile;
+  - Gemm and MatMul pass std::vector<int>{1, 1} strides/dilations, which the
+    templated ConvOpArgs constructor needs (braced lists do not deduce);
+  - hw1_dl_log_kernel_binds: when set (speaker diagnostics only), each
+    distinct conv kernel key is logged once as it binds (TL kbind);
   - dl_fft pinned to ==0.7.0: a local component's dependencies join the root
     solve, which would otherwise be free to pick a newer dl_fft.
 
@@ -52,8 +63,8 @@ VERSION = "3.3.12"
 COMPONENT_HASH = "d792e72ab3858d805d8918d1215a862541344625f62134597866834de666fd04"
 SOURCE_TREE_SHA256 = "e5c5155078c46e090ad7f08a7239bb52d456394fab1356d78b4c127eefcb6e86"
 PATCH = ROOT / "esp-dl-3.3.12-hw1.patch"
-PATCH_SHA256 = "1432c36627f937ceaf93094f0166358b12b47146bb3d61bf7e551c09fa027017"
-PATCHED_TREE_SHA256 = "8055e8930fa705ef4e28cd898a36996cd87623060418b7b3e72274b9710bcdbd"
+PATCH_SHA256 = "a8e46fd492c3c474a8ad757cdf2401e1cbd76aaaa7bc915cfa83b6bda4fc6d75"
+PATCHED_TREE_SHA256 = "684fd6e837b2ad74c8eaebf148567462861e875322c745e3766d0645fedc019b"
 MANIFEST = "hw1-esp-dl-override.json"
 # Present only in component-manager copies; not part of the package itself.
 IGNORED = {".component_hash", MANIFEST}

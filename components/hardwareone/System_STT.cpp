@@ -1570,6 +1570,86 @@ static void sttFeatureStop(StreamRun& run) {
     if (c.rows) { sttWipe(c.rows, kFeMaxRows * kFeRowFloats * sizeof(float)); free(c.rows); c.rows = nullptr; }
 }
 #endif
+#if HW1_STT_SPEAKER_LABELS
+// Speaker labels: saved transcript lines wait (up to kLabelWaitMs) for their phrase's speaker label from the background
+// task, then go out strictly in sequence as "[Person N] text" (plain text when the phrase was skipped, the label
+// is late, or the session ends). Only this worker writes the transcript; the labelling task only posts labels.
+namespace {
+constexpr size_t kLabelledLines = 8;
+constexpr uint32_t kLabelWaitMs = 10000;
+struct LabelledLine {
+  uint32_t seq = 0, queuedMs = 0;
+  int8_t speaker = -1;
+  bool labelled = false;
+  uint16_t len = 0;
+  char text[STT_MAX_TEXT + 1] = {};
+};
+struct LabelledTranscript {
+  LabelledLine* lines = nullptr;   // PSRAM ring
+  size_t head = 0, count = 0;
+  bool tried = false;
+  ~LabelledTranscript() {
+    if (lines) { sttWipe(lines, kLabelledLines * sizeof(LabelledLine)); heap_caps_free(lines); }
+  }
+};
+void sttLabelledPump(LabelledTranscript& lt, STTLocalSession& session, TranscriptSession& transcript,
+                     STTToken token, bool flushAll) {
+  uint32_t seq = 0;
+  int8_t speaker = -1;
+  while (sttSpeakerTakeLabel(&session, &seq, &speaker)) {
+    for (size_t i = 0; i < lt.count; ++i) {
+      LabelledLine& l = lt.lines[(lt.head + i) % kLabelledLines];
+      if (l.seq == seq) { l.speaker = speaker; l.labelled = true; break; }
+    }
+  }
+  const uint32_t now = millis();
+  bool wrote = false;
+  while (lt.count) {
+    LabelledLine& l = lt.lines[lt.head];
+    if (!(l.labelled || flushAll || now - l.queuedMs > kLabelWaitMs)) break;
+    char line[STT_MAX_TEXT + 1];
+    size_t n = 0;
+    if (l.labelled && l.speaker >= 0) n = size_t(snprintf(line, sizeof(line), "[Person %d] ", int(l.speaker) + 1));
+    const size_t take = std::min<size_t>(l.len, STT_MAX_TEXT - n);
+    memcpy(line + n, l.text, take);
+    n += take;
+    line[n] = '\0';
+    (void)transcript.append(l.seq, line, n);
+    ESP_LOGI("STT", "TL tsave seq=%lu spk=%d labelled=%d wait_ms=%lu", (unsigned long)l.seq, int(l.speaker),
+             l.labelled ? 1 : 0, (unsigned long)(now - l.queuedMs));
+    sttWipe(line, sizeof(line));
+    sttWipe(l.text, sizeof(l.text));
+    l = LabelledLine{};
+    lt.head = (lt.head + 1) % kLabelledLines;
+    --lt.count;
+    wrote = true;
+  }
+  if (wrote) sttPublishTranscript(token, transcript.snapshot());
+}
+// False: no ring (allocation failed) - the caller appends directly, keeping the sequence order.
+bool sttLabelledQueue(LabelledTranscript& lt, STTLocalSession& session, TranscriptSession& transcript, STTToken token,
+                      uint32_t seq, const char* text) {
+  if (!lt.lines && !lt.tried) {
+    lt.tried = true;
+    lt.lines = static_cast<LabelledLine*>(heap_caps_calloc(kLabelledLines, sizeof(LabelledLine), MALLOC_CAP_SPIRAM));
+  }
+  if (!lt.lines) return false;
+  if (lt.count == kLabelledLines) {   // full: the oldest line goes out unlabelled first
+    LabelledLine& oldest = lt.lines[lt.head];
+    oldest.queuedMs = millis() - kLabelWaitMs - 1;
+    sttLabelledPump(lt, session, transcript, token, false);
+  }
+  LabelledLine& l = lt.lines[(lt.head + lt.count) % kLabelledLines];
+  l = LabelledLine{};
+  l.seq = seq;
+  l.queuedMs = millis();
+  l.len = uint16_t(strnlen(text, STT_MAX_TEXT));
+  memcpy(l.text, text, l.len);
+  ++lt.count;
+  return true;
+}
+}  // namespace
+#endif
 static void sttContinuousWorker(void*) {
   StreamRun run;
   STTLocalSession backendSession;
@@ -1657,6 +1737,23 @@ static void sttContinuousWorker(void*) {
                  warmed ? 1 : 0, warmStats.lmUsed ? 1 : 0, (unsigned long)getCpuFrequencyMhz(),
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                  unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+#if HW1_STT_SPEAKER_LABELS
+        {
+          // The optional speaker model, after the STT model and LM are resident.
+          STTSpeakerStatus sp;
+          (void)sttSpeakerBegin(&backendSession, kStreamSamples, &sp);
+          ESP_LOGI("STT", "TL spk_load ok=%d why=%s bytes=%u psram_used=%u int_used=%ld ms=%lu th=%.2f fixture_cos=%.4f psram_free=%u",
+                   sp.ready ? 1 : 0, sp.why[0] ? sp.why : "none", unsigned(sp.bytes), unsigned(sp.psramUsed),
+                   sp.internalUsed, (unsigned long)sp.loadMs, double(sp.threshold), double(sp.fixtureCos),
+                   unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+          // where the load went: file read, SHA-256, ESP-DL build, ESP-DL self-test, fixture embed; memory parts
+          ESP_LOGI("STT", "TL spk_load2 read_ms=%lu sha_us=%lu build_us=%lu test=%d test_us=%lu fixture_us=%lu arena_psram=%u arena_int=%u work=%u modules=%u int_min=%u",
+                   (unsigned long)sp.readMs, (unsigned long)sp.shaUs, (unsigned long)sp.buildUs, sp.testResult,
+                   (unsigned long)sp.testUs, (unsigned long)sp.fixtureUs, unsigned(sp.arenaPsram), unsigned(sp.arenaInternal),
+                   unsigned(sp.workspaceBytes), sp.modules,
+                   unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+        }
+#endif
         if (gSTTPerfLog)
           INFO_SYSTEMF("[STTPERF] warm-up %s in %lu ms (load %lu, lm %s)", warmed ? "ok" : warmError,
                        (unsigned long)(millis() - warmStart), (unsigned long)warmStats.loadMs,
@@ -1668,7 +1765,24 @@ static void sttContinuousWorker(void*) {
 #if HW1_STT_CAPTURE_FEATURES
     if (!sttStreamCancelled(&run)) sttFeatureStart(run, backendSession);
 #endif
+#if HW1_STT_SPEAKER_LABELS
+    LabelledTranscript labelledLines;
+#if HW1_STT_SPEAKER_DIAGNOSTICS
+    bool speakerProfileDumped = false;
+#endif
+#endif
     for (;;) {
+#if HW1_STT_SPEAKER_LABELS
+      if (labelledLines.count) sttLabelledPump(labelledLines, backendSession, transcript, run.token, false);
+#if HW1_STT_SPEAKER_DIAGNOSTICS
+      // Per-layer speaker trunk profile (TL spkstg), 240 s after capture start: the
+      // conversation playlists end by ~233 s and the harness reads 20 s past the end.
+      if (!speakerProfileDumped && gSTT.captureStartedMs && millis() - gSTT.captureStartedMs > 240000) {
+        speakerProfileDumped = true;
+        sttSpeakerProfileLog();
+      }
+#endif
+#endif
       StreamSlot* slot = nullptr;
       bool captureDone;
       portENTER_CRITICAL(&gSTTMux);
@@ -1994,10 +2108,38 @@ static void sttContinuousWorker(void*) {
       uint32_t saveStartMs = 0, saveEndMs = 0;
       if (acceptedText) {
         saveStartMs = millis();
-        (void)transcript.append(slot->sequence, text, strlen(text));
-        sttPublishTranscript(run.token, transcript.snapshot());
+#if HW1_STT_SPEAKER_LABELS
+        // With background labelling the line waits for its "[Person N]" (sttLabelledPump).
+        if (!(sttSpeakerBackground(&backendSession) &&
+              sttLabelledQueue(labelledLines, backendSession, transcript, run.token, slot->sequence, text)))
+#endif
+        {
+          (void)transcript.append(slot->sequence, text, strlen(text));
+          sttPublishTranscript(run.token, transcript.snapshot());
+        }
         saveEndMs = millis();
       }
+#if HW1_STT_SPEAKER_LABELS
+      if (acceptedText) {
+        // Label the published phrase (after publish and save, so captions
+        // are never delayed by it); the voiced-trimmed audio, as inferred.
+        // Hand the phrase to the background labelling task; inline only if it has none.
+        STTSpeakerLabel spk;
+        if (sttSpeakerSubmit(&backendSession, slot->sequence, slot->pcm, trimmedSamples)) {
+        } else if (sttSpeakerLabel(&backendSession, slot->pcm, trimmedSamples, &spk)) {
+          ESP_LOGI("STT", "TL spk seq=%lu spk=%d sim=%.3f new=%d tent=%d samples=%u fe_us=%lu nn_us=%lu head_us=%lu us=%lu",
+                   (unsigned long)slot->sequence, int(spk.speaker), double(spk.similarity), spk.created ? 1 : 0,
+                   spk.tentative ? 1 : 0, unsigned(trimmedSamples), (unsigned long)spk.featureUs,
+                   (unsigned long)spk.trunkUs, (unsigned long)spk.headUs, (unsigned long)spk.totalUs);
+          // sections of the same phrase: features (fft, mel+log, norm+window), int16 in, trunk, out, SAP, softmax+pool, fc, cluster
+          ESP_LOGI("STT", "TL spkt seq=%lu frames=%u crop=%d fft=%lu mel=%lu norm=%lu q=%lu nn=%lu dq=%lu sap=%lu pool=%lu fc=%lu clu=%lu",
+                   (unsigned long)slot->sequence, unsigned(spk.frames), spk.cropped ? 1 : 0, (unsigned long)spk.fftUs,
+                   (unsigned long)spk.melUs, (unsigned long)spk.normUs, (unsigned long)spk.quantUs, (unsigned long)spk.trunkUs,
+                   (unsigned long)spk.dequantUs, (unsigned long)spk.sapUs, (unsigned long)spk.poolUs, (unsigned long)spk.fcUs,
+                   (unsigned long)spk.clusterUs);
+        }
+      }
+#endif
       sttWipe(text, sizeof(text));
       sttWipe(slot->pcm, std::max(inferenceSamples, slot->samples) * sizeof(int16_t));
 #if HW1_STT_CAPTURE_FEATURES
@@ -2087,6 +2229,13 @@ static void sttContinuousWorker(void*) {
       sttStreamTick(run);
       sttDrainLevelLog(run);
     }
+#if HW1_STT_SPEAKER_LABELS
+    // The last phrases' labels (bounded wait), then every held transcript line, in order.
+    if (labelledLines.count) {
+      if (!sttStreamCancelled(&run)) sttSpeakerDrain(&backendSession, 6000);
+      sttLabelledPump(labelledLines, backendSession, transcript, run.token, true);
+    }
+#endif
   } while (false);
   // On normal stop the producer has already joined; on failure/cancel its
   // callback sees the same fence. Never free buffers while either task uses them.
@@ -2107,6 +2256,9 @@ static void sttContinuousWorker(void*) {
              (unsigned long)run.feCachedFinals, (unsigned long)run.feCachedRows, (unsigned long)run.feDraftRows);
 #endif
   sttFeatureStop(run);  // the capture task has joined; nothing feeds the ring
+#endif
+#if HW1_STT_SPEAKER_LABELS
+  sttSpeakerEnd(&backendSession);  // stop background labelling and free the speaker model before the session goes
 #endif
   // FreeRTOS self-delete does not unwind C++ locals. Close the backend (or
   // park it for the next run while a hold lasts) before publishing

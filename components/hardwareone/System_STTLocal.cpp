@@ -7,6 +7,25 @@
 #include "System_VFS.h"
 #include "stt/quartznet_runtime.h"
 #include "stt/stt_model_identity.h"
+#if HW1_STT_SPEAKER_LABELS
+#include "esp_heap_caps.h"
+#include "esp_timer.h"
+#include "stt/speaker_cluster.h"
+#include "stt/speaker_model.h"
+#include "stt/stt_dl_metadata.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "freertos/idf_additions.h"
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+extern "C" int hw1_dl_log_kernel_binds;   // ESP-DL (speaker diagnostics): log each kernel bound, once
+using hw1::stt::sttPsramAlloc;
+using hw1::stt::sttPsramFree;
+#endif
 #if ENABLE_STT_LM
 #include "System_Debug.h"
 #include "esp_heap_caps.h"
@@ -158,11 +177,67 @@ bool releaseLanguageModel(void* context) {
     return true;
 }
 #endif
+#if HW1_STT_SPEAKER_LABELS
+// The session's speaker model (all PSRAM: the file, ESP-DL's arena and
+// metadata, the workspace, centroids).
+struct SpeakerJob { uint32_t seq=0, submittedMs=0, samples=0, phraseSamples=0; };
+struct SpeakerLabelMsg { uint32_t seq; int8_t speaker; };
+constexpr size_t kSpeakerJobs=4;
+struct SpeakerState {
+    uint8_t* blob=nullptr;
+    hw1::stt::speaker::Model model;
+    hw1::stt::speaker::Clusters clusters;
+    float* centroids=nullptr;
+    float* embedding=nullptr;
+    // background labelling
+    int16_t* jobPcm=nullptr;            // kSpeakerJobs * jobSpan samples (PSRAM)
+    size_t jobSpan=0;
+    SpeakerJob jobs[kSpeakerJobs];
+    QueueHandle_t ready=nullptr, free=nullptr;
+    QueueHandle_t labels=nullptr;       // SpeakerLabelMsg, read by the STT worker (transcript lines)
+    uint8_t* diagBuf=nullptr;           // diagnostics: int8 voiceprint + base64 (PSRAM)
+    SemaphoreHandle_t stopped=nullptr;
+    TaskHandle_t task=nullptr;
+    uint32_t submitted=0, skipped=0, labelled=0;
+    void stopTask();
+    ~SpeakerState();
+};
+SpeakerState* gSpeakerActive=nullptr;   // for sttSpeakerProfileLog (debug only; the worker owns it)
+void SpeakerState::stopTask() {
+    if(task) {
+        const uint8_t stop=0xFF;
+        if(xQueueSend(ready,&stop,pdMS_TO_TICKS(2000))==pdTRUE && xSemaphoreTake(stopped,pdMS_TO_TICKS(8000))==pdTRUE)
+            vTaskDeleteWithCaps(task);
+        task=nullptr;
+    }
+    if(ready) { vQueueDeleteWithCaps(ready); ready=nullptr; }
+    if(labels) { vQueueDeleteWithCaps(labels); labels=nullptr; }
+    if(free) { vQueueDeleteWithCaps(free); free=nullptr; }
+    if(stopped) { vSemaphoreDeleteWithCaps(stopped); stopped=nullptr; }
+}
+SpeakerState::~SpeakerState() {
+    stopTask();
+    if(gSpeakerActive==this)gSpeakerActive=nullptr;
+    model.reset(); sttPsramFree(centroids); sttPsramFree(embedding); sttPsramFree(jobPcm); sttPsramFree(diagBuf);
+    heap_caps_free(blob);
+}
+#endif
 // Session-owned backend state: verified weights plus the optional LM.
 struct Backend {
     hw1::stt::ModelCache weights;
 #if ENABLE_STT_LM
     LanguageModel lm;
+#endif
+#if HW1_STT_SPEAKER_LABELS
+    SpeakerState* speaker=nullptr;
+    bool speakerTried=false;
+    // The speaker model and the voices it has heard belong to one run: freed when the run's labelling ends, so
+    // a parked session (sttKeepWarm) holds only the weights and the LM, and the next run starts at Person 1.
+    void releaseSpeaker() {
+        if(speaker) { speaker->~SpeakerState(); sttPsramFree(speaker); speaker=nullptr; }
+        speakerTried=false;
+    }
+    ~Backend() { releaseSpeaker(); }
 #endif
 };
 }
@@ -205,6 +280,322 @@ bool sttLocalTranscribe(const int16_t* pcm,size_t samples,char* text,size_t text
     return hw1::stt::transcribe({&file,file.size(),readModel},pcm,samples,text,textCap,control,stats,error,errorCap,
                               nullptr,backend ? &backend->weights : nullptr,decoding,prefix);
 }
+#if HW1_STT_SPEAKER_LABELS
+namespace {
+bool readFully(File& file,uint8_t* dest,size_t bytes) {
+    for(size_t done=0;done<bytes;) {
+        const size_t n=file.read(dest+done,std::min(bytes-done,size_t(64*1024)));
+        if(!n || n>bytes-done)return false;
+        done+=n;
+    }
+    return true;
+}
+constexpr const char* kSpeakerPath="/sd/STT Models/speaker.spk";
+constexpr const char* kSpeakerFixturePath="/sd/STT Models/speaker_fixture.bin";
+constexpr size_t kSpeakerMaxBytes=16u<<20, kSpeakerArenaEstimate=1u<<20, kSpeakerKeepFree=3u<<20;
+// Diagnostics: the fixture (PCM + the Mac's embedding) kept in PSRAM, re-embedded before every background
+// job: a cosine below ~0.99 during a session means the trunk's result was corrupted (e.g. PIE state across a
+// context switch), not the audio.
+uint8_t* gSpeakerFixture=nullptr; [[maybe_unused]] size_t gSpeakerFixtureBytes=0;
+float speakerFixtureAgain(SpeakerState& s) {
+    if(!gSpeakerFixture)return -2.0f;
+    uint32_t samples=0,dim=0; memcpy(&samples,gSpeakerFixture,4); memcpy(&dim,gSpeakerFixture+4,4);
+    if(!s.model.embed(reinterpret_cast<const int16_t*>(gSpeakerFixture+8),samples,s.embedding))return -3.0f;
+    const float* want=reinterpret_cast<const float*>(gSpeakerFixture+8+size_t(samples)*2);
+    double dot=0,a=0,b=0;
+    for(size_t i=0;i<dim;++i) { dot+=double(s.embedding[i])*want[i]; a+=double(s.embedding[i])*s.embedding[i]; b+=double(want[i])*want[i]; }
+    return a>0 && b>0 ? float(dot/std::sqrt(a*b)) : -3.0f;
+}
+#if HW1_STT_SPEAKER_DIAGNOSTICS
+// Optional parity check: a phrase and the embedding the Mac computed for it.
+float speakerFixtureCosine(SpeakerState& s) {
+    const auto auth=VFS::systemAuth("stt.speaker_read");
+    if(!VFS::existsGuarded(kSpeakerFixturePath,auth))return -2.0f;
+    File f=VFS::openGuarded(kSpeakerFixturePath,"r",auth);
+    const size_t bytes=f && !f.isDirectory() ? f.size() : 0;
+    if(bytes<8 || bytes>(1u<<20))return -3.0f;
+    auto* buf=static_cast<uint8_t*>(heap_caps_malloc(bytes,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+    float cos=-3.0f;
+    if(buf && readFully(f,buf,bytes)) {
+        uint32_t samples=0,dim=0;
+        memcpy(&samples,buf,4); memcpy(&dim,buf+4,4);
+        if(dim==s.model.info().dim && 8+size_t(samples)*2+size_t(dim)*4==bytes &&
+           s.model.embed(reinterpret_cast<const int16_t*>(buf+8),samples,s.embedding)) {
+            const float* want=reinterpret_cast<const float*>(buf+8+size_t(samples)*2);
+            double dot=0,a=0,b=0;
+            for(size_t i=0;i<dim;++i) { dot+=double(s.embedding[i])*want[i]; a+=double(s.embedding[i])*s.embedding[i]; b+=double(want[i])*want[i]; }
+            cos=a>0 && b>0 ? float(dot/std::sqrt(a*b)) : -3.0f;
+        }
+    }
+    if(cos>-2.0f && !gSpeakerFixture) { gSpeakerFixture=buf; gSpeakerFixtureBytes=bytes; buf=nullptr; }
+    heap_caps_free(buf);
+    return cos;
+}
+#endif
+}  // namespace
+size_t speakerBase64(const uint8_t* in,size_t n,char* out) {
+    static const char k[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t o=0;
+    for(size_t i=0;i<n;i+=3) {
+        const uint32_t v=uint32_t(in[i])<<16 | (i+1<n ? uint32_t(in[i+1])<<8 : 0) | (i+2<n ? in[i+2] : 0);
+        out[o++]=k[v>>18&63]; out[o++]=k[v>>12&63]; out[o++]=i+1<n ? k[v>>6&63] : '='; out[o++]=i+2<n ? k[v&63] : '=';
+    }
+    out[o]=0;
+    return o;
+}
+// One label: embed + cluster + the TL lines (spk: label; spkt: sections; spke: the unit embedding as int8 x127,
+// base64, for offline threshold tuning on device voiceprints).
+void speakerLabelAndLog(SpeakerState& s,const SpeakerJob& job,const int16_t* pcm) {
+    const int64_t t0=esp_timer_get_time();
+    hw1::stt::speaker::EmbedTiming tm;
+    if(!s.model.embed(pcm,job.samples,s.embedding,&tm)) { ESP_LOGW("STT","TL spk seq=%lu fail",(unsigned long)job.seq); return; }
+    const int64_t c0=esp_timer_get_time();
+    const auto a=s.clusters.assign(s.embedding,job.phraseSamples);
+    const uint32_t cluUs=uint32_t(esp_timer_get_time()-c0), totalUs=uint32_t(esp_timer_get_time()-t0);
+    const uint32_t lagMs=uint32_t(esp_timer_get_time()/1000)-job.submittedMs;
+    ++s.labelled;
+    ESP_LOGI("STT","TL spk seq=%lu spk=%d sim=%.3f new=%d tent=%d samples=%u fe_us=%lu nn_us=%lu head_us=%lu us=%lu lag_ms=%lu",
+             (unsigned long)job.seq,int(a.speaker),double(a.similarity),a.created ? 1 : 0,a.tentative ? 1 : 0,
+             unsigned(job.phraseSamples),(unsigned long)tm.featureUs,(unsigned long)tm.trunkUs,(unsigned long)tm.headUs,
+             (unsigned long)totalUs,(unsigned long)lagMs);
+    ESP_LOGI("STT","TL spkt seq=%lu frames=%u crop=%d fft=%lu mel=%lu norm=%lu q=%lu nn=%lu dq=%lu sap=%lu pool=%lu fc=%lu clu=%lu",
+             (unsigned long)job.seq,unsigned(tm.frames),job.phraseSamples>job.samples ? 1 : 0,(unsigned long)tm.fftUs,
+             (unsigned long)tm.melUs,(unsigned long)tm.normUs,(unsigned long)tm.quantUs,(unsigned long)tm.trunkUs,
+             (unsigned long)tm.dequantUs,(unsigned long)tm.sapUs,(unsigned long)tm.poolUs,(unsigned long)tm.fcUs,(unsigned long)cluUs);
+    if(s.labels) { const SpeakerLabelMsg m{job.seq,a.speaker}; xQueueSend(s.labels,&m,0); }
+#if HW1_STT_SPEAKER_DIAGNOSTICS
+    const size_t dim=s.model.info().dim;
+    if(dim<=1024 && s.diagBuf) {
+        uint8_t* q=s.diagBuf;
+        char* b64=reinterpret_cast<char*>(s.diagBuf+1024);
+        double n2=0; for(size_t i=0;i<dim;++i)n2+=double(s.embedding[i])*s.embedding[i];
+        const float inv=n2>0 ? float(127.0/std::sqrt(n2)) : 0.0f;
+        for(size_t i=0;i<dim;++i) { const float v=std::nearbyint(s.embedding[i]*inv); q[i]=uint8_t(int8_t(v>127.f?127.f:(v<-127.f?-127.f:v))); }
+        speakerBase64(q,dim,b64);
+        ESP_LOGI("STT","TL spke seq=%lu dim=%u e=%s",(unsigned long)job.seq,unsigned(dim),b64);
+    }
+    {
+        size_t module=0;
+        const size_t dip=s.model.worstRamDip(&module);
+        ESP_LOGI("STT","TL spkram seq=%lu worst_dip=%u module=%u int_free=%u int_min=%u",(unsigned long)job.seq,
+                 unsigned(dip),unsigned(module),unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)),
+                 unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)));
+    }
+#endif
+}
+void speakerTask(void* arg) {
+    auto* s=static_cast<SpeakerState*>(arg);
+    for(;;) {
+        uint8_t i=0xFF;
+        if(xQueueReceive(s->ready,&i,portMAX_DELAY)!=pdTRUE)continue;
+        if(i>=kSpeakerJobs)break;   // stop
+        if(HW1_STT_SPEAKER_DIAGNOSTICS && s->labelled%16==0) {   // diagnostics: the fixture again every 16th job
+            const int64_t f0=esp_timer_get_time();
+            const float fc=speakerFixtureAgain(*s);
+            ESP_LOGI("STT","TL spkfix seq=%lu cos=%.4f us=%lu",(unsigned long)s->jobs[i].seq,double(fc),
+                     (unsigned long)(esp_timer_get_time()-f0));
+            vTaskDelay(1);
+        }
+        speakerLabelAndLog(*s,s->jobs[i],s->jobPcm+size_t(i)*s->jobSpan);
+        vTaskDelay(1);   // let IDLE1 run between jobs
+        xQueueSend(s->free,&i,0);
+    }
+    xSemaphoreGive(s->stopped);
+    vTaskSuspend(nullptr);   // deleted by stopTask() (vTaskDeleteWithCaps)
+}
+bool sttSpeakerBegin(STTLocalSession* session,size_t maxSamples,STTSpeakerStatus* status) {
+    STTSpeakerStatus local;
+    STTSpeakerStatus& st=status ? *status : local;
+    st=STTSpeakerStatus{};
+    Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
+    auto why=[&](const char* w) { snprintf(st.why,sizeof(st.why),"%s",w); return false; };
+    if(!b)return why("no session");
+    if(b->speaker) { st.ready=b->speaker->model.ready(); return st.ready; }
+    if(b->speakerTried)return why("already tried");
+    b->speakerTried=true;
+    // trusted: fixed optional model path beside the STT model; content is SHA-checked.
+    const auto auth=VFS::systemAuth("stt.speaker_read");
+    if(!VFS::existsGuarded(kSpeakerPath,auth))return why("no speaker.spk");
+    File file=VFS::openGuarded(kSpeakerPath,"r",auth);
+    const size_t bytes=file && !file.isDirectory() ? file.size() : 0;
+    st.bytes=bytes;
+    if(bytes<192 || bytes>kSpeakerMaxBytes)return why("wrong size");
+    const int64_t t0=esp_timer_get_time();
+    const size_t psram0=heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    const size_t int0=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+    if(psram0<bytes+kSpeakerArenaEstimate+kSpeakerKeepFree || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)<bytes)
+        return why("PSRAM short");
+    void* mem=sttPsramAlloc(sizeof(SpeakerState),"stt.speaker");
+    if(!mem)return why("no memory");
+    auto* s=new(mem) SpeakerState;
+    s->blob=static_cast<uint8_t*>(heap_caps_aligned_alloc(16,bytes,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+    hw1::stt::speaker::LoadStatus ls=hw1::stt::speaker::LoadStatus::NoMemory;
+#if HW1_STT_SPEAKER_DIAGNOSTICS
+    // Internal-RAM low point of each load step (file read through VFS/SD, ESP-DL build + first run).
+    const size_t intBefore=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+    heap_caps_monitor_local_minimum_free_size_start();
+#endif
+    const int64_t r0=esp_timer_get_time();
+    const bool readOk=s->blob && readFully(file,s->blob,bytes);
+    st.readMs=uint32_t((esp_timer_get_time()-r0)/1000);
+#if HW1_STT_SPEAKER_DIAGNOSTICS
+    const size_t lowRead=heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+    heap_caps_monitor_local_minimum_free_size_stop();
+    heap_caps_monitor_local_minimum_free_size_start();
+#endif
+#if HW1_STT_SPEAKER_DIAGNOSTICS
+    hw1::stt::speaker::Model::setLoadSelfTest(true);
+    hw1_dl_log_kernel_binds=1;
+#endif
+    if(readOk)
+        ls=s->model.load(s->blob,bytes,maxSamples,sttPsramAlloc,sttPsramFree);
+#if HW1_STT_SPEAKER_DIAGNOSTICS
+    const size_t lowBuild=heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+    heap_caps_monitor_local_minimum_free_size_stop();
+    ESP_LOGI("STT","TL spkram_load before=%u read_low=%u (dip %d) build_low=%u (dip %d) after=%u",unsigned(intBefore),
+             unsigned(lowRead),int(intBefore)-int(lowRead),unsigned(lowBuild),int(intBefore)-int(lowBuild),
+             unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)));
+#endif
+    if(ls==hw1::stt::speaker::LoadStatus::Ok) {
+        const auto& info=s->model.info();
+        s->centroids=static_cast<float*>(sttPsramAlloc(size_t(8)*info.dim*sizeof(float),"stt.speaker"));
+        s->embedding=static_cast<float*>(sttPsramAlloc(size_t(info.dim)*sizeof(float),"stt.speaker"));
+        hw1::stt::speaker::ClusterConfig cc;
+        cc.threshold=info.threshold; cc.min_new_samples=size_t(info.minNewMs)*16; cc.max_speakers=8;
+        if(!s->centroids || !s->embedding || !s->clusters.reset(s->centroids,info.dim,cc))
+            ls=hw1::stt::speaker::LoadStatus::NoMemory;
+    }
+    if(ls!=hw1::stt::speaker::LoadStatus::Ok) {
+        s->~SpeakerState(); sttPsramFree(s);
+        return why(hw1::stt::speaker::describe(ls));
+    }
+    b->speaker=s;
+    gSpeakerActive=s;
+    {
+        const auto& r=s->model.loadReport();
+        st.shaUs=r.shaUs; st.buildUs=r.buildUs; st.testUs=r.testUs; st.testResult=r.testResult;
+        st.arenaPsram=r.arenaPsram; st.arenaInternal=r.arenaInternal; st.workspaceBytes=r.workspaceBytes;
+        st.modules=r.modules;
+    }
+#if HW1_STT_SPEAKER_DIAGNOSTICS
+    const int64_t f0=esp_timer_get_time();
+    st.fixtureCos=speakerFixtureCosine(*s);
+    st.fixtureUs=uint32_t(esp_timer_get_time()-f0);
+    s->model.resetProfile();   // the fixture embed is not a phrase
+    s->model.setRamProbe(true);
+    s->diagBuf=static_cast<uint8_t*>(sttPsramAlloc(1024+1400,"stt.speaker"));
+#endif
+    // Background labelling: job slots hold the centre window the frontend uses (it crops the same span).
+    {
+        const auto& f=s->model.info().features;
+        s->jobSpan=size_t(f.window_frames-1)*f.hop;
+        s->jobPcm=static_cast<int16_t*>(sttPsramAlloc(kSpeakerJobs*s->jobSpan*sizeof(int16_t),"stt.speaker"));
+        s->ready=xQueueCreateWithCaps(kSpeakerJobs+1,1,MALLOC_CAP_SPIRAM);
+        s->labels=xQueueCreateWithCaps(2*kSpeakerJobs+4,sizeof(SpeakerLabelMsg),MALLOC_CAP_SPIRAM);
+        s->free=xQueueCreateWithCaps(kSpeakerJobs,1,MALLOC_CAP_SPIRAM);
+        s->stopped=xSemaphoreCreateBinaryWithCaps(MALLOC_CAP_SPIRAM);
+        if(s->jobPcm && s->ready && s->free && s->stopped && s->labels) {
+            for(uint8_t i=0;i<kSpeakerJobs;++i)xQueueSend(s->free,&i,0);
+            s->model.setMultiCore(false);   // never contend for ESP-DL's dual-core workers with the STT model
+#if HW1_STT_SPEAKER_DIAGNOSTICS
+            ESP_LOGI("STT","TL spkfix seq=0 single_core_at_load cos=%.4f",double(speakerFixtureAgain(*s)));
+#endif
+            // Priority 1 on core 1: below the "stt" worker (2), so it runs only while that worker waits.
+            if(xTaskCreatePinnedToCoreWithCaps(speakerTask,"stt_spk",8192,s,1,&s->task,1,MALLOC_CAP_SPIRAM)!=pdPASS)
+                s->task=nullptr;
+        }
+        if(!s->task)snprintf(st.why,sizeof(st.why),"%s","no background task (inline)");
+    }
+    st.ready=true;
+    st.threshold=s->model.info().threshold;
+    st.loadMs=uint32_t((esp_timer_get_time()-t0)/1000);
+    st.psramUsed=psram0-heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    st.internalUsed=long(int0)-long(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT));
+    return true;
+}
+bool sttSpeakerLabel(STTLocalSession* session,const int16_t* pcm,size_t samples,STTSpeakerLabel* out) {
+    Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
+    if(!b || !b->speaker || !b->speaker->model.ready() || !out)return false;
+    SpeakerState& s=*b->speaker;
+    const int64_t t0=esp_timer_get_time();
+    hw1::stt::speaker::EmbedTiming tm;
+    if(!s.model.embed(pcm,samples,s.embedding,&tm))return false;
+    const int64_t c0=esp_timer_get_time();
+    const auto a=s.clusters.assign(s.embedding,samples);
+    out->clusterUs=uint32_t(esp_timer_get_time()-c0);
+    out->speaker=a.speaker; out->similarity=a.similarity; out->created=a.created; out->tentative=a.tentative;
+    out->featureUs=tm.featureUs; out->trunkUs=tm.trunkUs; out->headUs=tm.headUs;
+    out->fftUs=tm.fftUs; out->melUs=tm.melUs; out->normUs=tm.normUs; out->quantUs=tm.quantUs;
+    out->dequantUs=tm.dequantUs; out->sapUs=tm.sapUs; out->poolUs=tm.poolUs; out->fcUs=tm.fcUs;
+    out->frames=tm.frames; out->cropped=tm.cropped;
+    out->totalUs=uint32_t(esp_timer_get_time()-t0);
+    return a.speaker>=0;
+}
+bool sttSpeakerSubmit(STTLocalSession* session,uint32_t seq,const int16_t* pcm,size_t samples) {
+    Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
+    if(!b || !b->speaker || !b->speaker->task || !pcm || !samples)return false;
+    SpeakerState& s=*b->speaker;
+    ++s.submitted;
+    uint8_t i=0xFF;
+    if(xQueueReceive(s.free,&i,0)!=pdTRUE) {
+        ++s.skipped;
+        ESP_LOGW("STT","TL spk seq=%lu skipped=1 backlog=%u",(unsigned long)seq,unsigned(kSpeakerJobs));
+        if(s.labels) { const SpeakerLabelMsg m{seq,-1}; xQueueSend(s.labels,&m,0); }
+        return true;   // handled: skipped, never labelled inline (that would delay captions)
+    }
+    size_t n=samples; const int16_t* src=pcm;
+    if(n>s.jobSpan) { src+=(n-s.jobSpan)/2; n=s.jobSpan; }
+    memcpy(s.jobPcm+size_t(i)*s.jobSpan,src,n*sizeof(int16_t));
+    s.jobs[i].seq=seq; s.jobs[i].samples=uint32_t(n); s.jobs[i].phraseSamples=uint32_t(samples);
+    s.jobs[i].submittedMs=uint32_t(esp_timer_get_time()/1000);
+    xQueueSend(s.ready,&i,0);
+    return true;
+}
+bool sttSpeakerBackground(STTLocalSession* session) {
+    Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
+    return b && b->speaker && b->speaker->task && b->speaker->labels;
+}
+bool sttSpeakerTakeLabel(STTLocalSession* session,uint32_t* seq,int8_t* speaker) {
+    Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
+    if(!b || !b->speaker || !b->speaker->labels || !seq || !speaker)return false;
+    SpeakerLabelMsg m;
+    if(xQueueReceive(b->speaker->labels,&m,0)!=pdTRUE)return false;
+    *seq=m.seq; *speaker=m.speaker;
+    return true;
+}
+void sttSpeakerDrain(STTLocalSession* session,uint32_t timeoutMs) {
+    Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
+    if(!b || !b->speaker || !b->speaker->task)return;
+    const int64_t end=esp_timer_get_time()+int64_t(timeoutMs)*1000;
+    while(uxQueueMessagesWaiting(b->speaker->free)<kSpeakerJobs && esp_timer_get_time()<end)vTaskDelay(pdMS_TO_TICKS(20));
+}
+void sttSpeakerEnd(STTLocalSession* session) {
+    Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
+    if(!b)return;
+    if(b->speaker)
+        ESP_LOGI("STT","TL spk_end submitted=%lu labelled=%lu skipped=%lu",(unsigned long)b->speaker->submitted,
+                 (unsigned long)b->speaker->labelled,(unsigned long)b->speaker->skipped);
+    b->releaseSpeaker();   // stops the task first
+}
+void sttSpeakerProfileLog() {
+    SpeakerState* s=gSpeakerActive;
+    if(!s || !s->model.ready())return;
+    const uint32_t n=s->model.embeds();
+    uint64_t total=0;
+    for(size_t i=0;i<s->model.stages();++i)total+=s->model.stage(i).us;
+    ESP_LOGI("STT","TL spkstg_begin embeds=%lu modules=%u trunk_us_total=%llu trunk_us_mean=%llu",(unsigned long)n,
+             unsigned(s->model.stages()),(unsigned long long)total,(unsigned long long)(n ? total/n : 0));
+    for(size_t i=0;i<s->model.stages();++i) {
+        const auto p=s->model.stage(i);
+        ESP_LOGI("STT","TL spkstg i=%u name=%s n=%lu us_mean=%llu pct=%.1f",unsigned(i),p.name ? p.name : "?",
+                 (unsigned long)p.calls,(unsigned long long)(p.calls ? p.us/p.calls : 0),
+                 total ? 100.0*double(p.us)/double(total) : 0.0);
+        if((i&15)==15)vTaskDelay(1);   // pace the console
+    }
+    ESP_LOGI("STT","TL spkstg_end");
+    s->model.resetProfile();
+}
+#endif
 STTLocalCallBudget sttLocalCallBudget(size_t samples,const STTLocalSession* session) {
     const Backend* backend=session ? static_cast<const Backend*>(session->backendState_) : nullptr;
     STTLocalCallBudget out;
@@ -245,6 +636,9 @@ void STTLocalSession::moveTo(STTLocalSession& to) {
     if(backend && backend->lm.state==LmState::Unavailable && !backend->lm.blob)backend->lm.state=LmState::Unloaded;
 #endif
     dropCallState();  // the resident model's arena still holds this run's last activations
+#if HW1_STT_SPEAKER_LABELS
+    if(backendState_)static_cast<Backend*>(backendState_)->releaseSpeaker();
+#endif
     to.backendState_=backendState_;
     backendState_=nullptr;
 }
