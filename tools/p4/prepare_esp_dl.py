@@ -18,6 +18,10 @@ dependencies.lock.esp32p4 pins plus tools/p4/esp-dl-3.3.12-hw1.patch:
     copy in a per-layer metadata block, and Add, LUT and Relu return; each
     Conv then runs on its prepared args once (same args, bit-identical
     output). With the flag never set every module runs as upstream;
+  - int8 LUT layers whose table is exactly ReLU (dl_base_lut.cpp checks all
+    256 entries on every call) run as a 16-byte vector max
+    (dl/tool/isa/esp32p4/dl_esp32p4_s8_relu_hw1.S) instead of a per-byte
+    table lookup; any other table keeps the lookup (identical output);
   - dl_tool_metadata.{hpp,cpp}: every block a dl::Model keeps for its lifetime
     is requested through one allocator hook. With no hook installed each site
     behaves exactly as upstream; the STT runtime installs an explicit PSRAM
@@ -48,8 +52,8 @@ VERSION = "3.3.12"
 COMPONENT_HASH = "d792e72ab3858d805d8918d1215a862541344625f62134597866834de666fd04"
 SOURCE_TREE_SHA256 = "e5c5155078c46e090ad7f08a7239bb52d456394fab1356d78b4c127eefcb6e86"
 PATCH = ROOT / "esp-dl-3.3.12-hw1.patch"
-PATCH_SHA256 = "e4b93864e4bfbb3154d166e7e5f486e8e9ae67f4ae111448764da30ed55c88c0"
-PATCHED_TREE_SHA256 = "9355db26d0f2b725006ed6584e02fb4eaf29fa60a7478a926e587bf44c377d5f"
+PATCH_SHA256 = "1432c36627f937ceaf93094f0166358b12b47146bb3d61bf7e551c09fa027017"
+PATCHED_TREE_SHA256 = "8055e8930fa705ef4e28cd898a36996cd87623060418b7b3e72274b9710bcdbd"
 MANIFEST = "hw1-esp-dl-override.json"
 # Present only in component-manager copies; not part of the package itself.
 IGNORED = {".component_hash", MANIFEST}
