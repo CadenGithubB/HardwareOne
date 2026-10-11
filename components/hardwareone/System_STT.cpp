@@ -579,7 +579,11 @@ static void sttWorker(void*) {
 // Independent producer/consumer tasks keep draining the microphone while a
 // synchronous backend works. This bounded pipeline has no total-duration cap.
 constexpr size_t kAudioQueueDepth = 3;
-constexpr size_t kStreamSamples = STT_SAMPLE_RATE * STT_MAX_CAPTURE_MS / 1000;
+// Continuous phrases are capped at 10 s (was STT_MAX_CAPTURE_MS, 20 s): a longer stretch without a pause is
+// cut at its quietest 10 ms in the last 2 s and handed to the worker while capture continues. One-shot captures
+// keep STT_MAX_CAPTURE_MS. Halves the five session audio buffers, the feature caches and the resident arena.
+constexpr uint32_t kStreamPhraseMs = 10000;
+constexpr size_t kStreamSamples = STT_SAMPLE_RATE * kStreamPhraseMs / 1000;
 constexpr size_t kStreamReadSamples = 1024; // Whole PDM DMA blocks; segmenting is downstream.
 constexpr uint32_t kCaptureStackBytes = 8192; // 2 KiB PCM block plus HAL/BLE startup and G2 lens container depth.
 #if HW1_STT_CAPTURE_FEATURES
@@ -594,7 +598,7 @@ constexpr uint32_t kCaptureStackBytes = 8192; // 2 KiB PCM block plus HAL/BLE st
 // pool (2 x 512 KB rows + 128 KB ring) is allocated after the warm-up, so the
 // LM and the resident model are admitted exactly as without it.
 constexpr size_t kFeRingSamples = 65536;              // 4.1 s of stream; power of two
-constexpr size_t kFeMaxRows = 20 * STT_SAMPLE_RATE / 160;  // 20 s phrase cap
+constexpr size_t kFeMaxRows = kStreamSamples / 160;  // the 10 s phrase cap
 constexpr int kFeCaches = 2;                          // phrase in progress + one queued
 constexpr size_t kFeBatchRows = 8;
 constexpr uint32_t kFeStackBytes = 3072;
@@ -1477,7 +1481,7 @@ static void sttFeatureRelease(StreamRun& run, int idx, uint32_t gen) {
 // After the warm-up (weights and LM loaded): allocate the pool and start the
 // feature task, or leave capture-time features off for this session. The pool
 // must never cost a phrase its inference or its LM: what stays free beside it
-// must admit the largest call the broker makes (a 20 s phrase or draft) by the
+// must admit the largest call the broker makes (a 10 s phrase or draft) by the
 // runtime's own rule (sttLocalCallBudget: with a resident model only that
 // call's frontend; with per-call models its arena, frontend and metadata
 // margin, ~3.7 MB, ~3.1 MB of it contiguous), plus 1 MiB for LM beams, and
@@ -1600,6 +1604,7 @@ static void sttContinuousWorker(void*) {
     // Stop leaves only a short tail. The 15x5 transcribes at ~0.45x real time,
     // so 4 s phrases keep up; less context at each cut is the trade-off.
     segmentConfig.min_segment_samples = 4 * STT_SAMPLE_RATE;
+    segmentConfig.max_segment_samples = kStreamSamples;  // the 10 s phrase cap
 #if HW1_STT_SHORT_CLOSE
     // Below 4 s a phrase closes after 1 s of silence instead of waiting for
     // the 4 s floor (a short reply gets its caption); at 4 s or more the

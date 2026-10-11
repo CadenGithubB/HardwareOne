@@ -446,7 +446,7 @@ class Model {
         const int kinds[4]={4,5,6,10};
         for(int i=0;i<4;++i) if(parts[i]) blocks.push_back(fake::metaAlloc(parts[i],kinds[i]));
         fake::state.foreignObjects+=3;
-        if(fake::state.ioMismatch && frames==2000)input.exponent.value=99;
+        if(fake::state.ioMismatch && frames==1000)input.exponent.value=99;
     }
     ~Model() {
         assert(fake::hasRaw(weights));
@@ -911,7 +911,7 @@ void perCallSession() {
 namespace resident {
 using namespace hw1::stt;
 using test::Reader; using test::call; using test::callWith; using test::FakeDecoder;
-constexpr size_t kMax=20*16000;   // the broker's cap: resident model is built at 2000 frames
+constexpr size_t kMax=10*16000;   // the broker's cap: resident model is built at 1000 frames
 void assertResident(int created,int destroyed) {
     assert(fake::state.models==1 && fake::state.created==created && fake::state.destroyed==destroyed);
 }
@@ -921,7 +921,7 @@ void lifecycle() {
         ModelCache cache;
         Reader a;auto first=call(&cache,a,320);           // the warm-up: per-call model, then the build
         assert(first.ok && !first.stats.weightsReused);
-        assert(fake::state.modelFrames==std::vector<size_t>({2,2000}));
+        assert(fake::state.modelFrames==std::vector<size_t>({2,1000}));
         assertResident(2,1);
         const std::vector<std::string> events={"allocate weights","create model","destroy model","create model"};
         assert(fake::state.events==events);              // per-call model gone before the resident build
@@ -931,17 +931,17 @@ void lifecycle() {
         Reader c;auto third=call(&cache,c,320);
         assert(third.ok && third.stats.featureFrames==2);
         Reader d;auto longest=call(&cache,d,kMax);         // exactly the build length
-        assert(longest.ok && longest.stats.featureFrames==2000 && longest.stats.outputFrames==1000);
+        assert(longest.ok && longest.stats.featureFrames==1000 && longest.stats.outputFrames==500);
         assertResident(2,1);                              // no model built for any of these
-        assert(fake::state.runFrames==std::vector<size_t>({2,3,2,2000}));
-        assert(fake::state.prepareFrames==std::vector<size_t>({3,2,2000}));  // not the warm-up's per-call model
+        assert(fake::state.runFrames==std::vector<size_t>({2,3,2,1000}));
+        assert(fake::state.prepareFrames==std::vector<size_t>({3,2,1000}));  // not the warm-up's per-call model
         // Longer than the resident length (one-shot sizes only): per-call model beside it.
         Reader e;auto beyond=call(&cache,e,kMax+160);
-        assert(beyond.ok && beyond.stats.featureFrames==2001 && fake::state.modelFrames.back()==2001);
+        assert(beyond.ok && beyond.stats.featureFrames==1001 && fake::state.modelFrames.back()==1001);
         assertResident(3,2);
         Reader f;assert(call(&cache,f,640).ok);assertResident(3,2);
-        assert(fake::state.runFrames==std::vector<size_t>({2,3,2,2000,2001,4}));
-        assert(fake::state.prepareFrames==std::vector<size_t>({3,2,2000,4}));
+        assert(fake::state.runFrames==std::vector<size_t>({2,3,2,1000,1001,4}));
+        assert(fake::state.prepareFrames==std::vector<size_t>({3,2,1000,4}));
         const int reshapes=fake::state.reshapes;
         Reader g;assert(call(&cache,g,640).ok);
         assert(fake::state.reshapes==reshapes);          // same length: shapes left as they are
@@ -963,7 +963,7 @@ void refusals() {
         assert(fake::state.models==0 && fake::state.created==2 && fake::state.destroyed==2);
         Reader b;assert(call(&cache,b,480).ok);
         Reader c;assert(call(&cache,c,320).ok);
-        assert(fake::state.created==4 && fake::state.modelFrames==std::vector<size_t>({2,2000,3,2}));
+        assert(fake::state.created==4 && fake::state.modelFrames==std::vector<size_t>({2,1000,3,2}));
         fake::settled(1);cache.reset();fake::settled(0);
     }
     // Not enough PSRAM to build and keep 2 MiB free: refused before any build.
@@ -1120,7 +1120,7 @@ void placement() {
         assert(fake::field(e3,"int_used")==0 && fake::field(e3,"fallback")==0 && fake::field(e3,"fallback_bytes")==0);
         assert(fake::field(e3,"meta_failed")==0 && fake::field(e3,"meta_n")==5 && fake::field(e3,"meta_frees")==0);
         assert(fake::field(e3,"meta_bytes")==long(kMeta+sizeof(dl::Model)) && fake::field(e3,"tensors")==5);
-        assert(fake::field(e3,"arena")==2048*1000 && fake::field(e3,"arena_int")==0);
+        assert(fake::field(e3,"arena")==2048*500 && fake::field(e3,"arena_int")==0);
         assert(fake::field(e3,"param_objs")==3 && fake::field(e3,"param_int")==0);
         const auto m=fake::linesWith("STT: TL e3m ");
         assert(m.size()==1 && fake::numericTL(m[0]) && fake::field(m[0],"model")==long(sizeof(dl::Model)));
@@ -1135,7 +1135,7 @@ void placement() {
         // Longer than the resident length: a per-call model, its metadata through the
         // same allocator, all of it returned when the call ends.
         const size_t blocks=fake::state.meta.size();
-        Reader d;assert(call(&cache,d,20*16000+160).ok);
+        Reader d;assert(call(&cache,d,10*16000+160).ok);
         assert(fake::state.meta.size()==blocks && fake::state.created==3);
         cache.reset();
         assert(fake::state.meta.empty() && fake::state.ps.empty() && fake::state.internalFree==internal);
@@ -1160,7 +1160,7 @@ void restarts() {
             ModelCache cache;fake::state.modelInternalBytes=kMeta;
             Reader a;assert(call(&cache,a,320).ok);
             Reader b;assert(call(&cache,b,64000).ok);
-            Reader c;assert(call(&cache,c,320000).ok);
+            Reader c;assert(call(&cache,c,160000).ok);
             assert(fake::state.models==1 && fake::state.meta.size()==5 && fake::state.ps.size()==2);
             assert(fake::state.metaPsram==kMeta+sizeof(dl::Model));
         }   // ~ModelCache: as STTLocalSession::reset() at the worker's end
@@ -1216,20 +1216,20 @@ void failedBuilds() {
     }
 }
 void featurePoolBudget() {
-    // The broker sizes its pool after the warm-up against callBudget(20 s): the resident call.
+    // The broker sizes its pool after the warm-up against callBudget(10 s): the resident call.
     fake::clean();
     {
         ModelCache cache;
         size_t contiguous=0;
-        const size_t frames=feature_frames(320000);
-        const size_t perCall=test::remainingBudget(320000);
+        const size_t frames=feature_frames(160000);
+        const size_t perCall=test::remainingBudget(160000);
         Reader a;assert(call(&cache,a,8000).ok);
         assert(fake::state.models==1);
-        const size_t resident=callBudget(320000,&cache,&contiguous);
+        const size_t resident=callBudget(160000,&cache,&contiguous);
         assert(resident==frames*kMelBins*sizeof(float)+sizeof(FrontendWorkspace)+kResidentCallMargin);
         assert(contiguous==frames*kMelBins*sizeof(float)+kResidentCallMargin && resident<perCall);
         cache.reset();fake::settled(0);
-        assert(callBudget(320000,&cache,&contiguous)==perCall);
+        assert(callBudget(160000,&cache,&contiguous)==perCall);
     }
 }
 }
