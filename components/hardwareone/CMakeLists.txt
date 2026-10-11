@@ -19,6 +19,7 @@ set(HW_CFG_ENABLE_AUTOMATION 0)
 set(HW_CFG_ENABLE_CAMERA_SENSOR 0)
 set(HW_CFG_ENABLE_ESP_SR 0)
 set(HW_CFG_ENABLE_LOCAL_STT 0)
+set(HW_CFG_ENABLE_STT_SPEAKER_LABELS 0)
 set(HW_CFG_ENABLE_EDGE_IMPULSE 0)
 set(HW_CFG_ENABLE_GAMES 0)
 set(HW_CFG_ENABLE_WEB_GAME_DARKROOM 0)
@@ -142,6 +143,11 @@ if(EXISTS "${hw_cfg_file}")
     string(REGEX MATCH "#define[ \t]+ENABLE_LOCAL_STT[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_LOCAL_STT "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_STT_SPEAKER_LABELS[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_STT_SPEAKER_LABELS "${CMAKE_MATCH_1}")
     endif()
 
     string(REGEX MATCH "#define[ \t]+ENABLE_AUTOMATION[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
@@ -675,6 +681,26 @@ if(HW_CFG_ENABLE_LOCAL_STT GREATER 0)
         else()
             set(_hw1_stt_resident_model 0)
         endif()
+        # Session speaker labels (stt/speaker_model.h, ENABLE_STT_SPEAKER_LABELS): their sources, plus the
+        # explicit-PSRAM helpers in stt_dl_metadata.cpp they allocate with.
+        if(HW_CFG_ENABLE_STT_SPEAKER_LABELS GREATER 0)
+            # The background speaker task and the STT worker both run PIE vector code on core 1. ESP-IDF
+            # before 6.0 does not save PIE register q3 on a context switch, so the voiceprints come out wrong:
+            # refuse to build until the IDF carries the fix (tools/p4/idf-patches/README.md).
+            set(_hw1_portasm "${IDF_PATH}/components/freertos/FreeRTOS-Kernel/portable/riscv/portasm.S")
+            if(EXISTS "${_hw1_portasm}")
+                file(READ "${_hw1_portasm}" _hw1_portasm_text)
+                if(NOT _hw1_portasm_text MATCHES "esp\\.vst\\.128\\.ip[ \t]+q3")
+                    message(FATAL_ERROR "ENABLE_STT_SPEAKER_LABELS needs the ESP-IDF PIE context-switch fix "
+                        "(upstream b25cb29, ESP-IDF 6.0+): apply tools/p4/idf-patches/"
+                        "0001-freertos-fix-xesppie-registers-save-restore.patch to ${IDF_PATH} (see its README).")
+                endif()
+            endif()
+            list(APPEND hardwareone_srcs stt/speaker_frontend.cpp stt/speaker_model.cpp)
+            if(NOT HW1_STT_RESIDENT_MODEL)
+                list(APPEND hardwareone_srcs stt/stt_dl_metadata.cpp)
+            endif()
+        endif()
         list(APPEND hardwareone_requires espressif__esp-dl esp_rom mbedtls)
     endif()
 endif()
@@ -718,6 +744,14 @@ if(HW_CFG_ENABLE_LOCAL_STT GREATER 0 AND IDF_TARGET STREQUAL "esp32p4")
     set_source_files_properties(stt/quartznet_frontend.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-O2")
     set_source_files_properties(stt/quartznet_runtime.cpp PROPERTIES COMPILE_OPTIONS "-O2")
     set_source_files_properties(stt/stt_lm.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+    # Speaker features and pooling are tight float loops (at -Os they were ~3x slower).
+    if(HW_CFG_ENABLE_STT_SPEAKER_LABELS GREATER 0)
+        set_source_files_properties(stt/speaker_frontend.cpp stt/speaker_model.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+    endif()
+    # Speaker diagnostics (System_STTLocal.h): off unless configured with -DHW1_STT_SPEAKER_DIAGNOSTICS=1.
+    if(DEFINED HW1_STT_SPEAKER_DIAGNOSTICS)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE HW1_STT_SPEAKER_DIAGNOSTICS=${HW1_STT_SPEAKER_DIAGNOSTICS})
+    endif()
     # Component-wide: ModelCache's layout depends on it, so every translation
     # unit (System_STTLocal.cpp included) must see the same value.
     target_compile_definitions(${COMPONENT_LIB} PRIVATE HW1_STT_RESIDENT_MODEL=${_hw1_stt_resident_model})
@@ -733,6 +767,10 @@ if(HW_CFG_ENABLE_LOCAL_STT GREATER 0 AND IDF_TARGET STREQUAL "esp32p4")
     endif()
     include("${_stt_dl_dir}/cmake/compile_register.cmake")
     esp_dl_compile_add_yml("${CMAKE_CURRENT_LIST_DIR}/stt/quartznet.compile_req.yml")
+    # The speaker-embedding trunk (8-bit weights, 16-bit activations), only with speaker labels.
+    if(HW_CFG_ENABLE_STT_SPEAKER_LABELS GREATER 0)
+        esp_dl_compile_add_yml("${CMAKE_CURRENT_LIST_DIR}/stt/speaker.compile_req.yml")
+    endif()
 endif()
 
 # Enable Sense features for ESP32-S3 boards (camera, mic, SD card on expansion board)

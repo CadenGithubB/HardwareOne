@@ -1587,6 +1587,18 @@
   #error "ENABLE_STT_LM decodes the local STT backend's output. Set ENABLE_LOCAL_STT 1 or ENABLE_STT_LM 0."
 #endif
 
+// Session speaker labels for the local STT backend (stt/speaker_model.h): a
+// speaker-embedding model from "/sd/STT Models/speaker.spk" labels each phrase
+// in a background task; saved transcript lines get "[Person N]". Off unless a
+// profile enables it; the build then compiles neither the speaker code nor its
+// ESP-DL kernels (CMake reads the same switch).
+#ifndef ENABLE_STT_SPEAKER_LABELS
+  #define ENABLE_STT_SPEAKER_LABELS 0
+#endif
+#if ENABLE_STT_SPEAKER_LABELS && !ENABLE_LOCAL_STT
+  #error "ENABLE_STT_SPEAKER_LABELS labels the local STT backend's phrases. Set ENABLE_LOCAL_STT 1 or ENABLE_STT_SPEAKER_LABELS 0."
+#endif
+
 // =============================================================================
 // LLM FEATURE / SOURCE CONSISTENCY  (see §5 ENABLE_LLM_BACKEND)
 // =============================================================================

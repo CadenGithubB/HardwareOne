@@ -100,6 +100,11 @@
 // Fully local transcription on the P4 (no Pi/UART, Wi-Fi or cloud).
 #undef ENABLE_LOCAL_STT
 #define ENABLE_LOCAL_STT 1
+// Session speaker labels: saved transcript lines become "[Person N] text" when
+// "/sd/STT Models/speaker.spk" is on the card (without it nothing changes).
+// Labelling runs in a background task; captions never wait for it.
+#undef ENABLE_STT_SPEAKER_LABELS
+#define ENABLE_STT_SPEAKER_LABELS 1
 // Private spoken notes (ring hold on a HW1 lens page, Notes page, `note` CLI),
 // transcribed locally and saved under /stt/u<id>/notes/.
 #undef ENABLE_QUICKNOTE

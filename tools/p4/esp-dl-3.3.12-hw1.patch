@@ -53,7 +53,7 @@ index 75f7d57..8b8c020 100644
              if (runtime_mode == RUNTIME_MODE_MULTI_CORE ||
                  (runtime_mode == RUNTIME_MODE_AUTO && args.input_height >= 100 && args.input_width >= 50)) {
 diff --git a/dl/base/dl_base_conv_loop.cpp b/dl/base/dl_base_conv_loop.cpp
-index 96c5377..0d29e0c 100644
+index 96c5377..55ad503 100644
 --- a/dl/base/dl_base_conv_loop.cpp
 +++ b/dl/base/dl_base_conv_loop.cpp
 @@ -40,10 +40,20 @@ static bool conv_loop_pie_tiled(ConvArgsType &args,
@@ -79,6 +79,103 @@ index 96c5377..0d29e0c 100644
  
      // height/width/pointers are the body rectangle: the full map when there is
      // no pad, or conv_1x1_body_view() after 1x1 pad fill. Stride is already in
+@@ -399,6 +409,54 @@ static void conv_loop_pie_grid(
+     }
+ }
+ 
++// HardwareOne: output-channel blocks for 16-bit-activation KxK convs whose filter outgrows the cache.
++// The w8a16/s16 hwcn/33cn kernels compute one output pixel for all n_div_x groups of 8 output channels,
++// reading the filter group after group ([N/8][kh][kw][C][8]), so every pixel re-reads the whole filter:
++// 147 KB for the speaker trunk's 128 -> 128 3x3 convs, beyond the 64 KB L1D both cores share (~195 ms each).
++// Here the grid loop runs once per block of output channels whose filter slice fits the budget; each output
++// value is still the same kernel's reduction over the full C x kh x kw, so results are bit-identical.
++// int8 (QuartzNet) is not touched.
++int hw1_dl_conv_block_bytes = 24 * 1024;
++extern "C" int hw1_dl_log_kernel_binds;
++int hw1_dl_log_kernel_binds = 0;
++static bool conv_loop_pie_grid_blocked(
++    ConvArgsType &args, conv_pie_fn_t body, conv_pie_fn_t border, int feat_bytes, int filt_bytes)
++{
++    const int lanes = 16 / feat_bytes;
++    if (feat_bytes != 2 || hw1_dl_conv_block_bytes <= 0 || !args.n_div_x || args.c_remainder || args.n_remainder ||
++        args.output_channel % lanes || args.filter_c <= 0) {
++        return false;
++    }
++    const int per_channel_bytes = args.filter_height * args.filter_width * args.filter_c * filt_bytes;
++    if (per_channel_bytes <= 0 || (long)per_channel_bytes * args.output_channel <= hw1_dl_conv_block_bytes) {
++        return false;
++    }
++    int block = (hw1_dl_conv_block_bytes / per_channel_bytes) / lanes * lanes;
++    if (block < lanes) {
++        block = lanes;
++    }
++    if (block >= args.output_channel) {
++        return false;
++    }
++    const int bias_bytes = (int)sizeof(int64_t);
++    const bool per_channel = args.mac_shift == INT_MIN;
++    for (int channel = 0; channel < args.output_channel; channel += block) {
++        ConvArgsType a = args;
++        const int n = std::min(block, args.output_channel - channel);
++        a.n_div_x = n / lanes;
++        a.output_element = conv_ptr_add(args.output_element, channel, feat_bytes);
++        a.filter_element = conv_ptr_add(args.filter_element, channel * (per_channel_bytes / filt_bytes), filt_bytes);
++        if (args.bias_element) {
++            a.bias_element = conv_ptr_add(args.bias_element, channel, bias_bytes);
++        }
++        if (per_channel && args.tie_filter_channel_factor) {
++            a.tie_filter_channel_factor = conv_ptr_add(args.tie_filter_channel_factor, channel, feat_bytes);
++        }
++        conv_loop_pie_grid(a, body, border, feat_bytes, filt_bytes);
++    }
++    return true;
++}
++
+ static void conv_loop_pie(ConvArgsType &args, conv_pie_fn_t body, conv_pie_fn_t border, int feat_bytes, int filt_bytes)
+ {
+     if (conv_is_1x1(args) || !conv_has_padding(args)) {
+@@ -419,7 +477,9 @@ static void conv_loop_pie(ConvArgsType &args, conv_pie_fn_t body, conv_pie_fn_t
+         }
+         return;
+     }
+-    conv_loop_pie_grid(args, body, border, feat_bytes, filt_bytes);
++    if (!conv_loop_pie_grid_blocked(args, body, border, feat_bytes, filt_bytes)) {
++        conv_loop_pie_grid(args, body, border, feat_bytes, filt_bytes);
++    }
+ }
+ #endif
+ 
+diff --git a/dl/base/dl_base_conv_select.hpp b/dl/base/dl_base_conv_select.hpp
+index 8eae64c..9ebda28 100644
+--- a/dl/base/dl_base_conv_select.hpp
++++ b/dl/base/dl_base_conv_select.hpp
+@@ -49,6 +49,9 @@ inline uint16_t dl_conv_key_from_args(const ConvArgsType &args, int group_dw, qu
+         dtype, group_dw ? 1 : 0, kshape, args.bias_element ? 1 : 0, act, args.mac_shift == INT_MIN ? 1 : 0, c_align);
+ }
+ 
++/** HardwareOne speaker diagnostics: when set, each distinct packed key is logged once at bind (TL kbind). */
++extern "C" int hw1_dl_log_kernel_binds;
++
+ /** Old EDL: pack args → intern names → lookup into fn[3] (body, border, tail). */
+ inline bool dl_conv_bind_from_args(const ConvArgsType &args, int group_dw, quant_type_t q, dl_kernel_erased_t fn[3])
+ {
+@@ -62,6 +65,16 @@ inline bool dl_conv_bind_from_args(const ConvArgsType &args, int group_dw, quant
+     fn[0] = dl_kernel_lookup(s0);
+     fn[1] = dl_kernel_lookup(s1);
+     fn[2] = dl_kernel_lookup(s2);
++    if (hw1_dl_log_kernel_binds) {
++        static uint16_t seen[96];
++        static int n_seen = 0;
++        bool known = false;
++        for (int i = 0; i < n_seen; i++) known = known || seen[i] == key;
++        if (!known && n_seen < 96) {
++            seen[n_seen++] = key;
++            ESP_LOGI("STT", "TL kbind key=0x%04x body=%s border=%s tail=%s", key, s0 ? s0 : "-", s1 ? s1 : "-", s2 ? s2 : "-");
++        }
++    }
+     if (!fn[0]) {
+         return false;
+     }
 diff --git a/dl/base/dl_base_dwconv_loop.cpp b/dl/base/dl_base_dwconv_loop.cpp
 index fc57844..8854e7c 100644
 --- a/dl/base/dl_base_dwconv_loop.cpp
@@ -261,7 +358,7 @@ index 7f249d9..bc50659 100644
                 const std::map<std::string, std::vector<int>> &input_shapes = {}) override;
  
 diff --git a/dl/model/include/dl_model_base.hpp b/dl/model/include/dl_model_base.hpp
-index d6e218c..844b1f0 100644
+index d6e218c..3696b5e 100644
 --- a/dl/model/include/dl_model_base.hpp
 +++ b/dl/model/include/dl_model_base.hpp
 @@ -47,8 +47,9 @@ class Model {
@@ -291,7 +388,27 @@ index d6e218c..844b1f0 100644
      Model() {}
  
      /**
-@@ -447,6 +456,25 @@ public:
+@@ -309,6 +318,19 @@ public:
+      */
+     virtual void run(int stage_num, int stage_index, runtime_mode_t mode = RUNTIME_MODE_SINGLE_CORE);
+ 
++    /**
++     * @brief HardwareOne: name of execution-plan module i (may be null), nullptr out of range.
++     */
++    const char *module_name(int i) const
++    {
++        return (i >= 0 && i < (int)m_execution_plan.size()) ? m_execution_plan[i]->name : nullptr;
++    }
++
++    /**
++     * @brief HardwareOne: number of execution-plan modules (names may be null).
++     */
++    int module_count() const { return (int)m_execution_plan.size(); }
++
+     /**
+      * @brief Minimize the model.
+      */
+@@ -447,6 +469,25 @@ public:
       * @return fbs::FbsModel *
       */
      virtual fbs::FbsModel *get_fbs_model() { return m_fbs_model; }
@@ -724,6 +841,21 @@ index 18cc659..175d7a4 100644
      }
  
      /**
+diff --git a/dl/module/include/dl_module_gemm.hpp b/dl/module/include/dl_module_gemm.hpp
+index 00c34a8..18bb87f 100644
+--- a/dl/module/include/dl_module_gemm.hpp
++++ b/dl/module/include/dl_module_gemm.hpp
+@@ -100,8 +100,8 @@ public:
+                                 input0,
+                                 padding,
+                                 filter,
+-                                {1, 1} /*strides*/,
+-                                {1, 1} /*dilations*/,
++                                std::vector<int>{1, 1} /*strides*/,
++                                std::vector<int>{1, 1} /*dilations*/,
+                                 1 /*group*/,
+                                 bias,
+                                 this->activation,
 diff --git a/dl/module/include/dl_module_insert_zeros.hpp b/dl/module/include/dl_module_insert_zeros.hpp
 index ebe4c42..492fd8a 100644
 --- a/dl/module/include/dl_module_insert_zeros.hpp
@@ -795,7 +927,7 @@ index 9d71e3a..fd81471 100644
          TensorBase *input = context->get_tensor(m_inputs_index[0]);
          TensorBase *table = context->get_tensor(m_inputs_index.back());
 diff --git a/dl/module/include/dl_module_matmul.hpp b/dl/module/include/dl_module_matmul.hpp
-index ce4da7f..4fc17e5 100644
+index ce4da7f..0303872 100644
 --- a/dl/module/include/dl_module_matmul.hpp
 +++ b/dl/module/include/dl_module_matmul.hpp
 @@ -191,8 +191,8 @@ public:
@@ -809,6 +941,61 @@ index ce4da7f..4fc17e5 100644
  
          assert(m_activation == Linear || m_activation == ReLU);
          assert(input0_shape.size() >= 1 && input0_shape.size() <= 4);
+@@ -313,8 +313,8 @@ public:
+                                     input0,
+                                     padding,
+                                     input1 /*filter*/,
+-                                    {1, 1} /*strides*/,
+-                                    {1, 1} /*dilations*/,
++                                    std::vector<int>{1, 1} /*strides*/,
++                                    std::vector<int>{1, 1} /*dilations*/,
+                                     1 /*group*/,
+                                     nullptr /*bias*/,
+                                     m_activation,
+@@ -382,8 +382,8 @@ public:
+                                             input0,
+                                             padding,
+                                             &input1_tmp /*filter*/,
+-                                            {1, 1} /*strides*/,
+-                                            {1, 1} /*dilations*/,
++                                            std::vector<int>{1, 1} /*strides*/,
++                                            std::vector<int>{1, 1} /*dilations*/,
+                                             1 /*group*/,
+                                             nullptr /*bias*/,
+                                             m_activation,
+@@ -431,8 +431,8 @@ public:
+                                             &input0_tmp,
+                                             padding,
+                                             input1 /*filter*/,
+-                                            {1, 1} /*strides*/,
+-                                            {1, 1} /*dilations*/,
++                                            std::vector<int>{1, 1} /*strides*/,
++                                            std::vector<int>{1, 1} /*dilations*/,
+                                             1 /*group*/,
+                                             nullptr /*bias*/,
+                                             m_activation,
+@@ -507,8 +507,8 @@ public:
+                                             &input0_tmp,
+                                             padding,
+                                             &input1_tmp /*filter*/,
+-                                            {1, 1} /*strides*/,
+-                                            {1, 1} /*dilations*/,
++                                            std::vector<int>{1, 1} /*strides*/,
++                                            std::vector<int>{1, 1} /*dilations*/,
+                                             1 /*group*/,
+                                             nullptr /*bias*/,
+                                             m_activation,
+@@ -603,8 +603,8 @@ public:
+                                                 &input0_tmp,
+                                                 padding,
+                                                 &input1_tmp /*filter*/,
+-                                                {1, 1} /*strides*/,
+-                                                {1, 1} /*dilations*/,
++                                                std::vector<int>{1, 1} /*strides*/,
++                                                std::vector<int>{1, 1} /*dilations*/,
+                                                 1 /*group*/,
+                                                 nullptr /*bias*/,
+                                                 m_activation,
 diff --git a/dl/module/include/dl_module_relu.hpp b/dl/module/include/dl_module_relu.hpp
 index 0b71b6a..3cd6948 100644
 --- a/dl/module/include/dl_module_relu.hpp
