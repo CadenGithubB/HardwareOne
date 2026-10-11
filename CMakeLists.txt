@@ -714,8 +714,9 @@ endif()
 # JPEG decoder as qualified. The managed espressif/esp-dl 3.3.12 is replaced
 # the same way (tools/p4/esp-dl-3.3.12-hw1.patch: P4 pointwise-conv tiles,
 # cache-blocked dual-core depthwise convolution, conv args prepared in one
-# pass before a model runs, and an allocator hook for model metadata, which
-# the local STT runtime points at PSRAM);
+# pass before a model runs, ReLU-shaped int8 LUTs run as a vector max, and an
+# allocator hook for model metadata, which the local STT runtime points at
+# PSRAM);
 # components/hardwareone/idf_component.yml names it as the dependency's
 # override_path, so ESP-SR's edge to esp-dl uses it too. A plain
 # EXTRA_COMPONENT_DIRS entry is not enough there: the component manager treats

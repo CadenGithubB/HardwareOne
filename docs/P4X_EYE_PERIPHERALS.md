@@ -29,8 +29,9 @@ component manager cache and checked against a pinned digest) with
 `tools/p4/esp-dl-3.3.12-hw1.patch`: pointwise-convolution tiles and
 single-column depthwise blocks sized for the P4's shared 64 KB L1 data cache,
 a channel-half dual-core split for those depthwise layers, convolution
-arguments prepared in one pass before the model runs, and an allocator hook for
-model metadata that the local STT runtime points at PSRAM. P4 builds
+arguments prepared in one pass before the model runs, int8 LUT layers whose
+table is exactly ReLU run as a vector max, and an allocator hook for model
+metadata that the local STT runtime points at PSRAM. P4 builds
 solve dependencies against a copy of `dependencies.lock.esp32p4` in their build
 directory, because the component manager records the local ESP-DL by its
 absolute path. A P4 build stops with that command if any override is missing.

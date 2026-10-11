@@ -175,6 +175,56 @@ index ec19478..44dec11 100644
      int dims = static_cast<int>(output_shape_ref.size());
      if (dims > kMaxDims) {
          ESP_LOGE("Element-wise", "Do not support dim=%d", dims);
+diff --git a/dl/base/dl_base_lut.cpp b/dl/base/dl_base_lut.cpp
+index 992bdff..7f96d4f 100644
+--- a/dl/base/dl_base_lut.cpp
++++ b/dl/base/dl_base_lut.cpp
+@@ -14,6 +14,25 @@ static void lut_s8_c(int8_t *output, const int8_t *input, int32_t size, const in
+     }
+ }
+ 
++#if CONFIG_PIE_V2_BOOST
++// HardwareOne: dl/tool/isa/esp32p4/dl_esp32p4_s8_relu_hw1.S (that directory is always compiled on the P4).
++extern "C" void dl_esp32p4_s8_relu_hw1(int8_t *output, const int8_t *input, int32_t vectors);
++
++// HardwareOne: a table that maps every int8 input to max(input, 0) is a ReLU; run it as a vector
++// max (one load, max, store per 16 bytes) instead of a per-byte table lookup. The table is checked
++// in full on every call (256 bytes), so any other table keeps the lookup: same output, exactly.
++static bool lut_s8_is_relu(const int8_t *table)
++{
++    for (int i = 0; i < 256; ++i) {
++        const int x = i - 128;  // lut_s8_c: table[uint8(input) ^ 0x80]
++        if (table[i] != (x > 0 ? x : 0)) {
++            return false;
++        }
++    }
++    return true;
++}
++#endif
++
+ void lut_s8(int8_t *output, const int8_t *input, int32_t size, const int8_t *table)
+ {
+     assert(output);
+@@ -23,6 +42,19 @@ void lut_s8(int8_t *output, const int8_t *input, int32_t size, const int8_t *tab
+     if (size <= 0) {
+         return;
+     }
++#if CONFIG_PIE_V2_BOOST
++    if (lut_s8_is_relu(table)) {
++        int32_t done = 0;
++        if (!(reinterpret_cast<uintptr_t>(output) & 0xf) && !(reinterpret_cast<uintptr_t>(input) & 0xf)) {
++            done = size & ~0xf;
++            dl_esp32p4_s8_relu_hw1(output, input, done / 16);
++        }
++        for (int32_t i = done; i < size; ++i) {
++            output[i] = input[i] > 0 ? input[i] : 0;
++        }
++        return;
++    }
++#endif
+ 
+     int32_t processed = 0;
+ #if CONFIG_PIE_V2_BOOST || CONFIG_PIE_V1_BOOST
 diff --git a/dl/model/include/dl_memory_manager.hpp b/dl/model/include/dl_memory_manager.hpp
 index 89c4c08..a642bc6 100644
 --- a/dl/model/include/dl_memory_manager.hpp
@@ -1296,6 +1346,32 @@ index 0000000..4b8b43e
 +    static void operator delete(void *, void *) noexcept                                                  \
 +    {                                                                                                      \
 +    }
+diff --git a/dl/tool/isa/esp32p4/dl_esp32p4_s8_relu_hw1.S b/dl/tool/isa/esp32p4/dl_esp32p4_s8_relu_hw1.S
+new file mode 100644
+index 0000000..7dd9dca
+--- /dev/null
++++ b/dl/tool/isa/esp32p4/dl_esp32p4_s8_relu_hw1.S
+@@ -0,0 +1,20 @@
++############################################################################################################################################################
++#### HardwareOne: int8 ReLU, out[i] = max(in[i], 0), 16 bytes per step (used for LUTs that are exactly ReLU).
++#### a0: int8_t *output (16-byte aligned), a1: const int8_t *input (16-byte aligned), a2: number of 16-byte vectors (>= 0)
++############################################################################################################################################################
++    .text
++    .global dl_esp32p4_s8_relu_hw1
++    .type   dl_esp32p4_s8_relu_hw1, @function
++    .balign 4
++    .option norvc
++dl_esp32p4_s8_relu_hw1:
++    esp.zero.q  q1
++    beqz  a2, 2f
++1:
++    esp.vld.128.ip  q0, a1, 16
++    esp.vmax.s8     q0, q0, q1
++    esp.vst.128.ip  q0, a0, 16
++    addi  a2, a2, -1
++    bnez  a2, 1b
++2:
++    ret
 diff --git a/dl/tool/src/dl_tool_metadata.cpp b/dl/tool/src/dl_tool_metadata.cpp
 new file mode 100644
 index 0000000..28e2c8e
