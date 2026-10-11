@@ -98,6 +98,8 @@ static size_t readCounter = 0;
 static bool irregularReads = false;
 // These are changed only after every worker has joined.
 constexpr uint64_t kCalibrationSamples = 8000; // Real production500ms; never bypass adaptive mode.
+// The broker's continuous phrase cap (kStreamSamples): a phrase without a pause is cut at 10 s.
+constexpr uint64_t kPhraseCap = 160000;
 static bool allVoice = true;
 static int16_t dc = 0;
 static std::vector<std::pair<uint64_t, uint64_t>> voiceIntervals;
@@ -250,11 +252,12 @@ bool sttLocalTranscribe(const int16_t*, size_t, char*, size_t,
 // fake PSRAM has no free-size accounting, so only the call is checked.
 static std::atomic<unsigned> callBudgetQueries{0};
 STTLocalCallBudget sttLocalCallBudget(size_t samples, const STTLocalSession* session) {
-  assert(samples == 320000 && session); ++callBudgetQueries;
+  assert(samples == kPhraseCap && session); ++callBudgetQueries;
   return {3u << 20, 3u << 20};
 }
 #define free trackedFree
 // INSERT_BROKER
+static_assert(kStreamSamples == kPhraseCap, "harness phrase cap");
 #undef free
 
 static std::atomic<bool> savePreference{false}, saveFailure{false}, saveHeld{false}, saveEntered{false};
@@ -476,7 +479,7 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
     // Live-mode draft of the utterance in progress: never a queued segment.
     // These tests pin final-segment behaviour, so drafts decline (production
     // simply publishes no draft on failure) without touching the backend.
-    { std::lock_guard<std::mutex> lock(gSTTMux); assert(run.draftBusy && count <= 320000); }
+    { std::lock_guard<std::mutex> lock(gSTTMux); assert(run.draftBusy && count <= kPhraseCap); }
     ++draftCalls;
     if (draftStages && !runDraftStages(pcm, count, control)) { snprintf(error, errorCap, "Cancelled"); return false; }
     if (draftsSucceed) {
@@ -503,7 +506,7 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
     }
   }
   assert(call.sequence && call.end - call.start == call.rawSamples);
-  assert(count == std::max(expectInference, size_t(320)) && count <= 320000);
+  assert(count == std::max(expectInference, size_t(320)) && count <= kPhraseCap);
   assert(allocationCount() == 5 || allocationCount() == 9);  // capture-features: + ring, workspace, 2 row caches
   if (prefix && count < call.rawSamples) ++cachedTrimmedFinals;  // combined: trim-trimmed input with cached rows
   auto assertPCM = [&] {
@@ -687,16 +690,16 @@ static void testAdaptiveReadiness() {
 static void testOverlapAndDrain() {
   reset(); enginePermits = 0; irregularReads = true;
   const auto token = begin(); started(token);
-  feed(token, 20 * 16000); await([] { return engineCalls == 1; }, "first blocked inference");
+  feed(token, kPhraseCap); await([] { return engineCalls == 1; }, "first blocked inference");
   const auto before = snapshot(token); assert(before.captureActive && before.inferenceActive);
-  feed(token, 45 * 16000); // Capture must advance by 25 s while inference is blocked.
+  feed(token, 360000); // Capture must advance by 12.5 s while inference is blocked.
   assert(engineCalls == 1 && snapshot(token).segmentsCaptured == 2);
   assert(sttRequestFinish(owner, token));
   await([] { return stopRequested.load(); }, "normal capture stop");
   assert(sttRunActive(token) && allocationCount() == 9);
   assert(snapshot(token).segmentsCaptured == 3);
   enginePermits = UINT32_MAX; complete(token);
-  auto s = snapshot(token); assert(s.state == STTState::Done && s.segmentsCompleted == 3 && s.recordedSamples == kCalibrationSamples + 720000);
+  auto s = snapshot(token); assert(s.state == STTState::Done && s.segmentsCompleted == 3 && s.recordedSamples == kCalibrationSamples + 360000);
   assert(starts == 1 && stops == 1 && deletedTasks == 3);  // capture-features: + stt_fe
   assert(weightLoads == 1 && weightReuses == 2 && sessionCloses == 1);
   assert(!engineHistory[0].weightsReused && engineHistory[1].weightsReused && engineHistory[2].weightsReused);
@@ -709,27 +712,27 @@ static void testOverlapAndDrain() {
     end = result[i].endSample;
     assert(result[i].forcedBoundary == (i < 2));
   }
-  assert(end == kCalibrationSamples + 45 * 16000);
+  assert(end == kCalibrationSamples + 360000);
 }
 static void testLongRunsAndPauses() {
   reset(); const auto token = begin(); started(token);
-  for (unsigned seconds : {20u, 40u, 60u}) {
-    feed(token, seconds * 16000);
-    await([&] { return snapshot(token).segmentsCompleted == seconds / 20; }, "hard-cut inference");
+  for (unsigned phrases : {1u, 2u, 3u}) {
+    feed(token, phrases * kPhraseCap);
+    await([&] { return snapshot(token).segmentsCompleted == phrases; }, "hard-cut inference");
   }
-  feed(token, 65 * 16000); assert(sttRequestFinish(owner, token)); complete(token);
-  auto s = snapshot(token); assert(s.state == STTState::Done && s.recordedSamples == kCalibrationSamples + 1040000 && s.sessionMs >= 65500);
+  feed(token, 520000); assert(sttRequestFinish(owner, token)); complete(token);
+  auto s = snapshot(token); assert(s.state == STTState::Done && s.recordedSamples == kCalibrationSamples + 520000 && s.sessionMs >= 33000);
   std::vector<STTTextChunk> chunks; acknowledgeAll(token, &chunks);
-  assert(chunks.size() == 4 && chunks.back().endSample == kCalibrationSamples + 1040000);
-  // Continuous local STT cuts a phrase that reaches 20 s at the quietest
+  assert(chunks.size() == 4 && chunks.back().endSample == kCalibrationSamples + 520000);
+  // Continuous local STT cuts a phrase that reaches 10 s at the quietest
   // 10 ms frame of its last 2 s (hard_cut_search_samples): phrases stay
-  // contiguous and complete, never exceed 20 s, and forced ones end within
+  // contiguous and complete, never exceed 10 s, and forced ones end within
   // the search window.
   for (size_t i = 0; i < chunks.size(); ++i) {
     const uint64_t span = chunks[i].endSample - chunks[i].startSample;
-    assert(chunks[i].startSample == (i ? chunks[i - 1].endSample : kCalibrationSamples) && span <= 320000);
+    assert(chunks[i].startSample == (i ? chunks[i - 1].endSample : kCalibrationSamples) && span <= kPhraseCap);
     assert(chunks[i].forcedBoundary == (i < 3));
-    if (i < 3) assert(span >= 320000 - 32000 && span % 160 == 0);
+    if (i < 3) assert(span >= kPhraseCap - 32000 && span % 160 == 0);
   }
 
   reset(); allVoice = false; dc = 11000; irregularReads = true;
@@ -757,28 +760,28 @@ static void testLongRunsAndPauses() {
   assert(snapshot(silent).state == STTState::Done && !snapshot(silent).textReady);
 }
 static void testShortFinalTail() {
-  // Voice up to the last 10 ms frame before 20 s, that frame silent, then a
+  // Voice up to the last 10 ms frame before 10 s, that frame silent, then a
   // 37-sample voiced tail: the quiet-point cut must take the silent frame.
-  reset(); allVoice = false; voiceIntervals = {{0, 319840}, {320000, 400000}};
+  reset(); allVoice = false; voiceIntervals = {{0, 159840}, {160000, 240000}};
   const auto token = begin(); started(token);
-  feed(token, 320000); await([&] { return snapshot(token).segmentsCompleted == 1; }, "first hard cut");
-  feed(token, 320037); assert(sttRequestFinish(owner, token)); complete(token);
-  assert(snapshot(token).state == STTState::Done && snapshot(token).recordedSamples == kCalibrationSamples + 320037);
+  feed(token, kPhraseCap); await([&] { return snapshot(token).segmentsCompleted == 1; }, "first hard cut");
+  feed(token, 160037); assert(sttRequestFinish(owner, token)); complete(token);
+  assert(snapshot(token).state == STTState::Done && snapshot(token).recordedSamples == kCalibrationSamples + 160037);
   // The cut lands on the silent frame, so the tail is that frame plus the 37
   // extra samples: still short enough to need inference-only padding.
   const auto first = peek(token);
-  assert(first.forcedBoundary && first.endSample == kCalibrationSamples + 319840);
-  const uint64_t raw = kCalibrationSamples + 320037 - first.endSample;
+  assert(first.forcedBoundary && first.endSample == kCalibrationSamples + 159840);
+  const uint64_t raw = kCalibrationSamples + 160037 - first.endSample;
   assert(raw == 197);
   assert(engineHistory.size() == 2 && engineHistory[1].rawSamples == raw && engineHistory[1].inferenceSamples == 320);
   assert(sttAcknowledgeChunk(owner, token, 1));
-  const auto tail = peek(token); assert(tail.startSample == first.endSample && tail.endSample == kCalibrationSamples + 320037 && !tail.forcedBoundary);
+  const auto tail = peek(token); assert(tail.startSample == first.endSample && tail.endSample == kCalibrationSamples + 160037 && !tail.forcedBoundary);
 }
 static void testCancelAndJoin() {
   reset(); enginePermits = 0; ignoreEngineCancel = true; stopHeld = true;
-  const auto token = begin(); started(token); feed(token, 320000);
+  const auto token = begin(); started(token); feed(token, kPhraseCap);
   await([] { return engineCalls == 1; }, "blocked model");
-  feed(token, 700000);
+  feed(token, 350000);
   assert(sttCancel(owner, token));
   await([] { return stopRequested.load(); }, "HAL asynchronous stop");
   assert(sttRunActive(token) && allocationCount() == 9 && engineActive);
@@ -795,9 +798,9 @@ static void testCancelAndJoin() {
 }
 static void testQueueBounds() {
   reset(); enginePermits = 0;
-  const auto token = begin(); started(token); feed(token, 320000);
+  const auto token = begin(); started(token); feed(token, kPhraseCap);
   await([] { return engineCalls == 1; }, "first blocked model");
-  allowedSamples = kCalibrationSamples + 1280000; // Fourth 20 s segment cannot fit three occupied slots.
+  allowedSamples = kCalibrationSamples + 4 * kPhraseCap; // Fourth 10 s segment cannot fit three occupied slots.
   complete(token);
   auto s = snapshot(token);
   assert(s.state == STTState::Failed && strstr(s.error, "audio queue full"));
@@ -805,10 +808,10 @@ static void testQueueBounds() {
 
   reset(); const auto textFull = begin(); started(textFull);
   for (unsigned i = 1; i <= 8; ++i) {
-    feed(textFull, i * 320000);
+    feed(textFull, i * kPhraseCap);
     await([&] { return snapshot(textFull).segmentsCompleted == i; }, "unacknowledged text");
   }
-  allowedSamples = kCalibrationSamples + 9 * 320000; complete(textFull); s = snapshot(textFull);
+  allowedSamples = kCalibrationSamples + 9 * kPhraseCap; complete(textFull); s = snapshot(textFull);
   assert(s.state == STTState::Failed && strstr(s.error, "text queue full"));
   assert(s.pendingTexts == 8 && s.segmentsCompleted == 8 && engineCalls == 9);
   for (uint32_t sequence = 1; sequence <= 8; ++sequence) {
@@ -820,7 +823,7 @@ static void testQueueBounds() {
 static void testDeliveryAndRevocation() {
   reset(); const auto token = begin(); started(token);
   for (unsigned i = 1; i <= 3; ++i) {
-    feed(token, i * 320000);
+    feed(token, i * kPhraseCap);
     await([&] { return snapshot(token).segmentsCompleted == i; }, "delivery fixture");
   }
   STTTextChunk denied{};
@@ -892,17 +895,17 @@ static void testFaults() {
   assert(snapshot(token).state == STTState::Failed && snapshot(token).audioOverruns == 7 && strstr(snapshot(token).error, "audio loss"));
   reset(); token = begin(); started(token); sourceAvailable = false; complete(token);
   assert(snapshot(token).state == STTState::Failed && strstr(snapshot(token).error, "source lost"));
-  reset(); cacheStartFails = true; token = begin(); started(token); allowedSamples = kCalibrationSamples + 320000; complete(token);
+  reset(); cacheStartFails = true; token = begin(); started(token); allowedSamples = kCalibrationSamples + kPhraseCap; complete(token);
   assert(snapshot(token).state == STTState::Failed && strstr(snapshot(token).error, "initialization"));
   assert(weightLoads == 0 && sessionCloses == 1 && liveWeightCaches == 0);
-  reset(); engineOK = false; token = begin(); started(token); allowedSamples = kCalibrationSamples + 320000; complete(token);
+  reset(); engineOK = false; token = begin(); started(token); allowedSamples = kCalibrationSamples + kPhraseCap; complete(token);
   assert(snapshot(token).state == STTState::Failed && strstr(snapshot(token).error, "Injected") && !snapshot(token).pendingTexts);
   assert(weightLoads == 1 && weightReuses == 0 && sessionCloses == 1 && liveWeightCaches == 0);
-  reset(); engineOverlong = true; token = begin(); started(token); allowedSamples = kCalibrationSamples + 320000; complete(token);
+  reset(); engineOverlong = true; token = begin(); started(token); allowedSamples = kCalibrationSamples + kPhraseCap; complete(token);
   assert(snapshot(token).state == STTState::Failed && !snapshot(token).pendingTexts);
   reset(); token = begin(); started(token);
   { std::lock_guard<std::mutex> lock(gSTTMux); gSTT.snapshot.segmentsCaptured = UINT32_MAX; }
-  allowedSamples = kCalibrationSamples + 320000; complete(token);
+  allowedSamples = kCalibrationSamples + kPhraseCap; complete(token);
   assert(snapshot(token).state == STTState::Failed && strstr(snapshot(token).error, "sequence exhausted"));
 }
 // Conversate sessions outlive glasses-mic faults: lost frames, a stalled
@@ -927,14 +930,14 @@ static void testNativeFaultTolerance() {
   assert(s.state == STTState::Done && !s.error[0] && s.audioOverruns == 9);
 
   reset(); enginePermits = 0;
-  token = beginNative(); started(token); feed(token, 320000);
+  token = beginNative(); started(token); feed(token, kPhraseCap);
   await([] { return engineCalls == 1; }, "first blocked native model");
-  feed(token, 1280000);  // a fourth 20 s phrase finds three slots occupied: dropped, not fatal
+  feed(token, 4 * kPhraseCap);  // a fourth 10 s phrase finds three slots occupied: dropped, not fatal
   s = snapshot(token);
   assert(s.workerActive && !s.error[0] && s.segmentsCaptured == 3);
   enginePermits = UINT32_MAX;
   await([&] { return snapshot(token).segmentsCompleted == 3; }, "backlog drained");
-  feed(token, 1600000);  // and later phrases continue in order
+  feed(token, 5 * kPhraseCap);  // and later phrases continue in order
   await([&] { return snapshot(token).segmentsCompleted == 4; }, "later phrase after a drop");
   acknowledgeAll(token);
   assert(sttRequestFinish(owner, token)); complete(token);
@@ -970,11 +973,11 @@ static void testRequestedSource() {
 }
 static void testTranscriptSaving() {
   reset(); savePreference = true; saveHeld = true;
-  // A silent 10 ms frame before each phrase's 20 s limit (the second phrase
-  // starts at the first cut, 319840): both quiet-point cuts land there and
+  // A silent 10 ms frame before each phrase's 10 s limit (the second phrase
+  // starts at the first cut, 159840): both quiet-point cuts land there and
   // the carries are silence, so finishing emits no third phrase.
-  allVoice = false; voiceIntervals = {{0, 319840}, {320000, 639680}};
-  auto token = begin(); savePreference = false; started(token); feed(token, 320000);
+  allVoice = false; voiceIntervals = {{0, 159840}, {160000, 319680}};
+  auto token = begin(); savePreference = false; started(token); feed(token, kPhraseCap);
   await([] { return saveEntered.load(); }, "accepted chunk reaches saving worker");
   // Publication/ACK can run while slow storage holds its own complete copy.
   auto first = peek(token); assert(first.sequence == 1);
@@ -983,7 +986,7 @@ static void testTranscriptSaving() {
   assert(saved(token).chunks.empty() && snapshot(token).workerActive);
   saveHeld = false;
   await([&] { return saved(token).chunks.size() == 1; }, "first saved chunk");
-  feed(token, 640000);
+  feed(token, 2 * kPhraseCap);
   await([&] { return saved(token).chunks.size() == 2; }, "second saved chunk despite setting off");
   finishHeld = true; assert(sttRequestFinish(owner, token));
   await([] { return finishEntered.load(); }, "saving finalization");
@@ -1006,13 +1009,13 @@ static void testTranscriptSaving() {
   assert(snapshot(token).state == STTState::Done && !snapshot(token).error[0]);
   assert(snapshot(token).transcript.error[0] && peek(token).text[0]);
 
-  reset(); savePreference = true; token = begin(); started(token); feed(token, 320000);
+  reset(); savePreference = true; token = begin(); started(token); feed(token, kPhraseCap);
   await([&] { return saved(token).chunks.size() == 1; }, "accepted words before cancel");
   assert(sttCancel(owner, token)); complete(token);
   assert(saved(token).chunks.size() == 1 && saved(token).outcome == "cancelled");
   assert(snapshot(token).state == STTState::Cancelled && !snapshot(token).pendingTexts);
 
-  reset(); savePreference = true; enginePermits = 0; token = begin(); started(token); feed(token, 320000);
+  reset(); savePreference = true; enginePermits = 0; token = begin(); started(token); feed(token, kPhraseCap);
   await([] { return engineCalls == 1; }, "inference before acceptance");
   assert(sttCancel(owner, token)); complete(token);
   assert(saved(token).chunks.empty() && saved(token).outcome == "cancelled");
@@ -1285,7 +1288,7 @@ static void feedPastSpeculation(STTToken token, uint64_t before, uint64_t after)
 // speculation: speculation starts at voiced end + 200 ms, is promoted when the pause
 // closes the phrase with the same voiced end, and is dropped when speech
 // resumes; short phrases closed by the 1 s short close speculate too, phrases
-// cut at 20 s never do.
+// cut at 10 s never do.
 static void testSpeculativeFinal() {
   // Promoted: 5 s voice; feed to 5.35 s, let the run finish, then the pause.
   reset(); allVoice = false; voiceIntervals = {{0, 80000}};
@@ -1366,9 +1369,9 @@ static void testSpeculativeFinal() {
   assert(chunk.endSample - chunk.startSample == 32000 && std::string(chunk.text) == "segment 1");
   assert(engineHistory.empty() && specHistory.size() == 1 && specHistory[0].samples == 16000 + 3200);
   assert(sttRequestFinish(owner, token)); complete(token);
-  // A 20 s hard limit never speculates.
+  // A 10 s hard limit never speculates.
   reset();
-  token = begin(); started(token); feed(token, 21 * 16000);
+  token = begin(); started(token); feed(token, kPhraseCap + 16000);
   await([&] { return snapshot(token).segmentsCompleted == 1; }, "hard-limit phrase");
   assert(specCalls == 0);
   assert(sttRequestFinish(owner, token)); complete(token);
@@ -1729,7 +1732,7 @@ int main() {
   setvbuf(stdout, nullptr, _IONBF, 0);
   testAdaptiveReadiness(); puts("PASS real adaptive500ms readiness, immediate speech, calibration stop");
   testOverlapAndDrain(); puts("PASS concurrent capture, exact PCM, stop/drain, zeroed cleanup");
-  testLongRunsAndPauses(); puts("PASS 65 s hard cuts, 100 s pauses, 120 s DC-only silence");
+  testLongRunsAndPauses(); puts("PASS 32.5 s hard cuts, 100 s pauses, 120 s DC-only silence");
   testShortFinalTail(); puts("PASS inference-only 37-to-320 sample padding and exact offsets");
   testCancelAndJoin(); puts("PASS cancellation joins both blocked inference and delayed HAL stop");
   testQueueBounds(); puts("PASS explicit audio/text queue pressure without overwrite");
@@ -1742,7 +1745,7 @@ int main() {
   testRequestedSource(); puts("PASS per-session requested source overrides the setting and fails strictly");
   testKeepWarm(); puts("PASS keep-warm: park/adopt across runs, hold expiry and millis wrap, low-PSRAM release, warm load (awaited past 20 s) and its back-off");
   testTrailingTrim(); puts("PASS trailing-silence trim: ambient gate, 30 ms blips ignored, spans whole, session end");
-  testSpeculativeFinal(); puts("PASS speculative final: promoted on the same input, dropped on resumed speech, aborted when busy, kept while later phrases queue behind its own, short closes too, never at 20 s");
+  testSpeculativeFinal(); puts("PASS speculative final: promoted on the same input, dropped on resumed speech, aborted when busy, kept while later phrases queue behind its own, short closes too, never at 10 s");
   testFeatureFaults(); puts("PASS capture-feature pool/task failures leave the session on the batch frontend");
   testShortClose(); puts("PASS short close: short phrases close after 1 s of silence, 600 ms from 4 s");
   testShortCloseSpeculation(); puts("PASS short closes speculate on their trimmed input and promote; 4 s-in-pause phrases speculate and promote");

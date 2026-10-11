@@ -178,7 +178,7 @@ bool tensor(dl::TensorBase* t, size_t frames, size_t channels, int exponent) {
 // forward), TensorBase::set_shape never reallocates, and the greedy plan gave
 // each tensor its max-length extent, so a call runs on a prefix of the same
 // arena: same kernels, same arithmetic, no per-call load()/build().
-constexpr size_t kResidentMaxSamples=20*kSampleRate;
+constexpr size_t kResidentMaxSamples=10*kSampleRate;  // the broker's continuous phrases are capped at 10 s
 constexpr size_t kResidentCallMargin=256*1024;    // per-call PSRAM beyond the frontend
 constexpr size_t kResidentInternalFloor=48*1024;   // never admit a call below this
 constexpr size_t kResidentKeepFree=2u<<20;         // PSRAM left free after the build
