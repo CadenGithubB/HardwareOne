@@ -9,13 +9,14 @@
 #  3. full run: 175 h of audio from the pretrained weights at that rate
 #  4. full test sets (incl. -g2) for best; compare with run15x5b/full/final.json
 # Usage: nohup caffeinate -dims ./run_citrinet384.sh > /dev/null 2>&1 &
+export STT_ROOT=${STT_ROOT:?set STT_ROOT to the STT data root (speech stores, work, logs)}
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
 P=${HW1_STT_PYTHON:-$PWD/../stt_p4/private/export-venv/bin/python}
-export PYTHONPATH=/Volumes/USB2/stt/pydeps
+export PYTHONPATH=$STT_ROOT/pydeps
 export PYTORCH_ENABLE_MPS_FALLBACK=1
-ROOT=/Volumes/USB2/stt
+ROOT=$STT_ROOT
 LOG=$ROOT/logs/citrinet384.log
 INIT=$ROOT/models/citrinet384_ls
 RUN=$ROOT/work/citrinet384

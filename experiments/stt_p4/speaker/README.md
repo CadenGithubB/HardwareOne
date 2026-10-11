@@ -21,8 +21,8 @@ accuracy). Any embedding model that its file describes can replace it.
   writes `speaker.spk`, `fixture.bin` (the diagnostics build's parity check)
   and `report.json`.
 
-Environment: `STT_ROOT` (default `/Volumes/Audiodrive/stt`: speech stores and
-outputs), `HW1_SPEAKER_CLOVA` (default `$STT_ROOT/hw1-work/speaker/clova`: the
+Environment: `STT_ROOT` (the STT data root: speech stores and outputs; `stt-data`
+in the current folder if unset), `HW1_SPEAKER_CLOVA` (default `$STT_ROOT/hw1-work/speaker/clova`: the
 voxceleb_trainer checkout with `baseline_lite_ap.model`, kept out of git). Run
 with the QuartzNet export venv (`../private/export-venv/bin/python`, esp-ppq).
 
