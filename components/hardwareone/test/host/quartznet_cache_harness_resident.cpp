@@ -59,6 +59,7 @@ struct State {
     size_t melRows=0, normalizes=0;
     const int8_t* lastOutput=nullptr;
     std::vector<size_t> runFrames;
+    std::vector<size_t> prepareFrames;  // prepared-args passes (resident model only)
     int reshapes=0;
     bool oddTensor=false;
     size_t modelInternalBytes=0;
@@ -374,6 +375,9 @@ struct FbsModel {
     }
 };
 }
+// The tree-local ESP-DL's prepared-args pass (dl_module_base.cpp): while the
+// mode is set no layer computes, so the fake model only records that pass.
+extern "C" { int hw1_dl_prepare_mode=0; uint32_t hw1_dl_prepare_gen=0; }
 namespace dl {
 constexpr int DATA_TYPE_INT8=1,MEMORY_MANAGER_GREEDY=1,RUNTIME_MODE_MULTI_CORE=1;
 struct Exponent { int value; bool is_valid()const{return true;} bool is_per_channel()const{return false;} explicit operator int()const{return value;} };
@@ -461,6 +465,11 @@ class Model {
     std::map<std::string,Memory> get_memory_info()const{return {{"variable",{4096,512}}};}
     void run(int count,int stage,int mode) {
         assert(fake::hasRaw(weights));assert(count==hw1::stt::identity::kNodeCount && mode==RUNTIME_MODE_MULTI_CORE);
+        if(hw1_dl_prepare_mode){
+            assert(hw1_dl_prepare_gen!=0);
+            if(stage==0)fake::state.prepareFrames.push_back(size_t(input.shape[1]));
+            return;
+        }
         // Every activation tensor carries this call's shape, and data never moved.
         const int frames=input.shape[1],half=(frames+1)/2;
         for(const TensorBase* t:{&a,&b,&c})
@@ -925,12 +934,14 @@ void lifecycle() {
         assert(longest.ok && longest.stats.featureFrames==2000 && longest.stats.outputFrames==1000);
         assertResident(2,1);                              // no model built for any of these
         assert(fake::state.runFrames==std::vector<size_t>({2,3,2,2000}));
+        assert(fake::state.prepareFrames==std::vector<size_t>({3,2,2000}));  // not the warm-up's per-call model
         // Longer than the resident length (one-shot sizes only): per-call model beside it.
         Reader e;auto beyond=call(&cache,e,kMax+160);
         assert(beyond.ok && beyond.stats.featureFrames==2001 && fake::state.modelFrames.back()==2001);
         assertResident(3,2);
         Reader f;assert(call(&cache,f,640).ok);assertResident(3,2);
         assert(fake::state.runFrames==std::vector<size_t>({2,3,2,2000,2001,4}));
+        assert(fake::state.prepareFrames==std::vector<size_t>({3,2,2000,4}));
         const int reshapes=fake::state.reshapes;
         Reader g;assert(call(&cache,g,640).ok);
         assert(fake::state.reshapes==reshapes);          // same length: shapes left as they are
