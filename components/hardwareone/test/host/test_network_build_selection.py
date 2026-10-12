@@ -139,6 +139,29 @@ class NetworkBuildSelection(unittest.TestCase):
         enabled = {name for index, name in enumerate(guards)
                    if f"HW1_ENABLED_SOURCE_{index}" in resolved.stdout.splitlines()}
 
+        evaluated, result = self.capture(sdk_dir, source_dir, overlays, configured)
+        self.assertEqual(evaluated.returncode, 0, evaluated.stdout + evaluated.stderr)
+        self.assertTrue(result.exists(), "actual idf_component_register was not reached")
+        entries = result.read_text().splitlines()
+        source_list = [line.removeprefix("source:") for line in entries if line.startswith("source:")]
+        sources = set(source_list)
+        # The owner remains registered in both phases with Wi-Fi enabled or
+        # disabled; its own feature guard supplies the disabled implementation.
+        # Retain duplicates here: a set alone would hide double registration.
+        wifi_owner = "network/wifi/System_WiFiNetworks.cpp"
+        self.assertTrue((COMPONENT / wifi_owner).is_file())
+        self.assertEqual(source_list.count(wifi_owner), 1)
+        self.assertNotIn("System_WiFiNetworks.cpp", sources)
+        dependencies = {line.removeprefix("dependency:") for line in entries
+                        if line.startswith("dependency:")}
+        self.assertFalse(enabled - sources, f"enabled source omitted: {sorted(enabled - sources)}")
+        if "HW1_FLAG_ENABLE_HTTP_SERVER" in resolved.stdout or "HW1_FLAG_ENABLE_MIGRATION_TOOL" in resolved.stdout:
+            self.assertIn("esp_http_server", dependencies)
+        if "HW1_FLAG_ENABLE_HTTPS" in resolved.stdout:
+            self.assertIn("esp_https_server", dependencies)
+
+    def capture(self, sdk_dir, source_dir, overlays, configured):
+        """Run the real component CMakeLists with idf_component_register captured."""
         result = sdk_dir / "registration.txt"
         wrapper = ["cmake_minimum_required(VERSION 3.16)", 'set(IDF_TARGET "esp32s3")']
         if configured:
@@ -169,25 +192,82 @@ class NetworkBuildSelection(unittest.TestCase):
         script.write_text("\n".join(wrapper) + "\n")
         evaluated = subprocess.run([CMAKE, "-P", str(script)], text=True,
                                    capture_output=True, timeout=30)
-        self.assertEqual(evaluated.returncode, 0, evaluated.stdout + evaluated.stderr)
-        self.assertTrue(result.exists(), "actual idf_component_register was not reached")
-        entries = result.read_text().splitlines()
-        source_list = [line.removeprefix("source:") for line in entries if line.startswith("source:")]
-        sources = set(source_list)
-        # The owner remains registered in both phases with Wi-Fi enabled or
-        # disabled; its own feature guard supplies the disabled implementation.
-        # Retain duplicates here: a set alone would hide double registration.
-        wifi_owner = "network/wifi/System_WiFiNetworks.cpp"
-        self.assertTrue((COMPONENT / wifi_owner).is_file())
-        self.assertEqual(source_list.count(wifi_owner), 1)
-        self.assertNotIn("System_WiFiNetworks.cpp", sources)
-        dependencies = {line.removeprefix("dependency:") for line in entries
-                        if line.startswith("dependency:")}
-        self.assertFalse(enabled - sources, f"enabled source omitted: {sorted(enabled - sources)}")
-        if "HW1_FLAG_ENABLE_HTTP_SERVER" in resolved.stdout or "HW1_FLAG_ENABLE_MIGRATION_TOOL" in resolved.stdout:
-            self.assertIn("esp_http_server", dependencies)
-        if "HW1_FLAG_ENABLE_HTTPS" in resolved.stdout:
-            self.assertIn("esp_https_server", dependencies)
+        return evaluated, result
+
+
+class TextParsedFlags(unittest.TestCase):
+    """CMake selects sources and the partition table from some flags' text.
+
+    A first definition that is not a bare integer literal would read
+    differently there than in the C++ preprocessor, so configure must stop.
+    """
+    cases = [
+        ("ENABLE_MAPS", "1", True),
+        ("ENABLE_MAPS", "0  // trailing comment", True),
+        ("ENABLE_MAPS", "1 /* trailing comment */", True),
+        ("ENABLE_MAPS", "(1)", False),
+        ("INPUT_DEVICE_TYPE", "0 + 1", False),
+        ("ENABLE_BLUETOOTH", "0x1", False),
+        ("ENABLE_G2_GLASSES", "(0)", False),
+        ("ENABLE_RASPBERRY_PI_HOST_FAN", "1u", False),
+    ]
+
+    def test_every_text_parse_goes_through_the_checked_list(self):
+        cmake = (COMPONENT / "CMakeLists.txt").read_text()
+        listed = re.search(r"set\(HW_CFG_TEXT_FLAGS([^)]*)\)", cmake)
+        self.assertIsNotNone(listed, "HW_CFG_TEXT_FLAGS list is missing")
+        names = listed[1].split()
+        self.assertEqual(len(names), len(set(names)))
+        stray = re.findall(r'string\(REGEX MATCH "#define\[ \\t\]\+([A-Z][A-Z0-9_]+)', cmake)
+        self.assertEqual(stray, [], "parse a text flag through HW_CFG_TEXT_FLAGS")
+
+    def test_component_refuses_non_literal_first_definitions(self):
+        self.assertIsNotNone(CMAKE, "cmake is required")
+        for flag, value, accepted in self.cases:
+            with self.subTest(flag=flag, value=value), \
+                    tempfile.TemporaryDirectory(prefix="hw1-text-flags-") as tmp:
+                root = Path(tmp)
+                source_dir = root / "component"
+                source_dir.mkdir()
+                shutil.copyfile(COMPONENT / "System_BuildConfig.h", source_dir / "System_BuildConfig.h")
+                shutil.copyfile(COMPONENT / "CMakeLists.txt", source_dir / "CMakeLists.txt")
+                feature = root / "feature.h"
+                feature.write_text(f"#undef {flag}\n#define {flag} {value}\n")
+                sdk_dir = root / "early"
+                sdk_dir.mkdir()
+                evaluated, result = NetworkBuildSelection.capture(
+                    self, sdk_dir, source_dir, {"FEATURE": feature}, False)
+                output = evaluated.stdout + evaluated.stderr
+                if accepted:
+                    self.assertEqual(evaluated.returncode, 0, output)
+                    self.assertTrue(result.exists())
+                else:
+                    self.assertNotEqual(evaluated.returncode, 0, output)
+                    self.assertIn(f"{flag} must be defined as a bare integer literal", output)
+                    self.assertFalse(result.exists(), "sources were registered from a misread flag")
+
+    def test_partition_selection_refuses_non_literal_first_definitions(self):
+        self.assertIsNotNone(CMAKE, "cmake is required")
+        root_cmake = (REPO / "CMakeLists.txt").read_text()
+        block = re.search(r"(?ms)^    foreach\(_bc_flag IN ITEMS[^\n]*\n.*?^    endforeach\(\)\n", root_cmake)
+        self.assertIsNotNone(block, "root partition flag check is missing")
+        for flag, value, accepted in (("ENABLE_ESP_SR", "1", True), ("ENABLE_ESP_SR", "(1)", False),
+                                      ("HW1_SR_MODELS_IN_FILESYSTEM", "1 // models in LittleFS", True),
+                                      ("HW1_SR_MODELS_IN_FILESYSTEM", "0 + 1", False)):
+            with self.subTest(flag=flag, value=value), \
+                    tempfile.TemporaryDirectory(prefix="hw1-partition-flags-") as tmp:
+                contents = Path(tmp) / "contents.h"
+                contents.write_text(f"#define {flag} {value}\n" + (COMPONENT / "System_BuildConfig.h").read_text())
+                script = Path(tmp) / "check.cmake"
+                script.write_text(f"file(READ {cmake_path(contents)} _bc_contents)\n" + block[0])
+                evaluated = subprocess.run([CMAKE, "-P", str(script)], text=True,
+                                           capture_output=True, timeout=30)
+                output = evaluated.stdout + evaluated.stderr
+                if accepted:
+                    self.assertEqual(evaluated.returncode, 0, output)
+                else:
+                    self.assertNotEqual(evaluated.returncode, 0, output)
+                    self.assertIn(f"{flag} must be defined as a bare integer literal", output)
 
 
 if __name__ == "__main__":

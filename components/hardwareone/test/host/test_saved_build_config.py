@@ -39,10 +39,14 @@ class SavedConfiguration(unittest.TestCase):
         build_config.config_path(name).write_text(build_config.encode(config))
         return config
 
-    def configure(self, name, bluetooth=True):
-        """Supply host compile metadata with the actual build's overlay order."""
+    def configure(self, name, bluetooth=True, header_root=None):
+        """Supply host compile metadata with the actual build's overlay order.
+
+        header_root names the checkout path the compiler was given (a symlink
+        to the same checkout, as a logical `pwd` would produce)."""
         build_config.prepare(name, "xiao_s3")
         directory = build_config.build_dir(name)
+        header_dir = (header_root / directory.relative_to(self.root)) if header_root else directory
         sdk = directory / "sdkconfig.h"
         sdk.write_text('#define CONFIG_IDF_TARGET "esp32s3"\n#define CONFIG_IDF_TARGET_ESP32S3 1\n' +
                        ("#define CONFIG_BT_ENABLED 1\n"
@@ -52,7 +56,7 @@ class SavedConfiguration(unittest.TestCase):
         source = REPO / "components/hardwareone/main.cpp"
         argv = [shutil.which("c++"), "-DARDUINO_XIAO_ESP32S3_DEV=1", "-I", str(directory),
                 '-DHW1_BOARD_CONFIG_HEADER="' + str(REPO / "boards/xiao_s3.features.h") + '"',
-                '-DHW1_FEATURE_CONFIG_HEADER="' + str(directory / "features.h") + '"',
+                '-DHW1_FEATURE_CONFIG_HEADER="' + str(header_dir / "features.h") + '"',
                 "-c", str(source), "-o", "unused.o"]
         (directory / "compile_commands.json").write_text(json.dumps([
             {"file": str(source), "directory": str(directory), "command": shlex.join(argv)}]))
@@ -147,6 +151,32 @@ class SavedConfiguration(unittest.TestCase):
         self.assertIsNone(result)
         self.assertIn("STALE", error)
         self.assertIn("sdkconfig.features", error)
+
+    def test_symlinked_checkout_path_is_the_same_configuration(self):
+        # build_board.sh passes the logical `pwd`; REPO is resolved. Both name
+        # the same file, which must verify instead of failing the build.
+        alias = self.root / "via-symlink"
+        alias.symlink_to(self.root, target_is_directory=True)
+        self.save("same", {"ENABLE_MQTT": 0})
+        self.configure("same", header_root=alias)
+        self.assertEqual(build_config.check("same")["value"]["ENABLE_MQTT"], "0")
+
+    def test_wrong_configuration_header_names_both_paths(self):
+        self.save("same", {"ENABLE_MQTT": 0})
+        self.save("other", {"ENABLE_MQTT": 0})
+        self.configure("other")
+        self.configure("same", header_root=None)
+        directory = build_config.build_dir("same")
+        commands = json.loads((directory / "compile_commands.json").read_text())
+        foreign = str(build_config.build_dir("other") / "features.h")
+        commands[0]["command"] = commands[0]["command"].replace(str(directory / "features.h"), foreign)
+        (directory / "compile_commands.json").write_text(json.dumps(commands))
+        with self.assertRaises(ValueError) as raised:
+            build_config.check("same")
+        message = str(raised.exception)
+        self.assertIn("compiler is not using this saved configuration", message)
+        self.assertIn(foreign, message)
+        self.assertIn(str(directory / "features.h"), message)
 
     def test_requires_build_local_sdkconfig(self):
         self.save("same", {})

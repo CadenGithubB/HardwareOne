@@ -81,118 +81,35 @@ if(EXISTS "${hw_cfg_file}")
         message(STATUS "HardwareOne feature configuration: ${_hw_feature_config_file}")
     endif()
 
-    # Helper-equivalent: extract `#define NAME <integer>` from the header
-    # and bind it to the matching HW_CFG_* variable. Inline-repeated
-    # because CMake macros over file scope add more rope than this is
-    # worth for ~10 flags.
-    string(REGEX MATCH "#define[ \t]+I2C_FEATURE_LEVEL[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_I2C_FEATURE_LEVEL "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+DISPLAY_TYPE[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_DISPLAY_TYPE "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+INPUT_DEVICE_TYPE[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_INPUT_DEVICE_TYPE "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_MQTT[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_MQTT "${CMAKE_MATCH_1}")
-    endif()
-
-    # LLM: one feature flag plus one flag per answer SOURCE. Each must stay a
-    # plain literal in the header — these regexes require whitespace then digits
-    # straight after the name, so ENABLE_LLM_BACKEND cannot swallow a longer
-    # name like ENABLE_LLM_BACKEND_FOO, and the three never alias each other.
-    string(REGEX MATCH "#define[ \t]+ENABLE_LLM_BACKEND[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_LLM_BACKEND "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_LLM_SOURCE_ONBOARD[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_LLM_SOURCE_ONBOARD "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_LLM_SOURCE_CM5[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_LLM_SOURCE_CM5 "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_MAPS[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_MAPS "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_CAMERA_SENSOR[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_CAMERA_SENSOR "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_ESP_SR[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_ESP_SR "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_LOCAL_STT[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_LOCAL_STT "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_AUTOMATION[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_AUTOMATION "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_EDGE_IMPULSE[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_EDGE_IMPULSE "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_GAMES[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_GAMES "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_WEB_GAME_DARKROOM[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_WEB_GAME_DARKROOM "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_BLUETOOTH[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_BLUETOOTH "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_G2_GLASSES[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_G2_GLASSES "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_R1_HEALTH[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_R1_HEALTH "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_G2_TESTSUITE[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_G2_TESTSUITE "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_RASPBERRY_PI_HOST_POWER[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_POWER "${CMAKE_MATCH_1}")
-    endif()
-
-    string(REGEX MATCH "#define[ \t]+ENABLE_RASPBERRY_PI_HOST_FAN[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
-    if(CMAKE_MATCH_1)
-        set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_FAN "${CMAKE_MATCH_1}")
-    endif()
+    # Source selection reads these flags as text: the first definition wins
+    # (feature configuration, deployment and board profiles are prepended to
+    # the shared header). The regexes need whitespace after each name, so
+    # ENABLE_LLM_BACKEND cannot match ENABLE_LLM_BACKEND_FOO and the LLM
+    # source flags never alias. Each first definition must be a bare integer
+    # literal, optionally followed by a comment: `(4)` or `0 + 4` would read
+    # differently here than in the C++ preprocessor, which keeps the feature
+    # while CMake drops its sources, so stop the configure instead. A flag
+    # with no definition keeps its 0 default above.
+    set(HW_CFG_TEXT_FLAGS
+        I2C_FEATURE_LEVEL DISPLAY_TYPE INPUT_DEVICE_TYPE ENABLE_MQTT
+        ENABLE_LLM_BACKEND ENABLE_LLM_SOURCE_ONBOARD ENABLE_LLM_SOURCE_CM5
+        ENABLE_MAPS ENABLE_CAMERA_SENSOR ENABLE_ESP_SR ENABLE_LOCAL_STT
+        ENABLE_AUTOMATION ENABLE_EDGE_IMPULSE ENABLE_GAMES ENABLE_WEB_GAME_DARKROOM
+        ENABLE_BLUETOOTH ENABLE_G2_GLASSES ENABLE_R1_HEALTH ENABLE_G2_TESTSUITE
+        ENABLE_RASPBERRY_PI_HOST_POWER ENABLE_RASPBERRY_PI_HOST_FAN)
+    foreach(_hw_flag IN LISTS HW_CFG_TEXT_FLAGS)
+        string(REGEX MATCH "#define[ \t]+${_hw_flag}[ \t][^\n]*" _hw_definition "${HW_CFG_CONTENT}")
+        if(_hw_definition AND NOT _hw_definition MATCHES
+           "^#define[ \t]+${_hw_flag}[ \t]+[0-9]+[ \t\r]*(//.*|/\\*.*)?$")
+            message(FATAL_ERROR
+                "${_hw_flag} must be defined as a bare integer literal, found: ${_hw_definition}\n"
+                "CMake selects sources from this flag's text; see System_BuildConfig.h.")
+        endif()
+        string(REGEX MATCH "#define[ \t]+${_hw_flag}[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+        if(CMAKE_MATCH_1)
+            set(HW_CFG_${_hw_flag} "${CMAKE_MATCH_1}")
+        endif()
+    endforeach()
 endif()
 
 # The resolved sdkconfig determines whether Bluedroid exists. Mirror the

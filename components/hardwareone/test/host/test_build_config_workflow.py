@@ -2,11 +2,13 @@
 """Exercise configuration discovery and editing without ESP-IDF or build output."""
 
 from contextlib import redirect_stderr, redirect_stdout
+import errno
 import io
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -250,6 +252,43 @@ class BuildConfigurationWorkflow(unittest.TestCase):
         self.assertEqual(destination.read_text(), winner)
         self.assertEqual(self.path.read_bytes(), original)
         self.assertEqual(set(destination.parent.iterdir()), {self.path, destination})
+
+    def test_create_without_hard_links_still_publishes_atomically(self):
+        # exFAT and some network filesystems refuse hard links. Creation then
+        # reserves the name exclusively and replaces the empty reservation.
+        destination = build_config.config_path("new")
+        no_hard_links = {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK}
+        for code in sorted(no_hard_links):
+            with self.subTest(errno=errno.errorcode[code]):
+                destination.unlink(missing_ok=True)
+                with patch.object(build_config.os, "link",
+                                  side_effect=OSError(code, os.strerror(code))):
+                    self.assertTrue(build_config.save_configuration("new", self.original))
+                self.assertEqual(build_config.load("new"), self.original)
+                self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
+                self.assertEqual(set(destination.parent.iterdir()), {self.path, destination})
+        self.assertEqual(build_config.NO_HARD_LINK_ERRNOS, no_hard_links)
+
+    def test_create_without_hard_links_keeps_a_concurrent_creator(self):
+        destination = build_config.config_path("racing")
+        winner = build_config.encode({"board": "xiao_s3", "features": {"ENABLE_MQTT": 1}})
+
+        def other_writer_then_refuse(source, target):
+            Path(target).write_text(winner)
+            raise OSError(errno.EPERM, os.strerror(errno.EPERM))
+
+        with patch.object(build_config.os, "link", side_effect=other_writer_then_refuse):
+            with self.assertRaises(FileExistsError):
+                build_config.save_configuration("racing", self.original)
+        self.assertEqual(destination.read_text(), winner)
+        self.assertEqual(set(destination.parent.iterdir()), {self.path, destination})
+
+    def test_other_link_errors_still_fail_without_a_partial_file(self):
+        before = self.state()
+        with patch.object(build_config.os, "link", side_effect=OSError(errno.ENOSPC, "no space")):
+            with self.assertRaisesRegex(OSError, "no space"):
+                build_config.save_configuration("new", self.original)
+        self.assertEqual(self.state(), before)
 
     def test_failed_atomic_creation_leaves_no_partial_file(self):
         before = self.state()
