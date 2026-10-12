@@ -34,6 +34,7 @@ def generate() -> str:
     functions = "\n\n".join([
         extract_block(setup, "bool wizardHandleCancelInput("),
         extract_block(setup, "static String waitForWizardInput("),
+        extract_block(setup, "static String waitForWizardSecret("),
         extract_block(setup, "static void handleSerialWiFiPage("),
         extract_block(oled, "bool renderWiFiPage("),
         extract_block(mode, "static WizardSubMode subModeForPage("),

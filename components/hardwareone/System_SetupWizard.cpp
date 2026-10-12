@@ -354,6 +354,10 @@ void wizardSetMQTTAutoStart(bool enabled) {
 #endif
 }
 
+void wizardSkipMQTTPage() {
+  if (getWizardDraftValues().mqttHost.length() == 0) wizardSetMQTTAutoStart(false);
+}
+
 bool wizardParseMQTTPort(const String& input, int& port) {
   String value = input;
   if (value.length() != input.length()) return false;
@@ -975,6 +979,13 @@ bool wizardNextPage(SetupWizardResult& result) {
 
   const SetupWizardPage next = wizardAdvanceFrom(currentPage);
   if (next == WIZARD_PAGE_COUNT) {
+    if (!sWizardDraft.valid) {
+      // A draft that failed to stage can never be applied. Leave through the
+      // cancel exit every adapter already has instead of parking Finish on
+      // the last page with a silent "cancelled" outcome.
+      broadcastOutput("Error: setup choices could not be staged; no changes saved. Reopen setup to try again.");
+      requestWizardCancel();
+    }
     result.completed = sWizardDraft.valid;
     return false;
   }
@@ -1041,6 +1052,15 @@ bool wizardHandleCancelInput(const String& input) {
 static String waitForWizardInput() {
   const String input = waitForSerialInputBlocking();
   if (isWizardCancelRequested() || wizardHandleCancelInput(input)) return String();
+  return input;
+}
+
+// Password prompts take the typed text literally: "cancel" is a password here,
+// never a command. Only the idle timeout can cancel a secret prompt.
+static String waitForWizardSecret() {
+  const String input = waitForSerialInputBlocking();
+  if (isWizardCancelRequested()) return String();
+  noteWizardInputActivity();
   return input;
 }
 
@@ -1167,7 +1187,8 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
   Serial.println("Configure a MQTT broker for this device to publish data.");
   Serial.println("----------------------------------------");
   Serial.println(" c = Configure (enter broker details)");
-  Serial.println(" n = Next (skip)");
+  Serial.println(getWizardDraftValues().mqttHost.length() > 0 ? " n = Next (keep current broker)"
+                                                              : " n = Next (skip)");
   Serial.println(" b = Back");
   Serial.print("Choice: ");
   String introChoice = waitForWizardInput();
@@ -1177,8 +1198,9 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
     return;
   }
   if (!introChoice.equalsIgnoreCase("c") && !introChoice.equalsIgnoreCase("configure")) {
-    // Skip — disable MQTT auto-start since it's unconfigured
-    wizardSetMQTTAutoStart(false);
+    // Skip: a configured broker stays as it is; a broker-less draft also loses
+    // auto-start (the owner's rule, shared with the other engines).
+    wizardSkipMQTTPage();
     if (!wizardNextPage(result)) running = false;
     return;
   }
@@ -1219,7 +1241,7 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
 
   if (user.length() > 0) {
     Serial.print("Password: ");
-    String pass = waitForWizardInput();
+    String pass = waitForWizardSecret();
     pass.trim();
     if (pass.equalsIgnoreCase("b") || pass.equalsIgnoreCase("back")) {
       wizardPrevPage();
@@ -1401,7 +1423,7 @@ static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
     if (ssid.length() > 0) {
       Serial.println("Enter WiFi password (or 'b' to go back):");
       Serial.print("> ");
-      String pass = waitForWizardInput();
+      String pass = waitForWizardSecret();
       if (isWizardCancelRequested()) {
         result.completed = false;
         running = false;
@@ -1704,14 +1726,12 @@ bool wizardSaveAndApplySettings(SetupWizardResult& result) {
   }
 
   // Short synchronous scope, never held while waiting for user input. It is
-  // private to this task and leaves any caller-owned batch intact.
+  // private to this task and leaves any caller-owned batch intact. When the
+  // batch table is full the scope stays inactive and the same values publish
+  // one file at a time; the draft was validated and reserved above either way.
   SettingsWriteScope writes;
-  if (!writes.active()) {
-    broadcastOutput("Error: setup could not start its settings save. No changes applied.");
-    result = {};
-    discardSetupWizard();
-    return false;
-  }
+  const bool batched = writes.active();
+  if (!batched) WARN_STORAGEF("[Wizard] settings scope unavailable; applying setup unbatched");
   for (size_t i = 0; i < sWizardDraft.boolCount; ++i) {
     const auto& choice = sWizardDraft.booleans[i];
     if (choice.value != choice.initial) setSetting(*choice.live, choice.value);
@@ -1726,14 +1746,23 @@ bool wizardSaveAndApplySettings(SetupWizardResult& result) {
   if (draft.espnowStationary != initial.espnowStationary) setSetting(gSettings.espnowStationary, draft.espnowStationary);
   if (draft.mqttPort != initial.mqttPort) setSetting(gSettings.mqttPort, draft.mqttPort);
 
+  // A network is saved only while the final draft still shows the Wi-Fi page:
+  // Wi-Fi switched off on a later Back drops credentials entered earlier, and
+  // the caller reads the same answer back from the result.
+  const bool saveWifi = wizardShouldShowWiFi() && result.wifiConfigured && result.wifiSSID.length() > 0;
 #if ENABLE_WIFI
-  if (result.wifiConfigured && result.wifiSSID.length() > 0) {
+  if (saveWifi) {
     const WifiNetworkSaveResult wifiSaved = saveSetupWiFiNetwork(result.wifiSSID, result.wifiPassword);
     broadcastOutput(wifiNetworkSaveResultMessage(wifiSaved));
     if (wifiSaved == WifiNetworkSaveResult::Accepted) broadcastOutput("WiFi network: " + result.wifiSSID);
   }
 #endif
-  if (!writes.finish()) {
+  if (!saveWifi) {
+    result.wifiConfigured = false;
+    result.wifiSSID = "";
+    result.wifiPassword = "";
+  }
+  if (batched && !writes.finish()) {
     broadcastOutput("Warning: one or more setup settings files could not be saved; retry is pending.");
   }
   // These live actions happen only after successful draft acceptance. A failed
@@ -1750,6 +1779,7 @@ bool wizardSaveAndApplySettings(SetupWizardResult& result) {
   }
 #endif
   discardSetupWizard();
+  result.applied = true;
   return true;
 }
 

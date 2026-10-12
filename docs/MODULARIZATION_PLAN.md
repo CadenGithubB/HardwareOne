@@ -3361,8 +3361,9 @@ shared group output uses the existing broadcast path for remote CLI clients.
 
 `System_FirstTimeSetup` owns one Basic/Advanced/Import list and parser, used by
 serial and display. Import requires migration and Wi-Fi support, independent of
-the normal web interface. Blank input selects Basic; malformed or unavailable
-choices remain at the chooser. Basic's description reflects its existing preset
+the normal web interface. Blank input selects Basic on the serial-only prompt and
+is ignored by the display chooser; malformed or unavailable choices remain at the
+chooser. Basic's description reflects its existing preset
 selection. Build flags, saved configuration formats and feature dependencies
 are unchanged; the existing editable build header and host setup tool retain
 their roles.

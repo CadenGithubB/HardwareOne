@@ -170,9 +170,14 @@ static bool wizardIsGroupPage(SetupWizardPage page) {
   return page == WIZARD_PAGE_CONNECTIONS || page == WIZARD_PAGE_DISPLAY ||
          page == WIZARD_PAGE_SENSORS || page == WIZARD_PAGE_SYSTEM;
 }
+static WizardMenuItemType menuItemType = WIZARD_ITEM_NTP;
 static const WizardMenuItem* getWizardMenuItem(SetupWizardPage, int) {
-  static const WizardMenuItem item{"ntp", "NTP", WIZARD_ITEM_NTP, nullptr, 0};
+  static WizardMenuItem item{"ntp", "NTP", WIZARD_ITEM_NTP, nullptr, 0};
+  item.type = menuItemType;
   return &item;
+}
+static const char* paintAfterTransition() {
+  return sWizard.subMode == WizardSubMode::PAGE_DEVICE_NAME ? "Device Name [fixture]: " : "";
 }
 static char* getWizardDeviceNameBuf() { return deviceName; }
 static const char* getWizardDeviceName() { return deviceName; }
@@ -199,7 +204,7 @@ static void reset() {
   sWizard.result = {}; sWizard.subMode = WizardSubMode::PAGE_GROUP; sDummyResult = {};
   toggleCalls = nextCalls = previousCalls = cycleCalls = exitCalls = activityCalls = wifiClearCalls = 0;
   nextCompletes = exitSawCompleted = false;
-  deviceName[0] = '\0';
+  deviceName[0] = '\0'; menuItemType = WIZARD_ITEM_NTP;
 }
 
 static void assertKeyboardReleased() {
@@ -208,11 +213,17 @@ static void assertKeyboardReleased() {
 }
 
 static void testKeyboardCancelAndTimeout() {
+  // A masked prompt takes the text literally: the cancel word is a password,
+  // never echoed; only the idle timeout cancels it.
   reset(); serialInputs.push_back({0, " CaNcEl "});
   bool cancelled = false;
-  assert(getOLEDTextInput("Password", true, "not-persisted", 32, &cancelled).empty());
-  assert(cancelled && isWizardCancelRequested());
+  assert(getOLEDTextInput("Password", true, "not-persisted", 32, &cancelled) == "CaNcEl");
+  assert(!cancelled && !isWizardCancelRequested());
   assert(lastDictationPolicy == OLEDKeyboardDictationPolicy::DENY && output.empty());
+  assertKeyboardReleased();
+  reset(); setSerialWaitTimeout(75); cancelled = false;
+  assert(getOLEDTextInput("Password", true, "", 32, &cancelled).empty());
+  assert(cancelled && isWizardCancelRequested() && nowMs == 100);
   assertKeyboardReleased();
 
   reset(); setSerialWaitTimeout(75);
@@ -256,6 +267,23 @@ static void testButtonWaitCancel() {
   assert(waitForButtonPress() == INPUT_MASK(INPUT_BUTTON_A));
 }
 
+static void testRetryOrSkipWait() {
+  // The picker's retry/skip wait acts on the serial words it advertises.
+  reset(); serialInputs.push_back({0, "skip"});
+  assert(waitForRetryOrSkip() == INPUT_MASK(INPUT_BUTTON_B) && !isWizardCancelRequested());
+  reset(); serialInputs.push_back({0, " rescan "});
+  assert(waitForRetryOrSkip() == INPUT_MASK(INPUT_BUTTON_A) && !isWizardCancelRequested());
+  reset(); serialInputs.push_back({0, "cancel"});
+  assert(waitForRetryOrSkip() == 0 && isWizardCancelRequested());
+  reset(); serialInputs.push_back({0, ""}); physicalInputs.push_back({20, INPUT_MASK(INPUT_BUTTON_B)});
+  assert(waitForRetryOrSkip() == INPUT_MASK(INPUT_BUTTON_B)); // a blank line is not a choice
+  reset(); setSerialWaitTimeout(15);
+  assert(waitForRetryOrSkip() == 0 && isWizardCancelRequested() && nowMs == 20);
+  reset(); gWizardOwnsSerial = false; serialInputs.push_back({0, "skip"});
+  physicalInputs.push_back({0, INPUT_MASK(INPUT_BUTTON_A)});
+  assert(waitForRetryOrSkip() == INPUT_MASK(INPUT_BUTTON_A)); // serial belongs to the CLI here
+}
+
 static void testWifiPickerCancel() {
   reset(); serialInputs.push_back({0, "cancel"});
   String selected = "old scratch";
@@ -271,6 +299,13 @@ static void testWifiPickerCancel() {
     serialInputs.push_back({0, "cancel"});
     assert(!getOLEDWiFiSelection(selected) && isWizardCancelRequested());
     assert(scanCalls == 1 && sFtsWifiStoredCount == 0);
+    // Serial 'skip' and 'rescan' act like the B and A the display offers.
+    reset(); scanAccepted = !failedScan; scannedNetworks.clear();
+    serialInputs.push_back({0, "skip"});
+    assert(!getOLEDWiFiSelection(selected) && !isWizardCancelRequested() && scanCalls == 1);
+    reset(); scanAccepted = !failedScan; scannedNetworks.clear();
+    serialInputs.push_back({0, "rescan"}); serialInputs.push_back({10, "skip"});
+    assert(!getOLEDWiFiSelection(selected) && !isWizardCancelRequested() && scanCalls == 2);
   }
 
   reset(); requestWizardCancel(); gWizardOwnsSerial = false;
@@ -325,9 +360,18 @@ static void testDisplayPageCancel() {
   tickNav.left = true;
   wizardMode_onTick(nullptr);
   assert(previousCalls == 1 && wifiClearCalls == 1 && exitCalls == 0);
+
+  // A on the device-name row must not open the blocking keyboard under the
+  // mode lock: the CLI wizard switches to its typed-name detour instead.
+  reset(); currentPage = WIZARD_PAGE_SYSTEM; sWizard.subMode = WizardSubMode::PAGE_GROUP;
+  menuItemType = WIZARD_ITEM_DEVICE_NAME; tickButtons = INPUT_MASK(INPUT_BUTTON_A);
+  wizardMode_onTick(nullptr);
+  assert(sWizard.subMode == WizardSubMode::PAGE_DEVICE_NAME && toggleCalls == 0 && exitCalls == 0);
+  assert(!keyboardActive && output.size() == 1 && output.back() == "Device Name [fixture]: ");
 }
 
 int main() {
-  testKeyboardCancelAndTimeout(); testButtonWaitCancel(); testWifiPickerCancel(); testDisplayPageCancel();
+  testKeyboardCancelAndTimeout(); testButtonWaitCancel(); testRetryOrSkipWait(); testWifiPickerCancel();
+  testDisplayPageCancel();
   std::puts("setup display cancellation contracts passed");
 }

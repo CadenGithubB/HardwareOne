@@ -55,6 +55,7 @@ def generate() -> str:
                  extract_block(mode, "static void clearWizardWifiChoices("),
                  extract_block(setup, "bool wizardHandleCancelInput("),
                  extract_block(setup, "static String waitForWizardInput("),
+                 extract_block(setup, "static String waitForWizardSecret("),
                  wrapper, on_exit,
                  extract_block(mode, "static CLIModeInputResult wizardMode_onInput(")]
     harness = (HERE / "setup_completion_harness.cpp").read_text()

@@ -518,8 +518,8 @@ void handleOLEDMQTTPage(SetupWizardResult& result, bool& running) {
       "Optional: MQTT broker");
   if (choice == -2) { result.completed = false; running = false; return; }
   if (choice == -1) return; // went back
-  if (choice == 0) {        // skip — disable MQTT auto-start since it's unconfigured
-    wizardSetMQTTAutoStart(false);
+  if (choice == 0) {        // skip: a configured broker stays as it is (owner rule)
+    wizardSkipMQTTPage();
     if (!wizardNextPage(result)) running = false;
     return;
   }
@@ -701,7 +701,7 @@ bool getOLEDSetupModeSelection(int& setupMode) {
                       option->label, option->description);
       }
       Serial.println("----------------------------------------");
-      Serial.printf("Serial: Enter 1..%d (blank = Basic)\n", optionCount);
+      Serial.printf("Serial: Enter 1..%d\n", optionCount);
       Serial.println("OLED: Joystick to move, A to select");
       Serial.print("> ");
       lastPrintedSelection = selection;
@@ -749,7 +749,9 @@ bool getOLEDSetupModeSelection(int& setupMode) {
       }
     }
     if (Serial.available()) {
-      const String input = Serial.readStringUntil('\n');
+      String input = Serial.readStringUntil('\n');
+      input.trim();
+      if (input.length() == 0) continue;  // a bare Enter is not a choice while the joystick drives the menu
       SetupMode selected;
       if (parseSetupModeInput(input, selected)) {
         setupMode = (int)selected;

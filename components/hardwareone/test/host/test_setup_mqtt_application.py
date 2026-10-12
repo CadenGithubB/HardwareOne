@@ -56,6 +56,8 @@ def main():
             functions = "\n\n".join([
                 extract_block(setup, "bool wizardHandleCancelInput("),
                 extract_block(setup, "static String waitForWizardInput("),
+                extract_block(setup, "static String waitForWizardSecret("),
+                extract_block(setup, "void wizardSkipMQTTPage("),
                 helper,
                 extract_block(mode, "static WizardSubMode subModeForPage("),
                 *handlers,

@@ -75,6 +75,34 @@ static uint32_t waitForButtonPress() {
   return pressed;
 }
 
+/**
+ * Wait for the Wi-Fi picker's retry-or-skip decision. The serial prompt beside
+ * the picker advertises 'rescan' and 'skip', so those words map onto the same
+ * buttons the display shows: A retries, B skips. Returns 0 when the wizard was
+ * cancelled (timeout or 'cancel'), which callers treat as skip.
+ */
+static uint32_t waitForRetryOrSkip() {
+  for (;;) {
+    if (gWizardOwnsSerial) {
+      if (isWizardCancelRequested()) return 0;
+      if (Serial.available()) {
+        String line = Serial.readStringUntil('\n');
+        if (wizardHandleCancelInput(line)) return 0;
+        line.trim();
+        if (line.equalsIgnoreCase("skip")) return INPUT_MASK(INPUT_BUTTON_B);
+        if (line.length() > 0) return INPUT_MASK(INPUT_BUTTON_A);  // 'rescan', 'retry' or anything else
+      }
+    }
+    updateInputState();
+    const uint32_t pressed = getNewlyPressedButtons();
+    if (pressed) {
+      if (gWizardOwnsSerial) noteWizardInputActivity();
+      return pressed;
+    }
+    delay(10);
+  }
+}
+
 // ============================================================================
 // OLED Text Input (with Virtual Keyboard)
 // ============================================================================
@@ -90,7 +118,7 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
     Serial.print(prompt);
     Serial.print(": ");
     String input = waitForSerialInputBlocking();
-    if (gWizardOwnsSerial && wizardHandleCancelInput(input)) {
+    if (gWizardOwnsSerial && !isPassword && wizardHandleCancelInput(input)) {
       if (wasCancelled) *wasCancelled = true;
       return "";
     }
@@ -123,7 +151,10 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
     // Check for serial input first (non-blocking)
     if (Serial.available()) {
       String serialInput = Serial.readStringUntil('\n');
-      if (gWizardOwnsSerial && wizardHandleCancelInput(serialInput)) {
+      // Masked prompts take the text literally (see wizardHandleCancelInput);
+      // it still counts as activity for the idle timeout.
+      if (gWizardOwnsSerial && isPassword) noteWizardInputActivity();
+      else if (gWizardOwnsSerial && wizardHandleCancelInput(serialInput)) {
         wizardCancelled = true;
         oledKeyboardComplete();
         break;
@@ -467,7 +498,7 @@ bool getOLEDWiFiSelection(String& outSSID) {
 
     if (!scanResult.ok()) {
       const char* status = wifiScanStatusText(scanResult.status);
-      Serial.printf("WiFi scan %s (driver=%ld). Press A to retry or B to skip.\n",
+      Serial.printf("WiFi scan %s (driver=%ld). Press A or type 'rescan' to retry, B or 'skip' to skip.\n",
                     status, (long)scanResult.driverError);
       OLED_TRANSACTION(
         oledDisplay->clearDisplay();
@@ -482,7 +513,7 @@ bool getOLEDWiFiSelection(String& outSSID) {
         oledDisplay->print("Press B to skip");
         oledDisplay->display();
       );
-      const uint32_t pressed = waitForButtonPress();
+      const uint32_t pressed = waitForRetryOrSkip();
       if (INPUT_CHECK(pressed, INPUT_BUTTON_A)) continue;
       return false;
     }
@@ -520,7 +551,7 @@ bool getOLEDWiFiSelection(String& outSSID) {
         oledDisplay->print("Press B to skip");
         oledDisplay->display();
       );
-      const uint32_t pressed = waitForButtonPress();
+      const uint32_t pressed = waitForRetryOrSkip();
       if (INPUT_CHECK(pressed, INPUT_BUTTON_A)) continue;
       return false;
     }
