@@ -35,8 +35,10 @@ suite fails against the 0.99.97.3 code.
 - Maps and web files: guests can no longer start, stop or save a map or load a
   track file. Live map recording no longer changes the saved logger selection.
   Uploads stop after two consecutive receive timeouts and replace the file
-  through a staged copy. The file manager selects by full path, and an
-  unusable camera capture folder is refused with a reason.
+  through a staged copy. The file manager acts on the full path of the entry
+  the user selected, and refuses when another task changed the folder so
+  that entry can no longer be told apart. An unusable camera capture folder
+  is refused with a reason.
 - Settings and storage: a failed firmware-version stamp is logged only and is
   cleared by the next full settings save. Staging files left by interrupted
   merges or exports are overwritten by the next run and hidden from the track

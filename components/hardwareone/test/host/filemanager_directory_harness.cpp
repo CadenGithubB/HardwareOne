@@ -297,6 +297,75 @@ static void selectedOperations(bool beyondCache) {
   const std::string tail = operations.empty() ? "" : operations.back();
   check(tail == "rmdir:/sd/deep/" + longFolder, "last backend operation addressed the full folder path");
 }
+// Another task may add or remove entries after the listing was loaded. An
+// operation must still target the entry the user selected (by its listed name
+// and position among same-named entries), or refuse; never the new neighbour.
+static void addFront(const std::string& parent, const std::string& name) {
+  const std::string full = parent + "/" + name;
+  auto node = std::make_shared<Node>(Node{"/deep/" + name, false, 12u, {}});
+  nodes[full] = node;
+  auto& siblings = nodes.at(parent)->children;
+  siblings.insert(siblings.begin(), node);
+}
+static void shiftFixture(const std::vector<std::string>& names) {
+  resetTree(true);
+  add("/sd", "deep", true, "/deep");
+  for (const auto& name : names) add("/sd/deep", name, false, "/deep/" + name);
+}
+static void selectionFollowsEntry() {
+  String selected;
+  {  // An entry ahead of the selection disappears: delete still hits the selection.
+    shiftFixture({"b.txt", "c.txt", "d.txt"});
+    FileManager manager;
+    check(manager.navigate("/sd/deep"), "shift fixture loads");
+    manager.moveDown();
+    detach("/sd/deep/b.txt");
+    check(manager.getSelectedPath(selected) && selected == "/sd/deep/c.txt", "removal ahead keeps the selected path");
+    check(manager.deleteItem() && !nodes.count("/sd/deep/c.txt") && nodes.count("/sd/deep/d.txt"),
+          "delete removes the selected entry, not its new neighbour");
+  }
+  {  // A new entry lists first: rename still hits the selection.
+    shiftFixture({"b.txt", "c.txt", "d.txt"});
+    FileManager manager;
+    check(manager.navigate("/sd/deep"), "shift fixture loads");
+    manager.moveDown();
+    addFront("/sd/deep", "a.txt");
+    check(manager.renameItem("c2.txt") && nodes.count("/sd/deep/c2.txt") && !nodes.count("/sd/deep/c.txt") &&
+          nodes.count("/sd/deep/b.txt"), "rename targets the selected entry after an insertion ahead of it");
+  }
+  {  // The selected entry itself is gone: refuse, touch nothing else.
+    shiftFixture({"b.txt", "c.txt", "d.txt"});
+    FileManager manager;
+    check(manager.navigate("/sd/deep"), "shift fixture loads");
+    manager.moveDown();
+    detach("/sd/deep/c.txt");
+    const size_t before = operations.size();
+    String content;
+    check(!manager.deleteItem() && !manager.readSelectedFile(content) && !manager.getSelectedPath(selected) &&
+          nodes.count("/sd/deep/b.txt") && nodes.count("/sd/deep/d.txt") && operations.size() == before,
+          "a vanished selection is refused without touching a neighbour");
+  }
+  const std::string prefix(70, 'p');
+  {  // Two long names share the bounded display name: their listed order decides.
+    shiftFixture({"x.txt", prefix + "1.txt", prefix + "2.txt"});
+    FileManager manager;
+    check(manager.navigate("/sd/deep"), "shared-prefix fixture loads");
+    manager.moveDown(); manager.moveDown();
+    detach("/sd/deep/x.txt");
+    check(manager.getSelectedPath(selected) && selected == String(("/sd/deep/" + prefix + "2.txt").c_str()),
+          "the second same-named entry stays the second after a shift");
+  }
+  {  // One of two same-named entries disappears: which one is ambiguous, so refuse.
+    shiftFixture({prefix + "1.txt", prefix + "2.txt", "z.txt"});
+    FileManager manager;
+    check(manager.navigate("/sd/deep"), "shared-prefix fixture loads");
+    detach("/sd/deep/" + prefix + "1.txt");
+    const size_t before = operations.size();
+    check(!manager.deleteItem() && nodes.count("/sd/deep/" + prefix + "2.txt") && operations.size() == before,
+          "a changed count of same-named entries is refused");
+  }
+  check(fsDepth == 0 && permissionViews == 0, "shift cases release the lock and metadata views");
+}
 int main(int argc, char** argv) {
   const std::string selected = argc > 1 ? argv[1] : "all";
   unsigned failures = 0;
@@ -329,6 +398,9 @@ int main(int argc, char** argv) {
       run(std::string("selected operations use full paths ") + (beyondCache ? "beyond the cache" : "within the cache"),
           [=]() { selectedOperations(beyondCache); });
     }
+#if TEST_SELECTED_PATH
+    run("selection follows the listed entry when the folder changes", selectionFollowsEntry);
+#endif
   }
   std::printf("FileManager production traversal: %zu assertions, %u failed scenarios\n", checks, failures);
   return failures ? 1 : 0;
