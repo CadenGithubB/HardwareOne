@@ -26,5 +26,9 @@ headset from 53.3% to 43.0%, while LibriSpeech clean rose from 5.6% to 7.5%.
 run and [NEXT_STEPS.md](results/5x5-finetune-2026-09-29/NEXT_STEPS.md) the plan
 that followed, including the move to the 15x5 model in `experiments/stt_train_15x5`.
 
-The historical runs used two local data drives. Supply your own dataset and
-work directories when reproducing them; machine-specific mount paths are omitted.
+The historical runs used two local data drives. The Python scripts read
+`STT_ROOT` and default to the author's data root; the shell scripts
+(`download.sh`, `run_day.sh`, `run_overnight.sh`, `lm/lm_v2_sweep.sh`) still
+hard-code that root, so set your own paths there when reproducing a run. The
+HardwareOne_Speech_To_Text repository is the maintained copy and reads
+`STT_ROOT` throughout.

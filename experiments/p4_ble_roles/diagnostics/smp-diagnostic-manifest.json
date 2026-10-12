@@ -1,6 +1,6 @@
 {
   "sdk": "5.5.5",
-  "sourceComponent": "/private/tmp/hw1-p4-investigation-20260927/esp-idf-v5.5.5/components/bt",
+  "sourceComponent": "/path/to/private-investigation/esp-idf-v5.5.5/components/bt",
   "unchangedFiles": 2047,
   "changedFiles": [
     {

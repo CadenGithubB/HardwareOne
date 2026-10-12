@@ -9,6 +9,9 @@ the P4. It led to the TinyCrypt ECC fix described in `../SDK-FIX.md`.
   `tinycrypt-host-vector-review.json` - review of the upstream fix.
 - `smp-diagnostic.patch`, `smp-diagnostic-manifest.json` - the instrumentation,
   applied to a copy of the IDF `bt` component, never to the shared SDK.
+- Paths in these JSON records are placeholders: `/path/to/private-investigation`
+  stands for the private IDF 5.5.5 investigation copy and `/path/to/temp` for a
+  temporary work folder; the recorded hashes identify the files.
 - `configure-p4-smpdiag.sh`, `build-p4-smpdiag.sh`, `build-s3-smpdiag.sh` and
   the `*-summary.json` / `firmware-*.json` files - how the diagnostic images
   were built. Their raw build and flash logs are archived outside the repository.

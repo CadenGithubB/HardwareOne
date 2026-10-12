@@ -195,6 +195,10 @@ static bool removeGuarded(const char* path, AuthContext auth) {
   check(ownsFs && activeFiles == 0, "temp cleanup outside lock or before close");
   check(isSettingsTemporary(path), "cleanup removed destination");
   authOwners.emplace_back(auth.owner); ++removeCalls;
+  // Models LittleFS (no SD paths here): unlink refuses a directory (EISDIR),
+  // as the map, boot-cleanup and capture doubles do.
+  const auto existing = files.find(path);
+  if (existing != files.end() && existing->second->directory) return false;
   if (fault == Fault::Cleanup) return false;
   files.erase(path); return true;
 }
@@ -399,7 +403,10 @@ static void failureCase(Writer writer, Fault injected) {
   check(!persisted, "failed replacement reported success");
   check(directOpens == 0, "failed rename fell back to destructive destination write");
   check(removeCalls == 1, "failed temp not cleaned exactly once");
-  check(files.count(temporary(writer)) == (injected == Fault::Cleanup ? 1u : 0u), "temp cleanup outcome not preserved");
+  // A temporary that cannot be removed (cleanup fault, or a directory at that
+  // path) stays; it is never promoted and the destination is intact.
+  check(files.count(temporary(writer)) == ((injected == Fault::Cleanup || injected == Fault::Directory) ? 1u : 0u),
+        "temp cleanup outcome not preserved");
   check(retryMask == hw1_settings_batch::ALL && bondHashes == 0 && settingsFirmwareVersionRestampPending(), "failed save published success or discarded retry/restamp intent");
   check(renameCalls == (injected == Fault::Rename ? 1u : 0u), "invalid temp reached rename");
   if (writer == Writer::Restamp) {
@@ -416,6 +423,9 @@ static void failureCase(Writer writer, Fault injected) {
           "helper failure logging occurred before filesystem release");
   }
   if (injected == Fault::Cleanup || writer == Writer::Restamp) {
+    // A directory at the temporary path is removed by boot cleanup or an
+    // operator before a save can succeed; the device cannot write through it.
+    if (injected == Fault::Directory) files.erase(temporary(writer));
     fault = Fault::None; events.clear();
     check(run(writer), "save did not recover after transient failure"); balanced();
     check(!files.count(temporary(writer)), "successful retry left stale temp");
@@ -580,7 +590,8 @@ static void userFailureCases() {
       if (existing) check(files.at(fixturePath)->bytes == oldUser, "failed per-user write changed existing credentials/preferences");
       check(renameCalls == (injected == Fault::Rename || injected == Fault::RenameShort ? 1u : 0u),
             "incomplete per-user temp reached promotion");
-      check(removeCalls == 1 && files.count(fixtureTemp) == (injected == Fault::Cleanup ? 1u : 0u),
+      check(removeCalls == 1 &&
+            files.count(fixtureTemp) == ((injected == Fault::Cleanup || injected == Fault::Directory) ? 1u : 0u),
             "failed per-user temp cleanup outcome incorrect");
 #else
       if (injected == Fault::WriteError || injected == Fault::Rename) {
@@ -597,6 +608,7 @@ static void userFailureCases() {
       }
 #endif
       fault = Fault::None;
+      if (injected == Fault::Directory) files.erase(fixtureTemp);  // removed before a retry can succeed
       check(saveUserSettings(fixtureUser, doc), "per-user retry failed after transient storage fault");
       userContract(2);
       check(files.at(fixturePath)->bytes == expected && !files.count(fixtureTemp), "per-user retry left partial or stale bytes");

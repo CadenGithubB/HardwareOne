@@ -424,6 +424,23 @@ elseif(HW1_JPEG_COMPONENT OR HW1_CAMERA_COMPONENT)
 endif()
 add_test(NAME jpeg_portable
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_jpeg.py ${JPEG_TEST_ARGS})
+
+# Camera family: the shared lifecycle core from System_Camera_DVP.cpp, the DVP
+# and P4 backends, the camera/sensor I2C reservation and the whole G2 camera
+# settings page, each compiled against host fault boundaries (README "Shared
+# camera controls and consumers" and "Camera / sensor I2C ownership").
+set(CAMERA_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND CAMERA_TEST_ARGS --sanitize)
+endif()
+foreach(test_name IN ITEMS camera_core camera_dvp camera_p4 camera_i2c_reservation
+                           camera_consumers)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
+            ${CAMERA_TEST_ARGS})
+endforeach()
 add_test(NAME p4eye_display_pixels COMMAND p4eye_display_pixels_tests)
 add_test(NAME p4eye_display_lifecycle COMMAND p4eye_display_lifecycle_tests)
 add_test(NAME rotary_core
@@ -750,24 +767,32 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_g2_reopen.py
           ${SETUP_MQTT_TEST_ARGS})
+# The browser suites are always registered, so `ctest -N` lists them and a run
+# without Node.js reports them as not run (disabled) instead of omitting them.
 find_program(HW1_NODE_EXECUTABLE NAMES node nodejs)
-if(HW1_NODE_EXECUTABLE)
-  add_test(
-    NAME map_live_browser
-    COMMAND ${HW1_NODE_EXECUTABLE}
-            ${CMAKE_CURRENT_LIST_DIR}/map_live_browser_test.js)
-  add_test(
-    NAME g2_status_browser
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_LIST_DIR}/test_g2_status_browser.py
-            --node ${HW1_NODE_EXECUTABLE})
-  add_test(
-    NAME sensor_mic_card
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_LIST_DIR}/test_sensor_mic_card.py
-            --node ${HW1_NODE_EXECUTABLE})
-else()
-  message(STATUS "Node.js not found: map_live_browser, g2_status_browser and sensor_mic_card are not registered")
+set(HW1_NODE_CMD "${HW1_NODE_EXECUTABLE}")
+if(NOT HW1_NODE_EXECUTABLE)
+  set(HW1_NODE_CMD node)
+endif()
+add_test(
+  NAME map_live_browser
+  COMMAND ${HW1_NODE_CMD}
+          ${CMAKE_CURRENT_LIST_DIR}/map_live_browser_test.js)
+add_test(
+  NAME g2_status_browser
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_status_browser.py
+          --node ${HW1_NODE_CMD})
+add_test(
+  NAME sensor_mic_card
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_sensor_mic_card.py
+          --node ${HW1_NODE_CMD})
+if(NOT HW1_NODE_EXECUTABLE)
+  set_tests_properties(map_live_browser g2_status_browser sensor_mic_card
+                       PROPERTIES DISABLED TRUE)
+  message(WARNING "Node.js not found: map_live_browser, g2_status_browser and sensor_mic_card "
+                  "are registered but disabled; pass -DHW1_NODE_EXECUTABLE=/path/to/node")
 endif()
 add_test(
   NAME setup_espnow_application
@@ -988,6 +1013,15 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_task_reporting.py
           ${SETUP_MQTT_TEST_ARGS})
+# The .3 sharing milestones: log-level owner and its CLI/boot callers, the
+# system-log status/flag formatters, and the shared command-origin prefix.
+foreach(test_name IN ITEMS log_level_application system_log_status command_feed)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
+            ${SETUP_MQTT_TEST_ARGS})
+endforeach()
 add_test(
   NAME raw_allocation_inventory
   COMMAND ${Python3_EXECUTABLE}
