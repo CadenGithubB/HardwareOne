@@ -757,9 +757,9 @@ endif()
 idf_build_set_property(DEPENDENCIES_LOCK "${_hw1_dependencies_lock}")
 
 if(_ota_layout)
-    set(PROJECT_VER "0.99.97.3+${_ota_version_suffix}")
+    set(PROJECT_VER "0.99.97.4+${_ota_version_suffix}")
 else()
-    set(PROJECT_VER "0.99.97.3")
+    set(PROJECT_VER "0.99.97.4")
 endif()
 project(hardwareone-idf)
 

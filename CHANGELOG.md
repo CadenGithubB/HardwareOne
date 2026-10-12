@@ -8,6 +8,89 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.97.4] - 2026-10-12
+
+Review fixes for the 0.99.97 cleanup series. Each fix lives in its owning
+module; where the old behavior was observable on a host, the new or changed
+suite fails against the 0.99.97.3 code.
+
+### Fixed
+- Sensor and battery logs: a header staging file left by a reset no longer
+  stops logging, and a new log is created only by promoting its staged header.
+  SD log rotation with a single kept copy now rotates (it never did).
+- First-time setup: cancelling the Advanced wizard returns to the setup menu
+  instead of finishing with default settings. Skipping the MQTT page keeps a
+  configured broker. At password prompts, `cancel` is taken as the password in
+  the serial, CLI and display wizards; `b` still goes back. A wizard change
+  applies unbatched when a settings write batch cannot start, and the serial
+  Wi-Fi picker accepts `skip` and `rescan`.
+- `featuresetup` over a serial session now shows its pages. The wizard used to
+  hide its own output while it owned the console (seen in 0.99.96.1 too).
+- Display power: preparing for sleep twice is harmless, a failed wake hands
+  the panel to `oledstart`, and a refused CPU clock change waits 5 s before
+  the next attempt instead of stalling every loop.
+- G2 and Bluetooth: the microphone page retries a failed shutdown, secure BLE
+  replies no longer hold the Bluetooth lifecycle lock, the Health logging
+  toggle shows its result, and ring name and address copies are bounded.
+- Maps and web files: guests can no longer start, stop or save a map or load a
+  track file. Live map recording no longer changes the saved logger selection.
+  Uploads stop after two consecutive receive timeouts and replace the file
+  through a staged copy. The file manager selects by full path, and an
+  unusable camera capture folder is refused with a reason.
+- Settings and storage: a failed firmware-version stamp is logged only and is
+  cleared by the next full settings save. Staging files left by interrupted
+  merges or exports are overwritten by the next run and hidden from the track
+  pickers, stray `.jpg.tmp` photos are swept once per mount, and boot recovery
+  checks each capped log's SD mirror for an orphaned rotation copy.
+- Wi-Fi: `wifistatus` and `wifilist` report a saved network they cannot read
+  instead of failing, removing a network by id no longer aborts on a copy
+  failure, and saved passwords are cleared from memory when records are
+  removed, replaced or reloaded.
+- Sensors: stop commands are refused when the I2C bus is not running and
+  report no event for a sensor that never started; start hints appear only
+  when the start was accepted. The thermal sensor allocates its zeroed frame
+  buffers at start, so a busy cache is no longer counted as a device error.
+  APDS9960 mode writes are serialized with its polling task, colour readings
+  keep their last valid values, the gesture FIFO is read at least every 100
+  ms, a swipe split by a FIFO overflow is no longer decoded as a new one, and
+  `apdsgesture` shows the last gesture and its age.
+- Automation: turning automation on or off from any setting applies to the
+  scheduler, the scheduler's own writes no longer trigger an extra pass, and
+  replacing an active automation log writes a stop marker into the previous
+  file. `uartlinkbaud` restarts the link only when the rate changed, and task
+  stack reports read one consistent snapshot.
+- Build tooling: saved configurations are checked by real path, publishing
+  falls back when hard links are unavailable, and CMake refuses feature flags
+  that are not plain integers.
+
+### Changed
+- Removed the unused `runOLEDSetupWizard()` wrapper and a write-only wizard
+  field.
+- Host tests: the five camera suites and new `log_level_application`,
+  `system_log_status` and `command_feed` suites are registered, 163 in total.
+  The browser suites are reported disabled when Node.js is missing, and the
+  command header boundary check ignores files outside the repository.
+- Records: the last workstation references in diagnostics, enclosure and audio
+  records are placeholders now.
+
+### Verification scope
+- 160 of the 163 registered host suites passed with ASan/UBSan; the three
+  browser suites need Node.js and were reported disabled. All 52 OTA tests
+  passed.
+- Release builds for XIAO default, QT Py Maps and P4 board defaults embed
+  `0.99.97.4` and fit their application partitions. XIAO default: 5,904,880
+  bytes with 79,376 bytes of app headroom, down from 88,080 in 0.99.97.3; the
+  next feature for that board needs to fit in it.
+- Device checks during the review: the setup wizard on the P4 X Eye, XIAO and
+  QT Py; Maps, uploads and file manager on the XIAO and QT Py; Wi-Fi, sensor,
+  APDS and automation changes on the QT Py. The release images then booted on
+  the XIAO and QT Py and passed a short serial check, including the serial
+  `featuresetup` pages; the P4 image was built but not flashed, since that
+  board runs the STT test build. Not exercised on hardware: skipping MQTT with
+  a configured broker (no broker available), the OLED-only cancel paths, Wi-Fi
+  scan failures, injected storage faults and the ghost-address case of the
+  simpler I2C probe (the QT Py's six devices scan cleanly).
+
 ## [0.99.97.3] - 2026-10-11
 
 Cleanup checkpoint for shared runtime helpers and checked persistence.
@@ -19,28 +102,23 @@ Cleanup checkpoint for shared runtime helpers and checked persistence.
   command-origin formatting and authenticated web command-context preparation.
 - Keep runtime log-level application and system-log status with their owners.
 - Reuse checked JSON snapshot writing across main, debug, version-stamp and
-  per-user settings while retaining each writer's document, locking policy
-  and failure reporting (a failed version stamp is logged only; it does not
-  raise the save-failed event that means a user change was lost).
+  per-user settings while retaining each writer's document and locking policy.
 - Share checked log-row and capture-copy operations. Use guarded file
   replacement for completed GPS exports, capture merges/exports and photos.
-  A staging file left by an interrupted merge or export is overwritten by the
-  next run, the track pickers skip staging names, and the photo folder is
-  swept once per mount for `.jpg.tmp` leftovers.
 - Route the existing bounded boot temporary-file sweep through shared VFS
   directory traversal and filesystem locking.
 
 ### Fixed
-- Preserve previous settings files when replacement fails; reject incomplete
-  temporary output and retain version-stamp retry intent. Serialize version
-  stamping with other settings writers to prevent stale overwrite.
+- Preserve previous settings files when replacement fails and reject
+  incomplete temporary output; a failed version stamp is attempted again at
+  the next boot. Serialize version stamping with other settings writers to
+  prevent stale overwrite.
 - Detect partial log appends, rotation copies, GPS exports and capture output
   before reporting success. Keep successful-write accounting consistent with
   accepted output and stage headers for new or empty sensor/battery logs before
   appending rows. A capped log on a full LittleFS without SD overflow now stays
   at its cap instead of being replaced by a partial copy; it shrinks again only
-  once space is freed elsewhere. Boot recovery also checks each capped log's
-  SD mirror for an orphaned rotation copy.
+  once space is freed elsewhere.
 - Check R1 history output, complete photo writes and final WAV header/size
   consistency before publishing completion. Retain recoverable backups in the
   shared SD capture-replacement path when promotion or rollback fails.
@@ -146,7 +224,7 @@ general-purpose, with selectable features and shared editable build defaults.
   Not complete: the `experiments/stt_*` copies kept their data-drive defaults
   (the HardwareOne_Speech_To_Text repository is their maintained copy), and a
   device port, a radio MAC, investigation paths and a viewer path remained in
-  four records until the 0.99.97.x review removed them.
+  four records until 0.99.97.4 removed them.
 
 ### Verification scope
 - Checkpoint verification passed 243 host/Python tests across the firmware,

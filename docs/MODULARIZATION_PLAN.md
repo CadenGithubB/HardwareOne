@@ -4534,7 +4534,9 @@ results remain as recorded. See the
 Checkpoint verification:
 
 - All **155 registered firmware host suites passed**, with ASan/UBSan and Node
-  checks enabled; all **52 OTA tests passed**. No tests failed or were skipped.
+  checks enabled (three of them are browser suites that run only when Node.js
+  is found at configure time); all **52 OTA tests passed**. No tests failed or
+  were skipped.
 - XIAO default, QT Py Maps and P4 board-default release builds passed. Their
   application descriptors embed `0.99.97.3`, saved inputs pass compiler
   verification and the recorded resolved selections match the `.2` checkpoint.
@@ -4559,3 +4561,38 @@ credentials. Raw hardware captures and build evidence remain private. Unrelated
 enclosure work is excluded. No files or host suites moved; STT engine, Conversate,
 P4 SDK staging and experiment tooling behavior remain unchanged for the later
 STT branch integration.
+
+## Checkpoint: 0.99.97.4 (2026-10-12)
+
+This checkpoint carries the fixes from an external review of `.1` to `.3`:
+seventy confirmed findings and the reviewers' structural follow-ups, worked
+package by package (logging, setup wizard, display power, G2/BLE, Maps and web
+files, persistence, Wi-Fi/sensors/automation, build tooling, tests and records).
+Each change stays with its owning module; adapters only call the owner. See the
+[changelog](../CHANGELOG.md#099974---2026-10-12) for the release summary.
+
+Record corrections made with it: the `.3` entry no longer claims version-stamp
+retry intent (a failed stamp is attempted again at the next boot), the
+write-error check is described as meaningful only for File implementations that
+set the flag, and the suite counts above name the three Node.js browser suites.
+
+Checkpoint verification:
+
+- 160 of the 163 registered firmware host suites passed with ASan/UBSan; the
+  three browser suites need Node.js and were reported disabled on this host.
+  All **52 OTA tests passed**.
+- XIAO default, QT Py Maps and P4 board-default release builds passed. Their
+  application descriptors embed `0.99.97.4`.
+
+| Profile | Image bytes | App headroom bytes |
+|---|---:|---:|
+| `xiao-default` | 5,904,880 | 79,376 |
+| `qtpy-maps-test` | 3,725,072 | 2,259,184 |
+| P4 X Eye board defaults | 6,507,744 | 918,304 |
+
+The release images booted on the XIAO and QT Py and passed a short serial
+check: login, I2C scan, log and Wi-Fi status, and the serial `featuresetup`
+pages and cancel. The P4 image was built only; that board keeps its STT test
+build. Fault-injection paths, skipping MQTT with a configured broker and the
+OLED-only cancel paths were verified on hosts only. The XIAO default profile
+has 79,376 bytes of app headroom left, so its next feature needs to fit there.
