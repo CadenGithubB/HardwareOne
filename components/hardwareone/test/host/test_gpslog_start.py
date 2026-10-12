@@ -115,10 +115,6 @@ def main() -> None:
         arduino = arduino.replace("#include <algorithm>", "#include <algorithm>\n#include <cstdlib>")
         arduino = arduino.replace("  char operator[]", """  explicit String(uint32_t value) : text_(std::to_string(value)) {}
   long toInt() const { return std::strtol(text_.c_str(), nullptr, 10); }
-  int lastIndexOf(char value) const {
-    auto pos = text_.rfind(value);
-    return pos == std::string::npos ? -1 : static_cast<int>(pos);
-  }
   friend String operator+(const char* left, const String& right) { return String(left) + right; }
   char operator[]""")
         (Path(directory) / "Arduino.h").write_text(arduino)

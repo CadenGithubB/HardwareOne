@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <new>
+#include <type_traits>
 
 #define ENABLE_BLUETOOTH 1
 #define ENABLE_G2_GLASSES 1
@@ -26,7 +27,10 @@ static uint32_t supportedResolutions=0;
 CameraCapabilities getCameraCapabilities() {return {"host",supportedResolutions,supportedControls,false,false,0,0};}
 bool cameraSupportsResolution(CameraFrameSize size) {return (supportedResolutions & cameraResolutionBit(size)) != 0;}
 bool cameraSupportsControl(CameraControl control) {return (supportedControls & cameraControlBit(control)) != 0;}
-struct G2CmdCookie {uint64_t seq=0;uint32_t menuGen=0;unsigned targetPage=0;uint8_t targetNetSub=0;};
+// The runner inserts G2HijackPage (G2_Glasses.h), G2CmdCookie and the declared
+// g2EnqueueRedraw (G2_HijackCmd.h, as header_boundary::g2EnqueueRedraw), so the
+// stubs below use the production types and fail to build when they drift.
+// INSERT_G2_BOUNDARY_TYPES
 using Completion = void(*)(bool,const char*,const G2CmdCookie&,void*);
 struct PendingCommand {G2CmdCookie cookie;Completion done;void* userData;};
 struct PendingRedraw {G2CmdCookie cookie;void(*render)();};
@@ -34,12 +38,12 @@ static std::vector<PendingCommand> pendingCommands;
 static std::vector<PendingRedraw> pendingRedraws;
 static std::vector<std::string> shownRows, submitted;
 static bool acceptCommand=true,acceptRedraw=true;
-static unsigned page=0,menuGen=0,listsShown=0;
+static G2HijackPage page=G2_HIJACK_PAGE_MAIN;
+static unsigned menuGen=0,listsShown=0;
 static uint64_t commandSeq=0;
-static constexpr unsigned G2_HIJACK_PAGE_CAMERA_SETTINGS=23;
 bool g2CamStreamSettingsExitRelaunch=false;
-unsigned g2GetHijackPage(){return page;}
-void g2SetHijackPage(unsigned value){if(page!=value){page=value;++menuGen;}}
+G2HijackPage g2GetHijackPage(){return page;}
+void g2SetHijackPage(G2HijackPage value){if(page!=value){page=value;++menuGen;}}
 bool g2ShowListPage(const char*const* rows,size_t count){++listsShown;shownRows.assign(rows,rows+count);return true;}
 void g2ReshowSensorsDetail(){}
 bool g2ShowCameraStream(void(*)()){return true;}
@@ -49,6 +53,8 @@ bool g2EnqueueRedraw(const G2CmdCookie& cookie,void(*render)(),const char* tag) 
   pendingRedraws.push_back({cookie,render});
   return true;
 }
+static_assert(std::is_same<decltype(header_boundary::g2EnqueueRedraw),decltype(g2EnqueueRedraw)>::value,
+              "g2EnqueueRedraw stub no longer matches the G2_HijackCmd.h declaration");
 bool g2SubmitHijackCommand(const char* command,const G2CmdCookie& cookie,
                            Completion done,void* userData) {
   if (!acceptCommand) return false;
@@ -187,7 +193,7 @@ int main() {
   acceptRedraw=true;
 
   // Even a manually delivered renderer is harmless after leaving the page.
-  g2CameraSettingsHandleTap(1);g2SetHijackPage(99);
+  g2CameraSettingsHandleTap(1);g2SetHijackPage(G2_HIJACK_PAGE_SENSORS);
   completeCommand(true,"SUCCESS");
   const auto awayDraws=listsShown;flushRedraws();
   assert(listsShown==awayDraws && pendingCommands.empty() && pendingRedraws.empty());

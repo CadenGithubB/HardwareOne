@@ -3,6 +3,7 @@
 from pathlib import Path
 import argparse
 import os
+import shutil
 import subprocess
 import tempfile
 
@@ -11,6 +12,7 @@ ROOT = HERE.parents[1]
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument('--cxx', default=os.environ.get('CXX') or shutil.which('c++') or 'c++')
     p.add_argument('--sanitize', action='store_true')
     args = p.parse_args()
     source = (ROOT / 'HAL_Camera_DVP.cpp').read_text()
@@ -19,7 +21,7 @@ def main():
         tmp = Path(tmp)
         (tmp / 'camera_dvp_extracted.inc').write_text(body)
         for port in (0, 1):
-            cmd = [os.environ.get('CXX', 'c++'), '-std=c++17', '-Wall', '-Wextra',
+            cmd = [args.cxx, '-std=c++17', '-Wall', '-Wextra',
                    '-DHW_CAMERA_HAL_HOST_TEST=1', f'-DCAMERA_SCCB_I2C_PORT={port}',
                    f'-DCONFIG_SCCB_HARDWARE_I2C_PORT1={port}', '-I', str(ROOT), '-I', str(tmp),
                    str(HERE / 'camera_dvp_harness.cpp'), str(ROOT / 'HAL_Camera.cpp'),

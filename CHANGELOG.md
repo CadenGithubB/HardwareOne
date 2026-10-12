@@ -49,8 +49,9 @@ Cleanup checkpoint for shared runtime helpers and checked persistence.
 
 ### Verification scope
 - All 155 registered firmware host suites passed with ASan/UBSan and Node
-  checks enabled; all 52 OTA tests passed, including release-version and
-  deployment contracts.
+  checks enabled (the count includes three browser suites that run only when
+  Node.js is found at configure time; without it they are reported disabled);
+  all 52 OTA tests passed, including release-version and deployment contracts.
 - Release rebuilds for XIAO default, QT Py Maps and P4 board defaults embed
   `0.99.97.3` and fit their existing application partitions. Saved choices
   passed compiler verification. No firmware was flashed for this checkpoint.
@@ -98,7 +99,8 @@ Cleanup checkpoint for shared runtime settings, setup and service ownership.
 
 ### Verification scope
 - The cleanup baseline passed all 146 firmware host suites with ASan/UBSan
-  and Node-based checks, followed by final focused menu/draft checks. Its
+  and Node-based checks (146 with Node.js found at configure time, 143
+  without), followed by final focused menu/draft checks. Its
   production source is unchanged for this release.
 - All 52 OTA tests passed, including release-version and deployment contracts.
 - Rebuilt QT Py Maps, XIAO default and P4 board-default firmware. All three
@@ -141,6 +143,10 @@ general-purpose, with selectable features and shared editable build defaults.
   preserve acknowledgement and failure handling for display controls.
 - Escape all JSON control bytes in the locally patched ArduinoJson formatter.
 - Remove personal workstation references from published source and test notes.
+  Not complete: the `experiments/stt_*` copies kept their data-drive defaults
+  (the HardwareOne_Speech_To_Text repository is their maintained copy), and a
+  device port, a radio MAC, investigation paths and a viewer path remained in
+  four records until the 0.99.97.x review removed them.
 
 ### Verification scope
 - Checkpoint verification passed 243 host/Python tests across the firmware,

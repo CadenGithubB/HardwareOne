@@ -30,6 +30,10 @@ class String {
     const auto pos = text_.find(value, from);
     return pos == std::string::npos ? -1 : static_cast<int>(pos);
   }
+  int lastIndexOf(char value) const {
+    const auto pos = text_.rfind(value);
+    return pos == std::string::npos ? -1 : static_cast<int>(pos);
+  }
   String substring(size_t from) const { return text_.substr(from); }
   String substring(size_t from, size_t to) const { return text_.substr(from, to - from); }
   String operator+(const String& other) const { return text_ + other.text_; }

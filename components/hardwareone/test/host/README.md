@@ -16,6 +16,11 @@ cmake --build /tmp/hw1-hardwareone-host
 ctest --test-dir /tmp/hw1-hardwareone-host --output-on-failure
 ```
 
+Node.js is required for the three browser suites (`map_live_browser`,
+`g2_status_browser`, `sensor_mic_card`). Set `HW1_NODE_EXECUTABLE` at configure
+time if it is outside PATH. Without it they stay registered but are reported as
+not run (disabled), so a green run then covers the remaining suites only.
+
 ## Map live recording
 
 `map_live_tracking` executes the production Map owner, argument parser and
@@ -65,7 +70,8 @@ ASan/UBSan when `HW1_SANITIZE=ON`.
 `map_live_browser` runs the actual Maps JavaScript functions in Node with
 controlled requests, timers and DOM elements. It checks confirmed state changes,
 failed-stop polling, duplicate clicks and stale responses. Node must be available
-when configuring CMake for this test to be registered.
+when configuring CMake for this test to run; without it the test is registered
+but disabled.
 
 ```sh
 ctest --test-dir /tmp/hw1-hardwareone-host \
@@ -139,6 +145,40 @@ contents and reproduces the former append false success, partial-copy promotion
 and LittleFS original deletion. This is fault-injection coverage of observable
 API results, not physical storage, SD qualification or power-loss durability.
 Arduino File's void flush/close calls cannot expose every backend failure.
+
+## Log level, system-log status and command origin
+
+```sh
+python3 components/hardwareone/test/host/test_log_level_application.py --sanitize
+python3 components/hardwareone/test/host/test_system_log_status.py --sanitize
+python3 components/hardwareone/test/host/test_command_feed.py --sanitize
+```
+
+`log_level_application` runs the shipping `applyLogLevel`, `cmd_loglevel`, the
+boot clamp block from `applySettings()` and `setDebugSetting`, with DebugManager,
+`esp_log_level_set` and the debug-settings persistence request recorded. It
+checks the ERROR/WARN/INFO mapping (anything else is DEBUG), that exactly the
+`wifi`, `wifi_init` and `phy_init` tags follow the level, every accepted
+spelling, the persistence request before the apply, no request for an unchanged
+value, refusals that change nothing, and the boot clamp into 0-3.
+
+`system_log_status` runs `formatSystemLogStatus`, both `formatSystemLogFlags`
+overloads, `parseSystemLogFlags` and `systemLogApplyPersistedFlags`. It reads the
+CLI, web-page and flag-message buffer sizes from their callers, renders the three
+logging states into both status buffers, fills the web buffer to 511 bytes plus
+NUL for a long path, and checks null and zero-size outputs, the 70-byte minimum
+for the 69-character mask, a format/parse round trip of all 256 single-bit masks
+in both accepted forms, and the persisted-mask restore (empty or prefix-only text
+keeps the live flags; non-hex text currently parses as zero).
+
+`command_feed` runs `originPrefix` and `appendCommandToFeed` from
+`HardwareOne.cpp`, with the CM5/live-audio classifiers, audit redaction and the
+web mirror recorded. Replies carry `[source user@ip] ` and the feed
+`[source user@ip] $ `, including the source-only, user-only and IP-only forms.
+For long identities both truncate inside the same 128-byte buffer, so the feed
+marker is cut with the prefix instead of being appended after it. Machine polls
+never reach the feed. None of these three suites touches a device, a file or the
+network.
 
 ## Boot temporary-file cleanup
 
@@ -1181,6 +1221,7 @@ small DOM boundary. It checks that a microphone-only page preserves the shared
 microphone target, other available sensors remain, and an empty grid
 still shows its placeholder. `--baseline <header-or-component-dir>` replays the
 same expectations against a saved header; it does not test layout or audio.
+It needs Node.js (see the quick start); without it the test is disabled.
 
 The extracted command-write callback and advertising functions also execute
 against boundary mocks, checking guarded counter/state updates, invalid writes
@@ -1399,9 +1440,9 @@ timer and request boundaries. It covers unknown initial mode, command/refusal
 and transport failures, authoritative mode/reconnect readback, repeat clicks,
 stale responses, slow polling, persistent connected-ring feedback, and the
 G2/Sensors/microphone link guards. It verifies navigation issues no microphone,
-source-selection or recording command. CMake registers this test
-when Node.js is found; set `HW1_NODE_EXECUTABLE` at configure time for a runtime
-outside PATH. These tests do not qualify physical G2 traffic, radio lifecycle,
+source-selection or recording command. It runs when Node.js is found at
+configure time (otherwise it is registered but disabled); set
+`HW1_NODE_EXECUTABLE` for a runtime outside PATH. These tests do not qualify physical G2 traffic, radio lifecycle,
 actual HTTP transport, browser layout or device scheduling.
 
 ## MQTT lifecycle coverage
@@ -1584,6 +1625,29 @@ routing, a connected cell, battery chemistry, or the charger circuit. Target
 builds and physical/meter comparison remain separate qualification steps.
 
 
+## Camera lifecycle and backends
+
+```sh
+python3 components/hardwareone/test/host/test_camera_core.py --sanitize
+python3 components/hardwareone/test/host/test_camera_dvp.py --sanitize
+python3 components/hardwareone/test/host/test_camera_p4.py --sanitize
+```
+
+`camera_core` compiles the production lifecycle, integer-control and resolution
+functions from `System_Camera_DVP.cpp` with `HAL_Camera.cpp` against a
+failure-injecting HAL: shared ownership, serialization, recovery fencing,
+temporary settings and persisted control failures. `camera_dvp` runs the DVP
+backend from `HAL_Camera_DVP.cpp` with the SCCB port set to 0 and to 1 against
+simulated camera and SCCB edges (SDK port ownership, maximum-geometry
+allocation, live resize, SOF verification, cleanup). `camera_p4` runs the P4
+backend and RGB565 resize code under host faults (ownership, cleanup,
+stream-stop retry, deadlines, budget and capture failures). No hardware is
+touched.
+
+The five camera suites (`camera_core`, `camera_dvp`, `camera_p4`,
+`camera_i2c_reservation` and `camera_consumers`) are registered CTest suites;
+ASan/UBSan follow `HW1_SANITIZE`.
+
 ## Shared camera controls and consumers
 
 ```sh
@@ -1597,7 +1661,11 @@ implementation. It checks fixed resolution IDs/dimensions, invalid IDs, JPEG
 marker and byte-budget admission, release ownership, backend-specific settings
 and resolution rows, no command on an unsupported control, stale taps after a
 capability change, failed command submission, and text truncation at every
-capacity from 1 to 1023 bytes. The JavaScript test executes the actual served
+capacity from 1 to 1023 bytes. The hijack-page enum, the command cookie and the
+redraw declaration come from `G2_Glasses.h` and `G2_HijackCmd.h`; a static
+assertion stops the build when the redraw stub's signature no longer matches
+the header, so a boundary change cannot leave the stubs compiling against a
+stale copy. The JavaScript test executes the actual served
 camera script against a small DOM adapter to verify supported options, disabled
 controls, capability changes, command gating and visible CLI errors. These are
 not sensor, browser layout, G2 transport, SD recording or physical camera tests.
