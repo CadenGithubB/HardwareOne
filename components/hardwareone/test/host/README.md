@@ -154,7 +154,9 @@ controlled boundaries. Checks cover exact row/header bytes, plain and sealed
 rows, trusted file identities, accepted-byte accounting, successful-write
 counters, failure-only size resynchronization, rotation after partial writes,
 close/unlock ordering, nested lock ownership and battery retry cadence.
-Fresh or empty header-bearing files are staged before receiving rows. Header
+Fresh or empty header-bearing files are staged before receiving rows; the sensor
+opener never creates the destination itself (an empty existing one is removed), so a
+new file appears only when its staged header is promoted. Header
 faults cover short writes, reported Print errors, post-flush size mismatch,
 failed staging/promotion, append-reopen failure and retries. A leftover `.header.tmp`
 beside an empty destination, including one a failed cleanup left behind, is replaced by a

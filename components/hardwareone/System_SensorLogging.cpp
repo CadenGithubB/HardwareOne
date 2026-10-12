@@ -271,27 +271,39 @@ static bool writeHeaderChecked(File& f) {
 // Caller holds the filesystem guard and owns the returned append handle.
 // Existing nonempty files retain their current compatibility policy. A new or
 // empty file gets a complete staged header before it can receive any rows.
+// The destination is never created by the probe: a new file comes into being
+// only when its staged header is promoted, which is then a plain rename on
+// every backend (an existing destination on SD would make replaceFileGuarded
+// keep a .bak of it), and a failed header leaves no empty file behind.
 static File openSensorLogForAppend(const String& path) {
   const auto ctx = VFS::systemAuth("senlog.append");
-  File file = VFS::openGuarded(path, "a", ctx, true);
-  if (!file || file.isDirectory()) {
-    if (file) file.close();
-    return File();
+  const bool headerless = !gSensorLogSealed && gSensorLogFormat == SENSOR_LOG_TEXT;
+  if (VFS::existsGuarded(path, ctx)) {
+    File file = VFS::openGuarded(path, "a", ctx, true);
+    if (!file || file.isDirectory()) {
+      if (file) file.close();
+      return File();
+    }
+    if (file.size() != 0 || headerless) return file;
+    file.close();
+    // Empty: remove it so promotion below is a plain rename rather than SD's
+    // backup sequence over a file that holds nothing.
+    if (!VFS::removeGuarded(path, ctx)) return File();
+  } else if (headerless) {
+    return VFS::openGuarded(path, "a", ctx, true);
   }
-  if (file.size() != 0 || (!gSensorLogSealed && gSensorLogFormat == SENSOR_LOG_TEXT)) return file;
-  file.close();
 
   String temporary;
   if (!temporary.concat(path) || !temporary.concat(".header.tmp")) return File();
-  // The destination is empty (checked above), so a sibling left here is an
+  // The destination is absent (checked above), so a sibling left here is an
   // unpublished staging file from an interrupted attempt, never data. The
   // "w" open replaces it and the header is staged again.
   File header = VFS::openGuarded(temporary, "w", ctx, true);
   const bool complete = header && !header.isDirectory() && writeHeaderChecked(header);
   if (header) header.close();
   if (!complete || !VFS::replaceFileGuarded(temporary, path, ctx)) {
-    // Remove the staging file so the next attempt starts clean; the empty
-    // destination stays unpublished.
+    // Remove the staging file so the next attempt starts clean; no
+    // destination exists yet, so nothing was published.
     VFS::removeGuarded(temporary, ctx);
     return File();
   }
