@@ -57,7 +57,7 @@ static void discardSetupWizard() { ++discardCalls; operations.emplace_back("draf
 static bool wizardSaveAndApplySettings(SetupWizardResult& result) {
   ++applyCalls; appliedResult = result; operations.emplace_back("draft.apply");
   if (!applyAccepted) result = {};
-  else result.timezoneAbbrev = "APPLIED";
+  else { result.timezoneAbbrev = "APPLIED"; result.applied = true; }
   return applyAccepted;
 }
 #if ENABLE_WIFI
@@ -134,7 +134,7 @@ static void completedAdapterCases() {
     } else {
       dialogResult = completed(); expectedDialogTimeout = 1234; sWizardCancelRequested = true;
       const auto result = runAndApplyFeatureWizard(expectedDialogTimeout);
-      check(result.completed == accepted && result.wifiConfigured == accepted);
+      check(result.completed == accepted && result.wifiConfigured == accepted && result.applied == accepted);
       check(!gWizardOwnsSerial && sSerialWaitTimeoutMs == 0 && !sWizardCancelRequested);
       check(hasOutput("Heap estimate: ~80 KB") == accepted);
     }
@@ -155,7 +155,7 @@ static void cancelledAdapterCases() {
     if (cancelKind == 0) dialogResult.completed = false;
     expectedDialogTimeout = dialogTimeout ? 250 : 0;
     const auto result = runAndApplyFeatureWizard(expectedDialogTimeout);
-    check(!result.completed && !result.wifiConfigured && result.wifiPassword.empty());
+    check(!result.completed && !result.applied && !result.wifiConfigured && result.wifiPassword.empty());
     check(applyCalls == 0 && discardCalls == 1 && !gWizardOwnsSerial && sSerialWaitTimeoutMs == 0);
     check(hasOutput(cancelKind ? "Feature setup cancelled or timed out. No changes saved."
                                : "Feature setup cancelled. No changes saved."));
@@ -165,7 +165,8 @@ static void cancelledAdapterCases() {
     reset(); sWizard.result = completed(); sWizard.wifiPendingSsid = "pending";
     sWizard.wifiNamedCount = 8; sWizard.wifiScanValid = sWizard.espnowConfiguring = true;
     if (explicitCancel) {
-      sWizard.subMode = WizardSubMode::WIFI_PASSWORD;
+      // Any prompt but a password one (see setup_wifi_navigation for those).
+      sWizard.subMode = WizardSubMode::WIFI_SSID;
       char response[256] = {};
       check(wizardMode_onInput("CaNcEl", nullptr, response, sizeof(response)) == CLI_MODE_HANDLED_AND_EXIT);
       check(!sWizard.result.completed && std::strstr(response, "No changes saved."));
@@ -187,6 +188,11 @@ static void inputCancellationCases() {
   }
   setSerialWaitTimeout(0); inputs = {" ordinary text "}; inputIndex = 0;
   check(waitForWizardInput() == "ordinary text" && !isWizardCancelRequested());
+  // Secret prompts take the cancel word literally; only the idle timeout cancels them.
+  setSerialWaitTimeout(0); inputs = {"cancel"}; inputIndex = 0;
+  check(waitForWizardSecret() == "cancel" && !isWizardCancelRequested());
+  setSerialWaitTimeout(50); fakeNow += 51; inputs.clear(); inputIndex = 0;
+  check(waitForWizardSecret().empty() && isWizardCancelRequested());
   requestWizardCancel(); check(waitForSerialInputBlocking().empty());
 }
 static void exitEligibilityCases() {

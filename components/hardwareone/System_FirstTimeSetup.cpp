@@ -855,6 +855,12 @@ void firstTimeSetupIfNeeded() {
     broadcastOutput("Feature Configuration...");
 
     SetupWizardResult wizardResult = runAndApplyFeatureWizard();
+    if (!wizardResult.applied) {
+      // Cancelled, Back off the first page, or the save was refused: the wizard
+      // already said which. Offer the menu again instead of finishing Advanced
+      // setup with defaults the user never accepted.
+      continue;  // back to the Basic/Advanced/Import menu
+    }
     wifiConfigured = wizardResult.wifiConfigured && wizardResult.wifiSSID.length() > 0;
   } else {
     // Basic setup - use sensible defaults

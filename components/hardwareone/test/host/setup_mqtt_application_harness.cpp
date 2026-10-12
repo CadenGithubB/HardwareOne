@@ -158,7 +158,11 @@ static void serialCases() {
   reset(); result = {}; inputs = {"c", "new.host", "2000", "new-user", "new-secret"}; cancelInput = 2;
   handleSerialMQTTPage(result, running);
   broker(); assert(staged.empty() && !running && nextCalls == 0 && draftAutoStart);
+  // Skip keeps a configured broker's auto-start; only a broker-less draft loses it.
   reset(); result = {}; running = true; inputs = {"n"};
+  handleSerialMQTTPage(result, running);
+  broker(); assert(draftAutoStart && nextCalls == 1 && staged.empty());
+  reset(); result = {}; running = true; inputs = {"n"}; draftValues.mqttHost = "";
   handleSerialMQTTPage(result, running);
   broker(); assert(!draftAutoStart && nextCalls == 1 && staged.empty());
   reset(); result = {}; inputs = {"c", "new.host", "2000", "user", "pass"}; stageSucceeds = false;
@@ -178,6 +182,9 @@ static void oledCases() {
     broker(); assert(staged.empty() && previousCalls == 0 && nextCalls == 0 && !running);
   }
   reset(); result = {}; introChoice = 0;
+  handleOLEDMQTTPage(result, running);
+  broker(); assert(draftAutoStart && staged.empty() && nextCalls == 1);
+  reset(); result = {}; introChoice = 0; draftValues.mqttHost = "";
   handleOLEDMQTTPage(result, running);
   broker(); assert(!draftAutoStart && staged.empty() && nextCalls == 1);
   reset(); result = {}; inputs = {"new.host", "1883", "user", "pass"}; stageSucceeds = false;
@@ -205,10 +212,16 @@ static void cliCases() {
     reset(); for (int i = 0; i < field; ++i) cli(prefix[i]);
     cli("b"); broker(); assert(staged.empty() && nextCalls == 0);
     reset(); for (int i = 0; i < field; ++i) cli(prefix[i]);
-    assert(cli("cancel") == CLI_MODE_HANDLED_AND_EXIT);
-    broker(); assert(staged.empty() && !sWizard.result.completed && clearCalls == 1 && nextCalls == 0);
+    if (field < 4) {
+      assert(cli("cancel") == CLI_MODE_HANDLED_AND_EXIT);
+      broker(); assert(staged.empty() && !sWizard.result.completed && clearCalls == 1 && nextCalls == 0);
+    } else {  // the password prompt takes the cancel word literally
+      assert(cli("cancel") == CLI_MODE_HANDLED);
+      submitted("new.host", 2000, "new-user", "cancel"); assert(nextCalls == 1 && clearCalls == 0);
+    }
   }
-  reset(); cli("n"); broker(); assert(!draftAutoStart && nextCalls == 1);
+  reset(); cli("n"); broker(); assert(draftAutoStart && nextCalls == 1);
+  reset(); draftValues.mqttHost = ""; cli("n"); broker(); assert(!draftAutoStart && nextCalls == 1);
   reset(); stageSucceeds = false;
   for (const char* value : {"c", "new.host", "1883", "user", "pass"}) cli(value);
   broker(); assert(staged.size() == 1 && nextCalls == 0 && !sWizard.result.completed);

@@ -53,7 +53,6 @@ def generate() -> str:
         extract_block(cli_header, "enum CLIModeInputResult") + ";",
     ])
     adapter_boundaries = """
-void requestWizardCancel() { cancelRequested = true; }
 static void appendPromptTo(char*, size_t) {}
 static void clearWizardWifiChoices() {}
 static CLIModeInputResult unexpectedDispatch(const String&, char*, size_t) {

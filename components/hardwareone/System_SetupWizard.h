@@ -30,7 +30,11 @@ enum SetupWizardPage {
 
 // Wizard result structure
 struct SetupWizardResult {
-  bool completed = false;
+  bool completed = false;  // every page was answered with a valid draft
+  // Set only by wizardSaveAndApplySettings once it accepted the draft. Every
+  // other exit (cancel, timeout, Back off the first page, refused save) leaves
+  // it false, so callers key "proceed" on this rather than on completed.
+  bool applied = false;
   bool wifiEnabled = false;
   bool wifiConfigured = false;
   String wifiSSID;
@@ -160,6 +164,10 @@ void discardSetupWizard();
 bool wizardFeatureEnabled(const char* featureId);
 void wizardSetFeatureEnabled(const char* featureId, bool enabled);
 void wizardSetMQTTAutoStart(bool enabled);
+// Skipping the broker page leaves a configured broker exactly as it is; only a
+// draft with no broker host has its auto-start cleared. Every adapter's
+// Next/Skip on the MQTT page goes through this.
+void wizardSkipMQTTPage();
 
 // Handle input actions (returns true if state changed)
 bool wizardActivateCurrentItem();
@@ -208,6 +216,8 @@ SetupWizardResult runSetupWizard();
 // idleTimeoutMs: 0 = wait forever (correct for first-time-setup at boot —
 // fresh-device owner may need time to read instructions). Non-zero = cancel
 // the wizard if no input arrives for `idleTimeoutMs` milliseconds.
+// The result's `applied` flag says whether anything was committed; every
+// cancel, timeout and refused-save path returns an empty result.
 SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs = 0);
 
 // Wizard-input timing controls (definitions in System_Utils.cpp).
@@ -220,6 +230,10 @@ bool isWizardCancelRequested();
 void requestWizardCancel();
 void noteWizardInputActivity();
 // Shared serial escape; call only for wizard input, not account provisioning.
+// Passwords are literal in every engine (serial waitForWizardSecret, the CLI
+// wizard's password sub-modes, the OLED keyboard's masked prompts): a password
+// that happens to be "cancel" is a password, and only the idle timeout cancels
+// there.
 bool wizardHandleCancelInput(const String& input);
 
 // "Wizard owns Serial" flag. The setup wizard reads Serial directly via

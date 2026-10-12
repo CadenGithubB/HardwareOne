@@ -33,6 +33,7 @@ class String : public std::string {
 };
 #define EXT_RAM_BSS_ATTR
 #define DEBUGF(...) do {} while (0)
+#define WARN_STORAGEF(...) operations.emplace_back("storage.warn")
 // INSERT_TYPES
 
 static struct SettingsBoundary {
@@ -90,6 +91,7 @@ static std::vector<std::string> operations, output;
 static std::vector<const void*> changed;
 static bool mainSave = true, debugSave = true, connected, cancelRequested;
 bool isWizardCancelRequested() { return cancelRequested; }
+void requestWizardCancel() { cancelRequested = true; }
 static WifiNetworkSaveResult wifiResult;
 static unsigned wifiSaveCalls;
 
@@ -105,18 +107,19 @@ namespace Clock { static void applyTimezone() { ++timezoneCalls; } }
 const char* cmd_certgen(const String&) { ++certCalls; operations.emplace_back("certificate"); return "fixture certificate generated"; }
 static WifiNetworkSaveResult saveSetupWiFiNetwork(const String& ssid, const String& password) {
   assert(ssid == "fixture-network" && password == "fixture-secret");
-  assert(scopeActive); ++wifiSaveCalls; operations.emplace_back("wifi.save"); return wifiResult;
+  assert(scopeActive || !scopeAvailable); ++wifiSaveCalls; operations.emplace_back("wifi.save"); return wifiResult;
 }
 struct WifiBoundary { bool isConnected() const { return connected; } } WiFi;
 static void setupNTP() { operations.emplace_back("ntp.setup"); }
 struct SettingEntry;
 static void finishSettingChange(const void* field, const SettingEntry*) {
-  assert(scopeActive && "wizard mutation escaped its persistence scope");
+  // Without a batch slot the owner applies unbatched by design.
+  assert((scopeActive || !scopeAvailable) && "wizard mutation escaped its persistence scope");
   changed.push_back(field);
   operations.emplace_back("setting.change");
 }
 static bool requestDebugSettingsPersist() {
-  assert(scopeActive && "wizard debug mutation escaped its persistence scope");
+  assert((scopeActive || !scopeAvailable) && "wizard debug mutation escaped its persistence scope");
   operations.emplace_back("debug.change");
   return true;
 }
@@ -470,11 +473,15 @@ static void completionFailuresAndNoop() {
   check(liveValues() == original && changed.empty());
   reset(); initSetupWizard(); toggleFeature("automation");
   scopeAvailable = false; result = completed();
-  check(!wizardSaveAndApplySettings(result)); check(!gSettings.automationEnabled && changed.empty());
+  // No batch slot: the accepted draft still applies, one file at a time.
+  check(wizardSaveAndApplySettings(result));
+  check(result.applied && gSettings.automationEnabled && applyCalls == 1 && scopeFinishes == 0);
+  check(std::count(operations.begin(), operations.end(), "storage.warn") == 1);
+  for (const auto& line : output) check(line.find("could not be saved") == std::string::npos);
   reset(); initSetupWizard(); toggleFeature("automation");
   scopeResult = false; result = completed();
   check(wizardSaveAndApplySettings(result));
-  check(result.completed && gSettings.automationEnabled && applyCalls == 1 && scopeFinishes == 1);
+  check(result.completed && result.applied && gSettings.automationEnabled && applyCalls == 1 && scopeFinishes == 1);
   bool warning = false;
   for (const auto& line : output) if (line.find("could not be saved") != std::string::npos) warning = true;
   check(warning);
@@ -492,6 +499,9 @@ static void completionEffects() {
     for (auto outcome : {WifiNetworkSaveResult::Rejected, WifiNetworkSaveResult::PersistFailed,
                          WifiNetworkSaveResult::Accepted}) {
       reset(); initSetupWizard(); connected = online; wifiResult = outcome;
+#if ENABLE_WIFI
+      wizardSetFeatureEnabled("wifi", true);  // the Wi-Fi page is still shown at Finish
+#endif
       setWizardLogLevelSelection(0); setWizardTimezoneSelection(0);
 #if ENABLE_HTTP_SERVER && ENABLE_HTTPS
       wizardSetFeatureEnabled("http", true);
@@ -524,10 +534,35 @@ static void completionEffects() {
   gSettings.automationEnabled = true;
   auto result = completed(); check(wizardSaveAndApplySettings(result));
   check(gSettings.automationEnabled && changed.empty()); // Reverted draft leaves the external edit intact.
+#if ENABLE_WIFI
+  // Credentials entered before Wi-Fi was switched off on a later Back are
+  // dropped, and the caller reads that back from the result.
+  reset(); initSetupWizard();
+  result = completed(); result.wifiConfigured = true;
+  result.wifiSSID = "fixture-network"; result.wifiPassword = "fixture-secret";
+  check(wizardSaveAndApplySettings(result) && result.applied);
+  check(wifiSaveCalls == 0 && !result.wifiConfigured && result.wifiSSID.empty() && result.wifiPassword.empty());
+#endif
+}
+
+static void invalidDraftFinish() {
+  // A draft that failed to stage ends through the cancel exit with one owner
+  // error line, so every adapter leaves the same way.
+  reset(); initSetupWizard();
+  SetupWizardResult patch; patch.mqttHost = "unreserved broker";
+  failReserve = true; check(!wizardStageMQTTSettings(patch)); failReserve = false;
+  SetupWizardResult result{}; int guard = 0;
+  while (wizardNextPage(result) && ++guard < WIZARD_PAGE_COUNT) {}
+  check(!result.completed && cancelRequested);
+  check(std::count(output.begin(), output.end(),
+                   "Error: setup choices could not be staged; no changes saved. Reopen setup to try again.") == 1);
+  reset(); initSetupWizard(); result = {}; guard = 0;
+  while (wizardNextPage(result) && ++guard < WIZARD_PAGE_COUNT) {}
+  check(result.completed && !cancelRequested && output.empty());
 }
 
 int main() {
-  cancellationAndRestart(); navigationAndModes(); stagingAndPortValidation();
+  cancellationAndRestart(); navigationAndModes(); stagingAndPortValidation(); invalidDraftFinish();
   deviceNameBackAndApply(); deviceNameRevertPreservesExternalChanges();
   deviceNameESPNowRevisit(); untouchedLongDeviceName();
   touchedOnlyApply(); completionFailuresAndNoop(); completionEffects();

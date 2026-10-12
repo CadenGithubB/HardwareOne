@@ -50,6 +50,9 @@ def generate() -> str:
     normal = extract_block(source, "void firstTimeSetupIfNeeded()")
     require(normal.count("createInitialAdminUser(") == 1, "normal setup must reuse the owner")
     require("hashUserPassword(" not in normal, "normal setup duplicates credential hashing")
+    wizard = extract_block(normal, "if (advancedSetup)")
+    require("continue;" in extract_block(wizard, "if (!wizardResult.applied)"),
+            "advanced setup must return to its menu unless the wizard applied its draft")
     tail_start = normal.index("  // Saving configuration stage")
     tail_end = normal.index("  } // end while(true) restart loop", tail_start)
     tail = normal[tail_start:tail_end]

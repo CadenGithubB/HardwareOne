@@ -22,7 +22,10 @@ static void requestWizardCancel() { cancelRequested = true; }
 static bool isWizardCancelRequested() { return cancelRequested; }
 static void noteWizardInputActivity() {}
 static String waitForSerialInputBlocking() {
-  assert(!inputs.empty()); const auto value = inputs.front(); inputs.pop_front(); return value;
+  assert(!inputs.empty()); const auto value = inputs.front(); inputs.pop_front();
+  // The idle timeout returns nothing and raises the cancel flag, like production.
+  if (value == "<timeout>") { requestWizardCancel(); return String(); }
+  return value;
 }
 struct SerialBoundary {
   void println(const char* = "") {} void print(const char*) {}
@@ -63,7 +66,7 @@ static bool getOLEDWiFiSelection(String& ssid) {
 }
 static String getOLEDTextInput(const char*, bool masked, const char*, int, bool* cancelled) {
   assert(masked); String value = waitForSerialInputBlocking();
-  if (value == "cancel") requestWizardCancel();
+  // A masked keyboard prompt takes text literally; only the timeout cancels it.
   *cancelled = passwordBack || cancelRequested;
   passwordBack = false; return value;
 }
@@ -120,12 +123,16 @@ static void serialCases() {
   }
   reset(); auto result = acceptedBefore(); bool running = true; inputs = {"rescan", "skip"};
   handleSerialWiFiPage(result, running); advanced(result); check(scans == 2);
-  for (bool password : {false, true}) {
-    reset(); result = acceptedBefore(); running = true;
-    inputs = password ? std::deque<String>{"new-network", "cancel"} : std::deque<String>{"cancel"};
-    handleSerialWiFiPage(result, running); preserved(result);
-    check(!running && !result.completed && cancelRequested && nextCalls == 0);
-  }
+  reset(); result = acceptedBefore(); running = true; inputs = {"cancel"};
+  handleSerialWiFiPage(result, running); preserved(result);
+  check(!running && !result.completed && cancelRequested && nextCalls == 0);
+  // The password prompt takes the cancel word literally; only the idle timeout cancels there.
+  reset(); result = acceptedBefore(); running = true; inputs = {"new-network", "cancel"};
+  handleSerialWiFiPage(result, running); advanced(result);
+  check(running && !cancelRequested && result.wifiSSID == "new-network" && result.wifiPassword == "cancel");
+  reset(); result = acceptedBefore(); running = true; inputs = {"new-network", "<timeout>"};
+  handleSerialWiFiPage(result, running); preserved(result);
+  check(!running && !result.completed && cancelRequested && nextCalls == 0);
 #else
   reset(); auto result = acceptedBefore(); bool running = true;
   handleSerialWiFiPage(result, running); advanced(result); check(running);
@@ -145,8 +152,12 @@ static void oledCases() {
   check(!renderWiFiPage(result)); preserved(result); check(previousCalls == 1 && !nextCalls);
   reset(); result = acceptedBefore(); introChoices = {1, 0}; pickedNetworks = {""};
   check(renderWiFiPage(result)); advanced(result); check(!result.wifiConfigured);
-  reset(); result = acceptedBefore(); introChoices = {1}; pickedNetworks = {"new-network"}; inputs = {"cancel"};
+  reset(); result = acceptedBefore(); introChoices = {1}; pickedNetworks = {"new-network"}; inputs = {"<timeout>"};
   check(!renderWiFiPage(result)); preserved(result); check(cancelRequested && !nextCalls);
+  // The masked keyboard prompt takes the cancel word as the password.
+  reset(); result = acceptedBefore(); introChoices = {1}; pickedNetworks = {"new-network"}; inputs = {"cancel"};
+  check(renderWiFiPage(result)); advanced(result);
+  check(!cancelRequested && result.wifiConfigured && result.wifiSSID == "new-network" && result.wifiPassword == "cancel");
 }
 static void cliCases() {
 #if ENABLE_WIFI
@@ -169,8 +180,12 @@ static void cliCases() {
   check(!sWizard.wifiScanValid && scanClears == 1 && !nextCalls);
   reset(); cachedNameAvailable = false; check(cli("1") == CLI_MODE_HANDLED); preserved(sWizard.result);
   check(sWizard.subMode == WizardSubMode::WIFI_SSID && sWizard.wifiPendingSsid.empty() && !nextCalls);
-  reset(); check(cli("new-network") == CLI_MODE_HANDLED); check(cli("cancel") == CLI_MODE_HANDLED_AND_EXIT);
+  reset(); check(cli("cancel") == CLI_MODE_HANDLED_AND_EXIT);
   check(!sWizard.result.completed && !nextCalls);
+  // At the password prompt the cancel word is the password.
+  reset(); check(cli("new-network") == CLI_MODE_HANDLED); check(cli("cancel") == CLI_MODE_HANDLED);
+  advanced(sWizard.result);
+  check(sWizard.result.wifiSSID == "new-network" && sWizard.result.wifiPassword == "cancel");
 #else
   reset(); check(cli("skip") == CLI_MODE_HANDLED); advanced(sWizard.result);
 #endif

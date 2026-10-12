@@ -49,6 +49,7 @@ def generate() -> str:
     functions = "\n\n".join([
         extract_block(first, "static bool isOLEDAvailable("),
         extract_block(first, "static uint32_t waitForButtonPress("),
+        extract_block(first, "static uint32_t waitForRetryOrSkip("),
         extract_block(first, "String getOLEDTextInput("),
         "#if ENABLE_WIFI\n" + first[cache_start:cache_end],
         extract_block(first, "bool getOLEDWiFiSelection("),

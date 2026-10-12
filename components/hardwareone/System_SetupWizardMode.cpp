@@ -239,7 +239,8 @@ static const char* paintAfterTransition() {
       broadcastOutput("Configure the MQTT broker for telemetry.");
       broadcastOutput("----------------------------------------");
       broadcastOutput(" c = Configure (enter broker fields)");
-      broadcastOutput(" n = Next (skip)");
+      broadcastOutput(getWizardDraftValues().mqttHost.length() > 0 ? " n = Next (keep current broker)"
+                                                                   : " n = Next (skip)");
       broadcastOutput(" b = Back");
       return "Choice: ";
     }
@@ -333,9 +334,12 @@ static CLIModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
                                              char* out, size_t outSize) {
   if (out && outSize > 0) out[0] = '\0';
 
-  // Universal cancel: 'cancel' at ANY sub-mode aborts the wizard with
-  // no changes saved.
-  if (line.equalsIgnoreCase("cancel")) {
+  // Universal cancel: 'cancel' at any prompt aborts the wizard with no changes
+  // saved. Password prompts are the exception in every engine (see
+  // wizardHandleCancelInput): the text typed there is the password.
+  const bool secretPrompt = sWizard.subMode == WizardSubMode::MQTT_PASS ||
+                            sWizard.subMode == WizardSubMode::WIFI_PASSWORD;
+  if (!secretPrompt && line.equalsIgnoreCase("cancel")) {
     clearWizardWifiChoices();
     snprintf(out, outSize, "Wizard cancelled. No changes saved.");
     sWizard.result.completed = false;
@@ -641,8 +645,9 @@ static CLIModeInputResult dispatchMQTT(const String& line,
         broadcastOutput("----------------------------------------");
         appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
       }
-      // Skipping broker configuration also leaves auto-start disabled.
-      wizardSetMQTTAutoStart(false);
+      // Skipping leaves a configured broker as it is; a broker-less draft also
+      // loses auto-start (the owner's rule, shared with the other engines).
+      wizardSkipMQTTPage();
       goNextPage();
       appendPromptTo(out, outSize);
       return (sWizard.subMode == WizardSubMode::DONE) ? CLI_MODE_HANDLED_AND_EXIT
@@ -879,13 +884,24 @@ static void wizardMode_onTick(void* /*ud*/) {
       // on the top-level pages -- sub-pages (ESPNOW / MQTT / WiFi) require
       // text entry which the joystick cannot provide.
       switch (sWizard.subMode) {
-        case WizardSubMode::PAGE_GROUP:
+        case WizardSubMode::PAGE_GROUP: {
+          const WizardMenuItem* item = getWizardMenuItem(getWizardCurrentPage(), getWizardCurrentSelection());
+          if ((newButtons & INPUT_MASK(INPUT_BUTTON_A)) && item && item->type == WIZARD_ITEM_DEVICE_NAME) {
+            // The shared handler would open the blocking OLED keyboard here and
+            // hold the CLI mode lock for as long as the user types. The CLI
+            // wizard takes the name from its own session instead, the same
+            // detour as picking this row by number.
+            sWizard.subMode = WizardSubMode::PAGE_DEVICE_NAME;
+            broadcastOutput(paintAfterTransition());
+            return;
+          }
           handleWizardPageInput(newButtons, nav, sWizard.result);
           if (sWizard.result.completed && !isWizardCancelRequested()) {
             cliExitMode();
             return;
           }
           break;
+        }
         default:
           // Text-entry sub-pages cannot safely borrow another transport's
           // login: that would defeat exact-session ownership. Left always
