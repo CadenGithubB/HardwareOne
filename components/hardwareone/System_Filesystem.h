@@ -239,7 +239,9 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes);
  * @param path File path
  * @param line Line to append
  * @param capBytes Maximum file size in bytes
- * @return false on a detected append or rotation failure
+ * @return false on a detected append or rotation failure. A short append also
+ *         skips rotation: a full LittleFS without SD overflow keeps the log at
+ *         its cap rather than replacing it with a partial copy.
  */
 bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 
@@ -249,7 +251,9 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
  * leaving a small crash-unsafe window. If the reboot hits that window, this call
  * promotes the `.tmp` back to the canonical path (or removes a stale `.tmp`
  * if the original survived). Safe to call even when no orphan exists —
- * it short-circuits on the first `exists()` check.
+ * it short-circuits on the first `exists()` check. The `/sd` mirror of `path`
+ * gets the same check whenever the card is mounted, so an orphan left while
+ * log overflow was latched on an earlier boot is recovered too.
  *
  * Should be called once per known log-file path during boot, after the
  * filesystem is mounted.

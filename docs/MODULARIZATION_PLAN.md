@@ -3995,6 +3995,14 @@ not reused here because its stack buffer and read-completion policy differ.
 SD retains its existing remove/rename sequence and orphan recovery window,
 now after temporary-copy checks; physical SD qualification remains deferred.
 The unchanged boot recovery list does not cover every capped-log caller.
+Trade accepted with this change: a detected short append returns before the
+rotation check, and rotation itself promotes only a verified copy that needs
+about 85% of the cap in free space, so a capped log on a full LittleFS with no
+SD overflow stays pinned at its cap until space is freed elsewhere. The
+earlier writer rotated anyway and could replace the log with a partial copy;
+that lossy reclaim is gone and no low-space trimming replaces it. Boot
+recovery checks each capped log's `/sd` mirror as well, so an orphan left by
+a rotation that ran while overflow was latched on an earlier boot is recovered.
 
 These are intentional failure-handling corrections. A failed append may still
 leave a partial line. Most callers ignore the returned boolean; this change
@@ -4437,8 +4445,14 @@ interface, module, settings format or temporary path was added or changed.
 
 The destructive per-user fallback is removed: failed staging or replacement
 leaves the previous destination intact and returns failure. The shared helper
-also rejects a directory handle and a reported write error. Main/debug writers
-retain their settings-writer-before-filesystem lock order. Per-user transactions
+also rejects a directory handle and a reported write error (meaningful only for
+Print subclasses that set the flag; the Arduino LittleFS/SD File never does, so
+the byte-count and size checks are the gate on the device). Main/debug writers
+retain their settings-writer-before-filesystem lock order. The version re-stamp
+calls the shared snapshot writer directly and keeps its own log-only failure
+report: it does not raise the full writers' error line or save-failed event,
+which signal a lost user change. A later complete full save clears the pending
+re-stamp, since the rebuilt document carries the running version. Per-user transactions
 retain their single outer filesystem lock through load, mutation, save and cache
 invalidation, without acquiring the main settings writer lock. This prevents
 introducing the opposite lock order while sharing the write mechanics.

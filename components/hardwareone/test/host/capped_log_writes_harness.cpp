@@ -21,7 +21,7 @@ static std::string text(const String& value) { return value.c_str(); }
 static std::map<std::string, std::string> disk;
 static std::vector<std::string> events;
 static int lockDepth = 0, liveFiles = 0, allocCalls = 0;
-static bool recovering = false, overflow = false, failAlloc = false, failSeek = false;
+static bool recovering = false, overflow = false, failAlloc = false, failSeek = false, sdAvailable = false;
 static bool failRename = false, appendError = false, copyError = false, flushError = false;
 static bool failAppendOpen = false, failReadOpen = false, failTempOpen = false;
 static int failAppendWrite = 0, appendWrites = 0, failCopyWrite = 0, copyWrites = 0;
@@ -112,6 +112,7 @@ using fs::File;
 namespace VFS {
 enum StorageType { INTERNAL, SDCARD };
 static StorageType getStorageType(const String& path) { return text(path).rfind("/sd/", 0) == 0 ? SDCARD : INTERNAL; }
+static bool isSDAvailable() { return sdAvailable; }
 static void resolveOverflowPath(const char* path, size_t need, char* dest, size_t capacity) {
   io("resolve"); requestedSpace = need;
   std::snprintf(dest, capacity, "%s%s", overflow ? "/sd" : "", path);
@@ -155,7 +156,7 @@ static size_t eventIndex(const std::string& event) {
 }
 static void reset(bool onSd = false) {
   check(lockDepth == 0 && liveFiles == 0, "previous case releases resources");
-  ++cases; disk.clear(); events.clear(); recovering = false; overflow = onSd;
+  ++cases; disk.clear(); events.clear(); recovering = false; overflow = onSd; sdAvailable = onSd;
   failAlloc = failSeek = failRename = appendError = copyError = flushError = false;
   failAppendOpen = failReadOpen = failTempOpen = false;
   failAppendWrite = appendWrites = failCopyWrite = copyWrites = failCopyRead = copyReads = failScanRead = scanReads = 0;
@@ -264,11 +265,29 @@ static void failureCases(bool onSd) {
     check(!append(), "SD failed original removal reported"); check(disk.at(destination()) == original + "new\r\n" && !disk.count(destination() + ".tmp") && !seen("rename"), "SD failed removal retains original and discards checked temp");
   }
 }
+// Boot recovery also checks the SD mirror of each capped log: a rotation that
+// ran while overflow was latched in an earlier boot leaves its orphan there,
+// where the current (unlatched) resolution never looks.
+static void mirrorRecovery() {
+  const std::string mirror = "/sd/logs/events.log";
+  reset(false); sdAvailable = true; disk[mirror + ".tmp"] = "mirror orphan"; recover();
+  check(disk.count(mirror) && disk.at(mirror) == "mirror orphan" && !disk.count(mirror + ".tmp") && !disk.count(destination()),
+        "mirror orphan promoted while the overflow latch is off");
+  reset(false); sdAvailable = true; disk[mirror] = "mirror"; disk[mirror + ".tmp"] = "stale"; disk[destination()] = "flash"; recover();
+  check(disk.at(mirror) == "mirror" && !disk.count(mirror + ".tmp") && disk.at(destination()) == "flash",
+        "stale mirror temp removed while both logs stay");
+  reset(true); sdAvailable = true; disk[mirror + ".tmp"] = "once"; recover();
+  check(disk.count(mirror) && disk.at(mirror) == "once" && std::count(events.begin(), events.end(), "rename") == 1,
+        "latched overflow checks the mirror exactly once");
+  reset(false); sdAvailable = false; disk[mirror + ".tmp"] = "unreachable"; recover();
+  check(disk.count(mirror + ".tmp") && !disk.count(mirror), "mirror left alone without a mounted card");
+}
 int main() {
   // Must precede successful rotation: the production allocation persists for the boot.
   reset(); disk[destination()] = rows(0, 20); failAlloc = true; check(!append(), "PSRAM allocation failure reported");
   if (!BASELINE) untouchedRotation(rows(0, 20));
   for (bool onSd : {false, true}) { normalCases(onSd); failureCases(onSd); }
+  if (!BASELINE) mirrorRecovery();
   check(allocCalls == 2, "one failed allocation then one reusable PSRAM allocation across all logs");
   reset(); recovering = true; cleanupLogOrphan(nullptr); recovering = false; check(events.empty(), "null recovery path is a no-op");
   std::cerr << cases << " scenarios, " << checks << " assertions passed (real Arduino Print and String)\n";

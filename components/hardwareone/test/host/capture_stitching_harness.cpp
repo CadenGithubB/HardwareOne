@@ -408,11 +408,13 @@ static void stagedCases() {
       if (fault == 7) { failReadPath = "/one"; failReadAt = 1; }
       if (fault == 8) directories.insert("/one");
       auto result = invoke("staged-fault", args, false);
-      check(fault ? result.rfind("Error:", 0) == 0 : result == success(1, 9, path), "completion failure reaches command result");
-      check(disk.at(path) == (fault ? "prior" : "new data\n"), "existing destination preserved until complete promotion");
+      // fault 5: a temporary left by an interrupted run is this command's own
+      // leftover; the next run overwrites it and completes.
+      const bool failure = fault && fault != 5;
+      check(failure ? result.rfind("Error:", 0) == 0 : result == success(1, 9, path), "completion failure reaches command result");
+      check(disk.at(path) == (failure ? "prior" : "new data\n"), "existing destination preserved until complete promotion");
       check(disk.at("/one") == "new data\n", "source input unchanged");
-      check(disk.count(path + ".tmp") == (fault == 5 || fault == 6 ? 1U : 0U), "only failed cleanup or preexisting temp remains");
-      if (fault == 5) check(disk.at(path + ".tmp") == "unowned neighbor", "preexisting temp is never consumed");
+      check(disk.count(path + ".tmp") == (fault == 6 ? 1U : 0U), "only a failed-cleanup temp remains");
     }
     for (const auto& suffix : {".tmp", ".bak"}) {
       reset(); disk[path] = "prior"; disk[path + suffix] = "input";
@@ -504,13 +506,15 @@ static void exportCases() {
     if (fault == 9) disk["/sealed"] = "not sealed\n";
     const std::string result = cmd_capturecrypt(String(("export \"/sealed\" \"" + path + "\"").c_str()));
     check(lockDepth == 0 && liveFiles == 0, "export releases all handles and lock");
-    check(fault ? result.rfind("Error:", 0) == 0 : result.rfind("SUCCESS:", 0) == 0, "export reports completion honestly");
-    check(disk.at(path) == (fault ? "prior" : "# columns\ndecoded\n[UNDECRYPTABLE]\n"), "export preserves old destination on failure and plaintext schema on success");
-    if (!fault) {
+    // fault 6: a temporary left by an interrupted export is overwritten by the next run.
+    const bool failure = fault && !(HAS_STAGED && fault == 6);
+    check(failure ? result.rfind("Error:", 0) == 0 : result.rfind("SUCCESS:", 0) == 0, "export reports completion honestly");
+    check(disk.at(path) == (failure ? "prior" : "# columns\ndecoded\n[UNDECRYPTABLE]\n"), "export preserves old destination on failure and plaintext schema on success");
+    if (!failure) {
       check(result.find("1 rows decrypted, 1 undecryptable") != std::string::npos, "export retains partial decryption policy");
-      std::cout << "export:" << path << ' ' << std::quoted(result) << '\n' << std::quoted(disk.at(path)) << '\n';
+      if (!fault) std::cout << "export:" << path << ' ' << std::quoted(result) << '\n' << std::quoted(disk.at(path)) << '\n';
     }
-    if (HAS_STAGED) check(disk.count(path + ".tmp") == (fault == 6 || fault == 8 ? 1U : 0U), "export cleanup only leaves refused or failed cleanup temp");
+    if (HAS_STAGED) check(disk.count(path + ".tmp") == (fault == 8 ? 1U : 0U), "export cleanup only leaves a failed-cleanup temp");
   }
 #if HAS_STAGED
   for (const auto& separator : {"/", "/./", "//"}) for (const auto& suffix : {"", ".tmp", ".bak"}) {

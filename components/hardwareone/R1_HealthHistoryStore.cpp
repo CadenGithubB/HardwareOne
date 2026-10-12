@@ -59,15 +59,17 @@ class StoreLock {
 
 class StoreIoLock {
  public:
-  // Keep each read/recovery/commit sequence indivisible to other filesystem
-  // users. Acquire FS before the private scratch-buffer mutex; nested VFS
-  // calls reuse the FS guard, and destruction releases the private lock first.
-  StoreIoLock() : fsGuard_("r1.history"),
-                  locked_(xSemaphoreTake(sStoreIoMutex, portMAX_DELAY) == pdTRUE) {}
+  // The private scratch-buffer mutex serializes the store's own sequences and
+  // its private directory. The shared filesystem guard is taken per VFS call,
+  // plus one short span across each publish sequence and the recovery scan
+  // (see commitDay and recoverInterruptedSwaps), so other filesystem users are
+  // not held off for a whole read-compare-write-retention commit. Every store
+  // entry point runs on the task that owns the health model; a caller that
+  // already holds the filesystem guard stays reentrant.
+  StoreIoLock() : locked_(xSemaphoreTake(sStoreIoMutex, portMAX_DELAY) == pdTRUE) {}
   ~StoreIoLock() { if (locked_) xSemaphoreGive(sStoreIoMutex); }
   bool locked() const { return locked_; }
  private:
-  FsLockGuard fsGuard_;
   bool locked_;
 };
 
@@ -240,6 +242,9 @@ bool emitMetric(File& file, char tag, const R1HealthHourlyMetricDay& metric,
 }
 
 void recoverInterruptedSwaps(const AuthContext& auth) {
+  // One guard across the scan and its repairs, so a backup is never observed
+  // half-promoted by another filesystem user.
+  FsLockGuard guard("r1.history.recover");
   if (!VFS::existsGuarded(kHistoryDir, auth)) return;
   File dir = VFS::openGuarded(kHistoryDir, "r", auth);
   if (!dir || !dir.isDirectory()) { if (dir) dir.close(); return; }
@@ -433,22 +438,27 @@ R1HealthHistoryStoreError commitDay(const R1HealthHistoryDay& day,
 
   // Keep the existing backup-based publish sequence for interrupted swaps:
   // checked temp -> old primary to backup -> temp to primary -> cleanup backup.
-  const bool hadPrimary = VFS::existsGuarded(primary, auth);
-  if (hadPrimary) {
-    VFS::removeGuarded(backup, auth);
-    if (!VFS::renameGuarded(primary, backup, auth)) {
+  // One filesystem guard spans the sequence so no other filesystem user sees
+  // the primary missing between its two renames.
+  {
+    FsLockGuard publish("r1.history.publish");
+    const bool hadPrimary = VFS::existsGuarded(primary, auth);
+    if (hadPrimary) {
+      VFS::removeGuarded(backup, auth);
+      if (!VFS::renameGuarded(primary, backup, auth)) {
+        VFS::removeGuarded(temp, auth);
+        return R1_HISTORY_STORE_RENAME_FAILED;
+      }
+    }
+    if (!VFS::renameGuarded(temp, primary, auth)) {
+      if (hadPrimary && !VFS::existsGuarded(primary, auth)) {
+        VFS::renameGuarded(backup, primary, auth);
+      }
       VFS::removeGuarded(temp, auth);
       return R1_HISTORY_STORE_RENAME_FAILED;
     }
+    if (hadPrimary) VFS::removeGuarded(backup, auth);
   }
-  if (!VFS::renameGuarded(temp, primary, auth)) {
-    if (hadPrimary && !VFS::existsGuarded(primary, auth)) {
-      VFS::renameGuarded(backup, primary, auth);
-    }
-    VFS::removeGuarded(temp, auth);
-    return R1_HISTORY_STORE_RENAME_FAILED;
-  }
-  if (hadPrimary) VFS::removeGuarded(backup, auth);
   enforceRetention(auth);
   return R1_HISTORY_STORE_OK;
 }

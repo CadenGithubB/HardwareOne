@@ -86,7 +86,12 @@ private:
   bool sdAvailable;
   bool littleFSAvailable;
   int imageCounter;  // For unique filenames
-  
+  // One stale-temporary sweep per tier per mount: a reset mid-save leaves
+  // `<image>.jpg.tmp`, which no listing or retention would otherwise reclaim.
+  bool lfsStaleSwept = false;
+  bool sdStaleSwept = false;
+  void sweepStaleTemporaries(ImageStorageLocation location, const String& folder);
+
   // Helper to get mount prefix for location
   String getMountPrefix(ImageStorageLocation location);
 };

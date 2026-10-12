@@ -19,9 +19,14 @@ Cleanup checkpoint for shared runtime helpers and checked persistence.
   command-origin formatting and authenticated web command-context preparation.
 - Keep runtime log-level application and system-log status with their owners.
 - Reuse checked JSON snapshot writing across main, debug, version-stamp and
-  per-user settings while retaining each writer's document and locking policy.
+  per-user settings while retaining each writer's document, locking policy
+  and failure reporting (a failed version stamp is logged only; it does not
+  raise the save-failed event that means a user change was lost).
 - Share checked log-row and capture-copy operations. Use guarded file
   replacement for completed GPS exports, capture merges/exports and photos.
+  A staging file left by an interrupted merge or export is overwritten by the
+  next run, the track pickers skip staging names, and the photo folder is
+  swept once per mount for `.jpg.tmp` leftovers.
 - Route the existing bounded boot temporary-file sweep through shared VFS
   directory traversal and filesystem locking.
 
@@ -32,7 +37,10 @@ Cleanup checkpoint for shared runtime helpers and checked persistence.
 - Detect partial log appends, rotation copies, GPS exports and capture output
   before reporting success. Keep successful-write accounting consistent with
   accepted output and stage headers for new or empty sensor/battery logs before
-  appending rows.
+  appending rows. A capped log on a full LittleFS without SD overflow now stays
+  at its cap instead of being replaced by a partial copy; it shrinks again only
+  once space is freed elsewhere. Boot recovery also checks each capped log's
+  SD mirror for an orphaned rotation copy.
 - Check R1 history output, complete photo writes and final WAV header/size
   consistency before publishing completion. Retain recoverable backups in the
   shared SD capture-replacement path when promotion or rollback fails.
@@ -49,7 +57,10 @@ Cleanup checkpoint for shared runtime helpers and checked persistence.
 - Dated milestone records describe XIAO hardware checks of reporting, sessions,
   HTTP commands, logging, captures, boot cleanup and per-user settings. Host
   failure injection checks observable write results; it does not establish
-  physical power-loss durability. Arduino File still has void flush/close APIs.
+  physical power-loss durability. Arduino File still has void flush/close APIs
+  and never sets Print's write-error flag, so the reported-write-error check
+  is meaningful only for File implementations that do; byte-count and size
+  checks are the gate on the device.
 - Physical SD qualification and memory slimming remain deferred. Capped-log
   SD rotation retains its existing remove/rename recovery protocol. No STT
   engine or Conversate behavior changed, and no files or host suites moved.

@@ -87,8 +87,10 @@ real Arduino `String`. File operations, identity, locking and decryption are
 controlled boundaries. Checks cover exact bytes and counts, empty/multi-chunk
 inputs, command defaults, normalized source/output/staging aliases and mixed
 sealed/plaintext refusal. Faults include incomplete reads, short body/newline
-writes, reported Print errors, post-flush size mismatch, directories, existing
-temporary files, failed promotion and failed cleanup.
+writes, reported Print errors, post-flush size mismatch, directories, failed
+promotion and failed cleanup. A temporary left by an interrupted run is the
+command's own leftover: the next run overwrites it and completes, with the
+previous output still preserved until promotion.
 
 Replacement cases exercise LittleFS rename-over-existing and SD's guarded
 backup/promotion/rollback sequence. Failed rollback must retain the previous
@@ -121,7 +123,10 @@ reused PSRAM storage and the existing recovery policies. Faults cover short
 body/newline appends, reported write/flush errors, premature reads, mismatched
 sizes, allocation/open/seek failures and failed promotion. LittleFS replacement
 must retain the original on failure; SD keeps its existing remove/rename orphan
-protocol after the temporary copy has been checked.
+protocol after the temporary copy has been checked. Boot recovery also checks
+each log's `/sd` mirror whenever a card is mounted, so an orphan left by a
+rotation that ran while overflow was latched on an earlier boot is promoted or
+discarded like a primary one, and left alone without a card.
 
 ```sh
 python3 components/hardwareone/test/host/test_capped_log_writes.py --sanitize
@@ -143,6 +148,8 @@ boundaries cover rooted/leaf backend names, child close before removal, exact
 directory scope, LLM enabled/disabled, nested caller lock ownership, failed opens
 and removals, and accurate success/failure diagnostics. Directories, virtual
 entries, `.header.tmp`, backups and out-of-scope children must survive the sweep.
+It also checks the shared `VFS::isStagingName` predicate the track pickers use
+to skip `.tmp`, `.header.tmp` and `.bak` names.
 
 ```sh
 python3 components/hardwareone/test/host/test_boot_temp_cleanup.py --sanitize
@@ -205,8 +212,10 @@ real serialization/parser round trips, unchanged-content skips, retry timing,
 generation acknowledgement, interrupted-swap recovery and nested lock ownership.
 Short writes, reported Print errors, final-size mismatch, key/sealing failures,
 open failures and failed promotion/rollback must preserve the previous primary
-or recovery backup and leave the new generation pending. The shared filesystem
-guard remains held across complete read/recovery/commit operations.
+or recovery backup and leave the new generation pending. The store's own
+temporary writes run under its private I/O mutex without the shared filesystem
+guard, while every publish or recovery rename happens inside one guard that
+spans its sequence, so other filesystem users wait only for those spans.
 
 ```sh
 python3 components/hardwareone/test/host/test_r1_history_store.py --sanitize
@@ -365,7 +374,11 @@ cache exactly once, keep an outer transaction lock held and never acquire the
 main settings writer lock or emit its failure events. Retries, absent files,
 unavailable storage, JSON overflow, rejected mutations and preservation of
 unrelated fields are included. Existing main/debug diagnostics, retry behavior
-and overlapping restamp/main-save checks remain covered.
+and overlapping restamp/main-save checks remain covered. A failed version
+re-stamp logs its own line and raises none of the full writers' failure
+reporting; a complete main save clears a pending re-stamp; and a main save
+refused because the existing file cannot be opened retains the main file's
+retry intent.
 
 ```sh
 python3 components/hardwareone/test/host/test_settings_file_writes.py --sanitize
@@ -441,7 +454,11 @@ independent BOTH-tier outcomes. Replacement is a service boundary here;
 `capture_stitching` exercises the actual shared replacement implementation.
 The capture-folder validator refuses a tier-prefixed (`/sd...`) or traversing
 folder with a reply that names the setting and `cameraStorageLocation`, and
-accepts plain folders.
+accepts plain folders. Folder preparation sweeps `.jpg.tmp`/`.jpeg.tmp`
+leftovers once per tier per mount (LittleFS at manager init, SD at first use)
+through the shared directory reader, leaves other temporaries alone, and
+sweeps again only after a remount; the harness prepares both tiers before
+observing a save, as a device has by the time it captures.
 The `--baseline <component-directory>` option accepts saved sources;
 `--case collision` reproduces the old destructive overwrite as an expected test
 failure. ASan/UBSan follow `HW1_SANITIZE`. These checks do not qualify a physical
@@ -1278,7 +1295,11 @@ device execution. ASan/UBSan follow `HW1_SANITIZE`.
 `settings_write_scope` executes the production synchronous save scope, batching
 adapter and batch core. It covers nested scopes, an existing command owner,
 foreign task/command requests, unavailable TLS/scheduler/capacity, repeated finish,
-main/debug flush failures and retries, and simultaneous tasks. No settings scope
+main/debug flush failures and retries, and simultaneous tasks. A scope destroyed
+out of nesting order is diagnosed, closes its batch with the pending file
+flushed and leaves the task's scope pointer cleared rather than dangling; one
+destroyed on a foreign task is diagnosed and its batch flushes when it expires.
+No settings scope
 is held while the wizard waits for input. The wizard suite records this boundary;
 this independent suite verifies its real persistence behavior with controlled
 RTOS and file-writer boundaries. ASan/UBSan follow `HW1_SANITIZE`.

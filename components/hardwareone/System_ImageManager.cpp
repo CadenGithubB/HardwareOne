@@ -41,7 +41,8 @@ ImageManager::~ImageManager() {
 
 bool ImageManager::init() {
   littleFSAvailable = filesystemReady;
-  
+  lfsStaleSwept = false;  // a fresh mount gets one stale-temporary sweep
+
   if (littleFSAvailable) {
     ensureCaptureFolder(IMAGE_STORAGE_LITTLEFS);
     INFO_STORAGEF("[ImageManager] LittleFS available");
@@ -57,6 +58,7 @@ bool ImageManager::initSD() {
   // Use VFS mount instead of reinitializing SD card ourselves
   // This prevents conflicts with the VFS SD mount
   if (VFS::isSDAvailable()) {
+    if (!sdAvailable) sdStaleSwept = false;  // a (re)mounted card gets one sweep
     sdAvailable = true;
     // Don't create capture folder here - only create when actually saving an image
     // ensureCaptureFolder() is called in saveImage() when needed
@@ -118,13 +120,53 @@ bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
   AuthContext sys = VFS::systemAuth(isSD ? "imgmgr.ensure_capture_folder.sd"
                                        : "imgmgr.ensure_capture_folder");
   FsLockGuard guard("ImageManager.ensureCaptureFolder");
-  if (VFS::existsGuarded(folder, sys)) return true;
-  if (!VFS::mkdirGuarded(folder, sys)) {
-    ERROR_STORAGEF("[ImageManager] Failed to create folder on %s: %s", storageName, folder.c_str());
-    return false;
+  if (!VFS::existsGuarded(folder, sys)) {
+    if (!VFS::mkdirGuarded(folder, sys)) {
+      ERROR_STORAGEF("[ImageManager] Failed to create folder on %s: %s", storageName, folder.c_str());
+      return false;
+    }
+    INFO_STORAGEF("[ImageManager] Created folder on %s: %s", storageName, folder.c_str());
   }
-  INFO_STORAGEF("[ImageManager] Created folder on %s: %s", storageName, folder.c_str());
+  // Lazily, once per tier per mount, under the same lock: reclaim the
+  // `.jpg.tmp` a reset mid-save leaves behind, which listings skip and
+  // retention never sees.
+  bool& swept = isSD ? sdStaleSwept : lfsStaleSwept;
+  if (!swept) {
+    swept = true;
+    sweepStaleTemporaries(location, folder);
+  }
   return true;
+}
+
+// Only this owner writes `<image>.jpg.tmp` names, and it holds the filesystem
+// lock while it does, so under the caller's lock every such entry is stale.
+// Entries are collected first; the directory is closed before anything is
+// removed.
+void ImageManager::sweepStaleTemporaries(ImageStorageLocation location, const String& folder) {
+  const bool isSD = location == IMAGE_STORAGE_SD;
+  const AuthContext sys = VFS::systemAuth(isSD ? "imgmgr.sweep_stale.sd" : "imgmgr.sweep_stale");
+  File dir = VFS::openGuarded(folder, "r", sys);
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return;
+  }
+  std::vector<String> stale;
+  VFS::DirectoryReader reader(dir, folder);
+  VFS::DirectoryEntry entry;
+  while (reader.next(entry)) {
+    if (entry.isFolder || entry.isVirtual) continue;
+    if (entry.name.endsWith(".jpg.tmp") || entry.name.endsWith(".jpeg.tmp")) stale.push_back(entry.path);
+  }
+  dir.close();
+  unsigned removed = 0;
+  for (const String& path : stale) {
+    if (VFS::removeGuarded(path, sys)) ++removed;
+    else WARN_STORAGEF("[ImageManager] Could not remove stale photo temporary %s", path.c_str());
+  }
+  if (removed) {
+    INFO_STORAGEF("[ImageManager] Removed %u stale photo temporar%s on %s", removed,
+                  removed == 1 ? "y" : "ies", isSD ? "SD" : "LittleFS");
+  }
 }
 
 String ImageManager::generateFilename() {

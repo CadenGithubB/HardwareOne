@@ -41,15 +41,18 @@ def generate(baseline: Path | None) -> str:
     reader = "namespace VFS {\n" + header[header.index("struct DirectoryEntry {"):
         header.index("bool exists(const String& path);")]
     reader += vfs[vfs.index("DirectoryReader::DirectoryReader("):vfs.index("static FS* fsForPath(")] + "\n}\n"
-    methods = "\n\n".join(extract_block(source, marker) for marker in (
-        "ImageManager::ImageManager()", "ImageManager::~ImageManager()",
-        "bool ImageManager::init()", "bool ImageManager::initSD()",
-        "String ImageManager::getMountPrefix(", "String ImageManager::getCaptureFolder(",
-        "bool ImageManager::ensureCaptureFolder(", "std::vector<ImageInfo> ImageManager::listImages(",
-        "int ImageManager::getImageCount(", "uint8_t* ImageManager::getImage(",
-        "bool ImageManager::getImageInfo(", "bool ImageManager::deleteImage(",
-        "bool ImageManager::deleteOldestImages(",
-        "StorageStats ImageManager::getStorageStats("))
+    markers = ["ImageManager::ImageManager()", "ImageManager::~ImageManager()",
+               "bool ImageManager::init()", "bool ImageManager::initSD()",
+               "String ImageManager::getMountPrefix(", "String ImageManager::getCaptureFolder(",
+               "bool ImageManager::ensureCaptureFolder(", "std::vector<ImageInfo> ImageManager::listImages(",
+               "int ImageManager::getImageCount(", "uint8_t* ImageManager::getImage(",
+               "bool ImageManager::getImageInfo(", "bool ImageManager::deleteImage(",
+               "bool ImageManager::deleteOldestImages(",
+               "StorageStats ImageManager::getStorageStats("]
+    # The capture-folder preparation sweeps stale photo temporaries once per tier.
+    if "void ImageManager::sweepStaleTemporaries(" in source:
+        markers.append("void ImageManager::sweepStaleTemporaries(")
+    methods = "\n\n".join(extract_block(source, marker) for marker in markers)
     harness = (HERE / "image_storage_harness.cpp").read_text()
     for marker, value in {
         "// INSERT_FS_GUARD": guard,

@@ -56,6 +56,8 @@ struct Node {
   std::vector<uint8_t> bytes;
   int tier = 0;
   bool directory = false, error = false, flushed = false;
+  std::string name;                               // backend-relative name for directory listings
+  std::vector<std::shared_ptr<Node>> children;    // direct children of a listed folder
 };
 static std::map<std::string, std::shared_ptr<Node>> files;
 struct Handle {
@@ -66,6 +68,7 @@ struct Handle {
     io(); closed = true; ++tiers[node->tier].closes; --activeFiles;
   }
   std::shared_ptr<Node> node;
+  size_t cursor = 0;
   bool closed = false;
 };
 class File {
@@ -74,6 +77,13 @@ class File {
   explicit File(std::shared_ptr<Node> value) : handle_(std::make_shared<Handle>(std::move(value))) {}
   explicit operator bool() const { return handle_ && !handle_->closed; }
   bool isDirectory() const { io(); return handle_->node->directory; }
+  const char* name() const { io(); return handle_->node->name.c_str(); }
+  time_t getLastWrite() const { io(); return 0; }
+  File openNextFile() {
+    io();
+    if (!*this || handle_->cursor >= handle_->node->children.size()) return {};
+    return File(handle_->node->children[handle_->cursor++]);
+  }
   size_t write(const uint8_t* data, size_t length) {
     io(); auto& node = *handle_->node; auto& tier = tiers[node.tier]; ++tier.writes;
     // A host fault boundary must not dereference an intentionally oversized
@@ -100,10 +110,12 @@ class File {
 // INSERT_NORMALIZE_FS_PATH
 namespace VFS {
 enum StorageType { INTERNAL = 0, SDCARD = 1, AUTO = 2 };
+struct VirtualEntry { const char* name; bool isFolder; };
 static bool isSDAvailable() { return sdMounted; }
 String normalize(const String&);
 }
 // INSERT_VFS_PATHS
+// INSERT_DIRECTORY_READER
 namespace VFS {
 static AuthContext systemAuth(const char* reason) { return {"system", reason}; }
 static bool allowed(const char* operation, const String& raw, const AuthContext& auth, String& path) {
@@ -126,10 +138,25 @@ static bool mkdirGuarded(const String& raw, const AuthContext& auth) {
   if (tier.mkdirFailed) return false;
   directories.insert(path.c_str()); return true;
 }
-static File openGuarded(const String& raw, const char* mode, const AuthContext& auth, bool create) {
+static File openGuarded(const String& raw, const char* mode, const AuthContext& auth, bool create = false) {
   FsLockGuard guard("mock.open"); String path;
   const bool admitted = allowed("open", raw, auth, path);
-  auto& tier = tiers[getStorageType(raw)]; ++tier.opens;
+  auto& tier = tiers[getStorageType(raw)];
+  if (std::strcmp(mode, "r") == 0) {
+    // Read opens list the capture folder for the stale-temporary sweep; they
+    // are not counted as image output opens.
+    check(!create && directories.count(path.c_str()), "read opens target an existing capture folder");
+    if (!admitted || tier.fault == Fault::Open) return {};
+    auto folder = std::make_shared<Node>(); folder->tier = getStorageType(path); folder->directory = true;
+    const std::string prefix = std::string(path.c_str()) + "/";
+    for (const auto& item : files) {
+      if (item.first.compare(0, prefix.size(), prefix) != 0 || item.first.find('/', prefix.size()) != std::string::npos) continue;
+      item.second->name = stripSdPrefix(item.first.c_str()).c_str();
+      folder->children.push_back(item.second);
+    }
+    return File(folder);
+  }
+  ++tier.opens;
   check(std::strcmp(mode, "w") == 0 && create, "image saves explicitly create/truncate the guarded output");
   if (!admitted || tier.fault == Fault::Open) return {};
   auto node = std::make_shared<Node>(); node->tier = getStorageType(path); node->directory = tier.fault == Fault::Directory;
@@ -209,7 +236,12 @@ static ImageManager setup(bool internal = true, bool sd = true) {
   balanced(); files.clear(); directories.clear(); accesses.clear(); events.clear(); retentions.clear();
   tiers[0] = {}; tiers[1] = {}; filesystemReady = internal; sdMounted = sd;
   gSettings.cameraCaptureFolder = "/photos"; fakeNow = 0; retentionSucceeds = true; expectOuterLock = false;
-  ImageManager out; out.init(); clearObservations(); return out;
+  // Prepare both tiers before observing a save, as a device has by the time
+  // it captures: LittleFS is swept at init, SD at its first folder
+  // preparation. Per-save observations then exclude the one-time sweep.
+  ImageManager out; out.init();
+  if (sd) out.ensureCaptureFolder(IMAGE_STORAGE_SD);
+  clearObservations(); return out;
 }
 static const char* pathFor(bool sd) { return sd ? "/sd/photos/img_000000.jpg" : "/photos/img_000000.jpg"; }
 static std::string writePathFor(bool sd) { return std::string(pathFor(sd)) + (HAS_TEMP_SAVE ? ".tmp" : ""); }
@@ -422,19 +454,51 @@ static void collision(bool sd, Fault failure) {
   }
   cleanupIdentity(sd); hooks(result, locationFor(sd)); balanced();
 }
+#if HAS_STALE_SWEEP
+// `<image>.jpg.tmp` in the capture folder can only be this owner's leftover of
+// an interrupted save: the first ensure on a tier after a mount sweeps such
+// entries (LittleFS at manager init, SD at its first use), then the save
+// completes. Other temporaries, and a leftover appearing later in the same
+// mount, are left alone until the next mount.
+static void preexistingTemporary(bool sd) {
+  auto owner = setup();
+  const std::string folder = sd ? "/sd/photos" : "/photos";
+  auto original = std::make_shared<Node>(); original->tier = sd; original->bytes = {9, 8, 7};
+  auto previousTemp = std::make_shared<Node>(); previousTemp->tier = sd; previousTemp->bytes = {4, 5, 6};
+  auto older = std::make_shared<Node>(); older->tier = sd; older->bytes = {1, 2};
+  auto unrelated = std::make_shared<Node>(); unrelated->tier = sd; unrelated->bytes = {3};
+  files[pathFor(sd)] = original; files[std::string(pathFor(sd)) + ".tmp"] = previousTemp;
+  files[folder + "/img_older.jpeg.tmp"] = older; files[folder + "/notes.txt.tmp"] = unrelated;
+  // A fresh mount sweeps at the next folder preparation: LittleFS inside
+  // init(), SD inside the first save after the card is seen again.
+  if (sd) { sdMounted = false; owner.initSD(); sdMounted = true; owner.initSD(); } else { owner.init(); }
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
+  check(result == pathFor(sd), "save after stale temporaries did not complete");
+  check(!files.count(std::string(pathFor(sd)) + ".tmp") && !files.count(folder + "/img_older.jpeg.tmp"),
+        "stale photo temporaries were not swept");
+  check(files.count(folder + "/notes.txt.tmp") && files.at(folder + "/notes.txt.tmp") == unrelated,
+        "sweep removed a temporary that is not a photo");
+  check(files.at(pathFor(sd))->bytes == std::vector<uint8_t>(jpeg, jpeg + sizeof(jpeg)), "save did not publish the new image");
+  hooks(result, locationFor(sd)); balanced();
+  auto later = std::make_shared<Node>(); later->tier = sd; later->bytes = {7};
+  files[folder + "/img_later.jpg.tmp"] = later;
+  check(owner.ensureCaptureFolder(locationFor(sd)) && files.count(folder + "/img_later.jpg.tmp"), "sweep repeated within one mount");
+  if (sd) { sdMounted = false; owner.initSD(); sdMounted = true; owner.initSD(); } else { owner.init(); }
+  check(owner.ensureCaptureFolder(locationFor(sd)) && !files.count(folder + "/img_later.jpg.tmp"), "remount did not sweep again");
+  balanced();
+}
+#else
 static void preexistingTemporary(bool sd) {
   auto owner = setup();
   auto original = std::make_shared<Node>(); original->tier = sd; original->bytes = {9, 8, 7};
   auto previousTemp = std::make_shared<Node>(); previousTemp->tier = sd; previousTemp->bytes = {4, 5, 6};
   files[pathFor(sd)] = original; files[std::string(pathFor(sd)) + ".tmp"] = previousTemp;
   const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
-  check(!result.length() && !tiers[sd].opens && !tiers[sd].removes && !tiers[sd].promotions,
-        "unknown existing temporary refuses save before opening or cleanup");
-  check(files.at(pathFor(sd)) == original && files.at(std::string(pathFor(sd)) + ".tmp") == previousTemp &&
-        original->bytes == std::vector<uint8_t>({9, 8, 7}) && previousTemp->bytes == std::vector<uint8_t>({4, 5, 6}),
-        "prior destination and unrelated temporary stay unchanged");
+  check(result == pathFor(sd) && !files.count(std::string(pathFor(sd)) + ".tmp"),
+        "stale photo temporary not reclaimed before the save");
   hooks(result, locationFor(sd)); balanced();
 }
+#endif
 static void bothPromotion(unsigned failedTier) {
   auto owner = setup(); tiers[failedTier].fault = Fault::Promotion;
   auto prior = std::make_shared<Node>(); prior->tier = failedTier; prior->bytes = {9, 8, 7}; files[pathFor(failedTier)] = prior;
@@ -473,7 +537,7 @@ int main(int argc, char** argv) {
       for (Fault failure : {Fault::None, Fault::Short, Fault::Zero, Fault::WriteError, Fault::FlushError,
                             Fault::SizeMismatch, Fault::Cleanup, Fault::Promotion, Fault::PromotionCleanup})
         run(tier + "timestamp collision " + std::to_string(int(failure)), [=] { collision(sd, failure); });
-      run(tier + "unknown temporary preserved", [=] { preexistingTemporary(sd); });
+      run(tier + "stale temporaries swept once per mount", [=] { preexistingTemporary(sd); });
       run(tier + "BOTH promotion failure", [=] { bothPromotion(sd); });
     }
     run("SD recovery backup belongs to promotion owner", [] { collision(true, Fault::RecoveryBackup); });

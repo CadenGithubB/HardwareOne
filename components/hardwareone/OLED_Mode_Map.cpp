@@ -607,6 +607,8 @@ static bool isGPSDataLine(const String& line) {
 // it qualifies. Shared by the top-level scan and the subfolder descent.
 static void probeTrackFile(File& file) {
   if (gTrackFileCount >= 8) return;
+  // Staging files of an interrupted merge/export are never loadable tracks.
+  if (VFS::isStagingName(String(file.path()))) return;
   FsLockGuard fsGuard("oled.map.probe_track");
   File check = VFS::openGuarded(file.path(), "r", VFS::systemAuth("oled.map.scan_tracks"));
   if (!check) return;

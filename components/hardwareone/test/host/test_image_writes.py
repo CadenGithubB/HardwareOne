@@ -41,9 +41,14 @@ def generate(baseline: Path | None) -> str:
     boundaries = boundaries.replace("  String& operator+=(const String& value)",
         "  bool concat(const String& value) { if (++concatCalls == failConcatCall) return false; "
         "value_ += value.value_; return true; }\n  String& operator+=(const String& value)")
-    vfs = read("System_VFS.cpp")
+    vfs, vfs_header = read("System_VFS.cpp"), read("System_VFS.h")
     paths = "namespace VFS {\n" + "\n".join(extract_block(vfs, marker) for marker in (
-        "String normalize(", "StorageType getStorageType(")) + "\n}\n"
+        "String normalize(", "StorageType getStorageType(", "String stripSdPrefix(",
+        "size_t listVirtualEntries(")) + "\n}\n"
+    # The stale-temporary sweep walks the folder with the shared directory reader.
+    reader = "namespace VFS {\n" + vfs_header[vfs_header.index("struct DirectoryEntry {"):
+                                              vfs_header.index("bool exists(const String& path);")]
+    reader += vfs[vfs.index("DirectoryReader::DirectoryReader("):vfs.index("static FS* fsForPath(")] + "\n}\n"
     markers = ["ImageManager::ImageManager()", "ImageManager::~ImageManager()",
                "bool ImageManager::init()", "bool ImageManager::initSD()",
                "String ImageManager::getMountPrefix(", "String ImageManager::getCaptureFolder(",
@@ -52,8 +57,12 @@ def generate(baseline: Path | None) -> str:
     validator = "const char* ImageManager::captureFolderRejectReason(" in source
     if validator:
         markers.append("const char* ImageManager::captureFolderRejectReason(")
-    methods = f"#define HAS_FOLDER_VALIDATOR {int(validator)}\n" + "\n\n".join(
-        extract_block(source, marker) for marker in markers)
+    sweep = "void ImageManager::sweepStaleTemporaries(" in source
+    if sweep:
+        markers.append("void ImageManager::sweepStaleTemporaries(")
+    methods = (f"#define HAS_FOLDER_VALIDATOR {int(validator)}\n"
+               f"#define HAS_STALE_SWEEP {int(sweep)}\n" + "\n\n".join(
+        extract_block(source, marker) for marker in markers))
     constant = re.search(r"(?m)^#define MIN_FREE_SPACE_BYTES[^\n]+", source)[0]
     harness = (HERE / "image_writes_harness.cpp").read_text()
     for marker, value in {
@@ -61,6 +70,7 @@ def generate(baseline: Path | None) -> str:
         "// INSERT_FS_GUARD": guard,
         "// INSERT_NORMALIZE_FS_PATH": extract_block(read("System_Filesystem.cpp"), "bool normalizeFsPath("),
         "// INSERT_VFS_PATHS": paths,
+        "// INSERT_DIRECTORY_READER": reader,
         "// INSERT_IMAGE_MANAGER": header + "\n" + constant + "\n" + methods,
     }.items():
         require(harness.count(marker) == 1, f"one insertion marker: {marker}")
