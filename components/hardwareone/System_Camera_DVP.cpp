@@ -20,6 +20,7 @@
 #include "System_Settings.h"
 #include "System_I2C.h"
 #include "System_Utils.h"
+#include "System_ImageManager.h"  // capture-folder validator, camerasave
 #include <ArduinoJson.h>
 #include <atomic>
 
@@ -1223,8 +1224,6 @@ const char* cmd_cameratargetdevice(const String& argsInput) {
   return buf;
 }
 
-// Forward declare ImageManager for camerasave
-#include "System_ImageManager.h"
 extern ImageManager gImageManager;
 
 const char* cmd_camerasave(const String& argsInput) {
