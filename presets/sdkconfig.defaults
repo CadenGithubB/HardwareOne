@@ -1,4 +1,9 @@
 # Optional SDK features enabled by the shared software preset.
 # Named configurations may override these boolean choices. Keep hardware,
 # backend selection, memory geometry and provisioning in their existing files.
+# Every key listed here (and in a board preset) is reconciled on every
+# tools/build_board.sh build, plain board builds included: a value changed with
+# menuconfig in that build's sdkconfig is reset to the preset before Kconfig
+# runs. To build with a different value, save it as an SDK choice in a named
+# configuration (configurations/README.md).
 CONFIG_BT_ENABLED=y

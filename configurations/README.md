@@ -186,6 +186,13 @@ removing an SDK override reconciles the existing build-local sdkconfig before
 Kconfig runs; removing it restores the inherited preset. The build checks the
 actual Kconfig result and records explicit SDK choices in its manifest.
 
+Every key listed in `presets/sdkconfig.defaults` or a board preset is reconciled
+on every `tools/build_board.sh` build, plain board builds included. Changing
+such a key with `menuconfig` in a build's sdkconfig therefore does not stick:
+the next build resets it to the preset. Save the value as an SDK choice in a
+named configuration instead, as `xiao-no-bluetooth` does for
+`CONFIG_BT_ENABLED`.
+
 Unlisted values inherit the shared and board defaults **at the source
 revision being built**. These are feature overlays, not complete frozen release
 configurations. Keep the source revision and build manifest with an image.

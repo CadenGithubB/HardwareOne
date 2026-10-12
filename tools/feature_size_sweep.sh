@@ -2,7 +2,11 @@
 # Per-feature flash-cost sweep: flip one feature family off, rebuild, record .bin size, restore.
 # Run from an ISOLATED CLONE of the tree (it rewrites System_BuildConfig.h, the board
 # feature profile if any, and the saved sdkconfig in place, restoring after each
-# variant). Results: sweep_results_<board>.tsv.
+# variant). SDK keys listed in presets/ are reconciled back to their preset on
+# every wrapper build, so a variant that needs one changed (Bluetooth) builds a
+# temporary saved configuration, configurations/sweep-sdk.json, in
+# build-config-sweep-sdk/; compare it with BASELINE_saved_config, which builds
+# the same way with no choices. Results: sweep_results_<board>.tsv.
 # Produced docs/FEATURE_COST_LEDGER_2026-08-23.md §3; baseline reproduced the live image byte-exact.
 #
 #   usage: tools/feature_size_sweep.sh [board]        (default: xiao_s3)
@@ -20,14 +24,24 @@ OUT="sweep_results_$BOARD.tsv"
 cp $F $F.base; cp $SDK $SDK.base; [ -z "$BF" ] || cp "$BF" "$BF.base"
 flag_file(){ if [ -n "$BF" ] && grep -qE "^[[:space:]]*#define[[:space:]]+$1[[:space:]]+[0-9]+" "$BF"; then echo "$BF"; else echo "$F"; fi; }
 set_flag(){ sed -i '' -E "s/^([[:space:]]*#define[[:space:]]+$1[[:space:]]+)[0-9]+/\1$2/" "$(flag_file "$1")"; }
-size(){ stat -f %z "build-$BOARD/hardwareone-idf.bin" 2>/dev/null || echo FAIL; }
-build(){ tools/build_board.sh "$BOARD" build > "sweep_${BOARD}_$1.log" 2>&1 && size || echo FAIL; }
-restore_all(){ cp $F.base $F; cp $SDK.base $SDK; [ -z "$BF" ] || cp "$BF.base" "$BF"; }
+CFG_NAME=sweep-sdk; CFG="configurations/$CFG_NAME.json"; SWEEP_CONFIG=
+size(){ stat -f %z "$1/hardwareone-idf.bin" 2>/dev/null || echo FAIL; }
+build(){
+  if [ -n "$SWEEP_CONFIG" ]; then
+    tools/build_board.sh "$BOARD" --config "$SWEEP_CONFIG" build > "sweep_${BOARD}_$1.log" 2>&1 && size "build-config-$SWEEP_CONFIG" || echo FAIL
+  else
+    tools/build_board.sh "$BOARD" build > "sweep_${BOARD}_$1.log" 2>&1 && size "build-$BOARD" || echo FAIL
+  fi
+}
+# A saved configuration with no feature choices and the given SDK choices.
+saved_config(){ printf '{\n  "board": "%s",\n  "features": {},\n  "sdkconfig": {%s}\n}\n' "$BOARD" "$1" > "$CFG"; SWEEP_CONFIG=$CFG_NAME; }
+restore_all(){ cp $F.base $F; cp $SDK.base $SDK; [ -z "$BF" ] || cp "$BF.base" "$BF"; rm -f "$CFG"; SWEEP_CONFIG=; }
 trap restore_all EXIT
 echo -e "variant\tbytes" > $OUT
 echo -e "BASELINE_full\t$(build baseline)" >> $OUT
 run(){ name=$1; shift; restore_all; eval "$*"; echo -e "$name\t$(build $name)" >> $OUT; restore_all; }
-run BT_family_off       'set_flag ENABLE_BLUETOOTH 0; set_flag ENABLE_G2_GLASSES 0; set_flag ENABLE_R1_HEALTH 0; set_flag ENABLE_G2_TESTSUITE 0; sed -i "" "s/^CONFIG_BT_ENABLED=y/CONFIG_BT_ENABLED=n/" $SDK'
+run BASELINE_saved_config 'saved_config ""'
+run BT_family_off       'set_flag ENABLE_BLUETOOTH 0; set_flag ENABLE_G2_GLASSES 0; set_flag ENABLE_R1_HEALTH 0; set_flag ENABLE_G2_TESTSUITE 0; saved_config "\"CONFIG_BT_ENABLED\": false"'
 run G2_glasses_off      'set_flag ENABLE_G2_GLASSES 0; set_flag ENABLE_G2_TESTSUITE 0'
 run G2_testsuite_off    'set_flag ENABLE_G2_TESTSUITE 0'
 run R1_health_off       'set_flag ENABLE_R1_HEALTH 0'

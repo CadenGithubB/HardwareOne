@@ -6,6 +6,7 @@ System_BuildConfig.h; the real build compiler verifies the requested choices.
 """
 
 import argparse
+import errno
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,10 @@ import tempfile
 import gen_build_info
 
 REPO = Path(__file__).resolve().parents[1]
+
+# os.link errors that mean "this filesystem has no hard links" (exFAT, some
+# SMB/NFS mounts) rather than "the destination exists".
+NO_HARD_LINK_ERRNOS = {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK}
 NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 
 
@@ -199,7 +204,18 @@ def save_configuration(name, config, *, original=None):
         if original is None:
             # Linking a completed same-directory file publishes atomically and
             # refuses a destination created by another caller while we wrote.
-            os.link(temporary, path)
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                raise
+            except OSError as error:
+                if error.errno not in NO_HARD_LINK_ERRNOS:
+                    raise
+                # No hard links here: reserve the name exclusively (a concurrent
+                # creator still wins and is kept), then atomically replace the
+                # empty reservation with the completed file.
+                os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+                os.replace(temporary, path)
         else:
             os.replace(temporary, path)
     finally:
@@ -297,8 +313,13 @@ def check(name):
     if error:
         raise ValueError(error)
     expected = directory / "features.h"
-    if macros.get("configuration_header") != str(expected):
-        raise ValueError("compiler is not using this saved configuration; reconfigure the build")
+    # The wrapper may pass a logical (symlinked) checkout path while REPO is
+    # resolved, so compare physical paths and name both when they differ.
+    compiled = macros.get("configuration_header") or ""
+    if not compiled or os.path.realpath(compiled) != os.path.realpath(expected):
+        raise ValueError("compiler is not using this saved configuration; reconfigure the build\n"
+                         f"  compiler uses: {compiled or '(no configuration header)'}\n"
+                         f"  expected:      {expected}")
     failures = []
     for key, requested in config["features"].items():
         actual = macros["value"].get(key)

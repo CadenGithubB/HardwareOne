@@ -34,23 +34,21 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // ⚠️  CMakeLists.txt PARSES THE FOLLOWING FLAGS BY REGEX
 // ─────────────────────────────────────────────────────────────────────────────
-// These flags are read as plain text by components/hardwareone/CMakeLists.txt
-// to decide which .cpp files get compiled (a coarse first-pass filter — the
-// per-file `#if` guards remain the fine-grained control inside each .cpp):
+// Some flags are read as plain text by CMake to decide which .cpp files get
+// compiled (a coarse first-pass filter — the per-file `#if` guards remain the
+// fine-grained control inside each .cpp) and which partition table is used.
+// The authoritative lists are HW_CFG_TEXT_FLAGS in
+// components/hardwareone/CMakeLists.txt and the partition check in the root
+// CMakeLists.txt (ENABLE_ESP_SR, HW1_SR_MODELS_IN_FILESYSTEM).
 //
-//     I2C_FEATURE_LEVEL, DISPLAY_TYPE,
-//     ENABLE_MQTT,
-//     ENABLE_LLM_BACKEND, ENABLE_LLM_SOURCE_ONBOARD, ENABLE_LLM_SOURCE_CM5,
-//     ENABLE_MAPS, ENABLE_AUTOMATION, ENABLE_EDGE_IMPULSE, ENABLE_GAMES,
-//     ENABLE_G2_TESTSUITE,
-//     ENABLE_RASPBERRY_PI_HOST_POWER, ENABLE_RASPBERRY_PI_HOST_FAN
-//
-// Keep these values as integer literals on a single line:
+// Keep those values as integer literals on a single line (a trailing comment
+// is fine):
 //     #define NAME <integer>
 //
-// Parentheses and expressions can disagree with the CMake interpretation:
-//     #define NAME (4)     // no literal found; CMake uses 0
-//     #define NAME 0 + 4   // CMake reads only the first integer
+// Parentheses and expressions would read differently in CMake than in the
+// C++ preprocessor, so the configure step stops with an error on them:
+//     #define NAME (4)
+//     #define NAME 0 + 4
 //
 // Other flags in this file are only read by the C++ preprocessor and can use
 // any valid macro form.
