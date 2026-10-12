@@ -216,7 +216,9 @@ static void sensorNormal(bool onSd) {
   reset(onSd); failAppendOpen = true; sensorAppend("body");
   check(disk.empty() && log_open_fail == 1 && log_writes == 0, "append open failure preserved"); transcript("sensor-open-failure");
   reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; failWrite = 1; shortCount = 3; sensorAppend("body");
-  check(log_open_fail == 1 && log_writes == 0 && disk.at(sensorPath()) == (BASELINE ? "tim" : ""), "failed header remains unpublished"); released();
+  check(log_open_fail == 1 && log_writes == 0 &&
+        (BASELINE ? (disk.count(sensorPath()) && disk.at(sensorPath()) == "tim") : !disk.count(sensorPath())),
+        "failed header remains unpublished and creates no destination"); released();
 }
 static void sensorFailures(bool onSd) {
   for (bool sealed : {false, true}) for (int failed : {1, 2}) {
@@ -330,7 +332,9 @@ static void headerCases() {
       if (fault == 6) failReplace = true;
       if (fault == 7) { failWrite = 1; shortCount = 3; failRemove = true; }
       if (sensor) sensorAppend("body"); else batteryLogAppend("event");
-      released(); check(disk.at(destination).empty(), "failed fresh header never publishes partial destination");
+      released();
+      // The sensor opener creates the destination only by promotion; the battery writer still probes with "a".
+      check(sensor ? !disk.count(destination) : disk.at(destination).empty(), "failed fresh header never creates or publishes the destination");
       if (sensor) check(log_writes == 0 && gSensorLogLastWrite == 25, "failed sensor header never counts successful row");
       check(disk.count(temporary) == (fault == 7 ? 1U : 0U), "failed staging cleanup leaves only its reserved sibling");
       failWrite = 0; reportWriteError = headerFlushError = failHeaderOpen = failReplace = false;
@@ -363,7 +367,27 @@ static void headerCases() {
       check(disk.at(destination).rfind(expected, 0) == 0 && !disk.count(temporary), "stale sibling beside an empty destination is replaced by a fresh header");
     }
     released();
-    reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; failAppendOpenCall = 2;
+    if (sensor) {
+      // A new destination comes into being only through promotion, so the rename never meets an
+      // existing file on either backend; an existing empty destination is removed first.
+      const std::string expected = text(buildCsvHeader(LOG_TOF)) + "\nbody\n";
+      const std::string replaceOp = "replace:" + temporary + ":" + destination;
+      auto find = [&](const std::string& op) { return std::find(operations.begin(), operations.end(), op); };
+      reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; sensorAppend("body"); released();
+      check(find(replaceOp) != operations.end(), "fresh destination is promoted from its staging file");
+      check(std::none_of(operations.begin(), find(replaceOp), [&](const std::string& op) { return op.rfind("open:" + destination + ":", 0) == 0; }),
+            "fresh destination is not opened or created before promotion");
+      check(disk.at(destination).rfind(expected, 0) == 0, "fresh destination receives header and row");
+      reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; disk[destination] = ""; sensorAppend("body"); released();
+      check(find("remove:" + destination) != operations.end() && find("remove:" + destination) < find(replaceOp),
+            "empty existing destination is removed before promotion");
+      check(disk.at(destination).rfind(expected, 0) == 0, "empty existing destination receives header and row");
+      reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; disk[destination] = ""; failRemove = true; sensorAppend("body"); released();
+      check(disk.at(destination).empty() && log_writes == 0 && log_open_fail == 1 && !disk.count(temporary),
+            "failed removal of an empty destination refuses this append without staging");
+    }
+    // The sensor opener's first "a" open is the reopen after promotion; the battery writer's is its probe.
+    reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; failAppendOpenCall = sensor ? 1 : 2;
     if (sensor) sensorAppend("body"); else batteryLogAppend("event");
     check(disk.at(destination) == (sensor ? text(buildCsvHeader(LOG_TOF)) + "\n" : batteryHeader), "failed append reopen retains complete header without rows");
     failAppendOpenCall = 0;
@@ -375,7 +399,7 @@ static void headerCases() {
       if (format == SENSOR_LOG_TEXT && failure == 2) continue;
       reset(); gSensorLogSealed = true; gSensorLogFormat = format; failWrite = failure; shortCount = 2;
       sensorAppend("private body"); released();
-      check(disk.at(sensorPath()).empty() && log_writes == 0 && !disk.count(sensorPath() + ".header.tmp"), "partial sealing magic/schema never becomes appendable");
+      check(!disk.count(sensorPath()) && log_writes == 0 && !disk.count(sensorPath() + ".header.tmp"), "partial sealing magic/schema never becomes appendable or creates the destination");
       failWrite = 0; sensorAppend("private body");
       check(disk.at(sensorPath()).rfind(CAPCRYPT_MAGIC_LINE "\n", 0) == 0 && disk.at(sensorPath()).find("SEALED[private body]\n") != std::string::npos,
             "sealed retry publishes magic/schema before sealed row"); released();
