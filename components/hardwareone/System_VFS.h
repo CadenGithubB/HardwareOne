@@ -223,8 +223,9 @@ bool renameGuarded (const String& pathFrom, const String& pathTo, const AuthCont
 // Caller holds FsLockGuard across preparation, this call and failed-temp cleanup.
 // LittleFS replaces directly. SD preserves an existing destination in .bak until
 // promotion succeeds; failed rollback retains that backup for manual recovery.
-// An existing .bak is never overwritten. Successful promotion may leave a backup
-// if its cleanup fails. This is not a power-loss atomicity/durability guarantee.
+// An existing .bak is never overwritten; one that blocks a replacement, survives
+// a failed restoration or outlives a successful promotion is reported to the
+// system log. This is not a power-loss atomicity/durability guarantee.
 bool replaceFileGuarded(const String& temporary, const String& destination,
                         const AuthContext& ctx);
 bool mkdirGuarded  (const String& path, const AuthContext& ctx);

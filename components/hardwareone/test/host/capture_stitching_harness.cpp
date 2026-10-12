@@ -125,6 +125,12 @@ public:
 }
 using fs::File;
 
+static std::vector<std::string> fsEvents;
+static void logSystemEvent(const char*, const char* format, ...) {
+  char line[256];
+  va_list args; va_start(args, format); vsnprintf(line, sizeof(line), format, args); va_end(args);
+  fsEvents.emplace_back(line);
+}
 namespace VFS {
 namespace Scopes {
 constexpr const char* CAPTURES = "/logging_captures";
@@ -416,7 +422,7 @@ static void stagedCases() {
     }
   }
   for (bool sd : {false, true}) for (int fault = 0; fault < 8; ++fault) {
-    reset(); ++scenarios;
+    reset(); ++scenarios; fsEvents.clear();
     const std::string path = sd ? "/sd/logging_captures/result.csv" : "/logging_captures/result.csv";
     const String temp((path + ".tmp").c_str()), dest(path.c_str());
     disk[path] = "prior"; disk[path + ".tmp"] = "complete";
@@ -437,6 +443,14 @@ static void stagedCases() {
     else check(disk.at(path) == "prior", "failed promotion keeps old destination");
     if (fault == 4) check(disk.at(path + ".bak") == "unresolved", "unknown backup never consumed");
     if (sd && fault == 5) check(disk.at(path + ".bak") == "prior", "backup cleanup failure retains old bytes");
+    // A backup that outlives the call is reported once; clean outcomes are silent.
+    auto reported = [&](const char* word) {
+      return fsEvents.size() == 1 && fsEvents[0].find(word) != std::string::npos && fsEvents[0].find(path + ".bak") != std::string::npos;
+    };
+    if (sd && fault == 4) check(reported("refused"), "blocking backup is reported");
+    else if (sd && fault == 3) check(reported("could not be restored"), "unrestored backup is reported");
+    else if (sd && fault == 5) check(reported("could not be removed"), "retained backup is reported");
+    else check(fsEvents.empty(), "clean replacement outcomes log nothing");
   }
 
   for (bool kind : {false, true}) for (const auto& suffix : {"", ".tmp", ".bak"}) {
