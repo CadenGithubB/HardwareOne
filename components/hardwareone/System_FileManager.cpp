@@ -136,40 +136,6 @@ bool FileManager::navigateInto() {
   return navigate(newPath.c_str());
 }
 
-bool FileManager::resolveSelectedPath(String& out, bool* isFolder) {
-  // The cache holds bounded display names only, so every operation on the
-  // selection replays the walk and takes the entry's own path (long SD names
-  // are truncated in FileEntry.name and would target a non-existent file).
-  if (state.selectedIndex < 0 || state.selectedIndex >= state.totalItems) return false;
-
-  FsLockGuard guard("FileManager.resolveSelected");
-  const AuthContext& ctx = currentAuthContext();
-  File dir = VFS::openGuarded(state.currentPath, "r", ctx);
-  if (!dir || !dir.isDirectory()) {
-    if (dir) dir.close();
-    return false;
-  }
-
-  VFS::DirectoryReader reader(dir, state.currentPath);
-  VFS::DirectoryEntry item;
-  int currentIdx = 0;
-  bool found = false;
-  while (reader.next(item)) {
-    if (!isVisible(makeBrowserEntry(item))) continue;
-    if (currentIdx++ != state.selectedIndex) continue;
-    out = item.path;
-    if (isFolder) *isFolder = item.isFolder;
-    found = true;
-    break;
-  }
-  dir.close();
-  return found;
-}
-
-bool FileManager::getSelectedPath(String& out) {
-  return resolveSelectedPath(out, nullptr);
-}
-
 void FileManager::moveUp() {
   if (state.selectedIndex > 0) {
     state.selectedIndex--;
@@ -256,6 +222,40 @@ bool FileManager::getItem(int index, FileEntry& entry) {
 
 bool FileManager::getCurrentItem(FileEntry& entry) {
   return getItem(state.selectedIndex, entry);
+}
+
+bool FileManager::resolveSelectedPath(String& out, bool* isFolder) {
+  // The cache holds bounded display names only, so every operation on the
+  // selection replays the walk and takes the entry's own path (long SD names
+  // are truncated in FileEntry.name and would target a non-existent file).
+  if (state.selectedIndex < 0 || state.selectedIndex >= state.totalItems) return false;
+
+  FsLockGuard guard("FileManager.resolveSelected");
+  const AuthContext& ctx = currentAuthContext();
+  File dir = VFS::openGuarded(state.currentPath, "r", ctx);
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return false;
+  }
+
+  VFS::DirectoryReader reader(dir, state.currentPath);
+  VFS::DirectoryEntry item;
+  int currentIdx = 0;
+  bool found = false;
+  while (reader.next(item)) {
+    if (!isVisible(makeBrowserEntry(item))) continue;
+    if (currentIdx++ != state.selectedIndex) continue;
+    out = item.path;
+    if (isFolder) *isFolder = item.isFolder;
+    found = true;
+    break;
+  }
+  dir.close();
+  return found;
+}
+
+bool FileManager::getSelectedPath(String& out) {
+  return resolveSelectedPath(out, nullptr);
 }
 
 int FileManager::getPageEnd() const {
