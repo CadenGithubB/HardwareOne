@@ -282,14 +282,16 @@ static File openSensorLogForAppend(const String& path) {
   file.close();
 
   String temporary;
-  if (!temporary.concat(path) || !temporary.concat(".header.tmp") ||
-      VFS::existsGuarded(temporary, ctx)) return File();
+  if (!temporary.concat(path) || !temporary.concat(".header.tmp")) return File();
+  // The destination is empty (checked above), so a sibling left here is an
+  // unpublished staging file from an interrupted attempt, never data. The
+  // "w" open replaces it and the header is staged again.
   File header = VFS::openGuarded(temporary, "w", ctx, true);
   const bool complete = header && !header.isDirectory() && writeHeaderChecked(header);
   if (header) header.close();
   if (!complete || !VFS::replaceFileGuarded(temporary, path, ctx)) {
-    // A failed cleanup leaves a visible reserved sibling. Later attempts also
-    // refuse it, including after reboot, rather than appending below bad data.
+    // Remove the staging file so the next attempt starts clean; the empty
+    // destination stays unpublished.
     VFS::removeGuarded(temporary, ctx);
     return File();
   }

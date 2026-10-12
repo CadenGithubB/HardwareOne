@@ -156,9 +156,9 @@ counters, failure-only size resynchronization, rotation after partial writes,
 close/unlock ordering, nested lock ownership and battery retry cadence.
 Fresh or empty header-bearing files are staged before receiving rows. Header
 faults cover short writes, reported Print errors, post-flush size mismatch,
-failed staging/promotion, append-reopen failure and retries. Failed cleanup or
-an existing `.header.tmp` must block append without consuming that sibling,
-including after a simulated runtime reset. Sealed magic/schema lines remain
+failed staging/promotion, append-reopen failure and retries. A leftover `.header.tmp`
+beside an empty destination, including one a failed cleanup left behind, is replaced by a
+freshly staged header, also after a simulated runtime reset. Sealed magic/schema lines remain
 complete before sealed data is appended. Existing empty battery files receive
 their header; nonempty legacy files retain the previous append policy.
 
