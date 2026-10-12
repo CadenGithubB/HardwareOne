@@ -225,10 +225,29 @@ bool FileManager::getCurrentItem(FileEntry& entry) {
 }
 
 bool FileManager::resolveSelectedPath(String& out, bool* isFolder) {
-  // The cache holds bounded display names only, so every operation on the
-  // selection replays the walk and takes the entry's own path (long SD names
-  // are truncated in FileEntry.name and would target a non-existent file).
+  // The selection is the entry the user saw in the listing. Operations take
+  // that entry's own path (long SD names are truncated in FileEntry.name), found
+  // by replaying the walk. Other tasks can add or remove entries after the
+  // listing was loaded, so the index alone is not the identity: the selected
+  // entry is the k-th listed entry with its bounded name and folder flag, and it
+  // stays the k-th live one while the number of such entries is unchanged. A
+  // changed count means a same-named entry came or went, so refuse rather than
+  // guess. Beyond the cache the listing is itself a live per-index lookup, so
+  // there the index remains the identity.
   if (state.selectedIndex < 0 || state.selectedIndex >= state.totalItems) return false;
+  const bool cached = cacheValid && state.selectedIndex < cachedCount;
+  FileEntry shown{};
+  int occurrence = 0;
+  int listedMatches = 0;
+  if (cached) {
+    shown = cachedEntries[state.selectedIndex];
+    for (int i = 0; i < cachedCount; ++i) {
+      if (cachedEntries[i].isFolder != shown.isFolder || strcmp(cachedEntries[i].name, shown.name) != 0) continue;
+      if (i < state.selectedIndex) ++occurrence;
+      ++listedMatches;
+    }
+  }
+  const bool wholeListingCached = cached && cachedCount >= state.totalItems;
 
   FsLockGuard guard("FileManager.resolveSelected");
   const AuthContext& ctx = currentAuthContext();
@@ -241,17 +260,40 @@ bool FileManager::resolveSelectedPath(String& out, bool* isFolder) {
   VFS::DirectoryReader reader(dir, state.currentPath);
   VFS::DirectoryEntry item;
   int currentIdx = 0;
+  int liveMatches = 0;
   bool found = false;
+  bool foundFolder = false;
+  String chosen;
   while (reader.next(item)) {
-    if (!isVisible(makeBrowserEntry(item))) continue;
-    if (currentIdx++ != state.selectedIndex) continue;
-    out = item.path;
-    if (isFolder) *isFolder = item.isFolder;
-    found = true;
-    break;
+    const FileEntry live = makeBrowserEntry(item);
+    if (!isVisible(live)) continue;
+    const int index = currentIdx++;
+    if (!cached) {
+      if (index != state.selectedIndex) continue;
+      chosen = item.path;
+      foundFolder = item.isFolder;
+      found = true;
+      break;
+    }
+    if (live.isFolder != shown.isFolder || strcmp(live.name, shown.name) != 0) continue;
+    if (liveMatches++ == occurrence) {
+      chosen = item.path;
+      foundFolder = item.isFolder;
+      found = true;
+    }
   }
   dir.close();
-  return found;
+  if (cached) {
+    // With part of the folder beyond the cache, only a name listed once is
+    // unambiguous.
+    const bool unchanged = wholeListingCached ? liveMatches == listedMatches
+                                              : (liveMatches == 1 && listedMatches == 1);
+    if (!unchanged) return false;
+  }
+  if (!found) return false;
+  out = chosen;
+  if (isFolder) *isFolder = foundFolder;
+  return true;
 }
 
 bool FileManager::getSelectedPath(String& out) {
@@ -295,12 +337,13 @@ bool FileManager::createFile(const char* name) {
 }
 
 bool FileManager::deleteItem() {
+  // One lock scope from resolving the confirmed entry to removing it, so no
+  // other task can change the folder in between (the guard is reentrant).
+  FsLockGuard guard("FileManager.deleteItem");
   String fullPath;
   bool isFolder = false;
   if (!resolveSelectedPath(fullPath, &isFolder)) return false;
   const AuthContext& ctx = currentAuthContext();
-
-  FsLockGuard guard("FileManager.deleteItem");
 
   bool success = isFolder
                    ? VFS::rmdirGuarded(fullPath, ctx)
@@ -317,12 +360,12 @@ bool FileManager::deleteItem() {
 bool FileManager::renameItem(const char* newName) {
   if (!newName || strlen(newName) == 0) return false;
 
+  // One lock scope from resolving the confirmed entry to renaming it.
+  FsLockGuard guard("FileManager.renameItem");
   String oldPath;
   if (!resolveSelectedPath(oldPath, nullptr)) return false;
   String newPath = formatPath(state.currentPath, newName);
   const AuthContext& ctx = currentAuthContext();
-
-  FsLockGuard guard("FileManager.renameItem");
 
   bool success = VFS::renameGuarded(oldPath, newPath, ctx);
   if (success) {
