@@ -8,6 +8,7 @@ command bridge's authorization machinery have separate owner tests.
 from __future__ import annotations
 
 import argparse
+import re
 import os
 from pathlib import Path
 import shutil
@@ -44,10 +45,18 @@ def generated(baseline: Path | None = None) -> str:
     auth_start = utils.index("#define WEB_AUTH_OR_RETURN(req, ctx)")
     auth_end = utils.index("\n\n", auth_start)
     production = [utils[auth_start:auth_end],
+                  *[re.search(pattern, health, re.M)[0] for pattern in (
+                      r"^static bool     sLoggingCmdPending[^\n]+", r"^static char     sLoggingUiMsg[^\n]+",
+                      r"^static uint32_t sLoggingUiMs[^\n]+",
+                      r"^static constexpr uint32_t kLoggingUiHoldMs[^\n]+")],
                   extract_block(health, "void g2HealthOpen("),
                   extract_block(health, "void g2HealthAction("),
                   extract_block(health, "bool g2HealthConsumeLoggingToggleRequest("),
                   extract_block(health, "void g2HealthSetPageActive("),
+                  extract_block(health, "void g2HealthNoteLoggingCommandQueued("),
+                  extract_block(health, "void g2HealthNoteLoggingCommandResult("),
+                  extract_block(health, "void g2HealthNoteLoggingCommandRefused("),
+                  extract_block(health, "const char* g2HealthLoggingStatusLine("),
                   extract_block(glasses, "static void onHealthLoggingCmdDone("),
                   "static void drainLoggingRequest() {\n" +
                   extract_block(glasses, "if (g2HealthConsumeLoggingToggleRequest())") + "\n}",

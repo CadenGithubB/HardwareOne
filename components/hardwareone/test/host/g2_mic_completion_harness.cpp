@@ -40,6 +40,8 @@ static constexpr uint32_t kMicDetailReadoutCid = 2;
 static const char* const kMicDetailReadoutName = "micLive";
 static char gMicDetailLastReadout[80]{};
 static uint32_t gMicDetailRecreateMenuGen = 0;
+static uint8_t gMicDetailRecreateRetries = 0;
+static constexpr uint8_t kMicDetailRecreateRetryCap = 3;
 static uint32_t gWidgetLifecycleEpoch = 9;
 static uint32_t currentGeneration = 37;
 static G2HijackPage currentPage = G2_HIJACK_PAGE_MIC_DETAIL;
@@ -169,7 +171,7 @@ static void reset() {
   gR = {}; gL = {}; lens.containerReady = true;
   currentGeneration = 37; currentPage = G2_HIJACK_PAGE_MIC_DETAIL;
   gWidgetLifecycleEpoch = 9; presentationEpoch = 100;
-  gMicDetailRecreateMenuGen = 0; gMicDetailLastReadout[0] = '\0';
+  gMicDetailRecreateMenuGen = 0; gMicDetailRecreateRetries = 0; gMicDetailLastReadout[0] = '\0';
   teardownCalls = createCalls = updateCalls = kicks = publishCalls = rearmCalls = 0;
   loggingRenders = 0;
   queueAccepts = shutdownOk = createOk = commitOk = publishOk = startOk = true;
@@ -223,14 +225,32 @@ int main() {
   onMicDetailSourceDone(true, nullptr, cookie(), nullptr);
   CHECK(queued.empty() && kicks == 0 && teardownCalls == 0);
 
-  // SHUTDOWN failure, navigation or lifecycle revocation must not CREATE.
-  for (int failure = 0; failure < 3; ++failure) {
+  // Navigation or lifecycle revocation during SHUTDOWN must not CREATE.
+  for (int failure = 1; failure < 3; ++failure) {
     reset(); onMicDetailSourceDone(true, nullptr, cookie(), nullptr); dispatch();
-    shutdownOk = failure != 0;
     navigateDuringShutdown = failure == 1;
     revokeDuringShutdown = failure == 2;
     CHECK(!tick()); CHECK(teardownCalls == 1 && createCalls == 0 && publishCalls == 0);
   }
+  // A transient SHUTDOWN failure with the fence still current is handed back
+  // to later ticks (bounded) instead of ending the live worker.
+  reset(); onMicDetailSourceDone(true, nullptr, cookie(), nullptr); dispatch();
+  shutdownOk = false;
+  for (unsigned attempt = 1; attempt <= kMicDetailRecreateRetryCap; ++attempt) {
+    CHECK(tick()); CHECK(teardownCalls == attempt && createCalls == 0 && publishCalls == 0);
+    CHECK(gMicDetailRecreateMenuGen == currentGeneration);
+  }
+  CHECK(!tick());
+  CHECK(teardownCalls == kMicDetailRecreateRetryCap + 1u && createCalls == 0 && gMicDetailRecreateMenuGen == 0);
+  reset(); onMicDetailSourceDone(true, nullptr, cookie(), nullptr); dispatch();
+  shutdownOk = false; CHECK(tick()); shutdownOk = true; CHECK(tick());
+  CHECK(teardownCalls == 2 && createCalls == 1 && gMicDetailRecreateMenuGen == 0);
+  // A fresh request restores the retry budget.
+  reset(); onMicDetailSourceDone(true, nullptr, cookie(), nullptr); dispatch();
+  shutdownOk = false;
+  for (unsigned attempt = 1; attempt <= kMicDetailRecreateRetryCap; ++attempt) CHECK(tick());
+  requestMicDetailRecreate();
+  CHECK(tick()); CHECK(teardownCalls == kMicDetailRecreateRetryCap + 1u && createCalls == 0);
   // Neither failed CREATE nor a revoked commit publishes an exit callback.
   for (int failure = 0; failure < 3; ++failure) {
     reset(); requestMicDetailRecreate();

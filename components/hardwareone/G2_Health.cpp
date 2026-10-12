@@ -73,6 +73,13 @@ enum : uint8_t {
 };
 static uint8_t sPollUi = POLL_UI_IDLE;
 static uint32_t sPollUiMs = 0;
+// Health Logging toggle feedback. The toggle itself runs as a command on the
+// executor; the model only mirrors its fate (queued, refused, failed) so the
+// live worker can show it, the way sPollUi mirrors a refresh.
+static bool     sLoggingCmdPending = false;
+static char     sLoggingUiMsg[40];
+static uint32_t sLoggingUiMs = 0;
+static constexpr uint32_t kLoggingUiHoldMs = 3000;
 // One-shot metric graph: armed on metric select / Poll Now; consumed by
 // the glasses worker once. Live 1 Hz sync must NOT re-push (~20 KB BLE).
 static bool sGraphPushPending = false;
@@ -1293,6 +1300,8 @@ void g2HealthOpen(void) {
   // normal freshness-throttled sweep; only explicit Poll Now forces it.
   sPollRequest = false;
   sLoggingToggleRequest = false;
+  sLoggingCmdPending = false;
+  sLoggingUiMsg[0] = '\0';
   sHistoryRefreshRequest = true;
   sHistoryRefreshForce = false;
   sPollUi = POLL_UI_IDLE;
@@ -1514,6 +1523,41 @@ static const char* healthPollStatusLine(const char* fallback) {
     return fallback ? fallback : "";
   }
   return fallback ? fallback : "";
+}
+
+// Health Logging row state for the text panels: neutral while the toggle
+// command is queued, otherwise what the logger reports.
+static const char* loggingTrackLabel(void) {
+  if (sLoggingCmdPending) return "Logging...";
+  return healthLoggingIsActive() ? "Logging on" :
+      (gSensorLoggingRunning && (sensorLogSelectedMask() & LOG_R1)) ? "LOG on" : "Logging off";
+}
+
+void g2HealthNoteLoggingCommandQueued(void) {
+  sLoggingCmdPending = true;
+  sLoggingUiMsg[0] = '\0';
+}
+
+void g2HealthNoteLoggingCommandResult(bool ok, const char* result) {
+  sLoggingCmdPending = false;
+  const bool errorText = result && (strncmp(result, "Error", 5) == 0 || strncmp(result, "ERROR", 5) == 0);
+  if (ok && !errorText) { sLoggingUiMsg[0] = '\0'; return; }
+  snprintf(sLoggingUiMsg, sizeof(sLoggingUiMsg), "%s", (result && result[0]) ? result : "Logging failed");
+  sLoggingUiMs = millis();
+}
+
+void g2HealthNoteLoggingCommandRefused(void) {
+  sLoggingCmdPending = false;
+  snprintf(sLoggingUiMsg, sizeof(sLoggingUiMsg), "Not paired");
+  sLoggingUiMs = millis();
+}
+
+// The refusal or error shown for a few seconds under the vitals, or nullptr.
+const char* g2HealthLoggingStatusLine(void) {
+  if (!sLoggingUiMsg[0]) return nullptr;
+  if ((long)(millis() - sLoggingUiMs) < (long)kLoggingUiHoldMs) return sLoggingUiMsg;
+  sLoggingUiMsg[0] = '\0';
+  return nullptr;
 }
 
 bool g2HealthConsumeHistoryRefreshRequest(bool* force) {
@@ -1910,9 +1954,7 @@ void g2HealthBuildOverviewText(char* out, size_t cap) {
     return;
   }
 
-  const char* track =
-      healthLoggingIsActive() ? "Logging on" :
-      (gSensorLoggingRunning && (sensorLogSelectedMask() & LOG_R1)) ? "LOG on" : "Logging off";
+  const char* track = loggingTrackLabel();
   const char* poll = healthPollStatusLine(nullptr);
 
   // One shared recentness (freshest vital), not per-line ages — avoids
@@ -1920,9 +1962,12 @@ void g2HealthBuildOverviewText(char* out, size_t cap) {
   char age[8];
   fmtAge(age, sizeof(age), freshestVitalAge(t));
 
+  const char* logging = g2HealthLoggingStatusLine();
   char status[48];
   if (poll && poll[0]) {
     snprintf(status, sizeof(status), "%s", poll);
+  } else if (logging) {
+    snprintf(status, sizeof(status), "%s", logging);
   } else if (age[0]) {
     snprintf(status, sizeof(status), "%s · %s · %s", wearLabel(t), track, age);
   } else {
@@ -2517,12 +2562,12 @@ void g2HealthBuildMetricText(char* out, size_t cap) {
   else        fmtValAge(val, sizeof(val), valid, cur, unit, ageSec);
 
   // Range lives on the graph Y-axis now — right column is n= / TRACK / wear.
-  const char* track =
-      healthLoggingIsActive() ? "Logging on" :
-      (gSensorLoggingRunning && (sensorLogSelectedMask() & LOG_R1)) ? "LOG on" : "Logging off";
+  const char* track = loggingTrackLabel();
   const char* poll = healthPollStatusLine(nullptr);
+  const char* logging = g2HealthLoggingStatusLine();
   char status[40];
   if (poll && poll[0]) snprintf(status, sizeof(status), "%s", poll);
+  else if (logging)    snprintf(status, sizeof(status), "%s", logging);
   else                 snprintf(status, sizeof(status), "%s", track);
 
   char nbuf[16];

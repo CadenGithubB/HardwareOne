@@ -1066,6 +1066,7 @@ extern BLEAdvertisedDevice* gRingAdvertisedDevice;  // defined in _Ring.cpp
 extern String               gRingDeviceName;
 extern String               gRingDeviceAddress;
 extern volatile bool        gRingScanFound;
+void g2RingSetIdentity(const char* name, const char* addr);  // cross-task copies, _Ring.cpp
 
 // Per-family in-flight flag for G2 connects. Set true by the public
 // g2Connect* wrappers before submitting to the unified BLE-connect worker
@@ -3556,6 +3557,7 @@ class G2ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
       gRingAdvertisedDevice = copy;
       gRingDeviceName       = name;
       gRingDeviceAddress    = advertisedDevice.getAddress().toString().c_str();
+      g2RingSetIdentity(gRingDeviceName.c_str(), gRingDeviceAddress.c_str());
       gRingScanFound        = true;
       DEBUG_G2F("[G2-SCAN] Found RING: %s @ %s (RSSI %d) — stashed",
                 name.c_str(), gRingDeviceAddress.c_str(),
@@ -7805,10 +7807,16 @@ static char gMicDetailLastReadout[80] = {0};
 // Keep the accepted view's generation until the session worker consumes it:
 // a refresh already accepted before navigation must not rebuild a later visit.
 static uint32_t gMicDetailRecreateMenuGen = 0;
+// SHUTDOWN can fail transiently (TX fence busy, write refused) while the page
+// and session are still current. Such a request is handed back to the next
+// tick instead of ending the live worker, a bounded number of times.
+static uint8_t gMicDetailRecreateRetries = 0;
+static constexpr uint8_t kMicDetailRecreateRetryCap = 3;
 
 static void requestMicDetailRecreate() {
   const uint32_t menuGen = g2CurrentMenuGen();
   if (g2GetHijackPage() != G2_HIJACK_PAGE_MIC_DETAIL) return;
+  gMicDetailRecreateRetries = 0;  // a fresh request gets a fresh budget
   __atomic_store_n(&gMicDetailRecreateMenuGen, menuGen, __ATOMIC_RELEASE);
   liveTextKickRefresh();
 }
@@ -7869,9 +7877,26 @@ static bool renderMicDetailLive() {
   // existing session/connection-fenced SHUTDOWN and stop if it fails.
   if (recreate) {
     if (!tearDownActiveContainer(*arm)) {
+      // A transient SHUTDOWN failure with the page, navigation and session
+      // still current is handed back to the next tick (bounded) instead of
+      // ending the worker and leaving the page dead. A stale fence or an
+      // exhausted budget ends it as before.
+      const bool fenceCurrent = redrawMenuGen == g2CurrentMenuGen() &&
+                                g2GetHijackPage() == G2_HIJACK_PAGE_MIC_DETAIL &&
+                                g2SessionLifecycleAllows(createLifecycleEpoch);
+      if (fenceCurrent && gMicDetailRecreateRetries < kMicDetailRecreateRetryCap) {
+        ++gMicDetailRecreateRetries;
+        uint32_t idle = 0;  // re-publish only if no newer request landed meanwhile
+        __atomic_compare_exchange_n(&gMicDetailRecreateMenuGen, &idle, redrawMenuGen,
+                                    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        DEBUG_G2F("[G2] mic-detail: refresh SHUTDOWN failed; retry %u/%u on the next tick",
+                  (unsigned)gMicDetailRecreateRetries, (unsigned)kMicDetailRecreateRetryCap);
+        return true;
+      }
       DEBUG_G2F("[G2] mic-detail: refresh SHUTDOWN failed");
       return false;
     }
+    gMicDetailRecreateRetries = 0;
     // Navigation can change while SHUTDOWN settles. Do not CREATE the old
     // compound over the destination page, even if the request was current
     // when the renderer consumed it.
@@ -8043,6 +8068,7 @@ static const G2PageModule kMicDetailPage = {
 
 bool g2ShowMicDetail() {
   __atomic_store_n(&gMicDetailRecreateMenuGen, 0u, __ATOMIC_RELEASE);
+  gMicDetailRecreateRetries = 0;
   // Mirror handleHijackMenuTap's live-text dispatch (the menu does this
   // when the user taps "Status" etc.). For MIC detail the entry isn't
   // the main menu — it's Sensors-detail tap on MIC — so we replicate
@@ -34275,7 +34301,9 @@ static void onHealthLoggingCmdDone(bool ok, const char* result,
   DEBUG_G2_PAGESF("[HEALTH] Health Logging ok=%d → %s", (int)ok,
                  result ? result : "(null)");
   // The live Health worker owns its lens updates and observes logger state
-  // on its next loop. Command completions never render on the executor task.
+  // on its next loop. Command completions never render on the executor task;
+  // the model only records the outcome for that worker to show.
+  g2HealthNoteLoggingCommandResult(ok, result);
 }
 
 static void g2HealthPageWorker(void* arg) {
@@ -34498,8 +34526,12 @@ static void g2HealthPageWorker(void* arg) {
         G2CmdCookie cookie{};
         cookie.targetPage = G2_HIJACK_PAGE_HEALTH;
         cookie.targetNetSub = static_cast<uint8_t>(g2HealthNav());
+        // The model mirrors the command's fate so the lens can show it: a
+        // neutral label while it is queued, the refusal or error afterwards.
+        g2HealthNoteLoggingCommandQueued();
         if (!g2SubmitHijackCommand("healthlogging toggle", cookie,
                                   onHealthLoggingCmdDone, nullptr)) {
+          g2HealthNoteLoggingCommandRefused();
           DEBUG_G2_PAGESF("[HEALTH] Health Logging command not queued");
         }
       }

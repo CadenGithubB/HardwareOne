@@ -74,6 +74,13 @@ bool g2HealthConsumePollRequest(void);
 // The transport worker submits this through its authorized command executor.
 // The model never changes the logger directly; repeated pending taps coalesce.
 bool g2HealthConsumeLoggingToggleRequest(void);
+// Fate of that command, mirrored for the lens: queued (neutral row label),
+// refused by the executor ("Not paired"), or an error result; the status line
+// shows the message for a few seconds.
+void g2HealthNoteLoggingCommandQueued(void);
+void g2HealthNoteLoggingCommandResult(bool ok, const char* result);
+void g2HealthNoteLoggingCommandRefused(void);
+const char* g2HealthLoggingStatusLine(void);
 
 // Worker lifecycle: suppress parallel ring traffic (sensorlog) while open, and
 // drive "Refreshing…/Refreshed" status in Overview/metric text so Poll Now is

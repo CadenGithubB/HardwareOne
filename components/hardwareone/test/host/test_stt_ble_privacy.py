@@ -21,6 +21,7 @@ def main():
            ('HISTORY','static void bleRememberOutput('),
            ('RAW_SESSION','static bool bleRawNotifyToSession('),
            ('RAW_BROADCAST','bool bleRawNotify('),
+           ('FENCE','static bool bleSessionFenceLive('),
            ('SEND','bool sendBLEResponseToSession('),
            ('CALLBACK','static void bleCommandResultCallback(')]
     for marker,name in names:

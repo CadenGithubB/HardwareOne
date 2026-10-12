@@ -1948,11 +1948,22 @@ bool sendBLEResponseToConn(uint16_t connId, const char* data, size_t len) {
   return sendBLEResponseToSession(connId, epoch, data, len);
 }
 
+// Per-fragment fence for the paced secure sender: the session epoch is
+// re-checked under a brief lifecycle guard before every fragment, so a
+// disconnect or replacement peer stops the transfer at the next frame.
+struct BleSessionFence { uint16_t connId; TransportSessionEpoch epoch; };
+static bool bleSessionFenceLive(void* ctx) {
+  const auto* fence = static_cast<const BleSessionFence*>(ctx);
+  return fence && bleSessionEpochMatches(fence->connId, fence->epoch);
+}
+
 bool sendBLEResponseToSession(uint16_t connId,
                               TransportSessionEpoch expectedEpoch,
                               const char* data, size_t len, bool blocking) {
   if (!data || len == 0) return false;
 
+  BleScBinding binding;
+  bool secure = false;
   {
     BleLifecycleGuard lifecycle;
     if (!lifecycle ||
@@ -1960,14 +1971,22 @@ bool sendBLEResponseToSession(uint16_t connId,
       return false;
     }
 
-    // Keep lifecycle ownership across secure-channel selection and emission.
-    // Otherwise connId could be reused after the epoch check, and a stale
-    // result could be encrypted with the replacement peer's newly established
-    // keys.  The secure sender is bounded to 255 paced fragments by protocol.
-    if (bleScEstablished(connId)) {
-      return bleScSendEncrypted(connId, data, len, blocking);
-    }
-    if (bleScRequired()) return false;
+    // Resolve the secure-channel binding while the slot cannot be reused, then
+    // let the mutex go: the paced sender can run for seconds (up to 255
+    // fragments), and BTC_TASK takes this mutex for every inbound write, so
+    // holding it across the transfer starves the BT host task and can deadlock
+    // it against our own notify queue. The binding's slot generation plus the
+    // per-fragment session fence keep a replacement peer from ever receiving
+    // this result under its newly established keys.
+    secure = bleScEstablished(connId);
+    if (secure && !bleScBind(connId, &binding)) return false;
+    if (!secure && bleScRequired()) return false;
+  }
+
+  if (secure) {
+    BleSessionFence fence{connId, expectedEpoch};
+    return bleScSendEncryptedBound(binding, data, len, blocking,
+                                   bleSessionFenceLive, &fence);
   }
 
   // Plaintext command replies are never characteristic-wide.  The session

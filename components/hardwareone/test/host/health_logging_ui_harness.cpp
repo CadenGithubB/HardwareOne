@@ -215,6 +215,7 @@ int main() {
   CHECK(g2Requests.empty());
   drainLoggingRequest(); drainLoggingRequest();
   CHECK(g2Requests.size() == 1);
+  CHECK(sLoggingCmdPending && g2HealthLoggingStatusLine() == nullptr);  // queued: neutral label, no message
   CHECK(g2Requests.back().command == "healthlogging toggle");
   CHECK(g2Requests.back().cookie.targetPage == G2_HIJACK_PAGE_HEALTH);
   CHECK(g2Requests.back().cookie.targetNetSub == HEALTH_NAV_MAIN);
@@ -222,7 +223,10 @@ int main() {
   CHECK(!loggerActive);
   const unsigned beforeDiagnostic = diagnosticMessages;
   g2Requests.back().done(false, "Error: denied", g2Requests.back().cookie, nullptr);
+  CHECK(!sLoggingCmdPending && g2HealthLoggingStatusLine() &&
+        std::string(g2HealthLoggingStatusLine()) == "Error: denied");  // the lens can say why
   g2Requests.back().done(true, "SUCCESS: Health logging ON", g2Requests.back().cookie, nullptr);
+  CHECK(!sLoggingCmdPending && g2HealthLoggingStatusLine() == nullptr);
   CHECK(diagnosticMessages == beforeDiagnostic + 2);
   CHECK(!loggerActive && g2Requests.size() == 1);
   g2HealthAction(10); g2HealthOpen(); drainLoggingRequest();
@@ -232,6 +236,8 @@ int main() {
   g2HealthSetPageActive(true); g2HealthAction(10);
   g2QueueAccepts = false; drainLoggingRequest();
   CHECK(g2Requests.size() == 1 && !g2HealthConsumeLoggingToggleRequest());
+  CHECK(!sLoggingCmdPending && g2HealthLoggingStatusLine() &&
+        std::string(g2HealthLoggingStatusLine()) == "Not paired");  // executor refusal is visible
   g2QueueAccepts = true;
   g2HealthAction(3); g2HealthAction(10); drainLoggingRequest();
   CHECK(g2Requests.size() == 1 && sNav == HEALTH_NAV_TRENDS);
