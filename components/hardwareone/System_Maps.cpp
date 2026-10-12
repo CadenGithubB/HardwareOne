@@ -3187,12 +3187,11 @@ const char* GPSTrackManager::startLiveTracking() {
   if (strncmp(result, "Error", 5) == 0) return result;
   const String gpsStatus(result);  // command replies share a borrowed buffer
 
-  // TRACK already selects GPS. Reuse the logger's policy and literal start
-  // path; gpslog instead creates a dated session and enables boot auto-start.
-  result = cmd_sensorlog("format track");
-  if (!result) return "Error: Track format returned no result";
-  if (strncmp(result, "Error", 5) == 0) return result;
-  result = cmd_sensorlog("start /logging_captures/tracks/live.csv 1000");
+  // A transient GPS-only TRACK capture at the literal path: the logger keeps
+  // the user's saved session (path, interval, sensors, format) untouched and
+  // restores its live values when this capture stops. gpslog instead creates
+  // a dated session and enables boot auto-start.
+  result = sensorLogStartLiveTrack("/logging_captures/tracks/live.csv", 1000);
   if (!result) return "Error: Sensor logger returned no result";
   if (strncmp(result, "Error", 5) == 0) return result;
   if (strncmp(result, "SUCCESS:", 8) != 0) return "Error: Sensor logger did not confirm startup";
@@ -3304,12 +3303,35 @@ String GPSTrackManager::getValidationMessage(TrackValidation result, float cover
   return msg;
 }
 
+int GPSTrackManager::copyPoints(GPSTrackPoint* dst, int cap) {
+  if (!dst || cap <= 0) return 0;
+  TrackStateGuard state;
+  const int count = _pointCount < cap ? _pointCount : cap;
+  if (count) memcpy(dst, _points + _pointCount - count, count * sizeof(GPSTrackPoint));
+  return count;
+}
+
 void GPSTrackManager::renderTrack(MapRenderer* renderer,
                                    float centerLat, float centerLon,
                                    int32_t scaleX, int32_t scaleY) {
-  GPSTrackSnapshot snapshot;
-  if (!renderer || !readSnapshot(snapshot) || snapshot.pointCount < 2) return;
-  
+  if (!renderer || !hasTrack()) return;
+  // The map render task is this function's only caller, so one reusable PSRAM
+  // copy sized for the point cap replaces a full-track allocation per frame.
+  // It is kept once a track has been drawn; a failed allocation is retried on
+  // the next frame and reported instead of silently drawing nothing.
+  static GPSTrackPoint* points = nullptr;
+  if (!points) {
+    points = static_cast<GPSTrackPoint*>(ps_alloc(
+        MAX_TRACK_POINTS * sizeof(GPSTrackPoint), AllocPref::PreferPSRAM, "gps.render"));
+    if (!points) {
+      ERROR_MAPSF("Track render buffer unavailable (%u bytes)",
+                  (unsigned)(MAX_TRACK_POINTS * sizeof(GPSTrackPoint)));
+      return;
+    }
+  }
+  const int pointCount = copyPoints(points, MAX_TRACK_POINTS);
+  if (pointCount < 2) return;
+
   int viewWidth = renderer->getWidth();
   int viewHeight = renderer->getHeight();
   int32_t centerLatMicro = (int32_t)(centerLat * 1000000);
@@ -3335,9 +3357,9 @@ void GPSTrackManager::renderTrack(MapRenderer* renderer,
   int16_t prevX = -1, prevY = -1;
   bool prevValid = false;
 
-  for (int i = 0; i < snapshot.pointCount; i++) {
-    int32_t latMicro = (int32_t)(snapshot.points.get()[i].lat * 1000000);
-    int32_t lonMicro = (int32_t)(snapshot.points.get()[i].lon * 1000000);
+  for (int i = 0; i < pointCount; i++) {
+    int32_t latMicro = (int32_t)(points[i].lat * 1000000);
+    int32_t lonMicro = (int32_t)(points[i].lon * 1000000);
 
     int16_t screenX, screenY;
     MapCore::geoToScreen(latMicro, lonMicro, centerLatMicro, centerLonMicro,
@@ -3349,8 +3371,8 @@ void GPSTrackManager::renderTrack(MapRenderer* renderer,
 
     bool tooLong = false;
     if (i > 0) {
-      float dLatM = (snapshot.points.get()[i].lat - snapshot.points.get()[i - 1].lat) * kMetersPerDeg;
-      float dLonM = (snapshot.points.get()[i].lon - snapshot.points.get()[i - 1].lon) * kMetersPerDeg * cosLat;
+      float dLatM = (points[i].lat - points[i - 1].lat) * kMetersPerDeg;
+      float dLonM = (points[i].lon - points[i - 1].lon) * kMetersPerDeg * cosLat;
       tooLong = (dLatM * dLatM + dLonM * dLonM) > kMaxSegMeters2;
     }
 
@@ -3364,9 +3386,9 @@ void GPSTrackManager::renderTrack(MapRenderer* renderer,
   }
   
   // Draw start marker (small circle)
-  if (snapshot.pointCount > 0) {
-    int32_t startLatMicro = (int32_t)(snapshot.points.get()[0].lat * 1000000);
-    int32_t startLonMicro = (int32_t)(snapshot.points.get()[0].lon * 1000000);
+  if (pointCount > 0) {
+    int32_t startLatMicro = (int32_t)(points[0].lat * 1000000);
+    int32_t startLonMicro = (int32_t)(points[0].lon * 1000000);
     int16_t startX, startY;
     MapCore::geoToScreen(startLatMicro, startLonMicro, centerLatMicro, centerLonMicro,
                          scaleX, scaleY, viewWidth, viewHeight, startX, startY);
@@ -3380,9 +3402,9 @@ void GPSTrackManager::renderTrack(MapRenderer* renderer,
   }
   
   // Draw end marker (small square)
-  if (snapshot.pointCount > 1) {
-    int32_t endLatMicro = (int32_t)(snapshot.points.get()[snapshot.pointCount - 1].lat * 1000000);
-    int32_t endLonMicro = (int32_t)(snapshot.points.get()[snapshot.pointCount - 1].lon * 1000000);
+  if (pointCount > 1) {
+    int32_t endLatMicro = (int32_t)(points[pointCount - 1].lat * 1000000);
+    int32_t endLonMicro = (int32_t)(points[pointCount - 1].lon * 1000000);
     int16_t endX, endY;
     MapCore::geoToScreen(endLatMicro, endLonMicro, centerLatMicro, centerLonMicro,
                          scaleX, scaleY, viewWidth, viewHeight, endX, endY);
@@ -3449,6 +3471,10 @@ const char* cmd_gpstrack(const String& argsInput) {
       const String message = GPSTrackManager::getValidationMessage(
           loaded.validation, loaded.coveragePercent);
       snprintf(buf, 1024, "Loaded %d GPS points\n%s", loaded.pointCount, message.c_str());
+    } else if (errorMsg.startsWith("Error:")) {
+      // Validation refusals are already complete replies (the OLED toast
+      // shows the same text); do not stack a second status prefix on them.
+      strlcpy(buf, errorMsg.c_str(), 1024);
     } else {
       snprintf(buf, 1024, "Error: Failed to load track: %s", errorMsg.c_str());
     }

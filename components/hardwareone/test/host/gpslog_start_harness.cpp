@@ -110,6 +110,8 @@ const char* sensorLogStartConfiguredSession() {
 using portMUX_TYPE = int;
 static portMUX_TYPE sSensorLogSessionMux;
 static uint32_t sSensorLogSessionId;
+[[maybe_unused]] static bool gSensorLogTransient;
+static void sensorLogRestoreSettings();
 static void portENTER_CRITICAL(portMUX_TYPE*) {}
 static void portEXIT_CRITICAL(portMUX_TYPE*) {}
 static bool debugAvailable, keyAvailable, headerWritable, fileOpenable;
@@ -519,6 +521,70 @@ static void sessionOwnership() {
   check(!error(commandStart("start /logs/reused.csv 1000")) && sensorLogCurrentSessionId() == 1,
         "session identity wrap published the zero sentinel");
 }
+#if HAVE_LIVE_TRACK_START
+static void configuredSession() {
+  gSettings.sensorLogMask = LOG_TOF | LOG_IMU;
+  gSettings.sensorLogFormat = SENSOR_LOG_CSV;
+  gSettings.sensorLogIntervalMs = 5000;
+  gSettings.sensorLogPath = "/logging_captures/sensors/sensors.csv";
+  gSensorLogMask = LOG_TOF | LOG_IMU;
+  gSensorLogFormat = SENSOR_LOG_CSV;
+  gSensorLogIntervalMs = 5000;
+}
+static void savedSessionUntouched() {
+  check(gSettings.sensorLogMask == (LOG_TOF | LOG_IMU) && gSettings.sensorLogFormat == SENSOR_LOG_CSV &&
+        gSettings.sensorLogIntervalMs == 5000 && gSettings.sensorLogPath == "/logging_captures/sensors/sensors.csv",
+        "live track changed the saved last-used session");
+  check(persistCalls == 0 && changedFields.empty(), "live track requested settings persistence");
+}
+static void liveSelectionRestored() {
+  check(gSensorLogFormat == SENSOR_LOG_CSV && gSensorLogMask == (LOG_TOF | LOG_IMU) && gSensorLogIntervalMs == 5000,
+        "ending the live track did not restore the saved selection");
+}
+static void liveTrackTransientSession() {
+  context = "live track start leaves the saved session untouched";
+  reset(); configuredSession();
+  const std::string started = sensorLogStartLiveTrack("/logging_captures/tracks/live.csv", 1000);
+  check(started.rfind("SUCCESS:", 0) == 0, "live track start refused");
+  check(gSensorLoggingRunning && gSensorLogPath == "/logging_captures/tracks/live.csv" &&
+        resolvedPath == "/logging_captures/tracks/live.csv" && shapedCalls == 0,
+        "live track did not use the literal path");
+  check(gSensorLogFormat == SENSOR_LOG_TRACK && gSensorLogMask == LOG_GPS && gSensorLogIntervalMs == 1000,
+        "live capture did not switch the live values to a GPS-only TRACK session");
+  savedSessionUntouched();
+  const uint32_t session = sensorLogCurrentSessionId();
+  check(session != 0 && sensorLogStopSession(session), "owner stop of the live session failed");
+  liveSelectionRestored();
+  savedSessionUntouched();
+
+  context = "an external stop also restores the saved selection";
+  reset(); configuredSession();
+  check(!error(sensorLogStartLiveTrack("/logging_captures/tracks/live.csv", 1000)), "second live start refused");
+  check(sensorLogMarkStopped(), "unconditional owner stop failed");
+  liveSelectionRestored();
+  savedSessionUntouched();
+
+  context = "a refused live start changes nothing";
+  reset(); configuredSession();
+  fileOpenable = false;
+  check(error(sensorLogStartLiveTrack("/logging_captures/tracks/live.csv", 1000)) && !gSensorLoggingRunning,
+        "refused live start reported success");
+  liveSelectionRestored();
+  savedSessionUntouched();
+  reset(); configuredSession();
+  check(error(sensorLogStartLiveTrack("relative.csv", 1000)) && resolvedCalls == 0, "relative live path accepted");
+  liveSelectionRestored();
+
+  context = "typed starts still persist, and their stop restores nothing";
+  reset(); configuredSession();
+  check(!error(commandStart("start /logs/typed.csv 700")), "typed start refused");
+  check(gSettings.sensorLogPath == "/logs/typed.csv" && gSettings.sensorLogIntervalMs == 700 &&
+        gSettings.sensorLogMask == (LOG_TOF | LOG_IMU) && persistCalls == 2, "typed start no longer persists its session");
+  gSensorLogFormat = SENSOR_LOG_TEXT;  // a later live change that no stop may undo
+  check(sensorLogMarkStopped() && gSensorLogFormat == SENSOR_LOG_TEXT && gSensorLogIntervalMs == 700,
+        "stopping a persisted session restored saved values");
+}
+#endif
 #endif
 
 int main() {
@@ -537,6 +603,9 @@ int main() {
   run("manual versus boot health policy", healthBootPolicy);
   run("typed admission and command adapter", admissionFailuresAndAdapter);
   run("logger session ownership", sessionOwnership);
+#if HAVE_LIVE_TRACK_START
+  run("transient live-track session", liveTrackTransientSession);
+#endif
 #endif
   std::printf("gpslog startup (%s): %d checks, %d failures\n", TEST_GPS ? "GPS" : "owner", checks, failures);
   return failures ? 1 : 0;

@@ -408,29 +408,46 @@ static bool webGuestApiAllowed(const char* path) {
   return false;
 }
 
+// Resolve whether this session's account is a Guest from one locked roster
+// snapshot. Returns false when the account cannot be verified.
+//
+// This is an authorization boundary, so do not use isGuestUser() here: that
+// UI-oriented helper deliberately falls back to ordinary User when an account
+// cannot be resolved.  A live web session whose account was deleted, banned,
+// or became unreadable must lose access rather than escape the Guest
+// allowlist.  getUserAuthorizationRole() also preserves pre-role rosters
+// (first account = recovery owner, later missing-role accounts = User).
+static bool webResolveGuestRole(const AuthContext& ctx, bool& guestRole) {
+  bool roleVerified = false;
+  guestRole = false;
+  FsLockGuard roleGuard("web.guestAccess");
+  if (roleGuard.held || isFsLockedByCurrentTask()) {
+    String role;
+    roleVerified = getUserAuthorizationRole(ctx.user, role);
+    // Preserve the legacy device-owner recovery rule only after the account
+    // was resolved positively from the same locked roster snapshot.
+    guestRole = roleVerified && role == "guest" &&
+                !isSuperAdminUser(ctx.user);
+  }
+  return roleVerified;
+}
+
+bool webGuestMutationAllowed(httpd_req_t* req, const AuthContext& ctx) {
+  if (!req) return false;
+  if (ctx.user.length() == 0 || ctx.user == "AuthBypass") return true;
+  bool guestRole = false;
+  if (!webResolveGuestRole(ctx, guestRole) || guestRole) {
+    webGuestSendForbidden(req);
+    return false;
+  }
+  return true;
+}
+
 bool webGuestAccessAllowed(httpd_req_t* req, const AuthContext& ctx) {
   if (!req) return false;
-  // This is an authorization boundary, so do not use isGuestUser() here:
-  // that UI-oriented helper deliberately falls back to ordinary User when an
-  // account cannot be resolved.  A live web session whose account was deleted,
-  // banned, or became unreadable must lose access rather than escape the Guest
-  // allowlist.  getUserAuthorizationRole() also preserves pre-role rosters
-  // (first account = recovery owner, later missing-role accounts = User).
   if (ctx.user.length() == 0 || ctx.user == "AuthBypass") return true;
-  bool roleVerified = false;
   bool guestRole = false;
-  {
-    FsLockGuard roleGuard("web.guestAccess");
-    if (roleGuard.held || isFsLockedByCurrentTask()) {
-      String role;
-      roleVerified = getUserAuthorizationRole(ctx.user, role);
-      // Preserve the legacy device-owner recovery rule only after the account
-      // was resolved positively from the same locked roster snapshot.
-      guestRole = roleVerified && role == "guest" &&
-                  !isSuperAdminUser(ctx.user);
-    }
-  }
-  if (!roleVerified) {
+  if (!webResolveGuestRole(ctx, guestRole)) {
     webGuestSendForbidden(req);
     return false;
   }

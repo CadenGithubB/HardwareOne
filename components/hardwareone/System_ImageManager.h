@@ -50,7 +50,13 @@ public:
   // BOTH tries each tier independently, succeeds if either completes, and
   // prefers the internal path when both complete. Empty means neither saved.
   String saveImage(const uint8_t* data, size_t len, ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS);
-  
+
+  // cameraCaptureFolder names a folder inside the tier that cameraStorageLocation
+  // selects, so it must not carry a tier prefix itself or step outside it.
+  // Returns nullptr when `folder` is acceptable, else a complete "Error: ..."
+  // reply for the setting's writers.
+  static const char* captureFolderRejectReason(const String& folder);
+
   // List images
   std::vector<ImageInfo> listImages(ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS);
   int getImageCount(ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS);

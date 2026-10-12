@@ -93,6 +93,21 @@ String ImageManager::getCaptureFolder(ImageStorageLocation location) {
   return prefix + folder;
 }
 
+const char* ImageManager::captureFolderRejectReason(const String& folder) {
+  // Mirror getCaptureFolder()'s leading-slash repair so "sd/x" and "/sd/x"
+  // are judged the same way.
+  const char* text = folder.c_str();
+  if (*text == '/') ++text;
+  if (strncmp(text, "sd", 2) == 0 && (text[2] == '\0' || text[2] == '/')) {
+    return "Error: cameraCaptureFolder is a folder inside the chosen tier and must not start with /sd; "
+           "use cameraStorageLocation to pick the tier";
+  }
+  if (folder.indexOf("..") >= 0) {
+    return "Error: cameraCaptureFolder must not contain '..'";
+  }
+  return nullptr;
+}
+
 
 bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
   const bool isSD = location == IMAGE_STORAGE_SD;
@@ -177,7 +192,9 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
     String normalizedPath;
     const VFS::StorageType storage = isSD ? VFS::SDCARD : VFS::INTERNAL;
     if (!normalizeFsPath(path, normalizedPath) || VFS::getStorageType(normalizedPath) != storage) {
-      ERROR_STORAGEF("[ImageManager] Invalid capture path for %s: %s", storageName, path.c_str());
+      ERROR_STORAGEF("[ImageManager] Invalid capture path for %s: %s (cameraCaptureFolder=\"%s\" must be a "
+                     "folder inside the tier cameraStorageLocation selects)",
+                     storageName, path.c_str(), gSettings.cameraCaptureFolder.c_str());
       return "";
     }
     path = normalizedPath;

@@ -31,6 +31,18 @@ static bool gCLIValidateOnly, debugAvailable = true, allocationOk = true;
 static const char* failedAllocationName;
 static bool gSensorLoggingRunning;
 static String gSensorLogPath;
+// The logger's transient-session bookkeeping: a stop that ends a transient
+// capture restores the saved selection (owner behavior tested in gpslog_start).
+[[maybe_unused]] static bool gSensorLogTransient;
+static unsigned restores;
+static void sensorLogRestoreSettings() { ++restores; }
+#if BASELINE
+static const std::vector<std::string> kLiveStartActions{
+    "gps", "format track", "start /logging_captures/tracks/live.csv 1000"};
+#else
+static const std::vector<std::string> kLiveStartActions{
+    "gps", "live /logging_captures/tracks/live.csv 1000"};
+#endif
 static struct {
   bool sensorLogEnabled = true, healthLoggingEnabled = false;
   bool gpsAutoStart = false, sensorLogAutoStart = false;
@@ -236,6 +248,7 @@ static const char* cmd_gpsstart(const String&) {
   boundary("GPS request"); actions.emplace_back("gps"); return borrowed(gpsReply);
 }
 static const char* cmd_sensorlog(const String& command);
+static const char* sensorLogStartLiveTrack(const char* path, uint32_t intervalMs);
 #endif
 
 // INSERT_PRODUCTION
@@ -276,6 +289,22 @@ static const char* cmd_sensorlog(const String& command) {
   }
   return borrowed(startReply);
 }
+#if !BASELINE
+// The logger's transient live-track entry point: one call carries the literal
+// path and interval; a confirmed start publishes a transient session.
+static const char* sensorLogStartLiveTrack(const char* path, uint32_t intervalMs) {
+  boundary("logger request");
+  actions.emplace_back(std::string("live ") + path + " " + std::to_string(intervalMs));
+  check(std::string(path) == "/logging_captures/tracks/live.csv" && intervalMs == 1000,
+        "Map requests literal existing capture target at one second");
+  if (startReply && std::strncmp(startReply, "SUCCESS:", 8) == 0) {
+    gSensorLogPath = path;
+    sensorLogPublishStarted(/*transient=*/true);
+    if (loseLoggerAfterStart) sensorLogMarkStopped();
+  }
+  return borrowed(startReply);
+}
+#endif
 #endif
 static bool error(const char* result) {
   return result && std::string(result).rfind("Error", 0) == 0;
@@ -290,7 +319,7 @@ static void reset() {
   check(GPSTrackManager::clearTrack(), "idle track cleared for test");
   gSettings = {}; sSensorLogSessionId = 0;
   gCLIValidateOnly = false; debugAvailable = allocationOk = true;
-  allocations = fsOperations = stopEvents = 0; now = 1000;
+  allocations = fsOperations = stopEvents = restores = 0; now = 1000;
   actions.clear(); messages.clear();
   gpsReply = "[GPS] Start queued; initialization is pending";
   formatReply = "Log format set to TRACK"; startReply = "SUCCESS: Sensor logging started";
@@ -341,23 +370,29 @@ int main() {
   reset(); allocationOk = false;
   check(error(cmd_gpstrack("live start")) && actions.empty() && !GPSTrackManager::isLiveTracking(),
         "allocation failure happens before GPS/logger effects");
-  for (bool loaded : {false, true}) for (unsigned failure = 0; failure < 8; ++failure) {
+  struct StartFailure { std::function<void()> inject; size_t actionsRun; };
+  const size_t loggerStep = kLiveStartActions.size();
+  const std::vector<StartFailure> startFailures = {
+    {[] { gpsReply = "Error: GPS queue unavailable"; }, 1},
+    {[] { gpsReply = nullptr; }, 1},
+#if BASELINE
+    {[] { formatReply = "Error: Logger format refused"; }, 2},
+    {[] { formatReply = nullptr; }, 2},
+#endif
+    {[] { startReply = "Error: Capture file open failed"; }, loggerStep},
+    {[] { startReply = nullptr; }, loggerStep},
+    {[] { loseLoggerAfterStart = true; }, loggerStep},
+    {[] { startReply = "Queued: startup still pending"; }, loggerStep},
+  };
+  for (bool loaded : {false, true}) for (const auto& failure : startFailures) {
     reset(); if (loaded) imported();
     const auto before = GPSTrackManager::readStatus();
     const auto count = GPSTrackManager::readStatus().pointCount;
-    if (failure == 0) gpsReply = "Error: GPS queue unavailable";
-    if (failure == 1) gpsReply = nullptr;
-    if (failure == 2) formatReply = "Error: Logger format refused";
-    if (failure == 3) formatReply = nullptr;
-    if (failure == 4) startReply = "Error: Capture file open failed";
-    if (failure == 5) startReply = nullptr;
-    if (failure == 6) loseLoggerAfterStart = true;
-    if (failure == 7) startReply = "Queued: startup still pending";
+    failure.inject();
     check(error(cmd_gpstrack("live start")), "startup failure propagated");
     check(!GPSTrackManager::isLiveTracking() && GPSTrackManager::readStatus().pointCount == before.pointCount &&
           GPSTrackManager::readStatus().pointCount == count, "failed start preserves imported track");
-    check(actions.size() == (failure < 2 ? 1u : failure < 4 ? 2u : 3u),
-          "startup stops immediately at failing step");
+    check(actions.size() == failure.actionsRun, "startup stops immediately at failing step");
     unchangedPreferences(false, false);
   }
   for (bool gpsAuto : {false, true}) for (bool logAuto : {false, true}) {
@@ -372,11 +407,10 @@ int main() {
           !GPSTrackManager::readStatus().stats.valid && GPSTrackManager::readStatus().stats.totalDistanceM == 0 &&
           GPSTrackManager::readStatus().stats.durationSec == 0 && GPSTrackManager::readStatus().stats.avgSpeedMps == 0 &&
           GPSTrackManager::readStatus().lastUpdateMs == 0, "new live capture resets all prior statistics");
-    check(actions == std::vector<std::string>({"gps", "format track",
-          "start /logging_captures/tracks/live.csv 1000"}), "single owner startup has no redundant settings calls");
+    check(actions == kLiveStartActions, "single owner startup has no redundant settings calls");
     check(std::string(cmd_gpstrack("status")).find("waiting for GPS fix") != std::string::npos,
           "live status before first indoor fix remains active");
-    check(success(cmd_gpstrack("live start")) && actions.size() == 3,
+    check(success(cmd_gpstrack("live start")) && actions.size() == kLiveStartActions.size(),
           "repeated start preserves active capture");
     String why;
     check(!GPSTrackManager::clearTrack() && !load("/logs/another.csv", why),
@@ -391,6 +425,9 @@ int main() {
     const unsigned stops = stopEvents;
     check(success(cmd_gpstrack("live stop")) && stopEvents == stops,
           "repeated stop has no duplicate logger event");
+#if !BASELINE
+    check(restores == 1, "ending the transient capture restored the saved logger selection exactly once");
+#endif
     unchangedPreferences(gpsAuto, logAuto);
   }
   reset(); check(success(cmd_gpstrack("live toggle")), "toggle starts inactive capture");
@@ -402,6 +439,9 @@ int main() {
   check(!GPSTrackManager::appendPoint(38, -123), "stale live capture no longer appends");
   check(success(cmd_gpstrack("live stop")) && sensorLogCurrentSessionId() == replacement,
         "stopping stale Map live state cannot stop unrelated replacement logger");
+#if !BASELINE
+  check(restores == 1, "only the transient capture's own end restores the saved selection");
+#endif
   reset(); check(success(cmd_gpstrack("live start")), "first capture starts before external stop");
   check(GPSTrackManager::appendPoint(37, -122), "old capture contains points before restart");
   sensorLogMarkStopped();
@@ -503,6 +543,18 @@ static void snapshotTests() {
   check(outOfBounds.status.validation == TRACK_OUT_OF_BOUNDS &&
         outOfBounds.status.coveragePercent == 0 && outOfBounds.points.get()[0].lat == 20,
         "load reply carries the exact accepted generation and its validation");
+#if !BASELINE
+  // CLI load replies: a validation refusal is already a complete reply and is
+  // returned as is; other failures carry the load prefix.
+  const std::string refused = cmd_gpstrack("load /logs/outside.csv");
+  check(refused.rfind("Error: Track outside map bounds", 0) == 0 &&
+        refused.find("Failed to load track") == std::string::npos,
+        "CLI out-of-bounds refusal is the single validation message");
+  fileExists = false;
+  check(std::string(cmd_gpstrack("load /logs/missing.csv")) == "Error: Failed to load track: File not found",
+        "CLI non-validation failure keeps the load prefix");
+  fileExists = true;
+#endif
   const String firstMessage = GPSTrackManager::getValidationMessage(TRACK_VALID, 100);
   const String secondMessage = GPSTrackManager::getValidationMessage(TRACK_PARTIAL, 60);
   check(firstMessage.startsWith("Track valid") && secondMessage.startsWith("Warning") &&
@@ -526,6 +578,29 @@ static void snapshotTests() {
         "load result identifies committed generation");
   check(GPSTrackManager::clearTrack() && loaded.points.get()[0].lat == 37,
         "load response survives immediate subsequent clear");
+
+#if !BASELINE
+  imported();
+  {
+    // The render copy is one reusable buffer: a refused allocation draws
+    // nothing and is retried on the next frame; later frames allocate nothing.
+    MapRenderer refused;
+    failedAllocationName = "gps.render";
+    GPSTrackManager::renderTrack(&refused, 37, -122, 1, 1);
+    check(refused.lines == 0, "render without its buffer draws nothing");
+    failedAllocationName = nullptr;
+    const unsigned beforeRender = allocations;
+    MapRenderer first, second;
+    GPSTrackManager::renderTrack(&first, 37, -122, 1, 1);
+    GPSTrackManager::renderTrack(&second, 37, -122, 1, 1);
+    check(first.lines >= 7 && second.lines == first.lines && allocations == beforeRender + 1,
+          "repeated renders reuse one allocated copy");
+    check(GPSTrackManager::clearTrack(), "track cleared after render buffer checks");
+    MapRenderer empty;
+    GPSTrackManager::renderTrack(&empty, 37, -122, 1, 1);
+    check(empty.lines == 0 && allocations == beforeRender + 1, "empty track renders nothing without allocating");
+  }
+#endif
 
   imported();
   bool renderMutation = false;

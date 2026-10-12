@@ -167,6 +167,14 @@ void sensorLogTick();
 // (consume it before another command). This is not a synchronization boundary.
 const char* sensorLogStartConfiguredSession();
 
+// Live map recording: start a GPS-only TRACK capture at a literal path without
+// saving it as the last-used session. The live format/mask switch for this
+// capture only; the logger restores the saved format, mask and interval when
+// the session ends by any stop path, so boot auto-start and the next typed
+// start resume the user's own selection. Same admission checks, borrowed
+// result and session identity as a typed start.
+const char* sensorLogStartLiveTrack(const char* path, uint32_t intervalMs);
+
 // Auto-start logging with persisted parameters and boot health policy.
 void sensorLogAutoStart();
 

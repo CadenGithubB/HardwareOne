@@ -142,6 +142,14 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
     if (httpd_query_key_value(query, "live", liveParam, sizeof(liveParam)) == ESP_OK) {
       httpd_resp_set_type(req, "application/json");
 
+      // Guests keep the read-only surface (the ?live=1 snapshot and the file
+      // listing). Recording control and saving track files are refused here,
+      // before any owner call; start/stop are policed again by the executor.
+      const bool mutates = strcmp(liveParam, "start") == 0 ||
+                           strcmp(liveParam, "stop") == 0 ||
+                           strcmp(liveParam, "save") == 0;
+      if (mutates && !webGuestMutationAllowed(req, ctx)) return ESP_OK;
+
       // Handle live tracking toggle: ?live=start or ?live=stop
       if (strcmp(liveParam, "start") == 0) {
         return handleGPSLiveTrackAction(req, ctx, true);
@@ -196,6 +204,8 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
     
     char filepath[256] = {0};
     if (httpd_query_key_value(query, "file", filepath, sizeof(filepath)) == ESP_OK) {
+      // Loading replaces the track every viewer sees; guests only read it.
+      if (!webGuestMutationAllowed(req, ctx)) return ESP_OK;
       String decodedPath = urlDecode(String(filepath));
       if (decodedPath.charAt(0) != '/') {
         httpd_resp_set_type(req, "application/json");
@@ -203,13 +213,24 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
         return ESP_OK;
       }
 
+      // Publish first, which releases the previous track's buffer, then copy
+      // the published track for the reply: owner + parse buffer, then owner +
+      // reply copy, never three full tracks at once. The reply describes the
+      // one snapshot it copied, status and points together.
       String errorMsg;
-      GPSTrackSnapshot track;
-      if (!GPSTrackManager::loadTrack(decodedPath.c_str(), errorMsg, track)) {
+      GPSTrackStatus loaded;
+      if (!GPSTrackManager::loadTrack(decodedPath.c_str(), errorMsg, loaded)) {
         httpd_resp_set_type(req, "application/json");
         char errJson[256];
         snprintf(errJson, sizeof(errJson), "{\"error\":\"%s\"}", errorMsg.c_str());
         httpd_resp_sendstr(req, errJson);
+        return ESP_OK;
+      }
+      GPSTrackSnapshot track;
+      if (!GPSTrackManager::readSnapshot(track)) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "{\"error\":\"Track loaded; unable to copy track data\"}");
         return ESP_OK;
       }
 

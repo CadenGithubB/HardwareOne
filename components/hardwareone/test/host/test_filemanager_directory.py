@@ -36,6 +36,13 @@ def generate(component: Path) -> str:
         "  String substring(size_t i) const",
         "  void remove(size_t i) { text_.erase(i); }\n  String substring(size_t i) const")
     boundaries = boundaries.replace("void close() {}", "void close() { node.reset(); }")
+    # The selected-file read walks the file with the Arduino byte API.
+    boundaries = boundaries.replace(
+        "  size_t cursor = 0;\n  explicit operator bool() const { return !!node; }",
+        "  size_t cursor = 0, readCursor = 0;\n"
+        "  explicit operator bool() const { return !!node; }\n"
+        "  bool available() const { return node && readCursor < node->bytes; }\n"
+        "  int read() { return available() ? 'a' + int(readCursor++ % 3) : -1; }")
     declarations = re.sub(r"(?m)^#include[^\n]*\n", "", header)
     count_marker = "static uint16_t countFolderEntries("
     methods = [extract_block(source[source.rindex(count_marker):], count_marker)]
@@ -49,14 +56,23 @@ def generate(component: Path) -> str:
         "bool FileManager::getItem(", "bool FileManager::getCurrentItem(",
         "int FileManager::getPageEnd()", "bool FileManager::loadDirectory()",
         "void FileManager::setVisibilityFilter(", "void FileManager::setCountFolderChildren(",
-        "void FileManager::ensureValidSelection()")]
+        "void FileManager::ensureValidSelection()",
+        "bool FileManager::deleteItem()", "bool FileManager::renameItem(",
+        "bool FileManager::readFile(")]
+    # Operations on the selection resolve its full path when the source has it.
+    selected_path = "bool FileManager::resolveSelectedPath(" in source
+    if selected_path:
+        methods += [extract_block(source, marker) for marker in (
+            "bool FileManager::resolveSelectedPath(", "bool FileManager::getSelectedPath(",
+            "bool FileManager::readSelectedFile(", "bool FileManager::readPath(")]
     constants = re.search(r"(?m)^static constexpr uint16_t kFolderCountCap[^\n]+", source)[0]
     reader, conversion = "", []
     if "VFS::DirectoryReader" in source:
         reader = directory_reader_source()
         conversion = [extract_block(source, marker) for marker in (
             "static FileEntry makeBrowserEntry(", "bool FileManager::isVisible(")]
-    production = (f"#define TEST_DIRECTORY_READER {int(bool(reader))}\n" + reader +
+    production = (f"#define TEST_DIRECTORY_READER {int(bool(reader))}\n"
+                  f"#define TEST_SELECTED_PATH {int(selected_path)}\n" + reader +
                   declarations + "\n" + constants + "\n" + "\n\n".join(conversion + methods))
     harness = (HERE / "filemanager_directory_harness.cpp").read_text()
     for marker, replacement in {
@@ -73,7 +89,7 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--baseline", type=Path)
-    parser.add_argument("--case", choices=("all", "virtual-boundary", "picker-beyond-cache", "compatibility"), default="all")
+    parser.add_argument("--case", choices=("all", "virtual-boundary", "picker-beyond-cache", "compatibility", "selected-operations"), default="all")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     with tempfile.TemporaryDirectory(prefix="hw1-filemanager-") as directory:

@@ -778,6 +778,10 @@ private:
   static void clearTrackLocked();
   static GPSTrackStatus readStatusLocked(const GPSTrackBounds& mapBounds);
 
+  // Copy the newest min(cap, count) points into a caller-owned buffer under
+  // the state lock, without allocating. Returns the number copied.
+  static int copyPoints(GPSTrackPoint* dst, int cap);
+
   static GPSTrackBounds calculateBounds(const GPSTrackPoint* points, int count);
   static GPSTrackStats calculateStats(const GPSTrackPoint* points, int count);
 

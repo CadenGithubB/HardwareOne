@@ -25,7 +25,7 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--baseline", type=Path)
-    parser.add_argument("--case", default="all", choices=("all", "invalid-open", "disconnect", "binary", "nested", "missing-content"))
+    parser.add_argument("--case", default="all", choices=("all", "invalid-open", "disconnect", "binary", "nested", "missing-content", "timeout", "replace"))
     parser.add_argument("--maps", default="both", choices=("both", "on", "off"))
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++23 compiler is required")

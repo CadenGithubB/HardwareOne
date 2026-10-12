@@ -28,7 +28,12 @@ exercise append/load/clear with owned snapshots; allocation and parse failures
 preserve the previous track. Save/render callbacks clear the owner while the
 original copy remains usable, and boundary checks reject holding the track
 state lock across filesystem, renderer or command work. Metadata-only loads
-avoid a point-copy allocation.
+avoid a point-copy allocation. Live recording starts through the logger's
+transient entry point with the literal path and interval, and ending it
+restores the saved logger selection exactly once; the CLI load reply returns a
+validation refusal unchanged (no second status prefix); renders reuse one
+allocated point copy, draw nothing when that allocation is refused and allocate
+nothing on later frames.
 
 Checked GPS saves run the shared row writer and real filesystem guard over
 controlled File/VFS and semaphore boundaries. Save cases cover unchanged CSV
@@ -49,8 +54,13 @@ command helper, live/file/save responses, OLED Tracks action branch and status
 drawing. Command submission, snapshots and transport sessions are boundary
 doubles; tests check source identity, guest/session refusal, JSON errors and
 display feedback. Replacing the owner during HTTP/OLED output cannot change
-the captured counts, points or metadata. Both compiled suites use ASan/UBSan
-when `HW1_SANITIZE=ON`.
+the captured counts, points or metadata. A Guest session is refused by the
+mutation gate (a double of `webGuestMutationAllowed`) on recording control,
+saving and loading before any owner or executor call, while the live snapshot
+still streams. The file reply publishes through the status-only load and then
+copies the published track once, so it describes one coherent snapshot; a
+failed copy is a 503, never an empty success. Both compiled suites use
+ASan/UBSan when `HW1_SANITIZE=ON`.
 
 `map_live_browser` runs the actual Maps JavaScript functions in Node with
 controlled requests, timers and DOM elements. It checks confirmed state changes,
@@ -429,6 +439,9 @@ same-timestamp image until verified promotion. Cases cover failed promotion,
 failed cleanup, unresolved temporary refusal, retained SD recovery backups and
 independent BOTH-tier outcomes. Replacement is a service boundary here;
 `capture_stitching` exercises the actual shared replacement implementation.
+The capture-folder validator refuses a tier-prefixed (`/sd...`) or traversing
+folder with a reply that names the setting and `cameraStorageLocation`, and
+accepts plain folders.
 The `--baseline <component-directory>` option accepts saved sources;
 `--case collision` reproduces the old destructive overwrite as an expected test
 failure. ASan/UBSan follow `HW1_SANITIZE`. These checks do not qualify a physical
@@ -477,9 +490,15 @@ guard ownership. Successful chunked text/binary uploads retain their bytes and
 run post-save hooks after file, buffer and lock cleanup. `--baseline <cpp>`
 accepts a saved pre-change `WebServer_Server.cpp` for the original regressions.
 It runs with map hooks enabled and disabled, using C++23 to match the firmware.
-ASan/UBSan follow `HW1_SANITIZE`. Uploads still write directly to their
-destination; these tests do not establish atomic replacement, power-loss
-durability or real HTTP/SD behavior.
+ASan/UBSan follow `HW1_SANITIZE`. Uploads stream into a sibling `.upload.tmp`
+that is promoted over the destination only after a complete, checked body
+(promotion is a VFS double here; `capture_stitching` exercises the real
+replacement): a dropped connection, failed write or failed promotion leaves an
+existing destination untouched and removes only the staged copy, and a name the
+backend cannot take as a staged copy falls back to the in-place write. Two
+consecutive receive timeouts abandon the upload and release the file lock and
+polling pause; single idle waits between chunks are retried. These tests do not
+establish power-loss durability or real HTTP/SD behavior.
 
 `checked_text_writes` compiles the actual `writeText`/`writeTextAtomic` helpers,
 filesystem lock guard and polling guard against file/RTOS boundary doubles.
@@ -502,8 +521,11 @@ lock-bound authorization implementation separately. ASan/UBSan follow
 and shared VFS directory reader. It covers 255/256/257-entry boundaries, virtual
 SD mounts, picker matches beyond the cache, hidden and malformed entries,
 SD-relative names, full permission paths, identity refresh, child-count limits
-and borrowed directory/owned entry lifetimes. Its `--baseline <directory>` mode
-can run the same regressions against a saved pre-change FileManager source.
+and borrowed directory/owned entry lifetimes. Operations on the selection
+(enter, rename, delete, read) resolve the entry's full native path by replaying
+the directory walk, so names longer than the bounded display copy are addressed
+correctly within and beyond the cache. Its `--baseline <directory>` mode can
+run the same regressions against a saved pre-change FileManager source.
 
 `espnow_directory` executes the production remote listing handler and
 reader against protocol/filesystem doubles. It checks pagination, visibility,
@@ -1304,6 +1326,10 @@ A separate unit executes the actual logger typed start, saved-parameter restore,
 configured-session entry point, boot helper and explicit-start adapter. It covers
 literal paths containing spaces/quotes, default paths, legacy restore/clamp
 limits, boot-only health policy, admission failures and session publication.
+The transient live-track entry point starts a GPS-only TRACK capture at a
+literal path without persisting it as the last-used session; the saved
+selection is restored when that session ends by either stop path, a refused
+start changes nothing, and typed starts still persist.
 VFS, sealing, clock/path shaping, persistence and GPS queue outcomes are controlled
 host boundaries; this does not qualify storage devices, GPS reception or task
 scheduling. `--baseline <component-directory>` reproduces the old orchestration's

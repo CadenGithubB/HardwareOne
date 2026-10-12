@@ -75,6 +75,17 @@ static void httpd_resp_sendstr_chunk(httpd_req_t* req, const char* body) {
   req->output += body;
   if (++req->chunks == 1 && onFirstChunk) onFirstChunk();
 }
+// The Guest mutation gate (WebServer_Utils): a Guest session gets the 403 reply.
+static bool guestSession;
+static unsigned forbidden;
+static bool webGuestMutationAllowed(httpd_req_t* req, const AuthContext&) {
+  if (!guestSession) return true;
+  ++forbidden;
+  httpd_resp_set_status(req, "403 Forbidden");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"guest_forbidden\",\"message\":\"Guest accounts are view-only\"}");
+  return false;
+}
 static String urlDecode(const String& value) { return value; }
 static int httpd_req_get_url_query_str(httpd_req_t* req, char* out, size_t length) {
   if (req->query.empty() || req->query.size() >= length) return ESP_FAIL;
@@ -153,7 +164,7 @@ static void goBackToMainMenu() {}
 
 static GPSTrackStatus currentTrack;
 static std::vector<GPSTrackPoint> suppliedPoints;
-static int snapshotCalls, statusCalls, loadCalls, requestedMaxPoints;
+static int snapshotCalls, statusCalls, loadCalls, statusLoadCalls, saveCalls, requestedMaxPoints;
 static bool snapshotOk = true, loadOk = true, saveOk = true;
 static String loadError = "File not found";
 static int savedCount = 37;
@@ -176,6 +187,7 @@ static void supplySnapshot(GPSTrackSnapshot& out) {
 }
 struct GPSTrackManager {
   static bool saveTrack(char* path, size_t length, int* count = nullptr) {
+    ++saveCalls;
     if (count) *count = saveOk ? savedCount : 0;
     std::snprintf(path, length, "%s", saveOk ? "/logging_captures/tracks/saved.csv" : "");
     return saveOk;
@@ -193,6 +205,16 @@ struct GPSTrackManager {
     ++loadCalls; loadedPath = path; rejectOutside = rejectOutOfBounds;
     if (!loadOk) { error = loadError; out = {}; return false; }
     supplySnapshot(out);
+    if (onTrackLoaded) onTrackLoaded();
+    return true;
+  }
+  // Status-only load: publishes, returns the published status, allocates no copy.
+  static bool loadTrack(const char* path, String& error, GPSTrackStatus& out,
+                        bool rejectOutOfBounds = false) {
+    CHECK(identityDepth == 1 && installedIdentity);
+    ++loadCalls; ++statusLoadCalls; loadedPath = path; rejectOutside = rejectOutOfBounds;
+    if (!loadOk) { error = loadError; out = {}; return false; }
+    out = currentTrack;
     if (onTrackLoaded) onTrackLoaded();
     return true;
   }
@@ -336,6 +358,24 @@ static void webTests() {
   const size_t count = webRequests.size();
   request("other=start"); request("live=start-extra"); request("");
   CHECK(webRequests.size() == count);
+
+  // A Guest session keeps the read-only surface: recording control, saving
+  // and loading are refused by the facade before any owner or executor call.
+  guestSession = true;
+  const size_t commandsBefore = webRequests.size();
+  const int loadsBefore = loadCalls, savesBefore = saveCalls, snapshotsBefore = snapshotCalls;
+  for (const char* query : {"live=start", "live=stop", "live=save", "file=/tracks/original.csv"}) {
+    const auto denied = request(query);
+    CHECK(denied.status == "403 Forbidden" && denied.type == "application/json");
+    CHECK(denied.sends == 1 && denied.chunks == 0 && denied.finishes == 0);
+    CHECK(denied.output.find("guest_forbidden") != std::string::npos);
+  }
+  CHECK(forbidden == 4 && webRequests.size() == commandsBefore);
+  CHECK(loadCalls == loadsBefore && saveCalls == savesBefore && snapshotCalls == snapshotsBefore);
+  const auto readOnly = request("live=1");
+  CHECK(readOnly.status == "200 OK" && readOnly.finishes == 1 && readOnly.sends == 0);
+  CHECK(forbidden == 4 && snapshotCalls == snapshotsBefore + 1);
+  guestSession = false;
 }
 static void setTrackFixture() {
   currentTrack = {};
@@ -393,13 +433,17 @@ static void dataTests() {
   CHECK(!deserializeJson(parsed, req.output));
   CHECK(parsed["count"].as<int>() == 0 && parsed["points"].size() == 0);
 
-  // File output must retain both the returned points and the validation
-  // text, even if another request replaces the owner at the first chunk.
+  // The file reply publishes through the status-only load (freeing the old
+  // track first), then copies the published track once and describes that
+  // one snapshot: status and points together. Replacing the owner at the
+  // first chunk cannot change what was copied.
   setTrackFixture();
   suppliedPoints.resize(3); currentTrack.pointCount = 3;
-  onTrackLoaded = replaceTrack;
   onFirstChunk = replaceTrack;
+  const int loadsBefore = loadCalls, statusLoadsBefore = statusLoadCalls, snapshotsBefore = snapshotCalls;
   req = request("file=/tracks/original.csv");
+  CHECK(loadCalls == loadsBefore + 1 && statusLoadCalls == statusLoadsBefore + 1);
+  CHECK(snapshotCalls == snapshotsBefore + 1 && requestedMaxPoints == MAX_TRACK_POINTS);
   CHECK(messageValidation == TRACK_PARTIAL && messageCoverage == 75.0f);
   CHECK(loadedPath == "/tracks/original.csv" && !rejectOutside);
   CHECK(req.chunks == 5 && req.finishes == 1 && req.sends == 0);
@@ -410,7 +454,32 @@ static void dataTests() {
   CHECK(parsed["points"].size() == 3 && parsed["points"][2]["lat"].as<int>() == 2);
   CHECK(std::strcmp(parsed["message"].as<const char*>(), "Track snapshot validation") == 0);
   CHECK(currentTrack.pointCount == 1);
-  onFirstChunk = nullptr; onTrackLoaded = nullptr;
+  onFirstChunk = nullptr;
+  // An owner replaced between publish and copy still yields one coherent
+  // reply: the replacement's status and points, not a mix of generations.
+  setTrackFixture();
+  suppliedPoints.resize(3); currentTrack.pointCount = 3;
+  onTrackLoaded = replaceTrack;
+  req = request("file=/tracks/original.csv");
+  CHECK(!deserializeJson(parsed, req.output));
+  CHECK(parsed["success"].as<bool>() && parsed["count"].as<int>() == 1);
+  CHECK(std::strcmp(parsed["validation"].as<const char*>(), "valid") == 0);
+  CHECK(parsed["coverage"].as<float>() == 0.0f);
+  CHECK(parsed["points"].size() == 1 && parsed["points"][0]["lat"].as<int>() == -20);
+  CHECK(currentTrack.validation == TRACK_EMPTY && messageValidation == currentTrack.validation);
+  CHECK(messageCoverage == currentTrack.coveragePercent);
+  onTrackLoaded = nullptr;
+  // A load that published but whose reply copy failed is reported as such,
+  // never streamed as an empty success.
+  setTrackFixture();
+  snapshotOk = false;
+  const int loadsBeforeCopyFailure = loadCalls;
+  req = request("file=/tracks/original.csv");
+  CHECK(loadCalls == loadsBeforeCopyFailure + 1);
+  CHECK(req.status == "503 Service Unavailable" && req.sends == 1 && req.chunks == 0);
+  CHECK(!deserializeJson(parsed, req.output) && parsed["error"].is<const char*>());
+  CHECK(!parsed["points"].is<JsonArray>());
+  snapshotOk = true;
   const auto beforeLoad = loadCalls;
   req = request("file=relative.csv");
   CHECK(loadCalls == beforeLoad && req.sends == 1 && req.chunks == 0);

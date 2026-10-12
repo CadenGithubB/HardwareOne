@@ -796,10 +796,13 @@ void prepareFileBrowserData() {
           if (entry.isFolder) {
             gOledFileManager->navigateInto();
           } else {
-            // Resolve full path (used by both picker and the .hwmap fallback)
-            String fullPath = String(gOledFileManager->getCurrentPath());
-            if (!fullPath.endsWith("/")) fullPath += "/";
-            fullPath += entry.name;
+            // Resolve the full native path (used by both picker and the
+            // .hwmap fallback); entry.name is a bounded display copy.
+            String fullPath;
+            if (!gOledFileManager->getSelectedPath(fullPath)) {
+              oledToastShow("Entry unavailable", 2500);
+              break;
+            }
 
             if (sPickerActive) {
               // Picker mode wins: fire callback and pop. firePickerCallback
@@ -814,8 +817,7 @@ void prepareFileBrowserData() {
             // Viewer-mode fallback: .hwmap files auto-load into the map.
             // Preserves the legacy "browse to find a map" workflow that
             // existed before the picker layer was added.
-            String filename = String(entry.name);
-            if (filename.endsWith(".hwmap")) {
+            if (fullPath.endsWith(".hwmap")) {
               if (MapCore::loadMapFile(fullPath.c_str())) {
                 extern bool gMapCenterSet;
                 extern bool gMapManuallyPanned;
@@ -853,8 +855,8 @@ void prepareFileBrowserData() {
             break;
           }
           String content;
-          if (gOledFileManager->readFile(entry.name, content)) {
-            // Sealed capture? Reveal for display — readFile ran under the
+          if (gOledFileManager->readSelectedFile(content)) {
+            // Sealed capture? Reveal for display — the read ran under the
             // OLED browser's guarded identity; the magic line stays visible.
             captureCryptoRevealText(content);
             bool trunc = false;
