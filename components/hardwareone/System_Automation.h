@@ -39,8 +39,12 @@ void stopAutomationScheduler();
 // Runtime state is separate from automationEnabled (permission) and
 // automationAutoStart (boot intent). Only the owner changes it.
 bool automationSchedulerRunning();
-// Call from the main task while automationEnabled permits execution. The
-// owner checks runtime state, due work, file changes and event throttling.
+// Sets permission and runtime together (start on enable, stop on disable);
+// nullptr on success, else an error reply. The one owner transition.
+const char* automationSetSystemEnabled(bool enable);
+// Call from the main task on every loop. The owner checks permission (and
+// stops itself when it was revoked elsewhere), runtime state, due work, file
+// changes and event throttling.
 void automationTick();
 void notifyAutomationScheduler();
 
@@ -103,6 +107,7 @@ inline void runAutomationsOnBoot() {}
 inline bool startAutomationScheduler() { return false; }
 inline void stopAutomationScheduler() {}
 inline bool automationSchedulerRunning() { return false; }
+inline const char* automationSetSystemEnabled(bool) { return "Error: Automations are not compiled in this build"; }
 inline void automationTick() {}
 inline void notifyAutomationScheduler() {}
 inline void automationOnSystemEvent(uint8_t) {}

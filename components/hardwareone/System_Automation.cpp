@@ -323,6 +323,12 @@ struct AutomationLogStatus {
   String filename;
 };
 enum class AutomationLogStopResult { Inactive, Stopped, WriteFailed, Unavailable };
+// What a start did to a session that was already active.
+struct AutomationLogReplacement {
+  bool replaced = false;  // an active session was displaced
+  bool marked = false;    // its file received the LOG_STOP marker
+  String filename;        // the displaced file
+};
 
 AutomationLogSession sAutomationLogSession;
 std::atomic_bool sAutomationLogActive{false};
@@ -387,7 +393,11 @@ bool writeAutomationLogEntry(const AutomationLogSession& session,
   return ok;
 }
 
-bool startAutomationLog(const String& filename, const AuthContext& owner) {
+// Starts a session or replaces the active one. The new LOG_START is written
+// first, so a failed start leaves the active session untouched; a displaced
+// session's file then gets a LOG_STOP naming the new file.
+bool startAutomationLog(const String& filename, const AuthContext& owner,
+                        AutomationLogReplacement* replacement = nullptr) {
   if (!filesystemReady || filename.length() == 0) return false;
   AutomationLogSession candidate{filename, owner};
   // Request pointers/session tokens do not belong in a long-lived writer.
@@ -401,6 +411,18 @@ bool startAutomationLog(const String& filename, const AuthContext& owner) {
   FsLockGuard fsGuard("automation.log.start");
   if (!isFsLockedByCurrentTask()) return false;
   if (!writeAutomationLogEntry(candidate, "LOG_START", "Automation logging started")) return false;
+  // Sessions are published only under the FS lock held here, so the active
+  // one cannot change before the swap below.
+  if (sAutomationLogActive.load()) {
+    String note("Automation logging replaced by ");
+    if (!note.concat(candidate.filename)) note = "Automation logging replaced";
+    const bool marked = writeAutomationLogEntry(sAutomationLogSession, "LOG_STOP", note);
+    if (replacement) {
+      replacement->replaced = true;
+      replacement->marked = marked;
+      replacement->filename = sAutomationLogSession.filename;
+    }
+  }
   {
     AutomationLogStateGuard guard;
     sAutomationLogSession = std::move(candidate);
@@ -440,8 +462,9 @@ bool appendAutoLogEntry(const char* type, const String& message) {
 // Forward declarations for functions implemented in this file
 bool updateAutomationNextAt(long automationId, time_t newNextAt);
 time_t computeNextRunTime(const char* automationJson, time_t fromTime);
-// Unified post-fire helper (Trigger model defined later in this file).
-static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt);
+// Unified post-fire helper (Trigger model defined later in this file). A
+// scheduler pass passes notify=false: its trailing cache rebuild reads the file.
+static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt, bool notify);
 // Force-recompute every CLOCK trigger of every enabled automation in one
 // read/modify/write. Defined below the Trigger type; declared here for
 // cmd_automation's "recompute" subcommand. Returns triggers rewritten.
@@ -2239,7 +2262,7 @@ const char* cmd_automation_run(const String& argsInput) {
   // Advance nextAt after manual execution via the unified post-fire helper.
   time_t now = time(nullptr);
   if (now > 0) {
-    rescheduleAfterFire(idStr.toInt(), obj.c_str(), now);
+    rescheduleAfterFire(idStr.toInt(), obj.c_str(), now, true);
   }
   
   // Log automation end if logging is active
@@ -2372,17 +2395,9 @@ const char* cmd_automation(const String& argsInput) {
     for (int i = 1; i < sysArgs.count(); i++) if (sysArgs.arg(i).equalsIgnoreCase("json")) wantJson = true;
 
     bool en;
-    if (action == "enable") {
-      setSetting(gSettings.automationEnabled, true);
-      if (!startAutomationScheduler()) {
-        setSetting(gSettings.automationEnabled, false);
-        return "Error: failed to allocate automation scheduler cache";
-      }
-      en = true;
-    } else if (action == "disable") {
-      setSetting(gSettings.automationEnabled, false);
-      stopAutomationScheduler();
-      en = false;
+    if (action == "enable" || action == "disable") {
+      en = action == "enable";
+      if (const char* error = automationSetSystemEnabled(en)) return error;
     } else if (action == "status") {
       en = gSettings.automationEnabled;
     } else {
@@ -2773,7 +2788,7 @@ static bool onFired(Trigger& s, time_t firedAt) {
 // Unified post-fire helper. For each trigger whose nextAt was at or before
 // `firedAt`, compute a new nextAt (and maybe update anchor) and persist the
 // whole triggers array back to the JSON file.
-static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt) {
+static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt, bool notify) {
   Trigger triggers[MAX_TRIGGERS];
   int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS);
   if (n == 0) return;  // Malformed — scheduler will skip on next rebuild.
@@ -2811,7 +2826,10 @@ static void rescheduleAfterFire(long id, const char* automationJson, time_t fire
   }
   json = "";
   serializeJsonPretty(doc, json);
-  writeAutomationsJsonAtomic(json);
+  // Inside a pass the trailing rebuild picks this write up; a notification
+  // would only schedule a second full pass. Other callers notify as usual.
+  if (notify) writeAutomationsJsonAtomic(json);
+  else writeTextAtomic(AUTOMATIONS_JSON_FILE, json);
 }
 
 // Force-recompute every clock trigger of every enabled automation.
@@ -3978,9 +3996,17 @@ const char* cmd_autolog(const String& argsInput) {
   if (action == "start") {
     const String filename = args.arg(1);
     if (filename.length() == 0) return "Error: invalid arguments — Usage: autolog start <filename>";
-    const bool started = startAutomationLog(filename, currentAuthContext());
-    snprintf(getDebugBuffer(), 1024, started ? "Automation logging started: %s"
-                                          : "Error: Failed to create log file: %s", filename.c_str());
+    AutomationLogReplacement replaced;
+    if (!startAutomationLog(filename, currentAuthContext(), &replaced)) {
+      snprintf(getDebugBuffer(), 1024, "Error: Failed to create log file: %s", filename.c_str());
+    } else if (!replaced.replaced) {
+      snprintf(getDebugBuffer(), 1024, "Automation logging started: %s", filename.c_str());
+    } else {
+      snprintf(getDebugBuffer(), 1024, replaced.marked
+          ? "Automation logging started: %s (replaced %s)"
+          : "Automation logging started: %s (replaced %s; its LOG_STOP marker could not be written)",
+          filename.c_str(), replaced.filename.c_str());
+    }
     return getDebugBuffer();
   }
   if (action == "stop") {
@@ -4282,7 +4308,7 @@ static void schedulerTickMinute() {
                      id, (long)(now - nextAt));
       DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld MISSED by %lds (grace %ds) — advancing without firing",
              id, (long)(now - nextAt), (int)kMissedFireGraceSec);
-      rescheduleAfterFire(id, obj.c_str(), now);
+      rescheduleAfterFire(id, obj.c_str(), now, false);
       automationClearCondBlock(id);
       if (!eventDue) {  // an event match still deserves its fire
         pos = objEnd + 1;
@@ -4472,14 +4498,14 @@ static void schedulerTickMinute() {
         // fires touch no clock trigger, so skip the (flash-writing) reschedule.
         if (clockDue) {
           automationClearCondBlock(id);  // it ran; drop any condition back-off
-          rescheduleAfterFire(id, obj.c_str(), now);
+          rescheduleAfterFire(id, obj.c_str(), now, false);
         }
       } else {
         DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skip: no commands found", id);
         // A command-less automation can never do anything, so deferring it is
         // pointless — advance it like a fire, or its past nextAt spins the
         // full tick (and its file read) on every main-loop pass forever.
-        if (clockDue) rescheduleAfterFire(id, obj.c_str(), now);
+        if (clockDue) rescheduleAfterFire(id, obj.c_str(), now, false);
       }
     } else {
       DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld wait: nextAt=%lu now=%lu", id, (unsigned long)nextAt, (unsigned long)now);
@@ -4522,6 +4548,14 @@ bool automationSchedulerRunning() { return sAutomationRunning.load(); }
 // with the cache owner; other tasks merely notify, start or stop the scheduler.
 void automationTick() {
   static uint32_t lastAutoCheck = 0;
+  // Permission revoked by a writer other than the owner (settings page or
+  // import, `set`) stops the scheduler here, so automationSchedulerRunning()
+  // never reports a scheduler without permission. A later grant stays idle
+  // until the owner enables it (`automation system enable`).
+  if (!gSettings.automationEnabled) {
+    if (sAutomationRunning.load()) stopAutomationScheduler();
+    return;
+  }
   const uint32_t nowMs = millis();
   const time_t now = time(nullptr);
   {
@@ -4569,6 +4603,23 @@ void stopAutomationScheduler() {
     releaseAutomationsCache();
   }
   DEBUGF(DEBUG_AUTOMATIONS, "[automations] Scheduler disabled");
+}
+
+// Owner transition for permission + runtime: `automation system enable|disable`
+// and `features automation on|off` both land here. A failed start withdraws
+// the permission again. Returns nullptr, or an error reply.
+const char* automationSetSystemEnabled(bool enable) {
+  if (!enable) {
+    setSetting(gSettings.automationEnabled, false);
+    stopAutomationScheduler();
+    return nullptr;
+  }
+  setSetting(gSettings.automationEnabled, true);
+  if (!startAutomationScheduler()) {
+    setSetting(gSettings.automationEnabled, false);
+    return "Error: failed to allocate automation scheduler cache";
+  }
+  return nullptr;
 }
 
 // ============================================================================

@@ -42,6 +42,9 @@ def main() -> None:
         # The two alternative input backends export the same production name;
         # only their declaration names change to exercise both in one binary.
         code = code.replace(f"bool {function}StartInternal()", f"bool {unique}StartInternal()", 1)
+        # The APDS rollback deletes its driver through the owner's lock helper.
+        if file == "apds9960" and "static bool apdsReleaseDriver(" in source:
+            code = extract_block(source, "static bool apdsReleaseDriver(") + "\n\n" + code
         logs.update(re.findall(r"\b((?:DEBUG|INFO|ERROR)[A-Z_]*F|DEBUGF_QUEUE)\s*\(", code))
         definitions.append(code)
     types = []

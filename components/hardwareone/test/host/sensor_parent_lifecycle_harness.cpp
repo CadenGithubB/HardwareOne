@@ -52,12 +52,15 @@ static struct { bool imuDataValid = true; unsigned imuSeq = 4; } sImuCache;
 static struct {
   bool apdsDataValid = true;
   bool apdsColorValid = true, apdsProximityValid = true, apdsGestureValid = true;
+  uint8_t apdsLastGesture = 3;
+  unsigned long apdsLastGestureMs = 1234;
 } sApdsCache;
 static struct { bool dataValid = true; } gInputCache, sAnoEncoderCache;
 // Synchronization is a boundary mock here; the snapshot suite executes the
 // production guard and invalidation under admission failure separately.
 static int sImuCacheMutex=1, sApdsCacheMutex=1, sAnoCacheMutex=1;
 struct SensorCacheGuard { bool held=true; SensorCacheGuard(int,unsigned,const char*) {} };
+using TickType_t = unsigned;
 static unsigned pdMS_TO_TICKS(unsigned ms) { return ms; }
 static void vTaskDelay(unsigned) { throw std::runtime_error("unexpected cache admission failure"); }
 static bool inputCacheInvalidate() { gInputCache.dataValid=false; return true; }

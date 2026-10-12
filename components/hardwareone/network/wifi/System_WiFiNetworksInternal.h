@@ -11,6 +11,15 @@ struct WifiConnectionTarget {
   String password;
   int priority = 0;
   int index = -1;
+
+  WifiConnectionTarget() = default;
+  WifiConnectionTarget(const WifiConnectionTarget&) = default;
+  WifiConnectionTarget(WifiConnectionTarget&&) = default;
+  WifiConnectionTarget& operator=(const WifiConnectionTarget&) = default;
+  WifiConnectionTarget& operator=(WifiConnectionTarget&&) = default;
+  // Zeroes this copy's password before its buffer returns to the heap
+  // (defined beside the saved list in System_WiFiNetworks.cpp).
+  ~WifiConnectionTarget();
 };
 
 #if ENABLE_WIFI

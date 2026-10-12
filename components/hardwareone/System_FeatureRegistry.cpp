@@ -16,6 +16,7 @@
 #include "System_User.h"          // CommandSource enum
 #include "System_SetupWizardMode.h"  // Phase 5: new CLIMode-based wizard for cmd_featuresetup
 #include "System_Events.h"        // systemEventPost() — SYSEVT_FEATURE_TOGGLED
+#include "System_Automation.h"    // automationSetSystemEnabled() — owner-applied toggle
 #include <esp_heap_caps.h>
 
 // External settings
@@ -743,6 +744,18 @@ static_assert(kFeaturesJsonWorstCase() + 256 <= kFeaturesJsonBuf - 2,
   "the list behind a dedicated endpoint instead - see /api/devices -> "
   "buildDeviceRegistryJson for the shape.");
 
+// Features whose owner keeps runtime state beside the permission flag apply a
+// toggle through that owner, so `features <id> on|off` and the owner's own
+// command leave the same state. nullptr = a plain permission flag.
+using FeatureOwnerToggle = const char* (*)(bool enable);
+static FeatureOwnerToggle featureOwnerToggle(const FeatureEntry* f) {
+#if ENABLE_AUTOMATION
+  if (f->enabledSetting == &gSettings.automationEnabled) return automationSetSystemEnabled;
+#endif
+  (void)f;
+  return nullptr;
+}
+
 const char* cmd_features(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -927,7 +940,11 @@ const char* cmd_features(const String& argsInput) {
   const bool enable = parsed != 0;
   
   bool wasEnabled = *f->enabledSetting;
-  setSetting(*f->enabledSetting, enable);
+  if (FeatureOwnerToggle applyToggle = featureOwnerToggle(f)) {
+    if (const char* error = applyToggle(enable)) return error;
+  } else {
+    setSetting(*f->enabledSetting, enable);
+  }
 
   // Runtime enable/disable — post only on an actual state transition (a no-op
   // re-set to the same value must not post). subject=feature name, detail=on|off.

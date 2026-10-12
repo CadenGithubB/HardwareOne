@@ -25,6 +25,7 @@ void putSecretPreserving(JsonObject object, const char* key, const String& plain
                          const String& previousBlob);
 String getSecret(JsonObjectConst object, const char* key);
 void systemEventPost(int kind, const char* source, const char* detail = nullptr);
+void secureClearString(String& s);
 static constexpr int SYSEVT_SECRET_DECRYPT_FAILED = 1;
 static constexpr int SYSEVT_WIFI_NET_REMOVED = 2;
 

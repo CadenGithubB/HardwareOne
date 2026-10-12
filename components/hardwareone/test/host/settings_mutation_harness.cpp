@@ -73,6 +73,17 @@ static const SettingsModule settingsModule = {"fixture", "fixture", entries,
 static const SettingsModule* gSettingsModules[] = {nullptr, &settingsModule};
 static constexpr size_t gSettingsModuleCount = sizeof(gSettingsModules) / sizeof(gSettingsModules[0]);
 static bool compiledOut() { return false; }
+// An owner that keeps runtime state beside its permission flag (Automations).
+#define ENABLE_AUTOMATION 1
+static struct { bool automationEnabled = false; } gSettings;
+static std::vector<bool> ownerToggles;
+static const char* ownerToggleError = nullptr;
+[[maybe_unused]] static const char* automationSetSystemEnabled(bool enable) {
+  ownerToggles.push_back(enable);
+  if (ownerToggleError) return ownerToggleError;
+  gSettings.automationEnabled = enable;  // the owner applies permission + runtime
+  return nullptr;
+}
 static const FeatureEntry featureRegistry[] = {
   {"runtime", "Runtime", FEATURE_CAT_SENSOR, 8, FEATURE_FLAG_RUNTIME_TOGGLE,
    &featureField, nullptr, "runtime fixture"},
@@ -83,6 +94,8 @@ static const FeatureEntry featureRegistry[] = {
    &disabledFeatureField, compiledOut, "compiled-out fixture"},
   {"fixed", "Fixed", FEATURE_CAT_CORE, 1, FEATURE_FLAG_COMPILE_TIME,
    nullptr, nullptr, "compile-time fixture"},
+  {"automation", "Automations", FEATURE_CAT_SYSTEM, 8, FEATURE_FLAG_RUNTIME_TOGGLE,
+   &gSettings.automationEnabled, nullptr, "owner-applied fixture"},
 };
 static constexpr size_t featureRegistryCount = sizeof(featureRegistry) / sizeof(featureRegistry[0]);
 static constexpr size_t kFeaturesJsonBuf = 4096;
@@ -366,6 +379,22 @@ static void featureCommands() {
   clearEffects(); gCLIValidateOnly = true;
   check(std::string(cmd_features("runtime off")) == "VALID" && featureField, "feature validation changed setting");
   noMutationEffects();
+
+  // A feature whose owner keeps runtime state is toggled through that owner
+  // (same transition as `automation system enable|disable`), never written raw.
+  reset(); context = "owner-applied feature";
+  gSettings.automationEnabled = false; ownerToggles.clear(); ownerToggleError = nullptr;
+  check(!error(cmd_features("automation on")) && gSettings.automationEnabled, "owner toggle not applied");
+  check((ownerToggles == std::vector<bool>{true}), "owner transition not used");
+  check(eventCount(SYSEVT_FEATURE_TOGGLED) == 1 && eventCount(SYSEVT_SETTING_CHANGED) == 0 && writeCalls == 0,
+        "registry wrote the owner's flag itself or lost the feature event");
+  clearEffects(); ownerToggleError = "Error: owner refused";
+  check(std::string(cmd_features("automation off")) == "Error: owner refused" && gSettings.automationEnabled,
+        "owner refusal not returned");
+  check(eventCount(SYSEVT_FEATURE_TOGGLED) == 0, "refused toggle posted an event");
+  ownerToggleError = nullptr;
+  check(!error(cmd_features("automation off")) && !gSettings.automationEnabled && ownerToggles.size() == 3,
+        "owner disable not applied");
 }
 
 static void persistenceBoundaries() {

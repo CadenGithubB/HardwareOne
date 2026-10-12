@@ -82,6 +82,11 @@ static portMUX_TYPE sSensorLogSessionMux;
 static uint32_t sSensorLogSessionId;
 static void portENTER_CRITICAL(portMUX_TYPE*) {}
 static void portEXIT_CRITICAL(portMUX_TYPE*) {}
+// Health restarts stop a persisted session, never a transient live track, so
+// the saved-selection restore must not run on these paths.
+[[maybe_unused]] static bool gSensorLogTransient = false;
+static unsigned settingsRestores = 0;
+[[maybe_unused]] static void sensorLogRestoreSettings() { ++settingsRestores; }
 #define CAPTURE_HEALTHLOG_DEFAULT "/logging_captures/sensors/health.csv"
 static String gSensorLogPath;
 static uint32_t gSensorLogIntervalMs;
@@ -406,6 +411,9 @@ int main() {
   run("format entry point agreement", formatPaths);
 #if ENABLE_R1_HEALTH
   run("health session transitions", healthTransitions);
+  run("health restarts keep the saved selection", [] {
+    check(settingsRestores == 0, "a health restart ran the transient-session restore");
+  });
 #endif
   std::printf("sensorlog settings (health=%d): %d checks, %d failures\n",
               ENABLE_R1_HEALTH, checks, failures);

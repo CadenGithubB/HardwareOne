@@ -150,6 +150,7 @@ bool inputStartInternal() {
     gInputRunning = false;
     gInputConnected = false;
     (void)inputCacheInvalidate();
+    sensorStatusBumpWith("openinput@task_failed");  // Undo the enable bump above.
     ERROR_INPUTF("Failed to create Gamepad task");
     return false;
   }

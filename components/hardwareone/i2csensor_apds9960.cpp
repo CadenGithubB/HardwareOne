@@ -53,6 +53,37 @@ static bool apdsInvalidateCache() {
   sApdsCache.apdsColorValid = false;
   sApdsCache.apdsProximityValid = false;
   sApdsCache.apdsGestureValid = false;
+  sApdsCache.apdsLastGesture = 0;
+  sApdsCache.apdsLastGestureMs = 0;
+  return true;
+}
+
+// Register writes from the command task. The cache lock also pins the
+// driver's lifetime (apdsReleaseDriver deletes it only under that lock), and
+// the bus transaction keeps the writes from interleaving with the polling
+// task's transfers. False: lock or bus unavailable, or the driver is gone.
+template <typename Write>
+static bool apdsDeviceWrite(Write&& write) {
+  SensorCacheGuard guard(sApdsCacheMutex, pdMS_TO_TICKS(100), "apds.modeWrite");
+  if (!guard.held || !gAPDS9960) return false;
+  bool written = false;
+  i2cDeviceTransactionVoid((uint8_t)gSettings.apdsBus, I2C_ADDR_APDS, 100000, 500, [&]() {
+    write(*gAPDS9960);
+    written = true;
+  });
+  return written;
+}
+
+// Deletes the driver under the cache lock (see apdsDeviceWrite). A bus
+// transaction cannot pin it: transactions skip a degraded device, so a
+// shutdown after an auto-disable would never get to run its delete.
+static bool apdsReleaseDriver(TickType_t wait) {
+  SensorCacheGuard guard(sApdsCacheMutex, wait, "apds.release");
+  if (!guard.held) return false;
+  if (gAPDS9960) {
+    ps_delete(gAPDS9960);
+    gAPDS9960 = nullptr;
+  }
   return true;
 }
 
@@ -129,6 +160,17 @@ int apdsBuildDataJSON(char* buf, size_t bufSize) {
   return pos + n;
 }
 
+// Direction name for a decoded gesture code, or nullptr for an unknown code.
+static const char* apdsGestureName(uint8_t gesture) {
+  switch (gesture) {
+    case APDS9960_UP: return "UP";
+    case APDS9960_DOWN: return "DOWN";
+    case APDS9960_LEFT: return "LEFT";
+    case APDS9960_RIGHT: return "RIGHT";
+    default: return nullptr;
+  }
+}
+
 // Read commands share the polling task's snapshot. In particular, they never
 // consume gesture FIFO data or wait for color conversion on the command task.
 static const char* apdsReadSnapshot(APDSCache& reading) {
@@ -168,14 +210,15 @@ const char* cmd_apdsgesture(const String& argsInput) {
   if (const char* error = apdsReadSnapshot(reading)) return error;
   if (!gApdsGestureRunning) return "Error: [APDS] Gesture mode is off. Use 'apdsmode gesture on'.";
   if (!reading.apdsDataValid || !reading.apdsGestureValid) return "Error: [APDS] No cached gesture reading yet; retry shortly";
-  switch (reading.apdsGesture) {
-    case APDS9960_DOWN: return "Gesture: DOWN (latest sample)";
-    case APDS9960_UP: return "Gesture: UP (latest sample)";
-    case APDS9960_LEFT: return "Gesture: LEFT (latest sample)";
-    case APDS9960_RIGHT: return "Gesture: RIGHT (latest sample)";
-    case 0: return "No gesture detected in latest sample";
-    default: return "Error: [APDS] Unknown cached gesture";
-  }
+  // Report the latched last swipe: one poll sees only one FIFO batch, so the
+  // latest sample alone almost never holds a completed gesture.
+  if (reading.apdsLastGesture == 0) return "No gesture since start";
+  const char* dir = apdsGestureName(reading.apdsLastGesture);
+  if (!dir) return "Error: [APDS] Unknown cached gesture";
+  if (!ensureDebugBuffer()) return "Error: [APDS] Debug buffer unavailable";
+  const unsigned long ageMs = millis() - reading.apdsLastGestureMs;
+  snprintf(getDebugBuffer(), 1024, "Gesture: %s (%lu.%lu s ago)", dir, ageMs / 1000, (ageMs % 1000) / 100);
+  return getDebugBuffer();
 }
 
 const char* cmd_apdsread(const String& argsInput) {
@@ -259,24 +302,29 @@ const char* cmd_apdsmode(const String& argsInput) {
   mode.toLowerCase();
   bool enable = a.argBool(1, true);  // default to "on" if not specified
   
+  // Writes go through apdsDeviceWrite: one bus transaction, driver pinned.
+  static const char* const kModeWriteFailed = "Error: [APDS] Sensor busy or stopping; mode unchanged";
   if (mode == "color") {
-    gAPDS9960->enableColor(enable);
+    if (!apdsDeviceWrite([&](Adafruit_APDS9960& d) { d.enableColor(enable); })) return kModeWriteFailed;
     gApdsColorRunning = enable;
     sensorStatusBumpWith(enable ? "apdsmode color on" : "apdsmode color off");
     return enable ? "[APDS] Color mode enabled" : "[APDS] Color mode disabled";
   } else if (mode == "proximity" || mode == "prox") {
-    gAPDS9960->enableProximity(enable);
+    if (!apdsDeviceWrite([&](Adafruit_APDS9960& d) { d.enableProximity(enable); })) return kModeWriteFailed;
     gApdsProximityRunning = enable;
     sensorStatusBumpWith(enable ? "apdsmode proximity on" : "apdsmode proximity off");
     return enable ? "[APDS] Proximity mode enabled" : "[APDS] Proximity mode disabled";
   } else if (mode == "gesture") {
-    if (enable) {
-      gAPDS9960->enableProximity(true);
-      gAPDS9960->enableGesture(true);
-    } else {
-      gAPDS9960->enableGesture(false);
-      gAPDS9960->enableProximity(false);
-    }
+    const bool written = apdsDeviceWrite([&](Adafruit_APDS9960& d) {
+      if (enable) {
+        d.enableProximity(true);
+        d.enableGesture(true);
+      } else {
+        d.enableGesture(false);
+        d.enableProximity(false);
+      }
+    });
+    if (!written) return kModeWriteFailed;
     gApdsGestureRunning = enable;
     sensorStatusBumpWith(enable ? "apdsmode gesture on" : "apdsmode gesture off");
     return enable ? "[APDS] Gesture mode enabled" : "[APDS] Gesture mode disabled";
@@ -325,6 +373,8 @@ bool apdsStartInternal() {
     sApdsCache.apdsClear = 0;
     sApdsCache.apdsProximity = 0;
     sApdsCache.apdsGesture = 0;
+    sApdsCache.apdsLastGesture = 0;
+    sApdsCache.apdsLastGestureMs = 0;
   }
   INFO_APDS_LIFECYCLEF("Cleaned up stale cache from previous run");
 
@@ -336,8 +386,21 @@ bool apdsStartInternal() {
     }
   }
 
-  // Enable color mode by default (user can change with apdsmode command)
-  gAPDS9960->enableColor(true);
+  // Enable color mode by default (user can change with apdsmode command). The
+  // write shares the bus with every other device, so it runs as a transaction.
+  bool colorEnabled = false;
+  i2cDeviceTransactionVoid((uint8_t)gSettings.apdsBus, I2C_ADDR_APDS, 100000, 500, [&]() {
+    gAPDS9960->enableColor(true);
+    colorEnabled = true;
+  });
+  if (!colorEnabled) {
+    ERROR_APDSF("Error: Could not enable APDS color mode (bus unavailable)");
+    gApdsConnected = false;
+    // No mode flag is set yet, so no command can hold the driver.
+    ps_delete(gAPDS9960);
+    gAPDS9960 = nullptr;
+    return false;
+  }
   gApdsRunning = true;
   gApdsColorRunning = true;
   INFO_APDS_LIFECYCLEF("Color mode enabled by default");
@@ -353,8 +416,12 @@ bool apdsStartInternal() {
     i2cDeviceTransactionVoid((uint8_t)gSettings.apdsBus, I2C_ADDR_APDS, 100000, 500, [&]() {
       gAPDS9960->enableColor(false);
     });
-    ps_delete(gAPDS9960);
-    gAPDS9960 = nullptr;
+    // A mode write that passed its checks before the flags dropped holds the
+    // cache lock; delete under it. Without the lock the worker still owns it.
+    if (!apdsReleaseDriver(pdMS_TO_TICKS(600))) {
+      ps_delete(gAPDS9960);
+      gAPDS9960 = nullptr;
+    }
     return false;
   }
 
@@ -452,18 +519,135 @@ const size_t apdsCommandsCount = sizeof(apdsCommands) / sizeof(apdsCommands[0]);
 // Purpose: Continuously reads color/proximity/gesture data from APDS9960 sensor
 // Stack: 3072 BYTES (3 KB) | Priority: 1 | Core: Any
 // Lifecycle: Created by cmd_apdsstart, deleted when all modes disabled
-// Polling: Fixed 100ms interval | I2C Clock: 100kHz
+// Polling: apdsDevicePollMs (default 200 ms); gesture FIFO at least every 100 ms
+// I2C Clock: 100kHz
 //
 // Cleanup Strategy:
 //   1. Check if all modes (color/proximity/gesture) are disabled
-//   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
-//   3. Delete sensor object and invalidate cache
-//   4. Release mutex and delete task
+//   2. Invalidate the cache, then delete the sensor object under the cache
+//      lock that mode writes hold across their bus transaction
+//   3. Delete task
 // ============================================================================
 
 // Proximity presence latch. Hysteresis (>200 arrive / <100 leave) plus
 // file-scope reset on task start keeps brief dropouts from flapping edges.
 static bool gApdsPresent = false;
+
+// One polling step, run by apdsTask while a mode is on. Colour and proximity
+// follow the user's interval; gesture mode drains the FIFO at least every
+// 100 ms, because the vendored decoder pairs the two halves of a swipe only
+// within 300 ms of motion and apdsDevicePollMs allows up to 5000. A gesture
+// read is at most three short transfers. Returns false after an auto-disable,
+// so the caller loops back to the clean shutdown.
+static bool apdsPollDevice(unsigned long nowMs, unsigned long pollMs,
+                           unsigned long& lastSampleMs, unsigned long& lastGestureMs) {
+  const unsigned long gesturePollMs = pollMs < 100 ? pollMs : 100;
+  const bool sampleDue = (nowMs - lastSampleMs) >= pollMs;
+  const bool gestureDue = gApdsGestureRunning && (nowMs - lastGestureMs) >= gesturePollMs;
+  if (!sampleDue && !gestureDue) return true;
+
+  const uint8_t apdsBus = (uint8_t)gSettings.apdsBus;
+  uint16_t red = 0, green = 0, blue = 0, clear = 0;
+  uint8_t proximity = 0;
+  uint8_t gesture = 0;
+  bool colorRead = false, proximityRead = false, gestureRead = false;
+
+  // Wait at most 100ms for bus admission. Gesture sampling consumes one
+  // available FIFO batch; it never waits for the next half of a swipe.
+  const bool result = i2cTaskWithTimeout(apdsBus, I2C_ADDR_APDS, 100000, 100, [&]() -> bool {
+    if (sampleDue && gApdsColorRunning && gAPDS9960->colorDataReady()) {
+      gAPDS9960->getColorData(&red, &green, &blue, &clear);
+      colorRead = true;
+    }
+    if (sampleDue && gApdsProximityRunning) {
+      proximity = gAPDS9960->readProximity();
+      proximityRead = true;
+    }
+    if (gestureDue && gApdsGestureRunning) {
+      gesture = gAPDS9960->readGesture();
+      gestureRead = true;
+    }
+    return true;
+  });
+
+  if (result) {
+    // Note: I2CDevice::recordSuccess() called automatically by transaction
+    // which resets consecutiveErrors - no local counter needed
+    {
+      SensorCacheGuard g(sApdsCacheMutex, pdMS_TO_TICKS(50), "apds.pollWrite");
+      if (g.held) {
+        // A mode without a new sample keeps its last one (colour "not ready"
+        // is no new sample); a mode that is off reads as zero and invalid.
+        if (colorRead) {
+          sApdsCache.apdsRed = red;
+          sApdsCache.apdsGreen = green;
+          sApdsCache.apdsBlue = blue;
+          sApdsCache.apdsClear = clear;
+          sApdsCache.apdsColorValid = true;
+        } else if (!gApdsColorRunning) {
+          sApdsCache.apdsRed = sApdsCache.apdsGreen = sApdsCache.apdsBlue = sApdsCache.apdsClear = 0;
+          sApdsCache.apdsColorValid = false;
+        }
+        if (proximityRead) {
+          sApdsCache.apdsProximity = proximity;
+          sApdsCache.apdsProximityValid = true;
+        } else if (!gApdsProximityRunning) {
+          sApdsCache.apdsProximity = 0;
+          sApdsCache.apdsProximityValid = false;
+        }
+        if (gestureRead) {
+          sApdsCache.apdsGesture = gesture;
+          sApdsCache.apdsGestureValid = true;
+          if (gesture != 0) {  // Latched for 'apdsgesture'.
+            sApdsCache.apdsLastGesture = gesture;
+            sApdsCache.apdsLastGestureMs = nowMs;
+          }
+        } else if (!gApdsGestureRunning) {
+          sApdsCache.apdsGesture = 0;
+          sApdsCache.apdsGestureValid = false;
+        }
+        sApdsCache.apdsLastUpdate = nowMs;
+        sApdsCache.apdsDataValid = sApdsCache.apdsColorValid || sApdsCache.apdsProximityValid ||
+                                   sApdsCache.apdsGestureValid;
+      }
+    }
+    // Bus event per detected swipe. The driver returns nonzero only on
+    // the poll where a gesture completed, so post-on-read is edge-safe.
+    if (gestureRead && gesture != 0) {
+      const char* dir = apdsGestureName(gesture);
+      systemEventPost(SYSEVT_GESTURE, dir ? dir : "?");
+    }
+    // Proximity presence with hysteresis: arrive above 200, leave below
+    // 100 (of 255). Edge-latched so we post once per crossing; only a pass
+    // that sampled proximity can move it.
+    if (proximityRead) {
+      if (!gApdsPresent && proximity > 200) {
+        gApdsPresent = true;
+        systemEventPost(SYSEVT_PRESENCE_DETECTED, "proximity");
+      } else if (gApdsPresent && proximity < 100) {
+        gApdsPresent = false;
+        systemEventPost(SYSEVT_PRESENCE_CLEARED, "proximity");
+      }
+    }
+  } else if (i2cShouldAutoDisable(I2C_ADDR_APDS, apdsBus)) {
+    // Note: I2CDevice::recordError() called automatically by transaction;
+    // the centralized health tracking decides on auto-disable.
+    uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_APDS, apdsBus);
+    gApdsColorRunning = false;
+    gApdsProximityRunning = false;
+    gApdsGestureRunning = false;
+    gApdsConnected = false;
+    sensorStatusBumpWith("apds@auto_disabled");
+    DEBUG_APDS_LIFECYCLEF("APDS auto-disabled after %u consecutive I2C failures", errors);
+    logSystemEvent("SENSOR", "APDS auto-disabled after %u consecutive I2C failures", errors);
+    { char det[24]; snprintf(det, sizeof(det), "%u I2C errors", errors);
+      systemEventPost(SYSEVT_SENSOR_FAULT, "APDS", det); }
+    return false;  // Timestamps stay; the shutdown path runs next.
+  }
+  if (sampleDue) lastSampleMs = nowMs;
+  if (gestureDue) lastGestureMs = nowMs;
+  return true;
+}
 
 void apdsTask(void* parameter) {
   gApdsPresent = false;
@@ -472,6 +656,7 @@ void apdsTask(void* parameter) {
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   INFO_APDS_LIFECYCLEF("[MODULAR] apdsTask() running from i2csensor_apds9960.cpp");
   unsigned long lastApdsRead = 0;
+  unsigned long lastGestureRead = 0;
   unsigned long lastStackLog = 0;
   // Note: Failure tracking now handled by centralized I2CDevice health system
   // Use i2cShouldAutoDisable() instead of local counters
@@ -489,9 +674,11 @@ void apdsTask(void* parameter) {
         vTaskDelay(pdMS_TO_TICKS(10));
         continue;
       }
-      if (gAPDS9960 != nullptr) {
-        ps_delete(gAPDS9960);
-        gAPDS9960 = nullptr;
+      // Mode writes hold the cache lock across their bus transaction, so the
+      // driver is deleted only under that lock.
+      if (!apdsReleaseDriver(pdMS_TO_TICKS(50))) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        continue;
       }
       SENSOR_TASK_EXIT(APDS, gApdsTaskHandle);
     }
@@ -519,100 +706,14 @@ void apdsTask(void* parameter) {
     
     const uint8_t apdsBus = (uint8_t)gSettings.apdsBus;
     if (anyEnabled && gApdsConnected && !pollPaused(apdsBus)) {
-      unsigned long apdsPollMs = (gSettings.apdsDevicePollMs > 0) ? (unsigned long)gSettings.apdsDevicePollMs : 200;
-      
-      if ((nowMs - lastApdsRead) >= apdsPollMs) {
-        uint16_t red = 0, green = 0, blue = 0, clear = 0;
-        uint8_t proximity = 0;
-        uint8_t gesture = 0;
-        bool colorRead = false, proximityRead = false, gestureRead = false;
-        
-        // Wait at most 100ms for bus admission. Gesture sampling consumes one
-        // available FIFO batch; it never waits for the next half of a swipe.
-        bool result = i2cTaskWithTimeout(apdsBus, I2C_ADDR_APDS, 100000, 100, [&]() -> bool {
-          if (gApdsColorRunning && gAPDS9960->colorDataReady()) {
-            gAPDS9960->getColorData(&red, &green, &blue, &clear);
-            colorRead = true;
-          }
-          if (gApdsProximityRunning) {
-            proximity = gAPDS9960->readProximity();
-            proximityRead = true;
-          }
-          if (gApdsGestureRunning) {
-            gesture = gAPDS9960->readGesture();
-            gestureRead = true;
-          }
-          return true;
-        });
-
-        if (result) {
-          // Note: I2CDevice::recordSuccess() called automatically by transaction
-          // which resets consecutiveErrors - no local counter needed
-          
-          {
-            SensorCacheGuard g(sApdsCacheMutex, pdMS_TO_TICKS(50), "apds.pollWrite");
-            if (g.held) {
-              sApdsCache.apdsRed = red;
-              sApdsCache.apdsGreen = green;
-              sApdsCache.apdsBlue = blue;
-              sApdsCache.apdsClear = clear;
-              sApdsCache.apdsProximity = proximity;
-              sApdsCache.apdsGesture = gesture;
-              sApdsCache.apdsLastUpdate = nowMs;
-              sApdsCache.apdsColorValid = colorRead;
-              sApdsCache.apdsProximityValid = proximityRead;
-              sApdsCache.apdsGestureValid = gestureRead;
-              sApdsCache.apdsDataValid = colorRead || proximityRead || gestureRead;
-            }
-          }
-          // Bus event per detected swipe. The driver returns nonzero only on
-          // the poll where a gesture completed, so post-on-read is edge-safe.
-          if (gApdsGestureRunning && gesture != 0) {
-            const char* dir = (gesture == APDS9960_UP)      ? "UP"
-                              : (gesture == APDS9960_DOWN)  ? "DOWN"
-                              : (gesture == APDS9960_LEFT)  ? "LEFT"
-                              : (gesture == APDS9960_RIGHT) ? "RIGHT"
-                                                            : "?";
-            systemEventPost(SYSEVT_GESTURE, dir);
-          }
-          // Proximity presence with hysteresis: arrive above 200, leave below
-          // 100 (of 255). Edge-latched so we post once per crossing.
-          if (gApdsProximityRunning) {
-            if (!gApdsPresent && proximity > 200) {
-              gApdsPresent = true;
-              systemEventPost(SYSEVT_PRESENCE_DETECTED, "proximity");
-            } else if (gApdsPresent && proximity < 100) {
-              gApdsPresent = false;
-              systemEventPost(SYSEVT_PRESENCE_CLEARED, "proximity");
-            }
-          }
-        } else {
-          // Note: I2CDevice::recordError() called automatically by transaction
-          // Check centralized health tracking for auto-disable decision
-          if (i2cShouldAutoDisable(I2C_ADDR_APDS, (uint8_t)gSettings.apdsBus)) {
-            uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_APDS,
-                                                     (uint8_t)gSettings.apdsBus);
-            gApdsColorRunning = false;
-            gApdsProximityRunning = false;
-            gApdsGestureRunning = false;
-            gApdsConnected = false;
-            sensorStatusBumpWith("apds@auto_disabled");
-            DEBUG_APDS_LIFECYCLEF("APDS auto-disabled after %u consecutive I2C failures", errors);
-            logSystemEvent("SENSOR", "APDS auto-disabled after %u consecutive I2C failures", errors);
-            { char det[24]; snprintf(det, sizeof(det), "%u I2C errors", errors);
-              systemEventPost(SYSEVT_SENSOR_FAULT, "APDS", det); }
-            // 'continue' (not 'break') — see the same note on the stack-safety
-            // bailout above. `break` here left the while(true) loop and RETURNED
-            // from the task entry point, which FreeRTOS turns into a jump to
-            // address 0 (InstrFetchProhibited panic + reboot) rather than a task
-            // exit. It also skipped the `ps_delete(gAPDS9960)` + cache-invalidate the
-            // shutdown path performs. All three running flags are cleared above,
-            // so the top-of-loop check now runs the clean SENSOR_TASK_EXIT.
-            continue;
-          }
-        }
-        lastApdsRead = nowMs;
-      }
+      const unsigned long apdsPollMs = (gSettings.apdsDevicePollMs > 0) ? (unsigned long)gSettings.apdsDevicePollMs : 200;
+      // 'continue' (not 'break') after an auto-disable — see the same note on
+      // the stack-safety bailout above. `break` here left the while(true) loop
+      // and RETURNED from the task entry point, which FreeRTOS turns into a
+      // jump to address 0 (InstrFetchProhibited panic + reboot) rather than a
+      // task exit. The poll clears all three running flags, so the
+      // top-of-loop check now runs the clean SENSOR_TASK_EXIT.
+      if (!apdsPollDevice(nowMs, apdsPollMs, lastApdsRead, lastGestureRead)) continue;
     }
     
     vTaskDelay(pdMS_TO_TICKS(10));

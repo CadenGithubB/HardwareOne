@@ -61,6 +61,12 @@ def generated(component: Path, baseline: bool) -> str:
                   extract_block((component / "i2csensor_mlx90640_oled.h").read_text(),
                                 "static void displayThermalVisual()")]
     if not baseline:
+        # Buffers are allocated at start; the poll (run inside its bus
+        # transaction) must not allocate or take the cache lock to do so.
+        poll = extract_block(owner, "\nbool thermalPoll() ")
+        require('"cache.thermal"' not in poll and '"cache.thermal.interp"' not in poll and
+                "lockThermalCache(pdMS_TO_TICKS(100))" not in poll,
+                "thermalPoll allocates cache buffers inside its transaction")
         task = extract_block(owner, "void thermalTask(void* parameter)")
         functions.append("static void runStopBranch() { while (true) {\n" +
                          extract_block(task, "if (!gThermalRunning)") + "\nbreak; } }")

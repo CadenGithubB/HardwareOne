@@ -176,6 +176,25 @@ static void lifecycle() {
   }
 }
 
+// Permission revoked by a writer other than the owner (settings page, import)
+// stops the scheduler on its next tick; a later grant stays idle until the
+// owner starts it again (`automation system enable`).
+static void permissionRevoked() {
+  reset(futureRules);
+  CHECK(startAutomationScheduler() && automationSchedulerRunning());
+  automationTick();
+  CHECK(ticks == 1);
+  gSettings.automationEnabled = false;
+  automationTick();
+  CHECK(!automationSchedulerRunning() && ticks == 1 && allocations == releases);
+  gSettings.automationEnabled = true;
+  automationTick();
+  CHECK(!automationSchedulerRunning() && ticks == 1);
+  CHECK(startAutomationScheduler() && automationSchedulerRunning());
+  automationTick();
+  CHECK(ticks == 2);
+}
+
 static void timing() {
   reset(R"({"automations":[
     {"id":1,"enabled":false,"triggers":[{"type":"interval","nextAt":1},{"type":"event","on":"edge"}]},
@@ -380,6 +399,7 @@ static void concurrentRequests() {
 
 int main() {
   lifecycle();
+  permissionRevoked();
   timing();
   invalidationAndOverlap();
   concurrentRequests();

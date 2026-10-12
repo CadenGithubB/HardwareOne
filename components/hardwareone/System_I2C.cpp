@@ -7,6 +7,7 @@
 
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <atomic>
 #include <Wire.h>
 #include <esp_log.h>   // esp_log_level_set — quiet probe NACKs during detect scan
 #include <soc/soc_caps.h>  // SOC_GPIO_PIN_COUNT — board's GPIO count for pin-range limits
@@ -428,6 +429,21 @@ static bool sensorHasTask(I2CDeviceType sensor) {
   }
 }
 
+// Admitted starts the queue worker has not settled yet. A stop that cancels
+// one (queued, or dropped while starting) still closes it with the stop event;
+// a stop with nothing running, starting or queued publishes nothing.
+static std::atomic<bool> sSensorStartOutstanding[I2C_DEVICE_COUNT];
+
+bool enqueueDeviceStart(I2CDeviceType device) {
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr || device < 0 || device >= I2C_DEVICE_COUNT) return false;
+  // Marked before the request is visible to the worker, which clears it.
+  const bool wasOutstanding = sSensorStartOutstanding[device].exchange(true);
+  if (mgr->enqueueDeviceStart(device)) return true;
+  if (!wasOutstanding) sSensorStartOutstanding[device] = false;
+  return false;
+}
+
 // Externally linkable so HAL_Input.cpp's unified cmd_openinput can dispatch
 // through the same queue as the other sensor start commands.
 bool requestSensorStart(I2CDeviceType sensor, const char* eventTag, SensorStartRefusal* why) {
@@ -477,7 +493,8 @@ const char* sensorStartRefusalText(SensorStartRefusal why) {
 
 // Command wrapper: the only place that renders the admission outcome, into
 // cmd_exec's debug buffer. Message texts are unchanged.
-const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName, const char* eventTag) {
+const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName, const char* eventTag,
+                                   const char* hint) {
 #if ENABLE_GPIO_ENCODER
   if (sensor == I2C_DEVICE_INPUT) return "Error: GPIO input is not an I2C device; use openinput";
 #endif
@@ -487,6 +504,8 @@ const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName
   if (requestSensorStart(sensor, eventTag, &why)) {
     snprintf(getDebugBuffer(), 1024, "%s sensor queued for start (position %d, queue depth: %d)",
              displayName, getQueuePosition(sensor), getQueueDepth());
+    // A refusal is its own answer; the next step only follows a queued start.
+    if (hint) cliHint(hint);
     return getDebugBuffer();
   }
   switch (why) {
@@ -2340,6 +2359,10 @@ const char* deviceTypeDisplayName(I2CDeviceType sensor) {
 }
 
 bool requestSensorStop(I2CDeviceType sensor) {
+  // Same admission as a start: with the bus disabled (fixed at boot) no queue
+  // worker runs and nothing was started, so refuse instead of allocating the
+  // manager for a request nothing would process.
+  if (!gI2CBusRunning) return false;
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   return mgr && mgr->enqueueDeviceStop(sensor);
 }
@@ -2352,6 +2375,19 @@ static bool sSensorStopAwaitingCleanup[I2C_DEVICE_COUNT] = {};
 // close during initialization is applied after the owner returns, so teardown
 // cannot free resources still being used by the starter.
 static void applySensorStop(I2CDeviceType sensor) {
+  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return;
+  // Only a sensor that was running, still has a task, was initialized without
+  // one (FM tune/boot, RTC), or had an admitted start this stop cancels gets a
+  // cleanup latch and a stop event. Stopping an idle sensor publishes nothing.
+  const bool startOutstanding = sSensorStartOutstanding[sensor].exchange(false);
+  const bool wasActive = startOutstanding || sensorIsRunning(sensor) || sensorHasTask(sensor)
+#if ENABLE_FM_RADIO
+      || (sensor == I2C_DEVICE_FMRADIO && gRadioInitialized)
+#endif
+#if ENABLE_RTC_SENSOR
+      || (sensor == I2C_DEVICE_RTC && gRtcConnected)
+#endif
+      ;
   // Set enabled flag to false and record stop time (common boilerplate)
   switch (sensor) {
     case I2C_DEVICE_THERMAL:
@@ -2420,6 +2456,7 @@ static void applySensorStop(I2CDeviceType sensor) {
     default: return;
   }
 
+  if (!wasActive) return;
   sSensorStopAwaitingCleanup[sensor] = true;
   sensorStatusBumpWith("stop@requested");
 }
@@ -2879,12 +2916,14 @@ void sensorQueueProcessorTask(void* param) {
       // device. Do not initialize a request that has since been cancelled.
       if (mgr->hasPendingDeviceStop(req.device)) continue;
       if (sensorIsRunning(req.device)) {
+        sSensorStartOutstanding[req.device] = false;  // Settled: nothing to start.
         sensorStatusBumpWith("queue@already_running");
         continue;
       }
       if (sensorHasTask(req.device)) {
         BROADCAST_PRINTF("Error: [%s] Previous task is still cleaning up; retry open shortly",
                          deviceTypeDisplayName(req.device));
+        sSensorStartOutstanding[req.device] = false;
         announceSensorStart(deviceTypeDisplayName(req.device), false);
         continue;
       }
@@ -2898,6 +2937,7 @@ void sensorQueueProcessorTask(void* param) {
       // received during it is the next request processed; suppress stale
       // success output and let that stop trigger owner-task cleanup.
       if (!mgr->hasPendingDeviceStop(req.device)) {
+        sSensorStartOutstanding[req.device] = false;  // Settled by its outcome.
         announceSensorStart(deviceTypeDisplayName(req.device), started);
         if (started) broadcastStartedSensor(req.device);
       }

@@ -2608,10 +2608,12 @@ const char* cmd_uartlink(const String& argsInput) {
 
 const char* cmd_uartlinkbaud(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  const int before = gSettings.uartLinkBaud;
   const char* r = handleSettingCommand(findOutputEntry("uartLinkBaud"), a);
-  // Live-apply a successful set by requesting a restart on the loop task. A
-  // bare get (no args) or a rejected value must not bounce the link.
-  if (a.length() && r && strncmp(r, "Error", 5) != 0 && uartLinkIsRunning()) {
+  // Live-apply only an actual change by requesting a restart on the loop task.
+  // A bare get, a rejected value or a re-set to the current baud must not
+  // bounce the link (the reply string cannot tell those apart).
+  if (gSettings.uartLinkBaud != before && uartLinkIsRunning()) {
     uartLinkRequestRestart();
   }
   return r;

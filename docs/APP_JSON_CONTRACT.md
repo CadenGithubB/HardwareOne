@@ -92,7 +92,7 @@ Note: read the global on/off via `automation system status json`, not from
 | Command (+`json`) | Reply shape |
 |---|---|
 | `blestatus` (alias `bleread`) | `{"schema":1,"initialized","state","activeConnections","maxConnections","totalConnections","commandsReceived","responsesSent","connections":[{"index","user","mac","connectedSec","commands"}]}` |
-| `wifistatus` (alias `wifiread`) | `{"schema":1,"connected","ssid","ip","rssi","mac"}` or `{"schema":1,"connected":false,"savedSsid","mac"}` |
+| `wifistatus` (alias `wifiread`) | `{"schema":1,"connected","ssid","ip","rssi","mac"}` or `{"schema":1,"connected":false,"savedSsid"?,"mac"}` (`savedSsid` is omitted when the saved list cannot be read) |
 | `wifilist` | `{"schema":1,"networks":[{"index","priority","ssid","hidden","primary"}],"count"}` |
 | `mqttstatus` | `{"schema":1,"enabled","connected","host","port","user","baseTopic","publishIntervalMs","lastError"?}` |
 | `httpstatus` | `{"schema":1,"running","https","port"}` (stub: `{"schema":1,"running":false,"compiled":false}`) |

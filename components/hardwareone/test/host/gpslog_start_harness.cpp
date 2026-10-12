@@ -62,12 +62,16 @@ static const char* startupReply;
 static const char* autostartReply;
 static unsigned queuedRequests, configuredStarts;
 static bool startSawAutoStart;
-const char* cmd_sensorstart_queued(int device, const char* name, const char* origin) {
+const char* cmd_sensorstart_queued(int device, const char* name, const char* origin,
+                                   const char* hint = nullptr) {
   if (device != I2C_DEVICE_GPS || std::strcmp(name, "GPS") ||
       std::strcmp(origin, "opengps@enqueue")) std::abort();
   ++queuedRequests;
   actions.emplace_back("gps request");
-  return borrowed(queueReply);
+  const char* reply = borrowed(queueReply);
+  // Production prints the next-step hint only after an accepted start.
+  if (hint && reply && std::strncmp(reply, "Error", 5) != 0) cliHint(hint);
+  return reply;
 }
 static bool succeeded(const char* response) {
   return response && std::strncmp(response, "Error", 5) != 0;

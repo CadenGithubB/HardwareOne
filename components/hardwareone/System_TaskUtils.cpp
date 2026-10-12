@@ -707,8 +707,18 @@ void reportAllTaskStacks() {
     }
     return false;
   };
+  // Stack high-water mark from the snapshot row (uxTaskGetSystemState fills
+  // it, as cmd_taskstats relies on). Never a live query by captured handle.
+  auto watermarkInSnapshot = [&](TaskHandle_t h) -> UBaseType_t {
+    for (UBaseType_t i = 0; i < numTasks; i++) {
+      if (taskArray[i].xHandle == h) return taskArray[i].usStackHighWaterMark;
+    }
+    return 0;
+  };
   
   // Skip tasks whose stop was requested, including cleanup still in progress.
+  // This narrows the rows to running tasks; it does not pin a handle (a task
+  // can still exit after this check), so rows read only snapshot fields.
   const bool taskAlive[] = {
     espnowSnapshotValid,                                            // espnow_task
     espnowTxSnapshotValid,                                         // espnow_tx
@@ -732,23 +742,15 @@ void reportAllTaskStacks() {
     if (!kt.handle || !alive) continue;
     if (!isTaskHandleInSnapshot(kt.handle)) continue;
     
-    // BYTES, not words — kt.stackWords holds the byte count passed to
-    // xTaskCreate, and the HWM is in bytes too. See System_TaskUtils.h.
-    // The TX task can be deleted by closeespnow. Its watermark was sampled
-    // while the TX lifecycle-owner mutex prevented deletion; never issue a
-    // later FreeRTOS task query with the now-unpinned handle.
-    UBaseType_t watermark = (ktIdx == 1)
-        ? espnowWatermark
-        : (ktIdx == 2) ? espnowTxWatermark
-                       : uxTaskGetStackHighWaterMark(kt.handle);
-
     // Find the snapshot row by handle (names can be stale/duplicate): it
-    // carries the measured stack/TCB blocks and the CPU counters. cpuPercent
-    // is lifetime; dCpu is the per-interval delta (n/a until a baseline exists).
+    // carries the measured stack/TCB blocks, the CPU counters and the stack
+    // high-water mark sampled with the snapshot. cpuPercent is lifetime; dCpu
+    // is the per-interval delta (n/a until a baseline exists).
     uint32_t cpuPercent = 0;
     int dCpu = -1;
     uint32_t measuredStack = 0;
     uint32_t measuredTcb = 0;
+    UBaseType_t snapshotWatermark = 0;
     for (UBaseType_t i = 0; i < numTasks; i++) {
       if (taskArray[i].xHandle == kt.handle) {
         uint32_t curRun = (uint32_t)taskArray[i].ulRunTimeCounter;
@@ -756,9 +758,21 @@ void reportAllTaskStacks() {
         dCpu = deltaCpuPercent(kt.handle, curRun, totalDelta);
         measuredStack = taskMeasure[i].stackBytes;
         measuredTcb = taskMeasure[i].tcbBytes;
+        snapshotWatermark = taskArray[i].usStackHighWaterMark;
         break;
       }
     }
+
+    // BYTES, not words — kt.stackWords holds the byte count passed to
+    // xTaskCreate, and the HWM is in bytes too. See System_TaskUtils.h.
+    // No live FreeRTOS query here: a sensor or ESP-NOW task may have been
+    // deleted since its handle was captured. The snapshot row was filled by
+    // uxTaskGetSystemState (as cmd_taskstats uses it); the ESP-NOW rows use
+    // watermarks sampled while their owners held the task alive.
+    UBaseType_t watermark = (ktIdx == 1)
+        ? espnowWatermark
+        : (ktIdx == 2) ? espnowTxWatermark
+                       : snapshotWatermark;
     char dc[16];  // sized for worst-case %4d%% so -Wformat-truncation stays quiet
     if (dCpu < 0) snprintf(dc, sizeof(dc), "%5s", "-");
     else          snprintf(dc, sizeof(dc), "%4d%%", dCpu);
@@ -931,12 +945,12 @@ void reportAllTaskStacks() {
     bool alive = taskAlive[warnIdx++];
     if (!kt.handle || !alive) continue;
     if (!isTaskHandleInSnapshot(kt.handle)) continue;
-    // Only call expensive FreeRTOS function when needed for warning check
+    // Stack warnings stay behind the performance debug flag.
     if (!isDebugFlagSet(DEBUG_PERFORMANCE)) continue;
     UBaseType_t watermark = (warnIdx == 1)
         ? espnowWatermark
         : (warnIdx == 2) ? espnowTxWatermark
-                         : uxTaskGetStackHighWaterMark(kt.handle);
+                         : watermarkInSnapshot(kt.handle);
     uint32_t freePercent = (watermark * 100) / kt.stackWords;
     if (freePercent < 25) {
       BROADCAST_PRINTF("  [!] %-16s CRITICAL: Only %u%% stack free!", 

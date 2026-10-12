@@ -2692,11 +2692,10 @@ void hardwareone_loop() {
   }
 
 #if ENABLE_AUTOMATION
-  // Settings grant permission; the scheduler owns runtime state and decides
-  // when due work, file changes or subscribed events require a full scan.
-  if (gSettings.automationEnabled) {
-    automationTick();
-  }
+  // Settings grant permission; the scheduler owns runtime state. It checks
+  // the permission itself (stopping when it was revoked elsewhere) and
+  // decides when due work, file changes or subscribed events need a scan.
+  automationTick();
 #endif
 
   // Render human-facing notifications for mesh-origin bus events (peer

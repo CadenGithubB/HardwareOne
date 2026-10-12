@@ -345,9 +345,8 @@ WifiScanResult wifiScanForEach(bool includeHidden, WifiScanVisitor visitor,
 
 const char* cmd_wifiinfo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  WifiNetworkSnapshot saved;
-  if (!wifiNetworkSnapshot(saved)) return "Error: saved WiFi networks unavailable";
-
+  // The saved list is copied only where it is shown (not connected). A failed
+  // copy (heap pressure) degrades that one field; the status itself stays.
   // JSON: returned to the caller only. The text path below still uses
   // broadcastOutput exactly as before, so plain `wifistatus` is unchanged.
   if (argWantsJson(argsInput)) {
@@ -362,8 +361,12 @@ const char* cmd_wifiinfo(const String& argsInput) {
     } else {
       // Top-priority saved network (array is priority-sorted). The old
       // gSettings.wifiSSID here was a dead legacy field frozen at "" — it
-      // showed a blank even with networks saved.
-      doc["savedSsid"] = (saved.count > 0) ? saved.entries[0].ssid : String("");
+      // showed a blank even with networks saved. The key is omitted (as when
+      // connected) if the saved list cannot be copied.
+      WifiNetworkSnapshot saved;
+      if (wifiNetworkSnapshot(saved)) {
+        doc["savedSsid"] = (saved.count > 0) ? saved.entries[0].ssid : String("");
+      }
     }
     doc["radioOn"] = wifiRadioOn();  // RADIO axis (power) — separate from `connected` (association)
     doc["radioHeldForEspnow"] = (wifiRadioState() == WIFI_RADIO_UP_FOR_ESPNOW);
@@ -389,8 +392,10 @@ const char* cmd_wifiinfo(const String& argsInput) {
     broadcastOutput(wifiRadioState() == WIFI_RADIO_UP_FOR_ESPNOW
                       ? "WiFi: Not connected (radio up, held for ESP-NOW)"
                       : "WiFi: Not connected");
+    WifiNetworkSnapshot saved;
+    const bool listed = wifiNetworkSnapshot(saved);
     snprintf(getDebugBuffer(), 1024, "  Saved SSID: %s",
-             (saved.count > 0) ? saved.entries[0].ssid.c_str() : "(none)");
+             !listed ? "(unavailable)" : (saved.count > 0) ? saved.entries[0].ssid.c_str() : "(none)");
     broadcastOutput(getDebugBuffer());
     snprintf(getDebugBuffer(), 1024, "  MAC: %s", WiFi.macAddress().c_str());
     broadcastOutput(getDebugBuffer());
@@ -610,7 +615,15 @@ bool connectToBestWiFiNetwork() {
 
   sortWiFiByPriority();
   WifiNetworkSnapshot saved;
-  if (!wifiNetworkSnapshot(saved) || saved.count == 0) return false;
+  // A failed copy is transient heap pressure, not "no networks": retry once.
+  if (!wifiNetworkSnapshot(saved)) {
+    delay(50);
+    if (!wifiNetworkSnapshot(saved)) {
+      WARN_WIFIF("[WiFi] Saved-network list could not be copied; connect skipped");
+      return false;
+    }
+  }
+  if (saved.count == 0) return false;
   gWifiUserCancelled = false;
   bool connected = false;
 
@@ -722,7 +735,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
     if (sel > 0) index1 = sel;
     else {
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-      snprintf(getDebugBuffer(), 1024, "Usage: openwifi [--best | --index <1..%d>]", wifiNetworkCount());
+      snprintf(getDebugBuffer(), 1024, "Usage: openwifi [--best | --index <1..%d> | --saved-id <id>]", wifiNetworkCount());
       return getDebugBuffer();
     }
   }
@@ -2317,11 +2330,11 @@ const CommandEntry wifiCommands[] = {
   { "wifilist", "List saved WiFi networks. (add 'json' for JSON output)", false, cmd_wifilist },
   { "wifiadd", "Add WiFi network: <ssid> <pass> [priority] [hidden]", true, cmd_wifiadd, "Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]" },
   { "wifirm", "Remove WiFi network: <ssid>", true, cmd_wifirm, "Usage: wifirm <ssid>" },
-  { "wifirmid", "Remove a saved WiFi entry selected by a screen", true, cmd_wifirmid, "Usage: wifirmid <saved-id>" },
+  { "wifirmid", "Remove a saved WiFi entry by its saved id (ids come from a screen's saved list and are valid for this boot only)", true, cmd_wifirmid, "Usage: wifirmid <saved-id>" },
   { "wifipromote", "Promote WiFi to top priority: <ssid> [newPriority]", true, cmd_wifipromote, "Usage: wifipromote <ssid> [newPriority]" },
   
   // Connection Control — lifecycle open/close is admin-only (status/scan stay open)
-  { "openwifi", "Connect to WiFi: [--best | --index <N>] (default: best)", true, cmd_wificonnect, "Usage: openwifi [--best | --index <1..N>]" },
+  { "openwifi", "Connect to WiFi: [--best | --index <N> | --saved-id <id>] (default: best; ids come from a screen's saved list and are valid for this boot only)", true, cmd_wificonnect, "Usage: openwifi [--best | --index <1..N> | --saved-id <id>]" },
   { "closewifi", "Disconnect from WiFi (also stops HTTP server + web output to free heap).", true, cmd_wifidisconnect },
   { "wifidisconnect", "Disconnect from the current network but keep the radio on (HTTP/web stay up).", true, cmd_wifidrop },
   { "radiopower", "Power the whole 2.4GHz radio on/off (airplane mode; also stops/restores ESP-NOW; runtime only, not persisted): [on|off|toggle]", true, cmd_radiopower, "Usage: radiopower [on|off|toggle]" },
@@ -2510,25 +2523,28 @@ void setupWiFi() {
   // Inform user they can escape WiFi connection attempts
   broadcastOutput("Starting WiFi connection... (Press any key in Serial Monitor to skip)");
 
-  WifiNetworkSnapshot saved;
-  wifiNetworkSnapshot(saved);
-  // WiFi networks already loaded by readSettingsJson() during boot
+  // WiFi networks already loaded by readSettingsJson() during boot. The count
+  // gates the connect; a failed list copy only loses the first-SSID line.
+  const int savedCount = wifiNetworkCount();
   DEBUG_WIFIF("[WiFi Setup] Using WiFi networks loaded from settings");
-  DEBUG_WIFIF("[WiFi Setup] Found %d saved networks", saved.count);
+  DEBUG_WIFIF("[WiFi Setup] Found %d saved networks", savedCount);
   
   char debugBuf[128];
-  snprintf(debugBuf, sizeof(debugBuf), "DEBUG: Found %d saved networks", saved.count);
+  snprintf(debugBuf, sizeof(debugBuf), "DEBUG: Found %d saved networks", savedCount);
   broadcastOutput(debugBuf);
 
-  if (saved.count > 0) {
-    snprintf(debugBuf, sizeof(debugBuf), "DEBUG: First network SSID: '%s'", saved.entries[0].ssid.c_str());
-    broadcastOutput(debugBuf);
-    DEBUG_WIFIF("[WiFi Setup] First network: SSID='%s', priority=%d",
-                saved.entries[0].ssid.c_str(), saved.entries[0].priority);
+  if (savedCount > 0) {
+    WifiNetworkSnapshot saved;
+    if (wifiNetworkSnapshot(saved) && saved.count > 0) {
+      snprintf(debugBuf, sizeof(debugBuf), "DEBUG: First network SSID: '%s'", saved.entries[0].ssid.c_str());
+      broadcastOutput(debugBuf);
+      DEBUG_WIFIF("[WiFi Setup] First network: SSID='%s', priority=%d",
+                  saved.entries[0].ssid.c_str(), saved.entries[0].priority);
+    }
   }
 
   bool connected = false;
-  if (saved.count > 0) {
+  if (savedCount > 0) {
     broadcastOutput("Attempting WiFi connection directly...");
     DEBUG_WIFIF("[WiFi Setup] Calling connectToBestWiFiNetwork() directly");
     DEBUG_WIFIF("[DEBUG] About to call connectToBestWiFiNetwork");
@@ -2549,7 +2565,7 @@ void setupWiFi() {
     if (!sBootConnectFailLogged) {
       sBootConnectFailLogged = true;
       logSystemEvent("WIFI", "boot connect failed — continuing offline (%d saved networks, final status=%d)",
-                     saved.count, (int)WiFi.status());
+                     savedCount, (int)WiFi.status());
     }
     DEBUG_WIFIF("[WiFi Setup] Final WiFi status: %d", WiFi.status());
   } else {

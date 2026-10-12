@@ -269,17 +269,17 @@ enum class SensorStartRefusal : uint8_t {
 bool requestSensorStart(I2CDeviceType sensor, const char* eventTag, SensorStartRefusal* why);
 const char* sensorStartRefusalText(SensorStartRefusal why);
 
+// `hint` is a next-step line printed only when the start was queued.
 const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName,
-                                   const char* eventTag);
+                                   const char* eventTag, const char* hint = nullptr);
 
 // Display name for I2CDeviceType (e.g., I2C_DEVICE_IMU → "IMU")
 const char* deviceTypeDisplayName(I2CDeviceType device);
 
 // Queue functions
-inline bool enqueueDeviceStart(I2CDeviceType device) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  return mgr ? mgr->enqueueDeviceStart(device) : false;
-}
+// Queues a start and marks it outstanding until the queue worker settles it
+// (started, failed, or closed by a stop).
+bool enqueueDeviceStart(I2CDeviceType device);
 
 inline bool dequeueDeviceRequest(I2CDeviceRequest* req) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();

@@ -131,6 +131,10 @@ static ThermalFrameBuffer thermalSnapshotBuffer(size_t count) {
                             AllocPref::PreferPSRAM, "thermal.snapshot")), ps_free);
 }
 
+// Runs on the queue worker before the task exists: retires the previous run's
+// buffers (a stop leaves them for the next start) and allocates this run's, so
+// thermalPoll never allocates or takes the cache lock inside its transaction.
+// False (lock or memory) fails the start.
 static bool thermalResetCacheForStart() {
   int16_t* oldFrame;
   float* oldInterpolated;
@@ -148,6 +152,32 @@ static bool thermalResetCacheForStart() {
   }
   free(oldFrame);
   free(oldInterpolated);
+
+  // Zeroed: until the first frame, readers see an invalid all-zero frame (the
+  // same shape as after a stop), never uninitialized memory.
+  int16_t* frame = static_cast<int16_t*>(
+      ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPSRAM, "cache.thermal"));
+  if (!frame) return false;
+  memset(frame, 0, 768 * sizeof(int16_t));
+  float* interpolated = nullptr;
+  if (gSettings.thermalUpscaleFactor == 2) {
+    interpolated = static_cast<float*>(
+        ps_alloc(64 * 48 * sizeof(float), AllocPref::PreferPSRAM, "cache.thermal.interp"));
+    if (interpolated) memset(interpolated, 0, 64 * 48 * sizeof(float));
+    else DEBUG_THERMAL_LIFECYCLEF("[THERMAL_MEM] Interpolated buffer unavailable; running at 1x");
+  }
+  SensorCacheGuard guard(sThermalCacheMutex, pdMS_TO_TICKS(100), "thermal.install");
+  if (!guard.held) {
+    free(frame);
+    free(interpolated);
+    return false;
+  }
+  sThermalCache.thermalFrame = frame;
+  sThermalCache.thermalInterpolated = interpolated;
+  sThermalCache.thermalInterpolatedWidth = interpolated ? 64 : 0;
+  sThermalCache.thermalInterpolatedHeight = interpolated ? 48 : 0;
+  DEBUG_THERMAL_LIFECYCLEF("[THERMAL_MEM] Frame buffer allocated (3072 B)%s",
+                           interpolated ? " + 64x48 interpolation (12288 B)" : "");
   return true;
 }
 
@@ -250,7 +280,7 @@ bool thermalStartInternal() {
   // Clean up any stale memory from previous run BEFORE starting
   // CRITICAL: Memory wasn't freed during stop to avoid dying-task crashes
   if (!thermalResetCacheForStart()) {
-    ERROR_THERMALF("Could not reset thermal cache before start");
+    ERROR_THERMALF("Could not prepare thermal cache before start (lock or memory)");
     return false;
   }
 
@@ -628,64 +658,11 @@ bool thermalPoll() {
     return false;
   }
   
-  // Ensure thermal frame buffer is allocated
-  {
-    if (lockThermalCache(pdMS_TO_TICKS(100))) {
-      if (!sThermalCache.thermalFrame) {
-        size_t psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-        size_t heap_before = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-        DEBUG_THERMAL_LIFECYCLEF("[THERMAL_MEM] Before frame alloc: PSRAM=%zu, Heap=%zu", psram_before, heap_before);
-
-        sThermalCache.thermalFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPSRAM, "cache.thermal");
-        if (!sThermalCache.thermalFrame) {
-          DEBUG_THERMAL_POLLINGF("thermalPoll() exit: failed to allocate frame buffer");
-          unlockThermalCache();
-          return false;
-        }
-
-        size_t psram_after = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-        size_t heap_after = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-        DEBUG_THERMAL_LIFECYCLEF("[THERMAL_MEM] After frame alloc (3072 bytes): PSRAM=%zu (-%zu), Heap=%zu (-%zu)",
-                       psram_after, psram_before - psram_after,
-                       heap_after, heap_before - heap_after);
-
-        DEBUG_THERMAL_POLLINGF("thermalPoll() allocated thermal frame buffer");
-
-        int upscale = gSettings.thermalUpscaleFactor;
-        if (upscale == 2) {
-          size_t psram_before_interp = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-          size_t heap_before_interp = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-          DEBUG_THERMAL_LIFECYCLEF("[THERMAL_MEM] Before interp alloc (quality=2): PSRAM=%zu, Heap=%zu",
-                         psram_before_interp, heap_before_interp);
-
-          sThermalCache.thermalInterpolatedWidth = 64;
-          sThermalCache.thermalInterpolatedHeight = 48;
-          int interpSize = 64 * 48;
-          sThermalCache.thermalInterpolated = (float*)ps_alloc(interpSize * sizeof(float), AllocPref::PreferPSRAM, "cache.thermal.interp");
-
-          if (sThermalCache.thermalInterpolated) {
-            size_t psram_after_interp = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-            size_t heap_after_interp = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-            DEBUG_THERMAL_LIFECYCLEF("[THERMAL_MEM] After interp alloc (12288 bytes): PSRAM=%zu (-%zu), Heap=%zu (-%zu)",
-                           psram_after_interp, psram_before_interp - psram_after_interp,
-                           heap_after_interp, heap_before_interp - heap_after_interp);
-            DEBUG_THERMAL_POLLINGF("Allocated interpolated buffer: %dx%d (%d pixels, %d bytes)",
-                         sThermalCache.thermalInterpolatedWidth, sThermalCache.thermalInterpolatedHeight,
-                         interpSize, interpSize * (int)sizeof(float));
-          } else {
-            DEBUG_THERMAL_POLLINGF("Warning: Failed to allocate interpolated buffer, falling back to 1x");
-            sThermalCache.thermalInterpolatedWidth = 0;
-            sThermalCache.thermalInterpolatedHeight = 0;
-          }
-        } else {
-          DEBUG_THERMAL_LIFECYCLEF("[THERMAL_MEM] Interpolation disabled (upscale=%d), no additional buffer allocated", upscale);
-        }
-      }
-      unlockThermalCache();
-    } else {
-      DEBUG_THERMAL_POLLINGF("thermalPoll() exit: failed to lock cache for allocation");
-      return false;
-    }
+  // thermalResetCacheForStart() allocated this run's buffers before the task
+  // existed and nothing replaces them while it runs, so no lock is taken here.
+  if (!sThermalCache.thermalFrame) {
+    DEBUG_THERMAL_POLLINGF("thermalPoll() exit: frame buffer missing");
+    return false;
   }
   
   if (gThermalArmAtMs) {

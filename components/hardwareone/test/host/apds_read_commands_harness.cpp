@@ -49,6 +49,8 @@ static int trackedSnprintf(char* out, size_t size, const char* format, ...) {
   return n;
 }
 #define snprintf trackedSnprintf
+static unsigned long harnessClockMs = 0;
+[[maybe_unused]] static unsigned long millis() { return harnessClockMs; }
 static bool gApdsRunning, gApdsConnected, gApdsColorRunning;
 static bool gApdsProximityRunning, gApdsGestureRunning;
 static constexpr uint8_t APDS9960_UP = 1, APDS9960_DOWN = 2;
@@ -62,7 +64,8 @@ static auto values(const APDSCache& reading) {
   return std::make_tuple(reading.apdsRed, reading.apdsGreen, reading.apdsBlue,
                         reading.apdsClear, reading.apdsProximity, reading.apdsGesture,
                         reading.apdsLastUpdate, reading.apdsDataValid, reading.apdsColorValid,
-                        reading.apdsProximityValid, reading.apdsGestureValid);
+                        reading.apdsProximityValid, reading.apdsGestureValid,
+                        reading.apdsLastGesture, reading.apdsLastGestureMs);
 }
 static bool error(const char* text) { return std::strncmp(text, "Error:", 6) == 0; }
 static bool contains(const char* text, const char* part) { return std::strstr(text, part) != nullptr; }
@@ -89,6 +92,9 @@ static void ready() {
   sApdsCache.apdsLastUpdate = 12345;
   sApdsCache.apdsDataValid = sApdsCache.apdsColorValid = true;
   sApdsCache.apdsProximityValid = sApdsCache.apdsGestureValid = true;
+  sApdsCache.apdsLastGesture = APDS9960_LEFT;  // latched 1.2 s before the clock
+  sApdsCache.apdsLastGestureMs = 11000;
+  harnessClockMs = 12250;
 }
 using Handler = const char* (*)(const String&);
 static void readerTests() {
@@ -121,8 +127,7 @@ static void readerTests() {
     ready(); sApdsCache.apdsDataValid = false;
     assert(error(handler("")));
     ready(); bufferAvailable = false;
-    if (i < 2) assert(error(handler("")));
-    else assert(!error(handler(""))); // Literal gesture responses need no buffer.
+    assert(error(handler("")));  // Every formatted reply needs the buffer.
     ready();
     const auto unchanged = values(sApdsCache);
     const std::string first = handler("");
@@ -133,26 +138,35 @@ static void readerTests() {
   const std::string color = cmd_apdscolor("");
   for (const char* value : {"65535", "1234", "17", "42"}) assert(contains(color.c_str(), value));
   assert(contains(cmd_apdsproximity(""), "255"));
-  for (const auto& gesture : {std::pair<uint8_t, const char*>{APDS9960_UP, "UP"},
-                             {APDS9960_DOWN, "DOWN"}, {APDS9960_LEFT, "LEFT"},
-                             {APDS9960_RIGHT, "RIGHT"}}) {
-    sApdsCache.apdsGesture = gesture.first;
+  // The command reports the latched last swipe and its age, whatever the
+  // latest sample holds (one poll sees only one FIFO batch).
+  for (const auto& gesture : {std::pair<uint8_t, const char*>{APDS9960_UP, "Gesture: UP (1.2 s ago)"},
+                             {APDS9960_DOWN, "Gesture: DOWN (1.2 s ago)"},
+                             {APDS9960_LEFT, "Gesture: LEFT (1.2 s ago)"},
+                             {APDS9960_RIGHT, "Gesture: RIGHT (1.2 s ago)"}}) {
+    sApdsCache.apdsLastGesture = gesture.first;
+    sApdsCache.apdsGesture = 0;
     const auto before = values(sApdsCache);
-    assert(contains(cmd_apdsgesture(""), gesture.second));
-    assert(contains(cmd_apdsgesture(""), gesture.second) && values(sApdsCache) == before);
+    assert(std::strcmp(cmd_apdsgesture(""), gesture.second) == 0);
+    assert(std::strcmp(cmd_apdsgesture(""), gesture.second) == 0 && values(sApdsCache) == before);
   }
-  sApdsCache.apdsGesture = 0;
-  assert(std::strcmp(cmd_apdsgesture(""), "No gesture detected in latest sample") == 0);
-  sApdsCache.apdsGesture = 99;
+  harnessClockMs = 11000 + 65432;
+  assert(std::strcmp(cmd_apdsgesture(""), "Gesture: RIGHT (65.4 s ago)") == 0);
+  sApdsCache.apdsLastGesture = 0; sApdsCache.apdsGesture = APDS9960_UP; bufferAvailable = false;
+  assert(std::strcmp(cmd_apdsgesture(""), "No gesture since start") == 0);  // literal: no buffer
+  bufferAvailable = true;
+  sApdsCache.apdsLastGesture = 99;
   assert(error(cmd_apdsgesture("")));
   ready(); cacheAdmit = false;
   assert(!apdsInvalidateCache() && sApdsCache.apdsColorValid && sApdsCache.apdsProximityValid && sApdsCache.apdsGestureValid);
   cacheAdmit = true;
   assert(apdsInvalidateCache() && !sApdsCache.apdsDataValid && !sApdsCache.apdsColorValid &&
          !sApdsCache.apdsProximityValid && !sApdsCache.apdsGestureValid);
+  assert(!sApdsCache.apdsLastGesture && !sApdsCache.apdsLastGestureMs);  // no swipe from a past session
   ready(); assert(resetApdsReading());
   assert(!sApdsCache.apdsDataValid && !sApdsCache.apdsColorValid &&
          !sApdsCache.apdsProximityValid && !sApdsCache.apdsGestureValid);
+  assert(!sApdsCache.apdsLastGesture && !sApdsCache.apdsLastGestureMs);
 }
 
 static void combinedReadTests() {
@@ -243,6 +257,10 @@ static void logSystemEvent(const char*, const char*, ...) { assert(!busHeld && !
 
 // INSERT_SAMPLING_FUNCTION
 
+static unsigned long lastGestureRead;
+static bool sampleOnce(unsigned long nowMs, unsigned long& lastRead, unsigned long pollMs = 200) {
+  return apdsPollDevice(nowMs, pollMs, lastRead, lastGestureRead);
+}
 static void samplingReset() {
   ready();
   driver = {};
@@ -252,6 +270,7 @@ static void samplingReset() {
   busCalls = healthyTransactions = failedTransactions = healthChecks = statusBumps = 0;
   deviceProximity = 220;
   deviceGesture = APDS9960_UP;
+  lastGestureRead = 0;
   events.clear();
 }
 static void samplingTests() {
@@ -266,17 +285,22 @@ static void samplingTests() {
     deviceColorReady = colorReady;
     unsigned long lastRead = 0;
     sampleOnce(1000, lastRead);
+    // A conversion that is not ready keeps the previous colour sample (the
+    // fixture's) and its validity; a mode that is off reads zero and invalid.
     const bool color = gApdsColorRunning && colorReady;
-    assert(sApdsCache.apdsColorValid == color);
+    const bool keptColor = gApdsColorRunning && !colorReady;
+    assert(sApdsCache.apdsColorValid == gApdsColorRunning);
     assert(sApdsCache.apdsProximityValid == gApdsProximityRunning);
     assert(sApdsCache.apdsGestureValid == gApdsGestureRunning);
-    assert(sApdsCache.apdsDataValid == (color || gApdsProximityRunning || gApdsGestureRunning));
-    assert(sApdsCache.apdsRed == (color ? 1 : 0));
-    assert(sApdsCache.apdsGreen == (color ? 2 : 0));
-    assert(sApdsCache.apdsBlue == (color ? 3 : 0));
-    assert(sApdsCache.apdsClear == (color ? 4 : 0));
+    assert(sApdsCache.apdsDataValid == (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning));
+    assert(sApdsCache.apdsRed == (color ? 1 : keptColor ? 65535 : 0));
+    assert(sApdsCache.apdsGreen == (color ? 2 : keptColor ? 1234 : 0));
+    assert(sApdsCache.apdsBlue == (color ? 3 : keptColor ? 17 : 0));
+    assert(sApdsCache.apdsClear == (color ? 4 : keptColor ? 42 : 0));
     assert(sApdsCache.apdsProximity == (gApdsProximityRunning ? 220 : 0));
     assert(sApdsCache.apdsGesture == (gApdsGestureRunning ? APDS9960_UP : 0));
+    assert(sApdsCache.apdsLastGesture == (gApdsGestureRunning ? APDS9960_UP : APDS9960_LEFT));
+    assert(sApdsCache.apdsLastGestureMs == (gApdsGestureRunning ? 1000u : 11000u));
     assert(sApdsCache.apdsLastUpdate == 1000 && lastRead == 1000);
     assert(driver.readinessCalls == int(gApdsColorRunning) && driver.colorCalls == int(color));
     assert(driver.proximityCalls == int(gApdsProximityRunning) && driver.gestureCalls == int(gApdsGestureRunning));
@@ -292,11 +316,61 @@ static void samplingTests() {
   }
   samplingReset();
   unsigned long lastRead = 900;
+  lastGestureRead = 950;
   const auto before = values(sApdsCache);
   sampleOnce(1000, lastRead);
   assert(busCalls == 0 && values(sApdsCache) == before && lastRead == 900);
   sampleOnce(1100, lastRead);
-  assert(busCalls == 1 && lastRead == 1100);
+  assert(busCalls == 1 && lastRead == 1100 && lastGestureRead == 1100);
+
+  // Gesture cadence: the FIFO is drained at least every 100 ms however long
+  // the colour/proximity interval is; a gesture-only pass leaves the other
+  // fields and their validity alone and cannot move presence.
+  samplingReset(); lastRead = 0;
+  sampleOnce(1000, lastRead, 1000);
+  assert(busCalls == 1 && driver.gestureCalls == 1 && driver.proximityCalls == 1);
+  assert(lastRead == 1000 && lastGestureRead == 1000 && events.size() == 2);
+  sampleOnce(1050, lastRead, 1000);
+  assert(busCalls == 1);
+  const auto colourAndProximity = std::make_tuple(sApdsCache.apdsRed, sApdsCache.apdsProximity,
+                                                  sApdsCache.apdsColorValid, sApdsCache.apdsProximityValid);
+  deviceProximity = 0; deviceGesture = 0;
+  sampleOnce(1100, lastRead, 1000);
+  assert(busCalls == 2 && driver.gestureCalls == 2 && driver.proximityCalls == 1 && driver.readinessCalls == 1);
+  assert(lastRead == 1000 && lastGestureRead == 1100 && events.size() == 2 && gApdsPresent);
+  assert(colourAndProximity == std::make_tuple(sApdsCache.apdsRed, sApdsCache.apdsProximity,
+                                               sApdsCache.apdsColorValid, sApdsCache.apdsProximityValid));
+  assert(sApdsCache.apdsGesture == 0 && sApdsCache.apdsGestureValid && sApdsCache.apdsLastUpdate == 1100);
+  for (unsigned long t = 1200; t < 2000; t += 100) sampleOnce(t, lastRead, 1000);
+  assert(driver.gestureCalls == 10 && driver.proximityCalls == 1);
+  sampleOnce(2000, lastRead, 1000);
+  assert(driver.gestureCalls == 11 && driver.proximityCalls == 2 && lastRead == 2000);
+  samplingReset(); lastRead = 0;
+  sampleOnce(1000, lastRead, 50); sampleOnce(1050, lastRead, 50);
+  assert(driver.gestureCalls == 2 && driver.proximityCalls == 2 && busCalls == 2);
+  samplingReset(); lastRead = 0; gApdsGestureRunning = false;
+  sampleOnce(1000, lastRead, 1000); sampleOnce(1100, lastRead, 1000);
+  assert(busCalls == 1 && driver.gestureCalls == 0);
+
+  // Colour "not ready" is no new sample: without a previous one it stays
+  // invalid; with one it is kept; turning colour off clears it.
+  samplingReset(); sApdsCache = {}; deviceColorReady = false; lastRead = 0;
+  sampleOnce(1000, lastRead);
+  assert(!sApdsCache.apdsColorValid && sApdsCache.apdsRed == 0 && sApdsCache.apdsProximityValid);
+  deviceColorReady = true; sampleOnce(1200, lastRead);
+  assert(sApdsCache.apdsColorValid && sApdsCache.apdsRed == 1 && sApdsCache.apdsClear == 4);
+  deviceColorReady = false; sampleOnce(1400, lastRead);
+  assert(sApdsCache.apdsColorValid && sApdsCache.apdsRed == 1 && sApdsCache.apdsClear == 4);
+  gApdsColorRunning = false; sampleOnce(1600, lastRead);
+  assert(!sApdsCache.apdsColorValid && sApdsCache.apdsRed == 0 && sApdsCache.apdsDataValid);
+
+  // The latch keeps a swipe after later empty samples; 'apdsgesture' reports it.
+  samplingReset(); lastRead = 0; sApdsCache.apdsLastGesture = 0;
+  deviceGesture = APDS9960_RIGHT; sampleOnce(1000, lastRead);
+  deviceGesture = 0; sampleOnce(1200, lastRead); sampleOnce(1400, lastRead);
+  harnessClockMs = 2250;
+  assert(sApdsCache.apdsGesture == 0 && sApdsCache.apdsLastGesture == APDS9960_RIGHT);
+  assert(std::strcmp(cmd_apdsgesture(""), "Gesture: RIGHT (1.2 s ago)") == 0);
 
   samplingReset(); lastRead = 0; busAdmit = false;
   const auto retained = values(sApdsCache);
@@ -323,7 +397,8 @@ static void samplingTests() {
   deviceGesture = 0; deviceProximity = 150;
   sampleOnce(1200, lastRead);
   assert(events.size() == 2 && gApdsPresent && sApdsCache.apdsGestureValid);
-  assert(std::strcmp(cmd_apdsgesture(""), "No gesture detected in latest sample") == 0);
+  harnessClockMs = 1200;
+  assert(std::strcmp(cmd_apdsgesture(""), "Gesture: UP (0.2 s ago)") == 0);
   deviceProximity = 50;
   sampleOnce(1400, lastRead);
   assert(events.size() == 3 && !gApdsPresent && std::get<0>(events.back()) == SYSEVT_PRESENCE_CLEARED);
