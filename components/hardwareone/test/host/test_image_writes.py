@@ -44,12 +44,16 @@ def generate(baseline: Path | None) -> str:
     vfs = read("System_VFS.cpp")
     paths = "namespace VFS {\n" + "\n".join(extract_block(vfs, marker) for marker in (
         "String normalize(", "StorageType getStorageType(")) + "\n}\n"
-    methods = "\n\n".join(extract_block(source, marker) for marker in (
-        "ImageManager::ImageManager()", "ImageManager::~ImageManager()",
-        "bool ImageManager::init()", "bool ImageManager::initSD()",
-        "String ImageManager::getMountPrefix(", "String ImageManager::getCaptureFolder(",
-        "bool ImageManager::ensureCaptureFolder(", "String ImageManager::generateFilename(",
-        "String ImageManager::saveImage("))
+    markers = ["ImageManager::ImageManager()", "ImageManager::~ImageManager()",
+               "bool ImageManager::init()", "bool ImageManager::initSD()",
+               "String ImageManager::getMountPrefix(", "String ImageManager::getCaptureFolder(",
+               "bool ImageManager::ensureCaptureFolder(", "String ImageManager::generateFilename(",
+               "String ImageManager::saveImage("]
+    validator = "const char* ImageManager::captureFolderRejectReason(" in source
+    if validator:
+        markers.append("const char* ImageManager::captureFolderRejectReason(")
+    methods = f"#define HAS_FOLDER_VALIDATOR {int(validator)}\n" + "\n\n".join(
+        extract_block(source, marker) for marker in markers)
     constant = re.search(r"(?m)^#define MIN_FREE_SPACE_BYTES[^\n]+", source)[0]
     harness = (HERE / "image_writes_harness.cpp").read_text()
     for marker, value in {

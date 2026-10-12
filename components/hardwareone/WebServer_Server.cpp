@@ -2139,11 +2139,14 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   // Read the body in chunks (httpd_req_recv may not read everything at once)
   size_t totalReceived = 0;
   int recvAttempts = 0;
+  int idleTimeouts = 0;  // consecutive recv_wait_timeout results
   while (totalReceived < contentLen) {
     recvAttempts++;
     int ret = httpd_req_recv(req, body + totalReceived, contentLen - totalReceived);
     if (ret <= 0) {
-      if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+      // One idle wait is a slow client; two in a row is a half-open socket
+      // that would otherwise pin this httpd worker forever.
+      if (ret == HTTPD_SOCK_ERR_TIMEOUT && ++idleTimeouts < 2) {
         DEBUG_STORAGEF("[handleFileWrite] Timeout on recv attempt %d, retrying...", recvAttempts);
         continue;  // Retry on timeout
       }
@@ -2152,6 +2155,7 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
       sendJsonResponse(req, "{\"success\":false, \"error\":\"Error receiving data\"}");
       return ESP_OK;
     }
+    idleTimeouts = 0;
     totalReceived += ret;
     DEBUG_STORAGEF("[handleFileWrite] Recv attempt %d: got %d bytes, total: %d/%d", recvAttempts, ret, totalReceived, contentLen);
   }
@@ -2343,6 +2347,10 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
   String path;
   path.reserve(64);
+  // Staged replacement: the body streams into a sibling temporary that is
+  // promoted over the destination only after a complete, checked upload.
+  String stagedPath;
+  bool staged = false;
   bool isBinary = false;
   bool binaryKnown = false;
 
@@ -2461,7 +2469,22 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     DEBUG_STORAGEF("[handleFileUpload] Opening file for write: %s", path.c_str());
 
     fileLock.emplace("handleFileUpload.file");
-    file = VFS::openGuarded(path, "w", ctx, /*create=*/true);
+    // Write to "<path>.upload.tmp" and promote it after a complete, checked
+    // upload, so an existing destination survives a dropped connection or a
+    // failed write. The temporary sits in the destination's directory, so the
+    // same permission and admin-only rules apply to it, and ".tmp" is not a
+    // sensitive extension. A name the backend cannot take (LittleFS limits
+    // names to 63 bytes) falls back to the previous in-place write.
+    stagedPath = path;
+    if (stagedPath.length() == path.length() && stagedPath.concat(".upload.tmp")) {
+      file = VFS::openGuarded(stagedPath, "w", ctx, /*create=*/true);
+      staged = (bool)file;
+    }
+    if (!staged) {
+      stagedPath = "";
+      DEBUG_STORAGEF("[handleFileUpload] Staged temporary unavailable; writing in place: %s", path.c_str());
+      file = VFS::openGuarded(path, "w", ctx, /*create=*/true);
+    }
     if (!file) {
       ERROR_STORAGEF("Failed to open file for write or denied: %s", path.c_str());
       return false;
@@ -2482,6 +2505,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   char* buf = uploadRecvBuf.get();
   size_t received = 0;
   int attempts = 0;
+  int idleTimeouts = 0;  // consecutive recv_wait_timeout results
   size_t chunkIndex = 0;
 
   // Helper to consume literal prefix like "path=" / "binary=" / "content="
@@ -2495,10 +2519,21 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       int toRead = (int)min((size_t)(contentLen - received), RECV_BUF_SIZE);
       int ret = httpd_req_recv(req, buf, toRead);
       if (ret <= 0) {
-        if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+          // One idle recv_wait_timeout is a slow client. Two in a row (60 s
+          // HTTP / 40 s HTTPS of silence) is a half-open socket: give up so
+          // finalization releases the file lock, the polling pause and this
+          // httpd worker instead of holding them until the socket dies.
+          if (++idleTimeouts >= 2) {
+            DEBUG_STORAGEF("[handleFileUpload] Recv timeout after %d attempts", attempts);
+            return "Recv timeout";
+          }
+          continue;
+        }
         DEBUG_STORAGEF("[handleFileUpload] Recv error %d", ret);
         return "Recv error";
       }
+      idleTimeouts = 0;
       received += ret;
       chunkIndex++;
       DEBUG_STORAGEF("[handleFileUpload] Chunk %d: %d bytes (total %d/%d)", (int)chunkIndex, ret, (int)received, (int)contentLen);
@@ -2640,11 +2675,18 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   if (fileOpen) {
     if (!uploadError) file.flush();
     file.close();
+    if (!uploadError && staged && !VFS::replaceFileGuarded(stagedPath, path, ctx)) {
+      // The previous destination is still in place; only the staged copy goes.
+      ERROR_STORAGEF("[handleFileUpload] Could not promote %s over %s", stagedPath.c_str(), path.c_str());
+      uploadError = "Could not replace destination";
+    }
     if (uploadError) {
-      // Remove only the partial destination opened by this upload, while its
-      // lock is still held. Retain the existing user-first cleanup policy.
-      if (!VFS::removeGuarded(path, ctx)) {
-        VFS::removeGuarded(path, VFS::systemAuth("upload.cleanup.partial"));
+      // Remove only what this upload wrote (the staged temporary, or the
+      // in-place partial), while its lock is still held. Retain the existing
+      // user-first cleanup policy.
+      const String& partial = staged ? stagedPath : path;
+      if (!VFS::removeGuarded(partial, ctx)) {
+        VFS::removeGuarded(partial, VFS::systemAuth("upload.cleanup.partial"));
       }
     }
   }
@@ -3031,14 +3073,17 @@ esp_err_t handleUserSettingsSet(httpd_req_t* req) {
   }
 
   int received = 0;
+  int idleTimeouts = 0;  // consecutive recv_wait_timeout results
   while (received < total_len) {
     int r = httpd_req_recv(req, buf.get() + received, total_len - received);
     if (r <= 0) {
-      if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+      // Two consecutive idle waits mean a half-open socket; stop retrying.
+      if (r == HTTPD_SOCK_ERR_TIMEOUT && ++idleTimeouts < 2) continue;
       DEBUG_HTTPF("[UserSettings] POST recv_failed r=%d user=%s userId=%u", r, ctx.user.c_str(), (unsigned)userId);
       sendJsonResponse(req, "{\"success\":false, \"error\":\"recv_failed\"}");
       return ESP_OK;
     }
+    idleTimeouts = 0;
     received += r;
   }
   buf.get()[received] = '\0';

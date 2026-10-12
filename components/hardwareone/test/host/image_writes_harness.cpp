@@ -336,6 +336,22 @@ static void failedConcat(bool sd, unsigned call) {
   check(!result.length() && !tiers[sd].opens && files.empty(), "failed complete output-path construction cannot open a truncated path");
   hooks(result, locationFor(sd)); balanced();
 }
+#if HAS_FOLDER_VALIDATOR
+// The setting's writers refuse a folder that names a tier or steps outside it,
+// with a reply that points at cameraStorageLocation; plain folders pass.
+static void folderValidator() {
+  for (const char* rejected : {"/sd", "/sd/", "/sd/photos", "sd/photos", "sd", "/../photos", "/photos/../x", ".."}) {
+    const char* why = ImageManager::captureFolderRejectReason(rejected);
+    check(why && std::strncmp(why, "Error:", 6) == 0, "tier-prefixed or traversing folder accepted");
+    check(std::strstr(why, "cameraCaptureFolder") != nullptr, "rejection does not name the setting");
+  }
+  check(std::strstr(ImageManager::captureFolderRejectReason("/sd/photos"), "cameraStorageLocation") != nullptr,
+        "tier rejection does not point at the tier setting");
+  for (const char* accepted : {"/photos", "photos", "/sdata", "/sd-card/photos", "/sdx", "/", "", "/photos/2026", "/photos/"}) {
+    check(ImageManager::captureFolderRejectReason(accepted) == nullptr, "plain folder rejected");
+  }
+}
+#endif
 static void configuredPath(const char* folder, ImageStorageLocation location, const char* expected) {
   auto owner = setup(); gSettings.cameraCaptureFolder = folder;
   const auto result = owner.saveImage(jpeg, sizeof(jpeg), location);
@@ -491,6 +507,9 @@ int main(int argc, char** argv) {
     run("configured relative folder", [] { configuredPath("pictures", IMAGE_STORAGE_LITTLEFS, "/pictures/img_000000.jpg"); });
     run("configured empty default", [] { configuredPath("", IMAGE_STORAGE_LITTLEFS, "/photos/img_000000.jpg"); });
     run("configured traversal refused", [] { configuredPath("/../photos", IMAGE_STORAGE_BOTH, ""); });
+#if HAS_FOLDER_VALIDATOR
+    run("capture folder setting validator", folderValidator);
+#endif
     run("nested filesystem guard", nestedSave);
     run("counter/clock/event/retention compatibility", filenameAndRetention);
   }

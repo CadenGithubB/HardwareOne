@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -22,10 +23,59 @@ static uint8_t getPermissions(const String& path, const AuthContext& ctx) {
   const auto found = permissionMasks.find(path.c_str());
   return found == permissionMasks.end() ? 7 : found->second;
 }
+// Mutation doubles keep the fixture tree consistent: a node leaves its parent's
+// listing when removed or renamed, so a later directory walk reflects it.
+static std::vector<std::string> operations;
+static std::string parentOf(const std::string& path) {
+  const size_t slash = path.rfind('/');
+  return slash == 0 ? "/" : path.substr(0, slash);
+}
+static std::shared_ptr<Node> detach(const std::string& path) {
+  const auto it = nodes.find(path);
+  if (it == nodes.end() || !nodes.count(parentOf(path))) return nullptr;
+  auto node = it->second;
+  nodes.erase(it);
+  auto& siblings = nodes.at(parentOf(path))->children;
+  siblings.erase(std::remove(siblings.begin(), siblings.end(), node), siblings.end());
+  return node;
+}
 namespace VFS {
 static bool existsGuarded(const String& path, const AuthContext& ctx) {
   check(fsDepth > 0 && ctx.user == auth.user, "navigation keeps guarded caller identity");
   return nodes.count(path.c_str()) && !denied.count(path.c_str());
+}
+static bool removeGuarded(const String& path, const AuthContext& ctx) {
+  check(fsDepth > 0 && ctx.user == auth.user, "removal keeps guarded caller identity");
+  operations.push_back("remove:" + std::string(path.c_str()));
+  if (denied.count(path.c_str())) return false;
+  const auto node = nodes.count(path.c_str()) && !nodes.at(path.c_str())->directory ? detach(path.c_str()) : nullptr;
+  return node != nullptr;
+}
+static bool rmdirGuarded(const String& path, const AuthContext& ctx) {
+  check(fsDepth > 0 && ctx.user == auth.user, "directory removal keeps guarded caller identity");
+  operations.push_back("rmdir:" + std::string(path.c_str()));
+  if (denied.count(path.c_str())) return false;
+  const auto it = nodes.find(path.c_str());
+  if (it == nodes.end() || !it->second->directory || !it->second->children.empty()) return false;
+  return detach(path.c_str()) != nullptr;
+}
+static bool renameGuarded(const String& from, const String& to, const AuthContext& ctx) {
+  check(fsDepth > 0 && ctx.user == auth.user, "rename keeps guarded caller identity");
+  operations.push_back("rename:" + std::string(from.c_str()) + ">" + to.c_str());
+  if (denied.count(from.c_str()) || nodes.count(to.c_str()) || !nodes.count(parentOf(to.c_str()))) return false;
+  const auto it = nodes.find(from.c_str());
+  if (it == nodes.end()) return false;
+  auto node = it->second;
+  nodes.erase(it);
+  // A rename within one directory keeps the entry's listing position.
+  if (parentOf(from.c_str()) != parentOf(to.c_str())) {
+    auto& siblings = nodes.at(parentOf(from.c_str()))->children;
+    siblings.erase(std::remove(siblings.begin(), siblings.end(), node), siblings.end());
+    nodes.at(parentOf(to.c_str()))->children.push_back(node);
+  }
+  node->name = stripSdPrefix(to).c_str();
+  nodes[to.c_str()] = node;
+  return true;
 }
 }
 
@@ -192,6 +242,61 @@ static void readerContract() {
   check(!directory, "parent lifetime remains caller-owned");
 }
 #endif
+// Operations on the selection act on the entry's full native path, not the
+// bounded display name, for cached and beyond-cache indexes alike.
+static void selectedOperations(bool beyondCache) {
+  resetTree(true);
+  add("/sd", "deep", true, "/deep");
+  const std::string longFolder(70, 'f'), longName = std::string(75, 'n') + ".txt";
+  std::vector<std::string> expected;
+  if (beyondCache) {
+    for (unsigned i = 0; i < 260; ++i) { add("/sd/deep", numbered(i), false, "/deep/" + numbered(i)); expected.push_back(numbered(i)); }
+  }
+  add("/sd/deep", longFolder, true, "/deep/" + longFolder);
+  add("/sd/deep/" + longFolder, "inside.txt", false, "/deep/" + longFolder + "/inside.txt");
+  add("/sd/deep", longName, false, "/deep/" + longName);
+  add("/sd/deep", "short.txt", false, "/deep/short.txt");
+  expected.push_back(longFolder.substr(0, 63)); expected.push_back(longName.substr(0, 63)); expected.push_back("short.txt");
+  const int folderIndex = static_cast<int>(expected.size()) - 3;
+  FileManager manager;
+  check(manager.navigate("/sd/deep"), "operations fixture loads");
+  expectItems(manager, expected);
+
+  for (int i = 0; i < folderIndex; ++i) manager.moveDown();
+  check(manager.getSelectedIndex() == folderIndex, "selection reaches the long folder");
+  check(manager.navigateInto() && std::string(manager.getCurrentPath()) == "/sd/deep/" + longFolder,
+        "entering a long folder name uses the entry's full path");
+  expectItems(manager, {"inside.txt"});
+#if TEST_SELECTED_PATH
+  String selected, content;
+  check(manager.getSelectedPath(selected) && selected == String(("/sd/deep/" + longFolder + "/inside.txt").c_str()),
+        "selected path is the entry's full native path");
+  check(manager.readSelectedFile(content) && content.length() == 12, "selected file reads by its full path");
+#endif
+  check(manager.navigateUp() && std::string(manager.getCurrentPath()) == "/sd/deep", "parent navigation restored");
+  for (int i = 0; i < folderIndex + 1; ++i) manager.moveDown();
+  check(manager.getSelectedIndex() == folderIndex + 1, "selection reaches the long file");
+#if TEST_SELECTED_PATH
+  check(manager.getSelectedPath(selected) && selected == String(("/sd/deep/" + longName).c_str()),
+        "beyond-cache or cached long file resolves to its full path");
+  check(manager.readSelectedFile(content) && content.length() == 12, "long file reads by its full path");
+  check(!manager.readFile(longName.substr(0, 63).c_str(), content), "display-name read cannot reach the long file");
+#endif
+  check(manager.renameItem("renamed.txt") && nodes.count("/sd/deep/renamed.txt") && !nodes.count("/sd/deep/" + longName),
+        "rename addresses the long file by its full path");
+  check(manager.getSelectedIndex() == folderIndex + 1, "rename keeps the selection");
+  check(manager.deleteItem() && !nodes.count("/sd/deep/renamed.txt") &&
+        manager.getItemCount() == static_cast<int>(expected.size()) - 1, "delete addresses the renamed file by its full path");
+  manager.moveUp();
+  check(manager.getSelectedIndex() == folderIndex && !manager.deleteItem() && nodes.count("/sd/deep/" + longFolder),
+        "a populated long folder is refused by the backend, not mis-addressed");
+  detach("/sd/deep/" + longFolder + "/inside.txt");
+  check(manager.deleteItem() && !nodes.count("/sd/deep/" + longFolder), "empty long folder removed by its full path");
+  check(manager.getItemCount() == static_cast<int>(expected.size()) - 2 && fsDepth == 0 && permissionViews == 0,
+        "operations release the lock and keep the listing current");
+  const std::string tail = operations.empty() ? "" : operations.back();
+  check(tail == "rmdir:/sd/deep/" + longFolder, "last backend operation addressed the full folder path");
+}
 int main(int argc, char** argv) {
   const std::string selected = argc > 1 ? argv[1] : "all";
   unsigned failures = 0;
@@ -218,6 +323,12 @@ int main(int argc, char** argv) {
 #if TEST_DIRECTORY_READER
     run("shared reader entry/output/lifetime contract", readerContract);
 #endif
+  }
+  if (selected == "all" || selected == "selected-operations") {
+    for (bool beyondCache : {false, true}) {
+      run(std::string("selected operations use full paths ") + (beyondCache ? "beyond the cache" : "within the cache"),
+          [=]() { selectedOperations(beyondCache); });
+    }
   }
   std::printf("FileManager production traversal: %zu assertions, %u failed scenarios\n", checks, failures);
   return failures ? 1 : 0;

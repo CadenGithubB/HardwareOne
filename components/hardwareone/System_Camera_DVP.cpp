@@ -1134,6 +1134,7 @@ const char* cmd_cameracapturefolder(const String& argsInput) {
     snprintf(buf, sizeof(buf), "cameraCaptureFolder = %s", gSettings.cameraCaptureFolder.c_str());
     return buf;
   }
+  if (const char* why = ImageManager::captureFolderRejectReason(val)) return why;
   setSetting(gSettings.cameraCaptureFolder, val);
   EXT_RAM_BSS_ATTR static char buf[256];
   snprintf(buf, sizeof(buf), "cameraCaptureFolder set to %s", val.c_str());
@@ -1249,6 +1250,8 @@ const char* cmd_camerasave(const String& argsInput) {
     snprintf(result, sizeof(result), "Saved: %s", savedPath.c_str());
     return result;
   }
+  cliHint("cameraStorageLocation picks the tier and cameraCaptureFolder a folder inside it "
+          "(no /sd prefix); the system log names the rejected path");
   return "Error: Failed to save image";
 }
 

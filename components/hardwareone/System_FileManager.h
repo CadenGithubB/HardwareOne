@@ -92,7 +92,11 @@ public:
   
   // Path info
   const char* getCurrentPath() const { return state.currentPath; }
-  
+  // Full native path of the selected entry, resolved by replaying the directory
+  // walk (FileEntry.name is a bounded display copy and can be truncated). Use
+  // it for operations on the selection, not per frame.
+  bool getSelectedPath(String& out);
+
   // Display helpers
   int getPageStart() const { return state.scrollOffset; }
   int getPageEnd() const;
@@ -107,6 +111,7 @@ public:
   
   // Content operations
   bool readFile(const char* filename, String& content);
+  bool readSelectedFile(String& content);  // the selected entry, by its full path
   bool writeFile(const char* filename, const String& content);
   
   // Status
@@ -132,7 +137,12 @@ public:
 
 private:
   FileManagerState state;
-  
+
+  // Replay the directory walk (same entry order and visibility predicate as
+  // loadDirectory()) to the selected index and return its full native path.
+  bool resolveSelectedPath(String& out, bool* isFolder = nullptr);
+  bool readPath(const String& fullPath, String& content);
+
   // Directory entry cache to avoid repeated filesystem scans
   FileEntry cachedEntries[FILE_MANAGER_MAX_CACHED_ITEMS];
   int cachedCount;

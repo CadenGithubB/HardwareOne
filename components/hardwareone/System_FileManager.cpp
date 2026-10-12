@@ -130,14 +130,44 @@ bool FileManager::navigateUp() {
 }
 
 bool FileManager::navigateInto() {
-  FileEntry entry;
-  if (!getCurrentItem(entry)) return false;
-  
-  if (!entry.isFolder) return false;  // Not a folder
-  
-  // Build new path
-  String newPath = formatPath(state.currentPath, entry.name);
+  String newPath;
+  bool isFolder = false;
+  if (!resolveSelectedPath(newPath, &isFolder) || !isFolder) return false;
   return navigate(newPath.c_str());
+}
+
+bool FileManager::resolveSelectedPath(String& out, bool* isFolder) {
+  // The cache holds bounded display names only, so every operation on the
+  // selection replays the walk and takes the entry's own path (long SD names
+  // are truncated in FileEntry.name and would target a non-existent file).
+  if (state.selectedIndex < 0 || state.selectedIndex >= state.totalItems) return false;
+
+  FsLockGuard guard("FileManager.resolveSelected");
+  const AuthContext& ctx = currentAuthContext();
+  File dir = VFS::openGuarded(state.currentPath, "r", ctx);
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return false;
+  }
+
+  VFS::DirectoryReader reader(dir, state.currentPath);
+  VFS::DirectoryEntry item;
+  int currentIdx = 0;
+  bool found = false;
+  while (reader.next(item)) {
+    if (!isVisible(makeBrowserEntry(item))) continue;
+    if (currentIdx++ != state.selectedIndex) continue;
+    out = item.path;
+    if (isFolder) *isFolder = item.isFolder;
+    found = true;
+    break;
+  }
+  dir.close();
+  return found;
+}
+
+bool FileManager::getSelectedPath(String& out) {
+  return resolveSelectedPath(out, nullptr);
 }
 
 void FileManager::moveUp() {
@@ -265,14 +295,14 @@ bool FileManager::createFile(const char* name) {
 }
 
 bool FileManager::deleteItem() {
-  FileEntry entry;
-  if (!getCurrentItem(entry)) return false;
-  String fullPath = formatPath(state.currentPath, entry.name);
+  String fullPath;
+  bool isFolder = false;
+  if (!resolveSelectedPath(fullPath, &isFolder)) return false;
   const AuthContext& ctx = currentAuthContext();
 
   FsLockGuard guard("FileManager.deleteItem");
 
-  bool success = entry.isFolder
+  bool success = isFolder
                    ? VFS::rmdirGuarded(fullPath, ctx)
                    : VFS::removeGuarded(fullPath, ctx);
 
@@ -287,10 +317,8 @@ bool FileManager::deleteItem() {
 bool FileManager::renameItem(const char* newName) {
   if (!newName || strlen(newName) == 0) return false;
 
-  FileEntry entry;
-  if (!getCurrentItem(entry)) return false;
-
-  String oldPath = formatPath(state.currentPath, entry.name);
+  String oldPath;
+  if (!resolveSelectedPath(oldPath, nullptr)) return false;
   String newPath = formatPath(state.currentPath, newName);
   const AuthContext& ctx = currentAuthContext();
 
@@ -305,7 +333,17 @@ bool FileManager::renameItem(const char* newName) {
 }
 
 bool FileManager::readFile(const char* filename, String& content) {
-  String fullPath = formatPath(state.currentPath, filename);
+  return readPath(formatPath(state.currentPath, filename), content);
+}
+
+bool FileManager::readSelectedFile(String& content) {
+  String fullPath;
+  bool isFolder = false;
+  if (!resolveSelectedPath(fullPath, &isFolder) || isFolder) return false;
+  return readPath(fullPath, content);
+}
+
+bool FileManager::readPath(const String& fullPath, String& content) {
   const AuthContext& ctx = currentAuthContext();
 
   // Pause sensor polling during file I/O (RAII — resumes on every return path).

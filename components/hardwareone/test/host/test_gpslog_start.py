@@ -56,8 +56,16 @@ def generated(gps: bool, baseline: Path | None = None) -> str:
             "uint32_t sensorLogCurrentSessionId(", "bool sensorLogStopSession(")]
         definitions += [extract_block(owner, marker) for marker in (
             "static uint32_t sensorLogClampInterval(", "static const char* sensorLogStartError(",
-            "static const char* sensorLogStart(", "static void sensorLogRestoreSettings(",
+            "static const char* sensorLogStart(")]
+        # The restore helper is forward-declared near the session helpers; take
+        # its definition (brace-less body) rather than that declaration.
+        restore_marker = "static void sensorLogRestoreSettings()"
+        definitions.append(extract_block(owner[owner.index(restore_marker + " {"):], restore_marker))
+        definitions += [extract_block(owner, marker) for marker in (
             "const char* sensorLogStartConfiguredSession(", "void sensorLogAutoStart(")]
+        if "const char* sensorLogStartLiveTrack(" in owner:
+            definitions.append(extract_block(owner, "const char* sensorLogStartLiveTrack("))
+        definitions.insert(0, f"#define HAVE_LIVE_TRACK_START {int('sensorLogStartLiveTrack(' in owner)}")
         start = extract_block(owner, 'if (subCmd == "start")')
         definitions += ['static const char* commandStart(const String& input) {\n'
                         '  const CommandArgs a(input);\n'

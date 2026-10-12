@@ -65,6 +65,12 @@ inline esp_err_t sendJsonResponse(httpd_req_t* req, const char* body, ssize_t le
 struct AuthContext;
 bool webGuestAccessAllowed(httpd_req_t* req, const AuthContext& ctx);
 
+// For a GET endpoint whose query selects a state change (for example
+// /api/gps/tracks?live=save): call before that branch. Non-guests pass; a
+// Guest, or an account that can no longer be verified, gets the same 403 reply
+// as the allowlist gate and false. The allowlist stays the read-only surface.
+bool webGuestMutationAllowed(httpd_req_t* req, const AuthContext& ctx);
+
 // Authenticate the request and return ESP_OK (unauthenticated) if auth fails.
 // Usage:  WEB_AUTH_OR_RETURN(req, ctx);
 //         ... use ctx.user, ctx.ip etc below ...

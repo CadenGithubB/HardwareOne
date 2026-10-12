@@ -78,11 +78,18 @@ static uint8_t gSensorLogMask = 0x00;
 
 static portMUX_TYPE sSensorLogSessionMux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t sSensorLogSessionId = 0;
+// True while the active session is a transient capture (live map recording)
+// whose format/mask were switched in RAM without touching the saved
+// configuration. Cleared, with the saved values restored, by whichever stop
+// ends that session.
+static bool gSensorLogTransient = false;
+static void sensorLogRestoreSettings();
 
-static void sensorLogPublishStarted() {
+static void sensorLogPublishStarted(bool transient = false) {
   portENTER_CRITICAL(&sSensorLogSessionMux);
   if (++sSensorLogSessionId == 0) ++sSensorLogSessionId;
   gSensorLoggingRunning = true;
+  gSensorLogTransient = transient;
   portEXIT_CRITICAL(&sSensorLogSessionMux);
 }
 
@@ -93,7 +100,12 @@ static bool sensorLogMarkStopped(uint32_t expected = 0) {
   const bool stopped = gSensorLoggingRunning &&
                        (!expected || expected == sSensorLogSessionId);
   if (stopped) gSensorLoggingRunning = false;
+  const bool transientEnded = stopped && gSensorLogTransient;
+  if (stopped) gSensorLogTransient = false;
   portEXIT_CRITICAL(&sSensorLogSessionMux);
+  // The tick writes nothing once the running flag is clear, so the user's
+  // saved format/mask/interval can come back before the file is closed.
+  if (transientEnded) sensorLogRestoreSettings();
   return stopped;
 }
 
@@ -1342,7 +1354,10 @@ static const char* sensorLogStartError() {
   return nullptr;
 }
 
-static const char* sensorLogStart(String filepath, uint32_t interval) {
+// persist=false starts a transient session: the four last-used parameters are
+// not saved, and the session restores the saved format/mask/interval when it
+// stops. Every other start keeps persisting as before.
+static const char* sensorLogStart(String filepath, uint32_t interval, bool persist = true) {
   if (const char* error = sensorLogStartError()) return error;
 
   if (filepath.length() == 0 || filepath.charAt(0) != '/') {
@@ -1438,7 +1453,7 @@ static const char* sensorLogStart(String filepath, uint32_t interval) {
 
   gSensorLogPath = filepath;
   gSensorLogIntervalMs = interval;
-  sensorLogPublishStarted();
+  sensorLogPublishStarted(/*transient=*/!persist);
   gSensorLogLastWrite = millis();
   // Day/boot/manual mode + honest rotation accounting for the (possibly
   // pre-existing, already-large) day file we're appending to.
@@ -1450,10 +1465,14 @@ static const char* sensorLogStart(String filepath, uint32_t interval) {
   // and healthlogging re-shape fresh each session, and persisting a shaped
   // path would compound variants / nest day folders. For manual literal
   // paths the strip is a no-op, so they persist exactly as typed.
-  setSetting(gSettings.sensorLogPath, stripSessionShaping(filepath));
-  setSetting(gSettings.sensorLogIntervalMs, (int)interval);
-  setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
-  setSetting(gSettings.sensorLogFormat, (int)gSensorLogFormat);
+  // A transient session (live map recording) leaves all four untouched so a
+  // later boot auto-start resumes the user's own session, not the track.
+  if (persist) {
+    setSetting(gSettings.sensorLogPath, stripSessionShaping(filepath));
+    setSetting(gSettings.sensorLogIntervalMs, (int)interval);
+    setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
+    setSetting(gSettings.sensorLogFormat, (int)gSensorLogFormat);
+  }
 
   systemEventPost(SYSEVT_SENSOR_STARTED, "Logging");
   logSystemEvent("SENSOR", "Logging online");
@@ -1462,6 +1481,25 @@ static const char* sensorLogStart(String filepath, uint32_t interval) {
   broadcastOutput(getDebugBuffer());
   cliHintf("readings are written to the file, not to this output - read them back with 'fileview \"%s\"', and stop logging with 'sensorlog stop'", filepath.c_str());
   return getDebugBuffer();
+}
+
+const char* sensorLogStartLiveTrack(const char* path, uint32_t intervalMs) {
+  if (const char* error = sensorLogStartError()) return error;
+  if (!path || path[0] != '/') return "Error: Live track path must start with /";
+  // TRACK selects GPS. Switch only the live values; the saved selection is
+  // untouched and comes back when the session stops. A refused start puts the
+  // live values straight back so nothing changes for the next typed start.
+  const SensorLogFormat previousFormat = gSensorLogFormat;
+  const uint8_t previousMask = gSensorLogMask;
+  gSensorLogFormat = SENSOR_LOG_TRACK;
+  gSensorLogMask = LOG_GPS;
+  const char* result = sensorLogStart(String(path), sensorLogClampInterval(intervalMs),
+                                      /*persist=*/false);
+  if (!result || strncmp(result, "SUCCESS:", 8) != 0) {
+    gSensorLogFormat = previousFormat;
+    gSensorLogMask = previousMask;
+  }
+  return result;
 }
 
 const char* cmd_sensorlog(const String& argsInput) {
