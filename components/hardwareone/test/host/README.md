@@ -158,7 +158,11 @@ counters, failure-only size resynchronization, rotation after partial writes,
 close/unlock ordering, nested lock ownership and battery retry cadence.
 Fresh or empty header-bearing files are staged before receiving rows; the sensor
 opener never creates the destination itself (an empty existing one is removed), so a
-new file appears only when its staged header is promoted. Header
+new file appears only when its staged header is promoted. The real
+`VFS::replaceFileGuarded` is compiled over the suite's fakes, whose `/sd/` rename refuses
+an existing destination as FAT does; the SD cases show that a new log is promoted by one
+rename, that no backup is created and that a foreign `.bak` beside an absent destination
+neither blocks nor is consumed. Header
 faults cover short writes, reported Print errors, post-flush size mismatch,
 failed staging/promotion, append-reopen failure and retries. A leftover `.header.tmp`
 beside an empty destination, including one a failed cleanup left behind, is replaced by a

@@ -1105,7 +1105,10 @@ void sensorLogTick() {
           lastTruncateMs = millis();
 
           if (gSensorLogMaxRotations > 0) {
-            if (gSensorLogMaxRotations > 1) {
+            // Remove the oldest generation first, including .1 when it is the
+            // only one: every rename below must land on a free name, because
+            // FAT (the SD tier) refuses to rename over an existing file.
+            {
               char oldestFile[128];
               snprintf(oldestFile, sizeof(oldestFile), "%s.%d", activePath, gSensorLogMaxRotations);
               if (VFS::existsGuarded(String(oldestFile), VFS::systemAuth("senlog.rotate"))) {
