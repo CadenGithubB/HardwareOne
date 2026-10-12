@@ -530,11 +530,9 @@ static void batteryLogAppend(const char* event) {
         "boot,uptime_ms,epoch_s,datetime,pct[%],voltage[V],crate[%/hr],status,charging,usb,event\n";
       f.close();
       String temporary;
-      if (!temporary.concat(kBatteryLogPath) || !temporary.concat(".header.tmp") ||
-          VFS::existsGuarded(temporary, ctx)) {
-        if (isDebugFlagSet(DEBUG_STORAGE)) DEBUGF_BROADCAST(DEBUG_STORAGE, "Battery log: header staging unavailable");
-        return;
-      }
+      if (!temporary.concat(kBatteryLogPath) || !temporary.concat(".header.tmp")) return;
+      // /battery.csv is empty here, so a leftover .header.tmp is an unpublished
+      // staging file from an interrupted boot; the "w" open replaces it.
       File header = VFS::openGuarded(temporary, "w", ctx, true);
       bool complete = false;
       if (header && !header.isDirectory()) {

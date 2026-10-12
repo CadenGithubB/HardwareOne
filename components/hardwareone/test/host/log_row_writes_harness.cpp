@@ -337,23 +337,32 @@ static void headerCases() {
       headerSizeOffset = 0; nowMs += 5000;
       if (sensor) sensorAppend("body"); else batteryLogAppend("event");
       released();
-      if (fault == 7) {
-        check(disk.at(destination).empty() && disk.at(temporary) == (sensor ? "tim" : "boo"), "retry refuses unresolved header sibling instead of appending");
-        auto retained = disk; reset(onSd); disk = retained; gSensorLogFormat = SENSOR_LOG_CSV;
-        if (sensor) sensorAppend("body"); else batteryLogAppend("event");
-        check(disk == retained, "reboot-like runtime reset cannot bypass unresolved header sibling");
-      } else {
+      {
         const std::string expected = sensor ? text(buildCsvHeader(LOG_TOF)) + "\nbody\n" : batteryHeader;
-        check(disk.at(destination).rfind(expected, 0) == 0 && !disk.count(temporary), "retry publishes full header before next row");
+        check(disk.at(destination).rfind(expected, 0) == 0 && !disk.count(temporary),
+              fault == 7 ? "retry replaces the leftover header sibling and publishes the header" : "retry publishes full header before next row");
       }
       released();
+      if (fault == 7) {
+        // Reboot-like: the destination is empty and only the staging sibling survived, so a fresh
+        // runtime stages the header again instead of refusing the path forever.
+        reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; disk[destination] = ""; disk[temporary] = sensor ? "tim" : "boo";
+        if (sensor) sensorAppend("body"); else batteryLogAppend("event");
+        const std::string expected = sensor ? text(buildCsvHeader(LOG_TOF)) + "\nbody\n" : batteryHeader;
+        check(disk.at(destination).rfind(expected, 0) == 0 && !disk.count(temporary), "reboot-like runtime reset replaces the leftover header sibling");
+        released();
+      }
     }
     reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV;
     const std::string destination = sensor ? sensorPath() : kBatteryLogPath;
     const std::string temporary = destination + ".header.tmp";
     disk[temporary] = "existing neighboring data";
     if (sensor) sensorAppend("body"); else batteryLogAppend("event");
-    check(disk.at(destination).empty() && disk.at(temporary) == "existing neighboring data", "existing sibling is not overwritten or removed"); released();
+    {
+      const std::string expected = sensor ? text(buildCsvHeader(LOG_TOF)) + "\nbody\n" : batteryHeader;
+      check(disk.at(destination).rfind(expected, 0) == 0 && !disk.count(temporary), "stale sibling beside an empty destination is replaced by a fresh header");
+    }
+    released();
     reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; failAppendOpenCall = 2;
     if (sensor) sensorAppend("body"); else batteryLogAppend("event");
     check(disk.at(destination) == (sensor ? text(buildCsvHeader(LOG_TOF)) + "\n" : batteryHeader), "failed append reopen retains complete header without rows");
