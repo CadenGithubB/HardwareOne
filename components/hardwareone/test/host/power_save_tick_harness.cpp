@@ -90,6 +90,7 @@ bool powerSetCpuFrequencyMhz(uint32_t target, bool* outClockChanged) {
 
 // INSERT_FUNCTIONS
 
+static constexpr unsigned long kClockRetryBackoffMs = 5000;  // production backoff in powerSaveTick
 static void clearTrace() { trace.clear(); clockRequests.clear(); }
 static std::string cpu(uint32_t frequency) { return "cpu:" + std::to_string(frequency); }
 static void expectTrace(std::vector<std::string> expected) {
@@ -134,6 +135,23 @@ static void test(const std::string& name) {
     expectTrace({cpu(POWER_INTERACTIVE_FLOOR_MHZ)});
     check(gOledRunning && liveMhz == POWER_CPU_PERFORMANCE_MHZ, "idle refusal preserves display and clock");
     clearTrace(); ++nowMs; powerSaveTick();
+    check(trace.empty() && gOledRunning, "a refused clock change is not retried on the next lap");
+    nowMs += kClockRetryBackoffMs; powerSaveTick();
+    enterTrace();
+  } else if (name == "persistent_refusal") {
+    // The bus stays wedged: one attempt per backoff window, the panel stays up
+    // and the loop is never pinned to back-to-back waits.
+    for (int i = 0; i < 3; ++i) clockReplies.push_back({false, 0, false});
+    idle();
+    for (int lap = 0; lap < 50; ++lap) { ++nowMs; powerSaveTick(); }
+    check(clockRequests.size() == 1 && gOledRunning, "refused idle entry waits out the backoff");
+    nowMs += kClockRetryBackoffMs; powerSaveTick();
+    for (int lap = 0; lap < 50; ++lap) { ++nowMs; powerSaveTick(); }
+    check(clockRequests.size() == 2 && gOledRunning, "each refusal starts a new backoff");
+    nowMs += kClockRetryBackoffMs; powerSaveTick();
+    check(clockRequests.size() == 3 && gOledRunning && liveMhz == POWER_CPU_PERFORMANCE_MHZ,
+          "a persistently refused clock change leaves display and clock alone");
+    clearTrace(); nowMs += kClockRetryBackoffMs; powerSaveTick();
     enterTrace();
   } else if (name == "foreign_change_refusal") {
     clockReplies.push_back({false, POWER_CPU_BALANCED_MHZ, false});
@@ -156,9 +174,11 @@ static void test(const std::string& name) {
     check(gOledRunning, "unconfirmed own transition never sleeps the display");
     clearTrace(); clockReplies.push_back({false, 0, false});
     ++nowMs; powerSaveTick();
+    check(trace.empty(), "recovery of an own partial change waits out the backoff");
+    nowMs += kClockRetryBackoffMs; powerSaveTick();
     expectTrace({cpu(POWER_CPU_PERFORMANCE_MHZ)});
     check(gOledRunning, "failed recovery keeps the previously awake panel");
-    clearTrace(); ++nowMs; powerSaveTick();
+    clearTrace(); nowMs += kClockRetryBackoffMs; powerSaveTick();
     expectTrace({cpu(POWER_CPU_PERFORMANCE_MHZ)});
     check(liveMhz == POWER_CPU_PERFORMANCE_MHZ && gOledRunning,
           "own partial change recovers without a fabricated sleep-exit event");
@@ -177,12 +197,14 @@ static void test(const std::string& name) {
       return;
     }
 #endif
-    expectTrace({cpu(POWER_CPU_PERFORMANCE_MHZ)});
-    check(!gOledRunning && liveMhz == POWER_INTERACTIVE_FLOOR_MHZ,
-          "failed wake does not resume display or publish exit");
-    clearTrace(); ++nowMs; powerSaveTick();
     wakeTrace();
-    check(liveMhz == POWER_CPU_PERFORMANCE_MHZ, "wake retry restores captured frequency");
+    check(gOledRunning && liveMhz == POWER_INTERACTIVE_FLOOR_MHZ,
+          "a refused clock restore still brings the display back; only the clock stays pending");
+    clearTrace(); ++nowMs; powerSaveTick();
+    check(trace.empty(), "the pending clock restore waits out the backoff");
+    nowMs += kClockRetryBackoffMs; powerSaveTick();
+    expectTrace({cpu(POWER_CPU_PERFORMANCE_MHZ)});
+    check(liveMhz == POWER_CPU_PERFORMANCE_MHZ && gOledRunning, "clock retry restores the captured frequency without a second resume");
     clearTrace(); ++nowMs; powerSaveTick();
     check(trace.empty(), "completed wake is not repeated");
   } else if (name == "locked" || name == "already_idle") {

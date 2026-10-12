@@ -2385,10 +2385,22 @@ static void powerSaveTick() {
   static uint32_t      lastSeq = 0;
   static uint32_t      savedCpuMhz = 0;
   static unsigned long lastSeenActivityMs = 0;
+  static unsigned long nextClockAttemptMs = 0;  // backoff after a refused clock change
   static bool          inited = false;
+  // A refused clock change means the shared owner could not drain an I2C bus
+  // within its wait. Retrying on the very next lap would pin the whole loop to
+  // that wait; space the attempts instead. Private to this tick: the sleep
+  // cooldown stamp is shared with lightsleep/deepsleep and must not record an
+  // entry that never happened.
+  constexpr unsigned long kClockRetryBackoffMs = 5000;
+
+  const unsigned long now = millis();
+  const bool clockAttemptDue = (long)(now - nextClockAttemptMs) >= 0;
 
   // Wake: restore the CPU clock (only if we lowered it), then bring the panel
-  // back. Centralized so every wake path stays in sync.
+  // back. Centralized so every wake path stays in sync. A refused clock
+  // restore does not hold the panel hostage: the display comes back now and
+  // only the clock stays pending, retried once the backoff has passed.
   auto wake = [&]() {
     // Restore the interactive clock iff idle-enter actually lowered it. Compare
     // to the LIVE clock rather than a fixed ">80" test: UltraSaver's interactive
@@ -2396,15 +2408,21 @@ static void powerSaveTick() {
     // test would strand it at 40 after wake. savedCpuMhz holds the pre-idle
     // (interactive) clock; 0 means "we never lowered".
     if (savedCpuMhz != 0 && getCpuFrequencyMhz() < savedCpuMhz) {
-      if (!powerSetCpuFrequencyMhz(savedCpuMhz)) {
-        // The activity stamp may already have been consumed. Remember this
-        // request independently so the next loop still retries restoration.
+      if (!clockAttemptDue) {
         wakePending = true;
-        return;
+      } else if (!powerSetCpuFrequencyMhz(savedCpuMhz)) {
+        // The activity stamp may already have been consumed. Remember this
+        // request independently so a later loop still retries restoration.
+        wakePending = true;
+        nextClockAttemptMs = now + kClockRetryBackoffMs;
+      } else {
+        savedCpuMhz = 0;
+        wakePending = false;
       }
+    } else {
+      savedCpuMhz = 0;
+      wakePending = false;
     }
-    savedCpuMhz = 0;
-    wakePending = false;
     // A refused idle transition can still need clock recovery if the HAL
     // changed it before reporting failure. The panel never slept in that case.
     if (!asleep) return;
@@ -2418,7 +2436,6 @@ static void powerSaveTick() {
     systemEventPost(SYSEVT_POWER_SAVE_EXIT);
   };
 
-  const unsigned long now = millis();
   if (!inited) {
     inited = true;
     inputActivitySequence(lastSeq, 5);
@@ -2482,8 +2499,10 @@ static void powerSaveTick() {
   const unsigned long timeoutMs = (unsigned long)gSettings.powerSaveTimeoutMinutes * 60000UL;
   if ((now - act) < timeoutMs) return;
 
-  // Idle long enough — enter power-save, respecting the anti-flap cooldown.
+  // Idle long enough — enter power-save, respecting the anti-flap cooldown and
+  // the backoff of a refused clock change.
   if (!powerSleepTransitionAllowed(nullptr)) return;
+  if (!clockAttemptDue) return;
   // Downclock to the current mode's IDLE floor. Locked keeps 240 through idle
   // (OLED blanks, core stays hot). Performance/Balanced/PowerSaver hold the
   // 80 MHz Wi-Fi floor while asleep — radio stays up so HTTP/ESP-NOW remain
@@ -2525,6 +2544,7 @@ static void powerSaveTick() {
     // transition state untouched when it cannot confirm the requested clock.
     bool clockChanged = false;
     if (!powerSetCpuFrequencyMhz(idleFloorMhz, &clockChanged)) {
+      nextClockAttemptMs = now + kClockRetryBackoffMs;
       // A busy refusal can race another command's accepted clock change.
       // Recover only our own partial transition, never that other request.
       if (clockChanged && getCpuFrequencyMhz() < savedCpuMhz) {

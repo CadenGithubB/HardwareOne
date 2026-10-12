@@ -50,7 +50,7 @@ def main() -> None:
     parser.add_argument("--sanitize", action="store_true")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
-    scenarios = ("normal", "idle_refusal", "foreign_change_refusal", "own_partial_failure",
+    scenarios = ("normal", "idle_refusal", "persistent_refusal", "foreign_change_refusal", "own_partial_failure",
                  "wake_input", "wake_command", "wake_disabled", "wake_stt", "locked",
                  "already_idle", "uart_fast", "uart_slow", "uart_stopped", "inhibited")
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic"]
@@ -68,7 +68,7 @@ def main() -> None:
                                check=True, timeout=60)
                 for scenario in scenarios:
                     subprocess.run([str(binary), scenario], check=True, timeout=15)
-    print("Power-save tick: 56 fresh-process scenarios passed across UART/STT gates")
+    print("Power-save tick: 60 fresh-process scenarios passed across UART/STT gates")
 
 
 if __name__ == "__main__":

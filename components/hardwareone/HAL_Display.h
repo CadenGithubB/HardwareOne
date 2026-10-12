@@ -245,6 +245,12 @@ uint8_t displayI2cBus();  // Latched for the canvas lifetime; bus settings requi
 // readiness; callers must use displayIsReady(). Stop keeps borrowed UI pointers
 // valid. Successful initialization means the probe and library setup ran, not
 // that every write was acknowledged (some drivers provide no write result).
+// Task contract: the lifecycle state here is not synchronized. The main loop
+// owns it (power-save tick, UI pump); cmd_exec's lightsleep/deepsleep call
+// displayPrepareForSleep/displayResumeFromSleep as well, and that overlap is
+// benign only because displayPrepareForSleep is idempotent (off always wins,
+// the rail is cut once). Routing those command paths through the main loop is
+// the follow-up; until then no third task may call these.
 bool displayInit();
 bool displayIsReady();
 void displayStop();

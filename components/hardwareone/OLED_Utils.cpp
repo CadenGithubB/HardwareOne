@@ -6871,8 +6871,12 @@ void tryAutoStartInputForMenu() {
   // queued I2C device. Reuse the same driver start and saved autostart policy.
   inputStartInternal();
 #else
-  const char* result = cmd_sensorstart_queued(I2C_DEVICE_INPUT, "Input", "input@menu");
-  DEBUG_DISPLAYF("[INPUT_AUTO] %s", result);
+  // Admission only: this runs on the main loop, and the command wrapper's
+  // reply text lives in cmd_exec's debug buffer.
+  SensorStartRefusal why = SensorStartRefusal::None;
+  if (!requestSensorStart(I2C_DEVICE_INPUT, "input@menu", &why)) {
+    DEBUG_DISPLAYF("[INPUT_AUTO] input not started: %s", sensorStartRefusalText(why));
+  }
 #endif
 }
 
@@ -7251,6 +7255,11 @@ void oledResumeFromSleep() {
   const bool restored = displayResumeFromSleep();
   if (!wasRunning) return;
   if (!restored) {
+    // The UI gives the panel up here, so the HAL drops its pending resume with
+    // it: otherwise the next idle cycle would skip the rail cut and a later
+    // wake would light a screen nothing renders to. The canvas and the
+    // post-power-cycle init flag stay for oledstart.
+    displayStop();
     oledConnected = false;
     gOledRunning = false;
     ERROR_SYSTEMF("[OLED] Display could not resume; use oledstart to retry");

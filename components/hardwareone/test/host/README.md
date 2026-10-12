@@ -322,8 +322,11 @@ initialization failure/retry, both OLED addresses on both buses, initialization
 without restarting Wire, retained canvas lifetime, latched bus routing, bus-lock
 refusal, brightness/dim/power transactions, and the power-rail sleep/wake order.
 Failed wake must remain unavailable until a successful retry; manual retry uses
-the same charge-pump restoration as wake. Repeated sleep/resume calls are safe,
-stopping while asleep cancels automatic resume, and disabled builds expose
+the same charge-pump restoration as wake, and that restoration pushes a blank
+frame before the panel is switched on, as stop blanks it before switching off.
+Repeated sleep/resume calls are safe, a sleep cycle after a failed wake still
+cuts the rail, stopping while asleep (or after giving up a failed wake) cancels
+automatic resume so a later wake lights nothing, and disabled builds expose
 compatible stubs.
 ASan/UBSan follow `HW1_SANITIZE`.
 
@@ -927,7 +930,9 @@ start-only; stop requests have independent capacity.
 worker with the actual manager queue. It injects close requests after dequeue,
 during startup spacing and inside initialization. It checks returned start
 outcomes, suppressed cancelled-start announcements, cleanup before stop events,
-taskless FM/RTC stops, probe errors and balanced polling pauses. ESP-NOW enabled
+taskless FM/RTC stops, probe errors and balanced polling pauses, and that the
+admission core shared with the display's input auto-start never writes the
+command reply buffer. ESP-NOW enabled
 and disabled variants run separately.
 
 `sensor_start_outcomes` executes all nine production sensor starters, including
@@ -1028,9 +1033,11 @@ messages, settings and events follow confirmed changes. ESP32/S3 and both P4
 revision policies run separately, including HAL-accepted idle-only 40 MHz.
 
 `power_save_tick` executes the unchanged idle/wake function in a fresh process
-for each scenario. It checks refused idle entry, retained wake retries after
-activity is consumed, recovery after an owner's partially failed clock change,
-and refusal overlapping another owner's clock change. Display/cooldown/events
+for each scenario. It checks refused idle entry and its backoff (a refusal is
+not retried on the next lap, and a persistently wedged bus gets one attempt per
+backoff window), retained wake retries after activity is consumed with the
+display restored before the pending clock, recovery after an owner's partially
+failed clock change, and refusal overlapping another owner's clock change. Display/cooldown/events
 must follow confirmed CPU transitions. Disabled power-save, STT, Locked mode and
 UART baud-floor behavior are included. These suites inherit `HW1_SANITIZE`; RTOS
 semaphores, clock hardware and display effects remain deterministic boundaries,
