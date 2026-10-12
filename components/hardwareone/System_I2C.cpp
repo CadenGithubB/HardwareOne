@@ -430,57 +430,92 @@ static bool sensorHasTask(I2CDeviceType sensor) {
 
 // Externally linkable so HAL_Input.cpp's unified cmd_openinput can dispatch
 // through the same queue as the other sensor start commands.
+bool requestSensorStart(I2CDeviceType sensor, const char* eventTag, SensorStartRefusal* why) {
+  auto refuse = [&](SensorStartRefusal reason) {
+    if (why) *why = reason;
+    return false;
+  };
+  // Reject immediately if the I2C bus is disabled at runtime (distinct from hardware not connected)
+  if (!gI2CBusRunning) return refuse(SensorStartRefusal::BusDisabled);
+
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr) return refuse(SensorStartRefusal::QueueUnavailable);
+  if (mgr->hasPendingDeviceStop(sensor) ||
+      (!sensorIsRunning(sensor) && sensorHasTask(sensor))) {
+    return refuse(SensorStartRefusal::StopPending);
+  }
+  if (sensorIsRunning(sensor)) return refuse(SensorStartRefusal::AlreadyRunning);
+  if (isInQueue(sensor)) return refuse(SensorStartRefusal::AlreadyQueued);
+
+  // Verify hardware is physically present before attempting start
+  const uint8_t addr = i2cAddressForDeviceType(sensor);
+  const uint8_t bus = i2cBusForDeviceType(sensor);
+  const uint8_t probe = addr ? i2cProbeAddress(addr, 100000, 50, bus) : 0;
+  if (probe == 2) return refuse(SensorStartRefusal::NoAck);
+  if (probe != 0) return refuse(SensorStartRefusal::ProbeFailed);
+
+  if (!enqueueDeviceStart(sensor)) return refuse(SensorStartRefusal::NotQueued);
+  sensorStatusBumpWith(eventTag);
+  if (why) *why = SensorStartRefusal::None;
+  return true;
+}
+
+const char* sensorStartRefusalText(SensorStartRefusal why) {
+  switch (why) {
+    case SensorStartRefusal::None:             return "queued";
+    case SensorStartRefusal::BusDisabled:      return "I2C bus is disabled";
+    case SensorStartRefusal::QueueUnavailable: return "sensor request queue is unavailable";
+    case SensorStartRefusal::StopPending:      return "stop/cleanup is still pending";
+    case SensorStartRefusal::AlreadyRunning:   return "already running";
+    case SensorStartRefusal::AlreadyQueued:    return "already queued";
+    case SensorStartRefusal::NoAck:            return "no acknowledgement from device on I2C bus";
+    case SensorStartRefusal::ProbeFailed:      return "I2C probe could not complete";
+    case SensorStartRefusal::NotQueued:        return "could not queue (queue unavailable/full or stop pending)";
+  }
+  return "unknown";
+}
+
+// Command wrapper: the only place that renders the admission outcome, into
+// cmd_exec's debug buffer. Message texts are unchanged.
 const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName, const char* eventTag) {
 #if ENABLE_GPIO_ENCODER
   if (sensor == I2C_DEVICE_INPUT) return "Error: GPIO input is not an I2C device; use openinput";
 #endif
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  // Reject immediately if the I2C bus is disabled at runtime (distinct from hardware not connected)
-  if (!gI2CBusRunning) {
-    snprintf(getDebugBuffer(), 1024, "Error: [%s] I2C bus is disabled — enable it in settings and reboot", displayName);
-    return getDebugBuffer();
-  }
-
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  if (!mgr) return "Error: Sensor request queue is unavailable";
-  if (mgr->hasPendingDeviceStop(sensor) ||
-      (!sensorIsRunning(sensor) && sensorHasTask(sensor))) {
-    snprintf(getDebugBuffer(), 1024, "Error: [%s] Stop/cleanup is still pending; retry open shortly", displayName);
-    return getDebugBuffer();
-  }
-  if (sensorIsRunning(sensor)) {
-    snprintf(getDebugBuffer(), 1024, "%s sensor already running", displayName);
-    return getDebugBuffer();
-  }
-  if (isInQueue(sensor)) {
-    int pos = getQueuePosition(sensor);
-    snprintf(getDebugBuffer(), 1024, "%s sensor already queued (position %d)", displayName, pos);
-    return getDebugBuffer();
-  }
-
-  // Verify hardware is physically present before attempting start
-  uint8_t addr = i2cAddressForDeviceType(sensor);
-  const uint8_t bus = i2cBusForDeviceType(sensor);
-  const uint8_t probe = addr ? i2cProbeAddress(addr, 100000, 50, bus) : 0;
-  if (probe != 0) {
-    snprintf(getDebugBuffer(), 1024, probe == 2
-        ? "Error: [%s] No acknowledgement from device on I2C bus"
-        : "Error: [%s] I2C probe could not complete (bus busy, unavailable or transfer error); retry",
-        displayName);
-    return getDebugBuffer();
-  }
-
-  if (enqueueDeviceStart(sensor)) {
-    sensorStatusBumpWith(eventTag);
-    int pos = getQueuePosition(sensor);
+  SensorStartRefusal why = SensorStartRefusal::None;
+  if (requestSensorStart(sensor, eventTag, &why)) {
     snprintf(getDebugBuffer(), 1024, "%s sensor queued for start (position %d, queue depth: %d)",
-             displayName, pos, getQueueDepth());
-    return getDebugBuffer();
-  } else {
-    snprintf(getDebugBuffer(), 1024, "Error: Could not queue %s sensor (queue unavailable/full or stop pending)", displayName);
+             displayName, getQueuePosition(sensor), getQueueDepth());
     return getDebugBuffer();
   }
+  switch (why) {
+    case SensorStartRefusal::BusDisabled:
+      snprintf(getDebugBuffer(), 1024, "Error: [%s] I2C bus is disabled — enable it in settings and reboot", displayName);
+      break;
+    case SensorStartRefusal::QueueUnavailable:
+      return "Error: Sensor request queue is unavailable";
+    case SensorStartRefusal::StopPending:
+      snprintf(getDebugBuffer(), 1024, "Error: [%s] Stop/cleanup is still pending; retry open shortly", displayName);
+      break;
+    case SensorStartRefusal::AlreadyRunning:
+      snprintf(getDebugBuffer(), 1024, "%s sensor already running", displayName);
+      break;
+    case SensorStartRefusal::AlreadyQueued:
+      snprintf(getDebugBuffer(), 1024, "%s sensor already queued (position %d)", displayName, getQueuePosition(sensor));
+      break;
+    case SensorStartRefusal::NoAck:
+      snprintf(getDebugBuffer(), 1024, "Error: [%s] No acknowledgement from device on I2C bus", displayName);
+      break;
+    case SensorStartRefusal::ProbeFailed:
+      snprintf(getDebugBuffer(), 1024, "Error: [%s] I2C probe could not complete (bus busy, unavailable or transfer error); retry", displayName);
+      break;
+    case SensorStartRefusal::NotQueued:
+    case SensorStartRefusal::None:
+      snprintf(getDebugBuffer(), 1024, "Error: Could not queue %s sensor (queue unavailable/full or stop pending)", displayName);
+      break;
+  }
+  return getDebugBuffer();
 }
 
 const char* cmd_thermalstart_queued(const String& argsInput) {

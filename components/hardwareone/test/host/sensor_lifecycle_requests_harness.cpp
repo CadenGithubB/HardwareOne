@@ -203,6 +203,19 @@ static unsigned eventCount(int type) {
 
 static void admissionCases() {
   { Fixture f; bufferAvailable = false; assert(contains(f.open(), "buffer unavailable")); assert(probeCalls == 0); }
+  // The admission core never touches the command reply buffer, so the main
+  // loop (menu input auto-start) can call it beside a running command.
+  { Fixture f; bufferAvailable = false; debugBuffer[0] = '\0';
+    SensorStartRefusal why = SensorStartRefusal::NotQueued;
+    assert(requestSensorStart(I2C_DEVICE_GPS, "menu@auto", &why) && why == SensorStartRefusal::None);
+    assert(statuses.size() == 1 && statuses.back() == "menu@auto" && f.manager.getQueueDepth() == 1);
+    assert(debugBuffer[0] == '\0'); }
+  { Fixture f; gI2CBusRunning = false; SensorStartRefusal why = SensorStartRefusal::None;
+    assert(!requestSensorStart(I2C_DEVICE_GPS, "menu@auto", &why) && why == SensorStartRefusal::BusDisabled);
+    assert(probeCalls == 0 && statuses.empty() && contains(sensorStartRefusalText(why), "disabled")); }
+  { Fixture f; probeResult = 2; SensorStartRefusal why = SensorStartRefusal::None;
+    assert(!requestSensorStart(I2C_DEVICE_GPS, "menu@auto", &why) && why == SensorStartRefusal::NoAck);
+    assert(probeCalls == 1 && f.manager.getQueueDepth() == 0 && statuses.empty()); }
   { Fixture f; gI2CBusRunning = false; assert(contains(f.open(), "disabled")); assert(probeCalls == 0 && f.manager.getQueueDepth() == 0); }
   { Fixture f; I2CDeviceManager::instance = nullptr; assert(contains(f.open(), "queue is unavailable")); assert(probeCalls == 0); }
   { Fixture f; handles[I2C_DEVICE_GPS] = &f; assert(contains(f.open(), "cleanup is still pending")); assert(probeCalls == 0); }

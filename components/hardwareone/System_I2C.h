@@ -250,6 +250,25 @@ inline bool i2cPingAddress(uint8_t address, uint32_t clockHz, uint32_t lockWaitM
 // active initialization; the sensor task then owns resource cleanup.
 bool requestSensorStop(I2CDeviceType device);
 
+// Admission for a queued sensor start, shared by the start commands and the
+// main loop's menu input auto-start. Formats nothing: the command wrapper
+// renders the outcome into cmd_exec's debug buffer, so other tasks can call
+// this without touching that buffer. True only when the start was queued and
+// the status bumped; `why` names the refusal otherwise.
+enum class SensorStartRefusal : uint8_t {
+  None,
+  BusDisabled,
+  QueueUnavailable,
+  StopPending,
+  AlreadyRunning,
+  AlreadyQueued,
+  NoAck,
+  ProbeFailed,
+  NotQueued,
+};
+bool requestSensorStart(I2CDeviceType sensor, const char* eventTag, SensorStartRefusal* why);
+const char* sensorStartRefusalText(SensorStartRefusal why);
+
 const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName,
                                    const char* eventTag);
 

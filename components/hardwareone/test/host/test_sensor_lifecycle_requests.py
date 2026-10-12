@@ -44,10 +44,12 @@ def main() -> None:
         "inline bool enqueueDeviceStart(", "inline bool isInQueue(",
         "inline int getQueuePosition(", "inline int getQueueDepth(",
     )]
+    controller_definitions += [extract_block(header, "enum class SensorStartRefusal") + ";"]
     controller_definitions += [re.search(r"^static bool sSensorStopAwaitingCleanup[^\n]+", controller, re.M)[0]]
     controller_definitions += [extract_block(controller, marker) for marker in (
         "static uint8_t i2cAddressForDeviceType(", "static uint8_t i2cBusForDeviceType(",
         "static bool sensorIsRunning(", "static bool sensorHasTask(",
+        "bool requestSensorStart(", "const char* sensorStartRefusalText(",
         "const char* cmd_sensorstart_queued(", "const char* deviceTypeDisplayName(",
         "bool requestSensorStop(", "static void applySensorStop(", "static void finishSensorStops()",
         "static bool startSensorInternal(", "static void broadcastStartedSensor(",

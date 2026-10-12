@@ -132,14 +132,14 @@ static void exerciseSsd1306(uint8_t bus, uint8_t address) {
     platform.events.clear();
     assert(displayInit());
     assert(displayIsReady() && platform.beginCalls > failedWakeBegins && gDisplay == retained);
-    requireEventOrder({"begin", "cmd:174", "cmd:141", "cmd:20", "cmd:175"});
+    requireEventOrder({"begin", "cmd:174", "clear", "display", "cmd:141", "cmd:20", "cmd:175"});
 
     platform.events.clear();
     displayPrepareForSleep();
     platform.events.clear();
     assert(displayResumeFromSleep());
     requireEventOrder({"rail:39:1", "delay:100", "recover:1", "begin",
-                       "cmd:174", "cmd:141", "cmd:20", "cmd:175"});
+                       "cmd:174", "clear", "display", "cmd:141", "cmd:20", "cmd:175"});
 
     // Successful begin alone cannot hide a denied post-power-cycle command.
     displayPrepareForSleep();
@@ -149,6 +149,39 @@ static void exerciseSsd1306(uint8_t bus, uint8_t address) {
     platform.lockUnavailableAfterBegin = false;
     platform.lockAvailable = true;
     assert(displayResumeFromSleep() && displayIsReady());
+
+    // A failed wake must not pin the HAL: a later idle cycle still cuts the
+    // rail although a resume is pending, and the pending resume itself keeps
+    // working once the panel answers again.
+    displayPrepareForSleep();
+    platform.beginResults = {false, false};
+    assert(!displayResumeFromSleep() && !displayIsReady());
+    platform.events.clear();
+    displayPrepareForSleep();
+    requireEventOrder({"rail:39:0", "delay:200"});
+    assert(!hasEvent("cmd:174"));  // nothing was on to switch off
+    platform.beginResults.clear();
+    assert(displayResumeFromSleep() && displayIsReady());
+
+    // When the UI gives the panel up after a failed wake (displayStop), the
+    // next idle cycle still cuts the rail and the next wake lights nothing;
+    // a manual start restores the rail and does the full post-power-cycle
+    // sequence, blank frame included.
+    displayPrepareForSleep();
+    platform.beginResults = {false, false};
+    assert(!displayResumeFromSleep());
+    displayStop();
+    platform.events.clear();
+    displayPrepareForSleep();
+    requireEventOrder({"rail:39:0", "delay:200"});
+    const int givenUpBegins = platform.beginCalls;
+    platform.beginResults.clear();
+    platform.events.clear();
+    assert(!displayResumeFromSleep() && !displayIsReady());
+    assert(platform.beginCalls == givenUpBegins && !hasEvent("cmd:175"));
+    platform.events.clear();
+    assert(displayInit() && displayIsReady());
+    requireEventOrder({"begin", "cmd:174", "clear", "display", "cmd:141", "cmd:20", "cmd:175"});
   } else
 #endif
   {
@@ -172,7 +205,7 @@ static void exerciseSsd1306(uint8_t bus, uint8_t address) {
   assert(displayInit());
 #if defined(I2C2_POWER_PIN) && I2C2_POWER_PIN >= 0
   if (bus == 1) {
-    requireEventOrder({"begin", "cmd:174", "cmd:141", "cmd:20", "cmd:175"});
+    requireEventOrder({"begin", "cmd:174", "clear", "display", "cmd:141", "cmd:20", "cmd:175"});
 
     // A manual start can itself restore the rail after a close while asleep;
     // it needs the same recovery and charge-pump sequence as normal wake.
@@ -181,7 +214,7 @@ static void exerciseSsd1306(uint8_t bus, uint8_t address) {
     platform.events.clear();
     assert(displayInit() && displayIsReady());
     requireEventOrder({"rail:39:1", "delay:100", "recover:1", "begin",
-                       "cmd:174", "cmd:141", "cmd:20", "cmd:175"});
+                       "cmd:174", "clear", "display", "cmd:141", "cmd:20", "cmd:175"});
   }
 #endif
   displayStop();

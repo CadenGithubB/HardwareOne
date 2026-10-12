@@ -37,9 +37,13 @@ bool beginOled(DisplayDriver* display, uint8_t bus, uint8_t address, uint32_t wa
     return display->begin(SSD1306_SWITCHCAPVCC, address, true, false);
   });
   if (!initialized || !oledNeedsInit) return initialized;
-  // Keep the post-power-cycle workaround on both wake and manual retry.
+  // Keep the post-power-cycle workaround on both wake and manual retry. GDDRAM
+  // holds noise after losing Vcc, so a blank frame goes in while the panel is
+  // still off; the charge-pump kick then lights a cleared screen.
   return i2cDeviceTransaction(bus, address, kOledClockHz, 200, [&]() -> bool {
     display->ssd1306_command(SSD1306_DISPLAYOFF);
+    display->clearDisplay();
+    display->display();
     display->ssd1306_command(SSD1306_CHARGEPUMP);
     display->ssd1306_command(0x14);
     display->ssd1306_command(SSD1306_DISPLAYON);
@@ -308,7 +312,13 @@ void displayStop() {
   if (!gDisplay) return;
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   if (wasReady) {
+    // Blank GDDRAM before the panel goes off, so a restart cannot flash the
+    // previous screen while begin() turns the display on ahead of the first
+    // real frame. displayReady is already false: no UI pointer depends on
+    // the canvas content any more.
     i2cDeviceTransactionVoid(oledBus, gDisplayI2cAddress, kOledClockHz, 500, [&]() {
+      gDisplay->clearDisplay();
+      gDisplay->display();
       gDisplay->ssd1306_command(SSD1306_DISPLAYOFF);
     });
   }
@@ -325,13 +335,19 @@ void displayStop() {
 }
 
 void displayPrepareForSleep() {
-  if (resumeAfterSleep) return;  // Preserve an already pending resume.
-  resumeAfterSleep = displayIsReady();
-  displaySetPower(false);
-  displayReady = false;
-  delay(10);  // Let the panel's off sequence complete before removing power.
+  // Idempotent: the main loop's power-save and cmd_exec's lightsleep may both
+  // call this, and whichever runs second must still find the panel off and
+  // the rail cut. Off always wins; a pending resume is kept, never a reason
+  // to skip the work (a stale one from a failed wake would otherwise keep the
+  // rail powered on every later idle cycle).
+  if (displayIsReady()) {
+    resumeAfterSleep = true;
+    displaySetPower(false);
+    displayReady = false;
+    delay(10);  // Let the panel's off sequence complete before removing power.
+  }
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 && defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
-  if (displayI2cBus() == 1) {
+  if (displayI2cBus() == 1 && !displayRailOff) {
     digitalWrite(I2C2_POWER_PIN, LOW);
     delay(200);  // Preserve the existing rail decay / power-on-reset interval.
     displayRailOff = true;
