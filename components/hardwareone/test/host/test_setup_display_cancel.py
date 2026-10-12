@@ -35,6 +35,7 @@ def generate() -> str:
         extract_block(header, "struct SetupWizardResult") + ";",
         extract_block(mode, "enum class WizardSubMode") + ";",
         extract_block(mode, "static struct") + " sWizard;",
+        "\n".join(re.findall(r"(?m)^#define MSG_ROUTE_\w+ .*$", (COMPONENT / "System_Debug.h").read_text())),
         extract_block((COMPONENT / "OLED_SetupWizard.h").read_text(), "struct JoystickNav") + ";",
     ])
     state = "\n".join(re.search(r"(?m)^static volatile[^\n]*\b" + name + r"\b[^\n]*;", utils)[0]

@@ -31,6 +31,7 @@ class String : public std::string {
   long toInt() const { return std::strtol(c_str(), nullptr, 10); }
 };
 
+volatile bool gInHelpRender = false;  // System_CLI.cpp; the wizard marks its renders with it
 // INSERT_PRODUCTION_TYPES
 
 struct SettingsBoundary {

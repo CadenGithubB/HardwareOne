@@ -27,6 +27,7 @@ class String : public std::string {
   }
 };
 
+volatile bool gInHelpRender = false;  // System_CLI.cpp; the wizard marks its renders with it
 // INSERT_PRODUCTION_TYPES
 
 struct SettingsBoundary {

@@ -26,6 +26,8 @@ class String : public std::string {
   }
 };
 
+volatile bool gInHelpRender = false;  // System_CLI.cpp; the wizard marks its renders with it
+static int ambientOutput = 0;  // lines printed without the explicit-render marker
 // INSERT_PRODUCTION_TYPES
 // INSERT_PRODUCTION_STATE
 
@@ -48,6 +50,7 @@ struct SerialBoundary {
 } Serial;
 static void broadcastOutput(const String& text) {
   output.push_back(text);
+  if (!gInHelpRender) ++ambientOutput;
   if (text == "Feature configuration complete.") {
     check(applyCalls == 1 && applyAccepted);
     operations.emplace_back("complete.message");
@@ -99,6 +102,7 @@ static WizardSubMode subModeForPage(SetupWizardPage) { return WizardSubMode::PAG
 
 static void reset() {
   operations.clear(); output.clear(); inputs.clear(); inputIndex = 0;
+  ambientOutput = 0; gInHelpRender = false;
   dialogTimeout = dialogCancel = false; applyAccepted = exitCanComplete = true;
   fakeNow = 100; expectedDialogTimeout = 0; heapUsed = 20; heapTotal = 100;
   sWizard = {}; dialogResult = {}; appliedResult = {};
@@ -121,14 +125,17 @@ static void noSecrets() {
 static void scratchCleared() {
   check(sWizard.wifiPendingSsid.empty() && !sWizard.wifiScanValid && sWizard.wifiNamedCount == 0);
   check(!sWizard.result.completed && !sWizard.result.wifiConfigured && sWizard.result.wifiPassword.empty());
-  check(!sWizard.espnowConfiguring && sWizard.subMode == WizardSubMode::DONE);
+  check(sWizard.subMode == WizardSubMode::DONE);
+  // Every line the mode printed was an explicit render (K4), and the marker
+  // is restored once the callback returns.
+  check(ambientOutput == 0 && !gInHelpRender);
 }
 static void completedAdapterCases() {
   for (bool cli : {false, true}) for (bool accepted : {false, true}) {
     reset(); applyAccepted = accepted;
     if (cli) {
       sWizard.result = completed(); sWizard.wifiPendingSsid = "pending";
-      sWizard.wifiNamedCount = 3; sWizard.wifiScanValid = sWizard.espnowConfiguring = true;
+      sWizard.wifiNamedCount = 3; sWizard.wifiScanValid = true;
       wizardMode_onExit(nullptr);
       scratchCleared(); check(discardCalls == 1 && dialogCalls == 0);
     } else {
@@ -163,7 +170,7 @@ static void cancelledAdapterCases() {
   }
   for (bool explicitCancel : {false, true}) {
     reset(); sWizard.result = completed(); sWizard.wifiPendingSsid = "pending";
-    sWizard.wifiNamedCount = 8; sWizard.wifiScanValid = sWizard.espnowConfiguring = true;
+    sWizard.wifiNamedCount = 8; sWizard.wifiScanValid = true;
     if (explicitCancel) {
       // Any prompt but a password one (see setup_wifi_navigation for those).
       sWizard.subMode = WizardSubMode::WIFI_SSID;
@@ -202,9 +209,10 @@ static void exitEligibilityCases() {
   for (bool eligible : {false, true}) for (bool cancelled : {false, true}) {
     reset(); exitCanComplete = eligible; setSerialWaitTimeout(500);
     sWizard.result = completed(); sWizard.wifiPendingSsid = "pending";
-    sWizard.wifiNamedCount = 4; sWizard.wifiScanValid = sWizard.espnowConfiguring = true;
+    sWizard.wifiNamedCount = 4; sWizard.wifiScanValid = true;
     if (cancelled) requestWizardCancel();
     wizardMode_onExit(nullptr);
+    check(ambientOutput == 0 && !gInHelpRender);
     const bool accepted = eligible && !cancelled;
     check(applyCalls == static_cast<unsigned>(accepted) && discardCalls == 1);
     check(hasOutput("Feature configuration complete.") == accepted);

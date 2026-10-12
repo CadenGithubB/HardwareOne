@@ -52,6 +52,7 @@ def main():
                 extract_block(mode, "enum class WizardSubMode") + ";",
                 cli_result,
                 extract_block(mode, "static struct") + " sWizard;",
+                extract_block(mode, "struct WizardRender") + ";",
             ])
             functions = "\n\n".join([
                 extract_block(setup, "bool wizardHandleCancelInput("),

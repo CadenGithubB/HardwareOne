@@ -21,6 +21,9 @@ import tempfile
 
 COMPONENT = Path(__file__).resolve().parents[2]
 ARDUINO_CORE = COMPONENT.parent / "arduino" / "cores" / "esp32"
+# The boundary is about project headers. The Arduino core may be a symlink
+# into another checkout, so its resolved location counts as inside.
+REPOSITORY_ROOTS = {COMPONENT.parents[1].resolve(), (COMPONENT.parent / "arduino").resolve()}
 
 
 def main() -> None:
@@ -53,6 +56,11 @@ def main() -> None:
                 dependencies.split(":", 1)[1])}
             expected = {unit.resolve(), *((COMPONENT / path).resolve()
                                          for path in allowed)}
+            # -MMD leaves out system headers, but Apple clang still lists files
+            # such as the SDK's SDKSettings.json. Only unexpected paths inside
+            # the repository change the boundary; everything outside is ignored.
+            paths = {path for path in paths if path in expected or any(
+                root == path or root in path.parents for root in REPOSITORY_ROOTS)}
             assert paths == expected, (
                 f"{name} header boundary changed: "
                 f"unexpected={paths - expected}; missing={expected - paths}"

@@ -8,6 +8,8 @@
 #include <deque>
 #include <string>
 #include <vector>
+volatile bool gInHelpRender = false;  // System_CLI.cpp; the wizard marks its renders with it
+static int ambientOutput = 0;  // lines printed without the explicit-render marker
 // INSERT_STRING
 // INSERT_TYPES
 
@@ -31,7 +33,7 @@ struct SerialBoundary {
   void println(const char* = "") {} void print(const char*) {}
   template<typename... Args> void printf(const char*, Args...) {}
 } Serial;
-static void broadcastOutput(const String& value) { output.push_back(value); }
+static void broadcastOutput(const String& value) { output.push_back(value); if (!gInHelpRender) ++ambientOutput; }
 static int getWizardPageNumber(SetupWizardPage) { return 2; }
 static int getWizardTotalPages() { return 6; }
 static bool wizardNextPage(SetupWizardResult& result) {
@@ -87,6 +89,7 @@ static SetupWizardResult acceptedBefore() {
 }
 static void reset() {
   inputs.clear(); pickedNetworks.clear(); introChoices.clear(); output.clear();
+  ambientOutput = 0; gInHelpRender = false;
   cancelRequested = passwordBack = false; cachedNameAvailable = true;
   nextCalls = previousCalls = scanClears = scans = prompts = 0;
   currentPage = WIZARD_PAGE_WIFI; sWizard = {}; sWizard.subMode = WizardSubMode::WIFI_SSID;
@@ -100,7 +103,12 @@ static void preserved(const SetupWizardResult& result) {
   check(result.wifiConfigured && result.wifiSSID == "old-network" && result.wifiPassword == "old-secret");
 }
 static CLIModeInputResult cli(const char* line) {
-  char response[160]{}; return wizardMode_onInput(line, nullptr, response, sizeof(response));
+  char response[160]{};
+  const int ambientBefore = ambientOutput;
+  const CLIModeInputResult result = wizardMode_onInput(line, nullptr, response, sizeof(response));
+  // Every line the mode printed was an explicit render (K4); the marker is restored.
+  check(ambientOutput == ambientBefore && !gInHelpRender);
+  return result;
 }
 static void serialCases() {
 #if ENABLE_WIFI

@@ -43,6 +43,7 @@ def main():
         extract_block(mode, "enum class WizardSubMode") + ";",
         extract_block((COMPONENT / "System_CLIMode.h").read_text(), "enum CLIModeInputResult") + ";",
         extract_block(mode, "static struct") + " sWizard;",
+        extract_block(mode, "struct WizardRender") + ";",
     ])
     functions = "\n\n".join([
         extract_block(setup, "bool wizardHandleCancelInput("),

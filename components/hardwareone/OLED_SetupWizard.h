@@ -53,9 +53,6 @@ bool handleWizardPageInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult
 // page model. Called from runSetupWizard() when currentPage is one of those.
 void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& running);
 
-// Delegate to runSetupWizard() - kept for any existing call sites
-SetupWizardResult runOLEDSetupWizard();
-
 #endif // ENABLE_OLED_DISPLAY
 
 #endif // OLED_SETUPWIZARD_H

@@ -50,6 +50,8 @@ def generate() -> str:
     adapter_types = "\n".join([
         extract_block(mode, "enum class WizardSubMode") + ";",
         extract_block(mode, "static struct") + " sWizard;",
+        "volatile bool gInHelpRender = false;",
+        extract_block(mode, "struct WizardRender") + ";",
         extract_block(cli_header, "enum CLIModeInputResult") + ";",
     ])
     adapter_boundaries = """
