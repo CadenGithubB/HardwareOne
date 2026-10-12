@@ -957,7 +957,12 @@ void firstTimeSetupIfNeeded() {
                 gSettings.rtcAutoStart ? 1 : 0,
                 gSettings.presenceAutoStart ? 1 : 0);
   
-  writeSettingsJson();
+  if (!writeSettingsJson()) {
+    // The refused save retained its background retry; tell the operator the
+    // wizard's choices are not on disk yet instead of implying they are.
+    WARN_SYSTEMF("[FTS] settings not persisted now; the settings writer retries");
+    broadcastOutput("Warning: settings could not be saved yet; a retry is scheduled.");
+  }
   applySettings();  // Apply log level and other debug settings immediately
 
   // Connect WiFi and check for an NTP reply before any potential reboot.

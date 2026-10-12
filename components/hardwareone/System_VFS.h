@@ -121,6 +121,13 @@ struct VirtualEntry {
  */
 size_t listVirtualEntries(const String& parentPath, VirtualEntry* out, size_t cap);
 
+// Staging names used by checked replacement: `<file>.tmp` (including
+// `.header.tmp`) and the SD backup `<file>.bak`. Listings offered to a user as
+// loadable files should skip them; they are never a finished output.
+inline bool isStagingName(const String& nameOrPath) {
+  return nameOrPath.endsWith(".tmp") || nameOrPath.endsWith(".bak");
+}
+
 // One entry in the VFS directory view. Names and full VFS paths are owned
 // strings; no child File or backend-relative path escapes the reader.
 struct DirectoryEntry {

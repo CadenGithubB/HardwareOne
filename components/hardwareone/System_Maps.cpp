@@ -3560,9 +3560,9 @@ const char* cmd_gpstrackmerge(const String& argsInput) {
   VFS::mkdirGuarded("/logging_captures", sysCtx);
   VFS::mkdirGuarded("/logging_captures/tracks", sysCtx);
 
-  if (VFS::existsGuarded(temporary, sysCtx)) {
-    return "Error: output temporary already exists; inspect it before retrying";
-  }
+  // A temporary already at this name is the leftover of an interrupted run:
+  // this command owns the name and holds the filesystem lock for its whole
+  // run, so "w" simply truncates it. The previous output stays until promotion.
   File out = VFS::openGuarded(temporary, "w", sysCtx, true);
   if (!out || out.isDirectory()) {
     if (out) out.close();

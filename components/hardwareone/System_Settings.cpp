@@ -387,7 +387,30 @@ SettingsWriteScope::SettingsWriteScope() {
 }
 
 SettingsWriteScope::~SettingsWriteScope() {
-  if (active_) (void)finish();
+  if (!active_) return;
+  if (finish()) return;
+#if configNUM_THREAD_LOCAL_STORAGE_POINTERS > 3
+  if (!active_) return;  // finish() ran and reported a failed flush
+  // finish() refused: this scope is being destroyed out of nesting order or on
+  // a foreign task. Leaving its batch open with the task's scope pointer aimed
+  // at this object's storage would dangle, so diagnose the misuse, close the
+  // batch and clear the pointer; pending dirty bits are flushed conservatively.
+  TaskHandle_t task = xTaskGetCurrentTaskHandle();
+  if (task != task_) {
+    ERROR_STORAGEF("SettingsWriteScope destroyed on a foreign task; its batch stays open until it expires");
+    active_ = false;
+    return;
+  }
+  ERROR_STORAGEF("SettingsWriteScope destroyed out of nesting order; closing its batch");
+  const SettingsBatchOwner owner = explicitSettingsBatchOwner(batchId_);
+  const SettingsBatchFinish finished = finishSettingsWriteBatch(owner);
+  vTaskSetThreadLocalStoragePointer(task, kSettingsScopeTlsSlot, nullptr);
+  active_ = false;
+  const uint8_t dirtyMask = finished.found
+      ? finished.dirtyMask : hw1_settings_batch::ALL;
+  result_ = (finished.found && !finished.final) || dirtyMask == 0 ||
+      flushSettingsDirtyMask(owner, dirtyMask);
+#endif
 }
 
 bool SettingsWriteScope::finish() {
@@ -1436,6 +1459,10 @@ static JsonSnapshotWriteResult writeJsonSnapshot(const JsonDocument& doc,
       bytesWritten = serializeJson(doc, file);
       file.flush();
       observedBytes = file.size();
+      // Print's write-error flag is set only by subclasses that call
+      // setWriteError(); the Arduino LittleFS/SD File never does, so on the
+      // device the byte-count and size checks below are the real gate. The
+      // term stays for File implementations that do report.
       writeError = file.getWriteError() != 0;
       file.close();
 
@@ -1475,6 +1502,12 @@ static bool writeSettingsSnapshot(const JsonDocument& doc,
   systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, result.failure, destination);
   return false;
 }
+
+// Set when readSettingsJson() found an on-disk firmwareVersion that differs
+// from the running build. Cleared when settingsRestampFirmwareVersion()
+// succeeds, or when a later complete writeSettingsJson() stamps the running
+// version through buildSettingsJsonDoc(); the next boot derives it again.
+static bool gSettingsVersionRestampPending = false;
 
 bool writeSettingsJson() {
   if (!filesystemReady) return false;
@@ -1575,6 +1608,10 @@ bool writeSettingsJson() {
       logSystemEvent("SETTINGS", "save REFUSED - cannot read existing settings.json; file left intact");
       systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "merge_read_failed",
                       "cannot open existing settings.json; save refused");
+      // A refused open is transient (descriptor or cache memory), unlike an
+      // unparseable file: keep the main file dirty so the background retry
+      // writes it once the open succeeds, whichever caller asked for this save.
+      retainSettingsWriteRetry(hw1_settings_batch::MAIN);
       pollResume();
       return false;
     }
@@ -1604,6 +1641,9 @@ bool writeSettingsJson() {
     return false;
   }
 
+  // The full document carries the running firmwareVersion, so a pending
+  // re-stamp is satisfied by this save (same writer guard as the re-stamp).
+  gSettingsVersionRestampPending = false;
   DEBUG_STORAGEF("[Settings] Write complete");
   pollResume();
   
@@ -1782,10 +1822,8 @@ static void selectDeviceKeyEpoch(const JsonDocument& doc) {
 // Read Settings from JSON File
 // ============================================================================
 
-// Set when the on-disk firmwareVersion differs from the running build, so the
-// caller can re-stamp it after the load finishes. Consumed by
-// settingsRestampFirmwareVersion().
-static bool gSettingsVersionRestampPending = false;
+// gSettingsVersionRestampPending is defined beside writeSettingsJson(), which
+// also clears it: a complete full save stamps the running version.
 
 bool settingsFirmwareVersionRestampPending() {
   return gSettingsVersionRestampPending;
@@ -1825,7 +1863,15 @@ bool settingsRestampFirmwareVersion() {
   if (deserializeJson(doc, json) != DeserializationError::Ok) return false;
   doc["firmwareVersion"] = SelfDevice::firmwareVersion();
 
-  if (!writeSettingsSnapshot(doc, SETTINGS_JSON_FILE, "/settings.tmp", "settings.restamp")) {
+  // The shared snapshot writer stages and checks the replacement. A failed
+  // re-stamp is cosmetic (the next boot derives the pending state again), so
+  // it keeps its own log-only report instead of the full writers' error line
+  // and save-failed event, which mean a user change was lost.
+  const JsonSnapshotWriteResult result =
+      writeJsonSnapshot(doc, SETTINGS_JSON_FILE, "/settings.tmp", "settings.restamp");
+  if (result.failure) {
+    logSystemEvent("SETTINGS", "firmwareVersion re-stamp FAILED (%s): serialized=%zu, size=%zu, expected=%zu",
+                   result.failure, result.bytesWritten, result.observedBytes, result.expectedBytes);
     return false;
   }
   gSettingsVersionRestampPending = false;

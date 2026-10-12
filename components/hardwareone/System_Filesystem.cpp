@@ -2188,6 +2188,15 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes) {
 // LittleFS replaces the destination directly. SD retains its remove/rename
 // sequence, which has a window where the log is missing; cleanupLogOrphan
 // can recover a verified .tmp for paths included in boot recovery.
+//
+// A detected short append, or a reopened size that differs from what the
+// append handle reported, returns false before any rotation: rotation only
+// promotes a verified copy, and that copy needs about 85% of the cap in free
+// space. On a LittleFS that is already full with no SD overflow a capped log
+// therefore stays pinned at its cap until space is freed elsewhere. The
+// pre-0.99.97.3 writer rotated anyway and could replace the log with a partial
+// copy; that lossy reclaim is deliberately gone, and nothing trims logs on low
+// space in its place.
 bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   STACK_TRACEF("appendLineWithCap.enter path=%s line_len=%u cap=%u",
                path ? path : "(null)", (unsigned)line.length(), (unsigned)capBytes);
@@ -2340,14 +2349,8 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
 //                                       rename(tmp→dest); promote .tmp.
 //
 // Case (c) is the only data-preserving recovery. Case (b) is cleanup.
-void cleanupLogOrphan(const char* path) {
-  if (!path) return;
-
-  char dest[128];
-  // Use the same overflow-aware resolution so we look at the actual location
-  // writes land in. Pass 0 for requiredSpace — we're not writing.
-  VFS::resolveOverflowPath(path, 0, dest, sizeof(dest));
-
+// The three-state check above, for one resolved destination.
+static void recoverLogOrphanAt(const char* dest) {
   char tmpPath[140];
   snprintf(tmpPath, sizeof(tmpPath), "%s.tmp", dest);
 
@@ -2366,5 +2369,25 @@ void cleanupLogOrphan(const char* path) {
       VFS::remove(String(tmpPath));
       Serial.printf("[FS] Could not recover %s from .tmp; discarded orphan\n", dest);
     }
+  }
+}
+
+void cleanupLogOrphan(const char* path) {
+  if (!path) return;
+
+  char dest[128];
+  // Use the same overflow-aware resolution so we look at the actual location
+  // writes land in. Pass 0 for requiredSpace — we're not writing.
+  VFS::resolveOverflowPath(path, 0, dest, sizeof(dest));
+  recoverLogOrphanAt(dest);
+
+  // A rotation that ran while log overflow was latched in an earlier boot can
+  // leave its orphan on the SD mirror, which the resolution above names only
+  // while the latch is tripped again. Check the mirror whenever the card is
+  // mounted, independent of the current latch.
+  if (VFS::isSDAvailable()) {
+    char mirror[140];
+    snprintf(mirror, sizeof(mirror), "/sd%s", path);
+    if (strcmp(mirror, dest) != 0) recoverLogOrphanAt(mirror);
   }
 }

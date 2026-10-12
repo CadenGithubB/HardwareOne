@@ -301,6 +301,17 @@ static void baselineRegressions() {
         "baseline attempts to unlink a directory and reports it as cleaned");
   check(systemLogs.size() == 2 && removed.size() == 1, "baseline summary overcounts directory unlink failure");
 }
+#if HAS_STAGING_NAME
+// The shared staging-name predicate the track pickers use to skip the files
+// checked replacement leaves behind.
+static void stagingNames() {
+  ++scenarios;
+  for (const char* staging : {"/a/b.tmp", "/a/b.header.tmp", "/a/b.bak", "x.tmp", "/logging_captures/tracks/live.csv.tmp"})
+    check(VFS::isStagingName(String(staging)), "staging name not recognized");
+  for (const char* plain : {"/a/b.csv", "/a/tmp", "/a/b.tmp.csv", "/a/bak", "", "/a/b.bak2"})
+    check(!VFS::isStagingName(String(plain)), "plain name treated as staging");
+}
+#endif
 int main() {
   try {
     normalParity();
@@ -308,6 +319,9 @@ int main() {
     baselineRegressions();
 #else
     policyAndPaths(); failuresAndEmpty(); nestedGuard();
+#endif
+#if HAS_STAGING_NAME
+    stagingNames();
 #endif
     std::fprintf(stderr, "boot_temp_cleanup %s LLM=%d: %u scenarios, %u checks passed\n",
                  BASELINE ? "baseline" : "current", ENABLE_LLM_SOURCE_ONBOARD, scenarios, checks);

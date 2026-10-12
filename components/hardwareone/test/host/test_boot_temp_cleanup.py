@@ -43,9 +43,13 @@ def generate(component: Path, baseline: bool) -> str:
     reader = "namespace VFS {\n" + "\n".join(
         extract_block(header, marker) + ";" for marker in (
             "struct DirectoryEntry", "class DirectoryReader"))
+    staging = "inline bool isStagingName(" in header
+    if staging:
+        reader += "\n" + extract_block(header, "inline bool isStagingName(")
     start = vfs.index("DirectoryReader::DirectoryReader(")
     end = vfs.index("\nstatic FS* fsForPath(", start)
     reader += "\n" + vfs[start:end] + "\n}\n"
+    reader = f"#define HAS_STAGING_NAME {int(staging)}\n" + reader
     harness = (HERE / "boot_temp_cleanup_harness.cpp").read_text()
     for marker, replacement in (("// INSERT_LOCKS", locks),
                                 ("// INSERT_READER", reader),

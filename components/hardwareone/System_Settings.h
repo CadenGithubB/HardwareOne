@@ -1228,8 +1228,10 @@ bool readSettingsJson();
 bool writeSettingsJson();
 
 // True when readSettingsJson() found an on-disk firmwareVersion different from
-// the running build. Cleared after settingsRestampFirmwareVersion() succeeds;
-// a failed attempt leaves it pending for a subsequent call or boot.
+// the running build. Cleared when settingsRestampFirmwareVersion() succeeds or
+// when a later complete writeSettingsJson() stamps the running version; a
+// failed re-stamp leaves it set until one of those happens or the next boot
+// derives it again (nothing retries the re-stamp on its own).
 bool settingsFirmwareVersionRestampPending();
 
 // Re-stamp ONLY firmwareVersion in the on-disk settings document, by rewriting
@@ -1263,7 +1265,10 @@ uint32_t allocateSettingsWriteBatchId();
 // without a command context. Check active() before changing values, then call
 // finish() to observe persistence failure. Destruction also finishes an active
 // scope; failed writes retain the ordinary background retry intent.
-// Scopes must remain on their creating task and finish in nesting order.
+// Scopes must remain on their creating task and finish in nesting order; a
+// scope destroyed out of order or on another task is reported with an error
+// log, its batch is closed with its pending files flushed conservatively, and
+// the task's scope pointer is cleared rather than left dangling.
 // A first scope uses its own owner, leaving existing command batches intact;
 // nested scopes share it and only the outer finish writes the changed files.
 // This coalesces writes, not live RAM changes or authorization.

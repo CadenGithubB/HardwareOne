@@ -2256,8 +2256,10 @@ void hardwareone_setup() {
         if (meshKeysStretchPassphrase(i)) meshesDirty = true;
       }
     }
-    if (meshesDirty && filesystemReady) {
-      writeSettingsJson();
+    if (meshesDirty && filesystemReady && !writeSettingsJson()) {
+      // The stretched-key cache is re-derived next boot; the refused save
+      // already retained its retry, so only say that it did not land now.
+      WARN_SYSTEMF("[Mesh] stretched-key cache not persisted now; the settings writer retries");
     }
     uint8_t derivedCount = meshKeysInitAll();
     (void)derivedCount;  // logged inside meshKeysInitAll on a per-mesh basis

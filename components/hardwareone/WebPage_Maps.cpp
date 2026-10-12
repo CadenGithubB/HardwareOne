@@ -273,6 +273,8 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
   // Probe one candidate file's head for GPS content and emit its JSON entry.
   // Shared by the top-level scan and the one-level session-subfolder descent.
   auto emitIfGps = [&](File& file, bool& first) {
+    // Staging files of an interrupted merge/export are never loadable tracks.
+    if (VFS::isStagingName(String(file.path()))) return;
     bool hasGPS = false;
     File check = VFS::openGuarded(file.path(), "r", ctx);
     if (check) {

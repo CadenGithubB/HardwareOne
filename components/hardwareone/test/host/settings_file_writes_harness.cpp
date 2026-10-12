@@ -242,6 +242,11 @@ static void clearSettingsWriteRetry(uint8_t mask) {
   check(writerDepth > 0 && !ownsFs && localPauseDepth == 0, "retry cleared before successful writer cleanup");
   retryMask &= ~mask;
 }
+static unsigned retains = 0;
+static void retainSettingsWriteRetry(uint8_t mask) {
+  check(writerDepth > 0 && !ownsFs, "retry retained outside the writer guard or under the filesystem lock");
+  retryMask |= mask; ++retains;
+}
 void computeBondLocalSettingsHash() {
   check(writerDepth > 0 && !ownsFs && localPauseDepth == 0, "bond hash before successful writer cleanup");
   ++bondHashes;
@@ -327,7 +332,7 @@ static void reset() {
   gFsMutex = &fsMutex;
   filesystemReady = gSettingsLoadedOk = gDebugLoadedOk = true;
   gSettingsVersionRestampPending = true; builderFails = builderOverflows = false;
-  jsonAllocator.fail = false; retryMask = hw1_settings_batch::ALL;
+  jsonAllocator.fail = false; retryMask = hw1_settings_batch::ALL; retains = 0;
   writeOpens = readOpens = directOpens = renameCalls = removeCalls = 0;
   builds = debugBuilds = bondHashes = 0; liveValue = 17;
   events.clear(); logs.clear(); logLocks.clear(); authOwners.clear();
@@ -378,7 +383,9 @@ static void successCases() {
     const uint8_t expectedRetry = writer == Writer::Main ? hw1_settings_batch::DEBUG : writer == Writer::Debug ? hw1_settings_batch::MAIN : hw1_settings_batch::ALL;
     check(retryMask == expectedRetry, "success cleared unrelated retry intent");
     check(bondHashes == (ENABLE_BONDED_MODE && writer != Writer::Restamp ? 1u : 0u), "wrong success bond hash behavior");
-    check(settingsFirmwareVersionRestampPending() == (writer != Writer::Restamp), "wrong restamp pending state after success");
+    // A complete main save stamps the running version too, so only the debug
+    // writer leaves a pending re-stamp behind.
+    check(settingsFirmwareVersionRestampPending() == (writer == Writer::Debug), "wrong restamp pending state after success");
   }
   reset(); gSettingsVersionRestampPending = false;
   check(settingsRestampFirmwareVersion() && readOpens == 0 && writeOpens == 0, "unneeded restamp performed I/O"); balanced();
@@ -395,11 +402,19 @@ static void failureCase(Writer writer, Fault injected) {
   check(files.count(temporary(writer)) == (injected == Fault::Cleanup ? 1u : 0u), "temp cleanup outcome not preserved");
   check(retryMask == hw1_settings_batch::ALL && bondHashes == 0 && settingsFirmwareVersionRestampPending(), "failed save published success or discarded retry/restamp intent");
   check(renameCalls == (injected == Fault::Rename ? 1u : 0u), "invalid temp reached rename");
-  check(events.size() == 1 && !events[0].locked && events[0].detail == destination(writer), "helper failure not reported once after FS release");
-  const char* stage = injected == Fault::Open || injected == Fault::Directory ? "open" : injected == Fault::Rename ? "rename" : "serialize";
-  check(events[0].reason == stage, "wrong failure stage");
-  check(!logs.empty() && logs.back().find("save FAILED for ") == 0 && !logLocks.back(),
-        "helper failure logging occurred before filesystem release");
+  if (writer == Writer::Restamp) {
+    // A failed re-stamp is cosmetic: it logs its own line and raises none of
+    // the full writers' error/save-failed reporting, which means a lost change.
+    check(events.empty() && diagnosticCalls == 0, "restamp failure raised the full writers' failure reporting");
+    check(!logs.empty() && logs.back().find("firmwareVersion re-stamp FAILED") == 0 && !logLocks.back(),
+          "restamp failure not logged once after filesystem release");
+  } else {
+    check(events.size() == 1 && !events[0].locked && events[0].detail == destination(writer), "helper failure not reported once after FS release");
+    const char* stage = injected == Fault::Open || injected == Fault::Directory ? "open" : injected == Fault::Rename ? "rename" : "serialize";
+    check(events[0].reason == stage, "wrong failure stage");
+    check(!logs.empty() && logs.back().find("save FAILED for ") == 0 && !logLocks.back(),
+          "helper failure logging occurred before filesystem release");
+  }
   if (injected == Fault::Cleanup || writer == Writer::Restamp) {
     fault = Fault::None; events.clear();
     check(run(writer), "save did not recover after transient failure"); balanced();
@@ -435,9 +450,12 @@ static void admissionAndBuildFailures() {
   check(writeSettingsJson() && files.count(SETTINGS_JSON_FILE), "fresh-device main save refused absent destination"); balanced();
 }
 static void mergeOpenFailure() {
-  reset(); readOpenFails = true;
+  reset(); readOpenFails = true; retryMask = 0; retains = 0;
   check(!writeSettingsJson(), "unopenable existing merge document was replaced from live RAM"); balanced();
   check(files.at(SETTINGS_JSON_FILE)->bytes == oldMain && builds == 0 && writeOpens == 0, "merge open failure lost original document");
+  // A refused open is transient: the main file stays dirty for the background
+  // retry whichever caller asked for the save.
+  check(retryMask == hw1_settings_batch::MAIN && retains == 1, "refused merge open did not retain the main retry intent");
 }
 static void helperOverflowAndReentry() {
 #if HAS_SNAPSHOT_HELPER

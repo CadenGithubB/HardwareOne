@@ -25,8 +25,11 @@ CORE = COMPONENT.parent / "arduino/cores/esp32"
 def generate(overlay: Path | None) -> str:
     source = (overlay or COMPONENT) / "System_Filesystem.cpp"
     production = source.read_text()
-    functions = "\n\n".join(extract_block(production, marker) for marker in (
-        "bool appendLineWithCap(", "void cleanupLogOrphan("))
+    markers = ["bool appendLineWithCap("]
+    if "static void recoverLogOrphanAt(" in production:
+        markers.append("static void recoverLogOrphanAt(")
+    markers.append("void cleanupLogOrphan(")
+    functions = "\n\n".join(extract_block(production, marker) for marker in markers)
     harness = (HERE / "capped_log_writes_harness.cpp").read_text()
     require(harness.count("// INSERT_PRODUCTION") == 1, "one production insertion marker")
     return f"#define BASELINE {int(overlay is not None)}\n" + harness.replace("// INSERT_PRODUCTION", functions)

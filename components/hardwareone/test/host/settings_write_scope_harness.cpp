@@ -51,7 +51,8 @@ static int xSemaphoreTakeRecursive(SemaphoreHandle_t semaphore, TickType_t wait)
   semaphore->mutex.lock(); return 1;
 }
 static void xSemaphoreGiveRecursive(SemaphoreHandle_t semaphore) { semaphore->mutex.unlock(); }
-#define ERROR_STORAGEF(...) ((void)0)
+static unsigned scopeErrors;
+#define ERROR_STORAGEF(...) ((void)++scopeErrors)
 #define WARN_STORAGEF(...) ((void)0)
 static std::atomic<unsigned> mainWrites{0}, debugWrites{0};
 static bool mainSucceeds = true, debugSucceeds = true;
@@ -212,6 +213,35 @@ static void concurrentTasks(Task& task) {
   one.join(); two.join();
   check(mainWrites == 2 && debugWrites == 2, "concurrent task scopes mixed owners or lost files");
 }
+// A scope destroyed while its finish is refused (outer destroyed before inner,
+// or on a foreign task) is diagnosed; its batch closes with the pending files
+// flushed and the task's scope pointer is cleared instead of left dangling.
+static void outOfOrderDestruction(Task& task) {
+  reset(task); scopeErrors = 0;
+  auto* outer = new SettingsWriteScope;
+  check(outer->active() && requestSettingsPersist(), "heap outer scope refused");
+  {
+    SettingsWriteScope inner;
+    check(inner.active() && !outer->finish() && outer->active(), "out-of-order finish was not refused");
+    delete outer;  // refused finish inside the destructor
+    check(scopeErrors == 1 && task.slots[3] == nullptr, "out-of-order destruction not diagnosed or left the scope pointer dangling");
+    check(mainWrites == 0, "closing the outer level of a nested batch wrote early");
+    check(!inner.finish() && inner.active(), "orphaned inner scope claimed a finish it could not perform");
+  }
+  check(scopeErrors == 2 && task.slots[3] == nullptr, "orphaned inner destruction not diagnosed or left the scope pointer dangling");
+  check(mainWrites == 1 && debugWrites == 0, "orphaned batch did not flush its pending file once");
+  check(requestSettingsPersist() && mainWrites == 2, "task no longer accepts ordinary writes after the diagnosis");
+  reset(task); scopeErrors = 0;
+  auto* foreign = new SettingsWriteScope;
+  check(foreign->active() && requestSettingsPersist(), "foreign-task fixture refused");
+  Task other; currentTask = &other;
+  delete foreign;  // destroyed on another task: cannot touch that task's TLS
+  currentTask = &task;
+  check(scopeErrors == 1 && task.slots[3] != nullptr && mainWrites == 0, "foreign-task destruction touched the owning task or wrote");
+  clockMs += 130000; settingsWriteBatchTick();
+  check(mainWrites == 1, "expired orphaned batch did not flush");
+  task.slots[3] = nullptr;
+}
 int main() {
   static_assert(!std::is_copy_constructible<SettingsWriteScope>::value, "scope must not copy TLS ownership");
   static_assert(!std::is_move_constructible<SettingsWriteScope>::value, "scope must not move TLS ownership");
@@ -219,6 +249,7 @@ int main() {
 #if configNUM_THREAD_LOCAL_STORAGE_POINTERS > 3
   coalescingAndIsolation(task);
   nestingAndCommandOwner(task);
+  outOfOrderDestruction(task);
   refusalsAndRetry(task);
   concurrentTasks(task);
 #else

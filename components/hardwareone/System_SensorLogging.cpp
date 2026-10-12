@@ -2477,9 +2477,9 @@ const char* cmd_healthlogmerge(const String& argsInput) {
   VFS::mkdirGuarded("/logging_captures", sysCtx);
   VFS::mkdirGuarded(CAPTURE_DIR_SENSORS, sysCtx);
 
-  if (VFS::existsGuarded(temporary, sysCtx)) {
-    return "Error: output temporary already exists; inspect it before retrying";
-  }
+  // A temporary already at this name is the leftover of an interrupted run:
+  // this command owns the name and holds the filesystem lock for its whole
+  // run, so "w" simply truncates it. The previous output stays until promotion.
   File out = VFS::openGuarded(temporary, "w", sysCtx, true);
   if (!out || out.isDirectory()) {
     if (out) out.close();
@@ -2655,10 +2655,8 @@ const char* cmd_capturecrypt(const String& argsInput) {
       in.close();
       return "Error: input is not a sealed capture (no #HW1ENC magic on line 1)";
     }
-    if (VFS::existsGuarded(temporary, sysCtx)) {
-      in.close();
-      return "Error: output temporary already exists; inspect it before retrying";
-    }
+    // A temporary already at this name is the leftover of an interrupted
+    // export; this command owns the name under the lock, so "w" truncates it.
     File out = VFS::openGuarded(temporary, "w", sysCtx, true);
     if (!out || out.isDirectory()) {
       if (out) out.close();
