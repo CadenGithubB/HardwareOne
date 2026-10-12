@@ -55,7 +55,11 @@ static void logMessage(const char* format, ...) {
 }
 #define DEBUG_LOGGERF(...) logMessage(__VA_ARGS__)
 #define DEBUGF_BROADCAST(flag, ...) logMessage(__VA_ARGS__)
-static void logSystemEvent(const char*, const char* format, const char* path) { logMessage(format, path); }
+static void logSystemEvent(const char*, const char* format, ...) {
+  char line[256];
+  va_list args; va_start(args, format); vsnprintf(line, sizeof(line), format, args); va_end(args);
+  logMessage("%s", line);
+}
 
 namespace fs {
 class File : public Print {
@@ -113,14 +117,19 @@ static bool existsGuarded(const String& path, const Context&) { io("exists:" + t
 static bool removeGuarded(const String& path, const Context&) { io("remove:" + text(path)); check(liveFiles == 0, "close before removal"); return !failRemove && disk.erase(text(path)) != 0; }
 static bool renameGuarded(const String& from, const String& to, const Context&) {
   io("rename:" + text(from) + ":" + text(to)); check(liveFiles == 0, "close before rotation");
-  if (!disk.count(text(from))) return false;
+  if (failReplace || !disk.count(text(from))) return false;
+  // FAT cannot rename over an existing file; LittleFS can.
+  if (text(to).rfind("/sd/", 0) == 0 && disk.count(text(to))) return false;
   disk[text(to)] = std::move(disk.at(text(from))); disk.erase(text(from)); return true;
 }
-static bool replaceFileGuarded(const String& from, const String& to, const Context& ctx) {
-  io("replace:" + text(from) + ":" + text(to));
-  if (failReplace) return false;
-  return renameGuarded(from, to, ctx);
+// The real VFS::replaceFileGuarded is compiled here (INSERT_REPLACE) over these fakes.
+using AuthContext = Context;
+enum StorageType { INTERNAL, SDCARD };
+static StorageType getStorageType(const String& path) { return path.startsWith("/sd/") ? SDCARD : INTERNAL; }
+static bool guardedNormalize(const String& path, String& normalized, const char*, const Context&) {
+  normalized = path; return path.startsWith("/") && path.indexOf("..") < 0;
 }
+// INSERT_REPLACE
 }
 namespace Clock { static bool isSynced() { return clockSynced; } }
 static SensorLogFormat gSensorLogFormat = SENSOR_LOG_TEXT;
@@ -371,7 +380,7 @@ static void headerCases() {
       // A new destination comes into being only through promotion, so the rename never meets an
       // existing file on either backend; an existing empty destination is removed first.
       const std::string expected = text(buildCsvHeader(LOG_TOF)) + "\nbody\n";
-      const std::string replaceOp = "replace:" + temporary + ":" + destination;
+      const std::string replaceOp = "rename:" + temporary + ":" + destination;   // the real helper's promotion
       auto find = [&](const std::string& op) { return std::find(operations.begin(), operations.end(), op); };
       reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; sensorAppend("body"); released();
       check(find(replaceOp) != operations.end(), "fresh destination is promoted from its staging file");
@@ -385,6 +394,18 @@ static void headerCases() {
       reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; disk[destination] = ""; failRemove = true; sensorAppend("body"); released();
       check(disk.at(destination).empty() && log_writes == 0 && log_open_fail == 1 && !disk.count(temporary),
             "failed removal of an empty destination refuses this append without staging");
+      if (onSd) {
+        // Against the real helper: the sensor logger never enters SD's backup branch, so no
+        // .bak is created, and a foreign .bak beside an absent destination neither blocks nor is consumed.
+        const std::string backup = destination + ".bak";
+        reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; sensorAppend("body"); released();
+        check(find("rename:" + temporary + ":" + destination) != operations.end() && find("rename:" + destination + ":" + backup) == operations.end() && !disk.count(backup),
+              "fresh SD destination is promoted by one rename without a backup");
+        reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; disk[backup] = "foreign"; sensorAppend("body"); released();
+        check(disk.at(destination).rfind(expected, 0) == 0 && disk.at(backup) == "foreign", "foreign backup beside an absent destination neither blocks nor is consumed");
+        reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; disk[destination] = ""; sensorAppend("body"); released();
+        check(disk.at(destination).rfind(expected, 0) == 0 && !disk.count(backup), "empty SD destination is replaced without a backup");
+      }
     }
     // The sensor opener's first "a" open is the reopen after promotion; the battery writer's is its probe.
     reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; failAppendOpenCall = sensor ? 1 : 2;

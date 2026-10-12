@@ -41,6 +41,11 @@ def generate(overlay: Path | None) -> str:
     functions.append(extract_block(sensor, "static bool writeHeaderChecked("))
     if "static File openSensorLogForAppend(" in sensor:
         functions.append(extract_block(sensor, "static File openSensorLogForAppend("))
+    vfs_path = (root / "System_VFS.cpp") if (root / "System_VFS.cpp").exists() else (COMPONENT / "System_VFS.cpp")
+    vfs = vfs_path.read_text()
+    replacement = (extract_block(vfs, "bool replaceFileGuarded(") if "bool replaceFileGuarded(" in vfs else
+                   "static bool replaceFileGuarded(const String& from, const String& to, const Context& ctx) {\n"
+                   "  return renameGuarded(from, to, ctx);\n}")
     functions.append("static void sensorAppend(const char* line) {\n" +
                      extract_block(sensor, "if (line && line[0] != '\\0')") + "\n}")
     functions.extend(extract_block(battery, marker) for marker in (
@@ -63,6 +68,7 @@ def generate(overlay: Path | None) -> str:
     return (f"#define BASELINE {int(overlay is not None)}\n#define LEGACY_ROWS {int(legacy_rows)}\n" + harness
             .replace("// INSERT_TYPES", types)
             .replace("// INSERT_LOCKS", lock_code)
+            .replace("// INSERT_REPLACE", replacement)
             .replace("// INSERT_PRODUCTION", "\n\n".join(functions)))
 
 
