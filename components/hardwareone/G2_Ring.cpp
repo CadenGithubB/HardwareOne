@@ -70,6 +70,36 @@ String               gRingDeviceName;
 String               gRingDeviceAddress;
 volatile bool        gRingScanFound       = false;
 
+// Fixed-size identity copies for readers on other tasks (status JSON on the
+// HTTP task, ringstatus on cmd_exec). The Strings above stay the ring owner's
+// working values; every writer refreshes the copies under this lock and the
+// readers copy them out under it, so a scan or connect reassigning the
+// Strings can no longer free a buffer underneath a reader.
+static portMUX_TYPE sRingIdentityMux = portMUX_INITIALIZER_UNLOCKED;
+static char sRingIdentityName[32];
+static char sRingIdentityAddr[18];
+
+static void ringCopyBounded(char* dst, size_t cap, const char* src) {
+  if (!dst || !cap) return;
+  size_t n = 0;
+  if (src) while (n + 1 < cap && src[n]) { dst[n] = src[n]; ++n; }
+  dst[n] = '\0';
+}
+
+void g2RingSetIdentity(const char* name, const char* addr) {
+  portENTER_CRITICAL(&sRingIdentityMux);
+  ringCopyBounded(sRingIdentityName, sizeof(sRingIdentityName), name);
+  ringCopyBounded(sRingIdentityAddr, sizeof(sRingIdentityAddr), addr);
+  portEXIT_CRITICAL(&sRingIdentityMux);
+}
+
+void g2RingCopyIdentity(char* name, size_t nameCap, char* addr, size_t addrCap) {
+  portENTER_CRITICAL(&sRingIdentityMux);
+  ringCopyBounded(name, nameCap, sRingIdentityName);
+  ringCopyBounded(addr, addrCap, sRingIdentityAddr);
+  portEXIT_CRITICAL(&sRingIdentityMux);
+}
+
 // =============================================================================
 // BLE peer registry binding
 // =============================================================================
@@ -5017,6 +5047,7 @@ public:
     gRingAdvertisedDevice = copy;
     gRingDeviceName       = name;
     gRingDeviceAddress    = advertisedDevice.getAddress().toString().c_str();
+    g2RingSetIdentity(gRingDeviceName.c_str(), gRingDeviceAddress.c_str());
     gRingScanFound        = true;
     DEBUG_RING_LIFECYCLEF("[RING] ringscan: Found %s @ %s (RSSI %d) — stashed",
               name.c_str(), gRingDeviceAddress.c_str(),
@@ -5329,6 +5360,7 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
       // paths print sensible names.
       gRingDeviceAddress = savedMac;
       if (gRingDeviceName.length() == 0) gRingDeviceName = "saved-ring";
+      g2RingSetIdentity(gRingDeviceName.c_str(), gRingDeviceAddress.c_str());
     }
   } else {
     // Same 35s bound as the saved-MAC path (the plain connect(device)
@@ -5941,6 +5973,8 @@ void g2RingGetTelemetry(G2RingTelemetry& out) {
 
 void g2RingGetStatus(char* buf, size_t cap) {
   if (!buf || cap == 0) return;
+  char name[32], addr[18];
+  g2RingCopyIdentity(name, sizeof(name), addr, sizeof(addr));
   const uint32_t nowMs = millis();
   const uint32_t upMs  = gRing.connected && gRing.connectedSince
                          ? (nowMs - gRing.connectedSince) : 0;
@@ -5954,8 +5988,8 @@ void g2RingGetStatus(char* buf, size_t cap) {
            "ring=%s name='%s' addr=%s mtu=%u rx=%lu up=%u.%03us "
            "stack=%lu/%luB (scan=%s pending=%u)",
            gRing.connected ? "up" : "down",
-           gRingDeviceName.length() ? gRingDeviceName.c_str() : "<unknown>",
-           gRingDeviceAddress.length() ? gRingDeviceAddress.c_str() : "--",
+           name[0] ? name : "<unknown>",
+           addr[0] ? addr : "--",
            (unsigned)gRing.mtu,
            (unsigned long)gRing.packetsReceived,
            (unsigned)(upMs / 1000), (unsigned)(upMs % 1000),
@@ -5967,6 +6001,8 @@ void g2RingGetStatus(char* buf, size_t cap) {
 
 bool g2RingBuildStatusJson(JsonObject out) {
   if (out.isNull()) return false;
+  char name[32], addr[18];
+  g2RingCopyIdentity(name, sizeof(name), addr, sizeof(addr));
   const uint32_t upMs = (gRing.connected && gRing.connectedSince)
       ? (millis() - gRing.connectedSince) : 0;
   const uint32_t stackFree = sRingOwnerTask
@@ -5977,8 +6013,8 @@ bool g2RingBuildStatusJson(JsonObject out) {
   out["schema"] = 1;
   out["connected"] = (bool)gRing.connected;
   out["connectPending"] = g2RingConnectInFlight();
-  out["name"] = JsonString(gRingDeviceName.length() ? gRingDeviceName.c_str() : "", false);
-  out["addr"] = JsonString(gRingDeviceAddress.length() ? gRingDeviceAddress.c_str() : "", false);
+  out["name"] = JsonString(name, false);  // copied into the document: stack buffers
+  out["addr"] = JsonString(addr, false);
   out["mtu"] = (unsigned)gRing.mtu;
   out["rx"] = (unsigned long)gRing.packetsReceived;
   out["upMs"] = (unsigned long)upMs;

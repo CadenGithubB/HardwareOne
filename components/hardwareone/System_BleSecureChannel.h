@@ -87,5 +87,19 @@ BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
 bool bleScSendEncrypted(uint16_t connId, const char* plaintext, size_t len, bool blocking = true,
                         bool binaryFrame = false);
 
+// A binding captured while the caller holds the BLE lifecycle mutex. The slot
+// generation changes on every allocation, reset and new handshake, so a sender
+// that has since released that mutex still refuses to encrypt for a
+// replacement peer or a re-keyed channel. bleScBind is true only for an
+// established channel.
+struct BleScBinding { uint16_t connId = 0; uint32_t generation = 0; };
+bool bleScBind(uint16_t connId, BleScBinding* out);
+// bleScSendEncrypted with the binding (and `fence`, when given) re-validated
+// before every fragment, so the lifecycle mutex need not be held across the
+// paced transfer.
+bool bleScSendEncryptedBound(const BleScBinding& binding, const char* plaintext, size_t len,
+                             bool blocking, bool (*fence)(void*), void* fenceCtx,
+                             bool binaryFrame = false);
+
 #endif // ENABLE_BLUETOOTH
 #endif // SYSTEM_BLE_SECURE_CHANNEL_H

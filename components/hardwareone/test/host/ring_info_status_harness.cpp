@@ -54,6 +54,8 @@ static G2RingState gRing;
 static String gRingDeviceName, gRingDeviceAddress;
 static volatile bool gRingScanFound = false, gRingConnectTaskActive = false;
 static void* sRingOwnerTask = nullptr;
+typedef int portMUX_TYPE;
+#define portMUX_INITIALIZER_UNLOCKED 0
 static int gRingConnectMux = 0;
 static unsigned criticalDepth = 0, criticalCalls = 0, stackCalls = 0, timeCalls = 0;
 static uint32_t fakeNow = 10000, stackFree = 4096;
@@ -63,11 +65,11 @@ static unsigned uxTaskGetStackHighWaterMark(void* task) {
   ++stackCalls; return stackFree;
 }
 #define portENTER_CRITICAL(mux) do { \
-  check((mux) == &gRingConnectMux, "pending state uses existing critical section"); \
+  check((mux) == &gRingConnectMux || (mux) == &sRingIdentityMux, "readers use a known critical section"); \
   ++criticalDepth; ++criticalCalls; \
 } while (0)
 #define portEXIT_CRITICAL(mux) do { \
-  check((mux) == &gRingConnectMux && criticalDepth == 1, "pending reader releases critical section"); \
+  check(((mux) == &gRingConnectMux || (mux) == &sRingIdentityMux) && criticalDepth == 1, "reader releases critical section"); \
   --criticalDepth; \
 } while (0)
 bool gCLIValidateOnly = false;
@@ -87,8 +89,9 @@ static void checkSchema(JsonVariantConst doc) {
   check(doc.as<JsonObjectConst>().size() == 12, "complete twelve-field ring schema preserved");
   check(doc["schema"] == 1 && doc["connected"] == gRing.connected &&
         doc["connectPending"] == gRingConnectTaskActive, "connection and pending facts preserved");
-  check(doc["name"] == (gRingDeviceName.length() ? gRingDeviceName.c_str() : "") &&
-        doc["addr"] == (gRingDeviceAddress.length() ? gRingDeviceAddress.c_str() : ""),
+  // Compare against the published copies directly (same translation unit), so
+  // the schema check itself adds no critical section to the counts below.
+  check(doc["name"] == sRingIdentityName && doc["addr"] == sRingIdentityAddr,
         "names and address preserve complete escaped values");
   check(doc["mtu"] == gRing.mtu && doc["rx"] == gRing.packetsReceived &&
         doc["upMs"] == expectedUp(), "MTU, counters and wrapping uptime preserved");
@@ -96,6 +99,8 @@ static void checkSchema(JsonVariantConst doc) {
         doc["stackUsedMax"] == (free < RING_OWNER_STACK_BYTES ? RING_OWNER_STACK_BYTES - free : 0) &&
         doc["scanFound"] == gRingScanFound, "stack units, clamping and discovery preserved");
 }
+// Writers refresh the cross-task copies whenever the owner's Strings change.
+static void syncIdentity() { g2RingSetIdentity(gRingDeviceName.c_str(), gRingDeviceAddress.c_str()); }
 static void emit(const char* kind) {
   const std::string output = cmd_ringstatus("json");
   JsonDocument doc = parsed(output.c_str());
@@ -106,16 +111,21 @@ static void populate() {
   gRing = {};
   gRing.connected = true; gRing.connectedSince = 2000;
   gRing.packetsReceived = 42; gRing.mtu = 247;
-  gRingDeviceName = "EVEN R1 Bench"; gRingDeviceAddress = "00:11:22:33:44:55";
+  gRingDeviceName = "EVEN R1 Bench"; gRingDeviceAddress = "00:11:22:33:44:55"; syncIdentity();
   gRingConnectTaskActive = true; gRingScanFound = true;
   sRingOwnerTask = &gRing; stackFree = 4096; fakeNow = 10000;
 }
 static void characterize() {
   emit("JSON");
+  populate();
   gRingDeviceName.invalidateForTest(); gRingDeviceAddress.invalidateForTest();
   check(gRingDeviceName.c_str() == nullptr && gRingDeviceAddress.c_str() == nullptr,
         "host boundary represents invalid Arduino String storage");
+  // Readers never dereference the owner's Strings: the status still carries
+  // the last identity the writers published, even while the Strings are invalid.
   emit("JSON");
+  check(std::string(cmd_ringstatus("")).find("name='EVEN R1 Bench'") != std::string::npos,
+        "status text reads the published identity copy, not the String");
   std::cout << "TEXT\t" << cmd_ringstatus("") << '\n';
   populate(); emit("JSON");
   std::cout << "TEXT\t" << cmd_ringstatus("jsonish") << '\n';
@@ -134,11 +144,11 @@ static void characterize() {
   populate();
   for (unsigned value = 1; value < 32; ++value) {
     gRingDeviceName = std::string("control-") + static_cast<char>(value) + "-end";
-    emit("ESCAPE");
+    syncIdentity(); emit("ESCAPE");
   }
-  gRingDeviceName = "quote\"slash\\tab\tline\nreturn\r"; emit("ESCAPE");
-  gRingDeviceName = "R1 caf\xc3\xa9"; emit("ESCAPE");
-  gRingDeviceName = std::string("R1\0hidden", 9); emit("ESCAPE");
+  gRingDeviceName = "quote\"slash\\tab\tline\nreturn\r"; syncIdentity(); emit("ESCAPE");
+  gRingDeviceName = "R1 caf\xc3\xa9"; syncIdentity(); emit("ESCAPE");
+  gRingDeviceName = std::string("R1\0hidden", 9); syncIdentity(); emit("ESCAPE");
   populate();
   const unsigned beforeStack = stackCalls, beforeTime = timeCalls, beforeCritical = criticalCalls;
   allocator.reset(); gCLIValidateOnly = true;
@@ -183,8 +193,8 @@ static void ownerChecks() {
     JsonDocument first, second;
     check(g2RingBuildStatusJson(first.to<JsonObject>()), "owner fills caller document");
     checkSchema(first.as<JsonVariantConst>());
-    check(criticalCalls == beforeCritical + 1 && criticalDepth == 0,
-          "pending state comes through the existing synchronized accessor");
+    check(criticalCalls == beforeCritical + 2 && criticalDepth == 0,
+          "identity copy and pending state each come through a synchronized accessor");
     gRingDeviceName = "changed after sampling"; gRingDeviceAddress = "different address";
     check(first["name"] == "EVEN R1 Bench" && first["addr"] == "00:11:22:33:44:55",
           "names and address are owned after source replacement");
@@ -196,30 +206,29 @@ static void ownerChecks() {
   populate();
   // Locate the exact 320-byte boundary using the actual serializer. Only the
   // string length changes: no duplicate model of the formatter's field sizes.
-  bool saw319 = false, saw320 = false;
-  for (unsigned length = 0; length < 200; ++length) {
-    gRingDeviceName = std::string(length, 'R');
+  // Identity copies are bounded (31-character name, 17-character address), so
+  // even the longest identity leaves the CLI's 320-byte buffer with margin and
+  // the "status too large" refusal remains a guard rather than a reachable path.
+  {
+    populate();
+    gRingDeviceName = std::string(200, 'R'); gRingDeviceAddress = std::string(40, 'A'); syncIdentity();
     JsonDocument doc;
     check(g2RingBuildStatusJson(doc.to<JsonObject>()), "owner permits variable caller-sized output");
-    const size_t bytes = measureJson(doc);
-    if (bytes == 319) {
-      checkSchema(parsed(cmd_ringstatus("json")).as<JsonVariantConst>());
-      saw319 = true;
-    } else if (bytes == 320) {
-      check(std::strcmp(cmd_ringstatus("json"), "{\"error\":\"status too large\"}") == 0,
-            "CLI rejects exact-capacity output requiring a NUL byte");
-      saw320 = true;
-    }
+    check(doc["name"] == std::string(31, 'R') && doc["addr"] == std::string(17, 'A'),
+          "identity copies are bounded");
+    check(measureJson(doc) < 320, "the longest identity still fits the CLI buffer");
+    checkSchema(parsed(cmd_ringstatus("json")).as<JsonVariantConst>());
   }
-  check(saw319 && saw320, "CLI boundary cases were both exercised");
-  gRingDeviceName = std::string(1000, 'N');
+  gRingDeviceName = std::string(1000, 'N'); syncIdentity();
   {
+    // An absurd advertised name is clamped by the identity copy, so the CLI
+    // output stays complete JSON instead of the explicit "too large" refusal.
     JsonDocument doc;
-    check(g2RingBuildStatusJson(doc.to<JsonObject>()), "owner permits output longer than CLI capacity");
+    check(g2RingBuildStatusJson(doc.to<JsonObject>()), "owner builds output for a clamped identity");
     checkSchema(doc.as<JsonVariantConst>());
-    check(measureJson(doc) > 1000 &&
-          std::strcmp(cmd_ringstatus("json"), "{\"error\":\"status too large\"}") == 0,
-          "oversized CLI output is explicit rather than missing fields");
+    check(doc["name"] == std::string(31, 'N') && measureJson(doc) < 320 &&
+          parsed(cmd_ringstatus("json"))["name"] == std::string(31, 'N'),
+          "a clamped identity keeps the CLI output complete");
   }
   populate(); allocator.reset();
   checkSchema(parsed(cmd_ringstatus("json")).as<JsonVariantConst>());

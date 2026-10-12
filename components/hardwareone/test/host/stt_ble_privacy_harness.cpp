@@ -34,7 +34,8 @@ struct Characteristic {
 static Characteristic* pCmdResponseChar=&characteristic;
 enum class BleNotifyResult{PENDING,OK,TERMINAL};
 static BleNotifyResult gLastNotifyResult=BleNotifyResult::OK;
-struct BleLifecycleGuard { explicit operator bool()const{return true;} };
+static int guardDepth=0; static unsigned bindCalls=0, fenceCalls=0;
+struct BleLifecycleGuard { BleLifecycleGuard(){++guardDepth;} ~BleLifecycleGuard(){--guardDepth;} explicit operator bool()const{return true;} };
 struct BleCommandReplyContext { uint16_t connId;TransportSessionEpoch sessionEpoch; };
 bool bleDataDebugEnabled(){return debugEnabled;}
 bool bleSessionEpochMatches(uint16_t conn,uint32_t epoch){return live&&conn==0&&epoch==7;}
@@ -45,6 +46,19 @@ bool bleScRequired(){return false;}
 bool bleScSendEncrypted(uint16_t conn,const char* data,size_t len,bool){
   deliveredConn=conn;deliveredEpoch=7;delivered.assign(data,len);return true;
 }
+struct BleScBinding { uint16_t connId=0; uint32_t generation=0; };
+bool bleScBind(uint16_t conn,BleScBinding* out){
+  assert(guardDepth==1&&"the binding is resolved under the lifecycle mutex");
+  ++bindCalls; if(out){out->connId=conn;out->generation=42;} return true;
+}
+bool bleScSendEncryptedBound(const BleScBinding& b,const char* data,size_t len,bool,bool(*fence)(void*),void* ctx,bool=false){
+  assert(guardDepth==0&&"the paced secure sender runs with the lifecycle mutex released");
+  assert(b.connId==0&&b.generation==42);
+  if(fence){++fenceCalls;assert(fence(ctx));}
+  deliveredConn=b.connId;deliveredEpoch=7;delivered.assign(data,len);return true;
+}
+struct BleSessionFence { uint16_t connId; TransportSessionEpoch epoch; };
+// INSERT_FENCE
 void vTaskDelay(int){}
 void broadcastOutputCore_Routed(const char* data,size_t len,uint8_t){traces.emplace_back(data,len);}
 void bleAddMessageToHistory(const char* data){history.emplace_back(data);}
@@ -75,6 +89,7 @@ int main(){
  privateMirrors();assert(history.size()==1&&history[0]=="TX:[private STT result]");
  assert(traces.size()==3&&traces[1].find("[private STT result]")!=std::string::npos);
  reset();secure=true;callback(secret);assert(delivered==secret);privateMirrors();
+ assert(bindCalls==1&&fenceCalls==1&&guardDepth==0);
  reset();debugEnabled=false;callback(secret);assert(delivered==secret&&traces.empty());privateMirrors();
  reset();live=false;callback(secret);assert(delivered.empty()&&traces.empty()&&history.empty());
  reset();callback("ordinary reply");assert(delivered=="ordinary reply"&&history[0]=="TX:ordinary reply");

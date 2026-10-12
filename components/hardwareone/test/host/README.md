@@ -1141,7 +1141,7 @@ Strings, escaping, copied string ownership, independent output documents,
 wrapping uptime, absent-task stack defaults and stack-use clamping. The CLI
 checks cover validation without sampling, every observed JSON allocation
 failure, and the exact 319/320-byte output boundary. The actual public header
-is compiled and executed with either or both feature gates disabled.
+is compiled and executed with either or both feature gates disabled. Status readers take fixed-size identity copies under their own lock, so a scan or connect reassigning the owner's Strings can no longer free a buffer under them; the longest possible identity still fits the CLI buffer.
 
 `--baseline <component-dir>` compares ordinary CLI JSON/text bytes and parsed
 escaped values against the saved pre-change command using its real CompactJson
@@ -1230,7 +1230,7 @@ exact exit-callback publication after recreation, and unchanged command policy.
 Logging completion cases cover success/error deferral, stale cookies and enqueue
 failure. Both suites use ASan/UBSan with `HW1_SANITIZE`; driver, display, command
 submission and RTOS operations are controlled host boundaries, not physical
-glasses or scheduler qualification.
+glasses or scheduler qualification. A SHUTDOWN that fails while the page, navigation and session are still current is handed back to later ticks a bounded number of times instead of ending the live worker.
 
 `sensorlog_selection` compiles the logger's production sensor catalog, selection
 helpers, shared argument parser and changed-only settings mutator. It covers
@@ -1319,7 +1319,7 @@ intent, guest/auth gates, web source/user/session forwarding, stale-session repl
 rejection, owner/helper failures and unchanged unrelated Health actions. Logger
 mutation, transport, session lookup and command submission are boundaries; this
 does not qualify physical glasses, radio traffic or the device scheduler.
-ASan/UBSan follow `HW1_SANITIZE`.
+ASan/UBSan follow `HW1_SANITIZE`. The model mirrors the toggle command's fate (queued, refused by the executor, error result) so the lens status line can show it for a few seconds.
 
 `g2_status_browser` runs extracted production browser JavaScript with Node.js,
 using small DOM/network boundaries. It checks structured connection status

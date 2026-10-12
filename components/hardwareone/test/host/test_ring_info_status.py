@@ -41,6 +41,12 @@ def generated(component: Path, baseline: bool) -> str:
                         events[events.index('CompactJson::CompactJson('):
                                events.index('// blePushEvent\n')]]
     else:
+        definitions[-1:-1] = [re.search(pattern, source, re.M).group() for pattern in (
+            r'^static portMUX_TYPE sRingIdentityMux[^\n]+', r'^static char sRingIdentityName[^\n]+',
+            r'^static char sRingIdentityAddr[^\n]+')]
+        definitions[-1:-1] = [extract_block(source, 'static void ringCopyBounded('),
+                              extract_block(source, 'void g2RingSetIdentity('),
+                              extract_block(source, 'void g2RingCopyIdentity(')]
         builder = extract_block(source, 'bool g2RingBuildStatusJson(')
         require('g2RingConnectInFlight()' in builder,
                 'ring pending status must use its existing synchronized reader')

@@ -499,6 +499,10 @@ extern BLEAdvertisedDevice* gRingAdvertisedDevice;
 extern String               gRingDeviceName;
 extern String               gRingDeviceAddress;
 extern volatile bool        gRingScanFound;
+// Cross-task identity copies (see G2_Ring.cpp). Writers refresh them whenever
+// the Strings above change; status readers on other tasks copy them out.
+void g2RingSetIdentity(const char* name, const char* addr);
+void g2RingCopyIdentity(char* name, size_t nameCap, char* addr, size_t addrCap);
 
 // Command table entry — wired into System_Utils.cpp alongside g2Commands.
 // The ring lives under the G2 umbrella but keeps its own command array for
