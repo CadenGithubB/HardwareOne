@@ -40,9 +40,18 @@ def main() -> None:
         "int I2CDeviceManager::getQueueDepth(",
     )]
     controller_definitions = re.findall(r"^#define I2C_ADDR_[^\n]+", header, re.M)
+    # The start helper marks admitted starts outstanding (out of line); older
+    # sources had it inline in the header.
+    outstanding = re.search(r"^static std::atomic<bool> sSensorStartOutstanding[^\n]+", controller, re.M)
+    if outstanding:
+        controller_definitions += ["#define HAS_START_OUTSTANDING 1", outstanding[0],
+                                   extract_block(controller, "bool enqueueDeviceStart(I2CDeviceType device)")]
+    else:
+        controller_definitions += [extract_block(header, "inline bool enqueueDeviceStart(")]
+    if re.search(r"const char\* eventTag,\s*const char\* hint", header):
+        controller_definitions += ["#define HAS_START_HINT 1"]
     controller_definitions += [extract_block(header, marker) for marker in (
-        "inline bool enqueueDeviceStart(", "inline bool isInQueue(",
-        "inline int getQueuePosition(", "inline int getQueueDepth(",
+        "inline bool isInQueue(", "inline int getQueuePosition(", "inline int getQueueDepth(",
     )]
     controller_definitions += [extract_block(header, "enum class SensorStartRefusal") + ";"]
     controller_definitions += [re.search(r"^static bool sSensorStopAwaitingCleanup[^\n]+", controller, re.M)[0]]
@@ -55,6 +64,9 @@ def main() -> None:
         "static bool startSensorInternal(", "static void broadcastStartedSensor(",
         "static void announceSensorStart(", "void sensorQueueProcessorTask(",
     )]
+    # A real start command, for the hint-only-after-acceptance contract.
+    controller_definitions.append(extract_block((COMPONENT / "i2csensor_pa1010d.cpp").read_text(),
+                                                "const char* cmd_gpsstart("))
     harness = (HERE / "sensor_lifecycle_requests_harness.cpp").read_text()
     harness = (harness.replace("// INSERT_MANAGER_DEFINITIONS", "\n\n".join(manager_definitions))
                .replace("// INSERT_CONTROLLER_DEFINITIONS", "\n\n".join(controller_definitions)))

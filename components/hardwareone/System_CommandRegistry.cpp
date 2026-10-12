@@ -394,9 +394,10 @@ static constexpr CommandModule gCommandModules[] = {
     "runtime with apdsmode <color|proximity|gesture> [on|off] -- note that enabling "
     "gesture also turns proximity hardware on. Dedicated reads apdscolor, "
     "apdsproximity, and apdsgesture show the latest cached sample; they report "
-    "unavailable when that mode has no reading yet. Gesture reports "
-    "UP/DOWN/LEFT/RIGHT or no gesture in that sample without consuming events. "
-    "apdsdevicepollms sets how often the background task samples the hardware.", apdsCommands,         &apdsCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("apds"); } },
+    "unavailable when that mode has no reading yet. Gesture reports the last "
+    "swipe (UP/DOWN/LEFT/RIGHT) and its age, or no gesture since start, without "
+    "consuming events. apdsdevicepollms sets how often the background task samples "
+    "color and proximity; gesture mode reads the gesture FIFO at least every 100 ms.", apdsCommands,         &apdsCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("apds"); } },
 #endif
 #if ENABLE_GPS_SENSOR
   { "gps",        "PA1010D GPS module", "PA1010D I2C GPS receiver. Lifecycle: opengps starts the parser task, gpsread "

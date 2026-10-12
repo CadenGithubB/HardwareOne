@@ -441,16 +441,14 @@ static const char* cmd_openinput(const String& argsInput) {
 #if ENABLE_GPIO_ENCODER
   return inputStartInternal() ? "[Input] GPIO encoder started" : "Error: GPIO encoder start failed";
 #else
-  const char* result = cmd_sensorstart_queued(I2C_DEVICE_INPUT, inputDeviceLabel(),
-                                              "openinput@enqueue");
   // The device starts asynchronously and this command returns no button state —
   // point at the driver read command so the next step is to read live input.
 #if ENABLE_ANO_ENCODER
-  cliHint("to read live input, run 'anoencoderread' once the device is up");
+  static const char* const kReadHint = "to read live input, run 'anoencoderread' once the device is up";
 #else
-  cliHint("to read live input, run 'gamepadread' once the device is up");
+  static const char* const kReadHint = "to read live input, run 'gamepadread' once the device is up";
 #endif
-  return result;
+  return cmd_sensorstart_queued(I2C_DEVICE_INPUT, inputDeviceLabel(), "openinput@enqueue", kReadHint);
 #endif
 }
 

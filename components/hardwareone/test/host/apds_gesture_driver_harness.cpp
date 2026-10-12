@@ -25,7 +25,7 @@ struct Scenario {
   Batch batch;
   unsigned reads = 0, validityChecks = 0, levelReads = 0;
   int levelOverride = -1;
-  bool valid = true, transferOK = true;
+  bool valid = true, transferOK = true, overflow = false;
 } scenario;
 
 static void advance(unsigned long ms) {
@@ -62,12 +62,15 @@ class Adafruit_APDS9960 {
  public:
   // INSERT_COUNTERS
   I2CDevice* i2c_dev = &i2cDevice;
+  struct GestureStatus { uint8_t GVALID = 0, GFOV = 0; } _gstatus;
   uint8_t readGesture();
   uint8_t read(uint8_t reg, uint8_t* buffer, uint8_t count);
   void resetCounts();
   bool gestureValid() {
     check(++scenario.validityChecks == 1, "one call checks gesture status at most once");
     advance(scenario.ioMs);
+    _gstatus.GVALID = scenario.valid;
+    _gstatus.GFOV = scenario.overflow;  // the same GSTATUS read reports overflow
     return scenario.valid;
   }
   uint8_t read8(uint8_t reg) {
@@ -233,6 +236,31 @@ static void tests() {
     feed({direction.first, direction.second}, 5000, 2);
     scenario.transferOK = false;
     check(readOnce(driver) == 0, "failed batch containing a reversal produces no gesture");
+    countsReset(driver);
+
+    // GFOV: the FIFO filled and later datasets were lost. The overflowed batch
+    // still follows the previous call, so it can complete a swipe begun there,
+    // but its own partial direction must not pair with samples after the gap.
+    driver.resetCounts();
+    feed({direction.first}, 5000, 2);
+    scenario.overflow = true;
+    check(readOnce(driver) == 0, "overflowed partial produces no gesture");
+    countsReset(driver);
+    feed({direction.second}, scenario.now + 100, 2);
+    check(readOnce(driver) == 0, "a sample after an overflow gap does not pair with the lost half");
+    driver.resetCounts();
+    feed({direction.first}, 5000, 2);
+    check(readOnce(driver) == 0, "partial before an overflowed batch");
+    feed({direction.second}, scenario.now + 100, 2);
+    scenario.overflow = true;
+    check(readOnce(driver) == direction.expected, "an overflowed batch completes a swipe begun before it");
+    countsReset(driver);
+    driver.resetCounts();
+    feed({direction.first}, 5000, 2);
+    check(readOnce(driver) == 0, "partial before an empty overflowed read");
+    feed({}, scenario.now + 50, 2);
+    scenario.overflow = true;
+    check(readOnce(driver) == 0, "an empty overflowed read produces no gesture");
     countsReset(driver);
   }
 }

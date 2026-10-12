@@ -124,4 +124,28 @@ release = sanitize.index("ps_free(seen);", failure)
 result = sanitize.rindex("return changed;")
 assert allocation < failure < release < result
 
+# Writes inside a claimed scheduler pass do not notify the scheduler: the pass
+# ends with a cache rebuild that reads them, and a notification would only
+# queue a second full pass. A manual run (command task) still notifies.
+reschedule = function_body(
+    automation,
+    "static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt, bool notify) {")
+assert "if (notify) writeAutomationsJsonAtomic(json);" in reschedule
+assert "else writeTextAtomic(AUTOMATIONS_JSON_FILE, json);" in reschedule
+assert tick.count("rescheduleAfterFire(") == 3
+assert tick.count("rescheduleAfterFire(id, obj.c_str(), now, false)") == 3
+assert "rescheduleAfterFire(idStr.toInt(), obj.c_str(), now, true);" in automation
+
+# The main loop ticks unconditionally; the owner checks permission itself and
+# stops when another writer revoked it (automationSchedulerRunning stays true
+# to the permission). Both permission writers go through the owner transition.
+assert "if (gSettings.automationEnabled) {\n    automationTick();" not in main
+owner_tick = function_body(automation, "void automationTick() {")
+assert owner_tick.index("if (!gSettings.automationEnabled)") < owner_tick.index("AutomationStateGuard guard;")
+assert "stopAutomationScheduler();" in owner_tick
+system = function_body(automation, "const char* automationSetSystemEnabled(bool enable) {")
+assert "startAutomationScheduler()" in system and "stopAutomationScheduler();" in system
+features = (COMPONENT / "System_FeatureRegistry.cpp").read_text(encoding="utf-8")
+assert "return automationSetSystemEnabled;" in features
+
 print("Automation scheduler integration and empty-file source guards passed")

@@ -35,18 +35,26 @@ def generate() -> str:
                  extract_block(owner, "static bool apdsInvalidateCache("),
                  extract_block((COMPONENT / "System_Utils.cpp").read_text(), "bool argWantsJson("),
                  extract_block((COMPONENT / "System_I2C.cpp").read_text(), "int sensorEnvelopeBegin("),
-                 extract_block(owner, "int apdsBuildDataJSON("),
-                 extract_block(owner, "static const char* apdsReadSnapshot(")]
+                 extract_block(owner, "int apdsBuildDataJSON(")]
+    if "static const char* apdsGestureName(" in owner:
+        functions.append(extract_block(owner, "static const char* apdsGestureName("))
+    functions.append(extract_block(owner, "static const char* apdsReadSnapshot("))
     functions += [extract_block(owner, f"const char* cmd_apds{mode}(")
                   for mode in ("color", "proximity", "gesture", "read")]
     reset = extract_block(extract_block(owner, "bool apdsStartInternal()"), "// Clean up any stale cache")
     functions.append("static bool resetApdsReading() {\n" + reset + "\nreturn true;\n}")
-    poll = extract_block(extract_block(owner, "void apdsTask("),
-                         "if ((nowMs - lastApdsRead) >= apdsPollMs)")
-    poll = ("static void sampleOnce(unsigned long nowMs, unsigned long& lastApdsRead, "
-            "unsigned long apdsPollMs = 200) {\n"
-            "const uint8_t apdsBus = static_cast<uint8_t>(gSettings.apdsBus);\n"
-            "do {\n" + poll + "\n} while (false);\n}")
+    # The task's polling step is its own function (cadence, cache and events).
+    # Older sources polled inline in the task; wrap that block in the same
+    # signature (it has no separate gesture cadence) to run the same checks.
+    if "static bool apdsPollDevice(" in owner:
+        poll = extract_block(owner, "static bool apdsPollDevice(")
+    else:
+        block = extract_block(extract_block(owner, "void apdsTask("),
+                              "if ((nowMs - lastApdsRead) >= apdsPollMs)")
+        poll = ("static bool apdsPollDevice(unsigned long nowMs, unsigned long apdsPollMs, "
+                "unsigned long& lastApdsRead, unsigned long&) {\n"
+                "const uint8_t apdsBus = static_cast<uint8_t>(gSettings.apdsBus);\n"
+                "do {\n" + block + "\n} while (false);\nreturn true;\n}")
     json_errors = "\n".join(re.findall(r"(?m)^#define SENSOR_JSON_(?:NOBUF|UNAVAILABLE)[^\n]+",
                                        (COMPONENT / "System_I2C.h").read_text()))
     for old in ("apdsColorPoll", "apdsProximityPoll", "apdsGesturePoll"):

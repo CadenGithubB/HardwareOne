@@ -535,9 +535,8 @@ const char* cmd_fmradio(const String& argsInput) {
 
 const char* cmd_fmradio_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* result = cmd_sensorstart_queued(I2C_DEVICE_FMRADIO, "FM Radio", "openfmradio@enqueue");
-  cliHint("the radio powers up in the background - check it with 'fmradioread', then tune with 'fmradiotune <freq>'");
-  return result;
+  return cmd_sensorstart_queued(I2C_DEVICE_FMRADIO, "FM Radio", "openfmradio@enqueue",
+      "the radio powers up in the background - check it with 'fmradioread', then tune with 'fmradiotune <freq>'");
 }
 
 const char* cmd_fmradio_stop(const String& argsInput) {

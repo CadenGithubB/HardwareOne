@@ -443,10 +443,17 @@ require(
 # behavior is executed by settings_file_writes against the production helper.
 # Keep this contract focused on all three callers using that one replacement.
 restamp_writer = block_after(settings_cpp, "bool settingsRestampFirmwareVersion(")
-for writer_name, writer in (("main", main_writer), ("debug", debug_writer),
-                            ("restamp", restamp_writer)):
+# The full writers report failures through writeSettingsSnapshot (error line and
+# save-failed event); the cosmetic re-stamp calls the same checked replacement,
+# writeJsonSnapshot, directly and keeps a log-only report.
+snapshot_writer = block_after(settings_cpp, "static bool writeSettingsSnapshot(")
+require(cpp_code(snapshot_writer).count("writeJsonSnapshot(") == 1,
+        "writeSettingsSnapshot does not wrap the shared checked replacement")
+for writer_name, writer, helper in (("main", main_writer, "writeSettingsSnapshot("),
+                                    ("debug", debug_writer, "writeSettingsSnapshot("),
+                                    ("restamp", restamp_writer, "writeJsonSnapshot(")):
     writer_code = cpp_code(writer)
-    require(writer_code.count("writeSettingsSnapshot(") == 1,
+    require(writer_code.count(helper) == 1,
             f"{writer_name} does not use the shared checked snapshot replacement")
     require(not re.search(r"\bserializeJson\s*\(", writer_code) and "renameGuarded(" not in writer_code,
             f"{writer_name} duplicates the shared file replacement")

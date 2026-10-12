@@ -71,8 +71,12 @@ def generated() -> str:
                      "uint32_t getEnabledFeaturesHeapEstimate(",
                      "uint32_t getTotalPossibleHeapCost(",
                      "static constexpr const char* getCategoryName(",
-                     "static inline uint16_t reportedHeapKB(",
-                     "const char* cmd_features(")]
+                     "static inline uint16_t reportedHeapKB(")]
+    # Owner-applied toggles (Automations) go through the owner's transition.
+    owner_toggle = re.search(r"(?m)^using FeatureOwnerToggle[^\n]+", feature_cpp)
+    if owner_toggle:
+        definitions += [owner_toggle.group(), extract_block(feature_cpp, "static FeatureOwnerToggle featureOwnerToggle(")]
+    definitions += [extract_block(feature_cpp, "const char* cmd_features(")]
     harness = (HERE / "settings_mutation_harness.cpp").read_text()
     for marker, body in (("// INSERT_TYPES", "\n\n".join(types)),
                          ("// INSERT_PRODUCTION", "\n\n".join(definitions))):

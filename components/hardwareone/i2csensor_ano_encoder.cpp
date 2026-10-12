@@ -285,6 +285,7 @@ bool inputStartInternal() {
     gInputConnected = false;
     (void)invalidateAnoCache();
     (void)inputCacheInvalidate();
+    sensorStatusBumpWith("openinput@task_failed");  // Undo the enable bump above.
     ERROR_ANO_ENCODERF("Failed to create ANO encoder task");
     return false;
   }

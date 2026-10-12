@@ -261,7 +261,9 @@ hooks. Boundary doubles exercise captured user/scope permissions, revocation,
 overflow paths, allocation failures, incomplete writes, failed replacement and
 stop reporting. Controlled overlapping writes/replacements/stops and threaded
 stress check that destinations and identities stay paired; status remains
-available during blocked I/O. The real disabled header is compiled separately
+available during blocked I/O. Replacing an active session writes the new
+LOG_START first, then a LOG_STOP naming the new file to the displaced one, and
+the reply names it. The real disabled header is compiled separately
 without VFS, authentication or RTOS headers.
 
 ```sh
@@ -283,9 +285,13 @@ stores, clock due times, event throttling, safety polling and millisecond wrap.
 Controlled overlap verifies that refreshes during a rebuild survive and that
 stopping during a read cannot restore a freed cache. Failed file writes leave
 the cached schedule intact. Threaded polling, notifications, event posts and
-start/stop exercise cache lifetime under ThreadSanitizer. The actual disabled
+start/stop exercise cache lifetime under ThreadSanitizer. Permission revoked by
+another writer stops the scheduler on its next tick; a later grant stays idle
+until the owner starts it. The actual disabled
 public header is compiled independently. `automation_scheduler_contract`
-retains the main-loop integration and full-tick early-exit/source guards.
+retains the main-loop integration and full-tick early-exit/source guards, plus
+the quiet in-pass reschedule writes, the unconditional main-loop tick and the
+owner transition shared with `features automation`.
 
 ```sh
 python3 components/hardwareone/test/host/test_automation_scheduler.py --sanitize
@@ -772,7 +778,10 @@ coverage checks stable entry IDs, credential-free presentation snapshots,
 coherent connection copies under concurrent updates, setup-result/autostart
 handling, legacy JSON loading, ciphertext preservation and password omission.
 The real removal commands and ID parser cover quoted/plain SSIDs, invalid IDs,
-stale selections and persistence failures; command registration guards retain
+stale selections, a removal that a failed name copy can no longer abort, and
+persistence failures; `credential_scrub` checks that every plaintext copy the
+owner makes (targets, writer/loader arrays, removed and replaced records) is
+zeroed before release; command registration guards retain
 their existing authentication requirement.
 Injected record-copy, initialization and JSON allocation failures must report
 failure; crypto, output and persistence must run outside the list lock.
@@ -859,7 +868,9 @@ failure and bounded shutdown attempts. Existing `sensor_parent_lifecycle` and
 `thermal_snapshot` executes production metadata/frame copies, serialization
 and OLED rendering. It checks raw/interpolated units, all four rotations,
 caller capacity, unavailable/allocation-failure paths, copied-frame lifetime,
-startup and shutdown. The output fixture includes the integer ESP-NOW payload.
+startup and shutdown. Start allocates the run's zeroed buffers (interpolation
+optional) and fails without a frame buffer; a source guard keeps the cache
+allocation and its lock out of the poll that runs inside the bus transaction. The output fixture includes the integer ESP-NOW payload.
 Consumers own copied frame buffers; a failed copy leaves the supplied buffer
 untouched and clears its metadata.
 
@@ -917,10 +928,13 @@ ctest --test-dir /tmp/hw1-hardwareone-host --output-on-failure \
 
 `apds_read_commands` executes the production commands, snapshots, JSON,
 invalidation and startup cache reset in a variant with no hardware or event
-APIs declared. A second variant executes the task's actual sampling block
-across 32 bus/mode/readiness combinations, bus/cache refusal and fault handling.
-It checks per-field availability, color-not-ready without an I2C health error,
-and gesture/presence event ownership. Reading a gesture repeatedly does not
+APIs declared. A second variant executes the task's polling step
+(`apdsPollDevice`) across 32 bus/mode/readiness combinations, bus/cache refusal
+and fault handling. It checks per-field availability, color-not-ready keeping
+the previous sample without an I2C health error, a gesture cadence of at most
+100 ms independent of the color/proximity interval, presence moving only on
+proximity samples, gesture/presence event ownership, and the latched last swipe
+that `apdsgesture` reports with its age. Reading a gesture repeatedly does not
 consume the cached value or read the hardware again.
 
 `tof_read_command` executes the production command, snapshot guard and JSON
@@ -943,7 +957,8 @@ held input over many calls must release the bus after each available batch.
 It checks all four directions within a batch or across calls 200 ms apart,
 recent partial gestures surviving no-data gaps, 300 ms inactivity expiration,
 FIFO levels 0/1/2/3/32/33, failed partial transfers, direction state surviving
-256+ records, and unsigned clock rollover. ASan/UBSan follow `HW1_SANITIZE`.
+256+ records, unsigned clock rollover, and a FIFO overflow (GFOV) batch that
+still completes an earlier half but drops its own partial direction. ASan/UBSan follow `HW1_SANITIZE`.
 
 ```sh
 ctest --test-dir /tmp/hw1-hardwareone-host --output-on-failure \
@@ -971,13 +986,17 @@ during startup spacing and inside initialization. It checks returned start
 outcomes, suppressed cancelled-start announcements, cleanup before stop events,
 taskless FM/RTC stops, probe errors and balanced polling pauses, and that the
 admission core shared with the display's input auto-start never writes the
-command reply buffer. ESP-NOW enabled
+command reply buffer. Stopping an idle sensor publishes nothing, a cancelled
+admitted start still closes with its stop event, a stop with the bus disabled
+is refused without allocating the manager, and start hints follow only an
+accepted start (helper and the real GPS command). ESP-NOW enabled
 and disabled variants run separately.
 
 `sensor_start_outcomes` executes all nine production sensor starters, including
 both I2C input backends. Cleanup guards must run before initialization or cache
 reset; initialization, allocation and task-creation failures must roll back
-state. Thermal/IMU/FM initialization handshakes also exercise failure and timeout.
+state; an input task-creation rollback re-publishes status. Thermal/IMU/FM
+initialization handshakes also exercise failure and timeout.
 The existing task-restart test covers retired task handles. ToF lifecycle tests
 check protected stop-measurement writes and release when bus access is refused.
 All compiled suites inherit `HW1_SANITIZE`. These deterministic interleavings
@@ -1048,7 +1067,8 @@ ArduinoJson, the complete post-restore credential flow, and the normal setup
 caller's unchanged save-through-success tail in a bounded restart loop. It checks
 empty credentials, failed hashing, JSON allocation and String serialization faults,
 credential/index save failures, retry, account metadata and theme, and credential
-storage before publication of the user index. Failed creation must skip completion,
+storage before publication of the user index. A refused settings save is logged
+and reported to the operator while setup completes. Failed creation must skip completion,
 automation creation, runtime settings application and reboot. Migration and OLED
 enabled/disabled variants run under `HW1_SANITIZE`. Earlier Basic/Advanced choices,
 hashing, String storage, file owners, input delivery and reboot are controlled
@@ -1313,7 +1333,8 @@ ranges, read-only and validation-only requests, bool aliases, repeated-off servi
 reconciliation, publication/persistence/stop/event order, explicit and first-row
 alias labels, long string event values and secret redaction.
 Changed values notify and request persistence once; no-ops leave batching clean.
-Feature tests preserve compiled/toggle gates, reboot notes, feature-specific
+Feature tests preserve compiled/toggle gates, owner-applied toggles (Automations
+goes through its owner transition, never a raw write), reboot notes, feature-specific
 events and settings notifications. Controlled argument-copy/reserve failures
 leave the old String intact; failed persistence retains live RAM changes and
 retry intent. Foreign-owner/background writes remain independent of an open

@@ -1,4 +1,5 @@
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cstdarg>
 #include <cstdio>
@@ -39,6 +40,9 @@ static std::function<void()> afterUnlock, duringDelay, duringInit, duringProbe;
 static unsigned takes, gives, probeCalls, pauseCalls, resumeCalls, pauseDepth, taskDeletes;
 static unsigned fmDeinitCalls, rtcStopCalls;
 static bool debugEnabled, bufferAvailable, fmHardwareReady;
+[[maybe_unused]] static bool& gRadioInitialized = fmHardwareReady;  // FM owner: initialized without a task
+static bool gRtcConnected;                         // RTC owner: connected without a task
+static unsigned managerInits;
 static uint8_t probeResult, probeAddress, probeBus;
 static char debugBuffer[1024];
 static std::array<bool, I2C_DEVICE_COUNT> running;
@@ -99,7 +103,7 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t mutex) {
 }
 uint32_t millis() { return now; }
 I2CDeviceManager* I2CDeviceManager::instance = nullptr;
-void I2CDeviceManager::initialize() {}  // Allocation is a controlled platform boundary.
+void I2CDeviceManager::initialize() { ++managerInits; }  // Allocation is a controlled platform boundary.
 
 // INSERT_MANAGER_DEFINITIONS
 
@@ -111,6 +115,10 @@ static uint8_t i2cProbeAddress(uint8_t addr, uint32_t clock, uint32_t wait, uint
   return probeResult;
 }
 static void sensorStatusBumpWith(const char* cause) { statuses.emplace_back(cause); }
+static std::vector<std::string> hints;
+static void cliHint(const char* text) { hints.emplace_back(text); }
+struct String {};  // Command handlers only pass it through.
+#define RETURN_VALID_IF_VALIDATE_CSTR() do {} while (0)
 [[maybe_unused]] static void broadcastSensorStatus(int sensor, bool online) { meshStatuses.emplace_back(sensor, online); }
 static void systemEventPost(int event, const char* name) { events.emplace_back(event, name); }
 static std::string format(const char* fmt, va_list args) {
@@ -164,6 +172,7 @@ static void fmRadioDeinit() {
 }
 static void rtcStop() {
   assert(pauseDepth > 0); ++rtcStopCalls; gRtcRunning = false;
+  if (!gRtcTaskHandle) gRtcConnected = false;
 }
 
 // INSERT_CONTROLLER_DEFINITIONS
@@ -181,13 +190,22 @@ struct Fixture {
     std::memset(sSensorStopAwaitingCleanup, 0, sizeof(sSensorStopAwaitingCleanup));
     takes = gives = probeCalls = pauseCalls = resumeCalls = pauseDepth = taskDeletes = 0;
     fmDeinitCalls = rtcStopCalls = 0; fmHardwareReady = false;
+    hints.clear(); gRtcConnected = false; managerInits = 0;
+#if HAS_START_OUTSTANDING
+    for (auto& outstanding : sSensorStartOutstanding) outstanding = false;
+#endif
     probeResult = probeAddress = probeBus = 0;
     afterUnlock = duringDelay = duringInit = duringProbe = {};
     statuses.clear(); broadcasts.clear(); events.clear(); logs.clear(); meshStatuses.clear(); graceResets.clear();
   }
   ~Fixture() { assert(!mutex.held && takes == gives && pauseCalls == resumeCalls); I2CDeviceManager::instance = nullptr; }
-  std::string open(I2CDeviceType sensor = I2C_DEVICE_GPS) {
+  std::string open(I2CDeviceType sensor = I2C_DEVICE_GPS, const char* hint = "test hint") {
+#if HAS_START_HINT
+    return cmd_sensorstart_queued(sensor, deviceTypeDisplayName(sensor), "test@enqueue", hint);
+#else
+    (void)hint;
     return cmd_sensorstart_queued(sensor, deviceTypeDisplayName(sensor), "test@enqueue");
+#endif
   }
   void worker() {
     const unsigned beforeDepth = pauseDepth;
@@ -220,7 +238,7 @@ static void admissionCases() {
   { Fixture f; I2CDeviceManager::instance = nullptr; assert(contains(f.open(), "queue is unavailable")); assert(probeCalls == 0); }
   { Fixture f; handles[I2C_DEVICE_GPS] = &f; assert(contains(f.open(), "cleanup is still pending")); assert(probeCalls == 0); }
   { Fixture f; running[I2C_DEVICE_GPS] = true; assert(contains(f.open(), "already running")); assert(probeCalls == 0); }
-  { Fixture f; assert(f.manager.enqueueDeviceStart(I2C_DEVICE_GPS)); assert(contains(f.open(), "already queued")); assert(probeCalls == 0); }
+  { Fixture f; assert(enqueueDeviceStart(I2C_DEVICE_GPS)); assert(contains(f.open(), "already queued")); assert(probeCalls == 0); }
   { Fixture f; assert(requestSensorStop(I2C_DEVICE_GPS)); assert(contains(f.open(), "Stop/cleanup")); assert(probeCalls == 0); }
   for (uint8_t result : {2, 4, 5}) {
     Fixture f; probeResult = result;
@@ -237,16 +255,33 @@ static void admissionCases() {
   { Fixture f;
     for (auto sensor : {I2C_DEVICE_THERMAL, I2C_DEVICE_TOF, I2C_DEVICE_IMU, I2C_DEVICE_INPUT,
                         I2C_DEVICE_FMRADIO, I2C_DEVICE_APDS, I2C_DEVICE_RTC}) {
-      assert(f.manager.enqueueDeviceStart(sensor));
+      assert(enqueueDeviceStart(sensor));
     }
     assert(contains(f.open(), "Could not queue") && probeCalls == 1 && statuses.empty()); }
+}
+
+// A start command's next-step hint follows only an accepted start.
+static void hintCases() {
+  { Fixture f; assert(contains(f.open(), "queued for start"));
+    assert((hints == std::vector<std::string>{"test hint"})); }
+  { Fixture f; assert(contains(f.open(I2C_DEVICE_GPS, nullptr), "queued for start") && hints.empty()); }
+  { Fixture f; gI2CBusRunning = false; assert(contains(f.open(), "disabled") && hints.empty()); }
+  { Fixture f; running[I2C_DEVICE_GPS] = true; assert(contains(f.open(), "already running") && hints.empty()); }
+  { Fixture f; probeResult = 2; assert(contains(f.open(), "No acknowledgement") && hints.empty()); }
+  { Fixture f; handles[I2C_DEVICE_GPS] = &f; assert(contains(f.open(), "cleanup is still pending") && hints.empty()); }
+  // The production GPS command: a refused open prints no "opens in the
+  // background" hint; an accepted one prints exactly one.
+  { Fixture f; probeResult = 2;
+    assert(contains(cmd_gpsstart(String{}), "No acknowledgement") && hints.empty()); }
+  { Fixture f; assert(contains(cmd_gpsstart(String{}), "queued for start") && hints.size() == 1);
+    assert(contains(hints[0], "gpsread")); }
 }
 
 static void workerOutcomeCases() {
   for (int index = 0; index < I2C_DEVICE_COUNT; ++index) {
     Fixture f; const auto sensor = static_cast<I2CDeviceType>(index);
     debugEnabled = true; pauseDepth = 1;  // An unrelated pause survives the batch.
-    assert(f.manager.enqueueDeviceStart(sensor)); f.worker();
+    assert(enqueueDeviceStart(sensor)); f.worker();
     assert(starts[sensor] == 1 && running[sensor]);
     assert(eventCount(SYSEVT_SENSOR_STARTED) == 1 && eventCount(SYSEVT_SENSOR_START_FAILED) == 0);
     assert(pauseCalls == 1 && pauseDepth == 1 && graceResets.size() == 1);
@@ -258,17 +293,17 @@ static void workerOutcomeCases() {
 #endif
   }
   { Fixture f; startResult[I2C_DEVICE_GPS] = false;
-    assert(f.manager.enqueueDeviceStart(I2C_DEVICE_GPS)); f.worker();
+    assert(enqueueDeviceStart(I2C_DEVICE_GPS)); f.worker();
     assert(running[I2C_DEVICE_GPS] && eventCount(SYSEVT_SENSOR_START_FAILED) == 1);
     assert(eventCount(SYSEVT_SENSOR_STARTED) == 0 && meshStatuses.empty()); } // Return value, not stale flag.
   { Fixture f; runningAfterStart[I2C_DEVICE_FMRADIO] = false;
-    assert(f.manager.enqueueDeviceStart(I2C_DEVICE_FMRADIO)); f.worker();
+    assert(enqueueDeviceStart(I2C_DEVICE_FMRADIO)); f.worker();
     assert(eventCount(SYSEVT_SENSOR_STARTED) == 1 && starts[I2C_DEVICE_FMRADIO] == 1); } // Owner acceptance contract.
   { Fixture f; running[I2C_DEVICE_GPS] = true;
-    assert(f.manager.enqueueDeviceStart(I2C_DEVICE_GPS)); f.worker();
+    assert(enqueueDeviceStart(I2C_DEVICE_GPS)); f.worker();
     assert(starts[I2C_DEVICE_GPS] == 0 && events.empty() && graceResets.empty()); }
   { Fixture f; handles[I2C_DEVICE_GPS] = &f;
-    assert(f.manager.enqueueDeviceStart(I2C_DEVICE_GPS)); f.worker();
+    assert(enqueueDeviceStart(I2C_DEVICE_GPS)); f.worker();
     assert(starts[I2C_DEVICE_GPS] == 0 && eventCount(SYSEVT_SENSOR_START_FAILED) == 1);
     assert(broadcasts.size() == 1 && graceResets.empty()); }
   { Fixture f; I2CDeviceManager::instance = nullptr; f.worker(); assert(taskDeletes == 1 && pauseCalls == 0); }
@@ -276,26 +311,26 @@ static void workerOutcomeCases() {
 
 static void closeOrderingCases() {
   // Cancel before dequeue: actual manager removes pending starts.
-  { Fixture f; assert(f.manager.enqueueDeviceStart(I2C_DEVICE_GPS));
+  { Fixture f; assert(enqueueDeviceStart(I2C_DEVICE_GPS));
     assert(requestSensorStop(I2C_DEVICE_GPS)); assert(starts[I2C_DEVICE_GPS] == 0);
     f.worker(); assert(starts[I2C_DEVICE_GPS] == 0 && eventCount(SYSEVT_SENSOR_STOPPED) == 1);
     assert(eventCount(SYSEVT_SENSOR_STARTED) == 0 && !running[I2C_DEVICE_GPS]); }
   // Inject after the real queue advances its head, before dequeue returns.
-  { Fixture f; assert(f.manager.enqueueDeviceStart(I2C_DEVICE_GPS));
+  { Fixture f; assert(enqueueDeviceStart(I2C_DEVICE_GPS));
     afterUnlock = [&] { assert(f.manager.queueHead != f.manager.queueTail || f.manager.queueHead != 0);
       assert(requestSensorStop(I2C_DEVICE_GPS)); };
     f.worker(); assert(starts[I2C_DEVICE_GPS] == 0 && eventCount(SYSEVT_SENSOR_STARTED) == 0);
     assert(eventCount(SYSEVT_SENSOR_STOPPED) == 1); }
   // Close while waiting for a previous device's initialization delay.
-  { Fixture f; assert(f.manager.enqueueDeviceStart(I2C_DEVICE_THERMAL));
-    assert(f.manager.enqueueDeviceStart(I2C_DEVICE_GPS));
+  { Fixture f; assert(enqueueDeviceStart(I2C_DEVICE_THERMAL));
+    assert(enqueueDeviceStart(I2C_DEVICE_GPS));
     duringDelay = [] { assert(starts[I2C_DEVICE_THERMAL] == 1 && starts[I2C_DEVICE_GPS] == 0);
       assert(requestSensorStop(I2C_DEVICE_GPS)); };
     f.worker(); assert(!duringDelay && starts[I2C_DEVICE_GPS] == 0);
     assert(eventCount(SYSEVT_SENSOR_STARTED) == 1 && eventCount(SYSEVT_SENSOR_STOPPED) == 1); }
   // Close during owner initialization only queues a request. The returned
   // successful start must not publish a stale online event; cleanup waits.
-  { Fixture f; assert(f.manager.enqueueDeviceStart(I2C_DEVICE_GPS));
+  { Fixture f; assert(enqueueDeviceStart(I2C_DEVICE_GPS));
     duringInit = [] { assert(gGpsRunning && gGpsTaskHandle);
       assert(requestSensorStop(I2C_DEVICE_GPS)); assert(gGpsRunning && gGpsTaskHandle); };
     f.worker(); assert(starts[I2C_DEVICE_GPS] == 1 && !gGpsRunning && gGpsTaskHandle);
@@ -309,7 +344,7 @@ static void closeOrderingCases() {
     f.worker(); assert(eventCount(SYSEVT_SENSOR_STOPPED) == 1); }
   // An init failure canceled by close likewise produces no stale start result.
   { Fixture f; startResult[I2C_DEVICE_GPS] = false; runningAfterStart[I2C_DEVICE_GPS] = false;
-    assert(f.manager.enqueueDeviceStart(I2C_DEVICE_GPS));
+    assert(enqueueDeviceStart(I2C_DEVICE_GPS));
     duringInit = [] { assert(requestSensorStop(I2C_DEVICE_GPS)); };
     f.worker(); assert(eventCount(SYSEVT_SENSOR_START_FAILED) == 0 && eventCount(SYSEVT_SENSOR_STOPPED) == 1); }
 }
@@ -326,14 +361,39 @@ static void cleanupCases() {
     assert(rtcStopCalls == static_cast<unsigned>(sensor == I2C_DEVICE_RTC));
     if (sensor == I2C_DEVICE_APDS) assert(!gApdsColorRunning && !gApdsProximityRunning && !gApdsGestureRunning);
     handles[sensor] = nullptr;
-    assert(f.manager.enqueueDeviceStart(sensor)); f.worker();
+    assert(enqueueDeviceStart(sensor)); f.worker();
     assert(events.size() == 2 && events[0].first == SYSEVT_SENSOR_STOPPED && events[1].first == SYSEVT_SENSOR_STARTED);
     assert(starts[sensor] == 1 && !sSensorStopAwaitingCleanup[sensor]);
   }
-  { Fixture f; running[I2C_DEVICE_GPS] = true; handles[I2C_DEVICE_GPS] = &f;
-    gI2CBusRunning = false; assert(requestSensorStop(I2C_DEVICE_GPS)); f.worker();
-    assert(!gGpsRunning && gGpsTaskHandle && events.empty());
-    gGpsTaskHandle = nullptr; f.worker(); assert(eventCount(SYSEVT_SENSOR_STOPPED) == 1); }
+  // The bus-running flag is fixed at boot. With the bus disabled a stop is
+  // refused like a start: nothing is queued and no manager is allocated.
+  { Fixture f; gI2CBusRunning = false;
+    assert(!requestSensorStop(I2C_DEVICE_GPS) && !f.manager.hasPendingDeviceStop(I2C_DEVICE_GPS));
+    I2CDeviceManager::instance = nullptr;
+    assert(!requestSensorStop(I2C_DEVICE_GPS) && managerInits == 0); }
+  // Stopping an idle sensor (nothing running, starting or queued) publishes
+  // nothing: no cleanup latch, no status bump, no stop event.
+  for (int index = 0; index < I2C_DEVICE_COUNT; ++index) {
+    Fixture f; const auto sensor = static_cast<I2CDeviceType>(index);
+    assert(requestSensorStop(sensor)); f.worker(); f.worker();
+    assert(!sSensorStopAwaitingCleanup[sensor] && statuses.empty() && events.empty() && meshStatuses.empty());
+  }
+  // Connected without a task still counts (RTC; FM tune/boot is below).
+  { Fixture f; gRtcConnected = true;
+    assert(requestSensorStop(I2C_DEVICE_RTC)); f.worker();
+    assert(rtcStopCalls == 1 && !gRtcConnected && eventCount(SYSEVT_SENSOR_STOPPED) == 1); }
+  // An admitted start that the stop cancels is closed with the stop event.
+  { Fixture f; assert(contains(f.open(), "queued for start"));
+    assert(requestSensorStop(I2C_DEVICE_GPS)); f.worker();
+    assert(starts[I2C_DEVICE_GPS] == 0 && eventCount(SYSEVT_SENSOR_STOPPED) == 1); }
+  // A settled start does not linger: after a failed start, stopping the idle
+  // sensor publishes nothing.
+  { Fixture f; startResult[I2C_DEVICE_GPS] = false; runningAfterStart[I2C_DEVICE_GPS] = false;
+    assert(contains(f.open(), "queued for start")); f.worker();
+    assert(eventCount(SYSEVT_SENSOR_START_FAILED) == 1);
+    events.clear(); statuses.clear();
+    assert(requestSensorStop(I2C_DEVICE_GPS)); f.worker(); f.worker();
+    assert(events.empty() && statuses.empty() && !sSensorStopAwaitingCleanup[I2C_DEVICE_GPS]); }
   // Legacy tune/boot may initialize FM without a polling task. Stop still
   // performs owner teardown on the worker before claiming cleanup complete.
   { Fixture f; fmHardwareReady = true;
@@ -348,6 +408,6 @@ static void cleanupCases() {
 }
 
 int main() {
-  admissionCases(); workerOutcomeCases(); closeOrderingCases(); cleanupCases();
+  admissionCases(); hintCases(); workerOutcomeCases(); closeOrderingCases(); cleanupCases();
   std::printf("Sensor lifecycle requests passed (production controller + manager; mesh=%d)\n", ENABLE_ESPNOW);
 }

@@ -216,9 +216,8 @@ bool tofStartInternal() {
 // Public command - uses centralized queue
 const char* cmd_tofstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* result = cmd_sensorstart_queued(I2C_DEVICE_TOF, "ToF", "opentof@enqueue");
-  cliHint("the sensor opens in the background - read a distance with 'tofread' once it is up");
-  return result;
+  return cmd_sensorstart_queued(I2C_DEVICE_TOF, "ToF", "opentof@enqueue",
+      "the sensor opens in the background - read a distance with 'tofread' once it is up");
 }
 
 const char* cmd_tofstop(const String& argsInput) {

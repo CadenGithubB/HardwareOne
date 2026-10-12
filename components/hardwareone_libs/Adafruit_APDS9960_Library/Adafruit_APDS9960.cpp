@@ -412,10 +412,18 @@ uint8_t Adafruit_APDS9960::readGesture() {
     resetCounts();
   if (!gestureValid())
     return 0;
+  // GFOV (loaded by gestureValid): the FIFO filled and later datasets were
+  // lost. This batch still follows the previous call's, so it is decoded
+  // against the retained direction, but its own partial direction must not
+  // pair with samples after the gap.
+  const bool overflowed = _gstatus.GFOV;
 
   const uint8_t datasets = this->read8(APDS9960_GFLVL);
-  if (datasets == 0)
+  if (datasets == 0) {
+    if (overflowed)
+      resetCounts();
     return 0;
+  }
   if (datasets > 32) {
     resetCounts();
     return 0;
@@ -477,6 +485,8 @@ uint8_t Adafruit_APDS9960::readGesture() {
       return gestureReceived;
     }
   }
+  if (overflowed)
+    resetCounts();
   return 0;
 }
 

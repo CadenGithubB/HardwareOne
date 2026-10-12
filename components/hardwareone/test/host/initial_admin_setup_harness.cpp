@@ -35,6 +35,8 @@ static TestAllocator allocator;
 #define PSRAM_JSON_DOC(name) JsonDocument name(&allocator)
 #define DEBUG_SYSTEMF(...) ((void)0)
 #define INFO_SYSTEMF(...) ((void)0)
+static std::vector<std::string> warnings;
+#define WARN_SYSTEMF(...) warnings.emplace_back("warn")
 static std::vector<std::string> operations, output;
 static String credentialJson, usersJson;
 static bool credentialOk, indexOk, hashOk, automationExists, credentialOverflow;
@@ -104,7 +106,8 @@ static bool existsGuarded(const char* path, int) {
 static bool writeAutomationsJsonAtomic(const String&) {
   ++automationCalls; operations.emplace_back("automations.save"); check(usersJson.length() > 0); return true;
 }
-static bool writeSettingsJson() { ++settingsWriteCalls; operations.emplace_back("settings.save"); return true; }
+static bool settingsSaveSucceeds = true;
+static bool writeSettingsJson() { ++settingsWriteCalls; operations.emplace_back("settings.save"); return settingsSaveSucceeds; }
 static void applySettings() { ++runtimeApplyCalls; operations.emplace_back("settings.apply"); }
 static void connectToBestWiFiNetwork() { ++wifiCalls; operations.emplace_back("wifi.connect"); }
 static void noteNtpStateBeforeSetupReboot() { operations.emplace_back("ntp.note"); }
@@ -141,6 +144,7 @@ static void normalCommitTail(const String& u, const String& p, bool useDarkTheme
 
 static void reset() {
   operations.clear(); output.clear(); credentialJson = ""; usersJson = "";
+  warnings.clear(); settingsSaveSucceeds = true;
   credentialOk = indexOk = hashOk = true; automationExists = credentialOverflow = false;
   hashCalls = credentialCalls = indexCalls = timestampCalls = rebootCalls = 0;
   runtimeApplyCalls = settingsWriteCalls = automationCalls = wifiCalls = normalAttempts = 0;
@@ -244,6 +248,15 @@ static void normalCallerCases() {
   }
   reset(); normalCommitTail("fixture-owner", "fixture-secret", true, true);
   check(gFirstTimeSetupPerformed && wifiCalls == 1); recordAndOrder(true);
+  check(warnings.empty());
+  // A refused settings save (its retry is retained by the writer) is reported
+  // to the log and the operator; setup still completes.
+  reset(); settingsSaveSucceeds = false;
+  normalCommitTail("fixture-owner", "fixture-secret", true, true);
+  check(gFirstTimeSetupPerformed && settingsWriteCalls == 1 && warnings.size() == 1);
+  bool told = false;
+  for (const auto& line : output) told = told || line.find("could not be saved yet") != std::string::npos;
+  check(told);
   reset();
   try { normalCommitTail("fixture-owner", "fixture-secret", false, false, true); }
   catch (const Reboot&) {}

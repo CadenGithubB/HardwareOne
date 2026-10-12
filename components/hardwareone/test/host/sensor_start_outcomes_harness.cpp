@@ -10,6 +10,7 @@
 using String = std::string;
 using TaskHandle_t = void*;
 using SemaphoreHandle_t = void*;
+using TickType_t = unsigned;
 constexpr unsigned MIN_RESTART_DELAY_MS = 2000;
 constexpr int DEBUG_ALWAYS = 1, DEBUG_RTC = 2, ANO_AXIS_VERTICAL = 0;
 constexpr int I2C_ADDR_TOF = 0x29, I2C_ADDR_GPS = 0x10, I2C_ADDR_APDS = 0x39;
@@ -27,6 +28,7 @@ struct Scenario {
   Handshake handshake = Handshake::Success;
   unsigned effects = 0, initCalls = 0, creates = 0, destroyed = 0, releases = 0, hardwareStops = 0;
   unsigned cacheInvalidations = 0, statuses = 0, now = 10000, delays = 0;
+  const char* lastStatus = nullptr;
 } scenario;
 int taskToken, mutexToken;
 bool checkMemoryAvailable(const char*, String*) { ++scenario.effects; return scenario.memory; }
@@ -36,7 +38,7 @@ struct SensorCacheGuard {
   SensorCacheGuard(SemaphoreHandle_t mutex, unsigned, const char*) : held(mutex && scenario.cache) { ++scenario.effects; }
 };
 unsigned long millis() { return scenario.now; }
-void sensorStatusBumpWith(const char*) { ++scenario.statuses; }
+void sensorStatusBumpWith(const char* cause) { ++scenario.statuses; scenario.lastStatus = cause; }
 void gamepadLogHeap(const char*) {}
 void anoLogHeap(const char*) {}
 struct { unsigned getFreeHeap() { return 1000000; } } ESP;
@@ -245,6 +247,10 @@ void testEveryOwner() {
     if (std::strcmp(owner.name, "FM") == 0) assert(scenario.hardwareStops == 1);
     if (std::strcmp(owner.name, "Gamepad") == 0) assert(scenario.cacheInvalidations == 1);
     if (std::strcmp(owner.name, "ANO") == 0) assert(scenario.cacheInvalidations == 2);
+    // The input enable was already published; its rollback publishes again.
+    if (std::strcmp(owner.name, "Gamepad") == 0 || std::strcmp(owner.name, "ANO") == 0) {
+      assert(scenario.lastStatus && std::strcmp(scenario.lastStatus, "openinput@task_failed") == 0);
+    }
 
     reset();
     if (!owner.deferred) {

@@ -373,6 +373,30 @@ static void executorHooks() {
   commandHook(&ctx, "safe"); outputHook(&ctx, "safe"); CHECK(written.size() == count);
   balanced();
 }
+// Replacing a session closes the displaced file with a LOG_STOP naming the new
+// one and says so in the reply. The new LOG_START is written first, so a
+// refused start leaves the old session (and its file) untouched.
+static void replacement() {
+  reset(); start(); caller = identity("bob");
+  CHECK(command("start /logs/bob.log") == "Automation logging started: /logs/bob.log (replaced /logs/alice.log)");
+  CHECK(written.size() == 3);
+  CHECK(written[1].path == "/logs/bob.log" && written[1].user == "bob");
+  CHECK(written[1].bytes.find("LOG_START | Automation logging started\n") != std::string::npos);
+  CHECK(written[2].path == "/logs/alice.log" && written[2].user == "alice");
+  CHECK(written[2].bytes.find("LOG_STOP | Automation logging replaced by /logs/bob.log\n") != std::string::npos);
+  CHECK(command("status") == "Automation logging ACTIVE: /logs/bob.log");
+  balanced();
+  reset(); start(); caller = identity("bob"); deniedUsers.insert("alice");
+  CHECK(command("start /logs/bob.log") ==
+        "Automation logging started: /logs/bob.log (replaced /logs/alice.log; its LOG_STOP marker could not be written)");
+  CHECK(command("status") == "Automation logging ACTIVE: /logs/bob.log" && written.size() == 2);
+  balanced();
+  reset(); start(); caller = identity("bob"); fault = Fault::Open;
+  CHECK(command("start /logs/bob.log").rfind("Error:", 0) == 0 && written.size() == 1);
+  fault = Fault::None;
+  CHECK(command("status") == "Automation logging ACTIVE: /logs/alice.log");
+  balanced();
+}
 static void armBlockedPrint() {
   std::lock_guard<std::mutex> lock(blockMutex);
   blockNextPrint = true; printEntered = printReleased = false;
@@ -398,9 +422,11 @@ static void concurrency() {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
   while (!fsWaiters && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
   CHECK(fsWaiters > 0); releaseBlockedPrint();
-  CHECK(append.get()); CHECK(replacement.get() == "Automation logging started: /logs/bob.log");
-  CHECK(written.size() == 3 && written[1].user == "alice" && written[1].path == "/logs/alice.log");
+  CHECK(append.get());
+  CHECK(replacement.get() == "Automation logging started: /logs/bob.log (replaced /logs/alice.log)");
+  CHECK(written.size() == 4 && written[1].user == "alice" && written[1].path == "/logs/alice.log");
   CHECK(written[2].user == "bob" && written[2].path == "/logs/bob.log");
+  CHECK(written[3].user == "alice" && written[3].path == "/logs/alice.log");  // replacement marker
   armBlockedPrint();
   auto second = std::async(std::launch::async, [] { return appendAutoLogEntry("EVENT", "before stop"); });
   awaitBlockedPrint();
@@ -428,7 +454,7 @@ static void concurrency() {
   if (automationLogActive()) command("stop"); balanced();
 }
 int main() {
-  basicLifecycle(); failures(); routingAndAllocation(); executorHooks(); concurrency();
+  basicLifecycle(); failures(); replacement(); routingAndAllocation(); executorHooks(); concurrency();
   reset();
   std::printf("automation logging: %u checks passed (owner, permissions, checked writes, hooks and concurrency)\n", checks.load());
 }

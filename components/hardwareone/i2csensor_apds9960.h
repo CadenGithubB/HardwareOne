@@ -18,6 +18,10 @@ struct APDSCache {
   bool apdsColorValid = false;
   bool apdsProximityValid = false;
   bool apdsGestureValid = false;
+  // Last non-zero swipe and when it was sampled; cleared when a session ends
+  // or starts, so `apdsgesture` never reports a previous session's swipe.
+  uint8_t apdsLastGesture = 0;
+  unsigned long apdsLastGestureMs = 0;
 };
 
 // Values only: callers own their copy; the live cache and lock stay in the driver.

@@ -15,6 +15,7 @@
 #define pdTRUE 1
 template <typename... Args> static void debugLog(const char*, Args...) {}
 #define DEBUG_THERMAL_POLLINGF(...) debugLog(__VA_ARGS__)
+#define DEBUG_THERMAL_LIFECYCLEF(...) debugLog(__VA_ARGS__)
 #define DEBUG_PERFORMANCEF(...) debugLog(__VA_ARGS__)
 #define DISPLAY_COLOR_WHITE 1
 #define OLED_CONTENT_START_Y 8
@@ -22,22 +23,27 @@ using TickType_t = uint32_t;
 struct Semaphore { bool held = false; } semaphore;
 using SemaphoreHandle_t = Semaphore*;
 static bool admit = true, allocationAvailable = true;
+// >= 0: admit/allocate that many more times, then refuse (one-shot faults).
+static int admitsBeforeRefusal = -1, allocationsBeforeFailure = -1;
 static std::vector<uint32_t> waits;
 static bool isHeldByCurrentTask(SemaphoreHandle_t m) { return m && m->held; }
 static int xSemaphoreTake(SemaphoreHandle_t m, TickType_t ms) {
   waits.push_back(ms);
   if (!m || m->held || !admit) return 0;
+  if (admitsBeforeRefusal == 0) return 0;
+  if (admitsBeforeRefusal > 0) --admitsBeforeRefusal;
   m->held = true; return pdTRUE;
 }
 static void xSemaphoreGive(SemaphoreHandle_t m) { assert(m && m->held); m->held = false; }
-static struct { int thermalRotation = 0; float oledThermalScale = 2.5f; } gSettings;
+static struct { int thermalRotation = 0; float oledThermalScale = 2.5f; int thermalUpscaleFactor = 1; } gSettings;
 static bool gThermalRunning = true, gThermalConnected = true;
 static unsigned long millis() { return 12345; }
 static std::vector<void*> allocations;
 enum class AllocPref { PreferPSRAM };
 static void* ps_alloc(size_t size, AllocPref, const char*) {
   assert(!semaphore.held);
-  if (!allocationAvailable) return nullptr;
+  if (!allocationAvailable || allocationsBeforeFailure == 0) return nullptr;
+  if (allocationsBeforeFailure > 0) --allocationsBeforeFailure;
   void* result = std::malloc(size); assert(result); allocations.push_back(result); return result;
 }
 static void trackedFree(void* ptr) {
@@ -104,6 +110,7 @@ static void releaseFrames() {
 static void reset(bool interpolation = false) {
   releaseFrames(); DATA = {}; semaphore = {}; MUTEX = &semaphore;
   admit = allocationAvailable = true; gThermalRunning = gThermalConnected = true;
+  admitsBeforeRefusal = allocationsBeforeFailure = -1;
   waits.clear(); gSettings = {}; gSettings.oledThermalScale = 2.5f; display = {};
   gMLX90640 = reinterpret_cast<void*>(0x1234);
   driverDestroyed = scratchReset = exited = delays = 0; stopAfterDelay = false;
@@ -199,12 +206,38 @@ static void ownerContracts() {
   const auto copied = frame;
   admit = false; assert(!thermalResetCacheForStart()); waited(100);
   assert(DATA.thermalFrame && DATA.thermalInterpolated && DATA.thermalDataValid);
-  admit = true; assert(thermalResetCacheForStart()); waited(100);
-  assert(allocations.empty() && !DATA.thermalFrame && !DATA.thermalInterpolated);
+  // Start retires the previous run's buffers and allocates this run's (1x by
+  // default), so the polling task never allocates inside its transaction.
+  admit = true; assert(thermalResetCacheForStart());
+  assert((waits == std::vector<uint32_t>{100, 100}) && !semaphore.held); waits.clear();
+  assert(allocations.size() == 1 && allocations[0] == DATA.thermalFrame);
+  assert(!DATA.thermalInterpolated && !DATA.thermalInterpolatedWidth && !DATA.thermalInterpolatedHeight);
   assert(frame == copied);  // independent data survives retirement/free of both live buffers
   assert(!DATA.thermalDataValid && !DATA.thermalSeq);
+  // Until the first frame the new buffer reads as an invalid, zeroed frame.
   assert(thermalFrameSnapshot(out, raw.data(), raw.size())); waited(10);
-  assert(!out.thermalFrameAvailable && raw[0] == -1664);
+  assert(out.thermalFrameAvailable && !out.thermalDataValid);
+  assert(std::all_of(raw.begin(), raw.end(), [](int16_t v) { return v == 0; }));
+
+  // 2x upscale allocates the interpolation buffer at start too.
+  reset(true); gSettings.thermalUpscaleFactor = 2;
+  assert(thermalResetCacheForStart()); waits.clear();
+  assert(allocations.size() == 2 && DATA.thermalFrame && DATA.thermalInterpolated);
+  assert(DATA.thermalInterpolatedWidth == 64 && DATA.thermalInterpolatedHeight == 48);
+  // A missing interpolation buffer falls back to 1x; the start still succeeds.
+  reset(true); gSettings.thermalUpscaleFactor = 2; allocationsBeforeFailure = 1;
+  assert(thermalResetCacheForStart()); waits.clear();
+  assert(allocations.size() == 1 && DATA.thermalFrame && !DATA.thermalInterpolated);
+  assert(!DATA.thermalInterpolatedWidth && !DATA.thermalInterpolatedHeight);
+  // No frame buffer fails the start, with the old buffers already released.
+  reset(true); allocationAvailable = false;
+  assert(!thermalResetCacheForStart()); waited(100);
+  assert(allocations.empty() && !DATA.thermalFrame && !DATA.thermalInterpolated && !DATA.thermalDataValid);
+  // A refused install lock frees the new buffers and fails the start.
+  reset(true); gSettings.thermalUpscaleFactor = 2; admitsBeforeRefusal = 1;
+  assert(!thermalResetCacheForStart());
+  assert((waits == std::vector<uint32_t>{100, 100}) && !semaphore.held); waits.clear();
+  assert(allocations.empty() && !DATA.thermalFrame && !DATA.thermalInterpolated);
 
   reset(); admit = false;
   assert(!thermalInvalidateCache()); waited(50); assert(DATA.thermalDataValid && DATA.thermalSeq == 27);

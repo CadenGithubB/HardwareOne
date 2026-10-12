@@ -16,7 +16,7 @@ WIFI_MODULE = Path("network/wifi")
 CASES = ("validation", "password_update", "capacity", "ordering", "persistence_failure", "remove_final")
 OWNER_CASES = ("stable_ids", "setup_result", "json_roundtrip", "json_load_contract",
                "coherent_connection_copy", "copy_failure", "json_overflow", "init_failure",
-               "removal_commands")
+               "removal_commands", "credential_scrub")
 JSON_INCLUDE = COMPONENT.parent / "hardwareone_libs" / "ArduinoJson" / "src"
 
 READ_ADAPTER = '''
@@ -152,7 +152,8 @@ int main() {
                                   str(disabled), "-o", str(executable)], check=True, timeout=120)
         subprocess.run([str(executable)], check=True, timeout=60)
         for name in ("System_Settings.h", "System_Debug.h", "System_MemUtil.h", "System_Filesystem.h",
-                     "System_SystemEvents.h", "System_Events.h", "freertos/FreeRTOS.h", "freertos/semphr.h"):
+                     "System_SystemEvents.h", "System_Events.h", "System_Utils.h",
+                     "freertos/FreeRTOS.h", "freertos/semphr.h"):
             path = work / name
             path.parent.mkdir(exist_ok=True)
             path.write_text('#pragma once\n#include "wifi_networks_test_platform.h"\n')

@@ -7,6 +7,7 @@
 #include "System_Filesystem.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
+#include "System_Utils.h"  // secureClearString
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <new>
@@ -74,13 +75,36 @@ bool copyRecord(const WifiNetwork& from, WifiNetwork& to, bool includePassword) 
   return to.ssid == from.ssid && (!includePassword || to.password == from.password);
 }
 
+// Zero a record's password, then give its buffer up: the move-construct takes
+// the zeroed buffer (freed at scope exit), so a later move into this record
+// adopts the incoming buffer. Arduino's String move otherwise copies into a
+// large-enough target and frees the source buffer without zeroing it.
+void scrub(WifiNetwork& network) {
+  secureClearString(network.password);
+  String released(std::move(network.password));
+  network = WifiNetwork{};
+}
+
+// Scrubs every record of a local credential array on all return paths.
+struct ScrubOnExit {
+  WifiNetwork* records;
+  int count;
+  ~ScrubOnExit() { for (int i = 0; i < count; ++i) scrub(records[i]); }
+};
+
+// A plain reset of a connection copy keeps the old bytes in its buffer.
+void resetTarget(WifiConnectionTarget& target) {
+  secureClearString(target.password);
+  target = WifiConnectionTarget{};
+}
+
 bool copyConnectionLocked(int index, WifiConnectionTarget& out) {
   if (index < 0 || index >= sCount) return false;
   const WifiNetwork& network = sNetworks[index];
   out.ssid = network.ssid;
   out.password = network.password;
   if (out.ssid != network.ssid || out.password != network.password) {
-    out = {};
+    resetTarget(out);
     return false;
   }
   out.id = network.id;
@@ -90,9 +114,10 @@ bool copyConnectionLocked(int index, WifiConnectionTarget& out) {
 }
 
 void removeLocked(int index) {
+  scrub(sNetworks[index]);  // The removed credential, before a shift reuses the slot.
   for (int i = index + 1; i < sCount; ++i)
     sNetworks[i - 1] = std::move(sNetworks[i]);
-  sNetworks[--sCount] = {};  // Release the removed/tail credentials too.
+  sNetworks[--sCount] = {};  // The vacated tail is moved-from and owns no credential.
 }
 
 } // namespace
@@ -227,10 +252,9 @@ bool removeWiFiNetworkById(uint32_t id, String* removedSsid) {
   NetworkGuard guard;
   const int index = guard ? findByIdLocked(id) : -1;
   if (index < 0) return false;
-  if (removedSsid) {
-    *removedSsid = sNetworks[index].ssid;
-    if (*removedSsid != sNetworks[index].ssid) return false;
-  }
+  // Move, not copy: a String move adopts or copies into existing storage and
+  // cannot fail, so the removal never depends on an allocation.
+  if (removedSsid) *removedSsid = std::move(sNetworks[index].ssid);
   removeLocked(index);
   return true;
 }
@@ -269,19 +293,19 @@ WifiNetworkSaveResult saveSetupWiFiNetwork(const String& ssid, const String& pas
 }
 
 bool wifiNetworkConnectionByIndex(int index, WifiConnectionTarget& out) {
-  out = {};
+  resetTarget(out);
   NetworkGuard guard;
   return guard && copyConnectionLocked(index, out);
 }
 
 bool wifiNetworkConnectionById(uint32_t id, WifiConnectionTarget& out) {
-  out = {};
+  resetTarget(out);
   NetworkGuard guard;
   return guard && copyConnectionLocked(findByIdLocked(id), out);
 }
 
 bool wifiNetworkConnectionBySSID(const String& ssid, WifiConnectionTarget& out) {
-  out = {};
+  resetTarget(out);
   NetworkGuard guard;
   return guard && copyConnectionLocked(findBySsidLocked(ssid), out);
 }
@@ -294,6 +318,7 @@ void wifiNetworkMarkConnected(uint32_t id, uint32_t when) {
 
 bool wifiNetworksWriteJson(JsonDocument& doc, bool excludePasswords) {
   WifiNetwork saved[MAX_WIFI_NETWORKS];
+  ScrubOnExit scrubSaved{saved, MAX_WIFI_NETWORKS};  // Plaintext copies, all paths.
   int count = 0;
   {
     NetworkGuard guard;
@@ -340,6 +365,7 @@ unsigned wifiNetworksReadJson(const JsonDocument& doc) {
   JsonArrayConst networks = doc["network"]["wifi"]["networks"].as<JsonArrayConst>();
   if (networks.isNull()) { WARN_STORAGEF("No wifiNetworks array found in JSON"); return 0; }
   WifiNetwork loaded[MAX_WIFI_NETWORKS];
+  ScrubOnExit scrubLoaded{loaded, MAX_WIFI_NETWORKS};  // Unpublished copies, all paths.
   int count = 0;
   unsigned failures = 0;
   for (JsonObjectConst net : networks) {
@@ -369,6 +395,7 @@ unsigned wifiNetworksReadJson(const JsonDocument& doc) {
     if (!guard) return failures;
     for (int i = 0; i < MAX_WIFI_NETWORKS; ++i) {
       if (i < count) loaded[i].id = sNextId++;
+      scrub(sNetworks[i]);  // Outgoing record; the move below then adopts.
       sNetworks[i] = std::move(loaded[i]);
     }
     sCount = count;
@@ -376,5 +403,7 @@ unsigned wifiNetworksReadJson(const JsonDocument& doc) {
   DEBUG_STORAGEF("[WiFi Networks] Loaded %d networks from JSON", count);
   return failures;
 }
+
+WifiConnectionTarget::~WifiConnectionTarget() { secureClearString(password); }
 
 #endif // ENABLE_WIFI

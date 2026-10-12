@@ -178,9 +178,8 @@ static bool readInt16(TwoWire& wire, uint8_t regL, int16_t* value) {
 
 const char* cmd_presencestart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* result = cmd_sensorstart_queued(I2C_DEVICE_PRESENCE, "Presence", "openpresence@enqueue");
-  cliHint("the sensor opens in the background - read it with 'presenceread' once it is up");
-  return result;
+  return cmd_sensorstart_queued(I2C_DEVICE_PRESENCE, "Presence", "openpresence@enqueue",
+      "the sensor opens in the background - read it with 'presenceread' once it is up");
 }
 
 const char* cmd_presencestop(const String& argsInput) {

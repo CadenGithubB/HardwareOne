@@ -32,6 +32,18 @@ void logSystemEvent(const char*, const char* format, ...) {
   messages.emplace_back(buffer);
 }
 #define ERROR_WIFIF(...) ((void)0)
+// Records each plaintext the owner zeroes (production: System_Utils).
+static std::vector<std::string> scrubbed;
+void secureClearString(String& s) {
+  if (s.length() == 0) return;
+  scrubbed.emplace_back(s.c_str());
+  s = String();
+}
+[[maybe_unused]] static size_t scrubCount(const char* value) {
+  size_t count = 0;
+  for (const auto& entry : scrubbed) count += entry == value;
+  return count;
+}
 bool filesystemReady = true;
 static bool persistResult = true;
 static int persistCalls = 0;
@@ -124,6 +136,51 @@ static void ownerCases(const std::string& scenario) {
     persistResult = false;
     assert(String(cmd_wifirmid(std::to_string(networkId("replacement")))).indexOf("FAILED") >= 0);
     assert(networkCount() == 0 && persistCalls == 4);
+    // The removed name is moved out, so a removal never fails on a copy.
+    persistResult = true;
+    assert(upsertWiFiNetwork("moved", "p", 1, false));
+    const std::string movedId = std::to_string(networkId("moved"));
+    wifiTestFailureValue = "moved"; wifiTestCopiesBeforeFailure = 0;
+    assert(String(cmd_wifirmid(movedId)).startsWith("Removed network 'moved'"));
+    wifiTestFailureValue = nullptr; wifiTestCopiesBeforeFailure = -1;
+    assert(findNetwork("moved") < 0 && networkCount() == 0);
+  } else if (scenario == "credential_scrub") {
+    // Every plaintext copy the owner makes is zeroed before its buffer goes:
+    // connection targets, the JSON writer's and loader's working arrays,
+    // removed records and the records a reload replaces.
+    assert(upsertWiFiNetwork("home", "home-secret", 1, false));
+    assert(upsertWiFiNetwork("cafe", "cafe-secret", 2, false));
+    scrubbed.clear();
+    {
+      WifiConnectionTarget target;
+      assert(wifiNetworkConnectionBySSID("home", target) && target.password == "home-secret");
+    }
+    assert(scrubCount("home-secret") == 1 && scrubbed.size() == 1);
+    scrubbed.clear();
+    {
+      WifiConnectionTarget target;
+      assert(wifiNetworkConnectionBySSID("home", target));
+      assert(wifiNetworkConnectionBySSID("cafe", target) && target.password == "cafe-secret");
+      assert(scrubCount("home-secret") == 1);  // reuse zeroes the previous copy first
+    }
+    scrubbed.clear();
+    JsonDocument doc;
+    assert(wifiNetworksWriteJson(doc, false));
+    assert(scrubCount("home-secret") == 1 && scrubCount("cafe-secret") == 1 && scrubbed.size() == 2);
+    scrubbed.clear();
+    assert(wifiNetworksReadJson(doc) == 0 && wifiNetworkCount() == 2);
+    assert(scrubCount("home-secret") == 1 && scrubCount("cafe-secret") == 1);  // replaced records
+    scrubbed.clear();
+    assert(removeWiFiNetwork("home"));
+    assert(scrubCount("home-secret") == 1 && scrubbed.size() == 1);
+    // A failed copy zeroes what it did copy before the target is reset.
+    scrubbed.clear();
+    const String cafe("cafe");
+    WifiConnectionTarget target;
+    wifiTestFailureValue = "cafe"; wifiTestCopiesBeforeFailure = 0;
+    assert(!wifiNetworkConnectionBySSID(cafe, target) && target.password.length() == 0);
+    wifiTestFailureValue = nullptr; wifiTestCopiesBeforeFailure = -1;
+    assert(scrubCount("cafe-secret") == 1);
   } else if (scenario == "stable_ids") {
     assert(upsertWiFiNetwork("A", "a", 1, false));
     assert(upsertWiFiNetwork("B", "b", 2, false));
@@ -307,7 +364,8 @@ int main(int argc, char** argv) {
 #if WIFI_NETWORKS_OWNER
   if (scenario == "stable_ids" || scenario == "setup_result" || scenario == "json_roundtrip" ||
       scenario == "json_load_contract" || scenario == "coherent_connection_copy" ||
-      scenario == "copy_failure" || scenario == "json_overflow" || scenario == "removal_commands") {
+      scenario == "copy_failure" || scenario == "json_overflow" || scenario == "removal_commands" ||
+      scenario == "credential_scrub") {
     ownerCases(scenario);
     std::printf("saved WiFi owner: %s passed\n", argv[1]);
     return 0;

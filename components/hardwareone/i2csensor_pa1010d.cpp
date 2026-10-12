@@ -197,9 +197,8 @@ bool gpsStartInternal() {
 
 const char* cmd_gpsstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* result = cmd_sensorstart_queued(I2C_DEVICE_GPS, "GPS", "opengps@enqueue");
-  cliHint("the GPS opens in the background - read location with 'gpsread' once it is up (a fix can take a minute outdoors)");
-  return result;
+  return cmd_sensorstart_queued(I2C_DEVICE_GPS, "GPS", "opengps@enqueue",
+      "the GPS opens in the background - read location with 'gpsread' once it is up (a fix can take a minute outdoors)");
 }
 
 const char* cmd_gpsstop(const String& argsInput) {

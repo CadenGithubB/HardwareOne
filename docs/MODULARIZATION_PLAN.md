@@ -1196,15 +1196,20 @@ proximity and gesture commands now copy its existing cache, and ToF text selects
 the nearest valid detected object from its four cached slots. ToF text and
 JSON use the same filtered/smoothed published distance; the text path emits one
 distance line. Commands report stopped, unavailable/busy, or no reading instead
-of claiming a completed read. APDS gesture reports the latest sampled value
-without consuming it or producing another event.
+of claiming a completed read. APDS gesture reports the last swipe the polling
+task latched, with its age, without consuming it or producing another event;
+the latch clears when a session starts or stops. While gesture mode is on the
+task drains the gesture FIFO at least every 100 ms, independent of the
+color/proximity interval, because the decoder pairs the two halves of a swipe
+only within 300 ms of motion.
 
 APDS records per-field availability in its snapshot value, because a
 successful polling transaction does not mean color conversion was ready. The
 task publishes those bits together with the values, and startup/shutdown clear
-them. A color-only cycle with no ready data now reports invalid rather than
-valid zero RGBC. JSON keys and existing output for supplied valid readings are
-unchanged. Vendor scalar/void read methods still cannot confirm every physical
+them. A color cycle with no ready data is "no new sample": it keeps the
+previous valid RGBC (or stays invalid if there is none yet) rather than
+publishing zeros as valid; turning color mode off clears it. JSON keys and
+existing output for supplied valid readings are unchanged. Vendor scalar/void read methods still cannot confirm every physical
 I2C acknowledgement; these bits identify which sampling paths ran.
 
 Eight focused host suites pass with ASan/UBSan, including two new command
@@ -2995,7 +3000,11 @@ concurrent invalidation. The shared file-save hook requested refresh only when
 duplicate-ID repair changed the uploaded rules.
 
 `System_Automation` now owns that coordination. The main task calls
-`automationTick()` while the existing enabled setting permits execution. Boot
+`automationTick()` on every loop; the owner checks the enabled setting itself
+and stops the scheduler when another writer (settings page or import) revoked
+it, so `automationSchedulerRunning()` stays true to the permission. A later
+grant stays idle until `automation system enable` (or `features automation on`,
+which goes through the same owner transition) starts it. Boot
 and RamFlush query `automationSchedulerRunning()`; start, stop and notification
 remain the other integration points. Due checks and full ticks are private.
 Unused memo arrays and their exported declarations are removed. Filesystem and
