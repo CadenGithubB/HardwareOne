@@ -82,7 +82,9 @@ temporary files, failed promotion and failed cleanup.
 
 Replacement cases exercise LittleFS rename-over-existing and SD's guarded
 backup/promotion/rollback sequence. Failed rollback must retain the previous
-bytes in `.bak`; unresolved backups are never consumed. Plaintext export keeps
+bytes in `.bak`; unresolved backups are never consumed, and a backup that blocks a
+replacement, survives a failed restoration or outlives a successful promotion is
+reported to the system log (asserted here; clean outcomes log nothing). Plaintext export keeps
 its schema lines and `[UNDECRYPTABLE]` policy, while detecting incomplete output
 before promotion. Failed attempts preserve the previous destination or its
 recovery backup and clean up only their own temporary.

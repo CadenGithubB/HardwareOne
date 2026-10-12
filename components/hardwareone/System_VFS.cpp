@@ -1150,31 +1150,57 @@ bool replaceFileGuarded(const String& temporary, const String& destination,
   const StorageType storage = getStorageType(from);
   if (storage != getStorageType(to)) return false;
 
-  FsLockGuard guard("VFS.replace");
-  if (storage != SDCARD || !existsGuarded(to, ctx)) {
-    return renameGuarded(from, to, ctx);
-  }
+  // A backup that outlives this call is reported once the lock is released:
+  // no other code looks for it, and the next replacement of `to` refuses it.
+  enum class Backup { None, Blocks, Unrestored, Retained } note = Backup::None;
+  String backup;
+  bool promoted = false;
+  {
+    FsLockGuard guard("VFS.replace");
+    if (storage != SDCARD || !existsGuarded(to, ctx)) {
+      promoted = renameGuarded(from, to, ctx);
+    } else {
+      File previous = openGuarded(to, "r", ctx);
+      if (!previous) return false;
+      const bool destinationIsDirectory = previous.isDirectory();
+      previous.close();
+      if (destinationIsDirectory) return false;
 
-  File previous = openGuarded(to, "r", ctx);
-  if (!previous) return false;
-  const bool destinationIsDirectory = previous.isDirectory();
-  previous.close();
-  if (destinationIsDirectory) return false;
-
-  // FAT cannot rename over an existing file. Keep its bytes under a sibling
-  // name until promotion completes, and never consume an unresolved backup.
-  String backup = to;
-  if (backup.length() != to.length() || !backup.concat(".bak") ||
-      backup == from || existsGuarded(backup, ctx)) return false;
-  if (!renameGuarded(to, backup, ctx)) return false;
-  if (!renameGuarded(from, to, ctx)) {
-    // If restoration also fails, retain the old file at .bak. The caller may
-    // remove its temporary, but must not delete this remaining recovery copy.
-    renameGuarded(backup, to, ctx);
-    return false;
+      // FAT cannot rename over an existing file. Keep its bytes under a sibling
+      // name until promotion completes, and never consume an unresolved backup.
+      backup = to;
+      if (backup.length() != to.length() || !backup.concat(".bak") || backup == from) return false;
+      if (existsGuarded(backup, ctx)) {
+        note = Backup::Blocks;
+      } else if (!renameGuarded(to, backup, ctx)) {
+        return false;
+      } else if (!renameGuarded(from, to, ctx)) {
+        // If restoration also fails, retain the old file at .bak. The caller may
+        // remove its temporary, but must not delete this remaining recovery copy.
+        if (!renameGuarded(backup, to, ctx)) note = Backup::Unrestored;
+      } else {
+        promoted = true;
+        if (!removeGuarded(backup, ctx)) note = Backup::Retained;  // the complete destination is live
+      }
+    }
   }
-  removeGuarded(backup, ctx);  // Best effort; the complete destination is live.
-  return true;
+  switch (note) {
+    case Backup::Blocks:
+      logSystemEvent("FS", "replace of %s refused: unresolved backup %s must be inspected or removed first",
+                     to.c_str(), backup.c_str());
+      break;
+    case Backup::Unrestored:
+      logSystemEvent("FS", "replace of %s failed and its previous contents could not be restored; they remain in %s",
+                     to.c_str(), backup.c_str());
+      break;
+    case Backup::Retained:
+      logSystemEvent("FS", "replace of %s complete, but its backup %s could not be removed; later replacements are refused until it is",
+                     to.c_str(), backup.c_str());
+      break;
+    case Backup::None:
+      break;
+  }
+  return promoted;
 }
 
 bool mkdirGuarded(const String& path, const AuthContext& ctx) {
