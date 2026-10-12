@@ -80,6 +80,10 @@ struct DisplayBoundary {
 static DisplayBoundary* oledDisplay = &display;
 static std::vector<String> output;
 static void broadcastOutput(const String& value) { output.push_back(value); }
+static std::vector<unsigned> outputRoutes;
+static void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route) {
+  output.push_back(String(text, len)); outputRoutes.push_back(route);
+}
 static void oledDrawBackArrowIcon(DisplayBoundary*, int) {}
 
 struct PhysicalInput { unsigned long at; uint32_t buttons; int x = 0, y = 0, wheel = 0; };
@@ -195,7 +199,7 @@ static String getOLEDTextInput(const char*, bool, const char*, int, bool* = null
 static void reset() {
   nowMs = 0; delayCalls = 0; setSerialWaitTimeout(0);
   serialInputs.clear(); physicalInputs.clear(); currentInput = {}; gNavEvents = {};
-  output.clear(); gWizardOwnsSerial = true; gOledRunning = oledConnected = true; oledDisplay = &display;
+  output.clear(); outputRoutes.clear(); gWizardOwnsSerial = true; gOledRunning = oledConnected = true; oledDisplay = &display;
   oledKeyboardReset(); keyboardResetCalls = 0;
   scanAccepted = true; scannedNetworks = {{{"test-network"}, -40}}; scanCalls = 0;
   tickButtons = sLastButtons = 0; sLastButtonsValid = true; tickNav = {};
@@ -368,6 +372,9 @@ static void testDisplayPageCancel() {
   wizardMode_onTick(nullptr);
   assert(sWizard.subMode == WizardSubMode::PAGE_DEVICE_NAME && toggleCalls == 0 && exitCalls == 0);
   assert(!keyboardActive && output.size() == 1 && output.back() == "Device Name [fixture]: ");
+  // The tick has no command context: its prompt carries the explicit-render
+  // route itself, so a serial-owned mode would not hide it.
+  assert(outputRoutes.size() == 1 && outputRoutes.back() == (MSG_ROUTE_ALL | MSG_ROUTE_ALLOW_IN_HELP));
 }
 
 int main() {

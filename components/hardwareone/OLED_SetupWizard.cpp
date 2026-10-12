@@ -926,9 +926,5 @@ bool getOLEDThemeSelection(bool& darkMode) {
   return false;
 }
 
-SetupWizardResult runOLEDSetupWizard() {
-  return runSetupWizard();
-}
-
 
 #endif // ENABLE_OLED_DISPLAY

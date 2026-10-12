@@ -407,6 +407,12 @@ ctest --test-dir /tmp/hw1-hardwareone-host \
 
 ## Checked JSON settings saves
 
+The persistence suites in this and the following sections each carry their own
+File/VFS and lock doubles, tuned to their writer. Before adding another
+persistence suite, move them into one shared fake VFS with backend policy knobs
+(directory unlink refused like LittleFS, rename over an existing `/sd` file,
+guarded versus unguarded seams) instead of writing a tenth double.
+
 `settings_file_writes` executes the production main/debug/restamp writers,
 shared JSON snapshot writer, per-user save/load/transaction/merge functions and
 filesystem/settings writer guards. It uses vendored ArduinoJson with controlled
@@ -1113,6 +1119,8 @@ automation creation, runtime settings application and reboot. Migration and OLED
 enabled/disabled variants run under `HW1_SANITIZE`. Earlier Basic/Advanced choices,
 hashing, String storage, file owners, input delivery and reboot are controlled
 boundaries; this does not simulate power loss or qualify durable flash writes.
+The real `saveUserSettings`/`writeTextAtomic` writers are not driven here; their
+own suites (`settings_file_writes`, `checked_text_writes`) cover them.
 
 ```sh
 ctest --test-dir /path/to/host-build --output-on-failure \

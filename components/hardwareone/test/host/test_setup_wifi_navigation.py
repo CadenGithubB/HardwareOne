@@ -29,6 +29,7 @@ def generate() -> str:
         extract_block(header, "struct SetupWizardResult") + ";",
         extract_block(mode, "enum class WizardSubMode") + ";",
         extract_block(mode, "static struct") + " sWizard;",
+        extract_block(mode, "struct WizardRender") + ";",
         extract_block((COMPONENT / "System_CLIMode.h").read_text(), "enum CLIModeInputResult") + ";",
     ])
     functions = "\n\n".join([

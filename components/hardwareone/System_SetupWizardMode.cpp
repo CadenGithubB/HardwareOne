@@ -30,6 +30,7 @@
 #include "System_SetupWizard.h"   // existing state mutators + renderers
 #include "System_CLIMode.h"
 #include "System_Debug.h"
+#include "System_CLI.h"            // gInHelpRender
 
 #if ENABLE_OLED_DISPLAY
 #include "OLED_Display.h"          // oledDisplay, oledConnected
@@ -90,9 +91,6 @@ static struct {
   bool  wifiScanValid;
   String wifiPendingSsid;    // SSID selected, awaiting password
 
-  // Tracks whether the user used the "configure" path on ESP-NOW so the
-  // skip path can disable ESP-NOW entirely.
-  bool espnowConfiguring;
 } sWizard;
 
 static void clearWizardWifiChoices() {
@@ -118,6 +116,19 @@ bool setupWizardMode_isActive();   // forward (defined below)
 // ============================================================================
 // Page rendering helpers (thin wrappers around existing render functions)
 // ============================================================================
+
+// A serial-owned CLI mode suppresses ambient serial lines (System_Debug.cpp
+// drain), so the pages, prompts and outcome lines the wizard prints from its
+// callbacks are marked as explicit renders, the way help marks its pages.
+// The marker counts only for the executor's current command; the OLED tick
+// has no command context and routes its one prompt explicitly instead.
+struct WizardRender {
+  WizardRender() : previous(gInHelpRender) { gInHelpRender = true; }
+  ~WizardRender() { gInHelpRender = previous; }
+  WizardRender(const WizardRender&) = delete;
+  WizardRender& operator=(const WizardRender&) = delete;
+  const bool previous;
+};
 
 static void paintCurrentPage() {
   // The printSerialPageStatus() helper (declared in System_SetupWizard.h)
@@ -332,6 +343,7 @@ static void appendPromptTo(char* out, size_t outSize) {
 
 static CLIModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
                                              char* out, size_t outSize) {
+  WizardRender render;
   if (out && outSize > 0) out[0] = '\0';
 
   // Universal cancel: 'cancel' at any prompt aborts the wizard with no changes
@@ -513,7 +525,6 @@ static CLIModeInputResult dispatchESPNow(const String& line,
     case WizardSubMode::ESPNOW_INTRO:
       if (isBack)         { goBack(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
       if (lc == "c" || lc == "configure") {
-        sWizard.espnowConfiguring = true;
         sWizard.result.espnowFriendlyName = "";
         sWizard.result.espnowRoom = "";
         sWizard.result.espnowZone = "";
@@ -539,7 +550,6 @@ static CLIModeInputResult dispatchESPNow(const String& line,
       // continue into the configure flow (matches handleSerialESPNowPage)
       // rather than silently skipping (which used to also disable ESP-NOW)
       // on what's very likely a menu mix-up, not an intentional skip.
-      sWizard.espnowConfiguring = true;
       sWizard.result.espnowRoom = "";
       sWizard.result.espnowZone = "";
       sWizard.result.espnowStationary = getWizardDraftValues().espnowStationary;
@@ -801,6 +811,7 @@ static CLIModeInputResult dispatchWiFi(const String& line,
 // ============================================================================
 
 static void wizardMode_onEnter(void* /*ud*/) {
+  WizardRender render;
   // CLIMode owns inactivity/session expiry; reset the blocking input escape.
   setSerialWaitTimeout(0);
   // Reset the wizard's state (existing initSetupWizard rebuilds the
@@ -812,7 +823,6 @@ static void wizardMode_onEnter(void* /*ud*/) {
   sWizard.result = SetupWizardResult{};
   clearWizardWifiChoices();
   sWizard.wifiPendingSsid = "";
-  sWizard.espnowConfiguring = false;
 
 #if ENABLE_OLED_DISPLAY
   // Reset joystick edge-detect state for this run -- prevents the first
@@ -830,6 +840,7 @@ static void wizardMode_onEnter(void* /*ud*/) {
 }
 
 static void wizardMode_onExit(void* /*ud*/) {
+  WizardRender render;
   // onExit also covers timeout/session-owner loss and cliExitMode().
   clearWizardWifiChoices();
   bool applied = false;
@@ -850,7 +861,6 @@ static void wizardMode_onExit(void* /*ud*/) {
   setSerialWaitTimeout(0);
   sWizard.wifiPendingSsid = "";
   sWizard.result = SetupWizardResult{};
-  sWizard.espnowConfiguring = false;
   sWizard.subMode = WizardSubMode::DONE;
   DEBUGF(DEBUG_CLI, "[wizardMode] exited (applied=%d)", applied ? 1 : 0);
 }
@@ -892,7 +902,9 @@ static void wizardMode_onTick(void* /*ud*/) {
             // wizard takes the name from its own session instead, the same
             // detour as picking this row by number.
             sWizard.subMode = WizardSubMode::PAGE_DEVICE_NAME;
-            broadcastOutput(paintAfterTransition());
+            if (const char* prompt = paintAfterTransition())
+              broadcastOutputCore_Routed(prompt, strlen(prompt),
+                                         MSG_ROUTE_ALL | MSG_ROUTE_ALLOW_IN_HELP);
             return;
           }
           handleWizardPageInput(newButtons, nav, sWizard.result);

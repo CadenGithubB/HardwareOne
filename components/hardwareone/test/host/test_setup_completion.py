@@ -43,6 +43,7 @@ def generate() -> str:
              extract_block(header, "struct SetupWizardResult") + ";",
              extract_block(mode, "enum class WizardSubMode") + ";",
              extract_block(mode, "static struct") + " sWizard;",
+             extract_block(mode, "struct WizardRender") + ";",
              extract_block((COMPONENT / "System_CLIMode.h").read_text(), "enum CLIModeInputResult") + ";"]
     state = [re.search(r"(?m)^static volatile[^\n]*\b" + name + r"\b[^\n]*;", utils)[0]
              for name in ("sSerialWaitTimeoutMs", "sSerialWaitLastActivityMs", "sWizardCancelRequested")]

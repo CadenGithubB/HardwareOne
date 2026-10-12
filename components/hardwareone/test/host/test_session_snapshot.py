@@ -37,6 +37,13 @@ def generate(source: str) -> str:
     production = namespace + "\n" + source[begin:end]
     require(production.count("serialTransportSessionSnapshot(") == 1, "expected intact serial wrapper")
     require(production.count("localDisplayTransportSessionSnapshot(") == 1, "expected intact display wrapper")
+    # The harness stands in for gSettings with the two policy flags the helper
+    # reads; tie that stand-in to the real declarations and defaults.
+    settings = (COMPONENT / "System_Settings.h").read_text()
+    for field in ("serialRequireAuth", "localDisplayRequireAuth"):
+        require(re.search(r"\bbool\s+" + field + r";", settings) is not None,
+                f"System_Settings.h declares bool {field}")
+        require(f"{field}(true)" in settings, f"{field} defaults to true, like the stand-in")
     harness = (HERE / "session_snapshot_harness.cpp").read_text()
     for marker, value in (("// INSERT_TYPES", types), ("// INSERT_PRODUCTION", production)):
         require(harness.count(marker) == 1, f"missing insertion point {marker}")
