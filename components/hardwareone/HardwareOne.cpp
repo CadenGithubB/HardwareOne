@@ -919,13 +919,16 @@ void deliverCommandResult(const String& result, const CommandContext& ctx) {
     framed += '\n';
   }
 
-  // Final admission and delivery are one serial-session transaction. A web
-  // revocation or live auth-policy change that wins before this point drops
-  // everything; one that arrives later waits for the bounded physical write
-  // and mirror enqueue, so a result can never cross into its replacement
-  // session between a check and the actual output.
+  // Final admission is re-checked right before the physical write, after the
+  // drain wait above, but the session writer is never held across the write:
+  // it can take hundreds of milliseconds on classic-UART boards, and a
+  // higher-priority task waiting on that writer would be blocked behind it.
+  // A revocation or auth-policy change that wins before this point drops
+  // everything; one that lands during the write cannot recall bytes already
+  // on the wire, so the mirror copy re-checks afterwards and is dropped.
   if (requiresLiveSession &&
-      !serialTransportSessionBeginDelivery(ctx.transportSessionEpoch)) {
+      !transportSessionEpochIsLive(ctx.auth.transport,
+                                   ctx.transportSessionEpoch)) {
     return;
   }
 
@@ -951,14 +954,22 @@ void deliverCommandResult(const String& result, const CommandContext& ctx) {
 
   // Mirror to the remaining sinks (file/OLED/G2, plus web when masked)
   // exactly as before; the queued serial copy is replaced by the direct
-  // write above.
+  // write above. The mirror is the part still under this task's control, so
+  // it is the part that honours a session change during the write.
+  if (requiresLiveSession &&
+      !transportSessionEpochIsLive(ctx.auth.transport,
+                                   ctx.transportSessionEpoch)) {
+    DEBUG_CMD_FLOWF(
+        "[deliver] session changed during serial write; mirror dropped epoch=%lu",
+        static_cast<unsigned long>(ctx.transportSessionEpoch));
+    return;
+  }
   CommandContext mirrorCtx = ctx;
   mirrorCtx.outputMask &= ~(uint32_t)MSG_ROUTE_SERIAL;
   if (!cliModeOwnedBySession(ctx.auth.transport,
                              ctx.transportSessionEpoch)) {
     broadcastOutput(result, mirrorCtx);
   }
-  if (requiresLiveSession) serialTransportSessionEndDelivery();
 }
 
 char* gFileReadBuf = nullptr;
@@ -1327,11 +1338,13 @@ void hardwareone_setup() {
       rtcCrashCount = 0;
     } else if (reason == ESP_RST_TASK_WDT || reason == ESP_RST_INT_WDT ||
                reason == ESP_RST_PANIC   || reason == ESP_RST_BROWNOUT) {
-      // Keep ESP_RST_TASK_WDT: although CONFIG_ESP_TASK_WDT_PANIC is unset (so a
-      // TWDT trip only prints and keeps running), the TWDT hardware still arms
-      // STAGE1 = RESET_SYSTEM at 2x the timeout. That stage is dodged only
-      // because the ISR feeds the timer — if interrupts are starved for 10 s the
-      // reset is real, and it is the highest-signal reason in this list.
+      // Keep ESP_RST_TASK_WDT. OTA-layout builds set CONFIG_ESP_TASK_WDT_PANIC
+      // (config/sdkconfig.ota.defaults), so there a TWDT trip panics and reboots
+      // with this reason. The other layouts leave it unset (a trip only prints
+      // and keeps running), but the TWDT hardware still arms STAGE1 =
+      // RESET_SYSTEM at 2x the timeout. That stage is dodged only because the
+      // ISR feeds the timer — if interrupts are starved for 10 s the reset is
+      // real, and it is the highest-signal reason in this list.
       rtcCrashCount++;
     }
     rtcLastResetReason = (uint32_t)reason;
@@ -2822,11 +2835,9 @@ void hardwareone_loop() {
       if (admittedSerialAuthed && sessionIdleExpired(
               SOURCE_SERIAL,
               gSerialLastInteractionMs.load(std::memory_order_acquire))) {
-        if (serialTransportSessionClearAndBeginDelivery(
-                admittedSerialEpoch)) {
+        if (serialTransportSessionClearIfEpoch(admittedSerialEpoch)) {
           Serial.println(
               "[serial] Signed out due to inactivity. Please log in again.");
-          serialTransportSessionEndDelivery();
         }
         gSerialCLI = "";
         gSerialCLIEpoch = 0;
@@ -2880,13 +2891,24 @@ void hardwareone_loop() {
           const TransportSessionEpoch newEpoch =
               serialTransportSessionAuthenticatedIfEpoch(
                   admittedSerialEpoch, u);
-          if (newEpoch != 0 && serialTransportSessionBeginDelivery(newEpoch)) {
+          if (newEpoch != 0) {
+            // Published; the session writer is already released. The audit
+            // append, the roster read and the console write run without it,
+            // and the acknowledgement is printed only if the new incarnation
+            // is still the live one once they are done.
             recordLoginAttempt(SOURCE_SERIAL, u, serialIp, true,
                                "Login successful");
             const bool isCurrentlyAdmin = isAdminUser(u);
-            Serial.printf("[serial] Login successful. User: %s%s\n", u.c_str(),
-                          isCurrentlyAdmin ? " (admin)" : "");
-            serialTransportSessionEndDelivery();
+            String liveSerialUser;
+            bool liveSerialAuthed = false;
+            if (serialTransportSessionSnapshot(liveSerialUser,
+                                               liveSerialAuthed) == newEpoch) {
+              Serial.printf("[serial] Login successful. User: %s%s\n",
+                            u.c_str(), isCurrentlyAdmin ? " (admin)" : "");
+            } else {
+              Serial.println(
+                  "[serial] Session changed before login completed.");
+            }
           } else {
             Serial.println("[serial] Session changed before login completed.");
           }
@@ -2914,10 +2936,8 @@ void hardwareone_loop() {
           handleSerialLocalLogin();
         } else if (serialLineArgs.count() == 1 &&
                    serialLineArgs.arg(0).equalsIgnoreCase("logout")) {
-          if (serialTransportSessionClearAndBeginDelivery(
-                  admittedSerialEpoch)) {
+          if (serialTransportSessionClearIfEpoch(admittedSerialEpoch)) {
             Serial.println("Logged out.");
-            serialTransportSessionEndDelivery();
           }
         } else if (serialLineArgs.count() == 1 &&
                    serialLineArgs.arg(0).equalsIgnoreCase("whoami")) {
@@ -2928,13 +2948,19 @@ void hardwareone_loop() {
                                              liveSerialAuthed);
           const bool isCurrentlyAdmin =
               liveSerialAuthed && isAdminUser(liveSerialUser);
+          // The roster read above takes time; answer only if the admitted
+          // incarnation is still the live one afterwards. No writer is held
+          // for the check or the console write.
+          String recheckSerialUser;
+          bool recheckSerialAuthed = false;
           if (whoamiEpoch == admittedSerialEpoch &&
-              serialTransportSessionBeginDelivery(whoamiEpoch)) {
+              serialTransportSessionSnapshot(recheckSerialUser,
+                                             recheckSerialAuthed) ==
+                  whoamiEpoch) {
             Serial.printf("You are %s%s\n",
                           liveSerialAuthed && liveSerialUser.length()
                               ? liveSerialUser.c_str() : "AuthBypass",
                           isCurrentlyAdmin ? " (admin)" : "");
-            serialTransportSessionEndDelivery();
           }
         } else {
           appendCommandToFeed("serial", cmd);

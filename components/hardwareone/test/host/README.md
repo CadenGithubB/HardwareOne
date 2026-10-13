@@ -180,6 +180,146 @@ marker is cut with the prefix instead of being appended after it. Machine polls
 never reach the feed. None of these three suites touches a device, a file or the
 network.
 
+## Boot-time crash counters and the OTA crash-loop escape
+
+```sh
+python3 components/hardwareone/test/host/test_crash_record_boot.py --sanitize
+```
+
+`crash_record_boot` runs the shipping RTC layout, `crashRecordBootConsume`, the
+counter getters, `crashRecordMarkBootHealthy`, `crashRecordConsumeCrashLoopEscape`
+and `crashRecordDetail` from `System_CrashRecord.cpp`, plus the escape decision
+(`crashLoopEscapeWanted`, `restartIntoCrashLoopRecovery`, `kCrashLoopEscapeCount`)
+from `System_OTA.cpp`. RTC_NOINIT storage is process memory, so a sequence of
+`crashRecordBootConsume` calls models resets that keep RTC memory; the build id is
+settable and `esp_restart` unwinds. It checks that three brownouts leave the
+software-fault count at 0 and never escape while the full count and the
+`crashlog` text still report them, that three panic or watchdog resets reach 3
+and escape, that a mixed sequence counts only the software faults, that the
+software reset after a committed escape (an operator cancel in the updater)
+finds both counters consumed and does not escape again while a fresh three still
+does, that an unknown previous phase or a different build blocks the escape, and
+that a healthy run, a power-on reset and a cold RTC block clear both counters.
+It does not run the partition, journal or updater side of the escape, and
+touches no device.
+
+## Transport session writers
+
+```sh
+python3 components/hardwareone/test/host/test_session_snapshot.py --sanitize
+```
+
+`session_snapshot` extracts the boot-local transport-session namespace and the
+serial/display lifecycle functions from `System_User.cpp` unchanged and runs
+them against stand-ins for Arduino `String`, the critical sections and the two
+lifecycle writers. Before compiling, it checks the source contract that the
+writers are FreeRTOS mutex handles created with `xSemaphoreCreateMutexStatic`
+(priority inheritance for a higher-priority waiter such as the httpd task) and
+not `std::atomic_flag` spin loops, and that no writer window in
+`System_User.cpp` or `HardwareOne.cpp` (a Begin/End pair, or the scope of a
+`NamedSourceUseGuard`) contains console output, `displayUpdate`, the auth-log
+append, a roster read, the output-drain wait or the shared mirror broadcast.
+The harness then exercises snapshots, lazy bypass creation, a full registry,
+policy and identity changes while waiting for a held writer, the Begin/End
+delivery windows (held only for the live epoch, a contended Begin waits for
+the holder) and `serialTransportSessionClearIfEpoch`, which returns with the
+writer released. The mutex stand-in fails a take on a writer the harness
+already holds and a give without a take. It does not cover `OLED_Utils.cpp`'s
+windows, task priorities or the device. `--baseline` compares the transcript
+against a saved `System_User.cpp` that already uses the mutex writers.
+
+    ctest --test-dir <build> -R '^session_snapshot$' --output-on-failure
+
+## Shared fake VFS
+
+`fake_vfs.h` is the one in-memory filesystem double that new persistence suites
+build on instead of carrying their own File/VFS/stat/lock stand-ins. It models
+the production routing rule (`/sd` is the SD card, everything else LittleFS)
+with both roots present, directories, and a `File` handle with the Arduino
+FS/Stream/Print method names production code calls (`read`, `write`, `print`,
+`printf`, `readBytes`, `readString[Until]`, `seek`, `position`, `size`,
+`available`, `flush`, `close`, `getWriteError`, `name`, `path`, `isDirectory`,
+`openNextFile`, `rewindDirectory`, `getLastWrite`). Copies of a `File` share one
+handle and a handle dropped without `close()` closes implicitly and is counted.
+It is not a model of power loss, wear or the real allocators.
+
+Knobs live on `fake_vfs::fs()`: `policy` (directory unlink refused like LittleFS
+or allowed; rename over an existing file on LittleFS yes and on `/sd` no, each
+switchable; an optional 63-byte LittleFS name limit; whether `create=true` makes
+parents; leaf or backend-rooted `name()`), `faults` (open, mkdir, rmdir, remove
+and rename refusals by path or `"*"`, a short write after N bytes per file, the
+write-error flag, a failing flush, a `stat` errno), `capacity[]` (SD or LittleFS
+unavailable, SD read-only, totals and a `getStats` failure), `lockHeld` (the
+predicate behind the guarded-versus-unguarded seam) and `now` for modified
+times. Every operation lands in `log` with its path, mode or destination,
+result, whether a `*Guarded` forwarder was used, whether the lock was held and
+the `systemAuth` user, reason and scope; `count`, `last`, `ops`,
+`lockedCalls`/`unlockedCalls` and `guardedCalls`/`unguardedCalls` query it.
+Setup helpers (`mkdirAll`, `put`, `text`, `list`, `exists`) are not logged.
+
+A suite opts in by including the header after the `web_batch_stubs` String
+double, defining `FAKE_VFS_PROVIDE_VFS_NAMESPACE` for the production `VFS::`
+signatures as thin forwarders (`openGuarded`, `open`, `exists[Guarded]`,
+`remove[Guarded]`, `rename[Guarded]`, `replaceFileGuarded`, `mkdir[Guarded]`,
+`rmdir[Guarded]`, `isSDAvailable`, `getStats`, `normalize`, `systemAuth` and the
+rest) and `FAKE_VFS_LOCK_DOUBLE` for the semaphore double the real `FsLockGuard`
+compiles against. `FAKE_VFS_EXTERNAL_AUTH_CONTEXT` keeps the suite's extracted
+real `AuthContext`; `#define stat FakeVfsStat` around an extracted block supplies
+the POSIX stat seam for `/littlefs/...` and `/sd/...` physical paths. The header
+comment carries a usage example. The existing persistence suites keep their
+private doubles until they are migrated; no suite was changed for this.
+
+`fake_vfs` is the self-test: it exercises every knob and fault above, the lock
+seam with the real `FsLockGuard`, the SD `.bak` sequence of `replaceFileGuarded`,
+and compiles the production `writeText`/`writeTextAtomic` against the fake,
+checking that a short write, write error, flush fault, failed rename or refused
+open preserves the previous file and removes the temporary. Two further units
+compile the header bare and with the real `AuthContext`/`CommandSource`.
+
+```sh
+python3 components/hardwareone/test/host/test_fake_vfs.py --sanitize
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^fake_vfs$' --output-on-failure
+```
+
+## users.json and pending-list writers
+
+```sh
+python3 components/hardwareone/test/host/test_user_store_mutations.py --sanitize
+```
+
+`user_store_mutations` runs the shipping roster writers from `System_User.cpp`
+on the shared fake VFS (`fake_vfs.h`) with vendored ArduinoJson: ban and unban,
+promote and demote, delete, `updateUserLastSeen`, `resolvePendingUserCreationTimes`,
+`adminCreateUser` (useradd), `approvePendingUserInternal`, `denyPendingUserInternal`
+and `cmd_user_request`, together with the real `FsLockGuard`, `readText`,
+`writeTextAtomic` and `getUserSettingsPath`. Hashing (a double that never contains
+its input), sessions, events, broadcasts and the per-user settings writer are
+doubles. It checks that ban reasons holding `}` and `]` leave a file that still
+parses after that account and a later one are deleted, promoted and demoted, with
+the other records intact and the founder protected; that a role-less legacy entry
+gains its role field; that a roster above 10 KB whose early accounts wait for a
+creation time is resolved whole and written complete, and that an account past
+8 KB is resolved; that useradd writes the credential before the roster entry,
+publishes nothing on a refused credential or roster write (the credential is
+withdrawn), stores only the hash and refuses reserved names; that a roster without
+`nextId`, or with a lagging one, gives the new account an unused id and leaves
+every other settings file untouched; that approve keeps the request and publishes
+nothing when the credential or roster write fails, retires the request only after
+the account is live, reports a failed pending-list rewrite instead of hiding it
+(the account exists, a retry is refused as a duplicate), and holds the filesystem
+lock across its whole read-modify-write, so a ban that another task commits while
+approve runs (modelled with `fs.onCall`) survives; that deny and request write the
+pending list through `writeTextAtomic` under the lock; and that an allocation
+failure never publishes a truncated roster. Source-level checks then require every
+users.json writer to go through `mutateUsersJson`, both creators to go through
+`createAccount`, and the pending-list writers to hold the lock. Not covered: the
+web and CLI adapters' rank checks and messages, the ESP-NOW USER_SYNC receiver,
+and the real per-user settings writer (`settings_file_writes`). On a tree whose
+mutators still edit users.json as text the same calls build (with
+`-Wno-sign-compare` for those mutators only) and the delete case fails on the
+corrupt file. Run with
+`ctest --test-dir build -R '^user_store_mutations$' --output-on-failure`.
+
 ## Boot temporary-file cleanup
 
 `boot_temp_cleanup` executes the production startup sweep, `VFS::DirectoryReader`

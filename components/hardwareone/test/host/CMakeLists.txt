@@ -1022,6 +1022,27 @@ foreach(test_name IN ITEMS log_level_application system_log_status command_feed)
             ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
             ${SETUP_MQTT_TEST_ARGS})
 endforeach()
+# users.json and pending_users.json writers on the shared fake VFS: one locked
+# parsed-document owner, credential-first account creation, whole-file resolve.
+add_test(
+  NAME user_store_mutations
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_user_store_mutations.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Shared in-memory fake VFS (fake_vfs.h) that new persistence suites build on;
+# this self-test covers its knobs, faults, lock seam and forwarders.
+add_test(
+  NAME fake_vfs
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_fake_vfs.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Boot-time crash counters: brownouts stay out of the software-fault count the
+# OTA crash-loop escape keys on, and a committed escape consumes the counters.
+add_test(
+  NAME crash_record_boot
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_crash_record_boot.py
+          ${SETUP_MQTT_TEST_ARGS})
 add_test(
   NAME raw_allocation_inventory
   COMMAND ${Python3_EXECUTABLE}

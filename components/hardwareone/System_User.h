@@ -80,11 +80,11 @@ TransportSessionEpoch captureTransportSessionEpoch(const AuthContext& ctx);
 TransportSessionEpoch serialTransportSessionAuthenticated(const String& user);
 // Local Serial intrinsics use the epoch that owned the completed input line.
 // Login publishes only if that exact incarnation is still current; logout
-// clears it and retains the writer lock through the direct physical ACK.
+// clears it only if it is. Both return with the writer released; the caller
+// prints its console acknowledgement afterwards.
 TransportSessionEpoch serialTransportSessionAuthenticatedIfEpoch(
     TransportSessionEpoch expectedEpoch, const String& user);
-bool serialTransportSessionClearAndBeginDelivery(
-    TransportSessionEpoch expectedEpoch);
+bool serialTransportSessionClearIfEpoch(TransportSessionEpoch expectedEpoch);
 // Physical input is generation-bound even before authentication. These two
 // helpers create/read the private pre-auth incarnation used only to ensure a
 // partially typed line cannot cross a login/logout/replacement boundary.
@@ -95,9 +95,12 @@ void serialTransportSessionCleared();
 // require-auth policy changes. A named authenticated session remains valid;
 // any bypass command admitted under the previous policy generation does not.
 void serialTransportAuthPolicyChanged();
-// Linearize the final serial result write with login/logout/revocation and
-// auth-policy rotation. Begin returns with the lifecycle writer held only when
-// the exact epoch is still live; callers must pair a successful begin with end.
+// Owner-side check that the exact epoch is still live, linearized with
+// login/logout/revocation and auth-policy rotation. Begin returns with the
+// lifecycle writer (a FreeRTOS mutex) held only when it is; callers must pair
+// a successful begin with end on the same task, and must do no console,
+// display, log or users.json I/O in between: the writer is for the check or
+// publication itself, and a slow holder blocks every other session writer.
 bool serialTransportSessionBeginDelivery(TransportSessionEpoch epoch);
 void serialTransportSessionEndDelivery();
 bool localDisplayTransportSessionBeginDelivery(TransportSessionEpoch epoch);
@@ -106,7 +109,8 @@ void localDisplayTransportSessionEndDelivery();
 // display lifecycle writer held, including when the authoritative state is
 // logged out (epoch zero), and snapshots that state into the outputs. This is
 // what lets the main loop update its legacy String/UI mirror without any
-// foreign task touching OLED-owned state. Every Begin must be paired with End.
+// foreign task touching OLED-owned state. Every Begin must be paired with End,
+// and the display push itself belongs outside the window.
 TransportSessionEpoch localDisplayTransportSessionBeginUiSync(
     String& userOut, bool& authedOut);
 void localDisplayTransportSessionEndUiSync();
@@ -301,6 +305,23 @@ static constexpr size_t kPublicPasswordMinLen = 6;
 // your own"; cmd_user_add does that via userMutationAllowed().
 bool adminCreateUser(const String& username, const String& plainPassword, bool mustChangeOnLogin,
                      const String& createdBy, String& errorOut, const String& role = "user");
+
+// Account creation owner. Every path that turns a name and a stored credential
+// into a usable account (useradd, approve) calls this. It validates the name
+// with isValidPublicUsername (reserved names included), requires a non-empty
+// credential hash, and under one filesystem lock refuses a duplicate, allocates
+// an id no existing entry uses, stores the credential and publishes users.json
+// last. Nothing is published when the credential write fails. The caller
+// validates plaintext (isValidPublicPassword) and hashes it; this owner never
+// sees a plaintext password. CALLERS MUST RANK-CHECK FIRST, as for adminCreateUser.
+struct NewAccount {
+  String username;                 // trimmed and validated here
+  String passwordHash;             // hashUserPassword output, never plaintext
+  String role = "user";            // unknown values collapse to "user"
+  String createdBy;                // provenance recorded in users.json
+  bool mustChangePassword = false; // userMustChangePassword until the first change
+};
+bool createAccount(const NewAccount& account, uint32_t& idOut, String& errorOut);
 
 // Update a user's gamepad pattern password (stores hashed, separate from text password)
 bool setUserGamepadPassword(const String& username, const String& newPatternRaw);

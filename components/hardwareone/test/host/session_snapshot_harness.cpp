@@ -14,7 +14,7 @@
 void webBatchTestStringAppend() {}
 // INSERT_TYPES
 
-static unsigned checks, criticalDepth, criticalEntries, yields, notifications;
+static unsigned checks, criticalDepth, criticalEntries, waits, notifications;
 static void checkAt(bool good, int line) {
   ++checks;
   if (!good) std::fprintf(stderr, "session snapshot assertion line %d\n", line);
@@ -38,11 +38,35 @@ static size_t sessionStringCopy(char* destination, const char* source, size_t ca
   if (capacity) { std::memcpy(destination, source, std::min(length, capacity - 1)); destination[std::min(length, capacity - 1)] = '\0'; }
   return length;
 }
-static std::function<void()> yieldHook;
-static void taskYIELD() {
-  CHECK(criticalDepth == 0 && yields == 0 && static_cast<bool>(yieldHook));
-  ++yields;
-  auto hook = std::move(yieldHook); yieldHook = {}; hook();
+// FreeRTOS mutex stand-in for the lifecycle writers. A take on a held writer
+// models the blocking wait: the registered hook plays the holder and must
+// release before the take returns. The harness is one task, so a take on a
+// writer this task already holds is the self-deadlock it would be on the
+// device, and a give must match an outstanding take.
+struct StaticSemaphore_t { bool held = false; };
+using SemaphoreHandle_t = StaticSemaphore_t*;
+using TickType_t = uint32_t;
+static constexpr TickType_t portMAX_DELAY = 0xffffffffu;
+static constexpr int pdTRUE = 1;
+static SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t* storage) {
+  *storage = {}; return storage;
+}
+static std::function<void()> waitHook;
+static int xSemaphoreTake(SemaphoreHandle_t writer, TickType_t wait) {
+  CHECK(wait == portMAX_DELAY && criticalDepth == 0);
+  if (writer->held) {
+    CHECK(waits == 0 && static_cast<bool>(waitHook));
+    ++waits;
+    auto hook = std::move(waitHook); waitHook = {}; hook();
+    CHECK(!writer->held);
+  }
+  writer->held = true;
+  return pdTRUE;
+}
+static int xSemaphoreGive(SemaphoreHandle_t writer) {
+  CHECK(writer->held && criticalDepth == 0);
+  writer->held = false;
+  return pdTRUE;
 }
 static struct { bool serialRequireAuth = true, localDisplayRequireAuth = true; } gSettings;
 static bool gSerialAuthed;
@@ -62,9 +86,12 @@ static LegacySessionShadow& shadow(CommandSource source) {
   CHECK(source == SOURCE_SERIAL || source == SOURCE_LOCAL_DISPLAY);
   return source == SOURCE_SERIAL ? sSerialSession : sDisplaySession;
 }
-static std::atomic_flag& writer(CommandSource source) {
+static SemaphoreHandle_t writer(CommandSource source) {
   return source == SOURCE_SERIAL ? sSerialSessionWriter : sDisplaySessionWriter;
 }
+// Another task holding or releasing a writer, outside the production code.
+static void hold(CommandSource source) { CHECK(!writer(source)->held); writer(source)->held = true; }
+static void release(CommandSource source) { CHECK(writer(source)->held); writer(source)->held = false; }
 static bool& policy(CommandSource source) {
   return source == SOURCE_SERIAL ? gSettings.serialRequireAuth : gSettings.localDisplayRequireAuth;
 }
@@ -84,20 +111,16 @@ static size_t occupied() {
   for (const auto& slot : sTransportSessions) if (slot.epoch) ++count;
   return count;
 }
-static bool writerIsHeld(CommandSource source) {
-  const bool held = writer(source).test_and_set(std::memory_order_acquire);
-  if (!held) writer(source).clear(std::memory_order_release);
-  return held;
-}
+static bool writerIsHeld(CommandSource source) { return writer(source)->held; }
 static void reset() {
   CHECK(criticalDepth == 0);
   for (auto& slot : sTransportSessions) slot = {};
   sSerialSession = {}; sDisplaySession = {}; sTransportSessionGeneration = 0;
-  sSerialSessionWriter.clear(); sDisplaySessionWriter.clear();
+  sSerialSessionWriter->held = sDisplaySessionWriter->held = false;
   sTransportSessionMux = {}; sLegacySessionShadowMux = {};
   gSettings = {}; gSerialAuthed = true; gSerialUser = "mirror-sentinel";
   gSerialLastInteractionMs.store(371); gLocalDisplayLastInteractionMs.store(911);
-  notifications = 7; yields = criticalEntries = 0; yieldHook = {};
+  notifications = 7; waits = criticalEntries = 0; waitHook = {};
   criticalEntryHook = {};
 }
 static void unchangedSideEffects() {
@@ -109,7 +132,7 @@ static void record(const char* label, CommandSource source, const ReadResult& re
   unchangedSideEffects();
   std::cout << label << '|' << static_cast<int>(source) << '|' << result.epoch << '|'
             << result.user.c_str() << '|' << result.authed << '|' << sTransportSessionGeneration << '|'
-            << occupied() << '|' << yields << '|' << criticalEntries << '\n';
+            << occupied() << '|' << waits << '|' << criticalEntries << '\n';
 }
 static void noIdentity(const ReadResult& result, TransportSessionEpoch epoch = 0) {
   CHECK(result.epoch == epoch && result.user.length() == 0 && !result.authed);
@@ -119,13 +142,13 @@ static void namedIdentity(const ReadResult& result, TransportSessionEpoch epoch,
 }
 static void requiredAndBypass(CommandSource source) {
   reset();
-  CHECK(!writer(source).test_and_set()); // Fast path must leave an existing writer untouched.
+  hold(source); // Fast path must leave an existing writer untouched.
   auto result = read(source); noIdentity(result);
-  CHECK(writerIsHeld(source) && yields == 0 && occupied() == 0 && sTransportSessionGeneration == 0);
-  writer(source).clear(); record("required-empty", source, result);
+  CHECK(writerIsHeld(source) && waits == 0 && occupied() == 0 && sTransportSessionGeneration == 0);
+  release(source); record("required-empty", source, result);
 
   reset(); policy(source) = false; policy(otherSource(source)) = true;
-  CHECK(!writer(otherSource(source)).test_and_set()); // Prove use of this source's lock.
+  hold(otherSource(source)); // Prove use of this source's lock.
   result = read(source); noIdentity(result, 1);
   CHECK(occupied() == 1 && sTransportSessions[0].source == source);
   CHECK(!writerIsHeld(source) && writerIsHeld(otherSource(source)));
@@ -133,26 +156,26 @@ static void requiredAndBypass(CommandSource source) {
   CHECK(!transportSessionEpochIsLive(otherSource(source), result.epoch));
   auto again = read(source); noIdentity(again, result.epoch);
   CHECK(sTransportSessionGeneration == 1 && occupied() == 1);
-  writer(otherSource(source)).clear(); record("bypass-once", source, result);
+  release(otherSource(source)); record("bypass-once", source, result);
 
   // An existing bypass epoch remains visible even after policy changed. Its
   // authority is separately decided by liveness/policy-change owners.
   policy(source) = true;
-  CHECK(!writer(source).test_and_set());
+  hold(source);
   result = read(source); noIdentity(result, 1);
   CHECK(writerIsHeld(source) && !transportSessionEpochIsLive(source, result.epoch));
-  writer(source).clear(); record("bypass-now-requires-auth", source, result);
+  release(source); record("bypass-now-requires-auth", source, result);
 }
 static void existingNamed(CommandSource source) {
   for (bool requireAuth : {false, true}) {
     reset(); policy(source) = requireAuth;
     const auto epoch = transportSessionOpen(source);
     publishLegacyShadow(shadow(source), epoch, "fixture-user", true);
-    CHECK(!writer(source).test_and_set());
+    hold(source);
     const auto result = read(source); namedIdentity(result, epoch, "fixture-user");
-    CHECK(writerIsHeld(source) && yields == 0 && occupied() == 1);
+    CHECK(writerIsHeld(source) && waits == 0 && occupied() == 1);
     CHECK(transportSessionEpochIsLive(source, epoch));
-    writer(source).clear(); record(requireAuth ? "named-required" : "named-bypass", source, result);
+    release(source); record(requireAuth ? "named-required" : "named-bypass", source, result);
   }
   reset(); policy(source) = false;
   // A malformed zero-epoch shadow must never publish authed=true. A new
@@ -176,25 +199,25 @@ static void fullRegistry(CommandSource source) {
   record("registry-retry", source, result);
 }
 static void changedWhileWaiting(CommandSource source) {
-  reset(); policy(source) = false; CHECK(!writer(source).test_and_set());
-  yieldHook = [source] { policy(source) = true; writer(source).clear(std::memory_order_release); };
+  reset(); policy(source) = false; hold(source);
+  waitHook = [source] { policy(source) = true; release(source); };
   auto result = read(source); noIdentity(result);
-  CHECK(yields == 1 && occupied() == 0 && sTransportSessionGeneration == 0 && !writerIsHeld(source));
+  CHECK(waits == 1 && occupied() == 0 && sTransportSessionGeneration == 0 && !writerIsHeld(source));
   record("waiting-policy-change", source, result);
 
   for (bool named : {false, true}) {
-    reset(); policy(source) = false; CHECK(!writer(source).test_and_set());
+    reset(); policy(source) = false; hold(source);
     TransportSessionEpoch successor = 0;
-    yieldHook = [source, named, &successor] {
+    waitHook = [source, named, &successor] {
       successor = transportSessionOpen(source);
       publishLegacyShadow(shadow(source), successor, named ? "successor" : "", named);
       policy(source) = true;
-      writer(source).clear(std::memory_order_release);
+      release(source);
     };
     result = read(source);
     if (named) namedIdentity(result, successor, "successor");
     else noIdentity(result, successor);
-    CHECK(yields == 1 && occupied() == 1 && sTransportSessionGeneration == successor && !writerIsHeld(source));
+    CHECK(waits == 1 && occupied() == 1 && sTransportSessionGeneration == successor && !writerIsHeld(source));
     CHECK(transportSessionEpochIsLive(source, result.epoch) == named);
     record(named ? "waiting-named-successor" : "waiting-bypass-successor", source, result);
   }
@@ -234,13 +257,13 @@ static void serialPreAuth() {
   const auto result = read(SOURCE_SERIAL); noIdentity(result, epoch);
   CHECK(serialTransportInputEpoch() == epoch && occupied() == 1 && !writerIsHeld(SOURCE_SERIAL));
   record("serial-preauth-input", SOURCE_SERIAL, result);
-  reset(); CHECK(!sSerialSessionWriter.test_and_set());
-  yieldHook = [] {
+  reset(); hold(SOURCE_SERIAL);
+  waitHook = [] {
     const auto successor = transportSessionOpen(SOURCE_SERIAL);
     publishLegacyShadow(sSerialSession, successor, "preauth-successor", true);
-    sSerialSessionWriter.clear(std::memory_order_release);
+    release(SOURCE_SERIAL);
   };
-  CHECK(serialTransportInputEpoch() == 1 && yields == 1 && occupied() == 1);
+  CHECK(serialTransportInputEpoch() == 1 && waits == 1 && occupied() == 1);
   namedIdentity(read(SOURCE_SERIAL), 1, "preauth-successor");
   record("serial-input-successor", SOURCE_SERIAL, read(SOURCE_SERIAL));
 }
@@ -262,11 +285,55 @@ static void displayUiSync() {
   localDisplayTransportSessionEndUiSync(); CHECK(!writerIsHeld(SOURCE_LOCAL_DISPLAY));
   record("ui-sync-full-held", SOURCE_LOCAL_DISPLAY, result);
 }
+static void deliveryWindows(CommandSource source) {
+  // Begin returns with the writer held only for the live epoch; End releases
+  // it. A stale or zero epoch leaves the writer free, and a Begin against a
+  // writer another task holds waits for that holder instead of spinning.
+  reset(); policy(source) = false;
+  const auto epoch = transportSessionOpen(source);
+  publishLegacyShadow(shadow(source), epoch, "window-user", true);
+  auto begin = [source](TransportSessionEpoch candidate) {
+    return source == SOURCE_SERIAL ? serialTransportSessionBeginDelivery(candidate)
+                                   : localDisplayTransportSessionBeginDelivery(candidate);
+  };
+  auto end = [source] {
+    if (source == SOURCE_SERIAL) serialTransportSessionEndDelivery();
+    else localDisplayTransportSessionEndDelivery();
+  };
+  CHECK(begin(epoch) && writerIsHeld(source) && !writerIsHeld(otherSource(source)));
+  end(); CHECK(!writerIsHeld(source));
+  CHECK(!begin(epoch + 1) && !writerIsHeld(source));
+  CHECK(!begin(0) && !writerIsHeld(source) && waits == 0);
+  hold(source); waitHook = [source] { release(source); };
+  CHECK(begin(epoch) && waits == 1 && writerIsHeld(source));
+  end(); CHECK(!writerIsHeld(source));
+  record("delivery-window", source, read(source));
+}
+static void serialClearIfEpoch() {
+  // The serial logout helper clears only the expected incarnation and returns
+  // with the writer released; the caller prints its acknowledgement afterwards.
+  reset(); CHECK(gSettings.serialRequireAuth);
+  const auto epoch = transportSessionOpen(SOURCE_SERIAL);
+  publishLegacyShadow(sSerialSession, epoch, "clear-user", true);
+  CHECK(!serialTransportSessionClearIfEpoch(epoch + 1) && !writerIsHeld(SOURCE_SERIAL));
+  CHECK(!serialTransportSessionClearIfEpoch(0) && !writerIsHeld(SOURCE_SERIAL));
+  namedIdentity(read(SOURCE_SERIAL), epoch, "clear-user");
+  CHECK(occupied() == 1 && transportSessionEpochIsLive(SOURCE_SERIAL, epoch));
+  unchangedSideEffects();
+  CHECK(serialTransportSessionClearIfEpoch(epoch));
+  CHECK(!writerIsHeld(SOURCE_SERIAL) && occupied() == 0 && waits == 0);
+  CHECK(!transportSessionEpochIsLive(SOURCE_SERIAL, epoch));
+  CHECK(!gSerialAuthed && gSerialUser.length() == 0 && gSerialLastInteractionMs.load() == 0);
+  noIdentity(read(SOURCE_SERIAL));
+  CHECK(!serialTransportSessionClearIfEpoch(epoch) && !writerIsHeld(SOURCE_SERIAL));
+  std::cout << "serial-clear-if-epoch|" << static_cast<int>(SOURCE_SERIAL) << '|' << epoch << '|'
+            << occupied() << '|' << waits << '|' << criticalEntries << '\n';
+}
 int main() {
   for (const auto source : {SOURCE_SERIAL, SOURCE_LOCAL_DISPLAY}) {
     requiredAndBypass(source); existingNamed(source); fullRegistry(source); changedWhileWaiting(source);
-    slowPathWriterFence(source);
+    slowPathWriterFence(source); deliveryWindows(source);
   }
-  independentSources(); serialPreAuth(); displayUiSync();
+  independentSources(); serialPreAuth(); displayUiSync(); serialClearIfEpoch();
   std::cerr << "checks=" << checks << '\n';
 }
