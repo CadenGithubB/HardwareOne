@@ -1,18 +1,21 @@
 # OpenClaw integration plan
 
-Status: Wi-Fi prototype implemented, 2026-10-12. Branch:
-`codex/openclaw-integration-plan`. Baseline: `154ad982` (v0.99.95).
-The HTTP source is compiled out by default. No device has been flashed and no
-OpenClaw service or network configuration has been changed. UART remains the
-second milestone. See [prototype setup](OPENCLAW_SETUP.md) for configuration,
-verification status, and limits. The findings below describe the original
-extension points; line numbers refer to the baseline.
+Status: consolidated into `main` for the 0.99.98 development checkpoint.
+The HTTP source remains optional and off in ordinary profiles; the saved
+OpenClaw profiles enable it. XIAO HTTPS chat, continuity and New chat passed
+hardware tests on the earlier 0.99.97.4-based image. P4 local speech and the HTTP
+source are now combined in source; their end-to-end voice test remains pending.
+UART OpenClaw remains the second milestone. See [working status](OPENCLAW_WORK_STATUS.md)
+and [setup](OPENCLAW_SETUP.md) for current evidence and limits.
 
-The user's existing OpenClaw host is on a separate VLAN from the Mac mini. Keep
-the VLANs isolated. The XIAO will join password-protected `TestESPNetwork`, which
-the user confirmed is on the OpenClaw host's VLAN. Use local mocks/build checks
-until that device is configured. Do not add routing, forwarding, or a network
-bridge for this prototype.
+The findings below describe the original extension points in `154ad982`
+(v0.99.95); line numbers refer to that historical baseline. The earlier
+`codex/openclaw-integration-plan` branch is no longer the active source.
+
+The user's OpenClaw host is on a separate VLAN from the Mac mini. Keep the
+VLANs isolated. Device tests use password-protected `TestESPNetwork` on the
+OpenClaw host's VLAN and USB from the Mac mini. Do not add routing, forwarding
+or a network bridge.
 
 The user selected direct communication from the ESP device to an OpenClaw
 computer on the same Wi-Fi/LAN for the first version, then clarified that both

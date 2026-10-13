@@ -47,7 +47,20 @@ No model retraining or automatic experiment resumption is part of this merge.
 - Nine baseline STT/dictation/G2 production suites passed with ASan/UBSan.
 - Combined profile/configuration checks: 46 tests passed, retaining the 15x5
   model, local STT, speaker labels, language model, SDMMC and QuickNote.
-- Consolidated HTTP/G2 host suites and combined firmware build: in progress.
+- Nine consolidated HTTP/G2 production harness suites passed with ASan/UBSan.
+- Browser checks passed: 68 CLI and 61 LLM behavior checks; 11 unittest cases
+  with no skips. All 63 relay, setup and device-client Python tests passed.
+- Consolidated `p4-glasses-test` firmware passed: 5,469,088-byte app, leaving
+  1,956,960 bytes in the attached P4's live app slot.
+- The P4 compiler caught non-trivial-object `memset` cleanup in the HTTP
+  source. The fix uses explicit object lifetimes and secure zeroing without
+  relaxing warnings. The HTTP worker ASan/UBSan suite passed again, including
+  assertions that sensitive allocations are cleared before release.
+- Combined `p4-openclaw` firmware passed at `4ad69ace`: 5,818,608-byte app,
+  leaving 1,607,440 bytes in the live app slot. Its 2,849 SDK values match the
+  speech-only build; the only feature differences enable the LLM backend and
+  HTTP source. Firmware SHA-256:
+  `c5845d6300bf37659a43bff9ae3e5180a9481d663fb43e5b2f837aaf5e95c573`.
 
 Earlier XIAO hardware tests passed HTTPS chat, conversation continuity and New
 chat. Earlier P4 hardware tests qualified the current local STT/G2 baseline.

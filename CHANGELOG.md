@@ -40,6 +40,11 @@ Ongoing fixes in the separate review worktree are not included.
   HTTP and speaker-label sources. SDK patches and optimized STT kernels remain
   under their existing owners.
 
+### Fixed
+- HTTP request and configuration cleanup uses explicit object lifetimes and
+  secure memory clearing, retaining credential wiping with the P4 compiler's
+  strict class-memory checks.
+
 ### Verification scope
 - Earlier XIAO hardware tests passed verified HTTPS chat to Mingus, a second
   turn recalling conversation context, and a fresh conversation after Clear.
