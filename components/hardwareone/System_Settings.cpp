@@ -1210,9 +1210,9 @@ static constexpr DebugFlagMapping kDebugMappings[] = {
 #undef DBG_MAP_ROW_0
 static constexpr size_t kDebugMappingCount = sizeof(kDebugMappings) / sizeof(kDebugMappings[0]);
 
-// 128 = 127 settings-bearing flag rows + 1 extra; the ALWAYS control row
+// 127 = 126 settings-bearing flag rows + 1 extra; the ALWAYS control row
 // contributes nothing. Row-for-row the hand table this replaces.
-static_assert(kDebugMappingCount == 128,
+static_assert(kDebugMappingCount == 127,
               "settings→flag map row count changed — reconcile the settingsField column and DBG_FLAG_EXTRA_SETTINGS");
 
 // Two rows mapping one Settings field means a transposed settingsField
