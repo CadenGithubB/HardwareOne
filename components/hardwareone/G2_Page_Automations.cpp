@@ -2,10 +2,10 @@
 // G2 glasses — "Automations" App page implementation
 // =============================================================================
 // See header for the contract. Lists the device's saved automations and lets
-// the wearer Run / Enable / Disable each one. Automations have no in-RAM
-// struct carrying names (the scheduler cache holds only id/nextAt/enabled), so
-// we re-read + parse /system/automations.json on each list render — the same
-// approach rebuildAutomationsCache() uses. Capped at G2_AUTO_MAX rows.
+// the wearer Run / Enable / Disable each one. Rows and the trigger text come
+// from the automation owner's summary copies (automationCopySummaries /
+// automationFindSummary), capped at G2_AUTO_MAX rows. The page keeps the ids
+// of the rows the lens shows, so a tap opens the automation it showed.
 //
 // Action taps route through g2SubmitHijackCommand (cmd_exec_task, glasses
 // auth). The completion callback marshals a re-render back onto the lens
@@ -19,15 +19,10 @@
 #include <Arduino.h>
 #include "G2_Glasses.h"        // g2ShowListPage / g2ShowTextAsList / g2Set/GetHijackPage
 #include "G2_HijackCmd.h"      // G2CmdCookie / g2SubmitHijackCommand / redraw plumbing
-#include "System_Utils.h"      // readText
-#include "System_MemUtil.h"    // PSRAM_JSON_DOC
+#include "G2_Page_Common.h"    // g2ShowListPageAndPublish
+#include "System_Automation.h" // AutomationSummary / automationCopySummaries / automationFindSummary
+#include "System_MemUtil.h"    // ps_alloc for the list copy
 #include "System_Debug.h"      // DEBUG_G2F / BROADCAST_PRINTF
-#include <ArduinoJson.h>
-
-// The automations JSON path is a global defined in the app globals (same
-// extern System_Automation.cpp uses). Declared here rather than pulled from a
-// header because it isn't exported by System_Automation.h.
-extern const char* AUTOMATIONS_JSON_FILE;  // "/system/automations.json"
 
 // g2ShowAppsMenu is a non-static definition in G2_Glasses.cpp (exposed so the
 // Apps sub-pages can return to the launcher). Forward-declared here rather
@@ -41,17 +36,18 @@ enum AutoSub : uint8_t { AUTO_SUB_LIST = 0, AUTO_SUB_DETAIL = 1 };
 static AutoSub gSub = AUTO_SUB_LIST;
 
 #define G2_AUTO_MAX 16
-// trig = human trigger summary built at load ("on peer_online" / "every 5m" /
-// "daily 07:30" / "delay 10s" / "boot"), so the DETAIL view can show WHAT
-// fires the automation — the event subsystem tie-in the page lacked.
-struct G2AutoRow { long id; bool enabled; char name[28]; char trig[34]; };
-static long gSelectedAutoId = -1;   // stable id while in DETAIL
+// Ids of the automation rows the lens shows (LIST row r+1 = gListIds[r]),
+// published with those rows.
+EXT_RAM_BSS_ATTR static long gListIds[G2_AUTO_MAX];
+static size_t gListCount = 0;
+static long gSelectedAutoId = -1;    // stable id while in DETAIL (set with it)
+static bool gSelectedEnabled = false; // DETAIL shows "Disable" when true
 
 // Last Run result text, shown on the lens by showRunResult().
 EXT_RAM_BSS_ATTR static char gRunResult[96];
 
 static void showListMenu();
-static void showDetailMenu();
+static void showDetailMenu(long id);
 static void showRunResult();
 
 static inline void setSub(AutoSub s) {
@@ -68,148 +64,85 @@ static G2CmdCookie buildCookie() {
 }
 
 // -----------------------------------------------------------------------------
-// Read automation JSON on demand. The G2 list page deep-copies row text into
-// its page-swap job, so this page does not need to keep a persistent row cache.
-// -----------------------------------------------------------------------------
-static void fillRowFromJson(JsonObjectConst a, G2AutoRow& r) {
-  r.id      = a["id"].as<long>();
-  r.enabled = a["enabled"] | false;
-  const char* nm = a["name"] | "";
-  if (nm[0] == '\0') snprintf(r.name, sizeof(r.name), "#%ld", r.id);
-  else { strncpy(r.name, nm, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = '\0'; }
-
-  // Trigger summary from the primary trigger (Phase 1 = one primary; extra
-  // triggers show as "+N"). Event triggers carry the SYSEVT kind in "on".
-  r.trig[0] = '\0';
-  JsonArrayConst trigs = a["triggers"].as<JsonArrayConst>();
-  if (!trigs.isNull() && trigs.size() > 0) {
-    JsonObjectConst t = trigs[0].as<JsonObjectConst>();
-    const char* tt = t["type"] | "";
-    if (strcmp(tt, "event") == 0) {
-      snprintf(r.trig, sizeof(r.trig), "on %s", (const char*)(t["on"] | "?"));
-    } else if (strcmp(tt, "interval") == 0) {
-      long ms = t["intervalMs"] | 0L;
-      if (ms >= 3600000)      snprintf(r.trig, sizeof(r.trig), "every %ldh", ms / 3600000);
-      else if (ms >= 60000)   snprintf(r.trig, sizeof(r.trig), "every %ldm", ms / 60000);
-      else                    snprintf(r.trig, sizeof(r.trig), "every %lds", ms / 1000);
-    } else if (strcmp(tt, "time") == 0 || strcmp(tt, "atTime") == 0) {
-      snprintf(r.trig, sizeof(r.trig), "daily %s", (const char*)(t["time"] | "?"));
-    } else if (strcmp(tt, "afterDelay") == 0 || strcmp(tt, "manual") == 0) {
-      long ms = t["delayMs"] | 0L;
-      if (ms >= 60000) snprintf(r.trig, sizeof(r.trig), "delay %ldm", ms / 60000);
-      else             snprintf(r.trig, sizeof(r.trig), "delay %lds", ms / 1000);
-    } else if (tt[0]) {
-      strncpy(r.trig, tt, sizeof(r.trig) - 1);
-      r.trig[sizeof(r.trig) - 1] = '\0';
-    }
-    if (trigs.size() > 1 && r.trig[0]) {
-      size_t len = strlen(r.trig);
-      snprintf(r.trig + len, sizeof(r.trig) - len, " +%u", (unsigned)(trigs.size() - 1));
-    }
-  }
-}
-
-static bool loadAutomationById(long id, G2AutoRow& out) {
-  String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) return false;
-  PSRAM_JSON_DOC(doc);
-  if (deserializeJson(doc, json)) return false;
-  JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
-  if (autos.isNull()) return false;
-  for (JsonObjectConst a : autos) {
-    if (a["id"].as<long>() == id) {
-      fillRowFromJson(a, out);
-      return true;
-    }
-  }
-  return false;
-}
-
-static bool loadAutomationByVisibleIndex(size_t wantIdx, G2AutoRow& out) {
-  String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) return false;
-  PSRAM_JSON_DOC(doc);
-  if (deserializeJson(doc, json)) return false;
-  JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
-  if (autos.isNull()) return false;
-  size_t shown = 0;
-  for (JsonObjectConst a : autos) {
-    if (shown >= G2_AUTO_MAX) break;
-    if (shown == wantIdx) {
-      fillRowFromJson(a, out);
-      return true;
-    }
-    shown++;
-  }
-  return false;
-}
-
-// -----------------------------------------------------------------------------
 // Renderers
 // -----------------------------------------------------------------------------
-// One row per automation with an on/off badge. Re-reads the JSON each time so
-// the badges reflect current state (e.g. after a toggle round-trips).
+// One row per automation with an on/off badge, from a fresh owner copy each
+// time so the badges reflect current state (e.g. after a toggle round-trips).
+// LIST is the page's entry level, so once the lens accepted the rows its
+// publish also claims the AUTOMATIONS hijack page (a no-op when already
+// there) and records the ids behind the rows.
 static void showListMenu() {
-  setSub(AUTO_SUB_LIST);
-  gSelectedAutoId = -1;
-
   char rows[1 + G2_AUTO_MAX][40];
   const char* ptrs[1 + G2_AUTO_MAX];
+  long ids[G2_AUTO_MAX] = {};
   strcpy(rows[0], "<- Apps");
   ptrs[0] = rows[0];
   size_t n = 1;
 
-  String json;
-  if (readText(AUTOMATIONS_JSON_FILE, json)) {
-    PSRAM_JSON_DOC(doc);
-    if (!deserializeJson(doc, json)) {
-      JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
-      if (!autos.isNull()) {
-        for (JsonObjectConst a : autos) {
-          if ((n - 1) >= G2_AUTO_MAX) break;
-          G2AutoRow r;
-          fillRowFromJson(a, r);
-          snprintf(rows[n], sizeof(rows[n]), "%s %s",
-                   r.enabled ? "[on] " : "[off]", r.name);
-          ptrs[n] = rows[n];
-          n++;
-        }
-      }
+  // 16 summaries are ~1.3 KB: a transient PSRAM copy, released before the render.
+  AutomationSummary* list = (AutomationSummary*)ps_alloc(
+      G2_AUTO_MAX * sizeof(AutomationSummary), AllocPref::PreferPSRAM, "g2.autolist");
+  size_t count = 0;
+  if (list && automationCopySummaries(list, G2_AUTO_MAX, &count)) {
+    for (size_t i = 0; i < count; i++) {
+      snprintf(rows[n], sizeof(rows[n]), "%s %s",
+               list[i].enabled ? "[on] " : "[off]", list[i].name);
+      ptrs[n] = rows[n];
+      ids[i] = list[i].id;
+      n++;
     }
   }
+  if (list) ps_free(list);
 
-  if (n == 1) {
-    const char* empty[] = { "<- Apps", "(no automations)" };
-    g2ShowListPage(empty, 2);
-  } else {
-    g2ShowListPage(ptrs, n);
+  const size_t shown = n - 1;
+  static const char* const kEmpty[] = { "<- Apps", "(no automations)" };
+  const bool empty = (shown == 0);
+  if (!g2ShowListPageAndPublish(empty ? kEmpty : ptrs, empty ? 2 : n, [&] {
+        setSub(AUTO_SUB_LIST);
+        gSelectedAutoId = -1;
+        memcpy(gListIds, ids, shown * sizeof(ids[0]));
+        gListCount = shown;
+        g2SetHijackPage(G2_HIJACK_PAGE_AUTOMATIONS);
+      })) {
+    DEBUG_G2F("[G2-AUTO] list not shown");
+    return;
   }
-  DEBUG_G2F("[G2-AUTO] list shown (%u automations)", (unsigned)(n - 1));
+  DEBUG_G2F("[G2-AUTO] list shown (%u automations)", (unsigned)shown);
 }
 
-// Actions for the selected automation. Back row is labelled with the name so
-// the user keeps context on which automation they drilled into.
-static void showDetailMenu() {
-  G2AutoRow r;
-  if (gSelectedAutoId < 0 || !loadAutomationById(gSelectedAutoId, r)) {
+// Actions for automation `id`. Back row is labelled with the name so the user
+// keeps context on which automation they drilled into. DETAIL and the selected
+// id become live only once the lens accepted these rows.
+static void showDetailMenu(long id) {
+  AutomationSummary r;
+  if (id < 0 || !automationFindSummary(id, &r)) {
     showListMenu();
     return;
   }
-  setSub(AUTO_SUB_DETAIL);
   char backRow[40];
   snprintf(backRow, sizeof(backRow), "<- %.28s", r.name);
-  // Inert trigger row: WHAT fires this automation ("on peer_online",
-  // "every 5m", "daily 07:30", ...). Tap is a no-op (detailHandleTap
-  // ignores idx 1) — it's information, not an action.
+  // Inert trigger row: WHAT fires this automation, in the owner's words
+  // ("on peer_online", "every 5m", "monthly 15 07:30", ...). Tap is a no-op
+  // (detailHandleTap ignores idx 1) — it's information, not an action.
   char trigRow[40];
-  snprintf(trigRow, sizeof(trigRow), "%.36s", r.trig[0] ? r.trig : "(no trigger)");
+  snprintf(trigRow, sizeof(trigRow), "%.36s", r.trigger[0] ? r.trigger : "(no trigger)");
   const char* items[] = {
     backRow,                            // 0 — back to list
     trigRow,                            // 1 — inert trigger summary
     "Run now",                          // 2
     r.enabled ? "Disable" : "Enable",   // 3
   };
-  g2ShowListPage(items, 4);
+  const bool enabled = r.enabled;
+  g2ShowListPageAndPublish(items, 4, [id, enabled] {
+    setSub(AUTO_SUB_DETAIL);
+    gSelectedAutoId = id;
+    gSelectedEnabled = enabled;
+  });
+}
+
+// Completion redraw: refresh the detail of the automation selected now.
+static void redrawDetailMenu() {
+  showDetailMenu(gSelectedAutoId);
 }
 
 // Dump the OK/Error text from a Run onto the lens. g2ShowTextAsList flips the
@@ -225,7 +158,7 @@ static void showRunResult() {
 static void autoToggleDone(bool ok, const char* /*result*/,
                            const G2CmdCookie& c, void* /*ud*/) {
   (void)ok;
-  (void)g2EnqueueRedraw(c, showDetailMenu, "Automation toggle");
+  (void)g2EnqueueRedraw(c, redrawDetailMenu, "Automation toggle");
 }
 
 static void autoRunDone(bool ok, const char* result,
@@ -241,16 +174,15 @@ static void autoRunDone(bool ok, const char* result,
 static void listHandleTap(uint32_t idx) {
   if (idx == 0) { g2ShowAppsMenu(); return; }   // <- Apps
   const size_t sel = idx - 1;
-  G2AutoRow r;
-  if (!loadAutomationByVisibleIndex(sel, r)) return;
-  gSelectedAutoId = r.id;
-  showDetailMenu();
+  if (sel >= gListCount) return;                // "(no automations)"
+  showDetailMenu(gListIds[sel]);
 }
 
+// Acts on the automation and state DETAIL showed; the owner answers with an
+// error if it was deleted meanwhile (a toggle redraw then returns to LIST).
 static void detailHandleTap(uint32_t idx) {
   if (idx == 0) { showListMenu(); return; }
-  G2AutoRow r;
-  if (gSelectedAutoId < 0 || !loadAutomationById(gSelectedAutoId, r)) {
+  if (gSelectedAutoId < 0) {
     showListMenu();
     return;
   }
@@ -258,14 +190,15 @@ static void detailHandleTap(uint32_t idx) {
   G2CmdCookie cookie = buildCookie();
   if (idx == 1) return;                   // inert trigger-summary row
   if (idx == 2) {                         // Run now
-    snprintf(line, sizeof(line), "automation run id=%ld", r.id);
+    snprintf(line, sizeof(line), "automation run id=%ld", gSelectedAutoId);
     if (!g2SubmitHijackCommand(line, cookie, autoRunDone, nullptr))
       DEBUG_G2F("[G2-AUTO] run submit failed (queue full)");
     return;
   }
-  if (idx == 3) {                         // Enable / Disable
-    const bool target = !r.enabled;
-    snprintf(line, sizeof(line), "automation %s id=%ld", target ? "enable" : "disable", r.id);
+  if (idx == 3) {                         // Enable / Disable, as the row reads
+    const bool target = !gSelectedEnabled;
+    snprintf(line, sizeof(line), "automation %s id=%ld", target ? "enable" : "disable",
+             gSelectedAutoId);
     if (!g2SubmitHijackCommand(line, cookie, autoToggleDone, nullptr))
       DEBUG_G2F("[G2-AUTO] toggle submit failed (queue full)");
     return;
@@ -281,9 +214,7 @@ void g2AutomationsHandleTap(uint32_t idx) {
 // Entry + registry stub
 // -----------------------------------------------------------------------------
 void g2ShowAutomationsMenu() {
-  gSub = AUTO_SUB_LIST;
-  showListMenu();
-  g2SetHijackPage(G2_HIJACK_PAGE_AUTOMATIONS);
+  showListMenu();   // claims the AUTOMATIONS page only if the lens shows it
 }
 
 void g2BuildAutomationsInfo(char* out, size_t cap) {

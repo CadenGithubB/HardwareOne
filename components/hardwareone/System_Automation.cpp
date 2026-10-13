@@ -537,110 +537,6 @@ static int findJsonObjectEnd(const String& json, int objStart) {
   return -1;
 }
 
-// Streaming automation parser: reads file in chunks and calls callback for each automation object
-bool streamParseAutomations(const char* path, AutomationCallback callback, void* userData) {
-  FsLockGuard guard("streamParseAutos");
-  File f = VFS::openGuarded(path, "r", VFS::systemAuth("auto.stream_parse"));
-  if (!f) return false;
-
-  // Read file in chunks, looking for automation objects
-  const size_t kChunkSize = 512;
-  static char* readBuf = nullptr;
-  if (!readBuf) {
-    readBuf = (char*)ps_alloc(kChunkSize, AllocPref::PreferPSRAM, "auto.stream.read");
-    if (!readBuf) {
-      f.close();
-      return false;
-    }
-  }
-
-  // Buffer to accumulate current automation object
-  static char* objBuf = nullptr;
-  static const size_t kObjBufSize = 4096;  // Max size for one automation object
-  if (!objBuf) {
-    objBuf = (char*)ps_alloc(kObjBufSize, AllocPref::PreferPSRAM, "auto.stream.obj");
-    if (!objBuf) {
-      f.close();
-      return false;
-    }
-  }
-
-  size_t objLen = 0;
-  int braceDepth = 0;
-  bool inString = false;
-  bool inArray = false;  // Track if we're inside "automations" array
-  bool foundArray = false;
-  char prevChar = 0;
-
-  while (f.available()) {
-    size_t n = f.readBytes(readBuf, kChunkSize);
-    if (n == 0) break;
-
-    for (size_t i = 0; i < n; ++i) {
-      char c = readBuf[i];
-
-      // Track string boundaries (ignore escaped quotes)
-      if (c == '"' && prevChar != '\\') {
-        inString = !inString;
-      }
-
-      // Only process structure outside of strings
-      if (!inString) {
-        // Look for "automations" array start
-        if (!foundArray && c == '[') {
-          inArray = true;
-          foundArray = true;
-          prevChar = c;
-          continue;
-        }
-
-        if (inArray) {
-          if (c == '{') {
-            braceDepth++;
-            if (braceDepth == 1) {
-              // Start of new automation object
-              objLen = 0;
-            }
-          } else if (c == '}') {
-            if (objLen < kObjBufSize - 1) objBuf[objLen++] = c;
-            braceDepth--;
-            if (braceDepth == 0 && objLen > 0) {
-              // Complete automation object extracted
-              objBuf[objLen] = '\0';
-
-              // Call callback with this automation
-              bool continueProcessing = callback(objBuf, objLen, userData);
-              if (!continueProcessing) {
-                f.close();
-                return true;  // Early exit requested by callback
-              }
-
-              objLen = 0;
-            }
-            prevChar = c;
-            continue;
-          } else if (c == ']' && braceDepth == 0) {
-            // End of automations array
-            inArray = false;
-            break;
-          }
-        }
-      }
-
-      // Accumulate characters for current object
-      if (inArray && braceDepth > 0 && objLen < kObjBufSize - 1) {
-        objBuf[objLen++] = c;
-      }
-
-      prevChar = c;
-    }
-
-    if (!inArray && foundArray) break;  // Finished processing automations array
-  }
-
-  f.close();
-  return true;
-}
 // Helper: Find automation array bounds in JSON
 void findAutomationsArrayBounds(const String& json, int& arrStart, int& arrEnd) {
   arrStart = -1;
@@ -2649,6 +2545,172 @@ static int triggersFromJson(const char* automationJson, Trigger* out, int maxCou
     }
   }
   return n;
+}
+
+// ---------------------------------------------------------------------------
+// List summaries for the OLED and G2 pages
+// ---------------------------------------------------------------------------
+// Pages receive copies built here from parseOneTrigger, so a page describes a
+// trigger the way the scheduler runs it and never reads automations.json.
+
+// Largest whole unit: 7200000 -> "2h", 5400000 -> "90m", 45000 -> "45s".
+static void formatSummaryDuration(char* out, size_t cap, uint32_t ms) {
+  if (ms >= 3600000UL && ms % 3600000UL == 0) {
+    snprintf(out, cap, "%luh", (unsigned long)(ms / 3600000UL));
+  } else if (ms >= 60000UL && ms % 60000UL == 0) {
+    snprintf(out, cap, "%lum", (unsigned long)(ms / 60000UL));
+  } else {
+    snprintf(out, cap, "%lus", (unsigned long)(ms / 1000UL));
+  }
+}
+
+static AutomationTriggerKind summaryKind(Trigger::Type type) {
+  switch (type) {
+    case Trigger::TIME:     return AutomationTriggerKind::Time;
+    case Trigger::MONTHLY:  return AutomationTriggerKind::Monthly;
+    case Trigger::YEARLY:   return AutomationTriggerKind::Yearly;
+    case Trigger::INTERVAL: return AutomationTriggerKind::Interval;
+    case Trigger::MANUAL:   return AutomationTriggerKind::Manual;
+    case Trigger::BOOT:     return AutomationTriggerKind::Boot;
+    case Trigger::EVENT:    return AutomationTriggerKind::Event;
+    default:                return AutomationTriggerKind::Invalid;
+  }
+}
+
+// Text for one parsed trigger: "daily 07:30", "weekly 08:00 MoWe",
+// "every 2w 07:30 Fr", "monthly 15 07:30", "yearly Mar 9 06:05", "every 5m",
+// "delay 10s", "boot", "boot +5s", "on <event>". The time comes before the day
+// list so narrow displays that cut the text keep it.
+static void formatTriggerSummary(const Trigger& t, char* out, size_t cap) {
+  static const char* const kDayCodes[7] = { "Su", "Mo", "Tu", "We", "Th", "Fr", "Sa" };
+  static const char* const kMonths[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+  char part[16];
+  switch (t.type) {
+    case Trigger::TIME: {
+      // Monday-first day codes; no days or all seven is every day.
+      char days[16] = "";
+      const uint8_t mask = t.daysMask & 0x7F;
+      if (mask != 0x7F) {
+        size_t n = 0;
+        for (int i = 1; i <= 7; i++) {
+          const int d = i % 7;
+          if (mask & (1u << d)) {
+            days[n++] = kDayCodes[d][0];
+            days[n++] = kDayCodes[d][1];
+          }
+        }
+        days[n] = '\0';
+      }
+      if (t.weekInterval > 1) {
+        snprintf(out, cap, "every %uw %02d:%02d%s%s", (unsigned)t.weekInterval,
+                 t.hour, t.minute, days[0] ? " " : "", days);
+      } else if (days[0]) {
+        snprintf(out, cap, "weekly %02d:%02d %s", t.hour, t.minute, days);
+      } else {
+        snprintf(out, cap, "daily %02d:%02d", t.hour, t.minute);
+      }
+      return;
+    }
+    case Trigger::MONTHLY:
+      snprintf(out, cap, "monthly %d %02d:%02d", t.dayOfMonth, t.hour, t.minute);
+      return;
+    case Trigger::YEARLY:
+      snprintf(out, cap, "yearly %s %d %02d:%02d", kMonths[t.monthOfYear - 1],
+               t.dayOfMonth, t.hour, t.minute);
+      return;
+    case Trigger::INTERVAL:
+      formatSummaryDuration(part, sizeof(part), t.intervalMs);
+      snprintf(out, cap, "every %s", part);
+      return;
+    case Trigger::MANUAL:
+      formatSummaryDuration(part, sizeof(part), t.delayMs);
+      snprintf(out, cap, "delay %s", part);
+      return;
+    case Trigger::BOOT:
+      if (t.bootDelayMs == 0) {
+        snprintf(out, cap, "boot");
+        return;
+      }
+      formatSummaryDuration(part, sizeof(part), t.bootDelayMs);
+      snprintf(out, cap, "boot +%s", part);
+      return;
+    case Trigger::EVENT:
+      snprintf(out, cap, "on %s", t.evtKind ? systemEventKindName(t.evtKind) : "unknown event");
+      return;
+    default:
+      snprintf(out, cap, "invalid trigger");
+      return;
+  }
+}
+
+static void fillAutomationSummary(JsonObjectConst a, AutomationSummary& out) {
+  memset(&out, 0, sizeof(out));
+  out.id = a["id"].as<long>();
+  out.enabled = a["enabled"] | false;
+  const char* name = a["name"] | "";
+  if (name[0]) snprintf(out.name, sizeof(out.name), "%s", name);
+  else snprintf(out.name, sizeof(out.name), "Auto #%ld", out.id);
+  const size_t commands = a["commands"].as<JsonArrayConst>().size();
+  out.commandCount = (uint16_t)(commands > 0xFFFF ? 0xFFFF : commands);
+  JsonArrayConst triggers = a["triggers"].as<JsonArrayConst>();
+  const size_t triggerCount = triggers.size();
+  out.triggerCount = (uint8_t)(triggerCount > 0xFF ? 0xFF : triggerCount);
+  if (triggerCount == 0) {
+    out.kind = AutomationTriggerKind::None;
+    return;
+  }
+  // The first trigger the scheduler accepts, in triggersFromJson's order.
+  Trigger primary;
+  bool parsed = false;
+  for (JsonVariantConst t : triggers) {
+    if (parseOneTrigger(t, primary)) {
+      parsed = true;
+      break;
+    }
+  }
+  if (parsed) {
+    out.kind = summaryKind(primary.type);
+    formatTriggerSummary(primary, out.trigger, sizeof(out.trigger));
+  } else {
+    out.kind = AutomationTriggerKind::Invalid;
+    snprintf(out.trigger, sizeof(out.trigger), "invalid trigger");
+  }
+  if (triggerCount > 1) {
+    const size_t len = strlen(out.trigger);
+    snprintf(out.trigger + len, sizeof(out.trigger) - len, " +%u", (unsigned)(triggerCount - 1));
+  }
+}
+
+bool automationCopySummaries(AutomationSummary* out, size_t maxCount, size_t* count) {
+  if (count) *count = 0;
+  String json;
+  if (!readText(AUTOMATIONS_JSON_FILE, json)) return false;
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, json)) return false;
+  JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
+  size_t n = 0;
+  for (JsonObjectConst a : autos) {
+    if (!out || n >= maxCount) break;
+    fillAutomationSummary(a, out[n++]);
+  }
+  if (count) *count = n;
+  return true;
+}
+
+bool automationFindSummary(long id, AutomationSummary* out) {
+  if (!out) return false;
+  String json;
+  if (!readText(AUTOMATIONS_JSON_FILE, json)) return false;
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, json)) return false;
+  JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
+  for (JsonObjectConst a : autos) {
+    if (a["id"].as<long>() != id) continue;
+    fillAutomationSummary(a, *out);
+    return true;
+  }
+  return false;
 }
 
 // Compute the next firing time at or after `from`, or 0 if there is none.

@@ -547,6 +547,72 @@ static void test_keep_warm() {
   CHECK(warmCalls == 0, "no warm-up without the paired wearer's session");
 }
 
+// A listing reply that also names the tier listed and whether a card is in.
+static std::string tiered(const std::string& reply, const char* tier, bool card) {
+  return reply.substr(0, reply.size() - 1) + ",\"tier\":\"" + tier + "\",\"sdAvailable\":" +
+         (card ? "true" : "false") + "}";
+}
+
+static void test_tier_row() {
+  // No card: only the tier a save uses now, as ever.
+  clearAll(); g2ShowNotesMenu(); drainUi(); tick(); answer(kIdle); tick(1);
+  CHECK(front() == "note list 0", "a show lists the tier a save uses now");
+  answer(tiered(listing(2), "internal", false)); tick(1);
+  CHECK(menu.size() == 4, "no card: no tier row");
+  // A card is in, so saves go there; notes saved while there was none are on
+  // flash. The last row lists the other tier.
+  clearAll(); g2ShowNotesMenu(); drainUi(); tick(); answer(kIdle); tick(1);
+  answer(tiered(listing(2), "sd", true)); tick(1);
+  CHECK(menu.size() == 5 && menu[4] == "Card notes · tap for flash",
+        "with a card in, the list offers the other tier (notes saved to flash stay reachable)");
+  g2NotesHandleTap(4); tick(1);
+  CHECK(front() == "note list internal 0", "the row lists flash from its newest note");
+  CHECK(menu.size() == 3 && menu[2] == "Flash notes · tap for card", "the card's rows go at once");
+  answer(tiered(listing(8, true), "internal", true)); tick(1);
+  CHECK(menu.size() == 10 && menu[2] == "10:30 Note number 1" && menu[8] == "More…" &&
+        menu[9] == "Flash notes · tap for card", "flash notes listed, the tier row last");
+  g2NotesHandleTap(8); tick(1);
+  CHECK(front() == "note list internal 6", "More… pages the same tier");
+  answer(tiered(listing(1, false, 6), "internal", true)); tick(1);
+  CHECK(menu.size() == 5 && menu[3] == "More…" && menu[4] == "Flash notes · tap for card", "its last page");
+  // Back to the card; a reply for the tier left behind never lands.
+  g2NotesHandleTap(4); tick(1);
+  CHECK(front() == "note list sd 0", "the row lists the card again");
+  g2NotesHandleTap(2); tick(1);
+  CHECK(menu.size() == 3 && menu[2] == "Flash notes · tap for card", "a second tap turns back at once");
+  answer(tiered(listing(3), "sd", true)); tick(1);
+  CHECK(front() == "note list internal 0" && menu.size() == 3, "the card's late reply is dropped");
+  answer(tiered(listing(2), "internal", true)); tick(1);
+  CHECK(menu.size() == 5 && menu[4] == "Flash notes · tap for card", "flash listed");
+  // The card was pulled: the page says so, and the row leads back.
+  g2NotesHandleTap(4); tick(1);
+  CHECK(front() == "note list sd 0", "card again");
+  answer("{\"success\":false,\"error\":\"No SD card\",\"transcriptPath\":true}"); tick(1);
+  CHECK(displayedHead == "No SD card" && menu.size() == 3 && menu[2] == "Card notes · tap for flash",
+        "a missing card says so");
+  g2NotesHandleTap(2); tick(1);
+  CHECK(front() == "note list internal 0", "and the row lists flash");
+  answer(tiered(listing(2), "internal", true)); tick(1);
+  // A note that ends lists where saves go now: the new note is there.
+  g2NotesHandleTap(1); tick(1);
+  CHECK(front() == "note start", "a lens note");
+  answer(live(false, true, 200)); tick(1);
+  g2NotesHandleTap(1); tick(1);
+  CHECK(front() == std::string("note stop ") + kId, "stopped");
+  answer(ended("saved", "", 3)); tick(1);
+  answer("{\"success\":true,\"sttText\":\"HardwareOne note v1\\n\\nhi\",\"offset\":0,\"eof\":true}"); tick(1);
+  CHECK(front() == "note list 0", "a saved note lists the tier saves use now");
+  answer(tiered(listing(2), "sd", true)); tick(1);
+  CHECK(menu.size() == 5 && menu[4] == "Card notes · tap for flash", "the card, offering flash");
+  // A new show starts there too.
+  g2NotesHandleTap(4); tick(1); answer(tiered(listing(2), "internal", true)); tick(1);
+  g2ShowNotesMenu(); drainUi(); tick(1);
+  CHECK(front() == "note status", "a show asks for the live note");
+  answer(kIdle); tick(1);
+  CHECK(front() == "note list 0", "then lists the tier a save uses now");
+  answer(tiered(listing(2), "sd", true)); tick(1);
+}
+
 static void test_tap_not_swallowed_and_privacy() {
   // A tap on New note while a listing is in flight still starts the note.
   clearAll();
@@ -600,6 +666,7 @@ int main() {
   test_note_view_reader_delete();
   test_tap_not_swallowed_and_privacy();
   test_keep_warm();
+  test_tier_row();
   clearAll();
   CHECK(criticalDepth == 0, "stateMux always released");
   if (failures) {

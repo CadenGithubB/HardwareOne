@@ -287,14 +287,14 @@ inline size_t noteFileName(const char* created, uint64_t id, bool tmp, char* out
   if (n <= 0 || static_cast<size_t>(n) >= cap) { out[0] = '\0'; return 0; }
   return static_cast<size_t>(n);
 }
-// Accepts only a name noteFileName(…, false, …) writes. `created` (optional)
-// needs kStampMax + 1 bytes.
-inline bool noteFileNameParse(const char* name, char* created, uint64_t* id) {
+// Accepts only a name noteFileName(…, tmp, …) writes: a note, or with `tmp`
+// the store's in-progress name. `created` (optional) needs kStampMax + 1 bytes.
+inline bool noteFileNameParse(const char* name, char* created, uint64_t* id, bool tmp = false) {
   if (!name) return false;
   const size_t length = strnlen(name, kFileNameMax + 1);
   if (length < 4 + 1 + 16 + 4 || length > kFileNameMax) return false;
   const size_t stamp = length - (1 + 16 + 4);
-  if (name[stamp] != '-' || memcmp(name + length - 4, ".txt", 4) != 0 ||
+  if (name[stamp] != '-' || memcmp(name + length - 4, tmp ? ".tmp" : ".txt", 4) != 0 ||
       !noteStampValid(name, stamp)) return false;
   // Lowercase only, so one note has exactly one spelling (FAT folds case).
   for (size_t i = stamp + 1; i < stamp + 17; ++i)

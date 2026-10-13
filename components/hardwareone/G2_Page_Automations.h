@@ -4,11 +4,11 @@
 // =============================================================================
 // G2 glasses — "Automations" App page
 // =============================================================================
-// A tap-navigated list of the device's saved automations (read from
-// /system/automations.json) with a per-automation action sub-page:
+// A tap-navigated list of the device's saved automations (summary copies from
+// the automation owner) with a per-automation action sub-page:
 //
 //   LIST     "<- Apps" + one row per automation ("[on]/[off] <name>")
-//     DETAIL "<- <name>" / Run now / Enable|Disable
+//     DETAIL "<- <name>" / <trigger summary> / Run now / Enable|Disable
 //
 // State-mutating taps (run / enable / disable) route through
 // g2SubmitHijackCommand so they run on cmd_exec_task with the glasses user's
@@ -19,7 +19,7 @@
 //
 // Build-guarded behind ENABLE_BLUETOOTH + ENABLE_G2_GLASSES + ENABLE_AUTOMATION
 // (the page is a lens front-end for the automation engine, which supplies both
-// AUTOMATIONS_JSON_FILE and the `automation ...` commands the taps submit) so
+// the automation summaries and the `automation ...` commands the taps submit) so
 // automation-less builds get harmless no-op stubs — same shape as
 // G2_Page_TestSuite.h.
 

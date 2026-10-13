@@ -1865,6 +1865,124 @@ The ring controls run the production `g2RingCommands` and `healthCommands` rows,
 
 `r1_history_store` (see "R1 history persistence") also compiles the production Health history model that drives the store (the pending-sweep load, merge and commit path of G2_Health.cpp; trend views, the graph push and the profile capability table are doubles). A stored day that exists but cannot be opened loads as `READ_FAILED`, never `NOT_FOUND`, and the retried load merges the sweep into it instead of replacing it; a backup an interrupted publish left alone is promoted and loaded; a corrupt stored day is retried a bounded number of times, is never replaced, and does not stop later sweeps from being accepted and stored. `--component <components/hardwareone>` runs these current expectations against another tree's production sources (the f4cc542 sources fail the twelve load-failure checks); `--baseline` keeps its store-only scope.
 
+## G2 Network background redraws
+
+`g2_network_async_redraw` compiles the Network page's state, renderers, WiFi "Pending..." and R1
+"connecting..." watchdogs, WiFi scan worker and WiFi/R1 tap handlers with the production redraw
+helper, lens job types and the lens worker's Redraw arm. A fake clock drives connects, expiry,
+in-flight ring jobs and scans; each case runs in its own process. It checks that a held note
+(Notes), another Network view or leaving during the scan settle window is never covered by a
+Network list and that these tasks never draw themselves, while the menu still repaints when the
+user stays on it or comes back to it while pending, and scan results still reach the lens through
+the Even-AI card, placeholder, backed-up queue and inline-fallback paths. `--component` runs it
+against another tree. ASan/UBSan follow `HW1_SANITIZE`; radio, ring, command, display and RTOS
+calls are host boundaries, not device scheduling. The list-page double models page-swap
+admission: a second list render inside one lens-applier job is refused, as on the device.
+
+## G2 Files page tasks and redraws
+
+```sh
+python3 components/hardwareone/test/host/test_g2_files_psram.py --sanitize
+```
+
+Besides the reader/viewer harness, `g2_files_psram` compiles the rest of the production Files page
+(`G2_Page_Files.cpp`, includes stripped, the reader/viewer stubbed) in `g2_files_redraw_harness.cpp` and drives it from
+simulated tasks: taps on `g2_tap_disp`, queued redraws on the lens applier, the rename/delete completion on
+`cmd_exec_task`, the info-overlay expiry on the main loop and the image viewers' `onDone` on the session worker. The
+completion, the expiry and the viewer return must not draw, delay or touch FileManager; each queues one Redraw (the
+completion with its submit cookie) that the applier drops after a menuGen bump. The result shows once in the list's
+back row, and a successful rename/delete is re-scanned even when its redraw was dropped. Every FileManager call and
+lens draw runs with the Files page lock held by the calling task; callbacks delivered in the middle of a tap's
+directory read never re-enter FileManager; info rows stay read-only after the overlay expired until the list is shown;
+a list shown by a tap cancels a queued list redraw; and a redraw that waited for the lock while a tap opened the
+rename keyboard does not replace it. `--component <dir>` replays the suite against a pre-fix tree. FreeRTOS, lens,
+command, VFS and FileManager are host doubles; ASan/UBSan follow `HW1_SANITIZE`.
+
+The same harness checks the chooser's action paths. `FileEntry.name` is FileManager's display copy (63 bytes), so
+View, Info's sealed-capture peek, Rename and Delete take the selected entry's full path from
+`FileManager::getSelectedPath()`: a 70-byte SD name is deleted by its full path, never by its 63-byte prefix; a path
+that cannot be resolved or does not fit the 160-byte action buffer (a 123-byte folder plus that name) is refused with
+nothing submitted and no viewer started; and folder rows keep the closing "]" of their "[n]" / "[99+]" badge.
+
+## G2 Sensors completion redraws
+
+```sh
+python3 components/hardwareone/test/host/test_g2_sensors_redraw.py --sanitize
+```
+
+The camera power post-hook (cam_pwr, after every camera power operation from any source) and the openmic/closemic
+completion (cmd_exec) refresh the Sensors CAM/MIC detail. They never render or write the Sensors level or hijack
+page on their own task: they queue a Redraw on the lens applier (the hook with the menu generation taken when it
+fires, the mic completion with its submit-time cookie), and the render re-checks level DETAIL and page SENSORS.
+`g2_sensors_redraw` compiles the whole production Sensors page (camera and microphone on, other sensors off) beside
+a lens double with swap admission, a generation-checked Redraw queue and task-context tags, and runs a user tap
+("Settings >", "<- Hardware") between a completion's check and its render: nothing renders on cam_pwr or
+cmd_exec, Camera Settings keeps its rows and routing, the list keeps routing list taps, and an undisturbed detail is
+still refreshed. It also checks that an out-of-range list tap does nothing and that the live view's level is
+committed only after the live page started. `--component <dir>` replays it against a pre-fix tree. Lens, camera,
+audio, registry and command calls are host doubles; ASan/UBSan follow `HW1_SANITIZE`.
+
+## G2 list pages under refused renders
+
+```sh
+python3 components/hardwareone/test/host/test_g2_page_publish.py --sanitize
+```
+
+`g2ShowListPage` can refuse a render (swap in flight, allocation failure, lost admission, full lens queue) and the
+previous rows then stay on the lens. List pages build their rows plus a pending mode / row map and publish it through
+`g2ShowListPageAndPublish` (G2_Page_Common.h) only after the lens accepted the rows. `g2_page_publish` compiles the
+production Files chooser, delete confirm, info overlay and tap dispatcher; the Settings level/row-map state, row
+builders, edit/commit machinery, menu entry and dispatcher; and the whole LED page, each beside a `g2ShowListPage`
+double that can refuse. After a refusal the visible rows keep their meaning: chooser row 2 never submits
+`filedelete`, a Settings entry row never commits a pick option or an entry from an unseen page, the LED root "Off"
+row never sends a color, and a refused entry does not claim the hijack page. `g2_power_completion` (tap 4 refused,
+then tap 1 never submits `deepsleep`) and `camera_consumers` (a refused Camera list leaves TOP's FPS row cycling
+FPS) carry the same cases for Power and Camera Settings. All three accept `--component <dir>` to replay against a
+pre-fix tree. Commands, lens, RTOS and settings-registry calls are host doubles; ASan/UBSan follow `HW1_SANITIZE`.
+
+## G2 Network row bindings
+
+`wifi_saved_ui` (see "Saved WiFi network coverage") also has a unit that compiles the
+G2 Network page's row bindings, its WiFi, ESP-NOW, HTTP(S), Bluetooth, G2 and R1
+menus and their tap handlers: each case draws a menu, changes the radio, link,
+server, BLE, ring or setting state behind its labels, taps a row and checks that
+the command matches the label that was shown (and that a refused render after a
+submenu change runs nothing), plus the unchanged-state row maps. Each case runs in
+its own process; the ENABLE_ESPNOW, ENABLE_HTTP_SERVER and ENABLE_WIFI off builds
+are compile-checked. `--component` runs it against another tree.
+
+## Automation summaries
+
+`automation_scheduler` (see "Automation scheduler") also checks the owner's automation summaries (`automationCopySummaries` / `automationFindSummary`), one case per trigger type, built from `parseOneTrigger`: daily, weekly days, week interval, monthly, yearly, interval, manual delay, boot, event, unknown event, legacy or malformed triggers, extra-trigger counts, name fallback, cap and unreadable/malformed files. A second program compiles the whole G2 Automations page beside lens, command and file doubles: the lens shows the owner's trigger text, a tap opens the automation its row showed even after a web add/delete, Enable/Disable submits what the visible row says, and taps read nothing. `automation_scheduler_contract` also guards that the G2 and OLED pages never open or parse automations.json. Both accept `--component <dir>` to replay against a pre-fix tree.
+
+## QuickNote interrupted saves and note tiers
+
+`quicknote_store` runs the production `QuickNoteStore::sweep`: on both tiers it
+removes only names that parse as the store's own temporary spelling inside
+canonical `u<id>` notes folders, never opens a file for reading, and leaves
+user-placed names, directories, transcripts and other folders alone; nothing is
+promoted, because a note header carries no length. `quicknote_service` covers the
+worker that runs the sweep once a boot, and `g2_notes_page` checks the lens tier
+row: with a card in, the last row lists the other tier (`note list sd|internal`),
+stale replies for the abandoned tier are dropped, and a new show returns to the
+save tier. The f4cc542 sources fail the sweep case (no sweep) and the tier row.
+
+## G2 page and hijack-bridge API contract
+
+```sh
+python3 components/hardwareone/test/host/test_g2_page_api_contract.py --sanitize
+```
+
+`g2_page_api_contract` keeps the G2 Files, Settings, Network and Sensors pages, the hijack command bridge and the hijack FSM free of entry points nothing calls. The pages are reached through their interactive list (`g2Show*Menu` / `g2*HandleTap`) and the `g2Build*Info` text the page registry renders; the text-dump wrappers `g2ShowFilesPage`, `g2ShowSettingsPage`, `g2ShowNetworkPage` and `g2ShowSensorList`, the no-op `g2FilesTick`, `g2CurrentCmdSeq` and `hijackEventName` must not exist, and `g2ShowSensorsMenu` keeps no copy of its rows (`gSensorsListCache` / `gSensorsListCount`). A header probe compiles `G2_Page_Files.h`, `G2_Page_Settings.h`, `G2_Page_Network.h`, `G2_Page_Sensors.h` and `G2_HijackFsm.h` with G2 enabled, with `ENABLE_G2_GLASSES=0` and with `ENABLE_BLUETOOTH=0` (the xiao_s3 board header plus a feature profile, as in `g2_disabled_header`): a probe namespace offers variadic fallbacks, and each removed name must resolve to one, so neither an enabled declaration nor a disabled inline stub may remain; the kept API keeps its signatures, and the disabled builds link and run its stubs (empty text, `Idle` state). A source contract scans every production `.cpp`/`.h` under the component (test/ excluded, comments and string literals stripped) for the nine names, and the owning files for any mention at all. `--component <dir>` replays the suite against another tree; the board header always comes from this repository.
+
+## File browser classification and rename/delete authority
+
+```sh
+python3 components/hardwareone/test/host/test_file_kind.py --sanitize
+```
+
+`file_kind` compiles the shared classifier `FileBrowser_FileKind.h` and, over one table of names, the production G2 Files page file-tap branch (the `else` block of `g2FilesHandleTap` with the classification it calls, `showFileChooser` recording the chooser kind) beside the OLED browser's "View" decision (its `sFbActionViewable` assignment). The lens must offer a text or JSON view exactly when the OLED offers View: `.log`, `.md`, `.ini`, `.yaml`, `.html`, `.c` and the other OLED text types open in both, BMP/JPEG open only on the lens, and png, bin, `.tar.gz` and names without an extension get Info/Rename/Delete only. A second harness runs the OLED browser's rename/delete helpers (`fbRenameSelected`, `fbDeleteSelected`, `fbSubmitMutate`) against FileManager and executor doubles: both submit the admin-only `filerename` and one-shot `filedelete ... confirm` commands with the selected entry's full path (a 70-byte SD name), re-scan only after the executor's `OK`, report the executor's admin refusal, and submit nothing for an unresolved selection or a quote. Source contracts check that the OLED browser no longer calls `FileManager::renameItem`/`deleteItem`, that its prepare pass routes Rename/Delete through those helpers under the identity guard, that guests are still stopped on the input path, and that neither browser keeps a private extension list. `--component <dir>` reads the production sources from another tree; the f4cc542 sources fail the agreement checks (the lens gives `.log` and `.md` no viewer while the OLED offers View) and the contracts (direct FileManager rename/delete). No device, executor or FileManager is run.
+
 ## Camera lifecycle and backends
 
 ```sh

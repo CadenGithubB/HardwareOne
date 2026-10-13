@@ -143,7 +143,9 @@ def check_wiring():
 
     # Restamping: the clock-step chokepoint's resolve duty (main loop) wakes
     # the worker, which alone touches note files; builds without QuickNote
-    # get an inline no-op.
+    # get an inline no-op. The worker's idle wait stays timed while the boot's
+    # unfinished-file sweep is due, so a first note that never began still
+    # gets it.
     clock = extract_block((c / 'System_Clock.cpp').read_text(), 'static void drainDuties() ')
     ordered(clock, 'if (pend & PEND_RESOLVE) {', 'resolvePendingUserCreationTimes();',
             'quickNoteClockSet();', '}')
@@ -151,7 +153,8 @@ def check_wiring():
     assert 'inline void quickNoteClockSet() {}' in qn_header.split('#else', 1)[1]
     assert function(source, 'void quickNoteClockSet(') .strip().endswith('{ wake(); }')
     worker = extract_block(source, 'void workerBody(void*) ')
-    ordered(worker, 'gRestampDue ? pdMS_TO_TICKS(kRestampRetryMs)', 'servicePass();', 'restampPass();')
+    ordered(worker, 'gRestampDue || gSweepDue ? pdMS_TO_TICKS(kRestampRetryMs)', 'servicePass();',
+            'restampPass();', 'sweepPass();')
     # Keep-warm exists only on local-STT builds and never loads from a note pass.
     service = extract_block(source, 'void servicePass() ')
     ordered(service, '#if ENABLE_LOCAL_STT', 'sttKeepWarm(kWarmHoldMs, false);', '#endif')

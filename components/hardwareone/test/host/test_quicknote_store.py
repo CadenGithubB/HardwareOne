@@ -8,6 +8,11 @@ mask (TranscriptPathPolicy::permissionMask) with the role tiers
 System_Filesystem.cpp layers on it (system/superadmin unrestricted, guest
 read-only, scope confinement); the real permission pipeline itself, notes
 folder included, is test_transcript_path_permissions.py.
+
+--component points the production sources at another tree (the base run).
+A tree whose store has no QuickNoteStore::sweep (before the unfinished-file
+sweep existed) gets a no-op one, which is what its service did at start:
+nothing.
 """
 import argparse
 from pathlib import Path
@@ -29,12 +34,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sanitize', action='store_true')
     parser.add_argument('--cxx', default='clang++')
+    parser.add_argument('--component', type=Path, default=COMPONENT)
     args = parser.parse_args()
-    policies = '\n'.join(clean((COMPONENT / name).read_text()) for name in
+    component = args.component.resolve()
+    policies = '\n'.join(clean((component / name).read_text()) for name in
                          ('Transcript_PathPolicy.h', 'Transcription_UI_Policy.h', 'QuickNote_Policy.h'))
-    normalizer = function((COMPONENT / 'System_Filesystem.cpp').read_text(), 'bool normalizeFsPath(')
-    store = (clean((COMPONENT / 'QuickNote_Store.h').read_text()) +
-             clean((COMPONENT / 'QuickNote_Store.cpp').read_text()))
+    normalizer = function((component / 'System_Filesystem.cpp').read_text(), 'bool normalizeFsPath(')
+    store = (clean((component / 'QuickNote_Store.h').read_text()) +
+             clean((component / 'QuickNote_Store.cpp').read_text()))
+    if 'bool sweep(uint32_t* removed, const char** why) {' not in store:
+        print('QuickNote_Store.cpp has no QuickNoteStore::sweep: the service start removes nothing', flush=True)
+        store += ('\nnamespace QuickNoteStore {\n'
+                  'bool sweep(uint32_t* removed, const char** why) {\n'
+                  '  if (removed) *removed = 0;\n'
+                  '  if (why) *why = nullptr;\n'
+                  '  return true;\n'
+                  '}\n'
+                  '}  // namespace QuickNoteStore\n')
     harness = (HERE / 'quicknote_store_harness.cpp').read_text()
     for marker, value in (('// INSERT_POLICIES', policies), ('// INSERT_NORMALIZER', normalizer),
                           ('// INSERT_STORE', store)):

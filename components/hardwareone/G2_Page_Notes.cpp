@@ -10,7 +10,10 @@
 //              "<when> title" rows (`note list`'s "when": hh:mm, or "5m ago" /
 //              "earlier" for a note saved before the clock was set, as of the
 //              listing: a rebuild per minute would lose the wearer's place),
-//              More…; header Ready or why not, body "Hold to record".
+//              More…, and while a card is in "Flash notes · tap for card" (or
+//              the reverse): the list starts on the tier a save uses now, and
+//              this row lists the other one; header Ready or why not, body
+//              "Hold to record".
 //   Recording  the same rows. Header "● REC 0:07 · release to save"; "speak
 //              now" only once the service reports live capture. A container
 //              rebuild stops the glasses' LC3 mic stream, so while a note runs
@@ -61,6 +64,8 @@ enum class View : uint8_t { List, Note, Reader };
 // The note this page started or adopted, as the page last saw it.
 enum class Rec : uint8_t { Idle, Recording, Saving, Done };
 enum class Op : uint8_t { None, Status, Start, Stop, Cancel, List, Read, Delete };
+// The tier `note list` is asked for; Auto is the one a save would use now.
+enum class Tier : uint8_t { Auto, Internal, Sd };
 // "<when> <title>": when <= 11 bytes ("49710d ago"), the title <= 48.
 struct Entry { char label[64] = {}, path[QuickNotePolicy::kPathMax] = {}; };
 struct State {
@@ -71,6 +76,10 @@ struct State {
   Op pending = Op::None, queued = Op::None;
   View view = View::List;
   Rec rec = Rec::Idle;
+  // The tier wanted and the one the listing in flight asked for; the last
+  // reply's tier (listedSd) and whether it saw a card (sdAvailable).
+  Tier tier = Tier::Auto, sentTier = Tier::Auto;
+  bool listedSd = false, sdAvailable = false;
   bool live = false, hold = false, capture = false, stopAfterStart = false;
   bool pressOpen = false, pagePress = false, wantList = false, more = false;
   bool eof = false, confirm = false, dirty = false;
@@ -82,12 +91,13 @@ static portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
 EXT_RAM_BSS_ATTR static State state;
 // Only the lens applier renders. Its scratch stays off the worker stack.
 EXT_RAM_BSS_ATTR static State renderState;
-EXT_RAM_BSS_ATTR static char rows[kRows + 3][64], header[kChildMax + 1], body[kChildMax + 1];
-EXT_RAM_BSS_ATTR static char renderedRows[kRows + 3][64], renderedHeader[kChildMax + 1];
+// Back, New note, the notes, More… and the tier row.
+EXT_RAM_BSS_ATTR static char rows[kRows + 4][64], header[kChildMax + 1], body[kChildMax + 1];
+EXT_RAM_BSS_ATTR static char renderedRows[kRows + 4][64], renderedHeader[kChildMax + 1];
 EXT_RAM_BSS_ATTR static char renderedBody[kChildMax + 1], textBody[1200], textPage[304], renderedText[304];
 // A listing reply, labelled outside stateMux. cmd_exec only.
 EXT_RAM_BSS_ATTR static Entry listed[kRows];
-static const char* rowPtrs[kRows + 3];
+static const char* rowPtrs[kRows + 4];
 static uint16_t pageOffsets[9];
 static View renderedView = View::List;
 static size_t renderedCount = 0;
@@ -129,6 +139,12 @@ static void stopNoteLocked() {
   else return;
   state.rec = Rec::Saving;
 }
+// Whether the rows are (or are about to be) the card's, and whether the list
+// offers the other tier: once a reply saw a card, or while the card is shown.
+static bool cardShown(const State& s) {
+  return s.tier == Tier::Auto ? s.listedSd : s.tier == Tier::Sd;
+}
+static bool tierRowShown(const State& s) { return s.sdAvailable || cardShown(s); }
 
 static void render();
 static void enqueueRender() {
@@ -225,6 +241,7 @@ static void render() {
       add("<- Apps"); add("● New note");
       for (size_t i = 0; i < s.count; ++i) add(s.entries[i].label);
       if (s.more || s.listOffset) add("More…");
+      if (tierRowShown(s)) add(cardShown(s) ? "Card notes · tap for flash" : "Flash notes · tap for card");
       if (s.rec == Rec::Recording) {
         const unsigned sec = s.elapsedMs / 1000;
         snprintf(header, sizeof(header), "● REC %u:%02u · %s", sec / 60, sec % 60,
@@ -304,7 +321,11 @@ static void applyNoteLocked(JsonVariantConst doc, uint32_t now) {
   const bool ended = state.live || state.id[0] || state.rec == Rec::Recording || state.rec == Rec::Saving;
   state.live = state.capture = state.stopAfterStart = false; state.id[0] = '\0';
   state.rec = outcome[0] ? Rec::Done : Rec::Idle; state.doneAt = now;
-  if (ended) state.wantList = true;
+  if (ended) {
+    state.wantList = true;
+    // A note that ended lists where saves go now (the new note's tier).
+    if (state.tier != Tier::Auto) { state.tier = Tier::Auto; state.listOffset = 0; }
+  }
   if (!strcmp(outcome, "saved")) {
     snprintf(state.message, sizeof(state.message), "✓ Saved · %lu words",
              static_cast<unsigned long>(num(doc, "words")));
@@ -361,10 +382,12 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
     } else if (op == Op::Delete) {
       changeViewLocked(View::List); state.wantList = true;
       snprintf(state.message, sizeof(state.message), "Note deleted");
-    } else if (state.requestView == state.viewGeneration && op == Op::List) {
+    } else if (state.requestView == state.viewGeneration && op == Op::List &&
+               state.sentTier == state.tier) {   // never a tier no longer wanted
       memcpy(state.entries, listed, count * sizeof(Entry)); state.count = count;
       state.listOffset = num(doc, "offset"); state.listNext = state.listOffset + count;
       state.more = notes.size() > kRows || flag(doc, "more");
+      state.listedSd = !strcmp(str(doc, "tier"), "sd"); state.sdAvailable = flag(doc, "sdAvailable");
     } else if (state.requestView == state.viewGeneration && op == Op::Read) {
       const char* window = str(doc, "sttText");
       const uint32_t offset = num(doc, "offset");
@@ -407,7 +430,7 @@ static bool beginHold(uint32_t pressId, bool fromPage, const char** why) {
     // the start, so the mic comes up on a container that stays (one still in
     // flight re-arms the mic when it lands: g2LensApplyContainer).
     if (!fromPage || state.view != View::List) changeViewLocked(View::List);
-    if (!fromPage) { ++state.showGen; state.listOffset = 0; state.wantList = true; }
+    if (!fromPage) { ++state.showGen; state.listOffset = 0; state.wantList = true; state.tier = Tier::Auto; }
     beginNoteLocked(true);
     state.pressOpen = true; state.pagePress = fromPage; state.holdPress = pressId;
   } else if (fromPage) {
@@ -440,7 +463,7 @@ void g2ShowNotesMenu() {
   portENTER_CRITICAL(&stateMux);
   if (!live || state.epoch != owner.transportEpoch) resetLocked(live ? owner.transportEpoch : 0);
   changeViewLocked(View::List);
-  ++state.showGen; state.listOffset = 0; state.wantList = true; state.confirm = false;
+  ++state.showGen; state.listOffset = 0; state.wantList = true; state.confirm = false; state.tier = Tier::Auto;
   // Picks up a note already running for the wearer (any trigger) first.
   if (state.pending == Op::None && state.queued == Op::None) state.queued = Op::Status;
   portEXIT_CRITICAL(&stateMux);
@@ -477,6 +500,11 @@ void g2NotesHandleTap(uint32_t index) {
       changeViewLocked(View::Note); state.confirm = false; state.queued = Op::Read; viewChanged = true;
     } else if (!busy && index == 2 + state.count && (state.more || state.listOffset)) {
       state.listOffset = state.more ? state.listNext : 0; state.queued = Op::List;
+    } else if (!busy && tierRowShown(state) &&
+               index == 2u + state.count + (state.more || state.listOffset)) {
+      // The other tier from its newest note; this tier's rows go at once.
+      state.tier = cardShown(state) ? Tier::Internal : Tier::Sd;
+      state.listOffset = 0; state.count = 0; state.more = false; state.wantList = true;
     }
   }
   state.dirty = true;
@@ -536,7 +564,12 @@ void g2NotesTick() {
       case Op::Start: snprintf(command, sizeof(command), "%s", state.hold ? "note start hold" : "note start"); break;
       case Op::Stop: snprintf(command, sizeof(command), "note stop %s", state.id); break;
       case Op::Cancel: snprintf(command, sizeof(command), "note cancel %s", state.id); break;
-      case Op::List: snprintf(command, sizeof(command), "note list %lu", static_cast<unsigned long>(state.listOffset)); break;
+      case Op::List:
+        state.sentTier = state.tier;
+        snprintf(command, sizeof(command), "note list%s %lu",
+                 state.tier == Tier::Sd ? " sd" : state.tier == Tier::Internal ? " internal" : "",
+                 static_cast<unsigned long>(state.listOffset));
+        break;
       case Op::Read: snprintf(command, sizeof(command), "note read \"%s\" %lu", state.path,
           static_cast<unsigned long>(state.view == View::Reader ? state.fileOffset : 0)); break;
       case Op::Delete: snprintf(command, sizeof(command), "note delete \"%s\"", state.path); break;

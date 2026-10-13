@@ -30,7 +30,7 @@
 #include "System_TaskUtils.h"
 #include "System_Transcript.h"   // transcriptCaptureIdentity
 #include "System_Utils.h"
-#include "System_VFS.h"          // isSDWritable: the default `note list` tier
+#include "System_VFS.h"          // isSDWritable/isSDAvailable: `note list` tiers
 #include "Transcription_UI_Policy.h"
 
 using namespace QuickNotePolicy;
@@ -49,6 +49,8 @@ constexpr uint32_t kWarmHoldMs = 120000;
 constexpr size_t kUnstampedMax = 16, kRestampPerPass = 2;
 constexpr uint8_t kRestampTries = 5;
 constexpr uint32_t kRestampRetryMs = 2000;
+// Passes (kRestampRetryMs apart) the boot's sweep of unfinished note files gets.
+constexpr uint8_t kSweepTries = 3;
 
 struct Note {
   Phase phase = Phase::Idle;
@@ -106,6 +108,9 @@ struct Unstamped {
 EXT_RAM_BSS_ATTR Unstamped gUnstamped[kUnstampedMax];
 size_t gUnstampedCount = 0;
 bool gRestampDue = false;  // entries left that a timed pass should retry
+// The notes folders still need this boot's sweep (sweepPass). Worker only.
+bool gSweepDue = true;
+uint8_t gSweepTries = 0;
 
 bool refuse(const char** why, const char* reason) {
   if (why) *why = reason;
@@ -267,6 +272,23 @@ void restampPass() {
   gRestampDue = gUnstampedCount != 0;
 }
 
+// Once a boot, the first time this worker (started by the boot's first note
+// request) finds no note running: removes the in-progress files interrupted
+// saves left (QuickNoteStore::sweep). Only this worker writes note files, so
+// none of them is a save under way. A failed sweep is retried on the timed
+// wait, kSweepTries passes in all. Logs a count, never a path.
+void sweepPass() {
+  if (!gSweepDue || quickNoteActive()) return;
+  uint32_t removed = 0;
+  const char* why = nullptr;
+  const bool ok = QuickNoteStore::sweep(&removed, &why);
+  gSweepDue = !ok && ++gSweepTries < kSweepTries;
+  if (removed)
+    INFO_SYSTEMF("[QNOTE] removed %lu unfinished note file(s)", static_cast<unsigned long>(removed));
+  if (!ok && !gSweepDue)
+    WARN_SYSTEMF("[QNOTE] unfinished note files not swept: %s", why ? why : "");
+}
+
 // Dictation is over (finished, failed, timed out or taken): keep what was
 // said, or discard a slip, a hold under kMinHoldMs or a take with nothing in
 // it. `failure` (static or dictation's own reason) only matters when there is
@@ -405,10 +427,11 @@ void servicePass() {
 void workerBody(void*) {
   for (;;) {
     (void)ulTaskNotifyTake(pdTRUE, quickNoteActive() ? pdMS_TO_TICKS(kPassMs)
-                                   : gRestampDue ? pdMS_TO_TICKS(kRestampRetryMs)
+                                   : gRestampDue || gSweepDue ? pdMS_TO_TICKS(kRestampRetryMs)
                                    : portMAX_DELAY);
     servicePass();
     restampPass();
+    sweepPass();
   }
 }
 
@@ -819,6 +842,8 @@ EXT_RAM_BSS_ATTR alignas(QuickNoteStore::Page) uint8_t gPageStorage[sizeof(Quick
 // list [internal|sd] [offset] [u<id>]; another account's notes need an
 // unrestricted role (the transcript path policy decides, as for transcripts).
 // With no tier it lists the one a save would use now (QuickNoteStore::create).
+// The reply names the tier listed and whether a card is there, so a front
+// end can offer the other tier's notes.
 const char* commandList(JsonDocument& doc, const CommandArgs& args) {
   bool sd = false;
   uint32_t offset = 0, owner = 0;
@@ -866,6 +891,8 @@ const char* commandList(JsonDocument& doc, const CommandArgs& args) {
     put(root, "total", page.total);
     putFlag(root, "more", page.more);
     putFlag(root, "capped", page.capped);
+    put(root, "tier", sd ? "sd" : "internal");
+    putFlag(root, "sdAvailable", sd || VFS::isSDAvailable());
   }
   // Titles are the start of the text: clear them once serialized.
   TranscriptionUI::clear(reinterpret_cast<char*>(gPageStorage), sizeof(gPageStorage));

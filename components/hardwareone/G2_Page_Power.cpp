@@ -33,6 +33,7 @@
 
 #include "G2_Glasses.h"
 #include "G2_HijackCmd.h"
+#include "G2_Page_Common.h"    // g2ShowListPageAndPublish
 #include "System_Debug.h"
 #include "System_Power.h"      // getPowerModeName / getPowerModeCpuFreq / POWER_MODE_*
 #include "System_Settings.h"   // gSettings.powerMode
@@ -94,6 +95,17 @@ static void powerBeginView(PowerLevel level) {
   portENTER_CRITICAL(&gPowerResultMux);
   gPowerResult.ready = false;
   portEXIT_CRITICAL(&gPowerResultMux);
+}
+
+// Draw the `n` rows just built for `level`. The level, and the action its
+// Confirm row arms, become live only once the lens accepted those rows; a
+// refused render leaves the visible rows with their current meaning.
+static bool powerShowLevel(PowerLevel level, size_t n,
+                           PowerAction pending = POWER_ACTION_NONE) {
+  return g2ShowListPageAndPublish(gRowPtrs, n, [level, pending] {
+    powerBeginView(level);
+    gPending = pending;
+  });
 }
 
 // -----------------------------------------------------------------------------
@@ -200,11 +212,12 @@ static void renderPowerResult() {
   portEXIT_CRITICAL(&gPowerResultMux);
   if (!ready) return;
 
-  if (gLevel != level) powerBeginView(level);
-  gPending = POWER_ACTION_NONE;
   const size_t n = level == POWER_LEVEL_CPU ? buildCpuRows() : buildActionRows();
   if (message[0]) snprintf(gRows[0], POWER_ROW_LEN, "<- %.20s", message);
-  g2ShowListPage(gRowPtrs, n);
+  g2ShowListPageAndPublish(gRowPtrs, n, [level] {
+    if (gLevel != level) powerBeginView(level);
+    gPending = POWER_ACTION_NONE;
+  });
 }
 
 static void powerClearResult(uint32_t menuGen) {
@@ -310,11 +323,8 @@ static void submitPowerCmd(const char* line, const char* pendingBanner) {
 // -----------------------------------------------------------------------------
 
 void g2ShowPowerMenu() {
-  powerBeginView(POWER_LEVEL_ACTIONS);
-  gPending = POWER_ACTION_NONE;
-
   size_t n = buildActionRows();
-  if (g2ShowListPage(gRowPtrs, n)) {
+  if (powerShowLevel(POWER_LEVEL_ACTIONS, n)) {
     g2SetHijackPage(G2_HIJACK_PAGE_POWER);
     DEBUG_G2F("[G2] Power menu shown (rows=%u)", (unsigned)n);
   } else {
@@ -339,37 +349,37 @@ void g2PowerHandleTap(uint32_t idx) {
       }
       if (idx == 1) {
         // Live status row → open the CPU preset picker (applies directly).
-        powerBeginView(POWER_LEVEL_CPU);
         size_t n = buildCpuRows();
-        g2ShowListPage(gRowPtrs, n);
-        DEBUG_G2F("[G2] Power: CPU preset picker opened");
+        if (powerShowLevel(POWER_LEVEL_CPU, n)) {
+          DEBUG_G2F("[G2] Power: CPU preset picker opened");
+        }
         return;
       }
+      PowerAction action;
       if (idx == 2) {
-        gPending = POWER_ACTION_RESTART;
+        action = POWER_ACTION_RESTART;
       } else if (idx == 3) {
-        gPending = POWER_ACTION_RAMFLUSH;
+        action = POWER_ACTION_RAMFLUSH;
       } else if (idx == 4) {
-        gPending = POWER_ACTION_POWEROFF;
+        action = POWER_ACTION_POWEROFF;
       } else {
         return;
       }
-      powerBeginView(POWER_LEVEL_CONFIRM);
-      size_t n = buildConfirmRows(gPending);
-      g2ShowListPage(gRowPtrs, n);
-      DEBUG_G2F("[G2] Power: confirm prompt for %s", actionDebugName(gPending));
+      size_t n = buildConfirmRows(action);
+      if (powerShowLevel(POWER_LEVEL_CONFIRM, n, action)) {
+        DEBUG_G2F("[G2] Power: confirm prompt for %s", actionDebugName(action));
+      }
       return;
     }
 
     case POWER_LEVEL_CONFIRM: {
       if (idx == 0) {
         // <- Cancel: back to action list.
-        powerBeginView(POWER_LEVEL_ACTIONS);
-        PowerAction was = gPending;
-        gPending = POWER_ACTION_NONE;
+        const PowerAction was = gPending;
         size_t n = buildActionRows();
-        g2ShowListPage(gRowPtrs, n);
-        DEBUG_G2F("[G2] Power: cancelled (was %s)", actionDebugName(was));
+        if (powerShowLevel(POWER_LEVEL_ACTIONS, n)) {
+          DEBUG_G2F("[G2] Power: cancelled (was %s)", actionDebugName(was));
+        }
         return;
       }
       if (idx == 1) {
@@ -389,9 +399,8 @@ void g2PowerHandleTap(uint32_t idx) {
     case POWER_LEVEL_CPU: {
       if (idx == 0) {
         // <- Back to the action list (rebuilt so the status row is fresh).
-        powerBeginView(POWER_LEVEL_ACTIONS);
         size_t n = buildActionRows();
-        g2ShowListPage(gRowPtrs, n);
+        powerShowLevel(POWER_LEVEL_ACTIONS, n);
         return;
       }
       if (idx >= 1 && idx <= POWER_MODE_COUNT) {
