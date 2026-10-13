@@ -28,8 +28,39 @@ is on another VLAN, and this work does not bridge it to the Mac mini or XIAO.
 The user selected the password-protected `TestESPNetwork` for the XIAO. Enter its
 password directly on the device during setup; do not store it here. The user
 confirmed that this network is on the OpenClaw host's VLAN, so a device on it
-can test the direct path without bridging VLANs. The host version, gateway
-settings, and agent ID still need to be collected.
+can test the direct path without bridging VLANs.
+
+Host inspection supplied on 2026-10-12: macOS, OpenClaw `2026.9.4` (`3a9d69d`),
+port `18789`, bind `loopback`. Both `gateway.tls.enabled` and
+`gateway.http.endpoints.chatCompletions.enabled` are valid but unset. The current
+release defaults leave TLS and chat completions disabled; this is not yet a
+live endpoint probe. Available agent IDs are `main`, `devlab`, and `android-trial`,
+with Ollama configured behind the agents. The user selected `main` (Mingus), so
+the device target will be `openclaw/main`. Gateway authentication mode, existing
+Control UI allowed origins, and the host's address on the test VLAN are still
+pending. Do not change the listener or restart the host service until the concrete
+setup is determined.
+
+The [v2026.9.4 release](https://github.com/openclaw/openclaw/releases/tag/v2026.9.4)
+matches the reported commit. Its custom IPv4 listener can bind the test VLAN
+address while retaining IPv4 loopback access; non-loopback startup also requires
+authentication and, with Control UI enabled, configured allowed origins. Preserve
+existing origins. See the tagged [listener implementation](https://github.com/openclaw/openclaw/blob/v2026.9.4/src/gateway/net.ts)
+and [startup validation](https://github.com/openclaw/openclaw/blob/v2026.9.4/src/gateway/server-runtime-config.ts).
+TLS and listener edits require a concrete migration/restart plan for existing
+clients. Use version-matched CLI guidance: newer documentation's stop-before-edit
+requirement does not apply to this release.
+
+Next read-only inspections on the Studio:
+
+```sh
+openclaw config get gateway.auth.mode
+openclaw config get gateway.controlUi.allowedOrigins
+scutil --nwi
+```
+
+Collect the authentication mode, allowed origins, and the IPv4 address/interface
+on the test VLAN. Do not collect the token or password in chat or this repository.
 
 The prototype uses the documented [OpenClaw chat-completions endpoint](https://docs.openclaw.ai/gateway/openai-http-api).
 It must be enabled on the chosen test host. The configured target is an agent
@@ -54,7 +85,7 @@ never paste a real token into this repository or a shared transcript.
 | Device command | Purpose |
 | --- | --- |
 | `llmhttpurl https://HOST:PORT/v1` | Base URL, including `/v1`; no embedded credentials, query, or fragment |
-| `llmhttpmodel openclaw/default` | Selected OpenClaw agent |
+| `llmhttpmodel openclaw/main` | Selected test agent, Mingus |
 | `llmhttptoken TOKEN` | Gateway bearer credential; stored using the existing encrypted-secret settings path |
 | `llmhttpca PEM` | Optional private CA certificate, with literal `\n` escapes for line breaks |
 | `llmhttpenabled 1` | Make the configured source visible |
