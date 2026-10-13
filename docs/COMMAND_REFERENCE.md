@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-966 commands across 53 modules (975 registry entries).
+972 commands across 53 modules (981 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -21,7 +21,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`bluetooth`](#bluetooth) — 19 commands
 - [`filesystem`](#filesystem) — 10 commands
 - [`sd`](#sd) — 5 commands
-- [`oled`](#oled) — 20 commands
+- [`oled`](#oled) — 19 commands
 - [`neopixel`](#neopixel) — 3 commands
 - [`led`](#led) — 6 commands
 - [`matrix`](#matrix) — 3 commands
@@ -47,10 +47,10 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`i2c`](#i2c) — 24 commands
 - [`automation`](#automation) — 8 commands
 - [`battery`](#battery) — 3 commands
-- [`debug`](#debug) — 182 commands
+- [`debug`](#debug) — 181 commands
 - [`settings`](#settings) — 17 commands
 - [`sensorlog`](#sensorlog) — 2 commands
-- [`health`](#health) — 3 commands
+- [`health`](#health) — 4 commands
 - [`users`](#users) — 22 commands
 - [`features`](#features) — 2 commands
 - [`image`](#image) — 4 commands
@@ -62,8 +62,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`ota`](#ota) — 18 commands
 - [`setpattern`](#setpattern) — 1 commands
 - [`even_g2`](#even-g2) — 57 commands
-- [`even_r1`](#even-r1) — 5 commands
-- [`llm`](#llm) — 30 commands
+- [`even_r1`](#even-r1) — 6 commands
+- [`llm`](#llm) — 36 commands
 - [`settingsedit`](#settingsedit) — 62 commands
 
 ---
@@ -324,7 +324,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `bleadv` | A | Start/stop/toggle BLE advertising [start\|stop\|toggle].<br/>`Usage: bleadv [start\|stop\|toggle]` |
 | `bleautoreconnect` | A | Per-peer auto-reconnect (boot + mid-session drop): bleautoreconnect <name> [on\|off]. `blepeers` lists names.<br/>`Usage: bleautoreconnect <peer-name> [on\|off] on: reconnect at boot and reseek after unexpected drops (not after ringdisconnect/closeg2)` |
 | `bleautostart` | A | Enable/disable BLE auto-start after boot [on\|off].<br/>`Usage: bleautostart [on\|off]` |
-| `bledisconnect` | A | Disconnect current BLE client. |
+| `bledisconnect` | A | Disconnect BLE app clients: all, or one by connection id [connId].<br/>`Usage: bledisconnect [connId]` |
 | `bleevent` |  | Send event to BLE client: <event>.<br/>`Usage: bleevent <message>` |
 | `bleinfo` |  | Show BLE configuration and settings. (add 'json' for JSON output) |
 | `blemode` | A | Get/set BLE mode [server\|client].<br/>`Usage: blemode [server\|client]` |
@@ -372,7 +372,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## oled
 
-> Drives the selected local display backend: its lifecycle, the live screen contents, and persistent appearance settings. oledstart/oledstop (aliases openoled/closeoled) power the display task on and off, and oledstatus (alias oledread) reports its state. oledmode <mode> switches the live screen among the built-in views (menu, status, sensordata, thermal, network, mesh, gps, espnow, memory, off, and more); oledtext <message> shows custom text and oledanim <name>|fps <n> picks the animation -- both require the display to be running (run oledstart first) and neither persists across reboot. Separately, the oled* config commands write settings to flash immediately: oledbootmode and oleddefaultmode set the screen shown at boot and as the idle default, while oledbrightness <0-255>, oledflip, oledbootduration, oledupdateinterval, oledthermalscale, oledthermalcolormode, and oledenabled tune appearance and timing. oledrequireauth <0|1> (admin-only) controls whether a user must log in at the display before interacting with it.
+> Drives the selected local display backend: its lifecycle, the live screen contents, and persistent appearance settings. oledstart/oledstop (aliases openoled/closeoled) power the display task on and off, and oledstatus (alias oledread) reports its state. oledmode <mode> switches the live screen among the built-in views (menu, status, sensordata, thermal, network, mesh, gps, espnow, memory, off, and more); oledtext <message> shows custom text and oledanim <name>|fps <n> picks the animation -- both require the display to be running (run oledstart first) and neither persists across reboot. Separately, the oled* config commands write settings to flash immediately: oledbootmode and oleddefaultmode set the screen shown at boot and as the idle default, while oledbrightness <0-255>, oledflip, oledbootduration, oledupdateinterval, oledthermalscale, oledthermalcolormode, and oledenabled tune appearance and timing. Whether a user must log in at the display before interacting with it is set with displayrequireauth <0|1> (super admin, Settings module).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -387,7 +387,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `oledflip` |  | Flip display 180°: [on\|off\|toggle]<br/>`Usage: oledflip [on\|off\|toggle]` |
 | `oledmode` |  | Set display mode: <mode><br/>`Usage: oledmode <menu\|status\|sensordata\|sensorlist\|thermal\|network\|mesh\|gps\|text\|logo\|anim\|imuactions\|fmradio\|files\|logging\|automations\|espnow\|memory\|off> Example: oledmode memory Example: oledmode off` |
 | `oledread` |  | Read OLED display status. (add 'json' for JSON output) |
-| `oledrequireauth` | A | OLED auth requirement: <0\|1><br/>`Usage: oledrequireauth <0\|1>` |
 | `oledstart` |  | Start OLED display. |
 | `oledstatus` |  | Show OLED status. (add 'json' for JSON output) |
 | `oledstop` |  | Stop OLED display. |
@@ -667,8 +666,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `camerawb` | A | White balance mode: <0-4><br/>`Usage: camerawb <0..4> (0=Auto,1=Sunny,2=Cloudy,3=Office,4=Home)` |
 | `camerawhitebal` | A | AWB master: <on\|off><br/>`Usage: camerawhitebal <on\|off>` |
 | `camerawpc` | A | White pixel correction: <on\|off><br/>`Usage: camerawpc <on\|off>` |
-| `closecamera` |  | Stop camera sensor. |
-| `opencamera` |  | Start camera sensor. |
+| `closecamera` |  | Stop camera sensor. [async: queue it and return at once] |
+| `opencamera` |  | Start camera sensor. [async: queue it and return at once] |
 
 ## microphone
 
@@ -974,7 +973,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `debugpresencepolling` | A | Debug presence sensor poll cadence.<br/>`Usage: debugpresencepolling <0\|1> [temp\|runtime]` |
 | `debugpresencevalues` | A | Debug presence detection values.<br/>`Usage: debugpresencevalues <0\|1> [temp\|runtime]` |
 | `debugring` | A | Debug R1 health ring (parent flag).<br/>`Usage: debugring <0\|1> [temp\|runtime]` |
-| `debugringbridge` | A | Debug R1→G2 spoof bridge push.<br/>`Usage: debugringbridge <0\|1> [temp\|runtime]` |
 | `debugringdump` | A | Debug R1 raw hex frame/payload dumps (loud).<br/>`Usage: debugringdump <0\|1> [temp\|runtime]` |
 | `debugringhealth` | A | Debug R1 telemetry cache + history sweep.<br/>`Usage: debugringhealth <0\|1> [temp\|runtime]` |
 | `debugringlifecycle` | A | Debug R1 scan/connect/GATT/disconnect.<br/>`Usage: debugringlifecycle <0\|1> [temp\|runtime]` |
@@ -1080,6 +1078,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `healthlogging` |  | Start/stop local R1 health logging (independent of ring collection)<br/>`Usage: healthlogging <on\|off\|toggle\|status\|interval [sec]> on: enable LOG_R1, force format=CSV, start under /logging_captures/sensors/, persist for boot (one dated per-day file when the clock is set, boot-<N>/ until sync then roll) off: remove LOG_R1; stop logging if no other sensors remain interval <sec>: legacy POINT mining interval (default 900 = 15 min) On 2.2.9, logging is passive/on-demand and records Poll Now refreshes; it sends no timed POINT query R1-only sessions write only on an admitted mine/refresh — no 5s empty heartbeats This does not change the ring's health-collection privacy setting.` |
 | `healthlogmerge` | A | Byte-concatenate sensor logs in the given order: "<out>" "<in1>" "<in2>" ...<br/>`Usage: healthlogmerge "<output>" "<in1>" "<in2>" [...] OUTPUT FIRST — arg 0 is TRUNCATED. Inputs follow, in the order you want them. Bare output name → /logging_captures/sensors/; INPUTS need a full path. Extensionless output gets .csv appended even for TEXT inputs. Concatenation is byte-exact: CSV inputs keep their header lines mid-file, rows are NOT time-ordered, and mixing formats/sensor masks yields an unparseable result. Max 8 inputs (arg limit).` |
 | `healthstatus` |  | R1 live vitals, ring controls, local logging, and typed history status<br/>`Usage: healthstatus [json\|poll\|history\|force-history\|refresh-controls] bare/json: live values, desired/observed controls, local logging, history/store poll: exact-2.2.9 DAILY HR/HRV/SpO2/sleep/activity + deviceStatus refresh history: normal typed history refresh; force-history: admin freshness bypass refresh-controls: read low-power state; health collection has no proven GET and stays Unknown BLE App / Web use healthstatus json; connect via ringconnect / Bluetooth page` |
+| `healthstatus force-history` | A | R1 typed history refresh that bypasses the freshness window (admin)<br/>`Usage: healthstatus force-history` |
 
 ## users
 
@@ -1298,11 +1297,12 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## even_r1
 
-> This subsystem talks to the Even R1 smart ring over BLE through a serialized, profile-gated transaction owner. ringscan [seconds] discovers the ring and ringconnect [mac] connects (auto-scanning when no MAC is given, or connecting directly when one is), with ringstatus and ringdisconnect for state and teardown. ringquery is the main data command, requesting wear/heart-rate/HRV/SpO2/temperature/activity/sleep readings. Its raw diagnostic form is admin-only, requires confirmation for SETs, and prohibits user-profile writes. Ring health collection and low-power desired state are managed through the authenticated Health surfaces; health SETs remain ACKed-unverified while low power has capture-proven readback. debugringdump toggles a redacted byte dump for debugging. Bridging ring data onto the G2 glasses is deliberately unavailable -- the commands exist in the code but are intentionally left unregistered because both approaches proved to be dead ends.
+> This subsystem talks to the Even R1 smart ring over BLE through a serialized, profile-gated transaction owner. ringscan [seconds] discovers the ring and ringconnect [mac] connects (auto-scanning when no MAC is given, or connecting directly when one is), with ringstatus and ringdisconnect for state and teardown. ringquery is the main data command, requesting wear/heart-rate/HRV/SpO2/temperature/activity/sleep readings. Its raw diagnostic form is admin-only, requires confirmation for SETs, and prohibits user-profile writes. Ring health collection and low power are set with ringcontrol <collection|lowpower> <preserve|on|off> (admin): a persisted desired state applied to the ring asynchronously, which healthstatus reports as desired and observed (the OLED and web Health controls run the same command). Health SETs remain ACKed-unverified while low power has capture-proven readback. debugringdump toggles a redacted byte dump for debugging. Bridging ring data onto the G2 glasses is not supported: both approaches proved to be dead ends and were removed.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `ringconnect` | A | Connect to the R1 ring: ringconnect [mac\|reconnect]<br/>`Usage: ringconnect [mac\|reconnect] (no arg = scan-then-connect; mac = direct; reconnect = drop+settle+connect)` |
+| `ringcontrol` | A | Set ring health collection or low power: ringcontrol <collection\|lowpower> <preserve\|on\|off><br/>`Usage: ringcontrol <collection\|lowpower> <preserve\|on\|off> (persisted desired state, applied to the ring asynchronously; healthstatus shows desired/observed)` |
 | `ringdisconnect` | A | Disconnect from the R1 ring |
 | `ringquery` |  | Queue an R1 query: ringquery <wear\|hr\|hrv\|spo2\|temp\|activity\|sleep\|raw> [type]<br/>`Usage: ringquery <wear\|hr\|hrv\|spo2\|temp\|activity\|sleep> [daily\|point\|measure] \| raw <module> <cmd> <subCmd> [hex_payload] [status=NN] (raw is admin-only; SET requires confirmation)` |
 | `ringscan` |  | Scan for the R1 ring: ringscan [seconds] (default 30, max 300)<br/>`Usage: ringscan [seconds] (1..300, default 30)` |
@@ -1324,6 +1324,12 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `llmdomaingate` | A | Refuse prompts outside the model's domain (0\|1)<br/>`Usage: llmdomaingate <0\|1> (only enforced when the model .bin carries a domain vocab)` |
 | `llmgenerate` |  | Ask the loaded model a question<br/>`Usage: llmgenerate <question> \| llmgenerate do: <intent> The question is wrapped in the model's Q:/A: format for you, same as the web chat. Prefix 'do:' to ask for a command instead of an answer. A prompt that already starts with 'Q:' is sent as-is.` |
 | `llmhardcap` | A | Set default hard token cap<br/>`Usage: llmhardcap <0-512>` |
+| `llmhttpca` | A | Set a private CA PEM for HTTPS<br/>`Usage: llmhttpca <PEM with escaped newlines> (or - to use system CA bundle)` |
+| `llmhttpenabled` | A | Enable the optional HTTP agent source<br/>`Usage: llmhttpenabled <0\|1>` |
+| `llmhttpmodel` | A | Set the OpenClaw agent target<br/>`Usage: llmhttpmodel openclaw/default` |
+| `llmhttpplaintext` | A | Allow plaintext HTTP for a local bench<br/>`Usage: llmhttpplaintext <0\|1>` |
+| `llmhttptoken` | A | Set the gateway token (stored encrypted)<br/>`Usage: llmhttptoken <token> (or - to clear)` |
+| `llmhttpurl` | A | Set the agent gateway base URL<br/>`Usage: llmhttpurl https://host:port/v1 (or - to clear)` |
 | `llmkvprec` | A | KV cache precision (0=FP32,1=FP16,2=INT8)<br/>`Usage: llmkvprec <0..2> (0=FP32,1=FP16,2=INT8; reload model to apply)` |
 | `llmload` | A | Load model [model.bin]<br/>`Usage: llmload [model id] [maxctx]` |
 | `llmmaxcontext` | A | Set KV cache context window (0=auto)<br/>`Usage: llmmaxcontext <0-4096>` |

@@ -1491,6 +1491,167 @@ foreach(test_name IN ITEMS log_level_application system_log_status command_feed)
             ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
             ${SETUP_MQTT_TEST_ARGS})
 endforeach()
+
+# BLE and display login lockout (README "BLE and display login lockout"): the real
+# bleLoginDeferred and loginTransport against the real attempt table; the sixth
+# attempt is refused before any password check, replies stay on the requesting
+# session, and a lost bind, an unpublished session or an unavailable store is not a guess.
+set(BLE_DISPLAY_LOGIN_LOCKOUT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND BLE_DISPLAY_LOGIN_LOCKOUT_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ble_display_login_lockout
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_display_login_lockout.py
+          ${BLE_DISPLAY_LOGIN_LOCKOUT_TEST_ARGS})
+
+# ESP-NOW passwords and USER_SYNC accounts (README "ESP-NOW passwords and USER_SYNC
+# accounts"): password remote commands and USER_SYNC's admin check share ESP-NOW's
+# lockout key (the bond-token path stays outside); USER_SYNC creates accounts through
+# createAccount on the shared fake VFS (validation, reserved names, id high-water mark,
+# credential written before users.json).
+set(ESPNOW_USER_CREDENTIALS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_USER_CREDENTIALS_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_user_credentials
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_user_credentials.py
+          ${ESPNOW_USER_CREDENTIALS_TEST_ARGS})
+
+# executeCommand runs only on the command executor (README "Command executor
+# admission"): the real admission predicate and the opening of executeCommand
+# admit cmd_exec and the early-boot path, refuse any other task before a side
+# effect; the ESP-NOW status endpoint submits its eight status commands.
+set(COMMAND_EXECUTOR_ADMISSION_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND COMMAND_EXECUTOR_ADMISSION_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME command_executor_admission
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_command_executor_admission.py
+          ${COMMAND_EXECUTOR_ADMISSION_TEST_ARGS})
+
+# Settings schema setters and the bonded remote-edit policy (README "Settings
+# schema setters and the bonded remote-edit policy"): the schema carries cmdKey
+# only for a registered setter; BondedPeer narrows the worker schema the web
+# bonded view receives; the settings page keeps no policy copy and never derives
+# a command from a key.
+set(SETTINGS_SCHEMA_SETTERS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND SETTINGS_SCHEMA_SETTERS_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME settings_schema_setters
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_settings_schema_setters.py
+          ${SETTINGS_SCHEMA_SETTERS_TEST_ARGS})
+
+# STT result privacy and the targeted BLE command result (README "STT result privacy
+# and the targeted BLE reply"): the private-STT rule, and since D1 the BLE reply is
+# fenced on the command's session epoch with no console-mirror fallback.
+# test_stt_privacy.py existed on main but was never registered; it now carries D1.
+set(STT_PRIVACY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND STT_PRIVACY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME stt_privacy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_privacy.py
+          ${STT_PRIVACY_TEST_ARGS})
+
+# BLE console mirror recipients (README "BLE console mirror recipients"): the drain
+# buffers only while sendBLEResponse has a recipient; `outble` reports the count.
+set(BLE_MIRROR_RECIPIENTS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND BLE_MIRROR_RECIPIENTS_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ble_mirror_recipients
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_mirror_recipients.py
+          ${BLE_MIRROR_RECIPIENTS_TEST_ARGS})
+
+# C6 companion BLE shutdown (README "C6 companion BLE shutdown"): the companion reset
+# stops the BLE server only through deinitBluetooth(), retried a bounded number of
+# times, and never forces the host down under a busy Ring owner.
+set(COMPANION_BLE_SHUTDOWN_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND COMPANION_BLE_SHUTDOWN_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME companion_ble_shutdown
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_companion_ble_shutdown.py
+          ${COMPANION_BLE_SHUTDOWN_TEST_ARGS})
+
+# Retired BLE code (README "Retired BLE code"): BLE_IDF.cpp/.h and their flag are gone,
+# debugringbridge is retired without moving another debug flag, and the flag table
+# compiles on the host with its static_asserts.
+set(BLE_RETIRED_CODE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND BLE_RETIRED_CODE_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ble_retired_code
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_retired_code.py
+          ${BLE_RETIRED_CODE_TEST_ARGS})
+
+# Module overview text (README "Module overview text") and repository tool pins
+# (README "Repository tool pins"). Source text and Python only; nothing is compiled.
+foreach(test_name IN ITEMS module_overview_text tool_pins)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py)
+endforeach()
+
+# OLED display-session writer windows (README "OLED display-session writer windows"):
+# the frame commit and the command-result path validate under the display lifecycle
+# writer, release it, push or copy, then re-check without opening a session.
+set(OLED_COMMIT_WINDOW_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_COMMIT_WINDOW_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_commit_window
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_commit_window.py
+          ${OLED_COMMIT_WINDOW_TEST_ARGS})
+
+# OLED leftovers cleared after the merge (README "OLED merge leftovers"): the unified
+# actions placeholder file, the display-off stubs, the failed-login counter comment
+# and the file-verb comments. Source text only; nothing is compiled.
+add_test(
+  NAME oled_merge_leftovers
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_merge_leftovers.py)
+
+# ESP-NOW radio ownership (README "ESP-NOW radio ownership"): espnowOwnsRadio is
+# initialized-or-closing with a compiled-out stub, and the five System_WiFi radio
+# decisions ask it instead of isEspNowInitialized().
+# Camera asynchronous power (README "Camera asynchronous power"): `opencamera async` /
+# `closecamera async` are gated on cameraEnabled and admitted by cam_pwr; the G2
+# Sensors page requests no camera power itself.
+# Structured Add-WiFi (README "Structured Add-WiFi"): wifiAddCommandLine's line parses
+# back through CommandArgs to the given fields, and cmd_wifiadd names a control-character
+# refusal.
+set(DEVICES_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND DEVICES_TEST_ARGS --sanitize)
+endif()
+foreach(test_name IN ITEMS espnow_radio_ownership camera_async_power wifi_structured_add)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
+            ${DEVICES_TEST_ARGS})
+endforeach()
 # Retired auth, session, SSE, help, registry and mutex helpers stay gone;
 # tgRequireAuth admits web requests only and a revoke queues no notice.
 foreach(test_name IN ITEMS dead_auth_helpers_removed)
@@ -1652,8 +1813,9 @@ foreach(test_name IN ITEMS capture_crypto_key llm_tokenizer_loader setting_reade
             ${SETUP_MQTT_TEST_ARGS})
 endforeach()
 # Credential attempt table in System_User: tiers, per-account success, locks
-# that outlive the window and are never evicted; web, serial, UART, MQTT and
-# targeted logins consult it before validating.
+# that outlive the window and are never evicted, one reserved key each for
+# Bluetooth and ESP-NOW, and checkCredentialAttempt; web, serial, UART, MQTT,
+# targeted, BLE, display and ESP-NOW logins consult it before validating.
 add_test(
   NAME credential_attempts
   COMMAND ${Python3_EXECUTABLE}
