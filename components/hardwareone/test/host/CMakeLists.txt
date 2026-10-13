@@ -888,6 +888,18 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_oled_map_context_bar.py
           ${OLED_MAP_CONTEXT_BAR_TEST_ARGS})
+
+# Bond JSON buffers (README "Bond manifest and schema buffers"): the manifest and schema
+# are serialized, received, cached and read back through one checked buffer, never a String.
+set(ESPNOW_BOND_JSON_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_BOND_JSON_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_bond_json
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_bond_json.py
+          ${ESPNOW_BOND_JSON_TEST_ARGS})
 add_test(NAME p4eye_display_pixels COMMAND p4eye_display_pixels_tests)
 add_test(NAME p4eye_display_lifecycle COMMAND p4eye_display_lifecycle_tests)
 add_test(NAME rotary_core

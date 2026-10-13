@@ -469,29 +469,23 @@ static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
     httpd_query_key_value(queryBuf, "fwHash", fwHashParam, sizeof(fwHashParam));
   }
   
-  // If fwHash provided, return that specific manifest
+  // If fwHash provided, return that specific manifest. The owner copies the
+  // cached file into a buffer under the filesystem lock and validates the hash,
+  // so the lock is never held while the response goes out.
   if (strlen(fwHashParam) > 0) {
-    char pathBuf[80];
-    snprintf(pathBuf, sizeof(pathBuf), "%s/%s.json", manifestDir, fwHashParam);
-    String path = pathBuf;
-    String manifest;
-    {
-      FsLockGuard fsGuard("web.espnow.manifest_read");
-      File f = VFS::openGuarded(path, "r", ctx);
-      if (!f) {
-        httpd_resp_send(req, "{\"error\":\"Manifest not found\"}", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
-      }
-      manifest = f.readString();
-      f.close();
+    char* manifest = nullptr;
+    const char* err = nullptr;
+    const size_t len = espnowReadCachedManifest(fwHashParam, ctx, &manifest, &err);
+    if (len == 0) {
+      httpd_resp_send(req, "{\"error\":\"Manifest not found\"}", HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
     }
     
-    // Stream the manifest file content
     webEspnowSendChunk(req, "{\"fwHash\":\"");
     webEspnowSendChunk(req, fwHashParam);
     webEspnowSendChunk(req, "\",\"manifest\":");
-    
-    httpd_resp_send_chunk(req, manifest.c_str(), manifest.length());
+    httpd_resp_send_chunk(req, manifest, len);
+    ps_free(manifest);
     
     webEspnowSendChunk(req, "}");
     httpd_resp_send_chunk(req, NULL, 0);

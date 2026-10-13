@@ -1224,6 +1224,13 @@ bool macEqual6(const uint8_t a[6], const uint8_t b[6]);
 // poll gEspNow->bondSchemaReceived for completion. Master-only.
 bool requestBondSchema(const uint8_t* peerMac);
 
+// Copies the cached manifest of a bonded peer's firmware into one PSRAM buffer
+// (fwHashHex = 32 lowercase hex characters; anything else is refused before the
+// filesystem is touched). The read happens under the filesystem lock; the caller
+// prints or sends the buffer after it is released and ps_free()s *out. Returns
+// the length, or 0 with *err naming the reason.
+size_t espnowReadCachedManifest(const char* fwHashHex, const AuthContext& auth, char** out, const char** err);
+
 // Latest CMD_RESP drained for a command this device sent (any peer). `seq`
 // increments on every result and is 0 until the first one; a sender snapshots
 // espnowCmdResultSeq() before sending and watches for it to change. Written by

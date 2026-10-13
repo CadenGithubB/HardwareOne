@@ -3199,19 +3199,27 @@ static void            addTopoDeviceName(const uint8_t* mac, const char* name);
 static bool            getTopoDeviceName(const uint8_t* mac, char* outBuf, size_t outLen);
 static void            finalizeTopologyStreamLocked(TopologyStream* stream);
 #if ENABLE_BONDED_MODE
-static bool            cacheManifestToLittleFS(const uint8_t fwHash[16], const String& manifest);
+static bool            cacheManifestToLittleFS(const uint8_t fwHash[16], const char* manifest, size_t len);
 #endif
 #if ENABLE_BONDED_MODE
 static void            processBondSettings(const uint8_t* srcMac, const String& deviceName, const String& settingsStr);
-static void            processBondSchema(const uint8_t* srcMac, const String& deviceName, const String& schemaStr);
+static void            processBondSchema(const uint8_t* srcMac, const String& deviceName, const char* schema, size_t len);
 static void            requestBondSettings(const uint8_t* peerMac);
+
+// A received bond JSON file (manifest, schema) is checked in place, in the
+// buffer the file transfer filled, never copied into a String: an Arduino
+// String stops at 65,535 bytes on builds without BOARD_HAS_PSRAM, and the
+// manifest is larger than that.
+static inline bool bondJsonEnvelopeOk(const char* data, size_t len) {
+  return data && len >= 2 && data[0] == '{' && data[len - 1] == '}';
+}
 #endif
 #if ENABLE_BONDED_MODE
 // Process a received manifest from a bonded peer (bond mode handshake step)
-static void processBondModeManifestResp(const uint8_t* srcMac, const String& deviceName, const String& manifestStr) {
+static void processBondModeManifestResp(const uint8_t* srcMac, const String& deviceName, const char* manifest, size_t len) {
   if (!gEspNow) return;
-  BROADCAST_PRINTF("[BOND_SYNC] Manifest received from %s len=%d role=%d",
-                   deviceName.c_str(), manifestStr.length(), (int)gSettings.bondRole);
+  BROADCAST_PRINTF("[BOND_SYNC] Manifest received from %s len=%u role=%d",
+                   deviceName.c_str(), (unsigned)len, (int)gSettings.bondRole);
   
   // Reject if peer is offline (stale transfer from before disconnect)
   if (!gEspNow->bondPeerOnline) {
@@ -3220,8 +3228,8 @@ static void processBondModeManifestResp(const uint8_t* srcMac, const String& dev
   }
   
   // Validate JSON integrity — reject truncated/corrupted file transfers
-  if (manifestStr.length() < 2 || manifestStr[0] != '{' || manifestStr[manifestStr.length() - 1] != '}') {
-    BROADCAST_PRINTF("[BOND_SYNC] REJECTED corrupt manifest (len=%d, not valid JSON object)", manifestStr.length());
+  if (!bondJsonEnvelopeOk(manifest, len)) {
+    BROADCAST_PRINTF("[BOND_SYNC] REJECTED corrupt manifest (len=%u, not valid JSON object)", (unsigned)len);
     gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
     gEspNow->bondSyncRetryCount = 0;
     return;  // Sync tick will re-request
@@ -3232,7 +3240,7 @@ static void processBondModeManifestResp(const uint8_t* srcMac, const String& dev
   gEspNow->bondSyncRetryCount = 0;
 
   if (gEspNow->lastRemoteCapValid) {
-    cacheManifestToLittleFS(gEspNow->lastRemoteCap.fwHash, manifestStr);
+    cacheManifestToLittleFS(gEspNow->lastRemoteCap.fwHash, manifest, len);
   }
   // Sync tick will pick up the next missing item (settings) on next iteration
 }
@@ -5056,8 +5064,7 @@ static void v4h_file_end(const V4RxCtx& ctx) {
         return;
       }
       if (strcmp(filename, "_manifest_out.json") == 0) {
-        String manifestStr((char*)dataBuf, recvBytes);
-        processBondModeManifestResp((uint8_t*)sndMac, senderMacStr, manifestStr);
+        processBondModeManifestResp((uint8_t*)sndMac, senderMacStr, (const char*)dataBuf, recvBytes);
         BROADCAST_PRINTF("[V4_FILE] Manifest processed: %lu bytes", (unsigned long)recvBytes);
       } else if (strcmp(filename, "_settings_out.json") == 0) {
         DEBUG_ESPNOWF("[FILE_END] Detected settings file: %s (%lu bytes)", filename, (unsigned long)recvBytes);
@@ -5067,8 +5074,7 @@ static void v4h_file_end(const V4RxCtx& ctx) {
         BROADCAST_PRINTF("[V4_FILE] Settings processed: %lu bytes", (unsigned long)recvBytes);
       } else {
         DEBUG_ESPNOWF("[FILE_END] Detected schema file: %s (%lu bytes)", filename, (unsigned long)recvBytes);
-        String schemaStr((char*)dataBuf, recvBytes);
-        processBondSchema((uint8_t*)sndMac, senderMacStr, schemaStr);
+        processBondSchema((uint8_t*)sndMac, senderMacStr, (const char*)dataBuf, recvBytes);
         BROADCAST_PRINTF("[V4_FILE] Schema processed: %lu bytes", (unsigned long)recvBytes);
       }
     } else
@@ -7610,11 +7616,9 @@ static void buildCapabilitySummary(CapabilitySummary& cap) {
 }
 
 /**
- * Generate full device manifest (UI apps + CLI command dump)
+ * Fill `doc` with the full device manifest (UI apps + CLI command dump).
  */
-static String generateDeviceManifest() {
-  PSRAM_JSON_DOC(doc);
-  
+static void buildDeviceManifest(JsonDocument& doc) {
   // Device info section
   JsonObject device = doc["device"].to<JsonObject>();
   device["name"] = gSettings.espnowDeviceName;
@@ -7733,16 +7737,61 @@ static String generateDeviceManifest() {
       cmd["admin"] = modules[m].commands[c].requiresAdmin;
     }
   }
-  
-  String manifest;
-  serializeJson(doc, manifest);
-  return manifest;
+}
+
+// Bond JSON files (manifest, schema) are serialized into one PSRAM buffer of
+// exactly measureJson() bytes, never into a String: an Arduino String stops at
+// 65,535 bytes on builds without BOARD_HAS_PSRAM and the manifest is larger.
+// The size limit is kFileSlotMaxFileSize, the largest file the receiver keeps
+// whole in RAM and processes as a bond file; a larger document is refused here
+// with an error instead of being sent. Returns the buffer (caller ps_free()s
+// it) and its length, or nullptr.
+static char* serializeBondJson(JsonDocument& doc, size_t* outLen, const char* tag) {
+  *outLen = 0;
+  const size_t n = measureJson(doc);
+  if (n == 0 || n > kFileSlotMaxFileSize) {
+    ERROR_ESPNOWF("[BOND] %s: JSON is %u bytes (limit %lu) - not sent",
+                  tag, (unsigned)n, (unsigned long)kFileSlotMaxFileSize);
+    return nullptr;
+  }
+  char* buf = (char*)ps_alloc(n + 1, AllocPref::PreferPSRAM, tag);
+  if (!buf) {
+    ERROR_ESPNOWF("[BOND] %s: no memory for %u bytes", tag, (unsigned)(n + 1));
+    return nullptr;
+  }
+  const size_t got = serializeJson(doc, buf, n + 1);
+  if (got != n) {
+    ERROR_ESPNOWF("[BOND] %s: serialized %u of %u bytes", tag, (unsigned)got, (unsigned)n);
+    ps_free(buf);
+    return nullptr;
+  }
+  *outLen = n;
+  return buf;
+}
+
+// Writes `len` bytes to `path` in one write and checks the count; a short write
+// removes the partial file so a later reader never sees it. The caller holds
+// the filesystem lock.
+static bool writeBondJsonFileLocked(const char* path, const char* data, size_t len, const char* authReason) {
+  File f = VFS::openGuarded(path, "w", VFS::systemAuth(authReason), true);
+  if (!f) {
+    ERROR_ESPNOWF("[BOND] cannot open %s for writing", path);
+    return false;
+  }
+  const size_t written = f.write((const uint8_t*)data, len);
+  f.close();
+  if (written != len) {
+    ERROR_ESPNOWF("[BOND] incomplete write of %s (%u of %u bytes)", path, (unsigned)written, (unsigned)len);
+    VFS::removeGuarded(path, VFS::systemAuth(authReason));
+    return false;
+  }
+  return true;
 }
 
 /**
  * Cache manifest to LittleFS keyed by firmware hash
  */
-static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const String& manifest) {
+static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const char* manifest, size_t len) {
   if (!filesystemReady) return false;
   
   // Build filename from hash
@@ -7762,21 +7811,12 @@ static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const String& mani
 
   // Write manifest
   FsLockGuard fsGuard("pair.manifest.cache");
-  File f = VFS::openGuarded(path, "w", VFS::systemAuth("espnow.manifest_cache_write"), true);
-  if (!f) {
-    broadcastOutput("[BOND] ERROR: Failed to open manifest cache file");
+  if (!writeBondJsonFileLocked(path, manifest, len, "espnow.manifest_cache_write")) {
+    broadcastOutput("[BOND] ERROR: Failed to cache the manifest");
     return false;
   }
   
-  size_t written = f.print(manifest);
-  f.close();
-  
-  if (written != manifest.length()) {
-    broadcastOutput("[BOND] ERROR: Incomplete manifest write");
-    return false;
-  }
-  
-  BROADCAST_PRINTF("[BOND] Cached manifest to %s (%u bytes)", path, (unsigned)written);
+  BROADCAST_PRINTF("[BOND] Cached manifest to %s (%u bytes)", path, (unsigned)len);
   return true;
 }
 
@@ -8148,24 +8188,29 @@ static void sendBondSchema(const uint8_t* peerMac) {
   String tempPath = "/system/espnow/this_device/_schema_out.json";
   size_t schemaLen = 0;
   {
-    PSRAM_JSON_DOC(doc);
-    buildSettingsSchemaJson(doc);
-    String schema;
-    serializeJson(doc, schema);
-    schemaLen = schema.length();
-    DEBUG_ESPNOWF("[SCHEMA_SEND] Generated schema JSON: %d bytes", schemaLen);
-
-    FsLockGuard guard("bond.schema.send");
-    File f = VFS::openGuarded(tempPath, "w", VFS::systemAuth("espnow.schema_send_temp"), true);
-    if (!f) {
-      ERROR_ESPNOWF("[SCHEMA_SEND] Cannot create %s", tempPath.c_str());
+    char* schema = nullptr;
+    {
+      PSRAM_JSON_DOC(doc);
+      buildSettingsSchemaJson(doc);
+      schema = serializeBondJson(doc, &schemaLen, "bond.schema");
+    }  // the document is freed before the file write
+    if (!schema) {
       sSchemaTransferInProgress = false;
       return;
     }
-    f.print(schema);
-    f.close();
-    DEBUG_ESPNOWF("[SCHEMA_SEND] Wrote %d bytes to %s", schemaLen, tempPath.c_str());
-    // schema + doc destructors run here — memory freed before transfer
+    DEBUG_ESPNOWF("[SCHEMA_SEND] Generated schema JSON: %u bytes", (unsigned)schemaLen);
+
+    bool written = false;
+    {
+      FsLockGuard guard("bond.schema.send");
+      written = writeBondJsonFileLocked(tempPath.c_str(), schema, schemaLen, "espnow.schema_send_temp");
+    }
+    ps_free(schema);  // freed before the transfer, which streams from the file
+    if (!written) {
+      sSchemaTransferInProgress = false;
+      return;
+    }
+    DEBUG_ESPNOWF("[SCHEMA_SEND] Wrote %u bytes to %s", (unsigned)schemaLen, tempPath.c_str());
   }
 
   DEBUG_ESPNOWF("[SCHEMA_SEND] Calling sendFileToMac for %s", tempPath.c_str());
@@ -8239,30 +8284,39 @@ static void sendBondManifest(const uint8_t* peerMac) {
   sManifestTransferInProgress = true;
 
   BROADCAST_PRINTF("[BOND] manifest-send: building dest=%s", MAC_STR(peerMac));
-  String manifest = generateDeviceManifest();
-  BROADCAST_PRINTF("[BOND] manifest-send: built len=%d", manifest.length());
+  size_t manifestLen = 0;
+  char* manifest = nullptr;
+  {
+    PSRAM_JSON_DOC(doc);
+    buildDeviceManifest(doc);
+    manifest = serializeBondJson(doc, &manifestLen, "bond.manifest");
+  }  // the document is freed before the file write
+  if (!manifest) {
+    BROADCAST_PRINTF("[BOND] manifest-send: ERROR manifest not built (see log)");
+    sManifestTransferInProgress = false;
+    return;
+  }
+  BROADCAST_PRINTF("[BOND] manifest-send: built len=%u", (unsigned)manifestLen);
 
   String tempPath = "/system/_manifest_out.json";
+  bool written = false;
   {
     FsLockGuard guard("bond.manifest.send");
-    if (!filesystemReady) {
+    if (filesystemReady) {
+      if (!VFS::existsGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"))) {
+        VFS::mkdirGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"));
+      }
+      written = writeBondJsonFileLocked(tempPath.c_str(), manifest, manifestLen, "espnow.bond_manifest_send");
+    } else {
       BROADCAST_PRINTF("[BOND] manifest-send: ERROR fs not ready");
-      sManifestTransferInProgress = false;
-      return;
     }
-    if (!VFS::existsGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"))) {
-      VFS::mkdirGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"));
-    }
-    File f = VFS::openGuarded(tempPath, "w", VFS::systemAuth("espnow.bond_manifest_send"), true);
-    if (!f) {
-      BROADCAST_PRINTF("[BOND] manifest-send: ERROR open %s failed", tempPath.c_str());
-      sManifestTransferInProgress = false;
-      return;
-    }
-    f.print(manifest);
-    f.close();
-    BROADCAST_PRINTF("[BOND] manifest-send: wrote %s len=%d", tempPath.c_str(), manifest.length());
   }
+  ps_free(manifest);  // freed before the transfer, which streams from the file
+  if (!written) {
+    sManifestTransferInProgress = false;
+    return;
+  }
+  BROADCAST_PRINTF("[BOND] manifest-send: wrote %s len=%u", tempPath.c_str(), (unsigned)manifestLen);
 
   bool fileSent = sendFileToMac(peerMac, tempPath);
   BROADCAST_PRINTF("[BOND] manifest-send: sendFileToMac rc=%d", (int)fileSent);
@@ -8361,16 +8415,16 @@ bool requestBondSchema(const uint8_t* peerMac) {
  * bondSchemaReceived so polling endpoints (handleBondSettingsSchemaSync)
  * see completion.
  */
-static void processBondSchema(const uint8_t* srcMac, const String& deviceName, const String& schemaStr) {
-  DEBUG_ESPNOWF("[SCHEMA_PROC] processBondSchema: srcMac=%p len=%d", srcMac, schemaStr.length());
+static void processBondSchema(const uint8_t* srcMac, const String& deviceName, const char* schema, size_t len) {
+  DEBUG_ESPNOWF("[SCHEMA_PROC] processBondSchema: srcMac=%p len=%u", srcMac, (unsigned)len);
   if (!srcMac) {
     DEBUG_ESPNOWF("[SCHEMA_PROC] EXIT: srcMac is NULL");
     return;
   }
   // Validate JSON envelope — reject truncated/corrupt transfers (mirrors
   // processBondSettings's check).
-  if (schemaStr.length() < 2 || schemaStr[0] != '{' || schemaStr[schemaStr.length() - 1] != '}') {
-    BROADCAST_PRINTF("[BOND_SYNC] REJECTED corrupt schema (len=%d, not valid JSON object)", schemaStr.length());
+  if (!bondJsonEnvelopeOk(schema, len)) {
+    BROADCAST_PRINTF("[BOND_SYNC] REJECTED corrupt schema (len=%u, not valid JSON object)", (unsigned)len);
     return;
   }
 
@@ -8387,21 +8441,13 @@ static void processBondSchema(const uint8_t* srcMac, const String& deviceName, c
     if (!VFS::existsGuarded(dirPath, VFS::systemAuth("espnow.schema_cache_mkdir"))) {
       VFS::mkdirGuarded(dirPath, VFS::systemAuth("espnow.schema_cache_mkdir"));
     }
-    File f = VFS::openGuarded(filePath, "w", VFS::systemAuth("espnow.schema_cache_write"), true);
-    if (!f) {
-      ERROR_ESPNOWF("[SCHEMA_PROC] Failed to open %s for writing", filePath);
-      return;
-    }
-    size_t written = f.print(schemaStr);
-    f.close();
-    if (written != schemaStr.length()) {
-      ERROR_ESPNOWF("[SCHEMA_PROC] Incomplete write (wrote %d of %d)", written, schemaStr.length());
+    if (!writeBondJsonFileLocked(filePath, schema, len, "espnow.schema_cache_write")) {
       return;
     }
   }
 
   if (gEspNow) gEspNow->bondSchemaReceived = true;
-  BROADCAST_PRINTF("[BOND_SYNC] Schema cached: %d bytes from %s", schemaStr.length(), deviceName.c_str());
+  BROADCAST_PRINTF("[BOND_SYNC] Schema cached: %u bytes from %s", (unsigned)len, deviceName.c_str());
 }
 
 /**
@@ -8526,38 +8572,107 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
 }
 
 /**
- * Load cached manifest from LittleFS by firmware hash
+ * Whether a complete manifest for this firmware hash is cached. Reads two bytes
+ * (the first and the last) instead of loading the file.
  */
-static String loadManifestFromCache(const uint8_t fwHash[16]) {
-  if (!filesystemReady) return "";
-  
-  // Build filename from hash
+static bool manifestCachedFor(const uint8_t fwHash[16]) {
+  if (!filesystemReady) return false;
+
   char keyHex[33];
   for (int i = 0; i < 16; i++) {
     snprintf(keyHex + (i * 2), 3, "%02x", fwHash[i]);
   }
   keyHex[32] = '\0';
-  
+
   char path[64];
   snprintf(path, sizeof(path), "/system/manifests/%s.json", keyHex);
-  
-  if (!VFS::existsGuarded(path, VFS::systemAuth("espnow.manifest_load"))) {
-    return "";  // Not cached
-  }
 
   FsLockGuard fsGuard("pair.manifest.load");
+  if (!VFS::existsGuarded(path, VFS::systemAuth("espnow.manifest_load"))) {
+    return false;  // Not cached
+  }
   File f = VFS::openGuarded(path, "r", VFS::systemAuth("espnow.manifest_load"));
   if (!f) {
-    return "";
+    return false;
   }
-
-  String manifest = f.readString();
+  const size_t size = f.size();
+  bool complete = false;
+  if (size >= 2) {
+    const int first = f.read();
+    const int last = f.seek(size - 1) ? f.read() : -1;
+    complete = (first == '{' && last == '}');
+  }
   f.close();
-  
-  return manifest;
+  return complete;
 }
 
 #endif // ENABLE_BONDED_MODE
+
+// Cached manifests live at /system/manifests/<fwHash>.json, where fwHash is the
+// 32 lowercase hex characters of the peer firmware hash. Copies one into a
+// PSRAM buffer sized from the file (at most kFileSlotMaxFileSize, the largest
+// manifest a bond transfer delivers) while the filesystem lock is held, so the
+// caller prints or sends it after the lock is released. Returns the length and
+// the buffer (caller ps_free()s *out), or 0 with *err naming the reason. Any
+// fwHash that is not 32 hex characters is refused before the filesystem is
+// touched.
+size_t espnowReadCachedManifest(const char* fwHashHex, const AuthContext& auth, char** out, const char** err) {
+  *out = nullptr;
+  *err = "not found";
+  if (!fwHashHex || strlen(fwHashHex) != 32) {
+    *err = "invalid fwHash";
+    return 0;
+  }
+  for (const char* c = fwHashHex; *c; ++c) {
+    if (!((*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'f'))) {
+      *err = "invalid fwHash";
+      return 0;
+    }
+  }
+  if (!filesystemReady) {
+    *err = "filesystem not ready";
+    return 0;
+  }
+  char path[64];
+  snprintf(path, sizeof(path), "/system/manifests/%s.json", fwHashHex);
+
+  FsLockGuard fsGuard("espnow.manifest_read");
+  if (!VFS::existsGuarded(path, auth)) {
+    return 0;
+  }
+  File f = VFS::openGuarded(path, "r", auth);
+  if (!f) {
+    *err = "cannot open";
+    return 0;
+  }
+  const size_t size = f.size();
+  if (size == 0 || size > kFileSlotMaxFileSize) {
+    f.close();
+    *err = "unexpected size";
+    return 0;
+  }
+  char* buf = (char*)ps_alloc(size + 1, AllocPref::PreferPSRAM, "espnow.manifest_read");
+  if (!buf) {
+    f.close();
+    *err = "out of memory";
+    return 0;
+  }
+  size_t got = 0;
+  while (got < size) {
+    const size_t n = f.read((uint8_t*)buf + got, size - got);
+    if (n == 0) break;
+    got += n;
+  }
+  f.close();
+  if (got != size) {
+    ps_free(buf);
+    *err = "read failed";
+    return 0;
+  }
+  buf[size] = '\0';
+  *out = buf;
+  return size;
+}
 
 // ==========================
 // Metadata Exchange Functions
@@ -10514,9 +10629,7 @@ void processMeshHeartbeats() {
         BROADCAST_PRINTF("[BOND_SYNC] Requesting CAP (msgId=%lu)", (unsigned long)reqId);
       } else if (!haveManifest) {
         // Have cap, need manifest — check cache first
-        bool haveCached = false;
-        String cached = loadManifestFromCache(gEspNow->lastRemoteCap.fwHash);
-        haveCached = (cached.length() > 0);
+        const bool haveCached = manifestCachedFor(gEspNow->lastRemoteCap.fwHash);
         if (haveCached) {
           gEspNow->bondManifestReceived = true;
           BROADCAST_PRINTF("[BOND_SYNC] Manifest found in cache, skipping request");
@@ -17081,6 +17194,26 @@ const char* cmd_bond_resync(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// Prints a JSON buffer in 200-byte lines (the debug queue holds 256-byte lines).
+// A manifest is several hundred lines and the output queue drops lines when
+// full, so each line first waits (at most 500 ms) until only a few lines are
+// pending.
+static void broadcastBondJsonChunks(const char* data, size_t len) {
+  QueueHandle_t q = getDebugQueue();
+  char chunkBuf[201];
+  while (len > 0) {
+    for (int waited = 0; q && uxQueueMessagesWaiting(q) > 16 && waited < 50; ++waited) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    const size_t chunk = (len > 200) ? 200 : len;
+    memcpy(chunkBuf, data, chunk);
+    chunkBuf[chunk] = '\0';
+    broadcastOutput(chunkBuf);
+    data += chunk;
+    len -= chunk;
+  }
+}
+
 /**
  * Show cached remote manifests: bondshowremotemanifest [fwHash]
  * Without args: list all cached manifests
@@ -17135,36 +17268,19 @@ const char* cmd_bond_showremotemanifest(const String& argsInput) {
   }
   
   // Show specific manifest by fwHash
-  char path[96];
-  snprintf(path, sizeof(path), "%s/%s.json", manifestDir, args.c_str());
-  if (!VFS::existsGuarded(path, currentAuthContext())) {
-    return "Error: Manifest not found. Use 'bondshowremotemanifest' to list available.";
+  char* manifest = nullptr;
+  const char* err = nullptr;
+  const size_t len = espnowReadCachedManifest(args.c_str(), currentAuthContext(), &manifest, &err);
+  if (len == 0) {
+    snprintf(getDebugBuffer(), 1024,
+             "Error: Manifest %s (%s). Use 'bondshowremotemanifest' to list available.", args.c_str(), err);
+    return getDebugBuffer();
   }
 
-  FsLockGuard guard("bond.manifest.read");
-  File f = VFS::openGuarded(path, "r", currentAuthContext());
-  if (!f) {
-    return "Error: Failed to open manifest file.";
-  }
-  
-  String manifest = f.readString();
-  f.close();
-  
   BROADCAST_PRINTF("=== Remote Manifest: %s ===", args.c_str());
-  BROADCAST_PRINTF("Size: %u bytes", (unsigned)manifest.length());
-  
-  // Broadcast manifest in 200-byte chunks
-  const char* ptr = manifest.c_str();
-  size_t remaining = manifest.length();
-  char chunkBuf[201];
-  while (remaining > 0) {
-    size_t chunk = (remaining > 200) ? 200 : remaining;
-    memcpy(chunkBuf, ptr, chunk);
-    chunkBuf[chunk] = '\0';
-    broadcastOutput(chunkBuf);
-    ptr += chunk;
-    remaining -= chunk;
-  }
+  BROADCAST_PRINTF("Size: %u bytes", (unsigned)len);
+  broadcastBondJsonChunks(manifest, len);
+  ps_free(manifest);
   
   return "Manifest displayed above.";
 }
@@ -17175,23 +17291,21 @@ const char* cmd_bond_showremotemanifest(const String& argsInput) {
 const char* cmd_bond_showmanifest(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String manifest = generateDeviceManifest();
+  size_t len = 0;
+  char* manifest = nullptr;
+  {
+    PSRAM_JSON_DOC(doc);
+    buildDeviceManifest(doc);
+    manifest = serializeBondJson(doc, &len, "bond.manifest.show");
+  }
+  if (!manifest) {
+    return "Error: Manifest could not be built (see log).";
+  }
   
   broadcastOutput("=== Device Manifest ===");
-  BROADCAST_PRINTF("Size: %u bytes", (unsigned)manifest.length());
-  
-  // Broadcast manifest in 200-byte chunks (debug queue buffer is 256 bytes)
-  const char* ptr = manifest.c_str();
-  size_t remaining = manifest.length();
-  char chunkBuf[201];
-  while (remaining > 0) {
-    size_t chunk = (remaining > 200) ? 200 : remaining;
-    memcpy(chunkBuf, ptr, chunk);
-    chunkBuf[chunk] = '\0';
-    broadcastOutput(chunkBuf);
-    ptr += chunk;
-    remaining -= chunk;
-  }
+  BROADCAST_PRINTF("Size: %u bytes", (unsigned)len);
+  broadcastBondJsonChunks(manifest, len);
+  ps_free(manifest);
   
   return "Manifest displayed above.";
 }
