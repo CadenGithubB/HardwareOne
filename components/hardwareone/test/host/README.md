@@ -2408,6 +2408,30 @@ python3 components/hardwareone/test/host/test_oled_map_context_bar.py --sanitize
 
 `oled_map_context_bar` compiles System_Maps.h's `LocationContext`, the context-bar append helper from OLED_Mode_Map.cpp and the `displayGPSMap` block that builds "On <road> • Near <area> (<n>m)" in its 128-byte `contextBuf`, all unchanged. Inside them `snprintf`/`vsnprintf` follow the C contract and store every byte from instrumented code, so ASan sees any write outside `contextBuf`. Each case runs in its own process: short names, area only, road only, no names, a 127-byte exact fit, and road and area names of 58+58, 58+57 and 63+63 characters with the area near and far. The bar text must be the whole context cut at 127 bytes, stay terminated inside the array, and `pos` must equal its length and stay below 128. `--component <dir>` reads the production sources from another tree; the f4cc542 sources fail four cases: `pos` ends at 134 or 139, and with two 58- or 63-character names and a near area the third append forms `contextBuf + 129` (UBSan bounds error; with ASan alone, a stack-buffer-overflow write).
 
+## Bond manifest and schema buffers
+
+`espnow_bond_json` guards the bond manifest (every command's name and help, 70,773
+bytes on xiao-default today) against the 65,535-byte cap of an Arduino `String` on boards
+without PSRAM support in the core. Source contracts: `sendBondManifest`,
+`sendBondSchema` and `cmd_bond_showmanifest` serialize through `serializeBondJson`;
+`v4h_file_end` hands the transfer buffer to the manifest and schema handlers without a
+`String` copy; `cmd_bond_showremotemanifest` and the fwHash branch of
+`handleEspNowRemoteManifest` read through `espnowReadCachedManifest` and the web branch
+takes no filesystem lock itself. It then compiles the production `bondJsonEnvelopeOk`,
+`serializeBondJson`, `writeBondJsonFileLocked`, `cacheManifestToLittleFS`,
+`processBondModeManifestResp`, `processBondSchema`, `manifestCachedFor` and
+`espnowReadCachedManifest` with the vendored ArduinoJson and a harness-local in-memory
+filesystem whose reads and writes assert the filesystem lock. A ~110 KB manifest is
+serialized into a buffer of exactly `measureJson()` bytes, received, cached and read
+back byte for byte; a manifest cut at 65,503 bytes is rejected; a document over
+`kFileSlotMaxFileSize`, an allocation failure, a short write (the partial file is
+removed), a failed read and malformed hashes (`../`, uppercase, wrong length; no
+filesystem call) are refused, and every buffer is freed. `broadcastBondJsonChunks`, the
+console printer of a manifest dump, runs against a modeled 64-line output queue that
+drops when full and must deliver every line. `--component`/`--source-dir`
+point it at another tree; ASan/UBSan follow `--sanitize`. The radio transfer, the
+senders' `sendFileToMac` and the web response are not run.
+
 ## Camera lifecycle and backends
 
 ```sh
