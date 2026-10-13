@@ -33,26 +33,33 @@ size_t sttPsramFree();  // host builds: the test harness supplies free PSRAM
 
 // Continuous-session latency features (measured on the P4 with the 15x5
 // model, speech end -> caption ~3.6 s -> ~1.7 s together with the runtime's
-// HW1_STT_RESIDENT_MODEL). Capture-time features and early drafts remain on.
-// Tail trimming and its speculative finals are now opt-in: the default keeps
-// every sample of a closed phrase, including quiet word endings. A features
-// file or -D can select the legacy policy for controlled comparisons. These
-// choices apply to Dictation, QuickNote, Transcription and Conversate.
+// HW1_STT_RESIDENT_MODEL). Capture-time features, early drafts, tail trimming
+// and its speculative finals are all on by default. The trim keeps 500 ms
+// after the last detected speech (200 ms until the 2026-10-11 Food-audio
+// investigation, where that short tail could clip quiet word endings). A
+// phrase closes after 600 ms of silence (1 s below 4 s), so the trim drops
+// only the last ~100 ms of a closing 600 ms pause. -DHW1_STT_TRIM_SILENCE=0
+// (or a features file) keeps every sample of a closed phrase instead, and
+// turns speculative finals off with it. These choices apply to Dictation,
+// QuickNote, Transcription and Conversate.
 
 // Log-mel rows are computed while a phrase is still being captured; the final
 // call only computes the rows after the cache and runs CMVN + quantize.
 #ifndef HW1_STT_CAPTURE_FEATURES
 #define HW1_STT_CAPTURE_FEATURES 1
 #endif
-// Preserve the complete captured phrase by default. The old voiced-end +
-// 200 ms shortcut can remove quiet endings even after capture retained them.
-// Keeping the tail costs extra final inference time, without delaying drafts.
+// Transcribe a phrase closed by a pause only up to its voiced end + 500 ms
+// (kTrimTailSamples), which shortens the final's inference and lets the
+// speculative final below start before the pause closes the phrase. The
+// earlier 200 ms tail could clip quiet word endings; 500 ms keeps most of
+// the pause. -DHW1_STT_TRIM_SILENCE=0 restores full phrases (every captured
+// sample, at the cost of a later final).
 #ifndef HW1_STT_TRIM_SILENCE
-#define HW1_STT_TRIM_SILENCE 0
+#define HW1_STT_TRIM_SILENCE 1
 #endif
-// Needs HW1_STT_TRIM_SILENCE: once a phrase's trimmed input is captured and
-// its pause will close it, its final is computed early and published when
-// the phrase closes exactly as predicted.
+// Needs HW1_STT_TRIM_SILENCE and follows it by default: once a phrase's
+// trimmed input is captured and its pause will close it, its final is
+// computed early and published when the phrase closes exactly as predicted.
 #ifndef HW1_STT_SPECULATIVE_FINAL
 #define HW1_STT_SPECULATIVE_FINAL HW1_STT_TRIM_SILENCE
 #endif
@@ -619,16 +626,20 @@ struct FeCache {
 #endif
 #if HW1_STT_TRIM_SILENCE
 // A phrase that closes on a pause, or at the session end, is transcribed only
-// up to its voiced end + 200 ms. The voiced end is the end of the last
+// up to its voiced end + 500 ms. The voiced end is the end of the last
 // ambient-voiced run longer than 30 ms (the
 // segmenter's trimCut = max(16, 2 x floor) gate with the silence-blip rule),
-// never the peak/8 stop gate, so quiet word endings stay in. Hard-limit cuts
-// are never trimmed. Only the inference copy is shortened: the published
-// start/end samples, the saved transcript and the wipe cover the whole phrase.
-constexpr size_t kTrimTailSamples = STT_SAMPLE_RATE / 5;
+// never the peak/8 stop gate. Even so, a 200 ms tail could clip quiet word
+// endings below that gate (Food-audio investigation, 2026-10-11); 500 ms
+// keeps them and still drops ~100 ms of a closing 600 ms pause. It must stay
+// shorter than that pause, or no phrase would be trimmed or speculated on.
+// Hard-limit cuts are never trimmed. Only the inference copy is shortened:
+// the published start/end samples, the saved transcript and the wipe cover
+// the whole phrase.
+constexpr size_t kTrimTailSamples = STT_SAMPLE_RATE / 2;
 #endif
 #if HW1_STT_SPECULATIVE_FINAL
-// Speculative final, on top of the trim: once a phrase's voiced end + 200 ms
+// Speculative final, on top of the trim: once a phrase's voiced end + 500 ms
 // has been captured and its pause would close it as an ordinary Pause
 // (Segmenter::speculation), the capture task snapshots exactly the trimmed
 // input into the draft buffer (no extra PSRAM; a running draft is preempted
@@ -2078,8 +2089,9 @@ static void sttContinuousWorker(void*) {
       // the exact captured extent, so no samples disappear or move in time.
       size_t retainedSamples = slot->samples;
 #if HW1_STT_TRIM_SILENCE
-      // Opt-in legacy trim for controlled comparisons. The default forwards
-      // the full captured phrase, including all of its quiet ending.
+      // Default trim: a pause or session-end phrase is inferred up to its
+      // voiced end + 500 ms (kTrimTailSamples). Built with
+      // -DHW1_STT_TRIM_SILENCE=0, the full captured phrase is forwarded.
       if (slot->endKind != hw1::stt::SegmentEnd::HardLimit && slot->voicedEnd &&
           slot->voicedEnd + kTrimTailSamples < slot->samples)
         retainedSamples = slot->voicedEnd + kTrimTailSamples;
@@ -2113,7 +2125,7 @@ static void sttContinuousWorker(void*) {
         STTFeaturePrefix prefix;
 #if HW1_STT_CAPTURE_FEATURES
         // Rows computed during capture for this phrase. The trim may infer
-        // only a prefix (voiced end + 200 ms); then only the cached rows whose
+        // only a prefix (voiced end + 500 ms); then only the cached rows whose
         // samples all lie inside that prefix are used, row r with
         // (r + 1) * 160 <= inferenceSamples. Such a row never reflects at the
         // end, so it equals the batch frontend's row of the trimmed input; the

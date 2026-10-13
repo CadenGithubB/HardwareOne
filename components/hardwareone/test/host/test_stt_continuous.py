@@ -25,7 +25,11 @@ def main():
     group.add_argument('--thread-sanitize', action='store_true', help='ThreadSanitizer (supported hosts only)')
     parser.add_argument('--repeat', type=int, default=1)
     parser.add_argument('--speakers', action='store_true', help='Exercise controlled late speaker labels, cancellation, bounded saves and session fences')
-    parser.add_argument('--trim-silence', action='store_true', help='Exercise legacy trailing trim and speculative-final opt-ins instead of full-phrase default')
+    policy = parser.add_mutually_exclusive_group()
+    policy.add_argument('--full-phrase', action='store_true',
+                        help='Build the opt-out (-DHW1_STT_TRIM_SILENCE=0): full phrases, no speculative finals')
+    policy.add_argument('--trim-silence', action='store_true',
+                        help='Alias of the default: production trailing trim (500 ms tail) with speculative finals')
     args = parser.parse_args()
     if not 1 <= args.repeat <= 100:
         parser.error('--repeat must be 1..100')
@@ -54,10 +58,12 @@ def main():
                '-Wno-unused-function', str(unit), '-o', str(exe)]
         if args.speakers:
             cmd += ['-DCONFIG_IDF_TARGET_ESP32P4=1', '-DENABLE_STT_SPEAKER_LABELS=1']
-        if args.trim_silence:
-            cmd += ['-DHW1_STT_TRIM_SILENCE=1', '-DHW1_STT_SPECULATIVE_FINAL=1']
+        if args.full_phrase:
+            cmd += ['-DHW1_STT_TRIM_SILENCE=0', '-DHW1_STT_SPECULATIVE_FINAL=0', '-DHW1_STT_TEST_EXPECT_FULL_PHRASE=1']
         else:
-            cmd += ['-DHW1_STT_TEST_EXPECT_FULL_PHRASE=1']
+            # Production defaults (no switch overrides): the harness asserts
+            # they trim with speculative finals and the 500 ms tail.
+            cmd += ['-DHW1_STT_TEST_EXPECT_DEFAULT_TRIM=1']
         if args.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
         elif args.thread_sanitize:

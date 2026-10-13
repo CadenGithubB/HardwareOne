@@ -339,9 +339,20 @@ STTLocalCallBudget sttLocalCallBudget(size_t samples, const STTLocalSession* ses
 }
 #define free trackedFree
 // INSERT_BROKER
+#if HW1_STT_TEST_EXPECT_DEFAULT_TRIM
+static_assert(HW1_STT_TRIM_SILENCE && HW1_STT_SPECULATIVE_FINAL,
+              "the default must trim pause tails and promote speculative finals");
+static_assert(kTrimTailSamples == STT_SAMPLE_RATE / 2, "the default trim keeps 500 ms after the voiced end");
+#endif
 #if HW1_STT_TEST_EXPECT_FULL_PHRASE
 static_assert(!HW1_STT_TRIM_SILENCE && !HW1_STT_SPECULATIVE_FINAL,
-              "the default must retain full phrases without speculative final promotion");
+              "the opt-out build must retain full phrases without speculative final promotion");
+#endif
+#if HW1_STT_TRIM_SILENCE
+// The scenarios below place speculation feeds relative to the tail: a 600 ms
+// pause must still be open one capture block (plus margin) after voiced end +
+// kTrimTailSamples, or nothing would be speculated on before it closes.
+static_assert(kTrimTailSamples % 160 == 0 && kTrimTailSamples + 1200 < 9600, "trim tail shorter than the 600 ms pause");
 #endif
 static_assert(kStreamSamples == kPhraseCap, "harness phrase cap");
 #undef free
@@ -595,7 +606,7 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
       expectInference = slot.samples;
 #if HW1_STT_TRIM_SILENCE
       if (slot.endKind != hw1::stt::SegmentEnd::HardLimit && slot.voicedEnd &&
-          slot.voicedEnd + 3200 < slot.samples) expectInference = slot.voicedEnd + 3200;
+          slot.voicedEnd + kTrimTailSamples < slot.samples) expectInference = slot.voicedEnd + kTrimTailSamples;
       if (expectInference != slot.samples) ++trimmedCalls;
 #endif
     }
@@ -1372,14 +1383,14 @@ static void testKeepWarm() {
 }
 
 // trim: pause/session-end phrases are inferred only up to the end of their last
-// voiced run longer than 30 ms plus 200 ms; published spans stay whole.
+// voiced run longer than 30 ms plus kTrimTailSamples; published spans stay whole.
 #if HW1_STT_TRIM_SILENCE
 static void testTrailingTrim() {
   struct Case { std::vector<std::pair<uint64_t, uint64_t>> voice; size_t raw, inference; };
   const Case cases[] = {
-    {{{0, 80000}}, 89600, 83200},                          // 5 s voice, 600 ms pause
-    {{{0, 80000}, {83200, 83680}}, 90080, 83200},          // + 30 ms blip: ignored
-    {{{0, 80000}, {83200, 83840}}, 93440, 87040},          // + 40 ms run: counts
+    {{{0, 80000}}, 89600, 80000 + kTrimTailSamples},                  // 5 s voice, 600 ms pause
+    {{{0, 80000}, {83200, 83680}}, 90080, 80000 + kTrimTailSamples},  // + 30 ms blip: ignored
+    {{{0, 80000}, {83200, 83840}}, 93440, 83840 + kTrimTailSamples},  // + 40 ms run: counts
   };
   for (const auto& c : cases) {
     reset(); allVoice = false; voiceIntervals = c.voice;
@@ -1403,11 +1414,15 @@ static void testTrailingTrim() {
   const auto token = begin(); started(token);
   feed(token, 48000); assert(sttRequestFinish(owner, token)); complete(token);
   assert(engineHistory.size() == 1 && engineHistory[0].rawSamples == 48000 && engineHistory[0].inferenceSamples == 48000);
-  // Session end after a short pause: trimmed like a pause.
+  // Session end after a short pause (longer than the tail, shorter than the
+  // 1 s short close of this 3 s phrase): trimmed like a pause.
   reset(); allVoice = false; voiceIntervals = {{0, 48000}};
   const auto late = begin(); started(late);
-  feed(late, 48000 + 8000); assert(sttRequestFinish(owner, late)); complete(late);
-  assert(engineHistory.size() == 1 && engineHistory[0].rawSamples == 56000 && engineHistory[0].inferenceSamples == 51200);
+  constexpr size_t kLatePause = kTrimTailSamples + 800;
+  static_assert(kLatePause < 16000, "the short pause must not close the phrase");
+  feed(late, 48000 + kLatePause); assert(sttRequestFinish(owner, late)); complete(late);
+  assert(engineHistory.size() == 1 && engineHistory[0].rawSamples == 48000 + kLatePause &&
+         engineHistory[0].inferenceSamples == 48000 + kTrimTailSamples);
   assert(trimmedCalls > 0);
 }
 #endif
@@ -1426,7 +1441,7 @@ static void assertTranscribedOnce(uint32_t sequence, size_t samples) {
 }
 #if HW1_STT_SPECULATIVE_FINAL
 // combined: feed to under one block (1024) before a speculation point (voiced end
-// + 200 ms), let the worker finish any draft, then feed past it, so the
+// + kTrimTailSamples), let the worker finish any draft, then feed past it, so the
 // trigger falls in the first block, where the capture task's speculation
 // check runs before any new draft snapshot. While a draft runs (the harness's
 // unstaged drafts never report getting past their frontend) the capture task
@@ -1439,15 +1454,16 @@ static void feedPastSpeculation(STTToken token, uint64_t before, uint64_t after)
         "drafts idle before the speculation point");
   feed(token, after);
 }
-// speculation: speculation starts at voiced end + 200 ms, is promoted when the pause
+// speculation: speculation starts at voiced end + kTrimTailSamples, is promoted when the pause
 // closes the phrase with the same voiced end, and is dropped when speech
 // resumes; short phrases closed by the 1 s short close speculate too, phrases
 // cut at 10 s never do.
 static void testSpeculativeFinal() {
-  // Promoted: 5 s voice; feed to 5.35 s, let the run finish, then the pause.
+  // Promoted: 5 s voice; feed to just past its speculation point (still inside
+  // the 600 ms pause, which closes at 89600), let the run finish, then the pause.
   reset(); allVoice = false; voiceIntervals = {{0, 80000}};
   auto token = begin(); started(token);
-  feedPastSpeculation(token, 83000, 85600);
+  feedPastSpeculation(token, 80000 + kTrimTailSamples - 200, 80000 + kTrimTailSamples + 1200);
   await([] { return specCalls == 1; }, "speculative run started");
   await([] { return specHeld(); }, "speculative result held");
   assert(engineCalls == 0);
@@ -1456,32 +1472,35 @@ static void testSpeculativeFinal() {
   auto chunk = peek(token);
   assert(std::string(chunk.text) == "segment 1" && chunk.endSample - chunk.startSample == 89600);
   assert(engineCalls == 0 && engineHistory.empty() && specHistory.size() == 1);
-  assert(specHistory[0].start == kCalibrationSamples && specHistory[0].samples == 83200 && specHistory[0].sequence == 1);
+  assert(specHistory[0].start == kCalibrationSamples && specHistory[0].samples == 80000 + kTrimTailSamples && specHistory[0].sequence == 1);
   assert(sttAcknowledgeChunk(owner, token, 1));
   assert(!specHeld());  // consumed by the promotion
   assert(sttRequestFinish(owner, token)); complete(token);
 
-  // Speech resumes 400 ms later: the held result is dropped, and the second
-  // pause (voiced end 6.0 s) speculates again and is promoted.
-  reset(); allVoice = false; voiceIntervals = {{0, 80000}, {86400, 96000}};
+  // Speech resumes 580 ms later (after the speculation point, before the
+  // 600 ms close): the held result is dropped, and the second pause (voiced
+  // end 6.0 s) speculates again and is promoted.
+  constexpr uint64_t kResume = 80000 + 9280;
+  static_assert(80000 + kTrimTailSamples + 1200 <= kResume, "speech resumes after the speculation feed");
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}, {kResume, 96000}};
   token = begin(); started(token);
-  feedPastSpeculation(token, 83000, 85600);
+  feedPastSpeculation(token, 80000 + kTrimTailSamples - 200, 80000 + kTrimTailSamples + 1200);
   await([] { return specHeld(); }, "first speculative result held");
-  feedPastSpeculation(token, 99000, 96000 + 5600);
+  feedPastSpeculation(token, 96000 + kTrimTailSamples - 200, 96000 + kTrimTailSamples + 1200);
   await([] { return specCalls == 2; }, "second speculative run");
   await([] { return specHeld(); }, "second speculative result held");
   feed(token, 9 * 16000);
   await([&] { return snapshot(token).segmentsCompleted == 1; }, "final after resumed speech");
   chunk = peek(token);
   assert(chunk.endSample - chunk.startSample == 96000 + 9600);
-  assert(engineHistory.empty() && specHistory.size() == 2 && specHistory[1].samples == 96000 + 3200);
+  assert(engineHistory.empty() && specHistory.size() == 2 && specHistory[1].samples == 96000 + kTrimTailSamples);
   assert(sttAcknowledgeChunk(owner, token, 1));
   assert(sttRequestFinish(owner, token)); complete(token);
 
   // A run still busy when speech resumes is aborted; the final then runs normally.
-  reset(); allVoice = false; voiceIntervals = {{0, 80000}, {86400, 96000}}; specHold = true;
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}, {kResume, 96000}}; specHold = true;
   token = begin(); started(token);
-  feedPastSpeculation(token, 83000, 85600);
+  feedPastSpeculation(token, 80000 + kTrimTailSamples - 200, 80000 + kTrimTailSamples + 1200);
   await([] { return specCalls == 1; }, "held speculative run");
   feed(token, 9 * 16000);
   await([] { return specAborts == 1; }, "speculative run aborted by resumed speech");
@@ -1496,7 +1515,7 @@ static void testSpeculativeFinal() {
   // promoted; the later phrase then runs normally.
   reset(); allVoice = false; voiceIntervals = {{0, 80000}, {96000, 176000}}; specHold = true;
   token = begin(); started(token);
-  feedPastSpeculation(token, 83000, 85600);
+  feedPastSpeculation(token, 80000 + kTrimTailSamples - 200, 80000 + kTrimTailSamples + 1200);
   await([] { return specCalls == 1; }, "held speculative run for phrase 1");
   feed(token, 14 * 16000);
   await([&] { return snapshot(token).segmentsCaptured == 2; }, "phrase 2 closed behind the matched phrase 1");
@@ -1504,24 +1523,24 @@ static void testSpeculativeFinal() {
   assert(specAborts == 0 && engineCalls == 0);
   specHold = false;
   await([&] { return snapshot(token).segmentsCompleted == 2; }, "promoted phrase 1, then phrase 2");
-  assert(specHistory.size() == 1 && specHistory[0].sequence == 1 && specHistory[0].samples == 83200);
+  assert(specHistory.size() == 1 && specHistory[0].sequence == 1 && specHistory[0].samples == 80000 + kTrimTailSamples);
   assert(engineHistory.size() == 1 && engineHistory[0].sequence == 2);
   std::vector<STTTextChunk> queued; acknowledgeAll(token, &queued);
   assert(queued.size() == 2 && std::string(queued[0].text) == "segment 1" && std::string(queued[1].text) == "segment 2");
   assert(sttRequestFinish(owner, token)); complete(token);
 
   // A sub-4 s phrase (1 s voice) that short-close closes on its 1 s pause
-  // speculates on voiced end + 200 ms as well and is promoted.
+  // speculates on voiced end + kTrimTailSamples as well and is promoted.
   reset(); allVoice = false; voiceIntervals = {{0, 16000}};
   token = begin(); started(token);
-  feedPastSpeculation(token, 19000, 16000 + 3200 + 2400);
+  feedPastSpeculation(token, 16000 + kTrimTailSamples - 200, 16000 + kTrimTailSamples + 2400);
   await([] { return specCalls == 1; }, "speculative run on a short phrase");
   await([] { return specHeld(); }, "short phrase's speculative result held");
   feed(token, 6 * 16000);
   await([&] { return snapshot(token).segmentsCompleted == 1; }, "promoted short phrase");
   chunk = peek(token);
   assert(chunk.endSample - chunk.startSample == 32000 && std::string(chunk.text) == "segment 1");
-  assert(engineHistory.empty() && specHistory.size() == 1 && specHistory[0].samples == 16000 + 3200);
+  assert(engineHistory.empty() && specHistory.size() == 1 && specHistory[0].samples == 16000 + kTrimTailSamples);
   assert(sttRequestFinish(owner, token)); complete(token);
   // A 10 s hard limit never speculates.
   reset();
@@ -1574,35 +1593,37 @@ static void testShortClose() {
 
 #if HW1_STT_SPECULATIVE_FINAL
 // All four together: short-close's sub-4 s close (1 s of silence) is
-// speculated on voiced end + 200 ms (the trimmed input) and promoted; a phrase
+// speculated on voiced end + kTrimTailSamples (the trimmed input) and promoted; a phrase
 // that reaches 4 s during its pause closes on the 600 ms pause and is
 // speculated/promoted as in speculation.
 static void testShortCloseSpeculation() {
   // 2 s voice: 600 ms of silence leaves it at 2.6 s (< 4 s), so only short-close's 1 s
-  // pause closes it (span 3 s); the speculative run takes voiced end + 200 ms.
+  // pause closes it (span 3 s); the speculative run takes voiced end + kTrimTailSamples.
   reset(); allVoice = false; voiceIntervals = {{0, 32000}};
   auto token = begin(); started(token);
-  feedPastSpeculation(token, 35000, 32000 + 3200 + 2400);
+  feedPastSpeculation(token, 32000 + kTrimTailSamples - 200, 32000 + kTrimTailSamples + 2400);
   await([] { return specCalls == 1; }, "speculation on a short-close phrase");
   await([] { return specHeld(); }, "held short-close speculative result");
   feed(token, 6 * 16000);
   await([&] { return snapshot(token).segmentsCompleted == 1; }, "short-close short phrase");
   auto chunk = peek(token);
   assert(chunk.endSample - chunk.startSample == 48000 && std::string(chunk.text) == "segment 1");
-  assert(engineHistory.empty() && specHistory.size() == 1 && specHistory[0].samples == 32000 + 3200);
+  assert(engineHistory.empty() && specHistory.size() == 1 && specHistory[0].samples == 32000 + kTrimTailSamples);
   assert(sttAcknowledgeChunk(owner, token, 1));
   assert(sttRequestFinish(owner, token)); complete(token);
 
   // Voice 0-1 s and 1.8-3.5 s: 4 s is reached during the second pause, so the
   // 600 ms rule closes it (span 4.1 s) and it is speculated on voiced end +
-  // 200 ms, then promoted. The first pause is speculated on too (a 1 s short
-  // close could have followed); that result is dropped when speech resumes.
+  // kTrimTailSamples, then promoted. The first (800 ms) pause is speculated on
+  // too (a 1 s short close could have followed); that result is dropped when
+  // speech resumes.
+  static_assert(16000 + kTrimTailSamples + 2400 <= 28800, "first pause speculates before speech resumes");
   reset(); allVoice = false; voiceIntervals = {{0, 16000}, {28800, 56000}};
   token = begin(); started(token);
-  feedPastSpeculation(token, 19000, 16000 + 3200 + 2400);
+  feedPastSpeculation(token, 16000 + kTrimTailSamples - 200, 16000 + kTrimTailSamples + 2400);
   await([] { return specCalls == 1; }, "speculation in the first, short pause");
   await([] { return specHeld(); }, "held first-pause speculative result");
-  feedPastSpeculation(token, 59000, 56000 + 3200 + 960);
+  feedPastSpeculation(token, 56000 + kTrimTailSamples - 200, 56000 + kTrimTailSamples + 1200);
   await([] { return specCalls == 2; }, "speculation on a phrase reaching 4 s in its pause");
   await([] { return specHeld(); }, "held speculative result");
   feed(token, 10 * 16000);
@@ -1610,7 +1631,7 @@ static void testShortCloseSpeculation() {
   chunk = peek(token);
   assert(chunk.endSample - chunk.startSample == 65600 && std::string(chunk.text) == "segment 1");
   assert(engineHistory.empty() && specHistory.size() == 2);
-  assert(specHistory[0].samples == 16000 + 3200 && specHistory[1].samples == 56000 + 3200);
+  assert(specHistory[0].samples == 16000 + kTrimTailSamples && specHistory[1].samples == 56000 + kTrimTailSamples);
   assert(sttAcknowledgeChunk(owner, token, 1));
   assert(sttRequestFinish(owner, token)); complete(token);
 
@@ -1623,7 +1644,7 @@ static void testShortCloseSpeculation() {
   await([&] { return snapshot(token).segmentsCompleted == 4; }, "four short replies");
   // Pre-roll: none before the first (calibration ends at its voice), 300 ms later.
   for (const auto& call : engineHistory) assert(call.rawSamples == (call.sequence > 1 ? 44800u : 40000u));
-  for (uint32_t seq = 1; seq <= 4; ++seq) assertTranscribedOnce(seq, (seq > 1 ? 4800 : 0) + 24000 + 3200);
+  for (uint32_t seq = 1; seq <= 4; ++seq) assertTranscribedOnce(seq, (seq > 1 ? 4800 : 0) + 24000 + kTrimTailSamples);
   for (uint32_t seq = 1; seq <= 4; ++seq) {
     STTTextChunk out; assert(sttReadChunk(owner, token, &out) && out.sequence == seq);
     assert(sttAcknowledgeChunk(owner, token, seq));
@@ -1636,17 +1657,20 @@ static void testShortCloseSpeculation() {
 // frontend (it reported Inference: the runtime reads PCM only in its frontend),
 // and the draft then stops at its next stage check. A draft still in its
 // frontend defers the copy to a later capture block, as with no draft before.
-// Each case feeds to just before the 5 s phrase's speculation point (voiced end
-// 80000 + 200 ms = 83200), then exactly one 1024-sample capture block past it.
+// Each case feeds to under one block before the 5 s phrase's speculation point
+// (voiced end 80000 + kTrimTailSamples), then exactly one 1024-sample capture
+// block past it; a second block after that still ends inside the 600 ms pause
+// (closed at 89600).
 struct SpecRequest { bool live, copied, wanted; uint64_t start; size_t voiced, samples; };
 static SpecRequest specRequest() {
   std::lock_guard<std::mutex> lock(gSTTMux); assert(gRun);
   return {gRun->specLiveId != 0, gRun->specCopied, gRun->specWanted, gRun->specStart, gRun->specVoiced, gRun->specSamples};
 }
 static bool draftIdle() { std::lock_guard<std::mutex> lock(gSTTMux); return gRun && !gRun->draftBusy && !gRun->draftReady; }
-constexpr uint64_t kSpecBefore = 83000, kSpecTrigger = kSpecBefore + kStreamReadSamples;
+constexpr uint64_t kSpecBefore = 80000 + kTrimTailSamples - 1000, kSpecTrigger = kSpecBefore + kStreamReadSamples;
+static_assert(kSpecTrigger >= 80000 + kTrimTailSamples && kSpecTrigger + kStreamReadSamples < 89600, "speculation copy geometry");
 // The 5 s phrase closes on its 600 ms pause and is promoted from the one
-// speculative run on [start, start + 83200), with no final run.
+// speculative run on [start, start + 80000 + kTrimTailSamples), with no final run.
 static void assertPromotedFivePhrase(STTToken token) {
   feed(token, 8 * 16000);
   await([&] { return snapshot(token).segmentsCompleted == 1; }, "promoted final");
@@ -1654,7 +1678,7 @@ static void assertPromotedFivePhrase(STTToken token) {
   assert(std::string(chunk.text) == "segment 1" && chunk.startSample == kCalibrationSamples &&
          chunk.endSample - chunk.startSample == 89600);
   assert(engineCalls == 0 && engineHistory.empty() && specHistory.size() == 1);
-  assert(specHistory[0].start == kCalibrationSamples && specHistory[0].samples == 83200 && specHistory[0].sequence == 1);
+  assert(specHistory[0].start == kCalibrationSamples && specHistory[0].samples == 80000 + kTrimTailSamples && specHistory[0].sequence == 1);
   assert(sttAcknowledgeChunk(owner, token, 1));
   assert(sttRequestFinish(owner, token)); complete(token);
 }
@@ -1667,24 +1691,27 @@ static void testSpecCopyNeverInDraftFrontend() {
   const auto token = begin(); started(token);
   feed(token, kSpecBefore);
   await([] { return draftInFrontend.load(); }, "a draft held in its frontend");
-  // Phrase 1 reaches its speculation point at 5.2 s and closes at 5.6 s;
-  // phrase 2 (1 s voice from 6 s, 300 ms pre-roll) reaches its own at 7.2 s.
-  feed(token, 118000);
+  // Phrase 1 reaches its speculation point at 5.5 s and closes at 5.6 s;
+  // phrase 2 (1 s voice from 6 s, 300 ms pre-roll) reaches its own at 7.5 s
+  // and closes on its 1 s short close at 8 s.
+  constexpr uint64_t kPastPhrase2 = 112000 + kTrimTailSamples + 2800;
+  static_assert(kPastPhrase2 + kStreamReadSamples < 112000 + 16000, "phrase 2 still open");
+  feed(token, kPastPhrase2);
   draftHoldFrontend = false;  // the staged draft compares its input hash here
   await([] { return draftAborts == 1; }, "draft stopped at the check after its frontend");
   assert(draftCalls == 1 && draftInferences == 0);
   const auto r = specRequest();
   assert(snapshot(token).segmentsCaptured == 1 && r.live && !r.copied && r.wanted);
-  assert(r.start == kCalibrationSamples + 91200 && r.voiced == 20800 && r.samples == 24000);
+  assert(r.start == kCalibrationSamples + 91200 && r.voiced == 20800 && r.samples == 20800 + kTrimTailSamples);
   await([&] { return snapshot(token).segmentsCompleted == 1; }, "phrase 1's ordinary final");
-  feed(token, 118000 + kStreamReadSamples);
+  feed(token, kPastPhrase2 + kStreamReadSamples);
   assert(specRequest().copied);
   await([] { return specHeld(); }, "phrase 2's speculative result held");
   feed(token, 140000);
   await([&] { return snapshot(token).segmentsCompleted == 2; }, "phrase 2 promoted");
   assert(engineHistory.size() == 1 && specHistory.size() == 1);
-  assert(specHistory[0].start == kCalibrationSamples + 91200 && specHistory[0].samples == 24000 && specHistory[0].sequence == 2);
-  assertTranscribedOnce(1, 83200); assertTranscribedOnce(2, 24000);
+  assert(specHistory[0].start == kCalibrationSamples + 91200 && specHistory[0].samples == 20800 + kTrimTailSamples && specHistory[0].sequence == 2);
+  assertTranscribedOnce(1, 80000 + kTrimTailSamples); assertTranscribedOnce(2, 20800 + kTrimTailSamples);
   std::vector<STTTextChunk> chunks; acknowledgeAll(token, &chunks);
   assert(chunks.size() == 2 && std::string(chunks[1].text) == "segment 2");
   assert(sttRequestFinish(owner, token)); complete(token);
@@ -1703,7 +1730,7 @@ static void testSpecCopyPastDraftFrontend() {
   feed(token, kSpecTrigger);
   const auto r = specRequest();
   assert(r.live && r.copied && !r.wanted);
-  assert(r.start == kCalibrationSamples && r.voiced == 80000 && r.samples == 83200);
+  assert(r.start == kCalibrationSamples && r.voiced == 80000 && r.samples == 80000 + kTrimTailSamples);
   await([] { return draftAborts == 1; }, "draft stopped at its next stage check");
   await([] { return specHeld(); }, "speculative result held");
   assert(draftCalls == 1 && deliveredSamples == kCalibrationSamples + kSpecTrigger);
@@ -1720,7 +1747,7 @@ static void testSpecCopyWithoutDraftOrInFrontend() {
   assert(draftInferences > 0);
   feed(token, kSpecTrigger);
   auto r = specRequest();
-  assert(r.live && r.copied && !r.wanted && r.start == kCalibrationSamples && r.voiced == 80000 && r.samples == 83200);
+  assert(r.live && r.copied && !r.wanted && r.start == kCalibrationSamples && r.voiced == 80000 && r.samples == 80000 + kTrimTailSamples);
   await([] { return specHeld(); }, "speculative result held");
   assertPromotedFivePhrase(token);
 
@@ -1738,7 +1765,7 @@ static void testSpecCopyWithoutDraftOrInFrontend() {
   assert(r.live && !r.copied && r.wanted && specCalls == 0 && draftInferences == 0);  // no block since
   feed(token, kSpecTrigger + kStreamReadSamples);
   r = specRequest();
-  assert(r.live && r.copied && !r.wanted && r.start == kCalibrationSamples && r.samples == 83200);
+  assert(r.live && r.copied && !r.wanted && r.start == kCalibrationSamples && r.samples == 80000 + kTrimTailSamples);
   await([] { return specHeld(); }, "speculative result held");
   assertPromotedFivePhrase(token);
 }
@@ -1753,8 +1780,8 @@ static void testSpecCopyWithoutDraftOrInFrontend() {
 static uint32_t droppedPhrases() { std::lock_guard<std::mutex> lock(gSTTMux); return gRun ? gRun->droppedSegments : 0; }
 static void testNativeMechanisms() {
   // A 2 s reply closes on a 1 s pause, then a 5 s phrase on a 600 ms pause.
-  // Both use full captured PCM by default; the legacy opt-in verifies trimmed
-  // input and speculative promotion on the same native capture/cache path.
+  // The default build verifies trimmed input and speculative promotion on the
+  // native capture/cache path; the full-phrase opt-out uses full captured PCM.
   reset(); allVoice = false; readLimit = 800;
   voiceIntervals = {{0, 32000}, {64000, 144000}};
   const unsigned rowsBefore = cachedRows.load(), mismatchesBefore = rowMismatches.load();
@@ -1764,12 +1791,16 @@ static void testNativeMechanisms() {
   await([&] { return snapshot(token).segmentsCompleted == 1; }, "native short-close short phrase");
   auto chunk = peek(token);
   assert(chunk.endSample - chunk.startSample == 48000 && std::string(chunk.text) == "segment 1");
-  assertTranscribedOnce(1, HW1_STT_TRIM_SILENCE ? 32000 + 3200 : 48000);
+#if HW1_STT_TRIM_SILENCE
+  assertTranscribedOnce(1, 32000 + kTrimTailSamples);
+#else
+  assertTranscribedOnce(1, 48000);
+#endif
   await([] { return publishWakes == 1; }, "publish wake wake for the first final");
   assert(sttAcknowledgeChunk(owner, token, 1));
   const size_t firstFinals = engineHistory.size(), firstSpecs = specHistory.size();
 #if HW1_STT_SPECULATIVE_FINAL
-  feedPastSpeculation(token, 146800, 148000);
+  feedPastSpeculation(token, 144000 + kTrimTailSamples - 200, 144000 + kTrimTailSamples + 1200);
   await([&] { return size_t(specCalls) == firstSpecs + 1; }, "native speculative run");
   await([] { return specHeld(); }, "native speculative result held");
 #else
@@ -1782,7 +1813,7 @@ static void testNativeMechanisms() {
   assert(chunk.startSample == kCalibrationSamples + 64000 - 4800 && chunk.endSample == kCalibrationSamples + 144000 + 9600);
 #if HW1_STT_SPECULATIVE_FINAL
   assert(engineHistory.size() == firstFinals && specHistory.size() == firstSpecs + 1);
-  assert(specHistory.back().start == kCalibrationSamples + 64000 - 4800 && specHistory.back().samples == 80000 + 4800 + 3200);
+  assert(specHistory.back().start == kCalibrationSamples + 64000 - 4800 && specHistory.back().samples == 80000 + 4800 + kTrimTailSamples);
 #else
   assert(engineHistory.size() == firstFinals + 1 && specHistory.size() == firstSpecs && specCalls == 0);
   assertTranscribedOnce(2, 80000 + 4800 + 9600);
@@ -1815,7 +1846,11 @@ static void testNativePauseCloses() {
   await([&] { return snapshot(token).segmentsCompleted == 1; }, "paused phrase transcribed");
   const auto chunk = peek(token);
   assert(chunk.startSample == kCalibrationSamples && std::string(chunk.text) == "segment 1");
-  assertTranscribedOnce(1, HW1_STT_TRIM_SILENCE ? 32160 + 3200 : chunk.endSample - chunk.startSample);
+#if HW1_STT_TRIM_SILENCE
+  assertTranscribedOnce(1, 32160 + kTrimTailSamples);
+#else
+  assertTranscribedOnce(1, chunk.endSample - chunk.startSample);
+#endif
   assert(publishWakes == 1 && snapshot(token).workerActive && !snapshot(token).error[0]);
   assert(sttAcknowledgeChunk(owner, token, 1));
   assert(sttSetPaused(owner, token, false));
@@ -1835,7 +1870,7 @@ static void testNativeQueueFullWithCaches() {
   const unsigned mismatchesBefore = rowMismatches.load();
   const auto token = beginNativeWake(); started(token);
 #if HW1_STT_SPECULATIVE_FINAL
-  feedPastSpeculation(token, 82800, 84000);
+  feedPastSpeculation(token, 80000 + kTrimTailSamples - 200, 80000 + kTrimTailSamples + 1200);
   await([] { return specCalls == 1; }, "phrase 1 speculative run held");
 #else
   feed(token, 90000);
