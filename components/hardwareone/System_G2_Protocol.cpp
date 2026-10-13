@@ -2165,11 +2165,14 @@ bool g2ParseSettingVersion(const uint8_t* payload, size_t payloadLen,
   return true;
 }
 
-static void g2CopySettingVersion(char (&dest)[32],
+static bool g2CopySettingVersion(char (&dest)[32],
                                  const uint8_t* src, size_t srcLen) {
-  const size_t copyLen = srcLen < sizeof(dest) - 1 ? srcLen : sizeof(dest) - 1;
-  if (copyLen > 0) memcpy(dest, src, copyLen);
-  dest[copyLen] = '\0';
+  // These strings select exact firmware profiles. Truncation or an embedded
+  // NUL must not turn a different wire value into an allowlisted C string.
+  if (srcLen >= sizeof(dest) || memchr(src, '\0', srcLen)) return false;
+  if (srcLen > 0) memcpy(dest, src, srcLen);
+  dest[srcLen] = '\0';
+  return true;
 }
 
 bool g2ParseSettingVersions(const uint8_t* payload, size_t payloadLen,
@@ -2219,10 +2222,10 @@ bool g2ParseSettingVersions(const uint8_t* payload, size_t payloadLen,
         }
         if (innerField == G2_SET_REQ_F_VER_LEFT) {
           parsed.hasLeft = true;
-          g2CopySettingVersion(parsed.left, version, versionLen);
+          if (!g2CopySettingVersion(parsed.left, version, versionLen)) return false;
         } else {
           parsed.hasRight = true;
-          g2CopySettingVersion(parsed.right, version, versionLen);
+          if (!g2CopySettingVersion(parsed.right, version, versionLen)) return false;
         }
         continue;
       }
@@ -2352,137 +2355,164 @@ size_t g2BuildHeadUpAngle(uint8_t seq, uint32_t magic, uint32_t angle,
 }
 
 bool g2ParseSettingEcho(const uint8_t* payload, size_t payloadLen,
-                        G2SettingsEcho* out) {
-  if (!payload || !out) return false;
+                        G2SettingsEcho* out, uint32_t* outMagic,
+                        uint32_t* outCommand) {
+  if (outMagic) *outMagic = 0;
+  if (outCommand) *outCommand = 0;
+  if (!out) return false;
   memset(out, 0, sizeof(*out));
+  if (!payload) return false;
 
+  G2SettingsEcho parsed = {};
+  uint32_t command = 0, magic = 0;
+  bool commandSeen = false, magicSeen = false;
   size_t pos = 0;
   while (pos < payloadLen) {
     uint32_t field; uint8_t wire;
-    if (!g2PbReadTag(payload, payloadLen, &pos, &field, &wire)) return false;
-    if (wire == G2_PB_WIRE_LEN_DELIM && field == G2_SET_F_REQ) {
-      uint64_t sublen;
-      if (!g2PbReadVarint(payload, payloadLen, &pos, &sublen)) return false;
-      if (sublen > payloadLen || pos + (size_t)sublen > payloadLen) return false;
-      const uint8_t* sub = payload + pos;
-      size_t subpos = 0;
-      bool any = false;
-      while (subpos < (size_t)sublen) {
-        uint32_t sf; uint8_t sw;
-        if (!g2PbReadTag(sub, (size_t)sublen, &subpos, &sf, &sw)) break;
-        if (sw != G2_PB_WIRE_VARINT) {
-          // f5/f6 are the version strings — g2ParseSettingVersion owns those.
-          if (!g2PbSkipField(sub, (size_t)sublen, &subpos, sw)) break;
-          continue;
-        }
-        uint64_t v;
-        if (!g2PbReadVarint(sub, (size_t)sublen, &subpos, &v)) break;
-        const uint8_t b = (v > 255) ? 255 : (uint8_t)v;
-        switch (sf) {
-          case 1:  out->settingInfoType = b; break;
-          case 2:  out->brightness      = b; break;
-          case 3:  out->yCoord          = b; break;
-          case 4:  out->xCoord          = b; break;
-          case 7:  out->headUpSwitch    = b; break;
-          case 8:  out->headUpAngle     = b; break;
-          case 9:  out->headUpCalib     = b; break;
-          case 10: out->wearDetect      = b; break;
-          case 11: out->runningStatus   = b; break;
-          case 12: out->battery         = b; break;
-          case 13: out->chargingStatus  = b; break;
-          case 14: out->silentMode      = b; break;
-          case 15: out->leftCalib       = b; break;
-          case 16: out->rightCalib      = b; break;
-          case 17: out->headUpRecalOk   = b; break;
-          case 18: out->autoBrightness  = b; break;
-          case 19: out->unreadCount     = b; break;
-          default: continue;   // unknown field: seen but not recorded
-        }
-        if (sf < 32) out->have |= (1u << sf);
-        any = true;
-      }
-      return any;
+    if (!g2PbReadTagStrict(payload, payloadLen, &pos, &field, &wire)) return false;
+    if (field == G2_SET_F_CMD || field == G2_SET_F_MAGIC) {
+      bool& seen = field == G2_SET_F_CMD ? commandSeen : magicSeen;
+      uint64_t value;
+      if (seen || wire != G2_PB_WIRE_VARINT ||
+          !g2PbReadVarintStrict(payload, payloadLen, &pos, &value) ||
+          value > UINT32_MAX) return false;
+      seen = true;
+      (field == G2_SET_F_CMD ? command : magic) = (uint32_t)value;
+      continue;
     }
-    if (!g2PbSkipField(payload, payloadLen, &pos, wire)) return false;
+    if (field != G2_SET_F_REQ) {
+      // A correlated state reply must not also contain a competing known
+      // settings body. Keep the legacy unscoped accessor and repeated-f4
+      // merge behavior, but do not qualify an ambiguous frame as readback.
+      if ((outMagic || outCommand) &&
+          (field == G2_SET_F_INFO || field == G2_SET_F_SEND_INFO ||
+           field == 6 || field == 7)) return false;
+      if (!g2PbSkipFieldStrict(payload, payloadLen, &pos, wire)) return false;
+      continue;
+    }
+    const uint8_t* body = nullptr;
+    size_t bodyLen = 0;
+    if (wire != G2_PB_WIRE_LEN_DELIM ||
+        !g2PbReadDelimited(payload, payloadLen, &pos, &body, &bodyLen)) return false;
+    // Match the version parser: repeated f4 messages merge, repeated scalar
+    // leaves take the last value. Nothing is published until the full frame
+    // validates, including fields after this body.
+    size_t bodyPos = 0;
+    while (bodyPos < bodyLen) {
+      uint32_t innerField; uint8_t innerWire;
+      if (!g2PbReadTagStrict(body, bodyLen, &bodyPos, &innerField, &innerWire)) return false;
+      uint8_t* target = nullptr;
+      switch (innerField) {
+        case 1:  target = &parsed.settingInfoType; break;
+        case 2:  target = &parsed.brightness; break;
+        case 3:  target = &parsed.yCoord; break;
+        case 4:  target = &parsed.xCoord; break;
+        case 7:  target = &parsed.headUpSwitch; break;
+        case 8:  target = &parsed.headUpAngle; break;
+        case 9:  target = &parsed.headUpCalib; break;
+        case 10: target = &parsed.wearDetect; break;
+        case 11: target = &parsed.runningStatus; break;
+        case 12: target = &parsed.battery; break;
+        case 13: target = &parsed.chargingStatus; break;
+        case 14: target = &parsed.silentMode; break;
+        case 15: target = &parsed.leftCalib; break;
+        case 16: target = &parsed.rightCalib; break;
+        case 17: target = &parsed.headUpRecalOk; break;
+        case 18: target = &parsed.autoBrightness; break;
+        case 19: target = &parsed.unreadCount; break;
+        default: break;
+      }
+      if (!target) {
+        // f5/f6 are version strings. Unknown, well-formed fields are skipped.
+        if ((innerField == G2_SET_REQ_F_VER_LEFT || innerField == G2_SET_REQ_F_VER_RIGHT) &&
+            innerWire != G2_PB_WIRE_LEN_DELIM) return false;
+        if (!g2PbSkipFieldStrict(body, bodyLen, &bodyPos, innerWire)) return false;
+        continue;
+      }
+      uint64_t value;
+      if (innerWire != G2_PB_WIRE_VARINT ||
+          !g2PbReadVarintStrict(body, bodyLen, &bodyPos, &value)) return false;
+      // Retain the existing U8 representation policy; this parser does not
+      // infer new firmware-specific setting ranges from a numeric snapshot.
+      *target = value > UINT8_MAX ? UINT8_MAX : (uint8_t)value;
+      parsed.have |= (1u << innerField);
+    }
   }
-  return false;
+  if (!parsed.have || (outMagic && !magicSeen) || (outCommand && !commandSeen)) return false;
+  *out = parsed;
+  if (outMagic) *outMagic = magic;
+  if (outCommand) *outCommand = command;
+  return true;
 }
 
 bool g2ParseSettingWriteAck(const uint8_t* payload, size_t payloadLen,
                             uint32_t* outMagic,
                             uint8_t* outInnerField, uint8_t* outLeafField,
                             uint32_t* outValue) {
+  if (outMagic) *outMagic = 0;
+  if (outInnerField) *outInnerField = 0;
+  if (outLeafField) *outLeafField = 0;
+  if (outValue) *outValue = 0;
   if (!payload) return false;
 
-  uint32_t cmdId = 0, magic = 0;
-  bool sawCmd = false, sawInfo = false;
+  uint32_t command = 0, magic = 0, value = 0;
+  bool commandSeen = false, magicSeen = false, infoSeen = false;
   uint8_t innerField = 0, leafField = 0;
-  uint32_t value = 0;
-
   size_t pos = 0;
   while (pos < payloadLen) {
     uint32_t field; uint8_t wire;
-    if (!g2PbReadTag(payload, payloadLen, &pos, &field, &wire)) break;
-
-    if (field == G2_SET_F_CMD && wire == G2_PB_WIRE_VARINT) {
+    if (!g2PbReadTagStrict(payload, payloadLen, &pos, &field, &wire)) return false;
+    if (field == G2_SET_F_CMD || field == G2_SET_F_MAGIC) {
+      bool& seen = field == G2_SET_F_CMD ? commandSeen : magicSeen;
       uint64_t v;
-      if (!g2PbReadVarint(payload, payloadLen, &pos, &v)) break;
-      cmdId = (uint32_t)v; sawCmd = true;
+      if (seen || wire != G2_PB_WIRE_VARINT ||
+          !g2PbReadVarintStrict(payload, payloadLen, &pos, &v) ||
+          v > UINT32_MAX) return false;
+      seen = true;
+      (field == G2_SET_F_CMD ? command : magic) = (uint32_t)v;
       continue;
     }
-    if (field == G2_SET_F_MAGIC && wire == G2_PB_WIRE_VARINT) {
-      uint64_t v;
-      if (!g2PbReadVarint(payload, payloadLen, &pos, &v)) break;
-      magic = (uint32_t)v;
+    // A confirmation must mirror one single-field write, not an ambiguous
+    // combination of response bodies or several setting writes.
+    const uint8_t* body = nullptr;
+    size_t bodyLen = 0;
+    if (field != G2_SET_F_INFO || infoSeen || wire != G2_PB_WIRE_LEN_DELIM ||
+        !g2PbReadDelimited(payload, payloadLen, &pos, &body, &bodyLen)) return false;
+    infoSeen = true;
+    size_t bodyPos = 0;
+    uint32_t setting; uint8_t settingWire;
+    const uint8_t* leaf = nullptr;
+    size_t leafLen = 0;
+    if (!g2PbReadTagStrict(body, bodyLen, &bodyPos, &setting, &settingWire) ||
+        setting > UINT8_MAX || settingWire != G2_PB_WIRE_LEN_DELIM ||
+        !g2PbReadDelimited(body, bodyLen, &bodyPos, &leaf, &leafLen) ||
+        bodyPos != bodyLen) return false;
+    // The stock nanopb descriptor makes wearDetectionSwitch a default-
+    // eliding scalar. Presence of its single-leaf sub-message with no bytes
+    // therefore means OFF; an absent setting body never confirms anything.
+    // Other settings may have several leaves, so their empty body is ambiguous.
+    if (!leafLen && setting == G2_SETW_F_WEAR_DETECT) {
+      innerField = G2_SETW_F_WEAR_DETECT;
+      leafField = G2_SETW_WEAR_F_SWITCH;
+      value = 0;
       continue;
     }
-    if (field == G2_SET_F_INFO && wire == G2_PB_WIRE_LEN_DELIM) {
-      uint64_t sublen;
-      if (!g2PbReadVarint(payload, payloadLen, &pos, &sublen)) break;
-      if (sublen > payloadLen || pos + (size_t)sublen > payloadLen) break;
-      const uint8_t* sub = payload + pos;
-      size_t subpos = 0;
-      // Exactly one sub-message, carrying exactly one leaf — that is what
-      // g2BuildSettingInfoWrite emits and what the device mirrors back. If a
-      // future firmware batches several, we report the first and the caller's
-      // match against what it sent still holds.
-      while (subpos < (size_t)sublen) {
-        uint32_t sf; uint8_t sw;
-        if (!g2PbReadTag(sub, (size_t)sublen, &subpos, &sf, &sw)) break;
-        if (sw != G2_PB_WIRE_LEN_DELIM) {
-          if (!g2PbSkipField(sub, (size_t)sublen, &subpos, sw)) break;
-          continue;
-        }
-        uint64_t leaflen;
-        if (!g2PbReadVarint(sub, (size_t)sublen, &subpos, &leaflen)) break;
-        if (leaflen > (size_t)sublen || subpos + (size_t)leaflen > (size_t)sublen) break;
-        const uint8_t* leaf = sub + subpos;
-        size_t leafpos = 0;
-        uint32_t lf; uint8_t lw;
-        if (g2PbReadTag(leaf, (size_t)leaflen, &leafpos, &lf, &lw) &&
-            lw == G2_PB_WIRE_VARINT) {
-          uint64_t lv;
-          if (g2PbReadVarint(leaf, (size_t)leaflen, &leafpos, &lv)) {
-            innerField = (uint8_t)sf;
-            leafField  = (uint8_t)lf;
-            value      = (uint32_t)lv;
-            sawInfo    = true;
-          }
-        }
-        subpos += (size_t)leaflen;
-        if (sawInfo) break;
-      }
-      pos += (size_t)sublen;
-      continue;
-    }
-    if (!g2PbSkipField(payload, payloadLen, &pos, wire)) break;
+    size_t leafPos = 0;
+    uint32_t leafNumber; uint8_t leafWire;
+    uint64_t v;
+    if (!g2PbReadTagStrict(leaf, leafLen, &leafPos, &leafNumber, &leafWire) ||
+        leafNumber > UINT8_MAX || leafWire != G2_PB_WIRE_VARINT ||
+        !g2PbReadVarintStrict(leaf, leafLen, &leafPos, &v) ||
+        v > UINT32_MAX || leafPos != leafLen) return false;
+    innerField = (uint8_t)setting;
+    leafField = (uint8_t)leafNumber;
+    value = (uint32_t)v;
   }
-
-  if (!sawCmd || cmdId != G2_SET_CMD_RECEIVE_INFO || !sawInfo) return false;
-  if (outMagic)      *outMagic      = magic;
+  if (!commandSeen || command != G2_SET_CMD_RECEIVE_INFO || !magicSeen || !infoSeen) return false;
+  if (outMagic) *outMagic = magic;
   if (outInnerField) *outInnerField = innerField;
-  if (outLeafField)  *outLeafField  = leafField;
-  if (outValue)      *outValue      = value;
+  if (outLeafField) *outLeafField = leafField;
+  if (outValue) *outValue = value;
   return true;
 }
 

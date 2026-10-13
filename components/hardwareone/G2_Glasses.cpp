@@ -1509,28 +1509,25 @@ static inline void imageProbeEnd() {
 // firmware sends its first version-bearing settings push.
 static char gFwVersion[32] = {0};
 
-// Last decoded DeviceReceiveRequestFromAPP snapshot — the glasses' own
-// reported settings state. Refreshed from every sid=0x09 frame that carries
-// a wrapper-f4 body (both explicit responses and the ~15 s async pushes), so
-// it is normally seconds old without us polling for it.
-//
-// Freshness (gSettingsEchoMs) is what a write consults before sending — see
-// g2SettingsPrimeIfNeeded. The cache is explicitly cleared when the right
-// temple generation changes so another pair can never inherit old state.
+// RIGHT native settings cache and explicit command transactions. Async pushes
+// may refresh the cache, but only an exact response can complete a fresh read.
 static G2SettingsEcho gSettingsEcho;
-static bool           gSettingsEchoSeen = false;
-static uint32_t       gSettingsEchoMs   = 0;
-
-// Last write-ack the glasses mirrored back at us (magic == our write magic).
-// gSettingsAckMs == 0 means "nothing acked yet"; a setter stamps it to 0
-// before sending so it can tell a fresh ack from a stale one.
-static uint8_t  gSettingsAckInner = 0;
-static uint8_t  gSettingsAckLeaf  = 0;
-static uint32_t gSettingsAckValue = 0;
-static uint32_t gSettingsAckMs    = 0;
-// BLE notifications publish this state on the host task while commands read
-// it on cmd_exec_task, often on the other core. Keep each snapshot coherent;
-// volatile alone would not make the multi-field struct or ack tuple atomic.
+static bool gSettingsEchoSeen = false, gSettingsEchoFullWearProfile = false;
+static uint32_t gSettingsEchoMs = 0, gSettingsEchoGeneration = 0;
+struct G2SettingsRead {
+  uint32_t generation = 0, atMs = 0;
+  uint8_t magic = 0;
+  bool active = false, matched = false, fullWearProfile = false;
+  G2SettingsEcho echo{};
+};
+struct G2SettingsWrite {
+  uint32_t generation = 0, value = 0;
+  uint8_t magic = 0, inner = 0, leaf = 0;
+  bool active = false, matched = false;
+};
+static G2SettingsRead gSettingsRead;
+static G2SettingsWrite gSettingsWrite;
+static uint8_t gSettingsRequestMagic = 0;
 static portMUX_TYPE gSettingsStateMux = portMUX_INITIALIZER_UNLOCKED;
 
 enum class G2PolicyFeature : uint8_t { None = 0, HeadUp, Notifications };
@@ -1645,57 +1642,131 @@ static void g2ControlNoteAck(uint32_t magic, uint8_t inner, uint8_t leaf,
   g2ControlMarkDirty();
 }
 
-static void g2SettingsEchoPublish(const G2SettingsEcho& echo, uint32_t atMs) {
+// The settings service suppresses a repeated magic before dispatch. Keep all
+// typed reads and explicit writes changing, while reserving 242 for HeadUp policy.
+static uint8_t g2NextSettingsMagic() {
   portENTER_CRITICAL(&gSettingsStateMux);
-  gSettingsEcho = echo;
-  gSettingsEchoSeen = true;
-  gSettingsEchoMs = atMs;
+  do { ++gSettingsRequestMagic; } while (!gSettingsRequestMagic || gSettingsRequestMagic == 242);
+  const uint8_t magic = gSettingsRequestMagic;
   portEXIT_CRITICAL(&gSettingsStateMux);
+  return magic;
 }
 
-static bool g2SettingsEchoSnapshot(G2SettingsEcho* out, uint32_t* atMs) {
+static void g2SettingsEchoPublish(const G2SettingsEcho& echo, uint32_t generation,
+                                  uint8_t flag, uint32_t magic, uint32_t atMs,
+                                  bool fullWearProfile) {
+  portENTER_CRITICAL(&gTopologyMux);
   portENTER_CRITICAL(&gSettingsStateMux);
-  const bool seen = gSettingsEchoSeen;
-  if (out) *out = gSettingsEcho;
-  if (atMs) *atMs = gSettingsEchoMs;
+  if (generation && gR.connected && gR.writeChar &&
+      gR.connectionGeneration == generation && gR.sessionReadyGeneration == generation) {
+    gSettingsEcho = echo; gSettingsEchoSeen = true;
+    gSettingsEchoMs = atMs; gSettingsEchoGeneration = generation;
+    gSettingsEchoFullWearProfile = false;
+    if (flag == G2_FLAG_RESPONSE && gSettingsRead.active &&
+        gSettingsRead.generation == generation && gSettingsRead.magic == magic &&
+        G2_ECHO_HAS(echo, 1) && echo.settingInfoType == 1) {
+      gSettingsRead.echo = echo; gSettingsRead.atMs = atMs; gSettingsRead.matched = true;
+      gSettingsRead.fullWearProfile = fullWearProfile;
+      gSettingsEchoFullWearProfile = fullWearProfile;
+    }
+  }
   portEXIT_CRITICAL(&gSettingsStateMux);
+  portEXIT_CRITICAL(&gTopologyMux);
+}
+
+static bool g2SettingsEchoSnapshot(G2SettingsEcho* out, uint32_t* atMs,
+                                    uint32_t generation = 0, bool* fullWearProfile = nullptr) {
+  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&gSettingsStateMux);
+  const bool seen = gSettingsEchoSeen && gR.connected && gR.writeChar &&
+      gR.sessionReadyGeneration == gR.connectionGeneration &&
+      gSettingsEchoGeneration == gR.connectionGeneration &&
+      (!generation || gSettingsEchoGeneration == generation);
+  if (out) *out = seen ? gSettingsEcho : G2SettingsEcho{};
+  if (atMs) *atMs = seen ? gSettingsEchoMs : 0;
+  if (fullWearProfile) *fullWearProfile = seen && gSettingsEchoFullWearProfile;
+  portEXIT_CRITICAL(&gSettingsStateMux);
+  portEXIT_CRITICAL(&gTopologyMux);
   return seen;
 }
 
 static void g2SettingsEchoInvalidateFreshness() {
   portENTER_CRITICAL(&gSettingsStateMux);
-  memset(&gSettingsEcho, 0, sizeof(gSettingsEcho));
-  gSettingsEchoSeen = false;
-  gSettingsEchoMs = 0;
+  gSettingsEcho = G2SettingsEcho{}; gSettingsEchoSeen = false;
+  gSettingsEchoFullWearProfile = false;
+  gSettingsEchoMs = gSettingsEchoGeneration = 0;
+  gSettingsRead = G2SettingsRead{}; gSettingsWrite = G2SettingsWrite{};
+  portEXIT_CRITICAL(&gSettingsStateMux);
+}
+
+static void g2SettingsAckArm(uint32_t generation, uint8_t magic,
+                              uint8_t inner, uint8_t leaf, uint32_t value) {
+  portENTER_CRITICAL(&gSettingsStateMux);
+  gSettingsWrite = {generation, value, magic, inner, leaf, true, false};
   portEXIT_CRITICAL(&gSettingsStateMux);
 }
 
 static void g2SettingsAckClear() {
   portENTER_CRITICAL(&gSettingsStateMux);
-  gSettingsAckMs = 0;
+  gSettingsWrite = G2SettingsWrite{};
   portEXIT_CRITICAL(&gSettingsStateMux);
 }
 
-static void g2SettingsAckPublish(uint8_t inner, uint8_t leaf,
-                                 uint32_t value, uint32_t atMs) {
+static void g2SettingsAckPublish(uint32_t generation, uint32_t magic,
+                                  uint8_t inner, uint8_t leaf, uint32_t value) {
+  portENTER_CRITICAL(&gTopologyMux);
   portENTER_CRITICAL(&gSettingsStateMux);
-  gSettingsAckInner = inner;
-  gSettingsAckLeaf = leaf;
-  gSettingsAckValue = value;
-  gSettingsAckMs = atMs;
+  if (generation && gR.connected && gR.writeChar &&
+      gR.connectionGeneration == generation && gR.sessionReadyGeneration == generation &&
+      gSettingsWrite.active && gSettingsWrite.generation == generation &&
+      gSettingsWrite.magic == magic && gSettingsWrite.inner == inner &&
+      gSettingsWrite.leaf == leaf && gSettingsWrite.value == value)
+    gSettingsWrite.matched = true;
   portEXIT_CRITICAL(&gSettingsStateMux);
+  portEXIT_CRITICAL(&gTopologyMux);
 }
 
-static bool g2SettingsAckSnapshot(uint8_t* inner, uint8_t* leaf,
-                                  uint32_t* value, uint32_t* atMs) {
+static bool g2SettingsAckSnapshot(uint32_t generation, uint8_t magic) {
+  if (!g2TempleReadyAtGeneration(gR, generation)) return false;
   portENTER_CRITICAL(&gSettingsStateMux);
-  if (inner) *inner = gSettingsAckInner;
-  if (leaf) *leaf = gSettingsAckLeaf;
-  if (value) *value = gSettingsAckValue;
-  const uint32_t stamp = gSettingsAckMs;
-  if (atMs) *atMs = stamp;
+  const bool matched = gSettingsWrite.active && gSettingsWrite.matched &&
+      gSettingsWrite.generation == generation && gSettingsWrite.magic == magic;
   portEXIT_CRITICAL(&gSettingsStateMux);
-  return stamp != 0;
+  return matched;
+}
+
+// Parse at the RX boundary so LEFT mirrors, async frames and stale connection
+// packets can never acknowledge a RIGHT native settings command.
+static bool g2SettingsReceive(G2Temple& temple, const G2EnvelopeView& env,
+                               uint32_t generation) {
+  uint32_t magic = 0, command = 0;
+  G2SettingsEcho echo;
+  if (g2ParseSettingEcho(env.payload, env.payloadLen, &echo, &magic, &command) &&
+      command == 2 && temple.side == 'R' &&
+      (env.flag == G2_FLAG_RESPONSE || env.flag == G2_FLAG_NOTIFY)) {
+    // The captured full BASIC schema copies wear state unconditionally but
+    // nanopb elides its zero scalar. Only a correlated reply bearing both
+    // exact firmware strings may interpret missing f10 as that default.
+    G2SettingVersions versions{};
+    const bool fullWearProfile = G2_ECHO_HAS(echo, 1) && echo.settingInfoType == 1 &&
+        g2ParseSettingVersions(env.payload, env.payloadLen, &versions) &&
+        versions.hasLeft && versions.hasRight &&
+        strcmp(versions.left, "2.3.2.14") == 0 && strcmp(versions.right, "2.3.2.14") == 0;
+    g2SettingsEchoPublish(echo, generation, env.flag, magic, millis(), fullWearProfile);
+    if (generation && g2TempleReadyAtGeneration(gR, generation)) g2ControlNoteEcho(echo, generation);
+  }
+  uint32_t value = 0;
+  uint8_t inner = 0, leaf = 0;
+  if (!g2ParseSettingWriteAck(env.payload, env.payloadLen, &magic, &inner, &leaf, &value)) return false;
+  DEBUG_G2F("[G2-%c] Settings write ACK magic=%u f%u.%u=%u flag=%u",
+            temple.side, (unsigned)magic, (unsigned)inner, (unsigned)leaf,
+            (unsigned)value, (unsigned)env.flag);
+  if (temple.side == 'R' && env.flag == G2_FLAG_RESPONSE && generation &&
+      g2TempleReadyAtGeneration(gR, generation)) {
+    g2ControlNoteAck(magic, inner, leaf, value, generation);
+    g2SettingsAckPublish(generation, magic, inner, leaf, value);
+  }
+  return true;
 }
 
 // Exact compatibility rule for the ordinary EvenHub/EvenCore response plane.
@@ -1776,6 +1847,8 @@ uint32_t gRingViaGlassesLastSeenMs = 0;
 // page-swap worker further down. Referenced earlier by the E0 TextEvent /
 // SysEvent hooks in handleDevEvent and dispatchEventPayload.
 static volatile bool     gTextViewActive;
+// Only ordinary TEXT/MULTITEXT swaps expose selective child-update readiness.
+static bool              gTextViewIsTextPage;
 // Widget lifecycle that owns the callback slot. A terminal boundary or
 // RIGHT-authority publication advances gWidgetLifecycleEpoch, making an
 // otherwise-still-set slot ineligible before cooperative cleanup runs.
@@ -3323,7 +3396,8 @@ static void g2TextViewDisarmIfOwned(void (*exitFn)(),
                                     uint32_t lifecycleEpoch);
 static bool g2TextViewPublishForLifecycle(void (*exitFn)(), G2TapFn tapFn,
                                           uint32_t lifecycleEpoch,
-                                          uint32_t presentationEpoch);
+                                          uint32_t presentationEpoch,
+                                          bool isTextPage = false);
 static bool g2SessionLifecycleAllows(uint32_t lifecycleEpoch);
 static bool g2LensTxFenceCurrent(const G2Temple& arm,
                                  uint32_t generation,
@@ -11771,50 +11845,7 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
       break;
 
     case G2_SID_SETTINGS: {
-      // Settings arrive in two flavours:
-      //   flag=0x00 → direct response to our g2BuildSettingBasicRequest
-      //   flag=0x01 → unsolicited async push (battery tick, etc.)
-      // Both have the same pb shape, so we just parse unconditionally.
-      // This keeps gBatteryL/gBatteryR + gFwVersion fresh without poll.
-      // Device-state snapshot (wrapper f4). Do this first so anything below
-      // — and any command waiting on a write to land — sees fresh values.
-      // Write-acks carry no f4 body, so they leave the snapshot alone.
-      G2SettingsEcho echo;
-      if (g2ParseSettingEcho(env.payload, env.payloadLen, &echo)) {
-        g2SettingsEchoPublish(echo, millis());
-        // Policy writes target the right/display temple. Do not let a left-arm
-        // mirror satisfy right-generation verification accidentally.
-        if (t.side == 'R') {
-          g2ControlNoteEcho(echo, rxGeneration ? rxGeneration
-                                               : t.connectionGeneration);
-        }
-      }
-
-      // Write-ack: the device mirrors an accepted settings write straight
-      // back at flag=0x00 carrying our magicRandom. This is the only positive
-      // confirmation a write landed — a write that changes nothing is NOT
-      // acked, so silence means "no-op or rejected", never plainly "failed".
-      {
-        uint32_t ackMagic = 0, ackValue = 0;
-        uint8_t  ackInner = 0, ackLeaf = 0;
-        if (g2ParseSettingWriteAck(env.payload, env.payloadLen,
-                                   &ackMagic, &ackInner, &ackLeaf, &ackValue)) {
-          DEBUG_G2F("[G2-%c] Settings write ACK magic=%u f%u.%u=%u%s",
-                    t.side, (unsigned)ackMagic, (unsigned)ackInner,
-                    (unsigned)ackLeaf, (unsigned)ackValue,
-                    (ackMagic == G2_MAGIC_SETTINGS_WRITE) ? "" : " (not ours)");
-          if (t.side == 'R') {
-            g2ControlNoteAck(ackMagic, ackInner, ackLeaf, ackValue,
-                             rxGeneration ? rxGeneration
-                                          : t.connectionGeneration);
-          }
-          if (ackMagic == G2_MAGIC_SETTINGS_WRITE) {
-            g2SettingsAckPublish(ackInner, ackLeaf, ackValue, millis());
-          }
-          // An ack has no f4 body — nothing else in this handler applies.
-          break;
-        }
-      }
+      if (g2SettingsReceive(t, env, rxGeneration ? rxGeneration : t.connectionGeneration)) break;
 
       uint8_t pct = 0;
       if (g2ParseSettingBattery(env.payload, env.payloadLen, &pct)) {
@@ -12300,7 +12331,8 @@ static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len,
       ok = false;
       break;
     }
-    if (!t.connected || !t.writeChar) {
+    if ((exactGeneration && !g2TempleTransportAtGeneration(t, exactGeneration)) ||
+        !t.connected || !t.writeChar) {
       DEBUG_G2F("[G2-%c] sendEnvelope aborted at offset %u/%u — "
                 "link dropped (connected=%d, writeChar=%p)",
                 t.side, (unsigned)off, (unsigned)len,
@@ -12472,7 +12504,8 @@ static bool sendEnvelopeExactGeneration(G2Temple& t, const uint8_t* data,
       strcmp(gR.firmwareVersion, exactFirmwareRight) == 0;
   portEXIT_CRITICAL(&gTopologyMux);
   portEXIT_CRITICAL(&gRxPacketMux);
-  const bool ok = exact && sendEnvelopeNoMutex(t, data, len);
+  const bool ok = exact && sendEnvelopeNoMutex(t, data, len, 0, nullptr,
+                                               0, 0, generation);
   xSemaphoreGive(writeMutex);
   bleCentralTxGive();
   return ok;
@@ -13953,7 +13986,7 @@ static void g2ControlReconcileTick() {
 
   if (verifyHead && rightReady && generation == gR.connectionGeneration) {
     uint8_t env[64];
-    const size_t n = g2BuildSettingBasicRequest(allocSeq(), G2_MAGIC_SETTINGS,
+    const size_t n = g2BuildSettingBasicRequest(allocSeq(), g2NextSettingsMagic(),
                                                 env, sizeof(env));
     if (n) (void)sendEnvelope(gR, env, n);
   }
@@ -19459,6 +19492,7 @@ static uint32_t g2TextViewNextSerialLocked() {
 
 static void g2TextViewDisarmLocked(bool invalidateDispatch) {
   gTextViewActive = false;
+  gTextViewIsTextPage = false;
   gTextViewExitFn = nullptr;
   gTextViewTapFn = nullptr;
   if (invalidateDispatch) {
@@ -19509,6 +19543,39 @@ static bool g2TextViewSnapshotForPacket(G2Temple& temple,
   }
   portEXIT_CRITICAL(&gSyncLifecycleMux);
   return current;
+}
+
+bool g2TextPageReady(void (*exitFn)(), G2TapFn tapFn, bool* pending) {
+  bool busy = pageSwapInFlight();
+  if (pending) *pending = busy;
+  if (busy) return false;
+
+  bool ready = false;
+  bool blocked = false;
+  portENTER_CRITICAL(&gSyncLifecycleMux);
+  portENTER_CRITICAL(&gTopologyMux);
+  // Match the CREATE/UPDATE temple preference; a ready peer cannot stand in
+  // for an unavailable container on the preferred connected temple.
+  G2Temple* arm = nullptr;
+  if (gR.connected && !gR.pluginDead) arm = &gR;
+  else if (gL.connected && !gL.pluginDead) arm = &gL;
+  blocked = gWidgetTerminalLatched != 0 || firmwareOverlayActiveLocked(millis());
+  ready = !blocked && arm && arm->writeChar && arm->connectionGeneration != 0 &&
+      arm->containerReady && !arm->containerIsList &&
+      gTextViewActive && gTextViewIsTextPage && gTextViewSlotSerial != 0 &&
+      gTextViewExitFn == exitFn && gTextViewTapFn == tapFn &&
+      gTextViewLifecycleEpoch != 0 &&
+      gTextViewLifecycleEpoch == gWidgetLifecycleEpoch &&
+      gTextViewPresentationEpoch != 0 &&
+      gTextViewPresentationEpoch == g2PresentationEpochCurrent();
+  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&gSyncLifecycleMux);
+
+  // Admission is atomic rather than guarded by the lifecycle lock. Recheck
+  // after the snapshot so a swap admitted while acquiring it remains pending.
+  busy = blocked || pageSwapInFlight();
+  if (pending) *pending = busy;
+  return ready && !busy;
 }
 
 // Page-swap admission must consume the source callback slot in the same
@@ -19698,7 +19765,8 @@ static bool g2LensTxFenceCurrent(const G2Temple& arm,
 // callback slot.
 static bool g2TextViewPublishForLifecycle(void (*exitFn)(), G2TapFn tapFn,
                                           uint32_t lifecycleEpoch,
-                                          uint32_t presentationEpoch) {
+                                          uint32_t presentationEpoch,
+                                          bool isTextPage) {
   if (lifecycleEpoch == 0 || presentationEpoch == 0) return false;
   bool published = false;
   portENTER_CRITICAL(&gSyncLifecycleMux);
@@ -19710,6 +19778,7 @@ static bool g2TextViewPublishForLifecycle(void (*exitFn)(), G2TapFn tapFn,
     gTextViewTapFn = tapFn;
     gTextViewLifecycleEpoch = lifecycleEpoch;
     gTextViewPresentationEpoch = presentationEpoch;
+    gTextViewIsTextPage = isTextPage;
     gTextViewActive = true;
     published = true;
   }
@@ -21633,18 +21702,18 @@ cleanup:
   // CREATE (e.g. Health safety-timeout → Apps onDone race) would leave a
   // phantom hijack with no widget, then hang BLE on the next Shutdown.
   if (createOk && g2WidgetLifecycleOpen(lifecycleEpoch)) {
-    pageSwapEnd();
     if (armRequestedTextCallbacks) {
       createOk = g2TextViewPublishForLifecycle(
           args->exitFn, args->tapFn, lifecycleEpoch,
-          committedPresentationEpoch);
-    } else {
-      // A terminal can claim the lifecycle after the pre-PageSwapEnd check.
-      // Revalidate after enqueueing PageSwapEnd so, if that event was queued
-      // behind the terminal's HijackExit, we append another exit and cannot
-      // leave the async FSM resurrected in Hijacked.
-      createOk = g2WidgetLifecycleOpen(lifecycleEpoch);
+          committedPresentationEpoch, /*isTextPage*/ true);
     }
+    // Keep admission claimed through callback publication: a readiness reader
+    // must not mistake an accepted CREATE awaiting its slot for a failed swap.
+    pageSwapEnd();
+    // A terminal can claim the lifecycle before PageSwapEnd is enqueued.
+    // Revalidate after enqueueing it so, if it followed the terminal's exit,
+    // we append another exit and cannot resurrect the async FSM in Hijacked.
+    createOk = createOk && g2WidgetLifecycleOpen(lifecycleEpoch);
     if (!createOk) {
       g2TextViewDisarm();
       gHijackStartedMs = 0;
@@ -26949,9 +27018,14 @@ static const size_t kG2GlassesKnobCount =
 // Returns false when the firmware doesn't report that field (or we've never
 // had a snapshot), which is a real answer and not the same as zero.
 static bool g2GlassesEchoValue(const G2SettingsEcho& echo,
-                               const G2GlassesKnob& k, uint8_t* out) {
+                               const G2GlassesKnob& k, uint8_t* out,
+                               bool fullWearProfile = false) {
   if (k.echoField == 0) return false;
-  if (!G2_ECHO_HAS(echo, k.echoField)) return false;
+  if (!G2_ECHO_HAS(echo, k.echoField)) {
+    if (k.echoField != 10 || !fullWearProfile) return false;
+    *out = 0; // Qualified full wear response uses nanopb's omitted-zero scalar.
+    return true;
+  }
   switch (k.echoField) {
     case 2:  *out = echo.brightness;     return true;
     case 3:  *out = echo.yCoord;         return true;
@@ -26974,29 +27048,47 @@ static bool g2GlassesEchoValue(const G2SettingsEcho& echo,
 // refreshes the snapshot a setter reports against. So we do it whenever the
 // snapshot is stale rather than trying to be clever about it.
 //
-// The device pushes an unsolicited settings frame roughly every 15 s while
-// connected, so on a live session this almost always no-ops.
+// A recent native RIGHT push can satisfy ordinary display freshness. Explicit
+// candidate writes and readback use a separate request-correlated read instead.
 #define G2_SETTINGS_FRESH_MS  30000
 
-static void g2SettingsPrimeIfNeeded(G2Temple& arm) {
-  const uint32_t now = millis();
+static bool g2SettingsReadFresh(G2Temple& arm, uint32_t generation,
+                                 G2SettingsEcho* out = nullptr, bool* fullWearProfile = nullptr) {
+  if (out) *out = G2SettingsEcho{};
+  if (fullWearProfile) *fullWearProfile = false;
+  if (!generation || arm.side != 'R' || !g2TempleReadyAtGeneration(arm, generation)) return false;
+  const uint8_t magic = g2NextSettingsMagic();
+  portENTER_CRITICAL(&gSettingsStateMux);
+  gSettingsRead = G2SettingsRead{}; gSettingsRead.active = true;
+  gSettingsRead.generation = generation; gSettingsRead.magic = magic;
+  portEXIT_CRITICAL(&gSettingsStateMux);
+  uint8_t env[64];
+  const size_t n = g2BuildSettingBasicRequest(allocSeq(), magic, env, sizeof(env));
+  bool matched = false;
+  if (n && sendEnvelopeAtGeneration(arm, env, n, generation)) {
+    for (unsigned i = 0; i < 25 && g2TempleReadyAtGeneration(arm, generation); ++i) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      portENTER_CRITICAL(&gSettingsStateMux);
+      matched = gSettingsRead.active && gSettingsRead.matched &&
+          gSettingsRead.generation == generation && gSettingsRead.magic == magic;
+      if (matched && out) *out = gSettingsRead.echo;
+      if (matched && fullWearProfile) *fullWearProfile = gSettingsRead.fullWearProfile;
+      portEXIT_CRITICAL(&gSettingsStateMux);
+      if (matched) break;
+    }
+  }
+  portENTER_CRITICAL(&gSettingsStateMux);
+  if (gSettingsRead.generation == generation && gSettingsRead.magic == magic) gSettingsRead.active = false;
+  portEXIT_CRITICAL(&gSettingsStateMux);
+  return matched && g2TempleReadyAtGeneration(arm, generation);
+}
+
+static void g2SettingsPrimeIfNeeded(G2Temple& arm, uint32_t generation) {
   G2SettingsEcho cached;
   uint32_t cachedMs = 0;
-  if (g2SettingsEchoSnapshot(&cached, &cachedMs) && cachedMs != 0 &&
-      (long)(now - cachedMs) < (long)G2_SETTINGS_FRESH_MS) {
-    return;
-  }
-  uint8_t env[64];
-  const size_t n = g2BuildSettingBasicRequest(allocSeq(), G2_MAGIC_SETTINGS,
-                                              env, sizeof(env));
-  if (n == 0 || !sendEnvelope(arm, env, n)) return;
-  // The response landed in ~60 ms on hardware; 250 ms is slack, and this
-  // runs on cmd_exec_task so blocking here doesn't stall the BLE task.
-  for (int i = 0; i < 25; i++) {
-    vTaskDelay(pdMS_TO_TICKS(10));
-    if (g2SettingsEchoSnapshot(&cached, &cachedMs) &&
-        (long)(cachedMs - now) >= 0) break;
-  }
+  if (g2SettingsEchoSnapshot(&cached, &cachedMs, generation) &&
+      uint32_t(millis() - cachedMs) < G2_SETTINGS_FRESH_MS) return;
+  (void)g2SettingsReadFresh(arm, generation);
 }
 
 static bool g2SettingsFirmwareKnown(const char* version) {
@@ -27014,27 +27106,36 @@ static const char* cmd_g2glasses(const String& argsInput) {
   if (!isG2Connected()) return "Error: G2 glasses: not connected";
   // Writes go to the RIGHT temple only. Do not copy cmd_g2battery here — it
   // sprays both arms, which is fine for a read and wrong for a write.
-  G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR : nullptr;
-  if (!arm) return "Error: G2 glasses: right arm not connected";
+  const uint32_t generation = g2LinkSnapshot().rightGeneration;
+  if (!generation || !g2TempleReadyAtGeneration(gR, generation))
+    return "Error: G2 glasses: right native session not ready";
+  G2Temple* arm = &gR; // Native settings do not require a running EvenHub renderer.
 
   String sub;
   if (ca.count() >= 1) { sub = ca.arg(0); sub.toLowerCase(); }
 
   // Bare / `show` / `refresh` — report the device's own state.
   if (sub.length() == 0 || sub == "show" || sub == "refresh") {
-    if (sub == "refresh") g2SettingsEchoInvalidateFreshness();
-    g2SettingsPrimeIfNeeded(*arm);
     G2SettingsEcho echo;
     uint32_t echoMs = 0;
-    if (!g2SettingsEchoSnapshot(&echo, &echoMs)) {
-      return "G2 glasses: no settings snapshot yet — glasses did not answer the read";
+    bool fullWearProfile = false;
+    if (sub == "refresh") {
+      // Keep this request's response even if an async push replaces the cache
+      // before formatting. Only its correlated full reply can supply default OFF.
+      if (!g2SettingsReadFresh(*arm, generation, &echo, &fullWearProfile))
+        return "G2 glasses: no matching fresh RIGHT settings response";
+      echoMs = millis();
+    } else {
+      g2SettingsPrimeIfNeeded(*arm, generation);
+      if (!g2SettingsEchoSnapshot(&echo, &echoMs, generation, &fullWearProfile))
+        return "G2 glasses: no settings snapshot yet — glasses did not answer the read";
     }
     BROADCAST_PRINTF("G2 glasses settings (device-reported, %lu ms old):",
                      (unsigned long)(millis() - echoMs));
     for (size_t i = 0; i < kG2GlassesKnobCount; i++) {
       const G2GlassesKnob& k = kG2GlassesKnobs[i];
       uint8_t v = 0;
-      if (g2GlassesEchoValue(echo, k, &v)) {
+      if (g2GlassesEchoValue(echo, k, &v, fullWearProfile)) {
         if (k.isBool) BROADCAST_PRINTF("  %-11s %s", k.name, v ? "on" : "off");
         else          BROADCAST_PRINTF("  %-11s %u", k.name, (unsigned)v);
       } else {
@@ -27072,8 +27173,9 @@ static const char* cmd_g2glasses(const String& argsInput) {
   if (ca.count() < 2) {
     uint8_t cur = 0;
     G2SettingsEcho echo;
-    if (g2SettingsEchoSnapshot(&echo, nullptr) &&
-        g2GlassesEchoValue(echo, *knob, &cur)) {
+    bool fullWearProfile = false;
+    if (g2SettingsEchoSnapshot(&echo, nullptr, generation, &fullWearProfile) &&
+        g2GlassesEchoValue(echo, *knob, &cur, fullWearProfile)) {
       if (knob->isBool)
         snprintf(ret, sizeof(ret), "G2 glasses: %s = %s", knob->name, cur ? "on" : "off");
       else
@@ -27117,89 +27219,91 @@ static const char* cmd_g2glasses(const String& argsInput) {
     value = (uint32_t)parsed;
   }
 
-  g2SettingsPrimeIfNeeded(*arm);
-
-  if (!g2SettingsFirmwareKnown(arm->firmwareVersion)) {
-    snprintf(ret, sizeof(ret),
-             "Error: G2 glasses: firmware '%s' is not an enabled settings profile",
-             arm->firmwareVersion[0] ? arm->firmwareVersion : "unknown");
+  char firmware[32];
+  portENTER_CRITICAL(&gRxPacketMux);
+  memcpy(firmware, arm->firmwareVersion, sizeof(firmware));
+  firmware[sizeof(firmware) - 1] = '\0';
+  portEXIT_CRITICAL(&gRxPacketMux);
+  if (!firmware[0]) {
+    // A cold session needs version-bearing BASIC even if a partial push is fresh.
+    (void)g2SettingsReadFresh(*arm, generation);
+    portENTER_CRITICAL(&gRxPacketMux);
+    memcpy(firmware, arm->firmwareVersion, sizeof(firmware));
+    firmware[sizeof(firmware) - 1] = '\0';
+    portEXIT_CRITICAL(&gRxPacketMux);
+  }
+  const bool candidateWear = strcmp(firmware, "2.3.2.14") == 0 &&
+      knob->innerField == G2_SETW_F_WEAR_DETECT && g2BothFirmwareExact("2.3.2.14");
+  if (!g2SettingsFirmwareKnown(firmware) && !candidateWear) {
+    snprintf(ret, sizeof(ret), "Error: G2 glasses: %s is not enabled on firmware '%s' (2.3.2.14 candidate is wear-only, exact pair)",
+             knob->name, firmware[0] ? firmware : "unknown");
     return ret;
   }
   const bool isHeadUpWrite = knob->innerField == G2_SETW_F_HEAD_UP;
-  uint32_t headUpGeneration = 0;
-  if (isHeadUpWrite && !g2BothFirmwareExact("2.2.6.10")) {
-    snprintf(ret, sizeof(ret),
-             "Error: G2 glasses: HeadUp writes require both temples on exact captured firmware 2.2.6.10 (L=%s R=%s)",
-             gL.firmwareVersion[0] ? gL.firmwareVersion : "unknown",
-             gR.firmwareVersion[0] ? gR.firmwareVersion : "unknown");
-    return ret;
-  }
-  if (isHeadUpWrite) {
-    portENTER_CRITICAL(&gRxPacketMux);
-    headUpGeneration = gR.connectionGeneration;
-    portEXIT_CRITICAL(&gRxPacketMux);
-  }
+  if (isHeadUpWrite && !g2BothFirmwareExact("2.2.6.10"))
+    return "Error: G2 glasses: HeadUp writes require both temples on exact captured firmware 2.2.6.10";
 
-  uint8_t before = 0;
-  G2SettingsEcho beforeEcho;
-  const bool haveBeforeSnapshot =
-      g2SettingsEchoSnapshot(&beforeEcho, nullptr);
-  const bool haveBefore = haveBeforeSnapshot &&
-      g2GlassesEchoValue(beforeEcho, *knob, &before);
+  if (candidateWear) {
+    bool fullWearProfile = false;
+    if (!g2SettingsReadFresh(*arm, generation, nullptr, &fullWearProfile) || !fullWearProfile)
+      return "Error: G2 glasses: no matching fresh RIGHT BASIC response with exact pair versions; wear write not sent";
+  } else g2SettingsPrimeIfNeeded(*arm, generation);
 
-  // Stamp the ack slot so we can tell a fresh ack from a stale one.
-  g2SettingsAckClear();
-
+  const uint8_t writeMagic = g2NextSettingsMagic();
+  g2SettingsAckArm(generation, writeMagic, knob->innerField, knob->leafField, value);
   uint8_t env[64];
-  const size_t n = g2BuildSettingInfoWrite(allocSeq(), G2_MAGIC_SETTINGS_WRITE,
+  const size_t n = g2BuildSettingInfoWrite(allocSeq(), writeMagic,
                                            knob->innerField, knob->leafField,
                                            value, env, sizeof(env));
   if (n == 0) {
+    g2SettingsAckClear();
     // Only reachable if the knob table and the builder allowlist disagree.
     snprintf(ret, sizeof(ret),
              "Error: G2 glasses: %s — builder rejected field %u.%u (allowlist)",
              knob->name, (unsigned)knob->innerField, (unsigned)knob->leafField);
     return ret;
   }
-  const bool sent = isHeadUpWrite
-      ? sendEnvelopeExactGeneration(*arm, env, n, headUpGeneration,
-                                    "2.2.6.10")
-      : sendEnvelope(*arm, env, n);
-  if (!sent)
+  const bool sent = (candidateWear || isHeadUpWrite)
+      ? sendEnvelopeExactGeneration(*arm, env, n, generation,
+                                    candidateWear ? "2.3.2.14" : "2.2.6.10")
+      : sendEnvelopeAtGeneration(*arm, env, n, generation);
+  if (!sent) {
+    g2SettingsAckClear();
     return "Error: G2 glasses: send failed or connection/firmware generation changed";
+  }
 
-  // Wait for the mirror-back. 60 ms on hardware; 500 ms is generous slack.
   bool acked = false;
-  uint32_t ackValue = 0;
-  for (int i = 0; i < 50; i++) {
+  for (unsigned i = 0; i < 50 && g2TempleReadyAtGeneration(*arm, generation); ++i) {
     vTaskDelay(pdMS_TO_TICKS(10));
-    uint8_t ackInner = 0, ackLeaf = 0;
-    if (g2SettingsAckSnapshot(&ackInner, &ackLeaf, &ackValue, nullptr) &&
-        ackInner == knob->innerField && ackLeaf == knob->leafField) {
-      acked = true;
-      break;
-    }
+    if (g2SettingsAckSnapshot(generation, writeMagic)) { acked = true; break; }
   }
+  g2SettingsAckClear();
+  if (!g2TempleReadyAtGeneration(*arm, generation))
+    return "G2 glasses: connection changed after send; result unconfirmed";
 
-  if (acked) {
-    snprintf(ret, sizeof(ret), "G2 glasses: %s = %u acked by glasses",
-             knob->name, (unsigned)ackValue);
-    return ret;
+  // A correlated readback can confirm a no-op even when firmware omits its
+  // write ACK. Missing scalars remain unknown except wear's qualified full
+  // 2.3.2.14 BASIC response, whose nanopb schema omits an OFF value.
+  G2SettingsEcho afterEcho;
+  bool fullWearProfile = false;
+  uint8_t observed = 0;
+  const bool haveAfter = g2SettingsReadFresh(*arm, generation, &afterEcho, &fullWearProfile) &&
+      g2GlassesEchoValue(afterEcho, *knob, &observed, candidateWear && fullWearProfile);
+  if (!g2TempleReadyAtGeneration(*arm, generation))
+    return "G2 glasses: connection changed during readback; result unconfirmed";
+  if (haveAfter && observed == value) {
+    snprintf(ret, sizeof(ret), "G2 glasses: %s = %u confirmed by fresh RIGHT readback%s",
+             knob->name, (unsigned)value, acked ? " and matching ACK" : " (no matching ACK)");
+  } else if (haveAfter) {
+    snprintf(ret, sizeof(ret), "G2 glasses: %s requested %u, fresh readback is %u%s; requested value unconfirmed",
+             knob->name, (unsigned)value, (unsigned)observed, acked ? " despite matching ACK" : "");
+  } else if (acked) {
+    snprintf(ret, sizeof(ret), "G2 glasses: %s = %u acked by RIGHT glasses; fresh readback unavailable",
+             knob->name, (unsigned)value);
+  } else {
+    snprintf(ret, sizeof(ret), "G2 glasses: %s = %u sent without matching ACK or fresh readback; unconfirmed",
+             knob->name, (unsigned)value);
   }
-
-  // No ack. On this firmware a write that changes nothing is simply not
-  // mirrored back, so if the device already held this value that is the
-  // expected — and successful — outcome. Say which case we're in when the
-  // snapshot can tell us, and stay honest when it can't.
-  if (haveBefore && before == (uint8_t)value) {
-    snprintf(ret, sizeof(ret),
-             "G2 glasses: %s already %u — no ack, which is how this firmware "
-             "reports a no-op", knob->name, (unsigned)value);
-    return ret;
-  }
-  snprintf(ret, sizeof(ret),
-           "G2 glasses: %s = %u sent but NOT acked — no-op or rejected, not confirmed. "
-           "Check `g2glasses refresh`", knob->name, (unsigned)value);
   return ret;
 }
 
@@ -28254,13 +28358,13 @@ static const char* cmd_g2battery(const String& /*argsInput*/) {
   uint8_t buf[64];
   if (gL.connected) {
     uint8_t seq = allocSeq();
-    size_t n = g2BuildSettingBasicRequest(seq, G2_MAGIC_SETTINGS,
+    size_t n = g2BuildSettingBasicRequest(seq, g2NextSettingsMagic(),
                                           buf, sizeof(buf));
     if (n) sendEnvelope(gL, buf, n);
   }
   if (gR.connected) {
     uint8_t seq = allocSeq();
-    size_t n = g2BuildSettingBasicRequest(seq, G2_MAGIC_SETTINGS,
+    size_t n = g2BuildSettingBasicRequest(seq, g2NextSettingsMagic(),
                                           buf, sizeof(buf));
     if (n) sendEnvelope(gR, buf, n);
   }

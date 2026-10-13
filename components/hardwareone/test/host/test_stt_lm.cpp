@@ -188,9 +188,9 @@ std::vector<uint8_t> decodeSpecBlob() {
 }
 struct Decoded { lm::DecodeStatus status; std::string text; };
 Decoded run(const lm::Lm& m, const Logits& x, const lm::CustomWords* words=nullptr, size_t capacity=512,
-            size_t beam=0, const lm::DecodeControl& control={}) {
+            size_t beam=0, const lm::DecodeControl& control={}, float strength=1.0f, lm::DecodeStats* stats=nullptr) {
     std::vector<char> text(capacity+1,'#');
-    const auto status=lm::decode(x.q.data(),x.frames(),-2,m,words,text.data(),capacity,control,beam);
+    const auto status=lm::decode(x.q.data(),x.frames(),-2,m,words,text.data(),capacity,control,beam,stats,strength);
     CHECK(std::memchr(text.data(),0,capacity));
     return {status,text.data()};
 }
@@ -257,6 +257,109 @@ void decodeLanguageModel() {
     CHECK(run(tl,Logits().frame({{'b',40},{'a',40}}).pattern("__").frame({{'z',40},{'y',40}})).text=="ay");
 }
 
+void decodeContextIsolation() {
+    const auto blob=decodeSpecBlob(), before=blob;
+    const auto beforeHash=sha(blob);
+    lm::Lm m, fresh;
+    CHECK(m.open(blob.data(),blob.size())==lm::LoadStatus::Ok);
+    CHECK(fresh.open(blob.data(),blob.size())==lm::LoadStatus::Ok);
+    lm::DecodeStats stats;
+    CHECK(stats.startHistoryWords==UINT8_MAX && stats.endHistoryWords==UINT8_MAX);
+    auto observed=[&](const Logits& x, const char* expected, uint8_t history) {
+        const auto r=run(m,x,nullptr,512,0,{},1.0f,&stats);
+        if(r.text!=expected)std::fprintf(stderr,"context fixture: expected '%s', got '%s'\n",expected,r.text.c_str());
+        CHECK(r.status==lm::DecodeStatus::Ok && r.text==expected);
+        CHECK(stats.startHistoryWords==0 && stats.endHistoryWords==history);
+        CHECK(stats.frames==x.frames() && stats.workspaceBytes==lm::workspace_bytes(x.frames(),m.beamWidth()));
+        CHECK(run(m,x).text==r.text); // collecting metadata cannot change the chosen text
+    };
+    Logits ambiguous; ambiguous.pattern("_dd_oo_"); ambiguous.frame({{'g',30},{'t',31}}); ambiguous.pattern("__");
+    Logits joined; joined.pattern("_zz_q_  _dd_oo_"); joined.frame({{'g',30},{'t',31}}); joined.pattern("__");
+    CHECK(run(fresh,ambiguous).text=="dot");
+    // The same LM changes dog/dot based on context within one decode. Its
+    // ending <unk> or known-word history must not leak into a following call.
+    for(int i=0;i<3;++i) {
+        observed(Logits().pattern("_zz_q_"),"zq",1);
+        observed(ambiguous,"dot",1);
+        observed(joined,"zq dog",2);
+        observed(ambiguous,"dot",1);
+        observed(Logits().pattern("cat"),"cat",1);
+        observed(ambiguous,"dot",1);
+    }
+    observed(Logits(),"",0);
+    observed(Logits().pattern("______"),"",0);
+    observed(Logits().pattern("cat "),"cat",1);
+    observed(Logits().pattern("cat dog cat"),"cat dog cat",2);
+    // End context is from the full winner, not the truncated display string.
+    const auto cut=run(m,Logits().pattern("cat dog"),nullptr,4,0,{},1.0f,&stats);
+    CHECK(cut.status==lm::DecodeStatus::OutputTooSmall && cut.text=="cat");
+    CHECK(stats.startHistoryWords==0 && stats.endHistoryWords==2);
+    char text[16]="stale";
+    CHECK(lm::decode(nullptr,1,-2,m,nullptr,text,sizeof(text),{},0,&stats)==lm::DecodeStatus::InvalidArgument);
+    CHECK(!text[0] && stats.startHistoryWords==UINT8_MAX && stats.endHistoryWords==UINT8_MAX);
+    struct Counter { int calls=0, cancelAt=0; static bool poll(void* c) { auto& s=*static_cast<Counter*>(c); return ++s.calls>=s.cancelAt; } };
+    Counter beforeStart{0,1};
+    CHECK(run(m,ambiguous,nullptr,512,0,{&beforeStart,Counter::poll},1.0f,&stats).status==lm::DecodeStatus::Cancelled);
+    CHECK(stats.startHistoryWords==UINT8_MAX && stats.endHistoryWords==UINT8_MAX && !stats.workspaceBytes);
+    Logits longer; for(int i=0;i<8;++i)longer.pattern("_cc_a_t__ ");
+    Counter during{0,3};
+    CHECK(run(m,longer,nullptr,512,0,{&during,Counter::poll},1.0f,&stats).status==lm::DecodeStatus::Cancelled);
+    CHECK(stats.startHistoryWords==0 && stats.endHistoryWords==UINT8_MAX && stats.workspaceBytes);
+    observed(ambiguous,"dot",1); // a cancelled search cannot contaminate the next call either
+    CHECK(blob==before && sha(blob)==beforeHash && load(blob)==lm::LoadStatus::Ok);
+    std::puts("stt_lm context: same-Lm consecutive calls start fresh; within-call context, bounded history, unavailable stages and immutable LM passed");
+}
+
+void decodeStrength() {
+    // Controlled conflict: acoustics favor b by 2 nats; the LM favors a by
+    // ln(10). Full strength wins with a, 0.75 lets the acoustics choose b.
+    Spec spec; spec.alpha=1; spec.beta=0; spec.bonus=0; spec.unk=-5; spec.prune=-8;
+    spec.uni("</s>",0).uni("<s>",0).uni("<unk>",-5000).uni("a",0).uni("b",-1000).uni("ab",0);
+    Logits conflict; conflict.frame({{'a',30},{'b',38}},-128);
+    const auto blob=lmtest::build(spec), before=blob;
+    const auto beforeHash=sha(blob);
+    lm::Lm m; CHECK(m.open(blob.data(),blob.size())==lm::LoadStatus::Ok);
+    char implicit[32], explicitOne[32]; lm::DecodeStats oldStats, oneStats;
+    CHECK(lm::decode(conflict.q.data(),1,-2,m,nullptr,implicit,sizeof(implicit),{},0,&oldStats)==lm::DecodeStatus::Ok);
+    CHECK(lm::decode(conflict.q.data(),1,-2,m,nullptr,explicitOne,sizeof(explicitOne),{},0,&oneStats,1.0f)==lm::DecodeStatus::Ok);
+    CHECK(!std::strcmp(implicit,"a") && !std::strcmp(implicit,explicitOne));
+    CHECK(std::tie(oldStats.frames,oldStats.beam,oldStats.nodes,oldStats.candidates,oldStats.completions,oldStats.workspaceBytes,
+                   oldStats.startHistoryWords,oldStats.endHistoryWords)==
+          std::tie(oneStats.frames,oneStats.beam,oneStats.nodes,oneStats.candidates,oneStats.completions,oneStats.workspaceBytes,
+                   oneStats.startHistoryWords,oneStats.endHistoryWords));
+    CHECK(run(m,conflict,nullptr,512,0,{},0.75f).text=="b");
+    CHECK(run(m,conflict,nullptr,512,0,{},0.0f).text=="b");
+    CHECK(run(m,conflict).text=="a"); // lower-strength calls do not mutate cached policy
+    CHECK(blob==before && sha(blob)==beforeHash && load(blob)==lm::LoadStatus::Ok);
+    CHECK(m.alpha()==spec.alpha && m.beta()==spec.beta && m.hotwordBonus()==spec.bonus);
+
+    // Custom-word and insertion scores must scale with alpha. Holding either
+    // fixed would retain an independent push toward words after reducing LM.
+    spec.alpha=0; spec.bonus=2.25f;
+    const auto hotBlob=lmtest::build(spec); lm::Lm hotLm;
+    CHECK(hotLm.open(hotBlob.data(),hotBlob.size())==lm::LoadStatus::Ok);
+    lm::CustomWords hot; CHECK(hot.parse("a\n",2)==1);
+    CHECK(run(hotLm,conflict,&hot).text=="a");
+    CHECK(run(hotLm,conflict,&hot,512,0,{},0.75f).text=="b");
+    CHECK(run(hotLm,conflict,&hot,512,0,{},0.0f).text=="b");
+
+    spec.bonus=0; spec.beta=2.25f;
+    const auto wordBlob=lmtest::build(spec); lm::Lm wordLm;
+    CHECK(wordLm.open(wordBlob.data(),wordBlob.size())==lm::LoadStatus::Ok);
+    Logits spacing; spacing.pattern("a").frame({{' ',30},{'_',38}},-128).pattern("b");
+    CHECK(run(wordLm,spacing).text=="a b");
+    CHECK(run(wordLm,spacing,nullptr,512,0,{},0.75f).text=="ab");
+    CHECK(run(wordLm,spacing,nullptr,512,0,{},0.0f).text=="ab");
+
+    for(float bad:{-0.01f,1.01f,std::numeric_limits<float>::infinity(),
+                   -std::numeric_limits<float>::infinity(),std::numeric_limits<float>::quiet_NaN()}) {
+        char text[8]="stale"; lm::DecodeStats stats; stats.frames=99;
+        CHECK(lm::decode(conflict.q.data(),1,-2,m,nullptr,text,sizeof(text),{},0,&stats,bad)==lm::DecodeStatus::InvalidArgument);
+        CHECK(!text[0] && !stats.frames && blob==before && m.alpha()==1.0f);
+    }
+    std::puts("stt_lm strength: default/1 parity, 0.75 acoustic conflict, coupled word/hotword scores, invalid factors and immutable LM passed");
+}
+
 void decodeControlAndArguments() {
     const auto blob=decodeSpecBlob(); lm::Lm m; CHECK(m.open(blob.data(),blob.size())==lm::LoadStatus::Ok);
     using D=lm::DecodeStatus;
@@ -287,7 +390,7 @@ void decodeControlAndArguments() {
 
 // Random small cases against the independent reference. Inactive classes sit
 // at -32 nats (always pruned); active ones cover blank, space, a, b and '.
-void randomisedOracle() {
+void randomisedOracle(float strength=1.0f) {
     std::mt19937 rng(1234);
     auto uniform=[&](int lo, int hi) { return std::uniform_int_distribution<int>(lo,hi)(rng); };
     const char* vocab[]={"a","b","ab","ba","aab","b'a","bb"};
@@ -305,23 +408,34 @@ void randomisedOracle() {
         for(int k=uniform(0,10);k>0;--k)s.bi(known[size_t(uniform(0,int(known.size())-1))],known[size_t(uniform(0,int(known.size())-1))],-uniform(0,3000),-uniform(0,800));
         for(int k=uniform(0,10);k>0;--k)s.tri(known[size_t(uniform(0,int(known.size())-1))],known[size_t(uniform(0,int(known.size())-1))],known[size_t(uniform(0,int(known.size())-1))],-uniform(0,3000));
         const auto blob=lmtest::build(s); lm::Lm m; CHECK(m.open(blob.data(),blob.size())==lm::LoadStatus::Ok);
-        lmtest::Reference ref{s,{}};
+        lmtest::Reference ref{s,{}}; ref.strength=strength;
         lm::CustomWords words; std::string list;
         for(const char* w:{"ab","bb","a'b","ba"})if(!uniform(0,2)) { list+=w; list+="\n"; ref.hot.insert(w); }
         words.parse(list.data(),list.size());
         const int exponent=uniform(-3,-1);
         Logits x; const int frames=uniform(0,24);
         for(int t=0;t<frames;++t) { int8_t* f=x.add(-128); for(int c:active)f[c]=int8_t(uniform(-60,60)); if(!uniform(0,4))f[1]=f[2]; }
+        // Zero strength must equal the existing acoustic-only beam path,
+        // including its tie behavior, without changing the original LM view.
+        if(strength==1.0f) {
+            Spec flat=s; flat.alpha=flat.beta=flat.bonus=0;
+            const auto flatBlob=lmtest::build(flat); lm::Lm flatLm;
+            CHECK(flatLm.open(flatBlob.data(),flatBlob.size())==lm::LoadStatus::Ok);
+            char scaledZero[64], originalZero[64];
+            CHECK(lm::decode(x.q.data(),x.frames(),exponent,m,&words,scaledZero,sizeof(scaledZero),{},0,nullptr,0.0f)==lm::DecodeStatus::Ok);
+            CHECK(lm::decode(x.q.data(),x.frames(),exponent,flatLm,&words,originalZero,sizeof(originalZero))==lm::DecodeStatus::Ok);
+            CHECK(!std::strcmp(scaledZero,originalZero));
+        }
         const std::string expected=ref.decode(x.q,x.frames(),exponent,s.beam);
         if(ref.minGap<1e-6) { ++skipped; continue; } // float log1p(exp) error is <1e-7
         char text[64];
-        const auto status=lm::decode(x.q.data(),x.frames(),exponent,m,&words,text,sizeof(text));
+        const auto status=lm::decode(x.q.data(),x.frames(),exponent,m,&words,text,sizeof(text),{},0,nullptr,strength);
         CHECK(status==lm::DecodeStatus::Ok);
         if(expected!=text) { std::fprintf(stderr,"case %d: expected '%s' got '%s'\n",n,expected.c_str(),text); std::abort(); }
         ++compared; ties+=ref.exactTies ? 1 : 0;
     }
-    std::printf("stt_lm oracle: %zu compared (%zu decided exact ties by prefix bytes), %zu skipped:"
-                " a rank decision within 1e-6 nats that is not a structural tie\n",compared,ties,skipped);
+    std::printf("stt_lm oracle strength %.2f: %zu compared (%zu decided exact ties by prefix bytes), %zu skipped:"
+                " a rank decision within 1e-6 nats that is not a structural tie\n",double(strength),compared,ties,skipped);
     CHECK(compared>=2000 && ties>=100);
 }
 }
@@ -333,7 +447,10 @@ int main() {
     customWords();
     decodeBasics();
     decodeLanguageModel();
+    decodeContextIsolation();
+    decodeStrength();
     decodeControlAndArguments();
     randomisedOracle();
+    randomisedOracle(0.75f);
     std::printf("stt_lm tests passed\n");
 }

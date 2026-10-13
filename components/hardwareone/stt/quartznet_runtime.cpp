@@ -1,6 +1,9 @@
+#if defined(HW1_BOARD_CONFIG_HEADER) || defined(HW1_FEATURE_CONFIG_HEADER) || defined(HW1_DEPLOYMENT_CONFIG_HEADER)
+#include "System_BuildConfig.h"
+#endif
 #include "quartznet_runtime.h"
 #include "quartznet_frontend.h"
-#include "stt_model_identity.h"
+#include "stt_model_selection.h"
 #include "stt_model_container.h"
 #include "dl_model_base.hpp"
 #if HW1_STT_RESIDENT_MODEL

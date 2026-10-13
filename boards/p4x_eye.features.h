@@ -40,11 +40,11 @@
 #define ENABLE_BATTERY_MONITOR 1
 
 // microSD (SDMMC slot 0) is implemented but not yet qualified with a card on
-// this board. Set both to 1 to try it; see docs/P4X_EYE_PERIPHERALS.md.
+// this board. Select ENABLE_SDMMC_CARD=1 in a saved configuration to try it;
+// System_BuildConfig.h derives ENABLE_SD_CARD from that selection.
+// See docs/P4X_EYE_PERIPHERALS.md.
 #undef ENABLE_SDMMC_CARD
 #define ENABLE_SDMMC_CARD 0
-#undef ENABLE_SD_CARD
-#define ENABLE_SD_CARD 0
 
 // --- Radio (onboard ESP32-C6 through ESP-Hosted) -----------------------------
 #undef NETWORK_FEATURE_LEVEL

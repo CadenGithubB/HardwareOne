@@ -24,6 +24,8 @@ def main():
     group.add_argument('--sanitize', action='store_true', help='AddressSanitizer and UBSan')
     group.add_argument('--thread-sanitize', action='store_true', help='ThreadSanitizer (supported hosts only)')
     parser.add_argument('--repeat', type=int, default=1)
+    parser.add_argument('--speakers', action='store_true', help='Exercise controlled late speaker labels, cancellation, bounded saves and session fences')
+    parser.add_argument('--trim-silence', action='store_true', help='Exercise legacy trailing trim and speculative-final opt-ins instead of full-phrase default')
     args = parser.parse_args()
     if not 1 <= args.repeat <= 100:
         parser.error('--repeat must be 1..100')
@@ -38,7 +40,7 @@ def main():
     assert one_shot.index('sttWarmYield(sttCancelled, &token);') < one_shot.index('ok = sttLocalTranscribe(')
     assert 'stats, error, sizeof(error));' in one_shot and 'sttWarmPark' not in one_shot
     interface = '\n'.join(no_includes((SOURCE / name).read_text()) for name in
-                          ('System_Transcript.h', 'System_STTLocal.h', 'System_STT.h', 'Audio_VadPolicy.h', 'stt/stt_segmenter.h',
+                          ('System_STTMetadata.h', 'System_Transcript.h', 'System_STTLocal.h', 'System_STT.h', 'Audio_VadPolicy.h', 'stt/stt_segmenter.h',
                            'stt/quartznet_frontend.h'))
     # The real frontend, so capture-time feature rows can be checked bit for bit.
     frontend = no_includes((SOURCE / 'stt/quartznet_constants.h').read_text()) + no_includes((SOURCE / 'stt/quartznet_frontend.cpp').read_text())
@@ -50,6 +52,12 @@ def main():
         unit.write_text(harness)
         cmd = ['clang++', '-std=c++17', '-pthread', '-Wall', '-Wextra', '-Werror', '-ffp-contract=off',
                '-Wno-unused-function', str(unit), '-o', str(exe)]
+        if args.speakers:
+            cmd += ['-DCONFIG_IDF_TARGET_ESP32P4=1', '-DENABLE_STT_SPEAKER_LABELS=1']
+        if args.trim_silence:
+            cmd += ['-DHW1_STT_TRIM_SILENCE=1', '-DHW1_STT_SPECULATIVE_FINAL=1']
+        else:
+            cmd += ['-DHW1_STT_TEST_EXPECT_FULL_PHRASE=1']
         if args.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
         elif args.thread_sanitize:
