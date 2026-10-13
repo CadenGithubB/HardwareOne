@@ -162,3 +162,4 @@ g2_long_release
 note_started
 note_saved
 note_failed
+video_record_failed

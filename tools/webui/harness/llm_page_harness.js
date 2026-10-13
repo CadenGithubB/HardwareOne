@@ -384,6 +384,12 @@ var DEV = {
     answerChunk: 10,
     genSession: 0,       // the generation the device is currently serving
     nextSession: 41,
+    // The session the page is rendered for (window.__hwUser.isAdmin in the
+    // shipped runtime, read through hw.isAdmin()).
+    isAdmin: true,
+    // An unload the device REFUSES or fails ({ok:false,error}), e.g. the
+    // executor's admin refusal; device state is left untouched.
+    unloadReject: null,
     statusHits: 0, modelHits: 0, resultHits: 0, stopHits: 0, unloadHits: 0
 };
 
@@ -431,6 +437,7 @@ var hw = {
     setText: function (x, v) { var el = hw.$(x); if (el) el.textContent = v; },
     setHTML: function (x, v) { var el = hw.$(x); if (el) el.innerHTML = v; },
     on: function (e, v, f) { if (e) e.addEventListener(v, f); },
+    isAdmin: function () { return !!DEV.isAdmin; },
     fetchJSON: function (url) {
         if (url.indexOf("/api/llm/status") === 0) { DEV.statusHits++; return P(clone(DEV.status)); }
         if (url.indexOf("/api/llm/models") === 0) { DEV.modelHits++; return P(clone(DEV.models)); }
@@ -494,7 +501,8 @@ var hw = {
         }
         if (url.indexOf("/api/llm/unload") === 0) {
             DEV.unloadHits++;
-            DEV.status = { state: "UNLOADED", model: "", arch: "", quant: "",
+            if (DEV.unloadReject) return P({ ok: false, error: DEV.unloadReject });
+            DEV.status ={ state: "UNLOADED", model: "", arch: "", quant: "",
                            menu: { groups: 0, gen: 0 }, ctxWarn: false };
             return P({ ok: true });
         }
@@ -578,6 +586,13 @@ function scenario() {
           modelOpts.length > 1 ? modelOpts[1].t : "(missing)");
     check("onboard size scales to MB", /6\.0MB/.test(modelOpts[0].t), modelOpts[0].t);
     check("unavailable row disabled", modelOpts.length > 1 && modelOpts[1].d === true);
+    check("admin: Load and Unload offered",
+          !!els["qa-load-btn"] && !!els["qa-unload-btn"] &&
+          els["qa-load-btn"].style.display !== "none" &&
+          els["qa-unload-btn"].style.display !== "none",
+          els["qa-load-btn"] ? "load=" + JSON.stringify(els["qa-load-btn"].style.display) +
+                               " unload=" + JSON.stringify(els["qa-unload-btn"] && els["qa-unload-btn"].style.display)
+                             : "no qa-load-btn element in the page markup");
 
     // 2. Idle heartbeats. Nothing changed, so nothing should be said or rebuilt --
     //    a poll that re-announces would spam the chat log every few seconds.
@@ -838,6 +853,23 @@ check("harness scenario ran to completion", scenarioError === null, scenarioErro
     DEV.streamForever = false;
     advance(2000);
 
+// 16a. A refused or failed unload ({ok:false,error}, e.g. the executor's admin
+//      refusal) must say so. Announcing "Model unloaded" here would be a false
+//      success: the model is still loaded.
+    var sysBeforeRefusal = sysLog.length;
+    DEV.unloadReject = "Admin required";
+    windowStub.qaUnloadModel();
+    advance(3000);
+    var refusal = sysLog.slice(sysBeforeRefusal);
+    check("unload refused: the reason is shown",
+          refusal.filter(function (m) { return /^Unload failed: Admin required$/.test(m); }).length === 1,
+          refusal.join(" / ") || "(silence)");
+    check("unload refused: no false 'Model unloaded'",
+          refusal.filter(function (m) { return /^Model unloaded$/.test(m); }).length === 0,
+          refusal.join(" / ") || "(silence)");
+    DEV.unloadReject = null;
+    advance(8000);
+
 // 16. Unload acknowledges explicitly instead of falling through to the generic
 //     "no model loaded" line — and must not then be re-announced by the
 //     heartbeat, which is what the afterGen signature adoption is for.
@@ -1023,6 +1055,38 @@ check("page threw no exceptions", absorbed.length === 0,
           answerText === textAtEnd && DEV.resultHits === pollsAtEnd,
           "text changed=" + (answerText !== textAtEnd) +
           " extra polls=" + (DEV.resultHits - pollsAtEnd));
+
+// 21. A non-admin session. Load and Unload run admin-only commands, so the page
+//     must not offer them (the /power page rule). The page reads the role once
+//     while it starts, so this renders a SECOND instance of the real page
+//     against fresh elements; it runs last because it replaces the window
+//     handlers the first instance registered.
+    var absorbedBeforeUser = absorbed.length;
+    function shown(id) { return !!els[id] && els[id].style.display !== "none"; }
+    try {
+    els = {};
+    declaredIds.forEach(function (id) { els[id] = new El(id); });
+    DEV.isAdmin = false;
+    new Function("document", "window", "hw", "setTimeout", "clearTimeout", "console", "navigator", pageSrc)(
+        documentStub, windowStub, hw, setTimeoutStub, clearTimeoutStub,
+        { log: function () {}, error: function () {}, warn: function () {} }, navigatorStub
+    );
+    advance(3000);
+    check("non-admin: Load and Unload hidden",
+          !!els["qa-load-btn"] && !!els["qa-unload-btn"] &&
+          els["qa-load-btn"].style.display === "none" &&
+          els["qa-unload-btn"].style.display === "none",
+          els["qa-load-btn"] ? "load=" + JSON.stringify(els["qa-load-btn"].style.display) +
+                               " unload=" + JSON.stringify(els["qa-unload-btn"] && els["qa-unload-btn"].style.display)
+                             : "no qa-load-btn element in the page markup");
+    check("non-admin: the chat itself stays available",
+          shown("qa-input") && shown("qa-ask") && shown("qa-model"),
+          "input=" + shown("qa-input") + " ask=" + shown("qa-ask") + " model=" + shown("qa-model"));
+    } catch (e) {
+        check("non-admin: the page instance ran", false, String(e));
+    }
+    check("non-admin page threw no exceptions", absorbed.length === absorbedBeforeUser,
+          absorbed.slice(absorbedBeforeUser, absorbedBeforeUser + 3).join(" | "));
 
 __out(failures === 0 ? "HARNESS_RESULT PASS" : "HARNESS_RESULT FAIL " + failures);
 

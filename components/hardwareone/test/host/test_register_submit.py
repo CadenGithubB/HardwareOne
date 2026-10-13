@@ -21,6 +21,14 @@ byte-exact. On a tree that still files the request as a `userrequest` command
 line under an empty web identity, the production authorizeCommand refuses it
 and the web cases fail on behaviour; where cmd_user_request does its own
 pending-list I/O the command cases are reported as failed.
+
+The same authorizeCommand is driven for the forced password change on
+command transports: while userMustChangePassword (a double) holds for the
+caller, every external transport refuses anything but userchangepassword,
+bare login/logout and whoami, with the change-password reply, one audit entry
+and one denial event; other accounts, internal callers and the
+require-auth-off identity are not gated. On a tree without that gate the case
+fails on behaviour.
 """
 from __future__ import annotations
 
@@ -57,6 +65,7 @@ CASES = (
     "web_owner_refusals",
     "web_rejected_fields",
     "anonymous_userrequest_refused",
+    "must_change_password_command_gate",
     "command_validate_only",
     "command_quoted_passphrase",
 )
@@ -96,8 +105,11 @@ def generate() -> tuple[str, bool]:
         unique(command_source, "const String& CommandArgs::arg(", "System_Command.cpp"),
         unique(utils, "enum class SessionControlForm", "System_Utils.cpp") + ";",
         unique(utils, "static SessionControlForm classifySessionControlLine(", "System_Utils.cpp"),
-        unique(utils, "static bool authorizeCommand(", "System_Utils.cpp"),
     ]
+    # The must-change allowlist; a tree without it has no command-side gate.
+    if "static bool commandAllowedDuringPasswordChange(" in utils:
+        pieces.append(unique(utils, "static bool commandAllowedDuringPasswordChange(", "System_Utils.cpp"))
+    pieces.append(unique(utils, "static bool authorizeCommand(", "System_Utils.cpp"))
     if "bool isReservedUsername(" in user:
         pieces.append(unique(user, "bool isReservedUsername(", "System_User.cpp"))
     pieces += [

@@ -377,7 +377,6 @@ struct Settings {
       edgeImpulseRequireLabels(true),
       edgeImpulseMinConfidence(0.6f),
       edgeImpulseMaxDetections(5),
-      edgeImpulseInputSize(96),
       edgeImpulseContinuous(false),
       edgeImpulseIntervalMs(1000),
       httpAutoStart(true),
@@ -1080,7 +1079,7 @@ struct Settings {
   bool edgeImpulseRequireLabels;
   float edgeImpulseMinConfidence; // Minimum confidence threshold (0.0-1.0)
   int edgeImpulseMaxDetections; // Max objects to report per frame (1-10)
-  int edgeImpulseInputSize;     // Model input size (96, 128, etc)
+  // No input-size field: the loaded model's input tensor sets the geometry.
   bool edgeImpulseContinuous;   // Continuous inference mode
   int edgeImpulseIntervalMs;    // Interval between inferences in continuous mode
   // HTTP server settings

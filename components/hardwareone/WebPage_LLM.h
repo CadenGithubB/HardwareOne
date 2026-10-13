@@ -182,8 +182,8 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
       <span class='qa-load-fill' id='qa-load-fill'></span>
     </span>
     <select id='qa-model' data-guest-hide><option value=''>Loading...</option></select>
-    <button class='btn' onclick='qaLoadModel()' data-guest-hide>Load</button>
-    <button class='btn' onclick='qaUnloadModel()' data-guest-hide>Unload</button>
+    <button class='btn' id='qa-load-btn' onclick='qaLoadModel()' data-guest-hide>Load</button>
+    <button class='btn' id='qa-unload-btn' onclick='qaUnloadModel()' data-guest-hide>Unload</button>
     <button class='btn' id='qa-adv-btn' onclick='qaToggleAdv()' data-guest-hide>Advanced</button>
   </div>
 
@@ -243,6 +243,13 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   var metaEl    = hw.$('qa-meta');
   var modelSel  = hw.$('qa-model');
   var initMsg   = hw.$('qa-init-msg');
+  // Load and Unload run the admin-only llmload/llmunload commands on the
+  // device, so a non-admin is not offered buttons that can only be refused
+  // (the same rule as the /power page).
+  if (!hw.isAdmin()) {
+    hw.hide(hw.$('qa-load-btn'));
+    hw.hide(hw.$('qa-unload-btn'));
+  }
   var busy      = false;
   var abortCtrl = null;
   var currentCtx = null; // Track the most recent Q&A context
@@ -973,9 +980,19 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
       // Acknowledge the unload explicitly. Pass afterGen=true so fetchStatus
       // refreshes the dot/state to UNLOADED but SKIPS the generic "No model
       // loaded…" line — we show "Model unloaded" instead (matches the CLI's
-      // `llmunload` result string). On failure, fall back to a normal status
+      // `llmunload` result string). A refused or failed unload comes back as
+      // {"ok":false,"error":...} (WebPage_LLM.cpp handleLLMUnload): say so and
+      // refresh normally. On a transport failure, fall back to a normal status
       // refresh so a real error still surfaces.
-      .then(function(){ addSys('Model unloaded'); fetchStatus(true, null); })
+      .then(function(j){
+        if (j && j.ok === false) {
+          addSys('Unload failed: ' + (j.error || 'unknown error'));
+          fetchStatus(false, null);
+          return;
+        }
+        addSys('Model unloaded');
+        fetchStatus(true, null);
+      })
       .catch(function(){ fetchStatus(false, null); });
   };
 

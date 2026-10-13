@@ -23,12 +23,13 @@ static void hostLog(const char*, ...) {}
 
 using TaskHandle_t = void*;
 
-enum { SYSEVT_VIDEO_SAVED = 1 };
+enum { SYSEVT_VIDEO_SAVED = 1, SYSEVT_VIDEO_RECORD_FAILED = 2 };
 static std::vector<std::string> savedEvents;
+static std::vector<std::string> failedEvents;
 static void systemEventPost(int kind, const char* subject, const char* detail = nullptr) {
-  if (kind == SYSEVT_VIDEO_SAVED) {
-    savedEvents.push_back(std::string(subject ? subject : "") + "|" + (detail ? detail : ""));
-  }
+  const std::string text = std::string(subject ? subject : "") + "|" + (detail ? detail : "");
+  if (kind == SYSEVT_VIDEO_SAVED) savedEvents.push_back(text);
+  if (kind == SYSEVT_VIDEO_RECORD_FAILED) failedEvents.push_back(text);
 }
 
 namespace VFS {
@@ -76,6 +77,7 @@ static bool startClip() {
   fake_vfs::wireLockDouble();
   fs.mkdirAll("/sd/VIDEOS");
   savedEvents.clear();
+  failedEvents.clear();
   VFS::sdInUseEnds = 0;
   std::snprintf(s_path, sizeof(s_path), "%s", kPath);
   s_file = VFS::openGuarded(String(s_path), FILE_WRITE, VFS::systemAuth(VFS::Scopes::VIDEOS, "video.record"), true);
@@ -109,6 +111,8 @@ static bool recordThree() { return recordFrame(100) && recordFrame(101) && recor
 static int expectNotSaved(bool finalized, const char* what) {
   CHECK(!finalized, what);
   CHECK(savedEvents.empty(), "no VIDEO_SAVED for an incomplete clip");
+  CHECK(failedEvents.size() == 1 && failedEvents[0].rfind("VID_1.AVI|", 0) == 0,
+        "one VIDEO_RECORD_FAILED carrying the clip name");
   CHECK(fake_vfs::fs().sdWriteFailureNotes > 0, "the failure is reported to VFS");
   CHECK(!s_file, "the clip handle is closed");
   std::puts("PASS");
@@ -122,6 +126,7 @@ static int run(const std::string& name) {
     CHECK(recordThree(), "three frames recorded");
     CHECK(FINALIZE(true, 600), "complete clip finalizes");
     CHECK(savedEvents.size() == 1 && savedEvents[0] == "VID_1.AVI|3 frames", "one VIDEO_SAVED with the clip name");
+    CHECK(failedEvents.empty(), "no VIDEO_RECORD_FAILED for a complete clip");
     CHECK(fs.sdWriteFailureNotes == 0 && !s_file, "no failure reported and the handle closed");
     const std::string bytes = fs.text(kPath);
     const uint32_t movi = (8 + 100) + (8 + 101 + 1) + (8 + 150);

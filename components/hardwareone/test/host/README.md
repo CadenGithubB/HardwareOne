@@ -604,8 +604,12 @@ a list missing an entry; that 16 bans with 39-character IPs and 79-character
 reasons list as complete JSON and round-trip through the file; that a list too
 large for the 4 KB reply buffer is an explicit `{"error":...}` rather than a
 truncated document; and that the lookup takes the ban-table lock while no file
-I/O runs under it. Not covered: real task interleaving, the device AES helpers
-and the `ban`/`unban` command replies. Run with
+I/O runs under it. It also checks that the ban's session kick reads the session
+table under the session fence (a counting double), and runs the real
+`ban`/`unban` adapters (`cmd_ban`, `cmd_unban` with `CommandArgs`): a ban or
+unban whose save failed is reported as not saved, distinct from a full list or
+an address that is not banned. Not covered: real task interleaving and the
+device AES helpers. Run with
 `ctest --test-dir build -R '^ip_ban_store$' --output-on-failure`.
 
 ## Migration restore
@@ -630,8 +634,8 @@ promotion, and binary map content. Run with
 
 `camera_web_frame_only` is a source check over the web sources (`WebPage_*`,
 `WebServer_*`, `System_Camera*Web*`): no camera stream endpoint is named, no
-`multipart/x-mixed-replace` response exists, `handleCameraStream` is not
-defined, and every httpd handler that captures a camera frame captures one per
+`multipart/x-mixed-replace` response exists, `handleCameraStream` is neither
+defined nor declared, and every httpd handler that captures a camera frame captures one per
 request without a loop, because a looping handler holds the single httpd task
 until its viewer disconnects. `/api/sensors/camera/frame` must stay registered.
 It does not compile or run the handlers. Run with
@@ -799,7 +803,11 @@ do; `userrequest` from every external transport without an identity (web CLI
 and register path included) is still refused with "Authentication required";
 validate-only `userrequest` returns VALID with the arguments checked and never
 reaches the owner; a quoted passphrase given to `userrequest` reaches the owner
-byte-exact. A source contract keeps the handler off the command path and the
+byte-exact; while `userMustChangePassword` (a double) holds, every external
+transport refuses anything but `userchangepassword`, bare `login`/`logout` and
+`whoami` with the change-password reply, one audit entry and one denial event,
+and other accounts, internal callers and `AuthBypass` are not gated. A source
+contract keeps the handler off the command path and the
 owner on the locked pending-list writer. Not covered: the owner's pending-list
 I/O itself (lock, 32-entry cap, atomic write), the real lockout table and
 httpd. Run with
@@ -869,7 +877,8 @@ frames: 200000 us per frame, rate/scale 5 fps), the largest frame as
 `dwSuggestedBufferSize` and the recorded geometry in avih, strh `rcFrame` and
 strf. A short idx1 write, a failed seek, a failed header patch, a flush error,
 an earlier frame-write failure and a failed geometry seek or write post no
-saved event and report an SD write failure; a failed start removes its file and
+saved event, post one `VIDEO_RECORD_FAILED` carrying the clip name and report
+an SD write failure; a failed start removes its file and
 releases the SD registration. A second harness compiles the real SD-in-use
 registration, `unmountSD`/`remountSD`/`formatSD` and the
 `sdunmount`/`sdmount`/`sdformat` commands from `System_VFS.cpp` against a fake
@@ -913,6 +922,84 @@ covered: the map, GPS track and LLM status replies (same helper, no harness)
 and the recordings producer in `System_Microphone.cpp`. Run with
 `ctest --test-dir build -R '^web_json_replies$' --output-on-failure` (or the
 runner with `--sanitize` / `--case <name>`).
+
+## Web session eviction
+
+`web_session_eviction` compiles, from `WebServer_Server.cpp` on every run,
+`setSession`, `findFreeSessionIndex`, `pruneExpiredSessions`, the session
+cookie writer and the session fence with its slot helpers, plus `SessionEntry`
+from `WebServer_Server.h`, with `unsigned long`/`long` mapped to the ESP32's
+32-bit widths so millis() arithmetic wraps as on the device. It checks that a
+login into the full two-slot table replaces the session that expires first, at
+early uptime and across the millis() wrap (never a blind slot 0), and that the
+replaced session is signed out like any other logout: `SYSEVT_LOGOUT` with
+`evicted`, a logout reason for its browser unless it is the address signing
+in, its socket closed unless it carries this login, its transport epoch closed
+and its slot generation bumped (a revoked session waiting for its notice gets
+its socket closed but no second event or reason). httpd, tokens, epochs,
+events and logout reasons are recording doubles. Not covered: the cookie
+reaching a browser,
+`handleLogin`, or the SSE delivery of the reason. Run with
+`ctest --test-dir build -R '^web_session_eviction$' --output-on-failure` (or
+the runner with `--sanitize` / `--case <name>`).
+
+## Command task isolation
+
+`command_task_isolation` executes code that runs beside the command executor
+on other tasks. The broadcast case compiles `broadcastOutputCore`
+(System_Debug.cpp) and `currentCommandValidateOnly` (System_Utils.cpp): one
+thread runs a validate pass the way `commandExecTask` does (its own
+CommandContext with `validateOnly`, plus the handler mirror
+`gCLIValidateOnly`), while a second thread broadcasts, once with no command
+context and once inside its own command. The validating thread's lines are
+dropped; the other thread's lines are delivered, and the executor's own
+output resumes after the pass. The password case compiles
+`userChangePasswordCore` and `cmd_user_changepassword` (System_User.cpp)
+with `RETURN_VALID_IF_VALIDATE_CSTR` and `USER_CHANGE_PASSWORD_MESSAGE_MAX`:
+every outcome (mismatch, short, unchanged, wrong current password, filesystem
+not ready, not authenticated, storage failure, success, a 64-character name)
+returns its status with the message in the caller's buffer while the shared
+debug buffer keeps another command's text; short and absent buffers are
+handled; the CLI handler still answers through the debug buffer and honours
+validate. Threads, task identity, the per-task context, the output queue and
+the account store are host doubles. Not covered: the ESP-IDF queue, the
+web page, or executeCommand placement (test_command_resolution_contract
+checks that every executeCommand call is on the executor or early boot, the
+web status endpoint submits through `executeInternalStatusCommand`, and who
+writes `gCLIValidateOnly`). Run with
+`ctest --test-dir build -R '^command_task_isolation$' --output-on-failure` (or
+the runner with `--sanitize`).
+
+## Battery log clear
+
+`battery_log_clear` extracts the `clear` branch of `cmd_batterylog` and the log
+path constants from `System_Battery.cpp` and runs them against the shared fake
+VFS with a `canDelete` double that answers as the `/battery.csv` permission row
+does (admins may delete, users only read). An admin clear removes
+`/battery.csv` and both rotations under the FS lock and replies
+"Battery log cleared."; a role user gets "Error: battery log not cleared:
+permission denied" and every file stays; a remove that fails for an admin is
+reported with the number of files left; an absent log clears cleanly. Not
+covered: the permission table itself, the other `batterylog` branches and the
+logger. Run with
+`ctest --test-dir build -R '^battery_log_clear$' --output-on-failure` (or the
+runner with `--sanitize`).
+
+## Retired feature text
+
+`retired_feature_text` reads the real sources (no compile) and checks that the
+camera, power and edgeimpulse module descriptions in
+`System_CommandRegistry.cpp` name only commands their own tables register and
+none of the retired ones (`cameraautocapture`, `cameraautocaptureinterval`,
+`camerasendaftercapture`, `cameratargetdevice`, `eiinputsize`), that the power
+description no longer promises an automatic low-battery switch, that no
+command table registers a retired command, that `System_Settings.h` no longer
+declares `edgeImpulseInputSize` and no production source reads it, and that the
+generated `docs/COMMAND_REFERENCE.md` lists no retired command and carries the
+current camera, power and edgeimpulse descriptions. Not covered: the commands'
+runtime replies and the hand-written `docs/USERGUIDE.md`. Run with
+`ctest --test-dir build -R '^retired_feature_text$' --output-on-failure` (or
+`python3 test_retired_feature_text.py`).
 
 ## Boot temporary-file cleanup
 

@@ -255,7 +255,10 @@ bool ensureDebugBuffer();
 extern DebugFlagMask gDebugFlags;  // 128-bit debug flags
 extern DebugSubFlags gDebugSubFlags;
 extern char* gDebugBuffer;
-// gDebugBuffer is the shared scratch space for cmd_* return strings.
+// gDebugBuffer is the shared scratch space for cmd_* return strings. It has no
+// lock: only code running on the command executor task may write it (handlers
+// run there; see executeCommand in System_Utils.h). Helpers that other tasks
+// call write into a caller-supplied buffer instead.
 // Two classes of user: (1) short status strings that stream long output
 // line-by-line via broadcastOutput() (capped at DEBUG_MSG_SIZE 256 B) and
 // return a one-liner — the historical case, for which 1 KB was already a

@@ -320,13 +320,19 @@ static bool patchFirstFrameDims(const uint8_t* jpeg, size_t len) {
 // Completes the clip and reports the outcome. VIDEO_SAVED is posted only when
 // every frame was written (recordedOk) and the index, every header patch, the
 // flush and the final size all check out; otherwise the failure is reported to
-// VFS as an SD write failure and no saved event is posted. The file is kept
-// either way: frames already on the card stay recoverable.
+// VFS as an SD write failure and VIDEO_RECORD_FAILED is posted with the clip
+// name instead. The file is kept either way: frames already on the card stay
+// recoverable.
 // Timing comes from what was recorded: elapsedMs of wall clock over the frames
 // written, so a clip that dropped frames still plays in real time.
 static bool finalizeAndClose(bool recordedOk, uint32_t elapsedMs) {
+  const char* slash = strrchr(s_path, '/');
+  const char* name = slash ? slash + 1 : s_path;
+  char det[24];
+  snprintf(det, sizeof(det), "%u frames", (unsigned)s_frameCount);
   if (!s_file) {
     VFS::noteSDWriteFailure("video recording finalize");
+    systemEventPost(SYSEVT_VIDEO_RECORD_FAILED, name, det);
     return false;
   }
 
@@ -383,18 +389,15 @@ static bool finalizeAndClose(bool recordedOk, uint32_t elapsedMs) {
     s_file.close();
   }
 
-  const char* slash = strrchr(s_path, '/');
-  const char* name = slash ? slash + 1 : s_path;
   if (!ok) {
     ERROR_CAMERAF("[Video] Recording not saved: %s (%u frames, %u bytes expected)",
                   s_path, (unsigned)s_frameCount, (unsigned)fileSize);
     VFS::noteSDWriteFailure("video recording finalize");
+    systemEventPost(SYSEVT_VIDEO_RECORD_FAILED, name, det);
     return false;
   }
   INFO_CAMERA_VIDEOF("Recording finalized: %s (%u frames, %u bytes)",
                      s_path, (unsigned)s_frameCount, (unsigned)fileSize);
-  char det[24];
-  snprintf(det, sizeof(det), "%u frames", (unsigned)s_frameCount);
   systemEventPost(SYSEVT_VIDEO_SAVED, name, det);
   return true;
 }

@@ -2,6 +2,7 @@
 """Source-contract guards for single-resolution command execution."""
 
 from pathlib import Path
+import re
 
 
 COMPONENT = Path(__file__).resolve().parents[2]
@@ -166,5 +167,192 @@ assert "commandRegistry[commandRegistrySize] = command;" in register
 assert "commandRegistrySize++;" in register
 assert "new " not in register
 assert "malloc(" not in register
+
+
+# ---------------------------------------------------------------------------
+# Handlers share the debug buffer and static result buffers and copy their
+# result only after returning, so they run on one task. executeCommand is
+# called only by the executor (cmd_exec, including deferred work it runs) and
+# the early-boot path of submitAndExecuteSync; every other caller submits.
+# ---------------------------------------------------------------------------
+def code_only(source: str) -> str:
+    """Blank comments and string/char/raw-string literals, keeping offsets."""
+
+    out = list(source)
+    pos, length = 0, len(source)
+
+    def blank(start: int, end: int) -> None:
+        for index in range(start, end):
+            if out[index] != "\n":
+                out[index] = " "
+
+    while pos < length:
+        current = source[pos]
+        following = source[pos + 1] if pos + 1 < length else ""
+        if current == "/" and following == "/":
+            end = source.find("\n", pos)
+            end = length if end < 0 else end
+            blank(pos, end)
+            pos = end
+        elif current == "/" and following == "*":
+            end = source.find("*/", pos + 2)
+            end = length if end < 0 else end + 2
+            blank(pos, end)
+            pos = end
+        elif current == '"' and pos > 0 and source[pos - 1] == "R":
+            delimiter = source[pos + 1 : source.index("(", pos)]
+            end = source.index(")" + delimiter + '"', pos) + len(delimiter) + 2
+            blank(pos, end)
+            pos = end
+        elif current in "\"'":
+            if (current == "'" and pos > 0 and source[pos - 1].isdigit()
+                    and following.isalnum()):
+                pos += 1  # digit separator
+                continue
+            end = pos + 1
+            while end < length and source[end] != current:
+                end += 2 if source[end] == "\\" else 1
+            blank(pos + 1, end)
+            pos = end + 1
+        else:
+            pos += 1
+    return "".join(out)
+
+
+def body_span(code: str, signature: str) -> tuple:
+    """Span of the one definition (not a forward declaration) of signature."""
+
+    definitions = []
+    for found in re.finditer(re.escape(signature), code):
+        brace = code.find("{", found.end())
+        semicolon = code.find(";", found.end())
+        if brace >= 0 and (semicolon < 0 or brace < semicolon):
+            definitions.append((found.start(), brace))
+    assert len(definitions) == 1, f"one definition: {signature!r}"
+    start, pos = definitions[0]
+    depth = 0
+    while True:
+        if code[pos] == "{":
+            depth += 1
+        elif code[pos] == "}":
+            depth -= 1
+            if depth == 0:
+                return start, pos + 1
+        pos += 1
+
+
+sources = {
+    path.relative_to(COMPONENT).as_posix(): code_only(path.read_text(encoding="utf-8"))
+    for pattern in ("*.cpp", "*.h")
+    for path in COMPONENT.rglob(pattern)
+    if "test" not in path.relative_to(COMPONENT).parts
+}
+
+# (file, enclosing function) for every permitted executeCommand call.
+EXECUTE_COMMAND_CALLERS = {
+    "HardwareOne.cpp": (
+        "static void commandExecTask(",          # the executor
+        "static String exitHelpAndExecute(",     # no caller; dead-code removal
+    ),
+    "System_Utils.cpp": (
+        "bool submitAndExecuteSync(const Command& cmd, String& out,",  # early boot
+    ),
+    "System_ESPSR.cpp": (
+        "static void runVoiceCommandJob(",       # runs on cmd_exec (deferred)
+    ),
+    # Set 2 (WebPage_ESPNow.cpp) moves this to executeInternalStatusCommand
+    # in the after-merge pass; executeCommand can then refuse other callers.
+    "WebPage_ESPNow.cpp": ("static void espnowRunInternal(",),
+}
+call = re.compile(r"(?<![\w.>])executeCommand\s*\(")
+for name, code in sorted(sources.items()):
+    allowed = [body_span(code, signature)
+               for signature in EXECUTE_COMMAND_CALLERS.get(name, ())
+               if signature in code]
+    for match in call.finditer(code):
+        if code[: match.start()].rstrip().endswith("bool"):
+            continue  # the declaration / definition
+        line = code.count("\n", 0, match.start()) + 1
+        assert any(start <= match.start() < end for start, end in allowed), (
+            f"{name}:{line} calls executeCommand off the executor; submit it "
+            "(submitAndExecuteSync / executeInternalStatusCommand) instead")
+
+# The early-boot call is the gCmdExecQ == nullptr branch only.
+utils_code = sources["System_Utils.cpp"]
+sync_start, sync_end = body_span(
+    utils_code, "bool submitAndExecuteSync(const Command& cmd, String& out,")
+sync_code = utils_code[sync_start:sync_end]
+early = sync_code.index("if (gCmdExecQ == nullptr)")
+early_call = sync_code.index("executeCommand(", early)
+assert [m.start() for m in call.finditer(sync_code)] == [early_call]
+assert early_call < sync_code.index("ExecReq* r =")
+# The voice job is only ever handed to cmd_exec.
+espsr_code = sources["System_ESPSR.cpp"]
+assert espsr_code.count("runVoiceCommandJob") == 2
+assert "submitDeferredToCmdExec(runVoiceCommandJob" in espsr_code
+assert sources["HardwareOne.cpp"].count("exitHelpAndExecute(") <= 1
+
+# Web status endpoints submit through the owner helper.
+web_code = sources["WebServer_Server.cpp"]
+logging_start, logging_end = body_span(
+    web_code, "static esp_err_t handleLoggingStatus(")
+logging_status = web_code[logging_start:logging_end]
+assert "executeInternalStatusCommand(" in logging_status
+assert "runInternalStatusCmd" not in web_code
+status_start, status_end = body_span(
+    utils_code, "bool executeInternalStatusCommand(")
+status_helper = utils_code[status_start:status_end]
+assert "submitAndExecuteSync(" in status_helper
+assert not call.search(status_helper)
+assert "SOURCE_INTERNAL" in status_helper
+assert "COMMAND_CONTEXT_MODE_INDEPENDENT" in status_helper
+
+# Validate-only state is per task. broadcastOutputCore, the audit
+# suppression and the OK stamp read the calling task's CommandContext; the
+# global stays a handler mirror written only where the executor runs.
+debug_code = sources["System_Debug.cpp"]
+core_start, core_end = body_span(debug_code, "static void broadcastOutputCore(")
+broadcast_core = debug_code[core_start:core_end]
+assert "currentCommandValidateOnly()" in broadcast_core
+assert "gCLIValidateOnly" not in broadcast_core
+accessor_start, accessor_end = body_span(utils_code, "bool currentCommandValidateOnly()")
+accessor = utils_code[accessor_start:accessor_end]
+assert "currentCommandContext()" in accessor and "->validateOnly" in accessor
+assert "gCLIValidateOnly" not in accessor
+for signature in ("static bool commandExecutionLogSuppressed(",
+                  "static void stampOkStatus("):
+    start, end = body_span(utils_code, signature)
+    assert "currentCommandValidateOnly()" in utils_code[start:end], signature
+    assert "gCLIValidateOnly" not in utils_code[start:end], signature
+writer = re.compile(r"\bgCLIValidateOnly\s*=(?!=)")
+VALIDATE_WRITERS = {
+    "HardwareOne.cpp": ("static void commandExecTask(",),
+    "System_Utils.cpp": ("bool submitAndExecuteSync(const Command& cmd, String& out,",),
+}
+for name, code in sorted(sources.items()):
+    allowed = [body_span(code, signature) for signature in VALIDATE_WRITERS.get(name, ())]
+    for match in writer.finditer(code):
+        if code[: match.start()].rstrip().endswith("bool"):
+            continue  # the definition
+        line = code.count("\n", 0, match.start()) + 1
+        assert any(start <= match.start() < end for start, end in allowed), (
+            f"{name}:{line} writes gCLIValidateOnly outside the executor")
+
+# The shared password helper reports a status and writes its message into the
+# caller's buffer; the web handler (still on httpd) reads only that buffer.
+user_code = sources["System_User.cpp"]
+user_h_code = sources["System_User.h"]
+assert "const char* userChangePasswordCore(" not in user_h_code
+assert re.search(r"bool userChangePasswordCore\([^;]*char\* message, size_t messageSize\);",
+                 user_h_code)
+core_start, core_end = body_span(user_code, "bool userChangePasswordCore(")
+password_core = user_code[core_start:core_end]
+for shared in ("getDebugBuffer", "ensureDebugBuffer", "gDebugBuffer"):
+    assert shared not in password_core, shared
+page_start, page_end = body_span(web_code, "esp_err_t handlePasswordChangePage(")
+password_page = web_code[page_start:page_end]
+assert "const bool ok = userChangePasswordCore(current, newp, conf," in password_page
+for shared in ("getDebugBuffer", "gDebugBuffer"):
+    assert shared not in password_page, shared
 
 print("command resolution source guards passed")

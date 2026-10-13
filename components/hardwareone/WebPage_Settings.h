@@ -3009,14 +3009,14 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     };
     
     /* Role rank for a userlist entry. Mirrors userRoleRank() / __hwRoleRank:
-       guest=0, user=1, admin=2, superadmin=3. `role` is authoritative
-       (userlist json copies users.json verbatim); `isAdmin` is a legacy
-       fallback that may not be present. */
+       guest=0, user=1, admin=2, superadmin=3. userlist json emits id,
+       username, role (normalized by the device), banned and createdAt per
+       account; `role` is the only rank field. */
     window.userRankOf = function(u) {
       var R = window.__hwRoleRank || { guest: 0, user: 1, admin: 2, superadmin: 3 };
       var r = (u && u.role) ? String(u.role).toLowerCase() : '';
       if (r === 'superadmin') return R.superadmin;
-      if (r === 'admin' || (u && u.isAdmin === true)) return R.admin;
+      if (r === 'admin') return R.admin;
       if (r === 'guest') return R.guest;
       return R.user;
     };
@@ -3101,9 +3101,8 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           /* Rank, not a boolean. The old `role === 'admin' || isAdmin === true`
              test made a SUPERADMIN match neither branch, so the device owner
              rendered as a plain "User" with a Promote button. Mirrors
-             userRoleRank() / __hwRoleRank. `role` is authoritative —
-             userlist json copies users.json verbatim and there may be no
-             isAdmin field at all; it is kept only as a legacy fallback. */
+             userRoleRank() / __hwRoleRank. userlist json emits id,
+             username, role, banned and createdAt; userRankOf reads role. */
           var R = window.__hwRoleRank || { guest: 0, user: 1, admin: 2, superadmin: 3 };
           var rank = userRankOf(user);
           var isAdmin = rank >= R.admin;
@@ -3426,8 +3425,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         users.forEach(function(u) {
           var opt = document.createElement('option');
           opt.value = u.username || '';
-          /* Was `u.isAdmin ? Admin : User` — a field userlist json may not even
-             emit, and blind to superadmin either way. Rank off `role`. */
+          /* userlist json carries no isAdmin field; rank off `role`. */
           var r = window.userRankOf(u);
           opt.textContent = (u.username || '') +
                             (r >= 2 ? ' (Super Admin)' : r === 1 ? ' (Admin)' : ' (User)');

@@ -177,6 +177,7 @@ static int revokeUserSessions(const String& username, const String&) {
 static bool webRevokeSessionBySid(const String&, const String&, String* who) { if (who) *who = "web"; return true; }
 static bool banIp(const char*, const char* = nullptr) { return true; }
 static bool unbanIp(const char*) { return true; }
+static bool isIpBanned(const char*) { return false; }
 static const char* banListJson() { return "{\"schema\":1,\"bans\":[]}"; }
 static void broadcastBanList() {}
 static int webBroadcastSessionsHuman() { return 0; }

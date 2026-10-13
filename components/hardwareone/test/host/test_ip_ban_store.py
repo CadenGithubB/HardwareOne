@@ -13,6 +13,13 @@ bans with 39-character IPs and 79-character reasons list as complete JSON, that
 a list too large for the reply buffer is an explicit error rather than a
 truncated document, and that the lookup takes the ban-table lock while no file
 I/O ever runs under it.
+
+It also checks that banning an address signs out its web sessions with the
+session table read under the session fence (a counting double), and runs the
+real `ban`/`unban` adapters (cmd_ban, cmd_unban from System_User.cpp, with the
+real CommandArgs): a ban or unban whose save failed is reported as not saved
+(the ban in force until reboot, or still in force), distinct from a full list
+or an address that is not banned.
 """
 from __future__ import annotations
 
@@ -67,6 +74,20 @@ def production(server: str, header: str, mutex: str, mutex_header: str, utils: s
             "// INSERT_TYPES": types, "// INSERT_PRODUCTION": section}
 
 
+def commands(command_header: str, command_source: str, user: str) -> str:
+    """CommandArgs and the ban/unban adapters, unchanged."""
+    pieces = [extract_block(command_header, "class CommandArgs") + ";",
+              "const String CommandArgs::empty_;"]
+    pieces += [extract_block(command_source, marker) for marker in (
+        "CommandArgs::CommandArgs(", "void CommandArgs::parse(", "const String& CommandArgs::arg(",
+        "String CommandArgs::remaining(")]
+    for marker in ("const char* cmd_ban(const String& argsInput)",
+                   "const char* cmd_unban(const String& argsInput)"):
+        require(user.count(marker) == 1, f"System_User.cpp: one {marker}")
+        pieces.append(extract_block(user, marker))
+    return "\n\n".join(pieces)
+
+
 def source_contract(server: str) -> None:
     """Checked writer for the save, and the lock on the httpd-side lookup."""
     save = extract_block(server, "static bool saveIpBans()")
@@ -92,6 +113,9 @@ def main() -> None:
                               (COMPONENT / "System_Mutex.cpp").read_text(),
                               (COMPONENT / "System_Mutex.h").read_text(),
                               (COMPONENT / "System_Utils.cpp").read_text())
+    replacements["// INSERT_COMMANDS"] = commands((COMPONENT / "System_Command.h").read_text(),
+                                                  (COMPONENT / "System_Command.cpp").read_text(),
+                                                  (COMPONENT / "System_User.cpp").read_text())
     for marker, replacement in replacements.items():
         require(harness.count(marker) == 1, f"one insertion marker: {marker}")
         harness = harness.replace(marker, replacement)

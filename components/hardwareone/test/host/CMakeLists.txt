@@ -1022,6 +1022,32 @@ foreach(test_name IN ITEMS log_level_application system_log_status command_feed)
             ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
             ${SETUP_MQTT_TEST_ARGS})
 endforeach()
+# `batterylog clear` reports a refused or failed remove instead of "cleared";
+# retired camera auto-capture, power auto mode and eiinputsize are neither
+# advertised in module descriptions or the command reference nor kept as a
+# dead settings field.
+foreach(test_name IN ITEMS battery_log_clear retired_feature_text)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
+            ${SETUP_MQTT_TEST_ARGS})
+endforeach()
+# Code that runs beside the command executor: a validate pass on cmd_exec
+# drops only its own broadcasts, and the shared password helper answers in the
+# caller's buffer instead of the shared debug buffer.
+add_test(
+  NAME command_task_isolation
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_command_task_isolation.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Web login into a full session table: the session that expires first is
+# signed out like any other logout, with the ESP32's 32-bit millis arithmetic.
+add_test(
+  NAME web_session_eviction
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_session_eviction.py
+          ${SETUP_MQTT_TEST_ARGS})
 # MQTT command replies from the cmd_exec completion: a command that stops
 # MQTT (closemqtt sent over MQTT) still gets its reply before teardown deletes
 # the client's outbox; other replies are queued for the client task.
