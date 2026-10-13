@@ -171,12 +171,22 @@ CLI references: [configuration](https://docs.openclaw.ai/cli/config) and
 
 ## Build and device settings
 
-Set the literal `ENABLE_LLM_SOURCE_HTTP` to `1` in
-`components/hardwareone/System_BuildConfig.h` for a test build. Keep
-`ENABLE_LLM_BACKEND` and `ENABLE_WIFI` enabled. For the qualified XIAO test image,
-set both `ENABLE_LLM_SOURCE_ONBOARD` and `ENABLE_LLM_SOURCE_CM5` to `0` (HTTP only).
-Other sources can coexist in the registry, but the mixed image's final flash fit
-has not been verified. The normal checked-in build keeps HTTP at `0`.
+Use the saved configuration on the `0.99.97.4` source baseline. After sourcing
+the ESP-IDF environment, run:
+
+```sh
+python3 tools/build_config.py build xiao-openclaw
+```
+
+This test profile adds `ENABLE_LLM_SOURCE_HTTP=1` and explicitly sets
+`ENABLE_LLM_SOURCE_ONBOARD=0`, keeping CM5 enabled. The user chose to omit onboard
+inference while testing the remote agent so the image fits the existing app
+partition. TLS trust/verification and all other baseline choices are retained;
+shared feature headers are unchanged. The normal `xiao-default` build retains
+the onboard source and keeps HTTP at `0`. Outputs and the compiler-resolved
+`BUILD_INFO.md` live in `build-config-xiao-openclaw/`; this command does not flash.
+The earlier `0.99.95` HTTP-only prototype is obsolete and must not be used to
+update the XIAO running `0.99.97.4`.
 
 On a device running that test image, configure these admin commands over its
 authenticated settings/command interface. Substitute the test host and agent;
@@ -186,8 +196,8 @@ never paste a real token into this repository or a shared transcript.
 | --- | --- |
 | `llmhttpurl https://HOST:PORT/v1` | Base URL, including `/v1`; no embedded credentials, query, or fragment |
 | `llmhttpmodel openclaw/main` | Selected test agent, Mingus |
-| `llmhttptoken TOKEN` | Gateway bearer credential; stored using the existing encrypted-secret settings path |
-| `llmhttpca PEM` | Optional private CA certificate, with literal `\n` escapes for line breaks |
+| `llmhttptoken TOKEN` | Relay **device token** for the selected relay path; use a gateway token only for a deliberate direct connection. Stored through the existing encrypted-secret settings path |
+| `llmhttpca PEM` | Relay public CA certificate, required for the selected private-CA relay; use literal `\n` escapes for line breaks |
 | `llmhttpenabled 1` | Make the configured source visible |
 | `llmclear` | Clear old chat before changing between an agent and another source |
 | `llmload http:openclaw` | Select the configured agent source |
@@ -199,15 +209,19 @@ The LLM feature must also be enabled in the ordinary app settings. Optional
 startup uses `llmdefaultmodel http:openclaw` and `llmautostart 1`; selection waits
 for Wi-Fi and valid configuration. No request is sent just by selecting a source.
 
-HTTPS verifies the hostname and CA. A build with no certificate bundle requires
-`llmhttpca`; clearing that field does not bypass verification. The URL limit is
-384 bytes, model 127, token command 512, and CA storage 4096. Normal command ingress
+Follow the [HTTPS relay setup](../integrations/openclaw/relay/README.md) for its
+endpoint, separate device token, and public CA certificate. HTTPS verifies the
+hostname and CA and requires a valid device clock. Check `time json`; use the
+existing NTP setup or `timeset <unix_timestamp>` if needed. A build with no
+certificate bundle requires `llmhttpca`; clearing that field does not bypass
+verification. The URL limit is 384 bytes, model 127, token command 512, and CA storage 4096. Normal command ingress
 limits still apply to a CA entered through the CLI. `-` clears a string setting.
 
 For a deliberately chosen isolated plaintext bench only, `llmhttpplaintext 1`
-allows an `http://HOST:PORT/v1` URL. It sends the gateway credential without
-encryption. No automatic TLS downgrade or redirect is followed. Gateway tokens
-can authorize more than a single agent; select a test gateway and its tool policy
+allows an `http://HOST:PORT/v1` URL. It sends the configured bearer credential
+without encryption; the selected HTTPS relay does not use this option. No
+automatic TLS downgrade or redirect is followed. Direct gateway tokens can
+authorize more than a single agent; select a test gateway and its tool policy
 accordingly. Keep each test host/device pair within one network; do not bridge
 the user's VLANs.
 
@@ -251,34 +265,68 @@ python3 components/hardwareone/test/host/test_llm_guided_source.py --sanitize
 python3 -m unittest discover -s integrations/openclaw/tests -v
 ```
 
-Validation on 2026-10-12: six focused host suites passed with ASan/UBSan (the five
-above plus the existing G2 conversation regression); all 45 web tests passed,
-including 68 extracted CLI checks; all 23 device-helper tests passed, including
-loopback TLS trust and hostname verification. The OLED/G2 clear helpers also
-passed extracted production-code sanitizer checks.
+Validation on 2026-10-12 against the current firmware baseline:
 
-Firmware validation used ESP-IDF 5.5.5 and the Xtensa GCC 14 toolchain in isolated
-source copies, with final production source hashes checked against the branch:
+- Nine selected firmware host suites passed: the five HTTP suites above with
+  ASan/UBSan, G2 conversation, saved build configuration, build-configuration
+  workflow, and shared settings mutation. The settings test uses the production
+  validation macro and verifies that validation-only token writes and clears do
+  not mutate settings; repeated clears do not save or emit another change event.
+- All 45 web tests passed, including 68 extracted CLI checks.
+- All 23 optional device-helper tests passed, including loopback TLS trust and
+  hostname verification. The relay passed 29 tests and its private setup helper
+  passed 11 tests. These local tests do not establish live Studio/device acceptance.
 
-| Configuration | Result |
-| --- | --- |
-| XIAO HTTP only | Full compile, link, binary and partition checks passed |
-| Mixed onboard + CM5 + HTTP | 11 affected translation units compiled; no full link/flash-fit check |
-| HTTP disabled | 10 affected translation units compiled; symbol check found no unresolved `httpLlm` references; no full link |
+The firmware was ported to source baseline `f4cc542c` (`0.99.97.4`, matching the
+installed version). Final source/profile revision is `04886ed7`; this guide was
+the only uncommitted file during the builds. Both full builds used the normal
+repository build path with local ESP-IDF `v5.5.5-dirty`, Xtensa GCC `14.2.0`, and
+the required local Arduino patches. No additional warning demotions or shared
+feature/header edits were needed.
 
-The HTTP-only binary is 5,845,520 bytes in a 5,984,256-byte app partition, leaving
-138,736 bytes (2.3%). Treat that as limited headroom when enabling more features.
-The full build required demoting existing GCC `stringop-truncation` warnings in
-the copied firmware and vendor targets. No other warning class was demoted and
-no production build flags were changed. Focused source checks retained strict
-flags except the existing G2 address-copy warning. XIAO's board policy excludes
-OLED; OLED validation here was the extracted helper check, not a full OLED build.
+| Saved configuration | Answer sources | Result | Image bytes | App space remaining |
+| --- | --- | --- | ---: | ---: |
+| `xiao-default` | Onboard + CM5; HTTP off | Full build and partition check passed | 5,908,640 | 75,616 (1.3%) |
+| `xiao-openclaw` | HTTP + CM5; onboard off | Full build and partition check passed | 5,936,096 | 48,160 (0.8%) |
 
-Live device-to-gateway compatibility, device memory use, and actual Wi-Fi
-streaming remain hardware acceptance checks. The existing Studio-to-device
-tools passed the separate checks above. No device was flashed for this
-implementation. Two Espressif USB devices were present during preparation; confirm
-the XIAO's port before flashing. Its Wi-Fi password is not recorded in this project.
+The initial attempt with onboard + CM5 + HTTP compiled and linked, but its
+6,027,344-byte image exceeded the existing partition by 43,088 bytes. The user
+then authorized omitting onboard inference for this test profile. No other
+feature was disabled. The final profiles differ in exactly two of 139 resolved
+feature values: HTTP and onboard-source selection. All 2,475 SDK values match,
+including the full certificate bundle and TLS settings.
+
+Both use the same 5,984,256-byte factory app partition at `0x10000` and the
+unchanged filesystem layout. The partition-table SHA-256 is
+`c6ed2513218eaa1d5b591914aea7ce95715500cb49068ed13b891ce5fa7efc71`.
+Image SHA-256 values:
+
+- `build-config-xiao-openclaw/hardwareone-idf.bin`:
+  `8d91298c0a16530b85497f8a8343bb09c234ec686aedc34cdd9081eb1751503c`
+- `build-config-xiao-default/hardwareone-idf.bin`:
+  `d68d1e24de9251a2bb214ea242b0c553ab608030193723b207a3a6811720c648`
+
+Each build directory contains its generated `BUILD_INFO.md`, saved input
+snapshot, and compiler-resolved flags. Build logs are under
+`work/openclaw-build/`: `xiao-default-build.log` and
+`xiao-openclaw-test-profile-build.log` are the successful final runs. Earlier
+attempt logs are retained for diagnosis; the older `0.99.95` HTTP-only image is
+obsolete. Recheck partition fit before adding features to this narrow headroom.
+
+No device was flashed for this implementation. Live ESP-to-Mingus conversation,
+device memory use, and Wi-Fi streaming remain hardware acceptance work. The
+existing Studio-to-device tools passed the separate live checks above. Relay
+installation and the exact API session's sandbox/tool policy also remain to be
+qualified on the Studio.
+
+After the relay is ready, inspect the XIAO's physical partition table and security
+state and capture an app-only rollback image before deployment. Use an app-only
+update at the validated app offset to preserve users, Wi-Fi settings, and files.
+The ordinary flash arguments also write the bootloader and partition table; the
+separate `littlefs-flash` target writes a generated blank filesystem. Neither is
+the intended update path here. Confirm `/dev/cu.usbmodem11201` and target MAC
+`68:EE:8F:50:E9:D0` again before device access. The Wi-Fi password is not recorded
+in this project, and `wifiAutoStart` remains false, so reconnect after a reboot.
 
 UART OpenClaw is planned in [the integration plan](OPENCLAW_INTEGRATION_PLAN.md).
 It needs a Pi daemon provider plus conversation/capability negotiation and narrow
