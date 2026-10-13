@@ -16,6 +16,9 @@
 #define BLE_MODE_SERVER     0   // Peripheral / GATT server for phone clients (Bluetooth)
 #define BLE_MODE_G2_CLIENT  1   // Central / GATT client for Even Realities G2 glasses (G2_Glasses)
 
+// Result of a bledisconnect request; the close itself completes asynchronously in onDisconnect.
+enum class BleDisconnectResult : uint8_t { REQUESTED, NOT_FOUND, PEER_LINK, UNAVAILABLE };
+
 #if ENABLE_BLUETOOTH
 
 #include <BLE2902.h>
@@ -45,7 +48,8 @@
 #define BLE_SENSOR_DATA_CHAR_UUID     "12345678-1234-5678-1234-56789abcde11"  // Notify - sensor data stream
 #define BLE_SYSTEM_STATUS_CHAR_UUID   "12345678-1234-5678-1234-56789abcde12"  // Notify - system status stream
 #define BLE_EVENT_NOTIFY_CHAR_UUID    "12345678-1234-5678-1234-56789abcde13"  // Notify - event notifications
-#define BLE_STREAM_CONTROL_CHAR_UUID  "12345678-1234-5678-1234-56789abcde14"  // Write - control streaming
+// Streams are controlled with the `blestream` command; the data service has no
+// writable characteristic.
 
 // Device Info (standard BLE service)
 #define BLE_DEVICE_INFO_SERVICE_UUID  "180A"
@@ -69,6 +73,10 @@ struct BLEConnection {
   // Per-connection CLI authentication
   bool authed;
   String user;
+  // Console-mirror recipient: the account was verified non-guest when this
+  // session logged in (the web console mirror's rule).  Meaningful only while
+  // authed; bleBindSession is the single writer of a true value.
+  bool mirrorEligible;
   uint32_t lastActivityMs;
 };
 
@@ -124,7 +132,13 @@ extern BLESystemState* gBLEState;
 
 // Initialization
 bool initBluetooth();
-void deinitBluetooth();
+// True once the server is stopped (or was not running). False when the stop
+// was deferred (role transition busy, Ring owner still active: the server keeps
+// running with its sessions) or the host teardown failed (reboot required);
+// the reason is broadcast. Under a RECOVERING claim (companion reset, which
+// takes the host down regardless) a Ring-deferred stop closes session admission
+// and advertising before it returns false.
+bool deinitBluetooth();
 void bleSecurityBootNotice();  // boot-time "set a passphrase" nudge when BLE is unencrypted
 
 // Device type management
@@ -137,11 +151,16 @@ void stopBLEAdvertising();
 
 // Connection management
 bool isBLEConnected();
-void disconnectBLE();
-uint32_t getBLEConnectionDuration();
+// Close one app client by its BLE connection id. Peer links (G2 temples, R1 ring)
+// are refused; the slot is cleared later by onDisconnect.
+BleDisconnectResult bleDisconnectConnection(uint16_t connId);
+// Close every app client (never a peer link); returns the number of close requests issued.
+int bleDisconnectAppClients();
 
-// Send response back to connected client. blocking=false makes the secure-channel send
-// try-lock (best-effort; used by the debug console mirror so it never stalls the debug task).
+// Console mirror / blesend: delivered as a directed notify (or the session's own
+// encrypted frames) to every logged-in non-guest session; never characteristic-wide.
+// Returns true when at least one session accepted it. blocking=false makes each send
+// best-effort (used by the debug console mirror so it never stalls the debug task).
 bool sendBLEResponse(const char* data, size_t len, bool blocking = true);
 
 // Send to the connection's current session, or to an explicitly captured
@@ -228,10 +247,6 @@ bool bleRoleTransitionHeldByCurrentTask();
 // the recovery transaction clears it only after a fully verified re-init.
 bool bleStackLifecycleFaulted();
 void bleStackSetLifecycleFault(bool faulted);
-// Compatibility-only historical predicate. It remains controller-wide; new
-// call sites must use one of the explicit predicates above.
-bool isBLERunning();
-void getBLEStatus(char* buffer, size_t bufferSize);
 const char* getBLEStateString();
 // Shared bleinfo schema for CLI and web. Copies live connection fields into
 // caller-owned JSON under the lifecycle lock; settings retain their existing
@@ -250,9 +265,6 @@ const char* getBleModeString();
 // running regardless of which mode is active.
 bool bleSubsystemActive();
 const char* bleSubsystemStateString();
-
-// Settings
-void bleApplySettings();
 
 // =============================================================================
 // COMMAND REGISTRY
@@ -274,13 +286,13 @@ extern const size_t bluetoothSettingsCount;
 
 // Stub declarations when Bluetooth is disabled
 inline bool initBluetooth() { return false; }
-inline void deinitBluetooth() {}
+inline bool deinitBluetooth() { return true; }
 inline void bleSecurityBootNotice() {}
 inline bool startBLEAdvertising() { return false; }
 inline void stopBLEAdvertising() {}
 inline bool isBLEConnected() { return false; }
-inline void disconnectBLE() {}
-inline uint32_t getBLEConnectionDuration() { return 0; }
+inline BleDisconnectResult bleDisconnectConnection(uint16_t) { return BleDisconnectResult::UNAVAILABLE; }
+inline int bleDisconnectAppClients() { return 0; }
 inline bool sendBLEResponse(const char*, size_t, bool = true) { return false; }
 inline bool sendBLEResponseToConn(uint16_t, const char*, size_t) { return false; }
 inline bool sendBLEResponseToSession(uint16_t, TransportSessionEpoch,
@@ -311,14 +323,11 @@ inline BleRoleTransition bleRoleTransitionState() { return BleRoleTransition::ID
 inline bool bleRoleTransitionHeldByCurrentTask() { return false; }
 inline bool bleStackLifecycleFaulted() { return false; }
 inline void bleStackSetLifecycleFault(bool) {}
-inline bool isBLERunning() { return false; }
-inline void getBLEStatus(char* buffer, size_t) { if (buffer) buffer[0] = '\0'; }
 inline const char* getBLEStateString() { return "disabled"; }
 inline bool buildBLEInfoJson(JsonObject) { return false; }
 inline const char* getBleModeString() { return "disabled"; }
 inline bool bleSubsystemActive() { return false; }
 inline const char* bleSubsystemStateString() { return "disabled"; }
-inline void bleApplySettings() {}
 
 // Streaming API stubs
 inline bool blePushSensorData(const char*, size_t) { return false; }
