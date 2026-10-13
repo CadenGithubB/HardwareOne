@@ -74,7 +74,8 @@ With `ENABLE_BONDED_MODE=1`, two devices can bond into a paired set. One acts as
 
 Hardware One requires **ESP-IDF v5.5.5** (not the Arduino IDE), one version for
 every board: the ESP32 and ESP32-S3 boards build on it, and the ESP32-P4X-EYE
-needs it (its patched `bt` and JPEG components are staged from a 5.5.5 tree by
+needs it (its patched `bt` and JPEG components are staged from a 5.5.5 tree,
+and its patched ESP-DL from the component manager's 3.3.12 package, by
 `tools/p4/prepare_sdk.sh`). The firmware vendors arduino-esp32 3.3.5 (supports
 IDF >=5.3,<5.6); older 5.3.x predates the `i2c_master` `Wire` HAL this build
 relies on, and 5.5.5's GCC 14 is stricter than 5.5.1's, which the vendored

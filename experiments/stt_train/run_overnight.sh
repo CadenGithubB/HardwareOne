@@ -2,14 +2,15 @@
 # Unattended overnight pipeline: prepare data as downloads land, measure the
 # baseline, fine-tune until the deadline, then measure and report.
 # Usage: caffeinate -dims nohup run_overnight.sh HH:MM &
+export STT_ROOT=${STT_ROOT:?set STT_ROOT to the STT data root (speech stores, work, logs)}
 set -u
 DEADLINE=${1:-06:30}
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
 P=${HW1_STT_PYTHON:-$PWD/../stt_p4/private/export-venv/bin/python}
-export PYTHONPATH=/Volumes/USB2/stt/pydeps
+export PYTHONPATH=$STT_ROOT/pydeps
 export PYTORCH_ENABLE_MPS_FALLBACK=1
-ROOT=/Volumes/USB2/stt
+ROOT=$STT_ROOT
 LOG=$ROOT/logs/overnight.log
 S=$ROOT/stores
 DL=$ROOT/logs/download.log
@@ -82,9 +83,10 @@ if [ -d "$RUN/best" ]; then
   say "final evaluation of best checkpoint"
   $P evaluate.py --ckpt "$RUN/best" --sets $TESTS --examples 12 --out "$ROOT/work/final.json" >> "$LOG" 2>&1
   $P - <<'EOF' >> "$LOG" 2>&1
+import os
 import json
-b = json.load(open('/Volumes/USB2/stt/work/baseline.json'))['results']
-f = json.load(open('/Volumes/USB2/stt/work/final.json'))['results']
+b = json.load(open(os.environ['STT_ROOT'] + '/work/baseline.json'))['results']
+f = json.load(open(os.environ['STT_ROOT'] + '/work/final.json'))['results']
 lines = ['# Overnight fine-tuning report', '', '| Test set | Before WER | After WER |', '|---|---:|---:|']
 for k in f:
     lines.append(f"| {k} | {b[k]['wer']*100:.1f}% | {f[k]['wer']*100:.1f}% |")
@@ -93,7 +95,7 @@ for k in f:
     lines.append(f'### {k}')
     for e in f[k]['examples']:
         lines.append(f"- ref: {e['ref']}\n  hyp: {e['hyp']}")
-open('/Volumes/USB2/stt/work/REPORT.md', 'w').write('\n'.join(lines) + '\n')
+open(os.environ['STT_ROOT'] + '/work/REPORT.md', 'w').write('\n'.join(lines) + '\n')
 print('\n'.join(lines[:8]))
 EOF
 fi

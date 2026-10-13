@@ -11,7 +11,7 @@ import random
 import numpy as np
 import torch
 
-from common import QuartzNet, Frontend, load_checkpoint, greedy_decode, word_errors
+from common import QuartzNet, Frontend, load_checkpoint, greedy_decode, word_errors, HOP
 
 
 def _subset(store, limit):
@@ -21,8 +21,13 @@ def _subset(store, limit):
 
 
 @torch.no_grad()
-def evaluate_stores(model, template, sets, device, batch_seconds=200.0, examples=0):
-    from data import Store
+def evaluate_stores(model, template, sets, device, batch_seconds=200.0, examples=0, bucket=None):
+    """bucket=(max_seconds, max_items): batch and pad like training's
+    micro-batches (data.batch_shape) instead of by batch_seconds, so an MPS
+    eval of the training model only meets shapes training has already compiled
+    (train.py --eval-device mps). Filler rows are dropped before decoding.
+    Items, their order and the dither stream are the same either way."""
+    from data import Store, batch_shape
     frontend = Frontend(template)
     decode = getattr(model, 'decode', greedy_decode)  # Citrinet: WordPiece tokens
     rng = np.random.default_rng(0)
@@ -41,10 +46,15 @@ def evaluate_stores(model, template, sets, device, batch_seconds=200.0, examples
             nonlocal errors, words
             feats = [frontend(store.samples(i), dither=True, rng=rng) for i in batch]
             lengths = torch.tensor([f.shape[1] for f in feats])
-            x = torch.zeros(len(feats), feats[0].shape[0], int(lengths.max()))
+            rows, frames = len(feats), int(lengths.max())
+            if bucket:
+                rows, frames = batch_shape(frames, *bucket)
+                lengths = torch.cat([lengths, lengths[:1].repeat(rows - len(feats))])  # filler rows
+            x = torch.zeros(rows, feats[0].shape[0], frames)
             for k, f in enumerate(feats):
                 x[k, :, :f.shape[1]] = f
             log_probs, out_lengths = model(x.to(device), lengths.to(device))
+            log_probs, out_lengths = log_probs[:len(feats)], out_lengths[:len(feats)]
             for i, hyp in zip(batch, decode(log_probs, out_lengths)):
                 ref = store.texts[i]
                 errors += word_errors(ref, hyp)
@@ -53,7 +63,11 @@ def evaluate_stores(model, template, sets, device, batch_seconds=200.0, examples
                     shown.append({'ref': ref, 'hyp': hyp})
 
         for i in items:
-            if batch and store.lengths[i] / 16000 * (len(batch) + 1) > batch_seconds:
+            if bucket:  # items are sorted, so item i sets the bucket's row count
+                full = len(batch) >= batch_shape(-(-int(store.lengths[i]) // HOP), *bucket)[0]
+            else:
+                full = store.lengths[i] / 16000 * (len(batch) + 1) > batch_seconds
+            if batch and full:
                 flush()
                 batch = []
             batch.append(i)

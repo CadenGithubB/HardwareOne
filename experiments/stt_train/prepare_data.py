@@ -29,11 +29,11 @@ from scipy.signal import resample_poly
 
 from common import SAMPLE_RATE, normalize_text, encode, ctc_min_frames, HOP
 import os
-STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
+STT_ROOT = Path(os.environ.get('STT_ROOT', 'stt-data'))  # data root: set STT_ROOT
 
 USB = STT_ROOT
-USB2 = STT_ROOT
-STORES = USB2 / 'stores'
+DATA = STT_ROOT
+STORES = DATA / 'stores'
 MIN_SECONDS, MAX_SECONDS = 0.5, 20.0
 
 
@@ -217,7 +217,7 @@ def prepare_voxpopuli(split, max_hours, shards=None, store=None):
 
 
 def prepare_musan():
-    archive = USB2 / 'musan' / 'musan.tar.gz'
+    archive = DATA / 'musan' / 'musan.tar.gz'
     noise = StoreWriter(STORES / 'musan-noise')   # noise + music
     speech = StoreWriter(STORES / 'musan-speech')  # babble source
     with tarfile.open(archive, 'r|gz') as tar:
@@ -237,7 +237,7 @@ def prepare_musan():
 
 
 def prepare_rirs(limit=4000):
-    archive = USB2 / 'rirs' / 'rirs_noises.zip'
+    archive = DATA / 'rirs' / 'rirs_noises.zip'
     writer = StoreWriter(STORES / 'rirs')
     rng = random.Random(0)
     with zipfile.ZipFile(archive) as zf:

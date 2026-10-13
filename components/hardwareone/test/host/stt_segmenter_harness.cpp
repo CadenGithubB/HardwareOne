@@ -212,7 +212,121 @@ static void adaptive_tests() {
     assert(sizeof(Segmenter)<2048); // Fixed1KB ambient history, never an unbounded ring.
     puts("PASS: adaptive calibration exclusion, configurable low/high RMS,120s measured room fluctuations, bounded noise window, loud/quiet reset, raw tails/pre-roll, DC/chunk invariance and sustained hard cuts");
 }
+// Opt-in latency options the continuous broker uses (HW1_STT_SHORT_CLOSE,
+// HW1_STT_TRIM_SILENCE, HW1_STT_SPECULATIVE_FINAL): short phrases may close on
+// a longer pause, every segment reports where its voice ended, and the
+// in-progress phrase reports the input a pause would close it with.
+static void latency_option_tests() {
+    SegmenterConfig four;four.min_segment_samples=4*16000;
+    // 2 s reply, then silence: the 4 s minimum holds it until 4 s are reached
+    // (75200), a 1 s short-close pause closes it as soon as that pause is 1 s.
+    std::vector<int16_t> reply(16000,0);append(reply,voice(32000));reply.resize(80000,0);
+    const auto held=run(reply,{reply.size()},four);
+    assert(held.size()==1&&held[0].info.end==SegmentEnd::Pause&&held[0].info.end_sample==75200);
+    auto shortClose=four;shortClose.short_close_silence_samples=16000;
+    const auto closed=run(reply,{reply.size()},shortClose);
+    assert(closed.size()==1&&closed[0].info.end==SegmentEnd::Pause);
+    assert(closed[0].info.start_sample==11200&&closed[0].info.end_sample==64000);
+    same(closed,run(reply,{1}, shortClose));same(closed,run(reply,{37,160,1024},shortClose));
+    // Voiced end: offset of the last voiced frame's end, reported only.
+    assert(held[0].info.voiced_end_samples==48000-11200&&closed[0].info.voiced_end_samples==48000-11200);
+    assert(closed[0].pcm.size()==closed[0].info.samples);
+    // Below the 4 s minimum the short-close pause must be at least the
+    // ordinary end pause and a whole number of 10 ms frames.
+    Segmenter check;std::vector<int16_t> buffer(shortClose.max_segment_samples);
+    auto invalid=shortClose;invalid.short_close_silence_samples=invalid.end_silence_samples-160;
+    assert(!check.reset(buffer.data(),buffer.size(),invalid));
+    invalid.short_close_silence_samples=16000+1;assert(!check.reset(buffer.data(),buffer.size(),invalid));
+    assert(check.reset(buffer.data(),buffer.size(),shortClose));
+    // A click up to silence_blip_samples long after the reply is no voice; a
+    // longer run moves the voiced end.
+    auto blips=shortClose;blips.silence_blip_samples=480;
+    for(size_t run_samples:{size_t(480),size_t(640)}) {
+        std::vector<int16_t> clicked(16000,0);append(clicked,voice(32000));
+        clicked.resize(clicked.size()+3200,0);append(clicked,voice(run_samples));clicked.resize(96000,0);
+        const auto out=run(clicked,{clicked.size()},blips);
+        assert(out.size()==1&&out[0].info.end==SegmentEnd::Pause);
+        assert(out[0].info.voiced_end_samples==(run_samples==480?48000:51200+run_samples)-11200);
+    }
+    // Speculation: a 4 s phrase in its pause reports the prefix (voiced end +
+    // 200 ms) once those samples exist and while the pause can still close it
+    // as an ordinary Pause; the published segment then has that voiced end.
+    std::vector<int16_t> phrase(16000,0);append(phrase,voice(64000));phrase.resize(100000,0);
+    Segmenter seg;std::vector<int16_t> work(four.max_segment_samples);
+    assert(seg.reset(work.data(),work.size(),four));
+    uint64_t start=0;size_t voicedEnd=0,samples=0;
+    for(size_t at=0;at<phrase.size();at+=160) {
+        const auto pushed=seg.push(phrase.data()+at,160);
+        if(pushed.status==SegmentStatus::Ready) {
+            const auto* s=seg.segment();
+            assert(at+160==89600&&s->end==SegmentEnd::Pause&&s->voiced_end_samples==68800&&s->samples==78400);
+            assert(seg.release());break;
+        }
+        assert(pushed.status==SegmentStatus::Ok&&pushed.consumed==160);
+        const bool ready=seg.speculation(3200,&start,&voicedEnd,&samples);
+        assert(ready==(at+160>=83200));
+        if(ready)assert(start==11200&&voicedEnd==68800&&samples==72000);
+        uint64_t liveStart=0;size_t liveSamples=0;
+        const bool open=seg.live_view(&liveStart,&liveSamples);
+        assert(open==(at+160>=16160));  // from the first voiced frame (pre-roll included)
+        if(open)assert(liveStart==11200&&liveSamples==at+160-11200);
+    }
+    // Without a short close a short phrase never speculates: its ordinary
+    // pause could not close it.
+    Segmenter quick;assert(quick.reset(work.data(),work.size(),four));
+    for(size_t at=0;at<64000;at+=160) {
+        if(quick.push(reply.data()+at,160).status==SegmentStatus::Ready)break;
+        assert(!quick.speculation(3200,&start,&voicedEnd,&samples));
+    }
+    puts("PASS: short-close pause below the minimum, voiced end with click rejection, speculation prefix and live view");
+}
+// Speculation with the short close: below the minimum length a continuing
+// pause still closes the phrase as a Pause (at the short close or on reaching
+// the minimum), so phrases of every length speculate as soon as voiced end +
+// tail exist, and the prefix is the input the close then publishes. With
+// short_close_silence_samples == 0 only phrases whose ordinary end pause
+// reaches the minimum speculate (voiced end + end_silence >= minimum).
+static void speculation_short_close_tests() {
+    SegmenterConfig four;four.min_segment_samples=4*16000;
+    auto shortClose=four;shortClose.short_close_silence_samples=16000;
+    constexpr size_t kTail=3200,kLead=16000;
+    for(const SegmenterConfig& config:{shortClose,four}) {
+        for(size_t ms:{size_t(800),size_t(1500),size_t(2000),size_t(3000),size_t(3500),size_t(3900),size_t(4500),size_t(6000)}) {
+            const size_t voiced=ms*16;
+            std::vector<int16_t> phrase(kLead,0);append(phrase,voice(voiced));phrase.resize(phrase.size()+3*16000,0);
+            // Pre-roll puts the start 300 ms before the voice: voiced end = voice + 4800.
+            const size_t ve=voiced+4800;
+            const bool expect=config.short_close_silence_samples || ve+config.end_silence_samples>=config.min_segment_samples;
+            Segmenter seg;std::vector<int16_t> work(config.max_segment_samples);
+            assert(seg.reset(work.data(),work.size(),config));
+            bool speculated=false,closed=false;uint64_t specStart=0;size_t specVoicedEnd=0,specSamples=0;
+            for(size_t at=0;at<phrase.size();at+=160) {
+                const auto pushed=seg.push(phrase.data()+at,160);
+                if(pushed.status==SegmentStatus::Ready) {
+                    const auto* s=seg.segment();
+                    assert(s->end==SegmentEnd::Pause&&s->voiced_end_samples==ve);
+                    assert(speculated==expect);
+                    if(speculated) {
+                        assert(specStart==s->start_sample&&specVoicedEnd==s->voiced_end_samples);
+                        assert(specSamples==s->voiced_end_samples+kTail&&specSamples<s->samples);
+                    }
+                    assert(seg.release());closed=true;break;
+                }
+                assert(pushed.status==SegmentStatus::Ok&&pushed.consumed==160);
+                uint64_t start=0;size_t voicedEnd=0,samples=0;
+                const bool ready=seg.speculation(kTail,&start,&voicedEnd,&samples);
+                assert(ready==(expect&&at+160>=kLead+voiced+kTail));
+                if(ready&&speculated)assert(start==specStart&&voicedEnd==specVoicedEnd&&samples==specSamples);
+                if(ready&&!speculated) { speculated=true;specStart=start;specVoicedEnd=voicedEnd;specSamples=samples; }
+            }
+            assert(closed);
+        }
+    }
+    puts("PASS: speculation below the minimum with the short close, unchanged without it");
+}
 int main() {
+    latency_option_tests();
+    speculation_short_close_tests();
     // Natural pause waits for the8s span; the first300ms is exact pre-roll.
     std::vector<int16_t> pause(16000,0);append(pause,voice(16000));pause.resize(9*16000,0);
     const auto baseline=run(pause,{pause.size()});assert(baseline.size()==1);

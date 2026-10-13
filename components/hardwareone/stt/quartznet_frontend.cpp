@@ -60,6 +60,32 @@ size_t reflect(int index, size_t samples) {
     if (static_cast<size_t>(index)>=samples) return 2*samples-2-static_cast<size_t>(index);
     return static_cast<size_t>(index);
 }
+// One row without dither, from any sample source (log_mel_frame and
+// log_mel_frame_ring). Must stay the exact operation sequence of
+// compute_features' loop body: s(i)=pcm[i]*(1/32768),
+// conditioned(i)=i ? s(i)-0.97*s(i-1) : s(i), window, power, mel, log.
+template<typename Source>
+void mel_row(const Source& source,size_t samples,size_t frame,float* out,FrontendWorkspace& w) {
+    const size_t center=frame*160;
+    std::memset(w.real,0,sizeof(w.real)); std::memset(w.imag,0,sizeof(w.imag));
+    for (size_t k=0;k<320;++k) {
+        const size_t input=reflect(static_cast<int>(center+k)-160,samples);
+        const float sample=static_cast<float>(source(input))*(1.0f/32768.0f);
+        float conditioned=sample;
+        if (input) {
+            const float previous=static_cast<float>(source(input-1))*(1.0f/32768.0f);
+            conditioned=sample-kPreemphasis*previous;
+        }
+        w.real[96+k]=conditioned*constants::window[k];
+    }
+    real_power_spectrum(w);
+    for (size_t m=0;m<kMelBins;++m) {
+        float value=0;
+        for (size_t j=0;j<constants::mel_count[m];++j)
+            value+=constants::mel_weight[constants::mel_offset[m]+j]*w.power[constants::mel_start[m]+j];
+        out[m]=std::log(value+kLogGuard);
+    }
+}
 bool valid_score_extent(size_t frames,size_t stride) {
     // The caller still owns the score allocation; reject arithmetic overflow before reads.
     return frames<=kMaxSamples/160 && stride>=kCtcClasses &&
@@ -131,6 +157,12 @@ Status compute_features(const int16_t* pcm,size_t samples,float* output,size_t c
             timing->conditionUs+=uint32_t(t1-t0); timing->fftUs+=uint32_t(t2-t1); timing->melUs+=uint32_t(t3-t2);
         }
     }
+    return normalize_features(output,frames,workspace,timing);
+}
+Status normalize_features(float* output,size_t frames,FrontendWorkspace* workspace,FrontendTiming* timing) {
+    const auto now=[timing]() -> uint64_t { return timing&&timing->now_us?timing->now_us():0; };
+    if (!output||!workspace||!frames) return Status::InvalidArgument;
+    auto& w=*workspace;
     const uint64_t normStart=now();
     // Per-utterance CMVN, row-wise over the [frames,64] matrix (cache-friendly)
     // in float: the P4 has no double FPU, and the previous column-wise float64
@@ -166,6 +198,18 @@ Status compute_features(const int16_t* pcm,size_t samples,float* output,size_t c
         for (size_t m=0;m<kMelBins;++m) row[m]=(row[m]-mean[m])/stddev[m];
     }
     if (timing&&timing->now_us) timing->normUs+=uint32_t(now()-normStart);
+    return Status::Ok;
+}
+Status log_mel_frame(const int16_t* pcm,size_t samples,size_t frame,float* out64,FrontendWorkspace* workspace) {
+    if (!pcm||!out64||!workspace||frame>=feature_frames(samples)) return Status::InvalidArgument;
+    mel_row([pcm](size_t i) { return pcm[i]; },samples,frame,out64,*workspace);
+    return Status::Ok;
+}
+Status log_mel_frame_ring(const int16_t* ring,size_t ring_mask,uint64_t start,size_t samples,size_t frame,
+                          float* out64,FrontendWorkspace* workspace) {
+    if (!ring||!out64||!workspace||frame>=feature_frames(samples)||(ring_mask&(ring_mask+1))) return Status::InvalidArgument;
+    mel_row([ring,ring_mask,start](size_t i) { return ring[static_cast<size_t>((start+i)&ring_mask)]; },
+            samples,frame,out64,*workspace);
     return Status::Ok;
 }
 Status ctc_reset(CtcState* state,char* text,size_t capacity) {

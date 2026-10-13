@@ -13,7 +13,7 @@
 set -u
 cd "$(dirname "$0")"
 P=${HW1_STT_PYTHON:-$PWD/../stt_p4/private/export-venv/bin/python}
-export STT_ROOT=/Volumes/Audiodrive/stt
+export STT_ROOT=${STT_ROOT:?set STT_ROOT to the STT data root (speech stores, work, logs)}
 export PYTHONPATH=$STT_ROOT/pydeps
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 LOG=$STT_ROOT/logs/general2.log

@@ -7,13 +7,14 @@
 #  0. wait until peoples-clean-train/keep.json exists (filter reviewed by hand)
 #  1. Citrinet-384 (~6 h)   2. QuartzNet15x5 (~13 h)   3. test sets + benchmark
 # Usage: nohup caffeinate -dims ./run_compare.sh > /dev/null 2>&1 &
+export STT_ROOT=${STT_ROOT:?set STT_ROOT to the STT data root (speech stores, work, logs)}
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
 P=${HW1_STT_PYTHON:-$PWD/../stt_p4/private/export-venv/bin/python}
-export PYTHONPATH=/Volumes/USB2/stt/pydeps
+export PYTHONPATH=$STT_ROOT/pydeps
 export PYTORCH_ENABLE_MPS_FALLBACK=1
-ROOT=/Volumes/USB2/stt
+ROOT=$STT_ROOT
 LOG=$ROOT/logs/compare.log
 RUN=$ROOT/work/expanded
 KEEP=$ROOT/stores/peoples-clean-train/keep.json
@@ -50,17 +51,18 @@ until [ -f "$KEEP" ]; do sleep 60; done
 say "keep.json: $(head -c 300 "$KEEP" | sed 's/"keep": \[[^]]*\], //')"
 
 train citrinet384 $ROOT/models/citrinet384_ls
-train quartznet15x5 /Volumes/USB/stt/models/quartznet15x5
+train quartznet15x5 $STT_ROOT/models/quartznet15x5
 
 # Add both to the benchmark (names fixed so re-runs do not duplicate rows).
 "$P" - <<'EOF'
+import os
 import json
 from pathlib import Path
 path = Path('benchmark_models.json')
 models = json.loads(path.read_text())
 names = {m['name'] for m in models}
-for name, ckpt in [('Citrinet-384 expanded data', '/Volumes/USB2/stt/work/expanded/citrinet384/best'),
-                   ('QuartzNet15x5 expanded data', '/Volumes/USB2/stt/work/expanded/quartznet15x5/best')]:
+for name, ckpt in [('Citrinet-384 expanded data', os.environ['STT_ROOT'] + '/work/expanded/citrinet384/best'),
+                   ('QuartzNet15x5 expanded data', os.environ['STT_ROOT'] + '/work/expanded/quartznet15x5/best')]:
     if name not in names and Path(ckpt, 'model_weights.ckpt').exists():
         models.append({'name': name, 'ckpt': ckpt,
                        'note': '2026-10-02: from NVIDIA original; --mix expanded (+People\'s Speech filtered, '

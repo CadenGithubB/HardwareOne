@@ -29,7 +29,13 @@ enum CommandSource { SOURCE_WEB, SOURCE_SERIAL, SOURCE_INTERNAL, SOURCE_ESPNOW,
   SOURCE_LOCAL_DISPLAY, SOURCE_BLUETOOTH, SOURCE_MQTT, SOURCE_VOICE, SOURCE_G2_GLASSES, SOURCE_UART };
 enum AudioSource { AUDIO_SRC_NONE, AUDIO_SRC_LOCAL_PDM, AUDIO_SRC_G2_LEFT };
 // INSERT_INTERFACE
+// INSERT_FRONTEND
 using portMUX_TYPE = std::mutex;
+using TaskHandle_t = void*;
+constexpr int pdTRUE = 1;
+static std::atomic<unsigned> feNotifies{0};
+void xTaskNotifyGive(TaskHandle_t) { ++feNotifies; }
+uint32_t ulTaskNotifyTake(int, uint32_t) { std::this_thread::sleep_for(std::chrono::microseconds(100)); return 0; }
 #define portMUX_INITIALIZER_UNLOCKED {}
 static thread_local unsigned criticalDepth = 0;
 #define portENTER_CRITICAL(x) do { (x)->lock(); ++criticalDepth; } while (0)
@@ -40,6 +46,7 @@ static std::atomic<uint64_t> clockMs{1};
 uint32_t millis() { return static_cast<uint32_t>(clockMs.load()); }
 void vTaskDelay(uint32_t) { std::this_thread::sleep_for(std::chrono::microseconds(100)); }
 static std::atomic<unsigned> deletedTasks{0}, activeTasks{0};
+static std::atomic<void*> captureTaskContext{nullptr};
 void vTaskDelete(void*);
 static thread_local bool mainWorker = false, taskSelfDeleted = false, backendResetBeforeDelete = false;
 uint32_t uxTaskGetStackHighWaterMark(void*) { return 2048; }
@@ -50,11 +57,12 @@ static std::vector<std::thread> tasks;
 static std::string failedTask;
 int xTaskCreatePinnedToCore(void (*fn)(void*), const char* name, uint32_t bytes,
                             void* context, int priority, void*, int core) {
-  assert(core == 1);
-  assert((std::string(name) == "stt" && bytes == 12288 && priority == 2) ||
-         (std::string(name) == "stt_warm" && bytes == 12288 && priority == 1) ||
-         (std::string(name) == "stt_capture" && bytes >= 4096 && bytes <= 8192 && priority == 3));
+  assert((core == 1 && std::string(name) == "stt" && bytes == 12288 && priority == 2) ||
+         (core == 1 && std::string(name) == "stt_warm" && bytes == 12288 && priority == 1) ||
+         (core == 1 && std::string(name) == "stt_capture" && bytes >= 4096 && bytes <= 8192 && priority == 3) ||
+         (core == 0 && std::string(name) == "stt_fe" && bytes == 3072 && priority == 1));
   if (failedTask == name) return 0;
+  if (std::string(name) == "stt_capture") captureTaskContext = context;
   ++activeTasks;
   std::lock_guard<std::mutex> lock(tasksMutex);
   tasks.emplace_back([=, main = std::string(name) == "stt"] {
@@ -92,16 +100,24 @@ static size_t readCounter = 0;
 static bool irregularReads = false;
 // These are changed only after every worker has joined.
 constexpr uint64_t kCalibrationSamples = 8000; // Real production500ms; never bypass adaptive mode.
+// The broker's continuous phrase cap (kStreamSamples): a phrase without a pause is cut at 10 s.
+constexpr uint64_t kPhraseCap = 160000;
 static bool allVoice = true;
 static int16_t dc = 0;
 static std::vector<std::pair<uint64_t, uint64_t>> voiceIntervals;
+// Quiet PCM below the endpoint gate must still reach full-phrase inference.
+static std::vector<std::pair<uint64_t, uint64_t>> weakIntervals;
 static int16_t rawSample(uint64_t sample) {
   if (sample < kCalibrationSamples) return dc; // Ambient quiet while UI says preparing.
   sample -= kCalibrationSamples;
   bool voice = allVoice;
   for (const auto& interval : voiceIntervals)
     voice = voice || (sample >= interval.first && sample < interval.second);
-  const int tone = voice ? ((sample & 1) ? -1 : 1) * (1000 + int(sample % 97)) : 0;
+  bool weak = false;
+  for (const auto& interval : weakIntervals)
+    weak = weak || (sample >= interval.first && sample < interval.second);
+  const int tone = voice ? ((sample & 1) ? -1 : 1) * (1000 + int(sample % 97)) :
+                  weak ? ((sample & 1) ? -8 : 8) : 0;
   return static_cast<int16_t>(dc + tone);
 }
 AudioSource audioGetSource() { std::lock_guard<std::mutex> lock(halMutex); return audioSource; }
@@ -135,6 +151,9 @@ bool audioCaptureStart(const char* owner, uint32_t rate) {
 // Conversate's native glasses stream: claims the left-temple source for one
 // connection generation (the HAL never selects it any other way).
 static std::atomic<uint32_t> nativeStarts{0};
+// publish wake: the consumer wake the native session registers. Must run on the STT
+// worker, outside gSTTMux; counted per published final/draft.
+static std::atomic<unsigned> publishWakes{0}, wakesWithText{0};
 bool audioCaptureStartG2Native(const char* owner, uint32_t generation) {
   std::lock_guard<std::mutex> lock(halMutex);
   if (startFails || !halOwner.empty() || !generation) return false;
@@ -191,9 +210,11 @@ enum class AllocPref { RequirePSRAM };
 static std::mutex allocationMutex;
 static std::map<void*, size_t> allocations;
 static unsigned allocationAttempt = 0, failAllocation = 0;
-void* ps_alloc(size_t n, AllocPref, const char*) {
+static std::atomic<unsigned> fePoolAllocs{0};  // native: capture-features pools allocated (one per session)
+void* ps_alloc(size_t n, AllocPref, const char* name) {
   std::lock_guard<std::mutex> lock(allocationMutex);
   if (++allocationAttempt == failAllocation) return nullptr;
+  if (name && !strcmp(name, "stt.fe_ring")) ++fePoolAllocs;
   void* p = std::malloc(n);
   if (p) { memset(p, 0xa5, n); allocations[p] = n; }
   return p;
@@ -206,6 +227,72 @@ void trackedFree(void* p) {
   for (size_t i = 0; i < it->second; ++i) assert(bytes[i] == 0);
   allocations.erase(it); std::free(p);
 }
+#if HW1_STT_SPEAKER_LABELS
+#define ESP_LOGI(...) ((void)0)
+constexpr int MALLOC_CAP_SPIRAM=1;
+static bool speakerRingFail=false;
+static std::atomic<unsigned> speakerRingAllocations{0};
+void* heap_caps_calloc(size_t n,size_t bytes,int){
+ if(speakerRingFail)return nullptr;
+ auto* p=ps_alloc(n*bytes,AllocPref::RequirePSRAM,"stt.labels");if(p){memset(p,0,n*bytes);++speakerRingAllocations;}return p;
+}
+void heap_caps_free(void* p){trackedFree(p);assert(speakerRingAllocations.fetch_sub(1)==1);}
+static std::atomic<bool> speakerEnabled{false},speakerDrainProduces{false};
+// These gates model a busy backend, without reimplementing its slot scheduler.
+// The real broker must forward cancellation and preserve pending saved lines.
+static std::atomic<bool> speakerSubmitHeld{false}, speakerSubmitEntered{false};
+static std::atomic<bool> speakerDrainHeld{false}, speakerDrainEntered{false};
+static std::atomic<unsigned> speakerSubmitCancelled{0}, speakerDrainCancelled{0}, speakerPolls{0};
+static std::atomic<unsigned> speakerPressureStops{0};
+static std::atomic<uint32_t> speakerSubmitSequence{0};
+static std::atomic<uint32_t> speakerDrainReadyAfterMs{0}, speakerDrainBudgetMs{0};
+static std::mutex speakerMutex;
+static std::vector<uint32_t> speakerSubmitted;
+static std::map<uint32_t, std::vector<int16_t>> speakerPcm;
+static std::vector<std::pair<uint32_t,int8_t>> speakerResults;
+bool sttSpeakerBackground(STTLocalSession*){return speakerEnabled;}
+bool sttSpeakerSubmit(STTLocalSession*,uint32_t seq,const int16_t* pcm,size_t samples,
+                      const STTLocalControl& control,bool (*canWait)(void*)){
+ if(!speakerEnabled)return false;
+ assert(control.cancelled && control.context && canWait);
+ speakerSubmitSequence=seq;speakerSubmitEntered=true;
+ while(speakerSubmitHeld && !control.cancelled(control.context)) {
+   if(!canWait(control.context)) {
+     ++speakerPressureStops;
+     std::lock_guard<std::mutex> lock(speakerMutex);speakerResults.emplace_back(seq,-1);
+     return true; // Pressure ends this admission, never the recording session.
+   }
+   std::this_thread::sleep_for(std::chrono::microseconds(100));
+ }
+ if(control.cancelled(control.context)){++speakerSubmitCancelled;return true;}
+ std::lock_guard<std::mutex> lock(speakerMutex);speakerSubmitted.push_back(seq);
+ speakerPcm[seq]=std::vector<int16_t>(pcm,pcm+samples);return true;
+}
+bool sttSpeakerLabel(STTLocalSession*,const int16_t*,size_t,STTSpeakerLabel*){return false;}
+bool sttSpeakerTakeLabel(STTLocalSession*,uint32_t* seq,int8_t* speaker){
+ ++speakerPolls;
+ std::lock_guard<std::mutex> lock(speakerMutex);if(speakerResults.empty())return false;
+ *seq=speakerResults.front().first;*speaker=speakerResults.front().second;speakerResults.erase(speakerResults.begin());return true;
+}
+void sttSpeakerDrain(STTLocalSession*,uint32_t timeoutMs,const STTLocalControl& control){
+ if(!speakerEnabled)return;
+ assert(control.cancelled && control.context);
+ speakerDrainBudgetMs=timeoutMs;speakerDrainEntered=true;
+ while(speakerDrainHeld && !control.cancelled(control.context))
+   std::this_thread::sleep_for(std::chrono::microseconds(100));
+ if(control.cancelled(control.context)){++speakerDrainCancelled;return;}
+ // Completion after this injected delay is available only if the caller's
+ // budget permits it. No host wall-clock sleep or fake queue algorithm.
+ if(!speakerDrainProduces || timeoutMs<speakerDrainReadyAfterMs)return;
+ std::lock_guard<std::mutex> lock(speakerMutex);
+ for(auto seq:speakerSubmitted)speakerResults.emplace_back(seq,1);
+ speakerSubmitted.clear();
+}
+void sttSpeakerEnd(STTLocalSession*){
+ std::lock_guard<std::mutex> lock(speakerMutex);
+ speakerSubmitted.clear();speakerResults.clear();
+}
+#endif
 static std::atomic<unsigned> engineCalls{0}, enginePermits{UINT32_MAX};
 static std::atomic<bool> modelAvailable{true}, engineOK{true}, engineOverlong{false};
 static std::atomic<bool> ignoreEngineCancel{false}, engineActive{false}, cacheStartFails{false};
@@ -227,15 +314,36 @@ struct EngineCall {
 };
 static std::mutex engineMutex;
 static std::vector<EngineCall> engineHistory;
+// Set before starting workers; the final and speculative paths return the same
+// injected result for a sequence. Draft results remain independently controlled.
+static std::map<uint32_t, std::string> finalTextOverrides;
+static void writeFinalText(char* text, size_t cap, uint32_t sequence) {
+  const auto result = finalTextOverrides.find(sequence);
+  if (result == finalTextOverrides.end()) snprintf(text, cap, "segment %u", sequence);
+  else snprintf(text, cap, "%s", result->second.c_str());
+}
 bool sttLocalAvailable(char* error, size_t cap) {
   if (!modelAvailable) snprintf(error, cap, "Model missing");
   return modelAvailable.load();
 }
 // Definition follows the injected broker so it can check real queue metadata.
 bool sttLocalTranscribe(const int16_t*, size_t, char*, size_t,
-                        const STTLocalControl&, STTLocalStats&, char*, size_t, STTLocalSession*);
+                        const STTLocalControl&, STTLocalStats&, char*, size_t, STTLocalSession*,
+                        const STTFeaturePrefix*);
+// The runtime's per-call PSRAM rule (capture-features sizes its pool against it); the host
+// fake PSRAM has no free-size accounting, so only the call is checked.
+static std::atomic<unsigned> callBudgetQueries{0};
+STTLocalCallBudget sttLocalCallBudget(size_t samples, const STTLocalSession* session) {
+  assert(samples == kPhraseCap && session); ++callBudgetQueries;
+  return {3u << 20, 3u << 20};
+}
 #define free trackedFree
 // INSERT_BROKER
+#if HW1_STT_TEST_EXPECT_FULL_PHRASE
+static_assert(!HW1_STT_TRIM_SILENCE && !HW1_STT_SPECULATIVE_FINAL,
+              "the default must retain full phrases without speculative final promotion");
+#endif
+static_assert(kStreamSamples == kPhraseCap, "harness phrase cap");
 #undef free
 
 static std::atomic<bool> savePreference{false}, saveFailure{false}, saveHeld{false}, saveEntered{false};
@@ -265,9 +373,14 @@ void TranscriptSession::begin(const TranscriptOptions& options, const char* prov
   assert(!savedTranscripts.count(id)); savedTranscripts[id].options = options;
 }
 bool TranscriptSession::append(uint32_t sequence, const char* text, size_t length) {
-  assertSaveWorker(); assert(!finished_ && sequence > sequence_); sequence_ = sequence;
+  assertSaveWorker();
   if (!options_.enabled) return true;
-  if (status_.error[0]) return false;
+  if (finished_ || status_.error[0]) return false;
+  assert(sequence && text && length <= 512 && !memchr(text, '\0', length));
+  if (sequence <= sequence_) return true; // Production replay contract.
+  assert(sequence == sequence_ + 1); // Production rejects a sequence gap.
+  sequence_ = sequence;
+  if (!length) return true; // Ordered silence marker: no file or saved chunk.
   saveEntered = true;
   while (saveHeld) std::this_thread::sleep_for(std::chrono::microseconds(100));
   if (saveFailure || (!status_.saved && !transportSessionEpochIsLive(options_.source, options_.epoch))) {
@@ -322,6 +435,9 @@ void STTLocalSession::moveTo(STTLocalSession& to) {
   backendState_ = nullptr;
   ++warmMoves;
 }
+// The fake keeps no resident model: nothing a call leaves behind to drop.
+static std::atomic<unsigned> callStateDrops{0};
+void STTLocalSession::dropCallState() { ++callStateDrops; }
 STTLocalSession::~STTLocalSession() {
   // Host threads return and unwind after our vTaskDelete fake. Real FreeRTOS
   // does not: the deletion check below must already have seen explicit reset.
@@ -341,9 +457,75 @@ void vTaskDelete(void*) {
 }
 
 static std::atomic<int> draftCalls{0};
+static std::atomic<bool> draftsSucceed{false};   // native: let drafts publish (publish wake draft wake)
+static std::atomic<unsigned> draftsPublished{0};
+static std::atomic<int> trimmedCalls{0};
+struct SpecCall { uint64_t start; size_t samples; uint32_t sequence; };
+static std::vector<SpecCall> specHistory;
+// Phrase `sequence` was transcribed exactly once on `samples` of input (0: any):
+// by one final run, or with no final run by its promoted speculative run. Short
+// closes speculate too, so when a test feeds a whole phrase at once capture
+// timing decides which of the two it is.
+static void assertTranscribedOnce(uint32_t sequence, size_t samples = 0);
+static std::atomic<int> specCalls{0}, specAborts{0};
+static std::atomic<bool> specHold{false};
+static StreamRun* gRun = nullptr;
+// Staged drafts (opt-in) follow the runtime's order: a stage check, Frontend (the
+// only PCM reads: hashed at entry and again just before Inference, which must
+// match), a stage check, Inference, a check before every stage, Decoding. A hold
+// keeps a draft in its frontend (no stage check there, as in the runtime) or in
+// its stages (still checked).
+static std::atomic<bool> draftStages{false}, draftHoldFrontend{false}, draftHoldStages{false};
+static std::atomic<bool> draftInFrontend{false};
+static std::atomic<unsigned> draftInferences{0}, draftAborts{0};
+static uint64_t pcmHash(const int16_t* pcm, size_t count) {
+  uint64_t h = 1469598103934665603ull;
+  for (size_t i = 0; i < count; ++i) { h ^= uint16_t(pcm[i]); h *= 1099511628211ull; }
+  return h;
+}
+static bool runDraftStages(const int16_t* pcm, size_t count, const STTLocalControl& control) {
+  const uint64_t entry = pcmHash(pcm, count);
+  if (control.cancelled(control.context)) { ++draftAborts; return false; }
+  control.progress(control.context, STTLocalPhase::Frontend);
+  draftInFrontend = true;
+  while (draftHoldFrontend) std::this_thread::sleep_for(std::chrono::microseconds(100));
+  assert(pcmHash(pcm, count) == entry);  // nothing wrote the input while the frontend read it
+  draftInFrontend = false;
+  if (control.cancelled(control.context)) { ++draftAborts; return false; }
+  control.progress(control.context, STTLocalPhase::Inference);
+  ++draftInferences;
+  while (draftHoldStages && !control.cancelled(control.context)) std::this_thread::sleep_for(std::chrono::microseconds(100));
+  if (control.cancelled(control.context)) { ++draftAborts; return false; }
+  control.progress(control.context, STTLocalPhase::Decoding);
+  return true;
+}
+static std::atomic<unsigned> cachedFinals{0}, cachedRows{0}, cachedDrafts{0}, rowMismatches{0};
+static std::atomic<unsigned> cachedSpecs{0}, cachedTrimmedFinals{0};  // features x speculation / features x trim
+// capture-features: every cached row must equal the batch frontend's row on this exact PCM.
+// kind: 0 final, 1 draft, 2 speculative final (combined).
+static void checkPrefix(const int16_t* pcm, size_t count, const STTFeaturePrefix* prefix, int kind) {
+  if (!prefix) return;
+  assert(prefix->rows && prefix->count && prefix->count <= hw1::stt::feature_frames(count));
+  hw1::stt::FrontendWorkspace w;
+  float row[64];
+  // combined: finals and speculative finals are checked row for row. A draft is
+  // checked on its first/last 8 rows and every 16th: a full -O0 check of a
+  // long draft held the worker long enough that speculation's speculative snapshot
+  // (copied by the capture task only while no draft runs or a running one is past
+  // its frontend, which these unstaged drafts never report, at the next block)
+  // never happened once a test stopped feeding audio. Production drafts are
+  // preempted between model stages instead.
+  for (size_t r = 0; r < prefix->count; ++r) {
+    if (kind == 1 && r >= 8 && r + 8 < prefix->count && r % 16) continue;
+    assert(hw1::stt::log_mel_frame(pcm, count, r, row, &w) == hw1::stt::Status::Ok);
+    if (memcmp(row, prefix->rows + r * 64, sizeof(row))) ++rowMismatches;
+  }
+  (kind == 1 ? cachedDrafts : kind == 2 ? cachedSpecs : cachedFinals) += 1; cachedRows += unsigned(prefix->count);
+}
 bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap,
                         const STTLocalControl& control, STTLocalStats& stats,
-                        char* error, size_t errorCap, STTLocalSession* session) {
+                        char* error, size_t errorCap, STTLocalSession* session,
+                        const STTFeaturePrefix* prefix) {
   if (control.cancelled == sttWarmLoadCancelled) {
     // The warm loader: half a second of silence into the parked session.
     assert(warmTest && !mainWorker && session == &gWarmSession && !session->backendState_);
@@ -361,28 +543,73 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
   }
   assert(mainWorker && session && !backendResetBeforeDelete);
   auto& run = *static_cast<StreamRun*>(control.context);
+  { std::lock_guard<std::mutex> lock(gSTTMux); gRun = &run; }  // test helpers read it under gSTTMux
+  bool speculative = false;
+  uint64_t specStart = 0; uint32_t specSeq = 0;
+#if HW1_STT_SPECULATIVE_FINAL
+  if (pcm == run.draftPcm) {
+    std::lock_guard<std::mutex> lock(gSTTMux);
+    speculative = run.specBusy;
+    if (speculative) { assert(!run.draftBusy && count == run.specReadySamples); specStart = run.specReadyStart; specSeq = run.specReadySequence; }
+  }
+#endif
+  // capture-features: every cached row equals the batch row of exactly this (possibly
+  // trimmed or speculative) input.
+  checkPrefix(pcm, count, prefix, speculative ? 2 : pcm == run.draftPcm ? 1 : 0);
+  if (prefix) stats.featureCachedFrames = uint32_t(prefix->count);
+  if (speculative) {
+    // speculation: the snapshot must be exactly the phrase's stream samples from its start.
+    for (size_t i = 0; i < count; ++i) assert(pcm[i] == rawSample(specStart + i));
+    { std::lock_guard<std::mutex> lock(engineMutex); specHistory.push_back({specStart, count, specSeq}); }
+    ++specCalls;
+    while (specHold && !control.cancelled(control.context)) std::this_thread::sleep_for(std::chrono::microseconds(100));
+    if (control.cancelled(control.context)) { ++specAborts; snprintf(error, errorCap, "Cancelled"); return false; }
+    stats.samples = count; stats.inferenceMs = 77;
+    writeFinalText(text, cap, specSeq);
+    return true;
+  }
   if (pcm == run.draftPcm) {
     // Live-mode draft of the utterance in progress: never a queued segment.
     // These tests pin final-segment behaviour, so drafts decline (production
     // simply publishes no draft on failure) without touching the backend.
-    { std::lock_guard<std::mutex> lock(gSTTMux); assert(run.draftBusy && count <= 320000); }
+    { std::lock_guard<std::mutex> lock(gSTTMux); assert(run.draftBusy && count <= kPhraseCap); }
     ++draftCalls;
+    if (draftStages && !runDraftStages(pcm, count, control)) { snprintf(error, errorCap, "Cancelled"); return false; }
+    if (draftsSucceed) {
+      uint32_t sequence = 0;
+      { std::lock_guard<std::mutex> lock(gSTTMux); sequence = run.draftSequence; }
+      snprintf(text, cap, "draft %u", unsigned(sequence));
+      ++draftsPublished;  // the broker publishes it: its phrase has no final yet
+      return true;
+    }
     snprintf(error, errorCap, "draft declined by harness");
     return false;
   }
   EngineCall call{};
+  size_t expectInference = 0;
   {
     std::lock_guard<std::mutex> lock(gSTTMux);
     for (const auto& slot : run.slots) if (slot.pcm == pcm) {
       assert(slot.state == StreamSlotState::Processing);
       call = {slot.samples, count, slot.start, slot.end, slot.sequence};
+      expectInference = slot.samples;
+#if HW1_STT_TRIM_SILENCE
+      if (slot.endKind != hw1::stt::SegmentEnd::HardLimit && slot.voicedEnd &&
+          slot.voicedEnd + 3200 < slot.samples) expectInference = slot.voicedEnd + 3200;
+      if (expectInference != slot.samples) ++trimmedCalls;
+#endif
     }
   }
   assert(call.sequence && call.end - call.start == call.rawSamples);
-  assert(count == std::max(call.rawSamples, size_t(320)) && count <= 320000);
-  assert(allocationCount() == 5);
+  assert(count == std::max(expectInference, size_t(320)) && count <= kPhraseCap);
+  size_t inferenceAllocations=allocationCount();
+#if HW1_STT_SPEAKER_LABELS
+  inferenceAllocations-=speakerRingAllocations;
+#endif
+  assert(inferenceAllocations == 5 || inferenceAllocations == 9); // capture-features: + ring, workspace, 2 row caches
+  if (prefix && count < call.rawSamples) ++cachedTrimmedFinals;  // combined: trim-trimmed input with cached rows
   auto assertPCM = [&] {
-    for (size_t i = 0; i < call.rawSamples; ++i) assert(pcm[i] == rawSample(call.start + i));
+    for (size_t i = 0; i < std::min(call.rawSamples, count); ++i) assert(pcm[i] == rawSample(call.start + i));
     for (size_t i = call.rawSamples; i < count; ++i) assert(pcm[i] == 0);
   };
   assertPCM();
@@ -414,7 +641,7 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
   stats.samples = count; stats.inferenceMs = 123; stats.weightsReused = call.weightsReused;
   if (!engineOK) snprintf(error, errorCap, "Injected inference failure");
   if (engineOverlong) memset(text, 'x', cap);
-  else snprintf(text, cap, "segment %u", call.sequence);
+  else writeFinalText(text, cap, call.sequence);
   engineActive = false;
   return engineOK.load() && !control.cancelled(control.context);
 }
@@ -443,7 +670,15 @@ static STTSnapshot snapshot(STTToken token) {
 static void reset() {
   joinTasks();
   gSTT = STTRun{}; memset(gSTTChunks, 0, sizeof(gSTTChunks));
-  clockMs = 1; deletedTasks = 0;
+  clockMs = 1; deletedTasks = 0; captureTaskContext = nullptr;
+#if HW1_STT_SPEAKER_LABELS
+  speakerEnabled=speakerDrainProduces=false;speakerRingFail=false;
+  speakerSubmitHeld=speakerSubmitEntered=speakerDrainHeld=speakerDrainEntered=false;
+  speakerSubmitCancelled=speakerDrainCancelled=speakerPolls=0;
+  speakerPressureStops=speakerSubmitSequence=0;
+  speakerDrainReadyAfterMs=speakerDrainBudgetMs=0;
+  speakerSubmitted.clear();speakerResults.clear();speakerPcm.clear();
+#endif
   serialLive = webLive = successorLive = true;
   failedTask.clear(); allocationAttempt = failAllocation = 0;
   srRunning = gMicRunning = recordingBusy = false;
@@ -454,9 +689,9 @@ static void reset() {
   gateNextIntegrity = integrityGateEntered = releaseIntegrityGate = false;
   allowedSamples = deliveredSamples = 0; starts = stops = 0;
   readLimit = 1024; readCounter = 0; irregularReads = false;
-  allVoice = true; dc = 0; voiceIntervals.clear();
+  allVoice = true; dc = 0; voiceIntervals.clear(); weakIntervals.clear();
   modelAvailable = engineOK = true; engineOverlong = ignoreEngineCancel = engineActive = false;
-  engineCalls = 0; enginePermits = UINT32_MAX; engineHistory.clear();
+  engineCalls = 0; enginePermits = UINT32_MAX; engineHistory.clear(); finalTextOverrides.clear();
   cacheStartFails = false; weightLoads = weightReuses = sessionCloses = 0;
   sttKeepWarm(0, false);  // drops a parked model (keep-warm tests)
   assert(!sttWarmResident() && liveWeightCaches == 0);
@@ -464,6 +699,10 @@ static void reset() {
   warmTest = warmLoadHeld = warmLoadFails = warmLoaderEntered = false; warmMoves = 0; psramFree = SIZE_MAX; warmLoadTakes = 0;
   savePreference = saveFailure = saveHeld = saveEntered = finishHeld = finishEntered = false;
   savedTranscripts.clear();
+  specHistory.clear(); specCalls = specAborts = 0; specHold = false; gRun = nullptr;
+  publishWakes = 0; wakesWithText = 0; nativeStarts = 0; draftsSucceed = false; draftsPublished = 0;
+  draftStages = draftHoldFrontend = draftHoldStages = draftInFrontend = false;
+  draftCalls = 0; draftInferences = draftAborts = 0;
 }
 static STTToken begin() {
   allowedSamples = deliveredSamples = 0; readCounter = 0;
@@ -504,6 +743,18 @@ static STTToken beginNative() {
   assert(sttBeginContinuousG2Native(owner, 7, &token, error, sizeof(error), nullptr) && token && !error[0]);
   return token;
 }
+static void countPublishWake() {
+  assert(mainWorker && !criticalDepth);  // never inside gSTTMux (production: a semaphore give)
+  { std::lock_guard<std::mutex> lock(gSTTMux);  // what the consumer would read now
+    if (gSTT.snapshot.pendingTexts || gSTT.draft.sequence) ++wakesWithText; }
+  ++publishWakes;
+}
+static STTToken beginNativeWake() {
+  allowedSamples = deliveredSamples = 0; readCounter = 0;
+  STTToken token = 0; char error[96] = {};
+  assert(sttBeginContinuousG2Native(owner, 7, &token, error, sizeof(error), nullptr, countPublishWake) && token && !error[0]);
+  return token;
+}
 static void rejectBegin() {
   STTToken token = 0; char error[96] = {};
   assert(!sttBeginContinuous(owner, &token, error, sizeof(error)) && error[0]);
@@ -514,6 +765,39 @@ static void acknowledgeAll(STTToken token, std::vector<STTTextChunk>* saved = nu
     if (saved) saved->push_back(chunk);
     assert(sttAcknowledgeChunk(owner, token, chunk.sequence));
   }
+}
+static void testQueuedBoundaryMetadata() {
+  reset();
+  StreamRun run;
+  std::vector<int16_t> work(1600), queued(1600), voice(1600), silence(320);
+  for(size_t i=0;i<voice.size();++i)voice[i]=(i&1)?1000:-1000;
+  hw1::stt::SegmenterConfig config;
+  config.max_segment_samples=1600;config.min_segment_samples=320;config.pre_roll_samples=0;
+  config.end_silence_samples=320;config.min_voice_samples=160;config.forced_overlap_samples=160;
+  assert(run.segmenter.reset(work.data(),work.size(),config));run.slots[0].pcm=queued.data();
+  auto queueAndCheck=[&](hw1::stt::SegmentEnd kind,bool continuation,size_t overlap) {
+    const auto* ready=run.segmenter.segment();assert(ready);
+    const auto expected=*ready;
+    assert(expected.end==kind&&expected.continuation==continuation&&expected.overlap_before_samples==overlap);
+    assert(expected.new_voiced_samples>0);
+    const std::vector<int16_t> original(expected.pcm,expected.pcm+expected.samples);
+    assert(sttQueueSegment(run)); // Actual broker handoff also releases the segmenter.
+    auto& slot=run.slots[0];assert(slot.state==StreamSlotState::Ready);
+    assert(slot.start==expected.start_sample&&slot.end==expected.end_sample&&slot.samples==expected.samples);
+    assert(slot.endKind==expected.end&&slot.continuation==expected.continuation);
+    assert(slot.overlapBefore==expected.overlap_before_samples&&slot.voicedSamples==expected.new_voiced_samples);
+    assert(slot.forced==(kind==hw1::stt::SegmentEnd::HardLimit));
+    assert(!memcmp(slot.pcm,original.data(),original.size()*sizeof(int16_t)));
+    slot.state=StreamSlotState::Free;--gSTT.snapshot.pendingAudio;
+  };
+  assert(run.segmenter.push(voice.data(),320).consumed==320);
+  assert(run.segmenter.push(silence.data(),silence.size()).status==hw1::stt::SegmentStatus::Ready);
+  queueAndCheck(hw1::stt::SegmentEnd::Pause,false,0);
+  assert(run.segmenter.push(voice.data(),voice.size()).status==hw1::stt::SegmentStatus::Ready);
+  queueAndCheck(hw1::stt::SegmentEnd::HardLimit,false,0);
+  assert(run.segmenter.push(voice.data(),1440).status==hw1::stt::SegmentStatus::Ready);
+  queueAndCheck(hw1::stt::SegmentEnd::HardLimit,true,160);
+  assert(gSTT.snapshot.segmentsCaptured==3&&!gSTT.snapshot.pendingAudio);
 }
 static void testAdaptiveReadiness() {
   reset(); irregularReads = true;
@@ -546,17 +830,17 @@ static void testAdaptiveReadiness() {
 static void testOverlapAndDrain() {
   reset(); enginePermits = 0; irregularReads = true;
   const auto token = begin(); started(token);
-  feed(token, 20 * 16000); await([] { return engineCalls == 1; }, "first blocked inference");
+  feed(token, kPhraseCap); await([] { return engineCalls == 1; }, "first blocked inference");
   const auto before = snapshot(token); assert(before.captureActive && before.inferenceActive);
-  feed(token, 45 * 16000); // Capture must advance by 25 s while inference is blocked.
+  feed(token, 360000); // Capture must advance by 12.5 s while inference is blocked.
   assert(engineCalls == 1 && snapshot(token).segmentsCaptured == 2);
   assert(sttRequestFinish(owner, token));
   await([] { return stopRequested.load(); }, "normal capture stop");
-  assert(sttRunActive(token) && allocationCount() == 5);
+  assert(sttRunActive(token) && allocationCount() == 9);
   assert(snapshot(token).segmentsCaptured == 3);
   enginePermits = UINT32_MAX; complete(token);
-  auto s = snapshot(token); assert(s.state == STTState::Done && s.segmentsCompleted == 3 && s.recordedSamples == kCalibrationSamples + 720000);
-  assert(starts == 1 && stops == 1 && deletedTasks == 2);
+  auto s = snapshot(token); assert(s.state == STTState::Done && s.segmentsCompleted == 3 && s.recordedSamples == kCalibrationSamples + 360000);
+  assert(starts == 1 && stops == 1 && deletedTasks == 3);  // capture-features: + stt_fe
   assert(weightLoads == 1 && weightReuses == 2 && sessionCloses == 1);
   assert(!engineHistory[0].weightsReused && engineHistory[1].weightsReused && engineHistory[2].weightsReused);
   for (const auto& call : engineHistory) assert(call.cacheId == engineHistory[0].cacheId);
@@ -568,27 +852,27 @@ static void testOverlapAndDrain() {
     end = result[i].endSample;
     assert(result[i].forcedBoundary == (i < 2));
   }
-  assert(end == kCalibrationSamples + 45 * 16000);
+  assert(end == kCalibrationSamples + 360000);
 }
 static void testLongRunsAndPauses() {
   reset(); const auto token = begin(); started(token);
-  for (unsigned seconds : {20u, 40u, 60u}) {
-    feed(token, seconds * 16000);
-    await([&] { return snapshot(token).segmentsCompleted == seconds / 20; }, "hard-cut inference");
+  for (unsigned phrases : {1u, 2u, 3u}) {
+    feed(token, phrases * kPhraseCap);
+    await([&] { return snapshot(token).segmentsCompleted == phrases; }, "hard-cut inference");
   }
-  feed(token, 65 * 16000); assert(sttRequestFinish(owner, token)); complete(token);
-  auto s = snapshot(token); assert(s.state == STTState::Done && s.recordedSamples == kCalibrationSamples + 1040000 && s.sessionMs >= 65500);
+  feed(token, 520000); assert(sttRequestFinish(owner, token)); complete(token);
+  auto s = snapshot(token); assert(s.state == STTState::Done && s.recordedSamples == kCalibrationSamples + 520000 && s.sessionMs >= 33000);
   std::vector<STTTextChunk> chunks; acknowledgeAll(token, &chunks);
-  assert(chunks.size() == 4 && chunks.back().endSample == kCalibrationSamples + 1040000);
-  // Continuous local STT cuts a phrase that reaches 20 s at the quietest
+  assert(chunks.size() == 4 && chunks.back().endSample == kCalibrationSamples + 520000);
+  // Continuous local STT cuts a phrase that reaches 10 s at the quietest
   // 10 ms frame of its last 2 s (hard_cut_search_samples): phrases stay
-  // contiguous and complete, never exceed 20 s, and forced ones end within
+  // contiguous and complete, never exceed 10 s, and forced ones end within
   // the search window.
   for (size_t i = 0; i < chunks.size(); ++i) {
     const uint64_t span = chunks[i].endSample - chunks[i].startSample;
-    assert(chunks[i].startSample == (i ? chunks[i - 1].endSample : kCalibrationSamples) && span <= 320000);
+    assert(chunks[i].startSample == (i ? chunks[i - 1].endSample : kCalibrationSamples) && span <= kPhraseCap);
     assert(chunks[i].forcedBoundary == (i < 3));
-    if (i < 3) assert(span >= 320000 - 32000 && span % 160 == 0);
+    if (i < 3) assert(span >= kPhraseCap - 32000 && span % 160 == 0);
   }
 
   reset(); allVoice = false; dc = 11000; irregularReads = true;
@@ -600,13 +884,14 @@ static void testLongRunsAndPauses() {
     await([&] { return snapshot(paused).segmentsCompleted == i + 1; }, "minimum-span pause segment");
     const auto chunk = peek(paused);
     assert(chunk.sequence == i + 1 && !chunk.forcedBoundary);
-    assert(chunk.endSample - chunk.startSample == 64000); // Continuous local STT: 4 s minimum span.
+    assert(chunk.endSample - chunk.startSample == (i ? 36800u : 32000u)); // short-close: short phrases close on their pause
     assert(chunk.startSample >= previousEnd);
     previousEnd = chunk.endSample;
     assert(sttAcknowledgeChunk(owner, paused, chunk.sequence));
   }
   assert(sttRequestFinish(owner, paused)); complete(paused);
-  assert(snapshot(paused).state == STTState::Done && engineCalls == 10 && snapshot(paused).sessionMs >= 100000);
+  assert(snapshot(paused).state == STTState::Done && snapshot(paused).sessionMs >= 100000);
+  for (uint32_t sequence = 1; sequence <= 10; ++sequence) assertTranscribedOnce(sequence);
 
   reset(); allVoice = false; dc = 16000;
   const auto silent = begin(); started(silent); feed(silent, 120 * 16000);
@@ -615,36 +900,45 @@ static void testLongRunsAndPauses() {
   assert(snapshot(silent).state == STTState::Done && !snapshot(silent).textReady);
 }
 static void testShortFinalTail() {
-  // Voice up to the last 10 ms frame before 20 s, that frame silent, then a
+  // Voice up to the last 10 ms frame before 10 s, that frame silent, then a
   // 37-sample voiced tail: the quiet-point cut must take the silent frame.
-  reset(); allVoice = false; voiceIntervals = {{0, 319840}, {320000, 400000}};
+  reset(); allVoice = false; voiceIntervals = {{0, 159840}, {160000, 240000}};
+#if HW1_STT_SPEAKER_LABELS
+  speakerEnabled = true;
+#endif
   const auto token = begin(); started(token);
-  feed(token, 320000); await([&] { return snapshot(token).segmentsCompleted == 1; }, "first hard cut");
-  feed(token, 320037); assert(sttRequestFinish(owner, token)); complete(token);
-  assert(snapshot(token).state == STTState::Done && snapshot(token).recordedSamples == kCalibrationSamples + 320037);
+  feed(token, kPhraseCap); await([&] { return snapshot(token).segmentsCompleted == 1; }, "first hard cut");
+  feed(token, 160037); assert(sttRequestFinish(owner, token)); complete(token);
+  assert(snapshot(token).state == STTState::Done && snapshot(token).recordedSamples == kCalibrationSamples + 160037);
   // The cut lands on the silent frame, so the tail is that frame plus the 37
   // extra samples: still short enough to need inference-only padding.
   const auto first = peek(token);
-  assert(first.forcedBoundary && first.endSample == kCalibrationSamples + 319840);
-  const uint64_t raw = kCalibrationSamples + 320037 - first.endSample;
+  assert(first.forcedBoundary && first.endSample == kCalibrationSamples + 159840);
+  const uint64_t raw = kCalibrationSamples + 160037 - first.endSample;
   assert(raw == 197);
   assert(engineHistory.size() == 2 && engineHistory[1].rawSamples == raw && engineHistory[1].inferenceSamples == 320);
   assert(sttAcknowledgeChunk(owner, token, 1));
-  const auto tail = peek(token); assert(tail.startSample == first.endSample && tail.endSample == kCalibrationSamples + 320037 && !tail.forcedBoundary);
+  const auto tail = peek(token); assert(tail.startSample == first.endSample && tail.endSample == kCalibrationSamples + 160037 && !tail.forcedBoundary);
+#if HW1_STT_SPEAKER_LABELS
+  std::lock_guard<std::mutex> lock(speakerMutex);
+  const auto& speakerTail = speakerPcm.at(2);
+  assert(speakerTail.size() == raw && speakerTail.size() != engineHistory[1].inferenceSamples);
+  for (size_t i = 0; i < speakerTail.size(); ++i) assert(speakerTail[i] == rawSample(tail.startSample + i));
+#endif
 }
 static void testCancelAndJoin() {
   reset(); enginePermits = 0; ignoreEngineCancel = true; stopHeld = true;
-  const auto token = begin(); started(token); feed(token, 320000);
+  const auto token = begin(); started(token); feed(token, kPhraseCap);
   await([] { return engineCalls == 1; }, "blocked model");
-  feed(token, 700000);
+  feed(token, 350000);
   assert(sttCancel(owner, token));
   await([] { return stopRequested.load(); }, "HAL asynchronous stop");
-  assert(sttRunActive(token) && allocationCount() == 5 && engineActive);
+  assert(sttRunActive(token) && allocationCount() == 9 && engineActive);
   assert(liveWeightCaches == 1 && sessionCloses == 0);
   rejectBegin();
   enginePermits = UINT32_MAX;
   await([] { return !engineActive.load(); }, "model cooperative join");
-  assert(sttRunActive(token) && allocationCount() == 5); // HAL still owns caller memory/lifecycle.
+  assert(sttRunActive(token) && allocationCount() == 9); // HAL still owns caller memory/lifecycle.
   assert(liveWeightCaches == 1 && sessionCloses == 0);
   releaseHALStop(); complete(token);
   assert(snapshot(token).state == STTState::Cancelled && engineCalls == 1 && !snapshot(token).pendingTexts);
@@ -653,9 +947,9 @@ static void testCancelAndJoin() {
 }
 static void testQueueBounds() {
   reset(); enginePermits = 0;
-  const auto token = begin(); started(token); feed(token, 320000);
+  const auto token = begin(); started(token); feed(token, kPhraseCap);
   await([] { return engineCalls == 1; }, "first blocked model");
-  allowedSamples = kCalibrationSamples + 1280000; // Fourth 20 s segment cannot fit three occupied slots.
+  allowedSamples = kCalibrationSamples + 4 * kPhraseCap; // Fourth 10 s segment cannot fit three occupied slots.
   complete(token);
   auto s = snapshot(token);
   assert(s.state == STTState::Failed && strstr(s.error, "audio queue full"));
@@ -663,10 +957,10 @@ static void testQueueBounds() {
 
   reset(); const auto textFull = begin(); started(textFull);
   for (unsigned i = 1; i <= 8; ++i) {
-    feed(textFull, i * 320000);
+    feed(textFull, i * kPhraseCap);
     await([&] { return snapshot(textFull).segmentsCompleted == i; }, "unacknowledged text");
   }
-  allowedSamples = kCalibrationSamples + 9 * 320000; complete(textFull); s = snapshot(textFull);
+  allowedSamples = kCalibrationSamples + 9 * kPhraseCap; complete(textFull); s = snapshot(textFull);
   assert(s.state == STTState::Failed && strstr(s.error, "text queue full"));
   assert(s.pendingTexts == 8 && s.segmentsCompleted == 8 && engineCalls == 9);
   for (uint32_t sequence = 1; sequence <= 8; ++sequence) {
@@ -678,7 +972,7 @@ static void testQueueBounds() {
 static void testDeliveryAndRevocation() {
   reset(); const auto token = begin(); started(token);
   for (unsigned i = 1; i <= 3; ++i) {
-    feed(token, i * 320000);
+    feed(token, i * kPhraseCap);
     await([&] { return snapshot(token).segmentsCompleted == i; }, "delivery fixture");
   }
   STTTextChunk denied{};
@@ -750,17 +1044,17 @@ static void testFaults() {
   assert(snapshot(token).state == STTState::Failed && snapshot(token).audioOverruns == 7 && strstr(snapshot(token).error, "audio loss"));
   reset(); token = begin(); started(token); sourceAvailable = false; complete(token);
   assert(snapshot(token).state == STTState::Failed && strstr(snapshot(token).error, "source lost"));
-  reset(); cacheStartFails = true; token = begin(); started(token); allowedSamples = kCalibrationSamples + 320000; complete(token);
+  reset(); cacheStartFails = true; token = begin(); started(token); allowedSamples = kCalibrationSamples + kPhraseCap; complete(token);
   assert(snapshot(token).state == STTState::Failed && strstr(snapshot(token).error, "initialization"));
   assert(weightLoads == 0 && sessionCloses == 1 && liveWeightCaches == 0);
-  reset(); engineOK = false; token = begin(); started(token); allowedSamples = kCalibrationSamples + 320000; complete(token);
+  reset(); engineOK = false; token = begin(); started(token); allowedSamples = kCalibrationSamples + kPhraseCap; complete(token);
   assert(snapshot(token).state == STTState::Failed && strstr(snapshot(token).error, "Injected") && !snapshot(token).pendingTexts);
   assert(weightLoads == 1 && weightReuses == 0 && sessionCloses == 1 && liveWeightCaches == 0);
-  reset(); engineOverlong = true; token = begin(); started(token); allowedSamples = kCalibrationSamples + 320000; complete(token);
+  reset(); engineOverlong = true; token = begin(); started(token); allowedSamples = kCalibrationSamples + kPhraseCap; complete(token);
   assert(snapshot(token).state == STTState::Failed && !snapshot(token).pendingTexts);
   reset(); token = begin(); started(token);
   { std::lock_guard<std::mutex> lock(gSTTMux); gSTT.snapshot.segmentsCaptured = UINT32_MAX; }
-  allowedSamples = kCalibrationSamples + 320000; complete(token);
+  allowedSamples = kCalibrationSamples + kPhraseCap; complete(token);
   assert(snapshot(token).state == STTState::Failed && strstr(snapshot(token).error, "sequence exhausted"));
 }
 // Conversate sessions outlive glasses-mic faults: lost frames, a stalled
@@ -785,14 +1079,14 @@ static void testNativeFaultTolerance() {
   assert(s.state == STTState::Done && !s.error[0] && s.audioOverruns == 9);
 
   reset(); enginePermits = 0;
-  token = beginNative(); started(token); feed(token, 320000);
+  token = beginNative(); started(token); feed(token, kPhraseCap);
   await([] { return engineCalls == 1; }, "first blocked native model");
-  feed(token, 1280000);  // a fourth 20 s phrase finds three slots occupied: dropped, not fatal
+  feed(token, 4 * kPhraseCap);  // a fourth 10 s phrase finds three slots occupied: dropped, not fatal
   s = snapshot(token);
   assert(s.workerActive && !s.error[0] && s.segmentsCaptured == 3);
   enginePermits = UINT32_MAX;
   await([&] { return snapshot(token).segmentsCompleted == 3; }, "backlog drained");
-  feed(token, 1600000);  // and later phrases continue in order
+  feed(token, 5 * kPhraseCap);  // and later phrases continue in order
   await([&] { return snapshot(token).segmentsCompleted == 4; }, "later phrase after a drop");
   acknowledgeAll(token);
   assert(sttRequestFinish(owner, token)); complete(token);
@@ -828,11 +1122,11 @@ static void testRequestedSource() {
 }
 static void testTranscriptSaving() {
   reset(); savePreference = true; saveHeld = true;
-  // A silent 10 ms frame before each phrase's 20 s limit (the second phrase
-  // starts at the first cut, 319840): both quiet-point cuts land there and
+  // A silent 10 ms frame before each phrase's 10 s limit (the second phrase
+  // starts at the first cut, 159840): both quiet-point cuts land there and
   // the carries are silence, so finishing emits no third phrase.
-  allVoice = false; voiceIntervals = {{0, 319840}, {320000, 639680}};
-  auto token = begin(); savePreference = false; started(token); feed(token, 320000);
+  allVoice = false; voiceIntervals = {{0, 159840}, {160000, 319680}};
+  auto token = begin(); savePreference = false; started(token); feed(token, kPhraseCap);
   await([] { return saveEntered.load(); }, "accepted chunk reaches saving worker");
   // Publication/ACK can run while slow storage holds its own complete copy.
   auto first = peek(token); assert(first.sequence == 1);
@@ -841,7 +1135,7 @@ static void testTranscriptSaving() {
   assert(saved(token).chunks.empty() && snapshot(token).workerActive);
   saveHeld = false;
   await([&] { return saved(token).chunks.size() == 1; }, "first saved chunk");
-  feed(token, 640000);
+  feed(token, 2 * kPhraseCap);
   await([&] { return saved(token).chunks.size() == 2; }, "second saved chunk despite setting off");
   finishHeld = true; assert(sttRequestFinish(owner, token));
   await([] { return finishEntered.load(); }, "saving finalization");
@@ -864,13 +1158,13 @@ static void testTranscriptSaving() {
   assert(snapshot(token).state == STTState::Done && !snapshot(token).error[0]);
   assert(snapshot(token).transcript.error[0] && peek(token).text[0]);
 
-  reset(); savePreference = true; token = begin(); started(token); feed(token, 320000);
+  reset(); savePreference = true; token = begin(); started(token); feed(token, kPhraseCap);
   await([&] { return saved(token).chunks.size() == 1; }, "accepted words before cancel");
   assert(sttCancel(owner, token)); complete(token);
   assert(saved(token).chunks.size() == 1 && saved(token).outcome == "cancelled");
   assert(snapshot(token).state == STTState::Cancelled && !snapshot(token).pendingTexts);
 
-  reset(); savePreference = true; enginePermits = 0; token = begin(); started(token); feed(token, 320000);
+  reset(); savePreference = true; enginePermits = 0; token = begin(); started(token); feed(token, kPhraseCap);
   await([] { return engineCalls == 1; }, "inference before acceptance");
   assert(sttCancel(owner, token)); complete(token);
   assert(saved(token).chunks.empty() && saved(token).outcome == "cancelled");
@@ -1077,11 +1371,999 @@ static void testKeepWarm() {
   reset();
 }
 
+// trim: pause/session-end phrases are inferred only up to the end of their last
+// voiced run longer than 30 ms plus 200 ms; published spans stay whole.
+#if HW1_STT_TRIM_SILENCE
+static void testTrailingTrim() {
+  struct Case { std::vector<std::pair<uint64_t, uint64_t>> voice; size_t raw, inference; };
+  const Case cases[] = {
+    {{{0, 80000}}, 89600, 83200},                          // 5 s voice, 600 ms pause
+    {{{0, 80000}, {83200, 83680}}, 90080, 83200},          // + 30 ms blip: ignored
+    {{{0, 80000}, {83200, 83840}}, 93440, 87040},          // + 40 ms run: counts
+  };
+  for (const auto& c : cases) {
+    reset(); allVoice = false; voiceIntervals = c.voice;
+    const auto token = begin(); started(token);
+    feed(token, 8 * 16000);
+    await([&] { return snapshot(token).segmentsCompleted == 1; }, "trimmed pause segment");
+    const auto chunk = peek(token);
+    assert(chunk.startSample == kCalibrationSamples && chunk.endSample - chunk.startSample == c.raw);
+    assert(std::string(chunk.text) == "segment 1");
+    if (engineHistory.empty()) {  // speculation: promoted speculative final on the same input
+      assert(!specHistory.empty() && specHistory.back().samples == c.inference && specHistory.back().start == kCalibrationSamples);
+    } else {
+      assert(engineHistory.size() == 1 && engineHistory[0].rawSamples == c.raw);
+      assert(engineHistory[0].inferenceSamples == c.inference);
+    }
+    assert(sttAcknowledgeChunk(owner, token, 1));
+    assert(sttRequestFinish(owner, token)); complete(token);
+  }
+  // Session end while still speaking: voiced to the end, nothing trimmed.
+  reset(); allVoice = false; voiceIntervals = {{0, 48000}};
+  const auto token = begin(); started(token);
+  feed(token, 48000); assert(sttRequestFinish(owner, token)); complete(token);
+  assert(engineHistory.size() == 1 && engineHistory[0].rawSamples == 48000 && engineHistory[0].inferenceSamples == 48000);
+  // Session end after a short pause: trimmed like a pause.
+  reset(); allVoice = false; voiceIntervals = {{0, 48000}};
+  const auto late = begin(); started(late);
+  feed(late, 48000 + 8000); assert(sttRequestFinish(owner, late)); complete(late);
+  assert(engineHistory.size() == 1 && engineHistory[0].rawSamples == 56000 && engineHistory[0].inferenceSamples == 51200);
+  assert(trimmedCalls > 0);
+}
+#endif
+
+#if HW1_STT_SPECULATIVE_FINAL
+static bool specHeld() { std::lock_guard<std::mutex> lock(gSTTMux); return gRun && gRun->specDoneId; }
+#endif
+static void assertTranscribedOnce(uint32_t sequence, size_t samples) {
+  std::lock_guard<std::mutex> lock(engineMutex);
+  unsigned finals = 0, specs = 0;
+  for (const auto& call : engineHistory)
+    if (call.sequence == sequence) { ++finals; assert(!samples || call.inferenceSamples == samples); }
+  for (const auto& call : specHistory)
+    if (call.sequence == sequence) { ++specs; assert(!samples || call.samples == samples); }
+  assert(finals == 1 || (!finals && specs));
+}
+#if HW1_STT_SPECULATIVE_FINAL
+// combined: feed to under one block (1024) before a speculation point (voiced end
+// + 200 ms), let the worker finish any draft, then feed past it, so the
+// trigger falls in the first block, where the capture task's speculation
+// check runs before any new draft snapshot. While a draft runs (the harness's
+// unstaged drafts never report getting past their frontend) the capture task
+// copies the snapshot only at its next block after the draft (production: 64 ms
+// later); a draft still running when a test stops feeding would leave it
+// uncopied. Once feeding stops no new draft snapshot is taken.
+static void feedPastSpeculation(STTToken token, uint64_t before, uint64_t after) {
+  feed(token, before);
+  await([] { std::lock_guard<std::mutex> lock(gSTTMux); return gRun && !gRun->draftBusy && !gRun->draftReady; },
+        "drafts idle before the speculation point");
+  feed(token, after);
+}
+// speculation: speculation starts at voiced end + 200 ms, is promoted when the pause
+// closes the phrase with the same voiced end, and is dropped when speech
+// resumes; short phrases closed by the 1 s short close speculate too, phrases
+// cut at 10 s never do.
+static void testSpeculativeFinal() {
+  // Promoted: 5 s voice; feed to 5.35 s, let the run finish, then the pause.
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}};
+  auto token = begin(); started(token);
+  feedPastSpeculation(token, 83000, 85600);
+  await([] { return specCalls == 1; }, "speculative run started");
+  await([] { return specHeld(); }, "speculative result held");
+  assert(engineCalls == 0);
+  feed(token, 8 * 16000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "promoted final");
+  auto chunk = peek(token);
+  assert(std::string(chunk.text) == "segment 1" && chunk.endSample - chunk.startSample == 89600);
+  assert(engineCalls == 0 && engineHistory.empty() && specHistory.size() == 1);
+  assert(specHistory[0].start == kCalibrationSamples && specHistory[0].samples == 83200 && specHistory[0].sequence == 1);
+  assert(sttAcknowledgeChunk(owner, token, 1));
+  assert(!specHeld());  // consumed by the promotion
+  assert(sttRequestFinish(owner, token)); complete(token);
+
+  // Speech resumes 400 ms later: the held result is dropped, and the second
+  // pause (voiced end 6.0 s) speculates again and is promoted.
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}, {86400, 96000}};
+  token = begin(); started(token);
+  feedPastSpeculation(token, 83000, 85600);
+  await([] { return specHeld(); }, "first speculative result held");
+  feedPastSpeculation(token, 99000, 96000 + 5600);
+  await([] { return specCalls == 2; }, "second speculative run");
+  await([] { return specHeld(); }, "second speculative result held");
+  feed(token, 9 * 16000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "final after resumed speech");
+  chunk = peek(token);
+  assert(chunk.endSample - chunk.startSample == 96000 + 9600);
+  assert(engineHistory.empty() && specHistory.size() == 2 && specHistory[1].samples == 96000 + 3200);
+  assert(sttAcknowledgeChunk(owner, token, 1));
+  assert(sttRequestFinish(owner, token)); complete(token);
+
+  // A run still busy when speech resumes is aborted; the final then runs normally.
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}, {86400, 96000}}; specHold = true;
+  token = begin(); started(token);
+  feedPastSpeculation(token, 83000, 85600);
+  await([] { return specCalls == 1; }, "held speculative run");
+  feed(token, 9 * 16000);
+  await([] { return specAborts == 1; }, "speculative run aborted by resumed speech");
+  specHold = false;
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "normal final");
+  assert(sttRequestFinish(owner, token)); complete(token);
+  assert(specAborts >= 1);
+  for (const auto& call : engineHistory) assert(call.inferenceSamples <= call.rawSamples);
+
+  // A run whose phrase is the oldest waiting final keeps going while a later
+  // phrase closes behind it (the worker takes the matched one next), and is
+  // promoted; the later phrase then runs normally.
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}, {96000, 176000}}; specHold = true;
+  token = begin(); started(token);
+  feedPastSpeculation(token, 83000, 85600);
+  await([] { return specCalls == 1; }, "held speculative run for phrase 1");
+  feed(token, 14 * 16000);
+  await([&] { return snapshot(token).segmentsCaptured == 2; }, "phrase 2 closed behind the matched phrase 1");
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));  // a preemption would have landed by now
+  assert(specAborts == 0 && engineCalls == 0);
+  specHold = false;
+  await([&] { return snapshot(token).segmentsCompleted == 2; }, "promoted phrase 1, then phrase 2");
+  assert(specHistory.size() == 1 && specHistory[0].sequence == 1 && specHistory[0].samples == 83200);
+  assert(engineHistory.size() == 1 && engineHistory[0].sequence == 2);
+  std::vector<STTTextChunk> queued; acknowledgeAll(token, &queued);
+  assert(queued.size() == 2 && std::string(queued[0].text) == "segment 1" && std::string(queued[1].text) == "segment 2");
+  assert(sttRequestFinish(owner, token)); complete(token);
+
+  // A sub-4 s phrase (1 s voice) that short-close closes on its 1 s pause
+  // speculates on voiced end + 200 ms as well and is promoted.
+  reset(); allVoice = false; voiceIntervals = {{0, 16000}};
+  token = begin(); started(token);
+  feedPastSpeculation(token, 19000, 16000 + 3200 + 2400);
+  await([] { return specCalls == 1; }, "speculative run on a short phrase");
+  await([] { return specHeld(); }, "short phrase's speculative result held");
+  feed(token, 6 * 16000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "promoted short phrase");
+  chunk = peek(token);
+  assert(chunk.endSample - chunk.startSample == 32000 && std::string(chunk.text) == "segment 1");
+  assert(engineHistory.empty() && specHistory.size() == 1 && specHistory[0].samples == 16000 + 3200);
+  assert(sttRequestFinish(owner, token)); complete(token);
+  // A 10 s hard limit never speculates.
+  reset();
+  token = begin(); started(token); feed(token, kPhraseCap + 16000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "hard-limit phrase");
+  assert(specCalls == 0);
+  assert(sttRequestFinish(owner, token)); complete(token);
+}
+#endif
+// capture-features: a failed pool allocation or feature task leaves capture-features off for the session
+// (batch frontend), never fails it; nothing leaks.
+static void testFeatureFaults() {
+  for (unsigned allocation = 6; allocation <= 9; ++allocation) {
+    reset(); failAllocation = allocation; allVoice = false; voiceIntervals = {{0, 80000}};
+    const unsigned before = cachedFinals.load();
+    const auto token = begin(); started(token); feed(token, 8 * 16000);
+    await([&] { return snapshot(token).segmentsCompleted == 1; }, "final without feature cache");
+    assert(sttRequestFinish(owner, token)); complete(token);
+    assert(snapshot(token).state == STTState::Done && cachedFinals.load() == before);
+  }
+  reset(); failedTask = "stt_fe"; allVoice = false; voiceIntervals = {{0, 80000}};
+  const unsigned before = cachedFinals.load();
+  const auto token = begin(); started(token); feed(token, 8 * 16000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "final without feature task");
+  assert(sttRequestFinish(owner, token)); complete(token);
+  assert(snapshot(token).state == STTState::Done && cachedFinals.load() == before);
+}
+
+// short-close: below 4 s a pause closes a phrase only once it reaches 1 s (shorter
+// pauses still merge); at 4 s or more the 600 ms rule is unchanged.
+static void testShortClose() {
+  struct Case { std::vector<std::pair<uint64_t, uint64_t>> voice; uint64_t span; };
+  const Case cases[] = {
+    {{{0, 16000}, {28800, 44800}}, 60800},  // 0.8 s pause merges; 1 s pause closes at 3.8 s
+    {{{0, 72000}}, 81600},                  // 4.5 s voice: 600 ms pause as before
+    {{{0, 16000}, {28800, 56000}}, 65600},  // reaches 4 s during the second pause: 600 ms
+  };
+  for (const auto& c : cases) {
+    reset(); allVoice = false; voiceIntervals = c.voice;
+    const auto token = begin(); started(token);
+    feed(token, 10 * 16000);
+    await([&] { return snapshot(token).segmentsCompleted == 1; }, "short-close phrase");
+    const auto chunk = peek(token);
+    assert(chunk.startSample == kCalibrationSamples && chunk.endSample - chunk.startSample == c.span);
+    assert(sttAcknowledgeChunk(owner, token, 1));
+    assert(sttRequestFinish(owner, token)); complete(token);
+    assert(snapshot(token).segmentsCompleted == 1);
+  }
+}
+
+#if HW1_STT_SPECULATIVE_FINAL
+// All four together: short-close's sub-4 s close (1 s of silence) is
+// speculated on voiced end + 200 ms (the trimmed input) and promoted; a phrase
+// that reaches 4 s during its pause closes on the 600 ms pause and is
+// speculated/promoted as in speculation.
+static void testShortCloseSpeculation() {
+  // 2 s voice: 600 ms of silence leaves it at 2.6 s (< 4 s), so only short-close's 1 s
+  // pause closes it (span 3 s); the speculative run takes voiced end + 200 ms.
+  reset(); allVoice = false; voiceIntervals = {{0, 32000}};
+  auto token = begin(); started(token);
+  feedPastSpeculation(token, 35000, 32000 + 3200 + 2400);
+  await([] { return specCalls == 1; }, "speculation on a short-close phrase");
+  await([] { return specHeld(); }, "held short-close speculative result");
+  feed(token, 6 * 16000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "short-close short phrase");
+  auto chunk = peek(token);
+  assert(chunk.endSample - chunk.startSample == 48000 && std::string(chunk.text) == "segment 1");
+  assert(engineHistory.empty() && specHistory.size() == 1 && specHistory[0].samples == 32000 + 3200);
+  assert(sttAcknowledgeChunk(owner, token, 1));
+  assert(sttRequestFinish(owner, token)); complete(token);
+
+  // Voice 0-1 s and 1.8-3.5 s: 4 s is reached during the second pause, so the
+  // 600 ms rule closes it (span 4.1 s) and it is speculated on voiced end +
+  // 200 ms, then promoted. The first pause is speculated on too (a 1 s short
+  // close could have followed); that result is dropped when speech resumes.
+  reset(); allVoice = false; voiceIntervals = {{0, 16000}, {28800, 56000}};
+  token = begin(); started(token);
+  feedPastSpeculation(token, 19000, 16000 + 3200 + 2400);
+  await([] { return specCalls == 1; }, "speculation in the first, short pause");
+  await([] { return specHeld(); }, "held first-pause speculative result");
+  feedPastSpeculation(token, 59000, 56000 + 3200 + 960);
+  await([] { return specCalls == 2; }, "speculation on a phrase reaching 4 s in its pause");
+  await([] { return specHeld(); }, "held speculative result");
+  feed(token, 10 * 16000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "promoted phrase reaching 4 s in its pause");
+  chunk = peek(token);
+  assert(chunk.endSample - chunk.startSample == 65600 && std::string(chunk.text) == "segment 1");
+  assert(engineHistory.empty() && specHistory.size() == 2);
+  assert(specHistory[0].samples == 16000 + 3200 && specHistory[1].samples == 56000 + 3200);
+  assert(sttAcknowledgeChunk(owner, token, 1));
+  assert(sttRequestFinish(owner, token)); complete(token);
+
+  // Several short replies in one session: each closes on its 1 s pause and
+  // is transcribed once on its trimmed input (final run or promoted
+  // speculative run).
+  reset(); allVoice = false;
+  for (unsigned i = 0; i < 4; ++i) voiceIntervals.push_back({i * 64000, i * 64000 + 24000});
+  token = begin(); started(token); feed(token, 4 * 64000 + 16000);
+  await([&] { return snapshot(token).segmentsCompleted == 4; }, "four short replies");
+  // Pre-roll: none before the first (calibration ends at its voice), 300 ms later.
+  for (const auto& call : engineHistory) assert(call.rawSamples == (call.sequence > 1 ? 44800u : 40000u));
+  for (uint32_t seq = 1; seq <= 4; ++seq) assertTranscribedOnce(seq, (seq > 1 ? 4800 : 0) + 24000 + 3200);
+  for (uint32_t seq = 1; seq <= 4; ++seq) {
+    STTTextChunk out; assert(sttReadChunk(owner, token, &out) && out.sequence == seq);
+    assert(sttAcknowledgeChunk(owner, token, seq));
+  }
+  assert(sttRequestFinish(owner, token)); complete(token);
+}
+
+// The speculative snapshot over a running draft. The capture task may copy it
+// into the shared draft buffer while a draft runs once that draft is past its
+// frontend (it reported Inference: the runtime reads PCM only in its frontend),
+// and the draft then stops at its next stage check. A draft still in its
+// frontend defers the copy to a later capture block, as with no draft before.
+// Each case feeds to just before the 5 s phrase's speculation point (voiced end
+// 80000 + 200 ms = 83200), then exactly one 1024-sample capture block past it.
+struct SpecRequest { bool live, copied, wanted; uint64_t start; size_t voiced, samples; };
+static SpecRequest specRequest() {
+  std::lock_guard<std::mutex> lock(gSTTMux); assert(gRun);
+  return {gRun->specLiveId != 0, gRun->specCopied, gRun->specWanted, gRun->specStart, gRun->specVoiced, gRun->specSamples};
+}
+static bool draftIdle() { std::lock_guard<std::mutex> lock(gSTTMux); return gRun && !gRun->draftBusy && !gRun->draftReady; }
+constexpr uint64_t kSpecBefore = 83000, kSpecTrigger = kSpecBefore + kStreamReadSamples;
+// The 5 s phrase closes on its 600 ms pause and is promoted from the one
+// speculative run on [start, start + 83200), with no final run.
+static void assertPromotedFivePhrase(STTToken token) {
+  feed(token, 8 * 16000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "promoted final");
+  const auto chunk = peek(token);
+  assert(std::string(chunk.text) == "segment 1" && chunk.startSample == kCalibrationSamples &&
+         chunk.endSample - chunk.startSample == 89600);
+  assert(engineCalls == 0 && engineHistory.empty() && specHistory.size() == 1);
+  assert(specHistory[0].start == kCalibrationSamples && specHistory[0].samples == 83200 && specHistory[0].sequence == 1);
+  assert(sttAcknowledgeChunk(owner, token, 1));
+  assert(sttRequestFinish(owner, token)); complete(token);
+}
+// Safety: a draft held in its frontend while two speculations trigger (its own
+// phrase's, then, after that phrase closed, the next phrase's, whose PCM
+// differs) never sees its input change; both copies wait for the draft to end.
+static void testSpecCopyNeverInDraftFrontend() {
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}, {96000, 112000}};
+  draftStages = draftHoldFrontend = true;
+  const auto token = begin(); started(token);
+  feed(token, kSpecBefore);
+  await([] { return draftInFrontend.load(); }, "a draft held in its frontend");
+  // Phrase 1 reaches its speculation point at 5.2 s and closes at 5.6 s;
+  // phrase 2 (1 s voice from 6 s, 300 ms pre-roll) reaches its own at 7.2 s.
+  feed(token, 118000);
+  draftHoldFrontend = false;  // the staged draft compares its input hash here
+  await([] { return draftAborts == 1; }, "draft stopped at the check after its frontend");
+  assert(draftCalls == 1 && draftInferences == 0);
+  const auto r = specRequest();
+  assert(snapshot(token).segmentsCaptured == 1 && r.live && !r.copied && r.wanted);
+  assert(r.start == kCalibrationSamples + 91200 && r.voiced == 20800 && r.samples == 24000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "phrase 1's ordinary final");
+  feed(token, 118000 + kStreamReadSamples);
+  assert(specRequest().copied);
+  await([] { return specHeld(); }, "phrase 2's speculative result held");
+  feed(token, 140000);
+  await([&] { return snapshot(token).segmentsCompleted == 2; }, "phrase 2 promoted");
+  assert(engineHistory.size() == 1 && specHistory.size() == 1);
+  assert(specHistory[0].start == kCalibrationSamples + 91200 && specHistory[0].samples == 24000 && specHistory[0].sequence == 2);
+  assertTranscribedOnce(1, 83200); assertTranscribedOnce(2, 24000);
+  std::vector<STTTextChunk> chunks; acknowledgeAll(token, &chunks);
+  assert(chunks.size() == 2 && std::string(chunks[1].text) == "segment 2");
+  assert(sttRequestFinish(owner, token)); complete(token);
+}
+// Early copy: a draft past its frontend (held in its stages) at the trigger.
+// The snapshot is copied in that capture call, the draft stops at its next
+// stage check (the copied snapshot outranks it), and the speculative run takes
+// exactly the trimmed phrase and is promoted.
+static void testSpecCopyPastDraftFrontend() {
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}};
+  draftStages = draftHoldStages = true;
+  const auto token = begin(); started(token);
+  feed(token, kSpecBefore);
+  await([] { return draftInferences == 1; }, "a draft held past its frontend");
+  assert(draftCalls == 1 && draftAborts == 0 && !specRequest().live);
+  feed(token, kSpecTrigger);
+  const auto r = specRequest();
+  assert(r.live && r.copied && !r.wanted);
+  assert(r.start == kCalibrationSamples && r.voiced == 80000 && r.samples == 83200);
+  await([] { return draftAborts == 1; }, "draft stopped at its next stage check");
+  await([] { return specHeld(); }, "speculative result held");
+  assert(draftCalls == 1 && deliveredSamples == kCalibrationSamples + kSpecTrigger);
+  draftHoldStages = false;
+  assertPromotedFivePhrase(token);
+}
+// Unchanged: with no draft running the trigger block copies at once; with a
+// draft still in its frontend the copy waits for a capture block after it.
+static void testSpecCopyWithoutDraftOrInFrontend() {
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}}; draftStages = true;
+  auto token = begin(); started(token);
+  feed(token, kSpecBefore);
+  await(draftIdle, "drafts idle before the speculation point");
+  assert(draftInferences > 0);
+  feed(token, kSpecTrigger);
+  auto r = specRequest();
+  assert(r.live && r.copied && !r.wanted && r.start == kCalibrationSamples && r.voiced == 80000 && r.samples == 83200);
+  await([] { return specHeld(); }, "speculative result held");
+  assertPromotedFivePhrase(token);
+
+  reset(); allVoice = false; voiceIntervals = {{0, 80000}}; draftStages = draftHoldFrontend = true;
+  token = begin(); started(token);
+  feed(token, kSpecBefore);
+  await([] { return draftInFrontend.load(); }, "a draft held in its frontend");
+  feed(token, kSpecTrigger);
+  r = specRequest();
+  assert(r.live && !r.copied && r.wanted);
+  draftHoldFrontend = false;
+  await([] { return draftAborts == 1; }, "draft stopped at the check after its frontend");
+  await(draftIdle, "worker idle after the draft");
+  r = specRequest();
+  assert(r.live && !r.copied && r.wanted && specCalls == 0 && draftInferences == 0);  // no block since
+  feed(token, kSpecTrigger + kStreamReadSamples);
+  r = specRequest();
+  assert(r.live && r.copied && !r.wanted && r.start == kCalibrationSamples && r.samples == 83200);
+  await([] { return specHeld(); }, "speculative result held");
+  assertPromotedFivePhrase(token);
+}
+
+#endif
+// ---------------------------------------------------------------------------
+// The combined latency features on the native Conversate path (G2 left temple):
+// 800-sample reads (one 50 ms BLE packet of five LC3 frames), the publish wake publish
+// wake, the native pause, a full queue that drops phrases while capture-features caches and
+// speculation speculation are live, and the per-session capture-features pool across restarts.
+// ---------------------------------------------------------------------------
+static uint32_t droppedPhrases() { std::lock_guard<std::mutex> lock(gSTTMux); return gRun ? gRun->droppedSegments : 0; }
+static void testNativeMechanisms() {
+  // A 2 s reply closes on a 1 s pause, then a 5 s phrase on a 600 ms pause.
+  // Both use full captured PCM by default; the legacy opt-in verifies trimmed
+  // input and speculative promotion on the same native capture/cache path.
+  reset(); allVoice = false; readLimit = 800;
+  voiceIntervals = {{0, 32000}, {64000, 144000}};
+  const unsigned rowsBefore = cachedRows.load(), mismatchesBefore = rowMismatches.load();
+  auto token = beginNativeWake(); started(token);
+  assert(nativeStarts == 1 && audioGetSource() == AUDIO_SRC_G2_LEFT);
+  feed(token, 60000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "native short-close short phrase");
+  auto chunk = peek(token);
+  assert(chunk.endSample - chunk.startSample == 48000 && std::string(chunk.text) == "segment 1");
+  assertTranscribedOnce(1, HW1_STT_TRIM_SILENCE ? 32000 + 3200 : 48000);
+  await([] { return publishWakes == 1; }, "publish wake wake for the first final");
+  assert(sttAcknowledgeChunk(owner, token, 1));
+  const size_t firstFinals = engineHistory.size(), firstSpecs = specHistory.size();
+#if HW1_STT_SPECULATIVE_FINAL
+  feedPastSpeculation(token, 146800, 148000);
+  await([&] { return size_t(specCalls) == firstSpecs + 1; }, "native speculative run");
+  await([] { return specHeld(); }, "native speculative result held");
+#else
+  feed(token, 148000);
+#endif
+  feed(token, 160000);
+  await([&] { return snapshot(token).segmentsCompleted == 2; }, "native second final");
+  chunk = peek(token);
+  assert(chunk.sequence == 2 && std::string(chunk.text) == "segment 2");
+  assert(chunk.startSample == kCalibrationSamples + 64000 - 4800 && chunk.endSample == kCalibrationSamples + 144000 + 9600);
+#if HW1_STT_SPECULATIVE_FINAL
+  assert(engineHistory.size() == firstFinals && specHistory.size() == firstSpecs + 1);
+  assert(specHistory.back().start == kCalibrationSamples + 64000 - 4800 && specHistory.back().samples == 80000 + 4800 + 3200);
+#else
+  assert(engineHistory.size() == firstFinals + 1 && specHistory.size() == firstSpecs && specCalls == 0);
+  assertTranscribedOnce(2, 80000 + 4800 + 9600);
+#endif
+  await([] { return publishWakes == 2; }, "publish wake for the second final");
+  assert(sttAcknowledgeChunk(owner, token, 2));
+  assert(sttRequestFinish(owner, token)); complete(token);
+  const auto s = snapshot(token);
+  assert(s.state == STTState::Done && !s.error[0] && s.segmentsCompleted == 2 && publishWakes == 2 && wakesWithText == 2);
+  assert(cachedRows.load() > rowsBefore && rowMismatches.load() == mismatchesBefore);  // capture-features ran on the native stream
+
+  // A non-native session never calls a wake hook.
+  reset(); allVoice = false; voiceIntervals = {{0, 32000}};
+  token = begin(); started(token); feed(token, 60000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "PDM phrase without a hook");
+  assert(publishWakes == 0);
+  assert(sttRequestFinish(owner, token)); complete(token);
+}
+static void testNativePauseCloses() {
+  // The wearer pauses mid-word (Conversate PAUSE): no PCM arrives, the broker
+  // feeds silence so the open phrase can close on its own rule. A sub-4 s
+  // phrase needs short-close's full 1 s of silence after its last voiced 10 ms frame,
+  // which a 1 s feed starting mid-frame never reaches.
+  reset(); allVoice = false; readLimit = 800;
+  voiceIntervals = {{0, 32080}};  // voice stops mid-frame, exactly at the pause
+  const auto token = beginNativeWake(); started(token);
+  feed(token, 32080);
+  assert(sttSetPaused(owner, token, true));
+  await([&] { return snapshot(token).segmentsCaptured == 1; }, "paused short phrase closes on the fed silence");
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "paused phrase transcribed");
+  const auto chunk = peek(token);
+  assert(chunk.startSample == kCalibrationSamples && std::string(chunk.text) == "segment 1");
+  assertTranscribedOnce(1, HW1_STT_TRIM_SILENCE ? 32160 + 3200 : chunk.endSample - chunk.startSample);
+  assert(publishWakes == 1 && snapshot(token).workerActive && !snapshot(token).error[0]);
+  assert(sttAcknowledgeChunk(owner, token, 1));
+  assert(sttSetPaused(owner, token, false));
+  assert(sttRequestFinish(owner, token)); complete(token);
+  assert(snapshot(token).state == STTState::Done && snapshot(token).segmentsCompleted == 1);
+}
+static void testNativeQueueFullWithCaches() {
+  // Finals blocked: phrases 2 and 3 fill the queue (2 capture-features caches are then all
+  // attached, so phrase 3 has none), 4 and 5 are dropped with their caches
+  // and speculation; nothing fails, leaks or mismatches, and later phrases
+  // continue in order with capture-features again.
+  // Phrase 1's speculative run is held. Phrase 1's final matches it and is
+  // the oldest waiting, so phrases 2 and 3 queued behind it do not abort it;
+  // once released it is promoted and phrase 2's final blocks the engine.
+  reset(); enginePermits = 0; specHold = true; allVoice = false; readLimit = 800;
+  for (unsigned i = 0; i < 6; ++i) voiceIntervals.push_back({i * 96000, i * 96000 + 80000});
+  const unsigned mismatchesBefore = rowMismatches.load();
+  const auto token = beginNativeWake(); started(token);
+#if HW1_STT_SPECULATIVE_FINAL
+  feedPastSpeculation(token, 82800, 84000);
+  await([] { return specCalls == 1; }, "phrase 1 speculative run held");
+#else
+  feed(token, 90000);
+  await([] { return engineCalls == 1; }, "phrase 1 full final held");
+#endif
+  feed(token, 5 * 96000);
+  await([&] { return snapshot(token).segmentsCaptured == 3 && droppedPhrases() == 2; }, "queue full behind the held run");
+  auto s = snapshot(token);
+  assert(s.workerActive && !s.error[0] && specAborts == 0 && engineCalls == (HW1_STT_SPECULATIVE_FINAL ? 0u : 1u));
+  specHold = false;
+  await([] { return engineCalls == 1; }, "native final still blocked before releasing backlog");
+  enginePermits = UINT32_MAX;
+  await([&] { return snapshot(token).segmentsCompleted == 3; }, "native backlog drained");
+  feed(token, 6 * 96000);
+  await([&] { return snapshot(token).segmentsCompleted == 4; }, "native phrase after the drops");
+  std::vector<STTTextChunk> chunks; acknowledgeAll(token, &chunks);
+  assert(chunks.size() == 4);
+  for (size_t i = 0; i < chunks.size(); ++i) assert(chunks[i].sequence == i + 1);
+  assert(chunks[3].startSample == kCalibrationSamples + 5 * 96000 - 4800);
+  assert(publishWakes == 4);
+  assert(sttRequestFinish(owner, token)); complete(token);
+  s = snapshot(token);
+  assert(s.state == STTState::Done && !s.error[0] && s.segmentsCompleted == 4);
+  assert(rowMismatches.load() == mismatchesBefore);
+}
+static void testNativeRestarts() {
+  // Conversate restarts transcription up to 3 times a minute: each session
+  // allocates its own capture-features pool after the warm-up and frees it (with weights,
+  // queue and draft buffers) before the worker exits, so a restart starts
+  // from the same PSRAM and other features get it back in between.
+  const unsigned poolsBefore = fePoolAllocs.load(), queriesBefore = callBudgetQueries.load();
+  for (unsigned n = 0; n < 3; ++n) {
+    reset(); allVoice = false; readLimit = 800; voiceIntervals = {{0, 80000}};
+    const unsigned rowsBefore = cachedRows.load();
+    const auto token = beginNativeWake(); started(token);
+    feed(token, 8 * 16000);
+    await([&] { return snapshot(token).segmentsCompleted == 1; }, "restarted native session final");
+    assert(allocationCount() == 9);  // working + 3 slots + draft + capture-features ring, workspace, 2 row caches
+    acknowledgeAll(token);
+    assert(sttCancel(owner, token)); complete(token);  // an unexpected end: everything is freed (joinTasks)
+    assert(allocationCount() == 0 && cachedRows.load() > rowsBefore);
+  }
+  assert(fePoolAllocs.load() == poolsBefore + 3 && callBudgetQueries.load() == queriesBefore + 3);
+}
+static void testNativeDraftWakes() {
+  // publish wake also wakes the pump on every draft refresh; the draft is readable then.
+  reset(); allVoice = false; readLimit = 800; draftsSucceed = true;
+  voiceIntervals = {{0, 96000}};
+  const auto token = beginNativeWake(); started(token);
+  feed(token, 64000);
+  await([] { return draftsPublished >= 2; }, "two native drafts");
+  STTDraft draft;
+  assert(sttReadDraft(owner, token, &draft) && draft.sequence == 1 && draft.version >= 2);
+  assert(!strncmp(draft.text, "draft 1", 7));
+  await([] { return publishWakes == draftsPublished; }, "a wake per published draft");
+  feed(token, 9 * 16000);
+  await([&] { return snapshot(token).segmentsCompleted == 1; }, "final after drafts");
+  await([] { return publishWakes == draftsPublished + 1; }, "a wake for the final");
+  assert(wakesWithText == publishWakes);
+  assert(sttReadDraft(owner, token, &draft) && draft.sequence == 0);  // the final cleared it
+  acknowledgeAll(token);
+  assert(sttRequestFinish(owner, token)); complete(token);
+}
+// Wait past publication through saving, speaker submission, and slot retirement;
+// observing segmentsCompleted alone can race those later worker actions.
+static void awaitFinalRetired(STTToken token, uint32_t sequence) {
+  await([&] {
+    if (snapshot(token).segmentsCompleted != sequence) return false;
+    std::lock_guard<std::mutex> lock(gSTTMux);
+    if (!gRun) return false;
+    for (const auto& slot : gRun->slots)
+      if (slot.state != StreamSlotState::Free) return false;
+    return true;
+  }, "completed final retires its audio slot");
+}
+#if !HW1_STT_TRIM_SILENCE
+static void testFullPhraseRetained() {
+  static_assert(!HW1_STT_SPECULATIVE_FINAL, "full phrases cannot promote trimmed speculative text");
+  struct Case {
+    std::vector<std::pair<uint64_t, uint64_t>> voice, weak;
+    size_t captured;
+  };
+  const Case cases[] = {
+    // An ending quieter than the energy gate, entirely beyond the old +200ms trim.
+    {{{0, 80000}}, {{83200, 88800}}, 89600},
+    // A 30ms consonant-like burst ignored by the voiced-run tracker is still PCM.
+    {{{0, 80000}, {83200, 83680}}, {}, 90080},
+  };
+  for (const auto& test : cases) {
+    reset(); allVoice = false; readLimit = 800;
+    voiceIntervals = test.voice; weakIntervals = test.weak;
+#if HW1_STT_SPEAKER_LABELS
+    speakerEnabled = true;
+#endif
+    const unsigned finalsBefore = cachedFinals.load(), rowsBefore = cachedRows.load();
+    const auto token = beginNativeWake(); started(token);
+    // Capture starts before optional feature allocation. Observe the actual
+    // task context, independent of the model fake (which first runs on a draft
+    // after one second), and admit PCM only once the feature pool is ready.
+    auto* run = static_cast<StreamRun*>(captureTaskContext.load()); assert(run);
+    await([&] {
+      std::lock_guard<std::mutex> lock(gSTTMux); return run->feRing != nullptr;
+    }, "full-tail fixture feature pool ready");
+    // This case requires a usable capture-time prefix. Feed bounded batches
+    // and wait for its rows; dumping 5.55 s instantly can overrun the 4.1 s
+    // feature ring on a busy host before its worker gets CPU time. Separate
+    // queue/feature-fault cases exercise fallback when a cache cannot keep up.
+    for (size_t fed = 0; fed < 88800;) {
+      fed = std::min<size_t>(fed + 8000, 88800);
+      feed(token, fed);
+      const size_t stableRows = fed / 160 - 4;
+      await([&] {
+        std::lock_guard<std::mutex> lock(gSTTMux);
+        for (const auto& cache : run->fe)
+          if (cache.state == FeState::Live && cache.frames >= stableRows) return true;
+        return false;
+      }, "bounded PCM batch reaches feature cache");
+    }
+    // Ensure the cache actually contains late-tail rows before handing off the
+    // final. The fake verifies every supplied row against the production batch
+    // frontend on the full PCM, including rows after the former 83200 cutoff.
+    await([] {
+      std::lock_guard<std::mutex> lock(gSTTMux);
+      if (!gRun) return false;
+      for (const auto& cache : gRun->fe)
+        if (cache.state == FeState::Live && cache.frames >= 550) return true;
+      return false;
+    }, "late-tail feature rows computed before finalization");
+    assert(snapshot(token).segmentsCompleted == 0 && engineCalls == 0 && specCalls == 0);
+    feed(token, 96000);
+    awaitFinalRetired(token, 1);
+    const auto chunk = peek(token);
+    assert(chunk.startSample == kCalibrationSamples && chunk.endSample - chunk.startSample == test.captured);
+    assert(engineHistory.size() == 1 && engineHistory[0].rawSamples == test.captured &&
+           engineHistory[0].inferenceSamples == test.captured);
+    assertTranscribedOnce(1, test.captured);
+    assert(cachedFinals.load() > finalsBefore && cachedRows.load() >= rowsBefore + 550 && rowMismatches == 0);
+    assert(specCalls == 0 && specHistory.empty() && cachedSpecs == 0 && cachedTrimmedFinals == 0);
+#if HW1_STT_SPEAKER_LABELS
+    {
+      std::lock_guard<std::mutex> lock(speakerMutex);
+      const auto& pcm = speakerPcm.at(1);
+      assert(pcm.size() == test.captured);
+      for (size_t i = 0; i < pcm.size(); ++i) assert(pcm[i] == rawSample(chunk.startSample + i));
+      // Both fixtures contain nonzero tail evidence the old trim would remove.
+      assert(std::any_of(pcm.begin() + 83200, pcm.end(), [](int16_t sample) { return sample != 0; }));
+    }
+#endif
+    assert(sttAcknowledgeChunk(owner, token, 1));
+    assert(sttRequestFinish(owner, token)); complete(token);
+  }
+  // Manual stop during a quiet ending preserves the captured suffix too.
+  reset(); allVoice = false; voiceIntervals = {{0, 48000}}; weakIntervals = {{52000, 55900}};
+  const auto token = begin(); started(token);
+  feed(token, 56000); assert(sttRequestFinish(owner, token)); complete(token);
+  assert(engineHistory.size() == 1 && engineHistory[0].inferenceSamples == 56000);
+  assert(specCalls == 0 && specHistory.empty());
+}
+#endif
+static void testEmptyFinals() {
+  reset(); allVoice = false; readLimit = 800; draftsSucceed = true; savePreference = true;
+  voiceIntervals = {{0, 96000}, {160000, 256000}, {320000, 416000}};
+  finalTextOverrides = {{1, ""}, {2, " \t\r\n"}};
+#if HW1_STT_SPEAKER_LABELS
+  speakerEnabled = true;
+#endif
+  const auto token = beginNativeWake(); started(token);
+#if HW1_STT_SPEAKER_LABELS
+  { std::lock_guard<std::mutex> lock(gSTTMux); gSTT.speakers.available = true; }
+#endif
+  for (uint32_t sequence = 1; sequence <= 2; ++sequence) {
+    const uint64_t start = (sequence - 1) * 160000;
+    feed(token, start + 64000);
+    STTDraft draft;
+    await([&] { return sttReadDraft(owner, token, &draft) && draft.sequence == sequence; },
+          "draft before an empty final");
+    const auto draftVersion = draft.version;
+    feed(token, start + 144000); // A six-second utterance followed by silence.
+    awaitFinalRetired(token, sequence);
+    await([&] { return publishWakes == draftsPublished + sequence; }, "empty final wakes draft reader");
+    assert(wakesWithText == draftsPublished); // The final's wake has no text or stale draft.
+    assert(sttReadDraft(owner, token, &draft) && !draft.sequence && !draft.text[0] && draft.version > draftVersion);
+    const auto state = snapshot(token);
+    assert(state.workerActive && !state.error[0] && !state.pendingTexts && !state.textReady);
+    STTTextChunk chunk;
+    assert(!sttReadChunk(owner, token, &chunk) && !chunk.text[0]);
+    assert(saved(token).chunks.empty());
+#if HW1_STT_SPEAKER_LABELS
+    { std::lock_guard<std::mutex> lock(speakerMutex); assert(speakerSubmitted.empty()); }
+    STTSpeakerSnapshot labels;
+    assert(sttReadSpeakers(owner, token, &labels) && labels.available && !labels.count);
+#endif
+  }
+  feed(token, 320000 + 144000);
+  awaitFinalRetired(token, 3);
+  assert(peek(token).sequence == 3 && !strcmp(peek(token).text, "segment 3"));
+  assert(sttAcknowledgeChunk(owner, token, 3)); // No ACKs exist for blank sequences 1 and 2.
+  assert(sttAcknowledgeChunk(owner, token, 3)); // Receipt replay remains idempotent.
+  assert(!snapshot(token).pendingTexts && !snapshot(token).textReady);
+#if HW1_STT_SPEAKER_LABELS
+  {
+    std::lock_guard<std::mutex> lock(speakerMutex);
+    assert(speakerSubmitted == std::vector<uint32_t>{3});
+    speakerResults.emplace_back(3, 0);
+  }
+  STTSpeakerSnapshot labels;
+  await([&] { return sttReadSpeakers(owner, token, &labels) && labels.count == 1 && labels.entries[0].ready; },
+        "only the nonempty final receives a speaker");
+  assert(labels.entries[0].sequence == 3 && labels.entries[0].speaker == 0);
+#endif
+  await([&] { return saved(token).chunks.size() == 1; }, "only nonempty final saved");
+  assert(sttRequestFinish(owner, token)); complete(token);
+  const auto savedResult = saved(token);
+  assert(snapshot(token).state == STTState::Done && snapshot(token).segmentsCompleted == 3);
+  assert(savedResult.outcome == "done" && savedResult.chunks.size() == 1 && savedResult.chunks[0].first == 3);
+#if HW1_STT_SPEAKER_LABELS
+  assert(savedResult.chunks[0].second == "[Person 1] segment 3");
+#else
+  assert(savedResult.chunks[0].second == "segment 3");
+#endif
+}
+static void testLeadingEmptyFinalSaving() {
+  reset();savePreference=true;finalTextOverrides={{1,""}};
+  allVoice=false;voiceIntervals={{0,16000},{48000,64000}};
+  const auto token=begin();started(token);
+  feed(token,48000);awaitFinalRetired(token,1);
+  assert(saved(token).chunks.empty()&&!snapshot(token).pendingTexts);
+  feed(token,96000);awaitFinalRetired(token,2);
+  assert(saved(token).chunks.size()==1&&saved(token).chunks[0]==std::make_pair(2u,std::string("segment 2")));
+  assert(sttAcknowledgeChunk(owner,token,2));assert(sttRequestFinish(owner,token));complete(token);
+}
+static void testEmptyFinalWithFullTextQueue() {
+  reset(); savePreference = true;
+  finalTextOverrides = {{9, ""}, {10, " \t\r\n"}};
+  const auto token = begin(); started(token);
+  for (uint32_t sequence = 1; sequence <= 10; ++sequence) {
+    feed(token, sequence * kPhraseCap);
+    awaitFinalRetired(token, sequence);
+    const auto state = snapshot(token);
+    assert(state.workerActive && !state.error[0]);
+    assert(state.pendingTexts == std::min<uint32_t>(sequence, 8) && state.textReady);
+    assert(saved(token).chunks.size() == std::min<uint32_t>(sequence, 8));
+  }
+  // Blank finals completed despite eight pending receipts. A subsequent real
+  // result still fails explicitly instead of overwriting unacknowledged text.
+  allowedSamples = kCalibrationSamples + 11 * kPhraseCap;
+  complete(token);
+  const auto state = snapshot(token);
+  assert(state.state == STTState::Failed && strstr(state.error, "text queue full"));
+  assert(state.segmentsCompleted == 10 && state.pendingTexts == 8 && engineCalls == 11);
+  assert(saved(token).chunks.size() == 8);
+  for (uint32_t sequence = 1; sequence <= 8; ++sequence) {
+    assert(peek(token).sequence == sequence);
+    assert(sttAcknowledgeChunk(owner, token, sequence));
+  }
+  assert(!snapshot(token).textReady);
+}
+#if HW1_STT_SPEAKER_LABELS
+static void makeSpeakersAvailable() {
+ std::lock_guard<std::mutex> lock(gSTTMux);
+ gSTT.speakers.available=true;++gSTT.speakers.version;
+}
+static void awaitSpeakerPump() {
+ const auto polls=speakerPolls.load();
+ // A second poll means the broker finished the previous pump (including the
+ // save pass after its last take-label call).
+ await([&]{return speakerPolls>=polls+2;},"speaker pump completes a pass");
+}
+static void testDelayedSpeakerSaving() {
+ reset();speakerEnabled=true;savePreference=true;allVoice=false;
+ voiceIntervals={{0,80000}};
+ auto token=begin();started(token);makeSpeakersAvailable();
+ feed(token,6*16000);awaitFinalRetired(token,1);
+ assert(sttAcknowledgeChunk(owner,token,1));assert(saved(token).chunks.empty());
+ feed(token,26*16000);awaitSpeakerPump();
+ // Text was already delivered. Recognition idles while the label arrives
+ // later than the old ten-second save expiry.
+ assert(saved(token).chunks.empty());
+ {std::lock_guard<std::mutex> lock(speakerMutex);speakerResults.emplace_back(1,2);}
+ await([&]{return saved(token).chunks.size()==1;},"twenty-second late saved speaker");
+ assert(saved(token).chunks[0]==std::make_pair(1u,std::string("[Person 3] segment 1")));
+ STTSpeakerSnapshot labels;
+ assert(sttReadSpeakers(owner,token,&labels)&&labels.count==1&&labels.entries[0].ready&&labels.entries[0].speaker==2);
+ assert(sttRequestFinish(owner,token));complete(token);
+
+ // A label which completes during final-stop drain must still be applied
+ // before the transcript is flushed and finalized, even after text ACK.
+ reset();speakerEnabled=speakerDrainProduces=speakerDrainHeld=true;savePreference=true;
+ speakerDrainReadyAfterMs=20000;allVoice=false;voiceIntervals={{0,80000}};
+ token=begin();started(token);makeSpeakersAvailable();
+ feed(token,6*16000);awaitFinalRetired(token,1);
+ assert(sttAcknowledgeChunk(owner,token,1));assert(sttRequestFinish(owner,token));
+ await([]{return speakerDrainEntered.load();},"normal-stop speaker drain");
+ clockMs+=20000;
+ assert(sttRunActive(token)&&!finishEntered&&saved(token).chunks.empty());
+ assert(speakerDrainBudgetMs>=20000);speakerDrainHeld=false;complete(token);
+ assert(saved(token).chunks.size()==1&&saved(token).chunks[0].second=="[Person 2] segment 1");
+ assert(sttReadSpeakers(owner,token,&labels)&&labels.count==1&&labels.entries[0].ready&&labels.entries[0].speaker==1);
+
+ // A backend slower than the bounded drain still terminates with explicit
+ // unknown metadata and the complete text saved once, without a Person label.
+ reset();speakerEnabled=speakerDrainProduces=true;savePreference=true;
+ speakerDrainReadyAfterMs=45000;allVoice=false;voiceIntervals={{0,80000}};
+ token=begin();started(token);makeSpeakersAvailable();
+ feed(token,6*16000);awaitFinalRetired(token,1);
+ assert(sttAcknowledgeChunk(owner,token,1));assert(sttRequestFinish(owner,token));complete(token);
+ assert(speakerDrainBudgetMs<45000);
+ assert(sttReadSpeakers(owner,token,&labels)&&labels.count==1&&labels.entries[0].ready&&labels.entries[0].speaker==-1);
+ assert(saved(token).chunks.size()==1&&saved(token).chunks[0].second=="segment 1");
+}
+static void testSpeakerSubmissionWait() {
+ reset();speakerEnabled=true;savePreference=true;allVoice=false;
+ voiceIntervals={{0,16000},{48000,64000}};
+ const auto token=begin();started(token);makeSpeakersAvailable();
+ feed(token,48000);awaitFinalRetired(token,1);assert(sttAcknowledgeChunk(owner,token,1));
+ speakerSubmitEntered=false;speakerSubmitHeld=true;
+ feed(token,96000);await([]{return speakerSubmitEntered.load();},"second caption waits for speaker capacity");
+ assert(peek(token).sequence==2);assert(sttAcknowledgeChunk(owner,token,2));
+ // Prior background work finishes while the submit call yields. Its result
+ // must survive until this wait returns, and the current caption stays visible
+ // to its reader independently of saving.
+ {std::lock_guard<std::mutex> lock(speakerMutex);speakerResults.emplace_back(1,0);}
+ assert(saved(token).chunks.empty());speakerSubmitHeld=false;
+ awaitFinalRetired(token,2);
+ await([&]{return saved(token).chunks.size()==1;},"previous label delivered after submit wait");
+ assert(saved(token).chunks[0].second=="[Person 1] segment 1");
+ {std::lock_guard<std::mutex> lock(speakerMutex);
+  assert((speakerSubmitted==std::vector<uint32_t>{1,2}));speakerResults.emplace_back(2,-1);
+ }
+ await([&]{return saved(token).chunks.size()==2;},"unknown label after successful admission");
+ assert(saved(token).chunks[1].second=="segment 2");
+ assert(sttRequestFinish(owner,token));complete(token);assert(saved(token).chunks.size()==2);
+}
+static void testSpeakerWaitPreservesCapture() {
+ for(bool native:{false,true}) {
+  reset();speakerEnabled=speakerDrainProduces=true;savePreference=true;allVoice=false;readLimit=800;
+  for(uint64_t i=0;i<6;++i)voiceIntervals.emplace_back(i*48000,i*48000+16000);
+  const auto token=native?beginNative():begin();started(token);makeSpeakersAvailable();
+  // Four accepted speaker jobs occupy the controlled backend. Capture and
+  // inference are real; no phrase may be dropped while the next submit waits.
+  for(uint32_t seq=1;seq<=4;++seq) {
+   feed(token,seq*48000);awaitFinalRetired(token,seq);assert(sttAcknowledgeChunk(owner,token,seq));
+  }
+  {std::lock_guard<std::mutex> lock(speakerMutex);assert(speakerSubmitted.size()==4);}
+  speakerSubmitHeld=true;
+  feed(token,5*48000);
+  await([]{return speakerSubmitSequence==5;},"fifth phrase waits behind full speaker backend");
+  assert(peek(token).sequence==5);assert(sttAcknowledgeChunk(owner,token,5));
+  assert(speakerPressureStops==0);
+  feed(token,6*48000);
+  await([]{return speakerPressureStops==1&&speakerSubmitSequence==6;},"queued audio ends speaker wait before capture fills");
+  const auto state=snapshot(token);
+  assert(state.workerActive&&!state.error[0]&&state.segmentsCaptured==6&&state.segmentsCompleted==6);
+  {std::lock_guard<std::mutex> lock(gSTTMux);assert(gRun&&gRun->droppedSegments==0);}
+  assert(peek(token).sequence==6);assert(sttAcknowledgeChunk(owner,token,6));
+  STTSpeakerSnapshot labels;
+  assert(sttReadSpeakers(owner,token,&labels)&&labels.count==6&&labels.entries[4].ready&&labels.entries[4].speaker==-1);
+  assert(!labels.entries[5].ready&&speakerSubmitHeld);
+  // With no newer captured phrase, the last submit still waits through normal
+  // capture stop and succeeds when backend capacity is released.
+  assert(sttRequestFinish(owner,token));
+  await([]{return !audioCaptureBusy();},"capture stopped while last speaker admission waits");
+  assert(sttRunActive(token)&&speakerPressureStops==1&&!speakerDrainEntered);
+  speakerSubmitHeld=false;complete(token);
+  assert(snapshot(token).state==STTState::Done&&snapshot(token).segmentsCompleted==6);
+  assert(sttReadSpeakers(owner,token,&labels)&&labels.count==6);
+  const auto lines=saved(token).chunks;assert(lines.size()==6);
+  for(uint32_t seq=1;seq<=6;++seq) {
+   const std::string prefix=seq==5?"":"[Person 2] ";
+   assert(lines[seq-1]==std::make_pair(seq,prefix+"segment "+std::to_string(seq)));
+   assert(labels.entries[seq-1].ready&&labels.entries[seq-1].speaker==(seq==5?-1:1));
+  }
+  assert(speakerSubmitCancelled==0&&speakerPressureStops==1);
+ }
+}
+static void testSpeakerCancellation() {
+ for(bool duringDrain:{false,true}) {
+  reset();speakerEnabled=true;savePreference=true;allVoice=false;voiceIntervals={{0,80000}};
+  speakerSubmitHeld=!duringDrain;speakerDrainHeld=duringDrain;
+  auto token=begin();started(token);makeSpeakersAvailable();feed(token,6*16000);
+  if(duringDrain) {
+   awaitFinalRetired(token,1);assert(sttRequestFinish(owner,token));
+   await([]{return speakerDrainEntered.load();},"held drain before cancellation");
+  } else await([]{return speakerSubmitEntered.load();},"held submit before cancellation");
+  // The current caption is visible while the backend waits for capacity.
+  assert(peek(token).sequence==1);assert(sttAcknowledgeChunk(owner,token,1));
+  assert(sttCancel(owner,token));complete(token);
+  assert(duringDrain?speakerDrainCancelled==1:speakerSubmitCancelled==1);
+  STTSpeakerSnapshot labels;
+  assert(!sttReadSpeakers(owner,token,&labels)&&!labels.count);
+
+  // Begin a real successor without resetting the broker. A completion tagged
+  // with the old token cannot label its reused sequence 1. Unknown belongs to
+  // this new phrase and must release its saved text immediately.
+  speakerSubmitHeld=speakerDrainHeld=speakerDrainEntered=false;
+  const auto next=begin();assert(next!=token);started(next);makeSpeakersAvailable();
+  feed(next,6*16000);awaitFinalRetired(next,1);
+  assert(sttReadSpeakers(owner,next,&labels)&&labels.count==1&&!labels.entries[0].ready);
+  const auto version=labels.version;sttPublishSpeaker(token,1,3);
+  assert(sttReadSpeakers(owner,next,&labels)&&labels.version==version&&!labels.entries[0].ready);
+  {std::lock_guard<std::mutex> lock(speakerMutex);speakerResults.emplace_back(1,-1);}
+  await([&]{return saved(next).chunks.size()==1;},"explicit unknown releases successor saved text");
+  assert(saved(next).chunks[0].second=="segment 1");
+  assert(sttReadSpeakers(owner,next,&labels)&&labels.entries[0].ready&&labels.entries[0].speaker==-1);
+  assert(sttAcknowledgeChunk(owner,next,1));assert(sttRequestFinish(owner,next));complete(next);
+ }
+}
+static void testEmptyFinalBehindPendingSpeaker() {
+ reset();speakerEnabled=true;savePreference=true;finalTextOverrides={{2," \t\r\n"}};
+ allVoice=false;voiceIntervals={{0,16000},{48000,64000},{96000,112000}};
+ const auto token=begin();started(token);makeSpeakersAvailable();
+ for(uint32_t seq=1;seq<=3;++seq) {
+  feed(token,seq*48000);awaitFinalRetired(token,seq);
+  if(seq!=2)assert(sttAcknowledgeChunk(owner,token,seq));
+  assert(saved(token).chunks.empty()); // Blank 2 cannot advance the writer past held 1.
+ }
+ STTSpeakerSnapshot labels;
+ assert(sttReadSpeakers(owner,token,&labels)&&labels.count==2&&labels.entries[0].sequence==1&&labels.entries[1].sequence==3);
+ {std::lock_guard<std::mutex> lock(speakerMutex);
+  assert((speakerSubmitted==std::vector<uint32_t>{1,3}));
+  speakerResults.emplace_back(3,1);
+ }
+ awaitSpeakerPump();assert(saved(token).chunks.empty());
+ {std::lock_guard<std::mutex> lock(speakerMutex);speakerResults.emplace_back(1,0);}
+ await([&]{return saved(token).chunks.size()==2;},"pending label then blank marker then later text");
+ const auto lines=saved(token).chunks;
+ assert(lines[0]==std::make_pair(1u,std::string("[Person 1] segment 1")));
+ assert(lines[1]==std::make_pair(3u,std::string("[Person 2] segment 3")));
+ assert(sttRequestFinish(owner,token));complete(token);assert(saved(token).chunks.size()==2);
+}
+static void testSpeakerSaveRingOverflow() {
+ reset();speakerEnabled=true;savePreference=true;allVoice=false;readLimit=800;
+ // Nine short replies finish within 27 seconds: buffer capacity, not the
+ // normal age timeout, forces the first saved row out without a label.
+ for(uint64_t i=0;i<9;++i)voiceIntervals.emplace_back(i*48000,i*48000+16000);
+ const auto token=begin();started(token);makeSpeakersAvailable();
+ for(uint32_t seq=1;seq<=9;++seq) {
+  feed(token,seq*48000);awaitFinalRetired(token,seq);
+  assert(sttAcknowledgeChunk(owner,token,seq));
+  assert(saved(token).chunks.size()==(seq==9?1u:0u));
+ }
+ assert(speakerRingAllocations==1);
+ assert(saved(token).chunks[0]==std::make_pair(1u,std::string("segment 1")));
+ {std::lock_guard<std::mutex> lock(speakerMutex);
+  speakerResults.emplace_back(9,0); // out-of-order completion cannot reorder saved text
+  speakerResults.emplace_back(1,3); // late result for the already-flushed oldest
+  for(uint32_t seq=3;seq<=8;++seq)speakerResults.emplace_back(seq,1);
+ }
+ awaitSpeakerPump();assert(saved(token).chunks.size()==1); // sequence 2 still pending
+ {std::lock_guard<std::mutex> lock(speakerMutex);speakerResults.emplace_back(2,-1);}
+ await([&]{return saved(token).chunks.size()==9;},"bounded ring drains in phrase order");
+ const auto lines=saved(token).chunks;
+ for(uint32_t seq=1;seq<=9;++seq) {
+  const std::string prefix=seq<=2?"":(seq==9?"[Person 1] ":"[Person 2] ");
+  assert(lines[seq-1]==std::make_pair(seq,prefix+"segment "+std::to_string(seq)));
+ }
+ STTSpeakerSnapshot labels;
+ assert(sttReadSpeakers(owner,token,&labels)&&labels.count==9);
+ assert(labels.entries[0].ready&&labels.entries[0].speaker==3); // live history may still update
+ assert(labels.entries[1].ready&&labels.entries[1].speaker==-1); // no cross-row contamination
+ assert(sttRequestFinish(owner,token));complete(token);assert(saved(token).chunks.size()==9);
+}
+static void testSpeakerMetadata() {
+ reset();speakerEnabled=true;
+ auto token=begin();started(token);
+ {std::lock_guard<std::mutex> lock(gSTTMux);gSTT.speakers.available=true;++gSTT.speakers.version;}
+ feed(token,kPhraseCap);
+ await([&]{return snapshot(token).segmentsCompleted==1;},"text before speaker assignment");
+ STTSpeakerSnapshot labels;
+ assert(sttReadSpeakers(owner,token,&labels)&&labels.available&&labels.count==1&&!labels.entries[0].ready);
+ assert(peek(token).sequence==1);assert(sttAcknowledgeChunk(owner,token,1));
+ assert(!savePreference&&saved(token).chunks.empty());
+ {std::lock_guard<std::mutex> lock(speakerMutex);speakerResults.emplace_back(1,2);}
+ await([&]{return sttReadSpeakers(owner,token,&labels)&&labels.entries[0].ready;},"late live speaker without saving");
+ assert(labels.entries[0].speaker==2&&!snapshot(token).pendingTexts);
+ const auto version=labels.version;
+ sttPublishSpeaker(token,1,2);assert(sttReadSpeakers(owner,token,&labels)&&labels.version==version);
+ assert(!sttReadSpeakers(other,token,&labels)&&!labels.count);
+ assert(!sttReadSpeakers(successor,token,&labels)&&!labels.count);
+ assert(!sttReadSpeakers(owner,token+1,&labels)&&!labels.count);
+ {std::lock_guard<std::mutex> lock(gSTTMux);for(uint32_t seq=2;seq<=STT_SPEAKER_HISTORY+1;++seq)sttSpeakerPendingLocked(seq);}
+ assert(sttReadSpeakers(owner,token,&labels)&&labels.count==STT_SPEAKER_HISTORY&&labels.entries[0].sequence==2);
+ const auto boundedVersion=labels.version;sttPublishSpeaker(token,1,4);
+ assert(sttReadSpeakers(owner,token,&labels)&&labels.version==boundedVersion); // Old label cannot reinsert an evicted phrase.
+ sttPublishSpeaker(token,2,-1);assert(sttReadSpeakers(owner,token,&labels)&&labels.entries[0].ready&&labels.entries[0].speaker==-1);
+ assert(sttCancel(owner,token));complete(token);
+ sttPublishSpeaker(token,2,3);assert(!sttReadSpeakers(owner,token,&labels)&&!labels.count);
+ assert(gSTT.speakers.count==0); // Cancellation clears the retained history too.
+
+ // Normal stop drains delayed labels even after all text was ACKed; saved
+ // lines keep their existing labels/order, and terminal history outlives ACK.
+ reset();speakerEnabled=speakerDrainProduces=true;savePreference=true;
+ token=begin();started(token);
+ {std::lock_guard<std::mutex> lock(gSTTMux);gSTT.speakers.available=true;}
+ feed(token,kPhraseCap);await([&]{return snapshot(token).segmentsCompleted==1;},"pending saved phrase");
+ assert(sttAcknowledgeChunk(owner,token,1));assert(saved(token).chunks.empty());
+ assert(sttRequestFinish(owner,token));complete(token);
+ assert(sttReadSpeakers(owner,token,&labels)&&labels.count>=1);
+ for(size_t i=0;i<labels.count;++i)assert(labels.entries[i].ready&&labels.entries[i].speaker==1);
+ assert(saved(token).chunks.size()==labels.count&&saved(token).chunks[0].second=="[Person 2] segment 1");
+ clockMs+=kResultRetentionMs;assert(sttReadSpeakers(owner,token,&labels)&&!labels.count&&!labels.available);
+
+ // A failed save-ring allocation must not prevent live label delivery.
+ reset();speakerEnabled=true;savePreference=true;speakerRingFail=true;
+ token=begin();started(token);
+ {std::lock_guard<std::mutex> lock(gSTTMux);gSTT.speakers.available=true;}
+ feed(token,kPhraseCap);await([&]{return snapshot(token).segmentsCompleted==1;},"plain saved phrase after allocation failure");
+ {std::lock_guard<std::mutex> lock(speakerMutex);speakerResults.emplace_back(1,0);}
+ await([&]{return sttReadSpeakers(owner,token,&labels)&&labels.entries[0].ready;},"live label after save allocation failure");
+ assert(labels.entries[0].speaker==0&&saved(token).chunks[0].second=="segment 1");
+ assert(sttRequestFinish(owner,token));complete(token);
+}
+#endif
 int main() {
   setvbuf(stdout, nullptr, _IONBF, 0);
+#if HW1_STT_SPEAKER_LABELS
+  testDelayedSpeakerSaving();puts("PASS late speaker saving: 20-second labels, final-stop drain and bounded unknown completion");
+  testSpeakerSubmissionWait();puts("PASS a busy speaker submit keeps captions readable and delivers labels completed during its wait");
+  testSpeakerWaitPreservesCapture();puts("PASS full speaker backend releases admission on queued audio; native and regular capture keep all six phrases; last phrase still waits");
+  testSpeakerCancellation();puts("PASS submit/drain cancellation, caption visibility while waiting, successor-token fencing and explicit unknown");
+  testEmptyFinalBehindPendingSpeaker();puts("PASS blank marker waits behind an older speaker label and preserves contiguous transcript order");
+  testSpeakerSaveRingOverflow();puts("PASS bounded eight-line save ring: ordered fallback, out-of-order labels and no late-label contamination");
+  testSpeakerMetadata();puts("PASS live speaker metadata: delayed labels after ACK, no saving, bounded history, session fences, drain, expiry and save allocation failure");
+#endif
+  testQueuedBoundaryMetadata(); puts("PASS actual queue preserves pause/hard-continuation boundaries, overlap, VAD count and PCM");
   testAdaptiveReadiness(); puts("PASS real adaptive500ms readiness, immediate speech, calibration stop");
   testOverlapAndDrain(); puts("PASS concurrent capture, exact PCM, stop/drain, zeroed cleanup");
-  testLongRunsAndPauses(); puts("PASS 65 s hard cuts, 100 s pauses, 120 s DC-only silence");
+  testLongRunsAndPauses(); puts("PASS 32.5 s hard cuts, 100 s pauses, 120 s DC-only silence");
   testShortFinalTail(); puts("PASS inference-only 37-to-320 sample padding and exact offsets");
   testCancelAndJoin(); puts("PASS cancellation joins both blocked inference and delayed HAL stop");
   testQueueBounds(); puts("PASS explicit audio/text queue pressure without overwrite");
@@ -1093,5 +2375,36 @@ int main() {
   testTranscriptSaving(); puts("PASS transcript admission latch, ACK-independent saving, save failure, cancel and finalization");
   testRequestedSource(); puts("PASS per-session requested source overrides the setting and fails strictly");
   testKeepWarm(); puts("PASS keep-warm: park/adopt across runs, hold expiry and millis wrap, low-PSRAM release, warm load (awaited past 20 s) and its back-off");
+#if HW1_STT_TRIM_SILENCE
+  testTrailingTrim(); puts("PASS trailing-silence trim: ambient gate, 30 ms blips ignored, spans whole, session end");
+#else
+  testFullPhraseRetained(); puts("PASS full phrase: weak and burst endings kept byte-exact, final waits for close, speaker receives all real PCM, full-input cached rows match batch");
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+  testSpeculativeFinal(); puts("PASS speculative final: promoted on the same input, dropped on resumed speech, aborted when busy, kept while later phrases queue behind its own, short closes too, never at 10 s");
+#endif
+  testFeatureFaults(); puts("PASS capture-feature pool/task failures leave the session on the batch frontend");
+  testShortClose(); puts("PASS short close: short phrases close after 1 s of silence, 600 ms from 4 s");
+#if HW1_STT_SPECULATIVE_FINAL
+  testShortCloseSpeculation(); puts("PASS short closes speculate on their trimmed input and promote; 4 s-in-pause phrases speculate and promote");
+  testSpecCopyNeverInDraftFrontend(); puts("PASS speculative snapshot never written over a draft's input while its frontend reads it");
+  testSpecCopyPastDraftFrontend(); puts("PASS speculative snapshot copied over a draft past its frontend in the trigger block; draft stopped, exact trimmed run promoted");
+  testSpecCopyWithoutDraftOrInFrontend(); puts("PASS speculative snapshot copied at once with no draft, deferred past a draft in its frontend");
+#endif
+  testNativeMechanisms(); puts("PASS native path: configured full/trim final, cached feature rows on 800-sample reads; a publish wake per final, none without a hook");
+  testNativePauseCloses(); puts("PASS native pause: a mid-word paused short phrase closes on the fed silence");
+  testNativeQueueFullWithCaches(); puts("PASS native full queue drops phrases with live feature caches, nothing leaks or mismatches");
+  testNativeDraftWakes(); puts("PASS native publish wake: a wake per published draft and final, each readable when woken");
+  testEmptyFinals(); puts("PASS empty/whitespace finals: completion without publication/save/speaker jobs, draft cleared and woken, later sequence ACK");
+  testLeadingEmptyFinalSaving(); puts("PASS blank first final advances transcript sequence without writing a row or file");
+  testEmptyFinalWithFullTextQueue(); puts("PASS full text queue: empty finals complete, next nonempty final retains explicit queue-full failure");
+  testNativeRestarts(); puts("PASS native restarts: one feature pool per session, all PSRAM freed at session end");
   reset(); puts("Continuous production STT broker multithread tests passed, including explicit backend-session cleanup");
+  printf("cached feature rows: finals %u drafts %u rows %u mismatches %u; speculative %u trimmed finals %u\n", cachedFinals.load(), cachedDrafts.load(), cachedRows.load(), rowMismatches.load(), cachedSpecs.load(), cachedTrimmedFinals.load());
+  assert(rowMismatches == 0 && cachedFinals > 0);
+#if HW1_STT_SPECULATIVE_FINAL
+  assert(cachedSpecs > 0 && cachedTrimmedFinals > 0);  // the features x speculation and features x trim paths ran
+#else
+  assert(cachedSpecs == 0 && cachedTrimmedFinals == 0 && trimmedCalls == 0);
+#endif
 }

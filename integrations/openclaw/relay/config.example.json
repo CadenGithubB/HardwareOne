@@ -1,0 +1,10 @@
+{
+  "bind_host": "192.168.21.143",
+  "bind_port": 18790,
+  "device_identity": "xiao-studio",
+  "tls_cert_file": "/ABSOLUTE/PRIVATE/RUNTIME/PATH/relay-cert.pem",
+  "tls_key_file": "/ABSOLUTE/PRIVATE/RUNTIME/PATH/relay-key.pem",
+  "device_token_file": "/ABSOLUTE/PRIVATE/RUNTIME/PATH/device-token.txt",
+  "upstream_token_file": "/ABSOLUTE/PRIVATE/RUNTIME/PATH/gateway-token.txt",
+  "upstream_port": 18789
+}

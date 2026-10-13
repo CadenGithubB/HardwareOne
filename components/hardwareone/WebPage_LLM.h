@@ -268,6 +268,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   // Whether the ACTIVE backend supports Do:-mode. Only the on-device model
   // does; see llmBackendSupportsCommandMode. Assumed true until the first
   // status lands so a fast typist is not refused on a stale default.
+  var retrySafe      = false;
   var cmdModeOk      = null;   // null = no status yet; see syncDoAffordance
 
   // ── helpers ──
@@ -332,6 +333,8 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
           cmdModeOk = j.cmdMode;
           syncDoAffordance(!askBtn.disabled || busy);
         }
+        retrySafe = j.retrySafe === true;
+        if (!retrySafe && currentCtx && currentCtx.retryBtn) hw.hide(currentCtx.retryBtn);
         var sig = j.state + '|' + (j.model || '') + '|' + (j.error || '');
         var announce = !afterGen && sig !== lastAnnounced;
         lastAnnounced = sig;
@@ -551,6 +554,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     // top_p / rep_window / min_p / hard_cap which the resolver pulls from
     // settings). This is why a blank panel now honours your saved settings.
     var body = { prompt: ctx.prompt };
+    if (ctx.isRetry) body.retry = true;
     var tempStr = hw.$('qa-temp').value.trim();
     var sentStr = hw.$('qa-sentlimit').value.trim();
     var repStr  = hw.$('qa-repen').value.trim();
@@ -578,6 +582,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
           finishGen(ctx);
           return;
         }
+        ctx.retrySafe = j.retrySafe === true;
         ctx.pollSession = j.session;
         schedulePoll(ctx);
       })
@@ -761,12 +766,13 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     }
 
     // Show retry button if under 3 retries
-    if (ctx.prevAnswers.length < 3 && ctx.aText.textContent.trim()) {
+    if (ctx.retrySafe && retrySafe && ctx.prevAnswers.length < 3 && ctx.aText.textContent.trim()) {
       if (!ctx.retryBtn) {
         ctx.retryBtn = document.createElement('button');
         ctx.retryBtn.className = 'btn qa-retry';
         ctx.retryBtn.innerHTML = '&#8635; Retry';
         ctx.retryBtn.onclick = function() {
+          if (!ctx.retrySafe || !retrySafe) return;
           var curAnswer = ctx.aText.textContent.trim();
           // Guided asks re-ask the SAME composed question plain: pushing the prior
           // answer into prevAnswers would send it as suppress[], banning the
@@ -796,6 +802,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
           ctx.metaLine = newMeta;
           ctx.retryBtn = null;
 
+          ctx.isRetry = true;
           doGenerate(ctx);
         };
         ctx.metaLine.parentNode.insertBefore(ctx.retryBtn, ctx.metaLine.nextSibling);

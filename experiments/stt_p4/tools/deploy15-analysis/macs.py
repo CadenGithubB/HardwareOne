@@ -1,4 +1,5 @@
 """MACs per 10 ms output-frame pair and folded parameter counts, 5x5 vs 15x5 (from the folded graph)."""
+import os
 import sys, json
 from pathlib import Path
 sys.dont_write_bytecode=True
@@ -7,7 +8,7 @@ import torch
 from torch import nn
 from quartznet_graph import QuartzNet, load_checkpoint
 out={}
-for name,ck in [('5x5_run2','/Volumes/USB2/stt/work/deploy/ckpt-run2'),('15x5_base','/Volumes/USB2/stt/work/deploy15/ckpt-base15')]:
+for name,ck in [('5x5_run2',os.path.join(os.environ.get('STT_ROOT', 'stt-data'), 'work/deploy/ckpt-run2')),('15x5_base',os.path.join(os.environ.get('STT_ROOT', 'stt-data'), 'work/deploy15/ckpt-base15'))]:
     import os
     os.environ['HW1_STT_ALLOW_WEIGHTS_SHA256']={'5x5_run2':'d6e7f963195194345e313d0a4ec6182967313a71acfff49a4622a42c968d9900','15x5_base':'b2eb3ebc66e9e82829818131c4da02cf9e1109003c3d445b824d9489869143f9'}[name]
     config,state=load_checkpoint(ck); m=QuartzNet(config,state); del state

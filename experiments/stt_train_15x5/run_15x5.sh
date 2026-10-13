@@ -6,18 +6,19 @@
 #  4. train to run2's audio budget (~175 h), capped by the deadline
 #  5. final test eval of best, CPU speed of both models, REPORT.md
 # Usage: nohup caffeinate -dims ./run_15x5.sh [HH:MM training deadline] &
+export STT_ROOT=${STT_ROOT:?set STT_ROOT to the STT data root (speech stores, work, logs)}
 set -u
 DEADLINE=${1:-06:15}
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
 P=${HW1_STT_PYTHON:-$PWD/../stt_p4/private/export-venv/bin/python}
-export PYTHONPATH=/Volumes/USB2/stt/pydeps
+export PYTHONPATH=$STT_ROOT/pydeps
 export PYTORCH_ENABLE_MPS_FALLBACK=1
-ROOT=/Volumes/USB2/stt
+ROOT=$STT_ROOT
 LOG=$ROOT/logs/run15x5.log
 DAYLOG=$ROOT/logs/day.log
 OTHER=$(cd "$HERE/../stt_train" && pwd)
-MODEL=/Volumes/USB/stt/models/quartznet15x5
+MODEL=$STT_ROOT/models/quartznet15x5
 BASE5=$HERE/../speech_portable/private/stt-quartznet
 RUN=$ROOT/work/run15x5
 TESTS="ami-sdm-test ami-ihm-test librispeech-test-clean"
