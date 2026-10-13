@@ -17,6 +17,8 @@
 #include "System_Debug.h"  // For DEBUG_WIFIF and BROADCAST_PRINTF macros
 #include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro + argWantsJson
 #include "System_RadioCompanion.h"  // radio companion gate (P4X-EYE); no-op with an on-chip radio
+#include "System_OTASafety.h"  // otaSafetySetupRemainingMs — boot connect budget on a trial image
+#include "System_AuthIdentity.h"  // currentCommandContext — which transport asked for a connect
 #include "System_Clock.h"  // Clock::syncSource ledger for ntpstatus
 #include "System_NTP.h"
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC
@@ -77,12 +79,57 @@ static inline void espnowNoteWifiChannelMayHaveChanged() {}
 // Forward Declarations for WiFi Helper Functions
 // ============================================================================
 
+// Limits shared by every attempt of one connect request: when the whole request
+// must stop, and whether a serial keystroke may cancel it. The budget bounds the
+// hunt as a whole; each attempt keeps its own per-attempt window inside it.
+struct WifiConnectBounds {
+  unsigned long startMs = 0;
+  uint32_t budgetMs = 0;
+  bool consoleCancels = false;
+
+  uint32_t remainingMs() const {
+    const unsigned long used = millis() - startMs;
+    return used >= budgetMs ? 0 : budgetMs - static_cast<uint32_t>(used);
+  }
+  bool expired() const { return remainingMs() == 0; }
+};
+
+// Once the driver's scan has found no AP with the requested SSID it reports
+// WL_NO_SSID_AVAIL. Waiting out the full attempt window then only delays the
+// next saved network; this grace lets one more scan cycle finish first.
+static constexpr uint32_t kWifiNoSsidGraceMs = 3000;
+
+// Setup work that follows the boot connect (NTP, servers, sensors, radios) has
+// to fit inside the probation setup window too. Keep this much of it free.
+static constexpr uint32_t kWifiBootSetupReserveMs = 90000;
+
+// Only a connect that owns the console may read it: the boot sequence (the main
+// task is inside the connect) or a command typed at the serial console (the main
+// loop is blocked waiting for it). Every other origin leaves the console to the
+// main loop, so a keystroke there neither cancels the hunt nor goes missing.
+static bool wifiConsoleCancelApplies(WifiConnectOrigin origin) {
+  if (origin == WifiConnectOrigin::BOOT) return true;
+  const CommandContext* ctx = static_cast<const CommandContext*>(currentCommandContext());
+  return ctx && ctx->origin == ORIGIN_SERIAL;
+}
+
+static WifiConnectBounds wifiConnectBounds(uint32_t budgetMs, WifiConnectOrigin origin) {
+  WifiConnectBounds bounds;
+  bounds.startMs = millis();
+  bounds.budgetMs = budgetMs;
+  bounds.consoleCancels = wifiConsoleCancelApplies(origin);
+  return bounds;
+}
+
 // Helper functions defined later in this file
 static const char* wifiStatusToString(wl_status_t status);
 static void wifiEnsureIdle(unsigned long waitMs);
 static bool connectWiFiTarget(const WifiConnectionTarget& network, unsigned long timeoutMs, bool showPriority);
+static bool connectWiFiTargetWithin(const WifiConnectionTarget& network, unsigned long timeoutMs,
+                                    bool showPriority, const WifiConnectBounds& bounds);
 bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriority = false);
-static bool connectWiFiId(uint32_t id, unsigned long timeoutMs, bool showPriority = false);
+static bool connectWiFiId(uint32_t id, unsigned long timeoutMs, bool showPriority,
+                          const WifiConnectBounds& bounds);
 bool connectWiFiSSID(const String& ssid, unsigned long timeoutMs);
 
 // Global flags (defined later in this file)
@@ -592,8 +639,10 @@ const char* cmd_wifipromote(const String& originalCmd) {
 }
 
 // Core WiFi connection logic - shared by command and boot sequence
-// Returns true if connected, false otherwise
-bool connectToBestWiFiNetwork() {
+// Returns true if connected, false otherwise. The whole hunt stops at budgetMs
+// even when saved networks remain untried; origin decides console cancellation.
+bool connectToBestWiFiNetwork(uint32_t budgetMs, WifiConnectOrigin origin) {
+  const WifiConnectBounds bounds = wifiConnectBounds(budgetMs, origin);
   // Defensively re-arm the STA interface. If a caller previously did
   // WiFi.disconnect(true) / WIFI_OFF, WiFi.status() would report WL_STOPPED for
   // the whole timeout. When ESP-NOW owns the radio it is already up in
@@ -628,10 +677,15 @@ bool connectToBestWiFiNetwork() {
   bool connected = false;
 
   for (int i = 0; i < saved.count && !connected; ++i) {
-    if (i > 0) {
-      // Brief pause between trying different saved networks
-      delay(2000);
+    // Brief pause between trying different saved networks. A network whose
+    // attempt could not even start inside the budget is reported, not tried.
+    const uint32_t pauseMs = i > 0 ? 2000 : 0;
+    if (bounds.remainingMs() <= pauseMs) {
+      BROADCAST_PRINTF("WiFi connect budget (%lu s) used up; %d saved network(s) not tried",
+                       (unsigned long)(bounds.budgetMs / 1000), saved.count - i);
+      break;
     }
+    if (pauseMs) delay(pauseMs);
     // 25 s, not 12 s. The driver's own 4-way-handshake timeout is 10 s and it
     // retries internally; a 12 s budget (12.5 s from esp_wifi_connect() — the
     // 500 ms settle is spent before the deadline clock starts) fits exactly ONE
@@ -640,8 +694,8 @@ bool connectToBestWiFiNetwork() {
     // this timeout disconnected it 2.4 s later — logged as "run -> init (0x0)",
     // reason 0 meaning WE dropped it, not the AP. A fresh attempt then joined
     // in 40 ms. 25 s gives the driver room for two full cycles.
-    connected = connectWiFiId(saved.entries[i].id, 35000, true);
-    
+    connected = connectWiFiId(saved.entries[i].id, 35000, true, bounds);
+
     if (gWifiUserCancelled) {
       WifiRadioMutationGuard radioGuard;
       if (radioGuard.acquired()) {
@@ -1403,13 +1457,23 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
   return connectWiFiTarget(network, timeoutMs, showPriority);
 }
 
-static bool connectWiFiId(uint32_t id, unsigned long timeoutMs, bool showPriority) {
+static bool connectWiFiId(uint32_t id, unsigned long timeoutMs, bool showPriority,
+                          const WifiConnectBounds& bounds) {
   WifiConnectionTarget network;
   if (!wifiNetworkConnectionById(id, network)) return false;
-  return connectWiFiTarget(network, timeoutMs, showPriority);
+  return connectWiFiTargetWithin(network, timeoutMs, showPriority, bounds);
 }
 
+// A single-target connect (openwifi --index/--saved-id, the rollback to the
+// previous SSID) is its own request: it gets the default budget and resolves
+// console cancellation from the command that asked for it.
 static bool connectWiFiTarget(const WifiConnectionTarget& nw, unsigned long timeoutMs, bool showPriority) {
+  return connectWiFiTargetWithin(nw, timeoutMs, showPriority,
+                                 wifiConnectBounds(kWifiConnectHuntBudgetMs, WifiConnectOrigin::COMMAND));
+}
+
+static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw, unsigned long timeoutMs,
+                                    bool showPriority, const WifiConnectBounds& bounds) {
   const int index0based = nw.index;
   DEBUG_WIFIF("[connectWiFiIndex] Attempting connection to [%d] SSID='%s'", index0based + 1, nw.ssid.c_str());
 
@@ -1591,6 +1655,13 @@ static bool connectWiFiTarget(const WifiConnectionTarget& nw, unsigned long time
 
   for (int attempt = 1; attempt <= kMaxWifiAttempts; ++attempt) {
     if (attempt > 1) {
+      // The request's deadline bounds the retries too: a retry that could not
+      // outlast its own backoff is not started.
+      if (bounds.remainingMs() <= retryBackoffMs) {
+        WARN_WIFIF("[connectWiFiIndex] connect deadline reached; not retrying '%s' (%d/%d)",
+                   nw.ssid.c_str(), attempt, kMaxWifiAttempts);
+        break;
+      }
       BROADCAST_PRINTF("Retrying '%s' (%d/%d)...", nw.ssid.c_str(), attempt, kMaxWifiAttempts);
       DEBUG_WIFIF("[connectWiFiIndex] Backing off %lums before retry", retryBackoffMs);
       delay(retryBackoffMs);
@@ -1657,12 +1728,31 @@ static bool connectWiFiTarget(const WifiConnectionTarget& nw, unsigned long time
     // Track if we hit the IDLE bug (status STAYS in IDLE for too long)
     bool hitIdleBug = false;
     unsigned long firstIdleTime = 0;  // When we first saw IDLE status
+    // First time the driver reported that no AP carries this SSID.
+    bool noSsidSeen = false;
+    unsigned long noSsidSinceMs = 0;
 
-    while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
+    // The per-attempt window stays whole for a link that is associating or
+    // handshaking; only the request's deadline may cut it short.
+    while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs && !bounds.expired()) {
       delay(200);
       statusCheckCount++;
 
       wl_status_t currentStatus = WiFi.status();
+
+      // NO_SSID_AVAIL means a scan completed without finding the SSID. Give the
+      // driver one more scan cycle, then move on instead of waiting out the
+      // window; a wrong password reports differently and keeps the full window.
+      if (currentStatus == WL_NO_SSID_AVAIL) {
+        if (!noSsidSeen) {
+          noSsidSeen = true;
+          noSsidSinceMs = millis();
+        } else if (millis() - noSsidSinceMs >= kWifiNoSsidGraceMs) {
+          DEBUG_WIFIF("[connectWiFiIndex] SSID not found; ending attempt after %lums grace",
+                      millis() - noSsidSinceMs);
+          break;
+        }
+      }
 
       // Track IDLE status timing
       if (currentStatus == WL_IDLE_STATUS) {
@@ -1742,8 +1832,10 @@ static bool connectWiFiTarget(const WifiConnectionTarget& nw, unsigned long time
                     wifiStatusToString(currentStatus), currentStatus, millis() - start);
         lastStatus = currentStatus;
       }
-      // Check for user escape input during WiFi connection
-      if (Serial.available()) {
+      // Check for user escape input during WiFi connection. Only a request that
+      // owns the console reads it (see wifiConsoleCancelApplies); otherwise the
+      // main loop is the console's reader and a keystroke there is a command.
+      if (bounds.consoleCancels && Serial.available()) {
         while (Serial.available()) Serial.read();  // consume all pending input
         DEBUG_WIFIF("[connectWiFiIndex] Connection cancelled by user");
         gWifiUserCancelled = true;  // Set global flag for multi-attempt cancellation
@@ -2506,7 +2598,21 @@ bool ensureWiFiInitialized() {
 // WiFi Setup (moved from .ino)
 // ============================================================================
 
+uint32_t wifiBootConnectBudgetMs() {
+  const uint32_t remaining = otaSafetySetupRemainingMs();
+  if (remaining == UINT32_MAX) return kWifiConnectHuntBudgetMs;
+  const uint32_t available =
+      remaining > kWifiBootSetupReserveMs ? remaining - kWifiBootSetupReserveMs : 0;
+  return available < kWifiConnectHuntBudgetMs ? available : kWifiConnectHuntBudgetMs;
+}
+
+// Runtime re-connects (radiopower on, the radio companion's restore) use the
+// default budget and resolve console cancellation from the calling command.
 void setupWiFi() {
+  setupWiFi(kWifiConnectHuntBudgetMs, WifiConnectOrigin::COMMAND);
+}
+
+void setupWiFi(uint32_t budgetMs, WifiConnectOrigin origin) {
   // Ensure WiFi is initialized before attempting connection
   if (!ensureWiFiInitialized()) {
     broadcastOutput("ERROR: Failed to initialize WiFi");
@@ -2520,8 +2626,13 @@ void setupWiFi() {
   
   DEBUG_WIFIF("[WiFi Setup] Starting WiFi connection");
 
-  // Inform user they can escape WiFi connection attempts
-  broadcastOutput("Starting WiFi connection... (Press any key in Serial Monitor to skip)");
+  // Inform user they can escape WiFi connection attempts, when this request
+  // may read the console at all.
+  if (wifiConsoleCancelApplies(origin)) {
+    broadcastOutput("Starting WiFi connection... (Press any key in Serial Monitor to skip)");
+  } else {
+    broadcastOutput("Starting WiFi connection...");
+  }
 
   // WiFi networks already loaded by readSettingsJson() during boot. The count
   // gates the connect; a failed list copy only loses the first-SSID line.
@@ -2550,7 +2661,7 @@ void setupWiFi() {
     DEBUG_WIFIF("[DEBUG] About to call connectToBestWiFiNetwork");
     // Call WiFi connection function directly instead of going through command system
     // This avoids potential deadlock with command executor task during boot
-    connected = connectToBestWiFiNetwork();
+    connected = connectToBestWiFiNetwork(budgetMs, origin);
     DEBUG_WIFIF("[DEBUG] connectToBestWiFiNetwork returned");
     DEBUG_WIFIF("[WiFi Setup] Connection result: %s (status=%d)",
                 connected ? "SUCCESS" : "FAILED", WiFi.status());

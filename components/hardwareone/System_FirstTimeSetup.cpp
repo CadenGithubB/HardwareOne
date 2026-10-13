@@ -573,8 +573,9 @@ void firstTimeSetupIfNeeded() {
     }
     broadcastOutput("WiFi network: " + restoreSSID);
 
-    // Use the project's standard WiFi connection (ESP-IDF API internally)
-    setupWiFi();
+    // Use the project's standard WiFi connection (ESP-IDF API internally).
+    // The wizard runs on the boot task, so a console keystroke may skip it.
+    setupWiFi(kWifiConnectHuntBudgetMs, WifiConnectOrigin::BOOT);
 
     if (WiFi.status() != WL_CONNECTED) {
       broadcastOutput("ERROR: Failed to connect to WiFi. Cannot use Import from Backup.");
@@ -971,7 +972,13 @@ void firstTimeSetupIfNeeded() {
   // even when the setup wizard triggers a reboot (I2C/OLED/gamepad).
   if (wifiConfigured) {
     broadcastOutput("Connecting WiFi and checking for an NTP reply before setup finishes...");
-    connectToBestWiFiNetwork();  // Handles WiFi connect + NTP sync + timestamp resolution
+    // Handles WiFi connect + NTP sync + timestamp resolution. The wizard runs
+    // on the boot task, so a console keystroke may skip the connect.
+#if ENABLE_WIFI
+    connectToBestWiFiNetwork(kWifiConnectHuntBudgetMs, WifiConnectOrigin::BOOT);
+#else
+    connectToBestWiFiNetwork();
+#endif
   }
 
   // If user disabled I2C, reboot so it takes effect from boot

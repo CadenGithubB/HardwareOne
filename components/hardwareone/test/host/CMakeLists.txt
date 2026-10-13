@@ -1029,6 +1029,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_user_store_mutations.py
           ${SETUP_MQTT_TEST_ARGS})
+# Wi-Fi connect hunt: one deadline for the whole hunt, NO_SSID attempts end
+# after a short grace, and only console-owned requests read the console.
+add_test(
+  NAME wifi_connect_budget
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_wifi_connect_budget.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Web file streaming: the FS mutex and the sensor poll pause are never held
 # across a chunk send, and every send loop stops at the first failed send.
 add_test(

@@ -375,6 +375,34 @@ handlers alone, so the lock and stop-on-error checks fail behaviourally rather
 than the unit failing to build; the source-level checks run after the binary.
 Run with `ctest --test-dir build -R '^web_file_streaming$' --output-on-failure`.
 
+## Wi-Fi connect hunt budget
+
+```sh
+python3 components/hardwareone/test/host/test_wifi_connect_budget.py --sanitize
+```
+
+`wifi_connect_budget` runs the shipping `connectToBestWiFiNetwork`,
+`connectWiFiId`, `connectWiFiTarget` and the bounded attempt function from
+`System_WiFi.cpp`, plus the hunt's bounds helpers and `wifiBootConnectBudgetMs`,
+against a scripted driver and a virtual clock (`millis()` reads a counter that
+`delay()` advances). Each saved network is scripted as missing (the driver
+reports `WL_NO_SSID_AVAIL` after its scan), associating (stays
+`WL_DISCONNECTED`) or joining after a delay; the serial console and the command
+context are doubles. It checks that eight missing networks finish inside the
+hunt budget with every attempt ending after the NO_SSID grace rather than its
+35 s window, that an associating link keeps the whole 35 s window per attempt,
+that the deadline stops the hunt (the running attempt ends, later networks are
+reported as not tried), that a reachable network after a missing one is still
+joined, that a console keystroke cancels only a boot or serial-console request
+(web, companion-restore and other origins leave the byte to the main loop), and
+that the boot budget is the default on a verified image, the remaining
+probation setup window minus the reserve on a trial boot, and zero once that is
+gone. The driver's IDLE-bug recovery, scan coordination, NTP and the OTA
+supervisor itself are outside this suite. On a tree without the bounded hunt the
+old entry points compile behind the same adapters, so the budget, grace and
+console-origin checks fail behaviourally. Run with
+`ctest --test-dir build -R '^wifi_connect_budget$' --output-on-failure`.
+
 ## users.json and pending-list writers
 
 ```sh
