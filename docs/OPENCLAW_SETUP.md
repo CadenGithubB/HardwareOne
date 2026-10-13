@@ -6,6 +6,12 @@ text; the agent, conversation history, and tools run on the OpenClaw host.
 The optional [device skill](../integrations/openclaw/README.md) lets that host
 read existing device APIs. Conversation does not require the skill.
 
+The source is consolidated on `main` for 0.99.98. Both `xiao-openclaw` and
+`p4-openclaw` saved profiles are available. The live XIAO evidence below comes
+from the earlier 0.99.97.4-based image; the combined P4 voice path still needs
+hardware qualification. See [current working status](OPENCLAW_WORK_STATUS.md)
+and [consolidation checks](CONSOLIDATION_0.99.98.md).
+
 ## Collect host information without changing its network
 
 Run these in a terminal on the OpenClaw host, using the same account/profile as

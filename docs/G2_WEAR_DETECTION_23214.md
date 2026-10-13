@@ -127,4 +127,3 @@ ON write and survival through a glasses power cycle were not exercised.
 Private capture: `/private/tmp/hw1-wear-validate-1791749709028093000/`.
 Durable private copies use prefix `wear-detection-23214-` in
 `/Users/cadbecaimacmini/Documents/Codex/Scratch/hardwareone-p4-backup-20261011/`.
-
