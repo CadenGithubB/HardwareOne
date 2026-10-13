@@ -91,6 +91,12 @@ bool otaSafetyAllowsDestructiveStorageRecovery();
 // full-erase guard.
 bool otaSafetyPartitionIsBlank(const esp_partition_t* part);
 
+// Milliseconds left before the supervisor's setup deadline fires, so a long
+// setup step (the boot Wi-Fi hunt) can size its own budget to finish inside the
+// window. UINT32_MAX when no setup deadline applies: the image is verified, or
+// setup has already reached RUNNING.
+uint32_t otaSafetySetupRemainingMs();
+
 // Call once, immediately after HardwareOne advances its crash phase to RUNNING.
 // The 60-second probation interval starts here, never from power-on uptime.
 void otaSafetySetupReachedRunning();

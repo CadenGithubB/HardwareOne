@@ -275,6 +275,14 @@ bool otaSafetyAllowsDestructiveStorageRecovery() {
   return false;
 }
 
+uint32_t otaSafetySetupRemainingMs() {
+  if (sPhase.load(std::memory_order_acquire) != ProbationPhase::Setup) return UINT32_MAX;
+  const TickType_t elapsed = elapsedTicks(
+      xTaskGetTickCount(), sBootStartedTick.load(std::memory_order_relaxed));
+  if (elapsed >= kSetupTimeoutTicks) return 0;
+  return static_cast<uint32_t>(pdTICKS_TO_MS(kSetupTimeoutTicks - elapsed));
+}
+
 void otaSafetySetupReachedRunning() {
   // Publish the timestamps before the phase transition. The supervisor runs
   // on the other core and treats Running as permission to consume all three;

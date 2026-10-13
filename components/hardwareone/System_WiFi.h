@@ -114,7 +114,28 @@ const char* cmd_wifiautoreconnect(const String& originalCmd);
 
 // WiFi Helper Functions
 bool ensureWiFiInitialized();
+
+// Who asked for a connect. It decides whether a keystroke on the serial console
+// cancels the hunt: at boot the main task is blocked inside the connect, so the
+// console has no other reader; for a command only one typed at the serial
+// console may be cancelled that way (the main loop is waiting on it). Connects
+// from the web, BLE, MQTT, UART or the radio companion never read the console.
+enum class WifiConnectOrigin : uint8_t {
+  COMMAND = 0,  // resolved from the executing command's context
+  BOOT,
+};
+
+// Longest one connect request (every saved network, every attempt) may run.
+// Each attempt still gets its full 35 s window for a link that is associating
+// or handshaking; the budget stops the hunt as a whole.
+constexpr uint32_t kWifiConnectHuntBudgetMs = 150000;
+
+// Budget for the boot connect: the default, shortened on a trial OTA boot so
+// the rest of setup still reaches RUNNING inside the probation setup window.
+uint32_t wifiBootConnectBudgetMs();
+
 void setupWiFi();
+void setupWiFi(uint32_t budgetMs, WifiConnectOrigin origin);
 
 // Single source of truth for WiFi radio state, so every surface reports the same
 // thing. CONNECTED = associated to an AP; UP_FOR_ESPNOW = radio on but STA
@@ -131,7 +152,8 @@ WifiRadioState wifiRadioState();
 // the driver has any active mode — connected, disconnected, or held up by
 // ESP-NOW; false only when fully off.
 bool wifiRadioOn();
-bool connectToBestWiFiNetwork();
+bool connectToBestWiFiNetwork(uint32_t budgetMs = kWifiConnectHuntBudgetMs,
+                              WifiConnectOrigin origin = WifiConnectOrigin::COMMAND);
 // Main-loop drain for the disconnect snapshot captured on the arduino_events
 // task (wifiEventLogger keeps its stack frame tiny; the logging happens here).
 void wifiEventLogDrain();

@@ -66,9 +66,10 @@ for consumer in (apply, legacy, mode):
 
 restore = extract_block(source("System_FirstTimeSetup.cpp"), "void firstTimeSetupIfNeeded(")
 failure = extract_block(restore, "if (wifiSaved != WifiNetworkSaveResult::Accepted)")
-assert "continue;" in failure and "setupWiFi();" not in failure
-assert restore.index("saveSetupWiFiNetwork(") < restore.index("setupWiFi();")
-assert restore.index(failure) < restore.index("setupWiFi();")
+restore_connect = "setupWiFi(kWifiConnectHuntBudgetMs, WifiConnectOrigin::BOOT);"
+assert "continue;" in failure and "setupWiFi(" not in failure
+assert restore.index("saveSetupWiFiNetwork(") < restore.index(restore_connect)
+assert restore.index(failure) < restore.index(restore_connect)
 
 for name in ("System_Settings.cpp", "System_SetupWizard.cpp",
              "System_SetupWizardMode.cpp", "System_FirstTimeSetup.cpp"):

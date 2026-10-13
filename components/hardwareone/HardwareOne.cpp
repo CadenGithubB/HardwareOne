@@ -1901,7 +1901,9 @@ void hardwareone_setup() {
   } else if (gSettings.wifiEnabled && ramFlushResolve(RF_WIFI, gSettings.wifiAutoStart)) {  // Controlled by first-time setup or settings
     // Skip NTP sync in wificonnect so we can show it separately in boot progress
     gSkipNTPInWifiConnect = true;
-    setupWiFi();
+    // The hunt budget shrinks on a trial OTA boot so setup still reaches
+    // RUNNING inside the probation window; BOOT lets a console keystroke skip it.
+    setupWiFi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BOOT);
     gSkipNTPInWifiConnect = false;  // Reset for future manual connections
     wifiConnected = WiFi.isConnected();
 #if DEBUG_MEM_SUMMARY
