@@ -3848,6 +3848,35 @@ static bool commandAllowedDuringPasswordChange(const String& line) {
   return false;
 }
 
+// The bonded peer runs every remote:/@ command as bond-admin, which is super
+// for the live bond session (v4_handle_cmd, System_ESPNow.cpp). Here the
+// unwrapped line can be checked only against this build's registry flags.
+// Handlers that decide access at run time from the caller (file path rules,
+// the owner of notes and transcripts, user settings, sessions, voice arming)
+// would decide it for super on the peer, and a command this build does not
+// compile has no row here at all. So a remote command needs a local
+// administrator, except the lines below: the bond page and the OLED bond
+// screen send them for any signed-in user, and their handlers check no
+// identity. Each starts or stops one of the peer's sensors and takes no
+// arguments. Anything not listed, including a command added later, needs an
+// administrator.
+static bool remoteCommandAllowedWithoutAdmin(const String& line) {
+  static const char* const kSensors[] = {
+      "thermal", "tof", "imu", "input", "apds", "gps", "rtc", "presence", "fmradio"};
+  CommandArgs args(line);
+  if (args.unterminatedQuote() || args.count() != 1 || args.argWasQuoted(0)) return false;
+  String verb = args.arg(0);
+  verb.toLowerCase();  // the registry matches names without case
+  const char* sensor = nullptr;
+  if (verb.startsWith("open")) sensor = verb.c_str() + 4;
+  else if (verb.startsWith("close")) sensor = verb.c_str() + 5;
+  if (!sensor) return false;
+  for (const char* known : kSensors) {
+    if (strcmp(sensor, known) == 0) return true;
+  }
+  return false;
+}
+
 enum class SessionControlForm : uint8_t {
   Other,
   BareLogin,
@@ -4090,6 +4119,29 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
     return false;
   }
   return true;
+}
+
+// The remote:/@ gate, applied after authorizeCommand has passed the unwrapped
+// line: see remoteCommandAllowedWithoutAdmin for why the peer's authority
+// needs a local administrator.
+static bool authorizeRemoteCommand(const AuthContext& ctx, const String& line,
+                                   const String& redactedLine,
+                                   char* out, size_t outSize) {
+  // The trusted internal identity passes authorizeCommand unchecked; same here.
+  if (ctx.transport == SOURCE_INTERNAL && ctx.user == "system") return true;
+  if (remoteCommandAllowedWithoutAdmin(line) || hasAdminPrivilege(ctx)) return true;
+  snprintf(out, outSize,
+           "Error: Admin access required to send this command to the bonded device; "
+           "it runs there as administrator.");
+  char auditBuf[180];
+  snprintf(auditBuf, sizeof(auditBuf), "remote cmd=%.160s", redactedLine.c_str());
+  logAuthAttempt(false, ctx.path.c_str(),
+                 ctx.user.length() ? ctx.user : String("(anonymous)"), ctx.ip,
+                 auditBuf);
+  if (ctx.user.length() > 0) {
+    systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), "remote");
+  }
+  return false;
 }
 
 // Core command execution with authentication and registry dispatch
@@ -4391,14 +4443,18 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     // become a privilege elevator for the human who submitted this wrapper.
     // Apply the ordinary command policy to the unwrapped line *locally* before
     // placing it in the bond envelope. This includes admin/super flags and the
-    // exact-session policy for targeted login/logout. The peer still validates
-    // the authenticated envelope and runs its own authorization as defense in
-    // depth.
+    // exact-session policy for targeted login/logout. Checks a handler makes
+    // at run time against the caller would see bond-admin on the peer, so
+    // authorizeRemoteCommand then requires a local administrator for anything
+    // but the peer sensor toggles. The peer still validates the authenticated
+    // envelope and runs its own authorization as defense in depth.
     const CommandResolution remoteResolution = resolveCommand(actualCommand);
     const String safeRemoteCommand =
         redactCmdForAudit(actualCommand, remoteResolution);
     if (!authorizeCommand(ctx, actualCommand, remoteResolution,
-                          safeRemoteCommand, out, outSize)) {
+                          safeRemoteCommand, out, outSize) ||
+        !authorizeRemoteCommand(ctx, actualCommand, safeRemoteCommand,
+                                out, outSize)) {
       return false;
     }
 
