@@ -102,6 +102,27 @@ design narrowly registered device tools through an explicitly approved broker;
 do not enable broad execution, host networking, or elevated access as a shortcut.
 The same separation applies to a future Pi/UART daemon that owns the serial port.
 
+The user's effective-policy report confirms `main` uses Docker with `mode: all`,
+`scope: agent`, and `workspaceAccess: none`; it has a separate sandbox workspace
+and a protected read-only skills mount. The existing allowlist already contains
+`hardwareone_camera`, `hardwareone_cli`, `hardwareone_devices`, and
+`hardwareone_ping`. Prefer integrating with those existing tools and their device
+configuration before installing the optional helper. Their implementation and
+environment variable names have not been inspected. Elevated execution is
+enabled globally but `allowedByConfig: false` for the report's unknown channel;
+that result is not a guarantee for a different caller/session. Preserve the
+existing sandbox, mounts, and tool policy.
+
+The user requested a device account named `cm5` and the XIAO's IP after it joins
+`TestESPNetwork`, for updating the existing tool environment on the Studio.
+The account password was supplied privately in the conversation and is not
+recorded here. The candidate XIAO console `/dev/cu.usbmodem11201` requires login;
+one attempt with the requested account credentials did not authenticate. Account
+creation and board/network identification await an existing administrator session.
+No account or Wi-Fi settings have been changed. Do not use `/dev/cu.usbmodem2201`,
+which is occupied by the separate P4 work. Verify the board identity after login
+before account changes, and retrieve the address through USB without bridging VLANs.
+
 The prototype uses the documented [OpenClaw chat-completions endpoint](https://docs.openclaw.ai/gateway/openai-http-api).
 It must be enabled on the chosen test host. The configured target is an agent
 alias such as `openclaw/default` or `openclaw/<agent-id>`, not its underlying
