@@ -43,10 +43,11 @@ THE EXTRACTION RULE
                 the EMPTY STRING. Empty is the only correct joiner and this was
                 measured: any non-empty token breaks 8 regions, because some
                 pages split a JS token across chunks to interpolate a runtime
-                value. WebPage_LoginSuccess.h:73 is the clearest case -- the
-                block ends mid-string-literal, at
-                    document.cookie = 'session=)LOGINSUCCESS3"
-                so a joiner lands INSIDE a JS string.
+                value. The clearest case is a block that ends mid-string-
+                literal, such as
+                    document.cookie = 'session=)DELIM"
+                with the value streamed as the next chunk, so a joiner lands
+                INSIDE a JS string.
     3 REGIONS   Each <script ...> starts JS that runs to the next </script> (or
                 EOF if unclosed). Everything outside is HTML and is discarded.
                 <!-- --> is left alone; the parser accepts it.

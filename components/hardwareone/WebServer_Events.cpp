@@ -13,11 +13,6 @@
 // External helpers
 extern const char* buildSensorStatusJson();
 
-// Debug helper for SSE
-void sseDebug(const String& msg) {
-  if (isDebugFlagSet(DEBUG_SSE)) { BROADCAST_PRINTF("[SSE] %s", msg.c_str()); }
-}
-
 bool sseWrite(httpd_req_t* req, const char* chunk) {
   if (!req) {
     DEBUG_SSEF("sseWrite called with null req");
@@ -58,23 +53,6 @@ int sseBindSession(httpd_req_t* req, String& outSid) {
   }
 
   return idx;
-}
-
-bool sseHeartbeat(httpd_req_t* req) {
-  DEBUG_SSEF("heartbeat");
-  return sseWrite(req, ":hb\n\n");
-}
-
-bool sseSendNotice(httpd_req_t* req, const String& note) {
-  // The message is a JSON string value: quotes, backslashes and control
-  // characters are escaped, so a newline cannot end the SSE data line and
-  // the frame is never cut short of its blank-line terminator.
-  String frame = "event: notice\ndata: {\"msg\":";
-  frame += webJsonString(note);
-  frame += "}\n\n";
-  bool ok = sseWrite(req, frame.c_str());
-  DEBUG_SSEF("sendNotice: len=%u %s", (unsigned)note.length(), ok ? "OK" : "FAIL");
-  return ok;
 }
 
 // Enqueue a typed SSE event (event name + JSON data) into the session's event queue
@@ -125,7 +103,7 @@ bool sseDequeueEvent(SessionEntry& s, String& outEventName, String& outData) {
   return true;
 }
 
-// SSE endpoint: push per-session notices without polling
+// SSE endpoint: push per-session events without polling
 esp_err_t handleEvents(httpd_req_t* req) {
   if (!req) {
     DEBUG_SSEF("handleEvents: null req");
@@ -250,26 +228,14 @@ esp_err_t handleEvents(httpd_req_t* req) {
     sendSystem();
   }
 
-  bool wantHold = gSessions[sessIdx].needsNotificationTick || (gSessions[sessIdx].nqCount > 0) || (gSessions[sessIdx].eqCount > 0);
+  bool wantHold = gSessions[sessIdx].needsNotificationTick || (gSessions[sessIdx].eqCount > 0);
   if (wantHold) {
     unsigned long holdStart = millis();
     const unsigned long holdMs = 600UL;
     while ((long)(millis() - holdStart) < (long)holdMs) {
-      String n;
-      int sent = 0;
-      // Dequeue under the session lock (bound to this request's sid); the
-      // socket write below runs after it is released.
-      while (webSessionDequeueSseNotice(sessIdx, sid, n)) {
-        DEBUG_SSEF("SSE notice tick send: %s", n.c_str());
-        if (!sseSendNotice(req, n)) {
-          DEBUG_SSEF("SSE write failed while sending notice; closing");
-          holdStart = 0;
-          break;
-        }
-        sent++;
-        if (sent >= 8) break;
-      }
-      // Also flush typed events (e.g., espnow-rx)
+      // Flush typed events (e.g., espnow-rx). Each is dequeued under the
+      // session lock (bound to this request's sid); the socket write below
+      // runs after it is released.
       int evSent = 0;
       while (true) {
         String evName, evData;

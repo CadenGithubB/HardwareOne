@@ -48,8 +48,6 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #if ENABLE_HTTP_SERVER
   #include "WebServer_Utils.h"
   #include "WebPage_Login.h"
-  #include "WebPage_LoginSuccess.h"
-  #include "WebPage_LoginRequired.h"
   #include "WebPage_Dashboard.h"
   #include "WebPage_CLI.h"
   #include "WebPage_Files.h"
@@ -404,11 +402,6 @@ extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, s
   memTrackerRecord(op, ptr, size, requestedPS, usedPS, fellBack, tag);
 }
 
-#if ENABLE_HTTP_SERVER
-void sseEnqueueNotice(SessionEntry& s, const String& msg);
-bool sseDequeueNotice(SessionEntry& s, String& out);
-#endif
-
 volatile uint32_t gOutputFlags = MSG_ROUTE_SERIAL;
 
 // Remove ANSI CSI escape sequences (e.g., ESC[2J, ESC[H, ESC[1;32m) for serial cleanliness
@@ -572,7 +565,7 @@ static bool getQueryParam(httpd_req_t* req, const char* key, String& out) {
 // HTTP handlers
 // ==========================
 // Note: handleRoot, handlePing, handleLogout, handleLogin, sendAuthRequiredResponse,
-//       handleLoginSetSession, handleRegisterPage, handleRegisterSubmit moved to web_server.cpp
+//       handleRegisterPage, handleRegisterSubmit moved to web_server.cpp
 // (declarations now in web_server.h)
 
 // Protected dashboard moved to web_server.cpp
@@ -580,28 +573,6 @@ static bool getQueryParam(httpd_req_t* req, const char* key, String& out) {
 // Sensor JSON building functions moved to respective sensor files (thermal_sensor.cpp, tof_sensor.cpp, imu_sensor.cpp)
 
 // Note: handlePing moved to web_server.cpp
-
-// ==========================
-// Sessions API (list + revoke)
-// ==========================
-#if ENABLE_HTTP_SERVER
-static void buildUserSessionsJson(const String& user, const String& currentSid, JsonArray& sessions) {
-  // Build JSON array directly (no String allocation)
-  for (int i = 0; i < MAX_SESSIONS; ++i) {
-    const SessionEntry& s = gSessions[i];
-    if (!s.sid.length()) continue;
-    if (s.user != user) continue;
-    
-    JsonObject session = sessions.add<JsonObject>();
-    session["sid"] = s.sid;
-    session["createdAt"] = s.createdAt;
-    session["lastSeen"] = s.lastSeen;
-    session["expiresAt"] = s.expiresAt;
-    session["ip"] = s.ip.length() ? s.ip : "-";
-    session["current"] = (s.sid == currentSid);
-  }
-}
-#endif // ENABLE_HTTP_SERVER
 
 static const char* originFrom(const AuthContext& ctx) {
   // Only map known transports to stable strings; avoid assuming future ones exist
@@ -903,11 +874,12 @@ void deliverCommandResult(const String& result, const CommandContext& ctx) {
   }
 
   // The direct write bypasses the queue pipeline, so it must re-ask the
-  // pipeline's own gates: validate-only suppression (per-command
-  // ctx.validateOnly — the race-free equivalent of the gCLIValidateOnly
-  // global broadcastOutputCore checks, which cmd_exec may already have
-  // re-set for its NEXT queued command by the time we run), and the outSerial
-  // kill-switch the drain applies per line (System_Debug.cpp serial sink).
+  // pipeline's own gates: validate-only suppression (the command's own
+  // ctx.validateOnly; broadcastOutputCore reads the same flag from the
+  // command context of the task it runs on, currentCommandValidateOnly(), and
+  // this delivery runs on the console task after cmd_exec returned), and the
+  // outSerial kill-switch the drain applies per line (System_Debug.cpp serial
+  // sink).
   const bool writeSerial = result.length() > 0
                         && !ctx.validateOnly
                         && (gOutputFlags & MSG_ROUTE_SERIAL);
@@ -1224,21 +1196,6 @@ bool perfGetLoopSnapshot(uint32_t& lapsPerSec, uint32_t& avgMs, uint32_t& maxMs,
   stalls5s    = gLoopPerf.snapStalls;
   totalStalls = gLoopPerf.totalStalls;
   return true;
-}
-
-static String exitHelpAndExecute(const String& originalCmd) {
-  String banner = exitToNormalBanner() + "\n";
-  AuthContext ctx = currentAuthContext();
-  ctx.path = "/help/exit";
-  // Full result size without carrying 4 KB on this task's stack: one PSRAM
-  // buffer for the lifetime of the firmware. A result that does not fit is
-  // reported by executeCommand's ceiling check, never halved.
-  static char* out = nullptr;
-  if (!out) out = static_cast<char*>(ps_alloc(CMD_RESULT_MAX, AllocPref::PreferPSRAM, "help.exit"));
-  if (!out) return banner + "Error: out of memory";
-  (void)executeCommand(ctx, originalCmd.c_str(), out, CMD_RESULT_MAX);
-  banner += out;
-  return banner;
 }
 
 extern int connectedDeviceCount;

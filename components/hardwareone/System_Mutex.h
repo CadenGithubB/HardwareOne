@@ -36,9 +36,6 @@ extern SemaphoreHandle_t gFsMutex;
 // JSON response buffer mutex - protects shared gJsonResponseBuffer
 extern SemaphoreHandle_t gJsonResponseMutex;
 
-// ESP-NOW file transfer mutex - protects gActiveFileTransfer state
-extern SemaphoreHandle_t gFileTransferMutex;
-
 // Map tile-cache / lifecycle mutex - serializes MapCore::renderMap,
 // loadTileData, loadMapFile and unloadMap so the OLED map task, the G2 map
 // page, and the location-context updater never touch (or free) the shared
@@ -119,27 +116,6 @@ struct MapCacheGuard {
   MapCacheGuard& operator=(const MapCacheGuard&) = delete;
 };
 
-/**
- * I2cLockGuard - RAII guard for I2C bus mutex
- * 
- * Acquires I2CDeviceManager::getBusMutex() directly — no legacy i2cMutex global.
- * 
- * Usage:
- *   {
- *     I2cLockGuard guard("sensorRead");
- *     Wire1.beginTransmission(...);
- *     // ... I2C operations ...
- *   }
- */
-struct I2cLockGuard {
-  bool held;
-  explicit I2cLockGuard(const char* owner = nullptr);
-  ~I2cLockGuard();
-  
-  I2cLockGuard(const I2cLockGuard&) = delete;
-  I2cLockGuard& operator=(const I2cLockGuard&) = delete;
-};
-
 struct I2sMicLockGuard {
   bool held;
   explicit I2sMicLockGuard(const char* owner = nullptr);
@@ -217,17 +193,6 @@ struct JsonBufferGuard {
   JsonBufferGuard& operator=(const JsonBufferGuard&) = delete;
 };
 
-/**
- * FileTransferGuard - RAII guard for ESP-NOW file transfer state mutex
- */
-struct FileTransferGuard {
-  bool held;
-  explicit FileTransferGuard(const char* owner = nullptr);
-  ~FileTransferGuard();
-  
-  FileTransferGuard(const FileTransferGuard&) = delete;
-  FileTransferGuard& operator=(const FileTransferGuard&) = delete;
-};
 
 // ESP-NOW topology streams mutex - protects gTopoStreams, gTopoDeviceCache
 extern SemaphoreHandle_t gTopoStreamsMutex;
@@ -279,9 +244,6 @@ struct EspNowTxGuard {
 // Manual lock/unlock for cases where RAII isn't suitable
 void fsLock(const char* owner = nullptr);
 void fsUnlock();
-
-void i2cLock(const char* owner = nullptr);
-void i2cUnlock();
 
 // Check if current task holds a mutex (for debugging/assertions)
 bool isFsLockedByCurrentTask();

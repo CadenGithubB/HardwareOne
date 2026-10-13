@@ -3425,10 +3425,13 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         users.forEach(function(u) {
           var opt = document.createElement('option');
           opt.value = u.username || '';
-          /* userlist json carries no isAdmin field; rank off `role`. */
+          /* userlist json carries no isAdmin field; rank off `role` and
+             label against __hwRoleRank, as the Users panel badge does. */
+          var R = window.__hwRoleRank || { guest: 0, user: 1, admin: 2, superadmin: 3 };
           var r = window.userRankOf(u);
           opt.textContent = (u.username || '') +
-                            (r >= 2 ? ' (Super Admin)' : r === 1 ? ' (Admin)' : ' (User)');
+                            (r >= R.superadmin ? ' (Super Admin)' : r >= R.admin ? ' (Admin)' :
+                             r >= R.user ? ' (User)' : ' (Guest)');
           sel.appendChild(opt);
         });
       });

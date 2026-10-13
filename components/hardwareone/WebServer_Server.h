@@ -70,14 +70,6 @@ struct SessionEntry {
   // (sessionIdleExpired) so automatic chatter never keeps a session alive.
   unsigned long lastInteractionMs = 0;
   String ip;
-  // Small ring buffer for notices to avoid drops during reconnects
-  // Using fixed-size char buffers instead of String to save memory and reduce fragmentation
-  static const int NOTICE_QUEUE_SIZE = 2;
-  static const int NOTICE_MAX_LEN = 96;
-  char noticeQueue[NOTICE_QUEUE_SIZE][NOTICE_MAX_LEN];  // 2 × 96 = 192 bytes
-  int nqHead = 0;
-  int nqTail = 0;
-  int nqCount = 0;
   // Small ring buffer for typed SSE events (event name + JSON data)
   static const int EVENT_QUEUE_SIZE = 4;
   static const int EVENT_NAME_MAX = 16;
@@ -87,17 +79,16 @@ struct SessionEntry {
   int eqHead = 0;
   int eqTail = 0;
   int eqCount = 0;
-  // Drop-oldest counters for the two rings above (diagnostics; reset with the
+  // Drop-oldest counter for the event ring above (diagnostics; reset with the
   // session entry). Surfaced via sseEventDropsTotal() / notifstats.
   uint16_t eqDropped = 0;
-  uint16_t nqDropped = 0;
-  // When a notice is queued, enter a short 'burst' window to reconnect faster
+  // When an event is queued, enter a short 'burst' window to reconnect faster
   unsigned long noticeBurstUntil = 0;  // millis() timestamp; 0 means idle
-  bool needsNotificationTick = false;  // set when there are pending notices to deliver
+  bool needsNotificationTick = false;  // set when there are pending events to deliver
   uint32_t lastSensorSeqSent = 0;      // last sensor-status sequence sent over SSE
   bool needsStatusUpdate = false;      // flag to trigger status refresh on next request
   int sockfd = -1;                     // socket file descriptor for force disconnect
-  bool revoked = false;                // session has been revoked but kept alive for notice delivery
+  bool revoked = false;                // revoked: isAuthed refuses it until the slot expires
 };
 
 // Session array (defined in main .ino)
@@ -198,12 +189,11 @@ uint32_t sseEventDropsTotal();
 
 // Locked queue access for the SSE handler: slot `idx` must still hold the
 // session `sid`, otherwise nothing is dequeued. The settle call clears the
-// pending-delivery flag when both queues are empty. The status call records a
+// pending-delivery flag when the event queue is empty. The status call records a
 // delivered sensor-status snapshot taken at `seqSent` and clears the update
 // flag only if no newer status was published since.
 bool webSessionDequeueSseEvent(int idx, const String& sid,
                                String& outEventName, String& outData);
-bool webSessionDequeueSseNotice(int idx, const String& sid, String& out);
 void webSessionSettleSseQueues(int idx, const String& sid);
 void webSessionMarkStatusSent(int idx, const String& sid, unsigned long seqSent);
 
@@ -221,9 +211,6 @@ int sseBindSession(httpd_req_t* req, String& outSid);
 String setSession(httpd_req_t* req, const String& u);
 void clearSession(httpd_req_t* req, const char* logoutReason = nullptr);
 
-// Unified authentication success handler (handles HTTP, Serial, TFT transports)
-// TODO: Consider decoupling Serial auth handling to separate module
-esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo);
 
 // Authentication
 bool isAuthed(httpd_req_t* req, String& outUser);
@@ -231,8 +218,6 @@ bool isAdminUser(const String& who);
 
 // Cookie and header helpers
 String getCookieSID(httpd_req_t* req);
-bool getHeaderValue(httpd_req_t* req, const char* name, String& out);
-bool getCookieValue(httpd_req_t* req, const char* key, String& out);
 String makeSessToken();
 
 // Client IP extraction
@@ -261,7 +246,8 @@ void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
 void storeLogoutReason(const String& ip, const String& reason);
 bool hasLogoutReason(const char* ip);
 
-// Session revocation
+// Session revocation: isAuthed refuses the slot from then on. The reason
+// reaches the browser only through storeLogoutReason.
 void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg);
 // Exact, table-locked web-session helpers for callers outside the HTTP TU.
 // They avoid racing slot reuse while inspecting Arduino String fields.
@@ -272,8 +258,6 @@ bool webRevokeSessionBySid(const String& sid,
                            const String& reason,
                            String* outUser = nullptr);
 int webBroadcastSessionsHuman();
-void sseEnqueueNotice(SessionEntry& s, const String& msg);
-bool sseDequeueNotice(SessionEntry& s, String& out);
 // Custom SSE event queue helpers
 void sseEnqueueEvent(SessionEntry& s, const char* eventName, const char* data);
 bool sseDequeueEvent(SessionEntry& s, String& outEventName, String& outData);
@@ -292,9 +276,7 @@ esp_err_t handleSettingsGet(httpd_req_t* req);
 esp_err_t handleUserSettingsGet(httpd_req_t* req);
 esp_err_t handleUserSettingsSet(httpd_req_t* req);
 esp_err_t handleDeviceRegistryGet(httpd_req_t* req);
-esp_err_t handleSessionsList(httpd_req_t* req);
-esp_err_t handleAdminSessionsList(httpd_req_t* req);
-esp_err_t handleNotice(httpd_req_t* req);
+esp_err_t handleSessionsList(httpd_req_t* req);  // /api/sessions and /api/admin/sessions
 esp_err_t handleLogs(httpd_req_t* req);
 esp_err_t handleSensorsStatusWithUpdates(httpd_req_t* req);
 esp_err_t handleSystemStatus(httpd_req_t* req);
@@ -317,7 +299,6 @@ esp_err_t handleLogout(httpd_req_t* req);
 // Auth handlers (Batch 2)
 esp_err_t handleLogin(httpd_req_t* req);
 esp_err_t sendAuthRequiredResponse(httpd_req_t* req);
-esp_err_t handleLoginSetSession(httpd_req_t* req);
 esp_err_t handleRegisterPage(httpd_req_t* req);
 esp_err_t handleRegisterSubmit(httpd_req_t* req);
 
@@ -349,12 +330,7 @@ esp_err_t handleMicRecordingDelete(httpd_req_t* req);
 // transport-neutral and must stay available when ENABLE_HTTP_SERVER=0.
 
 // SSE helpers moved from .ino
-bool sseSessionAliveAndRefresh(int sessIdx, const String& sid);
-bool sseSendLogs(httpd_req_t* req, unsigned long seq, const String& buf);
 bool sseWrite(httpd_req_t* req, const char* chunk);
-void sseDebug(const String& msg);
-bool sseHeartbeat(httpd_req_t* req);
-bool sseSendNotice(httpd_req_t* req, const String& note);
 esp_err_t handleEvents(httpd_req_t* req);
 
 // HTTP server management
@@ -362,11 +338,7 @@ void startHttpServer();
 
 // HTTP streaming helpers
 esp_err_t streamChunkC(httpd_req_t* req, const char* s);
-esp_err_t streamChunkBuf(httpd_req_t* req, const char* buf, size_t len);
-void streamBeginHtml(httpd_req_t* req, const String& title, const String& username = "");
 void streamEndHtml(httpd_req_t* req);
-void streamNav(httpd_req_t* req, const String& username, const String& activePage);
-void streamContentGeneric(httpd_req_t* req, const String& content);
 void streamChunk(httpd_req_t* req, const String& str);
 void streamChunk(httpd_req_t* req, const char* str);
 

@@ -2,7 +2,7 @@
 """Hand-built web JSON replies and response-header storage.
 
 Compiles the production handleAutomationsExport, handleIconGet,
-handleFilesCreate, handleMicRecordingsList and sseSendNotice bodies (plus the
+handleFilesCreate and handleMicRecordingsList bodies (plus the
 shared webJsonString / sendJsonError and the recordings-list builder where the
 tree has them) into web_json_replies_harness.cpp with real ArduinoJson and a
 local Arduino String stub. The fake httpd keeps header pointers and reads them
@@ -10,7 +10,7 @@ at httpd_resp_send, so a header value that dies first is an ASan
 use-after-free (run with --sanitize). Every JSON payload the harness prints is
 parsed here with Python's strict json module and compared with the text that
 went in: file names with backslashes, commas, colons, quotes and control
-characters; command errors with quotes and newlines; SSE notices.
+characters; command errors with quotes and newlines.
 
 Options: --cxx <compiler>, --sanitize (ASan + UBSan), --case <name>.
 Not covered: the map feature, GPS track and LLM status replies (same helper,
@@ -30,7 +30,7 @@ from test_web_batch_handlers import extract_block, require
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 JSON_INCLUDE = COMPONENT.parent / "hardwareone_libs" / "ArduinoJson" / "src"
-CASES = ("export", "icon", "files_create", "recordings", "notice")
+CASES = ("export", "icon", "files_create", "recordings")
 
 ARDUINO_STUB = r'''
 #pragma once
@@ -98,7 +98,6 @@ def production() -> str:
     utils_cpp = (COMPONENT / "WebServer_Utils.cpp").read_text()
     server = (COMPONENT / "WebServer_Server.cpp").read_text()
     sensors = (COMPONENT / "WebPage_Sensors.cpp").read_text()
-    events = (COMPONENT / "WebServer_Events.cpp").read_text()
     filesystem = (COMPONENT / "System_Filesystem.cpp").read_text()
     pieces: list[str] = []
     pieces += optional(utils_h, "inline String webJsonString(const String& text)")
@@ -111,7 +110,6 @@ def production() -> str:
     pieces.append(required(server, "esp_err_t handleFilesCreate("))
     pieces += optional(sensors, "static String buildRecordingsListJson(")
     pieces.append(required(sensors, "esp_err_t handleMicRecordingsList("))
-    pieces.append(required(events, "bool sseSendNotice("))
     return "\n\n".join(pieces)
 
 
@@ -160,13 +158,6 @@ def validate(case: str, found: dict[str, list[str]]) -> list[str]:
             expect([(f["name"], f["size"]) for f in reply.get("files", [])] == expected,
                    f"recordings files: {reply.get('files')!r}")
             expect(strict(found["RECORDINGS_EMPTY"][0]) == {"count": 0, "files": []}, "empty recordings")
-        elif case == "notice":
-            frame = found["NOTICE_FRAME"][0]
-            prefix = "event: notice\ndata: "
-            expect(frame.startswith(prefix) and frame.endswith("}\n\n"), f"notice frame: {frame!r}")
-            data = frame[len(prefix):-2]
-            expect("\n" not in data, "notice data stays on one line")
-            expect(strict(data) == {"msg": 'say "hi"\\ok\nnext\ttab'}, f"notice payload: {data!r}")
     except (KeyError, IndexError) as missing:
         problems.append(f"missing payload {missing}")
     except json.JSONDecodeError as invalid:

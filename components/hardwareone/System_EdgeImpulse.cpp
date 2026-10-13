@@ -1498,8 +1498,9 @@ bool isContinuousInferenceRunning() {
 static void appendDetectionJson(const EIResults& results, JsonDocument& doc) {
   doc["success"] = results.success;
   doc["inferenceTimeMs"] = results.inferenceTimeMs;
-  // Reported model geometry; modelInputSize (the width) is the field the
-  // web overlay reads.
+  // Reported model geometry. The web overlay reads modelInputWidth and
+  // modelInputHeight; modelInputSize (the width) remains for older readers,
+  // and the overlay falls back to it when a reply lacks the other two.
   doc["modelInputSize"] = gModelInputWidth;
   doc["modelInputWidth"] = gModelInputWidth;
   doc["modelInputHeight"] = gModelInputHeight;

@@ -1022,6 +1022,15 @@ foreach(test_name IN ITEMS log_level_application system_log_status command_feed)
             ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
             ${SETUP_MQTT_TEST_ARGS})
 endforeach()
+# Retired auth, session, SSE, help, registry and mutex helpers stay gone;
+# tgRequireAuth admits web requests only and a revoke queues no notice.
+foreach(test_name IN ITEMS dead_auth_helpers_removed)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
+            ${SETUP_MQTT_TEST_ARGS})
+endforeach()
 # `batterylog clear` reports a refused or failed remove instead of "cleared";
 # retired camera auto-capture, power auto mode and eiinputsize are neither
 # advertised in module descriptions or the command reference nor kept as a

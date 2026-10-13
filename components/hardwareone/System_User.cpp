@@ -110,14 +110,6 @@ static String uartSessionUserSnapshot() {
   return String(user);
 }
 
-static bool localDisplayBootAuthBypassActive() {
-#if ENABLE_OLED_DISPLAY
-  return oledBootModeActive;
-#else
-  return false;
-#endif
-}
-
 // ============================================================================
 // External Dependencies from .ino
 // ============================================================================
@@ -444,13 +436,6 @@ TransportSessionEpoch serialTransportInputEpoch() {
   return epoch;
 }
 
-bool serialTransportInputEpochIsCurrent(TransportSessionEpoch epoch) {
-  if (epoch == 0) return false;
-  String user;
-  bool authed = false;
-  return snapshotLegacyShadow(sSerialSession, user, authed) == epoch;
-}
-
 bool localDisplayTransportSessionBeginDelivery(TransportSessionEpoch epoch) {
   if (epoch == 0) return false;
   sessionWriterTake(sDisplaySessionWriter);
@@ -687,151 +672,33 @@ extern bool webPasswordChangeAllows(httpd_req_t* req, const String& user);
 // ============================================================================
 
 #if ENABLE_HTTP_SERVER
-// Require auth across transports. Returns true if authenticated; otherwise emits the
-// appropriate denial (401/console note) and returns false.
+// Web request admission. Every caller is an httpd handler that passes
+// makeWebAuthCtx(req); command transports are admitted by authorizeCommand
+// and their own receive paths, never here. Returns true if authenticated;
+// otherwise sends the denial and returns false. A context that is not a web
+// request is refused.
 bool tgRequireAuth(AuthContext& ctx) {
-  if (ctx.transport == SOURCE_WEB) {
-    httpd_req_t* req = reinterpret_cast<httpd_req_t*>(ctx.opaque);
-    if (!req) return false;
-    // Prefer cached auth for high-frequency endpoints
-    String userTmp;
-    bool ok = isAuthed(req, userTmp);
-    if (!ok) {
-      sendAuthRequiredResponse(req);
-      return false;
-    }
-    ctx.user = userTmp;
-    // Keep the bearer locator separate from the numeric command-generation
-    // fence. Basic Auth has no cookie and therefore remains intentionally
-    // stateless (empty sid / epoch zero).
-    ctx.sid = getCookieSID(req);
-    if (ctx.ip.length() == 0) { getClientIP(req, ctx.ip); }
-    logAuthAttempt(true, ctx.path.c_str(), ctx.user, ctx.ip, "");
-    // A forced password change admits only the change form and logout, for
-    // pages and APIs alike (userMustChangePassword is the one decision).
-    if (!webPasswordChangeAllows(req, ctx.user)) return false;
-    return true;
-  } else if (ctx.transport == SOURCE_SERIAL) {
-    // Serial console auth state. Use the synchronized fixed-storage shadow;
-    // targeted session administration can replace the legacy Arduino String
-    // from cmd_exec while another task is resolving a request.
-    String serialUser;
-    bool serialAuthed = false;
-    (void)serialTransportSessionSnapshot(serialUser, serialAuthed);
-    if (gSettings.serialRequireAuth && !serialAuthed) {
-      broadcastOutput("ERROR: auth required");
-      return false;
-    }
-    ctx.user = serialAuthed ? serialUser : String();
-    if (ctx.ip.length() == 0) ctx.ip = "local";
-    return true;
-  } else if (ctx.transport == SOURCE_UART) {
-    // UART host-link auth state — mirrors the serial branch against the
-    // link's own session pair. Must NOT fall into the trusting else-branch
-    // below (that branch assumes upstream validation the UART drain doesn't
-    // claim to do).
-    const String uartUser = uartSessionUserSnapshot();
-    if (gSettings.uartRequireAuth && uartUser.length() == 0) {
-      broadcastOutput("ERROR: auth required (uart)");
-      return false;
-    }
-    ctx.user = uartUser;
-    if (ctx.ip.length() == 0) ctx.ip = "uart";
-    return true;
-  } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
-    // Resolve from the synchronized authority, not the OLED-loop's legacy UI
-    // mirror. A remote login/logout updates this shadow synchronously and only
-    // then asks the main loop to redraw.
-    String displayUser;
-    bool displayAuthed = false;
-    (void)localDisplayTransportSessionSnapshot(displayUser, displayAuthed);
-    // Allow commands during boot phase (before auth is enforced).
-    if (gSettings.localDisplayRequireAuth && !displayAuthed &&
-        !localDisplayBootAuthBypassActive()) {
-      broadcastOutput("ERROR: auth required (display)");
-      return false;
-    }
-    ctx.user = displayAuthed ? displayUser : String();
-    if (ctx.ip.length() == 0) ctx.ip = "local";
-    return true;
-  } else if (ctx.transport == SOURCE_G2_GLASSES) {
-    // G2 lens — auth IS pairing. pairedByUser is the captured identity from
-    // pair-time (set by bleStampPairedByIfBlank when an authenticated CLI
-    // ran `bleautoreconnect g2-glasses on`). Blank means "paired-but-stamp-lost"
-    // — refuse the command and tell the user how to recover (re-stamp via
-    // bleautoreconnect from an authenticated CLI session).
-    String g2User = g2PairedUserGet();
-    if (g2User.length() == 0) {
-      broadcastOutput("ERROR: G2 pairedByUser blank — run 'bleautoreconnect g2-glasses on' from authenticated CLI to re-stamp");
-      return false;
-    }
-    ctx.user = g2User;
-    if (ctx.ip.length() == 0) ctx.ip = "g2.local";
-    return true;
-  } else {
-    // SOURCE_BLUETOOTH and SOURCE_ESPNOW are expected to validate auth in
-    // their command-receive handlers BEFORE submitting the command to
-    // executeCommand:
-    //   * BLE  — per-conn session token check in Bluetooth.cpp before submit
-    //   * ESP-NOW — v3 protocol signed msgId verification before submit
-    //   * MQTT — handleMQTTCommand checks the credential attempt table and
-    //     then the user/pass carried in every command envelope before submit
-    // SOURCE_INTERNAL is firmware-generated and trusted by design (used by
-    // automation rules, boot sequences, scheduled tasks).
-    return true;
+  if (ctx.transport != SOURCE_WEB) return false;
+  httpd_req_t* req = reinterpret_cast<httpd_req_t*>(ctx.opaque);
+  if (!req) return false;
+  // Prefer cached auth for high-frequency endpoints
+  String userTmp;
+  bool ok = isAuthed(req, userTmp);
+  if (!ok) {
+    sendAuthRequiredResponse(req);
+    return false;
   }
-}
-
-#else
-// Stub implementations when HTTP server is disabled
-bool tgRequireAuth(AuthContext& ctx) {
-  // Serial auth only when HTTP server disabled
-  if (ctx.transport == SOURCE_SERIAL) {
-    String serialUser;
-    bool serialAuthed = false;
-    (void)serialTransportSessionSnapshot(serialUser, serialAuthed);
-    if (gSettings.serialRequireAuth && !serialAuthed) {
-      broadcastOutput("ERROR: auth required");
-      return false;
-    }
-    ctx.user = serialAuthed ? serialUser : String();
-    if (ctx.ip.length() == 0) ctx.ip = "local";
-    return true;
-  } else if (ctx.transport == SOURCE_UART) {
-    // UART host link. This stub's fall-through returns true, so a missing
-    // case here would be an auth BYPASS, not a dead feature — keep this
-    // branch in lockstep with the full-build one above.
-    const String uartUser = uartSessionUserSnapshot();
-    if (gSettings.uartRequireAuth && uartUser.length() == 0) {
-      broadcastOutput("ERROR: auth required (uart)");
-      return false;
-    }
-    ctx.user = uartUser;
-    if (ctx.ip.length() == 0) ctx.ip = "uart";
-    return true;
-  } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
-    String displayUser;
-    bool displayAuthed = false;
-    (void)localDisplayTransportSessionSnapshot(displayUser, displayAuthed);
-    if (gSettings.localDisplayRequireAuth && !displayAuthed &&
-        !localDisplayBootAuthBypassActive()) {
-      broadcastOutput("ERROR: auth required (display)");
-      return false;
-    }
-    ctx.user = displayAuthed ? displayUser : String();
-    if (ctx.ip.length() == 0) ctx.ip = "local";
-    return true;
-  } else if (ctx.transport == SOURCE_G2_GLASSES) {
-    String g2User = g2PairedUserGet();
-    if (g2User.length() == 0) {
-      broadcastOutput("ERROR: G2 pairedByUser blank — run 'bleautoreconnect g2-glasses on' from authenticated CLI to re-stamp");
-      return false;
-    }
-    ctx.user = g2User;
-    if (ctx.ip.length() == 0) ctx.ip = "g2.local";
-    return true;
-  }
-  return true; // Internal commands pass through
+  ctx.user = userTmp;
+  // Keep the bearer locator separate from the numeric command-generation
+  // fence. Basic Auth has no cookie and therefore remains intentionally
+  // stateless (empty sid / epoch zero).
+  ctx.sid = getCookieSID(req);
+  if (ctx.ip.length() == 0) { getClientIP(req, ctx.ip); }
+  logAuthAttempt(true, ctx.path.c_str(), ctx.user, ctx.ip, "");
+  // A forced password change admits only the change form and logout, for
+  // pages and APIs alike (userMustChangePassword is the one decision).
+  if (!webPasswordChangeAllows(req, ctx.user)) return false;
+  return true;
 }
 #endif // ENABLE_HTTP_SERVER
 
@@ -949,7 +816,8 @@ static bool adminFromRosterJson(const String& json, const String& who) {
 
 // Determine if the given username is a super-admin (role == "superadmin").
 // This is the top tier: it gates identity/crypto/destructive/auth-posture
-// commands that an ordinary admin must not run (see commandRequiresSuperAdmin).
+// commands that an ordinary admin must not run (the requiresSuperAdmin column
+// of each command row, read by authorizeCommand).
 // The bonded ESP-NOW master (kBondAdminUser) is treated as super for the life
 // of a valid bond session — the bond is the token-authenticated 1:1 trust
 // channel and is intentionally the *only* over-the-air path to super (a
@@ -1949,14 +1817,6 @@ String getTransportUser(CommandSource transport) {
     default:
       return String();
   }
-}
-
-bool isTransportAdmin(CommandSource transport) {
-  String user = getTransportUser(transport);
-  if (user.length() == 0) {
-    return false;
-  }
-  return isAdminUser(user);
 }
 
 // ============================================================================
@@ -4274,14 +4134,6 @@ struct BootAnchor {
   BootAnchor(uint32_t seq, time_t epoch, unsigned long ms)
     : ntpAnchorId(seq), epochAtSync(epoch), millisAtSync(ms) {}
 };
-
-// Helper: Check if username exists in users.json content
-bool usernameExistsInUsersJson(const String& json, const String& username) {
-  char needleBuf[80];
-  snprintf(needleBuf, sizeof(needleBuf), "\"username\": \"%s\"", username.c_str());
-  String needle = needleBuf;
-  return json.indexOf(needle) >= 0;
-}
 
 // (Removed: loadUsersFromFile — read a `passwordHash` field that no longer
 // exists in users.json since the User struct moved to PBKDF2 with per-device

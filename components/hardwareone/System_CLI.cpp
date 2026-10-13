@@ -285,34 +285,6 @@ const char* renderHelpMain(bool showAll) {
   return "OK";
 }
 
-// Forward declaration (defined below)
-static void renderHelpModuleByName(const char* moduleName, const char* title);
-
-const char* renderHelpSystem() {
-  renderHelpModuleByName("system", "System Commands");
-  return "OK";
-}
-
-const char* renderHelpSettings() {
-  renderHelpModuleByName("settings", "Settings & Configuration");
-  return "OK";
-}
-
-const char* renderHelpAutomations() {
-  renderHelpModuleByName("automation", "Automations - Scheduled Tasks & Conditional Commands");
-  return "OK";
-}
-
-const char* renderHelpEspnow() {
-  renderHelpModuleByName("espnow", "ESP-NOW - Wireless Peer-to-Peer Communication");
-  return "OK";
-}
-
-const char* renderHelpWifi() {
-  renderHelpModuleByName("wifi", "WiFi Network Management");
-  return "OK";
-}
-
 const char* renderHelpSensors() {
   broadcastOutput("\033[2J\033[H");
   broadcastOutput("════════════════════════════════════════════════════════════════");
@@ -947,16 +919,6 @@ static void broadcastHelpNavFooter(const char* moduleName, size_t page,
   broadcastOutput("────────────────────────────────────────────────────────────────");
 }
 
-static const CommandModule* findHelpModule(const char* moduleName) {
-  if (!moduleName) return nullptr;
-  size_t moduleCount = 0;
-  const CommandModule* modules = getCommandModules(moduleCount);
-  for (size_t i = 0; i < moduleCount; ++i) {
-    if (strcmp(modules[i].name, moduleName) == 0) return &modules[i];
-  }
-  return nullptr;
-}
-
 // Plan the body once and, when requested, deterministically replay the same
 // item stream to emit only one selected page. The replay holds no page table or
 // full text buffer; its only mutable storage is the small Pager state and one
@@ -1014,21 +976,6 @@ static size_t renderModuleHelpPage(const CommandModule* module,
   broadcastHelpNavFooter(module->name, requestedPage, pageCount);
   debugQueueBackpressure();
   return pageCount;
-}
-
-// Render help for a single named module looked up from the command registry.
-// title may be nullptr — if so the title is derived from the module name.
-// All output is broadcast directly; nothing is returned.
-static void renderHelpModuleByName(const char* moduleName, const char* title) {
-  const CommandModule* module = findHelpModule(moduleName);
-  if (module) {
-    const HelpRenderSnapshot snapshot = captureHelpRenderSnapshot(module);
-    (void)renderModuleHelpPage(module, title, snapshot, 1, true);
-  } else {
-    broadcastOutput("\033[2J\033[H");
-    BROADCAST_PRINTF("  (No commands registered for module '%s')", moduleName);
-    broadcastHelpNavFooter(moduleName, 1, 1);
-  }
 }
 
 struct HelpModeEntryState {

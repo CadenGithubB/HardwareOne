@@ -2962,10 +2962,6 @@ setInterval(loadWaypoints, 5000);
 // API Handler Declarations (implementations in WebPage_Maps.cpp)
 // =============================================================================
 
-// Map select API - select a map file on device
-esp_err_t handleMapSelectAPI(httpd_req_t* req);
-esp_err_t handleMapUnloadAPI(httpd_req_t* req);
-
 // Map features API - get map metadata and feature names
 esp_err_t handleMapFeaturesAPI(httpd_req_t* req);
 

@@ -130,30 +130,6 @@ const CommandEntry* findCommand(const String& cmdLine) {
   return resolveCommand(cmdLine).entry;
 }
 
-// Check if a command should remain in help mode rather than exiting it.
-// Returns true for commands in the CLI module (help/back/exit/clear) and
-// any command whose name matches a registered module name (help navigation).
-bool isHelpModeCommand(const char* cmdName) {
-  size_t moduleCount;
-  const CommandModule* modules = getCommandModules(moduleCount);
-
-  // Check if command belongs to the CLI module (CMD_MODULE_CORE)
-  for (size_t i = 0; i < moduleCount; i++) {
-    if (!(modules[i].flags & CMD_MODULE_CORE)) continue;
-    const size_t commandCount = modules[i].commandCount();
-    for (size_t j = 0; j < commandCount; j++) {
-      if (strcasecmp(modules[i].commands[j].name, cmdName) == 0) return true;
-    }
-  }
-
-  // Check if command name matches any module name (help navigation shortcut)
-  for (size_t i = 0; i < moduleCount; i++) {
-    if (strcasecmp(modules[i].name, cmdName) == 0) return true;
-  }
-
-  return false;
-}
-
 // Resolve the canonical registry command key from a full command line
 // Uses longest-prefix matching to find the command name
 String resolveRegistryCommandKey(const String& command) {

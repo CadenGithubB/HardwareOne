@@ -170,7 +170,7 @@ struct DebugSubFlags {
   
   // SSE sub-flags
   bool sseConnection;   // SSE connection establishment
-  bool sseEvents;       // Event sending, notice queue
+  bool sseEvents;       // Event sending
   bool sseBroadcast;    // Broadcast routing, targeted messages
   
   // Command Flow sub-flags
@@ -808,9 +808,8 @@ extern char* gDebugBuffer;
 // ==========================================================================
 // Streaming Debug Instrumentation (centralized)
 // ==========================================================================
-// Records chunked HTTP streaming metrics per response for a concise summary
+// Names each streamed HTTP page in one HTTP-debug line
 void streamDebugReset(const char* tag);
-void streamDebugRecord(size_t sz, size_t chunkLimit);
 void streamDebugFlush();
 
 // ============================================================================

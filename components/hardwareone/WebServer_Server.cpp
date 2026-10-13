@@ -57,7 +57,6 @@
 #include "WebPage_Dashboard.h"
 #include "WebPage_Files.h"
 #include "WebPage_Login.h"
-#include "WebPage_LoginRequired.h"
 #include "WebPage_Logging.h"
 #include "WebPage_Battery.h"
 #include "WebPage_Power.h"
@@ -119,7 +118,6 @@
 
 // External dependencies from .ino (httpd_handle_t server declared in WebServer_Server.h)
 extern void streamCommonCSS(httpd_req_t* req);
-extern void streamDebugRecord(size_t bytes, size_t chunkSize);
 extern void streamDebugFlush();
 
 // Track whether the running server is HTTPS (true) or HTTP (false)
@@ -185,25 +183,16 @@ void httpServerStopPendingTick() {
 // SSE Helper Functions (moved from .ino)
 // ============================================================================
 
-void sseEnqueueNotice(SessionEntry& s, const String& msg);  // Forward declaration
 
 // The broadcast helpers and the fenced queue accessors live after the
 // session fence below.
 
-void sendSSEBurstToSession(int sessionIndex, const String& eventData) {
-  if (sessionIndex < 0 || sessionIndex >= MAX_SESSIONS) return;
-  if (gSessions[sessionIndex].sid.length() == 0) return;
-
-  DEBUG_SSEF("Would send SSE burst to session %d: %.50s...", sessionIndex, eventData.c_str());
-  gSessions[sessionIndex].needsStatusUpdate = true;
-}
 
 // ============================================================================
 // Global Variables - MUST BE FIRST, before any functions
 // ============================================================================
 
 // Session Management Globals
-String gSessUser;
 SessionEntry* gSessions = nullptr;
 
 // Logout reason tracking
@@ -308,22 +297,10 @@ bool webPublishSessionSlot(int idx) {
 // SSE fan-out and per-session queues
 // ============================================================================
 // Producers run on other tasks (the main-loop notification tick, BLE and G2
-// workers); handleEvents and handleNotice drain the queues on httpd, and login,
+// workers); handleEvents drains the event queue on httpd, and login,
 // logout and revoke replace slots there. Every queue access and slot read below
 // runs under WebSessionFenceGuard. The guard is never held across a viewer
 // predicate (it reads flash) or a socket write.
-
-void broadcastNoticeToAllSessions(const String& message) {
-  WebSessionFenceGuard guard;
-  if (!guard || !gSessions) return;
-  DEBUG_SSEF("Broadcasting notice to all sessions: %s", message.c_str());
-  for (int i = 0; i < MAX_SESSIONS; i++) {
-    if (gSessions[i].sid.length() > 0) {
-      sseEnqueueNotice(gSessions[i], message);
-      DEBUG_SSEF("Enqueued notice for session %d (user: %s) qCount=%d", i, gSessions[i].user.c_str(), gSessions[i].nqCount);
-    }
-  }
-}
 
 void broadcastEventToAllSessions(const char* eventName, const char* jsonData) {
   if (!eventName || !jsonData) return;
@@ -384,19 +361,12 @@ bool webSessionDequeueSseEvent(int idx, const String& sid,
   return sseDequeueEvent(gSessions[idx], outEventName, outData);
 }
 
-bool webSessionDequeueSseNotice(int idx, const String& sid, String& out) {
-  if (idx < 0 || idx >= MAX_SESSIONS || sid.length() == 0) return false;
-  WebSessionFenceGuard guard;
-  if (!guard || !gSessions || gSessions[idx].sid != sid) return false;
-  return sseDequeueNotice(gSessions[idx], out);
-}
-
-// Clears the pending-delivery flag once both of the session's queues are empty.
+// Clears the pending-delivery flag once the session's event queue is empty.
 void webSessionSettleSseQueues(int idx, const String& sid) {
   if (idx < 0 || idx >= MAX_SESSIONS || sid.length() == 0) return;
   WebSessionFenceGuard guard;
   if (!guard || !gSessions || gSessions[idx].sid != sid) return;
-  if (gSessions[idx].nqCount == 0 && gSessions[idx].eqCount == 0) {
+  if (gSessions[idx].eqCount == 0) {
     gSessions[idx].needsNotificationTick = false;
   }
 }
@@ -674,115 +644,6 @@ String setSession(httpd_req_t* req, const String& u) {
   // the DEBUG_AUTH lane above emits only a short diagnostic prefix.
   BROADCAST_PRINTF("[auth] setSession user=%s", u.c_str());
   return createdSid;
-}
-
-// ============================================================================
-// Unified Authentication Success Handler (moved from .ino)
-// TODO: This function handles both HTTP and Serial auth flows. Consider
-// decoupling the Serial auth handling to a separate module (serial_auth.cpp)
-// to better separate web concerns from serial CLI concerns.
-// ============================================================================
-
-// External dependencies for authSuccessUnified
-extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
-extern "C" void __attribute__((weak)) authSuccessDebug(const char* user,
-                                                       const char* ip,
-                                                       const char* path,
-                                                       const char* sid,
-                                                       const char* redirect,
-                                                       bool reused) {
-  // Default no-op; override in test harness or instrumentation module
-}
-
-esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
-  // Timestamp prefix with ms precision
-  char tsPrefix[40];
-  getTimestampPrefixMsCached(tsPrefix, sizeof(tsPrefix));
-  char prefixFallback[48];
-  if (!tsPrefix[0]) snprintf(prefixFallback, sizeof(prefixFallback), "[BOOT ms=%lu] | ", (unsigned long)millis());
-  const char* prefix = tsPrefix[0] ? tsPrefix : prefixFallback;
-
-  bool reused = false;
-  String sidShort;
-
-  if (ctx.transport == SOURCE_WEB) {
-    httpd_req_t* req = reinterpret_cast<httpd_req_t*>(ctx.opaque);
-    if (req) {
-      // Create or reuse session (Safari-safe cookie path inside setSession)
-      String sid = setSession(req, ctx.user);
-      ctx.sid = sid;
-      if (sid.length() > 8) {
-        char sidBuf[12];
-        snprintf(sidBuf, sizeof(sidBuf), "%.8s...", sid.c_str());
-        sidShort = sidBuf;
-      } else sidShort = sid;
-      // Heuristic: if session exists for same user+IP, setSession reuses; we mark reused
-      // We can't cheaply detect here without additional API; leave 'reused' default false.
-      if (ctx.ip.length() == 0) getClientIP(req, ctx.ip);
-    }
-  } else if (ctx.transport == SOURCE_SERIAL) {
-    // Establish serial-side session state
-    serialTransportSessionAuthenticated(
-        ctx.user.length() ? ctx.user : String("serial"));
-    // Admin decision left to existing logic; do not forcibly elevate here
-    sidShort = "serial";
-    if (ctx.ip.length() == 0) ctx.ip = "local";
-  } else if (ctx.transport == SOURCE_UART) {
-    // Establish UART host-link session state (mirrors serial; separate pair)
-    const String uartUser =
-        ctx.user.length() ? ctx.user : String("uart");
-    publishUartAccountSession(uartUser);
-    sidShort = "uart";
-    if (ctx.ip.length() == 0) ctx.ip = "uart";
-  } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
-    // Establish local display session state
-    localDisplayTransportSessionAuthenticated(
-        ctx.user.length() ? ctx.user : String("display"));
-    sidShort = "display";
-    if (ctx.ip.length() == 0) ctx.ip = "local";
-  } else {
-    // Internal/system commands
-    sidShort = "internal";
-    if (ctx.ip.length() == 0) ctx.ip = "local";
-  }
-
-  // Log unified success entry
-  String transportStr;
-  switch (ctx.transport) {
-    case SOURCE_WEB: transportStr = "http"; break;
-    case SOURCE_SERIAL: transportStr = "serial"; break;
-    case SOURCE_UART: transportStr = "uart"; break;
-    case SOURCE_LOCAL_DISPLAY: transportStr = "display"; break;
-    case SOURCE_G2_GLASSES: transportStr = "g2"; break;
-    case SOURCE_ESPNOW: transportStr = "espnow"; break;
-    case SOURCE_MQTT: transportStr = "mqtt"; break;
-    default: transportStr = "internal"; break;
-  }
-  
-  char logLine[384];
-  snprintf(logLine, sizeof(logLine),
-           "%sms=%lu event=auth_success user=%s ip=%s path=%s sid=%s transport=%s reused=%d redirect=%s",
-           prefix, (unsigned long)millis(),
-           ctx.user.length() ? ctx.user.c_str() : "<unknown>",
-           ctx.ip.length() ? ctx.ip.c_str() : "<none>",
-           ctx.path.length() ? ctx.path.c_str() : "<none>",
-           sidShort.length() ? sidShort.c_str() : "<none>",
-           transportStr.c_str(),
-           reused ? 1 : 0,
-           redirectTo ? redirectTo : "<none>");
-  appendLineWithCap(LOG_OK_FILE, logLine, LOG_CAP_BYTES);
-
-  // Weak hook for external instrumentation. Debug extensions receive the
-  // non-bearer hint, never the live session cookie.
-  authSuccessDebug(ctx.user.c_str(), ctx.ip.c_str(), ctx.path.c_str(), sidShort.c_str(), redirectTo ? redirectTo : "", reused);
-
-  // Transport-specific post-login actions
-  // Note: Web login response (303 redirect) is handled directly by handleLogin,
-  // not here. This function only handles logging and session state for all transports.
-  if (ctx.transport == SOURCE_SERIAL) {
-    DEBUG_HTTPF("OK: logged in (Serial transport)");
-  }
-  return ESP_OK;
 }
 
 // Session destruction
@@ -1512,27 +1373,20 @@ const char* banListJson() {
 
 // ============================================================================
 
-// Helper: enqueue a targeted revoke notice for a specific session index.
-// Marks session for revocation and sends notice to client for popup/redirect.
-// Session will be cleared on next auth check or after notice delivery.
+// Revoke the session in slot idx. isAuthed refuses a revoked slot from now
+// on; the slot is held as revoked for 30 s and then expires like any other.
+// The reason reaches the browser only as the stored logout reason
+// (storeLogoutReason, shown on the login page), which the callers that have
+// one record before calling this.
 void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg) {
+  (void)reasonMsg;
   if (idx < 0 || idx >= MAX_SESSIONS) return;
   WebSessionFenceGuard sessionGuard;
   if (!sessionGuard || !gSessions) return;
   if (gSessions[idx].sid.length() == 0) return;
-  const char* reason = reasonMsg.length() ? reasonMsg.c_str() : "Your session has been signed out by an administrator.";
-  char msgBuf[128];
-  snprintf(msgBuf, sizeof(msgBuf), "[revoke] %s", reason);
-  String msg(msgBuf);
-
-  // Mark session as revoked but keep it alive for notice delivery
   webInvalidateSessionSlot(idx);
   gSessions[idx].revoked = true;
-  // Set grace period for SSE delivery (30 seconds from now)
   gSessions[idx].expiresAt = millis() + 30000UL;
-
-  // Send SSE notice while session still exists
-  sseEnqueueNotice(gSessions[idx], msg);
 }
 
 int webRevokeSessionsForUser(const String& username,
@@ -1623,11 +1477,8 @@ extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, 
 extern void streamEndHtml(httpd_req_t* req);
 extern void streamChunk(httpd_req_t* req, const char* chunk);
 extern String getLogoutReason(const String& ip);
-extern String getLogoutReasonForAuthPage(httpd_req_t* req);
 extern bool isValidUser(const String& username, const String& password);
-extern String gSessUser;
 extern int findSessionIndexBySID(const String& sid);
-extern bool sseDequeueNotice(SessionEntry& s, String& out);
 // gWebMirror defined in WebServer_Utils.h
 extern unsigned long gWebMirrorSeq;
 extern void appendCommandToFeed(const char* origin, const String& cmd, const String& user, const String& ip);
@@ -1732,97 +1583,6 @@ extern void broadcastOutput(const String& s, const CommandContext& ctx);
 // handleSensorsPage moved to web_sensors.cpp
 
 // ============================================================================
-// SSE helpers exported for use by other modules (moved from .ino)
-// ============================================================================
-
-bool sseSessionAliveAndRefresh(int sessIdx, const String& sid) {
-  if (sessIdx < 0 || sessIdx >= MAX_SESSIONS) {
-    DEBUG_SSEF("Invalid session index: %d", sessIdx);
-    return false;
-  }
-  if (gSessions[sessIdx].sid != sid || sid.length() == 0) {
-    char storedBuf[12] = {0};
-    char providedBuf[12] = {0};
-    if (gSessions[sessIdx].sid.length() > 0) snprintf(storedBuf, sizeof(storedBuf), "%.8s...", gSessions[sessIdx].sid.c_str());
-    if (sid.length() > 0) snprintf(providedBuf, sizeof(providedBuf), "%.8s...", sid.c_str());
-    DEBUG_SSEF("Session SID mismatch or empty - stored: %s provided: %s",
-               storedBuf[0] ? storedBuf : "<empty>",
-               providedBuf[0] ? providedBuf : "<none>");
-    return false;
-  }
-  if (gSessions[sessIdx].sid.length() == 0) {
-    DEBUG_SSEF("Session was revoked/cleared - terminating SSE");
-    return false;
-  }
-  unsigned long now = millis();
-  if (gSessions[sessIdx].revoked) {
-    if (gSessions[sessIdx].expiresAt > 0 && (long)(now - gSessions[sessIdx].expiresAt) >= 0) {
-      DEBUG_SSEF("Revoked session grace period expired - terminating SSE");
-      return false;
-    }
-    return true;
-  }
-  if (gSessions[sessIdx].expiresAt > 0 && (long)(now - gSessions[sessIdx].expiresAt) >= 0) {
-    DEBUG_SSEF("Session expired - terminating SSE");
-    return false;
-  }
-  // Idle-logout terminates the SSE stream too. SSE is passive traffic, so it
-  // must NOT stamp lastInteractionMs — it only reads the idle clock. When the
-  // user has been idle past the window, drop the stream so the browser's next
-  // request hits isAuthed, gets 401, and redirects to /login.
-  if (sessionIdleExpired(SOURCE_WEB, gSessions[sessIdx].lastInteractionMs, now)) {
-    DEBUG_SSEF("Session idle-expired - terminating SSE");
-    return false;
-  }
-  gSessions[sessIdx].lastSeen = now;
-  gSessions[sessIdx].expiresAt = now + SESSION_TTL_MS;
-  static unsigned long lastDbg = 0;
-  if ((long)(now - lastDbg) >= 30000) {
-    DEBUG_SSEF("session refreshed; next exp=%lu", gSessions[sessIdx].expiresAt);
-    lastDbg = now;
-  }
-  return true;
-}
-
-bool sseSendLogs(httpd_req_t* req, unsigned long seq, const String& buf) {
-  // Only send the last N lines to avoid huge payloads blocking the UI
-  const int MAX_LINES = 200;
-  int linesFound = 0;
-  int startIdx = buf.length();
-  while (startIdx > 0 && linesFound <= MAX_LINES) {
-    int prev = buf.lastIndexOf('\n', startIdx - 1);
-    if (prev < 0) { startIdx = 0; break; }
-    startIdx = prev;
-    linesFound++;
-  }
-  if (linesFound > MAX_LINES && startIdx < (int)buf.length()) {
-    startIdx = startIdx + 1;
-  } else if (startIdx < 0) {
-    startIdx = 0;
-  }
-
-  String out;
-  out.reserve(64 + (buf.length() - startIdx));
-  out += "id: "; out += String(seq); out += "\n";
-  out += "event: logs\n";
-  int start = startIdx;
-  int lines = 0;
-  while (start < (int)buf.length()) {
-    int nl = buf.indexOf('\n', start);
-    if (nl < 0) nl = buf.length();
-    out += "data: ";
-    out += buf.substring(start, nl);
-    out += "\n";
-    lines++;
-    start = nl + 1;
-  }
-  out += "\n";
-  esp_err_t r = httpd_resp_send_chunk(req, out.c_str(), out.length());
-  DEBUG_SSEF("sendLogs: seq=%lu, lines=%d %s", seq, lines, (r == ESP_OK ? "OK" : "FAIL"));
-  return r == ESP_OK;
-}
-
-// ============================================================================
 // Basic Auth Helper Functions
 // ============================================================================
 
@@ -1918,28 +1678,6 @@ bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& h
 // rebuildExpectedAuthHeader() deleted (was the producer for the Basic-Auth
 // fast-path cache). decodeBasicAuth now always uses the base64 slow path.
 
-// Send basic auth required response
-void sendAuthRequired(httpd_req_t* req) {
-  httpd_resp_set_status(req, "401 Unauthorized");
-  httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"ESP32\"");
-  const char* msg = "Authentication required";
-  httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
-}
-
-// Redirect helper for UI pages: send user to /login (no next param)
-void redirectToLogin(httpd_req_t* req) {
-  const char* uri = req ? req->uri : "/";
-  const char* loc = "/login";
-  // Limit URI length in logs to avoid format-truncation warnings
-  DEBUG_AUTHF("[auth] redirectToLogin: uri=%.96s, loc=%s", uri, loc);
-  httpd_resp_set_status(req, "302 Found");
-  httpd_resp_set_hdr(req, "Location", loc);
-  httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
-  httpd_resp_set_hdr(req, "Pragma", "no-cache");
-  httpd_resp_set_type(req, "text/plain");
-  httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
-}
-
 // ============================================================================
 // Logout Reason Helpers
 // ============================================================================
@@ -1974,35 +1712,6 @@ void clearLogoutReason(const String& ip) {
       return;
     }
   }
-}
-
-// Function called from auth required page to get logout reason
-String getLogoutReasonForAuthPage(httpd_req_t* req) {
-  String logoutReason = "";
-  String clientIP;
-  getClientIP(req, clientIP);
-  if (clientIP.length() > 0) {
-    logoutReason = getLogoutReason(clientIP);
-    DEBUG_AUTHF("Login page for IP='%s' logout reason='%s'", clientIP.c_str(), logoutReason.c_str());
-  }
-
-  // Fallback to URL parameters if no stored reason
-  if (logoutReason.length() == 0 && req) {
-    String uri = String(req->uri);
-    int reasonPos = uri.indexOf("reason=");
-    if (reasonPos >= 0) {
-      reasonPos += 7;  // Skip "reason="
-      int endPos = uri.indexOf('&', reasonPos);
-      if (endPos < 0) endPos = uri.length();
-      logoutReason = uri.substring(reasonPos, endPos);
-      // URL decode basic characters
-      logoutReason.replace("%20", " ");
-      logoutReason.replace("%21", "!");
-      logoutReason.replace("%2E", ".");
-    }
-  }
-
-  return logoutReason;
 }
 
 // NOTE: logAuthAttempt() and recordLoginAttempt() moved to System_Debug.cpp
@@ -3362,74 +3071,6 @@ esp_err_t handleSessionsList(httpd_req_t* req) {
   return ESP_OK;
 }
 
-// Admin: list all sessions
-esp_err_t handleAdminSessionsList(httpd_req_t* req) {
-  WEB_AUTH_OR_RETURN(req, ctx);
-  if (!isAdminUser(ctx.user)) {
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin access required\"}");
-    return ESP_OK;
-  }
-  // Build response using ArduinoJson (no String concatenation)
-  PSRAM_JSON_DOC(doc);
-  doc["success"] = true;
-  JsonArray sessions = doc["sessions"].to<JsonArray>();
-  
-  String currentSid = getCookieSID(req);
-  buildAllSessionsJson(currentSid, sessions);
-  
-  String response;
-  serializeJson(doc, response);
-  
-  sendJsonResponse(req, response.c_str());
-  return ESP_OK;
-}
-
-// Notice endpoint: returns and clears per-session notice
-esp_err_t handleNotice(httpd_req_t* req) {
-  httpd_resp_set_type(req, "application/json");
-
-  // Check authentication manually to return JSON on failure
-  String user;
-  String ip;
-  getClientIP(req, ip);
-
-  if (!isAuthed(req, user)) {
-    // Return 401 with JSON response instead of HTML
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Authentication required\"}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-
-  String sid = getCookieSID(req);
-  String note = "";
-  bool revoked = false;
-  {
-    // The fence covers only the queue and slot update; the cookie header and
-    // the response are written after it is released.
-    WebSessionFenceGuard sessionGuard;
-    int idx = findSessionIndexBySID(sid);
-    if (sessionGuard && idx >= 0) {
-      // Dequeue one notice from the ring if available
-      String dequeued;
-      if (sseDequeueNotice(gSessions[idx], dequeued)) {
-        note = dequeued;
-        // If this is a revoke notice, immediately clear the session and expire cookie
-        if (note.startsWith("[revoke]")) {
-          webInvalidateSessionSlot(idx);
-          gSessions[idx] = SessionEntry();
-          revoked = true;
-        }
-      }
-    }
-  }
-  if (revoked) writeSessionCookie(req, String());  // empty sid → Max-Age=0
-  String escaped = jsonEscape(note);
-  char jsonBuf[256];
-  snprintf(jsonBuf, sizeof(jsonBuf), "{\"success\":true,\"notice\":\"%.*s\"}", (int)(sizeof(jsonBuf) - 40), escaped.c_str());
-  httpd_resp_send(req, jsonBuf, HTTPD_RESP_USE_STRLEN);
-  return ESP_OK;
-}
-
 // Auth-protected text log endpoint returning mirrored output
 esp_err_t handleLogs(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
@@ -4219,52 +3860,6 @@ esp_err_t sendAuthRequiredResponse(httpd_req_t* req) {
   httpd_resp_set_hdr(req, "Location", "/login");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
   httpd_resp_send(req, "", 0);
-  return ESP_OK;
-}
-
-// Session setter: Step 2 of login process - set fresh cookies after clearing old ones
-esp_err_t handleLoginSetSession(httpd_req_t* req) {
-  // Check if we have a pending session to set
-  if (gSessUser.length() == 0) {
-    broadcastOutput("[login] No pending session, redirecting to login");
-    httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "/login");
-    httpd_resp_send(req, "", 0);
-    return ESP_OK;
-  }
-
-  // Create a new session entry and set cookies
-  String user = gSessUser;  // capture then clear
-  setSession(req, user);
-  gSessUser = "";
-  BROADCAST_PRINTF("[login] Session set for user: %s", user.c_str());
-
-  // Send HTML page with JavaScript redirect and cookie verification
-  httpd_resp_set_type(req, "text/html");
-  httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-  String html = "<!DOCTYPE html><html><head><title>Login Success</title></head><body>";
-  html += "<script>";
-  html += "console.log('Cookie verification page loaded');";
-  html += "console.log('Document.cookie:', document.cookie);";
-  html += "if(document.cookie.indexOf('session=') >= 0) {";
-  html += "  console.log('Session cookie found, redirecting to dashboard');";
-  html += "  window.location.href = '/dashboard';";
-  html += "} else {";
-  html += "  console.log('No session cookie found, waiting 1 second and retrying');";
-  html += "  setTimeout(function() {";
-  html += "    console.log('Retry - Document.cookie:', document.cookie);";
-  html += "    if(document.cookie.indexOf('session=') >= 0) {";
-  html += "      window.location.href = '/dashboard';";
-  html += "    } else {";
-  html += "      console.log('Cookie still not found, redirecting to login');";
-  html += "      window.location.href = '/login';";
-  html += "    }";
-  html += "  }, 1000);";
-  html += "}";
-  html += "</script>";
-  html += "<p>Login successful, checking session...</p>";
-  html += "</body></html>";
-  httpd_resp_send(req, html.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
@@ -5546,43 +5141,6 @@ esp_err_t handleAutomationsExport(httpd_req_t* req) {
 #endif // ENABLE_AUTOMATION
 
 // ============================================================================
-// SSE Notice Queue Helpers (moved from HardwareOne.ino)
-// ============================================================================
-
-void sseEnqueueNotice(SessionEntry& s, const String& msg) {
-  // Queue-only policy: if full, drop oldest then enqueue new
-  const int cap = SessionEntry::NOTICE_QUEUE_SIZE;
-  if (s.nqCount < cap) {
-    // Copy message to buffer, truncating if necessary
-    strncpy(s.noticeQueue[s.nqTail], msg.c_str(), SessionEntry::NOTICE_MAX_LEN - 1);
-    s.noticeQueue[s.nqTail][SessionEntry::NOTICE_MAX_LEN - 1] = '\0';  // Ensure null termination
-    s.nqTail = (s.nqTail + 1) % cap;
-    s.nqCount++;
-  } else {
-    // Drop oldest
-    s.nqHead = (s.nqHead + 1) % cap;
-    if (s.nqDropped < UINT16_MAX) s.nqDropped++;  // silent loss — make it countable
-    // Enqueue new at tail
-    strncpy(s.noticeQueue[s.nqTail], msg.c_str(), SessionEntry::NOTICE_MAX_LEN - 1);
-    s.noticeQueue[s.nqTail][SessionEntry::NOTICE_MAX_LEN - 1] = '\0';
-    s.nqTail = (s.nqTail + 1) % cap;
-    // nqCount remains at capacity
-  }
-  // Enter burst mode for faster reconnects for a short period
-  s.noticeBurstUntil = millis() + 15000UL;  // 15s burst window
-  s.needsNotificationTick = true;
-}
-
-bool sseDequeueNotice(SessionEntry& s, String& out) {
-  if (s.nqCount == 0) return false;
-  const int cap = SessionEntry::NOTICE_QUEUE_SIZE;
-  out = String(s.noticeQueue[s.nqHead]);
-  s.nqHead = (s.nqHead + 1) % cap;
-  s.nqCount--;
-  return true;
-}
-
-// ============================================================================
 // Sensor Status Broadcast (moved from HardwareOne.ino)
 // ============================================================================
 
@@ -6164,7 +5722,6 @@ register_handlers:
   static const httpd_uri_t root = { .uri = "/", .method = HTTP_GET, .handler = handleRoot, .user_ctx = NULL };
   static const httpd_uri_t loginGet = { .uri = "/login", .method = HTTP_GET, .handler = handleLogin, .user_ctx = NULL };
   static const httpd_uri_t loginPost = { .uri = "/login", .method = HTTP_POST, .handler = handleLogin, .user_ctx = NULL };
-  static const httpd_uri_t loginSetSess = { .uri = "/login/setsession", .method = HTTP_GET, .handler = handleLoginSetSession, .user_ctx = NULL };
   static const httpd_uri_t logout = { .uri = "/logout", .method = HTTP_GET, .handler = handleLogout, .user_ctx = NULL };
   static const httpd_uri_t ping = { .uri = "/api/ping", .method = HTTP_GET, .handler = handlePing, .user_ctx = NULL };
   static const httpd_uri_t dash = { .uri = "/dashboard", .method = HTTP_GET, .handler = handleDashboard, .user_ctx = NULL };
@@ -6177,7 +5734,6 @@ register_handlers:
   static const httpd_uri_t userSettingsSet = { .uri = "/api/user/settings", .method = HTTP_POST, .handler = handleUserSettingsSet, .user_ctx = NULL };
   static const httpd_uri_t devicesGet = { .uri = "/api/devices", .method = HTTP_GET, .handler = handleDeviceRegistryGet, .user_ctx = NULL };
   static const httpd_uri_t buildConfig = { .uri = "/api/buildconfig", .method = HTTP_GET, .handler = handleBuildConfig, .user_ctx = NULL };
-  static const httpd_uri_t apiNotice = { .uri = "/api/notice", .method = HTTP_GET, .handler = handleNotice, .user_ctx = NULL };
   static const httpd_uri_t apiEvents = { .uri = "/api/events", .method = HTTP_GET, .handler = handleEvents, .user_ctx = NULL };
   static const httpd_uri_t apiEventsKinds = { .uri = "/api/events/kinds", .method = HTTP_GET, .handler = handleEventsKinds, .user_ctx = NULL };
   static const httpd_uri_t apiLoggingStatus = { .uri = "/api/logging/status", .method = HTTP_GET, .handler = handleLoggingStatus, .user_ctx = NULL };
@@ -6203,7 +5759,7 @@ register_handlers:
   static const httpd_uri_t systemStatus = { .uri = "/api/system", .method = HTTP_GET, .handler = handleSystemStatus, .user_ctx = NULL };
   // Sessions (admin)
   static const httpd_uri_t sessionsList = { .uri = "/api/sessions", .method = HTTP_GET, .handler = handleSessionsList, .user_ctx = NULL };
-  static const httpd_uri_t adminSessionsList = { .uri = "/api/admin/sessions", .method = HTTP_GET, .handler = handleAdminSessionsList, .user_ctx = NULL };
+  static const httpd_uri_t adminSessionsList = { .uri = "/api/admin/sessions", .method = HTTP_GET, .handler = handleSessionsList, .user_ctx = NULL };
 #if ENABLE_AUTOMATION
   static const httpd_uri_t automationsGet = { .uri = "/api/automations", .method = HTTP_GET, .handler = handleAutomationsGet, .user_ctx = NULL };
   static const httpd_uri_t automationsExport = { .uri = "/api/automations/export", .method = HTTP_GET, .handler = handleAutomationsExport, .user_ctx = NULL };
@@ -6225,7 +5781,6 @@ register_handlers:
   httpd_register_uri_handler(server, &root);
   httpd_register_uri_handler(server, &loginGet);
   httpd_register_uri_handler(server, &loginPost);
-  httpd_register_uri_handler(server, &loginSetSess);
   httpd_register_uri_handler(server, &logout);
   httpd_register_uri_handler(server, &ping);
   // Migration CORS/backup early — these must not lose slots to later page
@@ -6245,7 +5800,6 @@ register_handlers:
   httpd_register_uri_handler(server, &userSettingsSet);
   httpd_register_uri_handler(server, &devicesGet);
   httpd_register_uri_handler(server, &buildConfig);
-  httpd_register_uri_handler(server, &apiNotice);
   httpd_register_uri_handler(server, &filesPage);
   httpd_register_uri_handler(server, &filesList);
   httpd_register_uri_handler(server, &filesStats);

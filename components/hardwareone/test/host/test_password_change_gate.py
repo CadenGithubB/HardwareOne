@@ -81,9 +81,9 @@ def source_contract() -> None:
     """The adapters consult the owners instead of deciding themselves."""
     user = (COMPONENT / "System_User.cpp").read_text()
     server = (COMPONENT / "WebServer_Server.cpp").read_text()
+    # tgRequireAuth admits web requests only; its whole body is the web path.
     auth = extract_block(user, "bool tgRequireAuth(AuthContext& ctx)")
-    web_branch = auth[:auth.index("ctx.transport == SOURCE_SERIAL")]
-    require("webPasswordChangeAllows(req, ctx.user)" in web_branch,
+    require("webPasswordChangeAllows(req, ctx.user)" in auth,
             "tgRequireAuth must run the forced-password-change gate for every web request")
     setter = unique(user, "bool setUserPassword(", "System_User.cpp")
     require("must_change_cache::sWrites.fetch_add(" in setter,

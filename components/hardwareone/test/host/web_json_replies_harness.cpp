@@ -1,7 +1,7 @@
 // Hand-built web replies and header storage, run against the production
 // handler bodies that test_web_json_replies.py inserts:
 //   handleAutomationsExport (?id= and bulk), handleIconGet (?debug=1),
-//   handleFilesCreate, handleMicRecordingsList, sseSendNotice, and the shared
+//   handleFilesCreate, handleMicRecordingsList, and the shared
 //   webJsonString / sendJsonError helpers where the tree has them.
 // httpd_resp_set_hdr keeps the caller's pointer and httpd_resp_send reads it,
 // as ESP-IDF does, so a header value that died before the send is a
@@ -20,7 +20,6 @@
 #define ENABLE_MICROPHONE 1
 #define PSRAM_JSON_DOC(name) JsonDocument name
 #define DEBUG_HTTPF(...) ((void)0)
-#define DEBUG_SSEF(...) ((void)0)
 
 using esp_err_t = int;
 constexpr esp_err_t ESP_OK = 0;
@@ -175,10 +174,6 @@ static std::string gRecordings;
 String getRecordingsList() { return gRecordings.c_str(); }
 struct ExecIdentityGuard { explicit ExecIdentityGuard(const AuthContext&) {} };
 
-// ---- SSE fixtures ----
-static std::string gSseFrame;
-bool sseWrite(httpd_req_t*, const char* chunk) { gSseFrame = chunk; return true; }
-
 // INSERT_PRODUCTION
 
 static int failures = 0;
@@ -271,20 +266,12 @@ static void caseRecordings() {
   emit("RECORDINGS_EMPTY", empty.body);
 }
 
-static void caseNotice() {
-  httpd_req_t req;
-  gSseFrame.clear();
-  check(sseSendNotice(&req, String("say \"hi\"\\ok\nnext\ttab")), "notice sent");
-  emit("NOTICE_FRAME", gSseFrame);
-}
-
 int main(int argc, char** argv) {
   const std::string which = argc > 1 ? argv[1] : "all";
   if (which == "export" || which == "all") caseExport();
   if (which == "icon" || which == "all") caseIcon();
   if (which == "files_create" || which == "all") caseFilesCreate();
   if (which == "recordings" || which == "all") caseRecordings();
-  if (which == "notice" || which == "all") caseNotice();
   std::printf("DONE\t%d\n", failures);
   return failures ? 1 : 0;
 }

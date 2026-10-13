@@ -14,7 +14,7 @@
 
 // Session gate lives here.
 // Defined unconditionally so the auth plumbing (revocation sweeps, session
-// list, tgRequireAuth) links on every board, including ones without link pins.
+// list, getTransportUser) links on every board, including ones without link pins.
 // The active epoch is the single atomic authority token: zero means logged
 // out; every login publishes a new nonzero value. The username is fixed
 // storage under sUartSessionMux and is never exposed as a mutable String.

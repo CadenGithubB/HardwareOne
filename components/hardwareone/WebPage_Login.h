@@ -5,8 +5,6 @@
 // WebPage_Login.h - Login page content
 // ============================================================================
 
-// Forward declaration - implemented in WebServer_Server.cpp
-String getLogoutReasonForAuthPage(httpd_req_t* req);
 // Implemented in WebServer_Utils.cpp (declared in WebServer_Utils.h)
 void streamHtmlEscaped(httpd_req_t* req, const char* buf, size_t len);
 

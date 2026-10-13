@@ -14,7 +14,6 @@
 
 SemaphoreHandle_t gFsMutex = nullptr;
 SemaphoreHandle_t gJsonResponseMutex = nullptr;
-SemaphoreHandle_t gFileTransferMutex = nullptr;
 SemaphoreHandle_t gTopoStreamsMutex = nullptr;
 SemaphoreHandle_t gEspNowSessionTxMutex = nullptr;
 SemaphoreHandle_t gMapCacheMutex = nullptr;
@@ -28,17 +27,13 @@ void initMutexes() {
   // Create standard mutexes
   gFsMutex = xSemaphoreCreateMutex();
   gJsonResponseMutex = xSemaphoreCreateMutex();
-  gFileTransferMutex = xSemaphoreCreateMutex();
   gTopoStreamsMutex = xSemaphoreCreateMutex();
   gEspNowSessionTxMutex = xSemaphoreCreateMutex();
   gMapCacheMutex = xSemaphoreCreateMutex();
   i2sMicMutex = xSemaphoreCreateMutex();
 
-  // i2cMutex removed — I2cLockGuard and i2cLock/Unlock go through I2CDeviceManager::getBusMutex() directly
-
   // Log creation status
   bool allCreated = (gFsMutex != nullptr) && (gJsonResponseMutex != nullptr) &&
-                    (gFileTransferMutex != nullptr) &&
                     (gTopoStreamsMutex != nullptr) && (gEspNowSessionTxMutex != nullptr) &&
                     (gMapCacheMutex != nullptr) && (i2sMicMutex != nullptr);
   
@@ -139,26 +134,6 @@ MapCacheGuard::~MapCacheGuard() {
   }
 }
 
-// ============================================================================
-// I2cLockGuard Implementation
-// ============================================================================
-
-I2cLockGuard::I2cLockGuard(const char* owner) : held(false) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  SemaphoreHandle_t m = mgr ? mgr->getBusMutex() : nullptr;
-  if (m && xSemaphoreTake(m, portMAX_DELAY) == pdTRUE) {
-    held = true;
-  }
-}
-
-I2cLockGuard::~I2cLockGuard() {
-  if (held) {
-    I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-    SemaphoreHandle_t m = mgr ? mgr->getBusMutex() : nullptr;
-    if (m) xSemaphoreGive(m);
-  }
-}
-
 I2sMicLockGuard::I2sMicLockGuard(const char* owner) : held(false) {
   if (i2sMicMutex) {
     if (isHeldByCurrentTask(i2sMicMutex)) {
@@ -202,17 +177,6 @@ SensorCacheGuard::~SensorCacheGuard() {
   }
 }
 
-void i2cLock(const char* owner) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  SemaphoreHandle_t m = mgr ? mgr->getBusMutex() : nullptr;
-  if (m) xSemaphoreTake(m, portMAX_DELAY);
-}
-
-void i2cUnlock() {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  SemaphoreHandle_t m = mgr ? mgr->getBusMutex() : nullptr;
-  if (m) xSemaphoreGive(m);
-}
 
 // ============================================================================
 // JsonBufferGuard Implementation
@@ -235,26 +199,6 @@ JsonBufferGuard::~JsonBufferGuard() {
   }
 }
 
-// ============================================================================
-// FileTransferGuard Implementation
-// ============================================================================
-
-FileTransferGuard::FileTransferGuard(const char* owner) : held(false) {
-  if (gFileTransferMutex) {
-    if (isHeldByCurrentTask(gFileTransferMutex)) {
-      return;
-    }
-    if (xSemaphoreTake(gFileTransferMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      held = true;
-    }
-  }
-}
-
-FileTransferGuard::~FileTransferGuard() {
-  if (held && gFileTransferMutex) {
-    xSemaphoreGive(gFileTransferMutex);
-  }
-}
 
 // ============================================================================
 // TopoStreamsGuard Implementation
