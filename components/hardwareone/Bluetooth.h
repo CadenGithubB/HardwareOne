@@ -162,11 +162,14 @@ int bleDisconnectAppClients();
 // Returns true when at least one session accepted it. blocking=false makes each send
 // best-effort (used by the debug console mirror so it never stalls the debug task).
 bool sendBLEResponse(const char* data, size_t len, bool blocking = true);
+// Number of sessions sendBLEResponse would reach right now (the same
+// logged-in, non-guest eligibility). The debug console mirror buffers only
+// while this is non-zero; `outble` reports it.
+int bleMirrorRecipientCount();
 
-// Send to the connection's current session, or to an explicitly captured
-// session epoch.  The latter is required for deferred callbacks: a stale result
-// is dropped if the peer disconnected, logged out, or connId was reused.
-bool sendBLEResponseToConn(uint16_t connId, const char* data, size_t len);
+// Send to one session: the connection id and the session epoch captured when
+// the command (or the subscription) was admitted. A stale result is dropped if
+// the peer disconnected, logged out, or connId was reused by a new session.
 // blocking=false makes the secure-channel send try-lock, exactly like the
 // sendBLEResponse console-mirror path: a best-effort producer (the notification
 // sink, called from the main loop) must never stall behind a paced multi-frame
@@ -294,7 +297,7 @@ inline bool isBLEConnected() { return false; }
 inline BleDisconnectResult bleDisconnectConnection(uint16_t) { return BleDisconnectResult::UNAVAILABLE; }
 inline int bleDisconnectAppClients() { return 0; }
 inline bool sendBLEResponse(const char*, size_t, bool = true) { return false; }
-inline bool sendBLEResponseToConn(uint16_t, const char*, size_t) { return false; }
+inline int bleMirrorRecipientCount() { return 0; }
 inline bool sendBLEResponseToSession(uint16_t, TransportSessionEpoch,
                                      const char*, size_t, bool = true) { return false; }
 inline bool blePushNotification(uint16_t, TransportSessionEpoch, const char*,

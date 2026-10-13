@@ -521,7 +521,6 @@ inline bool isDebugOutputEnabled(DebugFlagMask flag) {
 #define DEBUG_RING_PROTOCOLF(fmt, ...)  DEBUGF_QUEUE_DEBUG(DEBUG_RING | DEBUG_RING_PROTOCOL,  fmt, ##__VA_ARGS__)
 #define DEBUG_RING_TXNF(fmt, ...)       DEBUGF_QUEUE_DEBUG(DEBUG_RING | DEBUG_RING_TXN,       fmt, ##__VA_ARGS__)
 #define DEBUG_RING_HEALTHF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_RING | DEBUG_RING_HEALTH,    fmt, ##__VA_ARGS__)
-#define DEBUG_RING_BRIDGEF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_RING | DEBUG_RING_BRIDGE,    fmt, ##__VA_ARGS__)
 #define DEBUG_RING_DUMPF(fmt, ...)      DEBUGF_QUEUE_DEBUG(DEBUG_RING | DEBUG_RING_DUMP,      fmt, ##__VA_ARGS__)
 #define DEBUG_CAMERAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_CAMERA, fmt, ##__VA_ARGS__)
 // Camera sub-flag macros — gate on parent OR sub-flag so the Camera "All"

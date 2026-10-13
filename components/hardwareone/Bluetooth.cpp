@@ -894,7 +894,7 @@ void bleAddMessageToHistory(const char* msg);
 static bool bleIsFileBrowserCommand(const char* line) {
   static const char* const kVerbs[] = {
     "files", "fileread", "filewrite", "fileview", "filecreate",
-    "filedelete", "filerename", "mkdir", "rmdir", "otawrite"
+    "filedelete", "filerename", "mkdir", "rmdir", "otawrite", "imagedelete"
   };
   for (const char* v : kVerbs) {
     size_t n = strlen(v);
@@ -1642,11 +1642,16 @@ bool deinitBluetooth() {
   // deferred stop leaves the server's sessions and advertising as they were.
   if (!g2RingPrepareForStackTeardown(2000)) {
     broadcastOutput("[BLE] Server stop deferred: Ring owner did not quiesce");
-    // A companion reset (the RECOVERING claim this nested claim joined) takes
-    // the host down after this returns, whatever it reports, and that frees the
-    // GATT objects. Close session admission and advertising first, so no
-    // directed sender reaches a freed characteristic. Every other caller keeps
-    // the server running.
+    // A companion reset (the RECOVERING claim this nested claim joined) honours
+    // this result: it retries the stop a bounded number of times and never
+    // forces the host down while the Ring owner is busy. If no attempt
+    // completes, it leaves the host up while the companion reboots underneath
+    // it and keeps Bluetooth off until a reboot (System_RadioCompanion.cpp
+    // shutDownBleForCompanionReset). No link survives that reboot, so close
+    // session admission and advertising now: no directed sender queues a
+    // result into a link that is about to vanish, and no new peer connects to
+    // a host that will be left stale. Every other caller keeps the server
+    // running.
     if (bleRoleTransitionState() == BleRoleTransition::RECOVERING) {
       {
         BleLifecycleGuard lifecycle;
@@ -1949,12 +1954,6 @@ bool bleRawNotifyToSession(uint16_t connId,
   return sent;
 }
 
-bool sendBLEResponseToConn(uint16_t connId, const char* data, size_t len) {
-  const TransportSessionEpoch epoch =
-      bleSessionEpochForConnection(connId);
-  return sendBLEResponseToSession(connId, epoch, data, len);
-}
-
 // One session as a send target: a connection and the session epoch captured
 // for it (the console-mirror collector's recipient record).
 struct BleSessionFence { uint16_t connId; TransportSessionEpoch epoch; };
@@ -2012,6 +2011,15 @@ static int bleCollectMirrorSessions(BleSessionFence* out, int cap) {
     out[count++] = BleSessionFence{c.connId, epoch};
   }
   return count;
+}
+
+// The debug console mirror's "has a recipient" predicate and the `outble`
+// status count: the same collector sendBLEResponse uses, so the drain buffers
+// exactly when a flush could reach somebody (with only guest sessions logged
+// in it used to fill and drop its buffer for nothing).
+int bleMirrorRecipientCount() {
+  BleSessionFence sessions[BLE_MAX_CONNECTIONS];
+  return bleCollectMirrorSessions(sessions, BLE_MAX_CONNECTIONS);
 }
 
 // Output chokepoint for broadcast/streamed device output (the debug-drain console

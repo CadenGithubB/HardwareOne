@@ -303,10 +303,12 @@ int main() {
   expectReleased();
 
   // C1: companion reset (System_RadioCompanion shutDownBleForCompanionReset):
-  // the outer RECOVERING claim, then deinitBluetooth(), then a forced host
-  // teardown whatever it reports, which frees the GATT objects. A Ring-deferred
-  // stop must close session admission first, or a directed sender to a live
-  // session passes admission and reaches the freed response characteristic.
+  // the outer RECOVERING claim, then deinitBluetooth(), retried a bounded
+  // number of times; the host is never forced down while the Ring owner is
+  // busy (companion_ble_shutdown). If no attempt completes, the companion
+  // reboots under a host left up, so no link survives: a Ring-deferred stop
+  // must close session admission and advertising itself, or a directed sender
+  // queues a result into a link that is about to vanish.
   resetWorld("C1 companion reset (RECOVERING), Ring owner busy");
   startServer();
   boundary.ringQuiesces = false;
@@ -317,7 +319,7 @@ int main() {
          !bleSessionEpochMatches(7, 41) && !bleSessionEpochMatches(9, 42) &&
          boundary.sessionCloses == 2,
          "a Ring-deferred stop under the companion reset left the app session epochs published "
-         "(the forced host teardown that follows frees the characteristic they send on)");
+         "(the companion then reboots under the host, so those links are about to vanish)");
   EXPECT(sBleGattsIf.load() == ESP_GATT_IF_NONE,
          "a Ring-deferred stop under the companion reset left the GATT interface id set");
   EXPECT(boundary.advStops == 1, "a Ring-deferred stop under the companion reset kept advertising");

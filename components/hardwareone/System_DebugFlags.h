@@ -355,7 +355,8 @@ inline constexpr const char* kDbgBankLabel[DBG_BANK_COUNT] = { DBG_BANK_LIST(DBG
   X(RING_PROTOCOL,         227, RING,        224, "RING_PROTO",       debugRingProtocol,       debugringprotocol,        "ring",           "protocol",   "Protocol") /* per-frame envelope decode, rejects, dup serial, reassembly */               \
   X(RING_TXN,              228, RING,        224, "RING_TXN",         debugRingTxn,            debugringtxn,             "ring",           "txn",        "Transactions") /* intent queued + TX writes + packetAck */                                \
   X(RING_HEALTH,           229, RING,        224, "RING_HEALTH",      debugRingHealth,         debugringhealth,          "ring",           "health",     "Health data") /* telemetry cache, history sweep coordinator, model ingest */             \
-  X(RING_BRIDGE,           230, RING,        224, "RING_BRIDGE",      debugRingBridge,         debugringbridge,          "ring",           "bridge",     "Spoof bridge") /* sid=0x90 RingDataPackage push, spoof task, bridge heartbeat */          \
+  /* Bit 230: retired (debugringbridge; the R1->G2 bridge it traced is gone). */                                                                                                                                                                       \
+  /* Not reused, so a saved log flags= mask cannot turn on another flag.      */                                                                                                                                                                       \
   X(RING_DUMP,             231, RING,        224, "RING_DUMP",        debugRingDump,           debugringdump,            "ring",           "dump",       "Hex dumps") /* raw notify/payload/fragment hex; redaction still applies */               \
   /* Bits 232-239: spare (RING)                                               */                                                                                                                                                                       \
   /* Bits 240-247: spare (one whole bank for a future sensor/subsystem)       */                                                                                                                                                                       \
@@ -639,7 +640,7 @@ constexpr bool dbgLlmFamilyWellFormed() {
          kDbgParentBit[DBG_LLM_MEMORY]    == parent;
 }
 
-static_assert(DBG_FLAG_COUNT == 128, "debug-flag row count changed — re-check every kDbg* consumer and the settings/CLI/web layers before accepting");
+static_assert(DBG_FLAG_COUNT == 127, "debug-flag row count changed — re-check every kDbg* consumer and the settings/CLI/web layers before accepting");
 static_assert(DBG_SUBBOOL_COUNT == 40, "bitless-sub row count changed — re-check DebugSubFlags, the CLI sub handlers, and dbgRecomputeParent consumers");
 static_assert(dbgBitsUnique(),          "two debug-flag rows claim the same bit");
 static_assert(dbgBitsInDeclaredBank(),  "a debug-flag bit falls outside its declared bank");

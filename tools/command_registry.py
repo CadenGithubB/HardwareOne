@@ -310,7 +310,7 @@ def cmd_reference(args) -> int:
 
 CALL_RE = re.compile(
     r'\b(executeCommand|executeOLEDCommand|executeCommandForUser'
-    r'|submitAndExecuteSync|enqueueCommand|runCommand)\s*\(\s*"([^"]{2,60})"'
+    r'|submitAndExecuteSync|enqueueCommand|runCommand|oledRunCommand)\s*\(\s*"([^"]{2,60})"'
 )
 SETTING_ARRAY_RE = re.compile(r"SettingEntry\s+\w+\s*\[\]\s*=\s*\{")
 

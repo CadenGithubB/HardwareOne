@@ -554,6 +554,34 @@ int main() {
   write(1, "filesystem");
   EXPECT(onlyQueued(1, 9, "filesystem"), "a non-file verb sharing a prefix was refused");
 
+  // F6: imagedelete removes a file by path like filedelete, so it gets the same
+  // file-verb treatment: refused in plaintext on its own connection (with or
+  // without a channel), run when the command itself arrived encrypted, and a
+  // longer verb that only shares its prefix is not a file verb.
+  currentCase = "F6 plaintext imagedelete on a channel holder";
+  clearWire();
+  write(1, "imagedelete /photos/a.jpg");
+  EXPECT(queued.empty(), "plaintext imagedelete ran because the connection also holds a channel");
+  EXPECT(inbox[1].size() == 1 && isDataFrameWith(inbox[1][0], kFileRefusal),
+         "plaintext imagedelete on a channel holder did not get secure_channel_required");
+  EXPECT(inbox[0].empty(), "the imagedelete refusal for conn 1 reached conn 0");
+  currentCase = "F6 plaintext imagedelete without a channel";
+  clearWire();
+  write(0, "imagedelete /photos/a.jpg");
+  EXPECT(queued.empty(), "plaintext imagedelete ran without a channel");
+  EXPECT(inbox[0].size() == 1 && inbox[0][0] == kFileRefusal,
+         "plaintext imagedelete without a channel did not get the plaintext refusal");
+  EXPECT(inbox[1].empty(), "the imagedelete refusal for conn 0 reached conn 1");
+  currentCase = "F6 encrypted imagedelete";
+  clearWire();
+  write(1, dataFrame(1, "imagedelete /photos/a.jpg"));
+  EXPECT(onlyQueued(1, 9, "imagedelete /photos/a.jpg"), "an encrypted imagedelete did not run");
+  EXPECT(inbox[0].empty() && inbox[1].empty(), "an encrypted imagedelete was refused");
+  currentCase = "F6 verb sharing the imagedelete prefix";
+  clearWire();
+  write(1, "imagedeleted");
+  EXPECT(onlyQueued(1, 9, "imagedeleted"), "a non-file verb sharing the imagedelete prefix was refused");
+
   // B1: encryption optional, conn 1 holds a channel and writes plaintext commands
   // that the command tail answers itself. Each reply reaches conn 1 as one
   // encrypted DATA frame, and none waited on the secure-channel tx mutex on

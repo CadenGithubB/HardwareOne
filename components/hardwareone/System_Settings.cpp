@@ -2389,7 +2389,6 @@ static constexpr SettingEntry debugSettingEntries[] = {
   DBG_ROW(RING_PROTOCOL),
   DBG_ROW(RING_TXN),
   DBG_ROW(RING_HEALTH),
-  DBG_ROW(RING_BRIDGE),
   DBG_ROW(RING_DUMP),
   // --- espsr group (ESP-SR speech recognition) ---
   DBG_ROW(SR),
@@ -2420,7 +2419,7 @@ static constexpr SettingEntry debugSettingEntries[] = {
 #undef DBG_SUBROW
 #undef DBG_ROW
 
-// Row accounting, pinned: 162 = 119 flag-backed + 40 bitless-sub + 3 hand rows.
+// Row accounting, pinned: 169 = 126 flag-backed + 40 bitless-sub + 3 hand rows.
 static constexpr size_t kDbgRegGeneratedRows = (DBG_FLAG_COUNT - 1) + DBG_SUBBOOL_COUNT;  // ALWAYS emits no row
 static constexpr size_t kDbgRegHandRows = 3;  // memorysampleintervalsec, webconsole, loglevel
 static_assert(sizeof(debugSettingEntries) / sizeof(debugSettingEntries[0])
