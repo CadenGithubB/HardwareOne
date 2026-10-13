@@ -618,14 +618,26 @@ const char* cmd_batterylog(const String& argsInput) {
   }
 
   if (a.equalsIgnoreCase("clear")) {
+    // The filesystem rules decide who may delete the log (users read it,
+    // admins may clear it); a refusal or a failed remove is reported, never
+    // "cleared".
+    if (!canDelete(String(kBatteryLogPath), ctx)) {
+      return "Error: battery log not cleared: permission denied";
+    }
     fsLock("batlog.clear");
     char p[80];
+    int notRemoved = 0;
     for (int i = 0; i <= kBatteryLogMaxRotations; i++) {
       if (i == 0) snprintf(p, sizeof(p), "%s", kBatteryLogPath);
       else        snprintf(p, sizeof(p), "%s.%d", kBatteryLogPath, i);
-      if (VFS::existsGuarded(String(p), ctx)) VFS::removeGuarded(String(p), ctx);
+      if (VFS::existsGuarded(String(p), ctx) && !VFS::removeGuarded(String(p), ctx)) notRemoved++;
     }
     fsUnlock();
+    if (notRemoved > 0) {
+      snprintf(getDebugBuffer(), 1024,
+               "Error: battery log not cleared: %d file(s) could not be removed", notRemoved);
+      return getDebugBuffer();
+    }
     return "Battery log cleared.";
   }
 

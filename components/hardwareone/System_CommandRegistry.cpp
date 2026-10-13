@@ -461,10 +461,10 @@ static constexpr CommandModule gCommandModules[] = {
     "(camerares/cameraframesize, cameraquality, camerafps) and a large set of "
     "sensor-tuning commands (brightness/contrast/saturation, white balance, "
     "exposure/AEC, gain/AGC, special effects, mirror/flip/rotate, plus raw camerareg "
-    "register writes) adjust the live image. Automation settings (cameraautostart, "
-    "cameraautocapture/cameraautocaptureinterval, "
-    "camerasendaftercapture/cameratargetdevice) drive timed capture and optional "
-    "ESP-NOW delivery to a named peer.", cameraCommands,       &cameraCommandsCount, CMD_MODULE_SENSOR, []() { return cameraConnected; } },
+    "register writes) adjust the live image. cameraautostart powers the sensor up at "
+    "boot, and cameramaxstoredimages caps how many saved photos are kept before the "
+    "oldest are rotated out. There is no timed auto-capture: every capture is "
+    "requested by a command or a page.", cameraCommands,       &cameraCommandsCount, CMD_MODULE_SENSOR, []() { return cameraConnected; } },
 #endif
 #if ENABLE_MICROPHONE
   { "microphone", "Microphone (PDM or G2 glasses)", "Driver and CLI for the microphone — the on-board PDM mic and/or the G2 glasses mic, selected with micsource. The mic must be started with "
@@ -713,15 +713,16 @@ static constexpr CommandModule gCommandModules[] = {
     "survive a reboot.", mapsSettingCommands, &mapsSettingCommandsCount, 0, nullptr },
 #endif
   { "power",      "Power management", "The power subsystem manages CPU frequency and battery-oriented power saving. The "
-    "main command is power: power alone prints the current mode, CPU clock, display "
-    "brightness, and auto-mode state; power mode <perf|balanced|saver|ultra|locked|0-4> "
+    "main command is power: power alone prints the current mode, CPU clock and display "
+    "brightness; power mode <perf|balanced|saver|ultra|locked|0-4> "
     "selects one of five target-specific presets: Performance, Balanced, PowerSaver, "
     "UltraSaver, or Locked. Run power or power json to see their active and idle MHz. "
     "Modes set the CPU clock and display brightness; the chosen mode is persisted. "
     "Locked keeps the maximum active clock when the OLED blanks. UltraSaver uses its "
     "lower idle-only clock when powersave blanks the display; input or a command "
-    "restores the target's interactive floor. power auto <on|off> enables an "
-    "automatic low-battery downshift gated by power threshold <0-100>. Two related idle "
+    "restores the target's interactive floor. Nothing switches the mode on battery "
+    "level in this firmware: power auto and power threshold report that automatic "
+    "mode is not available. Two related idle "
     "controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; "
     "0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) "
     "while the radio stays up so the device remains reachable, and powercooldown "

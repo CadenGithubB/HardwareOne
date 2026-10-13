@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-970 commands across 53 modules (982 registry entries).
+966 commands across 53 modules (975 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -13,8 +13,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 ## Modules
 
 - [`cli`](#cli) — 4 commands
-- [`system`](#system) — 26 commands
-- [`wifi`](#wifi) — 20 commands
+- [`system`](#system) — 25 commands
+- [`wifi`](#wifi) — 21 commands
 - [`espnow`](#espnow) — 119 commands
 - [`c6`](#c6) — 9 commands
 - [`mqtt`](#mqtt) — 27 commands
@@ -37,7 +37,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`fmradio`](#fmradio) — 10 commands
 - [`rtc`](#rtc) — 7 commands
 - [`presence`](#presence) — 6 commands
-- [`camera`](#camera) — 49 commands
+- [`camera`](#camera) — 45 commands
 - [`microphone`](#microphone) — 15 commands
 - [`edgeimpulse`](#edgeimpulse) — 16 commands
 - [`transcription`](#transcription) — 2 commands
@@ -48,10 +48,10 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`automation`](#automation) — 8 commands
 - [`battery`](#battery) — 3 commands
 - [`debug`](#debug) — 182 commands
-- [`settings`](#settings) — 18 commands
+- [`settings`](#settings) — 17 commands
 - [`sensorlog`](#sensorlog) — 2 commands
 - [`health`](#health) — 3 commands
-- [`users`](#users) — 23 commands
+- [`users`](#users) — 22 commands
 - [`features`](#features) — 2 commands
 - [`image`](#image) — 4 commands
 - [`map`](#map) — 12 commands
@@ -64,7 +64,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`even_g2`](#even-g2) — 57 commands
 - [`even_r1`](#even-r1) — 5 commands
 - [`llm`](#llm) — 30 commands
-- [`settingsedit`](#settingsedit) — 63 commands
+- [`settingsedit`](#settingsedit) — 62 commands
 
 ---
 
@@ -91,12 +91,11 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `crashlog` |  | Show the last recorded crash (panic text, core/PC, boot phase, repeat count). (add 'json')<br/>`Usage: crashlog [json]` |
 | `deepsleep` | A | Power off via deep sleep (no wake source — reset button to wake).<br/>`Usage: deepsleep (admin; wakes only via physical reset)` |
 | `events` |  | Show recent system events (the in-memory register that drives automation event triggers).<br/>`Usage: events [kinds [json]] (bare): show the recent-event ring kinds: list every valid event-kind name (json = machine form)` |
-| `factoryreset` | S | Wipe user accounts and reboot to re-run setup wizard.<br/>`Usage: factoryreset (no args, confirmation required) Deletes /system/users/users.json so the first-time setup wizard runs on next boot. WiFi credentials and other settings are preserved.` |
+| `factoryreset` | S | Wipe user accounts and their data and reboot to re-run setup wizard.<br/>`Usage: factoryreset (no args, confirmation required) Deletes /system/users/users.json, pending account requests, every user's settings file and every account's transcripts and notes (/stt/u*, /sd/stt/u*), so the first-time setup wizard runs on next boot. WiFi credentials and other settings are preserved.` |
 | `fsusage` |  | Show filesystem usage. (add 'json' for JSON output) |
 | `lightsleep` | A | Enter ESP32 light sleep: lightsleep [seconds] (default 20s).<br/>`Usage: lightsleep [seconds] (1..3600, default 20)` |
 | `memreport` |  | Comprehensive memory report (Task Manager style). (add 'json' for JSON output) |
 | `memsample` |  | Memory snapshot with component requirements. Use 'memsample track [on\|off\|reset\|status]' for allocation tracking.<br/>`Usage: memsample [track <on\|off\|reset\|status>]` |
-| `pendinglist` | A | List pending user requests. |
 | `perftop` |  | Live performance snapshot: loop laps/s, period, per-section timing, worst stalls + live task CPU%. (add 'json' for loop + per-task CPU% JSON) |
 | `ramflush` | A | Reboot to reclaim RAM, restoring the features running right now.<br/>`Usage: ramflush [status] (bare): capture which features are running, reboot, and restore them status: show what the last boot restored (no reboot) Restores for that one boot only — a normal reboot returns to configured autostart. Never changes your autostart settings.` |
 | `reboot` | A | Reboot the system. |
@@ -127,7 +126,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `ntpstatus` |  | Show NTP configuration and sync state. |
 | `ntpsync` |  | Sync time with NTP server. |
 | `openhttp` | A | Start HTTP server. |
-| `openwifi` | A | Connect to WiFi: [--best \| --index <N>] (default: best)<br/>`Usage: openwifi [--best \| --index <1..N>]` |
+| `openwifi` | A | Connect to WiFi: [--best \| --index <N> \| --saved-id <id>] (default: best; ids come from a screen's saved list and are valid for this boot only)<br/>`Usage: openwifi [--best \| --index <1..N> \| --saved-id <id>]` |
 | `radiopower` | A | Power the whole 2.4GHz radio on/off (airplane mode; also stops/restores ESP-NOW; runtime only, not persisted): [on\|off\|toggle]<br/>`Usage: radiopower [on\|off\|toggle]` |
 | `wifiadd` | A | Add WiFi network: <ssid> <pass> [priority] [hidden]<br/>`Usage: wifiadd <ssid> <pass> [priority] [hidden0\|1]` |
 | `wifidisconnect` | A | Disconnect from the current network but keep the radio on (HTTP/web stay up). |
@@ -136,6 +135,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `wifipromote` | A | Promote WiFi to top priority: <ssid> [newPriority]<br/>`Usage: wifipromote <ssid> [newPriority]` |
 | `wifiread` |  | Read current WiFi connection info. (add 'json' for JSON output) |
 | `wifirm` | A | Remove WiFi network: <ssid><br/>`Usage: wifirm <ssid>` |
+| `wifirmid` | A | Remove a saved WiFi entry by its saved id (ids come from a screen's saved list and are valid for this boot only)<br/>`Usage: wifirmid <saved-id>` |
 | `wifiscan` |  | Scan for available WiFi networks. (add 'json' for JSON output) |
 | `wifistatus` |  | Show current WiFi connection info. (add 'json' for JSON output) |
 
@@ -347,16 +347,16 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `filecreate` | A | Create file: "<path>"<br/>`Usage: filecreate "<path>"` |
-| `filedelete` | A | Delete file: "<path>" [confirm]<br/>`Usage: filedelete "<path>" [confirm]` |
-| `fileread` | A | Read file chunk as JSON: "<path>" [offset] [len] [b64\|bin] |
-| `filerename` | A | Rename file: "<oldpath>" "<newname>"<br/>`Usage: filerename "<oldpath>" "<newname>"` |
-| `files` | A | List files ["path"] \| files json ["path"] \| files stats json ["path"] |
-| `fileview` | A | View file (paged): "<path>" [page]<br/>`Usage: fileview "<path>" [page] (pages are ~3.5KB, split at line boundaries)` |
-| `filewrite` | A | Write file chunk: "<path>" <offset> <b64chunk> [final] |
+| `filecreate` |  | Create file: "<path>"<br/>`Usage: filecreate "<path>"` |
+| `filedelete` |  | Delete file: "<path>" [confirm]<br/>`Usage: filedelete "<path>" [confirm]` |
+| `fileread` |  | Read file chunk as JSON: "<path>" [offset] [len] [b64\|bin] |
+| `filerename` |  | Rename file: "<oldpath>" "<newname>"<br/>`Usage: filerename "<oldpath>" "<newname>"` |
+| `files` |  | List files ["path"] \| files json ["path"] \| files stats json ["path"] |
+| `fileview` |  | View file (paged): "<path>" [page]<br/>`Usage: fileview "<path>" [page] (pages are ~3.5KB, split at line boundaries)` |
+| `filewrite` |  | Write file chunk: "<path>" <offset> <b64chunk> [final] |
 | `logtier` |  | Show current log storage tier (LittleFS vs SD overflow). |
-| `mkdir` | A | Create directory: "<path>"<br/>`Usage: mkdir "<path>"` |
-| `rmdir` | A | Remove directory: "<path>"<br/>`Usage: rmdir "<path>"` |
+| `mkdir` |  | Create directory: "<path>"<br/>`Usage: mkdir "<path>"` |
+| `rmdir` |  | Remove directory: "<path>"<br/>`Usage: rmdir "<path>"` |
 
 ## sd
 
@@ -385,7 +385,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `oleddefaultmode` |  | OLED default mode: <logo\|status\|sensors\|thermal\|network\|mesh\|off><br/>`Usage: oleddefaultmode <logo\|status\|sensors\|thermal\|network\|mesh\|off>` |
 | `oledenabled` |  | Enable/disable OLED: <0\|1><br/>`Usage: oledenabled <0\|1>` |
 | `oledflip` |  | Flip display 180°: [on\|off\|toggle]<br/>`Usage: oledflip [on\|off\|toggle]` |
-| `oledmode` |  | Set display mode: <mode><br/>`Usage: oledmode <menu\|status\|sensordata\|sensorlist\|thermal\|network\|mesh\|gps\|text\|logo\|anim\|imuactions\|fmradio\|files\|automations\|espnow\|memory\|off> Example: oledmode memory Example: oledmode off` |
+| `oledmode` |  | Set display mode: <mode><br/>`Usage: oledmode <menu\|status\|sensordata\|sensorlist\|thermal\|network\|mesh\|gps\|text\|logo\|anim\|imuactions\|fmradio\|files\|logging\|automations\|espnow\|memory\|off> Example: oledmode memory Example: oledmode off` |
 | `oledread` |  | Read OLED display status. (add 'json' for JSON output) |
 | `oledrequireauth` | A | OLED auth requirement: <0\|1><br/>`Usage: oledrequireauth <0\|1>` |
 | `oledstart` |  | Start OLED display. |
@@ -475,7 +475,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## tof
 
-> The VL53L4CX is a laser time-of-flight ranging sensor that measures distance to nearby objects. opentof starts it, tofread reports the closest valid distance in centimeters (or full object data as JSON), and closetof stops it; tofautostart [on|off] persists launching it at boot, and it runs on the fixed secondary I2C bus (Wire1). It is configured for LONG distance mode with a 200 ms timing budget, and is multi-target: each measurement can return up to four objects, which are signal-rate-gated and exponentially smoothed before the nearest valid one is reported. Most tunables are client-side visualization knobs rather than sensor settings: tofpollingms, toftransitionms, and tofmaxdistancemm shape the UI, tofstabilitythreshold sets how steady a reading must be, and tofdevicepollms controls how often the firmware reads the hardware.
+> The VL53L4CX is a laser time-of-flight ranging sensor that measures distance to nearby objects. opentof starts it, tofread reports the closest valid cached distance in centimeters (or full cached object data as JSON), and closetof stops it; tofautostart [on|off] persists launching it at boot, and tofbus selects its I2C bus after reboot. It is configured for LONG distance mode with a 200 ms timing budget, and is multi-target: each measurement can return up to four objects, which are signal-rate-gated and exponentially smoothed before the nearest valid one is reported. Most tunables are client-side visualization knobs rather than sensor settings: tofpollingms, toftransitionms, and tofmaxdistancemm shape the UI, tofstabilitythreshold sets how steady a reading must be, and tofdevicepollms controls how often the firmware reads the hardware.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -547,30 +547,30 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## apds
 
-> The APDS9960 is a combined RGB color, proximity, and gesture sensor. openapds starts it (color sensing enabled by default), apdsread shows which modes are active plus the latest RGBC and proximity values, and closeapds stops it; apdsautostart [on|off] persists launching it at boot, and it runs on the fixed secondary I2C bus (Wire1). Its three functions are toggled independently at runtime with apdsmode <color|proximity|gesture> [on|off] -- note that enabling gesture also turns proximity on, since the gesture engine needs it. Dedicated reads apdscolor, apdsproximity, and apdsgesture print a single sample on demand (gesture returns UP/DOWN/LEFT/RIGHT), and apdsdevicepollms sets how often the background task samples the hardware.
+> The APDS9960 is a combined RGB color, proximity, and gesture sensor. openapds starts it (color sensing enabled by default), apdsread shows which modes are active plus the latest RGBC and proximity values, and closeapds stops it; apdsautostart [on|off] persists launching it at boot, and apdsbus selects its I2C bus after reboot. Its three functions are toggled at runtime with apdsmode <color|proximity|gesture> [on|off] -- note that enabling gesture also turns proximity hardware on. Dedicated reads apdscolor, apdsproximity, and apdsgesture show the latest cached sample; they report unavailable when that mode has no reading yet. Gesture reports the last swipe (UP/DOWN/LEFT/RIGHT) and its age, or no gesture since start, without consuming events. apdsdevicepollms sets how often the background task samples color and proximity; gesture mode reads the gesture FIFO at least every 100 ms.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `apdsautostart` |  | Enable/disable APDS auto-start after boot [on\|off]<br/>`Usage: apdsautostart [on\|off]` |
 | `apdsbus` | A | Route APDS9960 gesture to bus: <0\|1> (reboot required)<br/>`Usage: apdsBus <0\|1>` |
-| `apdscolor` |  | Read APDS9960 color values. |
-| `apdsgesture` |  | Read APDS9960 gesture. |
+| `apdscolor` |  | Show latest cached APDS9960 color values. |
+| `apdsgesture` |  | Show latest sampled APDS9960 gesture (does not consume events). |
 | `apdsmode` |  | Control APDS modes: apdsmode <color\|proximity\|gesture> [on\|off].<br/>`Usage: apdsmode <color\|proximity\|gesture> [<on\|off>]` |
-| `apdsproximity` |  | Read APDS9960 proximity value. |
+| `apdsproximity` |  | Show latest cached APDS9960 proximity value. |
 | `apdsread` |  | Read APDS9960 sensor status and data. (add 'json' for JSON output) |
 | `closeapds` |  | Stop APDS9960 sensor. |
 | `openapds` |  | Start APDS9960 sensor. |
 
 ## gps
 
-> PA1010D I2C GPS receiver. Lifecycle: opengps starts the parser task, gpsread prints the current fix, and closegps stops it; gpsautostart [on|off] persists boot auto-start, and the module appears in help only when the chip is detected. gpsread reports fix yes/no, fix quality, satellite count, and (only when a fix is held) latitude/longitude in degrees, altitude in meters, speed in knots, heading angle, plus GPS UTC time and date; with no fix it shows just quality and satellites. The distinctive gpslog [interval_ms] command is a one-shot setup that turns on gpsAutoStart, configures sensorlog to format=track with sensors=gps, then immediately starts both the GPS sensor and the logger to record a track (default 1000 ms, minimum 100 ms) that persists across reboots.
+> PA1010D I2C GPS receiver. Lifecycle: opengps starts the parser task, gpsread prints the current fix, and closegps stops it; gpsautostart [on|off] persists boot auto-start, and the module appears in help only when the chip is detected. gpsread reports fix yes/no, fix quality, satellite count, and (only when a fix is held) latitude/longitude in degrees, altitude in meters, speed in knots, heading angle, plus GPS UTC time and date; with no fix it shows just quality and satellites. The gpslog [interval_ms] command requests GPS startup and starts GPS-only track logging (100..3600000 ms, default 1000). It refuses while a log is running or health logging is enabled. GPS initializes in the background; a queued request does not establish a satellite fix. GPS/logger boot auto-start is enabled after the logger starts successfully.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `closegps` |  | Stop PA1010D GPS module. |
 | `gpsautostart` |  | Enable/disable GPS auto-start after boot [on\|off]<br/>`Usage: gpsautostart [on\|off]` |
 | `gpsbus` | A | Route PA1010D GPS to bus: <0\|1> (reboot required)<br/>`Usage: gpsBus <0\|1>` |
-| `gpslog` |  | Set up and start GPS track logging now (persists across boots). Usage: gpslog [interval_ms]<br/>`Usage: gpslog [interval_ms] Sets gpsAutoStart, sensorlog format=track, sensors=gps, and autostart, then starts both the GPS sensor and sensor logging immediately. interval_ms: log interval in ms (default 1000, min 100) Example: gpslog (1-second logging) gpslog 500 (500ms logging)` |
+| `gpslog` |  | Set up and start GPS track logging now (persists across boots). Usage: gpslog [interval_ms]<br/>`Usage: gpslog [interval_ms] Requests GPS startup, selects GPS-only Track format, and starts the logger. GPS initializes in the background. Refuses while another log is running or health logging is enabled. Boot auto-start is enabled after the logger starts successfully. interval_ms: log interval in ms (default 1000, range 100..3600000) Example: gpslog (1-second logging) gpslog 500 (500ms logging)` |
 | `gpsread` |  | Read GPS location and time data. (add 'json' for JSON output) |
 | `opengps` |  | Start PA1010D GPS module. |
 
@@ -620,7 +620,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## camera
 
-> Driver and CLI for the attached DVP camera sensor (OV2640/OV3660 class). The sensor must be powered up first with opencamera before any capture or tuning command works (closecamera stops it); cameraread and cameradump report status and all current sensor register values. Three distinct capture paths exist: cameracapture grabs one JPEG frame into RAM and reports its size only, camerasave captures and writes a frame to storage (LittleFS, SD, or both, per camerastoragelocation, into cameracapturefolder), and cameratiny produces a 160x120 frame small enough for a single ESP-NOW packet; camerarecord start|stop records MJPEG-AVI video and requires an SD card. Resolution and image controls (camerares/cameraframesize, cameraquality, camerafps) and a large set of sensor-tuning commands (brightness/contrast/saturation, white balance, exposure/AEC, gain/AGC, special effects, mirror/flip/rotate, plus raw camerareg register writes) adjust the live image. Automation settings (cameraautostart, cameraautocapture/cameraautocaptureinterval, camerasendaftercapture/cameratargetdevice) drive timed capture and optional ESP-NOW delivery to a named peer.
+> Driver and CLI for the attached DVP camera sensor (OV2640/OV3660 class). The sensor must be powered up first with opencamera before any capture or tuning command works (closecamera stops it); cameraread and cameradump report status and all current sensor register values. Three distinct capture paths exist: cameracapture grabs one JPEG frame into RAM and reports its size only, camerasave captures and writes a frame to storage (LittleFS, SD, or both, per camerastoragelocation, into cameracapturefolder), and cameratiny produces a 160x120 frame small enough for a single ESP-NOW packet; camerarecord start|stop records MJPEG-AVI video and requires an SD card. Resolution and image controls (camerares/cameraframesize, cameraquality, camerafps) and a large set of sensor-tuning commands (brightness/contrast/saturation, white balance, exposure/AEC, gain/AGC, special effects, mirror/flip/rotate, plus raw camerareg register writes) adjust the live image. cameraautostart powers the sensor up at boot, and cameramaxstoredimages caps how many saved photos are kept before the oldest are rotated out. There is no timed auto-capture: every capture is requested by a command or a page.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -629,8 +629,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `cameraaecvalue` | A | Exposure value: <0-1200><br/>`Usage: cameraaecvalue <0..1200>` |
 | `cameraagc` | A | Auto gain: <on\|off><br/>`Usage: cameraagc <on\|off\|1\|0\|true\|auto>` |
 | `cameraagcgain` | A | Gain value: <0-30><br/>`Usage: cameraagcgain <0..30>` |
-| `cameraautocapture` | A | Auto-capture: <on\|off><br/>`Usage: cameraautocapture <on\|off\|1\|0\|true>` |
-| `cameraautocaptureinterval` | A | Auto-capture: <sec><br/>`Usage: cameraautocaptureinterval <10..3600>` |
 | `cameraautostart` | A | Auto-start: <on\|off><br/>`Usage: cameraautostart <on\|off\|1\|0\|true\|false>` |
 | `cameraawbgain` | A | AWB gain: <on\|off><br/>`Usage: cameraawbgain <on\|off>` |
 | `camerabpc` | A | Black pixel correction: <on\|off><br/>`Usage: camerabpc <on\|off>` |
@@ -660,10 +658,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `camerarotate` |  | Rotate 180°: <on\|off><br/>`Usage: camerarotate <on\|off\|1\|0\|true\|180>` |
 | `camerasaturation` |  | Set saturation: <-2..2><br/>`Usage: camerasaturation <-2..2>` |
 | `camerasave` |  | Save current frame to storage |
-| `camerasendaftercapture` | A | Send after capture: <on\|off><br/>`Usage: camerasendaftercapture <on\|off\|1\|0\|true>` |
 | `camerasharpness` | A | Set sharpness: <-2..2><br/>`Usage: camerasharpness <-2..2> (OV3660 only)` |
 | `camerastoragelocation` | A | Storage location: <0-2><br/>`Usage: camerastoragelocation <0..2> (0=LittleFS,1=SD,2=Both)` |
-| `cameratargetdevice` | A | Target device: <name><br/>`Usage: cameratargetdevice <name>` |
 | `cameratiny` |  | Capture tiny frame for ESP-NOW |
 | `cameravflip` |  | Vertical flip: <on\|off><br/>`Usage: cameravflip <on\|off\|1\|0\|true>` |
 | `cameravideodelete` | A | Delete recording: "<filename>"<br/>`Usage: cameravideodelete "<filename>"` |
@@ -1051,7 +1047,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `beginwrite` | A | Start owner-scoped settings write coalescing until savesettings (not a RAM transaction). |
 | `controls` |  | Per-module control descriptor (JSON): controls json [module]<br/>`Usage: controls json <module> (e.g. 'controls json imu'); 'controls json' lists modules` |
 | `displayrequireauth` | S | Require auth for display: <0\|1><br/>`Usage: displayrequireauth <0\|1>` |
-| `espnowenabled` | A | Enable/disable ESP-NOW: <0\|1> (reboot required)<br/>`Usage: espnowenabled <0\|1>` |
 | `httpAutoStart` | A | Auto-start HTTP server at boot: <0\|1><br/>`Usage: httpAutoStart <0\|1>` |
 | `httpsEnabled` | A | Enable/disable HTTPS: <0\|1> (reboot required)<br/>`Usage: httpsEnabled <0\|1>` |
 | `ntpserver` | A | Set NTP server: <hostname><br/>`Usage: ntpserver <host>` |
@@ -1074,7 +1069,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `capturecrypt` | A | Capture at-rest encryption: status, mode (off/health/all), plaintext export<br/>`Usage: capturecrypt [status\|off\|health\|all\|export "<in>" "<out>"] Sealed sessions write '#HW1ENC' on line 1 + per-row ciphertext; filenames don't change. health: seal sessions that include the R1 ring (default). all: every capture session. Mode changes apply at the next session or day rollover — a single file is never mixed-mode. Viewers (fileview, web view, G2/OLED) decrypt for authorized users; raw downloads, fileread and ESP-NOW transfers ship sealed bytes. export: write a decrypted copy (inside /logging_captures) for sharing.` |
-| `sensorlog` |  | Sensor data logging: start, stop, status, format, maxsize, rotations, sensors<br/>`Usage: sensorlog <start\|stop\|status\|format\|maxsize\|rotations\|sensors\|interval\|autostart> [args...] start <filepath> [interval_ms]: Begin logging (default 5000ms) stop: Stop logging status: Show current logging status format <text\|csv\|track>: Set log format (default: text) track = GPS-only compact format with signal loss dedup; NOTE: also OVERWRITES the sensor mask to GPS-only and persists it maxsize <bytes>: Set max file size before rotation (default: 256000) rotations <count>: Old generations to keep (1-9). 0 = DELETE the active file at the size cap, losing the current day (default: 3) sensors <thermal\|tof\|imu\|gamepad\|apds\|gps\|presence\|r1\|all\|none>: Select sensors to log interval <ms>: Set poll interval 100-3600000 (default 5000) autostart [on\|off]: Auto-start logging on boot (bare = toggle)` |
+| `sensorlog` |  | Sensor data logging: start, stop, status, format, maxsize, rotations, sensors<br/>`Usage: sensorlog <start\|stop\|status\|format\|maxsize\|rotations\|sensors\|interval\|autostart> [args...] start <filepath> [interval_ms]: Begin logging (default 5000ms) stop: Stop logging status: Show current logging status format <text\|csv\|track>: Set log format (default: text) track = GPS-only compact format with signal loss dedup; NOTE: also OVERWRITES the sensor mask to GPS-only and persists it maxsize <bytes>: Set max file size before rotation (default: 256000) rotations <count>: Old generations to keep (1-9). 0 = DELETE the active file at the size cap, losing the current day (default: 3) sensors <thermal\|tof\|imu\|gamepad\|apds\|gps\|presence\|r1\|all\|none>: Select sensors to log sensors toggle <sensor>: Toggle one sensor in the current selection interval <ms>: Set poll interval 100-3600000 (default 5000) autostart [on\|off]: Auto-start logging on boot (bare = toggle)` |
 
 ## health
 
@@ -1098,7 +1093,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `login` |  | Login this interface, or target another session after signing in: <user> <pass> [serial\|uart\|display]<br/>`Usage: login <username> <password> [serial\|uart\|display] Bare login always targets the submitting interface. An explicit target requires a live named non-Guest Serial/UART/display session.` |
 | `logout` |  | Logout this interface, or target another session after signing in: [serial\|uart\|display]<br/>`Usage: logout [serial\|uart\|display] Bare logout always targets the submitting interface. An explicit target requires a live named non-Guest Serial/UART/display session.` |
 | `pendinglist` | A | List pending user requests. (add 'json' for JSON output) |
-| `serialrequireauth` | S | Enable/disable serial auth requirement [on\|off].<br/>`Usage: serialrequireauth [on\|off]` |
 | `sessionlist` | A | List active sessions. (add 'json' for JSON output) |
 | `sessionrevoke` | A | Revoke session: <sid\|user> [reason]<br/>`Usage: sessionrevoke sid <sid> [reason] sessionrevoke user <username> [reason]` |
 | `unban` | A | Remove an IP ban: <ip><br/>`Usage: unban <ip>` |
@@ -1142,7 +1136,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `gpstrack` |  | Manage GPS tracks: <status\|load\|clear><br/>`Usage: gpstrack [status\|load <filepath>\|clear]` |
+| `gpstrack` |  | Manage GPS tracks: status, load, clear, live recording<br/>`Usage: gpstrack [status\|load <filepath>\|clear\|live <start\|stop\|toggle>]` |
 | `gpstrackmerge` | A | Stitch GPS logs in order: "<out>" "<in1>" "<in2>" ...<br/>`Usage: gpstrackmerge "<output>" "<in1>" "<in2>" [...] (output first, then inputs in stitch order; max 9 inputs)` |
 | `map` |  | Show current map info (add 'json' for JSON output) |
 | `maplist` |  | List available maps (add 'json' for JSON output) |
@@ -1167,11 +1161,11 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## power
 
-> The power subsystem manages CPU frequency and battery-oriented power saving. The main command is power: power alone prints the current mode, CPU clock, display brightness, and auto-mode state; power mode <perf|balanced|saver|ultra|locked|0-4> selects one of five target-specific presets: Performance, Balanced, PowerSaver, UltraSaver, or Locked. Run power or power json to see their active and idle MHz. Modes set the CPU clock and display brightness; the chosen mode is persisted. Locked keeps the maximum active clock when the OLED blanks. UltraSaver uses its lower idle-only clock when powersave blanks the display; input or a command restores the target's interactive floor. power auto <on|off> enables an automatic low-battery downshift gated by power threshold <0-100>. Two related idle controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; 0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) while the radio stays up so the device remains reachable, and powercooldown <0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid back-to-back sleep transitions. All of these values persist.
+> The power subsystem manages CPU frequency and battery-oriented power saving. The main command is power: power alone prints the current mode, CPU clock and display brightness; power mode <perf|balanced|saver|ultra|locked|0-4> selects one of five target-specific presets: Performance, Balanced, PowerSaver, UltraSaver, or Locked. Run power or power json to see their active and idle MHz. Modes set the CPU clock and display brightness; the chosen mode is persisted. Locked keeps the maximum active clock when the OLED blanks. UltraSaver uses its lower idle-only clock when powersave blanks the display; input or a command restores the target's interactive floor. Nothing switches the mode on battery level in this firmware: power auto and power threshold report that automatic mode is not available. Two related idle controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; 0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) while the radio stays up so the device remains reachable, and powercooldown <0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid back-to-back sleep transitions. All of these values persist.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `power` | A | Power management [mode] [auto] [threshold]<br/>`Usage: power - show current power status power json - status as one JSON blob (same schema as /api/power/status) power mode <perf\|balanced\|saver\|ultra\|locked\|0-4> power auto <on\|off> power threshold <0-100>` |
+| `power` | A | Power management [mode]<br/>`Usage: power - show current power status power json - status as one JSON blob (same schema as /api/power/status) power mode <perf\|balanced\|saver\|ultra\|locked\|0-4>` |
 | `powercooldown` | A | Sleep transition cooldown (ms; 0 disables)<br/>`Usage: powercooldown <0..60000>` |
 | `powersave` | A | Idle power-save: OLED off + optional downclock (0 disables)<br/>`Usage: powersave <0..1440>` |
 
@@ -1240,7 +1234,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## even_g2
 
-> This subsystem drives Even Reality G2 smart glasses while Bluetooth is in client mode (blemode client); the two temples are addressed as left/right/auto. openg2 starts scan-and-connect IN THE BACKGROUND and returns immediately -- it does not block, so poll g2status (or g2info for firmware/MAC/battery) to see when the link is up, and nearly every other command here requires that connection first. Display commands render to the lens: g2show prints text, g2ai/g2ai-noask/g2ai-direct push a front-pane AI answer card through the EvenAI pipeline, g2bmp shows a BMP file, and g2sensors/g2network/g2files/g2settingspage show built-in info pages; g2nav [on|off] enables menu-navigation mode and g2clear blanks the display. For audio, g2mic only sends the enable/disable control frame (LC3 decode is not yet wired, so no audio arrives); the working capture path is g2micrec (raw LC3 packets to SD) and g2micwav (decodes to a 16 kHz mono WAV on SD), each an SD-backed start/stop/status lifecycle that needs an SD card. closeg2 disconnects but keeps the GATT cache for fast reconnect; closeg2 full also frees the cache to recover about 30 KB. The remaining g2* commands are low-level protocol probes and diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).
+> This subsystem drives Even Reality G2 smart glasses while Bluetooth is in client mode (blemode client); the two temples are addressed as left/right/auto. openg2 starts scan-and-connect IN THE BACKGROUND and returns immediately -- it does not block, so poll g2status (or g2info for firmware/MAC/battery) to see when the link is up, and nearly every other command here requires that connection first. Display commands render to the lens: g2show prints text, g2ai/g2ai-noask/g2ai-direct push a front-pane AI answer card through the EvenAI pipeline, g2bmp shows a BMP file, and g2sensors/g2network/g2files/g2settingspage show built-in info pages; g2nav [on|off] enables menu-navigation mode and g2clear blanks the display. For audio, use the shared Microphone controls: micsource selects auto, pdm or g2; openmic/closemic start and stop the selected source; micrecord controls WAV recording. g2micon/g2micoff are low-level stream probes; g2micrec and g2micwav remain SD-backed raw-LC3 and decoded-WAV diagnostics. closeg2 disconnects but keeps the GATT cache for fast reconnect; closeg2 full also frees the cache to recover about 30 KB. The remaining g2* commands are low-level protocol probes and diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -1331,7 +1325,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `llmgenerate` |  | Ask the loaded model a question<br/>`Usage: llmgenerate <question> \| llmgenerate do: <intent> The question is wrapped in the model's Q:/A: format for you, same as the web chat. Prefix 'do:' to ask for a command instead of an answer. A prompt that already starts with 'Q:' is sent as-is.` |
 | `llmhardcap` | A | Set default hard token cap<br/>`Usage: llmhardcap <0-512>` |
 | `llmkvprec` | A | KV cache precision (0=FP32,1=FP16,2=INT8)<br/>`Usage: llmkvprec <0..2> (0=FP32,1=FP16,2=INT8; reload model to apply)` |
-| `llmload` | A | Load model [model.bin]<br/>`Usage: llmload [filename.bin]` |
+| `llmload` | A | Load model [model.bin]<br/>`Usage: llmload [model id] [maxctx]` |
 | `llmmaxcontext` | A | Set KV cache context window (0=auto)<br/>`Usage: llmmaxcontext <0-4096>` |
 | `llmmaxtokens` | A | Set default max tokens per reply<br/>`Usage: llmmaxtokens <1-512>` |
 | `llmmenu` |  | Guided-input menu status/listing (add 'json')<br/>`Usage: llmmenu \| llmmenu json \| llmmenu json tpl <g> <off> \| llmmenu json ent <g> <off> Lists this model's guided question templates + entity rosters (empty if the model ships none).` |
@@ -1363,7 +1357,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `bleenabled` | A | Enable/disable the Bluetooth subsystem<br/>`Usage: bleenabled <0\|1>` |
 | `cameraenabled` | A | Enable/disable the camera subsystem<br/>`Usage: cameraenabled <0\|1>` |
 | `eiautostart` | A | Start Edge Impulse inference at boot<br/>`Usage: eiautostart <0\|1>` |
-| `eiinputsize` | A | Set Edge Impulse input size<br/>`Usage: eiinputsize <value>` |
 | `eiinterval` | A | Set Edge Impulse inference interval (ms)<br/>`Usage: eiinterval <100-10000>` |
 | `eimaxdetections` | A | Set Edge Impulse max detections<br/>`Usage: eimaxdetections <value>` |
 | `eirequirelabels` | A | Set Edge Impulse require-labels flag<br/>`Usage: eirequirelabels <0\|1>` |
@@ -1401,7 +1394,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `presenceenabled` | A | Enable/disable the presence sensor subsystem<br/>`Usage: presenceenabled <0\|1>` |
 | `rtcenabled` | A | Enable/disable the RTC subsystem<br/>`Usage: rtcenabled <0\|1>` |
 | `sensorlogenabled` | A | Enable/disable sensor logging entirely: <0\|1><br/>`Usage: sensorlogenabled <0\|1>` |
-| `sensorlogformat` | A | Set sensor-log format (0=text,1=csv,2=track)<br/>`Usage: sensorlogformat <0\|1\|2>` |
+| `sensorlogformat` | A | Set sensor-log format (0=text,1=csv,2=track)<br/>`Usage: sensorlogformat <0\|1\|2> Track (2) replaces the saved sensor selection with GPS-only.` |
 | `sensorlogmask` | A | Set sensor-log sensor bitmask<br/>`Usage: sensorlogmask <0-255>` |
 | `sensorlogpath` | A | Set default sensor-log file path<br/>`Usage: sensorlogpath <"/path">` |
 | `sessionidleble` | A | Set BLE session idle-logout (min)<br/>`Usage: sessionidleble <0-1440>` |

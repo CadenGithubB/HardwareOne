@@ -341,7 +341,6 @@ esp_err_t handleSensorData(httpd_req_t* req);
 esp_err_t handleRemoteSensors(httpd_req_t* req);
 esp_err_t handleCameraStatus(httpd_req_t* req);
 esp_err_t handleCameraFrame(httpd_req_t* req);
-esp_err_t handleCameraStream(httpd_req_t* req);
 esp_err_t handleMicRecordingsList(httpd_req_t* req);
 esp_err_t handleMicRecordingFile(httpd_req_t* req);
 esp_err_t handleMicRecordingDelete(httpd_req_t* req);

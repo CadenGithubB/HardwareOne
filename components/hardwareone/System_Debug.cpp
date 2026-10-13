@@ -927,8 +927,9 @@ extern uint32_t getCurrentCommandOutputMask();
 //   on this task — most non-cmd_exec tasks).
 //
 static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverride) {
-  // 1. Suppress output in validation mode
-  if (gCLIValidateOnly) return;
+  // 1. Suppress output of a validation pass, only on the task running it:
+  //    a validate request on cmd_exec must not silence other tasks.
+  if (currentCommandValidateOnly()) return;
 
   // 2. Capture output if active (used for HTTP response with capture=1).
   //    Per-task state — only the task that ran setCaptureBuffer() captures

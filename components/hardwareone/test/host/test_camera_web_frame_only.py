@@ -5,8 +5,9 @@ esp_httpd runs every handler on one task, so a handler that loops capturing
 and sending frames (an MJPEG stream) holds every other page, poll, SSE and
 login until its viewer disconnects. This checks that no stream endpoint is
 registered, that no multipart/x-mixed-replace response exists in the web
-sources, and that every httpd handler which captures a camera frame does so
-once, without a loop.
+sources, that handleCameraStream is neither defined nor declared, and that
+every httpd handler which captures a camera frame does so once, without a
+loop.
 
 It reads source text only; it does not compile or run the handlers.
 """
@@ -47,6 +48,8 @@ def main() -> None:
         require("multipart/x-mixed-replace" not in text, f"{path.name} still sends a multipart stream")
         require(not re.search(r"esp_err_t\s+handleCameraStream\([^)]*\)\s*\{", text),
                 f"{path.name} still defines handleCameraStream")
+        require(not re.search(r"\bhandleCameraStream\b", text),
+                f"{path.name} still declares or names handleCameraStream")
         for match in HANDLER.finditer(text):
             body = extract_block(text[match.start():], match.group(0)[:-1].rstrip())
             # Calls only: `extern uint8_t* captureFrame(...)` declarations do not count.

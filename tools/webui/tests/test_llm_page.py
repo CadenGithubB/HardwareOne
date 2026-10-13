@@ -51,7 +51,7 @@ HARNESS = REPO_ROOT / "tools" / "webui" / "harness" / "llm_page_harness.js"
 # Bumped deliberately when checks are added. A harness that silently stops
 # running checks -- an early return, a throw between sections -- would otherwise
 # report PASS on whatever it happened to reach.
-EXPECTED_CHECKS = 61
+EXPECTED_CHECKS = 67
 
 # Element ids are declared in the page's R"HTML( literal and consumed from its
 # R"JS( literal. Nothing in the build makes the two agree, so the harness is

@@ -3482,28 +3482,43 @@ const char* cmd_user_delete(const String& argsInput) {
 // back regardless of who actually called. Now currentExecUser() returns the
 // right user for every transport because each dispatch path installs its own
 // AuthContext into the TLS slot.
-const char* userChangePasswordCore(const String& currentPassword,
-                                   const String& newPassword,
-                                   const String& confirmPassword) {
-  if (!filesystemReady) return "Error: LittleFS not ready";
+//
+// The message goes into the caller's buffer, never the shared debug buffer:
+// the web handler calls this on httpd while cmd_exec may be formatting
+// another command's result there.
+bool userChangePasswordCore(const String& currentPassword,
+                            const String& newPassword,
+                            const String& confirmPassword,
+                            char* message, size_t messageSize) {
+  char scratch[1];
+  if (!message || messageSize == 0) {
+    message = scratch;
+    messageSize = sizeof(scratch);
+  }
+  auto fail = [&](const char* text) {
+    snprintf(message, messageSize, "%s", text);
+    return false;
+  };
+
+  if (!filesystemReady) return fail("Error: LittleFS not ready");
 
   if (newPassword != confirmPassword) {
-    return "Error: New passwords do not match";
+    return fail("Error: New passwords do not match");
   }
 
   if (newPassword.length() < 6) {
-    return "Error: Password must be at least 6 characters";
+    return fail("Error: Password must be at least 6 characters");
   }
 
   if (newPassword == currentPassword) {
-    return "Error: New password must differ from current password";
+    return fail("Error: New password must differ from current password");
   }
 
   // Resolve calling user from per-task TLS identity. Works for every
   // transport (web / CLI / OLED / BLE / ESP-NOW / serial) because each
   // dispatch path installs its own AuthContext via ExecIdentityGuard.
   String username = currentExecUser();
-  if (username.length() == 0) return "Error: Not authenticated";
+  if (username.length() == 0) return fail("Error: Not authenticated");
   const AuthContext& caller = currentAuthContext();
 
   // Verify current password
@@ -3511,14 +3526,13 @@ const char* userChangePasswordCore(const String& currentPassword,
     // Security event — log alongside login attempts so the auth-events
     // file shows both authentication AND credential-rotation activity.
     logAuthAttempt(false, caller.path.c_str(), username, caller.ip, "Current password incorrect");
-    return "Error: Current password incorrect";
+    return fail("Error: Current password incorrect");
   }
 
   if (!setUserPassword(username, newPassword)) {
     logAuthAttempt(false, caller.path.c_str(), username, caller.ip, "Password storage failed");
-    if (!ensureDebugBuffer()) return "Error: Failed to change password";
-    snprintf(getDebugBuffer(), 1024, "Error: Failed to change password for user '%s'", username.c_str());
-    return getDebugBuffer();
+    snprintf(message, messageSize, "Error: Failed to change password for user '%s'", username.c_str());
+    return false;
   }
 
   // Force-logout the user's OTHER sessions across all transports —
@@ -3540,9 +3554,8 @@ const char* userChangePasswordCore(const String& currentPassword,
   logAuthAttempt(true, caller.path.c_str(), username, caller.ip, "Password changed");
   systemEventPost(SYSEVT_PASSWORD_CHANGED, username.c_str(), "self");
 
-  if (!ensureDebugBuffer()) return "Password changed successfully";
-  snprintf(getDebugBuffer(), 1024, "Password changed successfully for user '%s'", username.c_str());
-  return getDebugBuffer();
+  snprintf(message, messageSize, "Password changed successfully for user '%s'", username.c_str());
+  return true;
 }
 
 const char* cmd_user_changepassword(const String& argsInput) {
@@ -3552,7 +3565,15 @@ const char* cmd_user_changepassword(const String& argsInput) {
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>";
 
-  return userChangePasswordCore(a.arg(0), a.arg(1), a.arg(2));
+  // Handlers run on the executor, so the reply may live in the debug buffer.
+  char message[USER_CHANGE_PASSWORD_MESSAGE_MAX];
+  const bool ok = userChangePasswordCore(a.arg(0), a.arg(1), a.arg(2),
+                                         message, sizeof(message));
+  if (!ensureDebugBuffer()) {
+    return ok ? "Password changed successfully" : "Error: Failed to change password";
+  }
+  snprintf(getDebugBuffer(), 1024, "%s", message);
+  return getDebugBuffer();
 }
 
 const char* cmd_user_resetpassword(const String& argsInput) {
@@ -4070,7 +4091,13 @@ const char* cmd_ban(const String& argsInput) {
     else                 snprintf(buf, sizeof(buf), "Banned %s", ip.c_str());
     return buf;
   }
-  return "Error: could not ban IP (list may be full or save failed)";
+  // banIp keeps a ban in force when only the save failed.
+  if (isIpBanned(ip.c_str())) {
+    EXT_RAM_BSS_ATTR static char notSaved[120];
+    snprintf(notSaved, sizeof(notSaved), "Error: banned %s, not saved (ends at reboot)", ip.c_str());
+    return notSaved;
+  }
+  return "Error: could not ban IP (ban list full)";
 }
 
 const char* cmd_unban(const String& argsInput) {
@@ -4083,6 +4110,12 @@ const char* cmd_unban(const String& argsInput) {
     EXT_RAM_BSS_ATTR static char buf[80];
     snprintf(buf, sizeof(buf), "Unbanned %s", ip.c_str());
     return buf;
+  }
+  // unbanIp restores the ban when the save failed.
+  if (isIpBanned(ip.c_str())) {
+    EXT_RAM_BSS_ATTR static char notSaved[120];
+    snprintf(notSaved, sizeof(notSaved), "Error: unban of %s not saved; the ban stays", ip.c_str());
+    return notSaved;
   }
   return "Error: IP not found in ban list";
 }

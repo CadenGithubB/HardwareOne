@@ -131,9 +131,22 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
 // Shared command execution (implemented in System_Utils.cpp)
 // ============================================================================
 
-// Low-level authorized dispatch. Transport/UI callers normally use the
-// submission functions below so commands run on the shared executor task.
+// Low-level authorized dispatch. Only the executor task (cmd_exec, including
+// work it runs through submitDeferredToCmdExec) and the early-boot path of
+// submitAndExecuteSync call it: handlers share the debug buffer and static
+// result buffers, so every other caller goes through the submission
+// functions below.
 bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
+
+// Validate-only (dry-run) state of the command running on the calling task,
+// read from that task's CommandContext. Another task's validate pass never
+// makes this true, so output suppression and audit decisions stay per task.
+bool currentCommandValidateOnly();
+
+// Run a read-only status command as the internal system identity on the
+// executor and copy its result into out (always NUL-terminated). For guest-
+// readable status endpoints; mutations must never go through this helper.
+bool executeInternalStatusCommand(const char* cmd, char* out, size_t outSize);
 
 // Wait for a command result. The return value reports command success;
 // completedOut distinguishes an executed failure from admission failure or
@@ -172,6 +185,11 @@ String redactCmdForAudit(const String& argsInput,
 String redactOutputForLog(const String& output);
 
 // CLI validation macro - returns "VALID" early when gCLIValidateOnly is set.
+// gCLIValidateOnly mirrors the validateOnly flag of the command the executor
+// is running (written only by HardwareOne.cpp commandExecTask and the
+// early-boot path of submitAndExecuteSync); handlers run there, so it is
+// their own task's state. Code that can run on any task reads
+// currentCommandValidateOnly() instead.
 // Keep the declaration at global namespace and qualify the reference: a
 // block-scope `extern` expanded inside an anonymous-namespace command handler
 // otherwise declares a different internal-linkage symbol and fails at link.

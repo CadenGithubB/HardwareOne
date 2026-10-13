@@ -512,6 +512,10 @@ static void useraddOrderAndFailures() {
   check(!adminCreateUser("System", "sys-secret", false, "x", err) && err == "Invalid username");
   check(!adminCreateUser("dave", "dave-secret", false, "x", err) && err == "Username already exists");
   check(!adminCreateUser("ok.name", "short", false, "x", err));
+  // `useradd <name> <pw> 1 guest`: a guest cannot change its own password,
+  // so it is never created with a forced change.
+  err = "";
+  check(!adminCreateUser("gwen", "gwen-secret", true, "x", err, "guest") && err.length() > 0);
   check(fs.text(USERS_JSON_FILE) == before && !fs.exists(settingsPath(7)));
 
   // Refused credential write: nothing published, nothing left behind.

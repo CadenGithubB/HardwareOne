@@ -222,4 +222,6 @@ HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_LONG_RELEASE,     "g2_long_release", SYSEVT
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_NOTE_STARTED,        "note_started", SYSEVT_FAM_MEDIA)           /* a private note began recording  subject=hold|lens|cli|web detail=local|pi */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_NOTE_SAVED,          "note_saved", SYSEVT_FAM_MEDIA)             /* that note was saved privately  subject=trigger detail=<words>w <ms>ms */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_NOTE_FAILED,         "note_failed", SYSEVT_FAM_MEDIA)            /* that note was not saved  subject=reason (a discarded slip posts nothing) */
+  /* --- Video recording outcome --- */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_VIDEO_RECORD_FAILED, "video_record_failed", SYSEVT_FAM_MEDIA)    /* a clip did not finalize (no video_saved)  subject=filename detail=frames */
 #endif

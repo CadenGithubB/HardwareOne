@@ -127,7 +127,15 @@ static unsigned deniedAudits = 0;
 static void logAuthAttempt(bool success, const char*, const String&, const String&, const char*) {
   if (!success) ++deniedAudits;
 }
-static void systemEventPost(int, const char* = nullptr, const char* = nullptr) {}
+static unsigned deniedEvents = 0;
+static void systemEventPost(int kind, const char* = nullptr, const char* = nullptr) {
+  if (kind == SYSEVT_COMMAND_DENIED) ++deniedEvents;
+}
+// Forced password change decision (System_User): true for one named account.
+static std::string mustChangeUser;
+static bool userMustChangePassword(const String& user) {
+  return !mustChangeUser.empty() && user.str() == mustChangeUser;
+}
 static bool isSuperAdminUser(const String&) { return false; }
 static bool getUserAuthorizationRole(const String&, String& role) { role = "user"; return true; }
 static bool commandAllowedForGuest(const String&) { return false; }
@@ -215,6 +223,8 @@ static void reset() {
   ipBanned = ipLocked = false;
   gCLIValidateOnly = false;
   deniedAudits = 0;
+  deniedEvents = 0;
+  mustChangeUser.clear();
 }
 
 static httpd_req_t post(const std::string& body) {
@@ -358,6 +368,74 @@ static void anonymousUserRequestStillRefused() {
   check(authorize(named, "userrequest bob bob-secret1", &kUserRequestEntry, reply));
 }
 
+// A forced password change holds on every command transport, not only on the
+// web: while the account must change its password, only userchangepassword,
+// bare login/logout and whoami pass; anything else is refused with the
+// change-password reply, one audit entry and one denial event. Other
+// accounts, internal callers and the require-auth-off identity are not gated.
+static void mustChangeGatesCommandTransports() {
+  static const CommandEntry kPlainEntry = {"command", false, false};
+  const CommandSource transports[] = {SOURCE_SERIAL, SOURCE_UART, SOURCE_LOCAL_DISPLAY,
+                                      SOURCE_BLUETOOTH, SOURCE_ESPNOW, SOURCE_MQTT,
+                                      SOURCE_WEB, SOURCE_VOICE, SOURCE_G2_GLASSES};
+  const char* refused[] = {"userrequest carol carol-secret1", "whoami bob", "logout serial2 extra",
+                           "status", "\"userchangepassword"};
+  const char* allowed[] = {"userchangepassword old-secret1 new-secret1 new-secret1",
+                           "USERCHANGEPASSWORD", "login bob new-secret1", "logout", "whoami"};
+  for (CommandSource transport : transports) {
+    AuthContext ctx{};
+    ctx.transport = transport;
+    ctx.user = "bob";
+    ctx.path = "/cli";
+    ctx.ip = kClientIp;
+    for (const char* line : refused) {
+      reset();
+      mustChangeUser = "bob";
+      std::string reply;
+      const bool accepted = authorize(ctx, line, &kPlainEntry, reply);
+      if (accepted) {
+        std::fprintf(stderr, "  transport %d accepted '%s' while bob must change password\n",
+                     static_cast<int>(transport), line);
+      }
+      check(!accepted);
+      check(reply.rfind("Error: change your password first", 0) == 0);
+      check(reply.find("userchangepassword") != std::string::npos);
+      check(deniedAudits == 1 && deniedEvents == 1);
+    }
+    for (const char* line : allowed) {
+      reset();
+      mustChangeUser = "bob";
+      std::string reply;
+      check(authorize(ctx, line, &kPlainEntry, reply));
+      check(deniedAudits == 0 && deniedEvents == 0);
+    }
+  }
+  // Not gated: another account, the internal identity, the require-auth-off
+  // identity, and the same account once the flag is gone.
+  reset();
+  mustChangeUser = "bob";
+  std::string reply;
+  AuthContext other{};
+  other.transport = SOURCE_SERIAL;
+  other.user = "alice";
+  check(authorize(other, "status", &kPlainEntry, reply));
+  AuthContext internal{};
+  internal.transport = SOURCE_INTERNAL;
+  internal.user = "bob";
+  check(authorize(internal, "status", &kPlainEntry, reply));
+  mustChangeUser = "AuthBypass";
+  AuthContext bypass{};
+  bypass.transport = SOURCE_SERIAL;
+  bypass.user = "AuthBypass";
+  check(authorize(bypass, "status", &kPlainEntry, reply));
+  mustChangeUser.clear();
+  AuthContext bob{};
+  bob.transport = SOURCE_SERIAL;
+  bob.user = "bob";
+  check(authorize(bob, "status", &kPlainEntry, reply));
+  check(deniedAudits == 0 && deniedEvents == 0);
+}
+
 #ifndef HW1_NO_ACCOUNT_REQUEST_ADAPTER
 // Validate-only checks the arguments and stops before the owner: no pending
 // list read or write, no event.
@@ -413,6 +491,7 @@ int main(int argc, char** argv) {
       {"web_owner_refusals", ownerRefusalsDoNotCount},
       {"web_rejected_fields", rejectedFieldsStillCount},
       {"anonymous_userrequest_refused", anonymousUserRequestStillRefused},
+      {"must_change_password_command_gate", mustChangeGatesCommandTransports},
       {"command_validate_only", commandValidateOnlyHasNoEffect},
       {"command_quoted_passphrase", commandQuotedPassphraseReachesOwner},
   };

@@ -522,16 +522,19 @@ const char* cmd_user_changepassword(const String& argsInput);  // revoke other �
 // requesting user's AuthContext. The function resolves the user via
 // currentExecUser() and reads the calling session's sid/transport via
 // currentAuthContext() to skip-revoke the caller's own session. Without an
-// installed identity it returns "Error: Not authenticated".
+// installed identity it fails with "Error: Not authenticated".
 //
-// Returns a result string compatible with the CLI command convention:
+// Returns true when the password was changed. The message (always written,
+// NUL-terminated, cut to messageSize) goes into the caller's buffer, never the
+// shared debug buffer, so it is safe on any task:
 //   "Password changed successfully for user '<name>'" on success,
 //   "Error: <reason>" on validation/auth/storage failure.
-// Pointer lifetime: backed by the shared debug buffer; valid until the next
-// debug-buffer use. Caller should copy or consume immediately.
-const char* userChangePasswordCore(const String& currentPassword,
-                                   const String& newPassword,
-                                   const String& confirmPassword);
+// USER_CHANGE_PASSWORD_MESSAGE_MAX holds every message in full.
+constexpr size_t USER_CHANGE_PASSWORD_MESSAGE_MAX = 160;
+bool userChangePasswordCore(const String& currentPassword,
+                            const String& newPassword,
+                            const String& confirmPassword,
+                            char* message, size_t messageSize);
 const char* cmd_user_resetpassword(const String& argsInput);   // revoke       — admin reset target's creds
 const char* cmd_user_add(const String& argsInput);       // bump        — new usable account exists (no sessions yet)
 const char* cmd_user_list(const String& argsInput);

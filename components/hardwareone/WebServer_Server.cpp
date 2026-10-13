@@ -481,13 +481,12 @@ int findFreeSessionIndex() {
   for (int i = 0; i < MAX_SESSIONS; ++i) {
     if (gSessions[i].sid.length() == 0) return i;
   }
-  // No free slot: evict the oldest or expired
-  int oldest = -1;
-  unsigned long tOld = 0xFFFFFFFFUL;
-  for (int i = 0; i < MAX_SESSIONS; ++i) {
-    if (gSessions[i].expiresAt == 0 || (long)(gSessions[i].expiresAt - tOld) < 0) {
+  // No free slot: the session that expires first (wrap-safe millis order).
+  // Every slot is occupied here, so slot 0 seeds the comparison.
+  int oldest = 0;
+  for (int i = 1; i < MAX_SESSIONS; ++i) {
+    if ((long)(gSessions[i].expiresAt - gSessions[oldest].expiresAt) < 0) {
       oldest = i;
-      tOld = gSessions[i].expiresAt;
     }
   }
   return oldest;
@@ -608,6 +607,23 @@ String setSession(httpd_req_t* req, const String& u) {
 
   int idx = findFreeSessionIndex();
   if (idx < 0) idx = 0;  // fallback
+  if (gSessions[idx].sid.length() > 0) {
+    // Table full: this login ends the session that expires first, like any
+    // other sign-out (reason for its browser, logout event, socket closed).
+    // A revoked session already got its reason and only waits for delivery.
+    if (!gSessions[idx].revoked) {
+      if (gSessions[idx].ip.length() > 0 && gSessions[idx].ip != currentIP) {
+        storeLogoutReason(gSessions[idx].ip, "You were signed out because the session limit was reached by another login.");
+      }
+      systemEventPost(SYSEVT_LOGOUT, gSessions[idx].user.c_str(), "evicted");
+      BROADCAST_PRINTF("[auth] Session table full: signing out %s for the new login", gSessions[idx].user.c_str());
+    }
+    if (gSessions[idx].sockfd >= 0 &&
+        gSessions[idx].sockfd != currentSockfd &&
+        socketsToCloseCount < MAX_SESSIONS) {
+      socketsToClose[socketsToCloseCount++] = gSessions[idx].sockfd;
+    }
+  }
   SessionEntry s;
   s.sid = makeSessToken();
   s.user = u;
@@ -1383,10 +1399,16 @@ bool banIp(const char* ip, const char* reason) {
     return false;
   }
 
-  // Kick any active sessions from this IP
-  for (int j = 0; j < MAX_SESSIONS; j++) {
-    if (gSessions[j].sid.length() > 0 && gSessions[j].ip == ip) {
-      enqueueTargetedRevokeForSessionIdx(j, "Your access has been revoked by an administrator.");
+  // Kick any active sessions from this IP. The session table is read under
+  // its fence (the revoke helper takes the same recursive mutex).
+  {
+    WebSessionFenceGuard sessionGuard;
+    if (sessionGuard && gSessions) {
+      for (int j = 0; j < MAX_SESSIONS; j++) {
+        if (gSessions[j].sid.length() > 0 && gSessions[j].ip == ip) {
+          enqueueTargetedRevokeForSessionIdx(j, "Your access has been revoked by an administrator.");
+        }
+      }
     }
   }
   // Also clear any brute-force tracking for this IP (no longer needed)
@@ -2964,23 +2986,22 @@ esp_err_t handlePasswordChangePage(httpd_req_t* req) {
     // returns ctx (so revoke skips ctx.sid + SOURCE_WEB and the user's own
     // browser tab stays logged in). RAII restores any prior identity on
     // return.
+    //
+    // This still runs on httpd (not the executor): the helper writes its
+    // message into this local buffer and reports success as its return
+    // value, so nothing here reads the shared debug buffer.
     ExecIdentityGuard identity(ctx);
-    const char* result = userChangePasswordCore(current, newp, conf);
-
-    // Helper returns "Password changed successfully for user '<name>'" on
-    // success, "Error: <reason>" on every failure mode (mismatch, length,
-    // wrong current password, storage failure, not authenticated). Match the
-    // "Error" prefix rather than full-string compare so future enrichments
-    // of the success message don't break this check.
-    const bool ok = (result != nullptr && strncmp(result, "Error", 5) != 0);
+    char result[USER_CHANGE_PASSWORD_MESSAGE_MAX];
+    const bool ok = userChangePasswordCore(current, newp, conf,
+                                           result, sizeof(result));
 
     if (!ok) {
       // Strip "Error: " prefix for display — the page template expects just
       // the human-readable message. Fall back to the full string if the
       // prefix is absent (defensive, shouldn't happen).
-      String err = (result && strncmp(result, "Error: ", 7) == 0)
+      String err = (strncmp(result, "Error: ", 7) == 0)
                      ? String(result + 7)
-                     : String(result ? result : "Unknown error");
+                     : String(result[0] ? result : "Unknown error");
       httpd_resp_set_type(req, "text/html");
       gMeshActivitySuspended = true;
       streamPasswordChangeInner(req, ctx.user, err);
@@ -3513,20 +3534,6 @@ esp_err_t handleSystemStatus(httpd_req_t* req) {
   return ESP_OK;
 }
 
-// Run a read-only status command under the internal system identity so guest
-// (and admin-gated status) pages can use dedicated GET endpoints instead of
-// /api/cli. Mutations must never go through this helper.
-static bool runInternalStatusCmd(const char* cmd, char* out, size_t outSize) {
-  if (!cmd || !out || outSize == 0) return false;
-  AuthContext sys;
-  sys.transport = SOURCE_INTERNAL;
-  sys.user = "system";
-  sys.ip = "local";
-  sys.path = cmd;
-  out[0] = '\0';
-  return executeCommand(sys, cmd, out, outSize);
-}
-
 // GET /api/events/kinds — vocabulary for notif/automation editors (was CLI
 // `events kinds json`). Guests may read it; mutation stays on CLI.
 struct EventsKindsHttpSink {
@@ -3683,10 +3690,13 @@ static esp_err_t handleLoggingStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   httpd_resp_set_type(req, "application/json");
 
+  // Read-only status commands run on the executor as the internal system
+  // identity (System_Utils executeInternalStatusCommand), so guests can load
+  // the page without /api/cli and the handlers never run on httpd.
   EXT_RAM_BSS_ATTR static char timeBuf[CMD_RESULT_MAX];
   EXT_RAM_BSS_ATTR static char sensorBuf[CMD_RESULT_MAX];
-  runInternalStatusCmd("time", timeBuf, sizeof(timeBuf));
-  runInternalStatusCmd("sensorlog status", sensorBuf, sizeof(sensorBuf));
+  executeInternalStatusCommand("time", timeBuf, sizeof(timeBuf));
+  executeInternalStatusCommand("sensorlog status", sensorBuf, sizeof(sensorBuf));
 
   // `log status` is admin-gated on the CLI. Reuse its read-only formatter so
   // guests/users retain access to this page's status without executing it.

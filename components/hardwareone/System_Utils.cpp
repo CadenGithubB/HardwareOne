@@ -824,8 +824,8 @@ static bool isQuietPollCommand(const char* cmd) {
  * Lightweight, always-enabled, no overhead when disabled
  */
 static bool commandExecutionLogSuppressed(const char* cmd) {
-  // Skip validation-only commands (dry-run checks)
-  if (gCLIValidateOnly) return true;
+  // Skip validation-only commands (dry-run checks) of this task's command
+  if (currentCommandValidateOnly()) return true;
 
   // Skip the audit log + broadcast for noisy read-only polls.
   return isQuietPollCommand(cmd);
@@ -3865,6 +3865,19 @@ static bool commandAllowedForGuest(const String& line) {
   return false;
 }
 
+// While the account must change its password (userMustChangePassword), the
+// command surface is the change itself plus the caller-local session verbs:
+// the command-line form of the web gate (webPasswordChangeAllows).
+static bool commandAllowedDuringPasswordChange(const String& line) {
+  CommandArgs args(line);
+  if (args.unterminatedQuote() || args.count() == 0) return false;
+  if (args.arg(0).equalsIgnoreCase("userchangepassword")) return true;
+  if (args.arg(0).equalsIgnoreCase("login")) return args.count() == 3;
+  if (args.arg(0).equalsIgnoreCase("logout")) return args.count() == 1;
+  if (args.arg(0).equalsIgnoreCase("whoami")) return args.count() == 1;
+  return false;
+}
+
 enum class SessionControlForm : uint8_t {
   Other,
   BareLogin,
@@ -4051,6 +4064,21 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
     systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), cmdName.c_str());
     return false;
   }
+  // Forced password change: every external transport (the web refuses the
+  // same account in tgRequireAuth). Internal callers run stored work such as
+  // automations, not a signed-in user, and are not gated here.
+  if (ctx.transport != SOURCE_INTERNAL && ctx.user.length() > 0 &&
+      ctx.user != "AuthBypass" && !liveBondIdentity &&
+      !commandAllowedDuringPasswordChange(line) &&
+      userMustChangePassword(ctx.user)) {
+    String cmdName = line;
+    int spacePos = line.indexOf(' ');
+    if (spacePos > 0) cmdName = line.substring(0, spacePos);
+    snprintf(out, outSize, "Error: change your password first (userchangepassword <current> <new> <confirm>).");
+    { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactedLine.c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
+    systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), cmdName.c_str());
+    return false;
+  }
   // Super-admin (top-tier) protection. Checked independently of the admin flag
   // so a super-only command is gated even if its table entry is not adminOnly.
   // A bonded session satisfies this (bond == super); a regular mesh/pair
@@ -4142,8 +4170,7 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
 // per-command allowlist to maintain.
 static void stampOkStatus(char* out, size_t outSize, bool success) {
   if (!success || !out || outSize < 6) return;
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return;                          // validate sentinels (e.g. "VALID")
+  if (currentCommandValidateOnly()) return;              // validate sentinels (e.g. "VALID")
   size_t n = strlen(out);
   if (n == 0) return;
   if (out[0] == '{') return;                             // JSON object - structured payload
@@ -4607,9 +4634,14 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
     // executeCommand installs the command identity via ExecIdentityGuard, so
     // the early-boot direct path no longer needs an outer save/restore. The
     // current command context pointer is still wired explicitly for the
-    // broadcast-output mask plumbing — per-task TLS now (Stage 3).
+    // broadcast-output mask plumbing — per-task TLS now (Stage 3). Before the
+    // executor exists this task is the executor, so it also sets the handler
+    // validate mirror the way commandExecTask does.
     setCurrentCommandContext((void*)&cmd.ctx);
+    const bool prevValidate = gCLIValidateOnly;
+    gCLIValidateOnly = cmd.ctx.validateOnly;
     bool ok = executeCommand((AuthContext&)cmd.ctx.auth, cmd.line.c_str(), outBuf, CMD_RESULT_MAX);
+    gCLIValidateOnly = prevValidate;
     clearCurrentCommandContext();
     out = outBuf;
     free(outBuf);
@@ -4828,6 +4860,38 @@ void runUnifiedSystemCommand(const String& argsInput) {
   String out;
   (void)submitAndExecuteSync(uc, out);
   broadcastOutput(out, uc.ctx);
+}
+
+bool currentCommandValidateOnly() {
+  const CommandContext* ctx =
+      static_cast<const CommandContext*>(currentCommandContext());
+  return ctx && ctx->validateOnly;
+}
+
+// Status endpoints used to call executeCommand on the httpd task, where the
+// handler's debug-buffer or static result could be overwritten by (or
+// overwrite) the command cmd_exec was running. Submitting keeps one task
+// running handlers; the result is copied out of the request, not a shared
+// buffer.
+bool executeInternalStatusCommand(const char* cmd, char* out, size_t outSize) {
+  if (!cmd || !out || outSize == 0) return false;
+  out[0] = '\0';
+  Command uc;
+  uc.line = cmd;
+  uc.ctx.origin = ORIGIN_SYSTEM;
+  uc.ctx.auth.transport = SOURCE_INTERNAL;
+  uc.ctx.auth.user = "system";
+  uc.ctx.auth.ip = "local";
+  uc.ctx.auth.path = cmd;
+  uc.ctx.id = (uint32_t)millis();
+  uc.ctx.timestampMs = uc.ctx.id;
+  uc.ctx.outputMask = MSG_ROUTE_FILE;
+  // A page poll is not an answer to anyone's interactive prompt.
+  uc.ctx.behaviorFlags |= COMMAND_CONTEXT_MODE_INDEPENDENT;
+  String result;
+  const bool ok = submitAndExecuteSync(uc, result);
+  snprintf(out, outSize, "%s", result.c_str());
+  return ok;
 }
 
 CommandContext makeWebCommandContext(httpd_req_t* req, const AuthContext& auth) {

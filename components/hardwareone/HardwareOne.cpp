@@ -194,7 +194,11 @@ bool isSensorConnected(const char* moduleName);
 bool gamepadInit();
 
 
-// Global flag to indicate CLI dry-run validation mode (no side effects)
+// CLI dry-run validation mode (no side effects) for command handlers. Mirrors
+// the validateOnly flag of the command the executor is running: written only
+// by commandExecTask below (and the early-boot path of submitAndExecuteSync),
+// read by handlers through RETURN_VALID_IF_VALIDATE_CSTR, which run there.
+// Code that can run on any task reads currentCommandValidateOnly() instead.
 bool gCLIValidateOnly = false;
 
 // Helper: early-return for validate-only mode inside command branches
@@ -713,6 +717,8 @@ static void commandExecTask(void* pv) {
       DEBUG_CMD_FLOWF("[cmd_exec] exec '%.80s' user='%s' heap=%lu",
                   safeExecLine.c_str(), r->ctx.auth.user.c_str(), (unsigned long)ESP.getFreeHeap());
 
+      // The per-task context carries validateOnly for broadcastOutput and the
+      // audit (currentCommandValidateOnly); the global mirror is for handlers.
       setCurrentCommandContext(&r->ctx);
       bool prevValidate = gCLIValidateOnly;
       gCLIValidateOnly = r->ctx.validateOnly;

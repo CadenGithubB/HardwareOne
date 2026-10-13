@@ -93,12 +93,36 @@ static SemaphoreHandle_t xSemaphoreCreateRecursiveMutexStatic(StaticSemaphore_t*
 static int xSemaphoreTakeRecursive(SemaphoreHandle_t, TickType_t) { ++banLockDepth; ++banLockTakes; return pdTRUE; }
 static int xSemaphoreGiveRecursive(SemaphoreHandle_t) { --banLockDepth; return pdTRUE; }
 
+// Session-table fence double (WebServer_Server.cpp's recursive mutex): counts
+// how deep the calling code holds it.
+static int sessionFenceDepth = 0;
+class WebSessionFenceGuard {
+ public:
+  WebSessionFenceGuard() { ++sessionFenceDepth; }
+  ~WebSessionFenceGuard() { --sessionFenceDepth; }
+  explicit operator bool() const { return true; }
+};
+static unsigned revokedUnfenced = 0;
+
+// Command-layer doubles for the ban/unban adapters (System_User.cpp).
+static bool gCLIValidateOnly = false;
+#define RETURN_VALID_IF_VALIDATE_CSTR() \
+  do { \
+    if (::gCLIValidateOnly) return "VALID"; \
+  } while (0)
+
 // INSERT_FS_GUARD
 // INSERT_TEXT_IO
 // INSERT_TYPES
 // INSERT_PRODUCTION
 
-void enqueueTargetedRevokeForSessionIdx(int idx, const String&) { revoked.push_back(idx); }
+void enqueueTargetedRevokeForSessionIdx(int idx, const String&) {
+  revoked.push_back(idx);
+  if (sessionFenceDepth == 0) ++revokedUnfenced;
+}
+
+// Production CommandArgs (System_Command) and the ban/unban adapters.
+// INSERT_COMMANDS
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -116,6 +140,7 @@ static fake_vfs::Fs& resetStore(bool withPrevious) {
   fs.mkdirAll("/system/users");
   if (withPrevious) fs.put(kBanFile, kPrevious);
   output.clear(); events.clear(); revoked.clear();
+  revokedUnfenced = 0;
   encryptionFails = false;
   for (auto& session : sessionStorage) session = SessionEntry{};
   loadIpBans();
@@ -230,6 +255,48 @@ static void caseLookupHoldsTheBanLock() {
   fs.onCall = nullptr;
 }
 
+// Banning an address signs out its web sessions; the kick loop reads the
+// session table under the session fence (the revoke helper nests in it).
+static void caseKickUnderSessionFence() {
+  resetStore(false);
+  sessionStorage[1] = SessionEntry{String("sid-one"), String("10.5.5.5")};
+  sessionStorage[2] = SessionEntry{String("sid-two"), String("10.6.6.6")};
+  sessionStorage[3] = SessionEntry{String("sid-three"), String("10.5.5.5")};
+  check(banIp("10.5.5.5", "kick"));
+  check(revoked.size() == 2 && revoked[0] == 1 && revoked[1] == 3);
+  check(revokedUnfenced == 0);
+  check(sessionFenceDepth == 0);
+}
+
+// The ban/unban replies tell a refused change from one that took effect but
+// was not saved: banIp keeps a ban in force when only the save failed, and
+// unbanIp restores the ban when its save failed.
+static void caseCommandRepliesOnFailedSave() {
+  auto& fs = resetStore(true);
+  failBanWrites(fs);
+  std::string reply = cmd_ban("10.2.2.2 probe");
+  check(reply == "Error: banned 10.2.2.2, not saved (ends at reboot)");
+  check(isIpBanned("10.2.2.2"));
+  reply = cmd_ban("10.2.2.2");                 // the retry fails the same way
+  check(reply == "Error: banned 10.2.2.2, not saved (ends at reboot)");
+  reply = cmd_unban("10.1.1.1");
+  check(reply == "Error: unban of 10.1.1.1 not saved; the ban stays");
+  check(isIpBanned("10.1.1.1"));
+  check(fs.text(kBanFile) == kPrevious);
+  check(std::string(cmd_unban("10.7.7.7")) == "Error: IP not found in ban list");
+
+  fs.faults.clear();
+  check(std::string(cmd_ban("10.2.2.2 probe")) == "Banned 10.2.2.2 — probe");
+  check(std::string(cmd_unban("10.1.1.1")) == "Unbanned 10.1.1.1");
+  check(!isIpBanned("10.1.1.1"));
+
+  // A full list refuses the ban and says so; nothing is in force.
+  resetStore(false);
+  for (int i = 0; i < 16; ++i) check(banIp(ipv6(i).c_str(), nullptr));
+  check(std::string(cmd_ban("10.9.9.9")) == "Error: could not ban IP (ban list full)");
+  check(!isIpBanned("10.9.9.9"));
+}
+
 int main(int argc, char** argv) {
   const std::string only = argc > 1 ? argv[1] : "";
   struct Case { const char* name; void (*run)(); };
@@ -240,6 +307,8 @@ int main(int argc, char** argv) {
       {"full-list-json", caseFullListJson},
       {"oversize-json", caseOversizeJsonIsAnError},
       {"lookup-lock", caseLookupHoldsTheBanLock},
+      {"kick-under-fence", caseKickUnderSessionFence},
+      {"command-replies", caseCommandRepliesOnFailedSave},
   };
   bool ran = false;
   for (const Case& c : cases) {
