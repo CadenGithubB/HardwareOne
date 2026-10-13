@@ -1,0 +1,7 @@
+{
+  "board": "xiao_s3",
+  "features": {
+    "ENABLE_LLM_SOURCE_HTTP": 1,
+    "ENABLE_MQTT": 0
+  }
+}

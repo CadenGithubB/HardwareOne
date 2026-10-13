@@ -665,9 +665,7 @@ static const char* llmHttpSettingCommand(const char* key, const String& args,
       !httpLlmValidateBaseUrl(value.c_str()))
     return "Error: use an HTTP(S) base URL ending /v1, without credentials, query, or fragment";
   if (value == "-" && entry->type == SETTING_STRING) {
-    *((String*)entry->valuePtr) = "";
-    (void)requestSettingsPersist();
-    notifySettingChanged(entry->valuePtr);
+    setSetting(*((String*)entry->valuePtr), String(), entry);
     llmHttpApplySettings();
     return "[Settings] Configuration cleared";
   }

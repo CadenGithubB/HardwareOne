@@ -76,6 +76,26 @@ class SavedConfiguration(unittest.TestCase):
         self.assertEqual(result["ENABLE_WEB_MQTT"], "1")
         self.assertEqual((baseline / "features.h").read_bytes(), before)
 
+    def test_openclaw_profile_retains_existing_xiao_sources(self):
+        saved = json.loads((REPO / "configurations/xiao-openclaw.json").read_text())
+        self.save("openclaw", saved["features"], saved["board"])
+        self.configure("openclaw")
+        values = build_config.check("openclaw")["value"]
+        for flag, expected in {"ENABLE_LLM_SOURCE_HTTP": "1",
+                               "ENABLE_LLM_SOURCE_ONBOARD": "1",
+                               "ENABLE_LLM_SOURCE_CM5": "1",
+                               "ENABLE_MQTT": "0"}.items():
+            self.assertEqual(values[flag], expected, flag)
+        self.save("baseline", {"ENABLE_MQTT": 0})
+        self.configure("baseline")
+        self.assertEqual(build_config.check("baseline")["value"]["ENABLE_LLM_SOURCE_HTTP"], "0")
+
+    def test_saved_http_source_requires_wifi(self):
+        self.save("bad-http", {"ENABLE_LLM_SOURCE_HTTP": 1, "NETWORK_FEATURE_LEVEL": 0})
+        self.configure("bad-http")
+        with self.assertRaisesRegex(ValueError, "ENABLE_LLM_SOURCE_HTTP requires Wi-Fi"):
+            build_config.check("bad-http")
+
     def test_missing_wifi_explains_dependency(self):
         self.save("bad", {"ENABLE_MQTT": 1, "NETWORK_FEATURE_LEVEL": 0})
         self.configure("bad")

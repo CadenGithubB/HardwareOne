@@ -4,6 +4,7 @@ Build different feature selections for the same board without editing shared hea
 
 ```sh
 python3 tools/build_config.py build xiao-default
+python3 tools/build_config.py build xiao-openclaw
 python3 tools/build_config.py build xiao-mqtt
 python3 tools/build_config.py build xiao-display
 python3 tools/build_config.py build xiao-no-bluetooth
@@ -26,6 +27,10 @@ enables MQTT, Wi-Fi, and the MQTT settings page, and disables offline maps to
 fit the existing app partition. Both use the existing Sense assembly selection
 and board defaults. This trade-off is an explicit saved choice, not a dependency
 rule or an automatic size adjustment.
+
+`xiao-openclaw` adds the optional HTTP agent source to `xiao-default`, retaining
+the onboard and CM5 sources and all other existing choices. Endpoint credentials
+remain runtime device settings; the saved configuration contains no secrets.
 
 `xiao-display` enables external I2C and an SSD1306 display. It explicitly disables
 the camera because the current SDK camera bus and external I2C both use
