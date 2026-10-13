@@ -1029,6 +1029,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_user_store_mutations.py
           ${SETUP_MQTT_TEST_ARGS})
+# Web file streaming: the FS mutex and the sensor poll pause are never held
+# across a chunk send, and every send loop stops at the first failed send.
+add_test(
+  NAME web_file_streaming
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_file_streaming.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Shared in-memory fake VFS (fake_vfs.h) that new persistence suites build on;
 # this self-test covers its knobs, faults, lock seam and forwarders.
 add_test(
@@ -1036,12 +1043,24 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_fake_vfs.py
           ${SETUP_MQTT_TEST_ARGS})
+# The shared bounded HTTP request-body reader and the LLM page's wrapper on it.
+add_test(
+  NAME web_body_reader
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_body_reader.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Boot-time crash counters: brownouts stay out of the software-fault count the
 # OTA crash-loop escape keys on, and a committed escape consumes the counters.
 add_test(
   NAME crash_record_boot
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_crash_record_boot.py
+          ${SETUP_MQTT_TEST_ARGS})
+# filecreate refuses an existing name instead of truncating it.
+add_test(
+  NAME filecreate
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_filecreate.py
           ${SETUP_MQTT_TEST_ARGS})
 add_test(
   NAME raw_allocation_inventory

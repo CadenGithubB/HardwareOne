@@ -1,7 +1,8 @@
 """Run the shipping battery page against measured, unavailable and estimated data.
 
-This checks display text and visibility transitions with a small DOM stub; it
-is not a browser layout test or an HTTP/firmware integration test.
+This checks display text and visibility transitions with a small DOM stub, and
+that the history table renders /battery.csv as text rather than markup; it is
+not a browser layout test or an HTTP/firmware integration test.
 """
 from __future__ import annotations
 
@@ -81,10 +82,72 @@ if(failures.length)throw new Error(failures.join('\n'));
 __out('BATTERY_PAGE PASS');
 """
 
+# /battery.csv is a file a signed-in user can replace, so whatever it contains
+# must reach the admin's page as text. This DOM stub records element trees and
+# treats any innerHTML assignment as a failure; it is still not a browser.
+LOG_CSV = (
+    "time,<img src=x onerror=1>pct[%],event\n"
+    "1,50,<script>alert(1)</script>\n"
+    "2,,<b onmouseover=1>plug</b>\n"
+)
+LOG_HARNESS = r"""
+var ids=JSON.parse(slurp(__argv[1])), nodes={}, loaded=null, innerHtmlWrites=[];
+function makeNode(tag){
+  var n={tag:tag,style:{},children:[]};
+  Object.defineProperty(n,'textContent',{get:function(){return this._text||'';},
+    set:function(v){this._text=(v===null||v===undefined)?'':String(v);this.children=[];}});
+  Object.defineProperty(n,'innerHTML',{get:function(){return '';},
+    set:function(v){innerHtmlWrites.push(tag+' <- '+String(v).slice(0,60));}});
+  n.appendChild=function(child){this.children.push(child);};
+  return n;
+}
+ids.forEach(function(id){nodes[id]=makeNode('#'+id);});
+function node(x){var n=typeof x==='string'?nodes[x]:x;if(!n)throw new Error('Missing DOM node '+x);return n;}
+var document={createElement:function(tag){return makeNode(String(tag).toLowerCase());}};
+var pending={then:function(){return this;},catch:function(){return this;}};
+var hw={
+  $:node,setText:function(x,v){node(x).textContent=v;},
+  toggle:function(x,visible){node(x).style.display=visible?'':'none';},
+  on:function(){},fetchJSON:function(){return pending;},pollJSON:function(){},
+  fetchText:function(){return {then:function(fn){loaded=fn;return pending;}};}
+};
+var console={log:function(){},warn:function(){},error:function(){}};
+eval(slurp(__argv[0]));
+if(typeof loaded!=='function')throw new Error('Missing log fetch callback');
+loaded(slurp(__argv[2]));
+
+var failures=[];
+function check(ok,msg){if(!ok)failures.push(msg);}
+var tags=[];
+function walk(n){tags.push(n.tag);(n.children||[]).forEach(walk);}
+var table=node('bat-table');walk(table);
+check(innerHtmlWrites.length===0,'innerHTML assigned: '+innerHtmlWrites.join(' | '));
+var allowed={thead:1,tbody:1,tr:1,th:1,td:1};
+var stray=tags.slice(1).filter(function(t){return !allowed[t];});
+check(stray.length===0,'markup from the log became elements: '+stray.join(','));
+var thead=table.children[0],tbody=table.children[1];
+var ths=(thead&&thead.children[0]&&thead.children[0].children)||[];
+check(ths.length===3,'header cells: '+ths.length+' != 3');
+if(ths.length===3){
+  check(ths[1].textContent==='<img src=x onerror=1>pct[%]','header text: '+ths[1].textContent);
+  check(String(ths[0].style.cssText||'').indexOf('position:sticky')!==-1,'header lost its sticky style');
+}
+var rows=(tbody&&tbody.children)||[];
+check(rows.length===2,'body rows: '+rows.length+' != 2');
+if(rows.length===2){
+  check(rows[0].children[2].textContent==='<script>alert(1)</script>','cell text: '+rows[0].children[2].textContent);
+  check(rows[1].children[1].textContent==='','empty cell: '+JSON.stringify(rows[1].children[1].textContent));
+  check(rows[1].children[2].textContent==='<b onmouseover=1>plug</b>','cell text: '+rows[1].children[2].textContent);
+}
+check(node('bat-log-info').textContent==='2 samples','log info: '+node('bat-log-info').textContent);
+if(failures.length)throw new Error(failures.join('\n'));
+__out('BATTERY_LOG_TABLE PASS');
+"""
+
 
 @unittest.skipUnless(JS_ENGINE, "a JavaScript engine is required")
 class BatteryPageTests(unittest.TestCase):
-    def test_validity_and_estimate_transitions(self):
+    def _run_page(self, harness_js, sentinel, extra_files=()):
         page_js, _ = extract_js.page_js(PAGE)
         self.assertIn("function applyStatus", page_js)
         ids = sorted(set(re.findall(r"\bid=['\"]([A-Za-z0-9_-]+)['\"]", PAGE.read_text())))
@@ -94,11 +157,22 @@ class BatteryPageTests(unittest.TestCase):
             script, markup, harness = work / 'page.js', work / 'ids.json', work / 'test.js'
             script.write_text(page_js)
             markup.write_text(json.dumps(ids))
-            harness.write_text(HARNESS)
-            result = run_js(harness, [str(script), str(markup)])
+            harness.write_text(harness_js)
+            args = [str(script), str(markup)]
+            for name, text in extra_files:
+                (work / name).write_text(text)
+                args.append(str(work / name))
+            result = run_js(harness, args)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.splitlines().count('BATTERY_PAGE PASS'), 1,
+        self.assertEqual(result.stdout.splitlines().count(sentinel), 1,
                          result.stdout + result.stderr)
+
+    def test_validity_and_estimate_transitions(self):
+        self._run_page(HARNESS, 'BATTERY_PAGE PASS')
+
+    def test_log_table_renders_csv_as_text(self):
+        self._run_page(LOG_HARNESS, 'BATTERY_LOG_TABLE PASS',
+                       extra_files=[('battery.csv', LOG_CSV)])
 
 
 if __name__ == '__main__':

@@ -33,9 +33,19 @@ class String {
     return value_.size() >= length && value_.compare(value_.size() - length, length, value) == 0;
   }
   int lastIndexOf(char value) const { auto at = value_.rfind(value); return at == std::string::npos ? -1 : int(at); }
-  int indexOf(char value) const { auto at = value_.find(value); return at == std::string::npos ? -1 : int(at); }
+  int indexOf(char value, size_t from = 0) const { auto at = value_.find(value, from); return at == std::string::npos ? -1 : int(at); }
+  // indexOf(String) and replace() are what the editor save's former private
+  // decoder used; they keep a --baseline WebServer_Server.cpp compiling.
+  int indexOf(const String& value, size_t from = 0) const { auto at = value_.find(value.value_, from); return at == std::string::npos ? -1 : int(at); }
+  void replace(const char* from, const char* to) {
+    const size_t fromLength = std::strlen(from), toLength = std::strlen(to);
+    for (size_t at = value_.find(from); at != std::string::npos; at = value_.find(from, at + toLength)) value_.replace(at, fromLength, to);
+  }
   String substring(size_t start, size_t end = std::string::npos) const { return value_.substr(start, end == std::string::npos ? end : end - start); }
   bool operator==(const char* value) const { return value_ == value; }
+  bool operator==(const String& value) const { return value_ == value.value_; }
+  char operator[](size_t index) const { return value_[index]; }
+  friend String operator+(const String& left, const char* right) { return left.value_ + right; }
  private:
   std::string value_;
 };
@@ -44,6 +54,10 @@ using std::min;
 #define ERROR_STORAGEF(...) ((void)0)
 #define WARN_SYSTEMF(...) ((void)0)
 #define INFO_WEBF(...) ((void)0)
+#define ERROR_WEBF(...) ((void)0)
+#define ERROR_MEMORYF(...) ((void)0)
+// The production form decoders (System_Utils.cpp) both handlers now share.
+// INSERT_FORM_DECODERS
 
 using TickType_t = uint32_t;
 constexpr TickType_t portMAX_DELAY = UINT32_MAX;
@@ -65,7 +79,11 @@ static void xSemaphoreGive(SemaphoreHandle_t) { check(ownsFs, "unowned mutex rel
 struct Controls {
   bool auth = true, guestAllowed = true, sd = true, import = true, admin = true;
   bool openFails = false, parentExists = true, shortWrite = false, cleanupUser = true, cleanupSystem = true;
-  bool magicMap = false, mapOrganization = true, replaceFails = false;
+  bool temporaryOpenFails = false;          // the backend refuses only the staged ".upload.tmp" open (full, transient, denied)
+  bool magicMap = false, mapOrganization = true, replaceFails = false, writeAllowed = true;
+  bool renameAllowed = true, createAllowed = true, deleteAllowed = true;  // the caller's rule-table bits at promotion
+  bool requirePause = true;                 // the editor save never paused polling; the upload does
+  bool hooksOutsideLock = true;             // the editor keeps its function-scoped lock through the post-save hooks
   size_t freeBytes = 1024 * 1024, failAllocation = 0, chunkSize = 4096;
   size_t disconnectAt = SIZE_MAX, maxNameLength = SIZE_MAX;
   unsigned timeouts = 0;                    // consecutive timeouts before the first byte
@@ -76,17 +94,18 @@ struct Metrics {
   unsigned posthooks = 0, mapProbes = 0, mapHooks = 0, waypointHooks = 0, mkdirs = 0;
   unsigned receives = 0, responses = 0, promotions = 0;
   bool badIoScope = false, badHookResources = false, badCloseScope = false;
-  std::vector<std::string> cleanupUsers, openedUsers, promotedUsers;
+  std::vector<std::string> cleanupUsers, openedUsers, openedPaths, promotedUsers, systemReasons;
 } metrics;
 static std::set<void*> buffers;
 static bool filesystemReady = true;
 static bool outerLock = false;
-static void io() { if (!ownsFs || !pauseDepth) metrics.badIoScope = true; }
+static void io() { if (!ownsFs || (control.requirePause && !pauseDepth)) metrics.badIoScope = true; }
 namespace AllocPref { enum Kind { PreferPSRAM }; }
 static void* ps_alloc(size_t size, AllocPref::Kind) {
   if (++metrics.allocations == control.failAllocation) return nullptr;
   void* result = std::malloc(size); check(result != nullptr, "host allocation failed"); buffers.insert(result); return result;
 }
+static void* ps_alloc(size_t size, AllocPref::Kind kind, const char*) { return ps_alloc(size, kind); }
 static void trackedFree(void* allocation) {
   if (allocation) { check(buffers.erase(allocation) == 1, "unowned buffer free"); ++metrics.frees; std::free(allocation); }
 }
@@ -105,6 +124,10 @@ static AuthContext makeWebAuthCtx(httpd_req_t*) { return {}; }
 static bool tgRequireAuth(const AuthContext&) { return control.auth; }
 static bool webGuestAccessAllowed(httpd_req_t*, const AuthContext&) { return control.guestAllowed; }
 static bool canImport(const String&, const AuthContext&) { return control.import; }
+// The silent rule-table queries the staged writer asks before promoting as the caller.
+static bool canRename(const String&, const AuthContext& ctx) { return ctx.user == "system" || control.renameAllowed; }
+static bool canCreate(const String&, const AuthContext& ctx) { return ctx.user == "system" || control.createAllowed; }
+static bool canDelete(const String&, const AuthContext& ctx) { return ctx.user == "system" || control.deleteAllowed; }
 static bool isAdminOnlyPath(const String& path) { return path.startsWith("/system/"); }
 static bool isAdminUser(const String&) { return control.admin; }
 static void sendJsonResponse(httpd_req_t* req, const char* value) { req->response = value; ++metrics.responses; }
@@ -119,14 +142,6 @@ static int httpd_query_key_value(const char* query, const char* key, char* outpu
   std::string text(query);
   if (text.rfind(prefix, 0) != 0 || text.size() - prefix.size() >= size) return ESP_FAIL;
   std::strcpy(output, text.c_str() + prefix.size()); return ESP_OK;
-}
-static String urlDecode(const String& text) {
-  std::string value(text.c_str()), result;
-  for (size_t i = 0; i < value.size(); ++i) {
-    if (value[i] == '%' && i + 2 < value.size()) { result += char(std::strtoul(value.substr(i + 1, 2).c_str(), nullptr, 16)); i += 2; }
-    else result += value[i] == '+' ? ' ' : value[i];
-  }
-  return result;
 }
 static int httpd_req_recv(httpd_req_t* req, char* output, int length) {
   ++metrics.receives;
@@ -147,7 +162,7 @@ struct Handle {
   explicit Handle(std::shared_ptr<Node> value) : node(std::move(value)) { ++liveHandles; }
   void close() {
     if (!open) return;
-    if (!ownsFs || !pauseDepth) metrics.badCloseScope = true;
+    if (!ownsFs || (control.requirePause && !pauseDepth)) metrics.badCloseScope = true;
     open = false; --liveHandles; ++metrics.closes;
   }
   ~Handle() { close(); }
@@ -175,9 +190,10 @@ static bool getStats(StorageType, uint64_t& total, uint64_t& used, uint64_t& fre
 static bool existsGuarded(const String&, const AuthContext&) { io(); return control.parentExists; }
 static bool mkdirGuarded(const String&, const AuthContext&) { io(); ++metrics.mkdirs; return true; }
 static File openGuarded(const String& path, const char* mode, const AuthContext& ctx, bool create) {
-  FsLockGuard guard("VFS.open"); io(); ++metrics.opens; metrics.openedUsers.emplace_back(ctx.user.c_str());
+  FsLockGuard guard("VFS.open"); io(); ++metrics.opens; metrics.openedUsers.emplace_back(ctx.user.c_str()); metrics.openedPaths.emplace_back(path.c_str());
   check(std::strcmp(mode, "w") == 0 && create, "upload still opens create/truncate under user auth");
   if (control.openFails) return {};
+  if (control.temporaryOpenFails && path.endsWith(".upload.tmp")) return {};
   const std::string full = path.c_str();
   if (full.size() - full.rfind('/') - 1 > control.maxNameLength) return {};  // backend name limit
   auto node = std::make_shared<Node>(); files[path.c_str()] = node; return File(node);
@@ -186,19 +202,36 @@ static File openGuarded(const String& path, const char* mode, const AuthContext&
 static bool replaceFileGuarded(const String& from, const String& to, const AuthContext& ctx) {
   FsLockGuard guard("VFS.replace"); io(); check(liveHandles == 0, "close the staged file before promotion");
   ++metrics.promotions; metrics.promotedUsers.emplace_back(ctx.user.c_str());
+  // renameGuarded's demands on a caller: RENAME on the source, CREATE on the destination,
+  // and DELETE for the backup of an existing SD file. The system identity has them all.
+  const bool sdBackup = getStorageType(to) == SDCARD && files.count(to.c_str());
+  if (ctx.user != "system" && !(control.renameAllowed && control.createAllowed && (!sdBackup || control.deleteAllowed))) return false;
   if (control.replaceFails || !files.count(from.c_str())) return false;
   files[to.c_str()] = files.at(from.c_str()); files.erase(from.c_str()); return true;
 }
-static AuthContext systemAuth(const char* reason) { check(std::strcmp(reason, "upload.cleanup.partial") == 0, "cleanup system identity reason preserved"); AuthContext result; result.user = "system"; return result; }
+static AuthContext systemAuth(const char* reason) {
+  check(std::strcmp(reason, "web.upload") == 0 || std::strcmp(reason, "web.filewrite") == 0, "the writer's system identity names its writer");
+  metrics.systemReasons.emplace_back(reason); AuthContext result; result.user = "system"; return result;
+}
+static bool exists(const String& path) { io(); return files.count(path.c_str()) != 0; }
+static bool guardedNormalize(const String& in, String& out, const char*, const AuthContext&) { out = in; return true; }
+// The destination's write right (WRITE on an existing file, CREATE on a new one): the
+// same decision canWriteGuarded below takes, as the writer asks it before a system promotion.
+static bool writePermitted(const String&, const AuthContext&) { io(); return control.writeAllowed; }
 static bool removeGuarded(const String& path, const AuthContext& ctx) {
   FsLockGuard guard("VFS.remove"); io(); check(liveHandles == 0, "close file before removing failed partial");
   metrics.cleanupUsers.emplace_back(ctx.user.c_str());
   if (ctx.user == "system" ? !control.cleanupSystem : !control.cleanupUser) return false;
   return files.erase(path.c_str()) != 0;
 }
+// The editor's destination gate (the decision a write-mode openGuarded makes).
+static bool canWriteGuarded(const String&, const AuthContext&) { io(); return control.writeAllowed; }
+// The shared staged writer (System_VFS) is compiled here over these fakes.
+// INSERT_STAGED_WRITE_DECL
+// INSERT_STAGED_WRITE_IMPL
 }
 static void hookScope() {
-  if (!buffers.empty() || liveHandles || ownsFs != outerLock) metrics.badHookResources = true;
+  if (!buffers.empty() || liveHandles || (control.hooksOutsideLock && ownsFs != outerLock)) metrics.badHookResources = true;
 }
 static void runFileWritePostSaveHooks(const String&) { hookScope(); ++metrics.posthooks; }
 static bool isMapFileByMagic(const String&) { hookScope(); ++metrics.mapProbes; return control.magicMap; }
@@ -207,6 +240,7 @@ static bool tryOrganizeLegacyWaypointsAtRoot(const String&, String&) { hookScope
 
 #define free trackedFree
 // INSERT_UPLOAD_HANDLER
+// INSERT_FILE_WRITE_HANDLER
 #undef free
 
 static void reset() {
@@ -241,6 +275,22 @@ static httpd_req_t request(const std::string& path = "/user/upload.txt", const s
   req.body = "path=" + encode(path) + "&binary=" + (binary ? "1" : "0") + "&content=" + encode(binary ? base64(bytes) : bytes);
   req.content_len = req.body.size(); return req;
 }
+// JavaScript encodeURIComponent: only A-Z a-z 0-9 - _ . ! ~ * ' ( ) stay literal; every other byte becomes %XX.
+static std::string encodeURIComponent(const std::string& input) {
+  static const char hex[] = "0123456789ABCDEF";
+  std::string result;
+  for (unsigned char c : input) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || std::strchr("-_.!~*'()", c)) result += char(c);
+    else { result += '%'; result += hex[c >> 4]; result += hex[c & 15]; }
+  }
+  return result;
+}
+// The Files editor save: hw.postForm('/api/files/write', { name, content }).
+static httpd_req_t editorRequest(const std::string& name, const std::string& bytes) {
+  httpd_req_t req;
+  req.body = "name=" + encodeURIComponent(name) + "&content=" + encodeURIComponent(bytes);
+  req.content_len = req.body.size(); return req;
+}
 static void balanced(unsigned expectedPause = 0, bool expectedLock = false) {
   check(buffers.empty(), "upload buffers leaked");
   check(liveHandles == 0, "file handle leaked");
@@ -272,6 +322,28 @@ static void succeeded(httpd_req_t& req, const std::string& path, const std::stri
   balanced();
 }
 static std::shared_ptr<Node> original() { return std::make_shared<Node>(Node{"original"}); }
+// A /user/ path whose last component is exactly `bytes` long. The writer keeps "<name>.upload.tmp" within
+// 63 bytes on LittleFS (the suffix adds 11) and stages longer names as /user/~stage.upload.tmp.
+static std::string longName(size_t bytes) { return "/user/" + std::string(bytes - 4, 'n') + ".txt"; }
+static void editorFailed(httpd_req_t& req, const char* reason) {
+  check(handleFileWrite(&req) == ESP_OK, "editor handler response convention changed");
+  check(req.response.find("\"success\":false") != std::string::npos && req.response.find(reason) != std::string::npos,
+        "expected editor failure '" + std::string(reason) + "', got " + req.response);
+  check(metrics.responses == 1 && metrics.posthooks == 0, "one error response and no post-save hooks");
+  balanced();
+}
+static void editorSucceeded(httpd_req_t& req, const std::string& path, const std::string& bytes) {
+  check(handleFileWrite(&req) == ESP_OK, "editor handler response convention changed");
+  check(req.response == "{\"success\":true}", "editor success response changed: " + req.response);
+  check(files.count(path), "editor saved under a different name");
+  check(files.at(path)->bytes == bytes, "editor saved different bytes: " + files.at(path)->bytes);
+  check(files.size() == 1, "staged temporary left behind after promotion");
+  check(metrics.opens == 1 && metrics.closes == 1 && metrics.flushes == 1 && metrics.writes == (bytes.size() + 511) / 512, "one complete checked file lifecycle");
+  check(metrics.openedUsers == std::vector<std::string>{"alice"} && metrics.promotedUsers == std::vector<std::string>{"alice"},
+        "staged copy opened and promoted once under the authenticated user");
+  check(metrics.cleanupUsers.empty() && metrics.posthooks == 1, "success hooks exactly once without cleanup");
+  balanced();
+}
 struct Test { const char* name; const char* group; std::function<void()> run; };
 int main(int argc, char** argv) {
   const std::string selected = argc > 1 ? argv[1] : "all";
@@ -307,7 +379,18 @@ int main(int argc, char** argv) {
   add("re-upload keeps the previous content on disconnect", "replace", [] { files["/user/upload.txt"] = original(); control.disconnectAt = 8192; auto req = request("/user/upload.txt", std::string(12000, 'a')); failed(req, "Recv error"); check(files.size() == 1 && files.at("/user/upload.txt")->bytes == "original" && metrics.cleanupUsers == std::vector<std::string>{"alice"}, "failed replacement must leave the destination untouched and remove only its staged copy"); });
   add("re-upload promotes over the previous content", "replace", [] { files["/user/upload.txt"] = original(); auto req = request("/user/upload.txt", "replacement"); succeeded(req, "/user/upload.txt", "replacement"); });
   add("promotion failure keeps the previous content", "replace", [] { files["/user/upload.txt"] = original(); control.replaceFails = true; auto req = request("/user/upload.txt", "replacement"); failed(req, "Could not replace destination"); check(files.size() == 1 && files.at("/user/upload.txt")->bytes == "original" && metrics.promotions == 1 && metrics.cleanupUsers == std::vector<std::string>{"alice"}, "failed promotion leaves the destination and removes the staged copy"); });
-  add("name too long for a staged copy writes in place", "replace", [] { control.maxNameLength = 14; auto req = request("/user/upload.txt", "hello"); check(handleFileUpload(&req) == ESP_OK && req.response == "{\"success\":true}", "in-place fallback response"); check(files.size() == 1 && files.at("/user/upload.txt")->bytes == "hello" && metrics.opens == 2 && metrics.promotions == 0 && metrics.cleanupUsers.empty(), "fallback writes the destination directly"); balanced(); });
+  // An IMPORT|WRITE|CREATE grant without RENAME (/system/llm/): the upload promotes through the writer's system identity.
+  add("upload without RENAME promotes as the writer", "replace", [] { files["/user/upload.txt"] = original(); control.renameAllowed = false; auto req = request("/user/upload.txt", "replacement"); check(handleFileUpload(&req) == ESP_OK && req.response == "{\"success\":true}", "an IMPORT|WRITE grant must still upload: " + req.response); check(files.size() == 1 && files.at("/user/upload.txt")->bytes == "replacement" && metrics.openedUsers == std::vector<std::string>{"alice"} && metrics.promotions == 1 && metrics.promotedUsers == std::vector<std::string>{"system"} && metrics.systemReasons == std::vector<std::string>{"web.upload"}, "temporary opened as the caller, promoted once by the upload's system identity"); check(metrics.cleanupUsers.empty() && metrics.posthooks == 1, "success hooks exactly once without cleanup"); balanced(); });
+  // CREATE|IMPORT without WRITE over an existing file (/sd/g2_icon_animations/): no write right, so no promotion.
+  add("upload without RENAME or a write right keeps the previous content", "replace", [] { files["/user/upload.txt"] = original(); control.renameAllowed = control.writeAllowed = false; auto req = request("/user/upload.txt", "replacement"); failed(req, "Could not replace destination"); check(files.size() == 1 && files.at("/user/upload.txt")->bytes == "original" && metrics.promotions == 0 && metrics.cleanupUsers == std::vector<std::string>{"alice"}, "no promotion without a write right; the staged copy is removed as the caller"); });
+  add("upload with RENAME promotes as the caller", "replace", [] { files["/user/upload.txt"] = original(); control.writeAllowed = false; auto req = request("/user/upload.txt", "replacement"); succeeded(req, "/user/upload.txt", "replacement"); });
+  // The in-place fallback exists only for a temporary whose name cannot exist on the backend (LittleFS: 63 bytes, so a
+  // destination name over 52). Any other refused temporary ends the upload with the destination untouched.
+  add("long name stages under the short staging name", "replace", [] { control.maxNameLength = 63; const std::string path = longName(60); files[path] = original(); auto req = request(path, "hello"); succeeded(req, path, "hello"); check(metrics.openedPaths == std::vector<std::string>{"/user/~stage.upload.tmp"}, "a 60-byte name stages under the short name, never opening the destination"); });
+  add("64-byte name on an image-formatted partition is staged", "replace", [] { control.maxNameLength = 64; const std::string path = longName(64); files[path] = original(); auto req = request(path, "hello"); succeeded(req, path, "hello"); check(metrics.openedPaths == std::vector<std::string>{"/user/~stage.upload.tmp"}, "a name the image takes is staged, not written in place"); });
+  add("long name on a device-formatted partition is staged", "replace", [] { control.maxNameLength = 255; const std::string path = longName(200); files[path] = original(); auto req = request(path, "hello"); succeeded(req, path, "hello"); check(metrics.openedPaths == std::vector<std::string>{"/user/~stage.upload.tmp"}, "a 200-byte name is staged, not written in place"); });
+  add("name that still fits with its staging suffix is staged", "replace", [] { control.maxNameLength = 63; const std::string path = longName(52); files[path] = original(); auto req = request(path, "hello"); succeeded(req, path, "hello"); check(metrics.openedPaths == std::vector<std::string>{path + ".upload.tmp"}, "a 52-byte name keeps the <name>.upload.tmp staging name"); });
+  add("refused temporary on a short name keeps the previous content", "replace", [] { control.temporaryOpenFails = true; files["/user/upload.txt"] = original(); auto req = request("/user/upload.txt", "replacement"); failed(req, "Invalid path"); check(files.size() == 1 && files.at("/user/upload.txt")->bytes == "original" && metrics.opens == 1 && metrics.cleanupUsers.empty(), "a refused temporary must not fall back to truncating the destination"); });
   add("binary across percent/base64 chunks", "binary", [] { control.chunkSize = 1; const std::string bytes("\0\xff\xfe\x01\x02\x7f\x80+/%", 10); auto req = request("/user/upload.bin", bytes, true); succeeded(req, "/user/upload.bin", bytes); });
   add("large binary", "binary", [] { control.chunkSize = 101; std::string bytes; for (unsigned i = 0; i < 12001; ++i) bytes += char(i % 256); auto req = request("/user/upload.bin", bytes, true); succeeded(req, "/user/upload.bin", bytes); check(metrics.writes > 2, "binary output spans buffers"); });
   add("empty binary", "binary", [] { auto req = request("/user/upload.bin", "", true); succeeded(req, "/user/upload.bin", ""); });
@@ -318,6 +401,35 @@ int main(int argc, char** argv) {
   add("map magic posthook", "maps", [] { control.magicMap = true; auto req = request("/user/map.bin"); succeeded(req, "/user/map.bin", "hello"); check(metrics.mapHooks == ENABLE_WEB_MAPS && metrics.mapProbes == ENABLE_WEB_MAPS, "map magic hook follows feature flag"); });
   add("legacy waypoint posthook", "maps", [] { auto req = request("/maps/waypoints_map.json"); succeeded(req, "/maps/waypoints_map.json", "hello"); check(metrics.waypointHooks == ENABLE_WEB_MAPS && metrics.mapProbes == 0, "waypoint hook follows feature flag"); });
   add("map organizer refusal preserves upload result", "maps", [] { control.mapOrganization = false; auto req = request("/user/map.hwmap"); succeeded(req, "/user/map.hwmap", "hello"); check(metrics.mapHooks == ENABLE_WEB_MAPS, "map organizer attempted once when enabled"); });
+  // /api/files/write (the Files editor save) through the same staged writer.
+  auto editor = [&](const char* name, std::function<void()> test) { add(name, "filewrite", [test] { control.requirePause = control.hooksOutsideLock = false; test(); }); };
+  const std::string alphabet = "a=b&c+d \xC3\xA9\t#%";  // the characters the old private decoder left as %XX
+  editor("editor round-trips the encodeURIComponent alphabet byte-exact", [alphabet] { control.chunkSize = 7; const std::string name = "/user/" + alphabet; auto req = editorRequest(name, alphabet); editorSucceeded(req, name, alphabet); check(metrics.receives > 1, "chunked receive exercised"); });
+  editor("editor replaces the previous content", [] { files["/user/notes.txt"] = original(); auto req = editorRequest("/user/notes.txt", std::string(1300, 'n') + "\r\n"); editorSucceeded(req, "/user/notes.txt", std::string(1300, 'n') + "\r\n"); });
+  editor("editor saves empty content", [] { files["/user/notes.txt"] = original(); auto req = editorRequest("/user/notes.txt", ""); editorSucceeded(req, "/user/notes.txt", ""); });
+  editor("editor literal plus decodes as a space", [] { auto req = editorRequest("/user/notes.txt", "a b"); req.body = "name=%2Fuser%2Fnotes.txt&content=a+b"; req.content_len = req.body.size(); editorSucceeded(req, "/user/notes.txt", "a b"); });
+  editor("editor short write keeps the previous bytes", [] { files["/user/notes.txt"] = original(); control.shortWrite = true; auto req = editorRequest("/user/notes.txt", "replacement"); editorFailed(req, "short write"); check(files.size() == 1 && files.at("/user/notes.txt")->bytes == "original", "a failed save must leave the previous file intact"); check(metrics.closes == 1 && metrics.flushes == 0 && metrics.promotions == 0 && metrics.cleanupUsers == std::vector<std::string>{"alice"}, "short write closes and removes only the staged copy"); });
+  editor("editor promotion failure keeps the previous bytes", [] { files["/user/notes.txt"] = original(); control.replaceFails = true; auto req = editorRequest("/user/notes.txt", "replacement"); editorFailed(req, "Could not replace destination"); check(files.size() == 1 && files.at("/user/notes.txt")->bytes == "original" && metrics.promotions == 1 && metrics.cleanupUsers == std::vector<std::string>{"alice"}, "failed promotion leaves the destination and removes the staged copy"); });
+  editor("editor cleanup system fallback names its writer", [] { files["/user/notes.txt"] = original(); control.shortWrite = true; control.cleanupUser = false; auto req = editorRequest("/user/notes.txt", "replacement"); editorFailed(req, "short write"); check(files.size() == 1 && files.at("/user/notes.txt")->bytes == "original" && metrics.cleanupUsers == std::vector<std::string>({"alice", "system"}) && metrics.systemReasons == std::vector<std::string>{"web.filewrite"}, "cleanup uses the caller, then the system identity with the editor's reason"); });
+  // A rule-table grant of WRITE without RENAME (/espnow/, /system/llm/) or CREATE without RENAME (/sd/g2_icon_animations/):
+  // the save must still complete through the staged copy, promoted by the writer's system identity.
+  editor("editor save without RENAME promotes as the writer", [] { files["/user/notes.txt"] = original(); control.renameAllowed = false; auto req = editorRequest("/user/notes.txt", "replacement"); check(handleFileWrite(&req) == ESP_OK && req.response == "{\"success\":true}", "a WRITE-only grant must still save: " + req.response); check(files.size() == 1 && files.at("/user/notes.txt")->bytes == "replacement", "staged copy promoted over the previous bytes"); check(metrics.opens == 1 && metrics.openedUsers == std::vector<std::string>{"alice"} && metrics.promotions == 1 && metrics.promotedUsers == std::vector<std::string>{"system"} && metrics.systemReasons == std::vector<std::string>{"web.filewrite"}, "temporary opened as the caller, promoted once by the editor's system identity"); check(metrics.cleanupUsers.empty() && metrics.posthooks == 1, "success hooks exactly once without cleanup"); balanced(); });
+  editor("editor new file without RENAME promotes as the writer", [] { control.renameAllowed = false; auto req = editorRequest("/user/notes.txt", "hello"); check(handleFileWrite(&req) == ESP_OK && req.response == "{\"success\":true}", "a CREATE-only grant must still save a new file: " + req.response); check(files.size() == 1 && files.at("/user/notes.txt")->bytes == "hello" && metrics.promotedUsers == std::vector<std::string>{"system"}, "new file promoted by the writer"); balanced(); });
+  editor("editor short write without RENAME keeps the previous bytes", [] { files["/user/notes.txt"] = original(); control.renameAllowed = false; control.shortWrite = true; auto req = editorRequest("/user/notes.txt", "replacement"); editorFailed(req, "short write"); check(files.size() == 1 && files.at("/user/notes.txt")->bytes == "original" && metrics.promotions == 0 && metrics.cleanupUsers == std::vector<std::string>{"alice"}, "the staged path is kept for a WRITE-only grant, so a failed save still leaves the previous file"); });
+  editor("editor promotion as the writer can still fail", [] { files["/user/notes.txt"] = original(); control.renameAllowed = false; control.replaceFails = true; auto req = editorRequest("/user/notes.txt", "replacement"); editorFailed(req, "Could not replace destination"); check(files.size() == 1 && files.at("/user/notes.txt")->bytes == "original" && metrics.promotedUsers == std::vector<std::string>{"system"} && metrics.cleanupUsers == std::vector<std::string>{"alice"}, "a failed system promotion leaves the destination and removes the staged copy as the caller"); });
+  editor("editor with RENAME promotes as the caller", [] { files["/user/notes.txt"] = original(); control.deleteAllowed = false; auto req = editorRequest("/user/notes.txt", "replacement"); editorSucceeded(req, "/user/notes.txt", "replacement"); });
+  editor("editor SD replacement without DELETE promotes as the writer", [] { files["/sd/notes.txt"] = original(); control.deleteAllowed = false; auto req = editorRequest("/sd/notes.txt", "replacement"); check(handleFileWrite(&req) == ESP_OK && req.response == "{\"success\":true}", "SD replacement response: " + req.response); check(files.size() == 1 && files.at("/sd/notes.txt")->bytes == "replacement" && metrics.promotedUsers == std::vector<std::string>{"system"}, "the FAT backup needs DELETE, so the writer promotes"); balanced(); });
+  editor("editor SD new file without DELETE promotes as the caller", [] { control.deleteAllowed = false; auto req = editorRequest("/sd/notes.txt", "hello"); editorSucceeded(req, "/sd/notes.txt", "hello"); });
+  editor("editor write denied before staging", [] { files["/user/notes.txt"] = original(); control.writeAllowed = false; auto req = editorRequest("/user/notes.txt", "replacement"); editorFailed(req, "Writes to this path are not allowed"); check(metrics.opens == 0 && files.size() == 1 && files.at("/user/notes.txt")->bytes == "original", "denied destination never opens a temporary"); });
+  editor("editor admin path denied", [] { control.admin = false; auto req = editorRequest("/system/secure.json", "x"); editorFailed(req, "Admin required"); check(metrics.opens == 0, "admin-only check retained"); });
+  editor("editor long name stages under the short staging name", [] { control.maxNameLength = 63; const std::string path = longName(60); files[path] = original(); auto req = editorRequest(path, "hello"); editorSucceeded(req, path, "hello"); check(metrics.openedPaths == std::vector<std::string>{"/user/~stage.upload.tmp"}, "a 60-byte name stages under the short name, never opening the destination"); });
+  editor("editor refused temporary on a short name keeps the previous bytes", [] { control.temporaryOpenFails = true; files["/user/notes.txt"] = original(); auto req = editorRequest("/user/notes.txt", "replacement"); editorFailed(req, "Could not save: storage full or unavailable"); check(files.size() == 1 && files.at("/user/notes.txt")->bytes == "original" && metrics.opens == 1 && metrics.cleanupUsers.empty(), "a refused temporary must not fall back to truncating the destination"); });
+  editor("editor refused temporary then short write keeps the previous bytes", [] { control.temporaryOpenFails = true; control.shortWrite = true; files["/user/notes.txt"] = original(); auto req = editorRequest("/user/notes.txt", "replacement"); editorFailed(req, "Could not save: storage full or unavailable"); check(files.size() == 1 && files.at("/user/notes.txt")->bytes == "original" && metrics.writes == 0 && metrics.cleanupUsers.empty(), "an in-place fallback would have truncated the destination and then removed it"); });
+  editor("editor missing name", [] { httpd_req_t req; req.body = "content=abc"; req.content_len = req.body.size(); editorFailed(req, "Name required"); check(metrics.opens == 0, "no file work without a name"); });
+  editor("editor rejects an empty body", [] { httpd_req_t req; editorFailed(req, "Invalid content length"); check(metrics.allocations == 0, "rejected before allocation"); });
+  editor("editor two consecutive timeouts abort", [] { control.timeouts = 2; auto req = editorRequest("/user/notes.txt", "hello"); editorFailed(req, "Error receiving data"); check(metrics.receives == 2 && metrics.opens == 0 && metrics.frees == 1, "half-open socket abandoned before any file work"); });
+  editor("editor unauthenticated", [] { control.auth = false; auto req = editorRequest("/user/notes.txt", "hello"); handleFileWrite(&req); check(metrics.allocations == 0 && metrics.opens == 0, "auth rejected before resources"); balanced(); });
+  editor("editor filesystem unavailable", [] { filesystemReady = false; auto req = editorRequest("/user/notes.txt", "hello"); editorFailed(req, "Filesystem not initialized"); check(metrics.allocations == 0, "readiness rejected before allocation"); });
   unsigned failedCount = 0, ran = 0;
   for (const auto& test : tests) {
     if (selected != "all" && selected != test.group) continue;

@@ -180,6 +180,21 @@ marker is cut with the prefix instead of being appended after it. Machine polls
 never reach the feed. None of these three suites touches a device, a file or the
 network.
 
+## File create over an existing name
+
+`filecreate` compiles the production `cmd_filecreate` handler against a
+name-to-content VFS double whose `"w"` open creates or truncates exactly as
+`VFS::open` does. A create that reuses an existing name must reply with an
+error, leave the content intact and never reach the truncating open; a new
+name is still created once and closed under the FS lock; denied opens and the
+early argument errors keep their established replies and touch no file.
+Permission rules, the real tokenizer and the storage drivers are not covered.
+
+```sh
+python3 components/hardwareone/test/host/test_filecreate.py --sanitize
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^filecreate$' --output-on-failure
+```
+
 ## Boot-time crash counters and the OTA crash-loop escape
 
 ```sh
@@ -202,6 +217,27 @@ does, that an unknown previous phase or a different build blocks the escape, and
 that a healthy run, a power-on reset and a cold RTC block clear both counters.
 It does not run the partition, journal or updater side of the escape, and
 touches no device.
+
+## Shared HTTP request-body reader
+
+`web_body_reader` compiles `webRecvRequestBody`, `webReadRequestBody` and
+`webSendBodyReadError` from `WebServer_Utils.cpp` (their types from
+`WebServer_Utils.h`) plus the `readPostBody` wrapper from `WebPage_LLM.cpp`,
+against a scripted httpd socket and allocator. It checks that a Content-Length
+of 0 is reported as empty, that a length over the caller's cap is refused before
+anything is allocated or received, that a failed allocation is reported instead
+of received into, that partial receives are joined and NUL-terminated, that one
+idle timeout is retried while two in a row end the read with the buffer released,
+that a socket error or short body is a failure and never a truncated success,
+and that the reply helper maps empty to 400, over-cap and no-memory to 413 and
+a failed receive to 400 (text or the JSON `success`/`error` contract), returning
+`ESP_FAIL` where unread bytes remain so httpd closes the socket. The LLM wrapper
+must go through the shared reader and give up after two timeouts. The
+`web_batch_handlers` suite covers the same reader inside `handleCLICommand`
+(forged Content-Length, failed allocation, short and stalled bodies, the
+`CMD_INPUT_MAX`-derived cap). Neither runs ESP-IDF's httpd or touches a device.
+
+    ctest --test-dir <build> -R '^web_body_reader$' --output-on-failure
 
 ## Transport session writers
 
@@ -229,6 +265,35 @@ windows, task priorities or the device. `--baseline` compares the transcript
 against a saved `System_User.cpp` that already uses the mutex writers.
 
     ctest --test-dir <build> -R '^session_snapshot$' --output-on-failure
+
+## Web file editor save through the staged writer
+
+`upload_lifecycle` (above) also compiles the production `handleFileWrite`
+(`/api/files/write`, the Files editor save), the shared staged writer
+`VFS::StagedWrite` and the form decoders `urlDecode` / `extractFormField`
+over the same fakes as the upload. Its `filewrite` scenarios post the
+encodeURIComponent form the editor sends and require the name and the content
+`a=b&c+d é<TAB>#%` to round-trip byte-exact; a literal `+` still decodes as a
+space. The save goes to a sibling `.upload.tmp` opened under the caller's
+identity and is promoted with `replaceFileGuarded`: an injected short write or
+a failed promotion must leave the previous bytes in place and remove only the
+staged copy (caller first, then the `web.filewrite` system identity), the
+destination gate (`canWriteGuarded`, the admin-only 403) runs before any
+temporary is opened, a name too long for the `.upload.tmp` suffix stages as
+`~stage.upload.tmp` (64- and 200-byte names included), a refused staged copy
+answers "Could not save: storage full or unavailable" with the destination
+never opened, and post-save hooks run once on success only. The fake
+`replaceFileGuarded` demands what `renameGuarded` does of a caller (RENAME,
+CREATE, and DELETE for the backup of an existing SD file), so the scenarios
+also fix the promotion identity: a caller with those bits promotes as itself;
+a caller holding only the destination's write right (WRITE on an existing
+file, CREATE on a new one, the `/espnow/`, `/system/llm/` and
+`/sd/g2_icon_animations/` grants) is promoted by the writer's system identity,
+and a caller with neither keeps the previous file; the `replace` group checks
+the same for the upload. Not covered: the real rule table itself (the bits are
+controls) and LittleFS/FAT behaviour behind the fakes.
+Run with `ctest --test-dir build -R '^upload_lifecycle$' --output-on-failure`
+or `python3 test_upload_lifecycle.py --case filewrite --sanitize`.
 
 ## Shared fake VFS
 
@@ -280,6 +345,35 @@ compile the header bare and with the real `AuthContext`/`CommandSource`.
 python3 components/hardwareone/test/host/test_fake_vfs.py --sanitize
 ctest --test-dir /tmp/hw1-hardwareone-host -R '^fake_vfs$' --output-on-failure
 ```
+
+## Web file streaming lock discipline
+
+```sh
+python3 components/hardwareone/test/host/test_web_file_streaming.py --sanitize
+```
+
+`web_file_streaming` compiles the shipping `streamFileChunks` helper,
+`handleFileRead`, `streamHtmlEscapedChecked` and the GPS track listing tail of
+`handleGPSTracksAPI` against an httpd double that records whether the
+filesystem mutex or a sensor poll pause was held inside every chunk send, and
+that fails one chosen send. It checks that a 1300-byte download arrives in
+512-byte chunks with one terminator and the file closed, that the lock is taken
+per read and released before each send, that a failed send ends the loop with
+no further chunk and no terminator while the file is still closed, that the
+missing-file and refused paths leave polling balanced, that the HTML-escaped
+viewer path escapes correctly and also stops at the first failed send (including
+a run longer than its staging buffer), and that the GPS listing emits its entries
+with the lock released around each send and stops scanning after a failure.
+`handleFileView` is checked at source level: no function-scope lock on the
+non-JSON path, the image, chunked-audio, `.hwmap` and text branches all stream
+through the helper, sealed-capture lines use the checked escaper, and polling
+resumes exactly once before the first response byte. The File/VFS stand-in is
+harness-local and tiny (this is a lock-discipline suite, not a persistence one);
+the upload path, authentication and the JSON viewer branch are not covered here.
+On a tree without the helper and the checked escaper the runner compiles the
+handlers alone, so the lock and stop-on-error checks fail behaviourally rather
+than the unit failing to build; the source-level checks run after the binary.
+Run with `ctest --test-dir build -R '^web_file_streaming$' --output-on-failure`.
 
 ## users.json and pending-list writers
 
@@ -703,8 +797,10 @@ ASan/UBSan follow `HW1_SANITIZE`. Uploads stream into a sibling `.upload.tmp`
 that is promoted over the destination only after a complete, checked body
 (promotion is a VFS double here; `capture_stitching` exercises the real
 replacement): a dropped connection, failed write or failed promotion leaves an
-existing destination untouched and removes only the staged copy, and a name the
-backend cannot take as a staged copy falls back to the in-place write. Two
+existing destination untouched and removes only the staged copy. A name too
+long for the `.upload.tmp` suffix stages as `~stage.upload.tmp` in the same
+directory, and a refused staged copy fails the upload without ever opening the
+destination for writing. Two
 consecutive receive timeouts abandon the upload and release the file lock and
 polling pause; single idle waits between chunks are retried. These tests do not
 establish power-loss durability or real HTTP/SD behavior.

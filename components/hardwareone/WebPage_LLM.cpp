@@ -42,22 +42,11 @@ extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, 
 extern void streamEndHtml(httpd_req_t* req);
 
 // ============================================================================
-// Helper: read POST body into a stack buffer
+// Helper: read POST body into a stack buffer through the shared bounded
+// reader (the body must fit the buffer; two idle timeouts end the read)
 // ============================================================================
 static bool readPostBody(httpd_req_t* req, char* buf, size_t bufSize) {
-  size_t contentLen = req->content_len;
-  if (contentLen == 0 || contentLen >= bufSize) return false;
-  size_t received = 0;
-  while (received < contentLen) {
-    int ret = httpd_req_recv(req, buf + received, contentLen - received);
-    if (ret <= 0) {
-      if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
-      return false;
-    }
-    received += ret;
-  }
-  buf[received] = '\0';
-  return true;
+  return webRecvRequestBody(req, buf, bufSize) == WebBodyStatus::Ok;
 }
 
 // ============================================================================

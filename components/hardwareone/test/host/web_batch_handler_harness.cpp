@@ -7,6 +7,8 @@
 #define ARDUINOJSON_ENABLE_PROGMEM 0
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -70,6 +72,7 @@ using TransportSessionEpoch = uint32_t;
 static constexpr int ESP_OK = 0, ESP_FAIL = -1;
 static constexpr int HTTPD_500_INTERNAL_SERVER_ERROR = 500;
 static constexpr int HTTPD_RESP_USE_STRLEN = -1;
+static constexpr int HTTPD_SOCK_ERR_TIMEOUT = -3;
 enum class AllocPref { PreferPSRAM };
 // INSERT_COMMAND_TYPES
 struct httpd_req_t {
@@ -87,6 +90,9 @@ struct Scenario {
   bool revokeOnFinalizer = false;
   size_t stepIndex = 0;
   int finalizers = 0, interactions = 0, delays = 0, captures = 0, feedEntries = 0;
+  size_t allocLimit = SIZE_MAX;   // ps_alloc returns nullptr above this size
+  bool recvTimeoutForever = false;  // every recv reports an idle timeout
+  int recvCalls = 0;
   uint32_t now = 100;
   TransportSessionEpoch epoch = 42;
   bool advanceEpochOnCapture = false;
@@ -104,7 +110,10 @@ static bool gMeshActivitySuspended = false;
 void webBatchTestStringAppend() {
   if (scenario.revokeOnSerialize) scenario.live = false;
 }
-static void* ps_alloc(size_t size, AllocPref, const char*) { return std::malloc(size); }
+static void* ps_alloc(size_t size, AllocPref, const char*) {
+  if (size > scenario.allocLimit) return nullptr;
+  return std::malloc(size);
+}
 static AuthContext makeWebAuthCtx(httpd_req_t*) {
   AuthContext ctx{};
   ctx.transport = SOURCE_WEB; ctx.user = "alice"; ctx.sid = "session";
@@ -128,11 +137,17 @@ static void httpd_resp_sendstr(httpd_req_t* req, const char* output) {
   req->output = output ? output : "";
   ++req->sends;
 }
-static void httpd_resp_send(httpd_req_t* req, const char* output, int) { httpd_resp_sendstr(req, output); }
+static esp_err_t httpd_resp_send(httpd_req_t* req, const char* output, int) {
+  httpd_resp_sendstr(req, output);
+  return ESP_OK;
+}
 static void httpd_resp_send_err(httpd_req_t* req, int, const char* output) {
   req->status = "500 Internal Server Error"; httpd_resp_sendstr(req, output);
 }
 static int httpd_req_recv(httpd_req_t* req, char* destination, size_t length) {
+  ++scenario.recvCalls;
+  check(destination != nullptr, "handlers never receive into a null buffer");
+  if (scenario.recvTimeoutForever) return HTTPD_SOCK_ERR_TIMEOUT;
   const size_t count = std::min(length, req->input.size() - req->received);
   std::memcpy(destination, req->input.data() + req->received, count);
   req->received += count;
@@ -208,6 +223,8 @@ static bool executeUnifiedWebCommand(httpd_req_t*, const AuthContext& ctx,
 #define DEBUG_CMD_FLOWF(...) ((void)0)
 #define DEBUG_CLIF(...) ((void)0)
 #define DEBUG_SSEF(...) ((void)0)
+#define DEBUG_HTTPF(...) ((void)0)
+#define ERROR_MEMORYF(...) ((void)0)
 static void httpd_resp_set_hdr(httpd_req_t*, const char*, const char*) {}
 static bool cliHelpModeOwnedBySession(int, TransportSessionEpoch) { return false; }
 static String extractFormField(const String& body, const String& key) {
@@ -551,9 +568,55 @@ static void testPrivateSTTDirectReplies() {
         "ordinary unknown-command behavior remains intact");
 }
 
+static void testSingleCommandBodyLimits() {
+  const size_t cap = CMD_INPUT_MAX * 3 + 128;
+  // A forged Content-Length far over the cap is refused before anything is
+  // allocated or received: 413, the socket is closed, nothing reaches the executor.
+  resetScenario();
+  httpd_req_t huge; huge.content_len = 100000000; scenario.allocLimit = 0;
+  check(handleCLICommand(&huge) == ESP_FAIL, "oversize body closes the connection");
+  check(huge.status.rfind("413", 0) == 0 && huge.sends == 1 && huge.contentType == "text/plain",
+        "oversize body answers 413 as text");
+  check(scenario.executed.empty() && scenario.feedEntries == 0 && scenario.recvCalls == 0,
+        "oversize body never submits, records or receives");
+  // Within the cap but the allocation fails: 413 and no receive into a null buffer.
+  resetScenario(); scenario.allocLimit = 0;
+  httpd_req_t oom; oom.input = "cmd=reboot"; oom.content_len = oom.input.size();
+  check(handleCLICommand(&oom) == ESP_FAIL && oom.status.rfind("413", 0) == 0 && oom.sends == 1,
+        "failed allocation answers 413");
+  check(scenario.executed.empty() && scenario.recvCalls == 0, "failed allocation never submits or receives");
+  // Just over the cap is refused, exactly at the cap still executes.
+  resetScenario();
+  httpd_req_t over; over.input = "cmd=" + std::string(cap - 3, 'a'); over.content_len = over.input.size();
+  check(handleCLICommand(&over) == ESP_FAIL && over.status.rfind("413", 0) == 0 && scenario.executed.empty(),
+        "one byte over the cap is refused");
+  resetScenario();
+  httpd_req_t atCap; atCap.input = "cmd=" + std::string(cap - 4, 'a'); atCap.content_len = atCap.input.size();
+  check(handleCLICommand(&atCap) == ESP_OK && scenario.executed.size() == 1 &&
+        scenario.executed[0].line.length() == cap - 4, "a body exactly at the cap executes whole");
+  // A short body (peer closed early) is a 400 and the truncated line is not executed.
+  resetScenario();
+  httpd_req_t shortBody; shortBody.input = "cmd=reb"; shortBody.content_len = 20;
+  check(handleCLICommand(&shortBody) == ESP_FAIL && shortBody.status.rfind("400", 0) == 0 && shortBody.sends == 1,
+        "short body answers 400");
+  check(scenario.executed.empty() && scenario.feedEntries == 0, "short body never executes the truncated command");
+  // A peer that sends headers and then nothing: two idle timeouts end the read.
+  resetScenario(); scenario.recvTimeoutForever = true;
+  httpd_req_t stalled; stalled.content_len = 20;
+  check(handleCLICommand(&stalled) == ESP_FAIL && stalled.status.rfind("400", 0) == 0 && stalled.sends == 1,
+        "stalled body answers 400");
+  check(scenario.recvCalls == 2 && scenario.executed.empty(), "stalled body ends after two idle timeouts");
+  // An empty body still reaches the executor's own "Empty command" reply.
+  resetScenario();
+  httpd_req_t empty;
+  check(handleCLICommand(&empty) == ESP_OK && scenario.executed.size() == 1 && scenario.recvCalls == 0,
+        "empty body keeps the previous executor path");
+}
+
 int main() {
   try {
     testContextContracts();
+    testSingleCommandBodyLimits();
     testPrivateSTTDirectReplies();
     testNormalAndOwnership(); testSettingsAndTimeouts(); testInteractive();
     testSessionAndShutdown(); testResponseAllocationFailures();

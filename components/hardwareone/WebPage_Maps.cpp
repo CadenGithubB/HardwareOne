@@ -270,6 +270,10 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
 
   fsLock("gps.tracks.list");
 
+  // Set once a chunk fails to send; the scan then stops instead of paying a
+  // send timeout for every remaining entry.
+  bool sendFailed = false;
+
   // Probe one candidate file's head for GPS content and emit its JSON entry.
   // Shared by the top-level scan and the one-level session-subfolder descent.
   auto emitIfGps = [&](File& file, bool& first) {
@@ -293,7 +297,12 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
       char fileJson[384];
       snprintf(fileJson, sizeof(fileJson), "%s{\"path\":\"%s\",\"size\":%lu}",
                first ? "" : ",", file.path(), (unsigned long)file.size());
-      httpd_resp_sendstr_chunk(req, fileJson);
+      // The filesystem lock is released around the send so a client that has
+      // stopped reading does not hold up every other filesystem user, then
+      // taken again for the next directory step.
+      fsUnlock();
+      if (httpd_resp_sendstr_chunk(req, fileJson) != ESP_OK) sendFailed = true;
+      fsLock("gps.tracks.list");
       first = false;
     }
   };
@@ -305,12 +314,12 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
   const char* dirs[] = {"/logging_captures", "/logging_captures/tracks", "/logging_captures/sensors"};
   bool firstFile = true;
 
-  for (int d = 0; d < 3; d++) {
+  for (int d = 0; d < 3 && !sendFailed; d++) {
     File root = VFS::openGuarded(dirs[d], "r", ctx);
     if (!root || !root.isDirectory()) continue;
 
     File file = root.openNextFile();
-    while (file) {
+    while (file && !sendFailed) {
       if (!file.isDirectory()) {
         emitIfGps(file, firstFile);
       } else {
@@ -318,7 +327,7 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
         File sub = VFS::openGuarded(file.path(), "r", ctx);
         if (sub && sub.isDirectory()) {
           File child = sub.openNextFile();
-          while (child) {
+          while (child && !sendFailed) {
             if (!child.isDirectory()) emitIfGps(child, firstFile);
             child = sub.openNextFile();
           }
@@ -330,10 +339,14 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
   }
   fsUnlock();
 
-  httpd_resp_sendstr_chunk(req, "]}");
-  httpd_resp_sendstr_chunk(req, NULL);
+  if (!sendFailed) {
+    httpd_resp_sendstr_chunk(req, "]}");
+    httpd_resp_sendstr_chunk(req, NULL);
+  }
 
-  return ESP_OK;
+  // A failed send leaves the chunked body unterminated; ESP_FAIL makes httpd
+  // close the socket instead of reusing the keep-alive session.
+  return sendFailed ? ESP_FAIL : ESP_OK;
 }
 
 // =============================================================================

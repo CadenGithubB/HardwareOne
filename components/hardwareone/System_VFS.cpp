@@ -1070,6 +1070,23 @@ static bool guardedNormalize(const String& in, String& out, const char* op,
 // security events while leaving aggregate UI permission queries (e.g.
 // getPermissions in a file listing) noise-free.
 
+// The permission a write-mode open needs on a normalized path. canEdit covers
+// an existing file; a path that does not exist yet is a create rather than an
+// edit, so canCreate is the fallback (the rule table author can grant CREATE
+// without WRITE for "drop-in only" directories like /sd/g2_icon_animations).
+// Logs the denial.
+static bool writePermitted(const String& norm, const AuthContext& ctx) {
+  if (canEdit(norm, ctx)) return true;
+  if (!exists(norm)) {
+    if (canCreate(norm, ctx)) return true;
+    logFsAccessDeny(norm, ctx, PERM_CREATE, "create");
+    return false;
+  }
+  // Existing file + no edit perm = denied
+  logFsAccessDeny(norm, ctx, PERM_WRITE, "edit");
+  return false;
+}
+
 File openGuarded(const String& path, const char* mode, const AuthContext& ctx, bool create) {
   String norm;
   if (!guardedNormalize(path, norm, "open", ctx)) return File();
@@ -1084,23 +1101,14 @@ File openGuarded(const String& path, const char* mode, const AuthContext& ctx, b
     logFsAccessDeny(norm, ctx, PERM_READ, "read");
     return File();
   }
-  if (needsWrite && !canEdit(norm, ctx)) {
-    // If the path doesn't exist yet, this is a create rather than an
-    // edit. Try canCreate as a fallback; the rule table author can grant
-    // CREATE without WRITE for "drop-in only" directories like
-    // /sd/g2_icon_animations.
-    if (!exists(norm)) {
-      if (!canCreate(norm, ctx)) {
-        logFsAccessDeny(norm, ctx, PERM_CREATE, "create");
-        return File();
-      }
-    } else {
-      // Existing file + no edit perm = denied
-      logFsAccessDeny(norm, ctx, PERM_WRITE, "edit");
-      return File();
-    }
-  }
+  if (needsWrite && !writePermitted(norm, ctx)) return File();
   return open(norm, mode, create);
+}
+
+bool canWriteGuarded(const String& path, const AuthContext& ctx) {
+  String norm;
+  if (!guardedNormalize(path, norm, "write", ctx)) return false;
+  return writePermitted(norm, ctx);
 }
 
 bool existsGuarded(const String& path, const AuthContext& ctx) {
@@ -1201,6 +1209,119 @@ bool replaceFileGuarded(const String& temporary, const String& destination,
       break;
   }
   return promoted;
+}
+
+// The staged copy's path: "<destination>.upload.tmp" beside the destination,
+// or a short fixed name in the same directory when that name would be longer
+// than the backend may take. LittleFS keeps the limit of whoever formatted the
+// partition (64 bytes on the flashed image, 255 when the device formatted it)
+// and sizes directory-entry names by CONFIG_LITTLEFS_OBJ_NAME_LEN, so the
+// smaller bound applies; FAT long names stop at CONFIG_FATFS_MAX_LFN. Reusing
+// the short name is safe because the caller holds the filesystem lock from
+// begin() to commit() or discard(), and boot cleanup removes any ".tmp" a
+// reset leaves behind. Returns an empty String when the copy came back short.
+static String stagingPathFor(const String& destination) {
+#ifdef CONFIG_LITTLEFS_OBJ_NAME_LEN
+  constexpr size_t kLittleFsNameMax = CONFIG_LITTLEFS_OBJ_NAME_LEN - 1;
+#else
+  constexpr size_t kLittleFsNameMax = 63;
+#endif
+#ifdef CONFIG_FATFS_MAX_LFN
+  constexpr size_t kFatNameMax = CONFIG_FATFS_MAX_LFN;
+#else
+  constexpr size_t kFatNameMax = 255;
+#endif
+  static const char kSuffix[] = ".upload.tmp";
+  static const char kShortName[] = "~stage.upload.tmp";
+  const size_t directoryLength = (size_t)(destination.lastIndexOf('/') + 1);
+  const size_t nameLength = destination.length() - directoryLength;
+  const size_t nameMax = getStorageType(destination) == SDCARD ? kFatNameMax : kLittleFsNameMax;
+  String staged;
+  size_t expected = 0;
+  if (nameLength + strlen(kSuffix) <= nameMax) {
+    staged = destination;
+    staged.concat(kSuffix);
+    expected = destination.length() + strlen(kSuffix);
+  } else {
+    staged = destination.substring(0, directoryLength);
+    staged.concat(kShortName);
+    expected = directoryLength + strlen(kShortName);
+  }
+  return staged.length() == expected ? staged : String();
+}
+
+bool StagedWrite::begin(const String& destination, const AuthContext& ctx) {
+  if (open_) return false;
+  destination_ = destination;
+  temporary_ = stagingPathFor(destination);
+  // No I/O on a truncated copy (a String that came back short).
+  if (destination_.length() != destination.length() || temporary_.length() == 0) {
+    temporary_ = "";
+    return false;
+  }
+  // A refused temporary (permission, full filesystem, transient error) ends
+  // the write with the destination untouched. The destination is never
+  // opened for writing here: that open would truncate the very file this
+  // staged write preserves, and a later short write would then remove it.
+  file_ = openGuarded(temporary_, "w", ctx, /*create=*/true);
+  if (!file_) {
+    temporary_ = "";
+    return false;
+  }
+  open_ = true;
+  return true;
+}
+
+// Whether `ctx` may itself promote `from` over `to` with replaceFileGuarded:
+// RENAME on the temporary and CREATE on the destination, plus DELETE for the
+// backup that replacing an existing SD file leaves behind. Both paths are
+// normalized.
+static bool canReplaceAsCaller(const String& from, const String& to, const AuthContext& ctx) {
+  if (!canRename(from, ctx) || !canCreate(to, ctx)) return false;
+  return getStorageType(to) != SDCARD || !exists(to) || canDelete(to, ctx);
+}
+
+bool StagedWrite::commit(const AuthContext& ctx) {
+  if (!open_) return false;
+  open_ = false;
+  file_.flush();
+  file_.close();
+  // The caller's WRITE on an existing destination (CREATE on a new one) is the
+  // permission this replacement represents; RENAME and DELETE are the mechanics
+  // of the staged copy. A caller the rule table lets move files here promotes
+  // as itself. Otherwise the writer promotes as its system identity once that
+  // write right is established, so a grant of WRITE without RENAME (such as
+  // /espnow/) still saves through the staged path instead of failing here.
+  String from, to;
+  bool promoted = false;
+  if (guardedNormalize(temporary_, from, "replace(from)", ctx) &&
+      guardedNormalize(destination_, to, "replace(to)", ctx)) {
+    if (canReplaceAsCaller(from, to, ctx)) {
+      promoted = replaceFileGuarded(from, to, ctx);
+    } else if (writePermitted(to, ctx)) {
+      promoted = replaceFileGuarded(from, to, systemAuth(writer_));
+    }
+  }
+  if (promoted) return true;
+  // The previous destination is still in place; only the staged copy goes.
+  removePartial(ctx);
+  return false;
+}
+
+void StagedWrite::discard(const AuthContext& ctx) {
+  if (!open_) return;
+  open_ = false;
+  file_.close();
+  removePartial(ctx);
+}
+
+// Remove only what this write produced, the staged temporary: as the caller
+// first, then as the writer's system identity, so a caller without DELETE on
+// the directory does not leave its partial copy behind.
+void StagedWrite::removePartial(const AuthContext& ctx) {
+  if (!removeGuarded(temporary_, ctx)) {
+    removeGuarded(temporary_, systemAuth(writer_));
+  }
 }
 
 bool mkdirGuarded(const String& path, const AuthContext& ctx) {
