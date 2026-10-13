@@ -6,6 +6,12 @@ OpenClaw or configure a gateway. The separate optional ESP-to-agent source and
 its setup are documented in [OpenClaw setup](../../docs/OPENCLAW_SETUP.md).
 It needs no firmware API changes. There are no mutation commands in this version.
 
+An optional [HTTPS chat relay](relay/README.md) serves the other direction:
+XIAO-to-Mingus conversation while keeping the gateway local and its credential
+off the device. It is separate from this device-read helper. The user's existing
+registered Hardware One tools have already passed live device-read checks;
+there is no need to replace them with this helper for the chat prototype.
+
 ## Configure the host
 
 Use a dedicated device account. A guest account can read the selected HTTP
