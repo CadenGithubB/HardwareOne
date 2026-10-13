@@ -79,11 +79,11 @@ openclaw sandbox explain --agent main
 This report describes OpenClaw's sandbox policy, not any additional container,
 VM, firewall, or host-level restrictions. The HTTP source sends only an agent
 target, conversation ID, current user message, and streaming flag; it does not
-send tool definitions, model overrides, or sandbox/elevated overrides. Nevertheless,
-the API conversation has its own session key. Before live acceptance, inspect
-that exact session's effective sandbox and tool policy too. The `main` agent ID
-does not mean the request uses its main session; `non-main` sandbox mode depends
-on the session key. See the version-matched [sandbox modes](https://github.com/openclaw/openclaw/blob/v2026.9.4/docs/gateway/sandboxing/modes-scope-and-backend.md)
+send tool definitions, model overrides, or sandbox/elevated overrides. The API
+conversation has its own session key, so its exact effective sandbox and tool
+policy must also be inspected; this check passed for the live device session
+below. The `main` agent ID does not mean the request uses its main session;
+`non-main` sandbox mode depends on the session key. See the version-matched [sandbox modes](https://github.com/openclaw/openclaw/blob/v2026.9.4/docs/gateway/sandboxing/modes-scope-and-backend.md)
 and [policy inspector](https://github.com/openclaw/openclaw/blob/v2026.9.4/docs/cli/sandbox.md).
 
 Shared-secret authentication on this release's HTTP endpoint conveys full
@@ -356,9 +356,21 @@ obsolete. Recheck partition fit before adding features to this narrow headroom.
 - A Studio-local direct Gateway probe returned `HW1 relay ready` and final
   `[DONE]` in the diagnostic session ending `0002`. This local check preceded
   the successful device requests above.
-- Pending: inspect the exact HTTP session's effective sandbox/tool policy.
-  Text transport, continuity, and New chat separation have passed; their
-  success does not establish session policy.
+- Exact HTTP-session policy inspection passed. The Studio CLI selected the
+  newest actual device session:
+  `agent:main:openai-user:hw1:xiao-studio:d6624f0093f968b9ebd797f68bb8487b`.
+  Its report identifies agent `main`, main session `agent:main:main`, and a
+  `sandboxed` runtime: Docker, `mode: all`, `scope: agent`,
+  `workspaceAccess: none`, runtime workdir `/workspace`, and a protected
+  read-only skills mount. The global tool allowlist matches the initial report;
+  `memory_search` and `memory_get` remain denied. Elevated execution is globally
+  enabled, but this session reports channel `unknown` and
+  `allowedByConfig: false`. The reported effective policy is preserved; this
+  was not an instrumented audit of host execution.
+- OpenClaw UI visibility remains pending: the user cannot yet find the new
+  device conversation. Its actual session was found through the CLI; the
+  direct UI link and visibility are being checked separately from text,
+  continuity, New chat, and reported session-policy acceptance.
 
 The pre-test app-only rollback image is in the primary checkout at
 `/Users/cadbecaimacmini/Documents/Codex/Projects/hardwareone/work/openclaw-usb-backup/20261013T011617Z/factory-before.bin`,
