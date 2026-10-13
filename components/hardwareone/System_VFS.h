@@ -238,6 +238,65 @@ bool replaceFileGuarded(const String& temporary, const String& destination,
 bool mkdirGuarded  (const String& path, const AuthContext& ctx);
 bool rmdirGuarded  (const String& path, const AuthContext& ctx);
 
+// The permission openGuarded applies to a write mode, without the open itself
+// (which creates or truncates): WRITE on an existing path, CREATE on a missing
+// one, after the same normalization, sensitive-extension and image rules.
+// Denials are logged as the open's would be. Check the destination with it
+// before staging a replacement, whose temporary carries a different name and
+// so a different extension.
+bool canWriteGuarded(const String& path, const AuthContext& ctx);
+
+/**
+ * Staged replacement of one file under the caller's identity: the shared
+ * writer behind the web upload and the web file editor.
+ *
+ * begin() opens the staged temporary through openGuarded, so the
+ * temporary is subject to the same directory rules as the destination (".tmp"
+ * is not a sensitive extension; gate the destination itself first, with
+ * canImport or canWriteGuarded). The caller writes to file() and checks every
+ * write count. commit() flushes, closes and promotes the temporary with
+ * replaceFileGuarded: the destination keeps its previous bytes until that
+ * succeeds, and a failed promotion removes only the temporary. The promotion
+ * runs as the caller when the rule table grants it RENAME and CREATE there
+ * (and DELETE for the backup of an existing SD file); a caller with WRITE on
+ * an existing destination, or CREATE on a new one, but without those bits is
+ * promoted by the writer's own system identity, named `writer` (for example
+ * "web.filewrite"), since that write right is the permission the replacement
+ * represents. A caller with neither gets no promotion and keeps the previous
+ * file. discard() closes and removes whatever this write produced, first as
+ * the caller and then as the same system identity.
+ *
+ * The temporary is "<destination>.upload.tmp" unless that name would exceed
+ * the backend's name limit, in which case a short fixed name in the same
+ * directory is used, so every write is staged and the destination is never
+ * opened for writing. A refused temporary open (permission, full filesystem,
+ * transient error) makes begin() return false with the destination
+ * untouched, so the caller reports the failed save and the previous file
+ * survives.
+ *
+ * The caller holds FsLockGuard from begin() through commit() or discard().
+ * Both finish the write; later calls are no-ops. Boot cleanup removes any
+ * ".tmp" left behind by a reset.
+ */
+class StagedWrite {
+ public:
+  explicit StagedWrite(const char* writer) : writer_(writer) {}
+  bool begin(const String& destination, const AuthContext& ctx);
+  File& file() { return file_; }
+  // The staged temporary being written.
+  const String& path() const { return temporary_; }
+  bool commit(const AuthContext& ctx);
+  void discard(const AuthContext& ctx);
+
+ private:
+  void removePartial(const AuthContext& ctx);
+  const char* writer_;
+  String destination_;
+  String temporary_;
+  File file_;
+  bool open_ = false;
+};
+
 /**
  * Construct an AuthContext representing the trusted internal "system"
  * identity. Pass `reason` describing why this code legitimately needs to

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Exercise the actual streaming upload handler with injected boundary failures.
+"""Exercise the actual web file writers with injected boundary failures.
 
-Only Arduino/HTTP/auth/storage/allocation boundaries are mocked. The handler and
-filesystem guard are extracted unchanged; PollPauseGuard is the production header.
---baseline accepts a saved WebServer_Server.cpp for before/after reproductions.
+The streaming upload handler, the Files editor save (handleFileWrite), the shared
+staged writer (VFS::StagedWrite) and the form decoders are extracted unchanged;
+only Arduino/HTTP/auth/storage/allocation boundaries are mocked. PollPauseGuard
+is the production header. --baseline accepts a saved WebServer_Server.cpp for
+before/after reproductions of the handlers.
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--baseline", type=Path)
-    parser.add_argument("--case", default="all", choices=("all", "invalid-open", "disconnect", "binary", "nested", "missing-content", "timeout", "replace"))
+    parser.add_argument("--case", default="all", choices=("all", "invalid-open", "disconnect", "binary", "nested", "missing-content", "timeout", "replace", "filewrite"))
     parser.add_argument("--maps", default="both", choices=("both", "on", "off"))
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++23 compiler is required")
@@ -37,8 +39,18 @@ def main() -> None:
         "FsLockGuard::FsLockGuard(const char* owner, TickType_t timeoutTicks)",
         "FsLockGuard::~FsLockGuard()", "void fsLock(", "void fsUnlock("))
     handler = extract_block(source, "esp_err_t handleFileUpload(")
+    writer = extract_block(source, "esp_err_t handleFileWrite(")
+    utils = (COMPONENT / "System_Utils.cpp").read_text()
+    decoders = "\n".join(extract_block(utils, marker) for marker in ("String urlDecode(", "String extractFormField("))
+    vfs = (COMPONENT / "System_VFS.cpp").read_text()
+    staged_declaration = extract_block((COMPONENT / "System_VFS.h").read_text(), "class StagedWrite") + ";\n"
+    staged = "\n".join(extract_block(vfs, marker) for marker in (
+        "static String stagingPathFor(", "bool StagedWrite::begin(", "static bool canReplaceAsCaller(", "bool StagedWrite::commit(",
+        "void StagedWrite::discard(", "void StagedWrite::removePartial("))
     harness = (HERE / "upload_lifecycle_harness.cpp").read_text()
-    for marker, replacement in {"// INSERT_FS_GUARD": guard, "// INSERT_UPLOAD_HANDLER": handler}.items():
+    for marker, replacement in {"// INSERT_FS_GUARD": guard, "// INSERT_UPLOAD_HANDLER": handler, "// INSERT_FILE_WRITE_HANDLER": writer,
+                                "// INSERT_FORM_DECODERS": decoders, "// INSERT_STAGED_WRITE_DECL": staged_declaration,
+                                "// INSERT_STAGED_WRITE_IMPL": staged}.items():
         require(harness.count(marker) == 1, f"one insertion marker: {marker}")
         harness = harness.replace(marker, replacement)
     with tempfile.TemporaryDirectory(prefix="hw1-upload-lifecycle-") as directory:

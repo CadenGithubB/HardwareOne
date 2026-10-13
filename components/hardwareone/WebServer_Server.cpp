@@ -1994,6 +1994,46 @@ static esp_err_t setFileResponsePolicy(httpd_req_t* req, bool isolateOrigin) {
   return httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 }
 
+// Streams the rest of an open file to the client, bufSize bytes per read, then
+// closes it. The filesystem mutex is held only around each read and the close,
+// never across a socket write: a client that stops reading (paused download,
+// phone asleep) costs one send timeout per chunk, and with the mutex held for
+// that long every other filesystem user (logins, logging, FS commands) would
+// wait with it. The loop ends at the first failed send and returns that error;
+// the caller sends its terminating chunk or page tail only on ESP_OK. With
+// htmlEscape the bytes go out through streamHtmlEscapedChecked, which keeps
+// the same stop-on-error rule. Sensor polling is not paused here: the caller
+// resumes it once the file is open, so a stalled transfer does not idle the
+// sensors either.
+static esp_err_t streamFileChunks(httpd_req_t* req, File& f, char* buf, size_t bufSize,
+                                  bool htmlEscape, const char* lockOwner,
+                                  size_t* totalSent, int* chunkCount) {
+  esp_err_t err = ESP_OK;
+  size_t total = 0;
+  int chunks = 0;
+  while (true) {
+    size_t n = 0;
+    {
+      FsLockGuard fsGuard(lockOwner);
+      n = f.readBytes(buf, bufSize);
+    }
+    if (n == 0) break;
+    err = htmlEscape ? streamHtmlEscapedChecked(req, buf, n)
+                     : httpd_resp_send_chunk(req, buf, n);
+    if (err != ESP_OK) break;
+    chunks++;
+    total += n;
+    if ((chunks % 8) == 0) delay(0);  // avoid WDT while streaming
+  }
+  {
+    FsLockGuard fsGuard(lockOwner);
+    f.close();
+  }
+  if (totalSent) *totalSent = total;
+  if (chunkCount) *chunkCount = chunks;
+  return err;
+}
+
 // Read raw file contents as text/plain
 esp_err_t handleFileRead(httpd_req_t* req) {
   // Fail closed before polling is paused or any response/file bytes are sent.
@@ -2064,42 +2104,44 @@ esp_err_t handleFileRead(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  FsLockGuard fsGuard("handleFileRead");
+  // The filesystem lock covers the open only; streamFileChunks takes it again
+  // around each read so no socket write happens while it is held.
+  File f;
+  size_t fileSize = 0;
+  {
+    FsLockGuard fsGuard("handleFileRead");
 
-  // Phase 3: openGuarded enforces canRead (the previous code skipped this
-  // check, so non-admin-only sensitive-extension files were readable),
-  // path normalization (".." traversal rejection), and the rule-table
-  // permission lookup against the caller's actual identity.
-  File f = VFS::openGuarded(path, "r", ctx);
+    // Phase 3: openGuarded enforces canRead (the previous code skipped this
+    // check, so non-admin-only sensitive-extension files were readable),
+    // path normalization (".." traversal rejection), and the rule-table
+    // permission lookup against the caller's actual identity.
+    f = VFS::openGuarded(path, "r", ctx);
+    if (f) fileSize = f.size();
+  }
+  // Polling stays paused while the file is located and opened, not for the
+  // transfer: a stalled client must not keep the sensors idle.
+  pollResume();
   if (!f) {
     WARN_STORAGEF("File not found or access denied: %s", path.c_str());
-    pollResume();
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "File not found", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  size_t fileSize = f.size();
   DEBUG_STORAGEF("[handleFileRead] File opened successfully, size: %d bytes", fileSize);
 
   httpd_resp_set_type(req, "text/plain; charset=utf-8");
   char buf[512];
   size_t totalSent = 0;
   int chunkCount = 0;
-  while (true) {
-    size_t n = f.readBytes(buf, sizeof(buf));
-    if (n == 0) break;
-    chunkCount++;
-    totalSent += n;
-    DEBUG_STORAGEF("[handleFileRead] Chunk %d: read %d bytes, total sent: %d", chunkCount, n, totalSent);
-    httpd_resp_send_chunk(req, buf, n);
-  }
-  f.close();
-  httpd_resp_send_chunk(req, NULL, 0);
-  DEBUG_STORAGEF("[handleFileRead] COMPLETE: Sent %d bytes in %d chunks", totalSent, chunkCount);
-  
-  // Resume sensor polling
-  pollResume();
-  return ESP_OK;
+  esp_err_t sendErr = streamFileChunks(req, f, buf, sizeof(buf), false, "handleFileRead",
+                                       &totalSent, &chunkCount);
+  if (sendErr == ESP_OK) sendErr = httpd_resp_send_chunk(req, NULL, 0);
+  DEBUG_STORAGEF("[handleFileRead] COMPLETE: Sent %d bytes in %d chunks, err=%d",
+                 totalSent, chunkCount, (int)sendErr);
+  // A failed send leaves the chunked body unterminated; ESP_FAIL makes httpd
+  // close the socket instead of reusing the keep-alive session for the next
+  // request on that connection.
+  return sendErr == ESP_OK ? ESP_OK : ESP_FAIL;
 }
 
 // Write file via x-www-form-urlencoded: name=<path>&content=<urlencoded text>
@@ -2162,39 +2204,18 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   body[totalReceived] = '\0';
   DEBUG_STORAGEF("[handleFileWrite] Received complete body: %d bytes in %d attempts", totalReceived, recvAttempts);
 
-  String s = String(body);
-  free(body);
-  DEBUG_STORAGEF("[handleFileWrite] Converted to String, length: %d", s.length());
-
-  auto getParam = [&](const char* key) -> String {
-    char kBuf[64];
-    snprintf(kBuf, sizeof(kBuf), "%s=", key);
-    String k = kBuf;
-    int p = s.indexOf(k);
-    if (p < 0) return String("");
-    p += k.length();
-    int e = s.indexOf('&', p);
-    if (e < 0) e = s.length();
-    String v = s.substring(p, e);
-    // URL decode common characters
-    v.replace("+", " ");
-    v.replace("%20", " ");
-    v.replace("%0A", "\n");
-    v.replace("%0D", "\r");
-    v.replace("%2F", "/");
-    v.replace("%3A", ":");
-    v.replace("%2C", ",");
-    v.replace("%7B", "{");
-    v.replace("%7D", "}");
-    v.replace("%22", "\"");
-    v.replace("%5B", "[");
-    v.replace("%5D", "]");
-    v.replace("%25", "%");  // Keep this last to avoid double-decoding
-    return v;
-  };
-
-  String name = getParam("name");
-  String content = getParam("content");
+  // The Files editor posts both fields through hw.postForm, which applies
+  // encodeURIComponent to every value: decode the complete alphabet with the
+  // shared form parser, as /login and /api/files/read do.
+  String name;
+  String content;
+  {
+    String s = String(body);
+    free(body);
+    DEBUG_STORAGEF("[handleFileWrite] Converted to String, length: %d", s.length());
+    name = urlDecode(extractFormField(s, "name"));
+    content = urlDecode(extractFormField(s, "content"));
+  }
   DEBUG_STORAGEF("[handleFileWrite] Parsed params - name: '%s', content length: %d", name.c_str(), content.length());
 
   if (name.length() == 0) {
@@ -2204,7 +2225,7 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   }
 
   // Keep the 403-style "Admin required" message for admin-only paths so
-  // the UX stays informative. The openGuarded call below would also deny
+  // the UX stays informative. The write check below would also deny
   // for non-admin attempts on those rules but with a less specific
   // response.
   if (isAdminOnlyPath(name) && !isAdminUser(ctx.user)) {
@@ -2216,14 +2237,25 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
 
   FsLockGuard fsGuard("handleFileWrite");
 
-  // Phase 3: openGuarded does the canEdit check (which now suffix-blocks
-  // .bin/.hex/.elf/.crt/.cert/.cer/.key/.pem/.credentials and rejects
-  // images for editing), normalises the path, and runs role-based perms
-  // against the caller's identity.
-  File f = VFS::openGuarded(name, "w", ctx, /*create=*/true);
-  if (!f) {
-    ERROR_STORAGEF("Failed to open file for write or denied: %s", name.c_str());
+  // canWriteGuarded is the decision a write-mode openGuarded makes, taken on
+  // the destination itself before anything is staged: canEdit (which
+  // suffix-blocks .bin/.hex/.elf/.crt/.cert/.cer/.key/.pem/.credentials and
+  // rejects images for editing) for an existing file, canCreate for a new
+  // one, with the path normalised and role-based perms run against the
+  // caller's identity. The bytes then go to a staged sibling that replaces
+  // the destination only after a complete, checked write, so a failed save
+  // leaves the previous file intact.
+  VFS::StagedWrite save("web.filewrite");
+  if (!VFS::canWriteGuarded(name, ctx)) {
+    ERROR_STORAGEF("Write denied: %s", name.c_str());
     sendJsonResponse(req, "{\"success\":false, \"error\":\"Writes to this path are not allowed\"}");
+    return ESP_OK;
+  }
+  if (!save.begin(name, ctx)) {
+    // The destination is untouched; the staged copy could not be opened
+    // (storage full or unavailable).
+    ERROR_STORAGEF("[handleFileWrite] Could not open the staged copy for %s", name.c_str());
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Could not save: storage full or unavailable\"}");
     return ESP_OK;
   }
 
@@ -2233,7 +2265,7 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   bool writeError = false;
   while (left > 0) {
     size_t chunk = left > 512 ? 512 : left;
-    size_t written = f.write((const uint8_t*)content.c_str() + pos, chunk);
+    size_t written = save.file().write((const uint8_t*)content.c_str() + pos, chunk);
     writeChunks++;
     if (written != chunk) {
       ERROR_STORAGEF("[handleFileWrite] Short write: got %d, expected %d", written, chunk);
@@ -2243,11 +2275,15 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
     pos += chunk;
     left -= chunk;
   }
-  f.flush();
-  f.close();
 
   if (writeError) {
+    save.discard(ctx);
     sendJsonResponse(req, "{\"success\":false, \"error\":\"Write failed (short write)\"}");
+    return ESP_OK;
+  }
+  if (!save.commit(ctx)) {
+    ERROR_STORAGEF("[handleFileWrite] Could not promote %s over %s", save.path().c_str(), name.c_str());
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Could not replace destination\"}");
     return ESP_OK;
   }
   DEBUG_STORAGEF("[handleFileWrite] File closed, wrote %d bytes in %d chunks", content.length(), writeChunks);
@@ -2347,10 +2383,6 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
   String path;
   path.reserve(64);
-  // Staged replacement: the body streams into a sibling temporary that is
-  // promoted over the destination only after a complete, checked upload.
-  String stagedPath;
-  bool staged = false;
   bool isBinary = false;
   bool binaryKnown = false;
 
@@ -2377,13 +2409,15 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
   // Acquire only when the validated destination opens; keep it through cleanup.
   std::optional<FsLockGuard> fileLock;
-  File file;
+  // Staged replacement: the body streams into a sibling temporary that is
+  // promoted over the destination only after a complete, checked upload.
+  VFS::StagedWrite save("web.upload");
   bool fileOpen = false;
 
   bool shortWrite = false;
   auto flushWrite = [&]() {
     if (outLen && fileOpen) {
-      size_t w = file.write(uploadOutBuf.get(), outLen);
+      size_t w = save.file().write(uploadOutBuf.get(), outLen);
       if (w != outLen) {
         shortWrite = true;
       }
@@ -2469,23 +2503,13 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     DEBUG_STORAGEF("[handleFileUpload] Opening file for write: %s", path.c_str());
 
     fileLock.emplace("handleFileUpload.file");
-    // Write to "<path>.upload.tmp" and promote it after a complete, checked
-    // upload, so an existing destination survives a dropped connection or a
-    // failed write. The temporary sits in the destination's directory, so the
-    // same permission and admin-only rules apply to it, and ".tmp" is not a
-    // sensitive extension. A name the backend cannot take (LittleFS limits
-    // names to 63 bytes) falls back to the previous in-place write.
-    stagedPath = path;
-    if (stagedPath.length() == path.length() && stagedPath.concat(".upload.tmp")) {
-      file = VFS::openGuarded(stagedPath, "w", ctx, /*create=*/true);
-      staged = (bool)file;
-    }
-    if (!staged) {
-      stagedPath = "";
-      DEBUG_STORAGEF("[handleFileUpload] Staged temporary unavailable; writing in place: %s", path.c_str());
-      file = VFS::openGuarded(path, "w", ctx, /*create=*/true);
-    }
-    if (!file) {
+    // Write to a staged sibling and promote it after a complete, checked
+    // upload (VFS::StagedWrite), so an existing destination survives a
+    // dropped connection or a failed write. The temporary sits in the
+    // destination's directory, so the same permission and admin-only rules
+    // apply to it; a refused temporary fails the upload and leaves the
+    // destination untouched.
+    if (!save.begin(path, ctx)) {
       ERROR_STORAGEF("Failed to open file for write or denied: %s", path.c_str());
       return false;
     }
@@ -2673,21 +2697,15 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   }();
 
   if (fileOpen) {
-    if (!uploadError) file.flush();
-    file.close();
-    if (!uploadError && staged && !VFS::replaceFileGuarded(stagedPath, path, ctx)) {
-      // The previous destination is still in place; only the staged copy goes.
-      ERROR_STORAGEF("[handleFileUpload] Could not promote %s over %s", stagedPath.c_str(), path.c_str());
-      uploadError = "Could not replace destination";
-    }
+    // Both finish while the upload's lock is still held: a failed upload
+    // removes only what it wrote, the staged temporary; a complete one
+    // promotes the staged copy over the destination.
     if (uploadError) {
-      // Remove only what this upload wrote (the staged temporary, or the
-      // in-place partial), while its lock is still held. Retain the existing
-      // user-first cleanup policy.
-      const String& partial = staged ? stagedPath : path;
-      if (!VFS::removeGuarded(partial, ctx)) {
-        VFS::removeGuarded(partial, VFS::systemAuth("upload.cleanup.partial"));
-      }
+      save.discard(ctx);
+    } else if (!save.commit(ctx)) {
+      // The previous destination is still in place; only the staged copy went.
+      ERROR_STORAGEF("[handleFileUpload] Could not promote %s over %s", save.path().c_str(), path.c_str());
+      uploadError = "Could not replace destination";
     }
   }
   fileLock.reset();
@@ -3589,23 +3607,24 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
     return ESP_OK;
   }
   lastCmdTime = now;
-  // Read x-www-form-urlencoded body
-  std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(req->content_len + 1, AllocPref::PreferPSRAM, "http.cli.exec"), free);
-  int received = 0;
+  // Read the x-www-form-urlencoded body. The command line itself is bounded
+  // by CMD_INPUT_MAX; %-encoding can triple it and the other form fields
+  // (validate, capture, interactive) add a few dozen bytes. Anything larger
+  // is refused before it is allocated or received.
+  static constexpr size_t kCliBodyMax = CMD_INPUT_MAX * 3 + 128;
   String body;
   if (req->content_len > 0) {
     DEBUG_CMD_FLOWF("[web.cli] content_len=%d, starting recv loop", (int)req->content_len);
-    while (received < (int)req->content_len) {
-      int ret = httpd_req_recv(req, buf.get() + received, req->content_len - received);
-      if (ret <= 0) break;
-      received += ret;
+    WebBodyBuffer bodyBuf = webReadRequestBody(req, kCliBodyMax, "http.cli.exec");
+    if (!bodyBuf.ok()) {
+      DEBUG_CMD_FLOWF("[web.cli] body read failed status=%d content_len=%d", (int)bodyBuf.status, (int)req->content_len);
+      return webSendBodyReadError(req, bodyBuf.status);
     }
-    buf.get()[received] = '\0';
     // The form body contains the command verbatim and may therefore contain
     // login/password material.  Log only structural metadata; the decoded
     // command is redacted below once we can parse it as a command line.
-    DEBUG_CMD_FLOWF("[web.cli] received=%d bytes", received);
-    body = String(buf.get());
+    DEBUG_CMD_FLOWF("[web.cli] received=%d bytes", (int)bodyBuf.len);
+    body = String(bodyBuf.c_str());
     DEBUG_CMD_FLOWF("[web.cli] body.length()=%d after String conversion", body.length());
   }
   String cmdEncoded = extractFormField(body, "cmd");
@@ -3926,27 +3945,16 @@ esp_err_t handleLogin(httpd_req_t* req) {
     return ESP_OK;
   }
   // POST — cap body so a giant payload cannot pin PSRAM / stall the HTTP task.
-  int total_len = req->content_len;
-  if (total_len <= 0) {
+  if (req->content_len == 0) {
     httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
     return ESP_FAIL;
   }
-  if (total_len > 2048) {
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
+  WebBodyBuffer bodyBuf = webReadRequestBody(req, 2048, "http.login");
+  if (!bodyBuf.ok()) {
+    webSendBodyReadError(req, bodyBuf.status);
     return ESP_FAIL;
   }
-  std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(total_len + 1, AllocPref::PreferPSRAM, "http.login"), free);
-  int received = 0;
-  while (received < total_len) {
-    int r = httpd_req_recv(req, buf.get() + received, total_len - received);
-    if (r <= 0) {
-      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Read err");
-      return ESP_FAIL;
-    }
-    received += r;
-  }
-  buf.get()[received] = '\0';
-  String body(buf.get());
+  String body(bodyBuf.c_str());
   String u = urlDecode(extractFormField(body, "username"));
   String p = urlDecode(extractFormField(body, "password"));
   u.trim();
@@ -4545,9 +4553,10 @@ static void streamViewerRawLink(httpd_req_t* req, const String& filename) {
   streamChunkC(req, "&amp;mode=raw\">Raw</a>");
 }
 
-static void streamViewerTail(httpd_req_t* req) {
-  streamChunkC(req, "</pre></body></html>");
-  httpd_resp_send_chunk(req, NULL, 0);
+static esp_err_t streamViewerTail(httpd_req_t* req) {
+  esp_err_t err = streamChunkC(req, "</pre></body></html>");
+  if (err != ESP_OK) return err;
+  return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 esp_err_t handleFileView(httpd_req_t* req) {
@@ -4662,8 +4671,8 @@ esp_err_t handleFileView(httpd_req_t* req) {
     // Phase 3: previous code skipped canRead which let admins read any
     // .bin/.crt the rule table didn't explicitly admin-only.
     File file = VFS::openGuarded(path, "r", ctx);
+    pollResume();  // sensor polling stays paused for the open only, not the transfer
     if (!file) {
-      pollResume();
       httpd_resp_set_type(req, "text/plain");
       httpd_resp_send(req, "File not found", HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
@@ -4680,20 +4689,24 @@ esp_err_t handleFileView(httpd_req_t* req) {
 
     fsLock("file.view.json.open");
 
+    // Set by the first failed send: the transfer stops, no terminator follows
+    // and ESP_FAIL makes httpd close the socket behind the unterminated body.
+    esp_err_t sendErr = ESP_OK;
+
     if (raw) {
       // Stream raw JSON: lock only during reads
       while (true) {
         int bytesRead = file.readBytes(gFileReadBuf, kFileReadBufSize);
         if (bytesRead <= 0) break;
         fsUnlock();
-        httpd_resp_send_chunk(req, gFileReadBuf, bytesRead);
+        sendErr = httpd_resp_send_chunk(req, gFileReadBuf, bytesRead);
         fsLock("file.view.json.loop");
+        if (sendErr != ESP_OK) break;
       }
       file.close();
       fsUnlock();
-      httpd_resp_send_chunk(req, NULL, 0);  // end chunked response
-      pollResume();
-      return ESP_OK;
+      if (sendErr == ESP_OK) sendErr = httpd_resp_send_chunk(req, NULL, 0);  // end chunked response
+      return sendErr == ESP_OK ? ESP_OK : ESP_FAIL;
     }
 
     // Pretty-print streaming
@@ -4708,8 +4721,8 @@ esp_err_t handleFileView(httpd_req_t* req) {
     // boundary can't split an entity.
     auto flushOut = [&](bool force) {
       if (outLen && (force || outLen > (kFileOutBufSize - 64))) {
-        streamHtmlEscaped(req, gFileOutBuf, outLen);
-        outLen = 0;
+        if (sendErr == ESP_OK) sendErr = streamHtmlEscapedChecked(req, gFileOutBuf, outLen);
+        outLen = 0;  // dropped after a failed send, so the buffer never overruns
       }
     };
     auto emit = [&](char ch) {
@@ -4759,47 +4772,58 @@ esp_err_t handleFileView(httpd_req_t* req) {
         }
         escaped = (c == '\\' && !escaped);
         if (outLen >= kFileOutBufSize - 4) flushOut(false);
+        if (sendErr != ESP_OK) break;
       }
       flushOut(false);
       fsLock("file.view.json.loop2");
+      if (sendErr != ESP_OK) break;
     }
     file.close();
     fsUnlock();
     flushOut(true);
-    streamViewerTail(req);
-    pollResume();
-    return ESP_OK;
+    if (sendErr == ESP_OK) sendErr = streamViewerTail(req);
+    return sendErr == ESP_OK ? ESP_OK : ESP_FAIL;
   }
 
   // Default: non-JSON simple read-then-send
   uint32_t tVStart = millis();
   DEBUG_STORAGEF("[handleFileView] Non-JSON path=%s, heap=%u", path.c_str(), (unsigned)ESP.getFreeHeap());
 
-  // Serialize file operations to prevent concurrent access crashes
-  FsLockGuard fsLock("handleFileView");
+  // The filesystem lock covers the lookup and open only. Every later read
+  // takes it again for just that read (streamFileChunks, or the scoped
+  // guards below), so no socket write happens while it is held.
+  File file;
+  size_t fileSize = 0;
+  bool exists = false;
+  {
+    FsLockGuard fsGuard("handleFileView");
 
-  // Phase 3: existsGuarded gates by canRead (no information leak about
-  // files the caller can't read), normalises path, and runs the same
-  // sensitive-extension / role-based checks as openGuarded below.
-  if (!VFS::existsGuarded(path, ctx)) {
+    // Phase 3: existsGuarded gates by canRead (no information leak about
+    // files the caller can't read), normalises path, and runs the same
+    // sensitive-extension / role-based checks as openGuarded below.
+    exists = VFS::existsGuarded(path, ctx);
+    if (exists) {
+      DEBUG_STORAGEF("[handleFileView] File exists, opening: %s (heap=%u)", path.c_str(), (unsigned)ESP.getFreeHeap());
+      file = VFS::openGuarded(path, "r", ctx);
+      if (file) fileSize = file.size();
+    }
+  }
+  // Polling stays paused while the file is located and opened, not for the
+  // transfer: a stalled client must not keep the sensors idle.
+  pollResume();
+  if (!exists) {
     DEBUG_STORAGEF("[handleFileView] ERROR: File does not exist or access denied: %s", path.c_str());
-    pollResume();
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "File not found", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-
-  DEBUG_STORAGEF("[handleFileView] File exists, opening: %s (heap=%u)", path.c_str(), (unsigned)ESP.getFreeHeap());
-  File file = VFS::openGuarded(path, "r", ctx);
   if (!file) {
     ERROR_STORAGEF("Failed to open file: %s", path.c_str());
-    pollResume();
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Failed to open file", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
 
-  size_t fileSize = file.size();
   DEBUG_STORAGEF("[handleFileView] File opened, size: %d bytes, heap=%u", fileSize, (unsigned)ESP.getFreeHeap());
 
   // Extract filename from path for Content-Disposition header
@@ -4823,8 +4847,10 @@ esp_err_t handleFileView(httpd_req_t* req) {
   char* viewBuf = (char*)ps_alloc(
       VIEW_BUF_SIZE, AllocPref::PreferPSRAM, "http.file.view.chunk");
   if (!viewBuf) {
-    file.close();
-    pollResume();
+    {
+      FsLockGuard fsGuard("handleFileView");
+      file.close();
+    }
     DEBUG_STORAGEF("[handleFileView] ERROR: Failed to allocate view buffer");
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Memory allocation failed", HTTPD_RESP_USE_STRLEN);
@@ -4850,26 +4876,16 @@ esp_err_t handleFileView(httpd_req_t* req) {
       httpd_resp_set_type(req, "image/svg+xml");
     }
 
-    // Stream binary data in chunks
     size_t totalSent = 0;
     int chunkCount = 0;
-    while (true) {
-      size_t n = file.readBytes(viewBuf, VIEW_BUF_SIZE);
-      if (n == 0) break;
-      chunkCount++;
-      totalSent += n;
-      httpd_resp_send_chunk(req, viewBuf, n);
-      if ((chunkCount % 8) == 0) {
-        DEBUG_STORAGEF("[handleFileView] Streamed %d bytes in %d chunks (heap=%u)", totalSent, chunkCount, (unsigned)ESP.getFreeHeap());
-        delay(0);  // avoid WDT while streaming
-      }
-    }
-    file.close();
+    esp_err_t sendErr = streamFileChunks(req, file, viewBuf, VIEW_BUF_SIZE, false,
+                                         "handleFileView", &totalSent, &chunkCount);
     free(viewBuf);
-    httpd_resp_send_chunk(req, NULL, 0);
-    DEBUG_STORAGEF("[handleFileView] Image sent: %d bytes in %d chunks, dur=%u ms", totalSent, chunkCount, (unsigned)(millis() - tVStart));
-    pollResume();
-    return ESP_OK;
+    if (sendErr == ESP_OK) sendErr = httpd_resp_send_chunk(req, NULL, 0);
+    DEBUG_STORAGEF("[handleFileView] Image sent: %d bytes in %d chunks, err=%d dur=%u ms",
+                   totalSent, chunkCount, (int)sendErr, (unsigned)(millis() - tVStart));
+    // After a failed send the body is unterminated: ESP_FAIL closes the socket.
+    return sendErr == ESP_OK ? ESP_OK : ESP_FAIL;
   }
 
   // Audio files (.wav / .mp3). Send with Content-Length + Accept-Ranges so
@@ -4887,24 +4903,29 @@ esp_err_t handleFileView(httpd_req_t* req) {
 
     const size_t kSinglePassMax = 5u * 1024u * 1024u;  // 5 MB
     if (fileSize == 0) {
-      file.close();
+      {
+        FsLockGuard fsGuard("handleFileView");
+        file.close();
+      }
       free(viewBuf);
       esp_err_t sendErr = httpd_resp_send(req, "", 0);
       DEBUG_STORAGEF("[handleFileView] Empty audio send: err=%d", (int)sendErr);
-      pollResume();
-      return ESP_OK;
+      return sendErr == ESP_OK ? ESP_OK : ESP_FAIL;
     }
 
     if (fileSize <= kSinglePassMax) {
       char* buf = (char*)ps_alloc(fileSize, AllocPref::RequirePSRAM,
                                   "http.file.audio.whole");
       if (buf) {
-        size_t bytesRead = file.read((uint8_t*)buf, fileSize);
-        file.close();
+        size_t bytesRead = 0;
+        {
+          FsLockGuard fsGuard("handleFileView");
+          bytesRead = file.read((uint8_t*)buf, fileSize);
+          file.close();
+        }
         free(viewBuf);
         if (bytesRead != fileSize) {
           ps_free(buf);
-          pollResume();
           ERROR_STORAGEF("[handleFileView] Audio short read: got=%u expected=%u",
                          (unsigned)bytesRead, (unsigned)fileSize);
           httpd_resp_set_status(req, "500 Internal Server Error");
@@ -4922,8 +4943,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
         DEBUG_STORAGEF("[handleFileView] Audio sent: %d B in single shot, "
                        "err=%d dur=%u ms", (int)fileSize, (int)sendErr,
                        (unsigned)(millis() - tVStart));
-        pollResume();
-        return ESP_OK;
+        return sendErr == ESP_OK ? ESP_OK : ESP_FAIL;
       }
       DEBUG_STORAGEF("[handleFileView] Strict PSRAM audio alloc failed (%u B); "
                      "using chunked fallback", (unsigned)fileSize);
@@ -4935,24 +4955,14 @@ esp_err_t handleFileView(httpd_req_t* req) {
     // not attach Content-Length/Accept-Ranges to this transfer-encoding path.
     size_t totalSent = 0;
     int chunkCount = 0;
-    esp_err_t sendErr = ESP_OK;
-    while (true) {
-      size_t n = file.readBytes(viewBuf, VIEW_BUF_SIZE);
-      if (n == 0) break;
-      chunkCount++;
-      sendErr = httpd_resp_send_chunk(req, viewBuf, n);
-      if (sendErr != ESP_OK) break;
-      totalSent += n;
-      if ((chunkCount % 8) == 0) delay(0);
-    }
-    file.close();
+    esp_err_t sendErr = streamFileChunks(req, file, viewBuf, VIEW_BUF_SIZE, false,
+                                         "handleFileView", &totalSent, &chunkCount);
     free(viewBuf);
     if (sendErr == ESP_OK) sendErr = httpd_resp_send_chunk(req, NULL, 0);
     DEBUG_STORAGEF("[handleFileView] Audio (chunked) sent: %d B in %d chunks, "
                    "err=%d dur=%u ms", (int)totalSent, chunkCount,
                    (int)sendErr, (unsigned)(millis() - tVStart));
-    pollResume();
-    return ESP_OK;
+    return sendErr == ESP_OK ? ESP_OK : ESP_FAIL;
   }
 
   // Binary download files (e.g., .hwmap) - serve with Content-Disposition for proper filename
@@ -4962,26 +4972,15 @@ esp_err_t handleFileView(httpd_req_t* req) {
     String disposition = "attachment; filename=\"" + dispFilename + "\"";
     httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
 
-    // Stream binary data in chunks
     size_t totalSent = 0;
     int chunkCount = 0;
-    while (true) {
-      size_t n = file.readBytes(viewBuf, VIEW_BUF_SIZE);
-      if (n == 0) break;
-      chunkCount++;
-      totalSent += n;
-      httpd_resp_send_chunk(req, viewBuf, n);
-      if ((chunkCount % 8) == 0) {
-        DEBUG_STORAGEF("[handleFileView] Streamed %d bytes in %d chunks (heap=%u)", totalSent, chunkCount, (unsigned)ESP.getFreeHeap());
-        delay(0);  // avoid WDT while streaming
-      }
-    }
-    file.close();
+    esp_err_t sendErr = streamFileChunks(req, file, viewBuf, VIEW_BUF_SIZE, false,
+                                         "handleFileView", &totalSent, &chunkCount);
     free(viewBuf);
-    httpd_resp_send_chunk(req, NULL, 0);
-    DEBUG_STORAGEF("[handleFileView] Binary file sent: %d bytes in %d chunks, dur=%u ms", totalSent, chunkCount, (unsigned)(millis() - tVStart));
-    pollResume();
-    return ESP_OK;
+    if (sendErr == ESP_OK) sendErr = httpd_resp_send_chunk(req, NULL, 0);
+    DEBUG_STORAGEF("[handleFileView] Binary file sent: %d bytes in %d chunks, err=%d dur=%u ms",
+                   totalSent, chunkCount, (int)sendErr, (unsigned)(millis() - tVStart));
+    return sendErr == ESP_OK ? ESP_OK : ESP_FAIL;
   }
 
   // Text file - stream it in chunks like images.
@@ -5002,54 +5001,49 @@ esp_err_t handleFileView(httpd_req_t* req) {
 
   size_t totalSent = 0;
   int chunkCount = 0;
+  esp_err_t sendErr = ESP_OK;
   // Sealed capture (magic first line) + a mode that reveals: stream line by
   // line — the fixed-size chunk pump below would split sealed lines across
   // reads. The '#HW1ENC' line passes through as the on-screen mark, and rows
   // this device can't open render as the undecryptable marker.
-  const bool revealSealed = (!raw || wantDec) && captureCryptoLooksSealed(file);
+  bool revealSealed = false;
+  {
+    FsLockGuard fsGuard("handleFileView");
+    revealSealed = (!raw || wantDec) && captureCryptoLooksSealed(file);
+  }
   if (revealSealed) {
-    while (file.available()) {
-      String lineStr = file.readStringUntil('\n');
+    // Same lock discipline as streamFileChunks: read a line under the lock,
+    // send it without, stop at the first failed send.
+    while (true) {
+      String lineStr;
+      {
+        FsLockGuard fsGuard("handleFileView");
+        if (!file.available()) break;
+        lineStr = file.readStringUntil('\n');
+      }
       captureCryptoRevealLine(lineStr);
       lineStr += '\n';
+      sendErr = raw ? httpd_resp_send_chunk(req, lineStr.c_str(), lineStr.length())
+                    : streamHtmlEscapedChecked(req, lineStr.c_str(), lineStr.length());
+      if (sendErr != ESP_OK) break;
       chunkCount++;
       totalSent += lineStr.length();
-      if (raw) {
-        httpd_resp_send_chunk(req, lineStr.c_str(), lineStr.length());
-      } else {
-        streamHtmlEscaped(req, lineStr.c_str(), lineStr.length());
-      }
       if ((chunkCount % 32) == 0) delay(0);  // avoid WDT while streaming
     }
-  } else
-  while (true) {
-    size_t n = file.readBytes(viewBuf, VIEW_BUF_SIZE);
-    if (n == 0) break;
-    DEBUG_STORAGEF("[handleFileView] Read chunk %d: %d bytes, heap=%u", chunkCount + 1, n, (unsigned)ESP.getFreeHeap());
-    chunkCount++;
-    totalSent += n;
-    if (raw) {
-      httpd_resp_send_chunk(req, viewBuf, n);
-    } else {
-      streamHtmlEscaped(req, viewBuf, n);
-    }
-    if ((chunkCount % 8) == 0) {
-      DEBUG_STORAGEF("[handleFileView] Streamed %d bytes in %d chunks (heap=%u)", totalSent, chunkCount, (unsigned)ESP.getFreeHeap());
-      delay(0);  // avoid WDT while streaming
-    }
-  }
-  file.close();
-  free(viewBuf);
-  if (raw) {
-    httpd_resp_send_chunk(req, NULL, 0);
+    FsLockGuard fsGuard("handleFileView");
+    file.close();
   } else {
-    streamViewerTail(req);
+    sendErr = streamFileChunks(req, file, viewBuf, VIEW_BUF_SIZE, !raw,
+                               "handleFileView", &totalSent, &chunkCount);
   }
-  DEBUG_STORAGEF("[handleFileView] COMPLETE: Text file sent %d bytes in %d chunks (dur=%u ms)", totalSent, chunkCount, (unsigned)(millis() - tVStart));
-  
-  // Resume sensor polling
-  pollResume();
-  return ESP_OK;
+  free(viewBuf);
+  if (sendErr == ESP_OK) {
+    sendErr = raw ? httpd_resp_send_chunk(req, NULL, 0) : streamViewerTail(req);
+  }
+  DEBUG_STORAGEF("[handleFileView] COMPLETE: Text file sent %d bytes in %d chunks (err=%d dur=%u ms)",
+                 totalSent, chunkCount, (int)sendErr, (unsigned)(millis() - tVStart));
+  // After a failed send the body is unterminated: ESP_FAIL closes the socket.
+  return sendErr == ESP_OK ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t handleIconGet(httpd_req_t* req) {
@@ -5246,21 +5240,13 @@ esp_err_t handleAdminApproveUser(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // Read POST body inline (reuse pattern from other handlers)
+  // The form carries one username; cap the body well above that.
+  static constexpr size_t kAdminFormBodyMax = 1024;
   String body;
-  int total_len = req->content_len;
-  if (total_len > 0) {
-    std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(total_len + 1, AllocPref::PreferPSRAM, "http.admin"), free);
-    if (buf) {
-      int received = 0;
-      while (received < total_len) {
-        int r = httpd_req_recv(req, buf.get() + received, total_len - received);
-        if (r <= 0) break;
-        received += r;
-      }
-      buf.get()[received] = '\0';
-      body = String(buf.get());
-    }
+  if (req->content_len > 0) {
+    WebBodyBuffer bodyBuf = webReadRequestBody(req, kAdminFormBodyMax, "http.admin");
+    if (!bodyBuf.ok()) return webSendBodyReadError(req, bodyBuf.status, /*json=*/true);
+    body = String(bodyBuf.c_str());
   }
   String username = urlDecode(extractFormField(body, "username"));
   if (username.length() == 0) {
@@ -5289,24 +5275,15 @@ esp_err_t handleAdminDenyUser(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // Read full body and decode
-  int total_len = req->content_len;
-  if (total_len <= 0) {
+  // Read the full body (one username) and decode
+  static constexpr size_t kAdminFormBodyMax = 1024;
+  if (req->content_len == 0) {
     sendJsonResponse(req, "{\"success\":false, \"error\":\"No data\"}");
     return ESP_OK;
   }
-  std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(total_len + 1, AllocPref::PreferPSRAM, "http.passwd"), free);
-  int received = 0;
-  while (received < total_len) {
-    int r = httpd_req_recv(req, buf.get() + received, total_len - received);
-    if (r <= 0) {
-      sendJsonResponse(req, "{\"success\":false, \"error\":\"Read error\"}");
-      return ESP_OK;
-    }
-    received += r;
-  }
-  buf.get()[received] = '\0';
-  String body = String(buf.get());
+  WebBodyBuffer bodyBuf = webReadRequestBody(req, kAdminFormBodyMax, "http.passwd");
+  if (!bodyBuf.ok()) return webSendBodyReadError(req, bodyBuf.status, /*json=*/true);
+  String body = String(bodyBuf.c_str());
   String username = urlDecode(extractFormField(body, "username"));
 
   if (username.length() == 0) {

@@ -348,6 +348,98 @@ String makeSessToken() {
   return String(buf);
 }
 
+// Receive a complete request body into the caller's buffer.
+WebBodyStatus webRecvRequestBody(httpd_req_t* req, char* buf, size_t bufSize, size_t* outLen) {
+  if (outLen) *outLen = 0;
+  if (!req || !buf || bufSize == 0) return WebBodyStatus::NoMemory;
+  buf[0] = '\0';
+  const size_t contentLen = req->content_len;
+  if (contentLen == 0) return WebBodyStatus::Empty;
+  if (contentLen >= bufSize) return WebBodyStatus::TooLarge;
+
+  size_t received = 0;
+  int idleTimeouts = 0;  // consecutive recv_wait_timeout results
+  while (received < contentLen) {
+    const int r = httpd_req_recv(req, buf + received, contentLen - received);
+    if (r <= 0) {
+      // One idle wait is a slow client; two in a row is a half-open socket
+      // that would otherwise pin this httpd worker forever.
+      if (r == HTTPD_SOCK_ERR_TIMEOUT && ++idleTimeouts < 2) continue;
+      DEBUG_HTTPF("[http.body] recv failed r=%d received=%u of %u", r, (unsigned)received, (unsigned)contentLen);
+      buf[0] = '\0';
+      return WebBodyStatus::RecvFailed;
+    }
+    idleTimeouts = 0;
+    received += (size_t)r;
+  }
+  buf[received] = '\0';
+  if (outLen) *outLen = received;
+  return WebBodyStatus::Ok;
+}
+
+// Receive a complete request body into a bounded PSRAM-preferred buffer.
+WebBodyBuffer webReadRequestBody(httpd_req_t* req, size_t maxLen, const char* allocTag) {
+  WebBodyBuffer body;
+  const size_t contentLen = req ? req->content_len : 0;
+  if (contentLen == 0) {
+    body.status = WebBodyStatus::Empty;
+    return body;
+  }
+  if (contentLen > maxLen) {
+    DEBUG_HTTPF("[http.body] content_len=%u over cap %u (%s)", (unsigned)contentLen, (unsigned)maxLen, allocTag ? allocTag : "");
+    body.status = WebBodyStatus::TooLarge;
+    return body;
+  }
+  char* raw = (char*)ps_alloc(contentLen + 1, AllocPref::PreferPSRAM, allocTag);
+  if (!raw) {
+    ERROR_MEMORYF("request body of %u bytes not allocated (%s)", (unsigned)(contentLen + 1), allocTag ? allocTag : "");
+    body.status = WebBodyStatus::NoMemory;
+    return body;
+  }
+  body.data.reset(raw);
+  body.status = webRecvRequestBody(req, raw, contentLen + 1, &body.len);
+  if (body.status != WebBodyStatus::Ok) {
+    body.data.reset();
+    body.len = 0;
+  }
+  return body;
+}
+
+// Reply for a failed body read; see the header for the status mapping.
+esp_err_t webSendBodyReadError(httpd_req_t* req, WebBodyStatus status, bool json) {
+  const char* code = "400 Bad Request";
+  const char* text = "Request body incomplete";
+  esp_err_t result = ESP_FAIL;
+  switch (status) {
+    case WebBodyStatus::Ok:
+      return ESP_OK;
+    case WebBodyStatus::Empty:
+      text = "Request body required";
+      result = ESP_OK;
+      break;
+    case WebBodyStatus::TooLarge:
+      code = "413 Payload Too Large";
+      text = "Request body too large";
+      break;
+    case WebBodyStatus::NoMemory:
+      code = "413 Payload Too Large";
+      text = "Request body too large for free memory";
+      break;
+    case WebBodyStatus::RecvFailed:
+      break;
+  }
+  httpd_resp_set_status(req, code);
+  if (json) {
+    char out[96];
+    snprintf(out, sizeof(out), "{\"success\":false,\"error\":\"%s\"}", text);
+    sendJsonResponse(req, out);
+  } else {
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, text);
+  }
+  return result;
+}
+
 // ============================================================================
 // Guest HTTP access gate
 // ============================================================================
@@ -632,7 +724,11 @@ const char* resolveUserThemePref(const String& username) {
 }
 
 void streamHtmlEscaped(httpd_req_t* req, const char* buf, size_t len) {
-  if (!req || !buf) return;
+  (void)streamHtmlEscapedChecked(req, buf, len);
+}
+
+esp_err_t streamHtmlEscapedChecked(httpd_req_t* req, const char* buf, size_t len) {
+  if (!req || !buf) return ESP_ERR_INVALID_ARG;
   // Copy whole runs of safe bytes rather than one byte at a time, and hand a
   // run longer than the staging buffer straight to the socket. Each chunk
   // costs three httpd_send_all calls (length, body, CRLF) — a TLS record each
@@ -640,25 +736,31 @@ void streamHtmlEscaped(httpd_req_t* req, const char* buf, size_t len) {
   // as it was before this viewer existed. Escape-dense input (pretty-printed
   // JSON) still batches through `out` instead of emitting a chunk per entity.
   // Keep `out` small: it lands on the httpd task stack, which is 11 KB.
+  // After the first failed send nothing more is written: each further chunk to
+  // a client that stopped reading would cost another send timeout.
   char out[512];
   size_t o = 0;
+  esp_err_t err = ESP_OK;
 
   auto flush = [&]() {
-    if (o) { httpd_resp_send_chunk(req, out, o); o = 0; }
+    if (o && err == ESP_OK) err = httpd_resp_send_chunk(req, out, o);
+    o = 0;
   };
   auto put = [&](const char* src, size_t n) {
+    if (err != ESP_OK) return;
     if (n >= sizeof(out)) {  // too big to be worth staging — send it as-is
       flush();
-      httpd_resp_send_chunk(req, src, n);
+      if (err == ESP_OK) err = httpd_resp_send_chunk(req, src, n);
       return;
     }
     if (o + n > sizeof(out)) flush();
+    if (err != ESP_OK) return;
     memcpy(out + o, src, n);
     o += n;
   };
 
   size_t run = 0;  // start of the current run of bytes needing no escape
-  for (size_t i = 0; i < len; i++) {
+  for (size_t i = 0; i < len && err == ESP_OK; i++) {
     const char* rep;
     switch (buf[i]) {
       case '&': rep = "&amp;"; break;
@@ -674,6 +776,7 @@ void streamHtmlEscaped(httpd_req_t* req, const char* buf, size_t len) {
   }
   if (len > run) put(buf + run, len - run);
   flush();
+  return err;
 }
 
 void streamBeginHtml(httpd_req_t* req,

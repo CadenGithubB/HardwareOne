@@ -119,11 +119,18 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
     // Sticky header: needs border-collapse:separate on the table (set in HTML)
     // and an opaque background so scrolling rows don't bleed through.
     var th='text-align:left;position:sticky;top:0;z-index:2;background:var(--panel-bg,#1e1e1e);box-shadow:inset 0 -1px 0 #555;'+cell;
-    var h='<thead><tr>';for(var i=0;i<d.hdr.length;i++){h+='<th style="'+th+'">'+d.hdr[i]+'</th>';}h+='</tr></thead><tbody>';
+    // The log file is user-writable: header and cell text go in as text
+    // nodes and are never parsed as HTML.
+    function addRow(parent,tag,style,values){
+      var tr=document.createElement('tr');
+      for(var i=0;i<values.length;i++){var el=document.createElement(tag);el.style.cssText=style;el.textContent=values[i]||'';tr.appendChild(el);}
+      parent.appendChild(tr);
+    }
+    var thead=document.createElement('thead'),tbody=document.createElement('tbody');
+    addRow(thead,'th',th,d.hdr);
     var rows=d.rows.slice(-60);
-    for(var r=0;r<rows.length;r++){h+='<tr>';for(var c=0;c<rows[r].length;c++){h+='<td style="'+cell+'">'+(rows[r][c]||'')+'</td>';}h+='</tr>';}
-    h+='</tbody>';
-    t.innerHTML=h;
+    for(var r=0;r<rows.length;r++)addRow(tbody,'td',cell,rows[r]);
+    t.textContent='';t.appendChild(thead);t.appendChild(tbody);
   }
   function drawChart(d){
     var cv=hw.$('bat-chart');if(!cv||!cv.getContext)return;var ctx=cv.getContext('2d');

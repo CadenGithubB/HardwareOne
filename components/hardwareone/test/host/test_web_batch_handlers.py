@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -93,8 +94,28 @@ def main() -> None:
     bond = (COMPONENT / "WebPage_Bond.cpp").read_text()
     utils = ((args.baseline / "System_Utils.before.cpp") if args.baseline else
              COMPONENT / "System_Utils.cpp").read_text()
+    web_utils = (COMPONENT / "WebServer_Utils.cpp").read_text()
+    web_utils_header = (COMPONENT / "WebServer_Utils.h").read_text()
+    limits = (COMPONENT / "System_CommandLimits.h").read_text()
+    for marker in ("WebBodyStatus webRecvRequestBody(", "WebBodyBuffer webReadRequestBody(",
+                   "esp_err_t webSendBodyReadError("):
+        require(web_utils.count(marker) == 1, f"shared request-body reader missing: {marker}")
+    cmd_input_max = re.search(r"static constexpr size_t CMD_INPUT_MAX = \d+;", limits)
+    require(cmd_input_max is not None, "CMD_INPUT_MAX definition not found")
+    # The default arguments live on the header declarations; carry them over.
+    reader_declarations = re.findall(r"^(?:WebBodyStatus webRecvRequestBody|esp_err_t webSendBodyReadError)\(.*;$",
+                                     web_utils_header, re.MULTILINE)
+    require(len(reader_declarations) == 2, "shared reader declarations missing from WebServer_Utils.h")
     definitions = [
         "#define HAVE_WEB_CONTEXT_HELPER " + str(int(not args.baseline)),
+        cmd_input_max.group(0),
+        extract_block(web_utils_header, "enum class WebBodyStatus") + ";",
+        extract_block(web_utils_header, "struct WebBodyBuffer") + ";",
+        *reader_declarations,
+        extract_block(web_utils_header, "inline esp_err_t sendJsonResponse("),
+        extract_block(web_utils, "WebBodyStatus webRecvRequestBody("),
+        extract_block(web_utils, "WebBodyBuffer webReadRequestBody("),
+        extract_block(web_utils, "esp_err_t webSendBodyReadError("),
         *([] if args.baseline else [extract_block(utils, "CommandContext makeWebCommandContext(")]),
         extract_block(utils, "String redactOutputForLog("),
         extract_block(local, "static String redactWebCommandResult("),

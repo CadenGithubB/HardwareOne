@@ -37,6 +37,8 @@ extern size_t gWebMirrorCap;
 #if ENABLE_HTTP_SERVER
 
 #include <esp_http_server.h>
+#include <cstdlib>
+#include <memory>
 
 // CACHE_MUTEX_TIMEOUT_MS lives in System_Mutex.h (single canonical home).
 // Callers that need it should include System_Mutex.h directly or via System_I2C.h.
@@ -109,6 +111,43 @@ String getCookieSID(httpd_req_t* req);
 
 // Generate a random session token
 String makeSessToken();
+
+// Result of reading a request body with the shared readers below.
+enum class WebBodyStatus : uint8_t {
+  Ok = 0,
+  Empty,       // Content-Length 0
+  TooLarge,    // Content-Length above the caller's cap (nothing was read)
+  NoMemory,    // the body buffer could not be allocated (nothing was read)
+  RecvFailed,  // socket error, closed peer, short body or two idle timeouts in a row
+};
+
+// A complete, NUL-terminated request body owned by the handler.
+struct WebBodyBuffer {
+  std::unique_ptr<char, void (*)(void*)> data{nullptr, free};
+  size_t len = 0;
+  WebBodyStatus status = WebBodyStatus::Empty;
+  bool ok() const { return status == WebBodyStatus::Ok; }
+  const char* c_str() const { return data ? data.get() : ""; }
+};
+
+// Receive the whole body into the caller's buffer (bufSize includes the NUL).
+// One idle receive timeout is a slow client and is retried; two in a row mean a
+// half-open socket and the read stops, so a vanished client cannot pin the
+// httpd worker. The buffer holds an empty string on any failure.
+WebBodyStatus webRecvRequestBody(httpd_req_t* req, char* buf, size_t bufSize, size_t* outLen = nullptr);
+
+// Receive the whole body into a PSRAM-preferred buffer of at most maxLen bytes.
+// The cap is checked before anything is allocated and the allocation is
+// null-checked, so a forged Content-Length can neither pin memory nor crash.
+WebBodyBuffer webReadRequestBody(httpd_req_t* req, size_t maxLen, const char* allocTag);
+
+// Send the reply for a failed read: Empty is 400, TooLarge and NoMemory are
+// 413, RecvFailed is 400. With json the body is {"success":false,"error":...},
+// otherwise text/plain. Returns the value the handler should return: ESP_FAIL
+// when unread or undeliverable body bytes remain so httpd closes the socket
+// instead of draining them, ESP_OK for an empty body (or status Ok, which
+// sends nothing).
+esp_err_t webSendBodyReadError(httpd_req_t* req, WebBodyStatus status, bool json = false);
 
 // ============================================================================
 // Navigation HTML Generation
@@ -1254,6 +1293,10 @@ const char* resolveUserThemePref(const String& username);
 // <pre>: unescaped, a file containing "</pre><script>" runs against the
 // viewing user's session.
 void streamHtmlEscaped(httpd_req_t* req, const char* buf, size_t len);
+// Same escaping, but stops at the first failed send and returns that error
+// (ESP_OK after the whole buffer went out). Streaming loops use this so a
+// client that stopped reading does not cost one send timeout per chunk.
+esp_err_t streamHtmlEscapedChecked(httpd_req_t* req, const char* buf, size_t len);
 
 // Begin HTML page with standard structure (doctype, head, nav, content wrapper)
 void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic,

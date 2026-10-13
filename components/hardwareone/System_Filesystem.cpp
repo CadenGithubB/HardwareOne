@@ -750,6 +750,13 @@ const char* cmd_filecreate(const String& argsInput) {
   // openGuarded("w", create=true) on a non-existent path falls back to
   // canCreate(path, ctx) when canEdit denies (per the openGuarded logic).
   FsLockGuard fsGuard("filecreate");
+  // "w" truncates an existing file, so create refuses when the path is
+  // already present. Probed under the same lock as the open so no other
+  // writer can slip a file in between the probe and the create.
+  if (VFS::existsGuarded(path, ctx)) {
+    snprintf(getDebugBuffer(), 1024, "Error: File already exists: %s", path.c_str());
+    return getDebugBuffer();
+  }
   File f = VFS::openGuarded(path, "w", ctx, /*create=*/true);
   if (!f) {
     snprintf(getDebugBuffer(), 1024, "Error: Failed to create file (denied or fs error): %s", path.c_str());
