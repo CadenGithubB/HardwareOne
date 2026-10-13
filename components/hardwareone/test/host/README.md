@@ -1578,6 +1578,71 @@ refusals run in `wifi_networks`. The checks:
 `--component <dir>` reads another tree. The pre-fix sources fail the
 control-character reply.
 
+## remote:/@ commands and the bonded peer's authority
+
+```sh
+python3 components/hardwareone/test/host/test_remote_command_authority.py --sanitize
+```
+
+The bonded peer runs every `remote:`/`@` command as bond-admin, which is super
+for the live bond session. The sender can check the unwrapped line only
+against its own registry flags. Handlers that decide access at run time from
+the caller (file path rules, the owner of notes and transcripts, sessions,
+voice arming) would decide it for super on the peer. A command the sender's
+build does not compile has no row to check at all. So the routing in
+`executeCommand` needs a local administrator. The one exception is the peer
+sensor start/stop lines (`open<sensor>` / `close<sensor>`, no arguments), which
+the bond page and the OLED bond screen send for any signed-in user.
+
+`remote_command_authority` compiles, unchanged, the remote routing of
+`executeCommand` (from the "REMOTE COMMAND ROUTING" marker through its
+`if (isRemoteCommand)` block), `authorizeCommand` with its guest,
+password-change and session classifiers, `authorizeRemoteCommand` and
+`remoteCommandAllowedWithoutAdmin`, and the remote reply owner
+(`formatRemoteCommandSent` / `parseRemoteCommandSentReqId`) from
+`System_Utils.cpp`. It also compiles `CommandArgs` (`System_Command.cpp`) and
+the registry name matcher (`System_CommandLookupCore.h`). Accounts, registry
+rows (with the shipping flags, file verbs user-level), redaction, the audit
+and event sinks and the bond transport are doubles. It checks that:
+
+- a signed-in user cannot send the file verbs (`files`, `fileread`,
+  `fileview`, `filewrite`, `filecreate`, `mkdir`, `rmdir`, `filedelete`,
+  `filerename`), `sensorlog`, `opensr`, `whoami`, a setter, or a command this
+  build lacks, over any transport. The same holds for an automation stored by
+  a user, an ownerless automation row, the require-auth-off identity, an
+  anonymous pre-auth line and a guest's `whoami`. Each refusal sends nothing.
+  The reply is "Error: Admin access required ..." and there is one failed audit
+  entry with the redacted line ("remote cmd=...") and one denial event for a
+  named caller;
+- the sensor toggles stay open to those callers. The ids are read from
+  `WebPage_Bond.cpp`'s remote sensor table and `OLED_Mode_Remote.cpp`'s
+  `bondSensorDefs`. Lines with an argument, a quoted verb or another verb are
+  refused;
+- administrators, the superadmin and the trusted internal identity keep the
+  remote surface: one `ESPNOW_V4_TYPE_CMD` frame with `ACK_REQ` carrying the
+  unwrapped line, the reply "Remote command sent: <redacted> (reqId <msgId>)",
+  which the reply owner parses back (A13), and one redacted broadcast;
+- the guest gate, the registry's own admin and super refusals, the
+  nested-wrapper refusal (first, for everyone), the bond-readiness errors and
+  local lines are unchanged.
+
+A source check confirms that `executeCommand`'s routing is the only caller of
+`buildBondedCommandPayload`, so no second sender bypasses the gate.
+`--component <dir>` / `--source-dir <dir>` read the production sources from
+another tree. The pre-fix tree (af1ed97c) fails the user, unknown-command,
+guest-and-unknown-account and redaction cases. Not covered: the peer's
+`v4_handle_cmd`, the radio, and the bonded-only FS RPC (`espnow_fs_transcript_privacy`).
+
+## Continuous STT trim default
+
+`stt_continuous` (System_STT.cpp's continuous broker) now runs the production
+default: a phrase that closes on a pause is transcribed up to its voiced end
+plus 500 ms (`kTrimTailSamples`), with speculative finals; the harness takes
+every tail expectation from that constant. `stt_continuous_full_phrase` builds
+the `-DHW1_STT_TRIM_SILENCE=0` opt-out and checks that full phrases are kept.
+`--speakers` adds the speaker-label path; `--trim-silence` is an alias of the
+default.
+
 ## Boot temporary-file cleanup
 
 `boot_temp_cleanup` executes the production startup sweep, `VFS::DirectoryReader`

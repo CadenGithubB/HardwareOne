@@ -12,7 +12,12 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 
 Development checkpoint combining the committed 0.99.97.4 fixes, OpenClaw
 integration, and the current P4 speech/G2 work in one main-line source tree.
-Ongoing fixes in the separate review worktree are not included.
+It also carries the fixes from the 2026-10-12 program review, merged on
+2026-10-13: 113 findings in two halves (web, accounts, core services, network,
+OTA, media, power and LLM; then ESP-NOW, Bluetooth, ring and health, G2 pages
+and OLED), a bond-manifest size fix found on hardware, and about 25 follow-up
+changes made on the merged tree where a fix needed both halves. The owners
+these fixes created are listed in `docs/MODULARIZATION_PLAN.md`.
 
 ### Added
 - Optional HTTP(S) chat source for OpenClaw, using the existing shared chat,
@@ -28,6 +33,93 @@ Ongoing fixes in the separate review worktree are not included.
 - P4 session speaker labels, pinned STT model selection, model export/training
   tools and host regressions. Translation feasibility work and enclosure
   references remain in the same repository.
+- Ring and health: the admin command
+  `ringcontrol <collection|lowpower> <preserve|on|off>` sets ring health
+  collection and low power from any command interface. The web and OLED
+  Health pages now run it, so these changes are in the command audit log.
+- Camera: `opencamera async` and `closecamera async` queue a camera power
+  change and return at once, reporting only whether it was accepted.
+
+### Security
+- Logins: one failed-login lockout (30 s, 5 min and 30 min after 5, 10 and 20
+  failures) now covers, on every build, the web `/login` form and Basic Auth,
+  serial, the UART link, Bluetooth, the device screen (its login screen, a
+  `login` typed there and the gamepad-pattern check), MQTT, ESP-NOW password
+  commands and the user-sync admin check, and a `login` aimed at another
+  console. A running lock no longer ends early, a success clears only
+  failures that named the same account, and a locked web address is never
+  evicted (while eight are locked, new addresses are refused until one ends).
+  MQTT (per broker), Bluetooth and ESP-NOW keep one entry each, so one
+  guessing client locks that interface's password logins for everyone while
+  the lock runs; ESP-NOW bond-token commands are not affected.
+- Accounts: a forced password change can no longer be skipped. Until it is
+  done, web API calls, the web CLI and event streams get 403
+  `password_change_required`, pages redirect to the change form, and every
+  command interface accepts only `userchangepassword`, `whoami` and a plain
+  `login` or `logout`. `/api/user/settings` accepts only theme, notification
+  level and dashboard layout keys (400 `setting_not_allowed` otherwise), so
+  it can no longer clear that flag or erase a stored password.
+- Accounts: the reserved `bond-admin` name has authority only in a live
+  ESP-NOW bond session and elsewhere ranks no higher than a user. Logins and
+  new accounts refuse the reserved names, including ESP-NOW user sync, which
+  now follows `useradd`'s rules (valid names, passwords of at least 6
+  characters, no reused ids). `unbanuser`, `sessionrevoke user` and a
+  `logout` aimed at another console follow `banuser`'s rank rule.
+- Accounts: `factoryreset` also removes pending requests, per-user settings
+  and every account's notes and transcripts under `/stt` (the new owner could
+  read the old ones), and accounts created later never reuse an earlier id.
+  A concurrent account-file write can no longer undo a ban or role change,
+  and approving a request while the account file is missing no longer
+  creates a super admin.
+- Web server and pages: `/api/cli` caps its request body (413), so a forged
+  `Content-Length` can no longer reboot the device. The Battery and ESP-NOW
+  pages show logged and peer-supplied text as plain text, so neither can run
+  script in a viewer's browser. Administrator toasts no longer reach another
+  user in the same session slot, and toast text is escaped. IP bans survive
+  a full filesystem or low memory, and a ban that cannot be saved stays in
+  force until reboot.
+- Files: `imagedelete` deletes only photos, under the caller's permissions
+  (an administrator could delete settings or account files), and over
+  Bluetooth needs the secure channel. The battery log is a system file that
+  only its logger writes, and the ESP-NOW inbox (`/espnow/received`) is
+  administrator-only.
+- ESP-NOW: files are listed and served only to the bonded partner during a
+  live bond session (any securely paired device could pull any file, account
+  files included), and the Bond page's file browser and the OLED peer file
+  browser need a local administrator. Replayed rekey and session-open frames
+  are ignored, and frames recorded under the previous key are refused.
+  Subscription changes need an encrypted session. Once the mesh has a
+  passphrase, text, boot and sensor frames must be authenticated; without
+  one, plain text is listed under the sender's address and raises no notice
+  or `text_rx` automation. The message history no longer frees memory in
+  use, malformed multi-frame messages are refused, and a remote command's
+  output streams only to the peer that sent it.
+- ESP-NOW bond: a `remote:` or `@` command needs a local administrator,
+  because the bonded partner runs it as administrator (with user-level file
+  commands, any signed-in user could otherwise have deleted the partner's
+  files). Only the partner's sensor start and stop commands, which the Bond
+  page and the OLED bond screen send, stay open to signed-in users.
+- Bluetooth: the console mirror (`outble`), `blesend` and the streams reach
+  only logged-in, non-guest connections, each encrypted for that
+  connection's own secure channel when it has one. A command result goes only
+  to the session that issued it and is dropped after a logout. Secure-channel
+  replies and handshakes go only to their own connection, file commands run
+  only when the command itself arrived encrypted, `blesecure` needs a super
+  admin, and a plaintext command buffer, which can hold a password, is wiped.
+- OLED: only a super admin can change the display login requirement, with
+  `displayrequireauth`; before, any admin could turn it off, and
+  `oledrequireauth on` turned it off. Unpair Device, the pairing window and
+  Power Saving need an administrator, and every OLED password field,
+  including the gamepad pattern and the user manager's, shows `*`.
+- LLM: loading and unloading a model from the web or the device screen needs
+  an administrator, as `llmload` and `llmunload` already did.
+- Ring and health: ring telemetry relayed by the glasses is strictly
+  length-checked, so a malformed frame can no longer hang the parser or make
+  it read past the frame.
+- OTA: the recovery updater no longer carries a failed update's downgrade or
+  forced-power permission into a later upload. This takes an updater from
+  this release in the factory slot; application images alone do not change
+  it.
 
 ### Changed
 - P4 STT retains model state for a session, computes frontend features during
@@ -39,11 +131,141 @@ Ongoing fixes in the separate review worktree are not included.
 - CMake retains the checked feature parser from 0.99.97.4 and selects both
   HTTP and speaker-label sources. SDK patches and optimized STT kernels remain
   under their existing owners.
+- P4 speech: trailing-silence trimming and early finals are on again, with a
+  500 ms tail after the last detected speech instead of 200 ms, so about
+  100 ms of a closing pause is trimmed and quiet word endings stay in.
+  `-DHW1_STT_TRIM_SILENCE=0` keeps whole phrases.
+- P4: PSRAM runs at 250 MHz instead of 200 MHz (revision 3 silicon). A build
+  folder configured earlier keeps 200 MHz until it is recreated.
+- Accounts: `userlist json` returns only id, username, role, banned and
+  createdAt for each account.
+- Files: the file commands are no longer administrator-only; the Files
+  page's path rules decide on every interface, so serial, Bluetooth, the web
+  CLI and the OLED give the same answer. The OLED browser's Rename and Delete
+  run as audited commands and show "Not found or denied" for a file that is
+  gone or that the account can no longer read.
+- Commands: for integrators, `executeCommand` refuses callers other than the
+  command executor task (early boot excepted); other tasks use
+  `executeInternalStatusCommand`, as `/api/logging/status` and
+  `/api/espnow/status` now do. `help` lists no command twice, and the
+  Bluetooth, OLED and ring overviews give the right tiers.
+- Web server and API: the login form and the account approve and deny forms
+  answer 413 to a body too large to hold and 400 to one that cannot be
+  received, as `/api/cli` does. `/api/backup` errors carry HTTP status codes,
+  and a restore needs free space for the whole bundle. A successful
+  `/api/llm/load` returns the `llmload` reply, and `/api/power/status`
+  replaces `batteryThreshold` with `autoModeSupported: false`.
+- Camera: `images json` and `cameravideolist json` replies over 4 KB drop
+  trailing entries and add `"truncated":true`. Unmounting, remounting or
+  formatting the card is refused while a video records, and a failed
+  recording raises the new `video_record_failed` event. The glasses' CAM
+  toggle runs as an audited `opencamera async` or `closecamera async`
+  command and is refused while `cameraenabled 0`.
+- MQTT: a command that cannot be queued is answered at once, and the 60 s
+  timeout reply is gone.
+- Ring and health: `healthstatus force-history` is a separate admin command;
+  a non-admin gets the standard refusal on every interface, and `help` lists
+  it. It was already refused to non-admins.
+- ESP-NOW: room, zone, tag and friendly names refuse control characters and
+  `< > " ' & \`, and `espnowrekey` is refused within 30 s of a key change.
+  Streamed command output keeps at most 202 bytes per line (130 through a
+  relaying device). A bonded `remote:` command replies with its request id
+  ("... (reqId N)"), which the OLED bonded-settings editor waits for. That
+  editor offers only settings whose command is built in, and
+  `/api/bond/settings/schema` returns the peer's schema already narrowed to
+  the settings a bonded peer may edit.
+- Bluetooth: `bledisconnect [connId]` disconnects one app client or, bare,
+  every app client (it used to drop the first connection), never the ring or
+  the glasses. `blestatus` and `bleread` report the `bleinfo json` snapshot,
+  whose JSON adds `connId` and `authed`; `outble` status shows how many
+  sessions receive the mirror.
+- Build and tools: the Bluetooth event-catalog client expects 165 event
+  kinds, and the command-registry audit also scans OLED command calls.
+  `docs/COMMAND_REFERENCE.md` is regenerated from the merged command table.
 
 ### Fixed
 - HTTP request and configuration cleanup uses explicit object lifetimes and
   secure memory clearing, retaining credential wiping with the P4 compiler's
   strict class-memory checks.
+- Accounts: a `}` or `]` in a ban reason no longer corrupts the account file
+  (deleting such an account could make every login fail); `useradd` and
+  approval leave nothing half-made; public web registration works again
+  (broken since 0.99.1); the ban commands work without the web server;
+  account JSON lists are never cut off; and the device-screen user manager
+  acts on names longer than 23 characters.
+- Sessions and commands: a web password change while the account is signed
+  in on the device screen or serial no longer freezes the device, a full web
+  session table signs out the session nearest expiry and tells it, a
+  `validate=1` check no longer silences other sessions, and status pages no
+  longer show another command's output.
+- Crash records and OTA: brownouts no longer send a board to the recovery
+  updater or roll back a trial boot. Saved networks out of range (a connect
+  now stops within 150 s, sooner on a trial boot) and a slow first-time setup
+  no longer roll back an update. The P4X-EYE companion-failure reboot
+  finalizes a recording and records its reason.
+- Files and web pages: the web editor saves text exactly as typed, through a
+  staged copy; Create refuses an existing name instead of emptying the file;
+  slow downloads no longer hold up logins; LLM and Health requests whose body
+  never arrives no longer block the web server; JSON replies are escaped. A
+  backup too large to restore drops maps or is refused, and a restore
+  changes nothing unless every file was staged.
+- Wi-Fi: the OLED and glasses Add Wi-Fi forms refuse `"` (one saved a
+  different password), and every interface refuses control characters in a
+  saved network's name or password. A connect started from the web,
+  Bluetooth or MQTT no longer reads console keystrokes. After a timed-out
+  `closeespnow`, Wi-Fi commands no longer stop the driver under ESP-NOW.
+- MQTT: a slow MQTT command no longer freezes the main loop, and a long base
+  topic no longer overflows memory.
+- Storage and camera: a key read error no longer replaces the capture key,
+  which made sealed captures unreadable, and the time-anchor file survives a
+  full filesystem. `capture` and `images` use the storage they name, a card
+  mounted after boot is used, and a recording is reported saved only when
+  complete and plays at real speed. A failed camera start no longer turns
+  camera auto-start off, and on display builds a video recording holds off
+  idle power-save.
+- LLM and Edge Impulse: loads and unloads run one at a time as `llmload` and
+  `llmunload`, `llmmaxcontext` limits every load, and a model with an
+  inconsistent tokenizer is refused. Edge Impulse (host-tested only) takes its
+  input geometry from the model and serializes inference.
+- ESP-NOW: a lost rekey is retried, then the session dropped after about 6 s;
+  it used to block encrypted sends until a reboot. Two devices browsing each
+  other no longer wedge on "busy", large replies no longer hold up
+  heartbeats, metadata changes are pushed to subscribed peers, and timers
+  survive the 49.7-day wrap. Bond sync completes with a manifest over 64 KB
+  (the XIAO default's is about 70 KB), and the OLED bonded-peer editor sends
+  real commands.
+- Bluetooth: `blesend`, `blestream` and `bleevent` read their first argument
+  again, the web page's per-client Kick disconnects that client, `closeble`
+  reports a server that could not stop, plaintext commands no longer stall
+  other connections, and `fileread ... bin` sends raw binary on the first
+  connection. On the P4X-EYE, a companion reset while the ring is busy no
+  longer forces the Bluetooth host down.
+- Ring and health: a 2.2.9 ring's history page is acknowledged only after
+  Health accepted it. A stored day that cannot be opened is merged into, not
+  replaced, and a corrupt day no longer stops later sweeps until a reboot.
+- G2 glasses: background updates draw only on their own page and taps act on
+  the rows shown, so a stale row can no longer start a recording or a delete.
+  Files actions use full paths without blocking the queue, Automations show
+  every trigger type, QuickNote cleans up partial saves, and notes saved to
+  internal flash stay reachable after a card is inserted.
+- OLED: Map waypoint and track actions take effect, the automation wizard
+  keeps commands up to 128 characters (they were cut at 32), actions report
+  refusals, an unpair is saved and drops the peer's keys, the pair-request
+  dialog no longer locks the display, and menus stop reading the account file
+  every frame. Display commands from other interfaces no longer garble a
+  frame being drawn, `oledenabled on` turns the display on, and the saved
+  brightness survives a reboot.
+
+### Removed
+- The MJPEG `/api/sensors/camera/stream` endpoint (poll
+  `/api/sensors/camera/frame`); automatic power mode and camera auto-capture,
+  which never worked; `eiinputsize`. Their saved values are ignored.
+- `oledrequireauth`, its settings row and `oledmode unified`;
+  `/login/setsession` and `/api/notice`; the Bluetooth stream-control
+  characteristic; `debugringbridge` (saved debug settings that name it still
+  load); the retired ESP-NOW sensor broadcast.
+- Unused code, including the experimental ESP-IDF Bluetooth host (`BLE_IDF`),
+  the ring bridge experiment and an unused second login check.
 
 ### Verification scope
 - Earlier XIAO hardware tests passed verified HTTPS chat to Mingus, a second
@@ -53,6 +275,34 @@ Ongoing fixes in the separate review worktree are not included.
 - Consolidated-source build and host verification are recorded in
   `docs/CONSOLIDATION_0.99.98.md`. The combined P4-to-OpenClaw voice path still
   needs hardware qualification; this checkpoint does not claim that test.
+- Merged tree: 259 of the 262 registered host suites passed with ASan/UBSan
+  (the three browser suites need Node.js and were reported disabled), and all
+  51 web UI tests passed. Each review fix has a host suite or source check
+  that fails without it. The xiao-default, qtpy-maps-test and p4x_eye builds
+  succeeded.
+- Image sizes: xiao-default 5,933,248 bytes (51,008 bytes of app headroom,
+  down from 78,912 in 0.99.97.4), qtpy-maps-test 3,736,448 bytes, p4x_eye
+  6,679,072 bytes (746,976 bytes free).
+- No device pass was run on the merged build. Each half's own build had a
+  short pass on 2026-10-13. The first (XIAO, P4X-EYE) confirmed the serial
+  lockout, the ban-reason, forced-password, rank and `imagedelete` fixes, the
+  IP ban list, camera storage arguments and the OLED brightness after a
+  reboot. The second (XIAO, QT Py, P4X-EYE) confirmed encrypted ESP-NOW text,
+  rekeying with its retry and recovery, the metadata text rule and push,
+  bonded commands streaming back, bond sync with a 70 KB manifest, the
+  Bluetooth and OLED command fixes, the waypoint refusal and `ringcontrol`.
+- Not exercised on hardware: the web pages, the P4 camera, the G2 lens pages,
+  gamepad-driven OLED pages, the bonded-peer file gate, phone-side Bluetooth,
+  the ring, MQTT with a broker, Edge Impulse, factory reset, OTA recovery, the
+  Wi-Fi connect budget with unreachable networks, and the follow-up changes
+  made on the merged tree, such as the Bluetooth, display and ESP-NOW
+  lockouts.
+- Known gaps: a second replayed rekey within the 5 s reply grace can
+  desynchronize a pair; replayed key-exchange hellos still rewrite the peer
+  identity file; Bond page device JSON is not escaped; a card not mounted during
+  `factoryreset` keeps the old accounts' folders, which pass to the new owner; a
+  microphone recording does not yet block unmounting the card; `outble` and
+  `oledenabled` are not admin-only; the user guide is not yet updated.
 
 ## [0.99.97.4] - 2026-10-12
 
