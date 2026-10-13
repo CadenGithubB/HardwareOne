@@ -104,21 +104,28 @@ struct STTSpeakerLabel {
 // (TL spkstg lines), then reset. No-op without a model.
 void sttSpeakerProfileLog();
 bool sttSpeakerBegin(STTLocalSession* session, size_t maxSamples, STTSpeakerStatus* status);
-// Background labelling: after sttSpeakerBegin, a priority-1 task on core 1
-// (PSRAM stack, single-core trunk) labels submitted phrases while the STT worker
-// is idle, so captions never wait for it. Submit copies the centre window the
-// model uses (<= 96 KB) into one of 4 slots; false = all slots busy (phrase
-// skipped, counted). The task logs TL spk / spkt / spke (embedding) lines.
-// sttSpeakerEnd stops the task and frees the speaker model (before the session is reset
-// or parked); the next run loads it again and starts with fresh labels.
-bool sttSpeakerSubmit(STTLocalSession* session, uint32_t seq, const int16_t* pcm, size_t samples);
+// Background labelling: a priority-1 task on core 1 owns the speaker model.
+// Text is published before submission. Submit waits for one of four fixed PCM
+// slots in cancellation-aware slices, for at most 30 s, then copies the centre
+// window (<= 96 KB). Optional canWait(control.context) is consulted only when
+// no slot is immediately available: false preserves capture headroom by ending
+// the wait. True means background handling, including a terminal unknown on
+// cancellation/timeout/audio pressure; false means no background worker and permits
+// inline fallback. A busy worker must never fall through to concurrent inline use.
+// End requests cooperative stop and joins the current embed before freeing any
+// queues/model; queued jobs are discarded. It may wait longer than the admission
+// deadline because an active ESP-DL embed cannot safely be force-deleted.
+bool sttSpeakerSubmit(STTLocalSession* session, uint32_t seq, const int16_t* pcm, size_t samples,
+                      const STTLocalControl& control = {}, bool (*canWait)(void*) = nullptr);
 void sttSpeakerEnd(STTLocalSession* session);
 // Labels for the transcript writer (the STT worker): true while a background task labels phrases.
 bool sttSpeakerBackground(STTLocalSession* session);
 // One finished label (non-blocking): speaker -1 = phrase skipped/failed (write it unlabelled).
 bool sttSpeakerTakeLabel(STTLocalSession* session, uint32_t* seq, int8_t* speaker);
-// Wait (bounded) until every submitted phrase has a label; before the session ends.
-void sttSpeakerDrain(STTLocalSession* session, uint32_t timeoutMs);
+// Wait for submitted work, bounded by timeoutMs and cancellation. This does not
+// free/cancel a live worker; consume available results, then call End to join it.
+void sttSpeakerDrain(STTLocalSession* session, uint32_t timeoutMs,
+                     const STTLocalControl& control = {});
 bool sttSpeakerLabel(STTLocalSession* session, const int16_t* pcm, size_t samples, STTSpeakerLabel* out);
 
 // Single-worker backend lifetime: one task uses a session at a time. Reset
@@ -157,11 +164,11 @@ class STTLocalSession {
   friend STTLocalCallBudget sttLocalCallBudget(size_t, const STTLocalSession*);
   friend bool sttSpeakerBegin(STTLocalSession*, size_t, STTSpeakerStatus*);
   friend bool sttSpeakerLabel(STTLocalSession*, const int16_t*, size_t, STTSpeakerLabel*);
-  friend bool sttSpeakerSubmit(STTLocalSession*, uint32_t, const int16_t*, size_t);
+  friend bool sttSpeakerSubmit(STTLocalSession*, uint32_t, const int16_t*, size_t, const STTLocalControl&, bool (*)(void*));
   friend void sttSpeakerEnd(STTLocalSession*);
   friend bool sttSpeakerBackground(STTLocalSession*);
   friend bool sttSpeakerTakeLabel(STTLocalSession*, uint32_t*, int8_t*);
-  friend void sttSpeakerDrain(STTLocalSession*, uint32_t);
+  friend void sttSpeakerDrain(STTLocalSession*, uint32_t, const STTLocalControl&);
 };
 
 // Cheap availability check for the configured, fixed model path; does not load

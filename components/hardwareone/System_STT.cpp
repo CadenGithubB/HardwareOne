@@ -33,20 +33,22 @@ size_t sttPsramFree();  // host builds: the test harness supplies free PSRAM
 
 // Continuous-session latency features (measured on the P4 with the 15x5
 // model, speech end -> caption ~3.6 s -> ~1.7 s together with the runtime's
-// HW1_STT_RESIDENT_MODEL). Each is a compile-time switch, default ON (the
-// measured design); a features file or -D may set one to 0, which restores
-// that part of the earlier behaviour exactly. They apply to every continuous
-// session (Dictation, QuickNote, the Transcription page and Conversate).
+// HW1_STT_RESIDENT_MODEL). Capture-time features and early drafts remain on.
+// Tail trimming and its speculative finals are now opt-in: the default keeps
+// every sample of a closed phrase, including quiet word endings. A features
+// file or -D can select the legacy policy for controlled comparisons. These
+// choices apply to Dictation, QuickNote, Transcription and Conversate.
 
 // Log-mel rows are computed while a phrase is still being captured; the final
 // call only computes the rows after the cache and runs CMVN + quantize.
 #ifndef HW1_STT_CAPTURE_FEATURES
 #define HW1_STT_CAPTURE_FEATURES 1
 #endif
-// A phrase closed by a pause or the session end is inferred only up to its
-// voiced end + 200 ms (published positions and the saved text are unchanged).
+// Preserve the complete captured phrase by default. The old voiced-end +
+// 200 ms shortcut can remove quiet endings even after capture retained them.
+// Keeping the tail costs extra final inference time, without delaying drafts.
 #ifndef HW1_STT_TRIM_SILENCE
-#define HW1_STT_TRIM_SILENCE 1
+#define HW1_STT_TRIM_SILENCE 0
 #endif
 // Needs HW1_STT_TRIM_SILENCE: once a phrase's trimmed input is captured and
 // its pause will close it, its final is computed early and published when
@@ -116,6 +118,7 @@ struct STTRun {
   char text[STT_MAX_TEXT + 1] = {};
   uint8_t textHead = 0;
   uint32_t acknowledgedSequence = 0;
+  STTSpeakerSnapshot speakers;
   STTDraft draft;  // live mode: provisional text of the utterance in progress
 };
 static portMUX_TYPE gSTTMux = portMUX_INITIALIZER_UNLOCKED;
@@ -160,6 +163,7 @@ static void sttClearTextLocked() {
   for (size_t i = 0; i < sizeof(gSTT.draft.text); ++i) d[i] = 0;
   gSTT.draft.sequence = 0;
   ++gSTT.draft.version;
+  gSTT.speakers = STTSpeakerSnapshot{};
 }
 
 // Terminal results have bounded retention. Re-check the original session at
@@ -655,9 +659,13 @@ struct StreamSlot {
   uint32_t feGen = 0;
   size_t feRows = 0;      // rows of that cache valid for this phrase
 #endif
+  // Boundary provenance for cross-phrase diagnostics; these fields do not
+  // change the PCM or the segmenter's decisions. VAD counts are estimates.
+  size_t voicedSamples = 0, overlapBefore = 0;
+  bool continuation = false;
+  hw1::stt::SegmentEnd endKind = hw1::stt::SegmentEnd::Pause;
 #if HW1_STT_TRIM_SILENCE
   size_t voicedEnd = 0;   // SpeechSegment::voiced_end_samples
-  hw1::stt::SegmentEnd endKind = hw1::stt::SegmentEnd::Pause;
 #endif
 #if HW1_STT_SPECULATIVE_FINAL
   uint32_t specId = 0;    // speculative request this phrase matched (0: none)
@@ -791,6 +799,22 @@ static bool sttStreamCancelled(void* context) {
   portEXIT_CRITICAL(&gSTTMux);
   return failed || sttCancelled(&run.token);
 }
+#if HW1_STT_SPEAKER_LABELS
+// Speaker admission may wait while capture continues, but must give the STT
+// worker back as soon as another final is queued. With the current Busy slot
+// and one Ready slot this still leaves a Free audio slot for the next close;
+// waiting until all slots fill would already risk a dropped captured phrase.
+static bool sttSpeakerCanWait(void* context) {
+  auto& run = *static_cast<StreamRun*>(context);
+  bool canWait = true;
+  portENTER_CRITICAL(&gSTTMux);
+  for (const auto& slot : run.slots) {
+    if (slot.state == StreamSlotState::Ready) { canWait = false; break; }
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+  return canWait;
+}
+#endif
 // A draft is only provisional text. Abandon it (the runtime checks between
 // model stages) as soon as a finished segment is queued, so a final result
 // never waits behind a whole draft of a long utterance.
@@ -993,9 +1017,12 @@ static bool sttQueueSegment(StreamRun& run) {
   slot->start = segment->start_sample;
   slot->end = segment->end_sample;
   slot->forced = segment->end == hw1::stt::SegmentEnd::HardLimit;
+  slot->voicedSamples = segment->new_voiced_samples;
+  slot->overlapBefore = segment->overlap_before_samples;
+  slot->continuation = segment->continuation;
+  slot->endKind = segment->end;
 #if HW1_STT_TRIM_SILENCE
   slot->voicedEnd = segment->voiced_end_samples;
-  slot->endKind = segment->end;
 #endif
 #if HW1_STT_SHORT_CLOSE
   slot->pauseEnd = segment->end == hw1::stt::SegmentEnd::Pause;
@@ -1571,12 +1598,59 @@ static void sttFeatureStop(StreamRun& run) {
 }
 #endif
 #if HW1_STT_SPEAKER_LABELS
+// Only the STT worker publishes speaker metadata; readers copy it under the
+// broker lock. A late result may update a retained phrase, never resurrect one
+// dropped from the bounded history, cancelled, or owned by another run.
+static void sttSpeakerPendingLocked(uint32_t sequence) {
+  auto& history = gSTT.speakers;
+  if (!history.available) return;
+  if (history.count == STT_SPEAKER_HISTORY) {
+    memmove(history.entries, history.entries + 1,
+            (STT_SPEAKER_HISTORY - 1) * sizeof(history.entries[0]));
+    --history.count;
+  }
+  history.entries[history.count++] = STTSpeakerEntry{sequence, -1, false};
+  ++history.version;
+}
+static void sttPublishSpeaker(STTToken token, uint32_t sequence, int8_t speaker) {
+  portENTER_CRITICAL(&gSTTMux);
+  if (gSTT.snapshot.token == token && !gSTT.cancelRequested) {
+    auto& history = gSTT.speakers;
+    for (size_t i = 0; i < history.count; ++i) {
+      auto& entry = history.entries[i];
+      if (entry.sequence != sequence) continue;
+      if (!entry.ready || entry.speaker != speaker) {
+        entry.speaker = speaker;
+        entry.ready = true;
+        ++history.version;
+      }
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+}
+static void sttFinishSpeakers(STTToken token) {
+  portENTER_CRITICAL(&gSTTMux);
+  if (gSTT.snapshot.token == token && !gSTT.cancelRequested) {
+    auto& history = gSTT.speakers;
+    for (size_t i = 0; i < history.count; ++i) {
+      if (!history.entries[i].ready) {
+        history.entries[i].ready = true; // Bounded drain expired: unknown.
+        ++history.version;
+      }
+    }
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+}
 // Speaker labels: saved transcript lines wait (up to kLabelWaitMs) for their phrase's speaker label from the background
 // task, then go out strictly in sequence as "[Person N] text" (plain text when the phrase was skipped, the label
 // is late, or the session ends). Only this worker writes the transcript; the labelling task only posts labels.
 namespace {
 constexpr size_t kLabelledLines = 8;
-constexpr uint32_t kLabelWaitMs = 10000;
+// Speaker work may lag while recognition owns the cores. Keep saved lines
+// pending through the bounded queue wait and final drain instead of erasing
+// their chance of receiving a late label after only 10 seconds.
+constexpr uint32_t kLabelWaitMs = 60000;
 struct LabelledLine {
   uint32_t seq = 0, queuedMs = 0;
   int8_t speaker = -1;
@@ -1597,6 +1671,7 @@ void sttLabelledPump(LabelledTranscript& lt, STTLocalSession& session, Transcrip
   uint32_t seq = 0;
   int8_t speaker = -1;
   while (sttSpeakerTakeLabel(&session, &seq, &speaker)) {
+    sttPublishSpeaker(token, seq, speaker);
     for (size_t i = 0; i < lt.count; ++i) {
       LabelledLine& l = lt.lines[(lt.head + i) % kLabelledLines];
       if (l.seq == seq) { l.speaker = speaker; l.labelled = true; break; }
@@ -1609,7 +1684,7 @@ void sttLabelledPump(LabelledTranscript& lt, STTLocalSession& session, Transcrip
     if (!(l.labelled || flushAll || now - l.queuedMs > kLabelWaitMs)) break;
     char line[STT_MAX_TEXT + 1];
     size_t n = 0;
-    if (l.labelled && l.speaker >= 0) n = size_t(snprintf(line, sizeof(line), "[Person %d] ", int(l.speaker) + 1));
+    if (l.len && l.labelled && l.speaker >= 0) n = size_t(snprintf(line, sizeof(line), "[Person %d] ", int(l.speaker) + 1));
     const size_t take = std::min<size_t>(l.len, STT_MAX_TEXT - n);
     memcpy(line + n, l.text, take);
     n += take;
@@ -1644,6 +1719,10 @@ bool sttLabelledQueue(LabelledTranscript& lt, STTLocalSession& session, Transcri
   l.seq = seq;
   l.queuedMs = millis();
   l.len = uint16_t(strnlen(text, STT_MAX_TEXT));
+  // Blank finals advance the transcript sequence without writing a line.
+  // Keep their markers behind earlier pending labels, but never wait for a
+  // speaker result that a blank final deliberately does not request.
+  l.labelled = l.len == 0;
   memcpy(l.text, text, l.len);
   ++lt.count;
   return true;
@@ -1742,6 +1821,12 @@ static void sttContinuousWorker(void*) {
           // The optional speaker model, after the STT model and LM are resident.
           STTSpeakerStatus sp;
           (void)sttSpeakerBegin(&backendSession, kStreamSamples, &sp);
+          portENTER_CRITICAL(&gSTTMux);
+          if (gSTT.snapshot.token == run.token && !gSTT.cancelRequested) {
+            gSTT.speakers.available = sp.ready;
+            ++gSTT.speakers.version;
+          }
+          portEXIT_CRITICAL(&gSTTMux);
           ESP_LOGI("STT", "TL spk_load ok=%d why=%s bytes=%u psram_used=%u int_used=%ld ms=%lu th=%.2f fixture_cos=%.4f psram_free=%u",
                    sp.ready ? 1 : 0, sp.why[0] ? sp.why : "none", unsigned(sp.bytes), unsigned(sp.psramUsed),
                    sp.internalUsed, (unsigned long)sp.loadMs, double(sp.threshold), double(sp.fixtureCos),
@@ -1773,7 +1858,9 @@ static void sttContinuousWorker(void*) {
 #endif
     for (;;) {
 #if HW1_STT_SPEAKER_LABELS
-      if (labelledLines.count) sttLabelledPump(labelledLines, backendSession, transcript, run.token, false);
+      // Consume label results even when saving is disabled or its line ring
+      // could not be allocated. UI metadata never depends on the saved copy.
+      sttLabelledPump(labelledLines, backendSession, transcript, run.token, false);
 #if HW1_STT_SPEAKER_DIAGNOSTICS
       // Per-layer speaker trunk profile (TL spkstg), 240 s after capture start: the
       // conversation playlists end by ~233 s and the harness reads 20 s past the end.
@@ -1989,17 +2076,15 @@ static void sttContinuousWorker(void*) {
       // A stop immediately after a forced boundary can leave fewer than20 ms
       // of real audio. Pad only the backend copy; published positions retain
       // the exact captured extent, so no samples disappear or move in time.
+      size_t retainedSamples = slot->samples;
 #if HW1_STT_TRIM_SILENCE
-      // Trim the inference copy of a pause/session-end phrase to its voiced
-      // end + 200 ms (no qualifying voiced run: keep it whole).
-      size_t trimmedSamples = slot->samples;
+      // Opt-in legacy trim for controlled comparisons. The default forwards
+      // the full captured phrase, including all of its quiet ending.
       if (slot->endKind != hw1::stt::SegmentEnd::HardLimit && slot->voicedEnd &&
           slot->voicedEnd + kTrimTailSamples < slot->samples)
-        trimmedSamples = slot->voicedEnd + kTrimTailSamples;
-      const size_t inferenceSamples = std::max(trimmedSamples, size_t(320));
-#else
-      const size_t inferenceSamples = std::max(slot->samples, size_t(320));
+        retainedSamples = slot->voicedEnd + kTrimTailSamples;
 #endif
+      const size_t inferenceSamples = std::max(retainedSamples, size_t(320));
       if (inferenceSamples > slot->samples)
         memset(slot->pcm + slot->samples, 0, (inferenceSamples - slot->samples) * sizeof(int16_t));
 #if HW1_STT_CAPTURE_FEATURES
@@ -2056,25 +2141,37 @@ static void sttContinuousWorker(void*) {
       if (stats.featureCachedFrames) { ++run.feCachedFinals; run.feCachedRows += stats.featureCachedFrames; }
       portEXIT_CRITICAL(&gSTTMux);
 #endif
+      bool acceptedFinal = false;
       bool acceptedText = false;
       uint32_t tlPubMs = 0;  // millis() (esp_timer) at the mailbox publish
       if (!sttStreamCancelled(&run)) {
         if (!ok || !memchr(text, '\0', sizeof(text))) {
           sttStreamFail(run, error[0] ? error : "Continuous transcription failed");
         } else {
+          // A successful blank result completes its audio segment, but is not
+          // a text turn. Preserve only its ordered transcript sequence marker;
+          // do not write a line or let its audio seed speaker clusters.
+          const bool hasText = text[strspn(text, " \t\r\n")] != '\0';
           portENTER_CRITICAL(&gSTTMux);
-          if (!gSTT.cancelRequested && !run.failed && gSTT.snapshot.pendingTexts < kTextQueueDepth) {
-            auto& chunk = gSTTChunks[(gSTT.textHead + gSTT.snapshot.pendingTexts) % kTextQueueDepth];
-            chunk.sequence = slot->sequence;
-            chunk.startSample = slot->start;
-            chunk.endSample = slot->end;
-            chunk.forcedBoundary = slot->forced;
-            memcpy(chunk.text, text, sizeof(chunk.text));
-            ++gSTT.snapshot.pendingTexts;
+          if (!gSTT.cancelRequested && !run.failed &&
+              (!hasText || gSTT.snapshot.pendingTexts < kTextQueueDepth)) {
             ++gSTT.snapshot.segmentsCompleted;
-            gSTT.snapshot.textReady = true;
-            acceptedText = true;
-            tlPubMs = millis();
+            acceptedFinal = true;
+            if (hasText) {
+              auto& chunk = gSTTChunks[(gSTT.textHead + gSTT.snapshot.pendingTexts) % kTextQueueDepth];
+              chunk.sequence = slot->sequence;
+#if HW1_STT_SPEAKER_LABELS
+              sttSpeakerPendingLocked(slot->sequence);
+#endif
+              chunk.startSample = slot->start;
+              chunk.endSample = slot->end;
+              chunk.forcedBoundary = slot->forced;
+              memcpy(chunk.text, text, sizeof(chunk.text));
+              ++gSTT.snapshot.pendingTexts;
+              gSTT.snapshot.textReady = true;
+              acceptedText = true;
+              tlPubMs = millis();
+            }
             if (gSTT.draft.sequence && gSTT.draft.sequence <= slot->sequence) {
               // The final text supersedes the draft for this utterance.
               volatile char* d = gSTT.draft.text;
@@ -2087,8 +2184,9 @@ static void sttContinuousWorker(void*) {
             snprintf(gSTT.snapshot.error, sizeof(gSTT.snapshot.error), "%s", "STT text queue full; receiver must acknowledge results");
           }
           portEXIT_CRITICAL(&gSTTMux);
-          if (acceptedText) {
+          if (acceptedFinal) {
 #if HW1_STT_PUBLISH_WAKE
+            // Empty finals also wake readers so superseded drafts disappear.
             // Wake the consumer first (Conversate's caption pump) so the
             // console write below is not part of its publish-to-read time.
             // Outside gSTTMux: the woken task may preempt this one.
@@ -2096,40 +2194,51 @@ static void sttContinuousWorker(void*) {
 #endif
 #ifdef ESP_PLATFORM
             // t is the publish instant (the mailbox write above).
-            ESP_LOGI("STT", "TL pub seq=%lu t=%lu", (unsigned long)slot->sequence, (unsigned long)tlPubMs);
+            if (acceptedText)
+              ESP_LOGI("STT", "TL pub seq=%lu t=%lu", (unsigned long)slot->sequence, (unsigned long)tlPubMs);
+            else
+              ESP_LOGI("STT", "TL empty seq=%lu", (unsigned long)slot->sequence);
 #else
             (void)tlPubMs;
 #endif
           }
         }
       }
-      // Save the whole accepted chunk once, before UI splitting/ACK can erase
-      // its mailbox copy. Only this inference worker performs transcript I/O.
+      // Save each accepted final in sequence, before UI splitting/ACK can
+      // erase its mailbox copy. Blank finals use a zero-length marker: append
+      // advances sequence without creating a file or writing a blank line.
+      // Only this inference worker performs transcript I/O.
       uint32_t saveStartMs = 0, saveEndMs = 0;
-      if (acceptedText) {
+      if (acceptedFinal) {
         saveStartMs = millis();
+        const char* transcriptText = acceptedText ? text : "";
 #if HW1_STT_SPEAKER_LABELS
-        // With background labelling the line waits for its "[Person N]" (sttLabelledPump).
-        if (!(sttSpeakerBackground(&backendSession) &&
-              sttLabelledQueue(labelledLines, backendSession, transcript, run.token, slot->sequence, text)))
+        // Blank markers share this ordered ring so they cannot overtake a
+        // preceding text line that is still waiting for its speaker label.
+        if (!(transcriptOptions.enabled && sttSpeakerBackground(&backendSession) &&
+              sttLabelledQueue(labelledLines, backendSession, transcript, run.token, slot->sequence, transcriptText)))
 #endif
         {
-          (void)transcript.append(slot->sequence, text, strlen(text));
+          (void)transcript.append(slot->sequence, transcriptText, strlen(transcriptText));
           sttPublishTranscript(run.token, transcript.snapshot());
         }
         saveEndMs = millis();
       }
 #if HW1_STT_SPEAKER_LABELS
       if (acceptedText) {
-        // Label the published phrase (after publish and save, so captions
-        // are never delayed by it); the voiced-trimmed audio, as inferred.
+        // Label the already-published phrase. If its background queue fills,
+        // yield to that worker before accepting more work; the current caption
+        // remains visible while later finals may wait. Stop that wait when
+        // another audio final queues, preserving capture headroom. Use recognition's audio,
+        // excluding the minimum-length zero padding used by its frontend.
         // Hand the phrase to the background labelling task; inline only if it has none.
         STTSpeakerLabel spk;
-        if (sttSpeakerSubmit(&backendSession, slot->sequence, slot->pcm, trimmedSamples)) {
-        } else if (sttSpeakerLabel(&backendSession, slot->pcm, trimmedSamples, &spk)) {
+        if (sttSpeakerSubmit(&backendSession, slot->sequence, slot->pcm, retainedSamples, control, sttSpeakerCanWait)) {
+        } else if (sttSpeakerLabel(&backendSession, slot->pcm, retainedSamples, &spk)) {
+          sttPublishSpeaker(run.token, slot->sequence, spk.speaker);
           ESP_LOGI("STT", "TL spk seq=%lu spk=%d sim=%.3f new=%d tent=%d samples=%u fe_us=%lu nn_us=%lu head_us=%lu us=%lu",
                    (unsigned long)slot->sequence, int(spk.speaker), double(spk.similarity), spk.created ? 1 : 0,
-                   spk.tentative ? 1 : 0, unsigned(trimmedSamples), (unsigned long)spk.featureUs,
+                   spk.tentative ? 1 : 0, unsigned(retainedSamples), (unsigned long)spk.featureUs,
                    (unsigned long)spk.trunkUs, (unsigned long)spk.headUs, (unsigned long)spk.totalUs);
           // sections of the same phrase: features (fft, mel+log, norm+window), int16 in, trunk, out, SAP, softmax+pool, fc, cluster
           ESP_LOGI("STT", "TL spkt seq=%lu frames=%u crop=%d fft=%lu mel=%lu norm=%lu q=%lu nn=%lu dq=%lu sap=%lu pool=%lu fc=%lu clu=%lu",
@@ -2137,7 +2246,12 @@ static void sttContinuousWorker(void*) {
                    (unsigned long)spk.melUs, (unsigned long)spk.normUs, (unsigned long)spk.quantUs, (unsigned long)spk.trunkUs,
                    (unsigned long)spk.dequantUs, (unsigned long)spk.sapUs, (unsigned long)spk.poolUs, (unsigned long)spk.fcUs,
                    (unsigned long)spk.clusterUs);
+        } else {
+          sttPublishSpeaker(run.token, slot->sequence, -1);
         }
+        // Submission can wait for space. Deliver labels completed during that
+        // wait immediately, including when this was the final phrase.
+        sttLabelledPump(labelledLines, backendSession, transcript, run.token, false);
       }
 #endif
       sttWipe(text, sizeof(text));
@@ -2173,6 +2287,16 @@ static void sttContinuousWorker(void*) {
                  unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)),
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                  unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+        // Expose the actual final input extent even when trimming is disabled.
+        ESP_LOGI("STT", "TL input seg=%lu captured=%u retained=%u inference=%u trim=%d",
+                 (unsigned long)slot->sequence, unsigned(slot->samples),
+                 unsigned(retainedSamples), unsigned(inferenceSamples), HW1_STT_TRIM_SILENCE);
+        // 0=pause, 1=hard limit, 2=session end. Offsets are absolute 16 kHz
+        // sample positions, so the log shows gaps/overlap and continuations.
+        ESP_LOGI("STT", "TL boundary seg=%lu start=%llu end=%llu kind=%u continuation=%d overlap=%u vad_voiced=%u",
+                 (unsigned long)slot->sequence, (unsigned long long)slot->start,
+                 (unsigned long long)slot->end, unsigned(slot->endKind), slot->continuation ? 1 : 0,
+                 unsigned(slot->overlapBefore), unsigned(slot->voicedSamples));
         // Blocking yields (timed vTaskDelay(1)) and total yield time in n.
         ESP_LOGI("STT", "TL yield seg=%lu blocks=%u yield_us=%lu", (unsigned long)slot->sequence,
                  unsigned(stats.inferenceBlocks), (unsigned long)stats.inferenceYieldUs);
@@ -2188,7 +2312,7 @@ static void sttContinuousWorker(void*) {
         ESP_LOGI("STT", "TL trim seg=%lu samples=%u inf=%u voiced_end=%u end=%u cut_ms=%u",
                  (unsigned long)slot->sequence, unsigned(slot->samples), unsigned(inferenceSamples),
                  unsigned(slot->voicedEnd), unsigned(slot->endKind),
-                 unsigned((slot->samples - trimmedSamples) / (STT_SAMPLE_RATE / 1000)));
+                 unsigned((slot->samples - retainedSamples) / (STT_SAMPLE_RATE / 1000)));
 #endif
 #if HW1_STT_SPECULATIVE_FINAL
         // This phrase matched a speculative request: promoted (s = that run's
@@ -2231,10 +2355,10 @@ static void sttContinuousWorker(void*) {
     }
 #if HW1_STT_SPEAKER_LABELS
     // The last phrases' labels (bounded wait), then every held transcript line, in order.
-    if (labelledLines.count) {
-      if (!sttStreamCancelled(&run)) sttSpeakerDrain(&backendSession, 6000);
-      sttLabelledPump(labelledLines, backendSession, transcript, run.token, true);
-    }
+    if (!sttStreamCancelled(&run))
+      sttSpeakerDrain(&backendSession, 30000, {&run, sttStreamCancelled, nullptr});
+    sttLabelledPump(labelledLines, backendSession, transcript, run.token, true);
+    sttFinishSpeakers(run.token);
 #endif
   } while (false);
   // On normal stop the producer has already joined; on failure/cancel its
@@ -2531,6 +2655,19 @@ bool sttReadDraft(STTOwner owner, STTToken token, STTDraft* out) {
   if (ok) *out = gSTT.draft;
   portEXIT_CRITICAL(&gSTTMux);
   if (!sttOwnerLive(owner)) { sttWipe(out, sizeof(*out)); return false; }
+  return ok;
+}
+
+bool sttReadSpeakers(STTOwner owner, STTToken token, STTSpeakerSnapshot* out) {
+  if (out) *out = STTSpeakerSnapshot{};
+  sttReapTerminal();
+  if (!out || !sttOwnerLive(owner)) return false;
+  portENTER_CRITICAL(&gSTTMux);
+  const bool ok = sttMatchesLocked(owner, token) &&
+      gSTT.snapshot.continuous && !gSTT.cancelRequested;
+  if (ok) *out = gSTT.speakers;
+  portEXIT_CRITICAL(&gSTTMux);
+  if (!sttOwnerLive(owner)) { *out = STTSpeakerSnapshot{}; return false; }
   return ok;
 }
 

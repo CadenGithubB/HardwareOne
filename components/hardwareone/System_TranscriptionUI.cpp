@@ -119,6 +119,19 @@ const char* commandSession(const String& input) {
         doc["draft"] = text; doc["draftVersion"] = draftVersion;
       }
       TranscriptionUI::clear(text, sizeof(text));
+      STTSpeakerSnapshot speakers;
+      if (dictationAppReadSpeakers(lease, &speakers)) {
+        doc["speakerVersion"] = speakers.version;
+        doc["speakersAvailable"] = speakers.available;
+        JsonArray labels = doc["speakers"].to<JsonArray>();
+        for (size_t i = 0; i < speakers.count; ++i) {
+          const auto& entry = speakers.entries[i];
+          JsonObject label = labels.add<JsonObject>();
+          label["sequence"] = entry.sequence;
+          label["speaker"] = entry.speaker;
+          label["ready"] = entry.ready;
+        }
+      }
     } else if (op == "ack" && args.count() == 5) {
       uint32_t seq, offset, length;
       if (!TranscriptionUI::parseUnsigned(args.arg(2).c_str(), seq) ||

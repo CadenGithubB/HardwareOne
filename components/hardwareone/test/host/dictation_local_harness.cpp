@@ -122,6 +122,7 @@ static STTOwner brokerOwner;
 static TranscriptOptions brokerTranscriptOptions;
 static AudioSource brokerRequestedSource=AUDIO_SRC_NONE;
 static STTSnapshot broker;
+static STTSpeakerSnapshot brokerSpeakers;
 static std::deque<STTTextChunk> chunks;
 static std::function<void()> beginHook,ackHook,runActiveHook;
 bool sttBeginContinuous(STTOwner owner,STTToken* token,char* error,size_t cap,const TranscriptOptions* options,AudioSource requested){
@@ -146,6 +147,10 @@ bool sttRequestFinish(STTOwner o,STTToken t){
 bool sttSnapshot(STTOwner o,STTToken t,STTSnapshot* out){
  if(!same(o,brokerOwner)||t!=broker.token||!displaySessionStillLive(o.source,o.epoch))return false;
  *out=broker;out->pendingTexts=chunks.size();return true;
+}
+bool sttReadSpeakers(STTOwner o,STTToken t,STTSpeakerSnapshot* out){
+ *out={};if(!same(o,brokerOwner)||t!=broker.token||!displaySessionStillLive(o.source,o.epoch))return false;
+ *out=brokerSpeakers;return true;
 }
 bool sttReadChunk(STTOwner o,STTToken t,STTTextChunk* out){
  if(!same(o,brokerOwner)||t!=broker.token||chunks.empty()||!displaySessionStillLive(o.source,o.epoch))return false;
@@ -194,7 +199,7 @@ static void reset(){
  nowMs=1;wakeCount=readyChecks=beginCalls=cancelCalls=finishCalls=ackCalls=0;
  sessions={{SOURCE_G2_GLASSES,3},{SOURCE_LOCAL_DISPLAY,4}};
  workerOK=modelReady=beginOK=ackOK=true;micBusy=srBusy=gMicRunning=false;halOwner.clear();
- beginHook=ackHook=runActiveHook=sessionHook=nullptr;broker=STTSnapshot{};chunks.clear();cleanup.clear();stops.clear();cancelEvents.clear();
+ beginHook=ackHook=runActiveHook=sessionHook=nullptr;brokerSpeakers={};broker=STTSnapshot{};chunks.clear();cleanup.clear();stops.clear();cancelEvents.clear();
 }
 static void stagePi(uint64_t id,const std::string& text){
  gDict.state=DictationState::WAITING;gDict.owner=id;gDict.requestHostEpoch=9;
@@ -669,7 +674,40 @@ static void testAppOptions() {
  assert(dictationAppBegin(SOURCE_WEB,7,&app)&&micInitCalls==0&&recorderStarts==1&&recorderSource==AUDIO_SRC_NONE);
 #endif
 }
-int main(){testAppLocalLifecycle();testWorkerSupervision();testAppSnapshotAndRecovery();testAppDelivery();testAppControls();testAppAdmission();testConsumerIdentity();testAppPurpose();testAppOptions();testPiMailbox();
+static void testAppSpeakers() {
+ reset();sessions.insert({SOURCE_WEB,7});sessions.insert({SOURCE_WEB,8});
+#if ENABLE_LOCAL_STT
+ ready();
+#endif
+ DictationAppLease app;assert(dictationAppBegin(SOURCE_WEB,7,&app));
+ STTSpeakerSnapshot out;assert(dictationAppReadSpeakers(app,&out)&&!out.available&&!out.count);
+#if ENABLE_LOCAL_STT
+ dictationProcessLocal();
+ brokerSpeakers.available=true;brokerSpeakers.version=1;brokerSpeakers.count=1;
+ brokerSpeakers.entries[0]={1,-1,false};
+ produce(1,"first voice");dictationProcessLocal();
+ assert(dictationAppReadSpeakers(app,&out)&&out.available&&out.count==1&&!out.entries[0].ready);
+ char text[64];DictationTextReceipt receipt;
+ assert(dictationAppPeekText(app,text,sizeof(text),&receipt));
+ assert(dictationAppCommitText(app,receipt,receipt.length));dictationProcessLocal();
+ assert(chunks.empty()); // Labels can arrive after the text has been ACKed.
+ brokerSpeakers.entries[0]={1,2,true};++brokerSpeakers.version;dictationProcessLocal();
+ assert(dictationAppReadSpeakers(app,&out)&&out.entries[0].speaker==2&&out.entries[0].ready);
+ auto other=app;other.epoch=8;assert(!dictationAppReadSpeakers(other,&out)&&!out.count);
+ other=app;other.exchange++;assert(!dictationAppReadSpeakers(other,&out)&&!out.count);
+ other=app;other.purpose=DictationAppPurpose::QuickNote;assert(!dictationAppReadSpeakers(other,&out)&&!out.count);
+ terminal();dictationProcessLocal();assert(!gLocalDict.exchange);
+ assert(dictationAppReadSpeakers(app,&out)&&out.entries[0].speaker==2); // Retained terminal lease.
+ sessions.erase({SOURCE_WEB,7});assert(!dictationAppReadSpeakers(app,&out)&&!out.count);
+ sessions.insert({SOURCE_WEB,7});assert(dictationAppCancel(app));
+ assert(dictationAppReadSpeakers(app,&out)&&!out.count&&!out.available);
+ DictationAppLease next;assert(dictationAppBegin(SOURCE_WEB,7,&next));
+ assert(!dictationAppReadSpeakers(app,&out)&&!out.count);
+ assert(dictationAppReadSpeakers(next,&out)&&!out.available&&!out.count);
+#endif
+ assert(!dictationAppReadSpeakers(app,nullptr));
+}
+int main(){testAppSpeakers();testAppLocalLifecycle();testWorkerSupervision();testAppSnapshotAndRecovery();testAppDelivery();testAppControls();testAppAdmission();testConsumerIdentity();testAppPurpose();testAppOptions();testPiMailbox();
 #if ENABLE_LOCAL_STT
  testLocalSaving();testLocal();
 #else

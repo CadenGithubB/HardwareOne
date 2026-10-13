@@ -1400,6 +1400,26 @@ It builds a synthetic 20k-word / 400k-bigram / 400k-trigram LM and 20 s of
 synthetic logits. Timings are host-only; the P4 has no double-precision FPU, so
 score arithmetic there is software double and must be measured on the device.
 
+## G2 transcription input routing
+
+`test_g2_text_navigation.py --sanitize` runs the production decoded TextEvent
+and SysEvent navigation branches with actual callback-slot publication and
+ownership checks. It verifies directional callbacks for ordinary and multi-text
+pages, stale/pending/overlay rejection, and exclusion of ordinary list pages.
+The RTOS queue is a controlled boundary; this does not simulate BLE delivery or
+prove that the glasses firmware emits gestures for a particular layout.
+`test_g2_transcription.py --sanitize` exercises the full page and requires one
+capturing header among four children. `test_g2_transcription_wire.py --sanitize`
+decodes the production CREATE payload to require capture flags `1,0,0,0`, while
+checking CRCs, single-fragment sizes and the observed ATT write limit.
+
+```sh
+python3 components/hardwareone/test/host/test_g2_text_navigation.py --sanitize
+python3 components/hardwareone/test/host/test_g2_transcription.py --sanitize
+python3 components/hardwareone/test/host/test_g2_transcription_wire.py --sanitize
+python3 components/hardwareone/test/host/test_g2_text_page_ready.py --sanitize
+```
+
 ## Local STT latency features
 
 These standalone scripts compile the production broker, runtime, segmenter and
@@ -1430,6 +1450,17 @@ and transcript tests.
 `test_stt_runtime.py` builds the one-shot path with all of those switches off,
 so every off path still compiles.
 
+`test_stt_continuous.py --speakers --sanitize` additionally enables the production
+speaker metadata path with controlled background results. It checks labels arriving
+after text ACK, labels without transcript saving, bounded history eviction,
+owner/epoch/token refusal, cancellation, terminal drain and expiry, and live labels
+when the saved-line ring cannot allocate. The existing saved transcript writer is
+exercised for ordered `[Person N]` prefixes. `test_dictation_local.py --sanitize`
+checks the App lease's delayed/terminal label snapshots for local, CM5 and disabled
+builds; `test_transcription_ui_adapter.py --sanitize` checks their private JSON
+response. Speaker model accuracy and on-device label latency require hardware.
+
+
 `test_quartznet_cache.py` runs the runtime twice: per-call models
 (`quartznet_cache_harness.cpp`, `HW1_STT_RESIDENT_MODEL=0`) and the resident
 model (`quartznet_cache_harness_resident.cpp`, the firmware default). The latter
@@ -1445,3 +1476,14 @@ hook hands out returns through `ps_free` on every destructor path, prebuilt-styl
 blocks are accepted, PSRAM refusal falls back to internal RAM and is counted.
 Without a staged override (`tools/p4/prepare_sdk.sh`) it exits 77 (skipped).
 `test_g2_tl_send.py` checks the Conversate TL send bookkeeping.
+
+
+`test_g2_settings_protocol.py --sanitize` checks the complete production settings
+codec, golden vectors, malformed/truncated payloads, exact version strings,
+correlated oneof bodies, explicit zero and nanopb-elided wear OFF.
+`test_g2_settings_command.py --sanitize` exercises the production command,
+RX owner and exact-generation sender with simulated BLE boundaries: request IDs,
+fresh reads, qualified default OFF, idle renderer/native readiness, ACK matching,
+connection rollover, cold discovery, and preservation of other firmware guards.
+Real G2 settings acceptance is tracked separately in
+`docs/G2_WEAR_DETECTION_23214.md`.

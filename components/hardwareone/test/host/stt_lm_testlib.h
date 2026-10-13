@@ -96,6 +96,7 @@ struct Logits {
 struct Reference {
     const Spec& spec;
     std::set<std::string> hot;
+    double strength=1.0; // external-score multiplier, independent of search implementation
     // Closest rank decision at any beam cut or the final pick. Only ties with
     // identical LM parts (identical arithmetic, e.g. equal logits) count as
     // exact; real-arithmetic coincidences via different paths round by ULPs
@@ -119,7 +120,7 @@ struct Reference {
     struct State { double lm=0; std::string c2, c1="<s>"; };
     void complete(State& s, const std::string& w) const {
         const double log10p=known(w) ? p(s.c2,s.c1,w) : double(spec.unk);
-        s.lm+=double(spec.alpha)*std::log(10.0)*log10p+double(spec.beta)+(hot.count(w) ? double(spec.bonus) : 0.0);
+        s.lm+=strength*(double(spec.alpha)*std::log(10.0)*log10p+double(spec.beta)+(hot.count(w) ? double(spec.bonus) : 0.0));
         s.c2=s.c1; s.c1=known(w) ? w : "<unk>";
     }
     State state(const std::string& prefix, std::string* partial) const {
@@ -132,7 +133,7 @@ struct Reference {
     double finalLm(const std::string& prefix) const {
         std::string partial; State s=state(prefix,&partial);
         if(!partial.empty())complete(s,partial);
-        return s.lm+double(spec.alpha)*std::log(10.0)*p(s.c2,s.c1,"</s>");
+        return s.lm+strength*(double(spec.alpha)*std::log(10.0)*p(s.c2,s.c1,"</s>"));
     }
     size_t exactTies=0; // structural ties decided by prefix bytes
     void cut(double sa, double la, double sb, double lb) {

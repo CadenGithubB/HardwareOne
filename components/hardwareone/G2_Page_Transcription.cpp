@@ -26,6 +26,7 @@ extern void g2ShowAppsMenu();
 
 namespace {
 constexpr size_t kTailBytes = 1024, kEntries = 8, kWindowBytes = 512;
+constexpr uint32_t kTextPollMs = 800, kStatusPollMs = 1000;
 // The right column is two text children, each refreshed by its own
 // single-write UPDATE_TEXT. The glasses negotiate MTU 244 (241-byte writes)
 // and UPDATE_TEXT framing adds ~43 B, so each child stays <=180 B (a 200-byte
@@ -36,12 +37,50 @@ constexpr size_t kBodyMax = 150;
 constexpr G2ContainerGeom kHeaderGeom = {280, 8, 288, 88};
 constexpr G2ContainerGeom kBodyGeom = {280, 100, 288, 180};
 constexpr uint32_t kHeaderId = 97, kBodyId = 98;
+// Keep four text children and exactly one input owner: the one-line header
+// captures scrolls while the three body bands update independently. With no
+// capture owner the glasses display text but emit no page-navigation gestures.
+// The old two-capture canary and nine-child failure do not prohibit one owner.
+// Each complete band UPDATE fits one BLE write, including UTF-8/newlines.
+constexpr size_t kLiveLines = 8, kLiveChildren = 4, kLinesPerBand = 3;
+constexpr size_t kLiveLineBytes = (kSidebarUpdateMax - (kLinesPerBand - 1)) / kLinesPerBand;
+constexpr size_t kPhraseCount = 16, kLayoutLines = 96;
+// Anchors name retained source bytes, not display offsets that labels can move.
+struct LiveAnchor {
+  uint32_t offset = 0;
+  bool draft = false, valid = false;
+};
+struct LiveSourceSpan {
+  uint16_t begin = 0, end = 0, source = 0;
+  bool draft = false;
+};
+struct Phrase {
+  uint32_t sequence = 0;
+  uint16_t begin = 0, end = 0;
+  int8_t speaker = -1;
+};
+static const char* const kLiveNames[kLiveChildren] = {
+  "trlh", "trl0", "trl1", "trl2"
+};
+static const G2ContainerGeom kLiveGeoms[kLiveChildren] = {
+  {8, 8, 560, 28}, {8, 44, 560, 84}, {8, 128, 560, 84}, {8, 212, 560, 56}
+};
+// Small nonempty CREATE content avoids a blank display while the queued page
+// commits. Actual text follows via bounded UPDATEs, keeping CREATE <=2 fragments.
+static const char* const kLiveInitial[kLiveChildren] = {
+  "Live text", "Loading text...", " ", " "
+};
 enum class View : uint8_t { Home, Live, List, File };
 enum class Op : uint8_t { None, Start, Status, Next, Ack, Stop, Cancel, List, Read, Save, Mic };
 struct Entry { char name[64] = {}, path[128] = {}; uint32_t bytes = 0; };
 struct State {
   uint32_t epoch = 0, request = 0, requestView = 0, viewGeneration = 0;
   uint32_t lastPoll = 0, listOffset = 0, listNext = 0, fileOffset = 0, fileNext = 0;
+  uint32_t lastTextPoll = 0, lastStatusPoll = 0;
+  uint32_t tailOrigin = 0, liveNavigation = 0;
+  LiveAnchor liveAnchor, livePrevious, liveNext;
+  bool followTail = true;
+  uint8_t liveFirstLine = 0, liveNewestLine = 0;
   uint32_t sequence = 0, receiptOffset = 0, receiptLength = 0;
   uint32_t elapsedMs = 0, history[32] = {};
   uint8_t historyCount = 0;
@@ -56,7 +95,12 @@ struct State {
   char exchange[17] = {}, message[96] = {}, saveError[64] = {}, micSource[8] = "auto";
   char tail[kTailBytes + 1] = {}, fileText[kWindowBytes + 1] = {}, path[128] = {};
   char draft[kWindowBytes + 1] = {};  // live mode: words still being spoken
-  uint32_t draftVersion = 0;
+  uint32_t draftVersion = 0, lastNavigationMs = 0;
+  bool navigationSeen = false;
+  G2TapKind lastNavigation = G2_TAP_PAGE_NEXT;
+  bool speakersAvailable = false;
+  uint8_t phraseCount = 0;
+  Phrase phrases[kPhraseCount];
   Entry entries[kEntries];
 };
 static portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
@@ -73,7 +117,16 @@ static uint16_t pageOffsets[9];
 static View renderedView = View::File;
 static char renderedRows[12][72];
 static size_t renderedCount = 0;
-static uint32_t renderedEpoch = 0;
+static uint32_t renderedEpoch = 0, renderedGeneration = 0, renderedMenuGen = 0;
+EXT_RAM_BSS_ATTR static char labelledText[2048];
+// One source span per phrase or unlabelled gap, plus the draft. The mapping
+// stays with the lens-applier scratch; navigation receives only three anchors.
+EXT_RAM_BSS_ATTR static LiveSourceSpan liveSources[2 * kPhraseCount + 2];
+static size_t liveSourceCount = 0;
+EXT_RAM_BSS_ATTR static uint16_t liveLineOffsets[kLayoutLines + 1];
+EXT_RAM_BSS_ATTR static char layoutLines[kLayoutLines][kSidebarUpdateMax + 1];
+EXT_RAM_BSS_ATTR static char liveChildren[kLiveChildren][kSidebarUpdateMax + 1];
+EXT_RAM_BSS_ATTR static char renderedLive[kLiveChildren][kSidebarUpdateMax + 1];
 EXT_RAM_BSS_ATTR static char renderedText[sizeof(textPage)];
 
 static bool ownerLive(uint32_t epoch) {
@@ -91,9 +144,160 @@ static void resetLocked(uint32_t epoch) {
   state.epoch = epoch; state.request = request; state.dirty = true;
 }
 static void appendTailLocked(const char* text, size_t length, bool separator) {
-  if (separator && state.tail[0]) TranscriptionUI::appendRecent(state.tail, sizeof(state.tail), " ", 1);
+  const size_t oldLength = strlen(state.tail);
+  const size_t space = separator && oldLength ? 1 : 0;
+  // A draft has no phrase identity in this protocol. Once a final arrives,
+  // fall back to that committed boundary instead of reusing its draft offset
+  // in a later utterance. Known committed anchors remain exact across reflow.
+  if (!state.followTail && state.liveAnchor.valid && state.liveAnchor.draft)
+    state.liveAnchor = {state.tailOrigin + uint32_t(oldLength + space), false, true};
+  if (space) TranscriptionUI::appendRecent(state.tail, sizeof(state.tail), " ", 1);
   TranscriptionUI::appendRecent(state.tail, sizeof(state.tail), text, length);
-  if (state.view == View::Live) state.page = 255; // follow newly accepted words
+  const size_t newLength = strlen(state.tail);
+  const size_t trimmed = oldLength + space + length - newLength;
+  state.tailOrigin += trimmed;
+  size_t kept = 0;
+  for (size_t i = 0; i < state.phraseCount; ++i) {
+    auto phrase = state.phrases[i];
+    if (phrase.end <= trimmed) continue;
+    phrase.begin = phrase.begin > trimmed ? phrase.begin - trimmed : 0;
+    phrase.end -= trimmed;
+    state.phrases[kept++] = phrase;
+  }
+  state.phraseCount = kept;
+  if (!kept || state.phrases[kept - 1].sequence != state.sequence) {
+    if (kept == kPhraseCount) {
+      memmove(state.phrases, state.phrases + 1, (kPhraseCount - 1) * sizeof(Phrase));
+      --kept;
+    }
+    auto& phrase = state.phrases[kept++];
+    phrase = Phrase{}; phrase.sequence = state.sequence;
+    phrase.begin = newLength - length;
+    state.phraseCount = kept;
+  }
+  state.phrases[kept - 1].end = newLength;
+}
+
+static void buildLabelledText(const State& s) {
+  size_t used = 0;
+  labelledText[0] = '\0'; liveSourceCount = 0;
+  auto append = [&](const char* text, size_t length) {
+    length = std::min(length, sizeof(labelledText) - used - 1);
+    length = TranscriptionUI::completePrefix(text, length);
+    memcpy(labelledText + used, text, length); used += length; labelledText[used] = '\0';
+  };
+  auto source = [&](size_t begin, size_t end, bool draft) {
+    const size_t out = used;
+    append((draft ? s.draft : s.tail) + begin, end - begin);
+    if (used > out && liveSourceCount < sizeof(liveSources) / sizeof(liveSources[0]))
+      liveSources[liveSourceCount++] = {uint16_t(out), uint16_t(used), uint16_t(begin), draft};
+  };
+  int lastSpeaker = -2;
+  auto phrase = [&](size_t begin, size_t end, int speaker) {
+    while (begin < end && s.tail[begin] == ' ') ++begin;
+    while (end > begin && s.tail[end - 1] == ' ') --end;
+    if (begin == end) return;
+    // Unknown is not a shared identity: keep each waiting phrase distinct.
+    const bool sameRun = used && speaker >= 0 && speaker == lastSpeaker;
+    if (used) append(sameRun ? " " : "\n", 1);
+    if (!sameRun) {
+      char tag[24];
+      if (speaker >= 0) snprintf(tag, sizeof(tag), "Person %d: ", speaker + 1);
+      else snprintf(tag, sizeof(tag), "?: "); // unassigned text, never a guessed person
+      append(tag, strlen(tag));
+    }
+    source(begin, end, false); lastSpeaker = speaker;
+  };
+  const size_t tailLength = strlen(s.tail);
+  if (!s.speakersAvailable) source(0, tailLength, false);
+  else {
+    size_t cursor = 0;
+    for (size_t i = 0; i < s.phraseCount; ++i) {
+      const auto& item = s.phrases[i];
+      if (item.begin < cursor || item.end > tailLength || item.end < item.begin) continue;
+      // Text whose phrase metadata was evicted still belongs on screen,
+      // but must not inherit the first retained speaker's identity.
+      if (item.begin > cursor) phrase(cursor, item.begin, -1);
+      phrase(item.begin, item.end, item.speaker);
+      cursor = item.end;
+    }
+    if (cursor < tailLength) phrase(cursor, tailLength, -1);
+  }
+  if (s.draft[0]) {
+    if (used) append("\n", 1);
+    append("~ ", 2); // live words are provisional and have no speaker assignment
+    source(0, strlen(s.draft), true);
+  }
+}
+
+static LiveAnchor anchorAtLine(const State& s, size_t line) {
+  const size_t out = liveLineOffsets[line];
+  for (size_t i = 0; i < liveSourceCount; ++i) {
+    const auto& span = liveSources[i];
+    if (out < span.end) {
+      const uint32_t offset = span.source + (out > span.begin ? out - span.begin : 0);
+      return {offset + (span.draft ? 0 : s.tailOrigin), span.draft, true};
+    }
+  }
+  return {};
+}
+
+static size_t lineAtAnchor(const State& s, const LiveAnchor& anchor, size_t lines) {
+  if (!anchor.valid || !lines) return 0;
+  const uint32_t relative = anchor.draft ? anchor.offset : anchor.offset - s.tailOrigin;
+  // If the anchored words have left the bounded tail, stay at the oldest
+  // retained text. Unsigned subtraction also handles origin rollover.
+  if (!anchor.draft && int32_t(relative) < 0) return 0;
+  size_t out = anchor.draft ? strlen(labelledText) : 0;
+  for (size_t i = 0; i < liveSourceCount; ++i) {
+    const auto& span = liveSources[i];
+    if (span.draft != anchor.draft) continue;
+    const size_t length = span.end - span.begin;
+    out = span.end - 1;
+    if (relative < span.source + length) {
+      out = span.begin + (relative > span.source ? relative - span.source : 0);
+      break;
+    }
+  }
+  size_t line = 0;
+  while (line + 1 < lines && liveLineOffsets[line + 1] <= out) ++line;
+  return line;
+}
+
+// Word wrapping with complete UTF-8 characters and a separate byte bound for
+// transport. Wide glyphs count as two cells; malformed bytes stay bounded.
+static size_t splitLiveLines(const char* text) {
+  memset(layoutLines, 0, sizeof(layoutLines));
+  size_t count = 0;
+  const char* p = text;
+  while (*p && count < kLayoutLines) {
+    liveLineOffsets[count] = p - text;
+    auto& line = layoutLines[count++];
+    size_t bytes = 0, cols = 0, breakBytes = 0;
+    const char* wordBreak = nullptr;
+    while (*p && *p != '\n') {
+      const unsigned char lead = static_cast<unsigned char>(*p);
+      if (lead == '\r' || (lead < 32 && lead != '\t') || lead == 127) { ++p; continue; }
+      size_t width = lead < 0x80 ? 1 : (lead & 0xe0) == 0xc0 ? 2 :
+          (lead & 0xf0) == 0xe0 ? 3 : (lead & 0xf8) == 0xf0 ? 4 : 1;
+      for (size_t i = 1; i < width; ++i) {
+        if (!p[i] || !TranscriptionUI::continuation(static_cast<unsigned char>(p[i]))) { width = 1; break; }
+      }
+      const size_t cells = width >= 3 ? 2 : 1;
+      if (cols + cells > G2_TEXT_DEFAULT_COLS || bytes + width > kLiveLineBytes) {
+        if (wordBreak) { p = wordBreak; bytes = breakBytes; }
+        break;
+      }
+      if (lead == ' ' || lead == '\t') {
+        wordBreak = p + 1; breakBytes = bytes; line[bytes++] = ' ';
+      } else { memcpy(line + bytes, p, width); bytes += width; }
+      cols += cells; p += width;
+    }
+    line[bytes] = '\0';
+    if (*p == '\n') ++p;
+  }
+  liveLineOffsets[count] = p - text;
+  return count;
 }
 static void render();
 static void enqueueRender() {
@@ -111,7 +315,9 @@ static void enqueueRender() {
   }
 }
 static void changeViewLocked(View view) {
-  state.view = view; ++state.viewGeneration; state.page = 0; state.pages = 0; state.dirty = true;
+  state.view = view; state.navigationSeen = false; ++state.viewGeneration; state.page = 0; state.pages = 0; state.dirty = true;
+  state.followTail = true; state.liveAnchor = state.livePrevious = state.liveNext = LiveAnchor{};
+  ++state.liveNavigation;
 }
 static void exitText() {
   g2BumpMenuGen();
@@ -121,9 +327,29 @@ static void exitText() {
   enqueueRender();
 }
 static void navigateText(G2TapKind kind) {
+  const uint32_t now = millis();
   portENTER_CRITICAL(&stateMux);
+  // Both temples may mirror a ring scroll. A stable page no longer has a
+  // swap-in-flight window to absorb the second event from the same gesture.
+  if (state.view == View::Live) {
+    if (state.navigationSeen && state.lastNavigation == kind &&
+        static_cast<uint32_t>(now - state.lastNavigationMs) < 120) {
+      portEXIT_CRITICAL(&stateMux); return;
+    }
+    state.navigationSeen = true; state.lastNavigation = kind; state.lastNavigationMs = now;
+  }
   if (state.pending == Op::Read || state.queued == Op::Read) { portEXIT_CRITICAL(&stateMux); return; }
-  if (kind == G2_TAP_PAGE_NEXT) {
+  if (state.view == View::Live) {
+    if (kind == G2_TAP_PAGE_NEXT) {
+      state.liveAnchor = state.liveNext;
+      // Next at the newest visible position also explicitly resumes following
+      // after a label correction shrank an older anchored view to one page.
+      state.followTail = (state.liveFirstLine / kLiveLines + 1) * kLiveLines >= state.liveNewestLine;
+    } else if (state.liveFirstLine) {
+      state.liveAnchor = state.livePrevious; state.followTail = false;
+    }
+    ++state.liveNavigation;
+  } else if (kind == G2_TAP_PAGE_NEXT) {
     if (state.page + 1 < state.pages) ++state.page;
     else if (state.view == View::File && !state.eof) {
       if (state.historyCount == 32) {
@@ -152,6 +378,13 @@ static void render() {
   if (!ownerLive(renderState.epoch) || !identity.stillCurrent()) {
     renderState = State{}; renderedCount = 0; renderedEpoch = 0;
     TranscriptionUI::clear(renderedText, sizeof(renderedText));
+    TranscriptionUI::clear(labelledText, sizeof(labelledText));
+    for (auto& span : liveSources) span = LiveSourceSpan{};
+    liveSourceCount = 0;
+    memset(liveLineOffsets, 0, sizeof(liveLineOffsets));
+    TranscriptionUI::clear(reinterpret_cast<char*>(layoutLines), sizeof(layoutLines));
+    TranscriptionUI::clear(reinterpret_cast<char*>(liveChildren), sizeof(liveChildren));
+    TranscriptionUI::clear(reinterpret_cast<char*>(renderedLive), sizeof(renderedLive));
     TranscriptionUI::clear(textBody, sizeof(textBody));
     TranscriptionUI::clear(textPage, sizeof(textPage));
     TranscriptionUI::clear(sidebar, sizeof(sidebar));
@@ -161,10 +394,73 @@ static void render() {
   }
   const auto& s = renderState;
   bool shown = false;
+  const uint32_t menuGeneration = g2CurrentMenuGen();
+  const bool samePresentation = renderedEpoch == s.epoch && renderedView == s.view &&
+      renderedGeneration == s.viewGeneration && renderedMenuGen == menuGeneration;
   const size_t tailLen = strlen(s.tail);
   const bool needSpace = tailLen && s.draft[0] && s.tail[tailLen - 1] != ' ';
   snprintf(liveText, sizeof(liveText), "%s%s%s", s.tail, needSpace ? " " : "", s.draft);
-  if (s.view == View::Live || s.view == View::File) {
+  if (s.view == View::Live) {
+    buildLabelledText(s);
+    const size_t lineCount = splitLiveLines(labelledText[0] ? labelledText : "Waiting for text");
+    const size_t pages = std::max<size_t>(1, (lineCount + kLiveLines - 1) / kLiveLines);
+    const size_t newestLine = lineCount > kLiveLines ? lineCount - kLiveLines : 0;
+    const size_t firstLine = s.followTail ? newestLine :
+        std::min(lineAtAnchor(s, s.liveAnchor, lineCount), newestLine);
+    const size_t selected = firstLine == newestLine ? pages - 1 : firstLine / kLiveLines;
+    // A source anchor can land between page boundaries after regrouping.
+    // Adjacent grid boundaries keep every intervening line reachable.
+    const size_t previousLine = firstLine ? (firstLine - 1) / kLiveLines * kLiveLines : 0;
+    const size_t nextLine = std::min((firstLine / kLiveLines + 1) * kLiveLines, newestLine);
+    portENTER_CRITICAL(&stateMux);
+    const bool current = state.epoch == s.epoch && state.viewGeneration == s.viewGeneration &&
+        state.liveNavigation == s.liveNavigation;
+    if (current) {
+      state.page = selected; state.pages = pages;
+      state.liveFirstLine = firstLine; state.liveNewestLine = newestLine;
+      // Keep the original reading anchor during reflow, rather than moving
+      // it back to each newly wrapped line and gradually drifting backwards.
+      if (s.followTail || !s.liveAnchor.valid) state.liveAnchor = anchorAtLine(s, firstLine);
+      state.livePrevious = anchorAtLine(s, previousLine);
+      state.liveNext = anchorAtLine(s, nextLine);
+    } else state.dirty = true;
+    portEXIT_CRITICAL(&stateMux);
+    if (!current) { renderState = State{}; return; }
+    memset(liveChildren, 0, sizeof(liveChildren));
+    snprintf(liveChildren[0], sizeof(liveChildren[0]), "Live %u/%u | scroll=page  2x=back",
+             unsigned(selected + 1), unsigned(pages));
+    for (size_t i = 0; i < kLiveLines && firstLine + i < lineCount; ++i) {
+      auto& band = liveChildren[1 + i / kLinesPerBand];
+      size_t used = strlen(band);
+      if (i % kLinesPerBand) band[used++] = '\n';
+      const size_t bytes = strlen(layoutLines[firstLine + i]);
+      memcpy(band + used, layoutLines[firstLine + i], bytes + 1);
+    }
+    bool pending = false;
+    const bool ready = g2TextPageReady(exitText, navigateText, &pending);
+    if (samePresentation && ready && identity.stillCurrent()) {
+      shown = true;
+      for (size_t i = 0; i < kLiveChildren; ++i) {
+        if (strcmp(renderedLive[i], liveChildren[i]) == 0) continue;
+        if (identity.stillCurrent() && g2UpdateMixedTextChild(kLiveNames[i], 110 + i, liveChildren[i]))
+          memcpy(renderedLive[i], liveChildren[i], sizeof(renderedLive[i]));
+        else shown = false;  // retry only unsuccessful bands, never tear down a live page
+      }
+    } else if (!pending && identity.stillCurrent()) {
+      G2TextChildSpec children[kLiveChildren];
+      for (size_t i = 0; i < kLiveChildren; ++i) {
+        children[i] = {kLiveNames[i], kLiveInitial[i], static_cast<uint32_t>(110 + i), kLiveGeoms[i], i == 0};
+      }
+      if (g2ShowMultiTextPage(children, kLiveChildren, exitText, navigateText)) {
+        for (size_t i = 0; i < kLiveChildren; ++i)
+          snprintf(renderedLive[i], sizeof(renderedLive[i]), "%s", kLiveInitial[i]);
+        renderedView = s.view; renderedEpoch = s.epoch; renderedCount = 0;
+        renderedGeneration = s.viewGeneration; renderedMenuGen = menuGeneration;
+      }
+      // Admission is asynchronous. Patch the initial placeholders only once
+      // the exact presentation/callback pair is committed.
+    }
+  } else if (s.view == View::File) {
     const char* text = s.view == View::Live ? liveText :
         s.message[0] ? s.message : s.fileText;
     bool truncated = false;
@@ -182,7 +478,7 @@ static void render() {
     else snprintf(title, sizeof(title), "Saved text @%lu%s", (unsigned long)s.fileOffset, s.eof ? " (end)" : "");
     G2TextPageChrome chrome = {title, "scroll=page  2x=back", "scroll=more  2x=back", nullptr,
                               text[0] ? "" : "Waiting for text"};
-    const bool sameView = renderedEpoch == s.epoch && renderedView == s.view;
+    const bool sameView = samePresentation;
     if (pager.pageCount > 1) {
       // Build the bounded page without submitting it twice. The shared renderer
       // itself enqueues a swap, so deduplicate before calling it.
@@ -240,7 +536,7 @@ static void render() {
     }
     const G2TextChildSpec header = {"trhead", sidebar, kHeaderId, kHeaderGeom, false};
     const G2TextChildSpec text = {"transcription", body, kBodyId, kBodyGeom, false};
-    const bool sameRows = renderedEpoch == s.epoch && renderedView == s.view && renderedCount == n &&
+    const bool sameRows = samePresentation && g2LensGetState().containerReady && renderedCount == n &&
         memcmp(renderedRows, rows, n * sizeof(rows[0])) == 0;
     if (identity.stillCurrent()) {
       // Only the text half changes while the rows are unchanged; the list
@@ -265,6 +561,7 @@ static void render() {
       snprintf(renderedBody, sizeof(renderedBody), "%s", body);
     }
   }
+  if (shown) { renderedGeneration = s.viewGeneration; renderedMenuGen = menuGeneration; }
   if (!shown) { portENTER_CRITICAL(&stateMux); state.dirty = true; portEXIT_CRITICAL(&stateMux); }
   renderState = State{};
 }
@@ -326,6 +623,13 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
       snprintf(state.message, sizeof(state.message), "%s", doc["reason"] | "Unavailable");
     if (op == Op::Start) {
       state.tail[0] = '\0'; state.message[0] = '\0'; state.ackPending = false;
+      state.draft[0] = '\0'; state.draftVersion = 0; state.phraseCount = 0;
+      state.sequence = state.receiptOffset = state.receiptLength = 0;
+      state.tailOrigin = 0; state.followTail = true;
+      state.liveAnchor = state.livePrevious = state.liveNext = LiveAnchor{};
+      ++state.liveNavigation;
+      for (auto& phrase : state.phrases) phrase = Phrase{};
+      state.speakersAvailable = false;
       if (!state.exchange[0]) {
         state.recoveringStart = true; state.queued = Op::None;
         snprintf(state.message, sizeof(state.message), "Checking start status before continuing");
@@ -342,17 +646,30 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
       const char* text = doc["sttText"] | "";
       const size_t length = strlen(text);
       if (length && length <= kWindowBytes && length == (doc["length"] | 0u)) {
-        state.sequence = doc["sequence"] | 0u; state.receiptOffset = doc["offset"] | 0u;
-        state.receiptLength = length;
-        appendTailLocked(text, length, state.receiptOffset == 0);
+        const uint32_t sequence = doc["sequence"] | 0u, offset = doc["offset"] | 0u;
+        const bool duplicate = state.sequence == sequence && state.receiptOffset == offset && state.receiptLength == length;
+        state.sequence = sequence; state.receiptOffset = offset; state.receiptLength = length;
+        if (!duplicate) appendTailLocked(text, length, state.receiptOffset == 0);
         state.ackPending = true;
       } else snprintf(state.message, sizeof(state.message), "Invalid text receipt");
     }
     if (strcmp(id, state.exchange) == 0 && !state.exiting) {
+      state.speakersAvailable = doc["speakersAvailable"] | state.speakersAvailable;
+      for (JsonObjectConst label : doc["speakers"].as<JsonArrayConst>()) {
+        if (!(label["ready"] | false)) continue;
+        const uint32_t sequence = label["sequence"] | 0u;
+        const int speaker = label["speaker"] | -1;
+        for (size_t i = 0; i < state.phraseCount; ++i)
+          if (state.phrases[i].sequence == sequence)
+            state.phrases[i].speaker = speaker >= 0 && speaker < 16 ? speaker : -1;
+      }
       const uint32_t version = doc["draftVersion"] | 0u;
       if (version != state.draftVersion) {
         state.draftVersion = version;
-        snprintf(state.draft, sizeof(state.draft), "%s", doc["draft"] | "");
+        const char* draft = doc["draft"] | "";
+        if (!draft[0] && !state.followTail && state.liveAnchor.valid && state.liveAnchor.draft)
+          state.liveAnchor = {state.tailOrigin + uint32_t(strlen(state.tail)), false, true};
+        snprintf(state.draft, sizeof(state.draft), "%s", draft);
       }
     }
     state.nextPoll = false;
@@ -478,8 +795,17 @@ void g2TranscriptionTick() {
       else { resetLocked(0); portEXIT_CRITICAL(&stateMux); return; }
     } else if (state.queued != Op::None) { op = state.queued; state.queued = Op::None; }
     else if (state.ackPending) op = Op::Ack;
-    // Live mode: poll twice as often while a session runs so drafts move.
-    else if ((uint32_t)(now - state.lastPoll) >= (state.active ? 500u : 1000u)) op = state.nextPoll ? Op::Next : Op::Status;
+    else if (onPage && state.view == View::Live && state.active && state.exchange[0]) {
+      // Fetch drafts every 800 ms independently of status. Serial command
+      // work may delay either poll; when both are due, serve the older
+      // deadline first so neither can starve. ACKs do not postpone a poll.
+      const uint32_t textElapsed = now - state.lastTextPoll;
+      const uint32_t statusElapsed = now - state.lastStatusPoll;
+      const bool textDue = textElapsed >= kTextPollMs;
+      const bool statusDue = statusElapsed >= kStatusPollMs;
+      if (textDue && (!statusDue || textElapsed - kTextPollMs >= statusElapsed - kStatusPollMs)) op = Op::Next;
+      else if (statusDue) op = Op::Status;
+    } else if ((uint32_t)(now - state.lastPoll) >= (state.active ? 500u : 1000u)) op = state.nextPoll ? Op::Next : Op::Status;
     switch (op) {
       case Op::Start: snprintf(command, sizeof(command), "transcription start"); break;
       case Op::Status: snprintf(command, sizeof(command), "transcription status%s%s", !state.recoveringStart && state.exchange[0] ? " " : "", state.recoveringStart ? "" : state.exchange); break;
@@ -495,7 +821,11 @@ void g2TranscriptionTick() {
           TranscriptionUI::nextMicSource(state.micSource, state.micPdm, state.micG2)); break;
       default: break;
     }
-    if (op != Op::None) { state.pending = op; state.requestView = state.viewGeneration; request = ++state.request; state.lastPoll = now; }
+    if (op != Op::None) {
+      state.pending = op; state.requestView = state.viewGeneration; request = ++state.request; state.lastPoll = now;
+      if (op == Op::Next || op == Op::Start) state.lastTextPoll = now;
+      if (op == Op::Status || op == Op::Start || op == Op::Stop) state.lastStatusPoll = now;
+    }
   }
   dirty = state.dirty;
   portEXIT_CRITICAL(&stateMux);
