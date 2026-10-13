@@ -216,7 +216,8 @@ static bool g2RingSetLowPowerDesired(G2RingDesiredState d) {
 // Command-layer doubles for the ring/health command handlers.
 static bool gCLIValidateOnly;
 static AuthContext execIdentity;  // identity installed for the running command
-static bool currentExecIsAdmin() { return isAdminUser(execIdentity.user); }
+// Read by the 0.99.97.4-era in-handler force-history check only.
+[[maybe_unused]] static bool currentExecIsAdmin() { return isAdminUser(execIdentity.user); }
 class CommandArgs {
  public:
   explicit CommandArgs(const String& input) {
@@ -464,8 +465,8 @@ int main() {
   CHECK(!healthInputHandler(0, 0, INPUT_BUTTON_B) && oledRequests.size() == 2);
 
   // Ring controls and the forced history refresh: web, OLED and CLI submit the
-  // same command under their own identity. The registry row (ringcontrol) or
-  // the healthstatus handler decides admin; nothing else does.
+  // same command under their own identity. The registry rows (ringcontrol,
+  // healthstatus force-history) decide admin; nothing else does.
   routeCommands = true;
   adminUser = false;
   AuthContext serial{};
@@ -501,8 +502,14 @@ int main() {
       "bob@display ringcontrol collection on", "bob@display ringcontrol lowpower on",
       "root@serial ringcontrol collection on", "root@serial ringcontrol lowpower on"}));
   CHECK(ringChanges.empty() && audit.empty());
-  // healthstatus force-history: the same handler refusal from every transport.
-  const std::string forceRefusal = "Error: admin required for forced history refresh";
+  // healthstatus force-history: its own admin row, so the registry refuses it
+  // from every transport before the handler runs (no audit of an execution).
+  const CommandEntry* forceRow = findRow("healthstatus force-history", matched);
+  CHECK(forceRow && forceRow->requiresAdmin && matched == std::strlen("healthstatus force-history"));
+  const CommandEntry* statusRow = findRow("healthstatus poll", matched);
+  CHECK(statusRow && !statusRow->requiresAdmin && matched == std::strlen("healthstatus"));
+  const std::string forceRefusal =
+      "Error: Admin access required for command 'healthstatus'. Contact an administrator.";
   r = request("action=history-force");
   CHECK(webRequests.back().line == "healthstatus force-history");
   CHECK(r.status == "403 Forbidden" && r.output == forceRefusal);
@@ -511,8 +518,26 @@ int main() {
   CHECK(oledRequests.back() == "healthstatus force-history" && lastOledResult == forceRefusal);
   CHECK(sHealthDeniedUntilMs != 0);
   CHECK(!registryExecute(serial, "healthstatus force-history", out) && out == forceRefusal);
-  CHECK(ringChanges.empty() && audit.size() == 3 && !audit[0].ok && !audit[1].ok && !audit[2].ok);
-  CHECK(audit[0].who == "alice@web" && audit[1].who == "bob@display" && audit[2].who == "root@serial");
+  gCLIValidateOnly = true;  // the validate pass is refused at the same row
+  CHECK(!registryExecute(serial, "healthstatus force-history", out) && out == forceRefusal);
+  gCLIValidateOnly = false;
+  CHECK(ringChanges.empty() && audit.empty());
+  CHECK(deniedCommands.size() == 10 &&
+        deniedCommands[6] == "alice@web healthstatus force-history" &&
+        deniedCommands[7] == "bob@display healthstatus force-history" &&
+        deniedCommands[8] == "root@serial healthstatus force-history");
+  // A line the registry matches only as plain `healthstatus` (double space)
+  // reaches the handler without the admin row: it is refused, never run.
+  CHECK(!registryExecute(serial, "healthstatus  force-history", out) && out.startsWith("Error"));
+  CHECK(ringChanges.empty());
+  // Only the registry's text is an admin refusal (403); any other refusal is
+  // the command's own (409), whatever its wording.
+  routeCommands = false; commandOk = false;
+  commandOutput = "Error: admin required for forced history refresh";
+  r = request("action=history-force");
+  CHECK(r.status == "409 Conflict" && r.output == "Error: admin required for forced history refresh");
+  routeCommands = true; commandOk = true; commandOutput = "SUCCESS: Health logging ON";
+  audit.clear();
 
   // A bad form value never reaches a command line; bad CLI arguments are errors.
   adminUser = true; audit.clear();
@@ -562,7 +587,7 @@ int main() {
   CHECK(audit[2].who == "bob@display" && audit[2].line == "ringcontrol collection off");
   CHECK(audit[4].who == "root@serial" && audit[4].line == "ringcontrol Collection Preserve");
   CHECK(audit[6].who == "bob@display" && audit[6].line == "healthstatus force-history");
-  CHECK(deniedCommands.size() == 6);
+  CHECK(deniedCommands.size() == 10);
   // A refusal that is not about the role keeps its own status and still flashes on OLED.
   ringAccepted = false;
   r = request("action=history-force");

@@ -49,7 +49,10 @@ bool initCamera(bool isRecovery = false);
 void stopCamera(bool isRecovery = false);
 
 // Stack-heavy power transitions run on a dedicated worker (see System_Camera_DVP.cpp).
-// G2 tap path uses *_Async; CLI / web use *_Sync so callers block until done.
+// UI adapters submit `opencamera async` / `closecamera async` through the
+// command executor (authorized, audited, cameraEnabled-gated); those use
+// *_Async and return once cam_pwr admitted the request. CLI / web use *_Sync
+// so callers block until done.
 typedef void (*CameraPowerPostHook)(void);
 void cameraPowerSetPostHook(CameraPowerPostHook hook);
 // Spawn cam_pwr task + queue on demand (idempotent). The worker cooperatively

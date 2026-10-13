@@ -12113,6 +12113,12 @@ bool espnowShutdownPending() {
   return gEspNowDeinitInProgress.load(std::memory_order_acquire);
 }
 
+// Initialized first, then the close flag: deinitEspNow raises the flag before
+// it clears `initialized`, so a reader mid-close never sees both false.
+bool espnowOwnsRadio() {
+  return isEspNowInitialized() || espnowShutdownPending();
+}
+
 // ESP-NOW deinit command
 const char* cmd_espnow_deinit(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();

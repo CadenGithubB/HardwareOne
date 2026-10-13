@@ -1924,12 +1924,11 @@ const char* cmd_healthstatus(const String& argsInput) {
     return "SUCCESS: R1 typed history refresh queued";
   }
   if (sub == "force-history") {
-    // Same identity, memoised — see System_Filesystem.cpp filesListingJsonForApp.
-    if (!currentExecIsAdmin())
-      return "Error: admin required for forced history refresh";
-    if (!g2RingRequestHistoryRefresh(true))
-      return "Error: forced history refresh not queued — ring/setup/profile may be unavailable";
-    return "SUCCESS: R1 forced typed history refresh queued";
+    // `healthstatus force-history` is its own admin registry row (below), so a
+    // well-formed line never reaches this handler. Only a line the registry
+    // matched as plain `healthstatus` (a tab or a double space before the
+    // verb) gets here, past no admin check: refuse it, never run it.
+    return "Error: force-history is an admin command; type it as 'healthstatus force-history'";
   }
   if (sub == "refresh-controls") {
     if (!g2RingRefreshControlStatus())
@@ -1999,6 +1998,18 @@ const char* cmd_healthstatus(const String& argsInput) {
            captureEncryptModeName(gSettings.captureEncryptMode),
            (gSensorLoggingRunning && gSensorLogSealed) ? " (active session sealed)" : "");
   return getDebugBuffer();
+}
+
+// `healthstatus force-history`: the admin freshness bypass for the typed
+// history refresh. Its registry row carries the admin flag, so authorizeCommand
+// refuses a non-admin (and the validate pass) on every transport before this
+// runs, with the registry's refusal text and record.
+static const char* cmd_healthstatus_forcehistory(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  (void)argsInput;
+  if (!g2RingRequestHistoryRefresh(true))
+    return "Error: forced history refresh not queued — ring/setup/profile may be unavailable";
+  return "SUCCESS: R1 forced typed history refresh queued";
 }
 #endif  // ENABLE_R1_HEALTH — cmd_healthstatus
 
@@ -2776,6 +2787,10 @@ const CommandEntry healthCommands[] = {
     "  history: normal typed history refresh; force-history: admin freshness bypass\n"
     "  refresh-controls: read low-power state; health collection has no proven GET and stays Unknown\n"
     "  BLE App / Web use healthstatus json; connect via ringconnect / Bluetooth page" },
+  // Longest-prefix lookup picks this row over `healthstatus`, so the admin rule
+  // for the forced refresh is the registry's, not the handler's.
+  { "healthstatus force-history", "R1 typed history refresh that bypasses the freshness window (admin)", true,
+    cmd_healthstatus_forcehistory, "Usage: healthstatus force-history" },
   { "healthlogmerge", "Byte-concatenate sensor logs in the given order: \"<out>\" \"<in1>\" \"<in2>\" ...", true, cmd_healthlogmerge,
     "Usage: healthlogmerge \"<output>\" \"<in1>\" \"<in2>\" [...]\n"
     "  OUTPUT FIRST — arg 0 is TRUNCATED. Inputs follow, in the order you want them.\n"

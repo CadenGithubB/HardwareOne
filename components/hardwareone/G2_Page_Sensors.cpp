@@ -67,7 +67,7 @@
 extern bool gOledRunning;
 #endif
 #if ENABLE_CAMERA_SENSOR
-#include "System_Camera_DVP.h"     // initCamera, stopCamera, gCameraRunning
+#include "System_Camera_DVP.h"     // gCameraRunning, cameraPowerSetPostHook
 #include "G2_Page_CameraSettings.h" // g2ShowCameraSettingsMenu
 #endif
 #if ENABLE_MICROPHONE
@@ -506,8 +506,10 @@ static SensorsLevel gSensorsLevel    = SENSORS_LEVEL_LIST;
 static size_t       gSensorsDetailIdx = 0;   // index into the LIST-level rows
 
 #if ENABLE_CAMERA_SENSOR
-// Set when CAM ON was queued to cam_pwr; cleared in g2SensorsOnCameraPowerDone.
-// Avoids "not connected" on Capture/Stream while initCamera() is still running.
+// Set when CAM ON was submitted (`opencamera async`); cleared by the cam_pwr
+// post-hook (g2SensorsOnCameraPowerDone) or by a refused start
+// (onCameraRuntimeDone). Avoids "not connected" on Capture/Stream while
+// initCamera() is still running.
 static bool sG2SensorsCamAsyncStartPending = false;
 #endif
 
@@ -1255,6 +1257,35 @@ static void onMicAutostartRuntimeDone(bool ok, const char* result,
 }
 #endif
 
+#if ENABLE_CAMERA_SENSOR
+// After `opencamera async` / `closecamera async` on cmd_exec. The camera owner
+// either admitted the power change to cam_pwr (its post-hook redraws once the
+// change completes) or refused it: camera disabled, not authorized, or the
+// power worker unavailable. cameraautostart is persisted only after admission,
+// so the saved preference never records a change the owner refused.
+// userData = (uintptr_t)1 if we wanted ON, else 0.
+static void onCameraRuntimeDone(bool ok, const char* result,
+                                const G2CmdCookie& cookie, void* userData) {
+  const bool wantOn = ((uintptr_t)userData) != 0;
+  const bool admitted = ok && !(result && (strncmp(result, "Error", 5) == 0 ||
+                                           strncmp(result, "ERROR", 5) == 0));
+  if (admitted) {
+    char line[32];
+    snprintf(line, sizeof(line), "cameraautostart %s", wantOn ? "on" : "off");
+    if (!g2SubmitHijackCommand(line, cookie, nullptr, nullptr)) {
+      DEBUG_G2F("[G2] Sensors: %s submit FAILED after camera admission", line);
+    }
+    return;
+  }
+  // Refused: no power change and no post-hook follow, so a start is no longer
+  // pending and the rows are refreshed here, through the lens applier.
+  if (wantOn) sG2SensorsCamAsyncStartPending = false;
+  DEBUG_G2F("[G2] Sensors: camera %s refused — skip cameraautostart (result='%s')",
+            wantOn ? "start" : "stop", result ? result : "");
+  (void)g2EnqueueRedraw(cookie, redrawSensorsDetailIfCurrent, "Sensors camera refused");
+}
+#endif
+
 void g2SensorsHandleTap(uint32_t idx) {
   if (gSensorsLevel == SENSORS_LEVEL_LIST) {
     if (idx == 0) {
@@ -1441,40 +1472,20 @@ void g2SensorsHandleTap(uint32_t idx) {
                      r.label, prev ? "ON" : "OFF",
                      next ? "ON" : "OFF");
 
-    // Camera runtime apply stays INLINE on tap_disp: `opencamera` is the
-    // SYNC variant (cameraPowerRequestStartSync, 60-s timeout) and would
-    // stall cmd_exec. Async queue returns instantly; persist still goes
-    // through cameraautostart on cmd_exec below. Mic uses openmic/closemic
-    // via submit (not a sync stall).
+    // Camera and microphone runtime changes run as commands on cmd_exec
+    // (authorization, live-owner fence, audit), never inline on tap_disp; the
+    // auto-start preference is persisted in their completion, only after the
+    // owner accepted the change. The camera uses the owner's asynchronous
+    // form (`opencamera async`), which queues to cam_pwr and returns at once:
+    // the synchronous `opencamera` would hold cmd_exec for up to 60 s.
     bool skipImmediateRedraw = false;
-    bool runtimeApplyOk      = true;
 #if ENABLE_CAMERA_SENSOR
-    if (strcmp(r.featureId, "camera") == 0) {
-      if (next && !gCameraRunning) {
-        BROADCAST_PRINTF("[G2] Sensors: starting camera (queued)...");
-        if (cameraPowerRequestStartAsync()) {
-          skipImmediateRedraw = true;
-          sG2SensorsCamAsyncStartPending = true;
-        } else {
-          // Lazy cam_pwr: first use may fail on worker create (low DRAM) as
-          // well as a full depth-6 queue after the worker already exists.
-          BROADCAST_PRINTF("[G2] Sensors: camera start failed "
-                           "(cam_pwr create failed or queue full — low DRAM?) "
-                           "— abort persist");
-          runtimeApplyOk = false;
-        }
-      } else if (!next && gCameraRunning) {
-        BROADCAST_PRINTF("[G2] Sensors: stopping camera (queued)...");
-        if (cameraPowerRequestStopAsync()) {
-          skipImmediateRedraw = true;
-        } else {
-          BROADCAST_PRINTF("[G2] Sensors: camera stop failed "
-                           "(cam_pwr create failed or queue full — low DRAM?) "
-                           "— abort persist");
-          runtimeApplyOk = false;
-        }
-      }
-    }
+    // Only a change of the live state needs the owner; otherwise the toggle
+    // just saves the preference below. Camera power then runs on cam_pwr and
+    // its post-hook redraws when done.
+    const bool cameraRuntime = strcmp(r.featureId, "camera") == 0 &&
+                               next != gCameraRunning;
+    if (cameraRuntime) skipImmediateRedraw = true;
 #endif
 #if ENABLE_MICROPHONE
     // Mic runtime is async on cmd_exec — redraw only after openmic/closemic
@@ -1484,9 +1495,8 @@ void g2SensorsHandleTap(uint32_t idx) {
     }
 #endif
 
-    // Re-derive rows after the start/stop call so the freshly-updated
-    // gXEnabled flag is reflected in the connected/value columns.
-    // Camera power runs asynchronously on `cam_pwr`; hook redraws when done.
+    // A preference-only toggle re-renders now; a runtime change redraws from
+    // its completion or the cam_pwr post-hook.
     if (!skipImmediateRedraw) {
       buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
       if (gSensorsDetailIdx < count) {
@@ -1502,13 +1512,6 @@ void g2SensorsHandleTap(uint32_t idx) {
     // no separate `savesettings` needed (the previous code's batched
     // writeSettingsJson is no longer required because we're not making
     // multiple setSetting calls inline).
-    //
-    // If runtime apply failed (e.g. camera queue full) we DON'T persist
-    // — leaves the user's preference matching the actual hardware state.
-    if (!runtimeApplyOk) {
-      return;
-    }
-
     G2CmdCookie cookie{};
     cookie.targetPage   = g2GetHijackPage();
     cookie.targetNetSub = 0;
@@ -1521,6 +1524,24 @@ void g2SensorsHandleTap(uint32_t idx) {
       const char* runtime = next ? "openmic" : "closemic";
       if (!g2SubmitHijackCommand(runtime, cookie, onMicAutostartRuntimeDone,
                                  (void*)(uintptr_t)(next ? 1 : 0))) {
+        DEBUG_G2F("[G2] Sensors: %s submit FAILED — no inline mutate", runtime);
+        g2ReshowSensorsDetail();
+      }
+      return;
+    }
+#endif
+#if ENABLE_CAMERA_SENSOR
+    // Camera: the owner's gated asynchronous start/stop first;
+    // cameraautostart only after it was admitted (onCameraRuntimeDone).
+    if (cameraRuntime) {
+      const char* runtime = next ? "opencamera async" : "closecamera async";
+      BROADCAST_PRINTF("[G2] Sensors: %s camera (queued)...",
+                       next ? "starting" : "stopping");
+      // Set before the submit: the post-hook of this very start clears it.
+      if (next) sG2SensorsCamAsyncStartPending = true;
+      if (!g2SubmitHijackCommand(runtime, cookie, onCameraRuntimeDone,
+                                 (void*)(uintptr_t)(next ? 1 : 0))) {
+        if (next) sG2SensorsCamAsyncStartPending = false;
         DEBUG_G2F("[G2] Sensors: %s submit FAILED — no inline mutate", runtime);
         g2ReshowSensorsDetail();
       }
@@ -1541,7 +1562,7 @@ void g2SensorsHandleTap(uint32_t idx) {
     }
 
     // No completion callback — the inline showSensorDetail() above
-    // already re-rendered (or the cam_pwr-done hook will). Persistence
+    // already re-rendered. Persistence
     // is fire-and-forget via cmd_exec only — never setSetting on the
     // tap/BLE task (wrong stack + skips auth). Optimistic UI may lie
     // until the next refresh if submit fails.

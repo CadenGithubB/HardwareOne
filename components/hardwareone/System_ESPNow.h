@@ -1365,6 +1365,13 @@ bool getEspNowTaskStackSnapshot(TaskHandle_t* outHandle,
 // True while a bounded close retained live resources for a later retry.
 bool espnowShutdownPending();
 
+// The radio-ownership answer for Wi-Fi decisions (mode, driver stop/deinit,
+// power-down): ESP-NOW holds the radio while it is initialized and also while
+// a timed-out close still retains espnow_task, espnow_tx and the driver
+// (deinitEspNow clears `initialized` before its bounded waits). Use this, not
+// isEspNowInitialized(), wherever the radio could be taken from under ESP-NOW.
+bool espnowOwnsRadio();
+
 // Centralized driver-peer deletion boundary for UI/first-party callers. It
 // rejects while ESP-NOW is stopped/closing and is included in close quiescence.
 bool espnowDeletePeerRuntime(const uint8_t mac[6]);
@@ -1601,6 +1608,8 @@ inline bool sendFileToMac(const uint8_t* mac, const String& localPath) {
 inline bool sendBondedSensorData(uint8_t, const uint8_t*, uint16_t) { return false; }
 inline bool isBondModeOnline() { return false; }
 inline bool isBondSynced() { return false; }
+// Compiled out, ESP-NOW never claims the radio.
+inline bool espnowOwnsRadio() { return false; }
 
 // Ping stubs — see real declarations above the ENABLE_ESPNOW else.
 enum class EspNowAppPingState : uint8_t {

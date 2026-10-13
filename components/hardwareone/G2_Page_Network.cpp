@@ -1529,7 +1529,8 @@ static void handleWiFiStatusTap(uint32_t /*idx*/) {
 
 // --- Join-a-scanned-AP flow -------------------------------------------------
 // Tap a scanned network → (secured) on-lens char-picker keyboard for the
-// password → `wifiadd "<ssid>" "<pass>" 1 0` through cmd_exec (auth + audit,
+// password → the owner's structured add (wifiAddCommandLine:
+// `wifiadd "<ssid>" "<pass>" 1 0`) through cmd_exec (auth + audit,
 // wifiadd is admin-gated so a non-admin pairer sees the denial text) → the
 // command's result text on the lens. Open APs skip the keyboard and save with
 // a quoted empty password. Accepted v1 limits: this field uses maxLen 32 (< the
@@ -1539,16 +1540,11 @@ static char sWifiAddSsid[33];
 EXT_RAM_BSS_ATTR static char sWifiAddMsg[128];
 static void showWifiAddMsg() { g2ShowText(sWifiAddMsg); }
 
-// The wifiadd line quotes each field and CommandArgs has no escape: a `"` ends
-// the field early (a scanned `x" "y` would save SSID x with password y), so the
-// page refuses it, and control characters with it, before building the line.
-static bool wifiAddTextQuotable(const char* text) {
-  for (const unsigned char* p = (const unsigned char*)text; *p; ++p) {
-    if (*p == '"' || *p < 0x20 || *p == 0x7F) return false;
-  }
-  return true;
-}
-
+// The saved-network owner decides what a field cannot carry on the wifiadd
+// line (a `"` would end a quoted field early, so a scanned `x" "y` would save
+// SSID x with password y; control characters too) and writes the line
+// (wifiAddCommandLine). The page refuses such a field before anything is
+// built and only words the refusal.
 static void showWifiAddRefusal() {
   snprintf(sWifiAddMsg, sizeof(sWifiAddMsg), "%s",
            "Error: WiFi name and password cannot contain a double-quote (\") "
@@ -1572,16 +1568,17 @@ static void onWifiAddDone(bool ok, const char* result,
 // Build + submit from the snapshot SSID and a password. Runs on the BLE
 // notify task (keyboard commit) — String build + submit only, no inline
 // mutate (wrong stack + skips auth). The keyboard charset already filters
-// double-quotes and control bytes; a field the quoted line cannot carry is
-// refused here for every caller before the line is built.
+// double-quotes and control bytes; the owner's structured add refuses a field
+// the line cannot carry for every caller before the line is built.
 static void wifiAddSubmit(const char* pass) {
   if (!pass) pass = "";
-  if (!wifiAddTextQuotable(sWifiAddSsid) || !wifiAddTextQuotable(pass)) {
+  String line;
+  if (wifiAddCommandLine(String(sWifiAddSsid), String(pass), /*priority=*/1,
+                         /*hidden=*/false, line) != WifiFieldProblem::None) {
     DEBUG_G2F("[G2] wifiadd: SSID or password has a quote/control byte — refused");
     showWifiAddRefusal();
     return;
   }
-  String line = String("wifiadd \"") + sWifiAddSsid + "\" \"" + pass + "\" 1 0";
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
   cookie.targetNetSub = (uint8_t)gNetSub;
@@ -1617,7 +1614,7 @@ static void handleWiFiScanTap(uint32_t idx) {
   }
   // A scanned SSID with a double-quote or control byte can't survive the
   // quoted command line: say so on the lens instead of opening the keyboard.
-  if (!wifiAddTextQuotable(ap.ssid)) {
+  if (wifiNetworkFieldProblem(ap.ssid) != WifiFieldProblem::None) {
     DEBUG_G2F("[G2] WiFi: tapped unquotable SSID — refused");
     showWifiAddRefusal();
     return;

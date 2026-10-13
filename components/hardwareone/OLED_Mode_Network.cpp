@@ -437,23 +437,22 @@ void oledNetworkModeResetSessionState() {
   memset(sRemovePromptBuf, 0, sizeof(sRemovePromptBuf));
 }
 
-// The wifiadd line quotes each field and CommandArgs has no escape: a `"` ends
-// the field early (password `pa"ss` would be saved as `pa`), so the form
-// refuses it, and control characters with it, before any line is built.
-// Returns the toast text for a field the line cannot carry, else nullptr.
-static const char* wifiAddFieldRefusal(const String& text) {
-  for (size_t i = 0; i < text.length(); ++i) {
-    const unsigned char c = static_cast<unsigned char>(text[i]);
-    if (c == '"') return "Quote not allowed";
-    if (c < 0x20 || c == 0x7F) return "Invalid character";
+// The saved-network owner decides what a field cannot carry on the wifiadd
+// line (a `"`, a control character: wifiNetworkFieldProblem) and writes that
+// line (wifiAddCommandLine); the form refuses such a field before any line is
+// built and only words the refusal. Returns the toast text, else nullptr.
+static const char* wifiAddFieldRefusal(WifiFieldProblem problem) {
+  switch (problem) {
+    case WifiFieldProblem::Quote: return "Quote not allowed";
+    case WifiFieldProblem::ControlCharacter: return "Invalid character";
+    default: return nullptr;
   }
-  return nullptr;
 }
 
 // Pre-fill the SSID from a scan pick and jump straight to password entry. A
 // scanned SSID the command line cannot carry is refused before the keyboard.
 static void startWifiAddFromScan(const char* ssid) {
-  const char* refusal = wifiAddFieldRefusal(String(ssid));
+  const char* refusal = wifiAddFieldRefusal(wifiNetworkFieldProblem(ssid));
   if (refusal) {
     oledToastShow(refusal, 2500);
     return;
@@ -490,7 +489,7 @@ static bool wifiAddKeyboardTick(bool* handled) {
     oledKeyboardReset();
     sWifiKeyboardActive = false;
     if (sWifiAddStep == WIFI_ADD_SSID) {
-      const char* refusal = wifiAddFieldRefusal(text);
+      const char* refusal = wifiAddFieldRefusal(wifiNetworkFieldProblem(text.c_str()));
       if (refusal) {
         wifiAddReset();
         oledToastShow(refusal, 2500);
@@ -502,12 +501,14 @@ static bool wifiAddKeyboardTick(bool* handled) {
       sWifiAddPass = text;
       secureClearString(text);
       char toast[40] = {};
-      const char* refusal = wifiAddFieldRefusal(sWifiAddSSID);
-      if (!refusal) refusal = wifiAddFieldRefusal(sWifiAddPass);
+      // Structured add: the owner writes the line (no priority or hidden
+      // flag, as the form always sent) or refuses a field it cannot carry.
+      String command;
+      const char* refusal = wifiAddFieldRefusal(wifiAddCommandLine(
+          sWifiAddSSID, sWifiAddPass, /*priority=*/0, /*hidden=*/false, command));
       if (refusal) {
         snprintf(toast, sizeof(toast), "%s", refusal);
       } else {
-        String command = "wifiadd \"" + sWifiAddSSID + "\" \"" + sWifiAddPass + "\"";
         const bool connectAfter = sWifiAddConnectAfter;
         // Expected-epoch admission/result fencing below fails closed if a
         // replacement arrives during FS/network I/O.

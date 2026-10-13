@@ -17,7 +17,10 @@ scan pick, with OLED_Utils.cpp's shared reply-to-toast mapping) and the G2
 join-a-scanned-AP flow. A double-quote or control character in the typed
 password or a scanned SSID must be refused before the quoted `wifiadd` line is
 built, with a visible message, and the owner's reply must reach the OLED toast /
-G2 lens.
+G2 lens. The field rule and the line come from the saved-network owner's
+structured add (System_WiFiNetworks.cpp wifiNetworkFieldProblem and
+wifiAddCommandLine, compiled unchanged); a contract checks that neither form
+writes the line or keeps a byte rule of its own.
 """
 
 import argparse
@@ -164,11 +167,40 @@ def run_network_rows(args, component, temp, flags):
           f"{len(DISABLED_VARIANTS)} disabled-feature builds passed")
 
 
+def wifi_field_owner(component):
+    """The owner's field rule and structured add line (fixed trees only)."""
+    header = (component / "network/wifi/System_WiFiNetworks.h").read_text()
+    if "enum class WifiFieldProblem" not in header:
+        return ""
+    source = (component / "network/wifi/System_WiFiNetworks.cpp").read_text()
+    return "\n\n".join([extract_block(header, "enum class WifiFieldProblem") + ";",
+                        extract_block(source, "WifiFieldProblem wifiNetworkFieldProblem("),
+                        extract_block(source, "WifiFieldProblem wifiAddCommandLine(")])
+
+
+def add_form_contract(component):
+    """Both forms leave the field rule and the line format to the owner."""
+    failures = []
+    for name, functions in (("OLED_Mode_Network.cpp", OLED_ADD_FUNCTIONS + OLED_ADD_HELPERS),
+                            ("G2_Page_Network.cpp", G2_ADD_FUNCTIONS + G2_ADD_HELPERS)):
+        source = (component / name).read_text()
+        code = "\n".join(definition(source, function) for function in functions
+                         if definition_match(source, function))
+        code = re.sub(r"/\*.*?\*/|//[^\n]*", "", code, flags=re.S)
+        if '"wifiadd \\"' in code or "wifiAddCommandLine(" not in code:
+            failures.append(f"{name} writes the wifiadd line itself instead of wifiAddCommandLine")
+        if re.search(r"0x7F|< *0x20|'\"'", code):
+            failures.append(f"{name} keeps its own field byte rule instead of wifiNetworkFieldProblem")
+    if failures:
+        raise SystemExit("Add-WiFi forms: " + "; ".join(failures))
+
+
 def add_form_unit(component):
     oled = (component / "OLED_Mode_Network.cpp").read_text()
     page = (component / "G2_Page_Network.cpp").read_text()
     utils = (component / "OLED_Utils.cpp").read_text()
     inserts = (
+        ("// INSERT_WIFI_FIELD_OWNER", wifi_field_owner(component)),
         ("// INSERT_OLED_REPLY_TEXT",
          extract_block(utils, OLED_REPLY_TEXT) if OLED_REPLY_TEXT in utils else ""),
         ("// INSERT_OLED_STATE", extract_block(oled, "enum WifiAddStep") + ";\n" + declarations(oled, [
@@ -201,6 +233,7 @@ def run_add_form(args, component, temp, flags):
     sys.stdout.flush()
     if run.returncode != 0:
         raise SystemExit("Add-WiFi forms: FAILED")
+    add_form_contract(component)
 
 
 def main():

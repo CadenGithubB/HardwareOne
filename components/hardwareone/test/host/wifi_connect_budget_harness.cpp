@@ -117,10 +117,15 @@ static wl_status_t driverStatus() {
   return WL_DISCONNECTED;
 }
 
+// Driver transitions a connect must not make while ESP-NOW holds the radio.
+static int gDriverStops = 0;
+static std::vector<wifi_mode_t> gDriverModes;   // esp_wifi_set_mode requests
+static std::vector<wifi_mode_t> gArduinoModes;  // WiFi.mode requests
+
 esp_err_t esp_wifi_disconnect() { gDriver.connecting = false; gDriver.connected = false; return ESP_OK; }
-esp_err_t esp_wifi_stop() { gDriver.started = false; esp_wifi_disconnect(); return ESP_OK; }
+esp_err_t esp_wifi_stop() { ++gDriverStops; gDriver.started = false; esp_wifi_disconnect(); return ESP_OK; }
 esp_err_t esp_wifi_start() { gDriver.started = true; return ESP_OK; }
-esp_err_t esp_wifi_set_mode(wifi_mode_t) { return ESP_OK; }
+esp_err_t esp_wifi_set_mode(wifi_mode_t mode) { gDriverModes.push_back(mode); return ESP_OK; }
 esp_err_t esp_wifi_get_mode(wifi_mode_t* mode) {
   if (!gDriver.inited) return ESP_FAIL;
   *mode = WIFI_MODE_STA;
@@ -145,7 +150,7 @@ static wifi_init_config_t makeArduinoCompatibleWifiInitConfig() { return wifi_in
 
 struct FakeIP { String toString() const { return String("10.0.0.2"); } };
 struct FakeWiFi {
-  bool mode(wifi_mode_t) { return true; }
+  bool mode(wifi_mode_t requested) { gArduinoModes.push_back(requested); return true; }
   wl_status_t status() { return driverStatus(); }
   bool disconnect(bool = true) { esp_wifi_disconnect(); return true; }
   FakeIP localIP() { return FakeIP{}; }
@@ -220,7 +225,12 @@ bool wifiNetworkConnectionById(uint32_t id, WifiConnectionTarget& out) {
 void sortWiFiByPriority() {}
 bool saveWiFiNetworks() { return true; }
 void wifiNetworkMarkConnected(uint32_t, uint32_t) {}
-bool isEspNowInitialized() { return false; }
+// ESP-NOW radio ownership (System_ESPNow): initialized, or a timed-out
+// closeespnow that still retains its runtime and the driver.
+static bool gEspNowInitialized = false;
+static bool gEspNowClosePending = false;
+bool isEspNowInitialized() { return gEspNowInitialized; }
+bool espnowOwnsRadio() { return gEspNowInitialized || gEspNowClosePending; }
 bool syncNTPAndResolve() { return true; }
 volatile bool gWifiUserCancelled = false;
 bool gSkipNTPInWifiConnect = true;
@@ -274,6 +284,16 @@ static void reset(std::vector<ScriptedNetwork> script, CommandContext* context, 
   Serial.pending = pendingBytes;
   gWifiUserCancelled = false;
   gSetupRemainingMs = UINT32_MAX;
+  gEspNowInitialized = false;
+  gEspNowClosePending = false;
+  gDriverStops = 0;
+  gDriverModes.clear();
+  gArduinoModes.clear();
+}
+
+static bool modeRequested(const std::vector<wifi_mode_t>& modes, wifi_mode_t mode) {
+  for (wifi_mode_t m : modes) if (m == mode) return true;
+  return false;
 }
 
 static std::vector<ScriptedNetwork> missing(int count) {
@@ -418,6 +438,40 @@ int main() {
     require(sawMessage("3 saved network(s) not tried"), "zero budget: every network reported as not tried");
   }
 #endif
+
+  // ESP-NOW holds the radio: running, and also while a closeespnow that timed
+  // out still retains its runtime. Neither the hunt nor a targeted connect may
+  // drop AP_STA or stop and restart the driver beneath it.
+  for (const bool closePending : {false, true}) {
+    const char* what = closePending ? "pending ESP-NOW close" : "running ESP-NOW";
+    char label[96];
+    reset({{"home", Behaviour::Connects, 2000}}, &gWebContext, 0);
+    gEspNowInitialized = !closePending;
+    gEspNowClosePending = closePending;
+    WifiConnectionTarget target;
+    require(wifiNetworkConnectionById(1, target), "radio owner: lookup");
+    std::snprintf(label, sizeof(label), "%s: targeted connect joins", what);
+    require(connectWiFiTarget(target, 35000, false), label);
+    std::snprintf(label, sizeof(label), "%s: the driver is not stopped or switched to STA", what);
+    require(gDriverStops == 0 && !modeRequested(gDriverModes, WIFI_MODE_STA), label);
+    reset({{"home", Behaviour::Connects, 2000}}, &gWebContext, 0);
+    gEspNowInitialized = !closePending;
+    gEspNowClosePending = closePending;
+    std::snprintf(label, sizeof(label), "%s: hunt joins", what);
+    require(huntBest(budget, WifiConnectOrigin::COMMAND), label);
+    std::snprintf(label, sizeof(label), "%s: the hunt keeps AP_STA", what);
+    require(modeRequested(gArduinoModes, WIFI_AP_STA) && !modeRequested(gArduinoModes, WIFI_STA) &&
+            gDriverStops == 0, label);
+  }
+  // Nothing holds the radio: the connect restarts the driver in STA as before.
+  {
+    reset({{"home", Behaviour::Connects, 2000}}, &gWebContext, 0);
+    WifiConnectionTarget target;
+    require(wifiNetworkConnectionById(1, target), "no radio owner: lookup");
+    require(connectWiFiTarget(target, 35000, false), "no radio owner: targeted connect joins");
+    require(gDriverStops == 1 && modeRequested(gDriverModes, WIFI_MODE_STA),
+            "no radio owner: the driver restarts in STA");
+  }
 
   std::fprintf(stderr, "checks=%d\n", gChecks);
   std::printf("wifi connect budget: OK\n");

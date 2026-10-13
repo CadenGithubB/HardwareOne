@@ -1,7 +1,8 @@
 // test_wifi_saved_ui.py also compiles the Add-WiFi forms: the production OLED
 // keyboard flow (OLED_Mode_Network.cpp: manual Add and scan pick) and the G2
-// join-a-scanned-AP flow (G2_Page_Network.cpp). Both build a quoted
-// `wifiadd "<ssid>" "<pass>"` line that CommandArgs splits at every `"`. The
+// join-a-scanned-AP flow (G2_Page_Network.cpp). Both submit a quoted
+// `wifiadd "<ssid>" "<pass>"` line, written by the saved-network owner's
+// structured add (wifiAddCommandLine), that CommandArgs splits at every `"`. The
 // cases check that a `"` or control character in the typed password or in a
 // scanned SSID is refused before any line is built, with a visible message,
 // that the owner's reply reaches the OLED toast / G2 lens, and that the OLED
@@ -129,6 +130,10 @@ static void oledToastShow(const char* message, uint32_t = 3000, OledUIIcon = Ole
   gToast = message ? message : "";
   ++gToastCount;
 }
+
+// ---- production: the saved-network owner's field rule and structured add line
+// (network/wifi/System_WiFiNetworks.cpp, when present) ----------------------------------
+// INSERT_WIFI_FIELD_OWNER
 
 // ---- production: OLED reply-to-toast mapping (OLED_Utils.cpp, when present) ---------
 // INSERT_OLED_REPLY_TEXT

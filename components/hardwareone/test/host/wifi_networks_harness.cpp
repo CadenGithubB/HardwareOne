@@ -113,7 +113,45 @@ static uint32_t networkId(const char* ssid) {
   return 0;
 }
 static void ownerCases(const std::string& scenario) {
-  if (scenario == "removal_commands") {
+  if (scenario == "interactive_fields") {
+    // A double-quote or a control character in either field is refused,
+    // nothing is stored and the reason is broadcast.
+    const std::vector<std::pair<String, String>> refused = {
+      {"Lab\tNet", "secret"}, {"Lab\nNet", "secret"}, {"home\r", "secret"},
+      {"home", "pa\x01ss"}, {"home", "pa\x7fss"}, {"x\" \"y", "secret"}, {"home", "pa\"ss"},
+    };
+    for (const auto& value : refused) {
+      messages.clear();
+      assert(!upsertWiFiNetwork(value.first, value.second, 1, false));
+      assert(wifiNetworkCount() == 0 && persistCalls == 0);
+      assert(!messages.empty() && messages.back().startsWith("ERROR: WiFi name and password cannot contain"));
+    }
+    // Spaces, punctuation and non-ASCII bytes are ordinary name bytes.
+    assert(upsertWiFiNetwork(" Caf\xc3\xa9 & Co ", "p a\\ss", 1, false) && wifiNetworkCount() == 1);
+#if HAVE_WIFI_FIELD_OWNER
+    assert(wifiNetworkFieldProblem("Lab\tNet") == WifiFieldProblem::ControlCharacter);
+    assert(wifiNetworkFieldProblem("a\"b\x01") == WifiFieldProblem::Quote);  // first offending byte
+    assert(wifiNetworkFieldProblem("x\x01\"") == WifiFieldProblem::ControlCharacter);
+    assert(wifiNetworkFieldProblem("Caf\xc3\xa9 & Co") == WifiFieldProblem::None);
+    assert(wifiNetworkFieldProblem(nullptr) == WifiFieldProblem::None);
+    // The structured add line: two arguments keep the stored priority; a
+    // priority or hidden flag writes all four.
+    String line = "stale";
+    assert(wifiAddCommandLine("My Net", "p w", 0, false, line) == WifiFieldProblem::None &&
+           line == "wifiadd \"My Net\" \"p w\"");
+    assert(wifiAddCommandLine("Guest", "", 1, false, line) == WifiFieldProblem::None &&
+           line == "wifiadd \"Guest\" \"\" 1 0");
+    assert(wifiAddCommandLine("Hide", "pw", 0, true, line) == WifiFieldProblem::None &&
+           line == "wifiadd \"Hide\" \"pw\" 1 1");
+    assert(wifiAddCommandLine("Prio", "pw", 5, false, line) == WifiFieldProblem::None &&
+           line == "wifiadd \"Prio\" \"pw\" 5 0");
+    assert(wifiAddCommandLine("x\" \"y", "pw", 1, false, line) == WifiFieldProblem::Quote &&
+           line.length() == 0);
+    line = "stale";
+    assert(wifiAddCommandLine("home", "pa\nss", 1, false, line) == WifiFieldProblem::ControlCharacter &&
+           line.length() == 0);
+#endif
+  } else if (scenario == "removal_commands") {
     for (const char* invalid : {"", "0", "-1", "+1", "1x", "1 2", "4294967296"}) {
       assert(parseSavedNetworkId(invalid) == 0);
       assert(String(cmd_wifirmid(invalid)).startsWith("Error:"));
@@ -365,7 +403,7 @@ int main(int argc, char** argv) {
   if (scenario == "stable_ids" || scenario == "setup_result" || scenario == "json_roundtrip" ||
       scenario == "json_load_contract" || scenario == "coherent_connection_copy" ||
       scenario == "copy_failure" || scenario == "json_overflow" || scenario == "removal_commands" ||
-      scenario == "credential_scrub") {
+      scenario == "credential_scrub" || scenario == "interactive_fields") {
     ownerCases(scenario);
     std::printf("saved WiFi owner: %s passed\n", argv[1]);
     return 0;

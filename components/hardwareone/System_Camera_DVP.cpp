@@ -770,10 +770,36 @@ const char* cmd_camera(const String& argsInput) {
   return buildCameraStatusJson();
 }
 
+static const char* const kCameraDisabledError =
+    "ERROR: Camera is disabled - run 'cameraenabled 1' first";
+
+// `opencamera async` / `closecamera async`: the gated asynchronous power
+// change for UI adapters (the G2 Sensors page). It runs on cmd_exec under the
+// submitter's identity, so the registry authorizes it, the live-session fence
+// applies and the [CMD] audit records it. A start honours the cameraEnabled
+// master switch exactly as the synchronous start does. The reply says only
+// whether cam_pwr admitted the request; the power change and the post-hook
+// then run on cam_pwr, and nothing here waits for the camera.
+static bool cameraAsyncForm(const String& argsInput) {
+  String form = argsInput;
+  form.trim();
+  form.toLowerCase();
+  return form == "async";
+}
+
+static const char* cameraPowerAsyncCommand(bool start) {
+  if (start && !gSettings.cameraEnabled) return kCameraDisabledError;
+  if (start ? cameraPowerRequestStartAsync() : cameraPowerRequestStopAsync())
+    return start ? "Camera start queued" : "Camera stop queued";
+  return start ? "Error: camera start not queued (camera power worker unavailable)"
+               : "Error: camera stop not queued (camera power worker unavailable)";
+}
+
 const char* cmd_camerastart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (cameraAsyncForm(argsInput)) return cameraPowerAsyncCommand(true);
   if (!gSettings.cameraEnabled) {
-    return "ERROR: Camera is disabled - run 'cameraenabled 1' first";
+    return kCameraDisabledError;
   }
   if (cameraPowerRequestStartSync(60000)) {
     return "Camera started successfully";
@@ -783,6 +809,7 @@ const char* cmd_camerastart(const String& argsInput) {
 
 const char* cmd_camerastop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (cameraAsyncForm(argsInput)) return cameraPowerAsyncCommand(false);
   return cameraPowerRequestStopSync(30000)
              ? "Camera stopped"
              : "Error: Camera stop failed or timed out";
@@ -1319,8 +1346,8 @@ const char* cmd_cameravideodelete(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry cameraCommands[] = {
   {"cameraread",       "Read camera status",              false, cmd_camera},
-  {"opencamera",       "Start camera sensor.",            false, cmd_camerastart},
-  {"closecamera",      "Stop camera sensor.",             false, cmd_camerastop},
+  {"opencamera",       "Start camera sensor. [async: queue it and return at once]", false, cmd_camerastart},
+  {"closecamera",      "Stop camera sensor. [async: queue it and return at once]",  false, cmd_camerastop},
   {"cameracapture",    "Capture a single frame",          false, cmd_cameracapture},
   {"camerasave",       "Save current frame to storage",   false, cmd_camerasave},
   {"camerares",        "Set camera resolution: <res>",    false, cmd_camerares, "Usage: camerares <96x96|qqvga|qcif|hqvga|240x240|qvga|cif|vga|svga|xga|sxga|uxga|hd>"},

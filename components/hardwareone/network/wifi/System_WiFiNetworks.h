@@ -24,6 +24,25 @@ struct WifiNetworkSnapshot {
 
 enum class WifiNetworkSaveResult { Rejected, PersistFailed, Accepted };
 
+// What an interactively added SSID or password cannot contain: a `"` (the
+// quoted `wifiadd` field has no escape, so it would end the field early and
+// shift the rest into the next argument) or a control character (0x00-0x1F,
+// 0x7F). Reports the first such byte. upsertWiFiNetwork refuses both.
+enum class WifiFieldProblem : uint8_t { None, Quote, ControlCharacter };
+WifiFieldProblem wifiNetworkFieldProblem(const char* text);
+
+// Structured Add-WiFi for UI adapters (OLED, G2): writes the one `wifiadd`
+// line that carries ssid, password, priority and hidden to cmd_wifiadd
+// unchanged — `wifiadd "<ssid>" "<pass>"`, plus `<priority> <0|1>` when a
+// priority (> 0) or hidden is given. The adapter submits it through its own
+// session-fenced executor path, so the add runs on cmd_exec under the
+// registry's admin rule and the audit masks the password token. A field the
+// line cannot carry is refused before anything is written (line stays empty);
+// length and blank-name rules stay with cmd_wifiadd, whose reply the adapter
+// shows. Available in every build: with Wi-Fi off the command does not exist.
+WifiFieldProblem wifiAddCommandLine(const String& ssid, const String& password,
+                                    int priority, bool hidden, String& line);
+
 #if ENABLE_WIFI
 // Boot only: construct internal-RAM storage before settings are loaded and
 // before other tasks can use this service. False is a fatal boot allocation error.
