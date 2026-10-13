@@ -28,9 +28,12 @@ fit the existing app partition. Both use the existing Sense assembly selection
 and board defaults. This trade-off is an explicit saved choice, not a dependency
 rule or an automatic size adjustment.
 
-`xiao-openclaw` adds the optional HTTP agent source to `xiao-default`, retaining
-the onboard and CM5 sources and all other existing choices. Endpoint credentials
-remain runtime device settings; the saved configuration contains no secrets.
+`xiao-openclaw` enables the HTTP agent source and keeps CM5 available. This test
+profile explicitly disables the onboard LLM to fit the existing app partition;
+the user selected that trade-off for remote-agent testing. `xiao-default` and
+shared defaults keep the onboard source enabled. TLS trust/verification and all
+other existing choices are unchanged. Endpoint credentials remain runtime device
+settings; the saved configuration contains no secrets.
 
 `xiao-display` enables external I2C and an SSD1306 display. It explicitly disables
 the camera because the current SDK camera bus and external I2C both use
