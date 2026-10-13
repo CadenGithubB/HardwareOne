@@ -176,16 +176,28 @@ const char* lastError() { return sLastError; }
 // INSERT_BONDED
 }  // namespace BondedPeer
 
+// ---- remote: reply owner (production System_Utils, when the tree has it) -------
+// INSERT_REMOTE_REPLY
+
 // ---- OLED command executor doubles ---------------------------------------------
 static std::vector<std::string> gWithResult;  // executeOLEDCommandWithResult lines
 static std::vector<std::string> gLocal;       // executeOLEDCommand lines (local, fire-and-forget)
 static bool gExecOk = true;
-static std::string gExecText;                 // "" = "Remote command sent: <inner>"
+static std::string gExecText;                 // "" = the remote: owner's "sent" reply
+static uint32_t gLastMsgId = 41;              // msgId of the last remote: send
 bool executeOLEDCommandWithResult(const String& cmd, char* out, size_t outSize) {
   gWithResult.emplace_back(cmd.c_str());
-  std::string text = gExecText;
-  if (text.empty()) text = std::string("Remote command sent: ") + (cmd.length() > 7 ? cmd.c_str() + 7 : "");
-  std::snprintf(out, outSize, "%s", text.c_str());
+  ++gLastMsgId;  // generateMessageId() for the CMD frame
+  if (!gExecText.empty()) {
+    std::snprintf(out, outSize, "%s", gExecText.c_str());
+    return gExecOk;
+  }
+  const char* inner = cmd.length() > 7 ? cmd.c_str() + 7 : "";
+#ifdef HW1_REMOTE_REPLY_OWNER
+  formatRemoteCommandSent(out, outSize, inner, gLastMsgId);
+#else
+  std::snprintf(out, outSize, "Remote command sent: %s", inner);  // the tree's reply has no id
+#endif
   return gExecOk;
 }
 void executeOLEDCommand(const String& cmd) { gLocal.emplace_back(cmd.c_str()); }
@@ -333,8 +345,9 @@ static std::string joined(const std::vector<std::string>& v) {
   for (const auto& s : v) out += (out.empty() ? "" : " | ") + s;
   return out.empty() ? "(none)" : out;
 }
+// The peer answers the last remote: send (its CMD_RESP echoes that msgId).
 static void peerReplies(const uint8_t* mac, bool ok, const char* text) {
-  espnowPublishCmdResult(mac, 42, ok, text);
+  espnowPublishCmdResult(mac, gLastMsgId, ok, text);
 }
 
 // ---- cases ------------------------------------------------------------------------
@@ -507,6 +520,75 @@ static void case_apply_ignores_other_peer_reply() {
          "another device's CMD_RESP does not decide the commit");
   peerReplies(kPeerMac, false, "Error: busy");
   EXPECT(remoteSettingsPollOutcome(text) == REMOTE_OUTCOME_FAILED, "the bonded peer's reply decides it");
+}
+
+// A13: the commit waits for the reply to its own request id, not the bonded
+// peer's next reply (the web console's remote: command may answer first).
+static void case_apply_ignores_same_peer_other_request() {
+  gCase = "apply_ignores_same_peer_other_request";
+  resetWorld();
+  loadRemoteSettingsModules();
+  const SettingEntry* b = findRemote("oledBrightness");
+  if (!b) { EXPECT(false, "oledBrightness is listed"); return; }
+  String err, text;
+  EXPECT(applyRemoteSettingChange(b, "7", err), "the commit is accepted for delivery: " + std::string(err.c_str()));
+  const uint32_t ours = gLastMsgId;
+  espnowPublishCmdResult(kPeerMac, ours + 100, true, "web console result");
+  EXPECT(remoteSettingsPollOutcome(text) == REMOTE_OUTCOME_PENDING,
+         "the bonded peer's reply to another remote: request does not decide the commit");
+  EXPECT(intValue(b) == 128, "another request's success does not reach the cached slot");
+  espnowPublishCmdResult(kPeerMac, ours, true, "oledBrightness set to 7");
+  EXPECT(remoteSettingsPollOutcome(text) == REMOTE_OUTCOME_APPLIED && intValue(b) == 7,
+         "the reply that answers this commit's request id decides it");
+}
+
+static void case_apply_needs_request_id() {
+  gCase = "apply_needs_request_id";
+  resetWorld();
+  loadRemoteSettingsModules();
+  const SettingEntry* b = findRemote("oledBrightness");
+  if (!b) { EXPECT(false, "oledBrightness is listed"); return; }
+  String err, text;
+  gExecText = "Remote command sent: oledbrightness 7";
+  EXPECT(!applyRemoteSettingChange(b, "7", err),
+         "a sent reply without a request id is not left waiting for a reply it cannot match");
+  EXPECT(std::string(err.c_str()).find("request id") != std::string::npos,
+         "the editor says why: " + std::string(err.c_str()));
+  EXPECT(remoteSettingsPollOutcome(text) == REMOTE_OUTCOME_NONE, "nothing is pending");
+}
+
+// The remote: reply owner itself (System_Utils): the web Pending mapping keys
+// on the prefix, the OLED commit on the trailing id.
+static void case_remote_reply_format() {
+  gCase = "remote_reply_format";
+#ifdef HW1_REMOTE_REPLY_OWNER
+  char out[128];
+  uint32_t id = 0;
+  formatRemoteCommandSent(out, sizeof(out), "oledbrightness 7", 77);
+  EXPECT(std::string(out) == "Remote command sent: oledbrightness 7 (reqId 77)",
+         "prefix, redacted echo, request id: " + std::string(out));
+  EXPECT(parseRemoteCommandSentReqId(out, &id) && id == 77, "the id parses back");
+  const std::string longCommand(300, 'c');
+  char small[64];
+  formatRemoteCommandSent(small, sizeof(small), longCommand.c_str(), 4294967295u);
+  EXPECT(std::strncmp(small, "Remote command sent: ccc", 24) == 0 && std::strlen(small) == sizeof(small) - 1,
+         "a long echo is shortened to fit: " + std::string(small));
+  EXPECT(parseRemoteCommandSentReqId(small, &id) && id == 4294967295u, "the id survives the shortening");
+  formatRemoteCommandSent(out, sizeof(out), "note (reqId 5)", 9);
+  EXPECT(parseRemoteCommandSentReqId(out, &id) && id == 9, "an echoed tag cannot stand in for the id");
+  for (const char* bad : {"Remote command sent: x", "Remote command sent: x (reqId 0)",
+                          "Remote command sent: x (reqId 12)y", "Remote command sent: x (reqId )",
+                          "Remote command sent: x (reqId 4294967296)", "Remote command sent: x (reqId 99999999999)",
+                          "Error: x (reqId 5)", "OK: Remote command sent: x (reqId 5)"}) {
+    id = 1234;
+    EXPECT(!parseRemoteCommandSentReqId(bad, &id) && id == 1234, std::string("rejected: ") + bad);
+  }
+  EXPECT(!parseRemoteCommandSentReqId(nullptr, &id) && !parseRemoteCommandSentReqId(out, nullptr),
+         "null arguments are refused");
+#else
+  EXPECT(false, "System_Utils has no remote: reply owner (formatRemoteCommandSent / "
+                "parseRemoteCommandSentReqId): the reply carries no request id");
+#endif
 }
 
 static void case_apply_refuses() {
@@ -794,6 +876,9 @@ int main() {
   case_apply_success_updates_cached_value();
   case_apply_reports_no_reply();
   case_apply_ignores_other_peer_reply();
+  case_apply_ignores_same_peer_other_request();
+  case_apply_needs_request_id();
+  case_remote_reply_format();
   case_apply_refuses();
   case_load_step_fetches_schema_once();
   case_editor_commits_remote_in_remote_mode();

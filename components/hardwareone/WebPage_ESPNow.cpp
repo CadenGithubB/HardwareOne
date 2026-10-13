@@ -542,19 +542,10 @@ static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
 #include "System_Utils.h"
 #include "System_CommandTypes.h"
 
-static void espnowRunInternal(const char* cmd, char* out, size_t outSize) {
-  AuthContext sys;
-  sys.transport = SOURCE_INTERNAL;
-  sys.user = "system";
-  sys.ip = "local";
-  sys.path = cmd;
-  out[0] = '\0';
-  (void)executeCommand(sys, cmd, out, outSize);
-}
-
 // GET /api/espnow/status — same result slots as the old CLI batch, so the
 // page can keep its apply logic. Runs as internal system (not the caller),
-// so guests can load the page without /api/cli.
+// so guests can load the page without /api/cli. Each command is submitted to
+// the executor (executeInternalStatusCommand), never run on httpd.
 static esp_err_t handleEspNowStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   httpd_resp_set_type(req, "application/json");
@@ -575,7 +566,7 @@ static esp_err_t handleEspNowStatus(httpd_req_t* req) {
   JsonArray results = doc["results"].to<JsonArray>();
   EXT_RAM_BSS_ATTR static char cmdBuf[CMD_RESULT_MAX];
   for (size_t i = 0; i < sizeof(CMDS) / sizeof(CMDS[0]); i++) {
-    espnowRunInternal(CMDS[i], cmdBuf, sizeof(cmdBuf));
+    (void)executeInternalStatusCommand(CMDS[i], cmdBuf, sizeof(cmdBuf));
     results.add(cmdBuf);
   }
   String out;

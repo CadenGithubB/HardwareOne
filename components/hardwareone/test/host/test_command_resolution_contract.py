@@ -262,9 +262,8 @@ EXECUTE_COMMAND_CALLERS = {
     "System_ESPSR.cpp": (
         "static void runVoiceCommandJob(",       # runs on cmd_exec (deferred)
     ),
-    # Set 2 (WebPage_ESPNow.cpp) moves this to executeInternalStatusCommand
-    # in the after-merge pass; executeCommand can then refuse other callers.
-    "WebPage_ESPNow.cpp": ("static void espnowRunInternal(",),
+    # Nothing else: executeCommand itself refuses any task but cmd_exec once
+    # the executor queue exists (command_executor_admission runs that check).
 }
 call = re.compile(r"(?<![\w.>])executeCommand\s*\(")
 for name, code in sorted(sources.items()):
@@ -308,6 +307,10 @@ assert "submitAndExecuteSync(" in status_helper
 assert not call.search(status_helper)
 assert "SOURCE_INTERNAL" in status_helper
 assert "COMMAND_CONTEXT_MODE_INDEPENDENT" in status_helper
+espnow_web = sources["WebPage_ESPNow.cpp"]
+espnow_start, espnow_end = body_span(espnow_web, "static esp_err_t handleEspNowStatus(")
+assert "executeInternalStatusCommand(" in espnow_web[espnow_start:espnow_end]
+assert "espnowRunInternal" not in espnow_web
 
 # Validate-only state is per task. broadcastOutputCore, the audit
 # suppression and the OK stamp read the calling task's CommandContext; the

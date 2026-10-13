@@ -210,14 +210,17 @@ window.BitmaskField = (function(){
   function render(opts) {
     var key = opts.key;
     var id = opts.id;
-    var cmd = opts.cmdKey || key;
+    // The schema's setter only; a row without one is shown, not saved (a
+    // command is never derived from the key).
+    var cmd = opts.cmdKey || '';
     var type = opts.type || 'int';
-    var disabled = !!opts.disabled;
+    var disabled = !!opts.disabled || !cmd;
     var bits = parseBits(opts.options);
     var mask = parseValue(opts.value);
     var disAttr = disabled ? ' disabled' : '';
-    var html = '<div class="bitmask-field" data-bitmask-field="' + key + '" data-cmd="' + cmd +
-               '" data-type="' + type + '" style="grid-column:1/-1;margin-bottom:0.25rem">';
+    var html = '<div class="bitmask-field" data-bitmask-field="' + key + '"' +
+               (cmd ? ' data-cmd="' + cmd + '"' : '') +
+               ' data-type="' + type + '" style="grid-column:1/-1;margin-bottom:0.25rem">';
     html += '<div style="font-weight:500;color:var(--panel-fg);margin-bottom:0.35rem;font-size:0.9em">' +
             (opts.label || key) + '</div>';
     html += '<input type="hidden" id="' + id + '" data-bitmask-snapshot="1" value="' +
@@ -261,9 +264,11 @@ window.BitmaskField = (function(){
     var out = [];
     root.querySelectorAll('[data-bitmask-field]').forEach(function(wrap) {
       var hid = wrap.querySelector('input[data-bitmask-snapshot]');
+      var cmd = wrap.getAttribute('data-cmd');
+      if (!cmd) return;  // no setter in the schema: nothing to send
       out.push({
         key: wrap.getAttribute('data-bitmask-field'),
-        cmd: wrap.getAttribute('data-cmd') || wrap.getAttribute('data-bitmask-field'),
+        cmd: cmd,
         id: hid ? hid.id : '',
         val: packFrom(wrap),
         type: wrap.getAttribute('data-type') || 'int'
@@ -943,7 +948,8 @@ window.SchemaPanel.render({
     for (var k in updates) {
       var el = container.querySelector('#net-' + k.replace(/\./g, '-'));
       var cmd = el && el.getAttribute('data-cmd');
-      cmds.push((cmd || k) + ' ' + updates[k]);
+      if (!cmd) continue;  // no setter in the schema; never derive one from the key
+      cmds.push(cmd + ' ' + updates[k]);
     }
 
     if (cmds.length === 0) { alert('No changes to save.'); return; }
@@ -1463,7 +1469,8 @@ window.SchemaPanel.render({
     for (var k in updates) {
       var el = pane.querySelector('#dyn-' + k.replace(/\./g, '-'));
       var cmd = el && el.getAttribute('data-cmd');
-      cmds.push((cmd || k) + ' ' + updates[k]);
+      if (!cmd) continue;  // no setter in the schema; never derive one from the key
+      cmds.push(cmd + ' ' + updates[k]);
     }
 
     if (cmds.length === 0) { alert('No changes to save.'); return; }
@@ -1901,10 +1908,14 @@ function saveNotifPolicy() {
     return gl ? (gl + ' debug flag.') : '';
   }
   function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-  function sw(cmd,grp,on,isAll){
-    var tip = esc(helpFor(cmd, grp, isAll));
+  // The schema's setter only (cmdKey); a row without one is shown disabled and
+  // never saved. A command is never derived from the key; helpKey (cmdKey or
+  // key) only picks the hover text.
+  function dbgCmdAttr(cmd){return cmd?' data-cmd="'+cmd+'"':' disabled';}
+  function sw(cmd,grp,on,isAll,helpKey){
+    var tip = esc(helpFor(helpKey||cmd, grp, isAll));
     var tAttr = tip ? ' title="'+tip+'"' : '';
-    return '<label class="dbg-sw"'+tAttr+'><input type="checkbox" class="dbg-cb" data-cmd="'+cmd+'"'+(grp?' data-group="'+grp+'"':'')+(isAll?' data-all="1"':'')+(on?' checked':'')+'><span class="sl"></span></label>';
+    return '<label class="dbg-sw"'+tAttr+'><input type="checkbox" class="dbg-cb"'+dbgCmdAttr(cmd)+(grp?' data-group="'+grp+'"':'')+(isAll?' data-all="1"':'')+(on?' checked':'')+'><span class="sl"></span></label>';
   }
   Promise.all([
     hw.fetchJSON('/api/settings/schema'),
@@ -1936,7 +1947,7 @@ function saveNotifPolicy() {
       ge.forEach(function(e){
         var lbl=e.key==='enabled'?'All':'&ensp;'+e.label;
         var rowTip = esc(helpFor(e.cmdKey||e.key, gn, e.key==='enabled'));
-        var cmd = e.cmdKey || e.key;
+        var cmd = e.cmdKey || '';
         if (e.type === 'int' || e.type === 'float') {
           // Numeric setting inside a folder — render as number input, not toggle.
           var nv = gd[e.key]; if (nv === undefined) nv = e['default'];
@@ -1944,11 +1955,11 @@ function saveNotifPolicy() {
           var mi = e.min !== undefined ? ' min="'+e.min+'"' : '';
           var ma = e.max !== undefined ? ' max="'+e.max+'"' : '';
           h+='<div class="dbg-row" title="'+rowTip+'"><span class="lbl">'+lbl+'</span>';
-          h+='<input type="number" class="dbg-input form-input input-fit" data-cmd="'+cmd+'" value="'+nv+'" step="'+step+'"'+mi+ma+' style="width:80px"></div>';
+          h+='<input type="number" class="dbg-input form-input input-fit"'+dbgCmdAttr(cmd)+' value="'+nv+'" step="'+step+'"'+mi+ma+' style="width:80px"></div>';
         } else {
           // Bool / default — render as toggle switch.
           var v=!!(e.key==='enabled'?gd.enabled:gd[e.key]);
-          h+='<div class="dbg-row" title="'+rowTip+'"><span class="lbl">'+lbl+'</span>'+sw(cmd,gn,v,e.key==='enabled')+'</div>';
+          h+='<div class="dbg-row" title="'+rowTip+'"><span class="lbl">'+lbl+'</span>'+sw(cmd,gn,v,e.key==='enabled',e.cmdKey||e.key)+'</div>';
         }
       });
       h+='</div>';
@@ -1960,19 +1971,19 @@ function saveNotifPolicy() {
       boolSA.forEach(function(e){
         var v=!!dbg[e.key];
         var pillTip = esc(helpFor(e.cmdKey||e.key, '', false));
-        h+='<div class="dbg-pill'+(v?' on':'')+'" title="'+pillTip+'"><span class="lbl">'+e.label+'</span>'+sw(e.cmdKey||e.key,'',v)+'</div>';
+        h+='<div class="dbg-pill'+(v?' on':'')+'" title="'+pillTip+'"><span class="lbl">'+e.label+'</span>'+sw(e.cmdKey||'','',v,false,e.cmdKey||e.key)+'</div>';
       });
       h+='</div>';
     }
     if(cfgSA.length>0){
       h+='<div style="margin-top:0.7rem;display:flex;flex-wrap:wrap;gap:0.6rem 1.5rem;align-items:center">';
       cfgSA.forEach(function(e){
-        var v=dbg[e.key];if(v===undefined)v=e['default'];var cmd=e.cmdKey||e.key;
-        var cfgTip = esc(helpFor(cmd, '', false));
+        var v=dbg[e.key];if(v===undefined)v=e['default'];var cmd=e.cmdKey||'';
+        var cfgTip = esc(helpFor(e.cmdKey||e.key, '', false));
         var tAttr = cfgTip ? ' title="'+cfgTip+'"' : '';
         if(e.key==='logLevel'){
           h+='<div style="display:flex;align-items:center;gap:0.5rem"'+tAttr+'><span style="font-size:0.88rem;color:var(--panel-fg)">'+e.label+'</span>';
-          h+='<select class="dbg-input form-input input-fit" data-cmd="'+cmd+'" style="width:130px"'+tAttr+'>';
+          h+='<select class="dbg-input form-input input-fit"'+dbgCmdAttr(cmd)+' style="width:130px"'+tAttr+'>';
           h+='<option value="0"'+(v===0?' selected':'')+'>Error</option>';
           h+='<option value="1"'+(v===1?' selected':'')+'>Warn</option>';
           h+='<option value="2"'+(v===2?' selected':'')+'>Info</option>';
@@ -1980,7 +1991,7 @@ function saveNotifPolicy() {
         } else {
           h+='<div style="display:flex;align-items:center;gap:0.5rem"'+tAttr+'><span style="font-size:0.88rem;color:var(--panel-fg)">'+e.label+'</span>';
           var mi=e.min!==undefined?' min="'+e.min+'"':'',ma=e.max!==undefined?' max="'+e.max+'"':'';
-          h+='<input type="number" class="dbg-input form-input input-fit" data-cmd="'+cmd+'" value="'+v+'"'+mi+ma+' style="width:80px"'+tAttr+'></div>';
+          h+='<input type="number" class="dbg-input form-input input-fit"'+dbgCmdAttr(cmd)+' value="'+v+'"'+mi+ma+' style="width:80px"'+tAttr+'></div>';
         }
       });
       h+='</div>';
@@ -3684,29 +3695,10 @@ console.log('[SETTINGS] All parts loaded successfully');
     setSettingsButtons(true);  // Default to "This Device" highlighted
   }).catch(function(){});
 
-  // Modules we don't render in the bonded view. Auth/users have dedicated
-  // composite UI on the local page (multi-user lists, password resets) that
-  // doesn't map cleanly to SchemaPanel's flat field grid. Bond mode itself
-  // excluded because reconfiguring bond over its own session would
-  // self-destruct. If a future refactor splits credential-bearing entries
-  // out, we can re-add some of these.
-  // 'wifi' is here because the only rows it still exposes are wifiEnabled /
-  // wifiAutoStart / wifiAutoReconnect — toggling those on a bonded worker drops
-  // the very link being used to manage it. Its time settings moved to 'clock'
-  // (whitelisted below), so the bonded view exposes exactly what it did before.
-  var BONDED_MODULE_DENYLIST = ['users', 'bond', 'wifi'];
-
-  // Per-module key whitelist for the bonded view. Modules listed here render
-  // ONLY the keys named — used for partial exposure when a module has both
-  // safe-to-edit fields and risky ones.
-  //
-  // NOTE: this filter FAILS OPEN — renderBondedModules() only applies it when
-  // the module name is a key here, and SchemaPanel renders every entry when no
-  // keys array is passed. So dropping a module from this table exposes all of
-  // its rows rather than none. Prefer BONDED_MODULE_DENYLIST to hide a module.
-  var BONDED_KEY_WHITELIST = {
-    clock: ['ntpServer', 'tzOffsetMinutes']
-  };
+  // Which worker modules and keys the bonded view may edit is the firmware's
+  // remote-edit policy (BondedPeer::remoteEditAllowed, shared with the OLED
+  // editor): /api/bond/settings/schema returns the schema already narrowed to
+  // it, so this page renders what it receives and keeps no copy of the policy.
 
   // After a successful sync, fetch the worker's schema and render one
   // SchemaPanel per module into bond-modules-host. Each panel renders the
@@ -3724,10 +3716,9 @@ console.log('[SETTINGS] All parts loaded successfully');
           return;
         }
         var visible = schema.modules.filter(function(m){
-          return m && m.name && BONDED_MODULE_DENYLIST.indexOf(m.name) < 0
-                                   && Array.isArray(m.entries) && m.entries.length > 0;
+          return m && m.name && Array.isArray(m.entries) && m.entries.length > 0;
         });
-        console.log('[Bonded] Worker exposed ' + schema.modules.length + ' modules, rendering ' + visible.length + ' (denylist: ' + BONDED_MODULE_DENYLIST.join(',') + ')');
+        console.log('[Bonded] Worker exposes ' + schema.modules.length + ' editable modules, rendering ' + visible.length);
         host.innerHTML = '';
         visible.forEach(function(m){
           var panelId = 'bond-mod-' + m.name;
@@ -3761,7 +3752,6 @@ console.log('[SETTINGS] All parts loaded successfully');
             saveLabel: 'Save to Worker',
             logPrefix: 'Bonded:' + m.name
           };
-          if (BONDED_KEY_WHITELIST[m.name]) panelOpts.keys = BONDED_KEY_WHITELIST[m.name];
           window.SchemaPanel.render(panelOpts);
         });
         if (visible.length === 0) {

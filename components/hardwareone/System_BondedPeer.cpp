@@ -9,6 +9,7 @@
 #include "System_VFS.h"
 #include "System_Mutex.h"
 #include "System_Debug.h"
+#include "System_MemUtil.h"   // PSRAM_JSON_DOC, ps_alloc — the editable-schema copy
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -196,6 +197,46 @@ bool remoteEditAllowed(const char* moduleName, const char* key) {
     return key == nullptr || strcmp(key, "ntpServer") == 0 ||
            strcmp(key, "tzOffsetMinutes") == 0;
   }
+  return true;
+}
+
+void filterSchemaForRemoteEdit(JsonDocument& schema) {
+  JsonArray modules = schema["modules"].as<JsonArray>();
+  if (modules.isNull()) return;
+  for (size_t m = modules.size(); m-- > 0;) {
+    JsonObject mod = modules[m].as<JsonObject>();
+    const char* name = mod["name"].as<const char*>();
+    if (!remoteEditAllowed(name, nullptr)) {
+      modules.remove(m);
+      continue;
+    }
+    JsonArray entries = mod["entries"].as<JsonArray>();
+    if (entries.isNull()) continue;
+    for (size_t i = entries.size(); i-- > 0;) {
+      const char* key = entries[i]["key"].as<const char*>();
+      if (!key || !remoteEditAllowed(name, key)) entries.remove(i);
+    }
+  }
+  schema["count"] = modules.size();
+}
+
+bool readRemoteEditableSchemaJson(char** out, size_t* outLen) {
+  if (out) *out = nullptr;
+  if (outLen) *outLen = 0;
+  if (!out || !outLen) return fail("No output buffer");
+  PSRAM_JSON_DOC(doc);
+  {
+    const String cached = readCachedSchemaJson();
+    if (cached.length() == 0) return false;  // lastError set by the reader
+    if (deserializeJson(doc, cached)) return fail("Cached schema does not parse");
+  }
+  filterSchemaForRemoteEdit(doc);
+  const size_t len = measureJson(doc);
+  char* buf = (char*)ps_alloc(len + 1, AllocPref::PreferPSRAM, "bond.schema.editable");
+  if (!buf) return fail("Out of memory for the schema");
+  serializeJson(doc, buf, len + 1);
+  *out = buf;
+  *outLen = len;
   return true;
 }
 

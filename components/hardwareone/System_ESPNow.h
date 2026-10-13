@@ -1163,7 +1163,11 @@ const char* cmd_espnow_mode(const String& originalCmd);
 const char* cmd_espnow_setname(const String& originalCmd);
 const char* cmd_espnow_hbmode(const String& originalCmd);
 
-// Streaming
+// Streaming. broadcastOutput asks espnowStreamOutputWanted() first: true while
+// cmd_exec runs an ESP-NOW command (its output goes to that request's session,
+// keyed by the command context's id) or while the legacy startstream sink is
+// on and a remote command is in flight.
+bool espnowStreamOutputWanted();
 void sendEspNowStreamMessage(const String& message);
 
 // Mesh

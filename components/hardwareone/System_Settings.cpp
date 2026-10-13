@@ -23,6 +23,7 @@
 #include "System_NTP.h"
 #include "BLE_Peers.h"       // bluetooth.peers JSON (de)serialization
 #include "System_Command.h"
+#include "System_SettingsEditorCore.h"  // settingsEditorHasCommand — schema cmdKey only for registered setters
 #include "System_CommandTypes.h"
 #include "System_AuthIdentity.h"
 #include "System_Notifications.h"
@@ -3892,7 +3893,11 @@ void buildSettingsSchemaJson(JsonDocument& doc) {
       }
       if (e->readOnly) entry["readOnly"] = true;
       if (e->group)    entry["group"] = e->group;
-      if (e->cmdKey) entry["cmdKey"] = e->cmdKey;
+      // A row is settable only through a setter this build registers; a row
+      // whose cmdKey names a compiled-out command carries none, so clients
+      // (the web page, the bonded peer's OLED editor) show it read-only
+      // instead of sending "Unknown command".
+      if (e->cmdKey && settingsEditorHasCommand(e)) entry["cmdKey"] = e->cmdKey;
 
       if (e->type == SETTING_INT || e->type == SETTING_U8 ||
           e->type == SETTING_U16 || e->type == SETTING_U32 ||
