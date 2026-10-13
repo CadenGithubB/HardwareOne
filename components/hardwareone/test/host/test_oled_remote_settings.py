@@ -14,7 +14,11 @@ carry a setter (cmdKey), sends `remote:<cmdKey> <value>`, reports the peer's
 CMD_RESP failure or silence instead of the local "sent" result, never runs a
 local setter, fetches a missing schema once without blocking, and releases
 everything it allocated; on the local screen a refused slider/pick-list (INT)
-save shows the executor's reply on the editor line like the STRING path. A
+save shows the executor's reply on the editor line like the STRING path. A13:
+System_Utils' remote: reply owner (formatRemoteCommandSent /
+parseRemoteCommandSentReqId) is spliced in; the executor double answers with it,
+and the commit waits for the CMD_RESP whose reqId is that request's msgId, so the
+bonded peer's reply to another remote: command does not decide it. A
 static check confirms the CMD_RESP drain publishes the record. `--component
 <dir>` runs the same cases against saved sources (the base `remote:set
 <jsonKey>` editor fails them). The radio link and the real display are not
@@ -123,6 +127,20 @@ const char* remoteSettingsLastError() { return ""; }
 """
 
 
+REPLY_FUNCTIONS = ("void formatRemoteCommandSent(", "bool parseRemoteCommandSentReqId(")
+
+
+def remote_reply(read) -> str:
+    """System_Utils' remote: reply owner (A13), or nothing on a tree without it."""
+    utils = read("System_Utils.cpp")
+    if not all(marker in utils for marker in REPLY_FUNCTIONS):
+        return "// this tree's remote: reply has no request id"
+    constants = re.findall(r'(?m)^static constexpr char kRemoteSent\w+\[\] = "[^"\n]*";$', utils)
+    require(len(constants) == 2, "System_Utils.cpp: the remote: reply constants changed")
+    return "\n".join([*constants, *(extract_block(utils, marker) for marker in REPLY_FUNCTIONS),
+                      "#define HW1_REMOTE_REPLY_OWNER 1"])
+
+
 def remote(read) -> str:
     header = strip_includes(read("OLED_RemoteSettings.h"))
     source = strip_includes(read("OLED_RemoteSettings.cpp"))
@@ -189,6 +207,7 @@ def generated(read) -> str:
     for marker, body in (("// INSERT_SETTINGS_TYPES", settings_types(read)),
                          ("// INSERT_ESPNOW", espnow_record(read)),
                          ("// INSERT_BONDED", bonded(read)),
+                         ("// INSERT_REMOTE_REPLY", remote_reply(read)),
                          ("// INSERT_EDITOR_TYPES", editor_types(read)),
                          ("// INSERT_REMOTE", remote(read)),
                          ("// INSERT_EDITOR", editor(read)),

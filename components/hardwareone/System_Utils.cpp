@@ -3803,12 +3803,11 @@ const char* cmd_perftop(const String& originalCmd) {
 // External dependencies for command execution
 extern bool gCLIValidateOnly;
 extern QueueHandle_t gCmdExecQ;
+extern TaskHandle_t gCmdExecTaskHandle;
 
 // External functions
 extern bool handleHelpNavigation(const String& cmd, char* out, size_t outSize);
 extern String exitToNormalBanner();
-extern bool hasAdminPrivilege(const AuthContext& ctx);
-extern bool hasSuperAdminPrivilege(const AuthContext& ctx);
 extern bool isAdminUser(const String& user);
 
 // Note: resolveRegistryCommandKey() is now defined in command_system.cpp
@@ -4164,9 +4163,72 @@ static void stampOkStatus(char* out, size_t outSize, bool success) {
   out[pfx + keep] = '\0';
 }
 
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+// `remote:` reply owner (declared in System_Utils.h).
+static constexpr char kRemoteSentPrefix[] = "Remote command sent: ";
+static constexpr char kRemoteSentReqId[] = " (reqId ";
+
+void formatRemoteCommandSent(char* out, size_t outSize, const char* safeCommand,
+                             uint32_t msgId) {
+  if (!out || outSize == 0) return;
+  char suffix[24];
+  snprintf(suffix, sizeof(suffix), "%s%lu)", kRemoteSentReqId, (unsigned long)msgId);
+  const size_t fixed = (sizeof(kRemoteSentPrefix) - 1) + strlen(suffix);
+  const char* echo = safeCommand ? safeCommand : "";
+  size_t echoLen = strlen(echo);
+  // Shorten the echo, never the request id.
+  const size_t room = outSize > fixed ? outSize - 1 - fixed : 0;
+  if (echoLen > room) echoLen = room;
+  snprintf(out, outSize, "%s%.*s%s", kRemoteSentPrefix, (int)echoLen, echo, suffix);
+}
+
+bool parseRemoteCommandSentReqId(const char* reply, uint32_t* msgIdOut) {
+  const size_t prefixLen = sizeof(kRemoteSentPrefix) - 1;
+  if (!reply || !msgIdOut || strncmp(reply, kRemoteSentPrefix, prefixLen) != 0) return false;
+  // The id is the last tag and ends the reply; an echoed command cannot fake it.
+  const char* tag = nullptr;
+  for (const char* p = strstr(reply + prefixLen, kRemoteSentReqId); p;
+       p = strstr(p + 1, kRemoteSentReqId)) {
+    tag = p;
+  }
+  if (!tag) return false;
+  const char* digits = tag + sizeof(kRemoteSentReqId) - 1;
+  const char* p = digits;
+  uint64_t value = 0;
+  while (*p >= '0' && *p <= '9' && p - digits < 10) value = value * 10 + (uint64_t)(*p++ - '0');
+  if (p == digits || p[0] != ')' || p[1] != '\0' || value == 0 || value > 0xFFFFFFFFull) {
+    return false;
+  }
+  *msgIdOut = (uint32_t)value;
+  return true;
+}
+#endif  // ENABLE_ESPNOW && ENABLE_BONDED_MODE
+
+// Handlers share the executor's task state: the validate mirror
+// gCLIValidateOnly, the debug and capture buffers and their static result
+// buffers. Only cmd_exec runs them, plus the early-boot direct path in
+// submitAndExecuteSync before the executor queue exists. Every other task
+// submits instead (submitAndExecuteSync, submitCommandAsync,
+// executeInternalStatusCommand).
+static bool executeCommandCallerAdmitted() {
+  if (gCmdExecQ == nullptr) return true;
+  return gCmdExecTaskHandle != nullptr &&
+         xTaskGetCurrentTaskHandle() == gCmdExecTaskHandle;
+}
+
 bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize) {
   // Clear output buffer
   out[0] = '\0';
+
+  // Refuse before any side effect (activity, identity, audit). The command
+  // text is not logged: it may carry a credential.
+  if (!executeCommandCallerAdmitted()) {
+    const char* task = pcTaskGetName(nullptr);
+    ERROR_SYSTEMF("[execCmd] refused a direct call from task '%s'; submit it to cmd_exec",
+                  task ? task : "?");
+    snprintf(out, outSize, "Error: commands run on the command executor only.");
+    return false;
+  }
 
   // Resolve the immutable queue-admission metadata before any side effect.
   // A logout, reconnect or same-user re-login invalidates the captured
@@ -4405,9 +4467,9 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
       // broadcastOutput fans out to every sink including the MSG_ROUTE_FILE tee,
       // writing the password to unencrypted flash. This branch returns before
       // executeCommand's logCommandExecution calls, so it never passed through
-      // any redaction at all; it has to redact for itself.
-      snprintf(out, outSize, "Remote command sent: %s",
-               safeRemoteCommand.c_str());
+      // any redaction at all; it has to redact for itself. The reply carries
+      // msgId, which the peer's CMD_RESP echoes as its reqId.
+      formatRemoteCommandSent(out, outSize, safeRemoteCommand.c_str(), msgId);
       broadcastOutput("[REMOTE] Sent to bonded device: " + safeRemoteCommand);
       return true;
     } else {

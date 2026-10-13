@@ -43,10 +43,13 @@ static bool gRemoteSchemaMissing = false;  // last load failed because no schema
 static RemoteSettingsLoadState gLoadState = REMOTE_LOAD_IDLE;
 static uint32_t gSyncStartMs = 0;
 
-// The one commit in flight. Its reply is the next CMD_RESP from the bonded peer
-// after `seqBefore` (EspNowCmdResult sequence).
+// The one commit in flight. Its reply is the CMD_RESP from the bonded peer that
+// answers `reqId` (the msgId the remote: reply reported), published after
+// `seqBefore` (EspNowCmdResult sequence). A reply to another remote: command
+// from the same peer (the web console's, say) does not decide it.
 struct RemotePending {
   bool active = false;
+  uint32_t reqId = 0;
   uint32_t seqBefore = 0;
   uint32_t sentMs = 0;
   const SettingEntry* entry = nullptr;
@@ -432,8 +435,18 @@ bool applyRemoteSettingChange(const SettingEntry* entry, const String& value, St
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] %s not sent: %s", entry->cmdKey, errOut.c_str());
     return false;
   }
+  // The remote: owner's reply names the request id the peer will answer
+  // (System_Utils parseRemoteCommandSentReqId). Without it this commit could
+  // not tell its reply from another request's, so it does not wait for one.
+  uint32_t reqId = 0;
+  if (!parseRemoteCommandSentReqId(out, &reqId)) {
+    errOut = "Sent, but no request id to match the reply";
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] %s: %s", entry->cmdKey, errOut.c_str());
+    return false;
+  }
 
   gPending.active = true;
+  gPending.reqId = reqId;
   gPending.seqBefore = seqBefore;
   gPending.sentMs = millis();
   gPending.entry = entry;
@@ -459,7 +472,7 @@ RemoteSettingsOutcome remoteSettingsPollOutcome(String& textOut) {
   EspNowCmdResult r;
   if (espnowCmdResultGet(r) && r.seq != gPending.seqBefore) {
     uint8_t peer[6];
-    if (BondedPeer::peerMacBytes(peer) && macEqual6(r.srcMac, peer)) {
+    if (r.reqId == gPending.reqId && BondedPeer::peerMacBytes(peer) && macEqual6(r.srcMac, peer)) {
       gPending.active = false;
       textOut = r.text;
       // Same rule as the local string save: a reply that starts with "Error"
@@ -470,7 +483,7 @@ RemoteSettingsOutcome remoteSettingsPollOutcome(String& textOut) {
       }
       return REMOTE_OUTCOME_FAILED;
     }
-    gPending.seqBefore = r.seq;  // another peer's reply; keep waiting for ours
+    gPending.seqBefore = r.seq;  // another request's or peer's reply; keep waiting for ours
   }
 
   if (millis() - gPending.sentMs >= REMOTE_SET_REPLY_TIMEOUT_MS) {

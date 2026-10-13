@@ -36,7 +36,6 @@ extern void streamEndHtml(httpd_req_t* req);
 
 extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
 extern String getEspNowDeviceName(const uint8_t* mac);
-extern bool hasAdminPrivilege(const AuthContext& ctx);  // HardwareOne.cpp — the executor's admin gate (authorizeCommand)
 
 
 // =============================================================================
@@ -1698,20 +1697,23 @@ static esp_err_t handleBondSettingsSync(httpd_req_t* req) {
 // ~8 KB and the unified-command capture buffer caps at 4 KB. The file
 // pipeline chunks transparently. Same reason settings.json moves this way.
 
-// GET /api/bond/settings/schema — read the cached schema file from disk.
-// Returns the raw JSON the worker emitted, byte-for-byte. Callers should
-// hit /api/bond/settings/schema/sync first if the cache may be stale.
+// GET /api/bond/settings/schema — the cached schema the worker emitted,
+// narrowed to what a bonded settings editor may show (the remote-edit policy
+// BondedPeer owns; the OLED editor applies the same one). Callers should hit
+// /api/bond/settings/schema/sync first if the cache may be stale.
 static esp_err_t handleBondSettingsSchema(httpd_req_t* req) {
   WEB_AUTH_JSON_OR_RETURN(req, ctx);
 
-  String cached = BondedPeer::readCachedSchemaJson();
-  if (cached.length() == 0) {
+  char* schema = nullptr;
+  size_t schemaLen = 0;
+  if (!BondedPeer::readRemoteEditableSchemaJson(&schema, &schemaLen)) {
     char body[160];
     snprintf(body, sizeof(body), "{\"error\":\"%s\"}", BondedPeer::lastError());
     httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  httpd_resp_send(req, cached.c_str(), cached.length());
+  httpd_resp_send(req, schema, schemaLen);
+  free(schema);
   return ESP_OK;
 }
 

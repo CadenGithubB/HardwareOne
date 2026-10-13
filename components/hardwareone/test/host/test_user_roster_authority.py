@@ -177,6 +177,28 @@ def source_contract() -> None:
     lister = unique_block(user, "const char* cmd_user_list(")
     require("visitUserRoster(" in lister and ".set(users)" not in lister,
             "userlist uses the roster snapshot and no longer copies whole records")
+    privilege_declarations()
+
+
+def privilege_declarations() -> None:
+    """The executor's admin gates are declared once, in System_User.h; callers
+    (authorizeCommand, the bond file pages, the OLED peer browser) include it
+    instead of carrying their own extern or forward declarations."""
+    header = (COMPONENT / "System_User.h").read_text()
+    for name in ("hasAdminPrivilege", "hasSuperAdminPrivilege"):
+        require(f"bool {name}(const AuthContext& ctx);" in header, f"System_User.h does not declare {name}")
+    local = re.compile(r"^[ \t]*(?:extern[ \t]+)?bool[ \t]+has(?:Super)?AdminPrivilege[ \t]*\([^)]*\)[ \t]*;", re.M)
+    for path in sorted(COMPONENT.rglob("*.cpp")):
+        if "test" in path.relative_to(COMPONENT).parts:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for match in local.finditer(text):
+            line = text.count("\n", 0, match.start()) + 1
+            raise AssertionError(f"{path.relative_to(COMPONENT)}:{line} declares the admin gate itself "
+                                 "(include System_User.h): " + match.group(0).strip())
+    gate = last_block((COMPONENT / "HardwareOne.cpp").read_text(), "bool hasAdminPrivilege(")
+    require("ONLY caller" not in gate,
+            "hasAdminPrivilege's comment still says authorizeCommand is its only caller")
 
 
 def main() -> None:

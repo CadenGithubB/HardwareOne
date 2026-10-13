@@ -1250,11 +1250,33 @@ void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& r
 
 // Forward declaration for session-based streaming helper (defined in V3 protocol section)
 static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t len);
-uint32_t gCurrentStreamCmdId = 0;  // Set during command execution on cmd_exec task (non-static for HardwareOne.cpp)
+
+// The stream session of the ESP-NOW command the calling task is running, or 0.
+// v4_handle_cmd keys the session by the request's msgId and queues the command
+// with ctx.origin = ORIGIN_ESPNOW and ctx.id = msgId; cmd_exec installs that
+// context for the command's run. Output of another task, of a command from
+// another origin, or of another queued request never selects a session. (One
+// global id set at queue time used to stream whatever cmd_exec printed to the
+// peer that queued last, and the first completion cleared the other's stream.)
+//
+// Task gate: only cmd_exec_task streams session output. Lines from unrelated
+// tasks would pollute the command's response (heartbeat ACKs, bond status
+// pushes) and run the STREAM send on small stacks: an `opengamepad` bonded
+// command's Seesaw init on sensor_queue_task (11 KB) once overflowed that way.
+static uint32_t streamCmdIdForCurrentTask() {
+  extern TaskHandle_t gCmdExecTaskHandle;
+  if (gCmdExecTaskHandle == nullptr || xTaskGetCurrentTaskHandle() != gCmdExecTaskHandle) {
+    return 0;
+  }
+  const CommandContext* ctx = static_cast<const CommandContext*>(currentCommandContext());
+  if (!ctx || ctx->origin != ORIGIN_ESPNOW) return 0;
+  return ctx->id;
+}
 
 // Send stream message to ESP-NOW target (called by broadcastOutput) - V3 binary STREAM
 // Supports two modes:
-// 1. Session-based: If gCurrentStreamCmdId is set, stream to that session's target
+// 1. Session-based: cmd_exec running an ESP-NOW command streams to that
+//    request's session target (streamCmdIdForCurrentTask)
 // 2. Legacy global: If streamActive, stream to streamTarget (startstream/stopstream commands)
 void sendEspNowStreamMessage(const String& message) {
   if (!gEspNow || !gEspNow->initialized) return;
@@ -1263,23 +1285,12 @@ void sendEspNowStreamMessage(const String& message) {
   // a sensitive JSON field cannot be split across frames ahead of the filter.
   const String safeMessage = redactOutputForLog(message);
 
-  // Check for session-based streaming first (V3 CMD output).
-  //
-  // CRITICAL — task gate: gCurrentStreamCmdId is a global set for the whole
-  // duration of an async bonded-command execution, and broadcastOutput() is
-  // also global. Without restricting to the command's actual task, log lines
-  // emitted by *unrelated* tasks during that window get force-streamed via a
-  // synchronous AEAD-encrypt + esp_now_send on whatever stack they're running.
-  // That (a) pollutes the command response with garbage (heartbeat ACKs, bond
-  // status pushes) and (b) overflows small task stacks — e.g. an `opengamepad`
-  // bonded command kicks the Seesaw init on sensor_queue_task (11 KB), and a
-  // nested STREAM frame send from inside that deep init blew the stack. Stream
-  // only the output produced by cmd_exec_task (24 KB), which is where the
-  // streamed command actually runs and emits its real output.
-  extern TaskHandle_t gCmdExecTaskHandle;
-  if (gCurrentStreamCmdId != 0 && xTaskGetCurrentTaskHandle() == gCmdExecTaskHandle) {
+  // Session-based streaming first (V3 CMD output), keyed by the command the
+  // calling task is running.
+  const uint32_t cmdMsgId = streamCmdIdForCurrentTask();
+  if (cmdMsgId != 0) {
     // The session helper clamps the line to one frame for its target.
-    if (trySendToStreamSession(gCurrentStreamCmdId, safeMessage.c_str(), safeMessage.length())) {
+    if (trySendToStreamSession(cmdMsgId, safeMessage.c_str(), safeMessage.length())) {
       return;  // Sent via session
     }
   }
@@ -1361,7 +1372,8 @@ struct StreamSession {
 #define MAX_STREAM_SESSIONS 4
 #define STREAM_SESSION_TIMEOUT_MS 30000  // Auto-expire after 30s
 static StreamSession gStreamSessions[MAX_STREAM_SESSIONS];
-// Note: gCurrentStreamCmdId is forward-declared near sendEspNowStreamMessage
+// Note: the session for output is chosen by streamCmdIdForCurrentTask() (near
+// sendEspNowStreamMessage), from the running command's context.
 
 // Stream session management
 static StreamSession* createStreamSession(const uint8_t* mac, uint32_t cmdMsgId) {
@@ -1436,6 +1448,21 @@ static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t l
                      (const uint8_t*)data, (uint16_t)len, 1);
   DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Session %lu sent: %.50s", (unsigned long)cmdMsgId, data);
   return true;
+}
+
+// broadcastOutputCore (System_Debug) asks this before copying a line into
+// sendEspNowStreamMessage, so an ordinary broadcast costs one check. A line
+// can stream when cmd_exec is running an ESP-NOW command (its own session), or
+// to the legacy startstream target while a remote command is in flight (a
+// stream session is open): the window that sink has always heard.
+bool espnowStreamOutputWanted() {
+  if (!gEspNow || !gEspNow->initialized || gEspNow->streamingSuspended) return false;
+  if (streamCmdIdForCurrentTask() != 0) return true;
+  if (!gEspNow->streamActive) return false;
+  for (int i = 0; i < MAX_STREAM_SESSIONS; i++) {
+    if (gStreamSessions[i].active) return true;
+  }
+  return false;
 }
 
 // EspNowV4Header, V4PayloadCmdResp, V4PayloadFile* moved to System_ESPNow_Wire.h
@@ -6837,10 +6864,10 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
   size_t resultLen = result ? strlen(result) : 0;
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4] CMD result callback: ok=%d len=%zu to %s (msgId=%lu)",
          ok, resultLen, ctx->deviceName, (unsigned long)ctx->cmdMsgId);
-  
-  // Clear the current stream session ID (stops any further streaming)
-  gCurrentStreamCmdId = 0;
-  
+
+  // No further output streams to this session: commandExecTask cleared the
+  // command context before calling back, so streamCmdIdForCurrentTask() is 0.
+
   // Send STREAM_END frame to signal output is complete
   sendSessionStreamFrame(ctx->cmdMsgId, nullptr, 0, ESPNOW_V4_FLAG_STREAM_END);
   
@@ -7117,11 +7144,10 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   
   // Send STREAM_BEGIN frame to signal output is starting
   sendSessionStreamFrame(msgId, nullptr, 0, ESPNOW_V4_FLAG_STREAM_BEGIN);
-  
-  // Set the current stream session ID (cmd_exec task will use this)
-  gCurrentStreamCmdId = msgId;
-  
-  // Build command for cmd_exec task
+
+  // Build command for cmd_exec task. Its output streams to this session while
+  // cmd_exec runs it: origin ORIGIN_ESPNOW with ctx.id == msgId (below) is the
+  // key streamCmdIdForCurrentTask() reads.
   Command cmd;
   cmd.line = actualCmd;
   cmd.ctx.origin = ORIGIN_ESPNOW;
@@ -7157,7 +7183,6 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     BROADCAST_PRINTF("[ESP-NOW] Rejected CMD from %s: %s", deviceName,
                      inputLengthAccepted ? "executor unavailable"
                                          : "command exceeds input limit");
-    gCurrentStreamCmdId = 0;
     destroyStreamSession(msgId);
     free(asyncCtx);
     uint8_t respPayload[32];

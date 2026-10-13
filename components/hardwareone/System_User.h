@@ -168,6 +168,15 @@ inline constexpr const char* kBondAdminUser = "bond-admin";
 // answer the bare name with this test against the calling task's identity.
 bool bondIdentityLive(const AuthContext& ctx);
 
+// The executor's admin gates for a caller's context (defined in
+// HardwareOne.cpp). authorizeCommand asks them for every registry row's
+// requiresAdmin / requiresSuperAdmin flag; the bond file pages and the OLED
+// peer browser ask hasAdminPrivilege before a remote file request. The reserved
+// bond name counts only as the live ESP-NOW bond (bondIdentityLive), so a web
+// or OLED context carrying it gets false.
+bool hasAdminPrivilege(const AuthContext& ctx);
+bool hasSuperAdminPrivilege(const AuthContext& ctx);
+
 // Reserved audit/dispatch names ("system", "AuthBypass", kBondAdminUser),
 // compared case-insensitively. They are never creatable, never resolve to an
 // account id and never pass a credential check.

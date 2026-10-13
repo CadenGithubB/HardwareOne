@@ -1618,6 +1618,14 @@ static const PathRule sPathRules[] = {
   // and why an admin could not hand-make a folder to drop a file into.
   {"/logging_captures/",                0,         PERM_READ | PERM_WRITE | PERM_DELETE | PERM_RENAME | PERM_CREATE | PERM_IMPORT, PERM_ALL, false, false},
 
+  // ---- ESP-NOW inbox: admin tier; system full ----
+  // Files a peer pushes (espnowsendfile, imagesend) and files an admin pulls
+  // from the bonded peer (FS_GET, which can bring back its users.json or logs)
+  // land in /espnow/received/<mac>/, written by the system identity. Users get
+  // nothing here; admins keep what '/espnow/' gave them. Must precede it.
+  {"/espnow/received",                  0,         PERM_READ | PERM_WRITE | PERM_DELETE,          PERM_ALL,  true,  false},
+  {"/espnow/received/",                 0,         PERM_READ | PERM_WRITE | PERM_DELETE,          PERM_ALL,  false, false},
+
   // ---- ESP-NOW data: user can read+write+delete; admin same; system full ----
   {"/espnow/",                          PERM_READ | PERM_WRITE | PERM_DELETE,
                                         PERM_READ | PERM_WRITE | PERM_DELETE,                          PERM_ALL,  false, false},

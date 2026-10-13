@@ -988,11 +988,13 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
   //    several lines in one envelope pack them with '\n' at the call site.
   enqueueChunk(text, len, route, /*category=*/0, len > (size_t)(DEBUG_MSG_SIZE - 1));
 
-  // 7. ESP-NOW V3 session streaming (extern to avoid circular deps)
+  // 7. ESP-NOW V3 session streaming (extern to avoid circular deps). The
+  //    owner decides from the calling task's command context whether, and to
+  //    which requester, this line streams.
 #if ENABLE_ESPNOW
-  extern uint32_t gCurrentStreamCmdId;
+  extern bool espnowStreamOutputWanted();
   extern void sendEspNowStreamMessage(const String& message);
-  if (gCurrentStreamCmdId != 0) {
+  if (espnowStreamOutputWanted()) {
     sendEspNowStreamMessage(String(text));
   }
 #endif

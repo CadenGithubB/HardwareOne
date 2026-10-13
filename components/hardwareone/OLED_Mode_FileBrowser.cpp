@@ -508,8 +508,8 @@ static bool ensurePeerCache() {
 // Browsing or pulling a peer's files needs the same local authority as
 // `remote:files`: an administrator at this display. The peer serves only its
 // bonded partner; this is the human half of the gate. AuthBypass (display auth
-// off) is not an administrator, exactly as for the remote command.
-extern bool hasAdminPrivilege(const AuthContext& ctx);  // HardwareOne.cpp — the executor's admin gate
+// off) is not an administrator, exactly as for the remote command. The gate is
+// the executor's (System_User.h hasAdminPrivilege).
 static bool peerBrowseAuthorized() {
   return hasAdminPrivilege(oledFileBrowserAuthContext());
 }

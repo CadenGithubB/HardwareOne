@@ -175,6 +175,15 @@ int main() {
     expect("admin", "/battery.csv.2",                       true,  false, false, true);
     expect("admin", "/system/settings.json",                true,  false, false, false);
     expect("admin", "/logging_captures/sensors/s.csv",      true,  true,  true,  true);
+    // The ESP-NOW inbox (pushed files and the bonded peer's pulled files, e.g.
+    // its users.json) is admin tier; the rest of /espnow/ is unchanged.
+    expect("alice", "/espnow/received",                     false, false, false, false);
+    expect("alice", "/espnow/received/peer01/users.json",   false, false, false, false);
+    expect("alice", "/espnow/received/peer01/photo.txt",    false, false, false, false);
+    expect("guest", "/espnow/received/peer01/users.json",   false, false, false, false);
+    expect("admin", "/espnow/received",                     true,  true,  false, true);
+    expect("admin", "/espnow/received/peer01/users.json",   true,  true,  false, true);
+    expect("alice", "/espnow/receivedX.txt",                true,  true,  false, true);
     // The battery logger writes, stages and rotates as the system identity.
     AuthContext system;system.transport=SOURCE_INTERNAL;system.user="system";
     for(const char* p:{"/battery.csv","/battery.csv.1","/battery.csv.header.tmp"}){

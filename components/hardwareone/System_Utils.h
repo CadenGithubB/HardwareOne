@@ -135,8 +135,19 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
 // work it runs through submitDeferredToCmdExec) and the early-boot path of
 // submitAndExecuteSync call it: handlers share the debug buffer and static
 // result buffers, so every other caller goes through the submission
-// functions below.
+// functions below. Any other task gets false and an Error result.
 bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
+
+// `remote:<command>` reply. A bonded send that left answers
+//   "Remote command sent: <redacted command> (reqId <msgId>)"
+// msgId is the CMD frame's id; the peer's CMD_RESP echoes it as
+// EspNowCmdResult::reqId, so a sender waiting for its answer can tell it from a
+// reply to anyone else's remote: command. The echo is shortened first, so the
+// id survives any result buffer that holds the prefix and the tag. The parser
+// accepts only that shape and a non-zero id. (ENABLE_ESPNOW && ENABLE_BONDED_MODE)
+void formatRemoteCommandSent(char* out, size_t outSize, const char* safeCommand,
+                             uint32_t msgId);
+bool parseRemoteCommandSentReqId(const char* reply, uint32_t* msgIdOut);
 
 // Validate-only (dry-run) state of the command running on the calling task,
 // read from that task's CommandContext. Another task's validate pass never

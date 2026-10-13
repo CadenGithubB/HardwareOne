@@ -282,8 +282,7 @@ extern bool gSkipNTPInWifiConnect;
 
 // Centralized command execution with AuthContext (transport-agnostic)
 static const char* originFrom(const AuthContext& ctx);
-bool hasAdminPrivilege(const AuthContext& ctx);
-bool hasSuperAdminPrivilege(const AuthContext& ctx);
+// hasAdminPrivilege / hasSuperAdminPrivilege are declared in System_User.h.
 
 struct ExecReq;
 QueueHandle_t gCmdExecQ = nullptr;
@@ -596,13 +595,15 @@ bool hasAdminPrivilege(const AuthContext& ctx) {
   // memoised in TLS. Reuse it rather than re-opening users.json for a question
   // this task may have answered moments ago.
   //
-  // The username guard is defensive, not load-bearing today: authorizeCommand
-  // is the ONLY caller (System_Utils.cpp, the gate itself plus the remote:/@
-  // re-check), and both pass the very ctx that CommandIdentityScope installed,
-  // so the fast path always wins. Targeted session control does NOT come
-  // through here — it routes to callerMayTargetAnotherSession. The guard exists
-  // so that a future caller passing someone else's ctx still resolves for real
-  // rather than silently inheriting this task's answer.
+  // Callers (declared in System_User.h): authorizeCommand (System_Utils.cpp,
+  // the gate itself plus the remote:/@ re-check) passes the very ctx
+  // CommandIdentityScope installed, so the fast path wins. The bond file pages
+  // (WebPage_Bond.cpp, on httpd) and the OLED peer browser
+  // (OLED_Mode_FileBrowser.cpp) pass their own request/display ctx, which is
+  // not an identity installed on their task: the username guard sends those to
+  // a real lookup rather than this task's memoised answer. Targeted session
+  // control does NOT come through here — it routes to
+  // callerMayTargetAnotherSession.
   //
   // The reserved bond name is decided from the ctx itself: privileged only as
   // the live ESP-NOW bond, never as an account or session on another transport.

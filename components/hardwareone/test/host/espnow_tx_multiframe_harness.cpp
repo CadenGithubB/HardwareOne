@@ -9,8 +9,10 @@
 //    CALLER plays cmd_exec_task (gCmdExecTaskHandle); HTTPD plays any other
 //    synchronous sender (httpd, the OLED loop).
 //  * STREAM: the real STREAM line sender (sendEspNowStreamMessage, its session
-//    helper and session lookup, plus v4_single_frame_cap when the source has
-//    it) against a recording espnowtx::sendAead.
+//    helper and session lookup, plus v4_single_frame_cap, the per-task session
+//    pick streamCmdIdForCurrentTask and the broadcast gate
+//    espnowStreamOutputWanted when the source has them) against a recording
+//    espnowtx::sendAead and a per-task command-context double.
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
@@ -405,8 +407,21 @@ struct EspNowState {
 };
 static EspNowState gState = {};
 EspNowState* gEspNow = &gState;
-uint32_t gCurrentStreamCmdId = 0;
 TaskHandle_t gCmdExecTaskHandle = CALLER;
+
+// Per-task command context (System_AuthIdentity's TLS slot): CALLER plays
+// cmd_exec_task, OTHER_TASK any other task. The two fields the stream owner
+// reads mirror System_CommandTypes.h (the driver checks that they still exist).
+enum CommandOrigin { ORIGIN_SERIAL, ORIGIN_WEB, ORIGIN_SYSTEM, ORIGIN_ESPNOW };
+struct CommandContext {
+  CommandOrigin origin;
+  uint32_t id;
+};
+static CommandContext gExecCtx = {};
+static bool gExecHasCtx = false;
+void* currentCommandContext() {
+  return (gCurrentTask == CALLER && gExecHasCtx) ? &gExecCtx : nullptr;
+}
 
 struct SendCall {
   uint8_t mac[6];
@@ -438,10 +453,44 @@ static void resetStream() {
   gSends.clear();
   gState = {};
   gState.initialized = true;
+#ifdef HW1_STREAM_GLOBAL_ID
   gCurrentStreamCmdId = 0;
+#endif
   gCurrentTask = CALLER;
+  gExecHasCtx = false;
   for (StreamSession& s : gStreamSessions) s = {};
   gClock += 1000;  // clear the legacy rate limit
+}
+
+// What v4_handle_cmd does on espnow_task when it accepts a request: open the
+// request's stream session keyed by its msgId and queue the command with
+// origin ORIGIN_ESPNOW, ctx.id = msgId. A pre-fix source also published the
+// msgId in one global the sender read, set at queue time.
+static void queueEspNowRequest(int slot, uint32_t msgId, const uint8_t* mac) {
+  gStreamSessions[slot].active = true;
+  gStreamSessions[slot].cmdMsgId = msgId;
+  std::memcpy(gStreamSessions[slot].targetMac, mac, 6);
+#ifdef HW1_STREAM_GLOBAL_ID
+  gCurrentStreamCmdId = msgId;
+#endif
+}
+
+// What commandExecTask does around one command: install its context on
+// cmd_exec for the run (execIdle: between commands, or a deferred job).
+static void runOnExec(CommandOrigin origin, uint32_t id) {
+  gCurrentTask = CALLER;
+  gExecCtx = {origin, id};
+  gExecHasCtx = true;
+}
+static void execIdle() { gExecHasCtx = false; }
+
+// broadcastOutputCore's question before it copies a line for the sender.
+static bool streamGate() {
+#ifdef HW1_STREAM_GATE
+  return espnowStreamOutputWanted();
+#else
+  return gCurrentStreamCmdId != 0;  // the pre-fix System_Debug gate
+#endif
 }
 
 static void expectOneSend(const char* label, const uint8_t* mac, uint32_t msgId, uint16_t expectLen) {
@@ -481,10 +530,8 @@ int main() {
   // S2: command-session stream from cmd_exec: direct 202 B, routed 130 B.
   for (int routed = 0; routed < 2; ++routed) {
     resetStream();
-    gCurrentStreamCmdId = 42;
-    gStreamSessions[1].active = true;
-    gStreamSessions[1].cmdMsgId = 42;
-    std::memcpy(gStreamSessions[1].targetMac, routed ? kRouted : kDirect, 6);
+    queueEspNowRequest(1, 42, routed ? kRouted : kDirect);
+    runOnExec(ORIGIN_ESPNOW, 42);
     sendEspNowStreamMessage(line(400));
     expectOneSend(routed ? "S2 session routed" : "S2 session direct",
                   routed ? kRouted : kDirect, 42, routed ? 130 : 202);
@@ -497,10 +544,8 @@ int main() {
   sendEspNowStreamMessage(line(50));
   expectOneSend("S3 legacy short", kRouted, 0, 50);
   resetStream();
-  gCurrentStreamCmdId = 7;
-  gStreamSessions[0].active = true;
-  gStreamSessions[0].cmdMsgId = 7;
-  std::memcpy(gStreamSessions[0].targetMac, kDirect, 6);
+  queueEspNowRequest(0, 7, kDirect);
+  runOnExec(ORIGIN_ESPNOW, 7);
   sendEspNowStreamMessage(line(50));
   expectOneSend("S3 session short", kDirect, 7, 50);
 
@@ -516,10 +561,8 @@ int main() {
   // S5: session output only from cmd_exec: another task's line falls through
   //     to the legacy stream (inactive here, so nothing is sent).
   resetStream();
-  gCurrentStreamCmdId = 42;
-  gStreamSessions[0].active = true;
-  gStreamSessions[0].cmdMsgId = 42;
-  std::memcpy(gStreamSessions[0].targetMac, kDirect, 6);
+  queueEspNowRequest(0, 42, kDirect);
+  runOnExec(ORIGIN_ESPNOW, 42);
   gCurrentTask = OTHER_TASK;
   sendEspNowStreamMessage(line(40));
   CHECK(gSends.empty());
@@ -532,6 +575,63 @@ int main() {
   std::memcpy(gState.streamTarget, kDirect, 6);
   sendEspNowStreamMessage(line(40));
   CHECK(gSends.empty());
+
+  // A9: the session is the one of the command cmd_exec is running, from its
+  // context, not the request that was queued last.
+  // S7: peer A's request 42 (direct) and then peer B's 43 (routed) are queued;
+  //     A's output goes to A, then B's output goes to B.
+  resetStream();
+  queueEspNowRequest(0, 42, kDirect);
+  queueEspNowRequest(1, 43, kRouted);
+  runOnExec(ORIGIN_ESPNOW, 42);
+  sendEspNowStreamMessage(line(40));
+  expectOneSend("S7 first requester's output", kDirect, 42, 40);
+  gSends.clear();
+  runOnExec(ORIGIN_ESPNOW, 43);
+  sendEspNowStreamMessage(line(40));
+  expectOneSend("S7 second requester's output", kRouted, 43, 40);
+
+  // S8: a local (web) command runs on cmd_exec while request 42 waits in the
+  //     queue, even with a colliding millis() id: nothing streams to the peer.
+  resetStream();
+  queueEspNowRequest(0, 42, kDirect);
+  runOnExec(ORIGIN_WEB, 42);
+  sendEspNowStreamMessage(line(40));
+  if (!gSends.empty()) std::fprintf(stderr, "FAIL S8: a web command's output streamed to a queued ESP-NOW requester\n");
+  CHECK(gSends.empty());
+  CHECK(!streamGate());
+
+  // S9: a deferred job on cmd_exec (no command context) while request 42 waits.
+  resetStream();
+  queueEspNowRequest(0, 42, kDirect);
+  execIdle();
+  sendEspNowStreamMessage(line(40));
+  if (!gSends.empty()) std::fprintf(stderr, "FAIL S9: a deferred job's output streamed to a queued ESP-NOW requester\n");
+  CHECK(gSends.empty());
+  CHECK(!streamGate());
+
+  // S10: broadcastOutputCore's gate. Open for the ESP-NOW command cmd_exec
+  //      runs; closed for other tasks and other origins while a request is only
+  //      queued; the legacy startstream sink still hears every task while a
+  //      remote command is in flight, and nothing when none is.
+  resetStream();
+  queueEspNowRequest(0, 42, kDirect);
+  runOnExec(ORIGIN_ESPNOW, 42);
+  CHECK(streamGate());
+  gCurrentTask = OTHER_TASK;
+  if (streamGate()) std::fprintf(stderr, "FAIL S10: another task's line passes the stream gate while a request is queued\n");
+  CHECK(!streamGate());
+  gState.streamActive = true;
+  std::memcpy(gState.streamTarget, kRouted, 6);
+  CHECK(streamGate());
+  sendEspNowStreamMessage(line(40));
+  expectOneSend("S10 legacy sink while a remote command is in flight", kRouted, 0, 40);
+  resetStream();
+  gState.streamActive = true;
+  std::memcpy(gState.streamTarget, kRouted, 6);
+  gCurrentTask = OTHER_TASK;
+  CHECK(!streamGate());
+  gCurrentTask = CALLER;
 
   std::printf("stream unit: %s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
   return failures ? 1 : 0;

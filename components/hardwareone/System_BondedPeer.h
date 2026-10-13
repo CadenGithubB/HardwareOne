@@ -104,13 +104,24 @@ bool beginSchemaSync();
 bool schemaSyncDone();
 
 // ----- Remote-edit exposure policy -----------------------------------------
-// Which worker modules/keys a bonded settings editor may expose. Mirrors the
-// web bonded view (WebPage_Settings.h BONDED_MODULE_DENYLIST /
-// BONDED_KEY_WHITELIST): users/bond/wifi are never exposed (composite UI;
-// reconfiguring bond or Wi-Fi over its own link strands the pair); clock
-// exposes only ntpServer and tzOffsetMinutes. key == nullptr asks about the
-// module as a whole. Case-sensitive registry names.
+// Which worker modules/keys a bonded settings editor may expose, for every
+// surface (the OLED editor asks per row; the web bonded view receives the
+// schema already narrowed by readRemoteEditableSchemaJson): users/bond/wifi are
+// never exposed (composite UI; reconfiguring bond or Wi-Fi over its own link
+// strands the pair); clock exposes only ntpServer and tzOffsetMinutes.
+// key == nullptr asks about the module as a whole. Case-sensitive registry names.
 bool remoteEditAllowed(const char* moduleName, const char* key);
+
+// Narrow a parsed worker schema ({"modules":[{"name",...,"entries":[{"key",...}]}],
+// "count"}) to remoteEditAllowed: modules it refuses are removed, and inside the
+// rest the entries whose key it refuses. Everything kept is unchanged; "count"
+// follows the module list.
+void filterSchemaForRemoteEdit(JsonDocument& schema);
+
+// The cached schema (readCachedSchemaJson) narrowed by filterSchemaForRemoteEdit,
+// serialized into one PSRAM buffer the caller free()s. Returns false with
+// lastError() set when there is no cache, it does not parse, or memory runs out.
+bool readRemoteEditableSchemaJson(char** out, size_t* outLen);
 
 // ----- Last-error -----------------------------------------------------------
 // Set by the sync triggers + readers when they return false/"". Stable until
