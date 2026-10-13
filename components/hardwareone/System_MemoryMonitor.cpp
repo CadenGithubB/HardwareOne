@@ -540,15 +540,3 @@ void periodicMemorySample() {
   gLastMemorySampleMs = now;
   sampleMemoryState();
 }
-
-// ============================================================================
-// OLED Memory Stats Display (merged from oled_memory_stats.cpp)
-// ============================================================================
-
-#include "System_BuildConfig.h"
-
-#if ENABLE_OLED_DISPLAY
-
-// displayMemoryStats() moved to OLED_Mode_System.cpp
-
-#endif // ENABLE_OLED_DISPLAY

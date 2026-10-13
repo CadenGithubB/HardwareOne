@@ -48,16 +48,6 @@ static void oledPostModeRequest(OLEDMode newMode, const char* reason, bool pushS
 static void oledApplyPendingOwnerRequests();
 #endif
 
-#if !ENABLE_OLED_DISPLAY
-bool oledBootModeActive = false;
-
-// Linked whenever OLED UI is compiled out; System_User::tgRequireAuth still references this.
-bool shouldBlockForDisplayAuth() {
-  extern bool gLocalDisplayAuthed;
-  return gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed && !oledBootModeActive;
-}
-#endif
-
 #if ENABLE_OLED_DISPLAY
 
 #include <Adafruit_GFX.h>
@@ -3406,6 +3396,16 @@ void executeOLEDCommand(const String& argsInput) {
   }
 }
 
+// True when `epoch` is still the live display session, checked under the
+// display lifecycle writer (linearized with login, logout and replacement).
+// The writer is released before this returns: it covers the check only, never
+// a copy or a display push (System_User.h).
+static bool oledDisplayEpochLiveUnderWriter(TransportSessionEpoch epoch) {
+  if (!localDisplayTransportSessionBeginDelivery(epoch)) return false;
+  localDisplayTransportSessionEndDelivery();
+  return true;
+}
+
 static bool executeOLEDCommandWithResultImpl(
     const String& argsInput, TransportSessionEpoch expectedEpoch,
     bool requireExpectedEpoch, char* out, size_t outSize) {
@@ -3422,17 +3422,18 @@ static bool executeOLEDCommandWithResultImpl(
   bool success = submitAndExecuteSync(uc, outStr);
 
   // A remote login/logout may replace this display session while cmd_exec is
-  // working. Never expose an old identity's result to the replacement user.
-  if (!localDisplayTransportSessionBeginDelivery(
-          uc.ctx.transportSessionEpoch)) {
-    out[0] = '\0';
-    return false;
-  }
-
-  // Copy result to caller's buffer
+  // working. Never expose an old identity's result to the replacement user:
+  // validate under the writer, copy outside it, then re-check. A closed epoch
+  // is never live again, so the lock-free re-check (it opens nothing) sees a
+  // replacement that landed during the copy, and the copy is wiped.
+  const TransportSessionEpoch epoch = uc.ctx.transportSessionEpoch;
+  if (!oledDisplayEpochLiveUnderWriter(epoch)) return false;
   strncpy(out, outStr.c_str(), outSize - 1);
   out[outSize - 1] = '\0';
-  localDisplayTransportSessionEndDelivery();
+  if (!transportSessionEpochIsLive(SOURCE_LOCAL_DISPLAY, epoch)) {
+    memset(out, 0, outSize);
+    return false;
+  }
 
   if (!success && outStr.length() > 0) {
     DEBUG_DISPLAYF("[OLED_CMD] Command failed: %s", out);
@@ -4104,6 +4105,48 @@ void projectCubePoint(float x, float y, float z, int& screenX, int& screenY, int
 bool processOLEDInput();
 void tryAutoStartInputForMenu();
 
+// Frame-commit fence, part 1. Pixels rendered for display session N must never
+// be pushed after a replacement has published N+1. Checked under the display
+// lifecycle writer, which is released before this returns: the panel push is
+// slow bus I/O, and every login, logout and revocation of this display waits
+// for that writer.
+static bool oledFrameCommitAllowed(TransportSessionEpoch& epochOut) {
+  String commitUser;
+  bool commitAuthed = false;
+  const TransportSessionEpoch commitEpoch =
+      localDisplayTransportSessionBeginUiSync(commitUser, commitAuthed);
+  const bool commitAllowed =
+      !oledSessionBoundaryPending() &&
+      commitEpoch == sOledUiSessionEpoch &&
+      commitAuthed == sOledUiSessionAuthed &&
+      (!commitAuthed || commitUser == gLocalDisplayUser);
+  secureClearString(commitUser);
+  localDisplayTransportSessionEndUiSync();
+  epochOut = commitEpoch;
+  return commitAllowed;
+}
+
+// Part 2: validate, push outside the writer, re-check. A replacement that
+// lands during the push bumps the boundary generation and closes the epoch;
+// the frame just pushed is then redrawn at once by the next pass, whose
+// boundary step wipes the old identity's UI. The re-check opens nothing
+// (BeginUiSync or a snapshot would open a bypass session when the display is
+// logged out with display auth off); epoch zero is the logged-out login
+// screen, which only a boundary replaces.
+static void oledCommitFrame() {
+  TransportSessionEpoch commitEpoch = kNoTransportSessionEpoch;
+  if (!oledFrameCommitAllowed(commitEpoch)) {
+    oledMarkDirty();
+    return;
+  }
+  displayUpdate();
+  if (oledSessionBoundaryPending() ||
+      (commitEpoch != kNoTransportSessionEpoch &&
+       !transportSessionEpochIsLive(SOURCE_LOCAL_DISPLAY, commitEpoch))) {
+    oledMarkDirty();
+  }
+}
+
 void updateOLEDDisplay() {
   // animationLastUpdate, animationFrame, animationFPS are now defined at top of file
   extern void displayAnimation();
@@ -4380,28 +4423,10 @@ void updateOLEDDisplay() {
     // Mark mode as clean after successful render
     oledClearDirty();
 
-    // Linearize the physical frame commit with the authoritative display
-    // session. CPU-side drawing above is harmless scratch work, but pixels
-    // rendered for epoch N must never be pushed after a remote replacement has
-    // published epoch N+1. This short lease cannot deadlock cmd_exec: all
-    // synchronous command work and mode callbacks have already completed.
-    String commitUser;
-    bool commitAuthed = false;
-    const TransportSessionEpoch commitEpoch =
-        localDisplayTransportSessionBeginUiSync(commitUser, commitAuthed);
-    const bool commitAllowed =
-        !oledSessionBoundaryPending() &&
-        commitEpoch == sOledUiSessionEpoch &&
-        commitAuthed == sOledUiSessionAuthed &&
-        (!commitAuthed || commitUser == gLocalDisplayUser);
-    secureClearString(commitUser);
-    if (!commitAllowed) {
-      localDisplayTransportSessionEndUiSync();
-      oledMarkDirty();
-      return;
-    }
-    displayUpdate();
-    localDisplayTransportSessionEndUiSync();
+    // Commit the frame against the authoritative display session. CPU-side
+    // drawing above is harmless scratch work; oledCommitFrame() decides
+    // whether these pixels may reach the panel.
+    oledCommitFrame();
     }
 }
 

@@ -845,7 +845,7 @@ void displayEspNow() {
 
 #if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
-#include "WebServer_Server.h"  // getTotalFailedLoginCount()
+#include "WebServer_Server.h"  // server, SessionEntry, MAX_SESSIONS, gSessions
 #endif
 
 extern SessionEntry* gSessions;
@@ -880,9 +880,10 @@ void prepareWebStatsData() {
 
 #if ENABLE_HTTP_SERVER
   webStatsRenderData.httpServerRunning = (server != nullptr);
-  // Surfaced from WebServer_Server's cumulative since-boot counter. Distinct
-  // from per-IP failCount (which is windowed + clears on success) — this is
-  // the "did anyone hammer my login?" audit number.
+  // System_User's credential attempt table (System_User.h): failed credential
+  // attempts on every transport since boot. Monotonic, unlike a peer's
+  // windowed failure count, which clears on success; this is the "did anyone
+  // hammer my login?" audit number.
   webStatsRenderData.failedLoginAttempts = (int)getTotalFailedLoginCount();
 #else
   webStatsRenderData.httpServerRunning = false;

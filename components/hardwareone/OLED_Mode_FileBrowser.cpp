@@ -179,13 +179,14 @@ static int fbBuildActionRows(const char* labels[4]) {
   return n;
 }
 
-// Rename and Delete submit the admin-only `filerename` / `filedelete` commands
+// Rename and Delete submit the user-level `filerename` / `filedelete` commands
 // through the shared executor as the OLED identity (authorization, guest and
-// live-session checks, [CMD] audit), the same path the G2 lens uses. The
+// live-session checks, [CMD] audit), the same path the G2 lens uses; the
+// handlers apply the per-path policy (System_Filesystem.cpp). The
 // target is the selected entry's full path from FileManager (entry.name is a
 // bounded display copy); resolving it walks the folder through the guarded
 // VFS, so these run in the prepare pass under OLEDFileBrowserCtxGuard.
-enum class FbMutateResult : uint8_t { Done, Unresolved, QuoteInName, AdminOnly, Failed };
+enum class FbMutateResult : uint8_t { Done, Unresolved, QuoteInName, AdminOnly, NoAccess, Failed };
 
 static FbMutateResult fbSubmitMutate(const String& line) {
   char out[96] = {};
@@ -195,8 +196,13 @@ static FbMutateResult fbSubmitMutate(const String& line) {
     gOledFileManager->forceRescan();   // refresh() is generation-gated
     return FbMutateResult::Done;
   }
-  return strncmp(out, "Error: Admin access required", 28) == 0 ? FbMutateResult::AdminOnly
-                                                                : FbMutateResult::Failed;
+  static const char kAdminRefusal[] = "Error: Admin access required";
+  // The handlers' path-policy refusal: a path this identity may not read is
+  // reported exactly like a missing one, so the toast names both.
+  static const char kPathRefusal[] = "Error: File does not exist or access denied";
+  if (strncmp(out, kAdminRefusal, sizeof(kAdminRefusal) - 1) == 0) return FbMutateResult::AdminOnly;
+  if (strncmp(out, kPathRefusal, sizeof(kPathRefusal) - 1) == 0) return FbMutateResult::NoAccess;
+  return FbMutateResult::Failed;
 }
 
 static FbMutateResult fbRenameSelected(const String& newName) {
@@ -222,6 +228,7 @@ static void fbToastMutate(FbMutateResult result, const char* done, const char* f
     case FbMutateResult::Unresolved:  oledToastShow("Entry unavailable", 2500); break;
     case FbMutateResult::QuoteInName: oledToastShow("Quote in name", 2500); break;
     case FbMutateResult::AdminOnly:   oledToastShow("Admin only", 2500); break;
+    case FbMutateResult::NoAccess:    oledToastShow("Not found or denied", 2500); break;
     case FbMutateResult::Failed:      oledToastShow(failed, 2500); break;
   }
 }

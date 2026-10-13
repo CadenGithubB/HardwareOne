@@ -8,10 +8,12 @@ sFbActionViewable assignment): the lens must offer a text/JSON view exactly
 when the OLED offers View (a .log or .md file opens in both).
 
 oled_file_command_harness.cpp runs the OLED browser's rename/delete helpers
-against FileManager and executor doubles: both submit the admin-only
+against FileManager and executor doubles: both submit the user-level
 `filerename` / one-shot `filedelete ... confirm` commands (the lens' path) with
 the selected entry's full path, re-scan only after the executor's "OK", and
-submit nothing for an unresolved selection or a quote.
+submit nothing for an unresolved selection or a quote. The handlers'
+path-policy refusal ("File does not exist or access denied") gets its own
+result and toast (fbToastMutate), not the generic "... failed".
 
 Source contracts: the OLED browser no longer calls FileManager::renameItem /
 deleteItem or keeps its own extension list, its prepare pass routes Rename and
@@ -42,7 +44,8 @@ G2_PREDICATES = ("isBmpFilename", "isJpgFilename", "isJsonFilename", "isTxtFilen
                  "isCsvFilename")
 OLED_HELPERS = ("static FbMutateResult fbSubmitMutate(",
                 "static FbMutateResult fbRenameSelected(",
-                "static FbMutateResult fbDeleteSelected(")
+                "static FbMutateResult fbDeleteSelected(",
+                "static void fbToastMutate(")
 
 
 def defines(source: str, names: tuple[str, ...]) -> str:

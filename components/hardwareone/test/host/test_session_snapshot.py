@@ -10,9 +10,13 @@ authentication policy.
 
 Source contract, checked before anything is compiled: the two writers are
 FreeRTOS mutex handles (priority inheritance), not std::atomic_flag spin
-loops, and no writer window in System_User.cpp or HardwareOne.cpp (a
-Begin/End pair or a NamedSourceUseGuard scope) contains console output, a
-display push, a log append or a users.json read.
+loops, and no writer window in System_User.cpp, HardwareOne.cpp or
+OLED_Utils.cpp (a Begin/End pair or a NamedSourceUseGuard scope) contains
+console output, a display push, a log append or a users.json read; in
+OLED_Utils.cpp it holds no copy of a command result either. A window runs
+from the Begin call to the end of its enclosing block, so a writer released
+early still has to sit in its own block or helper. `--component` reads the
+production files from another tree.
 """
 from __future__ import annotations
 
@@ -45,6 +49,14 @@ WRITER_WINDOW_FORBIDDEN = ("Serial.", "displayUpdate(", "appendLineWithCap(",
                            "isAdminUser(", "readRosterJson(", "readText(",
                            "writeText", "broadcastOutput(", "BROADCAST_PRINTF(",
                            "debugWaitOutputDrained(")
+# Scanned files, each with the forbidden tokens it adds. OLED_Utils.cpp's
+# command-result path validates under the writer, releases it, copies the
+# result into the caller's buffer and re-checks; the copy stays outside.
+WRITER_WINDOW_FILES = {
+    "System_User.cpp": (),
+    "HardwareOne.cpp": (),
+    "OLED_Utils.cpp": ("strncpy(", "strlcpy(", "memcpy(", "snprintf("),
+}
 
 
 def strip_comments_and_literals(source: str) -> str:
@@ -121,18 +133,20 @@ def check_writer_contract(production: str) -> None:
                 f"{name} must be a SemaphoreHandle_t created with xSemaphoreCreateMutexStatic")
     require("xSemaphoreTake(" in production and "xSemaphoreGive(" in production,
             "writers must be taken and given through the FreeRTOS mutex API")
-    for name in ("System_User.cpp", "HardwareOne.cpp"):
+    failures = []
+    for name, extra in WRITER_WINDOW_FILES.items():
         text = (COMPONENT / name).read_text()
         code = strip_comments_and_literals(text)
         windows = list(writer_windows(code))
-        require(name != "System_User.cpp" or windows, "expected writer windows in System_User.cpp")
+        require(name == "HardwareOne.cpp" or windows, f"expected writer windows in {name}")
         for start, end in windows:
             window = code[start:end]
-            for token in WRITER_WINDOW_FORBIDDEN:
+            for token in WRITER_WINDOW_FORBIDDEN + extra:
                 offset = window.find(token)
-                require(offset < 0,
-                        f"{name}:{code.count(chr(10), 0, start + offset) + 1}: {token.rstrip('(')} inside the writer "
-                        f"window opened at line {code.count(chr(10), 0, start) + 1}")
+                if offset >= 0:
+                    failures.append(f"{name}:{code.count(chr(10), 0, start + offset) + 1}: {token.rstrip('(')} "
+                                    f"inside the writer window opened at line {code.count(chr(10), 0, start) + 1}")
+    require(not failures, "writer windows do I/O or copy results:\n  " + "\n  ".join(failures))
 
 
 def generate(source: str) -> str:
@@ -166,11 +180,15 @@ def generate(source: str) -> str:
 
 
 def main() -> None:
+    global COMPONENT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--baseline", type=Path, help="saved pre-change System_User.cpp, kept outside repository")
+    parser.add_argument("--component", type=Path, default=COMPONENT,
+                        help="production component directory (default: this checkout)")
     args = parser.parse_args()
+    COMPONENT = args.component.resolve()
     require(bool(args.cxx), "a host C++17 compiler is required")
     sources = [("current", COMPONENT / "System_User.cpp")]
     if args.baseline:
