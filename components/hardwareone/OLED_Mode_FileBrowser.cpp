@@ -468,9 +468,25 @@ static bool ensurePeerCache() {
   return sPeerEntries != nullptr;
 }
 
+// Browsing or pulling a peer's files needs the same local authority as
+// `remote:files`: an administrator at this display. The peer serves only its
+// bonded partner; this is the human half of the gate. AuthBypass (display auth
+// off) is not an administrator, exactly as for the remote command.
+extern bool hasAdminPrivilege(const AuthContext& ctx);  // HardwareOne.cpp — the executor's admin gate
+static bool peerBrowseAuthorized() {
+  return hasAdminPrivilege(oledFileBrowserAuthContext());
+}
+
 // Kick off a fresh FS_LIST_REQ for sPeerPath. Cancels any in-flight request
 // first so a navigation-while-loading doesn't show stale entries.
 static void peerStartRequest() {
+  // Refuse before ensurePeerCache() so a refused user never allocates the
+  // entry cache. ERR_PERM renders "Permission denied" and is not in the
+  // A-button retry set; B exits as usual.
+  if (!peerBrowseAuthorized()) {
+    sPeerStatus = PeerListStatus::ERR_PERM;
+    return;
+  }
   if (!ensurePeerCache()) {
     sPeerStatus = PeerListStatus::ERR_OTHER;
     return;
@@ -568,6 +584,11 @@ static void peerActivate() {
   }
   // File selected.
   if (sEspnowCtx == EspnowFileCtx::RECEIVE) {
+    if (!peerBrowseAuthorized()) {
+      sGetUi = FsGetUi::DENIED;
+      oledToastShow("Permission denied");
+      return;
+    }
     sGetUi = FsGetUi::REQUESTING;
     if (fsGetSendRequest(sEspnowCtxMac, joined, onEspnowGetAck) == 0) {
       sGetUi = FsGetUi::FAILED;

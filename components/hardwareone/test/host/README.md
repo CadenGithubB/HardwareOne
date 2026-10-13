@@ -1633,6 +1633,121 @@ routing, a connected cell, battery chemistry, or the charger circuit. Target
 builds and physical/meter comparison remain separate qualification steps.
 
 
+## ESP-NOW remote file RPC requester gate
+
+`espnow_fs_transcript_privacy` (see "Filesystem and G2 PSRAM output") also
+checks who the FS_LIST/STAT/GET handlers serve. A request from any MAC other
+than the bonded peer, or from the bonded peer without a live bond session, is
+answered `PERM_DENIED` before an identity is installed or the filesystem is
+touched; a served request runs under the reserved bond identity rather than
+SYSTEM. A second compile with `ENABLE_BONDED_MODE=0` expects every request to
+be refused. Source-contract checks confirm that `/api/bond/fs/list`,
+`/api/bond/fs/get` and the OLED peer browser pass `hasAdminPrivilege` before
+sending a request. `--source-dir <component-directory>` replays the former
+SYSTEM-identity serving.
+
+## ESP-NOW peer metadata text and page rendering
+
+`espnow_metadata_text` extracts the production metadata types and runs the
+metadata text policy, the METADATA RESP/PUSH receive handler, `processMetadata`
+and the `espnowroom`/`zone`/`tags`/`friendlyname` setter (`metaGetSet`) against
+host doubles for the registry, mesh cache, settings writes, events and logging.
+Hostile peer text is replaced byte for byte with `_` before it reaches the mesh
+cache or the persisted registry, with one WARN that carries the count and the
+sender MAC only; the setters reject control bytes and `< > " ' & \` before any
+write or event; clean ASCII and UTF-8 values are stored unchanged. This suite
+uses ASan/UBSan when `HW1_SANITIZE=ON`.
+
+`espnow_page_render` runs the shipping `web_assets/espnow-core.js` (device list,
+peer metadata panel) and the `WebPage_ESPNow.h` script chunk that draws the graph
+view, unmodified, against a fake `hw`/DOM on whatever JavaScript engine
+`tools/webui/js_engine.py` finds (node, deno, jsc, ...). Peer names and metadata
+must reach `innerHTML` as literal text, clean text must render unchanged, and the
+Pair button must pass a discovered name with quotes intact. Static source
+contracts on the same renderers run first; `--contract-only` runs only those.
+When no engine exists and the contracts pass, the suite exits 77, which CTest
+reports as skipped. Both suites take `--source-dir <component-directory>` to
+replay other production sources, such as the pre-fix tree.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^(espnow_metadata_text|espnow_page_render)$' --output-on-failure
+```
+
+These checks do not open a browser or exchange real ESP-NOW frames.
+
+## ESP-NOW dispatch policy
+
+`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. Once the device has a mesh passphrase, SENSOR_STATUS, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. Every zero-flag row is on an explicit allow-list (handshakes, HEARTBEAT, TOPO_*, USER_SYNC); this is a subset check, so later items may only shrink the list. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
+
+## ESP-NOW fragment reassembly
+
+`espnow_reassembly` runs the production V4 fragment reassembler from `System_ESPNow.cpp` (entry allocation, GC, `v4_reasm_accept`, `v4_reasm_release` and `v4_dispatch_post_cleanup`) on crafted plaintext fragments, with the table allocated exactly as init does. It checks in-order and out-of-order completion with learned strides (direct 200 B and routed 130 B), duplicates and GC; that a fragment whose type, count or index disagrees with its entry is dropped; that a fragCount above `V4_FRAG_MAX` gets no entry; that a completion larger than the entry's buffer is refused; and, in separate invocations, the late-stride over-size case and cleanup when the table was never allocated. Source contracts check that `v4_try_handle_incoming` reaches the table only through these helpers. `--component <component-directory>` or `--source-dir <overlay>` replays the former over-read and null dereference. It uses ASan/UBSan when `HW1_SANITIZE=ON` and does not exercise sessions, ACKs or the radio.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^espnow_reassembly$' --output-on-failure
+```
+
+(Alternative placement: as a paragraph after `espnow_disabled_interface` in "Network build selection and disabled ESP-NOW", adding `espnow_reassembly` to that section's `ctest -R` line.)
+
+## ESP-NOW session replay window
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_session_replay.py --sanitize
+```
+
+`espnow_session_replay` drives the production session wrap, unwrap, rekey-apply, REKEYING/abort and prev-key
+sweep through two rekeys with a receiver record and a scripted peer on the host. Frames recorded under the
+previous key must be rejected by that key's own replay window after the rekey, a genuinely late old-key frame is
+accepted once without touching the new key's window, and new-key traffic from sequence 1 is accepted. The AEAD,
+clock, TX guard, drain and logging are harness doubles; `--source-dir <component-directory>` replays the
+regression against a pre-fix tree. No radio is used.
+
+## ESP-NOW session rekey retry
+
+`espnow_rekey_retry` runs the production SESSION_REKEY initiator, responder and retry sweep from
+`System_ESPNow_Handlers_Crypto.cpp` (`sendRekey`, `runDeferredRekey`, `espnowRekeyInitiate`, the in-flight table and
+`rekeyRetrySweep`) together with the session lifecycle functions from `System_ESPNow_Sessions.cpp`, against modelled
+peers with deterministic stand-in crypto; the radio, clock, logging, lock and allocation boundaries are host doubles.
+It checks that an unanswered initiator REKEY is re-sent at 2 s and 4 s as the identical frame with its original msgId,
+that a session still REKEYING at 6 s is dropped so the next send re-handshakes, that answered, aborted, replaced and
+responder-side rekeys are never re-sent, that sixteen rekeys outstanding at once are all covered, that a refused send
+leaves the session ACTIVE while the `kRekeyMinIntervalMs` re-init guard still spaces the next attempt, and that no
+frame is sent under `EspNowTxGuard`. It also runs the espnow tick's REKEY auto-trigger (step 1e of
+`processMeshHeartbeats` in `System_ESPNow.cpp`, plus a source contract on it) every 10 ms: a session that
+`espnowRekeyInitiate` would refuse gets no log line per tick. `--source-dir <component-directory>` replays the former stranded-REKEYING
+behaviour. It does not qualify libsodium primitives or radio timing.
+
+## ESP-NOW session handshake freshness
+
+`espnow_session_rekey` drives the production SESSION_OPEN / SESSION_CONFIRM / SESSION_REKEY handlers and
+initiators from `System_ESPNow_Handlers_Crypto.cpp`, with the `System_ESPNow_Sessions.cpp` lifecycle, wrap and
+unwrap functions, between two modelled devices that exchange the real handshake frames. Clock, logging, lock,
+allocation, the radio and the deferred (cmd_exec) queue are host doubles, and the crypto primitives are
+deterministic stand-ins. It checks that a re-delivered REKEY is ignored with one WARN and no reply (nonce of the
+last REKEY acted on, 30 s applied-at interval, sequence window), that an older REKEY copy ends in one converged
+extra round instead of an endless exchange, that a re-delivered SESSION_OPEN (the slot's live or a recent session
+id) keeps the live session, and that normal, concurrent, retransmitted, glare and post-reboot handshakes still
+converge. `--source-dir <component-directory>` replays the former REKEY storm and session reset against a pre-fix
+tree. It does not qualify libsodium primitives or radio timing.
+
+## ESP-NOW deadlines across the millis() wrap
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_deadline_wrap.py --sanitize
+```
+
+`espnow_deadline_wrap` compiles the production prev-key unwrap, rekey apply and prev-key sweep from
+`System_ESPNow_Sessions.cpp` (unit 1), and the sensor-subscription apply with its lease-expiry owner from
+`System_ESPNow_Sensors.cpp` plus the session pre-warm backoff owners from `System_ESPNow.cpp` (unit 2), against an
+injectable clock placed on both sides of the 32-bit `millis()` rollover. It checks that the 5 s previous-key
+window, a leased sensor subscription and the 60 s pre-warm cooldown neither outlive the wrap by ~49.7 days nor
+lapse at once, that a deadline landing on zero is never stored as "none", and that leases longer than INT32_MAX ms
+are capped. Source contracts confirm the sensor broadcaster task and the heartbeat handler call those owners
+instead of comparing absolute times. `System_ESPNow_Deadline.h` is pasted when the overlay or the component has it
+(`espnow_session_replay` and `espnow_rekey_retry` paste it the same way); `--source-dir <component-directory>`
+replays the pre-fix sources. No radio is used.
+
 ## Camera lifecycle and backends
 
 ```sh

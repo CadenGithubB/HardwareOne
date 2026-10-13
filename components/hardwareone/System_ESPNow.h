@@ -935,6 +935,9 @@ struct EspNowState {
     uint8_t fragIndex;     // 0-based fragment index from the frame header
     uint8_t fragCount;     // total fragments in the message (1 when not chunked)
     bool encrypted;
+    bool authenticated;    // frame proved key possession (SESSION_FRAME unwrap or BROADCAST_AUTH
+                           // verify); false = plaintext, accepted only on a keyless device —
+                           // filed under the MAC, never posts SYSEVT_TEXT_RX
     LogMessageType msgType; // MSG_TEXT (chat) or MSG_SYSTEM_EVENT (BOOT/system notice) — drain stores accordingly
     bool used;
   };

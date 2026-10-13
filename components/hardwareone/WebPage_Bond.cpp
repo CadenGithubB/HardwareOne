@@ -36,6 +36,7 @@ extern void streamEndHtml(httpd_req_t* req);
 
 extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
 extern String getEspNowDeviceName(const uint8_t* mac);
+extern bool hasAdminPrivilege(const AuthContext& ctx);  // HardwareOne.cpp — the executor's admin gate (authorizeCommand)
 
 
 // =============================================================================
@@ -1936,6 +1937,10 @@ static const char* fsStatusTag(uint8_t status) {
 #if ENABLE_BONDED_MODE
 static esp_err_t handleBondFsList(httpd_req_t* req) {
   WEB_AUTH_JSON_OR_RETURN(req, ctx);
+  // Browsing the bonded peer's files needs the same local authority as
+  // `remote:files`: an administrator. The peer serves under its bond
+  // identity, so this is the human half of the gate.
+  if (!hasAdminPrivilege(ctx)) return sendJsonResponse(req, "{\"success\":false,\"error\":\"admin required\"}");
   webFsBridgeEnsureInit();
   if (!sWebFsBridgeMutex || !sWebFsBridge.done) {
     return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge init failed\"}");
@@ -2175,6 +2180,8 @@ static esp_err_t handleBondFsStat(httpd_req_t* req) {
 // tie up an httpd worker for seconds with no value over client polling).
 static esp_err_t handleBondFsGet(httpd_req_t* req) {
   WEB_AUTH_JSON_OR_RETURN(req, ctx);
+  // Same local admin gate as /api/bond/fs/list (and `remote:files`).
+  if (!hasAdminPrivilege(ctx)) return sendJsonResponse(req, "{\"success\":false,\"error\":\"admin required\"}");
   webFsBridgeEnsureInit();
 
   char qbuf[300];

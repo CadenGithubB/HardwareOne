@@ -58,7 +58,9 @@ bool keyExIsInFlight(const uint8_t peerMac[6]);
 // Receive handlers for SESSION_OPEN / SESSION_CONFIRM. Both verify the
 // Ed25519 signature against the peer's long-term pubkey (stored from KEY_EX)
 // over the canonical transcript. On success, derive AEAD session keys via
-// Blake2b KDF and flip the SessionState to ACTIVE.
+// Blake2b KDF and flip the SessionState to ACTIVE. An OPEN that proposes the
+// slot's live sessionId or one it held before is a re-delivered copy (a genuine
+// initiator always picks a fresh id): it is ignored and the live session kept.
 void v4hSessionOpen   (const V4RxCtx& ctx);
 void v4hSessionConfirm(const V4RxCtx& ctx);
 
@@ -77,6 +79,14 @@ bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel);
 // can initiate. Concurrent rekeys converge (both sides derive the same shared
 // from the same (ephA, ephB) pair).
 //
+// A REKEY is bound to the session's live state (sessionClassifyPeerRekey): one
+// carrying the nonce of the last REKEY acted on, an initiation arriving less
+// than kRekeyMinIntervalMs after the keys last changed, or one signed more than
+// kRekeySeqSlack frames behind our rx high-water mark is ignored (no reply,
+// keys unchanged). After replying, the responder keeps its reply key for
+// kRekeyPrevKeysWindowMs and applies a peer REKEY arriving then as the answer
+// to that reply, without replying again.
+//
 // Handler runs on espnow_task: size-check + PSRAM copy + submitDeferredToCmdExec.
 // Heavy crypto (verify, ECDH, KDF, optional sign) runs on cmd_exec_task.
 
@@ -89,11 +99,21 @@ void v4hSessionRekey(const V4RxCtx& ctx);
 // the heartbeat tick, or the `espnowrekey` CLI for manual testing.
 //
 // Returns true if the REKEY was sent. Returns false if no ACTIVE session
-// exists for the peer, the peer identity record is missing, or the eph
-// keypair / signature failed. The session goes to SESSION_REKEYING on success;
-// transitions back to SESSION_ACTIVE when the peer's REKEY arrives and the
-// new keys are derived.
+// exists for the peer, the peer identity record is missing, the eph
+// keypair / signature failed, or the radio refused the frame (the session then
+// stays SESSION_ACTIVE on its current keys), and without sending anything when
+// the keys changed, or the last attempt was made, less than kRekeyMinIntervalMs
+// ago (the peer ignores such an initiation). The session goes to
+// SESSION_REKEYING on success; transitions back to SESSION_ACTIVE when the
+// peer's REKEY arrives and the new keys are derived, or back to SESSION_FREE
+// when rekeyRetrySweep gives up on an unanswered REKEY.
 bool espnowRekeyInitiate(const uint8_t peerMac[6]);
+
+// Re-sends an unanswered initiator REKEY (the same signed frame with the same
+// msgId) every 2 s, at most twice; when the session is still REKEYING 2 s after
+// the last re-send it is cleared, so the next send re-handshakes. Call from the
+// periodic espnow tick.
+void rekeyRetrySweep(uint32_t nowMs);
 
 #endif  // ENABLE_ESPNOW
 

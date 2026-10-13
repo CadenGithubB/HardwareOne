@@ -15,12 +15,15 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-#include "System_AuthIdentity.h"   // SYSTEM_IDENTITY_SCOPE, currentAuthContext
+#include "System_AuthIdentity.h"   // ExecIdentityGuard, currentAuthContext
 #include "System_CommandTypes.h"   // ExecReq::DeferredFn (signature for submitDeferredToCmdExec)
 #include "System_Utils.h"  // submitDeferredToCmdExec
 #include "System_Debug.h"
 #include "System_ESPNow.h"          // generateMessageId
 #include "System_ESPNow_Tx.h"       // espnowtx::sendAead / sendAeadSync (Step 3c)
+#if ENABLE_BONDED_MODE
+#include "System_BondedPeer.h"     // BondedPeer::peerMacBytes — the one requester FS RPC serves
+#endif
 #include "System_Filesystem.h"      // filesystemReady, getPermissions
 #include "System_MemUtil.h"         // ps_alloc — PSRAM-backed reply buffer (off espnow_task stack)
 #include "System_Mutex.h"           // FsLockGuard
@@ -587,13 +590,48 @@ static void processDeferredLocked() {
   xSemaphoreTake(sMutex, portMAX_DELAY);
 }
 
-// FS RPC authenticates a device peer, not an account. Its legacy SYSTEM scope
-// must not grant access to user-private transcripts (including FAT aliases).
+// FS RPC authenticates a device peer, not an account. The identity it serves
+// under must not grant access to user-private transcripts (including FAT
+// aliases).
 static bool fsRpcPathAllowed(const char* rawPath) {
   String normalized;
   return normalizeFsPath(String(rawPath), normalized)
       && TranscriptPathPolicy::classify(normalized.c_str()).kind
           == TranscriptPathPolicy::Kind::Outside;
+}
+
+// System_ESPNow.cpp; defined in both bond builds (returns false when bond mode
+// is compiled out).
+extern bool isBondSessionTokenValid();
+
+// FS RPC serves one requester: the bonded peer, while the bond session that
+// authenticates it is live. It runs under the reserved bond identity, which the
+// filesystem resolves to SUPER for the life of that session and to nobody
+// otherwise (System_Filesystem.cpp resolveRole, kBondAdminUser) — the tier the
+// bonded peer already holds for `remote:files`. Any other paired peer is refused
+// before an identity is installed or the filesystem is touched; a peer that is
+// not bonded fetches files with espnowbrowse/espnowfetch, which the target
+// authorizes as the supplied account.
+static bool fsRpcRequesterIdentity(const uint8_t srcMac[6], AuthContext& out) {
+#if ENABLE_BONDED_MODE
+  uint8_t bondMac[6];
+  if (!BondedPeer::peerMacBytes(bondMac) || memcmp(bondMac, srcMac, 6) != 0) return false;
+  if (!isBondSessionTokenValid()) return false;
+  out.transport = SOURCE_ESPNOW;
+  out.user      = kBondAdminUser;
+  out.path      = "/espnow/fs";
+  char ip[28];
+  snprintf(ip, sizeof(ip), "espnow:%02X:%02X:%02X:%02X:%02X:%02X",
+           srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
+  out.ip     = ip;        // same stamp as the bonded CMD path (v4_handle_cmd)
+  out.sid    = "";
+  out.opaque = nullptr;
+  out.scope  = "";        // unconfined: the SUPER-while-bonded rule is the boundary
+  return true;
+#else
+  (void)srcMac; (void)out;
+  return false;
+#endif
 }
 
 static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListReq& req) {
@@ -630,6 +668,8 @@ static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListRe
   V4PayloadFsListReplyHeader* hdr = (V4PayloadFsListReplyHeader*)replyBuf;
   V4PayloadFsEntry* entries =
       (V4PayloadFsEntry*)(replyBuf + sizeof(V4PayloadFsListReplyHeader));
+  AuthContext peerCtx{};
+  const bool served = fsRpcRequesterIdentity(srcMac, peerCtx);
 
   memset(replyBuf, 0, kReplyBufSize);
   hdr->reqId = req.reqId;
@@ -641,15 +681,20 @@ static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListRe
   }
 
   {
-    // Read under SYSTEM identity — a securely paired + session peer is trusted at
-    // device level (FsList is base ESP-NOW, not bond-gated).
-    // Per-user identity propagation can be layered on later via a token in
-    // the request's reserved bytes.
+    // Served under the bond identity (see fsRpcRequesterIdentity): only the
+    // bonded peer with a live bond session reads here, and the filesystem
+    // decides what that identity may see. Everyone else is refused before an
+    // identity is installed; the transcript policy is checked in front of it.
+    if (!served) {
+      WARN_ESPNOWF("[FSLIST] LIST reqId=%u refused: requester is not the bonded peer with a live session", req.reqId);
+      hdr->status = FS_LIST_STATUS_PERM_DENIED;
+      goto send_reply;
+    }
     if (!fsRpcPathAllowed(req.path)) {
       hdr->status = FS_LIST_STATUS_PERM_DENIED;
       goto send_reply;
     }
-    SYSTEM_IDENTITY_SCOPE("espnow.fs_list_reply");
+    ExecIdentityGuard identity(peerCtx);
     const AuthContext& ctx = currentAuthContext();
     String dirPath = VFS::normalize(req.path);
 
@@ -741,6 +786,8 @@ static void processStatDeferred(const uint8_t srcMac[6], const V4PayloadFsStatRe
   V4PayloadFsStatReply reply = {};
   reply.reqId = req.reqId;
   strlcpy(reply.path, req.path, sizeof(reply.path));
+  AuthContext peerCtx{};
+  const bool served = fsRpcRequesterIdentity(srcMac, peerCtx);
 
   if (!filesystemReady) {
     reply.status = FS_LIST_STATUS_NOT_READY;
@@ -748,11 +795,18 @@ static void processStatDeferred(const uint8_t srcMac[6], const V4PayloadFsStatRe
   }
 
   {
+    if (!served) {
+      WARN_ESPNOWF("[FSLIST] STAT reqId=%u refused: requester is not the bonded peer with a live session", req.reqId);
+      reply.status = FS_LIST_STATUS_PERM_DENIED;
+      goto send_stat;
+    }
     if (!fsRpcPathAllowed(req.path)) {
       reply.status = FS_LIST_STATUS_PERM_DENIED;
       goto send_stat;
     }
-    SYSTEM_IDENTITY_SCOPE("espnow.fs_stat_reply");
+    // Every served op runs as the requester, STAT included (VFS::getStats
+    // itself is not identity-guarded).
+    ExecIdentityGuard identity(peerCtx);
     VFS::StorageType tier = VFS::getStorageType(req.path);
     if (tier == VFS::SDCARD && !VFS::isSDAvailable()) {
       reply.status = FS_LIST_STATUS_NOT_FOUND;
@@ -793,14 +847,16 @@ send_stat: ;
 // receive path (System_ESPNow_Files).
 
 // Forward declaration: defined in System_ESPNow.cpp. The function reads the
-// file under the calling task's identity (we install SYSTEM here before
-// calling) and pumps FILE_START/DATA/END to the destination MAC.
+// file under the calling task's identity (we install the bond identity here
+// before calling) and pumps FILE_START/DATA/END to the destination MAC.
 extern bool sendFileToMac(const uint8_t* mac, const String& localPath);
 
 static void processGetDeferred(const uint8_t srcMac[6], const V4PayloadFsGetReq& req) {
   V4PayloadFsGetAck ack = {};
   ack.reqId = req.reqId;
   strlcpy(ack.path, req.path, sizeof(ack.path));
+  AuthContext peerCtx{};
+  const bool served = fsRpcRequesterIdentity(srcMac, peerCtx);
 
   if (!filesystemReady) {
     ack.status = FS_LIST_STATUS_NOT_READY;
@@ -808,11 +864,16 @@ static void processGetDeferred(const uint8_t srcMac[6], const V4PayloadFsGetReq&
   }
 
   {
+    if (!served) {
+      WARN_ESPNOWF("[FSLIST] GET reqId=%u refused: requester is not the bonded peer with a live session", req.reqId);
+      ack.status = FS_LIST_STATUS_PERM_DENIED;
+      goto send_ack;
+    }
     if (!fsRpcPathAllowed(req.path)) {
       ack.status = FS_LIST_STATUS_PERM_DENIED;
       goto send_ack;
     }
-    SYSTEM_IDENTITY_SCOPE("espnow.fs_get_ack");
+    ExecIdentityGuard identity(peerCtx);
     const AuthContext& ctx = currentAuthContext();
     String filePath = VFS::normalize(req.path);
 
@@ -866,7 +927,11 @@ send_ack: ;
   // and otherwise gives up after ~15 polls; the OLED just leaves its
   // "Downloading..." banner up.
   if (ack.status == FS_LIST_STATUS_OK) {
-    SYSTEM_IDENTITY_SCOPE("espnow.fs_get_send");
+    // `served` is necessarily true here. sendFileToMac re-resolves the role
+    // at transfer time (canRead under the installed identity), so a bond
+    // session that ended between ACK and transfer is refused by the
+    // filesystem.
+    ExecIdentityGuard identity(peerCtx);
     String filePath = VFS::normalize(req.path);
     bool ok = sendFileToMac(srcMac, filePath);
     DEBUG_ESPNOWF("[FSLIST] GET transfer for reqId=%u path='%s' result=%d",
