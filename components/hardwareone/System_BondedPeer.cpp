@@ -12,6 +12,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <cstring>
 
 // loadSettingsFromCache lives in System_ESPNow.cpp; it already does the
 // existsGuarded + FsLockGuard + open + readString dance. Forward-decl here so
@@ -168,7 +169,7 @@ bool requestSettingsSync(uint32_t timeoutMs, uint32_t* outElapsedMs) {
   return fail("Timed out waiting for settings sync");
 }
 
-bool requestSchemaSync(uint32_t timeoutMs, uint32_t* outElapsedMs) {
+bool beginSchemaSync() {
   clearError();
   uint8_t pm[6];
   if (!requireMasterOnlinePeer(pm)) return false;
@@ -178,6 +179,28 @@ bool requestSchemaSync(uint32_t timeoutMs, uint32_t* outElapsedMs) {
   gEspNow->bondSchemaReceived = false;
 
   if (!requestBondSchema(pm)) return fail("Failed to send SCHEMA_REQ");
+  return true;
+}
+
+bool schemaSyncDone() {
+  return gEspNow && gEspNow->bondSchemaReceived;
+}
+
+bool remoteEditAllowed(const char* moduleName, const char* key) {
+  if (!moduleName) return false;
+  if (strcmp(moduleName, "users") == 0 || strcmp(moduleName, "bond") == 0 ||
+      strcmp(moduleName, "wifi") == 0) {
+    return false;
+  }
+  if (strcmp(moduleName, "clock") == 0) {
+    return key == nullptr || strcmp(key, "ntpServer") == 0 ||
+           strcmp(key, "tzOffsetMinutes") == 0;
+  }
+  return true;
+}
+
+bool requestSchemaSync(uint32_t timeoutMs, uint32_t* outElapsedMs) {
+  if (!beginSchemaSync()) return false;
 
   const uint32_t POLL_MS = 100;
   const uint32_t startMs = millis();

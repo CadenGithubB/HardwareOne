@@ -4,6 +4,7 @@
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
+#include "OLED_UI.h"                  // oledToastShow — owner refusals on unpair/discovery
 #include "System_ESPNow.h"
 #include "System_ESPNow_Sessions.h"   // sendStatusGet / SendStatusState — post-send delivery indicator
 #include "System_MeshPeers.h"
@@ -54,13 +55,26 @@ EXT_RAM_BSS_ATTR static OLEDScrollState sEspNowMessageListScroll;
 // PSRAM .bss: CPU-only row metadata, written/read solely on the OLED task.
 EXT_RAM_BSS_ATTR static struct { bool isSent; uint32_t msgId; uint8_t sendState; } gOledRowMeta[OLED_SCROLL_MAX_ITEMS];
 
+// Run an owner command under the display identity (admin gate, live-session
+// fence and audit log in the executor) and show a short refusal on the toast.
+// The toast box fits ~17 columns (OLED_UI.cpp), so the owner's reply is mapped
+// to two fixed strings instead of being truncated mid-sentence. Returns true
+// only when the owner accepted the command.
+static bool oledEspNowRunOwnerCommand(const char* cmd, const char* failToast) {
+  char out[160];
+  if (executeOLEDCommandWithResult(cmd, out, sizeof(out)) && strncmp(out, "Error", 5) != 0) return true;
+  oledToastShow(strstr(out, "Admin access required") ? "Admin required" : failToast, 2500);
+  return false;
+}
+
 // =============================================================================
 // Pairing view — WPS-style toggle (see espnowpairmode / espnowPairMode* core)
 // =============================================================================
 // Open the timed pairing window on BOTH same-mesh devices; they broadcast a
 // discovery beacon and auto secure-pair each other. This screen is just the
 // on/off toggle + countdown + a live list of what has paired in. All discovery
-// and pairing logic lives in System_ESPNow.cpp; the OLED only drives the window.
+// and pairing logic lives in System_ESPNow.cpp; the OLED only drives the window,
+// through the owner's `espnowpairmode 120|off` command.
 
 // --- Conversation (device-detail) message-list geometry ---
 // The conversation view relies on the GLOBAL header bar (title "ESPNOW: Text"),
@@ -1004,7 +1018,9 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
           return true;
         }
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-          espnowPairModeClose();       // leaving the screen stops discovery
+          // Leaving the screen stops discovery through the owner (admin-gated);
+          // a refused close leaves the window to the owner's timer.
+          oledEspNowRunOwnerCommand("espnowpairmode off", "Discovery failed");
           gOledEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
           return true;
         }
@@ -1014,7 +1030,7 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
         if (!(gEspNow && !gEspNow->encryptionEnabled)) {   // need a mesh key first (screen says so)
           sPairingSel = 0;
-          espnowPairModeOpen(120);
+          oledEspNowRunOwnerCommand("espnowpairmode 120", "Discovery failed");   // owner-gated open
         }
         oledMarkDirty();
         return true;
@@ -1376,11 +1392,20 @@ void oledEspNowSelectMode() {
   gOledEspNowState.modeSelectorActive = false;
 }
 
+// Thin adapter over the unpair owner. `espnowunpair` (cmd_espnow_unpair) is the
+// one place that deletes the radio peer, removes the registry entry, drops the
+// crypto identity and live session, clears the mesh-liveness slot, posts
+// SYSEVT_PEER_UNPAIRED and saves the registry, behind the admin gate. The OLED
+// submits it under the display identity (as the G2 peers page does) and never
+// edits devices[] itself.
 void oledEspNowUnpairDevice() {
-  if (!gEspNow || !gEspNow->initialized) return;
-  if (!espnowDeletePeerRuntime(gOledEspNowState.selectedDeviceMac)) return;
-  removeEspNowDevice(gOledEspNowState.selectedDeviceMac);
-  oledEspNowBackToList();
+  char cmd[32];   // "espnowunpair " (13) + 17-char MAC + NUL
+  snprintf(cmd, sizeof(cmd), "espnowunpair %02X:%02X:%02X:%02X:%02X:%02X",
+           gOledEspNowState.selectedDeviceMac[0], gOledEspNowState.selectedDeviceMac[1],
+           gOledEspNowState.selectedDeviceMac[2], gOledEspNowState.selectedDeviceMac[3],
+           gOledEspNowState.selectedDeviceMac[4], gOledEspNowState.selectedDeviceMac[5]);
+  if (!oledEspNowRunOwnerCommand(cmd, "Unpair failed")) return;   // refused: stay on the config view
+  oledEspNowBackToList();   // peer is gone: the detail view has no target
 }
 
 // Helper struct for sorting devices
@@ -1561,40 +1586,52 @@ void oledEspNowRefreshMessages() {
   // received + sent rings into one time-ordered list (espnowGetConversation), so
   // the OLED shows the same outgoing history as every other interface — including
   // messages sent from the web or BLE, not just ones typed here. Sent rows carry
-  // msgId (head->reqId) for the live delivery-status indicator; received rows show
-  // the sender name + part count. (Zero-copy refs into the live rings.)
+  // msgId (the head record's reqId) for the live delivery-status indicator;
+  // received rows show the sender name + part count. Each row's head record is
+  // copied out of the store (espnowCopyCollapsedHead); a ref whose record was
+  // overwritten since the collapse is skipped.
   uint8_t* mac = gOledEspNowState.selectedDeviceMac;
 
   static EXT_RAM_BSS_ATTR CollapsedMsgRef refs[2 * MESSAGES_PER_DEVICE];
   int rc = espnowGetConversation(mac, refs, 2 * MESSAGES_PER_DEVICE);
 
+  // The scroll list keeps pointers, so row strings live in these persistent
+  // buffers until the next refresh. Line 1 holds 23 chars: the renderer
+  // (oledEspNowDisplayDeviceDetail) prints at most 19 plus '~'; widen this if a
+  // renderer ever prints more. Sender names keep their whole 32-byte field.
   static EXT_RAM_BSS_ATTR char metaBuf[OLED_SCROLL_MAX_ITEMS][24];  // persistent "name (k/n)" labels
+  static EXT_RAM_BSS_ATTR char textBuf[OLED_SCROLL_MAX_ITEMS][24];  // message text, line 1
+  static EXT_RAM_BSS_ATTR char nameBuf[OLED_SCROLL_MAX_ITEMS][sizeof(ReceivedTextMessage::senderName)];
   const int CAP = OLED_SCROLL_MAX_ITEMS;
+  ReceivedTextMessage head;
 
   // Show the most recent CAP messages (conversation is oldest→newest).
   int start = (rc > CAP) ? (rc - CAP) : 0;
   int m = 0;
   for (int i = start; i < rc && m < CAP; i++) {
-    const ReceivedTextMessage* msg = refs[i].head;
-    if (!msg || !oledEspNowValidateMessagePtr(msg, mac)) continue;  // ref still in the live ring
+    if (!espnowCopyCollapsedHead(refs[i], &head)) continue;  // overwritten since the collapse
 
     gOledRowMeta[m].isSent    = refs[i].isSent;
-    gOledRowMeta[m].msgId     = refs[i].isSent ? msg->reqId : 0;
-    gOledRowMeta[m].sendState = msg->sendState;  // durable; survives the 30s sendStatus sweep
+    gOledRowMeta[m].msgId     = refs[i].isSent ? head.reqId : 0;
+    gOledRowMeta[m].sendState = head.sendState;  // durable; survives the 30s sendStatus sweep
 
     const char* meta;
     if (refs[i].isSent) {
       meta = nullptr;  // sent rows: delivery status drawn live by the renderer
     } else if (refs[i].partsTotal > 1) {
-      const char* who = (msg->senderName[0]) ? msg->senderName : "Unknown";
+      const char* who = (head.senderName[0]) ? head.senderName : "Unknown";
       snprintf(metaBuf[m], sizeof(metaBuf[m]), "%s (%u/%u)", who,
                refs[i].partsPresent, refs[i].partsTotal);
       meta = metaBuf[m];
+    } else if (head.senderName[0]) {
+      strlcpy(nameBuf[m], head.senderName, sizeof(nameBuf[m]));
+      meta = nameBuf[m];
     } else {
-      meta = (msg->senderName[0]) ? msg->senderName : "Unknown";
+      meta = "Unknown";
     }
 
-    oledScrollAddItem(&sEspNowMessageListScroll, msg->message, meta, true, nullptr);
+    strlcpy(textBuf[m], head.message, sizeof(textBuf[m]));
+    oledScrollAddItem(&sEspNowMessageListScroll, textBuf[m], meta, true, nullptr);
     m++;
   }
 
@@ -1675,36 +1712,6 @@ void oledEspNowDrawStatusIcon(Adafruit_SSD1306* display, int x, int y, bool deli
 // =============================================================================
 // Buffer Safety Validation
 // =============================================================================
-
-bool oledEspNowValidateMessagePtr(const void* msgPtr, const uint8_t* peerMac) {
-  if (!msgPtr || !peerMac || !gEspNow || !gEspNow->peerMessageHistories) return false;
-  
-  // Find the peer history for this MAC.
-  // Bound by peerHistoryCapacity (the dynamically-grown size of the
-  // peerMessageHistories array), NOT gMeshPeerSlots — that sizes the separate
-  // gMeshPeers/gMeshPeerMeta arrays and is normally larger, which would overscan
-  // this allocation. Matches findOrCreatePeerHistory/getAllMessages.
-  PeerMessageHistory* history = nullptr;
-  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
-    if (gEspNow->peerMessageHistories[i].active && 
-        memcmp(gEspNow->peerMessageHistories[i].peerMac, peerMac, 6) == 0) {
-      history = &gEspNow->peerMessageHistories[i];
-      break;
-    }
-  }
-  
-  if (!history) return false;
-
-  // Pointer must land inside EITHER the received ring or the sent ring (the
-  // conversation view zero-copies refs from both).
-  const ReceivedTextMessage* msg = (const ReceivedTextMessage*)msgPtr;
-  bool inRecv = (msg >= &history->messages[0] && msg < &history->messages[MESSAGES_PER_DEVICE]);
-  bool inSent = (msg >= &history->sent[0]     && msg < &history->sent[MESSAGES_PER_DEVICE]);
-  if (!inRecv && !inSent) return false;
-
-  // Check if message is still active
-  return msg->active;
-}
 
 bool oledEspNowValidateDevicePtr(const void* devicePtr) {
   if (!devicePtr || !gEspNow) return false;

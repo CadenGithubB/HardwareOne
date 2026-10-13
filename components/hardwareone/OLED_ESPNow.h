@@ -175,7 +175,6 @@ void oledEspNowOpenDeviceConfig();
 void oledEspNowApplyDeviceConfigEdit(const String& value);
 
 // Buffer safety validation (implemented in cpp)
-bool oledEspNowValidateMessagePtr(const void* msgPtr, const uint8_t* peerMac);
 bool oledEspNowValidateDevicePtr(const void* devicePtr);
 
 // Remote file browsing

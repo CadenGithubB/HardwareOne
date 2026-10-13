@@ -23,6 +23,13 @@ extern bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags,
                           uint32_t msgId,
                           const uint8_t* payload, uint16_t payloadLen,
                           uint8_t ttl);
+// Longest AEAD plaintext that still fits one frame to `dst` (a routed peer has
+// a smaller budget than a direct one). Owned by System_ESPNow.cpp beside the
+// fragmenting sender so the dispatcher and the sender never disagree.
+extern uint16_t v4_single_frame_cap(const uint8_t* dst);
+// cmd_exec_task (HardwareOne.cpp): the one task whose synchronous multi-frame
+// sends run their fragment loop on the submitting task (see submitSync).
+extern TaskHandle_t gCmdExecTaskHandle;
 
 namespace espnowtx {
 
@@ -237,6 +244,36 @@ static inline void statsObserveDepth(UBaseType_t depth) {
 // ----------------------------------------------------------------------------
 // Dispatcher
 // ----------------------------------------------------------------------------
+// A multi-frame AEAD job from cmd_exec is not dispatcher work.
+// v4_send_encrypted_chunked waits for a per-fragment ACK (ACK_TIMEOUT_MS x
+// MAX_RETRIES per fragment), and while the single dispatcher sits in that wait
+// no other task's single-frame job is drained: sensor envelopes, bond
+// heartbeats and RX-side replies then fail at submit() once the queue fills.
+// cmd_exec sends the long ones (CMD_RESP up to 4 KB, FS_LIST_REPLY 2.5 KB), is
+// blocked for the whole send anyway and has the stack for the deep send path,
+// so their fragment loop runs there and the dispatcher keeps serving single
+// frames. Another task's synchronous multi-frame job (the FS RPC requests from
+// httpd and the OLED loop to a routed peer, 2 fragments) stays queued: those
+// stacks are not sized for the send path.
+static bool needsFragments(const Job& job) {
+  return job.kind == JOB_AEAD_SMART &&
+         job.payloadLen > v4_single_frame_cap(job.peerMac);
+}
+
+// Runs a multi-frame job to completion on cmd_exec. Takes the payload
+// (the submitSync ownership contract) and keeps the counters consistent with a
+// dispatched job: submitted, then sent or failed.
+static bool runMultiFrameOnCaller(Job& job) {
+  statsBump(&Stats::submitted);
+  const bool ok = v4_send_payload_smart(job.peerMac, job.type, job.flags,
+                                        job.msgId, job.payload, job.payloadLen,
+                                        job.ttl);
+  statsBump(ok ? &Stats::sent : &Stats::failed);
+  if (job.payload) free(job.payload);
+  job.payload = nullptr;
+  return ok;
+}
+
 static void runJob(const Job& job) {
   bool ok = false;
   switch (job.kind) {
@@ -554,8 +591,9 @@ bool submit(const Job& job) {
 
 bool submitSync(Job& job, uint32_t timeoutMs) {
   // submitSync OWNS job.payload on every return path: it is freed here on an
-  // enqueue failure, and by the dispatcher once the job is accepted (even if
-  // we then time out waiting). The caller must never free it.
+  // enqueue failure or after a multi-frame send run on cmd_exec, and by the
+  // dispatcher once a queued job is accepted (even if we then time out
+  // waiting). The caller must never free it.
   QueueHandle_t queue = nullptr;
   TaskHandle_t txTaskHandle = nullptr;
   if (!claimRunningQueue(&queue, &txTaskHandle)) {
@@ -567,6 +605,12 @@ bool submitSync(Job& job, uint32_t timeoutMs) {
     releaseQueueClaim();
     if (job.payload) free(job.payload);
     return false;
+  }
+
+  if (needsFragments(job) && xTaskGetCurrentTaskHandle() == gCmdExecTaskHandle) {
+    // Not queue work: release the claim and run the fragment loop on cmd_exec.
+    releaseQueueClaim();
+    return runMultiFrameOnCaller(job);
   }
 
   SyncCompletion* completion = completionCreate();

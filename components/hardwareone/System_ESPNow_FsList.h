@@ -54,6 +54,11 @@
 //   (a few ms for typical VFS dirs) so head-of-line blocking is acceptable
 //   in exchange for keeping deferred state trivial.
 //
+//   The module mutex guards the two tables only and is never held across a
+//   send, VFS work or a callback. A send call does not hold it while it
+//   blocks in the transport, so a reply can reach its callback before
+//   fs*SendRequest returns: callers match replies by reqId.
+//
 // Memory
 //   Sender pending table: FS_LIST_MAX_PENDING × 20 B = 80 B DRAM (static).
 //   Receiver deferred slot: ~150 B DRAM (static).
