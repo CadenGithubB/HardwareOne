@@ -23,20 +23,22 @@ openclaw agents list
 Record the version, port, bind mode, TLS/endpoint flags, and intended agent ID.
 An unset/default or unknown-path response is useful version information. Do not
 share tokens, passwords, or full configuration dumps. These are read-only
-commands; they do not enable an endpoint or connect the VLANs. The existing host
-is on another VLAN, and this work does not bridge it to the Mac mini or XIAO.
+commands; they do not enable an endpoint or connect the VLANs. The Studio and
+XIAO use the same test VLAN; the Mac mini remains outside it and uses USB for
+device access. This work does not bridge the VLANs.
 The user selected the password-protected `TestESPNetwork` for the XIAO. Enter its
 password directly on the device during setup; do not store it here. The user
 confirmed that this network is on the OpenClaw host's VLAN, so a device on it
 can test the direct path without bridging VLANs.
 
-Host inspection supplied on 2026-10-12: macOS, OpenClaw `2026.9.4` (`3a9d69d`),
-port `18789`, bind `loopback`. Both `gateway.tls.enabled` and
-`gateway.http.endpoints.chatCompletions.enabled` are valid but unset. The current
-release defaults leave TLS and chat completions disabled; this is not yet a
-live endpoint probe. Available agent IDs are `main`, `devlab`, and `android-trial`,
+Initial host inspection on 2026-10-12 found macOS, OpenClaw `2026.9.4`
+(`3a9d69d`), port `18789`, and bind `loopback`. At that stage, both
+`gateway.tls.enabled` and `gateway.http.endpoints.chatCompletions.enabled` were
+valid but unset, leaving TLS and chat completions disabled by default. Chat
+Completions has since been enabled through hot reload; Gateway TLS, loopback
+binding, authentication, and sandbox configuration remain unchanged. Available agent IDs are `main`, `devlab`, and `android-trial`,
 with Ollama configured behind the agents. The user selected `main` (Mingus), so
-the device target will be `openclaw/main`. Follow-up inspection confirmed gateway
+the device target is `openclaw/main`. Follow-up inspection confirmed gateway
 authentication mode `token`, a valid but unset Control UI allowed-origins setting,
 and IPv4 `192.168.21.143` on `en0` (no IPv6 network state). Effective sandbox/tool
 policy was inspected below. The selected relay keeps this listener unchanged;
@@ -128,8 +130,10 @@ Mac or printing it in tool output. USB status then confirmed connection to
 `TestESPNetwork` at `192.168.21.24`. The existing device HTTP server was started
 and reported running on port `80`, so the current device base URL is
 `http://192.168.21.24`. The previous saved network was retained. Wi-Fi is enabled
-but `wifiAutoStart` remains `false`; reconnect after a device reboot. No firmware
-was flashed, no VLANs bridged, and the gateway configuration was not changed.
+but `wifiAutoStart` remains `false`; reconnect after a device reboot. At this
+initial provisioning stage, no firmware had been flashed and Gateway settings
+were unchanged. Subsequent app-only updates and endpoint activation are recorded
+below. No VLANs were bridged.
 The account creation/listing and network/server status were verified through USB;
 authentication and reachability were subsequently verified from the Studio below.
 Do not use `/dev/cu.usbmodem2201`, which is occupied by the separate P4 work.
@@ -156,8 +160,12 @@ was not counted as a live read. Preserve this working integration and sandbox.
 
 For device-to-agent chat, the user selected a restricted HTTPS relay on the
 Studio, with a separate device credential and the gateway kept on loopback.
-Relay preparation is local only; no Studio service has been installed and no
-gateway settings have been changed. Both direct access and the relay use tokens:
+The user has started the foreground relay at `https://192.168.21.143:18790/v1`,
+fixed to `main`, and enabled Gateway Chat Completions through hot reload. The
+relay is running as a foreground process; a persistent service installation has
+not been verified. Its real device token was entered through a masked prompt,
+its public CA was provisioned on the XIAO, and the device clock is correct.
+Normal relay logs are silent. Both direct access and the relay use tokens:
 direct access uses the gateway credential on the device; the relay uses its own
 device token and keeps the gateway credential on the Studio. The relay limits
 HTTP routes and agent selection, not Mingus's configured tool permissions.
@@ -278,8 +286,12 @@ Validation on 2026-10-12 against the current firmware baseline:
   passed 11 tests. These local tests do not establish live Studio/device acceptance.
 
 The firmware was ported to source baseline `f4cc542c` (`0.99.97.4`, matching the
-installed version). Final source/profile revision is `04886ed7`; this guide was
-the only uncommitted file during the builds. Both full builds used the normal
+installed version). The initial qualifying source/profile revision was
+`04886ed7`; this guide was the only uncommitted file at that build stage.
+Follow-up revision `236589c9` adds a one-line initialization fix so Clear works
+on a cold start before generation. Its ASan/UBSan integration checks passed
+three source variants and seven feature gates, and its profile rebuild
+retains the same image size and headroom. Both initial full builds used the normal
 repository build path with local ESP-IDF `v5.5.5-dirty`, Xtensa GCC `14.2.0`, and
 the required local Arduino patches. No additional warning demotions or shared
 feature/header edits were needed.
@@ -299,34 +311,73 @@ including the full certificate bundle and TLS settings.
 Both use the same 5,984,256-byte factory app partition at `0x10000` and the
 unchanged filesystem layout. The partition-table SHA-256 is
 `c6ed2513218eaa1d5b591914aea7ce95715500cb49068ed13b891ce5fa7efc71`.
-Image SHA-256 values:
+Image SHA-256 values by revision:
 
-- `build-config-xiao-openclaw/hardwareone-idf.bin`:
+- Initial `xiao-openclaw`, `04886ed7`:
   `8d91298c0a16530b85497f8a8343bb09c234ec686aedc34cdd9081eb1751503c`
-- `build-config-xiao-default/hardwareone-idf.bin`:
+- Current `xiao-openclaw`, `236589c9` (`build-config-xiao-openclaw/hardwareone-idf.bin`):
+  `7f9d28179b3875add82746f0c0b5849b95fe5681199f7834c4473735f1758d7e`
+- Initial comparison `xiao-default` (`build-config-xiao-default/hardwareone-idf.bin`):
   `d68d1e24de9251a2bb214ea242b0c553ab608030193723b207a3a6811720c648`
 
 Each build directory contains its generated `BUILD_INFO.md`, saved input
 snapshot, and compiler-resolved flags. Build logs are under
 `work/openclaw-build/`: `xiao-default-build.log` and
-`xiao-openclaw-test-profile-build.log` are the successful final runs. Earlier
-attempt logs are retained for diagnosis; the older `0.99.95` HTTP-only image is
+`xiao-openclaw-test-profile-build.log` record the successful initial profile
+runs. Earlier attempt logs are retained for diagnosis; the older `0.99.95` HTTP-only image is
 obsolete. Recheck partition fit before adding features to this narrow headroom.
 
-No device was flashed for this implementation. Live ESP-to-Mingus conversation,
-device memory use, and Wi-Fi streaming remain hardware acceptance work. The
-existing Studio-to-device tools passed the separate live checks above. Relay
-installation and the exact API session's sandbox/tool policy also remain to be
-qualified on the Studio.
+## Hardware acceptance
 
-After the relay is ready, inspect the XIAO's physical partition table and security
-state and capture an app-only rollback image before deployment. Use an app-only
-update at the validated app offset to preserve users, Wi-Fi settings, and files.
-The ordinary flash arguments also write the bootloader and partition table; the
-separate `littlefs-flash` target writes a generated blank filesystem. Neither is
-the intended update path here. Confirm `/dev/cu.usbmodem11201` and target MAC
-`68:EE:8F:50:E9:D0` again before device access. The Wi-Fi password is not recorded
-in this project, and `wifiAutoStart` remains false, so reconnect after a reboot.
+- Initial image `04886ed7` passed app-only flashing and verification. The first
+  device chat received valid SSE containing `No response from OpenClaw.` This
+  is the Gateway's fallback text, confirmed in tagged
+  [OpenClaw 2026.9.4 source](https://github.com/openclaw/openclaw/blob/v2026.9.4/src/gateway/openai-http.ts#L1112-L1149).
+  Transport reached the Gateway, but an actual Mingus reply was not established.
+- Follow-up image `236589c9` passed app-only flashing and a separate
+  `verify_flash` digest comparison. An additional esptool reset was needed
+  before the console returned; the subsequent boot was healthy. All five stored
+  secrets decrypted successfully. With user `a` logged in, cold-start `llmclear`
+  returned `ok:true` before any generation request.
+- Latest XIAO checks: `TestESPNetwork`, `192.168.21.24`, HTTP port `80`, correct
+  time, preserved masked token and public CA, zero crashes, about 52 KB free
+  heap and 6,672 KB free PSRAM. Clock verified at `2026-10-13T01:36:30Z`;
+  Wi-Fi autostart remains off.
+- Device-to-agent text acceptance passed on `236589c9`: a request through the
+  real HTTPS relay returned the 16-byte reply `HW1 relay ready.`, `done:true`,
+  final state `READY`, an empty error, and `retrySafe:false`. The earlier
+  fallback was not reproduced by this successful request.
+- Conversation continuity passed: Mingus acknowledged an ephemeral test phrase
+  with `noted.` and recalled it correctly on the next turn. New chat separation
+  passed: `llmclear` returned `ok:true`, and the next conversation returned
+  `no test phrase` when asked about the prior phrase. These turns all finished
+  `READY` with an empty error and `retrySafe:false`; crash count stayed zero
+  and free heap/PSRAM remained about 52 KB/6,672 KB.
+- A Studio-local direct Gateway probe returned `HW1 relay ready` and final
+  `[DONE]` in the diagnostic session ending `0002`. This local check preceded
+  the successful device requests above.
+- Pending: inspect the exact HTTP session's effective sandbox/tool policy.
+  Text transport, continuity, and New chat separation have passed; their
+  success does not establish session policy.
+
+The pre-test app-only rollback image is in the primary checkout at
+`/Users/cadbecaimacmini/Documents/Codex/Projects/hardwareone/work/openclaw-usb-backup/20261013T011617Z/factory-before.bin`,
+5,984,256 bytes, SHA-256
+`d1b623c177ce367cc09405df4a0dd9586f167859889f066c4fa400899790fe9f`.
+Both updates preserve the existing bootloader, partition table, NVS, LittleFS,
+users, and network settings. Continue using only the validated application
+region for updates or rollback. App rollback does not revert runtime data
+changes made after boot. Ordinary flash arguments also write the bootloader and
+partition table, and `littlefs-flash` writes a blank filesystem; neither is the
+intended update path. Confirm `/dev/cu.usbmodem11201` and target MAC
+`68:EE:8F:50:E9:D0` before further device access. Credentials remain private.
+
+Before porting HTTP support to the P4, preserve the actual active STT working
+tree at `/Users/cadbecaimacmini/Documents/ChatGPT/HardwareOne-stt-speedups`:
+branch `stt-speedups`, HEAD `2e56063`, 34 modified tracked files plus untracked
+STT work, profile `p4-glasses-test`, model `quartznet15x5gen2`. Do not substitute a
+clean `f4cc542c` baseline for that work. P4 USB `/dev/cu.usbmodem2201` remains
+outside this test.
 
 UART OpenClaw is planned in [the integration plan](OPENCLAW_INTEGRATION_PLAN.md).
 It needs a Pi daemon provider plus conversation/capability negotiation and narrow
