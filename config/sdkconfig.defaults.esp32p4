@@ -12,10 +12,15 @@ CONFIG_ESP32P4_SELECTS_REV_LESS_V3=n
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=400
 
-# Hex-mode PSRAM at 200 MHz (32 MB on the P4X-EYE). BSS may live in PSRAM.
+# Hex-mode PSRAM at 250 MHz (32 MB on the P4X-EYE). BSS may live in PSRAM.
+# ESP-IDF offers 250 MHz only for revision 3.x silicon, which the line above
+# selects. Measured on the P4X-EYE with the 15x5 speech model: about 68 ms off
+# each phrase's speech-end-to-text time compared with 200 MHz. Defaults never
+# override an existing sdkconfig: a build directory configured before this
+# line keeps 200 MHz until it is recreated.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_HEX=y
-CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_SPEED_250M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 
