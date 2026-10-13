@@ -164,7 +164,12 @@ void finish(MockTransport& source, const char* output = "Reply") {
 }
 
 int main() {
-  chatInit();
+  // A CLI/web New chat may be the first chat operation after boot. It must
+  // initialize its owner without a prior generation or OLED entry point.
+  assert(llmBackendActiveKind() == LlmBackendKind::None);
+  assert(chatClear());
+  assert(chatGetTurnCount() == 0);
+  assert(httpTransport.starts == 0 && cm5Transport.starts == 0);
   LlmModelDesc models[4]{};
   const size_t count = llmEnumerateModels(models, 4);
   assert(count == ENABLE_LLM_SOURCE_HTTP + ENABLE_LLM_SOURCE_CM5);

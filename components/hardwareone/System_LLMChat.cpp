@@ -446,6 +446,7 @@ void chatStop() {
 }
 
 bool chatClear() {
+  chatInit();
   ChatLock lk;
   if (!lk.held) return false;
   // Refuse mid-generation — engine state could get out of sync.
