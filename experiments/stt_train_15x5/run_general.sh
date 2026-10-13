@@ -8,12 +8,13 @@
 #     G2 channel aug 0.3, AdamW 2e-5, 350 h, checkpoints chosen by --dev broad;
 #     then full test sets and a benchmark row
 # Usage: nohup caffeinate -dims ./run_general.sh > /dev/null 2>&1 &
+export STT_ROOT=${STT_ROOT:?set STT_ROOT to the STT data root (speech stores, work, logs)}
 set -u
 cd "$(dirname "$0")"
 P=${HW1_STT_PYTHON:-$PWD/../stt_p4/private/export-venv/bin/python}
-export PYTHONPATH=/Volumes/USB2/stt/pydeps
+export PYTHONPATH=$STT_ROOT/pydeps
 export PYTORCH_ENABLE_MPS_FALLBACK=1
-ROOT=/Volumes/USB2/stt
+ROOT=$STT_ROOT
 LOG=$ROOT/logs/general.log
 OUT=$ROOT/work/general/quartznet15x5
 say() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
@@ -36,9 +37,10 @@ L=$ROOT/work/lm
     --lms $L/meeting-15x5b.lm $L/v2/A-w60-v40k-2.5M.lm $L/v2/B-auto-v40k-2.5M.lm $L/v2/C-w60-v50k-5M.lm $L/v2/D-w60-v65k-8M.lm \
     --out $L/v2/broad-eval.json) >> "$LOG" 2>&1 || say "LM eval FAILED"
 $P - >> "$LOG" 2>&1 <<'EOF'
+import os
 import json
 from train import broad_score
-d = json.load(open('/Volumes/USB2/stt/work/lm/v2/broad-eval.json'))
+d = json.load(open(os.environ['STT_ROOT'] + '/work/lm/v2/broad-eval.json'))
 print('LM broad ranking (WER %, lower is better):')
 rows = [('no LM (greedy)', d['greedy'])] + [(k.split('/')[-1], {s: v for s, v in r.items() if s != 'params'}) for k, r in d['lms'].items()]
 for name, w in sorted(rows, key=lambda r: broad_score(r[1])):
@@ -53,7 +55,7 @@ fails=0
 until grep -q '"finished"' "$OUT/train.jsonl" 2>/dev/null; do
   left=$(( (END - $(date +%s)) / 60 ))
   [ $left -le 0 ] && { say "deadline passed"; break; }
-  $P train.py --init /Volumes/USB/stt/models/quartznet15x5 --out "$OUT" --deadline "+$(echo "scale=2; $left/60" | bc)h" \
+  $P train.py --init $STT_ROOT/models/quartznet15x5 --out "$OUT" --deadline "+$(echo "scale=2; $left/60" | bc)h" \
     --mix general --dev broad --g2-prob 0.3 --accum 4 --optimizer adamw --lr 2e-5 \
     --target-hours 350 --eval-hours 35 --first-eval-hours 17.5 >> "$LOG" 2>&1
   rc=$?
@@ -64,11 +66,12 @@ until grep -q '"finished"' "$OUT/train.jsonl" 2>/dev/null; do
 done
 say "test sets for the general model"
 $P - <<'EOF'
+import os
 import json
 from pathlib import Path
 p = Path('benchmark_models.json'); m = json.loads(p.read_text())
 if not any(x['name'] == 'QuartzNet15x5 general' for x in m):
-    m.append({'name': 'QuartzNet15x5 general', 'ckpt': '/Volumes/USB2/stt/work/general/quartznet15x5/best',
+    m.append({'name': 'QuartzNet15x5 general', 'ckpt': os.environ['STT_ROOT'] + '/work/general/quartznet15x5/best',
               'note': '2026-10-03: NVIDIA original; --mix general (PS 30, AMI 25, Libri 20, VoxPopuli 25), '
                       'G2 aug 0.3, AdamW 2e-5, 350 h, chosen by --dev broad'})
     p.write_text(json.dumps(m, indent=2) + '\n')

@@ -23,6 +23,7 @@ inline constexpr size_t kSampleRate=16000, kMaxSamples=480000;
 // second copy; compressed input crosses the runtime's 4096-byte read boundary.
 inline constexpr size_t kRawBytes=2*1024*1024, kCompressedBytes=5000;
 inline constexpr int kInputExponent=-4, kOutputExponent=-2, kNodeCount=3;
+inline constexpr uint32_t kCodec=1;  // deployed-tree identity field (zlib path is the faked one)
 inline constexpr const char* kInputName="input";
 inline constexpr const char* kOutputName="output";
 inline constexpr uint8_t kRawSha[32]={
@@ -53,6 +54,7 @@ struct State {
     bool mutateInDestructor=false;
     uint8_t* lastRaw=nullptr;
     int greedyFeeds=0;
+    size_t melRows=0, normalizes=0;
     const int8_t* lastOutput=nullptr;
 } state;
 void clean() { assert(state.allocations.empty()); assert(state.models==0); state=State{}; }
@@ -120,6 +122,7 @@ size_t heap_caps_get_largest_free_block(unsigned caps) {
 }
 int64_t esp_timer_get_time() { static int64_t clock=0; return clock+=1000; }
 void vTaskDelay(int ticks) { assert(ticks==1); }
+#define taskYIELD() ((void)0)  // non-blocking yield between 5-stage groups
 int mbedtls_sha256(const unsigned char* input,size_t size,unsigned char* output,int is224) {
     assert(is224==0);
     if(size==hw1::stt::identity::kRawBytes) {
@@ -208,6 +211,21 @@ Status compute_features(const int16_t*,size_t samples,float* output,size_t count
     for(size_t i=0;i<count;++i)output[i]=float(int(i%5)-2)*0.0625f;
     return Status::Ok;
 }
+// capture-time features: cached-prefix frontend. Rows are a pure function of the row
+// index, so a prefix built by the test equals what the runtime computes.
+float fakeRow(size_t row,size_t m) {return float(int((row*kMelBins+m)%7)-3)*0.03125f;}
+Status log_mel_frame(const int16_t* pcm,size_t samples,size_t frame,float* out,FrontendWorkspace* w) {
+    assert(pcm && out && w && frame<feature_frames(samples));
+    ++fake::state.melRows;
+    for(size_t m=0;m<kMelBins;++m)out[m]=fakeRow(frame,m);
+    return Status::Ok;
+}
+Status normalize_features(float* output,size_t frames,FrontendWorkspace* w,FrontendTiming*) {
+    assert(output && w && frames);
+    ++fake::state.normalizes;
+    for(size_t r=0;r<frames;++r)for(size_t m=0;m<kMelBins;++m)assert(output[r*kMelBins+m]==fakeRow(r,m));
+    return Status::Ok;
+}
 Status ctc_reset(CtcState* state,char* text,size_t cap) {assert(cap>2);*state={};text[0]=0;return Status::Ok;}
 Status ctc_feed(CtcState* state,const int8_t*,size_t frames,size_t stride,char* text,size_t cap) {
     assert(stride==29 && cap>2 && frames>0);
@@ -218,6 +236,13 @@ Status ctc_feed(CtcState* state,const int8_t*,size_t frames,size_t stride,char* 
 Status ctc_finish(CtcState* state,char*,size_t) {state->finished=true;return Status::Ok;}
 }
 
+// Host stand-in for the ROM CRC-32 (little-endian, IEEE polynomial).
+uint32_t esp_rom_crc32_le(uint32_t crc,const uint8_t* p,uint32_t n) {
+    crc=~crc;for(uint32_t i=0;i<n;++i){crc^=p[i];for(int k=0;k<8;++k)crc=(crc>>1)^(0xedb88320u&(0u-(crc&1u)));}return ~crc;
+}
+// Host stand-ins: evaluate and format-check the arguments, print the line.
+#define ESP_LOGI(tag, fmt, ...) ((void)std::printf("I %s: " fmt "\n", tag, __VA_ARGS__))
+#define ESP_LOGW(tag, fmt, ...) ((void)std::printf("W %s: " fmt "\n", tag, __VA_ARGS__))
 // INSERT_RUNTIME
 
 namespace test {
@@ -524,11 +549,96 @@ void decoderReleasesMemory() {
     fake::settled(0);
 }
 }
+namespace test {
+Result callPrefix(ModelCache* cache,size_t samples,size_t cached) {
+    Reader reader;std::vector<int16_t> pcm(samples,42);char text[64],error[128];STTLocalStats stats;
+    std::vector<float> rows(std::max<size_t>(cached,1)*kMelBins);
+    for(size_t r=0;r<cached;++r)for(size_t m=0;m<kMelBins;++m)rows[r*kMelBins+m]=fakeRow(r,m);
+    const STTFeaturePrefix prefix{rows.data(),cached};
+    const bool ok=transcribe(reader.model(),pcm.data(),samples,text,sizeof(text),fake::control(),stats,error,sizeof(error),
+                             nullptr,cache,nullptr,cached?&prefix:nullptr);
+    if(!ok) {assert(!text[0]);assert(error[0]);}
+    return {ok,stats,text,error};
+}
+// callBudget() (the feature pool's sizing) is exactly the admission rule: a warm
+// call is admitted at that much free PSRAM and that largest block, and refused
+// one byte below either (per-call model; with HW1_STT_RESIDENT_MODEL=1 and a
+// resident model, the resident call budget).
+void callBudgetMatchesAdmission() {
+    fake::clean();
+    {
+        ModelCache cache;
+        Reader cold;assert(call(&cache,cold,8000).ok);   // warm-up (builds the resident model)
+        for(size_t n:{size_t(480),size_t(64000),size_t(320000)}) {
+            size_t contiguous=0;
+            const size_t need=callBudget(n,&cache,&contiguous);
+#if !HW1_STT_RESIDENT_MODEL
+            assert(need==remainingBudget(n) && contiguous==2048*((feature_frames(n)+1)/2)+64*1024+1024*1024);
+#endif
+            assert(contiguous<=need);
+            fake::state.psramTotal=fake::state.allocated+need;fake::state.largest=contiguous;
+            Reader a;assert(call(&cache,a,n).ok);
+            fake::state.psramTotal=fake::state.allocated+need-1;
+            Reader b;auto refused=call(&cache,b,n);
+            assert(!refused.ok && refused.error=="Not enough free memory; stop camera, speech and other large models");
+            fake::state.psramTotal=fake::state.allocated+need;fake::state.largest=contiguous-1;
+            Reader c;auto split=call(&cache,c,n);
+            assert(!split.ok && split.error=="Not enough contiguous memory for STT activations");
+            fake::state.psramTotal=32*1024*1024;fake::state.largest=32*1024*1024;
+        }
+        // No session cache: the per-call rule.
+        size_t contiguous=0;
+        assert(callBudget(64000,nullptr,&contiguous)==remainingBudget(64000));
+        cache.reset();fake::settled(0);
+    }
+    fake::settled(0);
+}
+void perCallSession() {
+#if !HW1_STT_RESIDENT_MODEL
+    // With HW1_STT_RESIDENT_MODEL=0: a session never keeps a model.
+    // Each call creates its own (at its own length) and destroys it before
+    // returning, after the warm-up as before it, as in the deployed firmware.
+    fake::clean();
+    {
+        ModelCache cache;
+        const size_t lengths[]={8000,64000,480,320,64000,106000,40000};
+        int calls=0;
+        for(size_t n:lengths) {
+            Reader r;auto res=call(&cache,r,n);++calls;
+            assert(res.ok && res.stats.weightsReused==(calls>1));
+            assert(fake::state.created==calls && fake::state.destroyed==calls && fake::state.models==0);
+            assert(fake::state.modelFrames.back()==feature_frames(n));
+            fake::settled(1);  // weights only: no model, arena or metadata survives a call
+        }
+        // cached-feature prefix: copied rows + computed tail + CMVN, same per-call model.
+        const size_t melBefore=fake::state.melRows;
+        auto cachedCall=callPrefix(&cache,480,2);           // 3 frames, 2 cached
+        assert(cachedCall.ok && cachedCall.stats.featureCachedFrames==2);
+        assert(fake::state.melRows==melBefore+1 && fake::state.normalizes==1);
+        assert(fake::state.created==calls+1 && fake::state.models==0);
+        auto shortPrefix=callPrefix(&cache,1600,3);          // 10 frames, 3 cached: under a third, batch path
+        assert(shortPrefix.ok && shortPrefix.stats.featureCachedFrames==0 && fake::state.normalizes==1);
+        // The deployed 150 KB internal floor on every warm call.
+        fake::state.internalFree=150*1024;
+        Reader atFloor;assert(call(&cache,atFloor,64000).ok);
+        fake::state.internalFree=150*1024-1;
+        Reader below;auto refused=call(&cache,below,64000);
+        assert(!refused.ok && refused.error=="Not enough free memory; stop camera, speech and other large models");
+        fake::state.internalFree=1024*1024;
+        assert(fake::state.models==0);
+        cache.reset();fake::settled(0);
+    }
+    fake::settled(0);
+#endif
+}
+}
 int main() {
+    test::callBudgetMatchesAdmission();
+    test::perCallSession();
     test::decoderHook();test::decoderReleasesMemory();
     test::coldWarmShapes();test::oneShotOrder();test::failuresBeforePublish();test::failuresAfterPublish();
     test::corruptedAndFailedHash();test::warmBudgetAndEnvelope();test::guardLimitsAndDestruction();
     test::diagnosticsAfterModelDestruction();
     fake::clean();
-    std::printf("QuartzNet actual runtime cache tests passed (diagnostics=%d)\n",HW1_STT_RUNTIME_DIAGNOSTICS);
+    std::printf("QuartzNet actual runtime cache tests passed (diagnostics=%d resident=%d)\n",HW1_STT_RUNTIME_DIAGNOSTICS,HW1_STT_RESIDENT_MODEL);
 }

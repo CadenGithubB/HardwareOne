@@ -992,8 +992,9 @@ bool g2ParseSettingVersion(const uint8_t* payload, size_t payloadLen,
 
 // Decode the independent LEFT (inner f5) and RIGHT (inner f6) version strings
 // from DeviceReceiveRequestFromAPP (wrapper f4). Presence is reported per arm;
-// each string is truncated to fit and always NUL-terminated. Malformed input
-// returns false with the complete result zeroed. The singular API above remains
+// each string is copied intact and NUL-terminated. Embedded NUL, overlong
+// strings and malformed input return false with the complete result zeroed.
+// The singular API above remains
 // the compatibility accessor for the historical LEFT/f5 value.
 struct G2SettingVersions {
   bool hasLeft;
@@ -1130,14 +1131,28 @@ typedef struct {
 
 // Parse the device-state echo. Scoped to wrapper f4 ONLY — wrapper f3 on a
 // write-ack carries our own payload back at colliding inner field numbers.
-// Returns false if this frame carries no f4 body at all (write-acks don't).
+// Validates the whole frame before publishing; malformed suffixes do not
+// expose partial state. Repeated f4 bodies merge and scalar leaves use the
+// last value, matching the version parser. Numeric values retain U8 saturation.
+// Returns false if no recognized numeric field was reported (including when
+// there is no f4 body). Optional correlation outputs require that wrapper
+// field to be present; command/magic duplicates or overflow are rejected.
+// Requesting either correlation output also rejects competing known wrapper
+// bodies f3/f5/f6/f7, while repeated f4 bodies continue to merge.
+// All supplied outputs are cleared on failure.
 bool g2ParseSettingEcho(const uint8_t* payload, size_t payloadLen,
-                        G2SettingsEcho* out);
+                        G2SettingsEcho* out, uint32_t* outMagic = nullptr,
+                        uint32_t* outCommand = nullptr);
 
-// Recognise a write-ack: wrapper f1 == 1 and a wrapper f3 body present.
-// Writes back the echoed magic and the single (innerField, leafField, value)
-// triple the device mirrored, so a caller can match it against what it sent.
-// Returns false for anything that isn't a commandId=1 frame with an f3 body.
+// Recognise one unambiguous write-ack: exactly one commandId=1, one magic,
+// and one wrapper-f3 body, containing exactly one setting sub-message with
+// exactly one varint leaf. An empty wear-detection sub-message is the stock
+// nanopb scalar-default encoding of leaf1=0; other empty settings are rejected.
+// Order is immaterial; duplicates, extra fields,
+// truncated/trailing data and values outside the output types are rejected.
+// Writes back the echoed magic and (innerField, leafField, value) so the owner
+// can match the full tuple, response flag, temple and connection generation.
+// All supplied outputs are cleared on failure.
 bool g2ParseSettingWriteAck(const uint8_t* payload, size_t payloadLen,
                             uint32_t* outMagic,
                             uint8_t* outInnerField, uint8_t* outLeafField,

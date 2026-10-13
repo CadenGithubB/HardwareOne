@@ -25,10 +25,11 @@
 #   experiments/stt_p4/deploy_15x5.sh <checkpoint-dir> <name> [steps...]
 #     steps default to: stage export pack build card
 #     flash is never implied; add it explicitly (PORT=/dev/cu.usbmodemXXXX).
-#   e.g. deploy_15x5.sh /Volumes/USB2/stt/work/run15x5/best ft15-8877 all flash
+#   e.g. deploy_15x5.sh "$STT_ROOT/work/run15x5/best" ft15-8877 all flash
 #
 # Environment (local defaults can be overridden):
-#   CARD      mounted SD card volume          (/Volumes/P4SD)
+#   STT_ROOT  STT data root                   (required)
+#   CARD      mounted SD card volume          (required for card and lm)
 #   LM        word LM for the lm step         (work/lm/meeting-15x5ft.lm)
 #   PORT      P4 USB-Serial/JTAG port         (or HW1_P4_PORT; required for USB steps)
 #   ARTIFACT  file name on the card           (quartznet15x5-<name>.p4.stt)
@@ -49,7 +50,7 @@ STEPS=("$@")
 [ "${STEPS[0]}" = all ] && STEPS=(stage export pack build card "${STEPS[@]:1}")
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-STT=/Volumes/USB2/stt
+STT=${STT_ROOT:?set STT_ROOT to the STT data root}   # speech stores, work and logs
 DEPLOY=$STT/work/deploy15
 BASE_CKPT=$DEPLOY/ckpt-base15            # fixtures 0.wav/1.wav + trans.txt
 CKPT=$DEPLOY/ckpt-$NAME
@@ -66,7 +67,7 @@ SRC_FEATURES=$HERE/features-p4-noweb-15x5.h
 APP=$HERE/private/app-p4-$NAME
 FEATURES=$HERE/private/features-p4-noweb-$NAME.h
 BUILD=$HERE/private/build-p4-$NAME
-CARD=${CARD:-/Volumes/P4SD}
+CARD=${CARD:-}                            # mounted microSD card (card and lm steps)
 LM=${LM:-$STT/work/lm/meeting-15x5ft.lm}
 # The P4X-EYE these test builds may be flashed to. Kept out of git: set UNIT_MAC
 # in the environment or in the ignored private/unit.env (UNIT_MAC=xx:xx:...).
@@ -150,7 +151,7 @@ remount_card() {
 }
 
 step_card() {
-  [ -d "$CARD" ] || { say "card not mounted at $CARD"; exit 1; }
+  [ -d "$CARD" ] || { say "card not mounted at ${CARD:-<unset>} (set CARD)"; exit 1; }
   mkdir -p "$CARD/STT Models"
   cp -X "$EXPORT/$ARTIFACT" "$CARD/STT Models/$ARTIFACT.tmp"   # -X: no macOS ._ files
   mv "$CARD/STT Models/$ARTIFACT.tmp" "$CARD/STT Models/$ARTIFACT"
@@ -178,7 +179,7 @@ step_flash() {
 }
 
 step_lm() {
-  [ -d "$CARD" ] || { say "card not mounted at $CARD"; exit 1; }
+  [ -d "$CARD" ] || { say "card not mounted at ${CARD:-<unset>} (set CARD)"; exit 1; }
   mkdir -p "$CARD/STT Models"
   cp -X "$LM" "$CARD/STT Models/meeting.lm.tmp"
   mv "$CARD/STT Models/meeting.lm.tmp" "$CARD/STT Models/meeting.lm"

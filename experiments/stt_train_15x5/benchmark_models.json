@@ -43,5 +43,15 @@
     "name": "QuartzNet15x5 general2 (LR 2e-5)",
     "ckpt": "work/general2/quartznet15x5/best",
     "note": "2026-10-05: NVIDIA original; --mix general2 (+People's Speech 2, +Common Voice), MUSAN+DEMAND noise, 4% noise-only, G2 aug 0.3, no rollback, AdamW 2e-5, 500 h, chosen by --dev broad"
+  },
+  {
+    "name": "QuartzNet15x5 general2 (LR 1e-5)",
+    "ckpt": "work/general2-lr1e5/quartznet15x5/best",
+    "note": "2026-10-07: as general2 (LR 2e-5) but peak LR 1e-5; NVIDIA original, --mix general2, MUSAN+DEMAND noise, 4% noise-only, G2 aug 0.3, no rollback, 500 h, chosen by --dev broad"
+  },
+  {
+    "name": "QuartzNet15x5 general + noise-only",
+    "ckpt": "work/general-noiseonly/quartznet15x5/best",
+    "note": "2026-10-08: the general recipe (NVIDIA original, --mix general, MUSAN noise, G2 aug 0.3, 350 h, peak LR 1e-5, no rollback) + 4% noise-only clips from MUSAN+DEMAND; one change at a time"
   }
 ]

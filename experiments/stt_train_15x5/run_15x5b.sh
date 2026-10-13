@@ -9,13 +9,14 @@
 #  4. test sets (incl. the -g2 copies) for best; compare with run15x5's
 #     final.json / final-g2.json before deploying anything
 # Usage: nohup caffeinate -dims ./run_15x5b.sh > /dev/null 2>&1 &
+export STT_ROOT=${STT_ROOT:?set STT_ROOT to the STT data root (speech stores, work, logs)}
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
 P=${HW1_STT_PYTHON:-$PWD/../stt_p4/private/export-venv/bin/python}
-export PYTHONPATH=/Volumes/USB2/stt/pydeps
+export PYTHONPATH=$STT_ROOT/pydeps
 export PYTORCH_ENABLE_MPS_FALLBACK=1
-ROOT=/Volumes/USB2/stt
+ROOT=$STT_ROOT
 LOG=$ROOT/logs/run15x5b.log
 INIT=$ROOT/work/run15x5/best
 RUN=$ROOT/work/run15x5b

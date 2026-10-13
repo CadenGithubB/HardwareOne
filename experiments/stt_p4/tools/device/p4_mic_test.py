@@ -10,7 +10,7 @@ import serial
 
 PORT = os.environ['HW1_P4_PORT']
 USER, PASS = os.environ['P4_USER'], os.environ['P4_PASS']
-CLIPS = Path('/Volumes/USB2/stt/work/deploy/mic-test')
+CLIPS = Path(os.path.join(os.environ.get('STT_ROOT', 'stt-data'), 'work/deploy/mic-test'))
 OUT = Path(sys.argv[1])
 refs = json.loads((CLIPS / 'refs.json').read_text())
 

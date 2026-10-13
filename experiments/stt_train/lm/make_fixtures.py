@@ -35,7 +35,7 @@ import build_lm  # noqa: E402
 import hw1lm  # noqa: E402
 from hw1lm import BLANK, CHAR_TO_ID  # noqa: E402
 import os
-STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
+STT_ROOT = Path(os.environ.get('STT_ROOT', 'stt-data'))  # data root: set STT_ROOT
 
 REPO = HERE.parents[2]
 OUT = REPO / 'components' / 'hardwareone' / 'test' / 'host' / 'fixtures' / 'stt_lm'

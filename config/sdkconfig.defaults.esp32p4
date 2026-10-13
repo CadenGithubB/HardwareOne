@@ -19,6 +19,18 @@ CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 
+# 128-byte L2 cache lines (IDF default 64) for the 128 KB L2 that fronts PSRAM
+# and flash: each miss fetches twice as much, which suits the streaming reads
+# of model weights and activations in PSRAM. Measured on the P4X-EYE with the
+# 15x5 speech model: about 344 ms off each phrase's speech-end-to-text time,
+# the largest of the engine-side changes.
+# It re-slices the fixed L2, so it costs no RAM; L1 lines stay 64 bytes, and
+# cache maintenance in drivers (esp_cache_msync, JPEG and SDMMC buffers)
+# follows CONFIG_CACHE_L2_CACHE_LINE_SIZE. Defaults never override an existing
+# sdkconfig: a build directory configured before this line keeps 64 bytes
+# until it is recreated.
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
+
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 

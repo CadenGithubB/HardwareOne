@@ -20,6 +20,7 @@ set(HW_CFG_ENABLE_AUTOMATION 0)
 set(HW_CFG_ENABLE_CAMERA_SENSOR 0)
 set(HW_CFG_ENABLE_ESP_SR 0)
 set(HW_CFG_ENABLE_LOCAL_STT 0)
+set(HW_CFG_ENABLE_STT_SPEAKER_LABELS 0)
 set(HW_CFG_ENABLE_EDGE_IMPULSE 0)
 set(HW_CFG_ENABLE_GAMES 0)
 set(HW_CFG_ENABLE_WEB_GAME_DARKROOM 0)
@@ -96,6 +97,7 @@ if(EXISTS "${hw_cfg_file}")
         ENABLE_LLM_BACKEND ENABLE_LLM_SOURCE_ONBOARD ENABLE_LLM_SOURCE_CM5
         ENABLE_LLM_SOURCE_HTTP
         ENABLE_MAPS ENABLE_CAMERA_SENSOR ENABLE_ESP_SR ENABLE_LOCAL_STT
+        ENABLE_STT_SPEAKER_LABELS
         ENABLE_AUTOMATION ENABLE_EDGE_IMPULSE ENABLE_GAMES ENABLE_WEB_GAME_DARKROOM
         ENABLE_BLUETOOTH ENABLE_G2_GLASSES ENABLE_R1_HEALTH ENABLE_G2_TESTSUITE
         ENABLE_RASPBERRY_PI_HOST_POWER ENABLE_RASPBERRY_PI_HOST_FAN)
@@ -587,6 +589,38 @@ if(HW_CFG_ENABLE_LOCAL_STT GREATER 0)
     if(IDF_TARGET STREQUAL "esp32p4")
         # stt_lm.cpp is inert unless System_STTLocal.cpp uses it (ENABLE_STT_LM).
         list(APPEND hardwareone_srcs stt/quartznet_runtime.cpp stt/quartznet_frontend.cpp stt/stt_lm.cpp)
+        # The resident model (stt/quartznet_runtime.h) is on unless the build is
+        # configured with -DHW1_STT_RESIDENT_MODEL=0. stt_dl_metadata.cpp is its
+        # PSRAM metadata hook for the tree-local ESP-DL (tools/p4/prepare_esp_dl.py).
+        if(NOT DEFINED HW1_STT_RESIDENT_MODEL)
+            set(HW1_STT_RESIDENT_MODEL 1)
+        endif()
+        if(HW1_STT_RESIDENT_MODEL)
+            set(_hw1_stt_resident_model 1)
+            list(APPEND hardwareone_srcs stt/stt_dl_metadata.cpp)
+        else()
+            set(_hw1_stt_resident_model 0)
+        endif()
+        # Session speaker labels (stt/speaker_model.h, ENABLE_STT_SPEAKER_LABELS): their sources, plus the
+        # explicit-PSRAM helpers in stt_dl_metadata.cpp they allocate with.
+        if(HW_CFG_ENABLE_STT_SPEAKER_LABELS GREATER 0)
+            # The background speaker task and the STT worker both run PIE vector code on core 1. ESP-IDF
+            # before 6.0 does not save PIE register q3 on a context switch, so the voiceprints come out wrong:
+            # refuse to build until the IDF carries the fix (tools/p4/idf-patches/README.md).
+            set(_hw1_portasm "${IDF_PATH}/components/freertos/FreeRTOS-Kernel/portable/riscv/portasm.S")
+            if(EXISTS "${_hw1_portasm}")
+                file(READ "${_hw1_portasm}" _hw1_portasm_text)
+                if(NOT _hw1_portasm_text MATCHES "esp\\.vst\\.128\\.ip[ \t]+q3")
+                    message(FATAL_ERROR "ENABLE_STT_SPEAKER_LABELS needs the ESP-IDF PIE context-switch fix "
+                        "(upstream b25cb29, ESP-IDF 6.0+): apply tools/p4/idf-patches/"
+                        "0001-freertos-fix-xesppie-registers-save-restore.patch to ${IDF_PATH} (see its README).")
+                endif()
+            endif()
+            list(APPEND hardwareone_srcs stt/speaker_frontend.cpp stt/speaker_model.cpp)
+            if(NOT HW1_STT_RESIDENT_MODEL)
+                list(APPEND hardwareone_srcs stt/stt_dl_metadata.cpp)
+            endif()
+        endif()
         list(APPEND hardwareone_requires espressif__esp-dl esp_rom mbedtls)
     endif()
 endif()
@@ -622,7 +656,25 @@ idf_component_register(
 set_source_files_properties(System_QuickNote.cpp QuickNote_Store.cpp G2_Page_Notes.cpp
                             PROPERTIES COMPILE_OPTIONS "-Os")
 if(HW_CFG_ENABLE_LOCAL_STT GREATER 0 AND IDF_TARGET STREQUAL "esp32p4")
-    set_source_files_properties(stt/quartznet_frontend.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+    # The STT engine is built with -O2 instead of the app-wide -Os (source
+    # options follow the component's, so -O2 wins): measured ~41 ms per 15x5
+    # phrase on the P4. The frontend keeps -ffp-contract=off (no FMA
+    # contraction: features stay bit-identical to the reference). One call per
+    # file: set_source_files_properties replaces COMPILE_OPTIONS.
+    set_source_files_properties(stt/quartznet_frontend.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-O2")
+    set_source_files_properties(stt/quartznet_runtime.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+    set_source_files_properties(stt/stt_lm.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+    # Speaker features and pooling are tight float loops (at -Os they were ~3x slower).
+    if(HW_CFG_ENABLE_STT_SPEAKER_LABELS GREATER 0)
+        set_source_files_properties(stt/speaker_frontend.cpp stt/speaker_model.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+    endif()
+    # Speaker diagnostics (System_STTLocal.h): off unless configured with -DHW1_STT_SPEAKER_DIAGNOSTICS=1.
+    if(DEFINED HW1_STT_SPEAKER_DIAGNOSTICS)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE HW1_STT_SPEAKER_DIAGNOSTICS=${HW1_STT_SPEAKER_DIAGNOSTICS})
+    endif()
+    # Component-wide: ModelCache's layout depends on it, so every translation
+    # unit (System_STTLocal.cpp included) must see the same value.
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE HW1_STT_RESIDENT_MODEL=${_hw1_stt_resident_model})
     # ESP-SR also registers a model whitelist. Union QuartzNet's exact ops and
     # kernel variants into it; otherwise SR's WN10 list strips our Relu/int8 Conv.
     idf_build_get_property(_stt_build_components BUILD_COMPONENTS)
@@ -635,6 +687,10 @@ if(HW_CFG_ENABLE_LOCAL_STT GREATER 0 AND IDF_TARGET STREQUAL "esp32p4")
     endif()
     include("${_stt_dl_dir}/cmake/compile_register.cmake")
     esp_dl_compile_add_yml("${CMAKE_CURRENT_LIST_DIR}/stt/quartznet.compile_req.yml")
+    # The speaker-embedding trunk (8-bit weights, 16-bit activations), only with speaker labels.
+    if(HW_CFG_ENABLE_STT_SPEAKER_LABELS GREATER 0)
+        esp_dl_compile_add_yml("${CMAKE_CURRENT_LIST_DIR}/stt/speaker.compile_req.yml")
+    endif()
 endif()
 
 # Enable Sense features for ESP32-S3 boards (camera, mic, SD card on expansion board)

@@ -3,13 +3,14 @@
 # Builds each candidate, then tunes it fully against the deployed acoustic
 # checkpoint (run15x5b step 8375; logits cached by tune.py) so the WERs are
 # directly comparable with meeting-15x5b.lm (2.5 MB, AMI + Libri-100 text).
+export STT_ROOT=${STT_ROOT:?set STT_ROOT to the STT data root (speech stores, work, logs)}
 set -u
 cd "$(dirname "$0")"
 P=${HW1_STT_PYTHON:-$PWD/../../stt_p4/private/export-venv/bin/python}
-export PYTHONPATH=/Volumes/USB2/stt/pydeps
-OUT=/Volumes/USB2/stt/work/lm/v2
-CKPT=/Volumes/USB2/stt/work/run15x5b/full/best
-LOG=/Volumes/USB2/stt/logs/lm-v2-sweep.log
+export PYTHONPATH=$STT_ROOT/pydeps
+OUT=$STT_ROOT/work/lm/v2
+CKPT=$STT_ROOT/work/run15x5b/full/best
+LOG=$STT_ROOT/logs/lm-v2-sweep.log
 mkdir -p "$OUT"
 # name weights max_vocab target_bytes
 CANDIDATES=(
@@ -24,7 +25,7 @@ for c in "${CANDIDATES[@]}"; do
   if [ ! -f "$OUT/$name.lm" ]; then
     echo "$(date +%T) build $name" >> "$LOG"
     nice -n 5 $P build_lm.py --mode mixn --weights "$w" --max-vocab "$v" --target-bytes "$b" \
-      --params /Volumes/USB2/stt/work/lm/meeting-15x5b.lm --out "$OUT/$name.raw.lm" \
+      --params $STT_ROOT/work/lm/meeting-15x5b.lm --out "$OUT/$name.raw.lm" \
       --report "$OUT/$name.build.json" >> "$LOG" 2>&1 || { echo "build $name FAILED" >> "$LOG"; continue; }
   fi
   if [ ! -f "$OUT/$name.tune.json" ]; then

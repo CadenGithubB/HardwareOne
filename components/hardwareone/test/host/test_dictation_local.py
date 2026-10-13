@@ -23,7 +23,7 @@ def main():
     stt_header=(base/'System_STT.h').read_text()
     local_header=(base/'System_STTLocal.h').read_text()
     transcript_header=(base/'System_Transcript.h').read_text()
-    headers=re.sub(r'^#include.*\n|^#pragma once\n','',transcript_header+'\n'+local_header+'\n'+stt_header,flags=re.M)
+    headers=re.sub(r'^#include.*\n|^#pragma once\n','',(base/'System_STTMetadata.h').read_text()+'\n'+transcript_header+'\n'+local_header+'\n'+stt_header,flags=re.M)
     controls=source[source.index('struct DictationPublishedCapture'):source.index('// Capability is deliberately')]
     local=source[source.index('#if ENABLE_LOCAL_STT\n// A local exchange'):source.index('#endif // ENABLE_LOCAL_STT',source.index('// A local exchange'))]+'\n#endif\n'
     harness=(HERE/'dictation_local_harness.cpp').read_text()
@@ -40,6 +40,8 @@ int main(){
  assert(!dictationAppSnapshot(lease,&snap)&&!snap.valid&&!snap.busy);
  assert(!dictationAppPeekText(lease,text,sizeof(text),&receipt)&&!text[0]&&!receipt.exchange);
  assert(!dictationAppCommitText(lease,receipt,1));
+ STTSpeakerSnapshot speakers; speakers.available=true; speakers.count=1;
+ assert(!dictationAppReadSpeakers(lease,&speakers)&&!speakers.available&&!speakers.count);
  assert(!dictationAppRequestStop(lease)&&!dictationAppCancel(lease));
  puts("Dictation feature-off App stubs passed");
 }
@@ -48,7 +50,7 @@ int main(){
     harness=harness.replace('// INSERT_CONTROL',controls)
     harness=harness.replace('// INSERT_LOCAL',function(source,'static TranscriptOptions dictationTranscriptOptions(')+'\n'+local)
     harness=harness.replace('// INSERT_LIVE',function(source,'static bool displaySessionStillLive('))
-    shared='\n'.join(function(source, sig) for sig in ['static bool dictFailOwned(', 'static bool dictationPeekTextImpl(', 'static bool dictationCommitTextImpl(', 'bool dictationPeekTextFor(', 'bool dictationCommitTextFor(', 'bool dictationAppPeekText(', 'bool dictationAppCommitText(', 'bool dictationTakeTextFor(', 'static bool dictationCancelImpl(', 'bool dictationAppCancel(', 'void dictationFieldFullFor(', 'static const char* dictDeliver('])
+    shared='\n'.join(function(source, sig) for sig in ['static bool dictFailOwned(', 'static bool dictationPeekTextImpl(', 'static bool dictationCommitTextImpl(', 'bool dictationPeekTextFor(', 'bool dictationCommitTextFor(', 'bool dictationAppPeekText(', 'bool dictationAppCommitText(', 'bool dictationAppReadSpeakers(', 'bool dictationTakeTextFor(', 'static bool dictationCancelImpl(', 'bool dictationAppCancel(', 'void dictationFieldFullFor(', 'static const char* dictDeliver('])
     harness=harness.replace('// INSERT_DRAIN',shared)
     harness=harness.replace('// INSERT_STOP','\n'.join(function(source,sig) for sig in ('static bool dictationRequestStopImpl(', 'void dictationRequestStopFor(', 'bool dictationAppRequestStop(')))
     harness=harness.replace('// INSERT_BEGIN','\n'.join(function(source,sig) for sig in ('static bool dictationBeginImpl(', 'bool dictationBeginFor(', 'bool dictationAppBeginWith(', 'bool dictationAppBegin(')))

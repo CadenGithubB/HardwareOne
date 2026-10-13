@@ -46,6 +46,11 @@ class Lm {
     // The same value as the decoder uses it: a double sum of q/1000.0 terms
     // in the host reference's order (NaN for invalid ids).
     double log10(uint16_t w2, uint16_t w1, uint16_t word) const;
+    // Bounds of log10() over all valid ids (every n-gram/backoff path, as
+    // computed doubles; unkLog10 is separate), found by open(). The decoder
+    // uses them only to skip work that provably cannot change its result.
+    double log10Max() const { return log10Max_; }
+    double log10Min() const { return log10Min_; }
  private:
     long findBigram(uint16_t a, uint16_t b) const;
     long findTrigram(uint16_t a, uint16_t b, uint16_t c) const;
@@ -55,6 +60,7 @@ class Lm {
     const uint8_t *unigram_=nullptr, *offsets_=nullptr, *strings_=nullptr, *bigram_=nullptr, *trigram_=nullptr;
     uint32_t vocab_=0, bigrams_=0, trigrams_=0, strings_bytes_=0, beam_=0;
     float alpha_=0, beta_=0, unk_=0, prune_=0, bonus_=0;
+    double log10Max_=0, log10Min_=0;
     uint16_t bos_=kNoWord, eos_=kNoWord, unkId_=kNoWord;
 };
 
@@ -82,12 +88,18 @@ struct DecodeStats {
     uint32_t frames=0, beam=0;
     uint32_t nodes=0;        // prefix nodes created (<= frames*beam+1)
     uint32_t candidates=0;   // scored candidates, all frames
-    uint32_t completions=0;  // word LM evaluations (cached per prefix)
+    uint32_t completions=0;  // word LM evaluations (per prefix, only where the result can matter)
     size_t workspaceBytes=0;
+    // Completed words in the actual initial/final context, excluding BOS/EOS.
+    // 0..2 words; UINT8_MAX means that stage was not reached. The end context
+    // includes a final partial word, before EOS and output-buffer truncation.
+    // Each decode currently starts at BOS; no context is retained in Lm.
+    uint8_t startHistoryWords=UINT8_MAX, endHistoryWords=UINT8_MAX;
 };
 // Bytes of the single workspace allocation decode() makes for this shape:
 // 40*(frames*beam+1) nodes + 4*pow2(2*(frames*beam+1)) prefix index
-// + 24*beam beams + 40*29*beam candidates + ~3.7 KiB tables. 0 if out of range.
+// + 44*beam beams/heap + 48*29*beam candidates + 34*min(pow2(max(256,
+// 2*frames)),8192) word/n-gram memo + ~4.7 KiB tables. 0 if out of range.
 size_t workspace_bytes(size_t frames, size_t beam);
 // logits: int8 model output [frames x 29], value = q * 2^exponent (ESP-DL
 // sign: the P4 model's -2; hw1lm.py writes the same scale as +2); per-frame
@@ -95,8 +107,12 @@ size_t workspace_bytes(size_t frames, size_t beam);
 // skips non-blank tokens below it except the repeat of the prefix's last
 // symbol, matching hw1lm.py (FORMAT.md leaves that case implicit). Text is the
 // best prefix without a trailing space, NUL-terminated even on failure
-// (OutputTooSmall keeps the leading capacity-1 bytes).
+// (OutputTooSmall keeps the leading capacity-1 bytes). strength must be finite
+// in [0,1]: scale alpha, beta and the custom-word bonus together, preserving
+// their balance. 1 preserves file/reference behavior; 0 is acoustic-only CTC
+// beam search (not greedy). The checked blob and Lm view are never modified.
 DecodeStatus decode(const int8_t* logits, size_t frames, int exponent, const Lm& lm,
                     const CustomWords* words, char* text, size_t capacity,
-                    const DecodeControl& control={}, size_t beam=0, DecodeStats* stats=nullptr);
+                    const DecodeControl& control={}, size_t beam=0, DecodeStats* stats=nullptr,
+                    float strength=1.0f);
 }

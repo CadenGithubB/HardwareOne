@@ -17,6 +17,7 @@
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "stt/stt_segmenter.h"
+#include "stt/quartznet_frontend.h"
 #include <ArduinoJson.h>
 #include <esp_random.h>
 #include <algorithm>
@@ -28,6 +29,52 @@
 
 #ifndef ESP_PLATFORM
 size_t sttPsramFree();  // host builds: the test harness supplies free PSRAM
+#endif
+
+// Continuous-session latency features (measured on the P4 with the 15x5
+// model, speech end -> caption ~3.6 s -> ~1.7 s together with the runtime's
+// HW1_STT_RESIDENT_MODEL). Capture-time features and early drafts remain on.
+// Tail trimming and its speculative finals are now opt-in: the default keeps
+// every sample of a closed phrase, including quiet word endings. A features
+// file or -D can select the legacy policy for controlled comparisons. These
+// choices apply to Dictation, QuickNote, Transcription and Conversate.
+
+// Log-mel rows are computed while a phrase is still being captured; the final
+// call only computes the rows after the cache and runs CMVN + quantize.
+#ifndef HW1_STT_CAPTURE_FEATURES
+#define HW1_STT_CAPTURE_FEATURES 1
+#endif
+// Preserve the complete captured phrase by default. The old voiced-end +
+// 200 ms shortcut can remove quiet endings even after capture retained them.
+// Keeping the tail costs extra final inference time, without delaying drafts.
+#ifndef HW1_STT_TRIM_SILENCE
+#define HW1_STT_TRIM_SILENCE 0
+#endif
+// Needs HW1_STT_TRIM_SILENCE: once a phrase's trimmed input is captured and
+// its pause will close it, its final is computed early and published when
+// the phrase closes exactly as predicted.
+#ifndef HW1_STT_SPECULATIVE_FINAL
+#define HW1_STT_SPECULATIVE_FINAL HW1_STT_TRIM_SILENCE
+#endif
+#if HW1_STT_SPECULATIVE_FINAL && !HW1_STT_TRIM_SILENCE
+#error "HW1_STT_SPECULATIVE_FINAL needs HW1_STT_TRIM_SILENCE"
+#endif
+// A phrase shorter than the 4 s minimum closes after 1 s of silence instead of
+// waiting for more speech (a short reply gets its caption).
+#ifndef HW1_STT_SHORT_CLOSE
+#define HW1_STT_SHORT_CLOSE 1
+#endif
+// The broker calls the consumer's publishWake (Conversate's caption pump)
+// right after it publishes a final or a draft, instead of leaving it to the
+// consumer's next poll.
+#ifndef HW1_STT_PUBLISH_WAKE
+#define HW1_STT_PUBLISH_WAKE 1
+#endif
+// A native (glasses) pause feeds 1.25 s of silence instead of 1 s, so a short
+// phrase whose last 10 ms frame was only partly voiced still reaches the 1 s
+// short-close pause.
+#ifndef HW1_STT_LONG_PAUSE_FEED
+#define HW1_STT_LONG_PAUSE_FEED 1
 #endif
 
 namespace {
@@ -60,12 +107,18 @@ struct STTRun {
   // whether that session is paused by the wearer.
   uint32_t nativeG2Generation = 0;
   bool paused = false;
+  // The consumer's wake (Conversate: g2ControlWake), called by the worker
+  // right after a final or a draft is published, outside gSTTMux, when
+  // HW1_STT_PUBLISH_WAKE. The consumer keeps its own periodic poll as a
+  // fallback.
+  void (*publishWake)() = nullptr;
   bool cancelRequested = false;
   bool finishRequested = false;
   AudioSource requestedSource = AUDIO_SRC_NONE;
   char text[STT_MAX_TEXT + 1] = {};
   uint8_t textHead = 0;
   uint32_t acknowledgedSequence = 0;
+  STTSpeakerSnapshot speakers;
   STTDraft draft;  // live mode: provisional text of the utterance in progress
 };
 static portMUX_TYPE gSTTMux = portMUX_INITIALIZER_UNLOCKED;
@@ -110,6 +163,7 @@ static void sttClearTextLocked() {
   for (size_t i = 0; i < sizeof(gSTT.draft.text); ++i) d[i] = 0;
   gSTT.draft.sequence = 0;
   ++gSTT.draft.version;
+  gSTT.speakers = STTSpeakerSnapshot{};
 }
 
 // Terminal results have bounded retention. Re-check the original session at
@@ -228,6 +282,9 @@ static void sttWarmLoader(void*) {
     const STTLocalControl control{nullptr, sttWarmLoadCancelled, nullptr};
     ok = sttLocalTranscribe(silence, kSamples, text, sizeof(text), control, stats, error,
                             sizeof(error), &gWarmSession) && gWarmSession.warm();
+    // Parked, the session holds only weights and the LM (a resident model the
+    // load built is freed; the adopting run builds its own).
+    gWarmSession.dropCallState();
     free(silence);
   }
   if (!ok) gWarmSession.reset();
@@ -526,9 +583,69 @@ static void sttWorker(void*) {
 // Independent producer/consumer tasks keep draining the microphone while a
 // synchronous backend works. This bounded pipeline has no total-duration cap.
 constexpr size_t kAudioQueueDepth = 3;
-constexpr size_t kStreamSamples = STT_SAMPLE_RATE * STT_MAX_CAPTURE_MS / 1000;
+// Continuous phrases are capped at 10 s (was STT_MAX_CAPTURE_MS, 20 s): a longer stretch without a pause is
+// cut at its quietest 10 ms in the last 2 s and handed to the worker while capture continues. One-shot captures
+// keep STT_MAX_CAPTURE_MS. Halves the five session audio buffers, the feature caches and the resident arena.
+constexpr uint32_t kStreamPhraseMs = 10000;
+constexpr size_t kStreamSamples = STT_SAMPLE_RATE * kStreamPhraseMs / 1000;
 constexpr size_t kStreamReadSamples = 1024; // Whole PDM DMA blocks; segmenting is downstream.
 constexpr uint32_t kCaptureStackBytes = 8192; // 2 KiB PCM block plus HAL/BLE startup and G2 lens container depth.
+#if HW1_STT_CAPTURE_FEATURES
+// Log-mel rows are computed while a phrase is captured, by a separate
+// priority-1 task on core 0 (below the STT worker and ESP-DL's workers at 2,
+// so it only uses idle time; never the capture task).
+// The capture task only copies each PCM block into a stream ring and
+// publishes where the phrase in progress starts and how long it is. At the
+// close the phrase's cache travels with its queue slot; the worker copies the
+// finished rows, computes the rest and runs CMVN + quantize (bit-identical to
+// the batch frontend: hw1::stt::log_mel_frame). Drafts use the same rows. The
+// pool (2 x 512 KB rows + 128 KB ring) is allocated after the warm-up, so the
+// LM and the resident model are admitted exactly as without it.
+constexpr size_t kFeRingSamples = 65536;              // 4.1 s of stream; power of two
+constexpr size_t kFeMaxRows = kStreamSamples / 160;  // the 10 s phrase cap
+constexpr int kFeCaches = 2;                          // phrase in progress + one queued
+constexpr size_t kFeBatchRows = 8;
+constexpr uint32_t kFeStackBytes = 3072;
+constexpr size_t kFeRowFloats = hw1::stt::kMelBins;
+enum class FeState : uint8_t { Free, Live, Attached, Orphan };
+struct FeCache {
+  float* rows = nullptr;        // kFeMaxRows x 64 floats, fixed for the session
+  uint64_t start = 0;           // stream sample of the phrase's first sample
+  size_t frames = 0;            // committed rows (final: never rewritten)
+  uint32_t gen = 0;             // bumped on every reuse
+  FeState state = FeState::Free;
+  bool overrun = false;         // the feature task fell a ring behind: stop
+};
+#endif
+#if HW1_STT_TRIM_SILENCE
+// A phrase that closes on a pause, or at the session end, is transcribed only
+// up to its voiced end + 200 ms. The voiced end is the end of the last
+// ambient-voiced run longer than 30 ms (the
+// segmenter's trimCut = max(16, 2 x floor) gate with the silence-blip rule),
+// never the peak/8 stop gate, so quiet word endings stay in. Hard-limit cuts
+// are never trimmed. Only the inference copy is shortened: the published
+// start/end samples, the saved transcript and the wipe cover the whole phrase.
+constexpr size_t kTrimTailSamples = STT_SAMPLE_RATE / 5;
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+// Speculative final, on top of the trim: once a phrase's voiced end + 200 ms
+// has been captured and its pause would close it as an ordinary Pause
+// (Segmenter::speculation), the capture task snapshots exactly the trimmed
+// input into the draft buffer (no extra PSRAM; a running draft is preempted
+// first) and the worker starts the final early. When the phrase then closes
+// on that pause with the same start and voiced end, the queued slot is tagged
+// with the request id and the finished result is published as its final:
+// bit-identical to the trimmed final for the same audio. Speech that resumes
+// (a new voiced run), a hard-limit cut, a session end or any other close
+// discards it. The capture task never logs; the worker prints TL spec_*.
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#define STT_SPEC_TEXT_ATTR EXT_RAM_BSS_ATTR
+#else
+#define STT_SPEC_TEXT_ATTR
+#endif
+STT_SPEC_TEXT_ATTR static char gSpecText[STT_MAX_TEXT + 1];  // worker only
+#endif
 enum class StreamSlotState : uint8_t { Free, Ready, Processing };
 struct StreamSlot {
   int16_t* pcm = nullptr;
@@ -537,6 +654,25 @@ struct StreamSlot {
   uint32_t sequence = 0;
   uint32_t queuedMs = 0;  // when the segmenter closed this segment (sttperf)
   bool forced = false;
+#if HW1_STT_CAPTURE_FEATURES
+  int fe = -1;            // attached feature cache (-1: none)
+  uint32_t feGen = 0;
+  size_t feRows = 0;      // rows of that cache valid for this phrase
+#endif
+  // Boundary provenance for cross-phrase diagnostics; these fields do not
+  // change the PCM or the segmenter's decisions. VAD counts are estimates.
+  size_t voicedSamples = 0, overlapBefore = 0;
+  bool continuation = false;
+  hw1::stt::SegmentEnd endKind = hw1::stt::SegmentEnd::Pause;
+#if HW1_STT_TRIM_SILENCE
+  size_t voicedEnd = 0;   // SpeechSegment::voiced_end_samples
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+  uint32_t specId = 0;    // speculative request this phrase matched (0: none)
+#endif
+#if HW1_STT_SHORT_CLOSE
+  bool pauseEnd = false;  // closed on a pause (TL short)
+#endif
   StreamSlotState state = StreamSlotState::Free;
 };
 struct StreamRun {
@@ -552,6 +688,9 @@ struct StreamRun {
   uint32_t draftSequence = 0;
   size_t draftTakenSamples = 0;  // capture-side: length at the last snapshot
   bool draftReady = false, draftBusy = false;
+  // The running draft has finished its frontend, so it no longer reads draftPcm (the
+  // network and decoder work on its features); a speculative snapshot may overwrite it.
+  bool draftPastPcm = false;
   // Compute time of the last completed draft. The next snapshot waits for at
   // least this much new audio, so drafts can never occupy more than about
   // half the worker's time, whatever the model's cost (15x5 ~ 3x the 5x5).
@@ -560,12 +699,51 @@ struct StreamRun {
   bool failed = false;
   uint32_t clockMs = 0;
   uint32_t nativeGeneration = 0;  // see STTRun::nativeG2Generation
+  void (*publishWake)() = nullptr;  // see STTRun::publishWake (worker only)
   // Glasses-mic faults survived instead of ending the session (capture task
   // counts under gSTTMux; the worker logs changes). Conversate owns the
   // session's lifetime, and a few lost 10 ms frames or one dropped phrase
   // must not end the captions or split the saved transcript.
   uint32_t lossEvents = 0, droppedSegments = 0, stalls = 0;
   uint32_t loggedFaults = 0;  // worker-side: sum already logged
+#if HW1_STT_CAPTURE_FEATURES
+  // Capture-time features (under gSTTMux, except the contents of
+  // rows/ring/workspace).
+  FeCache fe[kFeCaches];
+  int16_t* feRing = nullptr;
+  hw1::stt::FrontendWorkspace* feWork = nullptr;
+  uint64_t feRingStart = 0, feRingHead = 0;  // stream samples [start, head) were written
+  bool feRingStarted = false;
+  int feLive = -1;            // cache of the phrase in progress
+  size_t feLiveLen = 0;
+  TaskHandle_t feTask = nullptr;
+  bool feStop = false, feRunning = false;
+  int draftFe = -1;           // cache rows a pending draft snapshot may use
+  uint32_t draftFeGen = 0;
+  size_t draftFeRows = 0;
+  uint32_t feRowsComputed = 0, feOverruns = 0, feFinals = 0, feCachedFinals = 0;
+  uint32_t feCachedRows = 0, feDraftRows = 0;
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+  // Speculative final (all under gSTTMux). Capture task: the live request
+  // (id, segment start, voiced end, input length) and its snapshot state.
+  uint32_t specNextId = 0, specLiveId = 0, specSequence = 0;
+  uint64_t specStart = 0;
+  size_t specVoiced = 0, specSamples = 0;
+  bool specCopied = false, specWanted = false;
+  // Snapshot handed to the worker (in draftPcm), the run and a held result.
+  bool specReady = false, specBusy = false;
+  uint32_t specReadyId = 0, specReadySequence = 0, specRunId = 0, specDoneId = 0;
+  uint64_t specReadyStart = 0;
+  size_t specReadySamples = 0, specDoneSamples = 0;
+  uint32_t specDoneStartMs = 0;
+  STTLocalStats specDoneStats;
+#if HW1_STT_CAPTURE_FEATURES
+  // Feature cache of the phrase the snapshot was taken from.
+  int specReadyFe = -1;
+  uint32_t specReadyFeGen = 0;
+#endif
+#endif
 };
 // Timeline level samples: written by the capture task under gSTTMux, printed
 // by the STT worker (never by the real-time capture task).
@@ -621,6 +799,22 @@ static bool sttStreamCancelled(void* context) {
   portEXIT_CRITICAL(&gSTTMux);
   return failed || sttCancelled(&run.token);
 }
+#if HW1_STT_SPEAKER_LABELS
+// Speaker admission may wait while capture continues, but must give the STT
+// worker back as soon as another final is queued. With the current Busy slot
+// and one Ready slot this still leaves a Free audio slot for the next close;
+// waiting until all slots fill would already risk a dropped captured phrase.
+static bool sttSpeakerCanWait(void* context) {
+  auto& run = *static_cast<StreamRun*>(context);
+  bool canWait = true;
+  portENTER_CRITICAL(&gSTTMux);
+  for (const auto& slot : run.slots) {
+    if (slot.state == StreamSlotState::Ready) { canWait = false; break; }
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+  return canWait;
+}
+#endif
 // A draft is only provisional text. Abandon it (the runtime checks between
 // model stages) as soon as a finished segment is queued, so a final result
 // never waits behind a whole draft of a long utterance.
@@ -631,13 +825,58 @@ static bool sttDraftPreempted(void* context) {
   for (const auto& candidate : run.slots) {
     if (candidate.state == StreamSlotState::Ready) { finalWaiting = true; break; }
   }
+#if HW1_STT_SPECULATIVE_FINAL
+  // The speculative snapshot needs the draft buffer (specWanted), or was already copied
+  // over it after the draft's frontend and outranks the draft (specReady).
+  if (run.specWanted || run.specReady) finalWaiting = true;
+#endif
   portEXIT_CRITICAL(&gSTTMux);
   return finalWaiting || sttStreamCancelled(context);
 }
+#if HW1_STT_SPECULATIVE_FINAL
+// A speculative request id is still worth something while it is the live
+// request or a queued/processing phrase matched it. Caller holds gSTTMux.
+static bool sttSpecReferencedLocked(const StreamRun& run, uint32_t id) {
+  if (!id) return false;
+  if (id == run.specLiveId) return true;
+  for (const auto& c : run.slots)
+    if (c.state != StreamSlotState::Free && c.specId == id) return true;
+  return false;
+}
+// Stop a speculative run whose phrase changed, or when a final it does not
+// match is waiting; keep going for the phrase it matched. Only the oldest
+// Ready phrase counts, because the worker takes that one next; later phrases
+// waiting behind a matched one do not abort the run (which made the matched
+// phrase start again from scratch: up to ~1.2 s close->start).
+static bool sttSpecPreempted(void* context) {
+  auto& run = *static_cast<StreamRun*>(context);
+  bool stop;
+  portENTER_CRITICAL(&gSTTMux);
+  const StreamSlot* oldest = nullptr;
+  for (const auto& candidate : run.slots)
+    if (candidate.state == StreamSlotState::Ready && (!oldest || candidate.sequence < oldest->sequence))
+      oldest = &candidate;
+  stop = oldest ? oldest->specId != run.specRunId : run.specRunId != run.specLiveId;
+  portEXIT_CRITICAL(&gSTTMux);
+  return stop || sttStreamCancelled(context);
+}
+#endif
 static void sttStreamProgress(void* context, STTLocalPhase phase) {
   auto& run = *static_cast<StreamRun*>(context);
   sttProgress(&run.token, phase);
   sttStreamTick(run);
+}
+// A draft reports Inference once its features are quantized; from then on it never
+// reads draftPcm again (the runtime reads PCM only in its frontend), so sttSpecCapture may
+// copy a speculative snapshot over the buffer at once instead of at the next capture block.
+static void sttDraftProgress(void* context, STTLocalPhase phase) {
+  auto& run = *static_cast<StreamRun*>(context);
+  if (phase == STTLocalPhase::Inference || phase == STTLocalPhase::Decoding) {
+    portENTER_CRITICAL(&gSTTMux);
+    run.draftPastPcm = true;
+    portEXIT_CRITICAL(&gSTTMux);
+  }
+  sttStreamProgress(context, phase);
 }
 static void sttWipe(void* memory, size_t bytes) {
   if (!memory) return;
@@ -755,6 +994,12 @@ static bool sttQueueSegment(StreamRun& run) {
     // session; the backlog drains and later phrases continue in order.
     portENTER_CRITICAL(&gSTTMux);
     ++run.droppedSegments;
+#if HW1_STT_CAPTURE_FEATURES
+    if (run.feLive >= 0) { run.fe[run.feLive].state = FeState::Orphan; run.feLive = -1; }
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+    run.specLiveId = 0; run.specWanted = false;  // that phrase is gone
+#endif
     portEXIT_CRITICAL(&gSTTMux);
     // Release it, or the segmenter stays Ready and capture stalls until a slot
     // frees (then queues the "dropped" phrase late after all).
@@ -772,14 +1017,199 @@ static bool sttQueueSegment(StreamRun& run) {
   slot->start = segment->start_sample;
   slot->end = segment->end_sample;
   slot->forced = segment->end == hw1::stt::SegmentEnd::HardLimit;
+  slot->voicedSamples = segment->new_voiced_samples;
+  slot->overlapBefore = segment->overlap_before_samples;
+  slot->continuation = segment->continuation;
+  slot->endKind = segment->end;
+#if HW1_STT_TRIM_SILENCE
+  slot->voicedEnd = segment->voiced_end_samples;
+#endif
+#if HW1_STT_SHORT_CLOSE
+  slot->pauseEnd = segment->end == hw1::stt::SegmentEnd::Pause;
+#endif
   slot->queuedMs = millis();
   portENTER_CRITICAL(&gSTTMux);
+#if HW1_STT_CAPTURE_FEATURES
+  // The phrase's feature cache goes with it; rows that read past its
+  // published end (or a sub-320-sample phrase, which inference pads) are not
+  // used.
+  slot->fe = -1; slot->feRows = 0;
+  if (run.feLive >= 0) {
+    FeCache& c = run.fe[run.feLive];
+    if (c.state == FeState::Live && c.start == segment->start_sample && segment->samples >= 320) {
+      slot->fe = run.feLive; slot->feGen = c.gen;
+      slot->feRows = std::min(c.frames, segment->samples / 160);
+      c.state = FeState::Attached;
+    } else {
+      c.state = FeState::Orphan;
+    }
+    run.feLive = -1;
+  }
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+  // The live speculative request belonged to this phrase. It matches only if
+  // the phrase closed on a pause with the same start and voiced end, i.e. if
+  // the trim will infer exactly the snapshot; either way the request is now
+  // settled.
+  slot->specId = run.specLiveId && segment->end == hw1::stt::SegmentEnd::Pause &&
+      segment->start_sample == run.specStart && segment->voiced_end_samples == run.specVoiced &&
+      run.specVoiced + kTrimTailSamples <= segment->samples ? run.specLiveId : 0;
+  run.specLiveId = 0; run.specWanted = false;
+#endif
   slot->sequence = ++gSTT.snapshot.segmentsCaptured;
   slot->state = StreamSlotState::Ready;
   ++gSTT.snapshot.pendingAudio;
   portEXIT_CRITICAL(&gSTTMux);
   return run.segmenter.release();
 }
+#if HW1_STT_CAPTURE_FEATURES
+// Computes the phrase in progress's final rows from the stream ring.
+// Single writer of every cache's rows; a batch is committed only if its cache
+// is still the same live phrase and the ring was not overwritten under it.
+static void sttFeatureWorker(void* context) {
+  auto& run = *static_cast<StreamRun*>(context);
+  bool stop = false;
+  while (!stop) {
+    (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+    for (;;) {
+      int idx = -1;
+      uint32_t gen = 0;
+      uint64_t start = 0, head = 0;
+      size_t done = 0, len = 0;
+      portENTER_CRITICAL(&gSTTMux);
+      stop = run.feStop;
+      if (run.feLive >= 0 && run.fe[run.feLive].state == FeState::Live && !run.fe[run.feLive].overrun) {
+        idx = run.feLive;
+        gen = run.fe[idx].gen; start = run.fe[idx].start; done = run.fe[idx].frames;
+        len = run.feLiveLen;
+      }
+      head = run.feRingHead;
+      portEXIT_CRITICAL(&gSTTMux);
+      if (stop || idx < 0) break;
+      const size_t stable = len >= 320 ? std::min(len / 160, kFeMaxRows) : 0;
+      if (done >= stable) break;
+      const size_t end = std::min(stable, done + kFeBatchRows);
+      // Oldest sample this batch reads (row r: [r*160-161, r*160+160)).
+      const uint64_t lo = start + (done * 160 > 161 ? done * 160 - 161 : 0);
+      const bool safe = lo + kFeRingSamples >= head + kStreamReadSamples;
+      if (safe)
+        for (size_t r = done; r < end; ++r)
+          (void)hw1::stt::log_mel_frame_ring(run.feRing, kFeRingSamples - 1, start, len, r,
+                                             run.fe[idx].rows + r * kFeRowFloats, run.feWork);
+      portENTER_CRITICAL(&gSTTMux);
+      FeCache& c = run.fe[idx];
+      if (c.gen == gen && c.state == FeState::Live) {
+        // The capture task writes at most one block past the published head.
+        if (safe && lo + kFeRingSamples >= run.feRingHead + kStreamReadSamples) {
+          c.frames = end;
+          run.feRowsComputed += static_cast<uint32_t>(end - done);
+        } else {
+          c.overrun = true;
+          ++run.feOverruns;
+        }
+      }
+      portEXIT_CRITICAL(&gSTTMux);
+    }
+  }
+  portENTER_CRITICAL(&gSTTMux);
+  run.feRunning = false;
+  portEXIT_CRITICAL(&gSTTMux);
+  vTaskDelete(nullptr);
+}
+// Capture task, per block: copy PCM into the stream ring (before the
+// segmenter sees it) ...
+static void sttFeatureRingWrite(StreamRun& run, int16_t* ring, const int16_t* block, size_t count) {
+  const uint64_t base = run.segmenter.samples_seen();
+  const size_t at = static_cast<size_t>(base & (kFeRingSamples - 1));
+  const size_t first = std::min(count, kFeRingSamples - at);
+  memcpy(ring + at, block, first * sizeof(int16_t));
+  if (count > first) memcpy(ring, block + first, (count - first) * sizeof(int16_t));
+  portENTER_CRITICAL(&gSTTMux);
+  if (!run.feRingStarted) { run.feRingStarted = true; run.feRingStart = base; }
+  run.feRingHead = base + count;
+  portEXIT_CRITICAL(&gSTTMux);
+}
+// ... and after it: give the phrase in progress a cache (one that started
+// inside the ring), publish its length, retire one whose phrase vanished.
+static void sttFeatureTrack(StreamRun& run) {
+  uint64_t liveStart = 0;
+  size_t liveLen = 0;
+  const bool active = run.segmenter.live_view(&liveStart, &liveLen);
+  portENTER_CRITICAL(&gSTTMux);
+  if (run.feLive >= 0 && (!active || run.fe[run.feLive].start != liveStart)) {
+    run.fe[run.feLive].state = FeState::Orphan;  // discarded candidate
+    run.feLive = -1;
+  }
+  if (active && run.feLive < 0 && run.feRingStarted && liveStart >= run.feRingStart) {
+    for (int i = 0; i < kFeCaches; ++i) {
+      if (run.fe[i].state != FeState::Free) continue;
+      FeCache& c = run.fe[i];
+      c.state = FeState::Live; c.start = liveStart; c.frames = 0; c.overrun = false; ++c.gen;
+      run.feLive = i;
+      break;
+    }
+  }
+  if (run.feLive >= 0) run.feLiveLen = liveLen;
+  const TaskHandle_t task = run.feLive >= 0 ? run.feTask : nullptr;
+  portEXIT_CRITICAL(&gSTTMux);
+  if (task) xTaskNotifyGive(task);
+}
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+// Capture task, after each pushed block. Issues/keeps/drops the live
+// speculative request and copies its snapshot into the draft buffer when that
+// buffer is free (a running draft is asked to stop first). Never logs.
+static void sttSpecCapture(StreamRun& run) {
+  if (!run.draftPcm) return;
+  uint64_t start = 0;
+  size_t voiced = 0, samples = 0, liveSamples = 0;
+  const int16_t* live = nullptr;
+  const bool want = run.segmenter.speculation(kTrimTailSamples, &start, &voiced, &samples) &&
+                    run.segmenter.in_progress(&live, &liveSamples) && samples <= liveSamples;
+  bool copy = false;
+  portENTER_CRITICAL(&gSTTMux);
+  if (!want) {
+    run.specLiveId = 0; run.specWanted = false;
+  } else {
+    if (!run.specLiveId || run.specStart != start || run.specVoiced != voiced) {
+      if (!++run.specNextId) ++run.specNextId;
+      run.specLiveId = run.specNextId;
+      run.specStart = start; run.specVoiced = voiced; run.specSamples = samples;
+      run.specSequence = gSTT.snapshot.segmentsCaptured + 1;
+      run.specCopied = false;
+    }
+    if (!run.specCopied) {
+      // A running draft past its frontend no longer reads the buffer either.
+      if ((!run.draftBusy || run.draftPastPcm) && !run.specBusy) {
+        // Nothing reads the buffer until a Ready flag is set again below.
+        run.draftReady = run.specReady = false;
+        copy = true;
+      } else {
+        run.specWanted = true;
+      }
+    }
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+  if (!copy) return;
+  memcpy(run.draftPcm, live, samples * sizeof(int16_t));
+  portENTER_CRITICAL(&gSTTMux);
+  run.specReady = true; run.specReadyId = run.specLiveId; run.specReadySamples = samples;
+  run.specReadyStart = run.specStart; run.specReadySequence = run.specSequence;
+  run.specCopied = true; run.specWanted = false;
+#if HW1_STT_CAPTURE_FEATURES
+  // The live phrase's feature cache may serve this snapshot's rows. Only the
+  // cache identity is noted here; the worker takes the rows that are
+  // committed when the run starts, clipped to the snapshot, i.e. only rows of
+  // samples the snapshot itself contains (sttFeatureTrack ran just before
+  // this, so feLive is the phrase being speculated on).
+  run.specReadyFe = -1;
+  if (run.feLive >= 0 && run.fe[run.feLive].state == FeState::Live && run.fe[run.feLive].start == run.specStart) {
+    run.specReadyFe = run.feLive; run.specReadyFeGen = run.fe[run.feLive].gen;
+  }
+#endif
+  portEXIT_CRITICAL(&gSTTMux);
+}
+#endif
 static void sttCaptureWorker(void* context) {
   auto& run = *static_cast<StreamRun*>(context);
   const AudioSource previous = audioGetSource();
@@ -843,10 +1273,21 @@ static void sttCaptureWorker(void* context) {
       paused = gSTT.paused;
       portEXIT_CRITICAL(&gSTTMux);
       if (finish) break;
+#if HW1_STT_LONG_PAUSE_FEED
+      // A native pause stops PCM delivery. Feed 1.25 s of silence so the
+      // phrase in progress can end on its normal pause rule, then wait without
+      // treating the missing audio as a failed microphone. A short phrase
+      // closes only after 1 s of silence from its last voiced 10 ms frame
+      // (HW1_STT_SHORT_CLOSE), and a wearer who pauses mid-word leaves that
+      // frame partly voiced: a 1 s feed stopped one frame short and the phrase
+      // stayed open (no caption) until speech resumed.
+      if (paused && !wasPaused) pauseSilence = STT_SAMPLE_RATE * 5 / 4;
+#else
       // A native pause stops PCM delivery. Feed one second of silence so the
       // phrase in progress can end on its normal pause rule, then wait without
       // treating the missing audio as a failed microphone.
       if (paused && !wasPaused) pauseSilence = STT_SAMPLE_RATE;
+#endif
       wasPaused = paused;
       if (paused) lastAudioMs = millis();
       if (!audioCaptureOwnedBy("stt") || !audioCaptureActive() || !audioSourceAvailable(source)) {
@@ -886,6 +1327,12 @@ static void sttCaptureWorker(void* context) {
         const double variance = static_cast<double>(square) / count -
                                 static_cast<double>(sum) * sum / count / count;
         const int level = std::min(100, static_cast<int>(std::sqrt(std::max(0.0, variance)) * 100.0 / 32768));
+#if HW1_STT_CAPTURE_FEATURES
+        portENTER_CRITICAL(&gSTTMux);
+        int16_t* const feRing = run.feRing;  // published by the worker after warm-up
+        portEXIT_CRITICAL(&gSTTMux);
+        if (feRing) sttFeatureRingWrite(run, feRing, block, count);
+#endif
         size_t offset = 0;
         while (offset < count && !sttStreamCancelled(&run)) {
           const auto fed = run.segmenter.push(block + offset, count - offset);
@@ -896,6 +1343,12 @@ static void sttCaptureWorker(void* context) {
             sttStreamFail(run, "Invalid continuous audio segment"); break;
           }
         }
+#if HW1_STT_CAPTURE_FEATURES
+        if (feRing) sttFeatureTrack(run);
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+        sttSpecCapture(run);  // before drafts, which it outranks
+#endif
         // Live mode: offer the utterance in progress for a draft once it has
         // >=1 s of audio and >=0.6 s more than the last snapshot. The worker
         // paces itself: a new snapshot waits until the previous draft is done.
@@ -904,7 +1357,12 @@ static void sttCaptureWorker(void* context) {
         if (run.draftPcm && run.segmenter.in_progress(&live, &liveSamples)) {
           portENTER_CRITICAL(&gSTTMux);
           const uint32_t nextSequence = gSTT.snapshot.segmentsCaptured + 1;
+#if HW1_STT_SPECULATIVE_FINAL
+          const bool idle = !run.draftReady && !run.draftBusy &&
+                            !run.specLiveId && !run.specReady && !run.specBusy;
+#else
           const bool idle = !run.draftReady && !run.draftBusy;
+#endif
           if (run.draftSequence != nextSequence) run.draftTakenSamples = 0;
           const size_t paceSamples = std::max<size_t>(STT_SAMPLE_RATE * 6 / 10,
                                                       size_t(run.lastDraftMs) * (STT_SAMPLE_RATE / 1000));
@@ -918,6 +1376,14 @@ static void sttCaptureWorker(void* context) {
             run.draftSequence = nextSequence;
             run.draftTakenSamples = liveSamples;
             run.draftReady = true;
+#if HW1_STT_CAPTURE_FEATURES
+            // The live cache's finished rows cover this snapshot's start.
+            run.draftFe = -1; run.draftFeRows = 0;
+            if (run.feLive >= 0 && run.fe[run.feLive].state == FeState::Live && liveSamples >= 320) {
+              run.draftFe = run.feLive; run.draftFeGen = run.fe[run.feLive].gen;
+              run.draftFeRows = std::min(run.fe[run.feLive].frames, liveSamples / 160);
+            }
+#endif
             portEXIT_CRITICAL(&gSTTMux);
           }
         }
@@ -1008,6 +1474,261 @@ static void sttCaptureWorker(void* context) {
   portEXIT_CRITICAL(&gSTTMux);
   vTaskDelete(nullptr);
 }
+#if HW1_STT_CAPTURE_FEATURES
+// Feature-cache helpers for the worker. Only the worker frees caches (so a
+// final or draft it is running can never lose its rows); orphans are retired
+// here.
+static void sttFeatureRetireOrphans(StreamRun& run) {
+  for (int i = 0; i < kFeCaches; ++i) {
+    size_t used = 0;
+    portENTER_CRITICAL(&gSTTMux);
+    const bool orphan = run.fe[i].state == FeState::Orphan;
+    if (orphan) used = run.fe[i].frames;
+    portEXIT_CRITICAL(&gSTTMux);
+    if (!orphan) continue;
+    sttWipe(run.fe[i].rows, std::min(used + kFeBatchRows, kFeMaxRows) * kFeRowFloats * sizeof(float));
+    portENTER_CRITICAL(&gSTTMux);
+    run.fe[i].state = FeState::Free; ++run.fe[i].gen;
+    portEXIT_CRITICAL(&gSTTMux);
+  }
+}
+static void sttFeatureRelease(StreamRun& run, int idx, uint32_t gen) {
+  if (idx < 0) return;
+  size_t used = 0;
+  portENTER_CRITICAL(&gSTTMux);
+  const bool mine = run.fe[idx].gen == gen && run.fe[idx].state == FeState::Attached;
+  if (mine) used = run.fe[idx].frames;
+  portEXIT_CRITICAL(&gSTTMux);
+  if (!mine) return;
+  sttWipe(run.fe[idx].rows, std::min(used + kFeBatchRows, kFeMaxRows) * kFeRowFloats * sizeof(float));
+  portENTER_CRITICAL(&gSTTMux);
+  run.fe[idx].state = FeState::Free; ++run.fe[idx].gen;
+  portEXIT_CRITICAL(&gSTTMux);
+}
+// After the warm-up (weights and LM loaded): allocate the pool and start the
+// feature task, or leave capture-time features off for this session. The pool
+// must never cost a phrase its inference or its LM: what stays free beside it
+// must admit the largest call the broker makes (a 10 s phrase or draft) by the
+// runtime's own rule (sttLocalCallBudget: with a resident model only that
+// call's frontend; with per-call models its arena, frontend and metadata
+// margin, ~3.7 MB, ~3.1 MB of it contiguous), plus 1 MiB for LM beams, and
+// never less than 2 MiB. Freed again at session end (sttFeatureStop).
+static void sttFeatureStart(StreamRun& run, const STTLocalSession& session) {
+  constexpr size_t kRowsBytes = kFeMaxRows * kFeRowFloats * sizeof(float);
+  constexpr size_t kPoolBytes = kFeCaches * kRowsBytes + kFeRingSamples * sizeof(int16_t) +
+                                sizeof(hw1::stt::FrontendWorkspace);
+  const char* why = nullptr;
+  const STTLocalCallBudget call = sttLocalCallBudget(kStreamSamples, &session);
+  const size_t keepFree = std::max<size_t>(2u << 20, call.total + (1u << 20));
+#ifdef ESP_PLATFORM
+  if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < kPoolBytes + keepFree) why = "psram";
+#else
+  (void)kPoolBytes; (void)keepFree;
+#endif
+  int16_t* ring = nullptr;
+  hw1::stt::FrontendWorkspace* work = nullptr;
+  float* rows[kFeCaches] = {};
+  if (!why) {
+    ring = static_cast<int16_t*>(ps_alloc(kFeRingSamples * sizeof(int16_t), AllocPref::RequirePSRAM, "stt.fe_ring"));
+    work = static_cast<hw1::stt::FrontendWorkspace*>(ps_alloc(sizeof(hw1::stt::FrontendWorkspace), AllocPref::RequirePSRAM, "stt.fe_work"));
+    for (auto& r : rows) r = static_cast<float*>(ps_alloc(kRowsBytes, AllocPref::RequirePSRAM, "stt.fe_rows"));
+    if (!ring || !work || !rows[0] || !rows[1]) why = "alloc";
+  }
+#ifdef ESP_PLATFORM
+  // The pool may have split the block a per-call arena needs: then give it back.
+  if (!why && (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < keepFree ||
+               heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) < call.contiguous))
+    why = "contiguous";
+#endif
+  if (!why) {
+    portENTER_CRITICAL(&gSTTMux);
+    for (int i = 0; i < kFeCaches; ++i) run.fe[i].rows = rows[i];
+    run.feWork = work;
+    run.feRunning = true;
+    portEXIT_CRITICAL(&gSTTMux);
+    TaskHandle_t task = nullptr;
+    taskStackRecord("stt_fe", kFeStackBytes);
+    if (xTaskCreatePinnedToCore(sttFeatureWorker, "stt_fe", kFeStackBytes, &run, 1, &task, 0) != pdPASS) {
+      portENTER_CRITICAL(&gSTTMux);
+      run.feRunning = false;
+      for (auto& c : run.fe) c.rows = nullptr;
+      run.feWork = nullptr;
+      portEXIT_CRITICAL(&gSTTMux);
+      why = "task";
+    } else {
+      portENTER_CRITICAL(&gSTTMux);
+      run.feTask = task;
+      run.feRing = ring;  // last: the capture task starts feeding it now
+      portEXIT_CRITICAL(&gSTTMux);
+    }
+  }
+  if (why) {
+    if (ring) { sttWipe(ring, kFeRingSamples * sizeof(int16_t)); free(ring); }
+    if (work) { sttWipe(work, sizeof(*work)); free(work); }
+    for (auto& r : rows) if (r) { sttWipe(r, kRowsBytes); free(r); }
+  }
+#ifdef ESP_PLATFORM
+  ESP_LOGI("STT", "TL fe_pool ok=%d caches=%d bytes=%u keep=%u need_block=%u psram_free=%u psram_largest=%u%s%s",
+           why ? 0 : 1, kFeCaches, unsigned(kPoolBytes), unsigned(keepFree), unsigned(call.contiguous),
+           unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+           unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)), why ? " off=" : "", why ? why : "");
+#endif
+}
+// Session end, after the capture task joined: stop and join the feature task,
+// then wipe and free the pool.
+static void sttFeatureStop(StreamRun& run) {
+  // No notification here: the task may already be deleting itself. It wakes
+  // at least every 20 ms, sees feStop, clears feRunning as its last access
+  // to `run`, and deletes itself.
+  portENTER_CRITICAL(&gSTTMux);
+  run.feStop = true;
+  portEXIT_CRITICAL(&gSTTMux);
+  for (;;) {
+    portENTER_CRITICAL(&gSTTMux);
+    const bool running = run.feRunning;
+    portEXIT_CRITICAL(&gSTTMux);
+    if (!running) break;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+  run.feTask = nullptr;
+  if (run.feRing) { sttWipe(run.feRing, kFeRingSamples * sizeof(int16_t)); free(run.feRing); run.feRing = nullptr; }
+  if (run.feWork) { sttWipe(run.feWork, sizeof(*run.feWork)); free(run.feWork); run.feWork = nullptr; }
+  for (auto& c : run.fe)
+    if (c.rows) { sttWipe(c.rows, kFeMaxRows * kFeRowFloats * sizeof(float)); free(c.rows); c.rows = nullptr; }
+}
+#endif
+#if HW1_STT_SPEAKER_LABELS
+// Only the STT worker publishes speaker metadata; readers copy it under the
+// broker lock. A late result may update a retained phrase, never resurrect one
+// dropped from the bounded history, cancelled, or owned by another run.
+static void sttSpeakerPendingLocked(uint32_t sequence) {
+  auto& history = gSTT.speakers;
+  if (!history.available) return;
+  if (history.count == STT_SPEAKER_HISTORY) {
+    memmove(history.entries, history.entries + 1,
+            (STT_SPEAKER_HISTORY - 1) * sizeof(history.entries[0]));
+    --history.count;
+  }
+  history.entries[history.count++] = STTSpeakerEntry{sequence, -1, false};
+  ++history.version;
+}
+static void sttPublishSpeaker(STTToken token, uint32_t sequence, int8_t speaker) {
+  portENTER_CRITICAL(&gSTTMux);
+  if (gSTT.snapshot.token == token && !gSTT.cancelRequested) {
+    auto& history = gSTT.speakers;
+    for (size_t i = 0; i < history.count; ++i) {
+      auto& entry = history.entries[i];
+      if (entry.sequence != sequence) continue;
+      if (!entry.ready || entry.speaker != speaker) {
+        entry.speaker = speaker;
+        entry.ready = true;
+        ++history.version;
+      }
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+}
+static void sttFinishSpeakers(STTToken token) {
+  portENTER_CRITICAL(&gSTTMux);
+  if (gSTT.snapshot.token == token && !gSTT.cancelRequested) {
+    auto& history = gSTT.speakers;
+    for (size_t i = 0; i < history.count; ++i) {
+      if (!history.entries[i].ready) {
+        history.entries[i].ready = true; // Bounded drain expired: unknown.
+        ++history.version;
+      }
+    }
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+}
+// Speaker labels: saved transcript lines wait (up to kLabelWaitMs) for their phrase's speaker label from the background
+// task, then go out strictly in sequence as "[Person N] text" (plain text when the phrase was skipped, the label
+// is late, or the session ends). Only this worker writes the transcript; the labelling task only posts labels.
+namespace {
+constexpr size_t kLabelledLines = 8;
+// Speaker work may lag while recognition owns the cores. Keep saved lines
+// pending through the bounded queue wait and final drain instead of erasing
+// their chance of receiving a late label after only 10 seconds.
+constexpr uint32_t kLabelWaitMs = 60000;
+struct LabelledLine {
+  uint32_t seq = 0, queuedMs = 0;
+  int8_t speaker = -1;
+  bool labelled = false;
+  uint16_t len = 0;
+  char text[STT_MAX_TEXT + 1] = {};
+};
+struct LabelledTranscript {
+  LabelledLine* lines = nullptr;   // PSRAM ring
+  size_t head = 0, count = 0;
+  bool tried = false;
+  ~LabelledTranscript() {
+    if (lines) { sttWipe(lines, kLabelledLines * sizeof(LabelledLine)); heap_caps_free(lines); }
+  }
+};
+void sttLabelledPump(LabelledTranscript& lt, STTLocalSession& session, TranscriptSession& transcript,
+                     STTToken token, bool flushAll) {
+  uint32_t seq = 0;
+  int8_t speaker = -1;
+  while (sttSpeakerTakeLabel(&session, &seq, &speaker)) {
+    sttPublishSpeaker(token, seq, speaker);
+    for (size_t i = 0; i < lt.count; ++i) {
+      LabelledLine& l = lt.lines[(lt.head + i) % kLabelledLines];
+      if (l.seq == seq) { l.speaker = speaker; l.labelled = true; break; }
+    }
+  }
+  const uint32_t now = millis();
+  bool wrote = false;
+  while (lt.count) {
+    LabelledLine& l = lt.lines[lt.head];
+    if (!(l.labelled || flushAll || now - l.queuedMs > kLabelWaitMs)) break;
+    char line[STT_MAX_TEXT + 1];
+    size_t n = 0;
+    if (l.len && l.labelled && l.speaker >= 0) n = size_t(snprintf(line, sizeof(line), "[Person %d] ", int(l.speaker) + 1));
+    const size_t take = std::min<size_t>(l.len, STT_MAX_TEXT - n);
+    memcpy(line + n, l.text, take);
+    n += take;
+    line[n] = '\0';
+    (void)transcript.append(l.seq, line, n);
+    ESP_LOGI("STT", "TL tsave seq=%lu spk=%d labelled=%d wait_ms=%lu", (unsigned long)l.seq, int(l.speaker),
+             l.labelled ? 1 : 0, (unsigned long)(now - l.queuedMs));
+    sttWipe(line, sizeof(line));
+    sttWipe(l.text, sizeof(l.text));
+    l = LabelledLine{};
+    lt.head = (lt.head + 1) % kLabelledLines;
+    --lt.count;
+    wrote = true;
+  }
+  if (wrote) sttPublishTranscript(token, transcript.snapshot());
+}
+// False: no ring (allocation failed) - the caller appends directly, keeping the sequence order.
+bool sttLabelledQueue(LabelledTranscript& lt, STTLocalSession& session, TranscriptSession& transcript, STTToken token,
+                      uint32_t seq, const char* text) {
+  if (!lt.lines && !lt.tried) {
+    lt.tried = true;
+    lt.lines = static_cast<LabelledLine*>(heap_caps_calloc(kLabelledLines, sizeof(LabelledLine), MALLOC_CAP_SPIRAM));
+  }
+  if (!lt.lines) return false;
+  if (lt.count == kLabelledLines) {   // full: the oldest line goes out unlabelled first
+    LabelledLine& oldest = lt.lines[lt.head];
+    oldest.queuedMs = millis() - kLabelWaitMs - 1;
+    sttLabelledPump(lt, session, transcript, token, false);
+  }
+  LabelledLine& l = lt.lines[(lt.head + lt.count) % kLabelledLines];
+  l = LabelledLine{};
+  l.seq = seq;
+  l.queuedMs = millis();
+  l.len = uint16_t(strnlen(text, STT_MAX_TEXT));
+  // Blank finals advance the transcript sequence without writing a line.
+  // Keep their markers behind earlier pending labels, but never wait for a
+  // speaker result that a blank final deliberately does not request.
+  l.labelled = l.len == 0;
+  memcpy(l.text, text, l.len);
+  ++lt.count;
+  return true;
+}
+}  // namespace
+#endif
 static void sttContinuousWorker(void*) {
   StreamRun run;
   STTLocalSession backendSession;
@@ -1016,6 +1737,7 @@ static void sttContinuousWorker(void*) {
   run.token = gSTT.snapshot.token;
   run.requested = gSTT.requestedSource;
   run.nativeGeneration = gSTT.nativeG2Generation;
+  run.publishWake = gSTT.publishWake;
   run.clockMs = millis();
   transcriptOptions = gSTT.transcriptOptions;
   portEXIT_CRITICAL(&gSTTMux);
@@ -1041,6 +1763,13 @@ static void sttContinuousWorker(void*) {
     // Stop leaves only a short tail. The 15x5 transcribes at ~0.45x real time,
     // so 4 s phrases keep up; less context at each cut is the trade-off.
     segmentConfig.min_segment_samples = 4 * STT_SAMPLE_RATE;
+    segmentConfig.max_segment_samples = kStreamSamples;  // the 10 s phrase cap
+#if HW1_STT_SHORT_CLOSE
+    // Below 4 s a phrase closes after 1 s of silence instead of waiting for
+    // the 4 s floor (a short reply gets its caption); at 4 s or more the
+    // 600 ms end wait is unchanged.
+    segmentConfig.short_close_silence_samples = STT_SAMPLE_RATE;
+#endif
     // The G2 glasses mic's quiet level jitters (~21..60+ RMS per 10 ms frame,
     // measured 2026-09-30), so the window minimum underestimated the room and
     // stray blips kept restarting the 600 ms pause: phrases ran to the 20 s
@@ -1087,6 +1816,29 @@ static void sttContinuousWorker(void*) {
                  warmed ? 1 : 0, warmStats.lmUsed ? 1 : 0, (unsigned long)getCpuFrequencyMhz(),
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                  unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+#if HW1_STT_SPEAKER_LABELS
+        {
+          // The optional speaker model, after the STT model and LM are resident.
+          STTSpeakerStatus sp;
+          (void)sttSpeakerBegin(&backendSession, kStreamSamples, &sp);
+          portENTER_CRITICAL(&gSTTMux);
+          if (gSTT.snapshot.token == run.token && !gSTT.cancelRequested) {
+            gSTT.speakers.available = sp.ready;
+            ++gSTT.speakers.version;
+          }
+          portEXIT_CRITICAL(&gSTTMux);
+          ESP_LOGI("STT", "TL spk_load ok=%d why=%s bytes=%u psram_used=%u int_used=%ld ms=%lu th=%.2f fixture_cos=%.4f psram_free=%u",
+                   sp.ready ? 1 : 0, sp.why[0] ? sp.why : "none", unsigned(sp.bytes), unsigned(sp.psramUsed),
+                   sp.internalUsed, (unsigned long)sp.loadMs, double(sp.threshold), double(sp.fixtureCos),
+                   unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+          // where the load went: file read, SHA-256, ESP-DL build, ESP-DL self-test, fixture embed; memory parts
+          ESP_LOGI("STT", "TL spk_load2 read_ms=%lu sha_us=%lu build_us=%lu test=%d test_us=%lu fixture_us=%lu arena_psram=%u arena_int=%u work=%u modules=%u int_min=%u",
+                   (unsigned long)sp.readMs, (unsigned long)sp.shaUs, (unsigned long)sp.buildUs, sp.testResult,
+                   (unsigned long)sp.testUs, (unsigned long)sp.fixtureUs, unsigned(sp.arenaPsram), unsigned(sp.arenaInternal),
+                   unsigned(sp.workspaceBytes), sp.modules,
+                   unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+        }
+#endif
         if (gSTTPerfLog)
           INFO_SYSTEMF("[STTPERF] warm-up %s in %lu ms (load %lu, lm %s)", warmed ? "ok" : warmError,
                        (unsigned long)(millis() - warmStart), (unsigned long)warmStats.loadMs,
@@ -1095,7 +1847,29 @@ static void sttContinuousWorker(void*) {
       }
     }
 #endif
+#if HW1_STT_CAPTURE_FEATURES
+    if (!sttStreamCancelled(&run)) sttFeatureStart(run, backendSession);
+#endif
+#if HW1_STT_SPEAKER_LABELS
+    LabelledTranscript labelledLines;
+#if HW1_STT_SPEAKER_DIAGNOSTICS
+    bool speakerProfileDumped = false;
+#endif
+#endif
     for (;;) {
+#if HW1_STT_SPEAKER_LABELS
+      // Consume label results even when saving is disabled or its line ring
+      // could not be allocated. UI metadata never depends on the saved copy.
+      sttLabelledPump(labelledLines, backendSession, transcript, run.token, false);
+#if HW1_STT_SPEAKER_DIAGNOSTICS
+      // Per-layer speaker trunk profile (TL spkstg), 240 s after capture start: the
+      // conversation playlists end by ~233 s and the harness reads 20 s past the end.
+      if (!speakerProfileDumped && gSTT.captureStartedMs && millis() - gSTT.captureStartedMs > 240000) {
+        speakerProfileDumped = true;
+        sttSpeakerProfileLog();
+      }
+#endif
+#endif
       StreamSlot* slot = nullptr;
       bool captureDone;
       portENTER_CRITICAL(&gSTTMux);
@@ -1113,14 +1887,119 @@ static void sttContinuousWorker(void*) {
       if (sttStreamCancelled(&run)) break;
       if (!slot) {
         if (captureDone) break;
+#if HW1_STT_CAPTURE_FEATURES
+        // Retire orphaned feature caches on every idle pass (before the
+        // speculative path too, which skips the draft code below).
+        sttFeatureRetireOrphans(run);
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+        // A speculative snapshot outranks drafts. A held result whose phrase
+        // no longer matches it (speech resumed, other close) is dropped.
+        bool speculating = false;
+        size_t specSamples = 0;
+        uint32_t specId = 0, specSeq = 0, staleDone = 0, staleSnapshot = 0;
+        uint64_t specA0 = 0;
+        STTFeaturePrefix specPrefix;  // capture-time rows (HW1_STT_CAPTURE_FEATURES)
+        portENTER_CRITICAL(&gSTTMux);
+        if (run.specDoneId && !sttSpecReferencedLocked(run, run.specDoneId)) {
+          staleDone = run.specDoneId; run.specDoneId = 0;
+        }
+        if (run.specReady && !run.failed && !gSTT.cancelRequested) {
+          run.specReady = false;
+          if (sttSpecReferencedLocked(run, run.specReadyId)) {
+            speculating = run.specBusy = true;
+            specId = run.specRunId = run.specReadyId;
+            specSamples = run.specReadySamples;
+            specSeq = run.specReadySequence;
+            specA0 = run.specReadyStart;
+#if HW1_STT_CAPTURE_FEATURES
+            // Rows of the speculated phrase's cache committed by now, clipped
+            // to rows whose samples all lie inside the snapshot
+            // ((r + 1) * 160 <= specSamples: the same rows the batch frontend
+            // computes on it). Only the worker frees a cache, so they stay put
+            // during the run; gen/start guard against a reused cache.
+            if (run.specReadyFe >= 0 && specSamples >= 320) {
+              const FeCache& c = run.fe[run.specReadyFe];
+              if (c.gen == run.specReadyFeGen && c.state != FeState::Free && c.start == specA0) {
+                specPrefix.rows = c.rows;
+                specPrefix.count = std::min(c.frames, specSamples / 160);
+              }
+            }
+#endif
+          } else {
+            staleSnapshot = run.specReadyId;
+          }
+        }
+        portEXIT_CRITICAL(&gSTTMux);
+        if (staleDone) sttWipe(gSpecText, sizeof(gSpecText));
+#ifdef ESP_PLATFORM
+        if (staleDone)
+          ESP_LOGI("STT", "TL spec_discard id=%lu t=%lu why=2 stale", (unsigned long)staleDone, (unsigned long)millis());
+        if (staleSnapshot)
+          ESP_LOGI("STT", "TL spec_discard id=%lu t=%lu why=3 unrun", (unsigned long)staleSnapshot, (unsigned long)millis());
+#else
+        (void)staleSnapshot;
+#endif
+        if (speculating) {
+          char specError[96] = {};
+          STTLocalStats specStats;
+          const STTLocalControl specControl{&run, sttSpecPreempted, sttStreamProgress};
+          const uint32_t specStart = millis();
+#ifdef ESP_PLATFORM
+          // a0: phrase start on the TL seg clock (capture start + samples).
+          ESP_LOGI("STT", "TL spec_start seq=%lu id=%lu a0=%lu samples=%u t=%lu", (unsigned long)specSeq,
+                   (unsigned long)specId, (unsigned long)(gSTT.captureStartedMs + specA0 / (STT_SAMPLE_RATE / 1000)),
+                   unsigned(specSamples), (unsigned long)specStart);
+#else
+          (void)specA0; (void)specSeq;
+#endif
+          const bool ok = sttLocalTranscribe(run.draftPcm, specSamples, gSpecText, sizeof(gSpecText), specControl,
+                                             specStats, specError, sizeof(specError), &backendSession,
+                                             specPrefix.count ? &specPrefix : nullptr);
+          bool kept = false;
+          portENTER_CRITICAL(&gSTTMux);
+          run.specBusy = false;
+          if (ok && memchr(gSpecText, '\0', sizeof(gSpecText)) && !run.failed && !gSTT.cancelRequested &&
+              sttSpecReferencedLocked(run, specId)) {
+            run.specDoneId = specId; run.specDoneSamples = specSamples;
+            run.specDoneStartMs = specStart; run.specDoneStats = specStats;
+            kept = true;
+          }
+          portEXIT_CRITICAL(&gSTTMux);
+          if (!kept) sttWipe(gSpecText, sizeof(gSpecText));
+#ifdef ESP_PLATFORM
+          // cached = feature rows this run took from the capture-time cache.
+          ESP_LOGI("STT", "TL spec_end seq=%lu id=%lu samples=%u s=%lu e=%lu ok=%d kept=%d m=%lu f=%lu n=%lu d=%lu cached=%u",
+                   (unsigned long)specSeq, (unsigned long)specId, unsigned(specSamples), (unsigned long)specStart,
+                   (unsigned long)millis(), ok ? 1 : 0, kept ? 1 : 0, (unsigned long)specStats.loadMs,
+                   (unsigned long)specStats.frontendMs, (unsigned long)specStats.inferenceMs,
+                   (unsigned long)specStats.decodeMs, unsigned(specStats.featureCachedFrames));
+          if (!kept)
+            ESP_LOGI("STT", "TL spec_discard seq=%lu id=%lu t=%lu why=1 %s", (unsigned long)specSeq,
+                     (unsigned long)specId, (unsigned long)millis(), ok ? "superseded" : "aborted");
+#endif
+          sttStreamTick(run);
+          sttDrainLevelLog(run);
+          continue;
+        }
+#endif
         bool drafting = false;
         size_t draftSamples = 0;
         uint32_t draftSequence = 0;
+        STTFeaturePrefix draftPrefix;  // capture-time rows (HW1_STT_CAPTURE_FEATURES)
         portENTER_CRITICAL(&gSTTMux);
         if (run.draftReady && !run.failed && !gSTT.cancelRequested) {
-          run.draftReady = false; run.draftBusy = drafting = true;
+          run.draftReady = false; run.draftBusy = drafting = true; run.draftPastPcm = false;
           draftSamples = std::max(run.draftSamples, size_t(320));
           draftSequence = run.draftSequence;
+#if HW1_STT_CAPTURE_FEATURES
+          // Only the worker frees a cache, so these rows stay put during the draft.
+          if (run.draftFe >= 0 && run.draftFeRows && run.fe[run.draftFe].gen == run.draftFeGen &&
+              run.fe[run.draftFe].state != FeState::Free && draftSamples == run.draftSamples) {
+            draftPrefix.rows = run.fe[run.draftFe].rows; draftPrefix.count = run.draftFeRows;
+          }
+          run.draftFe = -1;
+#endif
         }
         portEXIT_CRITICAL(&gSTTMux);
         if (drafting) {
@@ -1129,10 +2008,17 @@ static void sttContinuousWorker(void*) {
           char draftText[STT_MAX_TEXT + 1] = {};
           char draftError[96] = {};
           STTLocalStats draftStats;
-          const STTLocalControl draftControl{&run, sttDraftPreempted, sttStreamProgress};
+          const STTLocalControl draftControl{&run, sttDraftPreempted, sttDraftProgress};
           const uint32_t draftStart = millis();
           const bool ok = sttLocalTranscribe(run.draftPcm, draftSamples, draftText, sizeof(draftText), draftControl,
-                                             draftStats, draftError, sizeof(draftError), &backendSession);
+                                             draftStats, draftError, sizeof(draftError), &backendSession,
+                                             draftPrefix.count ? &draftPrefix : nullptr);
+#if HW1_STT_CAPTURE_FEATURES
+          portENTER_CRITICAL(&gSTTMux);
+          run.feDraftRows += draftStats.featureCachedFrames;
+          portEXIT_CRITICAL(&gSTTMux);
+#endif
+          bool draftPublished = false;
           portENTER_CRITICAL(&gSTTMux);
           // Publish only while its final chunk has not been produced yet.
           if (ok && memchr(draftText, '\0', sizeof(draftText)) && !gSTT.cancelRequested && !run.failed &&
@@ -1140,10 +2026,18 @@ static void sttContinuousWorker(void*) {
             memcpy(gSTT.draft.text, draftText, sizeof(draftText));
             gSTT.draft.sequence = draftSequence;
             ++gSTT.draft.version;
+            draftPublished = true;
           }
-          run.draftBusy = false;
+          run.draftBusy = false; run.draftPastPcm = false;
           if (ok) run.lastDraftMs = millis() - draftStart;
           portEXIT_CRITICAL(&gSTTMux);
+#if HW1_STT_PUBLISH_WAKE
+          // Wake the consumer now (never inside gSTTMux) rather than at its
+          // next poll; the console write below then follows its read.
+          if (draftPublished && run.publishWake) run.publishWake();
+#else
+          (void)draftPublished;
+#endif
 #ifdef ESP_PLATFORM
           ESP_LOGI("STT", "TL draft seq=%lu audio_ms=%lu s=%lu e=%lu ok=%d",
                    (unsigned long)draftSequence, (unsigned long)(draftSamples / (STT_SAMPLE_RATE / 1000)),
@@ -1182,28 +2076,102 @@ static void sttContinuousWorker(void*) {
       // A stop immediately after a forced boundary can leave fewer than20 ms
       // of real audio. Pad only the backend copy; published positions retain
       // the exact captured extent, so no samples disappear or move in time.
-      const size_t inferenceSamples = std::max(slot->samples, size_t(320));
+      size_t retainedSamples = slot->samples;
+#if HW1_STT_TRIM_SILENCE
+      // Opt-in legacy trim for controlled comparisons. The default forwards
+      // the full captured phrase, including all of its quiet ending.
+      if (slot->endKind != hw1::stt::SegmentEnd::HardLimit && slot->voicedEnd &&
+          slot->voicedEnd + kTrimTailSamples < slot->samples)
+        retainedSamples = slot->voicedEnd + kTrimTailSamples;
+#endif
+      const size_t inferenceSamples = std::max(retainedSamples, size_t(320));
       if (inferenceSamples > slot->samples)
         memset(slot->pcm + slot->samples, 0, (inferenceSamples - slot->samples) * sizeof(int16_t));
-      const bool ok = sttLocalTranscribe(slot->pcm, inferenceSamples, text, sizeof(text), control,
-                                        stats, error, sizeof(error), &backendSession);
+#if HW1_STT_CAPTURE_FEATURES
+      // Orphaned feature caches are retired before every final.
+      sttFeatureRetireOrphans(run);
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+      // Promote a finished speculative run on exactly this input.
+      bool promoted = false;
+      uint32_t promotedId = 0;
+      portENTER_CRITICAL(&gSTTMux);
+      if (slot->specId && slot->specId == run.specDoneId) {
+        promotedId = run.specDoneId;
+        promoted = run.specDoneSamples == inferenceSamples;
+        if (promoted) { stats = run.specDoneStats; perf.startMs = run.specDoneStartMs; }
+        run.specDoneId = 0;
+      }
+      portEXIT_CRITICAL(&gSTTMux);
+      bool ok = promoted;
+      if (promoted) memcpy(text, gSpecText, sizeof(text));
+#else
+      constexpr bool promoted = false;
+      bool ok = false;
+#endif
+      if (!promoted) {
+        STTFeaturePrefix prefix;
+#if HW1_STT_CAPTURE_FEATURES
+        // Rows computed during capture for this phrase. The trim may infer
+        // only a prefix (voiced end + 200 ms); then only the cached rows whose
+        // samples all lie inside that prefix are used, row r with
+        // (r + 1) * 160 <= inferenceSamples. Such a row never reflects at the
+        // end, so it equals the batch frontend's row of the trimmed input; the
+        // runtime computes the rest on the trimmed PCM. A zero-padded input
+        // (< 320 samples captured) has no cache (none is attached).
+        portENTER_CRITICAL(&gSTTMux);
+        if (slot->fe >= 0 && slot->feRows && run.fe[slot->fe].gen == slot->feGen &&
+            run.fe[slot->fe].state == FeState::Attached && inferenceSamples <= slot->samples) {
+          prefix.rows = run.fe[slot->fe].rows;
+          prefix.count = std::min(slot->feRows, inferenceSamples / 160);
+        }
+        portEXIT_CRITICAL(&gSTTMux);
+#endif
+        ok = sttLocalTranscribe(slot->pcm, inferenceSamples, text, sizeof(text), control,
+                                stats, error, sizeof(error), &backendSession,
+                                prefix.count ? &prefix : nullptr);
+      }
+#if HW1_STT_SPECULATIVE_FINAL
+      if (promotedId) sttWipe(gSpecText, sizeof(gSpecText));
+#endif
+#if HW1_STT_CAPTURE_FEATURES
+      // Feature counters; a promoted final counts with its speculative run's rows.
+      portENTER_CRITICAL(&gSTTMux);
+      ++run.feFinals;
+      if (stats.featureCachedFrames) { ++run.feCachedFinals; run.feCachedRows += stats.featureCachedFrames; }
+      portEXIT_CRITICAL(&gSTTMux);
+#endif
+      bool acceptedFinal = false;
       bool acceptedText = false;
+      uint32_t tlPubMs = 0;  // millis() (esp_timer) at the mailbox publish
       if (!sttStreamCancelled(&run)) {
         if (!ok || !memchr(text, '\0', sizeof(text))) {
           sttStreamFail(run, error[0] ? error : "Continuous transcription failed");
         } else {
+          // A successful blank result completes its audio segment, but is not
+          // a text turn. Preserve only its ordered transcript sequence marker;
+          // do not write a line or let its audio seed speaker clusters.
+          const bool hasText = text[strspn(text, " \t\r\n")] != '\0';
           portENTER_CRITICAL(&gSTTMux);
-          if (!gSTT.cancelRequested && !run.failed && gSTT.snapshot.pendingTexts < kTextQueueDepth) {
-            auto& chunk = gSTTChunks[(gSTT.textHead + gSTT.snapshot.pendingTexts) % kTextQueueDepth];
-            chunk.sequence = slot->sequence;
-            chunk.startSample = slot->start;
-            chunk.endSample = slot->end;
-            chunk.forcedBoundary = slot->forced;
-            memcpy(chunk.text, text, sizeof(chunk.text));
-            ++gSTT.snapshot.pendingTexts;
+          if (!gSTT.cancelRequested && !run.failed &&
+              (!hasText || gSTT.snapshot.pendingTexts < kTextQueueDepth)) {
             ++gSTT.snapshot.segmentsCompleted;
-            gSTT.snapshot.textReady = true;
-            acceptedText = true;
+            acceptedFinal = true;
+            if (hasText) {
+              auto& chunk = gSTTChunks[(gSTT.textHead + gSTT.snapshot.pendingTexts) % kTextQueueDepth];
+              chunk.sequence = slot->sequence;
+#if HW1_STT_SPEAKER_LABELS
+              sttSpeakerPendingLocked(slot->sequence);
+#endif
+              chunk.startSample = slot->start;
+              chunk.endSample = slot->end;
+              chunk.forcedBoundary = slot->forced;
+              memcpy(chunk.text, text, sizeof(chunk.text));
+              ++gSTT.snapshot.pendingTexts;
+              gSTT.snapshot.textReady = true;
+              acceptedText = true;
+              tlPubMs = millis();
+            }
             if (gSTT.draft.sequence && gSTT.draft.sequence <= slot->sequence) {
               // The final text supersedes the draft for this utterance.
               volatile char* d = gSTT.draft.text;
@@ -1216,19 +2184,82 @@ static void sttContinuousWorker(void*) {
             snprintf(gSTT.snapshot.error, sizeof(gSTT.snapshot.error), "%s", "STT text queue full; receiver must acknowledge results");
           }
           portEXIT_CRITICAL(&gSTTMux);
+          if (acceptedFinal) {
+#if HW1_STT_PUBLISH_WAKE
+            // Empty finals also wake readers so superseded drafts disappear.
+            // Wake the consumer first (Conversate's caption pump) so the
+            // console write below is not part of its publish-to-read time.
+            // Outside gSTTMux: the woken task may preempt this one.
+            if (run.publishWake) run.publishWake();
+#endif
+#ifdef ESP_PLATFORM
+            // t is the publish instant (the mailbox write above).
+            if (acceptedText)
+              ESP_LOGI("STT", "TL pub seq=%lu t=%lu", (unsigned long)slot->sequence, (unsigned long)tlPubMs);
+            else
+              ESP_LOGI("STT", "TL empty seq=%lu", (unsigned long)slot->sequence);
+#else
+            (void)tlPubMs;
+#endif
+          }
         }
       }
-      // Save the whole accepted chunk once, before UI splitting/ACK can erase
-      // its mailbox copy. Only this inference worker performs transcript I/O.
+      // Save each accepted final in sequence, before UI splitting/ACK can
+      // erase its mailbox copy. Blank finals use a zero-length marker: append
+      // advances sequence without creating a file or writing a blank line.
+      // Only this inference worker performs transcript I/O.
       uint32_t saveStartMs = 0, saveEndMs = 0;
-      if (acceptedText) {
+      if (acceptedFinal) {
         saveStartMs = millis();
-        (void)transcript.append(slot->sequence, text, strlen(text));
-        sttPublishTranscript(run.token, transcript.snapshot());
+        const char* transcriptText = acceptedText ? text : "";
+#if HW1_STT_SPEAKER_LABELS
+        // Blank markers share this ordered ring so they cannot overtake a
+        // preceding text line that is still waiting for its speaker label.
+        if (!(transcriptOptions.enabled && sttSpeakerBackground(&backendSession) &&
+              sttLabelledQueue(labelledLines, backendSession, transcript, run.token, slot->sequence, transcriptText)))
+#endif
+        {
+          (void)transcript.append(slot->sequence, transcriptText, strlen(transcriptText));
+          sttPublishTranscript(run.token, transcript.snapshot());
+        }
         saveEndMs = millis();
       }
+#if HW1_STT_SPEAKER_LABELS
+      if (acceptedText) {
+        // Label the already-published phrase. If its background queue fills,
+        // yield to that worker before accepting more work; the current caption
+        // remains visible while later finals may wait. Stop that wait when
+        // another audio final queues, preserving capture headroom. Use recognition's audio,
+        // excluding the minimum-length zero padding used by its frontend.
+        // Hand the phrase to the background labelling task; inline only if it has none.
+        STTSpeakerLabel spk;
+        if (sttSpeakerSubmit(&backendSession, slot->sequence, slot->pcm, retainedSamples, control, sttSpeakerCanWait)) {
+        } else if (sttSpeakerLabel(&backendSession, slot->pcm, retainedSamples, &spk)) {
+          sttPublishSpeaker(run.token, slot->sequence, spk.speaker);
+          ESP_LOGI("STT", "TL spk seq=%lu spk=%d sim=%.3f new=%d tent=%d samples=%u fe_us=%lu nn_us=%lu head_us=%lu us=%lu",
+                   (unsigned long)slot->sequence, int(spk.speaker), double(spk.similarity), spk.created ? 1 : 0,
+                   spk.tentative ? 1 : 0, unsigned(retainedSamples), (unsigned long)spk.featureUs,
+                   (unsigned long)spk.trunkUs, (unsigned long)spk.headUs, (unsigned long)spk.totalUs);
+          // sections of the same phrase: features (fft, mel+log, norm+window), int16 in, trunk, out, SAP, softmax+pool, fc, cluster
+          ESP_LOGI("STT", "TL spkt seq=%lu frames=%u crop=%d fft=%lu mel=%lu norm=%lu q=%lu nn=%lu dq=%lu sap=%lu pool=%lu fc=%lu clu=%lu",
+                   (unsigned long)slot->sequence, unsigned(spk.frames), spk.cropped ? 1 : 0, (unsigned long)spk.fftUs,
+                   (unsigned long)spk.melUs, (unsigned long)spk.normUs, (unsigned long)spk.quantUs, (unsigned long)spk.trunkUs,
+                   (unsigned long)spk.dequantUs, (unsigned long)spk.sapUs, (unsigned long)spk.poolUs, (unsigned long)spk.fcUs,
+                   (unsigned long)spk.clusterUs);
+        } else {
+          sttPublishSpeaker(run.token, slot->sequence, -1);
+        }
+        // Submission can wait for space. Deliver labels completed during that
+        // wait immediately, including when this was the final phrase.
+        sttLabelledPump(labelledLines, backendSession, transcript, run.token, false);
+      }
+#endif
       sttWipe(text, sizeof(text));
-      sttWipe(slot->pcm, inferenceSamples * sizeof(int16_t));
+      sttWipe(slot->pcm, std::max(inferenceSamples, slot->samples) * sizeof(int16_t));
+#if HW1_STT_CAPTURE_FEATURES
+      sttFeatureRelease(run, slot->fe, slot->feGen);  // after publish and save
+      slot->fe = -1;
+#endif
       perf.doneMs = millis();
       perf.stats = stats;
 #ifdef ESP_PLATFORM
@@ -1239,7 +2270,12 @@ static void sttContinuousWorker(void*) {
         const uint32_t base = gSTT.captureStartedMs;
         // lm: this phrase was LM-decoded; psram_min: PSRAM low-water mark since
         // boot (includes this phrase's inference arena and LM workspace).
-        ESP_LOGI("STT", "TL seg=%lu a0=%lu a1=%lu q=%lu s=%lu m=%lu f=%lu n=%lu d=%lu sv0=%lu sv1=%lu e=%lu ok=%d lm=%d psram_min=%u",
+        // int_free/int_min: internal RAM now and its low-water mark since
+        // boot, so anything eroding the runtime's per-call internal floor (or
+        // BLE's and the 6 KB g2_ctrl_owner stack's headroom) shows on every
+        // phrase.
+        ESP_LOGI("STT", "TL seg=%lu a0=%lu a1=%lu q=%lu s=%lu m=%lu f=%lu n=%lu d=%lu sv0=%lu sv1=%lu e=%lu ok=%d lm=%d psram_min=%u"
+                 " int_free=%u int_min=%u",
                  (unsigned long)slot->sequence,
                  (unsigned long)(base + slot->start / (STT_SAMPLE_RATE / 1000)),
                  (unsigned long)(base + slot->end / (STT_SAMPLE_RATE / 1000)),
@@ -1248,7 +2284,54 @@ static void sttContinuousWorker(void*) {
                  (unsigned long)stats.inferenceMs, (unsigned long)stats.decodeMs,
                  (unsigned long)saveStartMs, (unsigned long)saveEndMs,
                  (unsigned long)perf.doneMs, ok ? 1 : 0, stats.lmUsed ? 1 : 0,
-                 unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)));
+                 unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)),
+                 unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+        // Expose the actual final input extent even when trimming is disabled.
+        ESP_LOGI("STT", "TL input seg=%lu captured=%u retained=%u inference=%u trim=%d",
+                 (unsigned long)slot->sequence, unsigned(slot->samples),
+                 unsigned(retainedSamples), unsigned(inferenceSamples), HW1_STT_TRIM_SILENCE);
+        // 0=pause, 1=hard limit, 2=session end. Offsets are absolute 16 kHz
+        // sample positions, so the log shows gaps/overlap and continuations.
+        ESP_LOGI("STT", "TL boundary seg=%lu start=%llu end=%llu kind=%u continuation=%d overlap=%u vad_voiced=%u",
+                 (unsigned long)slot->sequence, (unsigned long long)slot->start,
+                 (unsigned long long)slot->end, unsigned(slot->endKind), slot->continuation ? 1 : 0,
+                 unsigned(slot->overlapBefore), unsigned(slot->voicedSamples));
+        // Blocking yields (timed vTaskDelay(1)) and total yield time in n.
+        ESP_LOGI("STT", "TL yield seg=%lu blocks=%u yield_us=%lu", (unsigned long)slot->sequence,
+                 unsigned(stats.inferenceBlocks), (unsigned long)stats.inferenceYieldUs);
+#if HW1_STT_CAPTURE_FEATURES
+        // Feature rows of this final, and how many came from the capture-time cache.
+        ESP_LOGI("STT", "TL fe seg=%lu frames=%u cached=%u", (unsigned long)slot->sequence,
+                 unsigned(stats.featureFrames), unsigned(stats.featureCachedFrames));
+#endif
+#if HW1_STT_TRIM_SILENCE
+        // Captured vs inferred samples (a0/a1 above stay the captured span),
+        // voiced end offset (0 = none) and end kind (0 pause, 1 hard limit,
+        // 2 session end).
+        ESP_LOGI("STT", "TL trim seg=%lu samples=%u inf=%u voiced_end=%u end=%u cut_ms=%u",
+                 (unsigned long)slot->sequence, unsigned(slot->samples), unsigned(inferenceSamples),
+                 unsigned(slot->voicedEnd), unsigned(slot->endKind),
+                 unsigned((slot->samples - retainedSamples) / (STT_SAMPLE_RATE / 1000)));
+#endif
+#if HW1_STT_SPECULATIVE_FINAL
+        // This phrase matched a speculative request: promoted (s = that run's
+        // start, before q; saved_ms = q - its end), or missed (the run had not
+        // finished, was aborted, or its length differed).
+        if (promoted)
+          ESP_LOGI("STT", "TL spec_promote seg=%lu id=%lu s=%lu q=%lu t=%lu", (unsigned long)slot->sequence,
+                   (unsigned long)promotedId, (unsigned long)perf.startMs, (unsigned long)slot->queuedMs,
+                   (unsigned long)perf.doneMs);
+        else if (slot->specId)
+          ESP_LOGI("STT", "TL spec_miss seg=%lu id=%lu held=%d", (unsigned long)slot->sequence,
+                   (unsigned long)slot->specId, promotedId ? 1 : 0);
+#endif
+#if HW1_STT_SHORT_CLOSE
+        // A pause closed this phrase below the 4 s minimum.
+        if (slot->pauseEnd && slot->samples < size_t(4 * STT_SAMPLE_RATE))
+          ESP_LOGI("STT", "TL short seg=%lu len_ms=%lu", (unsigned long)slot->sequence,
+                   (unsigned long)(slot->samples / (STT_SAMPLE_RATE / 1000)));
+#endif
       }
 #else
       (void)saveStartMs; (void)saveEndMs;
@@ -1270,6 +2353,13 @@ static void sttContinuousWorker(void*) {
       sttStreamTick(run);
       sttDrainLevelLog(run);
     }
+#if HW1_STT_SPEAKER_LABELS
+    // The last phrases' labels (bounded wait), then every held transcript line, in order.
+    if (!sttStreamCancelled(&run))
+      sttSpeakerDrain(&backendSession, 30000, {&run, sttStreamCancelled, nullptr});
+    sttLabelledPump(labelledLines, backendSession, transcript, run.token, true);
+    sttFinishSpeakers(run.token);
+#endif
   } while (false);
   // On normal stop the producer has already joined; on failure/cancel its
   // callback sees the same fence. Never free buffers while either task uses them.
@@ -1282,10 +2372,25 @@ static void sttContinuousWorker(void*) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
   }
+#if HW1_STT_CAPTURE_FEATURES
+#ifdef ESP_PLATFORM
+  if (run.feRing)
+    ESP_LOGI("STT", "TL fe_end rows=%lu overruns=%lu finals=%lu cached_finals=%lu cached_rows=%lu draft_rows=%lu",
+             (unsigned long)run.feRowsComputed, (unsigned long)run.feOverruns, (unsigned long)run.feFinals,
+             (unsigned long)run.feCachedFinals, (unsigned long)run.feCachedRows, (unsigned long)run.feDraftRows);
+#endif
+  sttFeatureStop(run);  // the capture task has joined; nothing feeds the ring
+#endif
+#if HW1_STT_SPEAKER_LABELS
+  sttSpeakerEnd(&backendSession);  // stop background labelling and free the speaker model before the session goes
+#endif
   // FreeRTOS self-delete does not unwind C++ locals. Close the backend (or
   // park it for the next run while a hold lasts) before publishing
   // workerActive=false, after every inference/capture user joined.
   sttWarmPark(backendSession);
+#if HW1_STT_SPECULATIVE_FINAL
+  sttWipe(gSpecText, sizeof(gSpecText));  // a held, never-promoted result
+#endif
   if (run.working) { sttWipe(run.working, kStreamSamples * sizeof(int16_t)); free(run.working); }
   if (run.draftPcm) { sttWipe(run.draftPcm, kStreamSamples * sizeof(int16_t)); free(run.draftPcm); }
   for (auto& slot : run.slots) {
@@ -1317,7 +2422,8 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
                          STTToken* token, char* error, size_t errorCap,
                          const TranscriptOptions* suppliedOptions = nullptr,
                          uint32_t nativeG2Generation = 0,
-                         AudioSource preferredSource = AUDIO_SRC_NONE) {
+                         AudioSource preferredSource = AUDIO_SRC_NONE,
+                         void (*publishWake)() = nullptr) {
   sttReapTerminal();
   if (token) *token = 0;
   if (!token || !sttOwnerLive(owner)) return sttError(error, errorCap, "A live authenticated session is required");
@@ -1368,6 +2474,7 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
     gSTT.snapshot.transcript.enabled = transcriptOptions.enabled;
     gSTT.requestedSource = nativeG2Generation ? AUDIO_SRC_G2_LEFT : requestedSource;
     gSTT.nativeG2Generation = nativeG2Generation;
+    gSTT.publishWake = publishWake;
     gSTT.snapshot.token = (static_cast<uint64_t>(gSTTNonce) << 32) | gSTTCounter;
     gSTT.snapshot.state = STTState::Preparing;
     gSTT.snapshot.captureLimitMs = continuous ? 0 : captureMs;
@@ -1413,12 +2520,15 @@ bool sttBeginContinuous(STTOwner owner, STTToken* token,
 
 bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
                                 char* error, size_t errorCap,
-                                const TranscriptOptions* transcriptOptions) {
+                                const TranscriptOptions* transcriptOptions,
+                                void (*publishWake)()) {
   if (!leftGeneration) {
     if (token) *token = 0;
     return sttError(error, errorCap, "No glasses microphone connection");
   }
-  return sttBeginMode(owner, 0, true, token, error, errorCap, transcriptOptions, leftGeneration);
+  // The glasses stream is the source; the caller's wake is kept for the run.
+  return sttBeginMode(owner, 0, true, token, error, errorCap, transcriptOptions, leftGeneration,
+                      AUDIO_SRC_NONE, publishWake);
 }
 
 bool sttSetPaused(STTOwner owner, STTToken token, bool paused) {
@@ -1518,6 +2628,10 @@ bool sttReadChunk(STTOwner owner, STTToken token, STTTextChunk* out) {
     // The perf record is stored after the text is published, so log the first
     // read of each sequence here regardless of it.
     static uint32_t lastReadLogged = 0;
+    // Sequences restart at 1 per session (e.g. a Conversate restart): forget
+    // the previous session's last.
+    static STTToken lastReadToken = 0;
+    if (token != lastReadToken) { lastReadToken = token; lastReadLogged = 0; }
     if (out->sequence != lastReadLogged) {
       lastReadLogged = out->sequence;
       tlReadSeq = out->sequence; tlReadMs = millis();
@@ -1541,6 +2655,19 @@ bool sttReadDraft(STTOwner owner, STTToken token, STTDraft* out) {
   if (ok) *out = gSTT.draft;
   portEXIT_CRITICAL(&gSTTMux);
   if (!sttOwnerLive(owner)) { sttWipe(out, sizeof(*out)); return false; }
+  return ok;
+}
+
+bool sttReadSpeakers(STTOwner owner, STTToken token, STTSpeakerSnapshot* out) {
+  if (out) *out = STTSpeakerSnapshot{};
+  sttReapTerminal();
+  if (!out || !sttOwnerLive(owner)) return false;
+  portENTER_CRITICAL(&gSTTMux);
+  const bool ok = sttMatchesLocked(owner, token) &&
+      gSTT.snapshot.continuous && !gSTT.cancelRequested;
+  if (ok) *out = gSTT.speakers;
+  portEXIT_CRITICAL(&gSTTMux);
+  if (!sttOwnerLive(owner)) { *out = STTSpeakerSnapshot{}; return false; }
   return ok;
 }
 

@@ -333,6 +333,19 @@
 #define ENABLE_LOCAL_STT        0
 #endif
 
+// Select the pinned 15x5 gen2 acoustic model on SD instead of the default
+// 5x5 model in LittleFS. The model path and generated identity change together.
+#ifndef ENABLE_STT_MODEL_15X5_GEN2
+#define ENABLE_STT_MODEL_15X5_GEN2 0
+#endif
+
+// Local STT language-model influence: scale its probability weight, word
+// insertion score and custom-word bonus together. Preserve the checked file's
+// original weights by default. Range 0.0f..1.0f for trials; no file rewrite.
+#ifndef HW1_STT_LM_STRENGTH
+#define HW1_STT_LM_STRENGTH     1.0f
+#endif
+
 // Edge Impulse: ML inference engine.
 #define ENABLE_EDGE_IMPULSE     0
 
@@ -1348,6 +1361,9 @@
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD && (!HW_BOARD_P4X_EYE || !defined(CONFIG_IDF_TARGET_ESP32P4))
   #error "SDMMC card requires a supported board profile (currently P4X-EYE)"
 #endif
+#if ENABLE_STT_MODEL_15X5_GEN2 && (!ENABLE_LOCAL_STT || !defined(CONFIG_IDF_TARGET_ESP32P4) || !ENABLE_SD_CARD)
+  #error "ENABLE_STT_MODEL_15X5_GEN2 requires ENABLE_LOCAL_STT, ESP32-P4 and ENABLE_SD_CARD."
+#endif
 
 // =============================================================================
 // BATTERY MONITOR — derived enable + backend sanity
@@ -1586,6 +1602,18 @@
 #endif
 #if ENABLE_STT_LM && !ENABLE_LOCAL_STT
   #error "ENABLE_STT_LM decodes the local STT backend's output. Set ENABLE_LOCAL_STT 1 or ENABLE_STT_LM 0."
+#endif
+
+// Session speaker labels for the local STT backend (stt/speaker_model.h): a
+// speaker-embedding model from "/sd/STT Models/speaker.spk" labels each phrase
+// in a background task; saved transcript lines get "[Person N]". Off unless a
+// profile enables it; the build then compiles neither the speaker code nor its
+// ESP-DL kernels (CMake reads the same switch).
+#ifndef ENABLE_STT_SPEAKER_LABELS
+  #define ENABLE_STT_SPEAKER_LABELS 0
+#endif
+#if ENABLE_STT_SPEAKER_LABELS && !ENABLE_LOCAL_STT
+  #error "ENABLE_STT_SPEAKER_LABELS labels the local STT backend's phrases. Set ENABLE_LOCAL_STT 1 or ENABLE_STT_SPEAKER_LABELS 0."
 #endif
 
 // =============================================================================
