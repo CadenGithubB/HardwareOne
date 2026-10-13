@@ -36,10 +36,11 @@ port `18789`, bind `loopback`. Both `gateway.tls.enabled` and
 release defaults leave TLS and chat completions disabled; this is not yet a
 live endpoint probe. Available agent IDs are `main`, `devlab`, and `android-trial`,
 with Ollama configured behind the agents. The user selected `main` (Mingus), so
-the device target will be `openclaw/main`. Gateway authentication mode, existing
-Control UI allowed origins, and the host's address on the test VLAN are still
-pending. Do not change the listener or restart the host service until the concrete
-setup is determined.
+the device target will be `openclaw/main`. Follow-up inspection confirmed gateway
+authentication mode `token`, a valid but unset Control UI allowed-origins setting,
+and IPv4 `192.168.21.143` on `en0` (no IPv6 network state). Effective sandbox/tool
+policy and the listener/TLS migration plan are still pending. Do not change the
+listener or restart the host service until the concrete setup is determined.
 
 The [v2026.9.4 release](https://github.com/openclaw/openclaw/releases/tag/v2026.9.4)
 matches the reported commit. Its custom IPv4 listener can bind the test VLAN
@@ -51,7 +52,7 @@ TLS and listener edits require a concrete migration/restart plan for existing
 clients. Use version-matched CLI guidance: newer documentation's stop-before-edit
 requirement does not apply to this release.
 
-Next read-only inspections on the Studio:
+Read-only network/authentication inspections completed on the Studio:
 
 ```sh
 openclaw config get gateway.auth.mode
@@ -61,6 +62,45 @@ scutil --nwi
 
 Collect the authentication mode, allowed origins, and the IPv4 address/interface
 on the test VLAN. Do not collect the token or password in chat or this repository.
+
+### Preserve the existing agent sandbox
+
+The user reports that Mingus has a carefully configured sandbox. Preserve that
+configuration as an integration constraint. Start with text conversation only;
+the device skill is optional. Inspect the current effective policy read-only:
+
+```sh
+openclaw sandbox explain --agent main
+```
+
+This report describes OpenClaw's sandbox policy, not any additional container,
+VM, firewall, or host-level restrictions. The HTTP source sends only an agent
+target, conversation ID, current user message, and streaming flag; it does not
+send tool definitions, model overrides, or sandbox/elevated overrides. Nevertheless,
+the API conversation has its own session key. Before live acceptance, inspect
+that exact session's effective sandbox and tool policy too. The `main` agent ID
+does not mean the request uses its main session; `non-main` sandbox mode depends
+on the session key. See the version-matched [sandbox modes](https://github.com/openclaw/openclaw/blob/v2026.9.4/docs/gateway/sandboxing/modes-scope-and-backend.md)
+and [policy inspector](https://github.com/openclaw/openclaw/blob/v2026.9.4/docs/cli/sandbox.md).
+
+Shared-secret authentication on this release's HTTP endpoint conveys full
+operator authority and owner-sender semantics. Agent restrictions still apply,
+but an existing channel/sender policy or creator-role sandbox requirement must
+not be assumed to transfer to this ingress. Selecting `openclaw/main` in firmware
+does not limit the credential to that agent. Assess this before placing a gateway
+credential on the XIAO. If that authority exceeds the intended device access,
+design a separately authenticated, narrowly constrained intermediary while
+keeping the gateway local; it must enforce permitted routes, agent/session
+selection, headers, and request fields. That intermediary is not implemented.
+See the tagged [HTTP authentication contract](https://github.com/openclaw/openclaw/blob/v2026.9.4/docs/gateway/openai-http-api.md#security-boundary-important).
+
+The optional Python device helper needs approved Python execution, readable
+helper files, device credentials, and network reachability from its actual
+execution environment to the XIAO. A skill cannot grant these permissions. If
+the existing sandbox intentionally denies them, leave the skill unused and
+design narrowly registered device tools through an explicitly approved broker;
+do not enable broad execution, host networking, or elevated access as a shortcut.
+The same separation applies to a future Pi/UART daemon that owns the serial port.
 
 The prototype uses the documented [OpenClaw chat-completions endpoint](https://docs.openclaw.ai/gateway/openai-http-api).
 It must be enabled on the chosen test host. The configured target is an agent
