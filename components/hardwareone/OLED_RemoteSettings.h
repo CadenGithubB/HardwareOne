@@ -57,9 +57,6 @@ enum RemoteSettingsOutcome {
 };
 RemoteSettingsOutcome remoteSettingsPollOutcome(String& textOut);
 
-// Check if remote settings are available (bonded and cached)
-bool hasRemoteSettings();
-
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
 #endif // OLED_REMOTESETTINGS_H

@@ -227,8 +227,8 @@ static void ledOnEnter(bool isForward) {
 // ---------------------------------------------------------------------------
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc,
 //          showInMenu, menuOrder, hints, onEnterFunc.
-// availFunc is a dead field (never invoked) — availability comes from the
-// central getMenuAvailability() switch in OLED_Utils.cpp.
+// No entry rule (availFunc nullptr): the LED screen is usable whenever it is
+// built; getMenuAvailability() reports NOT_BUILT without ENABLE_NEOPIXEL.
 static const OLEDModeEntry sLedModes[] = {
   { OLED_LED, "LED", "notify_sensor", displayLED, nullptr, ledInputHandler,
     false, -1, "A:Sel B:Back", ledOnEnter },

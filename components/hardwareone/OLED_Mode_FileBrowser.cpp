@@ -20,12 +20,12 @@
 #include "System_AuthIdentity.h"    // CommandIdentityScope — composed identity + notif install
 #include "System_User.h"            // AuthContext, SOURCE_LOCAL_DISPLAY
 #include "System_Settings.h"        // gSettings (for displayRequireAuth via globals)
-// ps_alloc/ps_delete/AllocPref are used UNGATED below (the gOledFileManager
-// PSRAM allocation at ~:643 and its teardown at ~:1464), so this include must
-// NOT sit inside the ENABLE_ESPNOW block — with ESP-NOW off the header vanished
+// ps_alloc/AllocPref are used UNGATED below (the gOledFileManager PSRAM
+// allocation in initFileBrowser()), so this include must NOT sit inside the
+// ENABLE_ESPNOW block — with ESP-NOW off the header vanished
 // and those uses failed to compile. Same gated-include / ungated-use shape as
 // the System_Utils.cpp G2_Glasses.h bug; found by tools/build_coverage.sh pass 2.
-#include "System_MemUtil.h"         // ps_alloc / ps_delete — PSRAM FileManager
+#include "System_MemUtil.h"         // ps_alloc — PSRAM FileManager
 #include <new>                      // placement-new: gOledFileManager lives in PSRAM
 
 #if ENABLE_ESPNOW
@@ -233,10 +233,6 @@ static void fbToastMutate(FbMutateResult result, const char* done, const char* f
 // after the footer). Display metadata only: path + 4 FileEntry name/size/flags —
 // never a write-path buffer, never secrets — so it lives in PSRAM (452 B).
 EXT_RAM_BSS_ATTR FileBrowserRenderData fileBrowserRenderData = {0};  // Non-static so footer can access it
-
-// Button/navigation state
-static unsigned long oledFileBrowserLastInput = 0;
-static const unsigned long OLED_FILE_BROWSER_DEBOUNCE = 200; // ms
 
 // ============================================================================
 // File Picker State (modal callback layer — see OLED_Display.h)
@@ -705,7 +701,7 @@ static bool initFileBrowser() {
   if (gOledFileManager == nullptr) {
     // PSRAM placement-new: FileManager's ~5 KB is an inline cachedEntries[64] POD
     // array (FileEntry has no String), so the whole object moves off internal DRAM.
-    // Pair with ps_delete in resetOLEDFileBrowser() — never `delete`.
+    // Allocated once and kept; release only with ps_delete, never `delete`.
     void* fmBuf = ps_alloc(sizeof(FileManager), AllocPref::PreferPSRAM, "oled.filemgr");
     if (fmBuf == nullptr) {
       return false;
@@ -1302,38 +1298,27 @@ void displayFileBrowserRendered() {
 // ============================================================================
 
 /**
- * File browser navigation functions
- * Call these from your button interrupt handlers or main loop
+ * File browser navigation functions, called from fileBrowserInputHandler.
+ * One step per nav event or button press: the input layer (gNavEvents) paces
+ * joystick repeats and edge-detects buttons.
  */
 void oledFileBrowserUp() {
   if (!gOledFileManager) return;
-  
-  unsigned long now = millis();
-  if (now - oledFileBrowserLastInput < OLED_FILE_BROWSER_DEBOUNCE) return;
-  oledFileBrowserLastInput = now;
-  
+
   gOledFileManager->moveUp();
   // Display will update on next updateOLEDDisplay() call
 }
 
 void oledFileBrowserDown() {
   if (!gOledFileManager) return;
-  
-  unsigned long now = millis();
-  if (now - oledFileBrowserLastInput < OLED_FILE_BROWSER_DEBOUNCE) return;
-  oledFileBrowserLastInput = now;
-  
+
   gOledFileManager->moveDown();
   // Display will update on next updateOLEDDisplay() call
 }
 
 void oledFileBrowserSelect() {
   if (!gOledFileManager) return;
-  
-  unsigned long now = millis();
-  if (now - oledFileBrowserLastInput < OLED_FILE_BROWSER_DEBOUNCE) return;
-  oledFileBrowserLastInput = now;
-  
+
   // Defer navigation to prevent filesystem I/O outside I2C transaction
   fileBrowserPendingAction = FileBrowserPendingAction::NAVIGATE_INTO;
   // Actual navigation will happen in displayFileBrowser() inside I2C transaction
@@ -1341,11 +1326,7 @@ void oledFileBrowserSelect() {
 
 void oledFileBrowserBack() {
   if (!gOledFileManager) return;
-  
-  unsigned long now = millis();
-  if (now - oledFileBrowserLastInput < OLED_FILE_BROWSER_DEBOUNCE) return;
-  oledFileBrowserLastInput = now;
-  
+
   // Defer navigation to prevent filesystem I/O outside I2C transaction
   fileBrowserPendingAction = FileBrowserPendingAction::NAVIGATE_BACK;
   // Actual navigation will happen in displayFileBrowser() inside I2C transaction
@@ -1506,10 +1487,8 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
 
 extern void displayFileBrowserRendered();
 
-// Entry hook. Previously the reset was duplicated two ways: cmd_oledmode called
-// the heavy resetOLEDFileBrowser() (delete+reinit), while the menu set the lazy
-// oledFileBrowserNeedsInit flag. Unify on the lazy flag (reinit happens on the
-// next render) and gate on isForward so back-navigation keeps your folder/scroll
+// Entry hook. A forward entry sets the lazy oledFileBrowserNeedsInit flag
+// (reinit happens on the next render); back-navigation keeps your folder/scroll
 // position instead of snapping to root.
 static void fileBrowserOnEnter(bool isForward) {
   if (isForward) {
@@ -1529,25 +1508,5 @@ static const OLEDModeEntry sFileBrowserModes[] = {
 };
 
 REGISTER_OLED_MODE_MODULE(sFileBrowserModes, sizeof(sFileBrowserModes) / sizeof(sFileBrowserModes[0]), "FileBrowser");
-
-/**
- * Reset file browser (e.g., when switching to this mode)
- */
-void resetOLEDFileBrowser() {
-  // Clean up existing manager
-  if (gOledFileManager) {
-    ps_delete(gOledFileManager);
-    gOledFileManager = nullptr;
-  }
-#if ENABLE_ESPNOW
-  // A plain Tools→Files entry must never inherit a stale ESP-NOW send/receive
-  // context from a previous device-detail launch.
-  sEspnowCtx = EspnowFileCtx::NONE;
-  sGetUi = FsGetUi::NONE;
-#endif
-
-  // Initialize immediately (not on next display call)
-  initFileBrowser();
-}
 
 #endif // ENABLE_OLED_DISPLAY

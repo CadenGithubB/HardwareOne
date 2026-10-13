@@ -134,7 +134,6 @@ enum OLEDMode {
   OLED_PRESENCE_DATA,  // STHS34PF80 IR presence/motion sensor view
   OLED_SPEECH,         // ESP-SR speech recognition status and control
   OLED_REMOTE,         // Remote device UI (paired mode only)
-  OLED_UNIFIED_MENU,   // Unified local+remote actions menu
   OLED_REMOTE_SETTINGS,// Remote device settings editor (paired mode only)
   OLED_SET_PATTERN,    // Set gamepad pattern password
   OLED_CHANGE_PASSWORD,// Change password for authenticated user
@@ -160,7 +159,11 @@ enum OLEDMode {
 
 // Guest OLED session helpers (view-only UX). Allowlist drives menu filter +
 // requestOLEDMode gate; oledGuestBlocksMutate covers direct-API mutates.
+// The guest and admin answers come from a per-session role cache (dropped at
+// the session boundary, refilled on a gIdentityGeneration change); a failed
+// lookup is guest and non-admin. Commands still check the role themselves.
 bool oledIsGuestSession();
+bool oledSessionIsAdmin();
 bool oledModeAllowedForGuest(OLEDMode mode);
 // True if guest — toast shown; callers should no-op the mutate.
 bool oledGuestBlocksMutate();
@@ -171,31 +174,6 @@ struct OLEDMenuItem {
   const char* iconName;  // Icon name from embedded icons
   OLEDMode targetMode;   // Mode to switch to when selected
 };
-
-// Extended menu item for dynamic menus (supports remote items and submenus)
-struct OLEDMenuItemEx {
-  char name[24];         // Display name (copied, not pointer)
-  char iconName[24];     // Icon name (copied)
-  char command[48];      // CLI command to execute (for remote items)
-  OLEDMode targetMode;   // Mode to switch to (for local items, OLED_OFF for command items)
-  bool isRemote;         // True if this is a remote item
-  bool isSubmenu;        // True if this opens a submenu
-  bool needsInput;       // True if command requires user input (parsed from help at load time)
-  char submenuId[16];    // Submenu identifier (e.g., "sensors", "network", "system")
-};
-
-// Maximum dynamic menu items (local + remote)
-#define MAX_DYNAMIC_MENU_ITEMS 32
-
-// Dynamic menu state
-extern OLEDMenuItemEx gDynamicMenuItems[];
-extern int gDynamicMenuItemCount;
-
-// Build dynamic menu based on current DataSource (LOCAL/REMOTE/BOTH)
-void buildDynamicMenu();
-
-// Get filtered menu item count based on DataSource
-int getFilteredMenuItemCount();
 
 // ============================================================================
 // Modular OLED Mode Registration System
@@ -221,10 +199,11 @@ struct OLEDModeEntry {
   const char* name;           // Display name for menu
   const char* iconName;       // Icon name for menu (from embedded icons)
   OLEDDisplayFunc displayFunc;      // Function to render this mode
-  OLEDAvailabilityFunc availFunc;   // Function to check if mode is available (nullptr = always available)
+  OLEDAvailabilityFunc availFunc;   // The mode's own entry rule (nullptr = none): false refuses entry
+                                    // with *outReason. getMenuAvailability() and oledmode consult it.
   OLEDInputFunc inputFunc;          // Function to handle gamepad input (nullptr = default B=back, X=action)
-  bool showInMenu;            // Whether to show in main menu
-  int menuOrder;              // Order in menu (lower = earlier, -1 = end)
+  bool showInMenu;            // Not read: launcher rows come from the oledMenuCategory tables
+  int menuOrder;              // Not read (see showInMenu)
   const char* hints;          // Footer hints string (nullptr = use central switch fallback)
   OLEDModeEnterFunc onEnterFunc;  // Optional entry hook (nullptr = none). Trailing field:
                                   // existing 9-field initializers value-initialize it to nullptr.
@@ -278,29 +257,6 @@ struct NavEvents {
 
 extern NavEvents gNavEvents;  // Global navigation events, updated each frame
 
-// =============================================================================
-// Data Source Selection (for paired mode)
-// =============================================================================
-// When paired with another device, controls whether menu items use local,
-// remote, or both data sources. Toggled via Start button when paired+online.
-enum class DataSource {
-  LOCAL,   // Use only local sensors/data
-  REMOTE,  // Use only remote sensors/data (via paired peer)
-  BOTH     // Show both local and remote data (split view or merged)
-};
-
-extern DataSource gDataSource;           // Current global data source
-extern bool gDataSourceIndicatorVisible; // Show source indicator in UI
-
-// Cycle through available data sources (called on Start button when paired)
-void oledCycleDataSource();
-
-// Get display string for current source
-const char* oledGetDataSourceLabel();
-
-// Check if remote data source is available (paired + online)
-bool oledRemoteSourceAvailable();
-
 // Menu navigation state
 extern int oledMenuSelectedIndex;
 // Category menu system
@@ -330,6 +286,14 @@ enum class MenuAvailability {
   NOT_DETECTED           // Hardware not found
 };
 
+// The mode module's own entry rule (its registered OLEDModeEntry::availFunc).
+// True when the mode registers no rule or its rule allows entry; on a refusal
+// *outReason gets the module's reason.
+bool oledModeRuleAllows(OLEDMode mode, String* outReason);
+
+// Launcher availability: the build, hardware and feature state of the mode
+// (not built, not detected, turned off), then the mode's own entry rule, whose
+// refusal makes an otherwise available mode FEATURE_DISABLED with its reason.
 MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason);
 
 // =============================================================================
@@ -384,7 +348,15 @@ void setOLEDMode(OLEDMode newMode);  // internal – prefer requestOLEDMode for 
 // pushStack=false skips the back-nav push (for boot, system, or replace-in-place transitions).
 // isBackNav: pass true ONLY for back-navigation (popOLEDMode() destinations) so the
 // target mode's onEnterFunc receives isForward=false and can preserve its state.
+// Called off the OLED owner task (cmd_exec for CLI, web, MQTT, BLE and automation
+// commands), it posts the request and returns; the owner applies it, gates and
+// onEnter hook included, at the start of its next frame.
 void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack = true, bool isBackNav = false);
+
+// requestOLEDMode() with a preparation step (a mode's own state reset) that runs
+// on the owner task right before the transition. Same deferral off the owner.
+void requestOLEDModePrepared(OLEDMode newMode, const char* reason, bool pushStack,
+                             void (*prepare)());
 
 // Slug <-> enum helpers (canonical CLI slugs; used by CLI, boot defaults, and Web selects).
 // modeFromSlug returns (OLEDMode)-1 for unknown slugs.
@@ -410,7 +382,6 @@ bool initOLEDDisplay();
 void stopOLEDDisplay();
 void updateOLEDDisplay();
 void displayAnimation();
-void displayConnectedSensors();
 
 // ============================================================================
 // OLED Change Detection - Skip rendering when nothing has changed
@@ -455,15 +426,11 @@ void displayPowerSleep();
 //   OLED_MESH_STATUS, OLED_WEB_STATS, OLED_ESPNOW, OLED_REMOTE_SENSORS
 
 // System mode functions (OLED_Mode_System.cpp)
-void displaySystemStatus();
-void displayMemoryStats();
-void displayWebStats();
 void displayCustomText();
 void displayUnavailable();
 
 // Sensor mode functions (OLED_Mode_Sensors.cpp)
 void displaySensorData();
-void displayConnectedSensors();
 // displayIMUActions() - moved to i2csensor_bno055.cpp (modular OLED mode)
 // displayFmRadio() - moved to fm_radio.cpp (modular OLED mode)
 void displayFileBrowser();
@@ -503,7 +470,6 @@ void oledFileBrowserUp();
 void oledFileBrowserDown();
 void oledFileBrowserSelect();
 void oledFileBrowserBack();
-void resetOLEDFileBrowser();
 
 // ============================================================================
 // File picker — modal callback layer over OLED_Mode_FileBrowser

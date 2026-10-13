@@ -13,10 +13,12 @@ The cases check that the remote screen lists only the peer's schema rows that
 carry a setter (cmdKey), sends `remote:<cmdKey> <value>`, reports the peer's
 CMD_RESP failure or silence instead of the local "sent" result, never runs a
 local setter, fetches a missing schema once without blocking, and releases
-everything it allocated. A static check confirms the CMD_RESP drain publishes
-the record. `--component <dir>` runs the same cases against saved sources (the
-base `remote:set <jsonKey>` editor fails them). The radio link and the real
-display are not exercised.
+everything it allocated; on the local screen a refused slider/pick-list (INT)
+save shows the executor's reply on the editor line like the STRING path. A
+static check confirms the CMD_RESP drain publishes the record. `--component
+<dir>` runs the same cases against saved sources (the base `remote:set
+<jsonKey>` editor fails them). The radio link and the real display are not
+exercised.
 """
 from __future__ import annotations
 
@@ -139,15 +141,20 @@ EDITOR_FUNCTIONS = (
      "static const SettingsModule** editorModules(size_t& n) { return getSettingsModules(n); }  // stand-in"),
     ("static bool commitRemoteSettingValue(", ""),
     ("static void editorDropForeignModule(", "static void editorDropForeignModule() {}  // stand-in"),
-    ("void setSettingValue(", None),
+    # The INT twin calls the STRING commit, so the STRING commit comes first.
+    # setSettingValue returns bool (void on older trees).
     ("static bool setSettingValueStr(", None),
+    (("bool setSettingValue(", "void setSettingValue("), None),
 )
 
 
 def editor(read) -> str:
     source = read("OLED_SettingsEditor.cpp")
     parts = []
-    for marker, standin in EDITOR_FUNCTIONS:
+    for markers, standin in EDITOR_FUNCTIONS:
+        if isinstance(markers, str):
+            markers = (markers,)
+        marker = next((m for m in markers if m in source), markers[0])
         if marker in source:
             require(source.count(marker) == 1, f"OLED_SettingsEditor.cpp: marker not unique: {marker}")
             parts.append(extract_block(source, marker))

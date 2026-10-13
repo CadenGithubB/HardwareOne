@@ -75,7 +75,11 @@ static constexpr size_t gSettingsModuleCount = sizeof(gSettingsModules) / sizeof
 static bool compiledOut() { return false; }
 // An owner that keeps runtime state beside its permission flag (Automations).
 #define ENABLE_AUTOMATION 1
-static struct { bool automationEnabled = false; } gSettings;
+static struct {
+  bool automationEnabled = false;
+  bool oledEnabled = false;  // `oledenabled` (dedicated command, OLED builds)
+  String oledDefaultMode = "status";
+} gSettings;
 static std::vector<bool> ownerToggles;
 static const char* ownerToggleError = nullptr;
 [[maybe_unused]] static const char* automationSetSystemEnabled(bool enable) {
@@ -157,6 +161,34 @@ static bool writeSettingsJson() {
   return writerSucceeds;
 }
 // INSERT_PRODUCTION
+
+#if ENABLE_OLED_DISPLAY
+// Display boundaries of the dedicated `oledenabled` command (OLED_Utils.cpp).
+// The enum has a fixed underlying type because the command compares
+// modeFromSlug()'s (OLEDMode)-1 "unknown slug" result.
+enum OLEDMode : int { OLED_OFF, OLED_SYSTEM_STATUS, OLED_MENU };
+static OLEDMode currentOLEDMode = OLED_OFF;
+static bool oledConnected, gOledRunning, oledInitSucceeds;
+static char debugBuffer[1024];
+static bool ensureDebugBuffer() { return true; }
+static char* getDebugBuffer() { return debugBuffer; }
+static bool initOLEDDisplay() {
+  effectOrder.emplace_back("display init");
+  return oledInitSucceeds;
+}
+static void stopOLEDDisplay() { effectOrder.emplace_back("display stop"); }
+static void updateOLEDDisplay() { effectOrder.emplace_back("display update"); }
+static void broadcastOutput(const char* text) { effectOrder.emplace_back(std::string("output: ") + text); }
+static OLEDMode modeFromSlug(const String& slug) {
+  return slug == "status" ? OLED_SYSTEM_STATUS : slug == "menu" ? OLED_MENU : (OLEDMode)-1;
+}
+static void requestOLEDMode(OLEDMode mode, const char*, bool) {
+  currentOLEDMode = mode;
+  effectOrder.emplace_back("display mode");
+}
+static void debugOLEDModeChange(const char*, OLEDMode, OLEDMode, const String&) {}
+// INSERT_OLED_COMMAND
+#endif
 
 static unsigned checks, failures;
 static std::string context;
@@ -423,9 +455,71 @@ static void persistenceBoundaries() {
   }
 }
 
+#if ENABLE_OLED_DISPLAY
+// `oledenabled` keeps its own live actions (start, default mode, full teardown)
+// but reads the same tokens as the generic boolean path and refuses anything
+// else before it persists or touches the panel.
+static void prepareOled(const char* input, bool enabled, bool connected, bool running) {
+  reset();
+  gSettings.oledEnabled = enabled;
+  oledConnected = connected; gOledRunning = running; oledInitSucceeds = true;
+  currentOLEDMode = OLED_OFF;
+  context = std::string("oledenabled '") + input + "' from " + (enabled ? "enabled" : "disabled");
+}
+
+static void oledEnabledCommand() {
+  using Effects = std::vector<std::string>;
+  const std::string usage = "Error: invalid arguments — Usage: oledenabled <0|1>";
+  const std::string enabledReply = "OLED display enabled (mode: status)";
+  for (const char* input : {"1", "true", "TRUE", "on", "enable", " On "}) {
+    prepareOled(input, true, true, true);
+    check(cmd_oled_enabled(input) == enabledReply, "true alias did not report the display enabled");
+    check(gSettings.oledEnabled && gOledRunning && writeCalls == 0, "true alias disabled or persisted the display");
+    check(effectOrder == Effects{"display mode", "display update"}, "true alias stopped the panel");
+    prepareOled(input, false, false, false);
+    check(cmd_oled_enabled(input) == enabledReply && gSettings.oledEnabled, "true alias did not enable");
+    check(effectOrder == Effects{"persist", "display init", "output: OLED display started",
+                                 "display mode", "display update"},
+          "enable lost persist/start/default-mode order");
+  }
+  for (const char* input : {"0", "false", "FALSE", "off", "disable", " OFF "}) {
+    prepareOled(input, true, true, true);
+    check(cmd_oled_enabled(input) == std::string("OLED display disabled"), "false alias reply changed");
+    check(!gSettings.oledEnabled && !gOledRunning, "false alias left the display enabled");
+    check(effectOrder == Effects{"persist", "display stop"}, "disable lost persist/full teardown");
+  }
+  for (const char* input : {"foo", "10", "truex", "1x", "onn", "yes", "-1", "on extra", "", "   "}) {
+    for (bool enabled : {true, false}) {
+      prepareOled(input, enabled, true, enabled);
+      check(cmd_oled_enabled(input) == usage, "unknown or missing token was not refused");
+      check(gSettings.oledEnabled == enabled && gOledRunning == enabled,
+            "unknown token changed the display state");
+      check(effectOrder.empty() && writeCalls == 0, "unknown token persisted or touched the panel");
+    }
+  }
+  prepareOled("1", false, false, false); oledInitSucceeds = false;
+  check(cmd_oled_enabled("1") == std::string("ERROR"), "init failure reply changed");
+  check(effectOrder == Effects{"persist", "display init",
+                               "output: Failed to initialize OLED display. Check wiring."},
+        "init failure lost persist/report order");
+  prepareOled("1", false, true, false);
+  check(cmd_oled_enabled("1") == enabledReply && gOledRunning && currentOLEDMode == OLED_SYSTEM_STATUS,
+        "connected panel did not resume in the default mode");
+  check(effectOrder == Effects{"persist", "display mode", "display update"}, "resume effects changed");
+  for (const char* input : {"on", "foo"}) {
+    prepareOled(input, true, true, true); gCLIValidateOnly = true;
+    check(cmd_oled_enabled(input) == std::string("VALID") && effectOrder.empty() && writeCalls == 0,
+          "validation-only contract changed");
+  }
+}
+#endif
+
 int main() {
   numericValues(); booleanAndStopPolicy(); stringsPrivacyAndPreflight();
   featureCommands(); persistenceBoundaries();
+#if ENABLE_OLED_DISPLAY
+  oledEnabledCommand();
+#endif
   std::printf("settings mutation (oled=%d): %u checks, %u failures\n", ENABLE_OLED_DISPLAY, checks, failures);
   return failures ? 1 : 0;
 }

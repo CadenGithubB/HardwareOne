@@ -606,9 +606,29 @@ static void case_editor_commits_local_otherwise() {
   resetWorld();
   loadRemoteSettingsModules();
   currentOLEDMode = OLED_SETTINGS;
+  gExecText = "OK: oledBrightness = 5";
   setSettingValue(&kLocalOledEntries[0], 5);
-  EXPECT(commandsAre(gLocal, {"oledbrightness 5"}) && gWithResult.empty(),
-         "the local Settings screen keeps its local setter");
+  EXPECT(commandsAre(gWithResult, {"oledbrightness 5"}) && gLocal.empty(),
+         "the local Settings screen runs its local setter through the checked executor, ran: " +
+             joined(gWithResult) + " / fire-and-forget: " + joined(gLocal));
+  EXPECT(gSettingsEditor.errorMessage.length() == 0, "an accepted local save shows no error");
+}
+
+// The slider (INT/BOOL) and INT pick-list commit through setSettingValue: a
+// refused local save shows the executor's reply on the editor line like the
+// STRING path instead of vanishing into the log.
+static void case_editor_local_int_refusal_shown() {
+  gCase = "editor_local_int_refusal_shown";
+  resetWorld();
+  currentOLEDMode = OLED_SETTINGS;
+  gExecOk = false;
+  gExecText = "Error: Admin access required for command 'oledbrightness'. Contact an administrator.";
+  setSettingValue(&kLocalOledEntries[0], 5);
+  EXPECT(std::string(gSettingsEditor.errorMessage.c_str()) == gExecText &&
+             gSettingsEditor.errorDisplayUntil > gNowMs,
+         "a refused slider/pick-list save shows the executor's reply on the editor line, shown: '" +
+             std::string(gSettingsEditor.errorMessage.c_str()) + "'");
+  EXPECT(gLocal.empty(), "the INT save does not use the fire-and-forget executor, ran: " + joined(gLocal));
 }
 
 static void case_editor_module_source_follows_mode() {
@@ -778,6 +798,7 @@ int main() {
   case_load_step_fetches_schema_once();
   case_editor_commits_remote_in_remote_mode();
   case_editor_commits_local_otherwise();
+  case_editor_local_int_refusal_shown();
   case_editor_module_source_follows_mode();
   case_editor_drops_foreign_module();
   case_policy_matches_web_table();

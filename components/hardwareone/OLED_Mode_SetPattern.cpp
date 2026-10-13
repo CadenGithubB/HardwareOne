@@ -52,7 +52,7 @@ void oledSetPatternModeResetSessionState() {
 
 static void startPatternKeyboard(const char* title) {
   oledKeyboardInit(title, nullptr, OLED_KEYBOARD_MAX_LENGTH,
-                   OLEDKeyboardDictationPolicy::DENY);
+                   OLEDKeyboardDictationPolicy::DENY, /*masked=*/true);
   // Force pattern mode as default for this flow
   gOledKeyboardState.mode = KEYBOARD_MODE_PATTERN;
   sKeyboardActive = true;
@@ -60,7 +60,7 @@ static void startPatternKeyboard(const char* title) {
 
 static void startTextKeyboard(const char* title) {
   oledKeyboardInit(title, nullptr, OLED_KEYBOARD_MAX_LENGTH,
-                   OLEDKeyboardDictationPolicy::DENY);
+                   OLEDKeyboardDictationPolicy::DENY, /*masked=*/true);
   // Use lowercase mode for text password entry
   gOledKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;
   sKeyboardActive = true;
@@ -340,6 +340,13 @@ static bool isSetPatternAvailable(String* outReason) {
 // CLI command: setpattern — triggers the OLED flow
 // ============================================================================
 
+// Restarts the flow at its first step. Runs on the OLED owner task, which also
+// runs the input handler that reads this state.
+static void setPatternRestartFromCommand() {
+  sStep = PATTERN_STEP_AUTH_CHECK;
+  secureClearString(sFirstPattern);
+}
+
 static const char* cmd_setpattern(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -347,9 +354,9 @@ static const char* cmd_setpattern(const String& argsInput) {
     return "Error: Log in on OLED first (login <user> <pass> display)";
   }
 
-  sStep = PATTERN_STEP_AUTH_CHECK;
-  secureClearString(sFirstPattern);
-  requestOLEDMode(OLED_SET_PATTERN, "cmd.setpattern", true);
+  // The owner restarts the flow and opens the page at its next frame.
+  requestOLEDModePrepared(OLED_SET_PATTERN, "cmd.setpattern", true,
+                          setPatternRestartFromCommand);
   return "Opening gamepad password setup on OLED...";
 }
 

@@ -11,6 +11,13 @@ action and toggle direction of the row the lens showed, even when the live
 state behind the labels changed in between. Each of its cases runs in its own
 process; the ENABLE_ESPNOW / ENABLE_HTTP_SERVER / ENABLE_WIFI off variants are
 compile-checked.
+
+A third unit compiles the Add-WiFi forms: the OLED keyboard flow (manual Add and
+scan pick, with OLED_Utils.cpp's shared reply-to-toast mapping) and the G2
+join-a-scanned-AP flow. A double-quote or control character in the typed
+password or a scanned SSID must be refused before the quoted `wifiadd` line is
+built, with a visible message, and the owner's reply must reach the OLED toast /
+G2 lens.
 """
 
 import argparse
@@ -36,6 +43,16 @@ NETWORK_ROW_FUNCTIONS = (
     "bluetoothToggleAutoStart", "handleBluetoothG2Tap", "handleBluetoothR1Tap",
     "handleBluetoothTap", "showHttpMenu", "handleHttpTap",
 )
+# Add-WiFi form functions; the helpers exist only on fixed trees, so a base tree
+# still compiles and fails on behavior. Spliced in source order.
+OLED_ADD_FUNCTIONS = ("startWifiAddSSID", "startWifiAddPass", "wifiAddReset",
+                      "startWifiAddFromScan", "wifiAddKeyboardTick")
+OLED_ADD_HELPERS = ("wifiAddFieldRefusal",)
+# The shared reply-to-toast mapping the OLED flow toasts the owner's reply with.
+OLED_REPLY_TEXT = "void oledCommandReplyText("
+G2_ADD_FUNCTIONS = ("showWifiAddMsg", "onWifiAddDone", "wifiAddSubmit",
+                    "wifiAddPassCommit", "wifiAddPassCancel", "handleWiFiScanTap")
+G2_ADD_HELPERS = ("wifiAddTextQuotable", "showWifiAddRefusal")
 DISABLED_VARIANTS = (
     ["-DENABLE_ESPNOW=0"],
     ["-DENABLE_HTTP_SERVER=0"],
@@ -61,18 +78,34 @@ def region(source, begin, end):
     return source[start:source.index(end, start)]
 
 
-def definition(source, name):
+def definition_match(source, name):
+    """First definition of `name` (forward declarations skipped), or None."""
     pattern = r"(?m)^(?:static[ \t]+)?[A-Za-z_][\w:<>* \t&]*?\b" + re.escape(name) + r"\("
     for match in re.finditer(pattern, source):
         brace = source.find("{", match.end())
         semicolon = source.find(";", match.end())
         if brace != -1 and (semicolon == -1 or brace < semicolon):
-            return extract_block(source[match.start():], match.group(0))
-    raise AssertionError(f"production definition not found: {name}")
+            return match
+    return None
 
 
-def network_rows_unit(component):
-    page = (component / "G2_Page_Network.cpp").read_text()
+def definition(source, name):
+    match = definition_match(source, name)
+    if match is None:
+        raise AssertionError(f"production definition not found: {name}")
+    return extract_block(source[match.start():], match.group(0))
+
+
+def definitions_in_order(source, required, optional=()):
+    """Required and present optional definitions, spliced in source order."""
+    blocks = {name: definition(source, name) for name in required}
+    blocks.update((name, definition(source, name)) for name in optional
+                  if definition_match(source, name))
+    order = sorted(blocks, key=lambda name: definition_match(source, name).start())
+    return "\n\n".join(blocks[name] for name in order)
+
+
+def g2_bridge_types(component):
     glasses = (component / "G2_Glasses.h").read_text()
     bridge = (component / "G2_HijackCmd.h").read_text()
     entry = (component / "G2_Page_TextEntry.h").read_text()
@@ -83,6 +116,12 @@ def network_rows_unit(component):
     ] + [statement(entry, f"typedef void (*TextEntry{kind}Fn)")
          for kind in ("Commit", "Cancel", "Abandon")]
     types.append(extract_block(entry, "struct TextEntryConfig") + ";")
+    return types
+
+
+def network_rows_unit(component):
+    page = (component / "G2_Page_Network.cpp").read_text()
+    types = g2_bridge_types(component)
     # Local state (sub-mode, overlays, row bindings) and WiFi's action enum.
     state = (region(page, "enum NetworkSubMode", "// Info text") + "\n" +
              region(page, "enum WifiMenuAction", "static void showWiFiMenu() {"))
@@ -123,6 +162,45 @@ def run_network_rows(args, component, temp, flags):
         raise SystemExit(f"G2 Network row bindings: {len(failed)} failed: {', '.join(failed)}")
     print(f"G2 Network row bindings: {len(cases)} cases and "
           f"{len(DISABLED_VARIANTS)} disabled-feature builds passed")
+
+
+def add_form_unit(component):
+    oled = (component / "OLED_Mode_Network.cpp").read_text()
+    page = (component / "G2_Page_Network.cpp").read_text()
+    utils = (component / "OLED_Utils.cpp").read_text()
+    inserts = (
+        ("// INSERT_OLED_REPLY_TEXT",
+         extract_block(utils, OLED_REPLY_TEXT) if OLED_REPLY_TEXT in utils else ""),
+        ("// INSERT_OLED_STATE", extract_block(oled, "enum WifiAddStep") + ";\n" + declarations(oled, [
+            "sWifiAddStep", "sWifiKeyboardActive", "sWifiAddConnectAfter",
+            "sWifiAddSSID", "sWifiAddPass", "sWifiAddEpoch"])),
+        ("// INSERT_OLED_FUNCTIONS", definitions_in_order(oled, OLED_ADD_FUNCTIONS, OLED_ADD_HELPERS)),
+        ("// INSERT_G2_TYPES", "\n".join(g2_bridge_types(component) + [
+            extract_block(page, "enum NetworkSubMode") + ";",
+            extract_block(page, "struct CachedAp") + ";"])),
+        ("// INSERT_G2_STATE", declarations(page, [
+            "gNetSub", "gScanCache", "gScanCacheCount", "sWifiAddSsid", "sWifiAddMsg"])),
+        ("// INSERT_G2_FUNCTIONS", definitions_in_order(page, G2_ADD_FUNCTIONS, G2_ADD_HELPERS)),
+    )
+    harness = (HERE / "wifi_add_form_harness.cpp").read_text()
+    for marker, body in inserts:
+        assert harness.count(marker) == 1, f"missing/duplicate marker: {marker}"
+        harness = harness.replace(marker, body)
+    return harness
+
+
+def run_add_form(args, component, temp, flags):
+    unit = Path(temp) / "add_form.cpp"
+    unit.write_text(add_form_unit(component))
+    executable = Path(temp) / "add_form"
+    subprocess.run([args.cxx, *flags, str(unit), "-o", str(executable)],
+                   check=True, timeout=120)
+    run = subprocess.run([str(executable)], timeout=60, capture_output=True, text=True)
+    sys.stdout.write(run.stdout)
+    sys.stdout.write(run.stderr)
+    sys.stdout.flush()
+    if run.returncode != 0:
+        raise SystemExit("Add-WiFi forms: FAILED")
 
 
 def main():
@@ -191,7 +269,15 @@ def main():
                  "-Wno-unused-function", "-Wno-unused-variable"]
         if args.sanitize:
             flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
-        run_network_rows(args, component, temp, flags)
+        # Both units always run, so a tree that fails one still reports the other.
+        failures = []
+        for unit in (run_network_rows, run_add_form):
+            try:
+                unit(args, component, temp, flags)
+            except SystemExit as failure:
+                failures.append(str(failure))
+        if failures:
+            raise SystemExit("; ".join(failures))
 
 
 if __name__ == "__main__":

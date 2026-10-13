@@ -480,35 +480,4 @@ RemoteSettingsOutcome remoteSettingsPollOutcome(String& textOut) {
   return REMOTE_OUTCOME_PENDING;
 }
 
-/**
- * Check if remote settings are available
- */
-bool hasRemoteSettings() {
-  DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] bondModeEnabled=%d peerMacLen=%d",
-                gSettings.bondModeEnabled ? 1 : 0, gSettings.bondPeerMac.length());
-  if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() < 12) {
-    DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] EXIT: bond mode disabled or MAC too short");
-    return false;
-  }
-  
-  // Check if settings cache exists
-  uint8_t peerMac[6];
-  macParse(gSettings.bondPeerMac.c_str(), peerMac);  // canonical parser (System_Utils.h)
-  
-  char macStr[13];
-  macToPathToken(peerMac, macStr);  // canonical PATH TOKEN form (System_Utils.h)
-
-  char filePathBuf[64];
-  snprintf(filePathBuf, sizeof(filePathBuf), "/system/espnow/peers/%s/settings.json", macStr);
-  String filePath = filePathBuf;
-  DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] Checking path: %s", filePath.c_str());
-  
-  extern bool filesystemReady;
-  // trusted: cached remote-device settings manifest read for OLED rendering.
-  bool exists = filesystemReady && VFS::existsGuarded(filePath, VFS::systemAuth("oled.remote_settings.read"));
-  DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] fsReady=%d exists=%d -> returning %d",
-                filesystemReady ? 1 : 0, exists ? 1 : 0, exists ? 1 : 0);
-  return exists;
-}
-
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE

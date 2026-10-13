@@ -741,6 +741,153 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_file_kind.py
           ${FILE_KIND_TEST_ARGS})
+
+# Login policy ownership (README "Display login policy ownership"): every settings row and
+# command that writes serial/UART/display RequireAuth is super-admin, one row per policy.
+set(DISPLAY_AUTH_POLICY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND DISPLAY_AUTH_POLICY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME display_auth_policy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_display_auth_policy.py
+          ${DISPLAY_AUTH_POLICY_TEST_ARGS})
+# settings_mutation is already registered; its extension needs no new snippet.
+
+# OLED session role (README "OLED session role cache"): the launcher, guest gate and Users
+# row read users.json at most once per session and identity generation, fail closed.
+set(OLED_SESSION_ROLE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_SESSION_ROLE_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_session_role
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_session_role.py
+          ${OLED_SESSION_ROLE_TEST_ARGS})
+
+set(OLED_OWNER_REQUESTS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_OWNER_REQUESTS_TEST_ARGS --sanitize)
+endif()
+add_test(NAME oled_owner_requests
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_owner_requests.py
+    ${OLED_OWNER_REQUESTS_TEST_ARGS})
+
+# OLED mode availability (README "OLED mode availability"): getMenuAvailability and the
+# production mode registry with the real availFuncs of CLI Input, Gamepad PW, Logout,
+# Actions, GPS and thermal.
+set(OLED_MODE_AVAILABILITY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_MODE_AVAILABILITY_TEST_ARGS --sanitize)
+endif()
+add_test(NAME oled_mode_availability
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_mode_availability.py
+    ${OLED_MODE_AVAILABILITY_TEST_ARGS})
+
+# Dead OLED code paths (README "Dead OLED code paths"): a source contract over the
+# component, plus the production OLED mode slug functions.
+set(OLED_DEAD_PATHS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_DEAD_PATHS_TEST_ARGS --sanitize)
+endif()
+add_test(NAME oled_dead_paths
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_dead_paths.py
+    ${OLED_DEAD_PATHS_TEST_ARGS})
+
+# OLED action feedback (README "OLED action feedback"): a refused OLED action toasts the
+# command's reply; success texts only on success; no dropped replies on the listed screens.
+set(OLED_COMMAND_FEEDBACK_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_COMMAND_FEEDBACK_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_command_feedback
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_command_feedback.py
+          ${OLED_COMMAND_FEEDBACK_TEST_ARGS})
+
+# OLED Power Saving row (README "OLED Power Saving row"): the row submits the admin-only
+# powersave command; no OLED_Mode_*.cpp writes settings directly.
+set(OLED_POWER_SETTINGS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_POWER_SETTINGS_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_power_settings
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_power_settings.py
+          ${OLED_POWER_SETTINGS_TEST_ARGS})
+
+# OLED automation wizard (README "OLED automation wizard"): names and commands up to the
+# keyboard cap reach automationadd whole; the confirm screen shows the whole command.
+set(OLED_AUTOMATION_WIZARD_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_AUTOMATION_WIZARD_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_automation_wizard
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_automation_wizard.py
+          ${OLED_AUTOMATION_WIZARD_TEST_ARGS})
+
+# OLED keyboard masking and dictation delivery (README "OLED keyboard masking and dictation UI"):
+# shared OLED/G2 dictation delivery, and a masked (secret) keyboard field never shows its text.
+set(DICTATION_UI_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND DICTATION_UI_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME dictation_ui
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_dictation_ui.py
+          ${DICTATION_UI_TEST_ARGS})
+
+# OLED pair-request prompt (README "OLED pair-request prompt"): the dialog opens once per
+# request, only for a logged-in admin off the Login screen, and names the shown sender.
+set(OLED_PAIR_PROMPT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_PAIR_PROMPT_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_pair_prompt
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_pair_prompt.py
+          ${OLED_PAIR_PROMPT_TEST_ARGS})
+
+# OLED list navigation (README "OLED list navigation"): Automations and Files move one row per
+# nav event; the settings editor's scroll windows are per module.
+set(OLED_LIST_NAV_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_LIST_NAV_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_list_nav
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_list_nav.py
+          ${OLED_LIST_NAV_TEST_ARGS})
+# test_sensorlog_ui.py is already registered (sensorlog_ui); its extension needs no snippet.
+
+set(OLED_MAP_ACTIONS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_MAP_ACTIONS_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_map_actions
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_map_actions.py
+          ${OLED_MAP_ACTIONS_TEST_ARGS})
+
+set(OLED_MAP_CONTEXT_BAR_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_MAP_CONTEXT_BAR_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_map_context_bar
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_map_context_bar.py
+          ${OLED_MAP_CONTEXT_BAR_TEST_ARGS})
 add_test(NAME p4eye_display_pixels COMMAND p4eye_display_pixels_tests)
 add_test(NAME p4eye_display_lifecycle COMMAND p4eye_display_lifecycle_tests)
 add_test(NAME rotary_core

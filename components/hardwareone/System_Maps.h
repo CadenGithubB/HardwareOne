@@ -819,7 +819,13 @@ public:
   static bool loadWaypoints();
   static bool saveWaypoints();
   
-  // Add waypoint at position (uses first empty slot)
+  // addWaypoint result when the waypoints file could not be written (no map
+  // loaded, its waypoint file unreadable, or the write refused/failed).
+  static constexpr int kNotSaved = -2;
+
+  // Add waypoint at position (uses first empty slot). Returns the slot index,
+  // -1 when no slot is free, or kNotSaved when the write failed; a waypoint
+  // that was not saved is removed again, so memory matches the file.
   static int addWaypoint(float lat, float lon, const char* name);
   static int addWaypoint(float lat, float lon, const char* name, const char* notes);
 
@@ -839,7 +845,8 @@ public:
   // Clear all waypoints
   static bool clearAll();
   
-  // Delete waypoint by index
+  // Delete waypoint by index. False for an empty/invalid index, or when the
+  // write failed (the waypoint and navigation target are then kept).
   static bool deleteWaypoint(int index);
   
   // Get waypoint by index

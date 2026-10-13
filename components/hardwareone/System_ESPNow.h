@@ -1338,7 +1338,9 @@ void espnowNoteWifiChannelMayHaveChanged();
 // Discover-then-confirm pairing — read accessors for the OLED/G2/web UI.
 int  espnowGetPairCandidateCount();                                              // pruned live count
 bool espnowGetPairCandidate(int idx, char* name, size_t nameCap, uint8_t mac[6], int* rssi);
-bool espnowGetIncomingPairRequest(char* name, size_t nameCap);                   // pending accept/reject
+// Pending accept/reject; optional `mac` (6 bytes) + `atMs` identify the request.
+bool espnowGetIncomingPairRequest(char* name, size_t nameCap,
+                                  uint8_t* mac = nullptr, uint32_t* atMs = nullptr);
 bool startEspNowTask();        // Start ESP-NOW heartbeat task
 // Cooperatively stop and join the heartbeat/RX task. On timeout the task and
 // its resources remain intact so closeespnow can retry safely.

@@ -75,7 +75,8 @@ static void drawLoggingMenuItem(int y, const char* text, bool selected, bool ena
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 }
 
-// (logging commands use executeOLEDCommand from OLED_Utils.h)
+// (logging commands run through oledRunCommand from OLED_Utils.h, which
+// toasts a refusal; the rows show the new state on success)
 
 // Logging display function
 static void displayLoggingMode() {
@@ -153,18 +154,10 @@ static void displayLoggingMode() {
       }
       loggingConfigScroll.selectedIndex = savedSel;
       loggingConfigScroll.scrollOffset = savedOff;
-      
-      oledScrollRender(oledDisplay, &loggingConfigScroll, true, true);
-      break;
-    }
-    
-    case LOG_MENU_VIEWER: {
-      oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-      oledDisplay->print("Not implemented");
-      oledDisplay->setCursor(0, OLED_CONTENT_START_Y + 12);
-      oledDisplay->print("Use CLI viewer");
-      oledDisplay->setCursor(0, OLED_CONTENT_START_Y + 24);
-      oledDisplay->print("or web interface");
+
+      // Shared single-line list: "> " cursor, scrollbar on the right edge
+      // while rows are hidden.
+      oledScrollRenderSimple(oledDisplay, &loggingConfigScroll);
       break;
     }
   }
@@ -215,26 +208,26 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
     } else if (loggingCurrentState == LOG_MENU_SENSOR) {
       if (loggingMenuSelection == 0 && !gSensorLoggingRunning) {
         String startCmd = String("sensorlog start \"") + gSettings.sensorLogPath + "\"";
-        executeOLEDCommand(startCmd);
+        oledRunCommand(startCmd);
       } else if (loggingMenuSelection == 1 && gSensorLoggingRunning) {
-        executeOLEDCommand("sensorlog stop");
+        oledRunCommand("sensorlog stop");
       } else if (loggingMenuSelection == 2) {
         loggingCurrentState = LOG_MENU_SENSOR_CONFIG;
         loggingSensorConfigSelection = 0;
-        oledScrollInit(&loggingConfigScroll, nullptr, 4);
-        oledScrollSetSplitPane(&loggingConfigScroll, 128, 0, 0);
+        // One 8 px row per entry, as many as the content area holds.
+        oledScrollInit(&loggingConfigScroll, nullptr, OLED_CONTENT_HEIGHT / 8);
       }
     } else if (loggingCurrentState == LOG_MENU_SYSTEM) {
       if (loggingMenuSelection == 0 && !gSystemLogRunning) {
-        executeOLEDCommand("log start");
+        oledRunCommand("log start");
       } else if (loggingMenuSelection == 1 && gSystemLogRunning) {
-        executeOLEDCommand("log stop");
+        oledRunCommand("log stop");
       }
     } else if (loggingCurrentState == LOG_MENU_SENSOR_CONFIG) {
       if (loggingSensorConfigSelection >= 0 &&
           loggingSensorConfigSelection < loggingIntervalRow) {
-        executeOLEDCommand(String("sensorlog sensors toggle ") +
-                           kSensorLogSensors[loggingSensorConfigSelection].name);
+        oledRunCommand(String("sensorlog sensors toggle ") +
+                       kSensorLogSensors[loggingSensorConfigSelection].name);
       } else if (loggingSensorConfigSelection == loggingIntervalRow) {
         uint32_t newInterval;
         const uint32_t interval = sensorLogIntervalMs();
@@ -243,14 +236,14 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
         else if (interval == 10000) newInterval = 30000;
         else if (interval == 30000) newInterval = 60000;
         else newInterval = 1000;
-        executeOLEDCommand("sensorlog interval " + String(newInterval));
+        oledRunCommand("sensorlog interval " + String(newInterval));
       } else if (loggingSensorConfigSelection == loggingFormatRow) {
         const char* newFmt;
         const SensorLogFormat format = sensorLogCurrentFormat();
         if (format == SENSOR_LOG_TEXT) newFmt = "csv";
         else if (format == SENSOR_LOG_CSV) newFmt = "track";
         else newFmt = "text";
-        executeOLEDCommand(String("sensorlog format ") + newFmt);
+        oledRunCommand(String("sensorlog format ") + newFmt);
       } else if (loggingSensorConfigSelection == loggingBackRow) {
         loggingCurrentState = LOG_MENU_SENSOR;
         loggingMenuSelection = 2;
