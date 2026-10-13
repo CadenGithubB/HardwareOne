@@ -8,6 +8,7 @@
 #include <string>
 #include <atomic>
 #include <new>
+#include <unordered_map>
 
 // Arduino declares this global type; the HTTP SSE parser must stay qualified.
 class Stream {};
@@ -43,15 +44,40 @@ static void vTaskDelete(void*) {}
 enum class AllocPref { PreferPSRAM };
 static size_t allocations = 0;
 static bool failConfigAllocation = false;
-static void* ps_alloc(size_t n, AllocPref, const char*) { ++allocations; return malloc(n); }
+static std::unordered_map<void*, size_t> sensitiveAllocations;
+static size_t wipedAllocations = 0;
+static void mbedtls_platform_zeroize(void* p, size_t n) {
+  auto* bytes = static_cast<volatile unsigned char*>(p);
+  while (n--) *bytes++ = 0;
+}
+static void* ps_alloc(size_t n, AllocPref, const char* tag) {
+  ++allocations;
+  void* p = malloc(n);
+  if (p && !strcmp(tag, "llm.http.body")) sensitiveAllocations[p] = n;
+  return p;
+}
 static void* ps_calloc(size_t n, size_t s, AllocPref, const char* tag) {
   if (failConfigAllocation && !strcmp(tag, "llm.http.config")) {
     failConfigAllocation = false; return nullptr;
   }
-  ++allocations; return calloc(n, s);
+  ++allocations;
+  void* p = calloc(n, s);
+  if (p && (!strcmp(tag, "llm.http.config") || !strcmp(tag, "llm.http.run")))
+    sensitiveAllocations[p] = n * s;
+  return p;
 }
 static void* ps_realloc(void* p, size_t n, AllocPref, const char*) { return realloc(p, n); }
-static void ps_free(void* p) { if (p) { --allocations; free(p); } }
+static void ps_free(void* p) {
+  if (!p) return;
+  const auto found = sensitiveAllocations.find(p);
+  if (found != sensitiveAllocations.end()) {
+    const auto* bytes = static_cast<const unsigned char*>(p);
+    for (size_t i = 0; i < found->second; ++i) assert(bytes[i] == 0);
+    sensitiveAllocations.erase(found);
+    ++wipedAllocations;
+  }
+  --allocations; free(p);
+}
 static void esp_fill_random(void* p, size_t n) {
   static uint8_t x = 0; auto* b = static_cast<uint8_t*>(p);
   while (n--) *b++ = ++x;
@@ -236,5 +262,6 @@ int main() {
   assert(httpLlmStartAsync("allocation publication failure", {})); drainWorker();
   assert(shuts == 1 && response().find("configuration could not be applied") != std::string::npos);
   assert(!httpLlmIsReady() && !httpLlmStartAsync("old config remains barred", {}));
+  assert(wipedAllocations > 0 && sensitiveAllocations.empty() && allocations == 0);
   std::cout << "HTTP worker lifecycle tests passed\n";
 }
