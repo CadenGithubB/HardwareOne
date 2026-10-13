@@ -29,6 +29,10 @@
 #include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_VFS.h"
+#if ENABLE_LLM_SOURCE_HTTP
+#include "System_LLMHttp.h"
+#include "System_Utils.h"  // RETURN_VALID_IF_VALIDATE_CSTR
+#endif
 
 #if ENABLE_LLM_SOURCE_ONBOARD
   #include "System_LLM.h"
@@ -151,6 +155,8 @@ static const char* cmd_llm_status(const String& argsInput) {
     ctxWarnBuf[0] = '\0';
     const bool ctxDeg = false;
 #endif
+    doc["retrySafe"] = llmBackendSupportsRetry();
+    doc["backend"] = llmBackendKindName(llmBackendActiveKind());
     doc["schema"]           = 1;
     doc["state"]       = stateStr;
     doc["model"]       = model;
@@ -489,6 +495,7 @@ static const char* cmd_llm_clear(const String&) {
 }
 
 static const char* cmd_llm_retry(const String&) {
+  if (!llmBackendSupportsRetry()) return "{\"schema\":1,\"ok\":false,\"error\":\"Retry is unavailable for this source; agent actions may already have run\"}";
   // Regenerate the last assistant reply. Thin wrapper over chatRetryLast()
   // (mirror of POST /api/llm/chat/retry): it drops the last reply, steers the
   // model away from repeating it, and kicks off a fresh async generation.
@@ -574,6 +581,14 @@ static const char* cmd_llm_turns(const String& args) {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options, isSecret, group, cmdKey
 static const SettingEntry llmSettingEntries[] = {
+#if ENABLE_LLM_SOURCE_HTTP
+  { "enabled", SETTING_BOOL, &gSettings.llmHttpEnabled, 0, 0, nullptr, 0, 1, "Enable OpenClaw HTTP", nullptr, false, "http", "llmhttpenabled" },
+  { "url", SETTING_STRING, &gSettings.llmHttpUrl, 0, 0, "", 0, 0, "Gateway base URL (including /v1)", nullptr, false, "http", "llmhttpurl" },
+  { "model", SETTING_STRING, &gSettings.llmHttpModel, 0, 0, "openclaw/default", 0, 0, "Agent target", nullptr, false, "http", "llmhttpmodel" },
+  { "token", SETTING_STRING, &gSettings.llmHttpToken, 0, 0, "", 0, 0, "Gateway token", nullptr, true, "http", "llmhttptoken" },
+  { "allowPlaintext", SETTING_BOOL, &gSettings.llmHttpAllowPlaintext, 0, 0, nullptr, 0, 1, "Allow HTTP for local testing", nullptr, false, "http", "llmhttpplaintext" },
+  { "caPem", SETTING_STRING, &gSettings.llmHttpCaPem, 0, 0, "", 0, 0, "Private CA PEM (optional)", nullptr, false, "http", "llmhttpca" },
+#endif
   { "llmEnabled", SETTING_BOOL, &gSettings.llmEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "llmenabled" },
   { "autoStart",     SETTING_BOOL,   &gSettings.llmAutoStart,     0, 0,    nullptr,    0,    1, "Auto-start at boot",   nullptr, false, nullptr, "llmautostart" },  // idx 1
   { "temperature",   SETTING_FLOAT,  &gSettings.llmTemperature,  0,   0.5f, nullptr,    0,    0, "Temperature",          nullptr, false, nullptr, "llmtemperature"   },
@@ -605,7 +620,7 @@ extern const SettingsModule llmSettingsModule = {
   "llm", "apps.llm", llmSettingEntries,
   sizeof(llmSettingEntries) / sizeof(llmSettingEntries[0]),
   nullptr,
-  "On-device LLM generation defaults"
+  "LLM sources and generation defaults"
 };
 
 // Setting command handlers — one per entry, resolved by cmdKey.
@@ -626,6 +641,56 @@ static const SettingEntry* llmSettingByCmdKey(const char* cmdKey) {
   }
   return nullptr;
 }
+
+#if ENABLE_LLM_SOURCE_HTTP
+// Called only by the settings owner after load or a serialized setting command.
+// The source copies everything; its worker never reads mutable global Strings.
+void llmHttpApplySettings() {
+  (void)httpLlmConfigure(gSettings.llmHttpEnabled,
+      gSettings.llmHttpUrl.c_str(), gSettings.llmHttpModel.c_str(),
+      gSettings.llmHttpToken.c_str(), gSettings.llmHttpAllowPlaintext,
+      gSettings.llmHttpCaPem.c_str());
+}
+#endif
+
+static const char* llmHttpSettingCommand(const char* key, const String& args,
+                                       size_t maxLen = 0, bool pem = false) {
+#if ENABLE_LLM_SOURCE_HTTP
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  const SettingEntry* entry = llmSettingByCmdKey(key);
+  if (!entry) return "Error: HTTP source setting unavailable";
+  String value = args;
+  value.trim();
+  if (pem) value.replace("\\n", "\n");
+  if (maxLen && value.length() > maxLen) return "Error: HTTP source setting is too long";
+  if (!pem) {
+    for (size_t i = 0; i < value.length(); ++i)
+      if ((unsigned char)value[i] < 32 || (unsigned char)value[i] == 127)
+        return "Error: control characters are not allowed";
+  }
+  if (!strcmp(key, "llmhttpurl") && value.length() && value != "-" &&
+      !httpLlmValidateBaseUrl(value.c_str()))
+    return "Error: use an HTTP(S) base URL ending /v1, without credentials, query, or fragment";
+  if (value == "-" && entry->type == SETTING_STRING) {
+    setSetting(*((String*)entry->valuePtr), String(), entry);
+    llmHttpApplySettings();
+    return "[Settings] Configuration cleared";
+  }
+  const char* result = handleSettingCommand(entry, value);
+  if (value.length()) llmHttpApplySettings();
+  return result;
+#else
+  (void)key; (void)args; (void)maxLen; (void)pem;
+  return "Error: HTTP LLM source is not compiled into this build";
+#endif
+}
+
+static const char* cmd_llm_httpenabled(const String& a) { return llmHttpSettingCommand("llmhttpenabled", a); }
+static const char* cmd_llm_httpurl(const String& a) { return llmHttpSettingCommand("llmhttpurl", a, 384); }
+static const char* cmd_llm_httpmodel(const String& a) { return llmHttpSettingCommand("llmhttpmodel", a, 127); }
+static const char* cmd_llm_httptoken(const String& a) { return llmHttpSettingCommand("llmhttptoken", a, 512); }
+static const char* cmd_llm_httpplaintext(const String& a) { return llmHttpSettingCommand("llmhttpplaintext", a); }
+static const char* cmd_llm_httpca(const String& a) { return llmHttpSettingCommand("llmhttpca", a, 4096, true); }
 
 #define LLM_SETTING_CMD(funcName, cmdKeyLit) \
   static const char* funcName(const String& a) { \
@@ -653,6 +718,12 @@ LLM_SETTING_CMD(cmd_llm_domaingate,    "llmdomaingate")
 LLM_SETTING_CMD(cmd_llm_profile,       "llmprofile")
 
 const CommandEntry llmCommands[] = {
+  { "llmhttpenabled", "Enable the optional HTTP agent source", true, cmd_llm_httpenabled, "Usage: llmhttpenabled <0|1>" },
+  { "llmhttpurl", "Set the agent gateway base URL", true, cmd_llm_httpurl, "Usage: llmhttpurl https://host:port/v1 (or - to clear)" },
+  { "llmhttpmodel", "Set the OpenClaw agent target", true, cmd_llm_httpmodel, "Usage: llmhttpmodel openclaw/default" },
+  { "llmhttptoken", "Set the gateway token (stored encrypted)", true, cmd_llm_httptoken, "Usage: llmhttptoken <token> (or - to clear)" },
+  { "llmhttpplaintext", "Allow plaintext HTTP for a local bench", true, cmd_llm_httpplaintext, "Usage: llmhttpplaintext <0|1>" },
+  { "llmhttpca", "Set a private CA PEM for HTTPS", true, cmd_llm_httpca, "Usage: llmhttpca <PEM with escaped newlines> (or - to use system CA bundle)" },
   { "llmstatus",        "Show LLM engine status (add 'json' for JSON output)",               false, cmd_llm_status },
   { "llmload",          "Load model [model.bin]",               true,  cmd_llm_load,         "Usage: llmload [model id] [maxctx]" },
   { "llmunload",        "Unload model and free PSRAM",          true,  cmd_llm_unload },

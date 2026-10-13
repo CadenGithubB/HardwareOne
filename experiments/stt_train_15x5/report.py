@@ -3,7 +3,7 @@
 import json
 import os
 from pathlib import Path
-STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
+STT_ROOT = Path(os.environ.get('STT_ROOT', 'stt-data'))  # data root: set STT_ROOT
 
 WORK = (STT_ROOT / 'work')
 RUN = Path(os.environ.get('RUN15X5', WORK / 'run15x5'))

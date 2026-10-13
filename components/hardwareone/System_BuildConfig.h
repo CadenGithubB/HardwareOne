@@ -333,6 +333,19 @@
 #define ENABLE_LOCAL_STT        0
 #endif
 
+// Select the pinned 15x5 gen2 acoustic model on SD instead of the default
+// 5x5 model in LittleFS. The model path and generated identity change together.
+#ifndef ENABLE_STT_MODEL_15X5_GEN2
+#define ENABLE_STT_MODEL_15X5_GEN2 0
+#endif
+
+// Local STT language-model influence: scale its probability weight, word
+// insertion score and custom-word bonus together. Preserve the checked file's
+// original weights by default. Range 0.0f..1.0f for trials; no file rewrite.
+#ifndef HW1_STT_LM_STRENGTH
+#define HW1_STT_LM_STRENGTH     1.0f
+#endif
+
 // Edge Impulse: ML inference engine.
 #define ENABLE_EDGE_IMPULSE     0
 
@@ -397,11 +410,13 @@
 //     ENABLE_LLM_SOURCE_CM5      the CM5 / Pi 5 co-processor, reached over the
 //                                authenticated UART host link. Costs almost no
 //                                flash — the model runs on the other end.
+//     ENABLE_LLM_SOURCE_HTTP     OpenClaw over a configured HTTP(S) endpoint.
+//                                Optional Wi-Fi client; no local model required.
 //
 //   Turning a source off removes it from every model picker; the feature and
-//   its remaining sources are unaffected. Master off ignores both sources.
+//   its remaining sources are unaffected. Master off requires all sources off.
 //
-//   Keep all three PLAIN LITERALS. CMakeLists regex-greps these exact lines to
+//   Keep these PLAIN LITERALS. CMakeLists regex-greps these exact lines to
 //   decide which files reach the compiler and does not evaluate the
 //   preprocessor, so nesting a source inside `#if ENABLE_LLM_BACKEND` would
 //   still be read as its literal and compile the engine with the feature off.
@@ -409,6 +424,7 @@
 #define ENABLE_LLM_BACKEND          1
 #define ENABLE_LLM_SOURCE_ONBOARD   1
 #define ENABLE_LLM_SOURCE_CM5       1
+#define ENABLE_LLM_SOURCE_HTTP      0
 
 #if ENABLE_LLM_SOURCE_ONBOARD
 // Max KV / attention context in tokens (0 = use checkpoint's seq_len only).
@@ -1345,6 +1361,9 @@
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD && (!HW_BOARD_P4X_EYE || !defined(CONFIG_IDF_TARGET_ESP32P4))
   #error "SDMMC card requires a supported board profile (currently P4X-EYE)"
 #endif
+#if ENABLE_STT_MODEL_15X5_GEN2 && (!ENABLE_LOCAL_STT || !defined(CONFIG_IDF_TARGET_ESP32P4) || !ENABLE_SD_CARD)
+  #error "ENABLE_STT_MODEL_15X5_GEN2 requires ENABLE_LOCAL_STT, ESP32-P4 and ENABLE_SD_CARD."
+#endif
 
 // =============================================================================
 // BATTERY MONITOR — derived enable + backend sanity
@@ -1585,6 +1604,18 @@
   #error "ENABLE_STT_LM decodes the local STT backend's output. Set ENABLE_LOCAL_STT 1 or ENABLE_STT_LM 0."
 #endif
 
+// Session speaker labels for the local STT backend (stt/speaker_model.h): a
+// speaker-embedding model from "/sd/STT Models/speaker.spk" labels each phrase
+// in a background task; saved transcript lines get "[Person N]". Off unless a
+// profile enables it; the build then compiles neither the speaker code nor its
+// ESP-DL kernels (CMake reads the same switch).
+#ifndef ENABLE_STT_SPEAKER_LABELS
+  #define ENABLE_STT_SPEAKER_LABELS 0
+#endif
+#if ENABLE_STT_SPEAKER_LABELS && !ENABLE_LOCAL_STT
+  #error "ENABLE_STT_SPEAKER_LABELS labels the local STT backend's phrases. Set ENABLE_LOCAL_STT 1 or ENABLE_STT_SPEAKER_LABELS 0."
+#endif
+
 // =============================================================================
 // LLM FEATURE / SOURCE CONSISTENCY  (see §5 ENABLE_LLM_BACKEND)
 // =============================================================================
@@ -1592,11 +1623,14 @@
 // their dependency cannot be expressed by nesting them in #if. It is enforced
 // here instead. Placed after the board blocks because the CM5 source needs
 // UART_LINK_PORT, which is not resolved until then.
-#if ENABLE_LLM_BACKEND && !ENABLE_LLM_SOURCE_ONBOARD && !ENABLE_LLM_SOURCE_CM5
-  #error "ENABLE_LLM_BACKEND needs at least one answer source. Set ENABLE_LLM_SOURCE_ONBOARD and/or ENABLE_LLM_SOURCE_CM5 to 1, or turn the feature off."
+#if ENABLE_LLM_BACKEND && !ENABLE_LLM_SOURCE_ONBOARD && !ENABLE_LLM_SOURCE_CM5 && !ENABLE_LLM_SOURCE_HTTP
+  #error "ENABLE_LLM_BACKEND needs at least one answer source (ONBOARD, CM5, or HTTP)."
 #endif
-#if !ENABLE_LLM_BACKEND && (ENABLE_LLM_SOURCE_ONBOARD || ENABLE_LLM_SOURCE_CM5)
+#if !ENABLE_LLM_BACKEND && (ENABLE_LLM_SOURCE_ONBOARD || ENABLE_LLM_SOURCE_CM5 || ENABLE_LLM_SOURCE_HTTP)
   #error "An LLM source is enabled but ENABLE_LLM_BACKEND is 0. A source has nothing to plug into on its own — set ENABLE_LLM_BACKEND 1, or turn the source off."
+#endif
+#if ENABLE_LLM_SOURCE_HTTP && !ENABLE_WIFI
+  #error "ENABLE_LLM_SOURCE_HTTP requires Wi-Fi."
 #endif
 #if ENABLE_LLM_SOURCE_CM5 && !defined(UART_LINK_PORT)
   #error "ENABLE_LLM_SOURCE_CM5 requires the authenticated UART host link, and this board defines no UART_LINK_PORT."

@@ -12,6 +12,8 @@
 #include "System_Filesystem.h"
 #include "System_Mutex.h"        // FsLockGuard
 #include "System_Settings.h"
+#include "System_LLMChat.h"
+#include "System_RamFlush.h"
 #include "System_VFS.h"
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 
@@ -20,6 +22,9 @@
 #endif
 #if ENABLE_LLM_SOURCE_CM5
   #include "System_LLMCm5.h"
+#endif
+#if ENABLE_LLM_SOURCE_HTTP
+  #include "System_LLMHttp.h"
 #endif
 
 // ============================================================================
@@ -30,12 +35,18 @@
 // their own internal locks, so no extra mutex is warranted here.
 
 static LlmBackendKind sActiveKind = LlmBackendKind::None;
+#if ENABLE_LLM_SOURCE_HTTP
+// Unload retains display history. Remember its source until the next selection
+// so unloading cannot bypass the explicit Clear boundary for an agent route.
+static LlmBackendKind sUnloadedKind = LlmBackendKind::None;
+#endif
 EXT_RAM_BSS_ATTR static LlmModelDesc sActiveDesc;  // PSRAM: task-context select/unload/read only (initializer dropped: .ext_ram.bss is zeroed)
 
 const char* llmBackendKindName(LlmBackendKind k) {
   switch (k) {
     case LlmBackendKind::Onboard: return "onboard";
     case LlmBackendKind::Cm5:     return "cm5";
+    case LlmBackendKind::Http:    return "http";
     case LlmBackendKind::None:    break;
   }
   return "none";
@@ -106,6 +117,9 @@ size_t llmEnumerateModels(LlmModelDesc* out, size_t cap) {
 #if ENABLE_LLM_SOURCE_CM5
   if (w < cap) w += cm5LlmEnumerate(out + w, cap - w);
 #endif
+#if ENABLE_LLM_SOURCE_HTTP
+  if (w < cap) w += httpLlmEnumerate(out + w, cap - w);
+#endif
   return w;
 }
 
@@ -157,6 +171,10 @@ bool llmResolveModelId(const char* id, LlmModelDesc* out) {
 #if ENABLE_LLM_SOURCE_CM5
     if (pfx == 3 && strncasecmp(id, "cm5", 3) == 0)
       return cm5LlmFindByName(name, out);
+#endif
+#if ENABLE_LLM_SOURCE_HTTP
+    if (pfx == 4 && strncasecmp(id, "http", 4) == 0)
+      return httpLlmFindByName(name, out);
 #endif
     return false;   // a prefix this build does not have
   }
@@ -222,6 +240,17 @@ bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
   if (!llmResolveModelId(id, &d)) return bail("no such model");
   if (!d.available)               return bail("that model is not available right now");
 
+#if ENABLE_LLM_SOURCE_HTTP
+  // Agent routes must not inherit a different source's visible transcript or
+  // silently abandon an action still in flight. Clear is an explicit boundary.
+  const LlmBackendKind previousKind = sActiveKind == LlmBackendKind::None ? sUnloadedKind : sActiveKind;
+  if (previousKind == LlmBackendKind::Http || d.backend == LlmBackendKind::Http) {
+    if (!llmBackendIsDone() || !httpLlmIsDone()) return bail("busy - stop and wait first");
+    if (previousKind != d.backend && chatGetTurnCount() > 0)
+      return bail("clear chat before changing the agent source");
+  }
+#endif
+
   switch (d.backend) {
 #if ENABLE_LLM_SOURCE_ONBOARD
     case LlmBackendKind::Onboard: {
@@ -235,6 +264,9 @@ bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
       // to nothing a single reader can observe in practice; it does not close
       // it, because neither store is atomic and there is no barrier here. A
       // real fix needs the pair under one lock.
+#if ENABLE_LLM_SOURCE_HTTP
+      if (sActiveKind == LlmBackendKind::Http) httpLlmUnload();
+#endif
       sActiveDesc = d;
       sActiveKind = LlmBackendKind::Onboard;
       return true;
@@ -245,8 +277,19 @@ bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
       char err[64] = {0};
       if (!cm5LlmSelectByName(d.name, err, sizeof(err)))
         return bail(err[0] ? err : "the CM5 refused the model");
+#if ENABLE_LLM_SOURCE_HTTP
+      if (sActiveKind == LlmBackendKind::Http) httpLlmUnload();
+#endif
       sActiveDesc = d;                      // descriptor before kind — see above
       sActiveKind = LlmBackendKind::Cm5;
+      return true;
+    }
+#endif
+#if ENABLE_LLM_SOURCE_HTTP
+    case LlmBackendKind::Http: {
+      if (!httpLlmSelectByName(d.name, errOut, errCap)) return false;
+      sActiveDesc = d;
+      sActiveKind = LlmBackendKind::Http;
       return true;
     }
 #endif
@@ -256,12 +299,18 @@ bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
 }
 
 void llmBackendUnload() {
+#if ENABLE_LLM_SOURCE_HTTP
+  if (sActiveKind != LlmBackendKind::None) sUnloadedKind = sActiveKind;
+#endif
   switch (sActiveKind) {
 #if ENABLE_LLM_SOURCE_ONBOARD
     case LlmBackendKind::Onboard: llmUnload();    break;
 #endif
 #if ENABLE_LLM_SOURCE_CM5
     case LlmBackendKind::Cm5:     cm5LlmUnload(); break;
+#endif
+#if ENABLE_LLM_SOURCE_HTTP
+    case LlmBackendKind::Http:    httpLlmUnload(); break;
 #endif
     default: break;
   }
@@ -319,11 +368,20 @@ bool llmBackendActiveModel(LlmModelDesc* out) {
   #define LLM_CM5_VOID(expr)
 #endif
 
+#if ENABLE_LLM_SOURCE_HTTP
+  #define LLM_HTTP_CASE(expr) case LlmBackendKind::Http: return (expr);
+  #define LLM_HTTP_VOID(expr) case LlmBackendKind::Http: (expr); return;
+#else
+  #define LLM_HTTP_CASE(expr)
+  #define LLM_HTTP_VOID(expr)
+#endif
+
 bool llmBackendIsReady() {
   if (!gSettings.llmEnabled) return false;
   switch (sActiveKind) {
     LLM_ONBOARD_CASE(llmIsReady())
     LLM_CM5_CASE(cm5LlmIsReady())
+    LLM_HTTP_CASE(httpLlmIsReady())
     default: return false;
   }
 }
@@ -332,6 +390,7 @@ LLMStatus llmBackendStatus() {
   switch (sActiveKind) {
     LLM_ONBOARD_CASE(llmGetStatus())
     LLM_CM5_CASE(cm5LlmStatus())
+    LLM_HTTP_CASE(httpLlmStatus())
     default: break;
   }
   LLMStatus st;
@@ -344,6 +403,7 @@ int llmBackendStartAsync(const char* prompt, const LLMGenParams& params) {
   switch (sActiveKind) {
     LLM_ONBOARD_CASE(llmStartAsync(prompt, params))
     LLM_CM5_CASE(cm5LlmStartAsync(prompt, params))
+    LLM_HTTP_CASE(httpLlmStartAsync(prompt, params))
     default: return 0;
   }
 }
@@ -352,6 +412,7 @@ void llmBackendStop() {
   switch (sActiveKind) {
     LLM_ONBOARD_VOID(llmStop())
     LLM_CM5_VOID(cm5LlmStop())
+    LLM_HTTP_VOID(httpLlmStop())
     default: return;
   }
 }
@@ -360,6 +421,7 @@ int llmBackendSessionId() {
   switch (sActiveKind) {
     LLM_ONBOARD_CASE(llmGetSessionId())
     LLM_CM5_CASE(cm5LlmSessionId())
+    LLM_HTTP_CASE(httpLlmSessionId())
     default: return 0;
   }
 }
@@ -368,6 +430,7 @@ int llmBackendResultLen() {
   switch (sActiveKind) {
     LLM_ONBOARD_CASE(llmGetResultLen())
     LLM_CM5_CASE(cm5LlmResultLen())
+    LLM_HTTP_CASE(httpLlmResultLen())
     default: return 0;
   }
 }
@@ -376,6 +439,7 @@ int llmBackendResultChunk(int offset, char* buf, int maxLen) {
   switch (sActiveKind) {
     LLM_ONBOARD_CASE(llmGetResultChunk(offset, buf, maxLen))
     LLM_CM5_CASE(cm5LlmResultChunk(offset, buf, maxLen))
+    LLM_HTTP_CASE(httpLlmResultChunk(offset, buf, maxLen))
     default: return 0;
   }
 }
@@ -384,6 +448,7 @@ bool llmBackendIsDone() {
   switch (sActiveKind) {
     LLM_ONBOARD_CASE(llmIsGenerationDone())
     LLM_CM5_CASE(cm5LlmIsDone())
+    LLM_HTTP_CASE(httpLlmIsDone())
     // Nothing selected means nothing is running. Reporting "done" here rather
     // than "running" matters: the chat drain finalizes on this, and the
     // opposite answer would strand a streaming turn forever.
@@ -452,6 +517,19 @@ bool llmBackendSupportsCommandMode() {
   return false;
 }
 
+bool llmBackendSupportsRetry() {
+  return sActiveKind != LlmBackendKind::None && sActiveKind != LlmBackendKind::Http;
+}
+
+bool llmBackendResetConversation() {
+#if ENABLE_LLM_SOURCE_HTTP
+  // An unloaded HTTP worker may still be releasing its socket.
+  if (!httpLlmIsDone()) return false;
+  if (sActiveKind == LlmBackendKind::Http) return httpLlmResetConversation();
+#endif
+  return true;
+}
+
 int llmBackendTokenize(const char* text, int* outTokens, int maxTokens) {
   switch (sActiveKind) {
     LLM_ONBOARD_CASE(llmTokenize(text, outTokens, maxTokens))
@@ -462,6 +540,20 @@ int llmBackendTokenize(const char* text, int* outTokens, int maxTokens) {
 }
 
 void llmBackendTick() {
+#if ENABLE_LLM_SOURCE_HTTP
+  httpLlmTick();
+  static bool sHttpAutostartTried = false;
+  if (!sHttpAutostartTried && sActiveKind == LlmBackendKind::None &&
+      gSettings.llmEnabled && ramFlushResolve(RF_LLM, gSettings.llmAutoStart) &&
+      gSettings.llmDefaultModel.startsWith("http:")) {
+    LlmModelDesc d;
+    if (llmResolveModelId(gSettings.llmDefaultModel.c_str(), &d) && d.available) {
+      sHttpAutostartTried = true;
+      char error[96] = {0};
+      (void)llmBackendSelect(d.id, error, sizeof(error));
+    }
+  }
+#endif
 #if ENABLE_LLM_SOURCE_CM5
   cm5LlmTick();
 

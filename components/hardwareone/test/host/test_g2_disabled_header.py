@@ -25,6 +25,7 @@ using PagerRender = bool (*)(TextPager&, char*, size_t, const G2TextPageChrome&,
                             const G2ContainerGeom&, void (*)(), G2TapFn);
 using RebuildProbe = bool (*)(const char*, const char*, const G2ContainerGeom&, void (*)());
 using MultiTextPage = bool (*)(const G2TextChildSpec*, size_t, void (*)(), G2TapFn);
+using TextPageReady = bool (*)(void (*)(), G2TapFn, bool*);
 using MixedPage = bool (*)(const char* const*, size_t, const G2ContainerGeom&,
                           const G2TextChildSpec&);
 using MixedPage2 = bool (*)(const char* const*, size_t, const G2ContainerGeom&,
@@ -34,6 +35,7 @@ static_assert(std::is_same_v<decltype(&g2ShowTextPage), TextPage>);
 static_assert(std::is_same_v<decltype(&g2TextPagerRender), PagerRender>);
 static_assert(std::is_same_v<decltype(&g2ShowTextPageRebuildProbe), RebuildProbe>);
 static_assert(std::is_same_v<decltype(&g2ShowMultiTextPage), MultiTextPage>);
+static_assert(std::is_same_v<decltype(&g2TextPageReady), TextPageReady>);
 static_assert(std::is_same_v<decltype(&g2ShowMixedListText), MixedPage>);
 static_assert(std::is_same_v<decltype(&g2ShowMixedListText2), MixedPage2>);
 static_assert(std::is_same_v<decltype(&g2RelistMixedListText), MixedPage>);
@@ -59,6 +61,7 @@ void checkRenderCalls() {
     const char body[] = "body";
     TextPager pager = {body, offsets, 1, 100, 1, 0, true};
     char pageBuf[] = "unchanged";
+    bool pending = true;
     const bool results[] = {
         g2ShowListPage(items, 2),
         g2ShowListPage(items, 2, G2_GEOM_SMALL),
@@ -71,6 +74,8 @@ void checkRenderCalls() {
         g2ShowTextPageRebuildProbe("wait", "text"),
         g2ShowTextPageRebuildProbe("wait", "text", G2_GEOM_SMALL),
         g2ShowTextPageRebuildProbe("wait", "text", G2_GEOM_SMALL, onExit),
+        g2TextPageReady(onExit, onTap),
+        g2TextPageReady(onExit, onTap, &pending),
         g2ShowMultiTextPage(children, 2),
         g2ShowMultiTextPage(children, 2, onExit),
         g2ShowMultiTextPage(children, 2, onExit, onTap),
@@ -81,6 +86,7 @@ void checkRenderCalls() {
 #if !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
     for (bool result : results) assert(!result);
     assert(callbackCalls == 0);
+    assert(!pending);
     assert(std::strcmp(pageBuf, "unchanged") == 0);
     assert(pager.body == body && pager.pageOff == offsets);
     assert(pager.maxPages == 1 && pager.pageBudget == 100);

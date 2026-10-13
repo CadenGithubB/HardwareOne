@@ -124,6 +124,7 @@ EXT_RAM_BSS_ATTR static char         sModelRows[LLM_MODEL_ROWS][LLM_CHARS + 1];
 EXT_RAM_BSS_ATTR static LlmModelDesc sModelDescs[LLM_MODEL_ROWS];
 static int  sModelCount = 0;
 static const char* sMenuStatus = nullptr;
+static char sMenuStatusBuffer[64];
 
 EXT_RAM_BSS_ATTR static char sGroupRows[8][LLM_CHARS + 1];
 EXT_RAM_BSS_ATTR static char sTplRows[OLED_SCROLL_MAX_ITEMS][LLM_CHARS + 1];
@@ -157,6 +158,17 @@ static const uintptr_t ENT_ROW_BASE = 3;
 static bool sLastTurnGuided   = false;
 static int  sGuidedAskSession = 0;
 
+static void clearChatForOled() {
+  if (!chatClear()) {
+    sMenuStatus = "Stop/wait, then retry";
+    return;
+  }
+  sLastTurnGuided = false;
+  sGuidedAskSession = 0;
+  sScrollOffset = 0;
+  sMenuStatus = "New chat ready";
+}
+
 // ============================================================================
 // Load / unload through the command executor
 // ============================================================================
@@ -172,19 +184,31 @@ static portMUX_TYPE sCmdMux = portMUX_INITIALIZER_UNLOCKED;
 static bool        sCmdReplyReady  = false;          // guarded by sCmdMux
 static uint8_t     sCmdReplyOp     = LLM_CMD_NONE;   // guarded by sCmdMux
 static const char* sCmdReplyStatus = nullptr;        // guarded by sCmdMux; literal, nullptr = success
+static char        sCmdReplyReason[sizeof(sMenuStatusBuffer)];  // guarded by sCmdMux; the reply's "error", or empty
 
 static void llmCommandDone(bool ok, const char* result, void* userData) {
   const uint8_t op = (uint8_t)(uintptr_t)userData;
   const char* r = result ? result : "";
   const char* status = nullptr;
+  char reason[sizeof(sCmdReplyReason)] = {0};
   if (strstr(r, "Admin access")) {
     status = "admin required";
   } else if (!ok || strncmp(r, "Error", 5) == 0 || strstr(r, "\"ok\":false")) {
     status = (op == LLM_CMD_LOAD) ? "load failed" : "unload failed";
+    // The backend's reason (a remote host's message, a missing model) is the
+    // reply's "error" string, which the firmware writes without quotes.
+    const char* e = strstr(r, "\"error\":\"");
+    if (e) {
+      e += 9;
+      size_t n = 0;
+      while (e[n] && e[n] != '"' && n + 1 < sizeof(reason)) { reason[n] = e[n]; ++n; }
+      reason[n] = '\0';
+    }
   }
   portENTER_CRITICAL(&sCmdMux);
   sCmdReplyOp = op;
   sCmdReplyStatus = status;
+  memcpy(sCmdReplyReason, reason, sizeof(reason));
   sCmdReplyReady = true;
   portEXIT_CRITICAL(&sCmdMux);
 }
@@ -210,11 +234,13 @@ static void pollLlmCommandReply() {
   bool ready = false;
   uint8_t op = LLM_CMD_NONE;
   const char* status = nullptr;
+  char reason[sizeof(sCmdReplyReason)];
   portENTER_CRITICAL(&sCmdMux);
   if (sCmdReplyReady) {
     ready = true;
     op = sCmdReplyOp;
     status = sCmdReplyStatus;
+    memcpy(reason, sCmdReplyReason, sizeof(reason));
     sCmdReplyReady = false;
   }
   portEXIT_CRITICAL(&sCmdMux);
@@ -223,7 +249,12 @@ static void pollLlmCommandReply() {
   if (!status) return;
   if (op == LLM_CMD_LOAD && sUIState == LLMUIState::LOADING) {
     sUIState = LLMUIState::PICK_MODEL;
-    sMenuStatus = status;
+    if (reason[0]) {
+      strlcpy(sMenuStatusBuffer, reason, sizeof(sMenuStatusBuffer));
+      sMenuStatus = sMenuStatusBuffer;
+    } else {
+      sMenuStatus = status;
+    }
   } else if (op == LLM_CMD_UNLOAD && sUIState == LLMUIState::NO_MODEL &&
              llmBackendIsReady()) {
     sUIState = LLMUIState::MENU;
@@ -438,7 +469,7 @@ static void commitModelPick() {
 // and gives the model picker a home — the ANO encoder has only A/B/X/Y plus a
 // chorded START, all already assigned, so a new button was not available.
 
-enum : uintptr_t { MENU_ROW_ASK = 1, MENU_ROW_GUIDED, MENU_ROW_MODEL, MENU_ROW_UNLOAD };
+enum : uintptr_t { MENU_ROW_ASK = 1, MENU_ROW_GUIDED, MENU_ROW_NEW_CHAT, MENU_ROW_MODEL, MENU_ROW_UNLOAD };
 
 static void populateMenuPicker() {
   ensurePickScrollInit();
@@ -446,6 +477,7 @@ static void populateMenuPicker() {
   oledScrollAddItem(&sMenuScroll, "Ask a question", nullptr, true, (void*)MENU_ROW_ASK);
   if (llmMenuGroupCount() > 0)   // 0 on every remote model, and on local ones with no MENU blob
     oledScrollAddItem(&sMenuScroll, "Guided questions", nullptr, true, (void*)MENU_ROW_GUIDED);
+  oledScrollAddItem(&sMenuScroll, "New chat",       nullptr, true, (void*)MENU_ROW_NEW_CHAT);
   oledScrollAddItem(&sMenuScroll, "Switch model",   nullptr, true, (void*)MENU_ROW_MODEL);
   oledScrollAddItem(&sMenuScroll, "Unload model",   nullptr, true, (void*)MENU_ROW_UNLOAD);
 }
@@ -836,7 +868,7 @@ static void displayLLM_chat(bool generating) {
     drawFooter(f);
   } else if (generating) {
     drawFooter("B: stop");
-  } else if (chatGetTurnCount() > 0) {
+  } else if (chatGetTurnCount() > 0 && llmBackendSupportsRetry()) {
     drawFooter("A: ask  Y: retry");
   } else {
     drawFooter("A: ask");
@@ -852,7 +884,7 @@ static void displayLLM_menu() {
 static void displayLLM_pickModel() {
   populateModelPicker();
   oledScrollRenderSimple(oledDisplay, &sModelScroll);
-  drawFooter(sMenuStatus ? sMenuStatus : "A: load  B: back");
+  drawFooter(sMenuStatus ? sMenuStatus : "A:load Y:new B:back");
 }
 
 // Guided-menu picker views — refill the level's list, render it single-line, and
@@ -981,6 +1013,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
+        if (!llmBackendSupportsRetry()) return true;
         // Retry. A guided ask must be re-run PLAIN via llmMenuRepeatLast() —
         // chatRetryLast() suppresses the previous answer's tokens, which bans the
         // memorized-correct answer for a guided question (spec §5). Branch on
@@ -1022,6 +1055,9 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
           case MENU_ROW_GUIDED:
             if (llmMenuGroupCount() > 0) enterPickGroup();
             break;
+          case MENU_ROW_NEW_CHAT:
+            clearChatForOled();
+            break;
           case MENU_ROW_MODEL:
             enterPickModel();
             break;
@@ -1048,6 +1084,10 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
 
     case LLMUIState::PICK_MODEL: {
       if (oledScrollHandleNav(&sModelScroll)) { sMenuStatus = nullptr; return true; }
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
+        clearChatForOled();
+        return true;
+      }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
         commitModelPick();
         return true;

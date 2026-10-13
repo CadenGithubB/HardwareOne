@@ -578,6 +578,15 @@ bool g2ShowMultiTextPage(const G2TextChildSpec* children, size_t childCount,
                          void (*exitFn)() = nullptr,
                          G2TapFn tapFn = nullptr);
 
+// Snapshot whether the current committed text page owns this exact callback
+// pair and is ready for child UPDATEs. Queued/failed CREATEs, stale lifecycles,
+// replaced presentations and firmware overlays are not ready. If supplied,
+// pending reports temporary CREATE blockers: page swap, interactive lens lease,
+// firmware overlay or terminal transition. False + !pending permits a new
+// admission attempt. This snapshot is not a lease.
+bool g2TextPageReady(void (*exitFn)(), G2TapFn tapFn,
+                      bool* pending = nullptr);
+
 // Compound List + Text page — title (TextObject) + selectable list
 // (ListObject). The list manages focus + scroll + CLICK natively, so
 // row taps reach the dispatcher via the standard ListEvent path —
@@ -1552,6 +1561,10 @@ inline bool g2ShowTextPageRebuildProbe(const char*, const char*,
 inline bool g2ShowMultiTextPage(const G2TextChildSpec*, size_t,
                                 void (*)() = nullptr,
                                 G2TapFn = nullptr) { return false; }
+inline bool g2TextPageReady(void (*)(), G2TapFn, bool* pending = nullptr) {
+  if (pending) *pending = false;
+  return false;
+}
 inline bool g2ShowMixedListText(const char* const*, size_t,
                                 const G2ContainerGeom&,
                                 const G2TextChildSpec&) { return false; }

@@ -1,10 +1,10 @@
 # HardwareOne STT training kit (Ubuntu + NVIDIA GPU)
 
 Everything needed to continue training the P4's speech model on a CUDA PC, on one
-exFAT SSD (`Audiodrive`):
+exFAT SSD (shown here as `<drive>`, its volume label):
 
 ```
-Audiodrive/
+<drive>/
   stt/                 data: stores (training audio), work (checkpoints, results), models, noise
   hw1-stt-kit/         this kit: code snapshot + scripts
 ```
@@ -21,18 +21,18 @@ Ubuntu 22.04 or newer. The one-time setup needs internet (about 3 GB of download
    ```
    If Secure Boot is on, the installer asks you to choose a password. After the reboot,
    a blue screen appears: choose "Enroll MOK", then enter that password.
-2. **Plug in the SSD.** Ubuntu mounts it at `/media/$USER/Audiodrive`
-   (`ls /media/$USER/Audiodrive` shows `stt` and `hw1-stt-kit`).
+2. **Plug in the SSD.** Ubuntu mounts it at `/media/$USER/<drive>`
+   (`ls /media/$USER/<drive>` shows `stt` and `hw1-stt-kit`).
 3. **One-time setup:**
    ```
    sudo apt-get install -y python3-venv python3-dev build-essential
-   cd /media/$USER/Audiodrive/hw1-stt-kit
+   cd /media/$USER/<drive>/hw1-stt-kit
    bash setup_ubuntu.sh
    ```
    It prints the GPU, then ends with `setup done`.
 4. **Start the run:**
    ```
-   cd /media/$USER/Audiodrive/hw1-stt-kit
+   cd /media/$USER/<drive>/hw1-stt-kit
    nohup bash run_continuation.sh > /dev/null 2>&1 &
    tail -f ../stt/logs/continuation.log
    ```
@@ -41,8 +41,8 @@ Ubuntu 22.04 or newer. The one-time setup needs internet (about 3 GB of download
    `tail ../stt/logs/continuation.log` from the kit folder, or `nvidia-smi` to see the GPU
    busy. If the PC restarts anyway, run the `nohup` line again: it resumes where it
    stopped.
-5. **When the log says `=== done`**, eject Audiodrive in the Files app (or
-   `udisksctl unmount -b "$(findmnt -no SOURCE /media/$USER/Audiodrive)"`) and bring the
+5. **When the log says `=== done`**, eject <drive> in the Files app (or
+   `udisksctl unmount -b "$(findmnt -no SOURCE /media/$USER/<drive>)"`) and bring the
    SSD back to the Mac.
 
 `STT_ROOT` (the `stt` folder) and the Python (`PY`) can be overridden if the SSD is

@@ -5,6 +5,7 @@
 #include "System_User.h"
 #include "System_STTLocal.h"
 #include "System_Transcript.h"
+#include "System_STTMetadata.h"
 
 // Shared dictation session broker. Audio remains bounded even for sessions
 // with no duration limit. Recognized words are text, never device commands.
@@ -95,15 +96,23 @@ struct STTDraft {
   char text[STT_MAX_TEXT + 1] = {};
 };
 bool sttReadDraft(STTOwner owner, STTToken token, STTDraft* out);
+// Non-consuming labels for recent final chunks, retained independently of text
+// ACKs and transcript saving. Enforces the same owner/epoch/token lifetime.
+bool sttReadSpeakers(STTOwner owner, STTToken token, STTSpeakerSnapshot* out);
 bool sttAcknowledgeChunk(STTOwner owner, STTToken token, uint32_t sequence);
 // Internal join predicate: contains no transcript/session data and remains
 // usable after revocation. Unknown or terminal tokens are inactive.
 bool sttRunActive(STTToken token);
 // Continuous transcription on the native Conversate microphone stream of the
 // exact left-temple connection `leftGeneration` (see audioCaptureStartG2Native).
+// publishWake (optional) is called on the STT worker, outside the broker's
+// lock, right after each final or draft is published (HW1_STT_PUBLISH_WAKE),
+// so the consumer can read it at once; it must only signal (e.g. give a
+// semaphore).
 bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
                                 char* error, size_t errorCap,
-                                const TranscriptOptions* transcriptOptions = nullptr);
+                                const TranscriptOptions* transcriptOptions = nullptr,
+                                void (*publishWake)() = nullptr);
 // Wearer pause/resume of a native session: no PCM arrives while paused, which
 // must not be mistaken for a failed microphone; the open phrase is closed.
 bool sttSetPaused(STTOwner owner, STTToken token, bool paused);

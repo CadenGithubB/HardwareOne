@@ -42,6 +42,7 @@
 #include "HAL_Audio.h"     // AudioSource (DictationAppOptions)
 #include "System_User.h"   // TransportSessionEpoch
 #include "System_Transcript.h"
+#include "System_STTMetadata.h"
 
 // Longest transcript accepted from the host. Sized to the keyboard buffer —
 // anything past the field's own maxLength is truncated at append time anyway,
@@ -209,6 +210,10 @@ bool dictationAppPeekText(const DictationAppLease& lease, char* out, size_t outS
 bool dictationAppCommitText(const DictationAppLease& lease,
                             const DictationTextReceipt& receipt, size_t accepted);
 bool dictationAppPeekDraft(const DictationAppLease& lease, char* out, size_t outSize, uint32_t* version);
+// Non-consuming recent speaker labels for this exact lease. Words may already
+// be ACKed when a label arrives. A completed lease retains its last snapshot;
+// cancellation/new admission clears it. CM5 reports available=false.
+bool dictationAppReadSpeakers(const DictationAppLease& lease, STTSpeakerSnapshot* out);
 
 // Post-publication hook. The mic layer invokes this only AFTER it has published
 // the owner-scoped completion result and IDLE. It copies the stable local result
@@ -284,6 +289,10 @@ inline bool dictationAppCommitText(const DictationAppLease&, const DictationText
 inline bool dictationAppPeekDraft(const DictationAppLease&, char* out, size_t size, uint32_t* version) {
   if (out && size) out[0] = '\0';
   if (version) *version = 0;
+  return false;
+}
+inline bool dictationAppReadSpeakers(const DictationAppLease&, STTSpeakerSnapshot* out) {
+  if (out) *out = STTSpeakerSnapshot{};
   return false;
 }
 inline void dictationOnCapturePublished(uint64_t, const char*, bool,

@@ -407,6 +407,16 @@ add_test(NAME hal_bluetooth
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_hal_bluetooth.py
           ${HAL_BLUETOOTH_TEST_ARGS})
 
+set(LLM_HTTP_TEST_ARGS)
+if(HW1_SANITIZE)
+  list(APPEND LLM_HTTP_TEST_ARGS --sanitize)
+endif()
+foreach(_http_test llm_http llm_http_runtime llm_http_integration llm_http_settings llm_guided_source)
+  add_test(NAME ${_http_test}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_${_http_test}.py
+            ${LLM_HTTP_TEST_ARGS})
+endforeach()
+
 # Exercise real JPEG dispatch/software/P4 code against controlled SDK boundaries.
 # Supplying installed component paths additionally checks exact old/new software
 # pixels using the actual TJpgDec and esp32-camera converter sources.

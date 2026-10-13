@@ -89,6 +89,7 @@ struct DictationControl {
   DictationAppLease appLease; // Retained until the next admission.
   DictationTextReceipt appLastReceipt;
   uint16_t appLastAccepted = 0;
+  STTSpeakerSnapshot appSpeakers;
 
 };
 
@@ -130,6 +131,7 @@ static void dictationAdmitConsumerLocked(CommandSource source,
                        : DictationAppLease{};
   gDict.appLastReceipt = DictationTextReceipt{};
   gDict.appLastAccepted = 0;
+  gDict.appSpeakers = STTSpeakerSnapshot{};
   if (app) *app = gDict.appLease;
 }
 
@@ -757,6 +759,7 @@ static bool dictationCancelLocal(CommandSource source, bool force,
   mine = force || dictationConsumerMatchesLocked(source, app);
   if (mine) {
     gDict.owner = 0; // Retained job identity below observes this and joins cancel.
+    gDict.appSpeakers = STTSpeakerSnapshot{};
     gDict.state = failure ? DictationState::FAILED : DictationState::IDLE;
     gDict.stateEnteredMs = millis();
     if (!failure) {
@@ -779,6 +782,7 @@ static bool dictationLocalCurrentLocked(const LocalDictation& run) {
 static void dictationFailLocal(const LocalDictation& run, const char* reason) {
   portENTER_CRITICAL(&gDictMux);
   if (dictationLocalCurrentLocked(run)) {
+    gDict.appSpeakers = STTSpeakerSnapshot{};
     gDict.owner = 0;
     dictationClearDeliveryLocked();
     gDict.state = DictationState::FAILED;
@@ -880,12 +884,15 @@ static void dictationProcessLocal() {
     return;
   }
 
+  STTSpeakerSnapshot speakers;
+  (void)sttReadSpeakers(run.actor, run.token, &speakers);
   uint16_t offset = 0;
   uint32_t sequence = 0;
   bool canStage = false;
   portENTER_CRITICAL(&gDictMux);
   if (dictationLocalCurrentLocked(run)) {
     gDict.transcriptStatus = snap.transcript;
+    gDict.appSpeakers = speakers;
     const DictationState state = !gDict.stopRequested &&
         (snap.captureActive || snap.state == STTState::Preparing)
             ? DictationState::RECORDING : DictationState::WAITING;
@@ -929,11 +936,13 @@ static void dictationProcessLocal() {
     dictationFailLocal(run, snap.error[0] ? snap.error : "local transcription failed");
     return;
   }
+  (void)sttReadSpeakers(run.actor, run.token, &speakers);
   bool terminal = false;
   portENTER_CRITICAL(&gDictMux);
   if (dictationLocalCurrentLocked(run) && !snap.workerActive && snap.pendingTexts == 0 &&
       !gDict.deliveryExchange && !gDict.textPending) {
     gDict.transcriptStatus = snap.transcript;
+    gDict.appSpeakers = speakers;
     dictationFinishInputLocked();
     terminal = true;
     if (gLocalDict.exchange == run.exchange) gLocalDict = LocalDictation{};
@@ -1677,6 +1686,22 @@ bool dictationAppPeekText(const DictationAppLease& lease, char* out, size_t outS
 bool dictationAppCommitText(const DictationAppLease& lease,
                             const DictationTextReceipt& receipt, size_t accepted) {
   return dictationCommitTextImpl(lease.source, receipt, accepted, &lease);
+}
+
+bool dictationAppReadSpeakers(const DictationAppLease& lease, STTSpeakerSnapshot* out) {
+  if (!out) return false;
+  *out = STTSpeakerSnapshot{};
+  if (!displaySessionStillLive(lease.source, lease.epoch)) return false;
+  portENTER_CRITICAL(&gDictMux);
+  const bool mine = dictationConsumerMatchesLocked(lease.source, &lease);
+  if (mine) *out = gDict.appSpeakers;
+  portEXIT_CRITICAL(&gDictMux);
+  const bool live = displaySessionStillLive(lease.source, lease.epoch);
+  portENTER_CRITICAL(&gDictMux);
+  const bool stillMine = dictationConsumerMatchesLocked(lease.source, &lease);
+  portEXIT_CRITICAL(&gDictMux);
+  if (!live || !stillMine) { *out = STTSpeakerSnapshot{}; return false; }
+  return mine;
 }
 
 // Live mode: the provisional text of the utterance still being spoken, for
