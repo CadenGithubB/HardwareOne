@@ -70,7 +70,6 @@ template <typename... Args> void quietLog(const char*, Args...) {}
 #define DEBUG_G2F(...) quietLog(__VA_ARGS__)
 
 uint32_t g2CurrentMenuGen() { return currentGeneration; }
-uint64_t g2CurrentCmdSeq() { return UINT64_C(9000000000); }
 G2HijackPage g2GetHijackPage() { return G2_HIJACK_PAGE_MAIN; }
 
 bool g2EnqueueLensJob(LensUiJob* job, G2LensEnqueueWait wait) {

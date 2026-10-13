@@ -32,7 +32,7 @@
 #include "System_Microphone.h" // micRecordingBusy — real recording lifecycle
 #endif
 #include "System_R1_Protocol.h"  // R1Encoder + decoder (real wire format)
-#include "System_G2_Protocol.h"  // g2BuildRingRawDataPush + G2RingPushFields
+#include "System_G2_Protocol.h"  // g2PbReadTag/g2PbReadVarint for forwarded RingDataPackage frames
 #include "G2_Health.h"           // history append + daily backfill
 #include "System_Events.h"       // systemEventPost — ring connect/disconnect bus events
 #include "System_Clock.h"        // isSynced/isValidEpoch — ring-clock custody gates
@@ -208,7 +208,6 @@ enum RingIntentKind : uint8_t {
   RING_INTENT_PAIR_AUTH,
   RING_INTENT_DEVICE_INFO,
   RING_INTENT_SYNC_TIME,
-  RING_INTENT_ADV_START,
   RING_INTENT_HEALTH_QUERY,
   RING_INTENT_HEALTH_COLLECTION_SET,
   RING_INTENT_LOW_POWER_QUERY,
@@ -349,6 +348,9 @@ struct RingRxFingerprint {
   uint8_t cmd;
   uint8_t subCmd;
   uint8_t statusByte;
+  // Health history verdict of the first copy; a retransmit is acknowledged
+  // again only when it is true (see ringDailyAckWaitsForHistory).
+  bool historyAccepted;
 };
 
 struct RingHistoryCoordinator {
@@ -624,7 +626,8 @@ static int ringReserveRawPayload(const uint8_t* payload, size_t payloadLen);
 static void ringReleaseRawPayload(uint8_t slot);
 static bool ringRawPayloadOwned(uint8_t slot);
 static void ringExtractTelemetryCache(const R1Decoded& decoded,
-                                      uint32_t generation);
+                                      uint32_t generation,
+                                      bool* historyAccepted = nullptr);
 static void ringReasmFinalize(uint32_t generation);
 static bool ringTelemetrySnapshotSelfTest();
 
@@ -1208,16 +1211,6 @@ static bool ringConfiguredTimezoneMinutes(int16_t& out) {
   return true;
 }
 
-static bool ringEnqueueAdvStart(
-    G2RingTransactionHandle* outHandle = nullptr) {
-  RingIntent intent{};
-  intent.kind = RING_INTENT_ADV_START;
-  intent.module = R1_MODULE_SYSTEM;
-  intent.cmd = R1_CMD_SYSTEM;
-  intent.subCmd = R1_SUB_ADV_START;
-  return ringEnqueueIntent(intent, outHandle);
-}
-
 static bool ringControlSupported(R1ProtocolProfile profile,
                                  RingControlTarget control,
                                  G2RingDesiredState desired) {
@@ -1566,10 +1559,9 @@ bool g2RingGetHealthPageRefreshStatus(
 // =============================================================================
 // The `point` queries return cached samples — the ring's auto-recording
 // cadence updates them every few minutes, not on demand. So we mirror them
-// into our own cache and let the spoof-push task forward whatever's fresh
-// to the glasses periodically. Each metric tracks its own "is valid" flag
-// so a partial cache (e.g. HR known but HRV not yet seen) translates into
-// a partial proto frame that omits the missing fields.
+// into our own cache for the status, health and logging readers. Each metric
+// tracks its own "is valid" flag so a partial cache (e.g. HR known but HRV
+// not yet seen) reports only the fields it has.
 struct R1TelemetryCache {
   uint8_t  hr;           uint32_t hrTs;        uint32_t hrRxMs;       bool hrValid;
   int16_t  hrv;          uint32_t hrvTs;       uint32_t hrvRxMs;      bool hrvValid;
@@ -2234,14 +2226,6 @@ void g2RingTimeSyncTick(void) {
   }
 }
 
-// Spoof-push task state. The task wakes every `gSpoofIntervalSec` seconds,
-// polls the ring for fresh point samples, and synthesises a sid=0x90
-// RingDataPackage frame to the glasses so their UI displays ring telemetry
-// as if the official bridge were active.
-static volatile bool   gSpoofEnabled       = false;
-static uint32_t        gSpoofIntervalSec   = 30;
-static TaskHandle_t    gSpoofTaskHandle    = nullptr;
-
 // Per-family in-flight flag — set by the public g2RingConnect* wrappers
 // before submitting to the unified BLE-connect worker (see G2_Glasses.h
 // `g2SubmitBleConnect`), cleared by the worker's dispatch (via the
@@ -2458,12 +2442,11 @@ static RingDownTransition ringBeginLogicalDown(
 // (LE i16 at offset 7..8 when payloadLength >= 9). For HRV/SpO2 we follow
 // the same slot — confidence is lower but it's the best guess we have until
 // captures show otherwise. Temperature uses `value` (offset 0..1) per the
-// existing annotator comment, but we don't push temp through the spoof yet.
+// existing annotator comment; it is not mirrored into this cache.
 //
 // Each metric only updates the cache when the response is the expected
 // shape (length / opcode), so a malformed/refused frame can't poison the
-// cache with garbage. Caller (the spoof task) checks each `*Valid` flag
-// before serialising — partial cache → partial proto frame.
+// cache with garbage. Readers check each `*Valid` flag.
 static bool ringDeviceStatusPayloadValid(const R1Decoded& d);
 
 static bool ringHealthTimestampPlausible(uint32_t timestamp) {
@@ -2539,8 +2522,12 @@ static void ringCacheDailyLatest(const R1HrvDailyResult& daily) {
   }
 }
 
+// *historyAccepted (optional) reports whether a daily page was accepted by the
+// Health history model; the RX path's packetAck follows that verdict.
 static void ringExtractTelemetryCache(const R1Decoded& d,
-                                      uint32_t generation) {
+                                      uint32_t generation,
+                                      bool* historyAccepted) {
+  if (historyAccepted) *historyAccepted = false;
   RingTelemetryGuard telemetry;
   if (!telemetry.locked()) return;
   uint32_t linkGeneration = 0;
@@ -2706,7 +2693,8 @@ static void ringExtractTelemetryCache(const R1Decoded& d,
     // ingested by the reassembly finalize instead. Parse into the shared PSRAM
     // scratch to keep the full-day-sized result off this task's stack.
     if (r1ParseActivityDaily(profile, d, sRingActivityScratch) == R1_PARSE_OK) {
-      (void)g2HealthApplyActivityDaily(sRingActivityScratch);
+      const bool accepted = g2HealthApplyActivityDaily(sRingActivityScratch);
+      if (historyAccepted) *historyAccepted = accepted;
     }
     return;
   }
@@ -2723,7 +2711,8 @@ static void ringExtractTelemetryCache(const R1Decoded& d,
       R1HrvDailyResult daily{};
       if (r1ParseHrvDaily(profile, d, daily) == R1_PARSE_OK) {
         ringCacheDailyLatest(daily);
-        (void)g2HealthApplyHrvDaily(daily);
+        const bool accepted = g2HealthApplyHrvDaily(daily);
+        if (historyAccepted) *historyAccepted = accepted;
         if (daily.dayMode == R1_DAILY_DAY_EPOCH) {
           count = daily.count;
           startTs = count ? daily.records[0].bucketEpoch : daily.dayStart;
@@ -2741,7 +2730,8 @@ static void ringExtractTelemetryCache(const R1Decoded& d,
       R1CommonDailyResult daily{};
       if (r1ParseCommonDaily(profile, d, daily) == R1_PARSE_OK) {
         ringCacheDailyLatest(daily);
-        (void)g2HealthApplyCommonDaily(daily);
+        const bool accepted = g2HealthApplyCommonDaily(daily);
+        if (historyAccepted) *historyAccepted = accepted;
         if (daily.dayMode == R1_DAILY_DAY_EPOCH) {
           count = daily.count;
           startTs = count ? daily.records[0].bucketEpoch : daily.dayStart;
@@ -2801,12 +2791,54 @@ static void ringExtractTelemetryCache(const R1Decoded& d,
 // =============================================================================
 // Forwarded-telemetry sink (called from G2_Glasses sid=0x90/0x91 RX)
 // =============================================================================
-// When the right temple's bridge is active (see ringbridge CLI), the temple
-// connects to the ring directly and forwards RingDataPackage frames to us
-// on sid=0x90 (UX_RING_ROW_DATA_ID). Decode the protobuf wrapper, walk into
-// the nested RingRawData (field 4, wire-type 2), and copy each present field
-// into gR1Cache so the same display / spoof / status code sees fresh data
-// regardless of who's holding the ring's BLE link.
+
+// Length-delimited read for the temple-supplied frame below. A declared length
+// is compared with the bytes that remain rather than added to `pos`, so a
+// ten-byte length near 2^64 is rejected instead of wrapping past the check and
+// moving `pos` backwards. The returned span aliases `buf`.
+static bool ringPbReadDelimited(const uint8_t* buf, size_t len, size_t* pos,
+                                const uint8_t** bytes, size_t* byteLen) {
+  uint64_t encodedLen = 0;
+  if (!g2PbReadVarint(buf, len, pos, &encodedLen)) return false;
+  if (*pos > len || encodedLen > (uint64_t)(len - *pos)) return false;
+  *bytes = buf + *pos;
+  *byteLen = (size_t)encodedLen;
+  *pos += *byteLen;
+  return true;
+}
+
+// Skip one field of a temple-supplied frame with the same remaining-bytes
+// bounds as ringPbReadDelimited; `pos` only moves forward and stays <= len.
+static bool ringPbSkipField(const uint8_t* buf, size_t len, size_t* pos,
+                            uint8_t wire) {
+  switch (wire) {
+    case G2_PB_WIRE_VARINT: {
+      uint64_t ignored = 0;
+      return g2PbReadVarint(buf, len, pos, &ignored);
+    }
+    case G2_PB_WIRE_FIXED64:
+      if (*pos > len || len - *pos < 8) return false;
+      *pos += 8;
+      return true;
+    case G2_PB_WIRE_LEN_DELIM: {
+      const uint8_t* ignored = nullptr;
+      size_t ignoredLen = 0;
+      return ringPbReadDelimited(buf, len, pos, &ignored, &ignoredLen);
+    }
+    case G2_PB_WIRE_FIXED32:
+      if (*pos > len || len - *pos < 4) return false;
+      *pos += 4;
+      return true;
+    default:
+      return false;
+  }
+}
+
+// When a temple forwards RingDataPackage frames to us on sid=0x90
+// (UX_RING_ROW_DATA_ID), decode the protobuf wrapper, walk into the nested
+// RingRawData (field 4, wire-type 2), and copy each present field into
+// gR1Cache so the same display / status code sees fresh data regardless of
+// who's holding the ring's BLE link.
 //
 // Schema: docs/g2_proto/ring.proto. Field tags inside RingRawData:
 //   1 battery, 2 chargeStates, 3 hr, 4 hrTs, 5 spo2, 6 spo2Ts,
@@ -2814,7 +2846,7 @@ static void ringExtractTelemetryCache(const R1Decoded& d,
 //   13 allKcal, 14 allKcalTs, 15 steps, 16 stepsTs, 17 errorCode.
 //
 // We currently mirror battery / hr+hrTs / spo2+spo2Ts / hrv+hrvTs into the
-// cache. Extend if the spoof builder ever grows new fields.
+// cache.
 void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
   if (!pb || pbLen == 0) return;
 
@@ -2831,14 +2863,9 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
       if (!g2PbReadVarint(pb, pbLen, &pos, &cmdId)) return;
       hasCmdId = true;
     } else if (field == 4 && wire == G2_PB_WIRE_LEN_DELIM) {
-      uint64_t sl;
-      if (!g2PbReadVarint(pb, pbLen, &pos, &sl)) return;
-      if (pos + sl > pbLen) return;
-      raw    = pb + pos;
-      rawLen = (size_t)sl;
-      pos += (size_t)sl;
+      if (!ringPbReadDelimited(pb, pbLen, &pos, &raw, &rawLen)) return;
     } else {
-      if (!g2PbSkipField(pb, pbLen, &pos, wire)) return;
+      if (!ringPbSkipField(pb, pbLen, &pos, wire)) return;
     }
   }
   if (!raw || rawLen == 0) return;
@@ -2867,7 +2894,7 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
     uint32_t f; uint8_t w;
     if (!g2PbReadTag(raw, rawLen, &p, &f, &w)) return;
     if (w != G2_PB_WIRE_VARINT) {
-      if (!g2PbSkipField(raw, rawLen, &p, w)) return;
+      if (!ringPbSkipField(raw, rawLen, &p, w)) return;
       continue;
     }
     if (!g2PbReadVarint(raw, rawLen, &p, &v)) return;
@@ -3103,15 +3130,22 @@ static bool ringFingerprintEqual(const RingRxFingerprint& a,
          a.subCmd == b.subCmd && a.statusByte == b.statusByte;
 }
 
-static bool ringRememberRx(const R1Decoded& d, uint32_t generation) {
+// Returns true for a first copy. `entry` is the remembered fingerprint: the new
+// one for a first copy, the earlier matching one for a duplicate.
+static bool ringRememberRx(const R1Decoded& d, uint32_t generation,
+                           RingRxFingerprint*& entry) {
   const RingRxFingerprint fp = {
     generation, d.crc32Received, d.serial, d.module, d.cmd, d.subCmd,
-    d.statusByte
+    d.statusByte, false
   };
   for (uint8_t i = 0; i < RING_RX_DUPLICATE_DEPTH; ++i) {
-    if (ringFingerprintEqual(fp, sRxFingerprints[i])) return false;
+    if (ringFingerprintEqual(fp, sRxFingerprints[i])) {
+      entry = &sRxFingerprints[i];
+      return false;
+    }
   }
-  sRxFingerprints[sRxFingerprintCursor] = fp;
+  entry = &sRxFingerprints[sRxFingerprintCursor];
+  *entry = fp;
   sRxFingerprintCursor = (uint8_t)((sRxFingerprintCursor + 1) %
                                    RING_RX_DUPLICATE_DEPTH);
   return true;
@@ -3147,6 +3181,20 @@ static void ringQueuePacketAck(const R1PacketAckDescriptor& descriptor,
   }
   sPacketAckQueue[sPacketAckCount++] =
       RingPacketAckPending{generation, descriptor};
+}
+
+// Daily packetAck policy. A packetAck tells the ring that a page's slots are
+// stored and need not be sent again (a daily query is answered with the slots
+// not yet acknowledged). On 2.2.9 the ACK waits for the Health history model to
+// accept the page into the active sweep; the captured app acknowledges only
+// pages it decoded, and the ring cannot tell a refused page from an undecodable
+// one. A refused page (no sweep, a sweep dropped behind an uncommitted result,
+// another day key, a pending peer switch, an unanchored day) stays
+// unacknowledged, so the ring still holds it for a later sweep. 2.2.7 keeps
+// its established flow control and acknowledges every eligible daily NOTIFY:
+// how a 2.2.7 ring treats a withheld packetAck has not been checked on a device.
+static bool ringDailyAckWaitsForHistory(R1ProtocolProfile profile) {
+  return profile != R1_PROFILE_FW_2_2_7_0005;
 }
 
 static bool ringApplyControlObservation(const R1Decoded& d,
@@ -3316,8 +3364,9 @@ static void ringHandleActiveRx(const R1Decoded& d,
   if (dailyDataNotify) {
     // Typed validation is the admission point for the buffered completion
     // fact. Invalid/unknown pages neither satisfy the transaction nor affect
-    // packet-ACK policy. The outer RX path separately applies the same typed
-    // gate before queueing a packet ACK.
+    // packet-ACK policy. The outer RX path decides the packet ACK separately
+    // (ringDailyAckWaitsForHistory: on 2.2.9, only a page the Health history
+    // model accepted).
     if (ringDailyPayloadValid(d) &&
         ringRememberTypedDailyData(sActiveTransaction)) {
       ringCompleteActive(G2_RING_TX_VERIFIED);
@@ -3495,14 +3544,17 @@ static void ringReasmFinalize(uint32_t generation) {
             (unsigned)sRingActivityScratch.count,
             (unsigned)sRingActivityScratch.sourceSerial,
             (unsigned)sRingReasm.len);
-  (void)g2HealthApplyActivityDaily(sRingActivityScratch);
+  const bool historyAccepted =
+      g2HealthApplyActivityDaily(sRingActivityScratch);
   // Peer publication cannot cross the telemetry fence, but disconnect can.
   // Never mint flow-control/transaction success after it has won.
   if (!ringReasmFinalizeCurrentLocked(generation, currentProfile) ||
       currentProfile != profile) return;
-  // Flow control: the ring expects a packetAck for each accepted daily NOTIFY.
+  // Flow control: the ring expects a packetAck for each accepted daily NOTIFY;
+  // ringDailyAckWaitsForHistory decides whether that waits for the model.
   R1PacketAckDescriptor descriptor;
-  if (r1MakeDailyPacketAckDescriptor(profile,
+  if ((historyAccepted || !ringDailyAckWaitsForHistory(profile)) &&
+      r1MakeDailyPacketAckDescriptor(profile,
                                      sRingActivityScratch.sourceSerial,
                                      R1_CMD_ACTIVITY, descriptor)) {
     ringQueuePacketAck(descriptor, generation);
@@ -3748,23 +3800,28 @@ static void ringProcessRxFrame(const uint8_t* data, size_t len,
           d.statusMethod == R1_STATUS_METHOD_SET &&
           d.statusAck == R1_STATUS_ACK_OK &&
           r1ProfileSupportsDailyPacketAck(sR1Profile, d.cmd);
-      // Preserve the established 2.2.7 ACK timing. On 2.2.9, however, the
-      // capture proves ACKs only for successfully decoded metric pages; never
-      // acknowledge a CRC-valid page that typed validation will discard.
-      const bool packetAckPayloadValid =
-          sR1Profile != R1_PROFILE_FW_2_2_9_0003 ||
-          ringDailyPayloadValid(d);
-      if (packetAckEligible && packetAckPayloadValid) {
-        R1PacketAckDescriptor descriptor;
-        if (r1PacketAckDescriptorFromDecoded(sR1Profile, d, descriptor)) {
-          ringQueuePacketAck(descriptor, generation);
-        }
+      R1PacketAckDescriptor packetAck;
+      const bool packetAckCandidate = packetAckEligible &&
+          r1PacketAckDescriptorFromDecoded(sR1Profile, d, packetAck);
+      // 2.2.7 keeps its established ACK timing: before the typed parse. On
+      // 2.2.9 the ACK follows the Health history model's verdict below, which
+      // implies the page also passed typed validation.
+      const bool ackWaitsForHistory = ringDailyAckWaitsForHistory(sR1Profile);
+      if (packetAckCandidate && !ackWaitsForHistory) {
+        ringQueuePacketAck(packetAck, generation);
       }
 
-      const bool firstCopy = ringRememberRx(d, generation);
+      RingRxFingerprint* seen = nullptr;
+      const bool firstCopy = ringRememberRx(d, generation, seen);
       if (!firstCopy) {
         DEBUG_RING_PROTOCOLF("[RING] RX duplicate ser=%u crc32=0x%08lX (typed ingestion skipped)",
                   (unsigned)d.serial, (unsigned long)d.crc32Received);
+        // The earlier ACK may have been lost: acknowledge a retransmit again
+        // when its first copy was accepted.
+        if (packetAckCandidate && ackWaitsForHistory &&
+            seen->historyAccepted) {
+          ringQueuePacketAck(packetAck, generation);
+        }
       } else {
         ringHandleSetupRx(d);
         RingControlTarget observedTarget = RING_CONTROL_NONE;
@@ -3773,7 +3830,12 @@ static void ringProcessRxFrame(const uint8_t* data, size_t len,
         ringHandleActiveRx(d, observedTarget, observed);
 
         // Typed consumers run only after the integrity/profile gate above.
-        ringExtractTelemetryCache(d, generation);
+        bool historyAccepted = false;
+        ringExtractTelemetryCache(d, generation, &historyAccepted);
+        seen->historyAccepted = historyAccepted;
+        if (packetAckCandidate && ackWaitsForHistory && historyAccepted) {
+          ringQueuePacketAck(packetAck, generation);
+        }
         // r1AnnotatePayload re-parses the page purely to label one
         // DEBUG_RING_PROTOCOLF line — same gate as the macro.
         if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_RING | DEBUG_RING_PROTOCOL)) {
@@ -4263,19 +4325,6 @@ static R1Frame ringBuildIntentFrame(const RingIntent& intent,
       // whatever the setting happens to be by the time this retry-safe build
       // runs (which may be a later owner-task pass than the enqueue).
       return gR1Encoder.buildSyncTime(intent.tzMin, intent.epoch);
-    }
-    case RING_INTENT_ADV_START: {
-      uint8_t right[6]{};
-      uint8_t left[6]{};
-      if (!g2GetRightTempleMac(right) || !g2GetLeftTempleMac(left)) {
-        error = G2_RING_ERR_IDENTITY_UNKNOWN;
-        return R1Frame{};
-      }
-      if (sR1Profile == R1_PROFILE_UNKNOWN) {
-        error = G2_RING_ERR_PROFILE_UNKNOWN;
-        return R1Frame{};
-      }
-      return gR1Encoder.buildAdvStart(sR1Profile, right, left);
     }
     case RING_INTENT_HEALTH_QUERY:
       if (sR1Profile == R1_PROFILE_UNKNOWN) {
@@ -6026,180 +6075,6 @@ bool g2RingBuildStatusJson(JsonObject out) {
 }
 
 // =============================================================================
-// Spoof-push to glasses
-// =============================================================================
-// The glasses' built-in UI normally consumes ring telemetry via a phone-app
-// bridge: the phone connects to both the ring and the glasses, polls the
-// ring, then forwards each metric in a sid=0x90 RingDataPackage frame to
-// the right temple. We're impersonating that bridge — we already have the
-// ring connected directly to us, so we poll the ring ourselves and synthesize
-// the same sid=0x90 frame to the glasses. The glasses don't know whether
-// the data came from a real bridge or our spoof.
-//
-// Only sent to the right temple — the left one ignores ring frames in the
-// official protocol. Send is best-effort: dropped silently if the right
-// temple isn't connected.
-static bool ringSpoofSendOnce(uint32_t magic) {
-  if (!gRing.connected) {
-    DEBUG_RING_BRIDGEF("[RING] spoof: ring not connected, skipping push");
-    return false;
-  }
-  // Keep the cache generation stable through the actual glasses send. A
-  // reconnect reset cannot publish a new link between selecting old values
-  // and transmitting them as if they belonged to that new session.
-  RingTelemetryGuard telemetry;
-  if (!telemetry.locked() || !gRing.connected) return false;
-
-  G2RingPushFields f = {};
-  uint32_t now = (uint32_t)time(nullptr);
-
-  if (gR1Cache.batteryValid) {
-    f.battery_valid = true;
-    f.battery       = (int32_t)gR1Cache.battery;
-  }
-  const bool liveVitalsSupported = g2RingPointPollingSupported() ||
-      g2RingHealthPageRefreshSupported();
-  if (liveVitalsSupported && gR1Cache.hrValid) {
-    f.hr_valid = true;
-    f.hr       = (int32_t)gR1Cache.hr;
-    f.hrTs     = (int32_t)gR1Cache.hrTs;
-  }
-  if (liveVitalsSupported && gR1Cache.hrvValid) {
-    f.hrv_valid = true;
-    f.hrv       = (int32_t)gR1Cache.hrv;
-    f.hrvTs     = (int32_t)gR1Cache.hrvTs;
-  }
-  if (liveVitalsSupported && gR1Cache.spo2Valid) {
-    f.spo2_valid = true;
-    f.spo2       = (int32_t)gR1Cache.spo2;
-    f.spo2Ts     = (int32_t)gR1Cache.spo2Ts;
-  }
-
-  if (!f.battery_valid && !f.hr_valid && !f.hrv_valid && !f.spo2_valid) {
-    DEBUG_RING_BRIDGEF("[RING] spoof: cache empty (no fresh telemetry yet) "
-              "— nothing to push at t=%lu", (unsigned long)now);
-    return false;
-  }
-
-  uint8_t env[256];
-  uint8_t seq = g2AllocSeq();
-  size_t envLen = g2BuildRingRawDataPush(seq, magic, f, env, sizeof(env));
-  if (envLen == 0) {
-    DEBUG_RING_BRIDGEF("[RING] spoof: builder failed (envelope buffer too small?)");
-    return false;
-  }
-  bool ok = g2SendToRightTemple(env, envLen);
-  DEBUG_RING_BRIDGEF("[RING] spoof TX seq=0x%02X envLen=%u %s — "
-            "batt=%s%d hr=%s%d hrv=%s%d spo2=%s%d",
-            seq, (unsigned)envLen, ok ? "sent" : "DROPPED(R-temple down?)",
-            f.battery_valid ? "" : "?", f.battery,
-            f.hr_valid      ? "" : "?", f.hr,
-            f.hrv_valid     ? "" : "?", f.hrv,
-            f.spo2_valid    ? "" : "?", f.spo2);
-  return ok;
-}
-
-// Background task — wakes every gSpoofIntervalSec, refreshes whatever the
-// active profile permits, then synthesizes the sid=0x90 push to the right
-// temple from the accepted cache.
-//
-// Legacy cadence per wake: hr → 700ms → hrv → 700ms → spo2 → 700ms
-// → deviceStatus → 600ms → push. On 2.2.9, POINT is deliberately absent,
-// so this legacy bridge task refreshes deviceStatus only and pushes any
-// already-accepted DAILY/passive vitals in the cache.
-//
-// We keep using vTaskDelay between writes (the user feedback rule about
-// avoiding per-action tasks): one persistent task, multiple sequenced
-// writes inside it. DRAM cost is one task TCB + 4KB stack.
-static void ringSpoofTaskBody(void* /*arg*/) {
-  DEBUG_RING_BRIDGEF("[RING] spoof task: started, interval=%us", (unsigned)gSpoofIntervalSec);
-  uint32_t magicCounter = 0;
-  while (gSpoofEnabled) {
-    const uint32_t cycleStartedMs = millis();
-    if (gRing.connected && gRing.writeChar) {
-      // Poll each metric. Ignore queue failures — cache simply won't
-      // refresh for that metric this cycle.
-      auto sendQ = [](uint8_t cmd, uint8_t sub, uint8_t ckey, const char* tag) {
-        G2RingTransactionHandle handle{};
-        if (ringEnqueueHealthDataQuery(cmd, sub, ckey, &handle)) {
-          DEBUG_RING_BRIDGEF("[RING] spoof poll queued %s tx=%lu", tag,
-                    (unsigned long)handle.id);
-        }
-      };
-      if (g2RingPointPollingSupported()) {
-        sendQ(R1_CMD_HEARTRATE, R1_SUB_POINT, 1, "hrPoint");
-        vTaskDelay(pdMS_TO_TICKS(700));
-        sendQ(R1_CMD_HRV,       R1_SUB_POINT, 2, "hrvPoint");
-        vTaskDelay(pdMS_TO_TICKS(700));
-        sendQ(R1_CMD_SPO2,      R1_SUB_POINT, 3, "spo2Point");
-        vTaskDelay(pdMS_TO_TICKS(700));
-      } else {
-        DEBUG_RING_BRIDGEF(
-            "[RING] spoof: point refresh unsupported on active profile");
-      }
-
-      // Battery comes from deviceStatus — generic system-module probe.
-      {
-        G2RingTransactionHandle handle{};
-        if (ringEnqueueSystemQuery(R1_SUB_DEVICE_STATUS,
-                                   /*coalesceKey=*/5, &handle)) {
-          DEBUG_RING_BRIDGEF("[RING] spoof poll queued deviceStatus tx=%lu",
-                    (unsigned long)handle.id);
-        }
-      }
-      vTaskDelay(pdMS_TO_TICKS(600));
-
-      // Vary magic per cycle so a glasses-side dedup doesn't collapse
-      // identical-payload pushes.
-      uint32_t mag = G2_MAGIC_RING_RAW_PUSH + (magicCounter++ & 0x7F);
-      ringSpoofSendOnce(mag);
-    } else {
-      DEBUG_RING_BRIDGEF("[RING] spoof task: ring not connected — skipping cycle");
-    }
-
-    // Sleep the remainder of the interval. Small ticks so an `off` flip
-    // gets noticed quickly without bashing the scheduler.
-    const uint32_t targetMs = gSpoofIntervalSec * 1000u;
-    const uint32_t elapsedMs = (uint32_t)(millis() - cycleStartedMs);
-    uint32_t remain = elapsedMs < targetMs ? targetMs - elapsedMs : 0;
-    while (remain > 0 && gSpoofEnabled) {
-      uint32_t step = remain > 500 ? 500 : remain;
-      vTaskDelay(pdMS_TO_TICKS(step));
-      remain -= step;
-    }
-  }
-  DEBUG_RING_BRIDGEF("[RING] spoof task: exiting");
-  gSpoofTaskHandle = nullptr;
-  vTaskDelete(nullptr);
-}
-
-static bool ringSpoofStart(uint32_t intervalSec) {
-  if (gSpoofEnabled) return false;
-  if (intervalSec < 10)  intervalSec = 10;
-  if (intervalSec > 600) intervalSec = 600;
-  gSpoofIntervalSec = intervalSec;
-  gSpoofEnabled     = true;
-  taskStackRecord("ring_spoof", 4096);
-  BaseType_t rc = xTaskCreatePinnedToCore(ringSpoofTaskBody, "ring_spoof",
-                              /*stack*/ 4096, nullptr,
-                              /*prio*/  4,    &gSpoofTaskHandle, APP_CORE);
-  if (rc != pdPASS) {
-    DEBUG_RING_BRIDGEF("[RING] spoof task: xTaskCreate failed (rc=%d)", (int)rc);
-    gSpoofEnabled    = false;
-    gSpoofTaskHandle = nullptr;
-    return false;
-  }
-  return true;
-}
-
-static void ringSpoofStop() {
-  // Task self-deletes on next loop iteration. We just flip the flag and
-  // let it wind down — avoids a vTaskDelete race against the task body's
-  // ring writes.
-  gSpoofEnabled = false;
-}
-
-// =============================================================================
 // CLI commands
 // =============================================================================
 
@@ -6282,6 +6157,44 @@ static const char* cmd_ringdisconnect(const String& /*args*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   g2RingDisconnect(/*userInitiated=*/true);
   return "RING: disconnect requested";
+}
+
+// ringcontrol <collection|lowpower> <preserve|on|off>
+//   The ring's health-collection (privacy) and low-power policies. Each is a
+//   persisted desired state that the transport owner applies to the ring
+//   asynchronously; `healthstatus` shows desired vs observed. The registry
+//   row is admin-only, so serial, web, OLED, BLE and MQTT get one refusal and
+//   the executor's audit line; the web and OLED Health controls submit this
+//   command instead of calling the setters.
+static const char* cmd_ringcontrol(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs ca(args);
+  String control = ca.arg(0);
+  String value = ca.arg(1);
+  control.toLowerCase();
+  value.toLowerCase();
+  const bool collection = control == "collection";
+  if (ca.count() != 2 || (!collection && control != "lowpower")) {
+    return "Error: invalid arguments — Usage: ringcontrol <collection|lowpower> <preserve|on|off>";
+  }
+  G2RingDesiredState desired;
+  if (value == "preserve") desired = G2_RING_PRESERVE;
+  else if (value == "off") desired = G2_RING_OFF;
+  else if (value == "on") desired = G2_RING_ON;
+  else return "Error: value must be preserve, off, or on";
+  const bool accepted = collection ? g2RingSetHealthCollectionDesired(desired)
+                                   : g2RingSetLowPowerDesired(desired);
+  if (!accepted) return "Error: desired policy not accepted";
+  G2RingControlStatus status{};
+  g2RingGetControlStatus(status);
+  if (collection) {
+    return status.healthLastError == G2_RING_ERR_FEATURE_UNSUPPORTED
+        ? "health collection preference saved; this operation is unsupported on the active ring profile, so no command was sent"
+        : "health collection policy accepted; 0x0E has no proven readback, so ACK is not observed state";
+  }
+  return status.lowPowerLastError == G2_RING_ERR_FEATURE_UNSUPPORTED
+      ? "low-power preference saved; unsupported on the active ring profile, so no command was sent"
+      : "low-power policy accepted; awaiting verified readback observation";
 }
 
 // ringscan [seconds]
@@ -6594,385 +6507,15 @@ static const char* cmd_ringquery(const String& args) {
   return ret;
 }
 
-// ringtoglasses on [interval_sec] | off | now | status
-//
-// Spoof-push ring telemetry into the glasses' built-in UI by synthesizing
-// sid=0x90 RingDataPackage frames to the right temple. We poll the ring
-// directly (we already have it connected), cache decoded HR/HRV/SpO2/battery
-// from the notifies, and forward whatever's fresh to the glasses on a
-// periodic schedule. The glasses can't tell the data isn't coming from a
-// real phone-app bridge.
-//
-//   on [sec]   start the background pusher. Default 30s, clamp [10..600].
-//   off        stop pushing
-//   now        send a one-shot push using whatever's currently in the cache
-//              (won't poll first — useful to test the codec without waiting
-//              a whole interval)
-//   status     print enable flag, interval, and current cache contents
-// DEPRECATED: unregistered from g2RingCommands — see registry table for why.
-// Kept as compiled reference so the spoof-push plumbing isn't lost.
-__attribute__((unused))
-static const char* cmd_ringtoglasses(const String& args) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  EXT_RAM_BSS_ATTR static char ret[300];
-  CommandArgs ca(args);
-  String sub = ca.arg(0); sub.toLowerCase();
-
-  if (sub == "" || sub == "status") {
-    G2RingTelemetry telemetry{};
-    g2RingGetTelemetry(telemetry);
-    snprintf(ret, sizeof(ret),
-             "ringtoglasses: %s interval=%us cache: hr=%s%u hrv=%s%d spo2=%s%u batt=%s%u",
-             gSpoofEnabled ? "ON" : "off",
-             (unsigned)gSpoofIntervalSec,
-             telemetry.hrValid      ? "" : "?", (unsigned)telemetry.hr,
-             telemetry.hrvValid     ? "" : "?", (int)telemetry.hrv,
-             telemetry.spo2Valid    ? "" : "?", (unsigned)telemetry.spo2,
-             telemetry.batteryValid ? "" : "?", (unsigned)telemetry.battery);
-    return ret;
-  }
-
-  if (sub == "on") {
-    if (gSpoofEnabled) return "ringtoglasses: already running (use 'off' to stop first)";
-    long secs = (ca.count() >= 2) ? ca.argInt(1, 30) : 30;
-    if (secs < 10)  secs = 10;
-    if (secs > 600) secs = 600;
-    if (!ringSpoofStart((uint32_t)secs)) {
-      return "Error: ringtoglasses: failed to start task (out of memory?)";
-    }
-    snprintf(ret, sizeof(ret),
-             "ringtoglasses: started (interval=%lds). First push in ~%lds.",
-             secs, secs);
-    return ret;
-  }
-
-  if (sub == "off") {
-    if (!gSpoofEnabled) return "ringtoglasses: not running";
-    ringSpoofStop();
-    return "ringtoglasses: stop requested (task winds down on next cycle)";
-  }
-
-  if (sub == "now") {
-    if (!ringSpoofSendOnce(G2_MAGIC_RING_RAW_PUSH)) {
-      return "Error: ringtoglasses: one-shot push failed (cache empty? right temple down?)";
-    }
-    return "ringtoglasses: one-shot push sent (see [RING] spoof TX log)";
-  }
-
-  return "Error: invalid arguments — Usage: ringtoglasses <on [sec]|off|now|status>";
-}
-
-// =============================================================================
-// Bridge keepalive task
-// =============================================================================
-// Phase 5 of docs/g2_proto/Ring_Bridge_Sequence.h: while the bridge is active,
-// the host maintains a 30-second heartbeat on sid=0x80 cmd=14
-// (BASE_CONNECT_HEARTBEAT, empty body) to keep the temple's bridge state from
-// timing out. Without this the bridge has been observed to fail to complete
-// its bond with the ring — the temple ack's our RING_CONNECT_INFO trigger but
-// then sits silent.
-//
-// Started by `ringbridge on`, stopped by `ringbridge off` (or any path that
-// flips gBridgeRequested to false). Sends to BOTH temples — the doc is
-// ambiguous about whether only the right one needs it; both is cheap and
-// matches the existing g2devcfg-heartbeat broadcast pattern.
-static volatile bool   gBridgeHbEnabled    = false;
-static TaskHandle_t    gBridgeHbTaskHandle = nullptr;
-
-static void ringBridgeHeartbeatBody(void* /*arg*/) {
-  DEBUG_RING_BRIDGEF("[RING] bridge-heartbeat task: started (30s cadence)");
-  while (gBridgeHbEnabled) {
-    uint8_t env[40];
-    size_t envLen = g2BuildDevCfgHeartbeat(g2AllocSeq(),
-                                           G2_MAGIC_DEVCFG_HEARTBEAT,
-                                           env, sizeof(env));
-    if (envLen > 0) {
-      bool ok = g2SendToRightTemple(env, envLen);
-      DEBUG_RING_BRIDGEF("[RING] bridge-heartbeat → R: %s",
-                ok ? "sent" : "DROPPED (R-temple down)");
-    }
-    // Sleep 30s in 500ms slices so an `off` flip lands quickly.
-    uint32_t remain = 30000;
-    while (remain > 0 && gBridgeHbEnabled) {
-      uint32_t step = remain > 500 ? 500 : remain;
-      vTaskDelay(pdMS_TO_TICKS(step));
-      remain -= step;
-    }
-  }
-  DEBUG_RING_BRIDGEF("[RING] bridge-heartbeat task: exiting");
-  gBridgeHbTaskHandle = nullptr;
-  vTaskDelete(nullptr);
-}
-
-static bool ringBridgeHeartbeatStart() {
-  if (gBridgeHbEnabled) return true;
-  gBridgeHbEnabled = true;
-  taskStackRecord("ring_bridge_hb", 3072);
-  BaseType_t rc = xTaskCreatePinnedToCore(ringBridgeHeartbeatBody, "ring_bridge_hb",
-                              /*stack*/ 3072, nullptr,
-                              /*prio*/  3,    &gBridgeHbTaskHandle, APP_CORE);
-  if (rc != pdPASS) {
-    DEBUG_RING_BRIDGEF("[RING] bridge-heartbeat: xTaskCreate failed (rc=%d)", (int)rc);
-    gBridgeHbEnabled    = false;
-    gBridgeHbTaskHandle = nullptr;
-    return false;
-  }
-  return true;
-}
-
-static void ringBridgeHeartbeatStop() {
-  // Task self-deletes on next loop iteration.
-  gBridgeHbEnabled = false;
-}
-
-// =============================================================================
-// Bridge progress mirror — populated by parseSid80Rx via a public hook
-// =============================================================================
-// The right temple reports bridge-attempt progress via the connRet field on
-// sid=0x80 RING_CONNECT_INFO polls. We capture the most recent value here so
-// `ringbridge status` can show it without forcing the user to scroll logs.
-//
-// connRet values seen in the wild (from R1_RE_Reference / live captures):
-//   0  unknown / not reported
-//   1  scanning (temple is looking for the ring)
-//   8  fail-terminal (bond attempt gave up)
-//   19 scanning? (alternative scanning code)
-//   62 unknown error (sometimes seen during bridge teardown)
-//   <other>  see connRetHint() in G2_Glasses.cpp for the full table
-struct R1BridgeProgress {
-  uint32_t lastConnRet;     uint32_t lastConnRetMs;     bool hasConnRet;
-  uint32_t lastConnectRing; uint32_t lastConnectRingMs; bool hasConnectRing;
-};
-static R1BridgeProgress gBridgeProgress;
-
+// Bridge-progress hook for sid=0x80 RING_CONNECT_INFO polls from a temple.
+// Nothing in this module consumes temple bridge progress, so the report is
+// ignored; the hook stays so the G2 receive path can keep calling it.
 void g2RingNoteBridgePoll(uint64_t connRet, bool hasConnRet,
                           uint64_t connectRing, bool hasConnectRing) {
-  uint32_t now = millis();
-  if (hasConnRet) {
-    gBridgeProgress.lastConnRet   = (uint32_t)connRet;
-    gBridgeProgress.lastConnRetMs = now;
-    gBridgeProgress.hasConnRet    = true;
-  }
-  if (hasConnectRing) {
-    gBridgeProgress.lastConnectRing   = (uint32_t)connectRing;
-    gBridgeProgress.lastConnectRingMs = now;
-    gBridgeProgress.hasConnectRing    = true;
-  }
-}
-
-// ringbridge on | off | status
-//
-// Hand the ring's BLE link off to the right temple's built-in bridge
-// firmware so the glasses' OWN health UI displays ring data natively. The
-// temple cannot bridge while we hold the ring (it's a single-central
-// peripheral), so `on` first drops our link + disables auto-reconnect,
-// then sends sid=0x80 cmd=6 RING_CONNECT_INFO with connectRing=true to the
-// right temple. The temple then scans for the ring, bonds, and starts
-// forwarding telemetry to us as sid=0x90 RingDataPackage frames — which
-// our handleEnvelope→g2RingNoteForwardedTelemetry path catches and pushes
-// into the same gR1Cache the direct path uses.
-//
-// `off` reverses the handoff: send connectRing=false to the temple to
-// release the ring, re-enable auto-reconnect (so a future boot grabs it
-// directly), and optionally `ringconnect` ourselves.
-//
-// `status` reports the current mode + cache state.
-//
-// We persist the mode in `gBridgeRequested` (RAM-only — survives the rest
-// of the session but a reboot returns to the bleautoreconnect default).
-static volatile bool gBridgeRequested = false;
-
-// DEPRECATED: unregistered from g2RingCommands — see registry table for why.
-// Kept as compiled reference so the RING_CONNECT_INFO + heartbeat plumbing
-// isn't lost.
-__attribute__((unused))
-static const char* cmd_ringbridge(const String& args) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  EXT_RAM_BSS_ATTR static char ret[300];
-  CommandArgs ca(args);
-  String sub = ca.arg(0); sub.toLowerCase();
-  BlePeerSavedTargetSnapshot savedRing{};
-  (void)blePeerSavedTargetSnapshot(BLE_PEER_R1_RING, savedRing);
-
-  if (sub == "" || sub == "status") {
-    G2RingTelemetry telemetry{};
-    g2RingGetTelemetry(telemetry);
-    // Decode the most recent connRet for a friendly hint.
-    const char* connRetWord = "?";
-    char ageBuf[24] = {0};
-    if (gBridgeProgress.hasConnRet) {
-      switch (gBridgeProgress.lastConnRet) {
-        case 0:  connRetWord = "idle";          break;
-        case 1:  connRetWord = "scanning";      break;
-        case 8:  connRetWord = "fail-terminal"; break;
-        case 19: connRetWord = "scanning?";     break;
-        case 62: connRetWord = "err?";          break;
-        default: connRetWord = "?";             break;
-      }
-      uint32_t ageMs = millis() - gBridgeProgress.lastConnRetMs;
-      snprintf(ageBuf, sizeof(ageBuf), " %us-ago", (unsigned)(ageMs / 1000));
-    }
-    snprintf(ret, sizeof(ret),
-             "ringbridge: mode=%s autoReconnect=%s ring-link=%s heartbeat=%s "
-             "tempStatus: connectRing=%s%u connRet=%u(%s)%s "
-             "fwd-cache: hr=%s%u hrv=%s%d spo2=%s%u batt=%s%u",
-             gBridgeRequested ? "BRIDGE (temple owns ring)" : "DIRECT (we own ring)",
-             blePeerAutoReconnectEnabled(BLE_PEER_R1_RING) ? "on" : "off",
-             gRing.connected ? "up" : "down",
-             gBridgeHbEnabled ? "on" : "off",
-             gBridgeProgress.hasConnectRing ? "" : "?",
-             (unsigned)gBridgeProgress.lastConnectRing,
-             (unsigned)gBridgeProgress.lastConnRet, connRetWord, ageBuf,
-             telemetry.hrValid      ? "" : "?", (unsigned)telemetry.hr,
-             telemetry.hrvValid     ? "" : "?", (int)telemetry.hrv,
-             telemetry.spo2Valid    ? "" : "?", (unsigned)telemetry.spo2,
-             telemetry.batteryValid ? "" : "?", (unsigned)telemetry.battery);
-    return ret;
-  }
-
-  if (sub == "on") {
-    // Need a saved ring MAC + name to tell the temple what to bond with.
-    // Prefer the live values if we're connected; fall back to the persisted
-    // peer-registry entry.
-    String mac;
-    String name;
-    if (gRingDeviceAddress.length() > 0) {
-      mac  = gRingDeviceAddress;
-      name = gRingDeviceName;
-    } else {
-      mac = savedRing.target.mac1;
-    }
-    mac.trim(); name.trim();
-    if (mac.length() < 17) {
-      return "Error: ringbridge on: no ring MAC known — `ringconnect` once first "
-             "(or `ringscan`) so we have something to tell the temple.";
-    }
-    if (name.length() == 0) {
-      // FlutterApp comments suggest the name doesn't actually matter
-      // operationally (the temple uses MAC for the connect), but the proto
-      // requires non-empty bytes. Use a placeholder if we don't know it.
-      name = "EVEN R1";
-    }
-
-    // Parse "02:48:57:31:02:1c" → byte array (BLE address order = high byte
-    // first). g2BuildDevCfgRingConnect reverses internally to wire order.
-    uint8_t macBle[6] = {0};
-    {
-      const char* s = mac.c_str();
-      for (int i = 0; i < 6; i++) {
-        unsigned v = 0;
-        if (sscanf(s + i * 3, "%2x", &v) != 1) {
-          return "Error: ringbridge on: failed to parse ring MAC";
-        }
-        macBle[i] = (uint8_t)v;
-      }
-    }
-
-    // FlutterApp's ring_bridge_coordinator.dart sequence:
-    //   if (!g2.isConnected || !r1.isConnected) return;
-    //   await r1.sendAdvStart(g2RightId: g2.rightId!);
-    //   await g2.sendConnectRing(...);
-    // Two important properties:
-    //   1. The ring MUST already be connected to us (the host). The R1 ring
-    //      supports multi-central — the temple bonds with it in PARALLEL while
-    //      we keep our link. An earlier version of this firmware disconnected
-    //      from the ring before triggering, which appears to have killed the
-    //      pairing context the ring needed to accept the temple's bond.
-    //   2. Firmware 2.2.7.0005 requires both temple identities. The profiled
-    //      encoder emits reversed-right followed by reversed-left; missing
-    //      either identity fails closed.
-    if (!gRing.connected || !gRing.writeChar) {
-      return "Error: ringbridge on: ring is not currently connected — run "
-             "`ringconnect` first, then re-issue `ringbridge on`. The R1 must "
-             "stay connected to us throughout the bridge (the temple bonds in "
-             "parallel; multi-central is supported).";
-    }
-
-    {
-      G2RingTransactionHandle advHandle{};
-      if (!ringEnqueueAdvStart(&advHandle)) {
-        DEBUG_RING_BRIDGEF("[RING] ringbridge: WARN dual-MAC advStart not queued; "
-                  "trigger will go without refresh");
-      } else {
-        // Dormant diagnostic path: wait only for the owner-correlated ACK;
-        // encoder serial allocation and the GATT write remain owner-exclusive.
-        for (uint8_t i = 0; i < 30; ++i) {
-          G2RingTransactionStatus status{};
-          if (g2RingGetTransactionStatus(advHandle, status) &&
-              status.completedAtMs != 0) break;
-          vTaskDelay(pdMS_TO_TICKS(100));
-        }
-      }
-    }
-
-    // Build + send RING_CONNECT_INFO to the right temple. seq=0 — we don't
-    // expect to correlate replies with this since we're not tracking the
-    // bridge-attempt response yet (the temple will report progress via the
-    // sid=0x80 connRet polls we already log).
-    uint8_t env[80];
-    size_t envLen = g2BuildDevCfgRingConnect(g2AllocSeq(),
-                                             G2_MAGIC_DEVCFG_RING_CONNECT,
-                                             /*connect=*/true,
-                                             macBle, name.c_str(),
-                                             env, sizeof(env));
-    if (envLen == 0) return "Error: ringbridge on: failed to build RING_CONNECT_INFO frame";
-    if (!g2SendToRightTemple(env, envLen)) {
-      return "Error: ringbridge on: send to right temple failed (R-temple down?)";
-    }
-    gBridgeRequested = true;
-    // Start the 30s keepalive so the temple's bridge state doesn't time out.
-    ringBridgeHeartbeatStart();
-    snprintf(ret, sizeof(ret),
-             "ringbridge: ON requested. We are STAYING connected to the ring "
-             "(R1 supports multi-central — temple bonds in parallel). Temple "
-             "should bond %s within ~10-20s; watch for [G2-R] sid=0x80 RX "
-             "RING_CONNECT_INFO connRet=N transitions, then [G2-R] sid=0x90 "
-             "forward frames once data is flowing. Re-run `ringbridge status` "
-             "to check progress.",
-             mac.c_str());
-    return ret;
-  }
-
-  if (sub == "off") {
-    // Same payload shape as `on`, but connectRing=false — releases the
-    // ring on the temple side. Use cached MAC/name.
-    String mac  = gRingDeviceAddress.length() ? gRingDeviceAddress
-                                              : String(savedRing.target.mac1);
-    String name = gRingDeviceName.length() ? gRingDeviceName : String("EVEN R1");
-    mac.trim();
-    if (mac.length() < 17) {
-      return "Error: ringbridge off: no MAC known to address the release — "
-             "send `g2devcfg ring <mac> <name>` manually if you need to.";
-    }
-    uint8_t macBle[6] = {0};
-    {
-      const char* s = mac.c_str();
-      for (int i = 0; i < 6; i++) {
-        unsigned v = 0;
-        if (sscanf(s + i * 3, "%2x", &v) != 1) {
-          return "Error: ringbridge off: failed to parse ring MAC";
-        }
-        macBle[i] = (uint8_t)v;
-      }
-    }
-    uint8_t env[80];
-    size_t envLen = g2BuildDevCfgRingConnect(g2AllocSeq(),
-                                             G2_MAGIC_DEVCFG_RING_CONNECT,
-                                             /*connect=*/false,
-                                             macBle, name.c_str(),
-                                             env, sizeof(env));
-    if (envLen == 0) return "Error: ringbridge off: failed to build release frame";
-    if (!g2SendToRightTemple(env, envLen)) {
-      return "Error: ringbridge off: send to right temple failed (R-temple down?)";
-    }
-    gBridgeRequested = false;
-    ringBridgeHeartbeatStop();
-    return "ringbridge: OFF requested. Temple should drop the ring within "
-           "~5-10s. Our own ring link is unaffected (we kept it during the "
-           "bridge), so direct `ringquery ...` commands continue to work.";
-  }
-
-  return "Error: invalid arguments — Usage: ringbridge <on|off|status>";
+  (void)connRet;
+  (void)hasConnRet;
+  (void)connectRing;
+  (void)hasConnectRing;
 }
 
 extern const CommandEntry g2RingCommands[] = {
@@ -6981,23 +6524,13 @@ extern const CommandEntry g2RingCommands[] = {
   { "ringconnect",    "Connect to the R1 ring: ringconnect [mac|reconnect]", true, cmd_ringconnect, "Usage: ringconnect [mac|reconnect]  (no arg = scan-then-connect; mac = direct; reconnect = drop+settle+connect)" },
   { "ringdisconnect", "Disconnect from the R1 ring",               true, cmd_ringdisconnect },
   { "ringquery",      "Queue an R1 query: ringquery <wear|hr|hrv|spo2|temp|activity|sleep|raw> [type]", false, cmd_ringquery, "Usage: ringquery <wear|hr|hrv|spo2|temp|activity|sleep> [daily|point|measure] | raw <module> <cmd> <subCmd> [hex_payload] [status=NN]  (raw is admin-only; SET requires confirmation)" },
-  // NOTE: `ringtoglasses` and `ringbridge` are UNREGISTERED on purpose.
-  // Both targeted getting ring data onto the G2's built-in health UI, and
-  // both are dead ends. See R1_RING_PROTOCOL.md §13 for the full writeup:
-  //   * ringtoglasses (postman) — pushed RingDataPackage on sid=0x90 to the
-  //     right temple. Temple silently ignores; the community RE codebases
-  //     never send in that direction either (sid=144/145 are temple→host,
-  //     not host→temple).
-  //   * ringbridge   (matchmaker) — issued RING_CONNECT_INFO so the temple
-  //     bonds with the ring directly. Fails with connRet=8 (terminal)
-  //     because the R1 firmware accepts only one BLE central at a time
-  //     and we still hold the link. Releasing the ESP32's link doesn't
-  //     help either (verified empirically; see §13).
-  // The implementations of `cmd_ringtoglasses` / `cmd_ringbridge` and their
-  // helpers (spoof task, bridge-heartbeat task, telemetry cache,
-  // g2BuildRingRawDataPush) are kept compiled-in but unreachable, so any
-  // future investigator can re-register them and pick up where we stopped
-  // without re-implementing the plumbing.
+  { "ringcontrol",    "Set ring health collection or low power: ringcontrol <collection|lowpower> <preserve|on|off>", true, cmd_ringcontrol, "Usage: ringcontrol <collection|lowpower> <preserve|on|off>  (persisted desired state, applied to the ring asynchronously; healthstatus shows desired/observed)" },
+  // Ring data is not pushed into the G2's built-in health UI: the temple
+  // ignores host-sent sid=0x90 RingDataPackage frames, and a temple-side
+  // RING_CONNECT_INFO bridge fails (connRet=8) because the R1 accepts one
+  // central at a time. The `ringtoglasses` / `ringbridge` experiment that
+  // showed this is in history at f4cc542 (G2_Ring.cpp); its write-up is
+  // R1_RING_PROTOCOL.md section 13 as last tracked at c9b070c^.
 };
 extern const size_t g2RingCommandsCount =
     sizeof(g2RingCommands) / sizeof(g2RingCommands[0]);

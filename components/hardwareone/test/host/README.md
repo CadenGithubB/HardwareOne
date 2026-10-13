@@ -2485,6 +2485,805 @@ routing, a connected cell, battery chemistry, or the charger circuit. Target
 builds and physical/meter comparison remain separate qualification steps.
 
 
+## ESP-NOW remote file RPC requester gate
+
+`espnow_fs_transcript_privacy` (see "Filesystem and G2 PSRAM output") also
+checks who the FS_LIST/STAT/GET handlers serve. A request from any MAC other
+than the bonded peer, or from the bonded peer without a live bond session, is
+answered `PERM_DENIED` before an identity is installed or the filesystem is
+touched; a served request runs under the reserved bond identity rather than
+SYSTEM. A second compile with `ENABLE_BONDED_MODE=0` expects every request to
+be refused. Source-contract checks confirm that `/api/bond/fs/list`,
+`/api/bond/fs/get` and the OLED peer browser pass `hasAdminPrivilege` before
+sending a request. `--source-dir <component-directory>` replays the former
+SYSTEM-identity serving.
+
+## ESP-NOW peer metadata text and page rendering
+
+`espnow_metadata_text` extracts the production metadata types and runs the
+metadata text policy, the METADATA RESP/PUSH receive handler, `processMetadata`
+and the `espnowroom`/`zone`/`tags`/`friendlyname` setter (`metaGetSet`) against
+host doubles for the registry, mesh cache, settings writes, events and logging.
+Hostile peer text is replaced byte for byte with `_` before it reaches the mesh
+cache or the persisted registry, with one WARN that carries the count and the
+sender MAC only; the setters reject control bytes and `< > " ' & \` before any
+write or event; clean ASCII and UTF-8 values are stored unchanged. This suite
+uses ASan/UBSan when `HW1_SANITIZE=ON`.
+
+`espnow_page_render` runs the shipping `web_assets/espnow-core.js` (device list,
+peer metadata panel) and the `WebPage_ESPNow.h` script chunk that draws the graph
+view, unmodified, against a fake `hw`/DOM on whatever JavaScript engine
+`tools/webui/js_engine.py` finds (node, deno, jsc, ...). Peer names and metadata
+must reach `innerHTML` as literal text, clean text must render unchanged, and the
+Pair button must pass a discovered name with quotes intact. Static source
+contracts on the same renderers run first; `--contract-only` runs only those.
+When no engine exists and the contracts pass, the suite exits 77, which CTest
+reports as skipped. Both suites take `--source-dir <component-directory>` to
+replay other production sources, such as the pre-fix tree.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^(espnow_metadata_text|espnow_page_render)$' --output-on-failure
+```
+
+These checks do not open a browser or exchange real ESP-NOW frames.
+
+## ESP-NOW dispatch policy
+
+`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. Once the device has a mesh passphrase, SENSOR_STATUS, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. Every zero-flag row is on an explicit allow-list (handshakes, HEARTBEAT, TOPO_*, USER_SYNC); this is a subset check, so later items may only shrink the list. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
+
+## ESP-NOW fragment reassembly
+
+`espnow_reassembly` runs the production V4 fragment reassembler from `System_ESPNow.cpp` (entry allocation, GC, `v4_reasm_accept`, `v4_reasm_release` and `v4_dispatch_post_cleanup`) on crafted plaintext fragments, with the table allocated exactly as init does. It checks in-order and out-of-order completion with learned strides (direct 200 B and routed 130 B), duplicates and GC; that a fragment whose type, count or index disagrees with its entry is dropped; that a fragCount above `V4_FRAG_MAX` gets no entry; that a completion larger than the entry's buffer is refused; and, in separate invocations, the late-stride over-size case and cleanup when the table was never allocated. Source contracts check that `v4_try_handle_incoming` reaches the table only through these helpers. `--component <component-directory>` or `--source-dir <overlay>` replays the former over-read and null dereference. It uses ASan/UBSan when `HW1_SANITIZE=ON` and does not exercise sessions, ACKs or the radio.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^espnow_reassembly$' --output-on-failure
+```
+
+(Alternative placement: as a paragraph after `espnow_disabled_interface` in "Network build selection and disabled ESP-NOW", adding `espnow_reassembly` to that section's `ctest -R` line.)
+
+## ESP-NOW session replay window
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_session_replay.py --sanitize
+```
+
+`espnow_session_replay` drives the production session wrap, unwrap, rekey-apply, REKEYING/abort and prev-key
+sweep through two rekeys with a receiver record and a scripted peer on the host. Frames recorded under the
+previous key must be rejected by that key's own replay window after the rekey, a genuinely late old-key frame is
+accepted once without touching the new key's window, and new-key traffic from sequence 1 is accepted. The AEAD,
+clock, TX guard, drain and logging are harness doubles; `--source-dir <component-directory>` replays the
+regression against a pre-fix tree. No radio is used.
+
+## ESP-NOW session rekey retry
+
+`espnow_rekey_retry` runs the production SESSION_REKEY initiator, responder and retry sweep from
+`System_ESPNow_Handlers_Crypto.cpp` (`sendRekey`, `runDeferredRekey`, `espnowRekeyInitiate`, the in-flight table and
+`rekeyRetrySweep`) together with the session lifecycle functions from `System_ESPNow_Sessions.cpp`, against modelled
+peers with deterministic stand-in crypto; the radio, clock, logging, lock and allocation boundaries are host doubles.
+It checks that an unanswered initiator REKEY is re-sent at 2 s and 4 s as the identical frame with its original msgId,
+that a session still REKEYING at 6 s is dropped so the next send re-handshakes, that answered, aborted, replaced and
+responder-side rekeys are never re-sent, that sixteen rekeys outstanding at once are all covered, that a refused send
+leaves the session ACTIVE while the `kRekeyMinIntervalMs` re-init guard still spaces the next attempt, and that no
+frame is sent under `EspNowTxGuard`. It also runs the espnow tick's REKEY auto-trigger (step 1e of
+`processMeshHeartbeats` in `System_ESPNow.cpp`, plus a source contract on it) every 10 ms: a session that
+`espnowRekeyInitiate` would refuse gets no log line per tick. `--source-dir <component-directory>` replays the former stranded-REKEYING
+behaviour. It does not qualify libsodium primitives or radio timing.
+
+## ESP-NOW session handshake freshness
+
+`espnow_session_rekey` drives the production SESSION_OPEN / SESSION_CONFIRM / SESSION_REKEY handlers and
+initiators from `System_ESPNow_Handlers_Crypto.cpp`, with the `System_ESPNow_Sessions.cpp` lifecycle, wrap and
+unwrap functions, between two modelled devices that exchange the real handshake frames. Clock, logging, lock,
+allocation, the radio and the deferred (cmd_exec) queue are host doubles, and the crypto primitives are
+deterministic stand-ins. It checks that a re-delivered REKEY is ignored with one WARN and no reply (nonce of the
+last REKEY acted on, 30 s applied-at interval, sequence window), that an older REKEY copy ends in one converged
+extra round instead of an endless exchange, that a re-delivered SESSION_OPEN (the slot's live or a recent session
+id) keeps the live session, and that normal, concurrent, retransmitted, glare and post-reboot handshakes still
+converge. `--source-dir <component-directory>` replays the former REKEY storm and session reset against a pre-fix
+tree. It does not qualify libsodium primitives or radio timing.
+
+## ESP-NOW deadlines across the millis() wrap
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_deadline_wrap.py --sanitize
+```
+
+`espnow_deadline_wrap` compiles the production prev-key unwrap, rekey apply and prev-key sweep from
+`System_ESPNow_Sessions.cpp` (unit 1), and the sensor-subscription apply with its lease-expiry owner from
+`System_ESPNow_Sensors.cpp` plus the session pre-warm backoff owners from `System_ESPNow.cpp` (unit 2), against an
+injectable clock placed on both sides of the 32-bit `millis()` rollover. It checks that the 5 s previous-key
+window, a leased sensor subscription and the 60 s pre-warm cooldown neither outlive the wrap by ~49.7 days nor
+lapse at once, that a deadline landing on zero is never stored as "none", and that leases longer than INT32_MAX ms
+are capped. Source contracts confirm the sensor broadcaster task and the heartbeat handler call those owners
+instead of comparing absolute times. `System_ESPNow_Deadline.h` is pasted when the overlay or the component has it
+(`espnow_session_replay` and `espnow_rekey_retry` paste it the same way); `--source-dir <component-directory>`
+replays the pre-fix sources. No radio is used.
+
+## ESP-NOW peer message store
+
+`espnow_message_store` compiles the whole message-buffer section of
+`System_ESPNow.cpp` (slot table, received and sent rings, chunked store, merged
+reads, collapsed views, `espnowCopyCollapsedHead`, delivery stamps) with the
+store's types and declarations from `System_ESPNow.h` and FreeRTOS mutex,
+allocation, clock and logging doubles. Each case runs in its own process. The
+cases check that a collapsed ref taken before new peers arrive still reads its
+own record, that reads for unknown MACs create no slot and allocate nothing,
+that history blocks never move, that the 17th peer is refused, that a ref whose
+ring index was reused is refused, and that a refused or contended store lock
+changes nothing and is never left held. A storing thread also races the readers
+under ASan/UBSan; `--thread-sanitize` reruns that race under ThreadSanitizer.
+Every case checks that no log line is written while the store lock is held.
+Source contracts confirm that the OLED and G2 screens copy records through
+`espnowCopyCollapsedHead` and hold no pointers into the history.
+`--source-dir <component-directory>` replays the former use-after-free. No
+radio, display or filesystem is touched.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^espnow_message_store$' --output-on-failure
+python3 test_espnow_message_store.py --thread-sanitize
+```
+
+## ESP-NOW FS RPC locking
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_fslist_locking.py --sanitize
+```
+
+`espnow_fslist_locking` compiles the FS RPC pending table, deferred slot, lock guard, send/cancel API, request capture, reply matching, cmd_exec runner and timeout sweep from `System_ESPNow_FsList.cpp` (with the packed wire structs and the header's tunables and callback typedefs) into a harness where host threads stand in for httpd, espnow_task and cmd_exec. The FreeRTOS mutex double honors bounded waits and records its owner; the blocking send can be parked on a gate (a stalled tx dispatcher); the per-op workers are counting doubles. It checks that no LIST/STAT/GET send holds the module mutex, that a captured request is served while a client send is blocked or another task holds the lock for 120 ms, that a request which cannot take the lock within espnow_task's bounded wait is answered TOO_BUSY, that the deferred slot is always released, that `fsListCancel` frees its slot so no callback fires afterwards, and that send failure, cmd_exec queue-full and the single-slot TOO_BUSY are unchanged. `--component <dir>` and `--source-dir <dir>` read production sources from another tree; the f4cc542 sources fail 14 checks (the cmd_exec runner gives up after 50 ms and leaves the slot pending, and the client sends hold the mutex). The tx dispatcher and radio delivery are not modeled.
+
+## ESP-NOW multi-frame sends and STREAM line size
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_tx_multiframe.py --sanitize
+```
+
+`espnow_tx_multiframe` compiles the production `espnowtx` namespace from `System_ESPNow_Tx.cpp` (queue, completion pool, `submit`/`submitSync`, `sendAead`/`sendAeadSync`, the dispatcher task body and `stop()`) against single-threaded FreeRTOS doubles and a stubbed radio whose multi-frame path models the per-fragment ACK wait; while a sender waits, producers submit fire-and-forget jobs and the dispatcher drains unless it is the task that is waiting. A 4 KB `sendAeadSync` from cmd_exec must run on cmd_exec with no queue drops among the 42 jobs submitted during its waits; the destination's single-frame cap decides (150 B from cmd_exec to a routed peer runs on cmd_exec, to a direct peer and exactly at 202 B it stays dispatcher work); another task's synchronous multi-frame job (httpd's 144 B FS request to a routed peer) stays dispatcher work; failure accounting, the self-deadlock guard, refusal before `init()` and after `stop()`, and the fire-and-forget path are unchanged. A second unit extracts `sendEspNowStreamMessage`, its session helper and lookup and `v4_single_frame_cap` from `System_ESPNow.cpp` and checks that STREAM lines are clamped to one frame (202 B direct, 130 B routed) on the legacy and the command-session path, with the rate limit, the cmd_exec-only session gate and suspension kept. The script checks that `System_ESPNow_Wire.h` still defines the budgets the doubles mirror. `--component <dir>` / `--source-dir <dir>` read the production sources from another tree; the f4cc542 sources fail the dispatcher-placement, queue-drop, routed-cap and four STREAM-length checks. Radio timing, real ACK loss and task stack depth are not modelled.
+
+## ESP-NOW metadata push
+
+`espnow_metadata_push` extracts the production metadata setters (`metaGetSet`
+with the metadata text policy, `cmd_espnow_stationary`, `cmd_espnow_setname`),
+`buildMetadataPayload`, `sendMetadata`, the metadata tracking block and
+`metadataPushTick` from `System_ESPNow.cpp`, plus the real `SessionState`,
+`EspNowEventCategory` and `V4PayloadMetadata` definitions, and runs them against
+doubles for the session table, the per-peer event subscription, the encrypted
+transport, settings and the clock. A local room/zone/tags/friendly name/
+stationary/device name change must reach every ACTIVE session whose peer
+subscribes to METADATA_PUSH as one type-55 frame after the settle window
+(ESTABLISHING, REKEYING, CLOSED and opted-out peers get nothing); a burst of
+edits coalesces into one frame; the deadline is millis()-wrap safe; a change
+made while ESP-NOW is down is kept; a failed send is not retried; rejected
+values do not arm a push; and the request/response path (forced RESP,
+debounced non-forced RESP) is unchanged. `--component <hardwareone dir>` and
+`--source-dir <overlay>` replay other production sources; a tree without the
+push tick compiles against a no-op tick and fails on behavior. ASan/UBSan under
+`HW1_SANITIZE=ON`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^espnow_metadata_push$' --output-on-failure
+```
+
+This check does not exchange real ESP-NOW frames.
+
+## OLED ESP-NOW unpair and discovery ownership
+
+`oled_espnow_ownership` executes the production OLED "Unpair Device" adapter
+(`oledEspNowUnpairDevice`, with the file-static `oledEspNowRunOwnerCommand`
+helper) and the `ESPNOW_VIEW_PAIRING` arm of `oledEspNowHandleInput` from
+`OLED_ESPNow.cpp`, with the real view/state types from `OLED_ESPNow.h` and
+`OLED_Display.h` and the command executor, toast and ESP-NOW owner as recorded
+doubles. It checks that the OLED submits `espnowunpair <MAC>` and
+`espnowpairmode 120|off` under the display identity, never calls the owner's
+peer-delete, registry-remove or pair-window functions itself, shows a short
+refusal toast ("Admin required" for the admin gate, "Unpair failed" /
+"Discovery failed" otherwise) without leaving the unpair view, treats the
+owner's save-warning reply as success, still leaves the discovery screen on B
+when the close is refused, and keeps the no-passphrase no-op, candidate
+navigation and the pair request unchanged. Static guards then require the
+helper and the absence of direct owner calls in `OLED_ESPNow.cpp`.
+`--component <dir>` points it at another copy of the sources; ASan/UBSan
+follow `HW1_SANITIZE`. Owner behavior (registry save, crypto teardown, events,
+authorization) is not exercised here.
+
+## OLED bonded-peer settings editor
+
+```sh
+python3 components/hardwareone/test/host/test_oled_remote_settings.py --sanitize
+```
+
+`oled_remote_settings` compiles the production OLED remote-settings module (`OLED_RemoteSettings.cpp` whole: schema-driven module builder, non-blocking schema fetch, remote apply and peer-reply outcome), the settings editor's module source and commit routing (`OLED_SettingsEditor.cpp`), the remote-settings mode adapter (`OLED_Mode_RemoteSettings.cpp`), the ESP-NOW command-result record (`System_ESPNow`) and BondedPeer's schema sync and remote-edit policy, against doubles for the OLED command executor, the peer caches, the clock, PSRAM allocation and the display. It checks that the remote screen lists only the peer's schema rows that carry a setter (no read-only, secret or float rows, no `users`/`bond`/`wifi`, only `ntpServer`/`tzOffsetMinutes` from `clock`) with the cached values, sends `remote:<cmdKey> <value>`, reports the peer's CMD_RESP failure (`Peer: ...`) or silence (`No reply from peer` after 5 s) instead of the local "sent" result, ignores another device's reply, never runs a local setter from the remote screen, fetches a missing schema once without blocking (6 s budget), does not let the local screen keep editing a peer module, and releases every PSRAM block and String it allocated, also when an allocation fails. A static check confirms the CMD_RESP drain publishes the redacted result. `--component <dir>` runs the same cases against saved sources; the f4cc542 sources fail them (modules built from settings.json without setters, `remote:set <jsonKey>` reported as applied, the local setter run from the remote screen). The radio link and the real display are not exercised.
+
+## BLE output privacy and console mirror
+
+`stt_ble_privacy` compiles the production BLE output seams from `Bluetooth.cpp` (the private-STT classifier, the trace/history redaction, the directed plaintext and secure per-session senders, the async command-result callback, and the console-mirror chokepoint `sendBLEResponse` with its recipient collector `bleCollectMirrorSessions`) against a four-slot fake GATT peer table. A directed send lands only in the addressed slot; the characteristic-wide notify lands in every connected slot, as the vendored Arduino wrapper sends it. The suite checks that private STT results never reach the trace or history mirrors, that command results reach exactly the originating session, and that the console mirror (`outble`, `blesend`) reaches only logged-in non-guest sessions. A connected peer that never logged in, a peer holding a Secure Channel without a login, a guest session, a logged-out slot and a disconnected slot receive nothing. No characteristic-wide notify is used, each recipient gets its own plaintext or encrypted copy, a congested recipient misses one flush without any recipient receiving a chunk twice, and secure-required mode still refuses plaintext. `--component <dir>` points the suite at another copy of the sources (the pre-fix tree fails the unauthenticated-peer, channel-only-peer and guest cases); `--cxx` selects the compiler; ASan/UBSan follow `--sanitize` / `HW1_SANITIZE`.
+
+```sh
+python3 components/hardwareone/test/host/test_stt_ble_privacy.py --sanitize
+```
+
+## BLE Secure Channel directed delivery
+
+`ble_sc_directed` compiles the production `System_BleSecureChannel.cpp` whole against harness-local libsodium, mbedTLS, FreeRTOS, settings and Arduino stand-ins (`ble_sc_stubs/`). It adds four pieces extracted from `Bluetooth.cpp`: the directed raw sender `bleRawNotifyToSession`, the session sender `sendBLEResponseToSession`, the console-mirror entry `sendBLEResponse` with its recipient collector, and the deferred inbound job `bleScDeferredInbound`. A two-peer fake GATT keeps one inbox per connection. A directed send lands only in the addressed connection; the characteristic-wide notify that pre-fix sources use lands in every connected one.
+
+The suite checks that HELLO_ACK, CONFIRM_ACK, both REJECT reasons and every DATA fragment (command results and `fileread ... bin` chunks) reach only the connection and session epoch they belong to, admitted under the BLE lifecycle guard. It also checks these cases:
+- A stale session epoch sends nothing.
+- A session rotated mid-message stops the transfer at the next fragment without resetting the channel.
+- When the server stops during a handshake (every epoch invalidated), no reply reaches the radio.
+- The console mirror sends each recipient one copy, directed or over its own channel.
+
+Crypto is a routing-neutral stand-in, so keys, radio timing and scheduling are not tested here. `--component <dir>` points the suite at another copy of the sources; the pre-fix tree fails every cross-connection case. `--cxx` selects the compiler; ASan/UBSan follow `--sanitize` / `HW1_SANITIZE`.
+
+```sh
+python3 components/hardwareone/test/host/test_ble_sc_directed.py --sanitize
+```
+
+## BLE Secure Channel policy
+
+`ble_sc_policy` compiles the production `System_BleSecureChannel.cpp` whole against the `ble_sc_stubs/` stand-ins it shares with `ble_sc_directed`. It splices the BLE command ingress from `Bluetooth.cpp`: the GATT write entry `processIncomingBLECommand`, the deferred secure-frame and plaintext jobs (`bleScDeferredInbound`, `blePlaintextDeferredInbound`), the command tail `processBleCommandLine` with its file-browser gate, and the directed and session senders. The fake GATT keeps one inbox per connection. A write runs the GATT entry as BTC_TASK; deferred jobs queue in submission order and run as cmd_exec_task after it returns, and the executor records which command would run for which session. The FreeRTOS doubles count every tx-mutex take that may wait and every delay made on BTC_TASK.
+
+The suite checks:
+- With the secure channel required, a plaintext write from a connection without a channel gets the fixed refusal on that connection only, in plaintext. A connection with a channel gets the refusal as one encrypted DATA frame, and its encrypted commands still run.
+- With no passphrase, plaintext commands run.
+- With encryption optional, file-browser verbs (`fileread`, `filewrite`, ...) written in plaintext are refused with `secure_channel_required`, even on a connection that holds a channel. The same verbs inside DATA frames run. Non-file plaintext commands still run, and a verb that only shares a prefix (`filesystem`) is not treated as a file verb.
+- No reply to a plaintext write waits on the secure-channel tx mutex on BTC_TASK (which serves the GATT/GAP callbacks of every link while a paced reply holds that mutex): the replies the command tail sends itself (`whoami`, login usage, `logout`, auth-required) and the required-mode refusal reach a channel holder as encrypted DATA frames from cmd_exec, and with the command queue full the writer gets one best-effort `Error: Failed to queue command` and the pool slot is returned.
+- A plaintext write's pool slot (the line can be `login <user> <password>`, and the production pool prefers PSRAM) holds no byte of the line once it is released: after the command ran, after a full command queue, after the session changed before cmd_exec ran the job, and after a required-mode refusal; a shorter later write leaves no password tail.
+- A source check of the command registry: `blerequireauth`, `blesecret` and `blesecure` are all superadmin-only.
+
+Crypto is a routing-neutral stand-in, so keys and radio timing are not tested here. `--component <dir>` points the suite at another copy of the sources; the pre-fix tree fails the refusal, file-verb, tier and BTC_TASK cases. `--cxx` selects the compiler; ASan/UBSan follow `--sanitize` / `HW1_SANITIZE`. `command_ingress_guards` holds the matching source contract: every notice the GATT write entry sends itself passes `blocking=false`, and the entry never calls the command tail.
+
+```sh
+python3 components/hardwareone/test/host/test_ble_sc_policy.py --sanitize
+```
+
+## Bluetooth server stop
+
+`ble_server_stop` extracts the production `deinitBluetooth()`, its session
+and advertising helpers, the role-claim and lifecycle-guard classes, and the
+`closeble` and `blemode` commands unchanged from `Bluetooth.cpp`. Host
+boundaries stand in for the role transition, the Ring owner
+(`g2RingPrepareForStackTeardown`), the host/controller teardown, transport
+sessions and settings writes. A stop deferred by a busy role transition or
+by a Ring owner that has not quiesced, and a host teardown that fails, must
+reach the caller. In each case `closeble` and `blemode client` answer
+`Error: ...; mode unchanged` and leave `bleMode` alone. A deferred stop must
+also leave the app session epochs live and advertising on: the Ring prepare
+runs before session admission closes. The exception is a companion reset: under
+its outer RECOVERING claim the caller forces the host down next, so a
+Ring-deferred stop closes the session epochs, clears the GATT interface id and
+stops advertising before it reports failure; a nested stop under any other
+claim keeps them. A retry after the Ring owner quiesces
+stops the server. A clean stop keeps its reply, its role reset, its freed
+state and the order Ring prepare, session close, advertising stop, host
+teardown. `closeble` with no server and `blemode server` keep their old
+outcomes. The suite builds with and without the G2 client. A second
+translation unit compiles the real `Bluetooth.h` with `ENABLE_BLUETOOTH=0`
+and checks that the stub returns `bool` true. `--component <dir>` runs the
+suite against another copy of `Bluetooth.cpp/.h`. On the pre-fix source the
+harness still compiles (a `void` stop is read as "reported stopped") and
+fails on the reported outcome, the persisted role and the closed sessions.
+`HW1_SANITIZE` enables ASan/UBSan. Real Ring/host timing still needs a device.
+
+## Bluetooth commands and status
+
+`ble_info_status` (see "Bluetooth status coverage") also runs the production `blesend`, `blestream` and `bleevent` handlers with the real `CommandArgs` parser and stream-flag helpers, and runs the data-service push functions against a fake directed GATT sender. Every keyword and the interval pair come from the dispatcher's arguments. `blestream sensors off` clears only that stream. Bad tokens and non-positive intervals are usage errors. `blesend` forwards the whole message. Sensor, system and event frames reach only the console-mirror recipients, by directed notify and never characteristic-wide. The checks also cover stale sessions, congestion, a missing GATT interface, a refused lifecycle lock and secure-required mode. `--component <dir>` points the suite at another copy of the BLE sources; the pre-fix tree fails at the `blestream on` case.
+
+It also runs the production `bledisconnect` command and its owner functions (`bleDisconnectConnection`, `bleDisconnectAppClients`) against a recording GATT-server double. `bledisconnect <connId>` closes exactly that app client. The bare form, which the page-level button and the OLED and G2 items use, closes every app client and never a paired R1 ring or G2 temple link. Unknown ids, peer links and malformed ids (`abc`, `-1`, `1x`, `0x1`, `70000`) are refused without a close. The close is issued with the lifecycle guard released, and a missing BLE state, server or lifecycle lock closes nothing. A Node-free check reads `WebPage_Bluetooth.h`: each client's Kick button must pass that client's `connId` to `bledisconnect`. `--component <dir>` also points these reads at another tree; the pre-fix tree fails at the first per-id case.
+
+`ble_info_status` also runs the production `blestatus`/`bleread` command against the same connection table: a logged-in user named "Unknown", a logged-in user and an anonymous peer. Both forms render the guarded snapshot that `bleinfo json` uses. The checks: the JSON views list the same client set (connId, authed, MAC, age, commands, slot index, with the display user "Unknown" only for a peer that has not logged in); each call takes and releases the lifecycle guard once with the 100 ms budget and reads connection age inside it; a busy guard gives an explicit unavailable reply; a change published as the guard is released does not appear; the text form keeps its exact lines; uninitialized replies are unchanged; four 64-character usernames give complete JSON; and every JSON allocation failure gives the oom reply.
+
+## BLE area cleanup coverage
+
+`ble_area_cleanup` runs the production connection typing from Bluetooth.cpp (`bleIdentifyDeviceByMAC`, its MAC helpers and `bleDeviceTypeToString`, extracted unchanged with BLE_Types.h and the saved-target types from BLE_Peers.h) against a host table standing in for the peer owner's saved targets. Saved glasses, ring and phone addresses classify in any letter case, an unsaved or all-zero address is Unknown, and after a re-pair the new addresses classify as the peer and the old ones as Unknown on the next lookup (`bledisconnect` keeps a link open only when it is typed as a G2 temple or the ring). Source contracts on the same files: every characteristic Bluetooth.cpp creates with PROPERTY_WRITE has write callbacks; the uncalled Bluetooth helpers and the MAC cache are absent from Bluetooth.cpp/.h; G2_Ring.cpp carries none of the unregistered ring-to-glasses spoof push or temple bridge (commands, tasks, state) while `g2RingNoteBridgePoll` stays defined for the G2 receive path, and once that code is gone G2_Ring.cpp names the commit that still holds it (f4cc542); and Bluetooth.h compiles with ENABLE_BLUETOOTH=0. `--component <dir>` runs it against another copy of Bluetooth.cpp/.h and G2_Ring.cpp/.h. It does not exercise the GATT server or a real connection.
+
+## Ring forwarded telemetry parser
+
+`test_ring_forwarded_telemetry.py` compiles the production
+`g2RingNoteForwardedTelemetry` and its local protobuf helpers (`G2_Ring.cpp`)
+with the shared `g2Pb*` readers (`System_G2_Protocol.cpp`), the production
+`R1TelemetryCache` layout and the `G2HealthMetric` enum. The telemetry mutex,
+the direct-link ownership check, the Health live series and `millis()` are
+doubles. Each case runs in its own process with the frame in an exact-size heap
+buffer and a 5 s alarm, so a parser that never returns, or one that reads past
+the frame (under `--sanitize`), fails by name. A well-formed frame with unknown
+fields of every wire type caches all six metrics and their Health samples; a
+field ending exactly at the frame end is accepted; truncated outer and nested
+fields are rejected. Ten-byte field lengths near 2^64 (an unknown field, field 4
+itself, field 4 of length 2^64-1 followed by eight data bytes, and a nested
+field inside a well-bounded field 4) must be rejected without moving the parse
+position backwards, reading past the frame or touching the cache.
+`--component <dir>` and `--source-dir <dir>` read production sources from
+another tree.
+
+## Ring daily packetAck and the Health history model
+
+```sh
+python3 components/hardwareone/test/host/test_ring_daily_ack.py --sanitize
+```
+
+`ring_daily_ack` compiles the production ring RX path (`ringProcessRxFrame`, `ringExtractTelemetryCache`, `ringReasmFinalize`, the RX duplicate filter and the packetAck lane from G2_Ring.cpp) with the production Health pending-session model (`g2HealthApply*Daily`, `g2HealthHistoryFetchStarted/Finished`, the day-key and peer checks from G2_Health.cpp) and the production profile capabilities and packetAck descriptor factories (System_R1_Protocol.cpp). The frame decoder and typed daily parsers are doubles that return the test's page. On 2.2.9 a daily page gets a packetAck only when the model accepted it into the active sweep: a page outside a sweep, in a sweep dropped behind an uncommitted result or a failing commit, with another day key, with a zero-base day or during a pending peer switch gets none, while it still refreshes the live cache; an accepted page gets exactly one ACK, and its retransmit is ACKed again without a second ingestion. 2.2.7 keeps its established flow control (every eligible daily NOTIFY, sleep and reassembled activity included, is ACKed) until a device check. `--component` / `--source-dir` read the production sources from another tree; the 0.99.97.4 sources fail the seven refused-page checks. No BLE link, ring firmware, owner-loop scheduling or store commit is simulated.
+
+## R1 ring health controls and history
+
+`health_logging_ui` (see the G2 Health paragraphs) also drives the R1 Health action body reader through a scripted `httpd_req_recv`: one idle wait between chunks is retried, two consecutive idle waits (a half-open socket) end the request with the 400 reply and release the httpd worker, and a socket error never retries. `--component <component-directory>` reads production sources from another checkout and `--source-dir <directory>` overlays single files; the 0.99.97.4 sources fail the half-open case because that reader retried timeouts without bound.
+
+The ring controls run the production `g2RingCommands` and `healthCommands` rows, `cmd_ringcontrol` and the `healthstatus force-history` branch through a registry executor double (longest-prefix lookup, the registry admin gate, an audit record per executed command). A non-admin is refused with the same text from the web handler (403), the OLED page ([DENIED]) and the serial CLI, nothing reaches the ring setters, and the validate pass is refused at the same admin row; an admin's change from each transport reaches the owner and is audited as `user@web`, `user@display` or `user@serial`. The 0.99.97.4 sources fail because the web and OLED adapters checked admin themselves and called the setters, and no command existed for collection or low power.
+
+`r1_history_store` (see "R1 history persistence") also compiles the production Health history model that drives the store (the pending-sweep load, merge and commit path of G2_Health.cpp; trend views, the graph push and the profile capability table are doubles). A stored day that exists but cannot be opened loads as `READ_FAILED`, never `NOT_FOUND`, and the retried load merges the sweep into it instead of replacing it; a backup an interrupted publish left alone is promoted and loaded; a corrupt stored day is retried a bounded number of times, is never replaced, and does not stop later sweeps from being accepted and stored. `--component <components/hardwareone>` runs these current expectations against another tree's production sources (the f4cc542 sources fail the twelve load-failure checks); `--baseline` keeps its store-only scope.
+
+## G2 Network background redraws
+
+`g2_network_async_redraw` compiles the Network page's state, renderers, WiFi "Pending..." and R1
+"connecting..." watchdogs, WiFi scan worker and WiFi/R1 tap handlers with the production redraw
+helper, lens job types and the lens worker's Redraw arm. A fake clock drives connects, expiry,
+in-flight ring jobs and scans; each case runs in its own process. It checks that a held note
+(Notes), another Network view or leaving during the scan settle window is never covered by a
+Network list and that these tasks never draw themselves, while the menu still repaints when the
+user stays on it or comes back to it while pending, and scan results still reach the lens through
+the Even-AI card, placeholder, backed-up queue and inline-fallback paths. `--component` runs it
+against another tree. ASan/UBSan follow `HW1_SANITIZE`; radio, ring, command, display and RTOS
+calls are host boundaries, not device scheduling. The list-page double models page-swap
+admission: a second list render inside one lens-applier job is refused, as on the device.
+
+## G2 Files page tasks and redraws
+
+```sh
+python3 components/hardwareone/test/host/test_g2_files_psram.py --sanitize
+```
+
+Besides the reader/viewer harness, `g2_files_psram` compiles the rest of the production Files page
+(`G2_Page_Files.cpp`, includes stripped, the reader/viewer stubbed) in `g2_files_redraw_harness.cpp` and drives it from
+simulated tasks: taps on `g2_tap_disp`, queued redraws on the lens applier, the rename/delete completion on
+`cmd_exec_task`, the info-overlay expiry on the main loop and the image viewers' `onDone` on the session worker. The
+completion, the expiry and the viewer return must not draw, delay or touch FileManager; each queues one Redraw (the
+completion with its submit cookie) that the applier drops after a menuGen bump. The result shows once in the list's
+back row, and a successful rename/delete is re-scanned even when its redraw was dropped. Every FileManager call and
+lens draw runs with the Files page lock held by the calling task; callbacks delivered in the middle of a tap's
+directory read never re-enter FileManager; info rows stay read-only after the overlay expired until the list is shown;
+a list shown by a tap cancels a queued list redraw; and a redraw that waited for the lock while a tap opened the
+rename keyboard does not replace it. `--component <dir>` replays the suite against a pre-fix tree. FreeRTOS, lens,
+command, VFS and FileManager are host doubles; ASan/UBSan follow `HW1_SANITIZE`.
+
+The same harness checks the chooser's action paths. `FileEntry.name` is FileManager's display copy (63 bytes), so
+View, Info's sealed-capture peek, Rename and Delete take the selected entry's full path from
+`FileManager::getSelectedPath()`: a 70-byte SD name is deleted by its full path, never by its 63-byte prefix; a path
+that cannot be resolved or does not fit the 160-byte action buffer (a 123-byte folder plus that name) is refused with
+nothing submitted and no viewer started; and folder rows keep the closing "]" of their "[n]" / "[99+]" badge.
+
+## G2 Sensors completion redraws
+
+```sh
+python3 components/hardwareone/test/host/test_g2_sensors_redraw.py --sanitize
+```
+
+The camera power post-hook (cam_pwr, after every camera power operation from any source) and the openmic/closemic
+completion (cmd_exec) refresh the Sensors CAM/MIC detail. They never render or write the Sensors level or hijack
+page on their own task: they queue a Redraw on the lens applier (the hook with the menu generation taken when it
+fires, the mic completion with its submit-time cookie), and the render re-checks level DETAIL and page SENSORS.
+`g2_sensors_redraw` compiles the whole production Sensors page (camera and microphone on, other sensors off) beside
+a lens double with swap admission, a generation-checked Redraw queue and task-context tags, and runs a user tap
+("Settings >", "<- Hardware") between a completion's check and its render: nothing renders on cam_pwr or
+cmd_exec, Camera Settings keeps its rows and routing, the list keeps routing list taps, and an undisturbed detail is
+still refreshed. It also checks that an out-of-range list tap does nothing and that the live view's level is
+committed only after the live page started. `--component <dir>` replays it against a pre-fix tree. Lens, camera,
+audio, registry and command calls are host doubles; ASan/UBSan follow `HW1_SANITIZE`.
+
+## G2 list pages under refused renders
+
+```sh
+python3 components/hardwareone/test/host/test_g2_page_publish.py --sanitize
+```
+
+`g2ShowListPage` can refuse a render (swap in flight, allocation failure, lost admission, full lens queue) and the
+previous rows then stay on the lens. List pages build their rows plus a pending mode / row map and publish it through
+`g2ShowListPageAndPublish` (G2_Page_Common.h) only after the lens accepted the rows. `g2_page_publish` compiles the
+production Files chooser, delete confirm, info overlay and tap dispatcher; the Settings level/row-map state, row
+builders, edit/commit machinery, menu entry and dispatcher; and the whole LED page, each beside a `g2ShowListPage`
+double that can refuse. After a refusal the visible rows keep their meaning: chooser row 2 never submits
+`filedelete`, a Settings entry row never commits a pick option or an entry from an unseen page, the LED root "Off"
+row never sends a color, and a refused entry does not claim the hijack page. `g2_power_completion` (tap 4 refused,
+then tap 1 never submits `deepsleep`) and `camera_consumers` (a refused Camera list leaves TOP's FPS row cycling
+FPS) carry the same cases for Power and Camera Settings. All three accept `--component <dir>` to replay against a
+pre-fix tree. Commands, lens, RTOS and settings-registry calls are host doubles; ASan/UBSan follow `HW1_SANITIZE`.
+
+## G2 Network row bindings
+
+`wifi_saved_ui` (see "Saved WiFi network coverage") also has a unit that compiles the
+G2 Network page's row bindings, its WiFi, ESP-NOW, HTTP(S), Bluetooth, G2 and R1
+menus and their tap handlers: each case draws a menu, changes the radio, link,
+server, BLE, ring or setting state behind its labels, taps a row and checks that
+the command matches the label that was shown (and that a refused render after a
+submenu change runs nothing), plus the unchanged-state row maps. Each case runs in
+its own process; the ENABLE_ESPNOW, ENABLE_HTTP_SERVER and ENABLE_WIFI off builds
+are compile-checked. `--component` runs it against another tree.
+
+## Automation summaries
+
+`automation_scheduler` (see "Automation scheduler") also checks the owner's automation summaries (`automationCopySummaries` / `automationFindSummary`), one case per trigger type, built from `parseOneTrigger`: daily, weekly days, week interval, monthly, yearly, interval, manual delay, boot, event, unknown event, legacy or malformed triggers, extra-trigger counts, name fallback, cap and unreadable/malformed files. A second program compiles the whole G2 Automations page beside lens, command and file doubles: the lens shows the owner's trigger text, a tap opens the automation its row showed even after a web add/delete, Enable/Disable submits what the visible row says, and taps read nothing. `automation_scheduler_contract` also guards that the G2 and OLED pages never open or parse automations.json. Both accept `--component <dir>` to replay against a pre-fix tree.
+
+## QuickNote interrupted saves and note tiers
+
+`quicknote_store` runs the production `QuickNoteStore::sweep`: on both tiers it
+removes only names that parse as the store's own temporary spelling inside
+canonical `u<id>` notes folders, never opens a file for reading, and leaves
+user-placed names, directories, transcripts and other folders alone; nothing is
+promoted, because a note header carries no length. `quicknote_service` covers the
+worker that runs the sweep once a boot, and `g2_notes_page` checks the lens tier
+row: with a card in, the last row lists the other tier (`note list sd|internal`),
+stale replies for the abandoned tier are dropped, and a new show returns to the
+save tier. The f4cc542 sources fail the sweep case (no sweep) and the tier row.
+
+## G2 page and hijack-bridge API contract
+
+```sh
+python3 components/hardwareone/test/host/test_g2_page_api_contract.py --sanitize
+```
+
+`g2_page_api_contract` keeps the G2 Files, Settings, Network and Sensors pages, the hijack command bridge and the hijack FSM free of entry points nothing calls. The pages are reached through their interactive list (`g2Show*Menu` / `g2*HandleTap`) and the `g2Build*Info` text the page registry renders; the text-dump wrappers `g2ShowFilesPage`, `g2ShowSettingsPage`, `g2ShowNetworkPage` and `g2ShowSensorList`, the no-op `g2FilesTick`, `g2CurrentCmdSeq` and `hijackEventName` must not exist, and `g2ShowSensorsMenu` keeps no copy of its rows (`gSensorsListCache` / `gSensorsListCount`). A header probe compiles `G2_Page_Files.h`, `G2_Page_Settings.h`, `G2_Page_Network.h`, `G2_Page_Sensors.h` and `G2_HijackFsm.h` with G2 enabled, with `ENABLE_G2_GLASSES=0` and with `ENABLE_BLUETOOTH=0` (the xiao_s3 board header plus a feature profile, as in `g2_disabled_header`): a probe namespace offers variadic fallbacks, and each removed name must resolve to one, so neither an enabled declaration nor a disabled inline stub may remain; the kept API keeps its signatures, and the disabled builds link and run its stubs (empty text, `Idle` state). A source contract scans every production `.cpp`/`.h` under the component (test/ excluded, comments and string literals stripped) for the nine names, and the owning files for any mention at all. `--component <dir>` replays the suite against another tree; the board header always comes from this repository.
+
+## File browser classification and rename/delete authority
+
+```sh
+python3 components/hardwareone/test/host/test_file_kind.py --sanitize
+```
+
+`file_kind` compiles the shared classifier `FileBrowser_FileKind.h` and, over one table of names, the production G2 Files page file-tap branch (the `else` block of `g2FilesHandleTap` with the classification it calls, `showFileChooser` recording the chooser kind) beside the OLED browser's "View" decision (its `sFbActionViewable` assignment). The lens must offer a text or JSON view exactly when the OLED offers View: `.log`, `.md`, `.ini`, `.yaml`, `.html`, `.c` and the other OLED text types open in both, BMP/JPEG open only on the lens, and png, bin, `.tar.gz` and names without an extension get Info/Rename/Delete only. A second harness runs the OLED browser's rename/delete helpers (`fbRenameSelected`, `fbDeleteSelected`, `fbSubmitMutate`) against FileManager and executor doubles: both submit the admin-only `filerename` and one-shot `filedelete ... confirm` commands with the selected entry's full path (a 70-byte SD name), re-scan only after the executor's `OK`, report the executor's admin refusal, and submit nothing for an unresolved selection or a quote. Source contracts check that the OLED browser no longer calls `FileManager::renameItem`/`deleteItem`, that its prepare pass routes Rename/Delete through those helpers under the identity guard, that guests are still stopped on the input path, and that neither browser keeps a private extension list. `--component <dir>` reads the production sources from another tree; the f4cc542 sources fail the agreement checks (the lens gives `.log` and `.md` no viewer while the OLED offers View) and the contracts (direct FileManager rename/delete). No device, executor or FileManager is run.
+
+## Display login policy ownership
+
+`display_auth_policy` scans every production source for command handlers that write
+`localDisplayRequireAuth`, `serialRequireAuth` or `uartRequireAuth`, then compiles the
+production OLED and output settings rows, the OLED, Settings and settings-editor command
+tables and every other table tied to a policy writer (today `userSystemCommands`) with
+generated link fixtures (a `gSettings` built from the rows, one stub per handler, the
+writer list). It checks that every row persisting a policy names a command that only
+super-admins run, that every command running a writer is super-admin, that each policy
+is persisted by exactly one row (one JSON key, so load order cannot decide it), that no
+policy write sits outside a registered command handler or behind a generic editor
+command, and that every OLED row names an existing command. `--component`/`--source-dir`
+point it at another tree; ASan/UBSan follow `--sanitize`. Table metadata only:
+`authorizeCommand`, the web UI and device behavior are not run.
+
+Suggested one-sentence addition to the existing `settings_mutation` paragraph: In the
+OLED-enabled variant it also runs the dedicated `oledenabled` command with display
+boundaries: the generic on/off/true/false/1/0/enable/disable tokens start or tear down
+the panel as before, and any other token (or none) is refused before it persists or
+touches the display. `--component` points the suite at another tree.
+
+## OLED session role cache
+
+`oled_session_role` compiles the shipping local-display role gate from
+`OLED_Utils.cpp`:
+
+- `oledIsGuestSession` with the session-role helpers beside it (everything between
+  the `shouldBlockForDisplayAuth()` definition and `oledModeAllowedForGuest`);
+- `oledModeAllowedForGuest`, `oledGuestBlocksMutate`;
+- `getMenuAvailability`, with every `ENABLE_*` off;
+- `oledApplyPendingSessionBoundary`.
+
+It also compiles the launcher populate and the selected-row right-pane decorator
+from `OLED_Mode_Menu.cpp`, with the shipping mode enum and menu/scroll structs.
+Fakes count every users.json read (`getUserAuthorizationRole`, `isAdminUser`) and
+supply the session authority, the owner task and the scroll primitives.
+
+The checks:
+
+- Launcher steps (input populate, render populate, Users-row pane, mutate guard,
+  mode gate) read the roster at most once per session and identity generation.
+- A failed lookup (banned, unknown or unreadable) is guest and non-admin, and is
+  retried rather than kept.
+- A `gIdentityGeneration` bump and a session boundary (login of another account,
+  logout) re-resolve the role. The boundary's own menu request already sees the
+  new identity, and no read happens while the display lifecycle writer is held.
+- Other tasks (`cmd_oledmode`) read live and leave the cache alone.
+- An unauthenticated launcher is unfiltered and reads nothing.
+
+`--component`/`--source-dir` point it at another tree. ASan/UBSan follow
+`--sanitize`. Device rendering, `authorizeCommand` and the real roster parser are
+not run.
+
+## OLED display commands from other tasks
+
+```sh
+python3 components/hardwareone/test/host/test_oled_owner_requests.py --sanitize
+```
+
+`oled_owner_requests` compiles the production `requestOLEDMode`, the owner-request queue, `cmd_oledmode`, `cmd_oledtext`, `cmd_oledclear`, `cmd_oledanim` and `oledUpdate` from OLED_Utils.cpp with `cmd_setpattern` (`setgamepadpassword`) from OLED_Mode_SetPattern.cpp. A task double makes `xTaskGetCurrentTaskHandle()` answer the main loop or cmd_exec, and fakes record which task touched the framebuffer, ran an onEnter hook, read the display role or auth mirror, pushed the back stack or auto-started input. Called as cmd_exec, every command and `requestOLEDMode` leave `customOLEDText`, the mode, the stack, the animation and the pattern flow unchanged until the owner runs `oledUpdate()`. The owner then applies them in post order with the same side effects as before: `oledmode menu` auto-starts input; `oledmode off` and `oledclear` blank the panel on the owner, and `oledclear` leaves the page clean; `setgamepadpassword` pushes the previous mode and restarts the flow; the auth gate still redirects to the login page. A command posted before a session boundary hands over its text or reset but does not navigate after that boundary. A command posted after a boundary the frame has not applied yet waits for it. A ninth request drops the oldest without leaking its text copy, and nothing allocates inside the queue lock. A source check requires `updateOLEDDisplay()` to drain the requests right after its first session-boundary apply. `--component` / `--source-dir` read production sources from another tree; the f4cc542 sources fail 26 checks (state written on cmd_exec) and the source check.
+
+## OLED mode availability
+
+```sh
+python3 components/hardwareone/test/host/test_oled_mode_availability.py --sanitize
+```
+
+`oled_mode_availability` compiles these from the production tree: `getMenuAvailability`, with its `oledModeFeatureState` classification and `oledModeRuleAllows`; the mode registry (`registerOLEDMode`, `registerOLEDModes`, `findOLEDMode`) from OLED_Utils.cpp; and `OLEDModeEntry`, the callback typedefs and `MenuAvailability` from OLED_Display.h. It registers the real entry rules of CLI Input, Gamepad PW, Logout, GPS (i2csensor_pa1010d_oled.h) and thermal through the registry, with GPS and thermal compiled in. A module's refusal makes its launcher row FEATURE_DISABLED with the module's reason. Without a named display session, CLI Input and Gamepad PW show "Login required" and Logout shows "Not logged in". The central classification keeps its class and reason: GPS or thermal not detected is NOT_DETECTED, detected but stopped is FEATURE_DISABLED "Disabled / Press X to start", and a mode that is not built is NOT_BUILT. Modes without a rule are unchanged, and a note an allowing rule leaves never reaches the launcher. A source check requires `requestOLEDModePrepared()` to be declared in OLED_Display.h beside `requestOLEDMode()` and in no other file. `--component` / `--source-dir` read production sources from another tree. On f4cc542 the suite fails five checks (the rules are ignored) and the prototype check.
+
+## Dead OLED code paths
+
+```sh
+python3 components/hardwareone/test/host/test_oled_dead_paths.py --sanitize
+```
+
+`oled_dead_paths` reads every top-level `*.cpp`/`*.h` of the component with comments and string literals stripped. It fails if any code still names a deleted OLED path:
+
+- the dynamic remote menu and its remote command input;
+- the bonded `DataSource` selection and its R/B indicator;
+- the OLED_UI Dialog and Progress components, with `oledUIHandleInput` and `oledUIModalActive`;
+- the display functions superseded by the `*Rendered` versions, and the undefined web-stats externs;
+- `forceSettingsModeLink`, `resetOLEDFileBrowser`, `getRegisteredOLEDModes`, `getPreviousOLEDMode` and `LOG_MENU_VIEWER`;
+- the helpers those deletions left without a caller: `hasRemoteSettings`, `oledDrawBox`, `oledDrawButton` and `oledDrawTextCentered`;
+- the unified actions mode.
+
+The live replacements must stay defined: `oledUIRender`, the toast and ribbon renders, the live drawing helpers `oledDrawIcon` and `oledDrawLevelBars`, the `*Rendered` displays, the mode registry, back-navigation and the slug functions. The suite then compiles the production `enum OLEDMode`, `modeFromSlug` and `slugFromMode` and checks three things: `oledmode unified` names no mode, no mode's slug resolves to a different mode, and "actions"/"imuactions" still open IMU actions. `--component`/`--source-dir` read production sources from another tree. On f4cc542 the contract names 65 identifiers, and the slug harness fails 2 checks: "unified" opens a mode, and `slugFromMode(OLED_UNIFIED_MENU)` is "actions", which opens IMU actions.
+
+`oled_without_input` also accepts `--component`/`--source-dir`/`--sanitize`. It requires that the display-state API carry no bonded data-source selection.
+
+## OLED action feedback
+
+```sh
+python3 components/hardwareone/test/host/test_oled_command_feedback.py --sanitize
+```
+
+`oled_command_feedback` compiles the shipping OLED action helper (`oledRunCommand` and its
+reply-to-toast mapping `oledCommandReplyText`, both from `OLED_Utils.cpp`) and real callers:
+
+- the Automations toggle and delete actions with their footer toast (`OLED_Mode_Automations.cpp`);
+- the Quick Settings radio, Wi-Fi, Bluetooth and HTTP rows (`OLED_SettingsEditor.cpp`);
+- the Network menu's HTTP confirm callbacks (`OLED_Mode_Network.cpp`).
+
+The OLED command executor (scripted verdict and reply), the global toast, the Automations
+rows and the radio/BLE/HTTP state are doubles.
+
+The checks:
+
+- A refused or failed command toasts its reply: an admin or super-admin denial as
+  "Admin required", any other reply as its first line without the `Error`/`ERROR`/`[ERROR]`
+  token, an empty or bare `ERROR` reply as "Failed". An `Error` reply fails even when the
+  executor says ok, and an over-long reply stays inside the toast buffer.
+- An accepted command returns true and leaves the toast to the caller.
+- `oledCommandReplyText` (also used by the Add-WiFi flow) gives the caller's success text on
+  success and the caller's fallback text for an empty refusal, and stays inside the caller's buffer.
+- Each caller shows its success text ("Enabled", "Deleted", "Radio OFF", "HTTP OFF", ...)
+  only on success; local refusals ("Radio off!", "Need WiFi first!") still run no command.
+- Static: the Automations, Logging and Network screens, the Quick Settings section and the
+  unavailable-page / Web Stats actions (`handleOLEDActionButton`) no longer fire commands
+  whose reply is dropped, and their `broadcastOutput` success lines are conditional.
+
+`--component`/`--source-dir` point it at another tree; the f4cc542 sources fail it (no
+helper; "Disabled"/"Deleted"/"Radio OFF" shown for refused commands). ASan/UBSan follow
+`--sanitize`. The real executor, admin gate and display are not run.
+
+`oled_remote_settings` (see "OLED bonded-peer settings editor") also checks the local screen: the slider/pick-list (INT) save runs through the same checked commit as the STRING save, so a refused save shows the executor's reply on the editor line.
+
+## OLED Power Saving row
+
+```sh
+python3 components/hardwareone/test/host/test_oled_power_settings.py --sanitize
+```
+
+`oled_power_settings` compiles the Power > Sleep Settings row action and input handler
+(`executePowerSleepAction`, `powerSleepInputHandler` from `OLED_Mode_Power.cpp`), the OLED
+action helper (`oledRunCommand` from `OLED_Utils.cpp`) and the real `powersave` handler
+(`cmd_powersave` from `System_Power.cpp`). The command executor is a double that applies the
+admin gate with the `requiresAdmin` flag of the production `powersave` row, then runs
+`cmd_powersave` and records a `[CMD]` audit line; `setSetting` records whether a write ran
+inside a command or directly from the OLED task.
+
+The checks:
+
+- "Power Saving" submits `powersave <next step>`: a non-admin is refused ("Admin required"
+  toast, value kept); an admin moves along the ladder (10 -> 15, 60 -> Off, Off -> 1, an
+  off-ladder value -> 1) with one audit record and no direct write.
+- A guest is still blocked ("View-only"); Sleep 20s and Screen Off run their commands as before.
+- Static: no `OLED_Mode_*.cpp` calls `setSetting`, and the `powersave` row is admin-only.
+
+`--component`/`--source-dir` point it at another tree; the f4cc542 sources fail it (the row
+writes the setting directly, so a non-admin changes it with no audit line). ASan/UBSan follow
+`--sanitize`. The real executor, admin gate, persistence and display are not run.
+
+## OLED automation wizard
+
+```sh
+python3 components/hardwareone/test/host/test_oled_automation_wizard.py --sanitize
+```
+
+`oled_automation_wizard` compiles the shipping OLED "New automation" wizard from
+`OLED_Mode_Automations.cpp` (its state, `wizKeyboardDone`, `wizCreate`, the confirm screen and
+`wizHandleInput`, from `enum AutoWizStep` through the end of `wizHandleInput`) and its footer
+toast, with `OLED_KEYBOARD_MAX_LENGTH` and the keyboard enums from `OLED_Utils.h`. Arduino
+`String`, the display (records what is printed where), the keyboard, the event catalog, the OLED
+command executor and the navigation events are doubles. It drives the wizard as the list handler
+does: name keyboard, Interval, "5 min", command keyboard, confirm.
+
+The checks:
+
+- A 40-character command (with a quoted path) and a 40-character name reach the
+  `automationadd ... enabled=1` line whole, and so does a command of the keyboard's full
+  length; every wizard keyboard admits no more than the wizard keeps.
+- Text that does not fit is refused: the step's keyboard re-opens, nothing is stored and
+  nothing is sent.
+- The confirm screen shows every command character: the rows are rebuilt by pressing Down
+  until the frame stops changing; text stays left of the arrow column, the action line stays
+  on screen, Up returns to the top, A creates from any scroll position, and a new wizard
+  starts at the top.
+- A short command still draws the four-line confirm screen at y 11/20/29/38 without arrows.
+
+`--component`/`--source-dir` point it at another tree; the f4cc542 sources fail it (name and
+command cut to 32 characters, 18 shown on confirm, over-long text stored cut). ASan/UBSan follow
+`--sanitize`. The real keyboard, executor and display are not run.
+
+## Add-WiFi forms
+
+```sh
+python3 components/hardwareone/test/host/test_wifi_saved_ui.py --sanitize
+```
+
+`wifi_saved_ui` (see "Saved WiFi network coverage") also compiles the Add-WiFi forms with
+`wifi_add_form_harness.cpp`: the OLED keyboard flow (manual Add and scan pick, `OLED_Mode_Network.cpp`)
+and the G2 join-a-scanned-AP flow (`G2_Page_Network.cpp`). Both build a quoted `wifiadd` line that the
+command parser splits at every double-quote, so a double-quote or control character in the typed password
+or in a scanned SSID must be refused before any line is built, with a toast (OLED) or lens text (G2). The
+OLED toasts the owner's reply after an add through OLED_Utils' shared `oledCommandReplyText` ("Network saved",
+"Connected", "Admin required" or the refusal's first line without its `[ERROR]`/`Error` token) and stays silent for a replacement display session; G2 keeps showing the owner's reply
+on the lens. The OLED keyboard, session epoch and executor, and the G2 command bridge, text entry and lens are
+host doubles. `--component <dir>` replays the cases against a pre-fix tree.
+
+## OLED keyboard masking and dictation UI
+
+`dictation_ui` compiles the shared OLED/G2 dictation delivery: the G2 text-entry
+pad, `kbdPadConsumeDictationText`, `kbdPadDictationServiceOnTap` and
+`oledKeyboardDictationTick`.
+
+A second unit compiles the shipping OLED virtual keyboard from `OLED_Utils.cpp`:
+
+- the character tables and `getCharAt`;
+- `oledKeyboardInit` and `oledKeyboardReset`;
+- the preview helper and `oledKeyboardDisplay`.
+
+It uses the real `OLEDKeyboardState` and the Set Pattern openers, and draws on a
+recording display.
+
+The checks:
+
+- A masked (secret) field never prints its text, or any 3-character piece of it,
+  on any keyboard page: the four text grids, pattern, mic or suggestions.
+- A masked field's preview is one `*` per character: the last 20, or the first 8
+  on the suggestions page. The field buffer keeps the typed text.
+- A plain field keeps its preview window, including a plain field opened after a
+  masked one.
+- Set Pattern's password and pattern keyboards open masked.
+- A source contract: these fields pass the mask:
+  - login;
+  - change password;
+  - Wi-Fi password, from manual add and from a scan pick;
+  - the ESP-NOW remote password and passphrase;
+  - first-time setup password prompts.
+
+  The SSID does not pass it, and first-time setup no longer writes `*` into the
+  shared buffer.
+
+Related checks in other suites:
+
+- `wifi_saved_ui`'s Add-WiFi unit checks that the OLED password keyboards open
+  masked and the SSID keyboard opens plain.
+- `setup_display_cancel` checks that a first-time-setup password prompt opens
+  masked and that its render leaves the field buffer intact.
+
+`--component` points `dictation_ui` and `setup_display_cancel` at another tree.
+ASan/UBSan follow `--sanitize`. The panel driver, fonts, and the user-manager
+password fields (OLED_Mode_UserManager.cpp, outside this set) are not covered.
+
+## OLED pair-request prompt
+
+`oled_pair_prompt` compiles the shipping incoming-pair-request prompt from
+`OLED_ESPNow.cpp`: everything after the `sPairingSel` static through
+`oledEspNowPollPairRequest()` (the prompt statics, the Accept/Reject callbacks
+and the poll), plus the file's `oledEspNowRunOwnerCommand` helper when it has
+one. It runs them with the shipping confirm overlay from `OLED_Utils.cpp` (state,
+request, close, input, session-boundary reset) and the mode enum and `NavEvents`
+from `OLED_Display.h`. Doubles: the pending request (sender MAC, name, arrival
+time), the `espnowaccept`/`espnowreject` owner behind a switchable admin
+refusal, the cached session role (`oledSessionIsAdmin`), counting `users.json`
+traps and the toast. A frame is one poll, as `oledUpdate()` makes it.
+
+The checks:
+
+- A request answered on the panel opens the dialog once, even when the owner
+  refuses the answer; the refusal is toasted ("Admin required").
+- The prompt never opens on the login screen, for AuthBypass (display auth off),
+  for a non-admin session, or over the Login screen of a logged-in admin. A
+  request that waited through login opens once for the admin.
+- Accept and Reject name the shown sender's MAC. If another sender replaced the
+  request while the dialog was up, Accept does not pair it; the newer request
+  opens next under its own name.
+- A re-sent request (new arrival time) opens once more; an expired one answers
+  quietly.
+- A session boundary drops the dialog without an answer and the next session
+  sees the request once.
+- Idle frames make no role query, and the prompt never reads `users.json`.
+
+`--component`/`--source-dir` point it at another tree. ASan/UBSan follow
+`--sanitize`. The real commands, the role cache and the radio are not run.
+
+## OLED list navigation
+
+```sh
+python3 components/hardwareone/test/host/test_oled_list_nav.py --sanitize
+python3 components/hardwareone/test/host/test_sensorlog_ui.py --sanitize
+```
+
+`oled_list_nav` compiles the Automations list navigation (`autoListUp`/`autoListDown` and
+`struct AutomationRenderData` from `OLED_Mode_Automations.cpp`), the file list navigation
+(`oledFileBrowserUp/Down/Select/Back` and the pending-action slot from `OLED_Mode_FileBrowser.cpp`)
+and the settings editor (`OLED_SettingsEditor.cpp`: the OLED predicate wrappers, the module source,
+`initSettingsEditor`, `displaySettingsEditor`, `settingsEditorDown/Select/Back`,
+`openSettingsEditorForModule`, with the settings and editor types). Any file-scope state those
+functions use on the tree under test comes along. The clock, FileManager, settings registry,
+settings-editor core, keyboard, commit path and display (which records each frame) are doubles.
+
+The checks:
+
+- Nav events 40 ms apart (a briskly turned ANO wheel, quick dpad presses) and two events in one
+  tick each move the Automations list one row (clamped at the top and at the "+ New" row) and the
+  file list one row; A and B right after a move still request open / parent folder. The input layer
+  already paces nav events, so no list adds its own debounce.
+- The settings editor draws every row of a 4-row module with no scroll arrow after a module with no
+  editable row (entered from the list or with `openSettingsEditorForModule`) and after a scrolled
+  module; a 6-row module's window follows the cursor with the right arrows.
+
+`sensorlog_ui` also builds a second unit (`sensorlog_config_list_harness.cpp`) that draws the Logging
+"Configure" list with the shipping scroll code (`OLEDScrollState`, the scroll primitives and both
+renderers from `OLED_Utils`) through the real `handleLoggingModeInput` and render block, walks the
+11 rows down and up, and checks every frame: rows inside the content area, every glyph on the 128x64
+panel, a visible scroll indicator while rows are hidden, the selected row drawn, and as many rows as
+the content area holds.
+
+`--component`/`--source-dir` point both suites at another tree; the f4cc542 sources fail them (the
+Logging list's arrows are drawn at x=128, off the panel, with 4 rows shown; Automations and Files
+drop a nav event or press that follows the previous one within 200 ms; the editor's function-static
+item offset goes negative and shows a spurious down arrow in the next module). ASan/UBSan follow
+`--sanitize`. Physical input timing, the ANO encoder and the real display are not run.
+
+## OLED Map actions, input devices and waypoint saves
+
+```sh
+python3 components/hardwareone/test/host/test_oled_map_actions.py --sanitize
+```
+
+`oled_map_actions` compiles the production OLED Map mode (OLED_Mode_Map.cpp: the Map state block, the track scan, the menu dispatch, `gpsMapInputHandler` and `displayGPSMap` through map centering) against owner, keyboard, file-picker and VFS doubles. It also compiles HAL_Input's real button mapping (the controller tables, `inputGetButtonMask`, `inputIsButtonPressed` and `INPUT_CHECK`, with the seesaw and ANO bit definitions) and `NavEvents`. The Map unit is built four times: for the seesaw gamepad with `ENABLE_GPS_SENSOR` 0 and 1, for the ANO rotary encoder, and for the GPIO wheel with the P4X-EYE keys. Each build feeds the handler what the OLED input router hands a mode on that device: the device's own press bits; the wheel's detents with up/down nav events; ANO dpad presses as nav events; and stick deflection, which produces a nav event only on the router's first-deflection and auto-repeat cadence. The identity double mirrors the per-task slot: `CommandIdentityScope` installs a context, and otherwise `currentAuthContext()` returns the empty anonymous one, which the owner and VFS doubles refuse as `checkPerm` does. Map actions: Mark Waypoint adds the typed name at the map center once the keyboard completes. A cancel adds nothing, and a refused write or a full table is shown as a toast. Goto Waypoint, Clear Nav, Delete Waypoint, Load Track, Delete Track, Next Map, Previous Map, the first-map auto-load (at most one attempt per 5 s while no map loads) and the load from the Select Map picker all run as the OLED user, and the track picker scans with that identity. Select Map opens the file browser as a `/maps` picker that shows only `.hwmap` files. Input, on every device: START opens the menu. The wheel or stick moves through the menu, the track and waypoint pickers, the features list and the routes list. A confirms and B goes back or closes. Search results step with left/right or the wheel. The info and track-status overlays close on A or B. In the routes viewer X highlights a route. On the map, X zooms in, Y zooms out and B leaves. ANO UP moves up instead of backing out, a GPIO double tap (SELECT) does not confirm, and a held stick moves the menu only on the router's nav events. A second unit compiles the production WaypointManager mutators, `cmd_waypoint`, `cmd_waypointfile`, CommandArgs and `requireQuotedToken` (System_Maps.cpp, System_Command.cpp, System_Filesystem.cpp) with a `saveWaypoints()` double. `waypoint add`, `waypoint del` and `waypointfile` report a write that fails, and the waypoint table and navigation target stay unchanged. Adds and deletes that save keep their replies. `--component <components/hardwareone>` reads all production sources from another tree. The f4cc542 sources fail 30 Map checks in each seesaw build, 59 on the ANO build and 55 on the GPIO build, plus 11 save checks.
+
+## OLED Map context bar
+
+```sh
+python3 components/hardwareone/test/host/test_oled_map_context_bar.py --sanitize
+```
+
+`oled_map_context_bar` compiles System_Maps.h's `LocationContext`, the context-bar append helper from OLED_Mode_Map.cpp and the `displayGPSMap` block that builds "On <road> • Near <area> (<n>m)" in its 128-byte `contextBuf`, all unchanged. Inside them `snprintf`/`vsnprintf` follow the C contract and store every byte from instrumented code, so ASan sees any write outside `contextBuf`. Each case runs in its own process: short names, area only, road only, no names, a 127-byte exact fit, and road and area names of 58+58, 58+57 and 63+63 characters with the area near and far. The bar text must be the whole context cut at 127 bytes, stay terminated inside the array, and `pos` must equal its length and stay below 128. `--component <dir>` reads the production sources from another tree; the f4cc542 sources fail four cases: `pos` ends at 134 or 139, and with two 58- or 63-character names and a near area the third append forms `contextBuf + 129` (UBSan bounds error; with ASan alone, a stack-buffer-overflow write).
+
+## Bond manifest and schema buffers
+
+`espnow_bond_json` guards the bond manifest (every command's name and help, 70,773
+bytes on xiao-default today) against the 65,535-byte cap of an Arduino `String` on boards
+without PSRAM support in the core. Source contracts: `sendBondManifest`,
+`sendBondSchema` and `cmd_bond_showmanifest` serialize through `serializeBondJson`;
+`v4h_file_end` hands the transfer buffer to the manifest and schema handlers without a
+`String` copy; `cmd_bond_showremotemanifest` and the fwHash branch of
+`handleEspNowRemoteManifest` read through `espnowReadCachedManifest` and the web branch
+takes no filesystem lock itself. It then compiles the production `bondJsonEnvelopeOk`,
+`serializeBondJson`, `writeBondJsonFileLocked`, `cacheManifestToLittleFS`,
+`processBondModeManifestResp`, `processBondSchema`, `manifestCachedFor` and
+`espnowReadCachedManifest` with the vendored ArduinoJson and a harness-local in-memory
+filesystem whose reads and writes assert the filesystem lock. A ~110 KB manifest is
+serialized into a buffer of exactly `measureJson()` bytes, received, cached and read
+back byte for byte; a manifest cut at 65,503 bytes is rejected; a document over
+`kFileSlotMaxFileSize`, an allocation failure, a short write (the partial file is
+removed), a failed read and malformed hashes (`../`, uppercase, wrong length; no
+filesystem call) are refused, and every buffer is freed. `broadcastBondJsonChunks`, the
+console printer of a manifest dump, runs against a modeled 64-line output queue that
+drops when full and must deliver every line. `--component`/`--source-dir`
+point it at another tree; ASan/UBSan follow `--sanitize`. The radio transfer, the
+senders' `sendFileToMac` and the web response are not run.
+
 ## Camera lifecycle and backends
 
 ```sh

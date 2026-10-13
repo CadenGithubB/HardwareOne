@@ -2,8 +2,10 @@
 """Exercise shipping settings mutation and feature-command paths on the host.
 
 The generic handler, three mutator overloads, shared notification/finalization,
-feature command and persistence adapter are extracted intact. The batching core
-and ArduinoJson are production headers; registry entries are controlled fixtures.
+feature command, persistence adapter and (OLED builds) the dedicated
+`oledenabled` command are extracted intact; --component points at another
+tree. The batching core and ArduinoJson are production headers; registry
+entries are controlled fixtures.
 Host String allocation-failure controls model failed operations, not ESP heap
 placement or timing. Flash, task identity, lifecycle commands and UI are observed
 boundaries. No wire, device, or filesystem durability qualification is implied.
@@ -32,18 +34,18 @@ def generic_setting_definitions(source: str, utils: str) -> list[str]:
             extract_block(source, "const char* handleSettingCommand(")]
 
 
-def generated() -> str:
-    settings_h = (COMPONENT / "System_Settings.h").read_text()
-    settings_cpp = (COMPONENT / "System_Settings.cpp").read_text()
-    feature_h = (COMPONENT / "System_FeatureRegistry.h").read_text()
-    feature_cpp = (COMPONENT / "System_FeatureRegistry.cpp").read_text()
-    utils = (COMPONENT / "System_Utils.h").read_text()
-    command_h = (COMPONENT / "System_Command.h").read_text()
-    command_cpp = (COMPONENT / "System_Command.cpp").read_text()
+def generated(component: Path = COMPONENT) -> str:
+    settings_h = (component / "System_Settings.h").read_text()
+    settings_cpp = (component / "System_Settings.cpp").read_text()
+    feature_h = (component / "System_FeatureRegistry.h").read_text()
+    feature_cpp = (component / "System_FeatureRegistry.cpp").read_text()
+    utils = (component / "System_Utils.h").read_text()
+    command_h = (component / "System_Command.h").read_text()
+    command_cpp = (component / "System_Command.cpp").read_text()
     types = [extract_block(settings_h, marker) + ";" for marker in
              ("enum SettingType", "struct SettingEntry ")]
     detail_limit = re.search(r"(?m)^#define SYSEVT_DETAIL_LEN .+$",
-                             (COMPONENT / "System_Events.h").read_text())
+                             (component / "System_Events.h").read_text())
     require(detail_limit is not None, "missing production event payload capacity")
     types.append(detail_limit.group())
     types += ["typedef bool (*ConnectionCheckFunc)();",
@@ -77,9 +79,12 @@ def generated() -> str:
     if owner_toggle:
         definitions += [owner_toggle.group(), extract_block(feature_cpp, "static FeatureOwnerToggle featureOwnerToggle(")]
     definitions += [extract_block(feature_cpp, "const char* cmd_features(")]
+    # The dedicated OLED command shares the boolean token contract (OLED builds).
+    oled_command = extract_block((component / "OLED_Utils.cpp").read_text(), "const char* cmd_oled_enabled(")
     harness = (HERE / "settings_mutation_harness.cpp").read_text()
     for marker, body in (("// INSERT_TYPES", "\n\n".join(types)),
-                         ("// INSERT_PRODUCTION", "\n\n".join(definitions))):
+                         ("// INSERT_PRODUCTION", "\n\n".join(definitions)),
+                         ("// INSERT_OLED_COMMAND", oled_command)):
         require(harness.count(marker) == 1, f"bad harness marker: {marker}")
         harness = harness.replace(marker, body)
     return harness
@@ -89,13 +94,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
+    parser.add_argument("--component", type=Path, default=COMPONENT,
+                        help="production component tree to extract from")
     args = parser.parse_args()
     if not args.cxx:
         raise SystemExit("a host C++17 compiler is required")
     with tempfile.TemporaryDirectory(prefix="hw1-settings-mutation-") as temporary:
         directory = Path(temporary)
         source = directory / "settings.cpp"
-        source.write_text(generated())
+        source.write_text(generated(args.component))
         arduino = (HERE / "web_batch_stubs" / "Arduino.h").read_text()
         arduino = arduino.replace("class String {", "bool settingsTestStringCopyAllowed();\n"
                                   "bool settingsTestStringReserveAllowed();\nclass String {")
@@ -108,7 +115,7 @@ def main() -> None:
             executable = directory / f"settings-{oled}"
             command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                        "-pedantic", "-Wno-sign-compare", f"-DENABLE_OLED_DISPLAY={oled}",
-                       "-I", str(directory), "-I", str(COMPONENT),
+                       "-I", str(directory), "-I", str(args.component),
                        "-I", str(JSON_INCLUDE), str(source), "-o", str(executable)]
             if args.sanitize:
                 command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",

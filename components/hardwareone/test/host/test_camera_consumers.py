@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 
+from test_g2_page_publish import list_publish_helper
 from test_web_batch_handlers import extract_block, require
 
 HERE = Path(__file__).resolve().parent
@@ -22,13 +23,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cxx', default=shutil.which('c++'))
     parser.add_argument('--sanitize', action='store_true')
+    parser.add_argument('--component', type=Path, default=COMPONENT,
+                        help='component directory to read production sources from')
     args = parser.parse_args()
-    source = (COMPONENT / 'G2_Page_CameraSettings.cpp').read_text()
+    component = args.component.resolve()
+    source = (component / 'G2_Page_CameraSettings.cpp').read_text()
     # Keep every function, table and conditional from the real page; replace
     # only includes, whose platform declarations the harness supplies.
     source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.M)
-    glasses = (COMPONENT / 'G2_Glasses.h').read_text()
-    hijack = (COMPONENT / 'G2_HijackCmd.h').read_text()
+    glasses = (component / 'G2_Glasses.h').read_text()
+    hijack = (component / 'G2_HijackCmd.h').read_text()
     redraw = re.findall(r'^bool g2EnqueueRedraw\([^;]*\);', hijack, flags=re.M)
     require(len(redraw) == 1, 'G2_HijackCmd.h declares g2EnqueueRedraw exactly once')
     # The harness static_asserts that its stub has the declared function type.
@@ -38,6 +42,7 @@ def main():
         'namespace header_boundary {', redraw[0], '}'))
     harness = (HERE / 'camera_consumers_harness.cpp').read_text()
     for marker, value in (('// INSERT_G2_BOUNDARY_TYPES', boundary),
+                          ('// INSERT_LIST_PUBLISH_HELPER', list_publish_helper(component)),
                           ('// INSERT_PRODUCTION_CAMERA_SETTINGS', source)):
         require(harness.count(marker) == 1, f'one insertion marker: {marker}')
         harness = harness.replace(marker, value)
@@ -46,8 +51,8 @@ def main():
         unit, binary = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
         unit.write_text(unit_text)
         command = [args.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic',
-                   '-DHW_CAMERA_HAL_HOST_TEST=1', '-I', str(COMPONENT),
-                   str(unit), str(COMPONENT / 'HAL_Camera.cpp'), '-o', str(binary)]
+                   '-DHW_CAMERA_HAL_HOST_TEST=1', '-I', str(component),
+                   str(unit), str(component / 'HAL_Camera.cpp'), '-o', str(binary)]
         if args.sanitize:
             command[1:1] = ['-fsanitize=address,undefined', '-g']
         subprocess.run(command, check=True)

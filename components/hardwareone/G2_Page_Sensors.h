@@ -41,13 +41,6 @@
 // safe.
 void g2BuildSensorList(char* out, size_t cap);
 
-// Convenience wrapper: build the list and push via g2ShowText() in one
-// call. Returns what g2ShowText returns (true = sent to the lens).
-// Use this for the `g2sensors` CLI path and for the hijack menu tap
-// handler — both need identical behaviour so centralising here keeps
-// the page self-contained.
-bool g2ShowSensorList();
-
 // On-glasses interactive Sensors page: show a list with one row per
 // COMPILED-IN sensor (non-compiled rows are filtered out entirely).
 // Tapping a row drills into a detail sub-menu (back / auto-start
@@ -88,7 +81,6 @@ void g2SensorsHandleTap(uint32_t idx);
 inline void g2BuildSensorList(char* out, size_t cap) {
   if (out && cap > 0) out[0] = '\0';
 }
-inline bool g2ShowSensorList() { return false; }
 inline void g2ShowSensorsMenu() {}
 inline void g2ReshowSensorsDetail() {}
 inline void g2BuildSensorReadout(char* out, size_t cap) { if (out && cap) out[0] = '\0'; }

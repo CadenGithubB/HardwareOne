@@ -22,6 +22,7 @@
 #include "System_CommandTypes.h"   // ExecReq::DeferredFn
 #include "System_Utils.h"  // submitDeferredToCmdExec
 #include "System_MemUtil.h"        // ps_alloc
+#include "System_Mutex.h"          // EspNowTxGuard
 #include "System_Settings.h"
 
 #include <sodium.h>  // sodium_memzero
@@ -796,6 +797,29 @@ void runDeferredSessionOpen(void* arg) {
     return;
   }
 
+  SessionState* existing = sessionFindByPeer(msg->initiatorMac, peer->meshId);
+
+  // --- Freshness: a re-delivered SESSION_OPEN never resets a live session ---
+  // The signed OPEN stays valid as long as the identity keys do, and the
+  // dispatcher's dedup ring forgets a frame after 5 s. A genuine initiator
+  // proposes a fresh random sessionId every time (a peer that rebooted or
+  // dropped its slot included), so an OPEN carrying this slot's current id, or
+  // one it held before, is a copy of an old frame. Accepting it would zero the
+  // live keys and install ones the initiator cannot derive.
+  if (existing && existing->state != SESSION_ESTABLISHING &&
+      sessionOpenIdStale(existing, msg->sessionId)) {
+    uint16_t n = sessionRejectLogCount(msg->initiatorMac);
+    if (n) {
+      WARN_ESPNOWF("SESSION_OPEN from %02X:%02X:%02X:%02X:%02X:%02X ignored (x%u in 30s): sessionId=%u "
+                   "is this peer's live or a recent session - re-delivered OPEN; live session kept",
+                   msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
+                   msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5],
+                   (unsigned)n, (unsigned)msg->sessionId);
+    }
+    free(w);
+    return;
+  }
+
   // --- Glare resolution (simultaneous SESSION_OPEN) ---
   // If we already have our OWN in-flight initiated handshake to this peer — a
   // slot still in ESTABLISHING (the responder path below flips to ACTIVE
@@ -808,18 +832,15 @@ void runDeferredSessionOpen(void* arg) {
   // the canonical initiator and KEEPS its own session (ignore the peer's OPEN —
   // our CONFIRM will win on both ends); the B-side falls through and yields,
   // accepting the peer's OPEN. Both then converge on the A-initiated session.
-  {
-    SessionState* existing = sessionFindByPeer(msg->initiatorMac, peer->meshId);
-    if (existing && existing->state == SESSION_ESTABLISHING &&
-        sessionIsASide(selfMac, msg->initiatorMac)) {
-      WARN_ESPNOWF("SESSION_OPEN glare with %02X:%02X:%02X:%02X:%02X:%02X — we are A-side, "
-                   "keeping our initiation (ignoring peer sessionId=%u)",
-                   msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
-                   msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5],
-                   (unsigned)msg->sessionId);
-      free(w);
-      return;
-    }
+  if (existing && existing->state == SESSION_ESTABLISHING &&
+      sessionIsASide(selfMac, msg->initiatorMac)) {
+    WARN_ESPNOWF("SESSION_OPEN glare with %02X:%02X:%02X:%02X:%02X:%02X — we are A-side, "
+                 "keeping our initiation (ignoring peer sessionId=%u)",
+                 msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
+                 msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5],
+                 (unsigned)msg->sessionId);
+    free(w);
+    return;
   }
 
   SessionState* s = sessionAllocate(msg->initiatorMac, peer->meshId);
@@ -1149,11 +1170,94 @@ bool deriveRekeyedKeysFromShared(SessionState* s,
   return true;
 }
 
+// Initiator-side REKEY retry table (the REKEY counterpart of the KEY_EX
+// in-flight table). A REKEY is one plaintext signed frame with no transport
+// retry, and a REKEYING session refuses every encrypted send, so an
+// unanswered REKEY is handled here: rekeyRetrySweep re-sends the identical
+// signed frame with its original msgId every kRekeyRetryMs, up to
+// kRekeyMaxRetries times. A peer that already holds the first copy drops a
+// retransmit in its (origin,msgId) dedup ring (5 s TTL); the parked eph priv
+// always matches the eph pub the peer answers, and prevTxSeqAtRekey stays
+// current because nothing is wrapped while REKEYING. Send at 0 s, re-send at
+// 2 s and 4 s, give up at 6 s — the same budget the SESSION_OPEN handshake
+// gets (kSessionEstablishTimeoutMs). On give-up the session is cleared, so the
+// next send or received peer heartbeat re-handshakes; it is not reverted to
+// the old keys, because a peer that applied the REKEY and lost only its reply
+// already holds the new ones.
+constexpr uint8_t  kRekeyInFlightSlots = 16;    // = session slots: one outstanding REKEY per session
+constexpr uint8_t  kRekeyMaxRetries    = 2;     // re-sends after the initial REKEY
+constexpr uint32_t kRekeyRetryMs       = 2000;  // re-send if still REKEYING this long
+
+struct RekeyInFlight {
+  bool                  inUse;
+  uint8_t               retriesLeft;
+  uint16_t              sessionId;
+  uint8_t               peerMac[6];
+  uint32_t              msgId;        // reused on every retransmit (the peer's dedup key)
+  uint32_t              lastSentMs;
+  V4PayloadSessionRekey frame;        // the signed REKEY exactly as first sent
+};
+
+// 16 x 152 B in PSRAM, allocated on the first initiator REKEY. Arming
+// (cmd_exec via espnowrekey, or espnow_task via the threshold trigger) and the
+// sweep (espnow_task) serialize on EspNowTxGuard, like the pending-frame ring.
+// An entry is released by the sweep as soon as its session is no longer
+// REKEYING (answered, aborted, cleared or replaced).
+RekeyInFlight* gRekeyInFlight = nullptr;
+
+// Caller holds EspNowTxGuard.
+bool ensureRekeyInFlightAllocated() {
+  if (gRekeyInFlight) return true;
+  gRekeyInFlight = (RekeyInFlight*)ps_alloc(sizeof(RekeyInFlight) * kRekeyInFlightSlots,
+                                            AllocPref::PreferPSRAM, "espnow.rekey.inflight");
+  if (!gRekeyInFlight) {
+    ERROR_ESPNOWF("REKEY: failed to allocate %u-slot in-flight table — no retry coverage",
+                  (unsigned)kRekeyInFlightSlots);
+    return false;
+  }
+  memset(gRekeyInFlight, 0, sizeof(RekeyInFlight) * kRekeyInFlightSlots);
+  return true;
+}
+
+void rekeyInFlightArm(const uint8_t peerMac[6], uint16_t sessionId, uint32_t msgId,
+                      const V4PayloadSessionRekey* frame) {
+  EspNowTxGuard g("rekeyArm");
+  if (!ensureRekeyInFlightAllocated()) return;
+  RekeyInFlight* e = nullptr;
+  for (uint8_t i = 0; i < kRekeyInFlightSlots; i++) {
+    RekeyInFlight& k = gRekeyInFlight[i];
+    if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) { e = &k; break; }  // one REKEY per peer: newest wins
+  }
+  if (!e) {
+    for (uint8_t i = 0; i < kRekeyInFlightSlots; i++) {
+      if (!gRekeyInFlight[i].inUse) { e = &gRekeyInFlight[i]; break; }
+    }
+  }
+  if (!e) {
+    WARN_ESPNOWF("REKEY: in-flight table full — no retry coverage for %02X:%02X:%02X:%02X:%02X:%02X",
+                 peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+    return;
+  }
+  memcpy(e->peerMac, peerMac, 6);
+  e->sessionId   = sessionId;
+  e->msgId       = msgId;
+  e->frame       = *frame;
+  e->retriesLeft = kRekeyMaxRetries;
+  e->lastSentMs  = (uint32_t)millis();
+  e->inUse       = true;   // publish last
+}
+
 // Build + send a REKEY payload to peerMac. Generates a fresh ephemeral
 // X25519 keypair and parks the priv key in SessionState for the eventual
 // ECDH. Used both for initiator-side first REKEY and responder-side reply.
-// Returns true on send success.
-bool sendRekey(SessionState* s, const uint8_t peerMac[6]) {
+// Returns true on send success; refuses (false, nothing sent) unless the
+// session is ACTIVE. `armRetry` is true only on the initiator
+// path: the frame is then re-sent by rekeyRetrySweep until the peer answers.
+// The responder's reply is never retransmitted (the initiator's retry covers
+// a lost reply). If the radio refuses the frame, a session this call moved to
+// REKEYING goes back to ACTIVE on its current keys, with the re-init guard
+// (kRekeyMinIntervalMs) still counting from this attempt.
+bool sendRekey(SessionState* s, const uint8_t peerMac[6], bool armRetry) {
   if (!s) return false;
   const auto& self = espnowIdentityGet();
   if (!self.valid) return false;
@@ -1194,30 +1298,38 @@ bool sendRekey(SessionState* s, const uint8_t peerMac[6]) {
     return false;
   }
 
-  // Park our eph priv in the session for the eventual ECDH on REKEY reply.
-  // Even if we're the *responder* here (we received a REKEY first), parking
-  // is still the right thing: the peer might have a stale view of us and
-  // initiate yet another REKEY before our reply arrives — having our priv
-  // already in the slot makes that benign.
+  // Park our eph priv in the session (ACTIVE -> REKEYING) for the ECDH: the
+  // initiator completes it when the peer's reply arrives, the responder right
+  // after this send (runDeferredRekey). Only an ACTIVE session starts an
+  // exchange — both callers check that first — so a refusal here means
+  // another exchange owns the parked key, and it is never overwritten.
   if (!sessionMarkRekeyInitiated(s, newEphSec, txSeqAtSign)) {
-    // Already REKEYING — keep the previously-parked priv; just use the new
-    // outbound one for this round. Stash via direct memcpy.
-    memcpy(s->rekeyEphPrivKey, newEphSec, 32);
-    s->rekeyTxSeqAtInit = txSeqAtSign;
+    ERROR_ESPNOWF("REKEY: session not ACTIVE (state=%u) - not sending", (unsigned)s->state);
+    sodium_memzero(newEphSec, sizeof(newEphSec));
+    return false;
   }
   sodium_memzero(newEphSec, sizeof(newEphSec));
 
+  const uint32_t msgId = generateMessageId();
   bool ok = v4_send_frame(peerMac, ESPNOW_V4_TYPE_SESSION_REKEY,
                           ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
-                          generateMessageId(),
+                          msgId,
                           reinterpret_cast<const uint8_t*>(&rk), sizeof(rk), 1);
   if (ok) {
     INFO_ESPNOWF("REKEY sent to %02X:%02X:%02X:%02X:%02X:%02X sessionId=%u "
                  "(txSeqAtSign=%lu)",
                  peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5],
                  (unsigned)s->sessionId, (unsigned long)txSeqAtSign);
+    if (armRetry) rekeyInFlightArm(peerMac, s->sessionId, msgId, &rk);
   } else {
     ERROR_ESPNOWF("REKEY send failed");
+    // Nothing reached the peer: undo this call's ACTIVE -> REKEYING flip
+    // (current keys untouched) instead of leaving the session refusing
+    // sends. The attempt time stays in rekeyInitiatedAtMs so the threshold
+    // trigger waits kRekeyMinIntervalMs before signing and sending again.
+    const uint32_t attemptMs = s->rekeyInitiatedAtMs;
+    sessionAbortRekey(s);
+    s->rekeyInitiatedAtMs = attemptMs;
   }
   return ok;
 }
@@ -1270,12 +1382,39 @@ void runDeferredRekey(void* arg) {
     return;
   }
 
-  // If we don't already have an outstanding REKEY of our own, generate one
-  // now and send it. This is the "responder" path. The sendRekey() call
-  // parks our fresh eph priv in s->rekeyEphPrivKey.
-  bool weHadOutstanding = (s->state == SESSION_REKEYING && s->rekeyInitiatedAtMs != 0);
-  if (!weHadOutstanding) {
-    if (!sendRekey(s, w->srcMac)) {
+  // Freshness. The signed REKEY stays valid for the life of the session and
+  // the dispatcher's dedup ring forgets it after 5 s, so a re-delivered copy
+  // is recognised against the session's live state instead (nonce of the last
+  // REKEY acted on, applied-at minimum interval, sequence window). Answering
+  // one would rekey to keys the peer does not hold and, with the peer
+  // answering back, never end.
+  const uint32_t nowMs = (uint32_t)millis();
+  const SessionPeerRekeyVerdict verdict =
+      sessionClassifyPeerRekey(s, msg->nonceRekey, msg->prevTxSeqAtRekey, nowMs);
+  if (verdict != SESSION_REKEY_COUNTERPART && verdict != SESSION_REKEY_INITIATION) {
+    static uint32_t sRekeyIgnoredWarnMs = 0;  // one line per 5 s however many copies arrive
+    if (logCooldownOk(sRekeyIgnoredWarnMs, 5000)) {
+      WARN_ESPNOWF("REKEY rx: ignored (%s) from %02X:%02X:%02X:%02X:%02X:%02X sessionId=%u "
+                   "prevTxSeq=%lu rxHwm=%lu keyedAgeMs=%lu - keys unchanged, no reply",
+                   verdict == SESSION_REKEY_NONCE_SEEN ? "nonce already seen" :
+                   verdict == SESSION_REKEY_TOO_SOON   ? "session keyed <30s ago" : "stale sequence",
+                   w->srcMac[0], w->srcMac[1], w->srcMac[2], w->srcMac[3], w->srcMac[4], w->srcMac[5],
+                   (unsigned)s->sessionId, (unsigned long)msg->prevTxSeqAtRekey,
+                   (unsigned long)s->rxSeqHighWater, (unsigned long)(nowMs - s->establishedAtMs));
+    }
+    free(w);
+    return;
+  }
+
+  // COUNTERPART: the peer answers a REKEY we sent — our initiation (REKEYING)
+  // or, inside the reply grace, the reply we just sent — so the parked priv
+  // completes the ECDH and nothing is sent. INITIATION: generate and send our
+  // reply now (the responder path); sendRekey parks its fresh eph priv in
+  // s->rekeyEphPrivKey.
+  const bool counterpart = (verdict == SESSION_REKEY_COUNTERPART);
+  const bool weInitiated = (s->state == SESSION_REKEYING);
+  if (!counterpart) {
+    if (!sendRekey(s, w->srcMac, /*armRetry=*/false)) {
       ERROR_ESPNOWF("REKEY rx: responder failed to send our REKEY reply");
       free(w);
       return;
@@ -1289,6 +1428,7 @@ void runDeferredRekey(void* arg) {
     // F3 — we may have already sent our REKEY reply (responder) or initiated
     // (initiator), so we're in REKEYING. Abort back to ACTIVE rather than
     // stranding the session; current keys are untouched and stay valid.
+    // (Inside the reply grace the session is already ACTIVE: a no-op.)
     ERROR_ESPNOWF("REKEY rx: X25519 shared computation failed — aborting rekey");
     sessionAbortRekey(s);
     free(w);
@@ -1304,7 +1444,15 @@ void runDeferredRekey(void* arg) {
     return;
   }
 
+  // Responder: keep our reply's priv for the reply grace, so that if the peer
+  // takes the reply for an initiation (its own REKEY was a re-delivered copy)
+  // its answer is applied as the counterpart and the exchange ends there.
+  uint8_t replyEphPriv[32];
+  memcpy(replyEphPriv, s->rekeyEphPrivKey, sizeof(replyEphPriv));
+  sessionNotePeerRekey(s, msg->nonceRekey);
   sessionApplyRekeyedKeys(s, newKeyTx, newKeyRx);
+  if (!counterpart) sessionHoldRekeyReply(s, replyEphPriv);
+  sodium_memzero(replyEphPriv, sizeof(replyEphPriv));
   sodium_memzero(newKeyTx, sizeof(newKeyTx));
   sodium_memzero(newKeyRx, sizeof(newKeyRx));
 
@@ -1312,7 +1460,7 @@ void runDeferredRekey(void* arg) {
                "(role=%s) — new keys active, prev keys valid %ums",
                w->srcMac[0], w->srcMac[1], w->srcMac[2], w->srcMac[3], w->srcMac[4], w->srcMac[5],
                (unsigned)s->sessionId,
-               weHadOutstanding ? "initiator" : "responder",
+               weInitiated ? "initiator" : counterpart ? "responder, peer answered our reply" : "responder",
                (unsigned)kRekeyPrevKeysWindowMs);
   free(w);
 }
@@ -1354,16 +1502,67 @@ bool espnowRekeyInitiate(const uint8_t peerMac[6]) {
     ERROR_ESPNOWF("REKEY initiate: no ACTIVE session");
     return false;
   }
+  uint32_t nowMs = (uint32_t)millis();
+  // Applied-at guard: the peer ignores an initiation that arrives less than
+  // kRekeyMinIntervalMs after the keys last changed (sessionClassifyPeerRekey),
+  // so never send one. This also keeps a responder's parked reply key (the
+  // reply grace) from being overwritten by a local initiation.
+  if ((uint32_t)(nowMs - s->establishedAtMs) < kRekeyMinIntervalMs) {
+    DEBUGF(DEBUG_ESPNOW_CORE, "REKEY initiate: skipping - session keyed %ums ago (min interval %ums)",
+           (unsigned)(nowMs - s->establishedAtMs), (unsigned)kRekeyMinIntervalMs);
+    return false;
+  }
   // Re-init guard: if we recently initiated, skip to let the in-flight one
   // converge before re-firing on the same trigger.
-  uint32_t nowMs = (uint32_t)millis();
   if (s->rekeyInitiatedAtMs != 0 &&
       (nowMs - s->rekeyInitiatedAtMs) < kRekeyMinIntervalMs) {
     DEBUGF(DEBUG_ESPNOW_CORE, "REKEY initiate: skipping — last attempt was %ums ago",
            (unsigned)(nowMs - s->rekeyInitiatedAtMs));
     return false;
   }
-  return sendRekey(s, peerMac);
+  return sendRekey(s, peerMac, /*armRetry=*/true);
+}
+
+void rekeyRetrySweep(uint32_t nowMs) {
+  if (!gRekeyInFlight) return;  // no initiator REKEY sent since boot
+  for (uint8_t i = 0; i < kRekeyInFlightSlots; i++) {
+    RekeyInFlight resend;
+    {
+      EspNowTxGuard g("rekeySweep");
+      RekeyInFlight& r = gRekeyInFlight[i];
+      if (!r.inUse) continue;
+      SessionState* s = sessionFindBySessionId(r.sessionId, r.peerMac);
+      if (!s || s->state != SESSION_REKEYING) {
+        // Answered (ACTIVE on the new keys), aborted, or torn down / replaced
+        // by a fresh handshake — nothing left to re-send.
+        memset(&r, 0, sizeof(r));
+        continue;
+      }
+      if ((uint32_t)(nowMs - r.lastSentMs) < kRekeyRetryMs) continue;
+      if (r.retriesLeft == 0) {
+        WARN_ESPNOWF("REKEY: no reply from %02X:%02X:%02X:%02X:%02X:%02X (sessionId=%u) after %u attempts — "
+                     "dropping the session; the next send re-handshakes",
+                     r.peerMac[0], r.peerMac[1], r.peerMac[2], r.peerMac[3], r.peerMac[4], r.peerMac[5],
+                     (unsigned)r.sessionId, (unsigned)(kRekeyMaxRetries + 1));
+        sessionClear(s);
+        memset(&r, 0, sizeof(r));
+        continue;
+      }
+      r.retriesLeft--;
+      r.lastSentMs = nowMs;
+      resend = r;
+    }
+    // Sent from the stack copy after the lock is released. Same bytes, same
+    // msgId: a peer that already holds the first copy dedups it. A refused
+    // retransmit just waits for the next interval.
+    INFO_ESPNOWF("REKEY: no reply from %02X:%02X:%02X:%02X:%02X:%02X yet — re-sending (%u left)",
+                 resend.peerMac[0], resend.peerMac[1], resend.peerMac[2],
+                 resend.peerMac[3], resend.peerMac[4], resend.peerMac[5],
+                 (unsigned)resend.retriesLeft);
+    v4_send_frame(resend.peerMac, ESPNOW_V4_TYPE_SESSION_REKEY,
+                  ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ, resend.msgId,
+                  reinterpret_cast<const uint8_t*>(&resend.frame), sizeof(resend.frame), 1);
+  }
 }
 
 #endif  // ENABLE_ESPNOW

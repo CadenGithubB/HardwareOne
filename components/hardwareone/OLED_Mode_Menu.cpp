@@ -13,12 +13,6 @@
 
 extern DisplayDriver* oledDisplay;
 
-// Dynamic menu system
-extern OLEDMenuItemEx gDynamicMenuItems[];
-extern int gDynamicMenuItemCount;
-extern void buildDynamicMenu();
-
-
 // Sensor menu state variables from OLED_Display.cpp
 extern const OLEDMenuItem oledSensorMenuItems[];
 extern const int oledSensorMenuItemCount;
@@ -273,15 +267,8 @@ static bool mainMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyP
     return true;
   }
 
-  // START - cycle data source when bonded (LOCAL/REMOTE/BOTH). SELECT->Quick
-  // Settings is handled by the global handler now that the launcher uses the
-  // normal registered-mode dispatch path.
-  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_START)) {
-    if (oledRemoteSourceAvailable()) {
-      oledCycleDataSource();
-      return true;
-    }
-  }
+  // SELECT -> Quick Settings is handled by the global handler (the launcher
+  // uses the normal registered-mode dispatch path).
 
   // B - leave a category submenu; at the top level let the global handler run
   // (there is nowhere above the category list to go).

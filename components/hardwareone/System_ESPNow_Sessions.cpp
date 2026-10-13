@@ -10,6 +10,7 @@
 
 #include "System_Debug.h"
 #include "System_ESPNow_Crypto.h"
+#include "System_ESPNow_Deadline.h"  // wrap-safe prev-key window
 #include "System_ESPNow_Wire.h"  // EspNowV4Header, flag constants
 #include "System_MemUtil.h"      // ps_alloc, AllocPref
 #include "System_Mutex.h"        // EspNowTxGuard — serializes the session TX critical section
@@ -67,6 +68,20 @@ SessionState* sessionAllocate(const uint8_t peerMac[6], uint8_t meshId) {
   // Reuse existing slot for this peer/mesh if present.
   SessionState* existing = sessionFindByPeer(peerMac, meshId);
   if (existing) {
+    // Remember the id being replaced (newest first) so a re-delivered
+    // SESSION_OPEN of it is recognised (sessionOpenIdStale); the caller
+    // writes the new sessionId.
+    if (existing->sessionId != 0) {
+      memmove(&existing->recentSessionIds[1], &existing->recentSessionIds[0],
+              sizeof(existing->recentSessionIds) - sizeof(existing->recentSessionIds[0]));
+      existing->recentSessionIds[0] = existing->sessionId;
+    }
+    // No rekey exchange survives a new handshake.
+    sodium_memzero(existing->rekeyEphPrivKey, sizeof(existing->rekeyEphPrivKey));
+    existing->rekeyInitiatedAtMs     = 0;
+    existing->rekeyTxSeqAtInit       = 0;
+    existing->rekeyReplyGraceUntilMs = 0;
+    memset(existing->lastPeerRekeyNonce, 0, sizeof(existing->lastPeerRekeyNonce));
     sodium_memzero(existing->aeadKeyTx, sizeof(existing->aeadKeyTx));
     sodium_memzero(existing->aeadKeyRx, sizeof(existing->aeadKeyRx));
     existing->state = SESSION_ESTABLISHING;
@@ -196,37 +211,43 @@ void buildNonce(uint8_t outNonce[12],
   outNonce[11] = 0;
 }
 
-// Replay-window check + insert. Returns true to accept the frame.
+// Replay-window check + insert on one (highWater, bitmap) pair. Returns true
+// to accept the frame.
 //   Strictly newer frame  → shift window, advance highWater, accept.
 //   Within 64-frame window → check bitmap; accept once, reject duplicate.
 //   Below window low edge → reject (too old).
-bool replayCheckAndInsert(SessionState* s, uint32_t frameSeq) {
+// A session owns two pairs: the current RX key's window and the previous
+// key's (rxSeqHighWaterPrev / rxSeqBitmapPrev). sessionUnwrapFrame passes the
+// pair that belongs to the key that opened the frame, so a late old-key frame
+// is checked against the window it was sent into and never seeds or advances
+// the fresh window.
+bool replayCheckAndInsert(uint32_t& highWater, uint64_t& bitmap, uint32_t frameSeq) {
   if (frameSeq == 0) {
     // We never send frameSeq=0 (txSeqNext starts at 0 and ++s to 1 on first
     // send), but reject defensively in case a peer is misbehaving.
     return false;
   }
-  if (s->rxSeqHighWater == 0) {
-    // First frame on this session — accept and seed.
-    s->rxSeqHighWater = frameSeq;
-    s->rxSeqBitmap    = 1ULL;  // bit 0 = this very frame
+  if (highWater == 0) {
+    // First frame under this key — accept and seed.
+    highWater = frameSeq;
+    bitmap    = 1ULL;  // bit 0 = this very frame
     return true;
   }
-  if (frameSeq > s->rxSeqHighWater) {
-    uint32_t shift = frameSeq - s->rxSeqHighWater;
+  if (frameSeq > highWater) {
+    uint32_t shift = frameSeq - highWater;
     if (shift >= 64) {
-      s->rxSeqBitmap = 1ULL;
+      bitmap = 1ULL;
     } else {
-      s->rxSeqBitmap = (s->rxSeqBitmap << shift) | 1ULL;
+      bitmap = (bitmap << shift) | 1ULL;
     }
-    s->rxSeqHighWater = frameSeq;
+    highWater = frameSeq;
     return true;
   }
-  uint32_t diff = s->rxSeqHighWater - frameSeq;
+  uint32_t diff = highWater - frameSeq;
   if (diff >= 64) return false;  // too old
   uint64_t mask = 1ULL << diff;
-  if (s->rxSeqBitmap & mask) return false;  // duplicate
-  s->rxSeqBitmap |= mask;
+  if (bitmap & mask) return false;  // duplicate
+  bitmap |= mask;
   return true;
 }
 
@@ -343,34 +364,43 @@ bool sessionUnwrapFrame(SessionState* s,
   buildNonce(nonce, s->sessionId, peerDir, header->frameSeq);
 
   const uint8_t* aad = reinterpret_cast<const uint8_t*>(header);
-  bool openedWithCurrent = espnowCryptoAeadOpen(outPlain, cipher, cipherLen, tag,
-                                                aad, 30, nonce, s->aeadKeyRx);
+  bool opened = espnowCryptoAeadOpen(outPlain, cipher, cipherLen, tag,
+                                     aad, 30, nonce, s->aeadKeyRx);
+  bool openedWithPrev = false;
   // Phase 3.6 — if the current key fails AND we have a recent prev key in the
   // retention window, try it. This catches frames sent by the peer under the
   // old key before they processed our REKEY-driven key swap.
-  if (!openedWithCurrent && s->prevKeysValidUntilMs != 0 &&
-      (uint32_t)millis() <= s->prevKeysValidUntilMs) {
-    if (espnowCryptoAeadOpen(outPlain, cipher, cipherLen, tag,
-                             aad, 30, nonce, s->aeadKeyRxPrev)) {
+  if (!opened &&
+      espnowDeadlinePending(s->prevKeysValidUntilMs, (uint32_t)millis())) {
+    openedWithPrev = espnowCryptoAeadOpen(outPlain, cipher, cipherLen, tag,
+                                          aad, 30, nonce, s->aeadKeyRxPrev);
+    if (openedWithPrev) {
       INFO_ESPNOWF("session: decrypted under prev key (sessionId=%u seq=%lu) — "
                    "peer hadn't applied REKEY yet",
                    (unsigned)s->sessionId, (unsigned long)header->frameSeq);
-      // Treat as success — fall through to replay check.
-      openedWithCurrent = true;
+      opened = true;
     }
   }
-  if (!openedWithCurrent) {
+  if (!opened) {
     WARN_ESPNOWF("session: AEAD open failed (sessionId=%u seq=%lu) — "
                  "tampered, wrong key, or wrong direction",
                  (unsigned)s->sessionId, (unsigned long)header->frameSeq);
     return false;
   }
-  // AEAD verified; now run replay check.
-  if (!replayCheckAndInsert(s, header->frameSeq)) {
-    WARN_ESPNOWF("session: replay reject (sessionId=%u seq=%lu hwm=%lu)",
+  // AEAD verified; now run the replay check against the window of the key
+  // that opened the frame. A frame under the previous key is checked against
+  // the window that key was live with and must never seed or advance the
+  // current key's fresh window — otherwise every frame of the previous epoch
+  // replays once after a REKEY, and a late old-key frame poisons the new
+  // high-water mark so genuine new-key frames are rejected as too old.
+  uint32_t& highWater = openedWithPrev ? s->rxSeqHighWaterPrev : s->rxSeqHighWater;
+  uint64_t& bitmap    = openedWithPrev ? s->rxSeqBitmapPrev    : s->rxSeqBitmap;
+  if (!replayCheckAndInsert(highWater, bitmap, header->frameSeq)) {
+    WARN_ESPNOWF("session: replay reject (sessionId=%u seq=%lu hwm=%lu%s)",
                  (unsigned)s->sessionId,
                  (unsigned long)header->frameSeq,
-                 (unsigned long)s->rxSeqHighWater);
+                 (unsigned long)highWater,
+                 openedWithPrev ? " prev-key" : "");
     // Don't expose the plaintext that we just decrypted — wipe it.
     sodium_memzero(outPlain, cipherLen);
     return false;
@@ -774,18 +804,25 @@ void sessionApplyRekeyedKeys(SessionState* s,
     // (sent under the old key before they processed our REKEY) a window to
     // decrypt. We don't keep old TX keys because we control when we switch.
     memcpy(s->aeadKeyRxPrev, s->aeadKeyRx, 32);
-    s->prevKeysValidUntilMs = (uint32_t)millis() + kRekeyPrevKeysWindowMs;
+    s->prevKeysValidUntilMs = espnowDeadlineAfter((uint32_t)millis(), kRekeyPrevKeysWindowMs);
+    // The prev key keeps the replay window it was live with, so a late
+    // old-key frame is still replay-checked and never touches the fresh
+    // window below.
+    s->rxSeqHighWaterPrev = s->rxSeqHighWater;
+    s->rxSeqBitmapPrev    = s->rxSeqBitmap;
     // Install the new keys.
     memcpy(s->aeadKeyTx, newKeyTx, 32);
     memcpy(s->aeadKeyRx, newKeyRx, 32);
-    // New keys = new nonce namespace. Reset frame counters and replay window.
+    // New keys = new nonce namespace. Reset frame counters and start a fresh
+    // replay window for the new RX key.
     s->txSeqNext      = 0;
     s->rxSeqHighWater = 0;
     s->rxSeqBitmap    = 0;
     // Done with the rekey transient state.
     sodium_memzero(s->rekeyEphPrivKey, sizeof(s->rekeyEphPrivKey));
-    s->rekeyInitiatedAtMs = 0;
-    s->rekeyTxSeqAtInit   = 0;
+    s->rekeyInitiatedAtMs     = 0;
+    s->rekeyTxSeqAtInit       = 0;
+    s->rekeyReplyGraceUntilMs = 0;
     s->state          = SESSION_ACTIVE;
     s->establishedAtMs = (uint32_t)millis();  // age clock resets on rekey
     s->lastUseMs       = s->establishedAtMs;
@@ -803,9 +840,10 @@ bool sessionMarkRekeyInitiated(SessionState* s,
   if (!s || !ephPrivKey) return false;
   if (s->state != SESSION_ACTIVE) return false;
   memcpy(s->rekeyEphPrivKey, ephPrivKey, 32);
-  s->rekeyInitiatedAtMs = (uint32_t)millis();
-  s->rekeyTxSeqAtInit   = txSeqAtSign;
-  s->state              = SESSION_REKEYING;
+  s->rekeyInitiatedAtMs     = (uint32_t)millis();
+  s->rekeyTxSeqAtInit       = txSeqAtSign;
+  s->rekeyReplyGraceUntilMs = 0;  // the parked key now belongs to this REKEY
+  s->state                  = SESSION_REKEYING;
   return true;
 }
 
@@ -822,9 +860,10 @@ bool sessionMarkRekeyInitiated(SessionState* s,
 void sessionAbortRekey(SessionState* s) {
   if (!s || s->state != SESSION_REKEYING) return;
   sodium_memzero(s->rekeyEphPrivKey, sizeof(s->rekeyEphPrivKey));
-  s->rekeyInitiatedAtMs = 0;
-  s->rekeyTxSeqAtInit   = 0;
-  s->state              = SESSION_ACTIVE;
+  s->rekeyInitiatedAtMs     = 0;
+  s->rekeyTxSeqAtInit       = 0;
+  s->rekeyReplyGraceUntilMs = 0;
+  s->state                  = SESSION_ACTIVE;
   s->lastUseMs          = (uint32_t)millis();
   pendingFrameDrainForPeer(s->peerMac);
 }
@@ -834,11 +873,67 @@ void sessionRekeyPrevKeysSweep(uint32_t nowMs) {
   for (uint8_t i = 0; i < kSessionSlots; i++) {
     SessionState& s = gSessions[i];
     if (s.state == SESSION_FREE) continue;
-    if (s.prevKeysValidUntilMs != 0 && nowMs > s.prevKeysValidUntilMs) {
+    if (s.prevKeysValidUntilMs != 0 && !espnowDeadlinePending(s.prevKeysValidUntilMs, nowMs)) {
       sodium_memzero(s.aeadKeyRxPrev, sizeof(s.aeadKeyRxPrev));
       s.prevKeysValidUntilMs = 0;
+      s.rxSeqHighWaterPrev   = 0;
+      s.rxSeqBitmapPrev      = 0;
+    }
+    // An expired reply grace: the peer did not answer our REKEY reply as an
+    // initiation, so the reply's parked ephemeral key is no longer needed.
+    if (s.rekeyReplyGraceUntilMs != 0 && !espnowDeadlinePending(s.rekeyReplyGraceUntilMs, nowMs)) {
+      if (s.state != SESSION_REKEYING) sodium_memzero(s.rekeyEphPrivKey, sizeof(s.rekeyEphPrivKey));
+      s.rekeyReplyGraceUntilMs = 0;
     }
   }
+}
+
+// ============================================================================
+// Handshake freshness — re-delivered REKEY / SESSION_OPEN
+// ============================================================================
+
+SessionPeerRekeyVerdict sessionClassifyPeerRekey(const SessionState* s,
+                                                 const uint8_t nonceRekey[16],
+                                                 uint32_t prevTxSeqAtRekey,
+                                                 uint32_t nowMs) {
+  // The exact frame we already acted on: a re-delivery or a retransmit.
+  if (!sodium_is_zero(s->lastPeerRekeyNonce, sizeof(s->lastPeerRekeyNonce)) &&
+      memcmp(nonceRekey, s->lastPeerRekeyNonce, sizeof(s->lastPeerRekeyNonce)) == 0) {
+    return SESSION_REKEY_NONCE_SEEN;
+  }
+  // We initiated (REKEYING), or we just replied and the peer is answering
+  // that reply: derive with the parked key and send nothing.
+  if (s->state == SESSION_REKEYING) return SESSION_REKEY_COUNTERPART;
+  if (espnowDeadlinePending(s->rekeyReplyGraceUntilMs, nowMs)) return SESSION_REKEY_COUNTERPART;
+  // An initiation. establishedAtMs is stamped whenever the keys change
+  // (handshake or rekey apply), so it is the applied-at clock.
+  if ((uint32_t)(nowMs - s->establishedAtMs) < kRekeyMinIntervalMs) return SESSION_REKEY_TOO_SOON;
+  // A genuine initiation is signed at the peer's live txSeqNext, which our
+  // high-water mark can pass only by the few frames minted while it signed.
+  if (s->rxSeqHighWater > prevTxSeqAtRekey &&
+      (s->rxSeqHighWater - prevTxSeqAtRekey) > kRekeySeqSlack) {
+    return SESSION_REKEY_STALE_SEQ;
+  }
+  return SESSION_REKEY_INITIATION;
+}
+
+void sessionNotePeerRekey(SessionState* s, const uint8_t nonceRekey[16]) {
+  if (!s || !nonceRekey) return;
+  memcpy(s->lastPeerRekeyNonce, nonceRekey, sizeof(s->lastPeerRekeyNonce));
+}
+
+void sessionHoldRekeyReply(SessionState* s, const uint8_t ephPrivKey[32]) {
+  if (!s || !ephPrivKey || s->state != SESSION_ACTIVE) return;
+  memcpy(s->rekeyEphPrivKey, ephPrivKey, sizeof(s->rekeyEphPrivKey));
+  s->rekeyReplyGraceUntilMs = espnowDeadlineAfter((uint32_t)millis(), kRekeyPrevKeysWindowMs);
+}
+
+bool sessionOpenIdStale(const SessionState* s, uint16_t sessionId) {
+  if (sessionId == 0 || s->sessionId == sessionId) return true;
+  for (uint16_t id : s->recentSessionIds) {
+    if (id != 0 && id == sessionId) return true;
+  }
+  return false;
 }
 
 #endif  // ENABLE_ESPNOW

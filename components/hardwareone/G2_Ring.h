@@ -473,20 +473,18 @@ void g2RingPollVitalForLogging(void);
 void g2RingTimeSyncTick(void);
 
 // Bridge-progress hook. Called by parseSid80Rx() when a RING_CONNECT_INFO
-// poll arrives from either temple. We mirror the most recent connRet /
-// connectRing values so `ringbridge status` can show "scanning" / "fail" /
-// "ok" without the user having to scroll the log. Pass 0 / false for fields
+// poll arrives from either temple. The ring module does not use temple
+// bridge progress, so the report is ignored. Pass 0 / false for fields
 // that weren't present in the inbound payload.
 void g2RingNoteBridgePoll(uint64_t connRet, bool hasConnRet,
                           uint64_t connectRing, bool hasConnectRing);
 
 // Forwarded-telemetry sink. Called by the G2 sid=0x90/0x91 RX handler when
-// the right temple's bridge is active and is forwarding RingDataPackage
-// frames to us. Parses the protobuf wrapper, extracts each populated
-// RingRawData field (battery / hr / spo2 / hrv / etc.), and updates the
-// internal R1TelemetryCache so the existing status / spoof-push code
-// stays useful regardless of which side actually owns the ring's BLE
-// link. `pb` / `pbLen` is the envelope body (post-header proto bytes).
+// a temple forwards RingDataPackage frames to us. Parses the protobuf
+// wrapper, extracts each populated RingRawData field (battery / hr / spo2 /
+// hrv / etc.), and updates the internal R1TelemetryCache so the status and
+// health readers see it regardless of which side actually owns the ring's
+// BLE link. `pb` / `pbLen` is the envelope body (post-header proto bytes).
 // Safe to call with malformed / partial frames — bails on first parse error.
 void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen);
 

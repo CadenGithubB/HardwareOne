@@ -12,6 +12,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_ESPNow.h"
+#include "System_ESPNow_Deadline.h"   // wrap-safe lease deadlines
 #include "System_ESPNow_Identity.h"   // peerIdentityFindByMac / espnowIdentityFormatPubHex — fingerprint auth
 #include "System_MemUtil.h"
 #include "System_Settings.h"
@@ -104,6 +105,13 @@ static uint32_t gSensorReqIntervalMs[REMOTE_SENSOR_MAX] = {0};
 // The authorized controller's MAC: the encrypted-unicast SENSOR_ENVELOPE reply target.
 // All-zero = no controller set → leased/manual streaming emits nothing on the air (D2).
 static uint8_t gSensorControllerMac[6] = {0};
+
+// The lease-expiry decision for one streaming slot. Wrap-safe: a lease stamped
+// just before the 49.7-day millis() wrap still lapses on time, and one whose
+// deadline wrapped past zero does not lapse at once. 0 = manual / no lease.
+static bool sensorLeaseLapsed(int i, uint32_t nowMs) {
+  return gSensorLeaseExpiresAt[i] != 0 && !espnowDeadlinePending(gSensorLeaseExpiresAt[i], nowMs);
+}
 
 // ==========================
 // Sensor JSON builder dispatch
@@ -596,9 +604,8 @@ void espnowApplySensorSubscription(uint8_t mode, uint32_t sensorMask,
       uint32_t leaseFor = (mode == SENSOR_REQ_ONESHOT)
                             ? (uint32_t)(intervalMs ? intervalMs : 500)  // ~one push then expire
                             : (uint32_t)leaseMs;
-      uint32_t exp = (uint32_t)millis() + leaseFor;
-      if (exp == 0) exp = 1;  // 0 is reserved for "manual / no lease"
-      gSensorLeaseExpiresAt[i] = exp;
+      // Never 0: 0 is reserved for "manual / no lease".
+      gSensorLeaseExpiresAt[i] = espnowDeadlineAfter((uint32_t)millis(), leaseFor);
     }
   }
 
@@ -816,7 +823,7 @@ static void sensorBroadcasterTask(void* param) {
       // ONLY the flags here — never call stopSensorDataStreaming/stopSensorBroadcaster
       // from inside this task (that self-vTaskDeletes our own handle and wedges the
       // worker until reboot). The self-teardown after the loop handles task exit.
-      if (gSensorLeaseExpiresAt[i] != 0 && (uint32_t)now >= gSensorLeaseExpiresAt[i]) {
+      if (sensorLeaseLapsed(i, (uint32_t)now)) {
         gSensorLeaseExpiresAt[i]   = 0;
         gSensorReqIntervalMs[i]    = 0;
         gSensorStreamingEnabled[i] = false;

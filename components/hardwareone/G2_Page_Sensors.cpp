@@ -5,8 +5,8 @@
 //   1. The sensor registry table — one row per known sensor with the matching
 //      build flag, runtime-state extern names, and a short display label.
 //   2. The formatter that walks that table and produces the rendered text.
-//   3. The high-level `g2ShowSensorList()` helper that builds + ships in one
-//      call (used by both the CLI and the hijack-menu tap handler).
+//   3. The interactive Sensors page: landing list, per-sensor detail and
+//      live views, and their tap dispatcher.
 //
 // Adding a new sensor: add an entry to kSensorRows[] below, plus its
 // extern declaration if the build flag is on. No changes needed in
@@ -22,6 +22,7 @@
 #include "System_FeatureRegistry.h"     // getFeatureById, FeatureEntry
 #include "System_Settings.h"            // setSetting, gSettings
 #include "G2_HijackCmd.h"               // g2SubmitHijackCommand — Group A migration
+#include "G2_Page_Common.h"             // g2ShowListPageAndPublish
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <stdio.h>
@@ -484,13 +485,6 @@ void g2BuildSensorList(char* out, size_t cap) {
   out[cap - 1] = '\0';
 }
 
-bool g2ShowSensorList() {
-  char buf[512];
-  g2BuildSensorList(buf, sizeof(buf));
-  DEBUG_G2F("[G2] Sensor list (%u B):\n%s", (unsigned)strlen(buf), buf);
-  return g2ShowText(buf);
-}
-
 // -----------------------------------------------------------------------------
 // Interactive Sensors page — landing list + per-sensor detail
 // -----------------------------------------------------------------------------
@@ -556,14 +550,6 @@ void g2ShowSensorsMenu() {
   size_t count = 0;
   buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
 
-  // Stash the filtered set so handleTap can look up by row index later
-  // — buildRows is cheap, but using the stashed copy guarantees the
-  // dispatcher and the renderer agree on indexing.
-  static EXT_RAM_BSS_ATTR G2SensorRow gSensorsListCache[SENSORS_MAX_ROWS];  // PSRAM: menu-index roster, read on-task only
-  static size_t      gSensorsListCount = 0;
-  for (size_t i = 0; i < count; i++) gSensorsListCache[i] = rows[i];
-  gSensorsListCount = count;
-
   size_t out = 0;
   strncpy(gSensorsRows[out], "<- Main Menu", SENSORS_ROW_LEN - 1);
   gSensorsRows[out][SENSORS_ROW_LEN - 1] = '\0';
@@ -583,15 +569,15 @@ void g2ShowSensorsMenu() {
     }
   }
 
-  gSensorsLevel = SENSORS_LEVEL_LIST;
-  g2SetHijackPage(G2_HIJACK_PAGE_SENSORS);
-  g2ShowListPage(gSensorsRowPtrs, out);
-  // Expose the cached count via a file-static accessor so the tap
-  // handler doesn't have to re-run buildRows on each tap. Just store
-  // it via a local helper that closes over the file-static cache.
-  // (Already done above — gSensorsListCount + gSensorsListCache.)
-  (void)gSensorsListCache;  // silence unused-static warning when
-                            //   SENSORS_LEVEL_DETAIL is the only reader
+  // The LIST level and the SENSORS page become live only once the lens
+  // accepted these rows; a refused render leaves the visible page in charge.
+  if (!g2ShowListPageAndPublish(gSensorsRowPtrs, out, [] {
+        gSensorsLevel = SENSORS_LEVEL_LIST;
+        g2SetHijackPage(G2_HIJACK_PAGE_SENSORS);
+      })) {
+    DEBUG_G2F("[G2] Sensors menu not shown");
+    return;
+  }
   DEBUG_G2F("[G2] Sensors menu shown (%u compiled rows)", (unsigned)count);
 }
 
@@ -602,7 +588,9 @@ void g2ShowSensorsMenu() {
 //   1: Auto Start: ON|OFF (toggle)
 //   2: <hardware name> (e.g. BNO055 — info-only)
 //   3: <label>: <live value> | <state word>
-static void showSensorDetail(const G2SensorRow& r) {
+// Returns true when the detail (live or static) is on the lens and its level
+// is live; false leaves the previous level and page routing the visible rows.
+static bool showSensorDetail(const G2SensorRow& r) {
 #if ENABLE_CAMERA_SENSOR
   const bool isCameraLive = (strcmp(r.featureId, "camera") == 0);
 #else
@@ -610,17 +598,18 @@ static void showSensorDetail(const G2SensorRow& r) {
 #endif
   // Non-camera sensors render as a LIVE compound (selectable list + a per-tick
   // live readout) instead of the static list built below. Camera keeps its
-  // multi-action static detail (Capture/Stream/Settings). The DETAIL-level tap
-  // routing (idx 0 = back, idx 1 = Auto-Start toggle) is reused as-is, so we
-  // set the level + hijack page here before spawning the live worker. On spawn
-  // failure we fall through to the static render so the page never goes blank.
+  // multi-action static detail (Capture/Stream/Settings). The LIVE level
+  // becomes live only once the live page started (g2ShowSensorLive claims the
+  // SENSORS page itself); until then taps keep the visible page's routing. On
+  // spawn failure nothing is committed and we fall through to the static
+  // render so the page never goes blank; it publishes DETAIL only if shown.
   if (!isCameraLive) {
-    gSensorsLevel = SENSORS_LEVEL_LIVE;
-    g2SetHijackPage(G2_HIJACK_PAGE_SENSORS);
-    if (g2ShowSensorLive()) return;
+    if (g2ShowSensorLive()) {
+      gSensorsLevel = SENSORS_LEVEL_LIVE;
+      return true;
+    }
     DEBUG_G2F("[G2] sensor-live start failed for '%s' — static detail fallback",
               r.label);
-    gSensorsLevel = SENSORS_LEVEL_DETAIL;  // fall through to static render
   }
   size_t out = 0;
   strncpy(gSensorsRows[out], "<- Hardware", SENSORS_ROW_LEN - 1);
@@ -745,13 +734,18 @@ static void showSensorDetail(const G2SensorRow& r) {
     }
   }
 
-  gSensorsLevel = SENSORS_LEVEL_DETAIL;
-  g2SetHijackPage(G2_HIJACK_PAGE_SENSORS);
-  g2ShowListPage(gSensorsRowPtrs, out);
+  if (!g2ShowListPageAndPublish(gSensorsRowPtrs, out, [] {
+        gSensorsLevel = SENSORS_LEVEL_DETAIL;
+        g2SetHijackPage(G2_HIJACK_PAGE_SENSORS);
+      })) {
+    DEBUG_G2F("[G2] Sensors detail for '%s' not shown", r.label);
+    return false;
+  }
   DEBUG_G2F("[G2] Sensors detail shown for '%s' (autoStart=%s, layout=%s)",
             r.label,
             autoStartPtr ? (*autoStartPtr ? "on" : "off") : "n/a",
             isCamera ? "camera" : "generic");
+  return true;
 }
 
 // Map a G2 sensor-row featureId to its feature-registry entry. The input
@@ -1215,9 +1209,23 @@ void g2ReshowSensorsDetail() {
   showSensorDetail(rows[gSensorsDetailIdx]);
 }
 
+#if ENABLE_CAMERA_SENSOR || ENABLE_MICROPHONE
+// Render of the redraws queued by the camera power hook and the mic runtime
+// completion; runs on the lens applier. The applier has already dropped the
+// job if a page change moved the menu generation past its cookie. Moves
+// inside the Sensors page keep the generation, so the level is checked here.
+// A tap that races this render either has its swap in flight (this render is
+// refused and publishes nothing) or has already published its page/level.
+static void redrawSensorsDetailIfCurrent() {
+  if (gSensorsLevel != SENSORS_LEVEL_DETAIL) return;
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_SENSORS) return;
+  g2ReshowSensorsDetail();
+}
+#endif
+
 #if ENABLE_MICROPHONE
 // After openmic/closemic: persist micautostart only if runtime succeeded,
-// then redraw so Auto Start / Run rows match gMicRunning.
+// then queue a redraw so Auto Start / Run rows match gMicRunning.
 // userData = (uintptr_t)1 if we wanted ON, else 0.
 static void onMicAutostartRuntimeDone(bool ok, const char* result,
                                       const G2CmdCookie& cookie,
@@ -1241,9 +1249,9 @@ static void onMicAutostartRuntimeDone(bool ok, const char* result,
               wantOn ? 1 : 0, result ? result : "");
   }
 
-  if (g2GetHijackPage() == G2_HIJACK_PAGE_SENSORS) {
-    g2ReshowSensorsDetail();
-  }
+  // cmd_exec never renders: the lens applier redraws with the submit-time
+  // cookie, so the redraw is dropped if the user left the page since.
+  (void)g2EnqueueRedraw(cookie, redrawSensorsDetailIfCurrent, "Sensors mic runtime");
 }
 #endif
 
@@ -1264,30 +1272,9 @@ void g2SensorsHandleTap(uint32_t idx) {
     buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
     const size_t pos = idx - 1;
     if (pos >= count) {
-#if ENABLE_CAMERA_SENSOR
-      // Lens can still be showing the CAM detail page (indices 2..5 = Capture ..
-      // Settings) while our FSM is LIST — e.g. race during page-swap or duplicate
-      // RX. Re-sync to CAM detail and handle the tap as detail.
-      if (idx >= 2 && idx <= 5) {
-        int camPos = -1;
-        for (size_t i = 0; i < count; i++) {
-          if (strcmp(rows[i].featureId, "camera") == 0) {
-            camPos = (int)i;
-            break;
-          }
-        }
-        if (camPos >= 0) {
-          DEBUG_G2F("[G2] Sensors: LIST idx=%u vs count=%u — recovering CAM detail "
-                    "tap (glasses/host desync)",
-                    (unsigned)idx,
-                    (unsigned)count);
-          gSensorsDetailIdx = (size_t)camPos;
-          showSensorDetail(rows[(size_t)camPos]);
-          g2SensorsHandleTap(idx);
-          return;
-        }
-      }
-#endif
+      // The level and page are published only with an accepted render, and
+      // taps from a superseded presentation are dropped before dispatch, so
+      // an out-of-range index is not a tap on another Sensors view.
       DEBUG_G2F("[G2] Sensors: tap idx=%u out of range (count=%u)",
                 (unsigned)idx, (unsigned)count);
       return;
@@ -1639,15 +1626,23 @@ void g2SensorsHandleTap(uint32_t idx) {
 }
 
 #if ENABLE_CAMERA_SENSOR
+// cam_pwr post-hook: runs after every camera power operation, whichever
+// source asked for it. It never renders or writes page state here; the CAM
+// detail refresh goes to the lens applier with the navigation generation
+// taken before the page check, so a navigation after the check drops it.
 static void g2SensorsOnCameraPowerDone() {
   sG2SensorsCamAsyncStartPending = false;
+  G2CmdCookie cookie{};
+  cookie.menuGen      = g2CurrentMenuGen();
+  cookie.targetPage   = G2_HIJACK_PAGE_SENSORS;
+  cookie.targetNetSub = 0;
   if (gSensorsLevel != SENSORS_LEVEL_DETAIL) {
     return;
   }
   if (g2GetHijackPage() != G2_HIJACK_PAGE_SENSORS) {
     return;
   }
-  g2ReshowSensorsDetail();
+  (void)g2EnqueueRedraw(cookie, redrawSensorsDetailIfCurrent, "Sensors camera power");
 }
 
 void g2RegisterSensorsCameraPowerHook() {

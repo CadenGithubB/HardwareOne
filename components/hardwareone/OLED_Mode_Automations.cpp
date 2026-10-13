@@ -11,10 +11,9 @@
 #include "System_Automation.h"
 #include "System_Settings.h"
 #include "System_EventCatalog.h"  // shared indexed event picker
-#include "OLED_Utils.h"   // executeOLEDCommand (was a local inline extern)
+#include "OLED_Utils.h"   // oledRunCommand, executeOLEDCommandWithResult
 
 // External references
-extern const char* AUTOMATIONS_JSON_FILE;
 extern bool oledMenuBack();
 extern void broadcastOutput(const String& msg);
 
@@ -24,21 +23,11 @@ extern void broadcastOutput(const String& msg);
 
 #define AUTO_LIST_MAX 20
 #define AUTO_NAME_MAX 20
-#define AUTO_TYPE_MAX 12
 
-struct AutoListItem {
-  long id;
-  char name[AUTO_NAME_MAX];
-  char type[AUTO_TYPE_MAX];    // "time"/"manual"/"interval"/"boot"/"event" (legacy aliases accepted)
-  bool enabled;
-  int commandCount;
-  char timeStr[16];            // HH:MM or delay/interval string
-  char eventKind[28];          // type=event: the SYSEVT kind name ("on=") — the
-                               // detail pane must show WHICH event fires it
-};
-
+// Rows are the automation owner's summary copies (System_Automation.h): id,
+// name, enabled, command count and the trigger text the scheduler runs by.
 struct AutomationRenderData {
-  AutoListItem items[AUTO_LIST_MAX];
+  AutomationSummary items[AUTO_LIST_MAX];
   int count;
   int selectedIdx;
   bool valid;
@@ -46,8 +35,6 @@ struct AutomationRenderData {
 };
 
 EXT_RAM_BSS_ATTR static AutomationRenderData autoRenderData;
-static unsigned long autoLastInput = 0;
-static const unsigned long AUTO_DEBOUNCE = 200;
 static const unsigned long AUTO_REFRESH_INTERVAL = 5000;
 
 // Action feedback
@@ -106,14 +93,17 @@ enum AutoWizStep : uint8_t {
 static AutoWizStep sWizStep = AW_NONE;
 static bool sWizKbActive = false;
 
-static char sWizName[33]    = {0};   // keyboard cap is 32 + NUL
-static char sWizCommand[33] = {0};
+// Name and command hold everything the wizard keyboard can return
+// (OLED_KEYBOARD_MAX_LENGTH characters + NUL). PSRAM: main-loop UI state only.
+EXT_RAM_BSS_ATTR static char sWizName[OLED_KEYBOARD_MAX_LENGTH + 1];
+EXT_RAM_BSS_ATTR static char sWizCommand[OLED_KEYBOARD_MAX_LENGTH + 1];
 static char sWizTime[8]     = {0};   // "HH:MM"
 static int  sWizTypeIdx     = 0;     // index into kWizTypes
 static unsigned long sWizIntervalMs = 0;
 static unsigned long sWizDelayMs    = 0;
 static int  sWizCursor = 0;          // pick-list cursor
 static int  sWizScroll = 0;          // pick-list scroll offset
+static int  sWizConfirmScroll = 0;   // first confirm-screen row shown
 static char sWizResultMsg[24] = {0}; // failure toast (autoActionMsg points here)
 
 // Type options -> (menu label, wire type= value).
@@ -232,7 +222,7 @@ static void wizResetAll() {
   sWizTypeIdx = 0; sWizIntervalMs = sWizDelayMs = 0;
   sWizEventFamilyIndex = SIZE_MAX;
   sWizEventKindIndex = SIZE_MAX;
-  sWizCursor = sWizScroll = 0;
+  sWizCursor = sWizScroll = sWizConfirmScroll = 0;
 }
 
 void oledAutomationsModeResetSessionState() {
@@ -355,6 +345,15 @@ static void wizListSelect() {
   }
 }
 
+// Copies keyboard text whole into a wizard field. The fields hold the
+// keyboard's full capacity; text that does not fit is refused (false) rather
+// than stored cut short.
+static bool wizStoreText(char* dst, size_t dstSize, const String& text) {
+  if (text.length() >= dstSize) return false;
+  memcpy(dst, text.c_str(), text.length() + 1);
+  return true;
+}
+
 // Keyboard completion for the current step. Returns to advance; on invalid
 // input re-opens the same keyboard with a toast.
 static void wizKeyboardDone(const String& textIn) {
@@ -366,8 +365,11 @@ static void wizKeyboardDone(const String& textIn) {
         wizStartKeyboard(AW_NAME, "Name:", false);
         return;
       }
-      strncpy(sWizName, text.c_str(), sizeof(sWizName) - 1);
-      sWizName[sizeof(sWizName) - 1] = '\0';
+      if (!wizStoreText(sWizName, sizeof(sWizName), text)) {
+        autoShowToast("Too long");
+        wizStartKeyboard(AW_NAME, "Name:", false);
+        return;
+      }
       wizEnterList(AW_TYPE);
       return;
     case AW_DAILY: {
@@ -391,8 +393,12 @@ static void wizKeyboardDone(const String& textIn) {
         wizStartKeyboard(AW_COMMAND, "Command:", false);
         return;
       }
-      strncpy(sWizCommand, text.c_str(), sizeof(sWizCommand) - 1);
-      sWizCommand[sizeof(sWizCommand) - 1] = '\0';
+      if (!wizStoreText(sWizCommand, sizeof(sWizCommand), text)) {
+        autoShowToast("Too long");
+        wizStartKeyboard(AW_COMMAND, "Command:", false);
+        return;
+      }
+      sWizConfirmScroll = 0;
       sWizStep = AW_CONFIRM;
       return;
     default:
@@ -435,27 +441,77 @@ static void wizDrawList() {
   if (sWizScroll + vis < n) { oledDisplay->setCursor(122, listTop + (vis - 1) * lineH); oledDisplay->print("\x19"); }
 }
 
+// Confirm screen rows: the name, the trigger, then the whole command in
+// 18-column pieces ("> " on the first, "  " on the rest), so every character
+// the automation will run is on screen. The rows that fit are drawn with the
+// "A:Create B:Cancel" line under them; Up/Down scroll the rows when the
+// command needs more, and column 21 holds the scroll arrows.
+static const int kWizConfirmLineH = 9;
+static const size_t kWizConfirmCmdCols = 18;
+
+static int wizConfirmRowCount() {
+  const size_t len = strlen(sWizCommand);
+  const size_t cmdRows = len == 0 ? 1 : (len + kWizConfirmCmdCols - 1) / kWizConfirmCmdCols;
+  return 2 + (int)cmdRows;
+}
+
+// Rows above the action line.
+static int wizConfirmVisibleRows() {
+  const int rows = OLED_CONTENT_HEIGHT / kWizConfirmLineH - 1;
+  return rows > 0 ? rows : 1;
+}
+
+static int wizConfirmMaxScroll() {
+  const int over = wizConfirmRowCount() - wizConfirmVisibleRows();
+  return over > 0 ? over : 0;
+}
+
+static void wizConfirmRowText(int row, char* line, size_t size) {
+  if (row == 0) {
+    snprintf(line, size, "New: %.14s", sWizName);
+    return;
+  }
+  if (row == 1) {
+    const char* wt = kWizTypes[sWizTypeIdx].wireType;
+    if (strcmp(wt, "interval") == 0)        snprintf(line, size, "Every %lum", (unsigned long)(sWizIntervalMs / 60000UL));
+    else if (strcmp(wt, "atTime") == 0)     snprintf(line, size, "Daily %s", sWizTime);
+    else if (strcmp(wt, "event") == 0) {
+      SystemEventCatalogKindInfo kind{};
+      snprintf(line, size, "On %.16s",
+               wizSelectedKind(&kind) ? kind.name : "unavailable");
+    }
+    else                                    snprintf(line, size, "Delay %lus", (unsigned long)(sWizDelayMs / 1000UL));
+    return;
+  }
+  const size_t offset = (size_t)(row - 2) * kWizConfirmCmdCols;
+  const size_t len = strlen(sWizCommand);
+  snprintf(line, size, "%s%.*s", row == 2 ? "> " : "  ", (int)kWizConfirmCmdCols,
+           sWizCommand + (offset < len ? offset : len));
+}
+
 static void wizDrawConfirm() {
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+  const int rows = wizConfirmRowCount();
+  const int vis = wizConfirmVisibleRows();
+  const int maxScroll = wizConfirmMaxScroll();
+  if (sWizConfirmScroll > maxScroll) sWizConfirmScroll = maxScroll;
+  if (sWizConfirmScroll < 0) sWizConfirmScroll = 0;
+
   int y = OLED_CONTENT_START_Y;
   char line[24];
-  snprintf(line, sizeof(line), "New: %.14s", sWizName);
-  oledDisplay->setCursor(0, y); oledDisplay->print(line); y += 9;
-
-  const char* wt = kWizTypes[sWizTypeIdx].wireType;
-  if (strcmp(wt, "interval") == 0)        snprintf(line, sizeof(line), "Every %lum", (unsigned long)(sWizIntervalMs / 60000UL));
-  else if (strcmp(wt, "atTime") == 0)     snprintf(line, sizeof(line), "Daily %s", sWizTime);
-  else if (strcmp(wt, "event") == 0) {
-    SystemEventCatalogKindInfo kind{};
-    snprintf(line, sizeof(line), "On %.16s",
-             wizSelectedKind(&kind) ? kind.name : "unavailable");
+  for (int i = 0; i < vis && sWizConfirmScroll + i < rows; i++) {
+    wizConfirmRowText(sWizConfirmScroll + i, line, sizeof(line));
+    oledDisplay->setCursor(0, y); oledDisplay->print(line);
+    y += kWizConfirmLineH;
   }
-  else                                    snprintf(line, sizeof(line), "Delay %lus", (unsigned long)(sWizDelayMs / 1000UL));
-  oledDisplay->setCursor(0, y); oledDisplay->print(line); y += 9;
-
-  snprintf(line, sizeof(line), "> %.18s", sWizCommand);
-  oledDisplay->setCursor(0, y); oledDisplay->print(line); y += 9;
+  if (sWizConfirmScroll > 0) {
+    oledDisplay->setCursor(122, OLED_CONTENT_START_Y); oledDisplay->print("\x18");
+  }
+  if (sWizConfirmScroll < maxScroll) {
+    oledDisplay->setCursor(122, OLED_CONTENT_START_Y + (vis - 1) * kWizConfirmLineH);
+    oledDisplay->print("\x19");
+  }
 
   oledDisplay->setCursor(0, y); oledDisplay->print("A:Create B:Cancel");
 }
@@ -477,6 +533,8 @@ static bool wizHandleInput(uint32_t newlyPressed) {
   if (sWizStep == AW_CONFIRM) {
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) { wizCreate(); return true; }
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) { wizAbort();  return true; }
+    if (gNavEvents.up && sWizConfirmScroll > 0) sWizConfirmScroll--;
+    else if (gNavEvents.down && sWizConfirmScroll < wizConfirmMaxScroll()) sWizConfirmScroll++;
     return true;
   }
   if (wizStepIsList()) {
@@ -488,203 +546,6 @@ static bool wizHandleInput(uint32_t newlyPressed) {
     return true;
   }
   // Keyboard step but keyboard not active (shouldn't happen) — bail out.
-  return true;
-}
-
-// ============================================================================
-// JSON Field Extraction Helpers (local, stack-only)
-// ============================================================================
-
-static bool extractStr(const char* json, const char* key, char* out, size_t outSize) {
-  out[0] = '\0';
-  const char* keyPos = strstr(json, key);
-  if (!keyPos) return false;
-  const char* colon = strchr(keyPos, ':');
-  if (!colon) return false;
-  const char* q1 = strchr(colon, '"');
-  if (!q1) return false;
-  q1++;
-  const char* q2 = strchr(q1, '"');
-  if (!q2) return false;
-  size_t len = q2 - q1;
-  if (len >= outSize) len = outSize - 1;
-  strncpy(out, q1, len);
-  out[len] = '\0';
-  return true;
-}
-
-static long extractLong(const char* json, const char* key) {
-  const char* keyPos = strstr(json, key);
-  if (!keyPos) return 0;
-  const char* colon = strchr(keyPos, ':');
-  if (!colon) return 0;
-  return atol(colon + 1);
-}
-
-static bool extractBool(const char* json, const char* key) {
-  const char* keyPos = strstr(json, key);
-  if (!keyPos) return false;
-  const char* colon = strchr(keyPos, ':');
-  if (!colon) return false;
-  const char* p = colon + 1;
-  while (*p == ' ' || *p == '\t') p++;
-  return (strncmp(p, "true", 4) == 0);
-}
-
-// ============================================================================
-// Data Gathering (streaming callback)
-// ============================================================================
-
-struct AutoGatherCtx {
-  AutoListItem* items;
-  int count;
-  int maxCount;
-};
-
-static bool autoGatherCallback(const char* autoJson, size_t jsonLen, void* userData) {
-  AutoGatherCtx* ctx = (AutoGatherCtx*)userData;
-  if (ctx->count >= ctx->maxCount) return false;
-
-  AutoListItem& item = ctx->items[ctx->count];
-  memset(&item, 0, sizeof(AutoListItem));
-
-  // Extract ID
-  item.id = extractLong(autoJson, "\"id\"");
-  if (item.id == 0) return true;
-
-  // Extract name
-  if (!extractStr(autoJson, "\"name\"", item.name, AUTO_NAME_MAX)) {
-    snprintf(item.name, AUTO_NAME_MAX, "Auto #%ld", item.id);
-  }
-
-  // Extract type
-  extractStr(autoJson, "\"type\"", item.type, AUTO_TYPE_MAX);
-
-  // Extract enabled
-  item.enabled = extractBool(autoJson, "\"enabled\"");
-
-  // Extract time display string based on type (accept v1 and legacy names)
-  bool isTime = (strcmp(item.type, "time") == 0 || strcmp(item.type, "atTime") == 0 || strcmp(item.type, "attime") == 0);
-  bool isManual = (strcmp(item.type, "manual") == 0 || strcmp(item.type, "afterDelay") == 0 || strcmp(item.type, "afterdelay") == 0);
-  bool isInterval = (strcmp(item.type, "interval") == 0);
-  bool isBoot = (strcmp(item.type, "boot") == 0);
-  (void)isBoot;
-  if (isTime) {
-    char hhmm[8] = "";
-    extractStr(autoJson, "\"time\"", hhmm, sizeof(hhmm));
-
-    // Check recurrence for monthly/yearly special formatting
-    char recur[12] = "";
-    extractStr(autoJson, "\"recurrence\"", recur, sizeof(recur));
-    for (char* p = recur; *p; p++) if (*p >= 'A' && *p <= 'Z') *p += 32;
-
-    if (strcmp(recur, "monthly") == 0) {
-      long dom = extractLong(autoJson, "\"dayOfMonth\"");
-      if (dom >= 1 && dom <= 31) snprintf(item.timeStr, sizeof(item.timeStr), "%ld@%s", dom, hhmm);
-      else snprintf(item.timeStr, sizeof(item.timeStr), "%s", hhmm);
-    } else if (strcmp(recur, "yearly") == 0) {
-      long dom = extractLong(autoJson, "\"dayOfMonth\"");
-      long moy = extractLong(autoJson, "\"month\"");
-      static const char* monthAbbr[13] = {"?","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
-      const char* mabbr = (moy >= 1 && moy <= 12) ? monthAbbr[moy] : "?";
-      if (dom >= 1 && dom <= 31) snprintf(item.timeStr, sizeof(item.timeStr), "%s%ld %s", mabbr, dom, hhmm);
-      else snprintf(item.timeStr, sizeof(item.timeStr), "%s", hhmm);
-    } else {
-    // Compose compact summary: "HH:MM[ Nw][ Days]" within 16-byte budget.
-    char daysRaw[64] = "";
-    extractStr(autoJson, "\"days\"", daysRaw, sizeof(daysRaw));
-    long wi = extractLong(autoJson, "\"weekInterval\"");
-
-    char daysShort[12] = "";
-    if (daysRaw[0]) {
-      // Count days and build 2-char abbreviations (Mo Tu We Th Fr Sa Su).
-      static const char* map[7][2] = {
-        {"sun","Su"},{"mon","Mo"},{"tue","Tu"},{"wed","We"},
-        {"thu","Th"},{"fri","Fr"},{"sat","Sa"}
-      };
-      int dayCount = 0;
-      bool present[7] = {false,false,false,false,false,false,false};
-      // Lowercase and tokenize in place.
-      for (char* p = daysRaw; *p; p++) if (*p >= 'A' && *p <= 'Z') *p += 32;
-      const char* tok = daysRaw;
-      while (*tok) {
-        while (*tok == ',' || *tok == ' ') tok++;
-        if (!*tok) break;
-        for (int i = 0; i < 7; i++) {
-          if (strncmp(tok, map[i][0], 3) == 0 && !present[i]) {
-            present[i] = true;
-            dayCount++;
-            break;
-          }
-        }
-        while (*tok && *tok != ',') tok++;
-      }
-      if (dayCount >= 1 && dayCount <= 3) {
-        size_t off = 0;
-        for (int i = 0; i < 7; i++) {
-          if (present[i] && off + 2 < sizeof(daysShort)) {
-            daysShort[off++] = map[i][1][0];
-            daysShort[off++] = map[i][1][1];
-          }
-        }
-        daysShort[off] = '\0';
-      } else if (dayCount >= 4) {
-        // Too many for abbreviation; show count.
-        snprintf(daysShort, sizeof(daysShort), "%dd", dayCount);
-      }
-    }
-
-    if (wi > 1 && daysShort[0]) {
-      snprintf(item.timeStr, sizeof(item.timeStr), "%s %ldw %s", hhmm, wi, daysShort);
-    } else if (wi > 1) {
-      snprintf(item.timeStr, sizeof(item.timeStr), "%s %ldw", hhmm, wi);
-    } else if (daysShort[0]) {
-      snprintf(item.timeStr, sizeof(item.timeStr), "%s %s", hhmm, daysShort);
-    } else {
-      snprintf(item.timeStr, sizeof(item.timeStr), "%s", hhmm);
-    }
-    }  // end daily/weekly branch
-  } else if (isManual) {
-    long ms = extractLong(autoJson, "\"delayMs\"");
-    if (ms >= 60000)
-      snprintf(item.timeStr, sizeof(item.timeStr), "%ldm", ms / 60000);
-    else
-      snprintf(item.timeStr, sizeof(item.timeStr), "%lds", ms / 1000);
-  } else if (isInterval) {
-    long ms = extractLong(autoJson, "\"intervalMs\"");
-    if (ms >= 3600000)
-      snprintf(item.timeStr, sizeof(item.timeStr), "q%ldh", ms / 3600000);
-    else if (ms >= 60000)
-      snprintf(item.timeStr, sizeof(item.timeStr), "q%ldm", ms / 60000);
-    else
-      snprintf(item.timeStr, sizeof(item.timeStr), "q%lds", ms / 1000);
-  } else if (strcmp(item.type, "event") == 0) {
-    // Which SYSEVT kind fires it — same flat-key heuristic as "type" above
-    // (the trigger object's "on" is the first occurrence in the blob).
-    extractStr(autoJson, "\"on\"", item.eventKind, sizeof(item.eventKind));
-  }
-
-  // Count commands in array
-  item.commandCount = 0;
-  const char* cmdsKey = strstr(autoJson, "\"commands\"");
-  if (cmdsKey) {
-    const char* arrStart = strchr(cmdsKey, '[');
-    if (arrStart) {
-      int depth = 0;
-      bool inStr = false;
-      item.commandCount = 1;
-      for (const char* p = arrStart; *p; p++) {
-        if (*p == '"' && (p == arrStart || *(p-1) != '\\')) inStr = !inStr;
-        if (!inStr) {
-          if (*p == '[') depth++;
-          else if (*p == ']') { depth--; if (depth == 0) break; }
-          else if (*p == ',' && depth == 1) item.commandCount++;
-        }
-      }
-    }
-  }
-
-  ctx->count++;
   return true;
 }
 
@@ -706,14 +567,10 @@ void prepareAutomationData() {
   }
   autoForceRefresh = false;
 
-  AutoGatherCtx ctx;
-  ctx.items = autoRenderData.items;
-  ctx.count = 0;
-  ctx.maxCount = AUTO_LIST_MAX;
+  size_t count = 0;
+  const bool ok = automationCopySummaries(autoRenderData.items, AUTO_LIST_MAX, &count);
 
-  bool ok = streamParseAutomations(AUTOMATIONS_JSON_FILE, autoGatherCallback, &ctx);
-
-  autoRenderData.count = ctx.count;
+  autoRenderData.count = (int)count;
   autoRenderData.valid = ok;
   autoRenderData.lastRefresh = now;
 
@@ -728,6 +585,22 @@ void prepareAutomationData() {
 // ============================================================================
 // Display Automations (called INSIDE I2C transaction)
 // ============================================================================
+
+// Copies the next line of `text` (at most `width` chars) into `line` and
+// returns the rest. Breaks at the last space that fits, or mid-word when one
+// word is wider than the line.
+static const char* autoWrapLine(const char* text, char* line, size_t width) {
+  while (*text == ' ') text++;
+  size_t take = strlen(text);
+  if (take > width) {
+    size_t space = width;
+    while (space > 0 && text[space] != ' ') space--;
+    take = (space > 0) ? space : width;
+  }
+  memcpy(line, text, take);
+  line[take] = '\0';
+  return text + take;
+}
 
 void displayAutomations() {
   if (!oledDisplay || !oledConnected) return;
@@ -797,7 +670,7 @@ void displayAutomations() {
       continue;
     }
 
-    AutoListItem& item = autoRenderData.items[idx];
+    const AutomationSummary& item = autoRenderData.items[idx];
     // Status dot: filled = enabled, hollow = disabled
     int dotX = 2;
     int dotY = y + 3;
@@ -825,48 +698,18 @@ void displayAutomations() {
     oledDisplay->setCursor(detailX, OLED_CONTENT_START_Y + 14);
     oledDisplay->print("A: New");
   } else if (autoRenderData.selectedIdx < autoRenderData.count) {
-    AutoListItem& sel = autoRenderData.items[autoRenderData.selectedIdx];
+    const AutomationSummary& sel = autoRenderData.items[autoRenderData.selectedIdx];
     int dy = OLED_CONTENT_START_Y + 2;
 
-    // Type label
-    oledDisplay->setCursor(detailX, dy);
-    bool isEventType = (strcmp(sel.type, "event") == 0);
-    if (strcmp(sel.type, "time") == 0 || strcmp(sel.type, "atTime") == 0)
-      oledDisplay->print("@Time");
-    else if (strcmp(sel.type, "manual") == 0 || strcmp(sel.type, "afterDelay") == 0)
-      oledDisplay->print("Delay");
-    else if (strcmp(sel.type, "interval") == 0)
-      oledDisplay->print("Repeat");
-    else if (strcmp(sel.type, "boot") == 0)
-      oledDisplay->print("Boot");
-    else if (isEventType)
-      oledDisplay->print("Event");
-    else
-      oledDisplay->print(sel.type);
-    dy += 10;
-
-    // Event trigger: the kind name, split across two 7-char lines (the
-    // detail pane is ~42 px wide; GFX auto-wrap would spill into the list).
-    if (isEventType && sel.eventKind[0]) {
+    // Trigger text ("daily 07:30", "every 5m", "on peer_online", ...) over at
+    // most three 7-column lines (the pane is ~42 px; GFX auto-wrap would spill
+    // into the list).
+    const char* rest = sel.trigger;
+    for (int line = 0; line < 3 && *rest; line++) {
       char seg[8];
-      strncpy(seg, sel.eventKind, 7);
-      seg[7] = '\0';
+      rest = autoWrapLine(rest, seg, sizeof(seg) - 1);
       oledDisplay->setCursor(detailX, dy);
       oledDisplay->print(seg);
-      dy += 10;
-      if (strlen(sel.eventKind) > 7) {
-        strncpy(seg, sel.eventKind + 7, 7);
-        seg[7] = '\0';
-        oledDisplay->setCursor(detailX, dy);
-        oledDisplay->print(seg);
-        dy += 10;
-      }
-    }
-
-    // Time value
-    if (sel.timeStr[0]) {
-      oledDisplay->setCursor(detailX, dy);
-      oledDisplay->print(sel.timeStr);
       dy += 10;
     }
 
@@ -916,19 +759,14 @@ void displayAutomations() {
 // Navigation and Actions
 // ============================================================================
 
+// One row per nav event; the input layer (gNavEvents) paces joystick repeats.
 static void autoListUp() {
   if (autoRenderData.count == 0) return;
-  unsigned long now = millis();
-  if (now - autoLastInput < AUTO_DEBOUNCE) return;
-  autoLastInput = now;
   if (autoRenderData.selectedIdx > 0)
     autoRenderData.selectedIdx--;
 }
 
 static void autoListDown() {
-  unsigned long now = millis();
-  if (now - autoLastInput < AUTO_DEBOUNCE) return;
-  autoLastInput = now;
   // Reaches the virtual "+ New" row at index == count (so the last real row
   // isn't the end of travel — you can always scroll down to create).
   if (autoRenderData.selectedIdx < autoRenderData.count)
@@ -939,13 +777,11 @@ static void autoRunSelected() {
   // The "+ New" virtual row (idx == count) is handled by the caller; here only
   // real automations run.
   if (autoRenderData.count == 0 || autoRenderData.selectedIdx >= autoRenderData.count) return;
-  AutoListItem& sel = autoRenderData.items[autoRenderData.selectedIdx];
+  const AutomationSummary& sel = autoRenderData.items[autoRenderData.selectedIdx];
 
   // Manual (afterDelay) automations are manually-armed one-shots: "trigger"
   // arms the delay timer; "run" would execute immediately and bypass the delay.
-  bool isAfterDelay = (strcmp(sel.type, "manual") == 0 ||
-                       strcmp(sel.type, "afterDelay") == 0 ||
-                       strcmp(sel.type, "afterdelay") == 0);
+  const bool isAfterDelay = (sel.kind == AutomationTriggerKind::Manual);
 
   char cmd[48];
   if (isAfterDelay) {
@@ -972,14 +808,15 @@ static void autoRunSelected() {
 
 static void autoToggleSelected() {
   if (autoRenderData.count == 0 || autoRenderData.selectedIdx >= autoRenderData.count) return;
-  AutoListItem& sel = autoRenderData.items[autoRenderData.selectedIdx];
+  const AutomationSummary& sel = autoRenderData.items[autoRenderData.selectedIdx];
 
   char cmd[48];
   snprintf(cmd, sizeof(cmd), "automation %s id=%ld",
            sel.enabled ? "disable" : "enable", sel.id);
-  executeOLEDCommand(String(cmd));
-
-  autoShowToast(sel.enabled ? "Disabled" : "Enabled");
+  // A refusal (admin-only command, not the creator) is toasted by the helper.
+  if (oledRunCommand(String(cmd))) {
+    autoShowToast(sel.enabled ? "Disabled" : "Enabled");
+  }
 
   // Force data refresh on next frame
   autoForceRefresh = true;
@@ -991,8 +828,7 @@ static void autoToggleSelected() {
 static void autoDeleteConfirmed(void* /*userData*/) {
   char cmd[48];
   snprintf(cmd, sizeof(cmd), "automation delete id=%ld", sPendingDeleteId);
-  executeOLEDCommand(String(cmd));
-  autoShowToast("Deleted");
+  if (oledRunCommand(String(cmd))) autoShowToast("Deleted");
   autoForceRefresh = true;
 }
 
@@ -1057,7 +893,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
   // X = Enable system if disabled, or toggle selected automation
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (!gSettings.automationEnabled) {
-      executeOLEDCommand("automation system enable");
+      oledRunCommand("automation system enable");
       autoForceRefresh = true;
       return true;
     }
@@ -1068,7 +904,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
     if (gSettings.automationEnabled && autoRenderData.count > 0 &&
         autoRenderData.selectedIdx < autoRenderData.count) {
-      AutoListItem& sel = autoRenderData.items[autoRenderData.selectedIdx];
+      const AutomationSummary& sel = autoRenderData.items[autoRenderData.selectedIdx];
       sPendingDeleteId = sel.id;
       strncpy(sPendingDeleteName, sel.name, sizeof(sPendingDeleteName) - 1);
       sPendingDeleteName[sizeof(sPendingDeleteName) - 1] = '\0';

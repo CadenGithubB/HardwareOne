@@ -70,8 +70,7 @@
 //                           SUB_LIST_REQ/SUB_LIST_REPLY reserved 131–134)
 //   150–169  Sensors       (SENSOR_STATUS live; SENSOR_REQ=153/SENSOR_ENVELOPE=154 live —
 //                           the secure fetcher's leased pull + encrypted reply;
-//                           SENSOR_BROADCAST=150 TX retired (D2: plaintext path removed,
-//                           encrypted ENVELOPE replaces it), RX kept vestigial;
+//                           150 retired (SENSOR_BROADCAST, removed — do not reuse);
 //                           POWER_STATUS=152 reserved)
 //   170–189  Bond          (BOND_*, MANIFEST_REQ, SETTINGS_REQ, SCHEMA_REQ, plus
 //                           BOND_STREAM_CTRL/BOND_SENSOR_DATA — moved in from
@@ -134,7 +133,7 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_TEXT            = 52,
   ESPNOW_V4_TYPE_METADATA_REQ    = 53,
   ESPNOW_V4_TYPE_METADATA_RESP   = 54,
-  ESPNOW_V4_TYPE_METADATA_PUSH   = 55,  // RX-plumbed but never TX'd today (no sendMetadata(isPush=true) caller)
+  ESPNOW_V4_TYPE_METADATA_PUSH   = 55,  // unsolicited; metadataPushTick sends it when local metadata changes
   ESPNOW_V4_TYPE_USER_SYNC       = 56,
 
   // --- Remote filesystem (70–89) ---
@@ -165,8 +164,8 @@ enum EspNowV4Type : uint8_t {
   // 135 earmarked EVENT_SUB v2 (semantic-kind mask wider than 32 bits)
 
   // --- Sensors (150–169) ---
-  ESPNOW_V4_TYPE_SENSOR_BROADCAST= 150,  // TX retired (D2 secure fetcher): plaintext broadcast
-                                         //   replaced by encrypted SENSOR_ENVELOPE. RX kept vestigial.
+  // 150 retired — SENSOR_BROADCAST (plaintext sensor data). TX removed with the D2 secure
+  //   fetcher, RX row removed afterwards; do not reuse the number.
   ESPNOW_V4_TYPE_SENSOR_STATUS   = 151,
   // 152=POWER_STATUS reserved (voltage/charging/USB/heap beacon — mesh report rank 8)
   ESPNOW_V4_TYPE_SENSOR_REQ      = 153,  // master → worker: subscribe/oneshot/unsubscribe (leased pull)
@@ -639,9 +638,9 @@ static_assert(sizeof(V4PayloadSessionRekey) <= ESPNOW_V4_MAX_PLAINTEXT,
 // "send everything", so this opcode only ever narrows traffic — pre-Phase-5
 // peers stay fully functional.
 //
-// Sent as a SESSION_FRAME if the session is available (preferred — narrows
-// who can spoof subscription changes), otherwise plaintext. Receiver must
-// confirm sender has a known PeerIdentity before applying.
+// Always sent as a SESSION_FRAME (v4_send_payload_smart is encrypt-or-fail);
+// the receiver's row is REQ_PAIRED|REQ_SESSION_ENC, so a plaintext or
+// BROADCAST_AUTH-only frame never reaches the handler.
 struct __attribute__((packed)) V4PayloadSubscribe {
   uint32_t requestedEvents;  // bitmask of EspNowEventCategory bits
   uint8_t  reserved[12];     // reserved for future flags / scope hints; must be 0

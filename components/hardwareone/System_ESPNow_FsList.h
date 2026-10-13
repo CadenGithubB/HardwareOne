@@ -19,18 +19,27 @@
 //       │                                         │
 //      callback fires with parsed entries
 //
-//   Both opcodes ride the existing bonded encrypted session
-//   (REQ_PAIRED + REQ_BOND_MODE + REQ_SESSION_ENC) so they get the same
-//   confidentiality + authentication as SETTINGS_REQ / MANIFEST_REQ.
+//   The opcodes ride the base ESP-NOW encrypted session: the dispatch rows
+//   in System_ESPNow.cpp gate them with REQ_PAIRED | REQ_SESSION_ENC, so a
+//   requester whose own bond mode is off still receives replies, and they
+//   get the same confidentiality + authentication as SETTINGS_REQ /
+//   MANIFEST_REQ.
 //
-// Identity model — device trust
-//   The peer that receives an FS_LIST_REQ checks "is this from my bonded
-//   peer?" via the standard pairing gate. If yes, it reads the directory
-//   under SYSTEM identity and reports the perms its bonded-peer ACL would
-//   give the caller. Per-user identity propagation is deliberately out of
-//   scope for this iteration — same trust posture as the existing settings
-//   sync over ESP-NOW. A future enhancement can add a per-user identity
-//   token in the request payload's reserved bytes.
+// Identity model — bonded peer only
+//   The receiving module serves exactly one requester: the bonded peer, and
+//   only while a live bond session authenticates it. A served request runs
+//   under the reserved bond identity (kBondAdminUser over SOURCE_ESPNOW),
+//   which the filesystem resolves to SUPER for the life of that session and
+//   to nobody otherwise — the tier the bonded peer already holds for
+//   `remote:files`. Every other peer, and the bonded peer without a live
+//   session, gets FS_LIST_STATUS_PERM_DENIED before any identity is
+//   installed or the filesystem is touched. The transcript path policy is
+//   checked in front of the identity for all three operations.
+//
+//   Requesters (web `/api/bond/fs/list|get`, the OLED PEER source) require a
+//   local administrator — the same gate as `remote:files`. A peer that is
+//   not bonded pulls files with `espnowbrowse` / `espnowfetch`, which the
+//   target authorizes as the supplied account.
 //
 // Concurrency
 //   Sender: pending-request table holds up to FS_LIST_MAX_PENDING outstanding
@@ -41,9 +50,14 @@
 //   Receiver: single deferred-work slot. If a second request arrives while
 //   one is in flight, the new one gets a FS_LIST_STATUS_TOO_BUSY reply
 //   immediately (without queueing). Caller retries with backoff. This is
-//   intentional: a directory listing read at SYSTEM identity is fast (a
-//   few ms for typical VFS dirs) so head-of-line blocking is acceptable
+//   intentional: a directory listing read under the bond identity is fast
+//   (a few ms for typical VFS dirs) so head-of-line blocking is acceptable
 //   in exchange for keeping deferred state trivial.
+//
+//   The module mutex guards the two tables only and is never held across a
+//   send, VFS work or a callback. A send call does not hold it while it
+//   blocks in the transport, so a reply can reach its callback before
+//   fs*SendRequest returns: callers match replies by reqId.
 //
 // Memory
 //   Sender pending table: FS_LIST_MAX_PENDING × 20 B = 80 B DRAM (static).

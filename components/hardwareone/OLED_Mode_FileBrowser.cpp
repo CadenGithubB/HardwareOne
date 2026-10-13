@@ -13,18 +13,19 @@
 #include <cstring>                  // strrchr — extension detection
 #include "HAL_Input.h"
 #include "System_FileManager.h"
+#include "FileBrowser_FileKind.h"   // file classifier shared with the G2 lens
 #include "System_Icons.h"
 #include "System_TextPager.h"       // textWrapInto — shared wrap/sanitize core
 #include "System_CaptureCrypto.h"   // reveal sealed captures in the OLED viewer
 #include "System_AuthIdentity.h"    // CommandIdentityScope — composed identity + notif install
 #include "System_User.h"            // AuthContext, SOURCE_LOCAL_DISPLAY
 #include "System_Settings.h"        // gSettings (for displayRequireAuth via globals)
-// ps_alloc/ps_delete/AllocPref are used UNGATED below (the gOledFileManager
-// PSRAM allocation at ~:643 and its teardown at ~:1464), so this include must
-// NOT sit inside the ENABLE_ESPNOW block — with ESP-NOW off the header vanished
+// ps_alloc/AllocPref are used UNGATED below (the gOledFileManager PSRAM
+// allocation in initFileBrowser()), so this include must NOT sit inside the
+// ENABLE_ESPNOW block — with ESP-NOW off the header vanished
 // and those uses failed to compile. Same gated-include / ungated-use shape as
 // the System_Utils.cpp G2_Glasses.h bug; found by tools/build_coverage.sh pass 2.
-#include "System_MemUtil.h"         // ps_alloc / ps_delete — PSRAM FileManager
+#include "System_MemUtil.h"         // ps_alloc — PSRAM FileManager
 #include <new>                      // placement-new: gOledFileManager lives in PSRAM
 
 #if ENABLE_ESPNOW
@@ -103,10 +104,10 @@ static FileBrowserPendingAction fileBrowserPendingAction = FileBrowserPendingAct
 enum class FbLevel : uint8_t { LIST = 0, ACTION_MENU = 1, VIEW = 2 };
 static FbLevel sFbLevel = FbLevel::LIST;
 
-// Snapshot of the file the action menu / viewer is acting on. FileManager
-// mutations (rename/delete/read) all act on the CURRENT SELECTION with no path
-// arg, and selection can't move while a level/overlay owns input — so the
-// snapshot is only for display + the extension check.
+// Snapshot of the file the action menu / viewer is acting on. Read, rename and
+// delete all resolve the CURRENT SELECTION's path through FileManager, and the
+// selection can't move while a level/overlay owns input — so the snapshot is
+// only for display + the file-kind check.
 static char     sFbActionName[FILE_MANAGER_MAX_NAME] = {0};
 static bool     sFbActionViewable = false;
 static bool     sFbRenameActive = false;         // keyboard open for a rename
@@ -167,20 +168,6 @@ static int fbViewVisibleLines() {
   return v > 0 ? v : 1;
 }
 
-// Text-ish extensions the viewer offers "View" for. Everything else gets only
-// Rename/Delete (a binary/image on a mono OLED is not worth rendering; jpg
-// lives on G2/web).
-static bool fbIsViewableExt(const char* name) {
-  const char* dot = strrchr(name, '.');
-  if (!dot) return false;
-  String e(dot);
-  e.toLowerCase();
-  return e == ".txt" || e == ".csv" || e == ".json" || e == ".log" ||
-         e == ".md"  || e == ".ini" || e == ".cfg"  || e == ".conf" ||
-         e == ".yaml"|| e == ".yml" || e == ".xml"  || e == ".html" ||
-         e == ".js"  || e == ".c"   || e == ".h"    || e == ".cpp";
-}
-
 // The action-menu rows, built in one place so render / count / dispatch agree.
 // Returns the row count; fills labels[] (cap 4).
 static int fbBuildActionRows(const char* labels[4]) {
@@ -192,6 +179,53 @@ static int fbBuildActionRows(const char* labels[4]) {
   return n;
 }
 
+// Rename and Delete submit the admin-only `filerename` / `filedelete` commands
+// through the shared executor as the OLED identity (authorization, guest and
+// live-session checks, [CMD] audit), the same path the G2 lens uses. The
+// target is the selected entry's full path from FileManager (entry.name is a
+// bounded display copy); resolving it walks the folder through the guarded
+// VFS, so these run in the prepare pass under OLEDFileBrowserCtxGuard.
+enum class FbMutateResult : uint8_t { Done, Unresolved, QuoteInName, AdminOnly, Failed };
+
+static FbMutateResult fbSubmitMutate(const String& line) {
+  char out[96] = {};
+  // The executor stamps "OK" on a handler success; refusals and handler
+  // errors start with "Error".
+  if (executeOLEDCommandWithResult(line, out, sizeof(out)) && strncmp(out, "OK", 2) == 0) {
+    gOledFileManager->forceRescan();   // refresh() is generation-gated
+    return FbMutateResult::Done;
+  }
+  return strncmp(out, "Error: Admin access required", 28) == 0 ? FbMutateResult::AdminOnly
+                                                                : FbMutateResult::Failed;
+}
+
+static FbMutateResult fbRenameSelected(const String& newName) {
+  String path;
+  if (!gOledFileManager->getSelectedPath(path)) return FbMutateResult::Unresolved;
+  // CommandArgs has no escapes: a quote would break the quoted arguments.
+  if (strchr(path.c_str(), '"') || strchr(newName.c_str(), '"')) return FbMutateResult::QuoteInName;
+  return fbSubmitMutate(String("filerename \"") + path + "\" \"" + newName + "\"");
+}
+
+static FbMutateResult fbDeleteSelected() {
+  String path;
+  if (!gOledFileManager->getSelectedPath(path)) return FbMutateResult::Unresolved;
+  if (strchr(path.c_str(), '"')) return FbMutateResult::QuoteInName;
+  // One-shot form: the OLED already asked Yes/No; the bare form would arm an
+  // interactive CLI confirm nothing here answers.
+  return fbSubmitMutate(String("filedelete \"") + path + "\" confirm");
+}
+
+static void fbToastMutate(FbMutateResult result, const char* done, const char* failed) {
+  switch (result) {
+    case FbMutateResult::Done:        oledToastShow(done, 2000); break;
+    case FbMutateResult::Unresolved:  oledToastShow("Entry unavailable", 2500); break;
+    case FbMutateResult::QuoteInName: oledToastShow("Quote in name", 2500); break;
+    case FbMutateResult::AdminOnly:   oledToastShow("Admin only", 2500); break;
+    case FbMutateResult::Failed:      oledToastShow(failed, 2500); break;
+  }
+}
+
 // Pre-rendered file browser snapshot (struct defined in System_FileManager.h).
 // Filled by prepareFileBrowserData() — the only place FS I/O runs — and read by
 // displayFileBrowserRendered() + the OLED_Utils.cpp footer, all on the OLED
@@ -199,10 +233,6 @@ static int fbBuildActionRows(const char* labels[4]) {
 // after the footer). Display metadata only: path + 4 FileEntry name/size/flags —
 // never a write-path buffer, never secrets — so it lives in PSRAM (452 B).
 EXT_RAM_BSS_ATTR FileBrowserRenderData fileBrowserRenderData = {0};  // Non-static so footer can access it
-
-// Button/navigation state
-static unsigned long oledFileBrowserLastInput = 0;
-static const unsigned long OLED_FILE_BROWSER_DEBOUNCE = 200; // ms
 
 // ============================================================================
 // File Picker State (modal callback layer — see OLED_Display.h)
@@ -468,9 +498,25 @@ static bool ensurePeerCache() {
   return sPeerEntries != nullptr;
 }
 
+// Browsing or pulling a peer's files needs the same local authority as
+// `remote:files`: an administrator at this display. The peer serves only its
+// bonded partner; this is the human half of the gate. AuthBypass (display auth
+// off) is not an administrator, exactly as for the remote command.
+extern bool hasAdminPrivilege(const AuthContext& ctx);  // HardwareOne.cpp — the executor's admin gate
+static bool peerBrowseAuthorized() {
+  return hasAdminPrivilege(oledFileBrowserAuthContext());
+}
+
 // Kick off a fresh FS_LIST_REQ for sPeerPath. Cancels any in-flight request
 // first so a navigation-while-loading doesn't show stale entries.
 static void peerStartRequest() {
+  // Refuse before ensurePeerCache() so a refused user never allocates the
+  // entry cache. ERR_PERM renders "Permission denied" and is not in the
+  // A-button retry set; B exits as usual.
+  if (!peerBrowseAuthorized()) {
+    sPeerStatus = PeerListStatus::ERR_PERM;
+    return;
+  }
   if (!ensurePeerCache()) {
     sPeerStatus = PeerListStatus::ERR_OTHER;
     return;
@@ -568,6 +614,11 @@ static void peerActivate() {
   }
   // File selected.
   if (sEspnowCtx == EspnowFileCtx::RECEIVE) {
+    if (!peerBrowseAuthorized()) {
+      sGetUi = FsGetUi::DENIED;
+      oledToastShow("Permission denied");
+      return;
+    }
     sGetUi = FsGetUi::REQUESTING;
     if (fsGetSendRequest(sEspnowCtxMac, joined, onEspnowGetAck) == 0) {
       sGetUi = FsGetUi::FAILED;
@@ -650,7 +701,7 @@ static bool initFileBrowser() {
   if (gOledFileManager == nullptr) {
     // PSRAM placement-new: FileManager's ~5 KB is an inline cachedEntries[64] POD
     // array (FileEntry has no String), so the whole object moves off internal DRAM.
-    // Pair with ps_delete in resetOLEDFileBrowser() — never `delete`.
+    // Allocated once and kept; release only with ps_delete, never `delete`.
     void* fmBuf = ps_alloc(sizeof(FileManager), AllocPref::PreferPSRAM, "oled.filemgr");
     if (fmBuf == nullptr) {
       return false;
@@ -747,9 +798,10 @@ void prepareFileBrowserData() {
   //   * Identity = OLED owner's synchronized session mirror (or
   //     "AuthBypass" when displayRequireAuth is off)
   //   * Notification source = NOTIF_SOURCE_OLED with the same user as
-  //     subsource — anything via notify*() (notifyFileDeleted on a delete
-  //     confirm, etc.) attributes to "OLED / <user>" instead of whichever
-  //     stale context this render task last held.
+  //     subsource — anything via notify*() from this pass attributes to
+  //     "OLED / <user>" instead of whichever stale context this render
+  //     task last held. (Rename/delete run as OLED commands on cmd_exec
+  //     with their own identity; see fbSubmitMutate.)
   // Both via the composed CommandIdentityScope primitive — see G2HijackCtx-
   // Guard for the parallel construction on the G2 side.
   OLEDFileBrowserCtxGuard ctxGuard;
@@ -765,7 +817,7 @@ void prepareFileBrowserData() {
   // Rename-keyboard completion poll. While the keyboard is up, all input is
   // centrally intercepted (the mode's inputFunc is never called); once the
   // user completes/cancels we land here on the next prepare pass — INSIDE the
-  // identity guard, which renameItem's guarded VFS call requires.
+  // identity guard, which resolving the selected path requires.
   if (sFbRenameActive) {
     if (oledKeyboardIsCompleted()) {
       String newName = oledKeyboardGetText();
@@ -774,10 +826,8 @@ void prepareFileBrowserData() {
       sFbRenameActive = false;
       if (newName.length() == 0) {
         oledToastShow("Empty name - kept", 2500);
-      } else if (gOledFileManager->renameItem(newName.c_str())) {
-        oledToastShow("Renamed", 2000);
       } else {
-        oledToastShow("Rename failed", 2500);
+        fbToastMutate(fbRenameSelected(newName), "Renamed", "Rename failed");
       }
       sFbLevel = FbLevel::LIST;
     } else if (oledKeyboardIsCancelled()) {
@@ -834,7 +884,9 @@ void prepareFileBrowserData() {
             // can't move while a menu/overlay owns input.
             strncpy(sFbActionName, entry.name, sizeof(sFbActionName) - 1);
             sFbActionName[sizeof(sFbActionName) - 1] = '\0';
-            sFbActionViewable = fbIsViewableExt(entry.name);
+            // "View" for text and JSON, from the classifier the G2 lens
+            // shares (images and binaries get Rename/Delete only here).
+            sFbActionViewable = fileKindIsReadableText(fileKindForName(entry.name));
             // Fresh entry: start the shared action menu at the top row.
             fbInitActionScroll();
             sFbActionScroll.selectedIndex = 0;
@@ -886,13 +938,9 @@ void prepareFileBrowserData() {
       }
       case FileBrowserPendingAction::DELETE_SELECTED: {
         // Set ONLY by the confirm dialog's Yes callback (which runs on the
-        // input path with no identity guard — the delete itself must happen
-        // here, under ctxGuard, or removeGuarded denies/mis-attributes).
-        if (gOledFileManager->deleteItem()) {
-          oledToastShow("Deleted", 2000);
-        } else {
-          oledToastShow("Delete failed", 2500);
-        }
+        // input path with no identity guard — the path is resolved here,
+        // under ctxGuard, and the delete runs as an OLED command).
+        fbToastMutate(fbDeleteSelected(), "Deleted", "Delete failed");
         sFbLevel = FbLevel::LIST;
         break;
       }
@@ -1250,38 +1298,27 @@ void displayFileBrowserRendered() {
 // ============================================================================
 
 /**
- * File browser navigation functions
- * Call these from your button interrupt handlers or main loop
+ * File browser navigation functions, called from fileBrowserInputHandler.
+ * One step per nav event or button press: the input layer (gNavEvents) paces
+ * joystick repeats and edge-detects buttons.
  */
 void oledFileBrowserUp() {
   if (!gOledFileManager) return;
-  
-  unsigned long now = millis();
-  if (now - oledFileBrowserLastInput < OLED_FILE_BROWSER_DEBOUNCE) return;
-  oledFileBrowserLastInput = now;
-  
+
   gOledFileManager->moveUp();
   // Display will update on next updateOLEDDisplay() call
 }
 
 void oledFileBrowserDown() {
   if (!gOledFileManager) return;
-  
-  unsigned long now = millis();
-  if (now - oledFileBrowserLastInput < OLED_FILE_BROWSER_DEBOUNCE) return;
-  oledFileBrowserLastInput = now;
-  
+
   gOledFileManager->moveDown();
   // Display will update on next updateOLEDDisplay() call
 }
 
 void oledFileBrowserSelect() {
   if (!gOledFileManager) return;
-  
-  unsigned long now = millis();
-  if (now - oledFileBrowserLastInput < OLED_FILE_BROWSER_DEBOUNCE) return;
-  oledFileBrowserLastInput = now;
-  
+
   // Defer navigation to prevent filesystem I/O outside I2C transaction
   fileBrowserPendingAction = FileBrowserPendingAction::NAVIGATE_INTO;
   // Actual navigation will happen in displayFileBrowser() inside I2C transaction
@@ -1289,11 +1326,7 @@ void oledFileBrowserSelect() {
 
 void oledFileBrowserBack() {
   if (!gOledFileManager) return;
-  
-  unsigned long now = millis();
-  if (now - oledFileBrowserLastInput < OLED_FILE_BROWSER_DEBOUNCE) return;
-  oledFileBrowserLastInput = now;
-  
+
   // Defer navigation to prevent filesystem I/O outside I2C transaction
   fileBrowserPendingAction = FileBrowserPendingAction::NAVIGATE_BACK;
   // Actual navigation will happen in displayFileBrowser() inside I2C transaction
@@ -1454,10 +1487,8 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
 
 extern void displayFileBrowserRendered();
 
-// Entry hook. Previously the reset was duplicated two ways: cmd_oledmode called
-// the heavy resetOLEDFileBrowser() (delete+reinit), while the menu set the lazy
-// oledFileBrowserNeedsInit flag. Unify on the lazy flag (reinit happens on the
-// next render) and gate on isForward so back-navigation keeps your folder/scroll
+// Entry hook. A forward entry sets the lazy oledFileBrowserNeedsInit flag
+// (reinit happens on the next render); back-navigation keeps your folder/scroll
 // position instead of snapping to root.
 static void fileBrowserOnEnter(bool isForward) {
   if (isForward) {
@@ -1477,25 +1508,5 @@ static const OLEDModeEntry sFileBrowserModes[] = {
 };
 
 REGISTER_OLED_MODE_MODULE(sFileBrowserModes, sizeof(sFileBrowserModes) / sizeof(sFileBrowserModes[0]), "FileBrowser");
-
-/**
- * Reset file browser (e.g., when switching to this mode)
- */
-void resetOLEDFileBrowser() {
-  // Clean up existing manager
-  if (gOledFileManager) {
-    ps_delete(gOledFileManager);
-    gOledFileManager = nullptr;
-  }
-#if ENABLE_ESPNOW
-  // A plain Tools→Files entry must never inherit a stale ESP-NOW send/receive
-  // context from a previous device-detail launch.
-  sEspnowCtx = EspnowFileCtx::NONE;
-  sGetUi = FsGetUi::NONE;
-#endif
-
-  // Initialize immediately (not on next display call)
-  initFileBrowser();
-}
 
 #endif // ENABLE_OLED_DISPLAY

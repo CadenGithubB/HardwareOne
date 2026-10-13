@@ -307,9 +307,10 @@ struct Created {
   CommandSource source; uint32_t epoch; std::string user, text; QuickNotePolicy::NoteHeader header;
 };
 static std::vector<Created> creates;
-static bool roomOk = true, createFails = false, listOk = true, sdWritable = false;
+static bool roomOk = true, createFails = false, listOk = true, sdWritable = false, sdPresent = false;
 namespace VFS {
 bool isSDWritable() { return sdWritable; }  // the tier a save would use now
+bool isSDAvailable() { return sdPresent; }  // a card is in (perhaps read-only)
 }  // namespace VFS
 static std::string listUser, readPath, removedPath;
 static uint32_t listOwner = 0;
@@ -320,6 +321,9 @@ struct Restamped { CommandSource source; std::string user, path, stamp; };
 static std::vector<Restamped> restamps;
 static int restampFailures = 0;   // the next N restamps fail...
 static bool restampGone = false;  // ...for good (else a retry may succeed)
+static unsigned sweeps = 0;       // QuickNoteStore::sweep calls
+static int sweepFailures = 0;     // the next N sweeps fail (busy)
+static uint32_t sweepRemoves = 0; // files each successful sweep reports
 namespace QuickNoteStore {
 void stamp(char* out, size_t cap) { std::snprintf(out, cap, "boot"); }
 void bootClock(uint32_t* boot, uint32_t* uptimeS) {
@@ -345,6 +349,19 @@ bool restamp(CommandSource source, const char* user, const char* path, const cha
   if (retry) *retry = !restampGone;
   if (why) *why = restampGone ? "Note unavailable" : "Note storage busy";
   return false;
+}
+bool sweep(uint32_t* removed, const char** why) {
+  CHECK(gDepth == 0);
+  ++sweeps;
+  if (sweepFailures) {
+    --sweepFailures;
+    if (removed) *removed = 0;
+    if (why) *why = "Note storage busy";
+    return false;
+  }
+  if (removed) *removed = sweepRemoves;
+  if (why) *why = nullptr;
+  return true;
 }
 bool hasRoom(const char** why) {
   CHECK(gDepth == 0);
@@ -469,7 +486,7 @@ static void reset() {
   logs.clear();
   creates.clear();
   roomOk = listOk = true;
-  createFails = sdWritable = false;
+  createFails = sdWritable = sdPresent = false;
   listUser = readPath = removedPath = "";
   liveEpochs = {{SOURCE_WEB, 7}, {SOURCE_G2_GLASSES, 9}, {SOURCE_LOCAL_DISPLAY, 5},
                 {SOURCE_SERIAL, 3}, {SOURCE_BLUETOOTH, 4}, {SOURCE_UART, 6}};
@@ -936,6 +953,8 @@ static void testFiles() {
         d["notes"][0]["mic"] == "g2" && d["notes"][0]["words"] == 4);
   CHECK(d["notes"][1]["title"] == "" && d["notes"][1]["trigger"] == "");  // header did not parse
   CHECK(d["more"] == true && d["nextOffset"] == 4 && d["total"] == 9);
+  // The tier listed, and whether a card is in: a front end offers the other.
+  CHECK(d["tier"] == "internal" && d["sdAvailable"] == false);
   // Each row's time: local hh:mm (UTC here), even from a name whose header
   // did not parse; a "boot" note's age this boot, or "earlier"; never "--:--".
   CHECK(d["notes"][0]["when"] == "15:30" && d["notes"][1]["when"] == "15:30");
@@ -948,15 +967,22 @@ static void testFiles() {
   Clock::tzOffset = 0;
   for (uint8_t b : gPageStorage) CHECK(b == 0);  // titles cleared once serialized
   d = note("list sd 8 u12");
-  CHECK(ok(d) && listSd && listOwner == 12 && d["offset"] == 8);
+  CHECK(ok(d) && listSd && listOwner == 12 && d["offset"] == 8 && d["tier"] == "sd" &&
+        d["sdAvailable"] == true);
+  sdPresent = true;  // a card that cannot be written: saves stay on flash
+  d = note("list");
+  CHECK(ok(d) && !listSd && d["tier"] == "internal" && d["sdAvailable"] == true);
+  sdPresent = false;
   d = note("list 16");
   CHECK(ok(d) && !listSd && d["offset"] == 16);
   // No tier: the one a save would use now, so a card note lists after saving.
-  sdWritable = true;
-  CHECK(ok(note("list")) && listSd);
+  sdWritable = sdPresent = true;
+  d = note("list");
+  CHECK(ok(d) && listSd && d["tier"] == "sd" && d["sdAvailable"] == true);
   CHECK(ok(note("list 8")) && listSd);
-  CHECK(ok(note("list internal")) && !listSd);
-  sdWritable = false;
+  d = note("list internal");
+  CHECK(ok(d) && !listSd && d["tier"] == "internal" && d["sdAvailable"] == true);
+  sdWritable = sdPresent = false;
   for (const char* line : {"list sd x", "list u0", "list ux", "list 1 2", "list sd 1 u3 x"})
     CHECK(!ok(note(line)));
   listOk = false;
@@ -1082,6 +1108,47 @@ static void testRestampFailures() {
   CHECK(!gUnstampedCount && restamps.size() == 16);
 }
 
+static void testSweep() {
+  // Due from boot. The worker sweeps unfinished note files once, the first
+  // time it finds no note running (or starting): only it writes them.
+  CHECK(gSweepDue && gSweepTries == 0 && sweeps == 0);
+  reset();
+  sweepRemoves = 2;
+  const uint64_t id = idOf(note("start"));
+  sweepPass();
+  CHECK(sweeps == 0 && gSweepDue);
+  CHECK(ok(noteFor("cancel", id)));
+  servicePass();
+  CHECK(!quickNoteActive());
+  sweepPass();
+  CHECK(sweeps == 1 && !gSweepDue && anywhere("[QNOTE] removed 2 unfinished note file(s)"));
+  sweepPass();
+  CHECK(sweeps == 1);  // once a boot
+  for (const auto& line : logs) CHECK(line.find("/stt") == std::string::npos);  // a count, never a path
+  // A failed sweep is retried on the timed wait, three passes in all.
+  reset();
+  gSweepDue = true;
+  gSweepTries = 0;
+  sweeps = 0;
+  sweepFailures = 10;
+  sweepPass();
+  CHECK(sweeps == 1 && gSweepDue);
+  sweepPass();
+  CHECK(sweeps == 2 && gSweepDue && logs.empty());
+  sweepPass();
+  CHECK(sweeps == 3 && !gSweepDue && anywhere("unfinished note files not swept: Note storage busy"));
+  sweepPass();
+  CHECK(sweeps == 3);
+  // Nothing left behind: nothing logged.
+  reset();
+  gSweepDue = true;
+  gSweepTries = 0;
+  sweepFailures = 0;
+  sweepRemoves = 0;
+  sweepPass();
+  CHECK(sweeps == 4 && !gSweepDue && logs.empty());
+}
+
 static void testWarm() {
   reset();
   quickNoteWarm();
@@ -1113,12 +1180,14 @@ int main() {
   testFiles();
   testRestamp();
   testRestampFailures();
+  testSweep();
   testWarm();
   if (failures) {
     std::fprintf(stderr, "%d QuickNote service check(s) failed\n", failures);
     return 1;
   }
   std::printf("QuickNote service (ENABLE_LOCAL_STT=%d): authority, one note, refusals, save/discard/fail, "
-              "revocation, limits, private CLI replies, list times, restamping and keep-warm passed\n", ENABLE_LOCAL_STT);
+              "revocation, limits, private CLI replies, list times and tiers, restamping, the "
+              "unfinished-file sweep and keep-warm passed\n", ENABLE_LOCAL_STT);
   return 0;
 }

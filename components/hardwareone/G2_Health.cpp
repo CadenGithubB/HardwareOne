@@ -125,6 +125,7 @@ struct PendingHistorySession {
   int16_t timezoneMinutes;
   uint32_t loadRetryAtMs;
   R1HealthHistoryStoreError loadError;
+  uint8_t loadFailures;
   bool heartRatePending;
   bool hrvPending;
   bool spo2Pending;
@@ -136,6 +137,12 @@ struct PendingHistorySession {
   R1CommonDailyResult spo2;
   R1ActivityDailyResult activity;
 };
+
+// A pending sweep merges only after its stored day has loaded. A failed load
+// is retried; one that keeps failing (a corrupt or undecryptable day, or an
+// open failure that outlasts the retries) ends that sweep after this many tries.
+static constexpr uint32_t kHistoryLoadRetryMs = 5000;
+static constexpr uint8_t kHistoryLoadMaxAttempts = 12;
 
 EXT_RAM_BSS_ATTR static PendingHistorySession sPendingHistory;
 
@@ -1007,10 +1014,20 @@ static void processPendingHistoryMainTask() {
           sPendingHistory.layout == layout &&
           sPendingHistory.dayStart == dayStart &&
           sPendingHistory.timezoneMinutes == timezoneMinutes) {
-        sPendingHistory.loadError = loadError;
-        sPendingHistory.loadRetryAtMs = millis() + 5000;
         sHistoryUiFetchState = R1_HISTORY_ERROR;
         sHistoryUiFetchError = static_cast<uint8_t>(loadError);
+        if (++sPendingHistory.loadFailures < kHistoryLoadMaxAttempts) {
+          sPendingHistory.loadError = loadError;
+          sPendingHistory.loadRetryAtMs = millis() + kHistoryLoadRetryMs;
+        } else {
+          // The stored day stays unreadable. Its pages cannot be merged
+          // without replacing that day, and holding them would drop every
+          // later sweep, so this sweep ends here and the stored file is kept.
+          // A sweep still running refuses its remaining pages and finishes
+          // without overwriting the error shown above.
+          if (sPendingHistory.active) sDropCurrentHistoryFetch = true;
+          memset(&sPendingHistory, 0, sizeof(sPendingHistory));
+        }
       }
       return;
     }

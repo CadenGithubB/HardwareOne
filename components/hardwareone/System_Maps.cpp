@@ -2437,21 +2437,7 @@ bool WaypointManager::saveWaypoints() {
 }
 
 int WaypointManager::addWaypoint(float lat, float lon, const char* name) {
-  if (!ensureStorage()) return -1;
-  for (int i = 0; i < MAX_WAYPOINTS; i++) {
-    if (!_waypoints[i].active) {
-      _waypoints[i].lat = lat;
-      _waypoints[i].lon = lon;
-      sanitizeWaypointTextCopy(_waypoints[i].name, WAYPOINT_NAME_LEN, name, "WP", false);
-      _waypoints[i].notes[0] = '\0';
-      _waypoints[i].fileCount = 0;
-      memset(_waypoints[i].files, 0, sizeof(_waypoints[i].files));
-      _waypoints[i].active = true;
-      saveWaypoints();
-      return i;
-    }
-  }
-  return -1;  // No free slots
+  return addWaypoint(lat, lon, name, nullptr);
 }
 
 int WaypointManager::addWaypoint(float lat, float lon, const char* name, const char* notes) {
@@ -2465,11 +2451,17 @@ int WaypointManager::addWaypoint(float lat, float lon, const char* name, const c
       _waypoints[i].fileCount = 0;
       memset(_waypoints[i].files, 0, sizeof(_waypoints[i].files));
       _waypoints[i].active = true;
-      saveWaypoints();
+      if (!saveWaypoints()) {
+        // Not on disk: release the slot so the list matches the file and
+        // every caller reports the failure instead of a waypoint that is
+        // gone after the next map load or reboot.
+        _waypoints[i].active = false;
+        return kNotSaved;
+      }
       return i;
     }
   }
-  return -1;
+  return -1;  // No free slots
 }
 
 bool WaypointManager::setNotes(int index, const char* notes) {
@@ -2580,10 +2572,16 @@ bool WaypointManager::deleteWaypoint(int index) {
   if (!_waypoints) return false;
   if (index < 0 || index >= MAX_WAYPOINTS) return false;
   if (!_waypoints[index].active) return false;
-  
+
+  const int previousTarget = _selectedTarget;
   _waypoints[index].active = false;
   if (_selectedTarget == index) _selectedTarget = -1;
-  saveWaypoints();
+  if (!saveWaypoints()) {
+    // The file still holds it: keep the waypoint (and target) in memory too.
+    _waypoints[index].active = true;
+    _selectedTarget = previousTarget;
+    return false;
+  }
   return true;
 }
 
@@ -3658,6 +3656,8 @@ const char* cmd_waypoint(const String& argsInput) {
     int idx = WaypointManager::addWaypoint(lat, lon, name.c_str());
     if (idx >= 0) {
       snprintf(buf, 1024, "Added waypoint %d: %s", idx, name.c_str());
+    } else if (idx == WaypointManager::kNotSaved) {
+      return "Error: Waypoint not saved (no map loaded or write failed)";
     } else {
       return "Error: No free waypoint slots";
     }
@@ -3666,10 +3666,12 @@ const char* cmd_waypoint(const String& argsInput) {
 
   if (sub == "del") {
     if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: waypoint del <index>";
-    if (WaypointManager::deleteWaypoint(a.argInt(1))) {
-      snprintf(buf, 1024, "Deleted waypoint %d", a.argInt(1));
+    const int idx = a.argInt(1);
+    if (!WaypointManager::getWaypoint(idx)) return "Error: Invalid waypoint index";
+    if (WaypointManager::deleteWaypoint(idx)) {
+      snprintf(buf, 1024, "Deleted waypoint %d", idx);
     } else {
-      return "Error: Invalid waypoint index";
+      return "Error: Waypoint deletion not saved (no map loaded or write failed)";
     }
     return buf;
   }
@@ -3765,6 +3767,9 @@ const char* cmd_waypointfile(const String& argsInput) {
       wpIndex = WaypointManager::findWaypointByName(wpName);
       if (wpIndex < 0) {
         wpIndex = WaypointManager::addWaypoint(lat, lon, wpName);
+        if (wpIndex == WaypointManager::kNotSaved) {
+          return "Error: Waypoint not saved (no map loaded or write failed)";
+        }
         if (wpIndex < 0) return "Error: No free waypoint slots";
         snprintf(buf, 1024, "Created waypoint '%s' at %.5f, %.5f", wpName, lat, lon);
       }

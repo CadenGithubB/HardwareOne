@@ -4,7 +4,12 @@
 Uses production authorization and VFS normalization, storage routing, directory
 reader, transcript classifier and packed wire structs.
 The host fakes count trusted scopes, VFS accesses and transfers so an error reply
-cannot conceal a read. No hardware or transport is accessed.
+cannot conceal a read. They also model the bond state the handlers consult, so
+the suite checks who is served (the bonded peer with a live session, under the
+bond identity) and who is refused before any identity or VFS call; a second
+compile with ENABLE_BONDED_MODE=0 expects every request to be refused. Source
+contracts confirm the requesters (web /api/bond/fs/list|get, the OLED peer
+browser) pass the executor's admin gate first. No hardware or transport is accessed.
 """
 import argparse
 import os
@@ -15,6 +20,27 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
+
+def client_contracts(read, extract_block):
+    """The requesters need httpd/semaphore/OLED doubles this suite does not have,
+    so their gate is a source contract: the local admin check runs before the request is sent."""
+    failures = []
+    bond = read('WebPage_Bond.cpp')
+    for handler, send in (('handleBondFsList', 'fsListSendRequest('), ('handleBondFsGet', 'fsGetSendRequest(')):
+        body = extract_block(bond, f'static esp_err_t {handler}(httpd_req_t* req)')
+        gate, request = body.find('hasAdminPrivilege(ctx)'), body.find(send)
+        if not 0 <= gate < request:
+            failures.append(f'{handler}: no hasAdminPrivilege(ctx) gate before {send}')
+    oled = read('OLED_Mode_FileBrowser.cpp')
+    marker = 'static bool peerBrowseAuthorized('
+    if marker not in oled or 'hasAdminPrivilege(' not in extract_block(oled, marker):
+        failures.append('OLED peer browser: no peerBrowseAuthorized() calling hasAdminPrivilege(')
+    for function, send in (('peerStartRequest', 'fsListSendRequest('), ('peerActivate', 'fsGetSendRequest(')):
+        body = extract_block(oled, f'static void {function}(')
+        gate, request = body.find('peerBrowseAuthorized()'), body.find(send)
+        if not 0 <= gate < request:
+            failures.append(f'OLED {function}: no peerBrowseAuthorized() gate before {send}')
+    return failures
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -39,6 +65,11 @@ def main():
     wire = wire[wire.index('struct __attribute__((packed)) V4PayloadFsListReq'):wire.index('// ---- Multi-hop reachability invariants')]
     pieces = [extract_block(filesystem, 'bool normalizeFsPath('),
               extract_block(source, 'static bool fsRpcPathAllowed(')]
+    # The requester gate exists only in sources that have it; an overlay without it
+    # still compiles and reaches the behavioral assertions (which then name the defect).
+    requester = 'static bool fsRpcRequesterIdentity('
+    if requester in source:
+        pieces.append(extract_block(source, requester))
     for kind, req in [('List','ListReq'), ('Stat','StatReq'), ('Get','GetReq')]:
         marker = f'static void process{kind}Deferred(const uint8_t srcMac[6], const V4PayloadFs{req}& req)'
         body = source[source.index(marker + ' {'):]
@@ -59,13 +90,21 @@ def main():
                        ('// INSERT_PRODUCTION', '\n\n'.join(pieces))]:
         assert harness.count(tag) == 1
         harness = harness.replace(tag,value)
+    failures = client_contracts(read, extract_block)
+    for failure in failures:
+        print('FAIL client contract:', failure, file=sys.stderr)
     with tempfile.TemporaryDirectory(prefix='hw1-fsrpc-transcript-') as tmp:
-        unit, exe = Path(tmp)/'test.cpp', Path(tmp)/'test'
-        unit.write_text(harness)
-        cmd = [a.cxx,'-std=c++17','-Wall','-Wextra','-Werror',str(unit),'-o',str(exe)]
-        if a.sanitize:
-            cmd[1:1] = ['-fsanitize=address,undefined','-fno-omit-frame-pointer']
-        subprocess.run(cmd,check=True,timeout=120)
-        subprocess.run([str(exe)],check=True,timeout=60)
+        for label, defines in (('bond mode on', []), ('bond mode off', ['-DENABLE_BONDED_MODE=0'])):
+            unit, exe = Path(tmp)/f'test_{label[-2:].strip()}.cpp', Path(tmp)/f'test_{label[-2:].strip()}'
+            unit.write_text(harness)
+            cmd = [a.cxx,'-std=c++17','-Wall','-Wextra','-Werror',*defines,str(unit),'-o',str(exe)]
+            if a.sanitize:
+                cmd[1:1] = ['-fsanitize=address,undefined','-fno-omit-frame-pointer']
+            subprocess.run(cmd,check=True,timeout=120)
+            if subprocess.run([str(exe)],timeout=60).returncode:
+                failures.append(f'handler suite ({label}) reported failures')
+    if failures:
+        print(f'{len(failures)} failure(s): ' + '; '.join(failures), file=sys.stderr)
+        sys.exit(1)
 if __name__ == '__main__':
     main()

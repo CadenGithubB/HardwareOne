@@ -283,6 +283,7 @@ struct OLEDKeyboardState {
   int cursorY;
   OLEDKeyboardMode mode;
   OLEDKeyboardDictationPolicy dictationPolicy;
+  bool masked;  // secret field: every preview draws '*' per character
   bool active;
   bool cancelled;
   bool completed;
@@ -304,10 +305,16 @@ extern const char OLED_KEYBOARD_CHARS_NUMBERS[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_
 extern const char OLED_KEYBOARD_CHARS_SYMBOLS[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS];
 extern OLEDKeyboardState gOledKeyboardState;
 
-// No default is intentional: adding a text field requires an explicit
-// dictation security decision at its call site.
+// No default for the dictation policy is intentional: adding a text field
+// requires an explicit dictation security decision at its call site.
+// `masked` marks a secret field (password, passphrase, gamepad pattern): every
+// keyboard page then draws one '*' per character in its preview, while the
+// buffer keeps the real text for oledKeyboardGetText(). It is separate from the
+// dictation policy because non-secret command fields also deny dictation.
+// Plain fields omit it.
 void oledKeyboardInit(const char* title, const char* initialText, int maxLength,
-                      OLEDKeyboardDictationPolicy dictationPolicy);
+                      OLEDKeyboardDictationPolicy dictationPolicy,
+                      bool masked = false);
 void oledKeyboardReset();
 void oledKeyboardDisplay(Adafruit_SSD1306* display);
 // Convenience "curtain": if the keyboard overlay is active, draw it and return
@@ -373,6 +380,18 @@ bool executeOLEDCommandWithResult(const String& argsInput, char* out, size_t out
 bool executeOLEDCommandWithResultForSession(
     const String& argsInput, TransportSessionEpoch expectedEpoch,
     char* out, size_t outSize);
+// Toast text for a command's outcome (the toast box fits ~17 columns). Success
+// gives okText (empty when nullptr). A refusal gives "Admin required" for an
+// admin or super-admin denial, otherwise the reply's first line without its
+// leading [ERROR]/Error/ERROR token and ": ", or failText when nothing is left.
+// out is always NUL-terminated (outSize > 0).
+void oledCommandReplyText(bool ok, const char* reply, const char* okText,
+                          const char* failText, char* out, size_t outSize);
+// Run a user-initiated OLED action. A refused or failed command shows its
+// reply on the global toast (oledCommandReplyText, "Failed" when empty) and
+// returns false; true only when the command succeeded, so the caller shows its
+// own success text only then.
+bool oledRunCommand(const String& cmd);
 
 // ============= OLED AuthContext Builder =============
 // Single source of truth for "what AuthContext represents OLED-originated
@@ -406,8 +425,7 @@ enum LoggingMenuState {
   LOG_MENU_MAIN,
   LOG_MENU_SENSOR,
   LOG_MENU_SYSTEM,
-  LOG_MENU_SENSOR_CONFIG,
-  LOG_MENU_VIEWER
+  LOG_MENU_SENSOR_CONFIG
 };
 
 extern LoggingMenuState loggingCurrentState;

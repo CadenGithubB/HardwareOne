@@ -150,19 +150,35 @@ static size_t      gBucketCount = 0;
 EXT_RAM_BSS_ATTR static char        gRows[SET_TOTAL_MODULES_ROWS][SET_ROW_LEN];
 EXT_RAM_BSS_ATTR static const char* gRowPtrs[SET_TOTAL_MODULES_ROWS];
 
-// A command failure is surfaced on the next entries render by temporarily
-// replacing its back-row label (the row still performs the normal Back action).
-// This keeps the feedback on the lens-applier worker without blocking that
-// worker or queueing a TEXT page that would need a second delayed page swap.
+// A command failure is surfaced on the next accepted entries render by
+// temporarily replacing its back-row label (the row still performs the normal
+// Back action). This keeps the feedback on the lens-applier worker without
+// blocking that worker or queueing a TEXT page that would need a second
+// delayed page swap.
 static char gCommitFailureBackRow[SET_ROW_LEN] = {0};
 
-// Action tables: map a rendered row index to the semantic item it represents,
+// Action table: maps a rendered row index to the semantic item it represents,
 // so tap dispatch never re-derives layout (the fragile pattern the Files page
-// abandoned). Rebuilt by each build*Rows() call.
-static int         gModuleRowItem[SET_TOTAL_MODULES_ROWS]; // registry module index per row (-1 = none)
-static const char* gGroupRowItem[SET_TOTAL_MODULES_ROWS];  // group bucket per row (nullptr = none)
-static int         gEntryRowItem[SET_TOTAL_MODULES_ROWS];  // module-entry index per row (-1 = none)
-static int         gPickRowItem[SET_TOTAL_MODULES_ROWS];   // enum option index per row (-1 = none)
+// abandoned). Each build*Rows() call fills gPendingMap beside gRows;
+// settingsShowList makes it gRowMap, together with its level, only once the
+// lens accepted those rows, so taps always resolve against the visible rows.
+struct SettingsRowMap {
+  int         item[SET_TOTAL_MODULES_ROWS];   // module / entry / enum option index per row (-1 = none)
+  const char* group[SET_TOTAL_MODULES_ROWS];  // group bucket per row (nullptr = none)
+  int         prevRow;                        // row idx of "<< Prev" if shown, else -1
+  int         nextRow;                        // row idx of "Next >>" if shown, else -1
+};
+static SettingsRowMap gRowMap     = {{}, {}, -1, -1};  // the rows on the lens
+static SettingsRowMap gPendingMap = {{}, {}, -1, -1};  // the rows just built
+
+static void settingsResetPendingMap() {
+  for (size_t i = 0; i < SET_TOTAL_MODULES_ROWS; i++) {
+    gPendingMap.item[i]  = -1;
+    gPendingMap.group[i] = nullptr;
+  }
+  gPendingMap.prevRow = -1;
+  gPendingMap.nextRow = -1;
+}
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -251,18 +267,16 @@ static void formatSettingValue(const SettingEntry& e, char* out, size_t cap) {
 // on middle pages.
 
 // Static state populated by buildModuleRows() so the tap handler knows
-// the row layout it just rendered. Avoids re-running the layout math
-// in two places.
+// the row layout it just rendered (the prev/next rows travel in the row map).
+// Avoids re-running the layout math in two places.
 static size_t gPageFirstModuleRow = 2;     // first module row index in current page
 static size_t gPageModuleCount    = 0;     // how many module rows on current page
-static int    gPagePrevRow        = -1;    // row idx of "<< Prev" if shown, else -1
-static int    gPageNextRow        = -1;    // row idx of "Next >>" if shown, else -1
 static size_t gPageStartIdx       = 0;     // registry index of first module on this page
 
 static size_t buildModuleRows() {
   writeBackRow("<- Config");       // row 0 — out of Settings to the Config launcher
   writeViewToggleRow(1);           // row 1 — view switcher
-  for (size_t i = 0; i < SET_TOTAL_MODULES_ROWS; i++) gModuleRowItem[i] = -1;
+  settingsResetPendingMap();
 
   size_t modCount = 0;
   const SettingsModule** mods = getSettingsModules(modCount);
@@ -279,7 +293,7 @@ static size_t buildModuleRows() {
     snprintf(gRows[row], SET_ROW_LEN, "[%s] (%u)",
              m->name, (unsigned)m->count);
     gRowPtrs[row] = gRows[row];
-    gModuleRowItem[row] = (int)mi;
+    gPendingMap.item[row] = (int)mi;
     row++;
     shown++;
   }
@@ -294,8 +308,8 @@ static size_t buildModuleRows() {
 
   row = g2PaginatorWriteChrome(p, gModulePage, row, SET_TOTAL_MODULES_ROWS,
                                 &gRows[0][0], SET_ROW_LEN, gRowPtrs);
-  gPagePrevRow = p.prevRow;
-  gPageNextRow = p.nextRow;
+  gPendingMap.prevRow = p.prevRow;
+  gPendingMap.nextRow = p.nextRow;
   return row;
 }
 
@@ -306,7 +320,7 @@ static int moduleIdxFromTap(uint32_t idx) {
   // robust even if a null/nameless module were skipped mid-page, which the old
   // linear reconstruction would have mis-mapped.
   if (idx >= SET_TOTAL_MODULES_ROWS) return -1;
-  return gModuleRowItem[idx];
+  return gRowMap.item[idx];
 }
 
 // -----------------------------------------------------------------------------
@@ -372,7 +386,7 @@ static void settingsBuildBuckets(const SettingsModule* m) {
 // Level 2a — group list for a grouped module.
 static size_t buildGroupRows(int moduleIdx) {
   writeBackRow("<- Settings");
-  for (size_t i = 0; i < SET_TOTAL_MODULES_ROWS; i++) gGroupRowItem[i] = nullptr;
+  settingsResetPendingMap();
 
   size_t modCount = 0;
   const SettingsModule** mods = getSettingsModules(modCount);
@@ -390,13 +404,13 @@ static size_t buildGroupRows(int moduleIdx) {
     snprintf(gRows[row], SET_ROW_LEN, "[%s] (%u)",
              settingsBucketLabel(g), (unsigned)settingsBucketCount(m, g));
     gRowPtrs[row] = gRows[row];
-    gGroupRowItem[row] = g;
+    gPendingMap.group[row] = g;
     row++;
   }
   row = g2PaginatorWriteChrome(p, gGroupPage, row, SET_TOTAL_MODULES_ROWS,
                                 &gRows[0][0], SET_ROW_LEN, gRowPtrs);
-  gPagePrevRow = p.prevRow;
-  gPageNextRow = p.nextRow;
+  gPendingMap.prevRow = p.prevRow;
+  gPendingMap.nextRow = p.nextRow;
   return row;
 }
 
@@ -404,13 +418,14 @@ static size_t buildGroupRows(int moduleIdx) {
 // over the (possibly non-contiguous) filtered set so pagination is exact; the
 // row->entry map is recorded for tap dispatch.
 static size_t buildEntryRows(int moduleIdx, const char* group) {
+  // The failure label is cleared when an entries render is accepted
+  // (settingsPublishView), so a refused render keeps it for the next one.
   if (gCommitFailureBackRow[0]) {
     writeBackRow(gCommitFailureBackRow);
-    gCommitFailureBackRow[0] = '\0';
   } else {
     writeBackRow(gModuleHasGroups ? "<- Groups" : "<- Settings");
   }
-  for (size_t i = 0; i < SET_TOTAL_MODULES_ROWS; i++) gEntryRowItem[i] = -1;
+  settingsResetPendingMap();
 
   size_t modCount = 0;
   const SettingsModule** mods = getSettingsModules(modCount);
@@ -448,15 +463,15 @@ static size_t buildEntryRows(int moduleIdx, const char* group) {
     const char* key = e.label ? e.label : (e.jsonKey ? e.jsonKey : "?");
     snprintf(gRows[row], SET_ROW_LEN, "%s=%s", key, val);
     gRowPtrs[row] = gRows[row];
-    gEntryRowItem[row] = (int)ei;
+    gPendingMap.item[row] = (int)ei;
     row++;
     mi++;
   }
 
   row = g2PaginatorWriteChrome(p, gEntryPage, row, SET_TOTAL_MODULES_ROWS,
                                 &gRows[0][0], SET_ROW_LEN, gRowPtrs);
-  gPagePrevRow = p.prevRow;
-  gPageNextRow = p.nextRow;
+  gPendingMap.prevRow = p.prevRow;
+  gPendingMap.nextRow = p.nextRow;
   return row;
 }
 
@@ -464,7 +479,7 @@ static size_t buildEntryRows(int moduleIdx, const char* group) {
 // matching the current value.
 static size_t buildPickRows(const SettingEntry* e) {
   writeBackRow("<- Cancel");
-  for (size_t i = 0; i < SET_TOTAL_MODULES_ROWS; i++) gPickRowItem[i] = -1;
+  settingsResetPendingMap();
   if (!e || !e->options) {
     snprintf(gRows[1], SET_ROW_LEN, "(no options)");
     gRowPtrs[1] = gRows[1];
@@ -480,13 +495,13 @@ static size_t buildPickRows(const SettingEntry* e) {
     if (!settingsEditorEnumAt(e->options, (int)oi, nullptr, 0, lab, sizeof(lab))) continue;
     snprintf(gRows[row], SET_ROW_LEN, "%s %s", ((int)oi == curIdx) ? "[X]" : "[ ]", lab);
     gRowPtrs[row] = gRows[row];
-    gPickRowItem[row] = (int)oi;
+    gPendingMap.item[row] = (int)oi;
     row++;
   }
   row = g2PaginatorWriteChrome(p, gPickPage, row, SET_TOTAL_MODULES_ROWS,
                                 &gRows[0][0], SET_ROW_LEN, gRowPtrs);
-  gPagePrevRow = p.prevRow;
-  gPageNextRow = p.nextRow;
+  gPendingMap.prevRow = p.prevRow;
+  gPendingMap.nextRow = p.nextRow;
   return row;
 }
 
@@ -526,37 +541,53 @@ static void settingsBeginRender() {
   portEXIT_CRITICAL(&gCommitUiMux);
 }
 
-// --- Render helpers. Each (a) bumps both Settings-local and lens-global
-// generations so any in-flight commit redraw becomes stale once the display
-// changes, and (b) re-asserts the hijack page, since a preceding keyboard
-// session leaves it at TEXT_VIEW and g2ShowListPage never sets it. ---
-
-static void settingsShowModules() {
+// The lens accepted the rows the builders just wrote for `level`: start a new
+// display generation and make that level and its row map the live dispatch
+// state. The module list has no active module; an accepted entries render
+// has shown the commit-failure label.
+static void settingsPublishView(SettingsLevel level) {
   settingsBeginRender();
+  gLevel  = level;
+  gRowMap = gPendingMap;
+  if (level == SET_LEVEL_MODULES) gActiveModule = -1;
+  if (level == SET_LEVEL_ENTRIES) gCommitFailureBackRow[0] = '\0';
+}
+
+// Render the `n` rows just built for `level`; publish only if accepted, so a
+// refused render leaves the visible rows with their current level and map.
+static bool settingsShowList(SettingsLevel level, size_t n) {
+  return g2ShowListPageAndPublish(gRowPtrs, n,
+                                  [level] { settingsPublishView(level); });
+}
+
+// --- Render helpers. Each (a) bumps both Settings-local and lens-global
+// generations once its rows are accepted, so any in-flight commit redraw for
+// the replaced view becomes stale, and (b) re-asserts the hijack page, since a
+// preceding keyboard session leaves it at TEXT_VIEW and g2ShowListPage never
+// sets it. ---
+
+static bool settingsShowModules() {
   size_t n = buildModuleRows();
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
-  g2ShowListPage(gRowPtrs, n);
+  return settingsShowList(SET_LEVEL_MODULES, n);
 }
 
-static void settingsRenderGroups() {
-  settingsBeginRender();
+static bool settingsRenderGroups() {
   size_t n = buildGroupRows(gActiveModule);
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
-  g2ShowListPage(gRowPtrs, n);
+  return settingsShowList(SET_LEVEL_GROUPS, n);
 }
 
-static void settingsRenderEntries() {
-  settingsBeginRender();
+static bool settingsRenderEntries() {
   size_t n = buildEntryRows(gActiveModule, gActiveGroup);
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
-  g2ShowListPage(gRowPtrs, n);
+  return settingsShowList(SET_LEVEL_ENTRIES, n);
 }
 
-static void settingsRenderPick() {
-  settingsBeginRender();
+static bool settingsRenderPick() {
   size_t n = buildPickRows(gEditEntry);
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
-  g2ShowListPage(gRowPtrs, n);
+  return settingsShowList(SET_LEVEL_PICK, n);
 }
 
 // Flash a short message, then return to the entry list. This is only for
@@ -655,7 +686,6 @@ static bool settingsConsumeCommitResult(bool expectedSuccess,
 static void settingsRenderCommitSuccess() {
   if (g2GetHijackPage() != G2_HIJACK_PAGE_SETTINGS) return;
   if (!settingsConsumeCommitResult(true, nullptr, 0)) return;
-  gLevel = SET_LEVEL_ENTRIES;
   settingsRenderEntries();  // value re-reads live from valuePtr
 }
 
@@ -663,7 +693,6 @@ static void settingsRenderCommitFailure() {
   if (g2GetHijackPage() != G2_HIJACK_PAGE_SETTINGS) return;
   char message[sizeof(gCommitUi.message)];
   if (!settingsConsumeCommitResult(false, message, sizeof(message))) return;
-  gLevel = SET_LEVEL_ENTRIES;
   snprintf(gCommitFailureBackRow, sizeof(gCommitFailureBackRow),
            "<- Failed: %.27s", message);
   settingsRenderEntries();
@@ -803,9 +832,8 @@ static void settingsEditEntry(int moduleIdx, int entryIdx) {
     return;
   }
   if (settingsEditorHasEnumOptions(&e)) {
-    gLevel = SET_LEVEL_PICK;
     gPickPage = 0;
-    settingsRenderPick();
+    settingsRenderPick();   // PICK becomes live only if the lens shows it
     return;
   }
   settingsLaunchKeyboard(&e);
@@ -877,7 +905,7 @@ static bool settingsRenderJsonPage();
 
 static void rebuildAndShowModuleList() {
   size_t n = buildModuleRows();
-  if (g2ShowListPage(gRowPtrs, n)) {
+  if (settingsShowList(SET_LEVEL_MODULES, n)) {
     DEBUG_G2F("[G2] Settings: re-shown module list (rows=%u)", (unsigned)n);
   } else {
     DEBUG_G2F("[G2] Settings: module-list re-show FAILED");
@@ -1036,13 +1064,6 @@ void g2BuildSettingsInfo(char* out, size_t cap) {
   out[cap - 1] = '\0';
 }
 
-bool g2ShowSettingsPage() {
-  char buf[400];
-  g2BuildSettingsInfo(buf, sizeof(buf));
-  DEBUG_G2F("[G2] Settings page (%u B):\n%s", (unsigned)strlen(buf), buf);
-  return g2ShowText(buf);
-}
-
 // -----------------------------------------------------------------------------
 // Public — list-mode page (interactive)
 // -----------------------------------------------------------------------------
@@ -1050,9 +1071,8 @@ bool g2ShowSettingsPage() {
 void g2ShowSettingsMenu() {
   // Entry from MAIN always lands at the module list. View persists
   // across hijack sessions intentionally — a user who prefers JSON
-  // shouldn't have to re-pick it every time.
-  gLevel           = SET_LEVEL_MODULES;
-  gActiveModule    = -1;
+  // shouldn't have to re-pick it every time. The module level (and no
+  // active module) is published with the rows.
   gActiveGroup     = kGroupAll;
   gModuleHasGroups = false;
   gGroupPage       = 0;
@@ -1060,7 +1080,7 @@ void g2ShowSettingsMenu() {
   gEditEntry       = nullptr;
 
   size_t n = buildModuleRows();
-  if (g2ShowListPage(gRowPtrs, n)) {
+  if (settingsShowList(SET_LEVEL_MODULES, n)) {
     g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
     DEBUG_G2F("[G2] Settings menu shown (modules, view=%s, rows=%u)",
               gView == SET_VIEW_INTERACTIVE ? "INTERACTIVE" : "JSON", (unsigned)n);
@@ -1093,12 +1113,12 @@ void g2SettingsHandleTap(uint32_t idx) {
       }
       // Pagination: prev/next page rows. Detect via stored row indices
       // so we don't have to re-derive layout here.
-      if ((int)idx == gPagePrevRow) {
+      if ((int)idx == gRowMap.prevRow) {
         if (gModulePage > 0) gModulePage--;
         settingsShowModules();
         return;
       }
-      if ((int)idx == gPageNextRow) {
+      if ((int)idx == gRowMap.nextRow) {
         gModulePage++;
         settingsShowModules();
         return;
@@ -1133,34 +1153,33 @@ void g2SettingsHandleTap(uint32_t idx) {
       }
 
       // INTERACTIVE: group level if the module has grouped settings, else flat.
+      // The module list stays live (its dispatch ignores gActiveModule and the
+      // buckets) unless the lens accepts the next level.
       settingsBuildBuckets(m);
       gGroupPage = 0;
       if (gModuleHasGroups) {
-        gLevel = SET_LEVEL_GROUPS;
-        settingsRenderGroups();
-        DEBUG_G2F("[G2] Settings: '%s' → groups (%u buckets)",
-                  modName, (unsigned)gBucketCount);
+        if (settingsRenderGroups()) {
+          DEBUG_G2F("[G2] Settings: '%s' → groups (%u buckets)",
+                    modName, (unsigned)gBucketCount);
+        }
       } else {
         gActiveGroup = kGroupAll;
-        gLevel       = SET_LEVEL_ENTRIES;
-        settingsRenderEntries();
-        DEBUG_G2F("[G2] Settings: '%s' → entries (flat)", modName);
+        if (settingsRenderEntries()) {
+          DEBUG_G2F("[G2] Settings: '%s' → entries (flat)", modName);
+        }
       }
       return;
     }
 
     case SET_LEVEL_GROUPS: {
       if (idx == 0) {
-        gLevel        = SET_LEVEL_MODULES;
-        gActiveModule = -1;
         settingsShowModules();
         return;
       }
-      if ((int)idx == gPagePrevRow) { if (gGroupPage > 0) gGroupPage--; settingsRenderGroups(); return; }
-      if ((int)idx == gPageNextRow) { gGroupPage++; settingsRenderGroups(); return; }
-      if (idx < SET_TOTAL_MODULES_ROWS && gGroupRowItem[idx]) {
-        gActiveGroup = gGroupRowItem[idx];
-        gLevel       = SET_LEVEL_ENTRIES;
+      if ((int)idx == gRowMap.prevRow) { if (gGroupPage > 0) gGroupPage--; settingsRenderGroups(); return; }
+      if ((int)idx == gRowMap.nextRow) { gGroupPage++; settingsRenderGroups(); return; }
+      if (idx < SET_TOTAL_MODULES_ROWS && gRowMap.group[idx]) {
+        gActiveGroup = gRowMap.group[idx];
         gEntryPage   = 0;
         settingsRenderEntries();
       }
@@ -1175,20 +1194,16 @@ void g2SettingsHandleTap(uint32_t idx) {
       if (idx == 0) {
         // Back: up to the group list (grouped module) or the module list.
         if (gModuleHasGroups) {
-          gLevel = SET_LEVEL_GROUPS;
           settingsRenderGroups();
-        } else {
-          gLevel        = SET_LEVEL_MODULES;
-          gActiveModule = -1;
-          gEntryPage    = 0;
-          settingsShowModules();
+        } else if (settingsShowModules()) {
+          gEntryPage = 0;
         }
         return;
       }
-      if ((int)idx == gPagePrevRow) { if (gEntryPage > 0) gEntryPage--; settingsRenderEntries(); return; }
-      if ((int)idx == gPageNextRow) { gEntryPage++; settingsRenderEntries(); return; }
-      if (idx < SET_TOTAL_MODULES_ROWS && gEntryRowItem[idx] >= 0) {
-        settingsEditEntry(gActiveModule, gEntryRowItem[idx]);
+      if ((int)idx == gRowMap.prevRow) { if (gEntryPage > 0) gEntryPage--; settingsRenderEntries(); return; }
+      if ((int)idx == gRowMap.nextRow) { gEntryPage++; settingsRenderEntries(); return; }
+      if (idx < SET_TOTAL_MODULES_ROWS && gRowMap.item[idx] >= 0) {
+        settingsEditEntry(gActiveModule, gRowMap.item[idx]);
       }
       return;
     }
@@ -1196,15 +1211,14 @@ void g2SettingsHandleTap(uint32_t idx) {
     case SET_LEVEL_PICK: {
       if (idx == 0) {
         // Cancel: back to the entry list, no change.
-        gLevel = SET_LEVEL_ENTRIES;
         settingsRenderEntries();
         return;
       }
-      if ((int)idx == gPagePrevRow) { if (gPickPage > 0) gPickPage--; settingsRenderPick(); return; }
-      if ((int)idx == gPageNextRow) { gPickPage++; settingsRenderPick(); return; }
-      if (idx < SET_TOTAL_MODULES_ROWS && gPickRowItem[idx] >= 0 && gEditEntry) {
+      if ((int)idx == gRowMap.prevRow) { if (gPickPage > 0) gPickPage--; settingsRenderPick(); return; }
+      if ((int)idx == gRowMap.nextRow) { gPickPage++; settingsRenderPick(); return; }
+      if (idx < SET_TOTAL_MODULES_ROWS && gRowMap.item[idx] >= 0 && gEditEntry) {
         char val[48];
-        if (settingsEditorEnumAt(gEditEntry->options, gPickRowItem[idx],
+        if (settingsEditorEnumAt(gEditEntry->options, gRowMap.item[idx],
                                  val, sizeof(val), nullptr, 0)) {
           // Stay at SET_LEVEL_PICK; onSettingsCommitDone lands on entries once
           // the write completes. This keeps a tap in the in-flight window routed

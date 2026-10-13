@@ -317,7 +317,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## bluetooth
 
-> The Bluetooth subsystem runs the device BLE stack in one of two mutually exclusive roles selected by blemode: server mode (the device advertises and a phone/app connects to it) or client mode (the device acts as a BLE central for Even G2 glasses; the even_g2 commands then apply). Switching modes tears down the other role automatically. In server mode, openble/closeble start and stop advertising, blesend pushes a one-off message and bleevent an event to the connected client, and blestream toggles periodic pushes as a bitmask of sensors/system/events (blestream on/off/sensors/system/events, plus interval) -- all of which require an active connection. An app-layer Secure Channel (X25519 + passphrase + ChaCha20-Poly1305, independent of BLE bonding) is configured with blesecret and required with blesecure; both are admin-only, as is blerequireauth. Boot reconnection to saved-MAC peers is per-peer via bleautoreconnect <name> [on|off] (see blepeers for names).
+> The Bluetooth subsystem runs the device BLE stack in one of two mutually exclusive roles selected by blemode: server mode (the device advertises and a phone/app connects to it) or client mode (the device acts as a BLE central for Even G2 glasses; the even_g2 commands then apply). Switching modes tears down the other role automatically. In server mode, openble/closeble start and stop advertising, blesend pushes a one-off message and bleevent an event to the connected client, and blestream toggles periodic pushes as a bitmask of sensors/system/events (blestream on/off/sensors/system/events, plus interval) -- all of which require an active connection. An app-layer Secure Channel (X25519 + passphrase + ChaCha20-Poly1305, independent of BLE bonding) is configured with blesecret and required with blesecure; both require super admin, as does blerequireauth. Boot reconnection to saved-MAC peers is per-peer via bleautoreconnect <name> [on|off] (see blepeers for names).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -333,7 +333,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `bleread` |  | Read Bluetooth connection status. (add 'json' for JSON output) |
 | `blerequireauth` | S | Enable/disable BLE authentication requirement [on\|off].<br/>`Usage: blerequireauth [on\|off]` |
 | `blesecret` | S | Set/clear the BLE Secure Channel passphrase: blesecret <phrase\|clear>.<br/>`Usage: blesecret <passphrase\|clear>` |
-| `blesecure` | A | Require app-layer BLE encryption [on\|off].<br/>`Usage: blesecure [on\|off]` |
+| `blesecure` | S | Require app-layer BLE encryption [on\|off].<br/>`Usage: blesecure [on\|off]` |
 | `blesend` |  | Send message to BLE client: <message>.<br/>`Usage: blesend <message>` |
 | `blestatus` |  | Show Bluetooth connection status. (add 'json' for JSON output) |
 | `blestream` |  | Control streaming: <on\|off\|sensors\|system\|events\|interval>.<br/>`Usage: blestream [on\|off\|sensors\|system\|events\|interval] \| interval <sensor_ms> <system_ms>` |

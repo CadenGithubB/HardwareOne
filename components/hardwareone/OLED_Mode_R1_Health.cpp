@@ -3,8 +3,9 @@
 // ============================================================================
 // Hybrid surface: connect stays under Bluetooth → R1 Ring. This mode shows
 // live HR/HRV/SpO2/temp/battery/wear from g2RingGetTelemetry, with entry/Poll
-// refresh delegated to the exact-profile coordinator. Ring collection/low-power controls use the
-// transport's async desired/observed contract; local logging is independent.
+// refresh delegated to the exact-profile coordinator. Ring collection/low-power controls and the
+// forced history refresh run as admin commands (`ringcontrol`, `healthstatus force-history`), so
+// the command layer decides and audits; local logging is independent.
 
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
@@ -13,6 +14,7 @@
 
 #include <Adafruit_SSD1306.h>
 #include <cstdio>
+#include <cstring>
 
 #include "G2_Ring.h"
 #include "G2_Health.h"
@@ -36,23 +38,26 @@ enum HealthAction : uint8_t {
 static uint8_t  sHealthSel        = 0;
 static uint8_t  sHealthActionTop  = 0;
 static bool     sHealthWasConn    = false;
-static uint32_t sHealthAdminDeniedUntilMs = 0;
+static uint32_t sHealthDeniedUntilMs = 0;
 
-static bool healthAdminAllowed() {
-  return gLocalDisplayAuthed && isAdminUser(gLocalDisplayUser);
+// Preserve -> On -> Off -> Preserve: the order A cycles a ring control.
+static const char* healthNextDesiredToken(G2RingDesiredState current) {
+  return current == G2_RING_PRESERVE ? "on"
+       : current == G2_RING_ON       ? "off"
+       : "preserve";
 }
 
-static bool healthActionRequiresAdmin(uint8_t action) {
-  return action == HEALTH_ACTION_COLLECTION ||
-         action == HEALTH_ACTION_HISTORY_FORCE ||
-         action == HEALTH_ACTION_LOW_POWER;
-}
-
-static bool healthRequireAdmin() {
-  if (healthAdminAllowed()) return true;
-  sHealthAdminDeniedUntilMs = millis() + 1500;
+// Runs a ring control command as the display's identity. The command owns the
+// admin rule and the executor audits it; a refusal (role, or the ring not
+// ready) flashes [DENIED] in the header.
+static void healthRunCommand(const char* line) {
+  char out[96];
+  if (executeOLEDCommandWithResult(line, out, sizeof(out)) &&
+      strncmp(out, "Error", 5) != 0) {
+    return;
+  }
+  sHealthDeniedUntilMs = millis() + 1500;
   oledMarkDirty();
-  return false;
 }
 
 static void healthOnEnter(bool isForward) {
@@ -108,7 +113,7 @@ static void displayR1Health() {
 
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->print("R1 HEALTH ");
-  if ((int32_t)(sHealthAdminDeniedUntilMs - millis()) > 0)
+  if ((int32_t)(sHealthDeniedUntilMs - millis()) > 0)
                                oledDisplay->println("[DENIED]");
   else if (!bleSubsystemActive()) oledDisplay->println("[BLE]");
   else if (conn)             oledDisplay->println("[OK]");
@@ -193,11 +198,7 @@ static void displayR1Health() {
     if (action >= HEALTH_ACTION_COUNT) break;
     oledDisplay->setCursor(0, a0 + row * 8);
     oledDisplay->print(action == sHealthSel ? "> " : "  ");
-    if (healthActionRequiresAdmin(action) && !healthAdminAllowed()) {
-      if (action == HEALTH_ACTION_COLLECTION) oledDisplay->print("Collect [admin]");
-      else if (action == HEALTH_ACTION_HISTORY_FORCE) oledDisplay->print("Force Hist [admin]");
-      else oledDisplay->print("LowP [admin]");
-    } else if (action == HEALTH_ACTION_POLL) {
+    if (action == HEALTH_ACTION_POLL) {
       if (conn && !g2RingHealthPageRefreshSupported()) {
         oledDisplay->print("Poll unsupported");
       } else {
@@ -247,30 +248,27 @@ static bool healthInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPre
         executeOLEDCommand("healthlogging toggle");
         break;
       case HEALTH_ACTION_COLLECTION: {
-        if (!healthRequireAdmin()) break;
         G2RingControlStatus status = {};
         g2RingGetControlStatus(status);
-        const G2RingDesiredState next = status.healthDesired == G2_RING_PRESERVE
-            ? G2_RING_ON : (status.healthDesired == G2_RING_ON
-                ? G2_RING_OFF : G2_RING_PRESERVE);
-        (void)g2RingSetHealthCollectionDesired(next);
+        char line[40];
+        snprintf(line, sizeof(line), "ringcontrol collection %s",
+                 healthNextDesiredToken(status.healthDesired));
+        healthRunCommand(line);
         break;
       }
       case HEALTH_ACTION_HISTORY:
         (void)g2RingRequestHistoryRefresh(false);
         break;
       case HEALTH_ACTION_HISTORY_FORCE:
-        if (!healthRequireAdmin()) break;
-        (void)g2RingRequestHistoryRefresh(true);
+        healthRunCommand("healthstatus force-history");
         break;
       case HEALTH_ACTION_LOW_POWER: {
-        if (!healthRequireAdmin()) break;
         G2RingControlStatus status = {};
         g2RingGetControlStatus(status);
-        const G2RingDesiredState next = status.lowPowerDesired == G2_RING_PRESERVE
-            ? G2_RING_ON : (status.lowPowerDesired == G2_RING_ON
-                ? G2_RING_OFF : G2_RING_PRESERVE);
-        (void)g2RingSetLowPowerDesired(next);
+        char line[40];
+        snprintf(line, sizeof(line), "ringcontrol lowpower %s",
+                 healthNextDesiredToken(status.lowPowerDesired));
+        healthRunCommand(line);
         break;
       }
       default:

@@ -185,6 +185,9 @@ bool r1HealthHistoryStoreStage(const R1HealthHistoryDay& day,
 void r1HealthHistoryStoreTick(void);
 
 // Normal-task read path for restoring one exact ring day into RAM.
+// NOT_FOUND only when no stored day exists (neither the file nor a backup
+// left by an interrupted publish); a stored day that cannot be opened or read
+// returns an error such as READ_FAILED, never NOT_FOUND.
 R1HealthHistoryStoreError r1HealthHistoryStoreLoadExact(
     const char* peerId, uint32_t dayStart, int16_t timezoneMinutes,
     R1HealthHistoryDay& out);

@@ -21,6 +21,9 @@
 #if ENABLE_G2_GLASSES
 #include "G2_Glasses.h"
 #endif
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+#include "OLED_RemoteSettings.h"
+#endif
 
 // gThermalConnected / gTofConnected come from the sensor headers.
 #if ENABLE_THERMAL_SENSOR
@@ -67,6 +70,65 @@ static int enumOptionIndexForCurrent(const SettingEntry* entry) {
 // Global settings editor context
 SettingsEditorContext gSettingsEditor;
 
+// ---------------------------------------------------------------------------
+// Module source and commit target
+// ---------------------------------------------------------------------------
+// The remote-settings mode edits the bonded peer's cached module set; every
+// other mode edits the local registry. Keyed on the current mode rather than a
+// sticky flag, so leaving the remote mode by any route (B, `oledmode`, sleep,
+// login) cannot leave the local editor pointed at the peer's modules.
+static bool editorIsRemote() {
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+  return currentOLEDMode == OLED_REMOTE_SETTINGS;
+#else
+  return false;
+#endif
+}
+
+static const SettingsModule** editorModules(size_t& count) {
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+  if (editorIsRemote()) return getRemoteSettingsModules(count);
+#endif
+  return getSettingsModules(count);
+}
+
+void settingsEditorShowError(const String& message, uint32_t durationMs) {
+  gSettingsEditor.errorMessage = message;
+  gSettingsEditor.errorDisplayUntil = millis() + durationMs;
+}
+
+// Remote commit: accepted-for-delivery here; the peer's answer reaches the
+// screen through OLED_Mode_RemoteSettings' outcome poll. Refusals use the
+// editor's error line exactly like a failed local string save.
+static bool commitRemoteSettingValue(const SettingEntry* entry, const String& value) {
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+  String err;
+  if (applyRemoteSettingChange(entry, value, err)) return true;
+  settingsEditorShowError(err.length() ? err : String("Remote save failed"), 2500);
+#else
+  (void)entry;
+  (void)value;
+  settingsEditorShowError("Remote save unavailable", 2500);
+#endif
+  return false;
+}
+
+// Both modes share gSettingsEditor. If it still holds a module that is not in
+// the current mode's list (the other mode was left mid-edit by a route other
+// than B, or the peer's set was released), start over at the category list
+// instead of editing a row of the other device and committing it here.
+static void editorDropForeignModule() {
+  size_t n = 0;
+  const SettingsModule** mods = editorModules(n);
+  bool known = (gSettingsEditor.currentModule == nullptr);
+  for (size_t i = 0; !known && i < n; i++) {
+    known = (mods[i] == gSettingsEditor.currentModule);
+  }
+  if (!known || (n > 0 && gSettingsEditor.categoryIndex >= (int)n)) {
+    initSettingsEditor();
+  }
+}
+
 // ============================================================================
 // Initialization
 // ============================================================================
@@ -86,6 +148,8 @@ void initSettingsEditor() {
   gSettingsEditor.optionIndex = 0;
   gSettingsEditor.optionCount = 0;
   gSettingsEditor.optionScroll = 0;
+  gSettingsEditor.categoryScroll = 0;
+  gSettingsEditor.itemScroll = 0;
 
   // Verify settings modules are registered
   size_t moduleCount = 0;
@@ -158,10 +222,13 @@ int getSettingCurrentValue(const SettingEntry* entry) {
   return settingsEditorCurrentValue(entry);
 }
 
-// Set value to setting entry — routes through command system for audit logging
-void setSettingValue(const SettingEntry* entry, int value) {
-  if (!entry || !entry->jsonKey) return;
-
+// Commit a value through the entry's set-command; the remote screen sends it to
+// the bonded peer instead. Locally it runs through cmd_exec for the audit log
+// (handleSettingCommand's SETTING_STRING case assigns the whole trimmed args
+// string, so multi-word values survive), and a refusal or "Error:" reply is
+// shown on the editor's error line. Returns false when the save was refused.
+static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
+  if (!entry || !entry->jsonKey) return false;
   // cmdKey ONLY — see settingsEditorCommandName() for why the jsonKey fallback
   // was removed. No cmdKey means this setting has no set-command, so do nothing
   // rather than firing an unrelated one.
@@ -169,25 +236,9 @@ void setSettingValue(const SettingEntry* entry, int value) {
   if (!cmdName || !cmdName[0]) {
     gSettingsEditor.errorMessage = String("Not editable here");
     gSettingsEditor.errorDisplayUntil = millis() + 2500;
-    return;
-  }
-  String cmd = String(cmdName) + " " + String(value);
-  executeOLEDCommand(cmd);
-}
-
-// String twin of setSettingValue — same cmdKey-or-jsonKey resolution, same
-// cmd_exec path (handleSettingCommand's SETTING_STRING case assigns the whole
-// trimmed args string, so multi-word values survive). Uses the WithResult
-// variant so an "Error:" reply surfaces via the editor's toast instead of
-// vanishing into the log. Returns false when the command reported failure.
-static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
-  if (!entry || !entry->jsonKey) return false;
-  const char* cmdName = entry->cmdKey;   // cmdKey ONLY — no jsonKey fallback
-  if (!cmdName || !cmdName[0]) {
-    gSettingsEditor.errorMessage = String("Not editable here");
-    gSettingsEditor.errorDisplayUntil = millis() + 2500;
     return false;
   }
+  if (editorIsRemote()) return commitRemoteSettingValue(entry, value);
   char out[128];
   bool ok = executeOLEDCommandWithResult(String(cmdName) + " " + value, out, sizeof(out));
   if (!ok || strncmp(out, "Error", 5) == 0) {
@@ -196,6 +247,12 @@ static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
     return false;
   }
   return true;
+}
+
+// INT/BOOL twin (slider and INT pick-list): the same checked commit, so a
+// refused save shows its reply instead of vanishing into the log.
+bool setSettingValue(const SettingEntry* entry, int value) {
+  return setSettingValueStr(entry, String(value));
 }
 
 // Validate value against min/max
@@ -225,7 +282,9 @@ void displaySettingsEditor() {
     DEBUG_SYSTEMF("[SettingsEditor] oledDisplay is NULL, returning");
     return;
   }
-  
+
+  editorDropForeignModule();
+
   // Keyboard-edit overlay: while a STRING edit's keyboard is up it owns the
   // whole content area (the global header is suppressed by the keyboard
   // subsystem itself). Draw it and skip the editor chrome entirely.
@@ -236,7 +295,7 @@ void displaySettingsEditor() {
   
   // Get module list
   size_t moduleCount = 0;
-  const SettingsModule** modules = getSettingsModules(moduleCount);
+  const SettingsModule** modules = editorModules(moduleCount);
   
   
   
@@ -266,8 +325,9 @@ void displaySettingsEditor() {
         const int lineHeight = 10;
         const int maxVisibleItems = OLED_CONTENT_HEIGHT / lineHeight;  // 43px / 10px = 4 items
         
-        // Calculate scroll offset to keep selection visible
-        static int scrollOffset = 0;
+        // Calculate scroll offset to keep selection visible (context-owned,
+        // reset by initSettingsEditor)
+        int& scrollOffset = gSettingsEditor.categoryScroll;
         if (gSettingsEditor.categoryIndex < scrollOffset) {
           scrollOffset = gSettingsEditor.categoryIndex;
         } else if (gSettingsEditor.categoryIndex >= scrollOffset + maxVisibleItems) {
@@ -333,14 +393,17 @@ void displaySettingsEditor() {
       const int lineHeight = 10;
       const int maxVisibleItems = OLED_CONTENT_HEIGHT / lineHeight;  // 4 items
       
-      // Calculate scroll offset to keep selected item visible
-      static int itemScrollOffset = 0;
+      // Calculate scroll offset to keep selected item visible (context-owned,
+      // reset whenever a module is entered)
+      int& itemScrollOffset = gSettingsEditor.itemScroll;
       if (visibleIndex < itemScrollOffset) {
         itemScrollOffset = visibleIndex;
       } else if (visibleIndex >= itemScrollOffset + maxVisibleItems) {
         itemScrollOffset = visibleIndex - maxVisibleItems + 1;
       }
-      
+      // No editable row under the cursor (visibleIndex -1): window at the top.
+      if (itemScrollOffset < 0) itemScrollOffset = 0;
+
       // Draw visible settings items
       int displayedCount = 0;
       int currentVisibleIdx = 0;
@@ -492,6 +555,7 @@ void displaySettingsEditor() {
 
 bool handleSettingsEditorInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
   if (oledGuestBlocksMutate()) return true;
+  editorDropForeignModule();
 
   // ---- Keyboard-edit completion poll (CLIInput idiom) ----
   // While the keyboard overlay is ACTIVE this handler is never invoked (the
@@ -612,7 +676,7 @@ bool handleSettingsEditorInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPre
 
 void settingsEditorUp() {
   size_t moduleCount = 0;
-  const SettingsModule** modules = getSettingsModules(moduleCount);
+  const SettingsModule** modules = editorModules(moduleCount);
   
   switch (gSettingsEditor.state) {
     case SETTINGS_CATEGORY_SELECT:
@@ -660,7 +724,7 @@ void settingsEditorUp() {
 
 void settingsEditorDown() {
   size_t moduleCount = 0;
-  const SettingsModule** modules = getSettingsModules(moduleCount);
+  const SettingsModule** modules = editorModules(moduleCount);
   
   switch (gSettingsEditor.state) {
     case SETTINGS_CATEGORY_SELECT:
@@ -706,7 +770,7 @@ void settingsEditorDown() {
 
 void settingsEditorSelect() {
   size_t moduleCount = 0;
-  const SettingsModule** modules = getSettingsModules(moduleCount);
+  const SettingsModule** modules = editorModules(moduleCount);
   
   switch (gSettingsEditor.state) {
     case SETTINGS_CATEGORY_SELECT:
@@ -714,7 +778,8 @@ void settingsEditorSelect() {
       if (gSettingsEditor.categoryIndex < (int)moduleCount) {
         gSettingsEditor.currentModule = modules[gSettingsEditor.categoryIndex];
         gSettingsEditor.itemIndex = 0;
-        
+        gSettingsEditor.itemScroll = 0;
+
         // Find first editable setting (this scan previously used a bare
         // INT/BOOL test WITHOUT isSettingVisible — the shared predicate also
         // fixes that latent desync).
@@ -798,8 +863,7 @@ void settingsEditorSelect() {
         if (gSettingsEditor.currentEntry->type == SETTING_STRING) {
           ok = setSettingValueStr(gSettingsEditor.currentEntry, String(val));
         } else {
-          setSettingValue(gSettingsEditor.currentEntry, atoi(val));
-          ok = true;
+          ok = setSettingValue(gSettingsEditor.currentEntry, atoi(val));
         }
         if (ok) {
           DEBUG_SYSTEMF("[SettingsEditor] Saved %s = %s (pick-list)",
@@ -825,8 +889,9 @@ void settingsEditorSelect() {
         break;
       }
 
-      // Apply via command system — generates [CMD] audit line and persists
-      setSettingValue(gSettingsEditor.currentEntry, gSettingsEditor.editValue);
+      // Apply via command system — generates [CMD] audit line and persists.
+      // A refused save stays in the value editor with the reply on the error line.
+      if (!setSettingValue(gSettingsEditor.currentEntry, gSettingsEditor.editValue)) break;
 
       DEBUG_SYSTEMF("[SettingsEditor] Saved %s = %d",
                     gSettingsEditor.currentEntry->jsonKey, gSettingsEditor.editValue);
@@ -845,7 +910,7 @@ bool openSettingsEditorForModule(const char* moduleName) {
   if (!moduleName) return false;
   
   size_t moduleCount = 0;
-  const SettingsModule** modules = getSettingsModules(moduleCount);
+  const SettingsModule** modules = editorModules(moduleCount);
   
   for (size_t i = 0; i < moduleCount; i++) {
     if (modules[i] && strcmp(modules[i]->name, moduleName) == 0) {
@@ -863,6 +928,8 @@ bool openSettingsEditorForModule(const char* moduleName) {
       gSettingsEditor.optionIndex = 0;
       gSettingsEditor.optionCount = 0;
       gSettingsEditor.optionScroll = 0;
+      gSettingsEditor.categoryScroll = 0;
+      gSettingsEditor.itemScroll = 0;
 
       DEBUG_SYSTEMF("[SettingsEditor] Opened module: %s", moduleName);
       return true;
@@ -901,11 +968,6 @@ void settingsEditorBack() {
 
 // Forward declaration for registerOLEDModes
 void registerOLEDModes(const OLEDModeEntry* modes, size_t count);
-
-// Force linker to include this file - must be called from oled_display.cpp
-void forceSettingsModeLink() {
-  DEBUG_SYSTEMF("[SettingsMode] forceSettingsModeLink() called - file is linked");
-}
 
 // Display handler for settings mode
 void displaySettingsMode() {
@@ -1024,11 +1086,9 @@ static bool getQuickRadioState() {
 static void toggleQuickRadio() {
   extern bool wifiRadioOn();
   if (wifiRadioOn()) {
-    setQuickStatus("Radio OFF");
-    executeOLEDCommand("radiopower off");
+    if (oledRunCommand("radiopower off")) setQuickStatus("Radio OFF");
   } else {
-    setQuickStatus("Radio ON");
-    executeOLEDCommand("radiopower on");
+    if (oledRunCommand("radiopower on")) setQuickStatus("Radio ON");
   }
 }
 #endif
@@ -1049,11 +1109,9 @@ static void toggleQuickWiFi() {
     return;
   }
   if (WiFi.isConnected()) {
-    setQuickStatus("WiFi OFF");
-    executeOLEDCommand("closewifi");
+    if (oledRunCommand("closewifi")) setQuickStatus("WiFi OFF");
   } else {
-    setQuickStatus("WiFi ON");
-    executeOLEDCommand("openwifi --best");
+    if (oledRunCommand("openwifi --best")) setQuickStatus("WiFi ON");
   }
 }
 #endif
@@ -1066,24 +1124,20 @@ static bool getQuickBluetoothState() {
 static void bluetoothToggleConfirmedQuick(void* userData) {
   (void)userData;
   if (isBleServerInitialized()) {
-    setQuickStatus("Bluetooth OFF");
-    executeOLEDCommand("closeble");
+    if (oledRunCommand("closeble")) setQuickStatus("Bluetooth OFF");
     return;
   }
 #if ENABLE_G2_GLASSES
   if (isG2ClientInitialized()) {
-    setQuickStatus("Bluetooth OFF");
-    executeOLEDCommand("g2deinit");
+    if (oledRunCommand("g2deinit")) setQuickStatus("Bluetooth OFF");
     return;
   }
   if (gSettings.bleMode == BLE_MODE_G2_CLIENT) {
-    setQuickStatus("Bluetooth ON");
-    executeOLEDCommand("openg2");
+    if (oledRunCommand("openg2")) setQuickStatus("Bluetooth ON");
     return;
   }
 #endif
-  setQuickStatus("Bluetooth ON");
-  executeOLEDCommand("openble");
+  if (oledRunCommand("openble")) setQuickStatus("Bluetooth ON");
 }
 static void toggleQuickBluetooth() {
   if (bleSubsystemActive()) {
@@ -1102,15 +1156,13 @@ static bool getQuickHTTPState() {
 static void httpToggleConfirmedQuick(void* userData) {
   (void)userData;
   if (server != nullptr) {
-    setQuickStatus("HTTP OFF");
-    executeOLEDCommand("closehttp");
+    if (oledRunCommand("closehttp")) setQuickStatus("HTTP OFF");
   } else {
     if (!WiFi.isConnected()) {
       setQuickStatus("Need WiFi first!");
       return;
     }
-    setQuickStatus("HTTP ON");
-    executeOLEDCommand("openhttp");
+    if (oledRunCommand("openhttp")) setQuickStatus("HTTP ON");
   }
 }
 static void toggleQuickHTTP() {

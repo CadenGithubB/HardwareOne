@@ -89,6 +89,7 @@ static void oledScrollRenderSimple(Display*, const OLEDScrollState* state) {
 static bool oledGuestBlocksMutate() { return guest; }
 static bool oledScrollHandleNav(OLEDScrollState*) { return navConsumed; }
 static void executeOLEDCommand(const String& line) { commands.push_back(line); }
+static bool oledRunCommand(const String& line) { commands.push_back(line); return true; }
 static void oledMenuBack() {}
 static void oledMarkDirty() {}
 static bool oledConfirmRequest(const char*, void*, void (*yes)(void*), void*, bool) {

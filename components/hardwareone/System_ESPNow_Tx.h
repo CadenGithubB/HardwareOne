@@ -64,9 +64,14 @@
 //   * V4 ACK tracking (sendStatus*) is unchanged. submit() is fire-and-
 //     forget at the wire level; per-message delivery confirmation still flows
 //     through the existing ACK state machine.
-//   * Fragmentation (v4_send_encrypted_chunked) stays at the caller for now.
-//     The per-fragment ACK-wait loop is hard to model as a single job; defer
-//     to a later phase once Phase 2 (sensor_bcast) validates the design.
+//   * Fragmentation (v4_send_encrypted_chunked) runs on the dispatcher only
+//     for short jobs. A submitSync() job from cmd_exec whose payload is over
+//     v4_single_frame_cap() for its destination (202 B direct, 130 B routed)
+//     runs the fragment loop on cmd_exec, so the long per-fragment ACK waits
+//     of a command result or FS listing never hold up other senders' queued
+//     jobs. Every other job is queued: fire-and-forget producers are capped at
+//     218 B and the other tasks' synchronous sends (FS RPC requests) at 144 B,
+//     so a queued job is at most 2 fragments.
 //
 // JOB KINDS
 // ---------
@@ -82,7 +87,6 @@
 //
 // Future kinds (not implemented — runJob has no case for these):
 //   JOB_FRAG_ACK     — tiny plaintext frag-ack (high priority).
-//   JOB_AEAD_CHUNKED — multi-frag AEAD with internal ACK-wait loop.
 //
 // COMPLETION SEMANTICS
 // --------------------
@@ -170,6 +174,18 @@ bool submit(const Job& job);
 // completion slot. The dispatcher will retain the lifecycle safely (no stale
 // task notification or UAF), and stop() will fail rather than free that slot.
 //
+// MULTI-FRAME: a JOB_AEAD_SMART payload over v4_single_frame_cap() for its
+// destination, submitted from cmd_exec, is not queued. submitSync runs
+// v4_send_payload_smart (and so the per-fragment ACK loop) on cmd_exec and
+// returns its real outcome. It blocks for the fragment loop's own budget
+// (fragCount × 3 × 200 ms plus back-off, ~13 s worst case for a 4 KB
+// CMD_RESP), not for timeoutMs, and runs the deep send path (AEAD seal + frame
+// buffer + capture line, the depth ESPNOW_TX_STACK_WORDS is sized for) on
+// cmd_exec's 8 KB stack. From any other task a multi-frame job is queued like
+// a single frame and the dispatcher runs its fragment loop; today that is only
+// the FS RPC requests from httpd and the OLED loop to a routed peer
+// (2 fragments). A longer send belongs on cmd_exec.
+//
 // Safe to call from any task except an ISR. Must NOT be called from the
 // espnow_tx dispatcher task itself (would self-deadlock).
 bool submitSync(Job& job, uint32_t timeoutMs);
@@ -197,6 +213,10 @@ bool sendAead(const uint8_t mac[6], uint8_t type, uint16_t flags,
 // Blocking AEAD send. Returns true iff the dispatcher reported the wire send
 // succeeded within timeoutMs. Worst-case blocking is ~2 × timeoutMs (queue
 // enqueue + completion wait both honor the timeout).
+//
+// From cmd_exec, a payload over one frame (see MULTI-FRAME at submitSync) is
+// sent on cmd_exec instead: it returns true iff every fragment was ACKed, and
+// it blocks for the fragment loop's budget rather than timeoutMs.
 //
 // SAFE FROM cmd_exec and other non-RX tasks. MUST NOT be called from
 // espnow_task (stalls RX drainer) or from the espnow_tx dispatcher itself

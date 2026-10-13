@@ -214,7 +214,12 @@ static bool canRead(const String&, int) { return allowed; }
 static constexpr size_t G2_TEXT_DEFAULT_COLS = 48;
 static constexpr int G2_GEOM_LARGE = 0;
 // INSERT_PRODUCTION_G2_STATE_HERE
-static void buildChooserPath(char* out, size_t capacity) { snprintf(out, capacity, "/sd/test.json"); }
+// FileManager's selected-entry path; false when it cannot be resolved or fit.
+static bool chooserPathOk = true;
+static bool buildChooserPath(char* out, size_t capacity) {
+  snprintf(out, capacity, "%s", chooserPathOk ? "/sd/test.json" : "");
+  return chooserPathOk;
+}
 static void exitTextViewBackToFiles() {}
 static bool g2ShowTextPage(const char*, int, void(*)(), void*) { ++blockedPages; return true; }
 static bool filesRenderTextPage() {
@@ -230,6 +235,7 @@ static void reset() {
   failExternal = failInternal = failAfterRead = false;
   haveExternal = haveKey = fileExists = allowed = true;
   failStringReserve = false;
+  chooserPathOk = true;
   inputWasExternal = false;
   externalCalls = internalCalls = inputCalls = jsonCalls = 0;
   opens = reads = renders = blockedPages = openCalls = keyCalls = 0;
@@ -411,6 +417,11 @@ static void testViewer() {
   reset();
   fileExists = false;
   check(!showTextFileViaWidget(false) && reads == 0 && renders == 0, "missing file has no partial display");
+  reset();
+  chooserPathOk = false;
+  check(!showTextFileViaWidget(false) && opens == 0 && reads == 0 && renders == 0 &&
+            blockedPages == 0,
+        "unresolved chooser path opens nothing");
   reset();
   fileContents.clear();
   check(showTextFileViaWidget(false) && gFilesPager.pageCount == 1 && gFilesTextPageOff[1] == 0,

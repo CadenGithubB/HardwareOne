@@ -629,7 +629,9 @@ R1HealthHistoryStoreError loadDayAtPath(
     R1HealthHistoryDay& out) {
   r1HealthHistoryDayClear(out);
   File file = VFS::openGuarded(path, "r", auth);
-  if (!file) return R1_HISTORY_STORE_NOT_FOUND;
+  // Callers establish that the file exists. Failing to open it (no free
+  // descriptor, no heap for the file cache) is a read failure, not absence.
+  if (!file) return R1_HISTORY_STORE_READ_FAILED;
   if (file.size() > R1_HEALTH_HISTORY_MAX_FILE_BYTES) {
     file.close();
     return R1_HISTORY_STORE_READ_FAILED;
@@ -674,6 +676,27 @@ R1HealthHistoryStoreError loadDayAtPath(
   if (!historyFetchTerminal(out.fetchState)) return R1_HISTORY_STORE_NOT_TERMINAL;
   if (contentHash(out) != state.storedHash) return R1_HISTORY_STORE_READ_FAILED;
   return R1_HISTORY_STORE_OK;
+}
+
+// A stored day exists when its primary does, or when an interrupted publish
+// left only the backup, which is promoted here (the repair
+// recoverInterruptedSwaps makes). NOT_FOUND means neither exists, so the
+// caller may start an empty day; any other failure must not read as absence,
+// because committing an empty day would replace the stored one.
+R1HealthHistoryStoreError loadExactDay(
+    const char* path, const AuthContext& auth, const char* peerId,
+    uint32_t dayStart, int16_t timezoneMinutes, R1HealthHistoryDay& out) {
+  const String primary(path);
+  {
+    FsLockGuard guard("r1.history.load");
+    if (!VFS::existsGuarded(primary, auth)) {
+      const String backup = primary + ".bak";
+      if (!VFS::existsGuarded(backup, auth)) return R1_HISTORY_STORE_NOT_FOUND;
+      if (!VFS::renameGuarded(backup, primary, auth))
+        return R1_HISTORY_STORE_READ_FAILED;
+    }
+  }
+  return loadDayAtPath(path, auth, peerId, dayStart, timezoneMinutes, -1, out);
 }
 
 }  // namespace
@@ -929,8 +952,8 @@ R1HealthHistoryStoreError r1HealthHistoryStoreLoadExact(
   {
     StoreIoLock io;
     if (io.locked()) {
-      loadError = loadDayAtPath(pathBuf, auth, peerId, dayStart,
-                                timezoneMinutes, -1, out);
+      loadError = loadExactDay(pathBuf, auth, peerId, dayStart,
+                               timezoneMinutes, out);
     }
   }
   if (loadError != R1_HISTORY_STORE_OK) {

@@ -4,6 +4,8 @@
 The OLED keyboard, Wi-Fi picker, first-page buttons and CLI display tick are
 shipping functions. Rendering, input delivery, Wi-Fi scans and the CLI exit
 boundary are controlled; timeout and cancellation state use production code.
+A password prompt opens the keyboard masked and never rewrites the shared text
+buffer around its render. `--component` points the suite at another tree.
 """
 from __future__ import annotations
 
@@ -21,13 +23,13 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
 
-def generate() -> str:
-    setup = (COMPONENT / "System_SetupWizard.cpp").read_text()
-    header = (COMPONENT / "System_SetupWizard.h").read_text()
-    oled = (COMPONENT / "OLED_SetupWizard.cpp").read_text()
-    first = (COMPONENT / "OLED_FirstTimeSetup.cpp").read_text()
-    mode = (COMPONENT / "System_SetupWizardMode.cpp").read_text()
-    utils = (COMPONENT / "System_Utils.cpp").read_text()
+def generate(component: Path = COMPONENT) -> str:
+    setup = (component / "System_SetupWizard.cpp").read_text()
+    header = (component / "System_SetupWizard.h").read_text()
+    oled = (component / "OLED_SetupWizard.cpp").read_text()
+    first = (component / "OLED_FirstTimeSetup.cpp").read_text()
+    mode = (component / "System_SetupWizardMode.cpp").read_text()
+    utils = (component / "System_Utils.cpp").read_text()
     types = "\n\n".join([
         extract_block(header, "enum SetupWizardPage") + ";",
         extract_block(header, "enum WizardMenuItemType") + ";",
@@ -35,8 +37,8 @@ def generate() -> str:
         extract_block(header, "struct SetupWizardResult") + ";",
         extract_block(mode, "enum class WizardSubMode") + ";",
         extract_block(mode, "static struct") + " sWizard;",
-        "\n".join(re.findall(r"(?m)^#define MSG_ROUTE_\w+ .*$", (COMPONENT / "System_Debug.h").read_text())),
-        extract_block((COMPONENT / "OLED_SetupWizard.h").read_text(), "struct JoystickNav") + ";",
+        "\n".join(re.findall(r"(?m)^#define MSG_ROUTE_\w+ .*$", (component / "System_Debug.h").read_text())),
+        extract_block((component / "OLED_SetupWizard.h").read_text(), "struct JoystickNav") + ";",
     ])
     state = "\n".join(re.search(r"(?m)^static volatile[^\n]*\b" + name + r"\b[^\n]*;", utils)[0]
                       for name in ("sSerialWaitTimeoutMs", "sSerialWaitLastActivityMs", "sWizardCancelRequested"))
@@ -72,12 +74,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
+    parser.add_argument("--component", type=Path, default=COMPONENT,
+                        help="production component directory (e.g. a base tree)")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     with tempfile.TemporaryDirectory(prefix="hw1-setup-display-cancel-") as temporary:
         directory = Path(temporary)
         unit = directory / "display_cancel.cpp"
-        unit.write_text(generate())
+        unit.write_text(generate(args.component.resolve()))
         for wifi in (0, 1):
             for gpio in (0, 1):
                 output = directory / f"display-cancel-wifi{wifi}-gpio{gpio}"

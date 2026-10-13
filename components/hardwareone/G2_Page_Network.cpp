@@ -65,16 +65,123 @@ static int gWifiSavedSel = -1;
 static WifiNetworkSnapshot gWifiSavedSnapshot;
 #endif
 
+// Rows of the Network action menu the lens shows now (WiFi, ESP-NOW, HTTP(S),
+// Bluetooth, G2, R1). Their layouts and toggle labels follow live state (radio,
+// link, ESP-NOW, HTTP server, BLE role, ring, settings), which web, CLI, an
+// automation or a link event can change between the render and the tap. So the
+// renderer binds every row to its action, and for a toggle to the state it
+// switches to as labelled, and the tap handler dispatches only from that
+// binding instead of rebuilding the layout from live state.
+struct NetRowBinding {
+  uint8_t action;  // the submenu's own row-action enum
+  bool    on;      // toggles: the state the tap switches to (true = on/open/start)
+};
+static constexpr size_t kNetRowMax = 10;
+static NetRowBinding gNetRows[kNetRowMax] = {};
+static volatile uint8_t gNetRowCount = 0;
+static volatile uint8_t gNetRowSub = NET_SUB_MAIN;  // submenu that bound gNetRows
+
 // Single mutator so every gNetSub transition bumps the menu generation —
 // in-flight hijack-command callbacks compare cookie.menuGen against the
 // live value and drop redraws when the user has navigated away. See
 // G2_HijackCmd.h staleness contract. Initializer above intentionally
 // bypasses this helper (no transition, no in-flight cmds at boot).
+// A transition also drops the bound rows: they belong to the previous view, and
+// the new one (or a view without bound rows) may still be refused by the lens.
 static inline void setNetSub(NetworkSubMode m) {
   if (gNetSub == m) return;
   gNetSub = m;
+  __atomic_store_n(&gNetRowCount, 0, __ATOMIC_RELEASE);
   g2BumpMenuGen();
 }
+
+// Labels plus bindings of one menu, collected while it is rendered.
+struct NetRowList {
+  const char*   items[kNetRowMax];
+  NetRowBinding rows[kNetRowMax];
+  size_t        n = 0;
+  void add(const char* label, uint8_t action, bool on = false) {
+    if (n >= kNetRowMax) return;
+    items[n] = label;
+    rows[n] = NetRowBinding{action, on};
+    ++n;
+  }
+};
+
+// Draws `list` and binds its rows to `sub` once the lens accepted the page.
+// g2ShowListPage has claimed page-swap admission before returning true, so tap
+// dispatch is fenced while the bindings are published. A refused render binds
+// nothing: the rows still on the lens keep theirs.
+static bool showNetRows(NetworkSubMode sub, const NetRowList& list) {
+  if (!g2ShowListPage(list.items, list.n)) return false;
+  for (size_t i = 0; i < list.n; ++i) {
+    __atomic_store_n(&gNetRows[i].action, list.rows[i].action, __ATOMIC_RELAXED);
+    __atomic_store_n(&gNetRows[i].on, list.rows[i].on, __ATOMIC_RELAXED);
+  }
+  __atomic_store_n(&gNetRowSub, (uint8_t)sub, __ATOMIC_RELAXED);
+  __atomic_store_n(&gNetRowCount, (uint8_t)list.n, __ATOMIC_RELEASE);
+  return true;
+}
+
+// The binding of row `idx` as `sub` drew it. False when the bound rows belong to
+// another view (or none are bound) or the row does not exist: the tap is stale.
+static bool netRowAt(NetworkSubMode sub, uint32_t idx, NetRowBinding* out) {
+  const uint8_t count = __atomic_load_n(&gNetRowCount, __ATOMIC_ACQUIRE);
+  const uint8_t owner = __atomic_load_n(&gNetRowSub, __ATOMIC_RELAXED);
+  if (owner != (uint8_t)sub || idx >= count) {
+    DEBUG_G2F("[G2] Network sub=%u: stale/unknown row idx=%u (bound sub=%u rows=%u)",
+              (unsigned)sub, (unsigned)idx, (unsigned)owner, (unsigned)count);
+    return false;
+  }
+  out->action = __atomic_load_n(&gNetRows[idx].action, __ATOMIC_RELAXED);
+  out->on     = __atomic_load_n(&gNetRows[idx].on, __ATOMIC_RELAXED);
+  return true;
+}
+
+// Row actions per submenu (WiFi's WifiMenuAction sits with showWiFiMenu).
+// `on` in the binding gives a toggle's direction.
+enum EspNowRowAction : uint8_t {
+  ESPNOW_ROW_BACK = 0,    // -> WiFi submenu
+  ESPNOW_ROW_INFO,        // Mode / Peers / not compiled: no action
+  ESPNOW_ROW_POWER,       // on: openespnow (name keyboard first if unset); off: closeespnow
+  ESPNOW_ROW_DEVICES,     // paired-device list
+  ESPNOW_ROW_NAME,        // on-glasses keyboard for the device name
+  ESPNOW_ROW_AUTO_START,  // espnowenabled 1|0
+};
+enum HttpRowAction : uint8_t {
+  HTTP_ROW_BACK = 0,      // -> WiFi submenu
+  HTTP_ROW_INFO,          // URL / not compiled: no action
+  HTTP_ROW_SERVER,        // on: openhttp; off: closehttp
+  HTTP_ROW_HTTPS,         // httpsEnabled 1|0 (reboot to apply)
+  HTTP_ROW_AUTO_START,    // httpAutoStart 1|0
+};
+enum BluetoothRowAction : uint8_t {
+  BT_ROW_BACK = 0,        // -> Network chooser
+  BT_ROW_INFO,            // Conn: no action
+  BT_ROW_CLIENT_POWER,    // on: openg2; off: g2deinit
+  BT_ROW_SERVER_POWER,    // on: openble; off: closeble
+  BT_ROW_MODE,            // on: blemode client; off: blemode server
+  BT_ROW_G2,              // G2 >> submenu
+  BT_ROW_R1,              // R1 >> submenu
+  BT_ROW_TOGGLE_ADV,      // bleadv toggle
+  BT_ROW_DISCONNECT,      // bledisconnect
+  BT_ROW_AUTO_START,      // bleautostart on|off
+};
+enum G2RowAction : uint8_t {
+  G2_ROW_BACK = 0,        // -> Bluetooth submenu
+  G2_ROW_INFO,            // Conn / BLE stopped: no action
+  G2_ROW_AUTO_RECONNECT,  // bleautoreconnect g2-glasses on|off
+  G2_ROW_RECONNECT,       // openg2 saved
+  G2_ROW_DISCONNECT,      // closeg2
+};
+enum R1RowAction : uint8_t {
+  R1_ROW_BACK = 0,        // -> Bluetooth submenu
+  R1_ROW_INFO,            // Ring / BLE stopped: no action
+  R1_ROW_AUTO_RECONNECT,  // bleautoreconnect r1-ring on|off
+  R1_ROW_CONNECT,         // ringconnect, with the "connecting..." overlay
+  R1_ROW_RECONNECT,       // ringconnect reconnect
+  R1_ROW_DISCONNECT,      // ringdisconnect
+};
 
 // Cache of the most recent scan results so tap-to-connect knows which
 // SSID was at index N. Populated when the user taps "Scan Networks".
@@ -105,8 +212,8 @@ static char     gScanFailure[32] = {};
 // While `millis() < gWifiPendingDeadlineMs`, showWiFiMenu() renders
 // the toggle row as "WiFi: Pending..." regardless of the live
 // WiFi.isConnected() value, so the user gets immediate visual feedback.
-// A short watchdog task polls WiFi.isConnected() every 500 ms and
-// re-renders the menu the moment the state flips (or when the deadline
+// A short watchdog task polls WiFi.isConnected() every 500 ms and queues a
+// redraw of the menu the moment the state flips (or when the deadline
 // expires, whichever comes first). Single-shot — re-tapping the toggle
 // while pending arms a fresh deadline + watchdog.
 static volatile uint32_t gWifiPendingDeadlineMs = 0;
@@ -157,6 +264,26 @@ static bool claimWifiPendingWatchdog() {
 static volatile uint32_t gRingPendingDeadlineMs = 0;
 static volatile bool     gRingPendingTaskActive = false;
 static constexpr uint32_t RING_PENDING_HARD_TIMEOUT_MS = 230000;
+
+// Menu generation of the last view drawn with the WiFi "Pending..." or the R1
+// "connecting..." overlay. showWiFiMenu / showBluetoothR1Menu publish it, so it
+// is the view the tap drew before arming the watchdog, or the same menu drawn
+// again after the user came back to it while still pending.
+static uint32_t gWifiPendingViewGen = 0;
+static uint32_t gRingPendingViewGen = 0;
+
+// The pending watchdogs run on their own tasks and never draw. When their state
+// changes they queue a redraw of the view that last showed the overlay; the lens
+// applier drops it if any navigation since then (another Network view, another
+// hijack page such as a held note, a lens re-entry) bumped the menu generation.
+static void queuePendingViewRedraw(uint32_t* viewGen, NetworkSubMode sub,
+                                   void (*render)(), const char* tag) {
+  G2CmdCookie cookie{};
+  cookie.menuGen      = __atomic_load_n(viewGen, __ATOMIC_ACQUIRE);
+  cookie.targetPage   = G2_HIJACK_PAGE_NETWORK;
+  cookie.targetNetSub = (uint8_t)sub;
+  (void)g2EnqueueRedraw(cookie, render, tag);
+}
 
 // -----------------------------------------------------------------------------
 // Info text (used by the CLI direct-invocation path)
@@ -223,13 +350,6 @@ void g2BuildNetworkInfo(char* out, size_t cap) {
   out[cap - 1] = '\0';
 }
 
-bool g2ShowNetworkPage() {
-  char buf[400];
-  g2BuildNetworkInfo(buf, sizeof(buf));
-  DEBUG_G2F("[G2] Network page (%u B):\n%s", (unsigned)strlen(buf), buf);
-  return g2ShowText(buf);
-}
-
 // -----------------------------------------------------------------------------
 // Top-level chooser (WiFi / ESP-NOW / Bluetooth)
 // -----------------------------------------------------------------------------
@@ -261,24 +381,23 @@ void g2ShowNetworkMenu() {
 // The WiFi menu has a compact radio-off layout, so visible row indices are not
 // stable. Keep the action bound to the exact accepted layout instead of
 // reconstructing it from live WiFi state when a later tap arrives (the radio
-// may have changed in between).
+// may have changed in between). Bound through the shared row table above.
 enum WifiMenuAction : uint8_t {
   WIFI_MENU_BACK = 0,
-  WIFI_MENU_TOGGLE_RADIO,
-  WIFI_MENU_TOGGLE_CONNECTION,
+  WIFI_MENU_TOGGLE_RADIO,       // on: radiopower on; off: radiopower off
+  WIFI_MENU_TOGGLE_CONNECTION,  // on: openwifi (Pending overlay); off: closewifi
   WIFI_MENU_DISCONNECT,
   WIFI_MENU_STATUS,
   WIFI_MENU_SCAN,
   WIFI_MENU_SAVED,
-  WIFI_MENU_AUTO_START,
+  WIFI_MENU_AUTO_START,         // wifiautostart 1|0
   WIFI_MENU_HTTP,
   WIFI_MENU_ESPNOW,
 };
-static WifiMenuAction gWifiMenuActionByRow[10] = {};
-static volatile uint8_t gWifiMenuRowCount = 0;
 
 static void showWiFiMenu() {
   setNetSub(NET_SUB_WIFI);
+  const uint32_t viewGen = g2CurrentMenuGen();  // this view, before drawing
   static char radioLine[24];  // "Radio: ON/OFF" — whole-radio power (airplane mode)
   static char wifiLine[64];
   static char autoLine[32];   // "Auto Start: ON/OFF" — boot-time auto-connect
@@ -336,18 +455,12 @@ static void showWiFiMenu() {
   snprintf(espnowLine, sizeof(espnowLine), "ESP-NOW: n/a");
 #endif
 
-  const char* items[10];
-  WifiMenuAction actions[10];
-  size_t n = 0;
-  auto addItem = [&](const char* label, WifiMenuAction action) {
-    items[n] = label;
-    actions[n] = action;
-    ++n;
-  };
-
-  addItem("<- Connect", WIFI_MENU_BACK);
-  addItem(radioLine, WIFI_MENU_TOGGLE_RADIO);
-  addItem(wifiLine, WIFI_MENU_TOGGLE_CONNECTION);
+  NetRowList rows;
+  rows.add("<- Connect", WIFI_MENU_BACK);
+  rows.add(radioLine, WIFI_MENU_TOGGLE_RADIO, /*on=*/!radioOn);
+  // A live link reads as the SSID and the tap disconnects; Pending, Disabled
+  // and Disconnected all read as "connect" (Pending re-arms the attempt).
+  rows.add(wifiLine, WIFI_MENU_TOGGLE_CONNECTION, /*on=*/!connected);
 
   // With the whole radio down neither action is useful. The WiFi row above is
   // the deliberate way back in: it runs openwifi, after which the refreshed
@@ -357,28 +470,21 @@ static void showWiFiMenu() {
   const bool showDisconnect = connected || pending ||
                               (gSettings.wifiEnabled && radioOn);
   if (showDisconnect)
-    addItem("Disconnect", WIFI_MENU_DISCONNECT);
+    rows.add("Disconnect", WIFI_MENU_DISCONNECT);
 
-  addItem("Status", WIFI_MENU_STATUS);
+  rows.add("Status", WIFI_MENU_STATUS);
   if (gSettings.wifiEnabled && (radioOn || connected || pending))
-    addItem("Scan Networks", WIFI_MENU_SCAN);
+    rows.add("Scan Networks", WIFI_MENU_SCAN);
 
-  addItem("List Saved", WIFI_MENU_SAVED);
-  addItem(autoLine, WIFI_MENU_AUTO_START);
-  addItem(httpLine, WIFI_MENU_HTTP);
-  addItem(espnowLine, WIFI_MENU_ESPNOW);
+  rows.add("List Saved", WIFI_MENU_SAVED);
+  rows.add(autoLine, WIFI_MENU_AUTO_START, /*on=*/!gSettings.wifiAutoStart);
+  rows.add(httpLine, WIFI_MENU_HTTP);
+  rows.add(espnowLine, WIFI_MENU_ESPNOW);
 
-  if (g2ShowListPage(items, n)) {
-    // g2ShowListPage has claimed page-swap admission before returning true, so
-    // tap dispatch is fenced while this map is published.
-    for (size_t i = 0; i < n; ++i) {
-      __atomic_store_n(&gWifiMenuActionByRow[i], actions[i],
-                       __ATOMIC_RELAXED);
-    }
-    __atomic_store_n(&gWifiMenuRowCount, (uint8_t)n, __ATOMIC_RELEASE);
-  }
+  showNetRows(NET_SUB_WIFI, rows);
+  if (pending) __atomic_store_n(&gWifiPendingViewGen, viewGen, __ATOMIC_RELEASE);
   DEBUG_G2F("[G2] WiFi submenu shown (radio=%d connected=%d rows=%u auto=%d)",
-            radioOn ? 1 : 0, connected ? 1 : 0, (unsigned)n,
+            radioOn ? 1 : 0, connected ? 1 : 0, (unsigned)rows.n,
             gSettings.wifiAutoStart ? 1 : 0);
 }
 
@@ -442,16 +548,19 @@ static void showWiFiStatusPage() {
 
 // Fallback while the coordinated WiFi scan runs: back-pane list when the Even-AI
 // front card could not be opened (e.g. CTRL ENTER error 7). Primary path
-// is g2ShowEvenAIReplyNoAsk("Scanning networks...") in runNetworkScanFlow.
-static void showWiFiScanningPlaceholder() {
+// is g2ShowEvenAIReplyNoAsk("Scanning networks...") in runNetworkScanFlow,
+// which empties the scan cache before queueing this view. Returns the menu
+// generation of the scan view it draws.
+static uint32_t showWiFiScanningPlaceholder() {
   setNetSub(NET_SUB_WIFI_SCAN);
-  gScanCacheCount = 0;
+  const uint32_t viewGen = g2CurrentMenuGen();
   static const char* rows[] = {
       "<- WiFi",
       "Scanning… (wait)",
   };
   g2ShowListPage(rows, sizeof(rows) / sizeof(rows[0]));
   DEBUG_G2F("[G2] WiFi: scan placeholder shown (back pane)");
+  return viewGen;
 }
 
 // Render scan results as a tappable list. Items:
@@ -557,6 +666,8 @@ static void showEspNowMenu() {
   static char modeLine[40];
   static char devsLine[32];
   static char autoLine[32];   // "Auto Start: ON/OFF" — boot-time auto-init
+  NetRowList rows;
+  rows.add("<- WiFi", ESPNOW_ROW_BACK);  // WiFi submenu is ESP-NOW's parent
 
 #if ENABLE_ESPNOW
   static char nameLine[48];
@@ -572,33 +683,22 @@ static void showEspNowMenu() {
     snprintf(modeLine, sizeof(modeLine), "Mode: %s", getEspNowModeString());
     snprintf(devsLine, sizeof(devsLine), "Peers: %d",
              gEspNow->deviceCount);
-    const char* items[] = {
-      "<- WiFi",         // 0 — back to WiFi submenu (parent of ESP-NOW now)
-      stateLine,         // 1 (toggle)
-      modeLine,          // 2 (info)
-      devsLine,          // 3 (info)
-      "View Devices",    // 4
-      nameLine,          // 5 (tap → on-glasses text entry)
-      autoLine,          // 6 (toggle espnowEnabled — boot-time)
-    };
-    g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+    rows.add(stateLine, ESPNOW_ROW_POWER, /*on=*/false);
+    rows.add(modeLine, ESPNOW_ROW_INFO);
+    rows.add(devsLine, ESPNOW_ROW_INFO);
   } else {
-    snprintf(stateLine, sizeof(stateLine), "ESP-NOW: OFF");
     // Only show toggle + View Devices + name editor when off; no point
     // listing Mode/Peers lines for a subsystem that isn't running.
-    const char* items[] = {
-      "<- WiFi",         // 0 — back to WiFi submenu (parent of ESP-NOW now)
-      stateLine,         // 1 (toggle — tap to start)
-      "View Devices",    // 2
-      nameLine,          // 3 (tap → on-glasses text entry)
-      autoLine,          // 4 (toggle espnowEnabled — boot-time)
-    };
-    g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+    snprintf(stateLine, sizeof(stateLine), "ESP-NOW: OFF");
+    rows.add(stateLine, ESPNOW_ROW_POWER, /*on=*/true);
   }
+  rows.add("View Devices", ESPNOW_ROW_DEVICES);
+  rows.add(nameLine, ESPNOW_ROW_NAME);  // tap → on-glasses text entry
+  rows.add(autoLine, ESPNOW_ROW_AUTO_START, /*on=*/!gSettings.espnowEnabled);
 #else
-  static const char* na[] = { "<- WiFi", "ESP-NOW: not compiled" };
-  g2ShowListPage(na, 2);
+  rows.add("ESP-NOW: not compiled", ESPNOW_ROW_INFO);
 #endif
+  showNetRows(NET_SUB_ESPNOW, rows);
   DEBUG_G2F("[G2] ESP-NOW submenu shown (auto=%d)",
             gSettings.espnowEnabled ? 1 : 0);
 }
@@ -672,26 +772,19 @@ static void showBluetoothG2Menu() {
   } else {
     snprintf(connLine, sizeof(connLine), "BLE: stopped");
   }
+  const bool autoReconnect = blePeerAutoReconnectEnabled(BLE_PEER_G2_GLASSES);
   snprintf(autoReconnLine, sizeof(autoReconnLine), "G2 AutoReconnect: %s",
-           blePeerAutoReconnectEnabled(BLE_PEER_G2_GLASSES) ? "ON" : "OFF");
+           autoReconnect ? "ON" : "OFF");
 
+  NetRowList rows;
+  rows.add("<- Bluetooth", G2_ROW_BACK);
+  rows.add(connLine, G2_ROW_INFO);  // "Conn: yes/no", or "BLE: stopped"
+  rows.add(autoReconnLine, G2_ROW_AUTO_RECONNECT, /*on=*/!autoReconnect);  // boot auto-reconnect
   if (active) {
-    const char* items[] = {
-      "<- Bluetooth",   // 0
-      connLine,         // 1 (info)
-      autoReconnLine,     // 2 (toggle boot auto-reconnect)
-      "Reconnect G2",   // 3 (saved MACs — same as boot path)
-      "Disconnect G2",  // 4
-    };
-    g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
-  } else {
-    const char* items[] = {
-      "<- Bluetooth",   // 0
-      connLine,         // 1 (info — "BLE: stopped")
-      autoReconnLine,     // 2 (toggle boot auto-reconnect)
-    };
-    g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+    rows.add("Reconnect G2", G2_ROW_RECONNECT);   // saved MACs — same as boot path
+    rows.add("Disconnect G2", G2_ROW_DISCONNECT);
   }
+  showNetRows(NET_SUB_BLUETOOTH_G2, rows);
   DEBUG_G2F("[G2] Bluetooth → G2 submenu shown (active=%d)", active ? 1 : 0);
 }
 
@@ -701,6 +794,7 @@ static void showBluetoothG2Menu() {
 // menu R1 >> drill-in.
 static void showBluetoothR1Menu() {
   setNetSub(NET_SUB_BLUETOOTH_R1);
+  const uint32_t viewGen = g2CurrentMenuGen();  // this view, before drawing
   static char connLine[40];
   static char autoReconnLine[44];
 
@@ -716,36 +810,24 @@ static void showBluetoothR1Menu() {
   } else {
     snprintf(connLine, sizeof(connLine), "BLE: stopped");
   }
+  const bool autoReconnect = blePeerAutoReconnectEnabled(BLE_PEER_R1_RING);
   snprintf(autoReconnLine, sizeof(autoReconnLine), "R1 AutoReconnect: %s",
-           blePeerAutoReconnectEnabled(BLE_PEER_R1_RING) ? "ON" : "OFF");
+           autoReconnect ? "ON" : "OFF");
 
+  NetRowList rows;
+  rows.add("<- Bluetooth", R1_ROW_BACK);
+  rows.add(connLine, R1_ROW_INFO);  // "Ring: ...", or "BLE: stopped"
+  rows.add(autoReconnLine, R1_ROW_AUTO_RECONNECT, /*on=*/!autoReconnect);  // boot auto-reconnect
   if (active) {
     if (ringUp) {
-      const char* items[] = {
-        "<- Bluetooth",    // 0
-        connLine,          // 1 (info)
-        autoReconnLine,      // 2 (toggle boot auto-reconnect)
-        "Reconnect Ring",  // 3
-        "Disconnect Ring", // 4
-      };
-      g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+      rows.add("Reconnect Ring", R1_ROW_RECONNECT);
+      rows.add("Disconnect Ring", R1_ROW_DISCONNECT);
     } else {
-      const char* items[] = {
-        "<- Bluetooth",    // 0
-        connLine,          // 1 (info)
-        autoReconnLine,      // 2 (toggle boot auto-reconnect)
-        "Connect Ring",    // 3
-      };
-      g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+      rows.add("Connect Ring", R1_ROW_CONNECT);
     }
-  } else {
-    const char* items[] = {
-      "<- Bluetooth",      // 0
-      connLine,            // 1 (info — "BLE: stopped")
-      autoReconnLine,        // 2 (toggle boot auto-reconnect)
-    };
-    g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   }
+  showNetRows(NET_SUB_BLUETOOTH_R1, rows);
+  if (pending) __atomic_store_n(&gRingPendingViewGen, viewGen, __ATOMIC_RELEASE);
   DEBUG_G2F("[G2] Bluetooth → R1 submenu shown (active=%d ringUp=%d)",
             active ? 1 : 0, ringUp ? 1 : 0);
 }
@@ -786,58 +868,34 @@ static void showBluetoothMenu() {
              bleSubsystemStateString());
     snprintf(connLine, sizeof(connLine), "Conn: %s",
              connected ? "yes" : "no");
-    if (isClient) {
-      // Client mode: G2 + R1 controls each live under their own
-      // submenu so the parent stays at BLE / Mode / G2 >> / R1 >> /
-      // Auto Start. Ring action rows (Connect/Reconnect/Disconnect
-      // Ring) moved into the R1 submenu 2026-05-09 alongside this
-      // restructure.
-      const char* items[] = {
-        "<- Connect",      // 0
-        stateLine,         // 1 (toggle = stop client)
-        modeLine,          // 2 (toggle — server↔client)
-        "G2 >>",           // 3
-        "R1 >>",           // 4
-        autoLine,          // 5 (toggle bleAutoStart)
-      };
-      g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
-    } else {
-      // Server mode (legacy layout, plus Mode toggle slotted in).
-      const char* items[] = {
-        "<- Connect",      // 0
-        stateLine,         // 1 (toggle = stop server)
-        modeLine,          // 2 (toggle — server↔client)
-        connLine,          // 3 (info)
-        "Toggle Adv",      // 4
-        "Disconnect",      // 5
-        autoLine,          // 6 (toggle bleAutoStart)
-      };
-      g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
-    }
   } else {
     // Subsystem fully inactive — Mode toggle still useful so the user
     // can pre-select what the BLE-on toggle starts.
     snprintf(stateLine, sizeof(stateLine), "BLE: OFF");
-    if (isClient) {
-      const char* items[] = {
-        "<- Connect",      // 0
-        stateLine,         // 1 (toggle — starts G2 client)
-        modeLine,          // 2 (toggle — server↔client)
-        "G2 >>",           // 3 (AutoReconnect + reconnect when BLE up)
-        "R1 >>",           // 4 (R1 AutoReconnect + connect when BLE up)
-        autoLine,          // 5 (toggle bleAutoStart)
-      };
-      g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
-    } else {
-      const char* items[] = {
-        "<- Connect",      // 0
-        stateLine,         // 1 (toggle — starts server)
-        modeLine,          // 2 (toggle — server↔client)
-        autoLine,          // 3 (toggle bleAutoStart)
-      };
-      g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
-    }
   }
+
+  NetRowList rows;
+  rows.add("<- Connect", BT_ROW_BACK);
+  // The BLE row starts or stops the role the menu shows.
+  rows.add(stateLine, isClient ? BT_ROW_CLIENT_POWER : BT_ROW_SERVER_POWER,
+           /*on=*/!active);
+  rows.add(modeLine, BT_ROW_MODE, /*on (to client)=*/!isClient);
+  if (isClient) {
+    // Client mode: G2 + R1 controls each live under their own
+    // submenu so the parent stays at BLE / Mode / G2 >> / R1 >> /
+    // Auto Start. Ring action rows (Connect/Reconnect/Disconnect
+    // Ring) moved into the R1 submenu 2026-05-09 alongside this
+    // restructure. With BLE off they still hold the AutoReconnect rows.
+    rows.add("G2 >>", BT_ROW_G2);
+    rows.add("R1 >>", BT_ROW_R1);
+  } else if (active) {
+    // Server mode (legacy layout, plus Mode toggle slotted in).
+    rows.add(connLine, BT_ROW_INFO);
+    rows.add("Toggle Adv", BT_ROW_TOGGLE_ADV);
+    rows.add("Disconnect", BT_ROW_DISCONNECT);
+  }
+  rows.add(autoLine, BT_ROW_AUTO_START, /*on=*/!gSettings.bleAutoStart);
+  showNetRows(NET_SUB_BLUETOOTH, rows);
   DEBUG_G2F("[G2] Bluetooth submenu shown (server=%d client=%d conn=%d mode=%s)",
             serverUp ? 1 : 0, clientUp ? 1 : 0, connected ? 1 : 0,
             isClient ? "client" : "server");
@@ -869,6 +927,13 @@ static void showBluetoothMenu() {
 // heap asserts (tlsf double-free) in field logs.
 static portMUX_TYPE s_netScanMux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_netScanRunning = false;
+// The scan flow never draws from its task. It reports into one Network view:
+// the WiFi menu it was started from, then the back-pane placeholder once the
+// lens applier has drawn that. Its redraws are fenced on this view's menu
+// generation, so a scan that ends after the user left draws nothing.
+// Both fields are guarded by s_netScanMux.
+static G2CmdCookie s_netScanView = {};
+static bool s_netScanResultsReady = false;
 
 static void netScanMarkFinished(void) {
   portENTER_CRITICAL(&s_netScanMux);
@@ -887,6 +952,24 @@ static bool cacheG2ScanRecord(const WifiScanRecord& record,
   return gScanCacheCount < 8;
 }
 
+// Lens-applier renderer for the placeholder, queued fenced on the WiFi menu
+// view. Drawing it moves Network to the scan sub-page (a new menu generation),
+// so the flow reports into that view from here on. If the worker already
+// published its results, the redraw it queued against the WiFi menu view is
+// stale now and will be dropped, so this queues the results redraw on the scan
+// view instead. It cannot draw them in this lens job: the placeholder's page
+// swap is still queued behind it, so a second list render here is refused.
+static void showScanPlaceholderForFlow() {
+  const uint32_t viewGen = showWiFiScanningPlaceholder();
+  portENTER_CRITICAL(&s_netScanMux);
+  s_netScanView.menuGen      = viewGen;
+  s_netScanView.targetNetSub = (uint8_t)NET_SUB_WIFI_SCAN;
+  const bool resultsReady = s_netScanResultsReady;
+  const G2CmdCookie view = s_netScanView;
+  portEXIT_CRITICAL(&s_netScanMux);
+  if (resultsReady) (void)g2EnqueueRedraw(view, &showScanResults, "WiFi scan results");
+}
+
 // Body of the scan flow — split out from the FreeRTOS task entry so the
 // vTaskDelete is only called when we actually own the task. Keeps the
 // inline fallback path safe (calling vTaskDelete on the BTC task that
@@ -898,18 +981,34 @@ static void runNetworkScanFlow() {
   //    observation; shorter windows sometimes still hit errorCode=7.
   vTaskDelay(pdMS_TO_TICKS(400));
 
+  // Start from an empty cache, before any placeholder can be drawn, so its
+  // "Scanning…" row never maps to an AP from an earlier scan.
+  memset(gScanCache, 0, sizeof(gScanCache));
+  gScanCacheCount = 0;
+  gScanFailure[0] = '\0';
+
   // 2. Clear any stuck Even-AI card from a previous scan, then try the
   //    front-pane "Scanning..." card (primary UX). We intentionally do
   //    NOT call g2ShowListPage before this: enqueueing a back-pane
   //    SHUTDOWN+CREATE first races the Even-AI pipeline and often left
-  //    users with only the small list and no front card.
-  g2HideEvenAICard();
-  vTaskDelay(pdMS_TO_TICKS(120));
+  //    users with only the small list and no front card. Skipped when the
+  //    user already left the WiFi menu during the settle window.
+  portENTER_CRITICAL(&s_netScanMux);
+  const G2CmdCookie startView = s_netScanView;
+  portEXIT_CRITICAL(&s_netScanMux);
+  const bool cardAttempted = startView.menuGen == g2CurrentMenuGen();
+  if (cardAttempted) {
+    g2HideEvenAICard();
+    vTaskDelay(pdMS_TO_TICKS(120));
 
-  if (!g2ShowEvenAIReplyNoAsk("Scanning networks...")) {
-    DEBUG_G2F("[G2] WiFi: Even-AI scanning card failed — back-pane "
-              "placeholder");
-    showWiFiScanningPlaceholder();
+    if (!g2ShowEvenAIReplyNoAsk("Scanning networks...")) {
+      DEBUG_G2F("[G2] WiFi: Even-AI scanning card failed — back-pane "
+                "placeholder");
+      (void)g2EnqueueRedraw(startView, &showScanPlaceholderForFlow,
+                            "WiFi scan placeholder");
+    }
+  } else {
+    DEBUG_G2F("[G2] WiFi: WiFi menu left before the scan card — no card");
   }
 
   // 3. Run the coordinated synchronous scan. Hidden=true preserves the old
@@ -917,9 +1016,6 @@ static void runNetworkScanFlow() {
   //    appear as "<hidden>" in the result list. An OK coordinator result has
   //    released the driver's scan records; a cleanup failure is non-OK and the
   //    copied prefix is discarded below.
-  memset(gScanCache, 0, sizeof(gScanCache));
-  gScanCacheCount = 0;
-  gScanFailure[0] = '\0';
   const WifiScanResult result = wifiScanForEach(
       /*includeHidden=*/true, cacheG2ScanRecord, nullptr,
       /*acquireTimeoutMs=*/0);
@@ -939,10 +1035,15 @@ static void runNetworkScanFlow() {
   // 4. Dismiss the front-pane card explicitly so it disappears the
   //    moment the back-pane swap happens, rather than lingering for
   //    its full firmware auto-dismiss window.
-  g2HideEvenAICard();
+  if (cardAttempted) g2HideEvenAICard();
 
-  // 5. Swap the back pane to the results list.
-  showScanResults();
+  // 5. Publish the results, then queue the back-pane swap to the results list
+  //    on the view the flow last drew (see showScanPlaceholderForFlow).
+  portENTER_CRITICAL(&s_netScanMux);
+  s_netScanResultsReady = true;
+  const G2CmdCookie resultView = s_netScanView;
+  portEXIT_CRITICAL(&s_netScanMux);
+  (void)g2EnqueueRedraw(resultView, &showScanResults, "WiFi scan results");
 }
 
 static void networkScanWorker(void* /*arg*/) {
@@ -952,6 +1053,11 @@ static void networkScanWorker(void* /*arg*/) {
 }
 
 static void spawnNetworkScanWorker() {
+  // Runs on the tap dispatcher while the WiFi menu is the current view.
+  G2CmdCookie startView{};
+  startView.menuGen      = g2CurrentMenuGen();
+  startView.targetPage   = g2GetHijackPage();
+  startView.targetNetSub = (uint8_t)gNetSub;
   portENTER_CRITICAL(&s_netScanMux);
   if (s_netScanRunning) {
     portEXIT_CRITICAL(&s_netScanMux);
@@ -959,6 +1065,8 @@ static void spawnNetworkScanWorker() {
     return;
   }
   s_netScanRunning = true;
+  s_netScanView = startView;
+  s_netScanResultsReady = false;
   portEXIT_CRITICAL(&s_netScanMux);
 
   // 4 KB stack: the blocking scan path uses ~1 KB, EvenAI builders
@@ -1002,17 +1110,17 @@ static void handleMainTap(uint32_t idx) {
 
 #if ENABLE_WIFI
 // Watchdog spawned by the WiFi-toggle ON branch. Polls WiFi.isConnected()
-// every 500 ms for up to ~10 s and re-renders the menu the moment the
-// connection comes up — replaces the "WiFi: Pending..." overlay with
-// the live SSID. If the deadline expires without a
-// successful connect (no saved network, AP out of range, wrong creds),
-// it re-renders one final time so the menu shows the live Disabled or
+// every 500 ms for up to ~10 s and, the moment the connection comes up,
+// clears the overlay and queues a redraw of the menu — replacing the
+// "WiFi: Pending..." overlay with the live SSID. If the deadline expires
+// without a successful connect (no saved network, AP out of range, wrong
+// creds), it does the same once so the menu shows the live Disabled or
 // Disconnected state instead of getting stuck on "Pending...".
 //
 // Runs on its own task, not the BLE notify task, because the polling
-// loop yields with vTaskDelay — calling g2ShowListPage from a task
-// other than the original tap dispatcher is fine; the BLE write path
-// is already mutex-guarded.
+// loop yields with vTaskDelay. It never draws: the redraw is fenced on the
+// view that showed the overlay (queuePendingViewRedraw), so it is dropped
+// once the user has navigated anywhere else.
 static void wifiPendingWatchdogTask(void* /*arg*/) {
   for (;;) {
     // Monitor whichever attempt currently owns the overlay. A later tap may
@@ -1024,16 +1132,18 @@ static void wifiPendingWatchdogTask(void* /*arg*/) {
 
       if ((int32_t)(millis() - watchedDeadline) >= 0) {
         if (!clearWifiPendingOverlayIfOwned(watchedDeadline)) continue;
-        if (gNetSub == NET_SUB_WIFI) showWiFiMenu();
+        queuePendingViewRedraw(&gWifiPendingViewGen, NET_SUB_WIFI,
+                               &showWiFiMenu, "WiFi pending");
         break;
       }
 
       vTaskDelay(pdMS_TO_TICKS(500));
       if (!WiFi.isConnected()) continue;
       if (!clearWifiPendingOverlayIfOwned(watchedDeadline)) continue;
-      // Only re-render if the user is still on the WiFi submenu — otherwise
-      // we'd clobber whatever they navigated to next.
-      if (gNetSub == NET_SUB_WIFI) showWiFiMenu();
+      // Applied only while the WiFi menu that showed "Pending..." is still
+      // the current view; otherwise it would clobber the user's next page.
+      queuePendingViewRedraw(&gWifiPendingViewGen, NET_SUB_WIFI,
+                             &showWiFiMenu, "WiFi pending");
       break;
     }
 
@@ -1183,27 +1293,20 @@ static void onBluetoothG2MenuRefreshDone(bool ok,
 }
 
 // Watchdog for the R1 ring connect — mirror of wifiPendingWatchdogTask. Polls
-// g2RingIsConnected() every 500 ms and re-renders the R1 submenu the moment the
-// ring actually connects. After the initial command-kick grace it follows the
-// worker's in-flight flag, so a job queued behind a real recording does not
-// falsely revert to "disconnected". A 230 s hard bound prevents a wedged worker
-// from pinning the overlay forever. Runs on its own task (the poll yields with
-// vTaskDelay); g2ShowListPage off the tap dispatcher is fine — the BLE write
-// path is mutex-guarded (same rationale as the WiFi watchdog).
+// g2RingIsConnected() every 500 ms and queues a redraw of the R1 submenu the
+// moment the ring actually connects. After the initial command-kick grace it
+// follows the worker's in-flight flag, so a job queued behind a real recording
+// does not falsely revert to "disconnected". A 230 s hard bound prevents a
+// wedged worker from pinning the overlay forever. Runs on its own task (the
+// poll yields with vTaskDelay) and never draws: like the WiFi watchdog, its
+// redraw is fenced on the view that showed "connecting...".
 static void ringPendingWatchdogTask(void* /*arg*/) {
-  bool rerendered = false;
   bool sawWorkerInFlight = false;
   const uint32_t watchdogStartedMs = millis();
   while ((uint32_t)(millis() - watchdogStartedMs) <
          RING_PENDING_HARD_TIMEOUT_MS) {
     vTaskDelay(pdMS_TO_TICKS(500));
-    if (g2RingIsConnected()) {
-      gRingPendingDeadlineMs = 0;
-      // Only repaint if the user is still on the R1 submenu — otherwise we'd
-      // clobber whatever they navigated to.
-      if (gNetSub == NET_SUB_BLUETOOTH_R1) { showBluetoothR1Menu(); rerendered = true; }
-      break;
-    }
+    if (g2RingIsConnected()) break;
     if (g2RingConnectInFlight()) {
       sawWorkerInFlight = true;
       // Keep the renderer's simple, rollover-safe deadline predicate true
@@ -1216,12 +1319,12 @@ static void ringPendingWatchdogTask(void* /*arg*/) {
                                 (int32_t)(millis() - gRingPendingDeadlineMs) < 0;
     if (!kickoffPending) break;
   }
-  if (!rerendered && gNetSub == NET_SUB_BLUETOOTH_R1) {
-    gRingPendingDeadlineMs = 0;
-    showBluetoothR1Menu();   // deadline expired → drop "connecting..." overlay
-  } else {
-    gRingPendingDeadlineMs = 0;
-  }
+  // Connected, failed or expired: drop the "connecting..." overlay, then
+  // repaint the R1 submenu only if it is still the view that showed it —
+  // otherwise we'd clobber whatever the user navigated to.
+  gRingPendingDeadlineMs = 0;
+  queuePendingViewRedraw(&gRingPendingViewGen, NET_SUB_BLUETOOTH_R1,
+                         &showBluetoothR1Menu, "R1 pending");
   gRingPendingTaskActive = false;
   vTaskDelete(nullptr);
 }
@@ -1242,15 +1345,9 @@ static void onBluetoothR1MenuRefreshDone(bool ok,
 }
 
 static void handleWiFiTap(uint32_t idx) {
-  const uint8_t rowCount =
-      __atomic_load_n(&gWifiMenuRowCount, __ATOMIC_ACQUIRE);
-  if (idx >= rowCount) {
-    DEBUG_G2F("[G2] WiFi: stale/unknown row idx=%u count=%u",
-              (unsigned)idx, (unsigned)rowCount);
-    return;
-  }
-  const WifiMenuAction action =
-      __atomic_load_n(&gWifiMenuActionByRow[idx], __ATOMIC_ACQUIRE);
+  NetRowBinding row;
+  if (!netRowAt(NET_SUB_WIFI, idx, &row)) return;
+  const WifiMenuAction action = (WifiMenuAction)row.action;
 
   switch (action) {
     case WIFI_MENU_BACK:  // <- Back to top-level
@@ -1262,7 +1359,7 @@ static void handleWiFiTap(uint32_t idx) {
       G2CmdCookie cookie{};
       cookie.targetPage   = g2GetHijackPage();
       cookie.targetNetSub = (uint8_t)gNetSub;
-      const char* rcmd = wifiRadioOn() ? "radiopower off" : "radiopower on";
+      const char* rcmd = row.on ? "radiopower on" : "radiopower off";
       DEBUG_G2F("[G2] Radio toggle: %s via cmd_exec", rcmd);
       cancelWifiPendingOverlay();   // radio power is not the WiFi "Pending" overlay
       if (!g2SubmitHijackCommand(rcmd, cookie, onWifiMenuRefreshDone, nullptr)) {
@@ -1274,7 +1371,9 @@ static void handleWiFiTap(uint32_t idx) {
 
     case WIFI_MENU_TOGGLE_CONNECTION: {  // Connect best / disconnect toggle.
 #if ENABLE_WIFI
-      bool connected = WiFi.isConnected();
+      // Direction as the row was labelled: the SSID row disconnects, every
+      // other state (Pending, Disabled, Disconnected) connects.
+      const bool connect = row.on;
       G2CmdCookie cookie{};
       cookie.targetPage   = g2GetHijackPage();
       cookie.targetNetSub = (uint8_t)gNetSub;
@@ -1283,14 +1382,14 @@ static void handleWiFiTap(uint32_t idx) {
       // runtime radio toggle. Do not promise/animate a connection attempt that
       // ensureWiFiInitialized() must reject; the row already directs the user
       // to Settings in this state.
-      if (!connected && !gSettings.wifiEnabled) {
+      if (connect && !gSettings.wifiEnabled) {
         DEBUG_G2F("[G2] WiFi toggle ignored: WiFi disabled in Settings");
         cancelWifiPendingOverlay();
         showWiFiMenu();
         break;
       }
 
-      if (connected) {
+      if (!connect) {
         // Disconnect path. Submit `closewifi`; callback re-renders the
         // menu showing OFF. Synchronous from the user's perspective —
         // closewifi returns immediately after kicking the disconnect,
@@ -1390,18 +1489,18 @@ static void handleWiFiTap(uint32_t idx) {
                //
                // (HTTP toggle moved to its own Network -> HTTP(S) section;
                // see showHttpMenu / handleHttpTap below.)
-      const bool prev = gSettings.wifiAutoStart;
+      const bool on = row.on;  // the state the row offered when drawn
       G2CmdCookie cookie{};
       cookie.targetPage   = g2GetHijackPage();
       cookie.targetNetSub = (uint8_t)gNetSub;
       // cookie.seq + cookie.menuGen are stamped by g2SubmitHijackCommand.
 
       char line[40];
-      snprintf(line, sizeof(line), "wifiautostart %d", prev ? 0 : 1);
+      snprintf(line, sizeof(line), "wifiautostart %d", on ? 1 : 0);
 
       if (g2SubmitHijackCommand(line, cookie, onWifiMenuRefreshDone, nullptr)) {
         BROADCAST_PRINTF("[G2] WiFi: Auto Start toggle %s→%s submitted via cmd_exec",
-                         prev ? "ON" : "OFF", prev ? "OFF" : "ON");
+                         on ? "OFF" : "ON", on ? "ON" : "OFF");
       } else {
         DEBUG_G2F("[G2] WiFi: Auto Start submit FAILED — no inline mutate");
       }
@@ -1440,6 +1539,23 @@ static char sWifiAddSsid[33];
 EXT_RAM_BSS_ATTR static char sWifiAddMsg[128];
 static void showWifiAddMsg() { g2ShowText(sWifiAddMsg); }
 
+// The wifiadd line quotes each field and CommandArgs has no escape: a `"` ends
+// the field early (a scanned `x" "y` would save SSID x with password y), so the
+// page refuses it, and control characters with it, before building the line.
+static bool wifiAddTextQuotable(const char* text) {
+  for (const unsigned char* p = (const unsigned char*)text; *p; ++p) {
+    if (*p == '"' || *p < 0x20 || *p == 0x7F) return false;
+  }
+  return true;
+}
+
+static void showWifiAddRefusal() {
+  snprintf(sWifiAddMsg, sizeof(sWifiAddMsg), "%s",
+           "Error: WiFi name and password cannot contain a double-quote (\") "
+           "or control characters");
+  showWifiAddMsg();
+}
+
 static void onWifiAddDone(bool ok, const char* result,
                           const G2CmdCookie& cookie, void* /*userData*/) {
   DEBUG_G2F("[G2] wifiadd done: ok=%d result='%s'", (int)ok, result ? result : "");
@@ -1455,10 +1571,17 @@ static void onWifiAddDone(bool ok, const char* result,
 
 // Build + submit from the snapshot SSID and a password. Runs on the BLE
 // notify task (keyboard commit) — String build + submit only, no inline
-// mutate (wrong stack + skips auth). The keyboard charset cannot produce a
-// double-quote, so the password is always safe to quote verbatim.
+// mutate (wrong stack + skips auth). The keyboard charset already filters
+// double-quotes and control bytes; a field the quoted line cannot carry is
+// refused here for every caller before the line is built.
 static void wifiAddSubmit(const char* pass) {
-  String line = String("wifiadd \"") + sWifiAddSsid + "\" \"" + (pass ? pass : "") + "\" 1 0";
+  if (!pass) pass = "";
+  if (!wifiAddTextQuotable(sWifiAddSsid) || !wifiAddTextQuotable(pass)) {
+    DEBUG_G2F("[G2] wifiadd: SSID or password has a quote/control byte — refused");
+    showWifiAddRefusal();
+    return;
+  }
+  String line = String("wifiadd \"") + sWifiAddSsid + "\" \"" + pass + "\" 1 0";
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
   cookie.targetNetSub = (uint8_t)gNetSub;
@@ -1487,11 +1610,16 @@ static void handleWiFiScanTap(uint32_t idx) {
   size_t apIdx = idx - 1;
   if (apIdx >= gScanCacheCount) return;
   const CachedAp& ap = gScanCache[apIdx];
-  // Hidden APs scan with an empty SSID — nothing to add. An SSID containing a
-  // double-quote can't survive the quoted command line (CommandArgs has no
-  // escape support) — refuse rather than mangle it.
-  if (ap.ssid[0] == '\0' || strchr(ap.ssid, '"') != nullptr) {
-    DEBUG_G2F("[G2] WiFi: tapped hidden/unquotable SSID — ignored");
+  // Hidden APs scan with an empty SSID — nothing to add.
+  if (ap.ssid[0] == '\0') {
+    DEBUG_G2F("[G2] WiFi: tapped hidden SSID — ignored");
+    return;
+  }
+  // A scanned SSID with a double-quote or control byte can't survive the
+  // quoted command line: say so on the lens instead of opening the keyboard.
+  if (!wifiAddTextQuotable(ap.ssid)) {
+    DEBUG_G2F("[G2] WiFi: tapped unquotable SSID — refused");
+    showWifiAddRefusal();
     return;
   }
   // Snapshot at tap time: the keyboard overlay blocks page taps but NOT the
@@ -1650,90 +1778,80 @@ static void espnowNameThenOpenCommit(const char* text) {
 #endif
 
 static void handleEspNowTap(uint32_t idx) {
-  // Layout depends on running state:
-  //   ON:  0=Back 1=toggle 2=Mode 3=Peers 4=ViewDevices 5=Name
-  //   OFF: 0=Back 1=toggle 2=ViewDevices 3=Name
-#if ENABLE_ESPNOW
-  bool running = (gEspNow && gEspNow->initialized);
-#else
-  bool running = false;
-#endif
-  // Back goes to the WiFi submenu now — ESP-NOW is nested under WiFi
-  // since both ride the WiFi radio.
-  if (idx == 0) { showWiFiMenu(); return; }
+  // Rows and toggle directions are the ones showEspNowMenu bound: the ON and
+  // OFF layouts differ, and ESP-NOW can start or stop between render and tap.
+  NetRowBinding row;
+  if (!netRowAt(NET_SUB_ESPNOW, idx, &row)) return;
 
-  if (idx == 1) {  // ESP-NOW state line — toggle via cmd_exec
+  switch ((EspNowRowAction)row.action) {
+    case ESPNOW_ROW_BACK:
+      // Back goes to the WiFi submenu now — ESP-NOW is nested under WiFi
+      // since both ride the WiFi radio.
+      showWiFiMenu();
+      return;
+
+    case ESPNOW_ROW_POWER: {  // ESP-NOW state line — toggle via cmd_exec
 #if ENABLE_ESPNOW
-    if (!running && gSettings.espnowDeviceName.length() == 0) {
-      // Match OLED: ESP-NOW cannot start without a device name, so open
-      // the on-glasses keyboard first and start the radio after commit.
-      DEBUG_G2F("[G2] ESP-NOW toggle: name unset — opening keyboard");
-      if (!beginEspNowNameEntry(espnowNameThenOpenCommit)) {
-        showEspNowMenu();
+      if (row.on && gSettings.espnowDeviceName.length() == 0) {
+        // Match OLED: ESP-NOW cannot start without a device name, so open
+        // the on-glasses keyboard first and start the radio after commit.
+        DEBUG_G2F("[G2] ESP-NOW toggle: name unset — opening keyboard");
+        if (!beginEspNowNameEntry(espnowNameThenOpenCommit)) {
+          showEspNowMenu();
+        }
+        return;
       }
+      const char* line = row.on ? "openespnow" : "closeespnow";
+      // For the OPEN path, use a callback that surfaces the failure reason on the
+      // lens (init can fail on memory/coexistence); CLOSE just re-renders.
+      G2HijackCmdCallback cb = row.on ? onEspNowOpenDone : onEspNowMenuRefreshDone;
+      G2CmdCookie cookie{};
+      cookie.targetPage   = g2GetHijackPage();
+      cookie.targetNetSub = (uint8_t)gNetSub;
+      DEBUG_G2F("[G2] ESP-NOW toggle: %s via cmd_exec", line);
+      if (!g2SubmitHijackCommand(line, cookie, cb, nullptr)) {
+        DEBUG_G2F("[G2] ESP-NOW toggle: %s submit FAILED — no inline mutate", line);
+      }
+#else
+      DEBUG_G2F("[G2] ESP-NOW: not compiled in");
+#endif
       return;
     }
-    const char* line = running ? "closeespnow" : "openespnow";
-    // For the OPEN path, use a callback that surfaces the failure reason on the
-    // lens (init can fail on memory/coexistence); CLOSE just re-renders.
-    G2HijackCmdCallback cb = running ? onEspNowMenuRefreshDone : onEspNowOpenDone;
-    G2CmdCookie cookie{};
-    cookie.targetPage   = g2GetHijackPage();
-    cookie.targetNetSub = (uint8_t)gNetSub;
-    DEBUG_G2F("[G2] ESP-NOW toggle: %s via cmd_exec", line);
-    if (!g2SubmitHijackCommand(line, cookie, cb, nullptr)) {
-      DEBUG_G2F("[G2] ESP-NOW toggle: %s submit FAILED — no inline mutate", line);
-    }
-#else
-    DEBUG_G2F("[G2] ESP-NOW: not compiled in");
-#endif
-    return;
-  }
 
+    case ESPNOW_ROW_DEVICES:
+      showEspNowDevices();
+      return;
+
+    case ESPNOW_ROW_NAME:
 #if ENABLE_ESPNOW
-  // Name editor — same row index regardless of running state, just shifts
-  // position. Brings up the on-glasses keyboard pre-filled with the
-  // current name. onCommit/onCancel both redraw the ESPNow submenu.
-  const uint32_t kNameIdxOn  = 5;
-  const uint32_t kNameIdxOff = 3;
-  if ((running && idx == kNameIdxOn) || (!running && idx == kNameIdxOff)) {
-    (void)beginEspNowNameEntry(espnowNameCommit);
-    return;
-  }
+      // Brings up the on-glasses keyboard pre-filled with the current name.
+      // onCommit/onCancel both redraw the ESPNow submenu.
+      (void)beginEspNowNameEntry(espnowNameCommit);
 #endif
+      return;
 
-  // Auto Start row idx depends on running state — see showEspNowMenu().
+    case ESPNOW_ROW_AUTO_START: {
 #if ENABLE_ESPNOW
-  const uint32_t kAutoIdxOn  = 6;
-  const uint32_t kAutoIdxOff = 4;
-  if ((running && idx == kAutoIdxOn) || (!running && idx == kAutoIdxOff)) {
-    const bool prev = gSettings.espnowEnabled;
-    char line[40];
-    snprintf(line, sizeof(line), "espnowenabled %d", prev ? 0 : 1);
-    G2CmdCookie cookie{};
-    cookie.targetPage   = g2GetHijackPage();
-    cookie.targetNetSub = (uint8_t)gNetSub;
-    if (g2SubmitHijackCommand(line, cookie, onEspNowMenuRefreshDone, nullptr)) {
-      BROADCAST_PRINTF("[G2] ESP-NOW: Auto Start toggle %s→%s submitted via cmd_exec",
-                       prev ? "ON" : "OFF", prev ? "OFF" : "ON");
-    } else {
-      DEBUG_G2F("[G2] ESP-NOW: Auto Start submit FAILED — no inline mutate");
-    }
-    return;
-  }
+      char line[40];
+      snprintf(line, sizeof(line), "espnowenabled %d", row.on ? 1 : 0);
+      G2CmdCookie cookie{};
+      cookie.targetPage   = g2GetHijackPage();
+      cookie.targetNetSub = (uint8_t)gNetSub;
+      if (g2SubmitHijackCommand(line, cookie, onEspNowMenuRefreshDone, nullptr)) {
+        BROADCAST_PRINTF("[G2] ESP-NOW: Auto Start toggle %s→%s submitted via cmd_exec",
+                         row.on ? "OFF" : "ON", row.on ? "ON" : "OFF");
+      } else {
+        DEBUG_G2F("[G2] ESP-NOW: Auto Start submit FAILED — no inline mutate");
+      }
 #endif
+      return;
+    }
 
-  if (running) {
-    if (idx == 2 || idx == 3) {  // info rows
+    case ESPNOW_ROW_INFO:
+    default:
       DEBUG_G2F("[G2] ESP-NOW: info row %u (no action)", (unsigned)idx);
       return;
-    }
-    if (idx == 4) { showEspNowDevices(); return; }
-  } else {
-    if (idx == 2) { showEspNowDevices(); return; }
   }
-  DEBUG_G2F("[G2] ESP-NOW: unknown idx=%u (running=%d)",
-            (unsigned)idx, running ? 1 : 0);
 }
 
 static void handleEspNowDevsTap(uint32_t idx) {
@@ -1745,10 +1863,10 @@ static void handleEspNowDevsTap(uint32_t idx) {
 // Toggle the persisted Bluetooth auto-start flag via the `bleautostart`
 // CLI command (routed through cmd_exec → runs as the paired-by user).
 // Hoisted out so every branch of handleBluetoothTap can call it without
-// copy-pasting the submit boilerplate. Submit failure is a no-op.
-static void bluetoothToggleAutoStart() {
-  const bool prev = gSettings.bleAutoStart;
-  const char* arg = prev ? "off" : "on";
+// copy-pasting the submit boilerplate. `on` is the state the row offered when
+// it was drawn. Submit failure is a no-op.
+static void bluetoothToggleAutoStart(bool on) {
+  const char* arg = on ? "on" : "off";
   char line[32];
   snprintf(line, sizeof(line), "bleautostart %s", arg);
   G2CmdCookie cookie{};
@@ -1756,26 +1874,25 @@ static void bluetoothToggleAutoStart() {
   cookie.targetNetSub = (uint8_t)gNetSub;
   if (g2SubmitHijackCommand(line, cookie, onBluetoothMenuRefreshDone, nullptr)) {
     BROADCAST_PRINTF("[G2] Bluetooth: Auto Start toggle %s→%s submitted via cmd_exec",
-                     prev ? "ON" : "OFF", prev ? "OFF" : "ON");
+                     on ? "OFF" : "ON", on ? "ON" : "OFF");
   } else {
     DEBUG_G2F("[G2] Bluetooth: Auto Start submit FAILED — no inline mutate");
   }
 }
 
 static void handleBluetoothG2Tap(uint32_t idx) {
-  // Layout (after 2026-05-09 Mode-row promotion to parent menu):
+  // Rows as showBluetoothG2Menu bound them (after 2026-05-09 Mode-row promotion
+  // to parent menu):
   //   active:    0=Back 1=Conn(info) 2=AutoReconnect 3=Reconnect 4=Disconnect
   //   inactive:  0=Back 1=BLE-stopped(info) 2=AutoReconnect
-  const bool active = isG2ClientInitialized();
-  if (idx == 0) {
+  NetRowBinding row;
+  if (!netRowAt(NET_SUB_BLUETOOTH_G2, idx, &row)) return;
+  const G2RowAction action = (G2RowAction)row.action;
+  if (action == G2_ROW_BACK) {
     showBluetoothMenu();
     return;
   }
-  if (idx == 1) {
-    DEBUG_G2F("[G2] Bluetooth → G2: info row %u (no action)", (unsigned)idx);
-    return;
-  }
-  if (idx == 2) {
+  if (action == G2_ROW_AUTO_RECONNECT) {
     // Route through cmd_exec → `bleautoreconnect g2-glasses on|off`. This
     // is intentional, not just for consistency: cmd_bleautoreconnect calls
     // bleStampPairedByIfBlank when flipping ON, capturing whoever owns
@@ -1784,8 +1901,7 @@ static void handleBluetoothG2Tap(uint32_t idx) {
     // ON from a freshly-paired set — which is fine, since the very first
     // flip would have come from a real admin via the web UI or CLI to
     // pair them in the first place.
-    const bool prev = blePeerAutoReconnectEnabled(BLE_PEER_G2_GLASSES);
-    const char* arg = prev ? "off" : "on";
+    const char* arg = row.on ? "on" : "off";
     char line[64];
     snprintf(line, sizeof(line), "bleautoreconnect g2-glasses %s", arg);
     G2CmdCookie cookie{};
@@ -1793,17 +1909,21 @@ static void handleBluetoothG2Tap(uint32_t idx) {
     cookie.targetNetSub = (uint8_t)gNetSub;
     if (g2SubmitHijackCommand(line, cookie, onBluetoothG2MenuRefreshDone, nullptr)) {
       BROADCAST_PRINTF("[G2] G2 AutoReconnect %s→%s submitted via cmd_exec",
-                       prev ? "ON" : "OFF", prev ? "OFF" : "ON");
+                       row.on ? "OFF" : "ON", row.on ? "ON" : "OFF");
     } else {
       DEBUG_G2F("[G2] G2 AutoReconnect submit FAILED — no inline mutate");
     }
     return;
   }
-  if (!active) {
+  if (action != G2_ROW_RECONNECT && action != G2_ROW_DISCONNECT) {
+    DEBUG_G2F("[G2] Bluetooth → G2: info row %u (no action)", (unsigned)idx);
+    return;
+  }
+  if (!isG2ClientInitialized()) {
     DEBUG_G2F("[G2] Bluetooth → G2: idx=%u — start BLE first", (unsigned)idx);
     return;
   }
-  if (idx == 3) {
+  if (action == G2_ROW_RECONNECT) {
     // Saved-MAC reconnect — same as boot path. Must go through cmd_exec
     // (auth + stack); never call g2ConnectSaved() on the tap task.
     G2CmdCookie cookie{};
@@ -1816,19 +1936,16 @@ static void handleBluetoothG2Tap(uint32_t idx) {
     }
     return;
   }
-  if (idx == 4) {
-    // Soft disconnect (keep GATT cache). Full teardown is g2deinit / closeg2 full.
-    G2CmdCookie cookie{};
-    cookie.targetPage   = g2GetHijackPage();
-    cookie.targetNetSub = (uint8_t)gNetSub;
-    DEBUG_G2F("[G2] Disconnect G2 via cmd_exec (closeg2)");
-    if (!g2SubmitHijackCommand("closeg2", cookie,
-                               onBluetoothG2MenuRefreshDone, nullptr)) {
-      DEBUG_G2F("[G2] Disconnect G2 submit FAILED — no inline mutate");
-    }
-    return;
+  // G2_ROW_DISCONNECT: soft disconnect (keep GATT cache). Full teardown is
+  // g2deinit / closeg2 full.
+  G2CmdCookie cookie{};
+  cookie.targetPage   = g2GetHijackPage();
+  cookie.targetNetSub = (uint8_t)gNetSub;
+  DEBUG_G2F("[G2] Disconnect G2 via cmd_exec (closeg2)");
+  if (!g2SubmitHijackCommand("closeg2", cookie,
+                             onBluetoothG2MenuRefreshDone, nullptr)) {
+    DEBUG_G2F("[G2] Disconnect G2 submit FAILED — no inline mutate");
   }
-  DEBUG_G2F("[G2] Bluetooth → G2: unknown idx=%u", (unsigned)idx);
 }
 
 // Forward decl — the R1 menu refresh callback lives in the same
@@ -1840,25 +1957,21 @@ static void onBluetoothR1MenuRefreshDone(bool ok,
                                          void* userData);
 
 static void handleBluetoothR1Tap(uint32_t idx) {
-  // Layout (mirror of handleBluetoothG2Tap):
+  // Rows as showBluetoothR1Menu bound them (mirror of handleBluetoothG2Tap):
   //   active+ringUp:    0=Back 1=Conn 2=AutoReconnect 3=Reconnect 4=Disconnect
   //   active+ringDown:  0=Back 1=Conn 2=AutoReconnect 3=Connect
   //   inactive:         0=Back 1=BLE-stopped 2=AutoReconnect
-  const bool active = isG2ClientInitialized();
-  const bool ringUp = g2RingIsConnected();
-  if (idx == 0) {
+  NetRowBinding row;
+  if (!netRowAt(NET_SUB_BLUETOOTH_R1, idx, &row)) return;
+  const R1RowAction action = (R1RowAction)row.action;
+  if (action == R1_ROW_BACK) {
     showBluetoothMenu();
     return;
   }
-  if (idx == 1) {
-    DEBUG_G2F("[G2] Bluetooth → R1: info row %u (no action)", (unsigned)idx);
-    return;
-  }
-  if (idx == 2) {
+  if (action == R1_ROW_AUTO_RECONNECT) {
     // R1 AutoReconnect — same cmd_exec pattern as G2 AutoReconnect, just
     // targeting the r1-ring peer instead of g2-glasses.
-    const bool prev = blePeerAutoReconnectEnabled(BLE_PEER_R1_RING);
-    const char* arg = prev ? "off" : "on";
+    const char* arg = row.on ? "on" : "off";
     char line[64];
     snprintf(line, sizeof(line), "bleautoreconnect r1-ring %s", arg);
     G2CmdCookie cookie{};
@@ -1866,31 +1979,38 @@ static void handleBluetoothR1Tap(uint32_t idx) {
     cookie.targetNetSub = (uint8_t)gNetSub;
     if (g2SubmitHijackCommand(line, cookie, onBluetoothR1MenuRefreshDone, nullptr)) {
       BROADCAST_PRINTF("[G2] R1 AutoReconnect %s→%s submitted via cmd_exec",
-                       prev ? "ON" : "OFF", prev ? "OFF" : "ON");
+                       row.on ? "OFF" : "ON", row.on ? "ON" : "OFF");
     } else {
       DEBUG_G2F("[G2] R1 AutoReconnect submit FAILED — no inline mutate");
     }
     return;
   }
-  if (!active) {
+  if (action != R1_ROW_CONNECT && action != R1_ROW_RECONNECT &&
+      action != R1_ROW_DISCONNECT) {
+    DEBUG_G2F("[G2] Bluetooth → R1: info row %u (no action)", (unsigned)idx);
+    return;
+  }
+  if (!isG2ClientInitialized()) {
     DEBUG_G2F("[G2] Bluetooth → R1: idx=%u — start BLE first", (unsigned)idx);
     return;
   }
-  if (idx == 3) {
-    // ringUp → reconnect (drop + settle + connect on cmd_exec); else connect.
-    // Heap guard + 500 ms settle live inside `ringconnect reconnect`.
-    const char* line = ringUp ? "ringconnect reconnect" : "ringconnect";
+  if (action != R1_ROW_DISCONNECT) {
+    // "Reconnect Ring" (drawn while the ring was up) → drop + settle + connect
+    // on cmd_exec; "Connect Ring" → a fresh connect, even if the ring came up
+    // since. Heap guard + 500 ms settle live inside `ringconnect reconnect`.
+    const bool fresh = (action == R1_ROW_CONNECT);
+    const char* line = fresh ? "ringconnect" : "ringconnect reconnect";
     G2CmdCookie cookie{};
     cookie.targetPage   = g2GetHijackPage();
     cookie.targetNetSub = (uint8_t)gNetSub;
     BROADCAST_PRINTF("[G2] Bluetooth: %s Ring via cmd_exec",
-                     ringUp ? "Reconnect" : "Connect");
+                     fresh ? "Connect" : "Reconnect");
     // Fresh connect: `ringconnect` returns OK on kick-off, but scan+connect+auth
     // finishes ~5-8 s later with no completion event. Arm the "connecting..."
     // overlay + watchdog so the menu flips to "connected" when it actually is,
     // instead of staying stuck on "disconnected". (Reconnect keeps ringUp true,
     // so its menu already reads right — no overlay needed.) Mirrors WiFi connect.
-    if (!ringUp) {
+    if (fresh) {
       gRingPendingDeadlineMs = millis() + 12000;
       showBluetoothR1Menu();            // immediate "Ring: connecting..." render
       vTaskDelay(pdMS_TO_TICKS(150));   // let the REBUILD hit the air before the scan storms BLE
@@ -1898,10 +2018,10 @@ static void handleBluetoothR1Tap(uint32_t idx) {
     if (!g2SubmitHijackCommand(line, cookie,
                                onBluetoothR1MenuRefreshDone, nullptr)) {
       DEBUG_G2F("[G2] R1 %s submit FAILED — no inline mutate",
-                ringUp ? "reconnect" : "connect");
+                fresh ? "connect" : "reconnect");
       gRingPendingDeadlineMs = 0;
-      if (!ringUp) showBluetoothR1Menu();
-    } else if (!ringUp && !gRingPendingTaskActive) {
+      if (fresh) showBluetoothR1Menu();
+    } else if (fresh && !gRingPendingTaskActive) {
       gRingPendingTaskActive = true;
       taskStackRecord("g2_ring_pending", 4096);
       if (xTaskCreatePinnedToCore(ringPendingWatchdogTask, "g2_ring_pending",
@@ -1913,46 +2033,42 @@ static void handleBluetoothR1Tap(uint32_t idx) {
     }
     return;
   }
-  if (ringUp && idx == 4) {
-    G2CmdCookie cookie{};
-    cookie.targetPage   = g2GetHijackPage();
-    cookie.targetNetSub = (uint8_t)gNetSub;
-    BROADCAST_PRINTF("[G2] Bluetooth: Disconnect Ring via cmd_exec");
-    if (!g2SubmitHijackCommand("ringdisconnect", cookie,
-                               onBluetoothR1MenuRefreshDone, nullptr)) {
-      DEBUG_G2F("[G2] R1 disconnect submit FAILED — no inline mutate");
-    }
-    return;
+  // R1_ROW_DISCONNECT ("Disconnect Ring", drawn while the ring was up).
+  G2CmdCookie cookie{};
+  cookie.targetPage   = g2GetHijackPage();
+  cookie.targetNetSub = (uint8_t)gNetSub;
+  BROADCAST_PRINTF("[G2] Bluetooth: Disconnect Ring via cmd_exec");
+  if (!g2SubmitHijackCommand("ringdisconnect", cookie,
+                             onBluetoothR1MenuRefreshDone, nullptr)) {
+    DEBUG_G2F("[G2] R1 disconnect submit FAILED — no inline mutate");
   }
-  DEBUG_G2F("[G2] Bluetooth → R1: unknown idx=%u (ringUp=%d)",
-            (unsigned)idx, ringUp ? 1 : 0);
 }
 
 static void handleBluetoothTap(uint32_t idx) {
-  // Layout (keep in sync with showBluetoothMenu) — restructured 2026-05-09
+  // Rows as showBluetoothMenu bound them — restructured 2026-05-09
   // to promote Mode out of the G2 submenu and consolidate ring controls
   // under a new R1 >> drill-in:
   //   active + server:           0=Back 1=BLE 2=Mode 3=Conn 4=ToggleAdv 5=Disconnect 6=Auto
   //   active + client:           0=Back 1=BLE 2=Mode 3=G2>> 4=R1>> 5=Auto
   //   inactive + server:         0=Back 1=BLE 2=Mode 3=Auto
   //   inactive + client:         0=Back 1=BLE 2=Mode 3=G2>> 4=R1>> 5=Auto
-  const bool active   = bleSubsystemActive();
-  const bool isClient = bluetoothClientRoleForUi();
-  if (idx == 0) { g2ShowNetworkMenu(); return; }
+  NetRowBinding row;
+  if (!netRowAt(NET_SUB_BLUETOOTH, idx, &row)) return;
+  const BluetoothRowAction action = (BluetoothRowAction)row.action;
+  if (action == BT_ROW_BACK) { g2ShowNetworkMenu(); return; }
 
-  if (idx == 1) {  // toggle — mode-aware, routed via cmd_exec
-    // Map (mode, active) → CLI command name:
-    //   client + active   → g2deinit  (yanks the lens out from under the user)
-    //   client + !active  → openg2
-    //   server + active   → closeble
-    //   server + !active  → openble
-    // Client+active is destructive to the lens redraw — the connection
+  if (action == BT_ROW_CLIENT_POWER || action == BT_ROW_SERVER_POWER) {
+    // BLE row — starts or stops the role it showed, via cmd_exec:
+    //   client + on  → openg2      client + off → g2deinit (yanks the lens out from under the user)
+    //   server + on  → openble     server + off → closeble
+    // Client+off is destructive to the lens redraw — the connection
     // we'd repaint on goes down. The completion callback will find the
     // lens disconnected and the redraw will skip silently in
     // g2EnqueueLensJob, which is fine.
+    const bool client = (action == BT_ROW_CLIENT_POWER);
     const char* line;
-    if (active) line = isClient ? "g2deinit" : "closeble";
-    else        line = isClient ? "openg2"  : "openble";
+    if (row.on) line = client ? "openg2"   : "openble";
+    else        line = client ? "g2deinit" : "closeble";
 
     G2CmdCookie cookie{};
     cookie.targetPage   = g2GetHijackPage();
@@ -1965,15 +2081,15 @@ static void handleBluetoothTap(uint32_t idx) {
     return;
   }
 
-  if (idx == 2) {  // Mode toggle (server ↔ client) — routed via cmd_exec.
+  if (action == BT_ROW_MODE) {  // Mode toggle (server ↔ client) — routed via cmd_exec.
     // `blemode <other>` tears down whichever side is currently active
     // before flipping the persisted setting (see cmd_blemode in
     // Bluetooth.cpp). Destructive to the lens hijack when going from
     // client + active → server: the BLE link we render through is
     // about to drop. Same caveat as the BLE on/off toggle on idx=1;
     // the completion callback's redraw will silently no-op once the
-    // link is gone.
-    const char* arg = isClient ? "server" : "client";
+    // link is gone. "Other" is the role the row showed (on = to client).
+    const char* arg = row.on ? "client" : "server";
     char line[24];
     snprintf(line, sizeof(line), "blemode %s", arg);
     G2CmdCookie cookie{};
@@ -1987,38 +2103,16 @@ static void handleBluetoothTap(uint32_t idx) {
     return;
   }
 
-  if (!active) {
-    if (isClient) {
-      // 0=Back 1=BLE 2=Mode 3=G2>> 4=R1>> 5=Auto
-      if (idx == 3) { showBluetoothG2Menu(); return; }
-      if (idx == 4) { showBluetoothR1Menu(); return; }
-      if (idx == 5) { bluetoothToggleAutoStart(); return; }
-    } else {
-      // 0=Back 1=BLE 2=Mode 3=Auto
-      if (idx == 3) { bluetoothToggleAutoStart(); return; }
-    }
-    DEBUG_G2F("[G2] Bluetooth: idx=%u while OFF (unknown)", (unsigned)idx);
-    return;
-  }
+  switch (action) {
+    case BT_ROW_G2:  showBluetoothG2Menu(); break;
+    case BT_ROW_R1:  showBluetoothR1Menu(); break;
 
-  if (isClient) {
-    // 0=Back 1=BLE 2=Mode 3=G2>> 4=R1>> 5=Auto
-    if (idx == 3) { showBluetoothG2Menu(); return; }
-    if (idx == 4) { showBluetoothR1Menu(); return; }
-    if (idx == 5) { bluetoothToggleAutoStart(); return; }
-    DEBUG_G2F("[G2] Bluetooth (client): unknown idx=%u", (unsigned)idx);
-    return;
-  }
-
-  // Server-mode layout — Mode (idx 2) is now a toggle handled before
-  // this switch. Conn (idx 3) remains info-only.
-  switch (idx) {
-    case 3:  // Conn info row
+    case BT_ROW_INFO:  // Conn info row (server layout)
       DEBUG_G2F("[G2] Bluetooth: info row %u (no action)", (unsigned)idx);
       break;
 
-    case 4: {  // Toggle Adv — routed via cmd_exec (`bleadv toggle` was
-               // extended in Bluetooth.cpp to support stop/toggle).
+    case BT_ROW_TOGGLE_ADV: {  // Toggle Adv — routed via cmd_exec (`bleadv toggle` was
+                               // extended in Bluetooth.cpp to support stop/toggle).
       G2CmdCookie cookie{};
       cookie.targetPage   = g2GetHijackPage();
       cookie.targetNetSub = (uint8_t)gNetSub;
@@ -2029,7 +2123,7 @@ static void handleBluetoothTap(uint32_t idx) {
       break;
     }
 
-    case 5: {  // Disconnect — routed via cmd_exec (`bledisconnect`).
+    case BT_ROW_DISCONNECT: {  // Disconnect — routed via cmd_exec (`bledisconnect`).
       if (!isBLEConnected()) {
         DEBUG_G2F("[G2] Bluetooth: not connected, no-op");
         showBluetoothMenu();
@@ -2045,12 +2139,13 @@ static void handleBluetoothTap(uint32_t idx) {
       break;
     }
 
-    case 6:  // Auto Start (server-mode layout)
-      bluetoothToggleAutoStart();
+    case BT_ROW_AUTO_START:  // every layout's last row
+      bluetoothToggleAutoStart(row.on);
       break;
 
     default:
-      DEBUG_G2F("[G2] Bluetooth: unknown idx=%u", (unsigned)idx);
+      DEBUG_G2F("[G2] Bluetooth: unknown action=%u at idx=%u",
+                (unsigned)action, (unsigned)idx);
       break;
   }
 }
@@ -2128,21 +2223,21 @@ static void showHttpMenu() {
 #endif
 
   // Variable row count — URL row only included when the server is up.
-  // Item indices are dispatched by handleHttpTap below; keep them in sync
-  // when adding rows.
-  const char* items[8];
-  size_t n = 0;
-  items[n++] = "<- WiFi";     // 0 — HTTP(S) is nested under WiFi
-  items[n++] = serverLine;    // 1 — start/stop toggle
+  // handleHttpTap dispatches from the bindings made here.
+  NetRowList rows;
+  rows.add("<- WiFi", HTTP_ROW_BACK);  // HTTP(S) is nested under WiFi
 #if ENABLE_HTTP_SERVER
-  items[n++] = httpsLine;     // 2 — HTTPS mode toggle
-  items[n++] = autoLine;      // 3 — Auto Start toggle
+  rows.add(serverLine, HTTP_ROW_SERVER, /*on=*/!running);  // start/stop as labelled
+  rows.add(httpsLine, HTTP_ROW_HTTPS, /*on=*/!gSettings.httpsEnabled);
+  rows.add(autoLine, HTTP_ROW_AUTO_START, /*on=*/!gSettings.httpAutoStart);
   if (ipLine[0]) {
-    items[n++] = ipLine;      // 4 — info-only URL (when running)
+    rows.add(ipLine, HTTP_ROW_INFO);  // URL (when running)
   }
+#else
+  rows.add(serverLine, HTTP_ROW_INFO);
 #endif
 
-  g2ShowListPage(items, n);
+  showNetRows(NET_SUB_HTTP, rows);
   DEBUG_G2F("[G2] HTTP submenu shown (running=%d, https=%d, auto=%d)",
             isHttpServerRunning() ? 1 : 0,
             gSettings.httpsEnabled ? 1 : 0,
@@ -2158,19 +2253,20 @@ static void onHttpMenuRefreshDone(bool /*ok*/, const char* /*result*/,
 }
 
 static void handleHttpTap(uint32_t idx) {
+  NetRowBinding row;
+  if (!netRowAt(NET_SUB_HTTP, idx, &row)) return;
   // Back goes to the WiFi submenu now — HTTP(S) is nested under WiFi
   // since the server can only run with a WiFi connection.
-  if (idx == 0) { showWiFiMenu(); return; }
+  if (row.action == HTTP_ROW_BACK) { showWiFiMenu(); return; }
 
 #if ENABLE_HTTP_SERVER
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
   cookie.targetNetSub = (uint8_t)gNetSub;
 
-  switch (idx) {
-    case 1: {  // Start/Stop server toggle
-      bool wasRunning = (server != nullptr);
-      const char* line = wasRunning ? "closehttp" : "openhttp";
+  switch ((HttpRowAction)row.action) {
+    case HTTP_ROW_SERVER: {  // Start/Stop server, as the row was labelled
+      const char* line = row.on ? "openhttp" : "closehttp";
       DEBUG_G2F("[G2] HTTP toggle: %s via cmd_exec", line);
       if (!g2SubmitHijackCommand(line, cookie, onHttpMenuRefreshDone, nullptr)) {
         DEBUG_G2F("[G2] HTTP toggle: %s submit FAILED — no inline mutate", line);
@@ -2178,33 +2274,31 @@ static void handleHttpTap(uint32_t idx) {
       break;
     }
 
-    case 2: {  // HTTPS mode toggle (reboot required to take effect)
-      const bool prev = gSettings.httpsEnabled;
+    case HTTP_ROW_HTTPS: {  // HTTPS mode toggle (reboot required to take effect)
       char line[40];
-      snprintf(line, sizeof(line), "httpsEnabled %d", prev ? 0 : 1);
+      snprintf(line, sizeof(line), "httpsEnabled %d", row.on ? 1 : 0);
       if (g2SubmitHijackCommand(line, cookie, onHttpMenuRefreshDone, nullptr)) {
         BROADCAST_PRINTF("[G2] HTTPS mode toggle %s→%s submitted (reboot to apply)",
-                         prev ? "ON" : "OFF", prev ? "OFF" : "ON");
+                         row.on ? "OFF" : "ON", row.on ? "ON" : "OFF");
       } else {
         DEBUG_G2F("[G2] HTTPS mode submit FAILED — no inline mutate");
       }
       break;
     }
 
-    case 3: {  // HTTP Auto Start toggle (boot-time start)
-      const bool prev = gSettings.httpAutoStart;
+    case HTTP_ROW_AUTO_START: {  // HTTP Auto Start toggle (boot-time start)
       char line[40];
-      snprintf(line, sizeof(line), "httpAutoStart %d", prev ? 0 : 1);
+      snprintf(line, sizeof(line), "httpAutoStart %d", row.on ? 1 : 0);
       if (g2SubmitHijackCommand(line, cookie, onHttpMenuRefreshDone, nullptr)) {
         BROADCAST_PRINTF("[G2] HTTP Auto Start toggle %s→%s submitted",
-                         prev ? "ON" : "OFF", prev ? "OFF" : "ON");
+                         row.on ? "OFF" : "ON", row.on ? "ON" : "OFF");
       } else {
         DEBUG_G2F("[G2] HTTP Auto Start submit FAILED — no inline mutate");
       }
       break;
     }
 
-    case 4:  // URL row (info only)
+    case HTTP_ROW_INFO:  // URL row (info only)
       DEBUG_G2F("[G2] HTTP: URL row tapped (info-only)");
       break;
 

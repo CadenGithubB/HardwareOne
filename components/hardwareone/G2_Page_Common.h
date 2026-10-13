@@ -22,6 +22,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "G2_Glasses.h"   // g2ShowListPage
+
 struct G2Paginator {
   size_t startIdx;     // first source item to render on this page
   size_t endIdx;       // one-past-last source item
@@ -78,6 +80,27 @@ inline size_t g2PaginatorWriteChrome(G2Paginator& p, size_t curPage,
   return row;
 }
 #pragma GCC diagnostic pop
+
+// =============================================================================
+// List render + dispatch-state publish
+// =============================================================================
+// A list page's tap dispatcher reads page-local state: its sub-mode, the
+// row -> action map of the rows it drew, an armed confirm, sometimes the
+// hijack page id. g2ShowListPage can refuse a render (another swap in flight,
+// allocation failure, admission lost, full lens queue) and the previous rows
+// then stay on the lens. Pages therefore build their rows plus a pending
+// dispatch state and hand the step that makes that state live to this
+// helper, which runs `publish` only after the lens accepted the rows. On a
+// refusal nothing is published, so the old mode keeps routing taps for the
+// rows that are still visible; nothing is drawn either, because a second
+// render would be refused for the same reason.
+template <typename Publish>
+inline bool g2ShowListPageAndPublish(const char* const* items, size_t itemCount,
+                                     Publish&& publish) {
+  if (!g2ShowListPage(items, itemCount)) return false;
+  publish();
+  return true;
+}
 
 // =============================================================================
 // Paged-text viewer core — MOVED to System_TextPager.h (2026-07-20)

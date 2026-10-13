@@ -21,9 +21,6 @@ extern bool gCLIValidateOnly;
 void fsLock(const char* reason);
 void fsUnlock();
 
-// Automation callback type
-typedef bool (*AutomationCallback)(const char* autoJson, size_t jsonLen, void* userData);
-
 // Core automation system functions
 bool initAutomationSystem();
 void suspendAutomationSystem();
@@ -62,10 +59,41 @@ bool sanitizeAutomationsJson(String& jsonRef);
 // failure so callers fail closed instead of echoing malformed raw storage.
 String redactAutomationsJsonForResponse(const String& json);
 bool writeAutomationsJsonAtomic(const String& json);
-bool streamParseAutomations(const char* path, AutomationCallback callback, void* userData);
 bool updateAutomationNextAt(long automationId, time_t newNextAt);
 // Write a specific trigger's nextAt (by zero-based index in the triggers array).
 bool updateAutomationTriggerNextAt(long automationId, int triggerIdx, time_t newNextAt);
+
+// Automation list summaries for the OLED and G2 pages. Each is a copy built by
+// the owner with the trigger parser the scheduler fires from, so pages never
+// open or parse automations.json themselves.
+enum class AutomationTriggerKind : uint8_t {
+  None,      // no triggers
+  Invalid,   // no trigger the scheduler accepts
+  Time,      // daily or weekly at HH:MM
+  Monthly,
+  Yearly,
+  Interval,
+  Manual,    // armed by "automation trigger", fires after its delay
+  Boot,
+  Event,
+};
+
+struct AutomationSummary {
+  long id;
+  uint16_t commandCount;
+  uint8_t triggerCount;          // entries in the "triggers" array
+  AutomationTriggerKind kind;    // the first trigger the scheduler accepts
+  bool enabled;
+  char name[32];                 // stored name, or "Auto #<id>"
+  char trigger[40];              // "daily 07:30", "weekly 08:00 MoWe", "monthly 15 07:30",
+                                 // "every 5m", "on <event>", ...; " +N" for N more triggers
+};
+
+// Copies up to maxCount automations, in file order. False when the file cannot
+// be read or parsed (*count is then 0).
+bool automationCopySummaries(AutomationSummary* out, size_t maxCount, size_t* count);
+// The automation with this id. False when it is missing or the file cannot be read.
+bool automationFindSummary(long id, AutomationSummary* out);
 
 // Automation command handlers
 const char* cmd_automation(const String& originalCmd);
