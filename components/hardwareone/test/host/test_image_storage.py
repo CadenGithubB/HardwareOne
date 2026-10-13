@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import tempfile
 
+from test_mqtt_boolean_commands import extract_macro
 from test_web_batch_handlers import extract_block, require
 
 HERE = Path(__file__).resolve().parent
@@ -46,24 +47,42 @@ def generate(baseline: Path | None) -> str:
                "String ImageManager::getMountPrefix(", "String ImageManager::getCaptureFolder(",
                "bool ImageManager::ensureCaptureFolder(", "std::vector<ImageInfo> ImageManager::listImages(",
                "int ImageManager::getImageCount(", "uint8_t* ImageManager::getImage(",
-               "bool ImageManager::getImageInfo(", "bool ImageManager::deleteImage(",
-               "bool ImageManager::deleteOldestImages(",
+               "bool ImageManager::deleteImage(", "bool ImageManager::deleteOldestImages(",
                "StorageStats ImageManager::getStorageStats("]
     # The capture-folder preparation sweeps stale photo temporaries once per tier.
     if "void ImageManager::sweepStaleTemporaries(" in source:
         markers.append("void ImageManager::sweepStaleTemporaries(")
+    # The owner's managed-photo rule, shared by the reader and the deleter.
+    if "bool ImageManager::managedImagePath(" in source:
+        markers.append("bool ImageManager::managedImagePath(")
     methods = "\n\n".join(extract_block(source, marker) for marker in markers)
+    filesystem, command = read("System_Filesystem.cpp"), read("System_Command.cpp")
+    parser = extract_block(read("System_Command.h"), "class CommandArgs") + ";\n"
+    parser += "const String CommandArgs::empty_;\n"
+    parser += "\n".join(extract_block(command, marker) for marker in (
+        "CommandArgs::CommandArgs(", "void CommandArgs::parse(", "const String& CommandArgs::arg("))
+    parser += "\n" + extract_block(filesystem, "const char* requireQuotedToken(")
+    parser += "\n" + extract_macro(read("System_Utils.h"), "RETURN_VALID_IF_VALIDATE_CSTR") + "\n"
     harness = (HERE / "image_storage_harness.cpp").read_text()
     for marker, value in {
         "// INSERT_FS_GUARD": guard,
-        "// INSERT_NORMALIZE_FS_PATH": extract_block(read("System_Filesystem.cpp"), "bool normalizeFsPath("),
+        "// INSERT_COMMAND_PARSER": parser,
+        "// INSERT_NORMALIZE_FS_PATH": extract_block(filesystem, "bool normalizeFsPath("),
         "// INSERT_VFS_PATHS": paths,
         "// INSERT_DIRECTORY_READER": reader,
         "// INSERT_IMAGE_MANAGER": declarations + "\n" + methods,
+        "// INSERT_IMAGE_COMMANDS": extract_block(source, "const char* cmd_imagedelete("),
     }.items():
         require(harness.count(marker) == 1, f"one insertion marker: {marker}")
         harness = harness.replace(marker, value)
     return harness
+
+
+def delete_takes_ctx(baseline: Path | None) -> bool:
+    """True when deleteImage takes the caller's AuthContext (saved sources may predate it)."""
+    path = baseline / "System_ImageManager.h" if baseline and (baseline / "System_ImageManager.h").exists() \
+        else COMPONENT / "System_ImageManager.h"
+    return "deleteImage(const String& path, const AuthContext& ctx)" in path.read_text()
 
 
 def main() -> None:
@@ -71,14 +90,16 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--baseline", type=Path)
-    parser.add_argument("--case", choices=("all", "routing", "locking", "capacity"), default="all")
+    parser.add_argument("--case", choices=("all", "routing", "scope", "locking", "capacity"), default="all")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     with tempfile.TemporaryDirectory(prefix="hw1-image-storage-") as directory:
         source, binary = Path(directory) / "test.cpp", Path(directory) / "test"
         source.write_text(generate(args.baseline))
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-                   "-Wno-unused-function", "-Wno-unused-parameter", str(source), "-o", str(binary)]
+                   "-Wno-unused-function", "-Wno-unused-parameter",
+                   f"-DIMAGE_DELETE_TAKES_CTX={int(delete_takes_ctx(args.baseline))}",
+                   str(source), "-o", str(binary)]
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
         subprocess.run(command, check=True, timeout=60)

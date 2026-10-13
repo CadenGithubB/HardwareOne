@@ -5,6 +5,8 @@
 #include <vector>
 #include "System_BuildConfig.h"
 
+struct AuthContext;  // System_User.h; deleteImage removes as the identity it is given
+
 // Storage location enum
 enum ImageStorageLocation {
   IMAGE_STORAGE_LITTLEFS = 0,
@@ -61,12 +63,15 @@ public:
   std::vector<ImageInfo> listImages(ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS);
   int getImageCount(ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS);
   
-  // Get image data
+  // Get image data. Only a managed photo (see managedImagePath) is served.
   uint8_t* getImage(const String& path, size_t* outLen);
-  bool getImageInfo(const String& path, ImageInfo& info);
-  
-  // Delete image
-  bool deleteImage(const String& path);
+
+  // Delete one managed photo as `ctx`: a command handler passes its caller's
+  // identity, so the filesystem rules decide what that caller may remove.
+  // Anything outside the capture folder, or not a .jpg/.jpeg, is refused
+  // before any filesystem access. Retention supplies the system identity
+  // because its paths come from listImages.
+  bool deleteImage(const String& path, const AuthContext& ctx);
   bool deleteOldestImages(int count, ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS);
   
   // Storage management
@@ -91,6 +96,11 @@ private:
   bool lfsStaleSwept = false;
   bool sdStaleSwept = false;
   void sweepStaleTemporaries(ImageStorageLocation location, const String& folder);
+
+  // ImageManager owns "this is a managed photo": a .jpg/.jpeg file inside the
+  // capture folder of the tier the path names. Reports the normalized path and
+  // its tier when `path` qualifies; readers and deleters refuse anything else.
+  bool managedImagePath(const String& path, String& normalizedPath, bool& isSD);
 
   // Helper to get mount prefix for location
   String getMountPrefix(ImageStorageLocation location);
