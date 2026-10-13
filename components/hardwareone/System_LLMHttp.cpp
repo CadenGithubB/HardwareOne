@@ -9,6 +9,7 @@
 #include <esp_http_client.h>
 #include <esp_log.h>
 #include <esp_random.h>
+#include <mbedtls/platform_util.h>
 #include <sys/socket.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -233,7 +234,7 @@ void worker(void* context) {
         esp_http_client_set_header(client, "Content-Type", "application/json") != ESP_OK ||
         esp_http_client_set_header(client, "Accept", "text/event-stream") != ESP_OK)
       error = "Could not set agent request headers";
-    memset(authorization, 0, sizeof(authorization));
+    mbedtls_platform_zeroize(authorization, sizeof(authorization));
   }
   const uint32_t start = millis();
   uint32_t lastData = start;
@@ -310,12 +311,12 @@ void worker(void* context) {
   } else {
     Text empty; empty.finish(true); publish(*run, empty, error, true);
   }
-  if (body) { memset(body, 0, kBodyCap); ps_free(body); }
+  if (body) { mbedtls_platform_zeroize(body, kBodyCap); ps_free(body); }
   {
     Lock lock(true);
     if (lock) { sDone = true; sWorker = false; }
   }
-  memset(run, 0, sizeof(*run)); ps_free(run);
+  run->~Run(); mbedtls_platform_zeroize(run, sizeof(*run)); ps_free(run);
   // FreeRTOS self-delete does not unwind this stack; all owning objects above
   // have explicitly released their storage before this point.
   vTaskDelete(nullptr);
@@ -339,6 +340,9 @@ bool httpLlmConfigure(bool enabled, const char* baseUrl, const char* model,
     if (lock) applyConfigurationFailureLocked();
     return false;
   }
+  // Start the object's lifetime while retaining calloc's zeroed padding for
+  // the bytewise comparison with the current configuration below.
+  new (next) Config;
   next->enabled = enabled; next->plaintext = allowPlaintext;
   const char* reason = nullptr;
   if (!endpoint(baseUrl, allowPlaintext, next->url, sizeof(next->url)))
@@ -361,7 +365,7 @@ bool httpLlmConfigure(bool enabled, const char* baseUrl, const char* model,
     Lock lock;
     if (!lock) {
       failConfigurationPublication();
-      memset(next, 0, sizeof(*next)); ps_free(next); return false;
+      next->~Config(); mbedtls_platform_zeroize(next, sizeof(*next)); ps_free(next); return false;
     }
     const bool recoveringPublication = !sConfigAdmitted.load(std::memory_order_acquire);
     applyConfigurationFailureLocked();
@@ -381,7 +385,7 @@ bool httpLlmConfigure(bool enabled, const char* baseUrl, const char* model,
     if (recoveringPublication && !sWorker) sError[0] = 0;
     sConfigAdmitted.store(true, std::memory_order_release);
   }
-  memset(next, 0, sizeof(*next)); ps_free(next);
+  next->~Config(); mbedtls_platform_zeroize(next, sizeof(*next)); ps_free(next);
   return valid;
 }
 
@@ -434,10 +438,11 @@ int httpLlmStartAsync(const char* prompt, const LLMGenParams& /*params*/) {
   if (!prompt || !*prompt || strlen(prompt) > kPromptMax) return 0;
   auto* run = static_cast<Run*>(ps_calloc(1, sizeof(Run), AllocPref::PreferPSRAM, "llm.http.run"));
   if (!run) return 0;
+  new (run) Run;
   Lock lock;
   if (!lock || !sConfigAdmitted.load(std::memory_order_acquire) || !sSelected ||
       !sConfig.enabled || !sConfig.valid || sWorker || !WiFi.isConnected()) {
-    ps_free(run); return 0;
+    run->~Run(); ps_free(run); return 0;
   }
   run->config = sConfig; run->revision = sRevision;
   if (!sConversation[0]) rotateLocked();
@@ -452,7 +457,7 @@ int httpLlmStartAsync(const char* prompt, const LLMGenParams& /*params*/) {
   if (xTaskCreate(worker, "llm_http", 8192, run, 1, nullptr) != pdPASS) {
     sWorker = false; sDone = true;
     strlcpy(sError, "Could not start HTTP agent worker", sizeof(sError));
-    memset(run, 0, sizeof(*run)); ps_free(run); return 0;
+    run->~Run(); mbedtls_platform_zeroize(run, sizeof(*run)); ps_free(run); return 0;
   }
   return sSession;
 }
