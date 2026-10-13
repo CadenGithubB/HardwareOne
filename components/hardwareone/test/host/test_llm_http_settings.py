@@ -51,8 +51,8 @@ using namespace hw1http;
 #define EXT_RAM_BSS_ATTR
 #define LLM_DEFAULT_REP_WINDOW 32
 #define LLM_SETTING_MAX_CONTEXT 4096
-bool validating = false;
-#define RETURN_VALID_IF_VALIDATE_CSTR() do { if (validating) return "VALID"; } while (0)
+bool gCLIValidateOnly = false;
+// INSERT_VALIDATION
 std::vector<std::string> broadcasts, events;
 void logBroadcast(const char* format, ...) {
   char out[8192]; va_list arguments; va_start(arguments, format);
@@ -146,10 +146,11 @@ int main() {
   assert(gSettings.llmHttpToken == secret && publications == 1);
   assert(std::string(cmd_llm_httptoken(String(std::string(1025, 'a')))).find("Error:") == 0);
   assert(gSettings.llmHttpToken == secret && publications == 1);
-  validating = true;
+  gCLIValidateOnly = true;
   cmd_llm_httptoken("replacement");
+  cmd_llm_httptoken("-");
   assert(gSettings.llmHttpToken == secret && publications == 1 && persists == 1);
-  validating = false;
+  gCLIValidateOnly = false;
   cmd_llm_httptoken("-");
   assert(gSettings.llmHttpToken.length() == 0 && publishedToken.empty());
   assert(events.size() == 2 && persists == 2 && publications == 2);
@@ -172,6 +173,9 @@ def main():
     settings = (COMPONENT / "System_Settings.cpp").read_text()
     settings_header = (COMPONENT / "System_Settings.h").read_text()
     utils = (COMPONENT / "System_Utils.cpp").read_text()
+    utils_header = (COMPONENT / "System_Utils.h").read_text()
+    validation_start = utils_header.index("#define RETURN_VALID_IF_VALIDATE_CSTR()")
+    validation_macro = utils_header[validation_start:utils_header.index("\n\n", validation_start)]
     command_header = (COMPONENT / "System_Command.h").read_text()
     command_source = (COMPONENT / "System_Command.cpp").read_text()
     http_source = (COMPONENT / "System_LLMHttp.cpp").read_text()
@@ -213,6 +217,7 @@ def main():
     redaction += block(utils, "String redactCmdForAudit(const String& argsInput,\n")
     unit = HARNESS
     for marker, content in (("TYPES", types), ("SETTINGS", state), ("TABLE", table),
+                            ("VALIDATION", validation_macro),
                             ("SETTINGS_IMPLEMENTATION", implementation),
                             ("COMMAND_ARGS", arg_code), ("REDACTION", redaction)):
         unit = unit.replace("// INSERT_" + marker + "\n", content + "\n")
