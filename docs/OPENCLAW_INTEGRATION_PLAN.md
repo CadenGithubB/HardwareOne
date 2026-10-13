@@ -1,8 +1,18 @@
 # OpenClaw integration plan
 
-Status: planning only, 2026-10-12. Branch: `codex/openclaw-integration-plan`.
-Baseline: `154ad982` (v0.99.95). No firmware, device, or external service has
-been changed. Recheck the extension points against ongoing work before implementation.
+Status: Wi-Fi prototype implemented, 2026-10-12. Branch:
+`codex/openclaw-integration-plan`. Baseline: `154ad982` (v0.99.95).
+The HTTP source is compiled out by default. No device has been flashed and no
+OpenClaw service or network configuration has been changed. UART remains the
+second milestone. See [prototype setup](OPENCLAW_SETUP.md) for configuration,
+verification status, and limits. The findings below describe the original
+extension points; line numbers refer to the baseline.
+
+The user's existing OpenClaw host is on a separate VLAN from the Mac mini. Keep
+the VLANs isolated. The XIAO will join password-protected `TestESPNetwork`, which
+the user confirmed is on the OpenClaw host's VLAN. Use local mocks/build checks
+until that device is configured. Do not add routing, forwarding, or a network
+bridge for this prototype.
 
 The user selected direct communication from the ESP device to an OpenClaw
 computer on the same Wi-Fi/LAN for the first version, then clarified that both

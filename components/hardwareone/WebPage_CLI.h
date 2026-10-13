@@ -134,6 +134,11 @@ var cliExecBtn = hw.$('cli-exec');
 window.addEventListener('error', function(e){ try { if(cliOutput){ cliOutput.textContent += ('[JS Error] ' + e.message + '\n'); } } catch(_){} });
 var commandHistory = []; var historyIndex = -1; var currentCommand=''; var outputHistory=''; var inHelp=false; var outputBackup=''; var scrolledOnce=false;
 var cliBondMode = false;
+// Scrub terminal/history/debug copies only; transport still needs the raw input.
+// Mask the remainder of nested input too, including quoted or multiline values.
+function __cliDisplayCommand(command){
+  return (command||'').replace(/\b(llmhttptoken|llmhttpurl)\b([\s\S]*)/i, function(_,key,tail){ return key+(tail.trim()?' ***':tail); });
+}
 hw.on(cliExecBtn, 'click', function(){ if(window.executeCommand) executeCommand(); });
 hw.on(cliInput, 'keydown', function(e){ if(e.key==='Enter' && window.executeCommand){ executeCommand(); } });
 try{console.log('[CLI] Core init ready');}catch(_){}
@@ -236,17 +241,18 @@ function executeCommand(){
   var command = (cliInput && cliInput.value ? cliInput.value : '').trim();
   if (!command) return;
   if (cliBondMode) { runBondedCommand(command); return; }
+  var displayCommand = __cliDisplayCommand(command);
   var responseGeneration=++cliResponseGeneration;
   ++cliLogRequestGeneration; // invalidate bootstrap/poll replies already in flight
   cliCommandPending=true;
   var outputBeforeCommand = cliOutput ? cliOutput.textContent : '';
-  if (commandHistory[commandHistory.length - 1] !== command) {
-    commandHistory.push(command); if (commandHistory.length > (window.__cliHistoryMax || 50)) commandHistory.shift();
+  if (commandHistory[commandHistory.length - 1] !== displayCommand) {
+    commandHistory.push(displayCommand); if (commandHistory.length > (window.__cliHistoryMax || 50)) commandHistory.shift();
     try{ localStorage.setItem('cliHistory', JSON.stringify(commandHistory)); }catch(_){}
   }
   historyIndex = -1; currentCommand = '';
-  if (cliOutput) { cliOutput.textContent += ('$ ' + command + '\n'); }
-  try { console.debug('[CLI] fetch start: ' + command); } catch(_){}
+  if (cliOutput) { cliOutput.textContent += ('$ ' + displayCommand + '\n'); }
+  try { console.debug('[CLI] fetch start: ' + displayCommand); } catch(_){}
   // This is the human terminal. Other /api/cli users default to machine mode
   // so their polls/buttons cannot answer a pending confirmation.
   hw.postForm('/api/cli', { cmd: command, capture: '1', interactive: '1' })
@@ -324,12 +330,13 @@ function cliSetTarget(bonded){
 
 function runBondedCommand(command){
   if (!window.BondFs) { if(cliOutput){ cliOutput.textContent += 'Error: bonded helper unavailable\n'; } return; }
-  if (commandHistory[commandHistory.length - 1] !== command) {
-    commandHistory.push(command); if (commandHistory.length > (window.__cliHistoryMax || 50)) commandHistory.shift();
+  var displayCommand = __cliDisplayCommand(command);
+  if (commandHistory[commandHistory.length - 1] !== displayCommand) {
+    commandHistory.push(displayCommand); if (commandHistory.length > (window.__cliHistoryMax || 50)) commandHistory.shift();
     try{ localStorage.setItem('cliHistory', JSON.stringify(commandHistory)); }catch(_){}
   }
   historyIndex = -1; currentCommand = '';
-  if (cliOutput) { cliOutput.textContent += ('[bonded]$ ' + command + '\n'); cliOutput.scrollTop = cliOutput.scrollHeight; }
+  if (cliOutput) { cliOutput.textContent += ('[bonded]$ ' + displayCommand + '\n'); cliOutput.scrollTop = cliOutput.scrollHeight; }
   if (cliInput) { cliInput.value=''; cliInput.disabled = true; }
   window.BondFs.exec(command, {
     onResult: function(lines, err){

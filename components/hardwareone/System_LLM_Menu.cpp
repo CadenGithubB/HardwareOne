@@ -20,6 +20,7 @@
 #if ENABLE_LLM_SOURCE_ONBOARD
 
 #include "System_LLM.h"
+#include "System_LLMBackend.h"     // keep agent routes separate from onboard guided prompts
 #include "System_LLM_Internal.h"   // gLLM, LLMMenuGroupDesc, lifecycle hooks, llmPsramFree
 #include "System_LLMChat.h"        // ChatParamOverride, chatBeginTurn, chatGetSessionId
 #include "System_Command.h"        // CommandArgs, argLeadingTokenIsJson
@@ -162,17 +163,19 @@ static int composeLocked(uint8_t g, uint16_t t, int e, char* buf, size_t cap, bo
 // ============================================================================
 
 uint16_t llmMenuGeneration(void) {
+  if (llmBackendActiveKind() == LlmBackendKind::Http) return 0;
   MenuLock lk;
   return gLLM.menuGeneration;
 }
 
 uint8_t llmMenuGroupCount(void) {
+  if (llmBackendActiveKind() == LlmBackendKind::Http) return 0;
   MenuLock lk;
   return gLLM.menuGroupCount;
 }
 
 bool llmMenuGroupInfo(uint8_t g, LLMMenuGroupInfo* out) {
-  if (!out) return false;
+  if (!out || llmBackendActiveKind() == LlmBackendKind::Http) return false;
   MenuLock lk;
   if (gLLM.menuGroupCount == 0 || g >= gLLM.menuGroupCount) return false;
   const LLMMenuGroupDesc& d = gLLM.menuGroups[g];
@@ -191,6 +194,7 @@ bool llmMenuGroupInfo(uint8_t g, LLMMenuGroupInfo* out) {
 int llmMenuTemplate(uint8_t g, uint16_t t, char* buf, size_t cap, bool* hasSlot) {
   if (!buf || cap == 0) return -1;
   buf[0] = '\0';
+  if (llmBackendActiveKind() == LlmBackendKind::Http) return -1;
   MenuLock lk;
   if (gLLM.menuGroupCount == 0 || g >= gLLM.menuGroupCount) return -1;
   const LLMMenuGroupDesc& d = gLLM.menuGroups[g];
@@ -216,6 +220,7 @@ int llmMenuTemplate(uint8_t g, uint16_t t, char* buf, size_t cap, bool* hasSlot)
 int llmMenuEntity(uint8_t g, uint16_t e, char* buf, size_t cap) {
   if (!buf || cap == 0) return -1;
   buf[0] = '\0';
+  if (llmBackendActiveKind() == LlmBackendKind::Http) return -1;
   MenuLock lk;
   if (gLLM.menuGroupCount == 0 || g >= gLLM.menuGroupCount) return -1;
   const LLMMenuGroupDesc& d = gLLM.menuGroups[g];
@@ -231,6 +236,7 @@ int llmMenuEntity(uint8_t g, uint16_t e, char* buf, size_t cap) {
 
 int llmMenuCompose(uint8_t g, uint16_t t, int e, char* buf, size_t cap) {
   if (!buf || cap == 0) return -2;
+  if (llmBackendActiveKind() == LlmBackendKind::Http) { buf[0] = '\0'; return -3; }
   MenuLock lk;
   int r = composeLocked(g, t, e, buf, cap, nullptr);
   if (r < 0 && cap) buf[0] = '\0';
@@ -238,6 +244,7 @@ int llmMenuCompose(uint8_t g, uint16_t t, int e, char* buf, size_t cap) {
 }
 
 int llmMenuAsk(uint16_t gen, uint8_t g, uint16_t t, int e, const ChatParamOverride* ov) {
+  if (llmBackendActiveKind() == LlmBackendKind::Http) return -3;
   // Compose under the lock WITH the generation check (a gen check without the
   // lock would be a TOCTOU). composed is a private copy, so once the lock is
   // released nothing here touches the blob again.
@@ -280,6 +287,7 @@ int llmMenuAsk(uint16_t gen, uint8_t g, uint16_t t, int e, const ChatParamOverri
 }
 
 int llmMenuRepeatLast(void) {
+  if (!llmBackendSupportsRetry()) return -3;
   char composed[192];
   bool isDo = false;
   {
@@ -304,6 +312,7 @@ int llmMenuRepeatLast(void) {
 }
 
 bool llmMenuLastAskInfo(int* sessionOut) {
+  if (llmBackendActiveKind() == LlmBackendKind::Http) return false;
   MenuLock lk;
   if (sLastAskSession == 0) return false;
   if (sessionOut) *sessionOut = sLastAskSession;

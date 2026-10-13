@@ -13,6 +13,7 @@ set(HW_CFG_INPUT_DEVICE_TYPE 0)  # 0 = NONE; header values 1/2 select a driver
 set(HW_CFG_ENABLE_MQTT 0)
 set(HW_CFG_ENABLE_LLM_BACKEND 0)         # the LLM feature (registry/chat/commands/surfaces)
 set(HW_CFG_ENABLE_LLM_SOURCE_ONBOARD 0)  # on-device PSRAM engine as a source
+set(HW_CFG_ENABLE_LLM_SOURCE_HTTP 0)     # optional Wi-Fi OpenClaw source
 set(HW_CFG_ENABLE_LLM_SOURCE_CM5 0)      # CM5 co-processor as a source
 set(HW_CFG_ENABLE_MAPS 0)
 set(HW_CFG_ENABLE_AUTOMATION 0)
@@ -93,6 +94,7 @@ if(EXISTS "${hw_cfg_file}")
     set(HW_CFG_TEXT_FLAGS
         I2C_FEATURE_LEVEL DISPLAY_TYPE INPUT_DEVICE_TYPE ENABLE_MQTT
         ENABLE_LLM_BACKEND ENABLE_LLM_SOURCE_ONBOARD ENABLE_LLM_SOURCE_CM5
+        ENABLE_LLM_SOURCE_HTTP
         ENABLE_MAPS ENABLE_CAMERA_SENSOR ENABLE_ESP_SR ENABLE_LOCAL_STT
         ENABLE_AUTOMATION ENABLE_EDGE_IMPULSE ENABLE_GAMES ENABLE_WEB_GAME_DARKROOM
         ENABLE_BLUETOOTH ENABLE_G2_GLASSES ENABLE_R1_HEALTH ENABLE_G2_TESTSUITE
@@ -546,11 +548,16 @@ if(HW_CFG_ENABLE_LLM_BACKEND GREATER 0)
         list(APPEND hardwareone_srcs System_LLMCm5.cpp)
         message(STATUS "LLM source: CM5 co-processor ENABLED")
     endif()
+    if(HW_CFG_ENABLE_LLM_SOURCE_HTTP GREATER 0)
+        list(APPEND hardwareone_srcs System_LLMHttp.cpp)
+        list(APPEND hardwareone_requires esp_http_client)
+        message(STATUS "LLM source: HTTP OpenClaw ENABLED")
+    endif()
     list(APPEND hardwareone_srcs WebPage_LLM.cpp)
     # OLED modes are always compiled and self-gate on ENABLE_OLED_DISPLAY —
     # see the OLED block above; no CMake-side display gate belongs here.
     list(APPEND hardwareone_srcs OLED_Mode_LLM.cpp)
-    message(STATUS "LLM feature ENABLED (sources: onboard=${HW_CFG_ENABLE_LLM_SOURCE_ONBOARD} cm5=${HW_CFG_ENABLE_LLM_SOURCE_CM5})")
+    message(STATUS "LLM feature ENABLED (sources: onboard=${HW_CFG_ENABLE_LLM_SOURCE_ONBOARD} cm5=${HW_CFG_ENABLE_LLM_SOURCE_CM5} http=${HW_CFG_ENABLE_LLM_SOURCE_HTTP})")
 else()
     message(STATUS "LLM feature DISABLED")
 endif()

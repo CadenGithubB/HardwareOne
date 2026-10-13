@@ -462,6 +462,14 @@ struct Settings {
       ,llmDefaultModel("model.bin")
       ,llmDomainGate(true)
       ,llmProfile(false)
+#if ENABLE_LLM_SOURCE_HTTP
+      ,llmHttpEnabled(false)
+      ,llmHttpUrl("")
+      ,llmHttpModel("openclaw/default")
+      ,llmHttpToken("")
+      ,llmHttpAllowPlaintext(false)
+      ,llmHttpCaPem("")
+#endif
 #endif
       // Maps app
       ,mapZoom(1.0f)
@@ -1191,6 +1199,14 @@ struct Settings {
   String llmDefaultModel;       // Default model filename for auto-load (default: "model.bin")
   bool llmDomainGate;           // Refuse generation when the prompt matches none of the model's embedded domain vocab (default: on). Only enforced when the loaded .bin carries a domain vocab section.
   bool llmProfile;              // Per-section forward-pass timing breakdown, dumped at end of each generation (default: off). Diagnostic only; leave off for real tok/s.
+#if ENABLE_LLM_SOURCE_HTTP
+  bool llmHttpEnabled;
+  String llmHttpUrl;            // Base URL including /v1; never contains credentials.
+  String llmHttpModel;          // OpenClaw agent target, not an upstream model override.
+  String llmHttpToken;          // Gateway credential; encrypted and redacted by the schema.
+  bool llmHttpAllowPlaintext;   // Explicit development opt-in; HTTPS remains verified.
+  String llmHttpCaPem;          // Optional private CA PEM; empty uses the built-in CA bundle.
+#endif
 #endif
 
   // Maps app — persisted defaults applied at boot to gMapZoom / gVisibleLayers

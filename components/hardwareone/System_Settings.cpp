@@ -3224,6 +3224,10 @@ size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bo
                    (unsigned long)gSettingsTypeMismatches,
                    (unsigned long)(gSettingsTypeMismatches - 4));
   }
+#if ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_HTTP
+  extern void llmHttpApplySettings();
+  llmHttpApplySettings();
+#endif
   return count;
 }
 
