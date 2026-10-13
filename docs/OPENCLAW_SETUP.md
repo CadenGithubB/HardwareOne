@@ -131,10 +131,20 @@ was flashed, no VLANs bridged, and the gateway configuration was not changed.
 The account creation/listing and network/server status were verified through USB;
 authentication and reachability from the Studio remain to be checked there.
 Do not use `/dev/cu.usbmodem2201`, which is occupied by the separate P4 work.
-The Studio's existing Hardware One tool variable names are unknown; use this
-observed URL for that integration rather than assuming the optional helper's
-`HW1_*` names. A Studio-side authenticated read can use
-`curl --user cm5 http://192.168.21.24/api/system`, which prompts for the password.
+The user subsequently created a dedicated device account named `openclaw` with
+its own credentials and updated the Studio's device configuration and address.
+USB account listing confirms that account exists with the user-selected `admin`
+role; its role and the older `cm5` account were left unchanged. Use `openclaw`
+for the next authenticated device-tool test. The supplied host setup script
+stores devices in `${HW1_DEVICES_FILE:-$HOME/.openclaw/hardwareone.devices.json}`;
+it is a JSON device registry, not the optional helper's `HW1_*` configuration.
+Neither its contents nor the new credentials have been read from the Studio.
+A Studio-side authenticated read can use
+`curl --user openclaw http://192.168.21.24/api/system`, which prompts for the
+password. A successful `/api/ping` alone does not verify authentication.
+Then test the existing `hardwareone_devices` tool from Mingus's sandbox. These
+checks validate agent-to-device access; the new ESP-to-OpenClaw chat firmware
+and gateway endpoint setup remain separate acceptance work.
 
 The prototype uses the documented [OpenClaw chat-completions endpoint](https://docs.openclaw.ai/gateway/openai-http-api).
 It must be enabled on the chosen test host. The configured target is an agent
