@@ -2409,10 +2409,10 @@ void logAuthAttempt(bool success, const char* path, const String& userTried, con
 }
 
 // Single audit front-door for all credential logins (web, serial, UART, BLE,
-// OLED). G2 is excluded — it has no credential login (its pair-time identity
-// is logged separately with path "g2/pair"). Maps the transport to a canonical
-// "<x>/login" path and fills a synthetic IP when the caller has none, so every
-// login path records consistently through one place.
+// OLED, MQTT command envelopes). G2 is excluded — it has no credential login
+// (its pair-time identity is logged separately with path "g2/pair"). Maps the
+// transport to a canonical "<x>/login" path and fills a synthetic IP when the
+// caller has none, so every login path records consistently through one place.
 void recordLoginAttempt(CommandSource transport, const String& user,
                         const String& ip, bool success, const char* reason) {
   const char* path;
@@ -2423,6 +2423,7 @@ void recordLoginAttempt(CommandSource transport, const String& user,
     case SOURCE_UART:          path = "uart/login";      defIp = "uart";  break;
     case SOURCE_BLUETOOTH:     path = "bluetooth/login"; defIp = "ble";   break;
     case SOURCE_LOCAL_DISPLAY: path = "display/login";   defIp = "local"; break;
+    case SOURCE_MQTT:          path = "mqtt/login";      defIp = "mqtt";  break;
     default:                   path = "login";           defIp = "local"; break;
   }
   logAuthAttempt(success, path, user, ip.length() ? ip : String(defIp), reason ? reason : "");

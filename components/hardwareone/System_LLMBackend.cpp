@@ -179,6 +179,37 @@ bool llmResolveModelId(const char* id, LlmModelDesc* out) {
 // Selection
 // ============================================================================
 
+#if ENABLE_LLM_SOURCE_ONBOARD
+// The context policy every surface loads with. gSettings.llmMaxContext
+// (0 = no cap) is the ceiling; a caller's own value may lower it, never
+// raise it. Both are kept within the setting's schema range.
+static int llmEffectiveMaxContext(int requested) {
+  int cap = gSettings.llmMaxContext;
+  if (cap < 0) cap = 0;
+  if (cap > LLM_SETTING_MAX_CONTEXT) cap = LLM_SETTING_MAX_CONTEXT;
+  if (requested < 0) requested = 0;
+  if (requested > LLM_SETTING_MAX_CONTEXT) requested = LLM_SETTING_MAX_CONTEXT;
+  if (cap == 0) return requested;
+  return (requested > 0 && requested < cap) ? requested : cap;
+}
+#endif
+
+bool llmBuildLoadCommand(const char* id, int maxCtx, char* out, size_t outCap) {
+  if (!out || outCap == 0) return false;
+  out[0] = '\0';
+  if (!id || !*id) return false;
+  // The id travels as one double-quoted token; CommandArgs has no escapes, so
+  // a quote or a control character would split or end it.
+  for (const char* p = id; *p; ++p) {
+    if (*p == '"' || (unsigned char)*p < 0x20 || *p == 0x7f) return false;
+  }
+  const int n = (maxCtx > 0)
+      ? snprintf(out, outCap, "llmload \"%s\" %d", id, maxCtx)
+      : snprintf(out, outCap, "llmload \"%s\"", id);
+  if (n < 0 || (size_t)n >= outCap) { out[0] = '\0'; return false; }
+  return true;
+}
+
 bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
   auto bail = [&](const char* m) {
     if (errOut && errCap) strlcpy(errOut, m, errCap);
@@ -197,7 +228,7 @@ bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
       // Blocking: reads weights into PSRAM, seconds. Callers are warned in the
       // header not to assume READY on return, which stays true for the remote
       // case below even though this one happens to be synchronous.
-      if (!llmLoadModel(d.path, maxCtx)) return bail("model failed to load");
+      if (!llmLoadModel(d.path, llmEffectiveMaxContext(maxCtx))) return bail("model failed to load");
       // Descriptor BEFORE kind. Readers dispatch on sActiveKind and then read
       // sActiveDesc, so publishing the kind first opens a window where the new
       // kind is paired with the previous descriptor. This narrows that window

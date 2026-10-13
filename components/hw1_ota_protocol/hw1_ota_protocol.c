@@ -844,7 +844,7 @@ hw1_ota_status_t hw1_ota_begin(
     if (record == NULL || hw1_ota_record_validate(record) != HW1_OTA_OK ||
         operation_id == 0 || source == HW1_OTA_SOURCE_NONE ||
         !source_is_valid(source) || (request_flags & ~HW1_OTA_REQUEST_KNOWN_FLAGS) != 0 ||
-        (!phase_is_terminal(record->phase) && record->phase != HW1_OTA_PHASE_IDLE) ||
+        !hw1_ota_phase_is_idle_or_terminal(record->phase) ||
         (hw1_ota_result_pending(record) &&
          (request_flags & HW1_OTA_REQUEST_SUPERSEDE_PENDING_RESULT) == 0) ||
         (record->last_result.sequence != 0 &&
@@ -1007,6 +1007,26 @@ bool hw1_ota_result_pending(const hw1_ota_record_t *record)
 {
     return record != NULL && record->last_result.sequence != 0 &&
            record->last_result.sequence != record->acknowledged_result_sequence;
+}
+
+bool hw1_ota_phase_is_idle_or_terminal(hw1_ota_phase_t phase)
+{
+    return phase == HW1_OTA_PHASE_IDLE || phase_is_terminal(phase);
+}
+
+uint16_t hw1_ota_replacement_request_flags(const hw1_ota_record_t *record)
+{
+    return hw1_ota_result_pending(record)
+               ? (uint16_t)HW1_OTA_REQUEST_SUPERSEDE_PENDING_RESULT
+               : (uint16_t)HW1_OTA_REQUEST_NONE;
+}
+
+bool hw1_ota_phase_accepts_downgrade_permission(hw1_ota_phase_t phase)
+{
+    return phase == HW1_OTA_PHASE_REQUESTED ||
+           phase == HW1_OTA_PHASE_RECOVERY_BOOT_ARMED ||
+           phase == HW1_OTA_PHASE_RECOVERY_RUNNING ||
+           phase == HW1_OTA_PHASE_APPLYING;
 }
 
 bool hw1_ota_record_candidate_matches_verified(

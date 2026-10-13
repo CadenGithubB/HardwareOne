@@ -30,7 +30,11 @@ void vTaskDelay(unsigned) {}
 void sensorStatusBumpWith(const char*) {}
 void logSystemEvent(const char*, const char*, ...) {}
 enum {SYSEVT_SENSOR_START_FAILED, SYSEVT_SENSOR_STARTED, SYSEVT_SENSOR_STOPPED};
-void systemEventPost(int, const char*, const char* = nullptr) {}
+int startFailedEvents = 0;
+void systemEventPost(int kind, const char*, const char* = nullptr) {
+  if (kind == SYSEVT_SENSOR_START_FAILED) ++startFailedEvents;
+}
+#include "camera_core_types.inc"
 bool videoRecording = false;
 void stopVideoRecording() { videoRecording = false; }
 class String {
@@ -59,6 +63,7 @@ struct Settings {
   int cameraBrightness = 0, cameraContrast = 0, cameraSaturation = 0;
   int cameraSharpness = 0, cameraDenoise = 0, cameraWBMode = 0, cameraSpecialEffect = 0, cameraAELevel = 0;
   bool cameraHMirror = false, cameraVFlip = false;
+  bool cameraAutoStart = true;
 } gSettings;
 int persistCount = 0;
 template<typename T> void setSetting(T& target, T value) { target = value; ++persistCount; }
@@ -133,13 +138,91 @@ const CameraBackend& cameraBackend() {
 }
 #include "camera_core_extracted.inc"
 
+// Boundaries of the power worker's per-command body; the queue, task and
+// completion slots are not part of this suite.
+using CameraPowerPostHook = void (*)();
+static CameraPowerPostHook sCamPwrHook = nullptr;
+static bool cameraPwrLifecycleTake() { return true; }
+static void cameraPwrLifecycleGive() {}
+static int pwrCompletions = 0, ramFlushFailedMarks = 0;
+static bool pwrLastResult = false;
+template <typename Msg> static void cameraPwrComplete(const Msg&, bool result) {
+  ++pwrCompletions; pwrLastResult = result;
+}
+enum { RF_CAMERA = 1 };
+static void ramFlushMarkAutostartFailed(int) { ++ramFlushFailedMarks; }
+#define BROADCAST_PRINTF(...) ((void)0)
+#include "camera_pwr_extracted.inc"
+
 void reset() {
   Fake::reset(); gSettings = {}; persistCount = 0;
   gCameraRunning = cameraConnected = cameraStreaming = cameraDetected = false;
   sCameraDesiredOn = false;
+  startFailedEvents = pwrCompletions = ramFlushFailedMarks = 0;
 }
 void start() { sCameraDesiredOn = true; assert(initCamera()); }
-int main() {
+
+#define CHECK(condition, what) \
+  do { if (!(condition)) { fprintf(stderr, "FAIL: %s\n", what); return 1; } } while (0)
+
+// A failed start from any surface keeps the saved intent and reports once.
+static int powerStartScenario() {
+  reset(); sCameraDesiredOn = true; gSettings.cameraAutoStart = true;
+  Fake::failBegin = true;
+  const CameraPwrMsg msg{CAM_PWR_CMD_START, 0xff, 0, 0};
+  cameraPwrRunOne(msg);
+  CHECK(!gCameraRunning && pwrCompletions == 1 && !pwrLastResult, "failed start completes with false");
+  CHECK(gSettings.cameraAutoStart && persistCount == 0, "failed start keeps the saved camera auto-start");
+  CHECK(startFailedEvents == 1, "failed start posts exactly one start-failed event");
+  CHECK(ramFlushFailedMarks == 1, "failed start is marked for the RAM-flush resume");
+  Fake::failBegin = false;
+  cameraPwrRunOne(msg);
+  CHECK(gCameraRunning && pwrLastResult && startFailedEvents == 1, "a later start succeeds without new failure events");
+  puts("camera core power-start: failed start keeps auto-start, posts one event PASS");
+  return 0;
+}
+
+// Capture recovery, a live resolution change and an explicit stop leave the
+// consumers' sessions alone.
+static int sessionsScenario() {
+  CameraFrame frame;
+  reset(); start();
+#if HAS_CAMERA_SESSIONS
+  cameraSessionBegin(CameraSessionKind::Stream);
+  CHECK(cameraStreamActive() && cameraCaptureBusy() && cameraStreaming, "stream session is visible");
+#else
+  cameraStreaming = true;  // the base build's only stream state
+#endif
+  Fake::failCaptures = 1;
+  CHECK(captureCameraFrame(frame) && Fake::beginCount == 2 && Fake::endCount == 1, "capture recovered by re-init");
+  cameraFrameRelease(frame);
+  CHECK(cameraStreaming, "capture recovery keeps the stream state");
+  const char* reply = cmd_camerares("qvga");
+  CHECK(strstr(reply, "320x240") && !strstr(reply, "stopped"), "resolution change does not claim the stream stopped");
+  CHECK(cameraStreaming, "resolution change keeps the stream state");
+#if HAS_CAMERA_SESSIONS
+  CHECK(cameraStreamActive() && cameraCaptureBusy(), "stream session survives recovery and resolution change");
+  cameraSessionBegin(CameraSessionKind::Recording);
+  cameraSessionEnd(CameraSessionKind::Stream);
+  CHECK(!cameraStreamActive() && !cameraStreaming && cameraCaptureBusy(), "recording alone keeps the camera busy");
+  stopCamera();
+  CHECK(!gCameraRunning && cameraCaptureBusy(), "stop leaves the recording session to its owner");
+  cameraSessionEnd(CameraSessionKind::Recording);
+  CHECK(!cameraCaptureBusy(), "ending the last session clears busy");
+  cameraSessionEnd(CameraSessionKind::Recording);
+  cameraSessionEnd(CameraSessionKind::Stream);
+  CHECK(!cameraCaptureBusy() && !cameraStreaming, "an unmatched end does not underflow");
+  cameraSessionBegin(CameraSessionKind::Stream);
+  CHECK(cameraStreamActive(), "a session after an unmatched end still counts");
+#endif
+  puts("camera core sessions: recovery, resolution change and stop keep session state PASS");
+  return 0;
+}
+
+int main(int argc, char** argv) {
+  if (argc > 1 && strcmp(argv[1], "power-start") == 0) return powerStartScenario();
+  if (argc > 1 && strcmp(argv[1], "sessions") == 0) return sessionsScenario();
+  if (argc > 1) { fprintf(stderr, "unknown scenario %s\n", argv[1]); return 2; }
   CameraFrame frame;
   reset(); assert(!captureCameraFrame(frame)); assert(Fake::captureCount == 0);
   Fake::failBegin = true; assert(!initCamera()); assert(!gCameraRunning && !cameraConnected);

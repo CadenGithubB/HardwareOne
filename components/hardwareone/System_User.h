@@ -162,6 +162,18 @@ String hashUserPassword(const String& password);
 // against it after a reboot.
 inline constexpr const char* kBondAdminUser = "bond-admin";
 
+// The live bonded-master identity: the ESP-NOW transport, the reserved
+// kBondAdminUser name and a live bond session, all three. An account or a
+// session on another transport that merely carries the name never qualifies.
+// Always false when bonded mode is compiled out. isAdminUser/isSuperAdminUser
+// answer the bare name with this test against the calling task's identity.
+bool bondIdentityLive(const AuthContext& ctx);
+
+// Reserved audit/dispatch names ("system", "AuthBypass", kBondAdminUser),
+// compared case-insensitively. They are never creatable, never resolve to an
+// account id and never pass a credential check.
+bool isReservedUsername(const String& username);
+
 // Transport-generic authentication functions
 bool tgRequireAuth(AuthContext& ctx);
 bool isAdminUser(const String& who);
@@ -235,10 +247,13 @@ bool loginTransportFromNamedSession(CommandSource target,
 uint32_t publishUartAccountSession(const String& username,
                                    uint32_t* transportEpochOut = nullptr);
 void logoutTransport(CommandSource transport);
+// Refuses (with *denialOut set when given) to sign out a target session whose
+// account outranks the source account, the rank rule the user mutations use.
 bool logoutTransportFromNamedSession(CommandSource target,
                                      CommandSource source,
                                      const String& sourceUser,
-                                     TransportSessionEpoch sourceEpoch);
+                                     TransportSessionEpoch sourceEpoch,
+                                     const char** denialOut = nullptr);
 bool isTransportAuthenticated(CommandSource transport);
 String getTransportUser(CommandSource transport);
 bool isTransportAdmin(CommandSource transport);
@@ -253,6 +268,57 @@ void logAuthAttempt(bool success, const char* path, const String& userTried,
                     const String& ip, const String& reason);
 void recordLoginAttempt(CommandSource transport, const String& user,
                         const String& ip, bool success, const char* reason);
+
+// ============================================================================
+// Credential attempt table: the brute-force lockout for credential logins
+// ============================================================================
+// One owner for login throttling, compiled on every build (with or without
+// the web server) and guarded by its own lock, because httpd, the main loop,
+// the MQTT task and cmd_exec all record attempts. Entries are keyed by
+// transport plus peer: the web uses the client IP, serial "local", the UART
+// link "uart", MQTT "mqtt:<broker>", and a targeted login the caller's own
+// console peer. Check credentialAttemptAllowed() before validating a
+// password and report the outcome with credentialAttemptRecord(); each
+// transport keeps its own reply text and audit line.
+//
+// Failures inside LOGIN_ATTEMPT_WINDOW_MS count toward the tiers below. An
+// entry never expires while its lock runs; after a lock it is kept for one
+// more window, so the next failure moves on toward the next tier. A success
+// clears the entry only when every failure in it named the account that
+// succeeded. Serial, UART, the local display and MQTT (one broker at a time)
+// have reserved slots, so network peers cannot crowd them out; network
+// peers (the web today) share a pool of CREDENTIAL_ATTEMPT_POOL_SLOTS where a
+// locked entry is never evicted: when every pool entry is locked, a new peer
+// is refused until one of the locks ends. Times use the 64-bit esp_timer
+// clock, so an ended lock cannot come back when millis() wraps.
+#define CREDENTIAL_ATTEMPT_POOL_SLOTS 8
+#define LOGIN_ATTEMPT_WINDOW_MS    (10UL * 60UL * 1000UL)  // 10 minutes
+#define LOGIN_LOCKOUT_TIER1_COUNT  5   // 5  failures -> 30-second lockout
+#define LOGIN_LOCKOUT_TIER1_MS     (30UL * 1000UL)
+#define LOGIN_LOCKOUT_TIER2_COUNT  10  // 10 failures -> 5-minute lockout
+#define LOGIN_LOCKOUT_TIER2_MS     (5UL * 60UL * 1000UL)
+#define LOGIN_LOCKOUT_TIER3_COUNT  20  // 20 failures -> 30-minute lockout
+#define LOGIN_LOCKOUT_TIER3_MS     (30UL * 60UL * 1000UL)
+
+// True when this peer may try a credential now. retryMsOut (optional)
+// receives the time left on the lock that refuses it.
+bool credentialAttemptAllowed(CommandSource transport, const char* peer,
+                              unsigned long* retryMsOut = nullptr);
+// Record one checked credential attempt for `username`. A failure counts
+// toward the peer's lock and posts SYSEVT_LOGIN_LOCKED when it sets one.
+void credentialAttemptRecord(CommandSource transport, const char* peer,
+                             const char* username, bool success);
+// Failures currently counted for this peer (0 when it has no live entry).
+uint8_t credentialAttemptFailures(CommandSource transport, const char* peer);
+// Drop the peer's entry (for example when an admin bans the address).
+void credentialAttemptForget(CommandSource transport, const char* peer);
+// The fixed peer name of a console transport: "local" (serial), "uart",
+// "display"; nullptr for every other transport.
+const char* credentialAttemptConsolePeer(CommandSource transport);
+// Failed credential attempts since boot. Monotonic: not reset by window
+// expiry or by a success. Written under the table's lock; a reader sees a
+// whole 32-bit value.
+uint32_t getTotalFailedLoginCount();
 
 // Force-logout every session belonging to `username` across all transports.
 // Returns count of sessions revoked. Called by user-mutation paths (delete,
@@ -286,7 +352,14 @@ void updateUserLastSeen(const String& username);
 // Update a user's password (stores hashed). If requireChangeOnNextLogin is true, sets mustChangePassword until they change it.
 bool setUserPassword(const String& username, const String& newPasswordRaw, bool requireChangeOnNextLogin = false);
 
-// True when per-user settings has mustChangePassword (user must set a new password after login).
+// The one forced-password-change decision: true when the account's settings
+// carry mustChangePassword and the account is not a guest (a guest cannot
+// change its own password, so the flag never applies to one). Answers are
+// cached per account and refilled after setUserPassword or an identity
+// change. False when the account or its settings cannot be read.
+// Web: tgRequireAuth admits only /account/password-change and /logout while
+// this holds (webPasswordChangeAllows). Command transports do not gate on it
+// yet; the user changes the password there with userchangepassword.
 bool userMustChangePassword(const String& username);
 
 // Public username/password intake rules (register + admin create). Username:
@@ -297,6 +370,45 @@ bool isValidPublicPassword(const String& password, String* errorOut = nullptr);
 static constexpr size_t kPublicUsernameMaxLen = 64;
 static constexpr size_t kPublicPasswordMaxLen = 64;
 static constexpr size_t kPublicPasswordMinLen = 6;
+
+// Self-registration owner, shared by /register/submit and `userrequest`. It
+// takes the plaintext password directly (never through a command line, so
+// spaces and quotes are kept), applies the public intake rules above, and
+// under the filesystem lock appends the hashed request to pending_users.json
+// through the atomic pending-list writer. At most 32 requests wait at once. A
+// refused or failed request leaves the pending list as it was. It records no
+// credential attempt; the caller decides what counts as one.
+enum class AccountRequestResult : uint8_t {
+  Submitted,
+  InvalidUsername,
+  PasswordTooShort,
+  PasswordTooLong,
+  AlreadyPending,
+  QueueFull,
+  NotReady,     // filesystem not mounted
+  ReadFailed,   // pending list unreadable
+  WriteFailed,  // pending list not written; the previous file is kept
+};
+AccountRequestResult submitAccountRequest(const String& username, const String& password);
+
+// Read-only roster snapshot for the display pages and `userlist`: one row per
+// users.json account in file order. username is the full stored name (an
+// account whose stored name is longer than kPublicUsernameMaxLen is left out
+// rather than cut). role is normalized to guest|user|admin|superadmin by the
+// rule the authorization lookup uses: lower-cased, a missing role is
+// superadmin for the first account and user otherwise, and an unknown or
+// malformed role reads as user.
+struct UserRosterEntry {
+  uint32_t id;
+  char username[kPublicUsernameMaxLen + 1];
+  char role[11];
+  bool banned;
+};
+// Fills up to `capacity` rows and stores the number written in countOut;
+// totalOut (optional) gets the number of rows the roster holds. Returns false,
+// with countOut 0, when users.json is missing, unreadable or malformed.
+bool readUserRoster(UserRosterEntry* out, size_t capacity, size_t& countOut,
+                    size_t* totalOut = nullptr);
 
 // Admin: create a new account immediately (not pending). Password is hashed into per-user settings.
 // If mustChangeOnLogin is true, userMustChangePassword stays set until they change password via setUserPassword.
@@ -310,10 +422,17 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
 // into a usable account (useradd, approve) calls this. It validates the name
 // with isValidPublicUsername (reserved names included), requires a non-empty
 // credential hash, and under one filesystem lock refuses a duplicate, allocates
-// an id no existing entry uses, stores the credential and publishes users.json
+// an id never issued before, stores the credential and publishes users.json
 // last. Nothing is published when the credential write fails. The caller
 // validates plaintext (isValidPublicPassword) and hashes it; this owner never
 // sees a plaintext password. CALLERS MUST RANK-CHECK FIRST, as for adminCreateUser.
+// A guest account with mustChangePassword is refused (a guest cannot change
+// its own password, so it could never satisfy the forced change).
+//
+// "Never issued before" is kept by the account-id high-water mark in NVS
+// (System_BootState): the new id is above the roster's ids, its nextId and the
+// mark, and the mark is raised before anything is written. Creation fails when
+// the mark cannot be read or raised. The first-setup owner is id 1 by design.
 struct NewAccount {
   String username;                 // trimmed and validated here
   String passwordHash;             // hashUserPassword output, never plaintext
@@ -322,6 +441,11 @@ struct NewAccount {
   bool mustChangePassword = false; // userMustChangePassword until the first change
 };
 bool createAccount(const NewAccount& account, uint32_t& idOut, String& errorOut);
+
+// Raises the account-id high-water mark to the highest id the current
+// users.json has issued. factoryreset calls it before deleting users.json.
+// False (with errorOut) when the roster cannot be read or the mark not raised.
+bool recordAccountIdHighWater(String& errorOut);
 
 // Update a user's gamepad pattern password (stores hashed, separate from text password)
 bool setUserGamepadPassword(const String& username, const String& newPatternRaw);

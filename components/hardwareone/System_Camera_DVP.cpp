@@ -22,6 +22,7 @@
 #include "System_Utils.h"
 #include "System_ImageManager.h"  // capture-folder validator, camerasave
 #include <ArduinoJson.h>
+#include "System_DebugJson.h"  // serializeJsonListToDebugBuffer (cameravideolist json)
 #include <atomic>
 
 // Static storage prevents first-call races and never treats allocation failure
@@ -43,6 +44,26 @@ static char* cameraStatusBuffer = nullptr;
 static const size_t kStatusBufSize = 4096;
 static std::atomic<bool> sCameraDesiredOn{false};
 static bool stopCameraInternal(bool isRecovery);
+
+// Capture sessions belong to their consumers (see System_Camera_DVP.h).
+static std::atomic<uint16_t> sCameraSessions[2] = {};
+static void cameraSessionAdjust(CameraSessionKind kind, bool begin) {
+  auto& count = sCameraSessions[kind == CameraSessionKind::Recording ? 1 : 0];
+  uint16_t seen = count.load();
+  while (begin ? !count.compare_exchange_weak(seen, uint16_t(seen + 1))
+               : (seen != 0 && !count.compare_exchange_weak(seen, uint16_t(seen - 1)))) {}
+  // Re-read after publishing so a writer preempted between the load and the
+  // store cannot leave the mirror stale once the last adjustment settles.
+  bool active;
+  do {
+    active = sCameraSessions[0].load() != 0;
+    cameraStreaming = active;
+  } while ((sCameraSessions[0].load() != 0) != active);
+}
+void cameraSessionBegin(CameraSessionKind kind) { cameraSessionAdjust(kind, true); }
+void cameraSessionEnd(CameraSessionKind kind) { cameraSessionAdjust(kind, false); }
+bool cameraStreamActive() { return sCameraSessions[0].load() != 0; }
+bool cameraCaptureBusy() { return cameraStreamActive() || sCameraSessions[1].load() != 0; }
 
 // Capability snapshots are small, immutable-value copies. Rendering never
 // waits behind an in-flight capture or sensor initialization. The driver is
@@ -119,7 +140,11 @@ static CameraConfig cameraConfigFromSettings() {
   return config;
 }
 bool initCamera(bool isRecovery) {
-  if (!lockCameraMutex(15000)) return false;
+  // Every non-recovery failure posts exactly one start-failed event, here.
+  if (!lockCameraMutex(15000)) {
+    if (!isRecovery) systemEventPost(SYSEVT_SENSOR_START_FAILED, "Camera", "camera busy");
+    return false;
+  }
   if (gCameraRunning) { unlockCameraMutex(); return true; }
   if (isRecovery && !sCameraDesiredOn) { unlockCameraMutex(); return false; }
   auto config = cameraConfigFromSettings();
@@ -166,7 +191,8 @@ static bool stopCameraInternal(bool isRecovery) {
   // A failed begin may retain resources when safe teardown itself failed.
   // Idempotent end must still be retried by an explicit stop in that state.
   if (!cameraBackend().end()) { unlockCameraMutex(); return false; }
-  gCameraRunning = cameraConnected = cameraStreaming = false;
+  // Capture sessions belong to their consumers and survive recovery.
+  gCameraRunning = cameraConnected = false;
   cacheCameraCapabilities(cameraBackend().capabilities());
   if (wasRunning) sensorStatusBumpWith("closecamera");
   if (wasRunning && !isRecovery) systemEventPost(SYSEVT_SENSOR_STOPPED, "Camera");
@@ -444,9 +470,9 @@ static void cameraPwrRunOne(const CameraPwrMsg& m) {
     case CAM_PWR_CMD_START:
       if (!gCameraRunning) {
         if (!initCamera()) {
-          BROADCAST_PRINTF("[CAM_PWR] initCamera failed — reverting camera auto-start");
-          setSetting(gSettings.cameraAutoStart, false);
-          systemEventPost(SYSEVT_SENSOR_START_FAILED, "Camera", "init failed");
+          // initCamera has posted the start-failed event. The saved
+          // auto-start intent stays as the owner set it, as for the sensors.
+          BROADCAST_PRINTF("[CAM_PWR] initCamera failed");
           // The camera is off because init failed, not because the user closed it —
           // don't let a ramflush capture read this as an intentional close.
           ramFlushMarkAutostartFailed(RF_CAMERA);
@@ -794,14 +820,12 @@ static const char* applyCameraResolutionSetting(CameraFrameSize size) {
     return "Error: Failed to apply resolution; setting not saved";
   }
   setSetting(gSettings.cameraFramesize, int(size));
-  const bool wasStreaming = cameraStreaming;
-  if (wasRunning) cameraStreaming = false;
+  // Live streams keep running and pick up the new size with their next frame.
   const auto* dims = cameraFrameSizeInfo(size);
   EXT_RAM_BSS_ATTR static char result[160];
   snprintf(result, sizeof(result), "Resolution set to %ux%u (saved). %s",
            unsigned(wasRunning ? cameraWidth : dims->width),
            unsigned(wasRunning ? cameraHeight : dims->height),
-           wasStreaming ? "Streaming stopped; restart the stream." :
            wasRunning ? "Applied live." : "Will apply on next camera start.");
   unlockCameraMutex();
   return result;
@@ -1160,70 +1184,6 @@ const char* cmd_cameramaxstoredimages(const String& argsInput) {
   return buf;
 }
 
-const char* cmd_cameraautocapture(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = argsInput;
-  arg.trim();
-  
-  if (arg.length() == 0) {
-    return gSettings.cameraAutoCapture ? "cameraAutoCapture = true" : "cameraAutoCapture = false";
-  }
-  bool enable = (arg == "1" || arg.equalsIgnoreCase("true") || arg.equalsIgnoreCase("on"));
-  setSetting(gSettings.cameraAutoCapture, enable);
-  // Set default capture folder if enabling and folder is empty
-  if (enable && gSettings.cameraCaptureFolder.length() == 0) {
-    setSetting(gSettings.cameraCaptureFolder, String("/photos"));
-  }
-  return enable ? "cameraAutoCapture set to true" : "cameraAutoCapture set to false";
-}
-
-const char* cmd_cameraautocaptureinterval(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = argsInput;
-  valStr.trim();
-  
-  if (valStr.length() == 0) {
-    EXT_RAM_BSS_ATTR static char buf[64];
-    snprintf(buf, sizeof(buf), "cameraAutoCaptureInterval = %d sec", gSettings.cameraAutoCaptureIntervalSec);
-    return buf;
-  }
-  int val = valStr.toInt();
-  if (val < 10 || val > 3600) return "Error: cameraAutoCaptureInterval must be 10-3600";
-  setSetting(gSettings.cameraAutoCaptureIntervalSec, val);
-  EXT_RAM_BSS_ATTR static char buf[48];
-  snprintf(buf, sizeof(buf), "cameraAutoCaptureInterval set to %d sec", val);
-  return buf;
-}
-
-const char* cmd_camerasendaftercapture(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = argsInput;
-  arg.trim();
-  
-  if (arg.length() == 0) {
-    return gSettings.cameraSendAfterCapture ? "cameraSendAfterCapture = true" : "cameraSendAfterCapture = false";
-  }
-  bool enable = (arg == "1" || arg.equalsIgnoreCase("true") || arg.equalsIgnoreCase("on"));
-  setSetting(gSettings.cameraSendAfterCapture, enable);
-  return enable ? "cameraSendAfterCapture set to true" : "cameraSendAfterCapture set to false";
-}
-
-const char* cmd_cameratargetdevice(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  String val = argsInput;
-  val.trim();
-  
-  if (val.length() == 0) {
-    EXT_RAM_BSS_ATTR static char buf[256];
-    snprintf(buf, sizeof(buf), "cameraTargetDevice = %s", gSettings.cameraTargetDevice.c_str());
-    return buf;
-  }
-  setSetting(gSettings.cameraTargetDevice, val);
-  EXT_RAM_BSS_ATTR static char buf[256];
-  snprintf(buf, sizeof(buf), "cameraTargetDevice set to %s", val.c_str());
-  return buf;
-}
-
 extern ImageManager gImageManager;
 
 const char* cmd_camerasave(const String& argsInput) {
@@ -1257,7 +1217,6 @@ const char* cmd_camerasave(const String& argsInput) {
 // ── Video recording commands ────────────────────────────────────────────────
 // These forward to System_Camera_Video. Kept here so they register alongside
 // the rest of the camera command table.
-EXT_RAM_BSS_ATTR static char gCameraCmdBuffer[192];
 
 const char* cmd_camerarecord(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -1312,8 +1271,10 @@ const char* cmd_cameravideolist(const String& argsInput) {
       start = nl + 1;
     }
     doc["count"] = count;  // in-place update: keeps "count" first in the object
-    serializeJson(doc, getDebugBuffer(), 1024);
-    return getDebugBuffer();
+    // Entries beyond the debug buffer are dropped and the reply says
+    // "truncated"; "count" still gives the total.
+    const char* reply = serializeJsonListToDebugBuffer(doc, arr);
+    return reply ? reply : "{\"schema\":1,\"error\":\"recordings_json_too_large\"}";
   }
 
   // Single walk; entries are newline-joined, so the count follows from the string.
@@ -1321,9 +1282,27 @@ const char* cmd_cameravideolist(const String& argsInput) {
   if (list.length() == 0) return "No video recordings found";
   int count = 1;
   for (int i = 0; i < (int)list.length(); i++) if (list[i] == '\n') count++;
-  snprintf(gCameraCmdBuffer, sizeof(gCameraCmdBuffer),
-           "Recordings (%d):\n%s", count, list.c_str());
-  return gCameraCmdBuffer;
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  // Whole entries only; any that do not fit are counted, never cut silently.
+  char* buf = getDebugBuffer();
+  constexpr size_t kMoreNote = 24;  // "\n... (<n> more)" and its terminator
+  size_t pos = (size_t)snprintf(buf, GLOBAL_DEBUG_BUFFER_SIZE, "Recordings (%d):", count);
+  int shown = 0;
+  const char* entry = list.c_str();
+  while (*entry) {
+    const char* nl = strchr(entry, '\n');
+    const size_t len = nl ? (size_t)(nl - entry) : strlen(entry);
+    if (pos + 1 + len + kMoreNote >= GLOBAL_DEBUG_BUFFER_SIZE) break;
+    buf[pos++] = '\n';
+    memcpy(buf + pos, entry, len);
+    pos += len;
+    ++shown;
+    if (!nl) break;
+    entry = nl + 1;
+  }
+  buf[pos] = '\0';
+  if (shown < count) snprintf(buf + pos, GLOBAL_DEBUG_BUFFER_SIZE - pos, "\n... (%d more)", count - shown);
+  return buf;
 }
 
 const char* cmd_cameravideodelete(const String& argsInput) {
@@ -1382,10 +1361,6 @@ const CommandEntry cameraCommands[] = {
   {"camerastoragelocation", "Storage location: <0-2>",    true,  cmd_camerastoragelocation, "Usage: camerastoragelocation <0..2> (0=LittleFS,1=SD,2=Both)"},
   {"cameracapturefolder",   "Photo folder: <path>",       true,  cmd_cameracapturefolder, "Usage: cameracapturefolder <path>"},
   {"cameramaxstoredimages", "Max stored: <0-1200>",       true,  cmd_cameramaxstoredimages, "Usage: cameramaxstoredimages <0..1200> (0=unlimited)"},
-  {"cameraautocapture",     "Auto-capture: <on|off>",     true,  cmd_cameraautocapture, "Usage: cameraautocapture <on|off|1|0|true>"},
-  {"cameraautocaptureinterval", "Auto-capture: <sec>",    true, cmd_cameraautocaptureinterval, "Usage: cameraautocaptureinterval <10..3600>"},
-  {"camerasendaftercapture", "Send after capture: <on|off>", true, cmd_camerasendaftercapture, "Usage: camerasendaftercapture <on|off|1|0|true>"},
-  {"cameratargetdevice",    "Target device: <name>",      true,  cmd_cameratargetdevice, "Usage: cameratargetdevice <name>"},
   {"camerarecord",          "Start/stop MJPEG-AVI recording (SD only): <start|stop>", false, cmd_camerarecord, "Usage: camerarecord <start|stop|1|0>"},
   {"cameravideolist",       "List AVI recordings on SD (add 'json' for JSON output)",  false, cmd_cameravideolist},
   {"cameravideodelete",     "Delete recording: \"<filename>\"", true, cmd_cameravideodelete, "Usage: cameravideodelete \"<filename>\""},
@@ -1415,10 +1390,6 @@ static const SettingEntry cameraSettingEntries[] = {
   { "cameraStorageLocation", SETTING_INT, &gSettings.cameraStorageLocation, 1, 0, nullptr, 0, 2, "Storage Location", "0:LittleFS (Internal),1:SD Card,2:Both", false, "storage", "camerastoragelocation" },
   { "cameraCaptureFolder", SETTING_STRING, &gSettings.cameraCaptureFolder, 0, 0, "/photos", 0, 0, "Photo folder path", nullptr, false, "storage", "cameracapturefolder" },
   { "cameraMaxStoredImages", SETTING_INT, &gSettings.cameraMaxStoredImages, 100, 0, nullptr, 0, 1000, "Max images (0=unlimited)", nullptr, false, "storage", "cameramaxstoredimages" },
-  { "cameraAutoCapture", SETTING_BOOL, &gSettings.cameraAutoCapture, 0, 0, nullptr, 0, 1, "Enable auto-capture", nullptr, false, "autoCapture", "cameraautocapture" },
-  { "cameraAutoCaptureInterval", SETTING_INT, &gSettings.cameraAutoCaptureIntervalSec, 60, 0, nullptr, 10, 3600, "Auto-capture interval (sec)", nullptr, false, "autoCapture", "cameraautocaptureinterval" },
-  { "cameraSendAfterCapture", SETTING_BOOL, &gSettings.cameraSendAfterCapture, 0, 0, nullptr, 0, 1, "Send to target after capture", nullptr, false, "autoCapture", "camerasendaftercapture" },
-  { "cameraTargetDevice", SETTING_STRING, &gSettings.cameraTargetDevice, 0, 0, nullptr, 0, 0, "ESP-NOW target device name", nullptr, false, "autoCapture", "cameratargetdevice" },
 };
 
 static bool isCameraConnected() {

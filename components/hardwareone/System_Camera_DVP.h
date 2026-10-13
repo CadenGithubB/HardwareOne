@@ -16,7 +16,19 @@
 // Camera sensor state
 extern bool gCameraRunning;
 extern bool cameraConnected;
+// Read-only mirror of cameraStreamActive() for status readers; written only by
+// the session calls below.
 extern bool cameraStreaming;
+
+// Capture sessions. A consumer that keeps the camera busy beyond one frame
+// (a G2 live stream, the AVI recorder) begins a session when it starts and
+// ends it exactly once when it stops; one-shot frame polling does not hold
+// one. Camera recovery, resolution changes and stops leave sessions alone.
+enum class CameraSessionKind : uint8_t { Stream, Recording };
+void cameraSessionBegin(CameraSessionKind kind);
+void cameraSessionEnd(CameraSessionKind kind);
+bool cameraStreamActive();   // at least one stream session
+bool cameraCaptureBusy();    // any stream or recording session (power-save inhibitor)
 // Sticky: set by initCamera's SCCB probe, never cleared. Answers "is a sensor
 // physically here?" — cameraConnected only answers "is it running right now?".
 extern bool cameraDetected;

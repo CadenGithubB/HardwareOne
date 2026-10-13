@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -112,6 +113,9 @@ namespace VFS {
 enum StorageType { INTERNAL = 0, SDCARD = 1, AUTO = 2 };
 struct VirtualEntry { const char* name; bool isFolder; };
 static bool isSDAvailable() { return sdMounted; }
+// Advanced by every successful mount, as VFS does for boot, remount and format.
+static uint32_t sdGeneration = 0;
+static uint32_t sdMountGeneration() { return sdGeneration; }
 String normalize(const String&);
 }
 // INSERT_VFS_PATHS
@@ -235,6 +239,7 @@ static void clearObservations() {
 static ImageManager setup(bool internal = true, bool sd = true) {
   balanced(); files.clear(); directories.clear(); accesses.clear(); events.clear(); retentions.clear();
   tiers[0] = {}; tiers[1] = {}; filesystemReady = internal; sdMounted = sd;
+  if (sd) ++VFS::sdGeneration;
   gSettings.cameraCaptureFolder = "/photos"; fakeNow = 0; retentionSucceeds = true; expectOuterLock = false;
   // Prepare both tiers before observing a save, as a device has by the time
   // it captures: LittleFS is swept at init, SD at its first folder
@@ -348,12 +353,14 @@ static void admission(bool sd, unsigned failure) {
 }
 static void unavailable(bool internal, bool sd, ImageStorageLocation location) {
   auto owner = setup(internal, sd);
-  // Backend flags can change independently; manager initialization remains its gate.
-  filesystemReady = sdMounted = true;
+  // Both backends come up after init: LittleFS stays gated by the manager's
+  // init snapshot, while SD is asked of VFS at save time.
+  filesystemReady = true;
+  if (!sdMounted) { sdMounted = true; ++VFS::sdGeneration; }
   const auto result = owner.saveImage(jpeg, sizeof(jpeg), location);
   const bool expectedInternal = internal && location != IMAGE_STORAGE_SD;
-  const bool expectedSD = sd && location != IMAGE_STORAGE_LITTLEFS;
-  check(result == (expectedInternal ? String(pathFor(false)) : expectedSD ? String(pathFor(true)) : String("")), "manager availability controls tier selection and BOTH fallback");
+  const bool expectedSD = location != IMAGE_STORAGE_LITTLEFS;
+  check(result == (expectedInternal ? String(pathFor(false)) : expectedSD ? String(pathFor(true)) : String("")), "init snapshot gates LittleFS, VFS gates SD, BOTH falls back");
   check(tiers[0].stats == unsigned(expectedInternal) && tiers[1].stats == unsigned(expectedSD), "unavailable manager tiers perform no capacity query");
   hooks(result, location); balanced();
 }
@@ -455,6 +462,9 @@ static void collision(bool sd, Fault failure) {
   cleanupIdentity(sd); hooks(result, locationFor(sd)); balanced();
 }
 #if HAS_STALE_SWEEP
+// A remount through VFS alone (sdunmount + sdmount, sdformat): ImageManager is
+// not told, it sees a new mount generation.
+static void remountSd() { sdMounted = false; sdMounted = true; ++VFS::sdGeneration; }
 // `<image>.jpg.tmp` in the capture folder can only be this owner's leftover of
 // an interrupted save: the first ensure on a tier after a mount sweeps such
 // entries (LittleFS at manager init, SD at its first use), then the save
@@ -471,7 +481,7 @@ static void preexistingTemporary(bool sd) {
   files[folder + "/img_older.jpeg.tmp"] = older; files[folder + "/notes.txt.tmp"] = unrelated;
   // A fresh mount sweeps at the next folder preparation: LittleFS inside
   // init(), SD inside the first save after the card is seen again.
-  if (sd) { sdMounted = false; owner.initSD(); sdMounted = true; owner.initSD(); } else { owner.init(); }
+  if (sd) remountSd(); else owner.init();
   const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
   check(result == pathFor(sd), "save after stale temporaries did not complete");
   check(!files.count(std::string(pathFor(sd)) + ".tmp") && !files.count(folder + "/img_older.jpeg.tmp"),
@@ -483,7 +493,7 @@ static void preexistingTemporary(bool sd) {
   auto later = std::make_shared<Node>(); later->tier = sd; later->bytes = {7};
   files[folder + "/img_later.jpg.tmp"] = later;
   check(owner.ensureCaptureFolder(locationFor(sd)) && files.count(folder + "/img_later.jpg.tmp"), "sweep repeated within one mount");
-  if (sd) { sdMounted = false; owner.initSD(); sdMounted = true; owner.initSD(); } else { owner.init(); }
+  if (sd) remountSd(); else owner.init();
   check(owner.ensureCaptureFolder(locationFor(sd)) && !files.count(folder + "/img_later.jpg.tmp"), "remount did not sweep again");
   balanced();
 }
@@ -499,6 +509,33 @@ static void preexistingTemporary(bool sd) {
   hooks(result, locationFor(sd)); balanced();
 }
 #endif
+// No card at boot; one is mounted later with sdmount: an SD save succeeds,
+// the card's stale photo temporaries are swept once for that mount, and after
+// sdunmount SD saves are refused before any storage work.
+static void lateMountSave() {
+  auto owner = setup(true, false);
+  check(!owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_SD).length() && !tiers[1].stats, "no card: SD save refused");
+  clearObservations();
+  sdMounted = true; ++VFS::sdGeneration;
+  auto stale = std::make_shared<Node>(); stale->tier = 1; stale->bytes = {1};
+  files["/sd/photos/img_crash.jpg.tmp"] = stale;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_SD);
+  // The refused attempt above used counter name 000000.
+  check(result == "/sd/photos/img_000001.jpg" && files.at("/sd/photos/img_000001.jpg")->bytes == std::vector<uint8_t>(jpeg, jpeg + sizeof(jpeg)),
+        "a card mounted after init accepts an SD save");
+  check(!files.count("/sd/photos/img_crash.jpg.tmp"), "the newly mounted card's stale temporary is swept");
+  hooks(result, IMAGE_STORAGE_SD); balanced();
+  auto later = std::make_shared<Node>(); later->tier = 1; later->bytes = {2};
+  files["/sd/photos/img_later.jpg.tmp"] = later; clearObservations(); fakeNow = 1;
+  check(owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_SD).length() && files.count("/sd/photos/img_later.jpg.tmp"),
+        "the sweep runs once per mount, not per save");
+  sdMounted = false; clearObservations();
+  check(!owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_SD).length() && !tiers[1].stats && !tiers[1].opens && accesses.empty(),
+        "after unmount SD saves are refused before any storage work");
+  check(owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_BOTH) == "/photos/img_20261009_123456.jpg" && !tiers[1].opens,
+        "after unmount BOTH saves internally only");
+  balanced();
+}
 static void bothPromotion(unsigned failedTier) {
   auto owner = setup(); tiers[failedTier].fault = Fault::Promotion;
   auto prior = std::make_shared<Node>(); prior->tier = failedTier; prior->bytes = {9, 8, 7}; files[pathFor(failedTier)] = prior;
@@ -541,6 +578,7 @@ int main(int argc, char** argv) {
       run(tier + "BOTH promotion failure", [=] { bothPromotion(sd); });
     }
     run("SD recovery backup belongs to promotion owner", [] { collision(true, Fault::RecoveryBackup); });
+    run("SD mounted after init: save, sweep once, refuse after unmount", lateMountSave);
   }
   if (selected == "all") {
     for (bool sd : {false, true}) {

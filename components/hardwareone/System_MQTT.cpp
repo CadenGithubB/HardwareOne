@@ -29,7 +29,10 @@
 #include "System_MemUtil.h"
 #include "System_CommandLimits.h"  // the client buffers match the command result ceiling
 #include "System_MQTTLifecycleGate.h"
+#include "System_MQTTAdmission.h"
 #include "System_User.h"
+#include <cstdarg>
+#include <utility>
 #include "System_Utils.h"
 #include <ArduinoJson.h>
 
@@ -90,24 +93,12 @@ static MqttLifecycleGate sMqttLifecycle;
 static std::atomic<bool> sMqttBeforeConnectSeen{false};
 
 // Holds one admission while non-lifecycle code may use mqttClient. For command
-// callbacks this begins before cmd_exec submission and lasts until every
-// response path has returned from esp_mqtt_client_publish().
-class MqttClientUse final {
+// callbacks this begins before parsing; a queued command moves it into its
+// cmd_exec completion, which releases it only after the response has been
+// enqueued, and every other response path publishes before it is released.
+class MqttClientUse final : public MqttAdmission {
  public:
-  MqttClientUse()
-      : admitted_(sMqttLifecycle.tryAdmitUse()) {}
-
-  ~MqttClientUse() {
-    if (admitted_) sMqttLifecycle.releaseUse();
-  }
-
-  MqttClientUse(const MqttClientUse&) = delete;
-  MqttClientUse& operator=(const MqttClientUse&) = delete;
-
-  bool admitted() const { return admitted_; }
-
- private:
-  bool admitted_;
+  MqttClientUse() : MqttAdmission(sMqttLifecycle) {}
 };
 
 // Ensures every early start failure re-closes the lifecycle gate.  A stop
@@ -212,9 +203,12 @@ static void releaseExternalSensorStorage() {
 
 static void updateExternalSensor(const char* topic, int topicLen, const char* data, int dataLen) {
   if (!externalSensorMutex || !externalSensors) return;
-  
-  String topicStr = String(topic).substring(0, topicLen);
-  String dataStr = String(data).substring(0, dataLen);
+  if (!topic || topicLen <= 0) return;
+  if (!data || dataLen < 0) dataLen = 0;
+
+  // esp-mqtt hands over length-delimited buffers with no terminating NUL.
+  String topicStr(topic, (unsigned int)topicLen);
+  String dataStr(dataLen > 0 ? data : "", (unsigned int)dataLen);
   
   if (xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
     if (!externalSensors) {
@@ -406,6 +400,40 @@ static String getDeviceId() {
 static constexpr size_t kMqttDiscoveryJsonCap = 1024;
 EXT_RAM_BSS_ATTR static char sMqttDiscoveryConfigJson[kMqttDiscoveryJsonCap];
 
+// Bounded text builder for the discovery documents. Once a piece does not fit
+// the writer stays failed, and the caller skips the publish instead of sending
+// a truncated document (a long mqttBaseTopic appears twice in each config).
+class MqttJsonWriter final {
+ public:
+  MqttJsonWriter(char* buffer, size_t capacity)
+      : buf_(buffer), cap_(capacity), len_(0), ok_(buffer && capacity > 0) {
+    if (ok_) buf_[0] = '\0';
+  }
+
+  __attribute__((format(printf, 2, 3)))
+  void appendf(const char* fmt, ...) {
+    if (!ok_) return;
+    va_list args;
+    va_start(args, fmt);
+    const int written = vsnprintf(buf_ + len_, cap_ - len_, fmt, args);
+    va_end(args);
+    if (written < 0 || (size_t)written >= cap_ - len_) {
+      ok_ = false;
+      buf_[len_] = '\0';
+      return;
+    }
+    len_ += (size_t)written;
+  }
+
+  bool ok() const { return ok_; }
+
+ private:
+  char* buf_;
+  size_t cap_;
+  size_t len_;
+  bool ok_;
+};
+
 static void publishDiscoveryConfig(const char* component, const char* objectId,
                                     const char* name, const char* valueTemplate,
                                     const char* unit, const char* deviceClass,
@@ -422,28 +450,27 @@ static void publishDiscoveryConfig(const char* component, const char* objectId,
   String discoveryTopic = gSettings.mqttDiscoveryPrefix + "/" + component + "/" + 
                           deviceId + "/" + objectId + "/config";
   
-  // Build config JSON. Array REFERENCE to the shared PSRAM buffer (not a
-  // pointer) so sizeof(configJson) still yields the capacity for the snprintf
-  // calls below — see sMqttDiscoveryConfigJson for why sharing is safe.
-  char (&configJson)[kMqttDiscoveryJsonCap] = sMqttDiscoveryConfigJson;
-  int pos = 0;
+  // Build config JSON in the shared PSRAM buffer — see
+  // sMqttDiscoveryConfigJson for why sharing is safe.
+  char* configJson = sMqttDiscoveryConfigJson;
+  MqttJsonWriter json(configJson, kMqttDiscoveryJsonCap);
   
-  pos += snprintf(configJson + pos, sizeof(configJson) - pos,
+  json.appendf(
     "{\"name\":\"%s\",\"unique_id\":\"%s\",\"state_topic\":\"%s\",\"value_template\":\"%s\"",
     name, uniqueId.c_str(), stateTopic.c_str(), valueTemplate);
   
   if (unit && strlen(unit) > 0) {
-    pos += snprintf(configJson + pos, sizeof(configJson) - pos, ",\"unit_of_measurement\":\"%s\"", unit);
+    json.appendf(",\"unit_of_measurement\":\"%s\"", unit);
   }
   if (deviceClass && strlen(deviceClass) > 0) {
-    pos += snprintf(configJson + pos, sizeof(configJson) - pos, ",\"device_class\":\"%s\"", deviceClass);
+    json.appendf(",\"device_class\":\"%s\"", deviceClass);
   }
   if (icon && strlen(icon) > 0) {
-    pos += snprintf(configJson + pos, sizeof(configJson) - pos, ",\"icon\":\"%s\"", icon);
+    json.appendf(",\"icon\":\"%s\"", icon);
   }
   
   // Add availability
-  pos += snprintf(configJson + pos, sizeof(configJson) - pos,
+  json.appendf(
     ",\"availability_topic\":\"%s\",\"payload_available\":\"online\",\"payload_not_available\":\"offline\"",
     availTopic.c_str());
   
@@ -453,18 +480,23 @@ static void publishDiscoveryConfig(const char* component, const char* objectId,
   if (gSettings.espnowFriendlyName.length() > 0) haDeviceName = gSettings.espnowFriendlyName.c_str();
   else if (gSettings.espnowDeviceName.length() > 0) haDeviceName = gSettings.espnowDeviceName.c_str();
   
-  pos += snprintf(configJson + pos, sizeof(configJson) - pos,
+  json.appendf(
     ",\"device\":{\"identifiers\":[\"%s\"],\"name\":\"%s\",\"model\":\"ESP32-S3\",\"manufacturer\":\"Custom\"",
     deviceId.c_str(), haDeviceName);
   
   // Add suggested_area from espnowRoom (HA auto-assigns device to this room)
   if (gSettings.espnowRoom.length() > 0) {
-    pos += snprintf(configJson + pos, sizeof(configJson) - pos,
-      ",\"suggested_area\":\"%s\"", gSettings.espnowRoom.c_str());
+    json.appendf(",\"suggested_area\":\"%s\"", gSettings.espnowRoom.c_str());
   }
-  pos += snprintf(configJson + pos, sizeof(configJson) - pos, "}");
+  json.appendf("}");
   
-  pos += snprintf(configJson + pos, sizeof(configJson) - pos, "}");
+  json.appendf("}");
+
+  if (!json.ok()) {
+    WARN_MQTTF("Discovery config for %s exceeds %u bytes; not published",
+               objectId, (unsigned)kMqttDiscoveryJsonCap);
+    return;
+  }
   
   // Publish with retain so HA picks it up even if it restarts
   esp_mqtt_client_publish(mqttClient, discoveryTopic.c_str(), configJson, 0, 1, true);
@@ -482,6 +514,129 @@ static void subscribeToCommandTopic() {
     INFO_MQTT_PUBSUBF("Subscribed to command topic: %s", commandTopic.c_str());
   } else {
     WARN_MQTTF("Failed to subscribe to command topic");
+  }
+}
+
+// One queued MQTT command between the esp-mqtt callback and its cmd_exec
+// completion. The admission keeps mqttClient alive (mqttTick cannot tear the
+// client down) until the response has been enqueued.
+struct MqttCommandReply {
+  MqttAdmission use;
+  String responseTopic;
+  String user;
+  String safeCommand;
+  const char* routedKind = nullptr;  // static text; nullptr for a local command
+};
+
+// Builds the response document and hands it to the client's outbox. Enqueue
+// takes the client's API lock only briefly and does no socket I/O, so a
+// completion on cmd_exec never waits for the esp-mqtt task's network work.
+// The esp-mqtt task sends queued items at the top of its next loop pass (up
+// to its poll-read timeout later when the broker is idle).
+//
+// When a stop is already pending (closemqtt or "mqttclientenabled 0" sent over
+// MQTT, for example), mqttTick claims teardown as soon as this reply releases
+// its admission, and the esp-mqtt task deletes every outbox item when it
+// exits, so a queued reply would be lost. Such a reply is published directly
+// instead: the event task no longer holds the API lock across a command, and
+// teardown waits for the admission this reply still holds.
+static void enqueueMqttCommandReply(const MqttCommandReply& reply, bool ok,
+                                    const char* result) {
+  const String safeResult = redactMQTTCommandResult(String(result ? result : ""));
+  PSRAM_JSON_DOC(respDoc);
+  respDoc["ok"] = ok;
+  if (reply.routedKind) {
+    respDoc["routed"] = reply.routedKind;
+  } else {
+    respDoc["user"] = reply.user;
+    // Keep command correlation without reflecting a login password (or any
+    // other registered secret-bearing argument) back over MQTT.
+    respDoc["cmd"] = reply.safeCommand;
+  }
+  if (ok) {
+    respDoc["result"] = safeResult;
+  } else {
+    respDoc["error"] = safeResult.length() > 0
+                           ? safeResult
+                           : String("Command execution failed");
+  }
+  String respStr;
+  serializeJson(respDoc, respStr);
+  if (sMqttLifecycle.stopPending()) {
+    if (esp_mqtt_client_publish(mqttClient, reply.responseTopic.c_str(),
+                                respStr.c_str(), (int)respStr.length(), 0,
+                                0) < 0) {
+      WARN_MQTTF("Command response could not be sent before stop");
+    }
+    return;
+  }
+  if (esp_mqtt_client_enqueue(mqttClient, reply.responseTopic.c_str(),
+                              respStr.c_str(), (int)respStr.length(), 0, 0,
+                              true) < 0) {
+    WARN_MQTTF("Command response could not be queued");
+  }
+}
+
+// cmd_exec completion: answer, then release the admission with the reply.
+static void mqttCommandCompleted(bool ok, const char* result, void* userData) {
+  MqttCommandReply* reply = static_cast<MqttCommandReply*>(userData);
+  if (!reply) return;
+  enqueueMqttCommandReply(*reply, ok, result);
+  DEBUG_MQTT_COMMANDSF("Command response: ok=%d", ok);
+  reply->~MqttCommandReply();
+  free(reply);
+}
+
+// Queues one authenticated command line on cmd_exec and returns at once: the
+// esp-mqtt task holds the client's API lock while it dispatches this event,
+// so waiting here would block every other publisher (the main loop's state
+// publish among them) for the whole command. The admission moves into the
+// completion only once the command is queued; every failure answers here
+// while the caller's admission is still held.
+static void submitMqttCommand(MqttAdmission&& use, const String& line,
+                              const char* username, const String& peer,
+                              const String& responseTopic,
+                              const String& safeCommand,
+                              const char* routedKind) {
+  void* storage = ps_alloc(sizeof(MqttCommandReply), AllocPref::PreferPSRAM,
+                           "mqtt.cmd.reply");
+  if (!storage) {
+    esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
+      "{\"ok\":false,\"error\":\"Out of memory\"}", 0, 0, false);
+    return;
+  }
+  MqttCommandReply* reply = new (storage) MqttCommandReply();
+  reply->use = std::move(use);
+  reply->responseTopic = responseTopic;
+  reply->user = username;
+  reply->safeCommand = safeCommand;
+  reply->routedKind = routedKind;
+
+  Command queued;
+  queued.line = line;
+  queued.ctx.origin = ORIGIN_MQTT;
+  queued.ctx.auth.transport = SOURCE_MQTT;
+  queued.ctx.auth.user = username;
+  queued.ctx.auth.ip = peer;
+  queued.ctx.auth.path = "/mqtt/command";
+  queued.ctx.auth.opaque = nullptr;
+  queued.ctx.id = (uint32_t)millis();
+  queued.ctx.timestampMs = (uint32_t)millis();
+  queued.ctx.outputMask = MSG_ROUTE_FILE;
+  queued.ctx.validateOnly = false;
+  queued.ctx.captureOutput = false;
+  queued.ctx.replyHandle = nullptr;
+  queued.ctx.httpReq = nullptr;
+  if (!submitCommandAsync(queued, mqttCommandCompleted, reply)) {
+    // Not queued: the completion will never run, so answer and release here.
+    // submitCommandAsync reports a full queue, a failed request allocation
+    // and a missing executor queue alike, so the answer covers all three.
+    enqueueMqttCommandReply(*reply, false,
+                            commandInputLengthAccepted(line.length())
+                                ? "Error: Command could not be queued - try again"
+                                : "Error: Command exceeds input limit");
+    reply->~MqttCommandReply();
+    free(reply);
   }
 }
 
@@ -555,9 +710,29 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
                safeCommand.c_str(),
                strlen(target) > 0 ? " target=" : "", target);
   
-  // Authenticate user
+  // Authenticate user. Every client of this broker shares one lockout key,
+  // so a client that keeps guessing also locks out MQTT users with the right
+  // password until the lock ends (the same trade as serial "local").
+  const String mqttPeer = "mqtt:" + gSettings.mqttHost;
+  unsigned long lockoutRemainingMs = 0;
+  if (!credentialAttemptAllowed(SOURCE_MQTT, mqttPeer.c_str(),
+                                &lockoutRemainingMs)) {
+    WARN_MQTTF("Command login locked out for user '%s'", username);
+    recordLoginAttempt(SOURCE_MQTT, String(username), mqttPeer, false,
+                       "Locked out");
+    char lockReply[96];
+    snprintf(lockReply, sizeof(lockReply),
+             "{\"ok\":false,\"error\":\"Login locked out. Retry in %lu seconds.\"}",
+             (lockoutRemainingMs + 999UL) / 1000UL);
+    esp_mqtt_client_publish(mqttClient, responseTopic.c_str(), lockReply, 0,
+                            0, false);
+    return;
+  }
   if (!isValidUser(String(username), String(password))) {
     WARN_MQTTF("Authentication FAILED for user '%s'", username);
+    credentialAttemptRecord(SOURCE_MQTT, mqttPeer.c_str(), username, false);
+    recordLoginAttempt(SOURCE_MQTT, String(username), mqttPeer, false,
+                       "Invalid credentials");
     // Every failure reaches the event register; the notification renderer
     // applies the 30s toast cooldown downstream.
     systemEventPost(SYSEVT_LOGIN_FAIL, username, "mqtt");
@@ -565,29 +740,10 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
       "{\"ok\":false,\"error\":\"Authentication failed\"}", 0, 0, false);
     return;
   }
+  credentialAttemptRecord(SOURCE_MQTT, mqttPeer.c_str(), username, true);
   
   DEBUG_MQTT_COMMANDSF("Authentication successful for user '%s'", username);
 
-  auto executeMqttRegistryLine = [&](const String& line,
-                                     String& resultOut) -> bool {
-    Command queued;
-    queued.line = line;
-    queued.ctx.origin = ORIGIN_MQTT;
-    queued.ctx.auth.transport = SOURCE_MQTT;
-    queued.ctx.auth.user = username;
-    queued.ctx.auth.ip = "mqtt:" + gSettings.mqttHost;
-    queued.ctx.auth.path = "/mqtt/command";
-    queued.ctx.auth.opaque = nullptr;
-    queued.ctx.id = (uint32_t)millis();
-    queued.ctx.timestampMs = (uint32_t)millis();
-    queued.ctx.outputMask = MSG_ROUTE_FILE;
-    queued.ctx.validateOnly = false;
-    queued.ctx.captureOutput = false;
-    queued.ctx.replyHandle = nullptr;
-    queued.ctx.httpReq = nullptr;
-    return submitAndExecuteSync(queued, resultOut);
-  };
-  
 #if ENABLE_ESPNOW
   // If target is specified, route command to mesh devices instead of executing locally
   if (strlen(target) > 0 && gSettings.meshRole == MESH_ROLE_MASTER) {
@@ -618,54 +774,20 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
     routedLine += " "; routedLine += username;
     routedLine += " "; routedLine += password;
     routedLine += " "; routedLine += command;
-    String routedResult;
-    const bool routedOk = executeMqttRegistryLine(routedLine, routedResult);
-    const String safeRoutedResult = redactMQTTCommandResult(routedResult);
-    PSRAM_JSON_DOC(routeResponse);
-    routeResponse["ok"] = routedOk;
-    routeResponse["routed"] = routedKind;
-    if (routedOk) routeResponse["result"] = safeRoutedResult;
-    else routeResponse["error"] = safeRoutedResult.length()
-                                      ? safeRoutedResult
-                                      : String("Command execution failed");
-    String routeJson;
-    serializeJson(routeResponse, routeJson);
-    esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
-                            routeJson.c_str(), 0, 0, false);
+    submitMqttCommand(std::move(commandUse), routedLine, username, mqttPeer,
+                      responseTopic, safeCommand, routedKind);
     return;
   }
 #endif
-  
-  // Route command execution through cmd_exec_task (submitAndExecuteSync) instead of
-  // calling executeCommand() directly on the esp-mqtt event task. This serializes MQTT
-  // commands with every other command source (no concurrent-handler races on shared
-  // state / static response buffers) and runs them on cmd_exec's 8 KB stack. The
-  // mesh-routing path (room:/tag:/device:) above is unchanged.
-  systemEventPost(SYSEVT_REMOTE_CMD_RX, username, safeCommand.c_str());
-  String cmdResult;
-  bool success = executeMqttRegistryLine(command, cmdResult);
-  const String safeResult = redactMQTTCommandResult(cmdResult);
 
-  // Build and publish response
-  PSRAM_JSON_DOC(respDoc);
-  respDoc["ok"] = success;
-  respDoc["user"] = username;
-  // Keep command correlation without reflecting a login password (or any
-  // other registered secret-bearing argument) back over MQTT.
-  respDoc["cmd"] = safeCommand;
-  if (success) {
-    respDoc["result"] = safeResult;
-  } else {
-    respDoc["error"] = safeResult.length() > 0
-                           ? safeResult
-                           : String("Command execution failed");
-  }
-  
-  String respStr;
-  serializeJson(respDoc, respStr);
-  esp_mqtt_client_publish(mqttClient, responseTopic.c_str(), respStr.c_str(), 0, 0, false);
-  
-  DEBUG_MQTT_COMMANDSF("Command response: ok=%d", success);
+  // Route command execution through cmd_exec_task instead of calling
+  // executeCommand() directly on the esp-mqtt event task. This serializes MQTT
+  // commands with every other command source (no concurrent-handler races on
+  // shared state / static response buffers) and runs them on cmd_exec's 8 KB
+  // stack. The response is published from the completion.
+  systemEventPost(SYSEVT_REMOTE_CMD_RX, username, safeCommand.c_str());
+  submitMqttCommand(std::move(commandUse), String(command), username, mqttPeer,
+                    responseTopic, safeCommand, nullptr);
 }
 
 // Forward declarations for mesh peer discovery (defined below)
@@ -807,27 +929,27 @@ static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
                           peerId + "/" + objectId + "/config";
 
   // Shares the same PSRAM buffer as publishDiscoveryConfig — this function only
-  // runs after every publishDiscoveryConfig frame has returned. Array reference
-  // keeps sizeof(configJson) working. See sMqttDiscoveryConfigJson.
-  char (&configJson)[kMqttDiscoveryJsonCap] = sMqttDiscoveryConfigJson;
-  int pos = 0;
+  // runs after every publishDiscoveryConfig frame has returned. See
+  // sMqttDiscoveryConfigJson.
+  char* configJson = sMqttDiscoveryConfigJson;
+  MqttJsonWriter json(configJson, kMqttDiscoveryJsonCap);
 
-  pos += snprintf(configJson + pos, sizeof(configJson) - pos,
+  json.appendf(
     "{\"name\":\"%s\",\"unique_id\":\"%s\",\"state_topic\":\"%s\",\"value_template\":\"%s\"",
     name, uniqueId.c_str(), peerStateTopic.c_str(), valueTemplate);
 
   if (unit && strlen(unit) > 0) {
-    pos += snprintf(configJson + pos, sizeof(configJson) - pos, ",\"unit_of_measurement\":\"%s\"", unit);
+    json.appendf(",\"unit_of_measurement\":\"%s\"", unit);
   }
   if (deviceClass && strlen(deviceClass) > 0) {
-    pos += snprintf(configJson + pos, sizeof(configJson) - pos, ",\"device_class\":\"%s\"", deviceClass);
+    json.appendf(",\"device_class\":\"%s\"", deviceClass);
   }
   if (icon && strlen(icon) > 0) {
-    pos += snprintf(configJson + pos, sizeof(configJson) - pos, ",\"icon\":\"%s\"", icon);
+    json.appendf(",\"icon\":\"%s\"", icon);
   }
 
   // Availability
-  pos += snprintf(configJson + pos, sizeof(configJson) - pos,
+  json.appendf(
     ",\"availability_topic\":\"%s\",\"payload_available\":\"online\",\"payload_not_available\":\"offline\"",
     peerAvailTopic.c_str());
 
@@ -835,16 +957,21 @@ static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
   const char* peerName = peer.friendlyName[0] ? peer.friendlyName :
                          (peer.name[0] ? peer.name : macCompact);
 
-  pos += snprintf(configJson + pos, sizeof(configJson) - pos,
+  json.appendf(
     ",\"device\":{\"identifiers\":[\"%s\"],\"name\":\"%s\",\"model\":\"ESP32-S3\",\"manufacturer\":\"Custom\""
     ",\"via_device\":\"%s\"",
     peerId.c_str(), peerName, masterDeviceId.c_str());
 
   if (peer.room[0]) {
-    pos += snprintf(configJson + pos, sizeof(configJson) - pos,
-      ",\"suggested_area\":\"%s\"", peer.room);
+    json.appendf(",\"suggested_area\":\"%s\"", peer.room);
   }
-  pos += snprintf(configJson + pos, sizeof(configJson) - pos, "}}");
+  json.appendf("}}");
+
+  if (!json.ok()) {
+    WARN_MQTTF("Peer discovery config for %s/%s exceeds %u bytes; not published",
+               peerId.c_str(), objectId, (unsigned)kMqttDiscoveryJsonCap);
+    return;
+  }
 
   esp_mqtt_client_publish(mqttClient, discoveryTopic.c_str(), configJson, 0, 1, true);
 }
@@ -1451,17 +1578,24 @@ void publishMQTTSensorData() {
   
   // Close JSON object
   pos += snprintf(jsonBuf + pos, 16384 - pos, "}");
-  
-  // Publish to state topic
-  String stateTopic = gSettings.mqttBaseTopic + "/state";
-  int msg_id = esp_mqtt_client_publish(mqttClient, stateTopic.c_str(), jsonBuf, 0, 0, false);
-  
-  if (msg_id >= 0) {
-    DEBUG_MQTT_PUBSUBF("Published %d bytes to %s", pos, stateTopic.c_str());
+
+  // Every section above is bounded (the largest, thermal, by its 2 KB
+  // buffer), so the document stays far below 16 KB; still never send a
+  // truncated document if a future section breaks that bound.
+  if (pos <= 0 || pos >= 16384) {
+    WARN_MQTTF("State document did not fit in 16384 bytes; not published");
   } else {
-    WARN_MQTTF("Publish failed");
+    // Publish to state topic
+    String stateTopic = gSettings.mqttBaseTopic + "/state";
+    int msg_id = esp_mqtt_client_publish(mqttClient, stateTopic.c_str(), jsonBuf, 0, 0, false);
+
+    if (msg_id >= 0) {
+      DEBUG_MQTT_PUBSUBF("Published %d bytes to %s", pos, stateTopic.c_str());
+    } else {
+      WARN_MQTTF("Publish failed");
+    }
   }
-  
+
   free(jsonBuf);
   
   // Publish sensor data for mesh peers (master bridge mode)

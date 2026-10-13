@@ -665,6 +665,7 @@ TransportSessionEpoch captureTransportSessionEpoch(const AuthContext& ctx) {
 extern bool isAuthed(httpd_req_t* req, String& outUser);
 extern esp_err_t sendAuthRequiredResponse(httpd_req_t* req);
 extern void getClientIP(httpd_req_t* req, String& ip);
+extern bool webPasswordChangeAllows(httpd_req_t* req, const String& user);
 
 // Debug macros now defined in debug_system.h with performance optimizations
 // DEBUG_USERS, DEBUG_USERSF, DEBUG_CMD_FLOW, DEBUG_CMD_FLOWF, DEBUG_SYSTEM, DEBUG_SYSTEMF
@@ -706,6 +707,9 @@ bool tgRequireAuth(AuthContext& ctx) {
     ctx.sid = getCookieSID(req);
     if (ctx.ip.length() == 0) { getClientIP(req, ctx.ip); }
     logAuthAttempt(true, ctx.path.c_str(), ctx.user, ctx.ip, "");
+    // A forced password change admits only the change form and logout, for
+    // pages and APIs alike (userMustChangePassword is the one decision).
+    if (!webPasswordChangeAllows(req, ctx.user)) return false;
     return true;
   } else if (ctx.transport == SOURCE_SERIAL) {
     // Serial console auth state. Use the synchronized fixed-storage shadow;
@@ -770,10 +774,8 @@ bool tgRequireAuth(AuthContext& ctx) {
     // executeCommand:
     //   * BLE  — per-conn session token check in Bluetooth.cpp before submit
     //   * ESP-NOW — v3 protocol signed msgId verification before submit
-    // SOURCE_MQTT currently has NO such upstream check: MQTT-received
-    // commands are administrator-trusted, equivalent to SOURCE_INTERNAL.
-    // If/when MQTT is opened to untrusted clients, split this branch and
-    // wire MQTT through a proper session/token check.
+    //   * MQTT — handleMQTTCommand checks the credential attempt table and
+    //     then the user/pass carried in every command envelope before submit
     // SOURCE_INTERNAL is firmware-generated and trusted by design (used by
     // automation rules, boot sequences, scheduled tasks).
     return true;
@@ -866,17 +868,14 @@ bool isAdminUser(const String& who) {
   // "username" key leaves firstUser empty, and "" == "" would otherwise satisfy the
   // first-user fallback. resolveRole() and isGuestUser() already guard the same way.
   if (who.length() == 0) return false;
-#if ENABLE_BONDED_MODE
   // A bonded master that presented a valid bond session token runs commands under
-  // kBondAdminUser. Grant admin for the lifetime of the live bond session only.
-  // Checked before the filesystem/JSON path — this identity is never a real
-  // users.json account, and ctx.user is only ever set to it by the token-validated
-  // bonded-command path (v4_handle_cmd), so the session check is defense-in-depth.
+  // kBondAdminUser. The bare name grants admin only while the calling task runs
+  // that live ESP-NOW bond identity: an account or a session on another
+  // transport carrying the same name is never elevated (and never the roster's
+  // answer either). Checked before the filesystem/JSON path.
   if (who == kBondAdminUser) {
-    extern bool isBondSessionTokenValid();
-    return isBondSessionTokenValid();
+    return bondIdentityLive(currentAuthContext());
   }
-#endif
   if (!filesystemReady) return false;
   // Serialize with role writes (reentrant per task) so this hot-path privilege
   // check can't tear-read a users.json mid-write.
@@ -1117,12 +1116,11 @@ bool isSuperAdminUser(const String& who) {
   // An empty identity is nobody — never super. See isAdminUser() for why this
   // guards the first-user fallback below.
   if (who.length() == 0) return false;
-#if ENABLE_BONDED_MODE
+  // Same rule as isAdminUser: the bare bond name is super only on the task
+  // running the live ESP-NOW bond identity.
   if (who == kBondAdminUser) {
-    extern bool isBondSessionTokenValid();
-    return isBondSessionTokenValid();
+    return bondIdentityLive(currentAuthContext());
   }
-#endif
   if (!filesystemReady) return false;
   // Serialize with role writes — an unlocked read can tear mid-write and
   // misjudge privilege. Reentrant per task, so nested FS ops are fine.
@@ -1130,6 +1128,19 @@ bool isSuperAdminUser(const String& who) {
   String json;
   if (!readRosterJson("user.isSuperAdmin", json)) return false;
   return superFromRosterJson(json, who);
+}
+
+bool bondIdentityLive(const AuthContext& ctx) {
+#if ENABLE_BONDED_MODE
+  // The bonded-command path (v4_handle_cmd) is the only producer of this
+  // tuple, and only after validating the bond session token.
+  if (ctx.transport != SOURCE_ESPNOW || ctx.user != kBondAdminUser) return false;
+  extern bool isBondSessionTokenValid();
+  return isBondSessionTokenValid();
+#else
+  (void)ctx;
+  return false;
+#endif
 }
 
 // Combined lookup for resolveRole(): both answers from ONE read of the roster.
@@ -1242,6 +1253,255 @@ uint32_t publishUartAccountSession(const String& username,
     (void)uartLinkSessionRestrictCm5PresenceIfUser(username, sessionEpoch);
   }
   return sessionEpoch;
+}
+
+// ============================================================================
+// Credential attempt table (contract in System_User.h)
+// ============================================================================
+
+namespace credential_attempts {
+
+constexpr uint8_t kMixedUsers = 0x01;   // failures named more than one account
+constexpr uint8_t kLockApplied = 0x02;  // lockedUntil holds the last lock's end
+
+struct Entry {
+  char peer[48];                         // "" = unused
+  char user[kPublicUsernameMaxLen + 1];  // the account its failures named
+  CommandSource transport;
+  uint8_t failCount;
+  uint8_t flags;
+  // Milliseconds on the 64-bit esp_timer clock, which does not wrap; a
+  // 32-bit millis() end time would read as running again after ~24.8 days.
+  uint64_t windowStart;  // first failure
+  uint64_t lastFailMs;   // latest failure (eviction order)
+  uint64_t lockedUntil;  // valid while kLockApplied is set
+};
+
+uint64_t nowMs() {
+  return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
+}
+
+// Slots 0..3 belong to serial, UART, the display and MQTT (one key each: a
+// console's fixed peer; every MQTT client shares its broker's key); the rest
+// are the pool shared by network peers (the web today).
+constexpr size_t kReservedSlots = 4;
+constexpr size_t kSlots = kReservedSlots + CREDENTIAL_ATTEMPT_POOL_SLOTS;
+// PSRAM: peers, public usernames and counters, no secrets.
+EXT_RAM_BSS_ATTR Entry sEntries[kSlots];
+portMUX_TYPE sMux = portMUX_INITIALIZER_UNLOCKED;
+uint32_t sTotalFailures = 0;
+
+int reservedSlot(CommandSource transport) {
+  switch (transport) {
+    case SOURCE_SERIAL: return 0;
+    case SOURCE_UART: return 1;
+    case SOURCE_LOCAL_DISPLAY: return 2;
+    case SOURCE_MQTT: return 3;
+    default: return -1;
+  }
+}
+
+const char* peerOrUnknown(const char* peer) {
+  return (peer && peer[0]) ? peer : "unknown";
+}
+
+unsigned long lockoutMs(uint8_t count) {
+  if (count >= LOGIN_LOCKOUT_TIER3_COUNT) return LOGIN_LOCKOUT_TIER3_MS;
+  if (count >= LOGIN_LOCKOUT_TIER2_COUNT) return LOGIN_LOCKOUT_TIER2_MS;
+  if (count >= LOGIN_LOCKOUT_TIER1_COUNT) return LOGIN_LOCKOUT_TIER1_MS;
+  return 0;
+}
+
+bool lockRunning(const Entry& e, uint64_t now) {
+  return (e.flags & kLockApplied) != 0 && now < e.lockedUntil;
+}
+
+// Unused, or unlocked and quiet for a whole window: counted from the first
+// failure, or from the end of the last lock once one was applied.
+bool expired(const Entry& e, uint64_t now) {
+  if (e.peer[0] == '\0') return true;
+  if (lockRunning(e, now)) return false;
+  const uint64_t anchor =
+      (e.flags & kLockApplied) ? e.lockedUntil : e.windowStart;
+  return now > anchor && (now - anchor) > LOGIN_ATTEMPT_WINDOW_MS;
+}
+
+// The live entry for this key, or nullptr; an expired entry for the key is
+// cleared on the way. Caller holds sMux.
+Entry* find(CommandSource transport, const char* peer, uint64_t now) {
+  const int reserved = reservedSlot(transport);
+  Entry* match = nullptr;
+  if (reserved >= 0) {
+    match = &sEntries[reserved];
+  } else {
+    for (size_t i = kReservedSlots; i < kSlots && !match; ++i) {
+      Entry& e = sEntries[i];
+      if (e.peer[0] != '\0' && e.transport == transport &&
+          strncmp(e.peer, peer, sizeof(e.peer) - 1) == 0) {
+        match = &e;
+      }
+    }
+  }
+  if (match && expired(*match, now)) {
+    memset(match, 0, sizeof(*match));
+    match = nullptr;
+  }
+  return match;
+}
+
+// The entry a failure for this key counts in: its live entry, else a fresh
+// one in an unused or expired slot, else the unlocked pool entry with the
+// oldest failure. nullptr when every pool entry holds a running lock.
+// Caller holds sMux.
+Entry* claim(CommandSource transport, const char* peer, uint64_t now) {
+  Entry* e = find(transport, peer, now);
+  if (e) return e;
+  const int reserved = reservedSlot(transport);
+  if (reserved >= 0) {
+    e = &sEntries[reserved];
+  } else {
+    Entry* oldest = nullptr;
+    for (size_t i = kReservedSlots; i < kSlots && !e; ++i) {
+      Entry& candidate = sEntries[i];
+      if (expired(candidate, now)) {
+        e = &candidate;
+      } else if (!lockRunning(candidate, now) &&
+                 (!oldest || candidate.lastFailMs < oldest->lastFailMs)) {
+        oldest = &candidate;
+      }
+    }
+    if (!e) e = oldest;
+    if (!e) return nullptr;
+  }
+  memset(e, 0, sizeof(*e));
+  strlcpy(e->peer, peer, sizeof(e->peer));
+  e->transport = transport;
+  e->windowStart = now;
+  return e;
+}
+
+}  // namespace credential_attempts
+
+bool credentialAttemptAllowed(CommandSource transport, const char* peer,
+                              unsigned long* retryMsOut) {
+  using namespace credential_attempts;
+  peer = peerOrUnknown(peer);
+  const uint64_t now = nowMs();
+  unsigned long retryMs = 0;
+  bool allowed = true;
+  portENTER_CRITICAL(&sMux);
+  const Entry* e = find(transport, peer, now);
+  if (e) {
+    if (lockRunning(*e, now)) {
+      allowed = false;
+      retryMs = static_cast<unsigned long>(e->lockedUntil - now);
+    }
+  } else if (reservedSlot(transport) < 0) {
+    // A new network peer needs a pool slot to count its failures. While every
+    // slot holds a running lock it is refused until the earliest lock ends.
+    allowed = false;
+    for (size_t i = kReservedSlots; i < kSlots; ++i) {
+      if (!lockRunning(sEntries[i], now)) {
+        allowed = true;
+        break;
+      }
+      const unsigned long left =
+          static_cast<unsigned long>(sEntries[i].lockedUntil - now);
+      if (retryMs == 0 || left < retryMs) retryMs = left;
+    }
+    if (allowed) retryMs = 0;
+  }
+  portEXIT_CRITICAL(&sMux);
+  if (retryMsOut) *retryMsOut = retryMs;
+  return allowed;
+}
+
+void credentialAttemptRecord(CommandSource transport, const char* peer,
+                             const char* username, bool success) {
+  using namespace credential_attempts;
+  peer = peerOrUnknown(peer);
+  if (!username) username = "";
+  const uint64_t now = nowMs();
+  unsigned long lockMs = 0;
+  int failures = -1;  // -1: no slot was free to count this failure
+  portENTER_CRITICAL(&sMux);
+  if (success) {
+    // Only the account that succeeded is cleared: an entry whose failures
+    // named another account (or several) keeps counting.
+    Entry* e = find(transport, peer, now);
+    if (e && !(e->flags & kMixedUsers) && strcmp(e->user, username) == 0) {
+      memset(e, 0, sizeof(*e));
+    }
+  } else {
+    ++sTotalFailures;
+    Entry* e = claim(transport, peer, now);
+    if (e) {
+      const bool fits = strlen(username) <= kPublicUsernameMaxLen;
+      if (e->failCount == 0 && fits) {
+        strlcpy(e->user, username, sizeof(e->user));
+      } else if (!fits || strcmp(e->user, username) != 0) {
+        e->flags |= kMixedUsers;
+      }
+      if (e->failCount < UINT8_MAX) ++e->failCount;
+      e->lastFailMs = now;
+      lockMs = lockoutMs(e->failCount);
+      if (lockMs > 0) {
+        e->lockedUntil = now + lockMs;
+        e->flags |= kLockApplied;
+      }
+      failures = e->failCount;
+    }
+  }
+  portEXIT_CRITICAL(&sMux);
+  if (success) return;
+  // Diagnostics and the event run after the lock is released.
+  if (lockMs > 0) {
+    DEBUG_AUTHF("[brute] peer=%s failures=%d locked=%lus", peer, failures,
+                lockMs / 1000UL);
+    BROADCAST_PRINTF("[auth] login locked peer=%s failures=%d duration=%lus",
+                     peer, failures, lockMs / 1000UL);
+    char lockSec[16];
+    snprintf(lockSec, sizeof(lockSec), "%lus", lockMs / 1000UL);
+    systemEventPost(SYSEVT_LOGIN_LOCKED, peer, lockSec);
+  } else {
+    DEBUG_AUTHF("[brute] peer=%s failures=%d (below lockout threshold)", peer,
+                failures);
+  }
+  (void)failures;
+}
+
+uint8_t credentialAttemptFailures(CommandSource transport, const char* peer) {
+  using namespace credential_attempts;
+  peer = peerOrUnknown(peer);
+  const uint64_t now = nowMs();
+  portENTER_CRITICAL(&sMux);
+  const Entry* e = find(transport, peer, now);
+  const uint8_t failures = e ? e->failCount : 0;
+  portEXIT_CRITICAL(&sMux);
+  return failures;
+}
+
+void credentialAttemptForget(CommandSource transport, const char* peer) {
+  using namespace credential_attempts;
+  peer = peerOrUnknown(peer);
+  const uint64_t now = nowMs();
+  portENTER_CRITICAL(&sMux);
+  Entry* e = find(transport, peer, now);
+  if (e) memset(e, 0, sizeof(*e));
+  portEXIT_CRITICAL(&sMux);
+}
+
+const char* credentialAttemptConsolePeer(CommandSource transport) {
+  switch (transport) {
+    case SOURCE_SERIAL: return "local";
+    case SOURCE_UART: return "uart";
+    case SOURCE_LOCAL_DISPLAY: return "display";
+    default: return nullptr;
+  }
+}
+
+uint32_t getTotalFailedLoginCount() {
+  return credential_attempts::sTotalFailures;
 }
 
 // ============================================================================
@@ -1459,13 +1719,24 @@ bool loginTransportFromNamedSession(CommandSource target,
 bool logoutTransportFromNamedSession(CommandSource target,
                                      CommandSource source,
                                      const String& sourceUser,
-                                     TransportSessionEpoch sourceEpoch) {
+                                     TransportSessionEpoch sourceEpoch,
+                                     const char** denialOut) {
   if (target == source ||
       (target != SOURCE_SERIAL && target != SOURCE_UART &&
        target != SOURCE_LOCAL_DISPLAY)) return false;
   FsLockGuard authGuard("users.cross_transport_logout");
   if (!authGuard.held && !isFsLockedByCurrentTask()) return false;
   if (!userMayControlOtherSessions(sourceUser)) return false;
+  // The rank rule of the user mutations (ban, unban, sessionrevoke): an
+  // account may not sign out a session of a higher-privileged account.
+  {
+    const String targetUser = getTransportUser(target);
+    if (targetUser.length() &&
+        userAccountRank(targetUser) > userAccountRank(sourceUser)) {
+      if (denialOut) *denialOut = "Error: Cannot sign out a higher-privileged account";
+      return false;
+    }
+  }
   // Same shape as the login above: the source check releases its writer
   // before the target's writer is taken.
   {
@@ -1775,6 +2046,100 @@ bool applyUserGamepadPasswordMutation(JsonDocument& settings, void* opaque) {
 
 }  // namespace
 
+// ----------------------------------------------------------------------------
+// Forced password change: one decision for every caller
+// ----------------------------------------------------------------------------
+// Every authenticated web request asks userMustChangePassword(), so answers
+// are cached per account. An entry is used only while both counters it was
+// filled under are current: gIdentityGeneration (accounts added, deleted or
+// re-roled) and sWrites, bumped after every setUserPassword (the only writer
+// of the flag on an existing account; per-user settings merges refuse it). A
+// write that lands while an entry is being filled bumps sWrites after the fill
+// read it, so that entry is refilled on its next use. Failed lookups are not
+// cached.
+namespace must_change_cache {
+
+constexpr size_t kSlots = 4;
+struct Entry {
+  char user[kPublicUsernameMaxLen + 1];  // "" = unused
+  uint32_t identityGeneration;
+  uint32_t writes;
+  bool mustChange;
+};
+// PSRAM: public usernames and one flag each, no secrets.
+EXT_RAM_BSS_ATTR Entry sEntries[kSlots];
+size_t sNext = 0;
+portMUX_TYPE sMux = portMUX_INITIALIZER_UNLOCKED;
+std::atomic<uint32_t> sWrites{0};
+
+}  // namespace must_change_cache
+
+// A guest cannot change its own password on any interface, so it can never
+// satisfy a forced change. Same reading as the web guest gate: the legacy
+// recovery owner is not treated as a guest.
+static bool accountIsGuestForPasswordChange(const String& username) {
+  String role;
+  return getUserAuthorizationRole(username, role) && role == "guest" &&
+         !isSuperAdminUser(username);
+}
+
+// Reads the flag from the account's settings file. False when the account or
+// its file cannot be read (the caller does not cache that answer).
+static bool readMustChangePassword(const String& username, bool& mustChangeOut) {
+  mustChangeOut = false;
+  uint32_t userId = 0;
+  if (!getUserIdByUsername(username, userId) || userId == 0) return false;
+  PSRAM_JSON_DOC(settings);
+  if (!loadUserSettings(userId, settings)) return false;
+  mustChangeOut = settings["mustChangePassword"] == true &&
+                  !accountIsGuestForPasswordChange(username);
+  return true;
+}
+
+bool userMustChangePassword(const String& username) {
+  using namespace must_change_cache;
+  if (!filesystemReady || username.length() == 0) return false;
+  const bool cacheable = username.length() <= kPublicUsernameMaxLen;
+  const uint32_t identity = gIdentityGeneration.load(std::memory_order_acquire);
+  const uint32_t writes = sWrites.load(std::memory_order_acquire);
+  if (cacheable) {
+    bool hit = false;
+    bool cached = false;
+    portENTER_CRITICAL(&sMux);
+    for (const Entry& entry : sEntries) {
+      if (entry.identityGeneration == identity && entry.writes == writes &&
+          strcmp(entry.user, username.c_str()) == 0) {
+        hit = true;
+        cached = entry.mustChange;
+        break;
+      }
+    }
+    portEXIT_CRITICAL(&sMux);
+    if (hit) return cached;
+  }
+
+  bool mustChange = false;
+  if (!readMustChangePassword(username, mustChange)) return false;
+  if (cacheable) {
+    portENTER_CRITICAL(&sMux);
+    size_t slot = sNext;
+    for (size_t i = 0; i < kSlots; ++i) {
+      if (strcmp(sEntries[i].user, username.c_str()) == 0) {
+        slot = i;
+        break;
+      }
+    }
+    if (slot == sNext) sNext = (sNext + 1) % kSlots;
+    Entry& entry = sEntries[slot];
+    memcpy(entry.user, username.c_str(), username.length() + 1);
+    entry.identityGeneration = identity;
+    entry.writes = writes;
+    entry.mustChange = mustChange;
+    portEXIT_CRITICAL(&sMux);
+  }
+  return mustChange;
+}
+
 // Update a user's text password in per-user settings file
 bool setUserPassword(const String& username, const String& newPasswordRaw, bool requireChangeOnNextLogin) {
   if (!filesystemReady || username.length() == 0 || newPasswordRaw.length() == 0) return false;
@@ -1799,6 +2164,7 @@ bool setUserPassword(const String& username, const String& newPasswordRaw, bool 
   UserPasswordMutationContext mutation{&hashed, requireChangeOnNextLogin};
   const UserSettingsTxnStatus status =
       runUserSettingsTransaction(userId, applyUserPasswordMutation, &mutation);
+  must_change_cache::sWrites.fetch_add(1, std::memory_order_acq_rel);
   if (status == UserSettingsTxnStatus::LoadFailed) {
     ERROR_STORAGEF("[user] password change REFUSED: user_settings/%lu.json is unreadable - "
                    "refusing to overwrite it",
@@ -1810,13 +2176,16 @@ bool setUserPassword(const String& username, const String& newPasswordRaw, bool 
   return status == UserSettingsTxnStatus::Committed;
 }
 
-bool userMustChangePassword(const String& username) {
-  if (!filesystemReady || username.length() == 0) return false;
-  uint32_t userId = 0;
-  if (!getUserIdByUsername(username, userId) || userId == 0) return false;
-  PSRAM_JSON_DOC(settings);
-  if (!loadUserSettings(userId, settings)) return false;
-  return settings["mustChangePassword"] == true;
+bool isReservedUsername(const String& username) {
+  // Audit/dispatch sentinels, compared case-insensitively and ignoring the
+  // surrounding whitespace the public intake trims.
+  static const char* const kReserved[] = { "system", "AuthBypass", kBondAdminUser };
+  String u = username;
+  u.trim();
+  for (const char* r : kReserved) {
+    if (strcasecmp(u.c_str(), r) == 0) return true;
+  }
+  return false;
 }
 
 bool isValidPublicUsername(const String& username, String* errorOut) {
@@ -1835,13 +2204,9 @@ bool isValidPublicUsername(const String& username, String* errorOut) {
       return false;
     }
   }
-  // Reserved names — audit/dispatch sentinels. Case-insensitive.
-  static const char* kReserved[] = { "system", "AuthBypass", kBondAdminUser };
-  for (const char* r : kReserved) {
-    if (strcasecmp(u.c_str(), r) == 0) {
-      if (errorOut) *errorOut = "Invalid username";
-      return false;
-    }
+  if (isReservedUsername(u)) {
+    if (errorOut) *errorOut = "Invalid username";
+    return false;
   }
   return true;
 }
@@ -1970,6 +2335,19 @@ struct CreateAccountContext {
   uint32_t id;
 };
 
+// The highest id this roster has issued: its largest account id, or the one
+// before its nextId counter when that is larger.
+static uint32_t rosterIssuedIdHighWater(JsonDocument& doc, JsonArray users) {
+  uint32_t highest = 0;
+  for (JsonObject user : users) {
+    const uint32_t id = (uint32_t)(user["id"] | 0);
+    if (id > highest) highest = id;
+  }
+  const uint32_t nextId = (uint32_t)(doc["nextId"] | 0);
+  if (nextId > 0 && nextId - 1 > highest) highest = nextId - 1;
+  return highest;
+}
+
 static UsersJsonMutation createAccountMutation(JsonDocument& doc, JsonArray users, void* opaque,
                                                String& errorOut) {
   CreateAccountContext* ctx = static_cast<CreateAccountContext*>(opaque);
@@ -1988,6 +2366,20 @@ static UsersJsonMutation createAccountMutation(JsonDocument& doc, JsonArray user
   // account holding that id would be overwritten with the new credential).
   uint32_t newId = (uint32_t)(doc["nextId"] | 2);
   if (newId == 0 || newId <= highestId) newId = highestId + 1;
+  // Ids are never reissued, not even after a factory reset or a restore has
+  // removed every account that held them: per-id data (transcripts under
+  // /stt/u<id>, user_settings/<id>.json) can outlive the roster. The mark is
+  // raised before anything is written, so a failed creation only skips an id.
+  uint32_t highWater = 0;
+  if (!bootStateGetAccountIdHighWater(highWater)) {
+    errorOut = "Could not read the account id record";
+    return UsersJsonMutation::Failed;
+  }
+  if (newId <= highWater) newId = highWater + 1;
+  if (newId == 0 || !bootStateRaiseAccountIdHighWater(newId)) {
+    errorOut = "Could not reserve an account id";
+    return UsersJsonMutation::Failed;
+  }
 
   {
     PSRAM_JSON_DOC(defaults);
@@ -2032,6 +2424,12 @@ bool createAccount(const NewAccount& account, uint32_t& idOut, String& errorOut)
     errorOut = "Invalid password";
     return false;
   }
+  // Guests cannot change their own password on any interface, so a guest
+  // created with a forced change could never get past it.
+  if (account.mustChangePassword && account.role == "guest") {
+    errorOut = "A guest account cannot be required to change its password";
+    return false;
+  }
   // One lock from the roster read to the publication, and over the removal of
   // a credential whose publication failed.
   FsLockGuard guard("user.create");
@@ -2045,6 +2443,21 @@ bool createAccount(const NewAccount& account, uint32_t& idOut, String& errorOut)
   DEBUG_USERSF("[users] created account '%s' id=%u role=%s", ctx.username.c_str(), (unsigned)ctx.id,
                account.role.c_str());
   return true;
+}
+
+static UsersJsonMutation recordIssuedIdsMutation(JsonDocument& doc, JsonArray users, void* opaque,
+                                                 String& errorOut) {
+  (void)opaque;
+  if (!bootStateRaiseAccountIdHighWater(rosterIssuedIdHighWater(doc, users))) {
+    errorOut = "Could not record the account id mark";
+    return UsersJsonMutation::Failed;
+  }
+  return UsersJsonMutation::Unchanged;
+}
+
+bool recordAccountIdHighWater(String& errorOut) {
+  errorOut = "";
+  return mutateUsersJson("user.idmark", recordIssuedIdsMutation, nullptr, errorOut);
 }
 
 bool adminCreateUser(const String& username, const String& plainPassword, bool mustChangeOnLogin,
@@ -2302,6 +2715,9 @@ bool isValidUser(const String& u, const String& p) {
   AuthPerfScope _perf("isValidUser(TOTAL)");
   if (!filesystemReady) return false;
   if (u.length() == 0 || p.length() == 0) return false;
+  // A reserved name is never a loginable account, whatever users.json holds
+  // (an entry could arrive from a sync receiver or a hand edit).
+  if (isReservedUsername(u)) return false;
 
   // Reject banned accounts before touching credentials
   if (isUserBanned(u)) return false;
@@ -2355,6 +2771,9 @@ bool getUserIdByUsername(const String& username, uint32_t& outUserId) {
   outUserId = 0;
   if (!filesystemReady) return false;
   if (username.length() == 0) return false;
+  // Reserved names never resolve to an account, so nothing keyed by account
+  // id (credentials, per-user settings, private data) can be reached by one.
+  if (isReservedUsername(username)) return false;
 
   {
     FsLockGuard guard("users.get_id");
@@ -2442,9 +2861,10 @@ int userAccountRank(const String& username) {
   // sequence; only the file read is shared.
   if (username.length() == 0) return kRoleRankUser;
 #if ENABLE_BONDED_MODE
-  // The bond identity is answered by the token check inside isSuperAdminUser /
-  // isAdminUser without touching the filesystem, so it cannot use the shared
-  // read below. Run the ORIGINAL three-call sequence verbatim for it — including
+  // The bond identity is answered by bondIdentityLive() inside isSuperAdminUser /
+  // isAdminUser (the calling task must be the live ESP-NOW bond) without
+  // touching the filesystem, so it cannot use the shared read below. Run the
+  // ORIGINAL three-call sequence verbatim for it — including
   // the getUserRole guest branch, which the old code reached and which an early
   // `return kRoleRankUser` here would have skipped. One extra read, only ever
   // for this one reserved name.
@@ -2597,6 +3017,83 @@ bool denyPendingUserInternal(const String& username, String& errorOut) {
 
   systemEventPost(SYSEVT_USER_REJECTED, username.c_str());
   return true;
+}
+
+// The public intake rules for a self-registration request, without side
+// effects: Submitted when both fields pass.
+static AccountRequestResult checkAccountRequestFields(const String& username, const String& password) {
+  if (!isValidPublicUsername(username, nullptr)) return AccountRequestResult::InvalidUsername;
+  if (!isValidPublicPassword(password, nullptr)) {
+    return (password.length() < kPublicPasswordMinLen) ? AccountRequestResult::PasswordTooShort
+                                                       : AccountRequestResult::PasswordTooLong;
+  }
+  return AccountRequestResult::Submitted;
+}
+
+// See System_User.h.
+AccountRequestResult submitAccountRequest(const String& usernameInput, const String& password) {
+  String username = usernameInput;
+  username.trim();
+  const AccountRequestResult fields = checkAccountRequestFields(username, password);
+  if (fields != AccountRequestResult::Submitted) return fields;
+  if (!filesystemReady) return AccountRequestResult::NotReady;
+
+  DEBUG_CMD_FLOWF("[users] Adding user to pending_users.json, filesystemReady=%d", filesystemReady ? 1 : 0);
+
+  // Held across the read-modify-write so an approve or deny committing on
+  // another task meanwhile is not overwritten by this stale copy.
+  FsLockGuard guard("user.request");
+  PSRAM_JSON_DOC(doc);
+  if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.request"))) {
+    String json;
+    if (!readText(PENDING_USERS_FILE, json)) {
+      DEBUG_CMD_FLOWF("[users] ERROR: Failed to read existing /system/pending_users.json");
+      return AccountRequestResult::ReadFailed;
+    }
+    if (json.length() >= 2 && json.startsWith("[")) {
+      if (deserializeJson(doc, json)) {
+        doc.clear();
+        doc.to<JsonArray>();
+      }
+    } else {
+      doc.to<JsonArray>();
+    }
+  } else {
+    doc.to<JsonArray>();
+  }
+
+  JsonArray arr = doc.as<JsonArray>();
+  if (!arr) {
+    doc.clear();
+    arr = doc.to<JsonArray>();
+  }
+  // Cap spam even if rate-limit is bypassed (CLI / other transports).
+  if (arr.size() >= 32) {
+    return AccountRequestResult::QueueFull;
+  }
+  for (JsonObject pu : arr) {
+    const char* existing = pu["username"] | "";
+    if (existing[0] && strcasecmp(existing, username.c_str()) == 0) {
+      return AccountRequestResult::AlreadyPending;
+    }
+  }
+
+  JsonObject entry = arr.add<JsonObject>();
+  entry["username"] = username;
+  entry["password"] = hashUserPassword(password);
+  entry["timestamp"] = (unsigned long)millis();
+
+  String writeError;
+  if (!writePendingUsers(doc, "user.request", writeError)) {
+    ERROR_STORAGEF("writeText failed when writing pending_users.json");
+    broadcastOutput("[users] ERROR: writeText failed for /system/pending_users.json");
+    return AccountRequestResult::WriteFailed;
+  }
+
+  DEBUG_CMD_FLOWF("[users] request username=%s", username.c_str());
+  BROADCAST_PRINTF("[register] New user request: %s", username.c_str());
+  systemEventPost(SYSEVT_USER_REQUEST, username.c_str());
+  return AccountRequestResult::Submitted;
 }
 
 // Shared authorization for user-mutation commands. Enforces the two rank rules:
@@ -3094,6 +3591,10 @@ const char* cmd_user_resetpassword(const String& argsInput) {
     return "Error: Password must be at least 6 characters";
   }
 
+  if (mustChange && accountIsGuestForPasswordChange(username)) {
+    return "Error: A guest account cannot be required to change its password";
+  }
+
   if (!setUserPassword(username, rest, mustChange)) {
     if (!ensureDebugBuffer()) return "Error: Failed to reset password";
     snprintf(getDebugBuffer(), 1024, "Error: Failed to reset password for user '%s'", username.c_str());
@@ -3185,84 +3686,165 @@ const char* cmd_user_add(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// ============================================================================
+// Read-only roster snapshot (display pages, userlist)
+// ============================================================================
+enum class RosterReadResult : uint8_t { Ok, Missing, Unreadable, Malformed };
+// createdAt is the stored creation time, empty while unresolved; only the
+// userlist reply carries it, so it is not part of the public row.
+typedef void (*UserRosterVisitor)(const UserRosterEntry& entry, const char* createdAt,
+                                  void* context);
+
+// One locked read of users.json, then calls visit once per account in file
+// order with a normalized row (see UserRosterEntry in System_User.h). The
+// filesystem lock covers only the read, so a visitor may print.
+static RosterReadResult visitUserRoster(UserRosterVisitor visit, void* context) {
+  if (!filesystemReady) return RosterReadResult::Unreadable;
+  String json;
+  {
+    FsLockGuard guard("users.roster");
+    if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.roster"))) {
+      return RosterReadResult::Missing;
+    }
+    if (!readRosterJson("user.roster", json)) return RosterReadResult::Unreadable;
+  }
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, json)) return RosterReadResult::Malformed;
+  JsonArrayConst users = doc["users"].as<JsonArrayConst>();
+  bool firstAccount = true;
+  for (JsonObjectConst user : users) {
+    const bool wasFirst = firstAccount;
+    firstAccount = false;
+    const char* name = user["username"] | "";
+    const size_t nameLen = strlen(name);
+    if (nameLen == 0 || nameLen > kPublicUsernameMaxLen) continue;
+    UserRosterEntry entry = {};
+    entry.id = user["id"] | 0u;
+    memcpy(entry.username, name, nameLen + 1);
+    // Same normalization as the authorization lookup (roleFromRosterJson),
+    // except that an unknown or malformed role reads as "user" for display.
+    const JsonVariantConst roleField = user["role"];
+    String role;
+    if (roleField.isNull()) {
+      role = wasFirst ? "superadmin" : "user";
+    } else if (roleField.is<const char*>()) {
+      role = roleField.as<const char*>();
+      role.toLowerCase();
+      if (!isKnownUserRole(role)) role = "user";
+    } else {
+      role = "user";
+    }
+    snprintf(entry.role, sizeof(entry.role), "%s", role.c_str());
+    entry.banned = user["banned"] | false;
+    const char* createdAt =
+        user["createdAt"].is<const char*>() ? user["createdAt"].as<const char*>() : "";
+    visit(entry, createdAt, context);
+  }
+  return RosterReadResult::Ok;
+}
+
+struct RosterArrayFill {
+  UserRosterEntry* out;
+  size_t capacity;
+  size_t count;
+  size_t total;
+};
+
+static void rosterArrayVisit(const UserRosterEntry& entry, const char*, void* context) {
+  RosterArrayFill* fill = static_cast<RosterArrayFill*>(context);
+  if (fill->count < fill->capacity) fill->out[fill->count++] = entry;
+  fill->total++;
+}
+
+bool readUserRoster(UserRosterEntry* out, size_t capacity, size_t& countOut,
+                    size_t* totalOut) {
+  RosterArrayFill fill = { out, out ? capacity : 0, 0, 0 };
+  const bool ok = visitUserRoster(rosterArrayVisit, &fill) == RosterReadResult::Ok;
+  countOut = ok ? fill.count : 0;
+  if (totalOut) *totalOut = ok ? fill.total : 0;
+  return ok;
+}
+
+// Serializes a list reply into a lazily allocated PSRAM buffer of one command
+// result. serializeJson writes no NUL when the output fills the buffer, so a
+// document that does not fit becomes an explicit error, never a cut or
+// unterminated reply.
+static const char* listJsonReply(const JsonDocument& doc, char*& buffer,
+                                 const char* tag, const char* tooLarge) {
+  if (!buffer) {
+    buffer = (char*)ps_alloc(CMD_RESULT_MAX, AllocPref::PreferPSRAM, tag);
+    if (!buffer) return "Error: out of memory for the list reply";
+  }
+  if (doc.overflowed()) return tooLarge;
+  const size_t len = serializeJson(doc, buffer, CMD_RESULT_MAX);
+  if (len == 0 || len >= CMD_RESULT_MAX - 1) {
+    buffer[0] = '\0';
+    ERROR_MEMORYF("%s: reply does not fit (%zu >= %zu)", tag, len, (size_t)CMD_RESULT_MAX - 1);
+    return tooLarge;
+  }
+  return buffer;
+}
+
+static void userListJsonVisit(const UserRosterEntry& entry, const char* createdAt,
+                              void* context) {
+  JsonArray& users = *static_cast<JsonArray*>(context);
+  // Only the fields the Settings Users panel and the user-sync picker read.
+  // The char arrays are passed as const char* so ArduinoJson copies them: a
+  // const char[N] would be kept by pointer as if it were a string literal, and
+  // the entry is reused for the next row.
+  JsonObject row = users.add<JsonObject>();
+  row["id"] = entry.id;
+  row["username"] = static_cast<const char*>(entry.username);
+  row["role"] = static_cast<const char*>(entry.role);
+  row["banned"] = entry.banned;
+  if (createdAt && createdAt[0]) row["createdAt"] = createdAt;
+}
+
+static void userListTextVisit(const UserRosterEntry& entry, const char*, void* context) {
+  int& count = *static_cast<int*>(context);
+  if (count++ == 0) broadcastOutput("Users:");
+  BROADCAST_PRINTF("  %s (%s)%s", entry.username, entry.role, entry.banned ? " [banned]" : "");
+}
+
 const char* cmd_user_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
 
   // Check if JSON output is requested (word-boundary "json" token via argWantsJson)
   bool jsonOutput = argWantsJson(argsInput);
-  
+
   DEBUG_USERSF("[USER_LIST_DEBUG] Called with args='%s', jsonOutput=%d", argsInput.c_str(), jsonOutput);
 
-  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.list"))) {
-    DEBUG_USERSF("[USER_LIST_DEBUG] File not found: %s", USERS_JSON_FILE);
-    return jsonOutput ? "{\"schema\":1,\"users\":[]}" : "No users found";
-  }
-
-  // Open and parse users file with ArduinoJson
-  File file = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.list"));
-  if (!file) {
-    ERROR_SESSIONF("Failed to open users file");
-    if (jsonOutput) return "{\"schema\":1,\"users\":[]}";
-    broadcastOutput("Error: Failed to read users file");
-    return "ERROR";
-  }
-
-  // Parse JSON document (2KB should be enough for users file)
-  PSRAM_JSON_DOC(doc);
-  DeserializationError error = deserializeJson(doc, file);
-  file.close();
-
-  if (error) {
-    ERROR_SESSIONF("JSON parse error: %s", error.c_str());
-    if (jsonOutput) return "{\"schema\":1,\"users\":[]}";
-    broadcastOutput("Error: Malformed users file");
-    return "ERROR";
-  }
-
-  JsonArray users = doc["users"];
-  if (!users) {
-    DEBUG_USERSF("[USER_LIST_DEBUG] No users array found");
-    return jsonOutput ? "{\"schema\":1,\"users\":[]}" : "No users found";
-  }
-
   if (jsonOutput) {
-    // Use static PSRAM buffer - 2KB sufficient for user list
-    static char* jsonBuf = nullptr;
-    static const size_t kBufSize = 2048;
-    if (!jsonBuf) {
-      jsonBuf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "user.list.json");
-      if (!jsonBuf) return "{\"schema\":1,\"users\":[]}";
-    }
-    // Wrap under {"v":1,"users":[...]} for the object-only JSON contract.
+    // Wrap under {"schema":1,"users":[...]} for the object-only JSON contract.
     PSRAM_JSON_DOC(out);
     out["schema"] = 1;
-    out["users"].set(users);
-    size_t len = serializeJson(out, jsonBuf, kBufSize);
-    if (len >= kBufSize) {
-      ERROR_MEMORYF("user list JSON truncated: %zu >= %zu", len, kBufSize);
+    JsonArray users = out["users"].to<JsonArray>();
+    const RosterReadResult read = visitUserRoster(userListJsonVisit, &users);
+    if (read != RosterReadResult::Ok) {
+      if (read != RosterReadResult::Missing) ERROR_SESSIONF("userlist: users file unreadable or malformed");
+      return "{\"schema\":1,\"users\":[]}";
     }
-    return jsonBuf;
-  } else {
-    // Stream human-readable format
-    broadcastOutput("Users:");
-
-    int userCount = 0;
-    for (JsonObject user : users) {
-      const char* username = user["username"];
-      const char* role = user["role"] | "user";
-      
-      if (username) {
-        BROADCAST_PRINTF("  %s (%s)", username, role);
-        userCount++;
-      }
-    }
-
-    if (userCount == 0) {
-      broadcastOutput("No users found");
-    }
-    return "OK";
+    static char* jsonBuf = nullptr;
+    return listJsonReply(out, jsonBuf, "user.list.json",
+                         "Error: user list does not fit in one reply");
   }
+
+  // Stream human-readable format (the visitor prints the "Users:" header
+  // before the first row).
+  int userCount = 0;
+  const RosterReadResult read = visitUserRoster(userListTextVisit, &userCount);
+  if (read == RosterReadResult::Missing) return "No users found";
+  if (read != RosterReadResult::Ok) {
+    broadcastOutput(read == RosterReadResult::Malformed ? "Error: Malformed users file"
+                                                        : "Error: Failed to read users file");
+    return "ERROR";
+  }
+  if (userCount == 0) {
+    broadcastOutput("Users:");
+    broadcastOutput("No users found");
+  }
+  return "OK";
 }
 
 const char* cmd_pending_list(const String& argsInput) {
@@ -3305,14 +3887,7 @@ const char* cmd_pending_list(const String& argsInput) {
   }
 
   if (jsonOutput) {
-    // Use static PSRAM buffer - 2KB sufficient for pending list
-    static char* jsonBuf = nullptr;
-    static const size_t kBufSize = 2048;
-    if (!jsonBuf) {
-      jsonBuf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "pending.list.json");
-      if (!jsonBuf) return "{\"schema\":1,\"pending\":[]}";
-    }
-    // Build sanitized {"v":1,"pending":[...]} object without password hashes.
+    // Build sanitized {"schema":1,"pending":[...]} object without password hashes.
     PSRAM_JSON_DOC(sanitized);
     sanitized["schema"] = 1;
     JsonArray sanitizedArray = sanitized["pending"].to<JsonArray>();
@@ -3322,11 +3897,9 @@ const char* cmd_pending_list(const String& argsInput) {
       sanitizedUser["timestamp"] = user["timestamp"];
       // Explicitly exclude password field for security
     }
-    size_t len = serializeJson(sanitized, jsonBuf, kBufSize);
-    if (len >= kBufSize) {
-      ERROR_MEMORYF("pending list JSON truncated: %zu >= %zu", len, kBufSize);
-    }
-    return jsonBuf;
+    static char* jsonBuf = nullptr;
+    return listJsonReply(sanitized, jsonBuf, "pending.list.json",
+                         "Error: pending list does not fit in one reply");
   } else {
     // Stream human-readable format
     broadcastOutput("Pending Users:");
@@ -3355,24 +3928,15 @@ const char* cmd_session_list(const String& argsInput) {
   bool jsonOutput = argWantsJson(argsInput);
 
   if (jsonOutput) {
-    // Use static PSRAM buffer - 2KB sufficient for session list
-    static char* jsonBuf = nullptr;
-    static const size_t kBufSize = 2048;
-    if (!jsonBuf) {
-      jsonBuf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "session.list.json");
-      if (!jsonBuf) return "{\"schema\":1,\"sessions\":[]}";
-    }
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     JsonArray sessions = doc["sessions"].to<JsonArray>();
     // This is the single all-transport aggregator: web plus Serial, UART,
     // OLED, G2, and every authenticated BLE connection.
     buildAllSessionsJson("", sessions);
-    size_t len = serializeJson(doc, jsonBuf, kBufSize);
-    if (len >= kBufSize) {
-      ERROR_MEMORYF("session list JSON truncated: %zu >= %zu", len, kBufSize);
-    }
-    return jsonBuf;
+    static char* jsonBuf = nullptr;
+    return listJsonReply(doc, jsonBuf, "session.list.json",
+                         "Error: session list does not fit in one reply");
   } else {
     // Stream human-readable format
     broadcastOutput("Active Sessions:");
@@ -3386,8 +3950,18 @@ const char* cmd_session_list(const String& argsInput) {
   }
 }
 
+#else
+const char* cmd_session_list(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (argWantsJson(originalCmd)) return "{\"schema\":1,\"available\":false,\"reason\":\"http server disabled\"}";
+  return "Session management requires HTTP server to be enabled";
+}
+#endif // ENABLE_HTTP_SERVER
+
 // cmd_login and cmd_logout moved to System_Utils.cpp (critical system functions)
 
+// Account sessions live on every transport, so `sessionrevoke user` exists in
+// every build; only revocation by web session id needs the HTTP server.
 const char* cmd_session_revoke(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -3400,6 +3974,9 @@ const char* cmd_session_revoke(const String& argsInput) {
   int revoked = 0;
 
   if (subcmd == "sid") {
+#if !ENABLE_HTTP_SERVER
+    return "Error: revoking by session id requires the HTTP server";
+#else
     String sid = a.arg(1);
     String reason = a.has(2) ? a.remaining(1) : String();
     if (!reason.length()) reason = defaultReason;
@@ -3418,12 +3995,24 @@ const char* cmd_session_revoke(const String& argsInput) {
     if (!ensureDebugBuffer()) return "Revoked 1 session";
     snprintf(getDebugBuffer(), 1024, "Revoked 1 session (sid=%s)", sid.c_str());
     return getDebugBuffer();
+#endif
   }
 
   if (subcmd == "user") {
     String username = a.arg(1);
     String reason = a.has(2) ? a.remaining(1) : String();
     if (!reason.length()) reason = defaultReason;
+
+    // Same rank rule as ban/unban: an account may not sign out a
+    // higher-privileged one.
+    {
+      String merr;
+      if (!userMutationAllowed(username, kRoleRankNoGrant, merr)) {
+        EXT_RAM_BSS_ATTR static char ebuf[160];
+        snprintf(ebuf, sizeof(ebuf), "Error: %s", merr.c_str());
+        return ebuf;
+      }
+    }
 
     // Delegate fan-out to revokeUserSessions — single source of truth for
     // "kick user X out of every transport's session table." The previous
@@ -3460,6 +4049,9 @@ const char* cmd_session_revoke(const String& argsInput) {
          "  sessionrevoke sid <sid> [reason]\n"
          "  sessionrevoke user <username> [reason]";
 }
+
+// The IP ban list lives in the web server (sIpBans).
+#if ENABLE_HTTP_SERVER
 const char* cmd_ban(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
@@ -3501,7 +4093,23 @@ const char* cmd_banlist(const String& argsInput) {
   broadcastBanList();
   return "";
 }
+#else
+const char* cmd_ban(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return "Ban management requires HTTP server to be enabled";
+}
+const char* cmd_unban(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return "Ban management requires HTTP server to be enabled";
+}
+const char* cmd_banlist(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (argWantsJson(originalCmd)) return "{\"schema\":1,\"available\":false,\"reason\":\"http server disabled\"}";
+  return "Ban management requires HTTP server to be enabled";
+}
+#endif // ENABLE_HTTP_SERVER
 
+// Account bans live in users.json, so banuser/unbanuser exist in every build.
 const char* cmd_banuser(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
@@ -3539,9 +4147,18 @@ const char* cmd_unbanuser(const String& argsInput) {
   username.trim();
   if (username.length() == 0) return "Error: invalid arguments — Usage: unbanuser <username>";
 
+  // Same rank rule as banuser: a regular admin cannot lift a super-admin's ban.
+  EXT_RAM_BSS_ATTR static char ebuf[160];
+  {
+    String merr;
+    if (!userMutationAllowed(username, kRoleRankNoGrant, merr)) {
+      snprintf(ebuf, sizeof(ebuf), "Error: %s", merr.c_str());
+      return ebuf;
+    }
+  }
+
   String err;
   if (!setUserBanInternal(username, false, "", err)) {
-    EXT_RAM_BSS_ATTR static char ebuf[160];
     snprintf(ebuf, sizeof(ebuf), "Error: %s", err.c_str());
     return ebuf;
   }
@@ -3551,44 +4168,9 @@ const char* cmd_unbanuser(const String& argsInput) {
   return buf;
 }
 
-#else
-// Stub implementations when HTTP server is disabled
-// Note: cmd_login and cmd_logout are in System_Utils.cpp (always available)
-const char* cmd_session_list(const String& originalCmd) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (argWantsJson(originalCmd)) return "{\"schema\":1,\"available\":false,\"reason\":\"http server disabled\"}";
-  return "Session management requires HTTP server to be enabled";
-}
-const char* cmd_session_revoke(const String& originalCmd) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return "Session management requires HTTP server to be enabled";
-}
-const char* cmd_ban(const String& originalCmd) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return "Ban management requires HTTP server to be enabled";
-}
-const char* cmd_unban(const String& originalCmd) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return "Ban management requires HTTP server to be enabled";
-}
-const char* cmd_banlist(const String& originalCmd) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (argWantsJson(originalCmd)) return "{\"schema\":1,\"available\":false,\"reason\":\"http server disabled\"}";
-  return "Ban management requires HTTP server to be enabled";
-}
-const char* cmd_banuser(const String& originalCmd) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return "Ban management requires HTTP server to be enabled";
-}
-const char* cmd_unbanuser(const String& originalCmd) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return "Ban management requires HTTP server to be enabled";
-}
-#endif // ENABLE_HTTP_SERVER
-
+// Command adapter: parses the arguments and reports the owner's result
+// (submitAccountRequest, beside the other pending-list owners).
 const char* cmd_user_request(const String& argsInput) {
-  //RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!filesystemReady) return "Error: LittleFS not ready";
   // Syntax: args = "<username> <password> [confirmPassword]"
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: user request <username> <password> [confirmPassword]";
@@ -3599,71 +4181,24 @@ const char* cmd_user_request(const String& argsInput) {
   String confirm = a.arg(2);  // empty if not provided
   if (confirm.length() && confirm != password) return "Error: passwords do not match";
 
-  String verr;
-  if (!isValidPublicUsername(username, &verr)) return "Error: Invalid username";
-  if (!isValidPublicPassword(password, &verr)) {
-    return (password.length() < kPublicPasswordMinLen)
-             ? "Error: Password must be at least 6 characters"
-             : "Error: Password is too long";
+  AccountRequestResult result = checkAccountRequestFields(username, password);
+  if (result == AccountRequestResult::Submitted) {
+    // Validation stops here: no pending-list read or write, no event.
+    RETURN_VALID_IF_VALIDATE_CSTR();
+    result = submitAccountRequest(username, password);
   }
 
-  DEBUG_CMD_FLOWF("[users] Adding user to pending_users.json, filesystemReady=%d", filesystemReady ? 1 : 0);
-
-  // Held across the read-modify-write so an approve or deny committing on
-  // another task meanwhile is not overwritten by this stale copy.
-  FsLockGuard guard("user.request");
-  PSRAM_JSON_DOC(doc);
-  if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.request"))) {
-    String json;
-    if (!readText(PENDING_USERS_FILE, json)) {
-      DEBUG_CMD_FLOWF("[users] ERROR: Failed to read existing /system/pending_users.json");
-      return "Error: could not read pending list";
-    }
-    if (json.length() >= 2 && json.startsWith("[")) {
-      if (deserializeJson(doc, json)) {
-        doc.clear();
-        doc.to<JsonArray>();
-      }
-    } else {
-      doc.to<JsonArray>();
-    }
-  } else {
-    doc.to<JsonArray>();
+  switch (result) {
+    case AccountRequestResult::Submitted: break;
+    case AccountRequestResult::InvalidUsername: return "Error: Invalid username";
+    case AccountRequestResult::PasswordTooShort: return "Error: Password must be at least 6 characters";
+    case AccountRequestResult::PasswordTooLong: return "Error: Password is too long";
+    case AccountRequestResult::AlreadyPending: return "Error: Username already pending approval";
+    case AccountRequestResult::QueueFull: return "Error: Too many pending requests";
+    case AccountRequestResult::NotReady: return "Error: LittleFS not ready";
+    case AccountRequestResult::ReadFailed: return "Error: could not read pending list";
+    case AccountRequestResult::WriteFailed: return "Error: could not write pending list";
   }
-
-  JsonArray arr = doc.as<JsonArray>();
-  if (!arr) {
-    doc.clear();
-    arr = doc.to<JsonArray>();
-  }
-  // Cap spam even if rate-limit is bypassed (CLI / other transports).
-  if (arr.size() >= 32) {
-    return "Error: Too many pending requests";
-  }
-  for (JsonObject pu : arr) {
-    const char* existing = pu["username"] | "";
-    if (existing[0] && strcasecmp(existing, username.c_str()) == 0) {
-      return "Error: Username already pending approval";
-    }
-  }
-
-  JsonObject entry = arr.add<JsonObject>();
-  entry["username"] = username;
-  entry["password"] = hashUserPassword(password);
-  entry["timestamp"] = (unsigned long)millis();
-
-  String outJson;
-  serializeJson(doc, outJson);
-  DEBUG_USERSF("[users] Attempting to write /system/pending_users.json (%d bytes)", (int)outJson.length());
-  if (!writeTextAtomic(PENDING_USERS_FILE, outJson)) {
-    ERROR_STORAGEF("writeText failed when writing pending_users.json");
-    broadcastOutput("[users] ERROR: writeText failed for /system/pending_users.json");
-    return "Error: could not write pending list";
-  }
-
-  DEBUG_CMD_FLOWF("[users] CLI request username=%s", username.c_str());
-  BROADCAST_PRINTF("[register] New user request: %s", username.c_str());
-  systemEventPost(SYSEVT_USER_REQUEST, username.c_str());
 
   if (!ensureDebugBuffer()) return "Request submitted (buffer unavailable)";
   snprintf(getDebugBuffer(), 1024, "Request submitted for '%s' (JSON)", username.c_str());
@@ -4112,27 +4647,7 @@ void writeBootAnchor() {
 // ============================================================================
 // User System Command Registry (System-Specific)
 // ============================================================================
-
-static const char* cmd_serialrequireauth(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = argsInput; arg.trim();
-  if (arg.length() == 0) {
-    return gSettings.serialRequireAuth ? "[Serial] Require auth: enabled" : "[Serial] Require auth: disabled";
-  }
-  arg.toLowerCase();
-  if (arg == "on" || arg == "true" || arg == "1") {
-    const bool changed = !gSettings.serialRequireAuth;
-    setSetting(gSettings.serialRequireAuth, true);
-    if (changed) serialTransportAuthPolicyChanged();
-    return "[Serial] Require auth enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
-    const bool changed = gSettings.serialRequireAuth;
-    setSetting(gSettings.serialRequireAuth, false);
-    if (changed) serialTransportAuthPolicyChanged();
-    return "[Serial] Require auth disabled - serial commands bypass login";
-  }
-  return "Error: invalid arguments — Usage: serialrequireauth [on|off]";
-}
+// serialrequireauth is registered by the settings module (System_Settings.cpp).
 
 static const char* cmd_whoami(const String& argsInput) {
   CommandArgs args(argsInput);
@@ -4165,8 +4680,7 @@ const CommandEntry userSystemCommands[] = {
   { "logout", "Logout this interface, or target another session after signing in: [serial|uart|display]", false, cmd_logout,
     "Usage: logout [serial|uart|display]\nBare logout always targets the submitting interface. An explicit target requires a live named non-Guest Serial/UART/display session." },
   { "whoami", "Show the identity of the submitting interface.", false, cmd_whoami, "Usage: whoami" },
-  { "serialrequireauth", "Enable/disable serial auth requirement [on|off].", true, cmd_serialrequireauth, "Usage: serialrequireauth [on|off]", /*requiresSuperAdmin=*/true },
-  
+
   // User management commands
   { "userapprove", "Approve pending request: <username>", true, cmd_user_approve, "Usage: userapprove <username>" },
   { "userdeny", "Deny pending request: <username>", true, cmd_user_deny, "Usage: userdeny <username>" },
@@ -4255,6 +4769,13 @@ void loadAndIncrementBootSeq() {
                        error.c_str(), q ? "quarantined to users.json.bad" : "quarantine rename FAILED");
       } else {
         DEBUG_NTP_ANCHORF("BootSeqInit: users.json parsed OK");
+        // Carry the roster's issued ids into the account-id mark, so a roster
+        // written before the mark existed is covered by the next reset or
+        // restore. Only a lower stored mark is rewritten.
+        JsonArray users = doc["users"];
+        if (users && !bootStateRaiseAccountIdHighWater(rosterIssuedIdHighWater(doc, users))) {
+          ERROR_SYSTEMF("BootSeqInit: could not record the account id mark");
+        }
       }
     }
   }

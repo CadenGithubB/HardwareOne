@@ -173,11 +173,12 @@ static bool secureEstablished = true, binarySendSucceeds = true;
 static unsigned binarySends = 0;
 static std::string binaryBody;
 static unsigned attemptsAtBinarySend = 0;
+static uint16_t expectedConnId = 7;
 #if ENABLE_BLUETOOTH
-static bool bleScEstablished(uint16_t id) { check(id == 7, "existing connection ID is preserved"); return secureEstablished; }
+static bool bleScEstablished(uint16_t id) { check(id == expectedConnId, "existing connection ID is preserved"); return secureEstablished; }
 static bool bleScSendEncrypted(uint16_t id, const char* bytes, size_t length,
                                bool blocking, bool binaryFrame) {
-  check(id == 7 && blocking && binaryFrame, "raw BLE framing/pacing flags are preserved");
+  check(id == expectedConnId && blocking && binaryFrame, "raw BLE framing/pacing flags are preserved");
   check(fsDepth == 0, "BLE send cannot hold the filesystem lock");
   check(length > 0, "zero-length EOF never sends a binary body");
   ++binarySends;
@@ -261,7 +262,7 @@ static void fixture(const std::string& bytes, size_t total = 0) {
   fileExists = true; fileDirectory = false;
   quotedPath = true; filesystemReady = true; validationOnly = false;
   secureEstablished = true; binarySendSucceeds = true;
-  auth.transport = SOURCE_SERIAL; auth.sid = "7";
+  auth.transport = SOURCE_SERIAL; auth.sid = "7"; expectedConnId = 7;
 }
 static JsonDocument parseSuccess(const std::string& reply) {
   JsonDocument document;
@@ -417,9 +418,22 @@ int main(int argc, char** argv) {
     sends = binarySends;
     checkPayload(invoke("/a", 0, 12, {"bin"}), fileBytes, "/a", 0, true);
     check(binarySends == sends, "unsecured BLE cannot send raw data");
-    secureEstablished = true; auth.sid = "0";
-    checkPayload(invoke("/a", 0, 12, {"bin"}), fileBytes, "/a", 0, true);
-    check(binarySends == sends, "zero session ID cannot send raw data");
+    // Bluedroid numbers connections from 0: the first link is a real one.
+    secureEstablished = true; binarySendSucceeds = true; auth.sid = "0"; expectedConnId = 0;
+    raw = invoke("/a", 0, 12, {"bin"});
+    check(parseSuccess(raw)["enc"] == "raw", "connection ID 0 takes the raw path");
+    check(binarySends == sends + 1 && binaryBody == fileBytes, "connection ID 0 sends the raw body");
+    auth.sid = "65535"; expectedConnId = 65535; sends = binarySends;
+    check(parseSuccess(invoke("/a", 0, 12, {"bin"}))["enc"] == "raw" && binarySends == sends + 1,
+          "the largest connection ID takes the raw path");
+    // No usable connection ID: bleScEstablished is never asked (its check
+    // would reject any ID) and the reply falls back to base64.
+    expectedConnId = 7;
+    for (const char* sid : {"", "abc", "7x", "-1", " 7", "65536", "99999999999"}) {
+      auth.sid = sid; sends = binarySends;
+      checkPayload(invoke("/a", 0, 12, {"bin"}), fileBytes, "/a", 0, true);
+      check(binarySends == sends, "an empty or non-numeric session ID cannot send raw data");
+    }
     fixture("plain text");
     auth.transport = SOURCE_BLUETOOTH;
     binarySendSucceeds = false;

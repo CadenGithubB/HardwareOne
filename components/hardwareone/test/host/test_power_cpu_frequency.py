@@ -47,10 +47,22 @@ def generate() -> str:
         require("powerSetCpuFrequencyMhz(" in body, f"{name} must use the shared owner")
         require(not re.search(r"\bsetCpuFrequencyMhz\s*\(", body), f"{name} bypasses owner")
     require("setCpuFrequencyDrained" not in hardware, "old clock helper must be removed")
-    owner = power[power.index("static StaticSemaphore_t sCpuFrequencyMutexStorage;"):
-                  power.index("void checkAutoPowerMode()")]
+    # The owner region ends where the telemetry JSON (ArduinoJson) begins. An
+    # older source still has the inert auto-mode stub there; stop before it.
+    start = power.index("static StaticSemaphore_t sCpuFrequencyMutexStorage;")
+    stub = power.find("void checkAutoPowerMode()")
+    owner = power[start:stub if stub >= 0 else power.index("void buildPowerJson(JsonDocument& doc)")]
+    # applySettings re-applies the saved mode at boot and after setup; run its
+    # actual applyPowerMode statement against the owner.
+    settings = (COMPONENT / "System_Settings.cpp").read_text()
+    apply_settings = extract_block(settings, "void applySettings(")
+    steps = re.findall(r"^\s*applyPowerMode\([^;]*\);", apply_settings, re.M)
+    require(len(steps) == 1, "applySettings must re-apply the saved power mode once")
+    step = "static void applySettingsPowerStep() {\n" + steps[0] + "\n}\n"
+    keeps = int("bool applyPowerMode(uint8_t mode, bool setDisplayBrightness" in header)
     harness = (HERE / "power_cpu_frequency_harness.cpp").read_text()
-    return harness.replace("// INSERT_PRODUCTION", owner + "\n" + command)
+    return (f"#define POWER_MODE_HAS_BRIGHTNESS_OPTION {keeps}\n" +
+            harness.replace("// INSERT_PRODUCTION", owner + "\n" + command + "\n" + step))
 
 
 def main() -> None:

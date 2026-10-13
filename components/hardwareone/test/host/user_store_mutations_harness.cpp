@@ -183,6 +183,30 @@ static bool saveUserSettings(uint32_t userId, const JsonDocument& doc) {
   return writeTextAtomic(getUserSettingsPath(userId).c_str(), json);
 }
 
+// The account-id high-water mark (an NVS key in System_BootState) as a
+// variable with refusable reads and writes. A tree without the mark never
+// calls these.
+static uint32_t idMark = 0;
+static bool idMarkReadOk = true, idMarkWriteOk = true;
+static unsigned idMarkWrites = 0;
+bool bootStateGetAccountIdHighWater(uint32_t& out) {
+  if (!idMarkReadOk) return false;
+  out = idMark;
+  return true;
+}
+bool bootStateRaiseAccountIdHighWater(uint32_t id) {
+  if (!idMarkWriteOk) return false;
+  if (idMark < id) { idMark = id; ++idMarkWrites; }
+  return true;
+}
+
+// The command adapter's validate-only guard (cmd_user_request restores it on
+// a tree with the self-registration owner); never set by these scenarios.
+[[maybe_unused]] static bool gCLIValidateOnly = false;
+#define RETURN_VALID_IF_VALIDATE_CSTR() \
+  do { \
+    if (::gCLIValidateOnly) return "VALID"; \
+  } while (0)
 // INSERT_TYPES
 // INSERT_PRODUCTION
 // INSERT_BAN_ADAPTER
@@ -220,6 +244,7 @@ static fake_vfs::Fs& resetStore() {
   allocationFailureAt = -1; allocationCalls = 0; allocationFailed = false;
   gAuth = AuthContext{}; gAuth.user = "fixture-admin";
   nowMs = 4242; wallTime = 0; gNTPAnchorId = 8; gBootCounter = 5;
+  idMark = 0; idMarkReadOk = true; idMarkWriteOk = true; idMarkWrites = 0;
   return fs;
 }
 
@@ -498,11 +523,14 @@ static void useraddOrderAndFailures() {
   // Refused roster write: nothing published and the credential is withdrawn.
   fs.faults.rename.add(std::string(USERS_JSON_FILE) + ".tmp");
   check(!adminCreateUser("frank", "frank-secret", false, "x", err));
-  check(fs.text(USERS_JSON_FILE) == before && !fs.exists(settingsPath(7)));
+  check(fs.text(USERS_JSON_FILE) == before && !fs.exists(settingsPath(7)) && !fs.exists(settingsPath(8)));
   check(!fs.exists(std::string(USERS_JSON_FILE) + ".tmp"));
   fs.faults.clear();
   check(adminCreateUser("frank", "frank-secret", false, "x", err) && rosterHas("frank"));
-  check(fs.exists(settingsPath(7)));
+  // Each refused attempt reserved its id in the account-id mark before writing,
+  // so frank gets the id after both (7 and 8 are never handed out).
+  check(parseRoster(doc) && rosterUser(doc, "frank")["id"].as<int>() == 9 && idMark == 9);
+  check(fs.exists(settingsPath(9)) && !fs.exists(settingsPath(7)) && !fs.exists(settingsPath(8)));
   noPlaintextAnywhere();
   check(fs.liveHandles() == 0);
 }
@@ -534,6 +562,66 @@ static void putPending(fake_vfs::Fs& fs, bool two) {
   fs.put(PENDING_USERS_FILE, json + "]");
 }
 
+// After a factory reset (or a restore of an older roster) users.json holds only
+// low ids, while data keyed by the ids issued before (/stt/u<id>, settings
+// files) may survive. No recreated roster may hand those ids out again.
+static void idHighWaterNeverReissued() {
+  auto& fs = resetStore();
+  fs.put(USERS_JSON_FILE, "{\"version\":1,\"nextId\":2,\"users\":[" +
+                              userRecord(1, "owner", "superadmin", false) + "]}");
+  fs.put(settingsPath(1), "{\"theme\":\"light\",\"password\":\"hash:user1\"}");
+  fs.put("/stt/u2/2026-01-01-local.txt", "private note of the previous id 2");
+  idMark = 4;  // ids 1..4 were issued before the reset
+  String err;
+  check(adminCreateUser("dave", "dave-secret", false, "x", err));
+  JsonDocument doc;
+  check(parseRoster(doc) && rosterUser(doc, "dave")["id"].as<int>() == 5 && doc["nextId"].as<int>() == 6);
+  check(idMark == 5 && !fs.exists(settingsPath(2)) && fs.exists(settingsPath(5)));
+
+  // The approve path allocates through the same owner.
+  putPending(fs, false);
+  check(approvePendingUserInternal("erin", err));
+  check(parseRoster(doc) && rosterUser(doc, "erin")["id"].as<int>() == 6 && idMark == 6);
+
+  // A restored roster whose ids and counter both lag the mark.
+  resetStore();
+  putStandardRoster(fs, true, /*nextId=*/5);
+  idMark = 11;
+  check(adminCreateUser("frank", "frank-secret", false, "x", err));
+  check(parseRoster(doc) && rosterUser(doc, "frank")["id"].as<int>() == 12 && doc["nextId"].as<int>() == 13);
+
+  // An unreadable or unwritable mark refuses the account: nothing is written.
+  const std::string before = fs.text(USERS_JSON_FILE);
+  const unsigned saves = credentialSaves;
+  idMarkReadOk = false;
+  check(!adminCreateUser("gina", "gina-secret", false, "x", err) && err.length() > 0);
+  idMarkReadOk = true;
+  idMarkWriteOk = false;
+  check(!adminCreateUser("gina", "gina-secret", false, "x", err) && err.length() > 0);
+  check(fs.text(USERS_JSON_FILE) == before && credentialSaves == saves && !fs.exists(settingsPath(13)));
+  idMarkWriteOk = true;
+
+#if HAS_ACCOUNT_ID_RECORD
+  // factoryreset records the roster's issued ids before it deletes the roster:
+  // the larger of its highest id and nextId - 1, without rewriting users.json.
+  resetStore();
+  putStandardRoster(fs, true, /*nextId=*/9);
+  const size_t start = fs.log.size();
+  check(recordAccountIdHighWater(err) && idMark == 8);
+  putStandardRoster(fs, false);
+  check(recordAccountIdHighWater(err) && idMark == 8);  // never lowered
+  idMark = 0;
+  check(recordAccountIdHighWater(err) && idMark == 4);
+  for (size_t i = start; i < fs.log.size(); ++i) check(fs.log[i].op != "rename");
+  idMarkWriteOk = false;
+  check(!recordAccountIdHighWater(err) && err.length() > 0);
+  idMarkWriteOk = true;
+  fs.remove(USERS_JSON_FILE, fake_vfs::Fs::Auth{});
+  check(!recordAccountIdHighWater(err) && err.length() > 0);
+#endif
+  check(fs.liveHandles() == 0);
+}
+
 static void approveOrderAndFailures() {
   auto& fs = resetStore();
   putStandardRoster(fs);
@@ -555,7 +643,7 @@ static void approveOrderAndFailures() {
   fs.faults.rename.add(std::string(USERS_JSON_FILE) + ".tmp");
   check(!approvePendingUserInternal("erin", err) && err.length() > 0);
   check(fs.text(USERS_JSON_FILE) == rosterBefore && fs.text(PENDING_USERS_FILE) == pendingBefore);
-  check(!fs.exists(settingsPath(5)) && output.empty() && identityBumps == 0);
+  check(!fs.exists(settingsPath(5)) && !fs.exists(settingsPath(6)) && output.empty() && identityBumps == 0);
   fs.faults.clear();
 
   // Unknown request.
@@ -563,17 +651,18 @@ static void approveOrderAndFailures() {
   check(fs.text(PENDING_USERS_FILE) == pendingBefore);
 
   // Success: account live with the request's hash, request retired, event and
-  // broadcast posted, every call under the lock.
+  // broadcast posted, every call under the lock. The two refused attempts
+  // reserved ids 5 and 6 in the account-id mark, so erin is 7.
   const size_t start = fs.log.size();
   check(approvePendingUserInternal("erin", err));
   JsonDocument doc;
   check(parseRoster(doc));
   JsonObject erin = rosterUser(doc, "erin");
-  check(erin["id"].as<int>() == 5 && std::string(erin["role"] | "") == "user");
+  check(erin["id"].as<int>() == 7 && std::string(erin["role"] | "") == "user");
   check(std::string(erin["createdBy"] | "") == "approved:fixture-admin");
-  check(fs.text(settingsPath(5)).find("\"password\":\"hash:erin-secret\"") != std::string::npos);
+  check(fs.text(settingsPath(7)).find("\"password\":\"hash:erin-secret\"") != std::string::npos);
   check(!fs.exists(PENDING_USERS_FILE));
-  check(contains(output, "Approved user: erin") && contains(logLines, "approved (id=5)"));
+  check(contains(output, "Approved user: erin") && contains(logLines, "approved (id=7)"));
   check(identityBumps == 1 && events.size() == 1);
   check(callsLockedSince(start));
   check(fs.liveHandles() == 0);
@@ -695,6 +784,7 @@ static const Case kCases[] = {
   {"resolvePastEightKb", resolvePastEightKb},
   {"useraddOrderAndFailures", useraddOrderAndFailures},
   {"uniqueIdWithoutNextId", uniqueIdWithoutNextId},
+  {"idHighWaterNeverReissued", idHighWaterNeverReissued},
   {"approveOrderAndFailures", approveOrderAndFailures},
   {"approveReportsPendingListFailure", approveReportsPendingListFailure},
   {"denyAndRequest", denyAndRequest},

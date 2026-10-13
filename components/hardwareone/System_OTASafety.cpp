@@ -212,6 +212,17 @@ bool otaSafetyAcceptProvisioningBoot() {
   if (phase == ProbationPhase::Inactive || phase == ProbationPhase::Validated) {
     return true;  // nothing to accept: not an unverified image
   }
+  if (phase == ProbationPhase::Setup) {
+    // The supervisor applies the loop-stall and hard-limit tests in
+    // MarkingValid as it does in Running. Coming straight from Setup, those
+    // ticks were never set, so they would read as the whole boot uptime and a
+    // pass during the journal check or the otadata write would reboot the
+    // image being accepted. Publish them before the phase, as
+    // otaSafetySetupReachedRunning() does.
+    const TickType_t now = xTaskGetTickCount();
+    sRunningStartedTick.store(now, std::memory_order_relaxed);
+    sLastLoopHeartbeatTick.store(now, std::memory_order_relaxed);
+  }
   ProbationPhase expected = phase;
   if (!sPhase.compare_exchange_strong(expected, ProbationPhase::MarkingValid,
                                       std::memory_order_acq_rel)) {

@@ -1022,6 +1022,166 @@ foreach(test_name IN ITEMS log_level_application system_log_status command_feed)
             ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
             ${SETUP_MQTT_TEST_ARGS})
 endforeach()
+# MQTT command replies from the cmd_exec completion: a command that stops
+# MQTT (closemqtt sent over MQTT) still gets its reply before teardown deletes
+# the client's outbox; other replies are queued for the client task.
+add_test(
+  NAME mqtt_command_reply
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_command_reply.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Hand-built web JSON replies (recordings list, files/create errors, SSE
+# notice) parse as strict JSON, and the automation export and icon debug
+# header values live until httpd_resp_send.
+add_test(
+  NAME web_json_replies
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_json_replies.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Video recording: the production AVI finalizer posts VIDEO_SAVED only for a
+# complete clip (short index, failed seek or patch, flush error and an earlier
+# frame failure post none), the header carries the measured timing and the
+# tracked buffer/geometry fields, a failed start removes its file, and VFS
+# refuses sdunmount/sdmount/sdformat while an SD-in-use registration is held.
+add_test(
+  NAME video_completion
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_video_completion.py
+          ${SETUP_MQTT_TEST_ARGS})
+# MQTT discovery builders skip a document that does not fit the 1 KB buffer
+# (400-character base topic) and the external-sensor table copies esp-mqtt's
+# length-delimited topic/payload with exactly topic_len/data_len bytes.
+add_test(
+  NAME mqtt_json_bounds
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_json_bounds.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Self-registration: /register/submit hands the decoded fields to
+# submitAccountRequest byte-exact (spaced and quoted passphrases), owner
+# refusals do not count toward the login lockout, anonymous `userrequest` is
+# still refused by authorizeCommand, and validate-only `userrequest` stops
+# before the owner.
+add_test(
+  NAME register_submit
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_register_submit.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Edge Impulse: the whole module on a fake interpreter. edge_impulse_jpeg covers
+# input geometry from the input tensor, per-detection labels, the one
+# camera/file pipeline and the EI=1/HTTP=0 link; edge_impulse_lifecycle covers
+# the inference lock and the continuous-task join.
+foreach(test_name IN ITEMS edge_impulse_jpeg edge_impulse_lifecycle)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
+            ${SETUP_MQTT_TEST_ARGS})
+endforeach()
+# Factory reset: the production confirm callback on the shared fake VFS removes
+# users.json, pending requests, user settings files and every /stt and /sd/stt
+# account folder in that order, keeps everything else, and stops before the
+# roster when account data cannot be removed.
+add_test(
+  NAME factory_reset_wipe
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_factory_reset_wipe.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Command names: a source scan of every registered CommandEntry row finds no
+# name registered twice, and initializeCommandSystem logs a CMDREG line for a
+# shadowed row.
+add_test(
+  NAME command_name_uniqueness
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_command_name_uniqueness.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Forced password change: the per-user settings merge refuses credentials and
+# the flag, userMustChangePassword ignores it for guests and is cached, the web
+# gate in tgRequireAuth admits only the change form and logout, and a guest
+# cannot be created with a forced change.
+add_test(
+  NAME password_change_gate
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_password_change_gate.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Web toast fan-out: JSON toast payloads and the session-fenced broadcast /
+# SSE dequeue raced from two threads.
+add_test(
+  NAME web_toast_fanout
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_toast_fanout.py
+          ${SETUP_MQTT_TEST_ARGS})
+# LLM load policy: web and OLED load/unload go through the admin llmload /
+# llmunload commands; the backend applies llmMaxContext for every caller.
+add_test(
+  NAME llm_load_policy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_llm_load_policy.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Account authority in System_User: the reserved bond name is privileged only
+# as the live ESP-NOW bond, unban/sessionrevoke/targeted logout follow the rank
+# rule, account bans work without HTTP, list replies fit or fail explicitly,
+# and the roster snapshot keeps full usernames for the display pages.
+add_test(
+  NAME user_roster_authority
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_user_roster_authority.py
+          ${SETUP_MQTT_TEST_ARGS})
+# IP ban list: checked saves that keep the previous file and the RAM ban, a
+# locked httpd lookup, whole-or-error JSON listing. Migration restore: all
+# files staged before any is replaced; backups stay within the restore limit.
+# Camera web: one frame per request, no stream loop on the httpd task.
+foreach(test_name IN ITEMS ip_ban_store migration_restore camera_web_frame_only)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
+            ${SETUP_MQTT_TEST_ARGS})
+endforeach()
+# Capture-key loader: only a missing namespace or blob mints; other NVS errors
+# fail closed. Tokenizer loader: malformed LLM1 tokenizer blobs fail the load.
+# Setting readers: every power/camera setting has a consumer.
+foreach(test_name IN ITEMS capture_crypto_key llm_tokenizer_loader setting_readers)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
+            ${SETUP_MQTT_TEST_ARGS})
+endforeach()
+# Credential attempt table in System_User: tiers, per-account success, locks
+# that outlive the window and are never evicted; web, serial, UART, MQTT and
+# targeted logins consult it before validating.
+add_test(
+  NAME credential_attempts
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_credential_attempts.py
+          ${SETUP_MQTT_TEST_ARGS})
+# OTA probation supervisor on a fake tick: the provisioning accept is not
+# diagnosed as a loop stall however late first-time setup starts.
+add_test(
+  NAME ota_probation_supervisor
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ota_probation_supervisor.py
+          ${SETUP_MQTT_TEST_ARGS})
+# OTA journal policy stays in hw1_ota_protocol; System_OTA's one emergency
+# recovery arm journals a failed factory switch.
+add_test(
+  NAME ota_journal_policy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ota_journal_policy.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Time-anchor registry on the shared fake VFS: checked prune rewrite, retried
+# append, no row merged into an interrupted one.
+add_test(
+  NAME time_anchor_persistence
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_time_anchor_persistence.py
+          ${SETUP_MQTT_TEST_ARGS})
+# The C6 companion's reboot escalation restarts through rebootDevice().
+add_test(
+  NAME companion_reboot_contract
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_companion_reboot_contract.py
+          ${SETUP_MQTT_TEST_ARGS})
 # users.json and pending_users.json writers on the shared fake VFS: one locked
 # parsed-document owner, credential-first account creation, whole-file resolve.
 add_test(
@@ -1078,4 +1238,5 @@ add_test(
           # someone reached past System_MemUtil again. The malloc/calloc split
           # (8/3) is what the tree has carried since 0.99.94; the earlier 6 was
           # recorded before two calloc sites became malloc and never updated.
-          --expect 11 --expect-malloc 8)
+          # The migration restore's raw malloc went with its staged rewrite (10/7).
+          --expect 10 --expect-malloc 7)

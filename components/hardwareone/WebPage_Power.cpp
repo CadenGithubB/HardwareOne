@@ -73,7 +73,6 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     </div>
     <div class='sys-card'>
       <div class='sys-card-row'><span>Auto mode</span><strong id='pw-auto'>--</strong></div>
-      <div class='sys-card-row'><span>Battery threshold</span><strong id='pw-threshold'>--</strong></div>
       <div class='sys-card-row'><span>Display brightness</span><strong id='pw-bright'>--</strong></div>
     </div>
     <div class='sys-card'>
@@ -117,15 +116,6 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
       <input type='number' id='pw-in-dim' min='0' max='100' class='input-fit input-m'>
       <div class='text-muted text-sm'>Brightness used when the display is dimmed rather than blanked.</div>
       <button class='btn btn-small space-top-sm' id='pw-dim-apply'>Apply</button>
-    </div>
-    <div>
-      <label for='pw-in-threshold'>Battery threshold (%)</label>
-      <input type='number' id='pw-in-threshold' min='0' max='100' class='input-fit input-m'>
-      <div class='text-muted text-sm'>Auto mode drops to PowerSaver below this charge level.</div>
-      <div class='btn-row space-top-sm'>
-        <button class='btn btn-small' id='pw-threshold-apply'>Apply</button>
-        <button class='btn btn-small' id='pw-auto-toggle'>Auto mode: --</button>
-      </div>
     </div>
   </div>
 </div>
@@ -260,8 +250,7 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     hw.setText('pw-idle', s.idleMhz + ' MHz');
     hw.setText('pw-xtal', s.xtalMhz + ' / ' + s.apbMhz + ' MHz');
 
-    hw.setText('pw-auto', s.autoMode ? 'On' : 'Off');
-    hw.setText('pw-threshold', s.batteryThreshold + '%');
+    hw.setText('pw-auto', s.autoModeSupported ? (s.autoMode ? 'On' : 'Off') : 'not available');
     hw.setText('pw-bright', s.displayBrightness + '/255 (dim ' + s.displayDimLevel + '%)');
 
     if (!s.powerSaveSupported) {
@@ -297,8 +286,6 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     setField('pw-in-save', s.powerSaveMinutes);
     setField('pw-in-cooldown', s.cooldownMs);
     setField('pw-in-dim', s.displayDimLevel);
-    setField('pw-in-threshold', s.batteryThreshold);
-    hw.setText('pw-auto-toggle', 'Auto mode: ' + (s.autoMode ? 'On' : 'Off'));
   }
 
   function refresh(){
@@ -329,7 +316,6 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     bindField('pw-in-save');
     bindField('pw-in-cooldown');
     bindField('pw-in-dim');
-    bindField('pw-in-threshold');
 
     function applyField(id, verb){
       var el = hw.$(id);
@@ -342,10 +328,6 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     hw.on(hw.$('pw-save-apply'),      'click', function(){ applyField('pw-in-save', 'powersave'); });
     hw.on(hw.$('pw-cooldown-apply'),  'click', function(){ applyField('pw-in-cooldown', 'powercooldown'); });
     hw.on(hw.$('pw-dim-apply'),       'click', function(){ applyField('pw-in-dim', 'powerdim'); });
-    hw.on(hw.$('pw-threshold-apply'), 'click', function(){ applyField('pw-in-threshold', 'power threshold'); });
-    hw.on(hw.$('pw-auto-toggle'), 'click', function(){
-      apply('power auto ' + (last && last.autoMode ? 'off' : 'on'));
-    });
 
     // --- actions ---
     function note(msg){ hw.setText('pw-act-result', msg); }

@@ -3,6 +3,7 @@
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_Settings.h"
 #include "System_Debug.h"
+#include "System_DebugJson.h"  // serializeJsonListToDebugBuffer
 #include "System_Utils.h"
 #include "System_Command.h"
 #include "System_AuthIdentity.h"  // currentAuthContext — imagedelete removes as its caller
@@ -33,8 +34,8 @@ ImageManager gImageManager;
 // ImageManager Implementation
 // ============================================================================
 
-ImageManager::ImageManager() 
-  : sdAvailable(false), littleFSAvailable(false), imageCounter(0) {
+ImageManager::ImageManager()
+  : littleFSAvailable(false), imageCounter(0) {
 }
 
 ImageManager::~ImageManager() {
@@ -49,21 +50,16 @@ bool ImageManager::init() {
     INFO_STORAGEF("[ImageManager] LittleFS available");
   }
   
-  // Try to init SD card
-  initSD();
-  
-  return littleFSAvailable || sdAvailable;
+  // Report the boot card; SD availability is asked of VFS per operation.
+  const bool sd = initSD();
+
+  return littleFSAvailable || sd;
 }
 
 bool ImageManager::initSD() {
-  // Use VFS mount instead of reinitializing SD card ourselves
-  // This prevents conflicts with the VFS SD mount
+  // VFS owns the SD mount; this only reports it. The capture folder is made,
+  // and swept once per mount, when a save first prepares it.
   if (VFS::isSDAvailable()) {
-    if (!sdAvailable) sdStaleSwept = false;  // a (re)mounted card gets one sweep
-    sdAvailable = true;
-    // Don't create capture folder here - only create when actually saving an image
-    // ensureCaptureFolder() is called in saveImage() when needed
-    
     uint64_t totalBytes, usedBytes, freeBytes;
     if (VFS::getStats(VFS::SDCARD, totalBytes, usedBytes, freeBytes)) {
       INFO_STORAGEF("[ImageManager] SD card available via VFS, size: %lluMB", totalBytes / (1024 * 1024));
@@ -72,10 +68,15 @@ bool ImageManager::initSD() {
     }
     return true;
   } else {
-    sdAvailable = false;
     DEBUG_STORAGEF("[ImageManager] SD card not available (VFS mount failed)");
     return false;
   }
+}
+
+bool ImageManager::isSDAvailable() const { return VFS::isSDAvailable(); }
+
+bool ImageManager::tierAvailable(bool isSD) const {
+  return isSD ? VFS::isSDAvailable() : littleFSAvailable;
 }
 
 String ImageManager::getMountPrefix(ImageStorageLocation location) {
@@ -114,7 +115,7 @@ const char* ImageManager::captureFolderRejectReason(const String& folder) {
 
 bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
   const bool isSD = location == IMAGE_STORAGE_SD;
-  if (!(isSD ? sdAvailable : littleFSAvailable)) return false;
+  if (!tierAvailable(isSD)) return false;
 
   String folder = getCaptureFolder(location);
   const char* storageName = isSD ? "SD" : "LittleFS";
@@ -130,10 +131,16 @@ bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
   }
   // Lazily, once per tier per mount, under the same lock: reclaim the
   // `.jpg.tmp` a reset mid-save leaves behind, which listings skip and
-  // retention never sees.
-  bool& swept = isSD ? sdStaleSwept : lfsStaleSwept;
-  if (!swept) {
-    swept = true;
+  // retention never sees. A card mounted after boot, or remounted, carries a
+  // new VFS mount generation and gets its own sweep.
+  if (isSD) {
+    const uint32_t mount = VFS::sdMountGeneration();
+    if (sdSweptGeneration != mount) {
+      sdSweptGeneration = mount;
+      sweepStaleTemporaries(location, folder);
+    }
+  } else if (!lfsStaleSwept) {
+    lfsStaleSwept = true;
     sweepStaleTemporaries(location, folder);
   }
   return true;
@@ -225,7 +232,7 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
   auto saveTo = [&](ImageStorageLocation target) -> String {
     const bool isSD = target == IMAGE_STORAGE_SD;
     const char* storageName = isSD ? "SD" : "LittleFS";
-    if (!(isSD ? sdAvailable : littleFSAvailable)) {
+    if (!tierAvailable(isSD)) {
       ERROR_STORAGEF("[ImageManager] %s not available", storageName);
       return "";
     }
@@ -310,7 +317,7 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
 std::vector<ImageInfo> ImageManager::listImages(ImageStorageLocation location) {
   std::vector<ImageInfo> images;
   const bool isSD = location == IMAGE_STORAGE_SD;
-  if (!(isSD ? sdAvailable : littleFSAvailable)) return images;
+  if (!tierAvailable(isSD)) return images;
 
   String folder = getCaptureFolder(location);
   FsLockGuard guard("ImageManager.listImages");
@@ -383,11 +390,7 @@ uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
   size_t len = 0;
   {
     FsLockGuard guard("ImageManager.getImage.open");
-    if (isSD) {
-      if (!sdAvailable) return nullptr;
-    } else if (!littleFSAvailable) {
-      return nullptr;
-    }
+    if (!tierAvailable(isSD)) return nullptr;
     f = VFS::openGuarded(normalizedPath, "r",
                          VFS::systemAuth("imgmgr.get_image"));
     if (f) len = f.size();
@@ -441,7 +444,7 @@ bool ImageManager::deleteImage(const String& path, const AuthContext& ctx) {
   String normalizedPath;
   bool isSD = false;
   if (!managedImagePath(path, normalizedPath, isSD)) return false;
-  if (!(isSD ? sdAvailable : littleFSAvailable)) return false;
+  if (!tierAvailable(isSD)) return false;
 
   FsLockGuard guard("ImageManager.deleteImage");
   return VFS::removeGuarded(normalizedPath, ctx);
@@ -491,7 +494,7 @@ bool ImageManager::enforceMaxImages(ImageStorageLocation location) {
 StorageStats ImageManager::getStorageStats(ImageStorageLocation location) {
   StorageStats stats = {0, 0, 0, 0, false};
   const bool isSD = location == IMAGE_STORAGE_SD;
-  if (!(isSD ? sdAvailable : littleFSAvailable)) return stats;
+  if (!tierAvailable(isSD)) return stats;
 
   uint64_t total = 0, used = 0, free = 0;
   if (!VFS::getStats(isSD ? VFS::SDCARD : VFS::INTERNAL, total, used, free)) return stats;
@@ -511,16 +514,23 @@ const char* cmd_capture(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   ImageStorageLocation location = (ImageStorageLocation)gSettings.cameraStorageLocation;
-  
-  // Check for location argument
-  if (argsInput.indexOf(" sd") > 0) {
-    location = IMAGE_STORAGE_SD;
-  } else if (argsInput.indexOf(" littlefs") > 0 || argsInput.indexOf(" lfs") > 0) {
-    location = IMAGE_STORAGE_LITTLEFS;
-  } else if (argsInput.indexOf(" both") > 0) {
-    location = IMAGE_STORAGE_BOTH;
+
+  // One optional tier token; without it cameraStorageLocation decides.
+  CommandArgs a(argsInput);
+  if (a.has(1)) return "Error: unexpected argument — usage: capture [littlefs|lfs|sd|both]";
+  if (a.has(0)) {
+    const String& tier = a.arg(0);
+    if (tier.equalsIgnoreCase("sd")) {
+      location = IMAGE_STORAGE_SD;
+    } else if (tier.equalsIgnoreCase("littlefs") || tier.equalsIgnoreCase("lfs")) {
+      location = IMAGE_STORAGE_LITTLEFS;
+    } else if (tier.equalsIgnoreCase("both")) {
+      location = IMAGE_STORAGE_BOTH;
+    } else {
+      return "Error: unknown storage — usage: capture [littlefs|lfs|sd|both]";
+    }
   }
-  
+
   String result = gImageManager.captureAndSave(location);
   
   if (result.length() > 0) {
@@ -535,11 +545,24 @@ const char* cmd_capture(const String& argsInput) {
 const char* cmd_images(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
+  // An optional tier (littlefs|lfs|sd) and an optional json, in either order.
   ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS;
-  if (argsInput.indexOf(" sd") > 0) {
-    location = IMAGE_STORAGE_SD;
+  bool wantJson = false, tierGiven = false;
+  CommandArgs a(argsInput);
+  for (int i = 0; i < a.count(); ++i) {
+    const String& token = a.arg(i);
+    if (!wantJson && token.equalsIgnoreCase("json")) {
+      wantJson = true;
+    } else if (!tierGiven && token.equalsIgnoreCase("sd")) {
+      location = IMAGE_STORAGE_SD;
+      tierGiven = true;
+    } else if (!tierGiven && (token.equalsIgnoreCase("littlefs") || token.equalsIgnoreCase("lfs"))) {
+      tierGiven = true;
+    } else {
+      return "Error: unexpected argument — usage: images [littlefs|lfs|sd] [json]";
+    }
   }
-  
+
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
   int pos = 0;
@@ -548,24 +571,27 @@ const char* cmd_images(const String& argsInput) {
   StorageStats stats = gImageManager.getStorageStats(location);
   const char* locName = (location == IMAGE_STORAGE_SD) ? "SD" : "LittleFS";
 
-  if (argWantsJson(argsInput)) {
+  if (wantJson) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     doc["location"] = locName;
     doc["available"] = stats.available;
+    JsonArray arr;
     if (stats.available) {
       doc["usedBytes"]  = (unsigned long)stats.usedBytes;
       doc["totalBytes"] = (unsigned long)stats.totalBytes;
       doc["imageCount"] = stats.imageCount;
-      JsonArray arr = doc["images"].to<JsonArray>();
+      arr = doc["images"].to<JsonArray>();
       for (const auto& img : gImageManager.listImages(location)) {
         JsonObject o = arr.add<JsonObject>();
         o["filename"] = img.filename;
         o["size"]     = (unsigned long)img.size;
       }
     }
-    serializeJson(doc, getDebugBuffer(), 1024);
-    return getDebugBuffer();
+    // More photos than the buffer holds: the last-listed entries are dropped
+    // and the reply says "truncated"; imageCount still gives the total.
+    const char* reply = serializeJsonListToDebugBuffer(doc, arr);
+    return reply ? reply : "{\"schema\":1,\"error\":\"images_json_too_large\"}";
   }
 
   if (!stats.available) {

@@ -66,13 +66,13 @@ bool sseHeartbeat(httpd_req_t* req) {
 }
 
 bool sseSendNotice(httpd_req_t* req, const String& note) {
-  // Wrap message as JSON string payload
-  String safe = note;  // minimal escaping
-  safe.replace("\n", "\\n");
-  // Build SSE frame in stack buffer instead of String concat
-  char sseBuf[512];
-  snprintf(sseBuf, sizeof(sseBuf), "event: notice\ndata: {\"msg\":\"%s\"}\n\n", safe.c_str());
-  bool ok = sseWrite(req, sseBuf);
+  // The message is a JSON string value: quotes, backslashes and control
+  // characters are escaped, so a newline cannot end the SSE data line and
+  // the frame is never cut short of its blank-line terminator.
+  String frame = "event: notice\ndata: {\"msg\":";
+  frame += webJsonString(note);
+  frame += "}\n\n";
+  bool ok = sseWrite(req, frame.c_str());
   DEBUG_SSEF("sendNotice: len=%u %s", (unsigned)note.length(), ok ? "OK" : "FAIL");
   return ok;
 }
@@ -187,6 +187,9 @@ esp_err_t handleEvents(httpd_req_t* req) {
 
   // Immediately push a 'sensor-status' (if needed) and a 'system' snapshot, then keep streaming
   auto sendStatus = [&](const char* reason) {
+    // Sequence read before the snapshot is built: a status published after
+    // this point keeps needsStatusUpdate set (webSessionMarkStatusSent).
+    const unsigned long seqAtBuild = gSensorStatusSeq;
     const char* statusJson = buildSensorStatusJson();
     if (isDebugFlagSet(DEBUG_SSE)) {
       // strlen of the JSON itself, not of a copy — the old form measured a
@@ -217,8 +220,7 @@ esp_err_t handleEvents(httpd_req_t* req) {
     if (sseWrite(req, "event: sensor-status\ndata: ") &&
         sseWrite(req, statusJson) &&
         sseWrite(req, "\n\n")) {
-      gSessions[sessIdx].needsStatusUpdate = false;
-      gSessions[sessIdx].lastSensorSeqSent = gSensorStatusSeq;
+      webSessionMarkStatusSent(sessIdx, sid, seqAtBuild);
     }
   };
 
@@ -255,7 +257,9 @@ esp_err_t handleEvents(httpd_req_t* req) {
     while ((long)(millis() - holdStart) < (long)holdMs) {
       String n;
       int sent = 0;
-      while (sseDequeueNotice(gSessions[sessIdx], n)) {
+      // Dequeue under the session lock (bound to this request's sid); the
+      // socket write below runs after it is released.
+      while (webSessionDequeueSseNotice(sessIdx, sid, n)) {
         DEBUG_SSEF("SSE notice tick send: %s", n.c_str());
         if (!sseSendNotice(req, n)) {
           DEBUG_SSEF("SSE write failed while sending notice; closing");
@@ -269,7 +273,7 @@ esp_err_t handleEvents(httpd_req_t* req) {
       int evSent = 0;
       while (true) {
         String evName, evData;
-        if (!sseDequeueEvent(gSessions[sessIdx], evName, evData)) break;
+        if (!webSessionDequeueSseEvent(sessIdx, sid, evName, evData)) break;
         char lineBuf[256];
         // Compose: event: <name>\ndata: <json>\n\n
         // Truncate if necessary
@@ -292,9 +296,7 @@ esp_err_t handleEvents(httpd_req_t* req) {
     }
   }
 
-  if (gSessions[sessIdx].nqCount == 0 && gSessions[sessIdx].eqCount == 0) {
-    gSessions[sessIdx].needsNotificationTick = false;
-  }
+  webSessionSettleSseQueues(sessIdx, sid);
 
   sseWrite(req, NULL);
   return ESP_OK;

@@ -58,10 +58,15 @@ static bool gSweepDone        = false;
 // never read. A bool is enough because the only consumer refuses outright.
 static bool gRegistryPartial = false;
 
+// Set when the file ends in a row without its newline: an append that stopped
+// part-way. The next row must not be appended onto that fragment.
+static bool gRegistryTailOpen = false;
+
 static void registryLoad() {
   gAnchorCount = 0;
   gRegistryLoaded = true;
   gRegistryPartial = false;
+  gRegistryTailOpen = false;
   File f = VFS::openGuarded(kAnchorsPath, "r",
                             VFS::systemAuth("timeanchor.load"));
   if (!f) return;
@@ -96,6 +101,7 @@ static void registryLoad() {
       gAnchorCount++;
     }
   }
+  gRegistryTailOpen = (ll > 0);
   f.close();
 }
 
@@ -107,74 +113,100 @@ static const Anchor* registryFind(uint32_t boot) {
   return nullptr;
 }
 
-// Rewrite the registry from the in-RAM cache (used after pruning a fully
-// promoted boot). Write-temp-then-rename so a power cut mid-write can't
-// truncate the live registry.
-static void registryPersist() {
-  FsLockGuard guard("timeAnchors.persist");
-  const char* tmpPath = CAPTURE_DIR_SENSORS "/.anchors.tmp";
-  File f = VFS::openGuarded(tmpPath, "w", VFS::systemAuth("timeanchor.persist"));
-  if (!f) return;
-  for (size_t i = 0; i < gAnchorCount; i++) {
-    char line[64];
-    snprintf(line, sizeof(line), "%lu,%lu,%lld\n",
-             (unsigned long)gAnchors[i].boot,
-             (unsigned long)gAnchors[i].msAtSync,
-             (long long)gAnchors[i].epochAtSync);
-    f.print(line);
-  }
-  f.close();
-  VFS::renameGuarded(tmpPath, kAnchorsPath,
-                     VFS::systemAuth("timeanchor.persist"));
+static void formatAnchorRow(char* out, size_t cap, const Anchor& a) {
+  snprintf(out, cap, "%lu,%lu,%lld\n", (unsigned long)a.boot,
+           (unsigned long)a.msAtSync, (long long)a.epochAtSync);
 }
 
-static void registryPrune(uint32_t boot) {
-  bool changed = false;
+constexpr size_t kNoSkip = (size_t)-1;
+
+// Save the cached table as the whole registry, leaving out row `skip` and
+// adding `extra` when given. writeTextAtomic promotes the new file only after
+// every byte was written, so a full or failing filesystem keeps the previous
+// registry. Callers change the cache only after this returns true.
+static bool registryRewrite(size_t skip, const Anchor* extra) {
+  String text;
+  char row[64];
   for (size_t i = 0; i < gAnchorCount; i++) {
-    if (gAnchors[i].boot == boot) {
-      memmove(&gAnchors[i], &gAnchors[i + 1],
-              (gAnchorCount - i - 1) * sizeof(Anchor));
-      gAnchorCount--;
-      changed = true;
-      break;
-    }
+    if (i == skip) continue;
+    formatAnchorRow(row, sizeof(row), gAnchors[i]);
+    if (!text.concat(row)) return false;
   }
-  if (changed) {
+  if (extra) {
+    formatAnchorRow(row, sizeof(row), *extra);
+    if (!text.concat(row)) return false;
+  }
+  if (!writeTextAtomic(kAnchorsPath, text)) return false;
+  gRegistryTailOpen = false;  // the rewrite holds whole rows only
+  return true;
+}
+
+// Drop a fully promoted boot's row from the file, then from the cache.
+static void registryPrune(uint32_t boot) {
+  for (size_t i = 0; i < gAnchorCount; i++) {
+    if (gAnchors[i].boot != boot) continue;
     if (gRegistryPartial) {
       // Refuse: the in-RAM table is missing whatever the unparseable lines held,
       // and persisting it would make that loss permanent.
       WARN_SYSTEMF("[anchor] registry parsed only partially - skipping persist");
-    } else {
-      registryPersist();
+    } else if (!registryRewrite(i, nullptr)) {
+      // The file still holds this row; keep the cache matching the file.
+      WARN_SYSTEMF("[anchor] registry rewrite failed - row for boot %lu kept",
+                   (unsigned long)boot);
+      return;
     }
+    memmove(&gAnchors[i], &gAnchors[i + 1],
+            (gAnchorCount - i - 1) * sizeof(Anchor));
+    gAnchorCount--;
+    return;
   }
 }
 
-// Append this boot's anchor line (once per boot; caller guards).
-static void writeAnchorLine() {
-  const uint32_t ms  = millis();
-  const time_t   now = time(nullptr);
-  FsLockGuard guard("timeAnchors.append");
-  File f = VFS::openGuarded(kAnchorsPath, "a",
-                            VFS::systemAuth("timeanchor.append"));
-  if (!f) return;
-  char line[64];
-  snprintf(line, sizeof(line), "%lu,%lu,%lld\n",
-           (unsigned long)gBootCounter, (unsigned long)ms, (long long)now);
-  f.print(line);
-  f.close();
+// Record this boot's anchor row. Returns false when the row did not reach the
+// file completely; the tick then tries again later.
+static bool writeAnchorLine() {
+  if (!gRegistryLoaded) registryLoad();
+  const Anchor fresh = {gBootCounter, (uint32_t)millis(), time(nullptr)};
+  bool ok = false;
+  if (gRegistryTailOpen && !gRegistryPartial) {
+    // An earlier append stopped mid-row. Rewrite the registry from the rows
+    // that parsed plus this one, which drops the fragment.
+    ok = registryRewrite(kNoSkip, &fresh);
+  } else {
+    // A registry with unparseable rows is never rewritten (gRegistryPartial),
+    // so a fragment there is closed off as its own line, not extended.
+    char row[64];
+    const size_t lead = gRegistryTailOpen ? 1 : 0;
+    row[0] = '\n';
+    formatAnchorRow(row + lead, sizeof(row) - lead, fresh);
+    const size_t len = strlen(row);
+    FsLockGuard guard("timeAnchors.append");
+    File f = VFS::openGuarded(kAnchorsPath, "a",
+                              VFS::systemAuth("timeanchor.append"));
+    if (f) {
+      const size_t before = f.size();
+      const size_t written = f.print(row);
+      f.flush();
+      ok = written == len && !f.getWriteError() && f.size() == before + len;
+      f.close();
+    }
+  }
+  if (!ok) {
+    gRegistryLoaded = false;  // re-read before the retry: a short append leaves a fragment
+    return false;
+  }
+  gRegistryTailOpen = false;
   // Refresh the cache so the sweep sees the new line without a reload.
   if (gRegistryLoaded && gAnchorCount < kMaxAnchors) {
-    gAnchors[gAnchorCount].boot        = gBootCounter;
-    gAnchors[gAnchorCount].msAtSync    = ms;
-    gAnchors[gAnchorCount].epochAtSync = now;
+    gAnchors[gAnchorCount] = fresh;
     gAnchorCount++;
   } else {
     gRegistryLoaded = false;  // reload lazily
   }
   DEBUG_SYSTEMF("[TimeAnchors] boot #%lu anchored: ms=%lu epoch=%lld",
-                (unsigned long)gBootCounter, (unsigned long)ms,
-                (long long)now);
+                (unsigned long)fresh.boot, (unsigned long)fresh.msAtSync,
+                (long long)fresh.epochAtSync);
+  return true;
 }
 
 // Parse "boot-<N>" folder names. Returns false for anything else.
@@ -436,8 +468,20 @@ void timeAnchorsTick() {
   if (!gAnchoredThisBoot) {
     // Guard against double-append across a same-boot soft restart path:
     // if a line for this boot already exists, adopt it instead.
-    if (registryFind(gBootCounter) == nullptr) writeAnchorLine();
-    gAnchoredThisBoot = true;
+    if (registryFind(gBootCounter) != nullptr) {
+      gAnchoredThisBoot = true;
+    } else if (writeAnchorLine()) {
+      gAnchoredThisBoot = true;
+      gSweepDone = false;  // a sweep that ran while unanchored skipped this boot
+    } else {
+      // Not recorded: stay unanchored so the next tick tries again.
+      static bool sWarned = false;
+      if (!sWarned) {
+        sWarned = true;
+        WARN_SYSTEMF("[anchor] could not record boot %lu's anchor - retrying",
+                     (unsigned long)gBootCounter);
+      }
+    }
   }
 
   if (!gSweepDone) gSweepDone = sweepPass();

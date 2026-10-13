@@ -685,9 +685,14 @@ void dispatch(CompanionAction action, uint32_t now) {
       logSystemEvent("C6", "rebooting: companion outage (%s) after %" PRIu32 " soft recoveries",
                      companionOutageName(stats.lastOutage), stats.softRecoveries);
       broadcastOutput("[C6] Companion keeps failing; rebooting to recover the radio");
-      vTaskDelay(pdMS_TO_TICKS(750));  // let the notification and log leave the device
+      // The marker tells the next boot this reboot was for the companion.
+      // rebootDevice finalizes a recording in progress, records the reason and
+      // flushes the event log, then waits 750 ms for output before restarting.
       gCompanionRebootMarker = kRebootMarker;
-      esp_restart();
+      char detail[96];
+      snprintf(detail, sizeof(detail), "companion outage (%s) after %" PRIu32 " soft recoveries",
+               companionOutageName(stats.lastOutage), stats.softRecoveries);
+      rebootDevice("c6-companion", detail, 750);
       break;
     }
     case CompanionAction::Hold:

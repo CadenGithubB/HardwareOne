@@ -40,8 +40,10 @@ public:
   
   // Initialization
   bool init();
-  bool initSD();  // Initialize SD card if present
-  bool isSDAvailable() const { return sdAvailable; }
+  // VFS owns the SD mount: these ask it on every call, so a card mounted
+  // (sdmount, sdformat) or removed after boot is seen without a reboot.
+  bool initSD();  // logs the card VFS has mounted; true when one is
+  bool isSDAvailable() const;
   bool isLittleFSAvailable() const { return littleFSAvailable; }
   
   // Capture and save
@@ -88,13 +90,14 @@ public:
   String getCaptureFolder(ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS);
   
 private:
-  bool sdAvailable;
   bool littleFSAvailable;
   int imageCounter;  // For unique filenames
   // One stale-temporary sweep per tier per mount: a reset mid-save leaves
   // `<image>.jpg.tmp`, which no listing or retention would otherwise reclaim.
+  // LittleFS is swept once per init(); SD once per VFS::sdMountGeneration().
   bool lfsStaleSwept = false;
-  bool sdStaleSwept = false;
+  uint32_t sdSweptGeneration = 0;
+  bool tierAvailable(bool isSD) const;
   void sweepStaleTemporaries(ImageStorageLocation location, const String& folder);
 
   // ImageManager owns "this is a managed photo": a .jpg/.jpeg file inside the

@@ -656,7 +656,10 @@ const char* cmd_files(const String& argsInput) {
   PsramBuffer buffer(SIZE_MAX, "files.text");
   if (!buffer.reserve(1)) return "Error: Out of memory building file listing";
   ListingPsramOutput out(buffer);
-  bool ok = buildFilesListingImpl(path, out, /*asJson=*/false, currentAuthContext(), false, nullptr);
+  // Same visibility as the JSON and web listings: admin-only branches are
+  // hidden from callers who cannot open them.
+  bool ok = buildFilesListingImpl(path, out, /*asJson=*/false, currentAuthContext(),
+                                  /*hideAdminPaths=*/!currentExecIsAdmin(), nullptr);
   if (!buffer.ok()) return "Error: Out of memory building file listing";
   if (!ok) {
     broadcastOutput(buffer.c_str());
@@ -1160,8 +1163,18 @@ const char* cmd_fileread(const String& argsInput) {
   // app has it in hand when this JSON header arrives (BLE preserves message order). Any
   // non-BLE / non-secure caller — or a failed send — falls through to the base64/utf8 reply.
   if (wantBin && ctx.transport == SOURCE_BLUETOOTH) {
-    uint16_t connId = (uint16_t)ctx.sid.toInt();
-    if (connId != 0 && bleScEstablished(connId)) {
+    // A BLE command carries its connection id as decimal text. Bluedroid
+    // numbers connections from 0, so "0" is a live link; only an empty or
+    // non-numeric id means there is no connection to send the body on.
+    const char* sid = ctx.sid.c_str();
+    uint32_t sidValue = 0;
+    bool haveConn = sid && *sid;
+    for (const char* p = sid; haveConn && *p; ++p) {
+      haveConn = *p >= '0' && *p <= '9' &&
+                 (sidValue = sidValue * 10 + (uint32_t)(*p - '0')) <= 0xFFFFu;
+    }
+    const uint16_t connId = (uint16_t)sidValue;
+    if (haveConn && bleScEstablished(connId)) {
       // Complete checked metadata BEFORE sending a body the client could accept.
       // The body is still transmitted first, then the executor sends this reply.
       if (!fileReadBuildReply(s_readJson, path, total, (size_t)offset,
@@ -1472,26 +1485,29 @@ static const char* cmd_logtier(const String& argsInput) {
 }
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
+// The file commands carry no admin flag: the path rule table below decides
+// what each role may do, on every transport, as it does for the web file
+// endpoints. Every handler acts through the guarded VFS as the caller.
 const CommandEntry filesystemCommands[] = {
-  { "files", "List files [\"path\"] | files json [\"path\"] | files stats json [\"path\"]", true, cmd_files,
+  { "files", "List files [\"path\"] | files json [\"path\"] | files stats json [\"path\"]", false, cmd_files,
     "files [\"path\"]            - List files in LittleFS (default '/')\n"
     "files json [\"path\"]       - List as JSON (app/BLE): {success,dirPerms,files[]}\n"
     "files stats json [\"path\"] - Storage usage JSON for the path's tier\n"
     "Paths are always double-quoted, e.g. files \"/logging_captures\"" },
-  { "mkdir", "Create directory: \"<path>\"", true, cmd_mkdir, "Usage: mkdir \"<path>\"" },
-  { "rmdir", "Remove directory: \"<path>\"", true, cmd_rmdir, "Usage: rmdir \"<path>\"" },
-  { "filecreate", "Create file: \"<path>\"", true, cmd_filecreate, "Usage: filecreate \"<path>\"" },
-  { "fileview", "View file (paged): \"<path>\" [page]", true, cmd_fileview, "Usage: fileview \"<path>\" [page]  (pages are ~3.5KB, split at line boundaries)" },
-  { "fileread", "Read file chunk as JSON: \"<path>\" [offset] [len] [b64|bin]", true, cmd_fileread,
+  { "mkdir", "Create directory: \"<path>\"", false, cmd_mkdir, "Usage: mkdir \"<path>\"" },
+  { "rmdir", "Remove directory: \"<path>\"", false, cmd_rmdir, "Usage: rmdir \"<path>\"" },
+  { "filecreate", "Create file: \"<path>\"", false, cmd_filecreate, "Usage: filecreate \"<path>\"" },
+  { "fileview", "View file (paged): \"<path>\" [page]", false, cmd_fileview, "Usage: fileview \"<path>\" [page]  (pages are ~3.5KB, split at line boundaries)" },
+  { "fileread", "Read file chunk as JSON: \"<path>\" [offset] [len] [b64|bin]", false, cmd_fileread,
     "fileread \"<path>\" [offset] [len] [b64|bin] - Chunked permission-guarded read (app/BLE).\n"
     "Returns {success,size,offset,len,eof,enc,data}; loop offset until eof.\n"
     "`bin` (established BLE Secure Channel only): sends the chunk as a raw binary frame and\n"
     "omits `data` (enc:\"raw\") — no base64 expansion, for fast bulk transfers like maps." },
-  { "filewrite", "Write file chunk: \"<path>\" <offset> <b64chunk> [final]", true, cmd_filewrite,
+  { "filewrite", "Write file chunk: \"<path>\" <offset> <b64chunk> [final]", false, cmd_filewrite,
     "filewrite \"<path>\" <offset> <b64chunk> [final] - Sequential chunked write (app/BLE).\n"
     "offset 0 truncates/creates; later offsets must equal current size; 'final' runs post-save hooks." },
-  { "filedelete", "Delete file: \"<path>\" [confirm]", true, cmd_filedelete, "Usage: filedelete \"<path>\" [confirm]" },
-  { "filerename", "Rename file: \"<oldpath>\" \"<newname>\"", true, cmd_filerename, "Usage: filerename \"<oldpath>\" \"<newname>\"" },
+  { "filedelete", "Delete file: \"<path>\" [confirm]", false, cmd_filedelete, "Usage: filedelete \"<path>\" [confirm]" },
+  { "filerename", "Rename file: \"<oldpath>\" \"<newname>\"", false, cmd_filerename, "Usage: filerename \"<oldpath>\" \"<newname>\"" },
   { "logtier", "Show current log storage tier (LittleFS vs SD overflow).", false, cmd_logtier,
     "logtier             - Report which tier logs are writing to and free space on each. [json]" },
 };
@@ -1605,6 +1621,13 @@ static const PathRule sPathRules[] = {
   // ---- ESP-NOW data: user can read+write+delete; admin same; system full ----
   {"/espnow/",                          PERM_READ | PERM_WRITE | PERM_DELETE,
                                         PERM_READ | PERM_WRITE | PERM_DELETE,                          PERM_ALL,  false, false},
+
+  // ---- Device logs at the root: the battery logger owns /battery.csv, its
+  // rotations (.1, .2) and its header staging file. Everyone signed in reads
+  // it (the battery page); admins may clear it (`batterylog clear`); only the
+  // system writes, creates or renames, so no account can replace the log the
+  // admin battery page renders.
+  {"/battery.csv",                      PERM_READ, PERM_READ | PERM_DELETE,                            PERM_ALL,  false, false},
 
   // ---- Default: user data (maps, photos, recordings, etc.) — full for everyone authenticated ----
   {nullptr,                             PERM_ALL,  PERM_ALL,                                           PERM_ALL,  false, false},

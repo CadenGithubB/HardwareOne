@@ -156,11 +156,12 @@ struct Faults {
   PathSet rename;                               // rename(from, ...) returns false (keyed by source)
   PathSet writeError;                           // getWriteError() reports 1 after the first write
   PathSet flush;                                // flush() sets the write error
+  PathSet seek;                                 // seek() returns false, position unchanged
   std::map<std::string, size_t> shortWriteAfter; // accept at most N bytes in total per file
   std::map<std::string, int> stat;              // stat() fails with this errno
   void clear() {
     open.clear(); mkdir.clear(); rmdir.clear(); remove.clear(); rename.clear();
-    writeError.clear(); flush.clear(); shortWriteAfter.clear(); stat.clear();
+    writeError.clear(); flush.clear(); seek.clear(); shortWriteAfter.clear(); stat.clear();
   }
 };
 
@@ -668,6 +669,7 @@ class File {
 
   bool seek(uint32_t pos, SeekMode mode) {
     if (!*this || handle_->node->directory) return false;
+    if (fake_vfs::fs().faults.seek.matches(handle_->node->path)) return false;
     const size_t size = handle_->node->bytes.size();
     size_t target;
     if (mode == SeekSet) target = pos;

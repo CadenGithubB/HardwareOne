@@ -119,47 +119,22 @@ bool webSessionEpochIsLive(TransportSessionEpoch epoch);
 #if ENABLE_HTTP_SERVER
 
 // ============================================================================
-// Brute-Force / Login Rate Limiting
+// Brute-Force / Login Rate Limiting (web adapters)
 // ============================================================================
+// The lockout table, its tiers and getTotalFailedLoginCount() live in
+// System_User (credentialAttempt*), keyed by transport plus peer; these
+// adapters key the web by client IP. /login and Basic Auth call the owner
+// directly because they know the account that was tried.
 
-// Track up to this many IPs simultaneously; oldest evicted when full
-#define MAX_LOGIN_ATTEMPT_ENTRIES  8
-
-// Failures within this window count toward lockout; resets on expiry
-#define LOGIN_ATTEMPT_WINDOW_MS    (10UL * 60UL * 1000UL)  // 10 minutes
-
-// Lockout tiers (checked in recordFailedLogin after incrementing failCount)
-#define LOGIN_LOCKOUT_TIER1_COUNT  5   // 5  failures → 30-second lockout
-#define LOGIN_LOCKOUT_TIER1_MS     (30UL * 1000UL)
-#define LOGIN_LOCKOUT_TIER2_COUNT  10  // 10 failures → 5-minute lockout
-#define LOGIN_LOCKOUT_TIER2_MS     (5UL * 60UL * 1000UL)
-#define LOGIN_LOCKOUT_TIER3_COUNT  20  // 20 failures → 30-minute lockout
-#define LOGIN_LOCKOUT_TIER3_MS     (30UL * 60UL * 1000UL)
-
-// Per-IP failed login tracking entry.
-// Uses fixed char[] (no String) to avoid heap fragmentation on embedded.
-struct LoginAttemptEntry {
-  char ip[40];                  // IPv4/IPv6 as C-string; ip[0]=='\0' means unused
-  uint8_t failCount;            // cumulative failures within current window
-  unsigned long windowStart;    // millis() of first failure in this window
-  unsigned long lockedUntil;    // millis() timestamp when lockout expires; 0 = not locked
-};
-
-// Returns true if the given IP is currently locked out.
-// If remainingMs is non-null it receives the milliseconds until unlock.
+// True if the given IP may not try a credential now (remainingMs, optional,
+// receives the time left).
 bool isLoginLocked(const char* ip, unsigned long* remainingMs = nullptr);
 
-// Record a failed login attempt for the given IP and apply lockout if threshold crossed.
+// Count a failed attempt that names no account (registration intake).
 void recordFailedLogin(const char* ip);
 
-// Clear the failure record for the given IP (call on successful login).
+// Drop the IP's attempt record (an admin ban replaces it).
 void clearLoginAttempts(const char* ip);
-
-// Cumulative count of failed login attempts since boot. Monotonic (not
-// affected by window expiry or successful login). Surfaced in the OLED
-// Web Stats card; safe to call from any task — no synchronization needed
-// because the writer is single-threaded inside recordFailedLogin().
-uint32_t getTotalFailedLoginCount();
 
 // ============================================================================
 // IP Ban List (permanent, admin-managed, persisted to flash)
@@ -182,11 +157,14 @@ void loadIpBans();
 bool isIpBanned(const char* ip);
 
 // Add an IP to the ban list, kick any active sessions from that IP, and persist.
-// Returns false if the list is full or the save fails.
+// Returns false if the list is full or the save fails. A ban whose save fails
+// stays in force in memory until reboot (a not-saved notice is broadcast);
+// banning the same IP again retries the save.
 bool banIp(const char* ip, const char* reason = nullptr);
 
 // Remove an IP from the ban list and persist.
-// Returns false if the IP was not found in the list.
+// Returns false if the IP was not found in the list, or if the save fails; a
+// failed save keeps the ban in force so memory matches the saved list.
 bool unbanIp(const char* ip);
 
 // Broadcast the current ban list to all connected clients (used by cmd_banlist).
@@ -194,6 +172,7 @@ void broadcastBanList();
 
 // JSON form of the IP ban list (used by `banlist json`). Defined alongside the
 // ban data in WebServer_Server.cpp; only linked in HTTP-enabled builds.
+// Returns the whole document or a one-field {"error":...} object.
 const char* banListJson();
 
 extern volatile unsigned long gSensorStatusSeq;
@@ -208,12 +187,25 @@ void broadcastEventToAllSessions(const char* eventName, const char* jsonData);
 
 // Predicate-filtered variant: only sessions whose authenticated username
 // passes `allow` receive the event (per-user notification visibility).
+// `allow` runs without the session lock on a copy of the username and may
+// read flash; the event is dropped if the slot changed hands meanwhile.
 void broadcastEventToSessionsIf(const char* eventName, const char* jsonData,
                                 bool (*allow)(const char* username, void* arg), void* arg);
 
 // Sum of typed-event drop-oldest counts across CURRENT sessions (counters
 // reset when a session entry is recycled). Used by `notifstats`.
 uint32_t sseEventDropsTotal();
+
+// Locked queue access for the SSE handler: slot `idx` must still hold the
+// session `sid`, otherwise nothing is dequeued. The settle call clears the
+// pending-delivery flag when both queues are empty. The status call records a
+// delivered sensor-status snapshot taken at `seqSent` and clears the update
+// flag only if no newer status was published since.
+bool webSessionDequeueSseEvent(int idx, const String& sid,
+                               String& outEventName, String& outData);
+bool webSessionDequeueSseNotice(int idx, const String& sid, String& out);
+void webSessionSettleSseQueues(int idx, const String& sid);
+void webSessionMarkStatusSent(int idx, const String& sid, unsigned long seqSent);
 
 // ============================================================================
 // Session Management Functions

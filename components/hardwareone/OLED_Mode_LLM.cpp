@@ -5,8 +5,8 @@
 // conversation module). Four sub-states:
 //
 //   NO_MODEL    — model isn't loaded. Footer: "A: pick model".
-//   LOADING     — model load in progress (synchronous in engine; OLED freezes
-//                 on the file picker's last frame while weights are read).
+//   LOADING     — model load in progress (`llmload` runs on cmd_exec; this
+//                 screen holds until its reply arrives and the engine settles).
 //   READY       — chat view with turn history. "A: ask  Y: retry".
 //   GENERATING  — streaming the active turn, "B: stop".
 //
@@ -158,6 +158,80 @@ static bool sLastTurnGuided   = false;
 static int  sGuidedAskSession = 0;
 
 // ============================================================================
+// Load / unload through the command executor
+// ============================================================================
+// `llmload` and `llmunload` are admin commands. Submitting them under the
+// display identity applies the same role check as every other surface, and the
+// load runs on cmd_exec, serialised with loads and unloads from the CLI, web
+// and G2, instead of blocking this loop for seconds. One request at a time; the
+// reply callback runs on cmd_exec and only fills this mailbox, which the
+// render loop drains.
+enum : uint8_t { LLM_CMD_NONE = 0, LLM_CMD_LOAD, LLM_CMD_UNLOAD };
+static uint8_t sCmdInFlight = LLM_CMD_NONE;          // owner task only
+static portMUX_TYPE sCmdMux = portMUX_INITIALIZER_UNLOCKED;
+static bool        sCmdReplyReady  = false;          // guarded by sCmdMux
+static uint8_t     sCmdReplyOp     = LLM_CMD_NONE;   // guarded by sCmdMux
+static const char* sCmdReplyStatus = nullptr;        // guarded by sCmdMux; literal, nullptr = success
+
+static void llmCommandDone(bool ok, const char* result, void* userData) {
+  const uint8_t op = (uint8_t)(uintptr_t)userData;
+  const char* r = result ? result : "";
+  const char* status = nullptr;
+  if (strstr(r, "Admin access")) {
+    status = "admin required";
+  } else if (!ok || strncmp(r, "Error", 5) == 0 || strstr(r, "\"ok\":false")) {
+    status = (op == LLM_CMD_LOAD) ? "load failed" : "unload failed";
+  }
+  portENTER_CRITICAL(&sCmdMux);
+  sCmdReplyOp = op;
+  sCmdReplyStatus = status;
+  sCmdReplyReady = true;
+  portEXIT_CRITICAL(&sCmdMux);
+}
+
+static bool submitLlmCommand(const char* line, uint8_t op) {
+  if (sCmdInFlight != LLM_CMD_NONE) return false;
+  String user;
+  bool authed = false;
+  const TransportSessionEpoch epoch = localDisplayTransportSessionSnapshot(user, authed);
+  if (epoch == kNoTransportSessionEpoch) return false;
+  if (!submitOLEDCommandForSession(String(line), epoch, llmCommandDone,
+                                   (void*)(uintptr_t)op)) {
+    return false;
+  }
+  sCmdInFlight = op;
+  return true;
+}
+
+// A refused or failed request returns to the screen it came from with the
+// reason on the status line; a success leaves the engine state to drive.
+static void pollLlmCommandReply() {
+  if (sCmdInFlight == LLM_CMD_NONE) return;
+  bool ready = false;
+  uint8_t op = LLM_CMD_NONE;
+  const char* status = nullptr;
+  portENTER_CRITICAL(&sCmdMux);
+  if (sCmdReplyReady) {
+    ready = true;
+    op = sCmdReplyOp;
+    status = sCmdReplyStatus;
+    sCmdReplyReady = false;
+  }
+  portEXIT_CRITICAL(&sCmdMux);
+  if (!ready) return;
+  sCmdInFlight = LLM_CMD_NONE;
+  if (!status) return;
+  if (op == LLM_CMD_LOAD && sUIState == LLMUIState::LOADING) {
+    sUIState = LLMUIState::PICK_MODEL;
+    sMenuStatus = status;
+  } else if (op == LLM_CMD_UNLOAD && sUIState == LLMUIState::NO_MODEL &&
+             llmBackendIsReady()) {
+    sUIState = LLMUIState::MENU;
+    sMenuStatus = status;
+  }
+}
+
+// ============================================================================
 // State transitions
 // ============================================================================
 
@@ -172,6 +246,7 @@ static bool stateOwnsUI(LLMUIState s) {
 // Refresh state from the engine + chat module. Called at the top of
 // displayLLM() each frame so transitions land within one render tick.
 static void syncStateFromEngine() {
+  pollLlmCommandReply();
   if (sKeyboardActive) return;  // keyboard owns the UI
 
   LLMStatus st = llmBackendStatus();
@@ -232,8 +307,11 @@ static void syncStateFromEngine() {
     return;
   }
 
-  // From LOADING → READY/NO_MODEL based on engine state
+  // From LOADING → READY/NO_MODEL based on engine state. While our own
+  // `llmload` is queued or running, the engine still shows the previous model
+  // (or none), so hold until its reply arrives.
   if (sUIState == LLMUIState::LOADING) {
+    if (sCmdInFlight == LLM_CMD_LOAD) return;
     if (st.state == LLMState::READY) {
       sUIState = LLMUIState::READY;
     } else if (st.state == LLMState::ERROR || st.state == LLMState::UNLOADED) {
@@ -241,6 +319,9 @@ static void syncStateFromEngine() {
     }
     return;
   }
+
+  // Our own `llmunload` is queued: keep the empty screen until it replies.
+  if (sCmdInFlight == LLM_CMD_UNLOAD && sUIState == LLMUIState::NO_MODEL) return;
 
   // Otherwise reflect whatever the engine reports.
   if (st.state == LLMState::READY) {
@@ -335,18 +416,18 @@ static void commitModelPick() {
   if (idx < 0 || idx >= sModelCount) return;
   if (!sModelDescs[idx].available) { sMenuStatus = "not available"; return; }
 
-  char err[64] = {0};
-  // Local selection blocks for seconds reading weights, so no LOADING frame is
-  // drawn in practice; a remote selection returns immediately with the host
-  // still switching, which is exactly what the LOADING state is for.
-  sUIState = LLMUIState::LOADING;
-  const bool ok = llmBackendSelect(sModelDescs[idx].id, err, sizeof(err));
-  if (!ok) {
-    sUIState = LLMUIState::PICK_MODEL;
+  if (sCmdInFlight != LLM_CMD_NONE) { sMenuStatus = "busy"; return; }
+  // The id is copied into the command line now, so a picker rebuild while the
+  // command waits on cmd_exec cannot change what loads. LOADING holds until
+  // the reply; a refusal or failure comes back here with the reason.
+  char cmd[LLM_MODEL_ID_LEN + 24];
+  if (!llmBuildLoadCommand(sModelDescs[idx].id, 0, cmd, sizeof(cmd)) ||
+      !submitLlmCommand(cmd, LLM_CMD_LOAD)) {
     sMenuStatus = "load failed";
     return;
   }
-  sUIState = llmBackendIsReady() ? LLMUIState::READY : LLMUIState::LOADING;
+  sMenuStatus = nullptr;
+  sUIState = LLMUIState::LOADING;
 }
 
 // ============================================================================
@@ -945,7 +1026,12 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
             enterPickModel();
             break;
           case MENU_ROW_UNLOAD:
-            llmBackendUnload();
+            if (sCmdInFlight != LLM_CMD_NONE) { sMenuStatus = "busy"; break; }
+            if (!submitLlmCommand("llmunload", LLM_CMD_UNLOAD)) {
+              sMenuStatus = "unload failed";
+              break;
+            }
+            sMenuStatus = nullptr;
             sUIState = LLMUIState::NO_MODEL;
             break;
           default: break;

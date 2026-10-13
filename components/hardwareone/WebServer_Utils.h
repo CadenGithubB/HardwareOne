@@ -73,6 +73,13 @@ bool webGuestAccessAllowed(httpd_req_t* req, const AuthContext& ctx);
 // as the allowlist gate and false. The allowlist stays the read-only surface.
 bool webGuestMutationAllowed(httpd_req_t* req, const AuthContext& ctx);
 
+// Forced password change gate, run by tgRequireAuth for every authenticated
+// web request. While userMustChangePassword(user) holds, only the
+// password-change page and logout pass: page requests are redirected to the
+// change form, API and JSON requests get 403 password_change_required.
+// Returns false after sending that reply.
+bool webPasswordChangeAllows(httpd_req_t* req, const String& user);
+
 // Authenticate the request and return ESP_OK (unauthenticated) if auth fails.
 // Usage:  WEB_AUTH_OR_RETURN(req, ctx);
 //         ... use ctx.user, ctx.ip etc below ...
@@ -148,6 +155,14 @@ WebBodyBuffer webReadRequestBody(httpd_req_t* req, size_t maxLen, const char* al
 // instead of draining them, ESP_OK for an empty body (or status Ok, which
 // sends nothing).
 esp_err_t webSendBodyReadError(httpd_req_t* req, WebBodyStatus status, bool json = false);
+
+// Text spliced into a hand-built JSON reply (file names, command errors,
+// status strings) goes through these. webJsonString returns the value as a
+// quoted JSON string; ArduinoJson escapes quotes, backslashes and every
+// control character. sendJsonError sends {"success":false,"error":<message>}.
+String webJsonString(const char* text);
+inline String webJsonString(const String& text) { return webJsonString(text.c_str()); }
+esp_err_t sendJsonError(httpd_req_t* req, const String& message);
 
 // ============================================================================
 // Navigation HTML Generation

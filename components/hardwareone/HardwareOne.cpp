@@ -628,6 +628,10 @@ bool hasAdminPrivilege(const AuthContext& ctx) {
   // through here — it routes to callerMayTargetAnotherSession. The guard exists
   // so that a future caller passing someone else's ctx still resolves for real
   // rather than silently inheriting this task's answer.
+  //
+  // The reserved bond name is decided from the ctx itself: privileged only as
+  // the live ESP-NOW bond, never as an account or session on another transport.
+  if (ctx.user == kBondAdminUser) return bondIdentityLive(ctx);
   if (ctx.user.length() > 0 && ctx.user == currentExecUser()) {
     return currentExecIsAdmin();
   }
@@ -635,6 +639,7 @@ bool hasAdminPrivilege(const AuthContext& ctx) {
 }
 
 bool hasSuperAdminPrivilege(const AuthContext& ctx) {
+  if (ctx.user == kBondAdminUser) return bondIdentityLive(ctx);
   return isSuperAdminUser(ctx.user);
 }
 
@@ -838,12 +843,18 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   if (ctx.outputMask & MSG_ROUTE_BLE) {
     String prefixed = prefix;
     prefixed += s;
-    uint16_t targetConnId = 0;
-    if (ctx.auth.sid.length() > 0) {
-      targetConnId = (uint16_t)ctx.auth.sid.toInt();
+    // The session id of a BLE command is its connection id in decimal.
+    // Bluedroid numbers connections from 0, so "0" is a live link; only an
+    // empty or non-numeric id falls back to the characteristic-wide notify.
+    const char* sid = ctx.auth.sid.c_str();
+    uint32_t targetConnId = 0;
+    bool haveConn = sid && *sid;
+    for (const char* p = sid; haveConn && *p; ++p) {
+      haveConn = *p >= '0' && *p <= '9' &&
+                 (targetConnId = targetConnId * 10 + (uint32_t)(*p - '0')) <= 0xFFFFu;
     }
-    if (targetConnId > 0) {
-      sendBLEResponseToConn(targetConnId, prefixed.c_str(), prefixed.length());
+    if (haveConn) {
+      sendBLEResponseToConn((uint16_t)targetConnId, prefixed.c_str(), prefixed.length());
     } else {
       sendBLEResponse(prefixed.c_str(), prefixed.length());
     }
@@ -1577,12 +1588,6 @@ void hardwareone_setup() {
   // while restoring can't replay the same state into a boot loop.
   ramFlushConsumeOverlay();
 
-  // cameraAutoStart is not stable across this boot: a failed initCamera() clears it
-  // (System_Camera_DVP.cpp:941) during the very replay that reads it. Snapshot the
-  // intent now, before any replay runs, so the camera's resolve can't be swayed by
-  // a write the replay itself caused.
-  [[maybe_unused]] const bool snapCameraAutoStart = gSettings.cameraAutoStart;
-
   // Unconditional per-boot orientation divider into the login/i2c/error logs so
   // every log is attributable to a boot even when NTP never syncs (offline) — now
   // carrying the reboot detail so those sparse logs self-explain a commanded restart.
@@ -2029,14 +2034,7 @@ void hardwareone_setup() {
   // them this reads `(enabled && autostart) || wantClient`, so a peer set to
   // auto-reconnect would start the radio on a device where Bluetooth is
   // explicitly disabled. Disabled has to mean disabled.
-  // One-boot resume after an update that arrived over Bluetooth. Sits beside
-  // ramFlushResolve deliberately: same shape (a transient override that never
-  // writes the autostart setting), and it stays INSIDE the bleEnabled gate for
-  // the same reason -- disabled has to mean disabled. That costs nothing in
-  // practice, since an update cannot have arrived over a radio the owner
-  // switched off.
-  const bool wantBleServerAtBoot =
-      ramFlushResolve(RF_BLUETOOTH, gSettings.bleAutoStart) || otaSystemResumeBleRequested();
+  const bool wantBleServerAtBoot = ramFlushResolve(RF_BLUETOOTH, gSettings.bleAutoStart);
 
   const char* bleCompanionReason = nullptr;
   if (gSettings.bleEnabled && (wantBleServerAtBoot || wantClientForAutoReconnect) &&
@@ -2108,7 +2106,7 @@ void hardwareone_setup() {
 
 #if ENABLE_CAMERA_SENSOR
   // Camera auto-start (independent of I2C sensor queue)
-  if (gSettings.cameraEnabled && ramFlushResolve(RF_CAMERA, snapCameraAutoStart)) {
+  if (gSettings.cameraEnabled && ramFlushResolve(RF_CAMERA, gSettings.cameraAutoStart)) {
     runUnifiedSystemCommand("opencamera");
   }
 #endif
@@ -2392,8 +2390,13 @@ static bool powerSaveInhibited() {
   // activity — an @BOND/RCE command — flows through executeCommand and resets
   // the idle timer via the activity hook instead, so the device wakes on actual
   // use while an idle-but-bonded link is free to power-save.
-  extern bool cameraStreaming;
-  return micRecordingBusy() || cameraStreaming;
+  // The camera module owns its busy answer: open stream and recording sessions.
+#if ENABLE_CAMERA_SENSOR
+  extern bool cameraCaptureBusy();
+  return micRecordingBusy() || cameraCaptureBusy();
+#else
+  return micRecordingBusy();
+#endif
 }
 
 static void powerSaveTick() {
@@ -2874,22 +2877,14 @@ void hardwareone_loop() {
           return;
         }
 
-#if ENABLE_HTTP_SERVER
         unsigned long lockoutRemainingMs = 0;
-        bool locked = isLoginLocked(serialIp, &lockoutRemainingMs);
-#else
-        bool locked = false;
-#endif
-        if (locked) {
-#if ENABLE_HTTP_SERVER
+        if (!credentialAttemptAllowed(SOURCE_SERIAL, serialIp,
+                                      &lockoutRemainingMs)) {
           BROADCAST_PRINTF("[serial] Login locked out. Retry in %lu seconds.",
                            lockoutRemainingMs / 1000UL);
           recordLoginAttempt(SOURCE_SERIAL, u, serialIp, false, "Locked out");
-#endif
         } else if (isValidUser(u, p)) {
-#if ENABLE_HTTP_SERVER
-          clearLoginAttempts(serialIp);
-#endif
+          credentialAttemptRecord(SOURCE_SERIAL, serialIp, u.c_str(), true);
           const TransportSessionEpoch newEpoch =
               serialTransportSessionAuthenticatedIfEpoch(
                   admittedSerialEpoch, u);
@@ -2915,9 +2910,7 @@ void hardwareone_loop() {
             Serial.println("[serial] Session changed before login completed.");
           }
         } else {
-#if ENABLE_HTTP_SERVER
-          recordFailedLogin(serialIp);
-#endif
+          credentialAttemptRecord(SOURCE_SERIAL, serialIp, u.c_str(), false);
           recordLoginAttempt(SOURCE_SERIAL, u, serialIp, false,
                              "Invalid credentials");
           broadcastOutput("[serial] Authentication failed.");

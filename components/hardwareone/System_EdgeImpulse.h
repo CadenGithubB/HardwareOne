@@ -34,9 +34,14 @@
 //   5. Run inference: ei detect
 // ============================================================================
 
-// Detection result structure
+// Longest class label kept, including the terminator (longer lines in a
+// labels file are truncated).
+#define EI_LABEL_MAX 32
+
+// Detection result structure. Each detection owns a copy of its label, so it
+// stays valid after the next inference or a model change.
 struct EIDetection {
-  const char* label;
+  char label[EI_LABEL_MAX];
   float confidence;
   int x;
   int y;
@@ -63,17 +68,20 @@ struct EIResults {
 // Initialize Edge Impulse module
 void initEdgeImpulse();
 
-// Run single inference on current camera frame
-// Returns detection results
+// Run single inference on current camera frame and update tracked objects.
+// Returns a "busy" error instead of waiting when another inference, a model
+// load or an unload is in progress.
 EIResults runEdgeImpulseInference();
 
-// Start/stop continuous inference mode
+// Run single inference on a stored JPEG file (same pipeline as the camera;
+// does not update tracked objects). Busy rule as above.
+EIResults runInferenceFromFile(const char* imagePath);
+
+// Start/stop continuous inference mode. Stop returns once the continuous task
+// has finished its current frame and exited.
 bool startContinuousInference();  // returns true if running on exit, false if it could not start
 void stopContinuousInference();
 bool isContinuousInferenceRunning();
-
-// Get last detection results (for SSE/web)
-const EIResults& getLastDetectionResults();
 
 // Build JSON from detection results
 void buildDetectionJson(const EIResults& results, String& output);
@@ -85,17 +93,13 @@ bool isEdgeImpulseModelLoaded();
 // Model Management API
 // ============================================================================
 
-// Load a .tflite model from LittleFS
+// Load a .tflite model from LittleFS. The model's input tensor sets the input
+// width, height and channels. Waits for a running inference; continuous mode
+// is paused for the swap and resumed when the new model loads.
 bool loadModelFromFile(const char* path);
 
-// Unload current model and free resources
+// Stop continuous mode, wait for a running inference, then free the model.
 void unloadModel();
-
-// Check if a model is loaded
-bool isModelLoaded();
-
-// Get path of currently loaded model
-const char* getLoadedModelPath();
 
 // List available models in /littlefs/EI Models/
 void listAvailableModels(String& output);
@@ -104,24 +108,8 @@ void listAvailableModels(String& output);
 // State Change Tracking API
 // ============================================================================
 
-// Tracked object structure (forward declaration for external use)
-struct TrackedObject;
-
-// State change callback type
-typedef void (*StateChangeCallback)(const char* objectLabel, const char* prevState, const char* newState, int x, int y);
-
-// Set callback for state change events
-void setStateChangeCallback(StateChangeCallback callback);
-
 // Enable/disable state tracking
 void setStateTrackingEnabled(bool enabled);
-
-// Get tracked object count and access
-int getTrackedObjectCount();
-const TrackedObject* getTrackedObject(int index);
-
-// Build JSON output for tracked objects
-void buildStateChangeJson(String& output);
 
 // ============================================================================
 // Settings Module (extern declaration)

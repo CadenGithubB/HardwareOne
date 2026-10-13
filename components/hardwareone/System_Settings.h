@@ -372,11 +372,7 @@ struct Settings {
       g2PackRateMs(80),
       cameraStorageLocation(1),  // 1 = SD card (default — LittleFS is too small for photos)
       cameraCaptureFolder("/photos"),
-      cameraAutoCapture(false),
-      cameraAutoCaptureIntervalSec(60),
       cameraMaxStoredImages(100),
-      cameraSendAfterCapture(false),
-      cameraTargetDevice(""),
       eiEnabled(false),
       edgeImpulseRequireLabels(true),
       edgeImpulseMinConfidence(0.6f),
@@ -407,8 +403,6 @@ struct Settings {
       bleSecureChannelSecret(""),
       // BLE peer fields moved to gBlePeerData[] (see BLE_Peers.h)
       powerMode(0),
-      powerAutoMode(false),
-      powerBatteryThreshold(20),
       powerDisplayDimLevel(30),
       powerTransitionCooldownMs(5000),  // 5s anti-flap guard on sleep entry; 0 = disabled
       powerSaveTimeoutMinutes(10),      // Idle power-save: blank OLED + 80MHz downclock after 10 min idle; 0 = disabled
@@ -1080,11 +1074,7 @@ struct Settings {
   // Camera storage settings
   int cameraStorageLocation;    // 0=LittleFS, 1=SD, 2=Both
   String cameraCaptureFolder;   // Folder for saved images (default: "/photos")
-  bool cameraAutoCapture;       // Enable periodic auto-capture
-  int cameraAutoCaptureIntervalSec; // Interval for auto-capture (default: 60)
   int cameraMaxStoredImages;    // Max images before rotation (0=unlimited, default: 100)
-  bool cameraSendAfterCapture;  // Auto-send to target device after capture
-  String cameraTargetDevice;    // ESP-NOW name/MAC of target device for auto-send
   // Edge Impulse ML settings
   bool eiEnabled;      // Enable Edge Impulse inference
   bool edgeImpulseRequireLabels;
@@ -1130,8 +1120,6 @@ struct Settings {
   //   g2AutoReconnect, ringAutoReconnect
   // Power Management settings
   uint8_t powerMode;            // 0=Performance(240/80), 1=Balanced(160/80), 2=PowerSaver(80), 3=UltraSaver(80 active / 40 idle), 4=Locked(240 always)
-  bool powerAutoMode;           // Auto-adjust power mode based on battery level
-  uint8_t powerBatteryThreshold; // Switch to power saver below this battery % (default: 20)
   uint8_t powerDisplayDimLevel; // Brightness % in power saver modes (0-100, default: 30)
   uint32_t powerTransitionCooldownMs; // Anti-flap cooldown between sleep entries (ms); 0 disables
   uint32_t powerSaveTimeoutMinutes;   // Idle power-save: blank OLED + 80MHz downclock after N min idle; 0 = disabled

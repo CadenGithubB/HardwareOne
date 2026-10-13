@@ -31,6 +31,7 @@
 #include "System_Debug.h"
 #include "System_Settings.h"
 #include "System_User.h"
+#include "System_Utils.h"     // executeUnifiedWebCommand
 #include "System_MemUtil.h"   // PSRAM_JSON_DOC
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
@@ -61,7 +62,6 @@ static esp_err_t handleLLMStatus(httpd_req_t* req) {
   // strip and refetch it when a model swap changes the menu (LLM_GUIDED_MENU_SPEC §7).
   uint8_t  menuGroups = llmMenuGroupCount();
   uint16_t menuGen    = llmMenuGeneration();
-  char json[1024];  // headroom for the optional ctxWarning + host fragments + a long error
   const char* stateStr = "UNLOADED";
   switch (st.state) {
     case LLMState::LOADING:    stateStr = "LOADING"; break;
@@ -117,24 +117,40 @@ static esp_err_t handleLLMStatus(httpd_req_t* req) {
   }
 #endif
 
-  snprintf(json, sizeof(json),
-    "{\"state\":\"%s\",\"model\":\"%s\",\"params\":\"%dx%dx%d\","
-    "\"psramKB\":%u,\"tokPerSec\":%.1f,\"lastTokens\":%d,\"error\":\"%s\","
-    "\"dim\":%d,\"layers\":%d,\"heads\":%d,\"kvHeads\":%d,\"vocab\":%d,\"seqLen\":%d,"
-    "\"ctxUsed\":%d,\"ctxMax\":%d,\"arch\":\"%s\",\"quant\":\"%s\","
-    "\"menu\":{\"groups\":%u,\"gen\":%u},\"backend\":\"%s\",\"cmdMode\":%s%s%s}",
-    stateStr, st.modelPath,
-    st.config.dim, st.config.n_layers, st.config.n_heads,
-    (unsigned)(st.totalPsramUsed / 1024),
-    st.lastTokensPerSec, st.lastTokenCount, st.errorMsg,
-    st.config.dim, st.config.n_layers, st.config.n_heads,
-    st.config.n_kv_heads, st.config.vocab_size, st.config.seq_len,
-    st.lastContextUsed, st.lastContextMax, archStr, quantStr,
-    (unsigned)menuGroups, (unsigned)menuGen,
-    llmBackendKindName(llmBackendActiveKind()),
-    llmBackendSupportsCommandMode() ? "true" : "false", ctxWarnFrag, hostFrag);
-
-  return sendJsonResponse(req, json);
+  // The model id and the error text (a remote host's message, a path) are
+  // escaped JSON strings; the reply buffer is sized to fit them.
+  const String modelJson = webJsonString(st.modelPath);
+  const String errorJson = webJsonString(st.errorMsg);
+  auto render = [&](char* out, size_t outSize) {
+    return snprintf(out, outSize,
+      "{\"state\":\"%s\",\"model\":%s,\"params\":\"%dx%dx%d\","
+      "\"psramKB\":%u,\"tokPerSec\":%.1f,\"lastTokens\":%d,\"error\":%s,"
+      "\"dim\":%d,\"layers\":%d,\"heads\":%d,\"kvHeads\":%d,\"vocab\":%d,\"seqLen\":%d,"
+      "\"ctxUsed\":%d,\"ctxMax\":%d,\"arch\":\"%s\",\"quant\":\"%s\","
+      "\"menu\":{\"groups\":%u,\"gen\":%u},\"backend\":\"%s\",\"cmdMode\":%s%s%s}",
+      stateStr, modelJson.c_str(),
+      st.config.dim, st.config.n_layers, st.config.n_heads,
+      (unsigned)(st.totalPsramUsed / 1024),
+      st.lastTokensPerSec, st.lastTokenCount, errorJson.c_str(),
+      st.config.dim, st.config.n_layers, st.config.n_heads,
+      st.config.n_kv_heads, st.config.vocab_size, st.config.seq_len,
+      st.lastContextUsed, st.lastContextMax, archStr, quantStr,
+      (unsigned)menuGroups, (unsigned)menuGen,
+      llmBackendKindName(llmBackendActiveKind()),
+      llmBackendSupportsCommandMode() ? "true" : "false", ctxWarnFrag, hostFrag);
+  };
+  const int needed = render(nullptr, 0);
+  char* json = needed > 0
+      ? (char*)ps_alloc((size_t)needed + 1, AllocPolicy::PreferPSRAM, "llm.status")
+      : nullptr;
+  if (!json) {
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    return sendJsonResponse(req, "{\"state\":\"ERROR\",\"error\":\"Out of memory\"}");
+  }
+  render(json, (size_t)needed + 1);
+  const esp_err_t sent = sendJsonResponse(req, json, needed);
+  ps_free(json);
+  return sent;
 }
 
 // ============================================================================
@@ -220,6 +236,26 @@ static esp_err_t handleLLMMenu(httpd_req_t* req) {
 }
 
 // ============================================================================
+// Reply for a load/unload command run through the executor. The command's own
+// JSON object ({"schema":1,"ok":...}) goes back as is; anything else (the
+// executor's admin refusal, a timeout) becomes {"ok":false,"error":...}.
+// ============================================================================
+static esp_err_t sendLLMCommandReply(httpd_req_t* req, const String& out,
+                                     const char* fallback) {
+  if (out.startsWith("{")) return sendJsonResponse(req, out.c_str());
+  const char* why = out.length() ? out.c_str() : fallback;
+  if (strncmp(why, "Error: ", 7) == 0) why += 7;
+  char msg[200];
+  strlcpy(msg, why, sizeof(msg));
+  PSRAM_JSON_DOC(doc);
+  doc["ok"] = false;
+  doc["error"] = msg;
+  char resp[512];
+  serializeJson(doc, resp, sizeof(resp));
+  return sendJsonResponse(req, resp);
+}
+
+// ============================================================================
 // POST /api/llm/load  { "model": "model.bin" }
 // ============================================================================
 static esp_err_t handleLLMLoad(httpd_req_t* req) {
@@ -241,34 +277,23 @@ static esp_err_t handleLLMLoad(httpd_req_t* req) {
     return sendJsonResponse(req, "{\"ok\":false,\"error\":\"No model specified\"}");
   }
 
-  int maxCtx = doc["max_ctx"] | gSettings.llmMaxContext;  // 0 = use compile-time default
+  // Optional lower context ceiling; llmMaxContext itself is applied by the
+  // backend for every surface, and this value can only lower it.
+  int maxCtx = doc["max_ctx"] | 0;
   if (maxCtx < 0) maxCtx = 0;
-  // Was a hand-typed 2048 while the schema accepted 4096, so every web load
-  // silently halved the configured context — and this is the ONLY surface that
-  // reads llmMaxContext at all (cmd_llm_load takes no context argument).
-  if (maxCtx > LLM_SETTING_MAX_CONTEXT) maxCtx = LLM_SETTING_MAX_CONTEXT;
-
-  DEBUG_HTTPF("[LLM-API] POST /api/llm/load: model='%s' max_ctx=%d", modelName, maxCtx);
 
   // `model` is a registry id ("onboard:x.bin" / "cm5:y.gguf"); a bare filename
-  // or absolute path still resolves, for hand-made requests. The path probing
-  // and directory allowlist that used to live here now live once, in
-  // llmResolveModelId — a remote model has no path to validate at all.
-  char err[96] = {0};
-  const bool ok = llmBackendSelect(modelName, err, sizeof(err), maxCtx);
-  if (ok) {
-    // A remote source is still switching when this returns, so report readiness
-    // rather than implying the model is live.
-    const bool ready = llmBackendIsReady();
-    char resp[128];
-    snprintf(resp, sizeof(resp), "{\"ok\":true,\"ready\":%s}", ready ? "true" : "false");
-    DEBUG_HTTPF("[LLM-API] Model selected: %s (ctx=%d ready=%d)", modelName, maxCtx, (int)ready);
-    return sendJsonResponse(req, resp);
+  // or absolute path still resolves, for hand-made requests. Loading is the
+  // admin-only `llmload` command: the executor checks the role and runs it on
+  // cmd_exec, serialised with every other load and unload.
+  char cmd[sizeof(body) + 32];
+  if (!llmBuildLoadCommand(modelName, maxCtx, cmd, sizeof(cmd))) {
+    return sendJsonResponse(req, "{\"ok\":false,\"error\":\"Invalid model id\"}");
   }
-  char resp[256];
-  snprintf(resp, sizeof(resp), "{\"ok\":false,\"error\":\"%s\"}", err[0] ? err : "load failed");
-  DEBUG_HTTPF("[LLM-API] Model select FAILED: %s error='%s'", modelName, err);
-  return sendJsonResponse(req, resp);
+  DEBUG_HTTPF("[LLM-API] POST /api/llm/load: model='%s' max_ctx=%d", modelName, maxCtx);
+  String out;
+  (void)executeUnifiedWebCommand(req, ctx, String(cmd), out);
+  return sendLLMCommandReply(req, out, "load failed");
 }
 
 // ============================================================================
@@ -277,9 +302,9 @@ static esp_err_t handleLLMLoad(httpd_req_t* req) {
 static esp_err_t handleLLMUnload(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("[LLM-API] POST /api/llm/unload from user=%s", ctx.user.c_str());
-  llmBackendUnload();
-  DEBUG_HTTPF("[LLM-API] Model unloaded");
-  return sendJsonResponse(req, "{\"ok\":true}");
+  String out;
+  (void)executeUnifiedWebCommand(req, ctx, String("llmunload"), out);
+  return sendLLMCommandReply(req, out, "unload failed");
 }
 
 // ============================================================================

@@ -79,24 +79,69 @@ assert "current + 1u" in admit
 assert "current | kClosed | kStopRequested" in request_stop
 assert "kClosed | kStopRequested" in begin_stop
 
+handle = function_body(mqtt, "static void handleMQTTCommand(")
+event_handler = function_body(mqtt, "static void mqtt_event_handler(")
+assert "handleMQTTCommand(event->topic" in event_handler
+
+# The esp-mqtt task holds the client's API lock while it dispatches an event,
+# and esp_mqtt_client_publish() on the main loop takes the same lock. Nothing
+# on the MQTT event path may wait for cmd_exec: commands are queued with
+# submitCommandAsync and answered from the completion with the outbox enqueue.
+assert "submitAndExecuteSync" not in mqtt, \
+    "the MQTT event path must not wait for cmd_exec (submitAndExecuteSync)"
+for body in (event_handler, handle):
+    assert "xSemaphoreTake" not in body and "vTaskDelay" not in body
+
 # Acquire admission immediately after identifying the command topic, before
 # parse/auth/queue publication. The function-scope RAII object survives through
-# every ordinary, mesh, error, and success response publication.
-handle = function_body(mqtt, "static void handleMQTTCommand(")
+# every response published on the event path; a queued command moves it into
+# the cmd_exec completion instead.
 topic_match = handle.index("strncmp(topic, commandTopic.c_str(), topicLen)")
 admission = handle.index("MqttClientUse commandUse;")
 payload_parse = handle.index("deserializeJson(")
-queue_submit = handle.index("submitAndExecuteSync(")
-final_publish = handle.rindex("esp_mqtt_client_publish(")
-assert topic_match < admission < payload_parse < queue_submit < final_publish
+queue_submit = handle.rindex("submitMqttCommand(std::move(commandUse)")
+assert topic_match < admission < payload_parse < queue_submit
 assert brace_depth_at(handle, admission) == 1
-assert brace_depth_at(handle, final_publish) == 1
+assert brace_depth_at(handle, queue_submit) == 1
 assert "MQTT client is stopping" in handle[admission:payload_parse]
 assert "releaseUse" not in handle
-admission_destructor = function_body(
-    mqtt, "~MqttClientUse()"
-)
-assert "sMqttLifecycle.releaseUse()" in admission_destructor
+assert "class MqttClientUse final : public MqttAdmission" in mqtt
+assert "MqttClientUse() : MqttAdmission(sMqttLifecycle) {}" in mqtt
+admission_header = (ROOT / "System_MQTTAdmission.h").read_text()
+assert "gate.tryAdmitUse() ? &gate : nullptr" in admission_header
+assert "if (gate) gate->releaseUse();" in function_body(
+    admission_header, "void release()")
+assert "release();" in function_body(admission_header, "~MqttAdmission()")
+
+submit = function_body(mqtt, "static void submitMqttCommand(")
+completion = function_body(mqtt, "static void mqttCommandCompleted(")
+reply_writer = function_body(mqtt, "static void enqueueMqttCommandReply(")
+assert "esp_mqtt_client_enqueue(mqttClient" in reply_writer
+# esp-mqtt deletes its outbox when the client stops, and mqttTick tears the
+# client down as soon as the reply releases its admission. A reply written
+# while a stop is pending (closemqtt sent over MQTT) is published directly
+# instead of queued; every other reply goes through the outbox.
+stop_branch = function_body(reply_writer, "if (sMqttLifecycle.stopPending())")
+assert "esp_mqtt_client_publish(mqttClient, reply.responseTopic" in stop_branch
+assert "return;" in stop_branch
+assert reply_writer.count("esp_mqtt_client_publish") == 1
+assert (reply_writer.index("if (sMqttLifecycle.stopPending())")
+        < reply_writer.index("esp_mqtt_client_enqueue(mqttClient"))
+assert "esp_mqtt_client_publish" not in completion
+assert "MqttAdmission use;" in function_body(mqtt, "struct MqttCommandReply")
+# The admission moves into the reply only after allocation, and a refused
+# submission answers before the reply (and the admission) is destroyed.
+alloc = submit.index("ps_alloc(sizeof(MqttCommandReply)")
+moved = submit.index("reply->use = std::move(use);")
+queued = submit.index("submitCommandAsync(queued, mqttCommandCompleted, reply)")
+assert alloc < moved < queued
+refused = function_body(submit, "if (!submitCommandAsync(")
+assert refused.index("enqueueMqttCommandReply(*reply, false") < refused.index(
+    "reply->~MqttCommandReply();")
+# The completion answers first and only then releases the admission.
+assert (completion.index("enqueueMqttCommandReply(*reply, ok, result)")
+        < completion.index("reply->~MqttCommandReply();")
+        < completion.index("free(reply);"))
 
 # Public stop is request-only. The only driver stop lives in the private helper
 # that mqttTick claims after responses reach zero, before normal publication.

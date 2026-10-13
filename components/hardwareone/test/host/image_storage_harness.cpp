@@ -33,7 +33,17 @@ class String {
   }
   int indexOf(const String& text) const { const auto pos = value_.find(text.value_); return pos == std::string::npos ? -1 : static_cast<int>(pos); }
   int indexOf(char value) const { return indexOf(String(value)); }
+  int indexOf(const String& text, int from) const {
+    const auto pos = from < 0 ? std::string::npos : value_.find(text.value_, static_cast<size_t>(from));
+    return pos == std::string::npos ? -1 : static_cast<int>(pos);
+  }
+  int indexOf(char value, int from) const { return indexOf(String(value), from); }
   int lastIndexOf(char value) const { const auto pos = value_.rfind(value); return pos == std::string::npos ? -1 : static_cast<int>(pos); }
+  bool equalsIgnoreCase(const String& other) const {
+    return value_.size() == other.value_.size() && std::equal(value_.begin(), value_.end(), other.value_.begin(),
+        [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); });
+  }
+  long toInt() const { return std::strtol(value_.c_str(), nullptr, 10); }
   String substring(size_t start) const { return value_.substr(std::min(start, value_.size())); }
   String substring(size_t start, size_t end) const {
     start = std::min(start, value_.size()); end = std::min(std::max(start, end), value_.size());
@@ -88,7 +98,7 @@ template <class... Args> static void logIgnored(const char*, Args...) {}
 #define WARN_STORAGEF(...) logIgnored(__VA_ARGS__)
 #define FILE_READ "r"
 
-struct Settings { String cameraCaptureFolder = "/photos"; } gSettings;
+struct Settings { String cameraCaptureFolder = "/photos"; int cameraStorageLocation = 0; } gSettings;
 static bool filesystemReady = true, sdMounted = false;
 struct AuthContext { String user; String reason; };
 struct Access { std::string operation, path, user, reason; };
@@ -152,6 +162,9 @@ namespace VFS {
 enum StorageType { INTERNAL = 0, SDCARD = 1, AUTO = 2 };
 struct VirtualEntry { const char* name; bool isFolder; };
 static bool isSDAvailable() { return sdMounted; }
+// Advanced by every successful mount, as VFS does for boot, remount and format.
+static uint32_t sdGeneration = 0;
+static uint32_t sdMountGeneration() { return sdGeneration; }
 String normalize(const String&);
 }
 // INSERT_VFS_PATHS
@@ -204,6 +217,26 @@ static void* ps_alloc(size_t length, AllocPref, const char*) { return failAlloc 
 static void ps_free(void* ptr) { std::free(ptr); }
 // INSERT_IMAGE_MANAGER
 ImageManager gImageManager;
+// Command boundaries: the 4 KB debug buffer, ArduinoJson, hints, the camera
+// frame source and the video recordings walk.
+#include <ArduinoJson.h>
+#define EXT_RAM_BSS_ATTR
+#define PSRAM_JSON_DOC(name) JsonDocument name
+constexpr size_t GLOBAL_DEBUG_BUFFER_SIZE = 4096;
+static char debugStorage[GLOBAL_DEBUG_BUFFER_SIZE];
+static bool ensureDebugBuffer() { return true; }
+static char* getDebugBuffer() { return debugStorage; }
+static void cliHint(const char*) {}
+// INSERT_DEBUG_JSON
+// INSERT_ARG_WANTS_JSON
+static ImageStorageLocation capturedTo = IMAGE_STORAGE_LITTLEFS;
+static unsigned captures = 0;
+String ImageManager::captureAndSave(ImageStorageLocation location) {
+  ++captures; capturedTo = location;
+  return location == IMAGE_STORAGE_SD ? "/sd/photos/new.jpg" : "/photos/new.jpg";
+}
+static std::string recordings;
+static String getVideoRecordingsList() { return recordings; }
 // INSERT_IMAGE_COMMANDS
 
 // Saved sources from before deleteImage took the caller's identity (--baseline)
@@ -226,6 +259,8 @@ static void balanced(bool expectOuter = false) {
 static void reset(bool sd = false, bool internal = true) {
   balanced(); nodes.clear(); accesses.clear(); denied.clear();
   sdMounted = sd; filesystemReady = internal; gSettings.cameraCaptureFolder = "/photos";
+  if (sd) ++VFS::sdGeneration;
+  gSettings.cameraStorageLocation = 0; captures = 0; capturedTo = IMAGE_STORAGE_LITTLEFS; recordings.clear();
   failOpen = failMkdir = failRemove = failStats = failAlloc = false; largestBlock = 4096;
   metadataUnlocked = closesUnlocked = directoryOpens = closeCalls = statCalls = mtimeCalls = 0;
   takes = gives = 0; lastStatType = -1;
@@ -364,13 +399,35 @@ static void inventory(ImageStorageLocation location, const char* capture = "/pho
   expectIdentity("open", sd ? "imgmgr.list_sd" : "imgmgr.list_images");
   check(metadataUnlocked == 0 && closesUnlocked == 0, "list operations and cleanup keep filesystem lock"); balanced();
 }
-static void availability(bool sd) {
-  reset(!sd, sd); auto owner = manager(); const auto location = sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
-  const char* path = sd ? "/sd/photos/no.jpg" : "/photos/no.jpg";
-  // A newly mounted backend must not silently bypass the manager snapshot.
-  sdMounted = filesystemReady = true; add(path);
+static void availability() {
+  reset(true, false); auto owner = manager(); const auto location = IMAGE_STORAGE_LITTLEFS;
+  const char* path = "/photos/no.jpg";
+  // LittleFS is mounted once before init; a later ready flag does not bypass
+  // the manager's init snapshot.
+  filesystemReady = true; add(path);
   check(!owner.ensureCaptureFolder(location) && owner.listImages(location).empty() && !deleteAs(owner, path, caller) && nodes.count(path), "unavailable manager tier rejects inventory operations");
   check(!owner.getStorageStats(location).available && accesses.empty() && !statCalls, "unavailable tier avoids I/O and capacity queries"); balanced();
+}
+// VFS owns SD availability: a card mounted after init (sdmount, sdformat) is
+// listed, counted and deletable at once, and an unmounted card is refused.
+static void sdFollowsVfs() {
+  reset(false); auto owner = manager();
+  check(owner.listImages(IMAGE_STORAGE_SD).empty() && !owner.getStorageStats(IMAGE_STORAGE_SD).available && !owner.isSDAvailable(),
+        "no card at init: SD is unavailable");
+  sdMounted = true; ++VFS::sdGeneration;
+  add("/sd", true); add("/sd/photos", true); add("/sd/photos/a.jpg"); add("/sd/photos/b.jpg");
+  check(owner.isSDAvailable(), "a card mounted after init is reported available");
+  check(owner.listImages(IMAGE_STORAGE_SD).size() == 2, "a card mounted after init is listed");
+  const auto stats = owner.getStorageStats(IMAGE_STORAGE_SD);
+  check(stats.available && stats.imageCount == 2, "a card mounted after init has storage stats");
+  check(owner.ensureCaptureFolder(IMAGE_STORAGE_SD), "a card mounted after init can prepare the capture folder");
+  check(deleteAs(owner, "/sd/photos/a.jpg", caller) && !nodes.count("/sd/photos/a.jpg"), "a photo on a card mounted after init can be deleted");
+  sdMounted = false; accesses.clear(); statCalls = 0;
+  check(!owner.isSDAvailable() && owner.listImages(IMAGE_STORAGE_SD).empty() && !owner.getStorageStats(IMAGE_STORAGE_SD).available,
+        "after unmount SD is unavailable, unlisted and has no stats");
+  check(!owner.ensureCaptureFolder(IMAGE_STORAGE_SD) && !deleteAs(owner, "/sd/photos/b.jpg", caller) && nodes.count("/sd/photos/b.jpg"),
+        "after unmount SD folder preparation and deletes are refused");
+  check(accesses.empty() && !statCalls, "an unmounted card gets no guarded I/O or capacity query"); balanced();
 }
 static void ensureFolder(bool sd, unsigned failure) {
   reset(sd); auto owner = manager(); const auto location = sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
@@ -442,6 +499,107 @@ static void imageRead(bool sd) {
   check(owner.getImage(sd ? "/sd/system/settings.json" : "/system/settings.json", &count) == nullptr && count == 0 && accesses.empty(),
         "image reader refuses a path outside the managed JPEG folder before any guarded open"); balanced();
 }
+// capture and images take their tier as a first token, the way the
+// dispatcher hands over arguments ("capture sd" arrives as "sd").
+static void captureArguments() {
+  reset(true); add("/photos", true); add("/photos/in.jpg"); add("/sd/photos", true); add("/sd/photos/card.jpg");
+  gImageManager.init(); gSettings.cameraStorageLocation = IMAGE_STORAGE_LITTLEFS;
+  const struct { const char* args; ImageStorageLocation expected; } routes[] = {
+    {"sd", IMAGE_STORAGE_SD}, {"both", IMAGE_STORAGE_BOTH}, {"SD", IMAGE_STORAGE_SD}, {"", IMAGE_STORAGE_LITTLEFS}};
+  for (const auto& route : routes) {
+    captures = 0; capturedTo = IMAGE_STORAGE_BOTH;
+    const char* reply = cmd_capture(route.args);
+    check(captures == 1 && capturedTo == route.expected, std::string("capture '") + route.args + "' saves to the tier it names");
+    check(std::strncmp(reply, "Captured: ", 10) == 0, "a capture reports its saved path");
+  }
+  gSettings.cameraStorageLocation = IMAGE_STORAGE_SD;
+  for (const char* internal : {"littlefs", "lfs"}) {
+    captures = 0; cmd_capture(internal);
+    check(captures == 1 && capturedTo == IMAGE_STORAGE_LITTLEFS, std::string("capture '") + internal + "' overrides an SD default");
+  }
+  captures = 0; cmd_capture("");
+  check(captures == 1 && capturedTo == IMAGE_STORAGE_SD, "no token keeps cameraStorageLocation");
+  captures = 0;
+  check(std::strncmp(cmd_capture("tape"), "Error: unknown storage", 22) == 0 && captures == 0, "an unknown tier is refused, not replaced by the default");
+  check(std::strncmp(cmd_capture("sd both"), "Error: unexpected argument", 26) == 0 && captures == 0, "a second token is refused");
+  balanced();
+}
+static void imagesArguments() {
+  reset(true); add("/photos", true); add("/photos/in.jpg"); add("/sd/photos", true); add("/sd/photos/card.jpg");
+  gImageManager.init();
+  for (const char* args : {"sd json", "json sd", "SD json"}) {
+    JsonDocument doc;
+    check(!deserializeJson(doc, cmd_images(args)), std::string("images '") + args + "' replies with JSON");
+    check(doc["location"] == "SD" && doc["images"].size() == 1 && doc["images"][0]["filename"] == "card.jpg",
+          std::string("images '") + args + "' lists the SD card");
+  }
+  for (const char* args : {"json", "lfs json", "littlefs json"}) {
+    JsonDocument doc;
+    check(!deserializeJson(doc, cmd_images(args)) && doc["location"] == "LittleFS" && doc["images"][0]["filename"] == "in.jpg",
+          std::string("images '") + args + "' lists internal storage");
+  }
+  check(std::strstr(cmd_images("sd"), "=== Images on SD ===") != nullptr, "images sd lists the SD card as text");
+  check(std::strstr(cmd_images(""), "=== Images on LittleFS ===") != nullptr, "images lists internal storage as text");
+  check(std::strncmp(cmd_images("sd extra"), "Error: unexpected argument", 26) == 0, "images refuses an unknown token");
+  balanced();
+}
+static std::string photoName(int index) {
+  char name[32]; std::snprintf(name, sizeof(name), "img_20261013_%06d.jpg", 120000 + index); return name;
+}
+// The app/BLE JSON listings must parse whatever the photo or recording count:
+// complete when they fit the 4 KB debug buffer, otherwise trimmed with
+// "truncated":true and the total still reported.
+static void photoListings() {
+  for (int photos : {40, 160}) {
+    reset(true); add("/sd/photos", true);
+    for (int i = 0; i < photos; ++i) add("/sd/photos/" + photoName(i))->size = 123456;
+    gImageManager.init();
+    // "json sd" is the one spelling the old token test routed to SD, so this
+    // case isolates the buffer size from the argument parsing.
+    const char* reply = cmd_images("json sd");
+    JsonDocument doc;
+    check(std::strlen(reply) < GLOBAL_DEBUG_BUFFER_SIZE, "the photo listing stays inside the debug buffer");
+    check(!deserializeJson(doc, reply), std::to_string(photos) + "-photo JSON listing parses");
+    const size_t listed = doc["images"].size();
+    check(doc["imageCount"] == photos && listed > 0, "the listing reports the photo total");
+    if (photos == 40) check(listed == 40 && doc["truncated"].isNull(), "40 photos are listed completely");
+    else check(listed < size_t(photos) && doc["truncated"] == true, "an oversized listing is trimmed and says so");
+    check(doc["images"][listed - 1]["filename"] == photoName(int(listed) - 1).c_str() && doc["images"][listed - 1]["size"] == 123456,
+          "listed entries are whole");
+    balanced();
+  }
+}
+static void recordingListings() {
+  for (int count : {10, 40, 200}) {
+    reset(); recordings.clear();
+    for (int i = 0; i < count; ++i) {
+      char line[48]; std::snprintf(line, sizeof(line), "%srec_20261013_%06d.avi:1234567", i ? "\n" : "", 120000 + i);
+      recordings += line;
+    }
+    const char* reply = cmd_cameravideolist("json");
+    JsonDocument doc;
+    check(std::strlen(reply) < GLOBAL_DEBUG_BUFFER_SIZE && !deserializeJson(doc, reply), std::to_string(count) + "-recording JSON listing parses");
+    const size_t listed = doc["recordings"].size();
+    check(doc["count"] == count && listed > 0 && doc["recordings"][listed - 1]["size"] == 1234567, "the recording listing reports its total and whole entries");
+    if (count <= 40) check(listed == size_t(count) && doc["truncated"].isNull(), "recordings that fit are listed completely");
+    else check(listed < size_t(count) && doc["truncated"] == true, "an oversized recording listing is trimmed and says so");
+    const std::string text = cmd_cameravideolist("");
+    check(text.rfind("Recordings (" + std::to_string(count) + "):", 0) == 0, "the text listing states the total");
+    const size_t lines = std::count(text.begin(), text.end(), '\n');
+    if (count <= 40) {
+      char last[40]; std::snprintf(last, sizeof(last), "rec_20261013_%06d.avi:1234567", 120000 + count - 1);
+      check(lines == size_t(count) && text.size() > std::strlen(last) && text.compare(text.size() - std::strlen(last), std::string::npos, last) == 0,
+            "every recording that fits is listed in full");
+    } else {
+      const size_t note = text.rfind("\n... (");
+      check(note != std::string::npos && text.compare(text.size() - 6, 6, " more)") == 0, "recordings that do not fit are counted, not cut silently");
+      const int more = std::atoi(text.c_str() + note + 6);
+      check(size_t(more) + lines - 1 == size_t(count), "shown plus counted recordings make the total");
+      const size_t previous = text.rfind('\n', note - 1);
+      check(text.compare(note - 8, 8, ":1234567") == 0 && previous != std::string::npos, "the last shown recording line is whole");
+    }
+  }
+}
 int main(int argc, char** argv) {
   const std::string selected = argc > 1 ? argv[1] : "all";
   unsigned failuresCount = 0, scenarios = 0;
@@ -450,6 +608,15 @@ int main(int argc, char** argv) {
     try { test(); std::printf("PASS %s\n", label.c_str()); }
     catch (const std::exception& error) { ++failuresCount; std::printf("FAIL %s: %s\n", label.c_str(), error.what()); }
   };
+  if (selected == "all" || selected == "mount") {
+    run("SD availability follows the VFS mount after init", sdFollowsVfs);
+  }
+  if (selected == "all" || selected == "commands") {
+    run("capture parses its tier token", captureArguments);
+    run("images parses its tier and json tokens", imagesArguments);
+    run("photo JSON listing fits the debug buffer and parses", photoListings);
+    run("recording listings fit the debug buffer, parse and count what they leave out", recordingListings);
+  }
   if (selected == "all" || selected == "routing") {
     run("internal /sdata delete with SD absent", routeDelete);
   }
@@ -471,7 +638,6 @@ int main(int argc, char** argv) {
     for (bool sd : {false, true}) {
       const std::string tier = sd ? "SD " : "internal ";
       run(tier + "alternate path spellings and metadata compatibility", [=] { pathForms(sd); });
-      run(tier + "unavailable manager gate", [=] { availability(sd); });
       run(tier + "nested filesystem guards", [=] { nested(sd); });
       run(tier + "JPEG buffer read compatibility", [=] { imageRead(sd); });
       for (unsigned fault = 0; fault < 3; ++fault) {
@@ -480,6 +646,7 @@ int main(int argc, char** argv) {
         run(tier + "failed list/metadata/delete " + std::to_string(fault), [=] { failures(sd, fault); });
       }
     }
+    run("internal unavailable manager gate", availability);
     for (auto location : {IMAGE_STORAGE_LITTLEFS, IMAGE_STORAGE_SD, IMAGE_STORAGE_BOTH}) {
       run("ordered JPEG inventory tier " + std::to_string(location), [=] { inventory(location); });
       run("canonical root inventory tier " + std::to_string(location), [=] { inventory(location, "/"); });

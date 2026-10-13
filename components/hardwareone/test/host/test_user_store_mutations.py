@@ -9,7 +9,9 @@ events and the per-user settings writer are doubles. It checks that free-text
 fields holding '}' or ']' never break the file, that a roster larger than 8 KB
 is resolved whole, that account creation stores the credential before the roster
 entry and publishes nothing on a refused write, that a roster without nextId
-gets a unique id, and that approve holds the filesystem lock across its
+gets a unique id, that a recreated or restored roster never reissues an id at
+or below the persisted account-id mark (a variable double of the NVS key), and
+that approve holds the filesystem lock across its
 read-modify-write. On a tree that still edits users.json as text the same
 calls run, so the cases fail behaviourally rather than at compile time; the
 source-level contract checks run after the binary.
@@ -89,11 +91,18 @@ def production(user: str, header: str, settings: str, mutex: str, mutex_header: 
     types += "\n" + declaration[0]
     if "struct NewAccount {" in header:
         types += "\n" + extract_block(header, "struct NewAccount") + ";"
+    # On a tree with the self-registration owner, cmd_user_request is a thin
+    # parser over submitAccountRequest and its field check.
+    has_request_owner = "enum class AccountRequestResult" in header
+    if has_request_owner:
+        types += "\n" + extract_block(header, "enum class AccountRequestResult") + ";"
 
     for marker in ("bool isValidPublicUsername(", "bool adminCreateUser("):
         require(user.count(marker) == 1, f"marker is not unique: {marker}")
     pieces = [
         unique_block(user, "bool isKnownUserRole("),
+        # The reserved-name rule the validators and the id lookup share.
+        unique_block(user, "bool isReservedUsername(") if "bool isReservedUsername(" in user else "",
         unique_block(user, "bool getUserIdByUsername("),
         # Validators, and on a tree with the owner: mutateUsersJson, the pending-list
         # writer and createAccount, which sit between the validators and useradd.
@@ -102,6 +111,8 @@ def production(user: str, header: str, settings: str, mutex: str, mutex_header: 
         region(user, ("struct BanMutationContext {", "static const char* setUserBanInternal("), "void updateUserLastSeen("),
         region(user, ("bool approvePendingUserInternal(",), "bool denyPendingUserInternal("),
         region(user, ("struct RoleMutationContext {", "static bool setUserRoleInternal("), "static bool deleteUserInternal("),
+        unique_block(user, "static AccountRequestResult checkAccountRequestFields(") if has_request_owner else "",
+        unique_block(user, "AccountRequestResult submitAccountRequest(") if has_request_owner else "",
         unique_block(user, "const char* cmd_user_request("),
         region(user, ("struct BootAnchor {",), "void resolvePendingUserCreationTimes()"),
     ]
@@ -128,6 +139,9 @@ def generate(user: str) -> tuple[str, bool]:
     for marker, replacement in production(user, header, settings, mutex, mutex_header, utils).items():
         require(harness.count(marker) == 1, f"one insertion marker: {marker}")
         harness = harness.replace(marker, replacement)
+    # The factory-reset id record sits between createAccount and useradd, so
+    # the validator region above already carries it when the tree has one.
+    harness = f"#define HAS_ACCOUNT_ID_RECORD {int('bool recordAccountIdHighWater(' in user)}\n" + harness
     legacy_text_editing = "USERS_JSON_BUF_SIZE" in user or "replaceJsonField(" in user
     return harness, legacy_text_editing
 
@@ -154,7 +168,11 @@ def source_contract(user: str) -> None:
     mutation = unique_block(user, "static UsersJsonMutation createAccountMutation(")
     require(mutation.index("saveUserSettings(") < mutation.index("users.add<JsonObject>()"),
             "the credential is stored before the roster entry is added")
-    for marker in ("bool approvePendingUserInternal(", "bool denyPendingUserInternal(", "const char* cmd_user_request("):
+    # The request intake's read-modify-write lives in submitAccountRequest once the
+    # self-registration owner exists; cmd_user_request is then only its parser.
+    request_writer = ("AccountRequestResult submitAccountRequest(" if "AccountRequestResult submitAccountRequest(" in user
+                      else "const char* cmd_user_request(")
+    for marker in ("bool approvePendingUserInternal(", "bool denyPendingUserInternal(", request_writer):
         body = unique_block(user, marker)
         require("FsLockGuard" in body, f"{marker} must hold the filesystem lock across its read-modify-write")
         require('"w"' not in body, f"{marker} must not rewrite the pending list in place")

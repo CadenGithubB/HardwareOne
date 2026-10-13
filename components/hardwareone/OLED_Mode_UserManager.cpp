@@ -3,10 +3,12 @@
 // ============================================================================
 // Admin-only user manager: a scrollable user list, a per-user action menu
 // (Change Role / Delete), and an Add-User wizard (username → password → role).
-// Read-only display parses /system/users/users.json; every mutation dispatches
-// a real command (useradd / userdelete confirm / userpromote / userdemote)
+// The list comes from System_User's read-only roster snapshot (full names,
+// normalized roles); every mutation dispatches a real command (useradd /
+// userdelete confirm / userpromote / userdemote) with the full username
 // through executeOLEDCommandWithResult so the rank/admin gating in the command
-// layer applies and we never touch the user store directly.
+// layer applies and we never touch the user store directly. Only the on-screen
+// label is shortened.
 
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
@@ -14,13 +16,11 @@
 #if ENABLE_OLED_DISPLAY
 
 #include <Adafruit_SSD1306.h>
-#include <ArduinoJson.h>
 #include "OLED_Utils.h"
 #include "System_Debug.h"
 #include "System_Mutex.h"
-#include "System_User.h"      // isAdminUser / isSuperAdminUser / userRoleRank / USERS_JSON_FILE / gLocalDisplay*
-#include "System_Utils.h"     // readText
-#include "System_MemUtil.h"   // PSRAM_JSON_DOC
+#include "System_User.h"      // readUserRoster / isAdminUser / isSuperAdminUser / userRoleRank / gLocalDisplay*
+#include "System_Utils.h"
 
 extern DisplayDriver* oledDisplay;
 
@@ -31,8 +31,7 @@ enum UmLevel : uint8_t { UM_LIST, UM_ACTIONS, UM_ROLE, UM_ADD_ROLE };
 static UmLevel gUmLevel = UM_LIST;
 
 #define UM_MAX_USERS 16
-struct UmUser { char name[24]; char role[12]; long id; };
-EXT_RAM_BSS_ATTR static UmUser gUsers[UM_MAX_USERS];
+EXT_RAM_BSS_ATTR static UserRosterEntry gUsers[UM_MAX_USERS];
 static int    gUmCount = 0;
 
 static int gUmSel    = 0;   // list cursor (0..gUmCount; gUmCount == "+ Add User")
@@ -45,7 +44,7 @@ static bool    gUmKbActive = false;
 static uint8_t gUmKbStage  = 0;   // 0 = username, 1 = password
 static char    gAddUser[33] = {0};
 static char    gAddPass[65] = {0};
-static char    gUmDelName[24] = {0};   // captured at delete-confirm request
+static char    gUmDelName[kPublicUsernameMaxLen + 1] = {0};   // full name, captured at delete-confirm request
 
 static String        umError;
 static unsigned long umErrorUntil = 0;
@@ -88,24 +87,9 @@ static void umShowError(const char* msg) {
 }
 
 static void loadUsers() {
-  gUmCount = 0;
-  String json;
-  if (!readText(USERS_JSON_FILE, json)) return;
-  PSRAM_JSON_DOC(doc);
-  if (deserializeJson(doc, json)) return;
-  JsonArrayConst users = doc["users"].as<JsonArrayConst>();
-  if (users.isNull()) return;
-  for (JsonObjectConst u : users) {
-    if (gUmCount >= UM_MAX_USERS) break;
-    const char* nm = u["username"] | "";
-    if (nm[0] == '\0') continue;
-    UmUser& r = gUsers[gUmCount];
-    strncpy(r.name, nm, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = '\0';
-    const char* role = u["role"] | "user";
-    strncpy(r.role, role, sizeof(r.role) - 1); r.role[sizeof(r.role) - 1] = '\0';
-    r.id = u["id"] | 0L;
-    gUmCount++;
-  }
+  size_t count = 0;
+  (void)readUserRoster(gUsers, UM_MAX_USERS, count);
+  gUmCount = (int)count;
 }
 
 // Synchronous dispatch (submitAndExecuteSync under the OLED identity). On
@@ -197,7 +181,7 @@ void displayUserManager() {
         oledDisplay->print("+ Add User");
       } else {
         char buf[22];
-        snprintf(buf, sizeof(buf), "%.11s (%.5s)", gUsers[i].name, gUsers[i].role);
+        snprintf(buf, sizeof(buf), "%.11s (%.5s)", gUsers[i].username, gUsers[i].role);
         oledDisplay->print(buf);
       }
     }
@@ -206,9 +190,9 @@ void displayUserManager() {
       oledDisplay->setCursor(122, y + OLED_CONTENT_HEIGHT - 8); oledDisplay->print("\x19");
     }
   } else if (gUmLevel == UM_ACTIONS) {
-    const UmUser& u = gUsers[gUmTarget];
+    const UserRosterEntry& u = gUsers[gUmTarget];
     oledDisplay->setCursor(0, y);
-    char hdr[22]; snprintf(hdr, sizeof(hdr), "%.11s (%.5s)", u.name, u.role);
+    char hdr[22]; snprintf(hdr, sizeof(hdr), "%.11s (%.5s)", u.username, u.role);
     oledDisplay->print(hdr);
     const bool founder = (u.id == 1);
     const char* acts[3] = { "Change Role", "Delete", "< Back" };
@@ -313,7 +297,7 @@ bool userManagerInput(int /*dx*/, int /*dy*/, uint32_t newlyPressed) {
         if (gUmRoleSel > umMaxRank()) gUmRoleSel = umMaxRank();
         gUmLevel = UM_ROLE;
       } else {                            // Delete
-        strncpy(gUmDelName, gUsers[gUmTarget].name, sizeof(gUmDelName) - 1);
+        strncpy(gUmDelName, gUsers[gUmTarget].username, sizeof(gUmDelName) - 1);
         gUmDelName[sizeof(gUmDelName) - 1] = '\0';
         oledConfirmRequest("Delete user?", gUmDelName, umDeleteConfirmed, nullptr, false);
       }
@@ -329,10 +313,10 @@ bool userManagerInput(int /*dx*/, int /*dy*/, uint32_t newlyPressed) {
     if (gNavEvents.down && gUmRoleSel < maxR) { gUmRoleSel++; return true; }
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
       if (gUmLevel == UM_ROLE) {
-        const UmUser& u = gUsers[gUmTarget];
+        const UserRosterEntry& u = gUsers[gUmTarget];
         int cur = userRoleRank(u.role);
         if (gUmRoleSel == cur) { gUmLevel = UM_ACTIONS; return true; }  // no change
-        String cmd = String(gUmRoleSel > cur ? "userpromote " : "userdemote ") + u.name + " " + kUmRoles[gUmRoleSel];
+        String cmd = String(gUmRoleSel > cur ? "userpromote " : "userdemote ") + u.username + " " + kUmRoles[gUmRoleSel];
         umDispatch(cmd);
       } else {                            // UM_ADD_ROLE → useradd
         String cmd = String("useradd \"") + gAddUser + "\" \"" + gAddPass + "\" 0 " + kUmRoles[gUmRoleSel];

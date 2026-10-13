@@ -55,11 +55,5 @@ void otaBleUploadHousekeeping();
 // by recent traffic.
 bool otaBleUploadActiveOnConnection(uint16_t connId);
 
-// True for the single trial boot that follows an update staged over Bluetooth.
-// Latched by otaSystemInitAfterStorage() from the durable journal; a plain
-// getter, so the boot path may consult it more than once. Always false on any
-// later boot, and on an update delivered by any other transport.
-bool otaSystemResumeBleRequested();
-
 extern const CommandEntry otaCommands[];
 extern const size_t otaCommandsCount;

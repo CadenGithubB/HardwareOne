@@ -403,10 +403,6 @@ bool uartLinkSessionRestrictCm5PresenceIfUser(
 #error "UART link is configured on the IDF console UART. Move the console (CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) or change UART_LINK_UART_NUM for this board."
 #endif
 
-#if ENABLE_HTTP_SERVER
-#include "WebServer_Server.h"     // isLoginLocked/recordFailedLogin/clearLoginAttempts/authSuccessUnified/recordLoginAttempt
-#endif
-
 // Defined in HardwareOne.cpp (web-mirror command feed). Declared there with
 // defaulted trailing args; this TU passes all four explicitly.
 extern void appendCommandToFeed(const char* source, const String& cmd, const String& user, const String& ip);
@@ -766,20 +762,14 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
     if (wantsLocalLogin) {
         const String u = uartLineArgs.arg(1);
         const String p = uartLineArgs.arg(2);
-#if ENABLE_HTTP_SERVER
         unsigned long lockoutRemainingMs = 0;
-        bool locked = isLoginLocked(kUartLockoutKey, &lockoutRemainingMs);
-#else
-        bool locked = false;
-#endif
-        if (locked) {
-#if ENABLE_HTTP_SERVER
+        if (!credentialAttemptAllowed(SOURCE_UART, kUartLockoutKey,
+                                      &lockoutRemainingMs)) {
           char msg[80];
           snprintf(msg, sizeof(msg), "Error: login locked out. Retry in %lu seconds.",
                    lockoutRemainingMs / 1000UL);
           uartWriteLine(msg);
           recordLoginAttempt(SOURCE_UART, u, kUartLockoutKey, false, "Locked out");
-#endif
         } else {
           bool loginSucceeded = false;
           uint32_t loginTransportEpoch = 0;
@@ -795,9 +785,8 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
               const bool sourceStillCurrent =
                   uartLinkTransportSessionBeginUse(admittedTransportEpoch);
               if (sourceStillCurrent) {
-#if ENABLE_HTTP_SERVER
-                clearLoginAttempts(kUartLockoutKey);
-#endif
+                credentialAttemptRecord(SOURCE_UART, kUartLockoutKey,
+                                        u.c_str(), true);
                 const uint32_t namedEpoch =
                     publishUartAccountSession(u, &loginTransportEpoch);
                 loginSucceeded = namedEpoch != 0 && loginTransportEpoch != 0;
@@ -816,9 +805,8 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
           (void)uartWriteLineForTransportSession(
               msg, loginTransportEpoch);
           } else {
-#if ENABLE_HTTP_SERVER
-            recordFailedLogin(kUartLockoutKey);
-#endif
+            credentialAttemptRecord(SOURCE_UART, kUartLockoutKey, u.c_str(),
+                                    false);
             recordLoginAttempt(SOURCE_UART, u, kUartLockoutKey, false, "Invalid credentials");
             systemEventPost(SYSEVT_LOGIN_FAIL, u.c_str(), "uart");
             uartWriteLine("Error: authentication failed");
