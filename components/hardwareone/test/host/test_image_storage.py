@@ -52,6 +52,9 @@ def generate(baseline: Path | None) -> str:
     # The capture-folder preparation sweeps stale photo temporaries once per tier.
     if "void ImageManager::sweepStaleTemporaries(" in source:
         markers.append("void ImageManager::sweepStaleTemporaries(")
+    # SD availability asked of VFS per operation rather than latched at init.
+    if "bool ImageManager::tierAvailable(" in source:
+        markers += ["bool ImageManager::isSDAvailable() const", "bool ImageManager::tierAvailable("]
     # The owner's managed-photo rule, shared by the reader and the deleter.
     if "bool ImageManager::managedImagePath(" in source:
         markers.append("bool ImageManager::managedImagePath(")
@@ -63,15 +66,30 @@ def generate(baseline: Path | None) -> str:
         "CommandArgs::CommandArgs(", "void CommandArgs::parse(", "const String& CommandArgs::arg("))
     parser += "\n" + extract_block(filesystem, "const char* requireQuotedToken(")
     parser += "\n" + extract_macro(read("System_Utils.h"), "RETURN_VALID_IF_VALIDATE_CSTR") + "\n"
+    # The image and recording list commands; the recordings command is camera
+    # owned and, before it used the debug buffer, kept its own text buffer.
+    commands = "\n".join(extract_block(source, marker) for marker in (
+        "const char* cmd_capture(", "const char* cmd_images(", "const char* cmd_imagedelete("))
+    camera = read("System_Camera_DVP.cpp")
+    old_buffer = re.search(r"(?m)^EXT_RAM_BSS_ATTR static char gCameraCmdBuffer\[\d+\];", camera)
+    commands += "\n" + (old_buffer[0] if old_buffer else "") + "\n"
+    commands += extract_block(camera, "const char* cmd_cameravideolist(")
+    # One shared "serialize a list into the debug buffer" helper, when present.
+    debug_json = baseline / "System_DebugJson.h" if baseline and (baseline / "System_DebugJson.h").exists() \
+        else COMPONENT / "System_DebugJson.h"
+    debug_json = extract_block(debug_json.read_text(), "inline const char* serializeJsonListToDebugBuffer(") \
+        if debug_json.exists() else ""
     harness = (HERE / "image_storage_harness.cpp").read_text()
     for marker, value in {
+        "// INSERT_DEBUG_JSON": debug_json,
+        "// INSERT_ARG_WANTS_JSON": extract_block(read("System_Utils.cpp"), "bool argWantsJson("),
         "// INSERT_FS_GUARD": guard,
         "// INSERT_COMMAND_PARSER": parser,
         "// INSERT_NORMALIZE_FS_PATH": extract_block(filesystem, "bool normalizeFsPath("),
         "// INSERT_VFS_PATHS": paths,
         "// INSERT_DIRECTORY_READER": reader,
         "// INSERT_IMAGE_MANAGER": declarations + "\n" + methods,
-        "// INSERT_IMAGE_COMMANDS": extract_block(source, "const char* cmd_imagedelete("),
+        "// INSERT_IMAGE_COMMANDS": commands,
     }.items():
         require(harness.count(marker) == 1, f"one insertion marker: {marker}")
         harness = harness.replace(marker, value)
@@ -90,7 +108,8 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--baseline", type=Path)
-    parser.add_argument("--case", choices=("all", "routing", "scope", "locking", "capacity"), default="all")
+    parser.add_argument("--case", choices=("all", "mount", "commands", "routing", "scope", "locking", "capacity"),
+                        default="all")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     with tempfile.TemporaryDirectory(prefix="hw1-image-storage-") as directory:
@@ -99,6 +118,7 @@ def main() -> None:
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                    "-Wno-unused-function", "-Wno-unused-parameter",
                    f"-DIMAGE_DELETE_TAKES_CTX={int(delete_takes_ctx(args.baseline))}",
+                   "-I", str(COMPONENT.parent / "hardwareone_libs/ArduinoJson/src"),
                    str(source), "-o", str(binary)]
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]

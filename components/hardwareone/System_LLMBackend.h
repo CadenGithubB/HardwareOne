@@ -113,8 +113,18 @@ bool llmResolveModelId(const char* id, LlmModelDesc* out);
 // callers must not assume READY on return — poll llmBackendStatus().state.
 // On failure returns false and writes a short reason into errOut when non-null.
 // maxCtx caps the KV window and is honoured only by a LOCAL source (a remote
-// host owns its own context window); 0 = the source's own default.
+// host owns its own context window). gSettings.llmMaxContext is applied here
+// for every caller: 0 loads with that setting (0 there = the model's own
+// window), and a non-zero maxCtx may only lower it.
+// Loading and unloading are admin commands: surfaces submit `llmload` /
+// `llmunload` through the command executor (llmBuildLoadCommand below), which
+// also serialises them on cmd_exec. Only those command handlers and the boot
+// autostart of a remote default model (llmBackendTick) call these directly.
 bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx = 0);
+
+// Build the `llmload "<id>" [maxCtx]` command line a surface submits. False
+// when the id is empty, holds a quote or control character, or does not fit.
+bool llmBuildLoadCommand(const char* id, int maxCtx, char* out, size_t outCap);
 
 // Drop the active selection and release whatever it held.
 void llmBackendUnload();

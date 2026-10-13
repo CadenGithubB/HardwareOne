@@ -442,6 +442,478 @@ mutators still edit users.json as text the same calls build (with
 corrupt file. Run with
 `ctest --test-dir build -R '^user_store_mutations$' --output-on-failure`.
 
+## Time-anchor registry writes
+
+```sh
+python3 components/hardwareone/test/host/test_time_anchor_persistence.py --sanitize
+```
+
+`time_anchor_persistence` runs the module body of `System_TimeAnchors.cpp`
+(registry load, append, prune rewrite, promote sweep and `timeAnchorsTick`) on
+the shared fake VFS (`fake_vfs.h`) with the real `FsLockGuard`, `writeText` and
+`writeTextAtomic`; the clock, boot counter and sensor-logging state are doubles,
+and each case runs in a fresh process. It checks that a prune rewrite whose
+temporary file cannot be opened, comes out short, reports a write error or
+cannot be renamed leaves `.anchors.csv` byte-for-byte unchanged with no temporary
+left behind, and that the row stays in RAM so a later successful prune still
+writes it; that an append that cannot open the registry, comes out short or
+reports a write error leaves the boot unanchored and a later tick records the
+row (warning once); that a fragment left by an interrupted append, this boot's or
+an earlier one's, is replaced by a rewrite instead of having the next row merged
+into it, or closed off as its own line when the registry already holds
+unparseable rows; that the sweep re-arms when a late anchor lands so this boot's
+folder still promotes; and that a working prune drops the row. Source checks
+require no unchecked rename of the registry and an anchor latch that follows the
+append result. Not covered: power loss, LittleFS durability, the clock sources
+and the 32-row cap. On a tree with the unchecked writers the same harness builds
+and the cases fail behaviourally. Run with
+`ctest --test-dir build -R '^time_anchor_persistence$' --output-on-failure`.
+
+## C6 companion reboot escalation
+
+```sh
+python3 components/hardwareone/test/host/test_companion_reboot_contract.py
+```
+
+`companion_reboot_contract` is a source check on `System_RadioCompanion.cpp`: no
+direct `esp_restart()` or `ESP.restart()`, and the `HardReboot` dispatch case
+posts its companion event and C6 log line, sets the RTC marker, then restarts
+through `rebootDevice("c6-companion", detail, 750)`, the shared owner that
+finalizes a microphone recording, records the reason and flushes the event log.
+The restart itself, the WAV header after an escalation during a recording and
+the next boot's REBOOT reason are device checks (P4, fault injection). Run with
+`ctest --test-dir build -R '^companion_reboot_contract$' --output-on-failure`.
+
+## OTA probation supervisor
+
+```sh
+python3 components/hardwareone/test/host/test_ota_probation_supervisor.py --sanitize
+```
+
+`ota_probation_supervisor` runs the shipping `probationSupervisor`,
+`otaSafetyAcceptProvisioningBoot`, `otaSafetySetupReachedRunning` and
+`otaSafetyLoopHeartbeat` from `System_OTASafety.cpp` against a settable tick,
+one supervisor pass at a time. The journal check and the otadata write are
+fakes that advance the clock and run supervisor passes inside their window.
+It covers a provisioning accept 3 s, 45 s and 290 s after boot with no reboot,
+a 31 s hang inside the accept still diagnosed as a loop stall, a failed
+otadata write returning to Setup under the setup deadline, a Running stall,
+and a healthy minute marking the image valid. Not covered: the real FreeRTOS
+scheduler, the second core, the bootloader rollback and the RTC breadcrumb.
+Run with `ctest --test-dir build -R '^ota_probation_supervisor$' --output-on-failure`.
+
+## OTA journal policy
+
+```sh
+python3 components/hardwareone/test/host/test_ota_journal_policy.py --sanitize
+```
+
+`ota_journal_policy` first checks the sources: neither `System_OTA.cpp` nor
+`updater/main/updater_main.c` spells out the IDLE-or-terminal phase test
+(`hw1_ota_phase_is_idle_or_terminal` in hw1_ota_protocol owns it); the
+crash-loop escape and the storage-failure path both go through
+`armEmergencyRecovery`; the updater's recovery upload takes its flags from
+`hw1_ota_replacement_request_flags` and its allow-downgrade action asks
+`hw1_ota_phase_accepts_downgrade_permission`; the BLE-resume-after-OTA latch
+that nothing set is gone. It then runs `armEmergencyRecovery` and the boot
+helpers it uses, unchanged from `System_OTA.cpp`, on the real
+`hw1_ota_protocol.c` with a fake slot store, factory check and boot switch:
+armed and requested intents replay, a failed switch is journaled as
+BOOT_SWITCH_ERROR, a failed or staged record is replaced without its policy
+flags, an unusable factory image leaves the journal untouched and a live
+operation is refused. Not covered: NVS slots, `esp_image_verify` and the
+restart. The protocol rules themselves are in
+`components/hw1_ota_protocol/test/host`. Run with
+`ctest --test-dir build -R '^ota_journal_policy$' --output-on-failure`.
+
+## Credential attempt table
+
+`credential_attempts` compiles the brute-force lockout table from
+`System_User.cpp` (the `credential_attempts` namespace and the
+`credentialAttempt*` functions) and its `System_User.h` contract unchanged,
+with a fake clock, critical section, diagnostics and event register. It checks
+that tiers 5/10/20 are all reachable by a peer that waits out each lock, that
+keys are transport plus peer, that a success clears only failures that named
+the same account, that the window ending never cancels a running lock, that a
+locked entry is never evicted, that a pool full of locks refuses new peers
+while serial, UART, the display and MQTT keep reserved slots, the lock event
+and since-boot total, a lock across the 32-bit `millis()` wrap, and that ended
+locks stay ended through weeks of idle. Source contracts: the table keeps time
+on the 64-bit `esp_timer_get_time()` clock (no `millis()`, no signed-difference
+checks) and is not under `ENABLE_HTTP_SERVER`; `/login`, Basic Auth, serial,
+UART, MQTT and the
+targeted `login` consult it before validating; Basic Auth failures are audited
+and evented like `/login`; MQTT failures write the `mqtt/login` audit line.
+`--baseline-web <WebServer_Server.cpp>` runs the same scenarios against the old
+per-IP web lockout through an adapter (expected to fail). Not covered: BLE,
+display and ESP-NOW logins (they adopt the table later), real httpd/MQTT
+traffic and the device reply texts. Run with
+`ctest --test-dir build -R '^credential_attempts$' --output-on-failure`.
+
+## Capture key loader
+
+`capture_crypto_key` compiles `captureCryptoEnsureKey` from
+`System_CaptureCrypto.cpp` unchanged against scripted NVS and libsodium fakes.
+It checks that only `ESP_ERR_NVS_NOT_FOUND` (missing namespace or missing blob)
+mints and stores a key, that a read-only `nvs_open` failing with
+`ESP_ERR_NO_MEM` or `ESP_ERR_NVS_NOT_INITIALIZED` fails closed without calling
+`nvs_set_blob` even when the read-write open would succeed, that the next call
+loads the stored key, that an unreadable or short stored blob is never
+replaced, and that a mint which cannot be committed is not used. Not covered:
+sealing and opening rows, the PSRAM scratch, real NVS and flash encryption. Run
+with `ctest --test-dir build -R '^capture_crypto_key$' --output-on-failure`.
+
+## LLM tokenizer loader
+
+`llm_tokenizer_loader` compiles the tokenizer structs from
+`System_LLM_Internal.h` and `loadTokenizerFromFile`, the merge map,
+`freeTokenizer`, `encode` and `decode` from `System_LLM_Tokenizer.cpp`
+unchanged, with an in-memory `File` and a PSRAM allocator that truncates sizes
+to the ESP32's 32-bit `size_t`. A well-formed blob loads and encodes; a blob
+that runs past the file or ends inside the vocab, a `merge_count` that does not
+fill the blob exactly (including one whose byte size wraps 32 bits), merge ids
+at or above the vocabulary, a tokenizer vocab larger than the model's
+`vocab_size` or above the 65536 ids the 16-bit merge keys hold, and trailing
+bytes inside the blob all fail the load, and `freeTokenizer` then releases
+everything. Each case runs in its own process. Not covered: the header and
+weight loaders, `forward()` and sampling. Run with
+`ctest --test-dir build -R '^llm_tokenizer_loader$' --output-on-failure`.
+
+## Setting readers
+
+`setting_readers` is a source check over the component sources: every row of
+`powerSettingEntries` and `cameraSettingEntries` must name a `gSettings` field
+that something reads outside the settings table, `setSetting()` writes and the
+setting's own one-word set command. It also requires that `power auto` does not
+promise a battery-driven switch and reports that auto mode is unavailable
+unless a caller of the auto-mode check exists. It does not check how a reader
+uses the value. Run with
+`ctest --test-dir build -R '^setting_readers$' --output-on-failure`.
+
+## IP ban store
+
+`ip_ban_store` compiles the IP ban section of `WebServer_Server.cpp` (load,
+save, `banIp`, `unbanIp`, the `isIpBanned` lookup the httpd task runs on every
+request, `broadcastBanList`, `banListJson`) with the real `FsLockGuard`,
+`writeText`/`writeTextAtomic` and vendored ArduinoJson on the shared fake VFS
+(`fake_vfs.h`). Encryption, sessions, events and output are doubles. It checks
+that a failed save keeps the previous `ip_bans.json`, reports the failure and
+keeps the new ban in force in memory, and that banning again retries the save;
+that a failed unban save keeps the ban; that an encryption failure never saves
+a list missing an entry; that 16 bans with 39-character IPs and 79-character
+reasons list as complete JSON and round-trip through the file; that a list too
+large for the 4 KB reply buffer is an explicit `{"error":...}` rather than a
+truncated document; and that the lookup takes the ban-table lock while no file
+I/O runs under it. Not covered: real task interleaving, the device AES helpers
+and the `ban`/`unban` command replies. Run with
+`ctest --test-dir build -R '^ip_ban_store$' --output-on-failure`.
+
+## Migration restore
+
+`migration_restore` compiles `applyStagedMigrationRestore`,
+`writeRestoreFilesFromDoc` and the backup directory walk from
+`WebServer_MigrationTool.cpp` with the real `FsLockGuard`, the real text
+writers and vendored ArduinoJson on the shared fake VFS. It checks that one
+failing file write fails the whole restore, leaves every device file as it was,
+removes the staging files and does not set `gRestoreComplete`; that a
+successful restore moves `users.json` into place last; that a failed
+cross-device credential-setup marker fails the restore; and that the backup
+walk keeps nested paths longer than 128 bytes whole and leaves out, with a
+warning, a map that would push the bundle past the 512 KB the restore accepts.
+A source check requires `/api/backup` to refuse an overflowed or oversized
+bundle with the limit `/api/restore` uses. Not covered: the HTTP handlers
+themselves, the device AES helpers, a rename failing part-way through
+promotion, and binary map content. Run with
+`ctest --test-dir build -R '^migration_restore$' --output-on-failure`.
+
+## Camera web frame-only
+
+`camera_web_frame_only` is a source check over the web sources (`WebPage_*`,
+`WebServer_*`, `System_Camera*Web*`): no camera stream endpoint is named, no
+`multipart/x-mixed-replace` response exists, `handleCameraStream` is not
+defined, and every httpd handler that captures a camera frame captures one per
+request without a loop, because a looping handler holds the single httpd task
+until its viewer disconnects. `/api/sensors/camera/frame` must stay registered.
+It does not compile or run the handlers. Run with
+`ctest --test-dir build -R '^camera_web_frame_only$' --output-on-failure`.
+
+## User roster authority
+
+`user_roster_authority` compiles the admin/super predicates (with their
+bond-admin branch), `isValidUser`, `getUserIdByUsername`, `userAccountRank`,
+the mutation rank rule, the ban/unban/`sessionrevoke` handlers, the
+targeted-logout owner, the `userlist`/`pendinglist`/`sessionlist` handlers and
+the roster snapshot from `System_User.cpp`, plus `hasAdminPrivilege` and
+`hasSuperAdminPrivilege` from `HardwareOne.cpp`, with the real `FsLockGuard`
+and vendored ArduinoJson on the shared fake VFS. It builds twice, with
+`ENABLE_HTTP_SERVER` 0 and 1. It checks that an account named `bond-admin`
+neither logs in nor resolves to an id and is privileged only as the live
+ESP-NOW bond (serial, web, UART and BLE sessions carrying the name are not);
+that `unbanuser`, `sessionrevoke user` and targeted logout refuse a
+higher-ranked target; that account bans and `sessionrevoke user` work without
+the HTTP server; that list replies are NUL-terminated and parseable or an
+explicit `Error:`, with `userlist` emitting only id, username, role, banned and
+createdAt; and that the roster snapshot keeps full usernames and normalized
+roles. A source check requires the OLED and lens user pages to read the
+snapshot rather than users.json and the lens page to offer Kick/Ban in every
+build. The ban writer, session fan-out, web session tables, hashing and the
+per-user settings loader are doubles; the OLED and lens pages themselves are
+not compiled. Run with
+`ctest --test-dir build -R '^user_roster_authority$' --output-on-failure`.
+
+## LLM load policy
+
+`llm_load_policy` compiles `handleLLMLoad`, `handleLLMUnload` and their reply
+helper from `WebPage_LLM.cpp`, `cmd_llm_load`/`cmd_llm_unload` from
+`System_LLMCommands.cpp`, `CommandArgs` from `System_Command.cpp`, and
+`llmBackendSelect`, `llmBackendUnload`, the context policy and
+`llmBuildLoadCommand` from `System_LLMBackend.cpp`, with vendored ArduinoJson.
+The web command executor is a double that refuses the admin rows to a
+non-admin (the runner pins `llmload` and `llmunload` as requiresAdmin rows)
+and otherwise runs the real command handlers; the engine and model resolution
+record their calls. It checks that a user-role session is refused and never
+reaches the engine, that the submitted command carries the model id, that an
+admin load gets `llmMaxContext` with the body's `max_ctx` only able to lower
+it, that `llmBackendSelect` applies `llmMaxContext` when called with 0, that
+`llmload <id> <maxctx>` passes the ceiling through, and that an id with a
+quote or control character is refused before submission. A source guard
+requires `WebPage_LLM.cpp` and `OLED_Mode_LLM.cpp` to submit the commands and
+never call `llmBackendSelect`/`llmBackendUnload`. The real `authorizeCommand`,
+the OLED screen flow and the engine's KV sizing are not covered. Run with
+`ctest --test-dir build -R '^llm_load_policy$' --output-on-failure`.
+
+## Web toast fan-out
+
+`web_toast_fanout` compiles, from the shipping sources, the toast block of
+`systemEventsNotifyTick` with `notifFormatEvent`, `levelName` and
+`notifRenderToastJson` (`System_Notifications.cpp`), the session fence,
+`webInvalidateSessionSlot`, the broadcast helpers and the fenced SSE queue
+accessors (`WebServer_Server.cpp`) and `sseEnqueueEvent`/`sseDequeueEvent`
+(`WebServer_Events.cpp`), with vendored ArduinoJson and a
+`std::recursive_mutex` double for the FreeRTOS mutex. `toast_payload` renders a
+LOGIN_FAIL whose attempted name holds a quote, a backslash and a newline and
+parses the queued payload back (one SSE data line, the exact text, no injected
+fields); an all-control-character name must still give a complete document
+inside one queue slot. `fanout_race` runs a producer thread (notification tick
+and BLE roles) against an httpd-role thread that signs a slot out and in
+between an admin and a guest while draining both sessions' queues: the viewer
+predicate must run without the fence, no admin-only toast may reach the guest,
+and the stable session must account for every event exactly once. The source
+guards for the same contract are in `test_notification_integration_guards.py`.
+Socket writes, the browser and the BLE/G2 producers' own state are not
+covered. `--tsan` builds with ThreadSanitizer. Run with
+`ctest --test-dir build -R '^web_toast_fanout$' --output-on-failure`.
+
+## Forced password change
+
+`password_change_gate` compiles, unchanged from the shipping sources, the
+per-user settings merge with its editable-key list `userSettingsPatchRefusedKey`
+(`System_Settings.cpp`), `userMustChangePassword` with its cache and guest rule
+and `createAccount` (`System_User.cpp`), and `webPasswordChangeAllows`
+(`WebServer_Utils.cpp`), with vendored ArduinoJson. The merge must refuse
+`password`, `gamepad_password` and `mustChangePassword` whatever the value (a
+JSON null included) and any key that is not a preference, leaving the stored
+file untouched, while theme, notification level and dashboard layout keys still
+merge. The decision must ignore the flag for a guest (the legacy recovery owner
+excepted), keep answering from its cache until a password write or identity
+change, and not cache unreadable files. The web gate must answer APIs, non-GET
+requests and JSON fetches with 403 `password_change_required`, redirect pages to
+`/account/password-change`, and admit only that form and `/logout`. A guest
+created with a forced change must be refused before anything is published. A
+source contract checks that `tgRequireAuth` runs the gate for every web
+request, that `setUserPassword` invalidates the cache, that
+`/api/user/settings` takes the owner's key decision and that
+`userresetpassword` refuses a forced change for a guest. The settings store,
+roster, httpd and users.json writer are doubles; command transports
+(serial, BLE, MQTT) are not covered because they do not gate on the flag yet.
+`test_user_settings_transaction_guards.py` carries the matching source guards.
+Run with `ctest --test-dir build -R '^password_change_gate$' --output-on-failure`.
+
+## Factory reset wipe
+
+`factory_reset_wipe` compiles the shipping `factoryreset_confirmed`, its
+removal helpers and the `cmd_factoryreset` prompt (`System_Utils.cpp`), the
+real `FsLockGuard` and the real VFS `DirectoryReader` against the shared fake
+VFS (`fake_vfs.h`). A confirmed reset must remove `users.json`,
+`pending_users.json`, every file in `user_settings/` and every `u<id>` folder
+under `/stt` and, when the card is mounted, `/sd/stt` (subfolders included),
+while settings, IP bans, other `/stt` and `/sd` content and the folders
+themselves stay. It must record the issued account ids first, remove account
+data before `users.json` and the settings files after it, make every call
+under the filesystem lock as system, and schedule exactly one reboot. A
+failure before `users.json` (pending list, a transcript, an SD folder, the
+roster itself) must stop the reset with the roster in place and no reboot; a
+settings file left after the commit is reported but the reset completes; an
+unmounted card keeps `/sd/stt` and says so. The prompt must name what is
+deleted. The reboot timer, events, logs, the microphone drain and the
+System_User id record are doubles (the record itself is covered by
+`user_store_mutations`); real LittleFS/FAT behaviour and the setup wizard are
+not covered. Run with
+`ctest --test-dir build -R '^factory_reset_wipe$' --output-on-failure`.
+
+## Command name uniqueness
+
+`command_name_uniqueness` scans every `CommandEntry` table that
+`gCommandModules` registers and fails when one name (ASCII case ignored, as
+lookup ignores it) has two rows that one build can link: lookup keeps the
+first registered row, so the other is dead while `help` still lists it. Rows
+in different branches of one `#if` group, or in two definitions of the same
+table symbol (the OTA layout variants, a disabled module's stub), are
+exclusive; macros are not otherwise evaluated, so rows of different tables
+count as compiled together. `DEFERRED_DUPLICATES` in the runner names any
+duplicate left to another session. It also compiles the shipping
+`registerCommand(s)` and `initializeCommandSystem` (`System_Command.cpp`)
+against fixture modules and checks one CMDREG log line per shadowed row with
+both module names, and none for unique names. Per-profile compilation of the
+real tables is not covered (`command_catalogue` covers module order with
+fixture rows). Run with
+`ctest --test-dir build -R '^command_name_uniqueness$' --output-on-failure`.
+
+## Edge Impulse inference lock and continuous task
+
+`test_edge_impulse_lifecycle.py` compiles the whole of `System_EdgeImpulse.cpp`
+on the same fakes as `test_edge_impulse_jpeg.py`, with the continuous task on a
+`std::thread`, FreeRTOS semaphores on `std::mutex`, and a fake interpreter that
+can hold one Invoke open. Scenarios: `eicontinuous 0` then `1` inside one
+interval leaves exactly one task, and a stop returns with the task gone;
+`eienable 0`, a model load and an unload during a running Invoke wait for that
+frame before freeing (a load resumes continuous mode on the new model); camera,
+`eidetect`, file and web detect during a continuous frame report busy and run
+no Invoke, and a detect between frames runs. Not modelled: FreeRTOS priorities,
+preemption, core affinity, real TFLite kernels. Run with
+`ctest --test-dir build -R '^edge_impulse_lifecycle$' --output-on-failure`
+(or the runner directly with `--sanitize`).
+
+## Self-registration
+
+`test_register_submit.py` extracts the shipping `handleRegisterSubmit` and its
+failure page (`WebServer_Server.cpp`), `urlDecode`/`extractFormField`,
+`CommandArgs`, `authorizeCommand` and its session-control classifier, and the
+public account rules plus the `userrequest` adapter (`cmd_user_request`) from
+`System_User.cpp`. The account-request owner (`submitAccountRequest`) is a
+recording double. Cases: a passphrase with spaces, repeated words, quotes or
+percent escapes reaches the owner byte-exact and no command line is built; an
+already-pending name, a full queue or a storage fault is shown with fixed text
+and does not count toward the login lockout, while rejected form fields still
+do; `userrequest` from every external transport without an identity (web CLI
+and register path included) is still refused with "Authentication required";
+validate-only `userrequest` returns VALID with the arguments checked and never
+reaches the owner; a quoted passphrase given to `userrequest` reaches the owner
+byte-exact. A source contract keeps the handler off the command path and the
+owner on the locked pending-list writer. Not covered: the owner's pending-list
+I/O itself (lock, 32-entry cap, atomic write), the real lockout table and
+httpd. Run with
+`ctest --test-dir build -R '^register_submit$' --output-on-failure`
+(or the runner directly with `--sanitize`).
+
+## MQTT discovery and external-sensor bounds
+
+`test_mqtt_json_bounds.py` extracts the shipping `publishDiscoveryConfig`,
+`publishPeerDiscoveryConfig`, their shared 1 KB discovery buffer and bounded
+`MqttJsonWriter`, `updateExternalSensor` with its sensor-table state
+(`System_MQTT.cpp`) and `macToPathToken` (`System_Utils.h`), and compiles them
+against a recording `esp_mqtt_client_publish`. Cases: a short base topic
+publishes the same retained discovery document byte for byte (local and mesh
+peer); a 400-character base topic skips the publish with one warning instead
+of writing past the buffer; a sweep of base-topic lengths across the capacity
+publishes every document of at most 1023 bytes exactly and skips every longer
+one; esp-mqtt's topic and payload, given in exactly-sized buffers with no NUL
+(payload with an embedded NUL), are stored with exactly `topic_len` /
+`data_len` bytes, and a topic length covering a prefix of a longer buffer
+stores only that prefix. Source guards: no unchecked `sizeof(configJson) - pos`
+remains, and the periodic state document is checked before it is published.
+Not covered: the state document's sensor sections, JSON escaping of setting
+text, and the real esp-mqtt client. `--case discovery|peer|sensor` runs one
+group. Run with
+`ctest --test-dir build -R '^mqtt_json_bounds$' --output-on-failure`
+(or the runner directly with `--sanitize`).
+
+MQTT commands no longer wait for cmd_exec on the esp-mqtt task (which holds
+the client's API lock during the event). `mqtt_lifecycle_contract` guards that
+`System_MQTT.cpp` has no `submitAndExecuteSync`, that a command is queued with
+`submitCommandAsync` and answered from its completion with
+`esp_mqtt_client_enqueue` (or a direct `esp_mqtt_client_publish` while a stop
+is pending), and that the admission moves into the completion only after
+allocation and is released only after the answer.
+`mqtt_lifecycle_gate_tests` adds the movable `MqttAdmission`
+(`System_MQTTAdmission.h`): the callback's return does not release a handed-off
+admission, teardown waits for the completion, a refused or released admission
+releases exactly once, and a three-thread race (callback, completion, stop)
+never lets teardown overlap the completion's publish. Not covered: the real
+cmd_exec queue and esp-mqtt outbox.
+
+`test_mqtt_command_reply.py` extracts `MqttCommandReply`,
+`enqueueMqttCommandReply` and `mqttCommandCompleted` from `System_MQTT.cpp`
+and compiles them with the production gate and `MqttAdmission`, vendored
+ArduinoJson and a small esp-mqtt model (a direct publish leaves at once, an
+enqueued item waits for the client task's next loop pass, stopping the client
+deletes the outbox). Cases: a command that stops MQTT (`closemqtt` over MQTT)
+requests the stop before its completion runs, and its reply is still
+delivered, published while the admission blocks teardown; with no stop pending
+the reply is enqueued (no socket write on cmd_exec) and sent on the next loop
+pass; the local and routed documents are byte-exact. Not covered: the real
+esp-mqtt client, a broker, or a stop requested from another source after a
+reply was queued. `--baseline <component-directory>` replays the cases against
+other sources. Run with
+`ctest --test-dir build -R '^mqtt_command_reply$' --output-on-failure`
+(or the runner directly with `--sanitize`).
+
+## Video recording completion
+
+`video_completion` compiles the shipping AVI recorder file path from
+`System_Camera_Video.cpp` (header skeleton, frame writer, first-frame geometry
+patch, `finalizeAndClose` and the failed-start cleanup) against the shared fake
+VFS with the real `FsLockGuard`. A complete three-frame clip posts exactly one
+`VIDEO_SAVED` and its header carries the measured timing (600 ms over three
+frames: 200000 us per frame, rate/scale 5 fps), the largest frame as
+`dwSuggestedBufferSize` and the recorded geometry in avih, strh `rcFrame` and
+strf. A short idx1 write, a failed seek, a failed header patch, a flush error,
+an earlier frame-write failure and a failed geometry seek or write post no
+saved event and report an SD write failure; a failed start removes its file and
+releases the SD registration. A second harness compiles the real SD-in-use
+registration, `unmountSD`/`remountSD`/`formatSD` and the
+`sdunmount`/`sdmount`/`sdformat` commands from `System_VFS.cpp` against a fake
+SD driver: each refuses (the command names the holder) while a registration is
+held, decided under the filesystem lock, and works after it ends; the table
+holds four owners. Not covered: the recorder task loop and its pacing, camera
+capture, RTOS task creation and the real SD driver. Run with
+`ctest --test-dir build -R '^video_completion$' --output-on-failure`
+(or the runner directly with `--sanitize`).
+
+## File permission owner and web JSON replies
+
+`filesystem_listing_permissions_contract` also compiles the real path rule
+table, role resolver and `canRead`/`canEdit`/`canCreate`/`canDelete`/
+`canRename`/`isAdminOnlyPath` from `System_Filesystem.cpp`
+(`filesystem_role_matrix_harness.cpp`, fake roster) together with the
+`requiresAdmin` column parsed from every file command row, and asserts one
+per-role read/write/create/delete matrix through both ways in: the command
+table (serial, BLE, web CLI and the Files page's delete/rename) and the direct
+web endpoints (their table-derived admin-path pre-check, checked in the source,
+then the table; `/api/files/create` adds the command). Rows cover the default
+user tree, `/espnow/`, `/system/` files, `/logging_captures/` and the
+system-owned `/battery.csv` (users read, admins read and delete, only the
+system writes, creates or renames, including the `.1`/`.2` rotations and the
+header staging file). It takes `--cxx` and `--sanitize`; CTest runs it
+without arguments (`c++`, no sanitizers).
+
+`web_json_replies` compiles the production `handleAutomationsExport`,
+`handleIconGet`, `handleFilesCreate`, `handleMicRecordingsList` and
+`sseSendNotice` (plus `webJsonString`, `sendJsonError` and the recordings-list
+builder) against a fake httpd that keeps header pointers and reads them at
+`httpd_resp_send`, with real ArduinoJson. Under `--sanitize` a header value
+that dies before the send is an ASan error (the `?id=` export disposition, the
+icon `X-Icon-Size`); the export filename keeps only `[A-Za-z0-9._-]`, at most
+48 characters. The runner parses every printed payload with Python's strict
+`json` module: recordings named with a backslash, comma, colon, quote or
+control character; `files/create` errors with quotes, a backslash, a newline
+and a control character (folder and file branches); a 150-character name that
+must reach `filecreate` whole; an SSE notice with quotes and a newline. Not
+covered: the map, GPS track and LLM status replies (same helper, no harness)
+and the recordings producer in `System_Microphone.cpp`. Run with
+`ctest --test-dir build -R '^web_json_replies$' --output-on-failure` (or the
+runner with `--sanitize` / `--case <name>`).
+
 ## Boot temporary-file cleanup
 
 `boot_temp_cleanup` executes the production startup sweep, `VFS::DirectoryReader`
@@ -1943,20 +2415,29 @@ controls, capability changes, command gating and visible CLI errors. These are
 not sensor, browser layout, G2 transport, SD recording or physical camera tests.
 
 
-### Edge Impulse JPEG capacity
+### Edge Impulse input geometry, labels and pipeline
 
 ```sh
 python3 components/hardwareone/test/host/test_edge_impulse_jpeg.py --sanitize
+ctest --test-dir <build> -R '^edge_impulse_jpeg$' --output-on-failure
 ```
 
-This compiles the actual Edge Impulse conversion guard and shared JPEG parser.
-Only the legacy converter is mocked, writing the complete inspected RGB size
-so a missed capacity check is observable under ASan. Real synthetic small/VGA
-JPEGs retain their actual geometry. HD input, undersized or null output,
-malformed headers, truncated input and a one-byte file cannot reach conversion;
-decoder failure cannot publish stale dimensions. Both camera and stored-file
-call sites are checked for use of this capacity-aware boundary. No additional
-full-image RGB allocation or inference/model behavior is introduced.
+This compiles the whole of `System_EdgeImpulse.cpp` after
+`edge_impulse_host_fakes.h` (fake TFLite Micro interpreter with exact-size
+tensors and guard bands, in-memory files, camera capture, httpd) and links the
+real `HAL_JPEG.cpp` front end with a faked codec backend. Scenarios: a
+96x96x1 grayscale model (luma fill of exactly the tensor), a changed former
+`eiinputsize` value after load, a non-square 64x48 model, float32 and int8
+fills, a 12-class output (label table sized from the model, each detection
+owning its label, distinct `class_N` names for unnamed classes), camera/file
+parity (same input tensor, same results, same eiEnabled and no-model errors;
+only the camera updates tracked objects) and the web detect JSON
+(`modelInputSize`, `lastSeenMs`, `stateChangeMs`). The decode unit checks the
+module's VGA cap and rejections before the codec; the link build checks that an
+ENABLE_EDGE_IMPULSE=1, ENABLE_HTTP_SERVER=0 build has every command handler;
+static checks cover the single pipeline, `hwjpeg::decode` as the only decoder,
+the removed exports and the removed `eiinputsize` command. Not covered: real
+TFLite kernels, arena placement, camera hardware, the hardware JPEG codec.
 
 ### Camera / sensor I2C ownership
 

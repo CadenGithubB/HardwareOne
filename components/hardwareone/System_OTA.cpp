@@ -845,10 +845,7 @@ bool otaUploadJournalStartable(char* reason, size_t reasonSize) {
              "Error: acknowledge the pending OTA result before uploading another image");
     return false;
   }
-  if (record.phase != HW1_OTA_PHASE_IDLE &&
-      record.phase != HW1_OTA_PHASE_SUCCEEDED &&
-      record.phase != HW1_OTA_PHASE_FAILED &&
-      record.phase != HW1_OTA_PHASE_CANCELED) {
+  if (!hw1_ota_phase_is_idle_or_terminal(record.phase)) {
     snprintf(reason, reasonSize,
              "Error: OTA phase %s does not allow a staging upload", phaseName(record.phase));
     return false;
@@ -1227,12 +1224,6 @@ const char* cmdOtaWrite(const String&) {
 }
 #endif
 
-// Set once, on the trial boot after a Bluetooth-delivered update. Never
-// persisted and never written back to gSettings.bleAutoStart: this is a
-// one-boot hint, so a device whose owner has Bluetooth off keeps it off from
-// the next boot onward without anyone having to undo anything.
-bool gResumeBleAfterOta = false;
-
 void postResultEvent(const hw1_ota_record_t& record) {
   char detail[SYSEVT_DETAIL_LEN];
   snprintf(detail, sizeof(detail), "%s seq=%" PRIu32 " %.48s",
@@ -1241,10 +1232,11 @@ void postResultEvent(const hw1_ota_record_t& record) {
   systemEventPost(SYSEVT_OTA_RESULT, phaseName(record.phase), detail);
 }
 
-bool bootRecoveryForRecord(hw1_ota_record_t& record, char* reason,
-                           size_t reasonSize) {
-  const esp_partition_t* factory = nullptr;
-  if (!verifyFactoryUpdater(&factory, nullptr, 0, reason, reasonSize)) return false;
+// Arms the recovery boot for a REQUESTED operation and selects the factory
+// updater the caller has already verified. A failed switch is journaled as
+// BOOT_SWITCH_ERROR rather than leaving the intent armed with no result.
+bool armRecoveryBoot(hw1_ota_record_t& record, const esp_partition_t* factory,
+                     char* reason, size_t reasonSize) {
   if (!transitionAndCommit(record, HW1_OTA_EVENT_ARM_RECOVERY_BOOT, nullptr,
                            reason, reasonSize)) {
     return false;
@@ -1264,6 +1256,13 @@ bool bootRecoveryForRecord(hw1_ota_record_t& record, char* reason,
   snprintf(reason, reasonSize, "Error: could not select factory recovery image: %s",
            esp_err_to_name(err));
   return false;
+}
+
+bool bootRecoveryForRecord(hw1_ota_record_t& record, char* reason,
+                           size_t reasonSize) {
+  const esp_partition_t* factory = nullptr;
+  if (!verifyFactoryUpdater(&factory, nullptr, 0, reason, reasonSize)) return false;
+  return armRecoveryBoot(record, factory, reason, reasonSize);
 }
 
 bool resumeRecoveryBootIntent(hw1_ota_record_t& record, char* reason,
@@ -1305,6 +1304,53 @@ bool resumeRecoveryBootIntent(hw1_ota_record_t& record, char* reason,
   snprintf(reason, reasonSize, "Error: could not replay recovery boot intent: %s",
            esp_err_to_name(err));
   return false;
+}
+
+// The one emergency arm behind both early escapes: a main image stuck in a
+// crash loop and a committed image whose LittleFS will not mount. It replays
+// an interrupted recovery intent, or replaces a record that holds no live
+// operation with a fresh direct-recovery operation, then selects the factory
+// updater. Every failed boot switch is journaled as BOOT_SWITCH_ERROR. The
+// factory image is verified before the journal changes, so an unusable updater
+// leaves the record as it was. replacedRequestDetail is the cancel detail for a
+// staged request that never launched.
+bool armEmergencyRecovery(hw1_ota_record_t& record, const char* replacedRequestDetail,
+                          char* reason, size_t reasonSize) {
+  if (record.phase == HW1_OTA_PHASE_RECOVERY_BOOT_ARMED ||
+      (record.phase == HW1_OTA_PHASE_REQUESTED &&
+       record.source == HW1_OTA_SOURCE_RECOVERY_UPLOAD)) {
+    return resumeRecoveryBootIntent(record, reason, reasonSize);
+  }
+  if (record.phase != HW1_OTA_PHASE_REQUESTED &&
+      !hw1_ota_phase_is_idle_or_terminal(record.phase)) {
+    snprintf(reason, reasonSize, "Error: OTA phase %s is active; emergency recovery not armed",
+             phaseName(record.phase));
+    return false;
+  }
+
+  const esp_partition_t* factory = nullptr;
+  if (!verifyFactoryUpdater(&factory, nullptr, 0, reason, reasonSize)) return false;
+  if (record.phase == HW1_OTA_PHASE_REQUESTED) {
+    hw1_ota_transition_args_t canceled{
+        .verified_manifest = nullptr,
+        .result_code = HW1_OTA_RESULT_CANCELED,
+        .native_error = 0,
+        .detail = replacedRequestDetail,
+    };
+    if (!transitionAndCommit(record, HW1_OTA_EVENT_CANCEL, &canceled,
+                             reason, reasonSize)) {
+      return false;
+    }
+  }
+  uint64_t operationId = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
+  if (operationId == 0) operationId = 1;
+  if (hw1_ota_begin(&record, operationId, HW1_OTA_SOURCE_RECOVERY_UPLOAD,
+                    hw1_ota_replacement_request_flags(&record), nullptr) != HW1_OTA_OK) {
+    snprintf(reason, reasonSize, "Error: could not open an emergency recovery operation");
+    return false;
+  }
+  if (!commitRecord(record, reason, reasonSize)) return false;
+  return armRecoveryBoot(record, factory, reason, reasonSize);
 }
 
 bool parseConfirmedOptions(const String& input, const char* allowedOption,
@@ -1493,10 +1539,7 @@ const char* cmdOtaStage(const String& argsInput) {
   if (hw1_ota_result_pending(&record)) {
     return "Error: review otastatus and run otaack <result-sequence> confirm before starting another OTA";
   }
-  if (record.phase != HW1_OTA_PHASE_IDLE &&
-      record.phase != HW1_OTA_PHASE_SUCCEEDED &&
-      record.phase != HW1_OTA_PHASE_FAILED &&
-      record.phase != HW1_OTA_PHASE_CANCELED) {
+  if (!hw1_ota_phase_is_idle_or_terminal(record.phase)) {
     return "Error: another OTA operation is active; inspect it with otastatus";
   }
   const AuthContext auth = VFS::systemAuth(VFS::Scopes::OTA, "hwone.ota_stage");
@@ -1551,9 +1594,9 @@ const char* cmdOtaStage(const String& argsInput) {
   // of fails the record -- and a flag added here but not to that mask fails
   // immediately (this is exactly what broke BLE staging on 2026-08-30: bit 3
   // was added to the enum only, so every Bluetooth-staged `otastage confirm`
-  // returned INVALID_STATE after a full 4 MB upload). The BLE-resume hint
-  // belongs in the main app's own NVS, which survives the same reboot chain
-  // without putting the updater and the app into version lockstep.
+  // returned INVALID_STATE after a full 4 MB upload). A transport hint, if one
+  // is ever wanted, belongs in the main app's own NVS, which survives the same
+  // reboot chain without putting the updater and the app into version lockstep.
   const hw1_ota_status_t begin = hw1_ota_begin(
       &record, operationId, HW1_OTA_SOURCE_STAGED_FILE, flags, &promoted.verified);
   if (begin != HW1_OTA_OK) {
@@ -1799,14 +1842,6 @@ bool otaBleUploadActiveOnConnection(uint16_t connId) {
 #endif
 }
 
-bool otaSystemResumeBleRequested() {
-#if HW1_OTA_LAYOUT
-  return gResumeBleAfterOta;
-#else
-  return false;
-#endif
-}
-
 bool otaBleHandleEncryptedFrame(uint16_t connId, const uint8_t* frame, size_t size) {
 #if HW1_OTA_LAYOUT && ENABLE_BLUETOOTH
   return handleBleUploadFrame(connId, frame, size);
@@ -1855,24 +1890,11 @@ void otaSystemCrashLoopEscapeEarly() {
   hw1_ota_record_t record{};
   char reason[128]{};
   if (!loadRecord(record, nullptr, true, reason, sizeof(reason))) return;
-  const esp_partition_t* factory = nullptr;
-  if (!verifyFactoryUpdater(&factory, nullptr, 0, reason, sizeof(reason))) return;
-
-  // Replay the two durable intent points here, not only after filesystem init:
-  // this function exists specifically for images that may crash before setup
-  // reaches otaSystemInitAfterStorage().
-  if (record.phase == HW1_OTA_PHASE_REQUESTED &&
-      record.source == HW1_OTA_SOURCE_RECOVERY_UPLOAD) {
-    if (!bootRecoveryForRecord(record, reason, sizeof(reason))) return;
-    restartIntoCrashLoopRecovery("Replaying interrupted crash-loop recovery request");
-  }
-  if (record.phase == HW1_OTA_PHASE_RECOVERY_BOOT_ARMED) {
-    if (esp_ota_set_boot_partition(factory) != ESP_OK) return;
-    restartIntoCrashLoopRecovery("Replaying interrupted crash-loop recovery boot switch");
-  }
 
   if (record.phase == HW1_OTA_PHASE_TRIAL_BOOT_ARMED ||
       record.phase == HW1_OTA_PHASE_TRIAL_RUNNING) {
+    const esp_partition_t* factory = nullptr;
+    if (!verifyFactoryUpdater(&factory, nullptr, 0, reason, sizeof(reason))) return;
     hw1_ota_transition_args_t rollback{
         .verified_manifest = nullptr,
         .result_code = HW1_OTA_RESULT_ROLLBACK_DETECTED,
@@ -1883,44 +1905,37 @@ void otaSystemCrashLoopEscapeEarly() {
                              &rollback, reason, sizeof(reason))) {
       return;
     }
-  } else {
-    // Rollback only protects the first trial boot. A defect that appears after
-    // commit (for example a later autostart path) still needs a way out of a
-    // permanent crash loop, so create a direct-recovery operation and park in
-    // the updater for an authenticated replacement upload.
-    if (record.phase == HW1_OTA_PHASE_REQUESTED) {
-      hw1_ota_transition_args_t canceled{
-          .verified_manifest = nullptr,
-          .result_code = HW1_OTA_RESULT_CANCELED,
-          .native_error = 0,
-          .detail = "unlaunched OTA request replaced by crash-loop recovery",
-      };
-      if (!transitionAndCommit(record, HW1_OTA_EVENT_CANCEL, &canceled,
-                               reason, sizeof(reason))) {
-        return;
-      }
-    }
-    if (record.phase != HW1_OTA_PHASE_IDLE &&
-        record.phase != HW1_OTA_PHASE_SUCCEEDED &&
-        record.phase != HW1_OTA_PHASE_FAILED &&
-        record.phase != HW1_OTA_PHASE_CANCELED) {
+    // The record is terminal now and already carries the rollback result, so
+    // a failed switch has nothing further to journal.
+    const esp_err_t err = esp_ota_set_boot_partition(factory);
+    if (err != ESP_OK) {
+      ESP_EARLY_LOGE(kTag, "Could not select factory recovery after a trial rollback: %s",
+                     esp_err_to_name(err));
       return;
     }
-    uint64_t operationId = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
-    if (operationId == 0) operationId = 1;
-    const uint16_t emergencyFlags = hw1_ota_result_pending(&record)
-                                        ? HW1_OTA_REQUEST_SUPERSEDE_PENDING_RESULT
-                                        : 0;
-    if (hw1_ota_begin(&record, operationId, HW1_OTA_SOURCE_RECOVERY_UPLOAD,
-                      emergencyFlags, nullptr) != HW1_OTA_OK ||
-        !commitRecord(record, reason, sizeof(reason)) ||
-        !transitionAndCommit(record, HW1_OTA_EVENT_ARM_RECOVERY_BOOT, nullptr,
-                             reason, sizeof(reason))) {
-      return;
-    }
+    restartIntoCrashLoopRecovery("Main-image crash loop detected; entering factory recovery");
   }
-  if (esp_ota_set_boot_partition(factory) != ESP_OK) return;
-  restartIntoCrashLoopRecovery("Main-image crash loop detected; entering factory recovery");
+
+  // Replay the two durable intent points here, not only after filesystem init:
+  // this function exists specifically for images that may crash before setup
+  // reaches otaSystemInitAfterStorage(). Otherwise: rollback only protects the
+  // first trial boot, and a defect that appears after commit (for example a
+  // later autostart path) still needs a way out of a permanent crash loop, so
+  // create a direct-recovery operation and park in the updater for an
+  // authenticated replacement upload.
+  const char* what =
+      record.phase == HW1_OTA_PHASE_RECOVERY_BOOT_ARMED
+          ? "Replaying interrupted crash-loop recovery boot switch"
+      : (record.phase == HW1_OTA_PHASE_REQUESTED &&
+         record.source == HW1_OTA_SOURCE_RECOVERY_UPLOAD)
+          ? "Replaying interrupted crash-loop recovery request"
+          : "Main-image crash loop detected; entering factory recovery";
+  if (!armEmergencyRecovery(record, "unlaunched OTA request replaced by crash-loop recovery",
+                            reason, sizeof(reason))) {
+    if (reason[0]) ESP_EARLY_LOGE(kTag, "%s", reason);
+    return;
+  }
+  restartIntoCrashLoopRecovery(what);
 #endif
 }
 
@@ -1936,46 +1951,10 @@ bool otaSystemRecoverFromStorageFailure() {
     return false;
   }
 
-  if (record.phase == HW1_OTA_PHASE_RECOVERY_BOOT_ARMED ||
-      (record.phase == HW1_OTA_PHASE_REQUESTED &&
-       record.source == HW1_OTA_SOURCE_RECOVERY_UPLOAD)) {
-    if (!resumeRecoveryBootIntent(record, reason, sizeof(reason))) {
-      ESP_LOGE(kTag, "%s", reason);
-      return false;
-    }
-  } else {
-    if (record.phase == HW1_OTA_PHASE_REQUESTED) {
-      hw1_ota_transition_args_t canceled{
-          .verified_manifest = nullptr,
-          .result_code = HW1_OTA_RESULT_CANCELED,
-          .native_error = 0,
-          .detail = "staged request replaced because LittleFS would not mount",
-      };
-      if (!transitionAndCommit(record, HW1_OTA_EVENT_CANCEL, &canceled,
-                               reason, sizeof(reason))) {
-        ESP_LOGE(kTag, "%s", reason);
-        return false;
-      }
-    }
-    if (record.phase != HW1_OTA_PHASE_IDLE &&
-        record.phase != HW1_OTA_PHASE_SUCCEEDED &&
-        record.phase != HW1_OTA_PHASE_FAILED &&
-        record.phase != HW1_OTA_PHASE_CANCELED) {
-      ESP_LOGE(kTag, "Error: storage failed during active OTA phase %s", phaseName(record.phase));
-      return false;
-    }
-    uint64_t operationId = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
-    if (operationId == 0) operationId = 1;
-    const uint16_t emergencyFlags = hw1_ota_result_pending(&record)
-                                        ? HW1_OTA_REQUEST_SUPERSEDE_PENDING_RESULT
-                                        : 0;
-    if (hw1_ota_begin(&record, operationId, HW1_OTA_SOURCE_RECOVERY_UPLOAD,
-                      emergencyFlags, nullptr) != HW1_OTA_OK ||
-        !commitRecord(record, reason, sizeof(reason)) ||
-        !bootRecoveryForRecord(record, reason, sizeof(reason))) {
-      ESP_LOGE(kTag, "%s", reason[0] ? reason : "Error: could not arm recovery");
-      return false;
-    }
+  if (!armEmergencyRecovery(record, "staged request replaced because LittleFS would not mount",
+                            reason, sizeof(reason))) {
+    ESP_LOGE(kTag, "%s", reason[0] ? reason : "Error: could not arm recovery");
+    return false;
   }
 
   ESP_LOGE(kTag, "LittleFS unavailable; entering factory recovery without formatting");
@@ -2046,9 +2025,6 @@ void otaSystemInitAfterStorage() {
       (imageState == ESP_OTA_IMG_NEW || imageState == ESP_OTA_IMG_PENDING_VERIFY) &&
       (record.phase == HW1_OTA_PHASE_TRIAL_BOOT_ARMED ||
        record.phase == HW1_OTA_PHASE_IMAGE_VERIFIED)) {
-    // BLE-resume latch intentionally absent: see the note in cmdOtaStage. The
-    // hint must not ride the journal record, so otaSystemResumeBleRequested()
-    // stays false until it is re-homed in the main app's own NVS.
     if (!transitionAndCommit(record, HW1_OTA_EVENT_TRIAL_STARTED, nullptr,
                              reason, sizeof(reason))) {
       ESP_LOGE(kTag, "%s", reason);

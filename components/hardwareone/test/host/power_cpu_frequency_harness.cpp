@@ -95,7 +95,7 @@ static uint32_t getCpuFrequencyMhz() { return current; }
 static uint32_t getXtalFrequencyMhz() { return 40; }
 static uint32_t getApbFrequency() { return 80000000; }
 static bool setCpuFrequencyMhz(uint32_t mhz);
-struct { int oledBrightness = 1; } gSettings;
+struct { int oledBrightness = 1; uint8_t powerMode = POWER_MODE_PERFORMANCE; } gSettings;
 template <typename T, typename U> static void setSetting(T& field, U value) {
   trace.push_back("setting"); ++settingWrites; field = value;
 }
@@ -141,6 +141,7 @@ static void reset() {
   trace.clear(); output.clear(); events.clear(); battery.clear();
   currentTask = 1; current = POWER_CPU_PERFORMANCE_MHZ; halCalls = 0;
   brightnessCalls = settingWrites = 0; gSettings.oledBrightness = 1;
+  gSettings.powerMode = POWER_MODE_PERFORMANCE;
   halCallback = {}; halResult = HalResult::Success; validateOnly = false;
 #if ENABLE_I2C_SYSTEM
   assert(!pollPaused(0) && !pollPaused(1) && !gSensorPollingPaused);
@@ -288,12 +289,30 @@ static void consumerOutcomes() {
     assert(events == std::vector<std::string>({getPowerModeName(mode)}));
     assert(battery.size() == 1 && brightnessCalls == 1 && settingWrites == 1);
     assert(trace[trace.size() - 5] == "give:gate"); // Success effects follow release.
+    // A mode the user chooses sets that mode's display brightness.
     assert(gSettings.oledBrightness == (getPowerModeDisplayBrightness(mode) * 255) / 100);
     released();
   }
   reset(); assert(applyPowerMode(POWER_MODE_PERFORMANCE)); assert(!halCalls && events.size() == 1);
   reset(); gSettings.oledBrightness = 204;
   assert(applyPowerMode(POWER_MODE_BALANCED)); assert(!settingWrites && !brightnessCalls); released();
+
+  // Boot and setup re-apply the saved mode through applySettings: the clock,
+  // event and battery note still happen, but the user's saved brightness stays.
+  for (uint8_t mode = 0; mode < POWER_MODE_COUNT; ++mode) {
+    reset(); current = 40; gSettings.powerMode = mode; gSettings.oledBrightness = 120;
+    applySettingsPowerStep();
+    assert(current == getPowerModeActiveCpuFreq(mode));
+    assert(gSettings.oledBrightness == 120 && !settingWrites && !brightnessCalls);
+    assert(events == std::vector<std::string>({getPowerModeName(mode)}) && battery.size() == 1);
+    released();
+#if POWER_MODE_HAS_BRIGHTNESS_OPTION
+    reset(); current = 40; gSettings.oledBrightness = 120;
+    assert(applyPowerMode(mode, false));
+    assert(gSettings.oledBrightness == 120 && !settingWrites && !brightnessCalls && events.size() == 1);
+    released();
+#endif
+  }
 
   for (const char* invalid : {"-80", "+80", "80.0", "80junk", "8 0", "0", "40", "1", "9999999999999999999999999", "4294967376"}) {
     reset(); assert(std::string(cmd_cpufreq(String(invalid))).find("Error:") == 0);

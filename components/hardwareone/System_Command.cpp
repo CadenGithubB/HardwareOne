@@ -236,6 +236,44 @@ String executeCommandThroughRegistry(const String& argsInput) {
 // System Initialization
 // ============================================================================
 
+// The registered module whose table holds entry, for the duplicate report.
+static const char* moduleNameForEntry(const CommandEntry* entry) {
+  const uintptr_t at = reinterpret_cast<uintptr_t>(entry);
+  for (size_t i = 0; i < registeredModuleCount; ++i) {
+    const uintptr_t first = reinterpret_cast<uintptr_t>(registeredModules[i].commands);
+    const uintptr_t end = reinterpret_cast<uintptr_t>(registeredModules[i].commands + registeredModules[i].count);
+    if (at >= first && at < end) return registeredModules[i].name;
+  }
+  return "?";
+}
+
+// Lookup keeps the first registered row of a name (ASCII case ignored), so a
+// later row with the same name never runs although help still lists it. Each
+// such row is logged once; the registry itself is unchanged. Returns how many
+// rows are shadowed.
+static size_t reportDuplicateCommandNames() {
+  size_t shadowed = 0;
+  for (size_t i = 1; i < commandRegistrySize; ++i) {
+    const char* name = commandRegistry[i] ? commandRegistry[i]->name : nullptr;
+    if (!name || !name[0]) continue;
+    const unsigned char first = hw1_command_lookup::foldAscii(static_cast<unsigned char>(name[0]));
+    size_t length = 0;  // measured only once a first letter matches
+    for (size_t j = 0; j < i; ++j) {
+      const char* earlier = commandRegistry[j] ? commandRegistry[j]->name : nullptr;
+      if (!earlier || hw1_command_lookup::foldAscii(static_cast<unsigned char>(earlier[0])) != first) continue;
+      if (length == 0) length = strlen(name);
+      if (strlen(earlier) != length ||
+          !hw1_command_lookup::equalAsciiIgnoreCase(earlier, name, length)) continue;
+      ++shadowed;
+      logSystemEvent("CMDREG", "DUPLICATE command name '%s': the '%s' module row is shadowed by "
+                     "the '%s' module row (the first registered wins).",
+                     name, moduleNameForEntry(commandRegistry[i]), moduleNameForEntry(commandRegistry[j]));
+      break;
+    }
+  }
+  return shadowed;
+}
+
 void initializeCommandSystem() {
   // Reset registry
   commandRegistrySize = 0;
@@ -293,6 +331,8 @@ void initializeCommandSystem() {
                    "counts — bump MAX_MODULES in System_Command.cpp.",
                    gModuleSummaryDropped, (int)MAX_MODULES);
   }
+  // Same channel for a name registered twice: the later row is dead.
+  (void)reportDuplicateCommandNames();
 
   // Update global pointers
   gCommands = commandRegistry;

@@ -5,12 +5,25 @@ The firmware implementation is coupled to Arduino File, FreeRTOS mutex
 ownership, and the live users roster. These checks deliberately inspect the
 production sources rather than maintaining a permissive host-side imitation of
 that security boundary.
+
+The file-permission owner check at the end compiles the real rule table and
+canX code (filesystem_role_matrix_harness.cpp) with the requiresAdmin column
+of every file command row, and asserts one per-role read/write/create/delete
+matrix through both the command table and the direct web file endpoints.
+Options: --cxx <compiler> (default c++), --sanitize (ASan + UBSan).
 """
 
+import argparse
+import re
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+WEB_SERVER_CPP = (ROOT / "WebServer_Server.cpp").read_text()
+WEB_UTILS_H = (ROOT / "WebServer_Utils.h").read_text()
 FS_CPP = (ROOT / "System_Filesystem.cpp").read_text()
 FS_H = (ROOT / "System_Filesystem.h").read_text()
 FS_INTERNAL_H = (ROOT / "System_Filesystem_Internal.h").read_text()
@@ -194,5 +207,98 @@ assert ".permissions = getPermissions(" not in load_dir
 get_item = function_body(FILE_MANAGER_CPP, "bool FileManager::getItem")
 assert "entry.permissions = getPermissions(item.path, ctx)" in get_item
 assert "LockedListingPermissions" not in get_item
+
+# ---------------------------------------------------------------------------
+# One owner for file permissions: the path rule table decides for every
+# transport. The command rows carry no admin flag of their own, and the web
+# endpoints add only the table-derived isAdminOnlyPath pre-check.
+# ---------------------------------------------------------------------------
+FILE_COMMANDS = ("files", "mkdir", "rmdir", "filecreate", "fileview", "fileread",
+                 "filewrite", "filedelete", "filerename")
+
+
+def file_command_gates(source: str) -> dict:
+    start = source.index("const CommandEntry filesystemCommands[] = {")
+    end = source.index("const size_t filesystemCommandsCount", start)
+    rows = re.findall(r'\{\s*"(\w+)",\s*"(?:[^"\\]|\\.)*",\s*(true|false),\s*(cmd_\w+)',
+                      source[start:end])
+    gates = {name: flag == "true" for name, flag, handler in rows
+             if handler == "cmd_" + name}
+    missing = [name for name in FILE_COMMANDS if name not in gates]
+    assert not missing, f"file command rows not found: {missing}"
+    return {name: gates[name] for name in FILE_COMMANDS}
+
+
+def web_handlers_gate_like_the_model() -> None:
+    pre_check = re.compile(r"if \(isAdminOnlyPath\((\w+)\) && !isAdminUser\(ctx\.user\)\)")
+    for handler in ("esp_err_t handleFileRead(", "esp_err_t handleFileWrite(",
+                    "esp_err_t handleFileUpload(", "esp_err_t handleFilesList(",
+                    "esp_err_t handleFilesCreate(", "esp_err_t handleFileView("):
+        body = function_body(WEB_SERVER_CPP, handler)
+        assert pre_check.search(body), f"{handler} lost the table-derived admin-path pre-check"
+        # No second, role-based refusal outside the table.
+        assert "currentExecIsAdmin" not in body, handler
+    create = function_body(WEB_SERVER_CPP, "esp_err_t handleFilesCreate(")
+    assert "executeUnifiedWebCommand(" in create
+    assert '"mkdir "' in create and "filecreate " in create
+    # The Files page sends the remaining verbs through the command executor.
+    for verb in ("filedelete ", "filerename ", "rmdir "):
+        assert verb in WEB_UTILS_H, verb
+
+
+def run_role_matrix(cxx: str, sanitize: bool) -> None:
+    here = ROOT / "test" / "host"
+    sys.path.insert(0, str(here))
+    from test_web_batch_handlers import extract_block
+
+    header = FS_H
+    internal = re.sub(r"^#include.*\n", "", FS_INTERNAL_H, flags=re.M)
+    pieces = [extract_block(header, "enum FilePermission") + ";",
+              extract_block(FS_CPP, "struct PathRule") + ";",
+              extract_block(FS_CPP, "static const PathRule sPathRules[]") + ";"]
+    for marker in ("static const PathRule& lookupRule(", "static bool hasSensitiveExtension(",
+                   "static bool isImageFile(", "bool normalizeFsPath(", "enum class FsRole"):
+        pieces.append(extract_block(FS_CPP, marker) + (";" if marker.startswith("enum") else ""))
+    for marker in ("static inline bool isUnrestrictedRole(", "static FsRole resolveRole(",
+                   "static uint8_t permsForRole(", "static bool pathWithinScope(",
+                   "static uint32_t transcriptAccountId(", "static uint8_t transcriptPermissionMask(",
+                   "static uint8_t permissionsForResolvedRole("):
+        pieces.append(extract_block(FS_CPP, marker))
+    for marker in ("static bool checkPerm(", "bool canRead ", "bool canEdit ", "bool canDelete ",
+                   "bool canRename ", "bool canCreate ", "bool canImport ",
+                   "bool isAdminOnlyPath(", "uint8_t getPermissions("):
+        pieces.append(extract_block(FS_CPP, marker))
+    gates = file_command_gates(FS_CPP)
+    gate_rows = "\n".join(f'    {{"{name}", {"true" if flag else "false"}}},'
+                          for name, flag in gates.items())
+    harness = (here / "filesystem_role_matrix_harness.cpp").read_text()
+    policy = (ROOT / "Transcript_PathPolicy.h").read_text().replace("#pragma once", "")
+    for marker, value in (("// INSERT_POLICY", policy), ("// INSERT_INTERNAL", internal),
+                          ("// INSERT_PRODUCTION", "\n\n".join(pieces)),
+                          ("// INSERT_COMMAND_GATES", gate_rows)):
+        assert harness.count(marker) == 1, marker
+        harness = harness.replace(marker, value)
+    with tempfile.TemporaryDirectory(prefix="hw1-fs-role-matrix-") as temp:
+        unit, exe = Path(temp) / "matrix.cpp", Path(temp) / "matrix"
+        unit.write_text(harness)
+        cmd = [cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", str(unit), "-o", str(exe)]
+        if sanitize:
+            cmd[1:1] = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
+        subprocess.run(cmd, check=True, timeout=180)
+        result = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60)
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        assert result.returncode == 0, "file permission matrix disagrees between transports"
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--cxx", default="c++")
+parser.add_argument("--sanitize", action="store_true")
+ARGS = parser.parse_args()
+
+web_handlers_gate_like_the_model()
+run_role_matrix(ARGS.cxx, ARGS.sanitize)
+admin_only = [name for name, flag in file_command_gates(FS_CPP).items() if flag]
+assert not admin_only, f"file commands still admin-only beside the path rules: {admin_only}"
 
 print("filesystem listing permission contract: OK")

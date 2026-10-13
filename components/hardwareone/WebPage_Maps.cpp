@@ -67,10 +67,11 @@ esp_err_t handleMapFeaturesAPI(httpd_req_t* req) {
   const LoadedMap& map = MapCore::getCurrentMap();
   
   // Build JSON response
+  // Names come from the map file: every string is JSON-escaped.
   String json = "{";
-  json += "\"mapName\":\"";
-  json += map.filename;
-  json += "\",\"hasNames\":";
+  json += "\"mapName\":";
+  json += webJsonString(map.filename);
+  json += ",\"hasNames\":";
   json += map.nameCount > 0 ? "true" : "false";
   json += ",\"featureCount\":";
   json += (int)map.header.featureCount;
@@ -85,11 +86,7 @@ esp_err_t handleMapFeaturesAPI(httpd_req_t* req) {
     for (int i = 0; i < map.nameCount; i++) {
       if (!firstName) json += ",";
       firstName = false;
-      
-      // Escape quotes in name
-      String name = String(map.names[i].name);
-      name.replace("\"", "\\\"");
-      json += "\"" + name + "\"";
+      json += webJsonString(map.names[i].name);
     }
     json += "]";
   } else {
@@ -221,9 +218,11 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
       GPSTrackStatus loaded;
       if (!GPSTrackManager::loadTrack(decodedPath.c_str(), errorMsg, loaded)) {
         httpd_resp_set_type(req, "application/json");
-        char errJson[256];
-        snprintf(errJson, sizeof(errJson), "{\"error\":\"%s\"}", errorMsg.c_str());
-        httpd_resp_sendstr(req, errJson);
+        // The message can carry the requested path: escape it.
+        String errJson = "{\"error\":";
+        errJson += webJsonString(errorMsg);
+        errJson += "}";
+        httpd_resp_sendstr(req, errJson.c_str());
         return ESP_OK;
       }
       GPSTrackSnapshot track;
@@ -255,10 +254,12 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
         httpd_resp_sendstr_chunk(req, pointJson);
       }
 
-      char footer[256];
-      snprintf(footer, sizeof(footer), "],\"count\":%d,\"message\":\"%s\"}", 
-               track.pointCount, validMsg.c_str());
-      httpd_resp_sendstr_chunk(req, footer);
+      char footer[64];
+      snprintf(footer, sizeof(footer), "],\"count\":%d,\"message\":", track.pointCount);
+      String tail = footer;
+      tail += webJsonString(validMsg);
+      tail += "}";
+      httpd_resp_sendstr_chunk(req, tail.c_str());
       httpd_resp_sendstr_chunk(req, NULL);
       return ESP_OK;
     }
@@ -294,14 +295,17 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
       check.close();
     }
     if (hasGPS) {
-      char fileJson[384];
-      snprintf(fileJson, sizeof(fileJson), "%s{\"path\":\"%s\",\"size\":%lu}",
-               first ? "" : ",", file.path(), (unsigned long)file.size());
+      // A file name may hold a backslash: the path is JSON-escaped.
+      String fileJson = first ? "{\"path\":" : ",{\"path\":";
+      fileJson += webJsonString(file.path());
+      char sizeJson[32];
+      snprintf(sizeJson, sizeof(sizeJson), ",\"size\":%lu}", (unsigned long)file.size());
+      fileJson += sizeJson;
       // The filesystem lock is released around the send so a client that has
       // stopped reading does not hold up every other filesystem user, then
       // taken again for the next directory step.
       fsUnlock();
-      if (httpd_resp_sendstr_chunk(req, fileJson) != ESP_OK) sendFailed = true;
+      if (httpd_resp_sendstr_chunk(req, fileJson.c_str()) != ESP_OK) sendFailed = true;
       fsLock("gps.tracks.list");
       first = false;
     }

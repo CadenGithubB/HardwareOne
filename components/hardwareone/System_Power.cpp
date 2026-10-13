@@ -167,7 +167,7 @@ uint8_t getPowerModeDisplayBrightness(uint8_t mode) {
   return gPowerModes[mode].displayBrightnessPercent;
 }
 
-bool applyPowerMode(uint8_t mode) {
+bool applyPowerMode(uint8_t mode, bool setDisplayBrightness) {
   DEBUG_SYSTEMF("[POWER] applyPowerMode called with mode=%d", mode);
   
   if (mode >= POWER_MODE_COUNT) {
@@ -197,11 +197,12 @@ bool applyPowerMode(uint8_t mode) {
     return false;
   }
   
-  // Apply display brightness
+  // Apply display brightness. A user mode change sets the mode's brightness;
+  // re-applying the saved mode (boot, setup) keeps the saved oledBrightness.
   uint8_t targetBrightness = (config.displayBrightnessPercent * 255) / 100;
   
   // Only apply if different from current setting
-  if (gSettings.oledBrightness != targetBrightness) {
+  if (setDisplayBrightness && gSettings.oledBrightness != targetBrightness) {
     INFO_SYSTEMF("Adjusting display brightness: %d -> %d (mode: %s)", 
                  gSettings.oledBrightness, targetBrightness, config.name);
     setSetting(gSettings.oledBrightness, (int)targetBrightness);
@@ -226,26 +227,6 @@ bool applyPowerMode(uint8_t mode) {
     batteryLogEvent(ev);
   }
   return true;
-}
-
-void checkAutoPowerMode() {
-  
-  if (!gSettings.powerAutoMode) {
-    return;  // Auto mode disabled
-  }
-  
-  // TODO: Get battery level from hardware
-  // For now, this is a placeholder for future battery monitoring
-  // When battery monitoring is implemented, check battery % and switch modes:
-  //
-  // uint8_t batteryPercent = getBatteryLevel();
-  // if (batteryPercent < gSettings.powerBatteryThreshold) {
-  //   if (gSettings.powerMode < 2) {  // Not already in power saver
-  //     gSettings.powerMode = 2;  // Switch to PowerSaver
-  //     applyPowerMode(gSettings.powerMode);
-  //     WARN_SYSTEMF("Low battery (%d%%) - switching to PowerSaver mode", batteryPercent);
-  //   }
-  // }
 }
 
 // ============================================================================
@@ -283,8 +264,10 @@ void buildPowerJson(JsonDocument& doc) {
     frequencies.add(getPowerCpuFrequencyMhz(i));
   }
 
-  doc["autoMode"]          = (bool)gSettings.powerAutoMode;
-  doc["batteryThreshold"]  = gSettings.powerBatteryThreshold;
+  // No battery-driven mode switch exists in this firmware; say so rather than
+  // reporting a stored flag that nothing acts on.
+  doc["autoMode"]          = false;
+  doc["autoModeSupported"] = false;
   doc["displayBrightness"] = gSettings.oledBrightness;          // 0..255
   doc["displayDimLevel"]   = gSettings.powerDisplayDimLevel;    // percent
 
@@ -359,10 +342,7 @@ const char* cmd_power(const String& argsInput) {
     BROADCAST_PRINTF("  Display Brightness: %d/255 (%d%%)",
                      gSettings.oledBrightness,
                      (gSettings.oledBrightness * 100) / 255);
-    BROADCAST_PRINTF("  Auto Mode: %s", gSettings.powerAutoMode ? "ON" : "OFF");
-    if (gSettings.powerAutoMode) {
-      BROADCAST_PRINTF("  Battery Threshold: %d%%", gSettings.powerBatteryThreshold);
-    }
+    broadcastOutput("  Auto Mode: not available in this firmware");
     broadcastOutput("\nAvailable modes:");
     for (uint8_t i = 0; i < POWER_MODE_COUNT; i++) {
       const uint32_t act  = getPowerModeActiveCpuFreq(i);
@@ -431,36 +411,17 @@ const char* cmd_power(const String& argsInput) {
     BROADCAST_PRINTF("Power mode set to: %s", getPowerModeName(newMode));
     return "[Power] Mode updated";
     
-  } else if (subCmd.equalsIgnoreCase("auto")) {
-    if (subArgs.length() == 0) {
-      return "Error: invalid arguments — Usage: power auto [on|off]";
+  } else if (subCmd.equalsIgnoreCase("auto") || subCmd.equalsIgnoreCase("threshold")) {
+    // Nothing switches the mode on battery level in this firmware, so neither
+    // auto mode nor its threshold is stored or reported as active.
+    if (subCmd.equalsIgnoreCase("auto") &&
+        (subArgs.equalsIgnoreCase("off") || subArgs.equalsIgnoreCase("false") || subArgs == "0")) {
+      return "[Power] Auto mode is off (not available in this firmware)";
     }
-    
-    bool enable = subArgs.equalsIgnoreCase("on") || subArgs.equalsIgnoreCase("true") || subArgs == "1";
-    setSetting(gSettings.powerAutoMode, enable);
-    
-    BROADCAST_PRINTF("Auto power mode: %s", enable ? "ON" : "OFF");
-    if (enable) {
-      BROADCAST_PRINTF("Will switch to PowerSaver when battery < %d%%", gSettings.powerBatteryThreshold);
-    }
-    return "[Power] Auto mode updated";
-    
-  } else if (subCmd.equalsIgnoreCase("threshold")) {
-    if (subArgs.length() == 0) {
-      return "Error: invalid arguments — Usage: power threshold [0-100]";
-    }
-    
-    int threshold = subArgs.toInt();
-    if (threshold < 0 || threshold > 100) {
-      return "Error: Threshold must be 0-100";
-    }
-    
-    setSetting(gSettings.powerBatteryThreshold, (uint8_t)threshold);
-    BROADCAST_PRINTF("Battery threshold set to: %d%%", threshold);
-    return "[Power] Threshold updated";
-    
+    return "Error: auto power mode is not available in this firmware; choose a mode with 'power mode'";
+
   } else {
-    return "Error: Unknown subcommand. Use: power [mode|auto|threshold]";
+    return "Error: Unknown subcommand. Use: power [mode]";
   }
 }
 
@@ -559,7 +520,7 @@ static const char* cmd_powersave(const String& argsInput) {
 // Command table
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry powerCommands[] = {
-  {"power",         "Power management [mode] [auto] [threshold]", true, cmd_power,         "Usage:\n  power - show current power status\n  power json - status as one JSON blob (same schema as /api/power/status)\n  power mode <perf|balanced|saver|ultra|locked|0-4>\n  power auto <on|off>\n  power threshold <0-100>"},
+  {"power",         "Power management [mode]", true, cmd_power,         "Usage:\n  power - show current power status\n  power json - status as one JSON blob (same schema as /api/power/status)\n  power mode <perf|balanced|saver|ultra|locked|0-4>"},
   {"powercooldown", "Sleep transition cooldown (ms; 0 disables)", true, cmd_powercooldown, "Usage: powercooldown <0..60000>"},
   {"powersave",     "Idle power-save: OLED off + optional downclock (0 disables)", true, cmd_powersave, "Usage: powersave <0..1440>"}
 };
@@ -580,8 +541,6 @@ static const SettingEntry powerSettingEntries[] = {
   // Fields are uint8_t — must use SETTING_U8 to avoid 4-byte-write overflow
   // into adjacent struct members. See System_Settings.h SettingType enum.
   { "mode", SETTING_U8, &gSettings.powerMode, 0, 0, nullptr, 0, 4, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver,Locked", false, nullptr, "power mode" },
-  { "autoMode", SETTING_BOOL, &gSettings.powerAutoMode, false, 0, nullptr, 0, 1, "Auto Mode", nullptr, false, nullptr, "power auto" },
-  { "batteryThreshold", SETTING_U8, &gSettings.powerBatteryThreshold, 20, 0, nullptr, 0, 100, "Battery Threshold (%)", nullptr, false, nullptr, "power threshold" },
   { "displayDimLevel", SETTING_U8, &gSettings.powerDisplayDimLevel, 30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr, false, nullptr, "powerdim" },
   { "transitionCooldownMs", SETTING_INT, &gSettings.powerTransitionCooldownMs, 5000, 0, nullptr, 0, 60000, "Sleep cooldown (ms, 0=disabled)", nullptr, false, nullptr, "powercooldown" },
   { "powerSaveMinutes", SETTING_INT, &gSettings.powerSaveTimeoutMinutes, 10, 0, nullptr, 0, 1440, "Power saving (min, 0=disabled)", nullptr, false, nullptr, "powersave" }

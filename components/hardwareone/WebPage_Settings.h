@@ -1229,30 +1229,9 @@ window.SchemaPanel.render({
       html += '</div>';
     }
     if (otherEntries.length > 0) {
-      // For camera module, separate ESP-NOW related settings
-      var espnowKeys = ['cameraSendAfterCapture', 'cameraTargetDevice'];
-      var regularEntries = otherEntries.filter(function(e) { return espnowKeys.indexOf(e.key) === -1; });
-      var espnowEntries = otherEntries.filter(function(e) { return espnowKeys.indexOf(e.key) !== -1; });
-
-      if (regularEntries.length > 0) {
-        html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
-        regularEntries.forEach(function(e) { html += renderInput(e, getValue(e), isOrphan); });
-        html += '</div>';
-      }
-
-      if (espnowEntries.length > 0 && mod.name === 'camera') {
-        html += '<div style="font-weight:bold;margin:1rem 0 0.5rem 0;color:var(--panel-fg);border-bottom:1px solid var(--border);padding-bottom:0.25rem">ESP-NOW Integration</div>';
-        html += '<div style="background:rgba(100,149,237,0.1);padding:0.5rem 0.75rem;margin-bottom:0.75rem;color:var(--panel-fg);font-size:0.85rem">';
-        html += 'Send captured images to another device via ESP-NOW mesh network.';
-        html += '</div>';
-        html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
-        espnowEntries.forEach(function(e) { html += renderInput(e, getValue(e), isOrphan); });
-        html += '</div>';
-      } else if (espnowEntries.length > 0) {
-        html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
-        espnowEntries.forEach(function(e) { html += renderInput(e, getValue(e), isOrphan); });
-        html += '</div>';
-      }
+      html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
+      otherEntries.forEach(function(e) { html += renderInput(e, getValue(e), isOrphan); });
+      html += '</div>';
     }
     if (!isOrphan) {
       html += '<button class="btn" onclick="saveDynamicSettings(\'' + mod.name + '\',\'' + mod.section + '\')">Save ' + (moduleLabels[mod.name] || mod.name) + ' Settings</button>';
@@ -1480,15 +1459,6 @@ window.SchemaPanel.render({
       if (el.type !== 'password' && !window._isChanged(el.id, val)) return;
       updates[key] = val;
     });
-
-    // For camera: if enabling auto-capture and folder is empty, set default and update UI
-    if (modName === 'camera' && updates['cameraAutoCapture'] === 1) {
-      var folderInput = hw.$('dyn-cameraCaptureFolder');
-      if (folderInput && !folderInput.value.trim()) {
-        folderInput.value = '/photos';
-        updates['cameraCaptureFolder'] = '/photos';
-      }
-    }
 
     for (var k in updates) {
       var el = pane.querySelector('#dyn-' + k.replace(/\./g, '-'));
@@ -1745,7 +1715,7 @@ function saveNotifPolicy() {
 </div>
 <script>
 (function(){
-  var GL={authentication:'Authentication',http:'HTTP',https:'HTTPS',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',bluetooth:'Bluetooth',g2:'G2 Glasses',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',camera:'Camera',microphone:'Microphone',gps:'GPS',rtc:'RTC',presence:'Presence',fmradio:'FM Radio',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',input:'Input',anoencoder:'Ano Encoder',tof:'ToF',apds:'APDS',maps:'Maps',datetime:'Date / Time',llm:'LLM',espsr:'ESP-SR Speech',memory:'Memory',mqtt:'MQTT',i2c:'I2C',display:'Display',oled:'OLED',logger:'Sensor Data Logger',channels:'Channels',auth:'Auth',boot:'Boot',broker:'Broker',topics:'Topics',publish:'Publish',image:'Image',tuning:'Tuning',storage:'Storage',autoCapture:'Auto Capture',timing:'Timing',orientation:'Orientation',filtering:'Filtering',interpolation:'Interpolation',scale:'Scale',mesh:'Mesh',bond:'Bond',identity:'Identity',buffers:'Buffers',capture:'Capture',lifecycle:'Lifecycle',polling:'Polling',values:'Values',page:'Page Console'};
+  var GL={authentication:'Authentication',http:'HTTP',https:'HTTPS',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',bluetooth:'Bluetooth',g2:'G2 Glasses',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',camera:'Camera',microphone:'Microphone',gps:'GPS',rtc:'RTC',presence:'Presence',fmradio:'FM Radio',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',input:'Input',anoencoder:'Ano Encoder',tof:'ToF',apds:'APDS',maps:'Maps',datetime:'Date / Time',llm:'LLM',espsr:'ESP-SR Speech',memory:'Memory',mqtt:'MQTT',i2c:'I2C',display:'Display',oled:'OLED',logger:'Sensor Data Logger',channels:'Channels',auth:'Auth',boot:'Boot',broker:'Broker',topics:'Topics',publish:'Publish',image:'Image',tuning:'Tuning',storage:'Storage',timing:'Timing',orientation:'Orientation',filtering:'Filtering',interpolation:'Interpolation',scale:'Scale',mesh:'Mesh',bond:'Bond',identity:'Identity',buffers:'Buffers',capture:'Capture',lifecycle:'Lifecycle',polling:'Polling',values:'Values',page:'Page Console'};
   // Hover help for each debug flag. Keyed by the CLI cmdKey so it survives
   // label changes. Missing keys fall back to a generic group-level hint.
   var HELP={

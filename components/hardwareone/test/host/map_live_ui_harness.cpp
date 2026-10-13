@@ -87,6 +87,14 @@ static bool webGuestMutationAllowed(httpd_req_t* req, const AuthContext&) {
   return false;
 }
 static String urlDecode(const String& value) { return value; }
+// WebServer_Utils.cpp's webJsonString: the same ArduinoJson escaping.
+static String webJsonString(const String& text) {
+  JsonDocument doc;
+  doc.set(text.c_str());
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
 static int httpd_req_get_url_query_str(httpd_req_t* req, char* out, size_t length) {
   if (req->query.empty() || req->query.size() >= length) return ESP_FAIL;
   std::snprintf(out, length, "%s", req->query.c_str()); return ESP_OK;

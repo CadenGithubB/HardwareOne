@@ -82,9 +82,19 @@ static SemaphoreHandle_t getRecCtrl() {
 // Offsets into the 224-byte header skeleton that get patched on finalize.
 static const uint32_t AVI_HEADER_SIZE        = 224;
 static const uint32_t OFF_RIFF_SIZE          = 4;
+static const uint32_t OFF_AVIH_US_PER_FRAME  = 32;
 static const uint32_t OFF_AVIH_TOTAL_FRAMES  = 48;
+static const uint32_t OFF_AVIH_BUFFER_SIZE   = 60;
+static const uint32_t OFF_AVIH_WIDTH         = 64;   // dwWidth, dwHeight
+static const uint32_t OFF_STRH_SCALE         = 128;  // dwScale, then dwRate
 static const uint32_t OFF_STRH_LENGTH        = 140;
+static const uint32_t OFF_STRH_BUFFER_SIZE   = 144;
+static const uint32_t OFF_STRH_RC_RIGHT      = 160;  // rcFrame.right, rcFrame.bottom (16-bit each)
+static const uint32_t OFF_STRF_WIDTH         = 176;  // biWidth, biHeight
 static const uint32_t OFF_MOVI_SIZE          = 216;
+
+// SD-in-use registration name: the card stays mounted while a clip is open.
+static const char* const VIDEO_SD_OWNER = "video recording";
 
 // Cap on frames per recording (~160 KB of index + whatever the frames cost).
 // At 10 fps that's 16+ minutes; at 30 fps about 5.5 minutes. Prevents runaway.
@@ -132,8 +142,8 @@ static inline uint32_t fourcc(const char* s) {
 
 // ── AVI header skeleton ─────────────────────────────────────────────────────
 // Written once when recording starts, patched in-place on finalize.
-// Width/height/fps known up front (from first frame); frame count and size
-// fields patched at end.
+// Width/height are patched from the first frame; frame count, sizes, the
+// measured frame timing, buffer size and rcFrame are patched at the end.
 static void buildHeaderSkeleton(uint8_t* h, uint32_t w, uint32_t hgt, uint32_t fps) {
   memset(h, 0, AVI_HEADER_SIZE);
 
@@ -286,63 +296,118 @@ static bool writeFrameChunk(const uint8_t* jpeg, size_t len) {
   return true;
 }
 
-static void finalizeAndClose() {
-  if (!s_file) return;
+// First frame: write its geometry into the header, then return the handle to
+// the start of the movi payload. False when any seek or write fails; frames
+// must not be appended then, because the handle position is unknown. A frame
+// whose geometry cannot be parsed keeps the skeleton values.
+static bool patchFirstFrameDims(const uint8_t* jpeg, size_t len) {
+  uint32_t w = 0, h = 0;
+  if (!probeJpegDims(jpeg, len, &w, &h) || w == 0 || h == 0) return true;
+  FsLockGuard fsGuard("video.dims.patch");
+  uint8_t dims[8];
+  put32(dims + 0, w);
+  put32(dims + 4, h);
+  if (!s_file.seek(OFF_AVIH_WIDTH) || s_file.write(dims, 8) != 8 ||
+      !s_file.seek(OFF_STRF_WIDTH) || s_file.write(dims, 8) != 8 ||
+      !s_file.seek(AVI_HEADER_SIZE)) {
+    return false;
+  }
+  s_width = w;
+  s_height = h;
+  return true;
+}
 
-  FsLockGuard fsGuard("video.finalize");
-
-  // Write idx1 chunk at end of file.
-  if (s_idx && s_frameCount > 0) {
-    uint8_t idxHdr[8];
-    put32(idxHdr + 0, fourcc("idx1"));
-    put32(idxHdr + 4, s_frameCount * 16);
-    s_file.write(idxHdr, 8);
-    // Each IdxEntry is already 16 bytes in little-endian layout on xtensa.
-    s_file.write((const uint8_t*)s_idx, s_frameCount * 16);
+// Completes the clip and reports the outcome. VIDEO_SAVED is posted only when
+// every frame was written (recordedOk) and the index, every header patch, the
+// flush and the final size all check out; otherwise the failure is reported to
+// VFS as an SD write failure and no saved event is posted. The file is kept
+// either way: frames already on the card stay recoverable.
+// Timing comes from what was recorded: elapsedMs of wall clock over the frames
+// written, so a clip that dropped frames still plays in real time.
+static bool finalizeAndClose(bool recordedOk, uint32_t elapsedMs) {
+  if (!s_file) {
+    VFS::noteSDWriteFailure("video recording finalize");
+    return false;
   }
 
-  // Prefer the bytes we know we appended over File::size(), which can drift
-  // if earlier writes failed under SD contention.
-  uint32_t fileSize = AVI_HEADER_SIZE + s_moviPayloadBytes;
-  if (s_idx && s_frameCount > 0) {
-    fileSize += 8 + s_frameCount * 16;  // idx1 header + entries
+  bool ok = recordedOk;
+  const bool hasIdx = s_idx && s_frameCount > 0;
+  const uint32_t idxBytes = hasIdx ? s_frameCount * 16 : 0;
+  const uint32_t fileSize = AVI_HEADER_SIZE + s_moviPayloadBytes + (hasIdx ? 8 + idxBytes : 0);
+  {
+    FsLockGuard fsGuard("video.finalize");
+
+    // The index goes right after the last complete frame, wherever an earlier
+    // failure left the handle.
+    bool written = s_file.seek(AVI_HEADER_SIZE + s_moviPayloadBytes);
+    if (written && hasIdx) {
+      uint8_t idxHdr[8];
+      put32(idxHdr + 0, fourcc("idx1"));
+      put32(idxHdr + 4, idxBytes);
+      // Each IdxEntry is already 16 bytes in little-endian layout on xtensa.
+      written = s_file.write(idxHdr, 8) == 8 &&
+                s_file.write((const uint8_t*)s_idx, idxBytes) == idxBytes;
+    }
+
+    uint8_t buf[4];
+    auto patch32 = [&](uint32_t off, uint32_t val) {
+      if (!written) return;
+      put32(buf, val);
+      written = s_file.seek(off) && s_file.write(buf, 4) == 4;
+    };
+
+    patch32(OFF_RIFF_SIZE, fileSize - 8);
+    patch32(OFF_AVIH_TOTAL_FRAMES, s_frameCount);
+    patch32(OFF_STRH_LENGTH, s_frameCount);
+    // movi LIST size includes the 'movi' fourcc (4) + payload
+    patch32(OFF_MOVI_SIZE, 4 + s_moviPayloadBytes);
+    if (s_frameCount > 0 && elapsedMs > 0) {
+      uint64_t usPerFrame = (uint64_t)elapsedMs * 1000u / s_frameCount;
+      if (usPerFrame == 0) usPerFrame = 1;
+      if (usPerFrame > UINT32_MAX) usPerFrame = UINT32_MAX;
+      patch32(OFF_AVIH_US_PER_FRAME, (uint32_t)usPerFrame);
+      // rate/scale = frames per second
+      patch32(OFF_STRH_SCALE, (uint32_t)usPerFrame);
+      patch32(OFF_STRH_SCALE + 4, 1000000u);
+    }
+    if (s_maxFrameBytes > 0) {
+      patch32(OFF_AVIH_BUFFER_SIZE, s_maxFrameBytes);
+      patch32(OFF_STRH_BUFFER_SIZE, s_maxFrameBytes);
+    }
+    if (s_width > 0 && s_height > 0) {
+      patch32(OFF_STRH_RC_RIGHT, (s_width & 0xffffu) | ((s_height & 0xffffu) << 16));
+    }
+
+    s_file.flush();
+    if (!written || s_file.getWriteError() || s_file.size() != fileSize) ok = false;
+    s_file.close();
   }
-  uint32_t reported = s_file.size();
-  if (reported > 0 && reported < fileSize) fileSize = reported;
 
-  // Patch header fields.
-  uint8_t buf[4];
-  bool patchOk = true;
-
-  auto patch32 = [&](uint32_t off, uint32_t val) {
-    if (!s_file.seek(off)) { patchOk = false; return; }
-    put32(buf, val);
-    if (s_file.write(buf, 4) != 4) patchOk = false;
-  };
-
-  patch32(OFF_RIFF_SIZE, fileSize > 8 ? fileSize - 8 : 0);
-  patch32(OFF_AVIH_TOTAL_FRAMES, s_frameCount);
-  patch32(OFF_STRH_LENGTH, s_frameCount);
-  // movi LIST size includes the 'movi' fourcc (4) + payload
-  patch32(OFF_MOVI_SIZE, 4 + s_moviPayloadBytes);
-
-  s_file.flush();
-  s_file.close();
-
-  if (!patchOk) {
-    ERROR_CAMERAF("[Video] Recording header patch failed: %s (%u frames, %u bytes)",
+  const char* slash = strrchr(s_path, '/');
+  const char* name = slash ? slash + 1 : s_path;
+  if (!ok) {
+    ERROR_CAMERAF("[Video] Recording not saved: %s (%u frames, %u bytes expected)",
                   s_path, (unsigned)s_frameCount, (unsigned)fileSize);
     VFS::noteSDWriteFailure("video recording finalize");
-  } else {
-    INFO_CAMERA_VIDEOF("Recording finalized: %s (%u frames, %u bytes)",
-                       s_path, (unsigned)s_frameCount, (unsigned)fileSize);
+    return false;
   }
-  {
-    const char* slash = strrchr(s_path, '/');
-    char det[24];
-    snprintf(det, sizeof(det), "%u frames", (unsigned)s_frameCount);
-    systemEventPost(SYSEVT_VIDEO_SAVED, slash ? slash + 1 : s_path, det);
+  INFO_CAMERA_VIDEOF("Recording finalized: %s (%u frames, %u bytes)",
+                     s_path, (unsigned)s_frameCount, (unsigned)fileSize);
+  char det[24];
+  snprintf(det, sizeof(det), "%u frames", (unsigned)s_frameCount);
+  systemEventPost(SYSEVT_VIDEO_SAVED, name, det);
+  return true;
+}
+
+// A start that fails after the file was created removes the half-made file
+// and releases the card.
+static void discardFailedStart() {
+  s_file.close();
+  if (!VFS::removeGuarded(String(s_path),
+                          VFS::systemAuth(VFS::Scopes::VIDEOS, "video.discard"))) {
+    ERROR_STORAGEF("[Video] Could not remove incomplete recording: %s", s_path);
   }
+  VFS::sdInUseEnd(VIDEO_SD_OWNER);
 }
 
 static void recordingTask(void* /*arg*/) {
@@ -351,6 +416,7 @@ static void recordingTask(void* /*arg*/) {
   const uint32_t fps = (gSettings.cameraStreamFps > 0)
                          ? (uint32_t)gSettings.cameraStreamFps : 10;
   const uint32_t intervalMs = 1000 / fps;
+  bool recordedOk = true;
 
   while (videoRecording && s_frameCount < MAX_FRAMES) {
     TickType_t loopStart = xTaskGetTickCount();
@@ -359,40 +425,30 @@ static void recordingTask(void* /*arg*/) {
     uint8_t* jpeg = captureFrame(&len);
     if (jpeg && len > 0) {
       // On the first frame, patch width/height into the header if we can.
-      if (s_frameCount == 0) {
-        uint32_t w = 0, h = 0;
-        if (probeJpegDims(jpeg, len, &w, &h) && w > 0 && h > 0) {
-          s_width = w;
-          s_height = h;
-          FsLockGuard fsGuard("video.dims.patch");
-          // Rewrite dims in-place (we still haven't written any frames).
-          s_file.seek(64);  // avih.dwWidth
-          uint8_t dims[8];
-          put32(dims + 0, w);
-          put32(dims + 4, h);
-          s_file.write(dims, 8);
-          s_file.seek(176);  // biWidth/biHeight
-          s_file.write(dims, 8);
-          s_file.seek(AVI_HEADER_SIZE);
-        }
-      }
-      if (!writeFrameChunk(jpeg, len)) {
+      if (s_frameCount == 0 && !patchFirstFrameDims(jpeg, len)) {
+        ERROR_CAMERAF("[Video] Header geometry patch failed — stopping");
+        recordedOk = false;
+      } else if (!writeFrameChunk(jpeg, len)) {
         ERROR_CAMERAF("[Video] SD write failed mid-recording at frame %u — stopping",
                       (unsigned)s_frameCount);
+        recordedOk = false;
+      }
+      free(jpeg);
+      if (!recordedOk) {
         VFS::noteSDWriteFailure("video recording frame write");
-        free(jpeg);
         videoRecording = false;
         break;
       }
-      free(jpeg);
     }
 
     // Pace to target interval; accept drift if writes took longer than budget.
     vTaskDelayUntil(&loopStart, pdMS_TO_TICKS(intervalMs));
   }
 
-  finalizeAndClose();
+  (void)finalizeAndClose(recordedOk, millis() - s_startMs);
   videoRecording = false;  // in case we exited via MAX_FRAMES
+  cameraSessionEnd(CameraSessionKind::Recording);
+  VFS::sdInUseEnd(VIDEO_SD_OWNER);
   s_task = nullptr;
   vTaskDelete(nullptr);
 }
@@ -449,6 +505,14 @@ bool startVideoRecording() {
 
   snprintf(s_path, sizeof(s_path), "%s/VID_%lu.AVI", VIDEO_FOLDER_SD, (unsigned long)millis());
 
+  // Hold the card before opening the clip: sdunmount, sdmount and sdformat
+  // refuse until the recorder has closed it.
+  if (!VFS::sdInUseBegin(VIDEO_SD_OWNER)) {
+    ERROR_STORAGEF("[Video] Cannot register SD use");
+    unlock();
+    return false;
+  }
+
   // Route the recording handle through VFS (shared FsLockGuard + permission
   // guard); VFS dispatches the "/sd/..." path to the SD backend. Reuse s_path
   // (already the /sd form) — this also fixes a latent double-millis() mismatch
@@ -466,6 +530,7 @@ bool startVideoRecording() {
     // Flag the card as not-writable — next isSDWritable() call will
     // re-probe, giving the UI accurate state without needing a remount.
     VFS::noteSDWriteFailure("video recording file create");
+    VFS::sdInUseEnd(VIDEO_SD_OWNER);
     unlock();
     return false;
   }
@@ -491,7 +556,7 @@ bool startVideoRecording() {
     if (wrote != AVI_HEADER_SIZE) {
       ERROR_STORAGEF("[Video] Short AVI header write: %u/%u", (unsigned)wrote,
                      (unsigned)AVI_HEADER_SIZE);
-      s_file.close();
+      discardFailedStart();
       VFS::noteSDWriteFailure("video header write");
       unlock();
       return false;
@@ -505,6 +570,8 @@ bool startVideoRecording() {
   s_moviPayloadBytes = 0;
   s_startMs = millis();
   videoRecording = true;
+  // The recorder task ends this session when it exits.
+  cameraSessionBegin(CameraSessionKind::Recording);
 
   taskStackRecord("cam_record", VIDEO_REC_STACK_WORDS);
   BaseType_t ok = xTaskCreatePinnedToCore(
@@ -513,7 +580,8 @@ bool startVideoRecording() {
   if (ok != pdPASS) {
     ERROR_CAMERAF("[Video] Failed to start recorder task");
     videoRecording = false;
-    s_file.close();
+    cameraSessionEnd(CameraSessionKind::Recording);
+    discardFailedStart();
     s_task = nullptr;
     unlock();
     return false;

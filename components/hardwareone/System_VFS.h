@@ -87,9 +87,25 @@ void noteSDWriteFailure(const char* hint);
 
 // SD card management. Stop active writers and close their files before
 // unmount/format; card insertion is mounted explicitly with remountSD().
+// All three refuse (return false) while an SD-in-use registration is held.
 bool remountSD();
 bool unmountSD();
 bool formatSD();
+
+// SD-in-use registration. An owner that keeps an SD file open across calls
+// (the video recorder) registers before it opens the file and ends the
+// registration after closing it. VFS only records the owner name (a string
+// with static lifetime); it never calls into an owner. sdInUseBegin returns
+// false when every slot is taken.
+bool sdInUseBegin(const char* owner);
+void sdInUseEnd(const char* owner);
+// One current holder's name, or nullptr when the card is free.
+const char* sdInUseOwner();
+
+// Counts successful SD mounts (boot, remount, format); it only increases.
+// Owners with once-per-mount work compare it with the value they last acted
+// on instead of caching availability, which they ask isSDAvailable() for.
+uint32_t sdMountGeneration();
 
 StorageType getStorageType(const String& path);
 String normalize(const String& path);

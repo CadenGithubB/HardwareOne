@@ -42,12 +42,16 @@ def generate(source: str) -> str:
         helper = (extract_block(source, "struct JsonSnapshotWriteResult") + ";\n" +
                   extract_block(source, "static JsonSnapshotWriteResult writeJsonSnapshot(") +
                   "\n" + helper)
-    user_functions = "\n\n".join(extract_block(source, marker) for marker in (
+    user_markers = [
         "String getUserSettingsPath(", "bool loadUserSettings(",
         "struct UserPrefsInvalidateOnExit", "bool saveUserSettings(",
         "UserSettingsTxnStatus runUserSettingsTransaction(",
         "struct UserSettingsMergeContext", "bool mergeUserSettingsMutation(",
-        "bool mergeAndSaveUserSettings("))
+        "bool mergeAndSaveUserSettings("]
+    # The merge's editable-key list (absent from older trees).
+    if "const char* userSettingsPatchRefusedKey(" in source:
+        user_markers.insert(-1, "const char* userSettingsPatchRefusedKey(")
+    user_functions = "\n\n".join(extract_block(source, marker) for marker in user_markers)
     # Struct extractors deliberately omit the trailing declaration semicolon.
     for marker in ("struct UserPrefsInvalidateOnExit", "struct UserSettingsMergeContext"):
         declaration = extract_block(source, marker)

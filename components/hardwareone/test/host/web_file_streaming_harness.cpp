@@ -282,6 +282,18 @@ String urlDecode(const String& s) {
   }
   return String(out);
 }
+// WebServer_Utils.cpp's webJsonString (ArduinoJson there): a quoted JSON string.
+String webJsonString(const String& text) {
+  std::string out = "\"";
+  for (const char* p = text.c_str(); *p; ++p) {
+    const unsigned char c = static_cast<unsigned char>(*p);
+    if (c == '"' || c == '\\') { out.push_back('\\'); out.push_back(*p); }
+    else if (c < 0x20) { char hex[8]; std::snprintf(hex, sizeof(hex), "\\u%04x", c); out += hex; }
+    else out.push_back(*p);
+  }
+  out.push_back('"');
+  return String(out);
+}
 
 // INSERT_PRODUCTION_HERE
 

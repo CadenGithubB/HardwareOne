@@ -117,7 +117,15 @@ bool captureCryptoEnsureKey() {
 
   nvs_handle_t h;
   size_t len = sizeof(sKey);
-  if (nvs_open(kNvsNamespace, NVS_READONLY, &h) == ESP_OK) {
+  esp_err_t openRc = nvs_open(kNvsNamespace, NVS_READONLY, &h);
+  if (openRc != ESP_OK && openRc != ESP_ERR_NVS_NOT_FOUND) {
+    // Only a missing namespace means first use. Any other failure (for example
+    // ESP_ERR_NO_MEM for the handle) says nothing about whether a key is stored,
+    // so minting here could overwrite the real key. Fail closed; callers retry.
+    ERROR_SYSTEMF("[CapCrypt] nvs_open(ro) failed: 0x%x - not minting a key", (unsigned)openRc);
+    return false;
+  }
+  if (openRc == ESP_OK) {
     esp_err_t rc = nvs_get_blob(h, kNvsKeyName, sKey, &len);
     if (rc == ESP_OK && len == sizeof(sKey)) {
       nvs_close(h);

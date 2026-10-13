@@ -10,6 +10,8 @@
 #include "System_Debug.h"
 #include <Arduino.h>
 #include <LittleFS.h>
+#include <climits>
+#include <cstdint>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -51,31 +53,54 @@ static void mergeMapInsert(TokenizerState* t, uint32_t left_id, uint32_t right_i
   }
 }
 
+// Read exactly n bytes; a short read fails the tokenizer load.
+static bool tokReadExact(File& f, void* dst, size_t n) {
+  return f.read((uint8_t*)dst, n) == n;
+}
+
+// Merge keys pack the left and right ids into 16 bits each (mergeLookup), so
+// a larger tokenizer vocabulary would make distinct merges collide.
+static constexpr uint32_t kTokenizerMaxVocab = 65536;
+// On-disk merge record: left, right, merged (u32 each).
+static constexpr size_t kMergeRecordBytes = 12;
+
 // Load tokenizer from embedded blob in an open LLM1 file.
 // The file position must already be at the tok_byte_len field: byte 64 for a
 // model with no info block, or 64 + info_len when loadInfoBlockFromFile consumed
 // an info block first. The caller (loadWeights) guarantees this.
+// Every count and id is checked against the blob length and the model's
+// vocab_size (gLLM.config, parsed before this); any mismatch fails the load and
+// the caller unwinds partial allocations through llmUnload().
 bool loadTokenizerFromFile(File& f) {
   TokenizerState* t = &gLLM.tokenizer;
 
   // Read blob size
   uint32_t tok_byte_len = 0;
-  if (f.read((uint8_t*)&tok_byte_len, 4) != 4) return false;
+  if (!tokReadExact(f, &tok_byte_len, 4)) return false;
 
-  size_t blobStart = f.position();
+  const size_t blobStart = f.position();
+  const size_t fileSize = f.size();
+  if (blobStart > fileSize || tok_byte_len < 8 || tok_byte_len > fileSize - blobStart) {
+    ERROR_LLMF("Bad tokenizer blob length: %u", (unsigned)tok_byte_len);
+    return false;
+  }
+  const size_t blobEnd = blobStart + tok_byte_len;
 
   // Read tokenizer header
   uint32_t tok_vocab_size = 0, merge_count = 0;
-  f.read((uint8_t*)&tok_vocab_size, 4);
-  f.read((uint8_t*)&merge_count, 4);
+  if (!tokReadExact(f, &tok_vocab_size, 4) || !tokReadExact(f, &merge_count, 4)) return false;
 
-  if (tok_vocab_size == 0 || tok_vocab_size > 131072) {
-    ERROR_LLMF("Bad tokenizer vocab_size: %u", tok_vocab_size);
+  const uint32_t modelVocab = gLLM.config.vocab_size > 0 ? (uint32_t)gLLM.config.vocab_size : 0;
+  if (tok_vocab_size == 0 || tok_vocab_size > kTokenizerMaxVocab || tok_vocab_size > modelVocab) {
+    ERROR_LLMF("Bad tokenizer vocab_size: %u (model vocab_size %u, limit %u)",
+               (unsigned)tok_vocab_size, (unsigned)modelVocab, (unsigned)kTokenizerMaxVocab);
     return false;
   }
-
-  t->vocab_size = (int)tok_vocab_size;
-  t->merge_count = (int)merge_count;
+  // Each vocab entry needs at least its length byte.
+  if (tok_vocab_size > blobEnd - f.position()) {
+    ERROR_LLMF("Tokenizer vocab_size %u exceeds the blob", (unsigned)tok_vocab_size);
+    return false;
+  }
 
   // Allocate vocab pointer array in internal RAM — it's only ~13KB for typical
   // vocab sizes and is accessed frequently during tokenization. Keeping it in
@@ -87,14 +112,28 @@ bool loadTokenizerFromFile(File& f) {
     if (!t->vocab) return false;
   }
 
-  // First pass: calculate total string pool size
-  size_t vocabStart = f.position();
+  // First pass: calculate total string pool size, staying inside the blob
+  const size_t vocabStart = f.position();
   size_t totalStringBytes = 0;
   for (uint32_t i = 0; i < tok_vocab_size; i++) {
     uint8_t byte_len = 0;
-    f.read(&byte_len, 1);
+    if (f.position() >= blobEnd || !tokReadExact(f, &byte_len, 1) ||
+        byte_len > blobEnd - f.position()) {
+      ERROR_LLMF("Tokenizer vocab entry %u runs past the blob", (unsigned)i);
+      return false;
+    }
     totalStringBytes += byte_len + 1; // +1 for null terminator
-    if (byte_len > 0) f.seek(f.position() + byte_len);
+    if (byte_len > 0 && !f.seek(f.position() + byte_len)) return false;
+  }
+
+  // The merge table fills the rest of the blob exactly.
+  const size_t mergeBytes = blobEnd - f.position();
+  if (mergeBytes % kMergeRecordBytes != 0 || merge_count != mergeBytes / kMergeRecordBytes ||
+      merge_count > (uint32_t)(INT_MAX / 2) ||
+      (size_t)merge_count > SIZE_MAX / (2 * sizeof(MergeLookup))) {
+    ERROR_LLMF("Tokenizer merge_count %u does not match the blob (%u bytes left)",
+               (unsigned)merge_count, (unsigned)mergeBytes);
+    return false;
   }
 
   // Allocate string pool
@@ -103,15 +142,13 @@ bool loadTokenizerFromFile(File& f) {
   gLLM.tokenizerData = stringPool;
 
   // Second pass: read vocab strings
-  f.seek(vocabStart);
+  if (!f.seek(vocabStart)) return false;
   char* poolPtr = stringPool;
   for (uint32_t i = 0; i < tok_vocab_size; i++) {
     uint8_t byte_len = 0;
-    f.read(&byte_len, 1);
+    if (!tokReadExact(f, &byte_len, 1)) return false;
     t->vocab[i] = poolPtr;
-    if (byte_len > 0) {
-      f.read((uint8_t*)poolPtr, byte_len);
-    }
+    if (byte_len > 0 && !tokReadExact(f, poolPtr, byte_len)) return false;
     poolPtr[byte_len] = '\0';
     poolPtr += byte_len + 1;
   }
@@ -144,9 +181,17 @@ bool loadTokenizerFromFile(File& f) {
     if (!t->merges) return false;
 
     for (uint32_t i = 0; i < merge_count; i++) {
-      f.read((uint8_t*)&t->merges[i].left_id, 4);
-      f.read((uint8_t*)&t->merges[i].right_id, 4);
-      f.read((uint8_t*)&t->merges[i].merged_id, 4);
+      MergeEntry* m = &t->merges[i];
+      if (!tokReadExact(f, &m->left_id, 4) || !tokReadExact(f, &m->right_id, 4) ||
+          !tokReadExact(f, &m->merged_id, 4)) {
+        return false;
+      }
+      if (m->left_id >= tok_vocab_size || m->right_id >= tok_vocab_size ||
+          m->merged_id >= tok_vocab_size) {
+        ERROR_LLMF("Tokenizer merge %u has an id outside vocab_size %u",
+                   (unsigned)i, (unsigned)tok_vocab_size);
+        return false;
+      }
     }
 
     // Build merge hash map (2x capacity for low collision rate)
@@ -243,14 +288,15 @@ bool loadTokenizerFromFile(File& f) {
     }
   }
 
-  // Verify we consumed the right amount of the tokenizer blob
-  size_t expectedEnd = blobStart + tok_byte_len;
-  if (f.position() != expectedEnd) {
-    DEBUG_LLM_TOKENIZERF("[LLM] Tokenizer blob pos mismatch: at %u, expected %u",
-                         (unsigned)f.position(), (unsigned)expectedEnd);
-    f.seek(expectedEnd);
+  // The blob must have been consumed exactly; the weights start at blobEnd.
+  if (f.position() != blobEnd) {
+    ERROR_LLMF("Tokenizer blob pos mismatch: at %u, expected %u",
+               (unsigned)f.position(), (unsigned)blobEnd);
+    return false;
   }
 
+  t->vocab_size = (int)tok_vocab_size;
+  t->merge_count = (int)merge_count;
   DEBUG_LLM_TOKENIZERF("[LLM] Tokenizer loaded: vocab_size=%d merges=%d", t->vocab_size, t->merge_count);
   return true;
 }

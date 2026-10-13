@@ -681,10 +681,8 @@ const CommandEntry settingsCommands[] = {
   // - thermal_sensor.cpp: thermalCommands[]
   // - tof_sensor.cpp: tofCommands[]
   
-#if ENABLE_ESPNOW
-  // ---- Device Settings ----
-  { "espnowenabled", "Enable/disable ESP-NOW: <0|1> (reboot required)", true, cmd_espnowenabled, "Usage: espnowenabled <0|1>" },
-#endif
+  // espnowenabled (handler cmd_espnowenabled below) is registered by the
+  // espnow module (System_ESPNow.cpp), which registers before this one.
 #if ENABLE_HTTP_SERVER
   { "httpAutoStart", "Auto-start HTTP server at boot: <0|1>", true, cmd_httpAutoStart, "Usage: httpAutoStart <0|1>" },
 #endif
@@ -1173,7 +1171,7 @@ void settingsDefaults() {
   // - fmradio (i2csensor_rda5807.cpp): autoStart, polling
   // - oled (OLED_Settings.cpp): enabled, autoInit, modes, brightness
   // - led (System_NeoPixel.cpp): brightness, startup effect/color/duration
-  // - power (System_Power.cpp): mode, autoMode, thresholds
+  // - power (System_Power.cpp): mode, dim level, sleep cooldown, power-save timeout
   // - bluetooth (Bluetooth.cpp): autoStart, requireAuth, deviceName
   // ============================================================================
   applyRegisteredDefaults();
@@ -1317,9 +1315,10 @@ void applySettings() {
   mapsApplyPersistedSettings();
 #endif
 
-  // Apply power mode from settings
+  // Apply power mode from settings. The saved oledBrightness is the user's
+  // value; re-applying the saved mode must not overwrite it.
   #include "System_Power.h"
-  applyPowerMode(gSettings.powerMode);
+  applyPowerMode(gSettings.powerMode, /*setDisplayBrightness=*/false);
 
   DEBUG_SYSTEMF("Settings applied (I2C hardware config skipped - requires sensor restart to apply)");
 }
@@ -3586,7 +3585,6 @@ SETTING_EDITOR_CMD(cmd_set_gpsdevicepollms,     "gpsdevicepollms")
 SETTING_EDITOR_CMD(cmd_set_sensorlogpath,       "sensorlogpath")
 SETTING_EDITOR_CMD(cmd_set_eirequirelabels,     "eirequirelabels")
 SETTING_EDITOR_CMD(cmd_set_eimaxdetections,     "eimaxdetections")
-SETTING_EDITOR_CMD(cmd_set_eiinputsize,         "eiinputsize")
 SETTING_EDITOR_CMD(cmd_set_eiinterval,          "eiinterval")
 SETTING_EDITOR_CMD(cmd_set_srautostart,         "srautostart")
 SETTING_EDITOR_CMD(cmd_set_srmodelsource,       "srmodelsource")
@@ -3672,7 +3670,6 @@ const CommandEntry settingEditorCommands[] = {
   { "systemlogflags",      "Set system-log debug category mask (hex)",   true, cmd_set_systemlogflags,      "Usage: systemlogflags <0x...>" },
   { "eirequirelabels",     "Set Edge Impulse require-labels flag",       true, cmd_set_eirequirelabels,     "Usage: eirequirelabels <0|1>" },
   { "eimaxdetections",     "Set Edge Impulse max detections",            true, cmd_set_eimaxdetections,     "Usage: eimaxdetections <value>" },
-  { "eiinputsize",         "Set Edge Impulse input size",                true, cmd_set_eiinputsize,         "Usage: eiinputsize <value>" },
   { "eiinterval",          "Set Edge Impulse inference interval (ms)",   true, cmd_set_eiinterval,          "Usage: eiinterval <100-10000>" },
   { "srautostart",         "Set ESP-SR auto-start flag",                 true, cmd_set_srautostart,         "Usage: srautostart <0|1>" },
   { "srmodelsource",       "Set ESP-SR model source",                    true, cmd_set_srmodelsource,       "Usage: srmodelsource <value>" },
@@ -4110,9 +4107,38 @@ bool mergeUserSettingsMutation(JsonDocument& base, void* opaque) {
 
 }  // namespace
 
+// Preferences a user may set through the generic merge (web
+// /api/user/settings, notifylevel). The same file holds the password hashes
+// and the forced-password-change flag, which only their owners in System_User
+// write. Notification kind lists have their own validated transaction.
+const char* userSettingsPatchRefusedKey(const JsonDocument& patch) {
+  static const char* const kEditable[] = {
+    "theme",
+    "notifyLevel",
+    "dashboardSystemLayout", "dashboardSystemHidden",
+    "dashboardConnLayout",   "dashboardConnHidden",
+    "dashboardSensorLayout", "dashboardSensorHidden",
+  };
+  if (!patch.is<JsonObjectConst>()) return "";
+  for (JsonPairConst kv : patch.as<JsonObjectConst>()) {
+    const char* key = kv.key().c_str();
+    if (!key) return "";
+    bool editable = false;
+    for (const char* allowed : kEditable) {
+      if (strcmp(key, allowed) == 0) {
+        editable = true;
+        break;
+      }
+    }
+    if (!editable) return key;
+  }
+  return nullptr;
+}
+
 bool mergeAndSaveUserSettings(uint32_t userId, const JsonDocument& patch) {
   if (!filesystemReady) return false;
   if (!patch.is<JsonObjectConst>() || patch.overflowed()) return false;
+  if (userSettingsPatchRefusedKey(patch) != nullptr) return false;
 
   UserSettingsMergeContext context{&patch};
   return runUserSettingsTransaction(userId, mergeUserSettingsMutation, &context) ==

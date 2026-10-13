@@ -215,7 +215,13 @@ static const char* cmd_llm_load(const String& args) {
     return "{\"schema\":1,\"ok\":false,\"error\":\"LLM disabled - run llmenabled 1 first\"}";
   }
   CommandArgs ca(args);
+  if (ca.unterminatedQuote()) {
+    return "{\"schema\":1,\"ok\":false,\"error\":\"unterminated quote in the model id\"}";
+  }
   String a = ca.arg(0);   // optional model id / filename
+  // Optional context ceiling (the web body's max_ctx). The backend applies
+  // llmMaxContext and lets this only lower it.
+  const int maxCtx = ca.argInt(1, 0);
 
   // Selection now goes through the registry, which owns every id→source rule:
   // "onboard:model.bin", "cm5:Qwen3-1.7B-Q4_0.gguf", a bare filename, or an
@@ -225,7 +231,7 @@ static const char* cmd_llm_load(const String& args) {
   const char* want = a.length() > 0 ? a.c_str() : gSettings.llmDefaultModel.c_str();
 
   char err[96] = {0};
-  const bool ok = llmBackendSelect(want, err, sizeof(err));
+  const bool ok = llmBackendSelect(want, err, sizeof(err), maxCtx);
 
   // JSON reply mirrors POST /api/llm/load ({"ok":true} / {"ok":false,"error"}).
   // The app sends `llmload <name>` (no `json` token) and parses the reply like
@@ -648,7 +654,7 @@ LLM_SETTING_CMD(cmd_llm_profile,       "llmprofile")
 
 const CommandEntry llmCommands[] = {
   { "llmstatus",        "Show LLM engine status (add 'json' for JSON output)",               false, cmd_llm_status },
-  { "llmload",          "Load model [model.bin]",               true,  cmd_llm_load,         "Usage: llmload [filename.bin]" },
+  { "llmload",          "Load model [model.bin]",               true,  cmd_llm_load,         "Usage: llmload [model id] [maxctx]" },
   { "llmunload",        "Unload model and free PSRAM",          true,  cmd_llm_unload },
   { "llmautostart",     "Auto-load default model at boot (0|1)", true,  cmd_llm_autostart,    "Usage: llmautostart <0|1>" },
   { "llmmodels",        "List available model files (add 'json' for JSON output)",           false, cmd_llm_models },

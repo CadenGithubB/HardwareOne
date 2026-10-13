@@ -392,6 +392,30 @@ hw1_ota_status_t hw1_ota_transition(
     const hw1_ota_transition_args_t *args);
 bool hw1_ota_result_pending(const hw1_ota_record_t *record);
 /*
+ * True for IDLE and the terminal phases (SUCCEEDED, FAILED, CANCELED): no
+ * operation is live, so a new one may begin once a pending result is
+ * acknowledged or explicitly superseded. Both binaries ask this question; keep
+ * the answer here so a new phase is classified once.
+ */
+bool hw1_ota_phase_is_idle_or_terminal(hw1_ota_phase_t phase);
+/*
+ * Request flags for a new operation that replaces an idle or terminal record
+ * without an operator choice of its own: a recovery upload over the updater's
+ * network, or an emergency escape into recovery. No policy flag of the
+ * replaced operation carries over, because allow-downgrade and the
+ * forced-power override are decisions about one operation. Only
+ * SUPERSEDE_PENDING_RESULT is set, and only while an unacknowledged result is
+ * pending.
+ */
+uint16_t hw1_ota_replacement_request_flags(const hw1_ota_record_t *record);
+/*
+ * True while explicit downgrade permission can still reach the live
+ * operation, that is before an image has been verified. IDLE and the terminal
+ * phases are refused: the permission would only surface in a later, unrelated
+ * operation.
+ */
+bool hw1_ota_phase_accepts_downgrade_permission(hw1_ota_phase_t phase);
+/*
  * Compares the durable candidate with a manifest freshly produced by
  * hw1_ota_manifest_verify(). This is the required bridge across a reboot;
  * record->candidate alone must never authorize an installation.

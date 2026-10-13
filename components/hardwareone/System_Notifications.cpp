@@ -964,6 +964,35 @@ static const char* levelName(uint8_t level) {
   }
 }
 
+// Payload of the web "notification" SSE event. The message embeds event text
+// that can come from outside (an attempted login name, peer and file names),
+// so it is serialized as JSON: quotes, backslashes and control characters are
+// escaped (a raw newline would also split the SSE frame). When the escaped
+// form does not fit `outSize`, the message is shortened at a character
+// boundary so the payload is always a complete document. Returns the length
+// written, 0 when nothing fits.
+static size_t notifRenderToastJson(char* out, size_t outSize, const char* level,
+                                   const char* msg, unsigned durMs) {
+  if (!out || outSize == 0) return 0;
+  out[0] = '\0';
+  char text[96];
+  snprintf(text, sizeof(text), "%s", msg ? msg : "");
+  size_t textLen = strlen(text);
+  PSRAM_JSON_DOC(doc);
+  for (;;) {
+    doc["level"] = level ? level : "info";
+    doc["msg"] = text;
+    doc["ms"] = durMs;
+    if (doc.overflowed()) return 0;
+    if (measureJson(doc) < outSize) return serializeJson(doc, out, outSize);
+    if (textLen == 0) return 0;
+    do {
+      --textLen;  // drop one character, continuation bytes included
+    } while (textLen > 0 && (static_cast<unsigned char>(text[textLen]) & 0xC0) == 0x80);
+    text[textLen] = '\0';
+  }
+}
+
 #if ENABLE_OLED_DISPLAY
 static PairingRibbonIcon levelIcon(uint8_t level) {
   switch (level) {
@@ -1158,12 +1187,13 @@ void systemEventsNotifyTick() {
       // Web toasts: broadcast whenever the surface is enabled device-wide and
       // let each session's viewer decide (the predicate applies floor/force/mute).
       if (gSettings.notifToasts) {
-        char json[128];
-        snprintf(json, sizeof(json), "{\"level\":\"%s\",\"msg\":\"%s\",\"ms\":%u}",
-                 levelName(r.level), msg, (unsigned)r.durMs);
-        broadcastEventToSessionsIf("notification", json, notifToastAllowedFor,
-                                   (void*)(uintptr_t)e.kind);
-        gNotifPipe.toastsBroadcast++;
+        char json[128];  // SessionEntry::EVENT_DATA_MAX
+        if (notifRenderToastJson(json, sizeof(json), levelName(r.level), msg,
+                                 (unsigned)r.durMs) > 0) {
+          broadcastEventToSessionsIf("notification", json, notifToastAllowedFor,
+                                     (void*)(uintptr_t)e.kind);
+          gNotifPipe.toastsBroadcast++;
+        }
       }
 
       #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

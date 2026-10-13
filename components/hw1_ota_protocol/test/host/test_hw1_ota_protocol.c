@@ -274,6 +274,89 @@ static void test_failure_and_cancel_rules(void)
     CHECK(record.last_result.native_error == -7);
 }
 
+static void test_phase_predicates(void)
+{
+    static const struct {
+        hw1_ota_phase_t phase;
+        bool idle_or_terminal;
+        bool accepts_downgrade_permission;
+    } table[] = {
+        {HW1_OTA_PHASE_IDLE, true, false},
+        {HW1_OTA_PHASE_REQUESTED, false, true},
+        {HW1_OTA_PHASE_RECOVERY_BOOT_ARMED, false, true},
+        {HW1_OTA_PHASE_RECOVERY_RUNNING, false, true},
+        {HW1_OTA_PHASE_APPLYING, false, true},
+        {HW1_OTA_PHASE_IMAGE_VERIFIED, false, false},
+        {HW1_OTA_PHASE_TRIAL_BOOT_ARMED, false, false},
+        {HW1_OTA_PHASE_TRIAL_RUNNING, false, false},
+        {HW1_OTA_PHASE_SUCCEEDED, true, false},
+        {HW1_OTA_PHASE_FAILED, true, false},
+        {HW1_OTA_PHASE_CANCELED, true, false},
+    };
+    size_t i;
+    CHECK(sizeof(table) / sizeof(table[0]) == (size_t)HW1_OTA_PHASE_CANCELED + 1u);
+    for (i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
+        CHECK(table[i].phase == (hw1_ota_phase_t)i);
+        CHECK(hw1_ota_phase_is_idle_or_terminal(table[i].phase) ==
+              table[i].idle_or_terminal);
+        CHECK(hw1_ota_phase_accepts_downgrade_permission(table[i].phase) ==
+              table[i].accepts_downgrade_permission);
+    }
+    CHECK(!hw1_ota_phase_is_idle_or_terminal((hw1_ota_phase_t)(HW1_OTA_PHASE_CANCELED + 1)));
+    CHECK(!hw1_ota_phase_accepts_downgrade_permission(
+        (hw1_ota_phase_t)(HW1_OTA_PHASE_CANCELED + 1)));
+}
+
+static void test_replacement_flags_never_inherit_policy(void)
+{
+    const uint16_t policy = HW1_OTA_REQUEST_ALLOW_DOWNGRADE |
+                            HW1_OTA_REQUEST_FORCED_POWER_OVERRIDE;
+    hw1_ota_verified_manifest_t verified = make_verified_manifest();
+    hw1_ota_transition_args_t failure = {
+        .result_code = HW1_OTA_RESULT_POWER_UNSAFE,
+        .detail = "staged update failed",
+    };
+    hw1_ota_record_t record;
+
+    CHECK(hw1_ota_replacement_request_flags(NULL) == HW1_OTA_REQUEST_NONE);
+
+    /* A staged update confirmed with allow-downgrade and force-power fails. */
+    hw1_ota_record_init(&record);
+    CHECK(hw1_ota_replacement_request_flags(&record) == HW1_OTA_REQUEST_NONE);
+    CHECK(hw1_ota_begin(&record, 41, HW1_OTA_SOURCE_STAGED_FILE, policy,
+                        &verified) == HW1_OTA_OK);
+    CHECK(hw1_ota_transition(&record, HW1_OTA_EVENT_ARM_RECOVERY_BOOT, NULL) == HW1_OTA_OK);
+    CHECK(hw1_ota_transition(&record, HW1_OTA_EVENT_RECOVERY_STARTED, NULL) == HW1_OTA_OK);
+    CHECK(hw1_ota_transition(&record, HW1_OTA_EVENT_FAIL, &failure) == HW1_OTA_OK);
+    CHECK(record.phase == HW1_OTA_PHASE_FAILED);
+    CHECK(record.request_flags == policy);
+    CHECK(!hw1_ota_phase_accepts_downgrade_permission(record.phase));
+
+    /* The next, unrelated recovery upload replaces it: only the pending
+     * result is superseded, neither policy decision rides along. */
+    {
+        const uint16_t flags = hw1_ota_replacement_request_flags(&record);
+        CHECK(flags == HW1_OTA_REQUEST_SUPERSEDE_PENDING_RESULT);
+        CHECK(hw1_ota_transition(&record, HW1_OTA_EVENT_CLEAR_TERMINAL, NULL) == HW1_OTA_OK);
+        CHECK(hw1_ota_begin(&record, 42, HW1_OTA_SOURCE_RECOVERY_UPLOAD, flags,
+                            NULL) == HW1_OTA_OK);
+        CHECK((record.request_flags & policy) == 0);
+        CHECK(hw1_ota_record_validate(&record) == HW1_OTA_OK);
+    }
+
+    /* The refused upload leaves a live operation, which the explicit
+     * allow-downgrade action may then extend. */
+    CHECK(hw1_ota_phase_accepts_downgrade_permission(record.phase));
+    record.request_flags |= HW1_OTA_REQUEST_ALLOW_DOWNGRADE;
+    CHECK(hw1_ota_record_validate(&record) == HW1_OTA_OK);
+
+    /* Once the result is acknowledged nothing at all is carried. */
+    CHECK(hw1_ota_transition(&record, HW1_OTA_EVENT_RECOVERY_STARTED, NULL) == HW1_OTA_OK);
+    CHECK(hw1_ota_transition(&record, HW1_OTA_EVENT_FAIL, &failure) == HW1_OTA_OK);
+    CHECK(hw1_ota_acknowledge_result(&record, record.last_result.sequence) == HW1_OTA_OK);
+    CHECK(hw1_ota_replacement_request_flags(&record) == HW1_OTA_REQUEST_NONE);
+}
+
 static void test_reconciliation(void)
 {
     hw1_ota_verified_manifest_t verified = make_verified_manifest();
@@ -440,6 +523,8 @@ int main(void)
     test_semver();
     test_record_round_trip_and_transitions();
     test_failure_and_cancel_rules();
+    test_phase_predicates();
+    test_replacement_flags_never_inherit_policy();
     test_reconciliation();
     test_trial_boot_armed_rejection_is_a_rollback();
     test_single_bit_corruption_is_rejected();

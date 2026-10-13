@@ -441,6 +441,25 @@ esp_err_t webSendBodyReadError(httpd_req_t* req, WebBodyStatus status, bool json
 }
 
 // ============================================================================
+// JSON text values
+// ============================================================================
+
+String webJsonString(const char* text) {
+  PSRAM_JSON_DOC(doc);
+  doc.set(text ? text : "");
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+esp_err_t sendJsonError(httpd_req_t* req, const String& message) {
+  String body = "{\"success\":false,\"error\":";
+  body += webJsonString(message);
+  body += "}";
+  return sendJsonResponse(req, body.c_str(), body.length());
+}
+
+// ============================================================================
 // Guest HTTP access gate
 // ============================================================================
 
@@ -578,6 +597,40 @@ bool webGuestAccessAllowed(httpd_req_t* req, const AuthContext& ctx) {
     return false;
   }
   return true;
+}
+
+bool webPasswordChangeAllows(httpd_req_t* req, const String& user) {
+  if (!req || user.length() == 0 || !userMustChangePassword(user)) return true;
+
+  // httpd_req_t::uri is a fixed-size array, never NULL.
+  const char* uri = req->uri;
+  const size_t pathLen = strcspn(uri, "?");
+  static const char* const kOpen[] = {"/account/password-change", "/logout"};
+  for (const char* open : kOpen) {
+    if (strlen(open) == pathLen && strncmp(uri, open, pathLen) == 0) return true;
+  }
+
+  bool wantsJson = strncmp(uri, "/api/", 5) == 0 ||
+                   (req->method != HTTP_GET && req->method != HTTP_HEAD);
+  char accept[128] = {0};
+  if (!wantsJson &&
+      httpd_req_get_hdr_value_str(req, "Accept", accept, sizeof(accept)) == ESP_OK &&
+      strstr(accept, "application/json") != nullptr) {
+    wantsJson = true;
+  }
+  if (wantsJson) {
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req,
+      "{\"success\":false,\"error\":\"password_change_required\","
+      "\"message\":\"Change your password at /account/password-change first\"}");
+  } else {
+    httpd_resp_set_status(req, "303 See Other");
+    httpd_resp_set_hdr(req, "Location", "/account/password-change");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, "", 0);
+  }
+  return false;
 }
 
 // ============================================================================

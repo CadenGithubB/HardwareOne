@@ -54,6 +54,9 @@ def generate(baseline: Path | None) -> str:
                "String ImageManager::getMountPrefix(", "String ImageManager::getCaptureFolder(",
                "bool ImageManager::ensureCaptureFolder(", "String ImageManager::generateFilename(",
                "String ImageManager::saveImage("]
+    # SD availability asked of VFS per operation rather than latched at init.
+    if "bool ImageManager::tierAvailable(" in source:
+        markers += ["bool ImageManager::isSDAvailable() const", "bool ImageManager::tierAvailable("]
     validator = "const char* ImageManager::captureFolderRejectReason(" in source
     if validator:
         markers.append("const char* ImageManager::captureFolderRejectReason(")

@@ -33,6 +33,7 @@
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include <esp_app_desc.h>
+#include <vector>
 
 #include "System_Debug.h"
 #include "System_Mutex.h"
@@ -63,6 +64,10 @@ static const char* ESPNOW_DEVICES    = "/system/espnow/devices.json";
 static const char* USER_SETTINGS_DIR  = "/system/users/user_settings";
 static const char* BOOT_ANCHORS_FILE  = "/system/boot_anchors.json";  // pending-user NTP anchors (split out of users.json)
 static const char* MAPS_DIR          = "/maps";
+
+// /api/restore refuses bodies larger than this; /api/backup keeps every bundle
+// within it so an export can always be imported again.
+static constexpr size_t kMigrationPayloadMax = 512 * 1024;
 
 // ============================================================================
 // CORS Helper (scoped to migration endpoints only)
@@ -191,6 +196,26 @@ static void collectEncryptedFieldsFromFiles(JsonObject files, JsonArray encField
   }
 }
 
+// Room kept below kMigrationPayloadMax for what is added after the files
+// (warnings, the encryptedFields list).
+static constexpr size_t kBackupTailReserve = 16 * 1024;
+
+static void warnBackupOmitted(JsonArray& warnings, const String& path) {
+  String warn = path;
+  warn += " omitted: the backup would exceed the restore limit";
+  warnings.add(warn);
+}
+
+// Called right after files[path] was added: takes the file out again when it
+// pushed the bundle past what the restore accepts (or past memory), and says
+// so in the bundle's warnings.
+static void keepBackupWithinRestoreLimit(const JsonDocument& bundle, JsonObject& files,
+                                         JsonArray& warnings, const String& path) {
+  if (!bundle.overflowed() && measureJson(bundle) + kBackupTailReserve <= kMigrationPayloadMax) return;
+  files.remove(path);
+  warnBackupOmitted(warnings, path);
+}
+
 // ============================================================================
 // Helper: Add a file to the backup JSON if it exists
 // ============================================================================
@@ -218,7 +243,11 @@ static void addFileToBackup(JsonObject& files, JsonArray& warnings, const char* 
 // Helper: Recursively add all files from a directory
 // ============================================================================
 
-static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, const char* dirPath, const AuthContext& ctx, int depth = 0) {
+// With omitFrom set (the bundle being built), a file that would take the
+// bundle past the restore limit is left out with a warning instead of making
+// the whole backup unrestorable. Only optional categories (maps) pass it.
+static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, const char* dirPath, const AuthContext& ctx,
+                                 const JsonDocument* omitFrom = nullptr, int depth = 0) {
   if (!filesystemReady || depth > 3) return;
 
   FsLockGuard fsGuard("migration.backup.scan");
@@ -242,14 +271,23 @@ static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, const c
   while ((entry = dir.openNextFile())) {
     String path = String(entry.name());
     // Ensure absolute path
-    if (!path.startsWith("/")) { char pBuf[128]; snprintf(pBuf, sizeof(pBuf), "%s/%s", dirPath, path.c_str()); path = pBuf; }
+    if (!path.startsWith("/")) {
+      String absolute(dirPath);
+      absolute += "/";
+      absolute += path;
+      path = absolute;
+    }
 
     if (entry.isDirectory()) {
-      addDirectoryToBackup(files, warnings, path.c_str(), ctx, depth + 1);
+      addDirectoryToBackup(files, warnings, path.c_str(), ctx, omitFrom, depth + 1);
     } else {
       // Include .hwmap, .json, and certificate files
-      if (path.endsWith(".hwmap") || path.endsWith(".json") ||
-          path.endsWith(".pem") || path.endsWith(".crt") || path.endsWith(".key")) {
+      const bool wanted = path.endsWith(".hwmap") || path.endsWith(".json") ||
+                          path.endsWith(".pem") || path.endsWith(".crt") || path.endsWith(".key");
+      if (wanted && omitFrom && entry.size() + kBackupTailReserve > kMigrationPayloadMax) {
+        // Too large for any restorable bundle; do not read it at all.
+        warnBackupOmitted(warnings, path);
+      } else if (wanted) {
         String content = entry.readString();
         if (content.length() > 0) {
           // Try to parse JSON files as objects
@@ -277,6 +315,7 @@ static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, const c
             // matches existing tool expectations)
             files[path] = content;
           }
+          if (omitFrom && !files[path].isNull()) keepBackupWithinRestoreLimit(*omitFrom, files, warnings, path);
         }
       }
     }
@@ -409,8 +448,9 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   if (wantEspnow) {
     addFileToBackup(files, warnings, ESPNOW_DEVICES);
   }
-  if (wantMaps) addDirectoryToBackup(files, warnings, MAPS_DIR, ctx);
   if (wantCerts) addDirectoryToBackup(files, warnings, "/system/certs", ctx);
+  // Maps go last and are the one category trimmed to fit the restore limit.
+  if (wantMaps) addDirectoryToBackup(files, warnings, MAPS_DIR, ctx, &doc);
 
   // Discover secrets from actual bundled content (AES: blobs + user password hashes)
   collectEncryptedFieldsFromFiles(files, encFields);
@@ -418,24 +458,30 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   // Serialize and send
   httpd_resp_set_type(req, "application/json");
 
-  // Measure output size first
-  size_t jsonLen = measureJson(doc);
-  if (jsonLen < 8192) {
-    // Small enough for a static buffer
-    char* buf = (char*)malloc(jsonLen + 1);
-    if (buf) {
-      serializeJson(doc, buf, jsonLen + 1);
-      httpd_resp_send(req, buf, jsonLen);
-      free(buf);
-    } else {
-      httpd_resp_send(req, "{\"error\":\"Out of memory\"}", HTTPD_RESP_USE_STRLEN);
-    }
-  } else {
-    // Large backup: use chunked response via String
-    String json;
-    serializeJson(doc, json);
-    httpd_resp_send(req, json.c_str(), json.length());
+  // A bundle that lost data to memory, or that /api/restore would refuse, is
+  // not sent at all.
+  if (doc.overflowed()) {
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_send(req, "{\"error\":\"Backup did not fit in memory; select fewer categories\"}",
+                    HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
   }
+  const size_t jsonLen = measureJson(doc);
+  if (jsonLen > kMigrationPayloadMax) {
+    httpd_resp_set_status(req, "413 Payload Too Large");
+    httpd_resp_send(req, "{\"error\":\"Backup exceeds the 512 KB restore limit; select fewer categories\"}",
+                    HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  char* buf = (char*)ps_alloc(jsonLen + 1, AllocPref::PreferPSRAM, "migrate.backup");
+  if (!buf) {
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_send(req, "{\"error\":\"Out of memory\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  serializeJson(doc, buf, jsonLen + 1);
+  httpd_resp_send(req, buf, jsonLen);
+  free(buf);
 
   // Bundle built and sent — record which categories went out.
   {
@@ -485,7 +531,14 @@ void discardStagedMigrationRestore() {
   sStagedRestoreCompatible = true;
 }
 
+static String restoreStagingPath(const String& dest) {
+  String staging(dest);
+  staging += ".restore.tmp";
+  return staging;
+}
+
 // Apply a validated HWBACKUP JsonDocument to flash. Used by applyStagedMigrationRestore.
+// True only when every file was written and moved into place.
 static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
                                      int* outWritten, int* outErrored) {
   // Cross-device restore: preserve the WiFi network the user entered during Import.
@@ -521,8 +574,14 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
   JsonObject files = doc["files"].as<JsonObject>();
   int filesWritten = 0;
   int filesErrored = 0;
+  // Every file is written to "<path>.restore.tmp" first. Destinations are
+  // replaced only after all staged writes succeeded, so a failed write leaves
+  // the device's files untouched; boot cleanup removes stray staging files.
+  std::vector<String> staged;  // destination paths with a complete staging file
+  String failedStage;          // staging file of the write that failed, if any
 
   for (JsonPair kv : files) {
+    if (filesErrored > 0) break;  // the restore is already refused
     const char* path = kv.key().c_str();
     if (!path || path[0] != '/') {
       filesErrored++;
@@ -580,21 +639,52 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
       }
     }
 
-    if (writeTextAtomic(path, content)) {
-      filesWritten++;
+    if (writeText(restoreStagingPath(pathStr).c_str(), content)) {
+      staged.push_back(pathStr);
     } else {
+      failedStage = restoreStagingPath(pathStr);
       filesErrored++;
     }
   }
 
-  if (!compatible) {
+  if (!compatible && filesErrored == 0) {
     // Next boot: streamlined credential-only flow (admin login), not full FTS menu.
-    writeText(PENDING_CRED_SETUP_FILE, "1");
+    const String marker(PENDING_CRED_SETUP_FILE);
+    if (writeText(restoreStagingPath(marker).c_str(), "1")) {
+      staged.push_back(marker);
+    } else {
+      failedStage = restoreStagingPath(marker);
+      filesErrored++;
+    }
+  }
+
+  {
+    FsLockGuard guard("migration.restore.promote");
+    if (filesErrored == 0) {
+      // users.json last: until it is in place the device still boots into setup.
+      for (int pass = 0; pass < 2 && filesErrored == 0; ++pass) {
+        for (const String& dest : staged) {
+          if ((dest == USERS_FILE) != (pass == 1)) continue;
+          if (!VFS::rename(restoreStagingPath(dest), dest)) {
+            ERROR_STORAGEF("[migrate] could not move the restored %s into place", dest.c_str());
+            filesErrored++;
+            break;
+          }
+          if (dest != PENDING_CRED_SETUP_FILE) filesWritten++;
+        }
+      }
+    }
+    // Drop whatever is still staged (all of it when a write failed).
+    for (const String& dest : staged) {
+      const String stagingPath = restoreStagingPath(dest);
+      if (VFS::exists(stagingPath)) VFS::remove(stagingPath);
+    }
+    if (failedStage.length()) VFS::remove(failedStage);
   }
 
   if (outWritten) *outWritten = filesWritten;
   if (outErrored) *outErrored = filesErrored;
-  return filesWritten > 0 || filesErrored == 0;
+  return filesErrored == 0;
 }
 
 bool applyStagedMigrationRestore() {
@@ -618,7 +708,13 @@ bool applyStagedMigrationRestore() {
   discardStagedMigrationRestore();
 
   if (!ok) {
-    broadcastOutput("Restore failed: no files were written.");
+    if (filesWritten == 0) {
+      broadcastOutput("Restore failed; nothing was replaced.");
+    } else {
+      char failBuf[96];
+      snprintf(failBuf, sizeof(failBuf), "Restore failed after replacing %d file(s); setup continues.", filesWritten);
+      broadcastOutput(failBuf);
+    }
     return false;
   }
 
@@ -662,7 +758,7 @@ static esp_err_t handleRestore(httpd_req_t* req) {
   }
 
   // Read POST body (backup payload can be large)
-  if (req->content_len == 0 || req->content_len > 512 * 1024) {
+  if (req->content_len == 0 || req->content_len > kMigrationPayloadMax) {
     httpd_resp_set_status(req, "400 Bad Request");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"error\":\"Invalid payload size\"}", HTTPD_RESP_USE_STRLEN);

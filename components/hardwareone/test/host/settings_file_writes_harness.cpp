@@ -692,11 +692,11 @@ static void transactionCases() {
 #endif
   }
   reset(); store(fixturePath, oldUser); writerAvailable = false;
-  JsonDocument patch; patch["notifyLevel"] = 2; patch["added"] = true;
+  JsonDocument patch; patch["notifyLevel"] = 2; patch["theme"] = "dark";
   check(mergeAndSaveUserSettings(fixtureUser, patch), "ordinary preference merge failed");
   userContract(1);
   auto merged = parse(files.at(fixturePath)->bytes);
-  check(merged["password"] == "synthetic-hash" && merged["notifyLevel"] == 2 && merged["added"] == true &&
+  check(merged["password"] == "synthetic-hash" && merged["notifyLevel"] == 2 && merged["theme"] == "dark" &&
         merged["unknown"]["values"][1] == "keep", "preference merge lost unrelated fields");
 }
 

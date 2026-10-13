@@ -95,4 +95,37 @@ assert "continue;" in resolve[generation_check:]
 assert resolve.rfind("xSemaphoreGive", 0, flash_load) != -1
 assert resolve.find("xSemaphoreTake", flash_load, generation_check) != -1
 
+# The generic merge accepts preferences only: the credential hashes and the
+# forced-password-change flag are refused whatever the value (a JSON null
+# would erase them), before the transaction takes the lock. The behaviour runs
+# in test_password_change_gate.py.
+assert "const char* userSettingsPatchRefusedKey(" in settings, "merge has no editable-key owner"
+refused_key = function_body(settings, "const char* userSettingsPatchRefusedKey(")
+editable = refused_key[refused_key.index("kEditable[]"):refused_key.index("};")]
+for protected_key in ('"password"', '"gamepad_password"', '"mustChangePassword"'):
+    assert protected_key not in editable, f"merge allows {protected_key}"
+assert '"theme"' in editable and '"notifyLevel"' in editable
+assert merge.index("userSettingsPatchRefusedKey(patch)") < merge.index("runUserSettingsTransaction(")
+server = (ROOT / "WebServer_Server.cpp").read_text()
+settings_post = function_body(server, "esp_err_t handleUserSettingsSet(")
+assert "userSettingsPatchRefusedKey(patch)" in settings_post
+assert 'patch["password"].isNull()' not in settings_post
+
+# A guest cannot change its own password, so account creation refuses a guest
+# with a forced change (createAccount on trees with the creation owner).
+creator = function_body(user, "bool createAccount(" if "bool createAccount(" in user
+                        else "bool adminCreateUser(")
+assert 'account.mustChangePassword && account.role == "guest"' in creator, \
+    "account creation accepts a guest that must change its password"
+assert creator.index('account.role == "guest"') < creator.index("FsLockGuard guard(")
+
+# The forced change is decided once (userMustChangePassword) and every
+# authenticated web request, APIs included, passes the gate in tgRequireAuth.
+web_auth = function_body(user, "bool tgRequireAuth(AuthContext& ctx)")
+web_auth = web_auth[:web_auth.index("SOURCE_SERIAL")]
+assert "webPasswordChangeAllows(req, ctx.user)" in web_auth, \
+    "web APIs ignore the forced password change"
+gate = function_body((ROOT / "WebServer_Utils.cpp").read_text(), "bool webPasswordChangeAllows(")
+assert "userMustChangePassword(user)" in gate and '"/account/password-change"' in gate
+
 print("user-settings transaction source guards passed")

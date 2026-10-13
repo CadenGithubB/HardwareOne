@@ -4,6 +4,10 @@
 #include <thread>
 
 #include "../../System_MQTTLifecycleGate.h"
+#include "../../System_MQTTAdmission.h"
+
+#include <memory>
+#include <utility>
 
 static int failures = 0;
 
@@ -182,8 +186,147 @@ static void test_atomic_start_stop_race() {
   }
 }
 
+// The command callback admits, hands the admission to a queued completion and
+// returns. The callback's own scope ending must not release the use: teardown
+// stays blocked until the completion has answered and released it.
+struct QueuedCompletion {
+  MqttAdmission use;
+  bool answered = false;
+};
+
+static void test_admission_moves_into_async_completion() {
+  MqttLifecycleGate gate;
+  openGate(gate);
+
+  std::unique_ptr<QueuedCompletion> completion;
+  {
+    MqttAdmission callbackUse(gate);
+    CHECK(callbackUse.admitted(), "open client must admit command callback");
+    completion.reset(new QueuedCompletion());
+    completion->use = std::move(callbackUse);
+    CHECK(!callbackUse.admitted(), "moved-from callback admission must be empty");
+    CHECK(completion->use.admitted(), "completion must own the admission");
+  }  // callback returns
+  CHECK(gate.usesInFlight() == 1, "callback return must not release the use");
+  CHECK(gate.requestStop(), "stop while the command is queued is accepted");
+  CHECK(!gate.tryBeginStop(), "queued completion must defer teardown");
+
+  completion->answered = true;  // response enqueued through the client
+  completion.reset();           // completion frees its reply
+  CHECK(gate.usesInFlight() == 0, "completion must release the admission");
+  CHECK(gate.tryBeginStop(), "teardown must follow the completion's release");
+  gate.finishStop();
+}
+
+static void test_refused_admission_and_failed_handoff() {
+  MqttLifecycleGate gate;
+  openGate(gate);
+  CHECK(gate.requestStop(), "stop must be accepted");
+  {
+    MqttAdmission refused(gate);
+    CHECK(!refused.admitted(), "stopping client must refuse admission");
+    MqttAdmission target;
+    target = std::move(refused);
+    CHECK(!target.admitted(), "moving a refused admission must stay empty");
+  }
+  CHECK(gate.usesInFlight() == 0, "a refused admission must not release");
+  CHECK(gate.tryBeginStop(), "nothing in flight after a refusal");
+  gate.finishStop();
+
+  // A submission that is not queued answers on the event path and releases
+  // the admission there, exactly once.
+  openGate(gate);
+  {
+    MqttAdmission callbackUse(gate);
+    QueuedCompletion notQueued;
+    notQueued.use = std::move(callbackUse);
+    notQueued.use.release();
+    CHECK(gate.usesInFlight() == 0, "explicit release must drop the use");
+    notQueued.use.release();
+  }
+  CHECK(gate.usesInFlight() == 0, "release after release must be a no-op");
+  CHECK(gate.requestStop(), "cleanup stop must be accepted");
+  CHECK(gate.tryBeginStop(), "cleanup stop must be claimable");
+  gate.finishStop();
+
+  // Move-assigning over a live admission releases the old one first.
+  openGate(gate);
+  {
+    MqttAdmission first(gate);
+    MqttAdmission second(gate);
+    CHECK(gate.usesInFlight() == 2, "two admissions must be counted");
+    first = std::move(second);
+    CHECK(gate.usesInFlight() == 1, "overwritten admission must be released");
+  }
+  CHECK(gate.usesInFlight() == 0, "both admissions released by scope end");
+  CHECK(gate.requestStop(), "cleanup stop must be accepted");
+  CHECK(gate.tryBeginStop(), "cleanup stop must be claimable");
+  gate.finishStop();
+}
+
+// The event thread admits and hands the use to a completion thread, which
+// publishes later; a stop thread races teardown against both. Teardown must
+// never begin while the completion may still touch the client.
+static void test_async_completion_stop_race() {
+  constexpr int kIterations = 400;
+  for (int iteration = 0; iteration < kIterations; ++iteration) {
+    MqttLifecycleGate gate;
+    openGate(gate);
+
+    std::atomic<bool> go{false};
+    std::atomic<bool> handedOff{false};
+    std::atomic<bool> publishing{false};
+    std::atomic<bool> overlap{false};
+    std::atomic<bool> tornDown{false};
+    std::atomic<bool> stopAccepted{false};
+    QueuedCompletion slot;
+    bool admitted = false;
+
+    std::thread eventThread([&]() {
+      while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+      MqttAdmission callbackUse(gate);
+      admitted = callbackUse.admitted();
+      if (admitted) slot.use = std::move(callbackUse);
+      handedOff.store(true, std::memory_order_release);
+    });
+    std::thread completionThread([&]() {
+      while (!handedOff.load(std::memory_order_acquire)) std::this_thread::yield();
+      if (!slot.use.admitted()) return;
+      publishing.store(true, std::memory_order_seq_cst);
+      for (int spin = 0; spin < 50; ++spin) {
+        if (tornDown.load(std::memory_order_seq_cst)) overlap.store(true);
+        std::this_thread::yield();
+      }
+      publishing.store(false, std::memory_order_seq_cst);
+      slot.answered = true;
+      slot.use.release();
+    });
+    std::thread stopThread([&]() {
+      while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+      stopAccepted.store(gate.requestStop());
+      while (!gate.tryBeginStop()) std::this_thread::yield();
+      tornDown.store(true, std::memory_order_seq_cst);
+      if (publishing.load(std::memory_order_seq_cst)) overlap.store(true);
+    });
+
+    go.store(true, std::memory_order_release);
+    eventThread.join();
+    completionThread.join();
+    stopThread.join();
+
+    CHECK(stopAccepted.load(), "racing stop must be accepted");
+    CHECK(!overlap.load(), "teardown must never overlap the completion's publish");
+    if (admitted) CHECK(slot.answered, "admitted command must be answered");
+    CHECK(gate.usesInFlight() == 0, "no admission may leak");
+    gate.finishStop();
+  }
+}
+
 int main() {
   test_command_first_defers_stop();
+  test_admission_moves_into_async_completion();
+  test_refused_admission_and_failed_handoff();
+  test_async_completion_stop_race();
   test_stop_first_rejects_command();
   test_all_admissions_must_release();
   test_start_stop_ordering();

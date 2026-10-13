@@ -97,6 +97,52 @@ namespace VFS {
 
 static bool gSdMounted  = false;  // driver-level: selected SD transport mounted
 static bool gSdWritable = false;  // probe-verified: a write round-trip worked
+// Advanced under the filesystem lock by every successful mount (boot,
+// remount, format), so per-mount owners can tell a new card from the old one.
+static uint32_t gSdMountGeneration = 0;
+
+uint32_t sdMountGeneration() { return gSdMountGeneration; }
+
+// SD-in-use registrations, changed and read under the filesystem lock so a
+// lifecycle call cannot interleave with an owner registering.
+static constexpr size_t kSdInUseSlots = 4;
+static const char* gSdInUse[kSdInUseSlots] = {};
+
+static const char* sdInUseOwnerLocked() {
+  for (const char* owner : gSdInUse) {
+    if (owner) return owner;
+  }
+  return nullptr;
+}
+
+bool sdInUseBegin(const char* owner) {
+  if (!owner) return false;
+  FsLockGuard guard("VFS.sdInUseBegin");
+  for (const char*& slot : gSdInUse) {
+    if (!slot) { slot = owner; return true; }
+  }
+  return false;
+}
+
+void sdInUseEnd(const char* owner) {
+  FsLockGuard guard("VFS.sdInUseEnd");
+  for (const char*& slot : gSdInUse) {
+    if (slot == owner) { slot = nullptr; return; }
+  }
+}
+
+const char* sdInUseOwner() {
+  FsLockGuard guard("VFS.sdInUseOwner");
+  return sdInUseOwnerLocked();
+}
+
+// Caller holds the filesystem lock.
+static bool sdLifecycleRefusedLocked(const char* action) {
+  const char* owner = sdInUseOwnerLocked();
+  if (!owner) return false;
+  WARN_STORAGEF("[SD] %s refused: card in use by %s", action, owner);
+  return true;
+}
 
 // Presentation-only capacity snapshots. The cache core is dependency-free and
 // host-tested; this spinlock makes complete 64-bit snapshots safe to share on
@@ -194,6 +240,7 @@ static bool tryMountSD() {
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
   if (SD.begin()) {
     gSdMounted = true;
+    ++gSdMountGeneration;
     gSdWritable = probeSDWriteInternal();
     char freeMb[16];
     const uint64_t total = SD.totalBytes(), used = SD.usedBytes();
@@ -263,6 +310,7 @@ static bool tryMountSD() {
         INFO_STORAGEF("[SD] Mount SUCCESS at %lu Hz (attempt %d)",
                       freq, attempt + 1);
         gSdMounted = true;
+        ++gSdMountGeneration;
         // Prove writability with a round-trip probe. If the card is
         // present but e.g. write-protected or has a bad sector where
         // SD.open lands, we want to know now, not the first time the
@@ -889,6 +937,7 @@ bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
 
 bool unmountSD() {
   FsLockGuard guard("VFS.sdUnmount");
+  if (sdLifecycleRefusedLocked("Unmount")) return false;
   invalidateStatsSnapshot(SDCARD);
 #if ENABLE_SD_CARD
   if (gSdMounted) {
@@ -911,6 +960,7 @@ bool unmountSD() {
 
 bool remountSD() {
   FsLockGuard guard("VFS.sdRemount");
+  if (sdLifecycleRefusedLocked("Remount")) return false;
   invalidateStatsSnapshot(SDCARD);
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
   const bool ended = SD.end();
@@ -933,6 +983,7 @@ bool remountSD() {
 // Format SD card as FAT32 using ESP-IDF low-level API
 bool formatSD() {
   FsLockGuard guard("VFS.sdFormat");
+  if (sdLifecycleRefusedLocked("Format")) return false;
   invalidateStatsSnapshot(SDCARD);
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
   // Authorization and exact confirmation are enforced by cmd_sdformat.
@@ -940,6 +991,7 @@ bool formatSD() {
   gSdWritable = false;
   if (!SD.format()) return false;
   gSdMounted = true;
+  ++gSdMountGeneration;
   gSdWritable = probeSDWriteInternal();
   return true;
 #elif ENABLE_SD_CARD && defined(SD_CS_PIN)
@@ -1388,6 +1440,10 @@ static const char* cmd_sdmount(const String& argsInput) {
     snprintf(buf, sizeof(buf), "SD card already mounted at /sd");
     return buf;
   }
+  if (const char* owner = VFS::sdInUseOwner()) {
+    snprintf(buf, sizeof(buf), "ERROR: SD card in use by %s; stop it first", owner);
+    return buf;
+  }
   
   if (VFS::remountSD()) {
     uint64_t total, used, free;
@@ -1411,6 +1467,10 @@ static const char* cmd_sdunmount(const String& argsInput) {
   snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");
   return buf;
 #else
+  if (const char* owner = VFS::sdInUseOwner()) {
+    snprintf(buf, sizeof(buf), "ERROR: SD card in use by %s; stop it first", owner);
+    return buf;
+  }
   // Release a stale mount too (e.g. an accidentally removed SDMMC card).
   if (VFS::unmountSD()) {
     snprintf(buf, sizeof(buf), "SD card unmounted successfully");
@@ -1435,6 +1495,10 @@ static const char* cmd_sdformat(const String& argsInput) {
     snprintf(buf, sizeof(buf), 
       "WARNING: This will ERASE ALL DATA on the SD card!\n"
       "Run 'sdformat confirm' to proceed.");
+    return buf;
+  }
+  if (const char* owner = VFS::sdInUseOwner()) {
+    snprintf(buf, sizeof(buf), "ERROR: SD card in use by %s; stop it first", owner);
     return buf;
   }
   

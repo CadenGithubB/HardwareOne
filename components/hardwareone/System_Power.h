@@ -74,8 +74,9 @@ bool isPowerCpuFrequencySupported(uint32_t mhz);
 bool powerSetCpuFrequencyMhz(uint32_t mhz, bool* outClockChanged = nullptr);
 
 // False if the target clock cannot be applied; no success event is emitted.
-bool applyPowerMode(uint8_t mode);
-void checkAutoPowerMode();
+// setDisplayBrightness=false keeps the saved oledBrightness (used when the
+// saved mode is re-applied at boot or after setup, not chosen by the user).
+bool applyPowerMode(uint8_t mode, bool setDisplayBrightness = true);
 
 // ----------------------------------------------------------------------------
 // Sleep transition cooldown ("anti-flap")

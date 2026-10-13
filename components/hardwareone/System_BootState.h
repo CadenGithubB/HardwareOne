@@ -27,3 +27,17 @@ uint32_t bootStateGetBootCount();
 
 // Reset the persisted boot counter to 0. Diagnostics only.
 void bootStateResetBootCount();
+
+// Account-id high-water mark: the highest account id this device has ever
+// issued. It lives here, outside users.json, so neither a factory reset (which
+// deletes users.json) nor a restored older roster lets System_User hand an id
+// out again while data keyed by that id may still exist. System_User owns it
+// and serializes its updates under the filesystem lock.
+//
+// Reads the mark into out (0 when never set). False when NVS is unavailable or
+// the read fails; out is then left unchanged.
+bool bootStateGetAccountIdHighWater(uint32_t& out);
+
+// Raises the mark to id when it is lower. True only when the stored mark is at
+// least id afterwards (the write and the commit are checked).
+bool bootStateRaiseAccountIdHighWater(uint32_t id);

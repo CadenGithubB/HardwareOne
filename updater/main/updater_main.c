@@ -447,10 +447,7 @@ static void record_failure(hw1_ota_record_t *record,
         .native_error = (int32_t)native_error,
         .detail = detail,
     };
-    if (record != NULL && record->phase != HW1_OTA_PHASE_IDLE &&
-        record->phase != HW1_OTA_PHASE_SUCCEEDED &&
-        record->phase != HW1_OTA_PHASE_FAILED &&
-        record->phase != HW1_OTA_PHASE_CANCELED) {
+    if (record != NULL && !hw1_ota_phase_is_idle_or_terminal(record->phase)) {
         esp_err_t journal_err = transition_record(record, HW1_OTA_EVENT_FAIL,
                                                   &args);
         if (journal_err != ESP_OK) {
@@ -1019,7 +1016,6 @@ static esp_err_t accept_manifest(const uint8_t *body, size_t body_size,
 {
     hw1_ota_verified_manifest_t fresh;
     hw1_ota_record_t record = {0};
-    uint16_t retry_flags = 0;
     esp_err_t err;
     (void)context;
     if (!s_control_watchdog_active) {
@@ -1049,34 +1045,22 @@ static esp_err_t accept_manifest(const uint8_t *body, size_t body_size,
                      "OTA journal corrupt/unavailable; use serial resetjournal confirm");
         }
     }
-    if (err == ESP_OK &&
-        (record.phase == HW1_OTA_PHASE_FAILED ||
-         record.phase == HW1_OTA_PHASE_CANCELED ||
-         record.phase == HW1_OTA_PHASE_SUCCEEDED)) {
-        retry_flags = record.phase == HW1_OTA_PHASE_FAILED
-                          ? record.request_flags : 0;
-        if (hw1_ota_result_pending(&record)) {
-            retry_flags |= HW1_OTA_REQUEST_SUPERSEDE_PENDING_RESULT;
+    if (err == ESP_OK && hw1_ota_phase_is_idle_or_terminal(record.phase)) {
+        /* An upload here is a new operation. It inherits no allow-downgrade
+         * or forced-power decision from the record it replaces; downgrade
+         * permission for it comes only from the explicit /allow-downgrade
+         * action once this operation is live. */
+        const uint16_t upload_flags = hw1_ota_replacement_request_flags(&record);
+        if (record.phase != HW1_OTA_PHASE_IDLE) {
+            err = transition_record(&record, HW1_OTA_EVENT_CLEAR_TERMINAL, NULL);
         }
-        err = transition_record(&record, HW1_OTA_EVENT_CLEAR_TERMINAL, NULL);
         if (err == ESP_OK &&
             hw1_ota_begin(&record, new_operation_id(),
-                          HW1_OTA_SOURCE_RECOVERY_UPLOAD, retry_flags,
+                          HW1_OTA_SOURCE_RECOVERY_UPLOAD, upload_flags,
                           NULL) != HW1_OTA_OK) {
             err = ESP_ERR_INVALID_STATE;
         }
         if (err == ESP_OK) {
-            err = commit_record(&record);
-        }
-    } else if (err == ESP_OK && record.phase == HW1_OTA_PHASE_IDLE) {
-        if (hw1_ota_result_pending(&record)) {
-            retry_flags |= HW1_OTA_REQUEST_SUPERSEDE_PENDING_RESULT;
-        }
-        if (hw1_ota_begin(&record, new_operation_id(),
-                          HW1_OTA_SOURCE_RECOVERY_UPLOAD, retry_flags,
-                          NULL) != HW1_OTA_OK) {
-            err = ESP_ERR_INVALID_STATE;
-        } else {
             err = commit_record(&record);
         }
     }
@@ -1702,12 +1686,12 @@ static esp_err_t allow_downgrade_for_transaction(void)
     if (err != ESP_OK) {
         return err;
     }
-    if (record.phase == HW1_OTA_PHASE_IDLE ||
-        record.phase == HW1_OTA_PHASE_SUCCEEDED ||
-        record.phase == HW1_OTA_PHASE_CANCELED ||
-        record.phase == HW1_OTA_PHASE_IMAGE_VERIFIED ||
-        record.phase == HW1_OTA_PHASE_TRIAL_BOOT_ARMED ||
-        record.phase == HW1_OTA_PHASE_TRIAL_RUNNING) {
+    /* A FAILED record is refused too: a new upload does not inherit its
+     * flags, so the permission would never be used. Send the manifest first;
+     * a refused downgrade leaves that new operation live for this action. */
+    if (!hw1_ota_phase_accepts_downgrade_permission(record.phase)) {
+        ESP_LOGW(TAG, "allow-downgrade needs a live transaction; send the "
+                      "manifest first, then allow the downgrade if it is refused");
         return ESP_ERR_INVALID_STATE;
     }
     record.request_flags |= HW1_OTA_REQUEST_ALLOW_DOWNGRADE;

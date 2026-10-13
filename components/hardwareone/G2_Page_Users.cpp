@@ -1,25 +1,24 @@
 // =============================================================================
 // G2 glasses — "Users" App page implementation (admin user manager)
 // =============================================================================
-// See header. Read-only display parses /system/users/users.json each render
-// (like the Automations page re-reads its JSON); every mutation dispatches a
-// real user/session command through g2SubmitHijackCommand, so command-layer
-// authorization remains authoritative and this page never mutates the account
-// store directly. Completion is marshalled through the lens applier.
+// See header. The list is read each render from System_User's read-only roster
+// snapshot; every mutation dispatches a real user/session command through
+// g2SubmitHijackCommand, so command-layer authorization remains authoritative
+// and this page never mutates the account store directly. Completion is
+// marshalled through the lens applier. Kick and ban are account commands and
+// are offered in every build, with or without the HTTP server.
 
 #include "G2_Page_Users.h"
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include <Arduino.h>
-#include <ArduinoJson.h>
 
 #include "G2_Glasses.h"        // g2ShowListPage / g2Set/GetHijackPage / g2BumpMenuGen
 #include "G2_HijackCmd.h"      // G2CmdCookie / g2SubmitHijackCommand / g2HijackAuthContext
 #include "G2_Page_TextEntry.h" // on-lens keyboard for Add User
-#include "System_Utils.h"      // readText
-#include "System_MemUtil.h"    // PSRAM_JSON_DOC
-#include "System_User.h"       // USERS_JSON_FILE / isAdminUser / isSuperAdminUser / userRoleRank
+#include "System_Utils.h"      // redactCmdForAudit
+#include "System_User.h"       // readUserRoster / isAdminUser / isSuperAdminUser / userRoleRank
 #include "System_Debug.h"      // DEBUG_G2F
 
 extern void g2ShowConfigMenu();  // return to the Config launcher on Back (menu reorg; non-static in G2_Glasses.cpp)
@@ -45,13 +44,9 @@ static inline void setSub(UsersSub s) {
 }
 
 #define G2_USERS_MAX 16
-struct G2UserRow {
-  char name[kPublicUsernameMaxLen + 1];
-  char role[12];
-  long id;
-  bool banned;
-};
-EXT_RAM_BSS_ATTR static G2UserRow gUsers[G2_USERS_MAX];
+// Rows come from System_User's read-only roster snapshot (full usernames,
+// normalized roles, ban flag).
+EXT_RAM_BSS_ATTR static UserRosterEntry gUsers[G2_USERS_MAX];
 static size_t    gUserCount = 0;
 static int       gSelected  = -1;   // index into gUsers while in DETAIL/ROLE/DELETE
 
@@ -81,11 +76,9 @@ enum DetailAction : uint8_t {
   DETAIL_ACTION_ROLE,
   DETAIL_ACTION_CHANGE_PASSWORD,
   DETAIL_ACTION_RESET_PASSWORD,
-#if ENABLE_HTTP_SERVER
   DETAIL_ACTION_KICK,
   DETAIL_ACTION_BAN,
   DETAIL_ACTION_UNBAN,
-#endif
   DETAIL_ACTION_DELETE,
 };
 static DetailAction gDetailActions[10];
@@ -93,11 +86,9 @@ static size_t gDetailActionCount = 0;
 
 enum ConfirmAction : uint8_t {
   CONFIRM_ACTION_NONE = 0,
-#if ENABLE_HTTP_SERVER
   CONFIRM_ACTION_KICK,
   CONFIRM_ACTION_BAN,
   CONFIRM_ACTION_UNBAN,
-#endif
   CONFIRM_ACTION_DELETE,
 };
 static ConfirmAction gConfirmAction = CONFIRM_ACTION_NONE;
@@ -137,28 +128,11 @@ static void scrubPasswordStaging() {
 }
 
 // -----------------------------------------------------------------------------
-// Load users from JSON (display only)
+// Load users (display only)
 // -----------------------------------------------------------------------------
 static void loadUsers() {
-  gUserCount = 0;
-  String json;
-  if (!readText(USERS_JSON_FILE, json)) return;   // no file / denied → empty
-  PSRAM_JSON_DOC(doc);
-  if (deserializeJson(doc, json)) return;          // malformed → empty
-  JsonArrayConst users = doc["users"].as<JsonArrayConst>();
-  if (users.isNull()) return;
-  for (JsonObjectConst u : users) {
-    if (gUserCount >= G2_USERS_MAX) break;
-    const char* nm = u["username"] | "";
-    if (nm[0] == '\0') continue;
-    G2UserRow& r = gUsers[gUserCount];
-    strncpy(r.name, nm, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = '\0';
-    const char* role = u["role"] | "user";
-    strncpy(r.role, role, sizeof(r.role) - 1); r.role[sizeof(r.role) - 1] = '\0';
-    r.id = u["id"] | 0L;
-    r.banned = u["banned"] | false;
-    gUserCount++;
-  }
+  // Missing, unreadable or malformed roster -> empty list.
+  (void)readUserRoster(gUsers, G2_USERS_MAX, gUserCount);
 }
 
 static bool selectedUserValid() {
@@ -184,7 +158,7 @@ static bool selectedIsPairer() {
   // Account lookup is case-sensitive: "Alice" and "alice" may identify
   // different records. Treating them as the same here could offer the
   // self-service password flow while displaying the other account's detail.
-  return pairer.length() && pairer == gUsers[gSelected].name;
+  return pairer.length() && pairer == gUsers[gSelected].username;
 }
 
 static bool selectedSharesPairerSessionIdentity() {
@@ -194,12 +168,12 @@ static bool selectedSharesPairerSessionIdentity() {
   // fence compare usernames case-insensitively. Protect a case-only account
   // collision from every action that could revoke the active lens owner.
   return pairer.length() &&
-         pairer.equalsIgnoreCase(gUsers[gSelected].name);
+         pairer.equalsIgnoreCase(gUsers[gSelected].username);
 }
 
 static bool selectedIsHigherRank() {
   return selectedUserValid() &&
-         userAccountRank(gUsers[gSelected].name) > pairerRank();
+         userAccountRank(gUsers[gSelected].username) > pairerRank();
 }
 
 // Refresh the selected row by stable username after a mutation. Deletion (or a
@@ -208,11 +182,11 @@ static bool selectedIsHigherRank() {
 static bool reloadSelectedUser() {
   if (!selectedUserValid()) return false;
   char wanted[kPublicUsernameMaxLen + 1];
-  strncpy(wanted, gUsers[gSelected].name, sizeof(wanted) - 1);
+  strncpy(wanted, gUsers[gSelected].username, sizeof(wanted) - 1);
   wanted[sizeof(wanted) - 1] = '\0';
   loadUsers();
   for (size_t i = 0; i < gUserCount; ++i) {
-    if (strcmp(gUsers[i].name, wanted) == 0) {
+    if (strcmp(gUsers[i].username, wanted) == 0) {
       gSelected = (int)i;
       return true;
     }
@@ -307,7 +281,7 @@ static void showListMenu() {
   strcpy(rows[1], "+ Add User"); ptrs[1] = rows[1];
   size_t n = 2;
   for (size_t i = 0; i < gUserCount; i++) {
-    snprintf(rows[n], sizeof(rows[n]), "%.48s (%.10s)%s", gUsers[i].name,
+    snprintf(rows[n], sizeof(rows[n]), "%.48s (%.10s)%s", gUsers[i].username,
              gUsers[i].role, gUsers[i].banned ? " [BANNED]" : "");
     ptrs[n] = rows[n];
     n++;
@@ -321,7 +295,7 @@ static void showListMenu() {
 static void showDetailMenu() {
   if (!selectedUserValid()) { showListMenu(); return; }
   setSub(USERS_SUB_DETAIL);
-  const G2UserRow& r = gUsers[gSelected];
+  const UserRosterEntry& r = gUsers[gSelected];
   const bool founder = selectedIsFounder();
   const bool self = selectedIsPairer();
   const bool ownerIdentity = selectedSharesPairerSessionIdentity();
@@ -338,7 +312,7 @@ static void showDetailMenu() {
     ++n;
   };
 
-  snprintf(rows[n], sizeof(rows[n]), "<- %.60s", r.name);
+  snprintf(rows[n], sizeof(rows[n]), "<- %.60s", r.username);
   ptrs[n] = rows[n];
   gDetailActions[n++] = DETAIL_ACTION_BACK;
 
@@ -363,11 +337,9 @@ static void showDetailMenu() {
     if (self) add(DETAIL_ACTION_CHANGE_PASSWORD, "Change Password");
   } else {
     add(DETAIL_ACTION_RESET_PASSWORD, "Reset Password");
-#if ENABLE_HTTP_SERVER
     add(DETAIL_ACTION_KICK, "Kick Sessions");
     add(r.banned ? DETAIL_ACTION_UNBAN : DETAIL_ACTION_BAN,
         r.banned ? "Unban User" : "Ban User");
-#endif
     add(DETAIL_ACTION_DELETE, "Delete User");
   }
 
@@ -404,22 +376,20 @@ static void showConfirmMenu(ConfirmAction action) {
   static char warning[72];
   static char confirm[72];
   switch (action) {
-#if ENABLE_HTTP_SERVER
     case CONFIRM_ACTION_KICK:
-      snprintf(warning, sizeof(warning), "Sign out %.55s?", gUsers[gSelected].name);
+      snprintf(warning, sizeof(warning), "Sign out %.55s?", gUsers[gSelected].username);
       strcpy(confirm, "Confirm Kick Sessions");
       break;
     case CONFIRM_ACTION_BAN:
-      snprintf(warning, sizeof(warning), "Ban %.60s?", gUsers[gSelected].name);
+      snprintf(warning, sizeof(warning), "Ban %.60s?", gUsers[gSelected].username);
       strcpy(confirm, "Confirm Ban + Kick");
       break;
     case CONFIRM_ACTION_UNBAN:
-      snprintf(warning, sizeof(warning), "Unban %.58s?", gUsers[gSelected].name);
+      snprintf(warning, sizeof(warning), "Unban %.58s?", gUsers[gSelected].username);
       strcpy(confirm, "Confirm Unban");
       break;
-#endif
     case CONFIRM_ACTION_DELETE:
-      snprintf(warning, sizeof(warning), "Delete %.57s?", gUsers[gSelected].name);
+      snprintf(warning, sizeof(warning), "Delete %.57s?", gUsers[gSelected].username);
       strcpy(confirm, "Confirm Delete");
       break;
     default:
@@ -457,7 +427,7 @@ static void showResultMenu() {
   setSub(USERS_SUB_RESULT);
   static char back[72];
   if (selectedUserValid())
-    snprintf(back, sizeof(back), "<- %.60s", gUsers[gSelected].name);
+    snprintf(back, sizeof(back), "<- %.60s", gUsers[gSelected].username);
   else
     strcpy(back, "<- Users");
   const char* items[] = {
@@ -557,7 +527,7 @@ static void passwordConfirmCommit(const char* text) {
       passwordFlowCancel();
       return;
     }
-    String line = String("userresetpassword \"") + gUsers[gSelected].name +
+    String line = String("userresetpassword \"") + gUsers[gSelected].username +
                   "\" \"" + gPasswordNew + "\" " +
                   (gResetMustChange ? "1" : "0");
     submitUserCmd(line.c_str());
@@ -708,7 +678,6 @@ static void detailHandleTap(uint32_t idx) {
     case DETAIL_ACTION_RESET_PASSWORD:
       beginAdminPasswordReset();
       return;
-#if ENABLE_HTTP_SERVER
     case DETAIL_ACTION_KICK:
       showConfirmMenu(CONFIRM_ACTION_KICK);
       return;
@@ -720,7 +689,6 @@ static void detailHandleTap(uint32_t idx) {
           selectedIsHigherRank()) return;
       showConfirmMenu(CONFIRM_ACTION_UNBAN);
       return;
-#endif
     case DETAIL_ACTION_DELETE:
       showConfirmMenu(CONFIRM_ACTION_DELETE);
       return;
@@ -735,14 +703,14 @@ static void roleHandleTap(uint32_t idx) {
     showDetailMenu();
     return;
   }
-  const G2UserRow& r = gUsers[gSelected];
+  const UserRosterEntry& r = gUsers[gSelected];
   int targetRank = (int)idx - 1;               // rows 1.. = ranks 0..
   if (targetRank < 0 || targetRank > pairerMaxRank()) return;
   int curRank = userRoleRank(r.role);
   if (targetRank == curRank) return;           // already that role — no-op
   // promote raises, demote lowers — there is no single set-role command.
   String line = String(targetRank > curRank ? "userpromote \"" : "userdemote \"") +
-                r.name + "\" " + kRoleNames[targetRank];
+                r.username + "\" " + kRoleNames[targetRank];
   submitUserCmd(line.c_str());
 }
 
@@ -757,23 +725,21 @@ static void confirmHandleTap(uint32_t idx) {
   }
   String line;
   switch (gConfirmAction) {
-#if ENABLE_HTTP_SERVER
     case CONFIRM_ACTION_KICK:
-      line = String("sessionrevoke user \"") + gUsers[gSelected].name + "\"";
+      line = String("sessionrevoke user \"") + gUsers[gSelected].username + "\"";
       break;
     case CONFIRM_ACTION_BAN:
-      line = String("banuser \"") + gUsers[gSelected].name + "\"";
+      line = String("banuser \"") + gUsers[gSelected].username + "\"";
       break;
     case CONFIRM_ACTION_UNBAN:
       // unbanuser's legacy parser consumes the whole remainder rather than
       // CommandArgs, so keep the public-username token unquoted.
-      line = String("unbanuser ") + gUsers[gSelected].name;
+      line = String("unbanuser ") + gUsers[gSelected].username;
       break;
-#endif
     case CONFIRM_ACTION_DELETE:
       // One-shot token bypasses the CLI interactive prompt only after this
       // explicit on-lens confirmation.
-      line = String("userdelete \"") + gUsers[gSelected].name + "\" confirm";
+      line = String("userdelete \"") + gUsers[gSelected].username + "\" confirm";
       break;
     default:
       showDetailMenu();

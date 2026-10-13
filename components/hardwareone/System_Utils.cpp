@@ -2249,22 +2249,27 @@ const char* cmd_reboot(const String& originalCmd) {
 }
 
 // ============================================================================
-// factoryreset -- wipe users.json + reboot to re-trigger first-time setup
+// factoryreset -- wipe the accounts and their data + reboot to first-time setup
 // ============================================================================
 //
 // Phase 4 of the CLIMode framework rollout: a real user-facing destructive
 // command that runs through the same yes/no confirm flow as filedelete and
 // userdelete (Phase 3). What it does:
 //
-//   1. Prompt: "Confirm FACTORY RESET? Wipes user accounts -- next boot
-//      runs first-time setup wizard. Settings (WiFi, debug flags) are
-//      PRESERVED."
-//   2. If user says yes:
-//      a. Delete /system/users/users.json via VFS::systemAuth (admin
-//         can't delete /system/* under normal permissions -- only the
-//         internal "system" auth has PERM_DELETE in the path table).
-//      b. Schedule a reboot 1 second in the future via esp_timer.
-//      c. Return "Factory reset complete. Rebooting in 1 second..."
+//   1. Prompt: lists what is deleted; settings (WiFi, debug flags) are
+//      PRESERVED.
+//   2. If user says yes, under one filesystem lock and as VFS::systemAuth
+//      (admin can't delete /system/* under normal permissions -- only the
+//      internal "system" auth has PERM_DELETE in the path table):
+//      a. Record the roster's issued account ids in the id high-water mark
+//         (System_User), so later accounts never reuse them.
+//      b. Delete pending_users.json and every account folder (u<id>) under
+//         /stt and, when the card is mounted, /sd/stt. A failure here stops
+//         the reset with the accounts untouched.
+//      c. Delete /system/users/users.json (the commit), then every file in
+//         /system/users/user_settings/.
+//      d. Schedule a reboot 1 second in the future via esp_timer.
+//      e. Return "Factory reset complete. ... Rebooting in 1 second..."
 //         -- this lets confirm_onInput audit the resolution + the
 //         dispatcher flush the response to the user before the device
 //         restarts.
@@ -2294,8 +2299,80 @@ static void factoryreset_doRestart(void* /*arg*/) {
   ESP.restart();
 }
 
+// Per-account data factoryreset removes besides users.json. All of it is keyed
+// by account id, and the transcript and note views authorize by id alone.
+static constexpr const char* kFactoryResetPendingUsers = "/system/users/pending_users.json";
+static constexpr const char* kFactoryResetUserSettingsDir = "/system/users/user_settings";
+static constexpr uint8_t kFactoryResetMaxDepth = 8;
+
+// "u<digits>": one account's folder under /stt or /sd/stt.
+static bool factoryResetIsAccountFolder(const VFS::DirectoryEntry& entry) {
+  if (!entry.isFolder || entry.name.length() < 2 || entry.name[0] != 'u') return false;
+  for (size_t i = 1; i < entry.name.length(); ++i) {
+    if (entry.name[i] < '0' || entry.name[i] > '9') return false;
+  }
+  return true;
+}
+
+// Removes the entries of dir that select accepts (all of them when select is
+// null), folders with everything below them; dir itself stays. The directory
+// is re-read after each removal, so no iterator is used across a removal. A
+// missing dir counts as empty. On failure failedPath names what was left.
+// The caller holds the filesystem lock.
+static bool factoryResetClearDirectory(const String& dir, bool (*select)(const VFS::DirectoryEntry&),
+                                       const AuthContext& ctx, uint8_t depth, String& failedPath) {
+  if (depth > kFactoryResetMaxDepth) {
+    failedPath = dir;
+    return false;
+  }
+  String previous;
+  for (;;) {
+    VFS::DirectoryEntry victim;
+    bool found = false;
+    {
+      File directory = VFS::openGuarded(dir, "r", ctx);
+      if (!directory) {
+        if (!VFS::existsGuarded(dir, ctx)) return true;
+        failedPath = dir;
+        return false;
+      }
+      if (!directory.isDirectory()) {
+        directory.close();
+        failedPath = dir;
+        return false;
+      }
+      VFS::DirectoryReader reader(directory, dir);
+      VFS::DirectoryEntry entry;
+      while (reader.next(entry)) {
+        if (entry.isVirtual || (select && !select(entry))) continue;
+        victim = entry;
+        found = true;
+        break;
+      }
+      directory.close();
+    }
+    if (!found) return true;
+    // A removal that reported success but left the entry would loop forever.
+    if (victim.path == previous) {
+      failedPath = victim.path;
+      return false;
+    }
+    previous = victim.path;
+    if (victim.isFolder) {
+      if (!factoryResetClearDirectory(victim.path, nullptr, ctx, depth + 1, failedPath)) return false;
+      if (!VFS::rmdirGuarded(victim.path, ctx)) {
+        failedPath = victim.path;
+        return false;
+      }
+    } else if (!VFS::removeGuarded(victim.path, ctx)) {
+      failedPath = victim.path;
+      return false;
+    }
+  }
+}
+
 static const char* factoryreset_confirmed(void* /*userData*/) {
-  EXT_RAM_BSS_ATTR static char respBuf[200];
+  EXT_RAM_BSS_ATTR static char respBuf[320];
 
   // Factory reset uses a deferred timer rather than rebootDevice(), so drain
   // the recorder before committing the destructive delete/scheduled restart.
@@ -2315,11 +2392,55 @@ static const char* factoryreset_confirmed(void* /*userData*/) {
   ramFlushClearOverlay();
 
   AuthContext sysCtx = VFS::systemAuth("factory.reset");
-  if (!VFS::removeGuarded(USERS_JSON_FILE, sysCtx)) {
-    snprintf(respBuf, sizeof(respBuf),
-             "Error: factory reset failed -- could not delete %s",
-             USERS_JSON_FILE);
-    return respBuf;
+  bool sdSkipped = false;
+  String settingsLeft;
+  {
+    // One lock over the whole wipe: no account is created or requested
+    // between recording the ids and removing the roster.
+    FsLockGuard guard("factory.reset");
+
+    // The ids users.json has issued stay reserved after it is gone.
+    String idError;
+    if (!recordAccountIdHighWater(idError)) {
+      logSystemEvent("SETUP", "factory reset — account id mark not updated (%s)", idError.c_str());
+    }
+
+    // Data that is useless without its account goes first. A failure here
+    // stops the reset while every account still exists.
+    String failed;
+    if (VFS::existsGuarded(kFactoryResetPendingUsers, sysCtx) &&
+        !VFS::removeGuarded(kFactoryResetPendingUsers, sysCtx)) {
+      failed = kFactoryResetPendingUsers;
+    }
+    if (failed.length() == 0) {
+      (void)factoryResetClearDirectory("/stt", factoryResetIsAccountFolder, sysCtx, 0, failed);
+    }
+    if (failed.length() == 0) {
+      if (VFS::isSDAvailable()) {
+        (void)factoryResetClearDirectory("/sd/stt", factoryResetIsAccountFolder, sysCtx, 0, failed);
+      } else {
+        sdSkipped = true;
+      }
+    }
+    if (failed.length() != 0) {
+      snprintf(respBuf, sizeof(respBuf),
+               "Error: factory reset stopped -- could not remove %s. Accounts are unchanged; no reboot.",
+               failed.c_str());
+      return respBuf;
+    }
+
+    if (!VFS::removeGuarded(USERS_JSON_FILE, sysCtx)) {
+      snprintf(respBuf, sizeof(respBuf),
+               "Error: factory reset failed -- could not delete %s",
+               USERS_JSON_FILE);
+      return respBuf;
+    }
+
+    // users.json is gone, so no account references these credentials any
+    // more; one left behind is overwritten whole when its id is next written.
+    if (!factoryResetClearDirectory(kFactoryResetUserSettingsDir, nullptr, sysCtx, 0, settingsLeft)) {
+      logSystemEvent("SETUP", "factory reset — could not remove %s", settingsLeft.c_str());
+    }
   }
 
   // Schedule the reboot for 1 second from now. This gives the confirm
@@ -2347,11 +2468,15 @@ static const char* factoryreset_confirmed(void* /*userData*/) {
   // users.json is gone and the reboot is scheduled — the reset is committed.
   systemEventPost(SYSEVT_FACTORY_RESET, currentExecUser().c_str());
 
-  logSystemEvent("SETUP", "factory reset — %s deleted; rebooting to setup wizard", USERS_JSON_FILE);
+  logSystemEvent("SETUP", "factory reset — accounts, pending requests, user settings and account "
+                 "transcripts deleted%s; rebooting to setup wizard",
+                 sdSkipped ? " (SD card not mounted: /sd/stt kept)" : "");
 
   snprintf(respBuf, sizeof(respBuf),
-           "Factory reset complete. %s deleted. Rebooting in 1 second to start setup wizard...",
-           USERS_JSON_FILE);
+           "Factory reset complete. Accounts, pending requests, user settings and account "
+           "transcripts/notes deleted.%s%s Rebooting in 1 second to start setup wizard...",
+           sdSkipped ? " SD card not mounted: its /sd/stt folders were kept." : "",
+           settingsLeft.length() ? " Some user settings files could not be removed." : "");
   return respBuf;
 }
 
@@ -2366,6 +2491,8 @@ const char* cmd_factoryreset(const String& argsInput) {
   String prompt =
     "Confirm FACTORY RESET? This will:\n"
     "  - Delete all user accounts (/system/users/users.json)\n"
+    "  - Delete pending account requests and every user's settings\n"
+    "  - Delete every account's transcripts and notes (/stt/u*, /sd/stt/u*)\n"
     "  - Reboot the device\n"
     "  - First-time setup wizard runs on next boot\n"
     "Settings (WiFi credentials, debug flags) are PRESERVED.\n"
@@ -2412,7 +2539,6 @@ const char* cmd_wait(const String& argsInput) {
 // cmd_testencryption, cmd_testpassword now implemented above
 // cmd_temperature, cmd_voltage, cmd_cpufreq now implemented above
 // cmd_reboot, cmd_broadcast, cmd_wait now implemented above
-extern const char* cmd_pending_list(const String& argsInput);
 // cmd_lightsleep now implemented above
 
 // Main/Core command registry (commands that remain in main .ino file)
@@ -2551,15 +2677,17 @@ extern const CommandEntry commands[] = {
     "\n"
     "Restores for that one boot only — a normal reboot returns to configured\n"
     "autostart. Never changes your autostart settings." },
-  { "factoryreset", "Wipe user accounts and reboot to re-run setup wizard.", true,
+  { "factoryreset", "Wipe user accounts and their data and reboot to re-run setup wizard.", true,
     cmd_factoryreset,
     "Usage: factoryreset (no args, confirmation required)\n"
-    "Deletes /system/users/users.json so the first-time setup wizard runs\n"
-    "on next boot. WiFi credentials and other settings are preserved.",
+    "Deletes /system/users/users.json, pending account requests, every user's\n"
+    "settings file and every account's transcripts and notes (/stt/u*, /sd/stt/u*),\n"
+    "so the first-time setup wizard runs on next boot. WiFi credentials and\n"
+    "other settings are preserved.",
     /*requiresSuperAdmin=*/true },
   { "broadcast", "Send a message to all connected output interfaces.", true, cmd_broadcast,
     "Usage: broadcast <message>" },
-  { "pendinglist", "List pending user requests.", true, cmd_pending_list },
+  // pendinglist is registered by the users module (System_User.cpp).
   { "wait", "Delay execution for N milliseconds: wait <ms>.", false, cmd_wait,
     "Usage: wait <ms>  (1..60000)" },
   { "sleep", "Alias for wait: sleep <ms>.", false, cmd_wait,
@@ -4784,58 +4912,6 @@ static bool sessionCommandTargetAvailable(CommandSource source) {
   return false;
 }
 
-struct TargetLoginThrottle {
-  CommandSource source = SOURCE_WEB;  // == 0 so the static array below is a
-                                      // valid all-zero NOLOAD image; a virgin
-                                      // zero slot mismatches every reachable
-                                      // caller exactly like the old sentinel
-  char user[kPublicUsernameMaxLen + 1] = {};
-  uint8_t failures = 0;
-  uint32_t lockedUntilMs = 0;
-};
-EXT_RAM_BSS_ATTR static TargetLoginThrottle sTargetLoginThrottle[3];  // PSRAM: cmd_exec only; holds public usernames + counters, no secrets
-
-static TargetLoginThrottle& targetLoginThrottleFor(const AuthContext& caller) {
-  size_t index = caller.transport == SOURCE_SERIAL ? 0 :
-                 caller.transport == SOURCE_UART ? 1 : 2;
-  TargetLoginThrottle& slot = sTargetLoginThrottle[index];
-  if (slot.source != caller.transport || caller.user != slot.user) {
-    slot = TargetLoginThrottle{};
-    slot.source = caller.transport;
-    strlcpy(slot.user, caller.user.c_str(), sizeof(slot.user));
-  }
-  return slot;
-}
-
-static bool targetedLoginThrottleAllows(const AuthContext& caller,
-                                        uint32_t& retrySecondsOut) {
-  TargetLoginThrottle& slot = targetLoginThrottleFor(caller);
-  const uint32_t now = millis();
-  if (slot.lockedUntilMs != 0 &&
-      static_cast<int32_t>(slot.lockedUntilMs - now) > 0) {
-    retrySecondsOut = (slot.lockedUntilMs - now + 999) / 1000;
-    return false;
-  }
-  if (slot.lockedUntilMs != 0) {
-    slot.failures = 0;
-    slot.lockedUntilMs = 0;
-  }
-  retrySecondsOut = 0;
-  return true;
-}
-
-static void targetedLoginThrottleRecord(const AuthContext& caller,
-                                        bool success) {
-  TargetLoginThrottle& slot = targetLoginThrottleFor(caller);
-  if (success) {
-    slot.failures = 0;
-    slot.lockedUntilMs = 0;
-    return;
-  }
-  if (slot.failures < UINT8_MAX) slot.failures++;
-  if (slot.failures >= 5) slot.lockedUntilMs = millis() + 60000UL;
-}
-
 const char* cmd_login(const String& originalCmd) {
   // Bare login is caller-relative. A supplied target is a distinct,
   // privileged operation and is authorized against the exact live source
@@ -4878,13 +4954,16 @@ const char* cmd_login(const String& originalCmd) {
   // it must stop before lockout counters, password verification, or mutation.
   RETURN_VALID_IF_VALIDATE_CSTR();
 
+  // A targeted login guesses from the caller's own console, so it counts in
+  // that console's entry of the credential attempt table.
+  const char* callerPeer = credentialAttemptConsolePeer(caller.transport);
   if (targeted) {
-    uint32_t retrySeconds = 0;
-    if (!targetedLoginThrottleAllows(caller, retrySeconds)) {
+    unsigned long retryMs = 0;
+    if (!credentialAttemptAllowed(caller.transport, callerPeer, &retryMs)) {
       EXT_RAM_BSS_ATTR static char throttleBuf[96];
       snprintf(throttleBuf, sizeof(throttleBuf),
                "Error: targeted login locked out. Retry in %lu seconds.",
-               static_cast<unsigned long>(retrySeconds));
+               (retryMs + 999UL) / 1000UL);
       return throttleBuf;
     }
   }
@@ -4896,7 +4975,8 @@ const char* cmd_login(const String& originalCmd) {
     loginOk = commandCtx && loginTransportFromNamedSession(
         transport, username, password, caller.transport, caller.user,
         commandCtx->transportSessionEpoch);
-    targetedLoginThrottleRecord(caller, loginOk);
+    credentialAttemptRecord(caller.transport, callerPeer, username.c_str(),
+                            loginOk);
   } else {
     loginOk = loginTransport(transport, username, password);
   }
@@ -4949,10 +5029,11 @@ const char* cmd_logout(const String& originalCmd) {
   if (targeted) {
     const CommandContext* commandCtx =
         static_cast<const CommandContext*>(currentCommandContext());
+    const char* denial = nullptr;
     if (!commandCtx || !logoutTransportFromNamedSession(
             transport, caller.transport, caller.user,
-            commandCtx->transportSessionEpoch)) {
-      return "Error: submitting session changed before logout.";
+            commandCtx->transportSessionEpoch, &denial)) {
+      return denial ? denial : "Error: submitting session changed before logout.";
     }
   } else {
     logoutTransport(transport);

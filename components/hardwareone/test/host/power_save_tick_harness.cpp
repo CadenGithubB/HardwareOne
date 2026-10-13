@@ -18,7 +18,18 @@ static uint32_t inputSeq = 1;
 static bool cooldownAllowed = true, micBusy = false, sttActive = false;
 static bool uartRunning = false;
 static int uartBaud = 0;
+// The camera's own busy answer (open stream or recording sessions). The old
+// web-owned status flag stays defined and false: it must not be what holds
+// power-save off.
+static bool cameraSessionOpen = false;
+bool cameraCaptureBusy() { return cameraSessionOpen; }
 bool cameraStreaming = false;
+#ifndef ENABLE_CAMERA_SENSOR
+#define ENABLE_CAMERA_SENSOR 1
+#endif
+#if !ENABLE_CAMERA_SENSOR
+#error "the camera branch of the power-save inhibitor must be compiled"
+#endif
 static bool gOledRunning = true;
 static struct {
   uint32_t powerSaveTimeoutMinutes = 1;
@@ -226,9 +237,10 @@ static void test(const std::string& name) {
   } else if (name == "inhibited") {
     micBusy = true;
     idle(); check(trace.empty() && gOledRunning, "microphone activity delays idle entry");
-    micBusy = false; cameraStreaming = true;
-    idle(); check(trace.empty() && gOledRunning, "camera activity delays idle entry");
-    cameraStreaming = false; cooldownAllowed = false;
+    micBusy = false; cameraSessionOpen = true;
+    idle(); check(trace.empty() && gOledRunning,
+                  "an open camera stream or recording session delays idle entry");
+    cameraSessionOpen = false; cooldownAllowed = false;
     idle(); check(trace.empty(), "cooldown refusal performs no clock or display mutation");
     cooldownAllowed = true; ++nowMs; powerSaveTick(); enterTrace();
   } else if (name == "normal") {

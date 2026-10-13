@@ -599,151 +599,51 @@ esp_err_t handleCameraFrame(httpd_req_t* req) {
   return ESP_OK;
 }
 
-// Camera MJPEG stream endpoint (auth-protected): returns multipart JPEG stream
-esp_err_t handleCameraStream(httpd_req_t* req) {
-  WEB_AUTH_OR_RETURN(req, ctx);
+// The camera has no MJPEG stream endpoint: a stream loop would hold the single
+// httpd task for as long as a viewer stays connected. Clients poll
+// /api/sensors/camera/frame instead.
 
-#if ENABLE_CAMERA_SENSOR
-  extern bool gCameraRunning;
-  extern bool cameraStreaming;
-  extern uint8_t* captureFrame(size_t* outLen);
-  extern Settings gSettings;
-  extern String getCookieSID(httpd_req_t* req);
-  
-  if (!gCameraRunning) {
-    httpd_resp_set_status(req, "503 Service Unavailable");
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_send(req, "Camera not enabled", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
+#if ENABLE_MICROPHONE
+// getRecordingsList() returns "name:size,name:size". A file name may itself
+// hold ',' or ':', so an entry ends only at a ',' (or the end of the list)
+// that follows ":<size>", and the size is what follows the entry's last ':'.
+// An entry without a well-formed size is skipped. Names are JSON-escaped.
+// The count falls out of the same parse (no second walk of the folders).
+static String buildRecordingsListJson(const String& list) {
+  String files;
+  int count = 0;
+  int start = 0;
+  const int length = (int)list.length();
+  for (int pos = 0; pos <= length; ++pos) {
+    if (pos < length && list[pos] != ',') continue;
+    const String item = list.substring(start, pos);
+    const int colon = item.lastIndexOf(':');
+    const int digits = (int)item.length() - colon - 1;
+    bool sized = colon > 0 && digits > 0 && (digits == 1 || item[colon + 1] != '0');
+    for (int i = colon + 1; sized && i < (int)item.length(); ++i) {
+      sized = item[i] >= '0' && item[i] <= '9';
+    }
+    if (!sized && pos < length) continue;  // this ',' is part of the name
+    if (sized) {
+      if (count) files += ",";
+      files += "{\"name\":";
+      files += webJsonString(item.substring(0, colon));
+      files += ",\"size\":";
+      files += item.substring(colon + 1);
+      files += "}";
+      count++;
+    }
+    start = pos + 1;
   }
 
-  // Single-stream lock: only allow one active MJPEG client at a time.
-  // Key by session cookie SID; fall back to IP if SID missing.
-  static String s_streamOwner;
-  static unsigned long s_streamLastBeat = 0;
-  static uint32_t s_streamGen = 0;
-  String sid = getCookieSID(req);
-  char keyBuf[64];
-  snprintf(keyBuf, sizeof(keyBuf), "%s:%s", sid.length() ? "sid" : "ip", sid.length() ? sid.c_str() : ctx.ip.c_str());
-  String key = keyBuf;
-  unsigned long nowMs = millis();
-  const unsigned long staleMs = 5000UL;
-  bool stale = (s_streamOwner.length() > 0) && ((long)(nowMs - s_streamLastBeat) > (long)staleMs);
-  if (s_streamOwner.length() > 0 && s_streamOwner != key && !stale) {
-    httpd_resp_set_status(req, "409 Conflict");
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_send(req, "Camera stream already in use by another session", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  // Takeover semantics: if a new stream is requested (even from same session),
-  // bump generation so the old loop will exit on its next iteration.
-  s_streamOwner = key;
-  uint32_t myGen = ++s_streamGen;
-  s_streamLastBeat = nowMs;
-
-  // Set MJPEG multipart content type
-  httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=frame");
-  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-  httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
-
-  char partHeader[128];
-  unsigned long lastFrameSentMs = 0;
-  // Stream indefinitely until client disconnects (or error occurs)
-  // Previously limited to 300 frames (~30s) but users expect continuous streaming
-  
-  // Set streaming flag for status indicator
-  cameraStreaming = true;
-  
-  while (true) {
-    // Heartbeat ownership; helps new sessions take over if client drops.
-    s_streamLastBeat = millis();
-
-    // If a newer stream has taken over, exit quickly.
-    if (myGen != s_streamGen) {
-      break;
-    }
-
-    // If camera is stopped while a client is streaming, end stream promptly.
-    if (!gCameraRunning) {
-      break;
-    }
-
- #if ENABLE_EDGE_IMPULSE
-    if (isContinuousInferenceRunning()) {
-      unsigned long now = millis();
-      // cameraStreamFps is 1..20; convert to ms per frame.
-      int fps = (gSettings.cameraStreamFps > 0) ? gSettings.cameraStreamFps : 5;
-      int delayMs = 1000 / fps;
-      if (delayMs < 50) delayMs = 50;
-      if (delayMs > 2000) delayMs = 2000;
-
-      int minIntervalMs = delayMs;
-      if (gSettings.edgeImpulseIntervalMs > 0) {
-        int halfEI = gSettings.edgeImpulseIntervalMs / 2;
-        if (halfEI > minIntervalMs) minIntervalMs = halfEI;
-      }
-      if (minIntervalMs < 200) minIntervalMs = 200;
-
-      if (lastFrameSentMs && (long)(now - lastFrameSentMs) < (long)minIntervalMs) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-        continue;
-      }
-    }
- #endif
-
-    size_t len = 0;
-    uint8_t* frame = captureFrame(&len);
-    if (!frame || len == 0) {
-      vTaskDelay(pdMS_TO_TICKS(100));
-      continue;
-    }
-
-    // Send boundary and headers
-    int hdrLen = snprintf(partHeader, sizeof(partHeader),
-      "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", (unsigned)len);
-    
-    esp_err_t err = httpd_resp_send_chunk(req, partHeader, hdrLen);
-    if (err != ESP_OK) {
-      free(frame);
-      break;  // Client disconnected
-    }
-
-    // Send frame data
-    err = httpd_resp_send_chunk(req, (const char*)frame, len);
-    free(frame);
-    if (err != ESP_OK) break;
-
-    lastFrameSentMs = millis();
-
-    // Send trailing newline
-    err = httpd_resp_send_chunk(req, "\r\n", 2);
-    if (err != ESP_OK) break;
-
-    // cameraStreamFps is 1..20; convert to ms per frame.
-    int fps2 = (gSettings.cameraStreamFps > 0) ? gSettings.cameraStreamFps : 5;
-    int delayMs = 1000 / fps2;
-    if (delayMs < 50) delayMs = 50;
-    if (delayMs > 2000) delayMs = 2000;
-    vTaskDelay(pdMS_TO_TICKS(delayMs));
-  }
-
-  // Clear streaming flag when done
-  cameraStreaming = false;
-  
-  // Release stream lock if we still own it.
-  if (s_streamOwner == key && myGen == s_streamGen) {
-    s_streamOwner = "";
-  }
-
-  // End multipart stream
-  httpd_resp_send_chunk(req, NULL, 0);
-#else
-  httpd_resp_set_status(req, "501 Not Implemented");
-  httpd_resp_set_type(req, "text/plain");
-  httpd_resp_send(req, "Camera not compiled", HTTPD_RESP_USE_STRLEN);
-#endif
-  return ESP_OK;
+  char jsonHdr[32];
+  snprintf(jsonHdr, sizeof(jsonHdr), "{\"count\":%d,\"files\":[", count);
+  String json = jsonHdr;
+  json += files;
+  json += "]}";
+  return json;
 }
+#endif
 
 // Microphone recordings list endpoint (auth-protected)
 esp_err_t handleMicRecordingsList(httpd_req_t* req) {
@@ -766,37 +666,7 @@ esp_err_t handleMicRecordingsList(httpd_req_t* req) {
   // httpd is single-task, so that time blocks every other request, including the
   // camera preview. Do not reintroduce a count-only walk.
   String list = getRecordingsList();
-
-  // Build the files array first so the count falls out of the same parse.
-  String files = "";
-  int count = 0;
-  if (list.length() > 0) {
-    // Parse "name:size,name:size" format
-    int start = 0;
-    while (start < (int)list.length()) {
-      int comma = list.indexOf(',', start);
-      if (comma < 0) comma = list.length();
-
-      String item = list.substring(start, comma);
-      int colon = item.indexOf(':');
-      if (colon > 0) {
-        String name = item.substring(0, colon);
-        String size = item.substring(colon + 1);
-
-        if (count) files += ",";
-        files += "{\"name\":\"" + name + "\",\"size\":" + size + "}";
-        count++;
-      }
-      start = comma + 1;
-    }
-  }
-
-  char jsonHdr[32];
-  snprintf(jsonHdr, sizeof(jsonHdr), "{\"count\":%d,\"files\":[", count);
-  String json = jsonHdr;
-  json += files;
-  json += "]}";
-  
+  String json = buildRecordingsListJson(list);
   sendJsonResponse(req, json.c_str(), json.length());
 #else
   sendJsonResponse(req, "{\"count\":0, \"files\":[],\"error\":\"not_compiled\"}");
@@ -1171,10 +1041,8 @@ void registerSensorHandlers(httpd_handle_t server) {
   // Camera endpoints
   static const httpd_uri_t cameraStatus = { .uri = "/api/sensors/camera/status", .method = HTTP_GET, .handler = handleCameraStatus, .user_ctx = NULL };
   static const httpd_uri_t cameraFrame = { .uri = "/api/sensors/camera/frame", .method = HTTP_GET, .handler = handleCameraFrame, .user_ctx = NULL };
-  static const httpd_uri_t cameraStream = { .uri = "/api/sensors/camera/stream", .method = HTTP_GET, .handler = handleCameraStream, .user_ctx = NULL };
   httpd_register_uri_handler(server, &cameraStatus);
   httpd_register_uri_handler(server, &cameraFrame);
-  httpd_register_uri_handler(server, &cameraStream);
   
   // Microphone recording endpoints
   static const httpd_uri_t micRecordings = { .uri = "/api/recordings", .method = HTTP_GET, .handler = handleMicRecordingsList, .user_ctx = NULL };

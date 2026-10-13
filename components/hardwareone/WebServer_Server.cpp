@@ -187,47 +187,8 @@ void httpServerStopPendingTick() {
 
 void sseEnqueueNotice(SessionEntry& s, const String& msg);  // Forward declaration
 
-void broadcastNoticeToAllSessions(const String& message) {
-  if (!gSessions) return;
-  DEBUG_SSEF("Broadcasting notice to all sessions: %s", message.c_str());
-  for (int i = 0; i < MAX_SESSIONS; i++) {
-    if (gSessions[i].sid.length() > 0) {
-      sseEnqueueNotice(gSessions[i], message);
-      DEBUG_SSEF("Enqueued notice for session %d (user: %s) qCount=%d", i, gSessions[i].user.c_str(), gSessions[i].nqCount);
-    }
-  }
-}
-
-void broadcastEventToAllSessions(const char* eventName, const char* jsonData) {
-  if (!gSessions || !eventName || !jsonData) return;
-  for (int i = 0; i < MAX_SESSIONS; i++) {
-    if (gSessions[i].sid.length() > 0) {
-      sseEnqueueEvent(gSessions[i], eventName, jsonData);
-    }
-  }
-}
-
-// Predicate-filtered variant: enqueue only to sessions whose authenticated
-// username passes `allow`. Used by System_Notifications for per-user toast
-// visibility (admin-only kinds, personal mutes).
-void broadcastEventToSessionsIf(const char* eventName, const char* jsonData,
-                                bool (*allow)(const char* username, void* arg), void* arg) {
-  if (!gSessions || !eventName || !jsonData) return;
-  for (int i = 0; i < MAX_SESSIONS; i++) {
-    if (gSessions[i].sid.length() == 0) continue;
-    if (allow && !allow(gSessions[i].user.c_str(), arg)) continue;
-    sseEnqueueEvent(gSessions[i], eventName, jsonData);
-  }
-}
-
-uint32_t sseEventDropsTotal() {
-  if (!gSessions) return 0;
-  uint32_t total = 0;
-  for (int i = 0; i < MAX_SESSIONS; i++) {
-    if (gSessions[i].sid.length() > 0) total += gSessions[i].eqDropped;
-  }
-  return total;
-}
+// The broadcast helpers and the fenced queue accessors live after the
+// session fence below.
 
 void sendSSEBurstToSession(int sessionIndex, const String& eventData) {
   if (sessionIndex < 0 || sessionIndex >= MAX_SESSIONS) return;
@@ -285,6 +246,10 @@ std::atomic<TransportSessionEpoch> sWebSessionEpoch[MAX_SESSIONS];
 // SessionEntry table while cmd_exec is fencing a queued command.
 static constexpr size_t kWebSessionSidChars = 32;
 char sWebSessionSid[MAX_SESSIONS][kWebSessionSidChars + 1] = {};
+// Per-slot generation, bumped under the fence whenever a slot is cleared,
+// replaced or revoked. A caller that released the fence compares it to know
+// the slot still holds the session it looked at.
+uint32_t sWebSessionSlotGeneration[MAX_SESSIONS] = {};
 StaticSemaphore_t sWebSessionFenceMutexStorage;
 SemaphoreHandle_t sWebSessionFenceMutex =
     xSemaphoreCreateRecursiveMutexStatic(&sWebSessionFenceMutexStorage);
@@ -308,6 +273,7 @@ void webInvalidateSessionSlotLocked(int idx) {
   TransportSessionEpoch old =
       sWebSessionEpoch[idx].exchange(0, std::memory_order_acq_rel);
   sWebSessionSid[idx][0] = '\0';
+  ++sWebSessionSlotGeneration[idx];
   transportSessionClose(SOURCE_WEB, old);
 }
 
@@ -337,6 +303,113 @@ bool webPublishSessionSlot(int idx) {
   return true;
 }
 }  // namespace
+
+// ============================================================================
+// SSE fan-out and per-session queues
+// ============================================================================
+// Producers run on other tasks (the main-loop notification tick, BLE and G2
+// workers); handleEvents and handleNotice drain the queues on httpd, and login,
+// logout and revoke replace slots there. Every queue access and slot read below
+// runs under WebSessionFenceGuard. The guard is never held across a viewer
+// predicate (it reads flash) or a socket write.
+
+void broadcastNoticeToAllSessions(const String& message) {
+  WebSessionFenceGuard guard;
+  if (!guard || !gSessions) return;
+  DEBUG_SSEF("Broadcasting notice to all sessions: %s", message.c_str());
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    if (gSessions[i].sid.length() > 0) {
+      sseEnqueueNotice(gSessions[i], message);
+      DEBUG_SSEF("Enqueued notice for session %d (user: %s) qCount=%d", i, gSessions[i].user.c_str(), gSessions[i].nqCount);
+    }
+  }
+}
+
+void broadcastEventToAllSessions(const char* eventName, const char* jsonData) {
+  if (!eventName || !jsonData) return;
+  WebSessionFenceGuard guard;
+  if (!guard || !gSessions) return;
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    if (gSessions[i].sid.length() > 0) {
+      sseEnqueueEvent(gSessions[i], eventName, jsonData);
+    }
+  }
+}
+
+// Predicate-filtered variant: enqueue only to sessions whose authenticated
+// username passes `allow`. Used by System_Notifications for per-user toast
+// visibility (admin-only kinds, personal mutes). The predicate runs on a copy
+// of the username with the fence released; the event is queued only if the
+// slot generation is unchanged, so a slot that was signed out or handed to
+// another login meanwhile never receives a decision made for its old user.
+void broadcastEventToSessionsIf(const char* eventName, const char* jsonData,
+                                bool (*allow)(const char* username, void* arg), void* arg) {
+  if (!eventName || !jsonData) return;
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    uint32_t generation = 0;
+    String user;
+    {
+      WebSessionFenceGuard guard;
+      if (!guard || !gSessions) return;
+      if (gSessions[i].sid.length() == 0) continue;
+      generation = sWebSessionSlotGeneration[i];
+      if (allow) user = gSessions[i].user;
+    }
+    if (allow && !allow(user.c_str(), arg)) continue;
+    WebSessionFenceGuard guard;
+    if (!guard || !gSessions) return;
+    if (sWebSessionSlotGeneration[i] != generation || gSessions[i].sid.length() == 0) continue;
+    sseEnqueueEvent(gSessions[i], eventName, jsonData);
+  }
+}
+
+uint32_t sseEventDropsTotal() {
+  WebSessionFenceGuard guard;
+  if (!guard || !gSessions) return 0;
+  uint32_t total = 0;
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    if (gSessions[i].sid.length() > 0) total += gSessions[i].eqDropped;
+  }
+  return total;
+}
+
+// handleEvents' side of the queues. `sid` is the session the SSE request was
+// bound to: once that slot is cleared or holds another login these return
+// false rather than draining the new session's queue.
+bool webSessionDequeueSseEvent(int idx, const String& sid,
+                               String& outEventName, String& outData) {
+  if (idx < 0 || idx >= MAX_SESSIONS || sid.length() == 0) return false;
+  WebSessionFenceGuard guard;
+  if (!guard || !gSessions || gSessions[idx].sid != sid) return false;
+  return sseDequeueEvent(gSessions[idx], outEventName, outData);
+}
+
+bool webSessionDequeueSseNotice(int idx, const String& sid, String& out) {
+  if (idx < 0 || idx >= MAX_SESSIONS || sid.length() == 0) return false;
+  WebSessionFenceGuard guard;
+  if (!guard || !gSessions || gSessions[idx].sid != sid) return false;
+  return sseDequeueNotice(gSessions[idx], out);
+}
+
+// Clears the pending-delivery flag once both of the session's queues are empty.
+void webSessionSettleSseQueues(int idx, const String& sid) {
+  if (idx < 0 || idx >= MAX_SESSIONS || sid.length() == 0) return;
+  WebSessionFenceGuard guard;
+  if (!guard || !gSessions || gSessions[idx].sid != sid) return;
+  if (gSessions[idx].nqCount == 0 && gSessions[idx].eqCount == 0) {
+    gSessions[idx].needsNotificationTick = false;
+  }
+}
+
+// Records a delivered sensor-status snapshot taken at `seqSent`. The update
+// flag stays set if the main loop published a newer status meanwhile.
+void webSessionMarkStatusSent(int idx, const String& sid, unsigned long seqSent) {
+  if (idx < 0 || idx >= MAX_SESSIONS || sid.length() == 0) return;
+  WebSessionFenceGuard guard;
+  if (!guard || !gSessions || gSessions[idx].sid != sid) return;
+  gSessions[idx].lastSensorSeqSent = seqSent;
+  if (gSensorStatusSeq == seqSent) gSessions[idx].needsStatusUpdate = false;
+}
 
 TransportSessionEpoch webSessionEpochForSID(const String& sid) {
   if (sid.length() != kWebSessionSidChars) return 0;
@@ -808,19 +881,23 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
     ScopedStringZeroize baPassZeroize(baPass);
     bool hdrPresent = false;
     if (decodeBasicAuth(req, baUser, baPass, hdrPresent) && hdrPresent) {
-      // Check lockout before attempting credential validation
-      if (isLoginLocked(ipBuf)) {
+      // Check lockout before attempting credential validation. A locked
+      // request is not audited: API clients retry stale credentials on a
+      // timer and would flood the failed-login log.
+      if (!credentialAttemptAllowed(SOURCE_WEB, ipBuf)) {
         DEBUG_AUTHF("[auth] Basic Auth blocked — IP %s is locked out", ipBuf);
         BROADCAST_PRINTF("[auth] basicauth blocked locked ip=%s uri=%.*s", ipBuf, 120, uri);
         return false;
       }
       if (isValidUser(baUser, baPass)) {
-        clearLoginAttempts(ipBuf);
+        credentialAttemptRecord(SOURCE_WEB, ipBuf, baUser.c_str(), true);
         outUser = baUser;
         DEBUG_AUTHF("[auth] Basic Auth OK for user=%s uri=%.*s", baUser.c_str(), 120, uri);
         return true;
       }
-      recordFailedLogin(ipBuf);
+      credentialAttemptRecord(SOURCE_WEB, ipBuf, baUser.c_str(), false);
+      recordLoginAttempt(SOURCE_WEB, baUser, String(ipBuf), false, "Invalid credentials");
+      systemEventPost(SYSEVT_LOGIN_FAIL, baUser.c_str(), "web");
       DEBUG_AUTHF("[auth] Basic Auth FAILED for user=%s uri=%.*s", baUser.c_str(), 120, uri);
     }
     BROADCAST_PRINTF("[auth] no session cookie for uri=%.*s", 120, uri);
@@ -1079,114 +1156,18 @@ bool hasLogoutReason(const char* ip) {
 // Brute-Force / Login Rate Limiting
 // ============================================================================
 
-EXT_RAM_BSS_ATTR static LoginAttemptEntry sLoginAttempts[MAX_LOGIN_ATTEMPT_ENTRIES];
-
-// Cumulative count of failed login attempts since boot. Distinct from the
-// per-IP failCount in sLoginAttempts (which is windowed + clears on success):
-// this counter is monotonic, surfaces in the OLED Web Stats card, and answers
-// the "did anyone try to brute me this session?" question regardless of window
-// expiry or successful retry. uint32_t wraps after ~4 billion failures, which
-// the tiered lockout makes physically impossible inside one boot.
-static uint32_t sTotalFailedLogins = 0;
-
-// Find the entry for the given IP, or a free/oldest slot if createIfMissing is true.
-static LoginAttemptEntry* findLoginEntry(const char* ip, bool createIfMissing = false) {
-  if (!ip || ip[0] == '\0') return nullptr;
-  LoginAttemptEntry* freeSlot = nullptr;
-  LoginAttemptEntry* oldestSlot = nullptr;
-  unsigned long oldestTime = 0xFFFFFFFFUL;
-
-  for (int i = 0; i < MAX_LOGIN_ATTEMPT_ENTRIES; i++) {
-    LoginAttemptEntry* e = &sLoginAttempts[i];
-    if (e->ip[0] != '\0' && strcmp(e->ip, ip) == 0) return e;
-    if (createIfMissing) {
-      if (e->ip[0] == '\0' && !freeSlot) freeSlot = e;
-      if (e->windowStart < oldestTime) { oldestTime = e->windowStart; oldestSlot = e; }
-    }
-  }
-  if (!createIfMissing) return nullptr;
-  LoginAttemptEntry* slot = freeSlot ? freeSlot : oldestSlot;
-  if (slot) memset(slot, 0, sizeof(*slot));
-  return slot;
-}
-
-// Returns the lockout duration in ms for a given cumulative failure count.
-static unsigned long lockoutDurationMs(uint8_t count) {
-  if (count >= LOGIN_LOCKOUT_TIER3_COUNT) return LOGIN_LOCKOUT_TIER3_MS;
-  if (count >= LOGIN_LOCKOUT_TIER2_COUNT) return LOGIN_LOCKOUT_TIER2_MS;
-  if (count >= LOGIN_LOCKOUT_TIER1_COUNT) return LOGIN_LOCKOUT_TIER1_MS;
-  return 0;
-}
-
+// The table lives in System_User (credentialAttempt*); the web keys it by
+// client IP. These adapters serve callers that have no account name.
 bool isLoginLocked(const char* ip, unsigned long* remainingMs) {
-  if (remainingMs) *remainingMs = 0;
-  LoginAttemptEntry* e = findLoginEntry(ip);
-  if (!e || e->ip[0] == '\0') return false;
-
-  unsigned long now = millis();
-
-  // Expire the entire window if it has rolled over
-  if (e->windowStart > 0 && (now - e->windowStart) > LOGIN_ATTEMPT_WINDOW_MS) {
-    memset(e, 0, sizeof(*e));
-    return false;
-  }
-
-  if (e->lockedUntil == 0) return false;
-
-  if ((long)(now - e->lockedUntil) >= 0) {
-    // Lockout timer has elapsed — clear it but keep failCount so next failure
-    // immediately re-locks at the same (or next) tier
-    e->lockedUntil = 0;
-    return false;
-  }
-
-  if (remainingMs) *remainingMs = e->lockedUntil - now;
-  return true;
+  return !credentialAttemptAllowed(SOURCE_WEB, ip, remainingMs);
 }
 
 void recordFailedLogin(const char* ip) {
-  if (!ip || ip[0] == '\0') return;
-  unsigned long now = millis();
-
-  LoginAttemptEntry* e = findLoginEntry(ip, /*createIfMissing=*/true);
-  if (!e) return;
-
-  // If entry is new or its window has expired, start a fresh window
-  if (e->ip[0] == '\0' || (e->windowStart > 0 && (now - e->windowStart) > LOGIN_ATTEMPT_WINDOW_MS)) {
-    memset(e, 0, sizeof(*e));
-    strncpy(e->ip, ip, sizeof(e->ip) - 1);
-    e->windowStart = now;
-  }
-
-  e->failCount++;
-  sTotalFailedLogins++;
-  unsigned long lockMs = lockoutDurationMs(e->failCount);
-  if (lockMs > 0) {
-    e->lockedUntil = now + lockMs;
-    DEBUG_AUTHF("[brute] IP=%s failures=%d locked=%lus", ip, (int)e->failCount, lockMs / 1000UL);
-    BROADCAST_PRINTF("[auth] login locked ip=%s failures=%d duration=%lus", ip, (int)e->failCount, lockMs / 1000UL);
-    char lockSec[16];
-    snprintf(lockSec, sizeof(lockSec), "%lus", lockMs / 1000UL);
-    systemEventPost(SYSEVT_LOGIN_LOCKED, ip, lockSec);
-  } else {
-    DEBUG_AUTHF("[brute] IP=%s failures=%d (below lockout threshold)", ip, (int)e->failCount);
-  }
+  credentialAttemptRecord(SOURCE_WEB, ip, "", false);
 }
 
 void clearLoginAttempts(const char* ip) {
-  LoginAttemptEntry* e = findLoginEntry(ip);
-  if (e) {
-    DEBUG_AUTHF("[brute] cleared attempt record for IP=%s (successful login)", ip);
-    memset(e, 0, sizeof(*e));
-  }
-}
-
-// Cumulative since-boot count, exposed to the OLED Web Stats card (and any
-// future caller — keep it cheap; no locking). Intentionally not reset by
-// clearLoginAttempts() — successful login clears the per-IP rate-limit state
-// but the audit count keeps climbing.
-uint32_t getTotalFailedLoginCount() {
-  return sTotalFailedLogins;
+  credentialAttemptForget(SOURCE_WEB, ip);
 }
 
 // ============================================================================
@@ -1194,86 +1175,170 @@ uint32_t getTotalFailedLoginCount() {
 // ============================================================================
 
 EXT_RAM_BSS_ATTR static IpBanEntry sIpBans[MAX_IP_BANS];
-static bool sIpBansLoaded = false;
+static std::atomic<bool> sIpBansLoaded{false};
+// True while the in-memory list holds a change ip_bans.json does not; a
+// repeated ban of an already banned IP retries the save.
+static bool sIpBansUnsaved = false;
+// sIpBans is read on the httpd task (isIpBanned) and changed from cmd_exec.
+// The lock covers only the in-memory table. File I/O, encryption, session
+// revocation and output run outside it, so it never nests with other locks.
+static StaticSemaphore_t sIpBanMutexStorage;
+static SemaphoreHandle_t sIpBanMutex = xSemaphoreCreateRecursiveMutexStatic(&sIpBanMutexStorage);
+
+class IpBanLock {
+ public:
+  IpBanLock()
+      : locked_(sIpBanMutex && xSemaphoreTakeRecursive(sIpBanMutex, portMAX_DELAY) == pdTRUE) {}
+  ~IpBanLock() {
+    if (locked_) xSemaphoreGiveRecursive(sIpBanMutex);
+  }
+  IpBanLock(const IpBanLock&) = delete;
+  IpBanLock& operator=(const IpBanLock&) = delete;
+
+ private:
+  bool locked_;
+};
+
+static IpBanEntry* allocIpBanTable() {
+  return (IpBanEntry*)ps_calloc(MAX_IP_BANS, sizeof(IpBanEntry), AllocPref::PreferPSRAM, "ipbans.stage");
+}
+
 // Forward declaration — defined below after session helpers
 void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg);
 
-void loadIpBans() {
-  memset(sIpBans, 0, sizeof(sIpBans));
-  sIpBansLoaded = true;
-  if (!filesystemReady || !VFS::existsGuarded(IP_BANS_FILE, VFS::systemAuth("ipbans.load"))) return;
-
-  FsLockGuard guard("ipbans.load");
-  File f = VFS::openGuarded(IP_BANS_FILE, "r", VFS::systemAuth("ipbans.load"));
-  if (!f) return;
-
-  PSRAM_JSON_DOC(doc);
-  DeserializationError err = deserializeJson(doc, f);
-  f.close();
-  if (err) { DEBUG_AUTHF("[ipban] load error: %s", err.c_str()); return; }
-
-  JsonArray bans = doc["bans"];
-  int count = 0;
-  for (JsonObject ban : bans) {
-    if (count >= MAX_IP_BANS) break;
-    const char* ipRaw = ban["ip"] | "";
-    if (ipRaw[0] == '\0') continue;
-
-    // Decrypt IP — all entries on disk are AES-encrypted
-    String ipStr;
-    if (strncmp(ipRaw, "AES:", 4) == 0) {
-      ipStr = decryptString(String(ipRaw));
-      if (ipStr.length() == 0) {
-        DEBUG_AUTHF("[ipban] load: decryption failed for entry %d, skipping", count);
-        continue;
-      }
-    } else {
-      // Plain-text entry (written before encryption was added) — accept but
-      // it will be re-encrypted on the next saveIpBans()
-      DEBUG_AUTHF("[ipban] load: plain-text IP found (will re-encrypt on next save)");
-      ipStr = String(ipRaw);
-    }
-
-    strncpy(sIpBans[count].ip, ipStr.c_str(), sizeof(sIpBans[count].ip) - 1);
-    const char* reason = ban["reason"] | "";
-    strncpy(sIpBans[count].reason, reason, sizeof(sIpBans[count].reason) - 1);
-    sIpBans[count].bannedAt = ban["bannedAt"] | 0UL;
-    count++;
+// Reads ip_bans.json and installs it. With replace=false the list is
+// installed only if no list is loaded yet (first use on any task), so a lazy
+// load never overwrites a ban added in the meantime.
+static void loadIpBansFromFile(bool replace) {
+  IpBanEntry* staged = allocIpBanTable();
+  if (!staged) {
+    // Leave the list unloaded so the next use retries, rather than install
+    // an empty list that would lift every ban.
+    DEBUG_AUTHF("[ipban] load: out of memory");
+    return;
   }
+  int count = 0;
+  if (filesystemReady && VFS::existsGuarded(IP_BANS_FILE, VFS::systemAuth("ipbans.load"))) {
+    PSRAM_JSON_DOC(doc);
+    DeserializationError err = DeserializationError::InvalidInput;
+    {
+      FsLockGuard guard("ipbans.load");
+      File f = VFS::openGuarded(IP_BANS_FILE, "r", VFS::systemAuth("ipbans.load"));
+      if (f) {
+        err = deserializeJson(doc, f);
+        f.close();
+      }
+    }
+    if (err) { DEBUG_AUTHF("[ipban] load error: %s", err.c_str()); }
+
+    JsonArray bans = doc["bans"];
+    for (JsonObject ban : bans) {
+      if (err || count >= MAX_IP_BANS) break;
+      const char* ipRaw = ban["ip"] | "";
+      if (ipRaw[0] == '\0') continue;
+
+      // Decrypt IP — all entries on disk are AES-encrypted
+      String ipStr;
+      if (strncmp(ipRaw, "AES:", 4) == 0) {
+        ipStr = decryptString(String(ipRaw));
+        if (ipStr.length() == 0) {
+          DEBUG_AUTHF("[ipban] load: decryption failed for entry %d, skipping", count);
+          continue;
+        }
+      } else {
+        // Plain-text entry (written before encryption was added) — accept but
+        // it will be re-encrypted on the next saveIpBans()
+        DEBUG_AUTHF("[ipban] load: plain-text IP found (will re-encrypt on next save)");
+        ipStr = String(ipRaw);
+      }
+
+      strncpy(staged[count].ip, ipStr.c_str(), sizeof(staged[count].ip) - 1);
+      const char* reason = ban["reason"] | "";
+      strncpy(staged[count].reason, reason, sizeof(staged[count].reason) - 1);
+      staged[count].bannedAt = ban["bannedAt"] | 0UL;
+      count++;
+    }
+  }
+
+  bool installed = false;
+  {
+    IpBanLock lock;
+    if (replace || !sIpBansLoaded.load()) {
+      memcpy(sIpBans, staged, sizeof(sIpBans));
+      sIpBansUnsaved = false;
+      sIpBansLoaded.store(true);
+      installed = true;
+    }
+  }
+  free(staged);
+  if (!installed) return;
   DEBUG_AUTHF("[ipban] loaded %d ban(s)", count);
   if (count > 0) { BROADCAST_PRINTF("[auth] loaded %d IP ban(s) from flash", count); }
 }
 
+void loadIpBans() { loadIpBansFromFile(true); }
+
+static void ensureIpBansLoaded() {
+  if (!sIpBansLoaded.load()) loadIpBansFromFile(false);
+}
+
+// Replaces ip_bans.json through the checked atomic writer. False means the
+// file was not replaced and still holds the previous list.
 static bool saveIpBans() {
   if (!filesystemReady) return false;
 
+  IpBanEntry* snapshot = allocIpBanTable();
+  if (!snapshot) return false;
+  {
+    IpBanLock lock;
+    memcpy(snapshot, sIpBans, sizeof(sIpBans));
+  }
+
   PSRAM_JSON_DOC(doc);
   JsonArray bans = doc["bans"].to<JsonArray>();
-  for (int i = 0; i < MAX_IP_BANS; i++) {
-    if (sIpBans[i].ip[0] == '\0') continue;
+  bool encrypted = true;
+  for (int i = 0; i < MAX_IP_BANS && encrypted; i++) {
+    if (snapshot[i].ip[0] == '\0') continue;
     // Encrypt IP before writing to disk — never store plain-text
-    String encryptedIp = encryptString(String(sIpBans[i].ip));
+    String encryptedIp = encryptString(String(snapshot[i].ip));
     if (encryptedIp.length() == 0) {
-      DEBUG_AUTHF("[ipban] save: encryption failed for entry %d, skipping", i);
-      continue;
+      DEBUG_AUTHF("[ipban] save: encryption failed for entry %d", i);
+      encrypted = false;
+      break;
     }
     JsonObject ban = bans.add<JsonObject>();
     ban["ip"]       = encryptedIp;
-    ban["reason"]   = sIpBans[i].reason;
-    ban["bannedAt"] = sIpBans[i].bannedAt;
+    ban["reason"]   = snapshot[i].reason;
+    ban["bannedAt"] = snapshot[i].bannedAt;
   }
+  free(snapshot);
+  if (!encrypted || doc.overflowed()) return false;
 
-  FsLockGuard guard("ipbans.save");
-  File f = VFS::openGuarded(IP_BANS_FILE, "w", VFS::systemAuth("ipbans.save"));
-  if (!f) return false;
-  size_t written = serializeJson(doc, f);
-  f.close();
-  return written > 0;
+  const size_t expected = measureJson(doc);
+  String json;
+  serializeJson(doc, json);
+  if (json.length() != expected) return false;
+  return writeTextAtomic(IP_BANS_FILE, json);
+}
+
+// Saves the list; on failure the in-memory list stays as it is and is marked
+// unsaved. Returns the save result.
+static bool persistIpBans(const char* ip, const char* change) {
+  const bool saved = saveIpBans();
+  {
+    IpBanLock lock;
+    sIpBansUnsaved = !saved;
+  }
+  if (!saved) {
+    BROADCAST_PRINTF("[auth] %s %s is in effect but was not saved to %s", change, ip, IP_BANS_FILE);
+  }
+  return saved;
 }
 
 bool isIpBanned(const char* ip) {
   if (!ip || ip[0] == '\0') return false;
-  if (!sIpBansLoaded) loadIpBans();
+  ensureIpBansLoaded();
+  IpBanLock lock;
   for (int i = 0; i < MAX_IP_BANS; i++) {
     if (sIpBans[i].ip[0] != '\0' && strcmp(sIpBans[i].ip, ip) == 0) return true;
   }
@@ -1282,69 +1347,108 @@ bool isIpBanned(const char* ip) {
 
 bool banIp(const char* ip, const char* reason) {
   if (!ip || ip[0] == '\0') return false;
-  if (!sIpBansLoaded) loadIpBans();
+  ensureIpBansLoaded();
 
-  // Already banned — treat as success (idempotent)
-  for (int i = 0; i < MAX_IP_BANS; i++) {
-    if (sIpBans[i].ip[0] != '\0' && strcmp(sIpBans[i].ip, ip) == 0) return true;
-  }
-
-  // Find a free slot
-  for (int i = 0; i < MAX_IP_BANS; i++) {
-    if (sIpBans[i].ip[0] == '\0') {
-      strncpy(sIpBans[i].ip, ip, sizeof(sIpBans[i].ip) - 1);
+  bool alreadyBanned = false;
+  bool retrySave = false;
+  bool added = false;
+  {
+    IpBanLock lock;
+    int freeSlot = -1;
+    for (int i = 0; i < MAX_IP_BANS; i++) {
+      if (sIpBans[i].ip[0] != '\0' && strcmp(sIpBans[i].ip, ip) == 0) {
+        alreadyBanned = true;
+        retrySave = sIpBansUnsaved;
+        break;
+      }
+      if (freeSlot < 0 && sIpBans[i].ip[0] == '\0') freeSlot = i;
+    }
+    if (!alreadyBanned && freeSlot >= 0) {
+      IpBanEntry& entry = sIpBans[freeSlot];
+      memset(&entry, 0, sizeof(entry));
+      strncpy(entry.ip, ip, sizeof(entry.ip) - 1);
       if (reason && reason[0]) {
-        strncpy(sIpBans[i].reason, reason, sizeof(sIpBans[i].reason) - 1);
+        strncpy(entry.reason, reason, sizeof(entry.reason) - 1);
       }
-      sIpBans[i].bannedAt = millis();
-
-      // Kick any active sessions from this IP
-      for (int j = 0; j < MAX_SESSIONS; j++) {
-        if (gSessions[j].sid.length() > 0 && gSessions[j].ip == ip) {
-          enqueueTargetedRevokeForSessionIdx(j, "Your access has been revoked by an administrator.");
-        }
-      }
-      // Also clear any brute-force tracking for this IP (no longer needed)
-      clearLoginAttempts(ip);
-
-      DEBUG_AUTHF("[ipban] banned %s reason='%s'", ip, reason ? reason : "");
-      systemEventPost(SYSEVT_IP_BANNED, ip, reason);
-      return saveIpBans();
+      entry.bannedAt = millis();
+      added = true;
     }
   }
 
-  // No free slot
-  DEBUG_AUTHF("[ipban] ban list full, could not ban %s", ip);
-  return false;
+  // Already banned — treat as success (idempotent); retry an earlier failed save.
+  if (alreadyBanned) return retrySave ? persistIpBans(ip, "ban on") : true;
+
+  if (!added) {
+    DEBUG_AUTHF("[ipban] ban list full, could not ban %s", ip);
+    return false;
+  }
+
+  // Kick any active sessions from this IP
+  for (int j = 0; j < MAX_SESSIONS; j++) {
+    if (gSessions[j].sid.length() > 0 && gSessions[j].ip == ip) {
+      enqueueTargetedRevokeForSessionIdx(j, "Your access has been revoked by an administrator.");
+    }
+  }
+  // Also clear any brute-force tracking for this IP (no longer needed)
+  clearLoginAttempts(ip);
+
+  DEBUG_AUTHF("[ipban] banned %s reason='%s'", ip, reason ? reason : "");
+  systemEventPost(SYSEVT_IP_BANNED, ip, reason);
+  // A failed save keeps the ban in force (fail closed) until reboot.
+  return persistIpBans(ip, "ban on");
 }
 
 bool unbanIp(const char* ip) {
   if (!ip || ip[0] == '\0') return false;
-  if (!sIpBansLoaded) loadIpBans();
+  ensureIpBansLoaded();
 
-  for (int i = 0; i < MAX_IP_BANS; i++) {
-    if (sIpBans[i].ip[0] != '\0' && strcmp(sIpBans[i].ip, ip) == 0) {
-      memset(&sIpBans[i], 0, sizeof(sIpBans[i]));
-      DEBUG_AUTHF("[ipban] unbanned %s", ip);
-      return saveIpBans();
+  IpBanEntry removed{};
+  int slot = -1;
+  {
+    IpBanLock lock;
+    for (int i = 0; i < MAX_IP_BANS; i++) {
+      if (sIpBans[i].ip[0] != '\0' && strcmp(sIpBans[i].ip, ip) == 0) {
+        removed = sIpBans[i];
+        memset(&sIpBans[i], 0, sizeof(sIpBans[i]));
+        slot = i;
+        break;
+      }
     }
   }
+  if (slot < 0) return false;  // not found
 
-  return false;  // not found
+  DEBUG_AUTHF("[ipban] unbanned %s", ip);
+  if (saveIpBans()) {
+    IpBanLock lock;
+    sIpBansUnsaved = false;
+    return true;
+  }
+
+  // The saved list still holds the ban; keep it in force so memory matches
+  // the file (fail closed).
+  {
+    IpBanLock lock;
+    if (sIpBans[slot].ip[0] == '\0') sIpBans[slot] = removed;
+  }
+  BROADCAST_PRINTF("[auth] unban of %s was not saved to %s; the ban stays", ip, IP_BANS_FILE);
+  return false;
 }
 
 void broadcastBanList() {
-  if (!sIpBansLoaded) loadIpBans();
+  ensureIpBansLoaded();
   broadcastOutput("IP Ban List:");
   broadcastOutput("  IP                                     Reason");
   broadcastOutput("  -------------------------------------  ------------------------------------------------");
   int count = 0;
   for (int i = 0; i < MAX_IP_BANS; i++) {
-    if (sIpBans[i].ip[0] == '\0') continue;
     char line[140];
-    snprintf(line, sizeof(line), "  %-37s  %s",
-             sIpBans[i].ip,
-             sIpBans[i].reason[0] ? sIpBans[i].reason : "(no reason)");
+    {
+      IpBanLock lock;
+      if (sIpBans[i].ip[0] == '\0') continue;
+      snprintf(line, sizeof(line), "  %-37s  %s",
+               sIpBans[i].ip,
+               sIpBans[i].reason[0] ? sIpBans[i].reason : "(no reason)");
+    }
     broadcastOutput(line);
     count++;
   }
@@ -1360,18 +1464,27 @@ void broadcastBanList() {
 // this file). Returned to the caller via getDebugBuffer; called by cmd_banlist
 // when `json` is requested.
 const char* banListJson() {
-  if (!sIpBansLoaded) loadIpBans();
+  ensureIpBansLoaded();
   PSRAM_JSON_DOC(doc);
   doc["schema"] = 1;
   JsonArray arr = doc["bans"].to<JsonArray>();
-  for (int i = 0; i < MAX_IP_BANS; i++) {
-    if (sIpBans[i].ip[0] == '\0') continue;
-    JsonObject o = arr.add<JsonObject>();
-    o["ip"]     = sIpBans[i].ip;
-    o["reason"] = sIpBans[i].reason[0] ? sIpBans[i].reason : "";
+  {
+    IpBanLock lock;
+    for (int i = 0; i < MAX_IP_BANS; i++) {
+      if (sIpBans[i].ip[0] == '\0') continue;
+      JsonObject o = arr.add<JsonObject>();
+      o["ip"]     = sIpBans[i].ip;
+      o["reason"] = sIpBans[i].reason[0] ? sIpBans[i].reason : "";
+    }
   }
   doc["count"] = (int)arr.size();
-  serializeJson(doc, getDebugBuffer(), 1024);
+  if (doc.overflowed()) return "{\"error\":\"out of memory building the ban list\"}";
+  if (!ensureDebugBuffer()) return "{\"error\":\"reply buffer unavailable\"}";
+  // Whole document or an explicit error; never a truncated one.
+  if (measureJson(doc) >= GLOBAL_DEBUG_BUFFER_SIZE) {
+    return "{\"error\":\"ban list too large for the reply buffer\"}";
+  }
+  serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
   return getDebugBuffer();
 }
 
@@ -3115,12 +3228,12 @@ esp_err_t handleUserSettingsSet(httpd_req_t* req) {
     return ESP_OK;
   }
   
-  // Reject attempts to set password fields via this API (use setUserPassword instead)
-  // This prevents storing unhashed passwords
-  if (!patch["password"].isNull() || !patch["gamepad_password"].isNull()) {
-    DEBUG_HTTPF("[UserSettings] POST rejected password field user=%s userId=%u", ctx.user.c_str(), (unsigned)userId);
+  // The settings owner accepts preference keys only; credentials and the
+  // forced-password-change flag are refused whatever their value.
+  if (const char* refused = userSettingsPatchRefusedKey(patch)) {
+    DEBUG_HTTPF("[UserSettings] POST refused key=%.40s user=%s userId=%u", refused, ctx.user.c_str(), (unsigned)userId);
     httpd_resp_set_status(req, "400 Bad Request");
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"password_not_allowed\"}");
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"setting_not_allowed\"}");
     return ESP_OK;
   }
 
@@ -3267,22 +3380,28 @@ esp_err_t handleNotice(httpd_req_t* req) {
   }
 
   String sid = getCookieSID(req);
-  WebSessionFenceGuard sessionGuard;
-  int idx = findSessionIndexBySID(sid);
   String note = "";
-  if (sessionGuard && idx >= 0) {
-    // Dequeue one notice from the ring if available
-    String dequeued;
-    if (sseDequeueNotice(gSessions[idx], dequeued)) {
-      note = dequeued;
-      // If this is a revoke notice, immediately clear the session and expire cookie
-      if (note.startsWith("[revoke]")) {
-        webInvalidateSessionSlot(idx);
-        gSessions[idx] = SessionEntry();
-        writeSessionCookie(req, String());  // empty sid → Max-Age=0
+  bool revoked = false;
+  {
+    // The fence covers only the queue and slot update; the cookie header and
+    // the response are written after it is released.
+    WebSessionFenceGuard sessionGuard;
+    int idx = findSessionIndexBySID(sid);
+    if (sessionGuard && idx >= 0) {
+      // Dequeue one notice from the ring if available
+      String dequeued;
+      if (sseDequeueNotice(gSessions[idx], dequeued)) {
+        note = dequeued;
+        // If this is a revoke notice, immediately clear the session and expire cookie
+        if (note.startsWith("[revoke]")) {
+          webInvalidateSessionSlot(idx);
+          gSessions[idx] = SessionEntry();
+          revoked = true;
+        }
       }
     }
   }
+  if (revoked) writeSessionCookie(req, String());  // empty sid → Max-Age=0
   String escaped = jsonEscape(note);
   char jsonBuf[256];
   snprintf(jsonBuf, sizeof(jsonBuf), "{\"success\":true,\"notice\":\"%.*s\"}", (int)(sizeof(jsonBuf) - 40), escaped.c_str());
@@ -3969,7 +4088,7 @@ esp_err_t handleLogin(httpd_req_t* req) {
   getClientIP(req, ip);
   {
     unsigned long remainingMs = 0;
-    if (isLoginLocked(ip.c_str(), &remainingMs)) {
+    if (!credentialAttemptAllowed(SOURCE_WEB, ip.c_str(), &remainingMs)) {
       unsigned long remainingSec = (remainingMs + 999UL) / 1000UL;  // round up
       char lockMsg[80];
       snprintf(lockMsg, sizeof(lockMsg),
@@ -3991,7 +4110,7 @@ esp_err_t handleLogin(httpd_req_t* req) {
   if (u.length() == 0 || p.length() == 0 || !validUser) {
     // Record failure (only when credentials were actually submitted)
     if (u.length() > 0 && p.length() > 0) {
-      recordFailedLogin(ip.c_str());
+      credentialAttemptRecord(SOURCE_WEB, ip.c_str(), u.c_str(), false);
       // Audit log: failed login attempt (password redacted by redactCmdForAudit)
       AuthContext auditCtx;
       auditCtx.transport = SOURCE_WEB;
@@ -4007,10 +4126,10 @@ esp_err_t handleLogin(httpd_req_t* req) {
     systemEventPost(SYSEVT_LOGIN_FAIL, u.c_str(), "web");
 
     // Show login form with error — include remaining attempts before first lockout
-    LoginAttemptEntry* e = findLoginEntry(ip.c_str());
+    const uint8_t failCount = credentialAttemptFailures(SOURCE_WEB, ip.c_str());
     String errorMsg = "Invalid username or password";
-    if (e && e->failCount > 0) {
-      int attemptsUntilLock = LOGIN_LOCKOUT_TIER1_COUNT - (int)e->failCount;
+    if (failCount > 0) {
+      int attemptsUntilLock = LOGIN_LOCKOUT_TIER1_COUNT - (int)failCount;
       if (attemptsUntilLock > 0 && attemptsUntilLock <= 2) {
         char warnBuf[80];
         snprintf(warnBuf, sizeof(warnBuf),
@@ -4030,8 +4149,8 @@ esp_err_t handleLogin(httpd_req_t* req) {
   // Success -> create session immediately and set cookie in this response
   BROADCAST_PRINTF("[login] Login successful for user: %s", u.c_str());
 
-  // Clear brute-force record and any existing logout reason for this IP
-  clearLoginAttempts(ip.c_str());
+  // Clear this account's brute-force record and any logout reason for this IP
+  credentialAttemptRecord(SOURCE_WEB, ip.c_str(), u.c_str(), true);
   recordLoginAttempt(SOURCE_WEB, u, ip, true, "Login successful");
   systemEventPost(SYSEVT_LOGIN_OK, u.c_str(), "web");
 
@@ -4201,7 +4320,8 @@ static esp_err_t sendRegisterFailPage(httpd_req_t* req, const char* message) {
   return ESP_OK;
 }
 
-// Registration submit: use unified CLI command for consistency
+// Registration submit: validates the form and files the request with the
+// account owner (submitAccountRequest); no command line is built.
 esp_err_t handleRegisterSubmit(httpd_req_t* req) {
   String ip;
   getClientIP(req, ip);
@@ -4280,26 +4400,27 @@ esp_err_t handleRegisterSubmit(httpd_req_t* req) {
                  : "Password is too long (max 64 characters).");
   }
 
-  // Execute via unified pipeline so it is logged/audited. Username/password are
-  // allowlisted/length-capped above, so they fit cmdBuf safely.
-  AuthContext ctx = makeWebAuthCtx(req);
-  char cmdBuf[256];
-  snprintf(cmdBuf, sizeof(cmdBuf), "userrequest %s %s %s",
-           username.c_str(), password.c_str(), confirmPassword.c_str());
-  String out;
-  bool ok = executeUnifiedWebCommand(req, ctx, String(cmdBuf), out);
-  ok = ok || (out.indexOf("Request submitted for") >= 0);
-
-  if (!ok) {
-    recordFailedLogin(ip.c_str());
-    // Map known command errors to fixed public strings — never echo `out`.
+  // The account owner takes the decoded password as typed. Only a rejected
+  // field counts toward the lockout; an existing request, a full queue or a
+  // storage fault is not a credential guess.
+  const AccountRequestResult result = submitAccountRequest(username, password);
+  if (result != AccountRequestResult::Submitted) {
     const char* msg = "Unable to submit request. Please try again later.";
-    if (out.indexOf("already pending") >= 0) {
-      msg = "That username is already pending approval.";
-    } else if (out.indexOf("Too many pending") >= 0) {
-      msg = "Too many pending requests. Please try again later.";
-    } else if (out.indexOf("LittleFS") >= 0 || out.indexOf("pending list") >= 0) {
-      msg = "Unable to submit request. Please try again later.";
+    switch (result) {
+      case AccountRequestResult::InvalidUsername:
+      case AccountRequestResult::PasswordTooShort:
+      case AccountRequestResult::PasswordTooLong:
+        recordFailedLogin(ip.c_str());
+        msg = "Invalid username or password.";
+        break;
+      case AccountRequestResult::AlreadyPending:
+        msg = "That username is already pending approval.";
+        break;
+      case AccountRequestResult::QueueFull:
+        msg = "Too many pending requests. Please try again later.";
+        break;
+      default:
+        break;
     }
     return sendRegisterFailPage(req, msg);
   }
@@ -4467,11 +4588,7 @@ esp_err_t handleFilesCreate(httpd_req_t* req) {
     if (success) {
       httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
     } else {
-      // Extract error message and return as JSON
-      String errorMsg = resultStr;
-      errorMsg.replace("\"", "\\\"");  // Escape quotes for JSON
-      String jsonResponse = "{\"success\":false,\"error\":\"" + errorMsg + "\"}";
-      httpd_resp_send(req, jsonResponse.c_str(), HTTPD_RESP_USE_STRLEN);
+      sendJsonError(req, resultStr);
     }
   } else {
     // Normalize extension in path
@@ -4480,18 +4597,14 @@ esp_err_t handleFilesCreate(httpd_req_t* req) {
     }
     // Route through unified executor using CLI-equivalent command
     // (path is a quoted token — uniform quoted-path rule).
-    char cmdBuf[128];
-    snprintf(cmdBuf, sizeof(cmdBuf), "filecreate \"%s\"", path.c_str());
-    String cmd = cmdBuf;
+    String cmd = "filecreate " + quotePath(path);
     String out;
     bool ok = executeUnifiedWebCommand(req, ctx, cmd, out);
     httpd_resp_set_type(req, "application/json");
     if (ok) {
       httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
     } else {
-      char respBuf[256];
-      snprintf(respBuf, sizeof(respBuf), "{\"success\":false,\"error\":\"%s\"}", out.c_str());
-      httpd_resp_send(req, respBuf, HTTPD_RESP_USE_STRLEN);
+      sendJsonError(req, out);
     }
   }
 
@@ -5090,8 +5203,9 @@ esp_err_t handleIconGet(httpd_req_t* req) {
   const uint8_t* pngPtr = (const uint8_t*)pgm_read_ptr(&icon->pngData);
   size_t pngSize = (size_t)pgm_read_dword(&icon->pngSize);
 
+  // Header values are read at httpd_resp_send, so sz lives at function scope.
+  char sz[16];
   if (debug) {
-    char sz[16];
     snprintf(sz, sizeof(sz), "%u", (unsigned)pngSize);
     httpd_resp_set_hdr(req, "X-Icon-Name", name);
     httpd_resp_set_hdr(req, "X-Icon-Size", sz);
@@ -5260,9 +5374,7 @@ esp_err_t handleAdminApproveUser(httpd_req_t* req) {
   if (ok) {
     httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
   } else {
-    char errBuf[256];
-    snprintf(errBuf, sizeof(errBuf), "{\"success\":false,\"error\":\"%s\"}", err.c_str());
-    httpd_resp_send(req, errBuf, HTTPD_RESP_USE_STRLEN);
+    sendJsonError(req, err);
   }
   return ESP_OK;
 }
@@ -5293,10 +5405,7 @@ esp_err_t handleAdminDenyUser(httpd_req_t* req) {
 
   String err;
   if (!denyPendingUserInternal(username, err)) {
-    httpd_resp_set_type(req, "application/json");
-    char errBuf[256];
-    snprintf(errBuf, sizeof(errBuf), "{\"success\":false,\"error\":\"%s\"}", err.c_str());
-    httpd_resp_send(req, errBuf, HTTPD_RESP_USE_STRLEN);
+    sendJsonError(req, err);
     return ESP_OK;
   }
 
@@ -5308,6 +5417,22 @@ esp_err_t handleAdminDenyUser(httpd_req_t* req) {
 // ============================================================================
 // Automation Export Handler (Batch 5 - migrated from .ino)
 // ============================================================================
+
+// Content-Disposition value for one exported automation. The name keeps only
+// letters, digits, '-', '_' and '.' (anything else becomes '_') and at most 48
+// characters, so it can neither end the quoted filename nor name a path.
+static void automationExportDisposition(const String& name, char* out, size_t outSize) {
+  char safe[49];
+  size_t n = 0;
+  for (size_t i = 0; i < name.length() && n < sizeof(safe) - 1; ++i) {
+    const char c = name[i];
+    const bool keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                      (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+    safe[n++] = keep ? c : '_';
+  }
+  safe[n] = '\0';
+  snprintf(out, outSize, "attachment; filename=\"%s.json\"", n ? safe : "automation");
+}
 
 esp_err_t handleAutomationsExport(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
@@ -5357,15 +5482,14 @@ esp_err_t handleAutomationsExport(httpd_req_t* req) {
       if (!parseJsonString(targetAuto, "name", name) || name.length() == 0) {
         name = "automation";
       }
-      // Sanitize filename
-      name.replace(" ", "_");
-      name.replace("/", "_");
-      name.replace("\\", "_");
-      String filename = name + ".json";
+      // httpd_resp_set_hdr keeps the pointer until httpd_resp_send, so the
+      // value lives in this block, which ends after the send.
+      char disposition[96];
+      automationExportDisposition(name, disposition, sizeof(disposition));
 
       // Set download headers
       httpd_resp_set_type(req, "application/json");
-      httpd_resp_set_hdr(req, "Content-Disposition", ("attachment; filename=\"" + filename + "\"").c_str());
+      httpd_resp_set_hdr(req, "Content-Disposition", disposition);
 
       // Export is an authenticated response, not a secret-backup channel:
       // stored command credentials must remain server-side.
@@ -5454,6 +5578,10 @@ bool sseDequeueNotice(SessionEntry& s, String& out) {
 
 void broadcastSensorStatusToAllSessions() {
   DEBUG_SSEF("broadcastSensorStatusToAllSessions called - seq: %lu", (unsigned long)gSensorStatusSeq);
+  // Runs on the main loop while httpd replaces and clears slots: read the
+  // table under the session fence (in-memory work and queued debug only).
+  WebSessionFenceGuard guard;
+  if (!guard || !gSessions) return;
   int flagged = 0;
 
   // Flag all active sessions as needing status updates
