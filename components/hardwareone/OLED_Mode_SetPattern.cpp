@@ -41,6 +41,9 @@ static String sFirstPattern = "";
 static bool sKeyboardActive = false;
 static unsigned long sMessageUntil = 0;
 static bool sAuthUsingGamepad = false;  // True if authenticating with gamepad password
+// Seconds left on the display's attempt-table lock when the last
+// re-authentication was refused by it (0: the password itself was wrong).
+static unsigned long sAuthLockedSeconds = 0;
 
 void oledSetPatternModeResetSessionState() {
   sKeyboardActive = false;
@@ -48,6 +51,7 @@ void oledSetPatternModeResetSessionState() {
   secureClearString(sFirstPattern);
   sMessageUntil = 0;
   sAuthUsingGamepad = false;
+  sAuthLockedSeconds = 0;
 }
 
 static void startPatternKeyboard(const char* title) {
@@ -117,7 +121,13 @@ static void displaySetPatternMode() {
       break;
     
     case PATTERN_STEP_AUTH_FAILED:
-      {
+      if (sAuthLockedSeconds > 0) {
+        oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
+        oledDisplay->println("Too many attempts.");
+        char retryLine[24];
+        snprintf(retryLine, sizeof(retryLine), "Retry in %lu s.", sAuthLockedSeconds);
+        oledDisplay->println(retryLine);
+      } else {
         oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
         oledDisplay->println("Incorrect password.");
         oledDisplay->println("Please try again.");
@@ -195,16 +205,31 @@ static bool handleSetPatternInput(int deltaX, int deltaY, uint32_t newlyPressed)
       // Handle auth steps
       if (sStep == PATTERN_STEP_AUTH_GAMEPAD || sStep == PATTERN_STEP_AUTH_TEXT) {
         String currentUser = getTransportUser(SOURCE_LOCAL_DISPLAY);
-        if (currentUser.length() > 0 && isValidUser(currentUser, inputStr)) {
+        // Re-authentication guesses the signed-in account's password from the
+        // panel, so it counts under the display's attempt-table entry like
+        // the display login does.
+        unsigned long lockoutRetryMs = 0;
+        const CredentialCheck check =
+            currentUser.length() > 0
+                ? checkCredentialAttempt(SOURCE_LOCAL_DISPLAY,
+                                         credentialAttemptConsolePeer(SOURCE_LOCAL_DISPLAY),
+                                         currentUser.c_str(), inputStr.c_str(),
+                                         &lockoutRetryMs)
+                : CredentialCheck::Invalid;
+        secureClearString(inputStr);
+        sAuthLockedSeconds = check == CredentialCheck::LockedOut
+                                 ? (lockoutRetryMs + 999UL) / 1000UL
+                                 : 0;
+        if (check == CredentialCheck::Valid) {
           // Auth successful - proceed to set new pattern
-          secureClearString(inputStr);
           sStep = PATTERN_STEP_ENTER;
           DEBUG_SYSTEMF("[SETPATTERN] Auth successful for user '%s'", currentUser.c_str());
         } else {
-          // Auth failed
-          secureClearString(inputStr);
+          // Auth failed or refused by the lockout
           sStep = PATTERN_STEP_AUTH_FAILED;
-          DEBUG_SYSTEMF("[SETPATTERN] Auth failed for user '%s'", currentUser.c_str());
+          DEBUG_SYSTEMF("[SETPATTERN] Auth %s for user '%s'",
+                        check == CredentialCheck::LockedOut ? "locked out" : "failed",
+                        currentUser.c_str());
         }
         return true;
       }

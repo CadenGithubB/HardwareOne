@@ -201,11 +201,23 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
         // long enough to post the event, and erase both credentials here too;
         // the owner-side boundary reset is the second line of defence.
         String attemptedUser = usernameBuffer;
-        if (loginTransport(SOURCE_LOCAL_DISPLAY, usernameBuffer, passwordBuffer)) {
+        // The owner throttles the display under its attempt-table entry; a
+        // refusal there checked no password, so it posts no login event.
+        unsigned long lockoutRetryMs = 0;
+        if (loginTransport(SOURCE_LOCAL_DISPLAY, usernameBuffer, passwordBuffer,
+                           &lockoutRetryMs)) {
           systemEventPost(SYSEVT_LOGIN_OK, attemptedUser.c_str(), "display");
           resetLoginSessionState();
           secureClearString(attemptedUser);
           return true;
+        } else if (lockoutRetryMs > 0) {
+          secureClearString(attemptedUser);
+          char lockedText[24];
+          snprintf(lockedText, sizeof(lockedText), "Locked out %lus",
+                   (lockoutRetryMs + 999UL) / 1000UL);
+          errorMessage = lockedText;
+          errorDisplayUntil = millis() + 3000;
+          oledMarkDirtyUntil(errorDisplayUntil);
         } else {
           systemEventPost(SYSEVT_LOGIN_FAIL, attemptedUser.c_str(), "display");
           secureClearString(attemptedUser);

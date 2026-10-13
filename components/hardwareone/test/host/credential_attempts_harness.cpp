@@ -65,6 +65,27 @@ void systemEventPost(uint8_t kind, const char* subject, const char* detail) {
   }
 }
 
+// checkCredentialAttempt validates through isValidUser: a host String and a
+// counting double that accepts only admin/right.
+struct String {
+  std::string text;
+  String(const char* value) : text(value ? value : "") {}
+};
+static int gValidations = 0;
+static std::string gLastPasswordChecked;
+bool isValidUser(const String& user, const String& password) {
+  ++gValidations;
+  gLastPasswordChecked = password.text;
+  return user.text == "admin" && password.text == "right";
+}
+// Counts wipes of the password copy isValidUser was just given.
+static int gPasswordCopiesWiped = 0;
+void secureClearString(String& s) {
+  if (!s.text.empty() && s.text == gLastPasswordChecked) ++gPasswordCopiesWiped;
+  for (char& c : s.text) c = '\0';
+  s.text.clear();
+}
+
 // INSERT_DECLARATIONS
 
 // INSERT_PRODUCTION
@@ -362,6 +383,89 @@ static void scenarioForget() {
   finish(name);
 }
 
+#if HARNESS_CURRENT_TABLE
+static bool samePeer(const char* actual, const char* expected) {
+  if (!actual || !expected) return actual == expected;
+  return std::strcmp(actual, expected) == 0;
+}
+
+// Bluetooth and ESP-NOW each count under one reserved key: a full web pool
+// cannot refuse them, and a peer label that changes (a rotated address)
+// still counts in the transport's one entry.
+static void scenarioRadioKeys() {
+  const char* name = "Bluetooth and ESP-NOW have one reserved key each";
+  begin();
+  check(samePeer(credentialAttemptConsolePeer(SOURCE_BLUETOOTH), "ble"), name,
+        "Bluetooth's fixed peer is \"ble\"");
+  check(samePeer(credentialAttemptConsolePeer(SOURCE_ESPNOW), "espnow"), name,
+        "ESP-NOW's fixed peer is \"espnow\"");
+  check(credentialAttemptConsolePeer(SOURCE_WEB) == nullptr &&
+            credentialAttemptConsolePeer(SOURCE_MQTT) == nullptr,
+        name, "the web and MQTT name their peer themselves");
+  for (size_t i = 0; i < kHarnessPoolSlots; ++i) {
+    char peer[32];
+    std::snprintf(peer, sizeof(peer), "203.0.113.%u", static_cast<unsigned>(i));
+    failTimes(SOURCE_WEB, peer, "admin", 5);
+  }
+  check(allowed(SOURCE_BLUETOOTH, "ble"), name,
+        "a web pool full of locks does not refuse Bluetooth logins");
+  check(allowed(SOURCE_ESPNOW, "espnow"), name,
+        "a web pool full of locks does not refuse ESP-NOW logins");
+  failTimes(SOURCE_ESPNOW, "espnow", "admin", 2);
+  failTimes(SOURCE_ESPNOW, "espnow:another-label", "admin", 3);
+  check(!allowed(SOURCE_ESPNOW, "espnow"), name,
+        "five ESP-NOW failures lock its key whatever the peer label");
+  check(credentialAttemptFailures(SOURCE_ESPNOW, "espnow") == 5, name,
+        "one entry counts all five");
+  check(allowed(SOURCE_BLUETOOTH, "ble"), name, "Bluetooth keeps its own entry");
+  failTimes(SOURCE_BLUETOOTH, "ble", "admin", 5);
+  check(!allowed(SOURCE_BLUETOOTH, "ble"), name, "and locks in it");
+  check(allowed(SOURCE_SERIAL, "local") && allowed(SOURCE_LOCAL_DISPLAY, "display") &&
+            allowed(SOURCE_MQTT, "mqtt:broker.example"),
+        name, "the radio locks leave the consoles and MQTT open");
+  finish(name);
+}
+#endif
+
+// The check-validate-record helper: a locked key refuses even the right
+// password without validating it; otherwise the outcome is recorded.
+static void scenarioCheckAttempt() {
+  const char* name = "checkCredentialAttempt refuses a locked key unchecked";
+  begin();
+#if HAS_CHECK_ATTEMPT
+  gValidations = 0;
+  gPasswordCopiesWiped = 0;
+  unsigned long retry = 7;
+  for (int i = 0; i < 5; ++i) {
+    check(checkCredentialAttempt(SOURCE_ESPNOW, "espnow", "admin", "wrong", &retry) ==
+              CredentialCheck::Invalid,
+          name, "a wrong password is Invalid");
+  }
+  check(retry == 0, name, "no retry time unless refused");
+  check(gValidations == 5, name, "five passwords were validated");
+  check(checkCredentialAttempt(SOURCE_ESPNOW, "espnow", "admin", "right", &retry) ==
+            CredentialCheck::LockedOut,
+        name, "the locked key refuses the right password");
+  check(gValidations == 5, name, "without validating it");
+  check(retry == LOGIN_LOCKOUT_TIER1_MS, name, "and reports the lock's time left");
+  gNow += retry;
+  check(checkCredentialAttempt(SOURCE_ESPNOW, "espnow", "admin", "right", nullptr) ==
+            CredentialCheck::Valid,
+        name, "the right password is Valid once the lock ends");
+  check(credentialAttemptFailures(SOURCE_ESPNOW, "espnow") == 0, name,
+        "and clears the account's failures");
+  check(gValidations == 6 && gPasswordCopiesWiped == 6, name,
+        "the helper wipes its copy of every password it validated");
+  check(checkCredentialAttempt(SOURCE_LOCAL_DISPLAY, "display", nullptr, nullptr) ==
+            CredentialCheck::Invalid,
+        name, "missing names are Invalid, not a crash");
+  check(gCriticalDepth == 0 && gOutputInsideLock == 0, name, "lock discipline");
+#else
+  check(false, name, "checkCredentialAttempt is missing from System_User");
+#endif
+  finish(name);
+}
+
 int main() {
   scenarioTiers();
   scenarioIsolation();
@@ -375,6 +479,10 @@ int main() {
   scenarioEventsAndTotals();
   scenarioLongIdle();
   scenarioForget();
+#if HARNESS_CURRENT_TABLE
+  scenarioRadioKeys();
+#endif
+  scenarioCheckAttempt();
   std::fprintf(stderr, "checks=%d\n", gChecks);
   std::printf("%d scenario(s) failed\n", gFailures);
   return gFailures == 0 ? 0 : 1;

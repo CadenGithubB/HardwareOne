@@ -1149,10 +1149,12 @@ uint64_t nowMs() {
   return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
 }
 
-// Slots 0..3 belong to serial, UART, the display and MQTT (one key each: a
-// console's fixed peer; every MQTT client shares its broker's key); the rest
-// are the pool shared by network peers (the web today).
-constexpr size_t kReservedSlots = 4;
+// Slots 0..5 belong to serial, UART, the display, MQTT, Bluetooth and ESP-NOW
+// (one key each: a console's fixed peer; every MQTT client shares its
+// broker's key; every BLE central and every ESP-NOW peer share their
+// transport's key, so a rotating address neither resets a count nor reaches
+// the pool); the rest are the pool shared by network peers (the web).
+constexpr size_t kReservedSlots = 6;
 constexpr size_t kSlots = kReservedSlots + CREDENTIAL_ATTEMPT_POOL_SLOTS;
 // PSRAM: peers, public usernames and counters, no secrets.
 EXT_RAM_BSS_ATTR Entry sEntries[kSlots];
@@ -1165,6 +1167,8 @@ int reservedSlot(CommandSource transport) {
     case SOURCE_UART: return 1;
     case SOURCE_LOCAL_DISPLAY: return 2;
     case SOURCE_MQTT: return 3;
+    case SOURCE_BLUETOOTH: return 4;
+    case SOURCE_ESPNOW: return 5;
     default: return -1;
   }
 }
@@ -1364,12 +1368,31 @@ const char* credentialAttemptConsolePeer(CommandSource transport) {
     case SOURCE_SERIAL: return "local";
     case SOURCE_UART: return "uart";
     case SOURCE_LOCAL_DISPLAY: return "display";
+    case SOURCE_BLUETOOTH: return "ble";
+    case SOURCE_ESPNOW: return "espnow";
     default: return nullptr;
   }
 }
 
 uint32_t getTotalFailedLoginCount() {
   return credential_attempts::sTotalFailures;
+}
+
+CredentialCheck checkCredentialAttempt(CommandSource transport, const char* peer,
+                                       const char* username, const char* password,
+                                       unsigned long* retryMsOut) {
+  if (retryMsOut) *retryMsOut = 0;
+  if (!username) username = "";
+  if (!password) password = "";
+  if (!credentialAttemptAllowed(transport, peer, retryMsOut)) {
+    return CredentialCheck::LockedOut;
+  }
+  // The callers wipe their own copies of the password; wipe this one too.
+  String secret(password);
+  const bool valid = isValidUser(String(username), secret);
+  secureClearString(secret);
+  credentialAttemptRecord(transport, peer, username, valid);
+  return valid ? CredentialCheck::Valid : CredentialCheck::Invalid;
 }
 
 // ============================================================================
@@ -1394,7 +1417,9 @@ void recordTransportLoginResult(CommandSource transport,
   if (success) updateUserLastSeen(username);
 }
 
-bool loginTransport(CommandSource transport, const String& username, const String& password) {
+bool loginTransport(CommandSource transport, const String& username, const String& password,
+                    unsigned long* lockoutRetryMsOut) {
+  if (lockoutRetryMsOut) *lockoutRetryMsOut = 0;
   // serial / display / bluetooth are the credential-login transports that funnel
   // through here (web uses cookie sessions; G2 uses pair-time identity). Audit
   // each attempt once via the shared recordLoginAttempt() front-door.
@@ -1402,6 +1427,9 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
                                     transport == SOURCE_LOCAL_DISPLAY ||
                                     transport == SOURCE_BLUETOOTH ||
                                     transport == SOURCE_UART);
+  // The display's login screen and a bare `login` typed on a console both
+  // land here, so the console's attempt-table entry throttles them once.
+  const char* attemptPeer = credentialAttemptConsolePeer(transport);
 
   // Serialize credential validation through publication for every native
   // transport. Account writers use this recursive filesystem lock and revoke
@@ -1414,7 +1442,18 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
                          "Authentication store unavailable");
     return false;
   }
+  if (attemptPeer) {
+    unsigned long retryMs = 0;
+    if (!credentialAttemptAllowed(transport, attemptPeer, &retryMs)) {
+      if (credentialTransport)
+        recordLoginAttempt(transport, username, String(), false, "Locked out");
+      if (lockoutRetryMsOut) *lockoutRetryMsOut = retryMs > 0 ? retryMs : 1;
+      return false;
+    }
+  }
   if (!isValidUser(username, password)) {
+    if (attemptPeer)
+      credentialAttemptRecord(transport, attemptPeer, username.c_str(), false);
     if (credentialTransport)
       recordLoginAttempt(transport, username, String(), false, "Invalid credentials");
     return false;
@@ -1474,6 +1513,10 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
       break;
   }
 
+  // A right password whose session did not publish is not a guess: only a
+  // published login clears the account's failures.
+  if (published && attemptPeer)
+    credentialAttemptRecord(transport, attemptPeer, username.c_str(), true);
   if (credentialTransport)
     recordLoginAttempt(transport, username, String(), published,
                        published ? "Login successful" : "Session publication failed");
@@ -2260,9 +2303,19 @@ static UsersJsonMutation createAccountMutation(JsonDocument& doc, JsonArray user
   // an unknown string would otherwise look like a real tier in users.json
   // while rating as kRoleRankUser everywhere else.
   newUser["role"] = isKnownUserRole(ctx->account->role) ? ctx->account->role.c_str() : "user";
-  newUser["createdAt"] = (const char*)nullptr;  // resolved lazily via boot anchor
+  // Pending (resolved lazily via boot anchor) unless the caller asked for the
+  // wall-clock time and the clock is valid.
+  char createdAtBuf[24];
+  bool stamped = false;
+  if (ctx->account->stampCreatedNow) {
+    const time_t createdNow = time(nullptr);
+    struct tm createdUtc;
+    stamped = Clock::isValidEpoch(createdNow) && gmtime_r(&createdNow, &createdUtc) &&
+              strftime(createdAtBuf, sizeof(createdAtBuf), "%Y-%m-%dT%H:%M:%SZ", &createdUtc) > 0;
+  }
+  newUser["createdAt"] = stamped ? static_cast<const char*>(createdAtBuf) : (const char*)nullptr;
   newUser["createdBy"] = ctx->account->createdBy.length() ? ctx->account->createdBy.c_str() : "admin";
-  newUser["createdAtSource"] = "pending";
+  newUser["createdAtSource"] = stamped ? "clock" : "pending";
   newUser["createdMs"] = millis();
   newUser["ntpAnchorId"] = gNTPAnchorId;
   newUser["bootCount"] = gBootCounter;

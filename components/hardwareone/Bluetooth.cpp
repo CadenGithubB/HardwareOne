@@ -828,6 +828,24 @@ static void bleLoginDeferred(void* arg) {
     return;
   }
 
+  // Every central counts under Bluetooth's one attempt-table key (never the
+  // connId, which the stack reuses, nor an address a central can rotate). A
+  // locked key refuses before any password check, on this session only.
+  const char* attemptPeer = credentialAttemptConsolePeer(SOURCE_BLUETOOTH);
+  unsigned long lockoutRetryMs = 0;
+  if (!credentialAttemptAllowed(SOURCE_BLUETOOTH, attemptPeer, &lockoutRetryMs)) {
+    recordTransportLoginResult(SOURCE_BLUETOOTH, String(job->user), false,
+                               "Locked out");
+    char locked[80];
+    snprintf(locked, sizeof(locked),
+             "[ble] Login locked out. Retry in %lu seconds.",
+             (lockoutRetryMs + 999UL) / 1000UL);
+    sendBLEResponseToSession(job->connId, job->sessionEpoch,
+                             locked, strlen(locked));
+    bleLoginJobFree(job);
+    return;
+  }
+
   FsLockGuard authGuard("ble.login_bind");
   const bool authStoreHeld =
       authGuard.held || isFsLockedByCurrentTask();
@@ -847,8 +865,10 @@ static void bleLoginDeferred(void* arg) {
       bleLoginJobFree(job);
       return;
     }
+    credentialAttemptRecord(SOURCE_BLUETOOTH, attemptPeer, job->user, true);
     recordTransportLoginResult(SOURCE_BLUETOOTH, String(job->user), true,
                                "Login successful");
+    systemEventPost(SYSEVT_LOGIN_OK, job->user, "ble");
     BLE_DEBUGF(DEBUG_BLE_CORE, "Login success conn=%u user='%s' mirror=%d",
                (unsigned)job->connId, job->user, mirrorEligible ? 1 : 0);
     // BLE broadcast/console output stays OFF on connect by default: keeps the
@@ -863,9 +883,14 @@ static void bleLoginDeferred(void* arg) {
              isAdminUser(String(job->user)) ? " (admin)" : "");
     sendBLEResponseToSession(job->connId, boundEpoch, out, strlen(out));
   } else {
+    // Only a checked wrong password is a guess; an unavailable store is not.
+    if (authStoreHeld) {
+      credentialAttemptRecord(SOURCE_BLUETOOTH, attemptPeer, job->user, false);
+    }
     recordTransportLoginResult(SOURCE_BLUETOOTH, String(job->user), false,
                                authStoreHeld ? "Invalid credentials"
                                              : "Authentication store unavailable");
+    if (authStoreHeld) systemEventPost(SYSEVT_LOGIN_FAIL, job->user, "ble");
     BLE_DEBUGF(DEBUG_BLE_CORE, "Login FAILED conn=%u", (unsigned)job->connId);
     const char* msg = "[ble] Authentication failed.";
     sendBLEResponseToSession(job->connId, job->sessionEpoch,

@@ -10,16 +10,26 @@ clear, window expiry during a lock stays locked, no eviction of a locked
 entry, a full pool of locks refuses new peers while the consoles keep their
 slots, MQTT keeps its own slot, lock events and totals, a lock across the
 32-bit millis() wrap, and ended locks staying ended through weeks of idle.
+Bluetooth and ESP-NOW each count under one reserved key ("ble", "espnow")
+that a full web pool cannot refuse and a changed peer label cannot split, and
+checkCredentialAttempt refuses a locked key without validating, then records
+the outcome and wipes its copy of the password (host isValidUser and
+secureClearString doubles count the validations and the wipes).
 
 Source contracts: the table is compiled regardless of ENABLE_HTTP_SERVER; the
 web (/login and Basic Auth), serial, UART, MQTT and targeted-login paths
-consult it before validating a password; Basic Auth failures are audited and
-evented like /login; MQTT failures are audited; the old web table and the
-targeted-login throttle are gone.
+consult it before validating a password; so do the BLE login job (after its
+session check, recording success only after the bind, never inside the
+command tail), loginTransport (the display login screen and a bare `login`),
+the display's set-pattern re-authentication, and ESP-NOW's password remote
+commands and USER_SYNC admin check (not the bond-token path); Basic Auth
+failures are audited and evented like /login; MQTT failures are audited; the
+old web table and the targeted-login throttle are gone.
 
 --baseline-web PATH runs the same scenarios against the old per-IP lockout
 functions extracted from a WebServer_Server.cpp (with its WebServer_Server.h
 beside it) through a thin adapter; that run is expected to fail.
+--component DIR reads the production files from another tree.
 """
 from __future__ import annotations
 
@@ -70,6 +80,17 @@ def current_units() -> tuple[str, str, str]:
     for marker in TABLE_FUNCTIONS:
         require(source.count(marker) == 1, f"expected one definition: {marker}")
         production += extract_block(source, marker) + "\n"
+    # The throttled check-validate-record helper, where the tree has it; a tree
+    # without it still runs every other scenario and fails the helper's.
+    check_decl = "enum class CredentialCheck"
+    check_marker = "CredentialCheck checkCredentialAttempt(CommandSource transport"
+    has_check = check_decl in header and source.count(check_marker) == 1
+    if has_check:
+        begin = header.index(check_decl)
+        declarations += "\n" + header[begin:header.index(");", header.index(check_marker, begin)) + 2]
+        production += extract_block(source, check_marker) + "\n"
+    declarations = (f"#define HARNESS_CURRENT_TABLE 1\n#define HAS_CHECK_ATTEMPT {int(has_check)}\n"
+                    + declarations)
     adapter = """
 static void harnessReset() {
   std::memset(credential_attempts::sEntries, 0,
@@ -86,7 +107,8 @@ def baseline_web_units(web_source: Path) -> tuple[str, str, str]:
     header = (web_source.parent / "WebServer_Server.h").read_text()
     begin = header.index("#define MAX_LOGIN_ATTEMPT_ENTRIES")
     end_marker = "uint32_t getTotalFailedLoginCount();"
-    declarations = header[begin:header.index(end_marker) + len(end_marker)]
+    declarations = ("#define HARNESS_CURRENT_TABLE 0\n#define HAS_CHECK_ATTEMPT 0\n"
+                    + header[begin:header.index(end_marker) + len(end_marker)])
     source = web_source.read_text()
     begin = source.index("EXT_RAM_BSS_ATTR static LoginAttemptEntry sLoginAttempts")
     marker = "uint32_t getTotalFailedLoginCount() "
@@ -218,15 +240,70 @@ def check_contracts() -> None:
                    "loginTransportFromNamedSession(")
     require("credentialAttemptRecord(caller.transport" in login_cmd,
             "targeted login records its outcome in the table")
+    require("loginTransport(transport, username, password, &lockoutRetryMs)" in login_cmd,
+            "a bare login reports loginTransport's lockout")
+
+    # Bluetooth: one reserved key, checked after the session check and before
+    # the password, a success recorded only once the session is bound. The
+    # command tail (spliced whole by ble_sc_policy) stays free of the table.
+    ble = (COMPONENT / "Bluetooth.cpp").read_text()
+    ble_login = extract_block(ble, "static void bleLoginDeferred(void* arg)")
+    require_before("BLE login", ble_login, "bleSessionEpochMatches(",
+                   "credentialAttemptAllowed(SOURCE_BLUETOOTH")
+    require_before("BLE login", ble_login, "credentialAttemptAllowed(SOURCE_BLUETOOTH",
+                   "validateTransportCredentials(")
+    require_before("BLE login", ble_login, "bleBindSession(",
+                   "credentialAttemptRecord(SOURCE_BLUETOOTH, attemptPeer, job->user, true)")
+    require("credentialAttemptConsolePeer(SOURCE_BLUETOOTH)" in ble_login,
+            "BLE logins count under Bluetooth's reserved key, never a connId")
+    require("credentialAttempt" not in extract_block(ble, "static void processBleCommandLine("),
+            "the BLE command tail must not consult the table itself")
+
+    # The display: loginTransport throttles the login screen and a bare
+    # `login`; the set-pattern re-authentication uses the same key.
+    transport_login = extract_block(user_source, "bool loginTransport(CommandSource transport")
+    require("credentialAttemptConsolePeer(transport)" in transport_login,
+            "loginTransport keys consoles by their fixed peer")
+    require_before("loginTransport", transport_login, "credentialAttemptAllowed(transport, attemptPeer",
+                   "isValidUser(username, password)")
+    oled_login = extract_block((COMPONENT / "OLED_Mode_Auth.cpp").read_text(),
+                               "static bool handleLoginModeInput(")
+    require("&lockoutRetryMs)" in oled_login,
+            "the display login screen shows loginTransport's lockout")
+    pattern = extract_block((COMPONENT / "OLED_Mode_SetPattern.cpp").read_text(),
+                            "static bool handleSetPatternInput(")
+    require("checkCredentialAttempt(SOURCE_LOCAL_DISPLAY" in pattern and "isValidUser(" not in pattern,
+            "set-pattern re-authentication counts under the display's key")
+
+    # ESP-NOW: password remote commands and USER_SYNC's admin check share one
+    # reserved key; the bond-token path is not a password and stays outside.
+    espnow = (COMPONENT / "System_ESPNow.cpp").read_text()
+    remote = extract_block(espnow, "static void v4_handle_cmd(const uint8_t* srcMac, "
+                                   "const char* deviceName, uint32_t msgId, const char* cmdPayload")
+    password = remote[remote.index("Traditional username:password auth"):]
+    require(re.search(r"checkCredentialAttempt\(\s*SOURCE_ESPNOW", password) is not None
+            and "isValidUser(" not in password,
+            "ESP-NOW password remote commands consult the table")
+    bond = remote[:remote.index("Traditional username:password auth")]
+    require("credentialAttempt" not in bond and "logBondAuthFailure(" in bond,
+            "the bond-token path keeps logBondAuthFailure and stays out of the table")
+    sync = extract_block(espnow, "static void doUserSyncWork(const DeferredUserSyncWork* w)")
+    require(re.search(r"checkCredentialAttempt\(\s*SOURCE_ESPNOW", sync) is not None
+            and "isValidUser(" not in sync,
+            "USER_SYNC's admin check consults the table")
 
 
 def main() -> None:
+    global COMPONENT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--baseline-web", type=Path,
                         help="run the scenarios against an old WebServer_Server.cpp lockout")
+    parser.add_argument("--component", type=Path, default=COMPONENT,
+                        help="read the production files from this components/hardwareone")
     args = parser.parse_args()
+    COMPONENT = args.component.resolve()
     require(bool(args.cxx), "a host C++17 compiler is required")
     if args.baseline_web:
         label = "baseline-web"
@@ -259,9 +336,9 @@ def main() -> None:
         print(f"credential attempts {label}: {count[1]} assertions passed", flush=True)
     if not args.baseline_web:
         check_contracts()
-        print("credential attempts: web, serial, UART, MQTT and targeted login consult "
-              "the System_User table before validating; it compiles without the web server",
-              flush=True)
+        print("credential attempts: web, serial, UART, MQTT, targeted login, BLE, the "
+              "display and ESP-NOW password logins consult the System_User table before "
+              "validating; it compiles without the web server", flush=True)
 
 
 if __name__ == "__main__":
