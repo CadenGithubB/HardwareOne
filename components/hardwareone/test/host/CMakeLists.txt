@@ -609,6 +609,66 @@ endif()
 add_test(NAME ring_forwarded_telemetry
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_ring_forwarded_telemetry.py
           ${RING_FORWARDED_TELEMETRY_TEST_ARGS})
+
+set(G2_NETWORK_ASYNC_REDRAW_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND G2_NETWORK_ASYNC_REDRAW_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME g2_network_async_redraw
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_network_async_redraw.py
+          ${G2_NETWORK_ASYNC_REDRAW_TEST_ARGS})
+
+# Sensors completions (cam_pwr post-hook, openmic/closemic on cmd_exec) queue a
+# generation-checked Redraw instead of rendering on their own task (README
+# "G2 Sensors completion redraws").
+set(G2_SENSORS_REDRAW_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND G2_SENSORS_REDRAW_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME g2_sensors_redraw
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_sensors_redraw.py
+          ${G2_SENSORS_REDRAW_TEST_ARGS})
+
+# G2 list pages publish their mode / row map only after the lens accepted the
+# rows (README "G2 list pages under refused renders"): Files chooser, delete
+# confirm and info overlay, Settings levels and row maps, LED sub-levels.
+set(G2_PAGE_PUBLISH_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND G2_PAGE_PUBLISH_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME g2_page_publish
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_page_publish.py
+          ${G2_PAGE_PUBLISH_TEST_ARGS})
+
+# G2 page API (README "G2 page and hijack-bridge API contract"):
+# no page, bridge or FSM entry point without a caller, enabled or disabled.
+set(G2_PAGE_API_CONTRACT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND G2_PAGE_API_CONTRACT_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME g2_page_api_contract
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_page_api_contract.py
+          ${G2_PAGE_API_CONTRACT_TEST_ARGS})
+
+# File browsers (README "File browser classification and rename/delete authority"):
+# one classifier for the G2 lens and OLED browsers; OLED rename/delete through the executor.
+set(FILE_KIND_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND FILE_KIND_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME file_kind
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_file_kind.py
+          ${FILE_KIND_TEST_ARGS})
 add_test(NAME p4eye_display_pixels COMMAND p4eye_display_pixels_tests)
 add_test(NAME p4eye_display_lifecycle COMMAND p4eye_display_lifecycle_tests)
 add_test(NAME rotary_core

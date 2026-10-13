@@ -1,4 +1,5 @@
-// The production cache and scheduler API are inserted by the runner.
+// The production cache and scheduler API, and the owner's trigger parser with
+// the automation summaries built from it, are inserted by the runner.
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <atomic>
@@ -64,6 +65,10 @@ static constexpr int SYSEVT_COUNT = 8;
 static int systemEventKindFromName(const char* name) {
   return std::strcmp(name, "edge") == 0 ? 1 : std::strcmp(name, "other") == 0 ? 2 : 0;
 }
+static const char* systemEventKindName(uint8_t kind) {
+  return kind == 1 ? "edge" : kind == 2 ? "other" : "?";
+}
+static constexpr size_t SYSEVT_DETAIL_LEN = 80;
 static const char* AUTOMATIONS_JSON_FILE = "/automations.json";
 static std::mutex storeMutex;
 static String storeJson;
@@ -116,6 +121,8 @@ static void schedulerTickMinute() {
 }
 
 // INSERT_SCHEDULER_API
+
+// INSERT_TRIGGER_SUMMARY
 
 static const char* emptyRules = R"({"version":2,"automations":[]})";
 static const char* futureRules = R"({"version":2,"automations":[{"id":1,"enabled":true,"triggers":[{"type":"interval","nextAt":101}]}]})";
@@ -397,12 +404,101 @@ static void concurrentRequests() {
   CHECK(allocations == releases);
 }
 
+// The OLED and G2 pages show these copies; the text comes from the parser the
+// scheduler fires from, one case per trigger type.
+static void summaries() {
+  reset(R"({"automations":[
+    {"id":1,"name":"Daily","enabled":true,"commands":["a","b"],"triggers":[{"type":"time","time":"07:30"}]},
+    {"id":2,"name":"All days","triggers":[{"type":"time","time":"07:30","days":"sun,mon,tue,wed,thu,fri,sat"}]},
+    {"id":3,"name":"Mon Wed","triggers":[{"type":"time","time":"08:00","days":"mon, WED"}]},
+    {"id":4,"name":"Weekend","triggers":[{"type":"time","time":"09:05","days":"sat,sun"}]},
+    {"id":5,"name":"Biweekly","triggers":[{"type":"time","time":"07:30","days":"fri","weekInterval":2}]},
+    {"id":6,"name":"Monthly","triggers":[{"type":"time","time":"07:30","recurrence":"monthly","dayOfMonth":15}]},
+    {"id":7,"name":"Yearly","triggers":[{"type":"time","time":"06:05","recurrence":"Yearly","dayOfMonth":9,"month":3}]},
+    {"id":8,"name":"No day","triggers":[{"type":"time","time":"07:30","recurrence":"monthly"}]},
+    {"id":9,"triggers":[{"type":"interval","intervalMs":7200000}]},
+    {"id":10,"triggers":[{"type":"interval","intervalMs":5400000}]},
+    {"id":11,"triggers":[{"type":"interval","intervalMs":45000}]},
+    {"id":12,"triggers":[{"type":"manual","delayMs":120000}]},
+    {"id":13,"triggers":[{"type":"manual","delayMs":10000}]},
+    {"id":14,"triggers":[{"type":"boot"}]},
+    {"id":15,"triggers":[{"type":"boot","bootDelayMs":5000}]},
+    {"id":16,"triggers":[{"type":"event","on":"edge"}]},
+    {"id":17,"triggers":[{"type":"event","on":"bogus"}]},
+    {"id":18,"triggers":[{"type":"atTime","time":"07:30"}]},
+    {"id":19,"triggers":[]},
+    {"id":20,"name":"A name longer than thirty-one characters","enabled":true,
+     "triggers":[{"type":"atTime","time":"07:30"},{"type":"interval","intervalMs":60000},{"type":"event","on":"edge"}]}
+  ]})");
+  AutomationSummary list[24];
+  std::memset(list, 0, sizeof(list));
+  size_t count = 99;
+  CHECK(automationCopySummaries(list, 24, &count));
+  CHECK(count == 20 && reads == 1);
+  struct Expect { long id; AutomationTriggerKind kind; const char* text; };
+  using K = AutomationTriggerKind;
+  static const Expect expected[] = {
+    {1, K::Time, "daily 07:30"}, {2, K::Time, "daily 07:30"},
+    {3, K::Time, "weekly 08:00 MoWe"}, {4, K::Time, "weekly 09:05 SaSu"},
+    {5, K::Time, "every 2w 07:30 Fr"}, {6, K::Monthly, "monthly 15 07:30"},
+    {7, K::Yearly, "yearly Mar 9 06:05"}, {8, K::Invalid, "invalid trigger"},
+    {9, K::Interval, "every 2h"}, {10, K::Interval, "every 90m"},
+    {11, K::Interval, "every 45s"}, {12, K::Manual, "delay 2m"},
+    {13, K::Manual, "delay 10s"}, {14, K::Boot, "boot"}, {15, K::Boot, "boot +5s"},
+    {16, K::Event, "on edge"}, {17, K::Event, "on unknown event"},
+    {18, K::Invalid, "invalid trigger"}, {19, K::None, ""},
+    {20, K::Interval, "every 1m +2"},
+  };
+  unsigned summaryMismatches = 0;
+  for (size_t i = 0; i < 20; ++i) {
+    const AutomationSummary& s = list[i];
+    if (s.id != expected[i].id || s.kind != expected[i].kind ||
+        std::strcmp(s.trigger, expected[i].text) != 0) {
+      ++summaryMismatches;
+      std::fprintf(stderr, "summary %zu: id=%ld kind=%d text=\"%s\" (want id=%ld kind=%d \"%s\")\n",
+                   i, s.id, (int)s.kind, s.trigger, expected[i].id, (int)expected[i].kind,
+                   expected[i].text);
+    }
+  }
+  CHECK(summaryMismatches == 0);
+  CHECK(std::strcmp(list[0].name, "Daily") == 0 && list[0].enabled);
+  CHECK(list[0].commandCount == 2 && list[0].triggerCount == 1);
+  CHECK(!list[1].enabled && list[1].commandCount == 0);
+  CHECK(std::strcmp(list[8].name, "Auto #9") == 0);
+  CHECK(list[18].triggerCount == 0 && list[19].triggerCount == 3 && list[19].enabled);
+  CHECK(std::strcmp(list[19].name, "A name longer than thirty-one c") == 0);
+
+  // The cap bounds the copy; entries past it are not written.
+  std::memset(list, 0, sizeof(list));
+  list[3].id = -5;
+  CHECK(automationCopySummaries(list, 3, &count) && count == 3);
+  CHECK(list[2].id == 3 && list[3].id == -5);
+
+  AutomationSummary one{};
+  CHECK(automationFindSummary(6, &one) && one.kind == K::Monthly);
+  CHECK(std::strcmp(one.name, "Monthly") == 0 && std::strcmp(one.trigger, "monthly 15 07:30") == 0);
+  CHECK(!automationFindSummary(99, &one));
+  CHECK(!automationFindSummary(6, nullptr));
+
+  readSucceeds = false;
+  count = 7;
+  CHECK(!automationCopySummaries(list, 24, &count) && count == 0);
+  CHECK(!automationFindSummary(6, &one));
+  readSucceeds = true;
+  replaceStore("{broken");
+  CHECK(!automationCopySummaries(list, 24, &count) && count == 0);
+  replaceStore(R"({"version":2})");
+  CHECK(automationCopySummaries(list, 24, &count) && count == 0);
+  CHECK(!automationFindSummary(1, &one));
+}
+
 int main() {
+  summaries();
   lifecycle();
   permissionRevoked();
   timing();
   invalidationAndOverlap();
   concurrentRequests();
   reset();
-  std::printf("automation scheduler: %u ownership, timing and overlap checks passed\n", checks.load());
+  std::printf("automation scheduler: %u summary, ownership, timing and overlap checks passed\n", checks.load());
 }

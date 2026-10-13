@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
-"""Integration guards beside the behavioral Automation scheduler owner tests."""
+"""Integration guards beside the behavioral Automation scheduler owner tests.
 
+--component <dir> reads the production sources from another tree (default:
+this component), so the guards replay against a pre-fix tree.
+"""
+
+import argparse
 from pathlib import Path
 
 
-COMPONENT = Path(__file__).resolve().parents[2]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--component", type=Path,
+                    default=Path(__file__).resolve().parents[2],
+                    help="component directory to read production sources from")
+COMPONENT = parser.parse_args().component.resolve()
 
 
 def function_body(source: str, signature: str) -> str:
@@ -148,4 +157,24 @@ assert "startAutomationScheduler()" in system and "stopAutomationScheduler();" i
 features = (COMPONENT / "System_FeatureRegistry.cpp").read_text(encoding="utf-8")
 assert "return automationSetSystemEnabled;" in features
 
-print("Automation scheduler integration and empty-file source guards passed")
+# The OLED and G2 automation pages show the owner's summary copies
+# (automationCopySummaries / automationFindSummary). They never open or parse
+# automations.json themselves, and G2 taps act on the ids of the rows shown.
+g2_page = (COMPONENT / "G2_Page_Automations.cpp").read_text(encoding="utf-8")
+g2_header = (COMPONENT / "G2_Page_Automations.h").read_text(encoding="utf-8")
+oled_page = (COMPONENT / "OLED_Mode_Automations.cpp").read_text(encoding="utf-8")
+for name, text in (("G2_Page_Automations.cpp", g2_page), ("G2_Page_Automations.h", g2_header),
+                   ("OLED_Mode_Automations.cpp", oled_page)):
+    for private in ("AUTOMATIONS_JSON_FILE", "readText(", "deserializeJson(",
+                    "streamParseAutomations"):
+        assert private not in text, f"{name} still reads the automation owner's file: {private}"
+for name, text in (("G2_Page_Automations.cpp", g2_page), ("OLED_Mode_Automations.cpp", oled_page)):
+    assert "automationCopySummaries(" in text, f"{name} must list the owner's summaries"
+assert "automationFindSummary(" in g2_page
+assert "loadAutomationByVisibleIndex" not in g2_page
+assert "showDetailMenu(gListIds[sel]);" in function_body(g2_page, "static void listHandleTap(uint32_t idx)")
+summary = function_body(automation, "static void fillAutomationSummary(")
+assert "parseOneTrigger(" in summary
+assert "streamParseAutomations" not in automation and "streamParseAutomations" not in header
+
+print("Automation scheduler integration, empty-file and page summary source guards passed")

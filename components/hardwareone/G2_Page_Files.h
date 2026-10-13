@@ -31,7 +31,6 @@
 // entries; useful when you want a quick dump without engaging the full
 // hijack list.
 void g2BuildFilesInfo(char* out, size_t cap);
-bool g2ShowFilesPage();
 
 // Show the interactive list view. Sets the page-mode tracker to FILES.
 void g2ShowFilesMenu();
@@ -39,18 +38,12 @@ void g2ShowFilesMenu();
 // Tap dispatch from handleHijackMenuTap when gHijackPage == FILES.
 void g2FilesHandleTap(uint32_t idx);
 
-// Called by the hijack tick (once per ~50 ms) so the file-info overlay can
-// time itself out and redraw the list. Cheap when no overlay is active.
-void g2FilesTick();
-
 #else
 inline void g2BuildFilesInfo(char* out, size_t cap) {
   if (out && cap > 0) out[0] = '\0';
 }
-inline bool g2ShowFilesPage() { return false; }
 inline void g2ShowFilesMenu() {}
 inline void g2FilesHandleTap(uint32_t idx) { (void)idx; }
-inline void g2FilesTick() {}
 #endif
 
 #endif  // G2_PAGE_FILES_H

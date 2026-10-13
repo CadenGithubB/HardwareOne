@@ -33,7 +33,6 @@
 // `g2network` command for direct invocation, and as the default render
 // when entering the Network page from the hijack menu.
 void g2BuildNetworkInfo(char* out, size_t cap);
-bool g2ShowNetworkPage();
 
 // Render the top-level Network chooser. Called when the user taps
 // "Network" from the main hijack menu. The chooser drills into one of
@@ -48,7 +47,6 @@ void g2NetworkHandleTap(uint32_t idx);
 inline void g2BuildNetworkInfo(char* out, size_t cap) {
   if (out && cap > 0) out[0] = '\0';
 }
-inline bool g2ShowNetworkPage() { return false; }
 inline void g2ShowNetworkMenu() {}
 inline void g2NetworkHandleTap(uint32_t idx) { (void)idx; }
 #endif

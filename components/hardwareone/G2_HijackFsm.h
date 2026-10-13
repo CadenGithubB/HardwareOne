@@ -81,7 +81,6 @@ struct HijackEventPayload {
 };
 
 const char* hijackStateName(HijackState s);
-const char* hijackEventName(HijackEvent e);
 
 // Lazily create the event queue + worker task. Dispatch calls ensure this on
 // first use; if queue/task allocation fails, events apply inline.
@@ -115,7 +114,6 @@ struct HijackEventPayload {
 };
 
 inline const char* hijackStateName(HijackState) { return "Idle"; }
-inline const char* hijackEventName(HijackEvent) { return ""; }
 inline void hijackFsmInit() {}
 inline HijackState hijackFsmState() { return HijackState::Idle; }
 inline void hijackFsmDispatch(HijackEvent, const char*) {}

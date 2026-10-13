@@ -323,6 +323,15 @@ static void test_file_names() {
                           "boot-0000000000000ab\\.txt", "2026100AT153012Z-6f1c9a2e00000007.txt"})
     CHECK(!noteFileNameParse(bad, nullptr, nullptr), bad);
   CHECK(!noteFileNameParse(nullptr, nullptr, nullptr), "null name");
+  // The store's in-progress spelling, only when asked for (the sweep).
+  CHECK(noteFileNameParse("20261004T153012Z-6f1c9a2e00000007.tmp", created, &id, true) &&
+            !std::strcmp(created, "20261004T153012Z") && id == 0x6f1c9a2e00000007ull,
+        "in-progress name parses as one");
+  CHECK(noteFileNameParse("boot-0000000000000abc.tmp", nullptr, nullptr, true), "boot in-progress name");
+  for (const char* bad : {"boot-0000000000000abc.txt", "boot-0000000000000ABC.tmp", "notes.tmp",
+                          "boot-0000000000000abc.TMP", "boot-0000000000000000.tmp",
+                          "boot-0000000000000abc.header.tmp", "x.tmp"})
+    CHECK(!noteFileNameParse(bad, nullptr, nullptr, true), bad);
 }
 
 static void test_ids() {
