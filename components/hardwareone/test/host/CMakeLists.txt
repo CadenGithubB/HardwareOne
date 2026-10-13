@@ -1550,6 +1550,39 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_settings_schema_setters.py
           ${SETTINGS_SCHEMA_SETTERS_TEST_ARGS})
 
+# remote:/@ authority (README "remote:/@ commands and the bonded peer's
+# authority"): the peer runs every bonded command as bond-admin (super), so the
+# routing in executeCommand needs a local administrator except for the peer
+# sensor start/stop lines the bond page and the OLED bond screen send; admin
+# replies (msgId), nested refusal, guest gate and redacted audit unchanged.
+set(REMOTE_COMMAND_AUTHORITY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND REMOTE_COMMAND_AUTHORITY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME remote_command_authority
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_remote_command_authority.py
+          ${REMOTE_COMMAND_AUTHORITY_TEST_ARGS})
+
+# Continuous STT broker (System_STT.cpp): the production default trims each
+# closing phrase to its voiced end + 500 ms with speculative finals; the
+# full-phrase variant builds the -DHW1_STT_TRIM_SILENCE=0 opt-out.
+set(STT_CONTINUOUS_TEST_ARGS)
+if(HW1_SANITIZE)
+  list(APPEND STT_CONTINUOUS_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME stt_continuous
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_continuous.py
+          ${STT_CONTINUOUS_TEST_ARGS})
+add_test(
+  NAME stt_continuous_full_phrase
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_continuous.py --full-phrase
+          ${STT_CONTINUOUS_TEST_ARGS})
+
 # STT result privacy and the targeted BLE command result (README "STT result privacy
 # and the targeted BLE reply"): the private-STT rule, and since D1 the BLE reply is
 # fenced on the command's session epoch with no console-mirror fallback.

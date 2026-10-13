@@ -4596,3 +4596,252 @@ pages and cancel. The P4 image was built only; that board keeps its STT test
 build. Fault-injection paths, skipping MQTT with a configured broker and the
 OLED-only cancel paths were verified on hosts only. The XIAO default profile
 has 79,376 bytes of app headroom left, so its next feature needs to fit there.
+
+## Checkpoint: 0.99.98 review fixes (2026-10-13)
+
+This checkpoint lands the fixes from the 2026-10-12 whole-firmware review on
+the 0.99.98 consolidation, which had left them out on purpose (see
+[CONSOLIDATION_0.99.98.md](CONSOLIDATION_0.99.98.md)). The confirmed findings
+were worked in two halves from the 0.99.97.4 tree: web, accounts, core
+services, network/OTA, media/power and LLM (59 findings); and ESP-NOW,
+Bluetooth/ring/health, G2 pages and OLED screens (54 findings, plus a bond
+manifest size limit found on hardware). Both halves were then merged with the
+updated main, and about 25 items that needed both halves were finished on the
+merged tree. The version stays `0.99.98`. Each change stays with its owning
+module and adapters only call the owner; the tables below name the single
+owners the fixes created, or the existing owner that became the only path. See
+the [changelog](../CHANGELOG.md#09998---2026-10-12) for the release summary.
+
+### Accounts and logins
+
+| Module | Owner | What it now owns |
+|---|---|---|
+| `System_User` | Credential attempt table: `credentialAttemptAllowed`, `credentialAttemptRecord`, `checkCredentialAttempt` | The brute-force lockout for credential logins, moved out of the web server and compiled on every build. Entries are keyed by transport plus peer under the table's own lock. Serial, UART, the local display, MQTT, Bluetooth and ESP-NOW have reserved slots. Bluetooth and ESP-NOW use one key per transport, not per address, so a rotating address can neither reset its count nor fill the web pool, at the cost that one guessing central or peer locks that transport's password checks (on ESP-NOW, password remote commands and the user-sync admin check) for everyone until the lock ends; bond-token commands are not affected. Web peers share eight slots in which a running lock is never evicted, so a pool full of running locks refuses new web peers until one ends; times use the 64-bit clock. A success clears an entry only when every failure in it named that account. Web form and Basic logins, serial, UART, MQTT command envelopes, Bluetooth logins and targeted `login` consult it before checking a password; Bluetooth logins also post the login success and failure events now. `checkCredentialAttempt` is the one throttled check for callers that publish no session (ESP-NOW password commands, the ESP-NOW user-sync admin check and the display's set-pattern re-authentication); it wipes its copy of the password. |
+| `System_User` | `loginTransport` fixed-key throttle | Every transport with a fixed attempt key is throttled inside `loginTransport`: the key is checked after the authentication lock is taken and before the password, a wrong password counts, and only a published session clears it. The OLED login screen and a bare `login` typed on a console go through it; an optional out-parameter gives the time left for the refusal text. |
+| `System_User` | `mutateUsersJson` (private) | Every read-modify-write of `users.json` in System_User: one filesystem lock from the guarded open through parse, mutation, overflow check and atomic write. Ban and unban, role changes, delete, last-seen updates, account creation's roster publication and the creation-time resolver edit the parsed document, never raw text, and the resolver reads the whole roster. First-time setup still writes the initial roster itself. |
+| `System_User` | `createAccount(NewAccount, idOut, errorOut)` | Account creation for `useradd`, approve and ESP-NOW user sync: name validation including reserved names, a required password hash, id allocation, the credential written first and the roster published last under one lock, and the credential withdrawn when publication fails. Approve retires a request only after its account is live. User sync no longer writes `users.json` itself: it checks the password against the public password rule, forces the user role, reports a refusal to the sender and posts the account-added event; `NewAccount::stampCreatedNow` keeps its clock creation stamp. `createInitialAdminUser` keeps the first-account bootstrap. |
+| `System_User`, `System_BootState` | Account-id high-water mark: `bootStateGetAccountIdHighWater`, `bootStateRaiseAccountIdHighWater`, `recordAccountIdHighWater` | The highest account id ever issued, kept in NVS. `createAccount` allocates above it and raises it before writing anything, so a creation that fails after that point skips its id; boot raises it from a clean roster; factory reset records it before removing the roster, pending requests and per-user data. Ids above the setup owner are never reissued. The setup owner is id 1 again after a reset, which is why the reset also wipes per-user data; an SD card that is not mounted during the reset keeps the old first account's folder on it, under the id the new setup owner receives. |
+| `System_User` | `submitAccountRequest` | Self-registration: the public intake rules, the pending-list cap and its lock, with a typed result. `/register/submit` calls it directly, so the web form builds no command line and a passphrase is stored exactly as typed; `userrequest` is a thin parser over it. |
+| `System_User` | `isReservedUsername`, `bondIdentityLive` | One reserved-name table for intake, creation and lookup. The reserved bond identity is elevated only in an ESP-NOW context while a bond token is live; an account of that name on any other transport counts as no more than a user. |
+| `System_User` | `userMutationAllowed`, `logoutTransportFromNamedSession` | The rank rule, now applied to unban, `sessionrevoke user` and targeted logout as well as ban. Ban, unban and `sessionrevoke user` are built without the web server too. |
+| `System_User` | `readUserRoster`; `listJsonReply` (private) | A read-only roster snapshot (id, full name, normalized role, banned) for the OLED user manager and the lens Users page, which no longer parse `users.json`. `userlist`, `pendinglist` and `sessionlist` replies are bounded and refuse rather than cut. |
+| `System_User`, `System_Settings` | `userMustChangePassword`; `userSettingsPatchRefusedKey` | The forced password change, cached per account and ignored for guests, applied by the web gate and by `authorizeCommand` on every external transport. The per-user settings merge admits only theme, notification level and dashboard layout keys. |
+| `System_User` | Serial and local-display session writers | Priority-inheriting mutexes behind the existing Begin/End API. In System_User and the serial console, source and target writers are never nested, and no console write, log append or roster read runs under one. |
+
+### Commands and execution
+
+| Module | Owner | What it now owns |
+|---|---|---|
+| `System_User`, `System_Utils` | `tgRequireAuth` (web only, System_User) and `authorizeCommand` (private, System_Utils) | Web requests are admitted by `tgRequireAuth`, which refuses non-web contexts; every command transport is admitted by `authorizeCommand`. The second per-transport admission policy and its HTTP-off stub are removed. |
+| `System_User.h` | `hasAdminPrivilege`, `hasSuperAdminPrivilege` (defined in `HardwareOne.cpp`) | The executor's admin gates, declared once beside `bondIdentityLive`. `authorizeCommand`, the bond file pages and the OLED peer browser use that declaration instead of local externs. |
+| `System_Utils` | `executeCommand` caller admission (`executeCommandCallerAdmitted`, private) | `executeCommand` runs only on the command executor, or during early boot before its queue exists. A call from any other task is refused before any side effect with an error result, and the log names the calling task, never the command text. |
+| `System_Utils` | `currentCommandValidateOnly` | The validate-only state, read per task from the executing command context. The global flag remains the handlers' mirror, written only by the executor and the early-boot path. |
+| `System_Utils` | `executeInternalStatusCommand` | Status commands that another task needs run on the executor under the system identity, with the result copied into the caller's buffer. `/api/logging/status` and the ESP-NOW page's `/api/espnow/status` use it, so neither runs commands on the web server task. |
+| `System_Utils` | `authorizeRemoteCommand` (private) | The `remote:`/`@` gate. The bonded peer runs every bonded command as the reserved bond identity, which is super for the live session, so after `authorizeCommand` passes the unwrapped line, a local administrator is required for everything except the argument-free peer sensor start/stop commands the Bond page and the OLED bond screen send. New commands need an administrator by default. |
+| `System_Command` | `reportDuplicateCommandNames` (private) | Duplicate command rows are reported at registration, one line per shadowed row naming both modules. |
+
+### Web server
+
+| Module | Owner | What it now owns |
+|---|---|---|
+| `WebServer_Utils` | `webRecvRequestBody`, `webReadRequestBody`, `webSendBodyReadError` | Bounded request-body reading: the cap is checked before a null-checked PSRAM allocation, one idle receive timeout is retried and two end the read, a short or failed read yields an empty body, and one mapping chooses the error reply. `/api/cli`, login, the approve and deny forms, the LLM page and the R1 Health actions use it; the Health page's private reader is gone. Other handlers, uploads and backup restore among them, still read their bodies themselves. |
+| `WebServer_Utils` | `webJsonString`, `sendJsonError` | JSON string escaping and JSON error replies for hand-built responses. |
+| `WebServer_Server` | `streamFileChunks` (private) | File downloads and the file viewer: each chunk is read under the filesystem lock, which is released before the send, and the response ends at the first failed send. |
+| `WebServer_Server` | IP ban list: `banIp`, `unbanIp`, `banListJson` | The ban table under its own small lock, saved through the checked atomic writer. A failed ban save keeps the ban in memory until reboot and says it was not saved; a failed unban save restores the entry; the JSON listing is whole or an explicit error. |
+| `WebServer_Server` | `broadcastEventToSessionsIf` and the per-slot session generation | Event and toast fan-out under the session fence: a send is queued only if the slot's generation is unchanged after the viewer check. The SSE drain uses fenced accessors bound to its session id, the IP-ban kick reads the table under the fence, and a login into a full table evicts the session that expires first and signs it out. |
+| `System_Notifications` | `notifRenderToastJson` (private) | Toast JSON, escaped and shortened on a UTF-8 boundary to fit its queue slot. |
+| `WebServer_MigrationTool` | Backup export and restore | One 512 KB bundle limit for export and import. A restore stages every file and replaces nothing unless every staged write succeeded, promoting `users.json` last. |
+
+### Files and storage
+
+| Module | Owner | What it now owns |
+|---|---|---|
+| `System_VFS` | `VFS::StagedWrite`, `canWriteGuarded` | Staged replacement of one file, staged under the caller's identity and shared by the web upload and the file editor. The destination keeps its previous bytes until a complete, checked copy is promoted, and it is never opened for writing. |
+| `System_VFS` | SD-in-use registration: `sdInUseBegin`, `sdInUseEnd`, `sdInUseOwner` | Four slots for owners that keep an SD file open across calls; unmount, remount and format refuse while one is held. The video recorder registers. |
+| `System_VFS` | `sdMountGeneration`; `isSDAvailable` per operation | SD availability is asked per operation, and once-per-mount work compares the mount generation. The image manager no longer latches availability at boot. |
+| `System_Filesystem` | Path rule table | The only file permission gate: file commands no longer carry their own admin flag, so serial, BLE, the web CLI, the Files page and the OLED file browser's rename and delete reach the same decision; the OLED browser shows "Not found or denied" for the rules' missing-or-denied refusal. The battery log and its rotations are system-owned. Files peers deliver under `/espnow/received` (pushed files and files fetched from the bonded peer) are administrator-only, with read, write and delete; users and guests get nothing there. |
+| Host tests | `test/host/fake_vfs.h` | The shared in-memory filesystem fake that new persistence suites build on. |
+
+### Network, OTA, MQTT and boot
+
+| Module | Owner | What it now owns |
+|---|---|---|
+| `System_WiFi` | `connectToBestWiFiNetwork(budgetMs, origin)`, `wifiBootConnectBudgetMs`, `WifiConnectOrigin` | One deadline per connect request across every attempt and saved network. A trial OTA boot takes its budget from the remaining probation setup window (`otaSafetySetupRemainingMs` in `System_OTASafety`), less a reserve for the rest of setup. Only a boot connect or a serial-origin command reads the console to cancel. |
+| `System_ESPNow` | `espnowOwnsRadio` | Whether ESP-NOW holds the radio: while it is initialized and while a timed-out close still holds its tasks and the driver. `System_WiFi`'s connect, disconnect, radio power-off, targeted connect and lazy start ask it, so a pending close no longer has the Wi-Fi driver stopped, switched or deinitialized underneath it. |
+| `System_WiFiNetworks` | `wifiNetworkFieldProblem`, `wifiAddCommandLine` | The saved-network field rule (no quote, no control character) and the structured add that writes the one `wifiadd` line, built in every configuration so the OLED and G2 add forms link with Wi-Fi off. The add runs as the admin `wifiadd` command on the executor; `upsertWiFiNetwork` refuses control characters too, and `wifiadd` names that refusal instead of reporting a full list. |
+| `hw1_ota_protocol` | `hw1_ota_phase_is_idle_or_terminal`, `hw1_ota_replacement_request_flags`, `hw1_ota_phase_accepts_downgrade_permission` | Phase classification for both the app and the updater, the flags a replacing operation may carry (never an earlier downgrade or forced-power permission), and the phases that accept a downgrade permission. |
+| `System_CrashRecord`, `System_OTA` | `crashRecordConsecutiveSoftwareFaults` | A software-fault count (panic and watchdog) beside the full fault count. The OTA crash-loop escape and the trial rollback key on it, so brownouts no longer send a board to factory recovery, and a committed escape consumes both counters. |
+| `System_OTA` | `armEmergencyRecovery` | One emergency-recovery arm for the crash-loop escape and the storage-failure path; every failed factory switch through it is journaled. |
+| `System_MQTT` | `MqttAdmission` (`System_MQTTAdmission.h`), `MqttCommandReply`, `MqttJsonWriter` | MQTT commands are queued to the command executor instead of waiting on the esp-mqtt task. The movable admission travels with the queued reply and is released only after the reply is enqueued, so teardown waits for every command; a stop within about a second of a queued reply can still drop that reply. Discovery documents go through a bounded writer, which skips one that does not fit. |
+| `System_TimeAnchors` | Anchor registry rewrite | The registry is replaced only through the checked atomic writer, a pruned row leaves memory only after the rewrite succeeds, and a failed append is retried on the next tick without duplicating a row that landed. |
+| `System_RadioCompanion` | Companion escalation through `rebootDevice` | The C6 escalation restarts through the shared reboot owner, which finalizes a recording, records the reboot reason and flushes the event log; no direct restart remains. |
+
+### Camera, images, LLM and Edge Impulse
+
+| Module | Owner | What it now owns |
+|---|---|---|
+| `System_Camera_DVP` | `cameraSessionBegin`, `cameraSessionEnd`, `cameraCaptureBusy` | Camera capture sessions (stream, recording) and the busy answer the power-save inhibitor asks for. Recovery, stop and resolution changes leave sessions alone; the recorder holds a recording session for its task's life, and web frame polling holds none. |
+| `System_Camera_DVP` | `initCamera` | The single report of a failed camera start; a failed start keeps the saved auto-start setting. |
+| `System_Camera_DVP` | `opencamera async`, `closecamera async` | The gated asynchronous power request. It runs on the executor under the caller's identity, so the registry's authorization, the session fence and the audit apply; a start is refused while the camera is disabled, and the reply says only whether the camera power task accepted it. The G2 Sensors CAM toggle submits it and saves the auto-start preference only after acceptance. |
+| `System_Camera_Video` | `finalizeAndClose` (private) | Clip completion: the index follows the last complete frame, and every header patch, the flush and the final size are checked before the saved event. A failure keeps the file and posts `video_record_failed`; a failed start removes its file. |
+| `System_ImageManager` | `managedImagePath` (private); `deleteImage` with the caller's `AuthContext` | What counts as a managed photo, for reads and deletes. `imagedelete` deletes as its caller. |
+| `System_DebugJson.h` | `serializeJsonListToDebugBuffer` | List replies sized against the debug buffer: an oversized `images json` or `cameravideolist json` drops trailing entries and says so. |
+| `System_LLMBackend` | `llmBackendSelect`, `llmBuildLoadCommand` | The configured context cap for every surface. Web and OLED loads and unloads submit `llmload` and `llmunload`, so the command table's admin gate and the executor's serialization apply. |
+| `System_EdgeImpulse` | `EIInferenceLock`, the lifecycle lock, `inferRgb` (private) | One inference lock from capture to results, serialized start, stop, load and unload, and one pipeline for camera and file input with geometry read from the model. Host-tested only; no shipped configuration builds it. |
+
+### ESP-NOW
+
+| Module | Owner | What it now owns |
+|---|---|---|
+| `System_ESPNow_FsList` | `fsRpcRequesterIdentity` (private) | Remote file identity: list, stat and get serve only the bonded peer while its bond session is live, under the reserved bond identity; every other paired peer is refused before any file access. The web Bond file list and fetch endpoints and the OLED peer browser require a local administrator first; the stat endpoint stays sign-in only. |
+| `System_ESPNow` | Opcode dispatch table flags | Text and boot frames, and sensor status, need an authenticated frame once the device has a passphrase; subscription updates need a session frame. The retired sensor broadcast opcode is gone. |
+| `System_ESPNow` | Message store: `peerHistorySlotLocked` (private), `espnowCopyCollapsedHead` | Peer message history as a fixed slot table whose blocks are allocated once and never moved or freed, behind one lock that takes no other lock. Reads are find-only, and the OLED and G2 views copy records instead of holding pointers. |
+| `System_ESPNow` | `streamCmdIdForCurrentTask` (private), `espnowStreamOutputWanted` | Remote command output streams to the session of the ESP-NOW command the executor is running, found from its command context, instead of one global id set when a request was queued. Another peer's queued command, local commands and background jobs no longer reach a remote requester, and one request ending no longer cuts another's stream. `broadcastOutput` asks `espnowStreamOutputWanted` before copying a line; the legacy `startstream` sink still hears output while a remote command is in flight. |
+| `System_Utils` | `formatRemoteCommandSent`, `parseRemoteCommandSentReqId` | The `remote:` reply, `Remote command sent: ... (reqId N)`, and its parser. The OLED bonded settings editor matches the peer's reply by that request id and the bonded peer, so the reply to another `remote:` command is no longer shown as its result. |
+| `System_ESPNow_Sessions` | `sessionClassifyPeerRekey`, `sessionNotePeerRekey`, `sessionHoldRekeyReply`, `sessionOpenIdStale`; the previous key's replay window | Session freshness: a re-delivered rekey or session-open frame is ignored instead of re-keying or resetting a live session. A frame opened with the previous key is checked against that key's own replay window. A second recorded rekey injected inside the five-second reply grace can still desynchronize a pair until it re-handshakes. |
+| `System_ESPNow_Handlers_Crypto` | `rekeyRetrySweep` | Retransmission of an unanswered rekey and the give-up that drops the session for a fresh handshake. |
+| `System_ESPNow_Deadline.h` | `espnowDeadlineAfter`, `espnowDeadlinePending` | Wrap-safe deadlines for the previous-key window, sensor leases and the pre-warm cooldown. |
+| `System_ESPNow` | Metadata text policy: `metadataTextAllowed`, `normalizeMetadataWireText`, `metadataPushTick` (all private) | One rule for the local metadata setters and for received metadata. Metadata changes are pushed to subscribed session peers after a short settle. |
+| `System_ESPNow` | `v4_reasm_accept`, `v4_reasm_release` (private) | Fragment reassembly with bounded counts, types and completed size, and one null-safe release for every cleanup path. |
+| `System_ESPNow_Tx` | `v4_single_frame_cap` | The single-frame cutoff. A synchronous send from the command executor that needs more than one frame runs its fragment loop there, so a large reply no longer stalls the transmit dispatcher. |
+| `System_ESPNow` | `espnowunpair`, `espnowpairmode` | The OLED Unpair Device and discovery screens submit these commands through the authorized executor, so an OLED unpair persists, drops the peer's key and session, and is admin-only as on the other surfaces. |
+| `System_BondedPeer` | `BondedPeer::remoteEditAllowed`, `filterSchemaForRemoteEdit`, `readRemoteEditableSchemaJson` | Which settings a bonded peer may edit remotely, for both settings editors. The OLED bonded-peer editor is built from it and the peer's cached schema; the web bonded view receives the schema already narrowed by it, so the Settings page script keeps no copy of the policy and never spells a command from a setting key. |
+| `System_Settings`, `System_SettingsEditorCore` | `settingsEditorHasCommand` for the schema's `cmdKey` | The settings schema names a row's command only when that setter is registered in this firmware. The OLED bonded editor leaves such a row out; the web Settings page shows bitmask and debug rows without a setter disabled and skips any such row when saving. |
+| `System_ESPNow` | Bond JSON: `serializeBondJson`, `writeBondJsonFileLocked` (private); `espnowReadCachedManifest` | The manifest and schema go through one measured PSRAM buffer and one checked write, are cached straight from the transfer buffer, and are read back through the owner API, which validates the firmware hash and copies under the filesystem lock. A document over the receiver's bond-file limit is refused, not cut. |
+
+### Bluetooth, ring and health
+
+| Module | Owner | What it now owns |
+|---|---|---|
+| `Bluetooth` | `bleRawNotifyToSession` | Now the only radio path for command-service output: each frame goes to one connection and is admitted under the lifecycle mutex only while its session epoch is live. The characteristic-wide raw notify is gone. |
+| `Bluetooth` | `sendBLEResponseToSession` | The only targeted BLE send: a command result goes to the connection and session epoch it was admitted under, and is dropped after a logout or a new login on that connection. The connection-only sender is removed, and a BLE result never falls back to the console-mirror sessions. |
+| `System_BleSecureChannel` | `bleScHandleInbound` with the frame's connection and session epoch | Session-scoped secure-channel delivery: handshake replies go only to the connection and session a frame arrived on, and every secure frame goes through the directed sender. File commands, now including `imagedelete`, run only when the command itself arrived encrypted. |
+| `Bluetooth` | `bleCollectMirrorSessions` (private), `bleMirrorRecipientCount` | Console-mirror recipients: logged-in non-guest sessions, each through its own channel. The debug drain buffers BLE output only while the count is non-zero, and `outble` reports it. |
+| `Bluetooth` | `bleDisconnectConnection`, `bleDisconnectAppClients` | Disconnecting one app client or all of them, never a ring or G2 temple link. |
+| `Bluetooth` | `deinitBluetooth` result; `bleCaptureStatusSnapshot` (private) | Whether a server stop happened, which `closeble` and `blemode client` report and the companion reset honours; one guarded status snapshot behind `blestatus`, `bleread` and `bleinfo json`. |
+| `System_RadioCompanion` | `shutDownBleForCompanionReset` | The C6 companion reset stops the BLE server only through `deinitBluetooth`, up to three attempts 500 ms apart. If no attempt completes (the ring owner has not quiesced or the host teardown failed), the host is not forced down: the lifecycle fault keeps Bluetooth off and the reason is logged. |
+| `Bluetooth` | `blePlaintextDeferredInbound` (private) | Plaintext BLE commands run on the command executor like secure frames, not on the Bluetooth stack's task. |
+| `G2_Ring` | `ringcontrol` command | Ring collection and low-power controls; the web and OLED health pages submit it through their authorized executors, and the ring's help overview names it. |
+| `System_SensorLogging` | `healthstatus force-history` registry row | The admin freshness bypass is its own admin row, so every interface gets the registry's standard refusal and `help` lists it; the plain `healthstatus` handler refuses the verb instead of running it. The web Health page maps only the registry's admin refusal to 403. |
+| `G2_Ring`, `R1_HealthHistoryStore` | Daily history acknowledgement and day loading | A daily history page from a 2.2.9 ring is acknowledged only after the Health model accepted it. A stored day that cannot be opened loads as a read failure and is merged into, never replaced; a corrupt day is retried, then that sweep is dropped. |
+
+### G2 pages
+
+| Module | Owner | What it now owns |
+|---|---|---|
+| `G2_Page_Common.h` | `g2ShowListPageAndPublish` | A page's sub-mode and row map are published only after the lens accepted the render. Power, Files, Settings, Camera Settings, LED, Sensors and Automations use it. |
+| G2 Network, Files and Sensors pages | `queuePendingViewRedraw`, `filesQueueListRedraw`, `redrawSensorsDetailIfCurrent` (private), on the shared `g2EnqueueRedraw` | Fenced redraws: watchdogs, scan workers and completions publish state and queue a redraw that the lens drops if the menu generation moved. They never draw from their own task. |
+| `G2_Page_Network` | Rendered row actions | Every Network submenu dispatches from the row actions it rendered, so a radio or server change after the render cannot change what a tap does. |
+| `FileBrowser_FileKind.h` | `fileKindForName` | One file classifier for the G2 and OLED file browsers. |
+| `System_Automation` | `automationCopySummaries`, `automationFindSummary` | Copied list summaries built by the owner's trigger parser; neither display page opens the automations file. |
+| `G2_Page_Files` | Files page recursive mutex | File-manager use, the row buffers and the chooser state, on every task. |
+| `QuickNote_Store` | `QuickNoteStore::sweep` | Removal of interrupted-save temporaries on both storage tiers. |
+
+### OLED
+
+| Module | Owner | What it now owns |
+|---|---|---|
+| `System_Settings` | `displayrequireauth` | The only display login policy control and JSON key (super admin); the OLED row and the plain-admin command are removed, and the `oled` help overview names it. |
+| `OLED_Utils` | Owner-task requests: `oledPostOwnerRequest`, `oledApplyPendingOwnerRequests` (private), behind `requestOLEDMode` | Display changes requested from other tasks (mode, text, animation, clear, enable) are queued and applied on the OLED task at its next frame. |
+| `OLED_Utils` | Commit window: `oledCommitFrame`, `oledFrameCommitAllowed`, `oledDisplayEpochLiveUnderWriter` (all private) | The frame commit and the command-result copy check the display session under its writer, release it, then push the panel or copy the result, and re-check without opening a session. A frame that went stale during the push is redrawn; a stale result is wiped and refused. Remote logins and revokes no longer wait for a panel push. |
+| `OLED_Utils` | `oledKeyboardInit(..., masked)` | Masking of secret fields in the shared keyboard, including its debug traces; the user manager's new-account password field uses it. |
+| `OLED_Utils` | `oledSessionRole` (private), `oledSessionIsAdmin` | The session's guest and admin role, cached on the OLED task per session boundary and identity generation and failing closed, so menu frames no longer read `users.json`. |
+| `OLED_Utils` | `oledRunCommand`, `oledCommandReplyText` | OLED actions run through the authorized executor and show the owner's refusal, with one mapping from reply to message. |
+| `OLED_Utils` | `oledModeRuleAllows` | The menu's mode availability and `oledmode` consult each mode's registered entry rule first. |
+| `System_Maps` | `WaypointManager::addWaypoint`, `deleteWaypoint` results | The waypoint save result, which every transport now reports; the OLED Map actions run as the signed-in user. |
+
+Removed with the after-merge items: the unused `BLE_IDF` experiment and its
+feature flag, the `debugringbridge` command and setting (its debug bit is
+retired, not reused), the OLED unified-menu placeholder and the HTTP-off and
+display-off stubs nothing called. The Bluetooth, OLED and ring help overviews
+now match their command rows (permission tiers, `displayrequireauth`,
+`ringcontrol`). Tools: the command-registry audit also checks the commands the
+OLED submits through `oledRunCommand`, and the BLE secure-channel client
+(`tools/ble_secure_event_catalog_client.py`) expects the current event catalog
+(13 families, 165 kinds) and reports a locked-out login instead of waiting for
+its timeout.
+
+Left after the merge: the items that need the 0.99.98 audio and glasses files
+stay deferred, among them the microphone recorder's SD-in-use registration, the
+G2 camera stream's capture session, the web session fence for the glasses'
+broadcast producers, the recordings list producer, micviz on the shared
+microphone stream, a strict field skip in the glasses protocol parser, the G2
+parts of the ring clean-up and the unread OLED mode-entry fields. Carried
+unchanged: a live power-mode brightness cap that does not persist
+`oledBrightness`, `sessionlist` with the web server compiled out, the periodic
+MQTT state document on the bounded writer, and the `healthstatus` poll, history
+and refresh dispatch that is still duplicated between the web and the CLI.
+
+ESP-NOW output streams are keyed by request id alone, so two peers using the
+same id at once share a stream; the OLED remote editor reads only the latest
+reply record and can report "No reply from peer" when another reply overwrote
+its own. Replayed key-exchange hellos still rewrite the peer identity file, and
+the Bond page builds device JSON without escaping. ESP-NOW password failures are
+not written to the failed-login log, and user-sync admin failures post no
+login-failed event. `/api/espnow/status` waits on the executor once per status
+command, as `/api/logging/status` and `/api/cli/batch` already do, so a queued
+`closehttp` can land between two of them; one waiter scope held for the whole
+handler would close that. The Wi-Fi radio status label (`wifiRadioState`)
+still reports from `isEspNowInitialized()`, so it reads as disconnected while
+an ESP-NOW close is pending. The OLED file browser names a path-policy refusal
+only for a path that is missing or unreadable; a denied rename or delete of a
+listed file still shows the generic failure toast until the file handlers
+report a denial separately. If the companion reset's BLE stop never completes,
+the server stays marked initialized with its sessions closed, and a later
+successful stop clears the lifecycle fault although the log line says "until
+a reboot". Password checks behind a signed-in session (password change, the
+user-sync sender) are not throttled, and whether `outble` should be admin-only
+is still open. Found by the merge checks and not review items: the OLED
+ESP-NOW device-config editor sends `espnow cmd` lines that resolve to no
+command, and the G2 Sensors fallback names `openmicrophone` and
+`closemicrophone` instead of `openmic` and `closemic`.
+
+Checkpoint verification:
+
+- Every review fix has a host suite or source guard that fails on the 0.99.97.4
+  tree and passes after, under ASan/UBSan. Most fail there behaviourally; some
+  fail only on a missing owner or a source contract (among them the roster
+  snapshot, the serial, UART and MQTT lockout adoption and the OTA updater
+  flags), and the auto power mode removal has no behavioural test. On their
+  own branches the first half passed 196 runnable host suites and 51 web UI
+  tests, and the second 200 runnable suites. The after-merge items register
+  fifteen more suites (one of them, `stt_privacy`, existed but was never
+  registered) and extend existing ones; each new suite and each added check
+  fails on the merged tree before those items and passes after. One
+  compile-time count the host suites do not compile, the settings-to-debug-flag
+  map after `debugringbridge` was retired, was caught by the firmware builds
+  and is fixed on the final tree.
+- On the final tree, 256 of the 259 registered firmware host suites passed with
+  ASan/UBSan; the three browser suites need Node.js and were reported disabled
+  on this host. All 51 web UI tests passed.
+- The `xiao-default`, `qtpy-maps-test` and `p4x_eye` builds passed on the final
+  tree; their application descriptors embed `0.99.98`.
+
+<sizes>
+
+No device pass was run on the merged build. Each half ran a short pass on its
+own branch build earlier the same day. The first, on the XIAO and P4X-EYE,
+confirmed the serial lockout and its end, a valid roster after ban, delete and
+reboot, the forced password change, the rank rule on unban, `imagedelete`
+acting as its caller, camera saves refusing without a card, the IP ban list,
+the removed auto power mode and the OLED brightness surviving a reboot; the P4
+camera and the web pages were not exercised. The second, on the XIAO, QT Py and
+P4X-EYE, confirmed encrypted ESP-NOW text, rekeying with its retry give-up and
+recovery, the metadata text rule and push, bonded remote commands streaming
+back, the BLE stream, disconnect, status and `closeble` commands, the OLED
+command replies, the waypoint refusal and the `ringcontrol` argument checks
+(no ring connected); with the bond manifest change a bonded pair completed
+sync. The after-merge items are host-tested only. Also verified on hosts only:
+the web pages and endpoints, the G2 lens pages, the gamepad-driven OLED pages,
+the P4 camera, the bonded-peer file gate, phone-side Bluetooth, the ring, MQTT
+with a broker, Edge Impulse, factory reset, the Wi-Fi connect budget with
+unreachable networks, the C6 companion reset with Bluetooth up and the OTA
+recovery paths. The updater's replacement-flag change takes effect only when a
+separately built updater is flashed to the factory slot. The XIAO default
+profile has the least app headroom of the three, so its next feature needs to
+fit there.
+
+`docs/COMMAND_REFERENCE.md` is regenerated from the merged command table. The
+user guide and app JSON contract lines these fixes call for, and an optional
+CONTRIBUTING row, are listed as deferred rather than applied. The fixes did not
+edit the 0.99.98 speech and audio files.
