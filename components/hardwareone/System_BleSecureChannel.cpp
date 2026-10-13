@@ -13,8 +13,13 @@
 #include <freertos/task.h>     // vTaskDelay — inter-fragment pacing
 #include <freertos/semphr.h>
 
-// Raw notify into the RESPONSE characteristic (binary-safe; defined in Bluetooth.cpp).
-extern bool bleRawNotify(const char* data, size_t len);
+// Directed raw notify into the RESPONSE characteristic (binary-safe; defined in
+// Bluetooth.cpp): one connection, admitted under the BLE lifecycle mutex only while
+// `expectedEpoch` is that connection's live session epoch.
+extern bool bleRawNotifyToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
+                                  const char* data, size_t len, bool blocking);
+extern bool bleSessionEpochMatches(uint16_t connId, TransportSessionEpoch epoch);
+extern TransportSessionEpoch bleSessionEpochForConnection(uint16_t connId);
 extern bool isBLEConnected();
 extern Settings gSettings;
 extern void broadcastOutput(const String& s);  // queue-based, BTC_TASK-safe
@@ -214,10 +219,11 @@ static ScConn* scAlloc(uint16_t connId) {
   return nullptr;
 }
 
-bool bleScBind(uint16_t connId, BleScBinding* out) {
+bool bleScBind(uint16_t connId, TransportSessionEpoch epoch, BleScBinding* out) {
+  if (epoch == 0) return false;
   ScConn* c = scFind(connId);
   if (!c || c->phase != 2) return false;
-  if (out) { out->connId = connId; out->generation = c->generation; }
+  if (out) { out->connId = connId; out->epoch = epoch; out->generation = c->generation; }
   return true;
 }
 
@@ -283,12 +289,12 @@ static const TickType_t SC_FRAME_PACING = pdMS_TO_TICKS(30);
 
 bool bleScSendEncrypted(uint16_t connId, const char* plaintext, size_t len, bool blocking, bool binaryFrame) {
   BleScBinding binding;
-  if (!bleScBind(connId, &binding)) return false;
-  return bleScSendEncryptedBound(binding, plaintext, len, blocking, nullptr, nullptr, binaryFrame);
+  if (!bleScBind(connId, bleSessionEpochForConnection(connId), &binding)) return false;
+  return bleScSendEncryptedBound(binding, plaintext, len, blocking, binaryFrame);
 }
 
 bool bleScSendEncryptedBound(const BleScBinding& binding, const char* plaintext, size_t len,
-                             bool blocking, bool (*fence)(void*), void* fenceCtx, bool binaryFrame) {
+                             bool blocking, bool binaryFrame) {
   // Take the tx mutex for the WHOLE chunked message so its frames stay contiguous with
   // monotonic counters even when path A and path B send concurrently from two tasks.
   // blocking=false is the best-effort console-mirror path (the single debugOutputTask): if a
@@ -329,10 +335,11 @@ bool bleScSendEncryptedBound(const BleScBinding& binding, const char* plaintext,
   uint8_t idx = 0;
   bool ok = true;
   do {
-    // Re-validate before every fragment: the caller's session fence (connection
-    // epoch) and the slot binding above. Pacing between fragments is where a
-    // disconnect or replacement would otherwise slip in.
-    if ((fence && !fence(fenceCtx)) || !bound()) { ok = false; break; }
+    // Re-validate before every fragment: the bound session epoch and the slot
+    // binding above. Pacing between fragments is where a disconnect or
+    // replacement would otherwise slip in; checking before encrypting means a
+    // dead session never advances txCtr.
+    if (!bleSessionEpochMatches(binding.connId, binding.epoch) || !bound()) { ok = false; break; }
     size_t chunk = (len - off < SC_MAX_PAY_FRAME) ? (len - off) : SC_MAX_PAY_FRAME;
     framePt[0] = binaryFrame ? SC_FRAME_VER_BIN : SC_FRAME_VER;
     framePt[1] = (uint8_t)(msgId & 0xFF);
@@ -341,7 +348,9 @@ bool bleScSendEncryptedBound(const BleScBinding& binding, const char* plaintext,
     framePt[4] = (uint8_t)fragCount;
     if (chunk) memcpy(framePt + SC_APP_HDR, (const uint8_t*)plaintext + off, chunk);
     size_t flen = scBuildData(c, framePt, SC_APP_HDR + chunk, frame);
-    bool nok = bleRawNotify((const char*)frame, flen);   // bounded backpressure lives in bleRawNotify
+    // Directed to this binding's connection and session; bounded backpressure
+    // (blocking: 6 tries, best-effort: 1) lives in the raw sender.
+    bool nok = bleRawNotifyToSession(binding.connId, binding.epoch, (const char*)frame, flen, blocking);
     if (scTrace) { char b[110];
       int n = snprintf(b, sizeof(b), "[BLE-SC]  frame %u/%u payload=%zu wire=%zu notify=%s",
                        (unsigned)idx, (unsigned)fragCount, chunk, flen, nok ? "ok" : "FAIL");
@@ -360,14 +369,15 @@ bool bleScSendEncryptedBound(const BleScBinding& binding, const char* plaintext,
 // Tell the app *why* the handshake won't proceed instead of going silent — the
 // app can only observe silence as a generic timeout. body = reason(1).
 // Best-effort: a failed notify just degrades back to the old silent behavior.
-static void scSendReject(uint8_t reason) {
+// Sent only to the connection and session whose handshake is being refused.
+static void scSendReject(uint16_t connId, TransportSessionEpoch epoch, uint8_t reason) {
   uint8_t frame[2] = { SC_REJECT, reason };
-  bleRawNotify((const char*)frame, sizeof(frame));
+  bleRawNotifyToSession(connId, epoch, (const char*)frame, sizeof(frame), true);
 }
 
 // ----- inbound handshake / data -----
-BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
-                               char* out, size_t outCap, size_t* outLen) {
+BleScResult bleScHandleInbound(uint16_t connId, TransportSessionEpoch epoch, const uint8_t* data,
+                               size_t len, char* out, size_t outCap, size_t* outLen) {
   if (len < 1) return BLE_SC_NOT_A_FRAME;
   uint8_t type = data[0];
   // Only our control/data type bytes are channel frames; printable input (CLI
@@ -375,7 +385,7 @@ BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
   if (type != SC_HELLO && type != SC_CONFIRM && type != SC_DATA) return BLE_SC_NOT_A_FRAME;
   if (!scSodiumReady() || !scDerivePsk()) {                      // no secret -> can't run channel
     scLog(connId, "secure frame received but no passphrase set (blesecret) — rejecting");
-    scSendReject(SC_REJ_NO_PASSPHRASE);
+    scSendReject(connId, epoch, SC_REJ_NO_PASSPHRASE);
     return BLE_SC_ERROR;
   }
 
@@ -389,7 +399,7 @@ BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
     crypto_kx_keypair(devPub, c->ephSec);          // X25519 keypair
     randombytes_buf(devNonce, sizeof(devNonce));
     uint8_t ss[32];
-    if (crypto_scalarmult(ss, c->ephSec, appPub) != 0) { scLog(connId, "HELLO: invalid peer key, aborting"); scSendReject(SC_REJ_AUTH_FAILED); bleScReset(connId); return BLE_SC_ERROR; }
+    if (crypto_scalarmult(ss, c->ephSec, appPub) != 0) { scLog(connId, "HELLO: invalid peer key, aborting"); scSendReject(connId, epoch, SC_REJ_AUTH_FAILED); bleScReset(connId); return BLE_SC_ERROR; }
     // K = HKDF(ikm = ss||PSK, salt = appNonce||devNonce, info)
     uint8_t ikm[64];  memcpy(ikm, ss, 32); memcpy(ikm + 32, gPsk, 32);
     uint8_t salt[32]; memcpy(salt, appNonce, 16); memcpy(salt + 16, devNonce, 16);
@@ -401,7 +411,7 @@ BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
     // Reply HELLO_ACK = type || devPub || devNonce
     uint8_t ack[1 + 32 + 16];
     ack[0] = SC_HELLO_ACK; memcpy(ack + 1, devPub, 32); memcpy(ack + 33, devNonce, 16);
-    bleRawNotify((const char*)ack, sizeof(ack));
+    bleRawNotifyToSession(connId, epoch, (const char*)ack, sizeof(ack), true);
     scLog(connId, "HELLO ok, keys derived, HELLO_ACK sent — awaiting CONFIRM");
     return BLE_SC_CONSUMED;
   }
@@ -414,10 +424,10 @@ BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
     if (crypto_aead_chacha20poly1305_ietf_decrypt_detached(
             pt, nullptr, data + 1, 2, data + 3, nullptr, 0, nonce, c->kC2D) != 0) {
       scLog(connId, "CONFIRM failed to decrypt — wrong passphrase or MITM; dropping channel");
-      scSendReject(SC_REJ_AUTH_FAILED);
+      scSendReject(connId, epoch, SC_REJ_AUTH_FAILED);
       bleScReset(connId); return BLE_SC_ERROR;   // wrong PSK / MITM
     }
-    if (pt[0] != 'o' || pt[1] != 'k') { scLog(connId, "CONFIRM bad payload; dropping channel"); scSendReject(SC_REJ_AUTH_FAILED); bleScReset(connId); return BLE_SC_ERROR; }
+    if (pt[0] != 'o' || pt[1] != 'k') { scLog(connId, "CONFIRM bad payload; dropping channel"); scSendReject(connId, epoch, SC_REJ_AUTH_FAILED); bleScReset(connId); return BLE_SC_ERROR; }
     // Reply CONFIRM_ACK = AEAD("ok", K_d2c, ctr 0)
     uint8_t ackNonce[12]; scNonce(ackNonce, DIR_D2C, 0);
     uint8_t ack[1 + 2 + 16]; ack[0] = SC_CONFIRM_ACK;
@@ -426,7 +436,7 @@ BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
     crypto_aead_chacha20poly1305_ietf_encrypt_detached(
         ack + 1, ack + 3, &tl, okMsg, 2, nullptr, 0, nullptr, ackNonce, c->kD2C);
     c->phase = 2;  // established; data counters: c2d>0 expected, d2c next = txCtr(1)
-    bleRawNotify((const char*)ack, sizeof(ack));
+    bleRawNotifyToSession(connId, epoch, (const char*)ack, sizeof(ack), true);
     scLog(connId, "secure channel ESTABLISHED");
     return BLE_SC_CONSUMED;
   }

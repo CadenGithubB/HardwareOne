@@ -536,6 +536,79 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_deadline_wrap.py
           ${ESPNOW_DEADLINE_WRAP_TEST_ARGS})
+
+set(STT_BLE_PRIVACY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND STT_BLE_PRIVACY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME stt_ble_privacy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_ble_privacy.py
+          ${STT_BLE_PRIVACY_TEST_ARGS})
+
+set(BLE_SC_DIRECTED_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND BLE_SC_DIRECTED_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ble_sc_directed
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_sc_directed.py
+          ${BLE_SC_DIRECTED_TEST_ARGS})
+
+set(RING_DAILY_ACK_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND RING_DAILY_ACK_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ring_daily_ack
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ring_daily_ack.py
+          ${RING_DAILY_ACK_TEST_ARGS})
+
+# BLE server stop: deinitBluetooth() reports deferred/failed stops; closeble and
+# blemode client keep bleMode and the app sessions (README "Bluetooth server stop").
+set(BLE_SERVER_STOP_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND BLE_SERVER_STOP_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ble_server_stop
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_server_stop.py
+          ${BLE_SERVER_STOP_TEST_ARGS})
+
+# BLE Secure Channel policy: the required-mode refusal reaches the plaintext writer,
+# file verbs run only when the command arrived encrypted, and the posture
+# commands share the superadmin tier (README "BLE Secure Channel policy").
+set(BLE_SC_POLICY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND BLE_SC_POLICY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ble_sc_policy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_sc_policy.py
+          ${BLE_SC_POLICY_TEST_ARGS})
+
+set(BLE_AREA_CLEANUP_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND BLE_AREA_CLEANUP_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ble_area_cleanup
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_area_cleanup.py
+          ${BLE_AREA_CLEANUP_TEST_ARGS})
+
+set(RING_FORWARDED_TELEMETRY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND RING_FORWARDED_TELEMETRY_TEST_ARGS --sanitize)
+endif()
+add_test(NAME ring_forwarded_telemetry
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_ring_forwarded_telemetry.py
+          ${RING_FORWARDED_TELEMETRY_TEST_ARGS})
 add_test(NAME p4eye_display_pixels COMMAND p4eye_display_pixels_tests)
 add_test(NAME p4eye_display_lifecycle COMMAND p4eye_display_lifecycle_tests)
 add_test(NAME rotary_core
