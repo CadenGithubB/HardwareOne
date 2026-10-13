@@ -39,11 +39,12 @@ with Ollama configured behind the agents. The user selected `main` (Mingus), so
 the device target will be `openclaw/main`. Follow-up inspection confirmed gateway
 authentication mode `token`, a valid but unset Control UI allowed-origins setting,
 and IPv4 `192.168.21.143` on `en0` (no IPv6 network state). Effective sandbox/tool
-policy and the listener/TLS migration plan are still pending. Do not change the
-listener or restart the host service until the concrete setup is determined.
+policy was inspected below. The selected relay keeps this listener unchanged;
+follow the [relay setup](../integrations/openclaw/relay/README.md) for the local
+chat endpoint and separate HTTPS listener.
 
 The [v2026.9.4 release](https://github.com/openclaw/openclaw/releases/tag/v2026.9.4)
-matches the reported commit. Its custom IPv4 listener can bind the test VLAN
+matches the reported commit. For a direct connection, its custom IPv4 listener can bind the test VLAN
 address while retaining IPv4 loopback access; non-loopback startup also requires
 authentication and, with Control UI enabled, configured allowed origins. Preserve
 existing origins. See the tagged [listener implementation](https://github.com/openclaw/openclaw/blob/v2026.9.4/src/gateway/net.ts)
@@ -91,7 +92,8 @@ does not limit the credential to that agent. Assess this before placing a gatewa
 credential on the XIAO. If that authority exceeds the intended device access,
 design a separately authenticated, narrowly constrained intermediary while
 keeping the gateway local; it must enforce permitted routes, agent/session
-selection, headers, and request fields. That intermediary is not implemented.
+selection, headers, and request fields. The optional
+[HTTPS relay](../integrations/openclaw/relay/README.md) implements that boundary.
 See the tagged [HTTP authentication contract](https://github.com/openclaw/openclaw/blob/v2026.9.4/docs/gateway/openai-http-api.md#security-boundary-important).
 
 The optional Python device helper needs approved Python execution, readable
@@ -129,7 +131,7 @@ and reported running on port `80`, so the current device base URL is
 but `wifiAutoStart` remains `false`; reconnect after a device reboot. No firmware
 was flashed, no VLANs bridged, and the gateway configuration was not changed.
 The account creation/listing and network/server status were verified through USB;
-authentication and reachability from the Studio remain to be checked there.
+authentication and reachability were subsequently verified from the Studio below.
 Do not use `/dev/cu.usbmodem2201`, which is occupied by the separate P4 work.
 The user subsequently created a dedicated device account named `openclaw` with
 its own credentials and updated the Studio's device configuration and address.
@@ -272,8 +274,9 @@ no production build flags were changed. Focused source checks retained strict
 flags except the existing G2 address-copy warning. XIAO's board policy excludes
 OLED; OLED validation here was the extracted helper check, not a full OLED build.
 
-Live gateway compatibility, skill discovery, device memory use, and actual Wi-Fi
-streaming remain hardware acceptance checks. No device was flashed for this
+Live device-to-gateway compatibility, device memory use, and actual Wi-Fi
+streaming remain hardware acceptance checks. The existing Studio-to-device
+tools passed the separate checks above. No device was flashed for this
 implementation. Two Espressif USB devices were present during preparation; confirm
 the XIAO's port before flashing. Its Wi-Fi password is not recorded in this project.
 
