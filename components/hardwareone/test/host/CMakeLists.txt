@@ -441,6 +441,101 @@ foreach(test_name IN ITEMS camera_core camera_dvp camera_p4 camera_i2c_reservati
             ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
             ${CAMERA_TEST_ARGS})
 endforeach()
+
+# ESP-NOW peer metadata: the metadata text policy, receive path and CLI setters
+# (C++), and the shipping ESP-NOW page renderers on a host JavaScript engine
+# (README "ESP-NOW peer metadata text and page rendering").
+set(ESPNOW_METADATA_TEXT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_METADATA_TEXT_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_metadata_text
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_metadata_text.py
+          ${ESPNOW_METADATA_TEXT_TEST_ARGS})
+add_test(
+  NAME espnow_page_render
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_page_render.py)
+# Exit 77 = source contracts passed but no JavaScript engine was found (reported as skipped).
+set_tests_properties(espnow_page_render PROPERTIES SKIP_RETURN_CODE 77)
+
+# ESP-NOW session handshake freshness (README "ESP-NOW session handshake freshness"):
+# production SESSION_OPEN/CONFIRM/REKEY handlers and initiators between two modelled
+# devices; re-delivered handshake frames must not re-key or reset a live session.
+set(ESPNOW_SESSION_REKEY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_SESSION_REKEY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_session_rekey
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_session_rekey.py
+          ${ESPNOW_SESSION_REKEY_TEST_ARGS})
+
+# ESP-NOW session replay window across a REKEY (README "ESP-NOW session replay
+# window"): production wrap/unwrap, rekey-apply, REKEYING/abort and prev-key sweep
+# driven by a scripted peer; the previous key is judged by its own replay window.
+set(ESPNOW_SESSION_REPLAY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_SESSION_REPLAY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_session_replay
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_session_replay.py
+          ${ESPNOW_SESSION_REPLAY_TEST_ARGS})
+
+# ESP-NOW session rekey retry (README "ESP-NOW session rekey retry"): production REKEY
+# initiator/responder/retry sweep and session lifecycle against modelled peers.
+set(ESPNOW_REKEY_RETRY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_REKEY_RETRY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_rekey_retry
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_rekey_retry.py
+          ${ESPNOW_REKEY_RETRY_TEST_ARGS})
+
+# ESP-NOW V4 dispatch policy: the real opcode table, flag constants, lookup and
+# dispatcher with generated handler doubles, compiled with ENABLE_BONDED_MODE 1
+# and 0 (README "ESP-NOW" area, espnow_dispatch_policy paragraph).
+set(ESPNOW_DISPATCH_POLICY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_DISPATCH_POLICY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_dispatch_policy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_dispatch_policy.py
+          ${ESPNOW_DISPATCH_POLICY_TEST_ARGS})
+
+# ESP-NOW V4 fragment reassembler: v4_reasm_accept / v4_reasm_release / dispatch cleanup on
+# crafted post-unwrap fragments, plus a run with no reassembly table.
+set(ESPNOW_REASSEMBLY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_REASSEMBLY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_reassembly
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_reassembly.py
+          ${ESPNOW_REASSEMBLY_TEST_ARGS})
+
+# ESP-NOW deadlines across the millis() wrap (README "ESP-NOW deadlines across the millis() wrap"):
+# production prev-key window, sensor-lease and session pre-warm cooldown owners driven
+# by an injectable clock on both sides of the 32-bit rollover.
+set(ESPNOW_DEADLINE_WRAP_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_DEADLINE_WRAP_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_deadline_wrap
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_deadline_wrap.py
+          ${ESPNOW_DEADLINE_WRAP_TEST_ARGS})
 add_test(NAME p4eye_display_pixels COMMAND p4eye_display_pixels_tests)
 add_test(NAME p4eye_display_lifecycle COMMAND p4eye_display_lifecycle_tests)
 add_test(NAME rotary_core

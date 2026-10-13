@@ -47,6 +47,7 @@
 #include "System_ESPNow_Identity.h"  // Phase 3.0: long-term Ed25519 identity load/store
 #include "System_ESPNow_MeshKeys.h"  // Phase 3.1: per-mesh PBKDF2 hash + bootstrap/group key cache
 #include "System_ESPNow_Sessions.h"  // Phase 3.4: per-peer-per-mesh session state
+#include "System_ESPNow_Deadline.h"  // wrap-safe pre-warm cooldown
 #include "System_ESPNow_Sensors.h"
 #include "System_ESPNow_Tx.h"        // Single-sender TX dispatcher (Phase 1)
 #include "System_MemUtil.h"          // ps_alloc — heap copy of payload for async send
@@ -395,7 +396,7 @@ static V4ReasmEntry* v4_reasm_find_or_alloc(const uint8_t* src, uint32_t msgId, 
       memcpy(gV4Reasm[i].src, src, 6);
       gV4Reasm[i].msgId       = msgId;
       gV4Reasm[i].type        = type;
-      gV4Reasm[i].fragCount   = (fragCount <= V4_FRAG_MAX) ? fragCount : V4_FRAG_MAX;
+      gV4Reasm[i].fragCount   = fragCount;  // 2..V4_FRAG_MAX, checked by v4_reasm_accept
       gV4Reasm[i].bufferSize  = (uint16_t)(gV4Reasm[i].fragCount * V4_MAX_FRAGMENT_PAYLOAD);
       gV4Reasm[i].lastUpdateMs = millis();
       gV4Reasm[i].active      = true;
@@ -403,6 +404,22 @@ static V4ReasmEntry* v4_reasm_find_or_alloc(const uint8_t* src, uint32_t msgId, 
     }
   }
   return nullptr;
+}
+
+// Drop the reassembly entry keyed by (src, msgId), if one exists. Safe when the
+// table was never allocated (init continues without fragmentation); every RX
+// path that cleans up after a multi-fragment header lands here.
+static void v4_reasm_release(const uint8_t* src, uint32_t msgId) {
+  if (!gV4Reasm) return;
+  for (int i = 0; i < V4_REASM_MAX; i++) {
+    if (gV4Reasm[i].active && gV4Reasm[i].msgId == msgId &&
+        memcmp(gV4Reasm[i].src, src, 6) == 0) {
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Cleaning up reassembly buffer for msgId=%lu",
+             (unsigned long)msgId);
+      v4_reasm_reset(gV4Reasm[i]);
+      return;
+    }
+  }
 }
 
 struct V4FragAckWait {
@@ -2459,9 +2476,9 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
   }
 
   // fragIndex/fragCount are uint8_t so the wire would allow 255 fragments, but
-  // the RECEIVER is the real ceiling: v4_reasm_find_or_alloc clamps fragCount to
-  // V4_FRAG_MAX and sizes its buffer from the clamped value, so an over-budget
-  // message can never reassemble. This used to guard only against >255, which
+  // the RECEIVER is the real ceiling: v4_reasm_accept refuses a fragCount above
+  // V4_FRAG_MAX, so an over-budget message is dropped at the first fragment and
+  // can never reassemble. This used to guard only against >255, which
   // meant a 33..255-fragment send left the wire looking healthy while the peer
   // silently failed to rebuild it. Guard the REAL cap and fail loudly instead —
   // same rule as the CMD_RESULT_MAX ceiling on the delivery side.
@@ -2996,10 +3013,9 @@ bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled) {
   return result;
 }
 
-// (v4_broadcast_sensor_data — the plaintext sensor-data broadcast — was removed here as
-//  part of the D2 secure-fetcher change. Sensor data now travels only as encrypted-unicast
-//  SENSOR_ENVELOPE. The RX handler v4h_sensor_broadcast is kept vestigial to absorb any
-//  straggler frame from an un-reflashed peer.)
+// (v4_broadcast_sensor_data — the plaintext sensor-data broadcast — was removed here with
+//  the D2 secure fetcher. Sensor data now travels only as encrypted-unicast SENSOR_ENVELOPE;
+//  opcode 150 has no RX row either — nothing emits it.)
 
 // SENSOR_ENVELOPE (154) — the secure fetcher's data reply (D2): a session-encrypted
 // UNICAST of ONE sensor reading to the leasing controller. Replaces the retired plaintext
@@ -3203,6 +3219,13 @@ static constexpr uint8_t V4_OPC_FLAG_REQ_AUTHENTICATED = 0x04;
 // be confidential AND unforgeable. Senders route through bondSendEncryptedAsync, so a
 // legitimate bond frame is always encrypted; plaintext bond frames are dropped.
 static constexpr uint8_t V4_OPC_FLAG_REQ_SESSION_ENC   = 0x08;
+// Require an authenticated frame (SESSION_FRAME unwrap or BROADCAST_AUTH HMAC)
+// once this device's primary passphrase is set (gEspNow->encryptionEnabled).
+// A keyless device still accepts plaintext so a fleet can bootstrap; once a
+// passphrase is set, a plaintext frame for this opcode is a spoof — legitimate
+// senders seal (v4_send_payload_smart) or sign (v4_broadcast /
+// v4_broadcast_category, BROADCAST_AUTH) whenever a key exists.
+static constexpr uint8_t V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED = 0x10;
 
 struct V4OpcodeEntry {
   uint8_t          opcode;
@@ -3312,8 +3335,16 @@ static void v4h_text(const V4RxCtx& ctx) {
       // so re-resolve from the origin. Falls back to the MAC string when the
       // originator is a node we have no name for (normal for a 2-hop peer we
       // have never paired with).
+      // A registry name is attributed only to a frame that proved key
+      // possession (SESSION_FRAME unwrap or BROADCAST_AUTH verify). A plaintext
+      // frame (accepted only on a keyless device, see REQ_AUTH_WHEN_KEYED) can
+      // carry any origin MAC, so it is filed under the MAC string, never under
+      // the name of the paired peer that owns that MAC, and the drain posts no
+      // text_rx event for it.
+      slot.authenticated = ctx.isAuthenticated;
       {
-        String originName = getEspNowDeviceName(ctx.h->origin);
+        String originName;
+        if (ctx.isAuthenticated) originName = getEspNowDeviceName(ctx.h->origin);
         if (originName.length() > 0) {
           strncpy(slot.deviceName, originName.c_str(), sizeof(slot.deviceName) - 1);
         } else {
@@ -3337,8 +3368,8 @@ static void v4h_text(const V4RxCtx& ctx) {
       slot.fragCount = ctx.h->fragCount;
       slot.used = true;
       gEspNow->textQueueHead = nextHead;
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message enqueued slot=%d (encrypted=%s)",
-             head, slot.encrypted ? "YES" : "NO");
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message enqueued slot=%d (encrypted=%s authenticated=%s)",
+             head, slot.encrypted ? "YES" : "NO", slot.authenticated ? "YES" : "NO");
       if (ctx.isPaired && meshEnabled()) {
         noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::RxActivity, -128,
                                ctx.recv_info->rx_ctrl ? ctx.recv_info->rx_ctrl->rssi : (int8_t)-128);
@@ -3432,6 +3463,19 @@ static void sessionPrewarmReset(const uint8_t mac[6]) {
     }
   }
 }
+// True while this peer's pre-warm is backing off (0 = no cooldown). Wrap-safe
+// across the 49.7-day millis() rollover.
+static bool sessionPrewarmInCooldown(const SessionPrewarm& pw, uint32_t nowMs) {
+  return espnowDeadlinePending(pw.cooldownUntilMs, nowMs);
+}
+// Count one fresh SESSION_OPEN attempt. Returns true when this attempt reaches
+// kSessionPrewarmMaxFails and starts the kSessionPrewarmCooldownMs backoff.
+static bool sessionPrewarmNoteAttempt(SessionPrewarm* pw, uint32_t nowMs) {
+  if (++pw->fails < kSessionPrewarmMaxFails) return false;
+  pw->cooldownUntilMs = espnowDeadlineAfter(nowMs, kSessionPrewarmCooldownMs);
+  pw->fails = 0;
+  return true;
+}
 
 static void v4h_heartbeat(const V4RxCtx& ctx) {
   if (ctx.payloadLen >= sizeof(V4PayloadHeartbeat)) {
@@ -3473,11 +3517,9 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
           // No live session - a fresh pre-warm is due.
           uint32_t now = millis();
           SessionPrewarm* pw = sessionPrewarmSlot(pmac);
-          if (now >= pw->cooldownUntilMs) {          // not currently backing off
+          if (!sessionPrewarmInCooldown(*pw, now)) {  // not currently backing off
             espnowSessionOpenInitiate(pmac, nullptr);
-            if (++pw->fails >= kSessionPrewarmMaxFails) {
-              pw->cooldownUntilMs = now + kSessionPrewarmCooldownMs;
-              pw->fails = 0;
+            if (sessionPrewarmNoteAttempt(pw, now)) {
               WARN_ESPNOWF("Encrypted session to %02X:%02X:%02X:%02X:%02X:%02X not establishing after "
                            "%u tries - peer likely does not hold our identity (re-flashed/erased?). "
                            "Backing off %us. Re-pair: 'espnowforget' + 'espnowpairsecure' on BOTH devices.",
@@ -3549,9 +3591,8 @@ static void v4h_sensor_status(const V4RxCtx& ctx) {
 }
 
 // Shared ingest for a per-sensor reading frame (V4PayloadSensorBroadcast wire layout).
-// Used by BOTH the encrypted-unicast SENSOR_ENVELOPE path (the secure fetcher, D2) and
-// the vestigial plaintext SENSOR_BROADCAST RX (D2 removed its TX; RX kept harmless so a
-// straggler frame from an un-reflashed peer still caches rather than erroring).
+// Used by the encrypted-unicast SENSOR_ENVELOPE path (the secure fetcher, D2).
+// Dispatch guarantees REQ_PAIRED|REQ_SESSION_ENC before this runs.
 static void v4_ingest_sensor_reading(const V4RxCtx& ctx, const char* tag) {
   if (ctx.payloadLen < sizeof(V4PayloadSensorBroadcast)) {
     DEBUGF(DEBUG_ESPNOW_MESH, "[%s] ERROR: Payload too small (%u < %u)",
@@ -3582,12 +3623,6 @@ static void v4_ingest_sensor_reading(const V4RxCtx& ctx, const char* tag) {
   entry->connected = true;
   DEBUGF(DEBUG_ESPNOW_MESH, "[%s] cached %s data (%u bytes)",
          tag, sensorTypeToString(sensorType), (unsigned)copyLen);
-}
-
-// SENSOR_BROADCAST — vestigial plaintext RX (D2: TX path removed). Kept so a frame from
-// an un-reflashed peer still caches. No worker in this build transmits opcode 150.
-static void v4h_sensor_broadcast(const V4RxCtx& ctx) {
-  v4_ingest_sensor_reading(ctx, "V4_RX_SENSOR_BROADCAST");
 }
 
 // SENSOR_ENVELOPE — the secure fetcher's data reply (D2). Encrypted-unicast per-sensor
@@ -4400,10 +4435,13 @@ static void v4h_manifest_req(const V4RxCtx& ctx) {
 // re-check peerIdentitySetSubscriptions's return value because race-y
 // FS_LIST / FS_STAT / FS_GET — thin shims that unpack V4RxCtx and call into
 // System_ESPNow_FsList.cpp where the real work lives. All six opcodes are
-// gated on REQ_PAIRED + REQ_SESSION_ENC by the dispatch table — NOT bond-gated
-// (these are base ESP-NOW; bonding merely piggybacks on them). So by the time
-// we reach these handlers the sender is a securely paired peer over an active
-// encrypted session, but it need not be our bond peer.
+// gated on REQ_PAIRED + REQ_SESSION_ENC by the dispatch table — no
+// REQ_BOND_MODE, so a reply still reaches a requester whose own bond mode is
+// off. So by the time we reach these handlers the sender is a securely paired
+// peer over an active encrypted session. Serving a request is narrower:
+// System_ESPNow_FsList.cpp answers LIST/STAT/GET only for our bonded peer
+// while its bond session is live, under the bond identity
+// (fsRpcRequesterIdentity), and replies PERM_DENIED to every other peer.
 extern void fsListOnRequestReceived(const uint8_t srcMac[6],
                                     const uint8_t* payload, uint16_t payloadLen);
 extern void fsListOnReplyReceived(const uint8_t srcMac[6],
@@ -4458,9 +4496,8 @@ static void v4h_subscribe_update(const V4RxCtx& ctx) {
                  MAC_STR(ctx.recv_info->src_addr),
                  (unsigned long)p.requestedEvents);
   }
-  // ACK if requested — flag is cleared on the headerCopy in v4_try_handle_incoming
-  // for SESSION_FRAME unwrap path, but plaintext SUBSCRIBE_UPDATE still
-  // triggers the downstream ACK send.
+  // Dispatch requires a SESSION_FRAME, which v4_try_handle_incoming ACKs before
+  // unwrap and clears ACK_REQ on its header copy — nothing to ACK here.
 }
 
 static void v4h_metadata_req(const V4RxCtx& ctx) {
@@ -4486,12 +4523,48 @@ static void v4h_metadata_req(const V4RxCtx& ctx) {
   }
 }
 
-static void normalizeMetadataWireText(V4PayloadMetadata& meta) {
+// Metadata text policy: the one owner for the local setters (metaGetSet) and the
+// wire receive path (normalizeMetadataWireText). The web page escapes before
+// rendering; this keeps the mesh cache, the persisted registry, the Bond JSON and
+// the CLI/OLED/G2 consumers free of HTML/attribute/JSON metacharacters and control
+// bytes as defence in depth. Bytes >= 0x80 pass unchanged so UTF-8 names work.
+static bool metadataTextByteAllowed(char c) {
+  unsigned char u = (unsigned char)c;
+  if (u < 0x20 || u == 0x7F) return false;
+  return c != '<' && c != '>' && c != '"' && c != '\'' && c != '&' && c != '\\';
+}
+
+static bool metadataTextAllowed(const char* s) {
+  for (; s && *s; ++s) {
+    if (!metadataTextByteAllowed(*s)) return false;
+  }
+  return true;
+}
+
+// In-place replacement keeps the field length, so the packed wire layout and every
+// NUL already placed by the caller are unchanged. Returns the number of bytes replaced.
+static size_t scrubMetadataText(char* s) {
+  size_t n = 0;
+  for (; s && *s; ++s) {
+    if (!metadataTextByteAllowed(*s)) {
+      *s = '_';
+      ++n;
+    }
+  }
+  return n;
+}
+
+// Terminates every fixed-width wire field, then applies the metadata text policy.
+// Returns the number of disallowed bytes replaced with '_'.
+static size_t normalizeMetadataWireText(V4PayloadMetadata& meta) {
   meta.deviceName[sizeof(meta.deviceName) - 1] = '\0';
   meta.friendlyName[sizeof(meta.friendlyName) - 1] = '\0';
   meta.room[sizeof(meta.room) - 1] = '\0';
   meta.zone[sizeof(meta.zone) - 1] = '\0';
   meta.tags[sizeof(meta.tags) - 1] = '\0';
+  return scrubMetadataText(meta.deviceName) + scrubMetadataText(meta.friendlyName) +
+         scrubMetadataText(meta.room) + scrubMetadataText(meta.zone) +
+         scrubMetadataText(meta.tags);
 }
 
 // METADATA_RESP / METADATA_PUSH — shared handler. Type comes from header.
@@ -4515,13 +4588,18 @@ static void v4h_metadata_resp_push(const V4RxCtx& ctx) {
   // first `%s`, strcmp/strncpy, String construction, or bounded registry
   // assignment. Legitimate senders already reserve the final byte for NUL, so
   // this is wire-compatible while making a fully occupied field safe without
-  // adding a 202-byte temporary to espnow_task's stack.
+  // adding a 202-byte temporary to espnow_task's stack. The same step replaces
+  // bytes outside the metadata text policy, so processMetadata stores clean text.
   bool wasPending = gEspNow->deferredMetadataPending;
   memcpy(gEspNow->deferredMetadataSrcMac, ctx.recv_info->src_addr, 6);
   memcpy(gEspNow->deferredMetadataPayload, ctx.payload, sizeof(V4PayloadMetadata));
   V4PayloadMetadata* meta =
       reinterpret_cast<V4PayloadMetadata*>(gEspNow->deferredMetadataPayload);
-  normalizeMetadataWireText(*meta);
+  size_t scrubbed = normalizeMetadataWireText(*meta);
+  if (scrubbed) {
+    WARN_ESPNOWF("[METADATA] %s from %s: replaced %u disallowed byte(s) in metadata text",
+      metaType, MAC_STR(ctx.recv_info->src_addr), (unsigned)scrubbed);
+  }
   DEBUG_ESPNOW_METADATAF("[METADATA] %s payload: name='%s' friendlyName='%s' room='%s' zone='%s' tags='%s' stationary=%d",
     metaType, meta->deviceName, meta->friendlyName, meta->room, meta->zone, meta->tags, (int)meta->stationary);
   gEspNow->deferredMetadataPending = true;
@@ -5872,8 +5950,16 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // or v4_broadcast (broadcast, BROADCAST_AUTH HMAC). Plaintext TIME_SYNC
   // from any source is silently dropped here.
   { ESPNOW_V4_TYPE_TIME_SYNC,        V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_time_sync         },
-  { ESPNOW_V4_TYPE_TEXT,             0,                                                    v4h_text              },
-  { ESPNOW_V4_TYPE_BOOT,             0,                                                    v4h_text              },  // boot/online notice; v4h_text tags it MSG_SYSTEM_EVENT
+  // TEXT/BOOT: every legitimate sender seals (v4_send_text, meshSendBootToPeers
+  // → v4_send_payload_smart, encrypt-or-fail) or signs (v4_broadcast_text →
+  // BROADCAST_AUTH) once a mesh key exists, so a plaintext frame on a keyed
+  // device is a spoof: it can carry any origin MAC behind a non-secret CRC16
+  // via the fingerprint-0 compatibility path. Plaintext stays accepted only
+  // while this device has no passphrase; v4h_text then files it under the MAC,
+  // not a registry name, and the drain posts no text_rx event for it. No
+  // REQ_PAIRED: flooded broadcasts and 2-hop members are unpaired senders.
+  { ESPNOW_V4_TYPE_TEXT,             V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED,                      v4h_text              },
+  { ESPNOW_V4_TYPE_BOOT,             V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED,                      v4h_text              },  // boot/online notice; v4h_text tags it MSG_SYSTEM_EVENT
   // Multi-hop transport. Both carry the mesh group-key HMAC and NOTHING else —
   // REQ_AUTHENTICATED is the whole trust check, and it is the right one: holding
   // the group key is exactly what "member of this mesh" means. NOT REQ_PAIRED,
@@ -5898,12 +5984,15 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_PAIR_REQUEST,     V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_request      },
   { ESPNOW_V4_TYPE_PAIR_ACCEPT,      V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_accept       },
   { ESPNOW_V4_TYPE_PAIR_REJECT,      V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_reject       },
-  { ESPNOW_V4_TYPE_SENSOR_STATUS,    0,                                                    v4h_sensor_status     },
-  { ESPNOW_V4_TYPE_SENSOR_BROADCAST, 0,                                                    v4h_sensor_broadcast  },
+  // SENSOR_STATUS: sender is v4_broadcast_category (BROADCAST_AUTH when a key exists).
+  // Plaintext is accepted only while this device has no passphrase, so a keyless fleet
+  // still sees status cards; a keyed device drops unsigned status.
+  { ESPNOW_V4_TYPE_SENSOR_STATUS,    V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED,                      v4h_sensor_status     },
   // Secure sensor fetcher (D1/D2): mesh-legal leased pull + encrypted reply. NOT bond-gated —
   // REQ_PAIRED|REQ_SESSION_ENC only; the worker's v4h_sensor_req adds the Ed25519 fingerprint
   // check (master/backup) so only designated controllers can drive streaming. SENSOR_ENVELOPE
-  // is the encrypted-unicast data reply replacing the retired plaintext SENSOR_BROADCAST TX.
+  // is the encrypted-unicast data reply replacing the retired plaintext SENSOR_BROADCAST
+  // (opcode 150, removed).
   { ESPNOW_V4_TYPE_SENSOR_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4h_sensor_req        },
   { ESPNOW_V4_TYPE_SENSOR_ENVELOPE,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4h_sensor_envelope   },
   // Keep the topology opcodes compatible with the existing plaintext V4 wire
@@ -5931,13 +6020,17 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // Phase 5: SUBSCRIBE_UPDATE — peer tells us which event categories they
   // want from us. REQ_PAIRED so unknown peers can't pollute our broadcast
   // gating (and to ensure peerIdentitySetSubscriptions finds the slot).
-  { ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, V4_OPC_FLAG_REQ_PAIRED,                               v4h_subscribe_update  },
-  // Remote filesystem (FsList) is a BASE ESP-NOW capability — browse/stat/fetch a
-  // paired peer's files over an active encrypted session. NOT bond-gated (bonding
-  // piggybacks on it). Gated only by REQ_PAIRED + REQ_SESSION_ENC: any securely
-  // paired peer with a live session may enumerate/pull files (served under SYSTEM
-  // identity). Both REQ and REPLY/ACK rows live here so a requester whose own bond
-  // mode is off still accepts the peer's replies.
+  // REQ_SESSION_ENC because the only sender (cmd_espnow_requestevents) is
+  // encrypt-or-fail and the mask is persisted to flash — a plaintext frame
+  // from a spoofed paired MAC must not reach the handler.
+  { ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_subscribe_update  },
+  // Remote filesystem (FsList) — browse/stat/fetch a peer's files over an active
+  // encrypted session. The rows carry REQ_PAIRED + REQ_SESSION_ENC and no
+  // REQ_BOND_MODE; the request handlers in System_ESPNow_FsList.cpp then serve
+  // only our bonded peer while its bond session is live, under the bond identity
+  // (fsRpcRequesterIdentity), and answer PERM_DENIED to every other paired peer.
+  // Both REQ and REPLY/ACK rows live here so a requester whose own bond mode is
+  // off still accepts the peer's replies.
   { ESPNOW_V4_TYPE_FS_LIST_REQ,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_list_req       },
   { ESPNOW_V4_TYPE_FS_LIST_REPLY,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_list_reply     },
   { ESPNOW_V4_TYPE_FS_STAT_REQ,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_stat_req       },
@@ -5955,7 +6048,8 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_req   },
   { ESPNOW_V4_TYPE_BOND_STATUS_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_resp  },
   { ESPNOW_V4_TYPE_MANIFEST_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_manifest_req      },
-  // (FS_LIST / FS_STAT / FS_GET rows moved above — now base ESP-NOW, not bond-gated.)
+  // (FS_LIST / FS_STAT / FS_GET rows are above, outside this block: no
+  // REQ_BOND_MODE in the table; FsList serves requests to the bonded peer only.)
 #endif
 };
 static constexpr size_t kV4HandlerTableSize = sizeof(kV4HandlerTable) / sizeof(kV4HandlerTable[0]);
@@ -5971,17 +6065,168 @@ static const V4OpcodeEntry* v4_dispatch_lookup(uint8_t opcode) {
   return nullptr;
 }
 
-// Centralized reassembly cleanup that each migrated branch used to do inline.
-static void v4_dispatch_post_cleanup(const esp_now_recv_info* recv_info, const EspNowV4Header* h) {
-  if (h->fragCount > 1) {
-    for (int i = 0; i < V4_REASM_MAX; i++) {
-      if (gV4Reasm[i].active && gV4Reasm[i].msgId == h->msgId &&
-          memcmp(gV4Reasm[i].src, recv_info->src_addr, 6) == 0) {
-        v4_reasm_reset(gV4Reasm[i]);
-        break;
+// Outcome of feeding one fragment to the reassembler.
+enum class V4ReasmOutcome : uint8_t { Dropped, Pending, Complete };
+
+// Feed one plaintext fragment (SESSION_FRAME already unwrapped) into the
+// reassembler. The entry is keyed by (src, msgId) and fixed by its FIRST
+// fragment: every later fragment must carry the same type and fragCount, and
+// its index is bounded by the entry, never by the frame's own header.
+// Complete: payload/payloadLen now reference the entry's buffer, which stays
+// valid until v4_dispatch_post_cleanup (v4_reasm_release) resets the entry.
+// Pending/Dropped: the frame is finished with.
+static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
+                                      const uint8_t*& payload, uint16_t& payloadLen) {
+  char srcMac[18];
+  formatMacAddressBuf(recv_info->src_addr, srcMac, sizeof(srcMac));
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment received from %s", srcMac);
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment %u/%u msgId=%lu type=%u len=%u",
+         h->fragIndex + 1, h->fragCount, (unsigned long)h->msgId, h->type, payloadLen);
+
+  // Run GC
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Running reassembly GC...");
+  v4_reasm_gc(millis());
+
+  // The sender refuses to split past V4_FRAG_MAX (v4_send_encrypted_chunked), so a
+  // larger count is not ours and could never complete honestly: drop it before an
+  // entry is allocated.
+  if (h->fragCount > V4_FRAG_MAX) {
+    WARN_ESPNOWF("[V4_FRAG_RX] fragCount %u exceeds the reassembly budget (%u) - dropping msgId=%lu from %s",
+                 h->fragCount, (unsigned)V4_FRAG_MAX, (unsigned long)h->msgId, srcMac);
+    return V4ReasmOutcome::Dropped;
+  }
+
+  // Find or allocate reassembly buffer
+  V4ReasmEntry* e = v4_reasm_find_or_alloc(recv_info->src_addr, h->msgId, h->type, h->fragCount);
+  if (!e) {
+    WARN_ESPNOWF("[V4_FRAG_RX] No reassembly slot available - all %u slots in use", V4_REASM_MAX);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    return V4ReasmOutcome::Dropped;
+  }
+
+  bool isNewEntry = (e->received == 0);
+  if (isNewEntry) {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Allocated new reassembly buffer: bufSize=%u", e->bufferSize);
+  } else {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Using existing reassembly buffer: %u/%u fragments already received",
+           e->received, e->fragCount);
+  }
+
+  // Every fragment of one message carries the same type and fragCount. A frame
+  // that disagrees with the entry keyed by (src, msgId) is not part of that
+  // message: drop the frame and leave the in-flight transfer alone (GC reclaims
+  // it if it never completes).
+  if (h->fragCount != e->fragCount || h->type != e->type) {
+    WARN_ESPNOWF("[V4_FRAG_RX] fragment %u/%u type=%u does not match msgId=%lu entry (%u fragments, type=%u) - dropping",
+                 h->fragIndex + 1, h->fragCount, h->type, (unsigned long)h->msgId, e->fragCount, e->type);
+    return V4ReasmOutcome::Dropped;
+  }
+
+  // Store fragment if not duplicate. The index is bounded by the ENTRY, so
+  // have[] is never indexed past its fragCount (at most V4_FRAG_MAX).
+  if (h->fragIndex >= e->fragCount) {
+    WARN_ESPNOWF("[V4_FRAG_RX] Invalid fragment index %u (max %u)", h->fragIndex, e->fragCount - 1);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    return V4ReasmOutcome::Dropped;
+  }
+
+  if (e->have[h->fragIndex]) {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Duplicate fragment %u - ignoring", h->fragIndex + 1);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    return V4ReasmOutcome::Dropped;
+  }
+
+  // Learn the sender's chunk size from any non-final fragment (every fragment
+  // but the last is full-size by construction). A direct sender uses 200 B; a
+  // sender routing through a relay must use less, because the envelope eats
+  // into the frame. Deriving the stride instead of assuming it is what lets
+  // both reassemble in the same buffer pool.
+  if (e->stride == 0 && h->fragIndex + 1 < h->fragCount && payloadLen > 0) {
+    e->stride = payloadLen;
+  }
+  if (h->fragIndex + 1 == h->fragCount) e->lastFragLen = payloadLen;
+  // Until a non-final fragment has been seen (e.g. the last one arrived
+  // first), fall back to the direct-path stride — the historical behaviour.
+  const uint16_t stride = e->stride ? e->stride : (uint16_t)V4_MAX_FRAGMENT_PAYLOAD;
+
+  // Copy fragment data to buffer
+  uint16_t offset = (uint16_t)(h->fragIndex * stride);
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Storing at offset=%u len=%u stride=%u (bufSize=%u)",
+         offset, payloadLen, stride, e->bufferSize);
+  if (offset + payloadLen > e->bufferSize) {
+    WARN_ESPNOWF("[V4_FRAG_RX] Fragment overflow: offset=%u len=%u bufSize=%u", offset, payloadLen, e->bufferSize);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Resetting corrupted reassembly buffer");
+    v4_reasm_reset(*e);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    return V4ReasmOutcome::Dropped;
+  }
+
+  memcpy(e->buffer + offset, payload, payloadLen);
+  e->have[h->fragIndex] = true;
+  e->received++;
+  e->lastUpdateMs = millis();
+
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment %u stored successfully", h->fragIndex + 1);
+
+  // Check if complete
+  if (e->received < e->fragCount) {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Progress: %u/%u fragments received",
+           e->received, e->fragCount);
+
+    // Log which fragments are still missing
+    if (e->fragCount <= 10) {  // Only log for reasonable fragment counts
+      char missing[64] = {0};  // Max: "1,2,3,4,5,6,7,8,9,10" = 20 chars + margin
+      int offset = 0;
+      for (uint8_t i = 0; i < e->fragCount; i++) {
+        if (!e->have[i]) {
+          if (offset > 0 && offset < (int)sizeof(missing) - 5) {
+            offset += snprintf(missing + offset, sizeof(missing) - offset, ",");
+          }
+          if (offset < (int)sizeof(missing) - 5) {
+            offset += snprintf(missing + offset, sizeof(missing) - offset, "%u", i + 1);
+          }
+        }
+      }
+      if (offset > 0) {
+        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Still waiting for fragments: %s", missing);
       }
     }
+
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    return V4ReasmOutcome::Pending;
   }
+
+  // Calculate actual reassembled size (last fragment may be partial).
+  // Uses the learned stride so a routed transfer reports its real length
+  // rather than one computed from the direct-path chunk size.
+  uint16_t reassembledSize = (uint16_t)((e->fragCount - 1) * stride + e->lastFragLen);
+  // The per-fragment offset check bounds each slice, but the final size is a
+  // product of the LEARNED stride, which can be wider than the fallback a
+  // last-first fragment was placed with. Never hand a handler more bytes than
+  // the entry owns.
+  if (reassembledSize > e->bufferSize) {
+    WARN_ESPNOWF("[V4_FRAG_RX] reassembled %u B exceeds the %u B buffer (msgId=%lu from %s) - dropping",
+                 reassembledSize, e->bufferSize, (unsigned long)h->msgId, srcMac);
+    v4_reasm_reset(*e);
+    return V4ReasmOutcome::Dropped;
+  }
+
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ✓✓✓ REASSEMBLY COMPLETE ✓✓✓");
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] All %u fragments received! Total size: %u bytes",
+         e->fragCount, reassembledSize);
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Proceeding to handle reassembled message type=%u", h->type);
+
+  // Update pointers to point to reassembled buffer
+  payload = e->buffer;
+  payloadLen = reassembledSize;
+
+  return V4ReasmOutcome::Complete;
+}
+
+// Centralized reassembly cleanup that each migrated branch used to do inline.
+static void v4_dispatch_post_cleanup(const esp_now_recv_info* recv_info, const EspNowV4Header* h) {
+  if (h->fragCount > 1) v4_reasm_release(recv_info->src_addr, h->msgId);
 }
 
 // Returns true if the dispatch table claimed the frame; false only for opcodes
@@ -6022,6 +6267,19 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     WARN_ESPNOWF("[V4_RX] type=%u from %02X:%02X:%02X:%02X:%02X:%02X dropped: "
                  "REQ_AUTHENTICATED set but frame was plaintext (no SESSION_FRAME "
                  "or BROADCAST_AUTH)",
+                 h->type,
+                 recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
+                 recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
+    v4_dispatch_post_cleanup(recv_info, h);
+    return true;
+  }
+  if ((e->flags & V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED) && !isAuthenticated &&
+      gEspNow && gEspNow->encryptionEnabled) {
+    // This device holds a mesh key, so every legitimate sender of this opcode
+    // signs (BROADCAST_AUTH) or session-wraps its frames; a plaintext one is a
+    // spoof. A keyless device skips this gate so a fleet can bootstrap.
+    WARN_ESPNOWF("[V4_RX] type=%u from %02X:%02X:%02X:%02X:%02X:%02X dropped: "
+                 "mesh has a key but frame was plaintext (REQ_AUTH_WHEN_KEYED)",
                  h->type,
                  recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
                  recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
@@ -6296,128 +6554,11 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   }
 
   if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_ACK && h->type != ESPNOW_V4_TYPE_TEXT) {
-    // Multi-fragment message - reassemble
+    // Multi-fragment message - reassemble. On Complete the entry's buffer backs
+    // `payload` until v4_dispatch_post_cleanup releases it after the handler ran.
     if (gEspNow) { gEspNow->routerMetrics.v4FragRx++; }
-    
-    char srcMac[18];
-    formatMacAddressBuf(recv_info->src_addr, srcMac, sizeof(srcMac));
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment received from %s", srcMac);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment %u/%u msgId=%lu type=%u len=%u",
-           h->fragIndex + 1, h->fragCount, (unsigned long)h->msgId, h->type, payloadLen);
-    
-    // Run GC
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Running reassembly GC...");
-    v4_reasm_gc(millis());
-    
-    // Find or allocate reassembly buffer
-    V4ReasmEntry* e = v4_reasm_find_or_alloc(recv_info->src_addr, h->msgId, h->type, h->fragCount);
-    if (!e) {
-      WARN_ESPNOWF("[V4_FRAG_RX] No reassembly slot available - all %u slots in use", V4_REASM_MAX);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
-      return true;
-    }
-    
-    bool isNewEntry = (e->received == 0);
-    if (isNewEntry) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Allocated new reassembly buffer: bufSize=%u", e->bufferSize);
-    } else {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Using existing reassembly buffer: %u/%u fragments already received",
-             e->received, e->fragCount);
-    }
-    
-    // Store fragment if not duplicate
-    if (h->fragIndex >= h->fragCount) {
-      WARN_ESPNOWF("[V4_FRAG_RX] Invalid fragment index %u (max %u)", h->fragIndex, h->fragCount - 1);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
-      return true;
-    }
-    
-    if (e->have[h->fragIndex]) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Duplicate fragment %u - ignoring", h->fragIndex + 1);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
-      return true;
-    }
-    
-    // Learn the sender's chunk size from any non-final fragment (every fragment
-    // but the last is full-size by construction). A direct sender uses 200 B; a
-    // sender routing through a relay must use less, because the envelope eats
-    // into the frame. Deriving the stride instead of assuming it is what lets
-    // both reassemble in the same buffer pool.
-    if (e->stride == 0 && h->fragIndex + 1 < h->fragCount && payloadLen > 0) {
-      e->stride = payloadLen;
-    }
-    if (h->fragIndex + 1 == h->fragCount) e->lastFragLen = payloadLen;
-    // Until a non-final fragment has been seen (e.g. the last one arrived
-    // first), fall back to the direct-path stride — the historical behaviour.
-    const uint16_t stride = e->stride ? e->stride : (uint16_t)V4_MAX_FRAGMENT_PAYLOAD;
-
-    // Copy fragment data to buffer
-    uint16_t offset = (uint16_t)(h->fragIndex * stride);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Storing at offset=%u len=%u stride=%u (bufSize=%u)",
-           offset, payloadLen, stride, e->bufferSize);
-    if (offset + payloadLen > e->bufferSize) {
-      WARN_ESPNOWF("[V4_FRAG_RX] Fragment overflow: offset=%u len=%u bufSize=%u", offset, payloadLen, e->bufferSize);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Resetting corrupted reassembly buffer");
-      v4_reasm_reset(*e);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
-      return true;
-    }
-    
-    memcpy(e->buffer + offset, payload, payloadLen);
-    e->have[h->fragIndex] = true;
-    e->received++;
-    e->lastUpdateMs = millis();
-    
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment %u stored successfully", h->fragIndex + 1);
-    
-    // Check if complete
-    if (e->received < e->fragCount) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Progress: %u/%u fragments received",
-             e->received, e->fragCount);
-      
-      // Log which fragments are still missing
-      if (e->fragCount <= 10) {  // Only log for reasonable fragment counts
-        char missing[64] = {0};  // Max: "1,2,3,4,5,6,7,8,9,10" = 20 chars + margin
-        int offset = 0;
-        for (uint8_t i = 0; i < e->fragCount; i++) {
-          if (!e->have[i]) {
-            if (offset > 0 && offset < (int)sizeof(missing) - 5) {
-              offset += snprintf(missing + offset, sizeof(missing) - offset, ",");
-            }
-            if (offset < (int)sizeof(missing) - 5) {
-              offset += snprintf(missing + offset, sizeof(missing) - offset, "%u", i + 1);
-            }
-          }
-        }
-        if (offset > 0) {
-          DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Still waiting for fragments: %s", missing);
-        }
-      }
-      
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
-      return true;  // Not complete yet
-    }
-    
-    // Calculate actual reassembled size (last fragment may be partial).
-    // Uses the learned stride so a routed transfer reports its real length
-    // rather than one computed from the direct-path chunk size.
-    uint16_t reassembledSize = (uint16_t)((e->fragCount - 1) * stride + e->lastFragLen);
-    
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ✓✓✓ REASSEMBLY COMPLETE ✓✓✓");
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] All %u fragments received! Total size: %u bytes",
-           e->fragCount, reassembledSize);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Proceeding to handle reassembled message type=%u", h->type);
+    if (v4_reasm_accept(recv_info, h, payload, payloadLen) != V4ReasmOutcome::Complete) return true;
     if (gEspNow) { gEspNow->routerMetrics.v4FragRxCompleted++; }
-    
-    // Update pointers to point to reassembled buffer
-    payload = e->buffer;
-    payloadLen = reassembledSize;
-    
-    // CRITICAL: Mark this reassembly entry for cleanup after message processing
-    // We can't free it immediately because payload points to e->buffer
-    // The cleanup happens at the end of this function before returning
-    // Note: Store the entry pointer for cleanup (h->fragCount check at end will handle it)
   }
   
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] ========================================");
@@ -6478,15 +6619,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     }
     
     // Cleanup reassembly buffer if this was a fragmented message
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V4_REASM_MAX; i++) {
-        if (gV4Reasm[i].active && gV4Reasm[i].msgId == h->msgId && 
-            memcmp(gV4Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v4_reasm_reset(gV4Reasm[i]);
-          break;
-        }
-      }
-    }
+    v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
   
@@ -6625,17 +6758,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // This was previously only cleaning up at the end of the function, causing memory leaks
   // for message types that returned early (TEXT, CMD, HEARTBEAT, etc.)
   // Now we cleanup immediately after processing any fragmented message
-  if (h->fragCount > 1) {
-    for (int i = 0; i < V4_REASM_MAX; i++) {
-      if (gV4Reasm[i].active && gV4Reasm[i].msgId == h->msgId && 
-          memcmp(gV4Reasm[i].src, recv_info->src_addr, 6) == 0) {
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Cleaning up reassembly buffer for msgId=%lu",
-               (unsigned long)h->msgId);
-        v4_reasm_reset(gV4Reasm[i]);
-        break;
-      }
-    }
-  }
+  v4_dispatch_post_cleanup(recv_info, h);
   
   return true;
 }
@@ -9823,6 +9946,9 @@ void processMeshHeartbeats() {
   sessionRekeyPrevKeysSweep((uint32_t)millis());
   // 1d2. F6 — re-send unanswered KEY_EX_HELLOs / expire dead handshakes.
   keyExRetrySweep((uint32_t)millis());
+  // 1d3. Re-send an unanswered REKEY; drop a session whose REKEY stays
+  // unanswered so the next send re-handshakes.
+  rekeyRetrySweep((uint32_t)millis());
   // 1e. Phase 3.6 — auto-trigger REKEY on threshold (txSeq>=10k OR age>=1h).
   // Walks the SessionState table; uses the kRekeyMinIntervalMs guard inside
   // espnowRekeyInitiate to avoid re-firing while a rekey is in flight.
@@ -9844,8 +9970,12 @@ void processMeshHeartbeats() {
         // timeouts, so a stuck transfer can't postpone rotation forever.
         DEBUG_ESPNOWF("REKEY deferred (file transfer active with peer) sessionId=%u txSeq=%lu",
                       (unsigned)sc->sessionId, (unsigned long)sc->txSeqNext);
-      } else if (wantRekey) {
-        // Log once per trigger (the initiate function's guard prevents spam).
+      } else if (wantRekey &&
+                 (uint32_t)(nowMs2 - sc->establishedAtMs) >= kRekeyMinIntervalMs &&
+                 !(sc->rekeyInitiatedAtMs != 0 &&
+                   (uint32_t)(nowMs2 - sc->rekeyInitiatedAtMs) < kRekeyMinIntervalMs)) {
+        // One line per attempt: espnowRekeyInitiate refuses inside kRekeyMinIntervalMs of
+        // the last key change or the last attempt (a refused send keeps the session ACTIVE).
         INFO_ESPNOWF("REKEY auto-trigger for sessionId=%u peer=%02X:%02X:%02X:%02X:%02X:%02X "
                      "(reason=%s txSeq=%lu ageMs=%lu)",
                      (unsigned)sc->sessionId,
@@ -10662,7 +10792,10 @@ void processMeshHeartbeats() {
           // the final fragment's content as its (truncated) preview. Chat
           // only: BOOT/system notices ride this queue as MSG_SYSTEM_EVENT
           // and must not fire text_rx automations or "Msg from" toasts.
-          if (entry.msgType == MSG_TEXT &&
+          // Authenticated only: a plaintext message (accepted on a keyless
+          // device, filed under its MAC) must not drive a text_rx automation
+          // or a "Msg from" toast as if a known peer had sent it.
+          if (entry.msgType == MSG_TEXT && entry.authenticated &&
               (entry.fragCount <= 1 || (uint8_t)(entry.fragIndex + 1) == entry.fragCount)) {
             systemEventPost(SYSEVT_TEXT_RX, devName.c_str(), entry.content);
           }
@@ -13248,6 +13381,11 @@ static const char* metaGetSet(const String& args, String& field, const char* fie
   }
   if (trimmed.length() > maxLen) {
     snprintf(getDebugBuffer(), 1024, "Error: %s too long (max %zu chars)", fieldName, maxLen);
+    return getDebugBuffer();
+  }
+  if (!metadataTextAllowed(trimmed.c_str())) {
+    snprintf(getDebugBuffer(), 1024,
+             "Error: %s may not contain control characters or < > \" ' & \\", fieldName);
     return getDebugBuffer();
   }
   setSetting(field, trimmed);  // Persist to flash

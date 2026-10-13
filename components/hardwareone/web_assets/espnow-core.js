@@ -1,6 +1,14 @@
 
 (function() {
   try {
+    // Peer-supplied text (device names, metadata fields) goes through this before
+    // any innerHTML concatenation. Same table as the page's topologyEscapeHtml;
+    // defined here because this script loads before the page chunks.
+    window.espnowEscapeHtml = function(value) {
+      return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+      });
+    };
     console.log('[ESP-NOW] Chunk 3A: listDevices function start');
     window.listDevices = function(preloadedBondStatus, preloadedList) {
       function applyBondStatus(bondStatus) {
@@ -41,6 +49,7 @@
     window.__meshPeers = window.__meshPeers || [];
     window.__meshUnpaired = window.__meshUnpaired || [];
     window.renderUnifiedDeviceList = function() {
+      var esc = window.espnowEscapeHtml;
       var deviceList = hw.$('device-list');
       if (!deviceList) return;
       var paired = window.__pairedDevices || [];
@@ -120,7 +129,7 @@
 
         html += '<div class="device-item">';
         html += '<div style="flex:1;min-width:0">';
-        html += '<div class="device-mac">' + statusDot + bondBadge + '<strong>' + (deviceName || mac) + '</strong>';
+        html += '<div class="device-mac">' + statusDot + bondBadge + '<strong>' + esc(deviceName || mac) + '</strong>';
         html += '<span class="encryption-indicator ' + encInd + '" title="' + encText + '"></span>';
         html += meshBadge;
         html += statusLabel + '</div>';
@@ -172,7 +181,7 @@
 
             html += '<div class="device-item">';
             html += '<div style="flex:1;min-width:0">';
-            html += '<div class="device-mac">' + mStatusDot + '<strong>' + mname + '</strong>';
+            html += '<div class="device-mac">' + mStatusDot + '<strong>' + esc(mname) + '</strong>';
             html += '<span style="background:var(--crumb-bg);color:var(--panel-fg);font-size:.72em;padding:2px 6px;border-radius:4px;margin-left:6px">Mesh</span>';
             html += mStatusLabel + '</div>';
             html += '<div class="device-channel" style="color:var(--muted)">' + mmac + ' • ' + mStats + '</div>';
@@ -195,14 +204,14 @@
             var rssiColor = ud.rssi > -60 ? 'var(--success)' : (ud.rssi > -75 ? 'var(--warning)' : 'var(--danger)');
             html += '<div class="device-item">';
             html += '<div style="flex:1;min-width:0">';
-            html += '<div class="device-mac"><strong>' + uname + '</strong>';
+            html += '<div class="device-mac"><strong>' + esc(uname) + '</strong>';
             html += '<span style="background:var(--crumb-bg);color:var(--muted);font-size:.72em;padding:2px 6px;border-radius:4px;margin-left:6px">Discovered</span></div>';
             html += '<div class="device-channel" style="color:var(--muted)">' + umac;
             html += ' • RSSI: <span style="color:' + rssiColor + '">' + ud.rssi + ' dBm</span>';
             html += ' • Last: ' + ud.secondsSinceLastSeen + 's ago</div>';
             html += '</div>';
             html += '<div class="device-actions">';
-            html += '<button class="btn btn-small" data-guest-hide onclick="pairUnpairedDevice(\'' + umac + '\',\'' + uname.replace(/'/g, "\\'") + '\')">Pair</button>';
+            html += '<button class="btn btn-small" data-guest-hide onclick="pairUnpairedDevice(\'' + umac + '\',' + esc(JSON.stringify(uname)) + ')">Pair</button>';
             html += '</div>';
             html += '</div>';
           }
@@ -1204,6 +1213,7 @@
       const container = hw.$('metadata-content-' + mac)
                      || hw.$('metadata-' + mac);
       if (!container) return;
+      var esc = window.espnowEscapeHtml;
       
       container.innerHTML = '<div style="text-align:center;color:var(--panel-fg);padding:20px">Loading metadata...</div>';
 
@@ -1218,27 +1228,27 @@
           
           if (data.deviceName) {
             html += '<div><label style="font-weight:600;color:var(--panel-fg);display:block;margin-bottom:4px">Device Name</label>';
-            html += '<div style="padding:8px;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)">' + data.deviceName + '</div></div>';
+            html += '<div style="padding:8px;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)">' + esc(data.deviceName) + '</div></div>';
           }
           
           if (data.friendlyName) {
             html += '<div><label style="font-weight:600;color:var(--panel-fg);display:block;margin-bottom:4px">Friendly Name</label>';
-            html += '<div style="padding:8px;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)">' + data.friendlyName + '</div></div>';
+            html += '<div style="padding:8px;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)">' + esc(data.friendlyName) + '</div></div>';
           }
           
           if (data.room) {
             html += '<div><label style="font-weight:600;color:var(--panel-fg);display:block;margin-bottom:4px">Room</label>';
-            html += '<div style="padding:8px;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)">' + data.room + '</div></div>';
+            html += '<div style="padding:8px;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)">' + esc(data.room) + '</div></div>';
           }
           
           if (data.zone) {
             html += '<div><label style="font-weight:600;color:var(--panel-fg);display:block;margin-bottom:4px">Zone</label>';
-            html += '<div style="padding:8px;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)">' + data.zone + '</div></div>';
+            html += '<div style="padding:8px;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)">' + esc(data.zone) + '</div></div>';
           }
           
           if (data.tags) {
             html += '<div><label style="font-weight:600;color:var(--panel-fg);display:block;margin-bottom:4px">Tags</label>';
-            html += '<div style="padding:8px;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)">' + data.tags + '</div></div>';
+            html += '<div style="padding:8px;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)">' + esc(data.tags) + '</div></div>';
           }
           
           html += '<div><label style="font-weight:600;color:var(--panel-fg);display:block;margin-bottom:4px">Stationary</label>';

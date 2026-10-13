@@ -873,7 +873,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
         
         // Show current device
         var selfDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:6px;"></span>';
-        html += '<div style="color:var(--success);font-weight:bold;">' + selfDot + deviceName;
+        html += '<div style="color:var(--success);font-weight:bold;">' + selfDot + window.topologyEscapeHtml(deviceName);
         if (deviceMac) {
           html += ' (' + deviceMac + ')';
         }
@@ -887,7 +887,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
               var peer = meshData.peers[i];
               var statusColor = peer.alive ? 'var(--success)' : 'var(--danger)';
               var statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + statusColor + ';margin-right:6px;"></span>';
-              html += '<div style="margin-left:20px;color:var(--panel-fg);">├─ ' + statusDot + peer.name + ' (' + peer.mac + ')</div>';
+              html += '<div style="margin-left:20px;color:var(--panel-fg);">├─ ' + statusDot + window.topologyEscapeHtml(peer.name) + ' (' + window.topologyEscapeHtml(peer.mac) + ')</div>';
             }
           } else {
             html += '<div style="margin-left:20px;color:var(--muted);">└─ No direct peers</div>';
