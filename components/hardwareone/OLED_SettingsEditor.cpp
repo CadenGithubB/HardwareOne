@@ -148,6 +148,8 @@ void initSettingsEditor() {
   gSettingsEditor.optionIndex = 0;
   gSettingsEditor.optionCount = 0;
   gSettingsEditor.optionScroll = 0;
+  gSettingsEditor.categoryScroll = 0;
+  gSettingsEditor.itemScroll = 0;
 
   // Verify settings modules are registered
   size_t moduleCount = 0;
@@ -220,35 +222,17 @@ int getSettingCurrentValue(const SettingEntry* entry) {
   return settingsEditorCurrentValue(entry);
 }
 
-// Set value to setting entry — routes through command system for audit logging
-void setSettingValue(const SettingEntry* entry, int value) {
-  if (!entry || !entry->jsonKey) return;
-
+// Commit a value through the entry's set-command; the remote screen sends it to
+// the bonded peer instead. Locally it runs through cmd_exec for the audit log
+// (handleSettingCommand's SETTING_STRING case assigns the whole trimmed args
+// string, so multi-word values survive), and a refusal or "Error:" reply is
+// shown on the editor's error line. Returns false when the save was refused.
+static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
+  if (!entry || !entry->jsonKey) return false;
   // cmdKey ONLY — see settingsEditorCommandName() for why the jsonKey fallback
   // was removed. No cmdKey means this setting has no set-command, so do nothing
   // rather than firing an unrelated one.
   const char* cmdName = entry->cmdKey;
-  if (!cmdName || !cmdName[0]) {
-    gSettingsEditor.errorMessage = String("Not editable here");
-    gSettingsEditor.errorDisplayUntil = millis() + 2500;
-    return;
-  }
-  if (editorIsRemote()) {
-    commitRemoteSettingValue(entry, String(value));
-    return;
-  }
-  String cmd = String(cmdName) + " " + String(value);
-  executeOLEDCommand(cmd);
-}
-
-// String twin of setSettingValue — same cmdKey-or-jsonKey resolution, same
-// cmd_exec path (handleSettingCommand's SETTING_STRING case assigns the whole
-// trimmed args string, so multi-word values survive). Uses the WithResult
-// variant so an "Error:" reply surfaces via the editor's toast instead of
-// vanishing into the log. Returns false when the command reported failure.
-static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
-  if (!entry || !entry->jsonKey) return false;
-  const char* cmdName = entry->cmdKey;   // cmdKey ONLY — no jsonKey fallback
   if (!cmdName || !cmdName[0]) {
     gSettingsEditor.errorMessage = String("Not editable here");
     gSettingsEditor.errorDisplayUntil = millis() + 2500;
@@ -263,6 +247,12 @@ static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
     return false;
   }
   return true;
+}
+
+// INT/BOOL twin (slider and INT pick-list): the same checked commit, so a
+// refused save shows its reply instead of vanishing into the log.
+bool setSettingValue(const SettingEntry* entry, int value) {
+  return setSettingValueStr(entry, String(value));
 }
 
 // Validate value against min/max
@@ -335,8 +325,9 @@ void displaySettingsEditor() {
         const int lineHeight = 10;
         const int maxVisibleItems = OLED_CONTENT_HEIGHT / lineHeight;  // 43px / 10px = 4 items
         
-        // Calculate scroll offset to keep selection visible
-        static int scrollOffset = 0;
+        // Calculate scroll offset to keep selection visible (context-owned,
+        // reset by initSettingsEditor)
+        int& scrollOffset = gSettingsEditor.categoryScroll;
         if (gSettingsEditor.categoryIndex < scrollOffset) {
           scrollOffset = gSettingsEditor.categoryIndex;
         } else if (gSettingsEditor.categoryIndex >= scrollOffset + maxVisibleItems) {
@@ -402,14 +393,17 @@ void displaySettingsEditor() {
       const int lineHeight = 10;
       const int maxVisibleItems = OLED_CONTENT_HEIGHT / lineHeight;  // 4 items
       
-      // Calculate scroll offset to keep selected item visible
-      static int itemScrollOffset = 0;
+      // Calculate scroll offset to keep selected item visible (context-owned,
+      // reset whenever a module is entered)
+      int& itemScrollOffset = gSettingsEditor.itemScroll;
       if (visibleIndex < itemScrollOffset) {
         itemScrollOffset = visibleIndex;
       } else if (visibleIndex >= itemScrollOffset + maxVisibleItems) {
         itemScrollOffset = visibleIndex - maxVisibleItems + 1;
       }
-      
+      // No editable row under the cursor (visibleIndex -1): window at the top.
+      if (itemScrollOffset < 0) itemScrollOffset = 0;
+
       // Draw visible settings items
       int displayedCount = 0;
       int currentVisibleIdx = 0;
@@ -784,7 +778,8 @@ void settingsEditorSelect() {
       if (gSettingsEditor.categoryIndex < (int)moduleCount) {
         gSettingsEditor.currentModule = modules[gSettingsEditor.categoryIndex];
         gSettingsEditor.itemIndex = 0;
-        
+        gSettingsEditor.itemScroll = 0;
+
         // Find first editable setting (this scan previously used a bare
         // INT/BOOL test WITHOUT isSettingVisible — the shared predicate also
         // fixes that latent desync).
@@ -868,8 +863,7 @@ void settingsEditorSelect() {
         if (gSettingsEditor.currentEntry->type == SETTING_STRING) {
           ok = setSettingValueStr(gSettingsEditor.currentEntry, String(val));
         } else {
-          setSettingValue(gSettingsEditor.currentEntry, atoi(val));
-          ok = true;
+          ok = setSettingValue(gSettingsEditor.currentEntry, atoi(val));
         }
         if (ok) {
           DEBUG_SYSTEMF("[SettingsEditor] Saved %s = %s (pick-list)",
@@ -895,8 +889,9 @@ void settingsEditorSelect() {
         break;
       }
 
-      // Apply via command system — generates [CMD] audit line and persists
-      setSettingValue(gSettingsEditor.currentEntry, gSettingsEditor.editValue);
+      // Apply via command system — generates [CMD] audit line and persists.
+      // A refused save stays in the value editor with the reply on the error line.
+      if (!setSettingValue(gSettingsEditor.currentEntry, gSettingsEditor.editValue)) break;
 
       DEBUG_SYSTEMF("[SettingsEditor] Saved %s = %d",
                     gSettingsEditor.currentEntry->jsonKey, gSettingsEditor.editValue);
@@ -933,6 +928,8 @@ bool openSettingsEditorForModule(const char* moduleName) {
       gSettingsEditor.optionIndex = 0;
       gSettingsEditor.optionCount = 0;
       gSettingsEditor.optionScroll = 0;
+      gSettingsEditor.categoryScroll = 0;
+      gSettingsEditor.itemScroll = 0;
 
       DEBUG_SYSTEMF("[SettingsEditor] Opened module: %s", moduleName);
       return true;
@@ -971,11 +968,6 @@ void settingsEditorBack() {
 
 // Forward declaration for registerOLEDModes
 void registerOLEDModes(const OLEDModeEntry* modes, size_t count);
-
-// Force linker to include this file - must be called from oled_display.cpp
-void forceSettingsModeLink() {
-  DEBUG_SYSTEMF("[SettingsMode] forceSettingsModeLink() called - file is linked");
-}
 
 // Display handler for settings mode
 void displaySettingsMode() {
@@ -1094,11 +1086,9 @@ static bool getQuickRadioState() {
 static void toggleQuickRadio() {
   extern bool wifiRadioOn();
   if (wifiRadioOn()) {
-    setQuickStatus("Radio OFF");
-    executeOLEDCommand("radiopower off");
+    if (oledRunCommand("radiopower off")) setQuickStatus("Radio OFF");
   } else {
-    setQuickStatus("Radio ON");
-    executeOLEDCommand("radiopower on");
+    if (oledRunCommand("radiopower on")) setQuickStatus("Radio ON");
   }
 }
 #endif
@@ -1119,11 +1109,9 @@ static void toggleQuickWiFi() {
     return;
   }
   if (WiFi.isConnected()) {
-    setQuickStatus("WiFi OFF");
-    executeOLEDCommand("closewifi");
+    if (oledRunCommand("closewifi")) setQuickStatus("WiFi OFF");
   } else {
-    setQuickStatus("WiFi ON");
-    executeOLEDCommand("openwifi --best");
+    if (oledRunCommand("openwifi --best")) setQuickStatus("WiFi ON");
   }
 }
 #endif
@@ -1136,24 +1124,20 @@ static bool getQuickBluetoothState() {
 static void bluetoothToggleConfirmedQuick(void* userData) {
   (void)userData;
   if (isBleServerInitialized()) {
-    setQuickStatus("Bluetooth OFF");
-    executeOLEDCommand("closeble");
+    if (oledRunCommand("closeble")) setQuickStatus("Bluetooth OFF");
     return;
   }
 #if ENABLE_G2_GLASSES
   if (isG2ClientInitialized()) {
-    setQuickStatus("Bluetooth OFF");
-    executeOLEDCommand("g2deinit");
+    if (oledRunCommand("g2deinit")) setQuickStatus("Bluetooth OFF");
     return;
   }
   if (gSettings.bleMode == BLE_MODE_G2_CLIENT) {
-    setQuickStatus("Bluetooth ON");
-    executeOLEDCommand("openg2");
+    if (oledRunCommand("openg2")) setQuickStatus("Bluetooth ON");
     return;
   }
 #endif
-  setQuickStatus("Bluetooth ON");
-  executeOLEDCommand("openble");
+  if (oledRunCommand("openble")) setQuickStatus("Bluetooth ON");
 }
 static void toggleQuickBluetooth() {
   if (bleSubsystemActive()) {
@@ -1172,15 +1156,13 @@ static bool getQuickHTTPState() {
 static void httpToggleConfirmedQuick(void* userData) {
   (void)userData;
   if (server != nullptr) {
-    setQuickStatus("HTTP OFF");
-    executeOLEDCommand("closehttp");
+    if (oledRunCommand("closehttp")) setQuickStatus("HTTP OFF");
   } else {
     if (!WiFi.isConnected()) {
       setQuickStatus("Need WiFi first!");
       return;
     }
-    setQuickStatus("HTTP ON");
-    executeOLEDCommand("openhttp");
+    if (oledRunCommand("openhttp")) setQuickStatus("HTTP ON");
   }
 }
 static void toggleQuickHTTP() {

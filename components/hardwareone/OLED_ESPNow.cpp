@@ -634,16 +634,47 @@ void oledEspNowDisplayRooms(Adafruit_SSD1306* display) {
 static int sPairingSel = 0;
 
 // Incoming pair request → the shared confirm dialog (Accept/Reject). Poll-driven
-// from oledUpdate() so it pops no matter which screen is showing. The dialog
-// holds line2 by pointer, so the name buffer is static (stable while it's up).
+// from oledUpdate() so it pops on any screen but Login, and only for a display
+// identity that may answer it: espnowaccept/espnowreject are admin-only, so the
+// prompt needs a logged-in admin (the OLED session role cache, no roster read
+// per frame). A request is its sender MAC plus arrival time (a re-sent request
+// is a new one). The answer names the shown sender, and the request is kept as
+// answered whatever the owner replies, so a refusal is toasted once instead of
+// the dialog re-opening every frame. A session boundary drops the dialog
+// without an answer, so the next admin session still sees the request. The
+// dialog holds line2 by pointer, so the name buffer is static (stable while
+// it's up). Main-loop only.
+struct PairPromptKey { bool valid; uint8_t mac[6]; uint32_t atMs; };
+EXT_RAM_BSS_ATTR static PairPromptKey sPairPromptShown;     // the request in the dialog
+EXT_RAM_BSS_ATTR static PairPromptKey sPairPromptAnswered;  // the last request answered here
 static char sPairPromptName[26];
-static void onPairReqAccept(void* /*ud*/) { executeOLEDCommand("espnowaccept"); }
-static void onPairReqReject(void* /*ud*/) { executeOLEDCommand("espnowreject"); }
+
+static bool pairPromptIs(const PairPromptKey& key, const uint8_t mac[6], uint32_t atMs) {
+  return key.valid && key.atMs == atMs && memcmp(key.mac, mac, 6) == 0;
+}
+
+static void oledEspNowAnswerPairRequest(const char* verb, const char* failToast) {
+  sPairPromptAnswered = sPairPromptShown;
+  const uint8_t* m = sPairPromptShown.mac;
+  char cmd[40];   // "espnowaccept " (13) + 17-char MAC + NUL
+  snprintf(cmd, sizeof(cmd), "%s %02X:%02X:%02X:%02X:%02X:%02X",
+           verb, m[0], m[1], m[2], m[3], m[4], m[5]);
+  oledEspNowRunOwnerCommand(cmd, failToast);
+}
+static void onPairReqAccept(void* /*ud*/) { oledEspNowAnswerPairRequest("espnowaccept", "Accept failed"); }
+static void onPairReqReject(void* /*ud*/) { oledEspNowAnswerPairRequest("espnowreject", "Reject failed"); }
 
 void oledEspNowPollPairRequest() {
   if (oledConfirmIsActive()) return;                       // a dialog is already up
   char reqName[24];
-  if (!espnowGetIncomingPairRequest(reqName, sizeof(reqName))) return;
+  uint8_t mac[6];
+  uint32_t atMs = 0;
+  if (!espnowGetIncomingPairRequest(reqName, sizeof(reqName), mac, &atMs)) return;
+  if (pairPromptIs(sPairPromptAnswered, mac, atMs)) return;            // answered here
+  if (currentOLEDMode == OLED_LOGIN || !oledSessionIsAdmin()) return;  // cannot answer it
+  sPairPromptShown.valid = true;
+  memcpy(sPairPromptShown.mac, mac, 6);
+  sPairPromptShown.atMs = atMs;
   snprintf(sPairPromptName, sizeof(sPairPromptName), "'%s'", reqName);
   // Default to No so an unattended device never auto-accepts.
   oledConfirmRequest("Pair request from", sPairPromptName, onPairReqAccept, nullptr,
@@ -1851,7 +1882,8 @@ bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPress
         gOledEspNowState.remoteFormField == 0
             ? OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT
             : OLEDKeyboardDictationPolicy::DENY;
-    oledKeyboardInit(title, initialText, 64, policy);
+    oledKeyboardInit(title, initialText, 64, policy,
+                     gOledEspNowState.remoteFormField == 1);  // password
     return true;
   }
   
@@ -2173,7 +2205,8 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
         gOledEspNowState.settingsEditField == 6
             ? OLEDKeyboardDictationPolicy::DENY
             : OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT;
-    oledKeyboardInit(prompt, initialValue.c_str(), maxLen, policy);
+    oledKeyboardInit(prompt, initialValue.c_str(), maxLen, policy,
+                     gOledEspNowState.settingsEditField == 6);  // passphrase
     gOledEspNowState.currentView = ESPNOW_VIEW_SETTINGS_KEYBOARD;
     return true;
   }

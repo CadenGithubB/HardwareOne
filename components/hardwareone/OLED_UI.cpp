@@ -1,5 +1,5 @@
 // OLED_UI.cpp - Unified OLED UI Component System
-// Provides reusable Toast, Dialog, Progress, and List components
+// Provides the reusable Toast and Pairing Ribbon overlays and drawing helpers
 
 #include "OLED_UI.h"
 #include "System_BuildConfig.h"
@@ -23,47 +23,10 @@ static portMUX_TYPE sToastMux = portMUX_INITIALIZER_UNLOCKED;
 // ============================================================================
 
 OledToast gOledToast = {{0}, 0, OledUIIcon::NONE, false};
-// PSRAM; the old aggregate initializer was all-zero (NONE enums are 0) and is
-// dropped because .ext_ram.bss is zeroed — identical boot image.
-EXT_RAM_BSS_ATTR OledDialog gOledDialog;
-OledProgress gOledProgress = {{0}, 0, 0, false, false};
 
 // ============================================================================
 // Drawing Helpers
 // ============================================================================
-
-void oledDrawBox(int x, int y, int w, int h, bool filled) {
-  if (!gDisplay) return;
-  if (filled) {
-    gDisplay->fillRect(x, y, w, h, DISPLAY_FG);
-    gDisplay->drawRect(x, y, w, h, DISPLAY_BG);
-  } else {
-    gDisplay->fillRect(x, y, w, h, DISPLAY_BG);
-    gDisplay->drawRect(x, y, w, h, DISPLAY_FG);
-  }
-}
-
-void oledDrawButton(int x, int y, int w, const char* label, bool selected) {
-  if (!gDisplay) return;
-  const int h = 11;
-  
-  if (selected) {
-    gDisplay->fillRect(x, y, w, h, DISPLAY_FG);
-    gDisplay->setTextColor(DISPLAY_BG, DISPLAY_FG);
-  } else {
-    gDisplay->drawRect(x, y, w, h, DISPLAY_FG);
-    gDisplay->setTextColor(DISPLAY_FG, DISPLAY_BG);
-  }
-  
-  // Center text in button
-  int textW = strlen(label) * 6;
-  int textX = x + (w - textW) / 2;
-  gDisplay->setCursor(textX, y + 2);
-  gDisplay->print(label);
-  
-  // Reset text color
-  gDisplay->setTextColor(DISPLAY_FG);
-}
 
 void oledDrawIcon(int x, int y, OledUIIcon icon) {
   if (!gDisplay || icon == OledUIIcon::NONE) return;
@@ -195,26 +158,6 @@ void oledDrawLevelBars(int x, int y, int level, int maxBars, int barHeight) {
   }
 }
 
-void oledDrawTextCentered(int x, int y, int w, const char* text) {
-  if (!gDisplay || !text) return;
-  int textW = strlen(text) * 6;
-  int textX = x + (w - textW) / 2;
-  if (textX < x) textX = x;
-  gDisplay->setCursor(textX, y);
-  gDisplay->print(text);
-}
-
-const char* oledUIButtonLabel(OledUIButton btn) {
-  switch (btn) {
-    case OledUIButton::OK:     return "OK";
-    case OledUIButton::CANCEL: return "Cancel";
-    case OledUIButton::YES:    return "Yes";
-    case OledUIButton::NO:     return "No";
-    case OledUIButton::RETRY:  return "Retry";
-    default:                   return "";
-  }
-}
-
 // ============================================================================
 // Toast Component
 // ============================================================================
@@ -289,271 +232,6 @@ void oledToastRender() {
   }
   
   gDisplay->setTextColor(DISPLAY_FG);
-}
-
-// ============================================================================
-// Dialog Component
-// ============================================================================
-
-static void oledDialogSetup(const char* title, const char* message, OledUIIcon icon) {
-  memset(&gOledDialog, 0, sizeof(gOledDialog));
-  
-  if (title) {
-    strncpy(gOledDialog.title, title, sizeof(gOledDialog.title) - 1);
-  }
-  
-  // Split message into lines (simple word wrap)
-  if (message) {
-    const int maxLineLen = sizeof(gOledDialog.lines[0]) - 1;
-    const char* src = message;
-    int lineIdx = 0;
-    
-    while (*src && lineIdx < 3) {
-      int len = strlen(src);
-      if (len <= maxLineLen) {
-        strncpy(gOledDialog.lines[lineIdx], src, maxLineLen);
-        lineIdx++;
-        break;
-      }
-      
-      // Find break point
-      int breakAt = maxLineLen;
-      while (breakAt > 0 && src[breakAt] != ' ' && src[breakAt] != '\n') breakAt--;
-      if (breakAt == 0) breakAt = maxLineLen;
-      
-      strncpy(gOledDialog.lines[lineIdx], src, breakAt);
-      gOledDialog.lines[lineIdx][breakAt] = '\0';
-      lineIdx++;
-      
-      src += breakAt;
-      while (*src == ' ' || *src == '\n') src++;
-    }
-    gOledDialog.lineCount = lineIdx;
-  }
-  
-  gOledDialog.icon = icon;
-  gOledDialog.selectedButton = 0;
-  gOledDialog.active = true;
-  oledMarkDirty();
-}
-
-void oledDialogOK(const char* title, const char* message, OledUICallback onOK, void* userData) {
-  oledDialogSetup(title, message, OledUIIcon::INFO);
-  gOledDialog.buttons[0] = OledUIButton::OK;
-  gOledDialog.onButton[0] = onOK;
-  gOledDialog.buttonCount = 1;
-  gOledDialog.userData = userData;
-}
-
-void oledDialogYesNo(const char* title, const char* message, OledUICallback onYes, OledUICallback onNo, void* userData) {
-  oledDialogSetup(title, message, OledUIIcon::QUESTION);
-  gOledDialog.buttons[0] = OledUIButton::YES;
-  gOledDialog.buttons[1] = OledUIButton::NO;
-  gOledDialog.onButton[0] = onYes;
-  gOledDialog.onButton[1] = onNo;
-  gOledDialog.buttonCount = 2;
-  gOledDialog.userData = userData;
-}
-
-void oledDialogCustom(const char* title, const char* message,
-                      OledUIButton btn1, OledUICallback cb1,
-                      OledUIButton btn2, OledUICallback cb2,
-                      void* userData, OledUIIcon icon) {
-  oledDialogSetup(title, message, icon);
-  gOledDialog.buttons[0] = btn1;
-  gOledDialog.onButton[0] = cb1;
-  gOledDialog.buttonCount = 1;
-  
-  if (btn2 != OledUIButton::NONE) {
-    gOledDialog.buttons[1] = btn2;
-    gOledDialog.onButton[1] = cb2;
-    gOledDialog.buttonCount = 2;
-  }
-  gOledDialog.userData = userData;
-}
-
-void oledDialogClose() {
-  gOledDialog.active = false;
-  oledMarkDirty();
-}
-
-bool oledDialogActive() {
-  return gOledDialog.active;
-}
-
-bool oledDialogHandleInput(uint32_t newlyPressed) {
-  if (!gOledDialog.active) return false;
-
-  bool handled = false;
-  
-  // Up/down to switch buttons. Even though the dialog button bar is
-  // horizontal visually, using LEFT/RIGHT here conflicts with the canonical
-  // LEFT-as-cancel mapping on the ANO encoder — pressing LEFT would move
-  // selection AND cancel the dialog in the same tick, wasting a state
-  // change. UP/DOWN is the canonical scroll axis and never conflicts with
-  // any button mapping.
-  if (gOledDialog.buttonCount > 1) {
-    if (gNavEvents.up) {
-      if (gOledDialog.selectedButton > 0) {
-        gOledDialog.selectedButton--;
-        oledMarkDirty();
-      }
-      handled = true;
-    } else if (gNavEvents.down) {
-      if (gOledDialog.selectedButton < gOledDialog.buttonCount - 1) {
-        gOledDialog.selectedButton++;
-        oledMarkDirty();
-      }
-      handled = true;
-    }
-  }
-  
-  // A to confirm, B to cancel (INPUT_CHECK and InputButton from HAL_Input.h)
-  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    int idx = gOledDialog.selectedButton;
-    if (gOledDialog.onButton[idx]) {
-      gOledDialog.onButton[idx](gOledDialog.userData);
-    }
-    oledDialogClose();
-    handled = true;
-  } else if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    // B always cancels/closes
-    oledDialogClose();
-    handled = true;
-  }
-  
-  return handled;
-}
-
-void oledDialogRender() {
-  if (!gOledDialog.active || !gDisplay) return;
-  
-  // Center dialog box
-  int boxW = SCREEN_WIDTH - 8;
-  int boxH = 44;
-  int boxX = 4;
-  int boxY = (SCREEN_HEIGHT - boxH) / 2 - 4;
-  
-  // Background
-  gDisplay->fillRect(boxX, boxY, boxW, boxH, DISPLAY_BG);
-  gDisplay->drawRect(boxX, boxY, boxW, boxH, DISPLAY_FG);
-  gDisplay->drawRect(boxX + 1, boxY + 1, boxW - 2, boxH - 2, DISPLAY_FG);
-  
-  gDisplay->setTextSize(1);
-  gDisplay->setTextColor(DISPLAY_FG);
-  
-  // Title bar
-  int titleY = boxY + 2;
-  int contentX = boxX + 4;
-  
-  if (gOledDialog.icon != OledUIIcon::NONE) {
-    oledDrawIcon(contentX, titleY, gOledDialog.icon);
-    contentX += 12;
-  }
-  
-  gDisplay->setCursor(contentX, titleY);
-  gDisplay->print(gOledDialog.title);
-  
-  // Separator line
-  gDisplay->drawLine(boxX + 2, boxY + 12, boxX + boxW - 3, boxY + 12, DISPLAY_FG);
-  
-  // Message lines
-  int lineY = boxY + 16;
-  for (int i = 0; i < gOledDialog.lineCount && i < 3; i++) {
-    gDisplay->setCursor(boxX + 4, lineY);
-    gDisplay->print(gOledDialog.lines[i]);
-    lineY += 9;
-  }
-  
-  // Buttons
-  int btnY = boxY + boxH - 13;
-  int btnW = (gOledDialog.buttonCount == 1) ? 40 : 36;
-  int totalBtnW = btnW * gOledDialog.buttonCount + (gOledDialog.buttonCount - 1) * 4;
-  int btnX = boxX + (boxW - totalBtnW) / 2;
-  
-  for (int i = 0; i < gOledDialog.buttonCount; i++) {
-    oledDrawButton(btnX, btnY, btnW, oledUIButtonLabel(gOledDialog.buttons[i]), 
-                   i == gOledDialog.selectedButton);
-    btnX += btnW + 4;
-  }
-}
-
-// ============================================================================
-// Progress Component
-// ============================================================================
-
-void oledProgressShow(const char* label, int percent, bool cancellable) {
-  strncpy(gOledProgress.label, label ? label : "", sizeof(gOledProgress.label) - 1);
-  gOledProgress.percent = percent;
-  gOledProgress.startMs = millis();
-  gOledProgress.cancellable = cancellable;
-  gOledProgress.active = true;
-  oledMarkDirty();
-}
-
-void oledProgressUpdate(int percent) {
-  gOledProgress.percent = percent;
-  oledMarkDirty();
-}
-
-void oledProgressLabel(const char* label) {
-  strncpy(gOledProgress.label, label ? label : "", sizeof(gOledProgress.label) - 1);
-  oledMarkDirty();
-}
-
-void oledProgressClose() {
-  gOledProgress.active = false;
-  oledMarkDirty();
-}
-
-bool oledProgressActive() {
-  return gOledProgress.active;
-}
-
-void oledProgressRender() {
-  if (!gOledProgress.active || !gDisplay) return;
-  
-  int boxW = SCREEN_WIDTH - 20;
-  int boxH = 28;
-  int boxX = 10;
-  int boxY = (SCREEN_HEIGHT - boxH) / 2;
-  
-  // Background
-  gDisplay->fillRect(boxX, boxY, boxW, boxH, DISPLAY_BG);
-  gDisplay->drawRect(boxX, boxY, boxW, boxH, DISPLAY_FG);
-  
-  gDisplay->setTextSize(1);
-  gDisplay->setTextColor(DISPLAY_FG);
-  
-  // Label
-  oledDrawTextCentered(boxX, boxY + 3, boxW, gOledProgress.label);
-  
-  // Progress bar
-  int barX = boxX + 4;
-  int barY = boxY + 14;
-  int barW = boxW - 8;
-  int barH = 8;
-  
-  gDisplay->drawRect(barX, barY, barW, barH, DISPLAY_FG);
-  
-  if (gOledProgress.percent >= 0) {
-    // Determinate progress
-    int fillW = (barW - 2) * gOledProgress.percent / 100;
-    if (fillW > 0) {
-      gDisplay->fillRect(barX + 1, barY + 1, fillW, barH - 2, DISPLAY_FG);
-    }
-  } else {
-    // Indeterminate - animated bar
-    uint32_t elapsed = millis() - gOledProgress.startMs;
-    int pos = (elapsed / 50) % (barW - 10);
-    gDisplay->fillRect(barX + 1 + pos, barY + 1, 10, barH - 2, DISPLAY_FG);
-  }
-  
-  // Cancel hint
-  if (gOledProgress.cancellable) {
-    gDisplay->setCursor(boxX + boxW - 20, boxY + boxH - 9);
-    gDisplay->print("B:X");
-  }
 }
 
 // ============================================================================
@@ -931,26 +609,9 @@ void oledPairingRibbonRender() {
 
 void oledUIInit() {
   memset(&gOledToast, 0, sizeof(gOledToast));
-  memset(&gOledDialog, 0, sizeof(gOledDialog));
-  memset(&gOledProgress, 0, sizeof(gOledProgress));
   memset(&gOledPairingRibbon, 0, sizeof(gOledPairingRibbon));
   gOledPairingRibbon.state = PairingRibbonState::HIDDEN;
   gOledPairingRibbon.animY = -RIBBON_HEIGHT;
-}
-
-bool oledUIHandleInput(uint32_t newlyPressed) {
-  // Handle in priority order (topmost first)
-  if (oledDialogActive()) {
-    return oledDialogHandleInput(newlyPressed);
-  }
-  // Toast and progress don't capture input (except progress cancel)
-  if (oledProgressActive() && gOledProgress.cancellable) {
-    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-      oledProgressClose();
-      return true;
-    }
-  }
-  return false;
 }
 
 void oledUIRender() {
@@ -958,35 +619,8 @@ void oledUIRender() {
   oledPairingRibbonUpdate();
   
   // Render in layer order (bottom to top)
-  oledProgressRender();
-  oledPairingRibbonRender();  // Pairing ribbon (below dialog/toast)
-  oledDialogRender();
+  oledPairingRibbonRender();  // Pairing ribbon (below the toast)
   oledToastRender();  // Toast always on top
-  
-  // Render data source indicator when paired and not LOCAL
-  if (gDataSourceIndicatorVisible && gDataSource != DataSource::LOCAL && gDisplay) {
-    const char* label = nullptr;
-    switch (gDataSource) {
-      case DataSource::REMOTE: label = "R"; break;
-      case DataSource::BOTH:   label = "B"; break;
-      default: break;
-    }
-    if (label) {
-      // Draw indicator in top-right corner
-      int x = SCREEN_WIDTH - 10;
-      int y = 1;
-      gDisplay->fillRect(x - 1, y - 1, 10, 9, DISPLAY_BG);
-      gDisplay->drawRect(x - 1, y - 1, 10, 9, DISPLAY_FG);
-      gDisplay->setTextSize(1);
-      gDisplay->setTextColor(DISPLAY_FG);
-      gDisplay->setCursor(x + 1, y);
-      gDisplay->print(label);
-    }
-  }
-}
-
-bool oledUIModalActive() {
-  return oledDialogActive();
 }
 
 #endif // ENABLE_OLED_DISPLAY

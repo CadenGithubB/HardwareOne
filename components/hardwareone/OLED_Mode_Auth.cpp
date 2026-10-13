@@ -237,7 +237,8 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
           currentField == FIELD_USERNAME
               ? OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT
               : OLEDKeyboardDictationPolicy::DENY;
-      oledKeyboardInit(title, initialText, 32, policy);
+      oledKeyboardInit(title, initialText, 32, policy,
+                       currentField == FIELD_PASSWORD);
       loginKeyboardActive = true;
     }
     handled = true;

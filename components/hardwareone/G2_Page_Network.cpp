@@ -1539,6 +1539,23 @@ static char sWifiAddSsid[33];
 EXT_RAM_BSS_ATTR static char sWifiAddMsg[128];
 static void showWifiAddMsg() { g2ShowText(sWifiAddMsg); }
 
+// The wifiadd line quotes each field and CommandArgs has no escape: a `"` ends
+// the field early (a scanned `x" "y` would save SSID x with password y), so the
+// page refuses it, and control characters with it, before building the line.
+static bool wifiAddTextQuotable(const char* text) {
+  for (const unsigned char* p = (const unsigned char*)text; *p; ++p) {
+    if (*p == '"' || *p < 0x20 || *p == 0x7F) return false;
+  }
+  return true;
+}
+
+static void showWifiAddRefusal() {
+  snprintf(sWifiAddMsg, sizeof(sWifiAddMsg), "%s",
+           "Error: WiFi name and password cannot contain a double-quote (\") "
+           "or control characters");
+  showWifiAddMsg();
+}
+
 static void onWifiAddDone(bool ok, const char* result,
                           const G2CmdCookie& cookie, void* /*userData*/) {
   DEBUG_G2F("[G2] wifiadd done: ok=%d result='%s'", (int)ok, result ? result : "");
@@ -1554,10 +1571,17 @@ static void onWifiAddDone(bool ok, const char* result,
 
 // Build + submit from the snapshot SSID and a password. Runs on the BLE
 // notify task (keyboard commit) — String build + submit only, no inline
-// mutate (wrong stack + skips auth). The keyboard charset cannot produce a
-// double-quote, so the password is always safe to quote verbatim.
+// mutate (wrong stack + skips auth). The keyboard charset already filters
+// double-quotes and control bytes; a field the quoted line cannot carry is
+// refused here for every caller before the line is built.
 static void wifiAddSubmit(const char* pass) {
-  String line = String("wifiadd \"") + sWifiAddSsid + "\" \"" + (pass ? pass : "") + "\" 1 0";
+  if (!pass) pass = "";
+  if (!wifiAddTextQuotable(sWifiAddSsid) || !wifiAddTextQuotable(pass)) {
+    DEBUG_G2F("[G2] wifiadd: SSID or password has a quote/control byte — refused");
+    showWifiAddRefusal();
+    return;
+  }
+  String line = String("wifiadd \"") + sWifiAddSsid + "\" \"" + pass + "\" 1 0";
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
   cookie.targetNetSub = (uint8_t)gNetSub;
@@ -1586,11 +1610,16 @@ static void handleWiFiScanTap(uint32_t idx) {
   size_t apIdx = idx - 1;
   if (apIdx >= gScanCacheCount) return;
   const CachedAp& ap = gScanCache[apIdx];
-  // Hidden APs scan with an empty SSID — nothing to add. An SSID containing a
-  // double-quote can't survive the quoted command line (CommandArgs has no
-  // escape support) — refuse rather than mangle it.
-  if (ap.ssid[0] == '\0' || strchr(ap.ssid, '"') != nullptr) {
-    DEBUG_G2F("[G2] WiFi: tapped hidden/unquotable SSID — ignored");
+  // Hidden APs scan with an empty SSID — nothing to add.
+  if (ap.ssid[0] == '\0') {
+    DEBUG_G2F("[G2] WiFi: tapped hidden SSID — ignored");
+    return;
+  }
+  // A scanned SSID with a double-quote or control byte can't survive the
+  // quoted command line: say so on the lens instead of opening the keyboard.
+  if (!wifiAddTextQuotable(ap.ssid)) {
+    DEBUG_G2F("[G2] WiFi: tapped unquotable SSID — refused");
+    showWifiAddRefusal();
     return;
   }
   // Snapshot at tap time: the keyboard overlay blocks page taps but NOT the

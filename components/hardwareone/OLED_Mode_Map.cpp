@@ -19,7 +19,9 @@
 #if ENABLE_OLED_DISPLAY && ENABLE_MAPS
 
 #include <Adafruit_SSD1306.h>
+#include <cstdarg>    // va_list (context bar append)
 #include <cstring>
+#include <strings.h>  // strcasecmp (map picker filter)
 #include "System_Maps.h"
 #include "System_Mutex.h"   // MapCacheGuard — serialize tile-cache reads vs mapRenderTask
 #include "OLED_Utils.h"
@@ -33,6 +35,7 @@
 #include "System_SensorStubs.h"  // gGpsRunning when the GPS sensor is disabled
 #include "System_TaskUtils.h"
 #include "System_VFS.h"
+#include "System_AuthIdentity.h"  // CommandIdentityScope (OLEDMapCtxGuard)
 
 #if ENABLE_GPS_SENSOR
 #include <Adafruit_GPS.h>
@@ -42,6 +45,29 @@
 #if ENABLE_ESPNOW
 #include "System_ESPNow_Sensors.h"
 #endif
+
+// OLED identity for Map work. The Map owners (MapCore, WaypointManager,
+// GPSTrackManager) check file access against currentAuthContext(), and the
+// main-loop input/render path that runs this mode installs no identity (an
+// empty user is refused). Every direct owner call below therefore runs inside
+// an OLEDMapCtxGuard: the composed identity + NOTIF_SOURCE_OLED scope, as
+// OLEDFileBrowserCtxGuard does for the file browser. Installed per action,
+// not per frame.
+static AuthContext oledMapAuthContext() {
+  return oledAuthContext("/oled/map");
+}
+
+class OLEDMapCtxGuard {
+ public:
+  OLEDMapCtxGuard() : scope_(oledMapAuthContext()) {}
+  ~OLEDMapCtxGuard() = default;
+  OLEDMapCtxGuard(const OLEDMapCtxGuard&)            = delete;
+  OLEDMapCtxGuard& operator=(const OLEDMapCtxGuard&) = delete;
+  OLEDMapCtxGuard(OLEDMapCtxGuard&&)                 = delete;
+  OLEDMapCtxGuard& operator=(OLEDMapCtxGuard&&)      = delete;
+ private:
+  CommandIdentityScope scope_;
+};
 
 // External OLED display pointer (provided via HAL_Display.h #define oledDisplay gDisplay)
 
@@ -256,6 +282,10 @@ static int gRoutesSelectedIdx = 0;
 // Search mode state
 static bool gMapSearchMode = false;
 static char gSearchResult[64] = "";
+
+// Mark Waypoint name entry: set while the shared keyboard collects the name.
+// The keyboard owns input meanwhile; gpsMapInputHandler consumes its result.
+static bool gMapWaypointNameMode = false;
 
 // Search results navigation (for multiple matches like "Target")
 // Store coordinates directly since tiled format doesn't have flat feature indices
@@ -605,12 +635,12 @@ static bool isGPSDataLine(const String& line) {
 
 // Probe one candidate file's head for GPS data; record it in gTrackFiles if
 // it qualifies. Shared by the top-level scan and the subfolder descent.
-static void probeTrackFile(File& file) {
+static void probeTrackFile(File& file, const AuthContext& auth) {
   if (gTrackFileCount >= 8) return;
   // Staging files of an interrupted merge/export are never loadable tracks.
   if (VFS::isStagingName(String(file.path()))) return;
   FsLockGuard fsGuard("oled.map.probe_track");
-  File check = VFS::openGuarded(file.path(), "r", VFS::systemAuth("oled.map.scan_tracks"));
+  File check = VFS::openGuarded(file.path(), "r", auth);
   if (!check) return;
   bool hasGPS = false;
   for (int i = 0; i < 15 && check.available(); i++) {
@@ -634,6 +664,9 @@ static void probeTrackFile(File& file) {
 static void scanTrackFiles() {
   FsLockGuard fsGuard("oled.map.scan_tracks");
   gTrackFileCount = 0;
+  // List under the OLED identity, the one Load/Delete Track open the file
+  // with, so the picker offers exactly the tracks this user may use.
+  const AuthContext auth = oledMapAuthContext();
 
   // Scan directories (sensors included: autostart-resumed TRACK sessions
   // land there, shaped into session subfolders).
@@ -641,22 +674,20 @@ static void scanTrackFiles() {
                         "/logging_captures/sensors"};
 
   for (int d = 0; d < 3 && gTrackFileCount < 8; d++) {
-    // trusted: OLED-local scan of logging captures for the track-picker UI.
-    // No per-user identity exists at the physical-display layer.
-    File root = VFS::openGuarded(dirs[d], "r", VFS::systemAuth("oled.map.scan_tracks"));
+    File root = VFS::openGuarded(dirs[d], "r", auth);
     if (!root || !root.isDirectory()) continue;
 
     File file = root.openNextFile();
     while (file && gTrackFileCount < 8) {
       if (!file.isDirectory()) {
-        probeTrackFile(file);
+        probeTrackFile(file, auth);
       } else {
         // One level down: session subfolders (dated / boot-N).
-        File sub = VFS::openGuarded(file.path(), "r", VFS::systemAuth("oled.map.scan_tracks"));
+        File sub = VFS::openGuarded(file.path(), "r", auth);
         if (sub && sub.isDirectory()) {
           File child = sub.openNextFile();
           while (child && gTrackFileCount < 8) {
-            if (!child.isDirectory()) probeTrackFile(child);
+            if (!child.isDirectory()) probeTrackFile(child, auth);
             child = sub.openNextFile();
           }
         }
@@ -1035,30 +1066,37 @@ static void mapRenderTask(void* param) {
   }
 }
 
+// Appends printf-formatted text to the context bar text in buf at pos and
+// returns the new text length. Text that does not fit is cut at the end of the
+// buffer and the length stays below size, so once the buffer is full further
+// appends write nothing. A formatting error keeps the text before pos.
+__attribute__((format(printf, 4, 5)))
+static int appendMapContextText(char* buf, size_t size, int pos, const char* fmt, ...) {
+  if (pos < 0 || (size_t)pos + 1 >= size) return pos;
+  va_list args;
+  va_start(args, fmt);
+  const int n = vsnprintf(buf + pos, size - (size_t)pos, fmt, args);
+  va_end(args);
+  if (n < 0) {
+    buf[pos] = '\0';
+    return pos;
+  }
+  const size_t end = (size_t)pos + (size_t)n;
+  return end < size ? (int)end : (int)(size - 1);
+}
+
 // Display function for GPS Map mode
 static void displayGPSMap() {
   if (!oledDisplay) return;
-  
-  // Handle OLED keyboard for waypoint naming
-    
-  if (gOledKeyboardState.active) {
+
+  // The keyboard (waypoint name or name search) owns the screen while it is
+  // up. Completion/cancel is consumed by gpsMapInputHandler: completing clears
+  // the keyboard's active flag, so this check never sees a finished keyboard.
+  if (oledKeyboardIsActive()) {
     oledKeyboardDisplay(oledDisplay);
-    
-    if (oledKeyboardIsCompleted()) {
-      const char* wpName = oledKeyboardGetText();
-      int idx = WaypointManager::addWaypoint(gMapCenterLat, gMapCenterLon, wpName);
-      if (idx >= 0) {
-        INFO_MAPSF("Marked waypoint %d: %s at %.5f, %.5f", idx, wpName, gMapCenterLat, gMapCenterLon);
-      }
-      oledKeyboardReset();
-      gOledKeyboardState.active = false;
-    } else if (oledKeyboardIsCancelled()) {
-      oledKeyboardReset();
-      gOledKeyboardState.active = false;
-    }
     return;
   }
-  
+
   oledDisplay->setTextSize(1);
   
   // Performance tracking
@@ -1108,12 +1146,23 @@ static void displayGPSMap() {
   const LoadedMap& currentMap = MapCore::getCurrentMap();
   
   if (!currentMap.valid && !gSensorPollingPaused) {
-    char maps[8][96];
-    int mapCount = MapCore::getAvailableMaps(maps, 8);
-    if (mapCount > 0) {
-      char path[128];
-      snprintf(path, sizeof(path), "/maps/%s", maps[0]);
-      MapCore::loadMapFile(path);
+    // Load the first available map, at most once per 5 s while none is
+    // valid: loadMapFile pauses sensor polling and reads the file, so a map
+    // that fails to load must not be retried on every frame.
+    static bool sAutoLoadTried = false;
+    static uint32_t sAutoLoadLastMs = 0;
+    const uint32_t now = millis();
+    if (!sAutoLoadTried || now - sAutoLoadLastMs >= 5000) {
+      sAutoLoadTried = true;
+      sAutoLoadLastMs = now;
+      OLEDMapCtxGuard ctxGuard;
+      char maps[8][96];
+      int mapCount = MapCore::getAvailableMaps(maps, 8);
+      if (mapCount > 0) {
+        char path[128];
+        snprintf(path, sizeof(path), "/maps/%s", maps[0]);
+        MapCore::loadMapFile(path);
+      }
     }
   }
   
@@ -1223,21 +1272,22 @@ static void displayGPSMap() {
     char contextBuf[128];
     int pos = 0;
     
-    // Build context string: "On [road] • Near [area] ([distance])"
+    // Build context string: "On [road] • Near [area] ([distance])", cut at
+    // the end of contextBuf (names are up to 63 characters each)
     if (ctx.nearestRoad[0] != '\0') {
-      pos += snprintf(contextBuf + pos, sizeof(contextBuf) - pos, "On %s", ctx.nearestRoad);
+      pos = appendMapContextText(contextBuf, sizeof(contextBuf), pos, "On %s", ctx.nearestRoad);
     }
     
     if (ctx.nearestArea[0] != '\0') {
       if (pos > 0) {
-        pos += snprintf(contextBuf + pos, sizeof(contextBuf) - pos, " • Near %s", ctx.nearestArea);
+        pos = appendMapContextText(contextBuf, sizeof(contextBuf), pos, " • Near %s", ctx.nearestArea);
       } else {
-        pos += snprintf(contextBuf + pos, sizeof(contextBuf) - pos, "Near %s", ctx.nearestArea);
+        pos = appendMapContextText(contextBuf, sizeof(contextBuf), pos, "Near %s", ctx.nearestArea);
       }
       
       // Add distance if close enough to be relevant
       if (ctx.areaDistanceM < 500.0f) {
-        pos += snprintf(contextBuf + pos, sizeof(contextBuf) - pos, " (%.0fm)", ctx.areaDistanceM);
+        pos = appendMapContextText(contextBuf, sizeof(contextBuf), pos, " (%.0fm)", ctx.areaDistanceM);
       }
     }
     
@@ -1354,6 +1404,52 @@ static void goBackToMainMenu() {
   gMapMenuScrollOffset = 0;
 }
 
+// Select Map: the file browser as a picker rooted at /maps. The browser lists
+// and navigates under its own OLED identity; picking a .hwmap pops back here
+// and loads it.
+static bool mapPickerShowsFile(const FileEntry& entry) {
+  const size_t len = strlen(entry.name);
+  return len > 6 && strcasecmp(entry.name + len - 6, ".hwmap") == 0;
+}
+
+static void mapPickerOnPicked(const char* fullPath, bool cancelled) {
+  if (cancelled || !fullPath) return;
+  OLEDMapCtxGuard ctxGuard;
+  if (MapCore::loadMapFile(fullPath)) {
+    gMapCenterSet = false;
+    gMapManuallyPanned = false;
+  } else {
+    oledToastShow("Map load failed", 3000, OledUIIcon::ERROR);
+  }
+}
+
+static void openMapPicker() {
+  FilePickerRequest req = {};
+  strlcpy(req.title, "Select Map", sizeof(req.title));
+  strlcpy(req.startPath, "/maps", sizeof(req.startPath));
+  req.filter = mapPickerShowsFile;
+  req.onPicked = mapPickerOnPicked;
+  req.requesterMode = OLED_GPS_MAP;
+  if (!oledFilePickerPush(req)) {
+    oledToastShow("File picker busy", 3000, OledUIIcon::ERROR);
+    return;
+  }
+  requestOLEDMode(OLED_FILE_BROWSER, "map.browse.maps");  // pushes currentOLEDMode so the pick returns here
+}
+
+// Mark Waypoint completion: add at the map center as the OLED user and say
+// why when nothing was added.
+static void markWaypointAtCenter(const char* name) {
+  OLEDMapCtxGuard ctxGuard;
+  const int idx = WaypointManager::addWaypoint(gMapCenterLat, gMapCenterLon, name);
+  if (idx >= 0) {
+    INFO_MAPSF("Marked waypoint %d: %s at %.5f, %.5f", idx, name, gMapCenterLat, gMapCenterLon);
+  } else {
+    oledToastShow(idx == WaypointManager::kNotSaved ? "Waypoint not saved" : "No free waypoint slots",
+                  3000, OledUIIcon::ERROR);
+  }
+}
+
 // Execute submenu action based on current submenu type and selection
 static void executeSubmenuAction(int submenuType, int action) {
   // Guests may pan/zoom/view; GPS toggle, waypoints, and track logging mutate.
@@ -1368,7 +1464,9 @@ static void executeSubmenuAction(int submenuType, int action) {
   int mapCount;
   int currentIdx;
   const LoadedMap& currentMap = MapCore::getCurrentMap();
-  
+  // Map list/load, navigation target and track scan run as the OLED user.
+  OLEDMapCtxGuard ctxGuard;
+
   switch (submenuType) {
     case MENU_CAT_VIEW:
       switch (action) {
@@ -1386,11 +1484,7 @@ static void executeSubmenuAction(int submenuType, int action) {
       switch (action) {
         case 0:  // Select Map
           {
-            extern class FileManager* gOledFileManager;
-            extern bool oledFileBrowserNeedsInit;
-            requestOLEDMode(OLED_FILE_BROWSER, "map.browse.maps");  // pushes currentOLEDMode so B returns here
-            if (gOledFileManager) gOledFileManager->navigate("/maps");
-            else oledFileBrowserNeedsInit = true;
+            openMapPicker();
             gMapMenuOpen = false;
             gMapSubmenuLevel = 0;
           }
@@ -1483,7 +1577,7 @@ static void executeSubmenuAction(int submenuType, int action) {
             oledKeyboardInit(
                 "Name Waypoint", defaultName, WAYPOINT_NAME_LEN - 1,
                 OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
-            gOledKeyboardState.active = true;
+            gMapWaypointNameMode = true;
             gMapMenuOpen = false;
             gMapSubmenuLevel = 0;
           }
@@ -1679,10 +1773,14 @@ static void executeMapMenuAction(int action) {
   }
 }
 
-// Input handler for GPS Map mode
+// Input handler for GPS Map mode. newlyPressed holds the input device's own
+// press bits, so buttons are read with INPUT_CHECK (HAL_Input maps them per
+// device) and list movement with gNavEvents, which the router sets for the
+// joystick, the wheel and the ANO dpad alike. deltaX/deltaY are analog stick
+// deflection (0 on wheel devices) and only drive pan and rotate.
 static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   // Start button: toggle menu
-  if (newlyPressed & 0x10000) {
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_START)) {
     gMapMenuOpen = !gMapMenuOpen;
     if (gMapMenuOpen) {
       gMapMenuSelection = 0;
@@ -1691,7 +1789,22 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     }
     return true;
   }
-  
+
+  // Waypoint name entry (Mark Waypoint). The central router feeds the keyboard
+  // while it is active; the first input after it closes lands here.
+  if (gMapWaypointNameMode) {
+    if (oledKeyboardIsActive()) {
+      oledKeyboardHandleInput(deltaX, deltaY, newlyPressed);
+      return true;
+    }
+    if (oledKeyboardIsCompleted()) {
+      markWaypointAtCenter(oledKeyboardGetText());
+    }
+    gMapWaypointNameMode = false;
+    oledKeyboardReset();
+    return true;
+  }
+
   // Search mode - keyboard handles input
   if (gMapSearchMode) {
     if (oledKeyboardIsActive()) {
@@ -1779,20 +1892,21 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   // Search results navigation (when multiple matches exist)
   if (gSearchResultsActive && gSearchResultCount > 1) {
-    // Left/Right to navigate between results
-    if (newlyPressed & 0x08) {  // Left - previous result
-      gSearchResultCurrent = (gSearchResultCurrent - 1 + gSearchResultCount) % gSearchResultCount;
-      goto centerOnCurrentResult;
-    }
-    if (newlyPressed & 0x04) {  // Right - next result
-      gSearchResultCurrent = (gSearchResultCurrent + 1) % gSearchResultCount;
-      goto centerOnCurrentResult;
-    }
-    if (newlyPressed & 0x02) {  // B button - exit search results mode
+    // B exits first: on the ANO encoder LEFT is B and also a left nav event.
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
       gSearchResultsActive = false;
       return true;
     }
-    
+    // Left/Right or the wheel steps between results
+    if (gNavEvents.left || gNavEvents.wheelDelta < 0) {  // previous result
+      gSearchResultCurrent = (gSearchResultCurrent - 1 + gSearchResultCount) % gSearchResultCount;
+      goto centerOnCurrentResult;
+    }
+    if (gNavEvents.right || gNavEvents.wheelDelta > 0) {  // next result
+      gSearchResultCurrent = (gSearchResultCurrent + 1) % gSearchResultCount;
+      goto centerOnCurrentResult;
+    }
+
     centerOnCurrentResult: {
       // Use stored coordinates directly (tiled format stores coords, not indices)
       gMapCenterLat = gSearchResultCoords[gSearchResultCurrent].lat;
@@ -1803,9 +1917,9 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     }
   }
   
-  // Map info overlay - any button dismisses
+  // Map info overlay - A or B dismisses
   if (gShowMapInfo) {
-    if (newlyPressed & (0x20 | 0x02)) {
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
       gShowMapInfo = false;
       gMapMenuOpen = false;
       gMapSubmenuLevel = 0;
@@ -1814,9 +1928,9 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     return true;
   }
   
-  // Track status overlay - any button dismisses
+  // Track status overlay - A or B dismisses
   if (gShowTrackStatus) {
-    if (newlyPressed & (0x20 | 0x02)) {
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
       gShowTrackStatus = false;
       gMapMenuOpen = false;
       gMapSubmenuLevel = 0;
@@ -1828,32 +1942,31 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   // Features viewer input handling
   if (gShowFeatures) {
     const LoadedMap& map = MapCore::getCurrentMap();
-    const int menuDeadzone = 5;
-    
-    if (newlyPressed & 0x02) {
+
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
       gShowFeatures = false;
       gMapMenuOpen = false;
       gMapSubmenuLevel = 0;
       return true;
     }
-    
-    if (deltaX < -menuDeadzone) {
+
+    if (gNavEvents.left) {
       gFeaturesCategory = (gFeaturesCategory + 5) % 6;
       gFeaturesScrollOffset = 0;
       return true;
     }
-    if (deltaX > menuDeadzone) {
+    if (gNavEvents.right) {
       gFeaturesCategory = (gFeaturesCategory + 1) % 6;
       gFeaturesScrollOffset = 0;
       return true;
     }
-    
+
     if (map.valid && map.nameCount > 0) {
-      if (deltaY < -menuDeadzone && gFeaturesScrollOffset > 0) {
+      if (gNavEvents.up && gFeaturesScrollOffset > 0) {
         gFeaturesScrollOffset--;
         return true;
       }
-      if (deltaY > menuDeadzone && gFeaturesScrollOffset < map.nameCount - 5) {
+      if (gNavEvents.down && gFeaturesScrollOffset < map.nameCount - 5) {
         gFeaturesScrollOffset++;
         return true;
       }
@@ -1864,9 +1977,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   // Routes viewer input handling
   if (gShowRoutes) {
-    const int menuDeadzone = 5;
-    
-    if (newlyPressed & 0x02) {  // B button - close
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {  // B button - close
       gShowRoutes = false;
       gMapMenuOpen = false;
       gMapSubmenuLevel = 0;
@@ -1943,20 +2054,10 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       }
     }
     
-    // Navigate selection
-    if (deltaY < -menuDeadzone && gRoutesSelectedIdx > 0) {
-      gRoutesSelectedIdx--;
-      if (gRoutesSelectedIdx < gRoutesScrollOffset) gRoutesScrollOffset = gRoutesSelectedIdx;
-      return true;
-    }
-    if (deltaY > menuDeadzone && gRoutesSelectedIdx < routeCount - 1) {
-      gRoutesSelectedIdx++;
-      if (gRoutesSelectedIdx >= gRoutesScrollOffset + 5) gRoutesScrollOffset = gRoutesSelectedIdx - 4;
-      return true;
-    }
-    
+    // Buttons before navigation: ANO DOWN is X and also a down nav event, and
+    // the wheel is what moves the selection there.
     // X button - highlight route on map (toggle blink)
-    if (newlyPressed & 0x04) {
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
       if (map.valid && routeCount > 0 && gRoutesSelectedIdx < routeCount) {
         if (gMapHighlight.active && strcmp(gMapHighlight.name, routeList[gRoutesSelectedIdx].name) == 0) {
           // Toggle off if same route
@@ -1974,7 +2075,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     }
     
     // A button - goto selected route (center on first point)
-    if (newlyPressed & 0x20) {
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
       if (map.valid && routeCount > 0 && gRoutesSelectedIdx < routeCount) {
         // Use stored coordinates directly
         gMapCenterLat = routeFirstLat[gRoutesSelectedIdx];
@@ -1987,16 +2088,27 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
         return true;
       }
     }
-    
+
+    // Navigate selection
+    if (gNavEvents.up && gRoutesSelectedIdx > 0) {
+      gRoutesSelectedIdx--;
+      if (gRoutesSelectedIdx < gRoutesScrollOffset) gRoutesScrollOffset = gRoutesSelectedIdx;
+      return true;
+    }
+    if (gNavEvents.down && gRoutesSelectedIdx < routeCount - 1) {
+      gRoutesSelectedIdx++;
+      if (gRoutesSelectedIdx >= gRoutesScrollOffset + 5) gRoutesScrollOffset = gRoutesSelectedIdx - 4;
+      return true;
+    }
+
     return true;
   }
-  
+
   // Track file selection mode input handling
   if (gTrackSelectMode != 0) {
-    const int menuDeadzone = 5;
-    
-    if (newlyPressed & 0x20) {  // A button: load or delete track
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {  // A button: load or delete track
       if (gTrackFileCount > 0 && gTrackFileIdx < gTrackFileCount) {
+        OLEDMapCtxGuard ctxGuard;  // the track owner opens/removes the file as the OLED user
         if (gTrackSelectMode == 1) {
           // Load track
           String errorMsg;
@@ -2022,17 +2134,17 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       return true;
     }
     
-    if (newlyPressed & 0x02) {  // B button: cancel
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {  // B button: cancel
       gTrackSelectMode = 0;
       return true;
     }
-    
-    // Navigate track files with joystick
-    if (deltaY < -menuDeadzone && gTrackFileIdx > 0) {
+
+    // Navigate track files
+    if (gNavEvents.up && gTrackFileIdx > 0) {
       gTrackFileIdx--;
       return true;
     }
-    if (deltaY > menuDeadzone && gTrackFileIdx < gTrackFileCount - 1) {
+    if (gNavEvents.down && gTrackFileIdx < gTrackFileCount - 1) {
       gTrackFileIdx++;
       return true;
     }
@@ -2043,8 +2155,9 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   // Waypoint selection mode input handling
   if (gWaypointSelectMode != 0) {
     int wpCount = WaypointManager::getActiveCount();
-    
-    if (newlyPressed & 0x20) {
+
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
+      OLEDMapCtxGuard ctxGuard;  // target and deletion are saved as the OLED user
       int activeIdx = 0;
       for (int i = 0; i < MAX_WAYPOINTS; i++) {
         const Waypoint* wp = WaypointManager::getWaypoint(i);
@@ -2057,7 +2170,10 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
               gMapCenterSet = true;
               gMapManuallyPanned = true;
             } else if (gWaypointSelectMode == 2) {
-              WaypointManager::deleteWaypoint(i);
+              // i is an active slot, so false means the file write failed.
+              if (!WaypointManager::deleteWaypoint(i)) {
+                oledToastShow("Delete not saved", 3000, OledUIIcon::ERROR);
+              }
             }
             break;
           }
@@ -2070,17 +2186,16 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       return true;
     }
     
-    if (newlyPressed & 0x02) {
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
       gWaypointSelectMode = 0;
       return true;
     }
-    
-    const int menuDeadzone = 5;
-    if (deltaY < -menuDeadzone && gWaypointSelectIdx > 0) {
+
+    if (gNavEvents.up && gWaypointSelectIdx > 0) {
       gWaypointSelectIdx--;
       return true;
     }
-    if (deltaY > menuDeadzone && gWaypointSelectIdx < wpCount - 1) {
+    if (gNavEvents.down && gWaypointSelectIdx < wpCount - 1) {
       gWaypointSelectIdx++;
       return true;
     }
@@ -2115,12 +2230,12 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       }
     }
     
-    if (newlyPressed & 0x20) {
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
       executeMapMenuAction(gMapMenuSelection);
       return true;
     }
-    
-    if (newlyPressed & 0x02) {
+
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
       // B button: go back one level
       if (gMapSubmenuLevel == 2) {
         // Subtype submenu → layers submenu, restore selection
@@ -2135,15 +2250,14 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       return true;
     }
     
-    const int menuDeadzone = 5;
-    if (deltaY < -menuDeadzone && gMapMenuSelection > 0) {
+    if (gNavEvents.up && gMapMenuSelection > 0) {
       gMapMenuSelection--;
       if (gMapMenuSelection < gMapMenuScrollOffset) {
         gMapMenuScrollOffset = gMapMenuSelection;
       }
       return true;
     }
-    if (deltaY > menuDeadzone && gMapMenuSelection < menuItemCount - 1) {
+    if (gNavEvents.down && gMapMenuSelection < menuItemCount - 1) {
       gMapMenuSelection++;
       if (gMapMenuSelection >= gMapMenuScrollOffset + maxVisible) {
         gMapMenuScrollOffset = gMapMenuSelection - maxVisible + 1;
@@ -2261,17 +2375,18 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   }
   
   // X button: zoom in
-  if (newlyPressed & 0x04) {
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     gMapZoom = fminf(gMapZoom * MAP_ZOOM_STEP, MAP_ZOOM_MAX);
     return true;
   }
   // Y button: zoom out
-  if (newlyPressed & 0x40) {
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
     gMapZoom = fmaxf(gMapZoom / MAP_ZOOM_STEP, MAP_ZOOM_MIN);
     return true;
   }
-  
-  if (newlyPressed & 0x02) {
+
+  // B button: leave the map (the router goes back)
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
     return false;
   }
   

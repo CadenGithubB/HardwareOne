@@ -14,7 +14,6 @@
 static const SettingEntry oledSettingEntries[] = {
   { "oledEnabled", SETTING_BOOL, &gSettings.oledEnabled, false, 0, nullptr, 0, 1, "OLED Enabled", nullptr, false, nullptr, "oledenabled" },
   { "oledAutoStart", SETTING_BOOL, &gSettings.oledAutoStart, 1, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "oledautostart" },
-  { "oledRequireAuth", SETTING_BOOL, &gSettings.localDisplayRequireAuth, true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, "display", "oledrequireauth" },
   { "oledBootMode", SETTING_STRING, &gSettings.oledBootMode, 0, 0, "logo", 0, 0, "Boot Mode", "logo,status,sensors,thermal,network,mesh,off", false, "boot", "oledbootmode" },
   { "oledDefaultMode", SETTING_STRING, &gSettings.oledDefaultMode, 0, 0, "status", 0, 0, "Default Mode", "logo,status,sensors,thermal,network,mesh,off", false, "boot", "oleddefaultmode" },
   { "oledBootDuration", SETTING_INT, &gSettings.oledBootDuration, 2000, 0, nullptr, 500, 10000, "Boot Duration (ms)", nullptr, false, "boot", "oledbootduration" },

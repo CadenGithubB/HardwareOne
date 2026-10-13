@@ -40,6 +40,7 @@
 #include "System_I2C.h"            // OLED_TRANSACTION (i2cDeviceTransactionVoid)
 #include "System_WiFi.h"           // ensureWiFiInitialized, scan operations
 #include "network/wifi/System_WiFiNetworks.h"   // credential-free saved-network snapshots
+#include "OLED_UI.h"               // oledToastShow — Add-WiFi refusals and replies
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -227,15 +228,16 @@ void displayNetworkInfoRendered() {
 #endif
 }
 
-// Confirmation callbacks for HTTP Start/Stop
+// Confirmation callbacks for HTTP Start/Stop. Network actions run through
+// oledRunCommand, which toasts a refusal; the rows show the new state.
 static void httpStartConfirmedNetwork(void* userData) {
   (void)userData;
-  executeOLEDCommand("openhttp");
+  oledRunCommand("openhttp");
 }
 
 static void httpStopConfirmedNetwork(void* userData) {
   (void)userData;
-  executeOLEDCommand("closehttp");
+  oledRunCommand("closehttp");
 }
 
 static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
@@ -251,7 +253,7 @@ static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t new
         requestOLEDMode(OLED_NETWORK_STATUS, "network.status");
         break;
       case NET_ACT_CONNECT_BEST:
-        executeOLEDCommand("openwifi --best");
+        oledRunCommand("openwifi --best");
         break;
       case NET_ACT_WIFI_MENU:
         requestOLEDMode(OLED_NETWORK_WIFI_MENU, "network.wifi.menu");
@@ -259,7 +261,7 @@ static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t new
       case NET_ACT_DISCONNECT:
         // Drop the AP but keep the radio (and HTTP) up — HTTP has its own
         // toggle in this menu, so Disconnect should only leave the network.
-        executeOLEDCommand("wifidisconnect");
+        oledRunCommand("wifidisconnect");
         break;
       case NET_ACT_TOGGLE_HTTP:
 #if ENABLE_HTTP_SERVER
@@ -412,7 +414,7 @@ static void startWifiAddSSID() {
 static void startWifiAddPass() {
   sWifiAddStep = WIFI_ADD_PASS;
   oledKeyboardInit("Enter Password:", "", OLED_KEYBOARD_MAX_LENGTH,
-                   OLEDKeyboardDictationPolicy::DENY);
+                   OLEDKeyboardDictationPolicy::DENY, /*masked=*/true);
   sWifiKeyboardActive = true;
 }
 
@@ -435,8 +437,27 @@ void oledNetworkModeResetSessionState() {
   memset(sRemovePromptBuf, 0, sizeof(sRemovePromptBuf));
 }
 
-// Pre-fill the SSID from a scan pick and jump straight to password entry.
+// The wifiadd line quotes each field and CommandArgs has no escape: a `"` ends
+// the field early (password `pa"ss` would be saved as `pa`), so the form
+// refuses it, and control characters with it, before any line is built.
+// Returns the toast text for a field the line cannot carry, else nullptr.
+static const char* wifiAddFieldRefusal(const String& text) {
+  for (size_t i = 0; i < text.length(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(text[i]);
+    if (c == '"') return "Quote not allowed";
+    if (c < 0x20 || c == 0x7F) return "Invalid character";
+  }
+  return nullptr;
+}
+
+// Pre-fill the SSID from a scan pick and jump straight to password entry. A
+// scanned SSID the command line cannot carry is refused before the keyboard.
 static void startWifiAddFromScan(const char* ssid) {
+  const char* refusal = wifiAddFieldRefusal(String(ssid));
+  if (refusal) {
+    oledToastShow(refusal, 2500);
+    return;
+  }
   String sessionUser;
   bool sessionAuthed = false;
   sWifiAddEpoch = localDisplayTransportSessionSnapshot(sessionUser, sessionAuthed);
@@ -447,7 +468,7 @@ static void startWifiAddFromScan(const char* ssid) {
   sWifiAddSSID = String(ssid);
   secureClearString(sWifiAddPass);
   oledKeyboardInit("Enter Password:", "", OLED_KEYBOARD_MAX_LENGTH,
-                   OLEDKeyboardDictationPolicy::DENY);
+                   OLEDKeyboardDictationPolicy::DENY, /*masked=*/true);
   sWifiKeyboardActive = true;
 }
 
@@ -469,28 +490,49 @@ static bool wifiAddKeyboardTick(bool* handled) {
     oledKeyboardReset();
     sWifiKeyboardActive = false;
     if (sWifiAddStep == WIFI_ADD_SSID) {
-      sWifiAddSSID = text;
-      startWifiAddPass();
+      const char* refusal = wifiAddFieldRefusal(text);
+      if (refusal) {
+        wifiAddReset();
+        oledToastShow(refusal, 2500);
+      } else {
+        sWifiAddSSID = text;
+        startWifiAddPass();
+      }
     } else if (sWifiAddStep == WIFI_ADD_PASS) {
       sWifiAddPass = text;
-      String command = "wifiadd \"" + sWifiAddSSID + "\" \"" + sWifiAddPass + "\"";
-      const bool connectAfter = sWifiAddConnectAfter;
-      // Expected-epoch admission/result fencing below fails closed if a
-      // replacement arrives during FS/network I/O.
-      char result[128] = {};
-      const bool added = executeOLEDCommandWithResultForSession(
-          command, sessionEpoch, result, sizeof(result));
-      secureClearString(command);
-      if (added && connectAfter) {
-        (void)executeOLEDCommandWithResultForSession(
-            "openwifi --best", sessionEpoch, result, sizeof(result));
-      }
-      volatile char* wipe = reinterpret_cast<volatile char*>(result);
-      for (size_t i = 0; i < sizeof(result); ++i) wipe[i] = '\0';
       secureClearString(text);
+      char toast[40] = {};
+      const char* refusal = wifiAddFieldRefusal(sWifiAddSSID);
+      if (!refusal) refusal = wifiAddFieldRefusal(sWifiAddPass);
+      if (refusal) {
+        snprintf(toast, sizeof(toast), "%s", refusal);
+      } else {
+        String command = "wifiadd \"" + sWifiAddSSID + "\" \"" + sWifiAddPass + "\"";
+        const bool connectAfter = sWifiAddConnectAfter;
+        // Expected-epoch admission/result fencing below fails closed if a
+        // replacement arrives during FS/network I/O.
+        char result[128] = {};
+        const bool added = executeOLEDCommandWithResultForSession(
+            command, sessionEpoch, result, sizeof(result));
+        secureClearString(command);
+        // The owner's reply becomes the toast text (OLED_Utils mapping).
+        oledCommandReplyText(added, result, "Network saved", "Add failed",
+                             toast, sizeof(toast));
+        if (added && connectAfter) {
+          const bool connected = executeOLEDCommandWithResultForSession(
+              "openwifi --best", sessionEpoch, result, sizeof(result));
+          oledCommandReplyText(connected, result, "Connected", "Connect failed",
+                               toast, sizeof(toast));
+        }
+        volatile char* wipe = reinterpret_cast<volatile char*>(result);
+        for (size_t i = 0; i < sizeof(result); ++i) wipe[i] = '\0';
+      }
+      // The outcome belongs to the session that typed it: a replacement
+      // session owns the flow state and sees no toast.
       if (transportSessionEpochIsLive(
               SOURCE_LOCAL_DISPLAY, sessionEpoch)) {
         wifiAddReset();
+        oledToastShow(toast, 2500);
       }
     } else {
       secureClearString(text);
@@ -556,7 +598,7 @@ static bool networkWifiListInputHandler(int /*dx*/, int /*dy*/, uint32_t newlyPr
     if (sSavedNetSnapshotValid && sel >= 0 && sel < sSavedNetSnapshot.count) {
       // The command resolves this boot-local identity when it executes. A
       // removed entry fails instead of connecting a different network by index.
-      executeOLEDCommand("openwifi --saved-id " + String(sSavedNetSnapshot.entries[sel].id));
+      oledRunCommand("openwifi --saved-id " + String(sSavedNetSnapshot.entries[sel].id));
       oledMenuBack();  // pop back to the WiFi menu after kicking off the connect
     }
     return true;
@@ -566,7 +608,7 @@ static bool networkWifiListInputHandler(int /*dx*/, int /*dy*/, uint32_t newlyPr
 
 static void onWifiRemoveConfirmed(void* /*ud*/) {
   if (sPendingRemoveId != 0) {
-    executeOLEDCommand("wifirmid " + String(sPendingRemoveId));
+    oledRunCommand("wifirmid " + String(sPendingRemoveId));
     sPendingRemoveId = 0;
     populateSavedNetScroll();
     oledMarkDirty();
@@ -722,7 +764,7 @@ static bool networkWifiMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t
         requestOLEDMode(OLED_NETWORK_WIFI_REMOVE, "network.wifi.remove");
         break;
       case 3: // Connect Best
-        executeOLEDCommand("openwifi --best");
+        oledRunCommand("openwifi --best");
         oledMenuBack();  // close this submenu after kicking off the connect
         break;
       case 4: // Scan Networks — scan, then push the scan picker (A adds + connects)

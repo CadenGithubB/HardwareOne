@@ -5987,9 +5987,14 @@ bool espnowGetPairCandidate(int idx, char* name, size_t nameCap, uint8_t mac[6],
   return true;
 }
 // True + fills `name` if there is an incoming pair request awaiting accept/reject.
-bool espnowGetIncomingPairRequest(char* name, size_t nameCap) {
+// `mac` and `atMs` (each optional) identify that request: the sender and its
+// arrival time, which a re-sent request restarts, so a UI can tell a request it
+// already answered from a new one.
+bool espnowGetIncomingPairRequest(char* name, size_t nameCap, uint8_t* mac, uint32_t* atMs) {
   if (!gPendingPairIn.active) return false;
   if (name && nameCap) { strncpy(name, gPendingPairIn.name, nameCap - 1); name[nameCap - 1] = '\0'; }
+  if (mac) memcpy(mac, gPendingPairIn.mac, 6);
+  if (atMs) *atMs = gPendingPairIn.atMs;
   return true;
 }
 
@@ -8518,13 +8523,6 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
       }
     }
   }
-  
-  // Invalidate dynamic menu to trigger rebuild with new settings data
-#if ENABLE_OLED_DISPLAY
-  extern void invalidateDynamicMenu();
-  invalidateDynamicMenu();
-  DEBUG_ESPNOWF("[SETTINGS_PROC] Invalidated dynamic menu");
-#endif
 }
 
 /**

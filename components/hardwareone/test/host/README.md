@@ -2077,6 +2077,337 @@ python3 components/hardwareone/test/host/test_file_kind.py --sanitize
 
 `file_kind` compiles the shared classifier `FileBrowser_FileKind.h` and, over one table of names, the production G2 Files page file-tap branch (the `else` block of `g2FilesHandleTap` with the classification it calls, `showFileChooser` recording the chooser kind) beside the OLED browser's "View" decision (its `sFbActionViewable` assignment). The lens must offer a text or JSON view exactly when the OLED offers View: `.log`, `.md`, `.ini`, `.yaml`, `.html`, `.c` and the other OLED text types open in both, BMP/JPEG open only on the lens, and png, bin, `.tar.gz` and names without an extension get Info/Rename/Delete only. A second harness runs the OLED browser's rename/delete helpers (`fbRenameSelected`, `fbDeleteSelected`, `fbSubmitMutate`) against FileManager and executor doubles: both submit the admin-only `filerename` and one-shot `filedelete ... confirm` commands with the selected entry's full path (a 70-byte SD name), re-scan only after the executor's `OK`, report the executor's admin refusal, and submit nothing for an unresolved selection or a quote. Source contracts check that the OLED browser no longer calls `FileManager::renameItem`/`deleteItem`, that its prepare pass routes Rename/Delete through those helpers under the identity guard, that guests are still stopped on the input path, and that neither browser keeps a private extension list. `--component <dir>` reads the production sources from another tree; the f4cc542 sources fail the agreement checks (the lens gives `.log` and `.md` no viewer while the OLED offers View) and the contracts (direct FileManager rename/delete). No device, executor or FileManager is run.
 
+## Display login policy ownership
+
+`display_auth_policy` scans every production source for command handlers that write
+`localDisplayRequireAuth`, `serialRequireAuth` or `uartRequireAuth`, then compiles the
+production OLED and output settings rows, the OLED, Settings and settings-editor command
+tables and every other table tied to a policy writer (today `userSystemCommands`) with
+generated link fixtures (a `gSettings` built from the rows, one stub per handler, the
+writer list). It checks that every row persisting a policy names a command that only
+super-admins run, that every command running a writer is super-admin, that each policy
+is persisted by exactly one row (one JSON key, so load order cannot decide it), that no
+policy write sits outside a registered command handler or behind a generic editor
+command, and that every OLED row names an existing command. `--component`/`--source-dir`
+point it at another tree; ASan/UBSan follow `--sanitize`. Table metadata only:
+`authorizeCommand`, the web UI and device behavior are not run.
+
+Suggested one-sentence addition to the existing `settings_mutation` paragraph: In the
+OLED-enabled variant it also runs the dedicated `oledenabled` command with display
+boundaries: the generic on/off/true/false/1/0/enable/disable tokens start or tear down
+the panel as before, and any other token (or none) is refused before it persists or
+touches the display. `--component` points the suite at another tree.
+
+## OLED session role cache
+
+`oled_session_role` compiles the shipping local-display role gate from
+`OLED_Utils.cpp`:
+
+- `oledIsGuestSession` with the session-role helpers beside it (everything between
+  the `shouldBlockForDisplayAuth()` definition and `oledModeAllowedForGuest`);
+- `oledModeAllowedForGuest`, `oledGuestBlocksMutate`;
+- `getMenuAvailability`, with every `ENABLE_*` off;
+- `oledApplyPendingSessionBoundary`.
+
+It also compiles the launcher populate and the selected-row right-pane decorator
+from `OLED_Mode_Menu.cpp`, with the shipping mode enum and menu/scroll structs.
+Fakes count every users.json read (`getUserAuthorizationRole`, `isAdminUser`) and
+supply the session authority, the owner task and the scroll primitives.
+
+The checks:
+
+- Launcher steps (input populate, render populate, Users-row pane, mutate guard,
+  mode gate) read the roster at most once per session and identity generation.
+- A failed lookup (banned, unknown or unreadable) is guest and non-admin, and is
+  retried rather than kept.
+- A `gIdentityGeneration` bump and a session boundary (login of another account,
+  logout) re-resolve the role. The boundary's own menu request already sees the
+  new identity, and no read happens while the display lifecycle writer is held.
+- Other tasks (`cmd_oledmode`) read live and leave the cache alone.
+- An unauthenticated launcher is unfiltered and reads nothing.
+
+`--component`/`--source-dir` point it at another tree. ASan/UBSan follow
+`--sanitize`. Device rendering, `authorizeCommand` and the real roster parser are
+not run.
+
+## OLED display commands from other tasks
+
+```sh
+python3 components/hardwareone/test/host/test_oled_owner_requests.py --sanitize
+```
+
+`oled_owner_requests` compiles the production `requestOLEDMode`, the owner-request queue, `cmd_oledmode`, `cmd_oledtext`, `cmd_oledclear`, `cmd_oledanim` and `oledUpdate` from OLED_Utils.cpp with `cmd_setpattern` (`setgamepadpassword`) from OLED_Mode_SetPattern.cpp. A task double makes `xTaskGetCurrentTaskHandle()` answer the main loop or cmd_exec, and fakes record which task touched the framebuffer, ran an onEnter hook, read the display role or auth mirror, pushed the back stack or auto-started input. Called as cmd_exec, every command and `requestOLEDMode` leave `customOLEDText`, the mode, the stack, the animation and the pattern flow unchanged until the owner runs `oledUpdate()`. The owner then applies them in post order with the same side effects as before: `oledmode menu` auto-starts input; `oledmode off` and `oledclear` blank the panel on the owner, and `oledclear` leaves the page clean; `setgamepadpassword` pushes the previous mode and restarts the flow; the auth gate still redirects to the login page. A command posted before a session boundary hands over its text or reset but does not navigate after that boundary. A command posted after a boundary the frame has not applied yet waits for it. A ninth request drops the oldest without leaking its text copy, and nothing allocates inside the queue lock. A source check requires `updateOLEDDisplay()` to drain the requests right after its first session-boundary apply. `--component` / `--source-dir` read production sources from another tree; the f4cc542 sources fail 26 checks (state written on cmd_exec) and the source check.
+
+## OLED mode availability
+
+```sh
+python3 components/hardwareone/test/host/test_oled_mode_availability.py --sanitize
+```
+
+`oled_mode_availability` compiles these from the production tree: `getMenuAvailability`, with its `oledModeFeatureState` classification and `oledModeRuleAllows`; the mode registry (`registerOLEDMode`, `registerOLEDModes`, `findOLEDMode`) from OLED_Utils.cpp; and `OLEDModeEntry`, the callback typedefs and `MenuAvailability` from OLED_Display.h. It registers the real entry rules of CLI Input, Gamepad PW, Logout, GPS (i2csensor_pa1010d_oled.h) and thermal through the registry, with GPS and thermal compiled in. A module's refusal makes its launcher row FEATURE_DISABLED with the module's reason. Without a named display session, CLI Input and Gamepad PW show "Login required" and Logout shows "Not logged in". The central classification keeps its class and reason: GPS or thermal not detected is NOT_DETECTED, detected but stopped is FEATURE_DISABLED "Disabled / Press X to start", and a mode that is not built is NOT_BUILT. Modes without a rule are unchanged, and a note an allowing rule leaves never reaches the launcher. A source check requires `requestOLEDModePrepared()` to be declared in OLED_Display.h beside `requestOLEDMode()` and in no other file. `--component` / `--source-dir` read production sources from another tree. On f4cc542 the suite fails five checks (the rules are ignored) and the prototype check.
+
+## Dead OLED code paths
+
+```sh
+python3 components/hardwareone/test/host/test_oled_dead_paths.py --sanitize
+```
+
+`oled_dead_paths` reads every top-level `*.cpp`/`*.h` of the component with comments and string literals stripped. It fails if any code still names a deleted OLED path:
+
+- the dynamic remote menu and its remote command input;
+- the bonded `DataSource` selection and its R/B indicator;
+- the OLED_UI Dialog and Progress components, with `oledUIHandleInput` and `oledUIModalActive`;
+- the display functions superseded by the `*Rendered` versions, and the undefined web-stats externs;
+- `forceSettingsModeLink`, `resetOLEDFileBrowser`, `getRegisteredOLEDModes`, `getPreviousOLEDMode` and `LOG_MENU_VIEWER`;
+- the helpers those deletions left without a caller: `hasRemoteSettings`, `oledDrawBox`, `oledDrawButton` and `oledDrawTextCentered`;
+- the unified actions mode.
+
+The live replacements must stay defined: `oledUIRender`, the toast and ribbon renders, the live drawing helpers `oledDrawIcon` and `oledDrawLevelBars`, the `*Rendered` displays, the mode registry, back-navigation and the slug functions. The suite then compiles the production `enum OLEDMode`, `modeFromSlug` and `slugFromMode` and checks three things: `oledmode unified` names no mode, no mode's slug resolves to a different mode, and "actions"/"imuactions" still open IMU actions. `--component`/`--source-dir` read production sources from another tree. On f4cc542 the contract names 65 identifiers, and the slug harness fails 2 checks: "unified" opens a mode, and `slugFromMode(OLED_UNIFIED_MENU)` is "actions", which opens IMU actions.
+
+`oled_without_input` also accepts `--component`/`--source-dir`/`--sanitize`. It requires that the display-state API carry no bonded data-source selection.
+
+## OLED action feedback
+
+```sh
+python3 components/hardwareone/test/host/test_oled_command_feedback.py --sanitize
+```
+
+`oled_command_feedback` compiles the shipping OLED action helper (`oledRunCommand` and its
+reply-to-toast mapping `oledCommandReplyText`, both from `OLED_Utils.cpp`) and real callers:
+
+- the Automations toggle and delete actions with their footer toast (`OLED_Mode_Automations.cpp`);
+- the Quick Settings radio, Wi-Fi, Bluetooth and HTTP rows (`OLED_SettingsEditor.cpp`);
+- the Network menu's HTTP confirm callbacks (`OLED_Mode_Network.cpp`).
+
+The OLED command executor (scripted verdict and reply), the global toast, the Automations
+rows and the radio/BLE/HTTP state are doubles.
+
+The checks:
+
+- A refused or failed command toasts its reply: an admin or super-admin denial as
+  "Admin required", any other reply as its first line without the `Error`/`ERROR`/`[ERROR]`
+  token, an empty or bare `ERROR` reply as "Failed". An `Error` reply fails even when the
+  executor says ok, and an over-long reply stays inside the toast buffer.
+- An accepted command returns true and leaves the toast to the caller.
+- `oledCommandReplyText` (also used by the Add-WiFi flow) gives the caller's success text on
+  success and the caller's fallback text for an empty refusal, and stays inside the caller's buffer.
+- Each caller shows its success text ("Enabled", "Deleted", "Radio OFF", "HTTP OFF", ...)
+  only on success; local refusals ("Radio off!", "Need WiFi first!") still run no command.
+- Static: the Automations, Logging and Network screens, the Quick Settings section and the
+  unavailable-page / Web Stats actions (`handleOLEDActionButton`) no longer fire commands
+  whose reply is dropped, and their `broadcastOutput` success lines are conditional.
+
+`--component`/`--source-dir` point it at another tree; the f4cc542 sources fail it (no
+helper; "Disabled"/"Deleted"/"Radio OFF" shown for refused commands). ASan/UBSan follow
+`--sanitize`. The real executor, admin gate and display are not run.
+
+`oled_remote_settings` (see "OLED bonded-peer settings editor") also checks the local screen: the slider/pick-list (INT) save runs through the same checked commit as the STRING save, so a refused save shows the executor's reply on the editor line.
+
+## OLED Power Saving row
+
+```sh
+python3 components/hardwareone/test/host/test_oled_power_settings.py --sanitize
+```
+
+`oled_power_settings` compiles the Power > Sleep Settings row action and input handler
+(`executePowerSleepAction`, `powerSleepInputHandler` from `OLED_Mode_Power.cpp`), the OLED
+action helper (`oledRunCommand` from `OLED_Utils.cpp`) and the real `powersave` handler
+(`cmd_powersave` from `System_Power.cpp`). The command executor is a double that applies the
+admin gate with the `requiresAdmin` flag of the production `powersave` row, then runs
+`cmd_powersave` and records a `[CMD]` audit line; `setSetting` records whether a write ran
+inside a command or directly from the OLED task.
+
+The checks:
+
+- "Power Saving" submits `powersave <next step>`: a non-admin is refused ("Admin required"
+  toast, value kept); an admin moves along the ladder (10 -> 15, 60 -> Off, Off -> 1, an
+  off-ladder value -> 1) with one audit record and no direct write.
+- A guest is still blocked ("View-only"); Sleep 20s and Screen Off run their commands as before.
+- Static: no `OLED_Mode_*.cpp` calls `setSetting`, and the `powersave` row is admin-only.
+
+`--component`/`--source-dir` point it at another tree; the f4cc542 sources fail it (the row
+writes the setting directly, so a non-admin changes it with no audit line). ASan/UBSan follow
+`--sanitize`. The real executor, admin gate, persistence and display are not run.
+
+## OLED automation wizard
+
+```sh
+python3 components/hardwareone/test/host/test_oled_automation_wizard.py --sanitize
+```
+
+`oled_automation_wizard` compiles the shipping OLED "New automation" wizard from
+`OLED_Mode_Automations.cpp` (its state, `wizKeyboardDone`, `wizCreate`, the confirm screen and
+`wizHandleInput`, from `enum AutoWizStep` through the end of `wizHandleInput`) and its footer
+toast, with `OLED_KEYBOARD_MAX_LENGTH` and the keyboard enums from `OLED_Utils.h`. Arduino
+`String`, the display (records what is printed where), the keyboard, the event catalog, the OLED
+command executor and the navigation events are doubles. It drives the wizard as the list handler
+does: name keyboard, Interval, "5 min", command keyboard, confirm.
+
+The checks:
+
+- A 40-character command (with a quoted path) and a 40-character name reach the
+  `automationadd ... enabled=1` line whole, and so does a command of the keyboard's full
+  length; every wizard keyboard admits no more than the wizard keeps.
+- Text that does not fit is refused: the step's keyboard re-opens, nothing is stored and
+  nothing is sent.
+- The confirm screen shows every command character: the rows are rebuilt by pressing Down
+  until the frame stops changing; text stays left of the arrow column, the action line stays
+  on screen, Up returns to the top, A creates from any scroll position, and a new wizard
+  starts at the top.
+- A short command still draws the four-line confirm screen at y 11/20/29/38 without arrows.
+
+`--component`/`--source-dir` point it at another tree; the f4cc542 sources fail it (name and
+command cut to 32 characters, 18 shown on confirm, over-long text stored cut). ASan/UBSan follow
+`--sanitize`. The real keyboard, executor and display are not run.
+
+## Add-WiFi forms
+
+```sh
+python3 components/hardwareone/test/host/test_wifi_saved_ui.py --sanitize
+```
+
+`wifi_saved_ui` (see "Saved WiFi network coverage") also compiles the Add-WiFi forms with
+`wifi_add_form_harness.cpp`: the OLED keyboard flow (manual Add and scan pick, `OLED_Mode_Network.cpp`)
+and the G2 join-a-scanned-AP flow (`G2_Page_Network.cpp`). Both build a quoted `wifiadd` line that the
+command parser splits at every double-quote, so a double-quote or control character in the typed password
+or in a scanned SSID must be refused before any line is built, with a toast (OLED) or lens text (G2). The
+OLED toasts the owner's reply after an add through OLED_Utils' shared `oledCommandReplyText` ("Network saved",
+"Connected", "Admin required" or the refusal's first line without its `[ERROR]`/`Error` token) and stays silent for a replacement display session; G2 keeps showing the owner's reply
+on the lens. The OLED keyboard, session epoch and executor, and the G2 command bridge, text entry and lens are
+host doubles. `--component <dir>` replays the cases against a pre-fix tree.
+
+## OLED keyboard masking and dictation UI
+
+`dictation_ui` compiles the shared OLED/G2 dictation delivery: the G2 text-entry
+pad, `kbdPadConsumeDictationText`, `kbdPadDictationServiceOnTap` and
+`oledKeyboardDictationTick`.
+
+A second unit compiles the shipping OLED virtual keyboard from `OLED_Utils.cpp`:
+
+- the character tables and `getCharAt`;
+- `oledKeyboardInit` and `oledKeyboardReset`;
+- the preview helper and `oledKeyboardDisplay`.
+
+It uses the real `OLEDKeyboardState` and the Set Pattern openers, and draws on a
+recording display.
+
+The checks:
+
+- A masked (secret) field never prints its text, or any 3-character piece of it,
+  on any keyboard page: the four text grids, pattern, mic or suggestions.
+- A masked field's preview is one `*` per character: the last 20, or the first 8
+  on the suggestions page. The field buffer keeps the typed text.
+- A plain field keeps its preview window, including a plain field opened after a
+  masked one.
+- Set Pattern's password and pattern keyboards open masked.
+- A source contract: these fields pass the mask:
+  - login;
+  - change password;
+  - Wi-Fi password, from manual add and from a scan pick;
+  - the ESP-NOW remote password and passphrase;
+  - first-time setup password prompts.
+
+  The SSID does not pass it, and first-time setup no longer writes `*` into the
+  shared buffer.
+
+Related checks in other suites:
+
+- `wifi_saved_ui`'s Add-WiFi unit checks that the OLED password keyboards open
+  masked and the SSID keyboard opens plain.
+- `setup_display_cancel` checks that a first-time-setup password prompt opens
+  masked and that its render leaves the field buffer intact.
+
+`--component` points `dictation_ui` and `setup_display_cancel` at another tree.
+ASan/UBSan follow `--sanitize`. The panel driver, fonts, and the user-manager
+password fields (OLED_Mode_UserManager.cpp, outside this set) are not covered.
+
+## OLED pair-request prompt
+
+`oled_pair_prompt` compiles the shipping incoming-pair-request prompt from
+`OLED_ESPNow.cpp`: everything after the `sPairingSel` static through
+`oledEspNowPollPairRequest()` (the prompt statics, the Accept/Reject callbacks
+and the poll), plus the file's `oledEspNowRunOwnerCommand` helper when it has
+one. It runs them with the shipping confirm overlay from `OLED_Utils.cpp` (state,
+request, close, input, session-boundary reset) and the mode enum and `NavEvents`
+from `OLED_Display.h`. Doubles: the pending request (sender MAC, name, arrival
+time), the `espnowaccept`/`espnowreject` owner behind a switchable admin
+refusal, the cached session role (`oledSessionIsAdmin`), counting `users.json`
+traps and the toast. A frame is one poll, as `oledUpdate()` makes it.
+
+The checks:
+
+- A request answered on the panel opens the dialog once, even when the owner
+  refuses the answer; the refusal is toasted ("Admin required").
+- The prompt never opens on the login screen, for AuthBypass (display auth off),
+  for a non-admin session, or over the Login screen of a logged-in admin. A
+  request that waited through login opens once for the admin.
+- Accept and Reject name the shown sender's MAC. If another sender replaced the
+  request while the dialog was up, Accept does not pair it; the newer request
+  opens next under its own name.
+- A re-sent request (new arrival time) opens once more; an expired one answers
+  quietly.
+- A session boundary drops the dialog without an answer and the next session
+  sees the request once.
+- Idle frames make no role query, and the prompt never reads `users.json`.
+
+`--component`/`--source-dir` point it at another tree. ASan/UBSan follow
+`--sanitize`. The real commands, the role cache and the radio are not run.
+
+## OLED list navigation
+
+```sh
+python3 components/hardwareone/test/host/test_oled_list_nav.py --sanitize
+python3 components/hardwareone/test/host/test_sensorlog_ui.py --sanitize
+```
+
+`oled_list_nav` compiles the Automations list navigation (`autoListUp`/`autoListDown` and
+`struct AutomationRenderData` from `OLED_Mode_Automations.cpp`), the file list navigation
+(`oledFileBrowserUp/Down/Select/Back` and the pending-action slot from `OLED_Mode_FileBrowser.cpp`)
+and the settings editor (`OLED_SettingsEditor.cpp`: the OLED predicate wrappers, the module source,
+`initSettingsEditor`, `displaySettingsEditor`, `settingsEditorDown/Select/Back`,
+`openSettingsEditorForModule`, with the settings and editor types). Any file-scope state those
+functions use on the tree under test comes along. The clock, FileManager, settings registry,
+settings-editor core, keyboard, commit path and display (which records each frame) are doubles.
+
+The checks:
+
+- Nav events 40 ms apart (a briskly turned ANO wheel, quick dpad presses) and two events in one
+  tick each move the Automations list one row (clamped at the top and at the "+ New" row) and the
+  file list one row; A and B right after a move still request open / parent folder. The input layer
+  already paces nav events, so no list adds its own debounce.
+- The settings editor draws every row of a 4-row module with no scroll arrow after a module with no
+  editable row (entered from the list or with `openSettingsEditorForModule`) and after a scrolled
+  module; a 6-row module's window follows the cursor with the right arrows.
+
+`sensorlog_ui` also builds a second unit (`sensorlog_config_list_harness.cpp`) that draws the Logging
+"Configure" list with the shipping scroll code (`OLEDScrollState`, the scroll primitives and both
+renderers from `OLED_Utils`) through the real `handleLoggingModeInput` and render block, walks the
+11 rows down and up, and checks every frame: rows inside the content area, every glyph on the 128x64
+panel, a visible scroll indicator while rows are hidden, the selected row drawn, and as many rows as
+the content area holds.
+
+`--component`/`--source-dir` point both suites at another tree; the f4cc542 sources fail them (the
+Logging list's arrows are drawn at x=128, off the panel, with 4 rows shown; Automations and Files
+drop a nav event or press that follows the previous one within 200 ms; the editor's function-static
+item offset goes negative and shows a spurious down arrow in the next module). ASan/UBSan follow
+`--sanitize`. Physical input timing, the ANO encoder and the real display are not run.
+
+## OLED Map actions, input devices and waypoint saves
+
+```sh
+python3 components/hardwareone/test/host/test_oled_map_actions.py --sanitize
+```
+
+`oled_map_actions` compiles the production OLED Map mode (OLED_Mode_Map.cpp: the Map state block, the track scan, the menu dispatch, `gpsMapInputHandler` and `displayGPSMap` through map centering) against owner, keyboard, file-picker and VFS doubles. It also compiles HAL_Input's real button mapping (the controller tables, `inputGetButtonMask`, `inputIsButtonPressed` and `INPUT_CHECK`, with the seesaw and ANO bit definitions) and `NavEvents`. The Map unit is built four times: for the seesaw gamepad with `ENABLE_GPS_SENSOR` 0 and 1, for the ANO rotary encoder, and for the GPIO wheel with the P4X-EYE keys. Each build feeds the handler what the OLED input router hands a mode on that device: the device's own press bits; the wheel's detents with up/down nav events; ANO dpad presses as nav events; and stick deflection, which produces a nav event only on the router's first-deflection and auto-repeat cadence. The identity double mirrors the per-task slot: `CommandIdentityScope` installs a context, and otherwise `currentAuthContext()` returns the empty anonymous one, which the owner and VFS doubles refuse as `checkPerm` does. Map actions: Mark Waypoint adds the typed name at the map center once the keyboard completes. A cancel adds nothing, and a refused write or a full table is shown as a toast. Goto Waypoint, Clear Nav, Delete Waypoint, Load Track, Delete Track, Next Map, Previous Map, the first-map auto-load (at most one attempt per 5 s while no map loads) and the load from the Select Map picker all run as the OLED user, and the track picker scans with that identity. Select Map opens the file browser as a `/maps` picker that shows only `.hwmap` files. Input, on every device: START opens the menu. The wheel or stick moves through the menu, the track and waypoint pickers, the features list and the routes list. A confirms and B goes back or closes. Search results step with left/right or the wheel. The info and track-status overlays close on A or B. In the routes viewer X highlights a route. On the map, X zooms in, Y zooms out and B leaves. ANO UP moves up instead of backing out, a GPIO double tap (SELECT) does not confirm, and a held stick moves the menu only on the router's nav events. A second unit compiles the production WaypointManager mutators, `cmd_waypoint`, `cmd_waypointfile`, CommandArgs and `requireQuotedToken` (System_Maps.cpp, System_Command.cpp, System_Filesystem.cpp) with a `saveWaypoints()` double. `waypoint add`, `waypoint del` and `waypointfile` report a write that fails, and the waypoint table and navigation target stay unchanged. Adds and deletes that save keep their replies. `--component <components/hardwareone>` reads all production sources from another tree. The f4cc542 sources fail 30 Map checks in each seesaw build, 59 on the ANO build and 55 on the GPIO build, plus 11 save checks.
+
+## OLED Map context bar
+
+```sh
+python3 components/hardwareone/test/host/test_oled_map_context_bar.py --sanitize
+```
+
+`oled_map_context_bar` compiles System_Maps.h's `LocationContext`, the context-bar append helper from OLED_Mode_Map.cpp and the `displayGPSMap` block that builds "On <road> • Near <area> (<n>m)" in its 128-byte `contextBuf`, all unchanged. Inside them `snprintf`/`vsnprintf` follow the C contract and store every byte from instrumented code, so ASan sees any write outside `contextBuf`. Each case runs in its own process: short names, area only, road only, no names, a 127-byte exact fit, and road and area names of 58+58, 58+57 and 63+63 characters with the area near and far. The bar text must be the whole context cut at 127 bytes, stay terminated inside the array, and `pos` must equal its length and stay below 128. `--component <dir>` reads the production sources from another tree; the f4cc542 sources fail four cases: `pos` ends at 134 or 139, and with two 58- or 63-character names and a near area the third append forms `contextBuf + 129` (UBSan bounds error; with ASan alone, a stack-buffer-overflow write).
+
 ## Camera lifecycle and backends
 
 ```sh

@@ -11,7 +11,7 @@
 #include "System_Automation.h"
 #include "System_Settings.h"
 #include "System_EventCatalog.h"  // shared indexed event picker
-#include "OLED_Utils.h"   // executeOLEDCommand (was a local inline extern)
+#include "OLED_Utils.h"   // oledRunCommand, executeOLEDCommandWithResult
 
 // External references
 extern bool oledMenuBack();
@@ -35,8 +35,6 @@ struct AutomationRenderData {
 };
 
 EXT_RAM_BSS_ATTR static AutomationRenderData autoRenderData;
-static unsigned long autoLastInput = 0;
-static const unsigned long AUTO_DEBOUNCE = 200;
 static const unsigned long AUTO_REFRESH_INTERVAL = 5000;
 
 // Action feedback
@@ -95,14 +93,17 @@ enum AutoWizStep : uint8_t {
 static AutoWizStep sWizStep = AW_NONE;
 static bool sWizKbActive = false;
 
-static char sWizName[33]    = {0};   // keyboard cap is 32 + NUL
-static char sWizCommand[33] = {0};
+// Name and command hold everything the wizard keyboard can return
+// (OLED_KEYBOARD_MAX_LENGTH characters + NUL). PSRAM: main-loop UI state only.
+EXT_RAM_BSS_ATTR static char sWizName[OLED_KEYBOARD_MAX_LENGTH + 1];
+EXT_RAM_BSS_ATTR static char sWizCommand[OLED_KEYBOARD_MAX_LENGTH + 1];
 static char sWizTime[8]     = {0};   // "HH:MM"
 static int  sWizTypeIdx     = 0;     // index into kWizTypes
 static unsigned long sWizIntervalMs = 0;
 static unsigned long sWizDelayMs    = 0;
 static int  sWizCursor = 0;          // pick-list cursor
 static int  sWizScroll = 0;          // pick-list scroll offset
+static int  sWizConfirmScroll = 0;   // first confirm-screen row shown
 static char sWizResultMsg[24] = {0}; // failure toast (autoActionMsg points here)
 
 // Type options -> (menu label, wire type= value).
@@ -221,7 +222,7 @@ static void wizResetAll() {
   sWizTypeIdx = 0; sWizIntervalMs = sWizDelayMs = 0;
   sWizEventFamilyIndex = SIZE_MAX;
   sWizEventKindIndex = SIZE_MAX;
-  sWizCursor = sWizScroll = 0;
+  sWizCursor = sWizScroll = sWizConfirmScroll = 0;
 }
 
 void oledAutomationsModeResetSessionState() {
@@ -344,6 +345,15 @@ static void wizListSelect() {
   }
 }
 
+// Copies keyboard text whole into a wizard field. The fields hold the
+// keyboard's full capacity; text that does not fit is refused (false) rather
+// than stored cut short.
+static bool wizStoreText(char* dst, size_t dstSize, const String& text) {
+  if (text.length() >= dstSize) return false;
+  memcpy(dst, text.c_str(), text.length() + 1);
+  return true;
+}
+
 // Keyboard completion for the current step. Returns to advance; on invalid
 // input re-opens the same keyboard with a toast.
 static void wizKeyboardDone(const String& textIn) {
@@ -355,8 +365,11 @@ static void wizKeyboardDone(const String& textIn) {
         wizStartKeyboard(AW_NAME, "Name:", false);
         return;
       }
-      strncpy(sWizName, text.c_str(), sizeof(sWizName) - 1);
-      sWizName[sizeof(sWizName) - 1] = '\0';
+      if (!wizStoreText(sWizName, sizeof(sWizName), text)) {
+        autoShowToast("Too long");
+        wizStartKeyboard(AW_NAME, "Name:", false);
+        return;
+      }
       wizEnterList(AW_TYPE);
       return;
     case AW_DAILY: {
@@ -380,8 +393,12 @@ static void wizKeyboardDone(const String& textIn) {
         wizStartKeyboard(AW_COMMAND, "Command:", false);
         return;
       }
-      strncpy(sWizCommand, text.c_str(), sizeof(sWizCommand) - 1);
-      sWizCommand[sizeof(sWizCommand) - 1] = '\0';
+      if (!wizStoreText(sWizCommand, sizeof(sWizCommand), text)) {
+        autoShowToast("Too long");
+        wizStartKeyboard(AW_COMMAND, "Command:", false);
+        return;
+      }
+      sWizConfirmScroll = 0;
       sWizStep = AW_CONFIRM;
       return;
     default:
@@ -424,27 +441,77 @@ static void wizDrawList() {
   if (sWizScroll + vis < n) { oledDisplay->setCursor(122, listTop + (vis - 1) * lineH); oledDisplay->print("\x19"); }
 }
 
+// Confirm screen rows: the name, the trigger, then the whole command in
+// 18-column pieces ("> " on the first, "  " on the rest), so every character
+// the automation will run is on screen. The rows that fit are drawn with the
+// "A:Create B:Cancel" line under them; Up/Down scroll the rows when the
+// command needs more, and column 21 holds the scroll arrows.
+static const int kWizConfirmLineH = 9;
+static const size_t kWizConfirmCmdCols = 18;
+
+static int wizConfirmRowCount() {
+  const size_t len = strlen(sWizCommand);
+  const size_t cmdRows = len == 0 ? 1 : (len + kWizConfirmCmdCols - 1) / kWizConfirmCmdCols;
+  return 2 + (int)cmdRows;
+}
+
+// Rows above the action line.
+static int wizConfirmVisibleRows() {
+  const int rows = OLED_CONTENT_HEIGHT / kWizConfirmLineH - 1;
+  return rows > 0 ? rows : 1;
+}
+
+static int wizConfirmMaxScroll() {
+  const int over = wizConfirmRowCount() - wizConfirmVisibleRows();
+  return over > 0 ? over : 0;
+}
+
+static void wizConfirmRowText(int row, char* line, size_t size) {
+  if (row == 0) {
+    snprintf(line, size, "New: %.14s", sWizName);
+    return;
+  }
+  if (row == 1) {
+    const char* wt = kWizTypes[sWizTypeIdx].wireType;
+    if (strcmp(wt, "interval") == 0)        snprintf(line, size, "Every %lum", (unsigned long)(sWizIntervalMs / 60000UL));
+    else if (strcmp(wt, "atTime") == 0)     snprintf(line, size, "Daily %s", sWizTime);
+    else if (strcmp(wt, "event") == 0) {
+      SystemEventCatalogKindInfo kind{};
+      snprintf(line, size, "On %.16s",
+               wizSelectedKind(&kind) ? kind.name : "unavailable");
+    }
+    else                                    snprintf(line, size, "Delay %lus", (unsigned long)(sWizDelayMs / 1000UL));
+    return;
+  }
+  const size_t offset = (size_t)(row - 2) * kWizConfirmCmdCols;
+  const size_t len = strlen(sWizCommand);
+  snprintf(line, size, "%s%.*s", row == 2 ? "> " : "  ", (int)kWizConfirmCmdCols,
+           sWizCommand + (offset < len ? offset : len));
+}
+
 static void wizDrawConfirm() {
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+  const int rows = wizConfirmRowCount();
+  const int vis = wizConfirmVisibleRows();
+  const int maxScroll = wizConfirmMaxScroll();
+  if (sWizConfirmScroll > maxScroll) sWizConfirmScroll = maxScroll;
+  if (sWizConfirmScroll < 0) sWizConfirmScroll = 0;
+
   int y = OLED_CONTENT_START_Y;
   char line[24];
-  snprintf(line, sizeof(line), "New: %.14s", sWizName);
-  oledDisplay->setCursor(0, y); oledDisplay->print(line); y += 9;
-
-  const char* wt = kWizTypes[sWizTypeIdx].wireType;
-  if (strcmp(wt, "interval") == 0)        snprintf(line, sizeof(line), "Every %lum", (unsigned long)(sWizIntervalMs / 60000UL));
-  else if (strcmp(wt, "atTime") == 0)     snprintf(line, sizeof(line), "Daily %s", sWizTime);
-  else if (strcmp(wt, "event") == 0) {
-    SystemEventCatalogKindInfo kind{};
-    snprintf(line, sizeof(line), "On %.16s",
-             wizSelectedKind(&kind) ? kind.name : "unavailable");
+  for (int i = 0; i < vis && sWizConfirmScroll + i < rows; i++) {
+    wizConfirmRowText(sWizConfirmScroll + i, line, sizeof(line));
+    oledDisplay->setCursor(0, y); oledDisplay->print(line);
+    y += kWizConfirmLineH;
   }
-  else                                    snprintf(line, sizeof(line), "Delay %lus", (unsigned long)(sWizDelayMs / 1000UL));
-  oledDisplay->setCursor(0, y); oledDisplay->print(line); y += 9;
-
-  snprintf(line, sizeof(line), "> %.18s", sWizCommand);
-  oledDisplay->setCursor(0, y); oledDisplay->print(line); y += 9;
+  if (sWizConfirmScroll > 0) {
+    oledDisplay->setCursor(122, OLED_CONTENT_START_Y); oledDisplay->print("\x18");
+  }
+  if (sWizConfirmScroll < maxScroll) {
+    oledDisplay->setCursor(122, OLED_CONTENT_START_Y + (vis - 1) * kWizConfirmLineH);
+    oledDisplay->print("\x19");
+  }
 
   oledDisplay->setCursor(0, y); oledDisplay->print("A:Create B:Cancel");
 }
@@ -466,6 +533,8 @@ static bool wizHandleInput(uint32_t newlyPressed) {
   if (sWizStep == AW_CONFIRM) {
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) { wizCreate(); return true; }
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) { wizAbort();  return true; }
+    if (gNavEvents.up && sWizConfirmScroll > 0) sWizConfirmScroll--;
+    else if (gNavEvents.down && sWizConfirmScroll < wizConfirmMaxScroll()) sWizConfirmScroll++;
     return true;
   }
   if (wizStepIsList()) {
@@ -690,19 +759,14 @@ void displayAutomations() {
 // Navigation and Actions
 // ============================================================================
 
+// One row per nav event; the input layer (gNavEvents) paces joystick repeats.
 static void autoListUp() {
   if (autoRenderData.count == 0) return;
-  unsigned long now = millis();
-  if (now - autoLastInput < AUTO_DEBOUNCE) return;
-  autoLastInput = now;
   if (autoRenderData.selectedIdx > 0)
     autoRenderData.selectedIdx--;
 }
 
 static void autoListDown() {
-  unsigned long now = millis();
-  if (now - autoLastInput < AUTO_DEBOUNCE) return;
-  autoLastInput = now;
   // Reaches the virtual "+ New" row at index == count (so the last real row
   // isn't the end of travel — you can always scroll down to create).
   if (autoRenderData.selectedIdx < autoRenderData.count)
@@ -749,9 +813,10 @@ static void autoToggleSelected() {
   char cmd[48];
   snprintf(cmd, sizeof(cmd), "automation %s id=%ld",
            sel.enabled ? "disable" : "enable", sel.id);
-  executeOLEDCommand(String(cmd));
-
-  autoShowToast(sel.enabled ? "Disabled" : "Enabled");
+  // A refusal (admin-only command, not the creator) is toasted by the helper.
+  if (oledRunCommand(String(cmd))) {
+    autoShowToast(sel.enabled ? "Disabled" : "Enabled");
+  }
 
   // Force data refresh on next frame
   autoForceRefresh = true;
@@ -763,8 +828,7 @@ static void autoToggleSelected() {
 static void autoDeleteConfirmed(void* /*userData*/) {
   char cmd[48];
   snprintf(cmd, sizeof(cmd), "automation delete id=%ld", sPendingDeleteId);
-  executeOLEDCommand(String(cmd));
-  autoShowToast("Deleted");
+  if (oledRunCommand(String(cmd))) autoShowToast("Deleted");
   autoForceRefresh = true;
 }
 
@@ -829,7 +893,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
   // X = Enable system if disabled, or toggle selected automation
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (!gSettings.automationEnabled) {
-      executeOLEDCommand("automation system enable");
+      oledRunCommand("automation system enable");
       autoForceRefresh = true;
       return true;
     }
