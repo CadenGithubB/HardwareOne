@@ -64,12 +64,15 @@ static uint64_t commandSeq = 0;
 static G2HijackPage page = G2_HIJACK_PAGE_MAIN;
 static unsigned listsShown = 0, textsShown = 0, delays = 0, delayedMs = 0;
 static bool insideCallback = false, commandAccepts = true, queueAccepts = true;
+// False models a refused lens render: another swap in flight, an allocation
+// failure, lost admission or a full lens queue. The old rows stay visible.
+static bool listAccepts = true;
+static unsigned listRefusals = 0;
 static char shownRows[8][80]{};
 static size_t shownCount = 0;
 static char shownText[80]{};
 
 uint32_t g2CurrentMenuGen() { return menuGen; }
-uint64_t g2CurrentCmdSeq() { return commandSeq; }
 void g2BumpMenuGen() { ++menuGen; }
 G2HijackPage g2GetHijackPage() { return page; }
 void g2SetHijackPage(G2HijackPage value) {
@@ -81,6 +84,7 @@ bool g2ShowListPage(const char* const* rows, size_t count) {
   CHECK(!insideCallback);
   CHECK(criticalDepth == 0);
   CHECK(count <= 8);
+  if (!listAccepts) { ++listRefusals; return false; }
   shownCount = count;
   for (size_t i = 0; i < count; ++i)
     std::snprintf(shownRows[i], sizeof(shownRows[i]), "%s", rows[i]);
@@ -197,7 +201,7 @@ static bool rowHas(size_t row, const char* text) {
 static void home() {
   drainUi();
   CHECK(commandCount == 0);
-  commandAccepts = queueAccepts = true;
+  commandAccepts = queueAccepts = listAccepts = true;
   failAllocationAt = allocationAttempts = queueCalls = 0;
   page = G2_HIJACK_PAGE_MAIN;
   ++menuGen;
@@ -453,7 +457,69 @@ static void testSubmissionRefusal() {
   CHECK(shownCount == 5 && rowHas(0, "Busy"));
 }
 
+// A refused render leaves the previous rows on the lens, so the next tap must
+// mean what those rows say. Committing the level first turned "<mode> MHz >"
+// into "Confirm Power Off" and "Restart" into a CPU preset.
+static void testRefusedRenders() {
+  home();
+  listAccepts = false;
+  unsigned refusals = listRefusals;
+  g2PowerHandleTap(4);  // "Power Off" -> confirm list refused.
+  CHECK(listRefusals == refusals + 1);
+  CHECK(shownCount == 5 && rowHas(1, "MHz") && rowHas(4, "Power Off"));
+  listAccepts = true;
+  unsigned submits = submitCalls;
+  g2PowerHandleTap(1);  // The visible row 1 opens the CPU picker.
+  const bool refusedConfirmSubmittedDeepSleep =
+      commandCount != 0 && std::strcmp(commands[0].line, "deepsleep") == 0;
+  CHECK(!refusedConfirmSubmittedDeepSleep);
+  CHECK(submitCalls == submits && commandCount == 0);
+  CHECK(shownCount == 1 + POWER_MODE_COUNT && rowHas(0, "Back"));
+
+  home();
+  listAccepts = false;
+  g2PowerHandleTap(1);  // CPU picker refused.
+  CHECK(shownCount == 5 && rowHas(2, "Restart"));
+  listAccepts = true;
+  submits = submitCalls;
+  g2PowerHandleTap(2);  // The visible "Restart" asks for confirmation.
+  const bool refusedPickerSubmittedPreset =
+      commandCount != 0 && std::strncmp(commands[0].line, "power mode", 10) == 0;
+  CHECK(!refusedPickerSubmittedPreset);
+  CHECK(submitCalls == submits && commandCount == 0);
+  CHECK(shownCount == 2 && rowHas(1, "Confirm Restart"));
+  g2PowerHandleTap(0);
+  CHECK(shownCount == 5);
+
+  // A refused Cancel keeps the confirmation that is still on the lens armed.
+  home();
+  g2PowerHandleTap(3);
+  CHECK(shownCount == 2 && rowHas(1, "Confirm RAM Flush"));
+  listAccepts = false;
+  g2PowerHandleTap(0);
+  CHECK(shownCount == 2 && rowHas(1, "Confirm RAM Flush"));
+  listAccepts = true;
+  g2PowerHandleTap(1);
+  Command command = takeCommand();
+  CHECK(std::strcmp(command.line, "ramflush") == 0);
+  complete(command, true, "OK: flushing");
+  CHECK(jobCount == 0);
+
+  // A refused completion redraw keeps the picker's level and arms nothing.
+  home(); cpu();
+  command = submitPreset();
+  complete(command, false, "Error: refused redraw");
+  listAccepts = false;
+  refusals = listRefusals;
+  drainUi();
+  CHECK(listRefusals == refusals + 1 && rowHas(0, "Back"));
+  listAccepts = true;
+  g2PowerHandleTap(0);
+  CHECK(shownCount == 5 && rowHas(0, "Main Menu"));
+}
+
 int main() {
+  testRefusedRenders();
   testPresetCompletion();
   testDestructiveCompletions();
   testNavigationStaleness();

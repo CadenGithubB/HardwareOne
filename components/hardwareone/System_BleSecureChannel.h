@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "System_User.h"   // TransportSessionEpoch
 
 // ============================================================================
 // HardwareOne Secure Channel v1 — app-layer encryption over the BLE GATT
@@ -69,16 +70,19 @@ void bleScInit();
 // set) so the per-connection handshake on BTC_TASK never pays the PBKDF2 cost.
 void bleScWarmPsk();
 
-// Process one inbound GATT write. Handshake frames are handled internally
-// (responses sent via the raw notify path). A DATA frame is decrypted into
+// Process one inbound GATT write. Handshake frames are handled internally:
+// `epoch` is the session epoch captured with the frame, and every handshake
+// reply (HELLO_ACK, CONFIRM_ACK, REJECT) goes to that (connId, epoch) only,
+// through the directed raw sender. A DATA frame is decrypted into
 // `out` with length in *outLen. Ordinary command plaintext is NUL-terminated
 // and returns BLE_SC_PLAINTEXT_READY. A recognized binary application envelope
 // is byte-exact (not text-filtered) and returns BLE_SC_BINARY_READY.
-BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
-                               char* out, size_t outCap, size_t* outLen);
+BleScResult bleScHandleInbound(uint16_t connId, TransportSessionEpoch epoch, const uint8_t* data,
+                               size_t len, char* out, size_t outCap, size_t* outLen);
 
-// Encrypt a plaintext reply as one or more DATA frames and notify them to the
-// client. Chunks to fit the negotiated MTU. Returns false if not established.
+// Encrypt a plaintext reply as one or more DATA frames and notify them to this
+// connection's current session only. Chunks to fit the negotiated MTU. Returns
+// false if not established or the connection has no live session epoch.
 // blocking=false try-locks the tx mutex (best-effort console mirror); true waits (command
 // results). See the .cpp for why the debug path must not block.
 // binaryFrame=true stamps the app-frame header with ver=0x02 so the app treats the
@@ -90,16 +94,17 @@ bool bleScSendEncrypted(uint16_t connId, const char* plaintext, size_t len, bool
 // A binding captured while the caller holds the BLE lifecycle mutex. The slot
 // generation changes on every allocation, reset and new handshake, so a sender
 // that has since released that mutex still refuses to encrypt for a
-// replacement peer or a re-keyed channel. bleScBind is true only for an
-// established channel.
-struct BleScBinding { uint16_t connId = 0; uint32_t generation = 0; };
-bool bleScBind(uint16_t connId, BleScBinding* out);
-// bleScSendEncrypted with the binding (and `fence`, when given) re-validated
-// before every fragment, so the lifecycle mutex need not be held across the
-// paced transfer.
+// replacement peer or a re-keyed channel. `epoch` is the session the frames are
+// addressed to. bleScBind is true only for an established channel and a
+// non-zero epoch; the caller has already matched the epoch to the connection.
+struct BleScBinding { uint16_t connId = 0; TransportSessionEpoch epoch = 0; uint32_t generation = 0; };
+bool bleScBind(uint16_t connId, TransportSessionEpoch epoch, BleScBinding* out);
+// bleScSendEncrypted with the binding re-validated before every fragment (slot
+// generation and live session epoch), so the lifecycle mutex need not be held
+// across the paced transfer. Every fragment goes to binding.connId only, and the
+// directed sender re-checks binding.epoch under the lifecycle mutex.
 bool bleScSendEncryptedBound(const BleScBinding& binding, const char* plaintext, size_t len,
-                             bool blocking, bool (*fence)(void*), void* fenceCtx,
-                             bool binaryFrame = false);
+                             bool blocking, bool binaryFrame = false);
 
 #endif // ENABLE_BLUETOOTH
 #endif // SYSTEM_BLE_SECURE_CHANNEL_H

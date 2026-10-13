@@ -315,7 +315,6 @@ void postEvent(const FsmEvent& e) {
 }  // namespace
 
 const char* hijackStateName(HijackState s) { return stateName(s); }
-const char* hijackEventName(HijackEvent e) { return eventName(e); }
 HijackState hijackFsmState() { return gFsmState; }
 
 void hijackFsmInit() {

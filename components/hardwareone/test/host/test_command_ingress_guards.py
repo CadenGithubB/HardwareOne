@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
-"""Source-contract checks for the production command ingress boundaries."""
+"""Source-contract checks for the production command ingress boundaries.
 
+--component <dir> points the hardwareone reads at another copy of the sources;
+the vendored Arduino BLE library is always read from this checkout.
+"""
+
+import argparse
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[2]
+HERE = Path(__file__).resolve().parent
+_parser = argparse.ArgumentParser(description=__doc__)
+_parser.add_argument("--component", type=Path, default=HERE.parents[1])
+ROOT = _parser.parse_args().component
+ARDUINO = HERE.parents[2] / "arduino"
 
 
 def function_body(source: str, signature: str) -> str:
@@ -31,10 +40,10 @@ ble_secure = (ROOT / "System_BleSecureChannel.cpp").read_text()
 web_handle = (ROOT / "WebServer_Handle.h").read_text()
 web_server = (ROOT / "WebServer_Server.cpp").read_text()
 ble_characteristic_h = (
-    ROOT.parent / "arduino" / "libraries" / "BLE" / "src" / "BLECharacteristic.h"
+    ARDUINO / "libraries" / "BLE" / "src" / "BLECharacteristic.h"
 ).read_text()
 ble_characteristic_cpp = (
-    ROOT.parent / "arduino" / "libraries" / "BLE" / "src" / "BLECharacteristic.cpp"
+    ARDUINO / "libraries" / "BLE" / "src" / "BLECharacteristic.cpp"
 ).read_text()
 
 assert "CMD_INPUT_MAX = 2047" in limits
@@ -125,10 +134,30 @@ frame_length_guard = ble_ingress.index(
     "len > sizeof(((BleScDeferred*)0)->buf)", frame_branch
 )
 assert frame_branch < frame_length_guard < ble_ingress.index(
-    "if (bleScRequired())"
+    "submitDeferredToCmdExec(bleScDeferredInbound, d)"
 )
 assert "isFrame && len <=" not in ble_ingress
 assert "BLE secure frame exceeds 517-byte input limit; discarded" in ble_ingress
+
+# The GATT write entry runs on BTC_TASK, which serves the GATT/GAP callbacks of
+# every link. A reply over an established channel waits for the secure-channel tx
+# mutex (held for a whole paced reply), so the entry only copies and defers:
+# both kinds of write run on cmd_exec, and every notice the entry itself sends is
+# best-effort (blocking=false never waits for that mutex).
+for sender in ("sendBLEResponseToSession(", "bleRawNotifyToSession("):
+    pos = ble_ingress.find(sender)
+    while pos >= 0:
+        call = ble_ingress[pos : ble_ingress.index(";", pos)]
+        assert "/*blocking=*/false)" in call, f"BTC_TASK reply may wait: {call}"
+        pos = ble_ingress.find(sender, pos + 1)
+for forbidden in ("processBleCommandLine(", "bleSendAuthRequired(",
+                  "sendBLEResponse(", "bleScSendEncrypted"):
+    assert forbidden not in ble_ingress, f"BTC_TASK ingress calls {forbidden}"
+assert "submitDeferredToCmdExec(blePlaintextDeferredInbound, d)" in ble_ingress
+on_write = function_body(bluetooth, "void onWrite(BLECharacteristic* pCharacteristic,")
+for sender in ("sendBLEResponse", "bleRawNotifyToSession(", "bleScSendEncrypted",
+               "processBleCommandLine("):
+    assert sender not in on_write, f"the GATT write callback calls {sender}"
 
 assert "setPreparedWriteEnabled(false)" in bluetooth
 assert "void setPreparedWriteEnabled(bool value);" in ble_characteristic_h
@@ -150,5 +179,55 @@ data_decrypt = ble_decrypt.index(
     "crypto_aead_chacha20poly1305_ietf_decrypt_detached(", data_length_guard
 )
 assert data_length_guard < data_decrypt
+
+# Secure-channel frames are never characteristic-wide: no raw broadcast sender
+# exists, the response characteristic is never set-and-notified, and every
+# handshake reply and DATA fragment is addressed to one connection and session
+# epoch through the directed, lifecycle-guarded sender.
+assert "bleRawNotify(" not in ble_secure
+assert "bool bleRawNotify(" not in bluetooth
+assert "gLastNotifyResult" not in bluetooth
+assert "pCmdResponseChar->notify()" not in bluetooth
+assert "pCmdResponseChar->setValue(" not in bluetooth
+assert ble_decrypt.count("bleRawNotifyToSession(connId, epoch,") == 2  # HELLO_ACK, CONFIRM_ACK
+assert ble_decrypt.count("scSendReject(connId, epoch,") == 4
+assert "bleRawNotifyToSession(connId, epoch," in function_body(
+    ble_secure, "static void scSendReject("
+)
+assert "bleRawNotifyToSession(binding.connId, binding.epoch," in function_body(
+    ble_secure, "bool bleScSendEncryptedBound("
+)
+assert "bleScHandleInbound(d->connId, d->sessionEpoch," in function_body(
+    bluetooth, "static void bleScDeferredInbound("
+)
+
+# The file-browser gate follows how this command arrived, not whether the
+# connection also holds a channel: only the deferred DATA-frame job passes
+# arrivedEncrypted=true; the plaintext path passes false (test_ble_sc_policy.py
+# runs both paths).
+line_start = bluetooth.index("static void processBleCommandLine(")
+assert "bool arrivedEncrypted)" in bluetooth[line_start : bluetooth.index("{", line_start)]
+assert "if (bleIsFileBrowserCommand(cmdStart) && !arrivedEncrypted)" in ble_line
+assert "bleScEstablished" not in ble_line
+ble_deferred = function_body(bluetooth, "static void bleScDeferredInbound(")
+assert ble_deferred.count("processBleCommandLine(") == 1
+assert "/*arrivedEncrypted=*/true)" in ble_deferred
+ble_plain_deferred = function_body(
+    bluetooth, "static void blePlaintextDeferredInbound(void* arg)"
+)
+assert ble_plain_deferred.count("processBleCommandLine(") == 1
+assert "/*arrivedEncrypted=*/false)" in ble_plain_deferred
+assert "bleScPoolRelease(d);" in ble_plain_deferred
+assert bluetooth.count("processBleCommandLine(d->connId, d->sessionEpoch,") == 2
+# In required mode a plaintext writer without a channel gets the fixed refusal
+# through the directed per-session sender; the session sender would drop it.
+required_branch = function_body(ble_plain_deferred, "if (bleScRequired())")
+assert "if (bleScEstablished(d->connId))" in required_branch
+assert "bleRawNotifyToSession(d->connId, d->sessionEpoch," in required_branch
+# The Bluetooth security-posture commands share the superadmin tier.
+for posture_command in ("blerequireauth", "blesecret", "blesecure"):
+    row_start = bluetooth.index('{ "' + posture_command + '",')
+    row = bluetooth[row_start : bluetooth.index("\n", row_start)]
+    assert row.rstrip().endswith("/*requiresSuperAdmin=*/true },"), row
 
 print("command ingress source guards passed")

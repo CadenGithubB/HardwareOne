@@ -2,6 +2,7 @@
 // write completion and lock ownership observable; they do not emulate flash.
 #include <Print.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -32,6 +33,7 @@ static int liveFiles = 0, unguardedIo = 0, writeCalls = 0, renameCalls = 0, rena
 static int failWrite = 0, failSeal = 0, sealCalls = 0;
 static std::set<int> failRenames;
 static bool failOpen = false, failMkdir = false, failCleanup = false;
+static int failReadOpens = 0;  // the next N read opens of an existing file fail
 static bool loseByteAtFlush = false, errorAtFlush = false, keyReady = true, ready = true;
 static std::function<void()> duringWrite;
 static unsigned long nowMs = 10000;
@@ -151,6 +153,8 @@ static File openGuarded(const String& path, const char* mode, const AuthContext&
   }
   check(!create && std::string(mode) == "r", "read-only store opens");
   if (directories.count(str(path))) return File(str(path), mode, true);
+  // An existing file that cannot be opened: no free descriptor, no heap.
+  if (failReadOpens > 0 && disk.count(str(path))) { --failReadOpens; return {}; }
   return disk.count(str(path)) ? File(str(path), mode) : File();
 }
 static bool existsGuarded(const String& path, const AuthContext& auth) {
@@ -208,7 +212,7 @@ static bool captureCryptoIsMagicLine(const char* line) { return strncmp(line, "#
 static void released() { check(liveFiles == 0 && lockStack.empty(), "all handles and locks released"); }
 static void reset() {
   released(); ++cases; disk.clear(); openFiles.clear(); directories = {"/logging_captures", kHistoryDir}; operations.clear();
-  failWrite = writeCalls = renameCalls = failSeal = sealCalls = 0; failRenames.clear();
+  failWrite = writeCalls = renameCalls = failSeal = sealCalls = failReadOpens = 0; failRenames.clear();
   failOpen = failMkdir = failCleanup = loseByteAtFlush = errorAtFlush = false;
   keyReady = ready = true; duringWrite = {}; nowMs = 10000; gSettings.captureEncryptMode = 0;
   sStagedGeneration = 0; sCommitPending = false; sNextRetryMs = 0; sRetryDelayMs = kRetryInitialMs; sStatus = {};
@@ -347,6 +351,136 @@ static void recoveryAndGeneration() {
     check(gFsMutex->held, "load preserves caller's FS ownership");
   } released(); good(day, 1);
 }
+#if !BASELINE
+// The production Health history model (G2_Health.cpp) that loads, merges and
+// commits through this store. Trend views, the graph push and the profile
+// capability table are doubles.
+static G2HealthNav sNav = HEALTH_NAV_MAIN;
+static void clearTypedTrends() {}
+static void rebuildTypedTrends(const R1HealthHistoryDay&) {}
+void g2HealthArmGraphPush(uint32_t) {}
+bool r1ProfileSupportsSingleFrameDaily(R1ProtocolProfile profile, uint8_t cmd) {
+  return profile == R1_PROFILE_FW_2_2_9_0003 && cmd == R1_CMD_HEARTRATE;
+}
+// INSERT_MODEL
+
+// Load-failure checks report every failure before the run fails.
+static int softFailures = 0;
+static void expect(bool condition, const char* message) {
+  ++checks;
+  if (!condition) { ++softFailures; std::cerr << "FAIL: " << message << '\n'; }
+}
+static constexpr unsigned long kLapMs = 5000;  // one main-loop pass per lap
+static void modelReboot(const char* peer) {
+  memset(&sPendingHistory, 0, sizeof(sPendingHistory));
+  r1HealthHistoryDayClear(sHistoryDay); r1HealthHistoryDayClear(sHistoryWorkDay);
+  sHistoryPeerCustody = HistoryPeerCustody{};
+  std::snprintf(sHistoryPeerCustody.current, sizeof(sHistoryPeerCustody.current), "%s", peer);
+  sHistoryLoadedExact = sDropCurrentHistoryFetch = false;
+  sHistoryUiFetchState = R1_HISTORY_FETCH_IDLE; sHistoryUiFetchError = 0;
+  sHistoryInitialized = false; sHistoryDirty = false; sHistoryDirtyGeneration = 0;
+  sHistoryGeneration = 1000;  // distinct from the store generations the fixtures commit
+  sTypedHistoryFetchActive = false; sTypedTrendSuppressMask = 0;
+}
+static R1CommonDailyResult hrPage(uint32_t dayStart, uint8_t slot) {
+  R1CommonDailyResult page{};
+  page.profile = R1_PROFILE_FW_2_2_9_0003; page.metric = R1_DAILY_METRIC_HEART_RATE;
+  page.sourceSerial = 21; page.sourceCrc32 = 0x0BADF00D; page.timezoneMinutes = -240;
+  page.dayMode = R1_DAILY_DAY_EPOCH; page.dayStart = dayStart; page.count = 1;
+  page.records[0] = R1CommonDailyRecord{slot, 70, 80, 60, dayStart + slot * 3600u};
+  return page;
+}
+static bool sweepPage(uint32_t dayStart, uint8_t slot) {
+  const bool accepted = g2HealthApplyCommonDaily(hrPage(dayStart, slot)); released(); return accepted;
+}
+static bool sweep(uint32_t dayStart, uint8_t slot) {
+  g2HealthHistoryFetchStarted(); const bool accepted = sweepPage(dayStart, slot);
+  g2HealthHistoryFetchFinished(true, 0); released(); return accepted;
+}
+static void mainLoop(int laps) {
+  for (int i = 0; i < laps; ++i) { g2HealthHistoryCommitTick(); released(); nowMs += kLapMs; }
+}
+static void storeLoadExistence() {
+  reset(); const auto day = fixture(); const auto path = primary(day); save(day, 1);
+  R1HealthHistoryDay loaded; failReadOpens = 1;
+  expect(r1HealthHistoryStoreLoadExact(day.peerId, day.dayStart, day.timezoneMinutes, loaded) == R1_HISTORY_STORE_READ_FAILED,
+         "a stored day that exists but cannot be opened must load as READ_FAILED, not NOT_FOUND");
+  released();
+  expect(status().error == R1_HISTORY_STORE_READ_FAILED, "the open failure of a stored day is reported in the store status");
+  check(r1HealthHistoryStoreLoadExact(day.peerId, day.dayStart, day.timezoneMinutes, loaded) == R1_HISTORY_STORE_OK &&
+        std::memcmp(&loaded, &day, sizeof(day)) == 0, "the day loads once it can be opened");
+  released();
+  disk[path + ".bak"] = disk.at(path); disk.erase(path);
+  const auto fromBackup = r1HealthHistoryStoreLoadExact(day.peerId, day.dayStart, day.timezoneMinutes, loaded);
+  released();
+  expect(fromBackup == R1_HISTORY_STORE_OK && std::memcmp(&loaded, &day, sizeof(day)) == 0,
+         "a day an interrupted publish left only as its backup must load, not read as NOT_FOUND");
+  expect(disk.count(path) == 1 && disk.count(path + ".bak") == 0, "that backup is promoted to the primary");
+  disk.clear();
+  check(r1HealthHistoryStoreLoadExact(day.peerId, day.dayStart, day.timezoneMinutes, loaded) == R1_HISTORY_STORE_NOT_FOUND,
+        "a day never stored is NOT_FOUND");
+  released();
+}
+static void modelOpenFailure() {
+  reset(); const auto day = fixture(); save(day, 1); modelReboot(day.peerId);
+  check(sweep(day.dayStart, 5), "the model accepts a sweep page for the stored day");
+  failReadOpens = 1; mainLoop(1);
+  expect(sHistoryUiFetchState == R1_HISTORY_ERROR && sHistoryUiFetchError == R1_HISTORY_STORE_READ_FAILED && sPendingHistory.keyKnown,
+         "an open failure of the stored day is shown and the load retried");
+  mainLoop(3);
+  R1HealthHistoryDay stored;
+  check(r1HealthHistoryStoreLoadExact(day.peerId, day.dayStart, day.timezoneMinutes, stored) == R1_HISTORY_STORE_OK,
+        "the swept day is committed");
+  released();
+  expect(stored.heartRate.count == 2 && stored.heartRate.slots[0].valid && stored.heartRate.slots[5].valid &&
+         stored.hrv.have && stored.spo2.have && stored.activity.have,
+         "an open failure of the stored day must not let the next commit replace it with the sweep's sparse delta");
+  check(!sHistoryDirty && !sPendingHistory.terminalPending && !sPendingHistory.heartRatePending,
+        "the sweep is merged and committed");
+}
+static std::string corruptStoredDay(const R1HealthHistoryDay& day) {
+  save(day, 1); auto& bytes = disk.at(primary(day));
+  const size_t at = bytes.find("I,") + 2; bytes[at] = bytes[at] == 'f' ? 'e' : 'f';
+  R1HealthHistoryDay loaded;
+  check(r1HealthHistoryStoreLoadExact(day.peerId, day.dayStart, day.timezoneMinutes, loaded) == R1_HISTORY_STORE_READ_FAILED,
+        "the corrupt fixture fails its integrity check");
+  released(); return bytes;
+}
+static void nextDayIsStored(const R1HealthHistoryDay& day, const std::string& corrupt) {
+  const uint32_t nextDay = day.dayStart + 86400;
+  expect(sweep(nextDay, 5), "a corrupt stored day must not wedge later sweeps: the next sweep's page is accepted");
+  mainLoop(3);
+  R1HealthHistoryDay stored;
+  const auto loaded = r1HealthHistoryStoreLoadExact(day.peerId, nextDay, day.timezoneMinutes, stored);
+  released();
+  expect(loaded == R1_HISTORY_STORE_OK && stored.heartRate.slots[5].valid, "the later sweep's day is stored");
+  check(disk.at(primary(day)) == corrupt, "an unreadable stored day is never replaced");
+}
+static void modelCorruptDay() {
+  reset(); const auto day = fixture(); const auto corrupt = corruptStoredDay(day); modelReboot(day.peerId);
+  check(sweep(day.dayStart, 5), "the model accepts a sweep page for the corrupt day");
+  mainLoop(2);
+  check(sPendingHistory.keyKnown && sHistoryUiFetchState == R1_HISTORY_ERROR &&
+        sHistoryUiFetchError == R1_HISTORY_STORE_READ_FAILED, "a failed load is shown and retried, never merged");
+  mainLoop(18);  // 100 s of main loop in all
+  expect(!sPendingHistory.keyKnown, "retries of an unreadable stored day must end");
+  check(disk.at(primary(day)) == corrupt, "an unreadable stored day is never replaced");
+  check(sHistoryUiFetchState == R1_HISTORY_ERROR && sHistoryUiFetchError == R1_HISTORY_STORE_READ_FAILED,
+        "the unreadable day stays reported");
+  nextDayIsStored(day, corrupt);
+}
+static void modelCorruptDayDuringSweep() {
+  reset(); const auto day = fixture(); const auto corrupt = corruptStoredDay(day); modelReboot(day.peerId);
+  g2HealthHistoryFetchStarted(); released();
+  check(sweepPage(day.dayStart, 5), "the model accepts the running sweep's first page");
+  mainLoop(20);
+  expect(!sweepPage(day.dayStart, 6), "a running sweep whose stored day is given up refuses its remaining pages");
+  g2HealthHistoryFetchFinished(true, 0); released();
+  check(sHistoryUiFetchState == R1_HISTORY_ERROR && sHistoryUiFetchError == R1_HISTORY_STORE_READ_FAILED,
+        "finishing that sweep keeps the load error on screen");
+  nextDayIsStored(day, corrupt);
+}
+#endif
 int main() {
   // Exercise actual boot-time recovery before the function-static initialization.
   reset(); ready = false; r1HealthHistoryStoreTick(); released();
@@ -357,9 +491,18 @@ int main() {
   r1HealthHistoryStoreTick(); released(); check(status().initialized && disk.size() == 2 && disk.at(path) == "old backup" && disk.at(otherPath) == "authoritative primary",
                                              "boot restores missing primary but retains existing primary, discarding stale backups and temps");
   normal(); failureCases(); firstSaveFailures(); recoveryAndGeneration();
+#if !BASELINE
+  storeLoadExistence(); modelOpenFailure(); modelCorruptDay(); modelCorruptDayDuringSweep();
+#endif
   if (!BASELINE) {
     check(unguardedIo > 0, "store data writes still run under the shared filesystem guard");
     check(renamesWithoutOuterGuard == 0, "a publish or recovery rename ran outside its sequence guard");
   }
+#if !BASELINE
+  if (softFailures != 0) {
+    std::cerr << softFailures << " of " << checks << " assertions failed\n";
+    return 1;
+  }
+#endif
   std::cerr << cases << " scenarios; " << checks << " assertions passed\n";
 }

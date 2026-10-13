@@ -18,7 +18,7 @@
 // Every call takes the filesystem lock (bounded at 1 s) and can block on
 // flash/SD: run it on a worker or cmd_exec, never in a critical section,
 // display task, BLE owner task or audio callback. Only one task (the QuickNote
-// worker) creates notes.
+// worker) creates notes and sweeps their in-progress files.
 namespace QuickNoteStore {
 constexpr uint64_t kReserveBytes = 100 * 1024;  // free space a note never eats into
 constexpr size_t kPageRows = 8;
@@ -96,5 +96,17 @@ bool read(const AuthContext& ctx, const char* path, uint32_t offset, char* out,
 
 // Deletes one note file.
 bool remove(const AuthContext& ctx, const char* path, const char** why);
+
+// Removes the in-progress files (<stamp>-<id>.tmp) that saves interrupted by a
+// power cut, crash or failed cleanup left in every account's notes folder, on
+// flash and, when it is writable, the card: a save that never finished leaves
+// neither file (create's contract), and the header carries no length that
+// could prove a .tmp complete. Names only: no file is opened for reading, and
+// nothing but those names is removed. Runs as system confined to each tier's
+// transcript root. QuickNote worker only, while no save of its own runs.
+// *removed (optional) counts the files removed. False with a short reason
+// when a tier could not be walked or a file could not be removed; the rest
+// are still tried.
+bool sweep(uint32_t* removed, const char** why);
 }  // namespace QuickNoteStore
 #endif

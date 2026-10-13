@@ -47,6 +47,7 @@
 #include "System_ESPNow_Identity.h"  // Phase 3.0: long-term Ed25519 identity load/store
 #include "System_ESPNow_MeshKeys.h"  // Phase 3.1: per-mesh PBKDF2 hash + bootstrap/group key cache
 #include "System_ESPNow_Sessions.h"  // Phase 3.4: per-peer-per-mesh session state
+#include "System_ESPNow_Deadline.h"  // wrap-safe pre-warm cooldown
 #include "System_ESPNow_Sensors.h"
 #include "System_ESPNow_Tx.h"        // Single-sender TX dispatcher (Phase 1)
 #include "System_MemUtil.h"          // ps_alloc — heap copy of payload for async send
@@ -158,6 +159,49 @@ bool isSelfMac(const uint8_t* mac) {
   uint8_t currentMac[6] = {};
   return esp_wifi_get_mac(WIFI_IF_STA, currentMac) == ESP_OK &&
          memcmp(mac, currentMac, sizeof(currentMac)) == 0;
+}
+
+// Latest drained CMD_RESP (see EspNowCmdResult in the header). The drain on
+// espnow_task writes it; UI loops read a whole-struct copy under the mux.
+// PSRAM .bss (zero = no result yet): task-context access only, never an ISR.
+EXT_RAM_BSS_ATTR static EspNowCmdResult gCmdResult;
+static portMUX_TYPE gCmdResultLock = portMUX_INITIALIZER_UNLOCKED;
+
+// Publish one drained CMD_RESP: seq+1, copy MAC/flags, keep the first line of
+// `text` cut at TEXT_MAX-1. Called only from the CMD_RESP drain.
+static void espnowPublishCmdResult(const uint8_t srcMac[6], uint32_t reqId,
+                                   bool success, const char* text) {
+  EspNowCmdResult next = {};
+  next.reqId = reqId;
+  next.receivedMs = millis();
+  next.success = success;
+  if (srcMac) memcpy(next.srcMac, srcMac, sizeof(next.srcMac));
+  const char* src = text ? text : "";
+  size_t n = 0;
+  while (n < EspNowCmdResult::TEXT_MAX - 1 && src[n] && src[n] != '\n' && src[n] != '\r') {
+    next.text[n] = src[n];
+    n++;
+  }
+  next.text[n] = '\0';
+  taskENTER_CRITICAL(&gCmdResultLock);
+  next.seq = gCmdResult.seq + 1;
+  if (next.seq == 0) next.seq = 1;   // 0 means "no result yet"
+  gCmdResult = next;
+  taskEXIT_CRITICAL(&gCmdResultLock);
+}
+
+uint32_t espnowCmdResultSeq() {
+  taskENTER_CRITICAL(&gCmdResultLock);
+  const uint32_t seq = gCmdResult.seq;
+  taskEXIT_CRITICAL(&gCmdResultLock);
+  return seq;
+}
+
+bool espnowCmdResultGet(EspNowCmdResult& out) {
+  taskENTER_CRITICAL(&gCmdResultLock);
+  out = gCmdResult;
+  taskEXIT_CRITICAL(&gCmdResultLock);
+  return out.seq != 0;
 }
 
 // Runtime boundary shared by every first-party send path. Admission starts
@@ -294,8 +338,8 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* d
 
 // Fragment budget, DERIVED from the outbound ceiling rather than hand-picked.
 // CMD_RESP is the only type that meaningfully fragments (STREAM is clamped to a
-// single frame at its send sites; METADATA is a small fixed struct;
-// METADATA_PUSH is never TX'd), and a CMD_RESP carries at most CMD_RESULT_MAX
+// single frame at its send sites; METADATA RESP/PUSH is a small fixed
+// struct), and a CMD_RESP carries at most CMD_RESULT_MAX
 // plus the 1 success byte. Every peer is ours and reflashed together, so the
 // receiver need not accommodate a stranger's larger ceiling.
 // Was a flat 32 (6400 B) chosen independently of CMD_RESULT_MAX — that mismatch
@@ -395,7 +439,7 @@ static V4ReasmEntry* v4_reasm_find_or_alloc(const uint8_t* src, uint32_t msgId, 
       memcpy(gV4Reasm[i].src, src, 6);
       gV4Reasm[i].msgId       = msgId;
       gV4Reasm[i].type        = type;
-      gV4Reasm[i].fragCount   = (fragCount <= V4_FRAG_MAX) ? fragCount : V4_FRAG_MAX;
+      gV4Reasm[i].fragCount   = fragCount;  // 2..V4_FRAG_MAX, checked by v4_reasm_accept
       gV4Reasm[i].bufferSize  = (uint16_t)(gV4Reasm[i].fragCount * V4_MAX_FRAGMENT_PAYLOAD);
       gV4Reasm[i].lastUpdateMs = millis();
       gV4Reasm[i].active      = true;
@@ -403,6 +447,22 @@ static V4ReasmEntry* v4_reasm_find_or_alloc(const uint8_t* src, uint32_t msgId, 
     }
   }
   return nullptr;
+}
+
+// Drop the reassembly entry keyed by (src, msgId), if one exists. Safe when the
+// table was never allocated (init continues without fragmentation); every RX
+// path that cleans up after a multi-fragment header lands here.
+static void v4_reasm_release(const uint8_t* src, uint32_t msgId) {
+  if (!gV4Reasm) return;
+  for (int i = 0; i < V4_REASM_MAX; i++) {
+    if (gV4Reasm[i].active && gV4Reasm[i].msgId == msgId &&
+        memcmp(gV4Reasm[i].src, src, 6) == 0) {
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Cleaning up reassembly buffer for msgId=%lu",
+             (unsigned long)msgId);
+      v4_reasm_reset(gV4Reasm[i]);
+      return;
+    }
+  }
 }
 
 struct V4FragAckWait {
@@ -489,6 +549,9 @@ bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
 // that smart is strict encrypt-or-fail. RX-side plaintext reassembly remains
 // for one release window to tolerate old-firmware peers, then can be removed.)
 //
+// Longest AEAD plaintext that fits one frame to `dst` (130 B routed, 202 B
+// direct). Non-static: the espnow_tx dispatcher asks it too.
+uint16_t v4_single_frame_cap(const uint8_t* dst);
 // Encrypted dispatcher — STRICT encrypt-or-fail. Single-frame fits → smart goes
 // through v4_send_encrypted_or_queue (auto-handshake). Multi-frame requires an
 // ACTIVE session — caller retries if not up.
@@ -581,12 +644,13 @@ struct WorkerStatusConfig {
 };
 static WorkerStatusConfig gWorkerStatusConfig;
 
-// Metadata transmission tracking
-static bool gMetadataChanged = false;          // Whether metadata changed since last send
-static String gLastSentFriendlyName = "";
-static String gLastSentRoom = "";
-static String gLastSentZone = "";
-static String gLastSentTags = "";
+// Metadata transmission tracking. gMetadataChanged is set by every command that
+// edits a V4PayloadMetadata field (espnowroom/zone/tags/friendlyname/stationary/
+// setname — the settings editors reach them through their cmdKey) and consumed
+// by metadataPushTick() on espnow_task.
+static bool gMetadataChanged = false;          // Whether metadata changed since the last push
+static uint32_t gMetadataPushDueMs = 0;        // 0 = no push armed; else millis() deadline
+static const uint32_t METADATA_PUSH_SETTLE_MS = 1500;  // coalesce a burst of edits into one PUSH
 
 // Master/Backup heartbeat tracking
 static uint32_t gLastMasterHeartbeat = 0;
@@ -1214,9 +1278,8 @@ void sendEspNowStreamMessage(const String& message) {
   // streamed command actually runs and emits its real output.
   extern TaskHandle_t gCmdExecTaskHandle;
   if (gCurrentStreamCmdId != 0 && xTaskGetCurrentTaskHandle() == gCmdExecTaskHandle) {
-    size_t msgLen = safeMessage.length();
-    if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
-    if (trySendToStreamSession(gCurrentStreamCmdId, safeMessage.c_str(), msgLen)) {
+    // The session helper clamps the line to one frame for its target.
+    if (trySendToStreamSession(gCurrentStreamCmdId, safeMessage.c_str(), safeMessage.length())) {
       return;  // Sent via session
     }
   }
@@ -1232,9 +1295,13 @@ void sendEspNowStreamMessage(const String& message) {
   }
   gEspNow->lastStreamSendTime = now;
 
+  // STREAM is fire-and-forget (sendAead): a line longer than one AEAD frame to
+  // this target would fragment on the dispatcher and stall every other sender,
+  // so clamp to the single-frame plaintext budget (202 B direct, 130 B routed).
   size_t msgLen = safeMessage.length();
-  if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
-  
+  const size_t lineCap = v4_single_frame_cap(gEspNow->streamTarget);
+  if (msgLen > lineCap) msgLen = lineCap;
+
   // Legacy global stream (startstream/stopstream) is uncorrelated live telemetry,
   // not a reply to any request — send msgId 0 so the receiver stores it as reqId 0
   // ("unsolicited"), exactly as before. (0 is also the dedup-skip sentinel.)
@@ -1358,6 +1425,11 @@ static void sendSessionStreamFrame(uint32_t cmdMsgId, const char* data, size_t l
 static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t len) {
   StreamSession* sess = findStreamSession(cmdMsgId);
   if (!sess || !sess->active) return false;
+
+  // One frame per line (see sendEspNowStreamMessage): fire-and-forget STREAM
+  // must never take the fragmenting path.
+  const size_t lineCap = v4_single_frame_cap(sess->targetMac);
+  if (len > lineCap) len = lineCap;
 
   // Step 3c: fire-and-forget through clerk (called from cmd_exec output path).
   espnowtx::sendAead(sess->targetMac, ESPNOW_V4_TYPE_STREAM, 0, cmdMsgId,
@@ -2414,6 +2486,17 @@ bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
   return anySuccess;
 }
 
+// Longest AEAD plaintext that still fits one frame to `dst`. A routed
+// destination (two or more hops) pays for the RELAY_DATA envelope out of
+// every frame, so its budget is 130 B instead of 202 B. One owner for the
+// cutoff: the smart sender, the fragmenting sender, the STREAM line clamp and
+// the espnow_tx dispatcher (which keeps multi-frame jobs off its queue) all
+// ask here, so they can never disagree about where fragmentation starts.
+uint16_t v4_single_frame_cap(const uint8_t* dst) {
+  return meshRouterIsRouted(dst) ? (uint16_t)ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT
+                                 : (uint16_t)ESPNOW_V4_MAX_PLAINTEXT;
+}
+
 // Phase 3.5 task #51 — encrypted multi-frame send.
 //
 // Splits `payload` into fragments of up to ESPNOW_V4_MAX_PLAINTEXT bytes each
@@ -2448,8 +2531,7 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
   // of this — it learns the stride from the fragments themselves (see
   // V4ReasmEntry::stride).
   const bool routed = meshRouterIsRouted(dst);
-  const uint16_t singleFrameCap = routed ? (uint16_t)ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT
-                                         : (uint16_t)ESPNOW_V4_MAX_PLAINTEXT;
+  const uint16_t singleFrameCap = v4_single_frame_cap(dst);
 
   // Single-frame fast path — no need to fragment.
   if (payloadLen <= singleFrameCap) {
@@ -2459,9 +2541,9 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
   }
 
   // fragIndex/fragCount are uint8_t so the wire would allow 255 fragments, but
-  // the RECEIVER is the real ceiling: v4_reasm_find_or_alloc clamps fragCount to
-  // V4_FRAG_MAX and sizes its buffer from the clamped value, so an over-budget
-  // message can never reassemble. This used to guard only against >255, which
+  // the RECEIVER is the real ceiling: v4_reasm_accept refuses a fragCount above
+  // V4_FRAG_MAX, so an over-budget message is dropped at the first fragment and
+  // can never reassemble. This used to guard only against >255, which
   // meant a 33..255-fragment send left the wire looking healthy while the peer
   // silently failed to rebuild it. Guard the REAL cap and fail loudly instead —
   // same rule as the CMD_RESULT_MAX ceiling on the delivery side.
@@ -2650,9 +2732,7 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
   // plaintext, not 202). Choosing the threshold here rather than letting the
   // single-frame path build an unroutable frame is what keeps a far peer's
   // sends fragmenting correctly instead of silently exceeding the envelope.
-  const uint16_t singleFrameCap = meshRouterIsRouted(dst)
-                                      ? (uint16_t)ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT
-                                      : (uint16_t)ESPNOW_V4_MAX_PLAINTEXT;
+  const uint16_t singleFrameCap = v4_single_frame_cap(dst);
 
   if (payloadLen <= singleFrameCap) {
     char status[64] = {0};
@@ -2996,10 +3076,9 @@ bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled) {
   return result;
 }
 
-// (v4_broadcast_sensor_data — the plaintext sensor-data broadcast — was removed here as
-//  part of the D2 secure-fetcher change. Sensor data now travels only as encrypted-unicast
-//  SENSOR_ENVELOPE. The RX handler v4h_sensor_broadcast is kept vestigial to absorb any
-//  straggler frame from an un-reflashed peer.)
+// (v4_broadcast_sensor_data — the plaintext sensor-data broadcast — was removed here with
+//  the D2 secure fetcher. Sensor data now travels only as encrypted-unicast SENSOR_ENVELOPE;
+//  opcode 150 has no RX row either — nothing emits it.)
 
 // SENSOR_ENVELOPE (154) — the secure fetcher's data reply (D2): a session-encrypted
 // UNICAST of ONE sensor reading to the leasing controller. Replaces the retired plaintext
@@ -3120,19 +3199,27 @@ static void            addTopoDeviceName(const uint8_t* mac, const char* name);
 static bool            getTopoDeviceName(const uint8_t* mac, char* outBuf, size_t outLen);
 static void            finalizeTopologyStreamLocked(TopologyStream* stream);
 #if ENABLE_BONDED_MODE
-static bool            cacheManifestToLittleFS(const uint8_t fwHash[16], const String& manifest);
+static bool            cacheManifestToLittleFS(const uint8_t fwHash[16], const char* manifest, size_t len);
 #endif
 #if ENABLE_BONDED_MODE
 static void            processBondSettings(const uint8_t* srcMac, const String& deviceName, const String& settingsStr);
-static void            processBondSchema(const uint8_t* srcMac, const String& deviceName, const String& schemaStr);
+static void            processBondSchema(const uint8_t* srcMac, const String& deviceName, const char* schema, size_t len);
 static void            requestBondSettings(const uint8_t* peerMac);
+
+// A received bond JSON file (manifest, schema) is checked in place, in the
+// buffer the file transfer filled, never copied into a String: an Arduino
+// String stops at 65,535 bytes on builds without BOARD_HAS_PSRAM, and the
+// manifest is larger than that.
+static inline bool bondJsonEnvelopeOk(const char* data, size_t len) {
+  return data && len >= 2 && data[0] == '{' && data[len - 1] == '}';
+}
 #endif
 #if ENABLE_BONDED_MODE
 // Process a received manifest from a bonded peer (bond mode handshake step)
-static void processBondModeManifestResp(const uint8_t* srcMac, const String& deviceName, const String& manifestStr) {
+static void processBondModeManifestResp(const uint8_t* srcMac, const String& deviceName, const char* manifest, size_t len) {
   if (!gEspNow) return;
-  BROADCAST_PRINTF("[BOND_SYNC] Manifest received from %s len=%d role=%d",
-                   deviceName.c_str(), manifestStr.length(), (int)gSettings.bondRole);
+  BROADCAST_PRINTF("[BOND_SYNC] Manifest received from %s len=%u role=%d",
+                   deviceName.c_str(), (unsigned)len, (int)gSettings.bondRole);
   
   // Reject if peer is offline (stale transfer from before disconnect)
   if (!gEspNow->bondPeerOnline) {
@@ -3141,8 +3228,8 @@ static void processBondModeManifestResp(const uint8_t* srcMac, const String& dev
   }
   
   // Validate JSON integrity — reject truncated/corrupted file transfers
-  if (manifestStr.length() < 2 || manifestStr[0] != '{' || manifestStr[manifestStr.length() - 1] != '}') {
-    BROADCAST_PRINTF("[BOND_SYNC] REJECTED corrupt manifest (len=%d, not valid JSON object)", manifestStr.length());
+  if (!bondJsonEnvelopeOk(manifest, len)) {
+    BROADCAST_PRINTF("[BOND_SYNC] REJECTED corrupt manifest (len=%u, not valid JSON object)", (unsigned)len);
     gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
     gEspNow->bondSyncRetryCount = 0;
     return;  // Sync tick will re-request
@@ -3153,7 +3240,7 @@ static void processBondModeManifestResp(const uint8_t* srcMac, const String& dev
   gEspNow->bondSyncRetryCount = 0;
 
   if (gEspNow->lastRemoteCapValid) {
-    cacheManifestToLittleFS(gEspNow->lastRemoteCap.fwHash, manifestStr);
+    cacheManifestToLittleFS(gEspNow->lastRemoteCap.fwHash, manifest, len);
   }
   // Sync tick will pick up the next missing item (settings) on next iteration
 }
@@ -3203,6 +3290,13 @@ static constexpr uint8_t V4_OPC_FLAG_REQ_AUTHENTICATED = 0x04;
 // be confidential AND unforgeable. Senders route through bondSendEncryptedAsync, so a
 // legitimate bond frame is always encrypted; plaintext bond frames are dropped.
 static constexpr uint8_t V4_OPC_FLAG_REQ_SESSION_ENC   = 0x08;
+// Require an authenticated frame (SESSION_FRAME unwrap or BROADCAST_AUTH HMAC)
+// once this device's primary passphrase is set (gEspNow->encryptionEnabled).
+// A keyless device still accepts plaintext so a fleet can bootstrap; once a
+// passphrase is set, a plaintext frame for this opcode is a spoof — legitimate
+// senders seal (v4_send_payload_smart) or sign (v4_broadcast /
+// v4_broadcast_category, BROADCAST_AUTH) whenever a key exists.
+static constexpr uint8_t V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED = 0x10;
 
 struct V4OpcodeEntry {
   uint8_t          opcode;
@@ -3312,8 +3406,16 @@ static void v4h_text(const V4RxCtx& ctx) {
       // so re-resolve from the origin. Falls back to the MAC string when the
       // originator is a node we have no name for (normal for a 2-hop peer we
       // have never paired with).
+      // A registry name is attributed only to a frame that proved key
+      // possession (SESSION_FRAME unwrap or BROADCAST_AUTH verify). A plaintext
+      // frame (accepted only on a keyless device, see REQ_AUTH_WHEN_KEYED) can
+      // carry any origin MAC, so it is filed under the MAC string, never under
+      // the name of the paired peer that owns that MAC, and the drain posts no
+      // text_rx event for it.
+      slot.authenticated = ctx.isAuthenticated;
       {
-        String originName = getEspNowDeviceName(ctx.h->origin);
+        String originName;
+        if (ctx.isAuthenticated) originName = getEspNowDeviceName(ctx.h->origin);
         if (originName.length() > 0) {
           strncpy(slot.deviceName, originName.c_str(), sizeof(slot.deviceName) - 1);
         } else {
@@ -3337,8 +3439,8 @@ static void v4h_text(const V4RxCtx& ctx) {
       slot.fragCount = ctx.h->fragCount;
       slot.used = true;
       gEspNow->textQueueHead = nextHead;
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message enqueued slot=%d (encrypted=%s)",
-             head, slot.encrypted ? "YES" : "NO");
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message enqueued slot=%d (encrypted=%s authenticated=%s)",
+             head, slot.encrypted ? "YES" : "NO", slot.authenticated ? "YES" : "NO");
       if (ctx.isPaired && meshEnabled()) {
         noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::RxActivity, -128,
                                ctx.recv_info->rx_ctrl ? ctx.recv_info->rx_ctrl->rssi : (int8_t)-128);
@@ -3432,6 +3534,19 @@ static void sessionPrewarmReset(const uint8_t mac[6]) {
     }
   }
 }
+// True while this peer's pre-warm is backing off (0 = no cooldown). Wrap-safe
+// across the 49.7-day millis() rollover.
+static bool sessionPrewarmInCooldown(const SessionPrewarm& pw, uint32_t nowMs) {
+  return espnowDeadlinePending(pw.cooldownUntilMs, nowMs);
+}
+// Count one fresh SESSION_OPEN attempt. Returns true when this attempt reaches
+// kSessionPrewarmMaxFails and starts the kSessionPrewarmCooldownMs backoff.
+static bool sessionPrewarmNoteAttempt(SessionPrewarm* pw, uint32_t nowMs) {
+  if (++pw->fails < kSessionPrewarmMaxFails) return false;
+  pw->cooldownUntilMs = espnowDeadlineAfter(nowMs, kSessionPrewarmCooldownMs);
+  pw->fails = 0;
+  return true;
+}
 
 static void v4h_heartbeat(const V4RxCtx& ctx) {
   if (ctx.payloadLen >= sizeof(V4PayloadHeartbeat)) {
@@ -3473,11 +3588,9 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
           // No live session - a fresh pre-warm is due.
           uint32_t now = millis();
           SessionPrewarm* pw = sessionPrewarmSlot(pmac);
-          if (now >= pw->cooldownUntilMs) {          // not currently backing off
+          if (!sessionPrewarmInCooldown(*pw, now)) {  // not currently backing off
             espnowSessionOpenInitiate(pmac, nullptr);
-            if (++pw->fails >= kSessionPrewarmMaxFails) {
-              pw->cooldownUntilMs = now + kSessionPrewarmCooldownMs;
-              pw->fails = 0;
+            if (sessionPrewarmNoteAttempt(pw, now)) {
               WARN_ESPNOWF("Encrypted session to %02X:%02X:%02X:%02X:%02X:%02X not establishing after "
                            "%u tries - peer likely does not hold our identity (re-flashed/erased?). "
                            "Backing off %us. Re-pair: 'espnowforget' + 'espnowpairsecure' on BOTH devices.",
@@ -3549,9 +3662,8 @@ static void v4h_sensor_status(const V4RxCtx& ctx) {
 }
 
 // Shared ingest for a per-sensor reading frame (V4PayloadSensorBroadcast wire layout).
-// Used by BOTH the encrypted-unicast SENSOR_ENVELOPE path (the secure fetcher, D2) and
-// the vestigial plaintext SENSOR_BROADCAST RX (D2 removed its TX; RX kept harmless so a
-// straggler frame from an un-reflashed peer still caches rather than erroring).
+// Used by the encrypted-unicast SENSOR_ENVELOPE path (the secure fetcher, D2).
+// Dispatch guarantees REQ_PAIRED|REQ_SESSION_ENC before this runs.
 static void v4_ingest_sensor_reading(const V4RxCtx& ctx, const char* tag) {
   if (ctx.payloadLen < sizeof(V4PayloadSensorBroadcast)) {
     DEBUGF(DEBUG_ESPNOW_MESH, "[%s] ERROR: Payload too small (%u < %u)",
@@ -3582,12 +3694,6 @@ static void v4_ingest_sensor_reading(const V4RxCtx& ctx, const char* tag) {
   entry->connected = true;
   DEBUGF(DEBUG_ESPNOW_MESH, "[%s] cached %s data (%u bytes)",
          tag, sensorTypeToString(sensorType), (unsigned)copyLen);
-}
-
-// SENSOR_BROADCAST — vestigial plaintext RX (D2: TX path removed). Kept so a frame from
-// an un-reflashed peer still caches. No worker in this build transmits opcode 150.
-static void v4h_sensor_broadcast(const V4RxCtx& ctx) {
-  v4_ingest_sensor_reading(ctx, "V4_RX_SENSOR_BROADCAST");
 }
 
 // SENSOR_ENVELOPE — the secure fetcher's data reply (D2). Encrypted-unicast per-sensor
@@ -4400,10 +4506,13 @@ static void v4h_manifest_req(const V4RxCtx& ctx) {
 // re-check peerIdentitySetSubscriptions's return value because race-y
 // FS_LIST / FS_STAT / FS_GET — thin shims that unpack V4RxCtx and call into
 // System_ESPNow_FsList.cpp where the real work lives. All six opcodes are
-// gated on REQ_PAIRED + REQ_SESSION_ENC by the dispatch table — NOT bond-gated
-// (these are base ESP-NOW; bonding merely piggybacks on them). So by the time
-// we reach these handlers the sender is a securely paired peer over an active
-// encrypted session, but it need not be our bond peer.
+// gated on REQ_PAIRED + REQ_SESSION_ENC by the dispatch table — no
+// REQ_BOND_MODE, so a reply still reaches a requester whose own bond mode is
+// off. So by the time we reach these handlers the sender is a securely paired
+// peer over an active encrypted session. Serving a request is narrower:
+// System_ESPNow_FsList.cpp answers LIST/STAT/GET only for our bonded peer
+// while its bond session is live, under the bond identity
+// (fsRpcRequesterIdentity), and replies PERM_DENIED to every other peer.
 extern void fsListOnRequestReceived(const uint8_t srcMac[6],
                                     const uint8_t* payload, uint16_t payloadLen);
 extern void fsListOnReplyReceived(const uint8_t srcMac[6],
@@ -4458,9 +4567,8 @@ static void v4h_subscribe_update(const V4RxCtx& ctx) {
                  MAC_STR(ctx.recv_info->src_addr),
                  (unsigned long)p.requestedEvents);
   }
-  // ACK if requested — flag is cleared on the headerCopy in v4_try_handle_incoming
-  // for SESSION_FRAME unwrap path, but plaintext SUBSCRIBE_UPDATE still
-  // triggers the downstream ACK send.
+  // Dispatch requires a SESSION_FRAME, which v4_try_handle_incoming ACKs before
+  // unwrap and clears ACK_REQ on its header copy — nothing to ACK here.
 }
 
 static void v4h_metadata_req(const V4RxCtx& ctx) {
@@ -4486,12 +4594,48 @@ static void v4h_metadata_req(const V4RxCtx& ctx) {
   }
 }
 
-static void normalizeMetadataWireText(V4PayloadMetadata& meta) {
+// Metadata text policy: the one owner for the local setters (metaGetSet) and the
+// wire receive path (normalizeMetadataWireText). The web page escapes before
+// rendering; this keeps the mesh cache, the persisted registry, the Bond JSON and
+// the CLI/OLED/G2 consumers free of HTML/attribute/JSON metacharacters and control
+// bytes as defence in depth. Bytes >= 0x80 pass unchanged so UTF-8 names work.
+static bool metadataTextByteAllowed(char c) {
+  unsigned char u = (unsigned char)c;
+  if (u < 0x20 || u == 0x7F) return false;
+  return c != '<' && c != '>' && c != '"' && c != '\'' && c != '&' && c != '\\';
+}
+
+static bool metadataTextAllowed(const char* s) {
+  for (; s && *s; ++s) {
+    if (!metadataTextByteAllowed(*s)) return false;
+  }
+  return true;
+}
+
+// In-place replacement keeps the field length, so the packed wire layout and every
+// NUL already placed by the caller are unchanged. Returns the number of bytes replaced.
+static size_t scrubMetadataText(char* s) {
+  size_t n = 0;
+  for (; s && *s; ++s) {
+    if (!metadataTextByteAllowed(*s)) {
+      *s = '_';
+      ++n;
+    }
+  }
+  return n;
+}
+
+// Terminates every fixed-width wire field, then applies the metadata text policy.
+// Returns the number of disallowed bytes replaced with '_'.
+static size_t normalizeMetadataWireText(V4PayloadMetadata& meta) {
   meta.deviceName[sizeof(meta.deviceName) - 1] = '\0';
   meta.friendlyName[sizeof(meta.friendlyName) - 1] = '\0';
   meta.room[sizeof(meta.room) - 1] = '\0';
   meta.zone[sizeof(meta.zone) - 1] = '\0';
   meta.tags[sizeof(meta.tags) - 1] = '\0';
+  return scrubMetadataText(meta.deviceName) + scrubMetadataText(meta.friendlyName) +
+         scrubMetadataText(meta.room) + scrubMetadataText(meta.zone) +
+         scrubMetadataText(meta.tags);
 }
 
 // METADATA_RESP / METADATA_PUSH — shared handler. Type comes from header.
@@ -4515,13 +4659,18 @@ static void v4h_metadata_resp_push(const V4RxCtx& ctx) {
   // first `%s`, strcmp/strncpy, String construction, or bounded registry
   // assignment. Legitimate senders already reserve the final byte for NUL, so
   // this is wire-compatible while making a fully occupied field safe without
-  // adding a 202-byte temporary to espnow_task's stack.
+  // adding a 202-byte temporary to espnow_task's stack. The same step replaces
+  // bytes outside the metadata text policy, so processMetadata stores clean text.
   bool wasPending = gEspNow->deferredMetadataPending;
   memcpy(gEspNow->deferredMetadataSrcMac, ctx.recv_info->src_addr, 6);
   memcpy(gEspNow->deferredMetadataPayload, ctx.payload, sizeof(V4PayloadMetadata));
   V4PayloadMetadata* meta =
       reinterpret_cast<V4PayloadMetadata*>(gEspNow->deferredMetadataPayload);
-  normalizeMetadataWireText(*meta);
+  size_t scrubbed = normalizeMetadataWireText(*meta);
+  if (scrubbed) {
+    WARN_ESPNOWF("[METADATA] %s from %s: replaced %u disallowed byte(s) in metadata text",
+      metaType, MAC_STR(ctx.recv_info->src_addr), (unsigned)scrubbed);
+  }
   DEBUG_ESPNOW_METADATAF("[METADATA] %s payload: name='%s' friendlyName='%s' room='%s' zone='%s' tags='%s' stationary=%d",
     metaType, meta->deviceName, meta->friendlyName, meta->room, meta->zone, meta->tags, (int)meta->stationary);
   gEspNow->deferredMetadataPending = true;
@@ -4915,8 +5064,7 @@ static void v4h_file_end(const V4RxCtx& ctx) {
         return;
       }
       if (strcmp(filename, "_manifest_out.json") == 0) {
-        String manifestStr((char*)dataBuf, recvBytes);
-        processBondModeManifestResp((uint8_t*)sndMac, senderMacStr, manifestStr);
+        processBondModeManifestResp((uint8_t*)sndMac, senderMacStr, (const char*)dataBuf, recvBytes);
         BROADCAST_PRINTF("[V4_FILE] Manifest processed: %lu bytes", (unsigned long)recvBytes);
       } else if (strcmp(filename, "_settings_out.json") == 0) {
         DEBUG_ESPNOWF("[FILE_END] Detected settings file: %s (%lu bytes)", filename, (unsigned long)recvBytes);
@@ -4926,8 +5074,7 @@ static void v4h_file_end(const V4RxCtx& ctx) {
         BROADCAST_PRINTF("[V4_FILE] Settings processed: %lu bytes", (unsigned long)recvBytes);
       } else {
         DEBUG_ESPNOWF("[FILE_END] Detected schema file: %s (%lu bytes)", filename, (unsigned long)recvBytes);
-        String schemaStr((char*)dataBuf, recvBytes);
-        processBondSchema((uint8_t*)sndMac, senderMacStr, schemaStr);
+        processBondSchema((uint8_t*)sndMac, senderMacStr, (const char*)dataBuf, recvBytes);
         BROADCAST_PRINTF("[V4_FILE] Schema processed: %lu bytes", (unsigned long)recvBytes);
       }
     } else
@@ -5846,9 +5993,14 @@ bool espnowGetPairCandidate(int idx, char* name, size_t nameCap, uint8_t mac[6],
   return true;
 }
 // True + fills `name` if there is an incoming pair request awaiting accept/reject.
-bool espnowGetIncomingPairRequest(char* name, size_t nameCap) {
+// `mac` and `atMs` (each optional) identify that request: the sender and its
+// arrival time, which a re-sent request restarts, so a UI can tell a request it
+// already answered from a new one.
+bool espnowGetIncomingPairRequest(char* name, size_t nameCap, uint8_t* mac, uint32_t* atMs) {
   if (!gPendingPairIn.active) return false;
   if (name && nameCap) { strncpy(name, gPendingPairIn.name, nameCap - 1); name[nameCap - 1] = '\0'; }
+  if (mac) memcpy(mac, gPendingPairIn.mac, 6);
+  if (atMs) *atMs = gPendingPairIn.atMs;
   return true;
 }
 
@@ -5872,8 +6024,16 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // or v4_broadcast (broadcast, BROADCAST_AUTH HMAC). Plaintext TIME_SYNC
   // from any source is silently dropped here.
   { ESPNOW_V4_TYPE_TIME_SYNC,        V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_time_sync         },
-  { ESPNOW_V4_TYPE_TEXT,             0,                                                    v4h_text              },
-  { ESPNOW_V4_TYPE_BOOT,             0,                                                    v4h_text              },  // boot/online notice; v4h_text tags it MSG_SYSTEM_EVENT
+  // TEXT/BOOT: every legitimate sender seals (v4_send_text, meshSendBootToPeers
+  // → v4_send_payload_smart, encrypt-or-fail) or signs (v4_broadcast_text →
+  // BROADCAST_AUTH) once a mesh key exists, so a plaintext frame on a keyed
+  // device is a spoof: it can carry any origin MAC behind a non-secret CRC16
+  // via the fingerprint-0 compatibility path. Plaintext stays accepted only
+  // while this device has no passphrase; v4h_text then files it under the MAC,
+  // not a registry name, and the drain posts no text_rx event for it. No
+  // REQ_PAIRED: flooded broadcasts and 2-hop members are unpaired senders.
+  { ESPNOW_V4_TYPE_TEXT,             V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED,                      v4h_text              },
+  { ESPNOW_V4_TYPE_BOOT,             V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED,                      v4h_text              },  // boot/online notice; v4h_text tags it MSG_SYSTEM_EVENT
   // Multi-hop transport. Both carry the mesh group-key HMAC and NOTHING else —
   // REQ_AUTHENTICATED is the whole trust check, and it is the right one: holding
   // the group key is exactly what "member of this mesh" means. NOT REQ_PAIRED,
@@ -5898,12 +6058,15 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_PAIR_REQUEST,     V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_request      },
   { ESPNOW_V4_TYPE_PAIR_ACCEPT,      V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_accept       },
   { ESPNOW_V4_TYPE_PAIR_REJECT,      V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_reject       },
-  { ESPNOW_V4_TYPE_SENSOR_STATUS,    0,                                                    v4h_sensor_status     },
-  { ESPNOW_V4_TYPE_SENSOR_BROADCAST, 0,                                                    v4h_sensor_broadcast  },
+  // SENSOR_STATUS: sender is v4_broadcast_category (BROADCAST_AUTH when a key exists).
+  // Plaintext is accepted only while this device has no passphrase, so a keyless fleet
+  // still sees status cards; a keyed device drops unsigned status.
+  { ESPNOW_V4_TYPE_SENSOR_STATUS,    V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED,                      v4h_sensor_status     },
   // Secure sensor fetcher (D1/D2): mesh-legal leased pull + encrypted reply. NOT bond-gated —
   // REQ_PAIRED|REQ_SESSION_ENC only; the worker's v4h_sensor_req adds the Ed25519 fingerprint
   // check (master/backup) so only designated controllers can drive streaming. SENSOR_ENVELOPE
-  // is the encrypted-unicast data reply replacing the retired plaintext SENSOR_BROADCAST TX.
+  // is the encrypted-unicast data reply replacing the retired plaintext SENSOR_BROADCAST
+  // (opcode 150, removed).
   { ESPNOW_V4_TYPE_SENSOR_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4h_sensor_req        },
   { ESPNOW_V4_TYPE_SENSOR_ENVELOPE,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4h_sensor_envelope   },
   // Keep the topology opcodes compatible with the existing plaintext V4 wire
@@ -5931,13 +6094,17 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // Phase 5: SUBSCRIBE_UPDATE — peer tells us which event categories they
   // want from us. REQ_PAIRED so unknown peers can't pollute our broadcast
   // gating (and to ensure peerIdentitySetSubscriptions finds the slot).
-  { ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, V4_OPC_FLAG_REQ_PAIRED,                               v4h_subscribe_update  },
-  // Remote filesystem (FsList) is a BASE ESP-NOW capability — browse/stat/fetch a
-  // paired peer's files over an active encrypted session. NOT bond-gated (bonding
-  // piggybacks on it). Gated only by REQ_PAIRED + REQ_SESSION_ENC: any securely
-  // paired peer with a live session may enumerate/pull files (served under SYSTEM
-  // identity). Both REQ and REPLY/ACK rows live here so a requester whose own bond
-  // mode is off still accepts the peer's replies.
+  // REQ_SESSION_ENC because the only sender (cmd_espnow_requestevents) is
+  // encrypt-or-fail and the mask is persisted to flash — a plaintext frame
+  // from a spoofed paired MAC must not reach the handler.
+  { ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_subscribe_update  },
+  // Remote filesystem (FsList) — browse/stat/fetch a peer's files over an active
+  // encrypted session. The rows carry REQ_PAIRED + REQ_SESSION_ENC and no
+  // REQ_BOND_MODE; the request handlers in System_ESPNow_FsList.cpp then serve
+  // only our bonded peer while its bond session is live, under the bond identity
+  // (fsRpcRequesterIdentity), and answer PERM_DENIED to every other paired peer.
+  // Both REQ and REPLY/ACK rows live here so a requester whose own bond mode is
+  // off still accepts the peer's replies.
   { ESPNOW_V4_TYPE_FS_LIST_REQ,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_list_req       },
   { ESPNOW_V4_TYPE_FS_LIST_REPLY,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_list_reply     },
   { ESPNOW_V4_TYPE_FS_STAT_REQ,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_stat_req       },
@@ -5955,7 +6122,8 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_req   },
   { ESPNOW_V4_TYPE_BOND_STATUS_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_resp  },
   { ESPNOW_V4_TYPE_MANIFEST_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_manifest_req      },
-  // (FS_LIST / FS_STAT / FS_GET rows moved above — now base ESP-NOW, not bond-gated.)
+  // (FS_LIST / FS_STAT / FS_GET rows are above, outside this block: no
+  // REQ_BOND_MODE in the table; FsList serves requests to the bonded peer only.)
 #endif
 };
 static constexpr size_t kV4HandlerTableSize = sizeof(kV4HandlerTable) / sizeof(kV4HandlerTable[0]);
@@ -5971,17 +6139,168 @@ static const V4OpcodeEntry* v4_dispatch_lookup(uint8_t opcode) {
   return nullptr;
 }
 
-// Centralized reassembly cleanup that each migrated branch used to do inline.
-static void v4_dispatch_post_cleanup(const esp_now_recv_info* recv_info, const EspNowV4Header* h) {
-  if (h->fragCount > 1) {
-    for (int i = 0; i < V4_REASM_MAX; i++) {
-      if (gV4Reasm[i].active && gV4Reasm[i].msgId == h->msgId &&
-          memcmp(gV4Reasm[i].src, recv_info->src_addr, 6) == 0) {
-        v4_reasm_reset(gV4Reasm[i]);
-        break;
+// Outcome of feeding one fragment to the reassembler.
+enum class V4ReasmOutcome : uint8_t { Dropped, Pending, Complete };
+
+// Feed one plaintext fragment (SESSION_FRAME already unwrapped) into the
+// reassembler. The entry is keyed by (src, msgId) and fixed by its FIRST
+// fragment: every later fragment must carry the same type and fragCount, and
+// its index is bounded by the entry, never by the frame's own header.
+// Complete: payload/payloadLen now reference the entry's buffer, which stays
+// valid until v4_dispatch_post_cleanup (v4_reasm_release) resets the entry.
+// Pending/Dropped: the frame is finished with.
+static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
+                                      const uint8_t*& payload, uint16_t& payloadLen) {
+  char srcMac[18];
+  formatMacAddressBuf(recv_info->src_addr, srcMac, sizeof(srcMac));
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment received from %s", srcMac);
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment %u/%u msgId=%lu type=%u len=%u",
+         h->fragIndex + 1, h->fragCount, (unsigned long)h->msgId, h->type, payloadLen);
+
+  // Run GC
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Running reassembly GC...");
+  v4_reasm_gc(millis());
+
+  // The sender refuses to split past V4_FRAG_MAX (v4_send_encrypted_chunked), so a
+  // larger count is not ours and could never complete honestly: drop it before an
+  // entry is allocated.
+  if (h->fragCount > V4_FRAG_MAX) {
+    WARN_ESPNOWF("[V4_FRAG_RX] fragCount %u exceeds the reassembly budget (%u) - dropping msgId=%lu from %s",
+                 h->fragCount, (unsigned)V4_FRAG_MAX, (unsigned long)h->msgId, srcMac);
+    return V4ReasmOutcome::Dropped;
+  }
+
+  // Find or allocate reassembly buffer
+  V4ReasmEntry* e = v4_reasm_find_or_alloc(recv_info->src_addr, h->msgId, h->type, h->fragCount);
+  if (!e) {
+    WARN_ESPNOWF("[V4_FRAG_RX] No reassembly slot available - all %u slots in use", V4_REASM_MAX);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    return V4ReasmOutcome::Dropped;
+  }
+
+  bool isNewEntry = (e->received == 0);
+  if (isNewEntry) {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Allocated new reassembly buffer: bufSize=%u", e->bufferSize);
+  } else {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Using existing reassembly buffer: %u/%u fragments already received",
+           e->received, e->fragCount);
+  }
+
+  // Every fragment of one message carries the same type and fragCount. A frame
+  // that disagrees with the entry keyed by (src, msgId) is not part of that
+  // message: drop the frame and leave the in-flight transfer alone (GC reclaims
+  // it if it never completes).
+  if (h->fragCount != e->fragCount || h->type != e->type) {
+    WARN_ESPNOWF("[V4_FRAG_RX] fragment %u/%u type=%u does not match msgId=%lu entry (%u fragments, type=%u) - dropping",
+                 h->fragIndex + 1, h->fragCount, h->type, (unsigned long)h->msgId, e->fragCount, e->type);
+    return V4ReasmOutcome::Dropped;
+  }
+
+  // Store fragment if not duplicate. The index is bounded by the ENTRY, so
+  // have[] is never indexed past its fragCount (at most V4_FRAG_MAX).
+  if (h->fragIndex >= e->fragCount) {
+    WARN_ESPNOWF("[V4_FRAG_RX] Invalid fragment index %u (max %u)", h->fragIndex, e->fragCount - 1);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    return V4ReasmOutcome::Dropped;
+  }
+
+  if (e->have[h->fragIndex]) {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Duplicate fragment %u - ignoring", h->fragIndex + 1);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    return V4ReasmOutcome::Dropped;
+  }
+
+  // Learn the sender's chunk size from any non-final fragment (every fragment
+  // but the last is full-size by construction). A direct sender uses 200 B; a
+  // sender routing through a relay must use less, because the envelope eats
+  // into the frame. Deriving the stride instead of assuming it is what lets
+  // both reassemble in the same buffer pool.
+  if (e->stride == 0 && h->fragIndex + 1 < h->fragCount && payloadLen > 0) {
+    e->stride = payloadLen;
+  }
+  if (h->fragIndex + 1 == h->fragCount) e->lastFragLen = payloadLen;
+  // Until a non-final fragment has been seen (e.g. the last one arrived
+  // first), fall back to the direct-path stride — the historical behaviour.
+  const uint16_t stride = e->stride ? e->stride : (uint16_t)V4_MAX_FRAGMENT_PAYLOAD;
+
+  // Copy fragment data to buffer
+  uint16_t offset = (uint16_t)(h->fragIndex * stride);
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Storing at offset=%u len=%u stride=%u (bufSize=%u)",
+         offset, payloadLen, stride, e->bufferSize);
+  if (offset + payloadLen > e->bufferSize) {
+    WARN_ESPNOWF("[V4_FRAG_RX] Fragment overflow: offset=%u len=%u bufSize=%u", offset, payloadLen, e->bufferSize);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Resetting corrupted reassembly buffer");
+    v4_reasm_reset(*e);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    return V4ReasmOutcome::Dropped;
+  }
+
+  memcpy(e->buffer + offset, payload, payloadLen);
+  e->have[h->fragIndex] = true;
+  e->received++;
+  e->lastUpdateMs = millis();
+
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment %u stored successfully", h->fragIndex + 1);
+
+  // Check if complete
+  if (e->received < e->fragCount) {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Progress: %u/%u fragments received",
+           e->received, e->fragCount);
+
+    // Log which fragments are still missing
+    if (e->fragCount <= 10) {  // Only log for reasonable fragment counts
+      char missing[64] = {0};  // Max: "1,2,3,4,5,6,7,8,9,10" = 20 chars + margin
+      int offset = 0;
+      for (uint8_t i = 0; i < e->fragCount; i++) {
+        if (!e->have[i]) {
+          if (offset > 0 && offset < (int)sizeof(missing) - 5) {
+            offset += snprintf(missing + offset, sizeof(missing) - offset, ",");
+          }
+          if (offset < (int)sizeof(missing) - 5) {
+            offset += snprintf(missing + offset, sizeof(missing) - offset, "%u", i + 1);
+          }
+        }
+      }
+      if (offset > 0) {
+        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Still waiting for fragments: %s", missing);
       }
     }
+
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    return V4ReasmOutcome::Pending;
   }
+
+  // Calculate actual reassembled size (last fragment may be partial).
+  // Uses the learned stride so a routed transfer reports its real length
+  // rather than one computed from the direct-path chunk size.
+  uint16_t reassembledSize = (uint16_t)((e->fragCount - 1) * stride + e->lastFragLen);
+  // The per-fragment offset check bounds each slice, but the final size is a
+  // product of the LEARNED stride, which can be wider than the fallback a
+  // last-first fragment was placed with. Never hand a handler more bytes than
+  // the entry owns.
+  if (reassembledSize > e->bufferSize) {
+    WARN_ESPNOWF("[V4_FRAG_RX] reassembled %u B exceeds the %u B buffer (msgId=%lu from %s) - dropping",
+                 reassembledSize, e->bufferSize, (unsigned long)h->msgId, srcMac);
+    v4_reasm_reset(*e);
+    return V4ReasmOutcome::Dropped;
+  }
+
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ✓✓✓ REASSEMBLY COMPLETE ✓✓✓");
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] All %u fragments received! Total size: %u bytes",
+         e->fragCount, reassembledSize);
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Proceeding to handle reassembled message type=%u", h->type);
+
+  // Update pointers to point to reassembled buffer
+  payload = e->buffer;
+  payloadLen = reassembledSize;
+
+  return V4ReasmOutcome::Complete;
+}
+
+// Centralized reassembly cleanup that each migrated branch used to do inline.
+static void v4_dispatch_post_cleanup(const esp_now_recv_info* recv_info, const EspNowV4Header* h) {
+  if (h->fragCount > 1) v4_reasm_release(recv_info->src_addr, h->msgId);
 }
 
 // Returns true if the dispatch table claimed the frame; false only for opcodes
@@ -6022,6 +6341,19 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     WARN_ESPNOWF("[V4_RX] type=%u from %02X:%02X:%02X:%02X:%02X:%02X dropped: "
                  "REQ_AUTHENTICATED set but frame was plaintext (no SESSION_FRAME "
                  "or BROADCAST_AUTH)",
+                 h->type,
+                 recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
+                 recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
+    v4_dispatch_post_cleanup(recv_info, h);
+    return true;
+  }
+  if ((e->flags & V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED) && !isAuthenticated &&
+      gEspNow && gEspNow->encryptionEnabled) {
+    // This device holds a mesh key, so every legitimate sender of this opcode
+    // signs (BROADCAST_AUTH) or session-wraps its frames; a plaintext one is a
+    // spoof. A keyless device skips this gate so a fleet can bootstrap.
+    WARN_ESPNOWF("[V4_RX] type=%u from %02X:%02X:%02X:%02X:%02X:%02X dropped: "
+                 "mesh has a key but frame was plaintext (REQ_AUTH_WHEN_KEYED)",
                  h->type,
                  recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
                  recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
@@ -6296,128 +6628,11 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   }
 
   if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_ACK && h->type != ESPNOW_V4_TYPE_TEXT) {
-    // Multi-fragment message - reassemble
+    // Multi-fragment message - reassemble. On Complete the entry's buffer backs
+    // `payload` until v4_dispatch_post_cleanup releases it after the handler ran.
     if (gEspNow) { gEspNow->routerMetrics.v4FragRx++; }
-    
-    char srcMac[18];
-    formatMacAddressBuf(recv_info->src_addr, srcMac, sizeof(srcMac));
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment received from %s", srcMac);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment %u/%u msgId=%lu type=%u len=%u",
-           h->fragIndex + 1, h->fragCount, (unsigned long)h->msgId, h->type, payloadLen);
-    
-    // Run GC
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Running reassembly GC...");
-    v4_reasm_gc(millis());
-    
-    // Find or allocate reassembly buffer
-    V4ReasmEntry* e = v4_reasm_find_or_alloc(recv_info->src_addr, h->msgId, h->type, h->fragCount);
-    if (!e) {
-      WARN_ESPNOWF("[V4_FRAG_RX] No reassembly slot available - all %u slots in use", V4_REASM_MAX);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
-      return true;
-    }
-    
-    bool isNewEntry = (e->received == 0);
-    if (isNewEntry) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Allocated new reassembly buffer: bufSize=%u", e->bufferSize);
-    } else {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Using existing reassembly buffer: %u/%u fragments already received",
-             e->received, e->fragCount);
-    }
-    
-    // Store fragment if not duplicate
-    if (h->fragIndex >= h->fragCount) {
-      WARN_ESPNOWF("[V4_FRAG_RX] Invalid fragment index %u (max %u)", h->fragIndex, h->fragCount - 1);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
-      return true;
-    }
-    
-    if (e->have[h->fragIndex]) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Duplicate fragment %u - ignoring", h->fragIndex + 1);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
-      return true;
-    }
-    
-    // Learn the sender's chunk size from any non-final fragment (every fragment
-    // but the last is full-size by construction). A direct sender uses 200 B; a
-    // sender routing through a relay must use less, because the envelope eats
-    // into the frame. Deriving the stride instead of assuming it is what lets
-    // both reassemble in the same buffer pool.
-    if (e->stride == 0 && h->fragIndex + 1 < h->fragCount && payloadLen > 0) {
-      e->stride = payloadLen;
-    }
-    if (h->fragIndex + 1 == h->fragCount) e->lastFragLen = payloadLen;
-    // Until a non-final fragment has been seen (e.g. the last one arrived
-    // first), fall back to the direct-path stride — the historical behaviour.
-    const uint16_t stride = e->stride ? e->stride : (uint16_t)V4_MAX_FRAGMENT_PAYLOAD;
-
-    // Copy fragment data to buffer
-    uint16_t offset = (uint16_t)(h->fragIndex * stride);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Storing at offset=%u len=%u stride=%u (bufSize=%u)",
-           offset, payloadLen, stride, e->bufferSize);
-    if (offset + payloadLen > e->bufferSize) {
-      WARN_ESPNOWF("[V4_FRAG_RX] Fragment overflow: offset=%u len=%u bufSize=%u", offset, payloadLen, e->bufferSize);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Resetting corrupted reassembly buffer");
-      v4_reasm_reset(*e);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
-      return true;
-    }
-    
-    memcpy(e->buffer + offset, payload, payloadLen);
-    e->have[h->fragIndex] = true;
-    e->received++;
-    e->lastUpdateMs = millis();
-    
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment %u stored successfully", h->fragIndex + 1);
-    
-    // Check if complete
-    if (e->received < e->fragCount) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Progress: %u/%u fragments received",
-             e->received, e->fragCount);
-      
-      // Log which fragments are still missing
-      if (e->fragCount <= 10) {  // Only log for reasonable fragment counts
-        char missing[64] = {0};  // Max: "1,2,3,4,5,6,7,8,9,10" = 20 chars + margin
-        int offset = 0;
-        for (uint8_t i = 0; i < e->fragCount; i++) {
-          if (!e->have[i]) {
-            if (offset > 0 && offset < (int)sizeof(missing) - 5) {
-              offset += snprintf(missing + offset, sizeof(missing) - offset, ",");
-            }
-            if (offset < (int)sizeof(missing) - 5) {
-              offset += snprintf(missing + offset, sizeof(missing) - offset, "%u", i + 1);
-            }
-          }
-        }
-        if (offset > 0) {
-          DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Still waiting for fragments: %s", missing);
-        }
-      }
-      
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
-      return true;  // Not complete yet
-    }
-    
-    // Calculate actual reassembled size (last fragment may be partial).
-    // Uses the learned stride so a routed transfer reports its real length
-    // rather than one computed from the direct-path chunk size.
-    uint16_t reassembledSize = (uint16_t)((e->fragCount - 1) * stride + e->lastFragLen);
-    
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ✓✓✓ REASSEMBLY COMPLETE ✓✓✓");
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] All %u fragments received! Total size: %u bytes",
-           e->fragCount, reassembledSize);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Proceeding to handle reassembled message type=%u", h->type);
+    if (v4_reasm_accept(recv_info, h, payload, payloadLen) != V4ReasmOutcome::Complete) return true;
     if (gEspNow) { gEspNow->routerMetrics.v4FragRxCompleted++; }
-    
-    // Update pointers to point to reassembled buffer
-    payload = e->buffer;
-    payloadLen = reassembledSize;
-    
-    // CRITICAL: Mark this reassembly entry for cleanup after message processing
-    // We can't free it immediately because payload points to e->buffer
-    // The cleanup happens at the end of this function before returning
-    // Note: Store the entry pointer for cleanup (h->fragCount check at end will handle it)
   }
   
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] ========================================");
@@ -6478,15 +6693,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     }
     
     // Cleanup reassembly buffer if this was a fragmented message
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V4_REASM_MAX; i++) {
-        if (gV4Reasm[i].active && gV4Reasm[i].msgId == h->msgId && 
-            memcmp(gV4Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v4_reasm_reset(gV4Reasm[i]);
-          break;
-        }
-      }
-    }
+    v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
   
@@ -6625,17 +6832,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // This was previously only cleaning up at the end of the function, causing memory leaks
   // for message types that returned early (TEXT, CMD, HEARTBEAT, etc.)
   // Now we cleanup immediately after processing any fragmented message
-  if (h->fragCount > 1) {
-    for (int i = 0; i < V4_REASM_MAX; i++) {
-      if (gV4Reasm[i].active && gV4Reasm[i].msgId == h->msgId && 
-          memcmp(gV4Reasm[i].src, recv_info->src_addr, 6) == 0) {
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Cleaning up reassembly buffer for msgId=%lu",
-               (unsigned long)h->msgId);
-        v4_reasm_reset(gV4Reasm[i]);
-        break;
-      }
-    }
-  }
+  v4_dispatch_post_cleanup(recv_info, h);
   
   return true;
 }
@@ -6713,7 +6910,9 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
     // Step 3c: cmd_exec context (callback fires after deferred CMD finishes).
     // sendAeadSync provides backpressure — the caller blocks until the wire
     // send completes, so subsequent CMD callbacks don't pile up frames in the
-    // clerk queue faster than they can drain.
+    // clerk queue faster than they can drain. A result over one frame runs its
+    // fragment/ACK loop here on cmd_exec (not on the espnow_tx dispatcher) and
+    // may take longer than the 2000 ms, which bounds only single-frame sends.
     espnowtx::sendAeadSync(ctx->srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
                            ctx->cmdMsgId, respPayload, payloadLen, 1, 2000);
     free(respPayload);
@@ -7417,11 +7616,9 @@ static void buildCapabilitySummary(CapabilitySummary& cap) {
 }
 
 /**
- * Generate full device manifest (UI apps + CLI command dump)
+ * Fill `doc` with the full device manifest (UI apps + CLI command dump).
  */
-static String generateDeviceManifest() {
-  PSRAM_JSON_DOC(doc);
-  
+static void buildDeviceManifest(JsonDocument& doc) {
   // Device info section
   JsonObject device = doc["device"].to<JsonObject>();
   device["name"] = gSettings.espnowDeviceName;
@@ -7540,16 +7737,61 @@ static String generateDeviceManifest() {
       cmd["admin"] = modules[m].commands[c].requiresAdmin;
     }
   }
-  
-  String manifest;
-  serializeJson(doc, manifest);
-  return manifest;
+}
+
+// Bond JSON files (manifest, schema) are serialized into one PSRAM buffer of
+// exactly measureJson() bytes, never into a String: an Arduino String stops at
+// 65,535 bytes on builds without BOARD_HAS_PSRAM and the manifest is larger.
+// The size limit is kFileSlotMaxFileSize, the largest file the receiver keeps
+// whole in RAM and processes as a bond file; a larger document is refused here
+// with an error instead of being sent. Returns the buffer (caller ps_free()s
+// it) and its length, or nullptr.
+static char* serializeBondJson(JsonDocument& doc, size_t* outLen, const char* tag) {
+  *outLen = 0;
+  const size_t n = measureJson(doc);
+  if (n == 0 || n > kFileSlotMaxFileSize) {
+    ERROR_ESPNOWF("[BOND] %s: JSON is %u bytes (limit %lu) - not sent",
+                  tag, (unsigned)n, (unsigned long)kFileSlotMaxFileSize);
+    return nullptr;
+  }
+  char* buf = (char*)ps_alloc(n + 1, AllocPref::PreferPSRAM, tag);
+  if (!buf) {
+    ERROR_ESPNOWF("[BOND] %s: no memory for %u bytes", tag, (unsigned)(n + 1));
+    return nullptr;
+  }
+  const size_t got = serializeJson(doc, buf, n + 1);
+  if (got != n) {
+    ERROR_ESPNOWF("[BOND] %s: serialized %u of %u bytes", tag, (unsigned)got, (unsigned)n);
+    ps_free(buf);
+    return nullptr;
+  }
+  *outLen = n;
+  return buf;
+}
+
+// Writes `len` bytes to `path` in one write and checks the count; a short write
+// removes the partial file so a later reader never sees it. The caller holds
+// the filesystem lock.
+static bool writeBondJsonFileLocked(const char* path, const char* data, size_t len, const char* authReason) {
+  File f = VFS::openGuarded(path, "w", VFS::systemAuth(authReason), true);
+  if (!f) {
+    ERROR_ESPNOWF("[BOND] cannot open %s for writing", path);
+    return false;
+  }
+  const size_t written = f.write((const uint8_t*)data, len);
+  f.close();
+  if (written != len) {
+    ERROR_ESPNOWF("[BOND] incomplete write of %s (%u of %u bytes)", path, (unsigned)written, (unsigned)len);
+    VFS::removeGuarded(path, VFS::systemAuth(authReason));
+    return false;
+  }
+  return true;
 }
 
 /**
  * Cache manifest to LittleFS keyed by firmware hash
  */
-static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const String& manifest) {
+static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const char* manifest, size_t len) {
   if (!filesystemReady) return false;
   
   // Build filename from hash
@@ -7569,21 +7811,12 @@ static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const String& mani
 
   // Write manifest
   FsLockGuard fsGuard("pair.manifest.cache");
-  File f = VFS::openGuarded(path, "w", VFS::systemAuth("espnow.manifest_cache_write"), true);
-  if (!f) {
-    broadcastOutput("[BOND] ERROR: Failed to open manifest cache file");
+  if (!writeBondJsonFileLocked(path, manifest, len, "espnow.manifest_cache_write")) {
+    broadcastOutput("[BOND] ERROR: Failed to cache the manifest");
     return false;
   }
   
-  size_t written = f.print(manifest);
-  f.close();
-  
-  if (written != manifest.length()) {
-    broadcastOutput("[BOND] ERROR: Incomplete manifest write");
-    return false;
-  }
-  
-  BROADCAST_PRINTF("[BOND] Cached manifest to %s (%u bytes)", path, (unsigned)written);
+  BROADCAST_PRINTF("[BOND] Cached manifest to %s (%u bytes)", path, (unsigned)len);
   return true;
 }
 
@@ -7955,24 +8188,29 @@ static void sendBondSchema(const uint8_t* peerMac) {
   String tempPath = "/system/espnow/this_device/_schema_out.json";
   size_t schemaLen = 0;
   {
-    PSRAM_JSON_DOC(doc);
-    buildSettingsSchemaJson(doc);
-    String schema;
-    serializeJson(doc, schema);
-    schemaLen = schema.length();
-    DEBUG_ESPNOWF("[SCHEMA_SEND] Generated schema JSON: %d bytes", schemaLen);
-
-    FsLockGuard guard("bond.schema.send");
-    File f = VFS::openGuarded(tempPath, "w", VFS::systemAuth("espnow.schema_send_temp"), true);
-    if (!f) {
-      ERROR_ESPNOWF("[SCHEMA_SEND] Cannot create %s", tempPath.c_str());
+    char* schema = nullptr;
+    {
+      PSRAM_JSON_DOC(doc);
+      buildSettingsSchemaJson(doc);
+      schema = serializeBondJson(doc, &schemaLen, "bond.schema");
+    }  // the document is freed before the file write
+    if (!schema) {
       sSchemaTransferInProgress = false;
       return;
     }
-    f.print(schema);
-    f.close();
-    DEBUG_ESPNOWF("[SCHEMA_SEND] Wrote %d bytes to %s", schemaLen, tempPath.c_str());
-    // schema + doc destructors run here — memory freed before transfer
+    DEBUG_ESPNOWF("[SCHEMA_SEND] Generated schema JSON: %u bytes", (unsigned)schemaLen);
+
+    bool written = false;
+    {
+      FsLockGuard guard("bond.schema.send");
+      written = writeBondJsonFileLocked(tempPath.c_str(), schema, schemaLen, "espnow.schema_send_temp");
+    }
+    ps_free(schema);  // freed before the transfer, which streams from the file
+    if (!written) {
+      sSchemaTransferInProgress = false;
+      return;
+    }
+    DEBUG_ESPNOWF("[SCHEMA_SEND] Wrote %u bytes to %s", (unsigned)schemaLen, tempPath.c_str());
   }
 
   DEBUG_ESPNOWF("[SCHEMA_SEND] Calling sendFileToMac for %s", tempPath.c_str());
@@ -8046,30 +8284,39 @@ static void sendBondManifest(const uint8_t* peerMac) {
   sManifestTransferInProgress = true;
 
   BROADCAST_PRINTF("[BOND] manifest-send: building dest=%s", MAC_STR(peerMac));
-  String manifest = generateDeviceManifest();
-  BROADCAST_PRINTF("[BOND] manifest-send: built len=%d", manifest.length());
+  size_t manifestLen = 0;
+  char* manifest = nullptr;
+  {
+    PSRAM_JSON_DOC(doc);
+    buildDeviceManifest(doc);
+    manifest = serializeBondJson(doc, &manifestLen, "bond.manifest");
+  }  // the document is freed before the file write
+  if (!manifest) {
+    BROADCAST_PRINTF("[BOND] manifest-send: ERROR manifest not built (see log)");
+    sManifestTransferInProgress = false;
+    return;
+  }
+  BROADCAST_PRINTF("[BOND] manifest-send: built len=%u", (unsigned)manifestLen);
 
   String tempPath = "/system/_manifest_out.json";
+  bool written = false;
   {
     FsLockGuard guard("bond.manifest.send");
-    if (!filesystemReady) {
+    if (filesystemReady) {
+      if (!VFS::existsGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"))) {
+        VFS::mkdirGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"));
+      }
+      written = writeBondJsonFileLocked(tempPath.c_str(), manifest, manifestLen, "espnow.bond_manifest_send");
+    } else {
       BROADCAST_PRINTF("[BOND] manifest-send: ERROR fs not ready");
-      sManifestTransferInProgress = false;
-      return;
     }
-    if (!VFS::existsGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"))) {
-      VFS::mkdirGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"));
-    }
-    File f = VFS::openGuarded(tempPath, "w", VFS::systemAuth("espnow.bond_manifest_send"), true);
-    if (!f) {
-      BROADCAST_PRINTF("[BOND] manifest-send: ERROR open %s failed", tempPath.c_str());
-      sManifestTransferInProgress = false;
-      return;
-    }
-    f.print(manifest);
-    f.close();
-    BROADCAST_PRINTF("[BOND] manifest-send: wrote %s len=%d", tempPath.c_str(), manifest.length());
   }
+  ps_free(manifest);  // freed before the transfer, which streams from the file
+  if (!written) {
+    sManifestTransferInProgress = false;
+    return;
+  }
+  BROADCAST_PRINTF("[BOND] manifest-send: wrote %s len=%u", tempPath.c_str(), (unsigned)manifestLen);
 
   bool fileSent = sendFileToMac(peerMac, tempPath);
   BROADCAST_PRINTF("[BOND] manifest-send: sendFileToMac rc=%d", (int)fileSent);
@@ -8168,16 +8415,16 @@ bool requestBondSchema(const uint8_t* peerMac) {
  * bondSchemaReceived so polling endpoints (handleBondSettingsSchemaSync)
  * see completion.
  */
-static void processBondSchema(const uint8_t* srcMac, const String& deviceName, const String& schemaStr) {
-  DEBUG_ESPNOWF("[SCHEMA_PROC] processBondSchema: srcMac=%p len=%d", srcMac, schemaStr.length());
+static void processBondSchema(const uint8_t* srcMac, const String& deviceName, const char* schema, size_t len) {
+  DEBUG_ESPNOWF("[SCHEMA_PROC] processBondSchema: srcMac=%p len=%u", srcMac, (unsigned)len);
   if (!srcMac) {
     DEBUG_ESPNOWF("[SCHEMA_PROC] EXIT: srcMac is NULL");
     return;
   }
   // Validate JSON envelope — reject truncated/corrupt transfers (mirrors
   // processBondSettings's check).
-  if (schemaStr.length() < 2 || schemaStr[0] != '{' || schemaStr[schemaStr.length() - 1] != '}') {
-    BROADCAST_PRINTF("[BOND_SYNC] REJECTED corrupt schema (len=%d, not valid JSON object)", schemaStr.length());
+  if (!bondJsonEnvelopeOk(schema, len)) {
+    BROADCAST_PRINTF("[BOND_SYNC] REJECTED corrupt schema (len=%u, not valid JSON object)", (unsigned)len);
     return;
   }
 
@@ -8194,21 +8441,13 @@ static void processBondSchema(const uint8_t* srcMac, const String& deviceName, c
     if (!VFS::existsGuarded(dirPath, VFS::systemAuth("espnow.schema_cache_mkdir"))) {
       VFS::mkdirGuarded(dirPath, VFS::systemAuth("espnow.schema_cache_mkdir"));
     }
-    File f = VFS::openGuarded(filePath, "w", VFS::systemAuth("espnow.schema_cache_write"), true);
-    if (!f) {
-      ERROR_ESPNOWF("[SCHEMA_PROC] Failed to open %s for writing", filePath);
-      return;
-    }
-    size_t written = f.print(schemaStr);
-    f.close();
-    if (written != schemaStr.length()) {
-      ERROR_ESPNOWF("[SCHEMA_PROC] Incomplete write (wrote %d of %d)", written, schemaStr.length());
+    if (!writeBondJsonFileLocked(filePath, schema, len, "espnow.schema_cache_write")) {
       return;
     }
   }
 
   if (gEspNow) gEspNow->bondSchemaReceived = true;
-  BROADCAST_PRINTF("[BOND_SYNC] Schema cached: %d bytes from %s", schemaStr.length(), deviceName.c_str());
+  BROADCAST_PRINTF("[BOND_SYNC] Schema cached: %u bytes from %s", (unsigned)len, deviceName.c_str());
 }
 
 /**
@@ -8330,48 +8569,110 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
       }
     }
   }
-  
-  // Invalidate dynamic menu to trigger rebuild with new settings data
-#if ENABLE_OLED_DISPLAY
-  extern void invalidateDynamicMenu();
-  invalidateDynamicMenu();
-  DEBUG_ESPNOWF("[SETTINGS_PROC] Invalidated dynamic menu");
-#endif
 }
 
 /**
- * Load cached manifest from LittleFS by firmware hash
+ * Whether a complete manifest for this firmware hash is cached. Reads two bytes
+ * (the first and the last) instead of loading the file.
  */
-static String loadManifestFromCache(const uint8_t fwHash[16]) {
-  if (!filesystemReady) return "";
-  
-  // Build filename from hash
+static bool manifestCachedFor(const uint8_t fwHash[16]) {
+  if (!filesystemReady) return false;
+
   char keyHex[33];
   for (int i = 0; i < 16; i++) {
     snprintf(keyHex + (i * 2), 3, "%02x", fwHash[i]);
   }
   keyHex[32] = '\0';
-  
+
   char path[64];
   snprintf(path, sizeof(path), "/system/manifests/%s.json", keyHex);
-  
-  if (!VFS::existsGuarded(path, VFS::systemAuth("espnow.manifest_load"))) {
-    return "";  // Not cached
-  }
 
   FsLockGuard fsGuard("pair.manifest.load");
+  if (!VFS::existsGuarded(path, VFS::systemAuth("espnow.manifest_load"))) {
+    return false;  // Not cached
+  }
   File f = VFS::openGuarded(path, "r", VFS::systemAuth("espnow.manifest_load"));
   if (!f) {
-    return "";
+    return false;
   }
-
-  String manifest = f.readString();
+  const size_t size = f.size();
+  bool complete = false;
+  if (size >= 2) {
+    const int first = f.read();
+    const int last = f.seek(size - 1) ? f.read() : -1;
+    complete = (first == '{' && last == '}');
+  }
   f.close();
-  
-  return manifest;
+  return complete;
 }
 
 #endif // ENABLE_BONDED_MODE
+
+// Cached manifests live at /system/manifests/<fwHash>.json, where fwHash is the
+// 32 lowercase hex characters of the peer firmware hash. Copies one into a
+// PSRAM buffer sized from the file (at most kFileSlotMaxFileSize, the largest
+// manifest a bond transfer delivers) while the filesystem lock is held, so the
+// caller prints or sends it after the lock is released. Returns the length and
+// the buffer (caller ps_free()s *out), or 0 with *err naming the reason. Any
+// fwHash that is not 32 hex characters is refused before the filesystem is
+// touched.
+size_t espnowReadCachedManifest(const char* fwHashHex, const AuthContext& auth, char** out, const char** err) {
+  *out = nullptr;
+  *err = "not found";
+  if (!fwHashHex || strlen(fwHashHex) != 32) {
+    *err = "invalid fwHash";
+    return 0;
+  }
+  for (const char* c = fwHashHex; *c; ++c) {
+    if (!((*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'f'))) {
+      *err = "invalid fwHash";
+      return 0;
+    }
+  }
+  if (!filesystemReady) {
+    *err = "filesystem not ready";
+    return 0;
+  }
+  char path[64];
+  snprintf(path, sizeof(path), "/system/manifests/%s.json", fwHashHex);
+
+  FsLockGuard fsGuard("espnow.manifest_read");
+  if (!VFS::existsGuarded(path, auth)) {
+    return 0;
+  }
+  File f = VFS::openGuarded(path, "r", auth);
+  if (!f) {
+    *err = "cannot open";
+    return 0;
+  }
+  const size_t size = f.size();
+  if (size == 0 || size > kFileSlotMaxFileSize) {
+    f.close();
+    *err = "unexpected size";
+    return 0;
+  }
+  char* buf = (char*)ps_alloc(size + 1, AllocPref::PreferPSRAM, "espnow.manifest_read");
+  if (!buf) {
+    f.close();
+    *err = "out of memory";
+    return 0;
+  }
+  size_t got = 0;
+  while (got < size) {
+    const size_t n = f.read((uint8_t*)buf + got, size - got);
+    if (n == 0) break;
+    got += n;
+  }
+  f.close();
+  if (got != size) {
+    ps_free(buf);
+    *err = "read failed";
+    return 0;
+  }
+  buf[size] = '\0';
+  *out = buf;
+  return size;
+}
 
 // ==========================
 // Metadata Exchange Functions
@@ -8484,6 +8785,44 @@ static void sendMetadata(const uint8_t* peerMac, bool isPush, bool force = false
       isPush ? "PUSH" : "RESP", MAC_STR(peerMac),
       status[0] ? status : "encrypted send failed");
   }
+}
+
+/**
+ * Push our metadata to every peer that holds an ACTIVE session with us and
+ * subscribes to ESPNOW_EVT_METADATA_PUSH (espnowrequestevents META=0x20).
+ * Runs on espnow_task from the super-loop (step 9a). gMetadataChanged is set
+ * by the commands that edit a metadata field; the settle window coalesces a
+ * burst of edits (a settings-editor save fires one command per field) into a
+ * single PUSH per peer. The flag is cleared once the push is attempted,
+ * whatever each send returned — sendMetadata logs a failure and the peer can
+ * still pull with espnowrequestmeta. Peers without an ACTIVE session are
+ * skipped on purpose: v4_send_encrypted_or_queue would otherwise park a frame
+ * and kick KEY_EX / SESSION_OPEN at every stale slot on every room change.
+ * While ESP-NOW is not initialized the flag is kept for the next start.
+ * Returns the number of peers a PUSH was attempted for (0 while settling).
+ */
+static int metadataPushTick(uint32_t nowMs) {
+  if (!gMetadataChanged) { gMetadataPushDueMs = 0; return 0; }
+  if (!gEspNow || !gEspNow->initialized) return 0;
+  if (gMetadataPushDueMs == 0) {
+    gMetadataPushDueMs = nowMs + METADATA_PUSH_SETTLE_MS;
+    if (gMetadataPushDueMs == 0) gMetadataPushDueMs = 1;  // 0 means "not armed"
+    return 0;
+  }
+  if ((int32_t)(nowMs - gMetadataPushDueMs) < 0) return 0;  // wrap-safe: not due yet
+  gMetadataChanged = false;
+  gMetadataPushDueMs = 0;
+  int attempted = 0;
+  const uint8_t slots = sessionSlotCount();
+  for (uint8_t i = 0; i < slots; i++) {
+    const SessionState* s = sessionAt(i);
+    if (!s || s->state != SESSION_ACTIVE) continue;
+    if (!peerIdentityWantsEvent(s->peerMac, ESPNOW_EVT_METADATA_PUSH)) continue;
+    sendMetadata(s->peerMac, /*isPush=*/true);
+    attempted++;
+  }
+  INFO_ESPNOWF("[METADATA] local metadata changed: PUSH attempted to %d session-active peer(s)", attempted);
+  return attempted;
 }
 
 /**
@@ -9823,6 +10162,9 @@ void processMeshHeartbeats() {
   sessionRekeyPrevKeysSweep((uint32_t)millis());
   // 1d2. F6 — re-send unanswered KEY_EX_HELLOs / expire dead handshakes.
   keyExRetrySweep((uint32_t)millis());
+  // 1d3. Re-send an unanswered REKEY; drop a session whose REKEY stays
+  // unanswered so the next send re-handshakes.
+  rekeyRetrySweep((uint32_t)millis());
   // 1e. Phase 3.6 — auto-trigger REKEY on threshold (txSeq>=10k OR age>=1h).
   // Walks the SessionState table; uses the kRekeyMinIntervalMs guard inside
   // espnowRekeyInitiate to avoid re-firing while a rekey is in flight.
@@ -9844,8 +10186,12 @@ void processMeshHeartbeats() {
         // timeouts, so a stuck transfer can't postpone rotation forever.
         DEBUG_ESPNOWF("REKEY deferred (file transfer active with peer) sessionId=%u txSeq=%lu",
                       (unsigned)sc->sessionId, (unsigned long)sc->txSeqNext);
-      } else if (wantRekey) {
-        // Log once per trigger (the initiate function's guard prevents spam).
+      } else if (wantRekey &&
+                 (uint32_t)(nowMs2 - sc->establishedAtMs) >= kRekeyMinIntervalMs &&
+                 !(sc->rekeyInitiatedAtMs != 0 &&
+                   (uint32_t)(nowMs2 - sc->rekeyInitiatedAtMs) < kRekeyMinIntervalMs)) {
+        // One line per attempt: espnowRekeyInitiate refuses inside kRekeyMinIntervalMs of
+        // the last key change or the last attempt (a refused send keeps the session ACTIVE).
         INFO_ESPNOWF("REKEY auto-trigger for sessionId=%u peer=%02X:%02X:%02X:%02X:%02X:%02X "
                      "(reason=%s txSeq=%lu ageMs=%lu)",
                      (unsigned)sc->sessionId,
@@ -10185,6 +10531,10 @@ void processMeshHeartbeats() {
     // credential-bearing unknown command.
     const String safeDeferredResult =
         redactEspNowCommandResult(String(gEspNow->deferredCmdRespResult));
+    // Readable record for a sender that waits on the peer's answer (the OLED
+    // bonded-settings editor reports this instead of the local send result).
+    espnowPublishCmdResult(gEspNow->deferredCmdRespSrcMac, gEspNow->deferredCmdRespReqId,
+                           gEspNow->deferredCmdRespSuccess, safeDeferredResult.c_str());
     // Chunk the result: a command's output can exceed the 256 B record slot
     // (e.g. `files json` for a non-trivial dir). Storing it whole truncated it
     // mid-JSON; chunking lets the client reassemble by reqId.
@@ -10279,9 +10629,7 @@ void processMeshHeartbeats() {
         BROADCAST_PRINTF("[BOND_SYNC] Requesting CAP (msgId=%lu)", (unsigned long)reqId);
       } else if (!haveManifest) {
         // Have cap, need manifest — check cache first
-        bool haveCached = false;
-        String cached = loadManifestFromCache(gEspNow->lastRemoteCap.fwHash);
-        haveCached = (cached.length() > 0);
+        const bool haveCached = manifestCachedFor(gEspNow->lastRemoteCap.fwHash);
         if (haveCached) {
           gEspNow->bondManifestReceived = true;
           BROADCAST_PRINTF("[BOND_SYNC] Manifest found in cache, skipping request");
@@ -10598,6 +10946,10 @@ void processMeshHeartbeats() {
     sendMetadata(gEspNow->metadataPendingResponseMac, false, true);
   }
   
+  // 9a. Push our own metadata to session-active peers once a local command
+  // changed it (settles METADATA_PUSH_SETTLE_MS so one editor save = one PUSH).
+  metadataPushTick(now);
+
   // 10. Process deferred received metadata (store in gMeshPeerMeta)
   if (gEspNow->deferredMetadataPending) {
     gEspNow->deferredMetadataPending = false;
@@ -10662,7 +11014,10 @@ void processMeshHeartbeats() {
           // the final fragment's content as its (truncated) preview. Chat
           // only: BOOT/system notices ride this queue as MSG_SYSTEM_EVENT
           // and must not fire text_rx automations or "Msg from" toasts.
-          if (entry.msgType == MSG_TEXT &&
+          // Authenticated only: a plaintext message (accepted on a keyless
+          // device, filed under its MAC) must not drive a text_rx automation
+          // or a "Msg from" toast as if a known peer had sent it.
+          if (entry.msgType == MSG_TEXT && entry.authenticated &&
               (entry.fragCount <= 1 || (uint8_t)(entry.fragIndex + 1) == entry.fragCount)) {
             systemEventPost(SYSEVT_TEXT_RX, devName.c_str(), entry.content);
           }
@@ -10902,6 +11257,11 @@ EXT_RAM_BSS_ATTR static char gLastInitErrorReason[96];
 // instance. False suppresses an ESP-NOW-OFF event because ON was never posted.
 static bool deinitEspNow(bool publishOffEvent = true);
 
+// Message store setup (message buffer section at the end of this file): the
+// store lock, the slot table and the first history blocks. Returns the bytes
+// allocated; 0 when the table could not be allocated.
+static size_t peerHistoryStoreInit();
+
 // Helper: Initialize ESP-NOW subsystem (static - internal use only)
 static bool initEspNow() {
   gLastInitErrorReason[0] = '\0';
@@ -11034,30 +11394,10 @@ static bool initEspNow() {
                     gEspNow->streamDrainMax);
     }
 
-    // Allocate per-device message history with dynamic growth
-    // Start with small initial capacity (5 slots) and grow as peers are discovered
-    int initialCapacity = PEER_HISTORY_INITIAL_CAPACITY;
-    if (initialCapacity > gMeshPeerSlots) {
-      initialCapacity = gMeshPeerSlots;  // Cap at configured max
-    }
-    
-    size_t histSize = sizeof(PeerMessageHistory) * initialCapacity;
-    gEspNow->peerMessageHistories = (PeerMessageHistory*)ps_alloc(histSize, AllocPref::PreferPSRAM, "espnow.msgHist");
-    if (gEspNow->peerMessageHistories) {
-      // Placement-init each entry (has constructor)
-      for (int i = 0; i < initialCapacity; i++) {
-        new (&gEspNow->peerMessageHistories[i]) PeerMessageHistory();
-      }
-      gEspNow->peerHistoryCapacity = initialCapacity;
-      gEspNow->peerHistoryCount = 0;
-      BROADCAST_PRINTF("[ESP-NOW] Message history allocated: %d slots (~%u KB, grows to %d max)",
-                       initialCapacity, (unsigned)(histSize / 1024), gMeshPeerSlots);
-    } else {
-      BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate message history (%u bytes)", (unsigned)histSize);
-      gEspNow->peerHistoryCapacity = 0;
-      gEspNow->peerHistoryCount = 0;
-      // Non-fatal — messaging will be limited but ESP-NOW still works
-    }
+    // Per-device message history: slot table sized to gMeshPeerSlots plus the
+    // first PEER_HISTORY_INITIAL_CAPACITY blocks; further blocks are allocated
+    // per new peer. Failure is non-fatal (messaging is limited, ESP-NOW works).
+    size_t histSize = peerHistoryStoreInit();
 
     size_t totalBytes = sizeof(EspNowState) + histSize +
                         sizeof(MeshPeerHealth) * gMeshPeerSlots +
@@ -13195,6 +13535,7 @@ const char* cmd_espnow_setname(const String& argsInput) {
   }
 
   setSetting(gSettings.espnowDeviceName, name);
+  gMetadataChanged = true;  // Mark metadata as dirty
   setSetting(gSettings.espnowFirstTimeSetup, true);
   // Raw setSetting bypasses handleSettingCommand, which is where
   // notifySettingChanged normally fires — post the parity notification here.
@@ -13250,6 +13591,11 @@ static const char* metaGetSet(const String& args, String& field, const char* fie
     snprintf(getDebugBuffer(), 1024, "Error: %s too long (max %zu chars)", fieldName, maxLen);
     return getDebugBuffer();
   }
+  if (!metadataTextAllowed(trimmed.c_str())) {
+    snprintf(getDebugBuffer(), 1024,
+             "Error: %s may not contain control characters or < > \" ' & \\", fieldName);
+    return getDebugBuffer();
+  }
   setSetting(field, trimmed);  // Persist to flash
   gMetadataChanged = true;  // Mark metadata as dirty
   systemEventPost(SYSEVT_SETTING_CHANGED, fieldName, trimmed.c_str());
@@ -13287,6 +13633,7 @@ const char* cmd_espnow_stationary(const String& argsInput) {
   }
   bool val = a.argBool(0, false);
   setSetting(gSettings.espnowStationary, val);
+  gMetadataChanged = true;  // Mark metadata as dirty
   snprintf(getDebugBuffer(), 1024, "Stationary set to: %s", val ? "true" : "false");
   return getDebugBuffer();
 }
@@ -16847,6 +17194,26 @@ const char* cmd_bond_resync(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// Prints a JSON buffer in 200-byte lines (the debug queue holds 256-byte lines).
+// A manifest is several hundred lines and the output queue drops lines when
+// full, so each line first waits (at most 500 ms) until only a few lines are
+// pending.
+static void broadcastBondJsonChunks(const char* data, size_t len) {
+  QueueHandle_t q = getDebugQueue();
+  char chunkBuf[201];
+  while (len > 0) {
+    for (int waited = 0; q && uxQueueMessagesWaiting(q) > 16 && waited < 50; ++waited) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    const size_t chunk = (len > 200) ? 200 : len;
+    memcpy(chunkBuf, data, chunk);
+    chunkBuf[chunk] = '\0';
+    broadcastOutput(chunkBuf);
+    data += chunk;
+    len -= chunk;
+  }
+}
+
 /**
  * Show cached remote manifests: bondshowremotemanifest [fwHash]
  * Without args: list all cached manifests
@@ -16901,36 +17268,19 @@ const char* cmd_bond_showremotemanifest(const String& argsInput) {
   }
   
   // Show specific manifest by fwHash
-  char path[96];
-  snprintf(path, sizeof(path), "%s/%s.json", manifestDir, args.c_str());
-  if (!VFS::existsGuarded(path, currentAuthContext())) {
-    return "Error: Manifest not found. Use 'bondshowremotemanifest' to list available.";
+  char* manifest = nullptr;
+  const char* err = nullptr;
+  const size_t len = espnowReadCachedManifest(args.c_str(), currentAuthContext(), &manifest, &err);
+  if (len == 0) {
+    snprintf(getDebugBuffer(), 1024,
+             "Error: Manifest %s (%s). Use 'bondshowremotemanifest' to list available.", args.c_str(), err);
+    return getDebugBuffer();
   }
 
-  FsLockGuard guard("bond.manifest.read");
-  File f = VFS::openGuarded(path, "r", currentAuthContext());
-  if (!f) {
-    return "Error: Failed to open manifest file.";
-  }
-  
-  String manifest = f.readString();
-  f.close();
-  
   BROADCAST_PRINTF("=== Remote Manifest: %s ===", args.c_str());
-  BROADCAST_PRINTF("Size: %u bytes", (unsigned)manifest.length());
-  
-  // Broadcast manifest in 200-byte chunks
-  const char* ptr = manifest.c_str();
-  size_t remaining = manifest.length();
-  char chunkBuf[201];
-  while (remaining > 0) {
-    size_t chunk = (remaining > 200) ? 200 : remaining;
-    memcpy(chunkBuf, ptr, chunk);
-    chunkBuf[chunk] = '\0';
-    broadcastOutput(chunkBuf);
-    ptr += chunk;
-    remaining -= chunk;
-  }
+  BROADCAST_PRINTF("Size: %u bytes", (unsigned)len);
+  broadcastBondJsonChunks(manifest, len);
+  ps_free(manifest);
   
   return "Manifest displayed above.";
 }
@@ -16941,23 +17291,21 @@ const char* cmd_bond_showremotemanifest(const String& argsInput) {
 const char* cmd_bond_showmanifest(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String manifest = generateDeviceManifest();
+  size_t len = 0;
+  char* manifest = nullptr;
+  {
+    PSRAM_JSON_DOC(doc);
+    buildDeviceManifest(doc);
+    manifest = serializeBondJson(doc, &len, "bond.manifest.show");
+  }
+  if (!manifest) {
+    return "Error: Manifest could not be built (see log).";
+  }
   
   broadcastOutput("=== Device Manifest ===");
-  BROADCAST_PRINTF("Size: %u bytes", (unsigned)manifest.length());
-  
-  // Broadcast manifest in 200-byte chunks (debug queue buffer is 256 bytes)
-  const char* ptr = manifest.c_str();
-  size_t remaining = manifest.length();
-  char chunkBuf[201];
-  while (remaining > 0) {
-    size_t chunk = (remaining > 200) ? 200 : remaining;
-    memcpy(chunkBuf, ptr, chunk);
-    chunkBuf[chunk] = '\0';
-    broadcastOutput(chunkBuf);
-    ptr += chunk;
-    remaining -= chunk;
-  }
+  BROADCAST_PRINTF("Size: %u bytes", (unsigned)len);
+  broadcastBondJsonChunks(manifest, len);
+  ps_free(manifest);
   
   return "Manifest displayed above.";
 }
@@ -18090,106 +18438,166 @@ const char* cmd_espnow_usersync(const String& argsInput) {
 // Per-Device Message Buffer Management (merged from espnow_message_buffer.cpp)
 // ============================================================================
 
-// Helper: Grow peer history array when capacity is reached
-static bool growPeerHistoryArray() {
-  if (!gEspNow || !gEspNow->peerMessageHistories) return false;
-  
-  int oldCapacity = gEspNow->peerHistoryCapacity;
-  int newCapacity = oldCapacity + PEER_HISTORY_GROWTH_INCREMENT;
-  
-  // Cap at gMeshPeerSlots (max configured peer limit)
-  if (newCapacity > gMeshPeerSlots) {
-    newCapacity = gMeshPeerSlots;
-  }
-  
-  // Already at max capacity
-  if (newCapacity <= oldCapacity) {
-    return false;
-  }
-  
-  DEBUG_ESPNOWF("[ESP-NOW] Growing peer history: %d -> %d slots", oldCapacity, newCapacity);
-  
-  // Allocate new larger array
-  size_t newSize = sizeof(PeerMessageHistory) * newCapacity;
-  PeerMessageHistory* newArray = (PeerMessageHistory*)ps_alloc(newSize, AllocPref::PreferPSRAM, "espnow.msgHist.grow");
-  
-  if (!newArray) {
-    ERROR_ESPNOWF("[ESP-NOW] Failed to grow peer history array (%u bytes)", (unsigned)newSize);
-    return false;
-  }
-  
-  // Initialize new array with placement new
-  for (int i = 0; i < newCapacity; i++) {
-    new (&newArray[i]) PeerMessageHistory();
-  }
-  
-  // Copy existing entries
-  for (int i = 0; i < oldCapacity; i++) {
-    if (gEspNow->peerMessageHistories[i].active) {
-      // Copy the entire structure (includes MAC, messages, counters)
-      memcpy(&newArray[i], &gEspNow->peerMessageHistories[i], sizeof(PeerMessageHistory));
-    }
-  }
-  
-  // Free old array and switch to new one
-  free(gEspNow->peerMessageHistories);
-  gEspNow->peerMessageHistories = newArray;
-  gEspNow->peerHistoryCapacity = newCapacity;
-  
-  BROADCAST_PRINTF("[ESP-NOW] Peer history expanded to %d slots (~%u KB)",
-                   newCapacity, (unsigned)(newSize / 1024));
-  
-  return true;
+// gEspNow->peerMessageHistories is a table of peerHistoryCapacity slot
+// pointers. A slot's PeerMessageHistory block is allocated once (the first
+// PEER_HISTORY_INITIAL_CAPACITY at init, the rest on first contact with a new
+// peer) and never moved or freed. Every store and read below runs under
+// gPeerHistoryLock; readers get copies or handles, never live pointers.
+
+static StaticSemaphore_t gPeerHistoryLockStorage;
+static SemaphoreHandle_t gPeerHistoryLock = nullptr;
+
+// Leaf lock for the peer message store: slot creation, ring writes and every
+// read. Nothing else is taken while it is held and no logging runs inside;
+// callers log after the guard's scope ends.
+struct PeerHistoryGuard {
+  bool held;
+  explicit PeerHistoryGuard(TickType_t timeout = pdMS_TO_TICKS(PEER_HISTORY_LOCK_TIMEOUT_MS))
+    : held(gPeerHistoryLock && xSemaphoreTake(gPeerHistoryLock, timeout) == pdTRUE) {}
+  ~PeerHistoryGuard() { if (held) xSemaphoreGive(gPeerHistoryLock); }
+  PeerHistoryGuard(const PeerHistoryGuard&) = delete;
+  PeerHistoryGuard& operator=(const PeerHistoryGuard&) = delete;
+};
+
+// What one locked store did. peerHistoryStoreReport logs it after the lock is
+// released.
+struct PeerHistoryStoreOutcome {
+  bool busy = false;         // lock not taken within PEER_HISTORY_LOCK_TIMEOUT_MS
+  bool stored = false;       // the record(s) were written
+  bool blockFailed = false;  // a new peer's block could not be allocated
+  int  newSlot = -1;         // slot activated for a peer seen for the first time
+  bool newBlock = false;     // that slot's block was allocated by this store
+  int  activeCount = 0;      // peerHistoryCount after the slot was activated
+  int  capacity = 0;         // slot table length
+};
+
+// Allocate and construct the block for table entry `slot`. Called with the
+// lock held. No logging: the caller reports a failure after unlocking.
+static PeerMessageHistory* peerHistoryAllocateBlock(int slot) {
+  void* mem = ps_alloc(sizeof(PeerMessageHistory), AllocPref::PreferPSRAM, "espnow.msgHist");
+  if (!mem) return nullptr;
+  PeerMessageHistory* block = new (mem) PeerMessageHistory();
+  gEspNow->peerMessageHistories[slot] = block;
+  return block;
 }
 
-// Helper: Find or create peer message history for a given MAC address
-PeerMessageHistory* findOrCreatePeerHistory(uint8_t* peerMac) {
-  if (!gEspNow || !gEspNow->peerMessageHistories) return nullptr;
-  
-  // First, try to find existing history for this peer
-  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
-    PeerMessageHistory& history = gEspNow->peerMessageHistories[i];
-    if (history.active && memcmp(history.peerMac, peerMac, 6) == 0) {
-      return &history;
-    }
+// Find the active slot for `mac`. With `create`, activate a slot for a new
+// peer: the first allocated-but-inactive block, else a new block in the first
+// empty table entry. Called with the lock held. Returns nullptr when the peer
+// has no slot (find) or none can be had (create; `outcome` records why).
+static PeerMessageHistory* peerHistorySlotLocked(const uint8_t* mac, bool create,
+                                                 PeerHistoryStoreOutcome* outcome = nullptr) {
+  if (!gEspNow || !gEspNow->peerMessageHistories || !mac) return nullptr;
+  PeerMessageHistory** table = gEspNow->peerMessageHistories;
+  const int capacity = gEspNow->peerHistoryCapacity;
+  for (int i = 0; i < capacity; i++) {
+    PeerMessageHistory* h = table[i];
+    if (h && h->active && memcmp(h->peerMac, mac, 6) == 0) return h;
   }
-  
-  // Not found, try to create new entry in existing capacity
-  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
-    PeerMessageHistory& history = gEspNow->peerMessageHistories[i];
-    if (!history.active) {
-      memcpy(history.peerMac, peerMac, 6);
-      history.head = 0;
-      history.tail = 0;
-      history.count = 0;
-      history.active = true;
-      gEspNow->peerHistoryCount++;
-      DEBUG_ESPNOWF("[ESP-NOW] Created peer history slot %d/%d for %02X:%02X:%02X:%02X:%02X:%02X",
-                    gEspNow->peerHistoryCount, gEspNow->peerHistoryCapacity,
-                    peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
-      return &history;
-    }
+  if (!create) return nullptr;
+
+  int slot = -1;
+  for (int i = 0; i < capacity && slot < 0; i++) {
+    if (table[i] && !table[i]->active) slot = i;
   }
-  
-  // No free slots - try to grow the array
-  if (growPeerHistoryArray()) {
-    // Retry allocation in the newly grown array
-    for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
-      PeerMessageHistory& history = gEspNow->peerMessageHistories[i];
-      if (!history.active) {
-        memcpy(history.peerMac, peerMac, 6);
-        history.head = 0;
-        history.tail = 0;
-        history.count = 0;
-        history.active = true;
-        gEspNow->peerHistoryCount++;
-        return &history;
+  bool newBlock = false;
+  if (slot < 0) {
+    for (int i = 0; i < capacity && slot < 0; i++) {
+      if (!table[i]) slot = i;
+    }
+    if (slot < 0) return nullptr;  // every slot belongs to a peer
+    if (!peerHistoryAllocateBlock(slot)) {
+      if (outcome) outcome->blockFailed = true;
+      return nullptr;
+    }
+    newBlock = true;
+  }
+
+  PeerMessageHistory* h = table[slot];
+  memcpy(h->peerMac, mac, 6);
+  h->head = 0;
+  h->tail = 0;
+  h->count = 0;
+  h->sentHead = 0;
+  h->sentTail = 0;
+  h->sentCount = 0;
+  h->active = true;
+  gEspNow->peerHistoryCount++;
+  if (outcome) {
+    outcome->newSlot = slot;
+    outcome->newBlock = newBlock;
+    outcome->activeCount = gEspNow->peerHistoryCount;
+    outcome->capacity = capacity;
+  }
+  return h;
+}
+
+// Create the store lock, the slot table (gMeshPeerSlots entries) and the first
+// PEER_HISTORY_INITIAL_CAPACITY blocks. Returns the bytes allocated; 0 when the
+// table could not be allocated (messaging limited, ESP-NOW still works).
+static size_t peerHistoryStoreInit() {
+  if (!gEspNow) return 0;
+  if (!gPeerHistoryLock) {
+    gPeerHistoryLock = xSemaphoreCreateMutexStatic(&gPeerHistoryLockStorage);
+  }
+
+  const int capacity = gMeshPeerSlots;
+  int eager = PEER_HISTORY_INITIAL_CAPACITY;
+  if (eager > capacity) eager = capacity;  // Cap at configured max
+  const size_t tableBytes = sizeof(PeerMessageHistory*) * (size_t)(capacity > 0 ? capacity : 0);
+  bool tableOk = false;
+  int blocks = 0;
+  {
+    PeerHistoryGuard g;
+    if (g.held && !gEspNow->peerMessageHistories && capacity > 0) {
+      PeerMessageHistory** table = (PeerMessageHistory**)ps_alloc(tableBytes, AllocPref::PreferPSRAM,
+                                                                  "espnow.msgHist.table");
+      if (table) {
+        memset(table, 0, tableBytes);
+        gEspNow->peerMessageHistories = table;
+        gEspNow->peerHistoryCapacity = capacity;
+        gEspNow->peerHistoryCount = 0;
+        tableOk = true;
+        while (blocks < eager && peerHistoryAllocateBlock(blocks)) blocks++;
       }
     }
   }
-  
-  // Still no free slots (growth failed or at max capacity)
-  return nullptr;
+
+  const size_t blockBytes = sizeof(PeerMessageHistory) * (size_t)blocks;
+  if (!tableOk) {
+    BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate message history (%u bytes)", (unsigned)tableBytes);
+    return 0;
+  }
+  BROADCAST_PRINTF("[ESP-NOW] Message history allocated: %d slots (~%u KB, grows to %d max)",
+                   blocks, (unsigned)(blockBytes / 1024), capacity);
+  return tableBytes + blockBytes;
+}
+
+// Log what a store did (lock released) and return whether it stored.
+static bool peerHistoryStoreReport(const PeerHistoryStoreOutcome& o, const uint8_t* peerMac) {
+  if (o.busy) {
+    ERROR_ESPNOWF("[ESP-NOW] peer history busy; dropped record from %02X:%02X:%02X:%02X:%02X:%02X",
+                  peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+    return false;
+  }
+  if (o.blockFailed) {
+    ERROR_ESPNOWF("[ESP-NOW] Failed to allocate peer history block (%u bytes)",
+                  (unsigned)sizeof(PeerMessageHistory));
+  }
+  if (!o.stored) {
+    broadcastOutput("[ESP-NOW] ERROR: No free peer history slots");
+    return false;
+  }
+  if (o.newSlot >= 0) {
+    DEBUG_ESPNOWF("[ESP-NOW] Created peer history slot %d/%d for %02X:%02X:%02X:%02X:%02X:%02X",
+                  o.activeCount, o.capacity,
+                  peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+    if (o.newBlock) {
+      BROADCAST_PRINTF("[ESP-NOW] Peer history slot %d/%d allocated (~%u KB)",
+                       o.newSlot + 1, o.capacity, (unsigned)(sizeof(PeerMessageHistory) / 1024));
+    }
+  }
+  return true;
 }
 
 // Store a message in the per-device buffer
@@ -18197,7 +18605,7 @@ PeerMessageHistory* findOrCreatePeerHistory(uint8_t* peerMac) {
 // and sent-store paths so the two rings behave identically (only the ring +
 // direction differ). `keyMac` becomes the record's senderMac — the conversation
 // key reported as the JSON `mac` (the peer on both directions); `fragment`/
-// `fragLen` is ONE fragment's text.
+// `fragLen` is ONE fragment's text. Called with the store lock held.
 static void espnowStoreInRing(
   ReceivedTextMessage* ring, uint8_t& head, uint8_t& tail, uint8_t& count,
   const uint8_t* keyMac, const char* name,
@@ -18235,7 +18643,7 @@ static void espnowStoreInRing(
 // with piece/of set. The slot caps at 256 B, so a single store of long content
 // (a command result, a long send) would truncate; chunking lets the client
 // reassemble by reqId. Shared by the sent and received chunked-store wrappers.
-// A short message is a single 1-of-1 piece.
+// A short message is a single 1-of-1 piece. Called with the store lock held.
 static void espnowStoreChunked(
   ReceivedTextMessage* ring, uint8_t& head, uint8_t& tail, uint8_t& count,
   const uint8_t* keyMac, const char* name, const char* message,
@@ -18263,67 +18671,71 @@ bool storeMessageInPeerHistory(
   uint8_t piece,
   uint8_t pieceTotal
 ) {
-  if (!gEspNow) return false;
+  if (!gEspNow || !peerMac) return false;
 
-  PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
-  if (!history) {
-    broadcastOutput("[ESP-NOW] ERROR: No free peer history slots");
-    return false;
+  PeerHistoryStoreOutcome outcome;
+  {
+    PeerHistoryGuard guard;
+    outcome.busy = !guard.held;
+    PeerMessageHistory* history = guard.held ? peerHistorySlotLocked(peerMac, true, &outcome) : nullptr;
+    if (history) {
+      espnowStoreInRing(history->messages, history->head, history->tail, history->count,
+                        peerMac, peerName, message, strlen(message),
+                        encrypted, msgType, reqId, piece, pieceTotal, /*isSent=*/false);
+      outcome.stored = true;
+    }
   }
-
-  espnowStoreInRing(history->messages, history->head, history->tail, history->count,
-                    peerMac, peerName, message, strlen(message),
-                    encrypted, msgType, reqId, piece, pieceTotal, /*isSent=*/false);
-  return true;
+  return peerHistoryStoreReport(outcome, peerMac);
 }
 
 bool storeSentMessageInPeerHistory(uint8_t* peerMac, const char* message, uint32_t msgId) {
-  if (!gEspNow || !message) return false;
+  if (!gEspNow || !peerMac || !message) return false;
 
-  PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
-  if (!history) {
-    broadcastOutput("[ESP-NOW] ERROR: No free peer history slots");
-    return false;
+  PeerHistoryStoreOutcome outcome;
+  {
+    PeerHistoryGuard guard;
+    outcome.busy = !guard.held;
+    PeerMessageHistory* history = guard.held ? peerHistorySlotLocked(peerMac, true, &outcome) : nullptr;
+    if (history) {
+      // Split into ≤200 B pieces sharing msgId (shared chunker) so the collapse view
+      // reassembles sent the same way and long sends aren't truncated. name empty
+      // (sent rows show delivery status, not a sender name); sends are always
+      // encrypted post-2026.
+      espnowStoreChunked(history->sent, history->sentHead, history->sentTail, history->sentCount,
+                         peerMac, "", message, /*encrypted=*/true, MSG_TEXT, msgId, /*isSent=*/true);
+      outcome.stored = true;
+    }
   }
-
-  // Split into ≤200 B pieces sharing msgId (shared chunker) so the collapse view
-  // reassembles sent the same way and long sends aren't truncated. name empty
-  // (sent rows show delivery status, not a sender name); sends are always
-  // encrypted post-2026.
-  espnowStoreChunked(history->sent, history->sentHead, history->sentTail, history->sentCount,
-                     peerMac, "", message, /*encrypted=*/true, MSG_TEXT, msgId, /*isSent=*/true);
-  return true;
+  return peerHistoryStoreReport(outcome, peerMac);
 }
 
 bool storeReceivedMessageChunked(uint8_t* peerMac, const char* peerName, const char* message,
                                  bool encrypted, LogMessageType msgType, uint32_t reqId) {
-  if (!gEspNow || !message) return false;
+  if (!gEspNow || !peerMac || !message) return false;
 
-  PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
-  if (!history) {
-    broadcastOutput("[ESP-NOW] ERROR: No free peer history slots");
-    return false;
+  PeerHistoryStoreOutcome outcome;
+  {
+    PeerHistoryGuard guard;
+    outcome.busy = !guard.held;
+    PeerMessageHistory* history = guard.held ? peerHistorySlotLocked(peerMac, true, &outcome) : nullptr;
+    if (history) {
+      // Received long content (e.g. a remote command's result) chunked the same way
+      // as sent text, so a multi-hundred-byte result isn't truncated at the 256 B
+      // slot. The client reassembles by reqId.
+      espnowStoreChunked(history->messages, history->head, history->tail, history->count,
+                         peerMac, peerName, message, encrypted, msgType, reqId, /*isSent=*/false);
+      outcome.stored = true;
+    }
   }
-
-  // Received long content (e.g. a remote command's result) chunked the same way
-  // as sent text, so a multi-hundred-byte result isn't truncated at the 256 B
-  // slot. The client reassembles by reqId.
-  espnowStoreChunked(history->messages, history->head, history->tail, history->count,
-                     peerMac, peerName, message, encrypted, msgType, reqId, /*isSent=*/false);
-  return true;
+  return peerHistoryStoreReport(outcome, peerMac);
 }
 
 void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state) {
   if (!gEspNow || !peerMac || msgId == 0) return;
+  PeerHistoryGuard guard;
+  if (!guard.held) return;
   // Don't create a peer slot just to update — only stamp if history exists.
-  PeerMessageHistory* history = nullptr;
-  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
-    if (gEspNow->peerMessageHistories[i].active &&
-        memcmp(gEspNow->peerMessageHistories[i].peerMac, peerMac, 6) == 0) {
-      history = &gEspNow->peerMessageHistories[i];
-      break;
-    }
-  }
+  PeerMessageHistory* history = peerHistorySlotLocked(peerMac, false);
   if (!history) return;
   // Stamp every fragment of this message (all share msgId in reqId).
   for (int i = 0; i < MESSAGES_PER_DEVICE; i++) {
@@ -18438,7 +18850,10 @@ static int mergePeerRingsBySeq(const PeerMessageHistory& h, ReceivedTextMessage*
 int getPeerMessages(uint8_t* peerMac, ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq) {
   if (!gEspNow || !outMessages) return 0;
 
-  PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
+  PeerHistoryGuard guard;
+  if (!guard.held) return 0;
+  // Find-only: reading a peer that has no history creates nothing.
+  PeerMessageHistory* history = peerHistorySlotLocked(peerMac, false);
   if (!history) return 0;
 
   // One peer = one interleaved timeline; output is already ascending by seqNum.
@@ -18447,22 +18862,27 @@ int getPeerMessages(uint8_t* peerMac, ReceivedTextMessage* outMessages, int maxM
 
 // Get all messages from all peers (for global view)
 int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq) {
-  if (!gEspNow || !outMessages || !gEspNow->peerMessageHistories) return 0;
-  
-  int copied = 0;
+  if (!gEspNow || !outMessages) return 0;
 
-  // Per peer, interleave its received + sent rings by seq via the shared merge
-  // (so a peer's sent rows aren't starved by its received rows — same fix as
-  // getPeerMessages). The cross-peer cap still fills peer-by-peer, so a very
-  // large multi-peer history can still miss the true global-newest — documented
-  // limitation, fine for small meshes.
-  for (int p = 0; p < gEspNow->peerHistoryCapacity && copied < maxMessages; p++) {
-    PeerMessageHistory& history = gEspNow->peerMessageHistories[p];
-    if (!history.active) continue;
-    copied = mergePeerRingsBySeq(history, outMessages, copied, maxMessages, sinceSeq);
+  int copied = 0;
+  {
+    PeerHistoryGuard guard;
+    if (!guard.held || !gEspNow->peerMessageHistories) return 0;
+
+    // Per peer, interleave its received + sent rings by seq via the shared merge
+    // (so a peer's sent rows aren't starved by its received rows — same fix as
+    // getPeerMessages). The cross-peer cap still fills peer-by-peer, so a very
+    // large multi-peer history can still miss the true global-newest — documented
+    // limitation, fine for small meshes.
+    for (int p = 0; p < gEspNow->peerHistoryCapacity && copied < maxMessages; p++) {
+      const PeerMessageHistory* history = gEspNow->peerMessageHistories[p];
+      if (!history || !history->active) continue;
+      copied = mergePeerRingsBySeq(*history, outMessages, copied, maxMessages, sinceSeq);
+    }
   }
 
-  // Sort by sequence number (simple bubble sort, good enough for small arrays)
+  // Sort the caller's copies by sequence number (simple bubble sort, good enough
+  // for small arrays; runs after the lock is released)
   for (int i = 0; i < copied - 1; i++) {
     for (int j = 0; j < copied - i - 1; j++) {
       if (outMessages[j].seqNum > outMessages[j + 1].seqNum) {
@@ -18476,16 +18896,19 @@ int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t s
   return copied;
 }
 
-// Collapse a peer's per-fragment records into one zero-copy reference per logical
-// message (see CollapsedMsgRef in the header for the contract + rationale). Walks
+// Collapse a peer's per-fragment records into one handle per logical message
+// (see CollapsedMsgRef in the header for the contract + rationale). Walks
 // the ring chronologically; fragments of one message share a reqId and are stored
 // consecutively, so a linear group-merge is correct. No text is copied — each
-// output entry points at the message's first present fragment in the live ring.
+// output entry names the message's first present fragment by slot, ring index
+// and seqNum, and carries its timestamp for ordering.
 // Collapse one ring (received or sent) into logical-message refs, appending to
 // out[] starting at index `startW`. Group-merge only searches refs added by THIS
-// call (>= startW) and also gates on isSent, so a received and a sent fragment
-// that happen to share a reqId never merge. Returns the new write count.
+// call (>= startW) and also gates on isSent and slot, so a received and a sent
+// fragment that happen to share a reqId never merge. Called with the store lock
+// held. Returns the new write count.
 static int espnowCollapseRing(const ReceivedTextMessage* ring, uint8_t tail, uint8_t count,
+                              uint8_t slot, bool isSent,
                               CollapsedMsgRef* out, int startW, int maxN) {
   int w = startW;
   for (int i = 0; i < count; i++) {
@@ -18499,14 +18922,18 @@ static int espnowCollapseRing(const ReceivedTextMessage* ring, uint8_t tail, uin
     if (msg.reqId != 0 && msg.pieceTotal > 1) {
       int g = -1;
       for (int k = startW; k < w; k++) {
-        if (out[k].reqId == msg.reqId && out[k].isSent == msg.isSent &&
-            memcmp(out[k].head->senderMac, msg.senderMac, 6) == 0) { g = k; break; }
+        if (out[k].reqId == msg.reqId && out[k].isSent == isSent &&
+            out[k].slot == slot) { g = k; break; }
       }
       if (g >= 0) {
         if (out[g].partsPresent < 255) out[g].partsPresent++;
         // Prefer the lowest-numbered present fragment as the preview head, so the
         // truncated list line shows the true start of the message.
-        if (msg.piece < out[g].head->piece) out[g].head = &msg;
+        if (msg.piece < ring[out[g].index].piece) {
+          out[g].index = idx;
+          out[g].seqNum = msg.seqNum;
+          out[g].timestamp = msg.timestamp;
+        }
         if (msg.pieceTotal > out[g].partsTotal) out[g].partsTotal = msg.pieceTotal;
         continue;
       }
@@ -18517,75 +18944,101 @@ static int espnowCollapseRing(const ReceivedTextMessage* ring, uint8_t tail, uin
     // "most recent N" caller wants. Callers that show the tail for recency
     // (espnowCollapsedAllMessages) must size maxN to cover the whole ring.
     if (w >= maxN) break;
-    out[w].head = &msg;
+    out[w].seqNum = msg.seqNum;
     out[w].reqId = msg.reqId;
+    out[w].timestamp = msg.timestamp;
+    out[w].slot = slot;
+    out[w].index = idx;
     out[w].partsPresent = 1;
     out[w].partsTotal = (msg.pieceTotal > 1) ? msg.pieceTotal : 1;
-    out[w].isSent = msg.isSent;
+    out[w].isSent = isSent;
     w++;
   }
   return w;
 }
 
-int espnowCollapsedPeerMessages(uint8_t* peerMac, CollapsedMsgRef* out, int maxN) {
-  if (!gEspNow || !out || maxN <= 0) return 0;
-
-  PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
-  if (!history || history->count == 0) return 0;
-
-  return espnowCollapseRing(history->messages, history->tail, history->count, out, 0, maxN);
+// Slot index of a block in the table (the block was found through the table,
+// so it is there). Called with the store lock held.
+static uint8_t peerHistorySlotIndex(const PeerMessageHistory* history) {
+  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
+    if (gEspNow->peerMessageHistories[i] == history) return (uint8_t)i;
+  }
+  return 0;
 }
 
-int espnowGetConversation(uint8_t* peerMac, CollapsedMsgRef* out, int maxN) {
-  if (!gEspNow || !out || maxN <= 0) return 0;
-
-  PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
-  if (!history) return 0;
-
-  // Collapse both rings into one buffer, then order the combined set oldest→newest
-  // by timestamp so callers see a single interleaved sent/received conversation.
-  int w = espnowCollapseRing(history->messages, history->tail, history->count, out, 0, maxN);
-  w = espnowCollapseRing(history->sent, history->sentTail, history->sentCount, out, w, maxN);
-
+// Order refs oldest→newest by the timestamp copied at collapse time. Runs on
+// the caller's array after the lock is released.
+static void espnowSortCollapsedByTime(CollapsedMsgRef* out, int w) {
   for (int i = 0; i < w - 1; i++) {
     for (int j = 0; j < w - i - 1; j++) {
-      if (out[j].head->timestamp > out[j + 1].head->timestamp) {
+      if (out[j].timestamp > out[j + 1].timestamp) {
         CollapsedMsgRef temp = out[j];
         out[j] = out[j + 1];
         out[j + 1] = temp;
       }
     }
   }
+}
 
+int espnowCollapsedPeerMessages(uint8_t* peerMac, CollapsedMsgRef* out, int maxN) {
+  if (!gEspNow || !out || maxN <= 0) return 0;
+
+  PeerHistoryGuard guard;
+  if (!guard.held) return 0;
+  PeerMessageHistory* history = peerHistorySlotLocked(peerMac, false);  // find-only
+  if (!history || history->count == 0) return 0;
+
+  return espnowCollapseRing(history->messages, history->tail, history->count,
+                            peerHistorySlotIndex(history), /*isSent=*/false, out, 0, maxN);
+}
+
+int espnowGetConversation(uint8_t* peerMac, CollapsedMsgRef* out, int maxN) {
+  if (!gEspNow || !out || maxN <= 0) return 0;
+
+  int w = 0;
+  {
+    PeerHistoryGuard guard;
+    if (!guard.held) return 0;
+    PeerMessageHistory* history = peerHistorySlotLocked(peerMac, false);  // find-only
+    if (!history) return 0;
+    const uint8_t slot = peerHistorySlotIndex(history);
+
+    // Collapse both rings into one buffer, then order the combined set oldest→newest
+    // by timestamp so callers see a single interleaved sent/received conversation.
+    w = espnowCollapseRing(history->messages, history->tail, history->count,
+                           slot, /*isSent=*/false, out, 0, maxN);
+    w = espnowCollapseRing(history->sent, history->sentTail, history->sentCount,
+                           slot, /*isSent=*/true, out, w, maxN);
+  }
+
+  espnowSortCollapsedByTime(out, w);
   return w;
 }
 
 // All-peers collapsed read: the global-inbox analogue of espnowGetConversation.
 // Collapses every active peer's received + sent rings into logical-message refs,
 // then orders the combined set oldest→newest by timestamp (callers show the tail
-// for "most recent"). reqId+isSent+senderMac gating in espnowCollapseRing means
+// for "most recent"). reqId+isSent+slot gating in espnowCollapseRing means
 // fragments from different peers never false-merge. Caps at maxN during
 // collection — fine for small meshes; logs if it truncates.
 int espnowCollapsedAllMessages(CollapsedMsgRef* out, int maxN) {
-  if (!gEspNow || !out || maxN <= 0 || !gEspNow->peerMessageHistories) return 0;
+  if (!gEspNow || !out || maxN <= 0) return 0;
 
   int w = 0;
-  for (int p = 0; p < gEspNow->peerHistoryCapacity && w < maxN; p++) {
-    PeerMessageHistory& history = gEspNow->peerMessageHistories[p];
-    if (!history.active) continue;
-    w = espnowCollapseRing(history.messages, history.tail, history.count, out, w, maxN);
-    w = espnowCollapseRing(history.sent, history.sentTail, history.sentCount, out, w, maxN);
-  }
-
-  for (int i = 0; i < w - 1; i++) {
-    for (int j = 0; j < w - i - 1; j++) {
-      if (out[j].head->timestamp > out[j + 1].head->timestamp) {
-        CollapsedMsgRef temp = out[j];
-        out[j] = out[j + 1];
-        out[j + 1] = temp;
-      }
+  {
+    PeerHistoryGuard guard;
+    if (!guard.held || !gEspNow->peerMessageHistories) return 0;
+    for (int p = 0; p < gEspNow->peerHistoryCapacity && w < maxN; p++) {
+      const PeerMessageHistory* history = gEspNow->peerMessageHistories[p];
+      if (!history || !history->active) continue;
+      w = espnowCollapseRing(history->messages, history->tail, history->count,
+                             (uint8_t)p, /*isSent=*/false, out, w, maxN);
+      w = espnowCollapseRing(history->sent, history->sentTail, history->sentCount,
+                             (uint8_t)p, /*isSent=*/true, out, w, maxN);
     }
   }
+
+  espnowSortCollapsedByTime(out, w);
 
   if (w >= maxN) {
     DEBUG_ESPNOWF("[ESPNOW] collapsedAll hit cap maxN=%d; older logical messages dropped", maxN);
@@ -18606,13 +19059,11 @@ int espnowReassembleByReqId(const uint8_t* peerMac, uint32_t reqId, bool isSent,
   if (complete) *complete = false;
   if (!out || cap == 0) return 0;
   out[0] = '\0';
-  if (!gEspNow || !peerMac || reqId == 0 || !gEspNow->peerMessageHistories) return 0;
+  if (!gEspNow || !peerMac || reqId == 0) return 0;
 
-  PeerMessageHistory* h = nullptr;
-  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
-    PeerMessageHistory& c = gEspNow->peerMessageHistories[i];
-    if (c.active && memcmp(c.peerMac, peerMac, 6) == 0) { h = &c; break; }
-  }
+  PeerHistoryGuard guard;
+  if (!guard.held) return 0;
+  const PeerMessageHistory* h = peerHistorySlotLocked(peerMac, false);  // find-only
   if (!h) return 0;
 
   const ReceivedTextMessage* ring = isSent ? h->sent : h->messages;
@@ -18645,6 +19096,38 @@ int espnowReassembleByReqId(const uint8_t* peerMac, uint32_t reqId, bool isSent,
   out[pos] = '\0';
   if (complete) *complete = (found >= total);
   return (int)pos;
+}
+
+bool espnowCopyCollapsedHead(const CollapsedMsgRef& ref, ReceivedTextMessage* out) {
+  if (!gEspNow || !out || ref.index >= MESSAGES_PER_DEVICE) return false;
+
+  PeerHistoryGuard guard;
+  if (!guard.held || !gEspNow->peerMessageHistories ||
+      ref.slot >= gEspNow->peerHistoryCapacity) return false;
+  const PeerMessageHistory* h = gEspNow->peerMessageHistories[ref.slot];
+  if (!h || !h->active) return false;
+  const ReceivedTextMessage& rec = ref.isSent ? h->sent[ref.index] : h->messages[ref.index];
+  // The ring reuses indices: only the record the ref was taken from qualifies.
+  if (!rec.active || rec.seqNum != ref.seqNum) return false;
+  memcpy(out, &rec, sizeof(ReceivedTextMessage));
+  return true;
+}
+
+int espnowHistoryMessageCount(const uint8_t* mac) {
+  if (!gEspNow) return 0;
+
+  PeerHistoryGuard guard;
+  if (!guard.held || !gEspNow->peerMessageHistories) return 0;
+  if (mac) {
+    const PeerMessageHistory* h = peerHistorySlotLocked(mac, false);  // find-only
+    return h ? h->count : 0;
+  }
+  int total = 0;
+  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
+    const PeerMessageHistory* h = gEspNow->peerMessageHistories[i];
+    if (h && h->active) total += h->count;
+  }
+  return total;
 }
 
 #else // !ENABLE_ESPNOW

@@ -37,14 +37,18 @@ struct PendingRedraw {G2CmdCookie cookie;void(*render)();};
 static std::vector<PendingCommand> pendingCommands;
 static std::vector<PendingRedraw> pendingRedraws;
 static std::vector<std::string> shownRows, submitted;
-static bool acceptCommand=true,acceptRedraw=true;
+// acceptList=false models a refused lens render; the old rows stay visible.
+static bool acceptCommand=true,acceptRedraw=true,acceptList=true;
 static G2HijackPage page=G2_HIJACK_PAGE_MAIN;
 static unsigned menuGen=0,listsShown=0;
 static uint64_t commandSeq=0;
 bool g2CamStreamSettingsExitRelaunch=false;
 G2HijackPage g2GetHijackPage(){return page;}
 void g2SetHijackPage(G2HijackPage value){if(page!=value){page=value;++menuGen;}}
-bool g2ShowListPage(const char*const* rows,size_t count){++listsShown;shownRows.assign(rows,rows+count);return true;}
+bool g2ShowListPage(const char*const* rows,size_t count){
+  if(!acceptList) return false;
+  ++listsShown;shownRows.assign(rows,rows+count);return true;
+}
 void g2ReshowSensorsDetail(){}
 bool g2ShowCameraStream(void(*)()){return true;}
 bool g2EnqueueRedraw(const G2CmdCookie& cookie,void(*render)(),const char* tag) {
@@ -75,6 +79,7 @@ static void flushRedraws() {
   const auto queued=pendingRedraws;pendingRedraws.clear();
   for(const auto& redraw:queued) redraw.render();
 }
+// INSERT_LIST_PUBLISH_HELPER
 // INSERT_PRODUCTION_CAMERA_SETTINGS
 
 int main() {
@@ -197,5 +202,27 @@ int main() {
   completeCommand(true,"SUCCESS");
   const auto awayDraws=listsShown;flushRedraws();
   assert(listsShown==awayDraws && pendingCommands.empty() && pendingRedraws.empty());
+
+  // A refused category list leaves TOP on the lens: its "FPS" row (2) must
+  // cycle FPS, not the Camera list's row-2 knob.
+  g2ShowCameraSettingsMenu();
+  assert(page==G2_HIJACK_PAGE_CAMERA_SETTINGS && shownRows[2].find("FPS:")==0);
+  acceptList=false;g2CameraSettingsHandleTap(3);acceptList=true;
+  assert(shownRows[2].find("FPS:")==0);
+  before=submitted.size();
+  g2CameraSettingsHandleTap(2);
+  const bool refusedSubListCycledCameraKnob=
+    submitted.size()>before && submitted.back().find("camerafps ")!=0;
+  assert(!refusedSubListCycledCameraKnob);
+  assert(submitted.size()==before+1 && submitted.back()=="camerafps 10");
+  completeCommand(true,"SUCCESS");flushRedraws();
+  // A refused re-render after a cycle keeps the rendered row identities.
+  showSubMenu(CAM_CAT_POSTPROC);
+  assert(gLevel==CAM_LEVEL_SUB_POSTPROC && shownRows[1].find("Quality:")==0);
+  acceptList=false;showSubMenu(CAM_CAT_TRANSFORM);acceptList=true;
+  assert(gLevel==CAM_LEVEL_SUB_POSTPROC);
+  g2CameraSettingsHandleTap(1);
+  assert(submitted.back().find("cameraquality ")==0);
+  completeCommand(true,"SUCCESS");flushRedraws();
   puts("CAMERA_CONSUMERS PASS");
 }

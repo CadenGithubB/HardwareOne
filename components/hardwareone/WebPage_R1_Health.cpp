@@ -5,6 +5,7 @@
 #include <Arduino.h>
 
 #include "G2_Ring.h"
+#include "System_Debug.h"             // DEBUG_HTTPF
 #include "System_MemUtil.h"           // ps_alloc, AllocPref
 #include "System_SensorLogging.h"     // buildHealthStatusJson, health*
 #include "System_User.h"              // AuthContext
@@ -32,10 +33,18 @@ static bool readHealthActionBody(httpd_req_t* req, char* out, size_t cap) {
   if (!req || !out || cap < 2 || req->content_len == 0 || req->content_len >= cap)
     return false;
   size_t received = 0;
+  int idleTimeouts = 0;  // consecutive recv_wait_timeout results
   while (received < req->content_len) {
     const int n = httpd_req_recv(req, out + received, req->content_len - received);
-    if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
-    if (n <= 0) return false;
+    if (n <= 0) {
+      // One idle wait is a slow client; two in a row is a half-open socket
+      // that would otherwise pin this httpd worker forever.
+      if (n == HTTPD_SOCK_ERR_TIMEOUT && ++idleTimeouts < 2) continue;
+      DEBUG_HTTPF("[R1Health] action body recv_failed n=%d received=%u of %u",
+                  n, (unsigned)received, (unsigned)req->content_len);
+      return false;
+    }
+    idleTimeouts = 0;
     received += static_cast<size_t>(n);
   }
   out[received] = '\0';
@@ -65,6 +74,23 @@ static esp_err_t healthActionReply(httpd_req_t* req, const char* status,
   return ESP_OK;
 }
 
+// Ring controls and the forced history refresh run as commands under the
+// signed-in identity, so the admin rule, the validate pass and the audit line
+// are the command layer's, the same as from serial, OLED, BLE or MQTT. An
+// admin refusal is 403 (as /api/cli maps it), any other refusal 409. The
+// registry refuses with "Error: Admin access required ..."; `healthstatus
+// force-history` still refuses inside its handler ("Error: admin required ...").
+static esp_err_t healthCommandReply(httpd_req_t* req, AuthContext& ctx,
+                                    const char* line) {
+  String result;
+  if (executeUnifiedWebCommand(req, ctx, line, result))
+    return healthActionReply(req, "202 Accepted", result.c_str());
+  const bool adminRefusal = result.startsWith("Error: Admin access required") ||
+                            result.startsWith("Error: admin required");
+  return healthActionReply(req, adminRefusal ? "403 Forbidden" : "409 Conflict",
+                           result.c_str());
+}
+
 esp_err_t handleR1HealthAction(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   if (isGuestUser(ctx.user))
@@ -75,7 +101,6 @@ esp_err_t handleR1HealthAction(httpd_req_t* req) {
   const String body(bodyBuf);
   const String action = healthFormValue(body, "action");
   const String value = healthFormValue(body, "value");
-  const bool admin = isAdminUser(ctx.user);
 
   if (action == "poll") {
     if (healthStartPollBurst()) {
@@ -116,41 +141,20 @@ esp_err_t handleR1HealthAction(httpd_req_t* req) {
         ? healthActionReply(req, "202 Accepted", "history refresh queued")
         : healthActionReply(req, "409 Conflict", "history refresh not queued");
   }
-  if (action == "history-force") {
-    if (!admin) return healthActionReply(req, "403 Forbidden", "admin required");
-    return g2RingRequestHistoryRefresh(true)
-        ? healthActionReply(req, "202 Accepted", "forced history refresh queued")
-        : healthActionReply(req, "409 Conflict", "forced history refresh not queued");
-  }
+  if (action == "history-force")
+    return healthCommandReply(req, ctx, "healthstatus force-history");
   if (action == "collection" || action == "low-power") {
-    if (!admin) return healthActionReply(req, "403 Forbidden", "admin required");
-    G2RingDesiredState desired;
-    if (value == "preserve") desired = G2_RING_PRESERVE;
-    else if (value == "off") desired = G2_RING_OFF;
-    else if (value == "on") desired = G2_RING_ON;
-    else return healthActionReply(req, "400 Bad Request", "value must be preserve, off, or on");
-    const bool queued = action == "collection"
-        ? g2RingSetHealthCollectionDesired(desired)
-        : g2RingSetLowPowerDesired(desired);
-    if (!queued)
-      return healthActionReply(req, "409 Conflict", "desired policy not accepted");
-    G2RingControlStatus status{};
-    g2RingGetControlStatus(status);
-    const bool unsupported = action == "collection"
-        ? status.healthLastError == G2_RING_ERR_FEATURE_UNSUPPORTED
-        : status.lowPowerLastError == G2_RING_ERR_FEATURE_UNSUPPORTED;
-    if (unsupported) {
-      return action == "collection"
-          ? healthActionReply(req, "202 Accepted",
-                "health collection preference saved; this operation is unsupported on the active ring profile, so no command was sent")
-          : healthActionReply(req, "202 Accepted",
-                "low-power preference saved; unsupported on the active ring profile, so no command was sent");
-    }
-    return action == "collection"
-        ? healthActionReply(req, "202 Accepted",
-              "health collection policy accepted; 0x0E has no proven readback, so ACK is not observed state")
-        : healthActionReply(req, "202 Accepted",
-              "low-power policy accepted; awaiting verified readback observation");
+    // Only fixed tokens reach the command line, never request text.
+    const char* desired = value == "preserve" ? "preserve"
+                        : value == "off"      ? "off"
+                        : value == "on"       ? "on"
+                        : nullptr;
+    if (!desired)
+      return healthActionReply(req, "400 Bad Request", "value must be preserve, off, or on");
+    char line[40];
+    snprintf(line, sizeof(line), "ringcontrol %s %s",
+             action == "collection" ? "collection" : "lowpower", desired);
+    return healthCommandReply(req, ctx, line);
   }
   return healthActionReply(req, "400 Bad Request", "unknown health action");
 }

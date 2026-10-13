@@ -54,7 +54,6 @@ void g2BumpMenuGen() {
 }
 
 uint32_t g2CurrentMenuGen() { return gMenuGen; }
-uint64_t g2CurrentCmdSeq()  { return gCmdSeq; }
 
 namespace {
 

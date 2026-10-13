@@ -441,6 +441,465 @@ foreach(test_name IN ITEMS camera_core camera_dvp camera_p4 camera_i2c_reservati
             ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
             ${CAMERA_TEST_ARGS})
 endforeach()
+
+# ESP-NOW peer metadata: the metadata text policy, receive path and CLI setters
+# (C++), and the shipping ESP-NOW page renderers on a host JavaScript engine
+# (README "ESP-NOW peer metadata text and page rendering").
+set(ESPNOW_METADATA_TEXT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_METADATA_TEXT_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_metadata_text
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_metadata_text.py
+          ${ESPNOW_METADATA_TEXT_TEST_ARGS})
+add_test(
+  NAME espnow_page_render
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_page_render.py)
+# Exit 77 = source contracts passed but no JavaScript engine was found (reported as skipped).
+set_tests_properties(espnow_page_render PROPERTIES SKIP_RETURN_CODE 77)
+
+# ESP-NOW session handshake freshness (README "ESP-NOW session handshake freshness"):
+# production SESSION_OPEN/CONFIRM/REKEY handlers and initiators between two modelled
+# devices; re-delivered handshake frames must not re-key or reset a live session.
+set(ESPNOW_SESSION_REKEY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_SESSION_REKEY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_session_rekey
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_session_rekey.py
+          ${ESPNOW_SESSION_REKEY_TEST_ARGS})
+
+# ESP-NOW session replay window across a REKEY (README "ESP-NOW session replay
+# window"): production wrap/unwrap, rekey-apply, REKEYING/abort and prev-key sweep
+# driven by a scripted peer; the previous key is judged by its own replay window.
+set(ESPNOW_SESSION_REPLAY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_SESSION_REPLAY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_session_replay
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_session_replay.py
+          ${ESPNOW_SESSION_REPLAY_TEST_ARGS})
+
+# ESP-NOW session rekey retry (README "ESP-NOW session rekey retry"): production REKEY
+# initiator/responder/retry sweep and session lifecycle against modelled peers.
+set(ESPNOW_REKEY_RETRY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_REKEY_RETRY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_rekey_retry
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_rekey_retry.py
+          ${ESPNOW_REKEY_RETRY_TEST_ARGS})
+
+# ESP-NOW V4 dispatch policy: the real opcode table, flag constants, lookup and
+# dispatcher with generated handler doubles, compiled with ENABLE_BONDED_MODE 1
+# and 0 (README "ESP-NOW" area, espnow_dispatch_policy paragraph).
+set(ESPNOW_DISPATCH_POLICY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_DISPATCH_POLICY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_dispatch_policy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_dispatch_policy.py
+          ${ESPNOW_DISPATCH_POLICY_TEST_ARGS})
+
+# ESP-NOW V4 fragment reassembler: v4_reasm_accept / v4_reasm_release / dispatch cleanup on
+# crafted post-unwrap fragments, plus a run with no reassembly table.
+set(ESPNOW_REASSEMBLY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_REASSEMBLY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_reassembly
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_reassembly.py
+          ${ESPNOW_REASSEMBLY_TEST_ARGS})
+
+# ESP-NOW deadlines across the millis() wrap (README "ESP-NOW deadlines across the millis() wrap"):
+# production prev-key window, sensor-lease and session pre-warm cooldown owners driven
+# by an injectable clock on both sides of the 32-bit rollover.
+set(ESPNOW_DEADLINE_WRAP_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_DEADLINE_WRAP_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_deadline_wrap
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_deadline_wrap.py
+          ${ESPNOW_DEADLINE_WRAP_TEST_ARGS})
+
+# ESP-NOW peer message store (README "ESP-NOW peer message store"): the production
+# slot table, rings, merged/collapsed reads and copy accessor with FreeRTOS mutex,
+# allocation and clock doubles; refs survive peer growth, reads never allocate.
+set(ESPNOW_MESSAGE_STORE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_MESSAGE_STORE_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_message_store
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_message_store.py
+          ${ESPNOW_MESSAGE_STORE_TEST_ARGS})
+
+# ESP-NOW FS RPC lock discipline: client sends off-lock, the cmd_exec runner
+# always releases the deferred slot, capture answers TOO_BUSY on a lock miss
+# (README "ESP-NOW FS RPC locking").
+set(ESPNOW_FSLIST_LOCKING_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_FSLIST_LOCKING_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_fslist_locking
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_fslist_locking.py
+          ${ESPNOW_FSLIST_LOCKING_TEST_ARGS})
+
+# ESP-NOW multi-frame sends: a synchronous payload over one frame runs its
+# fragment/ACK loop on the submitting task, never on the espnow_tx dispatcher,
+# and STREAM lines are clamped to one frame for their target.
+set(ESPNOW_TX_MULTIFRAME_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_TX_MULTIFRAME_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_tx_multiframe
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_tx_multiframe.py
+          ${ESPNOW_TX_MULTIFRAME_TEST_ARGS})
+
+# ESP-NOW metadata push: local room/zone/tags/name/stationary changes reach
+# session-active peers as METADATA_PUSH (README "ESP-NOW metadata push").
+set(ESPNOW_METADATA_PUSH_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_METADATA_PUSH_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_metadata_push
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_metadata_push.py
+          ${ESPNOW_METADATA_PUSH_TEST_ARGS})
+
+# OLED ESP-NOW unpair and discovery ownership (README "OLED ESP-NOW unpair and
+# discovery ownership"): the production OLED unpair adapter and discovery input
+# arm with the command executor, toast and ESP-NOW owner as recorded doubles.
+set(OLED_ESPNOW_OWNERSHIP_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_ESPNOW_OWNERSHIP_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_espnow_ownership
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_espnow_ownership.py
+          ${OLED_ESPNOW_OWNERSHIP_TEST_ARGS})
+
+set(OLED_REMOTE_SETTINGS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_REMOTE_SETTINGS_TEST_ARGS --sanitize)
+endif()
+add_test(NAME oled_remote_settings
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_remote_settings.py
+          ${OLED_REMOTE_SETTINGS_TEST_ARGS})
+
+set(STT_BLE_PRIVACY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND STT_BLE_PRIVACY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME stt_ble_privacy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_ble_privacy.py
+          ${STT_BLE_PRIVACY_TEST_ARGS})
+
+set(BLE_SC_DIRECTED_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND BLE_SC_DIRECTED_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ble_sc_directed
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_sc_directed.py
+          ${BLE_SC_DIRECTED_TEST_ARGS})
+
+set(RING_DAILY_ACK_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND RING_DAILY_ACK_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ring_daily_ack
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ring_daily_ack.py
+          ${RING_DAILY_ACK_TEST_ARGS})
+
+# BLE server stop: deinitBluetooth() reports deferred/failed stops; closeble and
+# blemode client keep bleMode and the app sessions (README "Bluetooth server stop").
+set(BLE_SERVER_STOP_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND BLE_SERVER_STOP_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ble_server_stop
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_server_stop.py
+          ${BLE_SERVER_STOP_TEST_ARGS})
+
+# BLE Secure Channel policy: the required-mode refusal reaches the plaintext writer,
+# file verbs run only when the command arrived encrypted, and the posture
+# commands share the superadmin tier (README "BLE Secure Channel policy").
+set(BLE_SC_POLICY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND BLE_SC_POLICY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ble_sc_policy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_sc_policy.py
+          ${BLE_SC_POLICY_TEST_ARGS})
+
+set(BLE_AREA_CLEANUP_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND BLE_AREA_CLEANUP_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ble_area_cleanup
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_area_cleanup.py
+          ${BLE_AREA_CLEANUP_TEST_ARGS})
+
+set(RING_FORWARDED_TELEMETRY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND RING_FORWARDED_TELEMETRY_TEST_ARGS --sanitize)
+endif()
+add_test(NAME ring_forwarded_telemetry
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_ring_forwarded_telemetry.py
+          ${RING_FORWARDED_TELEMETRY_TEST_ARGS})
+
+set(G2_NETWORK_ASYNC_REDRAW_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND G2_NETWORK_ASYNC_REDRAW_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME g2_network_async_redraw
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_network_async_redraw.py
+          ${G2_NETWORK_ASYNC_REDRAW_TEST_ARGS})
+
+# Sensors completions (cam_pwr post-hook, openmic/closemic on cmd_exec) queue a
+# generation-checked Redraw instead of rendering on their own task (README
+# "G2 Sensors completion redraws").
+set(G2_SENSORS_REDRAW_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND G2_SENSORS_REDRAW_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME g2_sensors_redraw
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_sensors_redraw.py
+          ${G2_SENSORS_REDRAW_TEST_ARGS})
+
+# G2 list pages publish their mode / row map only after the lens accepted the
+# rows (README "G2 list pages under refused renders"): Files chooser, delete
+# confirm and info overlay, Settings levels and row maps, LED sub-levels.
+set(G2_PAGE_PUBLISH_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND G2_PAGE_PUBLISH_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME g2_page_publish
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_page_publish.py
+          ${G2_PAGE_PUBLISH_TEST_ARGS})
+
+# G2 page API (README "G2 page and hijack-bridge API contract"):
+# no page, bridge or FSM entry point without a caller, enabled or disabled.
+set(G2_PAGE_API_CONTRACT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND G2_PAGE_API_CONTRACT_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME g2_page_api_contract
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_page_api_contract.py
+          ${G2_PAGE_API_CONTRACT_TEST_ARGS})
+
+# File browsers (README "File browser classification and rename/delete authority"):
+# one classifier for the G2 lens and OLED browsers; OLED rename/delete through the executor.
+set(FILE_KIND_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND FILE_KIND_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME file_kind
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_file_kind.py
+          ${FILE_KIND_TEST_ARGS})
+
+# Login policy ownership (README "Display login policy ownership"): every settings row and
+# command that writes serial/UART/display RequireAuth is super-admin, one row per policy.
+set(DISPLAY_AUTH_POLICY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND DISPLAY_AUTH_POLICY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME display_auth_policy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_display_auth_policy.py
+          ${DISPLAY_AUTH_POLICY_TEST_ARGS})
+# settings_mutation is already registered; its extension needs no new snippet.
+
+# OLED session role (README "OLED session role cache"): the launcher, guest gate and Users
+# row read users.json at most once per session and identity generation, fail closed.
+set(OLED_SESSION_ROLE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_SESSION_ROLE_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_session_role
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_session_role.py
+          ${OLED_SESSION_ROLE_TEST_ARGS})
+
+set(OLED_OWNER_REQUESTS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_OWNER_REQUESTS_TEST_ARGS --sanitize)
+endif()
+add_test(NAME oled_owner_requests
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_owner_requests.py
+    ${OLED_OWNER_REQUESTS_TEST_ARGS})
+
+# OLED mode availability (README "OLED mode availability"): getMenuAvailability and the
+# production mode registry with the real availFuncs of CLI Input, Gamepad PW, Logout,
+# Actions, GPS and thermal.
+set(OLED_MODE_AVAILABILITY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_MODE_AVAILABILITY_TEST_ARGS --sanitize)
+endif()
+add_test(NAME oled_mode_availability
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_mode_availability.py
+    ${OLED_MODE_AVAILABILITY_TEST_ARGS})
+
+# Dead OLED code paths (README "Dead OLED code paths"): a source contract over the
+# component, plus the production OLED mode slug functions.
+set(OLED_DEAD_PATHS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_DEAD_PATHS_TEST_ARGS --sanitize)
+endif()
+add_test(NAME oled_dead_paths
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_dead_paths.py
+    ${OLED_DEAD_PATHS_TEST_ARGS})
+
+# OLED action feedback (README "OLED action feedback"): a refused OLED action toasts the
+# command's reply; success texts only on success; no dropped replies on the listed screens.
+set(OLED_COMMAND_FEEDBACK_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_COMMAND_FEEDBACK_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_command_feedback
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_command_feedback.py
+          ${OLED_COMMAND_FEEDBACK_TEST_ARGS})
+
+# OLED Power Saving row (README "OLED Power Saving row"): the row submits the admin-only
+# powersave command; no OLED_Mode_*.cpp writes settings directly.
+set(OLED_POWER_SETTINGS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_POWER_SETTINGS_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_power_settings
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_power_settings.py
+          ${OLED_POWER_SETTINGS_TEST_ARGS})
+
+# OLED automation wizard (README "OLED automation wizard"): names and commands up to the
+# keyboard cap reach automationadd whole; the confirm screen shows the whole command.
+set(OLED_AUTOMATION_WIZARD_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_AUTOMATION_WIZARD_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_automation_wizard
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_automation_wizard.py
+          ${OLED_AUTOMATION_WIZARD_TEST_ARGS})
+
+# OLED keyboard masking and dictation delivery (README "OLED keyboard masking and dictation UI"):
+# shared OLED/G2 dictation delivery, and a masked (secret) keyboard field never shows its text.
+set(DICTATION_UI_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND DICTATION_UI_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME dictation_ui
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_dictation_ui.py
+          ${DICTATION_UI_TEST_ARGS})
+
+# OLED pair-request prompt (README "OLED pair-request prompt"): the dialog opens once per
+# request, only for a logged-in admin off the Login screen, and names the shown sender.
+set(OLED_PAIR_PROMPT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_PAIR_PROMPT_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_pair_prompt
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_pair_prompt.py
+          ${OLED_PAIR_PROMPT_TEST_ARGS})
+
+# OLED list navigation (README "OLED list navigation"): Automations and Files move one row per
+# nav event; the settings editor's scroll windows are per module.
+set(OLED_LIST_NAV_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_LIST_NAV_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_list_nav
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_list_nav.py
+          ${OLED_LIST_NAV_TEST_ARGS})
+# test_sensorlog_ui.py is already registered (sensorlog_ui); its extension needs no snippet.
+
+set(OLED_MAP_ACTIONS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_MAP_ACTIONS_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_map_actions
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_map_actions.py
+          ${OLED_MAP_ACTIONS_TEST_ARGS})
+
+set(OLED_MAP_CONTEXT_BAR_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_MAP_CONTEXT_BAR_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_map_context_bar
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_map_context_bar.py
+          ${OLED_MAP_CONTEXT_BAR_TEST_ARGS})
+
+# Bond JSON buffers (README "Bond manifest and schema buffers"): the manifest and schema
+# are serialized, received, cached and read back through one checked buffer, never a String.
+set(ESPNOW_BOND_JSON_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_BOND_JSON_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_bond_json
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_bond_json.py
+          ${ESPNOW_BOND_JSON_TEST_ARGS})
 add_test(NAME p4eye_display_pixels COMMAND p4eye_display_pixels_tests)
 add_test(NAME p4eye_display_lifecycle COMMAND p4eye_display_lifecycle_tests)
 add_test(NAME rotary_core

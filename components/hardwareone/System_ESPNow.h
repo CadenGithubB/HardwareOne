@@ -647,13 +647,17 @@ inline String getCapabilityListLong(uint32_t mask, const CapabilityName* names) 
 // frees none; it only moves where a long send is refused.
 #define ESPNOW_TEXT_MAX_LEN 1024
 
-// Dynamic peer history allocation parameters. One slot is a whole
-// PeerMessageHistory — ~158 KB on a PSRAM build (two 250-deep rings, see
-// above) — so these counts move PSRAM in very large chunks. Growth is capped
-// at the configured peer limit (MESH_PEER_MAX = 16 slots ≈ 2.47 MB of PSRAM
-// if every slot fills). Budget accordingly before nudging either number.
-#define PEER_HISTORY_INITIAL_CAPACITY 5    // Start with 5 peer slots (~791 KB)
-#define PEER_HISTORY_GROWTH_INCREMENT 3    // Grow by 3 slots at a time (~475 KB per growth)
+// Peer history allocation. The store is a table of slot pointers sized to the
+// configured peer limit; each slot's PeerMessageHistory block (~158 KB on a
+// PSRAM build: two 250-deep rings, see above) is allocated once and never
+// moved or freed. PEER_HISTORY_INITIAL_CAPACITY blocks are allocated at init;
+// each further peer allocates one block on first contact, up to the peer
+// limit (MESH_PEER_MAX = 16 blocks ≈ 2.47 MB of PSRAM if every slot fills).
+// Budget accordingly before nudging the number.
+#define PEER_HISTORY_INITIAL_CAPACITY 5    // Blocks allocated at init (~791 KB)
+// Longest wait for the message-store lock. A store that cannot take it in
+// time is refused; a read returns nothing.
+#define PEER_HISTORY_LOCK_TIMEOUT_MS 200
 
 // Message types for logging
 enum LogMessageType {
@@ -792,9 +796,11 @@ struct EspNowState {
   
   
   // Per-device message history buffers (for web UI and OLED)
-  // Dynamically allocated - starts small and grows as peers are discovered
-  PeerMessageHistory* peerMessageHistories;
-  int peerHistoryCapacity;      // Current allocated capacity
+  // [peerHistoryCapacity] slot pointers; a block is allocated once and never
+  // moved or freed. Only the message-store functions in System_ESPNow.cpp
+  // touch the table and the blocks, under the store lock.
+  PeerMessageHistory** peerMessageHistories;
+  int peerHistoryCapacity;      // Slot table length (gMeshPeerSlots at init)
   int peerHistoryCount;         // Number of active peer histories
   uint32_t globalMessageSeqNum; // Global sequence number for all messages
   
@@ -935,6 +941,9 @@ struct EspNowState {
     uint8_t fragIndex;     // 0-based fragment index from the frame header
     uint8_t fragCount;     // total fragments in the message (1 when not chunked)
     bool encrypted;
+    bool authenticated;    // frame proved key possession (SESSION_FRAME unwrap or BROADCAST_AUTH
+                           // verify); false = plaintext, accepted only on a keyless device —
+                           // filed under the MAC, never posts SYSEVT_TEXT_RX
     LogMessageType msgType; // MSG_TEXT (chat) or MSG_SYSTEM_EVENT (BOOT/system notice) — drain stores accordingly
     bool used;
   };
@@ -1215,6 +1224,29 @@ bool macEqual6(const uint8_t a[6], const uint8_t b[6]);
 // poll gEspNow->bondSchemaReceived for completion. Master-only.
 bool requestBondSchema(const uint8_t* peerMac);
 
+// Copies the cached manifest of a bonded peer's firmware into one PSRAM buffer
+// (fwHashHex = 32 lowercase hex characters; anything else is refused before the
+// filesystem is touched). The read happens under the filesystem lock; the caller
+// prints or sends the buffer after it is released and ps_free()s *out. Returns
+// the length, or 0 with *err naming the reason.
+size_t espnowReadCachedManifest(const char* fwHashHex, const AuthContext& auth, char** out, const char** err);
+
+// Latest CMD_RESP drained for a command this device sent (any peer). `seq`
+// increments on every result and is 0 until the first one; a sender snapshots
+// espnowCmdResultSeq() before sending and watches for it to change. Written by
+// the CMD_RESP drain on espnow_task; readable from any task (spinlock copy).
+struct EspNowCmdResult {
+  static constexpr size_t TEXT_MAX = 96;
+  uint32_t seq;
+  uint32_t reqId;          // msgId of the request this answers
+  uint32_t receivedMs;
+  bool     success;
+  uint8_t  srcMac[6];
+  char     text[TEXT_MAX]; // redacted result, first line, NUL-terminated, truncated
+};
+uint32_t espnowCmdResultSeq();
+bool     espnowCmdResultGet(EspNowCmdResult& out);   // false until the first result
+
 // Inline helpers
 inline const char* getEspNowModeString() {
   return (gEspNow && gEspNow->mode == ESPNOW_MODE_MESH) ? "mesh" : "direct";
@@ -1313,7 +1345,9 @@ void espnowNoteWifiChannelMayHaveChanged();
 // Discover-then-confirm pairing — read accessors for the OLED/G2/web UI.
 int  espnowGetPairCandidateCount();                                              // pruned live count
 bool espnowGetPairCandidate(int idx, char* name, size_t nameCap, uint8_t mac[6], int* rssi);
-bool espnowGetIncomingPairRequest(char* name, size_t nameCap);                   // pending accept/reject
+// Pending accept/reject; optional `mac` (6 bytes) + `atMs` identify the request.
+bool espnowGetIncomingPairRequest(char* name, size_t nameCap,
+                                  uint8_t* mac = nullptr, uint32_t* atMs = nullptr);
 bool startEspNowTask();        // Start ESP-NOW heartbeat task
 // Cooperatively stop and join the heartbeat/RX task. On timeout the task and
 // its resources remain intact so closeespnow can retry safely.
@@ -1334,8 +1368,10 @@ bool espnowDeletePeerRuntime(const uint8_t mac[6]);
 // Message handling (for command execution)
 void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& result, const String& senderName);
 
-// Per-device message buffer management (espnow_message_buffer.cpp)
-PeerMessageHistory* findOrCreatePeerHistory(uint8_t* peerMac);
+// Per-device message buffer management (message buffer section of System_ESPNow.cpp).
+// One lock serializes every store and read. Stores create the peer's slot on
+// first contact and return false when no slot is free or the lock timed out;
+// reads never create a slot and return 0 when the peer has none.
 bool storeMessageInPeerHistory(uint8_t* peerMac, const char* peerName, const char* message, bool encrypted, LogMessageType msgType, uint32_t reqId = 0, uint8_t piece = 1, uint8_t pieceTotal = 1);
 // Record a message WE sent to peerMac into that peer's sent[] ring (the shared
 // outgoing history every interface reads). Long text is split into ≤200 B
@@ -1363,46 +1399,49 @@ void logFileTransferEvent(uint8_t* peerMac, const char* peerName, const char* fi
 int getPeerMessages(uint8_t* peerMac, ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq);
 int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq);
 
-// Chunked-message collapse VIEW (shared by on-device displays — OLED now, G2 later).
+// Chunked-message collapse VIEW (shared by on-device displays: OLED and G2).
 // Chunked text is stored as separate per-fragment records sharing a reqId (see the
 // textQueue drain in System_ESPNow.cpp). Remote clients (web/BLE phone) reassemble
 // those fragments themselves; on-device displays have no remote client, so this
-// helper gives them ONE logical entry per message without copying or concatenating:
-//   - `head` points at the message's first present fragment IN THE LIVE RING
-//     (zero-copy; valid only until the ring overwrites it — same lifetime rule as
-//     the raw records). head->message already holds the first ~200 B, which is all
-//     a truncated list preview needs. Full text (>1 fragment) is assembled on
-//     demand by walking the ring for `reqId` — deferred until a reader view exists.
+// helper gives them ONE logical entry per message without copying text:
+//   - a ref is a handle to the message's first present fragment (peer slot, ring
+//     index and that record's seqNum), not a pointer. It stays usable until the
+//     ring overwrites the record; espnowCopyCollapsedHead copies the record into
+//     caller storage and refuses a ref whose record was overwritten since.
+//     Full text (>1 fragment) is assembled by espnowReassembleByReqId.
 //   - `partsPresent` / `partsTotal` let the caller flag multi-part / incomplete
 //     messages (partsTotal == 1 for ordinary single-frame text).
 // Output is chronological (oldest→newest), capped at maxN. CollapsedMsgRef is tiny
-// (~12 B), so a caller buffer sized to MESSAGES_PER_DEVICE is cheap.
+// (~20 B), so a caller buffer sized to MESSAGES_PER_DEVICE is cheap.
 struct CollapsedMsgRef {
-  const ReceivedTextMessage* head;  // first present fragment, in the live ring (zero-copy)
-  uint32_t reqId;                   // group id (0 for unsolicited / single-frame)
-  uint8_t  partsPresent;            // fragments currently in the ring for this message
-  uint8_t  partsTotal;              // total fragments the message was split into (1 = single-frame)
-  bool     isSent;                  // direction (from head->isSent): false=received, true=sent
+  uint32_t      seqNum;        // identity of the head record; espnowCopyCollapsedHead checks it
+  uint32_t      reqId;         // group id (0 for unsolicited / single-frame)
+  unsigned long timestamp;     // head record's millis() stamp (ordering key, copied at collapse time)
+  uint8_t       slot;          // peer history slot index
+  uint8_t       index;         // ring index of the head record
+  uint8_t       partsPresent;  // fragments currently in the ring for this message
+  uint8_t       partsTotal;    // total fragments the message was split into (1 = single-frame)
+  bool          isSent;        // direction (selects the ring): false=received, true=sent
 };
 int espnowCollapsedPeerMessages(uint8_t* peerMac, CollapsedMsgRef* out, int maxN);
 
 // Collapsed, direction-tagged, time-ordered CONVERSATION with one peer — the
-// shared read used by on-device UIs (OLED now, G2 later) so each interface shows
+// shared read used by on-device UIs (OLED and G2) so each interface shows
 // the same merged sent+received timeline without re-implementing the merge.
 // Collapses both rings (received + sent) and orders the result oldest→newest by
-// timestamp; each ref's isSent says which side it is. Zero-copy (same live-ring
-// lifetime rule as espnowCollapsedPeerMessages). out should be sized to hold both
-// rings (2 * MESSAGES_PER_DEVICE worst case); returns the number written, capped
-// at maxN (oldest dropped first).
+// timestamp; each ref's isSent says which side it is. Refs are handles (see
+// CollapsedMsgRef). out should be sized to hold both rings
+// (2 * MESSAGES_PER_DEVICE worst case); returns the number written, capped at
+// maxN (oldest dropped first).
 int espnowGetConversation(uint8_t* peerMac, CollapsedMsgRef* out, int maxN);
 
 // Collapsed, direction-tagged, time-ordered GLOBAL inbox across ALL peers — the
 // all-peers analogue of espnowGetConversation, for a "messages from everyone"
 // view (G2 global inbox). Collapses every active peer's received + sent rings and
-// orders the combined set oldest→newest by timestamp. Same zero-copy live-ring
-// lifetime rule as espnowCollapsedPeerMessages. Caps at maxN during collection
-// (like getAllMessages), so a very large multi-peer history can miss the true
-// global-newest — fine for small meshes. Returns the number written.
+// orders the combined set oldest→newest by timestamp. Refs are handles (see
+// CollapsedMsgRef). Caps at maxN during collection (like getAllMessages), so a
+// very large multi-peer history can miss the true global-newest — fine for
+// small meshes. Returns the number written.
 int espnowCollapsedAllMessages(CollapsedMsgRef* out, int maxN);
 
 // Reassemble the full text of a multi-fragment message (gathered by reqId) into
@@ -1412,6 +1451,15 @@ int espnowCollapsedAllMessages(CollapsedMsgRef* out, int maxN);
 // present. Returns bytes written (excluding NUL).
 int espnowReassembleByReqId(const uint8_t* peerMac, uint32_t reqId, bool isSent,
                             char* out, size_t cap, bool* complete = nullptr);
+
+// Copy the head record of a collapsed message into caller-owned storage.
+// Returns false when the record was overwritten since the collapse (seqNum
+// mismatch), is inactive, the slot is gone, or the store lock timed out.
+bool espnowCopyCollapsedHead(const CollapsedMsgRef& ref, ReceivedTextMessage* out);
+
+// Received-ring record count for one peer (mac) or for every peer (mac == nullptr).
+// 0 when the peer has no slot or the store lock timed out.
+int espnowHistoryMessageCount(const uint8_t* mac);
 
 // Serialize one mesh peer's metadata + liveness into a JSON object. Single
 // source of truth for the peer-metadata shape, shared by the `espnowdevices

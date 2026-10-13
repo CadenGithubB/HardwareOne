@@ -129,7 +129,8 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
   oledKeyboardInit(
       prompt, initialText, maxLength,
       isPassword ? OLEDKeyboardDictationPolicy::DENY
-                 : OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+                 : OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT,
+      isPassword);
 
   // Also echo prompt to serial so users monitoring via terminal know to type here
   Serial.print(prompt);
@@ -187,26 +188,8 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
     OLED_TRANSACTION(
       oledDisplay->clearDisplay();
       
-      // If password mode, temporarily modify the displayed text
-      if (isPassword && gOledKeyboardState.textLength > 0) {
-        // Save original text
-        char originalText[OLED_KEYBOARD_MAX_LENGTH + 1];
-        strncpy(originalText, gOledKeyboardState.text, sizeof(originalText));
-        
-        // Replace with asterisks for display
-        for (int i = 0; i < gOledKeyboardState.textLength; i++) {
-          gOledKeyboardState.text[i] = '*';
-        }
-        
-        // Display keyboard with masked text
-        oledKeyboardDisplay(oledDisplay);
-        
-        // Restore original text
-        strncpy(gOledKeyboardState.text, originalText, sizeof(gOledKeyboardState.text));
-      } else {
-        // Normal display
-        oledKeyboardDisplay(oledDisplay);
-      }
+      // A password prompt opened the keyboard masked; it draws the '*'.
+      oledKeyboardDisplay(oledDisplay);
       
       // Draw keyboard footer matching main keyboard style
       {

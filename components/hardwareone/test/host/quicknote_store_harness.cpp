@@ -193,6 +193,7 @@ static bool failRemove = false;
 static uint64_t freeBytes = 1 << 20;
 static StorageType statsTier = INTERNAL;
 static unsigned sdFailures = 0, notedBytes = 0, denials = 0, opens = 0, systemAuths = 0, guardedCalls = 0;
+static unsigned removeCalls = 0;
 static size_t skewAfterRename = 0;
 static std::vector<std::pair<std::string, std::string>> renames;
 static std::vector<std::string> contexts, opened;
@@ -220,6 +221,7 @@ static bool mkdirGuarded(const String& path, const AuthContext& ctx) {
   return true;
 }
 static bool removeGuarded(const String& path, const AuthContext& ctx) {
+  ++removeCalls;
   if (!allowed(path, ctx, PERM_DELETE) || failRemove) return false;
   const auto found = tree.find(path.c_str());
   if (found == tree.end() || found->second.dir) return false;
@@ -253,7 +255,7 @@ static File openGuarded(const String& p, const char* mode, const AuthContext& ct
   return File(path, true);
 }
 static AuthContext systemAuth(const char* scope, const char* reason) {
-  assert(!std::strcmp(reason, "note root"));
+  assert(!std::strcmp(reason, "note root") || !std::strcmp(reason, "note sweep"));
   ++systemAuths;
   AuthContext ctx;
   ctx.transport = SOURCE_INTERNAL;
@@ -302,6 +304,7 @@ static void reset() {
   VFS::sdPresent = VFS::statsOk = true;
   VFS::freeBytes = 1 << 20;
   VFS::sdFailures = VFS::notedBytes = VFS::denials = VFS::opens = VFS::systemAuths = VFS::guardedCalls = 0;
+  VFS::removeCalls = 0;
   VFS::skewAfterRename = 0;
   VFS::renames.clear(); VFS::contexts.clear(); VFS::opened.clear();
 }
@@ -957,6 +960,120 @@ static void test_restamp() {
   assert(restamping("alice", boot, kLater));
 }
 
+static void test_sweep() {
+  // Saves cut short leave in-progress files behind: a complete one (the rename
+  // and its cleanup failed: a power cut between them looks the same) and a
+  // partial one (a short header write whose cleanup failed).
+  reset();
+  std::string kept;
+  assert(save(0x10, &kept));
+  const std::string keptData = tree.at(kept).data;
+  const char* why = nullptr;
+  VFS::failRename = VFS::failRemove = true;
+  assert(!save(0x11, nullptr, &why) && !std::strcmp(why, "Cannot save note"));
+  VFS::failRename = false;
+  shortWrite = writes + 1;
+  assert(!save(0x12, nullptr, &why) && !std::strcmp(why, "Note write incomplete"));
+  shortWrite = 0;
+  const std::string complete = "/stt/u7/notes/20261004T153012Z-0000000000000011.tmp";
+  const std::string partial = "/stt/u7/notes/20261004T153012Z-0000000000000012.tmp";
+  {
+    const std::string& whole = tree.at(complete).data;
+    const std::string& half = tree.at(partial).data;
+    NoteHeader back;
+    size_t body = 0;
+    assert(noteParseHeader(whole.data(), whole.size(), &back, &body) && whole.substr(body) == kText);
+    assert(!noteParseHeader(half.data(), half.size(), &back, nullptr));
+  }
+  // A restamp cut short the same way: its copy stays beside the boot note.
+  const std::string boot = bootNote(0x31);
+  bool retry = false;
+  VFS::failRename = true;
+  assert(!restamping("alice", boot, kLater, nullptr, &retry, &why));
+  VFS::failRename = VFS::failRemove = false;
+  const std::string restampTmp = "/stt/u7/notes/20261004T153017Z-0000000000000031.tmp";
+  assert(tree.count(restampTmp) && tree.count(boot));
+  // Another account's, and the card's.
+  makeFolder("/stt/u8/notes");
+  const std::string bobTmp = "/stt/u8/notes/boot-0000000000000021.tmp";
+  tree[bobTmp] = Node{false, "Hardware"};
+  makeFolder("/sd/stt/u7/notes");
+  const std::string cardTmp = "/sd/stt/u7/notes/20261004T153012Z-0000000000000041.tmp";
+  tree[cardTmp] = Node{false, "HardwareOne note v1\nId: 00"};
+  putNote("/sd/stt/u7/notes", 1004, 0x42, "card note");
+  const std::string cardNote = "/sd/stt/u7/notes/" + noteName(1004, 0x42);
+  // Never touched: names the store does not write, a folder, a transcript's
+  // own file, a non-canonical account folder, the root's files, a non-folder.
+  const std::string userTmp = "/stt/u7/notes/notes.tmp",
+                    upperTmp = "/stt/u7/notes/20261004T153012Z-00000000000000AB.tmp",
+                    dirTmp = "/stt/u7/notes/20261004T153012Z-0000000000000051.tmp",
+                    transcriptTmp = "/stt/u7/20261004T153012Z-0000000000000061.tmp",
+                    aliasTmp = "/stt/u07/notes/20261004T153012Z-0000000000000071.tmp",
+                    rootTmp = "/stt/legacy.tmp", fileAccount = "/stt/u9";
+  for (const std::string& path : {userTmp, upperTmp, transcriptTmp, rootTmp, fileAccount})
+    tree[path] = Node{false, "x"};
+  tree[dirTmp] = Node{true, ""};
+  makeFolder("/stt/u07/notes");
+  tree[aliasTmp] = Node{false, "x"};
+  VFS::sdWritable = true;
+  const size_t entries = tree.size();
+
+  VFS::contexts.clear();
+  VFS::opened.clear();
+  VFS::systemAuths = 0;
+  lockTakes = reads = 0;
+  uint32_t removed = 99;
+  why = "junk";
+  const bool swept = QuickNoteStore::sweep(&removed, &why);
+  assert(!locks && !filesOpen);
+  assert(!tree.count(complete) && !tree.count(partial) &&
+         "interrupted saves' .tmp files are removed at service start");
+  assert(swept && !why && removed == 5 && tree.size() == entries - 5);
+  for (const std::string& gone : {restampTmp, bobTmp, cardTmp}) assert(!tree.count(gone));
+  for (const std::string& stays : {kept, boot, cardNote, userTmp, upperTmp, dirTmp, transcriptTmp, aliasTmp,
+                                   rootTmp, fileAccount})
+    assert(tree.count(stays));
+  assert(tree.at(kept).data == keptData);
+  // As system confined to each tier's transcript root, one lock per tier,
+  // and only folders opened: no note (or anything else) is read.
+  assert(VFS::systemAuths == 2 && lockTakes == 2 && reads == 0);
+  for (const std::string& context : VFS::contexts)
+    assert(context == "system|/stt" || context == "system|/sd/stt");
+  for (const std::string& path : VFS::opened) assert(tree.at(path).dir);
+  // The notes are all still listed; a second sweep finds nothing.
+  assert(listing("alice", 0, false, 0) && page.total == 2);
+  assert(QuickNoteStore::sweep(&removed, nullptr) && removed == 0);
+
+  // A card that cannot be written now keeps its files for a later sweep.
+  reset();
+  makeFolder("/stt/u7/notes");
+  makeFolder("/sd/stt/u7/notes");
+  tree[cardTmp] = Node{false, "x"};
+  tree[complete] = Node{false, "x"};
+  assert(QuickNoteStore::sweep(&removed, &why) && !why && removed == 1);
+  assert(tree.count(cardTmp) && !tree.count(complete));
+  // No transcript root yet: nothing to do.
+  reset();
+  assert(QuickNoteStore::sweep(&removed, &why) && !why && removed == 0 && !VFS::systemAuths);
+  // Busy: nothing removed, and the caller may try again.
+  reset();
+  makeFolder("/stt/u7/notes");
+  tree[complete] = Node{false, "x"};
+  lockAvailable = false;
+  assert(!QuickNoteStore::sweep(&removed, &why) && !std::strcmp(why, "Note storage busy") && removed == 0);
+  assert(tree.count(complete));
+  // A file that will not go: false, and every other one is still tried.
+  lockAvailable = true;
+  makeFolder("/stt/u8/notes");
+  tree[bobTmp] = Node{false, "x"};
+  VFS::failRemove = true;
+  VFS::removeCalls = 0;
+  assert(!QuickNoteStore::sweep(&removed, &why) && !std::strcmp(why, "Cannot remove unfinished note"));
+  assert(removed == 0 && VFS::removeCalls == 2 && tree.count(complete) && tree.count(bobTmp));
+  VFS::failRemove = false;
+  assert(QuickNoteStore::sweep(nullptr, nullptr) && countFiles(".tmp") == 0);
+}
+
 static void test_clock_helpers() {
   reset();
   uint32_t boot = 0, uptime = 0;
@@ -990,7 +1107,9 @@ int main() {
   test_read_and_remove();
   test_room_and_stamp();
   test_restamp();
+  test_sweep();
   test_clock_helpers();
   assert(!locks && !filesOpen && allocs == frees);
-  std::puts("QuickNote store: owner-only create/list/read/delete/restamp, tmp+rename, reserve, faults, aliases and boot clock passed");
+  std::puts("QuickNote store: owner-only create/list/read/delete/restamp, tmp+rename, reserve, faults, aliases, "
+            "unfinished-file sweep and boot clock passed");
 }

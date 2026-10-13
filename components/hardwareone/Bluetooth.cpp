@@ -107,15 +107,6 @@ class BleRoleTransitionClaim {
 static int sBLEToggleCount = 0;
 static size_t sBLEHeapBeforeInit = 0;
 
-// Cached normalized MAC addresses (uppercase, no heap allocations on lookup)
-static struct {
-  char leftMAC[18];
-  char rightMAC[18];
-  char ringMAC[18];
-  char phoneMAC[18];
-  bool initialized;
-} gBLEMACCache = {{0}, {0}, {0}, {0}, false};
-
 // ESP32 BLE objects
 static BLEServer* pServer = nullptr;
 static BLEAdvertising* pAdvertising = nullptr;
@@ -134,7 +125,6 @@ static BLECharacteristic* pCmdStatusChar = nullptr;
 BLECharacteristic* pSensorDataChar = nullptr;
 BLECharacteristic* pSystemStatusChar = nullptr;
 BLECharacteristic* pEventNotifyChar = nullptr;
-static BLECharacteristic* pStreamControlChar = nullptr;
 
 // Device info characteristics
 static BLECharacteristic* pManufacturerChar = nullptr;
@@ -143,6 +133,8 @@ static BLECharacteristic* pFirmwareChar = nullptr;
 
 // Forward declarations
 static void processIncomingBLECommand(uint16_t connId, const char* data, size_t len);
+bool bleRawNotifyToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
+                           const char* data, size_t len, bool blocking);
 
 namespace {
 // Serializes the app-level BLE connection table with its boot-local session
@@ -286,6 +278,7 @@ void bleClearConnectionByConnId(uint16_t connId) {
   gBLEState->connections[slot].commandsReceived = 0;
   gBLEState->connections[slot].authed = false;
   gBLEState->connections[slot].user = "";
+  gBLEState->connections[slot].mirrorEligible = false;
   gBLEState->connections[slot].lastActivityMs = 0;
   BLE_DEBUGF(DEBUG_BLE_CORE, "Cleared connection slot=%d for conn=%u", slot, (unsigned)connId);
 }
@@ -449,8 +442,9 @@ void bleAuthPolicyChanged() {
 }
 
 // Bind an already-validated user to this BLE connection (password verified elsewhere).
+// mirrorEligible latches the console-mirror rule resolved at login.
 static bool bleBindSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
-                           const String& user,
+                           const String& user, bool mirrorEligible,
                            TransportSessionEpoch& boundEpochOut) {
   boundEpochOut = 0;
   BleLifecycleGuard guard;
@@ -463,11 +457,13 @@ static bool bleBindSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
   bleInvalidateSessionSlotLocked(slot);
   gBLEState->connections[slot].authed = true;
   gBLEState->connections[slot].user = user;
+  gBLEState->connections[slot].mirrorEligible = mirrorEligible;
   gBLEState->connections[slot].lastActivityMs = millis();
   boundEpochOut = blePublishSessionSlotLocked(slot);
   if (boundEpochOut == 0) {
     gBLEState->connections[slot].authed = false;
     gBLEState->connections[slot].user = "";
+    gBLEState->connections[slot].mirrorEligible = false;
     return false;
   }
   BLE_DEBUGF(DEBUG_BLE_CORE, "Session bound conn=%u slot=%d user='%s'", (unsigned)connId, slot, user.c_str());
@@ -490,10 +486,7 @@ static void macToStackBuf(const uint8_t* mac, char* buf) {
   macToDisplay(mac, buf, 18);  // canonical DISPLAY form (System_Utils.h)
 }
 
-// Update MAC address cache from settings (call when settings change).
-// Source-of-truth is now gBlePeerData[] (see BLE_Peers.h); the cache
-// keeps an upper-cased fast-path copy for hot identification paths
-// that don't want to allocate or call toUpperCase on every check.
+// Upper-cased copy of a saved peer MAC text into a caller buffer (no heap).
 static void copyMacUpper(char* dst, size_t dstCap, const char* src) {
   if (!dst || dstCap == 0) return;
   const size_t len = src ? strnlen(src, dstCap - 1) : 0;
@@ -503,24 +496,13 @@ static void copyMacUpper(char* dst, size_t dstCap, const char* src) {
     dst[i] = (char)toupper((unsigned char)dst[i]);
   }
 }
-static void bleUpdateMACCache() {
-  BlePeerSavedTargetSnapshot glasses{};
-  BlePeerSavedTargetSnapshot ring{};
-  BlePeerSavedTargetSnapshot phone{};
-  (void)blePeerSavedTargetSnapshot(BLE_PEER_G2_GLASSES, glasses);
-  (void)blePeerSavedTargetSnapshot(BLE_PEER_R1_RING, ring);
-  (void)blePeerSavedTargetSnapshot(BLE_PEER_PHONE, phone);
-  copyMacUpper(gBLEMACCache.leftMAC,  sizeof(gBLEMACCache.leftMAC),
-               glasses.target.mac1);
-  copyMacUpper(gBLEMACCache.rightMAC, sizeof(gBLEMACCache.rightMAC),
-               glasses.target.mac2);
-  copyMacUpper(gBLEMACCache.ringMAC,  sizeof(gBLEMACCache.ringMAC),
-               ring.target.mac1);
-  copyMacUpper(gBLEMACCache.phoneMAC, sizeof(gBLEMACCache.phoneMAC),
-               phone.target.mac1);
 
-
-  gBLEMACCache.initialized = true;
+// True when a saved peer MAC (any case) names the connecting address
+// (canonical upper-case display form). An empty saved slot never matches.
+static bool bleSavedMacMatches(const char* macStr, const char* saved) {
+  char upper[18];
+  copyMacUpper(upper, sizeof(upper), saved);
+  return upper[0] != '\0' && strcmp(macStr, upper) == 0;
 }
 
 // Convert device type to human-readable string
@@ -535,31 +517,23 @@ const char* bleDeviceTypeToString(BLEDeviceType type) {
   }
 }
 
-// Identify device type by MAC address (zero heap allocations)
+// Identify device type by MAC address (zero heap allocations). Each call reads
+// the peer owner's current saved targets (BLE_Peers.h snapshot, a short
+// critical-section copy), so a re-paired glasses, ring or phone is typed by
+// its new address from the next connection on.
 BLEDeviceType bleIdentifyDeviceByMAC(const uint8_t* mac) {
-  // Ensure cache is initialized
-  if (!gBLEMACCache.initialized) {
-    bleUpdateMACCache();
-  }
-  
-  // Convert incoming MAC to uppercase string on stack
+  if (!mac) return BLE_DEVICE_UNKNOWN;
   char macStr[18];
   macToStackBuf(mac, macStr);
-  
-  // Check against cached normalized MACs
-  if (gBLEMACCache.leftMAC[0] != '\0' && strcmp(macStr, gBLEMACCache.leftMAC) == 0) {
-    return BLE_DEVICE_GLASSES_LEFT;
-  }
-  if (gBLEMACCache.rightMAC[0] != '\0' && strcmp(macStr, gBLEMACCache.rightMAC) == 0) {
-    return BLE_DEVICE_GLASSES_RIGHT;
-  }
-  if (gBLEMACCache.ringMAC[0] != '\0' && strcmp(macStr, gBLEMACCache.ringMAC) == 0) {
-    return BLE_DEVICE_RING;
-  }
-  if (gBLEMACCache.phoneMAC[0] != '\0' && strcmp(macStr, gBLEMACCache.phoneMAC) == 0) {
-    return BLE_DEVICE_PHONE;
-  }
-  
+
+  BlePeerSavedTargetSnapshot peer{};
+  (void)blePeerSavedTargetSnapshot(BLE_PEER_G2_GLASSES, peer);
+  if (bleSavedMacMatches(macStr, peer.target.mac1)) return BLE_DEVICE_GLASSES_LEFT;
+  if (bleSavedMacMatches(macStr, peer.target.mac2)) return BLE_DEVICE_GLASSES_RIGHT;
+  (void)blePeerSavedTargetSnapshot(BLE_PEER_R1_RING, peer);
+  if (bleSavedMacMatches(macStr, peer.target.mac1)) return BLE_DEVICE_RING;
+  (void)blePeerSavedTargetSnapshot(BLE_PEER_PHONE, peer);
+  if (bleSavedMacMatches(macStr, peer.target.mac1)) return BLE_DEVICE_PHONE;
   return BLE_DEVICE_UNKNOWN;
 }
 
@@ -596,10 +570,11 @@ class ServerCallbacks : public BLEServerCallbacks {
     gBLEState->connections[slot].commandsReceived = 0;
     gBLEState->connections[slot].authed = false;
     gBLEState->connections[slot].user = "";
+    gBLEState->connections[slot].mirrorEligible = false;
     gBLEState->connections[slot].lastActivityMs = millis();
     bleScReset(param->connect.conn_id);  // fresh secure-channel state for this connection
 
-    // Identify device type by MAC address (uses static lookup - ISR-safe)
+    // Type the link from the peer owner's saved targets (stack only, no heap)
     gBLEState->connections[slot].deviceType = bleIdentifyDeviceByMAC(param->connect.remote_bda);
     gBLEState->connections[slot].deviceName = bleDeviceTypeToString(gBLEState->connections[slot].deviceType);
     // Publish only after the complete connection identity exists. This token
@@ -689,7 +664,7 @@ class ServerCallbacks : public BLEServerCallbacks {
 
 // Command Request Characteristic - receives commands from client
 // NOTE: This callback runs on BTC_TASK with limited stack (~3KB)
-// Heavy command processing is routed through the central cmd_exec task via submitCommandAsync
+// Every write is copied and processed on the central cmd_exec task (processIncomingBLECommand)
 class CmdRequestCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic, esp_ble_gatts_cb_param_t* param) override {
     // NOTE: Callback runs on BTC_TASK - defer logging to task context (ISR-safe pattern)
@@ -717,8 +692,8 @@ class CmdRequestCallbacks : public BLECharacteristicCallbacks {
                  (unsigned)param->write.conn_id,
                  (unsigned)len);
 
-      // Route to processIncomingBLECommand which handles lightweight ops directly
-      // and routes heavy commands through cmd_exec task
+      // processIncomingBLECommand copies the write into a pool slot and defers
+      // it to cmd_exec_task; nothing on this task waits for a reply to go out
       processIncomingBLECommand(param->write.conn_id, (const char*)data, len);
     }
   }
@@ -738,31 +713,10 @@ class CmdStatusCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
-// Result of the most recent notify() on the response characteristic. notify() is
-// fire-and-forget at the ATT layer, but the Bluedroid wrapper surfaces the underlying
-// esp_ble_gatts_send_indicate() result through onStatus(): SUCCESS_NOTIFY when the packet
-// was accepted into the controller's ACL tx buffers, ERROR_GATT (errRc = ESP_ERR_NO_MEM /
-// congestion) when the buffers were full and the frame was DROPPED. Without this hook the
-// caller can't tell a sent frame from a lost one — which is exactly how big results
-// (memreport, espnowmessages json pages) silently lost fragments. bleRawNotify() reads
-// this to apply bounded backpressure instead of dropping. Installed on pCmdResponseChar
-// in initBluetooth().
-enum class BleNotifyResult : uint8_t { PENDING, OK, CONGESTED, TERMINAL };
-static volatile BleNotifyResult gLastNotifyResult = BleNotifyResult::PENDING;
-
-class CmdResponseCallbacks : public BLECharacteristicCallbacks {
-  void onStatus(BLECharacteristic* /*c*/, Status s, uint32_t /*code*/) override {
-    if (s == Status::SUCCESS_NOTIFY)   gLastNotifyResult = BleNotifyResult::OK;
-    else if (s == Status::ERROR_GATT)  gLastNotifyResult = BleNotifyResult::CONGESTED;  // tx buffers full → retryable
-    else                               gLastNotifyResult = BleNotifyResult::TERMINAL;   // no client / notify disabled → don't spin
-  }
-};
-
 // Arduino borrows these callback pointers. Their stateless implementations
 // survive role changes; allocating them on every Server start leaks them.
 static ServerCallbacks sServerCallbacks;
 static CmdRequestCallbacks sCmdRequestCallbacks;
-static CmdResponseCallbacks sCmdResponseCallbacks;
 static CmdStatusCallbacks sCmdStatusCallbacks;
 
 // =============================================================================
@@ -882,9 +836,12 @@ static void bleLoginDeferred(void* arg) {
                                    String(job->password));
 
   if (authOk) {
+    // Resolve the console-mirror rule once, from the same locked roster the
+    // credentials were checked against; fail closed like the web mirror.
+    const bool mirrorEligible = userMayControlOtherSessions(String(job->user));
     TransportSessionEpoch boundEpoch = 0;
     if (!bleBindSession(job->connId, job->sessionEpoch,
-                        String(job->user), boundEpoch)) {
+                        String(job->user), mirrorEligible, boundEpoch)) {
       recordTransportLoginResult(SOURCE_BLUETOOTH, String(job->user), false,
                                  "Connection changed before session bind");
       bleLoginJobFree(job);
@@ -892,7 +849,8 @@ static void bleLoginDeferred(void* arg) {
     }
     recordTransportLoginResult(SOURCE_BLUETOOTH, String(job->user), true,
                                "Login successful");
-    BLE_DEBUGF(DEBUG_BLE_CORE, "Login success conn=%u user='%s'", (unsigned)job->connId, job->user);
+    BLE_DEBUGF(DEBUG_BLE_CORE, "Login success conn=%u user='%s' mirror=%d",
+               (unsigned)job->connId, job->user, mirrorEligible ? 1 : 0);
     // BLE broadcast/console output stays OFF on connect by default: keeps the
     // load down and the response characteristic clean (no [CMD] audit echo
     // mixed into command replies) for RPC-style clients. The client opts in
@@ -945,11 +903,15 @@ static bool bleIsFileBrowserCommand(const char* line) {
   return false;
 }
 
-// Command tail — runs on cmd_exec_task (deep stack), called directly for plaintext
-// commands or by the deferred secure-channel handler after a DATA frame is decrypted.
+// Command tail — runs on cmd_exec_task (deep stack), called by the deferred plaintext
+// job (blePlaintextDeferredInbound) or by the deferred secure-channel job after a DATA
+// frame is decrypted. Its replies may wait for the secure-channel tx mutex, which is
+// why it never runs on BTC_TASK.
 // `data` is already plaintext here (no secure-channel parsing in this function).
+// `arrivedEncrypted` is true only for a command decrypted from a DATA frame.
 static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingressEpoch,
-                                  const char* data, size_t len) {
+                                  const char* data, size_t len,
+                                  bool arrivedEncrypted) {
   if (!bleSessionEpochMatches(connId, ingressEpoch)) return;
   // Build printable command string (filter non-printable bytes) - stack buffer, zero heap allocations
   char cmdBuf[512];
@@ -1055,12 +1017,15 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
       sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
       return;
     }
-    // Defer to cmd_exec_task — isValidUser() uses too much stack for BTC_TASK.
+    // The credential check runs as its own cmd_exec job (bleLoginDeferred).
     // This job carries the PLAINTEXT password until bleLoginDeferred runs, so
     // it must live in internal DRAM, never PSRAM: flash encryption is off on
     // most boards and external PSRAM is a probeable chip. RequireInternal
     // makes that placement a hard requirement; bleLoginJobFree wipes the
-    // password before free.
+    // password before free. A login written in plaintext mode reaches this
+    // tail through a slot of the PSRAM-preferred inbound pool (copied there on
+    // BTC_TASK, held until this cmd_exec job runs); blePlaintextDeferredInbound
+    // wipes that slot when it releases it.
     BleLoginAsyncJob* job = (BleLoginAsyncJob*)ps_alloc(sizeof(BleLoginAsyncJob),
                                                        AllocPref::RequireInternal,
                                                        "ble.loginAsyncJob");
@@ -1114,12 +1079,12 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
   }
 
   // Secure Channel gate for the file browser. File contents and paths must never
-  // cross the link in cleartext, so these commands require an established Secure
-  // Channel regardless of the global plaintext setting. When the command arrived
-  // as a decrypted DATA frame the channel is already established (bleScEstablished
-  // is true), so this only rejects the cleartext path. The operator must have set
-  // a `blesecret` for the app to be able to establish the channel.
-  if (bleIsFileBrowserCommand(cmdStart) && !bleScEstablished(connId)) {
+  // cross the link in cleartext, so these commands run only when this command
+  // arrived as a decrypted DATA frame, regardless of the global plaintext setting
+  // and of whether this connection also holds a channel: a cleartext file verb is
+  // refused even on a connection with an established channel. The operator must
+  // have set a `blesecret` for the app to be able to establish the channel.
+  if (bleIsFileBrowserCommand(cmdStart) && !arrivedEncrypted) {
     const char* msg = "{\"success\":false,\"error\":\"secure_channel_required\"}";
     sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
     return;
@@ -1179,7 +1144,10 @@ struct BleScDeferred {
 };
 
 /*
- * Fixed slot pool for inbound secure-channel frames.
+ * Fixed slot pool for inbound writes: secure-channel frames and plaintext
+ * command lines both travel to cmd_exec_task in a slot. A plaintext line can be
+ * `login <user> <password>`, so a plaintext slot is wiped before every release
+ * (secure-channel frames carry no cleartext command).
  *
  * The copy itself is irreducible -- the GATT callback's buffer is only valid
  * for the duration of the callback, so deferring the work requires copying the
@@ -1198,8 +1166,8 @@ struct BleScDeferred {
  * (ExecReq + BleScDeferred) = 55,296 B, i.e. this is ~4.4x LESS memory at 3x
  * the depth.
  *
- * Allocated lazily on the first secure frame, so a device that never takes an
- * encrypted BLE connection pays nothing -- and Bluetooth is off by default on
+ * Allocated lazily on the first inbound write, so a device that never takes a
+ * BLE command pays nothing -- and Bluetooth is off by default on
  * this build. Never freed: the pool is bounded and reused, and freeing it would
  * need a proof that no slot is still queued on cmd_exec_task.
  */
@@ -1257,9 +1225,12 @@ static void bleScDeferredInbound(void* arg) {
   }
   char   plain[512];
   size_t pl = 0;
-  BleScResult r = bleScHandleInbound(d->connId, d->buf, d->len, plain, sizeof(plain), &pl);
+  // Handshake replies go to this frame's own connection and session epoch only.
+  BleScResult r = bleScHandleInbound(d->connId, d->sessionEpoch, d->buf, d->len,
+                                     plain, sizeof(plain), &pl);
   if (r == BLE_SC_PLAINTEXT_READY) {
-    processBleCommandLine(d->connId, d->sessionEpoch, plain, pl);
+    processBleCommandLine(d->connId, d->sessionEpoch, plain, pl,
+                          /*arrivedEncrypted=*/true);
   } else if (r == BLE_SC_BINARY_READY) {
     // The secure-channel decoder recognized an opaque application envelope.
     // OTA performs its own live-session/superadmin check for every frame.
@@ -1274,10 +1245,46 @@ static void bleScDeferredInbound(void* arg) {
   bleScPoolRelease(d);
 }
 
-// Entry from the GATT write callback — runs on BTC_TASK (8 KB, time-critical). Keep it
-// light: secure-channel frames are copied + deferred to cmd_exec (where the handshake
-// crypto runs); plaintext commands go straight to the command tail (which itself defers
-// the heavy command execution via submitCommandAsync).
+// A slot is longer than the command tail's 511-byte input limit, so a plaintext
+// write clipped to a slot is still discarded whole with the over-limit error.
+static_assert(sizeof(BleScDeferred::buf) > 511,
+              "a clipped plaintext write must stay over the command input limit");
+
+// Runs on cmd_exec_task: a plaintext write copied off BTC_TASK by
+// processIncomingBLECommand. Wipes, then releases, its pool slot: the line may be
+// `login <user> <password>` and the pool prefers PSRAM. When the secure channel
+// is required the write gets a fixed refusal that carries no command output or
+// user data: over the channel when this connection holds one, otherwise in
+// plaintext through the directed per-session sender, because the session sender
+// refuses plaintext in required mode. Otherwise the command tail runs.
+static void blePlaintextDeferredInbound(void* arg) {
+  BleScDeferred* d = (BleScDeferred*)arg;
+  if (bleSessionEpochMatches(d->connId, d->sessionEpoch)) {
+    if (bleScRequired()) {
+      static const char kMsg[] = "Secure channel required — connect with the encrypted app.";
+      if (bleScEstablished(d->connId)) {
+        sendBLEResponseToSession(d->connId, d->sessionEpoch, kMsg, sizeof(kMsg) - 1);
+      } else {
+        bleRawNotifyToSession(d->connId, d->sessionEpoch, kMsg, sizeof(kMsg) - 1,
+                              /*blocking=*/true);
+      }
+    } else {
+      processBleCommandLine(d->connId, d->sessionEpoch,
+                            reinterpret_cast<const char*>(d->buf), d->len,
+                            /*arrivedEncrypted=*/false);
+    }
+  }
+  volatile uint8_t* p = d->buf;
+  for (size_t i = 0; i < d->len; ++i) p[i] = 0;
+  bleScPoolRelease(d);
+}
+
+// Entry from the GATT write callback — runs on BTC_TASK (8 KB, time-critical), which
+// serves the GATT/GAP callbacks of every link. It only copies the write into a pool slot
+// and defers it to cmd_exec: secure-channel frames to bleScDeferredInbound (where the
+// handshake crypto runs), plaintext writes to blePlaintextDeferredInbound. Replies wait
+// for the secure-channel tx mutex while a paced reply holds it, so they are sent from
+// cmd_exec; the only notices sent from here are best-effort (blocking=false).
 static void processIncomingBLECommand(uint16_t connId, const char* data, size_t len) {
   const TransportSessionEpoch ingressEpoch =
       bleSessionEpochForConnection(connId);
@@ -1287,7 +1294,8 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
   if (isFrame) {
     if (len > sizeof(((BleScDeferred*)0)->buf)) {
       const char* msg = "Error: BLE secure frame exceeds 517-byte input limit; discarded";
-      sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
+      sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg),
+                               /*blocking=*/false);
       return;
     }
     BleScDeferred* d = bleScPoolClaim();
@@ -1310,13 +1318,28 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
     }
     return;
   }
-  // Plaintext path: refuse if the secure channel is required, else run the command.
-  if (bleScRequired()) {
-    const char* msg = "Secure channel required — connect with the encrypted app.";
-    sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
-    return;
+  // Plaintext path: the secure-channel gate and the command tail run on cmd_exec
+  // (blePlaintextDeferredInbound). A write longer than a slot is clipped to it and
+  // still exceeds the tail's input limit (static_assert above). The slot may hold
+  // a cleartext password, so every release of a plaintext slot wipes it first.
+  BleScDeferred* d = bleScPoolClaim();
+  if (d) {
+    d->connId = connId;
+    d->sessionEpoch = ingressEpoch;
+    d->len = (uint16_t)(len < sizeof(d->buf) ? len : sizeof(d->buf));
+    memcpy(d->buf, data, d->len);
+    if (submitDeferredToCmdExec(blePlaintextDeferredInbound, d)) return;
+    volatile uint8_t* p = d->buf;
+    for (size_t i = 0; i < d->len; ++i) p[i] = 0;
+    bleScPoolRelease(d);  // the queue-full drop is counted by submitDeferredToCmdExec
+  } else {
+    cmdExecDropCountIncrement();
   }
-  processBleCommandLine(connId, ingressEpoch, data, len);
+  // Not queued. One best-effort notice: blocking=false never waits for the
+  // secure-channel tx mutex and makes one admission attempt.
+  static const char kQueueFull[] = "Error: Failed to queue command";
+  sendBLEResponseToSession(connId, ingressEpoch, kQueueFull, sizeof(kQueueFull) - 1,
+                           /*blocking=*/false);
 }
 
 // =============================================================================
@@ -1413,6 +1436,7 @@ bool initBluetooth() {
     state->connections[i].deviceType = BLE_DEVICE_UNKNOWN;
     state->connections[i].authed = false;
     state->connections[i].user = "";
+    state->connections[i].mirrorEligible = false;
     state->connections[i].lastActivityMs = 0;
   }
   state->activeConnectionCount = 0;
@@ -1521,7 +1545,6 @@ bool initBluetooth() {
     BLECharacteristic::PROPERTY_NOTIFY
   );
   pCmdResponseChar->addDescriptor(new BLE2902(), true);  // Owned CCCD for notifications
-  pCmdResponseChar->setCallbacks(&sCmdResponseCallbacks);  // onStatus → notify backpressure
   
   // Status characteristic (read - connection info)
   pCmdStatusChar = pCommandService->createCharacteristic(
@@ -1557,13 +1580,9 @@ bool initBluetooth() {
     BLECharacteristic::PROPERTY_NOTIFY
   );
   pEventNotifyChar->addDescriptor(new BLE2902(), true);
-  
-  // Stream control characteristic (write - enable/disable streams)
-  pStreamControlChar = pDataService->createCharacteristic(
-    BLE_STREAM_CONTROL_CHAR_UUID,
-    BLECharacteristic::PROPERTY_WRITE
-  );
-  
+
+  // Streams are switched on and off with the authenticated `blestream`
+  // command over the command service; this service only notifies.
   pDataService->start();
   
   // --------------------------------------------
@@ -1605,15 +1624,46 @@ bool initBluetooth() {
   return true;
 }
 
-void deinitBluetooth() {
+bool deinitBluetooth() {
   BleRoleTransitionClaim role(BleRoleTransition::SERVER_STOP);
   if (!role) {
     broadcastOutput("[BLE] Server stop deferred: another BLE role transition is active");
-    return;
+    return false;
   }
   {
     BleLifecycleGuard lifecycle;
-    if (!lifecycle || !gBLEState || !gBLEState->initialized) return;
+    if (!lifecycle || !gBLEState || !gBLEState->initialized) return true;
+  }
+
+  // Drop R1 GATT pointers before the stack dies. openg2 often deinit's
+  // server mode while ringconnect left a live client; without this,
+  // Health polls write through a freed characteristic → LoadProhibited.
+  // This runs while app sessions and advertising are still open, so a
+  // deferred stop leaves the server's sessions and advertising as they were.
+  if (!g2RingPrepareForStackTeardown(2000)) {
+    broadcastOutput("[BLE] Server stop deferred: Ring owner did not quiesce");
+    // A companion reset (the RECOVERING claim this nested claim joined) takes
+    // the host down after this returns, whatever it reports, and that frees the
+    // GATT objects. Close session admission and advertising first, so no
+    // directed sender reaches a freed characteristic. Every other caller keeps
+    // the server running.
+    if (bleRoleTransitionState() == BleRoleTransition::RECOVERING) {
+      {
+        BleLifecycleGuard lifecycle;
+        if (lifecycle) {
+          for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) {
+            bleInvalidateSessionSlotLocked(i);
+          }
+        }
+        sBleGattsIf.store(ESP_GATT_IF_NONE, std::memory_order_release);
+      }
+      stopBLEAdvertising();
+    }
+    return false;
+  }
+  {
+    BleLifecycleGuard lifecycle;
+    if (!lifecycle || !gBLEState || !gBLEState->initialized) return true;
     // Admission closes before the stack and characteristic objects are torn
     // down.  Any queued result carrying an old epoch now fails closed.
     for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) {
@@ -1625,14 +1675,6 @@ void deinitBluetooth() {
   
   stopBLEAdvertising();
 
-  // Drop R1 GATT pointers before the stack dies. openg2 often deinit's
-  // server mode while ringconnect left a live client; without this,
-  // Health polls write through a freed characteristic → LoadProhibited.
-  if (!g2RingPrepareForStackTeardown(2000)) {
-    broadcastOutput("[BLE] Server stop deferred: Ring owner did not quiesce");
-    return;
-  }
-  
   // ESP32 BLE doesn't have a clean disconnect API like NimBLE
   // Just deinit the device
   sBleGattsIf.store(ESP_GATT_IF_NONE, std::memory_order_release);
@@ -1651,7 +1693,7 @@ void deinitBluetooth() {
              (long)deinitResult.controllerStatusAfter,
              deinitResult.clientQuarantined ? 1 : 0);
     broadcastOutput(buf);
-    return;
+    return false;
   }
   bleCentralClientsTerminalTeardownAcknowledged();
   bleStackSetLifecycleFault(false);
@@ -1670,7 +1712,6 @@ void deinitBluetooth() {
   pSensorDataChar = nullptr;
   pSystemStatusChar = nullptr;
   pEventNotifyChar = nullptr;
-  pStreamControlChar = nullptr;
   pManufacturerChar = nullptr;
   pModelChar = nullptr;
   pFirmwareChar = nullptr;
@@ -1696,6 +1737,7 @@ void deinitBluetooth() {
     broadcastOutput("[BLE] Deinitialized");
   }
   systemEventPost(SYSEVT_BLE_OFF);
+  return true;
 }
 
 // =============================================================================
@@ -1750,52 +1792,84 @@ bool isBLEConnected() {
   return gBLEState && gBLEState->connectionState == BLE_STATE_CONNECTED;
 }
 
-void disconnectBLE() {
-  if (!gBLEState || !pServer) return;
-  
-  if (gBLEState->connectionState == BLE_STATE_CONNECTED) {
-    BLE_DEBUGF(DEBUG_BLE_CORE, "Disconnecting client...");
-    // ESP32 BLE uses disconnect() with connection ID (0 for first client)
-    pServer->disconnect(0);
-  }
+// G2 temples and the R1 ring are links this device opened as central; the GATT
+// server still gives them a slot (typed by MAC in onConnect). bledisconnect
+// never closes them; their owners have their own disconnect commands.
+static bool bleIsPeerLinkType(BLEDeviceType type) {
+  return type == BLE_DEVICE_GLASSES_LEFT || type == BLE_DEVICE_GLASSES_RIGHT ||
+         type == BLE_DEVICE_RING;
 }
 
-uint32_t getBLEConnectionDuration() {
-  if (!gBLEState || gBLEState->connectionState != BLE_STATE_CONNECTED) {
-    return 0;
-  }
-  // Return duration of first active connection
-  for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-    if (gBLEState->connections[i].active) {
-      return millis() - gBLEState->connections[i].connectedSince;
+BleDisconnectResult bleDisconnectConnection(uint16_t connId) {
+  BLEServer* server = nullptr;
+  {
+    BleLifecycleGuard lifecycle;
+    if (!lifecycle || !gBLEState || !pServer) return BleDisconnectResult::UNAVAILABLE;
+    const int slot = findConnectionSlotByConnIdLocked(connId);
+    if (slot < 0) return BleDisconnectResult::NOT_FOUND;
+    if (bleIsPeerLinkType(gBLEState->connections[slot].deviceType)) {
+      return BleDisconnectResult::PEER_LINK;
     }
+    server = pServer;
   }
-  return 0;
+  // esp_ble_gatts_close posts the close to the BTC task and can block while
+  // that queue is full; BTC's onConnect/onDisconnect take the lifecycle guard,
+  // so the close is issued with the guard released. onDisconnect clears the
+  // slot when the stack confirms.
+  BLE_DEBUGF(DEBUG_BLE_CORE, "Disconnecting client conn=%u", (unsigned)connId);
+  server->disconnect(connId);
+  return BleDisconnectResult::REQUESTED;
+}
+
+int bleDisconnectAppClients() {
+  uint16_t ids[BLE_MAX_CONNECTIONS];
+  int count = 0;
+  BLEServer* server = nullptr;
+  {
+    BleLifecycleGuard lifecycle;
+    if (!lifecycle || !gBLEState || !pServer) return 0;
+    for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
+      const BLEConnection& c = gBLEState->connections[i];
+      if (!c.active || bleIsPeerLinkType(c.deviceType)) continue;
+      ids[count++] = c.connId;
+    }
+    server = pServer;
+  }
+  for (int i = 0; i < count; i++) {
+    BLE_DEBUGF(DEBUG_BLE_CORE, "Disconnecting client conn=%u", (unsigned)ids[i]);
+    server->disconnect(ids[i]);
+  }
+  return count;
 }
 
 // =============================================================================
 // DATA TRANSMISSION
 // =============================================================================
 
-// RAW notify to the RESPONSE characteristic — the ONLY function that actually touches
-// the radio for output. The secure-channel encryptor and the handshake replies emit
-// through this; it does NOT encrypt. Everything that is *output* (results, streamed
-// CLI text) must go through sendBLEResponse()/sendBLEResponseToConn() instead, which
+// Directed RAW notify to the RESPONSE characteristic (bleRawNotifyToSession, below) —
+// the ONLY function that touches the radio for command-service output. Each frame goes
+// to exactly one connection through esp_ble_gatts_send_indicate, never through the
+// wrapper's characteristic-wide notify, and is admitted under the BLE lifecycle mutex
+// only while `expectedEpoch` is still that connection's live session epoch. A frame for
+// a closed, rotated or reused session is dropped, and server teardown (which invalidates
+// every epoch under the same mutex before the GATT tree is deleted) cannot race a send.
+// The secure-channel encryptor and its handshake replies (System_BleSecureChannel.cpp)
+// emit through this; it does NOT encrypt. Everything that is *output* (results, streamed
+// CLI text) goes through sendBLEResponse()/sendBLEResponseToSession() instead, which
 // encrypt when a channel is up.
 //
-// Bounded backpressure: a single notify() silently drops its frame when the controller's
-// ACL tx buffers are full (the common case mid-burst). We detect that via onStatus
-// (CONGESTED) and retry after yielding ~one connection interval, so bursts ride out
-// transient congestion instead of losing fragments. The retry budget caps total wait so a
-// stalled/dead link can never hang the calling task — under *sustained* congestion we give
-// up and return false, and the caller reports the failure (never silent). vTaskDelay yields
-// the CPU, so waiting costs latency, not cycles. In the common (uncongested) case the first
-// notify succeeds and there is zero added delay.
+// Bounded backpressure: an admission that fails (the controller's ACL tx buffers are
+// full, the common case mid-burst) is retried after yielding ~one connection interval,
+// so bursts ride out transient congestion instead of losing fragments. The retry budget
+// caps total wait so a stalled/dead link can never hang the calling task — under
+// *sustained* congestion it gives up and returns false, and the caller reports the
+// failure (never silent). vTaskDelay yields the CPU, so waiting costs latency, not
+// cycles. In the common (uncongested) case the first attempt succeeds with no delay.
 //
 // blocking=false collapses the retry budget to a single attempt: a best-effort
-// producer running on the main loop (the notification sink) must not pay up to
-// 6 x 15 ms of vTaskDelay per send. It gives up on the first CONGESTED instead,
-// and its caller counts the drop. Reliable senders keep the default.
+// producer (the console mirror, the notification sink) must not pay up to
+// 6 x 15 ms of vTaskDelay per send. It gives up on the first failure instead,
+// and its caller counts the drop. Reliable senders pass blocking=true.
 #if ENABLE_OLED_DISPLAY
 static void bleRememberOutput(const char* data, size_t len) {
   if (!data || !len) return;
@@ -1810,10 +1884,10 @@ static void bleRememberOutput(const char* data, size_t len) {
 }
 #endif
 
-static bool bleRawNotifyToSession(uint16_t connId,
-                                  TransportSessionEpoch expectedEpoch,
-                                  const char* data, size_t len,
-                                  bool blocking = true) {
+bool bleRawNotifyToSession(uint16_t connId,
+                           TransportSessionEpoch expectedEpoch,
+                           const char* data, size_t len,
+                           bool blocking) {
   if (!data || len == 0 || expectedEpoch == 0) return false;
 
   const int kMaxTries = blocking ? 6 : 1;
@@ -1875,87 +1949,15 @@ static bool bleRawNotifyToSession(uint16_t connId,
   return sent;
 }
 
-bool bleRawNotify(const char* data, size_t len) {
-  if (!isBLEConnected() || !pCmdResponseChar) {
-    BLE_DEBUGF(DEBUG_BLE_DATA, "bleRawNotify dropped (connected=%d char=%p)",
-               isBLEConnected(), (void*)pCmdResponseChar);
-    return false;
-  }
-
-  const int        BLE_NOTIFY_MAX_TRIES = 6;
-  const TickType_t BLE_NOTIFY_BACKOFF   = pdMS_TO_TICKS(15);  // ~one conn interval; 6*15 = ~90ms cap
-
-  // Set the characteristic value once, not per retry: the payload is identical on
-  // every attempt and setValue() heap-copies it into the wrapper's String, so only
-  // notify() needs to repeat under congestion. (The additional getValue() copies
-  // inside notify() itself are in vendored Arduino-BLE code and can't be removed
-  // without reimplementing its multi-peer + onStatus congestion path — left as-is;
-  // see audit finding Bluetooth.cpp:1191.)
-  pCmdResponseChar->setValue((uint8_t*)data, len);
-
-  bool sent = false;
-  int  tries = 0;
-  for (int attempt = 0; attempt < BLE_NOTIFY_MAX_TRIES; attempt++) {
-    tries = attempt + 1;
-    gLastNotifyResult = BleNotifyResult::PENDING;
-    pCmdResponseChar->notify();                 // fires onStatus synchronously on this task
-    BleNotifyResult r = gLastNotifyResult;
-    // PENDING means onStatus never ran (no callbacks / unexpected path) — assume delivered
-    // rather than spin. OK = accepted into tx buffers.
-    if (r == BleNotifyResult::OK || r == BleNotifyResult::PENDING) { sent = true; break; }
-    if (r == BleNotifyResult::TERMINAL) break;  // no client / disabled — retrying won't help
-    if (!isBLEConnected()) break;               // link dropped mid-retry
-    vTaskDelay(BLE_NOTIFY_BACKOFF);             // CONGESTED — let the controller drain, then retry
-  }
-
-  // Trace only when interesting (a retry happened or we gave up) so it doesn't spam.
-  if ((!sent || tries > 1) && bleDataDebugEnabled()) {
-    char b[120];
-    int n = snprintf(b, sizeof(b), "[BLE-NOTIFY] len=%zu sent=%d tries=%d", len, sent ? 1 : 0, tries);
-    if (n > 0) broadcastOutputCore_Routed(b, (size_t)n, (uint8_t)(MSG_ROUTE_ALL & ~MSG_ROUTE_BLE));
-  }
-
-  if (sent && gBLEState) gBLEState->responsesSent++;
-
-  #if ENABLE_OLED_DISPLAY
-  bleRememberOutput(data, len);
-  #endif
-  return sent;
-}
-
-// Output chokepoint for broadcast/streamed device output (the debug-drain "path A" via
-// System_Debug.cpp, plus any other caller). If a Secure Channel is established for a
-// connected client, encrypt+frame the output for it — so STREAMED CLI output (menus,
-// help, reports) is confidential, not just the short command result. In secure-required
-// mode with no established channel, DROP rather than leak plaintext over the air.
-bool sendBLEResponse(const char* data, size_t len, bool blocking) {
-  if (!data || len == 0) return false;
-  if (gBLEState) {
-    for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-      if (gBLEState->connections[i].active &&
-          bleScEstablished(gBLEState->connections[i].connId)) {
-        return bleScSendEncrypted(gBLEState->connections[i].connId, data, len, blocking);
-      }
-    }
-  }
-  if (bleScRequired()) return false;     // never emit plaintext on a must-be-secure link
-  return bleRawNotify(data, len);        // plaintext mode (no channel) — as before
-}
-
 bool sendBLEResponseToConn(uint16_t connId, const char* data, size_t len) {
   const TransportSessionEpoch epoch =
       bleSessionEpochForConnection(connId);
   return sendBLEResponseToSession(connId, epoch, data, len);
 }
 
-// Per-fragment fence for the paced secure sender: the session epoch is
-// re-checked under a brief lifecycle guard before every fragment, so a
-// disconnect or replacement peer stops the transfer at the next frame.
+// One session as a send target: a connection and the session epoch captured
+// for it (the console-mirror collector's recipient record).
 struct BleSessionFence { uint16_t connId; TransportSessionEpoch epoch; };
-static bool bleSessionFenceLive(void* ctx) {
-  const auto* fence = static_cast<const BleSessionFence*>(ctx);
-  return fence && bleSessionEpochMatches(fence->connId, fence->epoch);
-}
 
 bool sendBLEResponseToSession(uint16_t connId,
                               TransportSessionEpoch expectedEpoch,
@@ -1975,24 +1977,67 @@ bool sendBLEResponseToSession(uint16_t connId,
     // let the mutex go: the paced sender can run for seconds (up to 255
     // fragments), and BTC_TASK takes this mutex for every inbound write, so
     // holding it across the transfer starves the BT host task and can deadlock
-    // it against our own notify queue. The binding's slot generation plus the
-    // per-fragment session fence keep a replacement peer from ever receiving
-    // this result under its newly established keys.
+    // it against our own notify queue. The binding carries the slot generation
+    // and this session's epoch: the epoch is re-checked before every fragment
+    // and again by the directed raw sender under the lifecycle mutex, so a
+    // replacement peer or a logged-out session never receives this result, and
+    // each fragment reaches only this connection.
     secure = bleScEstablished(connId);
-    if (secure && !bleScBind(connId, &binding)) return false;
+    if (secure && !bleScBind(connId, expectedEpoch, &binding)) return false;
     if (!secure && bleScRequired()) return false;
   }
 
-  if (secure) {
-    BleSessionFence fence{connId, expectedEpoch};
-    return bleScSendEncryptedBound(binding, data, len, blocking,
-                                   bleSessionFenceLive, &fence);
-  }
+  if (secure) return bleScSendEncryptedBound(binding, data, len, blocking);
 
   // Plaintext command replies are never characteristic-wide.  The session
   // epoch is checked in the same lifecycle critical section as the directed
   // GATT admission, closing both connId reuse and check-then-send races.
   return bleRawNotifyToSession(connId, expectedEpoch, data, len, blocking);
+}
+
+// Console-mirror recipients: logged-in sessions whose account was verified
+// non-guest at login.  Resolved in one lifecycle critical section so every
+// (connId, epoch) pair is consistent; the sends run with the mutex released,
+// like every other paced sender in this file.
+static int bleCollectMirrorSessions(BleSessionFence* out, int cap) {
+  BleLifecycleGuard lifecycle;
+  if (!lifecycle || !gBLEState) return 0;
+  int count = 0;
+  for (int i = 0; i < BLE_MAX_CONNECTIONS && count < cap; ++i) {
+    const BLEConnection& c = gBLEState->connections[i];
+    if (!c.active || !c.authed || !c.mirrorEligible || c.user.length() == 0) continue;
+    const TransportSessionEpoch epoch =
+        sBleSessionEpoch[i].load(std::memory_order_acquire);
+    if (epoch == 0) continue;
+    out[count++] = BleSessionFence{c.connId, epoch};
+  }
+  return count;
+}
+
+// Output chokepoint for broadcast/streamed device output (the debug-drain console
+// mirror in System_Debug.cpp, and `blesend`).  Each logged-in non-guest session
+// gets its own directed notify, or its own encrypted frames when it holds a
+// Secure Channel; a peer that never logged in, a peer holding only a channel and
+// a guest session receive nothing, and the characteristic-wide notify is never
+// used.  sendBLEResponseToSession refuses plaintext for a session without a
+// channel when the channel is required.  Returns true when at least one session
+// accepted the buffer, false only when nobody received it, so a caller that
+// retries on false never resends to a session that already has the data.
+bool sendBLEResponse(const char* data, size_t len, bool blocking) {
+  if (!data || len == 0) return false;
+  BleSessionFence sessions[BLE_MAX_CONNECTIONS];
+  const int count = bleCollectMirrorSessions(sessions, BLE_MAX_CONNECTIONS);
+  bool delivered = false;
+  for (int i = 0; i < count; ++i) {
+    // The per-session fence drops a session that logged out or was replaced
+    // between the collection above and this send.  Offered once per call: a
+    // busy link misses this chunk (traced per session) and is never resent.
+    if (sendBLEResponseToSession(sessions[i].connId, sessions[i].epoch,
+                                 data, len, blocking)) {
+      delivered = true;
+    }
+  }
+  return delivered;
 }
 
 void bleSessionTick() {
@@ -2150,13 +2195,6 @@ bool isBleServerInitialized() {
   return gBLEState && gBLEState->initialized;
 }
 
-bool isBLERunning() {
-  // Preserve the historical controller-wide contract for compatibility. The
-  // server fallback also preserves behavior in tests/partial teardown states
-  // where app ownership remains published after the controller drops.
-  return isBleControllerEnabled() || isBleServerInitialized();
-}
-
 const char* getBLEStateString() {
   if (!gBLEState || !gBLEState->initialized) return "uninitialized";
   
@@ -2169,36 +2207,6 @@ const char* getBLEStateString() {
     case BLE_STATE_DISCONNECTING: return "disconnecting";
     default: return "unknown";
   }
-}
-
-void getBLEStatus(char* buffer, size_t bufferSize) {
-  if (!buffer || bufferSize < 64) return;
-  
-  if (!gBLEState || !gBLEState->initialized) {
-    snprintf(buffer, bufferSize, "Bluetooth: disabled");
-    return;
-  }
-  
-  if (gBLEState->connectionState == BLE_STATE_CONNECTED) {
-    snprintf(buffer, bufferSize, 
-             "BLE: %d/%d connected (rx:%lu tx:%lu)",
-             gBLEState->activeConnectionCount,
-             BLE_MAX_CONNECTIONS,
-             gBLEState->commandsReceived,
-             gBLEState->responsesSent);
-  } else {
-    snprintf(buffer, bufferSize, 
-             "BLE: %s (total: %lu)",
-             getBLEStateString(),
-             gBLEState->totalConnections);
-  }
-  BLE_DEBUGF(DEBUG_BLE_CORE, "BLE status requested");
-}
-
-void bleApplySettings() {
-  // Refresh MAC address cache when settings change
-  bleUpdateMACCache();
-  BLE_DEBUGF(DEBUG_BLE_CORE, "Settings applied, MAC cache refreshed");
 }
 
 // =============================================================================
@@ -2239,7 +2247,9 @@ static const char* cmd_blestart(const String& argsInput) {
 }
 
 static const char* cmd_blestop(const String& argsInput) {
-  deinitBluetooth();
+  // deinitBluetooth() has broadcast why a stop did not finish; the stored
+  // role stays as it is while the server is still up.
+  if (!deinitBluetooth()) return "Error: [BLE] Server did not stop; mode unchanged";
   // Return to the role this build can use by default. G2 builds select client
   // so glasses can auto-reconnect; server-only builds must not persist the
   // unavailable client role (which also suppresses the server security notice).
@@ -2248,43 +2258,105 @@ static const char* cmd_blestop(const String& argsInput) {
   return "Bluetooth stopped";
 }
 
+// One guarded copy of the live BLE status. buildBLEInfoJson (bleinfo json and
+// the web status) and blestatus/bleread (text and json) all render from it, so
+// every view reports the same client set with the same identity facts.
+struct BleStatusSnapshot {
+  struct Client {
+    int slot = 0;
+    uint16_t connId = 0;
+    bool authed = false;
+    String user;            // raw: "" until the connection logs in
+    char mac[18] = {};
+    uint32_t sinceSec = 0;
+    uint32_t commands = 0;
+  };
+  bool initialized = false;
+  const char* state = "uninitialized";
+  int activeConnections = 0;
+  uint32_t totalConnections = 0;   // lifetime
+  uint32_t commandsReceived = 0;   // lifetime
+  uint32_t responsesSent = 0;      // lifetime
+  int clientCount = 0;
+  Client clients[BLE_MAX_CONNECTIONS];
+};
+
+// Copies the live status under the lifecycle guard (bounded 100 ms wait).
+// Before the first server start there is no mutex and no published state, so
+// the snapshot stays "uninitialized" without dereferencing gBLEState. Once
+// created, the mutex survives server stops and protects this copy against the
+// BTC_TASK callbacks and state deletion. Returns false only when the mutex
+// exists and stays busy past the wait.
+static bool bleCaptureStatusSnapshot(BleStatusSnapshot& out) {
+  BleLifecycleGuard lifecycle(pdMS_TO_TICKS(100));
+  if (sBleLifecycleMutex && !lifecycle) return false;
+  if (!lifecycle || !gBLEState || !gBLEState->initialized) return true;
+  out.initialized = true;
+  out.state = getBLEStateString();
+  out.activeConnections = gBLEState->activeConnectionCount;
+  out.totalConnections = gBLEState->totalConnections;
+  out.commandsReceived = gBLEState->commandsReceived;
+  out.responsesSent = gBLEState->responsesSent;
+  const uint32_t now = millis();
+  for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
+    const BLEConnection& c = gBLEState->connections[i];
+    if (!c.active) continue;
+    BleStatusSnapshot::Client& o = out.clients[out.clientCount++];
+    o.slot = i;
+    o.connId = c.connId;
+    o.authed = c.authed;
+    o.user = c.user;
+    macToStackBuf(c.deviceAddr, o.mac);
+    o.sinceSec = (uint32_t)((now - c.connectedSince) / 1000);
+    o.commands = c.commandsReceived;
+  }
+  return true;
+}
+
 static const char* cmd_blestatus(const String& argsInput) {
   const bool wantJson = argWantsJson(argsInput);
 
-  if (!gBLEState || !gBLEState->initialized) {
+  BleStatusSnapshot snap;
+  if (!bleCaptureStatusSnapshot(snap)) {
+    if (wantJson) return "{\"schema\":1,\"error\":\"unavailable\"}";
+    return "Error: BLE status unavailable (Bluetooth busy); try again";
+  }
+  if (!snap.initialized) {
     if (wantJson) return "{\"schema\":1,\"initialized\":false}";
     return "Error: Bluetooth not initialized. Run 'openble' first.";
   }
 
   // JSON: machine-readable connection state for the app. Returned to the caller
-  // only (no broadcastOutput) so it never lands on the shared consoles.
+  // only (no broadcastOutput) so it never lands on the shared consoles. `user`
+  // is the display name ("Unknown" until the connection logs in); `authed`
+  // tells an anonymous peer from a user named "Unknown", and `connId` is the id
+  // bleinfo json and bledisconnect use.
   if (wantJson) {
     if (!ensureDebugBuffer()) return "{\"schema\":1,\"error\":\"buffer\"}";
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     doc["initialized"] = true;
-    doc["state"] = getBLEStateString();
-    doc["activeConnections"] = gBLEState->activeConnectionCount;
+    doc["state"] = snap.state;
+    doc["activeConnections"] = snap.activeConnections;
     doc["maxConnections"] = BLE_MAX_CONNECTIONS;
-    doc["totalConnections"] = gBLEState->totalConnections;
-    doc["commandsReceived"] = gBLEState->commandsReceived;
-    doc["responsesSent"] = gBLEState->responsesSent;
+    doc["totalConnections"] = snap.totalConnections;
+    doc["commandsReceived"] = snap.commandsReceived;
+    doc["responsesSent"] = snap.responsesSent;
     JsonArray conns = doc["connections"].to<JsonArray>();
-    for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-      if (!gBLEState->connections[i].active) continue;
-      JsonObject c = conns.add<JsonObject>();
-      char macStr[18];
-      macToStackBuf(gBLEState->connections[i].deviceAddr, macStr);
-      const char* who = (gBLEState->connections[i].authed &&
-                         gBLEState->connections[i].user.length() > 0)
-                          ? gBLEState->connections[i].user.c_str() : "Unknown";
-      c["index"]        = i;
-      c["user"]         = String(who);
-      c["mac"]          = String(macStr);
-      c["connectedSec"] = (uint32_t)((millis() - gBLEState->connections[i].connectedSince) / 1000);
-      c["commands"]     = gBLEState->connections[i].commandsReceived;
+    for (int i = 0; i < snap.clientCount; i++) {
+      const BleStatusSnapshot::Client& c = snap.clients[i];
+      JsonObject o = conns.add<JsonObject>();
+      o["index"]        = c.slot;
+      o["connId"]       = c.connId;
+      o["authed"]       = c.authed;
+      o["user"]         = (c.authed && c.user.length() > 0) ? c.user.c_str() : "Unknown";
+      o["mac"]          = JsonString(c.mac, false);
+      o["connectedSec"] = c.sinceSec;
+      o["commands"]     = c.commands;
     }
-    serializeJson(doc, getDebugBuffer(), 1024);
+    if (doc.overflowed()) return "{\"schema\":1,\"error\":\"oom\"}";
+    if (measureJson(doc) >= GLOBAL_DEBUG_BUFFER_SIZE) return "{\"schema\":1,\"error\":\"status too large\"}";
+    serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
     return getDebugBuffer();
   }
 
@@ -2295,41 +2367,35 @@ static const char* cmd_blestatus(const String& argsInput) {
   int remaining = 1024;
   
   // Build the full status string
-  int written = snprintf(buf + offset, remaining, "BLE Status: %s\n", getBLEStateString());
+  int written = snprintf(buf + offset, remaining, "BLE Status: %s\n", snap.state);
   if (written > 0) { offset += written; remaining -= written; }
   
-  written = snprintf(buf + offset, remaining, "Active connections: %d/%d\n", gBLEState->activeConnectionCount, BLE_MAX_CONNECTIONS);
+  written = snprintf(buf + offset, remaining, "Active connections: %d/%d\n", snap.activeConnections, BLE_MAX_CONNECTIONS);
   if (written > 0) { offset += written; remaining -= written; }
   
   // Show each active connection
-  for (int i = 0; i < BLE_MAX_CONNECTIONS && remaining > 100; i++) {
-    if (gBLEState->connections[i].active) {
-      uint32_t duration = (millis() - gBLEState->connections[i].connectedSince) / 1000;
-      char macStr[18];
-      macToStackBuf(gBLEState->connections[i].deviceAddr, macStr);
-      // Identity shown is the AUTHENTICATED user (firmware-proven via login),
-      // NOT the device-advertised name (which the client controls and we don't
-      // trust). A connection that hasn't logged in shows "Unknown"; once it
-      // authenticates it flips to that user's username. The web "Connected
-      // Clients" card parses this line; the MAC still identifies the device.
-      const char* who = (gBLEState->connections[i].authed &&
-                         gBLEState->connections[i].user.length() > 0)
-                          ? gBLEState->connections[i].user.c_str() : "Unknown";
-      written = snprintf(buf + offset, remaining, "[%d] %s\n    MAC: %s | %lu sec | %lu cmds\n",
-               i, who, macStr, duration, gBLEState->connections[i].commandsReceived);
-      if (written > 0) { offset += written; remaining -= written; }
-    }
+  for (int i = 0; i < snap.clientCount && remaining > 100; i++) {
+    const BleStatusSnapshot::Client& c = snap.clients[i];
+    // Identity shown is the AUTHENTICATED user (firmware-proven via login),
+    // NOT the device-advertised name (which the client controls and we don't
+    // trust). A connection that hasn't logged in shows "Unknown"; once it
+    // authenticates it flips to that user's username. The MAC still
+    // identifies the device.
+    const char* who = (c.authed && c.user.length() > 0) ? c.user.c_str() : "Unknown";
+    written = snprintf(buf + offset, remaining, "[%d] %s\n    MAC: %s | %lu sec | %lu cmds\n",
+             c.slot, who, c.mac, (unsigned long)c.sinceSec, (unsigned long)c.commands);
+    if (written > 0) { offset += written; remaining -= written; }
   }
   
-  written = snprintf(buf + offset, remaining, "Total connections: %lu\n", gBLEState->totalConnections);
+  written = snprintf(buf + offset, remaining, "Total connections: %lu\n", (unsigned long)snap.totalConnections);
   if (written > 0) { offset += written; remaining -= written; }
-  written = snprintf(buf + offset, remaining, "Commands received: %lu\n", gBLEState->commandsReceived);
+  written = snprintf(buf + offset, remaining, "Commands received: %lu\n", (unsigned long)snap.commandsReceived);
   if (written > 0) { offset += written; remaining -= written; }
-  written = snprintf(buf + offset, remaining, "Responses sent: %lu", gBLEState->responsesSent);
+  written = snprintf(buf + offset, remaining, "Responses sent: %lu", (unsigned long)snap.responsesSent);
   
   // Also broadcast to serial for backwards compatibility
   broadcastOutput(buf);
-  BLE_DEBUGF(DEBUG_BLE_CORE, "BLE status requested. Active=%d", gBLEState->activeConnectionCount);
+  BLE_DEBUGF(DEBUG_BLE_CORE, "BLE status requested. Active=%d", snap.activeConnections);
 
   return buf;
 }
@@ -2417,13 +2483,40 @@ void bleSecurityBootNotice() {
   broadcastOutput("***************************************************************");
 }
 
+// `bledisconnect` closes every app client; `bledisconnect <connId>` closes the
+// one whose BLE connection id (bleinfo json clients[].connId) matches.
 static const char* cmd_bledisconnect(const String& argsInput) {
-  if (!isBLEConnected()) {
-    return "Error: No client connected";
+  // The dispatcher supplies the arguments without the command name.
+  const char* args = argsInput.c_str();
+  while (isspace((unsigned char)*args)) args++;
+  if (*args == '\0') {
+    const int count = bleDisconnectAppClients();
+    if (count == 0) return "Error: No client connected";
+    if (count == 1) return "Disconnecting client...";
+    if (!ensureDebugBuffer()) return "Disconnecting clients...";
+    snprintf(getDebugBuffer(), 1024, "Disconnecting %d clients...", count);
+    return getDebugBuffer();
   }
-  BLE_DEBUGF(DEBUG_BLE_CORE, "Manual disconnect requested");
-  disconnectBLE();
-  return "Disconnecting client...";
+  // Strict decimal id: "abc", "-1", "1x" or "0x1" must not become conn 0.
+  char* end = nullptr;
+  const unsigned long id = strtoul(args, &end, 10);
+  while (end && isspace((unsigned char)*end)) end++;
+  if (!isdigit((unsigned char)*args) || !end || *end != '\0' || id > 0xFFFFu) {
+    return "Error: invalid arguments — Usage: bledisconnect [connId]";
+  }
+  switch (bleDisconnectConnection((uint16_t)id)) {
+    case BleDisconnectResult::REQUESTED:
+      if (!ensureDebugBuffer()) return "Disconnecting client...";
+      snprintf(getDebugBuffer(), 1024, "Disconnecting client %lu...", id);
+      return getDebugBuffer();
+    case BleDisconnectResult::NOT_FOUND:
+      return "Error: No client with that connection id";
+    case BleDisconnectResult::PEER_LINK:
+      return "Error: That connection is a paired peer link, not an app client";
+    case BleDisconnectResult::UNAVAILABLE:
+    default:
+      return "Error: Bluetooth not initialized. Run 'openble' first.";
+  }
 }
 
 static const char* cmd_bleadv(const String& argsInput) {
@@ -2459,9 +2552,8 @@ static const char* cmd_blesend(const String& argsInput) {
     return "Error: No client connected";
   }
   
-  // Extract message after first space (skip command name) - zero heap allocations
+  // The command dispatcher supplies arguments without the command name.
   const char* msg = argsInput.c_str();
-  while (*msg && *msg != ' ') msg++;  // Skip command name
   while (*msg == ' ') msg++;  // Skip spaces
   
   if (*msg == '\0') {
@@ -2477,17 +2569,32 @@ static const char* cmd_blesend(const String& argsInput) {
   return "Error: Failed to send message";
 }
 
+// One stream selector for `blestream <sensors|system|events> [on|off]`:
+// no second token or "on" enables, "off" disables, anything else is a usage
+// error. Exact tokens, so a word such as "offset" is not read as "off".
+static const char* bleStreamSelect(const CommandArgs& a, uint8_t flag,
+                                   const char* enabled, const char* disabled) {
+  const String& toggle = a.arg(1);
+  if (toggle.length() == 0 || toggle.equalsIgnoreCase("on")) {
+    bleEnableStream(flag);
+    return enabled;
+  }
+  if (toggle.equalsIgnoreCase("off")) {
+    bleDisableStream(flag);
+    return disabled;
+  }
+  return "Error: invalid arguments — Usage: blestream <sensors|system|events> [on|off]";
+}
+
 static const char* cmd_blestream(const String& argsInput) {
   if (!gBLEState || !gBLEState->initialized) {
     return "Error: Bluetooth not initialized";
   }
   
-  // Parse args - skip command name, zero heap allocations
-  const char* args = argsInput.c_str();
-  while (*args && *args != ' ') args++;  // Skip command name
-  while (*args == ' ') args++;  // Skip spaces
+  // The command dispatcher supplies arguments without the command name.
+  const CommandArgs a(argsInput);
   
-  if (*args == '\0') {
+  if (a.count() == 0) {
     // Show current status
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     char* buf = getDebugBuffer();
@@ -2507,69 +2614,46 @@ static const char* cmd_blestream(const String& argsInput) {
     return buf;
   }
   
-  // Parse command: blestream <on|off|sensors|system|events|interval>
-  if (strncasecmp(args, "on", 2) == 0 && (args[2] == '\0' || args[2] == ' ')) {
+  const String& sub = a.arg(0);
+  if (sub.equalsIgnoreCase("on")) {
     bleEnableStream(BLE_STREAM_ALL);
     BLE_DEBUGF(DEBUG_BLE_DATA, "blestream all=ON");
     return "All streams enabled";
-  } else if (strncasecmp(args, "off", 3) == 0 && (args[3] == '\0' || args[3] == ' ')) {
+  }
+  if (sub.equalsIgnoreCase("off")) {
     bleDisableStream(BLE_STREAM_ALL);
     BLE_DEBUGF(DEBUG_BLE_DATA, "blestream all=OFF");
     return "All streams disabled";
-  } else if (strncasecmp(args, "sensors", 7) == 0) {
-    if (strstr(args, "off") != nullptr) {
-      bleDisableStream(BLE_STREAM_SENSORS);
-      BLE_DEBUGF(DEBUG_BLE_DATA, "blestream sensors=OFF");
-      return "Sensor stream disabled";
-    } else {
-      bleEnableStream(BLE_STREAM_SENSORS);
-      BLE_DEBUGF(DEBUG_BLE_DATA, "blestream sensors=ON");
-      return "Sensor stream enabled";
+  }
+  if (sub.equalsIgnoreCase("sensors")) {
+    return bleStreamSelect(a, BLE_STREAM_SENSORS, "Sensor stream enabled", "Sensor stream disabled");
+  }
+  if (sub.equalsIgnoreCase("system")) {
+    return bleStreamSelect(a, BLE_STREAM_SYSTEM, "System stream enabled", "System stream disabled");
+  }
+  if (sub.equalsIgnoreCase("events")) {
+    return bleStreamSelect(a, BLE_STREAM_EVENTS, "Event stream enabled", "Event stream disabled");
+  }
+  if (sub.equalsIgnoreCase("interval")) {
+    // blestream interval <sensor_ms> <system_ms>
+    const int sensorMs = a.argInt(1, 0);
+    const int systemMs = a.argInt(2, 0);
+    if (sensorMs <= 0 || systemMs <= 0) {
+      return "Error: invalid arguments — Usage: blestream interval <sensor_ms> <system_ms>";
     }
-  } else if (strncasecmp(args, "system", 6) == 0) {
-    if (strstr(args, "off") != nullptr) {
-      bleDisableStream(BLE_STREAM_SYSTEM);
-      BLE_DEBUGF(DEBUG_BLE_DATA, "blestream system=OFF");
-      return "System stream disabled";
-    } else {
-      bleEnableStream(BLE_STREAM_SYSTEM);
-      BLE_DEBUGF(DEBUG_BLE_DATA, "blestream system=ON");
-      return "System stream enabled";
-    }
-  } else if (strncasecmp(args, "events", 6) == 0) {
-    if (strstr(args, "off") != nullptr) {
-      bleDisableStream(BLE_STREAM_EVENTS);
-      BLE_DEBUGF(DEBUG_BLE_DATA, "blestream events=OFF");
-      return "Event stream disabled";
-    } else {
-      bleEnableStream(BLE_STREAM_EVENTS);
-      BLE_DEBUGF(DEBUG_BLE_DATA, "blestream events=ON");
-      return "Event stream enabled";
-    }
-  } else if (strncasecmp(args, "interval", 8) == 0) {
-    // Parse: blestream interval <sensor_ms> <system_ms>
-    const char* p = args + 8;
-    while (*p == ' ') p++;
-    uint32_t sensorMs = atoi(p);
-    while (*p && *p != ' ') p++;
-    while (*p == ' ') p++;
-    uint32_t systemMs = atoi(p);
-    if (sensorMs > 0 && systemMs > 0) {
-      if (sensorMs >= 100 && systemMs >= 100) {
-        bleSetStreamInterval(sensorMs, systemMs);
-        if (!ensureDebugBuffer()) return "Intervals set";
-        char* buf = getDebugBuffer();
-        snprintf(buf, 1024, "Intervals set: sensor=%lums system=%lums",
-                 (unsigned long)sensorMs, (unsigned long)systemMs);
-        BLE_DEBUGF(DEBUG_BLE_DATA,
-                   "blestream interval sensor=%lu system=%lu",
-                   (unsigned long)sensorMs,
-                   (unsigned long)systemMs);
-        return buf;
-      }
+    if (sensorMs < 100 || systemMs < 100) {
       return "Error: Intervals must be >= 100ms";
     }
-    return "Error: invalid arguments — Usage: blestream interval <sensor_ms> <system_ms>";
+    bleSetStreamInterval((uint32_t)sensorMs, (uint32_t)systemMs);
+    if (!ensureDebugBuffer()) return "Intervals set";
+    char* buf = getDebugBuffer();
+    snprintf(buf, 1024, "Intervals set: sensor=%lums system=%lums",
+             (unsigned long)sensorMs, (unsigned long)systemMs);
+    BLE_DEBUGF(DEBUG_BLE_DATA,
+               "blestream interval sensor=%lu system=%lu",
+               (unsigned long)sensorMs,
+               (unsigned long)systemMs);
+    return buf;
   }
   
   return "Error: invalid arguments — Usage: blestream <on|off|sensors|system|events|interval>";
@@ -2580,9 +2664,8 @@ static const char* cmd_bleevent(const String& argsInput) {
     return "Error: No client connected";
   }
   
-  // Extract message after first space - zero heap allocations
+  // The command dispatcher supplies arguments without the command name.
   const char* msg = argsInput.c_str();
-  while (*msg && *msg != ' ') msg++;  // Skip command name
   while (*msg == ' ') msg++;  // Skip spaces
   
   if (*msg == '\0') {
@@ -2678,36 +2761,28 @@ bool buildBLEInfoJson(JsonObject out) {
   out["autoStart"]      = gSettings.bleAutoStart;
   out["requireAuth"]    = gSettings.bleRequireAuth;
   out["secureChannelRequired"] = bleScRequired();
-  // Before the first server start there is no mutex and no published state.
-  // Never dereference gBLEState in that case. Once created, the mutex survives
-  // server stops and protects this copy against callbacks and state deletion.
-  BleLifecycleGuard lifecycle(pdMS_TO_TICKS(100));
-  if (sBleLifecycleMutex && !lifecycle) return false;
-  const bool init = lifecycle && gBLEState && gBLEState->initialized;
-  out["initialized"]    = init;
-  out["state"]          = init ? getBLEStateString() : "uninitialized";
-  out["connections"]    = init ? gBLEState->activeConnectionCount : 0;
+  BleStatusSnapshot snap;
+  if (!bleCaptureStatusSnapshot(snap)) return false;
+  out["initialized"]    = snap.initialized;
+  out["state"]          = snap.state;
+  out["connections"]    = snap.activeConnections;
   out["maxConnections"] = BLE_MAX_CONNECTIONS;
-  out["totalConnections"] = init ? gBLEState->totalConnections : 0;  // lifetime
-  out["commandsReceived"] = init ? gBLEState->commandsReceived : 0;  // lifetime
+  out["totalConnections"] = snap.totalConnections;  // lifetime
+  out["commandsReceived"] = snap.commandsReceived;  // lifetime
   // Per-connection identity for the web "Connected Clients" card. Emit the
   // AUTHENTICATED facts (authed + raw user) rather than a pre-baked "Unknown",
   // so the UI can tell an unauthenticated connection from a user named
   // "Unknown" — the ambiguity the old text format couldn't represent.
   JsonArray clients = out["clients"].to<JsonArray>();
-  if (init) {
-    for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-      const BLEConnection& c = gBLEState->connections[i];
-      if (!c.active) continue;
-      JsonObject o = clients.add<JsonObject>();
-      o["connId"]   = c.connId;
-      o["authed"]   = c.authed;
-      o["user"]     = c.user;   // "" when not authed; UI renders authed ? user : "Unknown"
-      o["since"]    = (uint32_t)((millis() - c.connectedSince) / 1000);
-      o["commands"] = c.commandsReceived;
-      char macStr[18]; macToStackBuf(c.deviceAddr, macStr);
-      o["mac"]      = JsonString(macStr, false);
-    }
+  for (int i = 0; i < snap.clientCount; i++) {
+    const BleStatusSnapshot::Client& c = snap.clients[i];
+    JsonObject o = clients.add<JsonObject>();
+    o["connId"]   = c.connId;
+    o["authed"]   = c.authed;
+    o["user"]     = c.user;   // "" when not authed; UI renders authed ? user : "Unknown"
+    o["since"]    = c.sinceSec;
+    o["commands"] = c.commands;
+    o["mac"]      = JsonString(c.mac, false);
   }
   return true;
 }
@@ -2835,7 +2910,9 @@ static const char* cmd_blemode(const String& argsInput) {
 #else
     if (isBleServerInitialized()) {
       broadcastOutput("[BLE] Stopping BLE server mode");
-      deinitBluetooth();
+      if (!deinitBluetooth()) {
+        return "Error: [BLE] Server did not stop; mode unchanged";
+      }
     }
     setSetting(gSettings.bleMode, (int)BLE_MODE_G2_CLIENT);
     return "[BLE] Mode set to client (G2)";
@@ -2859,7 +2936,7 @@ const CommandEntry bluetoothCommands[] = {
   { "bleinfo",      "Show BLE configuration and settings. (add 'json' for JSON output)",      false, cmd_bleinfo },
   { "blename",      "Get/set BLE device name [name].",           false, cmd_blename, "Usage: blename [name]" },
   { "bletxpower",   "Get/set BLE TX power [0-7].",               false, cmd_bletxpower, "Usage: bletxpower [0..7]" },
-  { "bledisconnect","Disconnect current BLE client.",            true, cmd_bledisconnect },
+  { "bledisconnect","Disconnect BLE app clients: all, or one by connection id [connId].", true, cmd_bledisconnect, "Usage: bledisconnect [connId]" },
   { "bleadv",       "Start/stop/toggle BLE advertising [start|stop|toggle].", true, cmd_bleadv, "Usage: bleadv [start|stop|toggle]" },
   { "blesend",      "Send message to BLE client: <message>.",    false, cmd_blesend, "Usage: blesend <message>" },
   { "blestream",    "Control streaming: <on|off|sensors|system|events|interval>.",false, cmd_blestream, "Usage: blestream [on|off|sensors|system|events|interval] | interval <sensor_ms> <system_ms>" },
@@ -2874,7 +2951,7 @@ const CommandEntry bluetoothCommands[] = {
 
   // App-layer Secure Channel v1 (X25519+PSK+ChaCha20-Poly1305; no BLE bonding)
   { "blesecret", "Set/clear the BLE Secure Channel passphrase: blesecret <phrase|clear>.", true, cmd_blesecret, "Usage: blesecret <passphrase|clear>", /*requiresSuperAdmin=*/true },
-  { "blesecure", "Require app-layer BLE encryption [on|off].",                            true, cmd_blesecure, "Usage: blesecure [on|off]" },
+  { "blesecure", "Require app-layer BLE encryption [on|off].",                            true, cmd_blesecure, "Usage: blesecure [on|off]", /*requiresSuperAdmin=*/true },
 
   // Auto-reconnect (boot + mid-session drop) to saved-MAC peers. Pairing is
   // separate (`openg2 auto`, `ringconnect`) and always saves the MAC; this
@@ -2970,6 +3047,40 @@ int bleGetRecentMessages(const char* out[], int maxLines) {
 // DATA STREAMING PIPELINE
 // =============================================================================
 
+// Data-service streams (sensor, system and event characteristics) are plaintext
+// and outside the Secure Channel; callers suppress them when a channel is
+// required. Otherwise they go to the console-mirror recipients (logged-in,
+// verified non-guest sessions, the rule sendBLEResponse uses) as one directed
+// notify per recipient, never the characteristic-wide notify(), which the
+// Arduino wrapper fans out to every connected peer. One attempt per recipient:
+// the streams are periodic best-effort, so a busy link misses one sample.
+// Returns true when at least one recipient accepted the frame.
+static bool bleStreamNotifyDirected(BLECharacteristic* ch, const char* data, size_t len) {
+  if (!ch || !data || len == 0) return false;
+  BleSessionFence sessions[BLE_MAX_CONNECTIONS];
+  const int count = bleCollectMirrorSessions(sessions, BLE_MAX_CONNECTIONS);
+  bool delivered = false;
+  for (int i = 0; i < count; ++i) {
+    // Same directed IDF primitive and the same lifecycle critical section as
+    // bleRawNotifyToSession, so slot reuse is ordered against this send.
+    BleLifecycleGuard lifecycle;
+    if (!lifecycle ||
+        !bleConnectionEpochMatchesLocked(sessions[i].connId, sessions[i].epoch)) {
+      continue;
+    }
+    const int gattsIf = sBleGattsIf.load(std::memory_order_acquire);
+    if (gattsIf == ESP_GATT_IF_NONE) break;
+    if (esp_ble_gatts_send_indicate(static_cast<esp_gatt_if_t>(gattsIf),
+                                    sessions[i].connId, ch->getHandle(),
+                                    static_cast<uint16_t>(len),
+                                    reinterpret_cast<uint8_t*>(const_cast<char*>(data)),
+                                    false) == ESP_OK) {
+      delivered = true;
+    }
+  }
+  return delivered;
+}
+
 bool blePushSensorData(const char* jsonData, size_t len) {
   if (!isBLEConnected() || !pSensorDataChar) {
     return false;
@@ -2978,8 +3089,7 @@ bool blePushSensorData(const char* jsonData, size_t len) {
   // When encryption is required, suppress them rather than emit plaintext over the air.
   if (bleScRequired()) return false;
 
-  pSensorDataChar->setValue((uint8_t*)jsonData, len);
-  pSensorDataChar->notify();
+  if (!bleStreamNotifyDirected(pSensorDataChar, jsonData, len)) return false;
   
   if (gBLEState) {
     gBLEState->sensorStreamCount++;
@@ -2994,8 +3104,7 @@ bool blePushSystemStatus(const char* jsonData, size_t len) {
   }
   if (bleScRequired()) return false;  // not on the Secure Channel — don't leak plaintext
 
-  pSystemStatusChar->setValue((uint8_t*)jsonData, len);
-  pSystemStatusChar->notify();
+  if (!bleStreamNotifyDirected(pSystemStatusChar, jsonData, len)) return false;
   
   if (gBLEState) {
     gBLEState->systemStreamCount++;
@@ -3089,8 +3198,7 @@ bool blePushEvent(BLEEventType eventType, const char* message, const char* detai
   if (n < 0 || (size_t)n >= sizeof(eventJson) - pos) return false;
   pos += n;
 
-  pEventNotifyChar->setValue((uint8_t*)eventJson, pos);
-  pEventNotifyChar->notify();
+  if (!bleStreamNotifyDirected(pEventNotifyChar, eventJson, (size_t)pos)) return false;
   
   if (gBLEState) {
     gBLEState->eventCount++;

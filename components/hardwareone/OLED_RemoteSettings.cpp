@@ -4,232 +4,380 @@
 
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <cstring>
+#include <new>
 #include "System_VFS.h"
 #include "System_Debug.h"
 
+#include "System_BondedPeer.h"
 #include "System_ESPNow.h"
 #include "System_Mutex.h"
 #include "System_Utils.h"
 #include "System_MemUtil.h"
 #include "OLED_Utils.h"
 
-// Storage for dynamically created remote settings modules
-static SettingsModule* gRemoteModules = nullptr;
-static SettingEntry* gRemoteEntries = nullptr;
+// ----------------------------------------------------------------------------
+// The peer's module set (PSRAM; released by freeRemoteSettingsModules)
+// ----------------------------------------------------------------------------
+// One value slot per entry. SettingEntry::valuePtr points at the member that
+// matches the entry type, so the shared editor reads a peer value exactly like
+// a local one.
+struct RemoteValueSlot {
+  int i = 0;
+  bool b = false;
+  String s;
+};
+
+static SettingsModule*  gRemoteModules = nullptr;
+static SettingEntry*    gRemoteEntries = nullptr;
+static RemoteValueSlot* gRemoteSlots   = nullptr;
+static char*            gRemoteStrings = nullptr;  // key/label/cmdKey/options/group/name/section
 static size_t gRemoteModuleCount = 0;
 static size_t gRemoteEntryCount = 0;
+static size_t gRemoteSlotCount = 0;      // slots constructed (destroyed on release)
+static size_t gRemoteStringBytes = 0;
+static size_t gRemoteStringUsed = 0;
 
-// Helper: Convert JSON type to SettingType
-static SettingType jsonTypeToSettingType(JsonVariantConst value) {
-  if (value.is<bool>()) return SETTING_BOOL;
-  if (value.is<int>()) return SETTING_INT;
-  if (value.is<const char*>()) return SETTING_STRING;
-  return SETTING_STRING; // Default
+static const char* gRemoteLastError = "";
+static bool gRemoteSchemaMissing = false;  // last load failed because no schema.json is cached
+static RemoteSettingsLoadState gLoadState = REMOTE_LOAD_IDLE;
+static uint32_t gSyncStartMs = 0;
+
+// The one commit in flight. Its reply is the next CMD_RESP from the bonded peer
+// after `seqBefore` (EspNowCmdResult sequence).
+struct RemotePending {
+  bool active = false;
+  uint32_t seqBefore = 0;
+  uint32_t sentMs = 0;
+  const SettingEntry* entry = nullptr;
+  String value;
+};
+static RemotePending gPending;
+
+static const uint32_t REMOTE_SET_REPLY_TIMEOUT_MS = 5000;  // peer executes on cmd_exec; typical reply << 1 s
+static const uint32_t REMOTE_SCHEMA_SYNC_MS       = 6000;  // same budget as the web sync endpoint
+
+// ----------------------------------------------------------------------------
+// Schema walk
+// ----------------------------------------------------------------------------
+// A schema row the OLED editor can change on the peer: a type the editor edits
+// (int/bool/string), a setter command, not read-only, not secret, and exposed by
+// the bonded-edit policy. Rows without a setter are never offered: the settings
+// owner's contract is that clients send the schema's command, never one derived
+// from the key.
+static bool remoteEntryEditable(JsonObjectConst e, const char* moduleName) {
+  const char* type = e["type"] | "";
+  if (strcmp(type, "int") != 0 && strcmp(type, "bool") != 0 && strcmp(type, "string") != 0) {
+    return false;
+  }
+  const char* key = e["key"] | "";
+  const char* cmdKey = e["cmdKey"] | "";
+  if (!key[0] || !cmdKey[0]) return false;
+  if ((e["readOnly"] | false) || (e["secret"] | false)) return false;
+  return BondedPeer::remoteEditAllowed(moduleName, key);
 }
 
-// Helper: Get value range for known settings
-static void getValueRange(const char* key, int& minVal, int& maxVal) {
-  // Default range
-  minVal = 0;
-  maxVal = 100;
-  
-  // Specific ranges for known settings
-  if (strstr(key, "brightness") || strstr(key, "Brightness")) {
-    minVal = 0; maxVal = 255;
-  } else if (strstr(key, "contrast") || strstr(key, "Contrast")) {
-    minVal = 0; maxVal = 255;
-  } else if (strstr(key, "rotation") || strstr(key, "Rotation")) {
-    minVal = 0; maxVal = 3;
-  } else if (strstr(key, "channel") || strstr(key, "Channel")) {
-    minVal = 1; maxVal = 14;
-  } else if (strstr(key, "freq") || strstr(key, "Freq")) {
-    minVal = 100000; maxVal = 1000000;
-  } else if (strstr(key, "gain") || strstr(key, "Gain")) {
-    minVal = 0; maxVal = 100;
-  } else if (strstr(key, "count") || strstr(key, "Count")) {
-    minVal = 1; maxVal = 64;
-  } else if (strstr(key, "pin") || strstr(key, "Pin")) {
-    minVal = 0; maxVal = 40;
+// Visit the exposed modules (at most MAX_SETTINGS_MODULES, each with at least
+// one editable row) and their editable rows in schema order. Counting and
+// building both walk through here, so the sizes they see always agree.
+template <typename ModuleFn, typename EntryFn>
+static void remoteSchemaWalk(JsonArrayConst modules, ModuleFn onModule, EntryFn onEntry) {
+  size_t exposed = 0;
+  for (JsonObjectConst m : modules) {
+    if (exposed >= MAX_SETTINGS_MODULES) break;
+    const char* name = m["name"] | "";
+    if (!name[0] || !BondedPeer::remoteEditAllowed(name, nullptr)) continue;
+    JsonArrayConst entries = m["entries"].as<JsonArrayConst>();
+    size_t editable = 0;
+    for (JsonObjectConst e : entries) {
+      if (remoteEntryEditable(e, name)) editable++;
+    }
+    if (editable == 0) continue;
+    onModule(m, editable);
+    for (JsonObjectConst e : entries) {
+      if (remoteEntryEditable(e, name)) onEntry(e);
+    }
+    exposed++;
   }
 }
 
-// ----------------------------------------------------------------------------
-// Recursive JSON walk
-// ----------------------------------------------------------------------------
-// The remote settings.json mirrors the device's nested layout (post-v0.93:
-// hardware.sensors.camera.image.cameraQuality, network.wifi.enabled, etc.).
-// The OLED viewer renders modules → entries one level deep, so we flatten the
-// tree by emitting a synthetic SettingsModule for every JSON object that has
-// at least one leaf child. Each leaf becomes an entry on that module; nested
-// object children recurse and produce additional modules with a dotted-path
-// jsonSection (e.g. "hardware.sensors.camera.image"). The display name is
-// the last path segment so the OLED list stays readable.
+// Arena bytes for one optional string: empty/absent strings are stored as nullptr.
+static size_t arenaLen(const char* s) { return (s && s[0]) ? strlen(s) + 1 : 0; }
 
-// Pass 1: count modules + entries so we can allocate flat arrays.
-static void countNodesRecursive(JsonObjectConst node,
-                                size_t& moduleCount,
-                                size_t& entryCount) {
-  bool hasLeaves = false;
-  for (JsonPairConst kv : node) {
-    if (kv.value().is<JsonObjectConst>()) {
-      countNodesRecursive(kv.value().as<JsonObjectConst>(), moduleCount, entryCount);
-    } else {
-      hasLeaves = true;
+static const char* arenaDup(const char* s) {
+  const size_t n = arenaLen(s);
+  if (n == 0 || !gRemoteStrings || gRemoteStringUsed + n > gRemoteStringBytes) return nullptr;
+  char* out = gRemoteStrings + gRemoteStringUsed;
+  memcpy(out, s, n);
+  gRemoteStringUsed += n;
+  return out;
+}
+
+static void remoteSchemaCount(JsonArrayConst modules, size_t& moduleCount,
+                              size_t& entryCount, size_t& stringBytes) {
+  moduleCount = entryCount = stringBytes = 0;
+  remoteSchemaWalk(modules,
+    [&](JsonObjectConst m, size_t) {
+      moduleCount++;
+      stringBytes += arenaLen(m["name"] | "") + arenaLen(m["section"] | "");
+    },
+    [&](JsonObjectConst e) {
       entryCount++;
+      stringBytes += arenaLen(e["key"] | "") + arenaLen(e["label"] | "") +
+                     arenaLen(e["cmdKey"] | "") + arenaLen(e["options"] | "") +
+                     arenaLen(e["group"] | "");
+    });
+}
+
+// Fill the allocated arrays from the schema. Ranges and options are the
+// schema's; a bool gets the slider's 0..1 range (the schema sends none); the
+// schema default is the value until remoteFillValues finds the cached one.
+static void remoteSchemaBuild(JsonArrayConst modules) {
+  size_t mi = 0, ei = 0;
+  remoteSchemaWalk(modules,
+    [&](JsonObjectConst m, size_t editable) {
+      SettingsModule& mod = gRemoteModules[mi++];
+      mod.name = arenaDup(m["name"] | "");
+      mod.jsonSection = arenaDup(m["section"] | "");
+      mod.entries = &gRemoteEntries[ei];
+      mod.count = editable;
+      mod.isConnected = nullptr;
+      mod.description = "Remote settings";
+    },
+    [&](JsonObjectConst e) {
+      SettingEntry& entry = gRemoteEntries[ei];
+      RemoteValueSlot& slot = gRemoteSlots[ei];
+      ei++;
+      entry.jsonKey = arenaDup(e["key"] | "");
+      const char* label = arenaDup(e["label"] | "");
+      entry.label = label ? label : entry.jsonKey;
+      entry.cmdKey = arenaDup(e["cmdKey"] | "");
+      entry.options = arenaDup(e["options"] | "");
+      entry.group = arenaDup(e["group"] | "");
+      entry.isSecret = false;
+      entry.readOnly = false;
+      const char* type = e["type"] | "";
+      if (strcmp(type, "bool") == 0) {
+        entry.type = SETTING_BOOL;
+        entry.valuePtr = &slot.b;
+        entry.minVal = 0;
+        entry.maxVal = 1;
+        slot.b = e["default"] | false;
+        entry.intDefault = slot.b ? 1 : 0;
+      } else if (strcmp(type, "int") == 0) {
+        entry.type = SETTING_INT;
+        entry.valuePtr = &slot.i;
+        entry.minVal = e["min"] | 0;
+        entry.maxVal = e["max"] | 0;
+        slot.i = e["default"] | 0;
+        entry.intDefault = slot.i;
+      } else {
+        entry.type = SETTING_STRING;
+        entry.valuePtr = &slot.s;
+        slot.s = e["default"] | "";
+      }
+    });
+  gRemoteModuleCount = mi;
+  gRemoteEntryCount = ei;
+}
+
+// Read a dotted path ("hardware.sensors.oled") under `root`; null on any miss.
+static JsonVariantConst remoteJsonPath(JsonVariantConst root, const char* path) {
+  JsonVariantConst cur = root;
+  const char* seg = path;
+  while (seg && *seg) {
+    const char* dot = strchr(seg, '.');
+    const size_t len = dot ? (size_t)(dot - seg) : strlen(seg);
+    char name[64];
+    if (len == 0 || len >= sizeof(name)) return JsonVariantConst();
+    memcpy(name, seg, len);
+    name[len] = '\0';
+    cur = cur[name];
+    if (cur.isNull()) return cur;
+    seg = dot ? dot + 1 : nullptr;
+  }
+  return cur;
+}
+
+// Copy the peer's current values from its cached settings.json, nested as
+// <section>[.<group>].<key> (the layout readRegisteredSettings reads). Missing
+// or mistyped values keep the schema default.
+static void remoteFillValues(JsonVariantConst root) {
+  for (size_t m = 0; m < gRemoteModuleCount; m++) {
+    const SettingsModule& mod = gRemoteModules[m];
+    JsonVariantConst section = remoteJsonPath(root, mod.jsonSection);
+    if (section.isNull()) continue;
+    for (size_t i = 0; i < mod.count; i++) {
+      const SettingEntry& e = mod.entries[i];
+      JsonVariantConst holder = e.group ? section[e.group] : section;
+      if (holder.isNull()) continue;
+      JsonVariantConst v = holder[e.jsonKey];
+      if (v.isNull()) continue;
+      switch (e.type) {
+        case SETTING_INT:
+          if (v.is<int>()) *(int*)e.valuePtr = v.as<int>();
+          break;
+        case SETTING_BOOL:
+          if (v.is<bool>()) *(bool*)e.valuePtr = v.as<bool>();
+          break;
+        case SETTING_STRING:
+          if (v.is<const char*>()) *(String*)e.valuePtr = v.as<const char*>();
+          break;
+        default:
+          break;
+      }
     }
   }
-  if (hasLeaves) moduleCount++;
 }
 
-// Pass 2: populate the pre-allocated arrays. dottedPath is the full path to
-// `node` (empty for root); displayName is what shows in the OLED list.
-static void buildNodesRecursive(JsonObjectConst node,
-                                const String& dottedPath,
-                                const String& displayName,
-                                size_t& moduleIdx,
-                                size_t& entryIdx) {
-  size_t startIdx = entryIdx;
-  bool hasLeaves = false;
-
-  // Direct-leaf children become entries on a module rooted at this node.
-  for (JsonPairConst kv : node) {
-    if (kv.value().is<JsonObjectConst>()) continue;
-
-    SettingEntry& entry = gRemoteEntries[entryIdx++];
-    entry.jsonKey = strdup(kv.key().c_str());
-    entry.label = strdup(kv.key().c_str());
-    entry.type = jsonTypeToSettingType(kv.value());
-    entry.valuePtr = nullptr;
-    getValueRange(kv.key().c_str(), entry.minVal, entry.maxVal);
-    entry.intDefault = 0;
-    entry.floatDefault = 0.0f;
-    entry.stringDefault = nullptr;
-    entry.options = nullptr;
-    entry.isSecret = false;
-    hasLeaves = true;
-  }
-
-  if (hasLeaves) {
-    SettingsModule& module = gRemoteModules[moduleIdx++];
-    module.name = strdup(displayName.c_str());
-    module.jsonSection = strdup(dottedPath.c_str());
-    module.entries = &gRemoteEntries[startIdx];
-    module.count = entryIdx - startIdx;
-    module.isConnected = nullptr;
-    module.description = "Remote settings";
-  }
-
-  // Recurse into nested object children — each becomes its own module(s).
-  for (JsonPairConst kv : node) {
-    if (!kv.value().is<JsonObjectConst>()) continue;
-    String childKey(kv.key().c_str());
-    String childPath = dottedPath.length() > 0 ? (dottedPath + "." + childKey) : childKey;
-    buildNodesRecursive(kv.value().as<JsonObjectConst>(),
-                        childPath, childKey,
-                        moduleIdx, entryIdx);
-  }
+// Release the module set (load state untouched). A pending commit points into
+// the set, so it is dropped with it.
+static void releaseRemoteModules() {
+  gPending = RemotePending();
+  for (size_t i = 0; i < gRemoteSlotCount; i++) gRemoteSlots[i].~RemoteValueSlot();
+  free(gRemoteSlots);    // ps_calloc'd — free(), not delete[]
+  free(gRemoteEntries);
+  free(gRemoteModules);
+  free(gRemoteStrings);
+  gRemoteSlots = nullptr;
+  gRemoteEntries = nullptr;
+  gRemoteModules = nullptr;
+  gRemoteStrings = nullptr;
+  gRemoteModuleCount = gRemoteEntryCount = gRemoteSlotCount = 0;
+  gRemoteStringBytes = gRemoteStringUsed = 0;
 }
 
 /**
- * Load remote settings from cache and create virtual SettingsModule entries
+ * Build the peer's editable module set from the cached schema, then copy the
+ * current values from the cached settings. The two documents are parsed one
+ * after the other, never alive together.
  */
 bool loadRemoteSettingsModules() {
-  // Free any existing remote modules
-  freeRemoteSettingsModules();
+  releaseRemoteModules();
+  gRemoteSchemaMissing = false;
 
-  // Get bonded peer MAC
-  if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() < 12) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] Not bonded");
+  if (!BondedPeer::isPaired() || !BondedPeer::isMaster()) {
+    gRemoteLastError = "Not bonded master";
     return false;
   }
 
-  // Build path to cached settings
-  uint8_t peerMac[6];
-  macParse(gSettings.bondPeerMac.c_str(), peerMac);  // canonical parser (System_Utils.h)
+  {
+    String schema = BondedPeer::readCachedSchemaJson();
+    if (schema.length() == 0) {
+      gRemoteSchemaMissing = true;
+      gRemoteLastError = "No cached schema";
+      return false;
+    }
 
-  // Load settings from cache
-  extern String loadSettingsFromCache(const uint8_t* peerMac);
-  String settingsJson = loadSettingsFromCache(peerMac);
+    // Keep only what the editor uses (drops description/connected/set).
+    PSRAM_JSON_DOC(filter);
+    JsonObject fm = filter["modules"][0].to<JsonObject>();
+    fm["name"] = true;
+    fm["section"] = true;
+    JsonObject fe = fm["entries"][0].to<JsonObject>();
+    static const char* const kEntryFields[] = {
+      "key", "label", "type", "min", "max", "options", "cmdKey",
+      "readOnly", "secret", "group", "default"};
+    for (const char* field : kEntryFields) fe[field] = true;
 
-  if (settingsJson.length() == 0) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] No cached settings");
-    return false;
+    PSRAM_JSON_DOC(doc);
+    DeserializationError err =
+        deserializeJson(doc, schema, DeserializationOption::Filter(filter));
+    if (err) {
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] schema parse error: %s", err.c_str());
+      gRemoteLastError = "Schema parse error";
+      return false;
+    }
+    JsonArrayConst modules = doc["modules"].as<JsonArrayConst>();
+
+    size_t moduleCount = 0, entryCount = 0, stringBytes = 0;
+    remoteSchemaCount(modules, moduleCount, entryCount, stringBytes);
+    if (entryCount == 0) {
+      gRemoteLastError = "No editable settings";
+      return false;
+    }
+
+    gRemoteModules = (SettingsModule*)ps_calloc(moduleCount, sizeof(SettingsModule),
+                                                AllocPolicy::PreferPSRAM, "oled.remote.modules");
+    gRemoteEntries = (SettingEntry*)ps_calloc(entryCount, sizeof(SettingEntry),
+                                              AllocPolicy::PreferPSRAM, "oled.remote.entries");
+    gRemoteSlots = (RemoteValueSlot*)ps_calloc(entryCount, sizeof(RemoteValueSlot),
+                                               AllocPolicy::PreferPSRAM, "oled.remote.values");
+    gRemoteStrings = (char*)ps_alloc(stringBytes, AllocPolicy::PreferPSRAM, "oled.remote.strings");
+    if (!gRemoteModules || !gRemoteEntries || !gRemoteSlots || !gRemoteStrings) {
+      releaseRemoteModules();
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] alloc failed (%zu mods, %zu entries)",
+             moduleCount, entryCount);
+      gRemoteLastError = "Out of memory";
+      return false;
+    }
+    for (size_t i = 0; i < moduleCount; i++) new (&gRemoteModules[i]) SettingsModule();
+    for (size_t i = 0; i < entryCount; i++) {
+      new (&gRemoteEntries[i]) SettingEntry();
+      new (&gRemoteSlots[i]) RemoteValueSlot();
+    }
+    gRemoteSlotCount = entryCount;
+    gRemoteStringBytes = stringBytes;
+    gRemoteStringUsed = 0;
+    remoteSchemaBuild(modules);
   }
 
-  // Parse JSON
-  PSRAM_JSON_DOC(doc);
-  DeserializationError err = deserializeJson(doc, settingsJson);
-  if (err) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] JSON parse error: %s", err.c_str());
-    return false;
+  {
+    String settings = BondedPeer::readCachedSettingsJson();
+    if (settings.length() > 0) {
+      PSRAM_JSON_DOC(doc);
+      if (!deserializeJson(doc, settings)) remoteFillValues(doc.as<JsonVariantConst>());
+    }
   }
 
-  // Pass 1: count
-  size_t moduleCount = 0;
-  size_t totalEntries = 0;
-  countNodesRecursive(doc.as<JsonObjectConst>(), moduleCount, totalEntries);
-
-  if (totalEntries == 0) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] No settings found");
-    return false;
-  }
-
-  // Allocate the flat arrays in PSRAM. ps_calloc (zero-init) is equivalent to the
-  // former new[] here: both structs are trivially-destructible and their only
-  // in-class defaults are false/nullptr (= zero), which calloc supplies;
-  // buildNodesRecursive populates the rest. Freed via free() (NOT delete[]) in
-  // freeRemoteSettingsModules().
-  gRemoteModules = (SettingsModule*)ps_calloc(moduleCount, sizeof(SettingsModule), AllocPref::PreferPSRAM);
-  gRemoteEntries = (SettingEntry*)ps_calloc(totalEntries, sizeof(SettingEntry), AllocPref::PreferPSRAM);
-  if (!gRemoteModules || !gRemoteEntries) {
-    if (gRemoteModules) { free(gRemoteModules); gRemoteModules = nullptr; }
-    if (gRemoteEntries) { free(gRemoteEntries); gRemoteEntries = nullptr; }
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] alloc failed (%zu mods, %zu entries)", moduleCount, totalEntries);
-    return false;
-  }
-
-  // Pass 2: populate. The root object's display name is "Device" so its
-  // direct-leaf children (firmwareVersion, etc.) get a sensible header.
-  size_t moduleIdx = 0;
-  size_t entryIdx = 0;
-  buildNodesRecursive(doc.as<JsonObjectConst>(), "", "Device", moduleIdx, entryIdx);
-
-  gRemoteModuleCount = moduleIdx;
-  gRemoteEntryCount = entryIdx;
-
+  gRemoteLastError = "";
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] Loaded %zu modules, %zu entries",
          gRemoteModuleCount, gRemoteEntryCount);
-
   return true;
 }
 
+RemoteSettingsLoadState remoteSettingsLoadStep() {
+  switch (gLoadState) {
+    case REMOTE_LOAD_IDLE:
+      if (loadRemoteSettingsModules()) {
+        gLoadState = REMOTE_LOAD_READY;
+      } else if (!gRemoteSchemaMissing) {
+        gLoadState = REMOTE_LOAD_FAILED;
+      } else if (!BondedPeer::beginSchemaSync()) {
+        // The master's sync tick never fetches the schema itself, so the screen
+        // asks once; a precondition failure (offline, not master) ends here.
+        gRemoteLastError = BondedPeer::lastError();
+        gLoadState = REMOTE_LOAD_FAILED;
+      } else {
+        gSyncStartMs = millis();
+        gLoadState = REMOTE_LOAD_SYNCING;
+      }
+      break;
+    case REMOTE_LOAD_SYNCING:
+      if (BondedPeer::schemaSyncDone()) {
+        gLoadState = loadRemoteSettingsModules() ? REMOTE_LOAD_READY : REMOTE_LOAD_FAILED;
+      } else if (millis() - gSyncStartMs >= REMOTE_SCHEMA_SYNC_MS) {
+        gRemoteLastError = "Schema sync timed out";
+        gLoadState = REMOTE_LOAD_FAILED;
+      }
+      break;
+    case REMOTE_LOAD_READY:
+    case REMOTE_LOAD_FAILED:
+      break;
+  }
+  return gLoadState;
+}
+
+const char* remoteSettingsLastError() { return gRemoteLastError; }
+
 /**
- * Free remote settings modules
+ * Free the peer's module set, drop the pending commit, reset the load state.
  */
 void freeRemoteSettingsModules() {
-  if (gRemoteEntries) {
-    // Free duplicated strings
-    for (size_t i = 0; i < gRemoteEntryCount; i++) {
-      if (gRemoteEntries[i].jsonKey) free((void*)gRemoteEntries[i].jsonKey);
-      if (gRemoteEntries[i].label) free((void*)gRemoteEntries[i].label);
-    }
-    free(gRemoteEntries);   // ps_calloc'd — must free(), not delete[]
-    gRemoteEntries = nullptr;
-  }
-  
-  if (gRemoteModules) {
-    // Both name and jsonSection are strdup'd for every module (the recursive
-    // builder allocates uniformly), so free each independently if non-null.
-    for (size_t i = 0; i < gRemoteModuleCount; i++) {
-      if (gRemoteModules[i].name)        free((void*)gRemoteModules[i].name);
-      if (gRemoteModules[i].jsonSection) free((void*)gRemoteModules[i].jsonSection);
-    }
-    free(gRemoteModules);   // ps_calloc'd — must free(), not delete[]
-    gRemoteModules = nullptr;
-  }
-  
-  gRemoteModuleCount = 0;
-  gRemoteEntryCount = 0;
+  releaseRemoteModules();
+  gLoadState = REMOTE_LOAD_IDLE;
+  gRemoteSchemaMissing = false;
+  gRemoteLastError = "";
 }
 
 /**
@@ -253,62 +401,83 @@ const SettingsModule** getRemoteSettingsModules(size_t& count) {
 }
 
 /**
- * Apply remote setting change by sending command to bonded peer
+ * Send the entry's schema setter to the bonded peer. The `remote:` path applies
+ * the OLED user's authorization to the inner command and the bond session gate;
+ * its "sent" result only means the frame left, so the commit stays pending
+ * until the peer's CMD_RESP (remoteSettingsPollOutcome).
  */
-bool applyRemoteSettingChange(const char* moduleName, const char* settingKey, const String& value) {
-  if (!moduleName || !settingKey) return false;
-  
-  // Build remote command: "set <key> <value>"
-  char cmdBuf[128];
-  snprintf(cmdBuf, sizeof(cmdBuf), "set %s %s", settingKey, value.c_str());
-  String cmd = cmdBuf;
-  
-  // Execute via unified OLED command helper (SOURCE_LOCAL_DISPLAY context)
-  char result[256];
-  String remoteCmd = "remote:" + cmd;
-
-  bool success = executeOLEDCommandWithResult(remoteCmd, result, sizeof(result));
-  
-  if (success) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] Applied %s.%s = %s", 
-           moduleName, settingKey, value.c_str());
-  } else {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] Failed to apply %s.%s", 
-           moduleName, settingKey);
-  }
-  
-  return success;
-}
-
-/**
- * Check if remote settings are available
- */
-bool hasRemoteSettings() {
-  DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] bondModeEnabled=%d peerMacLen=%d",
-                gSettings.bondModeEnabled ? 1 : 0, gSettings.bondPeerMac.length());
-  if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() < 12) {
-    DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] EXIT: bond mode disabled or MAC too short");
+bool applyRemoteSettingChange(const SettingEntry* entry, const String& value, String& errOut) {
+  errOut = "";
+  if (!entry || !entry->cmdKey || !entry->cmdKey[0]) {
+    errOut = "No command";
     return false;
   }
-  
-  // Check if settings cache exists
-  uint8_t peerMac[6];
-  macParse(gSettings.bondPeerMac.c_str(), peerMac);  // canonical parser (System_Utils.h)
-  
-  char macStr[13];
-  macToPathToken(peerMac, macStr);  // canonical PATH TOKEN form (System_Utils.h)
+  String trimmed = value;
+  trimmed.trim();
+  if (trimmed.length() == 0) {
+    errOut = "Empty value";
+    return false;
+  }
+  if (gPending.active) {
+    errOut = "Busy";
+    return false;
+  }
 
-  char filePathBuf[64];
-  snprintf(filePathBuf, sizeof(filePathBuf), "/system/espnow/peers/%s/settings.json", macStr);
-  String filePath = filePathBuf;
-  DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] Checking path: %s", filePath.c_str());
-  
-  extern bool filesystemReady;
-  // trusted: cached remote-device settings manifest read for OLED rendering.
-  bool exists = filesystemReady && VFS::existsGuarded(filePath, VFS::systemAuth("oled.remote_settings.read"));
-  DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] fsReady=%d exists=%d -> returning %d",
-                filesystemReady ? 1 : 0, exists ? 1 : 0, exists ? 1 : 0);
-  return exists;
+  const uint32_t seqBefore = espnowCmdResultSeq();
+  char out[128];
+  out[0] = '\0';
+  const String cmd = String("remote:") + entry->cmdKey + " " + trimmed;
+  if (!executeOLEDCommandWithResult(cmd, out, sizeof(out)) || strncmp(out, "Error", 5) == 0) {
+    errOut = out[0] ? String(out) : String("Send failed");
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] %s not sent: %s", entry->cmdKey, errOut.c_str());
+    return false;
+  }
+
+  gPending.active = true;
+  gPending.seqBefore = seqBefore;
+  gPending.sentMs = millis();
+  gPending.entry = entry;
+  gPending.value = trimmed;
+  return true;
+}
+
+// Mirror an applied value into the entry's cached slot so the list shows it.
+static void remoteSlotStore(const SettingEntry* entry, const String& value) {
+  if (!entry || !entry->valuePtr) return;
+  switch (entry->type) {
+    case SETTING_INT:    *(int*)entry->valuePtr = atoi(value.c_str()); break;
+    case SETTING_BOOL:   *(bool*)entry->valuePtr = (value == "1" || value == "true"); break;
+    case SETTING_STRING: *(String*)entry->valuePtr = value; break;
+    default: break;
+  }
+}
+
+RemoteSettingsOutcome remoteSettingsPollOutcome(String& textOut) {
+  textOut = "";
+  if (!gPending.active) return REMOTE_OUTCOME_NONE;
+
+  EspNowCmdResult r;
+  if (espnowCmdResultGet(r) && r.seq != gPending.seqBefore) {
+    uint8_t peer[6];
+    if (BondedPeer::peerMacBytes(peer) && macEqual6(r.srcMac, peer)) {
+      gPending.active = false;
+      textOut = r.text;
+      // Same rule as the local string save: a reply that starts with "Error"
+      // is a failure even when the peer's executor reported success.
+      if (r.success && strncmp(r.text, "Error", 5) != 0) {
+        remoteSlotStore(gPending.entry, gPending.value);
+        return REMOTE_OUTCOME_APPLIED;
+      }
+      return REMOTE_OUTCOME_FAILED;
+    }
+    gPending.seqBefore = r.seq;  // another peer's reply; keep waiting for ours
+  }
+
+  if (millis() - gPending.sentMs >= REMOTE_SET_REPLY_TIMEOUT_MS) {
+    gPending.active = false;
+    return REMOTE_OUTCOME_TIMEOUT;
+  }
+  return REMOTE_OUTCOME_PENDING;
 }
 
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE

@@ -25,9 +25,6 @@
 
 #include <atomic>
 
-// Forward declaration for memory stats display
-void displayMemoryStats();
-
 #if ENABLE_OLED_DISPLAY
 // Auth/session changes may originate on cmd_exec. That task owns the
 // synchronous authority cutover, but it must never mutate Arduino Strings,
@@ -44,6 +41,11 @@ static void oledApplyPendingSessionBoundary();
 static void oledBindOwnerTask();
 static bool oledIsOwnerTask();
 static bool oledSessionBoundaryPending();
+// Display changes from other tasks travel to the owner as requests
+// (oledPostOwnerRequest, beside the OLED CLI commands).
+static void oledPostModeRequest(OLEDMode newMode, const char* reason, bool pushStack,
+                                bool isBackNav, void (*prepare)());
+static void oledApplyPendingOwnerRequests();
 #endif
 
 #if !ENABLE_OLED_DISPLAY
@@ -1584,7 +1586,7 @@ static char getCharAt(int row, int col) {
 OLEDKeyboardState gOledKeyboardState;
 
 void oledKeyboardInit(const char* title, const char* initialText, int maxLength,
-                      OLEDKeyboardDictationPolicy dictationPolicy) {
+                      OLEDKeyboardDictationPolicy dictationPolicy, bool masked) {
   // A new field starts clean: a FAILED dictation left over from the last one
   // must not greet the user on a page they just opened.
   dictationCancel();
@@ -1594,6 +1596,7 @@ void oledKeyboardInit(const char* title, const char* initialText, int maxLength,
   gOledKeyboardState.cursorY = 0;
   gOledKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;  // Start with lowercase
   gOledKeyboardState.dictationPolicy = dictationPolicy;
+  gOledKeyboardState.masked = masked;
   gOledKeyboardState.active = true;
   gOledKeyboardState.cancelled = false;
   gOledKeyboardState.completed = false;
@@ -1630,6 +1633,7 @@ void oledKeyboardReset() {
   gOledKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;
   gOledKeyboardState.dictationPolicy =
       OLEDKeyboardDictationPolicy::DENY;
+  gOledKeyboardState.masked = false;
   secureClearString(gOledKeyboardState.title);
   gOledKeyboardState.maxLength = 0;
   gOledKeyboardState.autocompleteFunc = nullptr;
@@ -1639,6 +1643,19 @@ void oledKeyboardReset() {
          sizeof(gOledKeyboardState.suggestions));
   gOledKeyboardState.suggestionCount = 0;
   gOledKeyboardState.selectedSuggestion = 0;
+}
+
+// Prints the field text at the display cursor: the last `maxChars` characters,
+// or the first `maxChars` when `fromStart`. A masked field prints one '*' per
+// character instead, so a secret never reaches the panel.
+static void oledKeyboardPrintPreview(Adafruit_SSD1306* display, int maxChars,
+                                     bool fromStart) {
+  const int length = (int)strlen(gOledKeyboardState.text);
+  const int shown = length < maxChars ? length : maxChars;
+  const int first = fromStart ? 0 : length - shown;
+  for (int i = first; i < first + shown; i++) {
+    display->print(gOledKeyboardState.masked ? '*' : gOledKeyboardState.text[i]);
+  }
 }
 
 void oledKeyboardDisplay(Adafruit_SSD1306* display) {
@@ -1658,10 +1675,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
     
     // Show current input
     display->setCursor(75, keyboardStartY);
-    char inputPreview[10];
-    strncpy(inputPreview, gOledKeyboardState.text, 8);
-    inputPreview[8] = '\0';
-    display->print(inputPreview);
+    oledKeyboardPrintPreview(display, 8, true);
     
     // List suggestions (up to 5 visible with full screen)
     int visibleCount = min(gOledKeyboardState.suggestionCount, 5);
@@ -1709,13 +1723,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
     // Text preview box - show pattern as arrow characters
     display->drawRect(0, keyboardStartY + 9, 128, 11, DISPLAY_COLOR_WHITE);
     display->setCursor(2, keyboardStartY + 11);
-    int startChar = 0;
-    if (gOledKeyboardState.textLength > 20) {
-      startChar = gOledKeyboardState.textLength - 20;
-    }
-    for (int i = startChar; i < gOledKeyboardState.textLength; i++) {
-      display->print(gOledKeyboardState.text[i]);
-    }
+    oledKeyboardPrintPreview(display, 20, false);
     if ((millis() / 500) % 2 == 0) {
       display->print("_");
     }
@@ -1761,10 +1769,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
     // Text preview box, same geometry as every other keyboard page.
     display->drawRect(0, keyboardStartY + 9, 128, 11, DISPLAY_COLOR_WHITE);
     display->setCursor(2, keyboardStartY + 11);
-    int micTextLen = strlen(gOledKeyboardState.text);
-    const char* micStart = gOledKeyboardState.text;
-    if (micTextLen > 20) micStart = gOledKeyboardState.text + (micTextLen - 20);
-    display->print(micStart);
+    oledKeyboardPrintPreview(display, 20, false);
     if ((millis() / 500) % 2 == 0) display->print("_");
 
     const int micY = keyboardStartY + 24;
@@ -1843,14 +1848,8 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
   display->drawRect(0, keyboardStartY + 9, 128, 11, DISPLAY_COLOR_WHITE);
   display->setCursor(2, keyboardStartY + 11);
   
-  // Show current text with cursor
-  int textLen = strlen(gOledKeyboardState.text);
-  const char* displayStart = gOledKeyboardState.text;
-  if (textLen > 20) {
-    // Scroll text if too long
-    displayStart = gOledKeyboardState.text + (textLen - 20);
-  }
-  display->print(displayStart);
+  // Show current text (the last 20 characters) with cursor
+  oledKeyboardPrintPreview(display, 20, false);
   
   // Show blinking cursor
   if ((millis() / 500) % 2 == 0) {
@@ -2164,7 +2163,7 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
     DEBUG_DISPLAYF("[KEYBOARD] Y button pressed - backspace (textLen=%d)\n", gOledKeyboardState.textLength);
     oledKeyboardBackspace();
-    DEBUG_DISPLAYF("[KEYBOARD] After backspace: textLen=%d text='%s'\n", gOledKeyboardState.textLength, gOledKeyboardState.text);
+    DEBUG_DISPLAYF("[KEYBOARD] After backspace: textLen=%d\n", gOledKeyboardState.textLength);
     inputHandled = true;
   }
   
@@ -2302,12 +2301,21 @@ void oledKeyboardAdvance(int steps) {
   gOledKeyboardState.cursorX = next % OLED_KEYBOARD_COLS;
 }
 
+// Debug traces print the typed text; a masked (secret) field prints a placeholder.
+static const char* oledKeyboardTraceText() {
+  return gOledKeyboardState.masked ? "<masked>" : gOledKeyboardState.text;
+}
+
 void oledKeyboardSelectChar() {
   // Get character at current cursor position
   char selectedChar = getCharAt(gOledKeyboardState.cursorY, gOledKeyboardState.cursorX);
   
-  DEBUG_DISPLAYF("[KEYBOARD_SELECT] Cursor at [%d,%d] char='%c' (0x%02X)\n", gOledKeyboardState.cursorX, gOledKeyboardState.cursorY, 
-                selectedChar, (unsigned char)selectedChar);
+  if (gOledKeyboardState.masked) {
+    DEBUG_DISPLAYF("[KEYBOARD_SELECT] Cursor at [%d,%d] (masked field)\n", gOledKeyboardState.cursorX, gOledKeyboardState.cursorY);
+  } else {
+    DEBUG_DISPLAYF("[KEYBOARD_SELECT] Cursor at [%d,%d] char='%c' (0x%02X)\n", gOledKeyboardState.cursorX, gOledKeyboardState.cursorY,
+                  selectedChar, (unsigned char)selectedChar);
+  }
   // Handle special characters
   if (selectedChar == CHAR_MODE) {
     // Toggle keyboard mode
@@ -2326,18 +2334,18 @@ void oledKeyboardSelectChar() {
     gOledKeyboardState.text[gOledKeyboardState.textLength] = selectedChar;
     gOledKeyboardState.textLength++;
     gOledKeyboardState.text[gOledKeyboardState.textLength] = '\0';
-    DEBUG_DISPLAYF("[KEYBOARD_SELECT] Added char: textLength=%d text='%s'\n", gOledKeyboardState.textLength, gOledKeyboardState.text);
+    DEBUG_DISPLAYF("[KEYBOARD_SELECT] Added char: textLength=%d text='%s'\n", gOledKeyboardState.textLength, oledKeyboardTraceText());
   } else {
     DEBUG_DISPLAYF("[KEYBOARD_SELECT] At max length (%d), cannot add char\n", gOledKeyboardState.maxLength);
   }
 }
 
 void oledKeyboardBackspace() {
-  DEBUG_DISPLAYF("[KEYBOARD_BACKSPACE] Called: textLength=%d text='%s'\n", gOledKeyboardState.textLength, gOledKeyboardState.text);
+  DEBUG_DISPLAYF("[KEYBOARD_BACKSPACE] Called: textLength=%d text='%s'\n", gOledKeyboardState.textLength, oledKeyboardTraceText());
   if (gOledKeyboardState.textLength > 0) {
     gOledKeyboardState.textLength--;
     gOledKeyboardState.text[gOledKeyboardState.textLength] = '\0';
-    DEBUG_DISPLAYF("[KEYBOARD_BACKSPACE] Deleted char: new textLength=%d text='%s'\n", gOledKeyboardState.textLength, gOledKeyboardState.text);
+    DEBUG_DISPLAYF("[KEYBOARD_BACKSPACE] Deleted char: new textLength=%d text='%s'\n", gOledKeyboardState.textLength, oledKeyboardTraceText());
   } else {
     DEBUG_DISPLAYF("[KEYBOARD_BACKSPACE] No characters to delete (textLength=0)");
   }
@@ -2491,9 +2499,9 @@ void oledKeyboardTriggerAutocomplete() {
   if (gOledKeyboardState.suggestionCount > 0) {
     gOledKeyboardState.showingSuggestions = true;
     gOledKeyboardState.selectedSuggestion = 0;
-    DEBUG_DISPLAYF("[KEYBOARD] Autocomplete found %d suggestions for '%s'\n", gOledKeyboardState.suggestionCount, gOledKeyboardState.text);
+    DEBUG_DISPLAYF("[KEYBOARD] Autocomplete found %d suggestions for '%s'\n", gOledKeyboardState.suggestionCount, oledKeyboardTraceText());
   } else {
-    DEBUG_DISPLAYF("[KEYBOARD] No suggestions found for '%s'\n", gOledKeyboardState.text);
+    DEBUG_DISPLAYF("[KEYBOARD] No suggestions found for '%s'\n", oledKeyboardTraceText());
   }
 }
 
@@ -3209,6 +3217,7 @@ void drawOLEDFooter() {
 
 #include "System_User.h"
 #include "System_Command.h"
+#include "System_AuthIdentity.h"  // gIdentityGeneration (session role cache)
 
 // Returns true if the local display should be blocked pending authentication.
 // Use this instead of repeating the three-part condition everywhere.
@@ -3216,14 +3225,62 @@ bool shouldBlockForDisplayAuth() {
   return gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed && !oledBootModeActive;
 }
 
+// Role of the logged-in display account, kept with the OLED session mirror so
+// menu frames and input handlers do not read users.json each time. Main-loop
+// owned: oledApplyPendingSessionBoundary() drops it with the identity it
+// describes, and any gIdentityGeneration change (role, delete, ban, unban)
+// refills it on the next query. These flags shape the UI only; commands keep
+// their own live role checks. A users.json edit through generic file
+// operations bumps no generation, so the flags follow it at the next boundary.
+struct OledSessionRole {
+  bool resolved = false;  // false: the lookup failed or has not run
+  uint32_t generation = 0;
+  bool guest = true;      // fail closed until the account resolves
+  bool admin = false;
+};
+static OledSessionRole sOledSessionRole;
+
+// Live roster lookup for gLocalDisplayUser. This is a security gate, so it
+// requires positive account resolution: a deleted/banned/malformed/unreadable
+// named identity stays guest and non-admin until the revocation boundary
+// catches up. Admin is then isAdminUser(), the same order authorizeCommand
+// uses (role first, then the admin check).
+static OledSessionRole oledLookupSessionRole(bool resolveAdmin) {
+  OledSessionRole looked;
+  // Stamped before the read: a bump that lands during it forces a refill.
+  looked.generation = gIdentityGeneration.load(std::memory_order_acquire);
+  String role;
+  if (getUserAuthorizationRole(gLocalDisplayUser, role)) {
+    looked.resolved = true;
+    looked.guest = role == "guest";
+    looked.admin = resolveAdmin && !looked.guest && isAdminUser(gLocalDisplayUser);
+  }
+  return looked;
+}
+
+// Cached on the OLED owner task; any other task reads live and leaves the
+// main-loop cache alone (the owner compare does not bind the owner);
+// requestOLEDMode() runs its gates on the owner. A failed lookup answers
+// guest/non-admin and is retried on the next query rather than kept for the
+// session.
+static OledSessionRole oledSessionRole(bool needAdmin) {
+  if (sOledOwnerTask.load(std::memory_order_acquire) != xTaskGetCurrentTaskHandle()) {
+    return oledLookupSessionRole(needAdmin);
+  }
+  if (!sOledSessionRole.resolved ||
+      sOledSessionRole.generation != gIdentityGeneration.load(std::memory_order_acquire)) {
+    sOledSessionRole = oledLookupSessionRole(true);
+  }
+  return sOledSessionRole;
+}
+
 bool oledIsGuestSession() {
   if (!gLocalDisplayAuthed) return false;
-  // This is a security gate, so require positive account resolution. A real
-  // Guest is view-only; a deleted/banned/malformed/unreadable named identity
-  // is also fail-closed view-only until the revocation boundary catches up.
-  String role;
-  return !getUserAuthorizationRole(gLocalDisplayUser, role) ||
-         role == "guest";
+  return oledSessionRole(false).guest;
+}
+
+bool oledSessionIsAdmin() {
+  return gLocalDisplayAuthed && oledSessionRole(true).admin;
 }
 
 bool oledModeAllowedForGuest(OLEDMode mode) {
@@ -3396,6 +3453,44 @@ bool executeOLEDCommandWithResultForSession(
       argsInput, expectedEpoch, true, out, outSize);
 }
 
+void oledCommandReplyText(bool ok, const char* reply, const char* okText,
+                          const char* failText, char* out, size_t outSize) {
+  if (!out || outSize == 0) return;
+  if (ok) {
+    snprintf(out, outSize, "%s", okText ? okText : "");
+    return;
+  }
+  // The toast box shows ~17 columns: the admin gate's sentence becomes a fixed
+  // short text; any other reply loses its error token and keeps its first line.
+  if (!reply) reply = "";
+  if (strstr(reply, "Admin access required") || strstr(reply, "Super-admin access required")) {
+    snprintf(out, outSize, "Admin required");
+    return;
+  }
+  const char* reason = reply;
+  if (strncmp(reason, "[ERROR]", 7) == 0) reason += 7;
+  else if (strncmp(reason, "Error", 5) == 0 || strncmp(reason, "ERROR", 5) == 0) reason += 5;
+  while (*reason == ':' || *reason == ' ') reason++;
+  const size_t lineLength = strcspn(reason, "\r\n");
+  if (lineLength == 0) {
+    snprintf(out, outSize, "%s", failText ? failText : "");
+  } else {
+    snprintf(out, outSize, "%.*s", (int)lineLength, reason);
+  }
+}
+
+bool oledRunCommand(const String& cmd) {
+  char out[96];
+  if (executeOLEDCommandWithResult(cmd, out, sizeof(out)) &&
+      strncmp(out, "Error", 5) != 0 && strncmp(out, "ERROR", 5) != 0) {
+    return true;
+  }
+  char text[64];
+  oledCommandReplyText(false, out, nullptr, "Failed", text, sizeof(text));
+  oledToastShow(text, 2500);
+  return false;
+}
+
 
 // =============================================================================
 // MERGED FROM OLED_Display.cpp
@@ -3537,7 +3632,7 @@ void prepareMeshStatusData();
 void prepareConnectedSensorsData();
 void prepareAutomationData();
 // OLED state variables (defined here, used by .ino and this file)
-// Initial mode will be set based on oledRequireAuth setting during initialization
+// Initial mode will be set based on displayRequireAuth (System_Settings) during initialization
 OLEDMode currentOLEDMode = OLED_SYSTEM_STATUS;
 static OLEDMode lastRenderedMode = OLED_OFF;  // Track mode changes to force immediate refresh
 
@@ -3548,7 +3643,15 @@ void setOLEDMode(OLEDMode newMode) {
 // Single authoritative mode transition entry point.
 // Auth gating, back-nav stack push, and standardised "[OLED_MODE]" logging.
 // pushStack=false for boot/system/replace-in-place transitions that must not pollute history.
+// Runs on the OLED owner task. Any other task (cmd_exec for CLI, web, MQTT, BLE
+// and automation commands) posts the request; the owner applies it, gates and
+// onEnter hook included, at the start of its next frame.
 void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack, bool isBackNav) {
+  if (!oledIsOwnerTask()) {
+    oledPostModeRequest(newMode, reason, pushStack, isBackNav, nullptr);
+    return;
+  }
+
   // Remember where we came from so the centralized onEnter hook below fires only
   // on a real mode change (and the auth-gate rewrite of newMode is accounted for).
   OLEDMode prevMode = currentOLEDMode;
@@ -3704,11 +3807,6 @@ const OLEDModeEntry* findOLEDMode(OLEDMode mode) {
     }
   }
   return nullptr;
-}
-
-const OLEDModeEntry* getRegisteredOLEDModes() {
-  // Return first entry (caller should use getRegisteredOLEDModeCount for iteration)
-  return oledModeRegistrySize > 0 ? oledModeRegistry[0] : nullptr;
 }
 
 size_t getRegisteredOLEDModeCount() {
@@ -3946,7 +4044,6 @@ void stopOLEDDisplay() {
 // Display Mode Functions
 // ============================================================================
 
-// displaySystemStatus() moved to OLED_Mode_System.cpp
 // displaySensorData() moved to OLED_Mode_Sensors.cpp
 // displayThermalVisual() moved to i2csensor_mlx90640.cpp (modular OLED mode)
 
@@ -4002,7 +4099,6 @@ void projectCubePoint(float x, float y, float z, int& screenX, int& screenY, int
 // displayToFData() moved to i2csensor_vl53l4cx.cpp (modular OLED mode)
 
 // displayAPDSData() moved to i2csensor_apds9960.cpp (modular OLED mode)
-// displayConnectedSensors() moved to OLED_Mode_Sensors.cpp
 
 // Forward declaration for gamepad input processing
 bool processOLEDInput();
@@ -4024,8 +4120,11 @@ void updateOLEDDisplay() {
   // only bump an atomic generation; the main loop performs every teardown and
   // navigation mutation here, before input or rendering can touch old state.
   oledApplyPendingSessionBoundary();
+  // Then the display commands other tasks posted (mode, text, animation,
+  // blanking), in post order, against the session that is now current.
+  oledApplyPendingOwnerRequests();
   prepareTranscriptionData();
-  
+
   if (!gOledRunning || !oledConnected || !displayIsReady() || oledDisplay == nullptr) {
     return;
   }
@@ -4313,9 +4412,11 @@ const char* cmd_oled_enabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledenabled <0|1>";
-  const char* p = _arg.c_str();
-  bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
+  // Accept exactly what the generic settings path accepts; refuse anything
+  // else before the display is touched (so "on" cannot stop the panel).
+  const int parsed = parseBoolArg(_arg);
+  if (parsed < 0) return "Error: invalid arguments — Usage: oledenabled <0|1>";
+  const bool enabled = parsed != 0;
   setSetting(gSettings.oledEnabled, enabled);
 
   if (gSettings.oledEnabled) {
@@ -4337,7 +4438,8 @@ const char* cmd_oled_enabled(const String& argsInput) {
     if ((int)defMode == -1) defMode = OLED_SYSTEM_STATUS;
     requestOLEDMode(defMode, "cmd.oledenabled.forceDefault", false);
 
-    { char dbgBuf[48]; snprintf(dbgBuf, sizeof(dbgBuf), "defaultMode=%s", defaultMode.c_str()); debugOLEDModeChange("cmd.oledenabled.forceDefault", prevMode, currentOLEDMode, dbgBuf); }
+    // Off the owner task the transition is still pending: log the requested mode.
+    { char dbgBuf[48]; snprintf(dbgBuf, sizeof(dbgBuf), "defaultMode=%s", defaultMode.c_str()); debugOLEDModeChange("cmd.oledenabled.forceDefault", prevMode, defMode, dbgBuf); }
 
     updateOLEDDisplay();
     snprintf(getDebugBuffer(), 1024, "OLED display enabled (mode: %s)", gSettings.oledDefaultMode.c_str());
@@ -4347,20 +4449,6 @@ const char* cmd_oled_enabled(const String& argsInput) {
     gOledRunning = false;
     snprintf(getDebugBuffer(), 1024, "OLED display disabled");
   }
-  return getDebugBuffer();
-}
-
-const char* cmd_oled_requireauth(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledrequireauth <0|1>";
-  const char* p = _arg.c_str();
-  bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
-  const bool changed = gSettings.localDisplayRequireAuth != enabled;
-  setSetting(gSettings.localDisplayRequireAuth, enabled);
-  if (changed) localDisplayTransportAuthPolicyChanged();
-  snprintf(getDebugBuffer(), 1024, "Local display require auth %s", enabled ? "enabled" : "disabled");
   return getDebugBuffer();
 }
 
@@ -4542,6 +4630,171 @@ const char* cmd_oledstop(const String& argsInput) {
   return "OK";
 }
 
+// =============================================================================
+// Display requests from other tasks
+// =============================================================================
+// Mode transitions, the custom text, the animation choice and panel blanking
+// belong to the OLED owner task (the main loop). Command handlers on cmd_exec
+// post a request; the owner applies the queue in post order at the start of
+// its next frame, right after the session boundary. A request posted before a
+// session boundary that has since been applied hands over its data (prepare
+// step, text, animation) but not its navigation or blanking: the boundary
+// already replaced the screen it targeted. On the owner task a request runs at
+// once.
+struct OledOwnerRequest {
+  enum Kind : uint8_t { Mode, CliMode, Text, Animation, Clear };
+  Kind kind;
+  OLEDMode mode;
+  const char* reason;   // string literal, for the transition log
+  bool pushStack;
+  bool isBackNav;
+  void (*prepare)();    // owner-side state reset, run before the transition
+  char* text;           // Text: the new customOLEDText (ps_alloc copy owned by the request)
+  int animation;        // Animation: the OLEDAnimationType to show
+  uint32_t boundary;    // sOledSessionBoundaryRequested when posted
+};
+
+#define OLED_OWNER_REQUEST_CAPACITY 8
+EXT_RAM_BSS_ATTR static OledOwnerRequest sOledOwnerRequests[OLED_OWNER_REQUEST_CAPACITY];
+static uint8_t sOledOwnerRequestHead = 0;
+static uint8_t sOledOwnerRequestCount = 0;
+// Guards only the POD copies in and out of the queue; nothing allocates or
+// frees inside it.
+static portMUX_TYPE sOledOwnerRequestMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void oledRunOwnerRequest(OledOwnerRequest& request, bool superseded) {
+  if (request.prepare) request.prepare();
+  if (request.kind == OledOwnerRequest::Text) {
+    customOLEDText = request.text ? request.text : "";
+    ps_free(request.text);
+    request.text = nullptr;
+  } else if (request.kind == OledOwnerRequest::Animation) {
+    currentAnimation = (OLEDAnimationType)request.animation;
+  }
+  if (superseded) return;
+
+  if (request.kind == OledOwnerRequest::Clear) {
+    OLED_TRANSACTION(
+      oledDisplay->clearDisplay();
+      oledDisplay->display();
+    );
+    return;
+  }
+
+  // oledmode honors the target mode's own entry rule as the launcher does: a
+  // refusal shows its reason on the unavailable page, which returns to the
+  // current screen. The display-auth redirect to the login page comes first.
+  if (request.kind == OledOwnerRequest::CliMode && !shouldBlockForDisplayAuth()) {
+    String refusal;
+    if (!oledModeRuleAllows(request.mode, &refusal)) {
+      const OLEDModeEntry* entry = findOLEDMode(request.mode);
+      pushOLEDMode(currentOLEDMode);
+      enterUnavailablePage(entry && entry->name ? entry->name : "", refusal);
+      return;
+    }
+  }
+
+  requestOLEDMode(request.mode, request.reason, request.pushStack, request.isBackNav);
+  switch (request.kind) {
+    case OledOwnerRequest::Text:
+      // customOLEDText isn't a registered setting, so nothing else announces the
+      // change. Without this, `oledtext` while ALREADY on the custom-text page is a
+      // no-op mode request → modeChanged false → the old message stays up.
+      oledMarkDirty();
+      break;
+    case OledOwnerRequest::Animation:
+      animationFrame = 0;
+      break;
+    case OledOwnerRequest::CliMode:
+      // oledmode's per-mode side effects, keyed on the requested mode. Entry
+      // resets (resetOLEDMenu, animation, file browser, ESP-NOW) run in each
+      // mode's onEnterFunc; the gamepad auto-start stays here, outside
+      // requestOLEDMode(), which the input pump also calls.
+      if (request.mode == OLED_MENU) {
+        tryAutoStartInputForMenu();
+      } else if (request.mode == OLED_OFF) {
+        OLED_TRANSACTION(
+          oledDisplay->clearDisplay();
+          oledDisplay->display();
+        );
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+static void oledPostOwnerRequest(OledOwnerRequest& request) {
+  if (oledIsOwnerTask()) {
+    oledRunOwnerRequest(request, false);
+    return;
+  }
+  request.boundary = sOledSessionBoundaryRequested.load(std::memory_order_acquire);
+  bool dropped = false;
+  char* droppedText = nullptr;
+  portENTER_CRITICAL(&sOledOwnerRequestMux);
+  if (sOledOwnerRequestCount == OLED_OWNER_REQUEST_CAPACITY) {
+    // Full: the oldest request gives way to the newest display intent.
+    dropped = true;
+    droppedText = sOledOwnerRequests[sOledOwnerRequestHead].text;
+    sOledOwnerRequestHead = (uint8_t)((sOledOwnerRequestHead + 1) % OLED_OWNER_REQUEST_CAPACITY);
+    sOledOwnerRequestCount--;
+  }
+  sOledOwnerRequests[(sOledOwnerRequestHead + sOledOwnerRequestCount) %
+                     OLED_OWNER_REQUEST_CAPACITY] = request;
+  sOledOwnerRequestCount++;
+  portEXIT_CRITICAL(&sOledOwnerRequestMux);
+  request.text = nullptr;  // the queue owns the copy now
+  ps_free(droppedText);
+  if (dropped) DEBUG_DISPLAYF("[OLED_MODE] request queue full; dropped the oldest request");
+}
+
+static void oledPostModeRequest(OLEDMode newMode, const char* reason, bool pushStack,
+                                bool isBackNav, void (*prepare)()) {
+  OledOwnerRequest request = {};
+  request.kind = OledOwnerRequest::Mode;
+  request.mode = newMode;
+  request.reason = reason;
+  request.pushStack = pushStack;
+  request.isBackNav = isBackNav;
+  request.prepare = prepare;
+  oledPostOwnerRequest(request);
+}
+
+// requestOLEDMode() with an owner-side preparation step (a mode's own state
+// reset) that runs, on the owner task, right before the transition.
+void requestOLEDModePrepared(OLEDMode newMode, const char* reason, bool pushStack,
+                             void (*prepare)()) {
+  oledPostModeRequest(newMode, reason, pushStack, false, prepare);
+}
+
+static void oledApplyPendingOwnerRequests() {
+  if (!oledIsOwnerTask()) return;
+  for (;;) {
+    OledOwnerRequest request;
+    int32_t age = 0;
+    portENTER_CRITICAL(&sOledOwnerRequestMux);
+    if (sOledOwnerRequestCount == 0) {
+      portEXIT_CRITICAL(&sOledOwnerRequestMux);
+      return;
+    }
+    OledOwnerRequest& head = sOledOwnerRequests[sOledOwnerRequestHead];
+    age = (int32_t)(sOledSessionBoundaryApplied - head.boundary);
+    if (age < 0) {
+      // Posted after a session boundary this frame has not applied yet; it
+      // runs on the frame that applies that boundary.
+      portEXIT_CRITICAL(&sOledOwnerRequestMux);
+      return;
+    }
+    request = head;
+    head.text = nullptr;
+    sOledOwnerRequestHead = (uint8_t)((sOledOwnerRequestHead + 1) % OLED_OWNER_REQUEST_CAPACITY);
+    sOledOwnerRequestCount--;
+    portEXIT_CRITICAL(&sOledOwnerRequestMux);
+    oledRunOwnerRequest(request, age > 0);
+  }
+}
+
 const char* cmd_oledmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -4575,33 +4828,19 @@ const char* cmd_oledmode(const String& argsInput) {
     return "ERROR";
   }
 
-  // Single authoritative transition — auth gating + debug log handled inside.
-  // CLI transitions do not push to the back-nav stack (explicit user destination).
-  requestOLEDMode(target, "cli.oledmode", false);
+  // The owner task applies the transition (auth gating + debug log inside
+  // requestOLEDMode) and the per-mode side effects (oledRunOwnerRequest). CLI
+  // transitions do not push to the back-nav stack (explicit user destination).
+  OledOwnerRequest request = {};
+  request.kind = OledOwnerRequest::CliMode;
+  request.mode = target;
+  request.reason = "cli.oledmode";
+  oledPostOwnerRequest(request);
 
-  // Per-mode initialisation side-effects (state resets, hardware inits).
-  switch (target) {
-    case OLED_MENU:
-      // State reset (resetOLEDMenu) now runs via OLED_MENU's onEnterFunc. This
-      // path keeps only the gamepad auto-start, which must run on the cmd_exec
-      // task — not inside requestOLEDMode(), which the input pump also calls.
-      tryAutoStartInputForMenu();
-      break;
-    case OLED_OFF:
-      OLED_TRANSACTION(
-        oledDisplay->clearDisplay();
-        oledDisplay->display();
-      );
-      break;
-    default:
-      // OLED_ANIMATION / OLED_FILE_BROWSER / OLED_ESPNOW entry resets now run via
-      // their per-mode onEnterFunc (see each mode's registration) — no longer
-      // duplicated here or in the menu-select path.
-      break;
-  }
-
+  // Reports the requested mode; a display-auth or guest gate, or the mode's own
+  // entry rule, may redirect it when the owner applies it.
   if (ensureDebugBuffer()) {
-    snprintf(getDebugBuffer(), 1024, "OLED mode: %s", getOLEDModeName(currentOLEDMode));
+    snprintf(getDebugBuffer(), 1024, "OLED mode: %s", getOLEDModeName(target));
     broadcastOutput(getDebugBuffer());
   }
   updateOLEDDisplay();
@@ -4628,13 +4867,21 @@ const char* cmd_oledtext(const String& argsInput) {
     text = text.substring(1, text.length() - 1);
   }
 
-  extern String customOLEDText;
-  customOLEDText = text;
-  requestOLEDMode(OLED_CUSTOM_TEXT, "cli.customtext", false);
-  // customOLEDText isn't a registered setting, so nothing else announces the
-  // change. Without this, `oledtext` while ALREADY on the custom-text page is a
-  // no-op mode request → modeChanged false → the old message stays up.
-  oledMarkDirty();
+  // customOLEDText is printed by the owner's render; the owner assigns it from
+  // this copy when it applies the request.
+  const size_t textLength = text.length();
+  char* textCopy = (char*)ps_alloc(textLength + 1, AllocPolicy::PreferPSRAM, "oled.text");
+  if (!textCopy) {
+    broadcastOutput("Error: out of memory for the OLED text");
+    return "ERROR";
+  }
+  memcpy(textCopy, text.c_str(), textLength + 1);
+  OledOwnerRequest request = {};
+  request.kind = OledOwnerRequest::Text;
+  request.mode = OLED_CUSTOM_TEXT;
+  request.reason = "cli.customtext";
+  request.text = textCopy;
+  oledPostOwnerRequest(request);
 
   if (ensureDebugBuffer()) {
     snprintf(getDebugBuffer(), 1024, "Custom text set: %s", text.c_str());
@@ -4652,10 +4899,12 @@ const char* cmd_oledclear(const String& argsInput) {
     return "ERROR";
   }
 
-  OLED_TRANSACTION(
-    oledDisplay->clearDisplay();
-    oledDisplay->display();
-  );
+  // The owner blanks and pushes the framebuffer; nothing marks the page dirty,
+  // so the blank stays until the screen next changes.
+  OledOwnerRequest request = {};
+  request.kind = OledOwnerRequest::Clear;
+  request.reason = "cli.oledclear";
+  oledPostOwnerRequest(request);
 
   broadcastOutput("OLED display cleared");
   return "OK";
@@ -4802,9 +5051,13 @@ const char* cmd_oledanim(const String& argsInput) {
   bool found = false;
   for (int i = 0; i < gAnimationCount; i++) {
     if (arg == gAnimationRegistry[i].name) {
-      currentAnimation = gAnimationRegistry[i].type;
-      requestOLEDMode(OLED_ANIMATION, "cli.animation", false);
-      animationFrame = 0;
+      // The owner selects the animation, enters the page and restarts it.
+      OledOwnerRequest request = {};
+      request.kind = OledOwnerRequest::Animation;
+      request.mode = OLED_ANIMATION;
+      request.reason = "cli.animation";
+      request.animation = (int)gAnimationRegistry[i].type;
+      oledPostOwnerRequest(request);
       if (ensureDebugBuffer()) {
         snprintf(getDebugBuffer(), 1024, "Animation set to: %s", gAnimationRegistry[i].description);
         broadcastOutput(getDebugBuffer());
@@ -4874,7 +5127,6 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_RTC_DATA: return "RTC";
     case OLED_PRESENCE_DATA: return "Presence";
     case OLED_REMOTE: return "Bond";
-    case OLED_UNIFIED_MENU: return "Actions";
     case OLED_NOTIFICATIONS: return "Notifs";
     case OLED_SET_PATTERN: return "Pattern";
     case OLED_LOGIN: return "Login";
@@ -4933,7 +5185,6 @@ OLEDMode modeFromSlug(const String& slug) {
   if (slug == "web") return OLED_WEB_STATS;
   if (slug == "rtc") return OLED_RTC_DATA;
   if (slug == "presence") return OLED_PRESENCE_DATA;
-  if (slug == "unified") return OLED_UNIFIED_MENU;
   if (slug == "notifs" || slug == "notifications") return OLED_NOTIFICATIONS;
   if (slug == "map" || slug == "gpsmap") return OLED_GPS_MAP;
   if (slug == "login") return OLED_LOGIN;
@@ -4992,7 +5243,6 @@ const char* slugFromMode(OLEDMode mode) {
     case OLED_WEB_STATS:       return "web";
     case OLED_RTC_DATA:        return "rtc";
     case OLED_PRESENCE_DATA:   return "presence";
-    case OLED_UNIFIED_MENU:    return "actions";
     case OLED_NOTIFICATIONS:   return "notifs";
     case OLED_GPS_MAP:         return "map";
     case OLED_LOGIN:           return "login";
@@ -5394,321 +5644,20 @@ extern const OLEDMenuItem oledSensorMenuItems[] = {
 };
 extern const int oledSensorMenuItemCount = sizeof(oledSensorMenuItems) / sizeof(oledSensorMenuItems[0]);
 
-// =============================================================================
-// Dynamic Menu System (combines local + remote items based on DataSource)
-// =============================================================================
-
-EXT_RAM_BSS_ATTR OLEDMenuItemEx gDynamicMenuItems[MAX_DYNAMIC_MENU_ITEMS];
-int gDynamicMenuItemCount = 0;
-static bool gDynamicMenuBuilt = false;
-static DataSource gLastBuildSource = DataSource::LOCAL;
-
-// Remote command input state (for commands that need parameters)
-static bool gRemoteCommandInputActive = false;
-static char gPendingRemoteCommand[64] = "";
-
-// Start remote command input mode with keyboard.
-// [[maybe_unused]]: its only live caller (the old oledMenuSelect remote-submenu
-// path) is gone with the menu unification; kept as the not-yet-wired
-// remote-command-input entry point.
-[[maybe_unused]] static void startRemoteCommandInput(const char* baseCommand) {
-  strncpy(gPendingRemoteCommand, baseCommand, sizeof(gPendingRemoteCommand) - 1);
-  gPendingRemoteCommand[sizeof(gPendingRemoteCommand) - 1] = '\0';
-  
-  // Initialize keyboard with command pre-filled, add space for parameters
-  char initialText[OLED_KEYBOARD_MAX_LENGTH];
-  snprintf(initialText, sizeof(initialText), "%s ", baseCommand);
-  oledKeyboardInit("Remote Command", initialText, OLED_KEYBOARD_MAX_LENGTH,
-                   OLEDKeyboardDictationPolicy::DENY);
-  
-  gRemoteCommandInputActive = true;
-  DEBUG_DISPLAYF("[RMENU] Started command input for: %s\n", baseCommand);
-}
-
-// Check if remote command input is active
-bool isRemoteCommandInputActive() {
-  return gRemoteCommandInputActive;
-}
-
-// Cancel remote command input
-void cancelRemoteCommandInput() {
-  gRemoteCommandInputActive = false;
-  gPendingRemoteCommand[0] = '\0';
-  oledKeyboardReset();
-}
-
-// Complete remote command input and execute
-void completeRemoteCommandInput() {
-  if (!gRemoteCommandInputActive) return;
-  
-  const char* fullCommand = oledKeyboardGetText();
-  if (fullCommand && strlen(fullCommand) > 0) {
-    // Execute remote command via unified OLED command helper
-    char remoteCmd[128];
-    snprintf(remoteCmd, sizeof(remoteCmd), "remote:%s", fullCommand);
-
-    char out[256];
-    executeOLEDCommandWithResult(remoteCmd, out, sizeof(out));
-
-    BROADCAST_PRINTF("[OLED] Remote: %s", fullCommand);
-    if (strlen(out) > 0) {
-      broadcastOutput(out);
-    }
-  }
-  
-  gRemoteCommandInputActive = false;
-  gPendingRemoteCommand[0] = '\0';
-  oledKeyboardReset();
-}
-
-// Helper to add a submenu header item
-static void addSubmenuHeader(OLEDMenuItemEx* items, int& count, int maxItems, int startIdx,
-                              const char* name, const char* icon, const char* submenuId) {
-  if (startIdx + count >= maxItems) return;
-  OLEDMenuItemEx& item = items[startIdx + count];
-  snprintf(item.name, sizeof(item.name), "%s >", name);
-  strncpy(item.iconName, icon, sizeof(item.iconName) - 1);
-  item.iconName[sizeof(item.iconName) - 1] = '\0';
-  item.command[0] = '\0';
-  item.targetMode = OLED_OFF;
-  item.isRemote = true;
-  item.isSubmenu = true;
-  item.needsInput = false;
-  strncpy(item.submenuId, submenuId, sizeof(item.submenuId) - 1);
-  item.submenuId[sizeof(item.submenuId) - 1] = '\0';
-  count++;
-}
-
-#if ENABLE_BONDED_MODE
-// Helper: Load cached manifest for bonded peer
-// Returns empty string if not found
-static String loadCachedManifest() {
-  extern bool filesystemReady;
-  
-  if (!filesystemReady || !gEspNow || !gEspNow->lastRemoteCapValid) {
-    return "";
-  }
-  
-  // Build filename from fwHash in capability summary
-  char hashHex[33];
-  for (int i = 0; i < 16; i++) {
-    snprintf(hashHex + (i * 2), 3, "%02x", gEspNow->lastRemoteCap.fwHash[i]);
-  }
-  hashHex[32] = '\0';
-  
-  char pathBuf[64];
-  snprintf(pathBuf, sizeof(pathBuf), "/system/manifests/%s.json", hashHex);
-  
-  FsLockGuard guard("manifest.load");
-  // trusted: cached manifest read for OLED capability rendering.
-  AuthContext sys = VFS::systemAuth("oled.utils.manifest_read");
-  if (!VFS::existsGuarded(pathBuf, sys)) {
-    DEBUG_DISPLAYF("[RMENU] Manifest not cached: %s\n", pathBuf);
-    return "";
-  }
-
-  File f = VFS::openGuarded(pathBuf, "r", sys);
-  if (!f) return "";
-  
-  String content = f.readString();
-  f.close();
-  DEBUG_DISPLAYF("[RMENU] Loaded manifest: %d bytes\n", content.length());
-  return content;
-}
-
-// Load remote menu items from cached manifest - creates submenu headers for each CLI module
-static int loadRemoteMenuItems(OLEDMenuItemEx* items, int maxItems, int startIdx) {
-
-  DEBUG_DISPLAYF("[RMENU] loadRemoteMenuItems called: startIdx=%d maxItems=%d\n", startIdx, maxItems);
-  if (!gSettings.bondModeEnabled) {
-    DEBUG_DISPLAYF("[RMENU] EXIT: bondModeEnabled=false");
-    return 0;
-  }
-  if (gSettings.bondPeerMac.length() == 0) {
-    DEBUG_DISPLAYF("[RMENU] EXIT: bondPeerMac is empty");
-    return 0;
-  }
-  DEBUG_DISPLAYF("[RMENU] bondPeerMac=%s\n", gSettings.bondPeerMac.c_str());
-  if (!gEspNow) {
-    DEBUG_DISPLAYF("[RMENU] EXIT: gEspNow is NULL");
-    return 0;
-  }
-  if (!gEspNow->lastRemoteCapValid) {
-    DEBUG_DISPLAYF("[RMENU] EXIT: lastRemoteCapValid=false (no capability received yet)");
-    return 0;
-  }
-
-  int count = 0;
-
-  // Load cached manifest to get actual CLI modules
-  String manifestStr = loadCachedManifest();
-  if (manifestStr.length() == 0) {
-    DEBUG_DISPLAYF("[RMENU] No cached manifest, using fallback headers");
-    // Fallback to basic headers
-    addSubmenuHeader(items, count, maxItems, startIdx, "Commands", "terminal", "core");
-    return count;
-  }
-  
-  // Parse manifest
-  PSRAM_JSON_DOC(doc);
-  DeserializationError err = deserializeJson(doc, manifestStr);
-  if (err) {
-    DEBUG_DISPLAYF("[RMENU] Manifest parse error: %s\n", err.c_str());
-    addSubmenuHeader(items, count, maxItems, startIdx, "Commands", "terminal", "core");
-    return count;
-  }
-  
-  // Create submenu header for each CLI module
-  JsonArray modules = doc["cliModules"].as<JsonArray>();
-  for (JsonObject module : modules) {
-    if (startIdx + count >= maxItems) break;
-    
-    const char* moduleName = module["name"] | "";
-    const char* moduleDesc = module["description"] | moduleName;
-    int cmdCount = module["commands"].as<JsonArray>().size();
-    
-    if (strlen(moduleName) == 0 || cmdCount == 0) continue;
-    
-    // Choose icon based on module name
-    const char* icon = "terminal";
-    if (strcmp(moduleName, "wifi") == 0) icon = "wifi_3";
-    else if (strcmp(moduleName, "bluetooth") == 0) icon = "bt_idle";
-    else if (strcmp(moduleName, "espnow") == 0) icon = "notify_espnow";
-    else if (strcmp(moduleName, "mqtt") == 0) icon = "mqtt";
-    else if (strcmp(moduleName, "filesystem") == 0) icon = "notify_files";
-    else if (strcmp(moduleName, "oled") == 0) icon = "notify_display";
-    else if (strcmp(moduleName, "neopixel") == 0) icon = "neopixel";
-    else if (strcmp(moduleName, "servo") == 0) icon = "servo";
-    else if (strcmp(moduleName, "gamepad") == 0) icon = "gamepad";
-    else if (strcmp(moduleName, "i2c") == 0) icon = "notify_sensor";
-    else if (strcmp(moduleName, "camera") == 0) icon = "camera";
-    else if (strcmp(moduleName, "microphone") == 0) icon = "mic";
-    else if (strcmp(moduleName, "presence") == 0) icon = "presence";
-    else if (strcmp(moduleName, "rtc") == 0) icon = "rtc";
-    else if (strcmp(moduleName, "edgeimpulse") == 0) icon = "edgeimpulse";
-    else if (strcmp(moduleName, "espsr") == 0) icon = "espsr";
-    else if (strcmp(moduleName, "battery") == 0) icon = "battery_full";
-    else if (strcmp(moduleName, "debug") == 0) icon = "debug";
-    else if (strcmp(moduleName, "settings") == 0) icon = "settings";
-    else if (strcmp(moduleName, "users") == 0) icon = "user";
-    else if (strcmp(moduleName, "core") == 0) icon = "notify_system";
-    else if (strcmp(moduleName, "cli") == 0) icon = "terminal";
-
-    // A peer can advertise modules that this firmware did not compile. Icon
-    // payloads follow the local feature set, so fall back instead of leaving a
-    // blank menu tile when the feature-specific asset is absent.
-    if (!iconExists(icon)) icon = "terminal";
-    
-    // Create display name with command count
-    char displayName[24];
-    snprintf(displayName, sizeof(displayName), "%s (%d)", moduleName, cmdCount);
-    
-    addSubmenuHeader(items, count, maxItems, startIdx, displayName, icon, moduleName);
-  }
-
-  DEBUG_DISPLAYF("[RMENU] Created %d module submenu headers from manifest\n", count);
-  return count;
-}
-#endif // ENABLE_BONDED_MODE
-
-// Build dynamic menu based on current DataSource
-void buildDynamicMenu() {
-  extern DataSource gDataSource;
-  
-  // Skip if already built for this source
-  if (gDynamicMenuBuilt && gLastBuildSource == gDataSource) {
-    return;
-  }
-  
-  gDynamicMenuItemCount = 0;
-  
-  // Add local items if LOCAL or BOTH (built from category arrays)
-  if (gDataSource == DataSource::LOCAL || gDataSource == DataSource::BOTH) {
-    const struct { const OLEDMenuItem* items; int count; } cats[] = {
-      { oledMenuCategory1, oledMenuCategory1Count },
-      { oledMenuCategory2, oledMenuCategory2Count },
-      { oledMenuCategory3, oledMenuCategory3Count },
-      { oledMenuCategory4, oledMenuCategory4Count },
-      { oledMenuCategory5, oledMenuCategory5Count },
-    };
-    for (int c = 0; c < (int)(sizeof(cats)/sizeof(cats[0])); c++) {
-      for (int i = 0; i < cats[c].count && gDynamicMenuItemCount < MAX_DYNAMIC_MENU_ITEMS; i++) {
-        OLEDMenuItemEx& item = gDynamicMenuItems[gDynamicMenuItemCount];
-        
-        strncpy(item.name, cats[c].items[i].name, sizeof(item.name) - 1);
-        item.name[sizeof(item.name) - 1] = '\0';
-        
-        strncpy(item.iconName, cats[c].items[i].iconName, sizeof(item.iconName) - 1);
-        item.iconName[sizeof(item.iconName) - 1] = '\0';
-        
-        item.command[0] = '\0';  // No command for local mode items
-        item.targetMode = cats[c].items[i].targetMode;
-        item.isRemote = false;
-        item.isSubmenu = false;
-        item.needsInput = false;
-        item.submenuId[0] = '\0';
-        
-        gDynamicMenuItemCount++;
-      }
-    }
-  }
-  
-#if ENABLE_BONDED_MODE
-  // Add remote items if REMOTE or BOTH
-  if (gDataSource == DataSource::REMOTE || gDataSource == DataSource::BOTH) {
-    DEBUG_DISPLAYF("[MENU] Building REMOTE menu (source=%d)\n", (int)gDataSource);
-    int added = loadRemoteMenuItems(gDynamicMenuItems, MAX_DYNAMIC_MENU_ITEMS, gDynamicMenuItemCount);
-    DEBUG_DISPLAYF("[MENU] loadRemoteMenuItems returned %d items\n", added);
-    gDynamicMenuItemCount += added;
-    
-    // Add "Remote Settings" menu item if remote settings are available
-    extern bool hasRemoteSettings();
-    bool hasSettings = hasRemoteSettings();
-    DEBUG_DISPLAYF("[MENU] hasRemoteSettings()=%d\n", hasSettings ? 1 : 0);
-    if (hasSettings && gDynamicMenuItemCount < MAX_DYNAMIC_MENU_ITEMS) {
-      OLEDMenuItemEx& item = gDynamicMenuItems[gDynamicMenuItemCount];
-      strncpy(item.name, "Remote Settings", sizeof(item.name) - 1);
-      item.name[sizeof(item.name) - 1] = '\0';
-      strncpy(item.iconName, "settings", sizeof(item.iconName) - 1);
-      item.iconName[sizeof(item.iconName) - 1] = '\0';
-      item.command[0] = '\0';
-      item.targetMode = OLED_REMOTE_SETTINGS;
-      item.isRemote = true;
-      item.isSubmenu = false;
-      item.needsInput = false;
-      item.submenuId[0] = '\0';
-      gDynamicMenuItemCount++;
-    }
-  }
-#endif // ENABLE_BONDED_MODE
-  
-  gDynamicMenuBuilt = true;
-  gLastBuildSource = gDataSource;
-  
-  DEBUG_DISPLAYF("[MENU] Built dynamic menu: %d items (source=%s)\n", gDynamicMenuItemCount, oledGetDataSourceLabel());
-}
-
-// Invalidate dynamic menu (call when source changes or manifest updates)
-void invalidateDynamicMenu() {
-  gDynamicMenuBuilt = false;
-}
-
-// Get filtered menu item count
-int getFilteredMenuItemCount() {
-  buildDynamicMenu();
-  return gDynamicMenuItemCount;
-}
-
 // MenuAvailability enum moved to OLED_Display.h
 
-MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
+// Build, hardware and feature state of a mode (not built, not detected, turned
+// off), with the reason and the class the launcher badges, sorts and drops by.
+// getMenuAvailability() combines it with the mode's own entry rule.
+static MenuAvailability oledModeFeatureState(OLEDMode mode, String* outReason) {
   if (outReason) *outReason = "";
 
   switch (mode) {
     // Admin user manager — only usable when the local display is logged in as
-    // an admin (the mode itself also refuses, and the commands are the backstop).
+    // an admin (cached session role; the mode itself also refuses, and the
+    // commands are the backstop).
     case OLED_USER_MANAGER:
-      if (gLocalDisplayAuthed && isAdminUser(gLocalDisplayUser)) return MenuAvailability::AVAILABLE;
+      if (oledSessionIsAdmin()) return MenuAvailability::AVAILABLE;
       if (outReason) *outReason = "Admin only";
       return MenuAvailability::FEATURE_DISABLED;
 // NeoPixel LED control: keyed on the feature flag (ENABLE_NEOPIXEL). The
@@ -5968,6 +5917,27 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
   }
 }
 
+bool oledModeRuleAllows(OLEDMode mode, String* outReason) {
+  const OLEDModeEntry* entry = findOLEDMode(mode);
+  if (!entry || !entry->availFunc) return true;
+  // Some rules leave a note while allowing entry; only a refusal reports one.
+  String reason;
+  if (entry->availFunc(&reason)) return true;
+  if (outReason) *outReason = reason;
+  return false;
+}
+
+MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
+  String refusal;
+  const bool ruleAllows = oledModeRuleAllows(mode, &refusal);
+  const MenuAvailability state = oledModeFeatureState(mode, outReason);
+  // A mode that is not built, not detected or turned off keeps that class and
+  // reason; otherwise the mode's own refusal turns it off with its reason.
+  if (ruleAllows || state != MenuAvailability::AVAILABLE) return state;
+  if (outReason) *outReason = refusal;
+  return MenuAvailability::FEATURE_DISABLED;
+}
+
 // BatteryIconState struct declared in OLED_Utils.h
 BatteryIconState batteryIconState = {0};
 extern const unsigned long BATTERY_ICON_UPDATE_INTERVAL = 120000; // 2 minutes
@@ -5980,15 +5950,9 @@ extern const unsigned long BATTERY_ICON_UPDATE_INTERVAL = 120000; // 2 minutes
 // displayAutomations() moved to OLED_Mode_Menu.cpp
 // displayEspNow() moved to OLED_Mode_Network.cpp
 
-// Handle B button press - exit keyboard input, submenu, or pop mode stack
+// Handle B button press - leave a category submenu or pop the mode stack
 // Returns true if back was consumed
 bool oledMenuBack() {
-  // Handle remote command keyboard cancellation
-  if (gRemoteCommandInputActive) {
-    cancelRemoteCommandInput();
-    return true;
-  }
-  
   // If not in menu mode, pop mode stack to go back to previous mode.
   // Category state is preserved so we return to the category submenu, not root.
   if (currentOLEDMode != OLED_MENU) {
@@ -6032,14 +5996,6 @@ void clearOLEDModeStack() {
   modeStackDepth = 0;
 }
 
-// Get previous OLED mode for back navigation (for compatibility)
-OLEDMode getPreviousOLEDMode() {
-  if (modeStackDepth > 0) {
-    return modeStack[modeStackDepth - 1];
-  }
-  return OLED_MENU;
-}
-
 
 void resetOLEDMenu() {
   // Fresh entry to the launcher returns to the top-level category list with the
@@ -6072,64 +6028,9 @@ static const unsigned long MENU_REPEAT_DELAY_MS = 100;   // Delay between repeat
 #endif // ENABLE_OLED_INPUT
 
 // Display state exists even without a local controller: renderers and serial
-// setup prompts share it, and data-source selection is independent of input.
-// Navigation stays neutral until an actual input source supplies events.
+// setup prompts share it. Navigation stays neutral until an actual input
+// source supplies events.
 NavEvents gNavEvents = {false, false, false, false, 0, 0, 0};
-
-// =============================================================================
-// Data Source Selection (for bond mode)
-// =============================================================================
-DataSource gDataSource = DataSource::LOCAL;
-bool gDataSourceIndicatorVisible = false;
-
-// Forward declaration
-void invalidateDynamicMenu();
-
-void oledCycleDataSource() {
-  if (!oledRemoteSourceAvailable()) {
-    // Not bonded or peer offline - stay on LOCAL
-    gDataSource = DataSource::LOCAL;
-    gDataSourceIndicatorVisible = false;
-    invalidateDynamicMenu();
-    return;
-  }
-  
-  // Cycle: LOCAL -> REMOTE -> BOTH -> LOCAL
-  switch (gDataSource) {
-    case DataSource::LOCAL:
-      gDataSource = DataSource::REMOTE;
-      break;
-    case DataSource::REMOTE:
-      gDataSource = DataSource::BOTH;
-      break;
-    case DataSource::BOTH:
-      gDataSource = DataSource::LOCAL;
-      break;
-  }
-  gDataSourceIndicatorVisible = true;
-  invalidateDynamicMenu();  // Rebuild menu with new source
-  oledMarkDirty();
-  BROADCAST_PRINTF("[OLED] Data source: %s", oledGetDataSourceLabel());
-}
-
-const char* oledGetDataSourceLabel() {
-  switch (gDataSource) {
-    case DataSource::LOCAL:  return "Local";
-    case DataSource::REMOTE: return "Remote";
-    case DataSource::BOTH:   return "Both";
-    default:                 return "Local";
-  }
-}
-
-bool oledRemoteSourceAvailable() {
-#if ENABLE_BONDED_MODE
-  return gSettings.bondModeEnabled && 
-         gEspNow && gEspNow->initialized && 
-         gEspNow->bondPeerOnline;
-#else
-  return false;
-#endif
-}
 
 #if ENABLE_OLED_INPUT
 // Debug throttle for gamepad menu input
@@ -6323,13 +6224,14 @@ void handleOLEDActionButton() {
 #endif
       } else if (unavailableOLEDTitle == "Automations") {
         // Enable automation system
-        executeOLEDCommand("automation system enable");
-        broadcastOutput("[OLED] Automation system enabled - restart required");
+        if (oledRunCommand("automation system enable")) {
+          broadcastOutput("[OLED] Automation system enabled - restart required");
+        }
         oledMenuBack();
       } else if (unavailableOLEDTitle == "Bluetooth") {
 #if ENABLE_BLUETOOTH
         // Initialize Bluetooth
-        executeOLEDCommand("openble");
+        oledRunCommand("openble");
         requestOLEDMode(OLED_BLUETOOTH, "unavail.start.bluetooth", false);
 #endif
       } else if (unavailableOLEDTitle == "Web") {
@@ -6337,8 +6239,7 @@ void handleOLEDActionButton() {
         // Start HTTP server with confirmation
         static auto httpStartConfirmedUnavail = [](void* userData) {
           (void)userData;
-          executeOLEDCommand("openhttp");
-          broadcastOutput("[OLED] HTTP server started");
+          if (oledRunCommand("openhttp")) broadcastOutput("[OLED] HTTP server started");
           requestOLEDMode(OLED_WEB_STATS, "unavail.confirm.web", false);
         };
         oledConfirmRequest("Start HTTP?", nullptr, httpStartConfirmedUnavail, nullptr);
@@ -6354,13 +6255,11 @@ void handleOLEDActionButton() {
         // Toggle HTTP server with confirmation
         static auto httpStopConfirmedWebStats = [](void* userData) {
           (void)userData;
-          executeOLEDCommand("closehttp");
-          broadcastOutput("[OLED] HTTP server stopped");
+          if (oledRunCommand("closehttp")) broadcastOutput("[OLED] HTTP server stopped");
         };
         static auto httpStartConfirmedWebStats = [](void* userData) {
           (void)userData;
-          executeOLEDCommand("openhttp");
-          broadcastOutput("[OLED] HTTP server started");
+          if (oledRunCommand("openhttp")) broadcastOutput("[OLED] HTTP server started");
         };
         if (server) {
           oledConfirmRequest("Stop HTTP?", nullptr, httpStopConfirmedWebStats, nullptr, false);
@@ -6914,7 +6813,6 @@ bool oledFileBrowserNeedsInit = true;
 
 // displayFileBrowserRendered() moved to OLED_Mode_FileBrowser.cpp
 // oledFileBrowserUp/Down/Select/Back() moved to OLED_Mode_FileBrowser.cpp
-// resetOLEDFileBrowser() moved to OLED_Mode_FileBrowser.cpp
 
 // ============================================================================
 // OLED Command Registry
@@ -6937,7 +6835,6 @@ const CommandEntry oledCommands[] = {
     "       oledanim fps <1-60>" },
   { "oledclear", "Clear OLED display.", false, cmd_oledclear },
   { "oledstatus", "Show OLED status. (add 'json' for JSON output)", false, cmd_oledstatus },
-  { "oledrequireauth", "OLED auth requirement: <0|1>", true, cmd_oled_requireauth, "Usage: oledrequireauth <0|1>" },
   { "oledenabled", "Enable/disable OLED: <0|1>", false, cmd_oled_enabled, "Usage: oledenabled <0|1>" },
   { "oledbootmode", "OLED boot mode: <logo|status|sensors|thermal|network|mesh|off>", false, cmd_oled_bootmode, "Usage: oledbootmode <logo|status|sensors|thermal|network|mesh|off>" },
   { "oleddefaultmode", "OLED default mode: <logo|status|sensors|thermal|network|mesh|off>", false, cmd_oled_defaultmode, "Usage: oleddefaultmode <logo|status|sensors|thermal|network|mesh|off>" },
@@ -6981,6 +6878,8 @@ void oledUpdate() {
   // Apply even while the panel is stopped/disconnected so credentials,
   // callbacks, and back-stack state cannot survive until a later wake.
   oledApplyPendingSessionBoundary();
+  // Posted display commands drain on every pass, panel running or not.
+  oledApplyPendingOwnerRequests();
   if (gOledRunning && oledConnected) {
 #if ENABLE_ESPNOW
     oledEspNowPollPairRequest();   // pop the accept/reject dialog on an incoming pair request
@@ -7119,7 +7018,6 @@ static void oledResetLocalDisplaySessionTransients() {
 #if ENABLE_AUTOMATION
   oledAutomationsModeResetSessionState();
 #endif
-  cancelRemoteCommandInput();
   oledKeyboardReset();
 
   // Navigation and console history are identity-owned too. Do this even when
@@ -7179,6 +7077,9 @@ static void oledApplyPendingSessionBoundary() {
     secureClearString(gLocalDisplayUser);
     gLocalDisplayUser = sessionAuthed ? sessionUser : String();
     gLocalDisplayAuthed = sessionAuthed;
+    // The role belongs to the identity just replaced; the next query resolves
+    // the new one after the lifecycle writer is released.
+    sOledSessionRole = OledSessionRole{};
     sOledUiSessionEpoch = sessionEpoch;
     sOledUiSessionAuthed = sessionAuthed;
     secureClearString(sessionUser);

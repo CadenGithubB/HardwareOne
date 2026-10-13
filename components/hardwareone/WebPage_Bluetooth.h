@@ -700,6 +700,9 @@ inline void streamBluetoothInner(httpd_req_t* req) {
         ' <span style="font-size:.7em;color:#c80;border:1px solid currentColor;border-radius:3px;padding:0 4px;vertical-align:middle">not logged in</span>';
       var since = parseInt(c.since, 10) || 0;
       var cmds  = parseInt(c.commands, 10) || 0;
+      // Kick names this client's connection id; without one there is no button
+      // (the bare command would close every app client).
+      var id    = parseInt(c.connId, 10);
       html += '<div class="bt-conn-item">'
         + '<div>'
         + '<div class="bt-conn-name" style="' + nameStyle + '">' + esc(who) + badge + '</div>'
@@ -707,7 +710,8 @@ inline void streamBluetoothInner(httpd_req_t* req) {
         + '<div class="bt-conn-meta">' + since + 's &nbsp;·&nbsp; ' + cmds + ' cmds</div>'
         + '</div>'
         + '<div class="bt-conn-actions">'
-        + '<button class="btn" style="font-size:.78em;padding:3px 8px" onclick="btDisconnect()" data-guest-hide>Kick</button>'
+        + (isNaN(id) ? '' :
+           '<button class="btn" style="font-size:.78em;padding:3px 8px" onclick="btDisconnect(' + id + ')" data-guest-hide>Kick</button>')
         + '</div>'
         + '</div>';
     });
@@ -807,8 +811,10 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   }
 
   // ── actions ───────────────────────────────────────────────────────────────
-  window.btDisconnect = function(){
-    cli('bledisconnect').then(function(){ setTimeout(refresh, 400); });
+  // Per-client Kick: closes only the connection with this id.
+  window.btDisconnect = function(connId){
+    if(typeof connId !== 'number' || !isFinite(connId)) return;
+    cli('bledisconnect ' + connId).then(function(out){ showStatusText(out); setTimeout(refresh, 400); });
   };
 
   function runAndRefresh(cmd, statusEl, msg){

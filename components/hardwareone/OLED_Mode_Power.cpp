@@ -7,7 +7,7 @@
 #if ENABLE_OLED_DISPLAY
 
 #include <Adafruit_SSD1306.h>
-#include "OLED_Utils.h"  // For executeOLEDCommand, OLEDScrollState
+#include "OLED_Utils.h"  // For executeOLEDCommand, oledRunCommand, OLEDScrollState
 #include "HAL_Input.h"
 #include "System_Settings.h"
 #include "System_Utils.h"
@@ -200,14 +200,19 @@ static void executePowerCpuAction() {
 static void executePowerSleepAction() {
   switch (sPowerSleepScroll.selectedIndex) {
     case 0: {
-      // Cycle the power-save timeout through a preset ladder; persists to flash.
+      // Cycle the power-save timeout through a preset ladder. The next step is
+      // submitted as the admin-only `powersave <n>` command (admin check, [CMD]
+      // audit; System_Power applies and persists it). A refusal shows on the
+      // toast and leaves the value; the row label shows the value every frame.
       // A value set off-ladder (e.g. via web) lands back on the first step.
       static const uint32_t presets[] = { 0, 1, 2, 5, 10, 15, 30, 60 };
       const int n = (int)(sizeof(presets) / sizeof(presets[0]));
       const uint32_t cur = gSettings.powerSaveTimeoutMinutes;
       int idx = 0;
       for (int i = 0; i < n; i++) { if (presets[i] == cur) { idx = i; break; } }
-      setSetting(gSettings.powerSaveTimeoutMinutes, presets[(idx + 1) % n]);
+      char cmd[24];
+      snprintf(cmd, sizeof(cmd), "powersave %lu", (unsigned long)presets[(idx + 1) % n]);
+      oledRunCommand(cmd);
       break;
     }
     case 1: executeOLEDCommand("lightsleep 20"); break;

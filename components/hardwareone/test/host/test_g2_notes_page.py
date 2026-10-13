@@ -5,8 +5,8 @@
    policy and text pager into g2_notes_page_harness.cpp and runs it: command
    strings, JSON replies, views, holds on the page and through the global hold
    action, no container rebuild while a note records, release before start,
-   stopAfterStart, stale replies, refusal without navigation, headless notes
-   and privacy.
+   stopAfterStart, stale replies, refusal without navigation, headless notes,
+   privacy and the tier row (with a card in, the other tier's notes).
 2. Compiles the production Apps launcher rows (9 with every app; Notes only
    with QuickNote), g2PageHoldsHijackAlive() (its truth table on local-STT
    and CM5 builds), the container-ready mic re-arm (a hold note's start can
@@ -203,6 +203,10 @@ def main() -> None:
     sys.path.insert(0, str(c / 'test/host'))
     from test_web_batch_handlers import extract_block
 
+    # A source-only tree (the base copy) builds with this tree's libraries.
+    libs = c.parent / 'hardwareone_libs'
+    if not libs.is_dir():
+        libs = HERE.parents[2] / 'hardwareone_libs'
     page = (c / 'G2_Page_Notes.cpp').read_text()
     glasses = (c / 'G2_Glasses.cpp').read_text()
 
@@ -225,7 +229,7 @@ def main() -> None:
     labels = glasses[glasses.index('static constexpr size_t kTapLabelRows'):glasses.index(peek) + len(peek)]
     with tempfile.TemporaryDirectory(prefix='hw1-g2-notes-') as tmp:
         build_and_run(a.cxx, harness, tmp, 'notes_page',
-                      ['-I', str(c), '-I', str(c.parent / 'hardwareone_libs/ArduinoJson/src')],
+                      ['-I', str(c), '-I', str(libs / 'ArduinoJson/src')],
                       a.sanitize)
         for quicknote in (1, 0):
             build_and_run(a.cxx, f'#define ENABLE_QUICKNOTE {quicknote}\n' +

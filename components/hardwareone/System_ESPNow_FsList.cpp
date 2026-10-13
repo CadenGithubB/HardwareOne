@@ -15,12 +15,15 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-#include "System_AuthIdentity.h"   // SYSTEM_IDENTITY_SCOPE, currentAuthContext
+#include "System_AuthIdentity.h"   // ExecIdentityGuard, currentAuthContext
 #include "System_CommandTypes.h"   // ExecReq::DeferredFn (signature for submitDeferredToCmdExec)
 #include "System_Utils.h"  // submitDeferredToCmdExec
 #include "System_Debug.h"
 #include "System_ESPNow.h"          // generateMessageId
 #include "System_ESPNow_Tx.h"       // espnowtx::sendAead / sendAeadSync (Step 3c)
+#if ENABLE_BONDED_MODE
+#include "System_BondedPeer.h"     // BondedPeer::peerMacBytes — the one requester FS RPC serves
+#endif
 #include "System_Filesystem.h"      // filesystemReady, getPermissions
 #include "System_MemUtil.h"         // ps_alloc — PSRAM-backed reply buffer (off espnow_task stack)
 #include "System_Mutex.h"           // FsLockGuard
@@ -54,17 +57,19 @@ enum FsRpcOp : uint8_t {
   FS_OP_GET  = 2,
 };
 
+// Union of callback variants. Only the member matching the slot's `op` is valid.
+union FsRpcCallback {
+  FsListReplyCallback list;
+  FsStatReplyCallback stat;
+  FsGetAckCallback    get;
+};
+
 struct PendingRequest {
   uint32_t  reqId;        // 0 = slot free
   uint8_t   peerMac[6];
   uint8_t   op;           // FsRpcOp
   uint32_t  deadlineMs;
-  // Union of callback variants. Only the one matching `op` is valid.
-  union {
-    FsListReplyCallback list;
-    FsStatReplyCallback stat;
-    FsGetAckCallback    get;
-  } cb;
+  FsRpcCallback cb;
 };
 
 static PendingRequest sPending[FS_LIST_MAX_PENDING];
@@ -98,16 +103,23 @@ EXT_RAM_BSS_ATTR static DeferredReply sDeferred;  // PSRAM: mutex-guarded task c
 
 // ============================================================================
 // Mutex — protects sPending[] and sDeferred against concurrent access from
-// espnow_task (RX handlers), cmd_exec_task (the deferred reply builder), and
-// the main ESP-NOW task (tick + send API).
+// espnow_task (RX handlers + tick), cmd_exec_task (the deferred reply builder)
+// and the client tasks (httpd, OLED) that call the send API.
+//
+// Invariant: the mutex guards table bookkeeping only. It is never held across
+// a send (espnowtx::sendAeadSync can block for seconds), VFS work or a
+// callback, so every critical section is microseconds long. Holders that run
+// on espnow_task keep the short bounded wait (RX must never stall); holders on
+// other tasks that would leak a slot or wedge the deferred slot by giving up
+// wait with portMAX_DELAY instead.
 // ============================================================================
 static SemaphoreHandle_t sMutex = nullptr;
 
 namespace {
 struct ScopedLock {
   bool held;
-  ScopedLock() : held(false) {
-    if (sMutex) held = (xSemaphoreTake(sMutex, pdMS_TO_TICKS(50)) == pdTRUE);
+  explicit ScopedLock(TickType_t wait = pdMS_TO_TICKS(50)) : held(false) {
+    if (sMutex) held = (xSemaphoreTake(sMutex, wait) == pdTRUE);
   }
   ~ScopedLock() { if (held) xSemaphoreGive(sMutex); }
 };
@@ -153,11 +165,15 @@ static int findPendingByIdLocked(uint32_t reqId) {
   return -1;
 }
 
-// Common slot bookkeeping shared by all three send paths. Allocates a reqId
-// + slot, fills the per-op fields, returns the reqId (or 0 on no-free-slot).
-// Lock MUST be held. Caller fills the callback union member matching `op`
-// before sending.
-static uint32_t allocSlotAndReqIdLocked(int* outSlot, uint8_t op, const uint8_t peerMac[6]) {
+// Common slot bookkeeping shared by all three send paths. Takes the lock,
+// allocates a reqId + slot, fills the per-op fields and callback, and releases
+// the lock before returning the reqId (0 on no-free-slot or lock miss). The
+// caller sends WITHOUT the lock: a blocked send must not stall the RX handlers
+// or the cmd_exec reply runner.
+static uint32_t allocPendingRequest(uint8_t op, const uint8_t peerMac[6],
+                                    const FsRpcCallback& cb) {
+  ScopedLock lk;
+  if (!lk.held) return 0;
   int slot = allocPendingSlotLocked();
   if (slot < 0) {
     WARN_ESPNOWF("[FSLIST] No free pending slot (sender table full)");
@@ -169,8 +185,36 @@ static uint32_t allocSlotAndReqIdLocked(int* outSlot, uint8_t op, const uint8_t 
   memcpy(sPending[slot].peerMac, peerMac, 6);
   sPending[slot].op = op;
   sPending[slot].deadlineMs = millis() + FS_LIST_REQUEST_TIMEOUT_MS;
-  *outSlot = slot;
+  sPending[slot].cb = cb;
   return reqId;
+}
+
+// Free a pending slot by reqId. Waits for the (always short) lock rather than
+// giving up: a leaked slot would fire its callback from the timeout sweep for
+// a request the caller already saw fail or cancelled. No-op if the reqId is
+// no longer in the table.
+static void freePendingSlot(uint32_t reqId) {
+  ScopedLock lk(portMAX_DELAY);
+  if (!lk.held) return;
+  int slot = findPendingByIdLocked(reqId);
+  if (slot >= 0) sPending[slot].reqId = 0;
+}
+
+// Blocking request send, called WITHOUT sMutex (see allocPendingRequest).
+// On failure the slot allocated for reqId is freed and false is returned.
+static bool sendPendingRequest(uint32_t reqId, const uint8_t peerMac[6], uint8_t type,
+                               const void* req, uint16_t reqLen,
+                               const char* opName, const char* path) {
+  uint32_t msgId = generateMessageId();
+  // Step 3c: httpd / OLED task caller — submitSync gives backpressure. The
+  // lock is not held because the send can block ~2 × 2000 ms.
+  bool sent = espnowtx::sendAeadSync(peerMac, type, 0, msgId,
+                                     (const uint8_t*)req, reqLen, 1, 2000);
+  if (!sent) {
+    freePendingSlot(reqId);
+    WARN_ESPNOWF("[FSLIST] %s send failed reqId=%u path='%s'", opName, reqId, path);
+  }
+  return sent;
 }
 
 uint32_t fsListSendRequest(const uint8_t peerMac[6],
@@ -180,13 +224,10 @@ uint32_t fsListSendRequest(const uint8_t peerMac[6],
   if (!peerMac || !path || !callback) return 0;
 
   fsListInit();
-  ScopedLock lk;
-  if (!lk.held) return 0;
-
-  int slot = -1;
-  uint32_t reqId = allocSlotAndReqIdLocked(&slot, FS_OP_LIST, peerMac);
+  FsRpcCallback cb;
+  cb.list = callback;
+  uint32_t reqId = allocPendingRequest(FS_OP_LIST, peerMac, cb);
   if (reqId == 0) return 0;
-  sPending[slot].cb.list = callback;
 
   V4PayloadFsListReq req = {};
   req.reqId = reqId;
@@ -194,13 +235,8 @@ uint32_t fsListSendRequest(const uint8_t peerMac[6],
   req.maxEntries = FS_LIST_ENTRIES_PER_REPLY;
   strlcpy(req.path, path, sizeof(req.path));
 
-  uint32_t msgId = generateMessageId();
-  // Step 3c: cmd_exec context (CLI caller) — submitSync gives backpressure.
-  bool sent = espnowtx::sendAeadSync(peerMac, ESPNOW_V4_TYPE_FS_LIST_REQ, 0, msgId,
-                                     (const uint8_t*)&req, sizeof(req), 1, 2000);
-  if (!sent) {
-    sPending[slot].reqId = 0;
-    WARN_ESPNOWF("[FSLIST] LIST send failed reqId=%u path='%s'", reqId, path);
+  if (!sendPendingRequest(reqId, peerMac, ESPNOW_V4_TYPE_FS_LIST_REQ,
+                          &req, sizeof(req), "LIST", path)) {
     return 0;
   }
   DEBUG_ESPNOWF("[FSLIST] Sent LIST reqId=%u path='%s' startIdx=%u", reqId, path, startIndex);
@@ -213,25 +249,17 @@ uint32_t fsStatSendRequest(const uint8_t peerMac[6],
   if (!peerMac || !path || !callback) return 0;
 
   fsListInit();
-  ScopedLock lk;
-  if (!lk.held) return 0;
-
-  int slot = -1;
-  uint32_t reqId = allocSlotAndReqIdLocked(&slot, FS_OP_STAT, peerMac);
+  FsRpcCallback cb;
+  cb.stat = callback;
+  uint32_t reqId = allocPendingRequest(FS_OP_STAT, peerMac, cb);
   if (reqId == 0) return 0;
-  sPending[slot].cb.stat = callback;
 
   V4PayloadFsStatReq req = {};
   req.reqId = reqId;
   strlcpy(req.path, path, sizeof(req.path));
 
-  uint32_t msgId = generateMessageId();
-  // Step 3c: cmd_exec context (CLI caller).
-  bool sent = espnowtx::sendAeadSync(peerMac, ESPNOW_V4_TYPE_FS_STAT_REQ, 0, msgId,
-                                     (const uint8_t*)&req, sizeof(req), 1, 2000);
-  if (!sent) {
-    sPending[slot].reqId = 0;
-    WARN_ESPNOWF("[FSLIST] STAT send failed reqId=%u path='%s'", reqId, path);
+  if (!sendPendingRequest(reqId, peerMac, ESPNOW_V4_TYPE_FS_STAT_REQ,
+                          &req, sizeof(req), "STAT", path)) {
     return 0;
   }
   DEBUG_ESPNOWF("[FSLIST] Sent STAT reqId=%u path='%s'", reqId, path);
@@ -244,25 +272,17 @@ uint32_t fsGetSendRequest(const uint8_t peerMac[6],
   if (!peerMac || !path || !callback) return 0;
 
   fsListInit();
-  ScopedLock lk;
-  if (!lk.held) return 0;
-
-  int slot = -1;
-  uint32_t reqId = allocSlotAndReqIdLocked(&slot, FS_OP_GET, peerMac);
+  FsRpcCallback cb;
+  cb.get = callback;
+  uint32_t reqId = allocPendingRequest(FS_OP_GET, peerMac, cb);
   if (reqId == 0) return 0;
-  sPending[slot].cb.get = callback;
 
   V4PayloadFsGetReq req = {};
   req.reqId = reqId;
   strlcpy(req.path, path, sizeof(req.path));
 
-  uint32_t msgId = generateMessageId();
-  // Step 3c: cmd_exec context (CLI caller).
-  bool sent = espnowtx::sendAeadSync(peerMac, ESPNOW_V4_TYPE_FS_GET_REQ, 0, msgId,
-                                     (const uint8_t*)&req, sizeof(req), 1, 2000);
-  if (!sent) {
-    sPending[slot].reqId = 0;
-    WARN_ESPNOWF("[FSLIST] GET send failed reqId=%u path='%s'", reqId, path);
+  if (!sendPendingRequest(reqId, peerMac, ESPNOW_V4_TYPE_FS_GET_REQ,
+                          &req, sizeof(req), "GET", path)) {
     return 0;
   }
   DEBUG_ESPNOWF("[FSLIST] Sent GET reqId=%u path='%s'", reqId, path);
@@ -270,14 +290,9 @@ uint32_t fsGetSendRequest(const uint8_t peerMac[6],
 }
 
 void fsListCancel(uint32_t reqId) {
-  ScopedLock lk;
-  if (!lk.held) return;
-  int slot = findPendingByIdLocked(reqId);
-  if (slot >= 0) {
-    // Just clear reqId — the union doesn't need to be wiped; the next allocation
-    // overwrites it. Future replies for the cancelled reqId find no slot and drop.
-    sPending[slot].reqId = 0;
-  }
+  // Just clear reqId — the union doesn't need to be wiped; the next allocation
+  // overwrites it. Future replies for the cancelled reqId find no slot and drop.
+  freePendingSlot(reqId);
 }
 
 // ============================================================================
@@ -342,7 +357,9 @@ void fsListOnReplyReceived(const uint8_t srcMac[6],
 // ============================================================================
 
 // Send an immediate TOO_BUSY response of the right shape for whatever the
-// incoming request was. Called when sDeferred is already occupied.
+// incoming request was. Called when sDeferred is already occupied, when the
+// module lock is not available within espnow_task's bounded wait, or when the
+// cmd_exec queue refuses the job.
 static void sendBusyReply(uint8_t op, const uint8_t srcMac[6],
                           const uint8_t* payload) {
   uint32_t msgId = generateMessageId();
@@ -399,10 +416,16 @@ static void processDeferredLocked();
 // the slot AFTER processDeferredLocked released the lock + cleared pending,
 // in which case it will submitDeferredToCmdExec a fresh job — that job runs
 // after this one finishes. Single-slot serialization is preserved.
+//
+// Lock wait: this job is the ONLY thing that clears sDeferred.pending, and
+// nothing re-queues it. A bounded wait that missed would leave the slot
+// pending forever (every later request answered TOO_BUSY until reboot), so it
+// waits for the lock. Every holder releases within microseconds (the mutex is
+// never held across a send or VFS work), so the wait is short.
 static void runDeferredFsOpOnCmdExec(void* arg) {
   (void)arg;
   if (!sMutex) return;
-  ScopedLock lk;
+  ScopedLock lk(portMAX_DELAY);
   if (!lk.held) return;
   processDeferredLocked();
 }
@@ -422,7 +445,12 @@ static void captureDeferred(uint8_t op, const uint8_t srcMac[6],
   }
   fsListInit();
   ScopedLock lk;
-  if (!lk.held) return;
+  if (!lk.held) {
+    // espnow_task must not wait longer. Answer BUSY so the peer retries now
+    // instead of waiting out its 5 s request timeout.
+    sendBusyReply(op, srcMac, payload);
+    return;
+  }
 
   if (sDeferred.pending) {
     sendBusyReply(op, srcMac, payload);
@@ -587,13 +615,48 @@ static void processDeferredLocked() {
   xSemaphoreTake(sMutex, portMAX_DELAY);
 }
 
-// FS RPC authenticates a device peer, not an account. Its legacy SYSTEM scope
-// must not grant access to user-private transcripts (including FAT aliases).
+// FS RPC authenticates a device peer, not an account. The identity it serves
+// under must not grant access to user-private transcripts (including FAT
+// aliases).
 static bool fsRpcPathAllowed(const char* rawPath) {
   String normalized;
   return normalizeFsPath(String(rawPath), normalized)
       && TranscriptPathPolicy::classify(normalized.c_str()).kind
           == TranscriptPathPolicy::Kind::Outside;
+}
+
+// System_ESPNow.cpp; defined in both bond builds (returns false when bond mode
+// is compiled out).
+extern bool isBondSessionTokenValid();
+
+// FS RPC serves one requester: the bonded peer, while the bond session that
+// authenticates it is live. It runs under the reserved bond identity, which the
+// filesystem resolves to SUPER for the life of that session and to nobody
+// otherwise (System_Filesystem.cpp resolveRole, kBondAdminUser) — the tier the
+// bonded peer already holds for `remote:files`. Any other paired peer is refused
+// before an identity is installed or the filesystem is touched; a peer that is
+// not bonded fetches files with espnowbrowse/espnowfetch, which the target
+// authorizes as the supplied account.
+static bool fsRpcRequesterIdentity(const uint8_t srcMac[6], AuthContext& out) {
+#if ENABLE_BONDED_MODE
+  uint8_t bondMac[6];
+  if (!BondedPeer::peerMacBytes(bondMac) || memcmp(bondMac, srcMac, 6) != 0) return false;
+  if (!isBondSessionTokenValid()) return false;
+  out.transport = SOURCE_ESPNOW;
+  out.user      = kBondAdminUser;
+  out.path      = "/espnow/fs";
+  char ip[28];
+  snprintf(ip, sizeof(ip), "espnow:%02X:%02X:%02X:%02X:%02X:%02X",
+           srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
+  out.ip     = ip;        // same stamp as the bonded CMD path (v4_handle_cmd)
+  out.sid    = "";
+  out.opaque = nullptr;
+  out.scope  = "";        // unconfined: the SUPER-while-bonded rule is the boundary
+  return true;
+#else
+  (void)srcMac; (void)out;
+  return false;
+#endif
 }
 
 static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListReq& req) {
@@ -630,6 +693,8 @@ static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListRe
   V4PayloadFsListReplyHeader* hdr = (V4PayloadFsListReplyHeader*)replyBuf;
   V4PayloadFsEntry* entries =
       (V4PayloadFsEntry*)(replyBuf + sizeof(V4PayloadFsListReplyHeader));
+  AuthContext peerCtx{};
+  const bool served = fsRpcRequesterIdentity(srcMac, peerCtx);
 
   memset(replyBuf, 0, kReplyBufSize);
   hdr->reqId = req.reqId;
@@ -641,15 +706,20 @@ static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListRe
   }
 
   {
-    // Read under SYSTEM identity — a securely paired + session peer is trusted at
-    // device level (FsList is base ESP-NOW, not bond-gated).
-    // Per-user identity propagation can be layered on later via a token in
-    // the request's reserved bytes.
+    // Served under the bond identity (see fsRpcRequesterIdentity): only the
+    // bonded peer with a live bond session reads here, and the filesystem
+    // decides what that identity may see. Everyone else is refused before an
+    // identity is installed; the transcript policy is checked in front of it.
+    if (!served) {
+      WARN_ESPNOWF("[FSLIST] LIST reqId=%u refused: requester is not the bonded peer with a live session", req.reqId);
+      hdr->status = FS_LIST_STATUS_PERM_DENIED;
+      goto send_reply;
+    }
     if (!fsRpcPathAllowed(req.path)) {
       hdr->status = FS_LIST_STATUS_PERM_DENIED;
       goto send_reply;
     }
-    SYSTEM_IDENTITY_SCOPE("espnow.fs_list_reply");
+    ExecIdentityGuard identity(peerCtx);
     const AuthContext& ctx = currentAuthContext();
     String dirPath = VFS::normalize(req.path);
 
@@ -713,9 +783,10 @@ send_reply: ;
   uint16_t payloadLen = sizeof(V4PayloadFsListReplyHeader)
                       + (uint16_t)hdr->entryCount * sizeof(V4PayloadFsEntry);
   uint32_t msgId = generateMessageId();
-  // Step 3c: cmd_exec context (deferred handler). 3s timeout — a REPLY with a
-  // full entry list is 2572 B (140 B header + 32 × 76 B), so it always fragments
-  // on the wire (13 fragments at 200 B each) and the ACK waits stack up.
+  // Step 3c: cmd_exec context (deferred handler). The 3000 ms bound covers a
+  // single-frame send only. A REPLY with a full entry list is 2572 B (140 B
+  // header + 32 × 76 B), so it fragments (13 fragments at 200 B each) and runs
+  // its fragment/ACK loop here on cmd_exec (System_ESPNow_Tx.h, MULTI-FRAME).
   bool sent = espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_LIST_REPLY, 0, msgId,
                                      replyBuf, payloadLen, 1, 3000);
   DEBUG_ESPNOWF("[FSLIST] Sent LIST REPLY reqId=%u status=%u entries=%u/%u hasMore=%u sent=%d",
@@ -741,6 +812,8 @@ static void processStatDeferred(const uint8_t srcMac[6], const V4PayloadFsStatRe
   V4PayloadFsStatReply reply = {};
   reply.reqId = req.reqId;
   strlcpy(reply.path, req.path, sizeof(reply.path));
+  AuthContext peerCtx{};
+  const bool served = fsRpcRequesterIdentity(srcMac, peerCtx);
 
   if (!filesystemReady) {
     reply.status = FS_LIST_STATUS_NOT_READY;
@@ -748,11 +821,18 @@ static void processStatDeferred(const uint8_t srcMac[6], const V4PayloadFsStatRe
   }
 
   {
+    if (!served) {
+      WARN_ESPNOWF("[FSLIST] STAT reqId=%u refused: requester is not the bonded peer with a live session", req.reqId);
+      reply.status = FS_LIST_STATUS_PERM_DENIED;
+      goto send_stat;
+    }
     if (!fsRpcPathAllowed(req.path)) {
       reply.status = FS_LIST_STATUS_PERM_DENIED;
       goto send_stat;
     }
-    SYSTEM_IDENTITY_SCOPE("espnow.fs_stat_reply");
+    // Every served op runs as the requester, STAT included (VFS::getStats
+    // itself is not identity-guarded).
+    ExecIdentityGuard identity(peerCtx);
     VFS::StorageType tier = VFS::getStorageType(req.path);
     if (tier == VFS::SDCARD && !VFS::isSDAvailable()) {
       reply.status = FS_LIST_STATUS_NOT_FOUND;
@@ -793,14 +873,16 @@ send_stat: ;
 // receive path (System_ESPNow_Files).
 
 // Forward declaration: defined in System_ESPNow.cpp. The function reads the
-// file under the calling task's identity (we install SYSTEM here before
-// calling) and pumps FILE_START/DATA/END to the destination MAC.
+// file under the calling task's identity (we install the bond identity here
+// before calling) and pumps FILE_START/DATA/END to the destination MAC.
 extern bool sendFileToMac(const uint8_t* mac, const String& localPath);
 
 static void processGetDeferred(const uint8_t srcMac[6], const V4PayloadFsGetReq& req) {
   V4PayloadFsGetAck ack = {};
   ack.reqId = req.reqId;
   strlcpy(ack.path, req.path, sizeof(ack.path));
+  AuthContext peerCtx{};
+  const bool served = fsRpcRequesterIdentity(srcMac, peerCtx);
 
   if (!filesystemReady) {
     ack.status = FS_LIST_STATUS_NOT_READY;
@@ -808,11 +890,16 @@ static void processGetDeferred(const uint8_t srcMac[6], const V4PayloadFsGetReq&
   }
 
   {
+    if (!served) {
+      WARN_ESPNOWF("[FSLIST] GET reqId=%u refused: requester is not the bonded peer with a live session", req.reqId);
+      ack.status = FS_LIST_STATUS_PERM_DENIED;
+      goto send_ack;
+    }
     if (!fsRpcPathAllowed(req.path)) {
       ack.status = FS_LIST_STATUS_PERM_DENIED;
       goto send_ack;
     }
-    SYSTEM_IDENTITY_SCOPE("espnow.fs_get_ack");
+    ExecIdentityGuard identity(peerCtx);
     const AuthContext& ctx = currentAuthContext();
     String filePath = VFS::normalize(req.path);
 
@@ -866,7 +953,11 @@ send_ack: ;
   // and otherwise gives up after ~15 polls; the OLED just leaves its
   // "Downloading..." banner up.
   if (ack.status == FS_LIST_STATUS_OK) {
-    SYSTEM_IDENTITY_SCOPE("espnow.fs_get_send");
+    // `served` is necessarily true here. sendFileToMac re-resolves the role
+    // at transfer time (canRead under the installed identity), so a bond
+    // session that ended between ACK and transfer is refused by the
+    // filesystem.
+    ExecIdentityGuard identity(peerCtx);
     String filePath = VFS::normalize(req.path);
     bool ok = sendFileToMac(srcMac, filePath);
     DEBUG_ESPNOWF("[FSLIST] GET transfer for reqId=%u path='%s' result=%d",

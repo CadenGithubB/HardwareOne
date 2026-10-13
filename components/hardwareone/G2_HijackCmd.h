@@ -64,10 +64,6 @@ struct G2CmdCookie {
 void     g2BumpMenuGen();
 uint32_t g2CurrentMenuGen();
 
-// Read-only accessor for the most recently assigned command sequence.
-// Useful for "latest-wins" subsystem policy in the lens applier (step 3).
-uint64_t g2CurrentCmdSeq();
-
 // Hijack-command completion callback. Receives the cookie back so the
 // implementation can apply gen/seq staleness checks before queueing UI work.
 typedef void (*G2HijackCmdCallback)(bool ok,

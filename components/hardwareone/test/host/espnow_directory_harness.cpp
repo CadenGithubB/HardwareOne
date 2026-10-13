@@ -21,6 +21,7 @@ static constexpr uint8_t ESPNOW_V4_TYPE_FS_LIST_REPLY = 123;
 
 #define ERROR_MEMORYF(...) debugStub(__VA_ARGS__)
 #define DEBUG_ESPNOWF(...) debugStub(__VA_ARGS__)
+#define WARN_ESPNOWF(...) debugStub(__VA_ARGS__)
 static bool allocationFails = false, pathAllowed = true, existenceDenied = false;
 static unsigned identityDepth = 0, allocations = 0, releases = 0;
 enum class AllocPref { PreferPSRAM };
@@ -36,25 +37,30 @@ static void releaseReply(void* allocation) {
   ++releases;
   std::free(allocation);
 }
-struct IdentityScope {
+// The handler installs the identity the requester gate returns: the bond
+// identity for the bonded peer. The SYSTEM_IDENTITY_SCOPE alias keeps older
+// handler snapshots compiling.
+struct ExecIdentityGuard {
   String previous;
-  explicit IdentityScope(const char*) : previous(auth.user) {
-    ++identityDepth; auth.user = "system";
+  explicit ExecIdentityGuard(const AuthContext& install) : previous(auth.user) {
+    ++identityDepth; auth.user = install.user;
   }
-  ~IdentityScope() { auth.user = previous; --identityDepth; }
+  ~ExecIdentityGuard() { auth.user = previous; --identityDepth; }
 };
-#define SYSTEM_IDENTITY_SCOPE(reason) IdentityScope identityScope(reason)
+static AuthContext systemIdentity(const char*) { AuthContext c; c.user = "system"; return c; }
+#define SYSTEM_IDENTITY_SCOPE(reason) ExecIdentityGuard identityScope(systemIdentity(reason))
 static bool fsRpcPathAllowed(const char*) { return pathAllowed; }
+static bool fsRpcRequesterIdentity(const uint8_t*, AuthContext& out) { out.user = "bond-admin"; return true; }
 static uint8_t getPermissions(const String& path, const AuthContext& ctx) {
-  check(fsDepth > 0 && identityDepth == 1 && ctx.user == "system",
-        "wire permission lookup remains inside FS lock with established SYSTEM identity");
+  check(fsDepth > 0 && identityDepth == 1 && ctx.user == "bond-admin",
+        "wire permission lookup remains inside FS lock with the established bond identity");
   events.push_back("perms:" + std::string(path.c_str()));
   const auto found = permissionMasks.find(path.c_str());
   return found == permissionMasks.end() ? 7 : found->second;
 }
 namespace VFS {
 static bool existsGuarded(const String& path, const AuthContext& ctx) {
-  check(identityDepth == 1 && ctx.user == "system", "existence query retains guarded SYSTEM identity");
+  check(identityDepth == 1 && ctx.user == "bond-admin", "existence query retains the guarded bond identity");
   return !existenceDenied && nodes.count(path.c_str());
 }
 }

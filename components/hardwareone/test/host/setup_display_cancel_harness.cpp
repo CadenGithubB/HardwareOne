@@ -106,15 +106,18 @@ static struct { char text[OLED_KEYBOARD_MAX_LENGTH + 1] = {}; int textLength = 0
 static bool keyboardActive, keyboardCancelled;
 static int keyboardResetCalls;
 static OLEDKeyboardDictationPolicy lastDictationPolicy;
-static void oledKeyboardInit(const char*, const char* value, int, OLEDKeyboardDictationPolicy policy) {
-  keyboardActive = true; keyboardCancelled = false; lastDictationPolicy = policy;
+static bool lastMasked;
+static std::vector<std::string> renderedTexts;  // the field buffer at each keyboard render
+static void oledKeyboardInit(const char*, const char* value, int, OLEDKeyboardDictationPolicy policy,
+                             bool masked = false) {
+  keyboardActive = true; keyboardCancelled = false; lastDictationPolicy = policy; lastMasked = masked;
   std::snprintf(gOledKeyboardState.text, sizeof(gOledKeyboardState.text), "%s", value ? value : "");
   gOledKeyboardState.textLength = static_cast<int>(std::strlen(gOledKeyboardState.text));
 }
 static bool oledKeyboardIsActive() { return keyboardActive; }
 static bool oledKeyboardIsCancelled() { return keyboardCancelled; }
 static void oledKeyboardComplete() { keyboardActive = false; }
-static void oledKeyboardDisplay(DisplayBoundary*) {}
+static void oledKeyboardDisplay(DisplayBoundary*) { renderedTexts.push_back(gOledKeyboardState.text); }
 static const char* oledKeyboardGetText() { return gOledKeyboardState.text; }
 static void oledKeyboardReset() {
   ++keyboardResetCalls; keyboardActive = keyboardCancelled = false;
@@ -225,6 +228,16 @@ static void testKeyboardCancelAndTimeout() {
   assert(!cancelled && !isWizardCancelRequested());
   assert(lastDictationPolicy == OLEDKeyboardDictationPolicy::DENY && output.empty());
   assertKeyboardReleased();
+  // The password prompt opens the keyboard masked, and its render leaves the
+  // shared buffer alone: the keyboard draws the '*', not the caller.
+  reset(); setSerialWaitTimeout(75); renderedTexts.clear(); cancelled = false;
+  assert(getOLEDTextInput("Password", true, "Kq7mZp3R", 32, &cancelled).empty() && cancelled);
+  assert(lastMasked && "a password prompt must open the keyboard masked");
+  assert(!renderedTexts.empty());
+  for (const std::string& rendered : renderedTexts) {
+    assert(rendered == "Kq7mZp3R" && "the render must not rewrite the field buffer");
+  }
+  assertKeyboardReleased();
   reset(); setSerialWaitTimeout(75); cancelled = false;
   assert(getOLEDTextInput("Password", true, "", 32, &cancelled).empty());
   assert(cancelled && isWizardCancelRequested() && nowMs == 100);
@@ -248,6 +261,7 @@ static void testKeyboardCancelAndTimeout() {
   cancelled = false;
   assert(getOLEDTextInput("Name", false, "draft", 32, &cancelled) == "draft");
   assert(!cancelled && !isWizardCancelRequested() && nowMs == 150);
+  assert(!lastMasked && "a plain prompt opens the keyboard unmasked");
   assertKeyboardReleased();
 
   reset(); requestWizardCancel(); gWizardOwnsSerial = false;

@@ -29,6 +29,7 @@ static size_t gColorPage = 0;   // paginator page for the color list
 
 // Every transition bumps the menu generation so in-flight cmd_exec redraw
 // callbacks with an older gen get dropped (same rationale as ESP-NOW's setSub).
+// The renderers call it only once the lens accepted the sub-level's rows.
 static inline void setSub(LedSub s) {
   if (gSub == s) return;
   gSub = s;
@@ -45,8 +46,9 @@ static G2CmdCookie buildCookie() {
 // -----------------------------------------------------------------------------
 // Renderers
 // -----------------------------------------------------------------------------
+// ROOT is also the page's entry level, so its publish claims the LED hijack
+// page (a no-op when already there).
 static void showRootMenu() {
-  setSub(LED_SUB_ROOT);
   // Live brightness label — static buffer because g2ShowListPage expects the
   // row pointers to stay valid until it returns (same idiom everywhere).
   static char brightRow[28];
@@ -58,27 +60,29 @@ static void showRootMenu() {
     brightRow,      // 3 — tap cycles the shared preset ladder
     "Off",          // 4 — ledclear (also cancels a running effect)
   };
-  g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+  g2ShowListPageAndPublish(items, sizeof(items) / sizeof(items[0]), [] {
+    setSub(LED_SUB_ROOT);
+    g2SetHijackPage(G2_HIJACK_PAGE_LED);
+  });
 }
 
 // Colors: "<- Back" + up to kColorsPerPage names + paginator chrome. 76 names
 // (off + colorTable) at 10/page = 8 pages.
 static constexpr size_t kColorsPerPage = 10;
 static constexpr size_t kColorRowMax   = 1 + kColorsPerPage + 2;  // back + items + prev/next
-static G2Paginator gColorPg;
+static G2Paginator gColorPg;   // window of the color rows on the lens
 
 static void showColorsMenu() {
-  setSub(LED_SUB_COLORS);
   EXT_RAM_BSS_ATTR static char rows[kColorRowMax][20];
   static const char* ptrs[kColorRowMax];
   const size_t total = 1 + (size_t)numColors;   // "off" + palette
 
-  gColorPg = g2PaginatorPrepare(total, kColorsPerPage, gColorPage);
+  G2Paginator pg = g2PaginatorPrepare(total, kColorsPerPage, gColorPage);
   size_t row = 0;
   snprintf(rows[row], sizeof(rows[row]), "<- Back");
   ptrs[row] = rows[row];
   row++;
-  for (size_t i = gColorPg.startIdx; i < gColorPg.endIdx; i++) {
+  for (size_t i = pg.startIdx; i < pg.endIdx; i++) {
     if (i == 0) {
       snprintf(rows[row], sizeof(rows[row]), "off");
     } else {
@@ -89,13 +93,15 @@ static void showColorsMenu() {
     ptrs[row] = rows[row];
     row++;
   }
-  row = g2PaginatorWriteChrome(gColorPg, gColorPage, row, kColorRowMax,
+  row = g2PaginatorWriteChrome(pg, gColorPage, row, kColorRowMax,
                                &rows[0][0], sizeof(rows[0]), ptrs);
-  g2ShowListPage(ptrs, row);
+  g2ShowListPageAndPublish(ptrs, row, [&pg] {
+    setSub(LED_SUB_COLORS);
+    gColorPg = pg;
+  });
 }
 
 static void showEffectsMenu() {
-  setSub(LED_SUB_EFFECTS);
   const char* items[2 + 8];   // back + shared names + off (headroom)
   size_t n = 0;
   items[n++] = "<- Back";
@@ -103,7 +109,7 @@ static void showEffectsMenu() {
     items[n++] = ledEffectNames[i];
   }
   items[n++] = "off";
-  g2ShowListPage(items, n);
+  g2ShowListPageAndPublish(items, n, [] { setSub(LED_SUB_EFFECTS); });
 }
 
 // -----------------------------------------------------------------------------
@@ -191,10 +197,8 @@ void g2LedHandleTap(uint32_t idx) {
 // Entry + registry stub
 // -----------------------------------------------------------------------------
 void g2ShowLedMenu() {
-  gSub = LED_SUB_ROOT;
   gColorPage = 0;
-  showRootMenu();
-  g2SetHijackPage(G2_HIJACK_PAGE_LED);
+  showRootMenu();   // claims the LED page only if the lens shows it
 }
 
 void g2BuildLedInfo(char* out, size_t cap) {

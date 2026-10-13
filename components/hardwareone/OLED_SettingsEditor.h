@@ -42,10 +42,13 @@ struct SettingsEditorContext {
   SettingsEditKind editKind;  // Active VALUE_EDIT variant
   int optionIndex;            // Pick-list cursor (index into parsed options)
   int optionCount;            // Parsed option count for the current entry
-  int optionScroll;           // Pick-list scroll offset (kept in the context —
-                              // the static-local scroll offsets elsewhere in the
-                              // editor persist across module switches, a quirk
-                              // this field deliberately avoids inheriting)
+  int optionScroll;           // Pick-list scroll offset (reset per entry)
+  // First row shown in the category list and in the current module's setting
+  // list. They live here, not in function statics, so initSettingsEditor() and
+  // entering a module start a fresh window: one module's (or the other
+  // editor's) window never carries into the next.
+  int categoryScroll;
+  int itemScroll;
 };
 
 // Global settings editor context
@@ -69,6 +72,10 @@ void settingsEditorUp();
 void settingsEditorDown();
 void settingsEditorSelect();
 void settingsEditorBack();
+
+// Show a message on the editor's error line for `durationMs` (same toast the
+// editor uses for a failed string save).
+void settingsEditorShowError(const String& message, uint32_t durationMs);
 
 // Open settings editor directly to a specific module by name
 // Returns true if module was found and editor was opened

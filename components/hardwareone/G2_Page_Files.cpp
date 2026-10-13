@@ -7,11 +7,20 @@
 // UIs or fighting over the cursor. A separate instance is cheap (~couple KB)
 // and decouples the two paths cleanly.
 //
-// File-metadata overlay: when the user taps a file, we replace the list
-// briefly with a multi-line text page (name, size, type). After
-// kFileInfoOverlayMs the tick handler swaps back to the list. We can't get a
-// "list still showing" signal from the lens, so we fudge it with a millis()
-// timer that ticks from g2FilesTick().
+// File-metadata overlay: Info replaces the list briefly with metadata rows
+// (name, size, type). We can't get a "list still showing" signal from the
+// lens, so the centralized lens overlay clock (g2Tick) times it: after
+// kFileInfoOverlayMs filesOverlayExpired queues a list redraw.
+//
+// TASKS / LOCKING
+// ---------------
+// Taps, the rename keyboard and the text pager run on g2_tap_disp; queued
+// redraws run on the lens applier (g2_page_swap_w); the g2files CLI summary
+// runs on cmd_exec_task. All of them take the Files page lock (FilesPageLock)
+// before touching gFilesFm, the row buffers or the page/mode state. The
+// rename/delete completion (cmd_exec_task), the overlay expiry (main loop) and
+// the image viewers' onDone (session worker) never take it and never draw:
+// they publish under gFilesRedrawMux and queue a menuGen-fenced redraw.
 //
 // IDENTITY / CACHE INVALIDATION
 // -----------------------------
@@ -36,6 +45,7 @@
 #include "G2_Page_Common.h"      // TextPager + paging ops (shared text viewer)
 #include "G2_HijackCmd.h"        // G2HijackCtxGuard — installs pairedByUser identity
 #include "G2_Page_TextEntry.h"   // on-lens keyboard for Rename
+#include "FileBrowser_FileKind.h"  // file classifier shared with the OLED browser
 #include "System_FileManager.h"
 #include "System_Filesystem.h"
 #include "System_VFS.h"          // internal / SD capacity + mount state
@@ -57,6 +67,30 @@
 
 static FileManager* gFilesFm = nullptr;
 
+// Files page lock (see TASKS / LOCKING above). Recursive because public
+// entries nest (a tap redraws the list). While holding it a task waits only on
+// tasks that never take it (FS lock, session worker, lens BLE exchanges); the
+// one wait that can involve the lens applier, a full lens queue, gives up
+// after 50 ms. Created at static init like G2_Health's series mutex.
+static StaticSemaphore_t gFilesLockStorage;
+static SemaphoreHandle_t gFilesLock =
+    xSemaphoreCreateRecursiveMutexStatic(&gFilesLockStorage);
+
+class FilesPageLock {
+ public:
+  FilesPageLock()
+      : held_(gFilesLock &&
+              xSemaphoreTakeRecursive(gFilesLock, portMAX_DELAY) == pdTRUE) {}
+  ~FilesPageLock() {
+    if (held_) xSemaphoreGiveRecursive(gFilesLock);
+  }
+  FilesPageLock(const FilesPageLock&) = delete;
+  FilesPageLock& operator=(const FilesPageLock&) = delete;
+
+ private:
+  bool held_;
+};
+
 // Paginated directory view. The lens can NOT render a whole big directory
 // as one list: the compound CREATE payload caps at 1 KB (~20 filename rows
 // before g2BuildCreateMixedListTextPb runs out of buffer and the page
@@ -75,9 +109,9 @@ static FileManager* gFilesFm = nullptr;
 // the same top-left position as you browse (/photos vs /sd, etc.).
 static constexpr size_t kFilesMinRenderRows = 8;
 
-// Row buffers in PSRAM — ~1 KB total. Filled/read by the serialized lens and
-// tap-dispatch work paths; never by the BLE callback. Regular task context
-// only, with no DMA / ISR access.
+// Row buffers in PSRAM — ~1 KB total. Filled and read only under the Files
+// page lock (taps, lens-applier redraws); never by the BLE callback. Regular
+// task context only, with no DMA / ISR access.
 EXT_RAM_BSS_ATTR static char        gFilesRows[FILES_MAX_ROWS][FILES_ROW_LEN];
 EXT_RAM_BSS_ATTR static const char* gFilesRowPtrs[FILES_MAX_ROWS];
 // Path is shown in the right-hand TextObject (not a list row). Keep its own
@@ -116,12 +150,11 @@ EXT_RAM_BSS_ATTR static int  gFilesEntryForRow[FILES_MAX_ROWS];
 // file list.
 static const uint32_t kFileInfoOverlayMs = 2200;
 
-// File-action chooser state. When the user taps a BMP file we show a
-// 3-row list (<- Files / View / Info) so they can pick whether to
-// render the image on the lens or look at metadata. Non-BMP files
-// route directly to the metadata page (no chooser). Active flag
-// gates the tap dispatcher; the cached entry lets View/Info reuse
-// the entry the user picked without a re-lookup.
+// File-action chooser state. When the user taps a file we show the
+// chooser for its kind (filesChooserKindFor): view rows for previewable
+// types, then Info / Rename / Delete. Active flag gates the tap
+// dispatcher; the cached entry lets View/Info reuse the entry the user
+// picked without a re-lookup.
 static bool      gFilesChooserActive = false;
 static FileEntry gFilesChooserEntry  = {};
 enum FilesChooserKind : uint8_t {
@@ -131,15 +164,22 @@ enum FilesChooserKind : uint8_t {
                           //  Full dispatch through g2ShowJpgFile path
                           //  (decode JPEG → 4-bpp BMP, then same wire
                           //   transport as the BMP viewers).
-  FILE_CHOOSER_TEXT = 3,  // .txt / .csv — one raw paged view + Info (no
-                          //  pretty-parse). Shares the JSON viewer's engine
-                          //  (readTextLimited → wrap → TextPager).
+  FILE_CHOOSER_TEXT = 3,  // text (.txt, .csv, .log, .md, ...) — one raw
+                          //  paged view + Info (no pretty-parse). Shares the
+                          //  JSON viewer's engine (readTextLimited → wrap →
+                          //  TextPager).
   FILE_CHOOSER_OTHER = 4, // any other file type — no viewer, but Info /
                           //  Rename / Delete must still be reachable (the old
                           //  direct-to-info-overlay path made mutation
                           //  impossible for most file types).
 };
 static FilesChooserKind gFilesChooserKind = FILE_CHOOSER_BMP;
+
+// Info rows are on the lens: set when the lens accepted them, cleared when a
+// list render is accepted. The overlay clock only schedules the list redraw;
+// until that list is up (or if it is refused) the info rows keep their
+// meaning — "<- Files" returns to the list, the rest are read-only.
+static bool gFilesInfoActive = false;
 
 // Per-row action table for the chooser. showFileChooser fills rows[] and
 // this table in ONE place so render and dispatch can never drift — the old
@@ -167,7 +207,6 @@ EXT_RAM_BSS_ATTR static char gFilesActionPath[FILE_MANAGER_MAX_PATH + 32];
 static char gFilesActionName[FILE_MANAGER_MAX_NAME];
 static bool gFilesConfirmActive = false;   // delete-confirm list is up
 static char gFilesConfirmRow[FILE_MANAGER_MAX_NAME + 12];
-EXT_RAM_BSS_ATTR static char gFilesMutateMsg[112];          // result banner text
 
 // Capacity calls use VFS's shared, opt-in presentation snapshots.
 // LittleFS.usedBytes() walks the filesystem, so doing it on every quick folder
@@ -187,6 +226,23 @@ struct FilesStorageSnapshot {
   uint64_t sdFree;
 };
 static constexpr uint32_t kFilesStorageTtlMs = 10000;
+
+// Pending redraws. The rename/delete completion, the overlay expiry and the
+// image viewers' onDone run on tasks that must not draw or wait on the Files
+// page lock; they only write this state and queue a Redraw that the lens
+// applier runs. A result or list request is consumed only while its menuGen is
+// still current. `rescan` survives a dropped result: the next list render
+// re-reads the directory and capacity after any successful mutation.
+static portMUX_TYPE gFilesRedrawMux = portMUX_INITIALIZER_UNLOCKED;
+struct FilesRedrawState {
+  bool     resultReady;
+  bool     rescan;
+  bool     listPending;
+  uint32_t resultMenuGen;
+  uint32_t listMenuGen;
+  char     resultMessage[FILES_ROW_LEN];  // shown in the list's back row
+};
+EXT_RAM_BSS_ATTR static FilesRedrawState gFilesRedraw;
 
 // Paged text viewer (JSON pretty/raw, .txt, .csv). Shares the TextPager
 // engine in G2_Page_Common.h with Settings JSON + ESPNow chat: one flat PSRAM
@@ -213,6 +269,8 @@ static TextPager gFilesPager = {
 // -----------------------------------------------------------------------------
 
 static void filesOverlayExpired(G2OverlayKind kind);  // forward decl
+static void showFilesList(const char* backResult);
+static void filesQueueListRedraw();
 static void exitTextViewBackToFiles();
 static void filesTextNav(G2TapKind kind);
 static bool filesRenderTextPage();
@@ -469,8 +527,8 @@ static size_t buildRows() {
       if (entry.childCount >= 99) snprintf(badge, sizeof(badge), "[99+]");
       else                        snprintf(badge, sizeof(badge), "[%u]", (unsigned)entry.childCount);
       char nm[FILES_ROW_LEN];
-      // Reserve "/ " (2) + " " (1) + badge for the name column.
-      const int reserve = 3 + (int)strlen(badge);
+      // Reserve "/ " (2) + " " (1) + badge + NUL (1) for the name column.
+      const int reserve = 4 + (int)strlen(badge);
       truncateInto(nm, sizeof(nm), entry.name, FILES_ROW_LEN - reserve);
       snprintf(gFilesRows[row], FILES_ROW_LEN, "/ %s %s", nm, badge);
     } else {
@@ -529,148 +587,108 @@ static size_t buildRows() {
 // File metadata overlay
 // -----------------------------------------------------------------------------
 
-// Case-insensitive ".bmp" suffix check. We only want the chooser path
-// for files we can actually preview — anything else falls through to
-// the existing metadata-only flow.
-static bool isBmpFilename(const char* name) {
-  if (!name) return false;
-  size_t n = strlen(name);
-  if (n < 4) return false;
-  const char* ext = name + n - 4;
-  return (ext[0] == '.') &&
-         (ext[1] == 'b' || ext[1] == 'B') &&
-         (ext[2] == 'm' || ext[2] == 'M') &&
-         (ext[3] == 'p' || ext[3] == 'P');
-}
-
-// Same shape for ".jpg" and ".jpeg". Both extensions accepted because
-// the camera-stream snapshot writes ".jpg" but a user might drop
-// either form on the SD card. Routes through the same View / View
-// Full chooser as BMP since the on-lens experience is identical
-// (g2ShowJpgFile / g2ShowJpgFileFullScreen do the JPEG → 4-bpp BMP
-// conversion before pushing through the same wire transport).
-static bool isJpgFilename(const char* name) {
-  if (!name) return false;
-  size_t n = strlen(name);
-  // ".jpg" — 4 chars
-  if (n >= 4) {
-    const char* ext = name + n - 4;
-    if ((ext[0] == '.') &&
-        (ext[1] == 'j' || ext[1] == 'J') &&
-        (ext[2] == 'p' || ext[2] == 'P') &&
-        (ext[3] == 'g' || ext[3] == 'G')) {
-      return true;
-    }
+// Chooser kind for a tapped file, from the classifier the OLED browser shares
+// (FileBrowser_FileKind.h). BMP and JPEG get View / View Full (JPEG is decoded
+// to a 4-bpp BMP before the same wire transport), JSON gets Pretty / JSON
+// View, text (.txt, .csv, .log, .md, ...) gets the raw paged view: a quick peek
+// whose rows soft-wrap at the lens width (no aligned-table mode; the web UI has
+// that). Everything else gets Info / Rename / Delete only.
+static FilesChooserKind filesChooserKindFor(const char* name) {
+  switch (fileKindForName(name)) {
+    case FileKind::ImageBmp:  return FILE_CHOOSER_BMP;
+    case FileKind::ImageJpeg: return FILE_CHOOSER_JPG;
+    case FileKind::Json:      return FILE_CHOOSER_JSON;
+    case FileKind::Text:      return FILE_CHOOSER_TEXT;
+    case FileKind::Other:     break;
   }
-  // ".jpeg" — 5 chars
-  if (n >= 5) {
-    const char* ext = name + n - 5;
-    if ((ext[0] == '.') &&
-        (ext[1] == 'j' || ext[1] == 'J') &&
-        (ext[2] == 'p' || ext[2] == 'P') &&
-        (ext[3] == 'e' || ext[3] == 'E') &&
-        (ext[4] == 'g' || ext[4] == 'G')) {
-      return true;
-    }
-  }
-  return false;
+  return FILE_CHOOSER_OTHER;
 }
 
-static bool isJsonFilename(const char* name) {
-  if (!name) return false;
-  size_t n = strlen(name);
-  if (n < 5) return false;
-  const char* ext = name + n - 5;
-  return (ext[0] == '.') &&
-         (ext[1] == 'j' || ext[1] == 'J') &&
-         (ext[2] == 's' || ext[2] == 'S') &&
-         (ext[3] == 'o' || ext[3] == 'O') &&
-         (ext[4] == 'n' || ext[4] == 'N');
-}
-
-// ".txt" — routed to the raw paged-text viewer (no pretty-parse).
-static bool isTxtFilename(const char* name) {
-  if (!name) return false;
-  size_t n = strlen(name);
-  if (n < 4) return false;
-  const char* ext = name + n - 4;
-  return (ext[0] == '.') &&
-         (ext[1] == 't' || ext[1] == 'T') &&
-         (ext[2] == 'x' || ext[2] == 'X') &&
-         (ext[3] == 't' || ext[3] == 'T');
-}
-
-// ".csv" — same raw paged-text viewer. On-lens is a quick peek: rows soft-wrap
-// at the lens column width; there is deliberately no aligned-table mode (the
-// firmware collapses runs of spaces and only ~48 chars fit per line). Full
-// tabular analysis lives in the web UI.
-static bool isCsvFilename(const char* name) {
-  if (!name) return false;
-  size_t n = strlen(name);
-  if (n < 4) return false;
-  const char* ext = name + n - 4;
-  return (ext[0] == '.') &&
-         (ext[1] == 'c' || ext[1] == 'C') &&
-         (ext[2] == 's' || ext[2] == 'S') &&
-         (ext[3] == 'v' || ext[3] == 'V');
-}
-
-// Build an absolute VFS path for the cached chooser entry. Joins the
-// FileManager's current directory with the entry name, collapsing the
-// duplicate slash when the dir is "/".
-static void buildChooserPath(char* out, size_t cap) {
-  if (!out || cap == 0) return;
+// Absolute VFS path of the chooser entry. The file tap selected the entry in
+// FileManager (as folder taps do for navigateInto), and nothing moves the
+// selection while the chooser is up; FileManager resolves the selection's
+// full path (FileEntry.name is a display copy cut at 63 bytes). Returns false,
+// with `out` empty, when the entry cannot be resolved or its path does not fit
+// `cap`; callers then refuse the action.
+static bool buildChooserPath(char* out, size_t cap) {
+  if (!out || cap == 0) return false;
   out[0] = '\0';
   FileManager* fm = ensureFm();
-  if (!fm) return;
-  const char* dir = fm->getCurrentPath();
-  if (!dir || !*dir) dir = "/";
-  if (dir[0] == '/' && dir[1] == '\0') {
-    snprintf(out, cap, "/%s", gFilesChooserEntry.name);
-  } else {
-    snprintf(out, cap, "%s/%s", dir, gFilesChooserEntry.name);
-  }
+  if (!fm) return false;
+  String path;
+  if (!fm->getSelectedPath(path) || path.length() >= cap) return false;
+  memcpy(out, path.c_str(), path.length() + 1);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
 // Rename / Delete flows. Both dispatch the REAL commands through cmd_exec
-// (auth + [CMD] audit as the paired user — deliberately stricter than the
-// OLED's direct-FileManager ops): `filerename "<old>" "<new>"` and the
+// (auth + [CMD] audit as the paired user; the OLED browser submits the same
+// admin-only commands): `filerename "<old>" "<new>"` and the
 // ONE-SHOT `filedelete "<path>" confirm` (the bare form arms an interactive
 // CLI confirm no tap UI can answer). /system config stays protected below
 // us at the VFS layer.
 // ---------------------------------------------------------------------------
 
-// Completion on cmd_exec_task. The Power page proves direct lens draws +
-// vTaskDelay are accepted practice here (onPowerCmdDone precedent). Success
-// forces a directory re-scan — FileManager::refresh() is generation-gated
-// and would keep showing the deleted/old name.
+// Lens applier: draw the list with the published result in its back row.
+// The result is consumed only if its submit menuGen is still current.
+static void renderFilesResult() {
+  FilesPageLock lock;
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_FILES) return;
+  char message[FILES_ROW_LEN];
+  bool ready = false;
+  portENTER_CRITICAL(&gFilesRedrawMux);
+  if (gFilesRedraw.resultReady &&
+      gFilesRedraw.resultMenuGen == g2CurrentMenuGen()) {
+    memcpy(message, gFilesRedraw.resultMessage, sizeof(message));
+    gFilesRedraw.resultReady = false;
+    ready = true;
+  }
+  portEXIT_CRITICAL(&gFilesRedrawMux);
+  if (ready) showFilesList(message);
+}
+
+// Completion on cmd_exec_task: copy the result and queue a redraw with the
+// submit cookie (G2HijackCmd.h contract — no lens, FileManager or Files page
+// lock here). The lens applier drops the redraw if the user navigated since
+// the submit. Success marks a forced re-scan for the next list render —
+// FileManager::refresh() is generation-gated and would keep showing the
+// deleted/old name.
 static void onFilesMutateDone(bool ok, const char* result,
-                              const G2CmdCookie& /*cookie*/, void* /*userData*/) {
+                              const G2CmdCookie& cookie, void* /*userData*/) {
   // executeCommand reports ok=true even for handler "Error: ..." strings —
   // judge by the result prefix, not the flag.
   const bool success = ok && result && strncmp(result, "OK", 2) == 0;
   const char* msg = (result && result[0]) ? result : (ok ? "Done" : "Failed");
-  if (strncmp(msg, "OK: ", 4) == 0) msg += 4;  // banner brevity
-  strncpy(gFilesMutateMsg, msg, sizeof(gFilesMutateMsg) - 1);
-  gFilesMutateMsg[sizeof(gFilesMutateMsg) - 1] = '\0';
+  if (strncmp(msg, "OK: ", 4) == 0) msg += 4;  // back-row brevity
+  char copy[FILES_ROW_LEN];
+  snprintf(copy, sizeof(copy), "%s", msg);
   DEBUG_G2F("[G2] Files: mutate done ok=%d success=%d '%s'",
-            (int)ok, (int)success, gFilesMutateMsg);
+            (int)ok, (int)success, msg);
 
-  if (g2GetHijackPage() != G2_HIJACK_PAGE_FILES) return;  // user navigated away
-
-  g2ShowText(gFilesMutateMsg);
-  vTaskDelay(pdMS_TO_TICKS(1300));
-  if (success) {
-    FileManager* fm = ensureFm();
-    if (fm) fm->forceRescan();
-    invalidateFilesStorageSnapshot();
+  bool published = false;
+  portENTER_CRITICAL(&gFilesRedrawMux);
+  if (success) gFilesRedraw.rescan = true;
+  if (g2GetHijackPage() == G2_HIJACK_PAGE_FILES &&
+      cookie.menuGen == g2CurrentMenuGen()) {
+    gFilesRedraw.resultMenuGen = cookie.menuGen;
+    memcpy(gFilesRedraw.resultMessage, copy, sizeof(copy));
+    gFilesRedraw.resultReady = true;
+    published = true;
   }
-  if (g2GetHijackPage() == G2_HIJACK_PAGE_FILES) g2ShowFilesMenu();
+  portEXIT_CRITICAL(&gFilesRedrawMux);
+  if (!published) return;  // user navigated away
+  if (!g2EnqueueRedraw(cookie, renderFilesResult, "Files result")) {
+    portENTER_CRITICAL(&gFilesRedrawMux);
+    if (gFilesRedraw.resultMenuGen == cookie.menuGen)
+      gFilesRedraw.resultReady = false;
+    portEXIT_CRITICAL(&gFilesRedrawMux);
+  }
 }
 
 static void filesSubmitMutate(const char* line) {
   G2CmdCookie cookie{};
+  cookie.menuGen    = g2CurrentMenuGen();
   cookie.targetPage = g2GetHijackPage();
   if (!g2SubmitHijackCommand(line, cookie, onFilesMutateDone, nullptr)) {
     DEBUG_G2F("[G2] Files: mutate submit FAILED — no inline fallback");
@@ -681,6 +699,7 @@ static void filesSubmitMutate(const char* line) {
 // Keyboard callbacks run on g2_tap_disp — String build + submit only; the
 // list redraw on cancel is cache-hot, no FS scan.
 static void filesRenameCommit(const char* text) {
+  FilesPageLock lock;
   if (!text || text[0] == '\0' || strcmp(text, gFilesActionName) == 0) {
     DEBUG_G2F("[G2] Files: rename empty/unchanged — cancelled");
     g2ShowFilesMenu();
@@ -696,13 +715,21 @@ static void filesRenameCancel() {
 }
 
 // Delete confirm — Power-page two-level pattern: Cancel row, inert
-// "Delete <name>?" header, explicit Confirm row.
+// "Delete <name>?" header, explicit Confirm row. Called while the chooser is
+// up; the confirm replaces it only once the lens accepted the confirm rows,
+// so a refused render leaves the chooser rows with their chooser meaning.
 static void showDeleteConfirm() {
-  gFilesConfirmActive = true;
   snprintf(gFilesConfirmRow, sizeof(gFilesConfirmRow), "Delete %.56s?", gFilesActionName);
   const char* rows[] = { "<- Cancel", gFilesConfirmRow, "Confirm Delete" };
-  g2ShowListPage(rows, 3);
+  const bool shown = g2ShowListPageAndPublish(rows, 3, [] {
+    gFilesChooserActive = false;
+    gFilesConfirmActive = true;
+  });
   g2LensClearOverlay();
+  if (!shown) {
+    DEBUG_G2F("[G2] Files: delete confirm not shown — chooser stays");
+    return;
+  }
   DEBUG_G2F("[G2] Files: delete confirm for '%s'", gFilesActionPath);
 }
 
@@ -715,21 +742,19 @@ static void showDeleteConfirm() {
 // "View Full" — same source upscaled 2× to 576×288 via 4-tile push.
 // "Info"      — metadata page (name / size / type).
 static void showFileChooser(const FileEntry& e, FilesChooserKind kind) {
-  gFilesChooserEntry  = e;
-  gFilesChooserActive = true;
-  gFilesChooserKind   = kind;
-
   static char title[FILES_ROW_LEN];
   snprintf(title, sizeof(title), "%s", e.name);
 
-  // Build rows + the action table in lockstep (see FilesAction).
+  // Build rows + the action table in lockstep (see FilesAction). The table,
+  // entry and kind become the chooser's only once the lens accepted the rows.
   static const char* rows[FILES_CHOOSER_MAX_ROWS];
-  gFilesChooserRowN = 0;
+  FilesAction acts[FILES_CHOOSER_MAX_ROWS];
+  uint8_t rowN = 0;
   auto add = [&](const char* label, FilesAction act) {
-    if (gFilesChooserRowN < FILES_CHOOSER_MAX_ROWS) {
-      rows[gFilesChooserRowN] = label;
-      gFilesChooserAct[gFilesChooserRowN] = act;
-      gFilesChooserRowN++;
+    if (rowN < FILES_CHOOSER_MAX_ROWS) {
+      rows[rowN] = label;
+      acts[rowN] = act;
+      rowN++;
     }
   };
   add("<- Files", FACT_BACK);
@@ -747,10 +772,20 @@ static void showFileChooser(const FileEntry& e, FilesChooserKind kind) {
   add("Info",   FACT_INFO);
   add("Rename", FACT_RENAME);
   add("Delete", FACT_DELETE);
-  g2ShowListPage(rows, gFilesChooserRowN);
+  const bool shown = g2ShowListPageAndPublish(rows, rowN, [&] {
+    gFilesChooserEntry  = e;
+    gFilesChooserKind   = kind;
+    memcpy(gFilesChooserAct, acts, rowN * sizeof(acts[0]));
+    gFilesChooserRowN   = rowN;
+    gFilesChooserActive = true;
+  });
 
   // No overlay — chooser is a deliberate stop, not a flash.
   g2LensClearOverlay();
+  if (!shown) {
+    DEBUG_G2F("[G2] Files: chooser for '%s' not shown", e.name);
+    return;
+  }
   DEBUG_G2F("[G2] Files: chooser shown for '%s' (kind=%d, %u rows)",
             e.name, (int)kind, (unsigned)gFilesChooserRowN);
 }
@@ -774,12 +809,14 @@ static bool filesRenderTextPage() {
 // tap/scroll page navigation. NEXT (tap / scroll-down) advances; PREV
 // (scroll-up) goes back; both wrap. Re-renders after moving.
 static void filesTextNav(G2TapKind kind) {
+  FilesPageLock lock;
   const int oldPage = gFilesPager.curPage;
   textNavPage(gFilesPager, kind != G2_TAP_PAGE_PREV);
   if (!filesRenderTextPage()) gFilesPager.curPage = oldPage;
 }
 
 static void exitTextViewBackToFiles() {
+  FilesPageLock lock;
   gFilesPager.pageCount = 0;
   gFilesPager.curPage   = 0;
   gFilesPager.truncated = false;
@@ -828,8 +865,10 @@ static bool showTextFileViaWidget(bool pretty) {
   G2HijackCtxGuard ctxGuard;
 
   char path[FILE_MANAGER_MAX_PATH + 32];
-  buildChooserPath(path, sizeof(path));
-  if (!path[0]) return false;
+  if (!buildChooserPath(path, sizeof(path))) {
+    DEBUG_G2F("[G2] Files text: chooser path unavailable");
+    return false;
+  }
 
   if (!canRead(String(path), currentAuthContext())) {
     DEBUG_G2F("[G2] Files text: blocked by canRead '%s'", path);
@@ -918,13 +957,13 @@ static void showFileInfo(const FileEntry& e) {
   // Sealed capture? One 7-byte guarded peek. The info overlay is where the
   // encrypted-at-rest mark lives on the lens — the directory listing stays
   // sniff-free (a per-entry open would drag on 256-file capture folders).
+  // Without a resolvable path the sniff is skipped; the rows still show.
   bool sealedFile = false;
   if (!e.isFolder) {
     G2HijackCtxGuard ctxGuard;
     char p[FILE_MANAGER_MAX_PATH + 32];
-    buildChooserPath(p, sizeof(p));
     String head;
-    if (p[0] && canRead(String(p), currentAuthContext()) &&
+    if (buildChooserPath(p, sizeof(p)) && canRead(String(p), currentAuthContext()) &&
         readTextLimited(p, head, sizeof(CAPCRYPT_MAGIC_PREFIX) - 1)) {
       sealedFile = captureCryptoIsMagicLine(head.c_str());
     }
@@ -947,12 +986,21 @@ static void showFileInfo(const FileEntry& e) {
   rows[1] = nameRow;
   rows[2] = sizeRow;
   rows[3] = typeRow;
-  g2ShowListPage(rows, 4);
   // Deliberately do NOT change the hijack page — leave it as FILES so a
   // tap on idx=0 routes through g2FilesHandleTap and goes back to the
   // file list. The lens overlay tracker handles auto-dismiss; the
-  // expired callback (filesOverlayExpired) redraws the file list.
-  g2LensStartOverlay(G2_OVERLAY_FILE_INFO, kFileInfoOverlayMs);
+  // expired callback (filesOverlayExpired) queues the file-list redraw. The
+  // info mode and overlay replace the chooser only once the lens accepted
+  // these rows.
+  if (!g2ShowListPageAndPublish(rows, 4, [] {
+        gFilesChooserActive = false;
+        gFilesInfoActive    = true;
+        g2LensStartOverlay(G2_OVERLAY_FILE_INFO, kFileInfoOverlayMs);
+      })) {
+    DEBUG_G2F("[G2] Files: file-info overlay for '%s' not shown — chooser stays",
+              e.name);
+    return;
+  }
   DEBUG_G2F("[G2] Files: file-info overlay for '%s' (%u B, %s)",
             e.name, (unsigned)sz, ext);
 }
@@ -964,6 +1012,7 @@ static void showFileInfo(const FileEntry& e) {
 void g2BuildFilesInfo(char* out, size_t cap) {
   if (!out || cap == 0) return;
   out[0] = '\0';
+  FilesPageLock lock;  // g2files CLI on cmd_exec_task shares gFilesFm
 
   String s;
   s.reserve(384);
@@ -999,20 +1048,19 @@ void g2BuildFilesInfo(char* out, size_t cap) {
   out[cap - 1] = '\0';
 }
 
-bool g2ShowFilesPage() {
-  char buf[400];
-  g2BuildFilesInfo(buf, sizeof(buf));
-  DEBUG_G2F("[G2] Files page (%u B):\n%s", (unsigned)strlen(buf), buf);
-  return g2ShowText(buf);
-}
-
-void g2ShowFilesMenu() {
+// The directory list; `backResult` (a rename/delete result) replaces the
+// back-row label for this render only. Callers hold the Files page lock.
+static void showFilesList(const char* backResult) {
   // Run all FS work under the paired-by user's identity. Without this guard
   // the task's TLS identity stays at ANON (the safe default) and
   // FileManager::navigate() denies every read.
   G2HijackCtxGuard ctxGuard;
   const bool enteringFiles =
       g2GetHijackPage() != G2_HIJACK_PAGE_FILES;
+  portENTER_CRITICAL(&gFilesRedrawMux);
+  const bool mutated = gFilesRedraw.rescan;
+  gFilesRedraw.rescan = false;
+  portEXIT_CRITICAL(&gFilesRedrawMux);
 
   // Directory cache policy for the per-boot FileManager singleton:
   //
@@ -1022,7 +1070,10 @@ void g2ShowFilesMenu() {
   //     files written by sensorlog / web / CLI while the user was away.
   //     Selection is preserved by loadDirectory().
   //
-  //   • Already on Files (overlay dismiss, viewer callback, folder
+  //   • After a successful lens rename/delete: forceRescan() too, and the
+  //     capacity snapshots are invalidated.
+  //
+  //   • Otherwise already on Files (overlay dismiss, viewer callback, folder
   //     navigate which already loaded): refresh() only. That covers the
   //     ANON-first-tap → later-paired empty-cache case without paying
   //     the full VFS permission walk on every in-page redraw.
@@ -1030,10 +1081,13 @@ void g2ShowFilesMenu() {
     if (enteringFiles) {
       fmRefresh->forceRescan();
       gFilesPage = 0;  // re-entry from outside → start at the first page
+    } else if (mutated) {
+      fmRefresh->forceRescan();
     } else {
       fmRefresh->refresh();
     }
   }
+  if (mutated) invalidateFilesStorageSnapshot();
 
   // Whenever the real file list comes back up, the chooser and the
   // delete-confirm are unconditionally gone — covers the View/Info → Back
@@ -1042,6 +1096,10 @@ void g2ShowFilesMenu() {
   gFilesChooserActive = false;
   gFilesConfirmActive = false;
   size_t n = buildRows();
+  if (backResult && backResult[0]) {
+    snprintf(gFilesRows[0], FILES_ROW_LEN, "<- %.*s",
+             (int)(FILES_ROW_LEN - 4), backResult);
+  }
   const char* path = "/";
   FileManager* fmMenu = ensureFm();
   if (fmMenu) path = fmMenu->getCurrentPath();
@@ -1051,6 +1109,11 @@ void g2ShowFilesMenu() {
       "filesSidebar", gFilesSidebarBuf, 99, kFilesSidebarGeom, false };
 
   if (g2ShowMixedListText(gFilesRowPtrs, n, kFilesListGeom, sidebar)) {
+    // The info rows are gone and a queued list redraw is now redundant.
+    gFilesInfoActive = false;
+    portENTER_CRITICAL(&gFilesRedrawMux);
+    gFilesRedraw.listPending = false;
+    portEXIT_CRITICAL(&gFilesRedrawMux);
     g2SetHijackPage(G2_HIJACK_PAGE_FILES);
     DEBUG_G2F("[G2] Files menu shown (list+storage/path, rows=%u)",
               (unsigned)n);
@@ -1061,7 +1124,46 @@ void g2ShowFilesMenu() {
   g2LensClearOverlay();
 }
 
+void g2ShowFilesMenu() {
+  FilesPageLock lock;
+  showFilesList(nullptr);
+}
+
+// Lens applier: redraw the list for a pending overlay-expiry / viewer-return
+// request. Its menuGen is rechecked under the lock: a tap that opened the
+// rename keyboard while this job waited for the lock has bumped it.
+static void renderFilesListIfCurrent() {
+  FilesPageLock lock;
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_FILES) return;
+  bool pending = false;
+  portENTER_CRITICAL(&gFilesRedrawMux);
+  if (gFilesRedraw.listPending &&
+      gFilesRedraw.listMenuGen == g2CurrentMenuGen()) {
+    gFilesRedraw.listPending = false;
+    pending = true;
+  }
+  portEXIT_CRITICAL(&gFilesRedrawMux);
+  if (pending) showFilesList(nullptr);
+}
+
+// Overlay expiry (main loop) and the image viewers' onDone (session worker)
+// queue the list redraw on the lens applier instead of drawing on their own
+// task. The current menuGen fences it: navigation before it runs drops it.
+static void filesQueueListRedraw() {
+  G2CmdCookie cookie{};
+  cookie.menuGen    = g2CurrentMenuGen();
+  cookie.targetPage = G2_HIJACK_PAGE_FILES;
+  portENTER_CRITICAL(&gFilesRedrawMux);
+  gFilesRedraw.listPending = true;
+  gFilesRedraw.listMenuGen = cookie.menuGen;
+  portEXIT_CRITICAL(&gFilesRedrawMux);
+  if (!g2EnqueueRedraw(cookie, renderFilesListIfCurrent, "Files list")) {
+    DEBUG_G2F("[G2] Files: list redraw not queued");
+  }
+}
+
 void g2FilesHandleTap(uint32_t idx) {
+  FilesPageLock lock;
   // Same guard as g2ShowFilesMenu — every tap may navigate, view a
   // file, or invoke the JSON viewer, all of which hit guarded VFS.
   G2HijackCtxGuard ctxGuard;
@@ -1114,12 +1216,13 @@ void g2FilesHandleTap(uint32_t idx) {
           // View -> push at native 288×144. BMP path uses the file bytes
           // directly; JPG decodes via the shared JPEG HAL then shares the transport.
           char path[FILE_MANAGER_MAX_PATH + 32];
-          buildChooserPath(path, sizeof(path));
+          const bool resolved = buildChooserPath(path, sizeof(path));
           const bool isJpg = (gFilesChooserKind == FILE_CHOOSER_JPG);
           gFilesChooserActive = false;
           DEBUG_G2F("[G2] Files: chooser View -> '%s' (%s)", path, isJpg ? "JPG" : "BMP");
-          const bool ok = isJpg ? g2ShowJpgFile(path, &g2ShowFilesMenu)
-                                : g2ShowBmpFile(path, &g2ShowFilesMenu);
+          const bool ok = resolved &&
+                          (isJpg ? g2ShowJpgFile(path, &filesQueueListRedraw)
+                                 : g2ShowBmpFile(path, &filesQueueListRedraw));
           if (!ok) g2ShowFilesMenu();
         } else {
           // TEXT = raw paged view; JSON's "Pretty View" = pretty-parsed.
@@ -1134,12 +1237,13 @@ void g2FilesHandleTap(uint32_t idx) {
       case FACT_VIEW_FULL: {
         // View Full -> 2× upscale to 576×288 via 4-tile push.
         char path[FILE_MANAGER_MAX_PATH + 32];
-        buildChooserPath(path, sizeof(path));
+        const bool resolved = buildChooserPath(path, sizeof(path));
         const bool isJpg = (gFilesChooserKind == FILE_CHOOSER_JPG);
         gFilesChooserActive = false;
         DEBUG_G2F("[G2] Files: chooser View Full -> '%s' (%s)", path, isJpg ? "JPG" : "BMP");
-        const bool ok = isJpg ? g2ShowJpgFileFullScreen(path, &g2ShowFilesMenu)
-                              : g2ShowBmpFileFullScreen(path, &g2ShowFilesMenu);
+        const bool ok = resolved &&
+                        (isJpg ? g2ShowJpgFileFullScreen(path, &filesQueueListRedraw)
+                               : g2ShowBmpFileFullScreen(path, &filesQueueListRedraw));
         if (!ok) g2ShowFilesMenu();
         return;
       }
@@ -1151,18 +1255,21 @@ void g2FilesHandleTap(uint32_t idx) {
         return;
 
       case FACT_INFO:
-        gFilesChooserActive = false;
         DEBUG_G2F("[G2] Files: chooser Info → '%s'", cached.name);
-        showFileInfo(cached);
+        showFileInfo(cached);   // closes the chooser once the info rows are shown
         return;
 
       case FACT_RENAME: {
         // Snapshot the target NOW — the chooser slot is cleared by list
         // redraws and the keyboard doesn't block the scan worker.
-        buildChooserPath(gFilesActionPath, sizeof(gFilesActionPath));
+        const bool resolved = buildChooserPath(gFilesActionPath, sizeof(gFilesActionPath));
         strncpy(gFilesActionName, cached.name, sizeof(gFilesActionName) - 1);
         gFilesActionName[sizeof(gFilesActionName) - 1] = '\0';
         gFilesChooserActive = false;
+        if (!resolved) {
+          g2ShowTextAsList("File path unavailable - rename on web", "<- Back");
+          return;
+        }
         if (strchr(gFilesActionPath, '"')) {
           // CommandArgs has no escapes — an embedded quote breaks the line.
           g2ShowTextAsList("Name has a quote char - rename on web", "<- Back");
@@ -1188,26 +1295,31 @@ void g2FilesHandleTap(uint32_t idx) {
       }
 
       case FACT_DELETE:
-        buildChooserPath(gFilesActionPath, sizeof(gFilesActionPath));
         strncpy(gFilesActionName, cached.name, sizeof(gFilesActionName) - 1);
         gFilesActionName[sizeof(gFilesActionName) - 1] = '\0';
-        gFilesChooserActive = false;
+        if (!buildChooserPath(gFilesActionPath, sizeof(gFilesActionPath))) {
+          gFilesChooserActive = false;
+          g2ShowTextAsList("File path unavailable - delete on web", "<- Back");
+          return;
+        }
         if (strchr(gFilesActionPath, '"')) {
+          gFilesChooserActive = false;
           g2ShowTextAsList("Name has a quote char - delete on web", "<- Back");
           return;
         }
-        showDeleteConfirm();
+        showDeleteConfirm();   // closes the chooser once the confirm is shown
         return;
     }
     return;
   }
 
   if (idx == 0) {
-    // Context-sensitive back. If a file-info overlay is showing,
-    // "<- Back" returns to the file list rather than the main hijack
-    // menu — matches what the user just navigated away from.
-    // g2ShowFilesMenu clears the overlay state.
-    if (g2LensInOverlay()) {
+    // Context-sensitive back. While the file-info rows are up (overlay
+    // running, or expired with its list redraw not shown yet), "<- Files"
+    // returns to the file list rather than the main hijack menu — matches
+    // what the user just navigated away from. g2ShowFilesMenu clears the
+    // info mode and the overlay state.
+    if (gFilesInfoActive) {
       DEBUG_G2F("[G2] Files: back from overlay → file list");
       g2ShowFilesMenu();
       return;
@@ -1218,8 +1330,8 @@ void g2FilesHandleTap(uint32_t idx) {
     return;
   }
 
-  // While an overlay is showing, idx>0 are read-only metadata rows. No-op.
-  if (g2LensInOverlay()) {
+  // While the info rows are up, idx>0 are read-only metadata rows. No-op.
+  if (gFilesInfoActive) {
     DEBUG_G2F("[G2] Files: tap on overlay row %u (read-only)",
               (unsigned)idx);
     return;
@@ -1271,50 +1383,34 @@ void g2FilesHandleTap(uint32_t idx) {
     return;
   }
 
+  // Select the entry: navigateInto (folders) and the chooser's actions
+  // (buildChooserPath) resolve the *selected* entry's full path, which
+  // e.name, a bounded display copy, may not hold.
+  while (fm->getSelectedIndex() < entryIdx) fm->moveDown();
+  while (fm->getSelectedIndex() > entryIdx) fm->moveUp();
+
   if (e.isFolder) {
-    // Navigate into it. FileManager's navigateInto uses the *selected* index,
-    // so set selection first.
-    while (fm->getSelectedIndex() < entryIdx) fm->moveDown();
-    while (fm->getSelectedIndex() > entryIdx) fm->moveUp();
     DEBUG_G2F("[G2] Files: navigateInto '%s'", e.name);
     fm->navigateInto();
     gFilesPage = 0;  // fresh directory → fresh page
     g2ShowFilesMenu();
   } else {
-    // File tap → previewable types get the View/Info chooser; everything
-    // else jumps straight to the metadata overlay (existing UX).
-    if (isBmpFilename(e.name)) {
-      showFileChooser(e, FILE_CHOOSER_BMP);
-    } else if (isJpgFilename(e.name)) {
-      showFileChooser(e, FILE_CHOOSER_JPG);
-    } else if (isJsonFilename(e.name)) {
-      showFileChooser(e, FILE_CHOOSER_JSON);
-    } else if (isTxtFilename(e.name) || isCsvFilename(e.name)) {
-      showFileChooser(e, FILE_CHOOSER_TEXT);
-    } else {
-      // No viewer for this type, but Info / Rename / Delete must still be
-      // reachable — the old direct-to-info path made mutation impossible
-      // for every non-previewable file.
-      showFileChooser(e, FILE_CHOOSER_OTHER);
-    }
+    // File tap → the chooser for its kind: view rows for previewable types,
+    // and Info / Rename / Delete for every file (FILE_CHOOSER_OTHER has no
+    // viewer but keeps those reachable).
+    showFileChooser(e, filesChooserKindFor(e.name));
   }
 }
 
 // Overlay-expired callback. Registered with the lens-state tracker via
-// g2LensSetOverlayExpiredCb at first ensureFm() call. Fires when the
-// shared overlay clock crosses our deadline. We only redraw if both
-// (a) the expired overlay was ours, and (b) we're still on the Files
-// page (user might have swiped away).
+// g2LensSetOverlayExpiredCb at first ensureFm() call. Fires on the main loop
+// (g2Tick) when the shared overlay clock crosses our deadline. We only queue
+// the list redraw if both (a) the expired overlay was ours, and (b) we're
+// still on the Files page (user might have swiped away).
 static void filesOverlayExpired(G2OverlayKind kind) {
   if (kind != G2_OVERLAY_FILE_INFO) return;
   if (g2GetHijackPage() != G2_HIJACK_PAGE_FILES) return;
-  g2ShowFilesMenu();
-}
-
-void g2FilesTick() {
-  // No longer needed — the centralized lens overlay tick handles auto-
-  // dismiss. Kept as a no-op so existing call sites compile; safe to
-  // remove once G2_Glasses.cpp's g2Tick stops calling it.
+  filesQueueListRedraw();
 }
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

@@ -17,8 +17,8 @@
 // (both declared below).
 //
 // Capacity: 16 slots (same as the existing peer table). A SessionState is
-// 208 B — the static_assert below pins that as the ceiling — so the table costs
-// 3328 B (~3.25 KiB) of PSRAM. Looked up by (peerMac, meshId) on the initiator
+// 240 B — the static_assert below pins that as the ceiling — so the table costs
+// 3840 B (3.75 KiB) of PSRAM. Looked up by (peerMac, meshId) on the initiator
 // path, by (sessionId, peerMac) on the RX fast path.
 // ============================================================================
 
@@ -66,7 +66,9 @@ struct SessionState {
   uint8_t  aeadKeyRx[32];      // key used when we decrypt from the peer
   uint32_t txSeqNext;          // next frameSeq value to use on send
   uint32_t rxSeqHighWater;     // highest frameSeq we've accepted from peer
+  uint32_t rxSeqHighWaterPrev; // replay window of aeadKeyRxPrev: high-water mark
   uint64_t rxSeqBitmap;        // 64-frame sliding window below highWater
+  uint64_t rxSeqBitmapPrev;    // replay window of aeadKeyRxPrev: bitmap
   uint32_t establishedAtMs;    // millis() when the session went ACTIVE
   uint32_t lastUseMs;          // millis() of last TX or RX through this session
   uint8_t  state;              // SessionStateLifecycle enum
@@ -76,6 +78,10 @@ struct SessionState {
   // ---- Phase 3.6 — REKEY state -----------------------------------------------
   // Previous AEAD keys, kept valid briefly after a key swap so in-flight frames
   // sent under the old keys still decrypt. Cleared after kRekeyPrevKeysWindowMs.
+  // The previous key keeps the replay window it was live with
+  // (rxSeqHighWaterPrev / rxSeqBitmapPrev above): a frame that opens under it
+  // is checked against, and only advances, that window, so an old-epoch frame
+  // can neither replay nor seed the fresh window of the current key.
   uint8_t  aeadKeyRxPrev[32];      // previous RX key
   uint32_t prevKeysValidUntilMs;   // 0 = no prev keys; otherwise millis() deadline
   // In-flight rekey state. When this side has SENT a REKEY but not yet received
@@ -95,8 +101,18 @@ struct SessionState {
   uint8_t  bondToken[16];
   uint8_t  bondTokenValid;         // 1 once derived
   uint8_t  _pad3[3];
+
+  // ---- Handshake freshness ----------------------------------------------------
+  // A REKEY or SESSION_OPEN is a plaintext signed frame that stays valid as long
+  // as the identity keys do, so a re-delivered copy must be recognised by state:
+  // see sessionClassifyPeerRekey and sessionOpenIdStale below.
+  uint8_t  lastPeerRekeyNonce[16];  // nonceRekey of the last peer REKEY acted on (all zero = none)
+  uint32_t rekeyReplyGraceUntilMs;  // 0 = none; while pending, rekeyEphPrivKey is the key of the
+                                    //   REKEY reply we sent, and a peer REKEY arriving now answers
+                                    //   that reply: it is applied and not answered again
+  uint16_t recentSessionIds[4];     // ids this slot held before sessionId, newest first (0 = empty)
 };
-static_assert(sizeof(SessionState) <= 208, "keep session record reasonably small");
+static_assert(sizeof(SessionState) <= 240, "keep session record reasonably small");
 
 // One-time allocation of the gSessions table in PSRAM. Idempotent; safe to
 // call multiple times. Returns false only on alloc failure.
@@ -118,11 +134,15 @@ SessionState* sessionFindBySessionId(uint16_t sessionId, const uint8_t peerMac[6
 // The two paths do NOT clear the same amount, which matters:
 //   - Free slot: full memset — every field starts at zero.
 //   - Existing session for the pair: a PARTIAL reset. It zeroes the live AEAD
-//     keys, txSeqNext, the rx replay window (rxSeqHighWater + rxSeqBitmap) and
-//     establishedAtMs. It leaves the REKEY state (aeadKeyRxPrev,
-//     prevKeysValidUntilMs, rekeyEphPrivKey, rekeyInitiatedAtMs,
-//     rekeyTxSeqAtInit), the bond token (bondToken, bondTokenValid) and
-//     consecutiveSendTimeouts exactly as they were.
+//     keys, txSeqNext, the rx replay window (rxSeqHighWater + rxSeqBitmap),
+//     establishedAtMs and the in-flight rekey state (rekeyEphPrivKey,
+//     rekeyInitiatedAtMs, rekeyTxSeqAtInit, rekeyReplyGraceUntilMs,
+//     lastPeerRekeyNonce), and pushes the sessionId it replaces onto
+//     recentSessionIds (the caller then writes the new sessionId). It leaves the
+//     previous RX key (aeadKeyRxPrev with its window
+//     rxSeqHighWaterPrev/rxSeqBitmapPrev, prevKeysValidUntilMs), the bond token
+//     (bondToken, bondTokenValid) and consecutiveSendTimeouts exactly as they
+//     were.
 //
 // The retained prev-RX key is the sharp edge: sessionUnwrapFrame still falls
 // back to aeadKeyRxPrev while prevKeysValidUntilMs hasn't expired, so a
@@ -172,9 +192,11 @@ bool sessionWrapFrame(SessionState* s,
                       uint8_t* outCipherWithTag);
 
 // Unwrap a received SESSION_FRAME. Verifies the AEAD tag (last 16 bytes of
-// the payload region), then runs the replay check against the session's
-// sliding 64-frame window. If both pass, writes plaintext into `outPlain`
-// and advances the window.
+// the payload region), then runs the replay check against the sliding
+// 64-frame window of the key that opened the frame: the current key's window,
+// or, inside kRekeyPrevKeysWindowMs after a REKEY, the previous key's own
+// window. If both pass, writes plaintext into `outPlain` and advances that
+// window only.
 //
 //   header:        the V4 header on the wire (read-only; AAD source)
 //   cipherWithTag: pointer to the payload region (cipher || tag)
@@ -306,16 +328,20 @@ extern "C" const SendStatus* sendStatusAt(uint8_t i);
 // Apply a freshly-derived AEAD key pair to a session, stashing the existing
 // RX key into the prev slot with a kRekeyPrevKeysWindowMs validity window.
 // (TX key isn't kept — we control our own TX so old TX keys won't see use.)
-// Resets txSeqNext to 0 and clears the rx replay window — the new keys define
-// a fresh frame-seq namespace. State transitions to SESSION_ACTIVE.
-// rekeyEphPrivKey + rekeyInitiatedAtMs + rekeyTxSeqAtInit are all zeroed.
+// Resets txSeqNext to 0 and starts a fresh rx replay window — the new keys
+// define a fresh frame-seq namespace. The window that was live with the old RX
+// key moves to rxSeqHighWaterPrev / rxSeqBitmapPrev together with that key, so
+// late old-key frames stay replay-checked. State transitions to SESSION_ACTIVE.
+// rekeyEphPrivKey + rekeyInitiatedAtMs + rekeyTxSeqAtInit are all zeroed and
+// any reply grace (rekeyReplyGraceUntilMs) ends.
 void sessionApplyRekeyedKeys(SessionState* s,
                              const uint8_t newKeyTx[32],
                              const uint8_t newKeyRx[32]);
 
 // Mark a session as having a REKEY in flight. Parks our ephemeral X25519
-// priv key for the eventual ECDH when the peer's REKEY reply arrives.
-// Returns false if the session isn't ACTIVE (can't rekey from any other state).
+// priv key for the eventual ECDH when the peer's REKEY reply arrives (ending
+// any reply grace). Returns false if the session isn't ACTIVE (can't rekey
+// from any other state).
 bool sessionMarkRekeyInitiated(SessionState* s,
                                const uint8_t ephPrivKey[32],
                                uint32_t txSeqAtSign);
@@ -328,8 +354,54 @@ bool sessionMarkRekeyInitiated(SessionState* s,
 void sessionAbortRekey(SessionState* s);
 
 // Sweep prev-keys retention windows. Called from the espnow heartbeat tick.
-// Zeros expired aeadKeyRxPrev material.
+// Zeros expired aeadKeyRxPrev material and its replay window, and ends an
+// expired reply grace (wiping the reply's parked ephemeral key).
 void sessionRekeyPrevKeysSweep(uint32_t nowMs);
+
+// ---- Handshake freshness: re-delivered REKEY / SESSION_OPEN ------------------
+//
+// The (origin, msgId) dedup ring only remembers a frame for 5 s, and the signed
+// REKEY / OPEN transcripts carry nothing the receiver can check against time,
+// so these helpers bind a received handshake frame to the session's live state.
+
+// A fresh REKEY's prevTxSeqAtRekey (the peer's txSeqNext when it signed) may
+// trail our rx high-water mark by at most this many frames.
+constexpr uint32_t kRekeySeqSlack = 64;
+
+// How a REKEY received from the peer relates to this session's live state.
+enum SessionPeerRekeyVerdict : uint8_t {
+  SESSION_REKEY_COUNTERPART = 0,  // answers a REKEY we sent: derive with the parked key, send nothing
+  SESSION_REKEY_INITIATION  = 1,  // a fresh initiation: reply with our own REKEY, then derive
+  SESSION_REKEY_NONCE_SEEN  = 2,  // same nonce as the last peer REKEY acted on (re-delivery)
+  SESSION_REKEY_TOO_SOON    = 3,  // an initiation less than kRekeyMinIntervalMs after the keys changed
+  SESSION_REKEY_STALE_SEQ   = 4,  // an initiation signed more than kRekeySeqSlack frames behind
+};
+
+// Classify a signature-verified REKEY from the peer. In order: the nonce of the
+// last REKEY acted on → NONCE_SEEN; we are REKEYING, or inside the reply grace
+// → COUNTERPART; keyed (established or rekeyed) less than kRekeyMinIntervalMs
+// ago → TOO_SOON; prevTxSeqAtRekey more than kRekeySeqSlack below
+// rxSeqHighWater → STALE_SEQ; otherwise INITIATION. Only COUNTERPART and
+// INITIATION may change the keys.
+SessionPeerRekeyVerdict sessionClassifyPeerRekey(const SessionState* s,
+                                                 const uint8_t nonceRekey[16],
+                                                 uint32_t prevTxSeqAtRekey,
+                                                 uint32_t nowMs);
+
+// Remember the nonce of a peer REKEY whose keys are being applied.
+void sessionNotePeerRekey(SessionState* s, const uint8_t nonceRekey[16]);
+
+// Responder side, right after sessionApplyRekeyedKeys installed the keys from
+// our REKEY reply: parks the reply's ephemeral private key again and opens the
+// reply grace for kRekeyPrevKeysWindowMs. A peer REKEY arriving inside it is
+// the peer's answer to our reply (it treated the reply as an initiation), so it
+// is applied with this key and not answered again, which ends the exchange.
+void sessionHoldRekeyReply(SessionState* s, const uint8_t ephPrivKey[32]);
+
+// True when `sessionId` is 0, the slot's current sessionId, or one of the ids
+// the slot held before it. A genuine SESSION_OPEN always proposes a fresh
+// random id, so such an OPEN is a re-delivered copy.
+bool sessionOpenIdStale(const SessionState* s, uint16_t sessionId);
 
 #endif  // ENABLE_ESPNOW
 

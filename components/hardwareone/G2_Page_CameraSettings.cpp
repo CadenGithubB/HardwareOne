@@ -321,13 +321,21 @@ static bool settingSupported(const CamSetting& setting, const CameraCapabilities
 // independent stream-size picker, with room for an unavailable-controls row.
 static EXT_RAM_BSS_ATTR char gRows[1 + 16][CAM_SETTINGS_ROW_LEN];  // PSRAM: deep-copied by g2ShowListPage
 static const char* gRowPtrs[1 + 16];
-// Keep the rendered identity until the next redraw. Capabilities can change
-// when the camera opens; a stale tap must never select a different setting.
+// Keep the rendered identity until the next accepted redraw. Capabilities can
+// change when the camera opens; a stale tap must never select a different
+// setting. The builders fill the pending copies beside gRows, and
+// cameraShowRows makes them live, with the level, only once the lens accepted
+// those rows: a refused render leaves the visible rows with their old meaning.
 static size_t gSettingRowMap[1 + 16];
 static int gResolutionRowMap[1 + 16];
 static size_t gSettingRowsCount = 0;
 static size_t gResolutionRowsCount = 0;
 static CamCategory gRenderedCategory = CAM_CAT_CAMERA;
+static EXT_RAM_BSS_ATTR size_t gPendingSettingRowMap[1 + 16];
+static EXT_RAM_BSS_ATTR int gPendingResolutionRowMap[1 + 16];
+static size_t gPendingSettingRowsCount = 0;
+static size_t gPendingResolutionRowsCount = 0;
+static CamCategory gPendingCategory = CAM_CAT_CAMERA;
 
 // -----------------------------------------------------------------------------
 // Forward decls — show/build helpers used across the level handlers
@@ -396,9 +404,9 @@ static size_t buildTopRows() {
 
 static size_t buildSubRows(CamCategory cat) {
   const auto caps = getCameraCapabilities();
-  gSettingRowsCount = 0;
-  gRenderedCategory = cat;
-  for (auto& index : gSettingRowMap) index = SIZE_MAX;
+  gPendingSettingRowsCount = 0;
+  gPendingCategory = cat;
+  for (auto& index : gPendingSettingRowMap) index = SIZE_MAX;
   size_t row = 0;
   strncpy(gRows[row], "<- Settings", CAM_SETTINGS_ROW_LEN - 1);
   gRows[row][CAM_SETTINGS_ROW_LEN - 1] = '\0';
@@ -424,7 +432,7 @@ static size_t buildSubRows(CamCategory cat) {
       snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "%s: %s", s.label, valueBuf);
     }
     gRowPtrs[row] = gRows[row];
-    gSettingRowMap[row] = i;
+    gPendingSettingRowMap[row] = i;
     row++;
   }
   if (row == 1) {
@@ -432,7 +440,7 @@ static size_t buildSubRows(CamCategory cat) {
     gRowPtrs[row] = gRows[row];
     row++;
   }
-  gSettingRowsCount = row;
+  gPendingSettingRowsCount = row;
   return row;
 }
 
@@ -442,8 +450,8 @@ static size_t buildSubRows(CamCategory cat) {
 
 static size_t buildResolutionPickerRows() {
   const auto caps = getCameraCapabilities();
-  gResolutionRowsCount = 0;
-  for (auto& id : gResolutionRowMap) id = -1;
+  gPendingResolutionRowsCount = 0;
+  for (auto& id : gPendingResolutionRowMap) id = -1;
   const int current = (int)gSettings.cameraFramesize;
 
   size_t row = 0;
@@ -461,17 +469,40 @@ static size_t buildResolutionPickerRows() {
              id == current ? "[X] " : "    ", info->name,
              (unsigned)info->width, (unsigned)info->height);
     gRowPtrs[row] = gRows[row];
-    gResolutionRowMap[row] = id;
+    gPendingResolutionRowMap[row] = id;
     row++;
   }
-  gResolutionRowsCount = row;
+  gPendingResolutionRowsCount = row;
   return row;
 }
 
+// Render the `n` rows just built for `level`; only once the lens accepted
+// them does `level`, with the row map its builder filled, become live.
+static bool cameraShowRows(CamSettingsLevel level, size_t n) {
+  return g2ShowListPageAndPublish(gRowPtrs, n, [level] {
+    gLevel = level;
+    switch (level) {
+      case CAM_LEVEL_SUB_CAMERA:
+      case CAM_LEVEL_SUB_TRANSFORM:
+      case CAM_LEVEL_SUB_POSTPROC:
+        memcpy(gSettingRowMap, gPendingSettingRowMap, sizeof(gSettingRowMap));
+        gSettingRowsCount = gPendingSettingRowsCount;
+        gRenderedCategory = gPendingCategory;
+        break;
+      case CAM_LEVEL_RESOLUTION_PICKER:
+        memcpy(gResolutionRowMap, gPendingResolutionRowMap, sizeof(gResolutionRowMap));
+        gResolutionRowsCount = gPendingResolutionRowsCount;
+        break;
+      case CAM_LEVEL_TOP:
+      case CAM_LEVEL_STREAM_PICKER:
+        break;  // fixed row layouts
+    }
+  });
+}
+
 static void showResolutionPicker() {
-  gLevel = CAM_LEVEL_RESOLUTION_PICKER;
   size_t n = buildResolutionPickerRows();
-  if (g2ShowListPage(gRowPtrs, n)) {
+  if (cameraShowRows(CAM_LEVEL_RESOLUTION_PICKER, n)) {
     DEBUG_G2F("[G2] Camera settings: resolution picker shown (%u rows)",
               (unsigned)n);
   }
@@ -513,35 +544,34 @@ static size_t buildStreamPickerRows() {
 }
 
 static void showStreamPicker() {
-  gLevel = CAM_LEVEL_STREAM_PICKER;
   size_t n = buildStreamPickerRows();
-  if (g2ShowListPage(gRowPtrs, n)) {
+  if (cameraShowRows(CAM_LEVEL_STREAM_PICKER, n)) {
     DEBUG_G2F("[G2] Camera settings: stream picker shown (%u rows)",
               (unsigned)n);
   }
 }
 
 // -----------------------------------------------------------------------------
-// Sub-menu show helpers — set level + render
+// Sub-menu show helpers — render, then set the level once shown
 // -----------------------------------------------------------------------------
 
 static void showSubMenu(CamCategory cat) {
+  CamSettingsLevel level = CAM_LEVEL_SUB_CAMERA;
   switch (cat) {
-    case CAM_CAT_CAMERA:    gLevel = CAM_LEVEL_SUB_CAMERA;    break;
-    case CAM_CAT_TRANSFORM: gLevel = CAM_LEVEL_SUB_TRANSFORM; break;
-    case CAM_CAT_POSTPROC:  gLevel = CAM_LEVEL_SUB_POSTPROC;  break;
+    case CAM_CAT_CAMERA:    level = CAM_LEVEL_SUB_CAMERA;    break;
+    case CAM_CAT_TRANSFORM: level = CAM_LEVEL_SUB_TRANSFORM; break;
+    case CAM_CAT_POSTPROC:  level = CAM_LEVEL_SUB_POSTPROC;  break;
   }
   size_t n = buildSubRows(cat);
-  if (g2ShowListPage(gRowPtrs, n)) {
+  if (cameraShowRows(level, n)) {
     DEBUG_G2F("[G2] Camera settings: sub-menu cat=%u shown (%u rows)",
               (unsigned)cat, (unsigned)n);
   }
 }
 
 static void showTopMenu() {
-  gLevel = CAM_LEVEL_TOP;
   size_t n = buildTopRows();
-  g2ShowListPage(gRowPtrs, n);
+  cameraShowRows(CAM_LEVEL_TOP, n);
 }
 
 // Runs only on the lens-applier worker. If the user moved within Camera
@@ -624,9 +654,8 @@ void g2BuildCameraSettingsInfo(char* out, size_t cap) {
 void g2ShowCameraSettingsMenu() {
   // Always enter at the TOP level — never resume on a sub-list. Entering
   // the page means "open camera settings", not "go to wherever I was".
-  gLevel = CAM_LEVEL_TOP;
   size_t n = buildTopRows();
-  if (g2ShowListPage(gRowPtrs, n)) {
+  if (cameraShowRows(CAM_LEVEL_TOP, n)) {
     g2SetHijackPage(G2_HIJACK_PAGE_CAMERA_SETTINGS);
     DEBUG_G2F("[G2] Camera settings shown (%u rows)", (unsigned)n);
   } else {
@@ -716,8 +745,7 @@ static void handleSubTap(CamCategory cat, uint32_t idx) {
   }
 
   // Re-render the same sub-list so the row reflects the new value.
-  size_t n = buildSubRows(cat);
-  g2ShowListPage(gRowPtrs, n);
+  showSubMenu(cat);
 }
 
 static void handleResolutionPickerTap(uint32_t idx) {

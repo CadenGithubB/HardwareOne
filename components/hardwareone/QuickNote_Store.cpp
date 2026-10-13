@@ -157,6 +157,44 @@ bool writeNote(const AuthContext& ctx, bool sd, const String& tmp, const String&
   }
   return true;
 }
+
+// "<root>/<name>/notes" in `out` when `name` is an account folder's one
+// canonical spelling, "u<id>" (TranscriptPathPolicy, as noteFolder writes it).
+bool accountNotesFolder(bool sd, const char* name, char* out, size_t cap) {
+  char owner[32];
+  const int n = snprintf(owner, sizeof(owner), "%s/%s", sd ? "/sd/stt" : "/stt", name);
+  if (n <= 0 || static_cast<size_t>(n) >= sizeof(owner)) return false;
+  const TranscriptPathPolicy::Path where = TranscriptPathPolicy::classify(owner);
+  const size_t length = where.kind == TranscriptPathPolicy::Kind::Owner
+      ? noteFolder(sd, where.owner, out, cap) : 0;
+  return length > static_cast<size_t>(n) && !strncmp(out, owner, n) && out[n] == '/';
+}
+
+// Removes `folder`'s in-progress note files, adding them to *removed; every
+// other entry is left alone and no file is read. False if one could not be
+// removed. The caller holds the lock.
+bool sweepFolder(const char* folder, const AuthContext& ctx, uint32_t* removed) {
+  if (!VFS::existsGuarded(folder, ctx)) return true;  // no notes in this account
+  File dir = VFS::openGuarded(folder, "r", ctx);
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return false;
+  }
+  bool ok = true;
+  for (File file = dir.openNextFile(); file; file = dir.openNextFile()) {
+    char path[kPathMax];
+    path[0] = '\0';
+    const char* name = baseName(file.name());
+    const bool orphan = !file.isDirectory() && noteFileNameParse(name, nullptr, nullptr, true) &&
+        snprintf(path, sizeof(path), "%s/%s", folder, name) < static_cast<int>(sizeof(path));
+    file.close();  // closed before its removal
+    if (!orphan) continue;
+    if (VFS::removeGuarded(path, ctx)) ++*removed;
+    else ok = false;
+  }
+  dir.close();
+  return ok;
+}
 }  // namespace
 
 namespace QuickNoteStore {
@@ -460,6 +498,43 @@ bool remove(const AuthContext& ctx, const char* path, const char** why) {
   if (!VFS::existsGuarded(normalized, ctx)) return fail(why, "Note unavailable");
   if (!VFS::removeGuarded(normalized, ctx)) return fail(why, "Cannot delete note");
   return true;
+}
+
+bool sweep(uint32_t* removed, const char** why) {
+  if (why) *why = nullptr;
+  uint32_t count = 0;
+  bool ok = true;
+  for (int tier = 0; tier < 2; ++tier) {
+    const bool sd = tier == 1;
+    FsLockGuard lock("qnote.store", pdMS_TO_TICKS(kLockMs));
+    if (!lock.held && !isFsLockedByCurrentTask()) {
+      ok = fail(why, "Note storage busy");
+      continue;
+    }
+    // A card that cannot be written now keeps its files for a later sweep.
+    if (sd && !VFS::isSDWritable()) continue;
+    const char* root = sd ? "/sd/stt" : "/stt";
+    if (!VFS::exists(root)) continue;
+    // trusted: lists account folders by name and removes only in-progress
+    // note files, never reading one; confined to this tier's transcript root.
+    const AuthContext sys = VFS::systemAuth(root, "note sweep");
+    File top = VFS::openGuarded(root, "r", sys);
+    if (!top || !top.isDirectory()) {
+      if (top) top.close();
+      ok = fail(why, "Notes folder unavailable");
+      continue;
+    }
+    for (File entry = top.openNextFile(); entry; entry = top.openNextFile()) {
+      char folder[kPathMax];
+      const bool account = entry.isDirectory() &&
+          accountNotesFolder(sd, baseName(entry.name()), folder, sizeof(folder));
+      entry.close();
+      if (account && !sweepFolder(folder, sys, &count)) ok = fail(why, "Cannot remove unfinished note");
+    }
+    top.close();
+  }
+  if (removed) *removed = count;
+  return ok;
 }
 
 }  // namespace QuickNoteStore

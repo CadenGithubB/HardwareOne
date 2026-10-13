@@ -15,6 +15,7 @@ static unsigned checks = 0;
   std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #condition); \
   std::abort(); } } while (false)
 #define EXT_RAM_BSS_ATTR
+#define OLED_CONTENT_HEIGHT 43
 
 class String {
  public:
@@ -102,6 +103,7 @@ bool oledScrollHandleNav(OLEDScrollState* state) {
   return true;
 }
 void executeOLEDCommand(const String& command) { oledRequests.emplace_back(command.c_str()); }
+bool oledRunCommand(const String& command) { oledRequests.emplace_back(command.c_str()); return true; }
 void oledScrollInit(OLEDScrollState* state, const char*, int) { *state = {}; }
 void oledScrollSetSplitPane(OLEDScrollState*, int, int, int) {}
 void oledScrollClear(OLEDScrollState* state) { *state = {}; }
@@ -109,6 +111,7 @@ void oledScrollAddItem(OLEDScrollState* state, const char* row, void*) {
   state->rows.emplace_back(row);
 }
 void oledScrollRender(void*, OLEDScrollState*, bool, bool) { ++scrollRenders; }
+void oledScrollRenderSimple(void*, OLEDScrollState*) { ++scrollRenders; }
 
 // INSERT_PRODUCTION
 
