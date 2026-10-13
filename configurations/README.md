@@ -5,6 +5,7 @@ Build different feature selections for the same board without editing shared hea
 ```sh
 python3 tools/build_config.py build xiao-default
 python3 tools/build_config.py build xiao-openclaw
+python3 tools/build_config.py build p4-openclaw
 python3 tools/build_config.py build xiao-mqtt
 python3 tools/build_config.py build xiao-display
 python3 tools/build_config.py build xiao-no-bluetooth
@@ -27,6 +28,13 @@ enables MQTT, Wi-Fi, and the MQTT settings page, and disables offline maps to
 fit the existing app partition. Both use the existing Sense assembly selection
 and board defaults. This trade-off is an explicit saved choice, not a dependency
 rule or an automatic size adjustment.
+
+`p4-openclaw` starts from the qualified `p4-glasses-test` speech profile and
+adds the LLM feature and HTTP source. It keeps local STT, the pinned 15x5 gen2
+model, speaker labels and SDMMC enabled, with ESP-SR and onboard/CM5 LLM sources
+off. Runtime relay credentials and the public CA are configured on the device.
+Use the existing Stop → wait for transcription → review → Send interaction.
+The combined voice-to-agent path still needs hardware qualification.
 
 `xiao-openclaw` enables the HTTP agent source and keeps CM5 available. This test
 profile explicitly disables the onboard LLM to fit the existing app partition;

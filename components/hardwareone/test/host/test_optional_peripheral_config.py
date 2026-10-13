@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Compile the real configuration for independent display/input/storage choices."""
+import json
 import pathlib
 import shutil
 import subprocess
@@ -72,6 +73,28 @@ class PeripheralConfig(unittest.TestCase):
                     'SD_MMC_SLOT == 0',
                     'SD_MMC_CLK_PIN == 43', 'SD_MMC_CMD_PIN == 44'],
                     board_profile=board)
+
+    def test_p4_openclaw_preserves_local_speech_profile(self):
+        repo = SOURCE.parents[1]
+        baseline = json.loads((repo / 'configurations/p4-glasses-test.json').read_text())
+        selected = json.loads((repo / 'configurations/p4-openclaw.json').read_text())
+        expected = dict(baseline['features'], ENABLE_LLM_BACKEND=1,
+                        ENABLE_LLM_SOURCE_HTTP=1)
+        self.assertEqual(selected, dict(baseline, features=expected))
+        for config, enabled in ((baseline, 0), (selected, 1)):
+            with self.subTest(http=enabled):
+                self.check_profile(config['features'], [
+                    f'ENABLE_LLM_BACKEND == {enabled}',
+                    f'ENABLE_LLM_SOURCE_HTTP == {enabled}',
+                    'ENABLE_LLM_SOURCE_ONBOARD == 0',
+                    'ENABLE_LLM_SOURCE_CM5 == 0',
+                    'ENABLE_LOCAL_STT == 1',
+                    'ENABLE_STT_MODEL_15X5_GEN2 == 1',
+                    'ENABLE_STT_SPEAKER_LABELS == 1',
+                    'ENABLE_STT_LM == 1', 'ENABLE_QUICKNOTE == 1',
+                    'ENABLE_SDMMC_CARD == 1', 'ENABLE_SD_CARD == 1',
+                    'ENABLE_ESP_SR == 0', 'ENABLE_WIFI == 1'],
+                    board_profile=repo / 'boards/p4x_eye.features.h')
 
     def test_board_buttons_can_be_forced_off(self):
         profile = self.profile(wheel=3)

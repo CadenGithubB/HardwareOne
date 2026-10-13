@@ -8,6 +8,47 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.98] - 2026-10-12
+
+Development checkpoint combining the committed 0.99.97.4 fixes, OpenClaw
+integration, and the current P4 speech/G2 work in one main-line source tree.
+Ongoing fixes in the separate review worktree are not included.
+
+### Added
+- Optional HTTP(S) chat source for OpenClaw, using the existing shared chat,
+  source selection, web, display and G2 interfaces. Includes verified TLS,
+  streamed replies, conversation continuity and New chat, bounded responses,
+  cancellation and explicit retry restrictions.
+- Restricted local HTTPS relay for a fixed OpenClaw agent, with a separate
+  device credential; the gateway can retain its loopback listener. Device
+  credentials use the existing secret settings storage and audit redaction.
+- Saved `xiao-openclaw` and `p4-openclaw` profiles. The XIAO profile omits only
+  onboard LLM inference to fit its existing app slot; the P4 profile preserves
+  local STT, SDMMC and the selected 15x5 gen2 model while adding HTTP chat.
+- P4 session speaker labels, pinned STT model selection, model export/training
+  tools and host regressions. Translation feasibility work and enclosure
+  references remain in the same repository.
+
+### Changed
+- P4 STT retains model state for a session, computes frontend features during
+  capture, and uses the qualified ESP-DL, decoder and cache optimizations.
+- The selected speech path preserves complete phrases, drains pending speaker
+  work and allows delayed labels; no retraining or new accuracy claim is made.
+- G2 live transcription keeps the four-child layout, a single input-capturing
+  header, scrolling, readiness handling and firmware-specific wear settings.
+- CMake retains the checked feature parser from 0.99.97.4 and selects both
+  HTTP and speaker-label sources. SDK patches and optimized STT kernels remain
+  under their existing owners.
+
+### Verification scope
+- Earlier XIAO hardware tests passed verified HTTPS chat to Mingus, a second
+  turn recalling conversation context, and a fresh conversation after Clear.
+- Earlier P4 hardware qualification passed local STT, speaker-label display and
+  G2 scrolling. The preserved baseline passed nine focused ASan/UBSan suites.
+- Consolidated-source build and host verification are recorded in
+  `docs/CONSOLIDATION_0.99.98.md`. The combined P4-to-OpenClaw voice path still
+  needs hardware qualification; this checkpoint does not claim that test.
+
 ## [0.99.97.4] - 2026-10-12
 
 Review fixes for the 0.99.97 cleanup series. Each fix lives in its owning
