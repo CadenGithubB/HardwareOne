@@ -23,7 +23,7 @@ import torch.nn.functional as F
 from common import QuartzNet, load_checkpoint, save_checkpoint, BLANK
 from data import Store, Augmenter, TrainSet, MixedBatchSampler, collate
 from evaluate import evaluate_stores
-STT_ROOT = Path(os.environ.get('STT_ROOT', '/Volumes/Audiodrive/stt'))  # data root; set STT_ROOT on other machines
+STT_ROOT = Path(os.environ.get('STT_ROOT', 'stt-data'))  # data root: set STT_ROOT
 
 TRAIN_MIX = [  # (store, weight, far_field); missing stores are skipped
     ('ami-sdm-train', 0.25, True),

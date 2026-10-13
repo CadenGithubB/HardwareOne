@@ -26,6 +26,23 @@ Status compute_features(const int16_t* pcm, size_t samples, float* output,
                         size_t output_floats, FrontendWorkspace* workspace,
                         uint32_t seed=kDitherSeed, bool dither=true,
                         FrontendTiming* timing=nullptr);
+// Incremental features (the broker computes rows while a phrase is captured,
+// HW1_STT_CAPTURE_FEATURES). Row `frame` of
+// compute_features(pcm, samples, ..., dither=false) before CMVN, alone: the
+// same float operations in the same order (this file keeps -ffp-contract=off),
+// so rows are bit-identical. A row reads samples [frame*160-161, frame*160+160)
+// (frame 0 also reads sample 160), reflecting at the segment's start and at
+// `samples`; a row with (frame+1)*160 <= samples and samples >= 320 never
+// reflects at the end, so it is final as soon as those samples exist.
+Status log_mel_frame(const int16_t* pcm, size_t samples, size_t frame, float* out64,
+                     FrontendWorkspace* workspace);
+// The same row, reading segment sample i from ring[(start + i) & ring_mask]
+// (ring_mask + 1 a power of two): the stream ring of the capture pipeline.
+Status log_mel_frame_ring(const int16_t* ring, size_t ring_mask, uint64_t start, size_t samples,
+                          size_t frame, float* out64, FrontendWorkspace* workspace);
+// compute_features' per-utterance CMVN over finished rows, in place.
+Status normalize_features(float* output, size_t frames, FrontendWorkspace* workspace,
+                          FrontendTiming* timing=nullptr);
 inline constexpr size_t kCtcClasses=29, kCtcBlank=28;
 struct CtcState {
     int previous=-1;

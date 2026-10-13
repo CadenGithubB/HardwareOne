@@ -68,6 +68,7 @@ static File openGuarded(const String& path,const char* mode,const AuthContext& c
 static DictationAppLease current{SOURCE_WEB,7,0x1122334455667788ULL};
 static bool haveLease=true,active=true,haveText=true;
 static DictationTextReceipt committed{};
+static STTSpeakerSnapshot speakerSnapshot;
 static bool owns(const DictationAppLease& l){return haveLease&&l.source==current.source&&l.epoch==current.epoch&&l.exchange==current.exchange&&l.purpose==current.purpose&&transportSessionEpochIsLive(l.source,l.epoch);}
 static unsigned currentLookups=0;
 static bool dictationAppCurrent(CommandSource source,uint32_t epoch,DictationAppLease* out,DictationAppPurpose purpose=DictationAppPurpose::Transcription){++currentLookups;assert(purpose==DictationAppPurpose::Transcription);*out={};if(!haveLease||source!=current.source||epoch!=current.epoch||purpose!=current.purpose||!epochLive)return false;*out=current;return true;}
@@ -78,10 +79,11 @@ static bool dictationAppRequestStop(const DictationAppLease& lease){++stopCalls;
 static bool dictationAppCancel(const DictationAppLease& lease){++cancelCalls;return owns(lease);}
 static bool dictationAppPeekText(const DictationAppLease& lease,char* text,size_t size,DictationTextReceipt* receipt){if(!owns(lease)||!haveText)return false;snprintf(text,size,"private words");*receipt={lease.exchange,9,0,13};if(peekHook){auto hook=peekHook;peekHook=nullptr;hook();}return true;}
 static bool dictationAppPeekDraft(const DictationAppLease&,char* out,size_t size,uint32_t* version){if(out&&size)out[0]=0;if(version)*version=0;return false;}
+static bool dictationAppReadSpeakers(const DictationAppLease& lease,STTSpeakerSnapshot* out){*out={};if(!owns(lease))return false;*out=speakerSnapshot;return true;}
 static bool dictationAppCommitText(const DictationAppLease& lease,const DictationTextReceipt& receipt,size_t accepted){++commitCalls;committed=receipt;return owns(lease)&&receipt.sequence==9&&receipt.offset==0&&accepted==13;}
 // INSERT_ADAPTER
 static std::shared_ptr<Node> add(const std::string& path,const std::string& data,bool dir=false){auto node=std::make_shared<Node>();node->path=path;node->data=data;node->directory=dir;nodes[path]=node;return node;}
-static void reset(){auth={};epochLive=accountExists=sdAvailable=allowBegin=true;guest=storageBusy=shortRead=seekFails=false;readCalls=beginCalls=stopCalls=cancelCalls=commitCalls=currentLookups=0;readHook=peekHook=snapshotHook=nullptr;openedPaths.clear();nodes.clear();haveLease=active=haveText=true;current={SOURCE_WEB,7,0x1122334455667788ULL};assert(!fsDepth);gSettings.sttSaveTranscripts=true;}
+static void reset(){speakerSnapshot={};auth={};epochLive=accountExists=sdAvailable=allowBegin=true;guest=storageBusy=shortRead=seekFails=false;readCalls=beginCalls=stopCalls=cancelCalls=commitCalls=currentLookups=0;readHook=peekHook=snapshotHook=nullptr;openedPaths.clear();nodes.clear();haveLease=active=haveText=true;current={SOURCE_WEB,7,0x1122334455667788ULL};assert(!fsDepth);gSettings.sttSaveTranscripts=true;}
 static JsonDocument parsed(const char* result){JsonDocument doc;assert(!deserializeJson(doc,result));assert(!doc["transcriptPath"].isNull());return doc;}
 static JsonDocument files(const String& args){auto doc=parsed(commandFiles(args));assert(!fsDepth);return doc;}
 static JsonDocument session(const String& args){return parsed(commandSession(args));}
@@ -116,6 +118,14 @@ static void testSession(){
  reset();d=session("start");assert(d["success"]==true&&beginCalls==1);
  reset();guest=true;d=session("start");assert(d["success"]==false&&beginCalls==0);
  reset();d=session("next 1122334455667788");assert(d["success"]==true&&d["sttText"]=="private words"&&d["sequence"]==9&&d["length"]==13);
+ reset();haveText=false;speakerSnapshot.available=true;speakerSnapshot.version=8;speakerSnapshot.count=2;
+ speakerSnapshot.entries[0]={9,1,true};speakerSnapshot.entries[1]={10,-1,false};
+ d=session("next 1122334455667788");assert(d["available"]==false&&d["speakerVersion"]==8&&d["speakersAvailable"]==true);
+ assert(d["speakers"].size()==2&&d["speakers"][0]["sequence"]==9&&d["speakers"][0]["speaker"]==1&&d["speakers"][0]["ready"]==true);
+ assert(d["speakers"][1]["speaker"]==-1&&d["speakers"][1]["ready"]==false);
+ // The maximum bounded history must fit the private response.
+ speakerSnapshot.count=STT_SPEAKER_HISTORY;for(auto& entry:speakerSnapshot.entries)entry={UINT32_MAX,127,true};
+ d=session("next 1122334455667788");assert(d["success"]==true&&d["speakers"].size()==STT_SPEAKER_HISTORY);
  reset();peekHook=[] {epochLive=false;};d=session("next 1122334455667788");assert(d["success"]==false&&!d.containsKey("sttText"));
  reset();snapshotHook=[] {epochLive=false;};d=session("status");assert(d["success"]==false&&!d.containsKey("sttText")&&d["transcriptPath"]==true);
  reset();d=session("ack 1122334455667788 9 0 13");assert(d["success"]==true&&commitCalls==1&&committed.sequence==9&&committed.length==13);

@@ -17,8 +17,14 @@ Options added 2026-09-30 for continued training, all off by default:
 --optimizer novograd (NeMo's recipe), --mix broad (+VoxPopuli), --dev g2 and
 --g2-prob (simulated glasses mic channel, see lc3codec.py).
 Everything else (augmentation, bucketed batch shapes, AdamW 2e-5, warmup 300,
-frozen BN stats, step-0 eval, CPU eval copy, rollback guard, memory restart)
-is unchanged.
+frozen BN stats, step-0 eval, rollback guard, memory restart) is unchanged.
+Speed options added 2026-10-09, ON by default, each with an off switch (same
+maths; only fp32 rounding differs, so runs are not bit-for-bit the old ones):
+--fast-dwconv (QuartzNet: depthwise convs' backward rebuilt from forward convs
+on MPS, masks built once per forward), --fused-adamw (one fused AdamW kernel
+instead of a per-tensor loop on MPS) and --eval-device mps (dev evals on the
+training model on MPS, padded to the training bucket shapes: ~110 s instead
+of ~20 min on a CPU copy). general2 recipe, 100 steps: 18.5 -> 55.1 audio-s/s.
 """
 import argparse
 import copy
@@ -100,6 +106,13 @@ GENERAL2_MIX = [
 MIXES = {'run2': TRAIN_MIX, 'broad': BROAD_MIX, 'expanded': EXPANDED_MIX, 'general': GENERAL_MIX,
          'general2': GENERAL2_MIX}
 NOISE_ONLY = '__noise_only__'  # mix entry name for data.NoiseOnlyStore
+
+
+def noise_source(name):
+    """--noise-pool / --noise-only-pool value -> the noise store or pool."""
+    from data import NoisePool
+    musan = Store('musan-noise')
+    return NoisePool([musan, Store('demand-noise-train')]) if name == 'musan+demand' else musan
 DEV_SETS = [('ami-sdm-validation', 400), ('ami-ihm-validation', 400), ('librispeech-dev-clean', 400)]
 # --dev g2 adds the same AMI subsets passed through the simulated glasses
 # channel (make_g2_stores.py), so selection also rewards glasses robustness.
@@ -231,7 +244,9 @@ def main():
                    help='padded audio seconds per optimizer step (split over --accum micro-batches)')
     p.add_argument('--max-items', type=int, default=32, help='items per optimizer step')
     p.add_argument('--accum', type=int, default=1, help='micro-batches per optimizer step')
-    p.add_argument('--workers', type=int, default=5)
+    p.add_argument('--workers', type=int, default=5,
+                   help='DataLoader workers; 2 measured the same speed as 5 with ~1 GB less memory '
+                        '(general2 recipe, 2026-10-09), below 2 the loader can fall behind')
     p.add_argument('--eval-hours', type=float, default=26.2, help='audio hours between dev evals')
     p.add_argument('--first-eval-hours', type=float, default=12.6)
     p.add_argument('--save-steps', type=int, default=250)
@@ -249,6 +264,16 @@ def main():
                    help='background noise for augmentation; +demand adds DEMAND everyday ambiences')
     p.add_argument('--noise-only-share', type=float, default=0.0,
                    help='share of training items that are pure noise with an EMPTY transcript (e.g. 0.04)')
+    p.add_argument('--noise-only-pool', choices=['same', 'musan', 'musan+demand'], default='same',
+                   help='noise the noise-only clips are cut from; same = --noise-pool')
+    p.add_argument('--fast-dwconv', choices=['on', 'off'], default='on',
+                   help='QuartzNet: custom backward for the stride-1 depthwise convs on MPS (~2.8x faster '
+                        'steps) and masks built once per forward; off = the stock autograd path')
+    p.add_argument('--fused-adamw', choices=['on', 'off'], default='on',
+                   help='AdamW as one fused kernel (MPS runs a per-tensor loop otherwise)')
+    p.add_argument('--eval-device', choices=['mps', 'cpu'], default='mps',
+                   help='--device mps only: mps = dev eval of the training model on MPS, padded to the '
+                        'training bucket shapes (~110 s); cpu = a CPU copy (~20 min). Citrinet always uses cpu')
     a = p.parse_args()
     train_mix = MIXES[a.mix]
     dev_sets = {'g2': G2_DEV_SETS, 'broad': BROAD_DEV_SETS}.get(a.dev, DEV_SETS)
@@ -275,12 +300,18 @@ def main():
     else:
         model = QuartzNet(config).load_nemo(template).to(device)
         encoder, blank, reduction = None, BLANK, 2
+    # Citrinet keeps its own plain blocks, and its MPS eval parity is unchecked.
+    quartznet = isinstance(model, QuartzNet)
+    custom_dw = model.set_fast(a.fast_dwconv == 'on') if quartznet else 0
+    eval_bucket = (micro_seconds, micro_items) if device.type == 'mps' and a.eval_device == 'mps' \
+        and quartznet else None
+    fused = True if a.fused_adamw == 'on' else None  # None: torch's default (a per-tensor loop on MPS)
     if a.optimizer == 'novograd':
         optimizer = NovoGrad(model.parameters(), lr=a.lr, betas=tuple(a.betas or (0.95, 0.5)),
                              weight_decay=a.weight_decay)
     else:
         optimizer = torch.optim.AdamW(model.parameters(), lr=a.lr, betas=tuple(a.betas or (0.9, 0.999)),
-                                      weight_decay=a.weight_decay)
+                                      weight_decay=a.weight_decay, fused=fused)
 
     step, best = 0, None
     # Rollback guard: after `patience` evals worse than the best, restore the
@@ -291,6 +322,8 @@ def main():
         blob = torch.load(resume, weights_only=False, map_location='cpu')
         model.load_state_dict(blob['model'])
         optimizer.load_state_dict(blob['optimizer'])
+        if a.optimizer == 'adamw':
+            set_fused(optimizer, fused)
         step, best = blob['step'], blob.get('best')
         guard.update(blob.get('guard', {}))
         emit(event='resumed', step=step, best=best, guard=guard)
@@ -298,25 +331,27 @@ def main():
          target_hours=a.target_hours, lr=a.lr, optimizer=a.optimizer, betas=a.betas,
          weight_decay=a.weight_decay, mix=train_mix, dev=dev_sets, g2_prob=a.g2_prob,
          rollback=a.rollback, amp=a.amp, noise_pool=a.noise_pool, noise_only_share=a.noise_only_share,
-         empty_chars_per_frame=EMPTY_CHARS_PER_FRAME,
-         device=str(device))
+         noise_only_pool=a.noise_only_pool, empty_chars_per_frame=EMPTY_CHARS_PER_FRAME,
+         device=str(device), fast_dwconv=a.fast_dwconv, custom_dw_convs=custom_dw,
+         fused_adamw=a.fused_adamw, adamw_fused=optimizer.param_groups[0].get('fused'),
+         eval_device=('mps' if eval_bucket else 'cpu') if device.type == 'mps' else str(device),
+         eval_bucket=eval_bucket, workers=a.workers)
 
     def save_resume():
         torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
                     'step': step, 'best': best, 'guard': guard}, out / 'resume.pt.tmp')
         (out / 'resume.pt.tmp').replace(resume)
 
-    from data import NoisePool, NoiseOnlyStore
+    from data import NoiseOnlyStore
     if a.g2_prob:  # build the LC3 library once here, not in every DataLoader worker
         import lc3codec
         lc3codec._load()
-    noise = Store('musan-noise')
-    if a.noise_pool == 'musan+demand':
-        noise = NoisePool([noise, Store('demand-noise-train')])
+    noise = noise_source(a.noise_pool)
     augmenter = Augmenter(noise, Store('musan-speech'), Store('rirs'), g2_prob=a.g2_prob)
+    only_noise = noise if a.noise_only_pool == 'same' else noise_source(a.noise_only_pool)
     if a.noise_only_share > 0:
         train_mix = train_mix + [(NOISE_ONLY, a.noise_only_share, False)]
-    stores = [NoiseOnlyStore(noise) if name == NOISE_ONLY else Store(name) for name, _, _ in train_mix]
+    stores = [NoiseOnlyStore(only_noise) if name == NOISE_ONLY else Store(name) for name, _, _ in train_mix]
     dataset = TrainSet(stores, [f for _, _, f in train_mix], template, augmenter, seed=step + 1,
                        **({'encoder': encoder} if encoder else {}))
     total_steps = (a.benchmark_steps * a.accum) or 10 ** 9
@@ -340,7 +375,7 @@ def main():
     # Score the starting point first so "best" can never be worse than it.
     if best is None and not a.benchmark_steps:
         best = run_eval(model, template, config, out, step, best, emit, device, guard, a.patience, dev_sets,
-                        rollback=a.rollback == 'on')
+                        rollback=a.rollback == 'on', bucket=eval_bucket)
         guard['last_eval_audio'] = -(a.eval_hours - a.first_eval_hours) * 3600
         save_resume()
     guard.setdefault('last_eval_audio', 0.0)
@@ -430,18 +465,32 @@ def main():
 
         if guard['audio_seconds'] - guard['last_eval_audio'] >= a.eval_hours * 3600:
             best = run_eval(model, template, config, out, step, best, emit, device, guard, a.patience, dev_sets,
-                        rollback=a.rollback == 'on')
+                            rollback=a.rollback == 'on', bucket=eval_bucket)
             guard['last_eval_audio'] = guard['audio_seconds']
             save_resume()
             train_mode(model)
 
     save_checkpoint(model, template, config, out / 'last')
     best = run_eval(model, template, config, out, step, best, emit, device, guard, a.patience, dev_sets,
-                        rollback=a.rollback == 'on')
+                    rollback=a.rollback == 'on', bucket=eval_bucket)
     save_resume()
     emit(event='finished', step=step, best=best, audio_hours=round(guard['audio_seconds'] / 3600, 2))
     log.close()
     os._exit(0)
+
+
+def set_fused(optimizer, fused):
+    """resume.pt brings back the param groups it was saved with, so a run saved
+    before --fused-adamw (or with the other setting) would silently keep its
+    old AdamW kernel. Re-apply the flag and keep each state['step'] where that
+    kernel wants it: fused float32 on the parameter's device, the per-tensor
+    loop on the CPU (it reads the step back every update)."""
+    for group in optimizer.param_groups:
+        group['fused'] = fused
+        for p in group['params']:
+            state = optimizer.state.get(p, {})
+            if 'step' in state:
+                state['step'] = state['step'].to(device=p.device if fused else 'cpu', dtype=torch.float32)
 
 
 def train_mode(model):
@@ -455,10 +504,19 @@ def train_mode(model):
 
 
 def run_eval(model, template, config, out, step, best, emit, device, guard, patience, dev_sets=DEV_SETS,
-             rollback=True):
+             rollback=True, bucket=None):
     model.eval()
     t0 = time.time()
-    if device.type == 'mps':
+    if device.type == 'mps' and bucket:
+        # --eval-device mps: the training model itself, with the dev items
+        # batched and padded to the training micro-batch shapes, so MPS only
+        # sees graphs training has already cached (~110 s vs ~20 min on CPU).
+        # Same items and dither stream; per-set WER was bit-identical at step 0
+        # and within one near-tie word per set on trained weights. No
+        # torch.mps.empty_cache() afterwards: the eval fits in training's pool,
+        # and emptying it only made training regrow it (+0.4 GB that stayed).
+        results = evaluate_stores(model, template, dev_sets, device, bucket=bucket)
+    elif device.type == 'mps':
         # Evaluate a CPU copy: eval batches have many distinct shapes, each of
         # which would otherwise leave a cached graph behind on MPS. 30 s batches
         # instead of 200 s: identical WER (padding is masked), ~3x faster on CPU.
@@ -472,7 +530,8 @@ def run_eval(model, template, config, out, step, best, emit, device, guard, pati
     metrics = {'score': score, 'step': step, 'audio_hours': round(guard['audio_seconds'] / 3600, 2),
                'sets': {k: v['wer'] for k, v in results.items()}}
     emit(event='eval', step=step, score=round(score, 4), eval_s=round(time.time() - t0),
-         audio_hours=metrics['audio_hours'], **{k: round(v['wer'], 4) for k, v in results.items()})
+         audio_hours=metrics['audio_hours'], mem_gb=round(footprint_gb(), 2),
+         **{k: round(v['wer'], 4) for k, v in results.items()})
     # Every evaluated point is kept (~76 MB each for the 15x5).
     snapshot = out / 'evals' / f'step_{step:06d}'
     save_checkpoint(model, template, config, snapshot)

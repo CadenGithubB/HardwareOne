@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """DEMAND everyday noise -> training and held-out test noise stores.
 
-  prepare_noise.py [--src /Volumes/Audiodrive/stt/demand]
+  prepare_noise.py [--src $STT_ROOT/demand]
 
 DEMAND (Thiemann et al. 2013, CC-BY 4.0, zenodo 1227121): 17 real
 environments (kitchen, living room, washing, field, park, river, hallway,

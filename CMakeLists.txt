@@ -723,19 +723,30 @@ endif()
 # copies (never edits to the shared SDK): `bt` carries the upstream TinyCrypt
 # ECC fix that BLE Secure Connections needs on P4 (esp-idf#19002), and
 # `esp_driver_jpeg` fixes allocation/interrupt unwind and marks the hardware
-# JPEG decoder as qualified. tools/p4/prepare_sdk.sh stages both, ignored by git.
+# JPEG decoder as qualified. The managed espressif/esp-dl 3.3.12 is replaced
+# the same way (tools/p4/esp-dl-3.3.12-hw1.patch: P4 pointwise-conv tiles,
+# cache-blocked dual-core depthwise convolution, conv args prepared in one
+# pass before a model runs, ReLU-shaped int8 LUTs run as a vector max, and an
+# allocator hook for model metadata, which the local STT runtime points at
+# PSRAM);
+# components/hardwareone/idf_component.yml names it as the dependency's
+# override_path, so ESP-SR's edge to esp-dl uses it too. A plain
+# EXTRA_COMPONENT_DIRS entry is not enough there: the component manager treats
+# the first local component with a manifest as the project's main component
+# and would ignore this one. tools/p4/prepare_sdk.sh stages all three, ignored
+# by git.
 if(_inferred_target STREQUAL "esp32p4")
     set(_hw1_p4_sdk_dir "${CMAKE_CURRENT_SOURCE_DIR}/.sdk-overrides/esp32p4")
-    foreach(_hw1_p4_component IN ITEMS bt esp_driver_jpeg)
+    foreach(_hw1_p4_component IN ITEMS bt esp_driver_jpeg espressif__esp-dl)
         if(NOT EXISTS "${_hw1_p4_sdk_dir}/${_hw1_p4_component}/CMakeLists.txt")
             message(FATAL_ERROR
-                "ESP32-P4 builds need the patched ESP-IDF component "
+                "ESP32-P4 builds need the patched component "
                 "'${_hw1_p4_component}' in ${_hw1_p4_sdk_dir}. With ESP-IDF 5.5.5 "
                 "exported, run:\n    tools/p4/prepare_sdk.sh")
         endif()
         list(APPEND EXTRA_COMPONENT_DIRS "${_hw1_p4_sdk_dir}/${_hw1_p4_component}")
     endforeach()
-    message(STATUS "ESP32-P4 SDK overrides: ${_hw1_p4_sdk_dir}/{bt,esp_driver_jpeg}")
+    message(STATUS "ESP32-P4 SDK overrides: ${_hw1_p4_sdk_dir}/{bt,esp_driver_jpeg,espressif__esp-dl}")
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
@@ -750,6 +761,27 @@ idf_build_set_property(HW1_FEATURE_CONFIG_FILE "${HW1_FEATURE_CONFIG_FILE}")
 if(IDF_TARGET STREQUAL "esp32s3")
     set(_hw1_dependencies_lock
         "${CMAKE_CURRENT_SOURCE_DIR}/dependencies.lock")
+elseif(IDF_TARGET STREQUAL "esp32p4")
+    # The ESP-DL override is a local component, which the component manager
+    # records in the lock by its absolute path (it has no relative form). P4
+    # builds therefore solve against a copy in the build directory, seeded from
+    # the tracked dependencies.lock.esp32p4 and re-seeded whenever that file
+    # changes, so a P4 build never writes a machine path into the tree. The
+    # tracked file keeps the registry versions the solve starts from (its
+    # espressif/esp-dl entry is the 3.3.12 package the override is staged
+    # from); a P4 dependency change is made there.
+    set(_hw1_tracked_lock "${CMAKE_CURRENT_SOURCE_DIR}/dependencies.lock.esp32p4")
+    set(_hw1_dependencies_lock "${CMAKE_BINARY_DIR}/dependencies.lock.esp32p4")
+    set(_hw1_lock_seed "${CMAKE_BINARY_DIR}/dependencies.lock.esp32p4.seed")
+    file(SHA256 "${_hw1_tracked_lock}" _hw1_tracked_lock_sha)
+    set(_hw1_seeded_sha "")
+    if(EXISTS "${_hw1_lock_seed}")
+        file(READ "${_hw1_lock_seed}" _hw1_seeded_sha)
+    endif()
+    if(NOT EXISTS "${_hw1_dependencies_lock}" OR NOT _hw1_seeded_sha STREQUAL _hw1_tracked_lock_sha)
+        configure_file("${_hw1_tracked_lock}" "${_hw1_dependencies_lock}" COPYONLY)
+        file(WRITE "${_hw1_lock_seed}" "${_hw1_tracked_lock_sha}")
+    endif()
 else()
     set(_hw1_dependencies_lock
         "${CMAKE_CURRENT_SOURCE_DIR}/dependencies.lock.${IDF_TARGET}")

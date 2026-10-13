@@ -40,11 +40,11 @@
 #define ENABLE_BATTERY_MONITOR 1
 
 // microSD (SDMMC slot 0) is implemented but not yet qualified with a card on
-// this board. Set both to 1 to try it; see docs/P4X_EYE_PERIPHERALS.md.
+// this board. Select ENABLE_SDMMC_CARD=1 in a saved configuration to try it;
+// System_BuildConfig.h derives ENABLE_SD_CARD from that selection.
+// See docs/P4X_EYE_PERIPHERALS.md.
 #undef ENABLE_SDMMC_CARD
 #define ENABLE_SDMMC_CARD 0
-#undef ENABLE_SD_CARD
-#define ENABLE_SD_CARD 0
 
 // --- Radio (onboard ESP32-C6 through ESP-Hosted) -----------------------------
 #undef NETWORK_FEATURE_LEVEL
@@ -100,6 +100,11 @@
 // Fully local transcription on the P4 (no Pi/UART, Wi-Fi or cloud).
 #undef ENABLE_LOCAL_STT
 #define ENABLE_LOCAL_STT 1
+// Session speaker labels: saved transcript lines become "[Person N] text" when
+// "/sd/STT Models/speaker.spk" is on the card (without it nothing changes).
+// Labelling runs in a background task; captions never wait for it.
+#undef ENABLE_STT_SPEAKER_LABELS
+#define ENABLE_STT_SPEAKER_LABELS 1
 // Private spoken notes (ring hold on a HW1 lens page, Notes page, `note` CLI),
 // transcribed locally and saved under /stt/u<id>/notes/.
 #undef ENABLE_QUICKNOTE

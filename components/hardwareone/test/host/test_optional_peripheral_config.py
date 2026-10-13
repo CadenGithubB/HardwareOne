@@ -9,7 +9,7 @@ import unittest
 SOURCE = pathlib.Path(__file__).resolve().parents[2]
 
 class PeripheralConfig(unittest.TestCase):
-    def check_profile(self, flags, checks, succeeds=True):
+    def check_profile(self, flags, checks, succeeds=True, board_profile=None):
         compiler = shutil.which('c++')
         self.assertIsNotNone(compiler)
         with tempfile.TemporaryDirectory() as temp:
@@ -18,10 +18,17 @@ class PeripheralConfig(unittest.TestCase):
                                            for key, value in flags.items()))
             source = '#include "System_BuildConfig.h"\n'
             source += '\n'.join(f'static_assert({expr}, "{expr}");' for expr in checks)
+            # A saved feature selection follows the actual board profile, just
+            # as it does in the firmware compiler. Older assembly-only cases
+            # continue to use their complete deployment override.
+            if board_profile:
+                headers = [f'-DHW1_BOARD_CONFIG_HEADER="{board_profile}"',
+                           f'-DHW1_FEATURE_CONFIG_HEADER="{override}"']
+            else:
+                headers = [f'-DHW1_DEPLOYMENT_CONFIG_HEADER="{override}"']
             result = subprocess.run([compiler, '-x', 'c++', '-std=c++17', '-fsyntax-only',
                                      '-I', str(SOURCE),
-                                     '-DCONFIG_IDF_TARGET_ESP32P4=1',
-                                     f'-DHW1_DEPLOYMENT_CONFIG_HEADER="{override}"', '-'],
+                                     '-DCONFIG_IDF_TARGET_ESP32P4=1', *headers, '-'],
                                     input=source, text=True, capture_output=True)
             if succeeds:
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -52,6 +59,19 @@ class PeripheralConfig(unittest.TestCase):
                             'EYE_LCD_SCLK == 17', 'GPIO_ENCODER_PIN_A == 48',
                             'EYE_BUTTON_1_PIN == 3', 'EYE_BUTTON_2_PIN == 4',
                             'EYE_BUTTON_3_PIN == 5'])
+
+    def test_p4_board_sd_saved_selection(self):
+        board = SOURCE.parents[1] / 'boards/p4x_eye.features.h'
+        for selected in (None, 0, 1):
+            with self.subTest(sdmmc=selected):
+                flags = {} if selected is None else {'ENABLE_SDMMC_CARD': selected}
+                expected = 0 if selected is None else selected
+                self.check_profile(flags, [
+                    f'ENABLE_SDMMC_CARD == {expected}',
+                    f'ENABLE_SD_CARD == {expected}',
+                    'SD_MMC_SLOT == 0',
+                    'SD_MMC_CLK_PIN == 43', 'SD_MMC_CMD_PIN == 44'],
+                    board_profile=board)
 
     def test_board_buttons_can_be_forced_off(self):
         profile = self.profile(wheel=3)

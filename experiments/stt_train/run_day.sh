@@ -2,14 +2,15 @@
 # Daytime continuation (run3): fine-tune from run2's best with more data as it
 # lands, until the deadline; then report against the baseline and run2.
 # Usage: caffeinate -dims nohup run_day.sh HH:MM &
+export STT_ROOT=${STT_ROOT:?set STT_ROOT to the STT data root (speech stores, work, logs)}
 set -u
 DEADLINE=${1:-18:00}
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE"
 P=${HW1_STT_PYTHON:-$PWD/../stt_p4/private/export-venv/bin/python}
-export PYTHONPATH=/Volumes/USB2/stt/pydeps
+export PYTHONPATH=$STT_ROOT/pydeps
 export PYTORCH_ENABLE_MPS_FALLBACK=1
-ROOT=/Volumes/USB2/stt
+ROOT=$STT_ROOT
 LOG=$ROOT/logs/day.log
 S=$ROOT/stores
 DL=$ROOT/logs/download.log
@@ -55,13 +56,14 @@ if [ -d "$RUN/best" ]; then
   say "final evaluation of run3 best"
   $P evaluate.py --ckpt "$RUN/best" --sets $TESTS voxpopuli-validation --examples 12 --out "$ROOT/work/final-run3.json" >> "$LOG" 2>&1
   $P - <<'PY' >> "$LOG" 2>&1
+import os
 import json
 load = lambda p: json.load(open(p))['results']
-b, r2, r3 = load('/Volumes/USB2/stt/work/baseline.json'), load('/Volumes/USB2/stt/work/final.json'), load('/Volumes/USB2/stt/work/final-run3.json')
+b, r2, r3 = load(os.environ['STT_ROOT'] + '/work/baseline.json'), load(os.environ['STT_ROOT'] + '/work/final.json'), load(os.environ['STT_ROOT'] + '/work/final-run3.json')
 f = lambda d, k: f"{d[k]['wer']*100:.1f}%" if k in d else '-'
 lines = ['# Day run (run3) report', '', '| Test set | Original | Run 2 (on P4) | Run 3 |', '|---|---:|---:|---:|']
 lines += [f'| {k} | {f(b, k)} | {f(r2, k)} | {f(r3, k)} |' for k in r3]
-open('/Volumes/USB2/stt/work/REPORT-run3.md', 'w').write('\n'.join(lines) + '\n')
+open(os.environ['STT_ROOT'] + '/work/REPORT-run3.md', 'w').write('\n'.join(lines) + '\n')
 print('\n'.join(lines))
 PY
 fi

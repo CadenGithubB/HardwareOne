@@ -12,7 +12,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--sanitize',action='store_true');a=p.parse_args()
     source=(COMPONENT/'System_TranscriptionUI.cpp').read_text()
     header=(COMPONENT/'System_Dictation.h').read_text()
-    types=extract_block((COMPONENT/'System_Transcript.h').read_text(),'struct TranscriptStatus')+';\n'
+    types='#include "System_STTMetadata.h"\n'+extract_block((COMPONENT/'System_Transcript.h').read_text(),'struct TranscriptStatus')+';\n'
     for name in ('enum class DictationState','struct DictationSnapshot','struct DictationTextReceipt','enum class DictationAppPurpose','struct DictationAppLease','struct DictationAppSnapshot'):
         types+=extract_block(header,name)+';\n'
     parser=extract_block((COMPONENT/'System_Command.h').read_text(),'class CommandArgs')+';\nconst String CommandArgs::empty_;\n'
