@@ -12,6 +12,7 @@
 #if ENABLE_WIFI
 
 #include "System_WiFi.h"
+#include "System_ESPNow.h"  // espnowOwnsRadio — radio ownership (stub when ESP-NOW is compiled out)
 #include "network/wifi/System_WiFiNetworksInternal.h"
 #include "System_Settings.h"      // Unified settings persistence
 #include "System_Debug.h"  // For DEBUG_WIFIF and BROADCAST_PRINTF macros
@@ -518,8 +519,8 @@ const char* cmd_wifiadd(const String& originalCmd) {
   int pri = a.argInt(2, 0);
   if (pri <= 0 && a.has(2)) pri = 1;
   bool hid = a.argBool(3, ssid.length() == 0);
-  // Networks already in memory from settings.json. upsert fails for exactly
-  // four reasons — distinguish them, or a full list shows the blank-SSID text
+  // Networks already in memory from settings.json. upsert fails for several
+  // distinct reasons — distinguish them, or a full list shows the blank-SSID text
   // (the real "list full" line only went to broadcastOutput, which G2/web
   // callers reading the return value never see).
   if (!upsertWiFiNetwork(ssid, pass, pri, hid)) {
@@ -540,6 +541,10 @@ const char* cmd_wifiadd(const String& originalCmd) {
     }
     if (ssid.indexOf('"') >= 0 || pass.indexOf('"') >= 0) {
       return "Error: WiFi name and password cannot contain a double-quote (\")";
+    }
+    if (wifiNetworkFieldProblem(ssid.c_str()) != WifiFieldProblem::None ||
+        wifiNetworkFieldProblem(pass.c_str()) != WifiFieldProblem::None) {
+      return "Error: WiFi name and password cannot contain control characters";
     }
     snprintf(getDebugBuffer(), 1024,
              "Error: saved-network list is full (%d) — remove one with wifirm first", MAX_WIFI_NETWORKS);
@@ -645,18 +650,18 @@ bool connectToBestWiFiNetwork(uint32_t budgetMs, WifiConnectOrigin origin) {
   const WifiConnectBounds bounds = wifiConnectBounds(budgetMs, origin);
   // Defensively re-arm the STA interface. If a caller previously did
   // WiFi.disconnect(true) / WIFI_OFF, WiFi.status() would report WL_STOPPED for
-  // the whole timeout. When ESP-NOW owns the radio it is already up in
-  // WIFI_AP_STA — keep that (WIFI_STA would drop the hidden AP that parks the
-  // ESP-NOW channel); otherwise ensure STA. Do this even with no saved networks:
-  // an explicit openwifi still means "enable WiFi" and must leave Scan usable.
-  extern bool isEspNowInitialized();
+  // the whole timeout. When ESP-NOW owns the radio (running, or a close still
+  // pending) it is already up in WIFI_AP_STA — keep that (WIFI_STA would drop
+  // the hidden AP that parks the ESP-NOW channel); otherwise ensure STA. Do this
+  // even with no saved networks: an explicit openwifi still means "enable WiFi"
+  // and must leave Scan usable.
   {
     WifiRadioMutationGuard radioGuard;
     if (!radioGuard.acquired()) {
       WARN_WIFIF("[WiFi] radio busy; cannot re-arm STA for connection");
       return false;
     }
-    if (!WiFi.mode(isEspNowInitialized() ? WIFI_AP_STA : WIFI_STA)) {
+    if (!WiFi.mode(espnowOwnsRadio() ? WIFI_AP_STA : WIFI_STA)) {
       ERROR_WIFIF("[WiFi] failed to re-arm STA mode for connection");
       return false;
     }
@@ -846,19 +851,11 @@ const char* cmd_wifidisconnect(const String& argsInput) {
   // WiFi back exactly as configured. openwifi re-arms it.
   WiFi.setAutoReconnect(false);
 
-  extern bool isEspNowInitialized();
-  bool espnowHoldsRadio = isEspNowInitialized();
-#if ENABLE_ESPNOW
-  // deinitEspNow clears `initialized` BEFORE its bounded waits, so a closeespnow
-  // that timed out leaves espnow_task/espnow_tx and the esp_now driver alive with
-  // isEspNowInitialized() == false. Powering the radio down under them would
-  // esp_wifi_deinit() beneath a live esp_now_send(). radioPowerOff already pairs
-  // these two checks; match it.
-  {
-    extern bool espnowShutdownPending();
-    if (espnowShutdownPending()) espnowHoldsRadio = true;
-  }
-#endif
+  // A closeespnow that timed out leaves espnow_task/espnow_tx and the esp_now
+  // driver alive with isEspNowInitialized() == false; powering the radio down
+  // under them would esp_wifi_deinit() beneath a live esp_now_send(). The
+  // owner's predicate counts that state as holding the radio.
+  const bool espnowHoldsRadio = espnowOwnsRadio();
   if (espnowHoldsRadio) {
     // ESP-NOW owns the radio — drop the association but KEEP the radio up (mode,
     // driver, PS untouched). The WIFI_STA_DISCONNECTED event re-pins the ESP-NOW
@@ -963,7 +960,6 @@ bool wifiRadioOn() { return wifiRadioState() != WIFI_RADIO_OFF; }
 // ---------------------------------------------------------------------------
 #if ENABLE_ESPNOW
 extern bool isEspNowInitialized();
-extern bool espnowShutdownPending();
 extern const char* cmd_espnow_init(const String&);
 extern const char* cmd_espnow_deinit(const String&);
 #endif
@@ -1003,7 +999,7 @@ static RadioPowerOffResult radioPowerOff() {
   // in AP_STA, so we still have to power it down explicitly below. A bounded
   // quiescence failure retains live/retryable ESP-NOW resources; never kill the
   // WiFi driver underneath them or falsely report airplane mode success.
-  if (isEspNowInitialized() || espnowShutdownPending()) {
+  if (espnowOwnsRadio()) {
     const char* closeResult = cmd_espnow_deinit("");
     if (!closeResult || strstr(closeResult, "successfully") == nullptr) {
       gRadioForcedOff = false;
@@ -1522,8 +1518,9 @@ static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
   DEBUG_WIFIF("[connectWiFiIndex] Current WiFi mode before reset: %d", WiFi.getMode());
   DEBUG_WIFIF("[connectWiFiIndex] Using ESP-IDF WiFi API for connection...");
 
-  extern bool isEspNowInitialized();
-  const bool espnowHoldsRadio = isEspNowInitialized();
+  // A pending ESP-NOW close still holds the radio: stopping or deinitializing
+  // the driver below would run beneath its retained runtime.
+  const bool espnowHoldsRadio = espnowOwnsRadio();
 
   // Step 1: Stop any existing connection
   esp_err_t err = esp_wifi_disconnect();
@@ -2578,15 +2575,16 @@ bool ensureWiFiInitialized() {
     WiFi.onEvent(wifiEventLogger, ARDUINO_EVENT_WIFI_STA_GOT_IP);
     WiFi.onEvent(wifiEventLogger, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   }
-  // When ESP-NOW already brought the radio up (WIFI_AP_STA), keep that mode —
-  // WIFI_STA would drop the hidden AP that parks the ESP-NOW channel. This lazy
-  // init only owns the STA-side event handler + latch in that case.
-  extern bool isEspNowInitialized();
-  if (!WiFi.mode(isEspNowInitialized() ? WIFI_AP_STA : WIFI_STA)) {
+  // When ESP-NOW holds the radio (WIFI_AP_STA; running or a close still
+  // pending), keep that mode — WIFI_STA would drop the hidden AP that parks the
+  // ESP-NOW channel. This lazy init only owns the STA-side event handler +
+  // latch in that case.
+  const bool espnowHoldsRadio = espnowOwnsRadio();
+  if (!WiFi.mode(espnowHoldsRadio ? WIFI_AP_STA : WIFI_STA)) {
     ERROR_WIFIF("[WiFi] failed to initialize WiFi radio mode");
     return false;
   }
-  DEBUG_WIFIF("[WiFi] Mode set to %s", isEspNowInitialized() ? "WIFI_AP_STA (ESP-NOW up)" : "WIFI_STA");
+  DEBUG_WIFIF("[WiFi] Mode set to %s", espnowHoldsRadio ? "WIFI_AP_STA (ESP-NOW up)" : "WIFI_STA");
   wifiInitialized = true;
   radioGuard.release();
 

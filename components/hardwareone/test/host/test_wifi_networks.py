@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Characterize the production saved-WiFi list helpers with host boundaries."""
+"""Characterize the production saved-WiFi list helpers with host boundaries.
+
+The interactive_fields case covers the interactive field rule: upsertWiFiNetwork
+refuses a double-quote or a control character in the name or password, and
+the structured Add-WiFi line (wifiAddCommandLine) refuses the same fields.
+--component reads the production sources from another tree.
+"""
 
 import argparse
 from pathlib import Path
@@ -16,7 +22,7 @@ WIFI_MODULE = Path("network/wifi")
 CASES = ("validation", "password_update", "capacity", "ordering", "persistence_failure", "remove_final")
 OWNER_CASES = ("stable_ids", "setup_result", "json_roundtrip", "json_load_contract",
                "coherent_connection_copy", "copy_failure", "json_overflow", "init_failure",
-               "removal_commands", "credential_scrub")
+               "removal_commands", "credential_scrub", "interactive_fields")
 JSON_INCLUDE = COMPONENT.parent / "hardwareone_libs" / "ArduinoJson" / "src"
 
 READ_ADAPTER = '''
@@ -100,10 +106,15 @@ def main():
     parser.add_argument("--cxx", default=shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--baseline", type=Path, help="pre-extraction source directory")
+    parser.add_argument("--component", type=Path, default=COMPONENT,
+                        help="components/hardwareone directory to read production sources from")
     args = parser.parse_args()
     if not args.cxx:
         raise SystemExit("a host C++17 compiler is required")
+    component = args.component
     harness = (HERE / "wifi_networks_harness.cpp").read_text()
+    # The interactive field rule and the structured add line (fixed trees).
+    field_owner = "enum class WifiFieldProblem" in (component / WIFI_MODULE / "System_WiFiNetworks.h").read_text()
     with tempfile.TemporaryDirectory(prefix="hw1-wifi-networks-") as temp:
         work = Path(temp)
         (work / "Arduino.h").write_text(string_boundary())
@@ -125,7 +136,7 @@ def main():
         # includes within the module resolve through the same root as firmware.
         (work / WIFI_MODULE).mkdir(parents=True)
         for name in ("System_WiFiNetworks.h", "System_WiFiNetworksInternal.h", "System_WiFiNetworks.cpp"):
-            shutil.copyfile(COMPONENT / WIFI_MODULE / name, work / WIFI_MODULE / name)
+            shutil.copyfile(component / WIFI_MODULE / name, work / WIFI_MODULE / name)
         (work / "System_BuildConfig.h").write_text("#pragma once\n")
         # No platform substitute headers yet: disabled source must need only
         # its public String/JSON types and leave persisted disabled data intact.
@@ -158,17 +169,19 @@ int main() {
             path.parent.mkdir(exist_ok=True)
             path.write_text('#pragma once\n#include "wifi_networks_test_platform.h"\n')
         shutil.copyfile(HERE / "wifi_networks_test_platform.h", work / "wifi_networks_test_platform.h")
-        settings = (COMPONENT / "System_Settings.cpp").read_text()
+        settings = (component / "System_Settings.cpp").read_text()
         secrets = '\n'.join(extract_block(settings, signature) for signature in (
             "void putSecretPreserving(", "void putSecret(", "String getSecret("))
-        wifi = (COMPONENT / "System_WiFi.cpp").read_text()
+        wifi = (component / "System_WiFi.cpp").read_text()
         removal = '\n'.join(extract_block(wifi, signature) for signature in (
             "static uint32_t parseSavedNetworkId(", "static const char* finishWiFiRemoval(",
             "const char* cmd_wifirm(", "static const char* cmd_wifirmid("))
         source.write_text(harness.replace("// INSERT_PRODUCTION_AND_READ_ADAPTER", READ_ADAPTER)
                           .replace("// INSERT_PRODUCTION_SECRET_HELPERS", secrets)
                           .replace("// INSERT_PRODUCTION_REMOVAL_COMMANDS", removal))
-        subprocess.run(command + ["-DWIFI_NETWORKS_OWNER=1", "-DENABLE_WIFI=1", str(work / WIFI_MODULE / "System_WiFiNetworks.cpp"),
+        subprocess.run(command + ["-DWIFI_NETWORKS_OWNER=1", "-DENABLE_WIFI=1",
+                                  f"-DHAVE_WIFI_FIELD_OWNER={int(field_owner)}",
+                                  str(work / WIFI_MODULE / "System_WiFiNetworks.cpp"),
                                   str(source), "-o", str(executable)], check=True, timeout=120)
         for case in CASES + OWNER_CASES:
             subprocess.run([str(executable), case], check=True, timeout=60)

@@ -8,7 +8,10 @@ sequence per saved network), millis()/delay() (a virtual clock), the serial
 console and the command context are doubles. On a tree without the bounded
 hunt the runner compiles the old entry points behind the same adapters, so the
 budget, grace and console-origin checks fail behaviourally rather than at
-compile time.
+compile time. The radio-ownership cases run the connect with ESP-NOW running
+and with a timed-out ESP-NOW close still pending (System_ESPNow's
+espnowOwnsRadio): neither may stop the driver or drop AP_STA beneath it.
+--component replays the suite against another tree.
 """
 from __future__ import annotations
 
@@ -29,9 +32,9 @@ FORWARD_DECLARATIONS = re.compile(
     r"static bool connectWiFi(?:TargetWithin|Target|Id)\([^;{]*\);")
 
 
-def generate() -> str:
-    source = (COMPONENT / "System_WiFi.cpp").read_text()
-    header = (COMPONENT / "System_WiFi.h").read_text()
+def generate(component: Path = COMPONENT) -> str:
+    source = (component / "System_WiFi.cpp").read_text()
+    header = (component / "System_WiFi.h").read_text()
     bounded = "WifiConnectOrigin" in header and "struct WifiConnectBounds" in source
     # The attempt helpers sit after the global-flag definitions; slicing there
     # keeps the forward declarations near the top from matching their markers.
@@ -78,14 +81,14 @@ def generate() -> str:
                    .replace("// INSERT_PRODUCTION_ATTEMPT", "\n\n".join(attempt)))
 
 
-def check_boot_callers() -> None:
+def check_boot_callers(component: Path = COMPONENT) -> None:
     """Connects that run on the boot task pass the BOOT origin, so a console
     keystroke can still skip them; command-context resolution would find no
     context there and leave the console unread."""
-    boot = (COMPONENT / "HardwareOne.cpp").read_text()
+    boot = (component / "HardwareOne.cpp").read_text()
     require("setupWiFi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BOOT);" in boot,
             "the boot connect passes the trial-aware budget and the BOOT origin")
-    setup = (COMPONENT / "System_FirstTimeSetup.cpp").read_text()
+    setup = (component / "System_FirstTimeSetup.cpp").read_text()
     require(setup.count("WifiConnectOrigin::BOOT") == 2,
             "both first-time-setup connects (restore and final) pass the BOOT origin")
     require("    setupWiFi();\n" not in setup and "    connectToBestWiFiNetwork();  //" not in setup,
@@ -97,10 +100,12 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--keep", type=Path, help="write the generated unit here as well")
+    parser.add_argument("--component", type=Path, default=COMPONENT,
+                        help="components/hardwareone directory to read production sources from")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
-    check_boot_callers()
-    unit_text = generate()
+    check_boot_callers(args.component)
+    unit_text = generate(args.component)
     if args.keep:
         args.keep.write_text(unit_text)
     with tempfile.TemporaryDirectory(prefix="hw1-wifi-connect-budget-") as temporary:

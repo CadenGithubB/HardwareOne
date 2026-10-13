@@ -6,7 +6,9 @@ web executor are compiled with boundary mocks. Logger mutations and the G2
 command bridge's authorization machinery have separate owner tests. The ring
 controls run the production ring/health command rows and handlers through a
 registry executor double, so web, OLED and CLI refusals and audit records can
-be compared.
+be compared; `healthstatus force-history` is refused by its own admin row, not
+by its handler. The action body is read by the shared bounded reader
+(WebServer_Utils.cpp webRecvRequestBody), compiled unchanged.
 """
 from __future__ import annotations
 
@@ -41,6 +43,13 @@ def generated(component: Path = COMPONENT, source_dir: Path | None = None,
     glasses = read("G2_Glasses.cpp")
     web = read("WebPage_R1_Health.cpp")
     utils = read("WebServer_Utils.h")
+    # The action body is read by the shared bounded reader (WebServer_Utils),
+    # compiled here unchanged; the page keeps no reader of its own.
+    require("static bool readHealthActionBody(" not in web,
+            "WebPage_R1_Health.cpp keeps a private body reader instead of webRecvRequestBody")
+    body_reader = [extract_block(utils, "enum class WebBodyStatus") + ";",
+                   re.search(r"^WebBodyStatus webRecvRequestBody\([^;{]*\);", utils, re.M)[0],
+                   extract_block(read("WebServer_Utils.cpp"), "WebBodyStatus webRecvRequestBody(")]
     if baseline is not None:
         command_path = baseline / "System_Utils.before.cpp" if baseline.is_dir() else baseline
         command = command_path.read_text()
@@ -79,7 +88,7 @@ def generated(component: Path = COMPONENT, source_dir: Path | None = None,
                   "static void drainLoggingRequest() {\n" +
                   extract_block(glasses, "if (g2HealthConsumeLoggingToggleRequest())") + "\n}",
                   *web_executor,
-                  extract_block(web, "static bool readHealthActionBody("),
+                  *body_reader,
                   extract_block(web, "static String healthFormValue("),
                   extract_block(web, "static esp_err_t healthActionReply("),
                   *optional(web, "static esp_err_t healthCommandReply("),
@@ -94,6 +103,8 @@ def generated(component: Path = COMPONENT, source_dir: Path | None = None,
                   "  sub.toLowerCase();\n" +
                   extract_block(sensor_logging, 'if (sub == "force-history")') +
                   "\n  return \"Error: healthstatus form not modelled by this harness\";\n}",
+                  # The forced refresh's own admin row and handler (fixed trees).
+                  *optional(sensor_logging, "static const char* cmd_healthstatus_forcehistory("),
                   extract_block(sensor_logging, "const CommandEntry healthCommands[] =") + ";",
                   *optional(oled, "static const char* healthNextDesiredToken("),
                   *optional(oled, "static void healthRunCommand("),

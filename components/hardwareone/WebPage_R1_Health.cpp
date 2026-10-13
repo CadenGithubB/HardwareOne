@@ -5,7 +5,7 @@
 #include <Arduino.h>
 
 #include "G2_Ring.h"
-#include "System_Debug.h"             // DEBUG_HTTPF
+#include "System_Debug.h"
 #include "System_MemUtil.h"           // ps_alloc, AllocPref
 #include "System_SensorLogging.h"     // buildHealthStatusJson, health*
 #include "System_User.h"              // AuthContext
@@ -27,28 +27,6 @@ esp_err_t handleR1HealthStatus(httpd_req_t* req) {
   buildHealthStatusJson(buf, kBufSize);
   httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
-}
-
-static bool readHealthActionBody(httpd_req_t* req, char* out, size_t cap) {
-  if (!req || !out || cap < 2 || req->content_len == 0 || req->content_len >= cap)
-    return false;
-  size_t received = 0;
-  int idleTimeouts = 0;  // consecutive recv_wait_timeout results
-  while (received < req->content_len) {
-    const int n = httpd_req_recv(req, out + received, req->content_len - received);
-    if (n <= 0) {
-      // One idle wait is a slow client; two in a row is a half-open socket
-      // that would otherwise pin this httpd worker forever.
-      if (n == HTTPD_SOCK_ERR_TIMEOUT && ++idleTimeouts < 2) continue;
-      DEBUG_HTTPF("[R1Health] action body recv_failed n=%d received=%u of %u",
-                  n, (unsigned)received, (unsigned)req->content_len);
-      return false;
-    }
-    idleTimeouts = 0;
-    received += static_cast<size_t>(n);
-  }
-  out[received] = '\0';
-  return true;
 }
 
 static String healthFormValue(const String& body, const char* key) {
@@ -77,16 +55,16 @@ static esp_err_t healthActionReply(httpd_req_t* req, const char* status,
 // Ring controls and the forced history refresh run as commands under the
 // signed-in identity, so the admin rule, the validate pass and the audit line
 // are the command layer's, the same as from serial, OLED, BLE or MQTT. An
-// admin refusal is 403 (as /api/cli maps it), any other refusal 409. The
-// registry refuses with "Error: Admin access required ..."; `healthstatus
-// force-history` still refuses inside its handler ("Error: admin required ...").
+// admin refusal is 403 (as /api/cli maps it), any other refusal 409. Every
+// admin rule here is a registry row (`ringcontrol`, `healthstatus
+// force-history`), so the registry's "Error: Admin access required ..." is the
+// only refusal text.
 static esp_err_t healthCommandReply(httpd_req_t* req, AuthContext& ctx,
                                     const char* line) {
   String result;
   if (executeUnifiedWebCommand(req, ctx, line, result))
     return healthActionReply(req, "202 Accepted", result.c_str());
-  const bool adminRefusal = result.startsWith("Error: Admin access required") ||
-                            result.startsWith("Error: admin required");
+  const bool adminRefusal = result.startsWith("Error: Admin access required");
   return healthActionReply(req, adminRefusal ? "403 Forbidden" : "409 Conflict",
                            result.c_str());
 }
@@ -95,8 +73,11 @@ esp_err_t handleR1HealthAction(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   if (isGuestUser(ctx.user))
     return healthActionReply(req, "403 Forbidden", "guest access is read-only");
+  // The shared bounded reader (WebServer_Utils): an empty body or one of 160
+  // bytes or more is refused before reading, and two idle receive timeouts in
+  // a row end a half-open request. Every failure is this action's 400.
   char bodyBuf[160];
-  if (!readHealthActionBody(req, bodyBuf, sizeof(bodyBuf)))
+  if (webRecvRequestBody(req, bodyBuf, sizeof(bodyBuf)) != WebBodyStatus::Ok)
     return healthActionReply(req, "400 Bad Request", "invalid action body");
   const String body(bodyBuf);
   const String action = healthFormValue(body, "action");

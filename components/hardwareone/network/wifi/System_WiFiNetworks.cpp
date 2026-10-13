@@ -1,4 +1,5 @@
 #include "System_WiFiNetworks.h"
+#include <stdio.h>  // snprintf — the structured Add-WiFi line (every build)
 
 #if ENABLE_WIFI
 #include "System_WiFiNetworksInternal.h"
@@ -201,6 +202,15 @@ bool upsertWiFiNetwork(const String& ssid, const String& password, int priority,
   if (ssid.indexOf('"') >= 0 || password.indexOf('"') >= 0) {
     ERROR_WIFIF("Refusing to save WiFi network: SSID or password contains a double-quote");
     broadcastOutput("ERROR: WiFi name and password cannot contain a double-quote");
+    return false;
+  }
+  // Control characters (TAB, line breaks, escape bytes) are refused on the same
+  // interactive path: the command line and the audit record do not carry them
+  // faithfully, and no real network name or passphrase needs them.
+  if (wifiNetworkFieldProblem(ssid.c_str()) != WifiFieldProblem::None ||
+      wifiNetworkFieldProblem(password.c_str()) != WifiFieldProblem::None) {
+    ERROR_WIFIF("Refusing to save WiFi network: SSID or password contains a control character");
+    broadcastOutput("ERROR: WiFi name and password cannot contain control characters");
     return false;
   }
 
@@ -407,3 +417,36 @@ unsigned wifiNetworksReadJson(const JsonDocument& doc) {
 WifiConnectionTarget::~WifiConnectionTarget() { secureClearString(password); }
 
 #endif // ENABLE_WIFI
+
+// ---------------------------------------------------------------------------
+// The interactive field rule and the structured Add-WiFi line (every build)
+// ---------------------------------------------------------------------------
+WifiFieldProblem wifiNetworkFieldProblem(const char* text) {
+  for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); p && *p; ++p) {
+    if (*p == '"') return WifiFieldProblem::Quote;
+    if (*p < 0x20 || *p == 0x7F) return WifiFieldProblem::ControlCharacter;
+  }
+  return WifiFieldProblem::None;
+}
+
+WifiFieldProblem wifiAddCommandLine(const String& ssid, const String& password,
+                                    int priority, bool hidden, String& line) {
+  line = "";
+  WifiFieldProblem problem = wifiNetworkFieldProblem(ssid.c_str());
+  if (problem == WifiFieldProblem::None) problem = wifiNetworkFieldProblem(password.c_str());
+  if (problem != WifiFieldProblem::None) return problem;
+  // cmd_wifiadd reads an explicit priority of 0 as 1, so "keep the stored
+  // priority" (priority <= 0 and not hidden) is the two-argument form.
+  char tail[24] = "";
+  if (priority > 0 || hidden)
+    snprintf(tail, sizeof(tail), " %d %d", priority > 0 ? priority : 1, hidden ? 1 : 0);
+  // With neither field able to hold a `"`, each quoted field ends exactly at
+  // its closing quote, so CommandArgs hands cmd_wifiadd the fields unchanged.
+  line += "wifiadd \"";
+  line += ssid;
+  line += "\" \"";
+  line += password;
+  line += "\"";
+  line += tail;
+  return WifiFieldProblem::None;
+}

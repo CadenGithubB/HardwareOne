@@ -6,7 +6,9 @@
 // for the lens applier, which drops it when the user navigated since. An
 // "interleave" runs a scripted user tap at the first page boundary the
 // completion reaches after its checks (or right after it returns), which is
-// the window the race needs.
+// the window the race needs. The CAM toggle submits the camera owner's gated
+// `opencamera async` / `closecamera async` (never powering the camera on the
+// tap task) and persists cameraautostart only after the owner admitted it.
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -126,8 +128,10 @@ static void* lastUserData = nullptr;
 static G2CmdCookie lastCookie{};
 static uint64_t cmdSeq = 0;
 static bool camAuto = false, micAuto = false;
+static bool submitAccepts = true;  // false: the executor queue refuses (no-op)
 bool g2SubmitHijackCommand(const char* line, const G2CmdCookie& cookie,
                            G2HijackCmdCallback callback, void* userData) {
+  if (!submitAccepts) return false;
   submitted.emplace_back(line);
   lastCookie = cookie;              // helper-owned fields, as shipped
   lastCookie.seq = ++cmdSeq;
@@ -164,9 +168,17 @@ static void runApplier() {
 // --- Camera, microphone, audio, settings, registry --------------------------
 bool gCameraRunning = false;
 bool gMicRunning = false;
+// Camera power requested by the page itself on the tap task (no command:
+// no authorization, enable gate or audit). Must stay zero.
 static unsigned camStarts = 0, camStops = 0;
 bool cameraPowerRequestStartAsync() { ++camStarts; return true; }
 bool cameraPowerRequestStopAsync() { ++camStops; return true; }
+// The camera owner behind `opencamera async` / `closecamera async`
+// (System_Camera_DVP): refused while the camera is disabled (start only),
+// admitted when cam_pwr accepts. It runs when a case executes the submitted
+// command on cmd_exec.
+static bool cameraEnabled = true, camPwrAccepts = true;
+static unsigned ownerStarts = 0, ownerStops = 0;
 typedef void (*CameraPowerPostHook)(void);
 static CameraPowerPostHook cameraHook = nullptr;
 void cameraPowerSetPostHook(CameraPowerPostHook hook) { cameraHook = hook; }
@@ -236,6 +248,42 @@ static void reset() {
   micAuto = false;
   camStarts = camStops = 0;
   viewers = 0;
+  submitAccepts = true;
+  cameraEnabled = camPwrAccepts = true;
+  ownerStarts = ownerStops = 0;
+  sG2SensorsCamAsyncStartPending = false;
+}
+
+// cmd_exec runs the camera command the page submitted last: the registry
+// (authorized: the line reaches the owner), the owner's enable gate and
+// cam_pwr admission, then the page's completion with the owner's reply. A
+// disabled camera answers "ERROR: ..." with ok=true, as the executor reports
+// a handler that ran.
+static bool runCameraCommand(bool authorized = true) {
+  if (submitted.empty() || !lastCallback) return false;
+  const std::string line = submitted.back();
+  const bool start = line == "opencamera async";
+  if (!start && line != "closecamera async") return false;
+  const G2HijackCmdCallback done = lastCallback;
+  const G2CmdCookie cookie = lastCookie;
+  void* const userData = lastUserData;
+  bool ok = true;
+  const char* reply;
+  if (!authorized) {
+    ok = false;
+    reply = "Error: Guest accounts are view-only.";
+  } else if (start && !cameraEnabled) {
+    reply = "ERROR: Camera is disabled - run 'cameraenabled 1' first";
+  } else if (!camPwrAccepts) {
+    reply = "Error: camera start not queued (camera power worker unavailable)";
+  } else {
+    ++(start ? ownerStarts : ownerStops);
+    reply = start ? "OK: Camera start queued" : "OK: Camera stop queued";
+  }
+  ctx = Ctx::CmdExec;
+  done(ok, reply, cookie, userData);
+  ctx = Ctx::Tap;
+  return true;
 }
 
 // Sensors list (rows: back, CAM, MIC), then the CAM detail.
@@ -266,8 +314,9 @@ static void cameraPowerDone(bool running) {
 static void testHookVsCameraSettings() {
   reset();
   openCamDetail();
-  tap(1);  // CAM: OFF -> ON (queued to cam_pwr) + cameraautostart on
-  CHECK(camStarts == 1 && camAuto);
+  tap(1);  // CAM: OFF -> `opencamera async`; admitted -> cameraautostart on
+  CHECK(runCameraCommand());
+  CHECK(camStarts == 0 && ownerStarts == 1 && camAuto);
   interleave = [] { dispatchTap(5); };  // "Settings >"
   cameraPowerDone(true);
   const bool hookRenderedOnCamPwr = renderedOn(Ctx::CamPwr);
@@ -442,6 +491,71 @@ static void testLiveLevelCommittedAfterStart() {
   CHECK(gSensorsLevel == SENSORS_LEVEL_LIST && shows(0, "<- Main Menu"));
 }
 
+// The CAM toggle is a command: the owner's gated asynchronous start/stop runs
+// on cmd_exec, and cameraautostart follows only once the owner admitted it.
+static void testCameraToggleIsACommand() {
+  reset();
+  openCamDetail();
+  const size_t rendersBefore = renders.size();
+  tap(1);  // CAM: OFF -> ON
+  const bool tapPoweredCameraInline = camStarts != 0 || camStops != 0;
+  CHECK(!tapPoweredCameraInline);
+  CHECK(submitted == std::vector<std::string>{"opencamera async"} && lastCallback != nullptr);
+  CHECK(!camAuto);  // nothing persisted before the owner answered
+  CHECK(sG2SensorsCamAsyncStartPending && renders.size() == rendersBefore);
+  CHECK(runCameraCommand());
+  CHECK(ownerStarts == 1 && submitted.back() == "cameraautostart on" && camAuto);
+  CHECK(!renderedOn(Ctx::CmdExec) && lensQueue.empty());  // the post-hook redraws
+  cameraPowerDone(true);
+  CHECK(!sG2SensorsCamAsyncStartPending && shows(1, "CAM: ON"));
+  tap(1);  // CAM: ON -> OFF
+  CHECK(camStops == 0 && submitted.back() == "closecamera async");
+  CHECK(camAuto);
+  CHECK(runCameraCommand());
+  CHECK(ownerStops == 1 && submitted.back() == "cameraautostart off" && !camAuto);
+}
+
+// A refused start (camera disabled, or the caller not authorized) persists
+// nothing, clears the pending start and redraws through the lens applier.
+static void testCameraRefusalPersistsNothing() {
+  for (const bool authorized : {true, false}) {
+    reset();
+    cameraEnabled = false;
+    openCamDetail();
+    tap(1);
+    renders.clear();
+    CHECK(runCameraCommand(authorized));
+    CHECK(ownerStarts == 0 && camStarts == 0 && !camAuto);
+    CHECK(submitted == std::vector<std::string>{"opencamera async"});
+    CHECK(!sG2SensorsCamAsyncStartPending);
+    CHECK(!renderedOn(Ctx::CmdExec) && lensQueue.size() == 1);
+    runApplier();
+    settle();
+    CHECK(renders.size() == 1 && renders[0].ctx == Ctx::Applier && shows(1, "CAM: OFF"));
+  }
+  // cam_pwr could not take the request: no preference saved either.
+  reset();
+  camPwrAccepts = false;
+  openCamDetail();
+  tap(1);
+  CHECK(runCameraCommand());
+  CHECK(!camAuto && submitted.size() == 1 && !sG2SensorsCamAsyncStartPending);
+}
+
+// The executor refused the submission: nothing runs inline, the pending start
+// is withdrawn and the tap re-renders the unchanged detail on its own task.
+static void testCameraSubmitRefused() {
+  reset();
+  openCamDetail();
+  submitAccepts = false;
+  renders.clear();
+  tap(1);
+  submitAccepts = true;
+  CHECK(camStarts == 0 && submitted.empty() && !camAuto);
+  CHECK(!sG2SensorsCamAsyncStartPending);
+  CHECK(renders.size() == 1 && renders[0].ctx == Ctx::Tap && shows(1, "CAM: OFF"));
+}
+
 int main() {
   g2RegisterSensorsCameraPowerHook();
   CHECK(cameraHook != nullptr);
@@ -455,6 +569,9 @@ int main() {
   testMicCompletionRefreshes();
   testOutOfRangeListTap();
   testLiveLevelCommittedAfterStart();
+  testCameraToggleIsACommand();
+  testCameraRefusalPersistsNothing();
+  testCameraSubmitRefused();
   if (failures) {
     std::fprintf(stderr, "G2 Sensors redraw: %u of %u checks FAILED\n", failures, checks);
     return 1;
