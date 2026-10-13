@@ -48,9 +48,9 @@ COMMAND_RESPONSE_UUID = "12345678-1234-5678-1234-56789abcde02"
 DEFAULT_DEVICE_NAME = "HardwareOne"
 CATALOG_COMMAND = b"events kinds json"
 MIN_SECURE_CHANNEL_MTU = 230
-EXPECTED_CATALOG_BYTES = 2_877
+EXPECTED_CATALOG_BYTES = 3_149
 EXPECTED_FAMILY_COUNT = 13
-EXPECTED_KIND_COUNT = 164
+EXPECTED_KIND_COUNT = 165
 MAX_LOGIN_TOKEN_BYTES = 64
 NOTIFICATION_QUEUE_CAPACITY = 512
 REASSEMBLY_POLL_SECONDS = 0.25
@@ -223,6 +223,10 @@ def classify_login_reply(payload: bytes, username: str) -> Optional[bool]:
         return True
     if text == "[ble] Authentication failed.":
         raise CompanionError("named BLE login was rejected")
+    if text.startswith("[ble] Login locked out."):
+        # The device's credential attempt table refused the login before
+        # checking the password; the reply names the remaining wait.
+        raise CompanionError(f"BLE login is locked out: {text}")
     if text in {
         "Usage: login <username> <password>",
         "Authentication required. Use: login <username> <password>",

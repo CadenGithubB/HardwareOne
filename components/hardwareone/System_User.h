@@ -225,8 +225,14 @@ bool getUserAuthorizationRole(const String& username, String& roleOut);
 // Does NOT handle the bond-admin identity; see the definition.
 bool getUserRoleAndSuper(const String& who, String& roleOut, bool& isSuperOut);
 
-// Centralized transport authentication management
-bool loginTransport(CommandSource transport, const String& username, const String& password);
+// Centralized transport authentication management. A transport with a fixed
+// attempt-table key (credentialAttemptConsolePeer) is throttled here: while
+// its key is locked the password is not checked, the call returns false and
+// lockoutRetryMsOut (optional) receives the time left on the lock; it stays 0
+// for every other outcome. A wrong password counts toward the lock and a
+// published session clears it.
+bool loginTransport(CommandSource transport, const String& username, const String& password,
+                    unsigned long* lockoutRetryMsOut = nullptr);
 // BLE validates under the users database lock, then binds an exact GATT
 // connection epoch before recording success. This avoids auditing a login as
 // successful when the connection disappeared between validation and bind.
@@ -275,23 +281,32 @@ void recordLoginAttempt(CommandSource transport, const String& user,
 // ============================================================================
 // One owner for login throttling, compiled on every build (with or without
 // the web server) and guarded by its own lock, because httpd, the main loop,
-// the MQTT task and cmd_exec all record attempts. Entries are keyed by
-// transport plus peer: the web uses the client IP, serial "local", the UART
-// link "uart", MQTT "mqtt:<broker>", and a targeted login the caller's own
-// console peer. Check credentialAttemptAllowed() before validating a
-// password and report the outcome with credentialAttemptRecord(); each
-// transport keeps its own reply text and audit line.
+// the MQTT task, espnow_task, the OLED task and cmd_exec all record attempts.
+// Entries are keyed by transport plus peer: the web uses the client IP, serial
+// "local", the UART link "uart", the local display "display" (its login
+// screen, a bare `login` typed on it and its set-pattern re-authentication),
+// MQTT "mqtt:<broker>", Bluetooth "ble", ESP-NOW "espnow" (password remote
+// commands and USER_SYNC's admin check; the bond-token path is not a
+// password), and a targeted login the caller's own console peer. Check
+// credentialAttemptAllowed() before validating a password and report the
+// outcome with credentialAttemptRecord(); each transport keeps its own reply
+// text and audit line.
 //
 // Failures inside LOGIN_ATTEMPT_WINDOW_MS count toward the tiers below. An
 // entry never expires while its lock runs; after a lock it is kept for one
 // more window, so the next failure moves on toward the next tier. A success
 // clears the entry only when every failure in it named the account that
-// succeeded. Serial, UART, the local display and MQTT (one broker at a time)
-// have reserved slots, so network peers cannot crowd them out; network
-// peers (the web today) share a pool of CREDENTIAL_ATTEMPT_POOL_SLOTS where a
-// locked entry is never evicted: when every pool entry is locked, a new peer
-// is refused until one of the locks ends. Times use the 64-bit esp_timer
-// clock, so an ended lock cannot come back when millis() wraps.
+// succeeded. Serial, UART, the local display, MQTT (one broker at a time),
+// Bluetooth and ESP-NOW have reserved slots, so network peers cannot crowd
+// them out. Bluetooth and ESP-NOW use one key per transport rather than one
+// per peer address: a central or peer that rotates its address cannot reset
+// its count or fill the web pool, at the cost that one guessing device locks
+// that transport's password logins for everyone until the lock ends (the
+// same trade as serial and MQTT). Web peers share a pool of
+// CREDENTIAL_ATTEMPT_POOL_SLOTS where a locked entry is never evicted: when
+// every pool entry is locked, a new peer is refused until one of the locks
+// ends. Times use the 64-bit esp_timer clock, so an ended lock cannot come
+// back when millis() wraps.
 #define CREDENTIAL_ATTEMPT_POOL_SLOTS 8
 #define LOGIN_ATTEMPT_WINDOW_MS    (10UL * 60UL * 1000UL)  // 10 minutes
 #define LOGIN_LOCKOUT_TIER1_COUNT  5   // 5  failures -> 30-second lockout
@@ -313,13 +328,24 @@ void credentialAttemptRecord(CommandSource transport, const char* peer,
 uint8_t credentialAttemptFailures(CommandSource transport, const char* peer);
 // Drop the peer's entry (for example when an admin bans the address).
 void credentialAttemptForget(CommandSource transport, const char* peer);
-// The fixed peer name of a console transport: "local" (serial), "uart",
-// "display"; nullptr for every other transport.
+// The fixed peer name of a transport with one reserved key: "local"
+// (serial), "uart", "display", "ble", "espnow"; nullptr for the web and MQTT,
+// whose keys name the client or broker, and for every other transport.
 const char* credentialAttemptConsolePeer(CommandSource transport);
 // Failed credential attempts since boot. Monotonic: not reset by window
 // expiry or by a success. Written under the table's lock; a reader sees a
 // whole 32-bit value.
 uint32_t getTotalFailedLoginCount();
+
+// One throttled password check for a caller that publishes no session
+// (ESP-NOW remote commands and USER_SYNC, the display's set-pattern
+// re-authentication): LockedOut while the key is locked, without validating
+// (retryMsOut, optional, gets the time left); otherwise isValidUser decides
+// and the outcome is recorded for `username` under the key.
+enum class CredentialCheck : uint8_t { Valid, Invalid, LockedOut };
+CredentialCheck checkCredentialAttempt(CommandSource transport, const char* peer,
+                                       const char* username, const char* password,
+                                       unsigned long* retryMsOut = nullptr);
 
 // Force-logout every session belonging to `username` across all transports.
 // Returns count of sessions revoked. Called by user-mutation paths (delete,
@@ -421,13 +447,14 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
                      const String& createdBy, String& errorOut, const String& role = "user");
 
 // Account creation owner. Every path that turns a name and a stored credential
-// into a usable account (useradd, approve) calls this. It validates the name
-// with isValidPublicUsername (reserved names included), requires a non-empty
-// credential hash, and under one filesystem lock refuses a duplicate, allocates
-// an id never issued before, stores the credential and publishes users.json
-// last. Nothing is published when the credential write fails. The caller
-// validates plaintext (isValidPublicPassword) and hashes it; this owner never
-// sees a plaintext password. CALLERS MUST RANK-CHECK FIRST, as for adminCreateUser.
+// into a usable account (useradd, approve, ESP-NOW USER_SYNC) calls this. It
+// validates the name with isValidPublicUsername (reserved names included),
+// requires a non-empty credential hash, and under one filesystem lock refuses
+// a duplicate, allocates an id never issued before, stores the credential and
+// publishes users.json last. Nothing is published when the credential write
+// fails. The caller validates plaintext (isValidPublicPassword) and hashes it;
+// this owner never sees a plaintext password. CALLERS MUST RANK-CHECK FIRST,
+// as for adminCreateUser.
 // A guest account with mustChangePassword is refused (a guest cannot change
 // its own password, so it could never satisfy the forced change).
 //
@@ -441,6 +468,10 @@ struct NewAccount {
   String role = "user";            // unknown values collapse to "user"
   String createdBy;                // provenance recorded in users.json
   bool mustChangePassword = false; // userMustChangePassword until the first change
+  // Record createdAt from the wall clock when it is valid (createdAtSource
+  // "clock"); otherwise, and by default, createdAt stays pending for the
+  // boot-anchor resolver.
+  bool stampCreatedNow = false;
 };
 bool createAccount(const NewAccount& account, uint32_t& idOut, String& errorOut);
 

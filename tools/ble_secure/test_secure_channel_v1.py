@@ -422,7 +422,7 @@ class CompanionBoundaryTests(unittest.TestCase):
         summary = validate_live_catalog(compact)
         self.assertEqual(
             (summary.family_count, summary.kind_count, summary.byte_count),
-            (12, 152, 2877),
+            (13, 165, 3149),
         )
         self.assertEqual(classify_catalog_reply(compact), summary)
 
@@ -468,6 +468,10 @@ class CompanionBoundaryTests(unittest.TestCase):
         )
         with self.assertRaises(CompanionError):
             classify_login_reply(b"[ble] Authentication failed.", "alice")
+        with self.assertRaisesRegex(CompanionError, "locked out"):
+            classify_login_reply(
+                b"[ble] Login locked out. Retry in 30 seconds.", "alice"
+            )
 
     def test_login_command_is_bounded_and_unambiguous(self) -> None:
         self.assertEqual(
@@ -568,7 +572,7 @@ class CompanionUnsolicitedFlowTests(VectorFixture, unittest.IsolatedAsyncioTestC
         )
         self.assertEqual(
             (summary.family_count, summary.kind_count, summary.byte_count),
-            (12, 152, 2877),
+            (13, 165, 3149),
         )
         self.assertEqual(catalog_pump.frames, [])
         client.assert_complete(generation)

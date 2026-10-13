@@ -4200,7 +4200,8 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
   // admin_user/admin_pass carry the RECEIVING device's admin (i.e. THIS device).
   // The sender supplies the target's admin credentials and we validate them
   // against our OWN user store below — the same model as a remote command
-  // (v4_handle_cmd: isValidUser against the local DB, session-encryption required).
+  // (v4_handle_cmd: a throttled check against the local DB, session-encryption
+  // required).
   const char* adminUser  = doc["recv_admin_user"] | "";
   const char* adminPass  = doc["recv_admin_pass"] | "";
   const char* targetUser = doc["target_user"]     | "";
@@ -4213,7 +4214,23 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
     return;
   }
 
-  if (!isValidUser(String(adminUser), String(adminPass))) {
+  // The receiving admin's password counts under ESP-NOW's attempt-table key,
+  // shared with password remote commands; a locked key is refused unchecked.
+  unsigned long lockoutRetryMs = 0;
+  const CredentialCheck adminCheck = checkCredentialAttempt(
+      SOURCE_ESPNOW, credentialAttemptConsolePeer(SOURCE_ESPNOW), adminUser,
+      adminPass, &lockoutRetryMs);
+  if (adminCheck == CredentialCheck::LockedOut) {
+    ERROR_ESPNOWF("[USER_SYNC] Admin auth locked out for '%s' from %s", adminUser, deviceName);
+    broadcastOutput("[ESP-NOW] User sync: Admin authentication locked out");
+    char lockedMsg[64];
+    snprintf(lockedMsg, sizeof(lockedMsg),
+             "Admin authentication locked out. Retry in %lus",
+             (lockoutRetryMs + 999UL) / 1000UL);
+    v4_send_command_response(srcAddr, msgId, false, lockedMsg, strlen(lockedMsg));
+    return;
+  }
+  if (adminCheck != CredentialCheck::Valid) {
     ERROR_ESPNOWF("[USER_SYNC] Admin auth FAILED for '%s' from %s", adminUser, deviceName);
     broadcastOutput("[ESP-NOW] User sync: Admin authentication FAILED");
     v4_send_command_response(srcAddr, msgId, false, "Admin authentication failed", strlen("Admin authentication failed"));
@@ -4241,115 +4258,66 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
     return;
   }
 
-  // Create the user. See original branch for the trust-model rationale —
-  // V3 USER_SYNC has already validated encryption + admin auth above; the
-  // local users.json mutation runs under systemAuth() like every other
-  // users.json mutation in System_User.cpp.
-  {
-    FsLockGuard guard("user_sync.create");
-    AuthContext userSyncCtx = VFS::systemAuth("user_sync.create");
-
-    if (!VFS::existsGuarded(USERS_JSON_FILE, userSyncCtx)) {
-      ERROR_ESPNOWF("[USER_SYNC] users.json not found");
-      v4_send_command_response(srcAddr, msgId, false, "users.json not found", strlen("users.json not found"));
-      return;
-    }
-
-    File f = VFS::openGuarded(USERS_JSON_FILE, "r", userSyncCtx);
-    if (!f) {
-      ERROR_ESPNOWF("[USER_SYNC] Could not open users.json");
-      v4_send_command_response(srcAddr, msgId, false, "Could not open users.json", strlen("Could not open users.json"));
-      return;
-    }
-
-    PSRAM_JSON_DOC(userDoc);
-    DeserializationError err = deserializeJson(userDoc, f);
-    f.close();
-
-    if (err || !userDoc["users"]) {
-      ERROR_ESPNOWF("[USER_SYNC] Malformed users.json");
-      v4_send_command_response(srcAddr, msgId, false, "Malformed users.json", strlen("Malformed users.json"));
-      return;
-    }
-
-    int nextId = userDoc["nextId"] | 2;
-    JsonArray users = userDoc["users"];
-
-    JsonObject newUser = users.add<JsonObject>();
-    newUser["id"]        = nextId;
-    newUser["username"]  = targetUser;
-    // SECURITY: synced accounts are always created as a standard user — never
-    // admin, even when they are admin on the source device. Privilege must be
-    // granted deliberately on THIS device (userpromote), not propagated by a
-    // sync. The source role is read only to log a downgrade notice below.
-    newUser["role"]      = "user";
-    // Stamp the real creation time when the wall clock is available (we are
-    // creating the user right now). Otherwise this is written null and resolved
-    // lazily by resolvePendingUserCreationTimes(), which runs only at boot /
-    // NTP-sync — so a user synced after this boot's NTP sync would otherwise
-    // stay createdAt=null until the next reboot.
-    char createdAtBuf[24];
-    time_t nowT = time(nullptr);
-    struct tm tmUtc;
-    if (Clock::isValidEpoch(nowT) && gmtime_r(&nowT, &tmUtc) &&
-        strftime(createdAtBuf, sizeof(createdAtBuf), "%Y-%m-%dT%H:%M:%SZ", &tmUtc) > 0) {
-      newUser["createdAt"]       = createdAtBuf;    // exact creation time
-      newUser["createdAtSource"] = "clock";         // stamped live from the wall clock
-    } else {
-      newUser["createdAt"]       = (const char*)nullptr;  // no clock yet → lazy resolve
-      newUser["createdAtSource"] = "pending";
-    }
-    char createdByBuf[48];
-    snprintf(createdByBuf, sizeof(createdByBuf), "espnow:%s", deviceName);
-    newUser["createdBy"] = createdByBuf;
-    newUser["createdMs"] = millis();
-    extern uint32_t gNTPAnchorId;
-    extern uint32_t gBootCounter;
-    newUser["ntpAnchorId"] = gNTPAnchorId;
-    newUser["bootCount"]   = gBootCounter;
-    userDoc["nextId"] = nextId + 1;
-
-    {
-      // Atomic write (tmp + rename) — never truncate the live auth DB in place.
-      String usersJson;
-      serializeJson(userDoc, usersJson);
-      if (usersJson.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, usersJson)) {
-        ERROR_ESPNOWF("[USER_SYNC] Failed to write users.json");
-        logSystemEvent("USERS", "users.json WRITE FAILED during mesh user-sync of '%s' — auth database may be inconsistent", targetUser);
-        v4_send_command_response(srcAddr, msgId, false, "Failed to write users.json", strlen("Failed to write users.json"));
-        return;
-      }
-    }
-
-    String hashedPassword = hashUserPassword(String(targetPass));
-    PSRAM_JSON_DOC(defaults);
-    defaults["theme"]    = "light";
-    defaults["password"] = hashedPassword;
-    saveUserSettings((uint32_t)nextId, defaults);
-
-    bool srcWasAdmin = (strcmp(role, "user") != 0);
-    INFO_ESPNOWF("[USER_SYNC] Created user '%s' (id=%d) as standard user from %s%s",
-                 targetUser, nextId, deviceName,
-                 srcWasAdmin ? " [source was admin — not propagated]" : "");
-    BROADCAST_PRINTF("[ESP-NOW] User sync: Created '%s' as standard user from %s%s",
-                     targetUser, deviceName,
-                     srcWasAdmin ? " (was admin on source; use userpromote to elevate)" : "");
-    // Account creation the LOCAL command audit never sees (it arrived over the
-    // mesh, not via a local command). Durable so the account is attributable.
-    logSystemEvent("USERS", "user '%s' (id=%d) created via mesh user-sync from '%s'",
-                   targetUser, nextId, deviceName);
-
-    char respBuf[128];
-    snprintf(respBuf, sizeof(respBuf), "User '%s' created (id=%d)", targetUser, nextId);
-    v4_send_command_response(srcAddr, msgId, true, respBuf, strlen(respBuf));
+  // The account owner validates the name (reserved names included) but never
+  // sees plaintext, so the synced password meets the public rules here.
+  String passwordError;
+  if (!isValidPublicPassword(String(targetPass), &passwordError)) {
+    WARN_ESPNOWF("[USER_SYNC] Refused '%s' from %s: %s", targetUser, deviceName,
+                 passwordError.c_str());
+    v4_send_command_response(srcAddr, msgId, false, passwordError.c_str(),
+                             passwordError.length());
+    return;
   }
 
-  // The new account must be visible to the auth layer immediately. The canonical
-  // creation path (adminCreateUser) bumps the identity generation to invalidate
-  // auth caches; the hand-rolled sync write above must do the same, or the synced
-  // user may fail to authenticate until the next bump / reboot.
+  // System_User's createAccount owns the rest: name validation, the duplicate
+  // check under its lock, an id above the account-id high-water mark, and the
+  // credential stored before users.json is published (nothing is published
+  // when that write fails).
+  // SECURITY: synced accounts are always created as a standard user — never
+  // admin, even when they are admin on the source device. Privilege must be
+  // granted deliberately on THIS device (userpromote), not propagated by a
+  // sync. The source role is read only to log a downgrade notice below.
+  char createdByBuf[48];
+  snprintf(createdByBuf, sizeof(createdByBuf), "espnow:%s", deviceName);
+  NewAccount account;
+  account.username = targetUser;
+  account.passwordHash = hashUserPassword(String(targetPass));
+  account.role = "user";
+  account.createdBy = createdByBuf;
+  // A user synced after this boot's NTP sync would otherwise stay
+  // createdAt=null until the next reboot's resolver pass.
+  account.stampCreatedNow = true;
+  uint32_t newId = 0;
+  String createError;
+  if (!createAccount(account, newId, createError)) {
+    ERROR_ESPNOWF("[USER_SYNC] Could not create '%s' from %s: %s", targetUser, deviceName,
+                  createError.c_str());
+    v4_send_command_response(srcAddr, msgId, false, createError.c_str(),
+                             createError.length());
+    return;
+  }
+
+  // The new account must be visible to the auth layer immediately: invalidate
+  // auth caches the way adminCreateUser does.
   extern void bumpIdentityGeneration(const char* reason);
   bumpIdentityGeneration("user.sync");
+
+  // Account creation the LOCAL command audit never sees (it arrived over the
+  // mesh, not via a local command). Durable so the account is attributable.
+  logSystemEvent("USERS", "user '%s' (id=%u) created via mesh user-sync from '%s'",
+                 targetUser, (unsigned)newId, deviceName);
+  bool srcWasAdmin = (strcmp(role, "user") != 0);
+  INFO_ESPNOWF("[USER_SYNC] Created user '%s' (id=%u) as standard user from %s%s",
+               targetUser, (unsigned)newId, deviceName,
+               srcWasAdmin ? " [source was admin — not propagated]" : "");
+  BROADCAST_PRINTF("[ESP-NOW] User sync: Created '%s' as standard user from %s%s",
+                   targetUser, deviceName,
+                   srcWasAdmin ? " (was admin on source; use userpromote to elevate)" : "");
+  systemEventPost(SYSEVT_USER_ADDED, targetUser, createdByBuf);
+
+  char respBuf[128];
+  snprintf(respBuf, sizeof(respBuf), "User '%s' created (id=%u)", targetUser, (unsigned)newId);
+  v4_send_command_response(srcAddr, msgId, true, respBuf, strlen(respBuf));
 }
 
 static void runDeferredUserSync(void* arg) {
@@ -7071,9 +7039,28 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     BROADCAST_PRINTF("[ESP-NOW] Remote command from %s (user=%s): %s",
                      deviceName, username, safeActualCmd.c_str());
     
-    // Quick auth check (runs in espnow_task - small stack usage)
-    if (isValidUser(String(username), String(password))) {
+    // Quick auth check (runs in espnow_task - small stack usage). Every peer's
+    // password commands count under ESP-NOW's one attempt-table key; a locked
+    // key is refused before the password is checked.
+    unsigned long lockoutRetryMs = 0;
+    const CredentialCheck check = checkCredentialAttempt(
+        SOURCE_ESPNOW, credentialAttemptConsolePeer(SOURCE_ESPNOW), username,
+        password, &lockoutRetryMs);
+    if (check == CredentialCheck::Valid) {
       authOk = true;
+    } else if (check == CredentialCheck::LockedOut) {
+      BROADCAST_PRINTF("[ESP-NOW] Remote command login locked out (user '%s' from %s)",
+                       username, deviceName);
+      // Same CMD_RESP shape and msgId echo as the failure below; the text is
+      // formatted in place to keep espnow_task's frame small.
+      uint8_t respPayload[40];
+      respPayload[0] = 0;
+      char* errMsg = reinterpret_cast<char*>(respPayload + 1);
+      snprintf(errMsg, sizeof(respPayload) - 1, "Auth locked out. Retry in %lus",
+               (lockoutRetryMs + 999UL) / 1000UL);
+      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                         msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
+      return;
     } else {
       BROADCAST_PRINTF("[ESP-NOW] Auth failed for user '%s' from %s", username, deviceName);
       systemEventPost(SYSEVT_LOGIN_FAIL, username, "espnow");

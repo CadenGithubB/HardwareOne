@@ -4990,7 +4990,8 @@ const char* cmd_login(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // A targeted login guesses from the caller's own console, so it counts in
-  // that console's entry of the credential attempt table.
+  // that console's entry of the credential attempt table. A bare login is
+  // throttled under the same entry inside loginTransport.
   const char* callerPeer = credentialAttemptConsolePeer(caller.transport);
   if (targeted) {
     unsigned long retryMs = 0;
@@ -5013,7 +5014,15 @@ const char* cmd_login(const String& originalCmd) {
     credentialAttemptRecord(caller.transport, callerPeer, username.c_str(),
                             loginOk);
   } else {
-    loginOk = loginTransport(transport, username, password);
+    unsigned long lockoutRetryMs = 0;
+    loginOk = loginTransport(transport, username, password, &lockoutRetryMs);
+    if (!loginOk && lockoutRetryMs > 0) {
+      EXT_RAM_BSS_ATTR static char lockedBuf[96];
+      snprintf(lockedBuf, sizeof(lockedBuf),
+               "Error: login locked out. Retry in %lu seconds.",
+               (lockoutRetryMs + 999UL) / 1000UL);
+      return lockedBuf;
+    }
   }
 
   if (loginOk) {
