@@ -624,10 +624,11 @@ static bool buildChooserPath(char* out, size_t cap) {
 // ---------------------------------------------------------------------------
 // Rename / Delete flows. Both dispatch the REAL commands through cmd_exec
 // (auth + [CMD] audit as the paired user; the OLED browser submits the same
-// admin-only commands): `filerename "<old>" "<new>"` and the
+// user-level commands): `filerename "<old>" "<new>"` and the
 // ONE-SHOT `filedelete "<path>" confirm` (the bare form arms an interactive
-// CLI confirm no tap UI can answer). /system config stays protected below
-// us at the VFS layer.
+// CLI confirm no tap UI can answer). The handlers apply the per-path policy
+// through the guarded VFS (System_Filesystem.cpp), so /system config stays
+// protected; their refusal shows in the result row.
 // ---------------------------------------------------------------------------
 
 // Lens applier: draw the list with the published result in its back row.

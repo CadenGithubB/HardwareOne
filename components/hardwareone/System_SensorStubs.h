@@ -343,8 +343,6 @@
   inline void getClientIP(httpd_req_t* req, String& ipOut) { ipOut = "0.0.0.0"; }
   inline void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize) { if (bufSize > 0) ipBuf[0] = '\0'; }
   // Session and SSE stub functions
-  inline void sseEnqueueNotice(SessionEntry& s, const String& msg) {}
-  inline bool sseDequeueNotice(SessionEntry& s, String& out) { return false; }
   inline void sseEnqueueEvent(SessionEntry& s, const char* name, const char* data) {}
   inline String getCookieSID(httpd_req_t* req) { return ""; }
   inline int findSessionIndexBySID(const String& sid) { return -1; }
@@ -364,7 +362,6 @@
   // declared in System_User.h). The stub that used to live here also had `ip`
   // and `user` transposed relative to the real signature — same types, so it
   // compiled either way and would have silently produced reversed audit lines.
-  inline bool authSuccessUnified(struct AuthContext& ctx, httpd_req_t* req) { return false; }
 #endif
 
 // ESP-NOW stubs now live in System_ESPNow.h (#else block) for grouping

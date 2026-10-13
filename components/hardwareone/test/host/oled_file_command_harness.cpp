@@ -1,12 +1,14 @@
 // test_file_kind.py compiles the OLED file browser's rename/delete helpers
-// (FbMutateResult, fbSubmitMutate, fbRenameSelected, fbDeleteSelected from
-// OLED_Mode_FileBrowser.cpp) beside the doubles below.
+// (FbMutateResult, fbSubmitMutate, fbRenameSelected, fbDeleteSelected and the
+// result toast fbToastMutate from OLED_Mode_FileBrowser.cpp) beside the
+// doubles below.
 //
-// Rename and delete must go through the command executor as the admin-only
+// Rename and delete must go through the command executor as the user-level
 // `filerename` / `filedelete` commands (the lens' path), naming the selected
 // entry's full path that FileManager resolves (not the bounded display name);
 // re-scan only after the executor's "OK"; submit nothing for an unresolved
-// selection or a quote the command line cannot carry.
+// selection or a quote the command line cannot carry. The handlers' path-policy
+// refusal gets its own toast instead of the generic failure.
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -58,6 +60,12 @@ static bool executeOLEDCommandWithResult(const String& line, char* out, size_t o
   return execOk;
 }
 
+// OLED toast (OLED_UI.cpp): keeps the last message shown.
+static std::string lastToast;
+static void oledToastShow(const char* message, uint32_t /*durationMs*/) {
+  lastToast = message ? message : "";
+}
+
 // INSERT_OLED_FILE_COMMANDS
 
 // --- Scenarios ---------------------------------------------------------------
@@ -97,7 +105,8 @@ static void deleteUsesOneShotCommand() {
 }
 
 static void executorRefusals() {
-  // The executor's admin gate (filerename / filedelete are admin-only).
+  // An admin refusal from the executor's gate keeps its own result (the file
+  // verbs are user-level today; the mapping stays for a gated build).
   reset("/notes/a.txt", false,
         "Error: Admin access required for command 'filedelete'. Contact an administrator.");
   CHECK(fbDeleteSelected() == FbMutateResult::AdminOnly);
@@ -121,9 +130,37 @@ static void executorRefusals() {
   CHECK(fbRenameSelected(String("b.txt")) == FbMutateResult::Failed);
   CHECK(fileManager.rescans == 0);
   // Success is the executor's "OK" stamp, not the ok flag alone.
-  reset("/notes/a.txt", true, "Error: File does not exist or access denied");
-  CHECK(fbDeleteSelected() == FbMutateResult::Failed);
+  reset("/notes/a.txt", true, "Error: Failed to rename (denied or fs error): /notes/a.txt -> /notes/b.txt");
+  CHECK(fbRenameSelected(String("b.txt")) == FbMutateResult::Failed);
   CHECK(fileManager.rescans == 0);
+}
+
+// The handlers' path-policy refusal: a path the identity may not read reads
+// as missing. It is neither a success nor the generic "... failed" toast.
+static void pathPolicyRefusal() {
+  static const char kRefusal[] = "Error: File does not exist or access denied";
+  for (bool ok : {true, false}) {
+    reset("/system/users/users.json", ok, kRefusal);
+    CHECK(fbDeleteSelected() == FbMutateResult::NoAccess);
+    CHECK(submitted.size() == 1 && fileManager.rescans == 0);
+    reset("/system/settings.json", ok, kRefusal);
+    CHECK(fbRenameSelected(String("old.json")) == FbMutateResult::NoAccess);
+    CHECK(fileManager.rescans == 0);
+  }
+  // Only the refusal itself, at the start of the reply.
+  reset("/notes/a.txt", false, "Error: Failed to delete file (denied or fs error): File does not exist or access denied");
+  CHECK(fbDeleteSelected() == FbMutateResult::Failed);
+
+  // Each result gets its toast; the path refusal names both causes.
+  lastToast.clear();
+  fbToastMutate(FbMutateResult::NoAccess, "Deleted", "Delete failed");
+  CHECK(lastToast == "Not found or denied");
+  fbToastMutate(FbMutateResult::AdminOnly, "Deleted", "Delete failed");
+  CHECK(lastToast == "Admin only");
+  fbToastMutate(FbMutateResult::Failed, "Deleted", "Delete failed");
+  CHECK(lastToast == "Delete failed");
+  fbToastMutate(FbMutateResult::Done, "Deleted", "Delete failed");
+  CHECK(lastToast == "Deleted");
 }
 
 static void refusedBeforeSubmit() {
@@ -148,6 +185,7 @@ int main() {
   deleteUsesOneShotCommand();
   executorRefusals();
   refusedBeforeSubmit();
+  pathPolicyRefusal();
   if (failures) {
     std::fprintf(stderr, "OLED file commands: %u of %u checks failed\n", failures, checks);
     return 1;

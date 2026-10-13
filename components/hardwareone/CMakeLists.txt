@@ -132,8 +132,8 @@ if(NOT (HW_CFG_ENABLE_BLUETOOTH GREATER 0 AND HW_CFG_ENABLE_G2_GLASSES GREATER 0
     set(HW_CFG_ENABLE_G2_TESTSUITE 0)
 endif()
 
-# Coarse OLED gate: skip every OLED_*.cpp (except OLED_Utils.cpp, which
-# carries the !ENABLE_OLED_DISPLAY stub implementations) when the user
+# Coarse OLED gate: skip every OLED_*.cpp (except OLED_Utils.cpp, whose
+# always-called entry points compile to empty bodies) when the user
 # has no display hardware, or selects an I2C display with I2C disabled.
 # The P4X-EYE SPI backend remains available without an I2C bus. The
 # per-feature .cpp guards (`#if ENABLE_OLED_DISPLAY && ...`) still apply
@@ -225,11 +225,12 @@ set(hardwareone_srcs
         System_Mutex.cpp
         System_Power.cpp
         System_NeoPixel.cpp
-        # OLED_Utils.cpp stays unconditional: it carries the
-        # !ENABLE_OLED_DISPLAY stub implementations needed by every
-        # consumer when DISPLAY_TYPE=0. The per-mode OLED_Mode_*.cpp
-        # files (handled below) only appear when a display is actually
-        # selected.
+        # OLED_Utils.cpp stays unconditional: every build calls its
+        # display entry points (oledUpdate, oledEarlyInit,
+        # oledNotifyLocalDisplayAuthChanged and the rest at the end of the
+        # file), whose bodies compile away when DISPLAY_TYPE=0. The
+        # per-mode OLED_Mode_*.cpp files (handled below) only appear when a
+        # display is actually selected.
         OLED_Utils.cpp
         System_MemUtil.cpp
         System_MemTracker.cpp
@@ -417,7 +418,6 @@ if(HW_CFG_BUILD_OLED_MODES GREATER 0)
         OLED_Mode_Speech.cpp
         OLED_Mode_Bluetooth.cpp
         OLED_Mode_Remote.cpp
-        OLED_Mode_UnifiedMenu.cpp
         OLED_Mode_RemoteSettings.cpp
         OLED_Mode_SetPattern.cpp
         OLED_Mode_ChangePassword.cpp

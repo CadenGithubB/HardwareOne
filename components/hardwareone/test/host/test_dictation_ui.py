@@ -32,6 +32,7 @@ SECRET_FIELDS=(
     ('OLED_ESPNow.cpp','bool oledEspNowHandleRemoteFormInput(','gOledEspNowState.remoteFormField == 1'),
     ('OLED_ESPNow.cpp','bool oledEspNowHandleSettingsInput(','gOledEspNowState.settingsEditField == 6'),
     ('OLED_FirstTimeSetup.cpp','String getOLEDTextInput(','isPassword'),
+    ('OLED_Mode_UserManager.cpp','static void umStartKeyboard(','stage != 0'),
 )
 PLAIN_FIELDS=(('OLED_Mode_Network.cpp','static void startWifiAddSSID('),)
 

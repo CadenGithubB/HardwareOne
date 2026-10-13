@@ -18,10 +18,10 @@ tgRequireAuth is defined once, for web requests only; that a revoke queues no
 notice; that /api/sessions and /api/admin/sessions share one handler; and that
 the stale three-argument streamBeginHtml prototype is gone.
 
-Leftovers in System_SensorStubs.h (HTTP-off no-op stubs for authSuccessUnified
-and the notice queue), a file the set-1 session does not edit, are listed in
-EXEMPT; they are on the after-merge list. It reads source text only; it does
-not compile anything.
+No name is exempt: the HTTP-off no-op stubs System_SensorStubs.h kept for
+authSuccessUnified and the notice queue went after the merge. It reads source
+text only; it does not compile anything. `--component` points it at another
+tree's component directory (its repository is two levels up).
 """
 from __future__ import annotations
 
@@ -64,13 +64,6 @@ REMOVED = (
     # The streaming summary counters only streamDebugRecord ever wrote.
     "gStreamTotalBytes", "gStreamMaxChunk", "gStreamHitMaxChunk",
 )
-
-# (file name, symbol): leftovers in files outside the set-1 file lists.
-EXEMPT = {
-    ("System_SensorStubs.h", "authSuccessUnified"),
-    ("System_SensorStubs.h", "sseEnqueueNotice"),
-    ("System_SensorStubs.h", "sseDequeueNotice"),
-}
 
 
 def definition(source: str, marker: str) -> tuple[int, str]:
@@ -139,10 +132,15 @@ def firmware_sources() -> list[Path]:
 
 
 def main() -> None:
+    global COMPONENT, REPO
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", help="accepted for a uniform runner interface; unused")
     parser.add_argument("--sanitize", action="store_true", help="accepted for a uniform runner interface; unused")
-    parser.parse_args()
+    parser.add_argument("--component", type=Path, default=COMPONENT,
+                        help="production component directory (default: this checkout)")
+    args = parser.parse_args()
+    COMPONENT = args.component.resolve()
+    REPO = COMPONENT.parents[1]
 
     failures: list[str] = []
     sources = firmware_sources()
@@ -155,8 +153,6 @@ def main() -> None:
         code[path.name] = text
         for lineno, line in enumerate(text.splitlines(), 1):
             for name in sorted(set(names.findall(line))):
-                if (path.name, name) in EXEMPT:
-                    continue
                 failures.append(f"{path.relative_to(REPO)}:{lineno} still names {name}")
         if "/login/setsession" in text:
             failures.append(f"{path.name} still names the /login/setsession route")
