@@ -1,4 +1,4 @@
-"""Behavioral coverage for interactive-help state in the shipping CLI page.
+"""Behavioral coverage for interactive-help state and CLI credential scrubbing.
 
 The browser cannot infer the CLI's mode from command spelling: ``help espnow``
 enters help directly, module-level ``back`` remains in help, and an ordinary
@@ -27,7 +27,7 @@ from tools.webui.js_engine import JS_ENGINE, run_js
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 PAGE = REPO_ROOT / "components" / "hardwareone" / "WebPage_CLI.h"
 HARNESS = REPO_ROOT / "tools" / "webui" / "harness" / "cli_page_harness.js"
-EXPECTED_CHECKS = 50
+EXPECTED_CHECKS = 68
 
 
 class CliPageExtractionTests(unittest.TestCase):
@@ -88,7 +88,7 @@ class CliPageBehaviorTests(unittest.TestCase):
         self.assertEqual(
             "HARNESS_RESULT PASS",
             verdicts[0],
-            "CLI help-state reconciliation regressed:\n  " + "\n  ".join(failures),
+            "CLI page behavior regressed:\n  " + "\n  ".join(failures),
         )
 
     def test_expected_number_of_checks_ran(self) -> None:

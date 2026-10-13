@@ -397,11 +397,13 @@
 //     ENABLE_LLM_SOURCE_CM5      the CM5 / Pi 5 co-processor, reached over the
 //                                authenticated UART host link. Costs almost no
 //                                flash — the model runs on the other end.
+//     ENABLE_LLM_SOURCE_HTTP     OpenClaw over a configured HTTP(S) endpoint.
+//                                Optional Wi-Fi client; no local model required.
 //
 //   Turning a source off removes it from every model picker; the feature and
-//   its remaining sources are unaffected. Master off ignores both sources.
+//   its remaining sources are unaffected. Master off requires all sources off.
 //
-//   Keep all three PLAIN LITERALS. CMakeLists regex-greps these exact lines to
+//   Keep these PLAIN LITERALS. CMakeLists regex-greps these exact lines to
 //   decide which files reach the compiler and does not evaluate the
 //   preprocessor, so nesting a source inside `#if ENABLE_LLM_BACKEND` would
 //   still be read as its literal and compile the engine with the feature off.
@@ -409,6 +411,7 @@
 #define ENABLE_LLM_BACKEND          1
 #define ENABLE_LLM_SOURCE_ONBOARD   1
 #define ENABLE_LLM_SOURCE_CM5       1
+#define ENABLE_LLM_SOURCE_HTTP      0
 
 #if ENABLE_LLM_SOURCE_ONBOARD
 // Max KV / attention context in tokens (0 = use checkpoint's seq_len only).
@@ -1592,11 +1595,14 @@
 // their dependency cannot be expressed by nesting them in #if. It is enforced
 // here instead. Placed after the board blocks because the CM5 source needs
 // UART_LINK_PORT, which is not resolved until then.
-#if ENABLE_LLM_BACKEND && !ENABLE_LLM_SOURCE_ONBOARD && !ENABLE_LLM_SOURCE_CM5
-  #error "ENABLE_LLM_BACKEND needs at least one answer source. Set ENABLE_LLM_SOURCE_ONBOARD and/or ENABLE_LLM_SOURCE_CM5 to 1, or turn the feature off."
+#if ENABLE_LLM_BACKEND && !ENABLE_LLM_SOURCE_ONBOARD && !ENABLE_LLM_SOURCE_CM5 && !ENABLE_LLM_SOURCE_HTTP
+  #error "ENABLE_LLM_BACKEND needs at least one answer source (ONBOARD, CM5, or HTTP)."
 #endif
-#if !ENABLE_LLM_BACKEND && (ENABLE_LLM_SOURCE_ONBOARD || ENABLE_LLM_SOURCE_CM5)
+#if !ENABLE_LLM_BACKEND && (ENABLE_LLM_SOURCE_ONBOARD || ENABLE_LLM_SOURCE_CM5 || ENABLE_LLM_SOURCE_HTTP)
   #error "An LLM source is enabled but ENABLE_LLM_BACKEND is 0. A source has nothing to plug into on its own — set ENABLE_LLM_BACKEND 1, or turn the source off."
+#endif
+#if ENABLE_LLM_SOURCE_HTTP && !ENABLE_WIFI
+  #error "ENABLE_LLM_SOURCE_HTTP requires Wi-Fi."
 #endif
 #if ENABLE_LLM_SOURCE_CM5 && !defined(UART_LINK_PORT)
   #error "ENABLE_LLM_SOURCE_CM5 requires the authenticated UART host link, and this board defines no UART_LINK_PORT."

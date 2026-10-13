@@ -356,6 +356,7 @@ int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt) {
 
 int chatRetryLast(const ChatParamOverride* opt) {
   chatInit();
+  if (!llmBackendSupportsRetry()) return 0;
   if (!llmBackendIsReady()) return 0;
 
   ChatLock lk;
@@ -451,7 +452,10 @@ bool chatClear() {
   drainEngineLocked();
   if (sStreamingTurnSlot >= 0) return false;
 
+  if (!llmBackendResetConversation()) return false;
   for (int i = 0; i < LLM_CHAT_MAX_TURNS; i++) freeTurnSlot(i);
+  sLastFinishedSlot = -1;
+  sLastFinishedSession = 0;
   sTurnHead = 0;
   sTurnCount = 0;
   sStreamingTurnSlot = -1;

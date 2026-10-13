@@ -6022,7 +6022,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
 #endif
 #if ENABLE_LLM_BACKEND
       // LLM viewer list dispatch (container 'lstLlm'). Rows: 0 Back,
-      // 1 Ask (Mic / Keys), 2 Re-run last. Set the row's bit; the worker
+      // 1 Ask (Mic / Keys), 2 New chat, 3 Re-run last. Set the row's bit; the worker
       // drains it each loop.
       // Refresh the 60 s hijack safety-timeout on real taps (same rationale
       // as the map/'app' paths above).
@@ -8870,6 +8870,7 @@ enum LlmHomeAction : uint8_t {
   LLM_HOME_OPEN,       // Open chat  → g2ShowLlmPage (today's viewer)
   LLM_HOME_PROMPT,     // Ask (Mic / Keys) → shared text-entry surface
   LLM_HOME_ASK,        // Ask (guided) → start/resume the picker
+  LLM_HOME_NEW_CHAT,   // Clear turns before starting a new conversation/source
   LLM_HOME_RERUN,      // Re-run last → guided-branch retry, then the viewer
   LLM_HOME_MODEL,      // Select Model → unload / pick a .bin via llmload
 };
@@ -9203,10 +9204,18 @@ static void llmMenuMarkFreeTurn() {
   __atomic_store_n(&sLlmLastTurnGuided, false, __ATOMIC_RELEASE);
 }
 
+static bool llmMenuClearChat() {
+  if (!chatClear()) return false;
+  llmMenuMarkFreeTurn();
+  __atomic_store_n(&sLlmGuidedAskSession, 0, __ATOMIC_RELAXED);
+  return true;
+}
+
 // Repeat according to the actual kind of turn submitted by this G2 surface.
 // A guided repeat must be plain (no suppress-token list); a free prompt uses
 // the normal chat retry. Returns the new session id, or <=0 on refusal.
 static int llmMenuRetryLastForG2() {
+  if (!llmBackendSupportsRetry()) return 0;
   const bool guided =
       __atomic_load_n(&sLlmLastTurnGuided, __ATOMIC_ACQUIRE);
   const int trackedSession =
@@ -9321,6 +9330,8 @@ static void llmMenuModelCmdDone(bool ok, const char* result, const G2CmdCookie& 
   }
   if (result && (strstr(result, "Admin") || strstr(result, "admin")))
     snprintf(sLlmMsg, sizeof(sLlmMsg), "Admin required");
+  else if (result && strstr(result, "clear chat before"))
+    snprintf(sLlmMsg, sizeof(sLlmMsg), "New chat before changing agent source");
   else if (result && strstr(result, "\"ok\":false"))
     snprintf(sLlmMsg, sizeof(sLlmMsg), "Load failed");
   else
@@ -9480,6 +9491,9 @@ static void llmMenuHomeTap(uint32_t idx) {
         llmMenuShowMsg("Keyboard unavailable");
       return;
     case LLM_HOME_ASK:   llmMenuStartAsk();           return;
+    case LLM_HOME_NEW_CHAT:
+      llmMenuShowMsg(llmMenuClearChat() ? "New chat ready" : "Stop or wait, then New chat");
+      return;
     case LLM_HOME_RERUN: llmMenuRerunLast();          return;
     case LLM_HOME_MODEL: llmMenuOpenModels();         return;
     default: return;
@@ -9523,7 +9537,7 @@ static const G2PageModule kLlmMenuPage = {
 };
 
 // Entry point — the LLM submenu (Apps → LLM). Rows: Open chat / Ask (Mic /
-// Keys) / Ask (guided, hidden when the model has no menu) / Re-run last /
+// Keys) / Ask (guided, hidden when the model has no menu) / New chat / Re-run last /
 // Select Model. Re-showing it after a picker (Back, or the viewer's onDone)
 // captures the abandoned guided level so the next Ask can resume there.
 static void g2ShowLlmMenu() {
@@ -9546,7 +9560,8 @@ static void g2ShowLlmMenu() {
   add("Open chat",    LLM_HOME_OPEN);
   add("Ask (Mic / Keys)", LLM_HOME_PROMPT);
   if (haveMenu) add("Ask (guided)", LLM_HOME_ASK);
-  add("Re-run last",  LLM_HOME_RERUN);
+  add("New chat", LLM_HOME_NEW_CHAT);
+  if (llmBackendSupportsRetry()) add("Re-run last", LLM_HOME_RERUN);
 
   // Select Model row — label reflects the loaded basename (Maps-style) so the
   // glasses can show which weights are active before opening the picker.
@@ -34817,7 +34832,8 @@ static const char* cmd_g2health(const String& argsInput) {
 static const char* const kLlmRows[] = {
   "<- Back",            // 0
   "Ask (Mic / Keys)",   // 1
-  "Re-run last",        // 2
+  "New chat",           // 2
+  "Re-run last",        // 3
 };
 static constexpr size_t kLlmRowCount = sizeof(kLlmRows) / sizeof(kLlmRows[0]);
 
@@ -34986,7 +35002,7 @@ static void g2LlmPageWorker(void* arg) {
       uint8_t* pb = (uint8_t*)ps_alloc(1024, AllocPref::PreferPSRAM, "g2.pb.llm-create");
       if (pb) {
         size_t pbLen = g2BuildCreateMixedListTextPb(
-            createMagic, "lstLlm", kLlmRows, kLlmRowCount,
+            createMagic, "lstLlm", kLlmRows, llmBackendSupportsRetry() ? kLlmRowCount : 3,
             kLlmListGeom, chat, BLOCKS_WIDGET_ID, pb, 1024);
         bool sent = pbLen && g2SendCreateTxnPb(*arm, pb, pbLen);
         free(pb);
@@ -35008,6 +35024,8 @@ static void g2LlmPageWorker(void* arg) {
     char tail[kLlmTailCap];
     char lastTail[kLlmTailCap];
     lastTail[0] = '\0';
+    const char* clearNotice = nullptr;
+    uint32_t clearNoticeUntilMs = 0;
     const uint32_t startMs = millis();
 
     while (true) {
@@ -35028,6 +35046,11 @@ static void g2LlmPageWorker(void* arg) {
         break;
       }
       if (taps & (1u << 2)) {
+        clearNotice = llmMenuClearChat() ? "New chat ready." : "Stop or wait for the reply, then choose New chat.";
+        clearNoticeUntilMs = millis() + 4000;
+      }
+      if (taps & (1u << 3)) {
+        clearNotice = nullptr;
         (void)llmMenuRetryLastForG2();
       }
 
@@ -35037,7 +35060,14 @@ static void g2LlmPageWorker(void* arg) {
       // and the normal tap-only 60 s watchdog governs passive reading.
       if (chatIsGenerating() && g2FsmHijackActive()) gHijackStartedMs = millis();
 
-      const size_t n = g2LlmBuildChatTail(tail, sizeof(tail));
+      size_t n;
+      if (clearNotice && (int32_t)(clearNoticeUntilMs - millis()) > 0) {
+        strlcpy(tail, clearNotice, sizeof(tail));
+        n = strlen(tail);
+      } else {
+        clearNotice = nullptr;
+        n = g2LlmBuildChatTail(tail, sizeof(tail));
+      }
       if (strcmp(tail, lastTail) != 0) {
         sendUpdateTextNamed(*arm, kLlmChatChildName, kLlmChatChildId, tail);
         memcpy(lastTail, tail, n + 1);

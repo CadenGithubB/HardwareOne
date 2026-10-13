@@ -163,6 +163,8 @@ function boot(seed, logBodies, commandReplies) {
     };
     var headerReads = [];
     var posts = [];
+    var bondedPosts = [];
+    var consoleMessages = [];
     var postFormTextCalls = 0;
     var logFetches = 0;
     var logIndex = 0;
@@ -211,6 +213,13 @@ function boot(seed, logBodies, commandReplies) {
 
     var windowStub = {
         __cliPoller: null,
+        BondFs: {
+            checkAvailable: function (callback) { callback(false); },
+            exec: function (command, options) {
+                bondedPosts.push(command);
+                options.onResult(['Setting accepted'], null);
+            }
+        },
         listeners: {},
         addEventListener: function (name, fn) {
             if (!this.listeners[name]) this.listeners[name] = [];
@@ -247,9 +256,10 @@ function boot(seed, logBodies, commandReplies) {
         }
     };
 
+    function recordConsole(message) { consoleMessages.push(String(message)); }
     var quietConsole = {
-        log: function () {}, debug: function () {}, warn: function () {},
-        error: function () {}
+        log: recordConsole, debug: recordConsole, warn: recordConsole,
+        error: recordConsole
     };
     var pageSource = slurp(PAGE_JS_PATH);
     var probes = null;
@@ -260,6 +270,7 @@ function boot(seed, logBodies, commandReplies) {
             pageSource + '\nreturn {' +
                 'execute: executeCommand,' +
                 'setTarget: cliSetTarget,' +
+                'displayCommand: __cliDisplayCommand,' +
                 'state: function(){ return {' +
                     'inHelp: inHelp, outputBackup: outputBackup,' +
                     'output: cliOutput ? cliOutput.textContent : ""' +
@@ -278,6 +289,8 @@ function boot(seed, logBodies, commandReplies) {
         elements: elements,
         headerReads: headerReads,
         posts: posts,
+        bondedPosts: bondedPosts,
+        consoleMessages: consoleMessages,
         probes: probes,
         runPollers: runPollers,
         getLogFetches: function () { return logFetches; },
@@ -626,6 +639,63 @@ check('late local log cannot overwrite the bonded terminal',
       bondRace.probes.state().output.indexOf('[Bonded device CLI]') >= 0 &&
       bondRace.probes.state().output.indexOf('late local log') < 0,
       JSON.stringify(bondRace.probes.state()));
+
+/* Commands retain their original payload on both transports, while browser
+ * presentation and localStorage never receive token/URL values. URL input is
+ * scrubbed even when it is malformed and would be rejected by the server. */
+var displayCases = [
+    ['llmhttptoken private-fixture-token', 'llmhttptoken ***'],
+    ['LLMHTTPTOKEN\t"private-fixture\r\nvalue"', 'LLMHTTPTOKEN ***'],
+    ['macro add setup "llmhttptoken private-fixture"', 'macro add setup "llmhttptoken ***'],
+    ['llmhttpurl http://admin:private-fixture@host', 'llmhttpurl ***'],
+    ["macro add setup 'LLMHTTPURL\tprivate-fixture'", "macro add setup 'LLMHTTPURL ***"],
+    ['llmhttpurl', 'llmhttpurl'],
+    ['llmhttptoken', 'llmhttptoken'],
+    ['llmhttptokenish visible', 'llmhttptokenish visible']
+];
+for (var dc = 0; dc < displayCases.length; dc++) {
+    check('secret display case ' + dc,
+          fresh.probes.displayCommand(displayCases[dc][0]) === displayCases[dc][1]);
+}
+var sensitiveCommands = [
+    'LLMHTTPTOKEN\tprivate-fixture-token',
+    'macro add setup "llmhttpurl http://admin:private-fixture@host"'
+];
+var safeCommands = [
+    'LLMHTTPTOKEN ***',
+    'macro add setup "llmhttpurl ***'
+];
+for (var target = 0; target < 2; target++) {
+    var name = target ? 'bonded' : 'local';
+    var redactionReplies = [];
+    for (var sr = 0; sr < sensitiveCommands.length; sr++) {
+        redactionReplies.push({command: sensitiveCommands[sr], help: 'inactive',
+                               body: 'Setting accepted\n'});
+    }
+    var redacted = boot({}, [''], redactionReplies);
+    redacted.probes.setTarget(!!target);
+    for (var sc = 0; sc < sensitiveCommands.length; sc++) {
+        redacted.command(sensitiveCommands[sc]);
+    }
+    var rawCommands = target ? redacted.bondedPosts : redacted.posts.map(function (post) {
+        return post.form.cmd;
+    });
+    check(name + ' transport preserves sensitive input exactly',
+          JSON.stringify(rawCommands) === JSON.stringify(sensitiveCommands));
+    check(name + ' command history stores only scrubbed commands',
+          redacted.storage.getItem('cliHistory') === JSON.stringify(safeCommands));
+    var redactedOutput = redacted.probes.state().output;
+    check(name + ' terminal displays only scrubbed command copies',
+          redactedOutput.indexOf('private-fixture') === -1 &&
+          redactedOutput.indexOf(safeCommands[0]) >= 0 &&
+          redactedOutput.indexOf(safeCommands[1]) >= 0);
+    check(name + ' localStorage contains no sensitive submitted value',
+          JSON.stringify(redacted.storage.data).indexOf('private-fixture') === -1);
+    var consoleText = redacted.consoleMessages.join('\n');
+    check(name + ' console contains no sensitive submitted value',
+          consoleText.indexOf('private-fixture') === -1 &&
+          (target || consoleText.indexOf(safeCommands[0]) >= 0));
+}
 
 check('page callbacks threw no exceptions', absorbed.length === 0,
       absorbed.join(' | '));

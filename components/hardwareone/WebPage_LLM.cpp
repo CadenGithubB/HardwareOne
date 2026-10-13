@@ -133,7 +133,7 @@ static esp_err_t handleLLMStatus(httpd_req_t* req) {
     "\"psramKB\":%u,\"tokPerSec\":%.1f,\"lastTokens\":%d,\"error\":\"%s\","
     "\"dim\":%d,\"layers\":%d,\"heads\":%d,\"kvHeads\":%d,\"vocab\":%d,\"seqLen\":%d,"
     "\"ctxUsed\":%d,\"ctxMax\":%d,\"arch\":\"%s\",\"quant\":\"%s\","
-    "\"menu\":{\"groups\":%u,\"gen\":%u},\"backend\":\"%s\",\"cmdMode\":%s%s%s}",
+    "\"menu\":{\"groups\":%u,\"gen\":%u},\"backend\":\"%s\",\"cmdMode\":%s,\"retrySafe\":%s%s%s}",
     stateStr, st.modelPath,
     st.config.dim, st.config.n_layers, st.config.n_heads,
     (unsigned)(st.totalPsramUsed / 1024),
@@ -143,7 +143,8 @@ static esp_err_t handleLLMStatus(httpd_req_t* req) {
     st.lastContextUsed, st.lastContextMax, archStr, quantStr,
     (unsigned)menuGroups, (unsigned)menuGen,
     llmBackendKindName(llmBackendActiveKind()),
-    llmBackendSupportsCommandMode() ? "true" : "false", ctxWarnFrag, hostFrag);
+    llmBackendSupportsCommandMode() ? "true" : "false",
+    llmBackendSupportsRetry() ? "true" : "false", ctxWarnFrag, hostFrag);
 
   return sendJsonResponse(req, json);
 }
@@ -329,6 +330,9 @@ static esp_err_t handleLLMGenerate(httpd_req_t* req) {
   }
 
   const char* prompt = doc["prompt"] | "";
+  // Older web controls regenerate through this endpoint, not /chat/retry.
+  if ((doc["retry"] | false) && !llmBackendSupportsRetry())
+    return sendJsonResponse(req, "{\"ok\":false,\"error\":\"Retry is unavailable for this agent source\"}");
   if (!prompt[0]) {
     DEBUG_HTTPF("[LLM-API] POST /api/llm/generate: empty prompt");
     return sendJsonResponse(req, "{\"ok\":false,\"error\":\"empty prompt\"}");
@@ -360,8 +364,8 @@ static esp_err_t handleLLMGenerate(httpd_req_t* req) {
     return sendJsonResponse(req, "{\"ok\":false,\"error\":\"busy or failed to start\"}");
   }
 
-  char json[48];
-  snprintf(json, sizeof(json), "{\"ok\":true,\"session\":%d}", sessionId);
+  char json[96];
+  snprintf(json, sizeof(json), "{\"ok\":true,\"session\":%d,\"retrySafe\":%s}", sessionId, llmBackendSupportsRetry() ? "true" : "false");
   return sendJsonResponse(req, json);
 }
 
@@ -537,12 +541,14 @@ static esp_err_t handleLLMChatRetry(httpd_req_t* req) {
     }
   }
 
+  if (!llmBackendSupportsRetry())
+    return sendJsonResponse(req, "{\"ok\":false,\"error\":\"Retry is unavailable for this source; agent actions may already have run\"}");
   int sessionId = chatRetryLast(&ov);
   if (sessionId == 0) {
     return sendJsonResponse(req, "{\"ok\":false,\"error\":\"no prior turn or busy\"}");
   }
-  char json[48];
-  snprintf(json, sizeof(json), "{\"ok\":true,\"session\":%d}", sessionId);
+  char json[96];
+  snprintf(json, sizeof(json), "{\"ok\":true,\"session\":%d,\"retrySafe\":%s}", sessionId, llmBackendSupportsRetry() ? "true" : "false");
   return sendJsonResponse(req, json);
 }
 

@@ -1087,6 +1087,8 @@ namespace {
   // Columns: prefix (lowercase cmd prefix), type (MASK_TOKEN_AT_POS|MASK_AFTER_TOKEN_POS|CALL_HANDLER), param (1-based token index), handler (custom fn or nullptr)
   static const RedactRule kRules[] = {
     { "wifiadd ",          MASK_TOKEN_AT_POS,    3, nullptr },  // wifiadd <ssid> <password>
+    { "llmhttptoken ",     MASK_AFTER_TOKEN_POS, 1, nullptr },  // gateway credential
+    { "llmhttpurl ",       MASK_AFTER_TOKEN_POS, 1, nullptr },  // redact even a rejected URL containing userinfo
     { "mqttpassword ",     MASK_AFTER_TOKEN_POS, 1, nullptr },  // mqttpassword <password>
     { "login ",            MASK_TOKEN_AT_POS,    3, nullptr },  // login <user> <password>
     { "testencryption ",   MASK_AFTER_TOKEN_POS, 1, nullptr },  // testencryption <secret>

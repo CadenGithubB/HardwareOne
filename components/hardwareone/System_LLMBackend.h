@@ -44,6 +44,7 @@ enum class LlmBackendKind : uint8_t {
   None    = 0,
   Onboard = 1,   // on-device PSRAM engine (ENABLE_LLM_SOURCE_ONBOARD)
   Cm5     = 2,   // CM5 / Pi 5 co-processor over the UART host link (ENABLE_LLM_SOURCE_CM5)
+  Http    = 3,   // OpenClaw over Wi-Fi (ENABLE_LLM_SOURCE_HTTP)
 };
 
 const char* llmBackendKindName(LlmBackendKind k);   // "onboard" / "cm5" / "none"
@@ -154,6 +155,13 @@ bool llmPromptIsCommandMode(const char* userText);
 // was trained on this device's command vocabulary, so a remote source would
 // have to invent one. See the definition for why instructing it is not a fix.
 bool llmBackendSupportsCommandMode();
+
+// Agents may perform actions. Regeneration must not replay their last request.
+bool llmBackendSupportsRetry();
+
+// Starts a fresh remote conversation; does not erase host history or memory.
+// False while the source is still releasing an active request.
+bool llmBackendResetConversation();
 
 // Tokenize with the ACTIVE source's tokenizer. Returns 0 for any source that
 // has no local tokenizer — which is what makes the retry path's suppress-token
