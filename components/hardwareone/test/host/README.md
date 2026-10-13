@@ -907,8 +907,8 @@ header staging file). It takes `--cxx` and `--sanitize`; CTest runs it
 without arguments (`c++`, no sanitizers).
 
 `web_json_replies` compiles the production `handleAutomationsExport`,
-`handleIconGet`, `handleFilesCreate`, `handleMicRecordingsList` and
-`sseSendNotice` (plus `webJsonString`, `sendJsonError` and the recordings-list
+`handleIconGet`, `handleFilesCreate` and `handleMicRecordingsList`
+(plus `webJsonString`, `sendJsonError` and the recordings-list
 builder) against a fake httpd that keeps header pointers and reads them at
 `httpd_resp_send`, with real ArduinoJson. Under `--sanitize` a header value
 that dies before the send is an ASan error (the `?id=` export disposition, the
@@ -917,7 +917,7 @@ icon `X-Icon-Size`); the export filename keeps only `[A-Za-z0-9._-]`, at most
 `json` module: recordings named with a backslash, comma, colon, quote or
 control character; `files/create` errors with quotes, a backslash, a newline
 and a control character (folder and file branches); a 150-character name that
-must reach `filecreate` whole; an SSE notice with quotes and a newline. Not
+must reach `filecreate` whole. Not
 covered: the map, GPS track and LLM status replies (same helper, no harness)
 and the recordings producer in `System_Microphone.cpp`. Run with
 `ctest --test-dir build -R '^web_json_replies$' --output-on-failure` (or the
@@ -935,11 +935,11 @@ early uptime and across the millis() wrap (never a blind slot 0), and that the
 replaced session is signed out like any other logout: `SYSEVT_LOGOUT` with
 `evicted`, a logout reason for its browser unless it is the address signing
 in, its socket closed unless it carries this login, its transport epoch closed
-and its slot generation bumped (a revoked session waiting for its notice gets
+and its slot generation bumped (a revoked session still held in its slot gets
 its socket closed but no second event or reason). httpd, tokens, epochs,
 events and logout reasons are recording doubles. Not covered: the cookie
 reaching a browser,
-`handleLogin`, or the SSE delivery of the reason. Run with
+`handleLogin`, or the login page showing the reason. Run with
 `ctest --test-dir build -R '^web_session_eviction$' --output-on-failure` (or
 the runner with `--sanitize` / `--case <name>`).
 
@@ -1000,6 +1000,35 @@ current camera, power and edgeimpulse descriptions. Not covered: the commands'
 runtime replies and the hand-written `docs/USERGUIDE.md`. Run with
 `ctest --test-dir build -R '^retired_feature_text$' --output-on-failure` (or
 `python3 test_retired_feature_text.py`).
+
+## Dead auth helpers removed
+
+`dead_auth_helpers_removed` is a source check over the firmware sources
+(`components/hardwareone` outside `test/`, plus `main/`, `updater/` and
+`components/hw1_ota_protocol` where present; comments ignored). None of the
+retired helpers may be defined, declared or called again: the per-transport
+branches and HTTP-off stub of `tgRequireAuth`, `authSuccessUnified`,
+`isTransportAdmin`, the registry and help helpers (`commandRequiresAdmin`,
+`dispatchCommand`, `isHelpModeCommand`, the `renderHelp*` wrappers,
+`exitHelpAndExecute`), the I2C and file-transfer mutex guards, and the web
+auth, session and SSE helpers (`getHeaderValue`/`getCookieValue`, which
+broadcast the cookie, `sendAuthRequired`, `getLogoutReasonForAuthPage`,
+`streamNav`, `renderTwoFieldForm`, `buildUserSessionsJson` and the rest), the
+per-session SSE notice queue (`sseEnqueueNotice`/`sseDequeueNotice`, the
+`SessionEntry` notice ring, `sseSendNotice`, `webSessionDequeueSseNotice`,
+`handleNotice`), the unread `CMD_MODULE_ADMIN`/`CMD_MODULE_NETWORK` module
+bits and the uncalled `streamDebugRecord`.
+`WebPage_Register.h`, `WebPage_LoginRequired.h` and `WebPage_LoginSuccess.h`
+must not exist, neither `/login/setsession` nor `/api/notice` may be named and
+no source writes an SSE `notice` frame, `tgRequireAuth` is
+defined once, under `ENABLE_HTTP_SERVER`, and refuses any context that is not
+a web request, a revoke marks the slot without queueing a `[revoke]` notice,
+`/api/sessions` and `/api/admin/sessions` share `handleSessionsList`, and the
+undefined three-argument `streamBeginHtml` prototype is gone. The HTTP-off
+no-op stubs in `System_SensorStubs.h` (`authSuccessUnified`,
+`sseEnqueueNotice`, `sseDequeueNotice`), a file set 1 does not edit, are
+exempt by name. It does not compile anything. Run with
+`ctest --test-dir build -R '^dead_auth_helpers_removed$' --output-on-failure`.
 
 ## Boot temporary-file cleanup
 

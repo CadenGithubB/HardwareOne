@@ -37,20 +37,10 @@ JSON_INCLUDE = COMPONENT.parent / "hardwareone_libs" / "ArduinoJson" / "src"
 
 FENCE_START = "std::atomic<TransportSessionEpoch> sWebSessionEpoch[MAX_SESSIONS];"
 FENCE_CLASS = "class WebSessionFenceGuard"
-BROADCAST_MARKERS = ("void broadcastNoticeToAllSessions(", "void broadcastEventToAllSessions(",
+BROADCAST_MARKERS = ("void broadcastEventToAllSessions(",
                      "void broadcastEventToSessionsIf(", "uint32_t sseEventDropsTotal(")
-DEQUEUE_MARKERS = ("bool webSessionDequeueSseEvent(", "bool webSessionDequeueSseNotice(",
-                   "void webSessionSettleSseQueues(")
+DEQUEUE_MARKERS = ("bool webSessionDequeueSseEvent(", "void webSessionSettleSseQueues(")
 RENDERER = "static size_t notifRenderToastJson("
-
-
-def unique_definition(source: str, marker: str) -> str:
-    """The one occurrence of marker that opens a body; declarations
-    (marker followed by ';') are skipped, and a second definition fails."""
-    starts = [m.start() for m in re.finditer(re.escape(marker), source)]
-    bodies = [s for s in starts if source[s + len(marker):].lstrip().startswith("{")]
-    require(len(bodies) == 1, f"one definition: {marker}")
-    return extract_block(source[bodies[0]:], marker)
 
 
 def production(server: str, events: str, header: str, notifications: str,
@@ -58,9 +48,8 @@ def production(server: str, events: str, header: str, notifications: str,
     fenced = all(server.count(marker) == 1 for marker in DEQUEUE_MARKERS)
     handler = extract_block(events, "esp_err_t handleEvents(")
     if fenced:
-        require("webSessionDequeueSseEvent(sessIdx, sid," in handler and
-                "webSessionDequeueSseNotice(sessIdx, sid," in handler,
-                "handleEvents must drain through the fenced accessors")
+        require("webSessionDequeueSseEvent(sessIdx, sid," in handler,
+                "handleEvents must drain through the fenced accessor")
     else:
         require("sseDequeueEvent(gSessions[sessIdx]" in handler,
                 "fallback dequeue no longer mirrors handleEvents")
@@ -72,8 +61,6 @@ def production(server: str, events: str, header: str, notifications: str,
     primitives = "\n\n".join([
         extract_block(events, "void sseEnqueueEvent("),
         extract_block(events, "bool sseDequeueEvent("),
-        unique_definition(server, "void sseEnqueueNotice(SessionEntry& s, const String& msg)"),
-        unique_definition(server, "bool sseDequeueNotice(SessionEntry& s, String& out)"),
     ])
 
     require(server.count(FENCE_START) == 1 and server.count(FENCE_CLASS) == 1, "one session fence")

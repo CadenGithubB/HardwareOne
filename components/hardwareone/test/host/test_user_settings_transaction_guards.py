@@ -121,8 +121,8 @@ assert creator.index('account.role == "guest"') < creator.index("FsLockGuard gua
 
 # The forced change is decided once (userMustChangePassword) and every
 # authenticated web request, APIs included, passes the gate in tgRequireAuth.
+# tgRequireAuth admits web requests only; its whole body is the web path.
 web_auth = function_body(user, "bool tgRequireAuth(AuthContext& ctx)")
-web_auth = web_auth[:web_auth.index("SOURCE_SERIAL")]
 assert "webPasswordChangeAllows(req, ctx.user)" in web_auth, \
     "web APIs ignore the forced password change"
 gate = function_body((ROOT / "WebServer_Utils.cpp").read_text(), "bool webPasswordChangeAllows(")

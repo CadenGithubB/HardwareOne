@@ -94,8 +94,12 @@ static_assert(!std::is_constructible<CommandEntry, const char*, const char*,
               bool, Handler, const char*, const char*>::value);
 static_assert(std::is_constructible<CommandEntry, const char*, const char*,
               bool, Handler, const char*, bool>::value);
-static_assert(CMD_MODULE_SENSOR == 0x01 && CMD_MODULE_CORE == 0x02 &&
-              CMD_MODULE_ADMIN == 0x04 && CMD_MODULE_NETWORK == 0x08);
+static_assert(CMD_MODULE_SENSOR == 0x01 && CMD_MODULE_CORE == 0x02);
+// Nothing read the admin and network module bits, so they are gone; access
+// control lives in each command's requiresAdmin/requiresSuperAdmin columns.
+#if defined(CMD_MODULE_ADMIN) || defined(CMD_MODULE_NETWORK)
+#error "CMD_MODULE_ADMIN/CMD_MODULE_NETWORK are retired module flags"
+#endif
 
 int main() {
   const size_t count = sizeof(entries) / sizeof(entries[0]);

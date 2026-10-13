@@ -54,8 +54,6 @@ struct CommandEntry {
 // Command module flags
 #define CMD_MODULE_SENSOR    0x01  // Module controls a sensor/peripheral
 #define CMD_MODULE_CORE      0x02  // Core system module (skip in help menu)
-#define CMD_MODULE_ADMIN     0x04  // Module requires admin access
-#define CMD_MODULE_NETWORK   0x08  // Network-related module
 
 // Command module structure - each module registers its command table
 struct CommandModule {
@@ -80,15 +78,6 @@ const CommandModule* getCommandModules(size_t& count);
 // Returns nullptr if not found
 const CommandEntry* findCommand(const String& cmdLine);
 
-// Check if a command should stay in help mode (CLI-module command or module-name navigation).
-// Returns true for help/back/exit/clear and any registered module name.
-bool isHelpModeCommand(const char* cmdName);
-
-// Check if a command requires admin privileges
-bool commandRequiresAdmin(const String& cmdLine);
-// True if the command is in the super-admin (top-tier) allowlist — gated
-// independently of the admin flag. See System_Utils.cpp.
-bool commandRequiresSuperAdmin(const String& cmdLine);
 
 // Opt-in structured (JSON) output detector. Returns true if `args` contains a
 // standalone `json` token at a word boundary (so it won't false-match a value
@@ -102,9 +91,5 @@ bool argWantsJson(const String& args);
 // lead because later tokens are real args that may contain a "json" token
 // (e.g. `llm json <prompt>`, `files json <path>`, `files /logs json`).
 bool argLeadingTokenIsJson(const String& args);
-
-// Execute a command through the registry (returns result string)
-// Note: executeCommand() in System_Utils.cpp handles the authorization context.
-const char* dispatchCommand(const String& argsInput);
 
 #endif // SYSTEM_COMMANDREGISTRY_H

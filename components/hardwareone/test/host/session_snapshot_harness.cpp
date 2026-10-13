@@ -253,7 +253,9 @@ static void independentSources() {
 static void serialPreAuth() {
   reset(); CHECK(gSettings.serialRequireAuth);
   const auto epoch = serialTransportInputEpoch(); CHECK(epoch != 0);
-  CHECK(serialTransportInputEpochIsCurrent(epoch) && !transportSessionEpochIsLive(SOURCE_SERIAL, epoch));
+  { String shadowUser; bool shadowAuthed = true;
+    CHECK(snapshotLegacyShadow(sSerialSession, shadowUser, shadowAuthed) == epoch && !shadowAuthed);
+    CHECK(!transportSessionEpochIsLive(SOURCE_SERIAL, epoch)); }
   const auto result = read(SOURCE_SERIAL); noIdentity(result, epoch);
   CHECK(serialTransportInputEpoch() == epoch && occupied() == 1 && !writerIsHeld(SOURCE_SERIAL));
   record("serial-preauth-input", SOURCE_SERIAL, result);

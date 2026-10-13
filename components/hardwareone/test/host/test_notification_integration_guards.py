@@ -79,10 +79,10 @@ def guard_scope_closed_before(body: str, guard_at: int, call_at: int) -> bool:
     return False
 
 
-for marker in ("void broadcastNoticeToAllSessions(", "void broadcastEventToAllSessions(",
+for marker in ("void broadcastEventToAllSessions(",
                "void broadcastEventToSessionsIf(", "uint32_t sseEventDropsTotal(",
                "void broadcastSensorStatusToAllSessions(",
-               "bool webSessionDequeueSseEvent(", "bool webSessionDequeueSseNotice(",
+               "bool webSessionDequeueSseEvent(",
                "void webSessionSettleSseQueues(", "void webSessionMarkStatusSent("):
     assert web_server.count(marker) == 1, marker
     helper = extract_block(web_server, marker)
@@ -91,14 +91,10 @@ for marker in ("void broadcastNoticeToAllSessions(", "void broadcastEventToAllSe
     for io in ("sseWrite(", "httpd_resp_", "httpd_sess_"):
         assert io not in helper, f"{marker} must not do socket I/O under the fence"
 
-# handleNotice: the fence covers the dequeue and slot clear only; the cookie
-# header and the response are written after its scope closes.
-notice = extract_block(web_server, "esp_err_t handleNotice(")
-notice_guard = notice.index("WebSessionFenceGuard sessionGuard;")
-for write in ("writeSessionCookie(", "httpd_resp_send(", "jsonEscape("):
-    write_at = notice.index(write, notice_guard)
-    assert guard_scope_closed_before(notice, notice_guard, write_at), \
-        f"handleNotice must release the session fence before {write}"
+# The per-session notice queue had no producer and no client, so it and
+# /api/notice are gone; a revoke reason reaches the browser only as the stored
+# logout reason (test_dead_auth_helpers_removed pins the removal).
+assert "esp_err_t handleNotice(" not in web_server
 
 fanout = extract_block(web_server, "void broadcastEventToSessionsIf(")
 assert "allow(gSessions" not in fanout, "the predicate must not read the live session table"
@@ -117,7 +113,7 @@ assert "++sWebSessionSlotGeneration[idx];" in invalidate
 
 handler = extract_block(web_events, "esp_err_t handleEvents(")
 assert "sseDequeueEvent(gSessions" not in handler and "sseDequeueNotice(gSessions" not in handler
-assert "webSessionDequeueSseNotice(sessIdx, sid, n)" in handler
+assert "webSessionDequeueSseNotice" not in handler and "sseSendNotice" not in handler
 assert "webSessionDequeueSseEvent(sessIdx, sid, evName, evData)" in handler
 assert "webSessionSettleSseQueues(sessIdx, sid);" in handler
 assert "needsNotificationTick = false" not in handler
@@ -128,7 +124,7 @@ assert handler.index("const unsigned long seqAtBuild = gSensorStatusSeq;") < \
     handler.index("buildSensorStatusJson()")
 assert "webSessionMarkStatusSent(sessIdx, sid, seqAtBuild);" in handler
 web_server_h = (ROOT / "WebServer_Server.h").read_text()
-for decl in ("bool webSessionDequeueSseEvent(", "bool webSessionDequeueSseNotice(",
+for decl in ("bool webSessionDequeueSseEvent(",
              "void webSessionSettleSseQueues(", "void webSessionMarkStatusSent("):
     assert web_server_h.count(decl) == 1, f"WebServer_Server.h must declare {decl}"
 mark_sent = extract_block(web_server, "void webSessionMarkStatusSent(")

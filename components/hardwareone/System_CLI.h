@@ -52,15 +52,6 @@ const char* renderHelpMain(bool showAll);
  */
 const char* renderHelpSensors();
 
-// The functions below are thin wrappers around renderHelpModuleByName().
-// They are kept for backward compatibility; prefer calling renderHelpModuleByName()
-// directly for new module help pages — no broadcastOutput() wrapping needed.
-const char* renderHelpSystem();
-const char* renderHelpWifi();
-const char* renderHelpAutomations();
-const char* renderHelpEspnow();
-const char* renderHelpSettings();
-
 // ============================================================================
 // CLI Navigation Functions
 // ============================================================================

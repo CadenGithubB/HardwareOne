@@ -85,11 +85,10 @@ TransportSessionEpoch serialTransportSessionAuthenticated(const String& user);
 TransportSessionEpoch serialTransportSessionAuthenticatedIfEpoch(
     TransportSessionEpoch expectedEpoch, const String& user);
 bool serialTransportSessionClearIfEpoch(TransportSessionEpoch expectedEpoch);
-// Physical input is generation-bound even before authentication. These two
-// helpers create/read the private pre-auth incarnation used only to ensure a
+// Physical input is generation-bound even before authentication. This helper
+// creates/reads the private pre-auth incarnation used only to ensure a
 // partially typed line cannot cross a login/logout/replacement boundary.
 TransportSessionEpoch serialTransportInputEpoch();
-bool serialTransportInputEpochIsCurrent(TransportSessionEpoch epoch);
 void serialTransportSessionCleared();
 // Invalidate only an unauthenticated/AuthBypass incarnation when the live
 // require-auth policy changes. A named authenticated session remains valid;
@@ -174,7 +173,9 @@ bool bondIdentityLive(const AuthContext& ctx);
 // account id and never pass a credential check.
 bool isReservedUsername(const String& username);
 
-// Transport-generic authentication functions
+// Web request admission (ENABLE_HTTP_SERVER builds only): every caller passes
+// makeWebAuthCtx(req); any other context is refused. Command transports are
+// admitted by authorizeCommand.
 bool tgRequireAuth(AuthContext& ctx);
 bool isAdminUser(const String& who);
 
@@ -183,7 +184,8 @@ bool isAdminUser(const String& who);
 // when G2 pairedByUser was never stamped or was cleared (ban/logout).
 String getDeviceOwnerUsername();
 // Top tier — role=="superadmin" (or a live bonded session). Gates the
-// identity/crypto/destructive/auth-posture command set; see commandRequiresSuperAdmin.
+// identity/crypto/destructive/auth-posture command set (the requiresSuperAdmin
+// column of each command row).
 bool isSuperAdminUser(const String& who);
 // Bottom tier — role=="guest". Authenticated view-only: caller-local
 // login/logout and whoami only; filesystem reads use the user column masked
@@ -256,7 +258,6 @@ bool logoutTransportFromNamedSession(CommandSource target,
                                      const char** denialOut = nullptr);
 bool isTransportAuthenticated(CommandSource transport);
 String getTransportUser(CommandSource transport);
-bool isTransportAdmin(CommandSource transport);
 
 // Security audit trail for credential logins. Defined in System_Debug.cpp
 // (beside the log-file constants) rather than WebServer_Server.cpp, so the
@@ -358,8 +359,9 @@ bool setUserPassword(const String& username, const String& newPasswordRaw, bool 
 // cached per account and refilled after setUserPassword or an identity
 // change. False when the account or its settings cannot be read.
 // Web: tgRequireAuth admits only /account/password-change and /logout while
-// this holds (webPasswordChangeAllows). Command transports do not gate on it
-// yet; the user changes the password there with userchangepassword.
+// this holds (webPasswordChangeAllows). Command transports: authorizeCommand
+// refuses every external-transport command except userchangepassword, bare
+// login/logout and whoami while this holds.
 bool userMustChangePassword(const String& username);
 
 // Public username/password intake rules (register + admin create). Username:
@@ -467,7 +469,6 @@ bool getUserRole(const String& username, String& outRole);
 extern const char* USERS_JSON_FILE;  // Now points to "/system/users/users.json"
 
 // Boot sequence and timestamp resolution
-bool usernameExistsInUsersJson(const String& json, const String& username);
 void resolvePendingUserCreationTimes();
 void writeBootAnchor();
 void cleanupOldBootAnchors(void* doc = nullptr);  // doc is StaticJsonDocument<8192>*

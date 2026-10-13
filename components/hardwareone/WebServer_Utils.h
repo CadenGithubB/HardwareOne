@@ -107,11 +107,6 @@ bool webPasswordChangeAllows(httpd_req_t* req, const String& user);
 void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 void getClientIP(httpd_req_t* req, String& ipOut);
 
-// Get header value from request
-bool getHeaderValue(httpd_req_t* req, const char* name, String& out);
-
-// Get cookie value from request
-bool getCookieValue(httpd_req_t* req, const char* key, String& out);
 
 // Get session ID from cookie
 String getCookieSID(httpd_req_t* req);
@@ -181,64 +176,6 @@ String generatePublicNavigation();
 // Forward declarations
 void streamCommonCSS(httpd_req_t* req);     // Streaming CSS - no String allocation
 void streamCommonDialogs(httpd_req_t* req); // Streaming dialog HTML+JS - no String allocation
-
-// Render a generic two-field form with two buttons using shared classes
-// title: heading for the form
-// subtitle: small helper text under the title (optional)
-// action, method: form target and HTTP method
-// Field 1: label1, name1, value1, type1 (e.g., text, email)
-// Field 2: label2, name2, value2, type2 (e.g., password)
-// primaryText: primary button text
-// secondaryText, secondaryHref: secondary action link
-// errorMsg: optional error message to display above the form
-inline String renderTwoFieldForm(
-  const String& title,
-  const String& subtitle,
-  const String& action,
-  const String& method,
-  const String& label1,
-  const String& name1,
-  const String& value1,
-  const String& type1,
-  const String& label2,
-  const String& name2,
-  const String& value2,
-  const String& type2,
-  const String& primaryText,
-  const String& secondaryText,
-  const String& secondaryHref,
-  const String& errorMsg
-) {
-  String html;
-  html += "<div class='panel container-narrow space-top-md'>";
-  html += "  <div class='text-center space-bottom-sm'>";
-  html += "    <h2>" + title + "</h2>";
-  if (subtitle.length()) {
-    html += "    <p class='text-muted' style='margin:0'>" + subtitle + "</p>";
-  }
-  html += "  </div>";
-
-  if (errorMsg.length()) {
-    html += "  <div id='err' class='form-error text-danger'>" + errorMsg + "</div>";
-  } else {
-    html += "  <div id='err' class='form-error' style='display:none'></div>";
-  }
-
-  html += "  <form method='" + method + "' action='" + action + "'>";
-  html += "    <div class='form-field'><label>" + label1 + "</label>";
-  html += "      <input class='form-input' name='" + name1 + "' value='" + value1 + "' type='" + type1 + "'></div>";
-  html += "    <div class='form-field'><label>" + label2 + "</label>";
-  html += "      <input class='form-input' name='" + name2 + "' value='" + value2 + "' type='" + type2 + "'></div>";
-  html += "    <div class='btn-row space-top-md'>";
-  html += "      <button class='btn btn-primary' type='submit'>" + primaryText + "</button>";
-  if (secondaryText.length()) {
-    html += "      <a class='btn btn-secondary' href='" + secondaryHref + "'>" + secondaryText + "</a>";
-  }
-  html += "    </div>";
-  html += "  </form>";
-  html += "</div>";
-  return html;
-}
 
 // Generic File Explorer Utility
 // This provides reusable JavaScript functions for browsing and selecting files from the filesystem
@@ -1288,8 +1225,6 @@ console.log('[BondFs] shared helper loaded');
 // Stream a null-terminated C string as a chunk
 esp_err_t streamChunkC(httpd_req_t* req, const char* s);
 
-// Stream a buffer with explicit length as a chunk
-esp_err_t streamChunkBuf(httpd_req_t* req, const char* buf, size_t len);
 
 // Stream a String as a chunk
 void streamChunk(httpd_req_t* req, const String& str);
@@ -1320,11 +1255,6 @@ void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic,
 // End HTML page (close content div, body, html; finalize chunked response)
 void streamEndHtml(httpd_req_t* req);
 
-// Stream navigation bar
-void streamNav(httpd_req_t* req, const String& username, const String& activePage);
-
-// Stream generic content with chunking (for large content)
-void streamContentGeneric(httpd_req_t* req, const String& content);
 
 // ============================================================================
 // CSS Streaming

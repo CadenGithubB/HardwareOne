@@ -1146,29 +1146,16 @@ void helpSuppressedPrintAndReset() {
 // ==========================================================================
 // Streaming Debug Instrumentation (centralized implementation)
 // ==========================================================================
-static bool gStreamHitMaxChunk = false;
-static size_t gStreamMaxChunk = 0;
-static size_t gStreamTotalBytes = 0;
+// Nothing records chunk sizes any more, so the summary names the page only.
 static String gStreamTag = "";
 
 void streamDebugReset(const char* tag) {
-  gStreamHitMaxChunk = false;
-  gStreamMaxChunk = 0;
-  gStreamTotalBytes = 0;
   gStreamTag = tag ? String(tag) : String("");
 }
 
-void streamDebugRecord(size_t sz, size_t chunkLimit) {
-  if (sz > gStreamMaxChunk) gStreamMaxChunk = sz;
-  gStreamTotalBytes += sz;
-  if (sz >= chunkLimit) gStreamHitMaxChunk = true;
-}
-
 void streamDebugFlush() {
-  // One-line summary per response
-  DEBUG_HTTPF("page=%s total=%uB maxChunk=%uB hitMax=%s buf=5119B",
-              gStreamTag.c_str(), (unsigned)gStreamTotalBytes, (unsigned)gStreamMaxChunk,
-              gStreamHitMaxChunk ? "yes" : "no");
+  // One line per streamed response
+  DEBUG_HTTPF("page=%s streamed", gStreamTag.c_str());
 }
 
 // ============================================================================

@@ -124,9 +124,12 @@ assert "const String& redactedLine" in authorize_signature
 assert "resolution.entry->requiresSuperAdmin" in authorize
 assert "resolution.entry->requiresAdmin" in authorize
 assert "findCommand(" not in authorize
-assert "commandRequiresAdmin(" not in authorize
-assert "commandRequiresSuperAdmin(" not in authorize
 assert "redactCmdForAudit(" not in authorize
+# The row flags are read in authorizeCommand only: the second-scan helpers
+# (commandRequiresAdmin/SuperAdmin) and the auth-less dispatchCommand are gone.
+for removed in ("commandRequiresAdmin(", "commandRequiresSuperAdmin(", "dispatchCommand("):
+    assert removed not in utils_cpp, removed
+    assert removed not in command_cpp, removed
 
 # The normal local executor has exactly one outer resolution, reused for
 # redaction, authorization, dispatch, unknown output, command audit, and auth
@@ -252,7 +255,6 @@ sources = {
 EXECUTE_COMMAND_CALLERS = {
     "HardwareOne.cpp": (
         "static void commandExecTask(",          # the executor
-        "static String exitHelpAndExecute(",     # no caller; dead-code removal
     ),
     "System_Utils.cpp": (
         "bool submitAndExecuteSync(const Command& cmd, String& out,",  # early boot
@@ -290,7 +292,7 @@ assert early_call < sync_code.index("ExecReq* r =")
 espsr_code = sources["System_ESPSR.cpp"]
 assert espsr_code.count("runVoiceCommandJob") == 2
 assert "submitDeferredToCmdExec(runVoiceCommandJob" in espsr_code
-assert sources["HardwareOne.cpp"].count("exitHelpAndExecute(") <= 1
+assert "exitHelpAndExecute(" not in sources["HardwareOne.cpp"]
 
 # Web status endpoints submit through the owner helper.
 web_code = sources["WebServer_Server.cpp"]

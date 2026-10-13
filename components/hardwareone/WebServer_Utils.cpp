@@ -238,34 +238,6 @@ void getClientIP(httpd_req_t* req, String& ipOut) {
   ipOut = buf;
 }
 
-// Get header value from request
-bool getHeaderValue(httpd_req_t* req, const char* name, String& out) {
-  size_t len = httpd_req_get_hdr_value_len(req, name);
-  if (!len) {
-    BROADCAST_PRINTF("[auth] header missing: %s", name);
-    return false;
-  }
-  std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(len + 1, AllocPref::PreferPSRAM, "http.header"), free);
-  if (httpd_req_get_hdr_value_str(req, name, buf.get(), len + 1) != ESP_OK) return false;
-  out = String(buf.get());
-  BROADCAST_PRINTF("[auth] got header %s: %s", name, out.c_str());
-  return true;
-}
-
-// Get cookie value from request
-bool getCookieValue(httpd_req_t* req, const char* key, String& out) {
-  char buf[256];
-  size_t len = sizeof(buf);
-  if (httpd_req_get_cookie_val(req, key, buf, &len) == ESP_OK) {
-    out = String(buf);
-    BROADCAST_PRINTF("[auth] cookie %s=\"%s\"", key, out.c_str());
-    return true;
-  }
-  // Do not fall back to manual parsing to avoid misreads; simply report absence.
-  BROADCAST_PRINTF("[auth] cookie key not found: %s", key);
-  return false;
-}
-
 // Get session ID from cookie
 String getCookieSID(httpd_req_t* req) {
   size_t hdr_len = httpd_req_get_hdr_value_len(req, "Cookie");
@@ -476,7 +448,6 @@ static void webGuestSendForbidden(httpd_req_t* req) {
 static bool webGuestApiAllowed(const char* path) {
   static const char* const kAllow[] = {
     "/api/ping",
-    "/api/notice",
     "/api/buildconfig",
     "/api/system",
     "/api/devices",
@@ -583,9 +554,9 @@ bool webGuestAccessAllowed(httpd_req_t* req, const AuthContext& ctx) {
     return false;
   }
 
-  // HTML view pages + logout + browser chrome. Block CLI and session minting.
+  // HTML view pages + logout + browser chrome. Block the CLI page.
   if (strncmp(path, "/api/", 5) != 0) {
-    if (strcmp(path, "/cli") == 0 || strcmp(path, "/login/setsession") == 0) {
+    if (strcmp(path, "/cli") == 0) {
       webGuestSendForbidden(req);
       return false;
     }
@@ -736,10 +707,6 @@ String generateNavigation(const String& activePage, const String& username, cons
 // HTTP Streaming Helpers
 // ============================================================================
 
-// External debug helpers
-extern void streamDebugRecord(size_t bytes, size_t chunkSize);
-extern void streamDebugFlush();
-
 esp_err_t streamChunkC(httpd_req_t* req, const char* s) {
   if (!req || !s) return ESP_FAIL;
   size_t len = strlen(s);
@@ -748,11 +715,6 @@ esp_err_t streamChunkC(httpd_req_t* req, const char* s) {
     WARN_WEBF("Failed to send chunk of %d bytes, error: %d", len, ret);
   }
   return ret;
-}
-
-esp_err_t streamChunkBuf(httpd_req_t* req, const char* buf, size_t len) {
-  if (!req || !buf) return ESP_FAIL;
-  return httpd_resp_send_chunk(req, buf, len);
 }
 
 void streamChunk(httpd_req_t* req, const String& str) {
@@ -1212,33 +1174,6 @@ void streamEndHtml(httpd_req_t* req) {
   if (!req) return;
   streamChunkC(req, "</div></body></html>");
   httpd_resp_send_chunk(req, nullptr, 0);  // End chunked response
-}
-
-void streamNav(httpd_req_t* req, const String& username, const String& activePage) {
-  if (!req) return;
-#ifdef ARDUINO
-  String nav = generateNavigation(username, activePage);
-  if (nav.length()) httpd_resp_send_chunk(req, nav.c_str(), nav.length());
-#endif
-}
-
-void streamContentGeneric(httpd_req_t* req, const String& content) {
-  const char* contentStr = content.c_str();
-  size_t contentLen = content.length();
-  size_t chunkSize = 5119;  // 5KB buffer size - 1 for null terminator
-
-  httpd_resp_set_type(req, "text/html; charset=utf-8");
-  DEBUG_HTTPF("streamContentGeneric: content_len=%u", (unsigned)contentLen);
-
-  for (size_t i = 0; i < contentLen; i += chunkSize) {
-    size_t remainingBytes = contentLen - i;
-    size_t currentChunkSize = (remainingBytes > chunkSize) ? chunkSize : remainingBytes;
-    streamDebugRecord(currentChunkSize, chunkSize);
-    httpd_resp_send_chunk(req, contentStr + i, currentChunkSize);
-  }
-
-  httpd_resp_send_chunk(req, NULL, 0);  // End chunked response
-  streamDebugFlush();
 }
 
 #endif // ENABLE_HTTP_SERVER

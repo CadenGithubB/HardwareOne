@@ -2721,37 +2721,6 @@ extern const size_t batteryCommandsCount = sizeof(batteryCommands) / sizeof(batt
 
 // Command lookup is implemented in System_Command.cpp.
 
-// Check if command requires admin
-bool commandRequiresAdmin(const String& cmdLine) {
-  const CommandEntry* entry = findCommand(cmdLine);
-  if (!entry) return false;
-  // super implies admin: a super-only command is always at least admin-gated,
-  // even if its row forgot requiresAdmin=true. Enforced here (the single reader
-  // of the raw flag) so the invariant holds for every caller — the auth gate
-  // and the help/visibility helper alike — with no per-row discipline. Mirrors
-  // isAdminUser(), where a superadmin also satisfies the admin check.
-  return entry->requiresAdmin || entry->requiresSuperAdmin;
-}
-
-// Top-tier gate, read straight from the command table (single source of truth,
-// same as commandRequiresAdmin) — the requiresSuperAdmin flag lives with each
-// command's own registration, so a command can never be dangerous-but-ungated
-// through a stale parallel list.
-bool commandRequiresSuperAdmin(const String& cmdLine) {
-  const CommandEntry* entry = findCommand(cmdLine);
-  return entry ? entry->requiresSuperAdmin : false;
-}
-
-// Dispatch command to handler (simple version without auth context)
-// executeCommand() below handles auth, logging, help mode, etc.
-const char* dispatchCommand(const String& argsInput) {
-  const CommandEntry* entry = findCommand(argsInput);
-  if (!entry) {
-    return "Error: Unknown command";
-  }
-  return entry->handler(argsInput);
-}
-
 // ============================================================================
 // Memory Reporting Functions
 // ============================================================================

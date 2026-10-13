@@ -177,7 +177,7 @@ static constexpr CommandModule gCommandModules[] = {
     "using it; 'radiopower off' is the unconditional airplane switch. wifiscan lists nearby APs, ntpsync/ntpstatus handle clock sync, "
     "and openhttp/closehttp/httpstatus run the web server (compiled in only when the "
     "HTTP server is enabled). certinfo and certgen (admin-only) manage the self-signed "
-    "HTTPS certificate.", wifiCommands,         &wifiCommandsCount, CMD_MODULE_NETWORK, nullptr },
+    "HTTPS certificate.", wifiCommands,         &wifiCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_ESPNOW
   { "espnow",     "ESP-NOW wireless communication (peer-to-peer, mesh)",
@@ -191,7 +191,7 @@ static constexpr CommandModule gCommandModules[] = {
     "(espnowmode mesh) adds routing with a TTL and master/worker/backup roles; each "
     "device carries identity metadata (name, friendly name, room, zone, tags) queried "
     "with espnowdeviceinfo locally or espnowrequestmeta for a peer.",
-    espNowCommands,       &espNowCommandsCount, CMD_MODULE_NETWORK, nullptr },
+    espNowCommands,       &espNowCommandsCount, 0, nullptr },
 #endif
 #if HW1_RADIO_COMPANION
   { "c6",         "ESP32-C6 radio companion (ESP-Hosted)",
@@ -203,7 +203,7 @@ static constexpr CommandModule gCommandModules[] = {
     "the running image; c6autorecover, c6autohold and c6heartbeat tune the background "
     "monitor. Radio features never start while the companion is offline, and a companion "
     "that stops answering is recovered without rebooting the P4.",
-    companionCommands,    &companionCommandsCount, CMD_MODULE_NETWORK, radioCompanionOnline },
+    companionCommands,    &companionCommandsCount, 0, radioCompanionOnline },
 #endif
 #if ENABLE_MQTT
   { "mqtt",       "MQTT broker connection for Home Assistant", "The MQTT subsystem connects the device to a broker, primarily to publish its "
@@ -216,7 +216,7 @@ static constexpr CommandModule gCommandModules[] = {
     "a live session. openmqtt and closemqtt start and stop the client, mqttstatus shows "
     "connection state, and mqttautostart controls whether it connects at boot. For "
     "inbound data, enable mqttSubscribeExternal with mqttSubscribeTopics; values "
-    "received from those topics are cached and read back with mqttExternalSensors.", mqttCommands,         &mqttCommandsCount, CMD_MODULE_NETWORK, nullptr },
+    "received from those topics are cached and read back with mqttExternalSensors.", mqttCommands,         &mqttCommandsCount, 0, nullptr },
 #endif
   #if ENABLE_BLUETOOTH
   { "bluetooth",  "Bluetooth LE control and status", "The Bluetooth subsystem runs the device BLE stack in one of two mutually exclusive "
@@ -231,7 +231,7 @@ static constexpr CommandModule gCommandModules[] = {
     "ChaCha20-Poly1305, independent of BLE bonding) is configured with blesecret and "
     "required with blesecure; both are admin-only, as is blerequireauth. Boot "
     "reconnection to saved-MAC peers is per-peer via bleautoreconnect <name> [on|off] "
-    "(see blepeers for names).", bluetoothCommands, &bluetoothCommandsCount, CMD_MODULE_NETWORK, nullptr },
+    "(see blepeers for names).", bluetoothCommands, &bluetoothCommandsCount, 0, nullptr },
   #endif
   { "filesystem", "File operations and storage management", "Manages files and directories on the device internal LittleFS flash. Browse with "
     "files [\"/path\"] (add json for app/BLE, or files stats json for storage usage); "
@@ -667,7 +667,7 @@ static constexpr CommandModule gCommandModules[] = {
     "banuser/unbanuser suspend a user account so it cannot log in until unbanned; the "
     "primary admin account cannot be banned. usersync pushes a user credentials to "
     "another device over ESP-NOW, authenticated by an admin account on the receiving "
-    "device.", userSystemCommands,         &userSystemCommandsCount, CMD_MODULE_ADMIN, nullptr },
+    "device.", userSystemCommands,         &userSystemCommandsCount, 0, nullptr },
   { "features",   "System feature management", "The features subsystem enables or disables compiled-in capabilities at runtime and "
     "reports their memory cost. features with no argument lists every feature grouped "
     "by category (Network, Display, Sensors, System) with an approximate heap estimate "
@@ -734,7 +734,7 @@ static constexpr CommandModule gCommandModules[] = {
     "recording through a fixed 16 KiB PSRAM queue. Shadow transport is disabled by default, never delays or replaces the WAV writer, and a "
     "transport fault aborts only the live copy while the finalized WAV remains authoritative. This diagnostic transport does not enable "
     "production streaming STT, LLM, or lens delivery.", liveAudioCommands, &liveAudioCommandsCount,
-    CMD_MODULE_NETWORK, nullptr },
+    0, nullptr },
   { "cm5", "CM5 service presence and host power/fan control", "Everything that talks to the CM5 Linux host over the authenticated UART link. "
     "cm5 status exposes the current named-UART epoch binding, freshness, state, command bridge, monitor transitions, and task stack watermark; "
     "cm5 capabilities reports the heartbeat protocol constants. The five-second heartbeat itself is authenticated UART control-plane traffic, "
@@ -749,7 +749,7 @@ static constexpr CommandModule gCommandModules[] = {
     "execution additionally requires confirmed accepted and committed ACK phases, while a normalized Linux boot ID distinguishes a daemon "
     "restart from a completed host boot. A max fan request may supersede one pending non-max request.",
     cm5PresenceCommands, &cm5PresenceCommandsCount,
-    CMD_MODULE_NETWORK, nullptr },
+    0, nullptr },
   { "ota",        "Signed firmware recovery and update", "Native ESP-IDF signed OTA support. otastatus reports the journal, "
     "partition identity, staged pair, and last result. A superadmin sets a persistent recovery credential with otapin - "
     "on the physical serial console only, because it decides whether recovery can be reached at all - then "
@@ -759,7 +759,7 @@ static constexpr CommandModule gCommandModules[] = {
     "allow-downgrade option is required for older signed releases. otacancel replaces a staged request safely, and "
     "otaack <result-sequence> confirm acknowledges exactly the durable result that was reviewed. Mutating OTA "
     "commands are forbidden from automations and require the opt-in 16 MB OTA partition layout.",
-    otaCommands, &otaCommandsCount, CMD_MODULE_ADMIN | CMD_MODULE_CORE, nullptr },
+    otaCommands, &otaCommandsCount, CMD_MODULE_CORE, nullptr },
 #if ENABLE_OLED_DISPLAY
   { "setpattern", "OLED gamepad password entry", "Provides the single admin-only command setgamepadpassword, which opens the "
     "gamepad-pattern password setup flow on the OLED screen. A pattern is a sequence of "
