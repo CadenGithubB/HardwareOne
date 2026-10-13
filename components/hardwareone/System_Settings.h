@@ -135,7 +135,6 @@ struct Settings {
       debugRingProtocol(false),
       debugRingTxn(false),
       debugRingHealth(false),
-      debugRingBridge(false),
       debugRingDump(false),
       debugCamera(false),
       debugCameraLifecycle(false),
@@ -604,7 +603,8 @@ struct Settings {
   bool debugRingProtocol;   // Per-frame envelope decode, rejects, dup serial, reassembly
   bool debugRingTxn;        // Intent queued + TX writes + packetAck
   bool debugRingHealth;     // Telemetry cache, history sweep coordinator, model ingest
-  bool debugRingBridge;     // sid=0x90 RingDataPackage spoof push, spoof task, bridge heartbeat
+  // (debugRingBridge retired: no producer left. A debug file that still has
+  // ring.bridge loads; the key is ignored and dropped on the next save.)
   bool debugRingDump;       // Raw notify/payload/fragment hex (redaction still applies)
   bool debugCamera;
   bool debugCameraLifecycle;  // initCamera/stopCamera, PWDN/RESET, GPIO state

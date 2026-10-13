@@ -165,7 +165,6 @@ set(hardwareone_srcs
         HAL_Radio.cpp
         System_RadioCompanion.cpp
         System_BleSecureChannel.cpp
-        BLE_IDF.cpp
         G2_Glasses.cpp
         G2_Ring.cpp
         BLE_CentralTx.cpp

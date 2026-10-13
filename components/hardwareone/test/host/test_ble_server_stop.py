@@ -8,9 +8,10 @@ transport sessions and settings writes are host boundaries. A stop the Ring
 owner or a busy role transition defers, or a host teardown that fails, must be
 reported to the caller: both commands answer an error and leave `bleMode`
 alone, and a deferred stop leaves the app sessions and advertising running,
-except under a companion reset's RECOVERING claim, whose forced host teardown
-follows: there a Ring-deferred stop closes session admission (epochs, GATT
-interface id) and advertising before it returns.
+except under a companion reset's RECOVERING claim, which retries the stop and,
+if it never completes, lets the companion reboot under a host it does not force
+down (companion_ble_shutdown): there a Ring-deferred stop closes session
+admission (epochs, GATT interface id) and advertising before it returns.
 Built with and without the G2 client; the disabled-Bluetooth header stub is
 compiled too. --component points the suite at another copy of the BLE sources
 (Bluetooth.cpp/.h) to show the pre-fix behavior.

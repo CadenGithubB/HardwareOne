@@ -229,7 +229,7 @@ static constexpr CommandModule gCommandModules[] = {
     "(blestream on/off/sensors/system/events, plus interval) -- all of which require an "
     "active connection. An app-layer Secure Channel (X25519 + passphrase + "
     "ChaCha20-Poly1305, independent of BLE bonding) is configured with blesecret and "
-    "required with blesecure; both are admin-only, as is blerequireauth. Boot "
+    "required with blesecure; both require super admin, as does blerequireauth. Boot "
     "reconnection to saved-MAC peers is per-peer via bleautoreconnect <name> [on|off] "
     "(see blepeers for names).", bluetoothCommands, &bluetoothCommandsCount, 0, nullptr },
   #endif
@@ -268,9 +268,9 @@ static constexpr CommandModule gCommandModules[] = {
     "commands write settings to flash immediately: oledbootmode and oleddefaultmode set "
     "the screen shown at boot and as the idle default, while oledbrightness <0-255>, "
     "oledflip, oledbootduration, oledupdateinterval, oledthermalscale, "
-    "oledthermalcolormode, and oledenabled tune appearance and timing. oledrequireauth "
-    "<0|1> (admin-only) controls whether a user must log in at the display before "
-    "interacting with it.", oledCommands,         &oledCommandsCount, 0, nullptr },
+    "oledthermalcolormode, and oledenabled tune appearance and timing. Whether a user "
+    "must log in at the display before interacting with it is set with "
+    "displayrequireauth <0|1> (super admin, Settings module).", oledCommands,        &oledCommandsCount, 0, nullptr },
 #if ENABLE_NEOPIXEL
   { "neopixel",   "RGB LED strip and effects", "Controls the addressable RGB status LED (WS2812/NeoPixel). ledcolor <name> lights "
     "it a solid color from a fixed palette (red, green, blue, yellow, magenta, cyan, "
@@ -794,12 +794,13 @@ static constexpr CommandModule gCommandModules[] = {
     "ringstatus and ringdisconnect for state and teardown. ringquery is the main data "
     "command, requesting wear/heart-rate/HRV/SpO2/temperature/activity/sleep readings. "
     "Its raw diagnostic form is admin-only, requires confirmation for SETs, and "
-    "prohibits user-profile writes. Ring health collection and low-power desired state "
-    "are managed through the authenticated Health surfaces; health SETs remain "
+    "prohibits user-profile writes. Ring health collection and low power are set with "
+    "ringcontrol <collection|lowpower> <preserve|on|off> (admin): a persisted desired "
+    "state applied to the ring asynchronously, which healthstatus reports as desired and "
+    "observed (the OLED and web Health controls run the same command). Health SETs remain "
     "ACKed-unverified while low power has capture-proven readback. debugringdump toggles "
-    "a redacted byte dump for debugging. Bridging ring data onto the G2 glasses is "
-    "deliberately unavailable -- the commands exist in the code but are intentionally "
-    "left unregistered because both approaches proved to be dead ends.", g2RingCommands,    &g2RingCommandsCount, 0, nullptr },
+    "a redacted byte dump for debugging. Bridging ring data onto the G2 glasses is not "
+    "supported: both approaches proved to be dead ends and were removed.", g2RingCommands,   &g2RingCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_LLM_BACKEND
   { "llm",        "On-device LLM text generation", "On-device large language model that runs a quantized model file entirely on the "

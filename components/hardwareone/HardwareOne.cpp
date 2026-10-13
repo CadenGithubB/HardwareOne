@@ -816,13 +816,15 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   // (No web-mirror backfill here: the drain appends WEB-routed messages to
   // the mirror unconditionally, so a backfill would double-append.)
 
-  // Targeted BLE response (direct send to originating connection, not via queue)
+  // Targeted BLE response: a direct send to the originating session, not via
+  // the queue. The session id of a BLE command is its connection id in
+  // decimal; Bluedroid numbers connections from 0, so "0" is a live link. The
+  // send is fenced on the session epoch the command was admitted under, so a
+  // result that outlives a logout, or a re-login on the same connection id, is
+  // dropped instead of reaching the replacement session. A context without a
+  // connection id has no direct BLE recipient: console-mirror sessions get
+  // only the queued copy above (private STT text redacted), never the original.
   if (ctx.outputMask & MSG_ROUTE_BLE) {
-    String prefixed = prefix;
-    prefixed += s;
-    // The session id of a BLE command is its connection id in decimal.
-    // Bluedroid numbers connections from 0, so "0" is a live link; only an
-    // empty or non-numeric id falls back to the characteristic-wide notify.
     const char* sid = ctx.auth.sid.c_str();
     uint32_t targetConnId = 0;
     bool haveConn = sid && *sid;
@@ -831,9 +833,10 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
                  (targetConnId = targetConnId * 10 + (uint32_t)(*p - '0')) <= 0xFFFFu;
     }
     if (haveConn) {
-      sendBLEResponseToConn((uint16_t)targetConnId, prefixed.c_str(), prefixed.length());
-    } else {
-      sendBLEResponse(prefixed.c_str(), prefixed.length());
+      String prefixed = prefix;
+      prefixed += s;
+      sendBLEResponseToSession((uint16_t)targetConnId, ctx.transportSessionEpoch,
+                               prefixed.c_str(), prefixed.length());
     }
   }
 

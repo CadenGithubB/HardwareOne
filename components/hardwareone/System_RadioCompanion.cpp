@@ -192,20 +192,42 @@ bool anyRadioUser() {
 // Retire the role, then take the whole host and controller down through the
 // checked HAL teardown, under the recovery transition so no other role change
 // can interleave. The role restarts afterwards re-initialise the host.
+//
+// The server is stopped only through its owner: deinitBluetooth() takes the
+// host down itself. It reports false while the Ring owner has not quiesced
+// (it has then closed session admission and advertising for this RECOVERING
+// claim) or when its own host teardown failed. Forcing the host down under a
+// Ring owner still inside a GATT call is the use-after-free its prepare step
+// exists to prevent, so the stop is retried a bounded number of times; if it
+// never completes, the reset goes ahead without forcing the host down and the
+// lifecycle fault keeps Bluetooth off until a reboot, so no role restart
+// re-initialises a host that missed the companion's reboot.
 void shutDownBleForCompanionReset(const RadioUsers& users) {
   if (!users.bleServer && !users.g2Client && bluetoothHalStatus().stopped()) return;
   if (!bleRoleTransitionBegin(BleRoleTransition::RECOVERING)) {
     logSystemEvent("C6", "BLE role transition busy; the host stays up across the companion reset");
     return;
   }
-  if (users.bleServer && isBleServerInitialized()) deinitBluetooth();  // takes the host down itself
+  bool serverStopped = true;
+  if (users.bleServer && isBleServerInitialized()) {
+    constexpr int kServerStopAttempts = 3;  // each waits up to 2 s for the Ring owner
+    serverStopped = false;
+    for (int attempt = 1; attempt <= kServerStopAttempts && !serverStopped; attempt++) {
+      serverStopped = deinitBluetooth();
+      if (!serverStopped && attempt < kServerStopAttempts) vTaskDelay(pdMS_TO_TICKS(500));
+    }
+  }
 #if ENABLE_G2_GLASSES
   for (int attempt = 0; attempt < 10 && users.g2Client && isG2ClientInitialized(); attempt++) {
     if (deinitG2Client()) break;
     vTaskDelay(pdMS_TO_TICKS(500));  // a worker still owns the runtime; it settles
   }
 #endif
-  if (!bluetoothHalStatus().stopped()) {
+  if (!serverStopped) {
+    bleStackSetLifecycleFault(true);
+    logSystemEvent("C6", "BLE server did not stop (Ring owner busy or host teardown failed): "
+                   "host not forced down for the companion reset; Bluetooth stays off until a reboot");
+  } else if (!bluetoothHalStatus().stopped()) {
     const BluetoothHalShutdownResult result = bluetoothHalDeinit();
     if (result.success) {
 #if ENABLE_G2_GLASSES

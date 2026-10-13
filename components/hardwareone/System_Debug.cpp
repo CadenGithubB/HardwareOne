@@ -106,11 +106,13 @@ static String gBLEOutputBuffer;
 static bool gBLEOutputBufferReserved = false;
 static unsigned long gBLELastFlush = 0;
 static const uint32_t BLE_OUTPUT_FLUSH_INTERVAL_MS = 150;   // Flush to BLE every 150ms (snappier; sendBLEResponse fragments)
-// MUST stay <= ESP_GATT_MAX_ATTR_LEN (512). BLECharacteristic::setValue REJECTS
-// any value longer than that — it logs at a level compiled out by default and
-// returns WITHOUT updating the characteristic, after which the caller's notify()
-// re-sends the PREVIOUS payload. So an oversize flush is not truncated, it is
-// silently duplicated.
+// MUST stay <= ESP_GATT_MAX_ATTR_LEN (512). A plaintext flush leaves as ONE
+// directed notification per session (sendBLEResponse -> bleRawNotifyToSession
+// -> esp_ble_gatts_send_indicate, never fragmented), and one ATT value cannot
+// be longer than that. The characteristic-wide sender this replaced
+// (BLECharacteristic::setValue + notify(), since deleted) did not even fail on
+// an oversize value: setValue dropped it and notify() re-sent the PREVIOUS
+// payload, so an oversize flush was silently duplicated.
 //
 // This was 1024, which made every size-triggered flush 768..1023 B (the flush
 // threshold is MAX - DEBUG_MSG_SIZE) — i.e. ALL of them over the limit, so on the
@@ -119,9 +121,9 @@ static const uint32_t BLE_OUTPUT_FLUSH_INTERVAL_MS = 150;   // Flush to BLE ever
 // usable "fully covers the 512-byte gBLEOutputBuffer flush"). With 512 the append
 // guard caps length at 511 and flushes run 256..511 B — always deliverable.
 //
-// The Secure-Channel path (bleScSendEncrypted) fragments at 195 B and was never
-// affected; this only ever bit plaintext links (bleRawNotify).
-static const size_t BLE_OUTPUT_BUFFER_MAX = 512;           // Coalesce per flush; hard-capped by setValue's 512 B limit
+// The Secure-Channel path (bleScSendEncryptedBound) fragments at 195 B and was
+// never affected; the cap only matters for plaintext sessions.
+static const size_t BLE_OUTPUT_BUFFER_MAX = 512;           // Coalesce per flush; one plaintext notification carries at most 512 B
 #endif
 
 // G2 glasses output buffer (accumulates messages for periodic display)
@@ -383,10 +385,11 @@ void debugOutputTask(void* parameter) {
       }
       #endif
 
-      // BLE broadcast output
+      // BLE broadcast output: buffered only while a session could receive a
+      // flush (sendBLEResponse's recipients: logged in, non-guest).
       #if ENABLE_BLUETOOTH
       if ((msg->routing & MSG_ROUTE_BLE) && (gOutputFlags & MSG_ROUTE_BLE) &&
-          isBLEConnected() && bleHasAuthenticatedSession()) {
+          isBLEConnected() && bleMirrorRecipientCount() > 0) {
         if (!gBLEOutputBufferReserved) {
           gBLEOutputBufferReserved = gBLEOutputBuffer.reserve(BLE_OUTPUT_BUFFER_MAX);
         }
@@ -1208,9 +1211,10 @@ const char* cmd_outble(const String& argsInput) {
     bool enabled = (gOutputFlags & MSG_ROUTE_BLE) != 0;
     bool connected = isBLEConnected();
     bool authed = bleHasAuthenticatedSession();
+    int recipients = bleMirrorRecipientCount();
     EXT_RAM_BSS_ATTR static char buf[160];
-    snprintf(buf, sizeof(buf), "BLE output: %s, BLE connected: %s, authenticated: %s",
-             enabled ? "yes" : "no", connected ? "yes" : "no", authed ? "yes" : "no");
+    snprintf(buf, sizeof(buf), "BLE output: %s, BLE connected: %s, authenticated: %s, mirror recipients: %d",
+             enabled ? "yes" : "no", connected ? "yes" : "no", authed ? "yes" : "no", recipients);
     return buf;
   }
   if (v) {
@@ -2205,7 +2209,6 @@ const CommandEntry debugCommands[] = {
   { "debugringprotocol",  "Debug R1 per-frame decode/reassembly (loud).",    true, cmd_debugringprotocol,  "Usage: debugringprotocol <0|1> [temp|runtime]" },
   { "debugringtxn",       "Debug R1 transactions + packetAck (loud).",       true, cmd_debugringtxn,       "Usage: debugringtxn <0|1> [temp|runtime]" },
   { "debugringhealth",    "Debug R1 telemetry cache + history sweep.",       true, cmd_debugringhealth,    "Usage: debugringhealth <0|1> [temp|runtime]" },
-  { "debugringbridge",    "Debug R1→G2 spoof bridge push.",                  true, cmd_debugringbridge,    "Usage: debugringbridge <0|1> [temp|runtime]" },
   { "debugringdump",      "Debug R1 raw hex frame/payload dumps (loud).",    true, cmd_debugringdump,      "Usage: debugringdump <0|1> [temp|runtime]" },
 #endif
   { "outble", "Enable/disable BLE broadcast output.", false, cmd_outble, "Usage: outble <0|1> - streams broadcast output to authenticated BLE clients" },
@@ -2224,12 +2227,12 @@ const CommandEntry debugCommands[] = {
 
 const size_t debugCommandsCount = sizeof(debugCommands) / sizeof(debugCommands[0]);
 
-// C3 drift tripwire. The flag/sub command handlers are generated thunks: 119
+// C3 drift tripwire. The flag/sub command handlers are generated thunks: 126
 // flag rows (DBG_FLAG_COUNT minus the ALWAYS control row that carries
-// DBG_NO_CMD) + 40 bitless subs = 159. The rows enumerated below stay
+// DBG_NO_CMD) + 40 bitless subs = 166. The rows enumerated below stay
 // hand-written. Adding a flag/sub row to the tables, or a hand row here,
 // without reconciling the counts fails this assert. The subtractions track the
-// two feature-gated table spans: 6 LLM flag rows, 7 debugg2* + 8 debugring*
+// two feature-gated table spans: 6 LLM flag rows, 7 debugg2* + 7 debugring*
 // flag rows (both under ENABLE_BLUETOOTH && ENABLE_G2_GLASSES), and the
 // outg2 hand row.
 static constexpr size_t kDbgHandCmdRows = 15;  // debugespnow(alias), notifstats,
@@ -2242,7 +2245,7 @@ static constexpr size_t kDbgGenCmdRowsInTable =
     - 6
 #endif
 #if !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
-    - 15  // 7 debugg2* + 8 debugring*
+    - 14  // 7 debugg2* + 7 debugring*
 #endif
     ;
 static constexpr size_t kDbgHandCmdRowsInTable = kDbgHandCmdRows
