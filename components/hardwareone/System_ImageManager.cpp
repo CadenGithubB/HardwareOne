@@ -5,6 +5,7 @@
 #include "System_Debug.h"
 #include "System_Utils.h"
 #include "System_Command.h"
+#include "System_AuthIdentity.h"  // currentAuthContext — imagedelete removes as its caller
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC
 #include <ArduinoJson.h>
 #include "System_ESPNow.h"
@@ -341,22 +342,20 @@ int ImageManager::getImageCount(ImageStorageLocation location) {
   return listImages(location).size();
 }
 
-uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
-  if (outLen) *outLen = 0;
-
-  String normalizedPath;
+bool ImageManager::managedImagePath(const String& path, String& normalizedPath,
+                                    bool& isSD) {
   if (!normalizeFsPath(path, normalizedPath)) {
     WARN_STORAGEF("[ImageManager] Rejected invalid image path: %s", path.c_str());
-    return nullptr;
+    return false;
   }
 
-  const bool isSD = VFS::getStorageType(normalizedPath) == VFS::SDCARD;
+  isSD = VFS::getStorageType(normalizedPath) == VFS::SDCARD;
   const ImageStorageLocation location =
       isSD ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
   String normalizedRoot;
   if (!normalizeFsPath(getCaptureFolder(location), normalizedRoot)) {
     ERROR_STORAGEF("[ImageManager] Invalid configured capture folder");
-    return nullptr;
+    return false;
   }
   const bool underCaptureRoot =
       normalizedRoot == "/"
@@ -368,8 +367,17 @@ uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
       !(normalizedPath.endsWith(".jpg") || normalizedPath.endsWith(".jpeg"))) {
     WARN_STORAGEF("[ImageManager] Rejected path outside managed JPEG folder: %s",
                   normalizedPath.c_str());
-    return nullptr;
+    return false;
   }
+  return true;
+}
+
+uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
+  if (outLen) *outLen = 0;
+
+  String normalizedPath;
+  bool isSD = false;
+  if (!managedImagePath(path, normalizedPath, isSD)) return nullptr;
 
   File f;
   size_t len = 0;
@@ -429,32 +437,14 @@ uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
   return buf;
 }
 
-bool ImageManager::getImageInfo(const String& path, ImageInfo& info) {
-  const bool isSD = VFS::getStorageType(path) == VFS::SDCARD;
-  if (!(isSD ? sdAvailable : littleFSAvailable)) return false;
-
-  FsLockGuard guard("ImageManager.getImageInfo");
-  File f = VFS::openGuarded(path, "r", VFS::systemAuth("imgmgr.get_image_info"));
-  if (!f) return false;
-
-  info.fullPath = path;
-  info.filename = path.substring(path.lastIndexOf('/') + 1);
-  info.size = f.size();
-  info.timestamp = isSD ? f.getLastWrite() : 0;
-  info.location = isSD ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
-  info.isOnSD = isSD;
-
-  f.close();
-  return true;
-}
-
-bool ImageManager::deleteImage(const String& path) {
-  const bool isSD = VFS::getStorageType(path) == VFS::SDCARD;
+bool ImageManager::deleteImage(const String& path, const AuthContext& ctx) {
+  String normalizedPath;
+  bool isSD = false;
+  if (!managedImagePath(path, normalizedPath, isSD)) return false;
   if (!(isSD ? sdAvailable : littleFSAvailable)) return false;
 
   FsLockGuard guard("ImageManager.deleteImage");
-  return VFS::removeGuarded(path, VFS::systemAuth(isSD ? "imgmgr.delete.sd"
-                                                     : "imgmgr.delete_image"));
+  return VFS::removeGuarded(normalizedPath, ctx);
 }
 
 bool ImageManager::deleteOldestImages(int count, ImageStorageLocation location) {
@@ -470,9 +460,13 @@ bool ImageManager::deleteOldestImages(int count, ImageStorageLocation location) 
     return a.filename < b.filename;
   });
   
+  // trusted: retention removes only paths listImages produced inside the
+  // capture folder, so no caller identity exists to confine it further.
+  const AuthContext retention = VFS::systemAuth(
+      location == IMAGE_STORAGE_SD ? "imgmgr.delete.sd" : "imgmgr.delete_image");
   int deleted = 0;
   for (int i = 0; i < count && i < (int)images.size(); i++) {
-    if (deleteImage(images[i].fullPath)) {
+    if (deleteImage(images[i].fullPath, retention)) {
       deleted++;
       INFO_STORAGEF("[ImageManager] Deleted old image: %s", images[i].fullPath.c_str());
     }
@@ -617,7 +611,7 @@ const char* cmd_imagedelete(const String& argsInput) {
   if (qerr) return qerr;
   if (a.has(1)) return "Error: unexpected argument — usage: imagedelete \"<path>\"";
 
-  if (gImageManager.deleteImage(path)) {
+  if (gImageManager.deleteImage(path, currentAuthContext())) {
     return "Image deleted";
   }
   return "Error: Failed to delete image";

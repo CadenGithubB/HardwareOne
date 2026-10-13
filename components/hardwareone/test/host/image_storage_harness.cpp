@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -34,6 +35,10 @@ class String {
   int indexOf(char value) const { return indexOf(String(value)); }
   int lastIndexOf(char value) const { const auto pos = value_.rfind(value); return pos == std::string::npos ? -1 : static_cast<int>(pos); }
   String substring(size_t start) const { return value_.substr(std::min(start, value_.size())); }
+  String substring(size_t start, size_t end) const {
+    start = std::min(start, value_.size()); end = std::min(std::max(start, end), value_.size());
+    return value_.substr(start, end - start);
+  }
   void remove(size_t start) { value_.erase(start); }
   void trim() {
     const auto first = value_.find_first_not_of(" \t\r\n"), last = value_.find_last_not_of(" \t\r\n");
@@ -53,6 +58,10 @@ class String {
  private:
   std::string value_;
 };
+// The production argument parser, quoted-token rule and validate-only macro,
+// so the imagedelete command runs unchanged.
+// INSERT_COMMAND_PARSER
+bool gCLIValidateOnly = false;
 
 using TickType_t = uint32_t;
 using SemaphoreHandle_t = int*;
@@ -84,7 +93,11 @@ static bool filesystemReady = true, sdMounted = false;
 struct AuthContext { String user; String reason; };
 struct Access { std::string operation, path, user, reason; };
 static std::vector<Access> accesses;
-static std::set<std::string> denied;
+static std::set<std::string> denied, deniedUsers;
+// The command executor's per-task identity: an ordinary admin over the CLI.
+static const AuthContext caller{"admin", "cli"};
+static unsigned callerLookups = 0;
+static const AuthContext& currentAuthContext() { ++callerLookups; return caller; }
 static bool failOpen = false, failMkdir = false, failRemove = false, failStats = false;
 static unsigned metadataUnlocked = 0, closesUnlocked = 0, directoryOpens = 0;
 static unsigned activeFiles = 0, closeCalls = 0, statCalls = 0, mtimeCalls = 0;
@@ -149,8 +162,8 @@ static AuthContext systemAuth(const char* reason) { return {"system", reason}; }
 static bool allowed(const char* operation, const String& input, const AuthContext& ctx, String& path) {
   check(heldFs, "guarded boundary performs I/O under its own nested guard");
   accesses.push_back({operation, input.c_str(), ctx.user.c_str(), ctx.reason.c_str()});
-  check(ctx.user == "system" && ctx.reason.length() != 0, "ImageManager retains explicit trusted system identity");
-  return normalizeFsPath(input, path) && !denied.count(path.c_str()) &&
+  check(ctx.user.length() != 0 && ctx.reason.length() != 0, "every guarded access carries a named identity");
+  return normalizeFsPath(input, path) && !denied.count(path.c_str()) && !deniedUsers.count(ctx.user.c_str()) &&
          (getStorageType(path) == SDCARD ? sdMounted : filesystemReady);
 }
 static File openGuarded(const String& input, const char* mode, const AuthContext& ctx, bool = false) {
@@ -190,6 +203,21 @@ static size_t heap_caps_get_largest_free_block(uint32_t) { return largestBlock; 
 static void* ps_alloc(size_t length, AllocPref, const char*) { return failAlloc ? nullptr : std::malloc(length); }
 static void ps_free(void* ptr) { std::free(ptr); }
 // INSERT_IMAGE_MANAGER
+ImageManager gImageManager;
+// INSERT_IMAGE_COMMANDS
+
+// Saved sources from before deleteImage took the caller's identity (--baseline)
+// still compile, so the identity and scope regressions replay against them.
+#ifndef IMAGE_DELETE_TAKES_CTX
+#define IMAGE_DELETE_TAKES_CTX 1
+#endif
+static bool deleteAs(ImageManager& owner, const String& path, const AuthContext& ctx) {
+#if IMAGE_DELETE_TAKES_CTX
+  return owner.deleteImage(path, ctx);
+#else
+  (void)ctx; return owner.deleteImage(path);
+#endif
+}
 
 static void balanced(bool expectOuter = false) {
   check(heldFs == expectOuter && gives + unsigned(expectOuter) == takes, "all filesystem guard scopes balance");
@@ -213,27 +241,86 @@ static std::shared_ptr<Node> add(const std::string& path, bool directory = false
   return node;
 }
 static ImageManager manager() { ImageManager out; out.init(); accesses.clear(); statCalls = 0; takes = gives = 0; return out; }
-static void expectIdentity(const std::string& operation, const std::string& reason) {
+static void expectIdentity(const std::string& operation, const std::string& reason, const std::string& user = "system") {
   auto found = std::find_if(accesses.begin(), accesses.end(), [&](const Access& access) { return access.operation == operation; });
-  check(found != accesses.end() && found->user == "system" && found->reason == reason, "operation retains its existing systemAuth audit reason: " + operation);
-}
-static void routeMetadata() {
-  reset(); auto image = add("/sdata/photo.jpg"); auto owner = manager(); ImageInfo info{};
-  check(owner.getImageInfo("/sdata/photo.jpg", info), "/sdata is internal and must work when SD is absent");
-  check(!info.isOnSD && info.location == IMAGE_STORAGE_LITTLEFS && info.size == image->size && info.timestamp == 0, "internal metadata reports internal storage");
-  expectIdentity("open", "imgmgr.get_image_info"); balanced();
+  check(found != accesses.end() && found->user == user && found->reason == reason, "operation carries the expected identity and audit reason: " + operation);
 }
 static void routeDelete() {
-  reset(); add("/sdata/photo.jpg"); auto owner = manager();
-  check(owner.deleteImage("/sdata/photo.jpg") && !nodes.count("/sdata/photo.jpg"), "/sdata deletion must use internal availability when SD is absent");
-  expectIdentity("remove", "imgmgr.delete_image"); balanced();
+  // "/sdata" is an internal folder, not the SD mount: configured as the capture
+  // folder it must be deleted with internal availability while SD is absent.
+  reset(); gSettings.cameraCaptureFolder = "/sdata"; add("/sdata", true); add("/sdata/photo.jpg"); auto owner = manager();
+  check(deleteAs(owner, "/sdata/photo.jpg", caller) && !nodes.count("/sdata/photo.jpg"), "/sdata deletion must use internal availability when SD is absent");
+  expectIdentity("remove", "cli", "admin"); balanced();
+  // Under the default root the same path is outside the capture folder.
+  reset(); add("/sdata/photo.jpg"); owner = manager();
+  check(!deleteAs(owner, "/sdata/photo.jpg", caller) && nodes.count("/sdata/photo.jpg") && accesses.empty(), "/sdata is refused without filesystem access when the root is /photos"); balanced();
 }
-static void metadataLock(bool sd) {
-  reset(sd); auto owner = manager(); const char* path = sd ? "/sd/photos/image.jpg" : "/photos/image.jpg";
-  auto node = add(path); ImageInfo info{};
-  check(owner.getImageInfo(path, info), "metadata lookup succeeds");
-  check(metadataUnlocked == 0 && closesUnlocked == 0, "metadata size/timestamp/close must all occur while holding FS mutex");
-  check(info.timestamp == (sd ? node->modified : 0), "SD timestamps and internal zero timestamp remain intact"); balanced();
+static void scopeRefusals(bool sd) {
+  reset(sd); auto owner = manager(); const std::string prefix = sd ? "/sd" : "";
+  const AuthContext system = VFS::systemAuth("imgmgr.delete_image");
+  for (const std::string& folder : {"/system", "/system/users", "/system/ota", "/photos", "/photosX"}) if (!nodes.count(prefix + folder)) add(prefix + folder, true);
+  // Every fixture exists, so an unscoped delete would remove it.
+  const std::vector<std::string> outside = {"/system/settings.json", "/system/users/users.json", "/system/ota/staged.bin",
+                                            "/system/photo.jpg", "/photosX/photo.jpg", "/photos/notes.txt", "/photos/UPPER.JPG", "/photos"};
+  for (const auto& relative : outside) if (!nodes.count(prefix + relative)) add(prefix + relative);
+  for (const auto& relative : outside) {
+    const std::string path = prefix + relative;
+    check(!deleteAs(owner, path.c_str(), caller) && nodes.count(path), "delete refuses a path outside the capture folder or not a JPEG: " + path);
+    check(!deleteAs(owner, path.c_str(), system) && nodes.count(path), "the managed-photo rule does not depend on the identity: " + path);
+  }
+  for (const char* traversal : {"/photos/../system/settings.json", "/photos/./../system/users/users.json"}) {
+    const std::string path = prefix + traversal;
+    check(!deleteAs(owner, path.c_str(), caller) && nodes.count(prefix + "/system/settings.json") && nodes.count(prefix + "/system/users/users.json"), std::string("traversal spellings are refused: ") + path);
+  }
+  size_t count = 0;
+  check(owner.getImage((prefix + "/system/settings.json").c_str(), &count) == nullptr && count == 0, "the reader shares the managed-photo rule");
+  check(accesses.empty() && callerLookups == 0, "refusals happen before any guarded filesystem call and without ImageManager reading the command identity");
+  // A different configured folder moves the boundary with it; the root folder admits any JPEG.
+  gSettings.cameraCaptureFolder = "/pics"; add(prefix + "/pics", true); add(prefix + "/pics/photo.jpg"); add(prefix + "/photos/photo.jpg");
+  check(!deleteAs(owner, (prefix + "/photos/photo.jpg").c_str(), caller) && nodes.count(prefix + "/photos/photo.jpg") && accesses.empty(), "the old folder is outside the configured capture folder");
+  check(deleteAs(owner, (prefix + "/pics/photo.jpg").c_str(), caller) && !nodes.count(prefix + "/pics/photo.jpg"), "a JPEG inside the configured folder is deleted");
+  expectIdentity("remove", "cli", "admin"); accesses.clear();
+  gSettings.cameraCaptureFolder = "/"; add(prefix + "/top.jpeg");
+  check(deleteAs(owner, (prefix + "/top.jpeg").c_str(), caller) && !nodes.count(prefix + "/top.jpeg"), "the root capture folder admits a top-level JPEG");
+  check(!deleteAs(owner, (prefix + "/system/settings.json").c_str(), caller) && nodes.count(prefix + "/system/settings.json"), "the root capture folder still refuses a non-JPEG");
+  balanced();
+}
+static void callerIdentity(bool sd) {
+  reset(sd); auto owner = manager(); const auto location = sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
+  const std::string folder = sd ? "/sd/photos" : "/photos";
+  if (!nodes.count(folder)) add(folder, true); add(folder + "/a.jpg"); add(folder + "/b.jpg");
+  check(deleteAs(owner, (folder + "/a.jpg").c_str(), caller) && !nodes.count(folder + "/a.jpg"), "a managed photo is removed for the caller");
+  expectIdentity("remove", "cli", "admin");
+  check(accesses.size() == 1 && accesses[0].path == folder + "/a.jpg", "one guarded removal of the normalized path");
+  accesses.clear(); deniedUsers.insert("admin");
+  check(!deleteAs(owner, (folder + "/b.jpg").c_str(), caller) && nodes.count(folder + "/b.jpg"), "the filesystem rules decide for the caller: a denied caller keeps the file");
+  check(accesses.size() == 1 && accesses[0].user == "admin", "the denied removal was attempted as the caller, not as system");
+  deniedUsers.clear(); accesses.clear();
+  // The mock's removal leaves the deleted entry in the directory listing; give
+  // retention a listing that holds only the surviving photo.
+  nodes.at(folder)->children.clear(); nodes.erase(folder + "/b.jpg"); add(folder + "/b.jpg");
+  check(owner.deleteOldestImages(1, location) && !nodes.count(folder + "/b.jpg"), "retention keeps system authority for paths from its own listing");
+  expectIdentity("remove", sd ? "imgmgr.delete.sd" : "imgmgr.delete_image");
+  check(callerLookups == 0, "ImageManager never reads the command identity itself"); balanced();
+}
+static void commandPath() {
+  reset(); add("/photos", true); add("/photos/a.jpg"); add("/photos/b.jpg"); add("/system/settings.json");
+  gImageManager.init(); accesses.clear(); statCalls = 0; takes = gives = 0; callerLookups = 0;
+  check(std::strcmp(cmd_imagedelete("\"/system/settings.json\""), "Error: Failed to delete image") == 0 && nodes.count("/system/settings.json") && accesses.empty(),
+        "imagedelete refuses a path outside the capture folder and the file stays");
+  check(std::strcmp(cmd_imagedelete("\"/photos/a.jpg\""), "Image deleted") == 0 && !nodes.count("/photos/a.jpg"), "imagedelete removes a managed photo");
+  expectIdentity("remove", "cli", "admin");
+  check(callerLookups == 2, "the command supplies its caller identity on every delete");
+  accesses.clear(); deniedUsers.insert("admin");
+  check(std::strcmp(cmd_imagedelete("\"/photos/b.jpg\""), "Error: Failed to delete image") == 0 && nodes.count("/photos/b.jpg"), "a caller the filesystem rules deny cannot delete through imagedelete");
+  deniedUsers.clear(); accesses.clear();
+  // The command stays a parser: quoting, argument count and validate-only are unchanged.
+  check(std::strncmp(cmd_imagedelete("/photos/b.jpg"), "Error: name must be in quotes", 29) == 0, "unquoted path is refused by the parser");
+  check(std::strncmp(cmd_imagedelete("\"/photos/b.jpg\" extra"), "Error: unexpected argument", 26) == 0, "extra argument is refused by the parser");
+  gCLIValidateOnly = true;
+  check(std::strcmp(cmd_imagedelete("\"/photos/b.jpg\""), "VALID") == 0, "validate-only returns VALID");
+  gCLIValidateOnly = false;
+  check(accesses.empty() && nodes.count("/photos/b.jpg"), "parser refusals and validate-only touch no file"); balanced();
 }
 static void listLock() {
   reset(true); add("/sd/photos", true); add("/sd/photos/image.jpg"); auto owner = manager();
@@ -249,11 +336,9 @@ static void failedCapacity(bool sd) {
 static void pathForms(bool sd) {
   for (const char* path : (sd ? std::vector<const char*>{"sd/photos/image.jpg", " /sd//photos/image.jpg "} :
                                 std::vector<const char*>{"photos/image.jpg", " /photos//image.jpg "})) {
-    reset(sd); auto owner = manager(); add(sd ? "/sd/photos/image.jpg" : "/photos/image.jpg");
-    ImageInfo info{}; check(owner.getImageInfo(path, info), "existing guarded normalization handles alternate path spelling");
-    String spelling(path); check(info.fullPath == spelling && info.filename == spelling.substring(spelling.lastIndexOf('/') + 1), "metadata preserves caller-supplied spelling");
-    check(info.isOnSD == sd, "alternate spelling selects actual storage tier");
-    check(owner.deleteImage(path), "deletion uses the same tier as normalized guarded I/O"); balanced();
+    reset(sd); auto owner = manager(); const std::string canonical = sd ? "/sd/photos/image.jpg" : "/photos/image.jpg"; add(canonical);
+    check(deleteAs(owner, path, caller) && !nodes.count(canonical), "normalized alternate spellings delete the canonical managed photo");
+    check(accesses.size() == 1 && accesses[0].operation == "remove" && accesses[0].path == canonical, "the guarded removal receives the normalized path"); balanced();
   }
 }
 static void inventory(ImageStorageLocation location, const char* capture = "/photos") {
@@ -281,10 +366,10 @@ static void inventory(ImageStorageLocation location, const char* capture = "/pho
 }
 static void availability(bool sd) {
   reset(!sd, sd); auto owner = manager(); const auto location = sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
-  const char* path = sd ? "/sd/photos/no.jpg" : "/photos/no.jpg"; ImageInfo info{};
+  const char* path = sd ? "/sd/photos/no.jpg" : "/photos/no.jpg";
   // A newly mounted backend must not silently bypass the manager snapshot.
-  sdMounted = filesystemReady = true;
-  check(!owner.ensureCaptureFolder(location) && owner.listImages(location).empty() && !owner.getImageInfo(path, info) && !owner.deleteImage(path), "unavailable manager tier rejects inventory operations");
+  sdMounted = filesystemReady = true; add(path);
+  check(!owner.ensureCaptureFolder(location) && owner.listImages(location).empty() && !deleteAs(owner, path, caller) && nodes.count(path), "unavailable manager tier rejects inventory operations");
   check(!owner.getStorageStats(location).available && accesses.empty() && !statCalls, "unavailable tier avoids I/O and capacity queries"); balanced();
 }
 static void ensureFolder(bool sd, unsigned failure) {
@@ -306,9 +391,8 @@ static void failures(bool sd, unsigned failure) {
   if (failure == 1) { denied.insert(folder); denied.insert(path); }
   if (failure == 2) { nodes[folder]->directory = false; nodes.erase(path); }
   check(owner.listImages(location).empty(), "missing/denied/non-directory list gives empty inventory");
-  ImageInfo info{}; check(!owner.getImageInfo(path.c_str(), info), "failed guarded metadata open reports false");
   if (failure == 0) failRemove = true;
-  check(!owner.deleteImage(path.c_str()), "delete failure/denial/missing path reports false"); balanced();
+  check(!deleteAs(owner, path.c_str(), caller), "delete failure/denial/missing path reports false"); balanced();
   check(!metadataUnlocked && !closesUnlocked, "failure cleanup retains lock for all File activity");
 }
 static void capacitySuccess(ImageStorageLocation location) {
@@ -322,11 +406,10 @@ static void capacitySuccess(ImageStorageLocation location) {
 static void nested(bool sd) {
   reset(sd); auto owner = manager(); const auto location = sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
   const char* path = sd ? "/sd/photos/test.jpg" : "/photos/test.jpg";
-  { FsLockGuard caller("outer caller");
+  { FsLockGuard outer("outer caller");
     check(owner.ensureCaptureFolder(location), "nested ensure succeeds"); add(path);
     check(owner.listImages(location).size() == 1, "nested directory scan succeeds");
-    ImageInfo info{}; check(owner.getImageInfo(path, info), "nested metadata succeeds");
-    check(owner.getStorageStats(location).available && owner.deleteImage(path), "nested stats/delete succeed");
+    check(owner.getStorageStats(location).available && deleteAs(owner, path, caller), "nested stats/delete succeed");
     check(heldFs && takes == 1 && gives == 0, "nested methods retain caller's original lock ownership"); balanced(true);
   }
   balanced();
@@ -342,6 +425,7 @@ static void retention(bool sd, unsigned failure) {
   if (failure == 2) denied.insert(first);
   check(owner.deleteOldestImages(failure == 2 ? 2 : 1, location) == (failure != 1),
         "retention preserves success/failed-removal/partial-success outcomes");
+  expectIdentity("remove", sd ? "imgmgr.delete.sd" : "imgmgr.delete_image");
   if (failure == 0) check(!nodes.count(first) && nodes.count(second),
         "SD selects oldest timestamp; internal selects earliest filename");
   if (failure == 1) check(nodes.count(first) && nodes.count(second), "failed retention removal leaves both files");
@@ -354,6 +438,9 @@ static void imageRead(bool sd) {
   uint8_t* bytes = owner.getImage(path, &count);
   check(bytes && count == 4 && bytes[0] == 0xff && bytes[1] == 0xd8, "image reader retains JPEG/PSRAM path and storage routing"); ps_free(bytes);
   check(!metadataUnlocked && !closesUnlocked, "reader metadata/data/close keep existing locking"); balanced();
+  accesses.clear(); add(sd ? "/sd/system/settings.json" : "/system/settings.json");
+  check(owner.getImage(sd ? "/sd/system/settings.json" : "/system/settings.json", &count) == nullptr && count == 0 && accesses.empty(),
+        "image reader refuses a path outside the managed JPEG folder before any guarded open"); balanced();
 }
 int main(int argc, char** argv) {
   const std::string selected = argc > 1 ? argv[1] : "all";
@@ -364,12 +451,18 @@ int main(int argc, char** argv) {
     catch (const std::exception& error) { ++failuresCount; std::printf("FAIL %s: %s\n", label.c_str(), error.what()); }
   };
   if (selected == "all" || selected == "routing") {
-    run("internal /sdata metadata with SD absent", routeMetadata);
     run("internal /sdata delete with SD absent", routeDelete);
+  }
+  if (selected == "all" || selected == "scope") {
+    for (bool sd : {false, true}) {
+      const std::string tier = sd ? "SD " : "internal ";
+      run(tier + "delete refuses paths outside the capture folder and non-JPEGs", [=] { scopeRefusals(sd); });
+      run(tier + "delete removes as the caller; retention keeps system authority", [=] { callerIdentity(sd); });
+    }
+    run("imagedelete command deletes as its caller", commandPath);
   }
   if (selected == "all" || selected == "locking") {
     run("SD directory lifetime lock", listLock);
-    for (bool sd : {false, true}) run(std::string(sd ? "SD" : "internal") + " metadata lifetime lock", [=] { metadataLock(sd); });
   }
   if (selected == "all" || selected == "capacity") {
     for (bool sd : {false, true}) run(std::string(sd ? "SD" : "internal") + " failed capacity", [=] { failedCapacity(sd); });
