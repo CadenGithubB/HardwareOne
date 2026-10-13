@@ -146,6 +146,20 @@ Then test the existing `hardwareone_devices` tool from Mingus's sandbox. These
 checks validate agent-to-device access; the new ESP-to-OpenClaw chat firmware
 and gateway endpoint setup remain separate acceptance work.
 
+Agent-to-device acceptance passed on 2026-10-12: the Studio's authenticated
+`GET /api/system` returned the expected board, firmware `0.99.97.4`, SSID, IP, and
+MAC. Mingus then used its existing `hardwareone_cli` tool to run `status json`
+and reported the same live board/version/network details. Registry listing alone
+was not counted as a live read. Preserve this working integration and sandbox.
+
+For device-to-agent chat, the user selected a restricted HTTPS relay on the
+Studio, with a separate device credential and the gateway kept on loopback.
+Relay preparation is local only; no Studio service has been installed and no
+gateway settings have been changed. Both direct access and the relay use tokens:
+direct access uses the gateway credential on the device; the relay uses its own
+device token and keeps the gateway credential on the Studio. The relay limits
+HTTP routes and agent selection, not Mingus's configured tool permissions.
+
 The prototype uses the documented [OpenClaw chat-completions endpoint](https://docs.openclaw.ai/gateway/openai-http-api).
 It must be enabled on the chosen test host. The configured target is an agent
 alias such as `openclaw/default` or `openclaw/<agent-id>`, not its underlying
