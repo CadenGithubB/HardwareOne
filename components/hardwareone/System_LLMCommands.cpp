@@ -31,6 +31,7 @@
 #include "System_VFS.h"
 #if ENABLE_LLM_SOURCE_HTTP
 #include "System_LLMHttp.h"
+#include "System_Utils.h"  // RETURN_VALID_IF_VALIDATE_CSTR
 #endif
 
 #if ENABLE_LLM_SOURCE_ONBOARD
