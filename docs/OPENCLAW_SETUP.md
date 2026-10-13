@@ -115,13 +115,26 @@ existing sandbox, mounts, and tool policy.
 
 The user requested a device account named `cm5` and the XIAO's IP after it joins
 `TestESPNetwork`, for updating the existing tool environment on the Studio.
-The account password was supplied privately in the conversation and is not
-recorded here. The candidate XIAO console `/dev/cu.usbmodem11201` requires login;
-one attempt with the requested account credentials did not authenticate. Account
-creation and board/network identification await an existing administrator session.
-No account or Wi-Fi settings have been changed. Do not use `/dev/cu.usbmodem2201`,
-which is occupied by the separate P4 work. Verify the board identity after login
-before account changes, and retrieve the address through USB without bridging VLANs.
+The account password is not recorded here. After the user supplied administrator
+access, USB status verified `/dev/cu.usbmodem11201` as a Seeed XIAO ESP32S3 Sense,
+firmware `0.99.97.4`, MAC `68:EE:8F:50:E9:D0`. The `cm5` account was created with
+the requested password as an ordinary `user` (no forced password change), and
+the account listing confirmed it. The administrator serial session was retained.
+The user entered the Wi-Fi password in a masked Mac mini prompt. It was passed
+in memory over USB and saved on the device, without writing the password to this
+Mac or printing it in tool output. USB status then confirmed connection to
+`TestESPNetwork` at `192.168.21.24`. The existing device HTTP server was started
+and reported running on port `80`, so the current device base URL is
+`http://192.168.21.24`. The previous saved network was retained. Wi-Fi is enabled
+but `wifiAutoStart` remains `false`; reconnect after a device reboot. No firmware
+was flashed, no VLANs bridged, and the gateway configuration was not changed.
+The account creation/listing and network/server status were verified through USB;
+authentication and reachability from the Studio remain to be checked there.
+Do not use `/dev/cu.usbmodem2201`, which is occupied by the separate P4 work.
+The Studio's existing Hardware One tool variable names are unknown; use this
+observed URL for that integration rather than assuming the optional helper's
+`HW1_*` names. A Studio-side authenticated read can use
+`curl --user cm5 http://192.168.21.24/api/system`, which prompts for the password.
 
 The prototype uses the documented [OpenClaw chat-completions endpoint](https://docs.openclaw.ai/gateway/openai-http-api).
 It must be enabled on the chosen test host. The configured target is an agent
