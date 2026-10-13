@@ -17,6 +17,9 @@
 // docs/PRE_1_0_HARDENING_AUDIT.md §5.2 for why an auto-safe-mode boot-loop
 // breaker was explicitly rejected (it would misfire on brownouts, on
 // attacker-induced panics, and on a counter that isn't consecutive).
+// The one consumer that does act on these counters, the OTA crash-loop escape
+// on OTA-layout boards, reads crashRecordConsecutiveSoftwareFaults(), which
+// leaves brownouts out, and consumes the counters when it commits.
 //
 // WHERE THE DATA LIVES
 // RTC_NOINIT_ATTR lands in .rtc_noinit -> rtc_data_location -> rtc_slow_seg
@@ -88,7 +91,8 @@ void crashRecordEmitEarly();
 
 bool        crashRecordHavePrevious();     // was a decodable panic record left behind?
 bool        crashRecordPreviousBuildMatches(); // did the immediately previous boot run this exact build?
-uint32_t    crashRecordConsecutive();      // consecutive fault resets (0 after a healthy run)
+uint32_t    crashRecordConsecutive();      // consecutive fault resets, brownouts included (0 after a healthy run)
+uint32_t    crashRecordConsecutiveSoftwareFaults(); // the subset caused by the firmware: panic and watchdog resets, never brownouts
 uint32_t    crashRecordSignature();        // FNV-1a over reason+addr+exception+elfsha
 uint32_t    crashRecordRepeatCount();      // how many boots in a row produced this signature
 uint8_t     crashRecordPrevPhase();        // CrashBootPhase the PREVIOUS boot died in
@@ -124,3 +128,11 @@ size_t crashRecordPersistToFile(const char* resetReasonLabel,
 // on a power cycle and would therefore measure "crashes since poweron", the exact
 // conflation this counter exists to avoid. Idempotent.
 void crashRecordMarkBootHealthy();
+
+// Called by the OTA crash-loop escape once it has committed the switch to the
+// factory updater, just before it restarts. Clears both RTC consecutive
+// counters so the boot that returns from the updater (an ESP_RST_SW after an
+// operator cancel or a new upload, which neither counts nor clears) starts with
+// a fresh budget instead of escaping again at once. The RAM view of the boot
+// that triggered the escape is kept, as crashRecordMarkBootHealthy() keeps it.
+void crashRecordConsumeCrashLoopEscape();

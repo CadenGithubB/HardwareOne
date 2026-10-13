@@ -30,7 +30,7 @@
 // these fields, while the device stays powered, would otherwise consume the old
 // bytes through a still-valid magic and emit a plausible, WRONG record. Folding
 // the field sizes into the magic makes any layout change self-invalidating.
-#define CRASH_LAYOUT_VERSION 2u
+#define CRASH_LAYOUT_VERSION 3u
 #define CRASH_REASON_MAX     128   // assert text runs long: "assert failed: xQueueGenericSend queue.c:832 (pxQueue)"
 #define CRASH_ELFSHA_MAX     16    // CONFIG_APP_RETRIEVE_LEN_ELF_SHA=9 -> 9 chars + NUL
 #define CRASH_BT_MAX         12    // Arduino walks up to 60 frames; 12 is plenty to place a fault and costs 48 B
@@ -59,7 +59,8 @@ static RTC_NOINIT_ATTR uint32_t          rtcPanicBt[CRASH_BT_MAX];
 // --- boot-managed state record ----------------------------------------------
 static RTC_NOINIT_ATTR volatile uint32_t rtcStateMagic;
 static RTC_NOINIT_ATTR uint8_t           rtcBootPhase;         // advanced during THIS boot
-static RTC_NOINIT_ATTR uint32_t          rtcConsecutive;       // consecutive fault resets
+static RTC_NOINIT_ATTR uint32_t          rtcConsecutive;       // consecutive fault resets, brownouts included
+static RTC_NOINIT_ATTR uint32_t          rtcConsecutiveSoftware; // the subset caused by the firmware (no brownouts)
 static RTC_NOINIT_ATTR uint32_t          rtcLastSignature;     // signature of the previous crash
 static RTC_NOINIT_ATTR uint32_t          rtcRepeatCount;       // boots in a row with that signature
 static RTC_NOINIT_ATTR char              rtcStateElfSha[CRASH_ELFSHA_MAX]; // build that last reached consume
@@ -70,6 +71,7 @@ static uint8_t  sPrevPhase      = CRASH_PHASE_UNKNOWN;
 static uint32_t sSignature      = 0;
 static uint32_t sRepeat         = 0;
 static uint32_t sConsecutive    = 0;
+static uint32_t sConsecutiveSoftware = 0;
 static uint32_t sResetReason    = 0;   // retained for isFaultReset gating, not rendered (see crashRecordDetail)
 static char     sReason[CRASH_REASON_MAX] = {0};
 static char     sElfSha[CRASH_ELFSHA_MAX] = {0};
@@ -206,6 +208,15 @@ static bool isFaultReset(uint32_t r) {
   }
 }
 
+// The subset of isFaultReset that points at the firmware. A brownout is the
+// supply sagging, not the image misbehaving, and it keeps RTC memory, so on a
+// weak battery it walks the consecutive counter up through boot after boot.
+// Anything that reacts to "crashes in a row" (the OTA crash-loop escape) must
+// key on this count; the full count stays for the crash log and the BOOT event.
+static bool isSoftwareFaultReset(uint32_t r) {
+  return isFaultReset(r) && (esp_reset_reason_t)r != ESP_RST_BROWNOUT;
+}
+
 void crashRecordBootConsume(uint32_t resetReason) {
   sResetReason = resetReason;
   const char* nowSha = esp_app_get_elf_sha256_str();
@@ -215,6 +226,7 @@ void crashRecordBootConsume(uint32_t resetReason) {
     // Cold power-on, RTC-domain reset, or a layout change. Start clean.
     rtcBootPhase     = CRASH_PHASE_UNKNOWN;
     rtcConsecutive   = 0;
+    rtcConsecutiveSoftware = 0;
     rtcLastSignature = 0;
     rtcRepeatCount   = 0;
     rtcStateElfSha[0] = '\0';
@@ -231,10 +243,13 @@ void crashRecordBootConsume(uint32_t resetReason) {
   const bool fault = isFaultReset(resetReason);
   if (fault) {
     rtcConsecutive++;
+    if (isSoftwareFaultReset(resetReason)) rtcConsecutiveSoftware++;
   } else if ((esp_reset_reason_t)resetReason == ESP_RST_POWERON) {
     rtcConsecutive = 0;
+    rtcConsecutiveSoftware = 0;
   }
   sConsecutive = rtcConsecutive;
+  sConsecutiveSoftware = rtcConsecutiveSoftware;
 
   // --- panic record ---------------------------------------------------------
   // Gate on the reset reason too. RTC_NOINIT also survives commanded reboots and
@@ -338,6 +353,7 @@ void crashRecordEmitEarly() {
 bool        crashRecordHavePrevious() { return sHavePrev; }
 bool        crashRecordPreviousBuildMatches() { return sPreviousBuildMatches; }
 uint32_t    crashRecordConsecutive()  { return sConsecutive; }
+uint32_t    crashRecordConsecutiveSoftwareFaults() { return sConsecutiveSoftware; }
 uint32_t    crashRecordSignature()    { return sSignature; }
 uint32_t    crashRecordRepeatCount()  { return sRepeat; }
 uint8_t     crashRecordPrevPhase()    { return sPrevPhase; }
@@ -372,10 +388,10 @@ size_t crashRecordDetail(char* buf, size_t n) {
   // exactly what left kResetReasonLabels short of the enum.
   w += (size_t)snprintf(buf + w, (w < n) ? n - w : 0,
                         "  boot phase   : %s\n"
-                        "  consecutive  : %lu  (fault resets in a row; clears after a healthy run)\n"
+                        "  consecutive  : %lu  (fault resets in a row, %lu software; clears after a healthy run)\n"
                         "  signature    : 0x%08lx  seen x%lu in a row\n",
                         crashPhaseName(sPrevPhase),
-                        (unsigned long)sConsecutive,
+                        (unsigned long)sConsecutive, (unsigned long)sConsecutiveSoftware,
                         (unsigned long)sSignature, (unsigned long)sRepeat);
   if (sHavePrev) {
     w += (size_t)snprintf(buf + w, (w < n) ? n - w : 0,
@@ -444,8 +460,19 @@ void crashRecordMarkBootHealthy() {
   if (sHealthyMarked) return;
   sHealthyMarked = true;
   rtcConsecutive = 0;
+  rtcConsecutiveSoftware = 0;
   // sConsecutive is intentionally NOT cleared: it describes the boot we already
   // reported, and clearing it would make `crashlog` contradict the boot banner.
+}
+
+void crashRecordConsumeCrashLoopEscape() {
+  // The escape is a committed intervention: the device leaves for the factory
+  // updater and comes back only through an operator's cancel or a new upload.
+  // Both arrive as ESP_RST_SW, which neither counts nor clears, so a counter
+  // left at the threshold would send the returning image straight back into
+  // recovery. The RAM view stays, as in crashRecordMarkBootHealthy().
+  rtcConsecutive = 0;
+  rtcConsecutiveSoftware = 0;
 }
 
 uint8_t         crashRecordBacktraceLen() { return sBtLen; }

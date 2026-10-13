@@ -206,17 +206,39 @@ struct LegacySessionShadow {
 LegacySessionShadow sSerialSession;
 LegacySessionShadow sDisplaySession;
 portMUX_TYPE sLegacySessionShadowMux = portMUX_INITIALIZER_UNLOCKED;
-std::atomic_flag sSerialSessionWriter = ATOMIC_FLAG_INIT;
-std::atomic_flag sDisplaySessionWriter = ATOMIC_FLAG_INIT;
 
-class AtomicFlagGuard {
+// Lifecycle writers, one per legacy transport. FreeRTOS mutexes rather than
+// spin flags: a higher-priority waiter (the httpd task revoking a session)
+// lends its priority to the holder instead of starving it on the same core.
+// Static storage created at load, like the other owner mutexes in this
+// component; nothing calls into the session API before that.
+// Rules for every holder: take a writer only around the owner-side check or
+// publication itself, never across a console write, display push, log append
+// or users.json access; never take the second writer while holding the first;
+// release on the task that took it, as a mutex requires.
+StaticSemaphore_t sSerialSessionWriterStorage;
+StaticSemaphore_t sDisplaySessionWriterStorage;
+SemaphoreHandle_t sSerialSessionWriter =
+    xSemaphoreCreateMutexStatic(&sSerialSessionWriterStorage);
+SemaphoreHandle_t sDisplaySessionWriter =
+    xSemaphoreCreateMutexStatic(&sDisplaySessionWriterStorage);
+
+void sessionWriterTake(SemaphoreHandle_t writer) {
+  (void)xSemaphoreTake(writer, portMAX_DELAY);
+}
+
+void sessionWriterGive(SemaphoreHandle_t writer) {
+  (void)xSemaphoreGive(writer);
+}
+
+class SessionWriterGuard {
  public:
-  explicit AtomicFlagGuard(std::atomic_flag& flag) : flag_(flag) {
-    while (flag_.test_and_set(std::memory_order_acquire)) taskYIELD();
+  explicit SessionWriterGuard(SemaphoreHandle_t writer) : writer_(writer) {
+    sessionWriterTake(writer_);
   }
-  ~AtomicFlagGuard() { flag_.clear(std::memory_order_release); }
+  ~SessionWriterGuard() { sessionWriterGive(writer_); }
  private:
-  std::atomic_flag& flag_;
+  SemaphoreHandle_t writer_;
 };
 
 TransportSessionEpoch nextTransportSessionEpochLocked() {
@@ -276,12 +298,12 @@ TransportSessionEpoch snapshotLegacyShadow(const LegacySessionShadow& shadow,
 // policy by reference: another writer may change it while we wait for the
 // lifecycle lock, so both the session and policy must be read again afterward.
 TransportSessionEpoch snapshotLegacySessionWithAuthPolicy(
-    LegacySessionShadow& shadow, std::atomic_flag& writer,
+    LegacySessionShadow& shadow, SemaphoreHandle_t writer,
     CommandSource source, const bool& requireAuth,
     String& userOut, bool& authedOut) {
   TransportSessionEpoch epoch = snapshotLegacyShadow(shadow, userOut, authedOut);
   if (epoch != 0 || requireAuth) return epoch;
-  AtomicFlagGuard guard(writer);
+  SessionWriterGuard guard(writer);
   epoch = snapshotLegacyShadow(shadow, userOut, authedOut);
   if (epoch == 0 && !requireAuth) {
     epoch = transportSessionOpen(source);
@@ -369,7 +391,7 @@ bool transportSessionEpochIsLive(CommandSource source,
 }
 
 void serialTransportSessionCleared() {
-  AtomicFlagGuard guard(sSerialSessionWriter);
+  SessionWriterGuard guard(sSerialSessionWriter);
   TransportSessionEpoch oldEpoch = 0;
   clearLegacyShadow(sSerialSession, oldEpoch);
   transportSessionClose(SOURCE_SERIAL, oldEpoch);
@@ -379,7 +401,7 @@ void serialTransportSessionCleared() {
 }
 
 void serialTransportAuthPolicyChanged() {
-  AtomicFlagGuard guard(sSerialSessionWriter);
+  SessionWriterGuard guard(sSerialSessionWriter);
   TransportSessionEpoch oldEpoch = 0;
   portENTER_CRITICAL(&sLegacySessionShadowMux);
   if (!sSerialSession.authed) {
@@ -393,20 +415,18 @@ void serialTransportAuthPolicyChanged() {
 
 bool serialTransportSessionBeginDelivery(TransportSessionEpoch epoch) {
   if (epoch == 0) return false;
-  while (sSerialSessionWriter.test_and_set(std::memory_order_acquire)) {
-    taskYIELD();
-  }
+  sessionWriterTake(sSerialSessionWriter);
   String liveUser;
   bool liveAuthed = false;
   if (snapshotLegacyShadow(sSerialSession, liveUser, liveAuthed) != epoch) {
-    sSerialSessionWriter.clear(std::memory_order_release);
+    sessionWriterGive(sSerialSessionWriter);
     return false;
   }
   return true;
 }
 
 void serialTransportSessionEndDelivery() {
-  sSerialSessionWriter.clear(std::memory_order_release);
+  sessionWriterGive(sSerialSessionWriter);
 }
 
 TransportSessionEpoch serialTransportInputEpoch() {
@@ -415,7 +435,7 @@ TransportSessionEpoch serialTransportInputEpoch() {
   TransportSessionEpoch epoch =
       snapshotLegacyShadow(sSerialSession, user, authed);
   if (epoch != 0) return epoch;
-  AtomicFlagGuard guard(sSerialSessionWriter);
+  SessionWriterGuard guard(sSerialSessionWriter);
   epoch = snapshotLegacyShadow(sSerialSession, user, authed);
   if (epoch == 0) {
     epoch = transportSessionOpen(SOURCE_SERIAL);
@@ -433,25 +453,21 @@ bool serialTransportInputEpochIsCurrent(TransportSessionEpoch epoch) {
 
 bool localDisplayTransportSessionBeginDelivery(TransportSessionEpoch epoch) {
   if (epoch == 0) return false;
-  while (sDisplaySessionWriter.test_and_set(std::memory_order_acquire)) {
-    taskYIELD();
-  }
+  sessionWriterTake(sDisplaySessionWriter);
   if (!transportSessionEpochIsLive(SOURCE_LOCAL_DISPLAY, epoch)) {
-    sDisplaySessionWriter.clear(std::memory_order_release);
+    sessionWriterGive(sDisplaySessionWriter);
     return false;
   }
   return true;
 }
 
 void localDisplayTransportSessionEndDelivery() {
-  sDisplaySessionWriter.clear(std::memory_order_release);
+  sessionWriterGive(sDisplaySessionWriter);
 }
 
 TransportSessionEpoch localDisplayTransportSessionBeginUiSync(
     String& userOut, bool& authedOut) {
-  while (sDisplaySessionWriter.test_and_set(std::memory_order_acquire)) {
-    taskYIELD();
-  }
+  sessionWriterTake(sDisplaySessionWriter);
 
   // Unlike BeginDelivery(), logout is a real UI boundary too. Keep the writer
   // held and return epoch zero instead of failing so the OLED owner can erase
@@ -470,7 +486,7 @@ TransportSessionEpoch localDisplayTransportSessionBeginUiSync(
 }
 
 void localDisplayTransportSessionEndUiSync() {
-  sDisplaySessionWriter.clear(std::memory_order_release);
+  sessionWriterGive(sDisplaySessionWriter);
 }
 
 static TransportSessionEpoch serialTransportSessionAuthenticatedLocked(
@@ -494,13 +510,13 @@ static TransportSessionEpoch serialTransportSessionAuthenticatedLocked(
 }
 
 TransportSessionEpoch serialTransportSessionAuthenticated(const String& user) {
-  AtomicFlagGuard guard(sSerialSessionWriter);
+  SessionWriterGuard guard(sSerialSessionWriter);
   return serialTransportSessionAuthenticatedLocked(user);
 }
 
 TransportSessionEpoch serialTransportSessionAuthenticatedIfEpoch(
     TransportSessionEpoch expectedEpoch, const String& user) {
-  AtomicFlagGuard guard(sSerialSessionWriter);
+  SessionWriterGuard guard(sSerialSessionWriter);
   String currentUser;
   bool currentAuthed = false;
   const TransportSessionEpoch currentEpoch =
@@ -509,27 +525,22 @@ TransportSessionEpoch serialTransportSessionAuthenticatedIfEpoch(
   return serialTransportSessionAuthenticatedLocked(user);
 }
 
-bool serialTransportSessionClearAndBeginDelivery(
-    TransportSessionEpoch expectedEpoch) {
-  while (sSerialSessionWriter.test_and_set(std::memory_order_acquire)) {
-    taskYIELD();
-  }
+bool serialTransportSessionClearIfEpoch(TransportSessionEpoch expectedEpoch) {
+  SessionWriterGuard guard(sSerialSessionWriter);
   String currentUser;
   bool currentAuthed = false;
   const TransportSessionEpoch currentEpoch =
       snapshotLegacyShadow(sSerialSession, currentUser, currentAuthed);
-  if (currentEpoch != expectedEpoch) {
-    sSerialSessionWriter.clear(std::memory_order_release);
-    return false;
-  }
+  if (currentEpoch != expectedEpoch) return false;
   TransportSessionEpoch oldEpoch = 0;
   clearLegacyShadow(sSerialSession, oldEpoch);
   transportSessionClose(SOURCE_SERIAL, oldEpoch);
   gSerialAuthed = false;
   gSerialUser = String();
   gSerialLastInteractionMs.store(0, std::memory_order_release);
-  // Intentionally retain sSerialSessionWriter. The local caller writes its
-  // fixed ACK directly, then calls serialTransportSessionEndDelivery().
+  // The writer is released here; the caller prints its fixed ACK afterwards.
+  // A successor login publishes through this same writer and never writes to
+  // the console itself, so the ACK cannot land after a replacement's output.
   return true;
 }
 
@@ -542,7 +553,7 @@ TransportSessionEpoch serialTransportSessionSnapshot(String& userOut,
 
 void localDisplayTransportSessionCleared() {
   {
-    AtomicFlagGuard guard(sDisplaySessionWriter);
+    SessionWriterGuard guard(sDisplaySessionWriter);
     TransportSessionEpoch oldEpoch = 0;
     clearLegacyShadow(sDisplaySession, oldEpoch);
     transportSessionClose(SOURCE_LOCAL_DISPLAY, oldEpoch);
@@ -556,7 +567,7 @@ void localDisplayTransportSessionCleared() {
 
 void localDisplayTransportAuthPolicyChanged() {
   {
-    AtomicFlagGuard guard(sDisplaySessionWriter);
+    SessionWriterGuard guard(sDisplaySessionWriter);
     TransportSessionEpoch oldEpoch = 0;
     portENTER_CRITICAL(&sLegacySessionShadowMux);
     if (!sDisplaySession.authed) {
@@ -575,7 +586,7 @@ void localDisplayTransportAuthPolicyChanged() {
 
 void localDisplayTransportSessionAuthenticated(const String& user) {
   {
-    AtomicFlagGuard guard(sDisplaySessionWriter);
+    SessionWriterGuard guard(sDisplaySessionWriter);
     TransportSessionEpoch oldEpoch = 0;
     clearLegacyShadow(sDisplaySession, oldEpoch);
     transportSessionClose(SOURCE_LOCAL_DISPLAY, oldEpoch);
@@ -1343,6 +1354,10 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
 }
 
 namespace {
+// Holds the source transport's lifecycle writer while confirming that the
+// exact epoch still belongs to the named user. Scope it to the check alone:
+// the writer must be released before any other transport's writer is taken
+// and before any log append, roster access or console output.
 class NamedSourceUseGuard {
  public:
   NamedSourceUseGuard(CommandSource source, const String& user,
@@ -1406,8 +1421,16 @@ bool loginTransportFromNamedSession(CommandSource target,
   }
   if (!userMayControlOtherSessions(sourceUser)) return false;
 
-  NamedSourceUseGuard sourceGuard(source, sourceUser, sourceEpoch);
-  if (!sourceGuard) return false;
+  // Validate the source under its own writer, then release it before the
+  // target publishes under its writer. The two lifecycle writers (and the
+  // UART link's lifecycle mutex) are therefore never nested, so no lock order
+  // exists between them, and the audit append and roster update below run
+  // with no session writer held. The filesystem lock above still serializes
+  // this whole operation with credential writers.
+  {
+    NamedSourceUseGuard sourceGuard(source, sourceUser, sourceEpoch);
+    if (!sourceGuard) return false;
+  }
 
   bool published = false;
   if (target == SOURCE_SERIAL) {
@@ -1443,8 +1466,12 @@ bool logoutTransportFromNamedSession(CommandSource target,
   FsLockGuard authGuard("users.cross_transport_logout");
   if (!authGuard.held && !isFsLockedByCurrentTask()) return false;
   if (!userMayControlOtherSessions(sourceUser)) return false;
-  NamedSourceUseGuard sourceGuard(source, sourceUser, sourceEpoch);
-  if (!sourceGuard) return false;
+  // Same shape as the login above: the source check releases its writer
+  // before the target's writer is taken.
+  {
+    NamedSourceUseGuard sourceGuard(source, sourceUser, sourceEpoch);
+    if (!sourceGuard) return false;
+  }
   logoutTransport(target);
   return true;
 }
@@ -1831,6 +1858,195 @@ bool isValidPublicPassword(const String& password, String* errorOut) {
   return true;
 }
 
+// ============================================================================
+// users.json mutation owner
+// ============================================================================
+// Every users.json read-modify-write goes through mutateUsersJson. It holds the
+// filesystem lock from the guarded open through parse, mutation, serialization
+// and writeTextAtomic, so a writer on another task is neither overwritten by a
+// stale copy nor interleaved with the temp-file promotion, and a document that
+// overflowed or serialized short is never published over the live roster. The
+// mutator edits the parsed document and reports whether it changed anything;
+// on Failed it has set errorOut and the file is left as it was.
+enum class UsersJsonMutation : uint8_t { Failed, Unchanged, Changed };
+typedef UsersJsonMutation (*UsersJsonMutator)(JsonDocument& doc, JsonArray users,
+                                              void* context, String& errorOut);
+
+static bool mutateUsersJson(const char* tag, UsersJsonMutator mutator, void* context,
+                            String& errorOut) {
+  if (!filesystemReady) {
+    errorOut = "Filesystem not ready";
+    return false;
+  }
+  FsLockGuard guard(tag);
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth(tag))) {
+    errorOut = "users.json not found";
+    return false;
+  }
+  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth(tag));
+  if (!f) {
+    errorOut = "Failed to read users.json";
+    return false;
+  }
+  PSRAM_JSON_DOC(doc);
+  const DeserializationError err = deserializeJson(doc, f);
+  f.close();
+  if (err) {
+    errorOut = "Malformed users.json";
+    return false;
+  }
+  JsonArray users = doc["users"];
+  if (!users) {
+    errorOut = "Malformed users.json - missing users array";
+    return false;
+  }
+  const UsersJsonMutation outcome = mutator(doc, users, context, errorOut);
+  if (outcome == UsersJsonMutation::Failed) return false;
+  if (outcome == UsersJsonMutation::Unchanged) return true;
+  // A truncated document must never become the roster: refuse an overflowed
+  // document and check the serialization against its measured size.
+  String json;
+  const size_t expected = doc.overflowed() ? 0 : measureJson(doc);
+  if (expected == 0 || !json.reserve(expected) || serializeJson(doc, json) != expected ||
+      json.length() != expected) {
+    errorOut = "Failed to prepare users.json";
+    return false;
+  }
+  if (!writeTextAtomic(USERS_JSON_FILE, json)) {
+    logSystemEvent("USERS", "users.json REWRITE FAILED during %s - auth database may be inconsistent", tag);
+    errorOut = "Failed to write users.json";
+    return false;
+  }
+  return true;
+}
+
+// The roster entry for a username, or a null object when there is none.
+// indexOut (optional) receives its position in the users array.
+static JsonObject findRosterUser(JsonArray users, const String& username, size_t* indexOut = nullptr) {
+  size_t index = 0;
+  for (JsonObject user : users) {
+    const char* name = user["username"] | "";
+    if (username == name) {
+      if (indexOut) *indexOut = index;
+      return user;
+    }
+    ++index;
+  }
+  return JsonObject();
+}
+
+// Publishes pending_users.json from its parsed array under the caller's lock:
+// an empty list removes the file, anything else goes through writeTextAtomic.
+static bool writePendingUsers(JsonDocument& doc, const char* tag, String& errorOut) {
+  JsonArray list = doc.as<JsonArray>();
+  if (!list || list.size() == 0) {
+    if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth(tag)) &&
+        !VFS::removeGuarded(PENDING_USERS_FILE, VFS::systemAuth(tag))) {
+      errorOut = "Could not update pending list";
+      return false;
+    }
+    return true;
+  }
+  String json;
+  const size_t expected = doc.overflowed() ? 0 : measureJson(doc);
+  if (expected == 0 || !json.reserve(expected) || serializeJson(doc, json) != expected ||
+      json.length() != expected || !writeTextAtomic(PENDING_USERS_FILE, json)) {
+    errorOut = "Could not update pending list";
+    return false;
+  }
+  return true;
+}
+
+// ============================================================================
+// Account creation owner
+// ============================================================================
+// See createAccount in System_User.h. The credential is stored before the
+// roster entry is added because users.json is the commit token: a power cut
+// between the two leaves a settings file nobody references, never an account
+// nobody can log into.
+struct CreateAccountContext {
+  const NewAccount* account;
+  String username;
+  uint32_t id;
+};
+
+static UsersJsonMutation createAccountMutation(JsonDocument& doc, JsonArray users, void* opaque,
+                                               String& errorOut) {
+  CreateAccountContext* ctx = static_cast<CreateAccountContext*>(opaque);
+  uint32_t highestId = 0;
+  for (JsonObject user : users) {
+    const char* existing = user["username"] | "";
+    if (ctx->username == existing) {
+      errorOut = "Username already exists";
+      return UsersJsonMutation::Failed;
+    }
+    const uint32_t id = (uint32_t)(user["id"] | 0);
+    if (id > highestId) highestId = id;
+  }
+  // nextId is advisory: a roster without it, or one restored from a backup
+  // whose counter lags, must still never reuse an id (the settings file of the
+  // account holding that id would be overwritten with the new credential).
+  uint32_t newId = (uint32_t)(doc["nextId"] | 2);
+  if (newId == 0 || newId <= highestId) newId = highestId + 1;
+
+  {
+    PSRAM_JSON_DOC(defaults);
+    defaults["theme"] = "light";
+    defaults["password"] = ctx->account->passwordHash;
+    defaults["mustChangePassword"] = ctx->account->mustChangePassword;
+    if (defaults.overflowed() || !saveUserSettings(newId, defaults)) {
+      errorOut = "Failed to write user settings";
+      return UsersJsonMutation::Failed;
+    }
+  }
+  ctx->id = newId;
+
+  JsonObject newUser = users.add<JsonObject>();
+  newUser["id"] = newId;
+  newUser["username"] = ctx->username;
+  // Unrecognised values collapse to "user" rather than being written through:
+  // an unknown string would otherwise look like a real tier in users.json
+  // while rating as kRoleRankUser everywhere else.
+  newUser["role"] = isKnownUserRole(ctx->account->role) ? ctx->account->role.c_str() : "user";
+  newUser["createdAt"] = (const char*)nullptr;  // resolved lazily via boot anchor
+  newUser["createdBy"] = ctx->account->createdBy.length() ? ctx->account->createdBy.c_str() : "admin";
+  newUser["createdAtSource"] = "pending";
+  newUser["createdMs"] = millis();
+  newUser["ntpAnchorId"] = gNTPAnchorId;
+  newUser["bootCount"] = gBootCounter;
+  doc["nextId"] = newId + 1;
+  return UsersJsonMutation::Changed;
+}
+
+bool createAccount(const NewAccount& account, uint32_t& idOut, String& errorOut) {
+  idOut = 0;
+  errorOut = "";
+  if (!filesystemReady) {
+    errorOut = "LittleFS not ready";
+    return false;
+  }
+  CreateAccountContext ctx{&account, account.username, 0};
+  ctx.username.trim();
+  if (!isValidPublicUsername(ctx.username, &errorOut)) return false;
+  if (account.passwordHash.length() == 0) {
+    errorOut = "Invalid password";
+    return false;
+  }
+  // One lock from the roster read to the publication, and over the removal of
+  // a credential whose publication failed.
+  FsLockGuard guard("user.create");
+  if (!mutateUsersJson("user.create", createAccountMutation, &ctx, errorOut)) {
+    if (ctx.id != 0) {
+      (void)VFS::removeGuarded(getUserSettingsPath(ctx.id).c_str(), VFS::systemAuth("user.create"));
+    }
+    return false;
+  }
+  idOut = ctx.id;
+  DEBUG_USERSF("[users] created account '%s' id=%u role=%s", ctx.username.c_str(), (unsigned)ctx.id,
+               account.role.c_str());
+  return true;
+}
+
 bool adminCreateUser(const String& username, const String& plainPassword, bool mustChangeOnLogin,
                      const String& createdBy, String& errorOut, const String& role) {
   errorOut = "";
@@ -1844,11 +2060,6 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
     return false;
   }
   if (!isValidPublicPassword(plainPassword, &errorOut)) {
-    return false;
-  }
-
-  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.admin.create"))) {
-    errorOut = "users.json not found";
     return false;
   }
 
@@ -1874,74 +2085,14 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
     }
   }
 
-  int nextIdForSettings = 0;
-  {
-    FsLockGuard guard("users.admin_create");
-    File file = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.admin.create"));
-    if (!file) {
-      errorOut = "Failed to read users.json";
-      return false;
-    }
-    PSRAM_JSON_DOC(doc);
-    DeserializationError jerr = deserializeJson(doc, file);
-    file.close();
-    if (jerr) {
-      errorOut = "Malformed users.json";
-      return false;
-    }
-    JsonArray users = doc["users"];
-    if (!users) {
-      errorOut = "Malformed users.json - missing users array";
-      return false;
-    }
-    for (JsonObject user : users) {
-      const char* existingUsername = user["username"];
-      if (existingUsername && u == existingUsername) {
-        errorOut = "Username already exists";
-        return false;
-      }
-    }
-
-    int nextId = doc["nextId"] | 2;
-    JsonObject newUser = users.add<JsonObject>();
-    newUser["id"] = nextId;
-    newUser["username"] = u;
-    // Unrecognised values collapse to "user" rather than being written through —
-    // an unknown string would otherwise look like a real tier in users.json
-    // while rating as kRoleRankUser everywhere else.
-    newUser["role"] = isKnownUserRole(role) ? role.c_str() : "user";
-    newUser["createdAt"] = (const char*)nullptr;
-    newUser["createdBy"] = createdBy.length() ? createdBy.c_str() : "admin";
-    newUser["createdAtSource"] = "pending";  // createdAt resolved lazily via boot anchor
-    newUser["createdMs"] = millis();
-    newUser["ntpAnchorId"] = gNTPAnchorId;
-    newUser["bootCount"] = gBootCounter;
-    doc["nextId"] = nextId + 1;
-
-    {
-      // Atomic write (tmp + rename) — never truncate the live auth DB in place.
-      String json;
-      serializeJson(doc, json);
-      if (json.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, json)) {
-        errorOut = "Failed to write users.json";
-        return false;
-      }
-    }
-    nextIdForSettings = nextId;
-  }
-
-  const uint32_t createdUserId = (uint32_t)nextIdForSettings;
-  {
-    FsLockGuard sguard("user_settings.admin_create");
-    PSRAM_JSON_DOC(defaults);
-    defaults["theme"] = "light";
-    defaults["password"] = hashUserPassword(plainPassword);
-    defaults["mustChangePassword"] = mustChangeOnLogin;
-    if (!saveUserSettings(createdUserId, defaults)) {
-      errorOut = "User created but failed to write settings file";
-      return false;
-    }
-  }
+  NewAccount account;
+  account.username = u;
+  account.passwordHash = hashUserPassword(plainPassword);
+  account.role = role;
+  account.createdBy = createdBy.length() ? createdBy : String("admin");
+  account.mustChangePassword = mustChangeOnLogin;
+  uint32_t createdUserId = 0;
+  if (!createAccount(account, createdUserId, errorOut)) return false;
 
   // Identity topology changed (a new account is now usable). Invalidate
   // any auth-dependent caches — see System_AuthIdentity.h for the protocol.
@@ -2022,55 +2173,50 @@ bool isUserBanned(const String& username) {
   return false;
 }
 
-// Sets (or clears) the "banned" flag on a user entry in users.json.
-// Also stores optional reason. Kicks active sessions when banning.
-// Returns error string on failure, nullptr on success.
-static const char* setUserBanInternal(const String& username, bool ban, const String& reason) {
-  if (username.length() == 0) return "Error: Username required";
-  if (!filesystemReady)       return "Error: Filesystem not ready";
+struct BanMutationContext {
+  const String* username;
+  bool ban;
+  const String* reason;
+};
 
-  uint32_t userId = 0;
-  getUserIdByUsername(username, userId);
-  if (userId == 0) return "Error: User not found";
-  if (userId == 1) return "Error: Cannot ban the primary admin account";
-
-  {
-    FsLockGuard guard("users.set_ban");
-    if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.setBan"))) return "Error: users.json not found";
-    File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.setBan"));
-    if (!f) return "Error: Failed to read users.json";
-    PSRAM_JSON_DOC(doc);
-    if (deserializeJson(doc, f)) { f.close(); return "Error: Malformed users.json"; }
-    f.close();
-
-    bool found = false;
-    for (JsonObject u : doc["users"].as<JsonArray>()) {
-      const char* uname = u["username"] | "";
-      if (username == uname) {
-        if (ban) {
-          u["banned"] = true;
-          if (reason.length()) u["banReason"] = reason;
-          else                 u.remove("banReason");
-        } else {
-          u.remove("banned");
-          u.remove("banReason");
-        }
-        found = true;
-        break;
-      }
-    }
-    if (!found) return "Error: User not found";
-
-    {
-      // Atomic write (tmp + rename) — never truncate the live auth DB in place.
-      String json;
-      serializeJson(doc, json);
-      if (json.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, json)) {
-        logSystemEvent("USERS", "users.json REWRITE FAILED during %s of '%s' — auth database may be inconsistent", ban ? "ban" : "unban", username.c_str());
-        return "Error: Failed to write users.json";
-      }
-    }
+static UsersJsonMutation banMutation(JsonDocument& doc, JsonArray users, void* opaque, String& errorOut) {
+  (void)doc;
+  const BanMutationContext* ctx = static_cast<const BanMutationContext*>(opaque);
+  JsonObject u = findRosterUser(users, *ctx->username);
+  if (u.isNull()) {
+    errorOut = "User not found";
+    return UsersJsonMutation::Failed;
   }
+  if ((uint32_t)(u["id"] | 0) == 1) {
+    errorOut = "Cannot ban the primary admin account";
+    return UsersJsonMutation::Failed;
+  }
+  if (ctx->ban) {
+    u["banned"] = true;
+    if (ctx->reason->length()) u["banReason"] = *ctx->reason;
+    else                       u.remove("banReason");
+  } else {
+    u.remove("banned");
+    u.remove("banReason");
+  }
+  return UsersJsonMutation::Changed;
+}
+
+// Sets (or clears) the "banned" flag on a user entry in users.json. Also stores
+// the optional reason, which may contain any byte: the roster is edited as a
+// parsed document, never as text. Kicks active sessions when banning. Returns
+// false with errorOut set on failure.
+static bool setUserBanInternal(const String& username, bool ban, const String& reason, String& errorOut) {
+  if (username.length() == 0) {
+    errorOut = "Username required";
+    return false;
+  }
+  if (!filesystemReady) {
+    errorOut = "Filesystem not ready";
+    return false;
+  }
+  BanMutationContext ctx{&username, ban, &reason};
+  if (!mutateUsersJson(ban ? "user.ban" : "user.unban", banMutation, &ctx, errorOut)) return false;
 
   // Account suspension changes whether an identity may publish device
   // readiness. Bump before revoking sessions so a concurrently completing
@@ -2110,7 +2256,23 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
   }
 
   DEBUG_USERSF("[users] %s user ban for '%s'", ban ? "set" : "cleared", username.c_str());
-  return nullptr;
+  return true;
+}
+
+struct LastSeenMutationContext {
+  const String* username;
+  const char* isoTimestamp;
+};
+
+static UsersJsonMutation lastSeenMutation(JsonDocument& doc, JsonArray users, void* opaque, String& errorOut) {
+  (void)doc;
+  (void)errorOut;
+  const LastSeenMutationContext* ctx = static_cast<const LastSeenMutationContext*>(opaque);
+  JsonObject u = findRosterUser(users, *ctx->username);
+  if (u.isNull()) return UsersJsonMutation::Unchanged;
+  u.remove("lastSeenSec");  // Remove legacy field if present
+  u["lastSeen"] = ctx->isoTimestamp;
+  return UsersJsonMutation::Changed;
 }
 
 // Updates the "lastSeen" field in users.json for the given username.
@@ -2126,30 +2288,11 @@ void updateUserLastSeen(const String& username) {
   if (!gmtime_r(&now, &tminfo)) return;
   strftime(isoTimestamp, sizeof(isoTimestamp), "%Y-%m-%dT%H:%M:%SZ", &tminfo);
 
-  FsLockGuard guard("users.last_seen");
-  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.lastSeen"))) return;
-  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.lastSeen"));
-  if (!f) return;
-  PSRAM_JSON_DOC(doc);
-  if (deserializeJson(doc, f)) { f.close(); return; }
-  f.close();
-
-  for (JsonObject u : doc["users"].as<JsonArray>()) {
-    const char* uname = u["username"] | "";
-    if (username == uname) {
-      u.remove("lastSeenSec");  // Remove legacy field if present
-      u["lastSeen"] = isoTimestamp;
-      break;
-    }
-  }
-
-  {
-    // Atomic write (tmp + rename). This runs on every login — a raw truncate
-    // here was the highest-frequency chance to shred the auth DB on a power cut.
-    String json;
-    serializeJson(doc, json);
-    if (json.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, json)) return;
-  }
+  // This runs on every login: the owner's atomic write keeps a power cut here
+  // from shredding the auth database. A missing account changes nothing.
+  LastSeenMutationContext ctx{&username, isoTimestamp};
+  String error;
+  if (!mutateUsersJson("user.lastSeen", lastSeenMutation, &ctx, error)) return;
   DEBUG_USERSF("[users] lastSeen updated for '%s' -> %s", username.c_str(), isoTimestamp);
 }
 
@@ -2341,195 +2484,53 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     errorOut = "Username required";
     return false;
   }
-  // Load pending list and extract approved user using ArduinoJson
-  String userPassword = "";
-  bool found = false;
+  // One lock from the pending-list read through the account publication to
+  // the pending-list update: a ban or role change committing on another task
+  // meanwhile is neither lost nor interleaved, and the request that holds the
+  // only copy of the credential hash is removed only once the account exists.
+  FsLockGuard guard("user.approve");
 
   if (!VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.approve"))) {
     errorOut = "User not found in pending list";
     return false;
   }
-
-  // Parse pending_users.json with ArduinoJson
   File file = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth("user.approve"));
   if (!file) {
     errorOut = "Could not read pending list";
     return false;
   }
-
-  PSRAM_JSON_DOC(doc);
-  DeserializationError error = deserializeJson(doc, file);
+  PSRAM_JSON_DOC(pending);
+  const DeserializationError error = deserializeJson(pending, file);
   file.close();
-
   if (error) {
     errorOut = "Malformed pending_users.json";
     return false;
   }
 
-  // Build new array without the approved user
-  PSRAM_JSON_DOC(newDoc);
-  JsonArray newArray = newDoc.to<JsonArray>();
-  JsonArray pendingArray = doc.as<JsonArray>();
-
-  for (JsonObject user : pendingArray) {
-    const char* objUsername = user["username"];
-    if (objUsername && username == objUsername) {
-      // Found the user to approve - extract password
-      const char* pass = user["password"];
-      if (pass) {
-        userPassword = String(pass);
-      }
-      found = true;
-      // Don't add this user to the new array (removing them)
-    } else {
-      // Keep this user in the list
-      newArray.add(user);
-    }
-  }
-
-  if (!found) {
+  JsonArray pendingArray = pending.as<JsonArray>();
+  size_t approvedIndex = 0;
+  JsonObject request = findRosterUser(pendingArray, username, &approvedIndex);
+  if (request.isNull()) {
     errorOut = "User not found in pending list";
     return false;
   }
 
-  // Write updated pending list or remove file if empty
-  if (newArray.size() == 0) {
-    // Remove file if empty
-    fsLock("pending_users.remove");
-    VFS::removeGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.approve"));
-    fsUnlock();
-  } else {
-    // Write updated list
-    FsLockGuard fsGuard("pending_users.approve_rewrite");
-    file = VFS::openGuarded(PENDING_USERS_FILE, "w", VFS::systemAuth("user.approve"));
-    if (!file) {
-      errorOut = "Could not update pending list";
-      return false;
-    }
-    size_t written = serializeJson(newDoc, file);
-    file.close();
-    
-    if (written == 0) {
-      errorOut = "Could not update pending list";
-      return false;
-    }
-  }
+  // Record WHO approved this pending request (provenance), distinct from a
+  // first-setup owner admin. Falls back to "admin" if there is no auth context.
+  char approvedByBuf[48];
+  { String ap = currentAuthContext().user;
+    snprintf(approvedByBuf, sizeof(approvedByBuf), "approved:%s", ap.length() ? ap.c_str() : "admin"); }
 
-  // Append approved user to users.json (JSON-only policy)
+  NewAccount account;
+  account.username = username;
+  account.passwordHash = String(request["password"] | "");  // stored hashed at request time
+  account.role = "user";
+  account.createdBy = approvedByBuf;
   uint32_t createdUserId = 0;
-  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.approve"))) {
-    // Create users.json with the first user (ID 1) using ArduinoJson
-    PSRAM_JSON_DOC(doc);
-    doc["version"] = 1;
-    doc["nextId"] = 2;
-    
-    JsonArray users = doc["users"].to<JsonArray>();
-    JsonObject user = users.add<JsonObject>();
-    user["id"] = 1;
-    user["username"] = username;
-    // Password now stored in per-user settings file, not here
-    user["role"] = "superadmin";               // first user is the device owner → top tier
-    user["createdAt"] = (const char*)nullptr;  // resolved lazily via boot anchor
-    user["createdBy"] = "firstsetup";          // first admin = device owner (not "approved")
-    user["createdAtSource"] = "pending";       // time-derivation status
-    user["createdMs"] = millis();
-    user["ntpAnchorId"] = gNTPAnchorId;
-    user["bootCount"] = gBootCounter;
-    
-    DEBUG_SYSTEMF("ApproveInit: Creating users.json with admin.bootCount=%lu, gNTPAnchorId=%lu", (unsigned long)gBootCounter, (unsigned long)gNTPAnchorId);
-
-    // Serialize atomically (tmp + rename). Boot anchors live in their own file now.
-    {
-      String json;
-      serializeJson(doc, json);
-      if (json.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, json)) {
-        errorOut = "Failed to create users.json";
-        return false;
-      }
-    }
-
-    createdUserId = 1;
-  } else {
-    // Parse existing users.json with ArduinoJson
-    File file = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.approve"));
-    if (!file) {
-      errorOut = "Failed to open users.json";
-      return false;
-    }
-    
-    PSRAM_JSON_DOC(doc);  // Use dynamic document for users.json
-    DeserializationError error = deserializeJson(doc, file);
-    file.close();
-    
-    if (error) {
-      errorOut = "Malformed users.json";
-      return false;
-    }
-    
-    // Get nextId
-    int nextId = doc["nextId"] | 2;  // Default to 2 if missing
-    
-    // Check if user already exists
-    JsonArray users = doc["users"];
-    if (!users) {
-      errorOut = "Malformed users.json - missing users array";
-      return false;
-    }
-    
-    for (JsonObject user : users) {
-      const char* existingUsername = user["username"];
-      if (existingUsername && username == existingUsername) {
-        errorOut = "Username already exists";
-        return false;
-      }
-    }
-    
-    // Record WHO approved this pending request (provenance), distinct from a
-    // first-setup owner admin. Falls back to "admin" if there is no auth context.
-    char approvedByBuf[48];
-    { String ap = currentAuthContext().user;
-      snprintf(approvedByBuf, sizeof(approvedByBuf), "approved:%s", ap.length() ? ap.c_str() : "admin"); }
-    JsonObject newUser = users.add<JsonObject>();
-    newUser["id"] = nextId;
-    newUser["username"] = username;
-    // Password now stored in per-user settings file, not here
-    newUser["role"] = "user";
-    newUser["createdAt"] = (const char*)nullptr;  // resolved lazily via boot anchor
-    newUser["createdBy"] = approvedByBuf;         // provenance: approved by an admin
-    newUser["createdAtSource"] = "pending";       // time-derivation status
-    newUser["createdMs"] = millis();
-    newUser["ntpAnchorId"] = gNTPAnchorId;
-    newUser["bootCount"] = gBootCounter;
-    
-    DEBUG_SYSTEMF("ApproveAppend: New user id=%d with bootCount=%lu, gNTPAnchorId=%lu", nextId, (unsigned long)gBootCounter, (unsigned long)gNTPAnchorId);
-    
-    // Update nextId
-    doc["nextId"] = nextId + 1;
-    
-    // Write back atomically (tmp + rename).
-    {
-      String json;
-      serializeJson(doc, json);
-      if (json.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, json)) {
-        logSystemEvent("USERS", "users.json REWRITE FAILED during approve of '%s' — auth database may be inconsistent", username.c_str());
-        errorOut = "Failed to write users.json";
-        return false;
-      }
-    }
-
-    createdUserId = (uint32_t)nextId;
-  }
-
-  if (createdUserId > 0 && filesystemReady) {
-    String settingsPath = getUserSettingsPath(createdUserId);
-    FsLockGuard guard("user_settings.default");
-    // Create user settings with password and defaults
-    PSRAM_JSON_DOC(defaults);
-    defaults["theme"] = "light";
-    defaults["password"] = userPassword;  // Store hashed password in user settings
-    if (!saveUserSettings(createdUserId, defaults)) {
-      WARN_SESSIONF("Failed to create user settings for userId=%u", (unsigned)createdUserId);
-    }
+  if (!createAccount(account, createdUserId, errorOut)) {
+    // Nothing was published and the request is still pending; the admin sees
+    // the reason and can retry or deny it.
+    return false;
   }
 
   // Identity topology changed (pending account is now real and usable).
@@ -2543,6 +2544,15 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
   logSystemEvent("USERS", "user '%s' approved (id=%lu)", username.c_str(), (unsigned long)createdUserId);
   systemEventPost(SYSEVT_USER_APPROVED, username.c_str());
   BROADCAST_PRINTF("[admin] Approved user: %s", username.c_str());
+
+  // The account is live; retire its request. A failure here is reported as
+  // such rather than hidden: the entry stays until a later approve (refused as
+  // a duplicate) or deny clears it.
+  pendingArray.remove(approvedIndex);
+  if (!writePendingUsers(pending, "user.approve", errorOut)) {
+    errorOut = "User approved, but the pending list could not be updated";
+    return false;
+  }
 
   // If NTP already synced, resolve the creation timestamp immediately
   if (time(nullptr) > 0) {
@@ -2558,70 +2568,32 @@ bool denyPendingUserInternal(const String& username, String& errorOut) {
     errorOut = "Username required";
     return false;
   }
-  
+  FsLockGuard guard("user.deny");
   if (!VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.deny"))) {
     errorOut = "User not found in pending list";
     return false;
   }
-
-  // Parse pending_users.json with ArduinoJson
   File file = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth("user.deny"));
   if (!file) {
     errorOut = "Could not read pending list";
     return false;
   }
-
-  PSRAM_JSON_DOC(doc);
-  DeserializationError error = deserializeJson(doc, file);
+  PSRAM_JSON_DOC(pending);
+  const DeserializationError error = deserializeJson(pending, file);
   file.close();
-
   if (error) {
     errorOut = "Malformed pending_users.json";
     return false;
   }
 
-  // Build new array without the denied user
-  PSRAM_JSON_DOC(newDoc);
-  JsonArray newArray = newDoc.to<JsonArray>();
-  JsonArray pendingArray = doc.as<JsonArray>();
-  bool found = false;
-
-  for (JsonObject user : pendingArray) {
-    const char* objUsername = user["username"];
-    if (objUsername && username == objUsername) {
-      // Found the user to deny - don't add to new array
-      found = true;
-    } else {
-      // Keep this user in the list
-      newArray.add(user);
-    }
-  }
-
-  if (!found) {
+  JsonArray pendingArray = pending.as<JsonArray>();
+  size_t deniedIndex = 0;
+  if (findRosterUser(pendingArray, username, &deniedIndex).isNull()) {
     errorOut = "User not found in pending list";
     return false;
   }
-
-  // Write updated pending list or remove file if empty
-  if (newArray.size() == 0) {
-    // Remove file if empty
-    VFS::removeGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.deny"));
-  } else {
-    // Write updated list
-    FsLockGuard fsGuard("pending_users.deny_rewrite");
-    file = VFS::openGuarded(PENDING_USERS_FILE, "w", VFS::systemAuth("user.deny"));
-    if (!file) {
-      errorOut = "Could not update pending list";
-      return false;
-    }
-    size_t written = serializeJson(newDoc, file);
-    file.close();
-
-    if (written == 0) {
-      errorOut = "Could not update pending list";
-      return false;
-    }
-  }
+  pendingArray.remove(deniedIndex);
+  if (!writePendingUsers(pending, "user.deny", errorOut)) return false;
 
   systemEventPost(SYSEVT_USER_REJECTED, username.c_str());
   return true;
@@ -2660,112 +2632,63 @@ static bool userMutationAllowed(const String& targetUser, int newRoleRank, Strin
 // (which event to post, session revocation on downgrade, user-facing messaging)
 // lives in the promote/demote handlers. Authorization is the caller's
 // responsibility via userMutationAllowed() BEFORE invoking this.
+struct RoleMutationContext {
+  const String* username;
+  const char* role;
+};
+
+static UsersJsonMutation roleMutation(JsonDocument& doc, JsonArray users, void* opaque, String& errorOut) {
+  (void)doc;
+  const RoleMutationContext* ctx = static_cast<const RoleMutationContext*>(opaque);
+  JsonObject u = findRosterUser(users, *ctx->username);
+  if (u.isNull()) {
+    errorOut = "User not found";
+    return UsersJsonMutation::Failed;
+  }
+  if ((uint32_t)(u["id"] | 0) == 1) {
+    errorOut = "Cannot modify the first admin account";
+    return UsersJsonMutation::Failed;
+  }
+  u["role"] = ctx->role;  // replaces the field, or adds it to a role-less legacy entry
+  return UsersJsonMutation::Changed;
+}
+
 static bool setUserRoleInternal(const String& username, const char* newRole, String& errorOut) {
   DEBUG_USERSF("[users] setrole internal username=%s role=%s", username.c_str(), newRole);
   if (username.length() == 0) {
     errorOut = "Username required";
     return false;
   }
-  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.promote"))) {
-    errorOut = "users.json not found";
-    return false;
-  }
-  String json;
-  if (!readText(USERS_JSON_FILE, json)) {
-    errorOut = "Failed to read users.json";
-    return false;
-  }
-  int usersIdx = json.indexOf("\"users\"");
-  int openBracket = (usersIdx >= 0) ? json.indexOf('[', usersIdx) : -1;
-  int closeBracket = (openBracket >= 0) ? json.indexOf(']', openBracket) : -1;
-  if (openBracket < 0 || closeBracket <= openBracket) {
-    errorOut = "Malformed users.json";
-    return false;
-  }
-
-  // Find the object for this username within the users array
-  int searchPos = openBracket + 1;
-  bool updated = false;
-  while (true) {
-    int objStart = json.indexOf('{', searchPos);
-    if (objStart < 0 || objStart > closeBracket) break;
-    int objEnd = json.indexOf('}', objStart);
-    if (objEnd < 0 || objEnd > closeBracket) break;
-    String obj = json.substring(objStart, objEnd + 1);
-
-    int un = obj.indexOf("\"username\":");
-    if (un >= 0) {
-      un += 11;  // skip "username":
-      // Skip optional space after colon
-      while (un < obj.length() && obj[un] == ' ') un++;
-      // Skip opening quote
-      if (un < obj.length() && obj[un] == '"') un++;
-      int unEnd = obj.indexOf('"', un);
-      if (unEnd > un) {
-        String name = obj.substring(un, unEnd);
-        if (name == username) {
-          // Check for ID field (founder protection) - only for the target user
-          int idStart = obj.indexOf("\"id\":");
-          if (idStart >= 0) {
-            idStart += 5;  // skip "id":
-            // Skip optional space
-            while (idStart < obj.length() && obj[idStart] == ' ') idStart++;
-            int idEnd = idStart;
-            while (idEnd < obj.length() && obj[idEnd] >= '0' && obj[idEnd] <= '9') idEnd++;
-            if (idEnd > idStart) {
-              int userId = obj.substring(idStart, idEnd).toInt();
-              if (userId == 1) {
-                errorOut = "Cannot modify the first admin account";
-                return false;
-              }
-            }
-          }
-
-          // Look for role field in the full JSON
-          int roleFieldStart = json.indexOf("\"role\":", objStart);
-          if (roleFieldStart >= 0 && roleFieldStart < objEnd) {
-            int roleValueStart = roleFieldStart + 7;  // skip "role":
-            // Skip optional space and quote
-            while (roleValueStart < json.length() && (json[roleValueStart] == ' ' || json[roleValueStart] == '"')) {
-              if (json[roleValueStart] == '"') { roleValueStart++; break; }
-              roleValueStart++;
-            }
-            int roleValueEnd = json.indexOf('"', roleValueStart);
-            if (roleValueEnd > roleValueStart && roleValueEnd < objEnd) {
-              // Replace the entire role value with the requested role
-              String before = json.substring(0, roleValueStart);
-              String after = json.substring(roleValueEnd);
-              json = before + newRole + after;
-              updated = true;
-              break;
-            }
-          } else {
-            // No role field; insert before closing brace
-            String ins = String(",\"role\":\"") + newRole + "\"";
-            String before = json.substring(0, objEnd);
-            String after = json.substring(objEnd);
-            json = before + ins + after;
-            updated = true;
-            break;
-          }
-        }
-      }
-    }
-    searchPos = objEnd + 1;
-  }
-  if (!updated) {
-    errorOut = "User not found";
-    return false;
-  }
-  if (!writeTextAtomic(USERS_JSON_FILE, json)) {
-    errorOut = "Failed to write users.json";
-    return false;
-  }
+  RoleMutationContext ctx{&username, newRole};
+  if (!mutateUsersJson("user.setrole", roleMutation, &ctx, errorOut)) return false;
   // Identity topology changed (role differs). Invalidate auth-dependent caches
   // — see System_AuthIdentity.h. Event posting, session revocation and messaging
   // are the handlers' job (they differ between promote and demote).
   bumpIdentityGeneration("user.setrole");
   return true;
+}
+
+struct DeleteMutationContext {
+  const String* username;
+  uint32_t id;  // the removed entry's id, for its settings file
+};
+
+static UsersJsonMutation deleteMutation(JsonDocument& doc, JsonArray users, void* opaque, String& errorOut) {
+  (void)doc;
+  DeleteMutationContext* ctx = static_cast<DeleteMutationContext*>(opaque);
+  size_t index = 0;
+  JsonObject u = findRosterUser(users, *ctx->username, &index);
+  if (u.isNull()) {
+    errorOut = "User not found";
+    return UsersJsonMutation::Failed;
+  }
+  ctx->id = (uint32_t)(u["id"] | 0);
+  if (ctx->id == 1) {
+    errorOut = "Cannot delete the first admin account";
+    return UsersJsonMutation::Failed;
+  }
+  users.remove(index);
+  return UsersJsonMutation::Changed;
 }
 
 // Delete an existing user from users.json and their settings file
@@ -2775,117 +2698,9 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
     errorOut = "Username required";
     return false;
   }
-  
-  // Get userId first so we can delete their settings file
-  uint32_t userId = 0;
-  getUserIdByUsername(username, userId);
-
-  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.delete"))) {
-    errorOut = "users.json not found";
-    return false;
-  }
-  String json;
-  if (!readText(USERS_JSON_FILE, json)) {
-    errorOut = "Failed to read users.json";
-    return false;
-  }
-  int usersIdx = json.indexOf("\"users\"");
-  int openBracket = (usersIdx >= 0) ? json.indexOf('[', usersIdx) : -1;
-  int closeBracket = (openBracket >= 0) ? json.indexOf(']', openBracket) : -1;
-  if (openBracket < 0 || closeBracket <= openBracket) {
-    errorOut = "Malformed users.json";
-    return false;
-  }
-
-  // Find the object for this username within the users array
-  int searchPos = openBracket + 1;
-  bool deleted = false;
-  while (true) {
-    int objStart = json.indexOf('{', searchPos);
-    if (objStart < 0 || objStart > closeBracket) break;
-    int objEnd = json.indexOf('}', objStart);
-    if (objEnd < 0 || objEnd > closeBracket) break;
-    String obj = json.substring(objStart, objEnd + 1);
-
-    int un = obj.indexOf("\"username\":");
-    if (un >= 0) {
-      un += 11;  // skip "username":
-      // Skip optional space after colon
-      while (un < obj.length() && obj[un] == ' ') un++;
-      // Skip opening quote
-      if (un < obj.length() && obj[un] == '"') un++;
-      int unEnd = obj.indexOf('"', un);
-      if (unEnd > un) {
-        String name = obj.substring(un, unEnd);
-        if (name == username) {
-          // Check for ID field (founder protection) - only for the target user
-          int idStart = obj.indexOf("\"id\":");
-          if (idStart >= 0) {
-            idStart += 5;  // skip "id":
-            // Skip optional space
-            while (idStart < obj.length() && obj[idStart] == ' ') idStart++;
-            int idEnd = idStart;
-            while (idEnd < obj.length() && obj[idEnd] >= '0' && obj[idEnd] <= '9') idEnd++;
-            if (idEnd > idStart) {
-              int userId = obj.substring(idStart, idEnd).toInt();
-              if (userId == 1) {
-                errorOut = "Cannot delete the first admin account";
-                return false;
-              }
-            }
-          }
-
-          // Find the start and end of this user object including commas
-          int deleteStart = objStart;
-          int deleteEnd = objEnd + 1;
-
-          // Check if there's a comma before this object
-          int commaBeforePos = deleteStart - 1;
-          while (commaBeforePos > openBracket && (json[commaBeforePos] == ' ' || json[commaBeforePos] == '\n' || json[commaBeforePos] == '\r' || json[commaBeforePos] == '\t')) {
-            commaBeforePos--;
-          }
-          bool hasCommaBefore = (commaBeforePos > openBracket && json[commaBeforePos] == ',');
-
-          // Check if there's a comma after this object
-          int commaAfterPos = deleteEnd;
-          while (commaAfterPos < closeBracket && (json[commaAfterPos] == ' ' || json[commaAfterPos] == '\n' || json[commaAfterPos] == '\r' || json[commaAfterPos] == '\t')) {
-            commaAfterPos++;
-          }
-          bool hasCommaAfter = (commaAfterPos < closeBracket && json[commaAfterPos] == ',');
-
-          // Determine what to delete
-          if (hasCommaBefore && hasCommaAfter) {
-            // Middle object: delete from start to after comma
-            deleteEnd = commaAfterPos + 1;
-          } else if (hasCommaBefore && !hasCommaAfter) {
-            // Last object: delete from before comma to end
-            deleteStart = commaBeforePos;
-          } else if (!hasCommaBefore && hasCommaAfter) {
-            // First object: delete from start to after comma
-            deleteEnd = commaAfterPos + 1;
-          }
-          // If no commas (only object), just delete the object itself
-
-          // Remove the user object
-          String before = json.substring(0, deleteStart);
-          String after = json.substring(deleteEnd);
-          json = before + after;
-          deleted = true;
-          break;
-        }
-      }
-    }
-    searchPos = objEnd + 1;
-  }
-  if (!deleted) {
-    errorOut = "User not found";
-    return false;
-  }
-  if (!writeTextAtomic(USERS_JSON_FILE, json)) {
-    logSystemEvent("USERS", "users.json REWRITE FAILED during delete of '%s' — auth database may be inconsistent", username.c_str());
-    errorOut = "Failed to write users.json";
-    return false;
-  }
+  DeleteMutationContext ctx{&username, 0};
+  if (!mutateUsersJson("user.delete", deleteMutation, &ctx, errorOut)) return false;
+  const uint32_t userId = ctx.id;
   // Identity topology changed (user removed — their permission set
   // evaporates). Invalidate any auth-dependent caches — see
   // System_AuthIdentity.h for the protocol.
@@ -3697,17 +3512,20 @@ const char* cmd_banuser(const String& argsInput) {
 
   // Rank check: a regular admin cannot ban a super-admin (founder also hard-
   // protected in setUserBanInternal).
+  EXT_RAM_BSS_ATTR static char ebuf[160];
   {
     String merr;
     if (!userMutationAllowed(username, kRoleRankNoGrant, merr)) {
-      EXT_RAM_BSS_ATTR static char ebuf[160];
       snprintf(ebuf, sizeof(ebuf), "Error: %s", merr.c_str());
       return ebuf;
     }
   }
 
-  const char* err = setUserBanInternal(username, true, reason);
-  if (err) return err;
+  String err;
+  if (!setUserBanInternal(username, true, reason, err)) {
+    snprintf(ebuf, sizeof(ebuf), "Error: %s", err.c_str());
+    return ebuf;
+  }
 
   EXT_RAM_BSS_ATTR static char buf[160];
   if (reason.length()) snprintf(buf, sizeof(buf), "Banned user '%s' — %s", username.c_str(), reason.c_str());
@@ -3721,8 +3539,12 @@ const char* cmd_unbanuser(const String& argsInput) {
   username.trim();
   if (username.length() == 0) return "Error: invalid arguments — Usage: unbanuser <username>";
 
-  const char* err = setUserBanInternal(username, false, "");
-  if (err) return err;
+  String err;
+  if (!setUserBanInternal(username, false, "", err)) {
+    EXT_RAM_BSS_ATTR static char ebuf[160];
+    snprintf(ebuf, sizeof(ebuf), "Error: %s", err.c_str());
+    return ebuf;
+  }
 
   EXT_RAM_BSS_ATTR static char buf[80];
   snprintf(buf, sizeof(buf), "Unbanned user '%s'", username.c_str());
@@ -3787,6 +3609,9 @@ const char* cmd_user_request(const String& argsInput) {
 
   DEBUG_CMD_FLOWF("[users] Adding user to pending_users.json, filesystemReady=%d", filesystemReady ? 1 : 0);
 
+  // Held across the read-modify-write so an approve or deny committing on
+  // another task meanwhile is not overwritten by this stale copy.
+  FsLockGuard guard("user.request");
   PSRAM_JSON_DOC(doc);
   if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.request"))) {
     String json;
@@ -3882,21 +3707,6 @@ struct BootAnchor {
     : ntpAnchorId(seq), epochAtSync(epoch), millisAtSync(ms) {}
 };
 
-// User timestamp info - extracted from JSON for resolution
-struct UserTimestampInfo {
-  int jsonStartPos;
-  int jsonEndPos;
-  uint32_t ntpAnchorId;
-  unsigned long createdMs;
-  int bootCount;
-  bool needsResolution;
-
-  UserTimestampInfo()
-    : jsonStartPos(-1), jsonEndPos(-1),
-      ntpAnchorId(0), createdMs(0),
-      bootCount(-1), needsResolution(false) {}
-};
-
 // Helper: Check if username exists in users.json content
 bool usernameExistsInUsersJson(const String& json, const String& username) {
   char needleBuf[80];
@@ -3915,43 +3725,9 @@ bool usernameExistsInUsersJson(const String& json, const String& username) {
 
 // Forward declarations for helper functions
 static int parseBootAnchors(const String& usersJson, BootAnchor* anchors, int maxCount);
-static bool parseUserTimestampInfo(const String& userObj, int userStart, UserTimestampInfo& info);
 static BootAnchor* findMatchingAnchor(BootAnchor* anchors, int count, uint32_t ntpAnchorId);
-static bool replaceJsonField(String& json, const char* fieldName, const String& newValue, int searchStart);
-static bool resolveUserTimestamp(String& usersJson, const UserTimestampInfo& info, const BootAnchor& anchor);
-static bool approximateUserTimestamp(String& usersJson, const UserTimestampInfo& info, uint32_t ordinalNumber);
-static bool extractJsonInt(const String& json, const char* fieldName, int& outValue, int searchStart);
 static void buildOrdinal(uint32_t n, char* buf, size_t bufSize);
 static bool formatEpochAsISO8601(time_t epoch, char* buf, size_t bufSize);
-
-// Extract integer field from JSON substring
-static bool extractJsonInt(const String& json, const char* fieldName,
-                           int& outValue, int searchStart = 0) {
-  char needleBuf[64];
-  snprintf(needleBuf, sizeof(needleBuf), "\"%s\":", fieldName);
-  int idx = json.indexOf(needleBuf, searchStart);
-  if (idx < 0) return false;
-
-  int valueStart = idx + strlen(needleBuf);
-  while (valueStart < json.length() && (json[valueStart] == ' ' || json[valueStart] == '\t')) {
-    valueStart++;
-  }
-
-  int valueEnd = valueStart;
-  bool isNegative = (json[valueStart] == '-');
-  if (isNegative) valueEnd++;
-
-  while (valueEnd < json.length() && json[valueEnd] >= '0' && json[valueEnd] <= '9') {
-    valueEnd++;
-  }
-
-  if (valueEnd == valueStart || (isNegative && valueEnd == valueStart + 1)) {
-    return false;
-  }
-
-  outValue = json.substring(valueStart, valueEnd).toInt();
-  return true;
-}
 
 // Build ordinal string (1st, 2nd, 3rd, etc.)
 static void buildOrdinal(uint32_t n, char* buf, size_t bufSize) {
@@ -4037,42 +3813,19 @@ static uint32_t highestBootAnchorId() {
   return maxId;
 }
 
-// Parse user timestamp info from user object
-static bool parseUserTimestampInfo(const String& userObj, int userStart,
-                                   UserTimestampInfo& info) {
-  info.jsonStartPos = userStart;
-  // Needs resolution if createdAt is:
-  //   1. JSON null (NTP wasn't synced at creation time)
-  //   2. Missing entirely (ArduinoJson may drop null values on re-serialize)
-  //   3. An approximate sentinel like "1st Power Cycle" written by approximateUserTimestamp()
-  //      — happens when gBootCounter advanced past bootCount before an anchor was available;
-  //      now that NTP has synced we can replace the approximation with the real timestamp.
-  bool hasNullCreatedAt    = (userObj.indexOf("\"createdAt\":null") >= 0) ||
-                             (userObj.indexOf("\"createdAt\": null") >= 0);
-  bool hasMissingCreatedAt = (userObj.indexOf("\"createdAt\"") < 0);
-  // The approximate sentinel now lives in createdAtSource; also accept the
-  // legacy createdBy location so pre-split users are still re-resolved.
-  bool isApproximate       = (userObj.indexOf("\"createdAtSource\":\"approx_power_cycle\"") >= 0) ||
-                             (userObj.indexOf("\"createdAtSource\": \"approx_power_cycle\"") >= 0) ||
-                             (userObj.indexOf("\"createdBy\":\"approx_power_cycle\"") >= 0) ||
-                             (userObj.indexOf("\"createdBy\": \"approx_power_cycle\"") >= 0);
-  info.needsResolution = hasNullCreatedAt || hasMissingCreatedAt || isApproximate;
-
-  if (!info.needsResolution) return false;
-
-  int ntpAnchorId, msSinceBoot, bootCounter;
-  if (!extractJsonInt(userObj, "ntpAnchorId", ntpAnchorId) || !extractJsonInt(userObj, "createdMs", msSinceBoot)) {
-    return false;
-  }
-
-  info.ntpAnchorId = ntpAnchorId;
-  info.createdMs = msSinceBoot;
-
-  if (extractJsonInt(userObj, "bootCount", bootCounter)) {
-    info.bootCount = bootCounter;
-  }
-
-  return true;
+// A roster entry still waits for its creation time when createdAt is:
+//   1. JSON null (NTP wasn't synced at creation time)
+//   2. Missing entirely (ArduinoJson may drop null values on re-serialize)
+//   3. An approximate sentinel like "1st Power Cycle" written by approximateUserTimestamp()
+//      — happens when gBootCounter advanced past bootCount before an anchor was available;
+//      now that NTP has synced we can replace the approximation with the real timestamp.
+// The approximate sentinel lives in createdAtSource; the legacy createdBy
+// location is also accepted so pre-split users are still re-resolved.
+static bool userNeedsCreationTime(JsonObjectConst user) {
+  if (user["createdAt"].isNull()) return true;
+  const char* source = user["createdAtSource"] | "";
+  const char* createdBy = user["createdBy"] | "";
+  return strcmp(source, "approx_power_cycle") == 0 || strcmp(createdBy, "approx_power_cycle") == 0;
 }
 
 // Find matching anchor for boot sequence
@@ -4085,65 +3838,10 @@ static BootAnchor* findMatchingAnchor(BootAnchor* anchors, int count, uint32_t n
   return nullptr;
 }
 
-// Replace JSON field value in string
-static bool replaceJsonField(String& json, const char* fieldName,
-                             const String& newValue, int searchStart = 0) {
-  char needle[64];
-  snprintf(needle, sizeof(needle), "\"%s\":", fieldName);
-  int needleLen = strlen(needle);
-
-  const char* jsonStr = json.c_str();
-  const char* found = strstr(jsonStr + searchStart, needle);
-  if (!found) return false;
-
-  int idx = found - jsonStr;
-  int valueStart = idx + needleLen;
-
-  while (valueStart < json.length() && (json[valueStart] == ' ' || json[valueStart] == '\t')) {
-    valueStart++;
-  }
-
-  int valueEnd = valueStart;
-  if (json[valueStart] == '"') {
-    valueEnd++;
-    while (valueEnd < json.length() && json[valueEnd] != '"') {
-      if (json[valueEnd] == '\\') valueEnd++;
-      valueEnd++;
-    }
-    valueEnd++;
-  } else if (json[valueStart] == '[' || json[valueStart] == '{') {
-    char open = json[valueStart];
-    char close = (open == '[') ? ']' : '}';
-    int depth = 1;
-    valueEnd++;
-    while (valueEnd < json.length() && depth > 0) {
-      if (json[valueEnd] == open) depth++;
-      else if (json[valueEnd] == close) depth--;
-      valueEnd++;
-    }
-  } else {
-    while (valueEnd < json.length() && json[valueEnd] != ',' && json[valueEnd] != '}' && json[valueEnd] != ']' && json[valueEnd] != '\n') {
-      valueEnd++;
-    }
-  }
-
-  int oldValueLen = valueEnd - valueStart;
-  int newLen = json.length() - oldValueLen + newValue.length();
-
-  String result;
-  result.reserve(newLen + 16);
-  result = json.substring(0, valueStart);
-  result += newValue;
-  result += json.substring(valueEnd);
-  json = result;
-
-  return true;
-}
-
 // Resolve user timestamp using NTP anchor
-static bool resolveUserTimestamp(String& usersJson, const UserTimestampInfo& info,
+static bool resolveUserTimestamp(JsonObject user, unsigned long createdMs,
                                  const BootAnchor& anchor) {
-  long delta = (long)anchor.millisAtSync - (long)info.createdMs;
+  long delta = (long)anchor.millisAtSync - (long)createdMs;
 
   time_t createdAtUtc;
   bool crossBoot = false;
@@ -4169,47 +3867,30 @@ static bool resolveUserTimestamp(String& usersJson, const UserTimestampInfo& inf
     return false;
   }
 
-  char quotedValue[32];
-  snprintf(quotedValue, sizeof(quotedValue), "\"%s\"", isoTimestamp);
-
-  if (!replaceJsonField(usersJson, "createdAt", String(quotedValue), info.jsonStartPos)) {
-    return false;
-  }
-
+  user["createdAt"] = isoTimestamp;
   // Mark whether this was an exact resolution or a cross-boot approximation.
   // Record HOW createdAt was derived in createdAtSource; leave createdBy
   // (provenance: who created the account) untouched.
-  replaceJsonField(usersJson, "createdAtSource",
-                   crossBoot ? "\"approx_ntp\"" : "\"ntp_resolved\"",
-                   info.jsonStartPos);
+  user["createdAtSource"] = crossBoot ? "approx_ntp" : "ntp_resolved";
   return true;
 }
 
 // Approximate user timestamp using power cycle label
-static bool approximateUserTimestamp(String& usersJson, const UserTimestampInfo& info,
-                                     uint32_t ordinalNumber) {
+static bool approximateUserTimestamp(JsonObject user, uint32_t ordinalNumber) {
   char ordinal[16];
   buildOrdinal(ordinalNumber, ordinal, sizeof(ordinal));
 
   char approxLabel[48];
-  char quotedValue[56];
   snprintf(approxLabel, sizeof(approxLabel), "%s Power Cycle", ordinal);
-  snprintf(quotedValue, sizeof(quotedValue), "\"%s\"", approxLabel);
 
-  // Idempotence: the resolve pass now re-runs on every clock step (duty
-  // drain), and an already-approximated user would otherwise report
-  // "modified" every time — a pointless users.json flash rewrite per step.
-  const int existing = usersJson.indexOf(quotedValue, info.jsonStartPos);
-  if (existing >= 0) {
-    const int nextObj = usersJson.indexOf('}', info.jsonStartPos);
-    if (nextObj < 0 || existing < nextObj) return false;  // unchanged
-  }
+  // Idempotence: the resolve pass re-runs on every clock step (duty drain),
+  // and an already-approximated user would otherwise report "modified" every
+  // time — a pointless users.json flash rewrite per step.
+  const char* current = user["createdAt"] | "";
+  if (strcmp(current, approxLabel) == 0) return false;  // unchanged
 
-  if (!replaceJsonField(usersJson, "createdAt", String(quotedValue), info.jsonStartPos)) {
-    return false;
-  }
-
-  replaceJsonField(usersJson, "createdAtSource", "\"approx_power_cycle\"", info.jsonStartPos);
+  user["createdAt"] = approxLabel;
+  user["createdAtSource"] = "approx_power_cycle";
   return true;
 }
 
@@ -4275,138 +3956,92 @@ void cleanupOldBootAnchors(void* usersDocPtr) {
   writeTextAtomic(BOOT_ANCHORS_FILE, out);
 }
 
-// Resolve pending user creation timestamps
-void resolvePendingUserCreationTimes() {
-  DEBUG_NTP_RESOLVEF("[resolve] Starting timestamp resolution");
+struct ResolveCreationTimesContext {
+  BootAnchor* anchors;
+  int anchorCount;
+  bool modified;
+};
 
-  if (!filesystemReady || !VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.resolveCreated"))) {
-    DEBUG_NTP_RESOLVEF("[resolve] Skipping - FS not ready or file missing");
-    return;
-  }
-
-  // Hold the FS lock across the WHOLE read-modify-write. This now runs from
-  // the main loop (Clock::clockDutiesTick) concurrently with cmd_exec user
-  // CRUD, which guards its own RMW the same way — without this, a useradd
-  // landing between our read and our writeTextAtomic would be clobbered by
-  // our stale copy (last-writer-wins on the whole file). FsLockGuard is
-  // per-task reentrant, so the guarded open/write inside are fine.
-  FsLockGuard fsGuard("user.resolveCreated");
-
-  static char* usersJsonBuf = nullptr;
-  static const size_t USERS_JSON_BUF_SIZE = 8192;
-  if (!usersJsonBuf) {
-    usersJsonBuf = (char*)ps_alloc(USERS_JSON_BUF_SIZE, AllocPref::PreferPSRAM, "users.json.buf");
-    if (!usersJsonBuf) return;
-  }
-
-  size_t bytesRead = 0;
-  {
-    File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.resolveCreated"));
-    if (!f) return;
-    bytesRead = f.readBytes(usersJsonBuf, USERS_JSON_BUF_SIZE - 1);
-    usersJsonBuf[bytesRead] = '\0';
-    f.close();
-  }
-
-  if (bytesRead == 0) return;
-
-  String usersJson = usersJsonBuf;
-  DEBUG_NTP_RESOLVEF("[resolve] Read %d bytes from users.json", (int)bytesRead);
-
-  const int MAX_ANCHORS = 16;
-  BootAnchor anchors[MAX_ANCHORS];
-  int anchorCount = readBootAnchors(anchors, MAX_ANCHORS);  // from BOOT_ANCHORS_FILE
-  DEBUG_NTP_RESOLVEF("[resolve] Found %d boot anchors", anchorCount);
-  
-  for (int i = 0; i < anchorCount; i++) {
-    DEBUG_NTP_RESOLVEF("[resolve] Anchor %d: ntpAnchorId=%lu epochAtSync=%u millisAtSync=%lu",
-                 i, (unsigned long)anchors[i].ntpAnchorId, (unsigned)anchors[i].epochAtSync, (unsigned long)anchors[i].millisAtSync);
-  }
-
-  // Find the "users" array in the JSON - start searching after "users":
-  int usersArrayStart = usersJson.indexOf("\"users\"");
-  if (usersArrayStart < 0) {
-    DEBUG_NTP_RESOLVEF("[resolve] No 'users' array found");
-    return;
-  }
-  int arrayBracket = usersJson.indexOf('[', usersArrayStart);
-  if (arrayBracket < 0) {
-    DEBUG_NTP_RESOLVEF("[resolve] No '[' found after 'users'");
-    return;
-  }
-
-  bool modified = false;
-  int userPos = arrayBracket + 1;  // Start after the '[' of the users array
-
-  while (true) {
-    int userStart = usersJson.indexOf('{', userPos);
-    if (userStart < 0) break;
-
-    // Find matching closing brace (handle nested objects)
-    int depth = 1;
-    int userEnd = userStart + 1;
-    while (userEnd < usersJson.length() && depth > 0) {
-      if (usersJson[userEnd] == '{') depth++;
-      else if (usersJson[userEnd] == '}') depth--;
-      userEnd++;
-    }
-    userEnd--;  // Point to the closing brace
-
-    if (depth != 0) break;
-
-    String userObj = usersJson.substring(userStart, userEnd + 1);
-    DEBUG_NTP_RESOLVEF("[resolve] Checking user object at pos %d-%d", userStart, userEnd);
-
-    UserTimestampInfo info;
-    if (!parseUserTimestampInfo(userObj, userStart, info)) {
-      DEBUG_NTP_RESOLVEF("[resolve] User doesn't need resolution (createdAt not null or missing fields)");
-      userPos = userEnd + 1;
+static UsersJsonMutation resolveCreationTimesMutation(JsonDocument& doc, JsonArray users, void* opaque,
+                                                      String& errorOut) {
+  (void)doc;
+  (void)errorOut;
+  ResolveCreationTimesContext* ctx = static_cast<ResolveCreationTimesContext*>(opaque);
+  bool& modified = ctx->modified;
+  for (JsonObject user : users) {
+    if (!userNeedsCreationTime(user)) continue;
+    JsonVariant anchorField = user["ntpAnchorId"];
+    JsonVariant createdField = user["createdMs"];
+    if (!anchorField.is<uint32_t>() || !createdField.is<unsigned long>()) {
+      DEBUG_NTP_RESOLVEF("[resolve] User lacks ntpAnchorId/createdMs - cannot resolve");
       continue;
     }
-
+    const uint32_t ntpAnchorId = anchorField.as<uint32_t>();
+    const unsigned long createdMs = createdField.as<unsigned long>();
+    const int bootCount = user["bootCount"] | -1;
     DEBUG_NTP_RESOLVEF("[resolve] User needs resolution: ntpAnchorId=%lu createdMs=%lu bootCount=%d",
-                 (unsigned long)info.ntpAnchorId, (unsigned long)info.createdMs, info.bootCount);
+                       (unsigned long)ntpAnchorId, createdMs, bootCount);
 
-    BootAnchor* anchor = findMatchingAnchor(anchors, anchorCount, info.ntpAnchorId);
-
+    BootAnchor* anchor = findMatchingAnchor(ctx->anchors, ctx->anchorCount, ntpAnchorId);
     if (anchor) {
-      DEBUG_NTP_RESOLVEF("[resolve] Found matching anchor for ntpAnchorId=%lu", (unsigned long)info.ntpAnchorId);
-      if (resolveUserTimestamp(usersJson, info, *anchor)) {
+      DEBUG_NTP_RESOLVEF("[resolve] Found matching anchor for ntpAnchorId=%lu", (unsigned long)ntpAnchorId);
+      if (resolveUserTimestamp(user, createdMs, *anchor)) {
         INFO_SESSIONF("Successfully resolved timestamp");
         modified = true;
       } else {
         WARN_SESSIONF("Failed to resolve timestamp");
       }
-    } else {
-      DEBUG_NTP_RESOLVEF("[resolve] No matching anchor for ntpAnchorId=%lu", (unsigned long)info.ntpAnchorId);
-      bool shouldApprox = false;
-      uint32_t ordinalN = info.ntpAnchorId;
-
-      if (info.bootCount > 0 && gBootCounter > 0) {
-        if ((uint32_t)info.bootCount < gBootCounter) {
-          shouldApprox = true;
-          ordinalN = (uint32_t)info.bootCount;
-        }
-      } else if (info.ntpAnchorId < gNTPAnchorId) {
-        shouldApprox = true;
-      }
-
-      if (shouldApprox) {
-        DEBUG_NTP_RESOLVEF("[resolve] Approximating timestamp with ordinal %lu", (unsigned long)ordinalN);
-        if (approximateUserTimestamp(usersJson, info, ordinalN)) {
-          modified = true;
-        }
-      }
+      continue;
     }
 
-    userPos = userEnd + 1;
+    DEBUG_NTP_RESOLVEF("[resolve] No matching anchor for ntpAnchorId=%lu", (unsigned long)ntpAnchorId);
+    bool shouldApprox = false;
+    uint32_t ordinalN = ntpAnchorId;
+    if (bootCount > 0 && gBootCounter > 0) {
+      if ((uint32_t)bootCount < gBootCounter) {
+        shouldApprox = true;
+        ordinalN = (uint32_t)bootCount;
+      }
+    } else if (ntpAnchorId < gNTPAnchorId) {
+      shouldApprox = true;
+    }
+    if (shouldApprox) {
+      DEBUG_NTP_RESOLVEF("[resolve] Approximating timestamp with ordinal %lu", (unsigned long)ordinalN);
+      if (approximateUserTimestamp(user, ordinalN)) modified = true;
+    }
+  }
+  return modified ? UsersJsonMutation::Changed : UsersJsonMutation::Unchanged;
+}
+
+// Resolve pending user creation timestamps. The whole roster is parsed and
+// rewritten through the users.json owner, so its size does not matter and the
+// filesystem lock covers the read-modify-write: this runs from the main loop
+// (Clock duties) concurrently with cmd_exec account edits.
+void resolvePendingUserCreationTimes() {
+  DEBUG_NTP_RESOLVEF("[resolve] Starting timestamp resolution");
+  if (!filesystemReady) {
+    DEBUG_NTP_RESOLVEF("[resolve] Skipping - FS not ready");
+    return;
+  }
+  FsLockGuard fsGuard("user.resolveCreated");
+
+  const int MAX_ANCHORS = 16;
+  BootAnchor anchors[MAX_ANCHORS];
+  int anchorCount = readBootAnchors(anchors, MAX_ANCHORS);  // from BOOT_ANCHORS_FILE
+  DEBUG_NTP_RESOLVEF("[resolve] Found %d boot anchors", anchorCount);
+  for (int i = 0; i < anchorCount; i++) {
+    DEBUG_NTP_RESOLVEF("[resolve] Anchor %d: ntpAnchorId=%lu epochAtSync=%u millisAtSync=%lu",
+                 i, (unsigned long)anchors[i].ntpAnchorId, (unsigned)anchors[i].epochAtSync, (unsigned long)anchors[i].millisAtSync);
   }
 
-  if (modified) {
-    DEBUG_NTP_RESOLVEF("[resolve] Writing modified users.json");
-    if (writeTextAtomic(USERS_JSON_FILE, usersJson)) {
-      cleanupOldBootAnchors();  // prunes BOOT_ANCHORS_FILE, guarded by pending-user check
-    }
+  ResolveCreationTimesContext ctx{anchors, anchorCount, false};
+  String error;
+  if (!mutateUsersJson("user.resolveCreated", resolveCreationTimesMutation, &ctx, error)) {
+    DEBUG_NTP_RESOLVEF("[resolve] Skipping - %s", error.c_str());
+    return;
+  }
+  if (ctx.modified) {
+    cleanupOldBootAnchors();  // prunes BOOT_ANCHORS_FILE, guarded by pending-user check
   } else {
     DEBUG_NTP_RESOLVEF("[resolve] No modifications needed");
   }

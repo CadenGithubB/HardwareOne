@@ -1824,13 +1824,31 @@ void otaBleUploadHousekeeping() {
 #endif
 }
 
+#if HW1_OTA_LAYOUT
+// The escape keys on software faults only. A brownout keeps RTC memory and
+// says nothing about the image, so a sagging battery would otherwise walk the
+// counter to the threshold and park a healthy build in the updater, where
+// recharging cannot bring it back.
+static bool crashLoopEscapeWanted() {
+  return crashRecordConsecutiveSoftwareFaults() >= kCrashLoopEscapeCount &&
+         crashRecordPrevPhase() != CRASH_PHASE_UNKNOWN &&
+         crashRecordPreviousBuildMatches();
+}
+
+// Every committed escape leaves through here. The counters are consumed first:
+// the updater hands control back with an ESP_RST_SW (operator cancel or a new
+// upload), which neither counts nor clears, so a counter still at the threshold
+// would send the returning image straight back into recovery.
+[[noreturn]] static void restartIntoCrashLoopRecovery(const char* what) {
+  crashRecordConsumeCrashLoopEscape();
+  ESP_EARLY_LOGE(kTag, "%s", what);
+  esp_restart();
+}
+#endif
+
 void otaSystemCrashLoopEscapeEarly() {
 #if HW1_OTA_LAYOUT
-  if (crashRecordConsecutive() < kCrashLoopEscapeCount ||
-      crashRecordPrevPhase() == CRASH_PHASE_UNKNOWN ||
-      !crashRecordPreviousBuildMatches()) {
-    return;
-  }
+  if (!crashLoopEscapeWanted()) return;
   const esp_partition_t* running = esp_ota_get_running_partition();
   if (!running || running->subtype != ESP_PARTITION_SUBTYPE_APP_OTA_0) return;
 
@@ -1846,13 +1864,11 @@ void otaSystemCrashLoopEscapeEarly() {
   if (record.phase == HW1_OTA_PHASE_REQUESTED &&
       record.source == HW1_OTA_SOURCE_RECOVERY_UPLOAD) {
     if (!bootRecoveryForRecord(record, reason, sizeof(reason))) return;
-    ESP_EARLY_LOGE(kTag, "Replaying interrupted crash-loop recovery request");
-    esp_restart();
+    restartIntoCrashLoopRecovery("Replaying interrupted crash-loop recovery request");
   }
   if (record.phase == HW1_OTA_PHASE_RECOVERY_BOOT_ARMED) {
     if (esp_ota_set_boot_partition(factory) != ESP_OK) return;
-    ESP_EARLY_LOGE(kTag, "Replaying interrupted crash-loop recovery boot switch");
-    esp_restart();
+    restartIntoCrashLoopRecovery("Replaying interrupted crash-loop recovery boot switch");
   }
 
   if (record.phase == HW1_OTA_PHASE_TRIAL_BOOT_ARMED ||
@@ -1904,8 +1920,7 @@ void otaSystemCrashLoopEscapeEarly() {
     }
   }
   if (esp_ota_set_boot_partition(factory) != ESP_OK) return;
-  ESP_EARLY_LOGE(kTag, "Main-image crash loop detected; entering factory recovery");
-  esp_restart();
+  restartIntoCrashLoopRecovery("Main-image crash loop detected; entering factory recovery");
 #endif
 }
 
