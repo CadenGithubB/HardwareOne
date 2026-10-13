@@ -364,9 +364,15 @@ obsolete. Recheck partition fit before adding features to this narrow headroom.
   `workspaceAccess: none`, runtime workdir `/workspace`, and a protected
   read-only skills mount. The global tool allowlist matches the initial report;
   `memory_search` and `memory_get` remain denied. Elevated execution is globally
-  enabled, but this session reports channel `unknown` and
-  `allowedByConfig: false`. The reported effective policy is preserved; this
-  was not an instrumented audit of host execution.
+  enabled, but the inspector reports channel `unknown` and
+  `allowedByConfig: false`. Source review of v2026.9.4
+  `sandbox-explain.ts:253-268` shows that an unknown channel forces this boolean
+  false; it does not establish that elevation is denied for the actual HTTP
+  caller. The reported Docker configuration/tool list is preserved, but strict
+  host-execution isolation remains unverified. Exec routing/session overrides,
+  elevated allowlists, and custom tool implementation boundaries require a
+  separate read-only Studio inspection. No sandbox/elevation/exec settings were
+  changed, and no host-execution audit was performed.
 - OpenClaw UI visibility remains pending: the user cannot yet find the new
   device conversation. Its actual session was found through the CLI; the
   direct UI link and visibility are being checked separately from text,
