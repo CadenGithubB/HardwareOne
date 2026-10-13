@@ -250,7 +250,7 @@ constexpr uint32_t INPUT_BUTTON_A = 1, INPUT_BUTTON_B = 2;
 #undef free
 
 // ---- fixtures -------------------------------------------------------------------
-static const char* kSchema = R"JSON({"modules":[
+static const char* kSchema = R"FIXTURE({"modules":[
  {"name":"oled","section":"hardware.sensors.oled","description":"OLED","connected":true,"entries":[
   {"key":"oledBrightness","label":"Brightness","type":"int","group":"display","cmdKey":"oledbrightness","min":0,"max":255,"default":255},
   {"key":"oledDefaultMode","label":"Default Mode","type":"string","cmdKey":"oleddefaultmode","options":"logo,status,menu","default":"logo"},
@@ -270,10 +270,10 @@ static const char* kSchema = R"JSON({"modules":[
   {"key":"y","label":"Y","type":"int","default":0}]},
  {"name":"misc","section":"system.misc","entries":[
   {"key":"beep","label":"Beep","type":"bool","cmdKey":"beep","default":false}]}
-],"count":6})JSON";
+],"count":6})FIXTURE";
 
-static const char* kSettings = R"JSON({"hardware":{"sensors":{"oled":{"display":{"oledBrightness":128}}}},
- "system":{"time":{"ntpServer":"time.example"},"misc":{"beep":true}},"firmwareVersion":"x"})JSON";
+static const char* kSettings = R"FIXTURE({"hardware":{"sensors":{"oled":{"display":{"oledBrightness":128}}}},
+ "system":{"time":{"ntpServer":"time.example"},"misc":{"beep":true}},"firmwareVersion":"x"})FIXTURE";
 
 static void resetWorld() {
   freeRemoteSettingsModules();
