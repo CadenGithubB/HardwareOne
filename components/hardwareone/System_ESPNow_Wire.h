@@ -133,7 +133,7 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_TEXT            = 52,
   ESPNOW_V4_TYPE_METADATA_REQ    = 53,
   ESPNOW_V4_TYPE_METADATA_RESP   = 54,
-  ESPNOW_V4_TYPE_METADATA_PUSH   = 55,  // RX-plumbed but never TX'd today (no sendMetadata(isPush=true) caller)
+  ESPNOW_V4_TYPE_METADATA_PUSH   = 55,  // unsolicited; metadataPushTick sends it when local metadata changes
   ESPNOW_V4_TYPE_USER_SYNC       = 56,
 
   // --- Remote filesystem (70–89) ---

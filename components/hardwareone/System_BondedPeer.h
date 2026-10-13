@@ -95,6 +95,23 @@ String readCachedSchemaJson();
 bool requestSettingsSync(uint32_t timeoutMs = 6000, uint32_t* outElapsedMs = nullptr);
 bool requestSchemaSync  (uint32_t timeoutMs = 6000, uint32_t* outElapsedMs = nullptr);
 
+// Non-blocking schema sync for callers that run on a UI loop: begin clears
+// bondSchemaReceived and sends SCHEMA_REQ (false + lastError on the usual
+// preconditions: not master / not paired / peer offline / send failed);
+// schemaSyncDone() reports the file_end completion. requestSchemaSync() is the
+// blocking composition of the two.
+bool beginSchemaSync();
+bool schemaSyncDone();
+
+// ----- Remote-edit exposure policy -----------------------------------------
+// Which worker modules/keys a bonded settings editor may expose. Mirrors the
+// web bonded view (WebPage_Settings.h BONDED_MODULE_DENYLIST /
+// BONDED_KEY_WHITELIST): users/bond/wifi are never exposed (composite UI;
+// reconfiguring bond or Wi-Fi over its own link strands the pair); clock
+// exposes only ntpServer and tzOffsetMinutes. key == nullptr asks about the
+// module as a whole. Case-sensitive registry names.
+bool remoteEditAllowed(const char* moduleName, const char* key);
+
 // ----- Last-error -----------------------------------------------------------
 // Set by the sync triggers + readers when they return false/"". Stable until
 // the next BondedPeer call; safe to fetch immediately after a failed call to

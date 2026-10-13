@@ -27,6 +27,7 @@
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
 #include "System_ESPNow_Sensors.h"   // gRemoteSensorCache + formatRemoteSensorReadable (Bonded Device view)
+#include "System_MemUtil.h"          // ps_alloc — chat head-record copy (PSRAM)
 #endif
 
 // -----------------------------------------------------------------------------
@@ -136,29 +137,17 @@ static bool bailIfNotReady(const char* what) {
 // Inbox helpers — message-count summaries + relative-time formatting
 // -----------------------------------------------------------------------------
 
-// Total active messages across every paired peer's history. Iterates the
-// dynamically-allocated peerMessageHistories[] (capacity, not deviceCount —
-// PSRAM grows that array beyond deviceCount when peers come and go).
+// Total received messages across every peer's history (the store counts them
+// under its lock).
 static int countInboxAll() {
-  if (!gEspNow || !gEspNow->initialized ||
-      !gEspNow->peerMessageHistories) return 0;
-  int total = 0;
-  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
-    const PeerMessageHistory& h = gEspNow->peerMessageHistories[i];
-    if (h.active) total += h.count;
-  }
-  return total;
+  if (!gEspNow || !gEspNow->initialized) return 0;
+  return espnowHistoryMessageCount(nullptr);
 }
 
 // Messages held for one peer. Returns 0 if no history slot exists yet.
 static int countInboxForPeer(const uint8_t* mac) {
-  if (!gEspNow || !gEspNow->initialized ||
-      !gEspNow->peerMessageHistories || !mac) return 0;
-  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
-    const PeerMessageHistory& h = gEspNow->peerMessageHistories[i];
-    if (h.active && memcmp(h.peerMac, mac, 6) == 0) return h.count;
-  }
-  return 0;
+  if (!gEspNow || !gEspNow->initialized || !mac) return 0;
+  return espnowHistoryMessageCount(mac);
 }
 
 // Column width for the chat view. The lens text grid is ~50 cols (G2_GEOM_LARGE);
@@ -178,18 +167,18 @@ static EXT_RAM_BSS_ATTR char gChatReasm[1152];
 // with the web/BLE UIs, which stitch the same way); an incomplete one (missing
 // fragments) gets a " ..." suffix. Printable ASCII only (control/non-ASCII would
 // break the layout / the protobuf UTF-8 string). No truncation here — the caller
-// wraps and pages. `ref.head` is a zero-copy live-ring pointer; read immediately.
-static void chatLogicalLine(char* out, size_t cap, const CollapsedMsgRef& ref) {
+// wraps and pages. `head` is the ref's head record, copied out of the store by
+// espnowCopyCollapsedHead.
+static void chatLogicalLine(char* out, size_t cap, const CollapsedMsgRef& ref,
+                            const ReceivedTextMessage& head) {
   if (!out || cap == 0) return;
   out[0] = '\0';
-  const ReceivedTextMessage* msg = ref.head;
-  if (!msg) return;
 
-  const char* body   = msg->message;   // single-frame: the record's own text
+  const char* body   = head.message;   // single-frame: the record's own text
   const char* suffix = "";
   if (ref.partsTotal > 1) {
     bool complete = false;
-    int n = espnowReassembleByReqId(msg->senderMac, ref.reqId, ref.isSent,
+    int n = espnowReassembleByReqId(head.senderMac, ref.reqId, ref.isSent,
                                     gChatReasm, sizeof(gChatReasm), &complete);
     if (n > 0) { body = gChatReasm; if (!complete) suffix = " ..."; }
     // else: fall back to the first fragment (body unchanged)
@@ -197,7 +186,7 @@ static void chatLogicalLine(char* out, size_t cap, const CollapsedMsgRef& ref) {
   if (ref.isSent) {
     snprintf(out, cap, "me: %s%s", body, suffix);
   } else {
-    const char* who = msg->senderName[0] ? msg->senderName : "?";
+    const char* who = head.senderName[0] ? head.senderName : "?";
     snprintf(out, cap, "%s: %s%s", who, body, suffix);
   }
   for (char* c = out; *c; c++) {
@@ -643,7 +632,8 @@ static void showBondDetailMenu() {
 // (espnowCollapsedAllMessages for the global inbox, espnowGetConversation for the
 // per-peer inbox) — the same reads the OLED uses, so every interface shows one
 // merged sent+received timeline with multi-fragment messages collapsed to a
-// single logical row. Zero new storage; espnow_task populates the rings in its
+// single logical row. Each row's head record is copied out of the store
+// (espnowCopyCollapsedHead); espnow_task populates the rings in its
 // textQueue drain (System_ESPNow.cpp processMeshHeartbeats).
 
 // Conversation rendering — PAGED TextContainer (scroll up/down through pages,
@@ -667,6 +657,9 @@ static EXT_RAM_BSS_ATTR CollapsedMsgRef gInboxRefs[2 * MESSAGES_PER_DEVICE];
 static EXT_RAM_BSS_ATTR char     gChatBuf[CHAT_BUF_SIZE];              // wrapped conversation
 static EXT_RAM_BSS_ATTR char     gChatPageBuf[CHAT_PAGE_BUDGET + 96];  // header + slice + marker
 static EXT_RAM_BSS_ATTR char     gChatLogical[1184];                   // one labelled (reassembled) line, pre-wrap
+// Copy of one ref's head record (espnowCopyCollapsedHead); allocated in PSRAM on
+// first use and kept.
+static ReceivedTextMessage* gChatHead = nullptr;
 static uint16_t gChatPageOff[CHAT_MAX_PAGES + 1];  // page start offsets + end sentinel
 static char     gChatTitle[20] = {0};
 static void   (*gChatExitFn)() = nullptr;
@@ -686,27 +679,30 @@ static void exitPeerInboxToDetail() { showPeerDetail(); }
 #if ENABLE_ESPNOW
 // Rough wrapped-byte estimate for one message — used to pick the newest tail
 // that fits gChatBuf.
-static size_t chatEstBytes(const CollapsedMsgRef& ref) {
-  const ReceivedTextMessage* m = ref.head;
-  if (!m) return 0;
-  size_t lbl     = ref.isSent ? 4 : (strlen(m->senderName[0] ? m->senderName : "?") + 2);
+static size_t chatEstBytes(const CollapsedMsgRef& ref, const ReceivedTextMessage& head) {
+  size_t lbl     = ref.isSent ? 4 : (strlen(head.senderName[0] ? head.senderName : "?") + 2);
   // Multi-fragment messages reassemble to ~partsTotal*200 B; estimate that so the
   // newest-tail fit below doesn't overflow gChatBuf mid-build.
   size_t textLen = (ref.partsTotal > 1) ? ((size_t)ref.partsTotal * 200)
-                                        : strlen(m->message);
+                                        : strlen(head.message);
   size_t total   = lbl + textLen;
   size_t w       = (size_t)kChatCols > 2 ? (size_t)kChatCols - 2 : 1;
   return total + (total / w + 1) * 3;   // + per-line newline/indent overhead
 }
 
 // Build gChatBuf from the newest messages that fit, then page it. Leaves the
-// current page on the newest (last) page.
+// current page on the newest (last) page. A ref whose record the ring overwrote
+// since the collapse is skipped.
 static void chatBuildPages(int rc) {
+  if (!gChatHead) {
+    void* mem = ps_alloc(sizeof(ReceivedTextMessage), AllocPref::PreferPSRAM, "g2.espnow.chatHead");
+    if (mem) gChatHead = new (mem) ReceivedTextMessage();
+  }
   size_t budget = CHAT_BUF_SIZE - 256, acc = 0;
   int start = rc;
   for (int i = rc - 1; i >= 0; i--) {
-    if (!gInboxRefs[i].head) continue;
-    size_t e = chatEstBytes(gInboxRefs[i]);
+    if (!gChatHead || !espnowCopyCollapsedHead(gInboxRefs[i], gChatHead)) continue;
+    size_t e = chatEstBytes(gInboxRefs[i], *gChatHead);
     if (acc + e > budget) break;
     acc += e;
     start = i;
@@ -715,8 +711,8 @@ static void chatBuildPages(int rc) {
   gChatBuf[0] = '\0';
   bool wrapTrunc = false;
   for (int i = start; i < rc; i++) {
-    if (!gInboxRefs[i].head) continue;
-    chatLogicalLine(gChatLogical, sizeof(gChatLogical), gInboxRefs[i]);
+    if (!gChatHead || !espnowCopyCollapsedHead(gInboxRefs[i], gChatHead)) continue;
+    chatLogicalLine(gChatLogical, sizeof(gChatLogical), gInboxRefs[i], *gChatHead);
     // Wrap the labelled line into gChatBuf (continuation indent 2), then a
     // separating newline between messages — matches the pre-refactor layout.
     textWrapAppend(gChatBuf, CHAT_BUF_SIZE, pos, gChatLogical, kChatCols,

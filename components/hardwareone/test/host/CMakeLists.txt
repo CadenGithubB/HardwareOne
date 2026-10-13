@@ -537,6 +537,78 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_deadline_wrap.py
           ${ESPNOW_DEADLINE_WRAP_TEST_ARGS})
 
+# ESP-NOW peer message store (README "ESP-NOW peer message store"): the production
+# slot table, rings, merged/collapsed reads and copy accessor with FreeRTOS mutex,
+# allocation and clock doubles; refs survive peer growth, reads never allocate.
+set(ESPNOW_MESSAGE_STORE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_MESSAGE_STORE_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_message_store
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_message_store.py
+          ${ESPNOW_MESSAGE_STORE_TEST_ARGS})
+
+# ESP-NOW FS RPC lock discipline: client sends off-lock, the cmd_exec runner
+# always releases the deferred slot, capture answers TOO_BUSY on a lock miss
+# (README "ESP-NOW FS RPC locking").
+set(ESPNOW_FSLIST_LOCKING_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_FSLIST_LOCKING_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_fslist_locking
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_fslist_locking.py
+          ${ESPNOW_FSLIST_LOCKING_TEST_ARGS})
+
+# ESP-NOW multi-frame sends: a synchronous payload over one frame runs its
+# fragment/ACK loop on the submitting task, never on the espnow_tx dispatcher,
+# and STREAM lines are clamped to one frame for their target.
+set(ESPNOW_TX_MULTIFRAME_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_TX_MULTIFRAME_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_tx_multiframe
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_tx_multiframe.py
+          ${ESPNOW_TX_MULTIFRAME_TEST_ARGS})
+
+# ESP-NOW metadata push: local room/zone/tags/name/stationary changes reach
+# session-active peers as METADATA_PUSH (README "ESP-NOW metadata push").
+set(ESPNOW_METADATA_PUSH_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_METADATA_PUSH_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_metadata_push
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_metadata_push.py
+          ${ESPNOW_METADATA_PUSH_TEST_ARGS})
+
+# OLED ESP-NOW unpair and discovery ownership (README "OLED ESP-NOW unpair and
+# discovery ownership"): the production OLED unpair adapter and discovery input
+# arm with the command executor, toast and ESP-NOW owner as recorded doubles.
+set(OLED_ESPNOW_OWNERSHIP_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_ESPNOW_OWNERSHIP_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME oled_espnow_ownership
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_espnow_ownership.py
+          ${OLED_ESPNOW_OWNERSHIP_TEST_ARGS})
+
+set(OLED_REMOTE_SETTINGS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND OLED_REMOTE_SETTINGS_TEST_ARGS --sanitize)
+endif()
+add_test(NAME oled_remote_settings
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_remote_settings.py
+          ${OLED_REMOTE_SETTINGS_TEST_ARGS})
+
 set(STT_BLE_PRIVACY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND STT_BLE_PRIVACY_TEST_ARGS --sanitize)

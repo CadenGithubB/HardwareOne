@@ -21,6 +21,9 @@
 #if ENABLE_G2_GLASSES
 #include "G2_Glasses.h"
 #endif
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+#include "OLED_RemoteSettings.h"
+#endif
 
 // gThermalConnected / gTofConnected come from the sensor headers.
 #if ENABLE_THERMAL_SENSOR
@@ -66,6 +69,65 @@ static int enumOptionIndexForCurrent(const SettingEntry* entry) {
 
 // Global settings editor context
 SettingsEditorContext gSettingsEditor;
+
+// ---------------------------------------------------------------------------
+// Module source and commit target
+// ---------------------------------------------------------------------------
+// The remote-settings mode edits the bonded peer's cached module set; every
+// other mode edits the local registry. Keyed on the current mode rather than a
+// sticky flag, so leaving the remote mode by any route (B, `oledmode`, sleep,
+// login) cannot leave the local editor pointed at the peer's modules.
+static bool editorIsRemote() {
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+  return currentOLEDMode == OLED_REMOTE_SETTINGS;
+#else
+  return false;
+#endif
+}
+
+static const SettingsModule** editorModules(size_t& count) {
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+  if (editorIsRemote()) return getRemoteSettingsModules(count);
+#endif
+  return getSettingsModules(count);
+}
+
+void settingsEditorShowError(const String& message, uint32_t durationMs) {
+  gSettingsEditor.errorMessage = message;
+  gSettingsEditor.errorDisplayUntil = millis() + durationMs;
+}
+
+// Remote commit: accepted-for-delivery here; the peer's answer reaches the
+// screen through OLED_Mode_RemoteSettings' outcome poll. Refusals use the
+// editor's error line exactly like a failed local string save.
+static bool commitRemoteSettingValue(const SettingEntry* entry, const String& value) {
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+  String err;
+  if (applyRemoteSettingChange(entry, value, err)) return true;
+  settingsEditorShowError(err.length() ? err : String("Remote save failed"), 2500);
+#else
+  (void)entry;
+  (void)value;
+  settingsEditorShowError("Remote save unavailable", 2500);
+#endif
+  return false;
+}
+
+// Both modes share gSettingsEditor. If it still holds a module that is not in
+// the current mode's list (the other mode was left mid-edit by a route other
+// than B, or the peer's set was released), start over at the category list
+// instead of editing a row of the other device and committing it here.
+static void editorDropForeignModule() {
+  size_t n = 0;
+  const SettingsModule** mods = editorModules(n);
+  bool known = (gSettingsEditor.currentModule == nullptr);
+  for (size_t i = 0; !known && i < n; i++) {
+    known = (mods[i] == gSettingsEditor.currentModule);
+  }
+  if (!known || (n > 0 && gSettingsEditor.categoryIndex >= (int)n)) {
+    initSettingsEditor();
+  }
+}
 
 // ============================================================================
 // Initialization
@@ -171,6 +233,10 @@ void setSettingValue(const SettingEntry* entry, int value) {
     gSettingsEditor.errorDisplayUntil = millis() + 2500;
     return;
   }
+  if (editorIsRemote()) {
+    commitRemoteSettingValue(entry, String(value));
+    return;
+  }
   String cmd = String(cmdName) + " " + String(value);
   executeOLEDCommand(cmd);
 }
@@ -188,6 +254,7 @@ static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
     gSettingsEditor.errorDisplayUntil = millis() + 2500;
     return false;
   }
+  if (editorIsRemote()) return commitRemoteSettingValue(entry, value);
   char out[128];
   bool ok = executeOLEDCommandWithResult(String(cmdName) + " " + value, out, sizeof(out));
   if (!ok || strncmp(out, "Error", 5) == 0) {
@@ -225,7 +292,9 @@ void displaySettingsEditor() {
     DEBUG_SYSTEMF("[SettingsEditor] oledDisplay is NULL, returning");
     return;
   }
-  
+
+  editorDropForeignModule();
+
   // Keyboard-edit overlay: while a STRING edit's keyboard is up it owns the
   // whole content area (the global header is suppressed by the keyboard
   // subsystem itself). Draw it and skip the editor chrome entirely.
@@ -236,7 +305,7 @@ void displaySettingsEditor() {
   
   // Get module list
   size_t moduleCount = 0;
-  const SettingsModule** modules = getSettingsModules(moduleCount);
+  const SettingsModule** modules = editorModules(moduleCount);
   
   
   
@@ -492,6 +561,7 @@ void displaySettingsEditor() {
 
 bool handleSettingsEditorInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
   if (oledGuestBlocksMutate()) return true;
+  editorDropForeignModule();
 
   // ---- Keyboard-edit completion poll (CLIInput idiom) ----
   // While the keyboard overlay is ACTIVE this handler is never invoked (the
@@ -612,7 +682,7 @@ bool handleSettingsEditorInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPre
 
 void settingsEditorUp() {
   size_t moduleCount = 0;
-  const SettingsModule** modules = getSettingsModules(moduleCount);
+  const SettingsModule** modules = editorModules(moduleCount);
   
   switch (gSettingsEditor.state) {
     case SETTINGS_CATEGORY_SELECT:
@@ -660,7 +730,7 @@ void settingsEditorUp() {
 
 void settingsEditorDown() {
   size_t moduleCount = 0;
-  const SettingsModule** modules = getSettingsModules(moduleCount);
+  const SettingsModule** modules = editorModules(moduleCount);
   
   switch (gSettingsEditor.state) {
     case SETTINGS_CATEGORY_SELECT:
@@ -706,7 +776,7 @@ void settingsEditorDown() {
 
 void settingsEditorSelect() {
   size_t moduleCount = 0;
-  const SettingsModule** modules = getSettingsModules(moduleCount);
+  const SettingsModule** modules = editorModules(moduleCount);
   
   switch (gSettingsEditor.state) {
     case SETTINGS_CATEGORY_SELECT:
@@ -845,7 +915,7 @@ bool openSettingsEditorForModule(const char* moduleName) {
   if (!moduleName) return false;
   
   size_t moduleCount = 0;
-  const SettingsModule** modules = getSettingsModules(moduleCount);
+  const SettingsModule** modules = editorModules(moduleCount);
   
   for (size_t i = 0; i < moduleCount; i++) {
     if (modules[i] && strcmp(modules[i]->name, moduleName) == 0) {

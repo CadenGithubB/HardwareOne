@@ -70,6 +70,10 @@ void settingsEditorDown();
 void settingsEditorSelect();
 void settingsEditorBack();
 
+// Show a message on the editor's error line for `durationMs` (same toast the
+// editor uses for a failed string save).
+void settingsEditorShowError(const String& message, uint32_t durationMs);
+
 // Open settings editor directly to a specific module by name
 // Returns true if module was found and editor was opened
 bool openSettingsEditorForModule(const char* moduleName);

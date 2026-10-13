@@ -1748,6 +1748,100 @@ instead of comparing absolute times. `System_ESPNow_Deadline.h` is pasted when t
 (`espnow_session_replay` and `espnow_rekey_retry` paste it the same way); `--source-dir <component-directory>`
 replays the pre-fix sources. No radio is used.
 
+## ESP-NOW peer message store
+
+`espnow_message_store` compiles the whole message-buffer section of
+`System_ESPNow.cpp` (slot table, received and sent rings, chunked store, merged
+reads, collapsed views, `espnowCopyCollapsedHead`, delivery stamps) with the
+store's types and declarations from `System_ESPNow.h` and FreeRTOS mutex,
+allocation, clock and logging doubles. Each case runs in its own process. The
+cases check that a collapsed ref taken before new peers arrive still reads its
+own record, that reads for unknown MACs create no slot and allocate nothing,
+that history blocks never move, that the 17th peer is refused, that a ref whose
+ring index was reused is refused, and that a refused or contended store lock
+changes nothing and is never left held. A storing thread also races the readers
+under ASan/UBSan; `--thread-sanitize` reruns that race under ThreadSanitizer.
+Every case checks that no log line is written while the store lock is held.
+Source contracts confirm that the OLED and G2 screens copy records through
+`espnowCopyCollapsedHead` and hold no pointers into the history.
+`--source-dir <component-directory>` replays the former use-after-free. No
+radio, display or filesystem is touched.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^espnow_message_store$' --output-on-failure
+python3 test_espnow_message_store.py --thread-sanitize
+```
+
+## ESP-NOW FS RPC locking
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_fslist_locking.py --sanitize
+```
+
+`espnow_fslist_locking` compiles the FS RPC pending table, deferred slot, lock guard, send/cancel API, request capture, reply matching, cmd_exec runner and timeout sweep from `System_ESPNow_FsList.cpp` (with the packed wire structs and the header's tunables and callback typedefs) into a harness where host threads stand in for httpd, espnow_task and cmd_exec. The FreeRTOS mutex double honors bounded waits and records its owner; the blocking send can be parked on a gate (a stalled tx dispatcher); the per-op workers are counting doubles. It checks that no LIST/STAT/GET send holds the module mutex, that a captured request is served while a client send is blocked or another task holds the lock for 120 ms, that a request which cannot take the lock within espnow_task's bounded wait is answered TOO_BUSY, that the deferred slot is always released, that `fsListCancel` frees its slot so no callback fires afterwards, and that send failure, cmd_exec queue-full and the single-slot TOO_BUSY are unchanged. `--component <dir>` and `--source-dir <dir>` read production sources from another tree; the f4cc542 sources fail 14 checks (the cmd_exec runner gives up after 50 ms and leaves the slot pending, and the client sends hold the mutex). The tx dispatcher and radio delivery are not modeled.
+
+## ESP-NOW multi-frame sends and STREAM line size
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_tx_multiframe.py --sanitize
+```
+
+`espnow_tx_multiframe` compiles the production `espnowtx` namespace from `System_ESPNow_Tx.cpp` (queue, completion pool, `submit`/`submitSync`, `sendAead`/`sendAeadSync`, the dispatcher task body and `stop()`) against single-threaded FreeRTOS doubles and a stubbed radio whose multi-frame path models the per-fragment ACK wait; while a sender waits, producers submit fire-and-forget jobs and the dispatcher drains unless it is the task that is waiting. A 4 KB `sendAeadSync` from cmd_exec must run on cmd_exec with no queue drops among the 42 jobs submitted during its waits; the destination's single-frame cap decides (150 B from cmd_exec to a routed peer runs on cmd_exec, to a direct peer and exactly at 202 B it stays dispatcher work); another task's synchronous multi-frame job (httpd's 144 B FS request to a routed peer) stays dispatcher work; failure accounting, the self-deadlock guard, refusal before `init()` and after `stop()`, and the fire-and-forget path are unchanged. A second unit extracts `sendEspNowStreamMessage`, its session helper and lookup and `v4_single_frame_cap` from `System_ESPNow.cpp` and checks that STREAM lines are clamped to one frame (202 B direct, 130 B routed) on the legacy and the command-session path, with the rate limit, the cmd_exec-only session gate and suspension kept. The script checks that `System_ESPNow_Wire.h` still defines the budgets the doubles mirror. `--component <dir>` / `--source-dir <dir>` read the production sources from another tree; the f4cc542 sources fail the dispatcher-placement, queue-drop, routed-cap and four STREAM-length checks. Radio timing, real ACK loss and task stack depth are not modelled.
+
+## ESP-NOW metadata push
+
+`espnow_metadata_push` extracts the production metadata setters (`metaGetSet`
+with the metadata text policy, `cmd_espnow_stationary`, `cmd_espnow_setname`),
+`buildMetadataPayload`, `sendMetadata`, the metadata tracking block and
+`metadataPushTick` from `System_ESPNow.cpp`, plus the real `SessionState`,
+`EspNowEventCategory` and `V4PayloadMetadata` definitions, and runs them against
+doubles for the session table, the per-peer event subscription, the encrypted
+transport, settings and the clock. A local room/zone/tags/friendly name/
+stationary/device name change must reach every ACTIVE session whose peer
+subscribes to METADATA_PUSH as one type-55 frame after the settle window
+(ESTABLISHING, REKEYING, CLOSED and opted-out peers get nothing); a burst of
+edits coalesces into one frame; the deadline is millis()-wrap safe; a change
+made while ESP-NOW is down is kept; a failed send is not retried; rejected
+values do not arm a push; and the request/response path (forced RESP,
+debounced non-forced RESP) is unchanged. `--component <hardwareone dir>` and
+`--source-dir <overlay>` replay other production sources; a tree without the
+push tick compiles against a no-op tick and fails on behavior. ASan/UBSan under
+`HW1_SANITIZE=ON`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^espnow_metadata_push$' --output-on-failure
+```
+
+This check does not exchange real ESP-NOW frames.
+
+## OLED ESP-NOW unpair and discovery ownership
+
+`oled_espnow_ownership` executes the production OLED "Unpair Device" adapter
+(`oledEspNowUnpairDevice`, with the file-static `oledEspNowRunOwnerCommand`
+helper) and the `ESPNOW_VIEW_PAIRING` arm of `oledEspNowHandleInput` from
+`OLED_ESPNow.cpp`, with the real view/state types from `OLED_ESPNow.h` and
+`OLED_Display.h` and the command executor, toast and ESP-NOW owner as recorded
+doubles. It checks that the OLED submits `espnowunpair <MAC>` and
+`espnowpairmode 120|off` under the display identity, never calls the owner's
+peer-delete, registry-remove or pair-window functions itself, shows a short
+refusal toast ("Admin required" for the admin gate, "Unpair failed" /
+"Discovery failed" otherwise) without leaving the unpair view, treats the
+owner's save-warning reply as success, still leaves the discovery screen on B
+when the close is refused, and keeps the no-passphrase no-op, candidate
+navigation and the pair request unchanged. Static guards then require the
+helper and the absence of direct owner calls in `OLED_ESPNow.cpp`.
+`--component <dir>` points it at another copy of the sources; ASan/UBSan
+follow `HW1_SANITIZE`. Owner behavior (registry save, crypto teardown, events,
+authorization) is not exercised here.
+
+## OLED bonded-peer settings editor
+
+```sh
+python3 components/hardwareone/test/host/test_oled_remote_settings.py --sanitize
+```
+
+`oled_remote_settings` compiles the production OLED remote-settings module (`OLED_RemoteSettings.cpp` whole: schema-driven module builder, non-blocking schema fetch, remote apply and peer-reply outcome), the settings editor's module source and commit routing (`OLED_SettingsEditor.cpp`), the remote-settings mode adapter (`OLED_Mode_RemoteSettings.cpp`), the ESP-NOW command-result record (`System_ESPNow`) and BondedPeer's schema sync and remote-edit policy, against doubles for the OLED command executor, the peer caches, the clock, PSRAM allocation and the display. It checks that the remote screen lists only the peer's schema rows that carry a setter (no read-only, secret or float rows, no `users`/`bond`/`wifi`, only `ntpServer`/`tzOffsetMinutes` from `clock`) with the cached values, sends `remote:<cmdKey> <value>`, reports the peer's CMD_RESP failure (`Peer: ...`) or silence (`No reply from peer` after 5 s) instead of the local "sent" result, ignores another device's reply, never runs a local setter from the remote screen, fetches a missing schema once without blocking (6 s budget), does not let the local screen keep editing a peer module, and releases every PSRAM block and String it allocated, also when an allocation fails. A static check confirms the CMD_RESP drain publishes the redacted result. `--component <dir>` runs the same cases against saved sources; the f4cc542 sources fail them (modules built from settings.json without setters, `remote:set <jsonKey>` reported as applied, the local setter run from the remote screen). The radio link and the real display are not exercised.
+
 ## BLE output privacy and console mirror
 
 `stt_ble_privacy` compiles the production BLE output seams from `Bluetooth.cpp` (the private-STT classifier, the trace/history redaction, the directed plaintext and secure per-session senders, the async command-result callback, and the console-mirror chokepoint `sendBLEResponse` with its recipient collector `bleCollectMirrorSessions`) against a four-slot fake GATT peer table. A directed send lands only in the addressed slot; the characteristic-wide notify lands in every connected slot, as the vendored Arduino wrapper sends it. The suite checks that private STT results never reach the trace or history mirrors, that command results reach exactly the originating session, and that the console mirror (`outble`, `blesend`) reaches only logged-in non-guest sessions. A connected peer that never logged in, a peer holding a Secure Channel without a login, a guest session, a logged-out slot and a disconnected slot receive nothing. No characteristic-wide notify is used, each recipient gets its own plaintext or encrypted copy, a congested recipient misses one flush without any recipient receiving a chunk twice, and secure-required mode still refuses plaintext. `--component <dir>` points the suite at another copy of the sources (the pre-fix tree fails the unauthenticated-peer, channel-only-peer and guest cases); `--cxx` selects the compiler; ASan/UBSan follow `--sanitize` / `HW1_SANITIZE`.
