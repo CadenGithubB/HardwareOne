@@ -33,6 +33,9 @@ def block(source, signature):
 
 HARNESS = r'''
 #include <cassert>
+#include <cerrno>
+#include <climits>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -62,7 +65,6 @@ constexpr int SYSEVT_SETTING_CHANGED = 1;
 void systemEventPost(int, const char*, const char* value) { events.emplace_back(value); }
 int persists = 0, notifications = 0, publications = 0, secretWrites = 0;
 bool requestSettingsPersist() { ++persists; return true; }
-void notifySettingChanged(const void*) { ++notifications; }
 void applyMasterEnableDisable(const char*) {}
 void webBatchTestStringAppend() {}
 std::string publishedToken, publishedUrl, publishedCa;
@@ -150,9 +152,13 @@ int main() {
   validating = false;
   cmd_llm_httptoken("-");
   assert(gSettings.llmHttpToken.length() == 0 && publishedToken.empty());
-  assert(notifications == 1 && persists == 2 && publications == 2);
+  assert(events.size() == 2 && persists == 2 && publications == 2);
   cmd_llm_httpca("-----BEGIN CERTIFICATE-----\\nexample\\n-----END CERTIFICATE-----");
   assert(publishedCa.find('\n') != std::string::npos && publishedCa.find("\\n") == std::string::npos);
+  const auto savedWrites = persists;
+  const auto savedEvents = events.size();
+  cmd_llm_httptoken("-");
+  assert(persists == savedWrites && events.size() == savedEvents);
   puts("HTTP settings: secret setter/getter/events, encrypted persistence routing, web exclusion, audit redaction, validation and clear passed");
 }
 '''
@@ -172,13 +178,22 @@ def main():
     table = block(commands, "static const SettingEntry llmSettingEntries[]") + ";\n"
     table += block(commands, "extern const SettingsModule llmSettingsModule") + ";\n"
     types = "\n".join(block(settings_header, name) + ";" for name in (
-        "enum SettingType", "struct SettingEntry", "struct SettingsModule"))
+        "enum SettingType", "struct SettingEntry {", "struct SettingsModule"))
     types = "using ConnectionCheckFunc = bool (*)();\n" + types
     field_types = {"INT": "int", "BOOL": "bool", "FLOAT": "float", "STRING": "String"}
     fields = re.findall(r"SETTING_(\w+),\s*&gSettings\.(\w+)", table)
     state = "struct TestSettings {\n" + "\n".join(
         field_types[kind] + " " + name + "{};" for kind, name in fields) + "\n} gSettings;"
+    types += "\n" + re.search(r"(?m)^#define SYSEVT_DETAIL_LEN .+$",
+                               (COMPONENT / "System_Events.h").read_text()).group()
     implementation = block(http_source, "bool httpLlmValidateBaseUrl(") + "\n"
+    implementation += block((COMPONENT / "System_Utils.h").read_text(), "inline int parseBoolArg(") + "\n"
+    implementation += block(settings, "void notifySettingChanged(") + "\n"
+    implementation += block(settings, "void finishSettingChange(") + "\n"
+    implementation += "\n".join(block(settings_header, signature) for signature in (
+        "template<typename T>\ninline void setSetting(",
+        "inline void setSetting(String& field, const String&",
+        "inline void setSetting(String& field, const char*")) + "\n"
     implementation += "\n".join(block(settings, signature) for signature in (
         "const char* handleSettingCommand(", "static JsonObject jsonPathCreate(",
         "size_t writeRegisteredSettings("))
@@ -203,6 +218,7 @@ def main():
         unit = unit.replace("// INSERT_" + marker + "\n", content + "\n")
     arduino = (HERE / "web_batch_stubs/Arduino.h").read_text()
     arduino = arduino.replace(" private:\n", r'''
+  bool reserve(size_t count) { text_.reserve(count); return true; }
   bool equalsIgnoreCase(const String& value) const { return equalsIgnoreCase(value.c_str()); }
   void replace(const char* before, const char* after) {
     size_t offset = 0;
