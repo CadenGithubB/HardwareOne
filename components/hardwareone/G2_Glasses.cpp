@@ -32,6 +32,7 @@
 
 #include "System_G2_Protocol.h"
 #include "G2_ConversateSession.h"
+#include "G2_NativeTerminalSession.h"
 #include "G2_HoldGesture.h"  // long-press pairing + route policy (host-tested)
 #include "System_Lz4.h"     // lz4Compress* — CompressMode=2 image push (Q32/Q32f)
 #include "Bluetooth.h"
@@ -99,7 +100,10 @@ extern "C" {
 #if ENABLE_LLM_BACKEND
 #include "System_LLMBackend.h" // model registry — Select Model lists every source
 #include "System_LLMTypes.h"   // LLMStatus + the guided-menu API (stubbed with no engine)
+#include "System_LLMHttp.h"    // independent native Terminal relay RPC
 #include "System_LLMChat.h"    // chat turns + streaming reads for the read-only G2 LLM viewer
+#include "G2_LlmReader.h"      // bounded UTF-8 reply pages
+#include "System_PsramBuffer.h"
 #endif
 #include "System_Settings.h"
 #include "System_Clock.h"  // Clock::tzOffsetQuarterHours() — explicit-unit tz accessor (defeats minutes/quarter-hours swap footgun)
@@ -125,6 +129,18 @@ extern "C" {
 // pulling the whole R1 header; the native-notification path is its second
 // consumer. See docs/G2_NATIVE_NOTIFICATION_PLAN.md §3.
 extern uint32_t r1Crc32(const uint8_t* data, size_t len);
+
+// Native Terminal owns its own lifecycle, independent of the custom renderer.
+static std::atomic<uint32_t> gNativeTerminalEpoch{0}, gNativeTerminalCounter{0};
+static std::atomic<bool> gNativeTerminalOwned{false};
+static std::atomic<bool> gNativeTerminalInitializing{false};
+static std::atomic_flag gNativeTerminalAdmission = ATOMIC_FLAG_INIT;
+// High bit claims an accepted CONFIRM. Close/EXIT exchange zero; CAS is the
+// submission linearization point. A claimed turn may finish after leaving.
+static std::atomic<uint32_t> gNativeTerminalSubmitGate{0};
+// Only a strictly parsed inactive RIGHT START can mint this tagged RX ticket.
+// It cannot equal an active epoch (which always has its high bit clear).
+static std::atomic<uint32_t> gNativeTerminalMenuTicket{0}, gNativeTerminalMenuStartMs{0}, gNativeTerminalMenuOwner{0};
 
 // =============================================================================
 // Constants
@@ -292,6 +308,7 @@ struct G2Temple {
   size_t                       rxFrameHave;
   size_t                       rxFrameExpected;
   uint32_t                     rxFrameConversateEpoch;
+  uint32_t                     rxFrameNativeTerminalEpoch;
   G2RxReassembly               rxReassembly;
   // Kept only until the former inline parser below is retired after the
   // owner-path hardware soak; it is no longer called by the notify thunks.
@@ -308,6 +325,7 @@ struct G2Temple {
   uint32_t                     rxReassemblyLifecycleEpoch;
   uint32_t                     rxReassemblyPresentationEpoch;
   uint32_t                     rxReassemblyConversateEpoch;
+  uint32_t                     rxReassemblyNativeTerminalEpoch;
   // Incremented before every subscribe attempt and on disconnect. Queued
   // notifications stamped by an older link are discarded by the owner.
   uint32_t                     connectionGeneration;
@@ -2575,11 +2593,12 @@ static volatile uint32_t gHealthPageGen        = 0;
 static volatile bool     gHealthTextDead       = false;
 #endif
 #if ENABLE_LLM_BACKEND
-// Interactive LLM viewer (g2LlmPageWorker) — same list-tap-bitfield + active
-// gate pattern as the map/camera self-driving workers. Defined near the top
-// so the BLE dispatcher (lstLlm branch) sees them before use.
-static volatile uint32_t gLlmPagePendingTap = 0;
-static volatile bool     gLlmPageActive     = false;
+// The reader worker owns its text/pager; dispatched input only posts intent.
+static std::atomic<bool> gLlmPageActive{false};
+static std::atomic<bool> gLlmPageExit{false};
+static std::atomic<bool> gLlmPageAsk{false};
+static std::atomic<bool> gLlmPageBusyNotice{false};
+static std::atomic<int>  gLlmPageNav{0};
 #endif
 
 // Interactive keyboard chunking A/B test. The session worker owns all mutable
@@ -3235,8 +3254,15 @@ static bool sendToBoth(const uint8_t* data, size_t len);
 static void handleNotify(G2Temple& t, const uint8_t* data, size_t len);
 static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
                           uint32_t generation, uint32_t lifecycleEpoch,
-                          uint32_t presentationEpoch, uint32_t conversateEpoch);
+                          uint32_t presentationEpoch, uint32_t conversateEpoch, uint32_t nativeTerminalEpoch);
 static void g2ControlWake();
+static void g2NativeTerminalRevoke(const char* reason);
+static bool g2NativeTerminalGuardMatches(uint32_t epoch, const G2Temple& temple);
+static uint32_t g2NativeTerminalEarlyRx(const G2Temple& temple, const uint8_t* data, size_t len);
+static void g2NativeTerminalOnRx(G2Temple& temple, uint32_t generation, uint32_t epoch,
+                                 const uint8_t* pb, size_t len);
+static void g2NativeTerminalTick();
+static const char* g2NativeTerminalRequestOpen(bool fromMenu = false, uint32_t menuStartedMs = 0, uint32_t menuOwner = 0);
 static bool g2ControlWorkerEnsure();
 static bool g2ControlWorkerShutdown();
 static void g2AdvanceGeneration(G2Temple& t,
@@ -5072,6 +5098,7 @@ struct G2RxPacket {
   uint32_t lifecycleEpoch;
   uint32_t presentationEpoch;
   uint32_t conversateEpoch;
+  uint32_t nativeTerminalEpoch;
   bool conversateClose;
   uint16_t len;
   char side;
@@ -5238,6 +5265,7 @@ static void g2DevCfgNoteRx(G2Temple& t, uint8_t envelopeFlag,
 }
 
 static void g2AdvanceGeneration(G2Temple& t, bool markDisconnected) {
+  g2NativeTerminalRevoke("connection-changed");
   G2CompletionGuard completion;
   if (!completion) return;
   // Wake any promotion waiter before changing the generation it is fenced to.
@@ -5306,6 +5334,9 @@ bool g2ControlStatusSnapshot(G2ControlStatus* out) {
 }
 
 static bool g2RxPacketEnqueue(const G2Temple& t, const uint8_t* data, size_t len) {
+  const uint32_t menuTicket = g2NativeTerminalEarlyRx(t, data, len);
+  const uint32_t activeNativeEpoch = gNativeTerminalEpoch.load(std::memory_order_acquire);
+  const uint32_t nativeTerminalEpoch = activeNativeEpoch ? activeNativeEpoch : menuTicket;
   const uint32_t conversateEpoch = __atomic_load_n(&gConversateRxEpoch, __ATOMIC_ACQUIRE);
   if (!gRxPackets || !data || len == 0 || len > G2_BLE_LOCAL_MTU_PREF) {
     portENTER_CRITICAL(&gRxPacketMux);
@@ -5351,6 +5382,7 @@ static bool g2RxPacketEnqueue(const G2Temple& t, const uint8_t* data, size_t len
                                          __ATOMIC_ACQUIRE);
       p.presentationEpoch = g2PresentationEpochCurrent();
       p.conversateEpoch = conversateEpoch;
+      p.nativeTerminalEpoch = nativeTerminalEpoch;
       p.conversateClose = false;
       p.len = (uint16_t)len;
       p.side = t.side;
@@ -5369,6 +5401,7 @@ static bool g2RxPacketEnqueue(const G2Temple& t, const uint8_t* data, size_t len
                                        __ATOMIC_ACQUIRE);
     p.presentationEpoch = g2PresentationEpochCurrent();
     p.conversateEpoch = conversateEpoch;
+    p.nativeTerminalEpoch = nativeTerminalEpoch;
     p.conversateClose = conversateTerminal == 2;
     p.len = (uint16_t)len;
     p.side = t.side;
@@ -5417,11 +5450,13 @@ static void g2RxReset(G2Temple& t) {
   t.rxFrameHave = 0;
   t.rxFrameExpected = 0;
   t.rxFrameConversateEpoch = 0;
+  t.rxFrameNativeTerminalEpoch = 0;
   g2RxReassemblyReset(&t.rxReassembly);
   t.rxStartedMs = 0;
   t.rxReassemblyLifecycleEpoch = 0;
   t.rxReassemblyPresentationEpoch = 0;
   t.rxReassemblyConversateEpoch = 0;
+  t.rxReassemblyNativeTerminalEpoch = 0;
 }
 
 static void g2DispatchCompleteEnvelope(G2Temple& t, const G2EnvelopeView& env,
@@ -5438,7 +5473,7 @@ static void g2DispatchCompleteEnvelope(G2Temple& t, const G2EnvelopeView& env,
 // Runs on the reused heartbeat/control owner, never on Bluedroid's callback.
 static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
                           uint32_t generation, uint32_t lifecycleEpoch,
-                          uint32_t presentationEpoch, uint32_t conversateEpoch) {
+                          uint32_t presentationEpoch, uint32_t conversateEpoch, uint32_t nativeTerminalEpoch) {
   if (!t.rxBuf || !data || len == 0 || generation != t.connectionGeneration) return;
   if (t.rxReassemblyGeneration != generation) {
     g2RxReset(t);
@@ -5461,6 +5496,7 @@ static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
     }
     t.rxFrameExpected = expected;
     t.rxFrameConversateEpoch = conversateEpoch;
+    t.rxFrameNativeTerminalEpoch = nativeTerminalEpoch;
   } else if (t.rxFrameHave == 0) {
     return;
   }
@@ -5477,6 +5513,7 @@ static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
   const uint8_t fragIdx = frame[5];
   const uint8_t totalFrags = frame[4];
   const uint32_t frameConversateEpoch = t.rxFrameConversateEpoch;
+  const uint32_t frameNativeTerminalEpoch = t.rxFrameNativeTerminalEpoch;
   t.rxFrameHave = t.rxFrameExpected = 0;
   const uint32_t now = millis();
   if (t.rxReassembly.active && (uint32_t)(now - t.rxStartedMs) > 2000) {
@@ -5491,6 +5528,7 @@ static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
     t.rxReassemblyLifecycleEpoch = lifecycleEpoch;
     t.rxReassemblyPresentationEpoch = presentationEpoch;
     t.rxReassemblyConversateEpoch = frameConversateEpoch;
+    t.rxReassemblyNativeTerminalEpoch = frameNativeTerminalEpoch;
   }
   G2EnvelopeView env{};
   const G2RxReassemblyStatus result =
@@ -5503,8 +5541,12 @@ static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
     t.rxReassemblyLifecycleEpoch = 0;
     t.rxReassemblyPresentationEpoch = 0;
     t.rxReassemblyConversateEpoch = 0;
+    t.rxReassemblyNativeTerminalEpoch = 0;
   } else if (result == G2_RX_REASSEMBLY_COMPLETE) {
-    if (env.sid != G2_SID_CONVERSATE ||
+    if (env.sid == G2_SID_TERMINAL) {
+      g2NativeTerminalOnRx(t, generation, t.rxReassemblyNativeTerminalEpoch,
+                            env.payload, env.payloadLen);
+    } else if (env.sid != G2_SID_CONVERSATE ||
         t.rxReassemblyConversateEpoch == __atomic_load_n(&gConversateRxEpoch, __ATOMIC_ACQUIRE))
       g2DispatchCompleteEnvelope(t, env, generation,
                                  t.rxReassemblyLifecycleEpoch,
@@ -5513,6 +5555,7 @@ static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
     t.rxReassemblyLifecycleEpoch = 0;
     t.rxReassemblyPresentationEpoch = 0;
     t.rxReassemblyConversateEpoch = 0;
+    t.rxReassemblyNativeTerminalEpoch = 0;
   }
 }
 
@@ -6091,21 +6134,6 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
           if (g2FsmHijackActive()) gHijackStartedMs = millis();
           g2MapPublishTap(idx);
           DEBUG_G2F("[G2] MapPage tap: idx=%u", (unsigned)idx);
-        }
-        return;
-      }
-#endif
-#if ENABLE_LLM_BACKEND
-      // LLM viewer list dispatch (container 'lstLlm'). Rows: 0 Back,
-      // 1 Ask (Mic / Keys), 2 New chat, 3 Re-run last. Set the row's bit; the worker
-      // drains it each loop.
-      // Refresh the 60 s hijack safety-timeout on real taps (same rationale
-      // as the map/'app' paths above).
-      if (etype == 0 && strcmp(cname, "lstLlm") == 0) {
-        if (gLlmPageActive && idx < 32) {
-          if (g2FsmHijackActive()) gHijackStartedMs = millis();
-          gLlmPagePendingTap |= (1u << idx);
-          DEBUG_G2F("[G2] LlmPage tap: idx=%u", (unsigned)idx);
         }
         return;
       }
@@ -7465,6 +7493,7 @@ static bool g2ShowMapPage(void (*onDone)());   // interactive list+image Maps pa
 #endif
 #if ENABLE_LLM_BACKEND
 static bool g2ShowLlmPage(void (*onDone)());   // read-only streaming LLM viewer, defined below
+static bool g2LlmReaderHold(uint8_t phase, uint8_t source);
 static void g2ShowLlmMenu();                   // LLM submenu (chat / guided / re-run / model), defined below
 #endif
 #if ENABLE_R1_HEALTH
@@ -8943,6 +8972,7 @@ enum LlmMenuLevel : uint8_t {
 enum LlmHomeAction : uint8_t {
   LLM_HOME_BACK = 0,   // <- Apps launcher
   LLM_HOME_OPEN,       // Open chat  → g2ShowLlmPage (today's viewer)
+  LLM_HOME_TERMINAL,   // verified native app, latest retained answer only
   LLM_HOME_PROMPT,     // Ask (Mic / Keys) → shared text-entry surface
   LLM_HOME_ASK,        // Ask (guided) → start/resume the picker
   LLM_HOME_NEW_CHAT,   // Clear turns before starting a new conversation/source
@@ -9009,7 +9039,6 @@ enum class LlmPromptReturn : uint8_t {
   MENU = 0,
   VIEWER,
 };
-static LlmPromptReturn sLlmPromptReturn = LlmPromptReturn::MENU;
 
 // Select Model cache — filled once when the page opens (tap task), then
 // paginated. Paths are full VFS paths so llmload is unambiguous if the same
@@ -9307,17 +9336,17 @@ static int llmMenuRetryLastForG2() {
   return sid;
 }
 
-static void llmPromptReturnToOrigin() {
-  if (sLlmPromptReturn == LlmPromptReturn::VIEWER) {
+static void llmPromptReturnToOrigin(LlmPromptReturn returnTo) {
+  if (returnTo == LlmPromptReturn::VIEWER) {
     if (!g2ShowLlmPage(g2ShowLlmMenu)) g2ShowLlmMenu();
   } else {
     g2ShowLlmMenu();
   }
 }
 
-static void llmPromptCommit(const char* text) {
+static void llmPromptCommit(const char* text, LlmPromptReturn returnTo) {
   if (!text || !text[0]) {
-    llmPromptReturnToOrigin();
+    llmPromptReturnToOrigin(returnTo);
     return;
   }
   const int sid = chatBeginTurn(text, nullptr);
@@ -9332,18 +9361,23 @@ static void llmPromptCommit(const char* text) {
   }
 }
 
-static void llmPromptCancel() {
-  llmPromptReturnToOrigin();
-}
-
-static bool llmMenuStartPromptEntry(LlmPromptReturn returnTo) {
+static bool llmMenuStartPromptEntry(LlmPromptReturn returnTo, bool startWithMic = false,
+                                   uint32_t expectedLifecycleEpoch = 0) {
   TextEntryConfig cfg = {};
   cfg.prompt   = "Ask LLM";
   cfg.initial  = "";
   cfg.maxLen   = G2_TEXT_ENTRY_MAX_LEN;
-  cfg.onCommit = llmPromptCommit;
-  cfg.onCancel = llmPromptCancel;
-  sLlmPromptReturn = returnTo;
+  // The return target belongs to this entry's callbacks. A stale startup must
+  // not change the destination of another currently active prompt.
+  if (returnTo == LlmPromptReturn::VIEWER) {
+    cfg.onCommit = [](const char* text) { llmPromptCommit(text, LlmPromptReturn::VIEWER); };
+    cfg.onCancel = [] { llmPromptReturnToOrigin(LlmPromptReturn::VIEWER); };
+  } else {
+    cfg.onCommit = [](const char* text) { llmPromptCommit(text, LlmPromptReturn::MENU); };
+    cfg.onCancel = [] { llmPromptReturnToOrigin(LlmPromptReturn::MENU); };
+  }
+  cfg.startWithMic = startWithMic;
+  cfg.expectedLifecycleEpoch = expectedLifecycleEpoch;
   if (g2BeginTextEntry(cfg)) return true;
   DEBUG_G2F("[G2-LLM] prompt text-entry failed to open");
   return false;
@@ -9561,6 +9595,11 @@ static void llmMenuHomeTap(uint32_t idx) {
   switch (sLlmHomeAct[idx]) {
     case LLM_HOME_BACK:  g2ShowAppsMenu();            return;
     case LLM_HOME_OPEN:  g2ShowLlmPage(g2ShowLlmMenu); return;
+    case LLM_HOME_TERMINAL: {
+      const char* result = g2NativeTerminalRequestOpen();
+      if (strncmp(result, "Error:", 6) == 0) llmMenuShowMsg(result);
+      return;
+    }
     case LLM_HOME_PROMPT:
       if (!llmMenuStartPromptEntry(LlmPromptReturn::MENU))
         llmMenuShowMsg("Keyboard unavailable");
@@ -9633,6 +9672,9 @@ static void g2ShowLlmMenu() {
   };
   add("<- Back",      LLM_HOME_BACK);
   add("Open chat",    LLM_HOME_OPEN);
+#if ENABLE_LOCAL_STT
+  add("Open Terminal", LLM_HOME_TERMINAL);
+#endif
   add("Ask (Mic / Keys)", LLM_HOME_PROMPT);
   if (haveMenu) add("Ask (guided)", LLM_HOME_ASK);
   add("New chat", LLM_HOME_NEW_CHAT);
@@ -9831,6 +9873,7 @@ static void registerG2Pages(void) {
 #endif
 #if ENABLE_LLM_BACKEND
   g2RegisterPage(kLlmMenuPage);          // hidden — reached via Apps → LLM (guided-input picker)
+  g2RegisterPageHold(G2_HIJACK_PAGE_LLM_READER, g2LlmReaderHold);
 #endif
 #if ENABLE_CAMERA_SENSOR
   g2RegisterPage(kCameraSettingsPage);   // hidden — see kCameraSettingsPage above
@@ -10112,7 +10155,7 @@ static uint32_t g2HoldMaxOpenMs() { return quickNoteMaxMs() + 15000u; }
 // Page hold handlers (g2RegisterPageHold), keyed by G2HijackPage id rather
 // than registry slot: page ids already reach G2_PAGE_REGISTRY_MAX.
 static constexpr size_t kG2PageHoldSlots = 32;
-static_assert(G2_HIJACK_PAGE_NOTES < kG2PageHoldSlots,
+static_assert(G2_HIJACK_PAGE_LLM_READER < kG2PageHoldSlots,
               "the page hold table must cover every G2HijackPage id");
 static G2HoldPageTable<G2PageHoldFn, kG2PageHoldSlots> gPageHold;
 
@@ -12288,7 +12331,9 @@ static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len,
                                 uint32_t createCleanupSerial = 0,
                                 uint32_t createTxnSerial = 0,
                                 uint32_t exactGeneration = 0,
-                                uint32_t exactLifecycleEpoch = 0) {
+                                uint32_t exactLifecycleEpoch = 0,
+                                uint32_t exactPresentationEpoch = 0,
+                                uint32_t nativeTerminalEpoch = 0) {
   if (finalChunkAttempted) *finalChunkAttempted = false;
   // Decode the 8-byte envelope header for logging:
   //   [AA 21][seq][len][totFrags][fragIdx][sid][flag]
@@ -12345,6 +12390,10 @@ static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len,
     // fragment can be newly admitted. A fragment whose check completed just
     // before that commit is already in flight and cannot be recalled without
     // holding a session lock across the blocking BLE stack call.
+    if (nativeTerminalEpoch && !g2NativeTerminalGuardMatches(nativeTerminalEpoch, t)) {
+      ok = false;
+      break;
+    }
     if (evenAiExchangeId &&
         !g2EvenAiGuardMatches(evenAiExchangeId, t)) {
       DEBUG_G2F("[G2-%c] EvenAI TX cancelled at offset %u/%u",
@@ -12368,6 +12417,13 @@ static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len,
     if (exactLifecycleEpoch &&
         !g2LensTxFenceCurrent(t, exactGeneration, exactLifecycleEpoch)) {
       DEBUG_G2F("[G2-%c] lifecycle-fenced TX superseded at offset %u/%u",
+                t.side, (unsigned)off, (unsigned)len);
+      ok = false;
+      break;
+    }
+    if (exactPresentationEpoch &&
+        exactPresentationEpoch != g2PresentationEpochCurrent()) {
+      DEBUG_G2F("[G2-%c] presentation-fenced TX superseded at offset %u/%u",
                 t.side, (unsigned)off, (unsigned)len);
       ok = false;
       break;
@@ -12593,10 +12649,17 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
                              const uint8_t* pb, size_t pbLen,
                              uint32_t expectedGeneration = 0,
                              bool* finalMessageChunkAttempted = nullptr,
-                             uint32_t createTxnSerial = 0) {
+                             uint32_t createTxnSerial = 0,
+                             uint32_t expectedLifecycleEpoch = 0,
+                             uint32_t expectedPresentationEpoch = 0,
+                             uint32_t nativeTerminalEpoch = 0) {
   if (finalMessageChunkAttempted) *finalMessageChunkAttempted = false;
-  if (!pb || pbLen == 0) return false;
-  if (!g2TempleReadyAtGeneration(arm, expectedGeneration) ||
+  if (!pb || pbLen == 0 || (nativeTerminalEpoch && !g2NativeTerminalGuardMatches(nativeTerminalEpoch, arm))) return false;
+  if ((expectedLifecycleEpoch &&
+       !g2LensTxFenceCurrent(arm, expectedGeneration, expectedLifecycleEpoch)) ||
+      (expectedPresentationEpoch &&
+       expectedPresentationEpoch != g2PresentationEpochCurrent()) ||
+      !g2TempleReadyAtGeneration(arm, expectedGeneration) ||
       !arm.writeMutex) {
     DEBUG_G2F("[G2-%c] sendPbFragmented: arm not ready", arm.side);
     return false;
@@ -12686,7 +12749,11 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
       break;
     }
     SemaphoreHandle_t writeMutex = arm.writeMutex;
-    if (!g2TempleReadyAtGeneration(arm, expectedGeneration) || !writeMutex ||
+    if ((expectedLifecycleEpoch &&
+         !g2LensTxFenceCurrent(arm, expectedGeneration, expectedLifecycleEpoch)) ||
+        (expectedPresentationEpoch &&
+         expectedPresentationEpoch != g2PresentationEpochCurrent()) ||
+        !g2TempleReadyAtGeneration(arm, expectedGeneration) || !writeMutex ||
         (createTxnSerial &&
          !g2CreateWireCurrent(createTxnSerial, arm))) {
       bleCentralTxGive();
@@ -12701,7 +12768,11 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
       ok = false;
       break;
     }
-    if (!g2TempleReadyAtGeneration(arm, expectedGeneration) ||
+    if ((expectedLifecycleEpoch &&
+         !g2LensTxFenceCurrent(arm, expectedGeneration, expectedLifecycleEpoch)) ||
+        (expectedPresentationEpoch &&
+         expectedPresentationEpoch != g2PresentationEpochCurrent()) ||
+        !g2TempleReadyAtGeneration(arm, expectedGeneration) ||
         (createTxnSerial &&
          !g2CreateWireCurrent(createTxnSerial, arm))) {
       xSemaphoreGive(writeMutex);
@@ -12714,7 +12785,8 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
                              /*evenAiExchangeId*/ 0,
                              &finalEnvelopeChunkAttempted,
                              /*createCleanupSerial*/ 0,
-                             createTxnSerial)) {
+                             createTxnSerial, expectedGeneration,
+                             expectedLifecycleEpoch, expectedPresentationEpoch, nativeTerminalEpoch)) {
       DEBUG_G2F("[G2-%c] sendPbFragmented: write failed at frag %u/%u",
                 arm.side, (unsigned)(i + 1), (unsigned)totFrags);
       ok = false;
@@ -12828,7 +12900,7 @@ static bool g2TerminalWireBlocksCreate() {
 }
 
 static bool g2CreateWireCurrent(uint32_t serial, const G2Temple& arm) {
-  if (!serial || g2TerminalWireBlocksCreate()) return false;
+  if (!serial || g2NativeTerminalActive() || g2TerminalWireBlocksCreate()) return false;
   uint32_t active = 0;
   uint32_t claim = 0;
   portENTER_CRITICAL(&gCreateAckStateMux);
@@ -14087,6 +14159,8 @@ struct G2EvenAiSessionState {
   char armSide;
   uint32_t armGeneration;
   uint32_t uartSessionEpoch;
+  bool local;
+  TransportSessionEpoch ownerEpoch;
   uint32_t lastActMs;
   uint32_t lastHbMs;
   uint32_t hbCnt;
@@ -14104,6 +14178,16 @@ static uint32_t gEvenAiExchangeCounter = 0;
 static uint32_t gEvenAiMagicCtr = 200;  // magicRandom base — MUST stay byte-sized
 static const uint32_t    kEvenAiHbIntervalMs = 3000;
 static const uint32_t    kEvenAiSessionMaxMs = 60000;  // safety EXIT if nothing finishes
+
+// Provider is latched on WAKE; selecting another model cannot reroute an
+// already-recorded question. CM5 retains its authenticated UART protocol.
+static bool g2EvenAiUseLocalSpeech() {
+#if ENABLE_LOCAL_STT && ENABLE_LLM_BACKEND
+  return llmBackendActiveKind() != LlmBackendKind::Cm5;
+#else
+  return false;
+#endif
+}
 
 // A terminal state is authoritative locally, but the CM5 cancellation EVT is
 // still important for latency: it lets the host abandon STT/LLM work before a
@@ -14332,7 +14416,7 @@ static void g2EvenAiFormatExchangeId(uint64_t id, char out[17]) {
 // no-session EVENT (stale/foreign) is dropped silently.
 static void g2EvenAiPushStreamCompleteEvt() {
   const G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
-  if (!s.active) return;
+  if (!s.active || s.local) return;
   char id[17];
   char evt[48];
   g2EvenAiFormatExchangeId(s.exchangeId, id);
@@ -14362,7 +14446,7 @@ static bool g2EvenAiSessionIsActive() {
 // QuickNote's stand-down check (R16): never start or keep a note over a
 // native Even AI or Conversate session.
 bool g2NativeVoiceActive() {
-  return g2EvenAiSessionIsActive() || g2ConversateActive();
+  return g2EvenAiSessionIsActive() || g2ConversateActive() || g2NativeTerminalActive();
 }
 
 bool g2EvenAiExchangeBoundToUartSession(uint64_t exchangeId,
@@ -14371,7 +14455,7 @@ bool g2EvenAiExchangeBoundToUartSession(uint64_t exchangeId,
       uartLinkSessionEpoch() != sessionEpoch) return false;
   const G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
   return s.active && s.exchangeId == exchangeId &&
-         s.uartSessionEpoch == sessionEpoch;
+         !s.local && s.uartSessionEpoch == sessionEpoch;
 }
 
 static bool g2EvenAiGuardMatches(uint64_t exchangeId,
@@ -14379,11 +14463,12 @@ static bool g2EvenAiGuardMatches(uint64_t exchangeId,
   if (!exchangeId) return false;
   const G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
   return s.active && s.exchangeId == exchangeId &&
-      s.uartSessionEpoch != 0 &&
-      uartLinkSessionEpoch() == s.uartSessionEpoch &&
+      (s.local ? (s.ownerEpoch &&
+                    transportSessionEpochIsLive(SOURCE_G2_GLASSES, s.ownerEpoch))
+               : (s.uartSessionEpoch != 0 &&
+                    uartLinkSessionEpoch() == s.uartSessionEpoch)) &&
       s.armSide == temple.side &&
-      s.armGeneration == temple.connectionGeneration &&
-      temple.connected && !temple.pluginDead && temple.writeChar;
+      s.armGeneration && g2TempleReadyAtGeneration(temple, s.armGeneration);
 }
 
 static bool g2EvenAiSetEnterPending(uint64_t exchangeId, bool pending) {
@@ -14598,6 +14683,7 @@ static bool g2EvenAiTerminate(uint64_t expectedId, const char* reason) {
     gEvenAiSession.armSide = 0;
     gEvenAiSession.armGeneration = 0;
     gEvenAiSession.uartSessionEpoch = 0;
+    gEvenAiSession.ownerEpoch = 0;
   }
   portEXIT_CRITICAL(&gEvenAiSessionMux);
   if (!endedId) return false;
@@ -14651,8 +14737,10 @@ static G2Temple* g2EvenAiBoundArm(uint64_t exchangeId) {
   const G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
   if (!s.active || s.exchangeId != exchangeId) return nullptr;
   G2Temple* arm = s.armSide == 'R' ? &gR : (s.armSide == 'L' ? &gL : nullptr);
-  if (!arm || !arm->connected || arm->pluginDead ||
-      arm->connectionGeneration != s.armGeneration) return nullptr;
+  // Native EvenAI (sid 0x07) is independent of the EvenCore app renderer.
+  // A quiet renderer must not reject a native wake on the live paired link.
+  if (!arm || !s.armGeneration ||
+      !g2TempleReadyAtGeneration(*arm, s.armGeneration)) return nullptr;
   return arm;
 }
 
@@ -14730,6 +14818,12 @@ static bool g2EvenAiSendReply(uint64_t exchangeId,
 // hard boundary: supersede any old exchange first, then bind this one to the
 // exact temple connection epoch that delivered it.
 static void g2EvenAiOnWakeUp(G2Temple& temple, uint32_t rxGeneration) {
+  if (g2NativeTerminalActive()) {
+    uint8_t frame[64];
+    const size_t n = g2BuildEvenAICtrl(allocSeq(), g2EvenAiNextMagic(), G2_AI_STATUS_EXIT, frame, sizeof(frame));
+    if (n && rxGeneration) (void)sendEnvelopeAtGeneration(temple, frame, n, rxGeneration);
+    return;
+  }
   // An active, explicitly enabled Conversate session owns the mic. Decline the
   // competing popup before creating an exchange or starting CM5 capture.
   if (g2ConversateDeclineEvenAi(temple, rxGeneration)) return;
@@ -14741,6 +14835,7 @@ static void g2EvenAiOnWakeUp(G2Temple& temple, uint32_t rxGeneration) {
 
   uint32_t nonceCandidate = esp_random();
   if (!nonceCandidate) nonceCandidate = 1;
+  const bool local = g2EvenAiUseLocalSpeech();
   uint64_t exchangeId = 0;
   portENTER_CRITICAL(&gEvenAiSessionMux);
   if (!gEvenAiBootNonce) gEvenAiBootNonce = nonceCandidate;
@@ -14755,6 +14850,8 @@ static void g2EvenAiOnWakeUp(G2Temple& temple, uint32_t rxGeneration) {
   gEvenAiSession.armGeneration =
       rxGeneration ? rxGeneration : temple.connectionGeneration;
   gEvenAiSession.uartSessionEpoch = 0;
+  gEvenAiSession.local = local;
+  gEvenAiSession.ownerEpoch = 0;
   gEvenAiSession.lastActMs = millis();
   gEvenAiSession.lastHbMs = 0;
   gEvenAiSession.hbCnt = 0;
@@ -15015,13 +15112,237 @@ static void g2EvenAiCaptureTick() {
 }
 #endif  // ENABLE_MICROPHONE
 
-// Worker-context session tick: send the owed ENTER, heartbeat ~3 s, and safety
-// EXIT after kEvenAiSessionMaxMs of no ask/reply activity. Runs inside
+// Local native voice adapter. Only the G2 control worker touches this state;
+// BLE/CLI cancellation invalidates the synchronized native exchange above and
+// wakes that worker. STT and chat own their tasks, buffers and exact-run fences.
+#if ENABLE_LOCAL_STT && ENABLE_LLM_BACKEND
+// REPLY at magic 200..250 adds 29 bytes for a 212-byte body: exactly the
+// qualified MTU244's 241-byte ATT write. ASK is slightly smaller. Keep this
+// local adapter within that bound without changing the existing CM5 contract.
+static constexpr size_t kEvenAiLocalTextBytes = 212;
+struct G2EvenAiLocalState {
+  uint64_t exchange = 0;
+  // No authority until epoch is bound; keep the PSRAM BSS initializer zero.
+  STTOwner owner{static_cast<CommandSource>(0), 0};
+  STTToken token = 0;
+  uint32_t leftGeneration = 0;
+  uint32_t startedMs = 0;
+  ChatRunToken chatRun = 0;
+  int replyOffset = 0;  // Next unread chat byte, including the retained tail.
+  bool done = false;
+  char model[LLM_MODEL_ID_LEN] = {};
+  char prompt[1025] = {};
+  size_t promptLen = 0;
+  // Hold one chunk so completion carries text rather than relying on an empty
+  // END to render the answer. This scratch stays in the existing PSRAM state.
+  char pendingReply[kEvenAiLocalTextBytes + 1] = {};
+  size_t pendingReplyLen = 0;
+};
+EXT_RAM_BSS_ATTR static G2EvenAiLocalState gEvenAiLocal;
+
+static void g2EvenAiLocalCancel() {
+  if (gEvenAiLocal.token)
+    (void)sttCancel(gEvenAiLocal.owner, gEvenAiLocal.token);
+  if (gEvenAiLocal.chatRun)
+    (void)chatStopRun(gEvenAiLocal.chatRun);
+  // Wipe abandoned speech as well as its authority handle.
+  volatile uint8_t* bytes = reinterpret_cast<volatile uint8_t*>(&gEvenAiLocal);
+  for (size_t i = 0; i < sizeof(gEvenAiLocal); ++i) bytes[i] = 0;
+}
+
+static bool g2EvenAiLocalCurrent() {
+  const auto s = g2EvenAiSessionSnapshot();
+  return s.active && s.local && s.exchangeId == gEvenAiLocal.exchange &&
+      s.ownerEpoch == gEvenAiLocal.owner.epoch &&
+      transportSessionEpochIsLive(SOURCE_G2_GLASSES, s.ownerEpoch) &&
+      g2EvenAiBoundArm(s.exchangeId) &&
+      g2TempleReadyAtGeneration(gL, gEvenAiLocal.leftGeneration);
+}
+
+static void g2EvenAiLocalFail(const char* reason) {
+  const uint64_t id = gEvenAiLocal.exchange;
+  if (gEvenAiLocal.token) (void)sttCancel(gEvenAiLocal.owner, gEvenAiLocal.token);
+  if (gEvenAiLocal.chatRun) (void)chatStopRun(gEvenAiLocal.chatRun);
+  gEvenAiLocal.token = 0;
+  gEvenAiLocal.chatRun = 0;
+  memset(gEvenAiLocal.prompt, 0, sizeof(gEvenAiLocal.prompt));
+  gEvenAiLocal.promptLen = 0;
+  memset(gEvenAiLocal.pendingReply, 0, sizeof(gEvenAiLocal.pendingReply));
+  gEvenAiLocal.pendingReplyLen = 0;
+  gEvenAiLocal.done = true;
+  // Never reflect server credentials/prompts here; callers pass local status
+  // reasons. Dismissed/revoked exchanges fail the existing per-packet guard.
+  if (!g2EvenAiLocalCurrent() || !g2EvenAiSendReply(id, reason))
+    (void)g2EvenAiTerminate(id, "local_failed");
+}
+
+static void g2EvenAiLocalTick() {
+  auto s = g2EvenAiSessionSnapshot();
+  if (gEvenAiLocal.exchange && !g2EvenAiLocalCurrent()) {
+    const uint64_t old = gEvenAiLocal.exchange;
+    g2EvenAiLocalCancel();
+    if (s.active && s.exchangeId == old) {
+      (void)g2EvenAiSendCtrl(old, G2_AI_STATUS_EXIT);
+      (void)g2EvenAiTerminate(old, "local_owner_lost");
+    }
+  }
+  s = g2EvenAiSessionSnapshot();
+  if (!s.active || !s.local) return;
+  if (s.enterPending) {
+    BlePeerOwnerSession peer;
+    const bool live = blePeerOwnerSessionSnapshot(BLE_PEER_G2_GLASSES, peer) && peer.live();
+    const TransportSessionEpoch epoch = live ? peer.transportEpoch : 0;
+    secureClearString(peer.user);
+    if (!epoch || !g2TempleReadyAtGeneration(gL) || !g2EvenAiBoundArm(s.exchangeId)) {
+      (void)g2EvenAiTerminate(s.exchangeId, "local_owner_missing");
+      return;
+    }
+    portENTER_CRITICAL(&gEvenAiSessionMux);
+    const bool bound = gEvenAiSession.active && gEvenAiSession.local &&
+        gEvenAiSession.exchangeId == s.exchangeId;
+    if (bound) {
+      gEvenAiSession.ownerEpoch = epoch;
+      gEvenAiSession.enterPending = false;
+      gEvenAiSession.lastHbMs = millis();
+    }
+    portEXIT_CRITICAL(&gEvenAiSessionMux);
+    if (!bound) return;
+    gEvenAiLocal = G2EvenAiLocalState{};
+    gEvenAiLocal.exchange = s.exchangeId;
+    gEvenAiLocal.owner = {SOURCE_G2_GLASSES, epoch};
+    gEvenAiLocal.leftGeneration = gL.connectionGeneration;
+    gEvenAiLocal.startedMs = millis();
+    if (!g2EvenAiSendCtrl(s.exchangeId, G2_AI_STATUS_ENTER)) {
+      (void)g2EvenAiTerminate(s.exchangeId, "enter_failed");
+      return;
+    }
+    LlmModelDesc model{};
+    if (!llmBackendActiveModel(&model) || model.backend == LlmBackendKind::Cm5 ||
+        !llmBackendIsReady() || chatIsGenerating()) {
+      g2EvenAiLocalFail("AI source not ready or busy. Please try again.");
+      return;
+    }
+    snprintf(gEvenAiLocal.model, sizeof(gEvenAiLocal.model), "%s", model.id);
+    char error[96] = {};
+    if (!sttBeginUtteranceG2Native(gEvenAiLocal.owner, gEvenAiLocal.leftGeneration,
+                                  &gEvenAiLocal.token, error, sizeof(error), g2ControlWake)) {
+      g2EvenAiLocalFail(error[0] ? error : "Speech recognition unavailable.");
+    }
+    return;
+  }
+  if (!g2EvenAiLocalCurrent() || gEvenAiLocal.done) return;
+  if (millis() - gEvenAiLocal.startedMs >= 180000) {
+    g2EvenAiLocalFail("Voice request timed out. Please try again.");
+    return;
+  }
+  // The broker/backend have their own finite timeouts. Keep the native card
+  // alive while waiting for a cold model or agent; retain the 60 s idle exit
+  // after an answer, and the bounded whole-request deadline above.
+  g2EvenAiMarkActivity(s.exchangeId);
+  if (!gEvenAiLocal.chatRun) {
+    // These large snapshots are control-worker-only scratch, not stack frames.
+    static STTSnapshot speech;
+    EXT_RAM_BSS_ATTR static STTTextChunk chunk;
+    if (!sttSnapshot(gEvenAiLocal.owner, gEvenAiLocal.token, &speech) ||
+        speech.state == STTState::Failed || speech.state == STTState::Cancelled) {
+      g2EvenAiLocalFail("Speech recognition failed. Please try again.");
+      return;
+    }
+    if (sttReadChunk(gEvenAiLocal.owner, gEvenAiLocal.token, &chunk)) {
+      const size_t length = strlen(chunk.text);
+      const size_t separator = length && gEvenAiLocal.promptLen ? 1 : 0;
+      if (length + separator >= sizeof(gEvenAiLocal.prompt) - gEvenAiLocal.promptLen) {
+        chunk = STTTextChunk{};
+        g2EvenAiLocalFail("Question too long. Please ask a shorter question.");
+        return;
+      }
+      if (separator) gEvenAiLocal.prompt[gEvenAiLocal.promptLen++] = ' ';
+      memcpy(gEvenAiLocal.prompt + gEvenAiLocal.promptLen, chunk.text, length + 1);
+      gEvenAiLocal.promptLen += length;
+      const bool accepted = sttAcknowledgeChunk(gEvenAiLocal.owner, gEvenAiLocal.token, chunk.sequence);
+      chunk = STTTextChunk{};
+      if (!accepted) g2EvenAiLocalFail("Speech session changed. Please try again.");
+      return;  // drain every final before submitting exactly once
+    }
+    if (speech.workerActive) return;
+    if (speech.state != STTState::Done || !gEvenAiLocal.promptLen) {
+      g2EvenAiLocalFail("No speech recognized. Please try again.");
+      return;
+    }
+    LlmModelDesc model{};
+    if (!llmBackendActiveModel(&model) || strcmp(model.id, gEvenAiLocal.model) != 0) {
+      g2EvenAiLocalFail("AI source changed. Please ask again.");
+      return;
+    }
+    // Show a valid UTF-8 prefix that fits one qualified ATT packet while
+    // sending the complete bounded question to chat; never truncate that request.
+    char visible[kEvenAiLocalTextBytes + 1];
+    const size_t visibleBytes = std::min(sizeof(visible) - 1, gEvenAiLocal.promptLen);
+    memcpy(visible, gEvenAiLocal.prompt, visibleBytes);
+    visible[utf8TrimPartialTail(visible, visibleBytes)] = '\0';
+    if (!g2EvenAiSendAsk(s.exchangeId, visible) || !g2EvenAiLocalCurrent()) {
+      (void)g2EvenAiTerminate(s.exchangeId, "ask_failed");
+      return;
+    }
+    const int session = chatBeginTurn(gEvenAiLocal.prompt, nullptr, &gEvenAiLocal.chatRun);
+    memset(gEvenAiLocal.prompt, 0, sizeof(gEvenAiLocal.prompt));
+    gEvenAiLocal.promptLen = 0;
+    if (session <= 0) g2EvenAiLocalFail("AI source not ready or busy. Please try again.");
+    return;
+  }
+  char reply[kEvenAiLocalTextBytes + 1];
+  bool done = false;
+  int count = chatReadRun(gEvenAiLocal.chatRun, gEvenAiLocal.replyOffset,
+                             reply, sizeof(reply), &done);
+  if (count < 0) {
+    g2EvenAiLocalFail("Chat session changed. Please ask again.");
+    return;
+  }
+  if (count) {
+    count = utf8TrimPartialTail(reply, count);
+    reply[count] = '\0';
+    if (!count) {
+      if (done) g2EvenAiLocalFail("AI returned invalid text. Please try again.");
+      return;
+    }
+    if (gEvenAiLocal.pendingReplyLen) {
+      const bool first = gEvenAiLocal.replyOffset == (int)gEvenAiLocal.pendingReplyLen;
+      if (!g2EvenAiSendReplyRaw(s.exchangeId, gEvenAiLocal.pendingReply, false, first)) {
+        (void)g2EvenAiTerminate(s.exchangeId, "reply_failed");
+        return;
+      }
+      g2EvenAiSetReplyStreaming(s.exchangeId, true);
+    }
+    memcpy(gEvenAiLocal.pendingReply, reply, count + 1);
+    gEvenAiLocal.pendingReplyLen = (size_t)count;
+    gEvenAiLocal.replyOffset += count;
+  } else if (done) {
+    if (!gEvenAiLocal.pendingReplyLen) {
+      g2EvenAiLocalFail("No response from AI. Please try again.");
+      return;
+    }
+    const bool first = gEvenAiLocal.replyOffset == (int)gEvenAiLocal.pendingReplyLen;
+    if (!g2EvenAiSendReplyRaw(s.exchangeId, gEvenAiLocal.pendingReply, true, first))
+      (void)g2EvenAiTerminate(s.exchangeId, "reply_failed");
+    memset(gEvenAiLocal.pendingReply, 0, sizeof(gEvenAiLocal.pendingReply));
+    gEvenAiLocal.pendingReplyLen = 0;
+    g2EvenAiSetReplyStreaming(s.exchangeId, false);
+    gEvenAiLocal.done = true;
+  }
+}
+#else
+static void g2EvenAiLocalCancel() {}
+static void g2EvenAiLocalTick() {}
+#endif
+
 // heartbeatWorkerTask (never the BLE notify task).
+// Send the owed ENTER, heartbeat ~3 s, and safety EXIT after the session's
+// idle limit. Local STT/chat keeps activity alive during its bounded request.
 static void g2EvenAiSessionTick() {
 #if ENABLE_MICROPHONE
   g2EvenAiCaptureTick();  // before the active check — must run post-EXIT too
 #endif
+  g2EvenAiLocalTick();   // also drains cancellation after dismiss/disconnect
   G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
   if (!s.active) return;
   const uint64_t exchangeId = s.exchangeId;
@@ -15033,14 +15354,16 @@ static void g2EvenAiSessionTick() {
   // this boot" from "a previously authenticated session was cleared" without
   // granting any authority. A changed nonzero epoch means logout/re-login
   // occurred after this exchange was bound.
-  const G2EvenAiHostObservation host =
-      g2EvenAiObserveHost(s.uartSessionEpoch);
-  const char* hostFailure = g2EvenAiHostGateReason(host.cause);
-  if (hostFailure != nullptr) {
-    g2EvenAiLogHostFailure(exchangeId, "session_tick", host);
-    (void)g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
-    g2EvenAiTerminate(exchangeId, hostFailure);
-    return;
+  if (!s.local) {
+    const G2EvenAiHostObservation host =
+        g2EvenAiObserveHost(s.uartSessionEpoch);
+    const char* hostFailure = g2EvenAiHostGateReason(host.cause);
+    if (hostFailure != nullptr) {
+      g2EvenAiLogHostFailure(exchangeId, "session_tick", host);
+      (void)g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
+      g2EvenAiTerminate(exchangeId, hostFailure);
+      return;
+    }
   }
 #endif
   if (!g2EvenAiBoundArm(exchangeId)) {
@@ -15048,7 +15371,7 @@ static void g2EvenAiSessionTick() {
     return;
   }
   const uint32_t nowMs = millis();
-  if (g2EvenAiTakeEnterPending(exchangeId)) {
+  if (!s.local && g2EvenAiTakeEnterPending(exchangeId)) {
     const G2EvenAiHostObservation admissionHost = g2EvenAiObserveHost(0);
     const uint32_t admittedSessionEpoch = admissionHost.activeSessionEpoch;
 #if ENABLE_MICROPHONE
@@ -15229,7 +15552,7 @@ static bool g2ConversateBusy() {
 #endif
       );
   return (audioCaptureBusy() && !ownCapture) || gMicStreamOn || gMicProbeActive ||
-      gMicRecFile || gMicWavFile || g2EvenAiSessionIsActive() ||
+      gMicRecFile || gMicWavFile || g2EvenAiSessionIsActive() || g2NativeTerminalActive() ||
       g2LensGetState().containerReady || g2FsmHijackActive();
 }
 
@@ -16003,6 +16326,980 @@ static void g2ConversateTick(bool requestsOnly) {
 // session on its own page, and a QuickNote on any page (a G2 capture needs a
 // lens container up). Once it stops, the watchdog governs passive reading
 // again. quickNoteActive() is false on a build without QuickNote.
+// Native Terminal adapter. The host owns conversations; this control owner owns
+// only a revocable view, speech draft, ACK transaction and bounded event cursor.
+#if ENABLE_LOCAL_STT && ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_HTTP
+using NativeTerm = G2NativeTerminalSession;
+enum class NativeRpc : uint8_t { None, List, Open, New, Poll, Prompt, Interrupt, Permission, Question };
+struct NativeSessionRow { uint32_t id = 0; char handle[69] = {}; char title[129] = {}; uint8_t state = 1; };
+struct NativeChoice { char key[33] = {}; char label[129] = {}; bool selected = false; };
+struct G2NativeTerminalState {
+  NativeTerm policy;
+  uint32_t epoch = 0, config = 0, sessionId = 0, nextId = 0;
+  uint32_t openingMs = 0, voiceMs = 0, pollMs = 0, cursor = 0, eventId = 0;
+  uint32_t firmwareQueryMs = 0, menuStartedMs = 0;
+  bool fromMenu = false;
+  uint32_t queryId = 0, querySentId = 0, queryDeadline = 0;
+  uint32_t queryRevision = 0, queuedQueryRevision = 0;
+  uint32_t deferredQueryId = 0, deferredOptionId = 0;
+  uint32_t listOffset = 0; int32_t nextOffset = -1;
+  STTOwner owner{}; STTToken speechToken = 0;
+  HttpTerminalToken rpcToken = 0;
+  NativeRpc rpc = NativeRpc::None, nextRpc = NativeRpc::None;
+  JsonDocument* batch = nullptr; size_t batchIndex = 0;
+  NativeSessionRow rows[10]; size_t rowCount = 0;
+  G2TerminalSessionItem wireRows[10]; G2TerminalQueryOption wireChoices[8];
+  NativeChoice choices[8]; size_t choiceCount = 0;
+  uint8_t state = G2_TERMINAL_STATE_IDLE, hostState = G2_TERMINAL_STATE_IDLE, sentState = 0, contentKind = 0;
+  uint32_t contentId = 0;
+  size_t textLen = 0, promptLen = 0;
+  bool openAttempted = false, opened = false, syncStarted = false, syncing = false, listDirty = false;
+  bool newResult = false, switchResult = false, resultSuccess = true, changeSession = false;
+  bool deferredConfirm = false, more = false, queryDirty = false, queryActive = false;
+  bool multiSelect = false, allowText = false, questionVoice = false, questionCancel = false;
+  bool choiceNotice = false, stateDirty = false;
+  bool firmwareReady = false, firmwareQuerySent = false;
+  char instance[37] = {}, view[33] = {}, selected[69] = {}, selectedTitle[129] = {};
+  char target[69] = {}, targetTitle[129] = {}, run[129] = {}, interruptRun[129] = {}, request[33] = {};
+  char activeRequest[33] = {};
+  char queuedView[33] = {}, queuedInstance[37] = {}, queuedPending[33] = {}, queuedQuestion[33] = {};
+  char pending[33] = {}, questionKey[33] = {}, queryType[12] = {}, decision[33] = {};
+  char question[1025] = {}, prompt[513] = {}, text[513] = {};
+  char json[HTTP_TERMINAL_JSON_CAP + 1] = {};
+  uint8_t pb[G2_TERMINAL_PB_MAX_BYTES] = {};
+  STTTextChunk chunk{}; STTSnapshot speech{};
+};
+EXT_RAM_BSS_ATTR static G2NativeTerminalState gNativeTerminal;
+static std::atomic<uint8_t> gNativeTerminalPhase{uint8_t(NativeTerm::Phase::Closed)};
+static std::atomic<const char*> gNativeTerminalReason{"closed"};
+static std::atomic<bool> gNativeTerminalOpenRequested{false}, gNativeTerminalCloseRequested{false};
+static std::atomic<bool> gNativeTerminalClosingWire{false};
+static std::atomic<uint32_t> gNativeTerminalOwner{0}, gNativeTerminalLeft{0}, gNativeTerminalRight{0};
+// A selection notification can arrive during a fragmented write. Fence physical
+// writes immediately; the control owner consumes the queued selection before TX.
+static std::atomic<uint32_t> gNativeTerminalSelectionFence{0}, gNativeTerminalAppliedFence{0};
+constexpr uint32_t kNativePrevious = 0xfffffff0u, kNativeMore = 0xfffffff1u;
+constexpr uint32_t kNativeFirmwareWaitMs = 1500, kNativeMenuWaitMs = 15000;
+
+enum class NativeFirmware : uint8_t { Unknown, Supported, Unsupported };
+static NativeFirmware g2NativeTerminalFirmware() {
+  char left[32], right[32];
+  portENTER_CRITICAL(&gRxPacketMux);
+  memcpy(left,gL.firmwareVersion,sizeof(left));
+  memcpy(right,gR.firmwareVersion,sizeof(right));
+  portEXIT_CRITICAL(&gRxPacketMux);
+  if ((left[0] && strcmp(left,"2.3.2.14")) || (right[0] && strcmp(right,"2.3.2.14")))
+    return NativeFirmware::Unsupported;
+  return left[0] && right[0] ? NativeFirmware::Supported : NativeFirmware::Unknown;
+}
+
+static void g2NativeTerminalPhase(NativeTerm::Phase phase) {
+  gNativeTerminal.policy.phase = phase;
+  gNativeTerminalPhase.store(uint8_t(phase), std::memory_order_release);
+}
+bool g2NativeTerminalActive() { return gNativeTerminalOwned.load(std::memory_order_acquire); }
+static void g2NativeTerminalRevoke(const char* reason) {
+  gNativeTerminalMenuTicket.store(0, std::memory_order_release);
+  if (!g2NativeTerminalActive()) return;
+  gNativeTerminalSubmitGate.store(0, std::memory_order_release);
+  gNativeTerminalReason.store(reason, std::memory_order_release);
+  gNativeTerminalEpoch.store(0, std::memory_order_release); g2ControlWake();
+}
+static bool g2NativeTerminalOwnerCurrent(uint32_t epoch, const G2Temple& temple) {
+  const uint32_t owner = gNativeTerminalOwner.load(std::memory_order_acquire);
+  const uint32_t left = gNativeTerminalLeft.load(std::memory_order_acquire);
+  const uint32_t right = gNativeTerminalRight.load(std::memory_order_acquire);
+  return epoch && gNativeTerminalEpoch.load(std::memory_order_acquire) == epoch &&
+      g2NativeTerminalActive() && temple.side == 'R' && owner && left && right &&
+      transportSessionEpochIsLive(SOURCE_G2_GLASSES, owner) &&
+      g2TempleReadyAtGeneration(gL, left) && g2TempleReadyAtGeneration(temple, right);
+}
+static bool g2NativeTerminalGuardMatches(uint32_t epoch, const G2Temple& temple) {
+  if (!g2NativeTerminalOwnerCurrent(epoch, temple)) return false;
+  if (gNativeTerminalClosingWire.load(std::memory_order_acquire)) return true;
+  const auto& s = gNativeTerminal;
+  return !gNativeTerminalCloseRequested.load(std::memory_order_acquire) && s.epoch == epoch &&
+      (gNativeTerminalSubmitGate.load(std::memory_order_acquire) & 0x7fffffffu) == epoch &&
+      gNativeTerminalSelectionFence.load(std::memory_order_acquire) ==
+          gNativeTerminalAppliedFence.load(std::memory_order_acquire) &&
+      s.config && httpTerminalConfigRevision() == s.config &&
+      gNativeTerminalEpoch.load(std::memory_order_acquire) == epoch;
+}
+static uint32_t g2NativeTerminalEarlyRx(const G2Temple& temple, const uint8_t* data, size_t len) {
+  if (temple.side != 'R' || !data || len < G2_ENVELOPE_HDR_LEN + G2_ENVELOPE_CRC_LEN ||
+      data[6] != G2_SID_TERMINAL) return 0;
+  G2EnvelopeView envelope{}; G2TerminalRx event{};
+  if (!g2ParseEnvelope(data, len, &envelope) || envelope.isTx || envelope.totalFrags != 1 || envelope.fragIdx != 1 ||
+      !g2ParseTerminalRx(envelope.payload, envelope.payloadLen, &event)) return 0;
+  if (!g2NativeTerminalActive()) {
+    if (event.command == G2_TERMINAL_CMD_EXIT) gNativeTerminalMenuTicket.store(0, std::memory_order_release);
+    if (event.command != G2_TERMINAL_CMD_START || !g2TempleReadyAtGeneration(temple) ||
+        gNativeTerminalInitializing.load(std::memory_order_acquire)) return 0;
+    BlePeerOwnerSession peer;
+    const bool live = blePeerOwnerSessionSnapshot(BLE_PEER_G2_GLASSES,peer) && peer.live();
+    const uint32_t owner = live ? peer.transportEpoch : 0; secureClearString(peer.user);
+    if (!owner) return 0;
+    const uint32_t ticket = (gNativeTerminalCounter.fetch_add(1) + 1) | 0x80000000u;
+    gNativeTerminalMenuTicket.store(0, std::memory_order_release);
+    gNativeTerminalMenuOwner.store(owner, std::memory_order_relaxed);
+    gNativeTerminalMenuStartMs.store(millis(), std::memory_order_relaxed);
+    gNativeTerminalMenuTicket.store(ticket, std::memory_order_release);
+    return ticket;
+  }
+  if (temple.connectionGeneration != gNativeTerminalRight.load(std::memory_order_acquire)) return 0;
+  if (event.command == G2_TERMINAL_CMD_EXIT) g2NativeTerminalRevoke("native-exit");
+  else if (event.command == G2_TERMINAL_CMD_SESSION_SWITCH || event.command == G2_TERMINAL_CMD_NEW_SESSION)
+    gNativeTerminalSelectionFence.fetch_add(1, std::memory_order_acq_rel);
+  return 0;
+}
+static void g2NativeTerminalCancelDraft() {
+  auto& s = gNativeTerminal;
+  if (s.speechToken) (void)sttCancel(s.owner, s.speechToken);
+  s.speechToken = 0; s.promptLen = 0; s.deferredConfirm = false;
+  memset(s.prompt, 0, sizeof(s.prompt)); s.chunk = {};
+}
+static void g2NativeTerminalDropBatch() {
+  auto& s = gNativeTerminal;
+  if (s.batch) { ps_delete(s.batch); s.batch = nullptr; }
+  s.batchIndex = 0; s.eventId = 0;
+}
+static void g2NativeTerminalClearQuery() {
+  auto& s = gNativeTerminal;
+  ++s.queryRevision;
+  if (s.questionVoice) { g2NativeTerminalCancelDraft(); g2NativeTerminalPhase(NativeTerm::Phase::Reply); }
+  if (s.nextRpc == NativeRpc::Permission || s.nextRpc == NativeRpc::Question) s.nextRpc = NativeRpc::None;
+  s.queryActive = s.queryDirty = s.questionVoice = s.questionCancel = false;
+  s.choiceCount = 0; s.queryDeadline = 0; s.deferredQueryId = s.deferredOptionId = 0;
+  memset(s.pending, 0, sizeof(s.pending)); memset(s.question, 0, sizeof(s.question));
+  for (auto& choice : s.choices) choice = {};
+  memset(s.decision, 0, sizeof(s.decision));
+}
+static void g2NativeTerminalEnded(const char* reason) {
+  auto& s = gNativeTerminal;
+  gNativeTerminalSubmitGate.store(0, std::memory_order_release);
+  gNativeTerminalEpoch.store(0, std::memory_order_release);
+  g2NativeTerminalCancelDraft(); g2NativeTerminalClearQuery(); g2NativeTerminalDropBatch();
+  if (s.rpcToken) httpTerminalCancel(s.rpcToken);
+  s.rpcToken = 0; s.rpc = s.nextRpc = NativeRpc::None;
+  s.policy.abandon(millis()); s.epoch = 0; s.opened = false;
+  memset(s.text, 0, sizeof(s.text)); memset(s.json, 0, sizeof(s.json)); memset(s.pb, 0, sizeof(s.pb));
+  memset(s.view, 0, sizeof(s.view)); memset(s.run, 0, sizeof(s.run)); memset(s.interruptRun, 0, sizeof(s.interruptRun));
+  g2NativeTerminalPhase(NativeTerm::Phase::Closed);
+  gNativeTerminalReason.store(reason, std::memory_order_release);
+  gNativeTerminalOpenRequested.store(false, std::memory_order_release);
+  gNativeTerminalCloseRequested.store(false, std::memory_order_release);
+  gNativeTerminalClosingWire.store(false, std::memory_order_release);
+  gNativeTerminalOwned.store(false, std::memory_order_release);
+  INFO_SYSTEMF("[G2-TERMINAL] closed: %s (accepted host work may continue)", reason);
+}
+static void g2NativeTerminalFail(const char* reason) {
+  gNativeTerminalSubmitGate.store(0, std::memory_order_release);
+  if (!gNativeTerminalCloseRequested.load(std::memory_order_acquire))
+    gNativeTerminalReason.store(reason, std::memory_order_release);
+  gNativeTerminalCloseRequested.store(true, std::memory_order_release);
+}
+static bool g2NativeTerminalCopy(JsonVariantConst value, char* out, size_t cap, bool empty = false) {
+  if (!value.is<const char*>()) return false;
+  const JsonString text = value.as<JsonString>();
+  if ((!text.size() && !empty) || text.size() >= cap || strlen(text.c_str()) != text.size()) return false;
+  memcpy(out, text.c_str(), text.size()); out[text.size()] = 0; return true;
+}
+static bool g2NativeTerminalHex(const char* text, size_t count) {
+  if (strlen(text) != count) return false;
+  for (size_t i = 0; i < count; ++i) if (!((text[i] >= '0' && text[i] <= '9') || (text[i] >= 'a' && text[i] <= 'f'))) return false;
+  return true;
+}
+static bool g2NativeTerminalHandle(const char* text) {
+  return !strncmp(text, "hwo_", 4) && g2NativeTerminalHex(text + 4, 64);
+}
+static uint8_t g2NativeTerminalHostState(const char* state) {
+  return !strcmp(state, "idle") ? G2_TERMINAL_STATE_IDLE :
+      !strcmp(state, "busy") ? G2_TERMINAL_STATE_THINKING :
+      !strcmp(state, "awaiting") ? G2_TERMINAL_STATE_AWAIT_USER : 0;
+}
+static bool g2NativeTerminalStateFrom(JsonObjectConst object, bool snapshot = true) {
+  auto& s = gNativeTerminal;
+  const char* value = object["state"] | "";
+  uint8_t state = g2NativeTerminalHostState(value);
+  if (!state) return false; // uncertain state cannot admit another prompt
+  if (!object["activity"].isUnbound()) {
+    char activity[11] = {};
+    if (!g2NativeTerminalCopy(object["activity"],activity,sizeof(activity))) return false;
+    const uint8_t display = !strcmp(activity,"thinking") ? G2_TERMINAL_STATE_THINKING :
+        !strcmp(activity,"tool") ? G2_TERMINAL_STATE_TOOL :
+        !strcmp(activity,"responding") ? G2_TERMINAL_STATE_RESPONDING : 0;
+    if (!display) return false;
+    // Activity refines a busy presentation only. It cannot make idle/awaiting
+    // busy, or turn tool/reply streaming into admission for another utterance.
+    if (state == G2_TERMINAL_STATE_THINKING) state = display;
+  }
+  if (snapshot) {
+    if (object["runId"].isNull()) s.run[0] = 0;
+    else if (!g2NativeTerminalCopy(object["runId"], s.run, sizeof(s.run))) return false;
+    s.hostState = state; // admission uses the latest snapshot, never a historical event
+  }
+  if (s.questionVoice) state = G2_TERMINAL_STATE_IDLE;
+  // Stock Terminal treats even an unchanged IDLE as a command to leave its
+  // speech UI. Poll snapshots must not repeatedly reset that native lifecycle.
+  if (s.state != state) { s.state = state; s.stateDirty = true; }
+  return true;
+}
+static uint32_t g2NativeTerminalNextId() {
+  auto& s = gNativeTerminal;
+  if (++s.nextId >= kNativePrevious || !s.nextId) s.nextId = 1;
+  return s.nextId;
+}
+static void g2NativeTerminalQueueRpc(NativeRpc operation) {
+  auto& s = gNativeTerminal;
+  s.nextRpc = operation;
+  // The gesture belongs to the displayed host view/card. A poll may replace
+  // either before this queued request can enter the HTTP worker. Refuse that
+  // replacement rather than deriving a new target from mutable display state.
+  snprintf(s.queuedView,sizeof(s.queuedView),"%s",s.view);
+  snprintf(s.queuedInstance,sizeof(s.queuedInstance),"%s",s.instance);
+  if (operation == NativeRpc::Permission || operation == NativeRpc::Question) {
+    s.queuedQueryRevision = s.queryRevision;
+    snprintf(s.queuedPending,sizeof(s.queuedPending),"%s",s.pending);
+    snprintf(s.queuedQuestion,sizeof(s.queuedQuestion),"%s",s.questionKey);
+  }
+  uint32_t nonce[4]; for (auto& n : nonce) n = esp_random();
+  snprintf(s.request, sizeof(s.request), "%08lx%08lx%08lx%08lx", (unsigned long)nonce[0],
+      (unsigned long)nonce[1], (unsigned long)nonce[2], (unsigned long)nonce[3]);
+}
+static void g2NativeTerminalCancelRpc() {
+  auto& s = gNativeTerminal;
+  if (s.rpcToken) httpTerminalCancel(s.rpcToken);
+  s.rpcToken = 0; s.rpc = s.nextRpc = NativeRpc::None; s.interruptRun[0] = 0;
+  g2NativeTerminalDropBatch(); memset(s.json, 0, sizeof(s.json));
+}
+static bool g2NativeTerminalRpcStart() {
+  auto& s = gNativeTerminal;
+  if (s.rpcToken || s.nextRpc == NativeRpc::None || !g2NativeTerminalGuardMatches(s.epoch, gR)) return false;
+  if (s.nextRpc != NativeRpc::List && s.nextRpc != NativeRpc::Open && s.nextRpc != NativeRpc::New &&
+      (strcmp(s.queuedView,s.view) || strcmp(s.queuedInstance,s.instance))) {
+    g2NativeTerminalFail("queued-view-replaced"); return false;
+  }
+  if ((s.nextRpc == NativeRpc::Permission || s.nextRpc == NativeRpc::Question) &&
+      (!s.pending[0] || s.queryRevision != s.queuedQueryRevision ||
+       strcmp(s.pending,s.queuedPending) || strcmp(s.questionKey,s.queuedQuestion) ||
+       int32_t(millis()-s.queryDeadline) >= 0)) { g2NativeTerminalFail("query-expired-or-replaced"); return false; }
+  if ((s.nextRpc == NativeRpc::Prompt && s.hostState != G2_TERMINAL_STATE_IDLE) ||
+      (s.nextRpc == NativeRpc::Question && s.questionVoice && s.hostState != G2_TERMINAL_STATE_AWAIT_USER)) {
+    g2NativeTerminalFail("confirmation-expired-or-host-busy"); return false;
+  }
+  PSRAM_JSON_DOC(doc);
+  const char* op = s.nextRpc == NativeRpc::List ? "list" : s.nextRpc == NativeRpc::Open ? "open" :
+      s.nextRpc == NativeRpc::New ? "new" : s.nextRpc == NativeRpc::Poll ? "poll" :
+      s.nextRpc == NativeRpc::Prompt ? "prompt" : s.nextRpc == NativeRpc::Interrupt ? "interrupt" :
+      s.nextRpc == NativeRpc::Permission ? "permission" : "question";
+  doc["schema"] = 1; doc["op"] = op; doc["requestId"] = s.request;
+  if (s.nextRpc == NativeRpc::List) { doc["offset"] = s.listOffset; doc["limit"] = 7; }
+  else if (s.nextRpc == NativeRpc::Open) doc["sessionId"] = s.target;
+  else if (s.nextRpc != NativeRpc::New) {
+    doc["view"] = s.view; doc["instance"] = s.instance;
+    if (s.nextRpc == NativeRpc::Poll) doc["after"] = s.cursor;
+    else if (s.nextRpc == NativeRpc::Prompt) doc["text"] = s.prompt;
+    else if (s.nextRpc == NativeRpc::Interrupt) doc["runId"] = s.interruptRun;
+    else {
+      doc["pendingId"] = s.pending;
+      if (s.nextRpc == NativeRpc::Permission) doc["decision"] = s.decision;
+      else {
+        doc["questionId"] = s.questionKey;
+        if (s.questionCancel) doc["cancel"] = true;
+        else if (s.questionVoice) doc["text"] = s.prompt;
+        else {
+          JsonArray selected = doc["optionIds"].to<JsonArray>();
+          for (size_t i = 0; i < s.choiceCount; ++i) if (s.choices[i].selected) selected.add(s.choices[i].key);
+        }
+      }
+    }
+  }
+  if (doc.overflowed() || measureJson(doc) > HTTP_TERMINAL_JSON_CAP) { g2NativeTerminalFail("request-too-large"); return false; }
+  const size_t n = serializeJson(doc, s.json, sizeof(s.json));
+  HttpTerminalToken token = 0;
+  const bool accepted = g2NativeTerminalGuardMatches(s.epoch, gR) && httpTerminalStart(s.json, n, &token);
+  memset(s.json, 0, sizeof(s.json));
+  if (!accepted) return false; // no request admitted; retain its exact ID while busy
+  snprintf(s.activeRequest,sizeof(s.activeRequest),"%s",s.request);
+  s.rpcToken = token; s.rpc = s.nextRpc; s.nextRpc = NativeRpc::None;
+  return true;
+}
+static void g2NativeTerminalWireRows() {
+  auto& s = gNativeTerminal;
+  for (size_t i = 0; i < s.rowCount; ++i)
+    s.wireRows[i] = {s.rows[i].id, s.rows[i].title, 1, s.rows[i].state};
+}
+static bool g2NativeTerminalSend(NativeTerm::Tx tx) {
+  auto& s = gNativeTerminal;
+  if (s.policy.pending != NativeTerm::Tx::None || !g2NativeTerminalGuardMatches(s.epoch, gR)) return false;
+  if (s.policy.ownsDraft() && tx != NativeTerm::Tx::Asr && tx != NativeTerm::Tx::Heartbeat &&
+      tx != NativeTerm::Tx::Close) return false;
+  const uint32_t now = millis();
+  if (tx == NativeTerm::Tx::Open && s.fromMenu && uint32_t(now-s.menuStartedMs) >= kNativeMenuWaitMs) {
+    g2NativeTerminalFail("native-menu-open-timeout-retry"); return false;
+  }
+  const uint8_t magic = s.policy.allocate(now);
+  if (!magic) { g2NativeTerminalFail("magic-capacity"); return false; }
+  size_t n = 0;
+  switch (tx) {
+    case NativeTerm::Tx::Open: {
+      s.openAttempted = true;
+      const G2TerminalAgentItem agent{1, "Mingus"}; g2NativeTerminalWireRows();
+      n = g2BuildTerminalOpenListPb(magic, &agent, 1, s.sessionId, s.wireRows, s.rowCount, s.pb, sizeof(s.pb)); break;
+    }
+    case NativeTerm::Tx::List:
+      g2NativeTerminalWireRows(); n = g2BuildTerminalSessionListPb(magic, s.sessionId, s.wireRows, s.rowCount, s.pb, sizeof(s.pb)); break;
+    case NativeTerm::Tx::SwitchResult: case NativeTerm::Tx::NewResult:
+      n = g2BuildTerminalResultPb(magic, tx == NativeTerm::Tx::SwitchResult ? G2_TERMINAL_CMD_SWITCH_RESULT : G2_TERMINAL_CMD_NEW_RESULT,
+                                  s.resultSuccess, s.pb, sizeof(s.pb)); break;
+    case NativeTerm::Tx::SessionChange:
+      n = g2BuildTerminalSessionChangePb(magic, s.sessionId, s.pb, sizeof(s.pb)); break;
+    case NativeTerm::Tx::Close: n = g2BuildTerminalClosePb(magic, 0, s.pb, sizeof(s.pb)); break;
+    case NativeTerm::Tx::Heartbeat: n = g2BuildTerminalHeartbeatPb(magic, s.pb, sizeof(s.pb)); break;
+    case NativeTerm::Tx::SyncBegin: case NativeTerm::Tx::SyncEnd:
+      n = g2BuildTerminalSyncPb(magic, s.sessionId, tx == NativeTerm::Tx::SyncBegin, s.pb, sizeof(s.pb)); break;
+    case NativeTerm::Tx::Asr: n = g2BuildTerminalAsrPb(magic, s.prompt, s.promptLen, true, true, s.pb, sizeof(s.pb)); break;
+    case NativeTerm::Tx::State:
+      s.sentState = s.state;
+      n = g2BuildTerminalStatePb(magic, s.sessionId, s.sentState, s.pb, sizeof(s.pb)); break;
+    case NativeTerm::Tx::Content:
+      n = g2BuildTerminalContentPb(magic, s.sessionId, s.contentId, s.contentKind, s.text, s.textLen, s.pb, sizeof(s.pb)); break;
+    case NativeTerm::Tx::Query: {
+      s.querySentId = s.queryId;
+      size_t count = s.choiceCount;
+      for (size_t i = 0; i < count; ++i) s.wireChoices[i] = {uint32_t(i + 1), s.choices[i].label};
+      if (s.multiSelect) s.wireChoices[count++] = {100, "Submit selected choices"};
+      if (s.allowText) s.wireChoices[count++] = {101, "Speak an answer"};
+      if (!strcmp(s.queryType, "question")) s.wireChoices[count++] = {102, "Cancel question"};
+      n = g2BuildTerminalQueryPb(magic, s.sessionId, s.queryId, s.question, s.wireChoices, count, s.pb, sizeof(s.pb)); break;
+    }
+    default: return false;
+  }
+  if (!n) { g2NativeTerminalFail("invalid-native-payload"); return false; }
+  s.policy.pending = tx; s.policy.magic = magic; s.policy.sentMs = now; s.policy.lastTxMs = now;
+  const bool sent = sendPbFragmented(gR, allocSeq(), G2_SID_TERMINAL, G2_FLAG_REQUEST,
+      s.pb, n, gNativeTerminalRight.load(std::memory_order_acquire), nullptr, 0, 0, 0, s.epoch);
+  memset(s.pb, 0, sizeof(s.pb));
+  if (!sent && gNativeTerminalSelectionFence.load() == gNativeTerminalAppliedFence.load())
+    g2NativeTerminalFail("native-write-failed");
+  return sent;
+}
+static void g2NativeTerminalConsumeEvent() {
+  auto& s = gNativeTerminal;
+  if (s.eventId) { s.cursor = s.eventId; s.eventId = 0; ++s.batchIndex; }
+}
+static bool g2NativeTerminalPinSelected() {
+  auto& s = gNativeTerminal;
+  for (size_t i = 0; i < s.rowCount; ++i) if (!strcmp(s.rows[i].handle, s.selected)) {
+    s.rows[i].id = s.sessionId; s.rows[i].state = s.state; return true;
+  }
+  if (s.rowCount == 10) return false;
+  auto& row = s.rows[s.rowCount++]; row.id = s.sessionId; row.state = s.state;
+  snprintf(row.handle, sizeof(row.handle), "%s", s.selected);
+  snprintf(row.title, sizeof(row.title), "%s", s.selectedTitle);
+  return true;
+}
+static bool g2NativeTerminalApplyList(JsonObjectConst response) {
+  auto& s = gNativeTerminal;
+  JsonArrayConst rows = response["sessions"].as<JsonArrayConst>();
+  if (rows.isNull() || rows.size() > 7) return false;
+  s.rowCount = 0;
+  for (JsonObjectConst value : rows) {
+    auto& row = s.rows[s.rowCount]; row = {};
+    if (!g2NativeTerminalCopy(value["id"], row.handle, sizeof(row.handle)) || !g2NativeTerminalHandle(row.handle) ||
+        !g2NativeTerminalCopy(value["title"], row.title, sizeof(row.title))) return false;
+    row.id = !strcmp(row.handle, s.selected) && s.sessionId ? s.sessionId : g2NativeTerminalNextId();
+    row.state = g2NativeTerminalHostState(value["state"] | "idle");
+    if (!row.state) row.state = G2_TERMINAL_STATE_AWAIT_USER;
+    ++s.rowCount;
+  }
+  if (response["nextOffset"].isNull()) s.nextOffset = -1;
+  else if (!response["nextOffset"].is<uint32_t>() || response["nextOffset"].as<uint32_t>() > 10000) return false;
+  else s.nextOffset = int32_t(response["nextOffset"].as<uint32_t>());
+  if (s.selected[0] && !g2NativeTerminalPinSelected()) return false;
+  if (s.listOffset && s.rowCount < 10) {
+    auto& row = s.rows[s.rowCount++]; row = {}; row.id = kNativePrevious;
+    snprintf(row.title, sizeof(row.title), "Previous conversations");
+  }
+  if (s.nextOffset >= 0 && s.rowCount < 10) {
+    auto& row = s.rows[s.rowCount++]; row = {}; row.id = kNativeMore;
+    snprintf(row.title, sizeof(row.title), "More conversations");
+  }
+  if (s.opened) { s.listDirty = true; return true; }
+  if (!s.selected[0]) {
+    if (!rows.size()) { g2NativeTerminalQueueRpc(NativeRpc::New); return true; }
+    snprintf(s.target, sizeof(s.target), "%s", s.rows[0].handle);
+    snprintf(s.targetTitle, sizeof(s.targetTitle), "%s", s.rows[0].title);
+    s.sessionId = s.rows[0].id;
+  } else {
+    snprintf(s.target, sizeof(s.target), "%s", s.selected);
+    snprintf(s.targetTitle, sizeof(s.targetTitle), "%s", s.selectedTitle);
+  }
+  g2NativeTerminalQueueRpc(NativeRpc::Open); return true;
+}
+static void g2NativeTerminalRpcRead() {
+  auto& s = gNativeTerminal;
+  if (!s.rpcToken) return;
+  HttpTerminalResult result{};
+  if (!httpTerminalRead(s.rpcToken, s.json, sizeof(s.json), &result)) {
+    g2NativeTerminalFail("host-request-lost"); return;
+  }
+  if (!result.done) return;
+  const NativeRpc completed = s.rpc;
+  s.rpc = NativeRpc::None; s.rpcToken = 0;
+  if (result.error[0] || result.configRevision != s.config || result.httpStatus != 200) {
+    memset(s.json, 0, sizeof(s.json)); g2NativeTerminalFail("host-request-failed-no-retry"); return;
+  }
+  auto* memory = ps_alloc(sizeof(JsonDocument), AllocPref::PreferPSRAM, "g2.terminal.json");
+  JsonDocument* doc = memory ? new (memory) JsonDocument(psramJsonAllocator()) : nullptr;
+  if (!doc) { g2NativeTerminalFail("host-response-memory"); return; }
+  const auto error = deserializeJson(*doc, static_cast<const char*>(s.json), result.length,
+                                     DeserializationOption::NestingLimit(8));
+  memset(s.json, 0, sizeof(s.json));
+  JsonObjectConst response = doc->as<JsonObjectConst>();
+  const char* instance = response["instance"] | "";
+  bool valid = !error && !doc->overflowed() && !response.isNull() &&
+      response["schema"].is<int>() && response["schema"].as<int>() == 1 &&
+      response["ok"].is<bool>() && response["ok"].as<bool>() &&
+      !strcmp(response["requestId"] | "", s.activeRequest) && strlen(instance) == 36 &&
+      (!s.instance[0] || !strcmp(instance, s.instance));
+  if (valid && !s.instance[0]) snprintf(s.instance, sizeof(s.instance), "%s", instance);
+  if (valid && completed == NativeRpc::List) valid = g2NativeTerminalApplyList(response);
+  else if (valid && (completed == NativeRpc::Open || completed == NativeRpc::New)) {
+    valid = g2NativeTerminalCopy(response["view"], s.view, sizeof(s.view)) && g2NativeTerminalHex(s.view, 32) &&
+        g2NativeTerminalCopy(response["sessionId"], s.selected, sizeof(s.selected)) && g2NativeTerminalHandle(s.selected) &&
+        response["cursor"].is<uint32_t>() && response["cursor"].as<uint32_t>() == 0 &&
+        (completed != NativeRpc::Open || !strcmp(s.selected,s.target)) && g2NativeTerminalStateFrom(response);
+    if (valid) {
+      if (completed == NativeRpc::New) {
+        for (size_t i=0;i<s.rowCount;++i) if (s.rows[i].id == s.sessionId) {
+          for (size_t j=i+1;j<s.rowCount;++j) { s.rows[j-1] = s.rows[j]; }
+          --s.rowCount;
+          break;
+        }
+        s.sessionId = g2NativeTerminalNextId(); snprintf(s.selectedTitle, sizeof(s.selectedTitle), "New Mingus conversation");
+      }
+      else snprintf(s.selectedTitle, sizeof(s.selectedTitle), "%s", s.targetTitle);
+      valid = g2NativeTerminalPinSelected();
+      s.cursor = 0; s.syncing = true; s.syncStarted = false; s.more = true;
+      s.listDirty = s.opened; s.changeSession = s.opened; s.newResult = completed == NativeRpc::New && s.opened;
+      s.switchResult = completed == NativeRpc::Open && s.opened; s.resultSuccess = true;
+      if (s.opened) g2NativeTerminalPhase(NativeTerm::Phase::Syncing);
+    }
+  } else if (valid && completed == NativeRpc::Poll) {
+    const JsonArrayConst events = response["events"].as<JsonArrayConst>();
+    valid = !events.isNull() && events.size() <= 3 && response["cursor"].is<uint32_t>() &&
+        response["more"].is<bool>();
+    uint32_t cursor = s.cursor;
+    for (JsonObjectConst event : events) {
+      if (!event["id"].is<uint32_t>() || event["id"].as<uint32_t>() <= cursor) { valid = false; break; }
+      cursor = event["id"].as<uint32_t>();
+    }
+    valid = valid && response["cursor"].as<uint32_t>() == cursor;
+    if (valid) valid = g2NativeTerminalStateFrom(response);
+    if (valid) {
+      // A revocation in the received batch wins over a queued choice mutation,
+      // even when earlier content still awaits its lens ACK.
+      for (JsonObjectConst event : events) {
+        if ((!strcmp(event["type"] | "","query_clear") && !strcmp(event["pendingId"] | "",s.pending)) ||
+            (!strcmp(event["type"] | "","query") && s.questionVoice)) {
+          if (s.nextRpc == NativeRpc::Permission || s.nextRpc == NativeRpc::Question) s.nextRpc = NativeRpc::None;
+          g2NativeTerminalClearQuery();
+        }
+      }
+      s.more = response["more"].as<bool>(); s.batch = doc; s.batchIndex = 0; doc = nullptr;
+      // Admission sees the current snapshot now; ordinary event presentation
+      // remains ordered and pauses while native speech owns the screen.
+      if (s.policy.ownsDraft() && !s.questionVoice && s.hostState != G2_TERMINAL_STATE_IDLE)
+        g2NativeTerminalFail("host-became-busy-during-speech");
+    }
+  } else if (valid && completed == NativeRpc::Prompt) {
+    valid = response["accepted"].is<bool>() && response["accepted"].as<bool>() &&
+        g2NativeTerminalCopy(response["runId"], s.run, sizeof(s.run));
+    if (valid) { s.hostState = s.state = G2_TERMINAL_STATE_THINKING; s.stateDirty = true;
+      g2NativeTerminalCancelDraft(); g2NativeTerminalPhase(NativeTerm::Phase::Reply); s.more = true; }
+  } else if (valid && completed == NativeRpc::Interrupt) {
+    valid = response["accepted"].is<bool>() && response["accepted"].as<bool>();
+    if (valid) { s.more = true; s.interruptRun[0] = 0; gNativeTerminalReason.store("interrupt-accepted-awaiting-host-state"); }
+  } else if (valid && (completed == NativeRpc::Permission || completed == NativeRpc::Question)) {
+    valid = response["applied"].is<bool>() &&
+        (response["applied"].as<bool>() || (completed == NativeRpc::Question &&
+         response["complete"].is<bool>() && !response["complete"].as<bool>()));
+    if (valid) { g2NativeTerminalClearQuery(); g2NativeTerminalCancelDraft(); s.more = true;
+      g2NativeTerminalPhase(NativeTerm::Phase::Reply); }
+  }
+  if (doc) ps_delete(doc);
+  if (!valid) g2NativeTerminalFail("host-response-invalid-or-reopen-required");
+}
+static bool g2NativeTerminalQueryFrom(JsonObjectConst event) {
+  auto& s = gNativeTerminal;
+  g2NativeTerminalClearQuery();
+  if (!g2NativeTerminalCopy(event["pendingId"], s.pending, sizeof(s.pending)) || !g2NativeTerminalHex(s.pending,32) ||
+      !g2NativeTerminalCopy(event["queryType"], s.queryType, sizeof(s.queryType)) ||
+      !g2NativeTerminalCopy(event["question"], s.question, sizeof(s.question))) return false;
+  const bool permission = !strcmp(s.queryType,"permission"), question = !strcmp(s.queryType,"question");
+  if (!permission && !question) return false;
+  if (question && !g2NativeTerminalCopy(event["questionId"],s.questionKey,sizeof(s.questionKey))) return false;
+  s.multiSelect = event["multiSelect"] | false; s.allowText = event["allowText"] | false;
+  if (permission && (s.multiSelect || s.allowText)) return false;
+  JsonArrayConst options = event["options"].as<JsonArrayConst>();
+  const size_t controls = size_t(s.multiSelect) + size_t(s.allowText) + size_t(question);
+  if (options.isNull() || options.size() + controls > 8 || (!options.size() && !s.allowText)) return false;
+  s.choiceCount = options.size();
+  for (size_t i=0; i<s.choiceCount; ++i) {
+    if (!g2NativeTerminalCopy(options[i]["id"],s.choices[i].key,sizeof(s.choices[i].key)) ||
+        !g2NativeTerminalCopy(options[i]["label"],s.choices[i].label,sizeof(s.choices[i].label))) return false;
+    for (size_t j=0;j<i;++j) if (!strcmp(s.choices[i].key,s.choices[j].key)) return false;
+    if (permission && strcmp(s.choices[i].key,"allow-once") && strcmp(s.choices[i].key,"allow-always") && strcmp(s.choices[i].key,"deny")) return false;
+  }
+  if (!event["expiresInMs"].is<uint32_t>() || !event["expiresInMs"].as<uint32_t>()) return false;
+  const uint32_t ttl = std::min(event["expiresInMs"].as<uint32_t>(), uint32_t(3600000));
+  s.queryDeadline = millis() + ttl; s.queryId = g2NativeTerminalNextId();
+  s.queryActive = s.queryDirty = true; s.questionVoice = false; return true;
+}
+// Returns true when it staged native work; IDs are consumed only after its ACK.
+static bool g2NativeTerminalBatchNext() {
+  auto& s = gNativeTerminal;
+  if (!s.batch || s.eventId) return false;
+  JsonArrayConst events = (*s.batch)["events"].as<JsonArrayConst>();
+  if (s.batchIndex >= events.size()) {
+    const bool valid = g2NativeTerminalStateFrom(s.batch->as<JsonObjectConst>());
+    g2NativeTerminalDropBatch();
+    if (!valid) g2NativeTerminalFail("host-state-uncertain");
+    return false;
+  }
+  if (s.policy.ownsDraft()) return false;
+  JsonObjectConst event = events[s.batchIndex].as<JsonObjectConst>();
+  const char* type = event["type"] | "";
+  if (!strcmp(type,"query") && s.syncing) { (void)g2NativeTerminalSend(NativeTerm::Tx::SyncEnd); return true; }
+  s.eventId = event["id"].as<uint32_t>();
+  if (!strcmp(type,"content")) {
+    if (!event["itemId"].is<uint32_t>() || !event["itemId"].as<uint32_t>() || event["itemId"].as<uint32_t>() >= 0x80000000u ||
+        !event["kind"].is<uint8_t>() || event["kind"].as<uint8_t>() < 1 || event["kind"].as<uint8_t>() > 5 ||
+        !g2NativeTerminalCopy(event["text"],s.text,sizeof(s.text),true)) { g2NativeTerminalFail("invalid-host-content"); return false; }
+    s.contentId = event["itemId"].as<uint32_t>(); s.contentKind = event["kind"].as<uint8_t>();
+    s.textLen = strlen(s.text); (void)g2NativeTerminalSend(NativeTerm::Tx::Content); return true;
+  }
+  if (!strcmp(type,"state")) {
+    if (!g2NativeTerminalStateFrom(event, false)) { g2NativeTerminalFail("host-state-uncertain"); return false; }
+    if (!s.stateDirty) { g2NativeTerminalConsumeEvent(); return false; }
+    (void)g2NativeTerminalSend(NativeTerm::Tx::State); return true;
+  }
+  if (!strcmp(type,"query")) {
+    if (event["expiresInMs"].is<uint32_t>() && !event["expiresInMs"].as<uint32_t>()) {
+      g2NativeTerminalClearQuery(); g2NativeTerminalConsumeEvent(); return false;
+    }
+    if (!g2NativeTerminalQueryFrom(event)) { g2NativeTerminalFail("query-needs-host-dashboard"); return false; }
+    (void)g2NativeTerminalSend(NativeTerm::Tx::Query); return true;
+  }
+  if (!strcmp(type,"query_clear")) {
+    if (!strcmp(event["pendingId"] | "",s.pending)) g2NativeTerminalClearQuery();
+    g2NativeTerminalConsumeEvent(); return false;
+  }
+  if (!strcmp(type,"host_required")) {
+    if (!g2NativeTerminalCopy(event["text"],s.text,sizeof(s.text))) { g2NativeTerminalFail("host-dashboard-required"); return false; }
+    s.textLen = strlen(s.text); s.contentKind = G2_TERMINAL_CONTENT_TOOL_ACTIVITY;
+    s.contentId = 0x80000000u | g2NativeTerminalNextId();
+    (void)g2NativeTerminalSend(NativeTerm::Tx::Content); return true;
+  }
+  g2NativeTerminalFail("unsupported-host-event"); return false;
+}
+static const char* g2NativeTerminalRequestOpen(bool fromMenu, uint32_t menuStartedMs, uint32_t menuOwner) {
+  if (g2NativeTerminalFirmware() == NativeFirmware::Unsupported)
+    return "Error: native Terminal requires G2 firmware 2.3.2.14";
+  if (!g2TempleReadyAtGeneration(gL) || !g2TempleReadyAtGeneration(gR) || !gL.audioNotifyChar)
+    return "Error: both glasses and the native audio connection must be ready";
+  if (g2EvenAiSessionIsActive() || g2ConversateActive() || quickNoteActive() ||
+      sttAnySessionActive() || audioCaptureBusy() || gMicStreamOn || gMicProbeActive || gMicRecFile || gMicWavFile)
+    return "Error: another speech or microphone session is active";
+  if (!httpTerminalConfigRevision()) return "Error: configure the OpenClaw HTTPS relay and Terminal host service first";
+  BlePeerOwnerSession peer;
+  const bool live = blePeerOwnerSessionSnapshot(BLE_PEER_G2_GLASSES,peer) && peer.live();
+  const uint32_t owner = live ? peer.transportEpoch : 0; secureClearString(peer.user);
+  if (!owner || (fromMenu && owner != menuOwner)) return "Error: the paired glasses need the original live Hardware One login";
+  if (!g2ControlWorkerEnsure()) return "Error: G2 control worker unavailable";
+  if (gNativeTerminalAdmission.test_and_set(std::memory_order_acquire)) return "Error: another Terminal request is being admitted";
+  gNativeTerminalInitializing.store(true,std::memory_order_release);
+  bool expected = false;
+  if (!gNativeTerminalOwned.compare_exchange_strong(expected,true)) {
+    gNativeTerminalInitializing.store(false); gNativeTerminalAdmission.clear(std::memory_order_release);
+    return "Error: Terminal is already open or closing; use g2terminal status";
+  }
+  gNativeTerminalMenuTicket.store(0, std::memory_order_release);
+  gNativeTerminal.fromMenu = fromMenu; gNativeTerminal.menuStartedMs = menuStartedMs;
+  gNativeTerminalOwner.store(owner); gNativeTerminalLeft.store(gL.connectionGeneration); gNativeTerminalRight.store(gR.connectionGeneration);
+  uint32_t epoch = (gNativeTerminalCounter.fetch_add(1) + 1) & 0x7fffffffu;
+  if (!epoch) epoch = (gNativeTerminalCounter.fetch_add(1) + 1) & 0x7fffffffu;
+  gNativeTerminalEpoch.store(epoch); gNativeTerminalSubmitGate.store(epoch);
+  gNativeTerminalSelectionFence.store(0); gNativeTerminalAppliedFence.store(0);
+  gNativeTerminalCloseRequested.store(false); gNativeTerminalReason.store("checking-glasses-firmware");
+  sendHijackShutdown("native-terminal");
+  gNativeTerminalOpenRequested.store(true); gNativeTerminalInitializing.store(false,std::memory_order_release);
+  gNativeTerminalAdmission.clear(std::memory_order_release); g2ControlWake();
+  return "G2 Terminal opening: checking glasses firmware, then Mingus sessions; use g2terminal status.";
+}
+static void g2NativeTerminalSelect(const G2TerminalRx& event) {
+  auto& s = gNativeTerminal;
+  // Selections are explicit wearer actions. They replace only the host view;
+  // any run already accepted in the prior conversation continues independently.
+  g2NativeTerminalCancelDraft(); g2NativeTerminalClearQuery(); g2NativeTerminalCancelRpc();
+  s.policy.abandon(millis()); s.eventId = 0;
+  s.choiceNotice = s.listDirty = s.changeSession = s.stateDirty = s.newResult = s.switchResult = false;
+  s.textLen = 0; memset(s.text,0,sizeof(s.text));
+  gNativeTerminalAppliedFence.store(gNativeTerminalSelectionFence.load(std::memory_order_acquire),std::memory_order_release);
+  gNativeTerminalSubmitGate.store(s.epoch,std::memory_order_release);
+  if (event.command == G2_TERMINAL_CMD_NEW_SESSION) {
+    // Stock 2.3.2.14 emits agent 0 for the single-agent selector
+    // (0x6217a4 -> 0x622876). Here it means our sole advertised Mingus agent;
+    // it never selects a different host agent. Explicit advertised ID 1 works too.
+    if (event.agentId != 0 && event.agentId != 1) { g2NativeTerminalFail("unknown-native-agent"); return; }
+    s.syncing = s.syncStarted = false;
+    g2NativeTerminalQueueRpc(NativeRpc::New); g2NativeTerminalPhase(NativeTerm::Phase::Fetching); return;
+  }
+  if (event.sessionId == kNativePrevious || event.sessionId == kNativeMore) {
+    if (event.sessionId == kNativePrevious) s.listOffset = s.listOffset >= 7 ? s.listOffset - 7 : 0;
+    else if (s.nextOffset >= 0) s.listOffset = uint32_t(s.nextOffset);
+    else { g2NativeTerminalFail("stale-list-page"); return; }
+    s.switchResult = true; s.resultSuccess = false; // pagination is not a conversation switch
+    g2NativeTerminalQueueRpc(NativeRpc::List); return;
+  }
+  for (size_t i = 0; i < s.rowCount; ++i) if (s.rows[i].id == event.sessionId && s.rows[i].handle[0]) {
+    snprintf(s.target,sizeof(s.target),"%s",s.rows[i].handle);
+    snprintf(s.targetTitle,sizeof(s.targetTitle),"%s",s.rows[i].title);
+    s.sessionId = s.rows[i].id;
+    s.syncing = s.syncStarted = false;
+    g2NativeTerminalQueueRpc(NativeRpc::Open); g2NativeTerminalPhase(NativeTerm::Phase::Fetching); return;
+  }
+  g2NativeTerminalFail("stale-native-session");
+}
+static void g2NativeTerminalOnRx(G2Temple& temple, uint32_t generation, uint32_t epoch,
+                                  const uint8_t* pb, size_t len) {
+  auto& s = gNativeTerminal;
+  G2TerminalRx event{}; if (!g2ParseTerminalRx(pb,len,&event)) return;
+  if (event.command == G2_TERMINAL_CMD_START && (epoch & 0x80000000u)) {
+    const uint32_t started = gNativeTerminalMenuStartMs.load(std::memory_order_acquire);
+    const uint32_t owner = gNativeTerminalMenuOwner.load(std::memory_order_acquire);
+    uint32_t expected = epoch;
+    if (temple.side == 'R' && generation == temple.connectionGeneration && !g2NativeTerminalActive() &&
+        !gNativeTerminalInitializing.load(std::memory_order_acquire) &&
+        uint32_t(millis()-started) < kNativeMenuWaitMs &&
+        gNativeTerminalMenuTicket.compare_exchange_strong(expected,0,std::memory_order_acq_rel)) {
+      const char* result = g2NativeTerminalRequestOpen(true,started,owner);
+      INFO_SYSTEMF("[G2-TERMINAL] native menu: %s",result);
+    }
+    return;
+  }
+  if (!epoch || epoch != s.epoch || generation != gNativeTerminalRight.load() ||
+      !g2NativeTerminalOwnerCurrent(epoch,temple)) return;
+  if (event.command == G2_TERMINAL_CMD_EXIT) { g2NativeTerminalRevoke("native-exit"); return; }
+  if (event.command == G2_TERMINAL_CMD_SESSION_SWITCH || event.command == G2_TERMINAL_CMD_NEW_SESSION) {
+    if (!gNativeTerminalCloseRequested.load() && s.opened && s.config == httpTerminalConfigRevision())
+      g2NativeTerminalSelect(event);
+    return;
+  }
+  if (!g2NativeTerminalGuardMatches(epoch,temple)) return;
+  if (event.command == G2_TERMINAL_CMD_ACK) {
+    NativeTerm::Tx completed;
+    if (!s.policy.acknowledge(event.magic,millis(),&completed)) return;
+    if (completed == NativeTerm::Tx::Close) {
+      INFO_SYSTEMF("[G2-TERMINAL] close ACK error=%u", unsigned(event.ackError));
+      g2NativeTerminalEnded(gNativeTerminalReason.load()); return;
+    }
+    if (event.ackError) { g2NativeTerminalFail("native-request-rejected"); return; }
+    switch (completed) {
+      case NativeTerm::Tx::Open: s.opened = true; g2NativeTerminalPhase(NativeTerm::Phase::Syncing); break;
+      case NativeTerm::Tx::List: s.listDirty = false; break;
+      case NativeTerm::Tx::SessionChange: s.changeSession = false; break;
+      case NativeTerm::Tx::SwitchResult: s.switchResult = false; break;
+      case NativeTerm::Tx::NewResult: s.newResult = false; break;
+      case NativeTerm::Tx::SyncBegin: s.syncStarted = true; s.more = true; break;
+      case NativeTerm::Tx::SyncEnd: s.syncing = false; s.stateDirty = true; break;
+      case NativeTerm::Tx::Asr:
+        if (s.policy.phase == NativeTerm::Phase::Confirming) {
+          g2NativeTerminalPhase(NativeTerm::Phase::AwaitConfirm);
+        }
+        break;
+      case NativeTerm::Tx::Query: if (s.queryId == s.querySentId) s.queryDirty = false; g2NativeTerminalConsumeEvent(); break;
+      case NativeTerm::Tx::Content:
+        s.textLen = 0; memset(s.text,0,sizeof(s.text)); s.choiceNotice = false; g2NativeTerminalConsumeEvent(); break;
+      case NativeTerm::Tx::State: s.stateDirty = s.state != s.sentState; g2NativeTerminalConsumeEvent(); break;
+      default: break;
+    }
+    return;
+  }
+  if (event.command == G2_TERMINAL_CMD_INTERRUPT) {
+    const auto phase = s.policy.phase;
+    if (event.sessionId == s.sessionId && s.run[0] && s.nextRpc == NativeRpc::None &&
+        s.opened && !s.syncing && !s.changeSession && !s.newResult && !s.switchResult &&
+        phase != NativeTerm::Phase::Opening && phase != NativeTerm::Phase::Fetching && phase != NativeTerm::Phase::Syncing) {
+      snprintf(s.interruptRun,sizeof(s.interruptRun),"%s",s.run);
+      g2NativeTerminalQueueRpc(NativeRpc::Interrupt);
+    }
+    return;
+  }
+  if (event.command == G2_TERMINAL_CMD_NEW_CANCEL) {
+    if (s.nextRpc == NativeRpc::New || s.rpc == NativeRpc::New) g2NativeTerminalFail("new-view-cancelled");
+    g2NativeTerminalCancelDraft(); return;
+  }
+  if (event.command == G2_TERMINAL_CMD_QUERY_REPLY) {
+    if (s.policy.pending != NativeTerm::Tx::None) {
+      if (!s.deferredQueryId && s.queryActive && event.queryId == s.queryId) {
+        s.deferredQueryId = event.queryId; s.deferredOptionId = event.optionId;
+      }
+      return;
+    }
+    if (!s.queryActive || event.queryId != s.queryId || s.questionVoice ||
+        int32_t(millis()-s.queryDeadline) >= 0 || s.nextRpc != NativeRpc::None) return;
+    if (event.optionId >= 1 && event.optionId <= s.choiceCount) {
+      auto& choice = s.choices[event.optionId-1];
+      if (!strcmp(s.queryType,"permission")) {
+        snprintf(s.decision,sizeof(s.decision),"%s",choice.key);
+        s.queryActive = false; g2NativeTerminalQueueRpc(NativeRpc::Permission);
+      } else if (s.multiSelect) {
+        choice.selected = !choice.selected;
+        snprintf(s.text,sizeof(s.text),"%s: %s",choice.selected ? "Selected" : "Unselected",choice.label);
+        s.textLen = strlen(s.text); s.contentId = 0x80000000u | g2NativeTerminalNextId();
+        s.contentKind = G2_TERMINAL_CONTENT_ANSWER; s.choiceNotice = true;
+        s.queryId = g2NativeTerminalNextId(); s.queryDirty = true;
+      } else {
+        choice.selected = true; s.queryActive = false; g2NativeTerminalQueueRpc(NativeRpc::Question);
+      }
+    } else if (event.optionId == 100 && s.multiSelect) {
+      bool any = false; for (size_t i=0;i<s.choiceCount;++i) any |= s.choices[i].selected;
+      if (any) { s.queryActive = false; g2NativeTerminalQueueRpc(NativeRpc::Question); }
+      else { s.queryId = g2NativeTerminalNextId(); s.queryDirty = true; }
+    } else if (event.optionId == 101 && s.allowText) {
+      s.questionVoice = true; s.queryDirty = false; s.state = G2_TERMINAL_STATE_IDLE; s.stateDirty = true;
+      g2NativeTerminalPhase(NativeTerm::Phase::Idle);
+      snprintf(s.text,sizeof(s.text),"Hold to speak an answer, then confirm the transcript.");
+      s.textLen = strlen(s.text); s.contentKind = G2_TERMINAL_CONTENT_ANSWER;
+      s.contentId = 0x80000000u | g2NativeTerminalNextId(); s.choiceNotice = true;
+    } else if (event.optionId == 102 && !strcmp(s.queryType,"question")) {
+      s.questionCancel = true; s.queryActive = false; g2NativeTerminalQueueRpc(NativeRpc::Question);
+    }
+    return;
+  }
+  if (event.command == G2_TERMINAL_CMD_AWAIT_DISMISS) {
+    // Dismissing an approval is not denial or approval. Keep the host pending.
+    if (event.sessionId == s.sessionId) { g2NativeTerminalClearQuery(); g2NativeTerminalCancelDraft();
+      g2NativeTerminalPhase(NativeTerm::Phase::Reply); }
+    return;
+  }
+  // Display/list focus, filter and thinking-word sync carry no permission to
+  // execute. This adapter has one agent; all supplied sessions already use it.
+  if (event.command != G2_TERMINAL_CMD_VOICE) return;
+  INFO_SYSTEMF("[G2-TERMINAL] voice=%u phase=%u host=%u rpc=%u queued=%u",
+      unsigned(event.voiceCommand),unsigned(s.policy.phase),unsigned(s.hostState),unsigned(s.rpc),unsigned(s.nextRpc));
+  if (event.voiceCommand == 4 && s.policy.phase == NativeTerm::Phase::Confirming && s.policy.pending == NativeTerm::Tx::Asr) {
+    s.deferredConfirm = true; return;
+  }
+  if (event.voiceCommand == 1 && s.policy.phase != NativeTerm::Phase::Idle && s.policy.phase != NativeTerm::Phase::Recording) {
+    g2NativeTerminalFail("voice-start-while-busy"); return;
+  }
+  if (!s.policy.voice(event.voiceCommand)) return;
+  gNativeTerminalPhase.store(uint8_t(s.policy.phase));
+  if (event.voiceCommand == 1) {
+    if ((s.hostState != G2_TERMINAL_STATE_IDLE && !s.questionVoice) || (s.queryActive && !s.questionVoice) ||
+        sttAnySessionActive() || (s.nextRpc != NativeRpc::None && s.nextRpc != NativeRpc::Poll) ||
+        (s.rpc != NativeRpc::None && s.rpc != NativeRpc::Poll)) { g2NativeTerminalFail("speech-or-host-busy"); return; }
+    uint32_t claimed = s.epoch | 0x80000000u; (void)gNativeTerminalSubmitGate.compare_exchange_strong(claimed,s.epoch);
+    if (gNativeTerminalSubmitGate.load() != s.epoch) { g2NativeTerminalFail("view-expired"); return; }
+    s.deferredConfirm = false; s.promptLen = 0; memset(s.prompt,0,sizeof(s.prompt)); s.voiceMs = millis();
+    TranscriptOptions noSave{}; char error[96] = {};
+    if (!sttBeginContinuousG2Native(s.owner,gNativeTerminalLeft.load(),&s.speechToken,error,sizeof(error),&noSave,g2ControlWake))
+      g2NativeTerminalFail("speech-unavailable");
+  } else if (event.voiceCommand == 2 || event.voiceCommand == 3) {
+    if (!sttRequestFinish(s.owner,s.speechToken)) g2NativeTerminalFail("speech-finish-failed");
+  } else if (event.voiceCommand == 5) {
+    g2NativeTerminalCancelDraft();
+    if (s.questionVoice && s.queryActive) { s.questionVoice = false; s.queryDirty = true; s.queryId = g2NativeTerminalNextId(); }
+  } else if (event.voiceCommand == 4) {
+    if (!s.promptLen || (s.nextRpc != NativeRpc::None && s.nextRpc != NativeRpc::Poll) ||
+        (s.rpc != NativeRpc::None && s.rpc != NativeRpc::Poll) || !g2NativeTerminalGuardMatches(s.epoch,gR) ||
+        (!s.questionVoice && s.hostState != G2_TERMINAL_STATE_IDLE) ||
+        (s.questionVoice && (s.hostState != G2_TERMINAL_STATE_AWAIT_USER || !s.queryActive || int32_t(millis()-s.queryDeadline) >= 0))) {
+      g2NativeTerminalFail("confirmation-expired-or-host-busy"); return;
+    }
+    uint32_t expected = s.epoch;
+    if (!gNativeTerminalSubmitGate.compare_exchange_strong(expected,s.epoch | 0x80000000u)) {
+      g2NativeTerminalFail("confirmation-revoked"); return;
+    }
+    g2NativeTerminalQueueRpc(s.questionVoice ? NativeRpc::Question : NativeRpc::Prompt);
+    if (s.questionVoice) s.queryActive = false;
+  }
+}
+static void g2NativeTerminalTick() {
+  auto& s = gNativeTerminal;
+  if (!g2NativeTerminalActive() || gNativeTerminalInitializing.load(std::memory_order_acquire)) return;
+  const uint32_t now = millis(), epoch = gNativeTerminalEpoch.load(std::memory_order_acquire);
+  if (!epoch) { g2NativeTerminalEnded(gNativeTerminalReason.load()); return; }
+  if (gNativeTerminalOpenRequested.exchange(false)) {
+    s.epoch = epoch; s.config = httpTerminalConfigRevision(); s.owner = {SOURCE_G2_GLASSES,gNativeTerminalOwner.load()};
+    s.policy.abandon(now); s.openingMs = now; s.opened = s.openAttempted = false;
+    s.firmwareReady = s.firmwareQuerySent = false; s.firmwareQueryMs = 0;
+    s.listOffset = 0; s.nextOffset = -1; s.rowCount = 0; s.cursor = 0;
+    s.syncing = s.syncStarted = s.listDirty = s.changeSession = s.newResult = s.switchResult = false;
+    s.choiceNotice = s.stateDirty = false; s.more = false; s.hostState = s.state = G2_TERMINAL_STATE_IDLE;
+    s.rpcToken = 0; s.rpc = s.nextRpc = NativeRpc::None;
+    s.instance[0] = s.view[0] = s.run[0] = 0;
+    g2NativeTerminalClearQuery(); g2NativeTerminalCancelDraft(); g2NativeTerminalDropBatch();
+    g2NativeTerminalPhase(NativeTerm::Phase::Opening);
+  }
+  if (!g2NativeTerminalOwnerCurrent(epoch,gR)) { g2NativeTerminalEnded("owner-or-link-lost"); return; }
+  if (s.fromMenu && !s.openAttempted && uint32_t(now-s.menuStartedMs) >= kNativeMenuWaitMs)
+    g2NativeTerminalFail("native-menu-open-timeout-retry");
+  if (!s.config || httpTerminalConfigRevision() != s.config) g2NativeTerminalFail("relay-configuration-changed");
+  if (gNativeTerminalSelectionFence.load() != gNativeTerminalAppliedFence.load()) g2NativeTerminalFail("selection-event-lost");
+  if (gNativeTerminalCloseRequested.load() && s.policy.phase != NativeTerm::Phase::Closing) {
+    g2NativeTerminalCancelDraft(); g2NativeTerminalClearQuery(); g2NativeTerminalCancelRpc(); s.policy.abandon(now);
+    if (!s.openAttempted) { g2NativeTerminalEnded(gNativeTerminalReason.load()); return; }
+    g2NativeTerminalPhase(NativeTerm::Phase::Closing); gNativeTerminalClosingWire.store(true);
+    if (!g2NativeTerminalSend(NativeTerm::Tx::Close)) g2NativeTerminalEnded(gNativeTerminalReason.load());
+    return;
+  }
+  if (s.policy.timedOut(now)) {
+    if (s.policy.phase == NativeTerm::Phase::Closing) {
+      INFO_SYSTEMF("[G2-TERMINAL] close ACK timeout");
+      g2NativeTerminalEnded(gNativeTerminalReason.load());
+    } else {
+      g2NativeTerminalFail("native-ack-timeout");
+    }
+    return;
+  }
+  if (s.policy.phase == NativeTerm::Phase::Closing) return;
+  if (!s.firmwareReady) {
+    const NativeFirmware firmware = g2NativeTerminalFirmware();
+    if (firmware == NativeFirmware::Unsupported) {
+      g2NativeTerminalEnded("unsupported-firmware-requires-2.3.2.14"); return;
+    }
+    if (firmware == NativeFirmware::Unknown) {
+      if (!s.firmwareQuerySent) {
+        // RX is drained by this same control owner. Send BASIC once and yield;
+        // its generation-checked settings reply fills both firmware strings.
+        // Use the existing fragmented sender even for this small PB so every
+        // physical write keeps the Terminal owner/config/connection fence.
+        s.firmwareQuerySent = true; s.firmwareQueryMs = now;
+        uint8_t frame[64]; const uint8_t seq = allocSeq(); G2EnvelopeView request{};
+        const size_t length = g2BuildSettingBasicRequest(seq,g2NextSettingsMagic(),frame,sizeof(frame));
+        if (!length || !g2ParseEnvelope(frame,length,&request) ||
+            !sendPbFragmented(gR,seq,request.sid,request.flag,request.payload,request.payloadLen,
+                gNativeTerminalRight.load(std::memory_order_acquire),nullptr,0,0,0,s.epoch)) {
+          g2NativeTerminalEnded("firmware-query-failed-wake-glasses-and-retry");
+        } else gNativeTerminalReason.store("waiting-for-glasses-firmware");
+      } else if (uint32_t(now-s.firmwareQueryMs) >= kNativeFirmwareWaitMs) {
+        g2NativeTerminalEnded("firmware-metadata-unavailable-wake-glasses-and-retry");
+      }
+      return;
+    }
+    s.firmwareReady = true;
+    gNativeTerminalReason.store("loading-host-sessions");
+    g2NativeTerminalQueueRpc(NativeRpc::List);
+  }
+  if (s.queryActive && int32_t(now-s.queryDeadline) >= 0) {
+    g2NativeTerminalClearQuery();
+    if (s.nextRpc == NativeRpc::Permission || s.nextRpc == NativeRpc::Question) s.nextRpc = NativeRpc::None;
+    s.stateDirty = true;
+  }
+  g2NativeTerminalRpcRead();
+  if (gNativeTerminalCloseRequested.load()) return;
+  if (s.policy.phase == NativeTerm::Phase::Recording || s.policy.phase == NativeTerm::Phase::Finishing) {
+    if (uint32_t(now-s.voiceMs) >= 90000) { g2NativeTerminalFail("speech-timeout"); return; }
+    if (!sttSnapshot(s.owner,s.speechToken,&s.speech)) { g2NativeTerminalFail("speech-session-lost"); return; }
+    if (sttReadChunk(s.owner,s.speechToken,&s.chunk)) {
+      const size_t n = strnlen(s.chunk.text,sizeof(s.chunk.text)), separator = n && s.promptLen ? 1 : 0;
+      if (n + separator > 512-s.promptLen) { g2NativeTerminalFail("transcript-over-512-bytes"); return; }
+      if (separator) s.prompt[s.promptLen++] = ' ';
+      memcpy(s.prompt+s.promptLen,s.chunk.text,n); s.promptLen += n; s.prompt[s.promptLen] = 0;
+      if (!sttAcknowledgeChunk(s.owner,s.speechToken,s.chunk.sequence)) g2NativeTerminalFail("speech-session-changed");
+      s.chunk = {};
+    } else if (!s.speech.workerActive) {
+      if (s.policy.phase != NativeTerm::Phase::Finishing || s.speech.state != STTState::Done || !s.promptLen) {
+        g2NativeTerminalFail("no-complete-speech"); return;
+      }
+      s.speechToken = 0; g2NativeTerminalPhase(NativeTerm::Phase::Confirming);
+    }
+  }
+  if (s.policy.phase == NativeTerm::Phase::Submitting && s.batch && !s.rpcToken &&
+      s.policy.pending == NativeTerm::Tx::None) {
+    // A confirmed draft must not wait for presentation which it intentionally
+    // paused. Re-fetch unpresented absolute upserts after submission; retaining
+    // the ACKed cursor prevents either lost history or replayed user actions.
+    g2NativeTerminalDropBatch();
+  }
+  if (s.nextRpc != NativeRpc::None && !s.batch) (void)g2NativeTerminalRpcStart();
+  if (s.policy.pending != NativeTerm::Tx::None) return;
+  if (!s.opened) {
+    if (uint32_t(now-s.openingMs) >= 60000) { g2NativeTerminalFail("host-or-renderer-open-timeout"); return; }
+    if (s.view[0] && !g2TerminalWireBlocksCreate() && !g2FsmHijackActive() && !g2LensGetState().containerReady)
+      (void)g2NativeTerminalSend(NativeTerm::Tx::Open);
+    return;
+  }
+  if (uint32_t(now-s.policy.lastTxMs) >= NativeTerm::HeartbeatMs) { (void)g2NativeTerminalSend(NativeTerm::Tx::Heartbeat); return; }
+  if (s.deferredConfirm && s.policy.phase == NativeTerm::Phase::AwaitConfirm) {
+    s.deferredConfirm = false;
+    const uint8_t confirmed[] = {0x08,0xa2,0x01,0xb2,0x01,0x02,0x08,0x04};
+    g2NativeTerminalOnRx(gR,gNativeTerminalRight.load(),s.epoch,confirmed,sizeof(confirmed)); return;
+  }
+  if (s.deferredQueryId) {
+    uint8_t answer[32]; size_t length = 0, nested = 0;
+    const uint32_t query = s.deferredQueryId, option = s.deferredOptionId;
+    s.deferredQueryId = s.deferredOptionId = 0;
+    if (g2PbWriteUint32(answer,sizeof(answer),&length,1,G2_TERMINAL_CMD_QUERY_REPLY) &&
+        g2PbBeginNested(answer,sizeof(answer),&length,23,&nested) &&
+        g2PbWriteUint32(answer,sizeof(answer),&length,1,query) &&
+        g2PbWriteUint32(answer,sizeof(answer),&length,2,option) && g2PbEndNested(answer,sizeof(answer),&length,nested))
+      g2NativeTerminalOnRx(gR,gNativeTerminalRight.load(),s.epoch,answer,length);
+    return;
+  }
+  if (s.policy.phase == NativeTerm::Phase::Confirming) { (void)g2NativeTerminalSend(NativeTerm::Tx::Asr); return; }
+  if (s.policy.ownsDraft()) {
+    // Empty snapshots can be consumed/polled while listening. A nonempty batch
+    // stays bounded and waits; it must not replace native listening or ASR UI.
+    (void)g2NativeTerminalBatchNext();
+    if (!s.batch && !s.rpcToken && s.nextRpc == NativeRpc::None &&
+        s.policy.phase != NativeTerm::Phase::Submitting && uint32_t(now-s.pollMs) >= 500) {
+      s.pollMs = now; g2NativeTerminalQueueRpc(NativeRpc::Poll); (void)g2NativeTerminalRpcStart();
+    }
+    return;
+  }
+  // Stock NEW_RESULT success resets its current session to UINT32_MAX and
+  // clears content (0x61f706 -> 0x61a08a). Send it before authoritative binding,
+  // otherwise a late result discards the LIST/SessionChange/sync we just sent.
+  if (s.newResult) { (void)g2NativeTerminalSend(NativeTerm::Tx::NewResult); return; }
+  if (s.listDirty) { (void)g2NativeTerminalSend(NativeTerm::Tx::List); return; }
+  if (s.changeSession) { (void)g2NativeTerminalSend(NativeTerm::Tx::SessionChange); return; }
+  if (s.syncing && !s.syncStarted) { (void)g2NativeTerminalSend(NativeTerm::Tx::SyncBegin); return; }
+  if (s.choiceNotice) { (void)g2NativeTerminalSend(NativeTerm::Tx::Content); return; }
+  if (s.queryDirty) { (void)g2NativeTerminalSend(NativeTerm::Tx::Query); return; }
+  if (g2NativeTerminalBatchNext()) return;
+  if (gNativeTerminalCloseRequested.load()) return;
+  if (!s.batch && !s.rpcToken && s.nextRpc == NativeRpc::None) {
+    if (s.syncing && s.syncStarted && !s.more) { (void)g2NativeTerminalSend(NativeTerm::Tx::SyncEnd); return; }
+    if (s.switchResult) { (void)g2NativeTerminalSend(NativeTerm::Tx::SwitchResult); return; }
+    if (s.more || uint32_t(now-s.pollMs) >= 500) {
+      s.pollMs = now; s.more = false; g2NativeTerminalQueueRpc(NativeRpc::Poll); (void)g2NativeTerminalRpcStart();
+    }
+  }
+  if (s.stateDirty) { (void)g2NativeTerminalSend(NativeTerm::Tx::State); return; }
+  const auto phase = s.policy.phase;
+  if (!s.syncing && phase != NativeTerm::Phase::Recording && phase != NativeTerm::Phase::Finishing &&
+      phase != NativeTerm::Phase::Confirming && phase != NativeTerm::Phase::AwaitConfirm &&
+      phase != NativeTerm::Phase::Submitting && !(phase == NativeTerm::Phase::Fetching && (s.rpcToken || s.nextRpc != NativeRpc::None))) {
+    g2NativeTerminalPhase(s.queryActive && !s.questionVoice ? NativeTerm::Phase::AwaitChoice :
+        s.state == G2_TERMINAL_STATE_IDLE || s.questionVoice ? NativeTerm::Phase::Idle : NativeTerm::Phase::Reply);
+  }
+}
+#else
+bool g2NativeTerminalActive() { return false; }
+static void g2NativeTerminalRevoke(const char*) {}
+static bool g2NativeTerminalGuardMatches(uint32_t, const G2Temple&) { return false; }
+static uint32_t g2NativeTerminalEarlyRx(const G2Temple&, const uint8_t*, size_t) { return 0; }
+static void g2NativeTerminalOnRx(G2Temple&, uint32_t, uint32_t, const uint8_t*, size_t) {}
+static void g2NativeTerminalTick() {}
+static const char* g2NativeTerminalRequestOpen(bool, uint32_t, uint32_t) { return "Error: native Terminal needs local STT and the HTTP agent source in this build"; }
+#endif
+// End native Terminal adapter.
+
 static bool g2PageHoldsHijackAlive() {
 #if ENABLE_LOCAL_STT
   if (g2GetHijackPage() == G2_HIJACK_PAGE_TRANSCRIPTION && sttAnySessionActive())
@@ -16040,6 +17337,13 @@ static void heartbeatWorkerTask(void* /*arg*/) {
                             : (g2MicCaptureActive || g2EvenAiSessionIsActive() || g2ConversateActive()
                                || micRecDrainPending)
                                 ? 1000u : 6000u;
+#if ENABLE_LOCAL_STT && ENABLE_LLM_BACKEND
+    // A local answer has no UART RX wake. Poll its bounded reply cursor often
+    // enough to stream smoothly; retain the ordinary idle/CM5 cadence.
+    if (gEvenAiLocal.exchange && !gEvenAiLocal.done && ownerWaitMs > 100u)
+      ownerWaitMs = 100u;
+#endif
+    if (g2NativeTerminalActive() && ownerWaitMs > 100u) ownerWaitMs = 100u;
     // Deadline-aware rather than five nominal 1-second laps: RX wakes and
     // unrelated owner work must not add an extra second to every heartbeat.
     const uint32_t conversateWaitMs = gConversateDeferredPrep ? 100 :
@@ -16141,7 +17445,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     while (g2RxEvenAiCtrlDequeue(&p)) {
       G2Temple& temple = (p.side == 'L') ? gL : gR;
       processNotify(temple, p.data, p.len, p.generation, p.lifecycleEpoch,
-                    p.presentationEpoch, p.conversateEpoch);
+                    p.presentationEpoch, p.conversateEpoch, p.nativeTerminalEpoch);
       if (gBeatTaskStop) break;
     }
     if (gBeatTaskStop) break;
@@ -16157,7 +17461,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     while (g2RxPacketDequeue(&p)) {
       G2Temple& temple = (p.side == 'L') ? gL : gR;
       processNotify(temple, p.data, p.len, p.generation, p.lifecycleEpoch,
-                    p.presentationEpoch, p.conversateEpoch);
+                    p.presentationEpoch, p.conversateEpoch, p.nativeTerminalEpoch);
       if (gBeatTaskStop) break;
     }
     if (gBeatTaskStop) break;
@@ -16165,6 +17469,8 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     // Run after the complete ordinary RX drain so a return-to-224 or 4094
     // cancellation queued in the same burst wins over timer expiry.
     g2SyncLifecycleTick();
+
+    g2NativeTerminalTick();  // all queued EXIT/ACK/voice transitions win before TX
 
     // Process native EXIT/ACK first, then renew only a still-live lease.
     g2ConversateTick();
@@ -16235,6 +17541,10 @@ static void heartbeatWorkerTask(void* /*arg*/) {
       }
     }
   }
+  g2NativeTerminalRevoke("shutdown");
+  g2NativeTerminalTick();
+  (void)g2EvenAiTerminate(g2EvenAiCurrentExchangeId(), "shutdown");
+  g2EvenAiLocalCancel();
   g2ConversateStop(G2ConversateSession::Stop::Shutdown);
   portENTER_CRITICAL(&gConversateMux);
   gConversateRequest = 0;
@@ -20681,8 +21991,18 @@ static bool sendRebuildTextNamedAndWait(G2Temple& arm,
                                         const char* containerName,
                                         const char* text,
                                         const G2ContainerGeom& geom,
-                                        bool eventCapture) {
+                                        bool eventCapture,
+                                        uint32_t expectedGeneration = 0,
+                                        uint32_t expectedLifecycleEpoch = 0,
+                                        uint32_t expectedPresentationEpoch = 0) {
   if (!containerName || !*containerName) return false;
+  const auto fenceCurrent = [&]() {
+    return (!expectedLifecycleEpoch ||
+            g2LensTxFenceCurrent(arm, expectedGeneration, expectedLifecycleEpoch)) &&
+        (!expectedPresentationEpoch ||
+         expectedPresentationEpoch == g2PresentationEpochCurrent());
+  };
+  if (!fenceCurrent()) return false;
   if (!armRebuildSlot("REBUILD-text(named)")) return false;
 
   constexpr size_t kPbCap = 8192;
@@ -20701,8 +22021,14 @@ static bool sendRebuildTextNamedAndWait(G2Temple& arm,
     free(pb);
     return false;
   }
+  if (!fenceCurrent()) {
+    free(pb);
+    return false;
+  }
   bool sentOk = sendPbFragmented(arm, allocSeq(), G2_SID_EVEN_CORE,
-                                  G2_FLAG_REQUEST, pb, pbLen);
+                                  G2_FLAG_REQUEST, pb, pbLen, expectedGeneration,
+                                  nullptr, 0, expectedLifecycleEpoch,
+                                  expectedPresentationEpoch);
   if (sentOk) {
     DEBUG_G2F("[G2] REBUILD-text(name=%s): pb=%u B sent",
               containerName, (unsigned)pbLen);
@@ -20712,7 +22038,8 @@ static bool sendRebuildTextNamedAndWait(G2Temple& arm,
     DEBUG_G2F("[G2] REBUILD-text(name=%s): send failed", containerName);
     return false;
   }
-  return waitRebuildAck("REBUILD-text(named)");
+  if (!fenceCurrent()) return false;
+  return waitRebuildAck("REBUILD-text(named)") && fenceCurrent();
 }
 
 // UPDATE_TEXT (Cmd=5 = APP_UPDATE_TEXT_DATA_PACKET) — per-widget text data
@@ -24530,6 +25857,7 @@ static uint8_t*          gSessionScratch = nullptr;
 static size_t            gSessionScratchCap = 0;
 
 static bool g2SessionLifecycleAllows(uint32_t lifecycleEpoch) {
+  if (g2NativeTerminalActive()) return false;
   if (xTaskGetCurrentTaskHandle() != gSessionTaskH) return true;
   const uint32_t running = __atomic_load_n(
       &gSessionRunningLifecycleEpoch, __ATOMIC_ACQUIRE);
@@ -26610,6 +27938,8 @@ static const char* cmd_g2evenai(const String& argsInput) {
 
   if (sub == "ask" || sub == "reply" || sub == "replypart" ||
       sub == "replyend" || sub == "exit") {
+    if (g2EvenAiSessionSnapshot().local)
+      return "Error: G2: local voice exchange cannot be controlled by the UART host";
     // Coordinated CM5/XIAO deployment is the normal path, but fail safe if a
     // stale daemon reaches a newer firmware.  Merely rejecting an untagged
     // mutation would leave the native card alive on our heartbeats until the
@@ -26721,11 +28051,12 @@ static const char* cmd_g2evenai(const String& argsInput) {
   const Cm5PresenceSnapshot cm5 =
       cm5PresenceSnapshotForSession(uartSession.activeEpoch, millis());
   snprintf(buf, sizeof(buf),
-           "EvenAI session: %s id=%s arm=%c gen=%lu bound_epoch=%lu "
+           "EvenAI session: %s provider=%s owner_epoch=%lu id=%s arm=%c gen=%lu bound_epoch=%lu "
            "host_uart=%s active_epoch=%lu last_epoch=%lu last_event=%s "
            "cm5=%s cm5_fresh=%d cm5_seen=%d cm5_age=%lums cm5_cmd=%d "
            "(hb=%lu, idle=%lums)",
-           s.active ? "active" : "idle", id,
+           s.active ? "active" : "idle", s.local ? "local-stt/chat" : "cm5",
+           (unsigned long)s.ownerEpoch, id,
            s.active ? s.armSide : '-',
            (unsigned long)(s.active ? s.armGeneration : 0),
            (unsigned long)s.uartSessionEpoch,
@@ -27710,8 +29041,38 @@ static const char* cmd_g2conversate(const String& argsInput) {
       : "G2 Conversate: user-ended mode queued (no duration cutoff). Open Conversate; Skip & Start if offered. Exit ends one session; off disables. No STT/file yet.";
 }
 
+static const char* cmd_g2terminal(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs ca(argsInput);
+  const String op = ca.count() ? ca.arg(0) : String("status");
+  if (ca.count() > 1) return "Usage: g2terminal open | status | close";
+  if (op == "open") return g2NativeTerminalRequestOpen();
+#if ENABLE_LOCAL_STT && ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_HTTP
+  if (op == "close") {
+    gNativeTerminalMenuTicket.store(0, std::memory_order_release);
+    if (!g2NativeTerminalActive()) return "G2 Terminal is closed";
+    gNativeTerminalSubmitGate.store(0, std::memory_order_release);
+    gNativeTerminalReason.store("user-close", std::memory_order_release);
+    gNativeTerminalCloseRequested.store(true, std::memory_order_release);
+    g2ControlWake();
+    return "G2 Terminal close queued; submitted chat may continue. Use status to confirm.";
+  }
+  if (op == "status") {
+    EXT_RAM_BSS_ATTR static char status[320];
+    snprintf(status, sizeof(status), "G2 Terminal: %s; reason=%s; owner=%s; Mingus host sessions; lenses retain latest 64 content items. Closing stops display/speech, not accepted agent work.",
+        NativeTerm::name(NativeTerm::Phase(gNativeTerminalPhase.load(std::memory_order_acquire))),
+        gNativeTerminalReason.load(std::memory_order_acquire), g2NativeTerminalActive() ? "held" : "released");
+    return status;
+  }
+#else
+  if (op == "status" || op == "close") return "G2 Terminal unavailable: this build needs local STT and HTTP source";
+#endif
+  return "Usage: g2terminal open | status | close";
+}
+
 static const char* cmd_g2micon(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (g2NativeTerminalActive()) return "Error: native mic owned by Terminal; use g2terminal close";
   if (g2ConversateActive()) return "Error: native mic owned by Conversate; use g2conversate stop";
   EXT_RAM_BSS_ATTR static char ret[200];
   CommandArgs ca(argsInput);
@@ -27737,6 +29098,7 @@ static const char* cmd_g2micon(const String& argsInput) {
 
 static const char* cmd_g2micoff(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (g2NativeTerminalActive()) return "Error: native mic owned by Terminal; use g2terminal close";
   if (g2ConversateActive()) return "Error: native mic owned by Conversate; use g2conversate stop";
   EXT_RAM_BSS_ATTR static char ret[160];
   G2Temple* arm = pickMicArm("g2micoff", true);
@@ -28680,6 +30042,7 @@ extern const CommandEntry g2Commands[] = {
   { "g2ai",         "Front-pane AI card (full pipeline): g2ai <text>", false, cmd_g2ai, "Usage: g2ai <text>" },
   { "g2ai-noask",   "Variant: skip ASK step: g2ai-noask <text>",       false, cmd_g2ai_noask, "Usage: g2ai-noask <text>" },
   { "g2ai-direct",  "Variant: CTRL+REPLY only: g2ai-direct <text>",    false, cmd_g2ai_direct, "Usage: g2ai-direct <text>" },
+  { "g2terminal", "Native Terminal voice/chat (firmware 2.3.2.14)", false, cmd_g2terminal, "Usage: g2terminal open | status | close. Browse Mingus host sessions and recent history; no automatic submission." },
   { "g2evenai",     "Push into the matching live Hey-Even exchange (strict 16-hex ID required)", false, cmd_g2evenai, "Usage: g2evenai <askid|replyid|replypartid|replyendid|exitid> <16hex-id> [text]\n  status:       show active exchange ID/arm/generation\n  capabilities: show guarded command contract\n  replypartid:  stream one delta (leading glue preserved)\n  legacy ask/reply/replypart/replyend/exit fail closed; use g2ai for deliberate bench cards" },
   { "g2aih",        "Front-pane card with custom heading: g2aih <heading>|<body>", false, cmd_g2aih, "Usage: g2aih <heading>|<body>  (no | = whole text as body)" },
   { "g2aiconfig",   "Send EvenAI CONFIG (cmd=10): g2aiconfig [voiceSwitch] [streamSpeed] [duplexMode]",  false, cmd_g2aiconfig, "Usage: g2aiconfig [voiceSwitch] [streamSpeed] [duplexMode]  (defaults: 0 80 0; use - to omit a field)" },
@@ -32951,6 +34314,15 @@ void g2KbdPadHandleTap(uint32_t idx) {
     g2TextEntryPadEvent('\x1b');
 }
 
+bool g2KbdPadStartMic() {
+  if (!gKbdPad.active || !gKbdPad.surfaceLive || !gKbdPad.dictationPermitted ||
+      gKbdPad.page == kKbdPageMic || !kbdPadSurfaceEligible()) return false;
+  // Reuse the manual Mic / Keys action; it owns countdown, capture and the
+  // existing transport-failure/cancellation path. It never submits the draft.
+  g2KbdPadHandleTap(kKbdRowMic);
+  return gKbdPad.active && gKbdPad.page == kKbdPageMic;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Keyboard chunking A/B test — interactive, test-only session
 // ─────────────────────────────────────────────────────────────────────
@@ -35007,295 +36379,196 @@ static const char* cmd_g2health(const String& argsInput) {
 
 #if ENABLE_LLM_BACKEND
 // ─────────────────────────────────────────────────────────────────────
-// LLM viewer (g2LlmPageWorker) — streaming LLM output plus native prompt
-// entry on the
-// lens. Left ~1/3: control list "lstLlm". Right ~2/3: a live text pane
-// "llmChat" that follows the current/last generation and appends tokens
-// as they arrive via UPDATE_TEXT (Cmd=5) — which patches the text child
-// in place WITHOUT blanking the list (the documented happy path for a
-// list+text compound). The page follows prompts started anywhere and can
-// launch the shared Mic / Keys text-entry surface for a new on-glasses turn.
-// See docs/G2_LLM_VIEWER_PLAN.md.
-//
-// HW-VALIDATE: the proven side-by-side "big pane" (map/camera) uses an
-// IMAGE tile; a native TEXT child at a side geometry is expressible in the
-// protocol (writeTextChildSpec carries x/y/w/h) but unproven on this
-// firmware. If the pane renders wrong, adjust kLlmChatGeom (or fall back
-// to the top-bar text layout the Status page uses).
+// Full-width LLM reply reader. The session worker owns text, pagination and
+// wire updates; the existing fenced text/hold dispatchers only post intent.
+// Menus keep Ask/New chat/Model actions. A hold opens the same draft/review
+// flow with microphone startup, without clearing or resubmitting a chat turn.
 // ─────────────────────────────────────────────────────────────────────
-static const char* const kLlmRows[] = {
-  "<- Back",            // 0
-  "Ask (Mic / Keys)",   // 1
-  "New chat",           // 2
-  "Re-run last",        // 3
+struct LlmPageArgs {
+  void (*onDone)();
+  uint32_t lifecycleEpoch;
 };
-static constexpr size_t kLlmRowCount = sizeof(kLlmRows) / sizeof(kLlmRows[0]);
 
-// Canvas ~576x288 (see the map page's list{8,8,264,272}+image geometry).
-// List left ~1/3; chat pane right ~2/3.
-static const G2ContainerGeom kLlmListGeom = {   8, 8, 180, 272 };
-static const G2ContainerGeom kLlmChatGeom = { 196, 8, 372, 272 };
-static constexpr uint32_t    kLlmChatChildId   = 2;
 static constexpr const char* kLlmChatChildName = "llmChat";
 
-// UPDATE_TEXT rides a single 256 B envelope (content + name/id/framing
-// overhead), so keep the visible tail conservatively small; an over-cap
-// build silently fails (frozen pane) rather than fragmenting. 180 B is a
-// safe glanceable "latest tokens" tail (like the OLED newest-lines).
-// Scroll-back over the full answer is a later phase.
-static constexpr size_t kLlmTailCap = 180;
-
-// Worker hard cap so a silent >60 s read isn't watchdog-exited mid-gen and
-// an idle page can't linger forever (mirrors the camera stream cap).
-static constexpr uint32_t kLlmSafetyCapMs = 5u * 60u * 1000u;
-
-struct LlmPageArgs { void (*onDone)(); };
-
-// PSRAM scratch for assembling the conversation before taking its tail.
-// Single-writer (the LLM worker task), so a shared static is safe.
-static EXT_RAM_BSS_ATTR char sLlmScratch[1536];
-
-// Compose the visible chat tail: recent "You: <prompt>" / "AI: <answer>"
-// turns, keeping the LAST (cap-1) bytes so newest content wins on the small
-// pane. Reads chat turns (internally mutexed) + the finished-turn fallback
-// so an answer that completed before the first poll still shows.
-// Append to sLlmScratch, dropping from the FRONT when it is full, so the
-// scratch always holds the NEWEST bytes regardless of turn order or turn size.
-//
-// This replaces a write-until-full loop that carried two defects, both of which
-// only became reachable once the 127-byte truncation below was fixed:
-//
-//  1. The tag went in via snprintf and advanced `pos` by its RETURN value —
-//     which is the WOULD-BE length, not what was written. Enter a turn with
-//     pos == 1534 (legal; the guard was pos < 1535), snprintf writes one byte
-//     and returns 5, pos becomes 1539, and the terminator write lands 4 bytes
-//     past a 1536-byte PSRAM allocation. Swept: reachable in 0.49% of turn-length
-//     combinations, worst write index 1539. Reproduced under ASan.
-//  2. The per-turn clamp truncated at the TAIL, so a long OLDEST turn filled the
-//     scratch and the newest turn — the streaming answer, the only part anyone
-//     is looking at — contributed nothing. Measured: 0 of 60 bytes.
-//
-// `pos` can no longer exceed sizeof(sLlmScratch) - 1, so the terminator write is
-// in bounds by construction rather than by argument.
-static void g2LlmScratchAppend(size_t& pos, const char* src, size_t n) {
-  if (!src || n == 0) return;
-  const size_t capacity = sizeof(sLlmScratch) - 1;
-  if (n >= capacity) {                       // fragment alone overflows: keep its tail
-    memcpy(sLlmScratch, src + (n - capacity), capacity);
-    pos = capacity;
-    return;
-  }
-  if (pos + n > capacity) {                  // make room by dropping the oldest bytes
-    const size_t drop = pos + n - capacity;
-    memmove(sLlmScratch, sLlmScratch + drop, pos - drop);
-    pos -= drop;
-  }
-  memcpy(sLlmScratch + pos, src, n);
-  pos += n;
+static bool g2LlmReaderCurrent() {
+  return gLlmPageActive.load(std::memory_order_acquire) &&
+      g2GetHijackPage() == G2_HIJACK_PAGE_LLM_READER;
 }
 
-static size_t g2LlmBuildChatTail(char* out, size_t cap) {
-  if (!out || cap == 0) return 0;
-  size_t pos = 0;
-  const int turns = chatGetTurnCount();
-  const int startTurn = (turns > 4) ? turns - 4 : 0;  // last ~2 exchanges
-  for (int i = startTurn; i < turns; i++) {
-    ChatTurnInfo info;
-    if (!chatGetTurnInfo(i, &info)) continue;
-    const char* tag = (info.role == ChatTurnRole::USER) ? "You: " : "AI: ";
-    g2LlmScratchAppend(pos, tag, strlen(tag));
-    int off = 0, r;
-    char tb[128];
-    while ((r = chatReadTurn(i, off, tb, sizeof(tb))) > 0) {
-      g2LlmScratchAppend(pos, tb, (size_t)r);
-      off += r;
-      // chatReadTurn returns min(avail, maxLen-1), so a read STRICTLY SHORTER
-      // than maxLen-1 is the end of the turn. The old test compared r against
-      // sizeof(tb) — which r can never reach — so it was always true and every
-      // turn was cut at 127 bytes. Measured: 127 of a 900-byte turn reached the
-      // pane, and because the sender suppresses an unchanged tail the lens then
-      // stopped updating entirely (3 distinct frames across a stream, vs 15).
-      if (r < (int)sizeof(tb) - 1) break;
-    }
-    g2LlmScratchAppend(pos, "\n", 1);
-  }
-  sLlmScratch[pos] = '\0';
+static void g2LlmReaderExit() {
+  if (g2LlmReaderCurrent()) gLlmPageExit.store(true, std::memory_order_release);
+}
 
-  // Nothing streaming but a generation just finished → recover its tail.
-  if (pos == 0) {
-    const int sess = chatGetSessionId();
-    const int fin  = chatFinishedLen(sess);
-    if (fin > 0) {
-      const int start = (fin > (int)sizeof(sLlmScratch) - 1)
-                          ? fin - ((int)sizeof(sLlmScratch) - 1) : 0;
-      const int r = chatReadFinished(sess, start, sLlmScratch, sizeof(sLlmScratch));
-      pos = (r > 0) ? (size_t)r : 0;
-      sLlmScratch[pos] = '\0';
-    }
-  }
+static void g2LlmReaderNav(G2TapKind kind) {
+  if (!g2LlmReaderCurrent()) return;
+  // Bounded intent count; no pager state is touched on the dispatch task.
+  int pending = gLlmPageNav.load(std::memory_order_relaxed);
+  const int step = kind == G2_TAP_PAGE_PREV ? -1 : 1;
+  while (pending + step >= -8 && pending + step <= 8 &&
+         !gLlmPageNav.compare_exchange_weak(pending, pending + step)) {}
+}
 
-  if (pos == 0) {
-    // NOTE: only chatBeginTurn paths feed this (web LLM page, `llmgenerate
-    // json <text>`, or the Re-run row). Plain `llmgenerate <text>` is a
-    // synchronous self-contained call that creates no chat turn — it will
-    // never appear here.
-    const char* ph = "No chat yet. Choose Ask (Mic / Keys) to speak or type.";
-    // strlen+clamp rather than strnlen(ph, cap-1): a bound larger than the
-    // literal trips gcc's -Werror=stringop-overread on a clean-config build.
-    size_t n = strlen(ph);
-    if (n > cap - 1) n = cap - 1;
-    memcpy(out, ph, n); out[n] = '\0';
-    return n;
-  }
-
-  size_t start = (pos > cap - 1) ? pos - (cap - 1) : 0;
-  // The window is cut at a byte offset, so it can BEGIN inside a multi-byte
-  // sequence — the G2 renders UTF-8 correctly, so that shows up as a stray glyph
-  // at the top of the pane. Skip to the next lead byte. Unlike the tail trim at
-  // the serving edges, this may consume the whole (<=3 byte) window, which is
-  // fine here: the slice is recomputed from an absolute buffer every frame.
-  start += (size_t)utf8AlignHead(sLlmScratch + start, (int)(pos - start));
-  const size_t n = pos - start;
-  memcpy(out, sLlmScratch + start, n);
-  out[n] = '\0';
-  return n;
+static bool g2LlmReaderHold(uint8_t phase, uint8_t source) {
+  if (phase != (uint8_t)G2HoldPhase::Press) return true;
+  if (!g2LlmReaderCurrent() || !g2HoldSourceAdmitted(source)) return false;
+  // Consume a busy hold on this page, so it cannot fall through to QuickNote.
+  // Starting another prompt does not implicitly cancel/retry an agent action.
+  if (chatIsGenerating()) gLlmPageBusyNotice.store(true, std::memory_order_release);
+  else gLlmPageAsk.store(true, std::memory_order_release);
+  return true;
 }
 
 static void g2LlmPageWorker(void* arg) {
-  // Paired-user identity + G2 notify source, same as the map worker.
   G2HijackCtxGuard ctxGuard;
-  auto* a = (LlmPageArgs*)arg;
-  bool openPromptEntry = false;
+  auto* a = static_cast<LlmPageArgs*>(arg);
+  const uint32_t life = a->lifecycleEpoch;
+  bool openPrompt = false, returnToMenu = false;
+  G2Temple* arm = nullptr;
+  uint32_t generation = 0, presentation = 0;
+  const size_t rawCap = LLM_CHAT_TURN_MAX_BYTES;
+  const size_t wrapCap = G2LlmReader::wrappedCapacity(rawCap);
+  const size_t offsetCount = G2LlmReader::pageOffsetsCapacity(rawCap);
+  PsramBuffer raw(rawCap, "g2.llm.raw");
+  PsramBuffer wrapped(wrapCap, "g2.llm.wrapped");
+  PsramBuffer offsets(offsetCount * sizeof(uint16_t), "g2.llm.offsets");
 
   do {
-    G2Temple* arm = pickEvenAIArm("llmPage");
-    if (!arm) { DEBUG_G2F("[G2] LLM page: no eligible arm"); break; }
-    G2ImageCreateFence cleanupFence = {};
-
-    if (!probeTearDownActiveContainer(*arm, &cleanupFence)) {
-      DEBUG_G2F("[G2] LLM page: pre-page SHUTDOWN failed");
+    if (!raw.reserve(rawCap) || !wrapped.reserve(wrapCap) ||
+        !offsets.reserve(offsetCount * sizeof(uint16_t))) {
+      DEBUG_G2F("[G2] LLM reader: allocation failed");
       break;
     }
-    gLlmPagePendingTap = 0;
+    arm = pickEvenAIArm("llmReader");
+    if (!arm) break;
+    generation = arm->connectionGeneration;
+    if (!g2LensTxFenceCurrent(*arm, generation, life) ||
+        !tearDownActiveContainerAtGeneration(*arm, generation, false, life)) break;
 
-    // CREATE compound: list "lstLlm" (left 1/3) + text child "llmChat"
-    // (right 2/3). Mirrors sendCreateMixedListTextAndWait but with our own
-    // list name so taps route to us (not the Apps 'app' handler).
-    G2TextChildSpec chat = {
-      /*containerName*/ kLlmChatChildName,
-      /*content*/       "(waiting for LLM...)",
-      /*containerId*/   kLlmChatChildId,
-      /*geom*/          kLlmChatGeom,
-      /*eventCapture*/  false
-    };
-    const uint32_t createLifecycleEpoch =
-        __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE);
-    bool created = false;
-    if (armCreateSlot("CREATE-llm", *arm)) {
-      const uint32_t createMagic = gExpectMagic;
-      uint8_t* pb = (uint8_t*)ps_alloc(1024, AllocPref::PreferPSRAM, "g2.pb.llm-create");
-      if (pb) {
-        size_t pbLen = g2BuildCreateMixedListTextPb(
-            createMagic, "lstLlm", kLlmRows, llmBackendSupportsRetry() ? kLlmRowCount : 3,
-            kLlmListGeom, chat, BLOCKS_WIDGET_ID, pb, 1024);
-        bool sent = pbLen && g2SendCreateTxnPb(*arm, pb, pbLen);
-        free(pb);
-        if (sent) created = waitCreateAck("CREATE-llm", BLOCKS_WIDGET_ID);
-        else g2CreateTxnRelease();
-      } else {
-        g2CreateTxnRelease();
-      }
+    gLlmPageExit.store(false);
+    gLlmPageAsk.store(false);
+    gLlmPageBusyNotice.store(false);
+    gLlmPageNav.store(0);
+    if (!sendCreateTextAndWait(*arm, "Opening reply...", BLOCKS_WIDGET_ID,
+                               G2_GEOM_LARGE, true, kLlmChatChildName) ||
+        !g2NoteCreateSuccess(*arm, false, BLOCKS_WIDGET_ID, life, &presentation)) break;
+    {
+      // Publish callbacks and page ownership in the same completion gate as
+      // terminal cleanup/CREATE, so a stale worker cannot relabel a new page.
+      G2CompletionGuard completion;
+      if (!completion ||
+          !g2TextViewPublishForLifecycle(g2LlmReaderExit, g2LlmReaderNav,
+                                         life, presentation, true)) break;
+      g2SetHijackPage(G2_HIJACK_PAGE_LLM_READER);
+      gLlmPageActive.store(true, std::memory_order_release);
     }
-    if (!created) { DEBUG_G2F("[G2] LLM page: compound CREATE failed"); break; }
-    if (!g2NoteCreateSuccess(*arm, /*isList*/ true, BLOCKS_WIDGET_ID,
-                             createLifecycleEpoch)) {
-      DEBUG_G2F("[G2] LLM page: stale CREATE publication rejected");
-      break;
-    }
-    DEBUG_G2F("[G2] LLM page: compound CREATE acked (list 'lstLlm' + text 'llmChat')");
-
-    gLlmPageActive = true;
-    char tail[kLlmTailCap];
-    char lastTail[kLlmTailCap];
-    lastTail[0] = '\0';
-    const char* clearNotice = nullptr;
-    uint32_t clearNoticeUntilMs = 0;
-    const uint32_t startMs = millis();
-
-    while (true) {
-      if (!gLens.hijackActive) { DEBUG_G2F("[G2] LLM page: hijack ended"); break; }
-      if (gImgProbeAbort)      { DEBUG_G2F("[G2] LLM page: abort flag set"); break; }
-      if (millis() - startMs > kLlmSafetyCapMs) { DEBUG_G2F("[G2] LLM page: safety cap"); break; }
-
-      const uint32_t taps = gLlmPagePendingTap;
-      gLlmPagePendingTap = 0;
-      if (taps & (1u << 0)) { DEBUG_G2F("[G2] LLM page: Back"); break; }
-      if (taps & (1u << 1)) {
-        // Hand off only after this worker has shut down its compound. The text
-        // entry surface owns the lens until commit/cancel, then its callback
-        // queues a fresh viewer.
-        DEBUG_G2F("[G2] LLM page: Ask (Mic / Keys)");
-        gLlmPageActive = false;
-        openPromptEntry = true;
-        break;
+    TextPager pager = {wrapped.data(), reinterpret_cast<uint16_t*>(offsets.data()),
+                       (int)offsetCount - 1, G2LlmReader::kBodyBytes,
+                       0, 0, false};
+    char frame[G2LlmReader::kFrameCapacity] = {};
+    char lastFrame[G2LlmReader::kFrameCapacity] = {};
+    ChatRunToken run = 0;
+    int lastLen = -1;
+    bool lastDone = false;
+    uint32_t noticeUntil = 0;
+    unsigned sendFailures = 0;
+    while (g2WidgetLifecycleOpen(life) && g2FsmHijackActive() &&
+           !gImgProbeAbort && g2LlmReaderCurrent() &&
+           g2PresentationEpochCurrent() == presentation &&
+           g2LensTxFenceCurrent(*arm, generation, life)) {
+      // Defer both rendering and a pending handoff while native UI owns focus.
+      if (firmwareOverlayActive()) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+      if (gLlmPageExit.exchange(false)) { returnToMenu = true; break; }
+      if (gLlmPageAsk.exchange(false)) {
+        if (!chatIsGenerating()) { openPrompt = true; break; }
+        gLlmPageBusyNotice.store(true);
       }
-      if (taps & (1u << 2)) {
-        clearNotice = llmMenuClearChat() ? "New chat ready." : "Stop or wait for the reply, then choose New chat.";
-        clearNoticeUntilMs = millis() + 4000;
+      const ChatRunToken currentRun = chatGetRunToken();
+      if (currentRun != run) {
+        run = currentRun;
+        pager.curPage = 0;
+        lastLen = -1;
       }
-      if (taps & (1u << 3)) {
-        clearNotice = nullptr;
-        (void)llmMenuRetryLastForG2();
+      bool done = true;
+      const int len = run
+          ? chatReadRun(run, 0, raw.data(), (int)rawCap, &done) : 0;
+      // A replaced/cleared turn cannot be combined with the prior snapshot.
+      if (len < 0) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+      if (!run) raw.data()[0] = '\0';
+      if (len != lastLen || done != lastDone) {
+        G2LlmReader::rebuild(raw.data(), (size_t)len, done, pager,
+                             wrapped.data(), wrapCap);
+        lastLen = len;
+        lastDone = done;
       }
-
-      // Keep the page alive while the engine is ACTIVELY generating — an
-      // authoritative device-side signal bounded by the hard-cap/sentence
-      // limit, NOT a BLE ack (ack != presence). Once done, stop refreshing
-      // and the normal tap-only 60 s watchdog governs passive reading.
-      if (chatIsGenerating() && g2FsmHijackActive()) gHijackStartedMs = millis();
-
-      size_t n;
-      if (clearNotice && (int32_t)(clearNoticeUntilMs - millis()) > 0) {
-        strlcpy(tail, clearNotice, sizeof(tail));
-        n = strlen(tail);
+      int moves = gLlmPageNav.exchange(0);
+      while (moves > 0) { G2LlmReader::navigate(pager, true); --moves; }
+      while (moves < 0) { G2LlmReader::navigate(pager, false); ++moves; }
+      if (gLlmPageBusyNotice.exchange(false)) noticeUntil = millis() + 2500;
+      if ((int32_t)(noticeUntil - millis()) > 0) {
+        strlcpy(frame, "Reply in progress.\nHold to ask after it finishes.\n2x-tap: back", sizeof(frame));
+      } else if (!run) {
+        strlcpy(frame, "No reply yet.\nHold to ask a question.\n2x-tap: back", sizeof(frame));
       } else {
-        clearNotice = nullptr;
-        n = g2LlmBuildChatTail(tail, sizeof(tail));
+        G2LlmReader::compose(pager, done, frame, sizeof(frame));
       }
-      if (strcmp(tail, lastTail) != 0) {
-        sendUpdateTextNamed(*arm, kLlmChatChildName, kLlmChatChildId, tail);
-        memcpy(lastTail, tail, n + 1);
+      // Retain the last successful wire frame, not a failed attempt. Failed
+      // updates are retried locally; agent requests are never replayed.
+      if (strcmp(frame, lastFrame) != 0) {
+        // Fill all six body lines. REBUILD's existing fragmentation keeps each
+        // ATT packet bounded while replacing this same input-capturing child.
+        if (sendRebuildTextNamedAndWait(*arm, kLlmChatChildName, frame,
+                                        G2_GEOM_LARGE, true, generation, life,
+                                        presentation)) {
+          strlcpy(lastFrame, frame, sizeof(lastFrame));
+          sendFailures = 0;
+        } else if (++sendFailures >= 3) {
+          DEBUG_G2F("[G2] LLM reader: text updates failed");
+          returnToMenu = true;
+          break;
+        }
       }
+      if (!done && g2FsmHijackActive()) gHijackStartedMs = millis();
       vTaskDelay(pdMS_TO_TICKS(250));
     }
+    gLlmPageActive.store(false, std::memory_order_release);
+  } while (false);
 
-    gLlmPageActive     = false;
-    gLlmPagePendingTap = 0;
-    probePostProbeShutdown(cleanupFence);
-  } while (0);
-
-  // This mirrors the Map Search handoff: the old compound is fully down
-  // before g2BeginTextEntry performs its own page swap. If entry cannot open,
-  // fall through to the normal submenu callback instead of leaving a blank
-  // lens.
-  const bool handedToPrompt = openPromptEntry &&
-      llmMenuStartPromptEntry(LlmPromptReturn::VIEWER);
-  if (!handedToPrompt && a->onDone) a->onDone();
+  gLlmPageActive.store(false, std::memory_order_release);
+  gLlmPageAsk.store(false);
+  gLlmPageNav.store(0);
+  g2TextViewDisarmIfOwned(g2LlmReaderExit, life);
+  const bool ownsSurface = arm && presentation &&
+      g2WidgetLifecycleOpen(life) && g2PresentationEpochCurrent() == presentation &&
+      g2GetHijackPage() == G2_HIJACK_PAGE_LLM_READER && !gImgProbeAbort;
+  if (ownsSurface) {
+    // Finish the reader's own widget before opening microphone input. A stale
+    // worker never tears down a replacement page or opens its return menu.
+    const bool closed = tearDownActiveContainerAtGeneration(*arm, generation, false, life);
+    const uint32_t afterTeardown = presentation == UINT32_MAX ? 1 : presentation + 1;
+    const auto canReturn = [&]() {
+      return g2LensTxFenceCurrent(*arm, generation, life) &&
+          g2PresentationEpochCurrent() == afterTeardown &&
+          !gImgProbeAbort && g2GetHijackPage() == G2_HIJACK_PAGE_LLM_READER;
+    };
+    if (closed && canReturn() && openPrompt) {
+      if (!llmMenuStartPromptEntry(LlmPromptReturn::VIEWER, true, life) &&
+          canReturn() && a->onDone)
+        a->onDone();
+    } else if (closed && canReturn() && returnToMenu && a->onDone) {
+      a->onDone();
+    }
+  }
   delete a;
-
 }
 
-static void g2LlmPageDrop(void* p) { delete (LlmPageArgs*)p; }
+static void g2LlmPageDrop(void* p) { delete static_cast<LlmPageArgs*>(p); }
 
-// Public entry — enqueue on g2_session_w (chat buffers stay in PSRAM).
 static bool g2ShowLlmPage(void (*onDone)()) {
-  auto* a = new LlmPageArgs;
+  const uint32_t life = __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE);
+  auto* a = new (std::nothrow) LlmPageArgs{onDone, life};
   if (!a) return false;
-  a->onDone = onDone;
-  if (!g2SessionSubmit(g2LlmPageWorker, a, g2LlmPageDrop, "llm_page",
-                       __atomic_load_n(&gWidgetLifecycleEpoch,
-                                       __ATOMIC_ACQUIRE))) {
-    DEBUG_G2F("[G2] LLM page: session enqueue failed");
+  if (!g2SessionSubmit(g2LlmPageWorker, a, g2LlmPageDrop, "llm_reader", life)) {
     g2LlmPageDrop(a);
     return false;
   }

@@ -133,6 +133,7 @@
                                   // metadata.
 #define G2_SID_EVEN_CORE    0xE0  // UI_BACKGROUND_EVENHUB_APP_ID — back-pane render
                                   // surface ("EvenHub" in the firmware's pb schema).
+#define G2_SID_TERMINAL     0x30  // Native Terminal; separate from lifecycle teardown.
 
 // Flag byte — note request is 0x20, NOT 0x00. 0x00 is the response direction.
 #define G2_FLAG_REQUEST     0x20
@@ -219,6 +220,92 @@
 #define G2_AI_CONFIG_F_VOICE_SWITCH  1
 #define G2_AI_CONFIG_F_STREAM_SPEED  2
 #define G2_AI_CONFIG_F_DUPLEX_MODE   4
+
+// Native Terminal schema recovered from stock 2.3.0.24 and independently
+// matched against all 32 descriptors / 81 fields in stock 2.3.2.14. This is
+// static wire evidence, not hardware qualification. See docs/G2_TERMINAL_WORK.md.
+enum G2TerminalCommand : uint8_t {
+  G2_TERMINAL_CMD_OPEN = 1, G2_TERMINAL_CMD_CLOSE = 2,
+  G2_TERMINAL_CMD_ASR = 3, G2_TERMINAL_CMD_STATE = 4,
+  G2_TERMINAL_CMD_CONTENT = 5, G2_TERMINAL_CMD_QUERY = 6,
+  G2_TERMINAL_CMD_ERROR = 7, G2_TERMINAL_CMD_SESSION_LIST = 8,
+  G2_TERMINAL_CMD_SWITCH_RESULT = 9, G2_TERMINAL_CMD_SESSION_CHANGE = 10,
+  G2_TERMINAL_CMD_NEW_RESULT = 11, G2_TERMINAL_CMD_SYNC = 12,
+  G2_TERMINAL_CMD_START = 161, G2_TERMINAL_CMD_VOICE = 162,
+  G2_TERMINAL_CMD_QUERY_REPLY = 163,
+  G2_TERMINAL_CMD_INTERRUPT = 164, G2_TERMINAL_CMD_SESSION_SWITCH = 165,
+  G2_TERMINAL_CMD_NEW_SESSION = 166, G2_TERMINAL_CMD_DISPLAY_STATE = 167,
+  G2_TERMINAL_CMD_NEW_CANCEL = 168, G2_TERMINAL_CMD_LIST_FOCUS = 169,
+  G2_TERMINAL_CMD_OVERLAY_FOCUS = 170, G2_TERMINAL_CMD_AGENT_FILTER = 172,
+  G2_TERMINAL_CMD_AWAIT_DISMISS = 173, G2_TERMINAL_CMD_THINKING_WORD = 174,
+  G2_TERMINAL_CMD_EXIT = 171, G2_TERMINAL_CMD_ACK = 240,
+  G2_TERMINAL_CMD_HEARTBEAT = 255,
+};
+enum G2TerminalState : uint8_t {
+  G2_TERMINAL_STATE_UNSPECIFIED = 0, G2_TERMINAL_STATE_IDLE = 1,
+  G2_TERMINAL_STATE_THINKING = 2, G2_TERMINAL_STATE_TOOL = 3,
+  G2_TERMINAL_STATE_RESPONDING = 4, G2_TERMINAL_STATE_AWAIT_USER = 5,
+};
+enum G2TerminalContentKind : uint8_t {
+  G2_TERMINAL_CONTENT_UNSPECIFIED = 0, G2_TERMINAL_CONTENT_USER_INPUT = 1,
+  G2_TERMINAL_CONTENT_AGENT_RESULT = 2, G2_TERMINAL_CONTENT_TOOL_ACTIVITY = 3,
+  G2_TERMINAL_CONTENT_QUERY = 4, G2_TERMINAL_CONTENT_ANSWER = 5,
+};
+static constexpr size_t G2_TERMINAL_TEXT_MAX_BYTES = 512;
+static constexpr size_t G2_TERMINAL_PB_MAX_BYTES = 2560; // largest bounded OPEN / eight-choice QUERY
+
+struct G2TerminalSessionItem { uint32_t id; const char* title; uint32_t agentId; uint8_t state; };
+struct G2TerminalAgentItem { uint32_t id; const char* name; };
+struct G2TerminalQueryOption { uint32_t id; const char* label; };
+size_t g2BuildTerminalOpenListPb(uint8_t magic, const G2TerminalAgentItem* agents,
+    size_t agentCount, uint32_t currentId, const G2TerminalSessionItem* sessions,
+    size_t sessionCount, uint8_t* out, size_t cap);
+size_t g2BuildTerminalSessionListPb(uint8_t magic, uint32_t currentId,
+    const G2TerminalSessionItem* sessions, size_t count, uint8_t* out, size_t cap);
+size_t g2BuildTerminalQueryPb(uint8_t magic, uint32_t sessionId, uint32_t queryId,
+    const char* question, const G2TerminalQueryOption* options, size_t count,
+    uint8_t* out, size_t cap);
+// SWITCH/NEW result: 1 success, 2 failed. Only those commands are accepted.
+size_t g2BuildTerminalResultPb(uint8_t magic, uint8_t command, bool success, uint8_t* out, size_t cap);
+size_t g2BuildTerminalSessionChangePb(uint8_t magic, uint32_t sessionId, uint8_t* out, size_t cap);
+
+// PB bodies only: use the existing bounded fragmenting transport for SID0x30.
+// Return zero on invalid arguments, malformed UTF-8, embedded NUL, oversized
+// text or insufficient capacity. No truncation or allocation. OPEN is limited
+// to one agent (ID1) and one nonzero session, initially IDLE; names are bounded
+// NUL-terminated strings (agent64/title128 bytes, both nonempty). ASR/content
+// spans may be empty. Caller must ignore output after any zero-length result.
+size_t g2BuildTerminalOpenPb(uint8_t magic, uint32_t sessionId,
+                            const char* agentName, const char* sessionTitle,
+                            uint8_t* out, size_t cap);
+size_t g2BuildTerminalClosePb(uint8_t magic, uint8_t error, uint8_t* out, size_t cap);
+size_t g2BuildTerminalHeartbeatPb(uint8_t magic, uint8_t* out, size_t cap);
+size_t g2BuildTerminalAsrPb(uint8_t magic, const char* text, size_t length,
+                           bool sentenceFinal, bool allFinal, uint8_t* out, size_t cap);
+size_t g2BuildTerminalStatePb(uint8_t magic, uint32_t sessionId, uint8_t state,
+                             uint8_t* out, size_t cap);
+size_t g2BuildTerminalContentPb(uint8_t magic, uint32_t sessionId, uint32_t contentId,
+                               uint8_t kind, const char* text, size_t length,
+                               uint8_t* out, size_t cap);
+size_t g2BuildTerminalSyncPb(uint8_t magic, uint32_t sessionId, bool begin,
+                            uint8_t* out, size_t cap);
+
+struct G2TerminalRx {
+  uint8_t command;
+  uint8_t magic;
+  uint8_t ackError;      // ACK only; nanopb may omit the default zero value.
+  uint8_t voiceCommand;  // VOICE only: start1, stop2, timeout3, confirm4, cancel5.
+  uint32_t sessionId;    // INTERRUPT/SESSION_SWITCH; validate against the owned session.
+  uint32_t agentId;      // NEW_SESSION; no host action is implied by parsing it.
+  bool switchFlag;       // SESSION_SWITCH notification flag.
+  uint32_t queryId = 0, optionId = 0, focusIndex = 0;
+  uint8_t displayState = 0, overlay = 0;
+  char thinkingWord[33] = {};
+};
+// Only the current, proven events above. Recognized command and
+// matching oneof body are required; duplicate/unknown fields are rejected.
+// Missing scalars default to0 as in nanopb. Output is cleared on failure.
+bool g2ParseTerminalRx(const uint8_t* pb, size_t len, G2TerminalRx* out);
 
 // ── CRC-16/CCITT-FALSE ───────────────────────────────────────────────────────
 // Polynomial 0x1021, init 0xFFFF, no input reflect, no output reflect, no

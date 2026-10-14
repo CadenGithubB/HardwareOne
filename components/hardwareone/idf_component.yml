@@ -35,6 +35,13 @@ dependencies:
     override_path: "../../.sdk-overrides/esp32p4/espressif__esp-dl"
     rules:
       - if: "target in [esp32p4]"
+  # Match Arduino's pinned Hosted version, with the shared TX DMA-stride fix.
+  # override_path also redirects Arduino's dependency to this verified copy.
+  espressif/esp_hosted:
+    version: "==2.12.13"
+    override_path: "../../.sdk-overrides/esp32p4/espressif__esp_hosted"
+    rules:
+      - if: "target in [esp32p4]"
   # ESP-SR for speech recognition (wake word + commands)
   espressif/esp-sr:
     version: "==2.5.5"

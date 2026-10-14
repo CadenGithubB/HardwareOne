@@ -216,7 +216,7 @@ never paste a real token into this repository or a shared transcript.
 | `llmclear` | Clear old chat before changing between an agent and another source |
 | `llmload http:openclaw` | Select the configured agent source |
 | `llmstatus json` | Check readiness and `retrySafe:false` |
-| `llmgenerate Hello` | Start a text conversation |
+| `llmgenerate json Hello` | Start an asynchronous text conversation; HTTP-only builds require the `json` form |
 | `llmresult json 0` | Read the streamed reply from offset zero |
 
 The LLM feature must also be enabled in the ordinary app settings. Optional
@@ -255,8 +255,18 @@ the user's VLANs.
   truncation or interruption, while preserving text already received. Prompts
   are limited to 2047 bytes. OpenClaw controls agent sampling and tool execution;
   onboard sampling settings are not forwarded.
-- Only text is supported. The ordinary G2 Ask Mic/Keys path can use this source;
-  the separate native Hey Even CM5 flow and speech playback are unchanged.
+- The endpoint exchanges text. G2 Ask Mic/Keys can transcribe locally before
+  sending it. With local STT and chat compiled in (including `p4-openclaw`),
+  native **Hey Even** also transcribes on the P4 and streams the selected
+  source's answer into the native popup. The glasses must have a live paired
+  user, both required temple connections, an available microphone and a ready
+  selected AI source. Existing relay settings are reused. Choosing a CM5 model
+  retains the UART-host flow. Speech playback is unchanged.
+- Native local questions end after a 1.5-second speech pause. Long speech can
+  span STT segments; capture fails after 30 seconds, or if the complete prompt
+  exceeds 1024 bytes, instead of sending a shortened request. Dismissal cancels
+  that exact speech/chat run. There is no automatic retry. `g2evenai status`
+  reports the native provider and exchange; see [qualification notes](G2_EVENAI_LOCAL_WORK.md).
 - One shared device chat is used, as before. This prototype does not introduce
   separate per-account OpenClaw sessions.
 

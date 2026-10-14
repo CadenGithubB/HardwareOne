@@ -575,6 +575,297 @@ static int32_t g2PbDecodeInt32(uint64_t value) {
   return (int32_t)(-1 - (int64_t)(~bits));
 }
 
+// ── Native Terminal (stock 2.3.0.24 / 2.3.2.14 descriptor match) ────────────
+static bool g2TerminalTextValid(const char* text, size_t length, size_t limit) {
+  if (length > limit || (length && !text)) return false;
+  const uint8_t* bytes = reinterpret_cast<const uint8_t*>(text);
+  for (size_t i = 0; i < length;) {
+    const uint8_t first = bytes[i++];
+    if (first == 0) return false;
+    if (first < 0x80) continue;
+    const size_t trailing = first >= 0xC2 && first <= 0xDF ? 1 :
+                            first >= 0xE0 && first <= 0xEF ? 2 :
+                            first >= 0xF0 && first <= 0xF4 ? 3 : 0;
+    if (!trailing || trailing > length - i) return false;
+    const uint8_t second = bytes[i];
+    if ((first == 0xE0 && second < 0xA0) || (first == 0xED && second > 0x9F) ||
+        (first == 0xF0 && second < 0x90) || (first == 0xF4 && second > 0x8F)) return false;
+    for (size_t j = 0; j < trailing; ++j) {
+      if ((bytes[i++] & 0xC0) != 0x80) return false;
+    }
+  }
+  return true;
+}
+
+static bool g2TerminalBegin(uint8_t command, uint8_t magic, uint32_t bodyTag,
+                             uint8_t* out, size_t cap, size_t* pos, size_t* body) {
+  return out && g2PbWriteUint32(out, cap, pos, 1, command) &&
+      g2PbWriteUint32(out, cap, pos, 2, magic) &&
+      g2PbBeginNested(out, cap, pos, bodyTag, body);
+}
+
+static bool g2TerminalSessions(uint8_t* out, size_t cap, size_t* pos,
+    uint32_t currentId, const G2TerminalSessionItem* sessions, size_t count) {
+  if (!count || count > 10 || !sessions || !currentId) return false;
+  bool currentSeen = false;
+  for (size_t i = 0; i < count; ++i) {
+    const auto& s = sessions[i];
+    const size_t n = s.title ? strnlen(s.title, 129) : 0;
+    if (!s.id || !s.agentId || !n || s.state > G2_TERMINAL_STATE_AWAIT_USER ||
+        !g2TerminalTextValid(s.title, n, 128)) return false;
+    for (size_t j = 0; j < i; ++j) if (sessions[j].id == s.id) return false;
+    currentSeen |= s.id == currentId;
+  }
+  if (!currentSeen || !g2PbWriteUint32(out, cap, pos, 1, currentId)) return false;
+  for (size_t i = 0; i < count; ++i) {
+    const auto& s = sessions[i]; size_t nested = 0;
+    if (!g2PbBeginNested(out, cap, pos, 2, &nested) ||
+        !g2PbWriteUint32(out, cap, pos, 1, s.id) ||
+        !g2PbWriteBytes(out, cap, pos, 2, reinterpret_cast<const uint8_t*>(s.title), strlen(s.title)) ||
+        !g2PbWriteUint32(out, cap, pos, 3, s.agentId) ||
+        !g2PbWriteUint32(out, cap, pos, 4, s.state) ||
+        !g2PbEndNested(out, cap, pos, nested)) return false;
+  }
+  return true;
+}
+
+size_t g2BuildTerminalOpenListPb(uint8_t magic, const G2TerminalAgentItem* agents,
+    size_t agentCount, uint32_t currentId, const G2TerminalSessionItem* sessions,
+    size_t sessionCount, uint8_t* out, size_t cap) {
+  if (!agents || !agentCount || agentCount > 10 || !sessions || sessionCount > 10) return 0;
+  for (size_t i = 0; i < agentCount; ++i) {
+    const size_t n = agents[i].name ? strnlen(agents[i].name, 65) : 0;
+    if (!agents[i].id || !n || !g2TerminalTextValid(agents[i].name, n, 64)) return 0;
+    for (size_t j = 0; j < i; ++j) if (agents[i].id == agents[j].id) return 0;
+  }
+  for (size_t i = 0; i < sessionCount; ++i) {
+    bool found = false;
+    for (size_t j = 0; j < agentCount; ++j) found |= sessions[i].agentId == agents[j].id;
+    if (!found) return 0;
+  }
+  size_t pos = 0, body = 0, nested = 0;
+  if (!g2TerminalBegin(G2_TERMINAL_CMD_OPEN, magic, 3, out, cap, &pos, &body)) return 0;
+  for (size_t i = 0; i < agentCount; ++i) {
+    if (!g2PbBeginNested(out, cap, &pos, 1, &nested) ||
+        !g2PbWriteUint32(out, cap, &pos, 1, agents[i].id) ||
+        !g2PbWriteBytes(out, cap, &pos, 2, reinterpret_cast<const uint8_t*>(agents[i].name), strlen(agents[i].name)) ||
+        !g2PbEndNested(out, cap, &pos, nested)) return 0;
+  }
+  if (!g2PbBeginNested(out, cap, &pos, 2, &nested) ||
+      !g2TerminalSessions(out, cap, &pos, currentId, sessions, sessionCount) ||
+      !g2PbEndNested(out, cap, &pos, nested) || !g2PbEndNested(out, cap, &pos, body)) return 0;
+  return pos;
+}
+
+size_t g2BuildTerminalOpenPb(uint8_t magic, uint32_t sessionId,
+                            const char* agentName, const char* sessionTitle,
+                            uint8_t* out, size_t cap) {
+  const G2TerminalAgentItem agent{1, agentName};
+  const G2TerminalSessionItem session{sessionId, sessionTitle, 1, G2_TERMINAL_STATE_IDLE};
+  return g2BuildTerminalOpenListPb(magic, &agent, 1, sessionId, &session, 1, out, cap);
+}
+
+size_t g2BuildTerminalSessionListPb(uint8_t magic, uint32_t currentId,
+    const G2TerminalSessionItem* sessions, size_t count, uint8_t* out, size_t cap) {
+  size_t pos = 0, body = 0;
+  if (!g2TerminalBegin(G2_TERMINAL_CMD_SESSION_LIST, magic, 10, out, cap, &pos, &body) ||
+      !g2TerminalSessions(out, cap, &pos, currentId, sessions, count) ||
+      !g2PbEndNested(out, cap, &pos, body)) return 0;
+  return pos;
+}
+
+size_t g2BuildTerminalQueryPb(uint8_t magic, uint32_t sessionId, uint32_t queryId,
+    const char* question, const G2TerminalQueryOption* options, size_t count,
+    uint8_t* out, size_t cap) {
+  const size_t n = question ? strnlen(question, 1025) : 0;
+  if (!sessionId || !queryId || !n || !options || !count || count > 8 ||
+      !g2TerminalTextValid(question, n, 1024)) return 0;
+  size_t pos = 0, body = 0;
+  if (!g2TerminalBegin(G2_TERMINAL_CMD_QUERY, magic, 8, out, cap, &pos, &body) ||
+      !g2PbWriteUint32(out, cap, &pos, 1, queryId) ||
+      !g2PbWriteBytes(out, cap, &pos, 2, reinterpret_cast<const uint8_t*>(question), n)) return 0;
+  for (size_t i = 0; i < count; ++i) {
+    const size_t labelLen = options[i].label ? strnlen(options[i].label, 129) : 0;
+    if (!options[i].id || !labelLen || !g2TerminalTextValid(options[i].label, labelLen, 128)) return 0;
+    for (size_t j = 0; j < i; ++j) if (options[i].id == options[j].id) return 0;
+    size_t nested = 0;
+    if (!g2PbBeginNested(out, cap, &pos, 3, &nested) ||
+        !g2PbWriteUint32(out, cap, &pos, 1, options[i].id) ||
+        !g2PbWriteBytes(out, cap, &pos, 2, reinterpret_cast<const uint8_t*>(options[i].label), labelLen) ||
+        !g2PbEndNested(out, cap, &pos, nested)) return 0;
+  }
+  if (!g2PbWriteUint32(out, cap, &pos, 4, sessionId) ||
+      !g2PbEndNested(out, cap, &pos, body)) return 0;
+  return pos;
+}
+
+size_t g2BuildTerminalResultPb(uint8_t magic, uint8_t command, bool success,
+    uint8_t* out, size_t cap) {
+  const uint8_t tag = command == G2_TERMINAL_CMD_SWITCH_RESULT ? 11 :
+                      command == G2_TERMINAL_CMD_NEW_RESULT ? 13 : 0;
+  if (!tag) return 0;
+  size_t pos = 0, body = 0;
+  if (!g2TerminalBegin(command, magic, tag, out, cap, &pos, &body) ||
+      !g2PbWriteUint32(out, cap, &pos, 1, success ? 1 : 2) ||
+      !g2PbEndNested(out, cap, &pos, body)) return 0;
+  return pos;
+}
+
+size_t g2BuildTerminalSessionChangePb(uint8_t magic, uint32_t sessionId, uint8_t* out, size_t cap) {
+  if (!sessionId) return 0;
+  size_t pos = 0, body = 0;
+  if (!g2TerminalBegin(G2_TERMINAL_CMD_SESSION_CHANGE, magic, 12, out, cap, &pos, &body) ||
+      !g2PbWriteUint32(out, cap, &pos, 1, sessionId) ||
+      !g2PbEndNested(out, cap, &pos, body)) return 0;
+  return pos;
+}
+
+size_t g2BuildTerminalClosePb(uint8_t magic, uint8_t error, uint8_t* out, size_t cap) {
+  size_t pos = 0, body = 0;
+  if (!g2TerminalBegin(G2_TERMINAL_CMD_CLOSE, magic, 4, out, cap, &pos, &body) ||
+      !g2PbWriteUint32(out, cap, &pos, 1, error) ||
+      !g2PbEndNested(out, cap, &pos, body)) return 0;
+  return pos;
+}
+
+size_t g2BuildTerminalHeartbeatPb(uint8_t magic, uint8_t* out, size_t cap) {
+  size_t pos = 0, body = 0;
+  if (!g2TerminalBegin(G2_TERMINAL_CMD_HEARTBEAT, magic, 41, out, cap, &pos, &body) ||
+      !g2PbEndNested(out, cap, &pos, body)) return 0;
+  return pos;
+}
+
+size_t g2BuildTerminalAsrPb(uint8_t magic, const char* text, size_t length,
+                           bool sentenceFinal, bool allFinal, uint8_t* out, size_t cap) {
+  if (!g2TerminalTextValid(text, length, G2_TERMINAL_TEXT_MAX_BYTES)) return 0;
+  size_t pos = 0, body = 0;
+  if (!g2TerminalBegin(G2_TERMINAL_CMD_ASR, magic, 5, out, cap, &pos, &body) ||
+      !g2PbWriteBytes(out, cap, &pos, 1, reinterpret_cast<const uint8_t*>(text), length) ||
+      !g2PbWriteUint32(out, cap, &pos, 2, sentenceFinal ? 1 : 0) ||
+      !g2PbWriteUint32(out, cap, &pos, 3, allFinal ? 1 : 0) ||
+      !g2PbEndNested(out, cap, &pos, body)) return 0;
+  return pos;
+}
+
+size_t g2BuildTerminalStatePb(uint8_t magic, uint32_t sessionId, uint8_t state,
+                             uint8_t* out, size_t cap) {
+  if (!sessionId || state > G2_TERMINAL_STATE_AWAIT_USER) return 0;
+  size_t pos = 0, body = 0;
+  if (!g2TerminalBegin(G2_TERMINAL_CMD_STATE, magic, 6, out, cap, &pos, &body) ||
+      !g2PbWriteUint32(out, cap, &pos, 1, sessionId) ||
+      !g2PbWriteUint32(out, cap, &pos, 2, state) ||
+      !g2PbEndNested(out, cap, &pos, body)) return 0;
+  return pos;
+}
+
+size_t g2BuildTerminalContentPb(uint8_t magic, uint32_t sessionId, uint32_t contentId,
+                               uint8_t kind, const char* text, size_t length,
+                               uint8_t* out, size_t cap) {
+  if (!sessionId || kind > G2_TERMINAL_CONTENT_ANSWER ||
+      !g2TerminalTextValid(text, length, G2_TERMINAL_TEXT_MAX_BYTES)) return 0;
+  size_t pos = 0, body = 0;
+  if (!g2TerminalBegin(G2_TERMINAL_CMD_CONTENT, magic, 7, out, cap, &pos, &body) ||
+      !g2PbWriteUint32(out, cap, &pos, 1, sessionId) ||
+      !g2PbWriteUint32(out, cap, &pos, 2, contentId) ||
+      !g2PbWriteUint32(out, cap, &pos, 3, kind) ||
+      !g2PbWriteBytes(out, cap, &pos, 4, reinterpret_cast<const uint8_t*>(text), length) ||
+      !g2PbEndNested(out, cap, &pos, body)) return 0;
+  return pos;
+}
+
+size_t g2BuildTerminalSyncPb(uint8_t magic, uint32_t sessionId, bool begin,
+                            uint8_t* out, size_t cap) {
+  if (!sessionId) return 0;
+  size_t pos = 0, body = 0;
+  if (!g2TerminalBegin(G2_TERMINAL_CMD_SYNC, magic, 14, out, cap, &pos, &body) ||
+      !g2PbWriteUint32(out, cap, &pos, 1, sessionId) ||
+      !g2PbWriteUint32(out, cap, &pos, 2, begin ? 1 : 2) ||
+      !g2PbEndNested(out, cap, &pos, body)) return 0;
+  return pos;
+}
+
+bool g2ParseTerminalRx(const uint8_t* pb, size_t len, G2TerminalRx* out) {
+  if (!out) return false;
+  *out = {};
+  if (!pb || !len || len > 64) return false;
+  G2TerminalRx event{};
+  size_t pos = 0, bodyLen = 0;
+  const uint8_t* body = nullptr;
+  uint32_t bodyTag = 0;
+  bool commandSeen = false, magicSeen = false;
+  while (pos < len) {
+    uint32_t field; uint8_t wire; uint64_t value;
+    if (!g2PbReadTagStrict(pb, len, &pos, &field, &wire)) return false;
+    if (field == 1 || field == 2) {
+      bool& seen = field == 1 ? commandSeen : magicSeen;
+      if (seen || wire != G2_PB_WIRE_VARINT ||
+          !g2PbReadVarintStrict(pb, len, &pos, &value) || value > UINT8_MAX) return false;
+      seen = true;
+      (field == 1 ? event.command : event.magic) = uint8_t(value);
+    } else {
+      if (body || wire != G2_PB_WIRE_LEN_DELIM ||
+          !g2PbReadDelimited(pb, len, &pos, &body, &bodyLen)) return false;
+      bodyTag = field;
+    }
+  }
+  uint32_t expectedTag = 0;
+  uint8_t fields = 0, byteMask = 0, boolMask = 0;
+  switch (event.command) {
+    case G2_TERMINAL_CMD_START: expectedTag = 20; break;
+    case G2_TERMINAL_CMD_EXIT: expectedTag = 21; break;
+    case G2_TERMINAL_CMD_NEW_CANCEL: expectedTag = 27; break;
+    case G2_TERMINAL_CMD_VOICE: expectedTag = 22; fields = 1; byteMask = 1; break;
+    case G2_TERMINAL_CMD_QUERY_REPLY: expectedTag = 23; fields = 2; break;
+    case G2_TERMINAL_CMD_INTERRUPT: expectedTag = 24; fields = 1; break;
+    case G2_TERMINAL_CMD_SESSION_SWITCH: expectedTag = 25; fields = 2; boolMask = 2; break;
+    case G2_TERMINAL_CMD_NEW_SESSION: expectedTag = 26; fields = 1; break;
+    case G2_TERMINAL_CMD_DISPLAY_STATE: expectedTag = 28; fields = 3; byteMask = 5; break;
+    case G2_TERMINAL_CMD_AGENT_FILTER: expectedTag = 29; fields = 1; break;
+    case G2_TERMINAL_CMD_LIST_FOCUS: expectedTag = 30; fields = 1; break;
+    case G2_TERMINAL_CMD_OVERLAY_FOCUS: expectedTag = 31; fields = 2; byteMask = 1; break;
+    case G2_TERMINAL_CMD_AWAIT_DISMISS: expectedTag = 32; fields = 1; break;
+    case G2_TERMINAL_CMD_THINKING_WORD: expectedTag = 33; fields = 2; break;
+    case G2_TERMINAL_CMD_ACK: expectedTag = 40; fields = 1; byteMask = 1; break;
+    default: return false;
+  }
+  if (!commandSeen || !body || bodyTag != expectedTag) return false;
+  uint32_t values[3] = {};
+  uint8_t seen = 0;
+  pos = 0;
+  while (pos < bodyLen) {
+    uint32_t field; uint8_t wire; uint64_t value;
+    if (!g2PbReadTagStrict(body, bodyLen, &pos, &field, &wire) ||
+        !field || field > fields || (seen & (1u << (field - 1)))) return false;
+    const uint8_t bit = uint8_t(1u << (field - 1)); seen |= bit;
+    if (event.command == G2_TERMINAL_CMD_THINKING_WORD && field == 2) {
+      const uint8_t* word = nullptr; size_t n = 0;
+      if (wire != G2_PB_WIRE_LEN_DELIM || !g2PbReadDelimited(body, bodyLen, &pos, &word, &n) ||
+          !g2TerminalTextValid(reinterpret_cast<const char*>(word), n, 32)) return false;
+      memcpy(event.thinkingWord, word, n); event.thinkingWord[n] = 0;
+    } else {
+      if (wire != G2_PB_WIRE_VARINT || !g2PbReadVarintStrict(body, bodyLen, &pos, &value) ||
+          value > ((boolMask & bit) ? 1u : (byteMask & bit) ? UINT8_MAX : UINT32_MAX)) return false;
+      values[field - 1] = uint32_t(value);
+    }
+  }
+  switch (event.command) {
+    case G2_TERMINAL_CMD_VOICE:
+      if (values[0] < 1 || values[0] > 5) return false;
+      event.voiceCommand = uint8_t(values[0]); break;
+    case G2_TERMINAL_CMD_ACK: event.ackError = uint8_t(values[0]); break;
+    case G2_TERMINAL_CMD_QUERY_REPLY: event.queryId = values[0]; event.optionId = values[1]; break;
+    case G2_TERMINAL_CMD_NEW_SESSION: case G2_TERMINAL_CMD_AGENT_FILTER:
+      event.agentId = values[0]; break;
+    case G2_TERMINAL_CMD_DISPLAY_STATE:
+      event.displayState = uint8_t(values[0]); event.sessionId = values[1]; event.overlay = uint8_t(values[2]); break;
+    case G2_TERMINAL_CMD_LIST_FOCUS: event.focusIndex = values[0]; break;
+    case G2_TERMINAL_CMD_OVERLAY_FOCUS: event.overlay = uint8_t(values[0]); event.focusIndex = values[1]; break;
+    default: event.sessionId = values[0]; event.switchFlag = values[1] != 0; break;
+  }
+  *out = event;
+  return true;
+}
+
 bool g2ParseCommandMagic(const uint8_t* payload, size_t payloadLen,
                          uint32_t* outCommand, uint32_t* outMagic) {
   if (!payload || !outCommand || !outMagic) return false;

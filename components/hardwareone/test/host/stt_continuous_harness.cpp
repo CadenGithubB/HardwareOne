@@ -75,6 +75,7 @@ bool transportSessionEpochIsLive(CommandSource source, uint32_t epoch) {
   if (source == SOURCE_SERIAL && epoch == 5) return serialLive.load();
   if (source == SOURCE_SERIAL && epoch == 6) return successorLive.load();
   if (source == SOURCE_WEB && epoch == 5) return webLive.load();
+  if (source == SOURCE_G2_GLASSES && epoch == 5) return serialLive.load();
   return false;
 }
 static bool srRunning = false;
@@ -2384,7 +2385,74 @@ static void testSpeakerMetadata() {
  assert(sttRequestFinish(owner,token));complete(token);
 }
 #endif
+// The real native one-question broker must endpoint on silence, continue
+// across hard cuts and refuse a partial question on timeout/queue loss.
+static void testNativeUtterance() {
+  const STTOwner glasses{SOURCE_G2_GLASSES, 5};
+  auto start = [&]() {
+    STTToken token = 0; char error[96] = {};
+    assert(sttBeginUtteranceG2Native(glasses, 7, &token, error, sizeof(error)));
+    await([] { return audioCaptureOwnedBy("stt"); }, "native question capture");
+    return token;
+  };
+  auto snap = [&](STTToken token) { STTSnapshot s; assert(sttSnapshot(glasses, token, &s)); return s; };
+  reset(); allVoice = false; voiceIntervals = {{0, 16000}};
+  auto token = start(); allowedSamples = kCalibrationSamples + 4 * 16000;
+  complete(token);
+  auto s = snap(token);
+  assert(s.state == STTState::Done && s.segmentsCaptured == 1 && s.captureLimitMs == 30000);
+  assert(s.recordedSamples < allowedSamples && s.recordedSamples >= kCalibrationSamples + 40000);
+  assert(nativeStarts == 1 && !savedTranscripts.at(token).options.enabled);
+  STTTextChunk chunk;
+  assert(sttReadChunk(glasses, token, &chunk) && !chunk.forcedBoundary);
+  assert(sttAcknowledgeChunk(glasses, token, chunk.sequence));
+
+  reset(); allVoice = false; voiceIntervals = {{0, 13 * 16000}};
+  token = start(); allowedSamples = kCalibrationSamples + 16 * 16000;
+  complete(token); s = snap(token);
+  assert(s.state == STTState::Done && s.segmentsCaptured >= 2);
+  assert(sttReadChunk(glasses, token, &chunk) && chunk.forcedBoundary);
+  assert(sttAcknowledgeChunk(glasses, token, chunk.sequence));
+  assert(sttReadChunk(glasses, token, &chunk) && !chunk.forcedBoundary);
+  assert(sttAcknowledgeChunk(glasses, token, chunk.sequence));
+
+  // Publish a hard-cut prefix before advancing the virtual clock to the
+  // question deadline. A fast capture task must not let an empty queue hide
+  // failed single-utterance runs retaining already-completed partial text.
+  reset(); token = start(); allowedSamples = kCalibrationSamples + 12 * 16000;
+  await([&] { return snap(token).pendingTexts == 1; }, "native question prefix before timeout");
+  assert(sttReadChunk(glasses, token, &chunk) && chunk.forcedBoundary);
+  allowedSamples = kCalibrationSamples + 32 * 16000;
+  complete(token); s = snap(token);
+  assert(s.state == STTState::Failed && !s.pendingTexts && strstr(s.error, "timed out"));
+  assert(!sttReadChunk(glasses, token, &chunk));
+  reset(); token = start(); readTimeout = true;
+  complete(token); s = snap(token);
+  assert(s.state == STTState::Failed && strstr(s.error, "PCM delivery timed out"));
+  reset(); token = start(); assert(sttCancel(glasses, token)); complete(token);
+  assert(snap(token).state == STTState::Cancelled);
+  reset(); token = start(); serialLive = false; complete(token);
+  assert(!sttSnapshot(glasses, token, &s));
+  reset(); STTToken invalid = 0; char error[96];
+  assert(!sttBeginUtteranceG2Native(owner, 7, &invalid, error, sizeof(error)));
+  assert(!sttBeginUtteranceG2Native(glasses, 0, &invalid, error, sizeof(error)));
+  // Saturation cannot take Conversate's drop-and-continue exception: losing
+  // words from a question that may request an action must fail the run.
+  StreamRun run; run.nativeGeneration = 7; run.singleUtterance = true;
+  std::vector<int16_t> pcm(1600), voice(1600);
+  for (size_t i = 0; i < voice.size(); ++i) voice[i] = i & 1 ? 1000 : -1000;
+  hw1::stt::SegmenterConfig cfg;
+  cfg.max_segment_samples = 1600; cfg.min_segment_samples = 320;
+  cfg.pre_roll_samples = 0; cfg.min_voice_samples = 160; cfg.end_silence_samples = 320;
+  assert(run.segmenter.reset(pcm.data(), pcm.size(), cfg));
+  assert(run.segmenter.push(voice.data(), voice.size()).status == hw1::stt::SegmentStatus::Ready);
+  for (auto& slot : run.slots) slot.state = StreamSlotState::Ready;
+  assert(!sttQueueSegment(run) && run.failed && run.droppedSegments == 0);
+  reset();
+}
+
 int main() {
+  testNativeUtterance(); puts("PASS native voice question: pause endpoint, hard-cut continuation, timeout, PCM loss, cancellation, epoch and queue fences");
   setvbuf(stdout, nullptr, _IONBF, 0);
 #if HW1_STT_SPEAKER_LABELS
   testDelayedSpeakerSaving();puts("PASS late speaker saving: 20-second labels, final-stop drain and bounded unknown completion");

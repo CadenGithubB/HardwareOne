@@ -69,7 +69,7 @@ static void utf8AndTruncation() {
   assert(std::string(t.bytes).substr(t.size - 3) == "\xef\xbf\xbd");
   hw1http::Text large;
   std::string previous;
-  for (unsigned i = 0; i < 3000; ++i) {
+  for (unsigned i = 0; i < hw1http::kResultCap / 4 + 128; ++i) {
     large.append("\xf0\x9f\x8c\x8d", 4);
     assert(std::string(large.bytes).compare(0, previous.size(), previous) == 0);
     previous = large.bytes;
@@ -80,6 +80,20 @@ static void utf8AndTruncation() {
   assert(std::strstr(large.bytes, hw1http::kInterrupted));
   assert(large.size < hw1http::kResultCap);
   assert(std::string(large.bytes).compare(0, previous.size(), previous) == 0);
+}
+
+static void longReply() {
+  auto stream = std::make_unique<Stream>();
+  const std::string expected(12000, 'r');
+  for (size_t offset = 0; offset < expected.size(); offset += 4000) {
+    const std::string wire = "data: {\"choices\":[{\"delta\":{\"content\":\"" +
+        expected.substr(offset, 4000) + "\"}}]}\n\n";
+    assert(stream->feed(wire.data(), wire.size()));
+    assert(stream->text.size == offset + 4000 && !stream->text.truncated);
+  }
+  assert(stream->feed("data: [DONE]\n\n", 14));
+  assert(stream->done && !stream->error);
+  assert(std::string(stream->text.bytes) == expected);
 }
 
 static void urls() {
@@ -95,6 +109,6 @@ static void urls() {
 }
 
 int main() {
-  fragmented(); failedStreams(); utf8AndTruncation(); urls();
+  fragmented(); failedStreams(); utf8AndTruncation(); longReply(); urls();
   std::cout << "HTTP source wire parser tests passed\n";
 }

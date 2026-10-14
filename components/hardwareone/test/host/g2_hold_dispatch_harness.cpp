@@ -71,6 +71,7 @@ enum G2HijackPage : uint8_t {
   G2_HIJACK_PAGE_APPS = 11,
   G2_HIJACK_PAGE_TRANSCRIPTION = 23,
   G2_HIJACK_PAGE_NOTES = 24,
+  G2_HIJACK_PAGE_LLM_READER = 25,
 };
 struct G2PageModule { const char* name; };
 typedef bool (*G2PageHoldFn)(uint8_t phase, uint8_t source);

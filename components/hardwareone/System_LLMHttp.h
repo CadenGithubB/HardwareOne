@@ -29,4 +29,27 @@ void httpLlmTick();
 // Refused until the worker has released its transport. A new ID starts a new
 // host conversation; it does not delete host transcripts or agent memory.
 bool httpLlmResetConversation();
+
+#if ENABLE_G2_GLASSES && ENABLE_LOCAL_STT
+// Native Terminal uses the same configured relay/TLS credentials, but has its
+// own bounded asynchronous JSON exchange. It never replaces the chat result.
+constexpr size_t HTTP_TERMINAL_JSON_CAP = 4096;
+using HttpTerminalToken = uint32_t;
+struct HttpTerminalResult {
+  bool done = false;
+  int httpStatus = 0;
+  size_t length = 0;
+  uint32_t configRevision = 0;
+  char error[96] = {};
+};
+bool httpTerminalStart(const char* json, size_t length, HttpTerminalToken* token);
+// False means a stale token or insufficient output capacity. Pending reads
+// return true with done=false and empty output; completed reads are repeatable.
+bool httpTerminalRead(HttpTerminalToken token, char* out, size_t cap,
+                      HttpTerminalResult* result);
+// Stops local I/O only; a sent host mutation may already have been accepted.
+void httpTerminalCancel(HttpTerminalToken token);
+// Zero means configuration is unavailable. A change invalidates a native view.
+uint32_t httpTerminalConfigRevision();
+#endif
 #endif

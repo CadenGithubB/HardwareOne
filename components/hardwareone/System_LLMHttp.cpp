@@ -80,6 +80,21 @@ void interruptSocketLocked() {
   if (sSocket >= 0) (void)shutdown(sSocket, SHUT_RDWR);
 }
 
+#if ENABLE_G2_GLASSES && ENABLE_LOCAL_STT
+bool sTerminalWorker = false;
+int sTerminalSocket = -1;
+uint32_t sTerminalToken = 0, sTerminalNextToken = 0;
+std::atomic<bool> sTerminalCancel{false};
+EXT_RAM_BSS_ATTR HttpTerminalResult sTerminalResult;
+EXT_RAM_BSS_ATTR char sTerminalResponse[HTTP_TERMINAL_JSON_CAP + 1];
+void interruptTerminalLocked() {
+  sTerminalCancel.store(true, std::memory_order_release);
+  if (sTerminalSocket >= 0) (void)shutdown(sTerminalSocket, SHUT_RDWR);
+}
+#else
+void interruptTerminalLocked() {}
+#endif
+
 void descriptor(LlmModelDesc* out, bool available) {
   memset(out, 0, sizeof(*out));
   strlcpy(out->id, "http:openclaw", sizeof(out->id));
@@ -137,13 +152,13 @@ esp_err_t httpEvent(esp_http_client_event_t* event) {
   return ESP_OK;
 }
 
-void publish(const Run& run, const Text& text, const char* error, bool terminal) {
+void publish(const Run& run, const char* text, size_t size, const char* error, bool terminal) {
   Lock lock(true);
   if (!lock) return;
   if (sSession != run.session || sRevision != run.revision) return;
   // Stop owns the terminal message once cancelled. No late network bytes leak.
   if (!sCancel.load(std::memory_order_acquire) && sConfigAdmitted.load(std::memory_order_acquire)) {
-    memcpy(sResult, text.bytes, text.size + 1); sResultLen = text.size;
+    memcpy(sResult, text, size + 1); sResultLen = size;
     if (error) strlcpy(sError, error, sizeof(sError));
   }
   if (terminal) sDone = true;
@@ -162,6 +177,9 @@ void failConfigurationPublication() {
   sConfigAdmitted.store(false, std::memory_order_release);
   sConfigFailurePending.store(true, std::memory_order_release);
   sCancel.store(true, std::memory_order_release);
+#if ENABLE_G2_GLASSES && ENABLE_LOCAL_STT
+  sTerminalCancel.store(true, std::memory_order_release);
+#endif
 }
 
 void applyConfigurationFailureLocked() {
@@ -171,6 +189,7 @@ void applyConfigurationFailureLocked() {
   strlcpy(sError, kConfigPublicationError, sizeof(sError));
   if (sWorker) appendTerminalLocked(sError);
   interruptSocketLocked();
+  interruptTerminalLocked();
 }
 
 // The worker exclusively owns its client. Stop shuts down its published socket;
@@ -289,7 +308,7 @@ void worker(void* context) {
       stream->feed(chunk, static_cast<size_t>(n));
       error = stream->error;
       if (stream->text.size != published) {
-        publish(*run, stream->text, nullptr, false);
+        publish(*run, stream->text.bytes, stream->text.size, nullptr, false);
         published = stream->text.size;
       }
       if (++serviced == 256) { serviced = 0; vTaskDelay(1); }
@@ -306,10 +325,12 @@ void worker(void* context) {
       char notice[68]; snprintf(notice, sizeof(notice), "\n[%.60s]", error);
       stream->text.literal(notice, strlen(notice));
     }
-    publish(*run, stream->text, error, true);
+    publish(*run, stream->text.bytes, stream->text.size, error, true);
     stream->hw1http::Stream::~Stream(); ps_free(stream);
   } else {
-    Text empty; empty.finish(true); publish(*run, empty, error, true);
+    // The allocation-failure path must not place a full reply buffer on this
+    // worker's 8 KiB stack. Publish the fixed notice directly instead.
+    publish(*run, kInterrupted, strlen(kInterrupted), error, true);
   }
   if (body) { mbedtls_platform_zeroize(body, kBodyCap); ps_free(body); }
   {
@@ -372,6 +393,7 @@ bool httpLlmConfigure(bool enabled, const char* baseUrl, const char* model,
     if (memcmp(&sConfig, next, sizeof(*next))) {
       sCancel.store(true, std::memory_order_release);
       interruptSocketLocked();
+      interruptTerminalLocked();
       ++sRevision;
       sConfig = *next;
       rotateLocked();
@@ -497,4 +519,5 @@ bool httpLlmResetConversation() {
   Lock lock; if (!lock || sWorker) return false;
   rotateLocked(); return true;
 }
+#include "System_LLMHttpTerminal.inc"
 #endif

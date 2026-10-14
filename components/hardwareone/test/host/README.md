@@ -1,5 +1,35 @@
 # HardwareOne host tests
 
+## Transferred Terminal and P4 regressions
+
+`openclaw_terminal` runs the provider and device-API tests when Node.js is
+available. Set `HW1_NODE_EXECUTABLE` during CMake configuration if Node is
+outside PATH. The question projection regression covers both `ask_user` and
+`openclaw:core:ask_user`, live events and replay, without hiding unrelated JSON.
+
+The existing continuous-STT suite covers failed native questions after a
+hard-cut prefix has already been decoded. It waits for the prefix before
+advancing to the timeout, then checks that no partial text remains readable.
+Continuous caption sessions still retain their completed text after failure.
+
+The optional `esp_hosted_mempool` suite needs ESP-IDF **5.5.5** source plus the
+pinned Hosted 2.12.13 package in the component-manager cache or
+`managed_components`. Select the SDK explicitly; an older SDK is not a valid
+substitute for this test of allocator internals:
+
+```sh
+cmake -S components/hardwareone/test/host -B /tmp/hw1-hardwareone-host \
+  -DHW1_ESP_HOSTED_TEST_IDF="$IDF_PATH"
+ctest --test-dir /tmp/hw1-hardwareone-host --output-on-failure \
+  -R '^(openclaw_terminal|esp_hosted_mempool)$'
+```
+
+The DMA suite reproduces the original misalignment, checks the patched pool
+across cache sizes and allocation fallback paths, and checks preparation hashes
+and refusal to overwrite a modified dependency. `HW1_SANITIZE` controls its
+ASan/UBSan instrumentation, as with other native host suites. A passing host
+test does not qualify firmware or physical Wi-Fi/BLE behavior.
+
 Host-side tests for firmware logic that is pure enough to compile off-target.
 They compile the **real** headers from `components/hardwareone/`, not copies —
 the same rule `updater/test/host/CMakeLists.txt` states for the recovery
@@ -4152,3 +4182,79 @@ fresh reads, qualified default OFF, idle renderer/native readiness, ACK matching
 connection rollover, cold discovery, and preservation of other firmware guards.
 Real G2 settings acceptance is tracked separately in
 `docs/G2_WEAR_DETECTION_23214.md`.
+
+## Native Hey Even with local speech and chat
+
+```sh
+python3 -B components/hardwareone/test/host/test_g2_evenai_local.py --sanitize
+python3 -B components/hardwareone/test/host/test_stt_continuous.py --sanitize
+python3 -B components/hardwareone/test/host/test_llm_http_integration.py --sanitize
+python3 -B components/hardwareone/test/host/test_g2_conversate.py --sanitize
+```
+
+The native adapter test compiles the actual G2 adapter and packet guard with
+controlled speech, chat and BLE boundaries, including disabled build paths.
+It checks multi-segment questions, UTF-8 reply deltas, blank/error outcomes,
+stale epochs, model changes, dismissal and successor-turn protection. The
+production session tick is also exercised through a 20-second speech wait and
+120-second reply wait: periodic heartbeats continue, active work outlives the
+ordinary idle limit, and idle expiry resumes after completion. The
+continuous STT suite exercises the production finite native question mode:
+pause endpointing, hard-cut continuation, timeouts, revoked owners and refusal
+to silently drop queued question audio. The chat suite checks exact run tokens
+even when two backend generations reuse a numeric session ID. These tests do
+not qualify physical wake-word recognition, microphone onset or lens rendering;
+those checks are tracked in `docs/G2_EVENAI_LOCAL_WORK.md`.
+
+## Retained LLM replies
+
+`System_LLMReplyLimits.h` sets the shared 16 KiB reply/turn storage cap, including
+NUL and the HTTP source's reserved terminal notices. The HTTP parser and worker
+suites retain a 12,000-byte reply; the chat integration suite retains 16,383
+bytes including its truncation notice. The OLED uses PSRAM scratch and the web
+history handler streams small JSON-escaped windows, keeping full replies off
+the task stacks.
+
+```sh
+python3 -B components/hardwareone/test/host/test_llm_turn_serving.py --sanitize
+```
+
+This executes the production CLI and web history handlers with long, empty,
+UTF-8 and escape-heavy turns, plus a failed web write. `llmturns json <index>
+[offset]` preserves full short replies and adds `len`, `next` and `more` for
+long replies; fetch `next` until `more` is false. The command response remains
+below 4 KiB. These host tests do not qualify device memory headroom or lenses.
+
+### G2 reply reader and microphone shortcut
+
+`test_g2_llm_reader.py --sanitize` compiles the production layout helper,
+REBUILD wire encoder/parser and fragment sender. It covers six full body lines,
+complete 16 KiB retained replies, UTF-8 stream boundaries, thousands of short
+lines, stable/clamped paging, reassembly/CRC and the qualified 241-byte ATT write
+limit. Connection, lifecycle or presentation changes stop remaining fragments.
+
+`test_g2_llm_reader_runtime.py --sanitize` extracts the production worker and
+intent handlers and named REBUILD helper. It checks full-width creation,
+scroll/tap paging, busy holds, exact-run replacement, retry limits and stale
+lifecycle/presentation cleanup, including replacement during encoding or ACK.
+The settings-command harness additionally exercises the actual physical sender's
+presentation check between ATT writes.
+`test_g2_text_entry_start.py --sanitize` compiles the real entry implementation
+and microphone adapter for manual defaults, opt-in startup, secrets, unavailable
+mic fallback, terminal/replacement races and review-before-Done behavior.
+These suites do not establish physical hold delivery on a glasses text page.
+
+### Native G2 Terminal
+
+```sh
+python3 -B components/hardwareone/test/host/test_g2_terminal_protocol.py --sanitize
+python3 -B components/hardwareone/test/host/test_g2_native_terminal.py --sanitize
+```
+
+The codec suite compiles the production protocol and fragmenter against fixed
+wire fixtures, including nanopb's omitted-zero values, malformed messages,
+UTF-8 limits and 512-byte text fragmentation. The adapter suite exercises the
+production control owner against controlled speech, Terminal HTTP and transport boundaries.
+These checks are separate from physical Terminal display, microphone and gesture
+qualification, recorded in `docs/G2_TERMINAL_WORK.md`. Terminal conversations
+use host-issued session/view identities independently of the custom LLM reader.

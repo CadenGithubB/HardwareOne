@@ -1,0 +1,56 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -141,7 +141,7 @@
+ list(APPEND driver_requires esp_event)
+ 
+ idf_component_register(SRCS ${srcs}
+-	PRIV_REQUIRES soc esp_netif esp_timer driver esp_wifi bt esp_http_client console wpa_supplicant openthread
++	PRIV_REQUIRES esp_mm soc esp_netif esp_timer driver esp_wifi bt esp_http_client console wpa_supplicant openthread
+ 	REQUIRES ${driver_requires}
+ 	INCLUDE_DIRS ${pub_include}
+ 	PRIV_INCLUDE_DIRS ${priv_include})
+--- a/host/drivers/transport/transport_drv.c
++++ b/host/drivers/transport/transport_drv.c
+@@ -26,6 +26,8 @@
+ 
+ #include "mempool.h"
+ #include "transport_util.h"
++#include "esp_heap_caps.h"
++#include "esp_private/heap_align_hw.h"
+ 
+ #include "esp_hosted_cli.h"
+ #include "rpc_wrap.h"
+@@ -283,11 +285,32 @@
+ static hosted_mempool_t * transport_drv_common_mempool_create(void)
+ {
+ 	if (!mempool_common) {
++		/* The DMA allocator aligns the pool base, not each block. Wi-Fi uses
++		 * this pool zero-copy, so its stride must meet the same hardware
++		 * alignment for either allocation location. Query the allocator's
++		 * own adjustment hook (cache and encryption), not a P4 cache constant.
++		 */
++		size_t block_size = ESP_TRANSPORT_MAX_BUF_SIZE;
++		size_t alignment = HOSTED_MEM_ALIGNMENT_64;
++		uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT;
++		esp_heap_adjust_alignment_to_hw(&alignment, &block_size, &caps);
++		if (caps & MALLOC_CAP_INVALID) {
++			return NULL;
++		}
++#if CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM
++		size_t spiram_block_size = ESP_TRANSPORT_MAX_BUF_SIZE;
++		size_t spiram_alignment = HOSTED_MEM_ALIGNMENT_64;
++		caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA | MALLOC_CAP_8BIT;
++		esp_heap_adjust_alignment_to_hw(&spiram_alignment, &spiram_block_size, &caps);
++		if (!(caps & MALLOC_CAP_INVALID) && spiram_block_size > block_size) {
++			block_size = spiram_block_size;
++		}
++#endif
+ 		hosted_mempool_config_t config = {
+ 			.pre_allocated_mem = NULL,
+ 			.pre_allocated_mem_size = 0,
+ 			.num_blocks = H_TRANSPORT_QUEUE_SIZE + MEMPOOL_PADDING,
+-			.block_size = ESP_TRANSPORT_MAX_BUF_SIZE,
++			.block_size = block_size,
+ 			.alignment_in_bytes = HOSTED_MEM_ALIGNMENT_64,
+ 			.malloc = transport_util_malloc,
+ 			.calloc = transport_util_calloc,

@@ -113,6 +113,13 @@ bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToke
                                 char* error, size_t errorCap,
                                 const TranscriptOptions* transcriptOptions = nullptr,
                                 void (*publishWake)() = nullptr);
+// Native voice question: same broker, exact G2 PCM claim and chunk/ACK API,
+// but capture ends on the first 1.5 s speech pause. Hard segment cuts continue
+// the question; a 30 s limit fails it rather than submitting a truncated request.
+// No transcript file is saved. The native caller owns ENTER/heartbeat/EXIT.
+bool sttBeginUtteranceG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
+                              char* error, size_t errorCap,
+                              void (*publishWake)() = nullptr);
 // Wearer pause/resume of a native session: no PCM arrives while paused, which
 // must not be mistaken for a failed microphone; the open phrase is closed.
 bool sttSetPaused(STTOwner owner, STTToken token, bool paused);

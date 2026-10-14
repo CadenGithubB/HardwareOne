@@ -70,6 +70,14 @@ struct TextEntryConfig {
   TextEntryAbandonFn onAbandon = nullptr;
   bool              isSecret = false;    // mask display; never log/dictate
                                          // buffer contents (passwords/PSKs)
+  // Open the existing microphone countdown after the pad is ready. This is
+  // only a preferred entry mode: secrets and the legacy keyboard stay manual,
+  // and unavailable dictation leaves the keyboard available for editing.
+  bool              startWithMic = false;
+  // Optional fence for an asynchronous caller returning from an older page.
+  // Zero uses the current lifecycle; a stale nonzero value is rejected before
+  // replacing any active entry.
+  uint32_t          expectedLifecycleEpoch = 0;
 };
 
 // Exact identity of an abandoned entry session. Terminal/lifecycle reduction
@@ -156,6 +164,8 @@ struct TextEntryConfig {
   TextEntryCancelFn onCancel = nullptr;
   TextEntryAbandonFn onAbandon = nullptr;
   bool              isSecret = false;
+  bool              startWithMic = false;
+  uint32_t          expectedLifecycleEpoch = 0;
 };
 
 struct G2TextEntryCleanupToken {

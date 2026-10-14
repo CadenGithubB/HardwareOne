@@ -19,7 +19,8 @@ def main():
     source = here.parents[1]
     harness = (here / 'llm_http_runtime_harness.cpp').read_text()
     harness = harness.replace('// INSERT_INTERFACE', stripped(source / 'System_LLMHttp.h'))
-    harness = harness.replace('// INSERT_IMPLEMENTATION', stripped(source / 'System_LLMHttp.cpp'))
+    harness = harness.replace('// INSERT_IMPLEMENTATION', stripped(source / 'System_LLMHttp.cpp') +
+                              '\n' + stripped(source / 'System_LLMHttpTerminal.inc'))
     with tempfile.TemporaryDirectory(prefix='hw1-llm-http-runtime-') as tmp:
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
         unit.write_text(harness)

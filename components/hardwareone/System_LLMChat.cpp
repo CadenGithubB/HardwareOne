@@ -10,6 +10,7 @@
 
 #include <Arduino.h>
 #include <math.h>
+#include <algorithm>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -57,6 +58,8 @@ static int  sEngineOffsetDrained = 0; // bytes copied from engine into the turn
 // web/OLED live view instead of blanking. Invalidated when a new turn begins.
 static int  sLastFinishedSession = 0;
 static int  sLastFinishedSlot    = -1;
+static ChatRunToken sRunCounter = 0;  // Never reset by Clear or a source change.
+static ChatRunToken sStreamingRun = 0, sLastFinishedRun = 0;
 
 static SemaphoreHandle_t sChatMutex = nullptr;
 
@@ -180,6 +183,7 @@ static void drainEngineLocked() {
   if (llmBackendSessionId() != sStreamingSessionId) {
     sStreamingTurnSlot = -1;
     sStreamingSessionId = 0;
+    sStreamingRun = 0;
     sEngineOffsetDrained = 0;
     return;
   }
@@ -215,6 +219,8 @@ static void drainEngineLocked() {
     // Snapshot the finished turn so a client that hasn't polled yet can still
     // fetch it (chatReadFinished), even though we clear the streaming slot here.
     sLastFinishedSession = sStreamingSessionId;
+    sLastFinishedRun = sStreamingRun;
+    sStreamingRun = 0;
     sLastFinishedSlot    = sStreamingTurnSlot;
     sStreamingTurnSlot = -1;
     sStreamingSessionId = 0;
@@ -303,7 +309,8 @@ EXT_RAM_BSS_ATTR static char sFramedPrompt[1024];
 // Mutating operations
 // ============================================================================
 
-int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt) {
+int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt, ChatRunToken* run) {
+  if (run) *run = 0;
   chatInit();
   if (!userPrompt || !*userPrompt) return 0;
   if (!llmBackendIsReady()) return 0;
@@ -324,6 +331,7 @@ int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt) {
   }
 
   // Append USER turn (full prompt copied into the slot's buffer)
+  sLastFinishedRun = 0;
   uint32_t promptLen = strlen(userPrompt);
   appendTurnLocked(ChatTurnRole::USER, userPrompt, promptLen);
 
@@ -348,6 +356,8 @@ int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt) {
 
   sStreamingTurnSlot   = assistantSlot;
   sStreamingSessionId  = sid;
+  sStreamingRun = ++sRunCounter;
+  if (run) *run = sStreamingRun;
   sEngineOffsetDrained = 0;
   sLastFinishedSlot    = -1;   // a new turn supersedes any finished-turn snapshot
   sLastFinishedSession = 0;
@@ -413,6 +423,7 @@ int chatRetryLast(const ChatParamOverride* opt) {
   }
 
   // Remove the previous assistant turn (we're regenerating it).
+  sLastFinishedRun = 0;
   if (lastAssistantSlot >= 0) {
     // Only pop if it was the LAST turn — if there's content after it (shouldn't
     // be possible, but defensively), don't disturb the order.
@@ -435,6 +446,7 @@ int chatRetryLast(const ChatParamOverride* opt) {
 
   sStreamingTurnSlot   = newSlot;
   sStreamingSessionId  = sid;
+  sStreamingRun = ++sRunCounter;
   sEngineOffsetDrained = 0;
   return sid;
 }
@@ -443,6 +455,15 @@ void chatStop() {
   llmBackendStop();
   // The drain on next read will see llmIsGenerationDone() == true and
   // finalize the current assistant turn (keeping whatever was generated).
+}
+
+bool chatStopRun(ChatRunToken run) {
+  ChatLock lk;
+  if (!lk.held || !run) return false;
+  drainEngineLocked();
+  if (sStreamingTurnSlot < 0 || sStreamingRun != run) return false;
+  llmBackendStop();
+  return true;
 }
 
 bool chatClear() {
@@ -457,6 +478,7 @@ bool chatClear() {
   for (int i = 0; i < LLM_CHAT_MAX_TURNS; i++) freeTurnSlot(i);
   sLastFinishedSlot = -1;
   sLastFinishedSession = 0;
+  sLastFinishedRun = sStreamingRun = 0;
   sTurnHead = 0;
   sTurnCount = 0;
   sStreamingTurnSlot = -1;
@@ -543,6 +565,35 @@ int chatFinishedLen(int session) {
   if (!lk.held) return 0;
   if (session == 0 || session != sLastFinishedSession || sLastFinishedSlot < 0) return 0;
   return (int)sTurns[sLastFinishedSlot].textLen;
+}
+
+ChatRunToken chatGetRunToken() {
+  ChatLock lk;
+  if (!lk.held) return 0;
+  drainEngineLocked();
+  return sStreamingRun ? sStreamingRun : sLastFinishedRun;
+}
+
+int chatReadRun(ChatRunToken run, int offset, char* buf, int maxLen, bool* done) {
+  if (done) *done = false;
+  if (!buf || maxLen <= 0) return -1;
+  buf[0] = '\0';
+  ChatLock lk;
+  if (!lk.held || !run || offset < 0) return -1;
+  drainEngineLocked();
+  int slot = -1;
+  if (sStreamingRun == run) slot = sStreamingTurnSlot;
+  else if (sLastFinishedRun == run) {
+    slot = sLastFinishedSlot;
+    if (done) *done = slot >= 0;
+  }
+  if (slot < 0) return -1;
+  const InternalTurn& t = sTurns[slot];
+  if (!t.text || (uint32_t)offset >= t.textLen) return 0;
+  const int count = std::min<int>(t.textLen - offset, maxLen - 1);
+  memcpy(buf, t.text + offset, count);
+  buf[count] = '\0';
+  return count;
 }
 
 int chatReadStream(int offset, char* buf, int maxLen) {
