@@ -41,6 +41,7 @@ struct TranscriptOptions { bool enabled = false; };
 enum class STTState { Preparing, Recording, Done, Cancelled, Failed };
 struct STTSnapshot { bool workerActive = false; STTState state = STTState::Done; };
 struct STTTextChunk { uint32_t sequence = 0; char text[2049] = {}; };
+STTState stoppedSpeechState = STTState::Done;
 uint32_t liveOwner = 7;
 bool sttLive = false, textReady = false, pausedAtTeardown = false;
 std::string transcript;
@@ -56,8 +57,8 @@ bool sttBeginContinuousG2Native(STTOwner owner, uint32_t gen, STTToken* token, c
   ++speechBegins; sttLive = true; *token = speechBegins; return true;
 }
 bool sttCancel(STTOwner, STTToken) { sttLive = false; textReady = false; return true; }
-bool sttRequestFinish(STTOwner, STTToken) { ++finishRequests; sttLive = false; textReady = true; return true; }
-bool sttSnapshot(STTOwner, STTToken, STTSnapshot* s) { s->workerActive = sttLive; s->state = sttLive ? STTState::Recording : STTState::Done; return true; }
+bool sttRequestFinish(STTOwner, STTToken) { ++finishRequests; sttLive = false; textReady = !transcript.empty(); return true; }
+bool sttSnapshot(STTOwner, STTToken, STTSnapshot* s) { s->workerActive = sttLive; s->state = sttLive ? STTState::Recording : stoppedSpeechState; return true; }
 bool sttReadChunk(STTOwner, STTToken, STTTextChunk* c) { if (!textReady) return false; c->sequence = 1; snprintf(c->text, sizeof(c->text), "%s", transcript.c_str()); return true; }
 bool sttAcknowledgeChunk(STTOwner, STTToken, uint32_t) { textReady = false; return true; }
 bool g2EvenAiSessionIsActive() { return false; }
@@ -133,6 +134,10 @@ static void hostQuery(const char* type,bool multi=false,bool other=false,char pe
   for(unsigned i=0;i<2;++i){auto x=options.add<JsonObject>();x["id"]=std::string(type)=="permission"?(i?"deny":"allow-once"):(i?"o1":"o0");x["label"]=i?"Second":"First";}
   hostEvents.push_back(stringify(d));hostState="awaiting";
 }
+static void hostClearQuery(const std::string& pending) {
+  JsonDocument d;d["id"]=++eventCounter;d["type"]="query_clear";d["pendingId"]=pending;
+  hostEvents.push_back(stringify(d));hostStatus("idle");
+}
 static std::string responseFor(const char* body) {
   JsonDocument q,r;assert(!deserializeJson(q,body));
   r["schema"]=1;r["ok"]=true;r["requestId"]=q["requestId"];r["instance"]=hostInstance;
@@ -196,6 +201,57 @@ void event(uint8_t command,uint32_t value=0,uint32_t second=0,uint32_t epoch=0){
   assert(g2PbEndNested(pb,sizeof(pb),&n,body));
   g2NativeTerminalOnRx(gR,gR.connectionGeneration,epoch?epoch:gNativeTerminal.epoch,pb,n);
 }
+// Exact 2.3.0 DISPLAY_STATE: state/session/overlay in fields 1/2/3.
+// SESSION_LIST=2, SESSION_ACTIVE=3; NONE=0 and QUERY=3 overlays.
+void display(uint8_t state,uint32_t session,uint8_t overlay=0){
+  uint8_t pb[64];size_t n=0,body=0;
+  assert(g2PbWriteUint32(pb,sizeof(pb),&n,1,G2_TERMINAL_CMD_DISPLAY_STATE));
+  assert(g2PbBeginNested(pb,sizeof(pb),&n,28,&body));
+  assert(g2PbWriteUint32(pb,sizeof(pb),&n,1,state));
+  assert(g2PbWriteUint32(pb,sizeof(pb),&n,2,session));
+  assert(g2PbWriteUint32(pb,sizeof(pb),&n,3,overlay));
+  assert(g2PbEndNested(pb,sizeof(pb),&n,body));
+  g2NativeTerminalOnRx(gR,gR.connectionGeneration,gNativeTerminal.epoch,pb,n);
+}
+static std::vector<uint8_t> wireBody(const Sent& frame,uint32_t tag){
+  size_t pos=0;uint32_t field;uint8_t wire;
+  while(pos<frame.pb.size()){
+    assert(g2PbReadTagStrict(frame.pb.data(),frame.pb.size(),&pos,&field,&wire));
+    if(field==tag){const uint8_t* data=nullptr;size_t n=0;
+      assert(wire==G2_PB_WIRE_LEN_DELIM&&g2PbReadDelimited(frame.pb.data(),frame.pb.size(),&pos,&data,&n));
+      return {data,data+n};}
+    assert(g2PbSkipFieldStrict(frame.pb.data(),frame.pb.size(),&pos,wire));
+  }
+  assert(false);return {};
+}
+static uint32_t wireNumber(const Sent& frame,uint32_t tag,uint32_t wanted){
+  const auto body=wireBody(frame,tag);size_t pos=0;uint32_t field;uint8_t wire;uint64_t value;
+  while(pos<body.size()){
+    assert(g2PbReadTagStrict(body.data(),body.size(),&pos,&field,&wire));
+    if(field==wanted){assert(wire==G2_PB_WIRE_VARINT&&g2PbReadVarintStrict(body.data(),body.size(),&pos,&value));return uint32_t(value);}
+    assert(g2PbSkipFieldStrict(body.data(),body.size(),&pos,wire));
+  }
+  assert(false);return 0;
+}
+// Compare the complete offered wire question/options/session, allowing only
+// the revocable native query ID (field 1) to change across presentation.
+static std::vector<uint8_t> queryOffer(const Sent& frame){
+  const auto body=wireBody(frame,8);std::vector<uint8_t> offer;size_t pos=0;
+  while(pos<body.size()){
+    const size_t start=pos;uint32_t field;uint8_t wire;
+    assert(g2PbReadTagStrict(body.data(),body.size(),&pos,&field,&wire));
+    assert(g2PbSkipFieldStrict(body.data(),body.size(),&pos,wire));
+    if(field!=1)offer.insert(offer.end(),body.begin()+start,body.begin()+pos);
+  }
+  return offer;
+}
+static const Sent& lastQuery(){for(auto i=sent.rbegin();i!=sent.rend();++i)if(i->command==G2_TERMINAL_CMD_QUERY)return *i;assert(false);return sent.back();}
+static size_t queryCount(size_t begin=0){size_t count=0;for(size_t i=begin;i<sent.size();++i)count+=sent[i].command==G2_TERMINAL_CMD_QUERY;return count;}
+static size_t stateCount(size_t begin,uint32_t state){size_t count=0;for(size_t i=begin;i<sent.size();++i)if(sent[i].command==G2_TERMINAL_CMD_STATE)count+=wireNumber(sent[i],6,2)==state;return count;}
+static std::string lastRequest(const char* operation){
+  for(auto i=rpcRequests.rbegin();i!=rpcRequests.rend();++i){JsonDocument request;assert(!deserializeJson(request,*i));if(!strcmp(request["op"]|"",operation))return *i;}
+  assert(false);return {};
+}
 void ack(){if(gNativeTerminal.policy.pending!=NativeTerm::Tx::None)event(G2_TERMINAL_CMD_ACK,gNativeTerminal.policy.magic);}
 void tick(unsigned count=1){while(count--){clockMs+=100;g2NativeTerminalTick();}}
 void settle(unsigned count=50){while(count--&&g2NativeTerminalActive()){tick();ack();}}
@@ -246,9 +302,147 @@ int main(){
   assert(gNativeTerminal.queryActive&&gNativeTerminal.choices[0].selected);
   event(G2_TERMINAL_CMD_QUERY_REPLY,gNativeTerminal.queryId,100);settle();assert(questions==1&&g2NativeTerminalActive());
   // Other answer cannot turn into a new prompt on native dismissal.
-  hostQuery("question",false,true);awaitQuery();event(G2_TERMINAL_CMD_QUERY_REPLY,gNativeTerminal.queryId,101);settle(8);
+  hostQuery("question",false,true);awaitQuery();const std::string voicePending=gNativeTerminal.pending;
+  event(G2_TERMINAL_CMD_QUERY_REPLY,gNativeTerminal.queryId,101);settle(8);
   dictate("private answer draft");event(G2_TERMINAL_CMD_AWAIT_DISMISS,gNativeTerminal.sessionId);event(G2_TERMINAL_CMD_VOICE,4);settle();assert(submissions==accepted&&questions==1&&!sttLive);
-  hostStatus("idle");untilIdle();
+  assert(gNativeTerminal.queryActive&&!gNativeTerminal.questionVoice&&!gNativeTerminal.promptLen);
+  hostClearQuery(voicePending);untilIdle();
+  // Dismissing the waiting cue must preserve the host-owned question. Returning
+  // from the selector restores its exact choices with a new presentation ID;
+  // neither navigation nor a stale choice sends an answer.
+  display(3,gNativeTerminal.sessionId);
+  const size_t directQuestionBegin=sent.size();
+  // A current awaiting snapshot may arrive before its ordered query event.
+  for(unsigned i=0;i<8;++i)content(800+i,"Earlier tool activity",3);
+  hostQuery("question");awaitQuery();settle(10);
+  assert(stateCount(directQuestionBegin,G2_TERMINAL_STATE_AWAIT_USER)==0);
+  const auto firstOffer=queryOffer(lastQuery());
+  const std::string restorePending=gNativeTerminal.pending,restoreQuestion=gNativeTerminal.questionKey;
+  const uint32_t dismissedId=gNativeTerminal.queryId,restoreDeadline=gNativeTerminal.queryDeadline;
+  const unsigned beforeRestoreQuestions=questions;
+  display(2,gNativeTerminal.sessionId);
+  settle(10);assert(stateCount(directQuestionBegin,G2_TERMINAL_STATE_AWAIT_USER)>0);
+  const size_t repeatedListBegin=sent.size();display(2,gNativeTerminal.sessionId);settle(10);
+  assert(stateCount(repeatedListBegin,G2_TERMINAL_STATE_AWAIT_USER)==0);
+  event(G2_TERMINAL_CMD_AWAIT_DISMISS,gNativeTerminal.sessionId);
+  assert(gNativeTerminal.queryActive&&std::string(gNativeTerminal.pending)==restorePending);
+  assert(gNativeTerminal.queryId!=dismissedId&&gNativeTerminal.queryDeadline==restoreDeadline);
+  const size_t restoreBegin=sent.size();settle(10);assert(queryCount(restoreBegin)==0);
+  event(G2_TERMINAL_CMD_QUERY_REPLY,dismissedId,1);settle(5);assert(questions==beforeRestoreQuestions);
+  display(3,gNativeTerminal.sessionId);settle(10);
+  assert(queryCount(restoreBegin)==1&&queryOffer(lastQuery())==firstOffer);
+  assert(wireNumber(lastQuery(),8,1)==gNativeTerminal.queryId);
+  assert(std::string(gNativeTerminal.questionKey)==restoreQuestion&&gNativeTerminal.hostState==G2_TERMINAL_STATE_AWAIT_USER);
+  display(3,gNativeTerminal.sessionId);settle(10);assert(queryCount(restoreBegin)==1);
+  assert(questions==beforeRestoreQuestions&&submissions==accepted);
+  event(G2_TERMINAL_CMD_QUERY_REPLY,gNativeTerminal.queryId,2);settle();
+  assert(questions==beforeRestoreQuestions+1);
+  {JsonDocument request;assert(!deserializeJson(request,lastRequest("question")));
+    assert(request["pendingId"].as<std::string>()==restorePending&&request["questionId"].as<std::string>()==restoreQuestion);
+    assert(request["optionIds"].size()==1&&request["optionIds"][0].as<std::string>()=="o1");}
+  hostClearQuery(restorePending);untilIdle();
+  // A foreground approval uses the same direct native query, but never loses
+  // its offered decisions or becomes permission to submit an ordinary prompt.
+  const size_t directPermissionBegin=sent.size();hostQuery("permission");awaitQuery();settle(10);
+  assert(stateCount(directPermissionBegin,G2_TERMINAL_STATE_AWAIT_USER)==0);
+  const std::string queuedPending=gNativeTerminal.pending;const unsigned beforeDismissPermissions=permissions;
+  const uint32_t queuedId=gNativeTerminal.queryId;holdPoll();
+  event(G2_TERMINAL_CMD_QUERY_REPLY,queuedId,1);assert(gNativeTerminal.nextRpc==NativeRpc::Permission);
+  display(2,gNativeTerminal.sessionId);event(G2_TERMINAL_CMD_AWAIT_DISMISS,gNativeTerminal.sessionId);
+  assert(gNativeTerminal.nextRpc!=NativeRpc::Permission&&!gNativeTerminal.decision[0]);
+  holdRpc=false;settle(10);display(3,gNativeTerminal.sessionId);settle(10);
+  assert(gNativeTerminal.queryActive&&permissions==beforeDismissPermissions&&gNativeTerminal.queryId!=queuedId);
+  event(G2_TERMINAL_CMD_QUERY_REPLY,queuedId,1);settle(5);assert(permissions==beforeDismissPermissions);
+  event(G2_TERMINAL_CMD_QUERY_REPLY,gNativeTerminal.queryId,2);settle();
+  assert(permissions==beforeDismissPermissions+1&&lastDecision=="deny");
+  hostClearQuery(queuedPending);untilIdle();
+  // Queries arriving behind the selector, display-off or another session wait
+  // for this session's content. Overlay hints do not own the local speech draft.
+  for(const auto blocked:std::vector<std::pair<uint8_t,uint8_t>>{{2,0},{1,0},{3,3}}){
+    const uint32_t displaySession=blocked.second==3?gNativeTerminal.sessionId+100:gNativeTerminal.sessionId;
+    display(blocked.first,displaySession,blocked.second);const size_t hiddenBegin=sent.size();
+    hostQuery("question");settle(15);assert(queryCount(hiddenBegin)==0&&gNativeTerminal.queryActive);
+    const std::string hiddenPending=gNativeTerminal.pending;
+    display(3,gNativeTerminal.sessionId);settle(10);assert(queryCount(hiddenBegin)==1);
+    display(3,gNativeTerminal.sessionId,3);settle(10);assert(queryCount(hiddenBegin)==1);
+    hostClearQuery(hiddenPending);untilIdle();
+  }
+  for(const uint8_t overlay:{1,2}){
+    display(3,gNativeTerminal.sessionId,overlay);const size_t overlayBegin=sent.size();
+    hostQuery("question");settle(15);assert(queryCount(overlayBegin)==1&&gNativeTerminal.queryActive);
+    const std::string overlayPending=gNativeTerminal.pending;
+    hostClearQuery(overlayPending);untilIdle();
+  }
+  // A reported VOICE overlay may survive voice cancellation. Local draft
+  // ownership blocks query writes during recording; Cancel restores the same
+  // question without requiring a fresh DISPLAY_STATE from the glasses.
+  display(3,gNativeTerminal.sessionId);hostQuery("question",false,true);awaitQuery();
+  const auto otherOffer=queryOffer(lastQuery());const std::string otherPending=gNativeTerminal.pending;
+  const unsigned beforeOtherQuestions=questions;
+  event(G2_TERMINAL_CMD_QUERY_REPLY,gNativeTerminal.queryId,101);settle(8);
+  display(3,gNativeTerminal.sessionId,2);event(G2_TERMINAL_CMD_VOICE,1);assert(sttLive);
+  const size_t otherBegin=sent.size();settle(10);assert(queryCount(otherBegin)==0);
+  event(G2_TERMINAL_CMD_VOICE,5);settle(15);
+  assert(!sttLive&&!gNativeTerminal.questionVoice&&gNativeTerminal.queryActive);
+  assert(queryCount(otherBegin)==1&&queryOffer(lastQuery())==otherOffer&&questions==beforeOtherQuestions);
+  // The same stale overlay must not strand the next panel after a confirmed
+  // voice answer. The fixture returns complete:false just as a multi-panel
+  // question does, then emits its next host-owned panel with the same ID.
+  event(G2_TERMINAL_CMD_QUERY_REPLY,gNativeTerminal.queryId,101);settle(8);
+  dictate("The explicit answer for the first panel");event(G2_TERMINAL_CMD_VOICE,4);settle(15);
+  assert(questions==beforeOtherQuestions+1&&submissions==accepted);
+  {JsonDocument request;assert(!deserializeJson(request,lastRequest("question")));
+    assert(request["pendingId"].as<std::string>()==otherPending&&request["text"].as<std::string>()=="The explicit answer for the first panel");}
+  const size_t nextPanelBegin=sent.size();hostQuery("question");
+  {JsonDocument panel;assert(!deserializeJson(panel,hostEvents.back()));panel["questionId"]="q1";panel["question"]="Next panel choices";hostEvents.back()=stringify(panel);}
+  settle(15);assert(gNativeTerminal.queryActive&&queryCount(nextPanelBegin)==1&&!strcmp(gNativeTerminal.questionKey,"q1"));
+  assert(questions==beforeOtherQuestions+1&&submissions==accepted);
+  hostClearQuery(otherPending);untilIdle();
+  // Returning cannot resurrect an expired or host-revoked offer.
+  hostQuery("question");awaitQuery();const std::string expiredPending=gNativeTerminal.pending;
+  display(2,gNativeTerminal.sessionId);event(G2_TERMINAL_CMD_AWAIT_DISMISS,gNativeTerminal.sessionId);settle(5);
+  clockMs=gNativeTerminal.queryDeadline+1;const size_t expiredBegin=sent.size();tick();ack();
+  display(3,gNativeTerminal.sessionId);settle(10);assert(!gNativeTerminal.queryActive&&queryCount(expiredBegin)==0);
+  hostClearQuery(expiredPending);untilIdle();
+  hostQuery("question");awaitQuery();const std::string revokedPending=gNativeTerminal.pending;
+  display(2,gNativeTerminal.sessionId);event(G2_TERMINAL_CMD_AWAIT_DISMISS,gNativeTerminal.sessionId);
+  hostClearQuery(revokedPending);settle(15);const size_t revokedBegin=sent.size();
+  display(3,gNativeTerminal.sessionId);settle(10);assert(!gNativeTerminal.queryActive&&queryCount(revokedBegin)==0);
+  // Dismissal also revokes staged multi-select choices and a reply deferred
+  // behind a native ACK. Neither can migrate to the restored presentation.
+  hostQuery("question",true);awaitQuery();const std::string deferredPending=gNativeTerminal.pending;
+  const unsigned beforeDeferredQuestions=questions;
+  event(G2_TERMINAL_CMD_QUERY_REPLY,gNativeTerminal.queryId,1);settle(10);assert(gNativeTerminal.choices[0].selected);
+  display(2,gNativeTerminal.sessionId);event(G2_TERMINAL_CMD_AWAIT_DISMISS,gNativeTerminal.sessionId);
+  assert(!gNativeTerminal.choices[0].selected);
+  display(3,gNativeTerminal.sessionId);
+  for(unsigned i=0;i<30&&gNativeTerminal.policy.pending!=NativeTerm::Tx::Query;++i){tick();if(gNativeTerminal.policy.pending!=NativeTerm::Tx::Query)ack();}
+  assert(gNativeTerminal.policy.pending==NativeTerm::Tx::Query);
+  event(G2_TERMINAL_CMD_QUERY_REPLY,gNativeTerminal.queryId,1);assert(gNativeTerminal.deferredQueryId);
+  display(2,gNativeTerminal.sessionId);event(G2_TERMINAL_CMD_AWAIT_DISMISS,gNativeTerminal.sessionId);
+  assert(!gNativeTerminal.deferredQueryId&&!gNativeTerminal.deferredOptionId);ack();
+  display(3,gNativeTerminal.sessionId);settle(15);
+  assert(questions==beforeDeferredQuestions&&!gNativeTerminal.choices[0].selected);
+  hostClearQuery(deferredPending);untilIdle();
+  assert(submissions==accepted);
+  // A binding ACK acknowledges that write, not the screen's current focus.
+  // LIST/OFF notifications received after the write but before its ACK
+  // remain authoritative for both OPEN and SESSION_CHANGE bindings.
+  for(const auto focus:std::vector<std::pair<uint8_t,uint8_t>>{{2,0},{1,0}}){
+    for(const bool initialOpen:{false,true}){
+      if(initialOpen){
+        close();assert(strncmp(g2NativeTerminalRequestOpen(),"Error:",6));
+        for(unsigned i=0;i<100&&gNativeTerminal.policy.pending!=NativeTerm::Tx::Open;++i){tick();if(gNativeTerminal.policy.pending!=NativeTerm::Tx::Open)ack();}
+        assert(gNativeTerminal.policy.pending==NativeTerm::Tx::Open);
+      }else assert(g2NativeTerminalSend(NativeTerm::Tx::SessionChange));
+      display(focus.first,gNativeTerminal.sessionId,focus.second);ack();
+      const size_t bindingBegin=sent.size();hostQuery("question");settle(25);
+      assert(gNativeTerminal.queryActive&&queryCount(bindingBegin)==0);
+      const std::string bindingPending=gNativeTerminal.pending;
+      display(3,gNativeTerminal.sessionId);settle(10);assert(queryCount(bindingBegin)==1);
+      hostClearQuery(bindingPending);untilIdle();
+    }
+  }
   // New view creates no prompt. Follow-up must still be explicit.
   const auto newWireOrder = [](size_t begin) {
     size_t result=sent.size(),list=sent.size(),change=sent.size(),sync=sent.size();
@@ -382,6 +576,74 @@ int main(){
   ticket=menuStart();clockMs+=15000;menuDeliver(ticket,gR.connectionGeneration);assert(!g2NativeTerminalActive());
   ticket=menuStart();holdRpc=true;menuDeliver(ticket,gR.connectionGeneration);tick();
   clockMs+=15000;tick();assert(!g2NativeTerminalActive()&&!strcmp(gNativeTerminalReason.load(),"native-menu-open-timeout-retry"));holdRpc=false;
+  // A brief release can finish normally without any recognized speech. It is
+  // a discarded draft, not a failed Terminal session or an empty host prompt.
+  hostState="idle";hostRun.clear();open();settle(10);
+  const unsigned beforeEmptyPrompts=submissions,beforeEmptyQuestions=questions;
+  const std::string emptyView=gNativeTerminal.view,emptySession=gNativeTerminal.selected;
+  transcript.clear();const size_t emptyBegin=sent.size();
+  event(G2_TERMINAL_CMD_VOICE,1);tick(2);ack();event(G2_TERMINAL_CMD_VOICE,2);settle(20);
+  assert(g2NativeTerminalActive()&&gNativeTerminal.policy.phase==NativeTerm::Phase::Idle);
+  assert(!sttLive&&!gNativeTerminal.speechToken&&!gNativeTerminal.promptLen);
+  assert(std::string(gNativeTerminal.view)==emptyView&&std::string(gNativeTerminal.selected)==emptySession);
+  assert(submissions==beforeEmptyPrompts&&questions==beforeEmptyQuestions);
+  for(size_t i=emptyBegin;i<sent.size();++i)assert(sent[i].command!=G2_TERMINAL_CMD_CLOSE&&sent[i].command!=G2_TERMINAL_CMD_ASR);
+  assert(stateCount(emptyBegin,G2_TERMINAL_STATE_IDLE)==1);
+  event(G2_TERMINAL_CMD_VOICE,4);settle(20);
+  assert(g2NativeTerminalActive()&&submissions==beforeEmptyPrompts&&questions==beforeEmptyQuestions);
+  assert(stateCount(emptyBegin,G2_TERMINAL_STATE_IDLE)==1);
+  // A state write accepted just before recording can be acknowledged after
+  // the empty worker finishes. Recovery waits so that old ACK cannot erase
+  // the one forced IDLE update which exits the native speech interface.
+  const size_t delayedEmptyBegin=sent.size();assert(g2NativeTerminalSend(NativeTerm::Tx::State));
+  event(G2_TERMINAL_CMD_VOICE,1);tick(2);event(G2_TERMINAL_CMD_VOICE,2);tick(2);
+  assert(g2NativeTerminalActive()&&gNativeTerminal.policy.phase==NativeTerm::Phase::Finishing);
+  assert(gNativeTerminal.policy.pending==NativeTerm::Tx::State);ack();settle(20);
+  assert(g2NativeTerminalActive()&&gNativeTerminal.policy.phase==NativeTerm::Phase::Idle);
+  assert(stateCount(delayedEmptyBegin,G2_TERMINAL_STATE_IDLE)==2);
+  assert(submissions==beforeEmptyPrompts&&questions==beforeEmptyQuestions);
+  for(size_t i=delayedEmptyBegin;i<sent.size();++i)assert(sent[i].command!=G2_TERMINAL_CMD_CLOSE&&sent[i].command!=G2_TERMINAL_CMD_ASR);
+  dictate("A real follow-up after a short accidental hold");event(G2_TERMINAL_CMD_VOICE,4);settle(20);
+  assert(submissions==beforeEmptyPrompts+1&&lastPrompt=="A real follow-up after a short accidental hold");
+  hostStatus("idle");untilIdle();
+  // Empty Other-answer speech restores the exact pending offer with a fresh
+  // presentation ID, keeping its expiry and rejecting the abandoned replies.
+  hostQuery("question",false,true);awaitQuery();
+  const std::string emptyOtherPending=gNativeTerminal.pending,emptyOtherQuestion=gNativeTerminal.questionKey;
+  const uint32_t emptyOtherId=gNativeTerminal.queryId,emptyOtherDeadline=gNativeTerminal.queryDeadline;
+  const auto emptyOtherOffer=queryOffer(lastQuery());
+  event(G2_TERMINAL_CMD_QUERY_REPLY,emptyOtherId,101);settle(8);display(3,gNativeTerminal.sessionId,2);
+  transcript.clear();const size_t emptyOtherBegin=sent.size();
+  event(G2_TERMINAL_CMD_VOICE,1);tick(2);ack();event(G2_TERMINAL_CMD_VOICE,2);settle(20);
+  assert(g2NativeTerminalActive()&&gNativeTerminal.queryActive&&!gNativeTerminal.questionVoice);
+  assert(!sttLive&&!gNativeTerminal.speechToken&&!gNativeTerminal.promptLen);
+  assert(gNativeTerminal.queryId!=emptyOtherId&&gNativeTerminal.queryDeadline==emptyOtherDeadline);
+  assert(std::string(gNativeTerminal.pending)==emptyOtherPending&&std::string(gNativeTerminal.questionKey)==emptyOtherQuestion);
+  assert(queryCount(emptyOtherBegin)==1&&queryOffer(lastQuery())==emptyOtherOffer);
+  assert(stateCount(emptyOtherBegin,G2_TERMINAL_STATE_IDLE)==1&&stateCount(emptyOtherBegin,G2_TERMINAL_STATE_AWAIT_USER)==0);
+  size_t emptyOtherIdle=sent.size(),emptyOtherQuery=sent.size();
+  for(size_t i=emptyOtherBegin;i<sent.size();++i){
+    if(sent[i].command==G2_TERMINAL_CMD_STATE&&wireNumber(sent[i],6,2)==G2_TERMINAL_STATE_IDLE)emptyOtherIdle=std::min(emptyOtherIdle,i);
+    if(sent[i].command==G2_TERMINAL_CMD_QUERY)emptyOtherQuery=std::min(emptyOtherQuery,i);}
+  assert(emptyOtherIdle<emptyOtherQuery);
+  for(size_t i=emptyOtherBegin;i<sent.size();++i)assert(sent[i].command!=G2_TERMINAL_CMD_CLOSE&&sent[i].command!=G2_TERMINAL_CMD_ASR);
+  event(G2_TERMINAL_CMD_VOICE,4);event(G2_TERMINAL_CMD_QUERY_REPLY,emptyOtherId,1);settle(10);
+  assert(submissions==beforeEmptyPrompts+1&&questions==beforeEmptyQuestions);
+  event(G2_TERMINAL_CMD_QUERY_REPLY,gNativeTerminal.queryId,1);settle(20);
+  assert(questions==beforeEmptyQuestions+1&&submissions==beforeEmptyPrompts+1);
+  {JsonDocument request;assert(!deserializeJson(request,lastRequest("question")));
+    assert(request["pendingId"].as<std::string>()==emptyOtherPending&&request["questionId"].as<std::string>()==emptyOtherQuestion);
+    assert(request["optionIds"].size()==1&&request["optionIds"][0].as<std::string>()=="o0");}
+  hostClearQuery(emptyOtherPending);untilIdle();
+  // A real STT failure is still fatal; empty successful capture recovery must
+  // not silently convert Failed into a new listening turn.
+  stoppedSpeechState=STTState::Failed;transcript.clear();const size_t failedSpeechBegin=sent.size();
+  event(G2_TERMINAL_CMD_VOICE,1);tick(2);ack();event(G2_TERMINAL_CMD_VOICE,2);settle(20);
+  assert(!g2NativeTerminalActive()&&!sttLive);
+  bool failedSpeechClosed=false;for(size_t i=failedSpeechBegin;i<sent.size();++i){
+    failedSpeechClosed|=sent[i].command==G2_TERMINAL_CMD_CLOSE;assert(sent[i].command!=G2_TERMINAL_CMD_ASR);}
+  assert(failedSpeechClosed&&submissions==beforeEmptyPrompts+1&&questions==beforeEmptyQuestions+1);
+  stoppedSpeechState=STTState::Done;
   NativeTerm magic;for(unsigned i=0;i<255;++i)assert(magic.allocate(100));assert(!magic.allocate(100));assert(magic.allocate(3101));
   puts("native Terminal host-session lifecycle tests passed");
 }

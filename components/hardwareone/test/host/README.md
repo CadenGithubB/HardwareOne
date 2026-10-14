@@ -4255,6 +4255,15 @@ The codec suite compiles the production protocol and fragmenter against fixed
 wire fixtures, including nanopb's omitted-zero values, malformed messages,
 UTF-8 limits and 512-byte text fragmentation. The adapter suite exercises the
 production control owner against controlled speech, Terminal HTTP and transport boundaries.
+It checks direct foreground question/approval cards without a separate waiting
+cue, exact pending-question restoration after dismissal, display/overlay focus,
+and expiry/revocation and stale-reply rejection. Focus reports received before
+an Open/SessionChange ACK remain authoritative; navigating back never answers
+a request. Host admission remains awaiting while native QUERY owns the screen.
+Completed empty recordings reset native speech UI without closing Terminal or
+sending an empty message; spoken-answer drafts restore the same question with
+a fresh presentation ID. Delayed state ACKs, stale confirmations, retry speech
+and genuine STT failures are covered separately.
 These checks are separate from physical Terminal display, microphone and gesture
 qualification, recorded in `docs/G2_TERMINAL_WORK.md`. Terminal conversations
 use host-issued session/view identities independently of the custom LLM reader.
