@@ -8,7 +8,10 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
-## Unreleased
+## [0.99.98.2] - 2026-10-13
+
+Source checkpoint combining the reviewed 0.99.98 release with the transferred
+G2/P4 work and the locally preserved P4X enclosure revisions through R26.
 
 - Native Terminal suppresses internal answer envelopes for both the bare and
   namespaced OpenClaw `ask_user` tool names, including replayed tool events.
@@ -16,6 +19,9 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   continuous captions retain their completed segments after a failure.
 - Host CTest registration includes Terminal projection and the optional pinned
   SDK DMA regression, and passes supported arguments to the Hey Even harness.
+- Preserves enclosure revisions R22–R26, their STL sets, manufacturing checks
+  and tooling. R26 restores continuous screw-well sleeves after R25's thin-band
+  regression. Provenance paths are portable; geometry and STL bytes are retained.
 - Native G2 Terminal can use the P4's local speech recognition and a local
   OpenClaw provider for Even Terminal 0.10.5. Adds Mingus session browsing,
   recent history, voice follow-ups, streamed replies/tool activity, exact-run
@@ -55,6 +61,12 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   changes are required.
   Build/host checks and pending hardware qualification are recorded in
   `docs/G2_EVENAI_LOCAL_WORK.md`.
+
+Integration verification: 21 selected host suites passed, including both STT
+trim policies and the DMA regression against ESP-IDF 5.5.5 source; 71 OpenClaw
+client/relay/setup tests passed. Enclosure source/STL hashes and four package
+CRC/member manifests were verified. This source checkpoint does not represent
+a new firmware build, flash, or physical enclosure qualification.
 
 ## [0.99.98] - 2026-10-12
 
