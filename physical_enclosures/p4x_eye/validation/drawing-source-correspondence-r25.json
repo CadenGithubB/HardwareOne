@@ -1,0 +1,16 @@
+{
+  "source_sha256": "7dc9cdda1a60c5adeab21eb7505e5dc27ed81c2e885276d88f73b7661f123d5a",
+  "mesh_sha256": {
+    "base": "3b9b6549a7647c7a4681e0c9e701434d16f0297e4a9936491fe464debdbc153e",
+    "lid": "dd11c0ab4178c97ecb24e9b9f90c0e3cf421e48cd55699e563e80c104de6c47b",
+    "midframe": "4b6748c1cc41b6f4fc3fb3de8a956f509e0811998507e7e0e3abe09cec0fd4b9",
+    "button_strip": "be7d27e0e53d51c085c2a462db8863abe69a168fc62a5f64ff16d12e2ceb78b1",
+    "button_keeper": "41ab06a2f6e8f1b3a143dfac02e5ceaad4e4047692730799c73f5b360bb60c14",
+    "power_slider": "627b8c89724218b5cf1434227f4254b3b5e75f4e9734dea63fdf914790e5a3e6"
+  },
+  "pdf": "output/pdf/p4x-eye-r25-pcbway-assembly.pdf",
+  "pdf_sha256": "84e67b19be8b61befb686ced9d4fc003d8d679c3812384adae2247e3cf93303e",
+  "slider_reference_x_offset_mm": 1.0,
+  "views": "Exploded and inside-lid views from the released STL meshes",
+  "visual_review_completed": false
+}

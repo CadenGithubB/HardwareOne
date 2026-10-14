@@ -1,0 +1,34 @@
+{
+  "drawing_source_before_coordinate_correction": "5eb81e113abaa36fe4cef22ba40062a795b99175097991bd879a481f758ea8e5",
+  "final_source_sha256": "be7d2855ed6454d9149d22d852d59ef857402d9e220c991e8ad4d53d9bd8129a",
+  "method": "Re-exported all six production XY projections after the base cutter coordinate correction; byte-identical SVG geometry verifies the existing finishing PDF views still match.",
+  "views": {
+    "midframe.svg": {
+      "identical": true,
+      "final_svg_sha256": "419d4f92f5abf992cf9e7ab52b26379c6087da084322cf7d6c4eb6ee0f454771"
+    },
+    "power_slider.svg": {
+      "identical": true,
+      "final_svg_sha256": "28747323bb0fd2f018f076a050b68b0f2d7aa5c2744ab9a31bdb00cbdc81c950"
+    },
+    "button_strip.svg": {
+      "identical": true,
+      "final_svg_sha256": "367b90ba0c4c6edce98411b2bf6229324b4a6e387e5ddf397cc3a606860376a4"
+    },
+    "base.svg": {
+      "identical": true,
+      "final_svg_sha256": "e70c568eb99d5382b80f82e6d82f2d731ec6b57ce69a6370aca7f4ff3555dc37"
+    },
+    "button_keeper.svg": {
+      "identical": true,
+      "final_svg_sha256": "d7636d3573a50ea38453dceed6d777b7e42fcd302492288666085e3ff4a6b79e"
+    },
+    "lid.svg": {
+      "identical": true,
+      "final_svg_sha256": "d27f8ad27d1ebbfdc8a4661033c88530c0d70627f7acaf542cd0af66198765e7"
+    }
+  },
+  "pdf": "../output/pdf/p4x-eye-r24-pcbway-finish.pdf",
+  "pdf_sha256": "c6001be4cfc99b923c52a71273c5919b31a0548e8de07bf38073bbd9300e64d9",
+  "visual_review": "Both final rendered pages inspected; no clipping or overlapping text. Projection SVGs verified unchanged after coordinate-only base correction."
+}

@@ -1,0 +1,86 @@
+{
+  "source_sha256": "eecf20445726f0c9f073dbfdaead6b1fb13cb4b2b49c2adc7d48288aeff6b332",
+  "stl_sha256": "4c57692ba64ef926c57904f7d04c3007f4abaf10b6dd928d91b7c65e9580d662",
+  "method": "Triangle-plane sections of final binary STL. 1024 radial rays per sleeve per section. Radial samples are not a continuous minimum-thickness proof; source assertions separately bound facet geometry.",
+  "sleeve_sections": [
+    {
+      "axis_xy": [
+        3.6,
+        3.6
+      ],
+      "section_z": 5.0,
+      "sampled_minimum_radial_wall_mm": 1.0060752481012152,
+      "sampled_minimum_head_bore_radius_mm": 2.2500049717688664
+    },
+    {
+      "axis_xy": [
+        76.4,
+        3.6
+      ],
+      "section_z": 5.0,
+      "sampled_minimum_radial_wall_mm": 1.0060727941270864,
+      "sampled_minimum_head_bore_radius_mm": 2.250002306956083
+    },
+    {
+      "axis_xy": [
+        3.6,
+        52.4
+      ],
+      "section_z": 5.0,
+      "sampled_minimum_radial_wall_mm": 1.0060749410401595,
+      "sampled_minimum_head_bore_radius_mm": 2.2500042135425184
+    },
+    {
+      "axis_xy": [
+        77.26,
+        41
+      ],
+      "section_z": 5.0,
+      "sampled_minimum_radial_wall_mm": 1.006071798653569,
+      "sampled_minimum_head_bore_radius_mm": 2.2500020049212424
+    },
+    {
+      "axis_xy": [
+        3.6,
+        3.6
+      ],
+      "section_z": 10.0,
+      "sampled_minimum_radial_wall_mm": 1.0060752481012152,
+      "sampled_minimum_head_bore_radius_mm": 2.2500049717688664
+    },
+    {
+      "axis_xy": [
+        76.4,
+        3.6
+      ],
+      "section_z": 10.0,
+      "sampled_minimum_radial_wall_mm": 1.0060727941270873,
+      "sampled_minimum_head_bore_radius_mm": 2.250002306956083
+    },
+    {
+      "axis_xy": [
+        3.6,
+        52.4
+      ],
+      "section_z": 10.0,
+      "sampled_minimum_radial_wall_mm": 1.0060749410401613,
+      "sampled_minimum_head_bore_radius_mm": 2.2500042135425153
+    },
+    {
+      "axis_xy": [
+        77.26,
+        41
+      ],
+      "section_z": 10.0,
+      "sampled_minimum_radial_wall_mm": 1.006071798653569,
+      "sampled_minimum_head_bore_radius_mm": 2.250002004921242
+    }
+  ],
+  "usb_tab": {
+    "sample_x": 75.3,
+    "sample_z": 22,
+    "rear_y": 38.5,
+    "front_y": 37.400001525878906,
+    "width_mm": 1.0999984741210938
+  }
+}

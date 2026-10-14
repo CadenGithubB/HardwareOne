@@ -1,0 +1,279 @@
+{
+  "revision": 22,
+  "units": "mm",
+  "source": "../enclosure.scad",
+  "source_sha256": "371bfe2b5feea715d346fbd28eebdb2a922e2750e2a9bfcd657826b7e994f8ce",
+  "compiler": "OpenSCAD 2026.09.23 WebAssembly-node; CGAL; --hardwarnings; binary STL",
+  "mesh_cleanup": "No geometry repair. Midframe rigidly translated by less than 0.000001 mm in X/Y to set minimum coordinates to zero.",
+  "orientations": {
+    "base": "Floor down",
+    "lid": "Exterior face down; rotate raw lid 180 degrees about X, translate [0,56,14.5]",
+    "midframe": "Flat underside down; raw frame translated to minimum XYZ=0"
+  },
+  "matched_set": "R22 base/lid/midframe with R21 button strip/keeper/power slider. Do not mix R21 and R22 structural parts.",
+  "physical_fit_verified": false,
+  "supplier_approved": false,
+  "parts": [
+    {
+      "part": "base",
+      "revision": 22,
+      "changed": true,
+      "post_export_translation_mm": [
+        -0.0,
+        -0.0,
+        -0.0
+      ],
+      "file": "p4x-eye-base-r22.stl",
+      "sha256": "94feb0eead149fc4f009fdd2593813bd0e18d627d334eaa30906f30295740487",
+      "triangles": 27644,
+      "unique_vertices": 13816,
+      "bounds_mm": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          80.5199966430664,
+          56.0,
+          22.829999923706055
+        ]
+      ],
+      "size_mm": [
+        80.5199966430664,
+        56.0,
+        22.829999923706055
+      ],
+      "volume_mm3": 15225.298422173506,
+      "positive_volume": true,
+      "edge_connected_components": 1,
+      "boundary_edges": 0,
+      "nonmanifold_edges": 0,
+      "nonmanifold_vertices": 0,
+      "inconsistent_winding_edges": 0,
+      "duplicate_triangles": 0,
+      "exact_degenerate_triangles": 0,
+      "minimum_triangle_area_mm2": 4.99130692332983e-08,
+      "watertight": true,
+      "consistent_winding": true,
+      "finite_coordinates": true,
+      "valid": true,
+      "failures": []
+    },
+    {
+      "part": "lid",
+      "revision": 22,
+      "changed": true,
+      "post_export_translation_mm": [
+        -0.0,
+        -0.0,
+        -0.0
+      ],
+      "file": "p4x-eye-lid-r22.stl",
+      "sha256": "ee7b2fc69d1edd4a63f5ddc9143e1f767f46b3241beec0ba6e0b1d2486ef5538",
+      "triangles": 59928,
+      "unique_vertices": 29956,
+      "bounds_mm": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          80.0,
+          56.0,
+          14.5
+        ]
+      ],
+      "size_mm": [
+        80.0,
+        56.0,
+        14.5
+      ],
+      "volume_mm3": 10790.229611547365,
+      "positive_volume": true,
+      "edge_connected_components": 1,
+      "boundary_edges": 0,
+      "nonmanifold_edges": 0,
+      "nonmanifold_vertices": 0,
+      "inconsistent_winding_edges": 0,
+      "duplicate_triangles": 0,
+      "exact_degenerate_triangles": 0,
+      "minimum_triangle_area_mm2": 3.483910404611379e-07,
+      "watertight": true,
+      "consistent_winding": true,
+      "finite_coordinates": true,
+      "valid": true,
+      "failures": []
+    },
+    {
+      "part": "midframe",
+      "revision": 22,
+      "changed": true,
+      "post_export_translation_mm": [
+        7.629394644936838e-07,
+        7.629394644936838e-07,
+        -0.0
+      ],
+      "file": "p4x-eye-midframe-r22.stl",
+      "sha256": "1a9c0b867b82ad0a7c83f4cd34eacad3c20ec6d4c34a4f0ef4cc3fb8e24db6f0",
+      "triangles": 1668,
+      "unique_vertices": 832,
+      "bounds_mm": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          72.61463165283203,
+          51.400001525878906,
+          8.09999942779541
+        ]
+      ],
+      "size_mm": [
+        72.61463165283203,
+        51.400001525878906,
+        8.09999942779541
+      ],
+      "volume_mm3": 5206.345331100261,
+      "positive_volume": true,
+      "edge_connected_components": 1,
+      "boundary_edges": 0,
+      "nonmanifold_edges": 0,
+      "nonmanifold_vertices": 0,
+      "inconsistent_winding_edges": 0,
+      "duplicate_triangles": 0,
+      "exact_degenerate_triangles": 0,
+      "minimum_triangle_area_mm2": 0.00016982783199637197,
+      "watertight": true,
+      "consistent_winding": true,
+      "finite_coordinates": true,
+      "valid": true,
+      "failures": []
+    },
+    {
+      "part": "button_strip",
+      "revision": 21,
+      "changed": false,
+      "file": "p4x-eye-button-strip-r21.stl",
+      "sha256": "51fe0f665844da4eeb8b0f335081a10ce126a13ba7906e967241c3d2daf68e24",
+      "triangles": 2736,
+      "unique_vertices": 1368,
+      "bounds_mm": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          22.773197174072266,
+          31.299999237060547,
+          5.90000057220459
+        ]
+      ],
+      "size_mm": [
+        22.773197174072266,
+        31.299999237060547,
+        5.90000057220459
+      ],
+      "volume_mm3": 470.5820465237778,
+      "positive_volume": true,
+      "edge_connected_components": 1,
+      "boundary_edges": 0,
+      "nonmanifold_edges": 0,
+      "nonmanifold_vertices": 0,
+      "inconsistent_winding_edges": 0,
+      "duplicate_triangles": 0,
+      "exact_degenerate_triangles": 0,
+      "minimum_triangle_area_mm2": 1.1359225027263165e-07,
+      "watertight": true,
+      "consistent_winding": true,
+      "finite_coordinates": true,
+      "valid": true,
+      "failures": []
+    },
+    {
+      "part": "button_keeper",
+      "revision": 21,
+      "changed": false,
+      "file": "p4x-eye-button-keeper-r21.stl",
+      "sha256": "ae2e127c6d4dde1122d086e5a32bff3756e1fe360c5794f803d2111ae6f627eb",
+      "triangles": 76,
+      "unique_vertices": 40,
+      "bounds_mm": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          8.5,
+          20.5,
+          1.0
+        ]
+      ],
+      "size_mm": [
+        8.5,
+        20.5,
+        1.0
+      ],
+      "volume_mm3": 109.89999842643738,
+      "positive_volume": true,
+      "edge_connected_components": 1,
+      "boundary_edges": 0,
+      "nonmanifold_edges": 0,
+      "nonmanifold_vertices": 0,
+      "inconsistent_winding_edges": 0,
+      "duplicate_triangles": 0,
+      "exact_degenerate_triangles": 0,
+      "minimum_triangle_area_mm2": 0.8000001907348633,
+      "watertight": true,
+      "consistent_winding": true,
+      "finite_coordinates": true,
+      "valid": true,
+      "failures": []
+    },
+    {
+      "part": "power_slider",
+      "revision": 21,
+      "changed": false,
+      "file": "p4x-eye-power-slider-r21.stl",
+      "sha256": "0a015315a63f24862cbb357049290e7ec1ccfd520d325194817ae892d1d21d72",
+      "triangles": 972,
+      "unique_vertices": 488,
+      "bounds_mm": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          13.999996185302734,
+          7.599998474121094,
+          4.600000381469727
+        ]
+      ],
+      "size_mm": [
+        13.999996185302734,
+        7.599998474121094,
+        4.600000381469727
+      ],
+      "volume_mm3": 148.42137717241323,
+      "positive_volume": true,
+      "edge_connected_components": 1,
+      "boundary_edges": 0,
+      "nonmanifold_edges": 0,
+      "nonmanifold_vertices": 0,
+      "inconsistent_winding_edges": 0,
+      "duplicate_triangles": 0,
+      "exact_degenerate_triangles": 0,
+      "minimum_triangle_area_mm2": 4.243599141773302e-05,
+      "watertight": true,
+      "consistent_winding": true,
+      "finite_coordinates": true,
+      "valid": true,
+      "failures": []
+    }
+  ]
+}

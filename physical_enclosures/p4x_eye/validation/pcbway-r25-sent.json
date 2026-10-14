@@ -1,0 +1,26 @@
+{
+  "status": "sent_and_verified_in_gmail_ui",
+  "verified_at": "2026-10-11T11:15:28.962820-04:00",
+  "gmail_display_time": "2026-10-11 11:15 AM America/New_York",
+  "thread_url": "<PRIVATE_EMAIL_THREAD>",
+  "recipient": "PCBWay Online Services Team",
+  "attachments": [
+    {
+      "name": "p4x-eye-r25-pcbway-review.zip",
+      "bytes": 554086,
+      "sha256": "b0cda4becca5689b51d7c58304fdac602bb2413edbf61753d28f1771d79ff76a"
+    },
+    {
+      "name": "p4x-eye-r25-pcbway-assembly.pdf",
+      "bytes": 297649,
+      "sha256": "845a9ac59e7479c76b01ad628c7da85205f5c2291361f843262c68ffb997cc2a"
+    }
+  ],
+  "evidence": "Gmail displayed Message sent; sent message displayed complete R25 reply and both attachment filenames.",
+  "repository_copy": {
+    "name": "p4x-eye-r25-pcbway-review.zip",
+    "sha256": "965710195a8ff67ac74550aedc20212b18bd1b2c212713a6659ed13f3ad97e75",
+    "bytes": 553913,
+    "note": "Portable metadata copy; attachments above record the original bytes sent, not this repository copy."
+  }
+}

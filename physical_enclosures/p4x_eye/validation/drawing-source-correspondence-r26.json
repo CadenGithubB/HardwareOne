@@ -1,0 +1,19 @@
+{
+  "source_sha256": "137e3eaabe9ac5556293db0ccc01434ffde566227c85d4e718f45397d0c06afc",
+  "mesh_sha256": {
+    "base": "626c1e5e5b3ade169ff90b79250b860a025bf70e34418d0432d46debe01c118a",
+    "lid": "668bc6d8de0dbd4b223f9451b80d2757795a4461d598cfccf2db49d31be52489",
+    "midframe": "49ba7e9d890c123570dce6f688e66c470fe3eaec46d9e1bb7fd8c52424367f71",
+    "button_strip": "5b2689178e8dd33b950eab275092d6bc690b3bf2ef4132bb5337ed46e43038f4",
+    "button_keeper": "41ab06a2f6e8f1b3a143dfac02e5ceaad4e4047692730799c73f5b360bb60c14",
+    "power_slider": "e49e54c200d65f494abf1695c83a571fe4971645c9a1b492073f4d6bb91c4130"
+  },
+  "pdf": "output/pdf/p4x-eye-r26-pcbway-assembly.pdf",
+  "pdf_sha256": "e9110a46562349b8ecbee1e7032304e40c7c3be89c52ae31cdf782d02cc772f9",
+  "slider_reference_x_offset_mm": 1.0,
+  "views": "Exploded and inside-lid views from the released STL meshes",
+  "visual_review_completed": true,
+  "pages": 2,
+  "review_method": "Both pages rasterized with pdftoppm at 70 dpi and visually inspected after the order numbers were filled in; STL views use backface culling and per-pixel depth testing.",
+  "note": "Two-page supplier drawing: exploded view with part/order/file table (all six orders filled), then assembly sequence, finish and handling."
+}

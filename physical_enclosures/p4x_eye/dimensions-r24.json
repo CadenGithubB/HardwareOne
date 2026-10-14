@@ -1,0 +1,426 @@
+{
+  "revision": 24,
+  "units": "mm",
+  "source": "enclosure.scad",
+  "scope": "Reviewed thin-wall reinforcement and rear-USB feather removal; retains R23 nominal assembly clearances and R22 base reinforcement",
+  "historical_dimension_records": [
+    "dimensions.json",
+    "dimensions-r22.json",
+    "dimensions-r23.json"
+  ],
+  "assembly_clearance": {
+    "nominal_gap_per_side": 0.25,
+    "supplier_per_side_interpretation_confirmed": false,
+    "global_all_fits_guarantee": false,
+    "finished_coating_allowance_confirmed": false
+  },
+  "nominal_shell_size": [
+    80,
+    56,
+    29
+  ],
+  "maximum_base_x": 80.52,
+  "floor_thickness": 2,
+  "case_screw_axes": [
+    [
+      3.6,
+      3.6
+    ],
+    [
+      76.4,
+      3.6
+    ],
+    [
+      3.6,
+      52.4
+    ],
+    [
+      77.26,
+      41
+    ]
+  ],
+  "hardware": {
+    "nominal_m2_shaft_diameter": 2,
+    "case_and_midframe_free_bore_diameter": 2.51,
+    "free_tip_bore_diameter": 2.51,
+    "bore_facets": 64,
+    "free_bore_minimum_radial_gap": 0.25348829753749125,
+    "nominal_head_diameter": 4,
+    "head_bore_reference_diameter": 4.5,
+    "head_bore_cutter_diameter": 4.505426984116767,
+    "head_bore_minimum_radial_gap": 0.25,
+    "head_seat_z": 10.2,
+    "screw_under_head_length": 8,
+    "lower_sleeve_outside_diameter": 6.52,
+    "lower_sleeve_top_z": 11.5,
+    "lower_sleeve_wall_conservative_polygon_bound": 1.0033596951704786,
+    "right_upper_post_diameter": 4.54,
+    "right_upper_post_tip_wall_conservative_polygon_bound": 1.0122656855857417,
+    "insert_od": 3,
+    "insert_length": 3.2,
+    "insert_pilot_diameter": 2.7,
+    "insert_pilot_depth": 3.4,
+    "pcb_hole_nominal_diameter": 2,
+    "provisional_pcb_screw_diameter": 1.6,
+    "pcb_hole_nominal_radial_gap": 0.2,
+    "pcb_self_tap_pilot_diameter": 1.2
+  },
+  "battery": {
+    "xy": [
+      8.5,
+      6
+    ],
+    "z": 2.5,
+    "size": [
+      65,
+      36,
+      10
+    ],
+    "right_lower_sleeve_gap": 0.5,
+    "bottom_pad_allowance": 0.5,
+    "support_ledge_edge_relief": 0.25,
+    "midframe_underside_gap": 0.5,
+    "locator_nominal_wall": 1.1,
+    "locator_outer_xy": [
+      6.4,
+      3.9
+    ],
+    "locator_outer_size": [
+      69.2,
+      40.2
+    ],
+    "locator_outer_radius": 2.1,
+    "locator_inner_xy": [
+      7.5,
+      5
+    ],
+    "locator_inner_size": [
+      67,
+      38
+    ],
+    "locator_inner_radius": 1,
+    "locator_bottom_z": 1.99,
+    "locator_height": 1.4
+  },
+  "midframe": {
+    "bottom_z": 13,
+    "thickness": 1.5,
+    "perimeter_and_post_notch_gap": 0.3,
+    "local_usb_wall_gap": 0.25,
+    "local_usb_support_overlap": 0.2,
+    "lid_key_per_side_gap": 0.25,
+    "lid_key_top_gap": 0.3,
+    "local_usb_extension_end_y": 38.1,
+    "lid_key_body_size": [
+      1.5,
+      8
+    ],
+    "lid_key_height": 2.5,
+    "lid_key_tip_chamfer": 0.2,
+    "lid_key_tip_minimum_width": 1.1,
+    "lid_receiver_height": 3.9,
+    "lid_receiver_roof": 1.1,
+    "lid_receiver_mouth_lip": 1.1,
+    "lid_receiver_rects": [
+      [
+        1.45,
+        18.45,
+        3.9,
+        11.1
+      ],
+      [
+        38.45,
+        1.45,
+        11.1,
+        3.9
+      ],
+      [
+        22.45,
+        50.65,
+        11.1,
+        3.9
+      ]
+    ]
+  },
+  "pcb": {
+    "bottom_z": 19.7,
+    "nominal_thickness": 1.6,
+    "anti_lift_stop_gap": 0.25,
+    "anti_lift_stop_bottom_z": 21.55,
+    "usb_side_support_xy": [
+      69.3,
+      32.75
+    ],
+    "usb_side_support_size": [
+      1.2,
+      2
+    ]
+  },
+  "usb": {
+    "aperture_size": [
+      9.8,
+      4.2
+    ],
+    "aperture_radius": 0.5,
+    "center_z": 22.93,
+    "centers_y": [
+      17.5,
+      32.5
+    ],
+    "rail_y": [
+      11.2,
+      38.5
+    ],
+    "lid_relief_y": [
+      10.95,
+      38.75
+    ],
+    "end_mating_gap": 0.25,
+    "split_gap": 0.25,
+    "rail_top_z": 22.805,
+    "lid_bottom_z": 23.055,
+    "rear_end_tab_width": 1.1,
+    "cable_relief_y": [
+      36.8,
+      38.54
+    ],
+    "measured_plug_size": [
+      10.25,
+      6
+    ],
+    "assumed_plug_front_x": 76,
+    "rear_feather_trim": {
+      "cut_xy": [
+        74,
+        38.7
+      ],
+      "cut_size_xy": [
+        1.8,
+        0.9
+      ],
+      "cut_z": [
+        14.49,
+        27.01
+      ],
+      "complete_insert_posts_excluded": true,
+      "purpose": "Remove the acute outside shell remnant beside the base rail while preserving the insert-post annulus."
+    }
+  },
+  "lcd": {
+    "module_size": [
+      31.52,
+      33.72,
+      1.9
+    ],
+    "pocket_size": [
+      32.02,
+      34.22
+    ],
+    "pocket_xy": [
+      13.99,
+      8.2
+    ],
+    "pocket_corner_radius": 0.24,
+    "per_side_gap": 0.25,
+    "seat_depth": 1.9,
+    "seat_z": 27.1,
+    "support_overlap": 1,
+    "flex_relief_size": [
+      24,
+      6.35
+    ]
+  },
+  "buttons": {
+    "arm_thickness": 1,
+    "key_diameter": 4.4,
+    "lid_hole_diameter": 5.2,
+    "nominal_radial_gap": 0.4,
+    "keeper_z": [
+      24.35,
+      25.35
+    ],
+    "keeper_thickness": 1,
+    "keeper_ledge_z": [
+      23.35,
+      24.35
+    ],
+    "keeper_slide_y": -3.3,
+    "keeper_side_gap": 0.25,
+    "keeper_vertical_float": 0.25,
+    "rest_gap_upper_strip": 0.5,
+    "rest_gap_settled_strip": 0.25,
+    "nominal_switch_travel": 0.2,
+    "nominal_press_to_actuate_range": [
+      0.45,
+      0.7
+    ],
+    "nominal_key_projection_range": [
+      0.75,
+      1
+    ],
+    "anti_backout": "Required removable resin-compatible silicone bead; no positive mechanical lock",
+    "arm_width": 2,
+    "arm_root_radius": 0.5,
+    "arm_bottom_z": 25.6,
+    "arm_top_z": 26.6,
+    "minimum_rail_root_width": 1,
+    "strip_guide_width": 1,
+    "idealized_stiffness_ratio_to_r23": 1.953125,
+    "stiffness_ratio_basis": "Rectangular cantilever with same material, effective length and width; t cubed scaling. Not measured force or fatigue performance."
+  },
+  "power_slider": {
+    "lid_slot_size": [
+      9,
+      4.6
+    ],
+    "nub_size": [
+      6,
+      4
+    ],
+    "flange_size": [
+      14,
+      7.6
+    ],
+    "flange_z": [
+      26.75,
+      27.75
+    ],
+    "guide_top_z": 28,
+    "retainer_z": [
+      25.3,
+      26.5
+    ],
+    "retainer_slot_size": [
+      8.1,
+      5.8
+    ],
+    "nominal_lower_gap": 0.25,
+    "nominal_upper_gap": 0.25,
+    "maximum_downward_float": 0.5,
+    "maximum_upward_float": 0.25,
+    "total_vertical_float": 0.75,
+    "socket_inner": 2,
+    "socket_outer": 4,
+    "socket_bottom_z": 25.55,
+    "socket_top_z": 28.05,
+    "nominal_handle_size": [
+      1.5,
+      1.5
+    ],
+    "handle_height_drawing": 2,
+    "handle_height_bom": 2.5,
+    "socket_per_side_gap": 0.25,
+    "minimum_provisional_body_and_taller_handle_gap": 0.25,
+    "nominal_cap_travel": 3,
+    "nominal_switch_travel": 2,
+    "flange_thickness": 1,
+    "guide_roof_thickness": 1,
+    "socket_nominal_wall": 1,
+    "socket_entry_chamfer": 0,
+    "nub_nominal_wall_beside_socket": 1,
+    "nub_slot_y_gap_per_side": 0.3
+  },
+  "free_clearance_exceptions": [
+    "Intended seating, bearing and travel-stop contacts",
+    "PCB nominal 2 mm hole around provisional M1.6 screw: 0.20 mm radial clearance",
+    "Insert pilots and self-tapping pilot are intended attachment fits"
+  ],
+  "finish": {
+    "preferred": "Full varnish",
+    "supersedes": "R21 selective masking and exterior-only clear-coat advice",
+    "finished_assembly_approved": false,
+    "requested": "Full varnish on all six R24 parts",
+    "applies_to_parts": [
+      "base",
+      "lid",
+      "midframe",
+      "button_strip",
+      "button_keeper",
+      "power_slider"
+    ],
+    "blanket_risk_acceptance": false,
+    "drawing": "output/pdf/p4x-eye-r24-pcbway-finish.pdf"
+  },
+  "changed_parts": [
+    "base",
+    "lid",
+    "midframe",
+    "button_strip",
+    "button_keeper",
+    "power_slider"
+  ],
+  "validation_records": [
+    "validation/assembly-clearance-r24.json",
+    "validation/control-motion-r24.json",
+    "validation/base-fit-r24.json",
+    "validation/wall-sections-r24.json",
+    "validation/export-source-correspondence-r24.json",
+    "validation/drawing-source-correspondence-r24.json",
+    "stl/export-manifest-r24.json"
+  ],
+  "validation_status": "All six final meshes pass strict topology audits; all34 source-based fit/clearance/motion probes and54 named production-STL section checks pass. Physical fit and supplier approval remain unverified.",
+  "physical_fit_verified": false,
+  "supplier_approved": false,
+  "limitations": [
+    "Nominal component references and installed Z heights remain provisional",
+    "No validated numeric varnish thickness allowance",
+    "No universal minimum clearance across all poses or all hardware",
+    "Print tolerances, deformation, spring return, material strength and finished physical assembly remain unverified"
+  ],
+  "nominal_shell_size_note": "Original main-shell datum; R24 outward wheel reinforcement changes the local lid exterior. Final mesh bounds are recorded in the export manifest.",
+  "wheel_reinforcement": {
+    "preserved_hardware_cavity_offset_datum": 0.6,
+    "nominal_completed_hardware_wall_target": 1.1,
+    "hardware_band_z": [
+      17.7,
+      21.6
+    ],
+    "reinforcement_z": [
+      17.2,
+      22.1
+    ],
+    "reinforcement_rear_region_min_y": 40.8,
+    "vertical_shoulder_overlap": 0.5,
+    "old_wall_overlap": 0.05,
+    "lower_wall": 1.5,
+    "upper_wall": 1.1,
+    "cavity_unchanged": true,
+    "direction": "Outward from the existing cavity; original seam retained",
+    "final_cut_section_verification": "PASS: named actual-STL encoder hardware band ray measures1.100000381 mm; sample only, see validation/wall-sections-r24.json."
+  },
+  "reinforced_feature_targets": {
+    "wheel_hardware_band": 1.1,
+    "button_arm": 1,
+    "slider_flange": 1,
+    "socket_open_end_wall": 1,
+    "nub_wall_beside_socket": 1,
+    "power_guide_roof": 1,
+    "keeper_rail_root": 1,
+    "strip_guide": 1,
+    "receiver_roof": 1.1,
+    "receiver_exposed_mouth_lip": 1.1,
+    "key_tip_minimum_width": 1.1,
+    "battery_locator_ring": 1.1
+  },
+  "reinforced_feature_targets_note": "Nominal values for named features, not a universal minimum wall certification across all cutouts, fillets or final meshes.",
+  "use_all_six_r24_parts_together": true,
+  "deformation_review": {
+    "zero_warp_claim": false,
+    "blanket_risk_acceptance": false,
+    "supplier_process_review_pending": [
+      "Print orientation and supports",
+      "Support removal and curing",
+      "Full-varnish buildup on mating and moving faces",
+      "Protective packing and transport deformation"
+    ],
+    "pcbway_general_sla_wall_guidance": 1,
+    "pcbway_deformation_warning_wall_guidance": 2,
+    "all_walls_at_least_2mm": false,
+    "official_sources": [
+      "https://www.pcbway.com/blog/3D_Printing/10_Ways_to_Reduce_3D_Printing_Costs_Through_Smarter_Design_Optimization_09282537.html",
+      "https://www.pcbway.com/rapid-prototyping/manufacture/?projectattid=79587&reffercode=Project&type=2",
+      "https://www.pcbway.com/rapid-prototyping//3d-printing/plastic/resin/UTR-8100/"
+    ]
+  },
+  "source_sha256": "be7d2855ed6454d9149d22d852d59ef857402d9e220c991e8ad4d53d9bd8129a"
+}

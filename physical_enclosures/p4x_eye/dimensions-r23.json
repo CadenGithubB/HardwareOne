@@ -1,0 +1,283 @@
+{
+  "revision": 23,
+  "units": "mm",
+  "source": "enclosure.scad",
+  "scope": "Reviewed nominal assembly clearances; retained R22 base reinforcement",
+  "historical_dimension_records": [
+    "dimensions.json",
+    "dimensions-r22.json"
+  ],
+  "assembly_clearance": {
+    "nominal_gap_per_side": 0.25,
+    "supplier_per_side_interpretation_confirmed": false,
+    "global_all_fits_guarantee": false,
+    "finished_coating_allowance_confirmed": false
+  },
+  "nominal_shell_size": [
+    80,
+    56,
+    29
+  ],
+  "maximum_base_x": 80.52,
+  "floor_thickness": 2,
+  "case_screw_axes": [
+    [
+      3.6,
+      3.6
+    ],
+    [
+      76.4,
+      3.6
+    ],
+    [
+      3.6,
+      52.4
+    ],
+    [
+      77.26,
+      41
+    ]
+  ],
+  "hardware": {
+    "nominal_m2_shaft_diameter": 2,
+    "case_and_midframe_free_bore_diameter": 2.51,
+    "free_tip_bore_diameter": 2.51,
+    "bore_facets": 64,
+    "free_bore_minimum_radial_gap": 0.25348829753749125,
+    "nominal_head_diameter": 4,
+    "head_bore_reference_diameter": 4.5,
+    "head_bore_cutter_diameter": 4.505426984116767,
+    "head_bore_minimum_radial_gap": 0.25,
+    "head_seat_z": 10.2,
+    "screw_under_head_length": 8,
+    "lower_sleeve_outside_diameter": 6.52,
+    "lower_sleeve_top_z": 11.5,
+    "lower_sleeve_wall_conservative_polygon_bound": 1.0033596951704786,
+    "right_upper_post_diameter": 4.54,
+    "right_upper_post_tip_wall_conservative_polygon_bound": 1.0122656855857417,
+    "insert_od": 3,
+    "insert_length": 3.2,
+    "insert_pilot_diameter": 2.7,
+    "insert_pilot_depth": 3.4,
+    "pcb_hole_nominal_diameter": 2,
+    "provisional_pcb_screw_diameter": 1.6,
+    "pcb_hole_nominal_radial_gap": 0.2,
+    "pcb_self_tap_pilot_diameter": 1.2
+  },
+  "battery": {
+    "xy": [
+      8.5,
+      6
+    ],
+    "z": 2.5,
+    "size": [
+      65,
+      36,
+      10
+    ],
+    "right_lower_sleeve_gap": 0.5,
+    "bottom_pad_allowance": 0.5,
+    "support_ledge_edge_relief": 0.25,
+    "midframe_underside_gap": 0.5
+  },
+  "midframe": {
+    "bottom_z": 13,
+    "thickness": 1.5,
+    "perimeter_and_post_notch_gap": 0.3,
+    "local_usb_wall_gap": 0.25,
+    "local_usb_support_overlap": 0.2,
+    "lid_key_per_side_gap": 0.25,
+    "lid_key_top_gap": 0.3,
+    "local_usb_extension_end_y": 38.1
+  },
+  "pcb": {
+    "bottom_z": 19.7,
+    "nominal_thickness": 1.6,
+    "anti_lift_stop_gap": 0.25,
+    "anti_lift_stop_bottom_z": 21.55,
+    "usb_side_support_xy": [
+      69.3,
+      32.75
+    ],
+    "usb_side_support_size": [
+      1.2,
+      2
+    ]
+  },
+  "usb": {
+    "aperture_size": [
+      9.8,
+      4.2
+    ],
+    "aperture_radius": 0.5,
+    "center_z": 22.93,
+    "centers_y": [
+      17.5,
+      32.5
+    ],
+    "rail_y": [
+      11.2,
+      38.5
+    ],
+    "lid_relief_y": [
+      10.95,
+      38.75
+    ],
+    "end_mating_gap": 0.25,
+    "split_gap": 0.25,
+    "rail_top_z": 22.805,
+    "lid_bottom_z": 23.055,
+    "rear_end_tab_width": 1.1,
+    "cable_relief_y": [
+      36.8,
+      38.54
+    ],
+    "measured_plug_size": [
+      10.25,
+      6
+    ],
+    "assumed_plug_front_x": 76
+  },
+  "lcd": {
+    "module_size": [
+      31.52,
+      33.72,
+      1.9
+    ],
+    "pocket_size": [
+      32.02,
+      34.22
+    ],
+    "pocket_xy": [
+      13.99,
+      8.2
+    ],
+    "pocket_corner_radius": 0.24,
+    "per_side_gap": 0.25,
+    "seat_depth": 1.9,
+    "seat_z": 27.1,
+    "support_overlap": 1,
+    "flex_relief_size": [
+      24,
+      6.35
+    ]
+  },
+  "buttons": {
+    "arm_thickness": 0.8,
+    "key_diameter": 4.4,
+    "lid_hole_diameter": 5.2,
+    "nominal_radial_gap": 0.4,
+    "keeper_z": [
+      24.55,
+      25.55
+    ],
+    "keeper_thickness": 1,
+    "keeper_ledge_z": [
+      23.55,
+      24.55
+    ],
+    "keeper_slide_y": -3.3,
+    "keeper_side_gap": 0.25,
+    "keeper_vertical_float": 0.25,
+    "rest_gap_upper_strip": 0.5,
+    "rest_gap_settled_strip": 0.25,
+    "nominal_switch_travel": 0.2,
+    "nominal_press_to_actuate_range": [
+      0.45,
+      0.7
+    ],
+    "nominal_key_projection_range": [
+      0.75,
+      1
+    ],
+    "anti_backout": "Required removable resin-compatible silicone bead; no positive mechanical lock"
+  },
+  "power_slider": {
+    "lid_slot_size": [
+      9,
+      4.4
+    ],
+    "nub_size": [
+      6,
+      3.8
+    ],
+    "flange_size": [
+      14,
+      7.6
+    ],
+    "flange_z": [
+      26.85,
+      27.65
+    ],
+    "guide_top_z": 27.9,
+    "retainer_z": [
+      25.4,
+      26.6
+    ],
+    "retainer_slot_size": [
+      8.1,
+      5.8
+    ],
+    "nominal_lower_gap": 0.25,
+    "nominal_upper_gap": 0.25,
+    "maximum_downward_float": 0.5,
+    "maximum_upward_float": 0.25,
+    "total_vertical_float": 0.75,
+    "socket_inner": 2,
+    "socket_outer": 4,
+    "socket_bottom_z": 25.55,
+    "socket_top_z": 28.05,
+    "nominal_handle_size": [
+      1.5,
+      1.5
+    ],
+    "handle_height_drawing": 2,
+    "handle_height_bom": 2.5,
+    "socket_per_side_gap": 0.25,
+    "minimum_provisional_body_and_taller_handle_gap": 0.25,
+    "nominal_cap_travel": 3,
+    "nominal_switch_travel": 2
+  },
+  "preserved_thin_features": {
+    "wheel_hardware_band": 0.6,
+    "button_arm": 0.8,
+    "slider_flange": 0.8,
+    "keeper_rail_root_approximate": 0.9,
+    "receiver_roof": 0.5
+  },
+  "free_clearance_exceptions": [
+    "Intended seating, bearing and travel-stop contacts",
+    "PCB nominal 2 mm hole around provisional M1.6 screw: 0.20 mm radial clearance",
+    "Insert pilots and self-tapping pilot are intended attachment fits"
+  ],
+  "finish": {
+    "preferred": "Full varnish",
+    "supersedes": "R21 selective masking and exterior-only clear-coat advice",
+    "finished_assembly_approved": false
+  },
+  "changed_parts": [
+    "base",
+    "lid",
+    "midframe",
+    "button_strip",
+    "button_keeper",
+    "power_slider"
+  ],
+  "use_all_six_r23_parts_together": true,
+  "validation_records": [
+    "validation/assembly-clearance-r23.json",
+    "validation/control-motion-r23.json",
+    "validation/base-fit-r23.json",
+    "stl/export-manifest-r23.json"
+  ],
+  "validation_status": "All six final meshes pass strict topology checks; all 34 named actual-source geometry probes pass. See matching records for numerical tolerances and scope.",
+  "physical_fit_verified": false,
+  "supplier_approved": false,
+  "limitations": [
+    "Nominal component references and installed Z heights remain provisional",
+    "No validated numeric varnish thickness allowance",
+    "No universal minimum clearance across all poses or all hardware",
+    "Print tolerances, deformation, spring return, material strength and finished physical assembly remain unverified"
+  ],
+  "source_sha256": "eecf20445726f0c9f073dbfdaead6b1fb13cb4b2b49c2adc7d48288aeff6b332"
+}
