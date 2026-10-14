@@ -112,6 +112,14 @@ multi-select panel collects the offered options then confirms; `allowText`
 permits a voice answer only where Gateway explicitly allows an Other answer.
 Answers are staged locally until all panels are answered, then one exact
 `question.resolve` is sent. Cancel resolves that pending question as cancelled.
+Once the Gateway confirms `answered`, the host emits `kind:5` content for each
+panel with its question and `You: <selected labels or text>`. These receipts
+use stable request/panel identities, so retries and repeated resolution events
+do not append duplicates. Unfinished panels, cancelled requests and rejected
+or uncertain submissions produce no accepted-answer content. Up to eight
+recent receipts replay from the existing bounded session event buffer on open,
+within the remaining item/event capacity after history and pending controls;
+they are process-local presentation data, not a new persistent transcript.
 The native QUERY wire only returns an option ID: free-text and multi-select
 collection are device UI flows, not invented native wire fields.
 

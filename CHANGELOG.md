@@ -8,6 +8,30 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.98.3] - 2026-10-14
+
+- Native G2 Terminal presents questions directly in the active conversation,
+  avoiding the generic permission cue. Background, dismissed and replaced
+  questions retain their exact identity and cannot accept stale replies.
+- Short or silent recordings with no transcript return to the conversation
+  instead of closing Terminal; an unanswered question is restored when needed.
+- Host question activity recognizes deferred tool wrappers without displaying
+  their internal JSON. Accepted answers appear as readable receipts, including
+  bounded replay when reopening a conversation.
+- The current computer host, relay, launcher and conversation skill now live in
+  [HardwareOne G2 Terminal Bridge](https://github.com/CadenGithubB/HardwareOne_G2_Terminal_Bridge).
+  Its first-party host replaces the Even Terminal dependency. The coordinated
+  bridge release includes natural paragraph wrapping aligned to native display
+  lines and refreshed Connect help. The legacy host files here are preserved
+  as an integration snapshot, not the current installation source.
+
+Verification: the firmware fixes match the previously sanitized, built and
+flashed P4 source; both P4 profiles passed their builds and installed firmware
+was checked by readback. The preserved host snapshot passes 24 tests. The
+standalone bridge passes 121 tests plus independent native-layout comparisons;
+the user confirmed the installed wrapping fix. This commit advances the source
+release identity; it does not rebuild or reflash the already working device.
+
 ## [0.99.98.2] - 2026-10-13
 
 Source checkpoint combining the reviewed 0.99.98 release with the transferred

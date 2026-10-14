@@ -368,7 +368,7 @@ export function createOpenClawProvider(emit, { client = new Gateway(JSON.parse(p
     respondQuestion: async (id, answer, requestId) => {
       const s = await resolve(id), q = requestId ? s.questions.get(requestId) : [...s.questions.values()][0];
       if (!q || q.expiresAtMs <= Date.now()) return false;
-      let params = { id: q.id, cancel: true };
+      let params = { id: q.id, cancel: true }, receipt;
       if (answer !== 'skip') {
         const answers = typeof answer === 'string' ? JSON.parse(answer) : answer;
         if (!answers || typeof answers !== 'object' || Array.isArray(answers)) return false;
@@ -378,9 +378,16 @@ export function createOpenClawProvider(emit, { client = new Gateway(JSON.parse(p
           if (!Array.isArray(values) || !values.length || !item.multiSelect && values.length !== 1 || values.some(v => typeof v !== 'string' || Buffer.byteLength(v) > 512 || !item.isOther && !item.options.some(o => o.label === v))) return false;
         }
         params = { id: q.id, answers: { answers }, resolutionId: randomUUID() };
+        // Copy the exact validated choices before awaiting the Gateway. Its
+        // status-only resolution event can arrive before the RPC response.
+        receipt = q.questions.map(item => ({ question: item.question, values: [...answers[item.questionId]] }));
       }
       const result = await client.request('question.resolve', params);
-      s.questions.delete(q.id); publish(s, { type: 'question_answer', requestId: q.id, status: result.status }); return true;
+      const accepted = answer === 'skip' || result.status === 'answered';
+      s.questions.delete(q.id);
+      publish(s, { type: 'question_answer', requestId: q.id, status: result.status,
+        ...(receipt && accepted ? { answers: receipt } : {}) });
+      return accepted;
     },
     getInstanceId: () => instanceId,
     getDeviceHistorySnapshot: async (id, limit = 10) => {
@@ -393,7 +400,9 @@ export function createOpenClawProvider(emit, { client = new Gateway(JSON.parse(p
       return { history: items, snapshot: { sessionId: id, runId: s.runId, state: state(s), uncertain: s.uncertain, cursor: s.cursor, ...activityFields(s) },
         liveText: s.text,
         pendingEvents: [...s.approvals.values()].map(approvalMessage).concat([...s.questions.values()].map(questionMessage)),
-        recentToolEvents: [...s.tools.values()], recentProgressEvents: [s.planMessage, s.statsMessage].filter(Boolean) };
+        recentToolEvents: [...s.tools.values()], recentProgressEvents: [s.planMessage, s.statsMessage].filter(Boolean),
+        // Reuse the bounded presentation ring, not a second transcript store.
+        recentAnswerEvents: s.events.filter(e => e.type === 'question_answer' && e.status === 'answered' && e.answers).slice(-8) };
     },
     getDeviceSnapshot: id => { const s = sessions.get(id); if (!s) throw error('Session not found', 404); stats(s); return { sessionId: id, runId: s.runId, state: state(s), uncertain: s.uncertain, cursor: s.cursor, ...activityFields(s) }; },
     getDeviceEvents: (id, after = 0, max = 4) => { const s = sessions.get(id); if (!s) throw error('Session not found', 404); return { reset: after > s.cursor || after < (s.events[0]?.id ?? 1) - 1, events: s.events.filter(e => e.id > after).slice(0, max), cursor: s.cursor }; },

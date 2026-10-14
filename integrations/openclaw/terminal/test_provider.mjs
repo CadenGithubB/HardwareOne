@@ -16,6 +16,7 @@ test('official provider: main-only resume, exact runs, offered decisions and unc
   writeFileSync(tokenFile, 'fixture-token', { mode: 0o600 }); createIdentity(identityFile);
   const calls = [], emitted = [], key = 'agent:main:main';
   let socket, inFlight = null, historyHook = null, listRows = null, historyText = 'Earlier answer', rejectSend = false;
+  let questionResultStatus = 'answered', questionResolveHook = null, rejectQuestion = false;
   const approval = { id:'exec:fixture', status:'pending', expiresAtMs:Date.now()+60000,
     presentation:{kind:'exec',commandText:'echo fixture',host:'sandbox',allowedDecisions:['allow-once','deny']} };
   class FakeSocket extends EventTarget {
@@ -63,7 +64,14 @@ test('official provider: main-only resume, exact runs, offered decisions and unc
         case 'chat.abort': payload={aborted:true};break;
         case 'approval.get': payload={approval};break;
         case 'approval.resolve': assert.equal(r.params.decision,'allow-once');payload={applied:true,approval:{...approval,status:'allowed',decision:'allow-once'}};break;
-        case 'question.resolve': payload={status:'answered'};break;
+        case 'question.resolve':
+          if(rejectQuestion) {
+            queueMicrotask(()=>this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'res',id:r.id,ok:false,
+              error:{code:'UNAVAILABLE',message:'Question resolution failed'}})})));
+            return;
+          }
+          payload={status:questionResultStatus};
+          if(questionResolveHook) {const hook=questionResolveHook;questionResolveHook=null;hook();} break;
         default: throw new Error(`Unexpected method ${r.method}`);
       }
       queueMicrotask(()=>this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'res',id:r.id,ok:true,payload})})));
@@ -126,7 +134,82 @@ test('official provider: main-only resume, exact runs, offered decisions and unc
     assert.equal(await provider.respondQuestion(id,{choice:['C']},q.id),false);
     assert.equal(await provider.respondQuestion(id,{choice:['A']},q.id),true);
     assert.equal(await provider.respondQuestion(id,{choice:['A']},q.id),false);
-    agent(10,'lifecycle',{phase:'end',startedAt,endedAt:startedAt+2500});
+    assert.deepEqual(emitted.findLast(e=>e.type==='question_answer'&&e.requestId===q.id).answers,
+      [{question:'Which?',values:['A']}]);
+    // Use the real device API and provider for staged multi-panel choices and
+    // voice text. No receipt exists until the Gateway confirms the full answer.
+    const panels={...q,id:'answer-panels',questions:[
+      {questionId:'colors',question:'Pick colors',multiSelect:true,options:[{label:'Red'},{label:'Blue'}]},
+      {questionId:'name',question:'Name?',isOther:true,options:[]}]};
+    socket.event('question.requested',panels);
+    const echoApi=createDeviceApi(provider);let echoRequest=5000,echoCursor=0,echoView;
+    const echoCall=(op,args={})=>echoApi({schema:1,deviceId:'p4-echo',requestId:(++echoRequest).toString(16).padStart(32,'0'),op,...args});
+    const echoDrain=async()=>{const events=[];for(let n=0;n<100;++n){
+      const r=await echoCall('poll',{view:echoView.view,instance:echoView.instance,after:echoCursor});
+      assert.equal(r.ok,true);events.push(...r.events);echoCursor=r.cursor;if(!r.more)return events;
+    }throw Error('answer view did not drain');};
+    echoView=await echoCall('open',{sessionId:id});assert.equal(echoView.ok,true);
+    const firstPanel=(await echoDrain()).find(e=>e.type==='query'&&e.question==='Pick colors');assert(firstPanel);
+    const resolutionsBeforePanels=calls.filter(c=>c.method==='question.resolve').length;
+    const staged=await echoCall('question',{view:echoView.view,instance:echoView.instance,pendingId:firstPanel.pendingId,
+      questionId:firstPanel.questionId,optionIds:['o0','o1']});
+    assert.equal(staged.complete,false);assert.equal(calls.filter(c=>c.method==='question.resolve').length,resolutionsBeforePanels);
+    assert(!emitted.some(e=>e.type==='question_answer'&&e.requestId===panels.id&&e.answers));
+    const nextPanelEvents=await echoDrain();assert(!nextPanelEvents.some(e=>e.type==='content'&&e.kind===5));
+    const nextPanel=nextPanelEvents.find(e=>e.type==='query');assert(nextPanel&&nextPanel.questionId==='q1');
+    const voiceAnswer='A voice answer 🌲';
+    const finalRequest={schema:1,deviceId:'p4-echo',requestId:'e'.repeat(32),op:'question',
+      view:echoView.view,instance:echoView.instance,pendingId:nextPanel.pendingId,questionId:nextPanel.questionId,text:voiceAnswer};
+    // Resolution broadcast can remove the live question before its RPC ACK.
+    questionResolveHook=()=>socket.event('question.resolved',{id:panels.id,status:'answered'});
+    const acceptedAnswer=await echoApi(finalRequest);assert.equal(acceptedAnswer.applied,true);
+    assert.deepEqual(await echoApi(finalRequest),acceptedAnswer);
+    const expectedAnswers=[{question:'Pick colors',values:['Red','Blue']},{question:'Name?',values:[voiceAnswer]}];
+    const panelReceipts=emitted.filter(e=>e.type==='question_answer'&&e.requestId===panels.id&&e.answers);
+    assert.equal(panelReceipts.length,1);assert.deepEqual(panelReceipts[0].answers,expectedAnswers);
+    assert.equal(calls.filter(c=>c.method==='question.resolve').length,resolutionsBeforePanels+1);
+    const echoed=await echoDrain();
+    assert.deepEqual(echoed.filter(e=>e.type==='content'&&e.kind===5).map(e=>e.text),['Pick colors\nYou: Red, Blue',`Name?\nYou: ${voiceAnswer}`]);
+    const retained=(await provider.getDeviceHistorySnapshot(id,10)).recentAnswerEvents;
+    assert.deepEqual(retained.find(e=>e.requestId===panels.id).answers,expectedAnswers);
+    echoView=await echoCall('open',{sessionId:id});echoCursor=0;
+    const replayed=(await echoDrain()).filter(e=>e.type==='content'&&e.kind===5);
+    assert.equal(replayed.filter(e=>e.text==='Pick colors\nYou: Red, Blue').length,1);
+    assert.equal(replayed.filter(e=>e.text===`Name?\nYou: ${voiceAnswer}`).length,1);
+    // No rejected, cancelled, timed-out or failed resolution can echo the
+    // caller's proposed values as if the Gateway accepted them.
+    for(const status of ['cancelled','expired','pending']) {
+      const rejected={...q,id:`answer-${status}`};socket.event('question.requested',rejected);questionResultStatus=status;
+      assert.equal(await provider.respondQuestion(id,{choice:['A']},rejected.id),false);
+      assert(!emitted.some(e=>e.requestId===rejected.id&&e.answers));
+    }
+    questionResultStatus='cancelled';const cancelled={...q,id:'answer-cancel'};socket.event('question.requested',cancelled);
+    assert.equal(await provider.respondQuestion(id,'skip',cancelled.id),true);
+    assert(!emitted.some(e=>e.requestId===cancelled.id&&e.answers));
+    questionResultStatus='answered';const failed={...q,id:'answer-error'};socket.event('question.requested',failed);rejectQuestion=true;
+    await assert.rejects(provider.respondQuestion(id,{choice:['A']},failed.id),/Gateway request rejected \(UNAVAILABLE\)/);
+    assert(!emitted.some(e=>e.requestId===failed.id&&e.answers));rejectQuestion=false;
+    socket.event('question.resolved',{id:failed.id,status:'cancelled'});
+    // Real provider must retain wrapper identity after result events omit args.
+    agent(10,'tool',{phase:'start',name:'tool_call',toolCallId:'ask-wrapper-failed',args:{id:'ask_user',args:{question:'Which?'}}});
+    agent(11,'tool',{phase:'result',name:'tool_call',toolCallId:'ask-wrapper-failed',isError:true,
+      result:{content:[{type:'text',text:'{"status":"error","error":"PRIVATE_SCHEMA_FIXTURE"}'}]}});
+    agent(12,'tool',{phase:'start',name:'tool_call',toolCallId:'ask-wrapper',args:{id:'openclaw:core:ask_user',args:{questions:[]}}});
+    agent(13,'tool',{phase:'result',name:'tool_call',toolCallId:'ask-wrapper',isError:false,
+      result:{content:[{type:'text',text:'{"tool":{"id":"openclaw:core:ask_user","name":"ask_user","source":"openclaw"},"result":{"details":{"answer":"PRIVATE_ANSWER_FIXTURE"}}}'}]}});
+    const wrapper=emitted.findLast(e=>e.toolId==='ask-wrapper');
+    assert.equal(wrapper.detail.input.id,'openclaw:core:ask_user');
+    const projection=createDeviceApi(provider);
+    const view=await projection({schema:1,op:'open',requestId:'1'.repeat(32),deviceId:'p4',sessionId:id});
+    let position=0; const projected=[];
+    for(let i=0;i<100;++i) {
+      const page=await projection({schema:1,op:'poll',requestId:'2'.repeat(32),deviceId:'p4',view:view.view,instance:view.instance,after:position});
+      assert.equal(page.ok,true);projected.push(...page.events);position=page.cursor;if(!page.more)break;
+    }
+    assert(!JSON.stringify(projected).includes('PRIVATE_'));
+    assert(projected.some(e=>e.text==='Question\nFailed'));
+    assert(projected.some(e=>e.text==='Question\nFinished'));
+    agent(14,'lifecycle',{phase:'end',startedAt,endedAt:startedAt+2500});
     socket.event('chat',{sessionKey:key,runId:requestId,seq:3,state:'final',message:{content:[{type:'text',text:'Hello complete'}]}});
     assert.equal(provider.getStatus(id).state,'idle');
     assert.equal(provider.getDeviceSnapshot(id).activity,undefined);

@@ -16342,6 +16342,8 @@ struct G2NativeTerminalState {
   uint32_t queryId = 0, querySentId = 0, queryDeadline = 0;
   uint32_t queryRevision = 0, queuedQueryRevision = 0;
   uint32_t deferredQueryId = 0, deferredOptionId = 0;
+  uint32_t displaySessionId = 0;
+  uint8_t displayState = G2_TERMINAL_DISPLAY_NONE;
   uint32_t listOffset = 0; int32_t nextOffset = -1;
   STTOwner owner{}; STTToken speechToken = 0;
   HttpTerminalToken rpcToken = 0;
@@ -16356,6 +16358,7 @@ struct G2NativeTerminalState {
   bool openAttempted = false, opened = false, syncStarted = false, syncing = false, listDirty = false;
   bool newResult = false, switchResult = false, resultSuccess = true, changeSession = false;
   bool deferredConfirm = false, more = false, queryDirty = false, queryActive = false;
+  bool queryDismissed = false;
   bool multiSelect = false, allowText = false, questionVoice = false, questionCancel = false;
   bool choiceNotice = false, stateDirty = false;
   bool firmwareReady = false, firmwareQuerySent = false;
@@ -16468,7 +16471,7 @@ static void g2NativeTerminalClearQuery() {
   ++s.queryRevision;
   if (s.questionVoice) { g2NativeTerminalCancelDraft(); g2NativeTerminalPhase(NativeTerm::Phase::Reply); }
   if (s.nextRpc == NativeRpc::Permission || s.nextRpc == NativeRpc::Question) s.nextRpc = NativeRpc::None;
-  s.queryActive = s.queryDirty = s.questionVoice = s.questionCancel = false;
+  s.queryActive = s.queryDirty = s.queryDismissed = s.questionVoice = s.questionCancel = false;
   s.choiceCount = 0; s.queryDeadline = 0; s.deferredQueryId = s.deferredOptionId = 0;
   memset(s.pending, 0, sizeof(s.pending)); memset(s.question, 0, sizeof(s.question));
   for (auto& choice : s.choices) choice = {};
@@ -16629,11 +16632,23 @@ static void g2NativeTerminalWireRows() {
   for (size_t i = 0; i < s.rowCount; ++i)
     s.wireRows[i] = {s.rows[i].id, s.rows[i].title, 1, s.rows[i].state};
 }
+static bool g2NativeTerminalForeground() {
+  const auto& s = gNativeTerminal;
+  return s.opened && s.displayState == G2_TERMINAL_DISPLAY_SESSION_ACTIVE && s.displaySessionId == s.sessionId;
+}
+static void g2NativeTerminalConsumeEvent();
 static bool g2NativeTerminalSend(NativeTerm::Tx tx) {
   auto& s = gNativeTerminal;
   if (s.policy.pending != NativeTerm::Tx::None || !g2NativeTerminalGuardMatches(s.epoch, gR)) return false;
   if (s.policy.ownsDraft() && tx != NativeTerm::Tx::Asr && tx != NativeTerm::Tx::Heartbeat &&
       tx != NativeTerm::Tx::Close) return false;
+  // Stock's foreground renderer sends QUERY directly. A separate AWAIT_USER
+  // state produces the generic permission cue, including while the question
+  // is still behind content in the host event queue. Keep host admission
+  // awaiting, but let the exact question/approval card own this presentation.
+  if (tx == NativeTerm::Tx::State && s.state == G2_TERMINAL_STATE_AWAIT_USER && g2NativeTerminalForeground()) {
+    s.stateDirty = false; g2NativeTerminalConsumeEvent(); return true;
+  }
   const uint32_t now = millis();
   if (tx == NativeTerm::Tx::Open && s.fromMenu && uint32_t(now-s.menuStartedMs) >= kNativeMenuWaitMs) {
     g2NativeTerminalFail("native-menu-open-timeout-retry"); return false;
@@ -16676,6 +16691,13 @@ static bool g2NativeTerminalSend(NativeTerm::Tx tx) {
     default: return false;
   }
   if (!n) { g2NativeTerminalFail("invalid-native-payload"); return false; }
+  if (tx == NativeTerm::Tx::Open || tx == NativeTerm::Tx::SessionChange) {
+    // An explicit binding presents this session unless a later DISPLAY_STATE
+    // says otherwise. Set the fallback before writing, never on the ACK: focus
+    // notifications received while the command is in flight must win.
+    s.displayState = G2_TERMINAL_DISPLAY_SESSION_ACTIVE;
+    s.displaySessionId = s.sessionId;
+  }
   s.policy.pending = tx; s.policy.magic = magic; s.policy.sentMs = now; s.policy.lastTxMs = now;
   const bool sent = sendPbFragmented(gR, allocSeq(), G2_SID_TERMINAL, G2_FLAG_REQUEST,
       s.pb, n, gNativeTerminalRight.load(std::memory_order_acquire), nullptr, 0, 0, 0, s.epoch);
@@ -16890,6 +16912,10 @@ static bool g2NativeTerminalBatchNext() {
       g2NativeTerminalClearQuery(); g2NativeTerminalConsumeEvent(); return false;
     }
     if (!g2NativeTerminalQueryFrom(event)) { g2NativeTerminalFail("query-needs-host-dashboard"); return false; }
+    // Cache the bounded offer while another native screen owns focus. Drain
+    // host events so revocation/replacement/expiry still reaches us; a later
+    // foreground transition presents only the surviving offer.
+    if (!g2NativeTerminalForeground()) { g2NativeTerminalConsumeEvent(); return false; }
     (void)g2NativeTerminalSend(NativeTerm::Tx::Query); return true;
   }
   if (!strcmp(type,"query_clear")) {
@@ -17007,7 +17033,8 @@ static void g2NativeTerminalOnRx(G2Temple& temple, uint32_t generation, uint32_t
     }
     if (event.ackError) { g2NativeTerminalFail("native-request-rejected"); return; }
     switch (completed) {
-      case NativeTerm::Tx::Open: s.opened = true; g2NativeTerminalPhase(NativeTerm::Phase::Syncing); break;
+      case NativeTerm::Tx::Open:
+        s.opened = true; g2NativeTerminalPhase(NativeTerm::Phase::Syncing); break;
       case NativeTerm::Tx::List: s.listDirty = false; break;
       case NativeTerm::Tx::SessionChange: s.changeSession = false; break;
       case NativeTerm::Tx::SwitchResult: s.switchResult = false; break;
@@ -17042,6 +17069,8 @@ static void g2NativeTerminalOnRx(G2Temple& temple, uint32_t generation, uint32_t
     g2NativeTerminalCancelDraft(); return;
   }
   if (event.command == G2_TERMINAL_CMD_QUERY_REPLY) {
+    if (!s.queryActive || s.queryDismissed || !g2NativeTerminalForeground() ||
+        event.queryId != s.queryId || event.queryId != s.querySentId) return;
     if (s.policy.pending != NativeTerm::Tx::None) {
       if (!s.deferredQueryId && s.queryActive && event.queryId == s.queryId) {
         s.deferredQueryId = event.queryId; s.deferredOptionId = event.optionId;
@@ -17080,13 +17109,44 @@ static void g2NativeTerminalOnRx(G2Temple& temple, uint32_t generation, uint32_t
     return;
   }
   if (event.command == G2_TERMINAL_CMD_AWAIT_DISMISS) {
-    // Dismissing an approval is not denial or approval. Keep the host pending.
-    if (event.sessionId == s.sessionId) { g2NativeTerminalClearQuery(); g2NativeTerminalCancelDraft();
-      g2NativeTerminalPhase(NativeTerm::Phase::Reply); }
+    // Dismiss the cue, not the host request. Revoke unsubmitted choices and
+    // speech, retain the exact offer, and give its next presentation a new ID
+    // so a late reply to the dismissed card cannot answer it.
+    if (event.sessionId == s.sessionId) {
+      g2NativeTerminalCancelDraft();
+      if (s.pending[0] && int32_t(millis()-s.queryDeadline) < 0 &&
+          s.rpc != NativeRpc::Permission && s.rpc != NativeRpc::Question) {
+        ++s.queryRevision;
+        if (s.nextRpc == NativeRpc::Permission || s.nextRpc == NativeRpc::Question) s.nextRpc = NativeRpc::None;
+        s.queryId = g2NativeTerminalNextId(); s.queryActive = s.queryDismissed = true;
+        s.queryDirty = s.questionVoice = s.questionCancel = s.choiceNotice = false;
+        s.deferredQueryId = s.deferredOptionId = 0;
+        for (auto& choice : s.choices) choice.selected = false;
+        memset(s.decision,0,sizeof(s.decision));
+        s.state = s.hostState; s.stateDirty = true;
+      } else g2NativeTerminalClearQuery();
+      g2NativeTerminalPhase(NativeTerm::Phase::Reply);
+    }
     return;
   }
-  // Display/list focus, filter and thinking-word sync carry no permission to
-  // execute. This adapter has one agent; all supplied sessions already use it.
+  if (event.command == G2_TERMINAL_CMD_DISPLAY_STATE) {
+    if (event.displayState > G2_TERMINAL_DISPLAY_NEW_SESSION_PENDING || event.overlay > G2_TERMINAL_OVERLAY_QUERY) return;
+    const bool wasVisible = g2NativeTerminalForeground();
+    const bool changed = s.displayState != event.displayState || s.displaySessionId != event.sessionId;
+    s.displayState = event.displayState; s.displaySessionId = event.sessionId;
+    if (changed && s.state == G2_TERMINAL_STATE_AWAIT_USER) s.stateDirty = true;
+    if (!wasVisible && g2NativeTerminalForeground() && s.queryActive && !s.questionVoice &&
+        int32_t(millis()-s.queryDeadline) < 0 &&
+        s.rpc != NativeRpc::Permission && s.rpc != NativeRpc::Question &&
+        s.nextRpc != NativeRpc::Permission && s.nextRpc != NativeRpc::Question) {
+      ++s.queryRevision; s.queryId = g2NativeTerminalNextId();
+      s.deferredQueryId = s.deferredOptionId = 0;
+      s.queryDismissed = false; s.queryDirty = true;
+    }
+    return;
+  }
+  // List/overlay focus indices, filter and thinking-word sync carry no
+  // permission to execute. This adapter has one agent; all sessions use it.
   if (event.command != G2_TERMINAL_CMD_VOICE) return;
   INFO_SYSTEMF("[G2-TERMINAL] voice=%u phase=%u host=%u rpc=%u queued=%u",
       unsigned(event.voiceCommand),unsigned(s.policy.phase),unsigned(s.hostState),unsigned(s.rpc),unsigned(s.nextRpc));
@@ -17213,8 +17273,26 @@ static void g2NativeTerminalTick() {
       if (!sttAcknowledgeChunk(s.owner,s.speechToken,s.chunk.sequence)) g2NativeTerminalFail("speech-session-changed");
       s.chunk = {};
     } else if (!s.speech.workerActive) {
-      if (s.policy.phase != NativeTerm::Phase::Finishing || s.speech.state != STTState::Done || !s.promptLen) {
+      if (s.policy.phase != NativeTerm::Phase::Finishing || s.speech.state != STTState::Done) {
         g2NativeTerminalFail("no-complete-speech"); return;
+      }
+      if (!s.promptLen) {
+        // A short/silent recording may finish normally without a transcript.
+        // Wait out an older ACK so it cannot consume this speech-UI reset.
+        if (s.policy.pending != NativeTerm::Tx::None) return;
+        g2NativeTerminalCancelDraft();
+        const bool restoreQuestion = s.questionVoice && s.queryActive;
+        if (restoreQuestion) {
+          s.questionVoice = false; s.queryDirty = true; s.queryId = g2NativeTerminalNextId();
+        }
+        g2NativeTerminalPhase(restoreQuestion ? NativeTerm::Phase::AwaitChoice : NativeTerm::Phase::Idle);
+        // Explicitly leave native transcription, then let the existing query
+        // path restore the unanswered offer. Host admission remains unchanged.
+        s.state = G2_TERMINAL_STATE_IDLE; s.stateDirty = true;
+        (void)g2NativeTerminalSend(NativeTerm::Tx::State);
+        s.state = s.hostState;
+        INFO_SYSTEMF("[G2-TERMINAL] empty speech discarded; restore question=%u", unsigned(restoreQuestion));
+        return;
       }
       s.speechToken = 0; g2NativeTerminalPhase(NativeTerm::Phase::Confirming);
     }
@@ -17270,7 +17348,12 @@ static void g2NativeTerminalTick() {
   if (s.changeSession) { (void)g2NativeTerminalSend(NativeTerm::Tx::SessionChange); return; }
   if (s.syncing && !s.syncStarted) { (void)g2NativeTerminalSend(NativeTerm::Tx::SyncBegin); return; }
   if (s.choiceNotice) { (void)g2NativeTerminalSend(NativeTerm::Tx::Content); return; }
-  if (s.queryDirty) { (void)g2NativeTerminalSend(NativeTerm::Tx::Query); return; }
+  // Like stock, wait for the selected conversation, not an overlay report:
+  // a stale VOICE_INPUT report may remain after cancellation/confirmation.
+  // The ownsDraft branch above protects live speech and transcript review.
+  if (s.queryActive && s.queryDirty && !s.queryDismissed && g2NativeTerminalForeground()) {
+    (void)g2NativeTerminalSend(NativeTerm::Tx::Query); return;
+  }
   if (g2NativeTerminalBatchNext()) return;
   if (gNativeTerminalCloseRequested.load()) return;
   if (!s.batch && !s.rpcToken && s.nextRpc == NativeRpc::None) {

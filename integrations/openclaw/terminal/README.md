@@ -1,5 +1,12 @@
 # Hardware One provider for Even Terminal
 
+This directory preserves the earlier integration snapshot. The maintained
+first-party host, relay, launcher and conversation skill are now in
+[HardwareOne G2 Terminal Bridge](https://github.com/CadenGithubB/HardwareOne_G2_Terminal_Bridge).
+Use that repository for current installation and updates; it does not require
+the Even Terminal computer server. The instructions below describe the legacy
+integration retained here for reference.
+
 This extends the official **Even Terminal 0.10.5** computer server with an
 OpenClaw provider. The P4 reaches it through the existing restricted HTTPS
 relay; the server connects only to OpenClaw on `127.0.0.1`. A phone, Even
@@ -18,12 +25,12 @@ fails closed instead of guessing its API.
 | New conversation | Reserves a new `agent:main:openai-user:hw1:terminal:…` session; the first explicit prompt starts it. |
 | History | Reads Gateway `chat.history`; the host does not invent a separate transcript. It requests ten recent entries, then keeps their user/assistant text, so the device can show fewer than ten messages. |
 | Live response | Actual chat deltas and final text, reconciled with history. Empty / `NO_REPLY` completion is reported as no visible reply. |
-| Tool activity | Actual start/update/result events, tool identity, reported error status and text output. Output previews are limited to 4 KiB and marked when truncated. `ask_user` shows a concise question status; its raw answer result/JSON stays off the glasses. Attachments and non-text result objects remain in the Gateway UI. |
+| Tool activity | Actual start/update/result events, tool identity, reported error status and text output. Output previews are limited to 4 KiB and marked when truncated. `ask_user`, including its deferred `tool_call` wrapper, shows a concise question status (real failures remain marked); its raw answer result/JSON stays off the glasses. Attachments and non-text result objects remain in the Gateway UI. |
 | Activity and progress | Observed thinking/tool/response activity drives native status. Explicit Gateway plan steps produce completed/total task progress and the current step, including in-flight replay. No tasks are inferred from tool calls. |
 | Run statistics | Gateway-reported cumulative output tokens and elapsed time from known run timing. Timing refreshes on event/poll activity, at most every ten seconds between authoritative updates. Unknown input-token counts, costs and model-call/turn counts are omitted. |
 | Interrupt | Exact selected run via `chat.abort`; the UI must wait for the outcome. Recovered runs requiring session-wide abort are directed to the OpenClaw dashboard. |
 | Approvals | The Gateway's offered decisions only, re-read immediately before resolution. Complete critical details must fit the device UI; otherwise approval stays on the dashboard. |
-| Questions | Offered options, supported multiple selections, free text and cancellation. Secret-store/password/URL questions stay on the dashboard. |
+| Questions | Offered options, supported multiple selections, free text and cancellation. Accepted answers appear as readable answer items, including selected labels or spoken text. Secret-store/password/URL questions stay on the dashboard. |
 | Reconnect | A new instance identity invalidates old device views. An interrupted connection is an uncertain outcome, never an automatic prompt resend. |
 
 Progress and statistics use stable text items in the native scrolling view;
@@ -32,6 +39,13 @@ text is not copied onto the glasses; only its observed activity is shown. Some
 channel-originated runs do not expose live plan/usage events through Gateway;
 missing values stay absent. The fixed `main` provider does not emulate other
 providers' shell sessions, account/cwd controls or unoffered permissions.
+Answer items are emitted after the complete question request is accepted;
+unfinished panels, cancellation and failed submission do not create an accepted
+answer. Up to eight recent answer receipts can be replayed from the existing
+bounded session event buffer when reopening Terminal, where the initial view
+has room; history and pending controls take priority. This buffer lasts only
+for the running host; it does not add a separate persistent transcript or change
+Gateway history. Replayed receipts retain stable content IDs within each view.
 It uses `deliver:false` for the chat
 response and rejects slash/bang-prefixed commands and the pinned Gateway's bare
 cancellation aliases locally; use the explicit Interrupt action to stop a run.

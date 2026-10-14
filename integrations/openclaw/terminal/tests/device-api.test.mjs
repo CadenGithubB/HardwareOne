@@ -238,3 +238,146 @@ test('question descriptions are preserved and every later panel is checked befor
   assert.ok(result.events.some(x => x.type === 'host_required'));
   assert.equal(result.events.filter(x => x.type === 'query').length, 1); // only the original retained card
 });
+
+for (const id of ['ask_user', 'openclaw:core:ask_user']) {
+  test(`deferred ${id} hides schema failures and answers, including replay`, async () => {
+    const f = fixture(), view = await f.open();
+    const detail = { input: { id, args: { questions: [] } } };
+    for (const [type, isError, label] of [['tool_start', false, 'Waiting'], ['tool_update', false, 'Update'], ['tool_end', true, 'Failed'], ['tool_end', false, 'Finished']]) {
+      f.emit({ type, runId: 'r', toolId: 'wrapper', name: 'tool_call', isError, detail,
+        text: '{"error":"PRIVATE_SCHEMA_FIXTURE", "answers":"PRIVATE_ANSWER_FIXTURE"}' });
+      const events = (await f.drain(view)).events;
+      assert(!JSON.stringify(events).includes('PRIVATE_'));
+      assert(events.some(e => e.type === 'content' && e.text === `Question\n${label}`));
+    }
+    const replay = fixture();
+    replay.provider.getDeviceHistorySnapshot = async () => ({ history: [],
+      snapshot: { runId: 'r', state: 'idle', cursor: 0 }, recentToolEvents: [
+        { type: 'tool_end', runId: 'r', toolId: 'wrapper', name: 'tool_call', isError: true, detail,
+          text: '{"error":"PRIVATE_SCHEMA_FIXTURE"}' }] });
+    const events = (await replay.drain(await replay.open())).events;
+    assert(!JSON.stringify(events).includes('PRIVATE_'));
+    assert(events.some(e => e.type === 'content' && e.text === 'Question\nFailed'));
+  });
+}
+test('only exact wrapper envelope is suppressed when start arguments are absent', async () => {
+  const f = fixture(), view = await f.open();
+  const envelope = JSON.stringify({ tool: { id:'openclaw:core:ask_user',name:'ask_user',source:'openclaw' },
+    result:{ content:[{type:'text',text:'PRIVATE_ANSWER_FIXTURE'}] } });
+  f.emit({ type:'tool_end',name:'tool_call',toolId:'question',text:envelope });
+  const events = (await f.drain(view)).events;
+  assert(!JSON.stringify(events).includes('PRIVATE_'));
+  assert(events.some(e=>e.type==='content' && e.text==='Question\nFinished'));
+  for (const [name, value] of [['tool_call','{"tool":{"id":"other","name":"ask_user","source":"openclaw"},"result":{}}'],
+    ['other',envelope],['tool_call','ask_user: keep this ordinary text']]) {
+    f.emit({ type:'tool_end',name,toolId:name+value,text:value });
+    const result = (await f.drain(view)).events;
+    assert(result.some(e=>e.type==='content' && e.text.includes(value)));
+  }
+  f.emit({type:'result',runId:'r',text:envelope});
+  assert((await f.drain(view)).events.some(e=>e.type==='content' && e.kind===2 && e.text===envelope));
+});
+
+test('accepted question answers render exact readable choices and voice text in bounded UTF-8 items', async () => {
+  const f = fixture(), view = await f.open();
+  const answers = [
+    { question: 'Pick colors', values: ['Red', 'Blue'] },
+    { question: 'Describe the place ' + '😀'.repeat(160), values: ['🌲'.repeat(120)] },
+  ];
+  const receipt = { type: 'question_answer', requestId: 'accepted-question', status: 'answered', answers };
+  f.emit(receipt);
+  const first = (await f.drain(view)).events.filter(e => e.type === 'content' && e.kind === 5);
+  assert.equal(first.map(e => e.text).join(''), answers.map(a => `${a.question}\nYou: ${a.values.join(', ')}`).join(''));
+  assert.ok(first.length > answers.length);
+  assert.ok(first.every(e => Buffer.byteLength(e.text) <= 512 && !e.text.includes('\ufffd')));
+  // An event/RPC replay uses the same content identities, not another answer.
+  f.emit(receipt);
+  const repeated = (await f.drain(view)).events.filter(e => e.type === 'content' && e.kind === 5);
+  assert.deepEqual(repeated, first);
+  assert.deepEqual(f.calls, []);
+});
+
+test('retained accepted answers return on reopen without exposing internal tool result JSON', async () => {
+  const f = fixture();
+  const receipt = { type: 'question_answer', requestId: 'retained-answer', status: 'answered',
+    answers: [{ question: 'Which route?', values: ['The wooded path'] }] };
+  f.provider.getDeviceHistorySnapshot = async () => ({ history: [], snapshot: { runId: 'run', state: 'idle', cursor: 0 },
+    recentAnswerEvents: [receipt], recentToolEvents: [{ type: 'tool_end', name: 'openclaw:core:ask_user', toolId: 'ask1',
+      text: '{"status":"answered","private":"PRIVATE_INTERNAL_FIXTURE"}' }] });
+  const view = await f.open();
+  let events = (await f.drain(view)).events;
+  const answer = events.filter(e => e.type === 'content' && e.kind === 5);
+  assert.deepEqual(answer.map(e => e.text), ['Which route?\nYou: The wooded path']);
+  assert.ok(!JSON.stringify(events).includes('PRIVATE_INTERNAL_FIXTURE'));
+  f.emit(receipt);
+  events = (await f.drain(view)).events;
+  assert.deepEqual(events.filter(e => e.type === 'content' && e.kind === 5), answer);
+  const reopened = (await f.drain(await f.open())).events;
+  assert.deepEqual(reopened.filter(e => e.type === 'content' && e.kind === 5).map(e => e.text), ['Which route?\nYou: The wooded path']);
+});
+
+test('initial answer replay preserves the event window, pending query and newest complete receipts', async () => {
+  const f = fixture(), historyText = 'H'.repeat(128 * 1024);
+  const receipts = Array.from({ length: 8 }, (_, i) => ({
+    type: 'question_answer', requestId: `receipt-${i}`, status: 'answered',
+    answers: Array.from({ length: 3 }, (_, panel) => ({
+      question: `Receipt ${i} panel ${panel}: `.padEnd(1000, 'Q'),
+      values: ['A', 'B', 'C', 'D'].map(value => value.repeat(128)),
+    })),
+  }));
+  let replay = false;
+  f.provider.getDeviceHistorySnapshot = async () => ({
+    history: [{ role: 'assistant', text: historyText }],
+    snapshot: { runId: 'run', state: 'awaiting', cursor: 0 },
+    recentToolEvents: Array.from({ length: 24 }, (_, i) => ({
+      type: 'tool_end', name: 'read_file', toolId: `tool-${i}`, text: 'T'.repeat(4048),
+    })),
+    pendingEvents: [{ type: 'user_question', requestId: 'next-question', expiresAtMs: Date.now() + 60000,
+      questions: [{ questionId: 'next', question: 'Keep this pending question', options: [{ label: 'Continue' }] }] }],
+    recentAnswerEvents: replay ? receipts : [],
+  });
+  // This valid initial projection fits before adding retained answer receipts.
+  const baseline = (await f.drain(await f.open())).events;
+  assert.equal(baseline.filter(e => e.type === 'content' && e.kind === 2).map(e => e.text).join(''), historyText);
+  assert.ok(baseline.length < 512);
+  replay = true;
+  const result = await f.drain(await f.open()), events = result.events;
+  assert.ok(events.length <= 512);
+  assert.deepEqual(events.map(e => e.id), Array.from({ length: events.length }, (_, i) => i + 1));
+  assert.equal(events.filter(e => e.type === 'content' && e.kind === 2).map(e => e.text).join(''), historyText);
+  assert.deepEqual(events.filter(e => e.type === 'content' && e.kind === 3).map(e => e.text),
+    baseline.filter(e => e.type === 'content' && e.kind === 3).map(e => e.text));
+  const pending = events.filter(e => e.type === 'query');
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].question, 'Keep this pending question');
+  assert.ok(!events.some(e => e.type === 'query_clear' && e.pendingId === pending[0].pendingId));
+  assert.equal(events.at(-1).type, 'state');
+  const echoed = events.filter(e => e.type === 'content' && e.kind === 5).map(e => e.text).join('');
+  const receiptText = receipt => receipt.answers.map(a => `${a.question}\nYou: ${a.values.join(', ')}`).join('');
+  assert.ok(echoed.endsWith(receiptText(receipts.at(-1))), 'the newest complete receipt must fit');
+  assert.ok(!echoed.includes('Receipt 0 panel 0:'), 'older receipts yield capacity to baseline content and controls');
+  assert.deepEqual(f.calls, []);
+});
+
+test('unaccepted, cancelled and externally resolved questions never invent an answer echo', async () => {
+  const f = fixture(), view = await f.open();
+  for (const status of ['pending', 'cancelled', 'expired', 'rejected'])
+    f.emit({ type: 'question_answer', requestId: status, status, answers: [{ question: 'Proceed?', values: ['Yes'] }] });
+  f.emit({ type: 'question_answer', requestId: 'external', status: 'answered' });
+  assert.deepEqual((await f.drain(view)).events.filter(e => e.type === 'content' && e.kind === 5), []);
+  for (const outcome of ['rejected', 'throw', 'cancel']) {
+    const run = fixture(), selected = await run.open();
+    run.provider.respondQuestion = async () => {
+      if (outcome === 'throw') throw Error('Uncertain question resolution');
+      return outcome === 'cancel';
+    };
+    run.emit({ type: 'user_question', requestId: outcome, expiresAtMs: Date.now() + 60000,
+      questions: [{ questionId: 'q', question: 'Proceed?', options: [{ label: 'Yes' }] }] });
+    const q = (await run.drain(selected)).events.find(e => e.type === 'query');
+    const response = await run.call('question', { ...selected, pendingId: q.pendingId, questionId: q.questionId,
+      ...(outcome === 'cancel' ? { cancel: true } : { optionIds: ['o0'] }) });
+    if (outcome === 'throw') assert.equal(response.ok, false);
+    else assert.equal(response.applied, outcome === 'cancel');
+    assert.deepEqual((await run.drain(selected)).events.filter(e => e.type === 'content' && e.kind === 5), []);
+  }
+});

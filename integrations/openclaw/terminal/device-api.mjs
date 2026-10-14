@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 
-const MAX_WIRE = 4096, MAX_EVENTS = 512, MAX_CONTENT = 128 * 1024;
+const MAX_WIRE = 4096, MAX_EVENTS = 512, MAX_ITEMS = 256, MAX_CONTENT = 128 * 1024;
 const HEX = /^[a-f0-9]{32}$/u, SESSION = /^hwo_[a-f0-9]{64}$/u;
 const bytes = s => Buffer.byteLength(s, 'utf8');
 const nonce = () => randomBytes(16).toString('hex');
@@ -36,7 +36,30 @@ function chunks(value, limit = 512) {
   return result;
 }
 function title(value) { return chunks(String(value || 'Mingus conversation'), 64)[0] || 'Mingus'; }
+const QUESTION_TOOLS = new Set(['ask_user', 'openclaw:core:ask_user']);
+function isQuestionTool(event, name) {
+  if (QUESTION_TOOLS.has(name)) return true;
+  if (name !== 'tool_call') return false;
+  // Deferred tools have an outer tool_call event as well as the named child.
+  // Use its exact dispatch identity, not text matching arbitrary output/errors.
+  if (QUESTION_TOOLS.has(event.detail?.input?.id)) return true;
+  // A replay may lack start arguments; only accept the dispatcher's structured
+  // success envelope. Never parse or suppress ordinary assistant JSON.
+  try {
+    const value = JSON.parse(event.text || event.result || '');
+    return object(value?.tool) && value.tool.source === 'openclaw' &&
+      value.tool.id === 'openclaw:core:ask_user' && value.tool.name === 'ask_user' && object(value.result);
+  } catch { return false; }
+}
 const activityFields = value => value.state === 'busy' && ['thinking','tool','responding'].includes(value.activity) ? {activity:value.activity} : {};
+function answerItems(e) {
+  if (e.status !== 'answered' || !text(e.requestId, 128) || !Array.isArray(e.answers) ||
+      e.answers.length < 1 || e.answers.length > 3 || !e.answers.every(a =>
+        object(a) && text(a.question, 1024) && Array.isArray(a.values) && a.values.length >= 1 &&
+        a.values.length <= 4 && a.values.every(value => text(value, 512)))) return [];
+  return e.answers.map((a, index) => ({ key: `answer:${e.requestId}:${index}`,
+    text: `${a.question}\nYou: ${a.values.join(', ')}` }));
+}
 
 // One selected, bounded presentation per authenticated relay identity. This is
 // presentation state only: OpenClaw remains the transcript/run/approval owner.
@@ -69,7 +92,7 @@ export function createDeviceApi(provider) {
     if (!text(value, MAX_CONTENT, true)) {
       event(v, { type: 'host_required', text: 'This output exceeds the device view limit. Open the OpenClaw dashboard.' }); return;
     }
-    if (!v.items.has(key) && v.items.size >= 256) fail('reopen_required', 'This view reached its item limit; reopen recent history');
+    if (!v.items.has(key) && v.items.size >= MAX_ITEMS) fail('reopen_required', 'This view reached its item limit; reopen recent history');
     const parts = chunks(value), old = v.items.get(key) || [];
     for (let i = 0; i < Math.max(old.length, parts.length); ++i) {
       const part = parts[i] || '';
@@ -144,9 +167,9 @@ export function createDeviceApi(provider) {
       case 'result': content(v, `assistant:${run}`, 2, typeof e.text === 'string' ? e.text : v.live.get(run) || ''); v.live.delete(run); break;
       case 'tool_start': case 'tool_end': case 'tool_update': {
         const name = e.name || e.toolName || 'Tool';
-        // ask_user has its own choice cards. Its tool result also contains an
-        // internal answer envelope; that must not become another glasses item.
-        const summary = (name === 'ask_user' || name === 'openclaw:core:ask_user')
+        // Direct and deferred ask_user calls have their own choice cards. Their
+        // schema errors and answer envelopes stay in the Gateway transcript.
+        const summary = isQuestionTool(e, name)
           ? ['Question', e.type === 'tool_start' ? 'Waiting' : e.type === 'tool_end' ? e.isError ? 'Failed' : 'Finished' : 'Update']
           : [name, e.type === 'tool_start' ? 'Running' : e.type === 'tool_end' ? e.isError ? 'Failed' : 'Finished' : 'Update', e.text || e.result || ''];
         content(v, `tool:${run}:${e.toolId || e.toolUseId || e.name || 'tool'}`, 3,
@@ -170,7 +193,12 @@ export function createDeviceApi(provider) {
           event(v, {type:'state', state, runId:e.runId || null, ...activityFields({...e,state})}); } break;
       case 'permission_request': offer(v, e, 'permission'); break;
       case 'user_question': offer(v, e, 'question'); break;
-      case 'permission_result': case 'question_answer': clearPending(v, e.requestId || e.toolUseId); break;
+      case 'permission_result': clearPending(v, e.requestId || e.toolUseId); break;
+      case 'question_answer':
+        // The native choice reply does not add a history item. Render only a
+        // confirmed receipt from the provider, never the raw ask_user result.
+        for (const item of answerItems(e)) content(v, item.key, 5, item.text);
+        clearPending(v, e.requestId || e.toolUseId); break;
       case 'error': case 'notification': event(v, { type: 'host_required', text: title(e.message || e.text || 'Open the OpenClaw dashboard.') }); break;
       default: break;
     }
@@ -213,6 +241,18 @@ export function createDeviceApi(provider) {
     for (const p of initial.pendingEvents || []) project(v, p);
     for (const p of initial.recentToolEvents || []) project(v, p);
     for (const p of initial.recentProgressEvents || []) project(v, p);
+    // Replayed receipts are optional presentation history. Keep complete newest
+    // receipts only where they fit, reserving the final state event. They must
+    // not evict the initial cursor or any history/pending controls during open.
+    const receipts = [];
+    let eventSpace = MAX_EVENTS - v.events.length - 1, itemSpace = MAX_ITEMS - v.items.size;
+    for (const answer of (initial.recentAnswerEvents || []).slice(-8).reverse()) {
+      const items = answerItems(answer), cost = items.reduce((n, item) => n + chunks(item.text).length, 0);
+      if (items.length && cost <= eventSpace && items.length <= itemSpace) {
+        receipts.unshift(items); eventSpace -= cost; itemSpace -= items.length;
+      }
+    }
+    for (const items of receipts) for (const item of items) content(v, item.key, 5, item.text);
     event(v, { type: 'state', state: snapshot.uncertain ? 'uncertain' : snapshot.state, runId: snapshot.runId, ...activityFields(snapshot) });
     d.view = v;
     // Retired view actions carry an invalid view token, so their response cache
