@@ -1,4 +1,5 @@
 {
+  "historical_snapshot": "R21 metadata retained for reference; current local reinforcement dimensions are in dimensions-r22.json",
   "units": "mm",
   "status": "Revision 21 replaces the two button-strip screws with solid roof datums, a separate slide-in keeper and four lid ledges. The ledges carry loads; a required removable resin-compatible silicone bead across a rear tab and fixed ledge prevents reverse sliding. Six printed parts, unchanged body height and six M2 case/frame insert locations. Lid and strip change; keeper is new; base/midframe/power slider retain R20 geometry. All six final meshes and source/file hashes passed checks. Base/midframe/power slider hashes match R20. Numerical viewer and browser assembly-view checks passed. Three-page PDF text/hash/dimension audit and final rendered-page inspection passed. Latest viewer browser reinspection passed at seated, entry and lowered positions with no reported errors/warnings. The final 10-file ZIP passed CRC, exact member-byte, and source/STL hash checks. Physical fit and strength unverified.",
   "source_board_revision": "PCB MB V2.3 2025-04-11 bundled in official P4X archive",

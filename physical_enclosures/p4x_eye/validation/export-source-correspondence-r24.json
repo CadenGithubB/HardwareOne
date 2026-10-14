@@ -1,0 +1,68 @@
+{
+  "final_source_sha256": "be7d2855ed6454d9149d22d852d59ef857402d9e220c991e8ad4d53d9bd8129a",
+  "export_source_sha256": "5eb81e113abaa36fe4cef22ba40062a795b99175097991bd879a481f758ea8e5",
+  "method": "Byte-identical expanded OpenSCAD CSG for each named production module; the coordinate-only battery locator fix affects base only.",
+  "parts": {
+    "lid": {
+      "export_source_csg_sha256": "b042fe70f981cd1b88ebcd12247b48dca93afe4746bcd02db96635d750f9a129",
+      "final_source_csg_sha256": "b042fe70f981cd1b88ebcd12247b48dca93afe4746bcd02db96635d750f9a129",
+      "identical": true
+    },
+    "midframe": {
+      "export_source_csg_sha256": "05c1146e06638b577325bec0acd85a188080900054e3b00850089cd7baf3ab7c",
+      "final_source_csg_sha256": "05c1146e06638b577325bec0acd85a188080900054e3b00850089cd7baf3ab7c",
+      "identical": true
+    },
+    "button_strip": {
+      "export_source_csg_sha256": "fa52376053575a4a5e855a3305a07eb5f1306ca3c9b10f62239e626c0c9690ea",
+      "final_source_csg_sha256": "fa52376053575a4a5e855a3305a07eb5f1306ca3c9b10f62239e626c0c9690ea",
+      "identical": true
+    },
+    "button_keeper": {
+      "export_source_csg_sha256": "5c89ff40db2c156644b30bbcec22c587b3fa91fcd0630d07d793638097cc8318",
+      "final_source_csg_sha256": "5c89ff40db2c156644b30bbcec22c587b3fa91fcd0630d07d793638097cc8318",
+      "identical": true
+    },
+    "power_slider": {
+      "export_source_csg_sha256": "7f018bd4a2cb2b26160e5936f4b77fccdd78596f11bfb122e9cd1689ad3c0834",
+      "final_source_csg_sha256": "7f018bd4a2cb2b26160e5936f4b77fccdd78596f11bfb122e9cd1689ad3c0834",
+      "identical": true
+    }
+  },
+  "lid_orientation_bounds_check": {
+    "file": "/tmp/p4x-r24-fast-walls/lid.stl",
+    "stl_sha256": "962a8c6022f4943b043d810729320b82595b4a42bc8a29a246b1044c31f8e139",
+    "wrapper_call": "translate([0,0,mid_top]) lid();",
+    "wrapper_sha256": "bfdbb5b0acfe47c65fe62db0715116a45feb2b3c79719bbd787d538928534001",
+    "assembly_bounds_mm": [
+      [
+        0.0,
+        0.0,
+        14.5
+      ],
+      [
+        80.4027328491211,
+        56.0,
+        29.0
+      ]
+    ],
+    "derived_print_bounds_mm": [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        80.4027328491211,
+        56.0,
+        14.5
+      ]
+    ],
+    "post_export_translation_mm": [
+      -0.0,
+      -0.0,
+      -0.0
+    ],
+    "limitation": "Bounds only; Manifold mesh is not release geometry or topology evidence."
+  }
+}

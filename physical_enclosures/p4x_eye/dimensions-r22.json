@@ -1,0 +1,73 @@
+{
+  "revision": 22,
+  "units": "mm",
+  "source": "enclosure.scad",
+  "scope": "Local USB end-tab and lower screw-sleeve reinforcement, with matched lid and midframe",
+  "historical_r21_metadata": "dimensions.json",
+  "nominal_shell_size": [
+    80,
+    56,
+    29
+  ],
+  "maximum_base_x": 80.52,
+  "floor_thickness": 2,
+  "usb_aperture_size": [
+    9.8,
+    4.2
+  ],
+  "usb_rear_end_tab_width": 1.1,
+  "usb_rail_y": [
+    11.2,
+    38.5
+  ],
+  "usb_lid_relief_y": [
+    11,
+    38.7
+  ],
+  "usb_rear_mating_gap": 0.2,
+  "case_screw_axes": [
+    [
+      3.6,
+      3.6
+    ],
+    [
+      76.4,
+      3.6
+    ],
+    [
+      3.6,
+      52.4
+    ],
+    [
+      77.26,
+      41
+    ]
+  ],
+  "lower_sleeve_outside_diameter": 6.52,
+  "lower_sleeve_top_z": 11.5,
+  "head_bore_diameter": 4.5,
+  "head_seat_z": 10.2,
+  "sleeve_wall_conservative_polygon_bound": 1.006073187228862,
+  "right_sleeve_battery_gap": 0.5,
+  "battery_xy": [
+    8.5,
+    6
+  ],
+  "battery_size": [
+    65,
+    36,
+    10
+  ],
+  "changed_parts": [
+    "base",
+    "lid",
+    "midframe"
+  ],
+  "reused_r21_parts": [
+    "button_strip",
+    "button_keeper",
+    "power_slider"
+  ],
+  "physical_fit_verified": false,
+  "supplier_approved": false
+}

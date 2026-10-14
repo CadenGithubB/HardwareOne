@@ -1,0 +1,59 @@
+{
+  "revision": 26,
+  "prepared": "2026-10-12",
+  "status": "PREPARED, NOT YET SENT",
+  "delivery_method": "Six STL files uploaded individually to their PCBWay orders, plus the two-page assembly PDF attached to the email reply.",
+  "replaces": "R25 files sent 2026-10-11 (p4x-eye-r25-pcbway-review.zip, p4x-eye-r25-pcbway-assembly.pdf)",
+  "source_sha256": "137e3eaabe9ac5556293db0ccc01434ffde566227c85d4e718f45397d0c06afc",
+  "files": [
+    {
+      "part": "base",
+      "file": "stl/p4x-eye-base-r26.stl",
+      "sha256": "626c1e5e5b3ade169ff90b79250b860a025bf70e34418d0432d46debe01c118a",
+      "pcbway_order": "C-1K3W1162240A",
+      "unchanged_from_r25": false
+    },
+    {
+      "part": "lid",
+      "file": "stl/p4x-eye-lid-r26.stl",
+      "sha256": "668bc6d8de0dbd4b223f9451b80d2757795a4461d598cfccf2db49d31be52489",
+      "pcbway_order": "C-1K6W1162240A",
+      "unchanged_from_r25": true
+    },
+    {
+      "part": "midframe",
+      "file": "stl/p4x-eye-midframe-r26.stl",
+      "sha256": "49ba7e9d890c123570dce6f688e66c470fe3eaec46d9e1bb7fd8c52424367f71",
+      "pcbway_order": "C-1K7W1162240A",
+      "unchanged_from_r25": true
+    },
+    {
+      "part": "button_strip",
+      "file": "stl/p4x-eye-button-strip-r26.stl",
+      "sha256": "5b2689178e8dd33b950eab275092d6bc690b3bf2ef4132bb5337ed46e43038f4",
+      "pcbway_order": "C-1K5W1162240A",
+      "unchanged_from_r25": true
+    },
+    {
+      "part": "button_keeper",
+      "file": "stl/p4x-eye-button-keeper-r26.stl",
+      "sha256": "41ab06a2f6e8f1b3a143dfac02e5ceaad4e4047692730799c73f5b360bb60c14",
+      "pcbway_order": "C-1K4W1162240A",
+      "unchanged_from_r25": true
+    },
+    {
+      "part": "power_slider",
+      "file": "stl/p4x-eye-power-slider-r26.stl",
+      "sha256": "e49e54c200d65f494abf1695c83a571fe4971645c9a1b492073f4d6bb91c4130",
+      "pcbway_order": "C-1K8W1162240A",
+      "unchanged_from_r25": true
+    }
+  ],
+  "drawing": {
+    "file": "output/pdf/p4x-eye-r26-pcbway-assembly.pdf",
+    "sha256": "e9110a46562349b8ecbee1e7032304e40c7c3be89c52ae31cdf782d02cc772f9",
+    "pages": 2,
+    "open_items": "None. Order numbers for midframe (C-1K7W1162240A) and keeper (C-1K4W1162240A) confirmed from PCBWay order emails on 2026-10-12."
+  },
+  "order_source": "PCBWay \"Your Orders Review Status\" email 2026-09-29 and \"successfully paid\" email 2026-10-01 list each order with its uploaded file. Confirmed 2026-10-12 against the PCBWay order page (order YH1819484, placed 2026-10-01): 3W base r24, 4W keeper r21, 5W strip r24, 6W lid r21, 7W midframe r21, 8W slider r24 on file; status \"In fabrication\"; engineering holds on all but the keeper."
+}

@@ -1,4 +1,4 @@
-/* ESP32-P4X-EYE camera-free enclosure — screwless button keeper, revision 21.
+/* ESP32-P4X-EYE camera-free enclosure — thin-wall reinforcement, revision 24.
  * Units: mm. Read README.md before manufacturing.
  * PCB XY is sourced; battery dimensions are supplied by the user.
  * Board Z clearances remain provisional.
@@ -13,6 +13,7 @@ show_midframe_hardware = true; // Same M2 x 8 hardware, installed from above the
 usb_apertures = true; // Requested ports; cable allowance and installed Z remain provisional.
 lcd_aperture = true; // Full-module flush seat; installed active-area XY remains provisional.
 button_keys = true; // Provisional printed return strip; verify travel and material in hand.
+assembly_clearance = 0.25; // Nominal gap between opposing free-fit faces, per side.
 
 case_w = 80;
 case_h = 56;
@@ -23,8 +24,7 @@ lower_body_h = 45.5; // Both halves follow the wheel shoulder and inset USB side
 upper_body_h = 45.5;
 floor_t = 2;
 lid_t = 2;
-face_edge_r = 2.0; // Soft outer face perimeter only; the assembly seam stays straight.
-face_edge_steps = 64; // Fine angular slices avoid invalid lofts at the concave USB return.
+face_edge_chamfer = 1.0; // Continuous 45-degree outer face bevel; no stacked micro-steps.
 battery_w = 65; // User dimensions 36 x 65 x 10, rotated in plane.
 battery_h = 36;
 battery_t = 10;
@@ -45,9 +45,12 @@ mid_z = battery_z+battery_t+0.5;
 mid_t = 1.5;
 mid_top = mid_z+mid_t;
 pcb_offset = [(case_w-69)/2, (case_h-43)/2];
+// The shell profile keeps its R21 corner; only the right fastener moves.
+right_corner_xy = [77.0,41.0];
+right_case_screw_shift = 0.26; // R22: retain 0.5 mm battery gap with the thicker sleeve.
 boss_xy = [[3.6,3.6],[case_w-3.6,3.6],
-           [3.6,case_h-3.6],[77.0,41.0]]; // Shift the right well forward 0.5 mm to align the rear edge.
-boss_d = [5.2,5.2,5.2,4.4];
+           [3.6,case_h-3.6],right_corner_xy+[right_case_screw_shift,0]];
+boss_d = [5.2,5.2,5.2,4.54]; // Preserve >1 mm at the enlarged right screw-tip pocket.
 case_insert_od = 3.0; // User's actual M2 heat-set insert outside diameter.
 case_insert_l = 3.2; // User's actual insert length.
 case_insert_bore_d = 2.7; // PROVISIONAL print pilot, not a universal M2 insert specification.
@@ -57,17 +60,17 @@ case_insert_leadin_depth = 0.25;
 case_insert_pad_d = 5.2;
 case_insert_pad_top = 18.2;
 case_insert_taper_top = 19.2; // Narrow before the PCB underside at Z19.7.
-case_tip_relief_d = 2.4;
+case_tip_relief_d = 2.51; // Includes polygon allowance for >=0.25 radial M2 clearance.
 case_tip_relief_top = 22.5; // Blind screw-tip space, leaving the front face unpierced.
-case_screw_clear_d = 2.3;
+case_screw_clear_d = 2.51; // >=0.25 radial clearance around a nominal M2 shaft at $fn=64.
 case_head_recess_d = 4.5;
 case_head_recess_depth = 10.2; // Deep underside well; head bears at Z10.2.
 case_screw_l = 8; // User's M2 x 8 under-head length; nominal tip Z18.2.
 case_screw_head_d = 4.0; // Reference nylon pan-head envelope; check the selected screw.
 case_screw_head_h = 1.3;
-case_well_pad_d = 6.5; // Lower support only; clipped to the existing case outline.
 case_well_pad_top = 11.5; // Leaves 1.3 mm above the head seat; meets the ledge below the frame.
-case_right_well_pad_d = 6.0; // Fully closed 0.75 mm sleeve around the 4.5 mm access bore.
+right_corner_d = 6.0; // R21 shell-profile diameter; independent of R22 sleeve reinforcement.
+case_sleeve_d = 6.52; // Unclipped lower sleeves: >1 mm wall, including polygon facets.
 
 // Gerber TOP XY. The +Z face of this concept is the display side, so flip X.
 function xy(p) = [pcb_offset[0]+69-p[0], pcb_offset[1]+p[1]];
@@ -75,16 +78,17 @@ function xy(p) = [pcb_offset[0]+69-p[0], pcb_offset[1]+p[1]];
 mount_xy = xy([53.4,2.2]);
 mount_pcb_hole_d = 2.0; // Nominal Gerber circle; check screw clearance physically.
 mount_post_d = 6;
-mid_screw_d = case_screw_clear_d; // Ø2.3 clearance for the user's M2 frame screws.
+mid_screw_d = case_screw_clear_d; // Same free clearance for the user's M2 frame screws.
 mid_screw_l = case_screw_l; // The same 8 mm under-head length as the case screws.
-mid_tip_relief_bottom = 6.0; // Blind Ø2.4 relief; screw tip Z6.5 leaves 0.5 mm spare.
+mid_tip_relief_bottom = 6.0; // Blind relief; screw tip Z6.5 leaves 0.5 mm spare.
 mid_right_xy = [44,48.5]; // Rear frame fixing, outside the PCB extension and battery.
 mid_third_xy = [5.0,8.7]; // Front-left frame fixing; the PCB fixing belongs to the frame.
 mid_third_post_d = 5.5;
 mid_fit_gap = 0.3;
+mid_usb_fit_gap = assembly_clearance; // Local frame extension preserves shelf overlap.
 mid_ledge_w = 1.4;
 mid_ledge_t = 1.5;
-mid_battery_relief = 0.2; // Narrow the shelf locally where the shifted pack reaches beneath it.
+mid_battery_relief = assembly_clearance; // Pack-to-ledge clearance at the upper pack edge.
 // Edge-open cable bay removes the unsupported strips beside the old passage.
 // J25 is at case (71.375,24.65), lead corner at (73.5,6), plug width 5 mm.
 // Cutter exits the front and right of the MIDFRAME ONLY; base stays closed.
@@ -103,20 +107,20 @@ usb_board_seat_size = [1.2,2.0];
 pcb_lift_stop_xy = [72.5,42.3];
 pcb_lift_stop_size = [3,1.2];
 pcb_lift_stop_root = [4,2.4];
-pcb_lift_gap = 0.2;
+pcb_lift_gap = assembly_clearance;
 pcb_lift_stop_z = pcb_z+pcb_t+pcb_lift_gap;
 pcb_lift_stop_shoulder_z = 23.5;
 // Midframe-owned alignment keys and lid-owned blind receivers, all below PCB.
 // Each row is [x,y,width,depth], in case coordinates. No outer-wall thinning.
 lid_key_rects = [[2.3,20,1.5,8],[40,2.3,8,1.5],[24,52.2,8,1.5]];
-lid_receiver_rects = [[1.5,18.8,3.5,10.4],[38.8,1.5,10.4,3.5],
-                      [22.8,51,10.4,3.5]];
+lid_receiver_rects = [[1.45,18.45,3.9,11.1],[38.45,1.45,11.1,3.9],
+                      [22.45,50.65,11.1,3.9]]; // R24: 1.1 mm inboard mouth lips.
 lid_key_h = 2.5;
-lid_key_clearance = 0.2; // Per side; sliding registration, not a friction latch.
-lid_key_tip_chamfer = 0.3;
+lid_key_clearance = assembly_clearance; // Per side; sliding registration, not a friction latch.
+lid_key_tip_chamfer = 0.2; // Retain a 1.1 mm tip land.
 lid_key_tip_h = 0.4;
 lid_key_top_gap = 0.3;
-lid_receiver_h = 3.3;
+lid_receiver_h = 3.9; // 1.1 mm roof over the blind key pocket.
 lid_key_mouth_flare = 0.2;
 lid_key_mouth_h = 0.4;
 mount_pilot_d = 1.2; // Provisional M1.6 self-tapping screw pilot; tune for material.
@@ -132,7 +136,9 @@ wheel_grip_blend = 2.0; // Left transition; the relieved rear flat now continues
 wheel_grip_span = [wheel_xy[0]-wheel_d/2,wheel_xy[0]+wheel_d/2];
 wheel_lower_wall = 1.5;
 wheel_upper_wall = 1.1;
-wheel_hardware_wall = 0.6; // User-selected thin band preserves PCB and encoder clearance.
+wheel_hardware_wall = 0.6; // Cavity datum retained; R24 adds thickness OUTSIDE this profile.
+wheel_hardware_outer_wall = 1.1; // New wall measured outward from the unchanged cavity.
+wheel_band_shoulder = 0.5; // Reinforcement overlaps adjacent thicker wall layers in Z.
 wheel_hardware_z = [wheel_z+wheel_dial_t,pcb_z+pcb_t+0.3]; // Z17.7..21.6.
 wheel_reinforce_y = 41.5; // Preserve the unrelated 1 mm USB wall in front of this region.
 // The upper housing follows the board shoulder; the wheel projects beyond it.
@@ -153,16 +159,16 @@ usb_wall_x = 75.8; // Socket shell projects 0.2 mm past the housing face.
 usb_wall_t = 1.0; // Leaves 0.3 mm to the nominal PCB edge at X74.5.
 lower_usb_wall_t = 1.6; // Battery-side wall: X74.2..75.8 along the straight USB section.
 usb_inner_region = [70,7,80,40.8]; // Local thinner-wall region, joined to the general interior.
-usb_panel_y = [11,38];
-usb_rail_y = [11.2,37.8]; // 0.2 mm side fitting gaps to the upper cover.
-usb_split_gap = 0.2;
+usb_rail_y = [11.2,38.5]; // Retain the R22 1.1 mm rear tab.
+usb_panel_y = [usb_rail_y[0]-assembly_clearance,usb_rail_y[1]+assembly_clearance];
+usb_split_gap = assembly_clearance;
 usb_rail_top = usb_center_z-usb_split_gap/2;
 usb_lid_bottom = usb_center_z+usb_split_gap/2;
 usb_plug_body_w = 10.25; // User-measured plastic overmold width, not a universal USB-C envelope.
 usb_plug_body_h = 6.0; // User-measured height; assumed centered on the rear socket.
 usb_plug_front_x = usb_face_x; // Assumption: plastic starts at or outside socket face X76.
 usb_cable_relief_x = [75.8,81];
-usb_cable_relief_y = [36.8,38.6];
+usb_cable_relief_y = [36.8,38.54]; // Retain separation from the enlarged upper screw post.
 usb_cable_relief_z = [19.2,26.8];
 usb_cable_relief_xy_r = 0.2;
 usb_cable_relief_yz_r = 0.5;
@@ -176,7 +182,8 @@ lcd_module_h = 33.72;
 lcd_module_t = 1.9;
 lcd_active_size = 27.72;
 lcd_module_center = lcd_center-[0,1.55];
-lcd_fit_clearance = 0.2; // Per-side clearance; tune with a printer fit coupon.
+lcd_fit_clearance = assembly_clearance; // Per-side clearance; verify the finished part.
+lcd_pocket_r = 0.24; // Small facet margin preserves >=0.25 at square module corners.
 lcd_seat_depth = 1.9; // Measure the actual module; adjust for flush glass height.
 lcd_seat_z = case_depth-lcd_seat_depth;
 lcd_support_w = 1.0; // Nominal overlap under the rear frame at each edge.
@@ -200,12 +207,12 @@ lcd_flex_r = 0.6;
 button_xy = [for(y=[12.5,18.5,24.5]) xy([23,y])];
 button_switch_h = 2.5;
 button_switch_travel = 0.2;
-button_rest_gap = 0.3; // No nominal preload; tune against the actual assembled stack.
-button_arm_t = 0.8;
+button_rest_gap = 0.5; // 0.25 remains after the keeper-supported strip settles 0.25.
+button_arm_t = 1.0; // User chose the existing 2 mm width and firmer buttons.
 button_arm_top = joint_z-0.4;
 button_arm_z = button_arm_top-button_arm_t;
 button_arm_w = 2;
-button_root_r = 0.3;
+button_root_r = 0.5;
 button_key_d = 4.4;
 button_hole_d = 5.2; // 0.4 mm radial clearance permits a small cantilever tilt.
 button_protrusion = 1.0; // Raised keys aid pressing and provide nominal face-down clearance.
@@ -222,13 +229,13 @@ button_anchor_d = 5;
 // The ledges carry the strip loads. A removable, resin-compatible silicone
 // bead across the rear tab/ledge seam is REQUIRED to prevent reverse sliding.
 // This is adhesive anti-backout, not a snap fit or a positive mechanical lock.
-button_keeper_z = [24.65,25.65];
+button_keeper_z = [24.35,25.35];
 button_keeper_y_shift = 3.3;
 button_keeper_main = [60.7,17.5,4.6,20.5];
 button_keeper_tab_y = [[21,23],[34.4,36.4]];
-button_keeper_ledge_z = [23.65,24.65];
-button_keeper_side_gap = 0.2;
-button_keeper_float = button_arm_z-button_keeper_z[1]; // .15; remaining switch gap .15.
+button_keeper_ledge_z = [23.35,24.35];
+button_keeper_side_gap = assembly_clearance;
+button_keeper_float = button_arm_z-button_keeper_z[1]; // .25; settled switch gap .25.
 // SW7: HRO K3-1235S-F1, bottom/display face, placement (11.4268,4.7).
 // Datasheet: body 9 x 3.5 x 3.5, travel 2 along X, slider 1.5 square.
 // F1 drawing has 2 mm handle; BOM says 2.5. Installed top Z26.8..27.3
@@ -237,23 +244,26 @@ power_switch_xy = xy([11.4268,4.7]);
 power_switch_body = [9,3.5,3.5];
 power_switch_handle = [1.5,1.5,2];
 power_switch_travel = 2;
-power_nub_size = [6,3.8];
+power_nub_size = [6,4.0]; // 1 mm walls beside the 2 mm socket.
 power_nub_r = 1;
-power_slot_size = [9,4.4]; // 3 mm cap travel; 2 mm switch travel plus socket play.
+power_slot_size = [9,4.6]; // 3 mm cap travel; 2 mm switch travel plus socket play.
 power_slot_r = 1;
-power_flange_size = [14,7.6];
+power_flange_size = [16.4,7.6]; // Retain capture overlap around the enlarged switch opening.
 power_flange_r = 1;
-power_flange_z = [26.8,27.6];
-power_guide_size = [17,8.2];
+power_flange_z = [26.35,27.75]; // 1.4 mm flange follows the lowered support, keeping .25 clearance.
+power_guide_size = [19.4,8.2];
 power_guide_r = 1;
-power_guide_top = 27.8; // 1.2 mm roof above the enclosed flange pocket.
-power_retainer_size = [18,9];
-power_retainer_z = [25.4,26.6]; // Rigid shelf added to the button strip's anchor bar.
-power_retainer_slot = [7.8,5.6]; // Allow the keeper-mounted strip's XY/yaw fit play.
+power_guide_top = 28.0; // 1 mm roof; 0.25 mm above the flange.
+power_retainer_size = [20.4,9]; // Wider shelf and side guides clear the reinforced flange travel.
+power_retainer_z = [24.9,26.1]; // 1.2 mm shelf: upper/lower steps to the bar are .5/.7 mm.
+power_retainer_slot = [10.5,5.8]; // Lowered shelf clears the switch body, including strip XY/yaw.
 power_socket_outer = 4;
 power_socket_inner = 2; // 0.25 mm per side around nominal 1.5 mm square lever.
-power_socket_bottom = 25.4;
-power_socket_top = 27.9; // Leaves clearance above both published handle heights.
+power_socket_bottom = 25.55;
+power_socket_top = 28.05; // Allows the cap's full 0.50 mm downward movement.
+power_lower_gap = power_flange_z[0]-power_retainer_z[1];
+power_upper_gap = power_guide_top-power_flange_z[1];
+power_downward_float = power_lower_gap+button_keeper_float;
 power_slider_offset = power_switch_travel/2; // Show the same end as the reference lever.
 power_slider_top = case_depth+button_protrusion;
 pcb_outline = [[0,0],[57.6,0],[57.6,5.6],[69,5.6],[69,32.6],
@@ -264,8 +274,11 @@ pcb_outline = [[0,0],[57.6,0],[57.6,5.6],[69,5.6],[69,32.6],
  [16,36.3],[16,36.5],[15.5,37],[0,37]];
 
 $fn = 64;
-assert(face_edge_r > 0 && face_edge_r <= min(floor_t,lid_t) && face_edge_steps >= 32,
-       "Face edge rounding must leave a continuous floor and lid face.");
+assert(face_edge_chamfer >= 0.5 && face_edge_chamfer <= min(floor_t,lid_t),
+       "Face bevel must remain substantial and leave a continuous floor and lid face.");
+assert(button_arm_top-power_retainer_z[1] >= 0.5-0.001 &&
+       button_arm_z-power_retainer_z[0] >= 0.5-0.001,
+       "Supplier-reviewed button/support steps must be at least 0.5 mm.");
 assert(battery_w+8 < case_w && battery_h+8 < case_h,
        "Battery needs a larger case and a new clearance review.");
 assert(battery_t >= 3 && battery_t <= 12, "Review depth outside this draft range.");
@@ -274,7 +287,8 @@ assert(mid_right_xy[1]-mount_post_d/2-(battery_xy[1]+battery_h) >= 0.7 &&
        "Rear frame post needs battery clearance; the board pilot must leave a solid frame floor.");
 assert(battery_xy[0]-(mid_third_xy[0]+mid_third_post_d/2) >= 0.75-0.001,
        "Battery would crowd the front-left midframe attachment.");
-assert(mid_screw_d >= 2.3 && case_screw_head_d-mid_screw_d >= 1.5 &&
+assert(mid_screw_d/2*cos(180/$fn)-1 >= assembly_clearance &&
+       (case_screw_head_d-mid_screw_d)/2 >= 0.74 &&
        min(mid_third_post_d,mount_post_d)-case_insert_od >= 2.4 &&
        min(mid_third_post_d,mount_post_d) >= case_screw_head_d+1,
        "Midframe holes, screw-head lands, and insert-post walls need positive margins.");
@@ -309,18 +323,17 @@ assert(case_head_recess_depth < mid_top-3 &&
        "Review the nylon screw head recess and compression-column seat.");
 assert(case_well_pad_top >= case_head_recess_depth+1.3-0.001 &&
        case_well_pad_top <= mid_z-mid_ledge_t &&
-       case_well_pad_d >= case_head_recess_d+2,
+       case_sleeve_d >= case_head_recess_d+2,
        "Deep screw wells need a supported head seat and must stop below the frame.");
-assert(case_right_well_pad_d-case_head_recess_d >= 1.5 &&
-       boss_xy[3][0]+case_right_well_pad_d/2 <= case_w &&
-       boss_xy[3][0]-case_right_well_pad_d/2-(battery_xy[0]+battery_w) >= 0.5-0.001,
-       "The right well needs a fully closed sleeve and battery clearance.");
+assert(right_corner_xy[0]+right_corner_d/2 <= case_w &&
+       case_sleeve_d/2*cos(180/$fn)-case_head_recess_d/2/cos(180/$fn) >= 1,
+       "The original shell profile stays fixed; lower sleeves need at least 1 mm of material.");
 for(i=[0:len(boss_xy)-1])
     assert(norm([max(battery_xy[0]-boss_xy[i][0],0,
                      boss_xy[i][0]-battery_xy[0]-battery_w),
                  max(battery_xy[1]-boss_xy[i][1],0,
                      boss_xy[i][1]-battery_xy[1]-battery_h)])
-           -(i==3 ? case_right_well_pad_d : case_well_pad_d)/2 >= 0.5-0.001,
+           -case_sleeve_d/2 >= 0.5-0.001,
            "A lower screw-well footprint would crowd the battery.");
 assert(case_head_recess_depth+case_screw_l >= mid_top+case_insert_l &&
        case_head_recess_depth+case_screw_l < case_tip_relief_top-0.5,
@@ -329,7 +342,7 @@ assert(battery_xy[1]+battery_h+1 <= upper_body_h-wheel_grip_depth-wheel_lower_wa
        "Battery needs clearance inside the lower housing shoulder.");
 assert(usb_wall_x-lower_usb_wall_t-(battery_xy[0]+battery_w) >= 0.7-0.001,
        "The inset lower USB wall would crowd the battery.");
-assert(usb_wall_x-lower_usb_wall_t-(battery_xy[0]+battery_w+mid_battery_relief)-mid_fit_gap >= 0.2-0.001,
+assert(usb_wall_x-lower_usb_wall_t-(battery_xy[0]+battery_w+mid_battery_relief)-mid_usb_fit_gap >= 0.2-0.001,
        "The narrowed USB-side shelf must still overlap the removable frame.");
 assert(upper_body_h-upper_wall >= pcb_offset[1]+37+0.25,
        "Upper wall would crowd the PCB edge beside the wheel.");
@@ -342,14 +355,17 @@ assert(upper_body_h-wheel_grip_depth-wheel_hardware_wall >= pcb_offset[1]+37+0.3
        upper_body_h-wheel_grip_depth-wheel_hardware_wall >= wheel_xy[1]+4.2+0.3 &&
        wheel_hardware_z[0] <= wheel_z+wheel_dial_t &&
        wheel_hardware_z[1] >= pcb_z+pcb_t+0.3-0.001,
-       "The thin hardware band must clear the PCB edge and provisional encoder hub.");
+       "The preserved hardware cavity must clear the PCB edge and provisional encoder hub.");
 assert(wheel_slot_w >= 2*sqrt(pow(wheel_d/2,2)-
                             pow(upper_body_h-wheel_grip_depth-wheel_upper_wall-wheel_xy[1],2))+0.8,
        "The wider wheel aperture must clear the reinforced-wall dial chord.");
-assert(abs(boss_xy[3][1]+3.5-(upper_body_h-wheel_grip_depth)) < 0.001 &&
+assert(abs(right_corner_xy[1]+3.5-(upper_body_h-wheel_grip_depth)) < 0.001 &&
        right_blend_center()[1] >= usb_case_y[1]+usb_slot_w/2+0.4 &&
-       right_blend_center()[1] > usb_rail_y[1],
-       "The aligned corner must preserve the USB opening and the base rail end.");
+       usb_rail_y[1]-(usb_case_y[1]+usb_slot_w/2) >= 1 &&
+       usb_panel_y[1]-usb_rail_y[1] >= assembly_clearance-0.001 &&
+       usb_rail_y[0]-usb_panel_y[0] >= assembly_clearance-0.001 &&
+       usb_split_gap >= assembly_clearance,
+       "The corner must preserve the USB opening, reinforced end tab and sliding lid clearance.");
 assert(upper_body_h-wheel_grip_depth-wheel_upper_wall >=
        pcb_lift_stop_xy[1]+pcb_lift_stop_size[1]/2+0.5-0.001,
        "The PCB travel-stop foot must clear the reinforced wall.");
@@ -357,6 +373,9 @@ assert(usb_wall_x-usb_wall_t-xy([0,0])[0] >= 0.299,
        "Flush USB wall needs at least 0.3 mm nominal PCB-edge clearance.");
 assert(usb_face_x-usb_wall_x >= 0 && usb_face_x-usb_wall_x <= 0.5,
        "Review socket projection beyond the USB face.");
+assert(norm(boss_xy[3]-[usb_wall_x+0.2,usb_panel_y[1]])-
+       case_insert_leadin_d/2 >= 1,
+       "The open USB lid relief must leave at least 1 mm beside the right insert entrance.");
 assert(usb_cable_relief_z[0] >= case_insert_taper_top &&
        usb_cable_relief_z[1] < joint_z &&
        usb_cable_relief_y[1] <= boss_xy[3][1]-boss_d[3]/2-0.19,
@@ -366,7 +385,8 @@ assert(usb_plug_front_x >= usb_cable_relief_x[0]+usb_cable_relief_xy_r-0.001 &&
        usb_center_z-usb_plug_body_h/2 >= usb_cable_relief_z[0]+usb_cable_relief_yz_r+0.2 &&
        usb_center_z+usb_plug_body_h/2 <= usb_cable_relief_z[1]-usb_cable_relief_yz_r-0.2,
        "Review the measured plug envelope, its assumed starting X, and scallop clearance.");
-assert(lcd_fit_clearance >= 0.1 && lcd_fit_clearance <= 0.5,
+assert(lcd_fit_clearance >= assembly_clearance && lcd_fit_clearance <= 0.5 &&
+       lcd_pocket_r <= lcd_fit_clearance,
        "Review LCD pocket clearance; do not press-fit the glass.");
 assert(lcd_support_w > 0 && lcd_support_w < 1.45,
        "LCD ledge must remain under the module perimeter, outside the active area.");
@@ -378,13 +398,13 @@ assert(button_arm_t > 0 && button_stem_z < button_arm_z,
        "Review the button strip thickness and the stem-to-switch stack.");
 assert(button_rest_gap > 0 && button_hole_d-button_key_d >= 0.79,
        "Buttons need positive rest clearance and room for cantilever tilt.");
-assert(button_keeper_float >= 0.149 && button_keeper_float <= 0.151 &&
-       button_rest_gap-button_keeper_float >= 0.149 &&
+assert(abs(button_keeper_float-assembly_clearance) < 0.001 &&
+       button_rest_gap-button_keeper_float >= assembly_clearance-0.001 &&
        abs(button_keeper_z[0]-button_keeper_ledge_z[1]) < 0.001,
        "Keeper must seat on its ledges and leave a positive settled switch gap.");
-assert(power_socket_bottom-0.2-button_keeper_float-
-       (pcb_z+pcb_t+power_switch_body[2]) >= 0.249 &&
-       power_socket_top-0.2-button_keeper_float-27.3 >= 0.249,
+assert(power_socket_bottom-power_downward_float-
+       (pcb_z+pcb_t+power_switch_body[2]) >= assembly_clearance-0.001 &&
+       power_socket_top-power_downward_float-27.3 >= assembly_clearance-0.001,
        "Allow strip settling in the power cap's worst downward clearance.");
 assert(button_anchor_y-power_switch_xy[1]-power_guide_size[1]/2 >= 1.2-0.001,
        "Power flange guide must clear the existing button anchor.");
@@ -393,16 +413,16 @@ assert(power_slot_size[0]-power_nub_size[0] >=
        power_slot_size[1]-power_nub_size[1] >= 0.59,
        "Power slider needs switch travel, socket play and resin running clearance.");
 assert((power_flange_size[0]-power_slot_size[0]-(power_slot_size[0]-power_nub_size[0]))/2 >= 1 &&
-       power_flange_size[1]-power_slot_size[1] >= 3.2-0.001,
+       power_flange_size[1]-power_slot_size[1] >= 3.0-0.001,
        "Flange must overlap the lid slot at both travel limits.");
-assert(power_flange_z[0]-power_retainer_z[1] >= 0.19 &&
-       power_guide_top-power_flange_z[1] >= 0.19 &&
-       power_socket_bottom-0.2-(pcb_z+pcb_t+power_switch_body[2]) >= 0.39 &&
-       power_socket_top-0.2-27.3 >= 0.39,
+assert(power_lower_gap >= assembly_clearance-0.001 &&
+       power_upper_gap >= assembly_clearance-0.001 &&
+       power_socket_bottom-power_lower_gap-(pcb_z+pcb_t+power_switch_body[2]) >= 0.49 &&
+       power_socket_top-power_lower_gap-27.3 >= 0.49,
        "Captive slider must float without loading the switch axially.");
 assert(front_board_seat_x+3 <= battery_cable_bay_xy[0]-1.5+0.001,
        "Relocated front PCB support must remain on a substantial plate edge.");
-assert(pcb_lift_gap >= 0.2 && pcb_lift_stop_z < pcb_lift_stop_shoulder_z &&
+assert(pcb_lift_gap >= assembly_clearance && pcb_lift_stop_z < pcb_lift_stop_shoulder_z &&
        pcb_lift_stop_shoulder_z < joint_z &&
        pcb_lift_stop_xy[0]+pcb_lift_stop_size[0]/2 <= 74 &&
        pcb_lift_stop_xy[1]+pcb_lift_stop_size[1]/2 <= 42.9+0.001,
@@ -418,17 +438,34 @@ assert(button_protrusion >= 0 && button_protrusion <= 1.5 &&
 assert(button_xy[0][0]-button_key_d/2 >
        lcd_pocket_xy[0]+lcd_pocket_w+lcd_collar_border,
        "Button tip would crowd the LCD support collar.");
-echo("PROVISIONAL outside dimensions", [case_w,case_h,case_depth]);
+echo("Nominal shell dimensions (R22 lower sleeve extends locally in X)", [case_w,case_h,case_depth]);
+echo("R22 lower sleeve maximum X", boss_xy[3][0]+case_sleeve_d/2);
 echo("LCD pocket and seat", [lcd_pocket_w,lcd_pocket_h,lcd_seat_z]);
 echo("Nominal key actuation travel", button_rest_gap+button_switch_travel);
 echo("Raised key top and projection", [button_arm_top+button_key_h,button_protrusion]);
 echo("Wheel exterior relief and centerline projection",
      [wheel_grip_depth,wheel_xy[1]+wheel_d/2-upper_body_h+wheel_grip_depth]);
-echo("Wheel wall layers and thin hardware band",
-     [wheel_lower_wall,wheel_upper_wall,wheel_hardware_wall,wheel_hardware_z]);
+echo("Wheel structural walls and hardware band Z",
+     [wheel_lower_wall,wheel_upper_wall,wheel_hardware_outer_wall,wheel_hardware_z]);
 echo("Measured rear USB plug assumption and relieved rear gap",
      [usb_plug_body_w,usb_plug_body_h,usb_plug_front_x,
       usb_cable_relief_y[1]-usb_case_y[1]-usb_plug_body_w/2]);
+assert(case_tip_relief_d/2*cos(180/$fn)-1 >= assembly_clearance &&
+       boss_d[3]/2*cos(180/$fn)-case_tip_relief_d/2 >= 1,
+       "Free screw-tip passages need clearance without thinning the right upper post.");
+assert(lid_key_clearance >= assembly_clearance &&
+       min(mid_fit_gap,mid_usb_fit_gap,mid_battery_relief) >= assembly_clearance,
+       "Reviewed sliding interfaces need at least the nominal assembly clearance.");
+
+assert(button_arm_t >= 1 && power_flange_z[1]-power_flange_z[0] >= 1 &&
+       case_depth-power_guide_top >= 1 &&
+       (min(power_nub_size)-power_socket_inner)/2 >= 1 &&
+       (power_socket_outer-power_socket_inner)/2 >= 1,
+       "Control arms, flange, guide roof and socket walls need at least 1 mm.");
+assert(lid_receiver_h-lid_key_h-lid_key_top_gap >= 1 &&
+       min([for(k=lid_key_rects) min(k[2],k[3])-2*lid_key_tip_chamfer]) >= 1 &&
+       wheel_hardware_outer_wall >= 1.1,
+       "Receiver roofs, key tip lands and the outward wheel band need reinforcement.");
 
 module rounded2d(w,h,r) {
     translate([r,r]) offset(r=r) square([w-2*r,h-2*r]);
@@ -436,20 +473,17 @@ module rounded2d(w,h,r) {
 module roundedbox(w,h,d,r) {
     linear_extrude(d) rounded2d(w,h,r);
 }
-module rounded_face_edge(z0,r,top=true) {
-    // A quarter-circle profile, sampled into 64 native 2D-offset slices.
-    // The largest stair step is under 0.050 mm at R2. Native offset resolves
-    // the tight, concave USB outline; a global convex hull would fill it in.
-    // top: full outline at z0, inset r at z0+r. Bottom is the Z-mirror.
-    for(i=[0:face_edge_steps-1])
-        let(a0=90*i/face_edge_steps,
-            a1=90*(i+1)/face_edge_steps,
-            inset=r*(1-cos(a1)),
-            zlo=top ? z0+r*sin(a0) : z0+r*(1-sin(a1)),
-            h=r*(sin(a1)-sin(a0)))
-            translate([0,0,zlo]) linear_extrude(h)
-                offset(delta=-inset) children();
+module chamfered_face_edge(z0,size,top=true) {
+    // A native distance roof creates a continuous 45-degree edge, including
+    // the concave USB return. Clip it to the face band, with no stacked slices
+    // or intersecting per-edge cutters. Requires OpenSCAD --enable=roof.
+    translate([0,0,z0+(top ? size : 0)]) scale([1,1,top ? -1 : 1])
+        intersection() {
+            translate([0,0,size]) mirror([0,0,1]) roof(method="voronoi") children();
+            translate([-10,-10,0]) cube([case_w+20,case_h+20,size+0.01]);
+        }
 }
+
 function arc_points(c,r,a0,a1,n=12) =
     [for(i=[0:n]) let(a=a0+(a1-a0)*i/n)
         [c[0]+r*cos(a),c[1]+r*sin(a)]];
@@ -477,11 +511,11 @@ function densify_open_rear_points(p) =
         let(a=p[i],b=p[i+1],n=max(1,ceil(norm(b-a)/0.25)))
             for(j=[0:n-1]) a+(b-a)*j/n], [p[len(p)-1]]);
 function right_blend_center() =
-    let(r=0.3,R=case_right_well_pad_d/2,x=usb_wall_x+r)
-        [x,boss_xy[3][1]-sqrt(pow(R+r,2)-pow(boss_xy[3][0]-x,2))];
+    let(r=0.3,R=right_corner_d/2,x=usb_wall_x+r)
+        [x,right_corner_xy[1]-sqrt(pow(R+r,2)-pow(right_corner_xy[0]-x,2))];
 function right_blend_angle() =
-    atan2(right_blend_center()[1]-boss_xy[3][1],
-          right_blend_center()[0]-boss_xy[3][0]);
+    atan2(right_blend_center()[1]-right_corner_xy[1],
+          right_blend_center()[0]-right_corner_xy[0]);
 module body_outline(h) {
     // Retain the helper signature for existing floor/fillet calls. Both halves
     // now deliberately use the same complete outline, including the USB side.
@@ -509,8 +543,8 @@ function upper_body_points() = concat(
     [for(i=[1:24]) usb_entry_outer(i/24)],
     [[usb_wall_x,right_blend_center()[1]]],
     arc_points(right_blend_center(),0.3,180,right_blend_angle()+180,16),
-    arc_points(boss_xy[3],case_right_well_pad_d/2,right_blend_angle(),0,48),
-    arc_points([case_w-3.5,boss_xy[3][1]],3.5,0,90,36),
+    arc_points(right_corner_xy,right_corner_d/2,right_blend_angle(),0,48),
+    arc_points([case_w-3.5,right_corner_xy[1]],3.5,0,90,36),
     // Subdivide the prior rear polygon linearly before the left smoothstep.
     // The full 1 mm relief continues to the R3.5 corner without another bump.
     [for(p=densify_open_rear_points(concat(
@@ -570,9 +604,21 @@ module upper_interior(hardware_band=false) {
         }
     }
 }
+module wheel_band_outer() {
+    // Reinforce from the actual cavity outward. Restrict to the rear shoulder;
+    // USB walls and the case seam keep their existing exterior and clearances.
+    union() {
+        upper_outline();
+        intersection() {
+            offset(delta=wheel_hardware_outer_wall) upper_interior(true);
+            translate([-2,usb_inner_region[3]]) square([case_w+4,case_h+2]);
+        }
+    }
+}
 module upper_shell_walls(z0,z1) {
-    // Local Z uses the lid joint. The thin central band clears both the
-    // encoder hub and the PCB; stronger material remains above and below.
+    // Local Z uses the lid joint. The cavity is unchanged through the hardware
+    // band. An exterior band overlaps the adjacent wall layers by 0.5 mm,
+    // preserving a substantial joint without taking space from the PCB/hub.
     cuts=[z0,max(z0,min(z1,wheel_hardware_z[0]-mid_top)),
           max(z0,min(z1,wheel_hardware_z[1]-mid_top)),z1];
     for(i=[0:2]) if(cuts[i+1]>cuts[i])
@@ -581,7 +627,15 @@ module upper_shell_walls(z0,z1) {
                 upper_outline();
                 upper_interior(i==1);
             }
+    band_z=[max(z0,wheel_hardware_z[0]-mid_top-wheel_band_shoulder),
+            min(z1,wheel_hardware_z[1]-mid_top+wheel_band_shoulder)];
+    translate([0,0,band_z[0]]) linear_extrude(band_z[1]-band_z[0])
+        difference() {
+            wheel_band_outer();
+            offset(delta=-0.05) upper_outline();
+        }
 }
+
 module shell_walls(h,z0,z1,t) {
     translate([0,0,z0]) linear_extrude(z1-z0)
         difference() {
@@ -590,20 +644,19 @@ module shell_walls(h,z0,z1,t) {
         }
 }
 module case_lower_well_outline() {
-    intersection() {
-        body_outline(lower_body_h);
-        union() for(i=[0:len(boss_xy)-1]) translate(boss_xy[i])
-            circle(d=i==3 ? case_right_well_pad_d : case_well_pad_d);
-    }
+    // R22: do not clip these sleeves against the rounded shell. Clipping
+    // left 0.75-0.79 mm outer walls even on the nominally wider corner pads.
+    for(p=boss_xy) translate(p) circle(d=case_sleeve_d);
 }
 module base_floor() {
-    // Preserve the closed screw-access rims locally. R2 around the complete
-    // lower perimeter would break through the tight corner/right head bores.
+    // Preserve the closed screw-access rims locally, outside the face bevel.
+    // R26: the sleeves must span the whole floor band. R25 extruded them only
+    // through the bevel height, leaving 0.49-0.76 mm rims between Z1 and Z2.
     union() {
-        rounded_face_edge(0,face_edge_r,false) body_outline(lower_body_h);
-        linear_extrude(face_edge_r) case_lower_well_outline();
-        if(floor_t>face_edge_r)
-            translate([0,0,face_edge_r]) linear_extrude(floor_t-face_edge_r)
+        chamfered_face_edge(0,face_edge_chamfer,false) body_outline(lower_body_h);
+        linear_extrude(floor_t) case_lower_well_outline();
+        if(floor_t>face_edge_chamfer)
+            translate([0,0,face_edge_chamfer]) linear_extrude(floor_t-face_edge_chamfer)
                 body_outline(lower_body_h);
     }
 }
@@ -623,7 +676,8 @@ module case_bottom_screw_cutouts() {
     // user's 8 mm shafts reach Z18.2 through the 3.2 mm inserts at Z14.5.
     for(p=boss_xy) {
         translate([p[0],p[1],-0.1])
-            cylinder(h=case_head_recess_depth+0.1,d=case_head_recess_d);
+            // Circumscribe the cutter: even the polygon flats clear the round head.
+            cylinder(h=case_head_recess_depth+0.1,d=case_head_recess_d/cos(180/$fn));
         translate([p[0],p[1],case_head_recess_depth-0.01])
             cylinder(h=mid_top-case_head_recess_depth+0.11,d=case_screw_clear_d);
     }
@@ -660,20 +714,24 @@ module case_upper_insert_cutouts() {
 module battery_locators() {
     // Low perimeter guides only; trim guides around posts, never the posts.
     difference() {
-        translate([battery_xy[0]-2,battery_xy[1]-2,floor_t-0.01])
-            difference() {
-                roundedbox(battery_w+4,battery_h+4,1.4,2);
-                translate([1,1,-0.1]) roundedbox(battery_w+2,battery_h+2,1.6,1);
-                // Lead exit; confirm against the selected pack.
-                translate([-1,4,-0.1]) cube([5,10,2]);
-            }
+        difference() {
+            translate([battery_xy[0]-2.1,battery_xy[1]-2.1,floor_t-0.01])
+                roundedbox(battery_w+4.2,battery_h+4.2,1.4,2.1);
+            // Absolute cutter coordinates avoid accumulating fractional nested
+            // translations along the long straight inner edge during export.
+            translate([battery_xy[0]-1,battery_xy[1]-1,floor_t-0.11])
+                roundedbox(battery_w+2,battery_h+2,1.6,1);
+            // Lead exit stays at its original assembly coordinates.
+            translate([battery_xy[0]-3,battery_xy[1]+2,floor_t-0.11])
+                cube([5,10,2]);
+        }
         translate([mid_right_xy[0],mid_right_xy[1],floor_t-0.1])
             cylinder(h=1.6,r=mount_post_d/2+0.4);
         translate([mid_third_xy[0],mid_third_xy[1],floor_t-0.1])
             cylinder(h=1.6,r=mid_third_post_d/2+0.4);
         for(i=[0:len(boss_xy)-1])
             translate([boss_xy[i][0],boss_xy[i][1],floor_t-0.1])
-                cylinder(h=1.6,r=(i==3 ? case_right_well_pad_d : case_well_pad_d)/2+0.4);
+                cylinder(h=1.6,r=case_sleeve_d/2+0.4);
     }
 }
 module midframe_standoffs() {
@@ -796,11 +854,23 @@ module lid_alignment_pockets() {
         }
     }
 }
+module midframe_outline() {
+    union() {
+        offset(delta=-mid_fit_gap) lower_interior();
+        // Retain 0.20 mm of ledge overlap after widening its battery relief.
+        intersection() {
+            usb_interior_region();
+            // Keep the original 0.30 gap around the curved return/brace root.
+            square([case_w,38.1]);
+            offset(delta=-mid_usb_fit_gap) lower_interior();
+        }
+    }
+}
 module midframe() {
     difference() {
         union() {
             translate([0,0,mid_z]) linear_extrude(mid_t)
-                offset(delta=-mid_fit_gap) lower_interior();
+                midframe_outline();
             translate([mount_xy[0],mount_xy[1],mid_top-0.01])
                 cylinder(h=pcb_z-mid_top+0.01,d=mount_post_d);
             board_edge_seats();
@@ -844,7 +914,7 @@ module usb_port_apertures() {
 }
 module usb_cable_relief() {
     // Local exterior scallop beside the rear USB port, at plug height only.
-    // The screw axis remains (77,41), with its full Ø4.4 upper column intact.
+    // The retained R22 screw axis is (77.26,41); R23 has a Ø4.54 upper column.
     // Intersect XY and YZ rounded cuts to protect the interior corner and soften
     // the upper/lower ends; the measured 10.25 x 6 overmold clears the full-depth band.
     intersection() {
@@ -905,7 +975,7 @@ module lcd_seat_cutouts() {
     // Only a 1 mm perimeter of the rear frame bears on the 1.2 mm thick ledge.
     translate([lcd_pocket_xy[0],lcd_pocket_xy[1],lcd_seat_z])
         roundedbox(lcd_pocket_w,lcd_pocket_h,
-                   case_depth-lcd_seat_z+0.1,0.3);
+                   case_depth-lcd_seat_z+0.1,lcd_pocket_r);
     translate([lcd_rear_xy[0],lcd_rear_xy[1],lcd_seat_z-lcd_support_t-0.1])
         roundedbox(lcd_rear_w,lcd_rear_h,
                    case_depth-lcd_seat_z+lcd_support_t+0.2,0.3);
@@ -935,23 +1005,26 @@ module button_keeper_rails() {
     // All dimensions are assembly coordinates; roots overlap the roof .1 mm.
     for(yr=[[20.8,23.2],[34.2,36.6]]) {
         translate([57.5,yr[0],button_keeper_ledge_z[0]])
-            cube([2.8,yr[1]-yr[0],1.0]);
-        translate([65.7,yr[0],button_keeper_ledge_z[0]])
-            cube([2.6,yr[1]-yr[0],1.0]);
+            cube([button_anchor_x-button_keeper_side_gap-57.5,yr[1]-yr[0],1.0]);
+        translate([button_anchor_x+button_anchor_w+button_keeper_side_gap,yr[0],button_keeper_ledge_z[0]])
+            cube([68.3-(button_anchor_x+button_anchor_w+button_keeper_side_gap),yr[1]-yr[0],1.0]);
         translate([57.5,yr[0],button_keeper_ledge_z[0]])
             cube([1.0,yr[1]-yr[0],joint_z+0.1-button_keeper_ledge_z[0]]);
         translate([67.4,yr[0],button_keeper_ledge_z[0]])
-            cube([0.9,yr[1]-yr[0],joint_z+0.1-button_keeper_ledge_z[0]]);
+            cube([1.0,yr[1]-yr[0],joint_z+0.1-button_keeper_ledge_z[0]]);
     }
     // Closed leading end of the right front channel: keeper stops at Y21.
-    translate([65.7,20.0,button_keeper_ledge_z[0]])
-        cube([2.6,1.0,joint_z+0.1-button_keeper_ledge_z[0]]);
+    translate([button_anchor_x+button_anchor_w+button_keeper_side_gap,20.0,button_keeper_ledge_z[0]])
+        cube([68.3-(button_anchor_x+button_anchor_w+button_keeper_side_gap),1.0,joint_z+0.1-button_keeper_ledge_z[0]]);
     // Strip registration at the fixed bar, away from all three moving arms.
-    for(x=[59.4,65.7]) translate([x,27,25.8])
-        cube([0.9,2.0,joint_z+0.1-25.8]);
-    // The rear bar and front shelf stops leave .2 mm nominal end clearance.
-    translate([61,38.2,26.0]) cube([4,1.0,joint_z+0.1-26.0]);
-    translate([60,5.5,26.0]) cube([5,1.0,joint_z+0.1-26.0]);
+    for(x=[button_anchor_x-button_keeper_side_gap-1.0,
+           button_anchor_x+button_anchor_w+button_keeper_side_gap]) translate([x,27,button_arm_z])
+        cube([1.0,2.0,joint_z+0.1-button_arm_z]);
+    // Running end gaps; the separate keeper's forward seating stop is intentional contact.
+    translate([61,button_anchor_y+button_anchor_h+button_keeper_side_gap,26.0])
+        cube([4,1.0,joint_z+0.1-26.0]);
+    translate([60,power_switch_xy[1]-power_retainer_size[1]/2-button_keeper_side_gap-1,26.0])
+        cube([5,1.0,joint_z+0.1-26.0]);
 }
 module button_keeper() {
     // Separate rigid part. Insert vertically at +3.3Y, then slide toward -Y.
@@ -962,15 +1035,18 @@ module button_keeper() {
                 translate([button_keeper_main[0],button_keeper_main[1]])
                     square([button_keeper_main[2],button_keeper_main[3]]);
                 for(yr=button_keeper_tab_y) {
-                    translate([58.7,yr[0]]) square([2.2,yr[1]-yr[0]]);
-                    translate([65.1,yr[0]]) square([2.1,yr[1]-yr[0]]);
+                    translate([58.5+button_keeper_side_gap,yr[0]])
+                        square([60.9-(58.5+button_keeper_side_gap),yr[1]-yr[0]]);
+                    translate([65.1,yr[0]])
+                        square([67.4-button_keeper_side_gap-65.1,yr[1]-yr[0]]);
                 }
             }
 }
 module button_power_shelf_guides() {
     // Locate the wide slider-retaining shelf directly, limiting strip yaw.
-    // These are rigid datums with .2 mm nominal side clearance, not snap tabs.
-    for(x=[power_switch_xy[0]-10.2,power_switch_xy[0]+9.2])
+    // Rigid guides with the specified nominal side clearance, not snap tabs.
+    for(x=[power_switch_xy[0]-power_retainer_size[0]/2-button_keeper_side_gap-1,
+           power_switch_xy[0]+power_retainer_size[0]/2+button_keeper_side_gap])
         translate([x,10,25.8]) cube([1,2,joint_z+0.1-25.8]);
 }
 module button_strip_outline() {
@@ -981,7 +1057,7 @@ module button_strip_outline() {
             translate([p[0],p[1]-button_arm_w/2])
                 square([button_anchor_x+0.5-p[0],button_arm_w]);
             translate(p) circle(d=button_key_d);
-            // Concave R0.3 root fillets on both sides of each independent arm.
+            // Concave R0.5 root fillets on both sides of each independent arm.
             for(s=[-1,1])
                 translate([button_anchor_x-button_root_r,
                            p[1]+s*(button_arm_w/2+button_root_r)])
@@ -996,7 +1072,7 @@ module button_strip_outline() {
 module button_strip() {
     // One removable component: anchor bar, three elastic tongues, keys and
     // centered actuator stems. No loose plungers and no intended static load.
-    // PETG is a candidate, not a qualified spring material. Print orientation,
+    // UTR-8100 resin is selected but not qualified for repeated flex. Print orientation,
     // return after repeated presses and creep need verification.
     // No hard travel stop is claimed: the switch drawing gives operating travel
     // but does not establish allowable forced overtravel.
@@ -1027,17 +1103,17 @@ module power_slider_retainer() {
                            power_retainer_z[1]-power_retainer_z[0],1);
             translate([button_anchor_x,power_switch_xy[1]+power_retainer_size[1]/2-1,
                        power_retainer_z[0]])
-                cube([button_anchor_w,button_anchor_y+0.6-
+                cube([button_anchor_w,button_anchor_y+0.75-
                       (power_switch_xy[1]+power_retainer_size[1]/2-1),
                       power_retainer_z[1]-power_retainer_z[0]]);
-            // R0.6 roots between the broad shelf and its 5 mm fixing bridge.
+            // R1 roots strengthen the broad shelf to its 5 mm fixing bridge.
             for(s=[-1,1]) {
                 bx = button_anchor_x+(s<0 ? 0 : button_anchor_w);
                 by = power_switch_xy[1]+power_retainer_size[1]/2;
                 translate([0,0,power_retainer_z[0]]) linear_extrude(power_retainer_z[1]-power_retainer_z[0])
                     difference() {
-                        translate([bx+(s<0 ? -0.6 : 0),by]) square([0.6,0.6]);
-                        translate([bx+s*0.6,by+0.6]) circle(r=0.6);
+                        translate([bx+(s<0 ? -1 : 0),by]) square([1,1]);
+                        translate([bx+s,by+1]) circle(r=1);
                     }
             }
         }
@@ -1079,18 +1155,23 @@ module power_slider(offset=power_slider_offset) {
         }
         translate([-power_socket_inner/2,-power_socket_inner/2,power_socket_bottom-0.1])
             cube([power_socket_inner,power_socket_inner,power_socket_top-power_socket_bottom+0.1]);
-        // Small lead-in for dropping the cover over the original slider.
-        hull() {
-            translate([-power_socket_inner/2-0.2,-power_socket_inner/2-0.2,power_socket_bottom-0.01])
-                cube([power_socket_inner+0.4,power_socket_inner+0.4,0.01]);
-            translate([-power_socket_inner/2,-power_socket_inner/2,power_socket_bottom+0.19])
-                cube([power_socket_inner,power_socket_inner,0.01]);
-        }
+        // Straight socket entrance retains 1 mm walls through the open end.
+
+    }
+}
+module usb_rear_feather_trim() {
+    // Remove the acute shell sliver where the saddle cut meets the concave
+    // return. Preserve the complete insert post and its load-bearing annulus.
+    // Removing this outside feather only opens clearance to the base tab.
+    difference() {
+        translate([74,38.7,mid_top-0.01])
+            cube([1.8,0.9,joint_z-mid_top+0.02]);
+        case_upper_insert_posts();
     }
 }
 module pcb_anti_lift_stop() {
     // Flat R0.2 foot; broad R0.4 root joins the roof and wheel-side wall.
-    // The lower foot hovers .2 above component-free PCB at the far USB corner.
+    // The lower foot hovers .25 above component-free PCB at the far USB corner.
     // It is intentionally separate from the underside support near SW1.
     translate([pcb_lift_stop_xy[0]-pcb_lift_stop_size[0]/2,
                pcb_lift_stop_xy[1]-pcb_lift_stop_size[1]/2,pcb_lift_stop_z])
@@ -1115,10 +1196,10 @@ module lid() {
     difference() {
         union() {
             upper_shell_walls(0,joint_z-mid_top);
-            if(lid_t>face_edge_r)
+            if(lid_t>face_edge_chamfer)
                 translate([0,0,joint_z-mid_top])
-                    linear_extrude(lid_t-face_edge_r) upper_outline();
-            rounded_face_edge(case_depth-mid_top-face_edge_r,face_edge_r,true)
+                    linear_extrude(lid_t-face_edge_chamfer) upper_outline();
+            chamfered_face_edge(case_depth-mid_top-face_edge_chamfer,face_edge_chamfer,true)
                 upper_outline();
             translate([0,0,-mid_top]) case_upper_insert_posts();
             if(lcd_aperture) translate([0,0,-mid_top]) lcd_support_collar();
@@ -1132,10 +1213,11 @@ module lid() {
         translate([0,0,-mid_top]) lid_alignment_pockets();
         translate([0,0,-mid_top]) wheel_access_slot();
         // The rail is part of the base. Split the USB wall at socket
-        // center height, with a 0.2 mm seam, for straight vertical disassembly.
+        // center height, with the specified assembly gap, for vertical disassembly.
         translate([usb_wall_x-usb_wall_t-0.1,usb_panel_y[0],-0.1])
             cube([usb_wall_t+0.3,usb_panel_y[1]-usb_panel_y[0],
                   usb_lid_bottom-mid_top+0.1]);
+        translate([0,0,-mid_top]) usb_rear_feather_trim();
         if(usb_apertures) translate([0,0,-mid_top]) usb_port_apertures();
         if(usb_apertures) translate([0,0,-mid_top]) usb_cable_relief();
         if(lcd_aperture) translate([0,0,-mid_top]) lcd_seat_cutouts();
@@ -1168,7 +1250,7 @@ module usb_reference() {
         }
 }
 module lcd_reference() {
-    // Square module envelope; the 0.2 mm pocket allowance clears its corners.
+    // Square module envelope; the pocket allowance also clears its corners.
     // The two-color top surface represents the active area, not another layer.
     color([0.09,0.10,0.12])
         difference() {

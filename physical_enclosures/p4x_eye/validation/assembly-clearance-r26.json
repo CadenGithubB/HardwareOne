@@ -1,0 +1,179 @@
+{
+  "source": "physical_enclosures/p4x_eye/enclosure.scad",
+  "source_sha256": "137e3eaabe9ac5556293db0ccc01434ffde566227c85d4e718f45397d0c06afc",
+  "backend": "Manifold",
+  "openscad_command": [
+    "node",
+    "/tmp/p4x-openscad-node/openscad.js"
+  ],
+  "requested_clearance_mm": 0.25,
+  "tested_clearance_mm": 0.2499,
+  "penetration_volume_tolerance_mm3": 1e-06,
+  "limitations": [
+    "Only the named nominal interfaces/poses are checked; print tolerances and material behavior remain unqualified.",
+    "LCD and frame seats, key roots, screw-head seats and blind-hole roofs are excluded by slicing 0.001 mm from their datum faces.",
+    "M2 passage probes check printed bores; they exclude installed insert threads.",
+    "Lateral probes offset and sweep the actual production silhouette; key chamfers are conservatively filled. USB end faces are tested at both 0.2499 mm Y offsets.",
+    "Keeper side probes exclude its support ledge and preserve intentional contact with the leading Y stop. Strip probes exclude its upper roof datum.",
+    "Retainer checks cover two adverse sampled strip poses at settled Z and maximum nominal cap drop, not continuous play."
+  ],
+  "checks": {
+    "lcd_lateral_clearance": {
+      "seconds": 1.156,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "alignment_keys_lateral_clearance": {
+      "seconds": 1.125,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "alignment_keys_top_clearance": {
+      "seconds": 1.146,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "midframe_plate_lateral_clearance": {
+      "seconds": 1.021,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "usb_saddle_end_clearance": {
+      "seconds": 2.26,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "usb_saddle_vertical_split_clearance": {
+      "seconds": 1.605,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "pcb_upward_clearance_to_lid": {
+      "seconds": 1.129,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "case_m2_shaft_and_tip_free_passages": {
+      "seconds": 1.835,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "midframe_m2_shaft_and_tip_free_passages": {
+      "seconds": 1.036,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "case_m2_head_recess_radial_clearance": {
+      "seconds": 0.929,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "battery_lateral_clearance_to_base_and_ledge": {
+      "seconds": 0.884,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "keeper_side_running_clearance": {
+      "seconds": 1.496,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 4,
+      "collision_volume_mm3": 0.0,
+      "passed": true,
+      "collision_bounds_mm": [
+        [
+          65.75,
+          21.0,
+          24.35099983215332
+        ],
+        [
+          67.39990234375,
+          21.0,
+          25.349000930786133
+        ]
+      ]
+    },
+    "fixed_strip_and_shelf_lateral_clearance": {
+      "seconds": 1.603,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "keeper_vertical_float": {
+      "seconds": 0.381,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "retainer_socket_lateral_extreme_x": {
+      "seconds": 0.422,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "retainer_socket_lateral_extreme_y": {
+      "seconds": 0.401,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    }
+  },
+  "passed": true
+}

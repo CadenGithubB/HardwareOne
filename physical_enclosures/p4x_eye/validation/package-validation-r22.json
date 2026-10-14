@@ -1,0 +1,66 @@
+{
+  "revision": 22,
+  "checked_at_utc": "2026-10-08T15:29:00.990023+00:00",
+  "package": "p4x-eye-r22-base-reinforcement.zip",
+  "bytes": 1090767,
+  "sha256": "90929d22dfebf3412e69a910b16871fde6792bb19f66fc7816882f0c70737010",
+  "files": [
+    {
+      "name": "enclosure.scad",
+      "sha256": "371bfe2b5feea715d346fbd28eebdb2a922e2750e2a9bfcd657826b7e994f8ce"
+    },
+    {
+      "name": "R22_BASE_REINFORCEMENT.md",
+      "sha256": "df3a7ddc24b6c3dbb5c49168b8b47f905ba3ce6262d68bf1e8b28a8c390d5ab8"
+    },
+    {
+      "name": "dimensions-r22.json",
+      "sha256": "f54c62e91918cc76fd7f984420ad6bd8760f1d064a6bda18dbec9acea108828e"
+    },
+    {
+      "name": "stl/export-manifest-r22.json",
+      "sha256": "23eebce48dadce14e585689d3bfd5848ae6b32fef0f198773fe8304880a072e3"
+    },
+    {
+      "name": "stl/PRINTING.md",
+      "sha256": "fa9888bcf7e4a80fe7a76b995de76df94a9f59f21846cac49c116f4b2e28b10b"
+    },
+    {
+      "name": "validation/base-reinforcement-r22.json",
+      "sha256": "68a93135fe577e1c1357122f7242a410eb37a291e207da54bd44f9205c41258e"
+    },
+    {
+      "name": "images/r22-base-reinforcement.png",
+      "sha256": "9a93eb96cfd9e343797dc292b3455dbf17b1fa2661d955e9d74b46a3035d2893"
+    },
+    {
+      "name": "stl/p4x-eye-base-r22.stl",
+      "sha256": "94feb0eead149fc4f009fdd2593813bd0e18d627d334eaa30906f30295740487"
+    },
+    {
+      "name": "stl/p4x-eye-lid-r22.stl",
+      "sha256": "ee7b2fc69d1edd4a63f5ddc9143e1f767f46b3241beec0ba6e0b1d2486ef5538"
+    },
+    {
+      "name": "stl/p4x-eye-midframe-r22.stl",
+      "sha256": "1a9c0b867b82ad0a7c83f4cd34eacad3c20ec6d4c34a4f0ef4cc3fb8e24db6f0"
+    },
+    {
+      "name": "stl/p4x-eye-button-strip-r21.stl",
+      "sha256": "51fe0f665844da4eeb8b0f335081a10ce126a13ba7906e967241c3d2daf68e24"
+    },
+    {
+      "name": "stl/p4x-eye-button-keeper-r21.stl",
+      "sha256": "ae2e127c6d4dde1122d086e5a32bff3756e1fe360c5794f803d2111ae6f627eb"
+    },
+    {
+      "name": "stl/p4x-eye-power-slider-r21.stl",
+      "sha256": "0a015315a63f24862cbb357049290e7ec1ccfd520d325194817ae892d1d21d72"
+    }
+  ],
+  "CRC_and_member_bytes_verified": true,
+  "submission_status": "Prepared locally; not sent",
+  "supplier_approved": false,
+  "original_archive_sha256": "e43a6021e92825ec9501578574a90769aa1bebd52ad3be5f42fb778e9b8dcb8b",
+  "metadata_normalization": "2026-10-13: absolute build-machine paths made portable; source, STL and drawing bytes unchanged; original archive retained privately."
+}

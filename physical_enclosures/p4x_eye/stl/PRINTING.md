@@ -1,4 +1,15 @@
-# Revision 21 - prototype enclosure parts
+> **Current release: R26.** Use all six R26 STLs and the R26 manufacturing note.
+> Full varnish is requested on all surfaces; historical masking advice below
+> is superseded. See `output/pdf/p4x-eye-r26-pcbway-assembly.pdf` in the enclosure root.
+
+# Revision 21 - prototype enclosure parts (historical)
+
+For the current reinforced set, see
+[R26_SLEEVE_CONTINUITY.md](../R26_SLEEVE_CONTINUITY.md),
+`../dimensions-r26.json` and `export-manifest-r26.json`. The dimensions,
+reused-part advice and clearance figures below describe historical R21 parts.
+R26 retains the 0.25 mm nominal per-side free-fit target; physical finished
+fit, material durability and supplier process approval remain unverified.
 
 **Not ready for JLC3DP production or its requested insert installation.** The
 current thin walls, locating features and M2 insert layout require a separate

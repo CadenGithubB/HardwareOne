@@ -1,0 +1,230 @@
+{
+  "source": "physical_enclosures/p4x_eye/enclosure.scad",
+  "source_sha256": "eecf20445726f0c9f073dbfdaead6b1fb13cb4b2b49c2adc7d48288aeff6b332",
+  "backend": "Manifold",
+  "openscad_command": [
+    "node",
+    "/tmp/p4x-openscad-node/openscad.js"
+  ],
+  "penetration_volume_tolerance_mm3": 1e-06,
+  "entry_offsets_mm": [
+    -4.0,
+    -3.75,
+    -3.5,
+    -3.25,
+    -3.0,
+    -2.75,
+    -2.5,
+    -2.25,
+    -2.0,
+    -1.75,
+    -1.5,
+    -1.25,
+    -1.0,
+    -0.75,
+    -0.5,
+    -0.25,
+    0.0
+  ],
+  "keeper_slide_fractions": [
+    0.0,
+    0.030303030303030304,
+    0.06060606060606061,
+    0.09090909090909091,
+    0.12121212121212122,
+    0.15151515151515152,
+    0.18181818181818182,
+    0.21212121212121213,
+    0.24242424242424243,
+    0.2727272727272727,
+    0.30303030303030304,
+    0.3333333333333333,
+    0.36363636363636365,
+    0.3939393939393939,
+    0.42424242424242425,
+    0.45454545454545453,
+    0.48484848484848486,
+    0.5151515151515151,
+    0.5454545454545454,
+    0.5757575757575758,
+    0.6060606060606061,
+    0.6363636363636364,
+    0.6666666666666666,
+    0.696969696969697,
+    0.7272727272727273,
+    0.7575757575757576,
+    0.7878787878787878,
+    0.8181818181818182,
+    0.8484848484848485,
+    0.8787878787878788,
+    0.9090909090909091,
+    0.9393939393939394,
+    0.9696969696969697,
+    1.0
+  ],
+  "limitations": [
+    "Rigid-body insertion/motion is sampled; elastic key deflection and fatigue are not modeled.",
+    "Cap guide extremes are checked without forcing them against the switch handle; the socket/reference probe uses its actual 0.25 mm allowed play.",
+    "Controls are centered in their guide system; separate clearance probes cover adverse strip translation/yaw.",
+    "Intentional bearing contact is permitted; print errors, varnish, friction and real installed component heights remain unqualified."
+  ],
+  "checks": {
+    "strip_insertion_and_settlement_vs_lid": {
+      "seconds": 141.61,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 224,
+      "collision_volume_mm3": 2.4080737404119645e-13,
+      "passed": true,
+      "collision_bounds_mm": [
+        [
+          60.5,
+          16.5,
+          26.600000381469727
+        ],
+        [
+          65.5,
+          38.0,
+          26.600000381469727
+        ]
+      ]
+    },
+    "keeper_entry_vs_lid_and_upper_strip": {
+      "seconds": 77.348,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "keeper_slide_vs_lid_and_upper_strip": {
+      "seconds": 66.325,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 328,
+      "collision_volume_mm3": 1.4326502946933792e-13,
+      "passed": true,
+      "collision_bounds_mm": [
+        [
+          58.75,
+          21.0,
+          24.549999237060547
+        ],
+        [
+          67.1500015258789,
+          36.599998474121094,
+          25.549999237060547
+        ]
+      ]
+    },
+    "keeper_seated_vs_settled_strip": {
+      "seconds": 0.409,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 16,
+      "collision_volume_mm3": 7.579122514774402e-14,
+      "passed": true,
+      "collision_bounds_mm": [
+        [
+          60.5,
+          17.5,
+          25.549999237060547
+        ],
+        [
+          65.5,
+          36.400001525878906,
+          25.549999237060547
+        ]
+      ]
+    },
+    "cap_guide_extremes_vs_lid": {
+      "seconds": 52.831,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 42494,
+      "collision_volume_mm3": 9.596080393498019e-08,
+      "passed": true,
+      "collision_bounds_mm": [
+        [
+          54.57320022583008,
+          7.099999904632568,
+          27.0
+        ],
+        [
+          71.57319641113281,
+          14.49509048461914,
+          29.0
+        ]
+      ]
+    },
+    "cap_guide_extremes_vs_retaining_strip": {
+      "seconds": 1.038,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 3024,
+      "collision_volume_mm3": 1.328462802726212e-12,
+      "passed": true,
+      "collision_bounds_mm": [
+        [
+          54.641239166259766,
+          7.099999904632568,
+          26.350000381469727
+        ],
+        [
+          71.57319641113281,
+          15.29819107055664,
+          26.600000381469727
+        ]
+      ]
+    },
+    "cap_socket_extremes_vs_taller_switch": {
+      "seconds": 0.504,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 1046,
+      "collision_volume_mm3": 5.65279304846437e-13,
+      "passed": true,
+      "collision_bounds_mm": [
+        [
+          61.82320022583008,
+          9.449999809265137,
+          25.25
+        ],
+        [
+          66.32319641113281,
+          12.495454788208008,
+          27.299999237060547
+        ]
+      ]
+    },
+    "strip_settlement_vs_switch_references": {
+      "seconds": 0.402,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 4,
+      "collision_volume_mm3": 1.5158245029548803e-13,
+      "passed": true,
+      "collision_bounds_mm": [
+        [
+          67.12319946289062,
+          9.449999809265137,
+          25.299999237060547
+        ],
+        [
+          67.57319641113281,
+          12.949999809265137,
+          25.299999237060547
+        ]
+      ]
+    }
+  },
+  "passed": true
+}

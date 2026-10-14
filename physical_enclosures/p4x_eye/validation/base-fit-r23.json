@@ -1,0 +1,225 @@
+{
+  "source": "physical_enclosures/p4x_eye/enclosure.scad",
+  "source_sha256": "eecf20445726f0c9f073dbfdaead6b1fb13cb4b2b49c2adc7d48288aeff6b332",
+  "backend": "Manifold",
+  "openscad_command": [
+    "node",
+    "/tmp/p4x-openscad-node/openscad.js"
+  ],
+  "penetration_volume_tolerance_mm3": 1e-06,
+  "lid_insertion_sampled_offsets_mm": [
+    0.0,
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    1.25,
+    1.5,
+    1.75,
+    2.0,
+    2.25,
+    2.5,
+    2.75,
+    3.0,
+    3.25,
+    3.5,
+    3.75,
+    4.0,
+    4.25,
+    4.5,
+    4.75,
+    5.0,
+    5.25,
+    5.5,
+    5.75,
+    6.0,
+    6.25,
+    6.5,
+    6.75,
+    7.0,
+    7.25,
+    7.5,
+    7.75,
+    8.0,
+    8.25,
+    8.5,
+    8.75,
+    9.0
+  ],
+  "limitations": [
+    "Full lid insertion is sampled at 0.25 mm; the rear USB tab has an additional continuous conservative-envelope check.",
+    "Reference hardware and plug envelopes use source dimensions; real tolerances, solder, finish and resin strength are not qualified.",
+    "The approximately 0.5 mm nominal battery gap is not a guaranteed printed clearance."
+  ],
+  "checks": {
+    "base_battery": {
+      "seconds": 15.267,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "base_lid_seated": {
+      "seconds": 29.008,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 3116,
+      "collision_volume_mm3": 5.921189464667501e-16,
+      "passed": true,
+      "contact_only": true,
+      "collision_bounds_mm": [
+        [
+          0.0,
+          0.0,
+          14.5
+        ],
+        [
+          80.0,
+          56.0,
+          14.5
+        ]
+      ]
+    },
+    "base_midframe": {
+      "seconds": 15.849,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 920,
+      "collision_volume_mm3": 7.579122514774402e-14,
+      "passed": true,
+      "contact_only": true,
+      "collision_bounds_mm": [
+        [
+          2.299999952316284,
+          2.299999952316284,
+          13.0
+        ],
+        [
+          74.56065368652344,
+          53.70000076293945,
+          13.0
+        ]
+      ]
+    },
+    "lid_midframe_seated": {
+      "seconds": 17.891,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 12,
+      "collision_volume_mm3": 0.0,
+      "passed": true,
+      "contact_only": true,
+      "collision_bounds_mm": [
+        [
+          5.02891206741333,
+          18.75,
+          14.5
+        ],
+        [
+          30.153945922851562,
+          53.70000076293945,
+          14.5
+        ]
+      ]
+    },
+    "screws_through_assembled_parts": {
+      "seconds": 30.573,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 640,
+      "collision_volume_mm3": 1.4814538484841933e-15,
+      "passed": true,
+      "contact_only": true,
+      "collision_bounds_mm": [
+        [
+          2.3312134742736816,
+          1.653335690498352,
+          10.199999809265137
+        ],
+        [
+          78.5287857055664,
+          54.38579177856445,
+          10.199999809265137
+        ]
+      ]
+    },
+    "usb_plug_envelopes": {
+      "seconds": 18.634,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "usb_socket_references": {
+      "seconds": 19.535,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    },
+    "pcb_reference": {
+      "seconds": 11.421,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 264,
+      "collision_volume_mm3": 8.629671051825956e-14,
+      "passed": true,
+      "contact_only": true,
+      "collision_bounds_mm": [
+        [
+          18.100000381469727,
+          6.5,
+          19.700000762939453
+        ],
+        [
+          24.100000381469727,
+          11.699999809265137,
+          19.700000762939453
+        ]
+      ]
+    },
+    "lid_insertion_sampled": {
+      "seconds": 142.59,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 2542,
+      "collision_volume_mm3": 3.789561257387201e-14,
+      "passed": true,
+      "contact_only": true,
+      "collision_bounds_mm": [
+        [
+          0.04277569055557251,
+          0.0,
+          14.5
+        ],
+        [
+          80.0,
+          56.0,
+          14.5
+        ]
+      ]
+    },
+    "usb_end_tab_continuous_insertion_envelope": {
+      "seconds": 3.577,
+      "returncode": 0,
+      "witness_triangles": 12,
+      "witness_volume_mm3": 1.0,
+      "collision_triangles": 0,
+      "collision_volume_mm3": 0.0,
+      "passed": true
+    }
+  },
+  "passed": true
+}

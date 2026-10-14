@@ -1,0 +1,31 @@
+{
+  "final_source_sha256": "eecf20445726f0c9f073dbfdaead6b1fb13cb4b2b49c2adc7d48288aeff6b332",
+  "reason": "During initial exports, LCD corner radius and local midframe outline were refined. Final midframe was exported directly from the final source. The expanded CSG for every reused mesh is byte-identical to the final-source CSG; final lid uses the corrected radius.",
+  "parts": {
+    "base": {
+      "export_input_csg_sha256": "2106a353ce8cdfa6109a584659dfed033974385531f92b51e32df5f69679c0b8",
+      "final_source_csg_sha256": "2106a353ce8cdfa6109a584659dfed033974385531f92b51e32df5f69679c0b8",
+      "identical": true
+    },
+    "button_strip": {
+      "export_input_csg_sha256": "183b46a7b511add436a57c548cf87273402ffe98afe8c5b5b18c91f19b2e08bf",
+      "final_source_csg_sha256": "183b46a7b511add436a57c548cf87273402ffe98afe8c5b5b18c91f19b2e08bf",
+      "identical": true
+    },
+    "button_keeper": {
+      "export_input_csg_sha256": "7fd8e7ca7d10106cfe33216fc3a27ef1f253c82a7b9b83bd79048bdd5cd4f009",
+      "final_source_csg_sha256": "7fd8e7ca7d10106cfe33216fc3a27ef1f253c82a7b9b83bd79048bdd5cd4f009",
+      "identical": true
+    },
+    "power_slider": {
+      "export_input_csg_sha256": "77fc84003d8bc90c258096d1edce967de34cd42b719240b1e9170c51603d041f",
+      "final_source_csg_sha256": "77fc84003d8bc90c258096d1edce967de34cd42b719240b1e9170c51603d041f",
+      "identical": true
+    },
+    "lid": {
+      "export_input_csg_sha256": "cc1ce12089330959375abab71f5773f17322eb5d9039391b0d4ea1d0e6fdef75",
+      "final_source_csg_sha256": "cc1ce12089330959375abab71f5773f17322eb5d9039391b0d4ea1d0e6fdef75",
+      "identical": true
+    }
+  }
+}

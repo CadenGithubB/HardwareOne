@@ -1,0 +1,35 @@
+{
+  "revision": 23,
+  "checked_at_utc": "2026-10-09T21:16:44.832092+00:00",
+  "source_sha256": "eecf20445726f0c9f073dbfdaead6b1fb13cb4b2b49c2adc7d48288aeff6b332",
+  "archive": "p4x-eye-r23-assembly-clearance.zip",
+  "archive_sha256": "7bb61e6cee9fd9c83b87e6eaa36b12da53b3b7218775f32c590bd710a8332f58",
+  "archive_bytes": 1003149,
+  "member_count": 15,
+  "crc_and_member_byte_checks_passed": true,
+  "mesh_topology_passed": true,
+  "geometry_checks_passed": {
+    "assembly-clearance": 16,
+    "control-motion": 8,
+    "base-fit": 10
+  },
+  "members": {
+    "enclosure.scad": "eecf20445726f0c9f073dbfdaead6b1fb13cb4b2b49c2adc7d48288aeff6b332",
+    "R23_ASSEMBLY_CLEARANCE.md": "1f1cc76b0858b4093761518f7ee0759410f8c0dd463a22c6c5db6d64ad53523f",
+    "dimensions-r23.json": "40e2cec50cb6cef1db47645fed9f50c7e9640910c6cbe6b50d2d5a442e6b9f71",
+    "stl/export-manifest-r23.json": "283dfb9558a810e12e1b7baa9f864e305f2d393b36a8fa7e4792b038c076a9e7",
+    "stl/p4x-eye-base-r23.stl": "4c57692ba64ef926c57904f7d04c3007f4abaf10b6dd928d91b7c65e9580d662",
+    "stl/p4x-eye-lid-r23.stl": "93eb6f5027aada75d3d556e09e6b019b5fd75efd68d50ca174d37b7133292dd8",
+    "stl/p4x-eye-midframe-r23.stl": "8c74efea52d779c65ebbf399520bba7dcaa7c3fb9eb72b46446eb86f4d59dbf7",
+    "stl/p4x-eye-button-strip-r23.stl": "eb07a86ac62552968583384649946768f4b6186a608cf115606e7c1bae99fd60",
+    "stl/p4x-eye-button-keeper-r23.stl": "41ab06a2f6e8f1b3a143dfac02e5ceaad4e4047692730799c73f5b360bb60c14",
+    "stl/p4x-eye-power-slider-r23.stl": "8cd866d7722fe4bf65d9a322d792e48c337732a0eb9c838b40f5c0509d4d716f",
+    "validation/assembly-clearance-r23.json": "eaad072c9f9de235d804b8d74822c01fc87c9878f891c59bdbb4b135a8e2708f",
+    "validation/control-motion-r23.json": "421471403d1189ba4179ca4aacd4e53aa6114a5ff92565cf679395bff0249afb",
+    "validation/base-fit-r23.json": "cac8b823db6ddb64224ba7b9720b7b3fb70525e252a0f4b8e244d40f1c441698",
+    "validation/base-sections-r23.json": "0540b0280fbde574953661ad3269b8ffe4d99a2d7ebaacf1e52b2468ea9e7bb8",
+    "validation/export-source-correspondence-r23.json": "00bb4db774419634c136b0dfd66b12cb834c521e1d4bf48e3cabc76f0455ef4c"
+  },
+  "original_archive_sha256": "5321b34deaafccccf36ddd2b3e10aacb8c59e3ebccfe855cdcc2c65fba95f7a9",
+  "metadata_normalization": "2026-10-13: absolute build-machine paths made portable; source, STL and drawing bytes unchanged; original archive retained privately."
+}

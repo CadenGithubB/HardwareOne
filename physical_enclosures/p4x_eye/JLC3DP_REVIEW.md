@@ -1,4 +1,14 @@
+> **Current release: R24.** Use all six R24 STLs and the R24 thin-wall note.
+> Full varnish is requested on all surfaces; historical masking advice below
+> is superseded. See `output/pdf/p4x-eye-r24-pcbway-finish.pdf` in the enclosure root.
+
 # Revision 21 manufacturing review
+
+Historical review: [R24](R24_THIN_WALL_REINFORCEMENT.md) is the current matched
+six-part set. It reinforces the reviewed thin features and retains R23
+assembly clearances. Full varnish is requested. R24 manufacturing approval
+and insert installation remain unverified; the historical R21 findings below
+must not be treated as a fresh review of R24 geometry.
 
 Updated 2026-09-29 for the screwless keeper in `enclosure.scad` and
 `dimensions.json`. **The prototype still needs supplier material, finish and
