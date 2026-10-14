@@ -79,6 +79,12 @@ static bool g2EvenAiGuardMatches(uint64_t, const G2Temple&) { return true; }
 static bool g2CreateCleanupWireCurrent(uint32_t, const G2Temple&) { return true; }
 static bool g2CreateWireCurrent(uint32_t, const G2Temple&) { return true; }
 static bool g2LensTxFenceCurrent(const G2Temple&, uint32_t, uint32_t) { return true; }
+static uint32_t presentationEpoch = 1;
+static uint32_t g2PresentationEpochCurrent() { return presentationEpoch; }
+static uint32_t nativeTerminalEpoch = 73;
+static bool g2NativeTerminalGuardMatches(uint32_t epoch, const G2Temple& temple) {
+  return epoch && epoch == nativeTerminalEpoch && temple.side == 'R';
+}
 static bool g2LinkIsSlow(const G2Temple*) { return false; }
 static void statsBoundary(uint8_t sid, uint8_t flag, size_t len) { g2statsRecordTx(sid, flag, len); if (onStats) onStats(); }
 #define g2statsRecordTx statsBoundary
@@ -189,6 +195,8 @@ bool FakeWrite::writeValue(uint8_t* data, size_t length, bool) {
   return true;
 }
 static void reset(const char* version = "2.3.2.14") {
+  presentationEpoch = 1;
+  nativeTerminalEpoch = 73;
   gL = G2Temple{'L'}; gR = G2Temple{'R'};
   gL.writeChar = &leftWrite; gR.writeChar = &rightWrite;
   gL.writeMutex = gR.writeMutex = &fakeMutex;
@@ -316,6 +324,26 @@ int main() {
   uint8_t large[80] = {};
   assert(!sendEnvelopeNoMutex(gR, large, sizeof(large), 0, nullptr, 0, 0, 7));
   assert(physicalWrites == 1);
+
+  // A fragmented reader REBUILD must not paint over a replacement surface,
+  // including replacement between physical ATT writes of one envelope.
+  reset(); gR.mtu = 23;
+  afterPhysical = [] { ++presentationEpoch; };
+  assert(!sendEnvelopeNoMutex(gR, large, sizeof(large), 0, nullptr, 0, 0, 7, 0, 1));
+  assert(physicalWrites == 1);
+  reset(); onStats = [] { ++presentationEpoch; };
+  assert(!sendEnvelopeNoMutex(gR, large, sizeof(large), 0, nullptr, 0, 0, 7, 0, 1));
+  assert(physicalWrites == 0);
+
+  // Native Terminal revocation is checked by the actual sender adjacent to
+  // each physical ATT write, even when one envelope needs multiple writes.
+  reset(); gR.mtu = 23;
+  afterPhysical = [] { nativeTerminalEpoch = 0; };
+  assert(!sendEnvelopeNoMutex(gR, large, sizeof(large), 0, nullptr, 0, 0, 7, 0, 0, 73));
+  assert(physicalWrites == 1);
+  reset(); onStats = [] { nativeTerminalEpoch = 0; };
+  assert(!sendEnvelopeNoMutex(gR, large, sizeof(large), 0, nullptr, 0, 0, 7, 0, 0, 73));
+  assert(physicalWrites == 0);
 
   puts("G2 native settings command: correlation, default OFF, cache, generation/ATT fencing, policy isolation passed");
 }

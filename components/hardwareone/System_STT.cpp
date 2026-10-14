@@ -109,10 +109,11 @@ struct STTRun {
   uint32_t captureEndedMs = 0;
   uint32_t captureStartedMs = 0;  // audio sample 0 of this session (timeline log)
   uint8_t captureSource = 0;
-  // Native G2 (Conversate) capture: the exact left-temple connection that the
+  // Native G2 capture: the exact left-temple connection that the
   // native session's audio belongs to (0 = ordinary STT-owned capture), and
   // whether that session is paused by the wearer.
   uint32_t nativeG2Generation = 0;
+  bool singleUtterance = false;
   bool paused = false;
   // The consumer's wake (Conversate: g2ControlWake), called by the worker
   // right after a final or a draft is published, outside gSTTMux, when
@@ -710,6 +711,7 @@ struct StreamRun {
   bool failed = false;
   uint32_t clockMs = 0;
   uint32_t nativeGeneration = 0;  // see STTRun::nativeG2Generation
+  bool singleUtterance = false;
   void (*publishWake)() = nullptr;  // see STTRun::publishWake (worker only)
   // Glasses-mic faults survived instead of ending the session (capture task
   // counts under gSTTMux; the worker logs changes). Conversate owns the
@@ -1000,7 +1002,7 @@ static bool sttQueueSegment(StreamRun& run) {
   }
   const bool exhausted = gSTT.snapshot.segmentsCaptured == UINT32_MAX;
   portEXIT_CRITICAL(&gSTTMux);
-  if (!slot && !exhausted && run.nativeGeneration) {
+  if (!slot && !exhausted && run.nativeGeneration && !run.singleUtterance) {
     // Conversate: drop this phrase (it is never shown or saved) and keep the
     // session; the backlog drains and later phrases continue in order.
     portENTER_CRITICAL(&gSTTMux);
@@ -1233,11 +1235,11 @@ static void sttCaptureWorker(void* context) {
       sttStreamFail(run, "Audio became busy; close SR/mic and retry"); break;
     }
     if (run.nativeGeneration) {
-      // Conversate owns the glasses mic lifecycle (START/pause/close); claim
+      // The native UI owns the glasses mic lifecycle; claim
       // its native stream for this exact connection. The HAL selects the left
       // G2 source itself and restores the previous source on release.
       if (!audioCaptureStartG2Native("stt", run.nativeGeneration)) {
-        sttStreamFail(run, "Could not claim the Conversate microphone"); break;
+        sttStreamFail(run, "Could not claim the native glasses microphone"); break;
       }
     } else {
       if (run.requested != AUDIO_SRC_NONE && !audioSourceAvailable(run.requested)) {
@@ -1275,6 +1277,8 @@ static void sttCaptureWorker(void* context) {
     gSTT.captureSource = static_cast<uint8_t>(source);
     portEXIT_CRITICAL(&gSTTMux);
     uint32_t lastAudioMs = millis();
+    const uint32_t captureStartMs = lastAudioMs;
+    bool utteranceEnded = false;
     bool wasPaused = false;
     size_t pauseSilence = 0;  // zero samples still to feed after a pause edge
     while (!sttStreamCancelled(&run)) {
@@ -1284,6 +1288,9 @@ static void sttCaptureWorker(void* context) {
       paused = gSTT.paused;
       portEXIT_CRITICAL(&gSTTMux);
       if (finish) break;
+      if (run.singleUtterance && millis() - captureStartMs >= 30000) {
+        sttStreamFail(run, "Question timed out; please try again"); break;
+      }
 #if HW1_STT_LONG_PAUSE_FEED
       // A native pause stops PCM delivery. Feed 1.25 s of silence so the
       // phrase in progress can end on its normal pause rule, then wait without
@@ -1349,7 +1356,10 @@ static void sttCaptureWorker(void* context) {
           const auto fed = run.segmenter.push(block + offset, count - offset);
           offset += fed.consumed;
           if (fed.status == hw1::stt::SegmentStatus::Ready) {
+            utteranceEnded = run.singleUtterance &&
+                run.segmenter.segment()->end == hw1::stt::SegmentEnd::Pause;
             if (!sttQueueSegment(run)) break;
+            if (utteranceEnded) break;
           } else if (fed.status != hw1::stt::SegmentStatus::Ok || !fed.consumed) {
             sttStreamFail(run, "Invalid continuous audio segment"); break;
           }
@@ -1426,9 +1436,12 @@ static void sttCaptureWorker(void* context) {
         gSTT.snapshot.captureStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
         portEXIT_CRITICAL(&gSTTMux);
       } else vTaskDelay(pdMS_TO_TICKS(1));
+      if (utteranceEnded) break;
       sttStreamTick(run);
       if (millis() - lastAudioMs >= sttSourceTimeoutMs(source)) {
-        if (!run.nativeGeneration) { sttStreamFail(run, "Microphone PCM delivery timed out"); break; }
+        if (!run.nativeGeneration || run.singleUtterance) {
+          sttStreamFail(run, "Microphone PCM delivery timed out"); break;
+        }
         // Conversate decides when the session ends (CLOSE, or the temple's
         // disconnect, which "source lost" above catches); keep waiting.
         portENTER_CRITICAL(&gSTTMux);
@@ -1748,6 +1761,7 @@ static void sttContinuousWorker(void*) {
   run.token = gSTT.snapshot.token;
   run.requested = gSTT.requestedSource;
   run.nativeGeneration = gSTT.nativeG2Generation;
+  run.singleUtterance = gSTT.singleUtterance;
   run.publishWake = gSTT.publishWake;
   run.clockMs = millis();
   transcriptOptions = gSTT.transcriptOptions;
@@ -1791,6 +1805,11 @@ static void sttContinuousWorker(void*) {
     // A phrase that reaches the length limit is cut at the quietest point of
     // its last 2 s (usually between words), not mid-word at the exact limit.
     segmentConfig.hard_cut_search_samples = 2 * STT_SAMPLE_RATE;
+    if (run.singleUtterance) {
+      segmentConfig.min_segment_samples = segmentConfig.min_voice_samples;
+      segmentConfig.end_silence_samples = STT_SAMPLE_RATE * 3 / 2;
+      segmentConfig.short_close_silence_samples = 0;
+    }
     if (!run.segmenter.reset(run.working, kStreamSamples, segmentConfig)) {
       sttStreamFail(run, "Invalid continuous segmentation settings"); break;
     }
@@ -2415,7 +2434,10 @@ static void sttContinuousWorker(void*) {
   transcript.finish(cancelled ? "cancelled" : run.failed ? "failed" : "done");
   sttPublishTranscript(run.token, transcript.snapshot());
   portENTER_CRITICAL(&gSTTMux);
-  if (cancelled || gSTT.cancelRequested) sttClearTextLocked();
+  // A failed one-question run must not retain an actionable partial prefix.
+  // Ordinary continuous captions keep completed text available after failure.
+  if (cancelled || gSTT.cancelRequested || (run.singleUtterance && run.failed))
+    sttClearTextLocked();
   gSTT.snapshot.state = (cancelled || gSTT.cancelRequested) ? STTState::Cancelled
                            : run.failed ? STTState::Failed : STTState::Done;
   gSTT.snapshot.captureActive = false;
@@ -2435,7 +2457,8 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
                          const TranscriptOptions* suppliedOptions = nullptr,
                          uint32_t nativeG2Generation = 0,
                          AudioSource preferredSource = AUDIO_SRC_NONE,
-                         void (*publishWake)() = nullptr) {
+                         void (*publishWake)() = nullptr,
+                         bool singleUtterance = false) {
   sttReapTerminal();
   if (token) *token = 0;
   if (!token || !sttOwnerLive(owner)) return sttError(error, errorCap, "A live authenticated session is required");
@@ -2486,10 +2509,11 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
     gSTT.snapshot.transcript.enabled = transcriptOptions.enabled;
     gSTT.requestedSource = nativeG2Generation ? AUDIO_SRC_G2_LEFT : requestedSource;
     gSTT.nativeG2Generation = nativeG2Generation;
+    gSTT.singleUtterance = singleUtterance;
     gSTT.publishWake = publishWake;
     gSTT.snapshot.token = (static_cast<uint64_t>(gSTTNonce) << 32) | gSTTCounter;
     gSTT.snapshot.state = STTState::Preparing;
-    gSTT.snapshot.captureLimitMs = continuous ? 0 : captureMs;
+    gSTT.snapshot.captureLimitMs = singleUtterance ? 30000 : continuous ? 0 : captureMs;
     gSTT.snapshot.continuous = continuous;
     gSTT.snapshot.workerActive = true;
     gSTT.startedMs = millis();
@@ -2541,6 +2565,17 @@ bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToke
   // The glasses stream is the source; the caller's wake is kept for the run.
   return sttBeginMode(owner, 0, true, token, error, errorCap, transcriptOptions, leftGeneration,
                       AUDIO_SRC_NONE, publishWake);
+}
+
+bool sttBeginUtteranceG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
+                              char* error, size_t errorCap, void (*publishWake)()) {
+  if (!leftGeneration || owner.source != SOURCE_G2_GLASSES) {
+    if (token) *token = 0;
+    return sttError(error, errorCap, "A signed-in glasses microphone is required");
+  }
+  const TranscriptOptions noSave{};
+  return sttBeginMode(owner, 0, true, token, error, errorCap, &noSave, leftGeneration,
+                      AUDIO_SRC_NONE, publishWake, true);
 }
 
 bool sttSetPaused(STTOwner owner, STTToken token, bool paused) {

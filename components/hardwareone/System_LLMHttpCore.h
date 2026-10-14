@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include "System_LLMReplyLimits.h"
 
 namespace hw1http {
 constexpr size_t kUrlMax = 384;
@@ -14,7 +15,7 @@ constexpr size_t kTokenMax = 1024;
 constexpr size_t kCaMax = 4096;
 constexpr size_t kPromptMax = 2047;
 constexpr size_t kEventMax = 8192;
-constexpr size_t kResultCap = 2048;
+constexpr size_t kResultCap = kLlmReplyCapacityBytes;
 constexpr const char* kTruncated = "\n[Reply truncated on device]";
 constexpr const char* kInterrupted = "\n[Response interrupted; check status]";
 

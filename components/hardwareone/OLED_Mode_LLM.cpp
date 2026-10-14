@@ -659,7 +659,9 @@ static void rebuildRenderLines() {
   TurnLineSpan spans[LLM_CHAT_MAX_TURNS];
   int totalLines = 0;
 
-  char turnBuf[LLM_CHAT_TURN_MAX_BYTES + 1];
+  // The display task is the sole renderer. Retain this scratch in PSRAM:
+  // remote replies can be 16 KiB and must never live on the OLED task stack.
+  EXT_RAM_BSS_ATTR static char turnBuf[LLM_CHAT_TURN_MAX_BYTES];
   for (int i = 0; i < turnCount; i++) {
     spans[i].lineStart = totalLines;
     int copied = chatReadTurn(i, 0, turnBuf, sizeof(turnBuf));

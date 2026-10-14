@@ -64,7 +64,8 @@ def main():
         raise SystemExit('C++17 compiler required')
     harness = (HERE / 'llm_http_integration_harness.cpp').read_text()
     headers = '\n'.join(without_includes(COMPONENT / name) for name in (
-        'System_LLMTypes.h', 'System_LLMBackend.h', 'System_LLMChat.h'))
+        'System_LLMTypes.h', 'System_LLMBackend.h', 'System_LLMReplyLimits.h',
+        'System_LLMChat.h'))
     source = '\n'.join(without_includes(COMPONENT / name) for name in (
         'System_LLMBackend.cpp', 'System_LLMChat.cpp'))
     unit = harness.replace('// INSERT_PRODUCTION_HEADERS', headers).replace(

@@ -411,7 +411,7 @@ set(LLM_HTTP_TEST_ARGS)
 if(HW1_SANITIZE)
   list(APPEND LLM_HTTP_TEST_ARGS --sanitize)
 endif()
-foreach(_http_test llm_http llm_http_runtime llm_http_integration llm_http_settings llm_guided_source)
+foreach(_http_test llm_http llm_http_runtime llm_http_integration llm_http_settings llm_guided_source llm_turn_serving)
   add_test(NAME ${_http_test}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_${_http_test}.py
             ${LLM_HTTP_TEST_ARGS})
@@ -1347,6 +1347,47 @@ add_test(
   NAME g2_hold_dispatch
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_g2_hold_dispatch.py)
+# Full-width reply pagination, real wire framing, reader lifecycle and optional
+# microphone entry compile the production code against bounded host fakes.
+set(G2_LLM_READER_TEST_ARGS)
+if(HW1_SANITIZE)
+  list(APPEND G2_LLM_READER_TEST_ARGS --sanitize)
+endif()
+foreach(reader_suite g2_evenai_local g2_llm_reader g2_llm_reader_runtime g2_text_entry_start)
+  add_test(NAME ${reader_suite}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${reader_suite}.py
+            ${G2_LLM_READER_TEST_ARGS})
+endforeach()
+# Host-side Terminal projection includes the namespaced ask_user regression.
+find_program(HW1_NODE_EXECUTABLE NAMES node)
+if(HW1_NODE_EXECUTABLE)
+  add_test(NAME openclaw_terminal
+    COMMAND ${HW1_NODE_EXECUTABLE} --test
+            ${CMAKE_CURRENT_LIST_DIR}/../../../../integrations/openclaw/terminal/test_provider.mjs
+            ${CMAKE_CURRENT_LIST_DIR}/../../../../integrations/openclaw/terminal/tests/device-api.test.mjs)
+else()
+  message(STATUS "OpenClaw Terminal host tests need Node.js; set HW1_NODE_EXECUTABLE to enable them")
+endif()
+
+# This regression compiles SDK internals, so the intended SDK must be selected
+# explicitly instead of silently using an older installed IDF_PATH.
+set(HW1_ESP_HOSTED_TEST_IDF "" CACHE PATH "ESP-IDF 5.5.5 sources for the Hosted DMA regression")
+if(HW1_ESP_HOSTED_TEST_IDF)
+  add_test(NAME esp_hosted_mempool
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_esp_hosted_mempool.py
+            --idf ${HW1_ESP_HOSTED_TEST_IDF} --cc ${CMAKE_C_COMPILER}
+            ${G2_LLM_READER_TEST_ARGS})
+else()
+  message(STATUS "Hosted DMA regression needs HW1_ESP_HOSTED_TEST_IDF pointing to ESP-IDF 5.5.5 sources")
+endif()
+foreach(terminal_suite g2_terminal_protocol g2_native_terminal)
+  add_test(NAME ${terminal_suite}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${terminal_suite}.py
+            ${G2_LLM_READER_TEST_ARGS})
+endforeach()
 # The production QuickNote store (create/list/read/delete with tmp+rename and
 # the free-space reserve) against a fake guarded VFS whose owner decision is
 # the production transcript path policy. Same xcrun shim note.

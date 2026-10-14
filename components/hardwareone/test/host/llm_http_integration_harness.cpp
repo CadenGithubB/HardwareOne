@@ -163,6 +163,27 @@ void finish(MockTransport& source, const char* output = "Reply") {
   assert(!chatIsGenerating());
 }
 
+static void longReplyRetention(MockTransport& transport) {
+  assert(chatClear());
+  const int session = chatBeginTurn("Keep the whole long reply");
+  assert(session > 0);
+  const std::string notice = "\n[Reply truncated on device]";
+  const std::string reply = std::string(kLlmReplyCapacityBytes - 1 - notice.size(), 'r') + notice;
+  transport.output = reply.substr(0, 8192);
+  assert(chatGetStreamLen() == 8192);
+  finish(transport, reply.c_str());
+  ChatTurnInfo info{};
+  assert(chatGetTurnInfo(-1, &info) && info.textLen == reply.size());
+  assert(chatFinishedLen(session) == static_cast<int>(reply.size()));
+  std::string retained;
+  char chunk[512];
+  int n;
+  while ((n = chatReadTurn(-1, retained.size(), chunk, sizeof(chunk))) > 0)
+    retained.append(chunk, n);
+  assert(retained == reply);  // terminal notice survives the shared chat cap
+  assert(chatClear());
+}
+
 int main() {
   // A CLI/web New chat may be the first chat operation after boot. It must
   // initialize its owner without a prior generation or OLED entry point.
@@ -190,17 +211,27 @@ int main() {
   MockTransport& transport = cm5Transport;
 #endif
   assert(chatBeginTurn("Do: toggle the LED") == 0);
-  const int firstSession = chatBeginTurn("Hello, agent");
+  assert(chatGetRunToken() == 0);
+  ChatRunToken firstRun = 0;
+  const int firstSession = chatBeginTurn("Hello, agent", nullptr, &firstRun);
   assert(firstSession > 0 && transport.prompt == "Hello, agent");
+  assert(firstRun && chatGetRunToken() == firstRun);
   assert(chatIsGenerating());
   assert(!chatClear());
   assert(chatRetryLast() == 0);
   assert(chatBeginTurn("Duplicate") == 0);
+  assert(chatGetRunToken() == firstRun);
   assert(transport.starts == 1);
   transport.output = "Partial text";
   char text[128]{};
   assert(chatReadStream(0, text, sizeof(text)) == 12);
   assert(std::strcmp(text, "Partial text") == 0);
+  bool exactDone = true;
+  assert(chatReadRun(firstRun, 0, text, sizeof(text), &exactDone) == 12 && !exactDone);
+  assert(chatReadRun(firstRun + 99, 0, text, sizeof(text), &exactDone) == -1 && !text[0]);
+  const int stopsBeforeStale = transport.stops;
+  assert(!chatStopRun(firstRun + 99) && transport.stops == stopsBeforeStale);
+  assert(chatStopRun(firstRun) && transport.stops == stopsBeforeStale + 1);
   chatStop();
 #if ENABLE_LLM_SOURCE_HTTP
   // Stop requests cancellation; clear waits for the transport to release it.
@@ -208,7 +239,11 @@ int main() {
   assert(transport.resets == 0);
 #endif
   finish(transport, "Partial text");
+  assert(chatGetRunToken() == firstRun);
   assert(chatReadFinished(firstSession, 0, text, sizeof(text)) == 12);
+  assert(chatReadRun(firstRun, 0, text, sizeof(text), &exactDone) == 12 && exactDone);
+  assert(chatReadRun(firstRun, 12, text, sizeof(text), &exactDone) == 0 && exactDone);
+  assert(!chatStopRun(firstRun));
   assert(chatGetTurnCount() == 2);
 #if ENABLE_LLM_SOURCE_HTTP
   const int before = transport.starts;
@@ -225,19 +260,30 @@ int main() {
 #endif
   assert(chatClear());
   assert(chatGetTurnCount() == 0);
+  assert(chatGetRunToken() == 0);
   assert(chatFinishedLen(firstSession) == 0);
 #if ENABLE_LLM_SOURCE_HTTP
   assert(transport.resets == 1);
 #endif
   // Empty successful replies finish rather than leaving a perpetual spinner.
-  const int emptySession = chatBeginTurn("No text");
-  assert(emptySession > 0);
+  // Different backends can reuse a numeric session ID. The new run token
+  // must still reject the old popup's reads/cancellation after Clear.
+  transport.session = firstSession - 1;
+  ChatRunToken emptyRun = 0;
+  const int emptySession = chatBeginTurn("No text", nullptr, &emptyRun);
+  assert(emptySession == firstSession && emptyRun && emptyRun != firstRun);
+  assert(chatGetRunToken() == emptyRun);
+  assert(!chatStopRun(firstRun));
+  assert(chatReadRun(firstRun, 0, text, sizeof(text), &exactDone) == -1);
   finish(transport, "");
+  assert(chatGetRunToken() == emptyRun);
   assert(chatGetTurnCount() == 2);
   assert(chatReadFinished(emptySession, 0, text, sizeof(text)) == 0);
+  assert(chatReadRun(emptyRun, 0, text, sizeof(text), &exactDone) == 0 && exactDone);
   ChatTurnInfo info{};
   assert(chatGetTurnInfo(-1, &info) && !info.isStreaming && info.textLen == 0);
   assert(chatClear());
+  longReplyRetention(transport);
 #if ENABLE_LLM_SOURCE_HTTP && ENABLE_LLM_SOURCE_CM5
   assert(chatBeginTurn("One route") > 0);
   finish(httpTransport);

@@ -636,6 +636,8 @@ bool g2UpdateMixedTextChild(const char* containerName, uint32_t containerId,
 // current grid key, removing the need for a separate Select row. End frees the
 // render buffers.
 bool g2KbdPadBegin(const char* bufText);
+// Start the existing countdown/dictation flow on a ready, nonsecret pad.
+bool g2KbdPadStartMic();
 void g2KbdPadNoteBufferText(const char* bufText);
 void g2KbdPadHandleTap(uint32_t idx);
 void g2KbdPadEnd();
@@ -898,6 +900,8 @@ uint64_t g2EvenAiActiveExchangeId();
 // True while a native Even AI or Conversate session owns the glasses' voice
 // path. QuickNote refuses to start, and finishes a running note, meanwhile.
 bool g2NativeVoiceActive();
+// Native Terminal reserves the shared glasses surface through confirmation.
+bool g2NativeTerminalActive();
 // Drains up to `capSamples` samples into `out`. Returns number of
 // samples actually read (0 on timeout). Blocks up to `timeoutMs` if
 // the ring is empty.
@@ -1029,6 +1033,7 @@ enum G2HijackPage : uint8_t {
   G2_HIJACK_PAGE_LLM_MENU        = 22,
   G2_HIJACK_PAGE_TRANSCRIPTION   = 23, // Apps: private live text and saved sessions
   G2_HIJACK_PAGE_NOTES           = 24, // Apps: private spoken notes (QuickNote)
+  G2_HIJACK_PAGE_LLM_READER      = 25, // Full-width reply; hold asks a follow-up
 };
 G2HijackPage g2GetHijackPage();
 void         g2SetHijackPage(G2HijackPage p);
@@ -1540,6 +1545,7 @@ inline uint32_t g2EvenAiLastWakeMs() { return 0; }
 inline void g2EvenAiHostStateChanged() {}
 inline uint64_t g2EvenAiActiveExchangeId() { return 0; }
 inline bool g2NativeVoiceActive() { return false; }
+inline bool g2NativeTerminalActive() { return false; }
 inline size_t g2MicReadPcmSamples(int16_t*, size_t, uint32_t) { return 0; }
 inline size_t g2MicTrimAfeRingToNewest(size_t) { return 0; }
 inline size_t g2MicAfeRingDepth() { return 0; }
@@ -1571,6 +1577,7 @@ inline bool g2ShowMixedListText(const char* const*, size_t,
 inline bool g2ShowMixedListText2(const char* const*, size_t, const G2ContainerGeom&,
                                  const G2TextChildSpec&, const G2TextChildSpec&) { return false; }
 inline bool g2KbdPadBegin(const char*) { return false; }
+inline bool g2KbdPadStartMic() { return false; }
 inline void g2KbdPadNoteBufferText(const char*) {}
 inline void g2KbdPadHandleTap(uint32_t) {}
 inline void g2KbdPadEnd() {}

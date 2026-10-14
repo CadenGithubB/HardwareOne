@@ -15,6 +15,8 @@ class Stream {};
 
 #define ENABLE_LLM_BACKEND 1
 #define ENABLE_LLM_SOURCE_HTTP 1
+#define ENABLE_G2_GLASSES 1
+#define ENABLE_LOCAL_STT 1
 #define CONFIG_MBEDTLS_CERTIFICATE_BUNDLE 0
 #define EXT_RAM_BSS_ATTR
 #define pdTRUE 1
@@ -62,7 +64,8 @@ static void* ps_calloc(size_t n, size_t s, AllocPref, const char* tag) {
   }
   ++allocations;
   void* p = calloc(n, s);
-  if (p && (!strcmp(tag, "llm.http.config") || !strcmp(tag, "llm.http.run")))
+  if (p && (!strcmp(tag, "llm.http.config") || !strcmp(tag, "llm.http.run") ||
+            !strcmp(tag, "llm.terminal.run")))
     sensitiveAllocations[p] = n * s;
   return p;
 }
@@ -115,10 +118,13 @@ static std::string wire, request, auth;
 static size_t readOffset;
 static int opens = 0, cleanups = 0, shuts = 0, status = 200;
 static bool failWrite = false, failOpen = false, eventType = true;
+static bool terminalJson = false, completeResponse = true;
+static std::string requestUrl;
 static std::function<void()> readHook;
 static esp_http_client_handle_t esp_http_client_init(esp_http_client_config_t* cfg) {
   assert(httpLogLevel <= ESP_LOG_WARN);
   assert(cfg->disable_auto_redirect && cfg->max_authorization_retries == -1);
+  requestUrl = cfg->url;
   assert(cfg->timeout_ms <= 2000); return new Client{*cfg};
 }
 static int esp_http_client_set_header(Client*, const char* key, const char* value) {
@@ -138,7 +144,7 @@ static int esp_http_client_write(Client*, const char* p, int n) {
 }
 static int64_t esp_http_client_fetch_headers(Client* c) {
   esp_http_client_event_t event{HTTP_EVENT_ON_HEADER, "Content-Type",
-      eventType ? "text/event-stream; charset=utf-8" : "text/html", c->cfg.user_data};
+      terminalJson ? "application/json" : eventType ? "text/event-stream; charset=utf-8" : "text/html", c->cfg.user_data};
   c->cfg.event_handler(&event); return 0;
 }
 static int esp_http_client_get_status_code(Client*) { return status; }
@@ -152,6 +158,7 @@ static int esp_http_client_read(Client*, char* p, int n) {
 }
 static void esp_http_client_close(Client*) {}
 static void esp_http_client_cleanup(Client* c) { ++cleanups; delete c; }
+static bool esp_http_client_is_complete_data_received(Client*) { return completeResponse; }
 
 // INSERT_INTERFACE
 // INSERT_IMPLEMENTATION
@@ -166,6 +173,7 @@ static void resetServer() {
   wire = validWire; request.clear(); auth.clear(); readOffset = 0;
   opens = cleanups = shuts = 0; status = 200;
   failWrite = failOpen = false; eventType = true; readHook = {};
+  terminalJson = false; completeResponse = true; requestUrl.clear();
 }
 static void drainWorker() {
   assert(pendingTask); auto task = pendingTask; void* arg = pendingArg;
@@ -175,7 +183,11 @@ static void drainWorker() {
   assert(ignoreLogSuppression || httpLogLevel == ESP_LOG_WARN);
 }
 static std::string response() {
-  char out[2048]; httpLlmResultChunk(0, out, sizeof(out)); return out;
+  char chunk[512];
+  std::string out;
+  int n;
+  while ((n = httpLlmResultChunk(out.size(), chunk, sizeof(chunk))) > 0) out.append(chunk, n);
+  return out;
 }
 static std::string user() {
   JsonDocument doc; assert(!deserializeJson(doc, request));
@@ -201,6 +213,12 @@ int main() {
   resetServer(); assert(httpLlmStartAsync("follow up", {}) != first); drainWorker(); assert(user() == conversation);
   assert(httpLlmResetConversation());
   resetServer(); assert(httpLlmStartAsync("new chat", {})); drainWorker(); assert(user() != conversation);
+  resetServer(); wire.clear();
+  for (int i = 0; i < 3; ++i)
+    wire += "data: {\"choices\":[{\"delta\":{\"content\":\"" + std::string(4000, 'r') + "\"}}]}\n\n";
+  wire += "data: [DONE]\n\n";
+  assert(httpLlmStartAsync("long reply", {})); drainWorker();
+  assert(response() == std::string(12000, 'r') && httpLlmResultLen() == 12000);
   for (int code : {301, 401, 500}) {
     resetServer(); status = code; assert(httpLlmStartAsync("once", {})); drainWorker();
     assert(opens == 1 && response().find("HTTP " + std::to_string(code)) != std::string::npos);
@@ -262,6 +280,54 @@ int main() {
   assert(httpLlmStartAsync("allocation publication failure", {})); drainWorker();
   assert(shuts == 1 && response().find("configuration could not be applied") != std::string::npos);
   assert(!httpLlmIsReady() && !httpLlmStartAsync("old config remains barred", {}));
+  // Terminal runs the actual bounded JSON worker using the same immutable
+  // credentials, without exposing its JSON in the shared chat result.
+  assert(httpLlmConfigure(true, "https://relay/v1", "openclaw/default", "device-token", false, "test-ca"));
+  const std::string priorChat = response();
+  const char* operation = "{\"schema\":1,\"op\":\"list\"}";
+  HttpTerminalToken token = 0, refused = 0;
+  HttpTerminalResult terminalResult{};
+  char terminalOutput[HTTP_TERMINAL_JSON_CAP + 1];
+  resetServer(); terminalJson = true; wire = "{\"schema\":1,\"ok\":true}";
+  const uint32_t revision = httpTerminalConfigRevision();
+  assert(revision && httpTerminalStart(operation, strlen(operation), &token));
+  assert(!httpTerminalStart(operation, strlen(operation), &refused) && !refused);
+  assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult) && !terminalResult.done);
+  drainWorker();
+  assert(opens == 1 && cleanups == 1 && requestUrl == "https://relay/v1/terminal");
+  assert(request == operation && auth == "Bearer device-token");
+  assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult));
+  assert(terminalResult.done && !terminalResult.error[0] && terminalOutput == wire);
+  assert(terminalResult.configRevision == revision && response() == priorChat);
+  assert(!httpTerminalRead(token, terminalOutput, 2, &terminalResult));
+  const HttpTerminalToken previousToken = token;
+  resetServer(); terminalJson = true; wire = "{}";
+  assert(httpTerminalStart(operation, strlen(operation), &token));
+  assert(!httpTerminalRead(previousToken, terminalOutput, sizeof(terminalOutput), &terminalResult));
+  httpTerminalCancel(previousToken); // A stale close cannot cancel the new view.
+  drainWorker(); assert(!shuts);
+  for (int fault = 0; fault < 4; ++fault) {
+    resetServer(); terminalJson = true; wire = "{}";
+    if (fault == 0) wire.assign(HTTP_TERMINAL_JSON_CAP + 1, 'x');
+    if (fault == 1) completeResponse = false;
+    if (fault == 2) status = 302;
+    if (fault == 3) failWrite = true;
+    assert(httpTerminalStart(operation, strlen(operation), &token));
+    drainWorker();
+    assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult));
+    assert(terminalResult.done && terminalResult.error[0] && !terminalOutput[0] && opens == 1);
+  }
+  resetServer(); terminalJson = true; wire = "{}";
+  assert(httpTerminalStart(operation, strlen(operation), &token));
+  httpTerminalCancel(token); drainWorker(); assert(opens == 0);
+  resetServer(); terminalJson = true; wire = "{}";
+  readHook = [] { if (!readOffset) assert(httpLlmConfigure(true, "https://replacement/v1",
+      "openclaw/default", "replacement-token", false, "test-ca")); };
+  assert(httpTerminalStart(operation, strlen(operation), &token));
+  drainWorker();
+  assert(httpTerminalConfigRevision() != revision && shuts == 1);
+  assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult));
+  assert(terminalResult.error[0] && !terminalOutput[0] && response() == priorChat);
   assert(wipedAllocations > 0 && sensitiveAllocations.empty() && allocations == 0);
   std::cout << "HTTP worker lifecycle tests passed\n";
 }

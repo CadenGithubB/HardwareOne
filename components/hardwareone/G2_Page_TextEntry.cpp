@@ -397,6 +397,16 @@ bool g2BeginTextEntry(const TextEntryConfig& cfg) {
     return false;
   }
 
+  uint32_t lifecycleEpoch = 0;
+  uint32_t connectionGeneration = 0;
+  char side = 0;
+  if (!g2TextEntryCaptureAdmissionFence(
+          &lifecycleEpoch, &connectionGeneration, &side) ||
+      (cfg.expectedLifecycleEpoch &&
+       cfg.expectedLifecycleEpoch != lifecycleEpoch)) {
+    return false;
+  }
+
   // Replace an ordinary live session only if its exact callback claim is still
   // ours. A terminal-tombstoned session is intentionally not replaceable until
   // its FIFO cleanup has freed pad buffers on g2_tap_disp.
@@ -414,13 +424,6 @@ bool g2BeginTextEntry(const TextEntryConfig& cfg) {
     if (abandon) abandon();
   }
 
-  uint32_t lifecycleEpoch = 0;
-  uint32_t connectionGeneration = 0;
-  char side = 0;
-  if (!g2TextEntryCaptureAdmissionFence(
-          &lifecycleEpoch, &connectionGeneration, &side)) {
-    return false;
-  }
   // Seed state before publishing the exact identity. Routing consults the
   // coordinator, so active=true is not externally visible until publication.
   gTE.padMode  = false;
@@ -493,6 +496,13 @@ bool g2BeginTextEntry(const TextEntryConfig& cfg) {
     } else {
       DEBUG_G2F("[G2] text-entry(pad): '%s' (max=%u, initial='%s')",
                 gTE.prompt, (unsigned)gTE.maxLen, gTE.buf);
+    }
+    // The pad's synchronous CREATE/push and the exact-session check above
+    // must both succeed before handing off to its ordinary mic countdown.
+    // Reuse that path's auth, readiness and cancellation rules. A declined
+    // shortcut leaves the ready keyboard usable, just like manual mic entry.
+    if (cfg.startWithMic && !gTE.isSecret && !g2KbdPadStartMic()) {
+      DEBUG_G2F("[G2] text-entry(pad): microphone shortcut unavailable");
     }
     return true;
   }

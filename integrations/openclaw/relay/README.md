@@ -24,6 +24,15 @@ selection, and conversation namespaces. It does not make those prompts read-only
 or override sandbox/tool policies. The upstream token remains a full operator
 credential; see the [version-matched HTTP contract](https://github.com/openclaw/openclaw/blob/v2026.9.4/docs/gateway/openai-http-api.md).
 
+The relay adds a fixed system note identifying requests as direct, interactive
+device chat, with concise visible replies expected even for greetings. This
+addresses a P4 voice turn where Mingus returned `NO_REPLY`, which OpenClaw
+suppressed and replaced with `No response from OpenClaw.`. The device's original
+words remain a separate user message; device-supplied system messages are still
+rejected. This is request-scoped model guidance, not a guarantee of a reply or a
+change to the agent's global instructions, tools, or sandbox. Verify an ordinary
+greeting and follow-up on the live model after installation.
+
 ## Prepare on the Studio
 
 Requires Python 3.9+ and OpenSSL/LibreSSL; no Python packages are installed.
@@ -110,7 +119,9 @@ Once the compatible HTTP-enabled firmware has been built and flashed:
 | `llmhttpplaintext` | `0` |
 | `llmhttpenabled` | `1` |
 
-Use the existing `llmclear`, `llmload http:openclaw`, and `llmgenerate` commands.
+Use `llmclear`, `llmload http:openclaw`, and `llmgenerate json <prompt>`;
+read the asynchronous reply with `llmresult json 0`. The plain synchronous
+`llmgenerate <prompt>` form is unavailable in HTTP-only builds.
 The ESP must have a valid clock for certificate verification. Check `time json`;
 use existing NTP or an explicit `timeset <unix_timestamp>` if needed. Do not
 disable certificate verification to work around an unset clock.
@@ -134,18 +145,43 @@ launchctl bootstrap "gui/$(id -u)" \
 
 To stop it, use `launchctl bootout` with that same domain and plist path. The
 LaunchAgent runs while this user is logged in, not as a machine-wide daemon.
-Its log contains service status and fixed error messages, not chat bodies or
-credentials. A config/credential change requires restarting the relay.
+Its log contains service status and fixed failure stages/categories, not chat
+bodies, raw exception messages or credentials. For example,
+`relay: upstream_stream failed (deadline)` means the total turn deadline expired;
+`upstream_stream failed (UpstreamError)` means the gateway stream was invalid,
+reported an error, ended early or exceeded a size bound. Check that session on
+the gateway before submitting it again: agent actions may already have run.
+A config/credential change requires restarting the relay.
+
+## Update an existing relay
+
+Copy the updated relay directory to the Studio. Stop the foreground relay with
+Ctrl-C in its Terminal, then run the following from the new source directory:
+
+```sh
+python3 relay.py --config "$HOME/.openclaw/hardwareone-relay/config.json" --check-config &&
+  cp relay.py "$HOME/.openclaw/hardwareone-relay/relay.py" &&
+  python3 "$HOME/.openclaw/hardwareone-relay/relay.py" --config "$HOME/.openclaw/hardwareone-relay/config.json"
+```
+
+Keep this Terminal open for foreground use. If using the optional LaunchAgent,
+restart that service instead of starting a second foreground copy. Updating
+`relay.py` preserves the installed configuration, tokens and certificates. Do
+not rerun `setup_relay.py` or reflash the ESP for this update. Existing device
+conversation IDs continue to select the same sessions.
 
 ## Bounds and verification
 
 One agent request is forwarded at a time; other requests receive `503`. There
 are at most four TLS/request workers. Prompts are limited to 2047 UTF-8 bytes,
 SSE events to 8192 bytes, total upstream output to 1 MiB, and a turn to five
-minutes. The current upstream idle window is 30 seconds. Incoming header/body,
-TLS handshake, and downstream write deadlines prevent a stalled client from
-occupying the relay indefinitely. No redirect, proxy environment, or automatic
-retry is used. Closing a connection cannot undo agent actions already performed.
+minutes. A local model may load or think silently before response headers or
+between streamed tokens; those upstream reads can wait until the same five-minute
+deadline. They no longer fail after 30 idle seconds. Upstream connect/request
+writes retain their 30-second bound. Incoming header/body, TLS handshake, and
+downstream write deadlines are unchanged. Device-side timeouts can still end a
+turn sooner. No redirect, proxy environment, or automatic retry is used. Closing
+a connection cannot undo agent actions already performed.
 
 Run local tests from the repository root:
 
@@ -156,3 +192,37 @@ python3 -B integrations/openclaw/tests/test_relay_setup.py
 
 They use temporary loopback servers, temporary certificates, and fake gateway
 credentials. They do not contact the Studio gateway or attached hardware.
+
+## Native Terminal sessions
+
+The optional `/v1/terminal` route connects the P4 to the computer-side official
+Even Terminal server with the Hardware One OpenClaw provider. It supports the
+bounded session browser/history/event/action contract in
+[`../terminal/DEVICE_API.md`](../terminal/DEVICE_API.md). The existing chat route
+continues to work. Terminal remains disabled until both optional configuration
+fields are set:
+
+```json
+{
+  "terminal_port": 3457,
+  "terminal_token_file": "/absolute/private/path/to/bridge-token.txt"
+}
+```
+
+Use the Terminal setup helper to add these fields while preserving existing
+relay settings. The token file must be a private regular file owned by the relay
+user, distinct from both the device token and Gateway token. The relay connects
+only to `127.0.0.1` and the fixed `/api/hardwareone` route; the device cannot supply
+a host, route, provider, agent, or Gateway RPC method. It injects the configured
+device identity rather than trusting one in a request. Both request and response
+bodies are limited to 4096 encoded bytes. Terminal requests have a 30-second hard
+deadline and are never automatically retried. Mutations carry stable request IDs
+so a lost response cannot silently become a second prompt.
+
+The user has enabled browsing and resuming existing `main` / Mingus sessions.
+This is broader than the older dedicated Hardware One chat session: a holder of
+the device token can read those sessions and send prompts to a selected session.
+Gateway approval/question capability still depends on the host bridge's granted
+scopes and paired identity. No sandbox policy or elevated-execution setting is
+changed by enabling this route. Oversized or private pending requests require
+the OpenClaw dashboard rather than an incomplete approval on the glasses.

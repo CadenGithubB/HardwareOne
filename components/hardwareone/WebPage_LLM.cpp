@@ -441,7 +441,7 @@ static esp_err_t handleLLMPoll(httpd_req_t* req) {
   jsonSanitizeServedBytes(chunk, n);
 
   // `done` must NOT be gated on the client's cursor reaching `totalLen`. A turn
-  // can legally end mid-character — the 2 KB cap drops a whole engine window and
+  // can legally end mid-character — a storage cap drops a whole engine window and
   // freezes textLen wherever the previous one ended — so the trim may withhold
   // up to 3 bytes forever and `offset + n >= totalLen` would never be satisfied.
   // That is a fixed-offset livelock. Gate on `n == 0`, which is the terminal
@@ -451,7 +451,7 @@ static esp_err_t handleLLMPoll(httpd_req_t* req) {
   // The `n == 0` conjunct also closes a data-loss bug that predates the UTF-8
   // work: `!chatIsGenerating()` alone is cursor-blind, so an answer that was
   // already complete when the first poll landed got exactly ONE 511-byte window
-  // with done:true and the page stopped there. Turn text runs to 2047 bytes, so
+  // with done:true and the page stopped there. Retained turns span many windows, so
   // a fast answer — an instant gate refusal, a CM5 one-liner arriving in a UART
   // burst — silently lost everything past 511.
   bool done = !chatIsGenerating() && (n == 0);
@@ -499,36 +499,56 @@ static esp_err_t handleLLMChatTurns(httpd_req_t* req) {
 
   int count = chatGetTurnCount();
 
-  // Streaming write so a 16-turn history with 2 KB bodies doesn't allocate
-  // 32+ KB of contiguous JSON in PSRAM all at once. Per-turn buffers are
-  // small (textLen capped at LLM_CHAT_TURN_MAX_BYTES = 2 KB).
+  // Stream each text string in bounded escaped windows. Neither a 16 KiB turn
+  // nor its worst-case JSON escaping belongs on the 7.5 KiB HTTP task stack.
+  // The array/entry contract remains unchanged for the browser.
   httpd_resp_set_type(req, "application/json");
-  httpd_resp_send_chunk(req, "[", 1);
+  if (httpd_resp_send_chunk(req, "[", 1) != ESP_OK) return ESP_FAIL;
 
-  char turnBuf[LLM_CHAT_TURN_MAX_BYTES + 1];
+  char turnBuf[256];
+  char escaped[6 * (sizeof(turnBuf) - 1) + 3];  // quotes + worst-case \uXXXX + NUL
+  bool first = true;
   for (int i = 0; i < count; i++) {
     ChatTurnInfo info;
     if (!chatGetTurnInfo(i, &info)) continue;
 
-    int n = chatReadTurn(i, 0, turnBuf, sizeof(turnBuf));
-    (void)n;  // turnBuf is NUL-terminated; ArduinoJson handles the rest.
-
     PSRAM_JSON_DOC(jdoc);
     jdoc["role"]       = (info.role == ChatTurnRole::USER) ? "user" : "assistant";
-    jdoc["text"]       = (const char*)turnBuf;
     jdoc["tokens"]     = info.tokenCount;
     jdoc["tokPerSec"]  = info.tokensPerSecX10 / 10.0f;
     jdoc["streaming"]  = info.isStreaming;
+    if (jdoc.overflowed()) return ESP_FAIL;
 
     String entry;
     serializeJson(jdoc, entry);
-    if (i > 0) httpd_resp_send_chunk(req, ",", 1);
-    httpd_resp_send_chunk(req, entry.c_str(), entry.length());
+    if (entry.length() < 2 || entry[entry.length() - 1] != '}') return ESP_FAIL;
+    if (!first && httpd_resp_send_chunk(req, ",", 1) != ESP_OK) return ESP_FAIL;
+    first = false;
+    if (httpd_resp_send_chunk(req, entry.c_str(), entry.length() - 1) != ESP_OK ||
+        httpd_resp_send_chunk(req, ",\"text\":\"", 9) != ESP_OK) return ESP_FAIL;
+
+    int offset = 0;
+    while (offset < static_cast<int>(info.textLen)) {
+      int n = chatReadTurn(i, offset, turnBuf, sizeof(turnBuf));
+      n = utf8TrimPartialTail(turnBuf, n);
+      if (n <= 0) break;
+      turnBuf[n] = '\0';
+      jsonSanitizeServedBytes(turnBuf, n);
+      jdoc.clear();
+      jdoc.set(static_cast<const char*>(turnBuf));
+      if (jdoc.overflowed()) return ESP_FAIL;
+      const size_t size = serializeJson(jdoc, escaped, sizeof(escaped));
+      if (size < 2 || size >= sizeof(escaped) || escaped[0] != '"' ||
+          escaped[size - 1] != '"') return ESP_FAIL;
+      // Each escaped fragment is a JSON string; omit only its outer quotes.
+      if (httpd_resp_send_chunk(req, escaped + 1, size - 2) != ESP_OK) return ESP_FAIL;
+      offset += n;
+    }
+    if (httpd_resp_send_chunk(req, "\"}", 2) != ESP_OK) return ESP_FAIL;
   }
 
-  httpd_resp_send_chunk(req, "]", 1);
-  httpd_resp_send_chunk(req, NULL, 0);
-  return ESP_OK;
+  if (httpd_resp_send_chunk(req, "]", 1) != ESP_OK) return ESP_FAIL;
+  return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 // ============================================================================

@@ -5,6 +5,38 @@ small change with a visible result, reuse the existing path, and remove an old
 dependency or duplicate when replacing it. Apply these rules to code being
 changed; unrelated subsystems do not need a simultaneous rewrite.
 
+## Own the workspace through cleanup
+
+Storage and cleanup are part of completing a task. The agent creating temporary
+files owns their lifecycle; do not leave the user to identify disposable files.
+
+- Reuse an existing suitable checkout and one build directory per active saved
+  profile, with compatible target, SDK/dependencies and task ownership. Before
+  creating a large copy or build, check its expected size and available disk
+  space. Record why any extra copy is needed; never reuse another active task's
+  build directory. Use another worktree only when isolation is needed.
+- Record source revisions, small patches for uncommitted work, saved profiles,
+  dependency locks and verification results. Do not create a full app/dependency
+  snapshot for each trial or tuning change. Preserve experimental edits in Git
+  or a checked patch before reusing a directory.
+- Share dependency download caches where supported; keep mutable dependency
+  trees isolated. Do not replace writable dependencies with shared symlinks.
+- Give any necessary extra copy a recorded path, purpose and removal condition
+  in the task's working note. A completed experiment does not need to retain
+  all of its compiler objects, archives, caches and temporary environments.
+- Keep selected working firmware and matching debug/layout information, model
+  identities and necessary model/checkpoint files. Keep unique recordings,
+  configuration and test evidence deliberately; keep credentials private.
+  Preserve these compact recovery inputs separately from disposable builds.
+- Before reporting completion, clean up task-created disposable files within
+  the authorized scope after checking that no active task uses them. Use the
+  managed worktree archive operation for eligible managed worktrees; preserve
+  needed ignored files first. Report retained large directories, their reason
+  and the remaining cleanup, alongside space actually recovered.
+- For legacy directories mixing source, evidence and generated output, inspect
+  and prepare an exact cleanup list first. Preserve unique work and other
+  agents' active files. Never infer that everything ignored by Git is disposable.
+
 ## The 0.99.97.x cleanup series
 
 The focus of `0.99.97.x` is long-term readability, editability and consistent
@@ -175,6 +207,8 @@ into the setup UI.
 5. Record what changed and what was verified. Distinguish a successful build
    from physical hardware qualification. Remove superseded helpers/rules when
    their consumers have migrated.
+6. Complete the workspace cleanup above and report any retained large outputs
+   with their purpose. A successful build alone does not finish the task.
 
 Use the [saved configuration workflow](configurations/README.md),
 [host test instructions](components/hardwareone/test/host/README.md), and

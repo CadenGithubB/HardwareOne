@@ -26,7 +26,7 @@ import time
 
 HEADER_TIMEOUT = 5.0
 BODY_TIMEOUT = 5.0
-IO_TIMEOUT = 30.0
+IO_TIMEOUT = 30.0  # Upstream connect/request-write bound; model waits use TOTAL_TIMEOUT.
 WRITE_TIMEOUT = 5.0
 TOTAL_TIMEOUT = 300.0
 MAX_HEADERS = 8192
@@ -35,7 +35,22 @@ MAX_EVENT = 8192
 MAX_REPLY = 1024 * 1024
 MAX_CLIENTS = 4
 CHAT_PATH = "/v1/chat/completions"
+TERMINAL_PATH = "/v1/terminal"
+TERMINAL_UPSTREAM_PATH = "/api/hardwareone"
+MAX_TERMINAL = 4096
 AGENT_MODEL = "openclaw/main"
+# Relay-owned context for this interactive endpoint, never supplied by the device.
+DEVICE_CHAT_CONTEXT = (
+    "This is a direct, interactive Hardware One chat with a person. Their message "
+    "may be transcribed speech, and they are waiting to read your answer on a "
+    "small display such as smart glasses. This is not a heartbeat or background "
+    "notification. Give a brief, useful visible text reply, including for greetings. "
+    "Do not use NO_REPLY for an ordinary chat response unless the user explicitly "
+    "asks for silence. If you cannot help or a tool fails, explain briefly. "
+    "Return the answer in this chat; use another messaging channel only if the "
+    "user explicitly requests it. Follow your existing tool permissions, sandbox "
+    "boundaries, and approval requirements."
+)
 ALLOWED_HEADERS = frozenset(("host", "content-type", "accept", "user-agent",
                              "connection", "content-length", "authorization"))
 
@@ -80,6 +95,8 @@ class Config:
     device_token_file: str
     upstream_token_file: str
     upstream_port: int = 18789
+    terminal_port: int = 3457
+    terminal_token_file: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.bind_host, str):
@@ -90,7 +107,7 @@ class Config:
             raise ConfigError("bind_host must be an explicit IPv4 address") from None
         if address.is_unspecified or address.is_multicast or address.is_reserved:
             raise ConfigError("bind_host must name a specific local interface")
-        for port in (self.bind_port, self.upstream_port):
+        for port in (self.bind_port, self.upstream_port, self.terminal_port):
             if type(port) is not int or not 1 <= port <= 65535:
                 raise ConfigError("Configured ports must be between 1 and 65535")
         if not isinstance(self.device_identity, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", self.device_identity):
@@ -99,6 +116,9 @@ class Config:
             value = getattr(self, name)
             if not isinstance(value, str) or not value or not Path(value).is_absolute() or "\x00" in value:
                 raise ConfigError("Certificate and credential paths must be absolute")
+        if self.terminal_token_file is not None and (not isinstance(self.terminal_token_file, str)
+                or not Path(self.terminal_token_file).is_absolute() or "\x00" in self.terminal_token_file):
+            raise ConfigError("Terminal credential path must be absolute")
 
 
 def _private_file(path, maximum):
@@ -137,6 +157,15 @@ def _credentials(config):
     return device, upstream
 
 
+def _terminal_credential(config, device, upstream):
+    if config.terminal_token_file is None:
+        return None
+    token = _token(config.terminal_token_file, 32)
+    if hmac.compare_digest(token, device) or hmac.compare_digest(token, upstream):
+        raise ConfigError("Terminal, device, and gateway credentials must be distinct")
+    return token
+
+
 def create_tls_context(config):
     _private_file(config.tls_key_file, 16384)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -163,7 +192,8 @@ def load_config(path, check_files=True):
     except (OSError, ValueError, TypeError, RecursionError):
         raise ConfigError("Invalid relay configuration; check its fields and absolute paths") from None
     if check_files:
-        _credentials(config)
+        device, upstream = _credentials(config)
+        _terminal_credential(config, device, upstream)
         create_tls_context(config)
     return config
 
@@ -191,7 +221,10 @@ def validate_request(raw, device_identity):
         if not isinstance(content, str) or not content or len(content.encode("utf-8")) > 2047 or "\x00" in content:
             raise ValueError()
         upstream = {"model": AGENT_MODEL, "user": "hw1:" + device_identity + ":" + conversation[4:],
-                    "stream": True, "messages": [{"role": "user", "content": content}]}
+                    "stream": True, "messages": [
+                        {"role": "system", "content": DEVICE_CHAT_CONTEXT},
+                        {"role": "user", "content": content},
+                    ]}
         return json.dumps(upstream, ensure_ascii=True, separators=(",", ":")).encode("ascii")
     except (ValueError, TypeError, UnicodeError, RecursionError):
         raise RequestError() from None
@@ -202,6 +235,36 @@ def _remaining(deadline, maximum):
     if remaining <= 0:
         raise TimeoutError()
     return min(remaining, maximum)
+
+
+def validate_terminal_request(raw, device_identity):
+    """Allow only device operations; host/agent/RPC routing is never supplied."""
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_TERMINAL:
+        raise RequestError()
+    common = {"schema", "op", "requestId"}
+    view = {"view", "instance"}
+    operations = {
+        "list": {"offset", "limit"}, "open": {"sessionId"}, "new": set(),
+        "poll": view | {"after"}, "prompt": view | {"text"},
+        "interrupt": view | {"runId"}, "permission": view | {"pendingId", "decision"},
+        "question": view | {"pendingId", "questionId", "optionIds", "text", "cancel"},
+    }
+    try:
+        value = _json(raw)
+        if not isinstance(value, dict) or type(value.get("schema")) is not int or value["schema"] != 1:
+            raise ValueError()
+        op = value.get("op")
+        if not isinstance(op, str) or op not in operations or set(value) - common - operations[op]:
+            raise ValueError()
+        if not isinstance(value.get("requestId"), str) or not re.fullmatch(r"[0-9a-f]{32}", value["requestId"]):
+            raise ValueError()
+        # The host owns semantic validation and issued-handle authorization.
+        # Reconstruct the allowlisted object and inject the authenticated identity.
+        result = {key: value[key] for key in common | operations[op] if key in value}
+        result["deviceId"] = device_identity
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise RequestError() from None
 
 
 def _receive_request(connection, expected_token):
@@ -239,7 +302,7 @@ def _receive_request(connection, expected_token):
             raise RequestError("Unauthorized", 401)
         if method != "POST":
             raise RequestError("Method not allowed", 405)
-        if path != CHAT_PATH:
+        if path not in (CHAT_PATH, TERMINAL_PATH):
             raise RequestError("Not found", 404)
         if headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
             raise RequestError("Unsupported media type", 415)
@@ -247,7 +310,7 @@ def _receive_request(connection, expected_token):
         if not re.fullmatch(r"[0-9]{1,6}", length_text):
             raise ValueError()
         length = int(length_text)
-        if not 0 < length <= MAX_BODY:
+        if not 0 < length <= (MAX_TERMINAL if path == TERMINAL_PATH else MAX_BODY):
             raise RequestError("Request too large", 413)
         if len(body) > length:
             raise ValueError()
@@ -262,7 +325,7 @@ def _receive_request(connection, expected_token):
         if not chunk:
             raise RequestError()
         body += chunk
-    return body
+    return path, body
 
 
 class _BoundedResponseReader:
@@ -393,23 +456,32 @@ class _Handler(socketserver.BaseRequestHandler):
         connection = None
         streaming = False
         acquired = False
+        forward_slot = None
         upstream = None
         response = None
         deadline_timer = None
+        deadline = None
+        stage = "tls"
         try:
             self.request.settimeout(HEADER_TIMEOUT)
             connection = self.server.tls_context.wrap_socket(self.request, server_side=True)
-            raw = _receive_request(connection, self.server.device_token)
-            body = validate_request(raw, self.server.config.device_identity)
-            acquired = self.server.forward_slot.acquire(blocking=False)
+            stage = "device_request"
+            path, raw = _receive_request(connection, self.server.device_token)
+            terminal = path == TERMINAL_PATH
+            if terminal and self.server.terminal_token is None:
+                raise RequestError("Terminal is not configured", 503)
+            body = (validate_terminal_request if terminal else validate_request)(raw, self.server.config.device_identity)
+            forward_slot = self.server.terminal_slot if terminal else self.server.forward_slot
+            acquired = forward_slot.acquire(blocking=False)
             if not acquired:
                 raise RequestError("Busy", 503)
-            deadline = time.monotonic() + TOTAL_TIMEOUT
+            deadline = time.monotonic() + (IO_TIMEOUT if terminal else TOTAL_TIMEOUT)
             # HTTPConnection uses direct sockets, never environment proxies, and
             # does not replay a failed request or follow a redirect.
-            upstream = http.client.HTTPConnection("127.0.0.1", self.server.config.upstream_port,
+            upstream = http.client.HTTPConnection("127.0.0.1", self.server.config.terminal_port if terminal else self.server.config.upstream_port,
                                                   timeout=_remaining(deadline, IO_TIMEOUT))
             upstream.response_class = _BoundedResponse
+            stage = "upstream_connect"
             upstream.connect()
             # A hard deadline also interrupts a slow-drip status/header or
             # chunk-framing read inside http.client, where per-read socket
@@ -419,12 +491,42 @@ class _Handler(socketserver.BaseRequestHandler):
                                              self._interrupt, (upstream_socket,))
             deadline_timer.daemon = True
             deadline_timer.start()
-            upstream.request("POST", CHAT_PATH, body=body, headers={
-                "Authorization": "Bearer " + self.server.upstream_token,
-                "Content-Type": "application/json", "Accept": "text/event-stream", "Connection": "close"})
+            stage = "upstream_request"
+            upstream.request("POST", TERMINAL_UPSTREAM_PATH if terminal else CHAT_PATH, body=body, headers={
+                "Authorization": "Bearer " + (self.server.terminal_token if terminal else self.server.upstream_token),
+                "Content-Type": "application/json", "Accept": "application/json" if terminal else "text/event-stream", "Connection": "close"})
+            # Local model loading/thinking can be silent for more than 30 s,
+            # before headers or between events. Keep the same hard turn deadline
+            # instead of treating those quiet intervals as a transport failure.
+            stage = "upstream_headers"
+            upstream_socket.settimeout(_remaining(deadline, TOTAL_TIMEOUT))
             response = upstream.getresponse()
+            if terminal:
+                if response.status != 200 or response.getheader("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    raise UpstreamError()
+                lengths = response.headers.get_all("Content-Length", [])
+                transfers = response.headers.get_all("Transfer-Encoding", [])
+                if (len(lengths) > 1 or len(transfers) > 1 or lengths and transfers
+                        or transfers and transfers[0].strip().lower() != "chunked"
+                        or lengths and (not re.fullmatch(r"[0-9]+", lengths[0]) or int(lengths[0]) > MAX_TERMINAL)):
+                    raise UpstreamError()
+                payload = response.read(MAX_TERMINAL + 1)
+                if not payload or len(payload) > MAX_TERMINAL or lengths and len(payload) != int(lengths[0]):
+                    raise UpstreamError()
+                value = _json(payload)
+                if not isinstance(value, dict) or type(value.get("schema")) is not int or value["schema"] != 1 or type(value.get("ok")) is not bool:
+                    raise UpstreamError()
+                request_id = _json(raw)["requestId"]
+                if value.get("requestId") != request_id or not isinstance(value.get("instance"), str):
+                    raise UpstreamError()
+                stage = "device_terminal"
+                headers = ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                           f"Content-Length: {len(payload)}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").encode("ascii")
+                _send(connection, headers + payload, deadline)
+                return
             if response.status != 200 or response.getheader("Content-Type", "").split(";", 1)[0].strip().lower() != "text/event-stream":
                 raise UpstreamError()
+            stage = "device_headers"
             _send(connection, b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", deadline)
             streaming = True
             events = _Events()
@@ -432,7 +534,8 @@ class _Handler(socketserver.BaseRequestHandler):
             while not events.done:
                 # The response keeps ownership of a close-delimited socket even
                 # when HTTPConnection.getresponse() clears its sock attribute.
-                upstream_socket.settimeout(_remaining(deadline, IO_TIMEOUT))
+                stage = "upstream_stream"
+                upstream_socket.settimeout(_remaining(deadline, TOTAL_TIMEOUT))
                 chunk = response.read1(4096)
                 if not chunk:
                     raise UpstreamError()
@@ -440,11 +543,15 @@ class _Handler(socketserver.BaseRequestHandler):
                 if count > MAX_REPLY:
                     raise UpstreamError()
                 for event in events.feed(chunk):
+                    stage = "device_stream"
                     _send(connection, event, deadline)
+                    stage = "upstream_stream"
         except RequestError as error:
+            self._log_failure(stage, error, deadline)
             if connection is not None:
                 self._safe_error(connection, error.status)
-        except (OSError, ValueError, http.client.HTTPException, TimeoutError):
+        except (OSError, ValueError, http.client.HTTPException, TimeoutError) as error:
+            self._log_failure(stage, error, deadline)
             if connection is not None:
                 if streaming:
                     try:
@@ -461,9 +568,16 @@ class _Handler(socketserver.BaseRequestHandler):
             if upstream is not None:
                 upstream.close()
             if acquired:
-                self.server.forward_slot.release()
+                forward_slot.release()
             if connection is not None:
                 connection.close()
+
+    @staticmethod
+    def _log_failure(stage, error, deadline):
+        # Stages are fixed local labels. Never stringify exceptions: HTTP/TLS
+        # diagnostics can contain upstream content, request data or credentials.
+        category = "deadline" if deadline is not None and time.monotonic() >= deadline else type(error).__name__
+        print(f"relay: {stage} failed ({category})", file=sys.stderr, flush=True)
 
     @staticmethod
     def _interrupt(connection):
@@ -489,8 +603,10 @@ class RelayServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.config = config
         self.tls_context = tls_context
         self.device_token, self.upstream_token = _credentials(config)
+        self.terminal_token = _terminal_credential(config, self.device_token, self.upstream_token)
         self.client_slots = threading.BoundedSemaphore(MAX_CLIENTS)
         self.forward_slot = threading.BoundedSemaphore(1)
+        self.terminal_slot = threading.BoundedSemaphore(1)
         super().__init__(address, _Handler)
 
     def process_request(self, request, client_address):

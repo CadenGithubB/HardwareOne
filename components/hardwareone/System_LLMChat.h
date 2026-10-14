@@ -37,13 +37,14 @@
 #include <ArduinoJson.h>
 #include "System_LLMBackend.h"   // dispatch to whichever source owns the turn
 #include "System_LLMTypes.h"
+#include "System_LLMReplyLimits.h"
 
 // Ring depth — older turns roll off when this is exceeded.
 #define LLM_CHAT_MAX_TURNS 16
 
-// Hard cap per turn text body. Assistant output past this is truncated
-// (the engine's maxTokens almost always trips first).
-#define LLM_CHAT_TURN_MAX_BYTES 2048
+// Storage cap per turn, including NUL. Match the HTTP source so its explicit
+// truncation/transport notices survive retention for all display surfaces.
+#define LLM_CHAT_TURN_MAX_BYTES kLlmReplyCapacityBytes
 
 enum class ChatTurnRole : uint8_t {
   USER = 0,
@@ -99,8 +100,11 @@ void chatInit();
 // speak the identical override contract (one source of truth).
 void chatParamOverrideFromJson(JsonObjectConst src, ChatParamOverride& out);
 
-int  chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt = nullptr);
-
+// Optional opaque run identity for consumers which outlive a view/session.
+// It is unique across source switches and Clear; backend session numbers are not.
+using ChatRunToken = uint64_t;
+int  chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt = nullptr,
+                   ChatRunToken* run = nullptr);
 // Re-run the most recent USER turn. Removes the last ASSISTANT turn (if any)
 // and tokenizes its text as suppress tokens to steer the model away from
 // repeating itself. Returns session ID (>0) on success; 0 if no prior turn,
@@ -146,6 +150,15 @@ int  chatReadStream(int offset, char* buf, int maxLen);
 // that completed before the client's first poll (e.g. an instant gate refusal).
 int  chatReadFinished(int session, int offset, char* buf, int maxLen);
 int  chatFinishedLen(int session);
+
+// Exact-turn operations for asynchronous consumers (e.g. a native voice popup).
+// Read and completion are sampled under one lock; -1 means the turn was cleared
+// or superseded. A stale cancellation never stops a newer surface's generation.
+// The getter returns the live or most recently finished retained run, or 0.
+// A replacement between getter and read is reported as -1 by chatReadRun.
+ChatRunToken chatGetRunToken();
+int  chatReadRun(ChatRunToken run, int offset, char* buf, int maxLen, bool* done);
+bool chatStopRun(ChatRunToken run);
 
 // True iff there's a live assistant turn currently being filled.
 bool chatIsGenerating();

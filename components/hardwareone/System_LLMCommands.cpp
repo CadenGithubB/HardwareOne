@@ -518,23 +518,21 @@ static const char* cmd_llm_turns(const String& args) {
   // functions the web's GET /api/llm/chat/turns uses (chatGetTurnCount /
   // chatGetTurnInfo / chatReadTurn — web-only until now).
   //
-  // The web endpoint streams an unbounded array; a BLE command reply is capped
-  // at 4 KB and can't chunk arbitrarily. So this is paginated ONE TURN PER
-  // CALL by index — a single turn (<=2 KB body) always fits. The app reads
-  // `count` from any response, then fetches index 0..count-1. Schema:
+  // The web endpoint streams an array; a BLE command reply is capped at 4 KB.
+  // Keep whole short turns compatible, and page longer/escape-heavy turns by
+  // optional byte offset. Follow `next` while `more` is true. Schema:
   //   {"v":1,"count":N,"index":I,"role":"user|assistant","text":"…",
-  //    "tokens":T,"tokPerSec":F,"streaming":bool}
+  //    "tokens":T,"tokPerSec":F,"streaming":bool,"len":L,"next":O,"more":bool}
   //   out-of-range → {"v":1,"count":N,"index":I,"end":true}
   String a = args; a.trim();
   if (!argLeadingTokenIsJson(a))
-    return "Error: invalid arguments — Usage: llmturns json <index>";
+    return "Error: invalid arguments — Usage: llmturns json <index> [offset]";
 
-  int index = 0;
-  if (a.startsWith("json ")) {
-    String rest = a.substring(5); rest.trim();
-    index = rest.toInt();
-    if (index < 0) index = 0;
-  }
+  CommandArgs ca(a);
+  int index = ca.arg(1).toInt();
+  int offset = ca.arg(2).toInt();
+  if (index < 0) index = 0;
+  if (offset < 0) offset = 0;
 
   int count = chatGetTurnCount();
   PSRAM_JSON_DOC(doc);
@@ -552,22 +550,38 @@ static const char* cmd_llm_turns(const String& args) {
     return ebuf;
   }
 
-  // Read the turn body into a reusable PSRAM scratch buffer. Assigned to the
-  // doc as a (non-const) char* so ArduinoJson COPIES it into the doc pool —
-  // the scratch buffer can then be reused safely on the next call.
+  // Serialized command execution owns this small PSRAM window through return.
+  // Do not allocate a complete 16 KiB turn or grow the BLE reply envelope.
+  constexpr size_t kTurnWindow = 2048;
   static char* turnBuf = nullptr;
-  if (!turnBuf) turnBuf = (char*)ps_alloc(LLM_CHAT_TURN_MAX_BYTES + 1, AllocPref::PreferPSRAM, "llmturn.txt");
+  if (!turnBuf) turnBuf = (char*)ps_alloc(kTurnWindow, AllocPref::PreferPSRAM, "llmturn.txt");
   if (!turnBuf) return "{\"error\":\"oom\"}";
-  chatReadTurn(index, 0, turnBuf, LLM_CHAT_TURN_MAX_BYTES + 1);
+  int n = chatReadTurn(index, offset, turnBuf, kTurnWindow);
+  n = utf8TrimPartialTail(turnBuf, n);
+  turnBuf[n] = '\0';
+  jsonSanitizeServedBytes(turnBuf, n);
 
   doc["role"]      = (info.role == ChatTurnRole::USER) ? "user" : "assistant";
-  doc["text"]      = turnBuf;                       // char* → copied into doc
+  doc["text"]      = static_cast<const char*>(turnBuf);
   doc["tokens"]    = info.tokenCount;
   doc["tokPerSec"] = info.tokensPerSecX10 / 10.0f;
   doc["streaming"] = info.isStreaming;
 
-  // One turn body is <=2 KB; realistic text escapes to ~1.1×, so the blob sits
-  // well under the 4 KB command-return cap.
+  doc["len"]       = info.textLen;
+  doc["next"]      = offset + n;
+  doc["more"]      = n > 0 && offset + n < static_cast<int>(info.textLen);
+
+  // Preserve a full <=2047-byte short turn when it fits. Heavy JSON escaping
+  // can expand sixfold; fall back to a UTF-8-aligned 511-byte window in that
+  // case, with an explicit continuation cursor rather than malformed JSON.
+  if (measureJson(doc) >= 4096) {
+    n = utf8TrimPartialTail(turnBuf, n < 511 ? n : 511);
+    turnBuf[n] = '\0';
+    doc["text"] = static_cast<const char*>(turnBuf);
+    doc["next"] = offset + n;
+    doc["more"] = n > 0 && offset + n < static_cast<int>(info.textLen);
+  }
+  if (doc.overflowed() || measureJson(doc) >= 4096) return "{\"error\":\"oom\"}";
   static char* jbuf = nullptr;
   if (!jbuf) jbuf = (char*)ps_alloc(4096, AllocPref::PreferPSRAM, "llmturns.json");
   if (!jbuf) return "{\"error\":\"oom\"}";
@@ -735,7 +749,7 @@ const CommandEntry llmCommands[] = {
   { "llmcorrupttest",   "Debug: force corruption-recovery test", true, cmdLlmCorruptRow },
   { "llmclear",         "Reset the LLM conversation",           false, cmd_llm_clear },
   { "llmretry",         "Regenerate the last reply (JSON)",     false, cmd_llm_retry },
-  { "llmturns",         "Read a conversation turn (JSON)",      false, cmd_llm_turns,        "Usage: llmturns json <index>" },
+  { "llmturns",         "Read a conversation turn (JSON)",      false, cmd_llm_turns,        "Usage: llmturns json <index> [offset]  (follow next while more=true)" },
   { "llmmenu",          "Guided-input menu status/listing (add 'json')",  false, cmdLlmMenuRow, "Usage: llmmenu  |  llmmenu json  |  llmmenu json tpl <g> <off>  |  llmmenu json ent <g> <off>\nLists this model's guided question templates + entity rosters (empty if the model ships none)." },
   { "llmask",           "Ask a guided question by index",       false, cmdLlmAskRow,          "Usage: llmask <group> <template> [entity]  |  llmask json <gen> <g> <t> [e]  |  llmask repeat\nComposes the question on-device from 'llmmenu' indices and streams the answer (read it with 'llmresult json 0')." },
   { "llmtemperature",   "Set default sampling temperature",     true,  cmd_llm_temperature,  "Usage: llmtemperature <0.0-2.0>" },

@@ -733,11 +733,13 @@ endif()
 # override_path, so ESP-SR's edge to esp-dl uses it too. A plain
 # EXTRA_COMPONENT_DIRS entry is not enough there: the component manager treats
 # the first local component with a manifest as the project's main component
-# and would ignore this one. tools/p4/prepare_sdk.sh stages all three, ignored
-# by git.
+# and would ignore this one. ESP-Hosted 2.12.13 uses the same override mechanism
+# for its common Wi-Fi TX pool's DMA-aligned block stride. Its allocation base
+# was aligned, but 1600-byte strides failed SDIO with a 128-byte cache line.
+# tools/p4/prepare_sdk.sh stages these components, ignored by git.
 if(_inferred_target STREQUAL "esp32p4")
     set(_hw1_p4_sdk_dir "${CMAKE_CURRENT_SOURCE_DIR}/.sdk-overrides/esp32p4")
-    foreach(_hw1_p4_component IN ITEMS bt esp_driver_jpeg espressif__esp-dl)
+    foreach(_hw1_p4_component IN ITEMS bt esp_driver_jpeg espressif__esp-dl espressif__esp_hosted)
         if(NOT EXISTS "${_hw1_p4_sdk_dir}/${_hw1_p4_component}/CMakeLists.txt")
             message(FATAL_ERROR
                 "ESP32-P4 builds need the patched component "
@@ -746,7 +748,7 @@ if(_inferred_target STREQUAL "esp32p4")
         endif()
         list(APPEND EXTRA_COMPONENT_DIRS "${_hw1_p4_sdk_dir}/${_hw1_p4_component}")
     endforeach()
-    message(STATUS "ESP32-P4 SDK overrides: ${_hw1_p4_sdk_dir}/{bt,esp_driver_jpeg,espressif__esp-dl}")
+    message(STATUS "ESP32-P4 SDK overrides: ${_hw1_p4_sdk_dir}/{bt,esp_driver_jpeg,espressif__esp-dl,espressif__esp_hosted}")
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

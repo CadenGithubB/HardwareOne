@@ -8,6 +8,54 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## Unreleased
+
+- Native Terminal suppresses internal answer envelopes for both the bare and
+  namespaced OpenClaw `ask_user` tool names, including replayed tool events.
+- Failed native STT questions discard previously decoded partial text. Normal
+  continuous captions retain their completed segments after a failure.
+- Host CTest registration includes Terminal projection and the optional pinned
+  SDK DMA regression, and passes supported arguments to the Hey Even harness.
+- Native G2 Terminal can use the P4's local speech recognition and a local
+  OpenClaw provider for Even Terminal 0.10.5. Adds Mingus session browsing,
+  recent history, voice follow-ups, streamed replies/tool activity, exact-run
+  interruption, and offered approval/question controls. A bounded Terminal
+  API extends the existing HTTPS relay; Gateway credentials and paired
+  approval identity remain on the host. The dedicated host launcher excludes
+  Even account/cloud, update and tunnel paths. Build and hardware qualification
+  status, native display limits and setup are tracked in
+  `docs/G2_TERMINAL_WORK.md`. The glasses' own Terminal menu enters the same
+  connection path; background status refreshes preserve its recording and
+  transcript-confirmation screens. Host sends use the existing non-admin
+  Gateway scopes; a preserving updater applies host fixes without reinstalling
+  dependencies or replacing private setup. New session accepts the glasses'
+  implicit single-agent selection and acknowledges creation before binding the
+  conversation, preventing rejection or a cleared native session.
+- P4's shared Wi-Fi TX pool aligns every block to the DMA/cache requirement,
+  preventing SDIO invalid-argument failures with 128-byte PSRAM cache lines.
+  The pinned Hosted override preserves PSRAM allocation and C6 recovery policy.
+- The OpenClaw relay permits slow upstream replies within its existing total
+  deadline and logs fixed failure categories without chat text or credentials.
+- G2 Apps/LLM replies use a full-width paged reader. Tap/scroll navigates without
+  losing the current page while text streams; double-tap returns to the menu.
+  Fragmented text refresh fills six body lines per page instead of limiting
+  ordinary text to about three; stale screen updates stop between writes.
+  A plain hold opens microphone entry for a follow-up in the same conversation,
+  with transcript review and Done before sending. Retained replies now have a
+  shared 16 KiB bound; web, OLED and serial readers use bounded storage/output.
+  Verification and physical gesture qualification are tracked in
+  `docs/G2_LLM_READER_WORK.md`.
+- Native G2 **Hey Even** can use the shared local STT broker and selected chat
+  source, including OpenClaw, to display a spoken question and streamed answer
+  in the glasses' built-in popup. Retains paired-user/connection authority,
+  exact-turn cancellation, bounded single-question capture and the CM5 UART
+  route. Native voice remains available when the independent custom-app
+  renderer is silent. Local replies finish with their last text chunk and use
+  packet sizes accepted by the glasses. No relay configuration or agent-policy
+  changes are required.
+  Build/host checks and pending hardware qualification are recorded in
+  `docs/G2_EVENAI_LOCAL_WORK.md`.
+
 ## [0.99.98] - 2026-10-12
 
 Development checkpoint combining the committed 0.99.97.4 fixes, OpenClaw
