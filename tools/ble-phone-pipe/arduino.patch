@@ -1,0 +1,96 @@
+--- a/libraries/BLE/src/BLEDevice.h
++++ b/libraries/BLE/src/BLEDevice.h
+@@ -294,6 +294,14 @@
+ 
+ #if defined(CONFIG_BLUEDROID_ENABLED)
+   static void setCustomGattcHandler(gattc_event_handler handler);
++  // Optional peer-scoped pre-dispatch hook. true means this event belongs wholly
++  // to the auxiliary owner (e.g. a numeric-comparison reply), so default handling
++  // must not issue a second reply. Install/remove only with that owner quiescent.
++  using GapInterceptor = bool (*)(esp_gap_ble_cb_event_t, esp_ble_gap_cb_param_t*);
++  static void setGapInterceptor(GapInterceptor handler);
++  using GattcInterceptor = bool (*)(esp_gattc_cb_event_t, esp_gatt_if_t, esp_ble_gattc_cb_param_t*);
++  static void setGattcInterceptor(GattcInterceptor handler);
++#define HARDWAREONE_BLE_PHONE_PIPE_API 1
+   static void setCustomGattsHandler(gatts_event_handler handler);
+ #endif
+ 
+--- a/libraries/BLE/src/BLEDevice.cpp
++++ b/libraries/BLE/src/BLEDevice.cpp
+@@ -1393,7 +1393,16 @@
+  * @param [in] gattc_if
+  * @param [in] param
+  */
++namespace {
++BLEDevice::GattcInterceptor sGattcInterceptor = nullptr;
++}
++void BLEDevice::setGattcInterceptor(GattcInterceptor handler) {
++  __atomic_store_n(&sGattcInterceptor, handler, __ATOMIC_RELEASE);
++}
++
+ void BLEDevice::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param) {
++  auto interceptor = __atomic_load_n(&sGattcInterceptor, __ATOMIC_ACQUIRE);
++  if (interceptor && interceptor(event, gattc_if, param)) return;
+ 
+   log_d("gattClientEventHandler [esp_gatt_if: %d] ... %s", gattc_if, BLEUtils::gattClientEventTypeToString(event).c_str());
+   BLEUtils::dumpGattClientEvent(event, gattc_if, param);
+@@ -1454,7 +1463,17 @@
+ /**
+  * @brief Handle GAP events.
+  */
++namespace {
++BLEDevice::GapInterceptor sGapInterceptor = nullptr;
++}
++void BLEDevice::setGapInterceptor(GapInterceptor handler) {
++  __atomic_store_n(&sGapInterceptor, handler, __ATOMIC_RELEASE);
++}
++
+ void BLEDevice::gapEventHandler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
++
++  auto interceptor = __atomic_load_n(&sGapInterceptor, __ATOMIC_ACQUIRE);
++  if (interceptor && interceptor(event, param)) return;
+ 
+   BLEUtils::dumpGapEvent(event, param);
+ 
+--- a/libraries/BLE/src/BLESecurity.h
++++ b/libraries/BLE/src/BLESecurity.h
+@@ -114,6 +114,13 @@
+ 
+ #if defined(CONFIG_BLUEDROID_ENABLED)
+   static char *esp_key_type_to_str(esp_ble_key_type_t key_type);
++  struct Policy {
++    uint8_t authentication, capability, initiatorKeys, responderKeys, keySize;
++  };
++  static Policy policy();
++  // Caller serializes global SMP policy with other connection owners.
++  // Attempts every field, reports the first rejected submission.
++  static esp_err_t applyPolicy(const Policy& policy);
+   static void setEncryptionLevel(esp_ble_sec_act_t level);
+   static bool startSecurity(esp_bd_addr_t bd_addr, int *rcPtr = nullptr);
+ #endif
+--- a/libraries/BLE/src/BLESecurity.cpp
++++ b/libraries/BLE/src/BLESecurity.cpp
+@@ -60,6 +60,23 @@
+ #if defined(CONFIG_BLUEDROID_ENABLED)
+ uint8_t BLESecurity::m_keySize = 16;
+ esp_ble_sec_act_t BLESecurity::m_securityLevel;
++BLESecurity::Policy BLESecurity::policy() {
++  return {m_authReq, m_iocap, m_initKey, m_respKey, m_keySize};
++}
++esp_err_t BLESecurity::applyPolicy(const Policy& p) {
++  const esp_ble_sm_param_t kinds[] = {ESP_BLE_SM_AUTHEN_REQ_MODE, ESP_BLE_SM_IOCAP_MODE,
++    ESP_BLE_SM_SET_INIT_KEY, ESP_BLE_SM_SET_RSP_KEY, ESP_BLE_SM_MAX_KEY_SIZE};
++  uint8_t values[] = {p.authentication, p.capability, p.initiatorKeys, p.responderKeys, p.keySize};
++  uint8_t* mirrors[] = {&m_authReq, &m_iocap, &m_initKey, &m_respKey, &m_keySize};
++  esp_err_t first = ESP_OK;
++  for (unsigned i = 0; i < sizeof(values); ++i) {
++    const esp_err_t result = esp_ble_gap_set_security_param(kinds[i], &values[i], sizeof(uint8_t));
++    if (result == ESP_OK) *mirrors[i] = values[i];
++    else if (first == ESP_OK) first = result;
++  }
++  return first;
++}
++
+ FreeRTOS::Semaphore *BLESecurity::m_authCompleteSemaphore = nullptr;
+ #endif
+ 

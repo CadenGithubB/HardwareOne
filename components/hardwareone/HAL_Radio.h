@@ -78,6 +78,7 @@ struct RadioCompanionIdentity {
   uint32_t minFreeHeap;
   uint32_t cpuMhz;
   uint32_t nativeEspNowVersion;
+  uint8_t bleMaxConnections;      // BLE controller links the bridge reports, 0 not reported
   char build[17];
 };
 
@@ -114,6 +115,11 @@ bool radioHalEspNowAvailable();
 
 const RadioCompanionIdentity& radioHalIdentity();
 esp_err_t radioHalRefreshIdentity();            // RPCs; transport must be up
+// BLE links the companion's controller accepts, for central-link admission:
+// min(HW1_C6_BLE_MAX_CONNECTIONS, the limit the bridge reports). A companion
+// that reports none (no bridge, a bridge built before the report, or no
+// identity read yet) counts as 3, the IDF default those images were built with.
+uint8_t radioHalCompanionBleLinks();
 void radioHalBridgeStats(RadioBridgeStats& out);
 esp_err_t radioHalQueryMemory(RadioCompanionMemory& out); // RPC; transport must be up
 const RadioCompanionMemory& radioHalLastMemory();
@@ -170,6 +176,8 @@ inline const RadioCompanionIdentity& radioHalIdentity() {
   return none;
 }
 inline esp_err_t radioHalRefreshIdentity() { return ESP_ERR_NOT_SUPPORTED; }
+// No companion: this image's own controller configuration is the only limit.
+inline uint8_t radioHalCompanionBleLinks() { return UINT8_MAX; }
 inline void radioHalBridgeStats(RadioBridgeStats& out) { out = {}; }
 inline esp_err_t radioHalQueryMemory(RadioCompanionMemory& out) { out = {}; return ESP_ERR_NOT_SUPPORTED; }
 inline const RadioCompanionMemory& radioHalLastMemory() {

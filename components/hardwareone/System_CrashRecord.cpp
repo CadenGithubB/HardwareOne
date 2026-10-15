@@ -124,18 +124,26 @@ static uint32_t fnv1a(const void* data, size_t len, uint32_t seed) {
 // -Wl,--wrap=esp_panic_handler flag activates. Arduino has already walked the
 // backtrace for us by this point.
 //
-// WHAT IS SAFE HERE — the other core is stalled, the TIMG watchdogs are off, the
-// RTC WDT is armed at ~10 s (the hard budget for everything below), and the
-// flash cache has been re-enabled by panic_enable_cache(). So reading rodata and
-// doing plain stores is fine. FORBIDDEN: malloc, any locking FreeRTOS call,
-// printf, LittleFS, and esp_flash_*/esp_partition_* (the flash guard IPCs the
-// stalled core and deadlocks). Nothing below does any of those.
-static void crashPanicHook(arduino_panic_info_t* info, void* /*arg*/) {
+// WHAT IS SAFE HERE — the other core is stalled, the TIMG watchdogs are off and
+// the RTC WDT is armed at ~10 s (the hard budget for everything below).
+// panic_enable_cache() has re-enabled the flash cache, but flash can still be
+// unreadable (a fault in the middle of an erase or program, or a cache error),
+// so with CONFIG_ESP_PANIC_HANDLER_IRAM this hook lives in IRAM like the rest
+// of the panic path and touches only RAM, RTC memory and the reason text.
+// FORBIDDEN: malloc, any locking FreeRTOS call, printf, LittleFS, and
+// esp_flash_*/esp_partition_* (the flash guard IPCs the stalled core and
+// deadlocks). Nothing below does any of those.
+#if CONFIG_ESP_PANIC_HANDLER_IRAM
+#define CRASH_PANIC_ATTR IRAM_ATTR
+#else
+#define CRASH_PANIC_ATTR
+#endif
+static void CRASH_PANIC_ATTR crashPanicHook(arduino_panic_info_t* info, void* /*arg*/) {
   // Invalidate first. If we fault partway through the capture, the next boot
   // must see an INVALID record rather than a half-written one that reads as
-  // authoritative. PANIC_ENTRY_COUNT_MAX is 2, so a faulting hook gets exactly
-  // one retry before a hard restart — magic-cleared-first is what makes that
-  // survivable.
+  // authoritative. Arduino's wrap does not call this hook again on a nested
+  // panic, so a faulting hook still lets the IDF handler print and restart —
+  // magic-cleared-first is what makes that survivable.
   rtcPanicMagic = 0;
   __asm__ __volatile__("" ::: "memory");
 

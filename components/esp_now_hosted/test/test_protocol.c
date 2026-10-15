@@ -61,7 +61,8 @@ static void info_tests(void)
     }, decoded;
     esp_now_hosted_info_t info = {.wire_version = ESP_NOW_HOSTED_WIRE_VERSION,
                                   .image_state = ESP_NOW_HOSTED_IMAGE_PENDING_VERIFY,
-                                  .running_slot = 1, .uptime_ms = 123456, .cpu_mhz = 160};
+                                  .running_slot = 1, .uptime_ms = 123456, .cpu_mhz = 160,
+                                  .ble_max_connections = 4};
     memcpy(bytes, &response, sizeof(response));
     memcpy(bytes + sizeof(response), &info, sizeof(info));
     assert(esp_now_hosted_decode_response(bytes, sizeof(bytes), &decoded));
@@ -69,7 +70,14 @@ static void info_tests(void)
     esp_now_hosted_info_t back;
     memcpy(&back, bytes + sizeof(response), sizeof(back));
     assert(back.image_state == ESP_NOW_HOSTED_IMAGE_PENDING_VERIFY && back.running_slot == 1 &&
-           back.uptime_ms == 123456 && back.cpu_mhz == 160);
+           back.uptime_ms == 123456 && back.cpu_mhz == 160 && back.ble_max_connections == 4);
+    /* A slave built before the BLE limit sent cpu_mhz as a uint32_t: its upper
+     * half, now the limit, is zero, which a host reads as "not reported". */
+    const uint32_t old_cpu_word = 160;
+    memcpy(bytes + sizeof(response) + offsetof(esp_now_hosted_info_t, cpu_mhz), &old_cpu_word,
+           sizeof(old_cpu_word));
+    memcpy(&back, bytes + sizeof(response), sizeof(back));
+    assert(back.cpu_mhz == 160 && back.ble_max_connections == 0 && back.reserved == 0);
     /* The marker a host searches a firmware file for ends in the wire version. */
     const char *marker = ESP_NOW_HOSTED_BRIDGE_MARKER;
     assert(marker[strlen(marker) - 1] == '0' + ESP_NOW_HOSTED_WIRE_VERSION);

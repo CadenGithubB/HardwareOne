@@ -51,6 +51,18 @@ def generate(component: Path = COMPONENT) -> str:
         support.append(extract_block(source, "static WifiConnectBounds wifiConnectBounds("))
         support.append(extract_block(source, "uint32_t wifiBootConnectBudgetMs("))
         support.append("#define HW1_WIFI_CONNECT_BUDGET_API 1")
+        # The superseding radio command's side of a BACKGROUND boot connect.
+        supersede = "static bool wifiConnectSuperseded(" in source
+        if supersede:
+            support.extend(re.findall(r"^static std::atomic<bool> sBackgroundConnect\w+\{false\};$",
+                                      source, re.MULTILINE))
+            support.append(extract_block(source, "static bool wifiConnectSuperseded("))
+            support.append(extract_block(source, "static bool wifiConnectWait("))
+            support.append(extract_block(source, "void wifiBackgroundConnectReserve("))
+            support.append(extract_block(source, "bool wifiBackgroundConnectActive("))
+            support.append(extract_block(source, "bool wifiBackgroundConnectSuperseded("))
+            support.append(extract_block(source, "bool wifiSupersedeBackgroundConnect("))
+        support.append(f"#define HW1_WIFI_SUPERSEDE_API {1 if supersede else 0}")
         support.append("bool connectToBestWiFiNetwork(uint32_t budgetMs, WifiConnectOrigin origin);")
         support.append("static bool huntBest(uint32_t budgetMs, WifiConnectOrigin origin) "
                        "{ return connectToBestWiFiNetwork(budgetMs, origin); }")
@@ -58,6 +70,7 @@ def generate(component: Path = COMPONENT) -> str:
         support.append("enum class WifiConnectOrigin : uint8_t { COMMAND = 0, BOOT };")
         support.append("constexpr uint32_t kWifiConnectHuntBudgetMs = 150000;")
         support.append("#define HW1_WIFI_CONNECT_BUDGET_API 0")
+        support.append("#define HW1_WIFI_SUPERSEDE_API 0")
         support.append("bool connectToBestWiFiNetwork();")
         support.append("static bool huntBest(uint32_t, WifiConnectOrigin) "
                        "{ return connectToBestWiFiNetwork(); }")
@@ -72,6 +85,9 @@ def generate(component: Path = COMPONENT) -> str:
                extract_block(tail, "static bool connectWiFiTarget(const WifiConnectionTarget& nw")]
     if bounded:
         attempt.append(extract_block(tail, "static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw"))
+    if bounded and "static bool wifiConnectSuperseded(" in source:
+        # The boot connect's entry point owns the background connect's lifetime.
+        attempt.append(extract_block(source, "void setupWiFi(uint32_t budgetMs, WifiConnectOrigin origin)"))
 
     harness = (HERE / "wifi_connect_budget_harness.cpp").read_text()
     for marker in ("// INSERT_PRODUCTION_SUPPORT", "// INSERT_PRODUCTION_HUNT", "// INSERT_PRODUCTION_ATTEMPT"):
@@ -84,10 +100,38 @@ def generate(component: Path = COMPONENT) -> str:
 def check_boot_callers(component: Path = COMPONENT) -> None:
     """Connects that run on the boot task pass the BOOT origin, so a console
     keystroke can still skip them; command-context resolution would find no
-    context there and leave the console unread."""
+    context there and leave the console unread. The boot connect that runs on
+    its own task passes BACKGROUND instead, and the radio commands that can
+    arrive while it hunts supersede it first."""
     boot = (component / "HardwareOne.cpp").read_text()
     require("setupWiFi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BOOT);" in boot,
             "the boot connect passes the trial-aware budget and the BOOT origin")
+    wifi = (component / "System_WiFi.cpp").read_text()
+    if "bool wifiSupersedeBackgroundConnect(" in wifi:
+        require("setupWiFi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BACKGROUND);" in boot,
+                "the background boot connect passes the trial-aware budget and the BACKGROUND origin")
+        for handler in ("const char* cmd_wificonnect(", "const char* cmd_wifidisconnect(",
+                        "const char* cmd_wifidrop(", "const char* cmd_radiopower("):
+            body = extract_block(wifi, handler)
+            name = handler.split('(')[0].split()[-1]
+            require("if (!wifiSupersedeBackgroundConnect())" in body,
+                    f"{name} supersedes a background boot connect and reports a timeout")
+        # Ordering the plain presence check above cannot see.
+        power = extract_block(wifi, "const char* cmd_radiopower(")
+        require(power.index("wifiSupersedeBackgroundConnect()") < power.index('"Radio already off."'),
+                "radiopower off stops the boot connect before deciding the radio is already off")
+        connect = extract_block(wifi, "const char* cmd_wificonnect(")
+        require(connect.index('"Usage: openwifi [--best') < connect.index("wifiSupersedeBackgroundConnect()"),
+                "openwifi checks its arguments before cancelling the boot connect")
+        companion = (component / "System_RadioCompanion.cpp").read_text()
+        require("stopBootWifiConnect();" in extract_block(companion, "void stopUsers(")
+                and "stopBootWifiConnect();" in extract_block(companion, "void updateProc("),
+                "the radio companion stops the boot connect before it stops or reuses the transport")
+        espnow = (component / "System_ESPNow.cpp").read_text()
+        require("wifiBackgroundConnectActive()" in extract_block(espnow, "const char* cmd_espnow_init("),
+                "openespnow waits for the boot connect instead of starting beneath it")
+        require("wifiBackgroundConnectReserve(true);" in boot,
+                "the boot task's connect is reserved before the task is created")
     setup = (component / "System_FirstTimeSetup.cpp").read_text()
     require(setup.count("WifiConnectOrigin::BOOT") == 2,
             "both first-time-setup connects (restore and final) pass the BOOT origin")

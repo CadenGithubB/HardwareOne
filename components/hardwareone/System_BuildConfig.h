@@ -244,8 +244,11 @@
 // the derived dependency rules disable this application flag and its consumers.
 #define ENABLE_BLUETOOTH        1
 
+// Android peripheral TCP pipe. Independent of G2; requires authenticated BLE.
+#define ENABLE_BLE_PHONE_PIPE   0
+
 // Even G2 Smart Glasses: BLE client to connect to Even Realities G2 glasses.
-// ESP32 acts as BLE central; mutually exclusive with phone BLE at runtime.
+// ESP32 acts as BLE central; can share that role with the Android pipe.
 // Auto-disabled if ENABLE_BLUETOOTH=0.
 #define ENABLE_G2_GLASSES       1
 
@@ -865,6 +868,20 @@
 #if !ENABLE_HTTP_SERVER && ENABLE_HTTPS
   #undef ENABLE_HTTPS
   #define ENABLE_HTTPS 0
+#endif
+
+// The pipe is an optional central capability, independent of the G2 renderer.
+#if !ENABLE_BLUETOOTH
+  #undef ENABLE_BLE_PHONE_PIPE
+  #define ENABLE_BLE_PHONE_PIPE 0
+#endif
+#if ENABLE_BLE_PHONE_PIPE && defined(CONFIG_IDF_TARGET)
+  #if !defined(CONFIG_BT_BLUEDROID_ENABLED)
+    #error "The Android phone pipe requires Bluedroid"
+  #endif
+  #if ENABLE_G2_GLASSES && CONFIG_BT_ACL_CONNECTIONS < 4
+    #error "G2 plus phone requires four BLE ACL slots (two arms, phone, optional ring)"
+  #endif
 #endif
 
 // Bluetooth web page needs the BLE radio.

@@ -25,6 +25,7 @@
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC
 #include "System_CommandTypes.h"  // CMD_RESULT_MAX — json branch returns the document
 #include <atomic>
+#include <optional>
 #include <ArduinoJson.h>
 #include "System_Command.h"
 #include "System_Notifications.h"
@@ -87,6 +88,7 @@ struct WifiConnectBounds {
   unsigned long startMs = 0;
   uint32_t budgetMs = 0;
   bool consoleCancels = false;
+  bool supersedable = false;  // a BACKGROUND connect: a radio command may stop it
 
   uint32_t remainingMs() const {
     const unsigned long used = millis() - startMs;
@@ -110,6 +112,7 @@ static constexpr uint32_t kWifiBootSetupReserveMs = 90000;
 // main loop, so a keystroke there neither cancels the hunt nor goes missing.
 static bool wifiConsoleCancelApplies(WifiConnectOrigin origin) {
   if (origin == WifiConnectOrigin::BOOT) return true;
+  if (origin == WifiConnectOrigin::BACKGROUND) return false;
   const CommandContext* ctx = static_cast<const CommandContext*>(currentCommandContext());
   return ctx && ctx->origin == ORIGIN_SERIAL;
 }
@@ -119,7 +122,35 @@ static WifiConnectBounds wifiConnectBounds(uint32_t budgetMs, WifiConnectOrigin 
   bounds.startMs = millis();
   bounds.budgetMs = budgetMs;
   bounds.consoleCancels = wifiConsoleCancelApplies(origin);
+  bounds.supersedable = origin == WifiConnectOrigin::BACKGROUND;
   return bounds;
+}
+
+// The BACKGROUND connect's lifetime as superseding commands see it. Active
+// covers exactly the span in which the hunt may hold the radio; a command sets
+// the request and waits for active to clear (wifiSupersedeBackgroundConnect).
+static std::atomic<bool> sBackgroundConnectActive{false};
+static std::atomic<bool> sBackgroundConnectSuperseded{false};
+
+static bool wifiConnectSuperseded(const WifiConnectBounds& bounds) {
+  return bounds.supersedable && sBackgroundConnectSuperseded.load(std::memory_order_acquire);
+}
+
+// delay() that a superseding command can cut short. Returns false when the
+// wait ended because the connect was superseded. Waits outside a BACKGROUND
+// connect are plain delays.
+static bool wifiConnectWait(unsigned long ms, const WifiConnectBounds& bounds) {
+  if (!bounds.supersedable) {
+    delay(ms);
+    return true;
+  }
+  while (ms > 0) {
+    if (wifiConnectSuperseded(bounds)) return false;
+    const unsigned long step = ms < 100 ? ms : 100;
+    delay(step);
+    ms -= step;
+  }
+  return !wifiConnectSuperseded(bounds);
 }
 
 // Helper functions defined later in this file
@@ -681,7 +712,15 @@ bool connectToBestWiFiNetwork(uint32_t budgetMs, WifiConnectOrigin origin) {
   gWifiUserCancelled = false;
   bool connected = false;
 
+  // A BACKGROUND hunt runs beside screens that can start a scan. It keeps the
+  // radio across the pause between saved networks, so a scan cannot slip in
+  // there and make the next attempt give up as busy. The coordinator is
+  // recursive; each attempt takes it again inside this hold.
+  std::optional<WifiRadioMutationGuard> huntGuard;
+  if (bounds.supersedable) huntGuard.emplace();
+
   for (int i = 0; i < saved.count && !connected; ++i) {
+    if (wifiConnectSuperseded(bounds)) break;
     // Brief pause between trying different saved networks. A network whose
     // attempt could not even start inside the budget is reported, not tried.
     const uint32_t pauseMs = i > 0 ? 2000 : 0;
@@ -690,7 +729,7 @@ bool connectToBestWiFiNetwork(uint32_t budgetMs, WifiConnectOrigin origin) {
                        (unsigned long)(bounds.budgetMs / 1000), saved.count - i);
       break;
     }
-    if (pauseMs) delay(pauseMs);
+    if (pauseMs && !wifiConnectWait(pauseMs, bounds)) break;
     // 25 s, not 12 s. The driver's own 4-way-handshake timeout is 10 s and it
     // retries internally; a 12 s budget (12.5 s from esp_wifi_connect() — the
     // 500 ms settle is spent before the deadline clock starts) fits exactly ONE
@@ -713,9 +752,22 @@ bool connectToBestWiFiNetwork(uint32_t budgetMs, WifiConnectOrigin origin) {
       broadcastOutput("*** WiFi connection cancelled by user ***");
       return false;
     }
+    if (!connected && wifiConnectSuperseded(bounds)) break;
+  }
+  huntGuard.reset();
+
+  if (!connected && wifiConnectSuperseded(bounds)) {
+    // The superseding command is waiting for the radio; leave it unassociated
+    // and let that command decide what happens next.
+    WifiRadioMutationGuard radioGuard;
+    if (radioGuard.acquired()) esp_wifi_disconnect();
+    broadcastOutput("WiFi boot connect stopped by a WiFi command");
+    return false;
   }
 
-  if (connected && !gSkipNTPInWifiConnect) {
+  // A BACKGROUND connect belongs to the boot sequence, which syncs the clock
+  // itself once the hunt has finished.
+  if (connected && !gSkipNTPInWifiConnect && origin != WifiConnectOrigin::BACKGROUND) {
     syncNTPAndResolve();
   }
 
@@ -744,9 +796,11 @@ static void clearRadioRestoreSnapshot() {
   gRadioPrevStaIdle = false;
 }
 
+bool wifiRadioForcedOff() { return gRadioForcedOff; }
+
 const char* cmd_wificonnect(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
   // Ensure WiFi is initialized (lazy init)
   if (!ensureWiFiInitialized()) {
     return "ERROR: Failed to initialize WiFi";
@@ -799,6 +853,12 @@ const char* cmd_wificonnect(const String& originalCmd) {
     }
   }
 
+  // A valid connect request replaces a boot connect still hunting in the
+  // background (after the arguments are checked, so a typo cancels nothing).
+  if (!wifiSupersedeBackgroundConnect()) {
+    return "Error: WiFi boot connect is still stopping; retry openwifi";
+  }
+
   if (useBest) {
     // Use shared connection logic
     connected = connectToBestWiFiNetwork();
@@ -832,6 +892,11 @@ const char* cmd_wificonnect(const String& originalCmd) {
 
 const char* cmd_wifidisconnect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  // Stop a boot connect still hunting in the background before closing.
+  if (!wifiSupersedeBackgroundConnect()) {
+    return "Error: WiFi boot connect is still stopping; retry closewifi";
+  }
 
   // Check if WiFi is initialized before attempting disconnect
   wifi_mode_t mode;
@@ -1145,14 +1210,17 @@ const char* cmd_radiopower(const String& originalCmd) {
   String arg = a.arg(0);
   arg.toLowerCase();
 
+  // A boot connect still hunting in the background is the radio being on, even
+  // in the moments its own mode changes leave wifiRadioOn() false.
+  const bool radioOn = wifiRadioOn() || wifiBackgroundConnectActive();
   bool wantOn;
   if (arg == "on")                                wantOn = true;
   else if (arg == "off")                          wantOn = false;
-  else if (arg == "toggle" || arg.length() == 0)  wantOn = !wifiRadioOn();
+  else if (arg == "toggle" || arg.length() == 0)  wantOn = !radioOn;
   else return "Usage: radiopower [on|off|toggle]";
 
   if (wantOn) {
-    if (wifiRadioOn()) {
+    if (radioOn) {
       // Treat an explicit ON as cancellation of a failed OFF transaction. The
       // radio never went down, so there is nothing to restore later.
       clearRadioRestoreSnapshot();
@@ -1162,6 +1230,11 @@ const char* cmd_radiopower(const String& originalCmd) {
       return "Error: radio could not be enabled (WiFi disabled, radio busy, or restore failed).";
     }
     return "Radio on (runtime only).";
+  }
+  // Stop a boot connect still hunting in the background before deciding the
+  // radio is already off and powering it down.
+  if (!wifiSupersedeBackgroundConnect()) {
+    return "Error: WiFi boot connect is still stopping; radio remains on. Retry radiopower off.";
   }
   if (!wifiRadioOn() && !gRadioPowerOffPending) return "Radio already off.";
   const RadioPowerOffResult offResult = radioPowerOff();
@@ -1180,6 +1253,10 @@ const char* cmd_radiopower(const String& originalCmd) {
 // and reconnect/scan to another without re-enabling WiFi.
 const char* cmd_wifidrop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  // Stop a boot connect still hunting in the background before dropping.
+  if (!wifiSupersedeBackgroundConnect()) {
+    return "Error: WiFi boot connect is still stopping; retry wifidisconnect";
+  }
   wifi_mode_t mode;
   if (esp_wifi_get_mode(&mode) != ESP_OK) {
     return "Error: WiFi is not initialized";
@@ -1649,6 +1726,9 @@ static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
   // board -- measure the heap before committing to it.
   const int kMaxWifiAttempts = 3;
   unsigned long retryBackoffMs = 1500;
+  // Set when a radio command superseded a BACKGROUND connect. The attempt ends
+  // without a failure report; the driver repair below still runs.
+  bool superseded = false;
 
   for (int attempt = 1; attempt <= kMaxWifiAttempts; ++attempt) {
     if (attempt > 1) {
@@ -1661,7 +1741,10 @@ static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
       }
       BROADCAST_PRINTF("Retrying '%s' (%d/%d)...", nw.ssid.c_str(), attempt, kMaxWifiAttempts);
       DEBUG_WIFIF("[connectWiFiIndex] Backing off %lums before retry", retryBackoffMs);
-      delay(retryBackoffMs);
+      if (!wifiConnectWait(retryBackoffMs, bounds)) {
+        superseded = true;
+        break;
+      }
       retryBackoffMs = min(retryBackoffMs * 2, (unsigned long)8000);
     }
 
@@ -1839,8 +1922,15 @@ static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
         broadcastOutput("*** WiFi connection cancelled by user ***");
         return false;  // connection cancelled
       }
+      if (wifiConnectSuperseded(bounds)) {
+        DEBUG_WIFIF("[connectWiFiIndex] Background connect superseded by a WiFi command");
+        superseded = true;
+        break;
+      }
       // progress dots omitted from unified output to reduce noise
     }
+
+    if (superseded) break;
 
     if (WiFi.status() == WL_CONNECTED) {
       DEBUG_WIFIF("[connectWiFiIndex] SUCCESS! Connected to '%s', IP=%s",
@@ -1924,7 +2014,12 @@ static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
       }
     }
   }
-  
+
+  if (superseded) {
+    radioGuard.release();
+    return false;
+  }
+
   if (showPriority) {
     BROADCAST_PRINTF("Failed connecting to '%s' after %d attempts - WiFi status: %d",
                      nw.ssid.c_str(), kMaxWifiAttempts, WiFi.status());
@@ -2610,7 +2705,54 @@ void setupWiFi() {
   setupWiFi(kWifiConnectHuntBudgetMs, WifiConnectOrigin::COMMAND);
 }
 
+void wifiBackgroundConnectReserve(bool reserve) {
+  if (reserve) sBackgroundConnectSuperseded.store(false, std::memory_order_release);
+  sBackgroundConnectActive.store(reserve, std::memory_order_release);
+}
+
+bool wifiBackgroundConnectActive() {
+  return sBackgroundConnectActive.load(std::memory_order_acquire);
+}
+
+bool wifiBackgroundConnectSuperseded() {
+  return sBackgroundConnectSuperseded.load(std::memory_order_acquire);
+}
+
+bool wifiSupersedeBackgroundConnect(uint32_t waitMs) {
+  if (!sBackgroundConnectActive.load(std::memory_order_acquire)) return true;
+  sBackgroundConnectSuperseded.store(true, std::memory_order_release);
+  const unsigned long startMs = millis();
+  while (sBackgroundConnectActive.load(std::memory_order_acquire)) {
+    if (millis() - startMs >= waitMs) {
+      WARN_WIFIF("[WiFi] background boot connect still holds the radio after %lums",
+                 (unsigned long)waitMs);
+      return false;
+    }
+    delay(20);
+  }
+  return true;
+}
+
 void setupWiFi(uint32_t budgetMs, WifiConnectOrigin origin) {
+  // A BACKGROUND connect stays visible to superseding commands until this call
+  // returns, including every early return below. Its reservation began before
+  // the boot task started (wifiBackgroundConnectReserve); a request made since
+  // then still stands.
+  struct BackgroundConnectScope {
+    explicit BackgroundConnectScope(bool background) : background_(background) {
+      if (background_) sBackgroundConnectActive.store(true, std::memory_order_release);
+    }
+    ~BackgroundConnectScope() {
+      if (background_) sBackgroundConnectActive.store(false, std::memory_order_release);
+    }
+    const bool background_;
+  } backgroundScope(origin == WifiConnectOrigin::BACKGROUND);
+  if (origin == WifiConnectOrigin::BACKGROUND &&
+      sBackgroundConnectSuperseded.load(std::memory_order_acquire)) {
+    DEBUG_WIFIF("[WiFi Setup] Background connect superseded before it started");
+    return;
+  }
+
   // Ensure WiFi is initialized before attempting connection
   if (!ensureWiFiInitialized()) {
     broadcastOutput("ERROR: Failed to initialize WiFi");
@@ -2667,7 +2809,11 @@ void setupWiFi(uint32_t budgetMs, WifiConnectOrigin origin) {
     DEBUG_WIFIF("[WiFi Setup] No saved networks found - skipping connection");
   }
 
-  if (!connected) {
+  if (!connected && origin == WifiConnectOrigin::BACKGROUND &&
+      sBackgroundConnectSuperseded.load(std::memory_order_acquire)) {
+    // A WiFi command took the radio over; it reports its own outcome.
+    DEBUG_WIFIF("[WiFi Setup] Background connect superseded");
+  } else if (!connected) {
     broadcastOutput("WiFi connect timed out; continuing without network");
     // Once-per-boot latch: setupWiFi can also run via first-time setup.
     static bool sBootConnectFailLogged = false;

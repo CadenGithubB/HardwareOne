@@ -67,6 +67,11 @@ PY
         -D "IDF_TARGET=$target" \
         -D "SDKCONFIG=$config_file" \
         -D "SDKCONFIG_DEFAULTS=$source_dir/sdkconfig.defaults" build
+    # Kconfig drops a default it cannot apply without an error. Check that the
+    # resolved C6 configuration has every setting prepare.py requires.
+    if [[ "$name" == c6 ]]; then
+        python3 "$root/prepare.py" --check
+    fi
 }
 
 if [[ "$selection" == all ]]; then

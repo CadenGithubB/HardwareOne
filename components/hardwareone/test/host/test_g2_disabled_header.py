@@ -63,6 +63,7 @@ void checkRenderCalls() {
     char pageBuf[] = "unchanged";
     bool pending = true;
     const bool results[] = {
+        g2BothConnected(),
         g2ShowListPage(items, 2),
         g2ShowListPage(items, 2, G2_GEOM_SMALL),
         g2ShowTextPage("text"),

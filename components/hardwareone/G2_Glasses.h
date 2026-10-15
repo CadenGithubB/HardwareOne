@@ -1505,6 +1505,7 @@ inline bool g2Connect(G2Eye eye = G2_EYE_LEFT) { return false; }
 inline bool g2ConnectSaved() { return false; }
 inline bool g2Disconnect(bool = false) { return true; }
 inline bool isG2Connected() { return false; }
+inline bool g2BothConnected() { return false; }
 inline bool g2LeftConnected() { return false; }
 inline G2State getG2State() { return G2_STATE_IDLE; }
 inline const char* getG2StateString() { return "disabled"; }

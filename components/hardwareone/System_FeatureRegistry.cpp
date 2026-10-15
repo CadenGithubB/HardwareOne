@@ -305,7 +305,7 @@ static constexpr FeatureEntry featureRegistry[] = {
   { "bluetooth", "Bluetooth", FEATURE_CAT_NETWORK, 12,
     FEATURE_FLAG_RUNTIME_TOGGLE,
     &gSettings.bleAutoStart, isBluetoothCompiled,
-    "BLE server for remote control" },
+    "Bluetooth in the selected Server, G2 client or phone client mode" },
     
   { "espnow", "ESP-NOW", FEATURE_CAT_NETWORK, 8,
     FEATURE_FLAG_RUNTIME_TOGGLE,

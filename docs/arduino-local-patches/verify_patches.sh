@@ -63,6 +63,40 @@ check_symbol cores/esp32/esp32-hal-hosted.h hostedSetTransportLost
 check_symbol cores/esp32/esp32-hal-bt.c hostedTransportLost
 check_symbol libraries/WiFi/src/WiFiGeneric.cpp hostedTransportLost
 
+# Panic path without flash, 2026-10-15 (marked): the panic wrap follows
+# CONFIG_ESP_PANIC_HANDLER_IRAM into IRAM and runs the custom handler once.
+check_symbol cores/esp32/esp32-hal-misc.c _panic_custom_entered
+
+# URL-pull firmware download removed, 2026-08-30: no OTA path may fetch
+# firmware from a URL compiled into the image. A re-vendor brings these back
+# (and back into the build list) silently, so check that they stay gone.
+check_absent() { # relative-path [pattern]: the path, or the pattern in it, must be gone
+  local f="$ARD/$1"
+  if [ -z "${2:-}" ]; then
+    if [ -e "$f" ]; then
+      echo "REMOVAL UNDONE: components/arduino/$1 is back"
+      fail=1
+    else
+      echo "ok: components/arduino/$1 (absent)"
+    fi
+  elif [ ! -f "$f" ]; then
+    echo "MISSING FILE: components/arduino/$1"
+    fail=1
+  elif grep -qE "$2" "$f"; then
+    echo "REMOVAL UNDONE: components/arduino/$1 contains $2"
+    fail=1
+  else
+    echo "ok: components/arduino/$1 (no $2)"
+  fi
+}
+check_absent libraries/ESP_HostedOTA
+check_absent libraries/HTTPUpdate
+check_absent libraries/Update/src/HttpsOTAUpdate.cpp
+check_absent libraries/Update/src/HttpsOTAUpdate.h
+check_absent CMakeLists.txt 'ESP_HostedOTA|HttpsOTAUpdate|HTTPUpdate_SRCS|^  HTTPUpdate$'
+check_absent cores/esp32/esp32-hal-hosted.c hostedGetUpdateURL
+check_absent cores/esp32/esp32-hal-hosted.h hostedGetUpdateURL
+
 # NetworkEvents.cpp carries an UNMARKED local change — detectable only via git.
 # A clean diff here means it was either reverted or committed into the nested
 # repo; check `git -C components/arduino log` before assuming it is fine.
@@ -77,6 +111,10 @@ if [ "$fail" -ne 0 ]; then
   echo "Local patches are MISSING. Re-apply with:"
   echo "  git -C \"$ARD\" apply --check \"$ROOT/docs/arduino-local-patches/arduino-local-patches.patch\" \\"
   echo "    && git -C \"$ARD\" apply \"$ROOT/docs/arduino-local-patches/arduino-local-patches.patch\""
+  echo "then the dated patches in date order (README.md):"
+  echo "  arduino-local-patches-2026-08-30-url-ota-removal.patch"
+  echo "  arduino-local-patches-2026-10-02-companion.patch"
+  echo "  arduino-local-patches-2026-10-15-panic-iram.patch"
   exit 1
 fi
 echo "All arduino local patches present."

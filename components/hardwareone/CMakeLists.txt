@@ -168,6 +168,9 @@ set(hardwareone_srcs
         G2_Glasses.cpp
         G2_Ring.cpp
         BLE_CentralTx.cpp
+        BLE_CentralCoordinator.cpp
+        BLE_PhoneGatt.cpp
+        BLE_PhonePipe.cpp
         BLE_Events.cpp
         BLE_Peers.cpp
         G2_Page_Sensors.cpp
@@ -550,8 +553,8 @@ if(HW_CFG_ENABLE_LLM_BACKEND GREATER 0)
         message(STATUS "LLM source: CM5 co-processor ENABLED")
     endif()
     if(HW_CFG_ENABLE_LLM_SOURCE_HTTP GREATER 0)
-        list(APPEND hardwareone_srcs System_LLMHttp.cpp)
-        list(APPEND hardwareone_requires esp_http_client)
+        list(APPEND hardwareone_srcs System_LLMHttp.cpp System_LLMHttpTransport.cpp)
+        list(APPEND hardwareone_requires esp_http_client tcp_transport esp-tls)
         message(STATUS "LLM source: HTTP OpenClaw ENABLED")
     endif()
     list(APPEND hardwareone_srcs WebPage_LLM.cpp)

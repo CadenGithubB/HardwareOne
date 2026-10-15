@@ -1,4 +1,5 @@
 #include "System_LLMHttpCore.h"
+#include "System_LLMHttpTransportCore.h"
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
@@ -17,6 +18,7 @@ class Stream {};
 #define ENABLE_LLM_SOURCE_HTTP 1
 #define ENABLE_G2_GLASSES 1
 #define ENABLE_LOCAL_STT 1
+#define ENABLE_BLE_PHONE_PIPE 0
 #define CONFIG_MBEDTLS_CERTIFICATE_BUNDLE 0
 #define EXT_RAM_BSS_ATTR
 #define pdTRUE 1
@@ -160,6 +162,12 @@ static void esp_http_client_close(Client*) {}
 static void esp_http_client_cleanup(Client* c) { ++cleanups; delete c; }
 static bool esp_http_client_is_complete_data_received(Client*) { return completeResponse; }
 
+static bool phonePipeReady() { return false; }
+namespace Clock {
+static long epochSeconds(){return 0;}
+static bool isPlausibleEpoch(long){return true;}
+}
+// INSERT_IO
 // INSERT_INTERFACE
 // INSERT_IMPLEMENTATION
 

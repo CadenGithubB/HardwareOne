@@ -11888,6 +11888,14 @@ const char* cmd_espnow_init(const String& argsInput) {
   if (gEspNow && gEspNow->initialized) {
     return "ESP-NOW already initialized";
   }
+#if ENABLE_WIFI
+  // The boot Wi-Fi connect hunts on its own task and switches the radio mode
+  // between attempts; it would not see an ESP-NOW that is still starting and
+  // could drop the AP that parks its channel. Boot autostart waits for it.
+  if (wifiBackgroundConnectActive()) {
+    return "Error: WiFi boot connect in progress; retry openespnow when it finishes";
+  }
+#endif
 
   // P4X-EYE: ESP-NOW runs on the C6 companion through the HardwareOne bridge.
   {

@@ -92,7 +92,7 @@ static esp_err_t handleBleStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   httpd_resp_set_type(req, "application/json");
 
-  const char* mode = (gSettings.bleMode == 1) ? "client" : "server";
+  const char* mode = getBleModeString();
   PSRAM_JSON_DOC(doc);
   doc["schema"] = 1;
   doc["mode"] = mode;

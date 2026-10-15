@@ -366,7 +366,12 @@ static void process_request(const uint8_t *data, size_t len)
         info.uptime_ms = (uint32_t)(esp_timer_get_time() / 1000);
         info.free_heap = esp_get_free_heap_size();
         info.min_free_heap = esp_get_minimum_free_heap_size();
-        info.cpu_mhz = (uint32_t)(esp_clk_cpu_freq() / 1000000);
+        info.cpu_mhz = (uint16_t)(esp_clk_cpu_freq() / 1000000);
+#ifdef CONFIG_BT_LE_MAX_CONNECTIONS
+        /* prepare.py sets it from HW1_C6_BLE_MAX_CONNECTIONS. The P4 cannot
+         * learn the controller's limit through Hosted, so report it here. */
+        info.ble_max_connections = (uint8_t)CONFIG_BT_LE_MAX_CONNECTIONS;
+#endif
         uint32_t version = 0;
         if (s_espnow_initialized && esp_now_get_version(&version) == ESP_OK) info.native_espnow_version = version;
         const esp_app_desc_t *desc = esp_app_get_description();

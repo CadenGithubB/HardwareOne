@@ -40,3 +40,9 @@ struct BleCentralTxGuard {
   BleCentralTxGuard& operator=(const BleCentralTxGuard&) = delete;
   explicit operator bool() const { return held; }
 };
+
+// Phone writes have lower admission priority than G2/ring. These calls never
+// wait for the controller gate; the caller releases it immediately after API
+// submission, before any completion wait.
+bool bleCentralTxTryPhone();
+bool bleCentralTxAccessoryPressure();

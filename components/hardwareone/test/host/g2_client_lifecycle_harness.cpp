@@ -82,6 +82,7 @@ struct Boundaries {
   bool sessionStops = true, uiQuiesces = true, disconnect = true;
   bool connectIdle = true, scanIdle = true, connectStops = true;
   bool leftReset = true, rightReset = true;
+  bool phoneStops = true;
   bool sampledMemory = false;
   size_t activeHeap = 0, stoppedHeap = 0;
   unsigned memorySamples = 0, serverStopCalls = 0, templeInits = 0;
@@ -90,6 +91,9 @@ struct Boundaries {
   std::vector<std::string> events;
   unsigned halStarts = 0, halStops = 0, peerRegisters = 0, templeResets = 0;
 } boundary;
+static bool phonePipeStop() { return boundary.phoneStops; }
+static bool phonePipeHostStopped() { return boundary.stopped; }
+static bool phonePipeStart(bool) { return true; }
 static struct Settings { bool bleEnabled = true; int bleTxPower = 3; } gSettings;
 enum class BleRoleTransition { IDLE, G2_START, G2_STOP, RECOVERING };
 static BleRoleTransition roleState = BleRoleTransition::IDLE;
@@ -245,6 +249,7 @@ static void transitions() {
                            "server", "ring-busy", "ring-quiesce", "normalize", "left-temple", "right-temple"};
   for (const char* reason : refusals) {
     defaults(); const std::string why(reason);
+    if (why == "phone") boundary.phoneStops = false;
     if (why == "role") boundary.role = false;
     if (why == "fault") boundary.fault = true;
     if (why == "companion") boundary.companion = true;
@@ -289,10 +294,11 @@ static void transitions() {
     std::cout << "worker-init:" << workers << '\n';
   }
   const char* deferrals[] = {"role", "init", "ui-init", "ui-submit", "session", "ui", "disconnect",
-                            "connect-idle", "scan", "connect-stop", "left-reset", "right-reset"};
+                            "connect-idle", "scan", "connect-stop", "left-reset", "right-reset", "phone"};
   for (const char* reason : deferrals) {
     defaults(); check(initG2Client(), "prepare active teardown case"); publishConnected();
     const std::string why(reason);
+    if (why == "phone") boundary.phoneStops = false;
     if (why == "role") boundary.role = false;
     if (why == "init") gClientInitters = 1;
     if (why == "ui-init") gUiWorkerInitters = 1;

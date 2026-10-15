@@ -18,6 +18,7 @@ def main():
     here = Path(__file__).resolve().parent
     source = here.parents[1]
     harness = (here / 'llm_http_runtime_harness.cpp').read_text()
+    harness = harness.replace('// INSERT_IO', stripped(source / 'System_LLMHttpTransport.h') + '\n' + stripped(source / 'System_LLMHttpTransport.cpp'))
     harness = harness.replace('// INSERT_INTERFACE', stripped(source / 'System_LLMHttp.h'))
     harness = harness.replace('// INSERT_IMPLEMENTATION', stripped(source / 'System_LLMHttp.cpp') +
                               '\n' + stripped(source / 'System_LLMHttpTerminal.inc'))
