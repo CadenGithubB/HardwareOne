@@ -1,3 +1,4 @@
+#include "Bluetooth.h"
 /**
  * System Setup Wizard Implementation
  * 
@@ -750,16 +751,24 @@ bool wizardStageMQTTSettings(const SetupWizardResult& result) {
 #if ENABLE_HTTP_SERVER && ENABLE_HTTPS
 static const WizardModeOption kWebModes[] = { {"HTTP", 0, 0}, {"HTTPS", 1, 20} };
 #endif
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-static const WizardModeOption kBtModes[]  = { {"Server (phone)", 0, 0}, {"G2 Glasses", 1, 10} };
+#if ENABLE_BLUETOOTH && (ENABLE_G2_GLASSES || ENABLE_BLE_PHONE_PIPE)
+static const WizardModeOption kBtModes[] = {
+  {"Server (console)", BLE_MODE_SERVER, 0},
+#if ENABLE_G2_GLASSES
+  {"G2 Glasses", BLE_MODE_G2_CLIENT, 10},
+#endif
+#if ENABLE_BLE_PHONE_PIPE
+  {"Phone pipe client", BLE_MODE_PHONE_CLIENT, 32},
+#endif
+};
 #endif
 
 static const WizardModeMenu kModeMenus[] = {
 #if ENABLE_HTTP_SERVER && ENABLE_HTTPS
   { "http",      "Web Mode",       kWebModes, 2, &sWizardDraft.values.httpsEnabled, nullptr },
 #endif
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  { "bluetooth", "Bluetooth Mode", kBtModes,  2, nullptr, &sWizardDraft.values.bleMode },
+#if ENABLE_BLUETOOTH && (ENABLE_G2_GLASSES || ENABLE_BLE_PHONE_PIPE)
+  { "bluetooth", "Bluetooth Mode", kBtModes, sizeof(kBtModes)/sizeof(kBtModes[0]), nullptr, &sWizardDraft.values.bleMode },
 #endif
 };
 static const size_t kModeMenuCount = sizeof(kModeMenus) / sizeof(kModeMenus[0]);
@@ -1711,7 +1720,7 @@ bool wizardSaveAndApplySettings(SetupWizardResult& result) {
   const auto& initial = sWizardDraft.initial;
   const bool invalid = !sWizardDraft.valid ||
       (draft.logLevel != initial.logLevel && (draft.logLevel < 0 || draft.logLevel >= (int)logLevelCount)) ||
-      (draft.bleMode != initial.bleMode && (draft.bleMode < 0 || draft.bleMode > 1)) ||
+      (draft.bleMode != initial.bleMode && !bleModeIsAvailable(draft.bleMode)) ||
       (draft.mqttPort != initial.mqttPort && (draft.mqttPort < 1 || draft.mqttPort > 65535));
   // Reserve every edited destination before publishing any value. A failed
   // String copy must not turn Apply into a partial configuration change.

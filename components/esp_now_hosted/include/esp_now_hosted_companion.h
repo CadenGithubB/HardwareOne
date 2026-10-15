@@ -5,7 +5,8 @@
  *   - main/radio_backend.cpp compares the running C6's reported Hosted version
  *     with these values at boot and probes for the ESP-NOW bridge;
  *   - tools/p4/companion/prepare.py reads the TAG/SHA literals below to fetch
- *     and verify the pinned ESP-Hosted slave and serial-flasher sources;
+ *     and verify the pinned ESP-Hosted slave and serial-flasher sources, and
+ *     the BLE connection limit to configure the slave's controller;
  *   - the documentation quotes them.
  * Keep every value a plain literal on its own line; prepare.py parses this
  * file as text, not through the C preprocessor.
@@ -19,6 +20,17 @@
 #define HW1_C6_HOSTED_VERSION_MAJOR 2
 #define HW1_C6_HOSTED_VERSION_MINOR 12
 #define HW1_C6_HOSTED_VERSION_PATCH 13
+
+/* BLE controller connections the companion allows (both G2 arms, the R1 ring
+ * and the phone pipe). prepare.py builds the slave with this value as
+ * CONFIG_BT_LE_MAX_CONNECTIONS and reserves that many connections at controller
+ * init. Hosted cannot report the limit and its version does not change with
+ * it, so the bridge reports it in GET_INFO; the P4 admits
+ * radioHalCompanionBleLinks() = min(this, reported) links. A companion that
+ * reports no limit (stock Hosted, or a bridge built before the report) was
+ * built with the IDF default of 3 and refuses a 4th connection in the
+ * controller. */
+#define HW1_C6_BLE_MAX_CONNECTIONS 4
 
 /* esp-serial-flasher used by the P4-side C6 programmer service. */
 #define HW1_C6_FLASHER_TAG "v1.10.0"

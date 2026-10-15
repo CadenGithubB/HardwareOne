@@ -38,8 +38,8 @@ def generated(component: Path) -> str:
     settings = (COMPONENT / "System_Settings.h").read_text()
     hal = (COMPONENT / "HAL_Bluetooth.h").read_text()
 
-    modes = re.findall(r"^#define BLE_MODE_(?:SERVER|G2_CLIENT)\s+\d+", header, re.MULTILINE)
-    require(len(modes) == 2, "BLE mode constants are present in Bluetooth.h")
+    modes = re.findall(r"^#define BLE_MODE_(?:SERVER|G2_CLIENT|PHONE_CLIENT)\s+\d+", header, re.MULTILINE)
+    require(len(modes) == 3, "BLE mode constants are present in Bluetooth.h")
     default = re.search(r"static constexpr int kBleModeDefaultForBuild = [^;]+;", settings)
     require(default is not None, "kBleModeDefaultForBuild is present in System_Settings.h")
     types = [*modes, default[0], (COMPONENT / "BLE_Types.h").read_text(),
@@ -121,13 +121,15 @@ def main() -> None:
 
         source = generated(args.component)
         for g2 in (1, 0):
-            if not compile_and_run(f"server-stop-g2-{g2}", source, [f"-DENABLE_G2_GLASSES={g2}"]):
-                failures.append(f"server stop (ENABLE_G2_GLASSES={g2})")
+            for phone in (1, 0):
+                if not compile_and_run(f"server-stop-g2-{g2}-phone-{phone}", source,
+                                       [f"-DENABLE_G2_GLASSES={g2}", f"-DENABLE_BLE_PHONE_PIPE={phone}"]):
+                    failures.append(f"server stop (G2={g2}, phone={phone})")
 
         disabled = work / "disabled-include"
         disabled.mkdir()
         shutil.copyfile(args.component / "Bluetooth.h", disabled / "Bluetooth.h")
-        (disabled / "System_BuildConfig.h").write_text("#define ENABLE_BLUETOOTH 0\n")
+        (disabled / "System_BuildConfig.h").write_text("#define ENABLE_BLUETOOTH 0\n#define ENABLE_G2_GLASSES 0\n#define ENABLE_BLE_PHONE_PIPE 0\n")
         (disabled / "System_User.h").write_text(
             "#include <cstdint>\nusing TransportSessionEpoch = uint32_t;\n")
         if not compile_and_run("disabled", DISABLED_CHECK,

@@ -2,21 +2,17 @@
 #if ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_HTTP
 
 #include "System_LLMHttpCore.h"
+#include "System_LLMHttpTransport.h"
 #include "System_MemUtil.h"
-#include <WiFi.h>
 #include <atomic>
 #include <new>
 #include <esp_http_client.h>
 #include <esp_log.h>
 #include <esp_random.h>
 #include <mbedtls/platform_util.h>
-#include <sys/socket.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
-#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
-#include <esp_crt_bundle.h>
-#endif
 
 namespace {
 using namespace hw1http;
@@ -38,7 +34,7 @@ char sError[128]{};
 char sConfigError[96]{};
 char sConversation[48]{};
 bool sSelected = false, sWorker = false, sDone = true;
-int sSocket = -1;
+LlmHttpIo* sIo = nullptr;
 uint32_t sStartedMs = 0;
 uint32_t sRevision = 1;
 int sSession = 0, sNextSession = 1;
@@ -75,21 +71,20 @@ void rotateLocked() {
 }
 
 void interruptSocketLocked() {
-  // shutdown wakes a blocked read without freeing the HTTP/TLS objects.
-  // Worker clears this descriptor under the same lock before close/cleanup.
-  if (sSocket >= 0) (void)shutdown(sSocket, SHUT_RDWR);
+  // Published before connect; cancellation never frees worker-owned I/O.
+  llmHttpIoCancel(sIo);
 }
 
-#if ENABLE_G2_GLASSES && ENABLE_LOCAL_STT
+#if (ENABLE_G2_GLASSES && ENABLE_LOCAL_STT) || ENABLE_BLE_PHONE_PIPE
 bool sTerminalWorker = false;
-int sTerminalSocket = -1;
+LlmHttpIo* sTerminalIo = nullptr;
 uint32_t sTerminalToken = 0, sTerminalNextToken = 0;
 std::atomic<bool> sTerminalCancel{false};
 EXT_RAM_BSS_ATTR HttpTerminalResult sTerminalResult;
 EXT_RAM_BSS_ATTR char sTerminalResponse[HTTP_TERMINAL_JSON_CAP + 1];
 void interruptTerminalLocked() {
   sTerminalCancel.store(true, std::memory_order_release);
-  if (sTerminalSocket >= 0) (void)shutdown(sTerminalSocket, SHUT_RDWR);
+  llmHttpIoCancel(sTerminalIo);
 }
 #else
 void interruptTerminalLocked() {}
@@ -177,7 +172,7 @@ void failConfigurationPublication() {
   sConfigAdmitted.store(false, std::memory_order_release);
   sConfigFailurePending.store(true, std::memory_order_release);
   sCancel.store(true, std::memory_order_release);
-#if ENABLE_G2_GLASSES && ENABLE_LOCAL_STT
+#if (ENABLE_G2_GLASSES && ENABLE_LOCAL_STT) || ENABLE_BLE_PHONE_PIPE
   sTerminalCancel.store(true, std::memory_order_release);
 #endif
 }
@@ -192,9 +187,10 @@ void applyConfigurationFailureLocked() {
   interruptTerminalLocked();
 }
 
-// The worker exclusively owns its client. Stop shuts down its published socket;
-// only the worker closes/frees it. Connect/write also carry a bounded timeout.
+// The worker exclusively owns client and transport. Stop cancels the published
+// I/O handle; only this worker closes/frees it after unpublishing under Lock.
 void worker(void* context) {
+  const uint32_t start = millis();
   // ESP-IDF's HTTP_CLIENT debug logs print the complete outbound header block
   // (including Authorization) and inbound header values. Suppress that tag
   // before initialization/header setup and keep it suppressed after cleanup.
@@ -212,6 +208,7 @@ void worker(void* context) {
   auto* stream = parserMemory ? new (parserMemory) hw1http::Stream(&allocator) : nullptr;
   auto* body = static_cast<char*>(ps_alloc(kBodyCap, AllocPref::PreferPSRAM, "llm.http.body"));
   esp_http_client_handle_t client = nullptr;
+  LlmHttpIo* io = nullptr;
   size_t bodyLen = 0;
   if (!stream || !body) error = "Not enough memory for HTTP agent";
   if (!error) {
@@ -237,11 +234,10 @@ void worker(void* context) {
     cfg.event_handler = httpEvent;
     cfg.user_data = run;
     cfg.keep_alive_enable = false;
-    if (run->config.ca[0]) cfg.cert_pem = run->config.ca;
-#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
-    else cfg.crt_bundle_attach = esp_crt_bundle_attach;
-#endif
-    client = esp_http_client_init(&cfg);
+    io = llmHttpIoCreate(run->config.ca, !strncasecmp(run->config.url, "https://", 8),
+                         sCancel, start, kTotalMs, run->revision);
+    if (io) { Lock lock(true); if (lock) sIo = io; }
+    if (llmHttpIoConfigure(io, cfg)) client = esp_http_client_init(&cfg);
     if (!client) error = "Could not initialize HTTP agent";
   }
   if (!error && client) {
@@ -255,7 +251,6 @@ void worker(void* context) {
       error = "Could not set agent request headers";
     mbedtls_platform_zeroize(authorization, sizeof(authorization));
   }
-  const uint32_t start = millis();
   uint32_t lastData = start;
   if (!error && client && !sCancel.load(std::memory_order_acquire)) {
     if (esp_http_client_open(client, static_cast<int>(bodyLen)) != ESP_OK)
@@ -263,13 +258,14 @@ void worker(void* context) {
     if (!error) {
       Lock lock(true);
       if (lock) {
-        sSocket = esp_http_client_get_socket(client);
+        llmHttpIoConnected(io, client);
         if (sCancel.load(std::memory_order_acquire)) interruptSocketLocked();
       }
     }
     // Partial writes continue the SAME request, never replay a POST.
     size_t sent = 0;
     while (!error && sent < bodyLen && !sCancel.load(std::memory_order_acquire)) {
+      if (uint32_t(millis() - start) >= kTotalMs) { error = "Agent request time limit reached; outcome unknown"; break; }
       int n = esp_http_client_write(client, body + sent, static_cast<int>(bodyLen - sent));
       if (n <= 0) error = "Agent request write failed; outcome unknown";
       else sent += static_cast<size_t>(n);
@@ -316,9 +312,10 @@ void worker(void* context) {
   }
   {
     Lock lock(true);
-    if (lock) { applyConfigurationFailureLocked(); sSocket = -1; }
+    if (lock) { applyConfigurationFailureLocked(); sIo = nullptr; }
   }
   if (client) { esp_http_client_close(client); esp_http_client_cleanup(client); }
+  llmHttpIoDestroy(io);
   if (stream) {
     if (error) {
       stream->text.finish(false);
@@ -415,7 +412,7 @@ size_t httpLlmEnumerate(LlmModelDesc* out, size_t cap) {
   if (!out || !cap) return 0;
   Lock lock;
   if (!lock || !sConfig.enabled) return 0;
-  descriptor(out, sConfigAdmitted.load(std::memory_order_acquire) && sConfig.valid && WiFi.isConnected()); return 1;
+  descriptor(out, sConfigAdmitted.load(std::memory_order_acquire) && sConfig.valid && llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8))); return 1;
 }
 bool httpLlmFindByName(const char* name, LlmModelDesc* out) {
   return name && !strcasecmp(name, "openclaw") && httpLlmEnumerate(out, 1) == 1;
@@ -427,7 +424,7 @@ bool httpLlmSelectByName(const char* name, char* error, size_t cap) {
       !sConfigAdmitted.load(std::memory_order_acquire) ? kConfigPublicationError :
       !sConfig.enabled ? "HTTP agent is disabled" :
       !sConfig.valid ? sConfigError : sWorker ? "HTTP agent request still active" :
-      !WiFi.isConnected() ? "Wi-Fi is not connected" : nullptr;
+      !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8)) ? "No relay transport is ready" : nullptr;
   if (reason) { if (error && cap) strlcpy(error, reason, cap); return false; }
   sSelected = true; sError[0] = 0;
   if (!sConversation[0]) rotateLocked();
@@ -440,7 +437,7 @@ void httpLlmUnload() {
 bool httpLlmIsReady() {
   Lock lock;
   return lock && sConfigAdmitted.load(std::memory_order_acquire) && sSelected &&
-         sConfig.enabled && sConfig.valid && !sWorker && WiFi.isConnected();
+         sConfig.enabled && sConfig.valid && !sWorker && llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8));
 }
 LLMStatus httpLlmStatus() {
   LLMStatus st{}; Lock lock;
@@ -451,9 +448,9 @@ LLMStatus httpLlmStatus() {
     strlcpy(st.errorMsg, kConfigPublicationError, sizeof(st.errorMsg)); return st;
   }
   st.state = !sSelected ? LLMState::UNLOADED : sWorker ? LLMState::GENERATING :
-             sError[0] || !sConfig.valid || !sConfig.enabled || !WiFi.isConnected() ? LLMState::ERROR : LLMState::READY;
+             sError[0] || !sConfig.valid || !sConfig.enabled || !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8)) ? LLMState::ERROR : LLMState::READY;
   const char* reason = sError[0] ? sError : !sConfig.enabled ? "HTTP agent disabled" :
-                       !sConfig.valid ? sConfigError : !WiFi.isConnected() ? "Wi-Fi disconnected" : "";
+                       !sConfig.valid ? sConfigError : !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8)) ? "No relay transport ready" : "";
   strlcpy(st.errorMsg, reason, sizeof(st.errorMsg)); return st;
 }
 int httpLlmStartAsync(const char* prompt, const LLMGenParams& /*params*/) {
@@ -463,7 +460,7 @@ int httpLlmStartAsync(const char* prompt, const LLMGenParams& /*params*/) {
   new (run) Run;
   Lock lock;
   if (!lock || !sConfigAdmitted.load(std::memory_order_acquire) || !sSelected ||
-      !sConfig.enabled || !sConfig.valid || sWorker || !WiFi.isConnected()) {
+      !sConfig.enabled || !sConfig.valid || sWorker || !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8))) {
     run->~Run(); ps_free(run); return 0;
   }
   run->config = sConfig; run->revision = sRevision;

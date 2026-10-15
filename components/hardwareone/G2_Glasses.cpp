@@ -67,7 +67,9 @@ extern "C" {
 #include "WebServer_Server.h"  // broadcastEventToAllSessions() for SSE push
 #include "BLE_Events.h"        // CompactJson + blePushEvent
 #include "BLE_Peers.h"         // peer registry + saved-MAC reconnect
-#include "BLE_CentralTx.h"     // controller-level TX gate (G2 L/R + R1)
+#include "BLE_CentralTx.h"
+#include "BLE_CentralCoordinator.h"
+#include "BLE_PhonePipe.h"     // controller-level TX gate (G2 L/R + R1)
 #include "G2_Ring.h"  // g2RingInit (eager registration in initG2Client)
 #include "G2_Page_Common.h"    // TextPager + paging ops (g2TextPagerRender)
 #include "G2_Page_Sensors.h"   // g2ShowSensorList() (per-page module)
@@ -18670,6 +18672,7 @@ bool initG2Client() {
   }
   G2ClientInitClaim initClaim(initClaimed);
   if (isG2ClientInitialized()) return true;
+  if (!phonePipeStop()) { broadcastOutput("[G2] Phone pipe did not quiesce"); return false; }
   if (!g2RendererLivenessSelfTest()) {
     broadcastOutput("[G2] Client start blocked: renderer-liveness selftest failed");
     return false;
@@ -18758,6 +18761,7 @@ bool initG2Client() {
   templeInit(gL, 'L');
   templeInit(gR, 'R');
 
+  if (!phonePipeHostStopped()) return false;
   if (!bluetoothHalInit("HardwareOne")) {
     // Initialization can fail after enabling the controller/host but
     // before publishing its Arduino initialized flag. Retire the partial
@@ -18879,6 +18883,9 @@ bool initG2Client() {
   DEBUG_G2F("[G2] Client memory ready: free=%u largest=%u",
             (unsigned)hw1InternalFreeBytes(), (unsigned)hw1InternalLargestBlock());
   DEBUG_G2F("[G2] Client initialized");
+#if ENABLE_BLE_PHONE_PIPE
+  if (!phonePipeStart(false)) broadcastOutput("[G2] Phone pipe unavailable; glasses remain active");
+#endif
   return true;
 }
 
@@ -18886,6 +18893,10 @@ bool deinitG2Client() {
   G2BleRoleTransitionClaim role(BleRoleTransition::G2_STOP);
   if (!role) {
     DEBUG_G2F("[G2] Client deinit deferred: another BLE role transition is active");
+    return false;
+  }
+  if (isG2ClientInitialized() && !phonePipeStop()) {
+    broadcastOutput("[G2] Phone pipe did not quiesce; teardown deferred");
     return false;
   }
   g2ControlStartBlockAcquire();
@@ -19569,6 +19580,9 @@ static void bleConnectWorkerLoop(void* arg) {
     if (!job) continue;
 
     gBleConnectJobActive = true;
+    // A phone setup may be in flight. Wait without holding any peer/TX mutex;
+    // accessory priority prevents a second phone attempt winning this gate.
+    BleCentralSetupGuard setup(false, portMAX_DELAY);
     portENTER_CRITICAL(&gBleWorkerStateMux);
     gBleActiveKind = job->kind;
     gBleActiveKindValid = true;
@@ -19578,7 +19592,7 @@ static void bleConnectWorkerLoop(void* arg) {
          job->kind == BleConnectKind::G2_SAVED ||
          job->kind == BleConnectKind::G2_REPAIR) &&
         job->cancelEpoch != bleConnectCancelEpochSnapshot();
-    const bool centralFaulted = bleStackLifecycleFaulted() ||
+    const bool centralFaulted = !setup || bleStackLifecycleFaulted() ||
         gBleClientRetirementPeerMask != 0;
     switch (job->kind) {
       case BleConnectKind::G2_EYE:

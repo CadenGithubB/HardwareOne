@@ -333,6 +333,16 @@ bool radioHalEspNowAvailable() {
 
 const RadioCompanionIdentity& radioHalIdentity() { return sIdentity; }
 
+uint8_t radioHalCompanionBleLinks() {
+  // CONFIG_BT_LE_MAX_CONNECTIONS defaults to 3 on the C6 (IDF 5.5).
+  constexpr uint8_t kUnreportedLinks = 3;
+  portENTER_CRITICAL(&sLock);
+  const uint8_t reported = sIdentity.infoKnown ? sIdentity.bleMaxConnections : 0;
+  portEXIT_CRITICAL(&sLock);
+  const uint8_t links = reported ? reported : kUnreportedLinks;
+  return links < HW1_C6_BLE_MAX_CONNECTIONS ? links : HW1_C6_BLE_MAX_CONNECTIONS;
+}
+
 esp_err_t radioHalRefreshIdentity() {
   if (!radioHalTransportUp()) return ESP_ERR_INVALID_STATE;
   RadioCompanionIdentity id = sIdentity;
@@ -384,6 +394,7 @@ esp_err_t radioHalRefreshIdentity() {
     id.minFreeHeap = info.min_free_heap;
     id.cpuMhz = info.cpu_mhz;
     id.nativeEspNowVersion = info.native_espnow_version;
+    id.bleMaxConnections = info.ble_max_connections;
     copyBounded(id.build, sizeof(id.build), info.build, sizeof(info.build));
   } else {
     id.infoKnown = false;
@@ -468,6 +479,12 @@ esp_err_t radioHalStartTransport() {
   ESP_LOGI(kTag, "C6 up: Hosted %" PRIu32 ".%" PRIu32 ".%" PRIu32 " (%s), bridge %s%s", id.major, id.minor, id.patch,
            id.versionMatches ? "qualified" : "differs from " HW1_C6_HOSTED_TAG, radioHalBridgeStateName(id.bridge),
            id.infoKnown && id.imageState == ESP_NOW_HOSTED_IMAGE_PENDING_VERIFY ? ", image pending confirmation" : "");
+  const uint8_t bleLinks = radioHalCompanionBleLinks();
+  if (bleLinks < HW1_C6_BLE_MAX_CONNECTIONS) {
+    ESP_LOGW(kTag, "C6 allows %u BLE links (%s), this image is built for %d; reflash the C6 (tools/p4/companion/README.md)",
+             bleLinks, id.infoKnown && id.bleMaxConnections ? "reported" : "limit not reported, assumed",
+             HW1_C6_BLE_MAX_CONNECTIONS);
+  }
   return ESP_OK;
 }
 

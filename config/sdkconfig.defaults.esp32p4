@@ -42,6 +42,12 @@ CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 # Console and Arduino Serial both use the USB-Serial/JTAG port.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+# Panic handler in IRAM. A fault while flash is unreadable (mid erase/program,
+# or a cache error) otherwise re-faults on every fetch of the flash-resident
+# handler: no dump, no reboot, and only the HP watchdog recovers the chip about
+# ten minutes later (seen 2026-10-15 in phone-client mode). Arduino's panic
+# wrap and the crash-record hook follow this option into IRAM.
+CONFIG_ESP_PANIC_HANDLER_IRAM=y
 CONFIG_ARDUINO_USB_CDC_ON_BOOT=y
 CONFIG_ARDUINO_USB_MODE=1
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
@@ -81,6 +87,11 @@ CONFIG_BT_BLE_42_SCAN_EN=y
 CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID=y
 CONFIG_ESP_HOSTED_BLUEDROID_HCI_VHCI=y
 CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE=n
+# Discovery caches every service and characteristic of the peer, and the
+# phone pipe's peer is a whole phone: 40 entries (the IDF default) can drop
+# its pipe service on a phone with many apps' services. About 28 bytes each,
+# allocated per discovery from PSRAM first.
+CONFIG_BT_GATTC_MAX_CACHE_CHAR=128
 
 # ESP-SR wake word qualified on the P4X-EYE. The packed model set in the
 # device filesystem must match this choice (HW1_SR_MODELS_IN_FILESYSTEM).

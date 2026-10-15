@@ -25,7 +25,9 @@ All marked with `[hardwareone local patch YYYY-MM-DD]` comments:
 | `libraries/Network/src/NetworkEvents.cpp` | 0 (unmarked) | arduino_events task stack fix (see wifirm/arduino_events memory) |
 | `CMakeLists.txt`, `Kconfig.projbuild`, `idf_component.yml` | — | Build-integration tweaks |
 | ESP32-P4 / ESP-Hosted (2026-09-29, unmarked) | - | Required by `HW_BOARD=p4x_eye`, harmless elsewhere. `esp32-hal-bt.c/.h`: Bluedroid over the Hosted C6 controller (VHCI), with acknowledged controller lifecycle state (`btHostedControllerStatus`). `esp32-hal-hosted.c/.h`: `hostedSetPins`, BLE claim/release. BLE library: every `SOC_BLE_SUPPORTED` gate also accepts Hosted Bluedroid/NimBLE; owned CCCD descriptors (`addDescriptor(d, true)`) and GATT server trees are reclaimed only after checked terminal host teardown. `esp32-hal-uart.c`: P4 LP-UART RC_FAST clock. `idf_component.yml`: pins `esp_hosted` 2.12.13, `esp_wifi_remote` 1.3.1, `mdns` 1.10.1, `littlefs` 1.20.4 and drops Arduino's own `esp-sr` rule (HardwareOne pins ESP-SR itself). Qualified on hardware in `experiments/p4_connectivity`, `p4_ble_roles` and `p4_mesh`. |
+| URL-pull OTA removed (2026-08-30, unmarked) | - | Deletes `libraries/ESP_HostedOTA/`, `libraries/HTTPUpdate/` and `libraries/Update/src/HttpsOTAUpdate.cpp/.h`, drops them from `CMakeLists.txt`, and removes `hostedGetUpdateURL()` and its `Update URL:` log line from `cores/esp32/esp32-hal-hosted.c/.h`. This is a policy decision, not a size saving: no firmware path may download an image from a URL compiled into the binary. `ESP_HostedOTA` fetched co-processor firmware from `https://espressif.github.io/arduino-esp32/hosted/<target>-vX.Y.Z.bin`. Nothing called any of it and the linker already dropped it, so the image does not change. HardwareOne's own update paths (staged BLE OTA, the recovery updater, `c6update`) never used it. `ArduinoOTA` (push, not URL-pull) and `HTTPUpdateServer` (not in the build list) were deliberately left. Deletions carry no markers; `verify_patches.sh` checks they stay absent. Recorded in `arduino-local-patches-2026-08-30-url-ota-removal.patch`. |
 | Companion transport lost (2026-10-02) | 8 | `cores/esp32/esp32-hal-hosted.c/.h`: `hostedSetTransportLost`/`hostedTransportLost`; a successful `hostedInit` clears the flag and `hostedDeinitBLE` skips the controller RPCs while it is set. `cores/esp32/esp32-hal-bt.c`: controller disable/deinit report the controller as lost (`ESP_ERR_INVALID_STATE`) instead of pretending it acknowledged, so the BLE lifecycle records an incomplete retirement and refuses to reopen BLE until a reboot. `libraries/WiFi/src/WiFiGeneric.cpp`: `wifiLowLevelDeinit` and `espWiFiStop` forgive remote failures while lost. Lets `System_RadioCompanion` tear Wi-Fi down on a dead C6 without waiting out RPC timeouts (a live C6 is always stopped cleanly); recorded in `arduino-local-patches-2026-10-02-companion.patch`. |
+| Panic path without flash (2026-10-15) | 2 | `cores/esp32/esp32-hal-misc.c`: with `CONFIG_ESP_PANIC_HANDLER_IRAM` (set for every ESP32-P4 in `config/sdkconfig.defaults.esp32p4`), `__wrap_esp_panic_handler` and `handle_custom_backtrace` are placed in IRAM, and the custom panic handler runs only on the first entry. A fault while flash is unreadable (mid erase/program, or a cache error) previously re-faulted on every fetch of the flash-resident wrap, so the IDF handler never printed or restarted and only the HP watchdog recovered the P4 about ten minutes later. Recorded in `arduino-local-patches-2026-10-15-panic-iram.patch`. |
 
 `arduino-local-patches.patch` is the full `git -C components/arduino diff`
 snapshot of all of the above.
@@ -48,14 +50,22 @@ bash docs/arduino-local-patches/verify_patches.sh
 ```bash
 git -C components/arduino apply --check ../../docs/arduino-local-patches/arduino-local-patches.patch
 git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches.patch
+git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-08-30-url-ota-removal.patch
 git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-10-02-companion.patch
+git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-10-15-panic-iram.patch
 ```
 
 Patches after the snapshot are separate files applied on top of it, in date
 order; `arduino-local-patches-2026-10-02-companion.patch` was produced by
 diffing the upstream 3.3.5 files plus the snapshot's hunks against the
 working copy (a checkout without the nested git repository cannot use `git
-diff` for this).
+diff` for this). `arduino-local-patches-2026-08-30-url-ota-removal.patch` was
+recorded on 2026-10-15, after a worktree build showed the snapshot did not
+carry it. It is a `git diff` against a clean clone with only the snapshot
+applied, and it also applies after the companion patch. Clean clone plus all
+three patches reproduces the main checkout's tree on 2026-10-15. The only
+exceptions were the untracked variant below and in-progress edits to
+`BLEDevice` and `BLESecurity` from another branch.
 
 (The `../../` matters: `git -C` resolves relative paths against
 `components/arduino`, not your shell's cwd.)

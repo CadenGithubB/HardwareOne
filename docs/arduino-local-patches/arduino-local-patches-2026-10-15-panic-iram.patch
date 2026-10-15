@@ -1,0 +1,38 @@
+diff --git a/cores/esp32/esp32-hal-misc.c b/cores/esp32/esp32-hal-misc.c
+--- a/cores/esp32/esp32-hal-misc.c
++++ b/cores/esp32/esp32-hal-misc.c
+@@ -358,7 +358,18 @@
+   return _panic_handler_arg;
+ }
+ 
+-static void handle_custom_backtrace(panic_info_t *info) {
++// [hardwareone local patch 2026-10-15] With CONFIG_ESP_PANIC_HANDLER_IRAM the
++// whole panic path must run without flash: a fault in the middle of a flash
++// erase/program (or a cache error) leaves flash unreadable, and a flash-resident
++// wrap re-faults on every entry, so the IDF handler never prints or restarts.
++#if CONFIG_ESP_PANIC_HANDLER_IRAM
++#define ARDUINO_PANIC_ATTR IRAM_ATTR
++#else
++#define ARDUINO_PANIC_ATTR
++#endif
++static bool _panic_custom_entered = false;
++
++static void ARDUINO_PANIC_ATTR handle_custom_backtrace(panic_info_t *info) {
+   arduino_panic_info_t p_info;
+   p_info.reason = info->reason;
+   p_info.core = info->core;
+@@ -415,8 +426,12 @@
+ }
+ 
+ void __real_esp_panic_handler(panic_info_t *);
+-void __wrap_esp_panic_handler(panic_info_t *info) {
+-  if (_panic_handler != NULL) {
++void ARDUINO_PANIC_ATTR __wrap_esp_panic_handler(panic_info_t *info) {
++  // [hardwareone local patch 2026-10-15] Run the custom handler once. If it
++  // faults, the nested panic skips it so the IDF handler can still print and
++  // restart.
++  if (_panic_handler != NULL && !_panic_custom_entered) {
++    _panic_custom_entered = true;
+     handle_custom_backtrace(info);
+   }
+   __real_esp_panic_handler(info);

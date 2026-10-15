@@ -252,7 +252,8 @@ void blePeerNoteUserConnectIntent(BlePeerKind kind);
 void blePeerNoteLinkLost(BlePeerKind kind);
 void blePeerNoteLinkUp(BlePeerKind kind);
 bool blePeerNoteLinkUpIfCurrent(
-    BlePeerKind kind, const BlePeerConnectRequest& request);
+    BlePeerKind kind, const BlePeerConnectRequest& request,
+    uint32_t* committedIntent = nullptr, uint32_t* committedIdentity = nullptr);
 // Finite/manual repair fence. Unlike a scheduler request, a half-pair repair
 // is allowed while autoReconnect is off, but it must still be cancelled by a
 // newer user disconnect, owner/target replacement, or manual intent.
@@ -279,6 +280,23 @@ bool blePeerCommitLearnedTargetIfCurrent(
 // Atomically validates a finite repair's intent+identity, applies any newly
 // discovered MAC, and commits LinkUp under the PeerData→reconnect lock order.
 // No separate policy or persistence window remains after this returns true.
+// Verified phone-pipe enrollment only. Never call from a generic MAC save.
+// Caller checks the stack bond's SC/MITM/key strength before this transaction.
+// Updates the generation references to the committed live incarnation.
+// Caller requests persistence after releasing its completion lock.
+bool blePeerCommitPhonePipeIdentityIfCurrent(
+    uint32_t& intentGeneration, uint32_t& identityGeneration,
+    const uint8_t identity[6], uint8_t addressType, bool* persistNeeded = nullptr);
+// Local, explicitly authorized pipe unpair. The fence also suppresses automatic
+// reconnect while the runtime drains streams and awaits native bond deletion.
+// Server/console MAC and shared phone-account ownership remain intact.
+struct BlePhoneForget {
+  uint32_t intent = 0, identity = 0;
+  BlePeerSavedTarget target;
+};
+bool blePeerBeginPhonePipeForget(uint32_t ownerGeneration, BlePhoneForget& out);
+bool blePeerPhonePipeForgetIsCurrent(const BlePhoneForget& expected);
+bool blePeerCommitPhonePipeForget(const BlePhoneForget& expected);
 bool blePeerCommitRepairIfCurrent(
     BlePeerKind kind, uint32_t intentGeneration,
     uint32_t identityGeneration, const String& mac1,
@@ -323,6 +341,10 @@ struct BlePeerSavedTargetSnapshot {
   uint32_t identityGeneration = 0;
   BlePeerSavedTarget target;
 };
+
+// Legacy Server/console display identification, separate from pipe trust.
+// Fixed runtime copy: safe in a BLE callback, no allocation or task mutex wait.
+void blePeerPhoneConsoleAddressSnapshot(char (&out)[BLE_PEER_ADDRESS_TEXT_CAPACITY]);
 
 bool blePeerSavedTargetSnapshot(BlePeerKind kind,
                                 BlePeerSavedTargetSnapshot& out);

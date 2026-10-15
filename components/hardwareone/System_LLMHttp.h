@@ -30,7 +30,7 @@ void httpLlmTick();
 // host conversation; it does not delete host transcripts or agent memory.
 bool httpLlmResetConversation();
 
-#if ENABLE_G2_GLASSES && ENABLE_LOCAL_STT
+#if (ENABLE_G2_GLASSES && ENABLE_LOCAL_STT) || ENABLE_BLE_PHONE_PIPE
 // Native Terminal uses the same configured relay/TLS credentials, but has its
 // own bounded asynchronous JSON exchange. It never replaces the chat result.
 constexpr size_t HTTP_TERMINAL_JSON_CAP = 4096;

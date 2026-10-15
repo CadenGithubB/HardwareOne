@@ -116,7 +116,15 @@ typedef struct __attribute__((packed)) {
 } esp_now_hosted_send_evt_t;
 
 /* GET_INFO return payload. Every field is a plain value the host may display;
- * none of it is authoritative for Hosted's own version check. */
+ * none of it is authoritative for Hosted's own version check.
+ *
+ * ble_max_connections is additive within wire version 1: it took the upper
+ * half of what was a uint32_t cpu_mhz, which an older slave always sends as
+ * zero. A host therefore reads 0 as "not reported" (treat the companion as
+ * built with the IDF default), and the reply keeps the 40-byte size an older
+ * host requires, so an older host still finds the bridge. An older host does
+ * show the limit as part of the CPU frequency (4 links at 160 MHz read as
+ * 262304 MHz); nothing but display uses that value. */
 typedef struct __attribute__((packed)) {
     uint8_t wire_version;          /* ESP_NOW_HOSTED_WIRE_VERSION compiled into the slave */
     uint8_t image_state;           /* ESP_NOW_HOSTED_IMAGE_* below */
@@ -125,7 +133,9 @@ typedef struct __attribute__((packed)) {
     uint32_t uptime_ms;            /* companion uptime, wraps after 49.7 days */
     uint32_t free_heap;            /* esp_get_free_heap_size() */
     uint32_t min_free_heap;        /* esp_get_minimum_free_heap_size() since boot */
-    uint32_t cpu_mhz;
+    uint16_t cpu_mhz;
+    uint8_t ble_max_connections;   /* the slave's CONFIG_BT_LE_MAX_CONNECTIONS, 0 not reported */
+    uint8_t reserved;              /* 0 */
     uint32_t native_espnow_version;
     char build[16];                /* slave app version string, truncated, not always NUL-terminated */
 } esp_now_hosted_info_t;
@@ -195,6 +205,7 @@ HW1_WIRE_ASSERT(sizeof(esp_now_hosted_send_req_t) == 9, "send wire size");
 HW1_WIRE_ASSERT(sizeof(esp_now_hosted_recv_evt_t) == 37, "recv wire size");
 HW1_WIRE_ASSERT(sizeof(esp_now_hosted_send_evt_t) == 45, "send event wire size");
 HW1_WIRE_ASSERT(sizeof(esp_now_hosted_info_t) == 40, "info wire size");
+HW1_WIRE_ASSERT(offsetof(esp_now_hosted_info_t, ble_max_connections) == 18, "info: BLE limit in the old cpu_mhz word");
 HW1_WIRE_ASSERT(ESP_NOW_HOSTED_MAX_RETURN == 40, "max return size");
 HW1_WIRE_ASSERT(ESP_NOW_HOSTED_MAX_EVENT < 8166, "CustomRpc payload limit");
 #undef HW1_WIRE_ASSERT

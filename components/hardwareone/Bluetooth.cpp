@@ -14,6 +14,7 @@
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_Mutex.h"  // FsLockGuard for authentication
 #include "System_PollPause.h"   // PollPauseGuard — quiesce sensor polling during BLE init
+#include "BLE_PhonePipe.h"
 #include "G2_Glasses.h"  // Header provides stubs when ENABLE_G2_GLASSES=0, so blemode CLI compiles either way
 #include "G2_Ring.h"     // g2RingInvalidateLink before BLEDevice::deinit
 #include "System_Utils.h"
@@ -532,8 +533,9 @@ BLEDeviceType bleIdentifyDeviceByMAC(const uint8_t* mac) {
   if (bleSavedMacMatches(macStr, peer.target.mac2)) return BLE_DEVICE_GLASSES_RIGHT;
   (void)blePeerSavedTargetSnapshot(BLE_PEER_R1_RING, peer);
   if (bleSavedMacMatches(macStr, peer.target.mac1)) return BLE_DEVICE_RING;
-  (void)blePeerSavedTargetSnapshot(BLE_PEER_PHONE, peer);
-  if (bleSavedMacMatches(macStr, peer.target.mac1)) return BLE_DEVICE_PHONE;
+  char phoneConsoleAddress[BLE_PEER_ADDRESS_TEXT_CAPACITY];
+  blePeerPhoneConsoleAddressSnapshot(phoneConsoleAddress);
+  if (bleSavedMacMatches(macStr, phoneConsoleAddress)) return BLE_DEVICE_PHONE;
   return BLE_DEVICE_UNKNOWN;
 }
 
@@ -1377,6 +1379,7 @@ bool initBluetooth() {
     broadcastOutput("[BLE] Server start deferred: another BLE role transition is active");
     return false;
   }
+  if (!phonePipeStop()) { broadcastOutput("[BLE] Phone pipe did not quiesce"); return false; }
   if (bleStackLifecycleFaulted() &&
       bleRoleTransitionState() != BleRoleTransition::RECOVERING) {
     broadcastOutput("[BLE] Server start blocked: prior host teardown was incomplete; reboot required");
@@ -1655,6 +1658,14 @@ bool deinitBluetooth() {
     broadcastOutput("[BLE] Server stop deferred: another BLE role transition is active");
     return false;
   }
+  const bool phoneOnly = phonePipeStandalone();
+  if (!phonePipeStop()) { broadcastOutput("[BLE] Phone pipe did not quiesce"); return false; }
+  if (phoneOnly && !isBleServerInitialized() && !isG2ClientInitialized()) {
+    const auto stopped = bluetoothHalDeinit();
+    if (!stopped.success) { bleStackSetLifecycleFault(true); return false; }
+    return phonePipeHostStopped();
+  }
+
   {
     BleLifecycleGuard lifecycle;
     if (!lifecycle || !gBLEState || !gBLEState->initialized) return true;
@@ -2878,12 +2889,14 @@ static const char* cmd_blerequireauth(const String& a) {
 // -----------------------------------------------------------------------------
 
 const char* getBleModeString() {
+  if (gSettings.bleMode == BLE_MODE_PHONE_CLIENT) return "phone-client";
   return (gSettings.bleMode == BLE_MODE_G2_CLIENT) ? "client" : "server";
 }
 
 // Logical aggregate status: a bare enabled controller/host is not sufficient.
 // One application role must own initialized runtime state.
 bool bleSubsystemActive() {
+  if (phonePipeActive()) return true;
   if (isBleServerInitialized()) return true;
 #if ENABLE_G2_GLASSES
   if (isG2ClientInitialized()) return true;
@@ -2904,7 +2917,14 @@ const char* bleSubsystemStateString() {
 #if ENABLE_G2_GLASSES
   if (isG2ClientInitialized()) return getG2StateString();
 #endif
+  if (phonePipeActive()) return phonePipeStatus();
   return "uninitialized";
+}
+
+static const char* cmd_phonepipe(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String value=args;value.trim();
+  return phonePipeCommand(value);
 }
 
 static const char* cmd_blemode(const String& argsInput) {
@@ -2923,8 +2943,12 @@ static const char* cmd_blemode(const String& argsInput) {
   // `blemode <value>`. Accept those numeric forms in addition to the keywords.
   if (arg == "0") arg = "server";
   else if (arg == "1") arg = "client";
+  else if (arg == "2") arg = "phone-client";
+  BleRoleTransitionClaim role(BleRoleTransition::PHONE_START);
+  if (!role) return "Error: BLE role transition busy";
 
   if (arg == "server" || arg == "phone") {
+    if (phonePipeStandalone() && !deinitBluetooth()) return "Error: phone client did not stop; mode unchanged";
 #if ENABLE_G2_GLASSES
     if (isG2ClientInitialized()) {
       broadcastOutput("[BLE] Stopping G2 client mode");
@@ -2938,6 +2962,7 @@ static const char* cmd_blemode(const String& argsInput) {
   }
 
   if (arg == "client" || arg == "g2") {
+    if (phonePipeStandalone() && !deinitBluetooth()) return "Error: phone client did not stop; mode unchanged";
 #if !ENABLE_G2_GLASSES
     return "Error: [BLE] G2 client not compiled (ENABLE_G2_GLASSES=0)";
 #else
@@ -2952,7 +2977,17 @@ static const char* cmd_blemode(const String& argsInput) {
 #endif
   }
 
-  return "Error: invalid arguments — Usage: blemode [server|client]";
+  if (arg == "phone-client") {
+#if ENABLE_BLE_PHONE_PIPE
+    if (isG2ClientInitialized() && !deinitG2Client()) return "Error: G2 client did not stop; mode unchanged";
+    if (isBleServerInitialized() && !deinitBluetooth()) return "Error: Server did not stop; mode unchanged";
+    setSetting(gSettings.bleMode, int(BLE_MODE_PHONE_CLIENT));
+    return "[BLE] Mode set to phone client (phonepipe start to connect)";
+#else
+    return "Error: Android phone pipe not compiled";
+#endif
+  }
+  return "Error: invalid arguments — Usage: blemode [server|client|phone-client]";
 }
 
 // =============================================================================
@@ -2980,7 +3015,10 @@ const CommandEntry bluetoothCommands[] = {
   { "blerequireauth", "Enable/disable BLE authentication requirement [on|off].", true, cmd_blerequireauth, "Usage: blerequireauth [on|off]", /*requiresSuperAdmin=*/true },
 
   // Mode (server vs. G2 client) - mutually exclusive at runtime
-  { "blemode",        "Get/set BLE mode [server|client].",                     true, cmd_blemode,         "Usage: blemode [server|client]" },
+  { "blemode",        "Get/set BLE mode [server|client|phone-client].",                     true, cmd_blemode,         "Usage: blemode [server|client|phone-client]" },
+
+  { "phonepipe", "Android TCP pipe status, enrollment and connection.", true, cmd_phonepipe,
+    "Usage: phonepipe [status|start|stop|enroll|confirm <six digits>|connect|disconnect|forget]" },
 
   // App-layer Secure Channel v1 (X25519+PSK+ChaCha20-Poly1305; no BLE bonding)
   { "blesecret", "Set/clear the BLE Secure Channel passphrase: blesecret <phrase|clear>.", true, cmd_blesecret, "Usage: blesecret <passphrase|clear>", /*requiresSuperAdmin=*/true },
@@ -3006,13 +3044,22 @@ const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoo
 // Per-peer rows are emitted programmatically in registerBluetoothPeerSettings()
 // (see below) so they stay in sync with BLE_Peers.h's BlePeerKind enum. The
 // static rows here cover only the non-peer bluetooth settings.
+static constexpr const char* kBleModeChoices = "0|Server"
+#if ENABLE_G2_GLASSES
+  ",1|Client (G2)"
+#endif
+#if ENABLE_BLE_PHONE_PIPE
+  ",2|Phone pipe client"
+#endif
+  ;
+static constexpr int kBleModeMaximum = ENABLE_BLE_PHONE_PIPE ? 2 : (ENABLE_G2_GLASSES ? 1 : 0);
 const SettingEntry bluetoothSettingsEntries[] = {
   { "bleEnabled", SETTING_BOOL, &gSettings.bleEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "bleenabled" },
   { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bleAutoStart,    false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "bleautostart" },
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bleRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
   { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, 0, 0, "HardwareOne", 0, 0, "Device Name", nullptr, false, nullptr, "blename" },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            3, 0, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
-  { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               kBleModeDefaultForBuild, 0, nullptr, 0, 1, "Mode (0=server, 1=g2)", "0|Server,1|Client (G2)", false, nullptr, "blemode" },
+  { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               kBleModeDefaultForBuild, 0, nullptr, 0, kBleModeMaximum, "Mode", kBleModeChoices, false, nullptr, "blemode" },
   { "bleRequireSecureChannel", SETTING_BOOL, &gSettings.bleRequireSecureChannel, true, 0, nullptr, 0, 1, "Require Secure Channel", nullptr, false, nullptr, "blesecure" },
   { "bleSecureChannelSecret",  SETTING_STRING, &gSettings.bleSecureChannelSecret, 0, 0, "", 0, 0, "Secure Channel Secret", nullptr, true, nullptr, "blesecret" },
 };

@@ -106,7 +106,7 @@
 // Private spoken notes (ring hold on a HW1 lens page, Notes page, `note` CLI),
 // transcribed locally and saved under /stt/u<id>/notes/.
 #undef ENABLE_QUICKNOTE
-#define ENABLE_QUICKNOTE 1
+#define ENABLE_QUICKNOTE (ENABLE_DICTATION && ENABLE_G2_GLASSES && ENABLE_BLUETOOTH)
 
 // --- Not used on this board --------------------------------------------------
 #undef ENABLE_EDGE_IMPULSE

@@ -21,6 +21,7 @@ struct RadioUsers {
   bool wifi = false;
   bool bleServer = false;
   bool g2Client = false;
+  bool phoneClient = false;
   bool radioPoweredOff = false;
 };
 
@@ -44,6 +45,7 @@ int roleBegins = 0, roleEnds = 0;
 int ringBusyAttempts = 0;   // deinitBluetooth() calls that find the Ring owner busy; -1 = forever
 int deinitCalls = 0, halDeinits = 0, forcedWhileRingBusy = 0;
 bool fault = false;
+bool phoneStops = true;
 uint32_t delayedMs = 0;
 std::vector<std::string> logs;
 bool ringBusy() { return ringBusyAttempts < 0 || deinitCalls < ringBusyAttempts; }
@@ -88,6 +90,9 @@ void logSystemEvent(const char*, const char* fmt, ...) {
 }
 void vTaskDelay(TickType_t ms) { world::delayedMs += ms; }
 
+bool phonePipeStop() {return world::phoneStops;}
+bool phonePipeHostStopped() {return world::halStopped;}
+
 /*@SHUTDOWN@*/
 
 static int failures = 0;
@@ -110,6 +115,7 @@ static RadioUsers reset(const char* name, bool server, bool g2, bool halUp) {
   world::ringBusyAttempts = 0;
   world::deinitCalls = world::halDeinits = world::forcedWhileRingBusy = 0;
   world::fault = false;
+  world::phoneStops = true;
   world::delayedMs = 0;
   world::logs.clear();
   RadioUsers users;
@@ -177,6 +183,15 @@ int main() {
   shutDownBleForCompanionReset(users);
   EXPECT(world::roleBegins == 0 && world::deinitCalls == 0 && world::halDeinits == 0,
          "an idle stack was touched");
+
+  users = reset("K7 phone owner busy", false, false, true);
+  users.phoneClient = true; world::phoneStops = false;
+  shutDownBleForCompanionReset(users);
+  EXPECT(world::halDeinits == 0 && world::fault, "host forced down under a busy phone owner");
+  users = reset("K8 phone owner stopped", false, false, true);
+  users.phoneClient = true;
+  shutDownBleForCompanionReset(users);
+  EXPECT(world::halDeinits == 1 && world::halStopped && !world::fault, "standalone phone host was not retired");
 
   if (failures) {
     std::fprintf(stderr, "companion BLE shutdown: %d expectation(s) failed\n", failures);

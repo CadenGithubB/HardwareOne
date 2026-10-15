@@ -17,6 +17,7 @@
 
 #include "BLE_Peers.h"
 #include "Bluetooth.h"
+#include "BLE_PhonePipe.h"
 #if ENABLE_BLUETOOTH
 #include "HAL_Bluetooth.h"
 #endif
@@ -88,6 +89,7 @@ struct RadioUsers {
   bool wifi = false;              // radio on for Wi-Fi (also true while ESP-NOW runs)
   bool bleServer = false;
   bool g2Client = false;
+  bool phoneClient = false;
   bool radioPoweredOff = false;   // stopUsers ran `radiopower off`; `radiopower on` replays its snapshot
 };
 RadioUsers sHeldUsers;  // restored by `c6hold off`
@@ -175,13 +177,14 @@ RadioUsers snapshotUsers() {
 #if ENABLE_BLUETOOTH
   u.bleServer = isBleServerInitialized();
   u.g2Client = isG2ClientInitialized();
+  u.phoneClient = phonePipeStandalone();
 #endif
   return u;
 }
 
 bool anyRadioUser() {
   const RadioUsers u = snapshotUsers();
-  return u.espnow || u.wifi || u.bleServer || u.g2Client;
+  return u.espnow || u.wifi || u.bleServer || u.g2Client || u.phoneClient;
 }
 
 #if ENABLE_BLUETOOTH
@@ -203,11 +206,12 @@ bool anyRadioUser() {
 // lifecycle fault keeps Bluetooth off until a reboot, so no role restart
 // re-initialises a host that missed the companion's reboot.
 void shutDownBleForCompanionReset(const RadioUsers& users) {
-  if (!users.bleServer && !users.g2Client && bluetoothHalStatus().stopped()) return;
+  if (!users.bleServer && !users.g2Client && !users.phoneClient && bluetoothHalStatus().stopped()) return;
   if (!bleRoleTransitionBegin(BleRoleTransition::RECOVERING)) {
     logSystemEvent("C6", "BLE role transition busy; the host stays up across the companion reset");
     return;
   }
+  const bool phoneStopped = phonePipeStop();
   bool serverStopped = true;
   if (users.bleServer && isBleServerInitialized()) {
     constexpr int kServerStopAttempts = 3;  // each waits up to 2 s for the Ring owner
@@ -223,13 +227,14 @@ void shutDownBleForCompanionReset(const RadioUsers& users) {
     vTaskDelay(pdMS_TO_TICKS(500));  // a worker still owns the runtime; it settles
   }
 #endif
-  if (!serverStopped) {
+  if (!serverStopped || !phoneStopped) {
     bleStackSetLifecycleFault(true);
-    logSystemEvent("C6", "BLE server did not stop (Ring owner busy or host teardown failed): "
+    logSystemEvent("C6", "BLE owner did not stop (phone, ring, or server teardown incomplete): "
                    "host not forced down for the companion reset; Bluetooth stays off until a reboot");
   } else if (!bluetoothHalStatus().stopped()) {
     const BluetoothHalShutdownResult result = bluetoothHalDeinit();
     if (result.success) {
+      (void)phonePipeHostStopped();
 #if ENABLE_G2_GLASSES
       bleCentralClientsTerminalTeardownAcknowledged();
 #endif
@@ -244,8 +249,26 @@ void shutDownBleForCompanionReset(const RadioUsers& users) {
 }
 #endif
 
+#if ENABLE_WIFI
+// A boot Wi-Fi connect still hunting on its own task keeps calling esp_wifi_*
+// through the transport. Stop it before the transport goes away. Hosted calls
+// to a failing companion can each take seconds, hence the longer wait.
+constexpr uint32_t kBootConnectStopWaitMs = 30000;
+static void stopBootWifiConnect() {
+  if (!wifiSupersedeBackgroundConnect(kBootConnectStopWaitMs)) {
+    BROADCAST_PRINTF("[C6] Boot WiFi connect still running after %lu ms",
+                     static_cast<unsigned long>(kBootConnectStopWaitMs));
+  }
+}
+#endif
+
 // Stop everything that uses the transport, in the order the radio stack needs.
 void stopUsers(RadioUsers& users) {
+#if ENABLE_WIFI
+  stopBootWifiConnect();
+  // The connect may have powered the radio up after the caller's snapshot.
+  users.wifi = users.wifi || wifiRadioOn();
+#endif
 #if ENABLE_BLUETOOTH
   shutDownBleForCompanionReset(users);
 #endif
@@ -277,6 +300,8 @@ void restoreUsers(const RadioUsers& users) {
       vTaskDelay(pdMS_TO_TICKS(2000));
       bleBootReconnect();
     }
+  } else if (users.phoneClient) {
+    if (phonePipeStart(true)) bleBootReconnect();
   }
 #endif
 }
@@ -294,6 +319,7 @@ void bringUpConfiguredUsers() {
   if (gSettings.bleEnabled && gSettings.bleAutoStart) {
     wanted.bleServer = gSettings.bleMode == BLE_MODE_SERVER;
     wanted.g2Client = gSettings.bleMode == BLE_MODE_G2_CLIENT;
+    wanted.phoneClient = gSettings.bleMode == BLE_MODE_PHONE_CLIENT;
   }
 #endif
   const RadioUsers running = snapshotUsers();
@@ -311,7 +337,10 @@ void bringUpConfiguredUsers() {
       vTaskDelay(pdMS_TO_TICKS(2000));
       bleBootReconnect();
     }
+  }  else if (wanted.phoneClient && !running.phoneClient) {
+    if (phonePipeStart(true)) bleBootReconnect();
   }
+
 #endif
 }
 
@@ -518,7 +547,12 @@ void updateProc(void* arg) {
     withMonitor([&](CompanionMonitor& m) { m.onUpdateStarted(); });
     // ESP-NOW and BLE would compete with the transfer for the link and are
     // interrupted by the companion's reboot anyway. Wi-Fi may stay up: the
-    // transport carries the update whether or not Wi-Fi uses it.
+    // transport carries the update whether or not Wi-Fi uses it. A boot
+    // connect still hunting is stopped, though: its driver restarts (and the
+    // IDLE-recovery deinit) would run during the transfer.
+#if ENABLE_WIFI
+    stopBootWifiConnect();
+#endif
     RadioUsers users = snapshotUsers();
 #if ENABLE_BLUETOOTH
     shutDownBleForCompanionReset(users);  // the companion reboots into the new image
@@ -767,7 +801,9 @@ void fillStatus(JsonObject out, bool full) {
                                                                                     : "unknown";
     bridge["slot"] = id.runningSlot;
     bridge["build"] = id.build;
+    bridge["ble_max_connections"] = id.bleMaxConnections;  // 0: not reported
   }
+  out["ble_links"] = radioHalCompanionBleLinks();
   JsonObject hb = out["heartbeat"].to<JsonObject>();
   hb["interval_sec"] = gSettings.c6HeartbeatSec;
   hb["seen"] = stats.heartbeatsSeen;
@@ -866,6 +902,13 @@ const char* cmd_c6status(const String& argsInput) {
   if (id.descKnown) BROADCAST_PRINTF("  Image: %s %s, IDF %s, built %s %s", id.project, id.version, id.idf, id.date, id.time);
   if (id.chipKnown) BROADCAST_PRINTF("  Chip: %s (0x%04" PRIX32 ")", id.chip, id.chipId);
   BROADCAST_PRINTF("  ESP-NOW bridge: %s", radioHalBridgeStateName(id.bridge));
+  if (id.infoKnown && id.bleMaxConnections) {
+    BROADCAST_PRINTF("  BLE links: %u (companion reports %u, this image is built for %d)", radioHalCompanionBleLinks(),
+                     id.bleMaxConnections, HW1_C6_BLE_MAX_CONNECTIONS);
+  } else {
+    BROADCAST_PRINTF("  BLE links: %u (companion does not report its limit, this image is built for %d)",
+                     radioHalCompanionBleLinks(), HW1_C6_BLE_MAX_CONNECTIONS);
+  }
   if (id.infoKnown) {
     BROADCAST_PRINTF("  Running slot: ota_%u, image %s, build %s", id.runningSlot,
                      id.imageState == ESP_NOW_HOSTED_IMAGE_PENDING_VERIFY ? "pending confirmation"

@@ -1112,7 +1112,7 @@ struct Settings {
   bool bleRequireAuth;    // Require login before accepting BLE commands (always required, per-connection)
   String bleDeviceName;         // BLE advertised device name (default: "HardwareOne")
   int bleTxPower;               // BLE TX power level 0-7 (0=min, 7=max, default: 3)
-  int bleMode;                  // BLE role: 0=server (phone peripheral), 1=G2 client (central). Mutually exclusive at runtime.
+  int bleMode;                  // BLE role: 0=Server, 1=G2 central (+ optional phone), 2=phone-only central.
   // ESP32-C6 radio companion (P4X-EYE; the fields exist on every build so the
   // settings layout is one). See System_RadioCompanion.
   bool c6AutoRecover;           // Recover the companion on its own after an outage (default: true)

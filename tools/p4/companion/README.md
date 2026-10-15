@@ -7,7 +7,7 @@ depends on, and this directory is its home in the main tree:
 
 | Path | What |
 | --- | --- |
-| [`../../../components/esp_now_hosted/include/esp_now_hosted_companion.h`](../../../components/esp_now_hosted/include/esp_now_hosted_companion.h) | **The pins.** ESP-Hosted tag/SHA and version, esp-serial-flasher tag/SHA. The P4 firmware checks the running C6 against these at boot; `prepare.py` fetches exactly these. |
+| [`../../../components/esp_now_hosted/include/esp_now_hosted_companion.h`](../../../components/esp_now_hosted/include/esp_now_hosted_companion.h) | **The pins.** ESP-Hosted tag/SHA and version, esp-serial-flasher tag/SHA, and the BLE connection limit (`HW1_C6_BLE_MAX_CONNECTIONS`, 4). The P4 firmware checks the running C6's Hosted version against these at boot; `prepare.py` fetches exactly these and configures the C6 controller for that many connections. The bridge reports the C6's limit in `GET_INFO`; a C6 that does not report one (flashed before the report, or stock Hosted) counts as 3. `radioHalCompanionBleLinks()` gives the P4's link admission the smaller of the pin and the reported limit. |
 | `bridge/esp_now_hosted_slave.c`, `.h` | The C6 side of the HardwareOne ESP-NOW bridge (stock Hosted does not forward ESP-NOW). The host side and the shared wire header are the production component `components/esp_now_hosted`. |
 | [`bridge/README.md`](bridge/README.md) | Protocol, threading, timeouts, provenance and license of the bridge. |
 | `prepare.py` | Fetches the pinned ESP-Hosted MCU slave and esp-serial-flasher into the ignored `private/`, applies the recorded flasher patch, generates `private/c6-slave/` (pinned slave + bridge). `--check` verifies without writing. |
@@ -32,7 +32,8 @@ each:
   here and a `companion_mismatch` event;
 - one ESP-NOW bridge request (`GET_INFO`) is sent. A reply means the bridge
   is present and also tells the P4 which ota slot runs, whether that image is
-  still pending confirmation, and the C6's uptime, heap and reset reason. No
+  still pending confirmation, the C6's uptime, heap and reset reason, and how
+  many BLE connections its controller accepts. No
   reply within the bridge timeout means the C6 runs stock Hosted firmware:
   the log says so, Wi-Fi and BLE keep working through Hosted's own RPCs, and
   ESP-NOW cannot start. `radioCompanionLogBootSummary()` repeats the verdict

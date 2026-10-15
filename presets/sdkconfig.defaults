@@ -7,3 +7,6 @@
 # runs. To build with a different value, save it as an SDK choice in a named
 # configuration (configurations/README.md).
 CONFIG_BT_ENABLED=y
+
+# Opt in for the BLE relay path in saved configurations that enable it.
+CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=n

@@ -122,8 +122,35 @@ bool ensureWiFiInitialized();
 // from the web, BLE, MQTT, UART or the radio companion never read the console.
 enum class WifiConnectOrigin : uint8_t {
   COMMAND = 0,  // resolved from the executing command's context
-  BOOT,
+  BOOT,         // the boot connect when setup itself waits for it
+  // The boot connect on its own task while setup carries on. It never reads
+  // the console (the main loop owns it), leaves NTP to the boot sequence that
+  // follows it, and an explicit radio command supersedes it (below).
+  BACKGROUND,
 };
+
+// A BACKGROUND connect can still be hunting when a radio command arrives on
+// the command executor. openwifi, closewifi, wifidisconnect, radiopower off and
+// the radio companion's procedures supersede it: this asks the hunt to stop and
+// waits for it to let go of the radio. Returns true once no background connect
+// holds the radio (immediately when none is running), false if it was still
+// holding it after waitMs; the request stands, so the hunt still stops.
+// Blocks up to waitMs; a hunt notices the request within ~2 s at worst.
+constexpr uint32_t kWifiSupersedeWaitMs = 5000;
+bool wifiSupersedeBackgroundConnect(uint32_t waitMs = kWifiSupersedeWaitMs);
+
+// The boot task reserves its BACKGROUND connect before the task is created, so
+// a command that arrives before the task reaches setupWiFi still supersedes it.
+// setupWiFi(..., BACKGROUND) ends the reservation when it returns; pass false
+// to drop one whose task never started.
+void wifiBackgroundConnectReserve(bool reserve);
+// True from that reservation until setupWiFi(..., BACKGROUND) returns.
+bool wifiBackgroundConnectActive();
+// True once the BACKGROUND connect has been superseded (sticky for the boot).
+bool wifiBackgroundConnectSuperseded();
+
+// True while `radiopower off` holds the radio down (runtime airplane mode).
+bool wifiRadioForcedOff();
 
 // Longest one connect request (every saved network, every attempt) may run.
 // Each attempt still gets its full 35 s window for a link that is associating
@@ -131,7 +158,8 @@ enum class WifiConnectOrigin : uint8_t {
 constexpr uint32_t kWifiConnectHuntBudgetMs = 150000;
 
 // Budget for the boot connect: the default, shortened on a trial OTA boot so
-// the rest of setup still reaches RUNNING inside the probation setup window.
+// the rest of setup still reaches RUNNING inside the probation setup window
+// when setup has to wait for the connect (WifiConnectOrigin::BOOT).
 uint32_t wifiBootConnectBudgetMs();
 
 void setupWiFi();

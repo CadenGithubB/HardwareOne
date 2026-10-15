@@ -26,7 +26,9 @@ struct Boundary {
   bool ringQuiesces = true;   // g2RingPrepareForStackTeardown() result
   bool halStops = true;       // bluetoothHalDeinit() result
   bool g2Client = false;      // isG2ClientInitialized()
-  bool fault = false;         // BLE lifecycle fault flag
+  bool fault = false;
+  bool phoneOnly = false, phoneStops = true;
+  unsigned phoneStopCalls = 0, phoneHostAcks = 0;         // BLE lifecycle fault flag
   bool lockedTeardown = false;
   unsigned ringPrepares = 0, halDeinits = 0, advStops = 0, settingWrites = 0;
   unsigned sessionCloses = 0, bleOffEvents = 0, centralAcks = 0;
@@ -90,7 +92,13 @@ static void setSetting(T& field, const T& value) {
 #if ENABLE_G2_GLASSES
 static bool isG2ClientInitialized() { return boundary.g2Client; }
 static bool deinitG2Client() { boundary.g2Client = false; return true; }
+#else
+static bool isG2ClientInitialized() { return false; }
+static bool deinitG2Client() { return true; }
 #endif
+static bool phonePipeStandalone() { return boundary.phoneOnly; }
+static bool phonePipeStop() { ++boundary.phoneStopCalls; if (boundary.phoneStops) boundary.phoneOnly=false; return boundary.phoneStops; }
+static bool phonePipeHostStopped() { ++boundary.phoneHostAcks; return true; }
 
 using TransportSessionEpoch = uint32_t;
 enum HostCommandSource { SOURCE_BLUETOOTH = 1 };
@@ -456,6 +464,29 @@ int main() {
          "blemode server changed");
   expectReleased();
 
+  resetWorld("phone stop blocks host teardown");
+  startServer(); boundary.phoneStops=false;
+  EXPECT(!deinitBluetooth() && boundary.halDeinits==0 && sessionsLive(),
+         "host was torn down before the phone owner quiesced");
+  expectReleased();
+  resetWorld("phone-only stop"); boundary.phoneOnly=true;
+  EXPECT(deinitBluetooth() && boundary.halDeinits==1 && boundary.phoneHostAcks==1,
+         "phone-only stop did not retire its host and acknowledge teardown");
+  expectReleased();
+  resetWorld("phone-only mode choice");
+  reply=cmd_blemode("phone-client");
+#if ENABLE_BLE_PHONE_PIPE
+  EXPECT(!isError(reply) && gSettings.bleMode==BLE_MODE_PHONE_CLIENT,
+         "phone-only mode must be selectable without G2");
+#else
+  EXPECT(isError(reply) && gSettings.bleMode==BLE_MODE_SERVER,
+         "an unavailable phone mode must not be persisted");
+#endif
+  expectReleased();
+  resetWorld("legacy phone alias stays Server");
+  reply=cmd_blemode("phone");
+  EXPECT(!isError(reply) && gSettings.bleMode==BLE_MODE_SERVER, "legacy phone alias changed");
+  expectReleased();
   dropServerState();
   std::printf("ble server stop (G2=%d): %u assertions, %u failures\n",
               ENABLE_G2_GLASSES, assertions, failures);

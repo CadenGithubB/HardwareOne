@@ -14,7 +14,14 @@
 // Which one is active at runtime is stored in gSettings.bleMode and also
 // controlled by the `blemode` CLI / the Bluetooth web page mode toggle.
 #define BLE_MODE_SERVER     0   // Peripheral / GATT server for phone clients (Bluetooth)
+#define BLE_MODE_PHONE_CLIENT 2 // Central / Android opaque TCP pipe
 #define BLE_MODE_G2_CLIENT  1   // Central / GATT client for Even Realities G2 glasses (G2_Glasses)
+
+inline bool bleModeIsAvailable(int mode) {
+  return mode == BLE_MODE_SERVER ||
+      (ENABLE_G2_GLASSES && mode == BLE_MODE_G2_CLIENT) ||
+      (ENABLE_BLE_PHONE_PIPE && mode == BLE_MODE_PHONE_CLIENT);
+}
 
 // Result of a bledisconnect request; the close itself completes asynchronously in onDisconnect.
 enum class BleDisconnectResult : uint8_t { REQUESTED, NOT_FOUND, PEER_LINK, UNAVAILABLE };
@@ -239,6 +246,8 @@ enum class BleRoleTransition : uint8_t {
   SERVER_STOP,
   G2_START,
   G2_STOP,
+  PHONE_START,
+  PHONE_STOP,
   RECOVERING,
 };
 bool bleRoleTransitionBegin(BleRoleTransition state);
@@ -318,7 +327,7 @@ inline bool isBleControllerEnabled() { return false; }
 inline bool isBluedroidHostEnabled() { return false; }
 inline bool isBleServerInitialized() { return false; }
 enum class BleRoleTransition : uint8_t {
-  IDLE = 0, SERVER_START, SERVER_STOP, G2_START, G2_STOP, RECOVERING,
+  IDLE = 0, SERVER_START, SERVER_STOP, G2_START, G2_STOP, PHONE_START, PHONE_STOP, RECOVERING,
 };
 inline bool bleRoleTransitionBegin(BleRoleTransition) { return false; }
 inline void bleRoleTransitionEnd() {}

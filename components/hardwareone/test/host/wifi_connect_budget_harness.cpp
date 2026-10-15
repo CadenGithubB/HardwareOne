@@ -4,6 +4,7 @@
 // virtual: millis() reads a counter that delay() advances, so a 35 s window
 // costs nothing to run and the assertions are about recorded virtual time.
 #include <Arduino.h>
+#include <atomic>
 #include <cassert>
 #include <cstdarg>
 #include <cstdint>
@@ -11,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -29,8 +31,14 @@ static void require(bool condition, const char* what) {
 // Virtual clock
 // ---------------------------------------------------------------------------
 static unsigned long gNowMs = 1000;  // non-zero so "0" sentinels stay distinct
+// Runs after every delay(); a case uses it to act "from another task" at a
+// chosen point in virtual time (a superseding radio command).
+static void (*gDelayHook)() = nullptr;
 unsigned long millis() { return gNowMs; }
-void delay(unsigned long ms) { gNowMs += ms; }
+void delay(unsigned long ms) {
+  gNowMs += ms;
+  if (gDelayHook) gDelayHook();
+}
 template <class T>
 T min(T a, T b) { return a < b ? a : b; }
 
@@ -159,6 +167,7 @@ struct FakeWiFi {
   wifi_mode_t getMode() { return WIFI_MODE_STA; }
   bool isConnected() { return gDriver.connected; }
   String SSID() { return String(gDriver.ssid.c_str()); }
+  void setAutoReconnect(bool) {}
 };
 static FakeWiFi WiFi;
 
@@ -222,6 +231,13 @@ bool wifiNetworkConnectionById(uint32_t id, WifiConnectionTarget& out) {
   out.index = static_cast<int>(id - 1);
   return true;
 }
+int wifiNetworkCount() { return static_cast<int>(std::min<size_t>(gScript.size(), MAX_WIFI_NETWORKS)); }
+// setupWiFi's lazy driver init and the auto-reconnect setting it applies.
+static bool gWifiInitOk = true;
+static int gEnsureInitCalls = 0;
+bool ensureWiFiInitialized() { ++gEnsureInitCalls; return gWifiInitOk; }
+struct FakeSettings { bool wifiAutoReconnect = true; };
+static FakeSettings gSettings;
 void sortWiFiByPriority() {}
 bool saveWiFiNetworks() { return true; }
 void wifiNetworkMarkConnected(uint32_t, uint32_t) {}
@@ -231,7 +247,8 @@ static bool gEspNowInitialized = false;
 static bool gEspNowClosePending = false;
 bool isEspNowInitialized() { return gEspNowInitialized; }
 bool espnowOwnsRadio() { return gEspNowInitialized || gEspNowClosePending; }
-bool syncNTPAndResolve() { return true; }
+static int gNtpSyncs = 0;
+bool syncNTPAndResolve() { ++gNtpSyncs; return true; }
 volatile bool gWifiUserCancelled = false;
 bool gSkipNTPInWifiConnect = true;
 
@@ -252,7 +269,10 @@ void debugSink(const char*, ...) {}
 void logSystemEvent(const char*, const char*, ...) {}
 static constexpr uint8_t SYSEVT_WIFI_CONNECTED = 1;
 static constexpr uint8_t SYSEVT_WIFI_CONNECT_FAILED = 2;
-void systemEventPost(uint8_t, const char* = nullptr, const char* = nullptr) {}
+static int gConnectFailedEvents = 0;
+void systemEventPost(uint8_t kind, const char* = nullptr, const char* = nullptr) {
+  if (kind == SYSEVT_WIFI_CONNECT_FAILED) ++gConnectFailedEvents;
+}
 
 enum CommandOrigin { ORIGIN_SERIAL, ORIGIN_WEB, ORIGIN_BLUETOOTH, ORIGIN_MQTT };
 struct CommandContext { CommandOrigin origin = ORIGIN_WEB; };
@@ -289,6 +309,16 @@ static void reset(std::vector<ScriptedNetwork> script, CommandContext* context, 
   gDriverStops = 0;
   gDriverModes.clear();
   gArduinoModes.clear();
+  gDelayHook = nullptr;
+  gNtpSyncs = 0;
+  gConnectFailedEvents = 0;
+  gSkipNTPInWifiConnect = true;
+  gWifiInitOk = true;
+  gEnsureInitCalls = 0;
+#if HW1_WIFI_SUPERSEDE_API
+  sBackgroundConnectActive.store(false);
+  sBackgroundConnectSuperseded.store(false);
+#endif
 }
 
 static bool modeRequested(const std::vector<wifi_mode_t>& modes, wifi_mode_t mode) {
@@ -472,6 +502,146 @@ int main() {
     require(gDriverStops == 1 && modeRequested(gDriverModes, WIFI_MODE_STA),
             "no radio owner: the driver restarts in STA");
   }
+
+#if HW1_WIFI_SUPERSEDE_API
+  // The background boot connect runs beside the main loop: the console byte
+  // stays with the loop and every saved network is still tried.
+  {
+    reset(missing(2), nullptr, 1);
+    require(!huntBest(budget, WifiConnectOrigin::BACKGROUND), "background: hunt runs to the end");
+    require(Serial.reads == 0 && Serial.pending == 1 && !gWifiUserCancelled,
+            "background: the console is not read");
+    require(connectCalls("missing-2") == 3, "background: every saved network was tried");
+  }
+  // It leaves the clock to the boot sequence; a command-origin hunt still syncs.
+  {
+    reset({{"home", Behaviour::Connects, 2000}}, nullptr, 0);
+    gSkipNTPInWifiConnect = false;
+    require(huntBest(budget, WifiConnectOrigin::BACKGROUND), "background: joins");
+    require(gNtpSyncs == 0, "background: no NTP sync inside the hunt");
+    reset({{"home", Behaviour::Connects, 2000}}, &gWebContext, 0);
+    gSkipNTPInWifiConnect = false;
+    require(huntBest(budget, WifiConnectOrigin::COMMAND), "command: joins");
+    require(gNtpSyncs == 1, "command: the hunt syncs NTP after joining");
+  }
+  // A radio command supersedes it mid-attempt: the attempt ends within one
+  // status poll, no later network is tried and no connect failure is reported.
+  {
+    static unsigned long sSupersedeAtMs = 0;
+    reset({{"hs-1", Behaviour::Handshaking, 0}, {"hs-2", Behaviour::Handshaking, 0}}, nullptr, 0);
+    const unsigned long t0 = millis();
+    sSupersedeAtMs = t0 + 10000;
+    gDelayHook = [] { if (gNowMs >= sSupersedeAtMs) sBackgroundConnectSuperseded.store(true); };
+    require(!huntBest(budget, WifiConnectOrigin::BACKGROUND), "superseded mid-attempt: no connection");
+    const unsigned long late = millis() - sSupersedeAtMs;
+    std::fprintf(stderr, "superseded mid-attempt: stopped %lu ms after the request\n", late);
+    require(late <= 1000, "superseded mid-attempt: stops within one status poll");
+    require(connectCalls("hs-1") == 1 && connectCalls("hs-2") == 0,
+            "superseded mid-attempt: no retry and no later network");
+    require(gConnectFailedEvents == 0, "superseded mid-attempt: not reported as a connect failure");
+    require(sawMessage("stopped by a WiFi command"), "superseded mid-attempt: says why it stopped");
+  }
+  // ...and during the backoff between attempts, which no longer runs to its end.
+  {
+    reset({{"missing-1", Behaviour::Missing, 0}}, nullptr, 0);
+    gDelayHook = [] { if (sawMessage("Retrying '")) sBackgroundConnectSuperseded.store(true); };
+    require(!huntBest(budget, WifiConnectOrigin::BACKGROUND), "superseded in backoff: no connection");
+    require(connectCalls("missing-1") == 1, "superseded in backoff: the retry is not started");
+    require(gConnectFailedEvents == 0, "superseded in backoff: not reported as a connect failure");
+  }
+  // Only a background connect can be superseded; a command's own hunt ignores it.
+  {
+    reset(missing(1), &gWebContext, 0);
+    sBackgroundConnectSuperseded.store(true);
+    require(!huntBest(budget, WifiConnectOrigin::COMMAND), "command origin: hunt runs");
+    require(connectCalls("missing-1") == 3, "command origin: a stale supersede request is ignored");
+  }
+  // The waiting side: immediate with no background connect, bounded otherwise.
+  {
+    reset(missing(1), nullptr, 0);
+    unsigned long t0 = millis();
+    require(wifiSupersedeBackgroundConnect(5000), "supersede: nothing running returns at once");
+    require(millis() == t0 && !sBackgroundConnectSuperseded.load(),
+            "supersede: nothing running neither waits nor leaves a request behind");
+    sBackgroundConnectActive.store(true);
+    t0 = millis();
+    require(!wifiSupersedeBackgroundConnect(5000), "supersede: a connect that never lets go times out");
+    require(millis() - t0 >= 5000 && millis() - t0 < 5100, "supersede: waits the bound and no longer");
+    require(sBackgroundConnectSuperseded.load(), "supersede: the request is left for the hunt to see");
+    static unsigned long sReleaseAtMs = 0;
+    sReleaseAtMs = millis() + 300;
+    gDelayHook = [] { if (gNowMs >= sReleaseAtMs) sBackgroundConnectActive.store(false); };
+    t0 = millis();
+    require(wifiSupersedeBackgroundConnect(5000), "supersede: returns once the connect lets go");
+    require(millis() - t0 < 400, "supersede: returns promptly after the release");
+  }
+  // ...and during the pause between saved networks, before the next is tried.
+  {
+    reset(missing(2), nullptr, 0);
+    gDelayHook = [] {
+      if (sawMessage("Failed connecting to 'missing-1'")) sBackgroundConnectSuperseded.store(true);
+    };
+    require(!huntBest(budget, WifiConnectOrigin::BACKGROUND), "superseded between networks: no connection");
+    require(connectCalls("missing-1") == 3 && connectCalls("missing-2") == 0,
+            "superseded between networks: the next network is not tried");
+  }
+
+  // setupWiFi owns the background connect's lifetime. Reserved before the boot
+  // task starts, active for the whole hunt, released on every way out.
+  {
+    static bool sSawInactive = false;
+    reset(missing(1), nullptr, 0);
+    wifiBackgroundConnectReserve(true);
+    require(wifiBackgroundConnectActive(), "reserve: active before the task runs");
+    sSawInactive = false;
+    gDelayHook = [] { if (!wifiBackgroundConnectActive()) sSawInactive = true; };
+    setupWiFi(budget, WifiConnectOrigin::BACKGROUND);
+    require(!sSawInactive, "setupWiFi: active throughout the hunt");
+    require(!wifiBackgroundConnectActive(), "setupWiFi: released when the hunt returns");
+    require(!wifiBackgroundConnectSuperseded(), "setupWiFi: a natural failure is not a supersede");
+    require(sawMessage("WiFi connect timed out"), "setupWiFi: a natural failure is still reported");
+    require(connectCalls("missing-1") == 3, "setupWiFi: the reserved hunt ran");
+  }
+  {
+    reset(missing(1), nullptr, 0);
+    gWifiInitOk = false;
+    wifiBackgroundConnectReserve(true);
+    setupWiFi(budget, WifiConnectOrigin::BACKGROUND);
+    require(!wifiBackgroundConnectActive(), "setupWiFi: released on the driver-init early return");
+  }
+  {
+    reset(missing(1), nullptr, 0);
+    wifiBackgroundConnectReserve(true);
+    wifiBackgroundConnectReserve(false);
+    require(!wifiBackgroundConnectActive(), "reserve(false): drops a reservation whose task never ran");
+  }
+  // A command that arrives after the reservation but before the task reaches
+  // setupWiFi still supersedes it: nothing is initialized or tried.
+  {
+    reset(missing(1), nullptr, 0);
+    wifiBackgroundConnectReserve(true);
+    require(!wifiSupersedeBackgroundConnect(0), "early supersede: the reserved connect has not let go yet");
+    setupWiFi(budget, WifiConnectOrigin::BACKGROUND);
+    require(gEnsureInitCalls == 0 && connectCalls("missing-1") == 0,
+            "early supersede: the boot connect never starts");
+    require(wifiBackgroundConnectSuperseded() && !wifiBackgroundConnectActive(),
+            "early supersede: reported as superseded and released");
+    require(!sawMessage("WiFi connect timed out"), "early supersede: not reported as a timeout");
+  }
+  // Superseded mid-hunt through setupWiFi: says why, not "timed out".
+  {
+    static unsigned long sSupersedeAtMs = 0;
+    reset({{"hs-1", Behaviour::Handshaking, 0}}, nullptr, 0);
+    wifiBackgroundConnectReserve(true);
+    sSupersedeAtMs = millis() + 10000;
+    gDelayHook = [] { if (gNowMs >= sSupersedeAtMs) sBackgroundConnectSuperseded.store(true); };
+    setupWiFi(budget, WifiConnectOrigin::BACKGROUND);
+    require(sawMessage("stopped by a WiFi command") && !sawMessage("WiFi connect timed out"),
+            "setupWiFi superseded mid-hunt: reported as stopped, not timed out");
+    require(wifiBackgroundConnectSuperseded() && !wifiBackgroundConnectActive(),
+            "setupWiFi superseded mid-hunt: superseded and released");
+  }
+#endif
 
   std::fprintf(stderr, "checks=%d\n", gChecks);
   std::printf("wifi connect budget: OK\n");

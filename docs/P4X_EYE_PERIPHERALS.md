@@ -78,9 +78,10 @@ in P4 images; every other board compiles it to nothing.
   answers, the features configured to auto-start are started then.
 - **Status.** `c6status [json]` reports the companion's ESP-Hosted version
   against the qualified one, its image (project, version, build date, running
-  slot, confirmed or pending), the ESP-NOW bridge state, heartbeat, memory,
-  bridge counters and recovery counters. `/api/system` carries the same
-  summary under `companion`.
+  slot, confirmed or pending), the ESP-NOW bridge state, the BLE links its
+  controller accepts (reported by the bridge; a C6 that reports none counts
+  as 3), heartbeat, memory, bridge counters and recovery counters.
+  `/api/system` carries the same summary under `companion`.
 - **Events.** The "Radio companion" family of System Events
   (`companion_online`, `companion_offline`, `companion_restarted`,
   `companion_mismatch`, `companion_low_memory`, `companion_updated`,

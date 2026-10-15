@@ -17,6 +17,7 @@
 #if ENABLE_BLUETOOTH
 
 #include "System_Settings.h"   // setSetting, persisted peer rows
+#include "BLE_PhoneIdentityCore.h"
 #include "Bluetooth.h"         // live server/client role predicates
 #include "System_Debug.h"
 #include "System_Utils.h"      // RETURN_VALID_IF_VALIDATE_CSTR, parseBoolArg
@@ -40,6 +41,9 @@ struct BlePeerData {
   String mac1;
   String mac2;
   bool autoReconnect = false;
+  // Separate from the legacy console MAC. Only verified pipe enrollment writes this.
+  String pipeIdentity;
+  uint8_t pipeIdentityType = 0;
 };
 // PSRAM: every access holds the recursive PeerDataGuard mutex (task context
 // only), and peerConfigApply snapshots effAuto before taking sReconnectMux,
@@ -99,6 +103,7 @@ struct PeerReconnectRuntime {
 };
 
 PeerReconnectRuntime sReconnect[BLE_PEER_MAX];
+char sPhoneConsoleAddress[BLE_PEER_ADDRESS_TEXT_CAPACITY]{};
 portMUX_TYPE sReconnectMux = portMUX_INITIALIZER_UNLOCKED;
 
 uint32_t nextReconnectGeneration(uint32_t current) {
@@ -133,6 +138,7 @@ struct PeerConfigApplyResult {
   bool applied = false;
   bool targetChanged = false;
   bool policyChanged = false;
+  bool persistenceChanged = false;
   uint32_t identityGeneration = 0;
 };
 
@@ -173,8 +179,16 @@ PeerConfigApplyResult peerConfigApply(
   // RAM. Must stay AFTER the conditional write above.
   const bool effAuto = data.autoReconnect;
 
+  char phoneConsoleAddress[BLE_PEER_ADDRESS_TEXT_CAPACITY]{};
+  if (kind == BLE_PEER_PHONE) (void)copySavedAddress(data.mac1, phoneConsoleAddress);
   BlePeerSavedTarget target;
-  const bool mac1Representable = copySavedAddress(data.mac1, target.mac1);
+  // A legacy phone console MAC never grants pipe reconnect authority.
+  const bool mac1Representable = copySavedAddress(
+      kind == BLE_PEER_PHONE ? data.pipeIdentity : data.mac1, target.mac1);
+  if (kind == BLE_PEER_PHONE && target.mac1[0]) {
+    target.addressType1 = data.pipeIdentityType;
+    target.addressType1Known = true;
+  }
   const bool mac2Representable = copySavedAddress(data.mac2, target.mac2);
   // G2 can legitimately have only one temple persisted. The right temple is
   // stored in mac2, so treating mac1 as the universal gate strands a
@@ -206,10 +220,14 @@ PeerConfigApplyResult peerConfigApply(
       state.savedTarget.addressType2 != target.addressType2 ||
       state.savedTarget.addressType1Known != target.addressType1Known ||
       state.savedTarget.addressType2Known != target.addressType2Known;
+  result.persistenceChanged = oldMac1 != data.mac1 || oldMac2 != data.mac2 ||
+      oldAutoReconnect != data.autoReconnect;
   result.policyChanged = state.autoReconnect != effAuto;
   state.autoReconnect = effAuto;
   state.hasSavedTarget = hasSavedTarget;
   state.savedTarget = target;
+  if (kind == BLE_PEER_PHONE)
+    memcpy(sPhoneConsoleAddress, phoneConsoleAddress, sizeof(sPhoneConsoleAddress));
   if (!hasSavedTarget ||
       (!effAuto && !state.reseekEvenIfNoAuto)) {
     state.wantReconnect = false;
@@ -431,6 +449,12 @@ bool blePeerAutoReconnectEnabled(BlePeerKind kind) {
   const bool enabled = sReconnect[kind].autoReconnect;
   portEXIT_CRITICAL(&sReconnectMux);
   return enabled;
+}
+
+void blePeerPhoneConsoleAddressSnapshot(char (&out)[BLE_PEER_ADDRESS_TEXT_CAPACITY]) {
+  portENTER_CRITICAL(&sReconnectMux);
+  memcpy(out, sPhoneConsoleAddress, sizeof(out));
+  portEXIT_CRITICAL(&sReconnectMux);
 }
 
 bool blePeerSavedTargetSnapshot(BlePeerKind kind,
@@ -791,7 +815,7 @@ void bleSavePeerMac(BlePeerKind kind, const String& mac1, const String& mac2) {
       kind, mac1.length() > 0, mac1, mac2.length() > 0, mac2,
       false, false);
   if (!applied.applied) return;
-  if (applied.targetChanged) (void)requestSettingsPersist();
+  if (applied.persistenceChanged) (void)requestSettingsPersist();
   // Deliberately do not establish owner authority here. This function also
   // runs on anonymous auto-reconnect workers; ownership must be captured at
   // an explicit authenticated pairing or autoReconnect-enable intent site.
@@ -812,7 +836,7 @@ bool bleSavePeerMacIfIdentityCurrent(
       kind, mac1.length() > 0, mac1, mac2.length() > 0, mac2,
       false, false, expectedIdentityGeneration);
   if (!applied.applied) return false;
-  if (applied.targetChanged) (void)requestSettingsPersist();
+  if (applied.persistenceChanged) (void)requestSettingsPersist();
   return true;
 }
 
@@ -822,7 +846,7 @@ bool blePeerCommitLearnedTargetIfCurrent(
     const String& mac2, uint8_t replaceMask, bool completeTopology,
     bool* persistNeeded) {
   if (persistNeeded) *persistNeeded = false;
-  if (kind >= BLE_PEER_MAX || intentGeneration == 0 ||
+  if (kind >= BLE_PEER_MAX || kind == BLE_PEER_PHONE || intentGeneration == 0 ||
       identityGeneration == 0) return false;
 
   bool targetChanged = false;
@@ -893,6 +917,104 @@ bool blePeerCommitLearnedTargetIfCurrent(
   // releasing its completion lock; a scoped batch can safely defer it there.
   if (persistNeeded) *persistNeeded = targetChanged;
   return true;
+}
+
+// Caller supplies a bond identity only after checking authenticated SC, a
+// 128-bit key and explicit numeric confirmation. This API owns persistence and
+// scheduler publication; it does not substitute for the runtime bond check.
+bool blePeerCommitPhonePipeIdentityIfCurrent(
+    uint32_t& intentGeneration, uint32_t& identityGeneration,
+    const uint8_t identity[6], uint8_t addressType, bool* persistNeeded) {
+  if (persistNeeded) *persistNeeded = false;
+  char address[18];
+  if (!hw1phone::formatIdentity(identity, addressType, address) ||
+      !intentGeneration || !identityGeneration) return false;
+  bool changed = false;
+  {
+    PeerDataGuard guard;
+    if (!guard) return false;
+    BlePeerData& data = gBlePeerData[BLE_PEER_PHONE];
+    const String oldIdentity = data.pipeIdentity;
+    const uint8_t oldType = data.pipeIdentityType;
+    data.pipeIdentity = address;
+    if (data.pipeIdentity != address) { data.pipeIdentity = oldIdentity; return false; }
+    data.pipeIdentityType = addressType;
+    BlePeerSavedTarget target;
+    strlcpy(target.mac1, address, sizeof(target.mac1));
+    target.addressType1 = addressType;
+    target.addressType1Known = true;
+    portENTER_CRITICAL(&sReconnectMux);
+    PeerReconnectRuntime& state = sReconnect[BLE_PEER_PHONE];
+    if (state.intentGeneration != intentGeneration ||
+        state.identityGeneration != identityGeneration ||
+        state.userDisconnect || !state.ownerAuthorityAvailable) {
+      portEXIT_CRITICAL(&sReconnectMux);
+      data.pipeIdentity = oldIdentity;
+      data.pipeIdentityType = oldType;
+      return false;
+    }
+    changed = !savedTargetMatches(state.savedTarget, target);
+    state.savedTarget = target;
+    state.hasSavedTarget = true;
+    if (changed) reconnectBumpIdentityLocked(state);
+    noteLinkUpLocked(state);
+    // Return the new incarnation for the live link's authority checks.
+    intentGeneration = state.intentGeneration;
+    identityGeneration = state.identityGeneration;
+    portEXIT_CRITICAL(&sReconnectMux);
+  }
+  if (persistNeeded) *persistNeeded = changed;
+  return true;
+}
+
+bool blePeerBeginPhonePipeForget(uint32_t ownerGeneration, BlePhoneForget& out) {
+  out = {};
+  portENTER_CRITICAL(&sReconnectMux);
+  PeerReconnectRuntime& state = sReconnect[BLE_PEER_PHONE];
+  const bool accepted = ownerGeneration && state.ownerGeneration == ownerGeneration &&
+      state.ownerAuthorityAvailable && state.hasSavedTarget;
+  if (accepted) {
+    state.userDisconnect = true;
+    state.wantReconnect = state.reseekEvenIfNoAuto = false;
+    state.launchedAttempts = 0; state.dueMs = 0;
+    reconnectBumpIntentLocked(state);
+    out.intent = state.intentGeneration; out.identity = state.identityGeneration;
+    out.target = state.savedTarget;
+  }
+  portEXIT_CRITICAL(&sReconnectMux);
+  return accepted;
+}
+
+bool blePeerPhonePipeForgetIsCurrent(const BlePhoneForget& expected) {
+  portENTER_CRITICAL(&sReconnectMux);
+  const PeerReconnectRuntime& state = sReconnect[BLE_PEER_PHONE];
+  const bool current = expected.intent && expected.identity &&
+      state.intentGeneration == expected.intent && state.identityGeneration == expected.identity &&
+      state.userDisconnect && state.ownerAuthorityAvailable && state.hasSavedTarget;
+  portEXIT_CRITICAL(&sReconnectMux);
+  return current;
+}
+
+bool blePeerCommitPhonePipeForget(const BlePhoneForget& expected) {
+  PeerDataGuard guard;
+  if (!guard) return false;
+  BlePeerData& data = gBlePeerData[BLE_PEER_PHONE];
+  // Existing PeerData -> reconnect lock order. Validate before changing either
+  // publication; clearing the String afterward needs no allocation or rollback.
+  portENTER_CRITICAL(&sReconnectMux);
+  PeerReconnectRuntime& state = sReconnect[BLE_PEER_PHONE];
+  const bool current = expected.intent && expected.identity &&
+      state.intentGeneration == expected.intent && state.identityGeneration == expected.identity &&
+      state.userDisconnect && state.ownerAuthorityAvailable && state.hasSavedTarget;
+  if (current) {
+    state.savedTarget = {};
+    state.hasSavedTarget = state.wantReconnect = state.reseekEvenIfNoAuto = false;
+    state.launchedAttempts = 0; state.dueMs = 0;
+    reconnectBumpIdentityLocked(state); reconnectBumpIntentLocked(state);
+  }
+  portEXIT_CRITICAL(&sReconnectMux);
+  if (current) { data.pipeIdentity = ""; data.pipeIdentityType = 0; }
+  return current;
 }
 
 bool blePeerCommitRepairIfCurrent(
@@ -1303,7 +1425,8 @@ void blePeerNoteLinkUp(BlePeerKind kind) {
 }
 
 bool blePeerNoteLinkUpIfCurrent(
-    BlePeerKind kind, const BlePeerConnectRequest& request) {
+    BlePeerKind kind, const BlePeerConnectRequest& request,
+    uint32_t* committedIntent, uint32_t* committedIdentity) {
   if (kind >= BLE_PEER_MAX || request.intentGeneration == 0 ||
       request.identityGeneration == 0 ||
       (!request.autoReconnect && !request.explicitReseek)) {
@@ -1314,6 +1437,8 @@ bool blePeerNoteLinkUpIfCurrent(
   PeerReconnectRuntime& state = sReconnect[kind];
   if (connectRequestIsCurrentLocked(state, request)) {
     noteLinkUpLocked(state);
+    if (committedIntent) *committedIntent = state.intentGeneration;
+    if (committedIdentity) *committedIdentity = state.identityGeneration;
     committed = true;
   }
   portEXIT_CRITICAL(&sReconnectMux);
@@ -1571,12 +1696,18 @@ void blePeersWriteJson(JsonDocument& doc) {
     String mac1;
     String mac2;
     bool autoReconnect = false;
+    String pipeIdentity;
+    uint8_t pipeIdentityType = 0;
     {
       PeerDataGuard guard;
       if (!guard) continue;
       mac1 = gBlePeerData[row.kind].mac1;
       mac2 = gBlePeerData[row.kind].mac2;
       autoReconnect = gBlePeerData[row.kind].autoReconnect;
+      if (row.kind == BLE_PEER_PHONE) {
+        pipeIdentity = gBlePeerData[row.kind].pipeIdentity;
+        pipeIdentityType = gBlePeerData[row.kind].pipeIdentityType;
+      }
     }
     BlePeerOwnerSession owner;
     (void)blePeerOwnerSessionSnapshot(row.kind, owner);
@@ -1585,6 +1716,11 @@ void blePeersWriteJson(JsonDocument& doc) {
     // Only emit mac2 if it has content — keeps single-MAC peers tidy.
     if (mac2.length() > 0) e["mac2"] = mac2;
     e["autoReconnect"] = autoReconnect;
+    if (pipeIdentity.length()) {
+      e["pipeBondVersion"] = 1;
+      e["pipeIdentity"] = pipeIdentity;
+      e["pipeIdentityType"] = pipeIdentityType;
+    }
     // Only emit pairedByUser if set — legacy peers paired before this
     // field existed leave it blank.
     if (owner.user.length() > 0) e["pairedByUser"] = owner.user;
@@ -1637,8 +1773,27 @@ void blePeersReadJson(JsonDocument& doc) {
     if (peerOwnerPublish(row.kind, loadedOwner, false)) {
       bumpIdentityGeneration("ble.load.pairedByUser");
     }
-    (void)peerConfigApply(row.kind, true, newMac1, true, newMac2,
-                          true, newAutoReconnect);
+    {
+      PeerDataGuard guard;
+      if (!guard) continue;
+      if (row.kind == BLE_PEER_PHONE) {
+        // Missing, malformed and old schemas fail closed. Never derive an
+        // identity from mac1, an RPA or an address without an explicit type.
+        char canonical[18];
+        uint8_t address[6];
+        const char* text = e["pipeIdentity"] | "";
+        const int type = e["pipeIdentityType"].is<int>()
+            ? e["pipeIdentityType"].as<int>() : -1;
+        bool valid = e["pipeBondVersion"].is<int>() &&
+            e["pipeBondVersion"].as<int>() == 1 && type >= 0 && type <= 1 &&
+            hw1phone::parseIdentity(text, uint8_t(type), address) &&
+            hw1phone::formatIdentity(address, uint8_t(type), canonical);
+        gBlePeerData[row.kind].pipeIdentity = valid ? canonical : "";
+        gBlePeerData[row.kind].pipeIdentityType = valid ? uint8_t(type) : 0;
+      }
+      (void)peerConfigApply(row.kind, true, newMac1, true, newMac2,
+                            true, newAutoReconnect);
+    }
   }
   // A legacy record with a saved MAC but no pairedByUser remains deliberately
   // unowned. Automatic settings-load/boot recovery may preserve authority,

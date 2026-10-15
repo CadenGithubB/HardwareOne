@@ -1,7 +1,7 @@
 // Private implementation included by System_LLMHttp.cpp. Configuration and
 // credential publication remain with that owner; Terminal results are separate
 // from normal chat. All network work runs on this worker, never the G2 worker.
-#if ENABLE_G2_GLASSES && ENABLE_LOCAL_STT
+#if (ENABLE_G2_GLASSES && ENABLE_LOCAL_STT) || ENABLE_BLE_PHONE_PIPE
 namespace {
 constexpr uint32_t kTerminalTotalMs = 15000;
 struct TerminalRun {
@@ -37,6 +37,7 @@ void terminalWorker(void* context) {
   int status = 0;
   size_t received = 0;
   esp_http_client_handle_t client = nullptr;
+  LlmHttpIo* io = nullptr;
   const uint32_t started = millis();
   if (!error && !terminalCancelled()) {
     esp_http_client_config_t cfg{};
@@ -50,11 +51,10 @@ void terminalWorker(void* context) {
     cfg.event_handler = terminalHttpEvent;
     cfg.user_data = run;
     cfg.keep_alive_enable = false;
-    if (run->config.ca[0]) cfg.cert_pem = run->config.ca;
-#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
-    else cfg.crt_bundle_attach = esp_crt_bundle_attach;
-#endif
-    client = esp_http_client_init(&cfg);
+    io = llmHttpIoCreate(run->config.ca, !strncasecmp(run->config.url, "https://", 8),
+                         sTerminalCancel, started, kTerminalTotalMs, run->revision);
+    if (io) { Lock lock(true); if (lock) sTerminalIo = io; }
+    if (llmHttpIoConfigure(io, cfg)) client = esp_http_client_init(&cfg);
     if (!client) error = "Could not initialize Terminal connection";
   }
   if (!error && client) {
@@ -72,7 +72,7 @@ void terminalWorker(void* context) {
     if (!error) {
       Lock lock(true);
       if (lock) {
-        sTerminalSocket = esp_http_client_get_socket(client);
+        llmHttpIoConnected(io, client);
         if (terminalCancelled()) interruptTerminalLocked();
       }
     }
@@ -120,9 +120,10 @@ void terminalWorker(void* context) {
   }
   {
     Lock lock(true);
-    if (lock) sTerminalSocket = -1;
+    if (lock) sTerminalIo = nullptr;
   }
   if (client) { esp_http_client_close(client); esp_http_client_cleanup(client); }
+  llmHttpIoDestroy(io);
   {
     Lock lock(true);
     if (lock && sTerminalToken == run->token) {
@@ -163,7 +164,7 @@ bool httpTerminalStart(const char* json, size_t length, HttpTerminalToken* token
   auto* run = new (memory) TerminalRun;
   Lock lock;
   if (!lock || !sConfigAdmitted.load(std::memory_order_acquire) ||
-      !sConfig.enabled || !sConfig.valid || sTerminalWorker || !WiFi.isConnected()) {
+      !sConfig.enabled || !sConfig.valid || sTerminalWorker || !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8))) {
     run->~TerminalRun(); ps_free(run); return false;
   }
   run->config = sConfig;

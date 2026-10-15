@@ -42,6 +42,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include <time.h>
 #include <esp_timer.h>
 #include <esp_sleep.h>
+#include <freertos/semphr.h>
 #include "mbedtls/base64.h"
 #include <lwip/sockets.h>
 #include <ArduinoJson.h>
@@ -71,6 +72,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
   #include "System_ESPNow_Tx.h"
 #endif
 #include "Bluetooth.h"
+#include "BLE_PhonePipe.h"
 #include "G2_Glasses.h"
 #include "G2_Ring.h"
 #include "BLE_Peers.h"
@@ -1049,7 +1051,8 @@ EXT_RAM_BSS_ATTR static LoopPerfState gLoopPerf;  // PSRAM: loop-task only; ~10 
 // Unlike millis()-since-power-on, this timestamp starts only after setup has
 // actually reached CRASH_PHASE_RUNNING. It owns the existing crash-counter
 // healthy marker; OTA validation has its stricter completed-loop gate below.
-static bool sHardwareOneRunning = false;
+// Atomic because the boot network task waits on it (bootNetworkTask).
+static std::atomic<bool> sHardwareOneRunning{false};
 static unsigned long sHardwareOneRunningSinceMs = 0;
 
 // Called after each loop section: record that section's wall-clock duration and
@@ -1298,6 +1301,280 @@ static const char* resetReasonName(uint32_t r) {
     case ESP_RST_UNKNOWN:   return "unknown";
     default:                return "other";
   }
+}
+
+// ============================================================================
+// Boot network bring-up
+// ============================================================================
+// The boot Wi-Fi connect may hunt for up to kWifiConnectHuntBudgetMs, almost all
+// of it waiting on the driver. Away from every saved network that held setup
+// for ~40 s per power-on (P4X-EYE field log, 2026-10-14), with the display,
+// input, Bluetooth and sensors not yet started and the event ring not draining.
+// The connect and its clock sync now run on a one-shot task while setup
+// carries on.
+//
+// HTTP, MQTT and ESP-NOW autostart keep their place in the boot order. Setup
+// decides once, at its HTTP step (bootNetHandOffServices):
+//   * the connect has resolved (joined or given up, clock synced): setup starts
+//     them exactly where it always did;
+//   * it is still hunting, or a radio command superseded it: setup hands them
+//     to the task, which starts them once setup has reached RUNNING and any
+//     command already working on the radio has finished, so they still follow
+//     every other boot service and see that command's outcome.
+// One atomic phase makes the hand-off exclusive: exactly one side starts them.
+//
+// Why a task (DEFERRED WORK POLICY, System_TaskUtils.h): no loop that already
+// runs can absorb a blocking connect this long. The main loop owns display and
+// input, and cmd_exec would stall every command and the OTA probation
+// heartbeat. The task lives for one boot connect and then deletes itself.
+#if ENABLE_WIFI
+enum BootNetPhase : uint8_t {
+  BOOT_NET_RESOLVED = 0,  // no background connect, or it finished first
+  BOOT_NET_HUNTING,       // the task owns the connect; setup has not decided yet
+  BOOT_NET_HANDED_OFF,    // setup moved on first; the task starts the services
+};
+static std::atomic<uint8_t> sBootNetPhase{BOOT_NET_RESOLVED};
+#endif
+
+// Autostart choices, resolved once in setup and read by whichever side starts
+// the services. The task reads them only after setup has reached RUNNING.
+struct BootNetServices {
+  bool http = false;
+  bool mqtt = false;
+  bool espnow = false;  // autostart wanted and the long-term identity loaded
+};
+[[maybe_unused]] static BootNetServices sBootNetServices;  // unused if HTTP, MQTT and ESP-NOW are all compiled out
+
+#if ENABLE_WIFI
+// The boot connect, then the clock sync when it joined a network. Runs on the
+// boot network task, or inline in setup if that task could not be created.
+// Boot progress is drawn only inline; from the task the boot screen may be gone.
+static void bootNetConnectAndSync(bool background) {
+  if (background) {
+    // No console reads (the main loop owns Serial) and no NTP inside the hunt;
+    // the sync below follows it.
+    setupWiFi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BACKGROUND);
+  } else {
+    // Skip NTP sync in wificonnect so we can show it separately in boot progress
+    gSkipNTPInWifiConnect = true;
+    // The hunt budget shrinks on a trial OTA boot so setup still reaches
+    // RUNNING inside the probation window; BOOT lets a console keystroke skip it.
+    setupWiFi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BOOT);
+    gSkipNTPInWifiConnect = false;  // Reset for future manual connections
+  }
+  const bool wifiConnected = WiFi.isConnected();
+#if DEBUG_MEM_SUMMARY
+  if (wifiConnected) { heapLogSummary("boot.after_wifi"); }
+#endif
+  auto progress = [background](int percent, const char* label) {
+    if (!background) oledSetBootProgress(percent, label);
+  };
+
+  // Update OLED animation after WiFi attempt
+  progress(40, wifiConnected ? "WiFi connected" : "Skipping WiFi");
+
+  // NTP sync phase - only needed if RTC didn't already provide valid time
+  // RTC is the primary time source; NTP is secondary (for initial calibration or manual refresh)
+  if (wifiConnected) {
+    bool rtcProvidedTime = false;
+#if ENABLE_RTC_SENSOR
+    // Check if RTC already set valid system time during early boot.
+    // getLocalTime(&t, 10) blocks up to 10ms for the time to become valid
+    // and fills timeinfo on success. Validate against the same year>=2020
+    // threshold Clock::isSynced uses, but read the JUST-populated tm_year
+    // directly — calling Clock::isSynced here would do a fresh time()/
+    // localtime_r and could race against the 10ms-window state we just
+    // sampled.
+    if (gSettings.rtcTimeHasBeenSet) {
+      struct tm timeinfo;
+      if (getLocalTime(&timeinfo, 10) && timeinfo.tm_year >= 120) {
+        rtcProvidedTime = true;
+      }
+    }
+#endif
+    if (rtcProvidedTime) {
+      // RTC already provided valid time - skip blocking NTP sync at boot
+      // NTP can still be triggered manually via 'ntpsync' command
+      progress(50, "Time from RTC");
+      DEBUG_NTPF("[DEBUG] Skipping NTP sync - RTC already provided valid time");
+      // Arm lwIP SNTP without blocking for a foreground reply.
+      setupNTP();
+    } else {
+      progress(45, "Syncing NTP");
+      DEBUG_NTPF("[DEBUG] Starting NTP sync");
+      NtpSyncOutcome ntpOutcome = NtpSyncOutcome::Failed;
+      bool ntpOk = syncNTPAndResolve(&ntpOutcome);
+      DEBUG_NTPF("%s", ntpOk ? "[DEBUG] NTP sync complete" : "[DEBUG] NTP sync failed");
+      const char* ntpMsg = "Time unavailable";
+      switch (ntpOutcome) {
+        case NtpSyncOutcome::Reply:       ntpMsg = "Time synced"; break;
+        case NtpSyncOutcome::KeptPrior:   ntpMsg = "Time kept; no NTP reply"; break;
+        case NtpSyncOutcome::RtcFallback: ntpMsg = "Time from RTC"; break;
+        default: break;
+      }
+      progress(50, ntpMsg);
+    }
+  } else {
+    progress(50, "Continuing offline");
+  }
+}
+#endif  // ENABLE_WIFI
+
+#if ENABLE_HTTP_SERVER
+static void bootAutostartHttp(bool httpWanted) {
+  if (httpWanted && WiFi.isConnected()) {
+    runUnifiedSystemCommand("openhttp");
+    BROADCAST_PRINTF("%s%s", gServerIsHttps ? "HTTPS server started. Try: https://" : "HTTP server started. Try: http://", WiFi.localIP().toString().c_str());
+  } else if (!httpWanted) {
+    broadcastOutput("HTTP server available. Use 'openhttp' or quick settings (SELECT button) to start.");
+  } else {
+    broadcastOutput("HTTP server not started (WiFi offline). Use quick settings (SELECT button) or 'openhttp' to start manually.");
+  }
+}
+#endif
+
+#if ENABLE_MQTT
+// Called only when MQTT autostart is wanted.
+static void bootAutostartMqtt() {
+  if (WiFi.isConnected()) {
+    runUnifiedSystemCommand("openmqtt");
+    broadcastOutput("[MQTT] Auto-start enabled, connecting to broker...");
+  } else {
+    broadcastOutput("[MQTT] Not started (WiFi offline). Use 'openmqtt' to start manually.");
+  }
+}
+#endif
+
+#if ENABLE_ESPNOW
+// Calls the init handler directly, so it runs where no other command can: in
+// setup, or on cmd_exec after a hand-off (bootAutostartEspNowDeferred).
+static void bootAutostartEspNow(bool wanted) {
+  // espnowEnabled used to serve as BOTH the master switch and the boot flag.
+  // It is now the master switch only; espnowAutoStart is the boot flag.
+  const char* espnowCompanionReason = nullptr;
+  if (gSettings.espnowEnabled && radioCompanionBlocksRadio(&espnowCompanionReason)) {
+    BROADCAST_PRINTF("[ESP-NOW] Auto-start skipped: %s", espnowCompanionReason);
+  } else if (gSettings.espnowEnabled && wanted) {
+    broadcastOutput("[ESP-NOW] Auto-initialization enabled in settings");
+    const char* setupError = checkEspNowFirstTimeSetup();
+    if (setupError && strlen(setupError) > 0) {
+      broadcastOutput("[ESP-NOW] Auto-init skipped - first-time setup required:");
+      broadcastOutput(setupError);
+      broadcastOutput("[ESP-NOW] Set device name with: espnowsetname <name>");
+    } else {
+      broadcastOutput("[ESP-NOW] Initializing...");
+      const char* result = cmd_espnow_init("");
+      broadcastOutput(result);
+#if DEBUG_MEM_SUMMARY
+      heapLogSummary("boot.after_espnow_init");
+#endif
+      // NOTE: the espnow_tx dispatcher is started inside initEspNow() so it
+      // comes up on every init path (boot + manual `openespnow`), not just here.
+    }
+  }
+}
+#endif
+
+#if ENABLE_WIFI
+#if ENABLE_ESPNOW
+// After a hand-off ESP-NOW starts on cmd_exec, after commands have had a chance
+// to run. One of them may have powered the radio down; leave it down.
+static void bootAutostartEspNowDeferred(void*) {
+  if (wifiRadioForcedOff()) {
+    broadcastOutput("[ESP-NOW] Auto-start skipped: radio powered off (radiopower off)");
+    return;
+  }
+  bootAutostartEspNow(sBootNetServices.espnow);
+}
+#endif
+
+static void bootStartHandedOffServices() {
+  broadcastOutput("[Boot] WiFi resolved; starting network services");
+#if ENABLE_HTTP_SERVER
+  bootAutostartHttp(sBootNetServices.http);
+#endif
+#if ENABLE_MQTT
+  if (sBootNetServices.mqtt) bootAutostartMqtt();
+#endif
+#if ENABLE_ESPNOW
+  if (gSettings.espnowEnabled &&
+      !submitDeferredToCmdExec(bootAutostartEspNowDeferred, nullptr)) {
+    broadcastOutput("[ESP-NOW] Auto-start not queued (command executor full); use 'openespnow'");
+  }
+#endif
+}
+
+// cmd_exec runs one job at a time, in order. Once this barrier job runs, any
+// command that was running or queued before it (an openwifi that superseded
+// the boot connect, say) has finished, so the Wi-Fi state read next is its
+// outcome. The semaphore is never deleted: a late give after a timeout is safe.
+static SemaphoreHandle_t sBootNetBarrier = nullptr;
+static void bootNetBarrierJob(void*) { xSemaphoreGive(sBootNetBarrier); }
+static void bootNetWaitForCommandsToSettle() {
+  if (!sBootNetBarrier) sBootNetBarrier = xSemaphoreCreateBinary();
+  if (!sBootNetBarrier || !submitDeferredToCmdExec(bootNetBarrierJob, nullptr)) return;
+  // A connect command's own hunt is bounded by kWifiConnectHuntBudgetMs.
+  (void)xSemaphoreTake(sBootNetBarrier, pdMS_TO_TICKS(kWifiConnectHuntBudgetMs + 30000));
+}
+
+static void bootNetworkTask(void*) {
+  {
+    // A new task starts without the main task's SYSTEM identity. Scoped so the
+    // guard restores before the task deletes itself.
+    SYSTEM_IDENTITY_SCOPE("boot.network");
+    bootNetConnectAndSync(true);
+    // A superseded connect resolves nothing: the command that took over is
+    // still running on cmd_exec. Its services go through the hand-off, which
+    // waits for that command, instead of setup starting them against a link
+    // still being made.
+    uint8_t expected = BOOT_NET_HUNTING;
+    if (wifiBackgroundConnectSuperseded() ||
+        !sBootNetPhase.compare_exchange_strong(expected, BOOT_NET_RESOLVED)) {
+      // Setup hands the services over at its HTTP step, before RUNNING. Start
+      // them once setup has finished, so they still come after every other
+      // boot service, and after any command already working on the radio.
+      while (!sHardwareOneRunning.load()) vTaskDelay(pdMS_TO_TICKS(100));
+      bootNetWaitForCommandsToSettle();
+      bootStartHandedOffServices();
+    }
+  }
+  const UBaseType_t freeBytes = uxTaskGetStackHighWaterMark(nullptr);
+  if (freeBytes < 1024) {
+    WARN_SYSTEMF("[STACK] boot_net: only %lu of %lu bytes never used",
+                 (unsigned long)freeBytes, (unsigned long)BOOT_NET_STACK_WORDS);
+  } else {
+    DEBUG_MEMORY_STACKF("[STACK] boot_net: peak=%lu bytes, free_min=%lu bytes, total=%lu",
+                        (unsigned long)(BOOT_NET_STACK_WORDS - freeBytes),
+                        (unsigned long)freeBytes, (unsigned long)BOOT_NET_STACK_WORDS);
+  }
+  vTaskDelete(nullptr);
+}
+
+// Start the boot connect on its own task. False if the task could not be
+// created; the caller then connects inline as setup always did. The connect is
+// reserved first, so a command that arrives before the task runs supersedes it.
+static bool bootNetStartBackground() {
+  sBootNetPhase.store(BOOT_NET_HUNTING);
+  wifiBackgroundConnectReserve(true);
+  if (xTaskCreateLogged(bootNetworkTask, "boot_net", BOOT_NET_STACK_WORDS, nullptr,
+                        TASK_PRIORITY_LOW, nullptr, "boot network", PRO_CORE) == pdPASS) {
+    return true;
+  }
+  wifiBackgroundConnectReserve(false);
+  sBootNetPhase.store(BOOT_NET_RESOLVED);
+  return false;
+}
+#endif  // ENABLE_WIFI
+
+// Setup's single decision point: true when the boot connect is still hunting,
+// in which case the boot network task starts HTTP, MQTT and ESP-NOW later.
+static bool bootNetHandOffServices() {
+#if ENABLE_WIFI
+  uint8_t expected = BOOT_NET_HUNTING;
+  return sBootNetPhase.compare_exchange_strong(expected, BOOT_NET_HANDED_OFF);
+#else
+  return false;
+#endif
 }
 
 void hardwareone_setup() {
@@ -1865,72 +2142,25 @@ void hardwareone_setup() {
 #if ENABLE_WIFI
   oledSetBootProgress(30, "Connecting WiFi");
 
-  bool wifiConnected = false;
   // Always attempt WiFi connection if credentials exist (controlled by wifiAutoStart setting)
   const char* wifiCompanionReason = nullptr;
   if (gSettings.wifiEnabled && radioCompanionBlocksRadio(&wifiCompanionReason)) {
     BROADCAST_PRINTF("[WiFi] Auto-start skipped: %s", wifiCompanionReason);
+    oledSetBootProgress(40, "Skipping WiFi");
+    oledSetBootProgress(50, "Continuing offline");
   } else if (gSettings.wifiEnabled && ramFlushResolve(RF_WIFI, gSettings.wifiAutoStart)) {  // Controlled by first-time setup or settings
-    // Skip NTP sync in wificonnect so we can show it separately in boot progress
-    gSkipNTPInWifiConnect = true;
-    // The hunt budget shrinks on a trial OTA boot so setup still reaches
-    // RUNNING inside the probation window; BOOT lets a console keystroke skip it.
-    setupWiFi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BOOT);
-    gSkipNTPInWifiConnect = false;  // Reset for future manual connections
-    wifiConnected = WiFi.isConnected();
-#if DEBUG_MEM_SUMMARY
-    if (wifiConnected) { heapLogSummary("boot.after_wifi"); }
-#endif
+    // The connect and NTP run beside the rest of setup (see "Boot network
+    // bring-up" above); setup waits for them only if that task can't start.
+    if (bootNetStartBackground()) {
+      oledSetBootProgress(50, "WiFi in background");
+    } else {
+      broadcastOutput("[WiFi] Background connect unavailable; connecting before setup continues");
+      bootNetConnectAndSync(false);
+    }
   } else {
     // WiFi initialization deferred - will initialize on first use
     broadcastOutput("WiFi disabled by default. Use quick settings (SELECT button) or 'openwifi' to connect.");
-  }
-
-  // Update OLED animation after WiFi attempt
-  oledSetBootProgress(40, wifiConnected ? "WiFi connected" : "Skipping WiFi");
-
-  // NTP sync phase - only needed if RTC didn't already provide valid time
-  // RTC is the primary time source; NTP is secondary (for initial calibration or manual refresh)
-  if (wifiConnected) {
-    bool rtcProvidedTime = false;
-#if ENABLE_RTC_SENSOR
-    // Check if RTC already set valid system time during early boot.
-    // getLocalTime(&t, 10) blocks up to 10ms for the time to become valid
-    // and fills timeinfo on success. Validate against the same year>=2020
-    // threshold Clock::isSynced uses, but read the JUST-populated tm_year
-    // directly — calling Clock::isSynced here would do a fresh time()/
-    // localtime_r and could race against the 10ms-window state we just
-    // sampled.
-    if (gSettings.rtcTimeHasBeenSet) {
-      struct tm timeinfo;
-      if (getLocalTime(&timeinfo, 10) && timeinfo.tm_year >= 120) {
-        rtcProvidedTime = true;
-      }
-    }
-#endif
-    if (rtcProvidedTime) {
-      // RTC already provided valid time - skip blocking NTP sync at boot
-      // NTP can still be triggered manually via 'ntpsync' command
-      oledSetBootProgress(50, "Time from RTC");
-      DEBUG_NTPF("[DEBUG] Skipping NTP sync - RTC already provided valid time");
-      // Arm lwIP SNTP without blocking for a foreground reply.
-      setupNTP();
-    } else {
-      oledSetBootProgress(45, "Syncing NTP");
-      DEBUG_NTPF("[DEBUG] Starting NTP sync");
-      NtpSyncOutcome ntpOutcome = NtpSyncOutcome::Failed;
-      bool ntpOk = syncNTPAndResolve(&ntpOutcome);
-      DEBUG_NTPF("%s", ntpOk ? "[DEBUG] NTP sync complete" : "[DEBUG] NTP sync failed");
-      const char* ntpMsg = "Time unavailable";
-      switch (ntpOutcome) {
-        case NtpSyncOutcome::Reply:       ntpMsg = "Time synced"; break;
-        case NtpSyncOutcome::KeptPrior:   ntpMsg = "Time kept; no NTP reply"; break;
-        case NtpSyncOutcome::RtcFallback: ntpMsg = "Time from RTC"; break;
-        default: break;
-      }
-      oledSetBootProgress(50, ntpMsg);
-    }
-  } else {
+    oledSetBootProgress(40, "Skipping WiFi");
     oledSetBootProgress(50, "Continuing offline");
   }
 #else
@@ -1971,29 +2201,30 @@ void hardwareone_setup() {
   // Bluetooth - auto-start if enabled in settings.
   // Two triggers can bring up BT at boot:
   //   1. bleAutoStart=true   → start whichever mode bleMode says
-  //   2. Any registered peer wants auto-reconnect AND has a saved MAC
-  //      → start client mode (even if (1) is off and bleMode=server)
-  // Trigger 2 only ever starts the *client* role; if you want server mode
-  // at boot, flip bleAutoStart explicitly. Boot reconnect itself is
-  // delegated to BLE_Peers' bleBootReconnect() which iterates the peer
-  // registry — adding a new peer doesn't require touching this block.
+  //   2. The selected central mode has an authorized saved reconnect target.
+  //      G2 mode admits accessories and the optional phone; phone-client mode
+  //      consults only the phone. Saved peers never override Server selection.
+  // BLE_Peers owns paced reconnect admission after the selected host starts.
 #if ENABLE_BLUETOOTH
   // Make sure built-in metadata-only peers (phone) are registered so
   // bleAnyPeerWantsAutoReconnect can see them. Real peer modules register
   // themselves from initG2Client / g2RingInit further down.
   bleRegisterBuiltinPeers();
 
+  // Persisted mode is authoritative. Saved accessory intents never turn an
+  // explicitly selected Server into a central role.
+  const int bootBleMode = gSettings.bleMode;
+  bool wantClientForAutoReconnect = false;
 #if ENABLE_G2_GLASSES
-  const bool wantClientForAutoReconnect = bleAnyPeerWantsAutoReconnect();
-#else
-  const bool wantClientForAutoReconnect = false;
+  if (bootBleMode == BLE_MODE_G2_CLIENT) wantClientForAutoReconnect = bleAnyPeerWantsAutoReconnect();
 #endif
-
-  // The *effective* mode for boot. If a peer wants auto-reconnect we
-  // coerce to client mode so the BLE stack comes up the right way.
-  const int bootBleMode = wantClientForAutoReconnect
-      ? (int)BLE_MODE_G2_CLIENT
-      : gSettings.bleMode;
+#if ENABLE_BLE_PHONE_PIPE
+  if (bootBleMode == BLE_MODE_PHONE_CLIENT) {
+    BlePeerReconnectSnapshot phone;
+    wantClientForAutoReconnect = blePeerReconnectSnapshot(BLE_PEER_PHONE, phone) &&
+        phone.autoReconnect && phone.hasSavedTarget && phone.ownerAuthorityAvailable;
+  }
+#endif
 
   // Substitute only the setting read, not the whole condition: a G2/ring peer
   // brings the radio up in client mode independently of bleAutoStart.
@@ -2035,7 +2266,15 @@ void hardwareone_setup() {
       }
     } else
 #endif
-    if (wantBleServerAtBoot) {
+#if ENABLE_BLE_PHONE_PIPE
+    if (bootBleMode == BLE_MODE_PHONE_CLIENT) {
+      if (phonePipeStart(true)) {
+        broadcastOutput("Phone pipe client initialized");
+        if (wantClientForAutoReconnect) bleBootReconnect();
+      } else broadcastOutput("Phone pipe client initialization failed");
+    } else
+#endif
+    if (bootBleMode == BLE_MODE_SERVER && wantBleServerAtBoot) {
       // Server-mode path only runs when the user *explicitly* asked for BT
       // at boot, or when this boot is resuming the transport that just
       // delivered an OTA. We never coerce to server from auto-reconnect flags.
@@ -2102,19 +2341,19 @@ void hardwareone_setup() {
   #endif
 #endif
 
+  // HTTP, MQTT and ESP-NOW start below unless the boot connect is still
+  // hunting; then the boot network task starts them after it resolves.
+  const bool netHandedOff = bootNetHandOffServices();
+  if (netHandedOff) {
+    broadcastOutput("[Boot] WiFi still connecting; network services will start once it resolves");
+  }
+
   // HTTP server - auto-start if enabled in settings and WiFi is connected
 #if ENABLE_HTTP_SERVER
   oledSetBootProgress(90, "Starting HTTP");
 
-  const bool httpWanted = gSettings.httpEnabled && ramFlushResolve(RF_HTTP, gSettings.httpAutoStart);
-  if (httpWanted && WiFi.isConnected()) {
-    runUnifiedSystemCommand("openhttp");
-    BROADCAST_PRINTF("%s%s", gServerIsHttps ? "HTTPS server started. Try: https://" : "HTTP server started. Try: http://", WiFi.localIP().toString().c_str());
-  } else if (!httpWanted) {
-    broadcastOutput("HTTP server available. Use 'openhttp' or quick settings (SELECT button) to start.");
-  } else {
-    broadcastOutput("HTTP server not started (WiFi offline). Use quick settings (SELECT button) or 'openhttp' to start manually.");
-  }
+  sBootNetServices.http = gSettings.httpEnabled && ramFlushResolve(RF_HTTP, gSettings.httpAutoStart);
+  if (!netHandedOff) bootAutostartHttp(sBootNetServices.http);
 #else
   oledSetBootProgress(90, "Skipping HTTP");
 #endif
@@ -2134,14 +2373,10 @@ void hardwareone_setup() {
 #if ENABLE_MQTT
   // mqttEnabled stays a hard master gate — the overlay resolves the
   // autostart intent, it does not override whether MQTT is configured at all.
-  if (gSettings.mqttEnabled && ramFlushResolve(RF_MQTT, gSettings.mqttAutoStart)) {
+  sBootNetServices.mqtt = gSettings.mqttEnabled && ramFlushResolve(RF_MQTT, gSettings.mqttAutoStart);
+  if (sBootNetServices.mqtt) {
     oledSetBootProgress(92, "Starting MQTT");
-    if (WiFi.isConnected()) {
-      runUnifiedSystemCommand("openmqtt");
-      broadcastOutput("[MQTT] Auto-start enabled, connecting to broker...");
-    } else {
-      broadcastOutput("[MQTT] Not started (WiFi offline). Use 'openmqtt' to start manually.");
-    }
+    if (!netHandedOff) bootAutostartMqtt();
   } else {
     oledSetBootProgress(92, "Skipping MQTT");
   }
@@ -2265,30 +2500,8 @@ void hardwareone_setup() {
     fsListInit();
   }
 
-  // espnowEnabled used to serve as BOTH the master switch and the boot flag.
-  // It is now the master switch only; espnowAutoStart is the boot flag.
-  const char* espnowCompanionReason = nullptr;
-  if (gSettings.espnowEnabled && radioCompanionBlocksRadio(&espnowCompanionReason)) {
-    BROADCAST_PRINTF("[ESP-NOW] Auto-start skipped: %s", espnowCompanionReason);
-  } else if (gSettings.espnowEnabled &&
-      ramFlushResolve(RF_ESPNOW, gSettings.espnowAutoStart) && identityOk) {
-    broadcastOutput("[ESP-NOW] Auto-initialization enabled in settings");
-    const char* setupError = checkEspNowFirstTimeSetup();
-    if (setupError && strlen(setupError) > 0) {
-      broadcastOutput("[ESP-NOW] Auto-init skipped - first-time setup required:");
-      broadcastOutput(setupError);
-      broadcastOutput("[ESP-NOW] Set device name with: espnowsetname <name>");
-    } else {
-      broadcastOutput("[ESP-NOW] Initializing...");
-      const char* result = cmd_espnow_init("");
-      broadcastOutput(result);
-#if DEBUG_MEM_SUMMARY
-      heapLogSummary("boot.after_espnow_init");
-#endif
-      // NOTE: the espnow_tx dispatcher is started inside initEspNow() so it
-      // comes up on every init path (boot + manual `openespnow`), not just here.
-    }
-  }
+  sBootNetServices.espnow = ramFlushResolve(RF_ESPNOW, gSettings.espnowAutoStart) && identityOk;
+  if (!netHandedOff) bootAutostartEspNow(sBootNetServices.espnow);
 
   // Boot notification is sent by initEspNow() itself (System_ESPNow.cpp),
   // which covers every init path — boot autostart AND manual `openespnow`.

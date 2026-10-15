@@ -8,6 +8,44 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.98.4] - 2026-10-15
+
+Work-in-progress checkpoint of the Android BLE relay pipe and the P4X-EYE
+companion work. It is not qualified on hardware, and the P4 has an open fault
+in phone-client mode (see Known issue).
+
+- Phone relay pipe (P4X-EYE): a new phone-client Bluetooth mode lets the
+  device reach its relay through an enrolled Android phone over an encrypted,
+  bonded BLE link. Enrollment uses numeric comparison, and unpairing removes
+  only the phone's own bond. Saved configurations `p4-phone-only` and
+  `p4-phone-pipe` select it. HTTP chat and Terminal try Wi-Fi first and fall
+  back to the phone once, before any request byte is sent, and never replay a
+  request.
+- The pipe tolerates bursts of up to 13 phone notifications between polls,
+  scans longer for the phone (30 ms of every 100 ms for up to 2 s), and caches
+  up to 128 phone GATT entries.
+- Boot joins Wi-Fi in the background, so setup no longer waits for the network
+  hunt; network services start when the connection resolves.
+- The ESP32-C6 companion reports how many BLE links it allows, and `c6status`
+  shows `BLE links:`. The P4 admits no more than the companion supports.
+- ESP32-P4 panics no longer need flash: the panic handler, Arduino's panic
+  wrap and the crash-record hook run from IRAM. A fault during a flash write
+  previously left the board silent until a watchdog reset about ten minutes
+  later.
+- Local Arduino core changes are now fully recorded and checked by
+  `verify_patches.sh`, including the 2026-08-30 removal of firmware download
+  from a URL compiled into the image.
+
+Known issue: on the P4X-EYE in phone-client mode, the USB serial console stops
+responding a few seconds after the HTTP server starts. A watchdog then resets
+the board about ten minutes later. The scheduler keeps running during the
+silence. Under investigation.
+
+Verification: the `p4-phone-only` P4 build passes, and the phone pipe, GATT,
+identity, runtime, forget and BLE coordinator host tests pass. The image was
+flashed once to the P4X-EYE and shows the known issue. No other board was
+rebuilt for this checkpoint.
+
 ## [0.99.98.3] - 2026-10-14
 
 - Native G2 Terminal presents questions directly in the active conversation,
