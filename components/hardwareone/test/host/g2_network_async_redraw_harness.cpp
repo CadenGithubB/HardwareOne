@@ -48,6 +48,7 @@ void operator delete(void* pointer, std::size_t) noexcept { ::operator delete(po
 #define ENABLE_WIFI 1
 #define ENABLE_HTTP_SERVER 0
 #define ENABLE_ESPNOW 0
+#define ENABLE_BLE_PHONE_PIPE 1
 #define EXT_RAM_BSS_ATTR
 template <typename... Args> void quietLog(const char*, Args...) {}
 #define DEBUG_G2F(...) quietLog(__VA_ARGS__)
@@ -153,9 +154,13 @@ bool g2HideEvenAICard() { ++cardHides; return true; }
 using Callback = void (*)(bool, const char*, const G2CmdCookie&, void*);
 static char lastCommand[64]{};
 static unsigned submits = 0;
-bool g2SubmitHijackCommand(const char* line, const G2CmdCookie&, Callback, void*) {
+static Callback lastCallback = nullptr;
+static G2CmdCookie lastCookie{};
+bool g2SubmitHijackCommand(const char* line, const G2CmdCookie& cookie, Callback done, void*) {
   CHECK(!inTask && criticalDepth == 0);
   std::snprintf(lastCommand, sizeof(lastCommand), "%s", line);
+  lastCallback = done;
+  lastCookie = cookie;
   ++submits;
   return true;
 }
@@ -199,7 +204,7 @@ struct FakeWiFi {
   String SSID() const { return String("HomeNet"); }
 } WiFi;
 static bool wifiRadioOn() { return radioOn; }
-struct { bool wifiEnabled = true; bool wifiAutoStart = false; } gSettings;
+struct { bool wifiEnabled = true; bool wifiAutoStart = false; int bleMode = 1; } gSettings;
 struct WifiNetworkSnapshot { int count = 0; };
 
 static bool ringClientActive = true;
@@ -207,14 +212,17 @@ static bool ringWillConnect = false;
 static uint32_t ringConnectAt = 0, ringInFlightUntil = 0;
 static void ringConnectsAt(uint32_t when) { ringWillConnect = true; ringConnectAt = when; }
 static bool isG2ClientInitialized() { return ringClientActive; }
+static bool bleServerUp() { return false; }  // the glasses own the host
 static bool g2RingIsConnected() {
   return ringWillConnect && (int32_t)(now - ringConnectAt) >= 0;
 }
 static bool g2RingConnectInFlight() {
   return !g2RingIsConnected() && (int32_t)(now - ringInFlightUntil) < 0;
 }
-enum { BLE_PEER_R1_RING = 1 };
+static bool ringYields = false;  // the enabled phone pipe holds the ring's slot
+static bool bleCentralRingShouldYield() { return ringYields; }
 static bool blePeerAutoReconnectEnabled(int) { return false; }
+// INSERT_LINK_STATUS
 
 static void (*duringScan)() = nullptr;
 static unsigned scans = 0;
@@ -335,9 +343,20 @@ static void tapRingConnect() {
   showBluetoothR1Menu();
   CHECK(gNetSub == NET_SUB_BLUETOOTH_R1 && rowHas(1, "Ring: disconnected"));
   handleBluetoothR1Tap(3);
-  CHECK(std::strcmp(lastCommand, "ringconnect") == 0);
+  CHECK(std::strcmp(lastCommand, "openring") == 0);
   CHECK(rowHas(1, "Ring: connecting..."));
   CHECK(spawnedTask("g2_ring_pending"));
+}
+
+static void tapPhoneOpen() {
+  enterNetwork();
+  linkIn = FakeLinkInputs{};               // the pipe closed, the phone paired
+  linkIn.paired = true;
+  showBluetoothPhoneMenu();
+  CHECK(gNetSub == NET_SUB_BLUETOOTH_PHONE && rowHas(1, "Pipe: off"));
+  handleBluetoothPhoneTap((uint32_t)rowOf("Open Phone"));
+  CHECK(std::strcmp(lastCommand, "openphone") == 0 && lastCallback != nullptr);
+  lastCookie.menuGen = g2CurrentMenuGen();  // the production submit helper stamps it
 }
 
 static void tapScan() {
@@ -521,6 +540,63 @@ static void ringWatchdogFailedOnMenu() {
   finish();
 }
 
+static void ringPausedForPipe() {
+  ringYields = true;
+  enterNetwork();
+  showBluetoothR1Menu();
+  EXPECT(rowHas(1, "Ring: paused (phone pipe on)"),
+         "R1 menu says the ring is paused for the phone pipe");
+  handleBluetoothR1Tap(3);
+  CHECK(std::strcmp(lastCommand, "openring") == 0);
+  EXPECT(spawnedCount == 0 && gRingPendingDeadlineMs == 0,
+         "a connect the ring cannot start arms no connecting overlay");
+  ringYields = false;
+  finish();
+}
+
+static void ringRefusalClearsOverlay() {
+  tapRingConnect();
+  const uint32_t refusedAt = now;
+  CHECK(lastCallback != nullptr);
+  lastCallback(false, "Error: RING: connect not started", lastCookie, nullptr);
+  EXPECT(gRingPendingDeadlineMs == 0, "a refused connect drops the connecting overlay at once");
+  runSpawned();
+  drainUi();
+  EXPECT((uint32_t)(now - refusedAt) <= 1000 && rowHas(1, "Ring: disconnected"),
+         "the watchdog repaints within one poll, not after the 12 s kick-off grace");
+  CHECK(!gRingPendingTaskActive);
+  finish();
+}
+
+// The phone menu repaints from its command's completion, on the lens applier.
+static void phoneRefreshOnMenu() {
+  tapPhoneOpen();
+  linkIn.pipeActive = linkIn.pipeReady = true;  // the pipe opened and the phone linked
+  linkIn.step = hw1link::PipeStep::Link;
+  linkIn.label = "ready";
+  const unsigned before = listsShown;
+  lastCallback(true, "Phone connect accepted", lastCookie, nullptr);
+  CHECK(listsShown == before);                 // queued, not drawn by the callback
+  drainUi();
+  EXPECT(gNetSub == NET_SUB_BLUETOOTH_PHONE && rowHas(1, "Pipe: ready") &&
+         rowHas(5, "Close Phone"),
+         "the phone menu repaints with the link the command brought up");
+  CHECK(paintsFromTask == 0);
+  finish();
+}
+
+// ... but never over a view the user moved to before the reply.
+static void phoneRefreshAfterHold() {
+  tapPhoneOpen();
+  holdOpensNotes();
+  const unsigned before = listsShown;
+  lastCallback(true, "Phone connect accepted", lastCookie, nullptr);
+  drainUi();
+  EXPECT(paintsOffNetwork == 0 && listsShown == before && page == G2_HIJACK_PAGE_NOTES,
+         "a phone command reply painted the phone menu over Notes");
+  finish();
+}
+
 static void ringWatchdogReentry() {
   tapRingConnect();
   handleBluetoothR1Tap(0);                      // back to Bluetooth ...
@@ -595,6 +671,10 @@ static const Case cases[] = {
   {"ring_watchdog_on_menu", ringWatchdogOnMenu},
   {"ring_watchdog_failed_on_menu", ringWatchdogFailedOnMenu},
   {"ring_watchdog_reentry", ringWatchdogReentry},
+  {"ring_paused_for_pipe", ringPausedForPipe},
+  {"ring_refusal_clears_overlay", ringRefusalClearsOverlay},
+  {"phone_refresh_on_menu", phoneRefreshOnMenu},
+  {"phone_refresh_after_hold", phoneRefreshAfterHold},
   {"scan_results_on_menu", scanResultsOnMenu},
   {"scan_placeholder_on_menu", scanPlaceholderOnMenu},
   {"scan_placeholder_queue_backed_up", scanPlaceholderQueueBackedUp},

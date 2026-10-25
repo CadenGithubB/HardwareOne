@@ -59,7 +59,7 @@ class GuardTests(unittest.TestCase):
                     '$ state=off L=down R=down mtu=L0/R0\r\n',
                     '{"schema":1,"connected":false,"connectPending":false}', 'probe result']) as send:
                 self.assertEqual(self.board.command(probe), 'probe result')
-            self.assertEqual([x.args[0] for x in send.call_args_list], ['g2status','ringstatus json',probe])
+            self.assertEqual([x.args[0] for x in send.call_args_list], ['g2status','ring status json',probe])
 
     def test_actual_ok_prefixed_g2_reply_allows_probe(self):
         actual = ('OK: state=off L=down R=down mtu=L0/R0 batt=L-1/R-1 '

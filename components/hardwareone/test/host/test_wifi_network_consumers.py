@@ -27,7 +27,7 @@ assert loader.index("selectDeviceKeyEpoch(doc)") < loader.index("wifiNetworksRea
 assert "gSecretLoadFailures += wifiNetworksReadJson(doc);" in loader
 assert loader.index("wifiNetworksReadJson(doc)") < loader.index("gSettingsLoadedOk = true")
 
-writer = extract_block(settings, "bool writeSettingsJson(")
+writer = extract_block(settings, "static bool writeSettingsJsonImpl(")
 failure = extract_block(writer, "if (!buildSettingsJsonDoc(")
 assert "SYSEVT_SETTINGS_SAVE_FAILED" in failure
 assert "pollResume();" in failure and "return false;" in failure

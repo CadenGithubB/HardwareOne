@@ -31,9 +31,13 @@
 #include "System_AuthIdentity.h"  // currentAuthContext — CLI handlers' per-task identity
 #include "System_CLIConfirm.h"    // cliRequestConfirm — yes/no gate for destructive filedelete
 #include "System_TextPager.h"     // sanitize + page-split core — paged fileview (CLI, not BT-gated)
+#include "System_TextWrapStream.h" // fileview wraps its page body as it is written
+#include "System_JsonPretty.h"    // fileview re-indents JSON like the web/OLED/G2 viewers
+#include "FileBrowser_FileKind.h" // which files fileview treats as JSON
 #include "System_CaptureCrypto.h" // reveal sealed captures for display (fileview is a presentation surface)
 #if ENABLE_BLUETOOTH
-#include "System_BleSecureChannel.h"  // bleScSendEncrypted/bleScEstablished — raw-binary `fileread ... bin`
+#include "Bluetooth.h"  // bleSessionConfidential/bleSendBinaryToSession — raw-binary `fileread ... bin`
+#include "System_CommandTypes.h"  // CommandContext: the command's session epoch
 #endif
 
 // Forward declarations (none needed — permissions are table-driven)
@@ -789,13 +793,19 @@ const char* cmd_fileview(const String& argsInput) {
   // Optional 1-based page number. Replaces the old hard 8000-byte cut, which
   // made everything past 8 KB unreachable from serial (and the web CLI bridge
   // silently truncates ~4 KB, so remote views cut even earlier). Pages are
-  // sized to survive every transport.
+  // sized to survive every transport. `raw`, in either order with the page,
+  // shows a JSON file as stored instead of re-indented.
   int page = 1;
-  if (a.has(1)) {
-    page = a.argInt(1, 0);
-    if (page < 1) return "Error: page must be >= 1 — usage: fileview \"<path>\" [page]";
+  bool raw = false, havePage = false;
+  for (int i = 1; i < a.count(); i++) {
+    const bool isRaw = !a.argWasQuoted(i) && a.arg(i) == "raw";
+    if (isRaw ? raw : havePage)
+      return "Error: unexpected argument — usage: fileview \"<path>\" [page] [raw]";
+    if (isRaw) { raw = true; continue; }
+    page = a.argInt(i, 0);
+    if (page < 1) return "Error: page must be >= 1 — usage: fileview \"<path>\" [page] [raw]";
+    havePage = true;
   }
-  if (a.has(2)) return "Error: unexpected argument — usage: fileview \"<path>\" [page]";
 
   // This legacy viewer broadcasts untagged page chunks to shared sinks.
   if (filePathIsPrivateTranscript(path))
@@ -835,26 +845,47 @@ const char* cmd_fileview(const String& argsInput) {
   // "[undecryptable row]".
   captureCryptoRevealText(content);
 
+  // JSON is re-indented by default through the re-indenter the web, OLED and
+  // G2 viewers share; `raw` shows the stored text. Re-indenting grows the
+  // text, so count what will be shown before sizing the body.
+  const bool pretty = !raw && fileKindForName(path.c_str()) == FileKind::Json;
+  size_t shownLen = content.length();
+  if (pretty) {
+    shownLen = 0;
+    JsonPrettyFormatter().write(content.c_str(), content.length(),
+                                [&](char) { ++shownLen; });
+  }
+
   // Sanitize + wrap into a scratch buffer: CRLF -> LF, tabs -> space, control
   // bytes dropped (a stray binary file no longer sprays escape sequences into
   // the terminal). Wrap at 200 cols — broadcastOutput clamps any single call
   // at 255 B ('[CUT]'-stamped, no splitting), so every emitted line must stay
   // under that; 200 leaves margin and terminals re-flow long lines anyway.
   // Wrapping can GROW the text (a continuation '\n' per 200 cols), so size the
-  // buffer with 1 extra byte per 200 + slack.
+  // buffer with 1 extra byte per 200 + slack. The pager's uint16_t offsets
+  // address 64 KB, so a re-indented body stops there (marked truncated).
   const size_t kCols = 200;
-  const size_t bodyCap = content.length() + (content.length() / kCols) + 16;
+  const size_t kBodyMax = 65535;
+  size_t bodyCap = shownLen + (shownLen / kCols) + 16;
+  if (bodyCap > kBodyMax) bodyCap = kBodyMax;
   char* body = (char*)ps_alloc(bodyCap, AllocPref::PreferPSRAM, "fs.fileview.body");
   if (!body) return "Error: fileview: buffer alloc failed";
-  bool wrapTrunc = false;
-  const size_t bodyLen = textWrapInto(body, bodyCap, content.c_str(),
-                                      kCols, /*contIndent=*/0,
-                                      /*stripCtrl=*/true, &wrapTrunc);
+  TextWrapStream wrap(body, bodyCap, kCols, /*continuationIndent=*/0,
+                      /*stripControl=*/true);
+  if (pretty) {
+    JsonPrettyFormatter().write(content.c_str(), content.length(), [&](char c) {
+      wrap.write(static_cast<uint8_t>(c));
+    });
+  } else {
+    wrap.write(content.c_str());
+  }
+  const bool wrapTrunc = wrap.truncated();
+  const size_t bodyLen = wrap.size();
 
   // Split at line boundaries into transport-safe pages. Budget 3500 B keeps a
   // page + header/trailer under the ~4095 B web-bridge cap. Worst-case page
-  // count at this cap is ~35 (lines just over half the budget), so 40 slots
-  // cover it; the pager sets `truncated` if that ever overflows.
+  // count at the 64 KB body cap is ~38 (lines just over half the budget), so
+  // 40 slots cover it; the pager sets `truncated` if that ever overflows.
   uint16_t pageOff[41];
   TextPager pg = { body, pageOff, 40, 3500, 0, 0, false };
   pg.truncated = readCapHit || wrapTrunc;
@@ -872,9 +903,9 @@ const char* cmd_fileview(const String& argsInput) {
   }
 
   if (ensureDebugBuffer()) {
-    snprintf(getDebugBuffer(), 1024, "--- %s  page %d/%d (%u B%s) ---",
+    snprintf(getDebugBuffer(), 1024, "--- %s  page %d/%d (%u B%s%s) ---",
              path.c_str(), page, pageCount, (unsigned)content.length(),
-             pg.truncated ? ", truncated" : "");
+             pretty ? ", re-indented" : "", pg.truncated ? ", truncated" : "");
     broadcastOutput(getDebugBuffer());
   }
 
@@ -910,7 +941,10 @@ const char* cmd_fileview(const String& argsInput) {
   free(body);
 
   if (page < pageCount) {
-    cliHintf("next: fileview \"%s\" %d", path.c_str(), page + 1);
+    cliHintf("next: fileview \"%s\" %d%s", path.c_str(), page + 1, raw ? " raw" : "");
+  } else if (pg.truncated && pretty && !readCapHit) {
+    cliHintf("the re-indented view stops at %u B — 'fileview \"%s\" raw' pages the stored text",
+             (unsigned)kBodyMax, path.c_str());
   } else if (pg.truncated) {
     cliHintf("view stops at the %u B read cap — use fileread for raw ranges", (unsigned)kReadCap);
   }
@@ -1155,13 +1189,16 @@ const char* cmd_fileread(const String& argsInput) {
   bool eof = ((size_t)offset + got >= total);
 
 #if ENABLE_BLUETOOTH
-  // Raw-binary fast path for the companion app. When the caller passes `bin` over an
-  // established BLE Secure Channel, ship the chunk's bytes as a raw (ver=0x02) binary
-  // Secure-Channel message and return ONLY the JSON metadata envelope (enc:"raw", no
-  // "data" field). This drops base64's 33% expansion for bulk transfers (map downloads)
-  // while keeping the same envelope the app already parses. The body is sent FIRST so the
-  // app has it in hand when this JSON header arrives (BLE preserves message order). Any
-  // non-BLE / non-secure caller — or a failed send — falls through to the base64/utf8 reply.
+  // Raw-binary fast path for the companion app. When the caller passes `bin` over a
+  // confidential BLE session (an established Secure Channel, or the phone link's console
+  // stream), ship the chunk's bytes raw (a binary ver=0x02 Secure-Channel message, or a
+  // BLOB chain on the console stream) and return ONLY the JSON metadata envelope
+  // (enc:"raw", no "data" field). This drops base64's 33% expansion for bulk transfers
+  // (map downloads) while keeping the same envelope the app already parses. The body is
+  // sent FIRST so the app has it in hand when this JSON header arrives (BLE preserves
+  // message order). Both the check and the send are fenced on this command's own session
+  // epoch: a session renewed meanwhile gets nothing. Any non-BLE / non-confidential
+  // caller — or a failed send — falls through to the base64/utf8 reply.
   if (wantBin && ctx.transport == SOURCE_BLUETOOTH) {
     // A BLE command carries its connection id as decimal text. Bluedroid
     // numbers connections from 0, so "0" is a live link; only an empty or
@@ -1174,7 +1211,9 @@ const char* cmd_fileread(const String& argsInput) {
                  (sidValue = sidValue * 10 + (uint32_t)(*p - '0')) <= 0xFFFFu;
     }
     const uint16_t connId = (uint16_t)sidValue;
-    if (haveConn && bleScEstablished(connId)) {
+    const auto* command = static_cast<const CommandContext*>(currentCommandContext());
+    const TransportSessionEpoch epoch = command ? command->transportSessionEpoch : 0;
+    if (haveConn && bleSessionConfidential(connId, epoch)) {
       // Complete checked metadata BEFORE sending a body the client could accept.
       // The body is still transmitted first, then the executor sends this reply.
       if (!fileReadBuildReply(s_readJson, path, total, (size_t)offset,
@@ -1183,8 +1222,7 @@ const char* cmd_fileread(const String& argsInput) {
         return "Error: File response too large for this transport";
       }
       // got==0 (empty window at eof) ships no body — the header's len:0/eof says it all.
-      bool sent = (got == 0) ||
-                  bleScSendEncrypted(connId, (const char*)buf, got, /*blocking=*/true, /*binaryFrame=*/true);
+      bool sent = (got == 0) || bleSendBinaryToSession(connId, epoch, buf, got);
       if (sent) {
         if (buf) free(buf);
         return s_readJson.c_str();
@@ -1497,7 +1535,7 @@ const CommandEntry filesystemCommands[] = {
   { "mkdir", "Create directory: \"<path>\"", false, cmd_mkdir, "Usage: mkdir \"<path>\"" },
   { "rmdir", "Remove directory: \"<path>\"", false, cmd_rmdir, "Usage: rmdir \"<path>\"" },
   { "filecreate", "Create file: \"<path>\"", false, cmd_filecreate, "Usage: filecreate \"<path>\"" },
-  { "fileview", "View file (paged): \"<path>\" [page]", false, cmd_fileview, "Usage: fileview \"<path>\" [page]  (pages are ~3.5KB, split at line boundaries)" },
+  { "fileview", "View file (paged): \"<path>\" [page] [raw]", false, cmd_fileview, "Usage: fileview \"<path>\" [page] [raw]  (pages are ~3.5KB, split at line boundaries; JSON is re-indented unless raw)" },
   { "fileread", "Read file chunk as JSON: \"<path>\" [offset] [len] [b64|bin]", false, cmd_fileread,
     "fileread \"<path>\" [offset] [len] [b64|bin] - Chunked permission-guarded read (app/BLE).\n"
     "Returns {success,size,offset,len,eof,enc,data}; loop offset until eof.\n"

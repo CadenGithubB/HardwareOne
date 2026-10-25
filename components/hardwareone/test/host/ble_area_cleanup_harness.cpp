@@ -1,8 +1,9 @@
 // Production definitions are inserted by test_ble_area_cleanup.py: the BLE
 // server's connection typing (bleIdentifyDeviceByMAC and its MAC helpers),
 // extracted unchanged from Bluetooth.cpp, with BLE_Types.h and the saved-target
-// types from BLE_Peers.h. The peer owner's saved-target snapshot is a host
-// boundary backed by a table the cases rewrite to model a re-pair.
+// types from BLE_Peers.h. The peer owner's saved-target snapshot and the
+// phone's console address (the Server-role display identity, kept apart from
+// pipe trust) are host boundaries backed by tables the cases rewrite.
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -23,6 +24,17 @@ bool blePeerSavedTargetSnapshot(BlePeerKind kind, BlePeerSavedTargetSnapshot& ou
   ++gSnapshotReads;
   out.target = gSavedTargets[kind];
   return true;
+}
+
+static char gPhoneConsoleAddress[BLE_PEER_ADDRESS_TEXT_CAPACITY];
+
+void blePeerPhoneConsoleAddressSnapshot(char (&out)[BLE_PEER_ADDRESS_TEXT_CAPACITY]) {
+  ++gSnapshotReads;
+  std::memcpy(out, gPhoneConsoleAddress, sizeof(out));
+}
+
+static void saveConsolePhone(const char* mac) {
+  std::snprintf(gPhoneConsoleAddress, sizeof(gPhoneConsoleAddress), "%s", mac);
 }
 
 static void saveTarget(BlePeerKind kind, const char* mac1, const char* mac2 = "") {
@@ -62,12 +74,15 @@ static void expectType(const char* name, const char* mac, BLEDeviceType expected
 static void caseClassify() {
   saveTarget(BLE_PEER_G2_GLASSES, "02:00:00:00:0a:01", "02:00:00:00:0A:02");
   saveTarget(BLE_PEER_R1_RING, "02:00:00:00:0a:03");
-  saveTarget(BLE_PEER_PHONE, "02:00:00:00:0A:04");
+  saveConsolePhone("02:00:00:00:0A:04");
+  saveTarget(BLE_PEER_PHONE, "02:00:00:00:0A:05");  // the pipe's trusted target
   const char* why = "saved peer targets, matched in any case";
   expectType("classify", "02:00:00:00:0A:01", BLE_DEVICE_GLASSES_LEFT, why);
   expectType("classify", "02:00:00:00:0A:02", BLE_DEVICE_GLASSES_RIGHT, why);
   expectType("classify", "02:00:00:00:0A:03", BLE_DEVICE_RING, why);
   expectType("classify", "02:00:00:00:0A:04", BLE_DEVICE_PHONE, why);
+  expectType("classify", "02:00:00:00:0A:05", BLE_DEVICE_UNKNOWN,
+             "the pipe's saved target is pipe trust, not the Server-role phone");
   expectType("classify", "02:00:00:00:0A:99", BLE_DEVICE_UNKNOWN, "address not saved for any peer");
 }
 
@@ -78,7 +93,7 @@ static void caseClassify() {
 static void caseRepair() {
   saveTarget(BLE_PEER_G2_GLASSES, "02:00:00:00:0b:21", "02:00:00:00:0B:22");
   saveTarget(BLE_PEER_R1_RING, "02:00:00:00:0B:23");
-  saveTarget(BLE_PEER_PHONE, "");
+  saveConsolePhone("");
   const char* stale = "connection typing must follow the peer owner's current saved targets, "
                       "not a copy taken at the first connection";
   expectType("repair", "02:00:00:00:0B:21", BLE_DEVICE_GLASSES_LEFT, stale);
@@ -92,6 +107,7 @@ static void caseRepair() {
 // An empty saved slot never matches, including the all-zero address.
 static void caseEmpty() {
   for (int k = 0; k < BLE_PEER_MAX; ++k) gSavedTargets[k] = BlePeerSavedTarget{};
+  saveConsolePhone("");
   expectType("empty", "00:00:00:00:00:00", BLE_DEVICE_UNKNOWN, "no peer saved");
 }
 

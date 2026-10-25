@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import subprocess
 import tempfile
+from test_web_batch_handlers import extract_block
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -22,6 +23,10 @@ def main():
     harness = harness.replace('// INSERT_PROTOCOL', header + '\n' + protocol)
     harness = harness.replace('// INSERT_GLOBALS', globals_)
     harness = harness.replace('// INSERT_ADAPTER', adapter)
+    transport = (COMPONENT / 'System_LLMHttpTransport.cpp').read_text()
+    admission = extract_block(transport, 'struct RequestSlot') + ';\nRequestSlot requestSlots[2];\n'
+    admission += '\n'.join(extract_block(transport, name) for name in ('LlmHttpAdmission llmHttpRequestAdmit(', 'void llmHttpRequestRelease('))
+    harness = harness.replace('// INSERT_ADMISSION', admission)
     with tempfile.TemporaryDirectory(prefix='hw1-native-terminal-') as directory:
         unit, exe = Path(directory) / 'test.cpp', Path(directory) / 'test'
         unit.write_text(harness)

@@ -84,6 +84,10 @@ bool sHeld = false;
 bool sEventsRegistered = false;
 RadioHalEventFn sEventFn = nullptr;
 RadioCompanionIdentity sIdentity = {};
+// The link limit the companion reported in this transport session. A refresh
+// whose probe fails (a busy bridge, a status read) keeps it, so link admission
+// does not fall back to three links mid-session; a new session clears it.
+uint8_t sSessionBleLinks = 0;
 RadioCompanionMemory sMemory = {};
 uint16_t sHeartbeatSec = 0;
 uint32_t sLowMemoryBytes = 0;
@@ -157,12 +161,14 @@ void hostedEventHandler(void*, esp_event_base_t base, int32_t id, void* data) {
     case ESP_HOSTED_EVENT_TRANSPORT_DOWN:
       portENTER_CRITICAL(&sLock);
       sTransportUp = false;
+      sSessionBleLinks = 0;
       portEXIT_CRITICAL(&sLock);
       deliver(RadioHalEvent::TransportDown, 0);
       break;
     case ESP_HOSTED_EVENT_TRANSPORT_FAILURE:
       portENTER_CRITICAL(&sLock);
       sTransportUp = false;
+      sSessionBleLinks = 0;
       portEXIT_CRITICAL(&sLock);
       deliver(RadioHalEvent::TransportFailure, 0);
       break;
@@ -337,7 +343,7 @@ uint8_t radioHalCompanionBleLinks() {
   // CONFIG_BT_LE_MAX_CONNECTIONS defaults to 3 on the C6 (IDF 5.5).
   constexpr uint8_t kUnreportedLinks = 3;
   portENTER_CRITICAL(&sLock);
-  const uint8_t reported = sIdentity.infoKnown ? sIdentity.bleMaxConnections : 0;
+  const uint8_t reported = sSessionBleLinks;
   portEXIT_CRITICAL(&sLock);
   const uint8_t links = reported ? reported : kUnreportedLinks;
   return links < HW1_C6_BLE_MAX_CONNECTIONS ? links : HW1_C6_BLE_MAX_CONNECTIONS;
@@ -401,6 +407,7 @@ esp_err_t radioHalRefreshIdentity() {
   }
   portENTER_CRITICAL(&sLock);
   sIdentity = id;
+  if (id.infoKnown) sSessionBleLinks = id.bleMaxConnections;
   portEXIT_CRITICAL(&sLock);
   return ESP_OK;
 }
@@ -458,12 +465,14 @@ esp_err_t radioHalStartTransport() {
   esp_now_hosted_host_reset_local();
   portENTER_CRITICAL(&sLock);
   sTransportLost = false;
+  sSessionBleLinks = 0;
   portEXIT_CRITICAL(&sLock);
   // Hosted's own reset pulse releases a held companion; the pin reconfigures.
   const esp_err_t err = startOnce();
   if (err != ESP_OK) {
     portENTER_CRITICAL(&sLock);
     sTransportUp = false;
+    sSessionBleLinks = 0;
     portEXIT_CRITICAL(&sLock);
     return err;
   }
@@ -497,6 +506,7 @@ void radioHalStopTransport() {
   }
   portENTER_CRITICAL(&sLock);
   sTransportUp = false;
+  sSessionBleLinks = 0;
   portEXIT_CRITICAL(&sLock);
 }
 
@@ -506,6 +516,7 @@ void radioHalMarkTransportLost() {
   portENTER_CRITICAL(&sLock);
   sTransportLost = true;
   sTransportUp = false;
+  sSessionBleLinks = 0;
   portEXIT_CRITICAL(&sLock);
 }
 
@@ -524,7 +535,10 @@ esp_err_t radioHalHold(bool hold) {
   ESP_RETURN_ON_ERROR(gpio_set_direction(eye::kC6Enable, GPIO_MODE_OUTPUT), kTag, "C6 EN direction");
   portENTER_CRITICAL(&sLock);
   sHeld = hold;
-  if (hold) sTransportUp = false;
+  if (hold) {
+    sTransportUp = false;
+    sSessionBleLinks = 0;
+  }
   portEXIT_CRITICAL(&sLock);
   ESP_LOGI(kTag, "C6 %s", hold ? "held in reset" : "released from reset");
   return ESP_OK;

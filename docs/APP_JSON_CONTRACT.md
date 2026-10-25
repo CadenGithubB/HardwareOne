@@ -61,7 +61,7 @@ the peer-metadata items shipped earlier in v0.95.10).
    `espnowrouterstats`/`espnowsubs`.
 4. **Web-off stub hardening** - `banlist`/`httpstatus`/`sessionlist` stubs now emit
    `available:false` JSON instead of text.
-5. **Deferred set** - `memreport`, `banlist`, `miclist`, `cameravideolist`, `ringstatus`.
+5. **Deferred set** - `memreport`, `banlist`, `miclist`, `cameravideolist`, `ring status`.
 6. **Second-ring diagnostics** - `espnowidentity`, `espnowmeshmetrics`, `espnowworker`,
    `i2chealth`, `i2cmetrics`, `servolist`, `mqttExternalSensors`, `logtier`, `map`,
    `whereami`.
@@ -70,6 +70,15 @@ the peer-metadata items shipped earlier in v0.95.10).
 8. **System Event vocabulary** - `events kinds json` and
    `GET /api/events/kinds` now use one shared, allocation-free serializer over
    the native typed catalog (see sec. 10).
+9. **Bluetooth link words** - `blestatus json` gains `link` and `hint`;
+   `GET /api/ble/status` gains `link` and the phone object (schema 2);
+   `status json` `connectivity.bluetooth` gains the link keys; the web SSE stream
+   gains `phone-status` (see sec. 11).
+10. **Phone link block (phone link v2)** - `bleinfo json`, `blestatus json` and
+   `GET /api/ble/status` gain `phoneLink` (full form), `status json`
+   `connectivity.bluetooth` gains it in compact form; the `console` word puts the
+   pipe's console stream first; `blemode` accepts `glasses`
+   (see sec. 11.9).
 
 ---
 
@@ -91,7 +100,8 @@ Note: read the global on/off via `automation system status json`, not from
 
 | Command (+`json`) | Reply shape |
 |---|---|
-| `blestatus` (alias `bleread`) | `{"schema":1,"initialized","state","activeConnections","maxConnections","totalConnections","commandsReceived","responsesSent","connections":[{"index","user","mac","connectedSec","commands"}]}` |
+| `blestatus` (alias `bleread`) | `{"schema":1,"initialized","state","activeConnections","maxConnections","totalConnections","commandsReceived","responsesSent","connections":[{"index","connId","authed","user","mac","connectedSec","commands"}],"link":{...},"phoneLink"?:{...},"hint"?}`; the console keys from `state` to `connections` are present only while `initialized` (the app console server runs; the console on the phone link shows only in `link` and `phoneLink`). `link` and `hint`: sec. 11.3; `phoneLink` (pipe builds): sec. 11.9 |
+| `bleinfo` | `buildBLEInfoJson`'s 13 keys (`schema`, `deviceName`, `txPower`, `autoStart`, `requireAuth`, `secureChannelRequired`, `initialized`, `state`, `connections`, `maxConnections`, `totalConnections`, `commandsReceived`, `clients`), plus `phoneLink` (full form, sec. 11.9) in pipe builds. Errors: `{"error":"oom"}`, `"unavailable"`, `"status too large"` |
 | `wifistatus` (alias `wifiread`) | `{"schema":1,"connected","ssid","ip","rssi","mac"}` or `{"schema":1,"connected":false,"savedSsid"?,"mac"}` (`savedSsid` is omitted when the saved list cannot be read) |
 | `wifilist` | `{"schema":1,"networks":[{"index","priority","ssid","hidden","primary"}],"count"}` |
 | `mqttstatus` | `{"schema":1,"enabled","connected","host","port","user","baseTopic","publishIntervalMs","lastError"?}` |
@@ -132,7 +142,7 @@ Note: read the global on/off via `automation system status json`, not from
 | `espnowidentity` | `{"schema":1,"valid","mac","pub","createdAtSec","regenCount"}` |
 | `espnowmeshmetrics` | `{"schema":1,"mode","activePeers","ttl","adaptiveTtl"}` |
 | `espnowworker` (or `espnowworker show`) | `{"schema":1,"enabled","intervalMs","fields":{"heap","rssi","thermal","imu"}}` |
-| `ringstatus` | `{"schema":1,"connected","name","addr","mtu","rx","upMs","scanFound"}` |
+| `ring status` | `{"schema":1,"connected","name","mtu","rx","upMs","scanFound"}` (no address) |
 | `espnowmeshstatus` / `espnowlist` / `espnowstats` | already JSON (pre-existing) |
 
 ### ESP-NOW peer metadata is pull-only
@@ -410,7 +420,282 @@ restores the source config exactly. The physical Secure-BLE client run and
 deterministic live HTTP sink-failure test remain pending and are not implied by
 those automated results.
 
-## 11. Status
+## 11. Bluetooth link status: role, relay pipe, app console
+
+The phone has two roles. In `blemode client` both ride **one link**: the
+device is central to the app's pipe server, and the app is a GATT client of the
+device's command service on that same link (no scan, no advertising, no second
+link).
+
+| | Relay pipe | App console |
+|---|---|---|
+| Central | the device | the phone app |
+| GATT server | the Android app | the device (the command service the app's BLE commands use) |
+| Used for | relay, LLM HTTP fallback, Terminal | CLI commands, `#NOTIF` cards (sec. 9) |
+| Runs in | the shared client stack (`openphone`: beside the glasses, or alone) | `openconsole` (saved `blemode server`: advertised, a direct app connection), and in `blemode client` on the relay pipe's link (Secure Channel only) |
+
+Phone link v2: wherever the pipe runs (`glasses-pipe` and `phone-pipe`), the app
+console is also stream slot 2 inside the pipe itself, offered when the phone
+secret is a device code from `phone pair new` and `bleconsole` is on (sec.
+11.9). Design A, the command service on the pipe's link in `blemode client`, is
+kept beside it for now.
+
+How the app reads `console`:
+
+- `role` `console`: the console server. Scan for the command service when
+  `waiting`.
+- `role` `glasses-pipe` or `phone-pipe`, the console stream first: `signed-out` /
+  `signed-in` while the stream is open on a `ready` pipe; `waiting-phone` while
+  it is offered and not open (the app opens it when the link is ready).
+- `role` `glasses-pipe` (or `glasses` in a pipe build) with no stream offered:
+  design A's words. The console rides the pipe's link. It reads `waiting-phone`
+  until the pipe is `ready` and the app has joined that link (its first write,
+  normally the Secure Channel HELLO), then `signed-out` / `signed-in` (a joined
+  design-A slot shows so beside an offered stream too). Attach on the pipe's
+  "ready" instead of scanning; `no-secret` means `blesecret` must be set first
+  (the phone link refuses plaintext); `off` means `bleconsole off`. The session
+  rules on that link are in sec. 11.8.
+- `role` `phone-pipe` with no stream offered (no device code, or
+  `bleconsole off`), or the glasses in a build without the pipe (or with a
+  failed registration): `not-here`.
+  Show "not available in this mode" and stop scanning until the role changes;
+  `phoneLink.console` says why (`needs-code`, `off`).
+
+The words come from one place (`BLE_LinkStatusCore.h`), so the OLED, lens, web
+page, CLI and JSON agree.
+
+### 11.1 The `link` object
+
+`blestatus json` (`link`), `GET /api/ble/status` (`link`) and `status json`
+(`connectivity.bluetooth`, flattened in, sec. 11.4) carry the same keys from one
+reading. Nothing in it is an address, IP or passphrase.
+
+| Key | Type | Values |
+|---|---|---|
+| `role` | string | What runs now: `console` \| `glasses` \| `glasses-pipe` \| `phone-pipe` \| `off` |
+| `roleText` | string | The same as shown: `App console` \| `Glasses` \| `Glasses+pipe` \| `Phone pipe` \| `Off` |
+| `saved` | string | The role the saved `blemode` starts, as `role`: `server` -> `console`; `client` -> `glasses-pipe` (`glasses` in a build without the pipe) |
+| `savedText` | string | `saved` as shown, as `roleText` |
+| `savedDiffers` | bool | `saved` is not what runs (the glasses with or without the pipe count as the same mode). Always `true` while `role` is `off` |
+| `pipe` | string | Pipe builds only. `off` \| `no-secret` \| `not-paired` \| `pairing` \| `waiting` \| `searching` \| `linking` \| `ready` \| `closing` \| `idle` \| `fail` \| `fault` |
+| `pipeText` | string | Pipe builds only. `pipe` as shown: `off`, `no secret`, `not paired`, `pairing`, `waiting`, `searching`, `linking`, `ready`, `closing`, `idle`, `fail`, `fault` |
+| `pipeReason` | string | Pipe builds only, and only when there is one (a `fail`, a `closing` or a `fault`): `not found` \| `timed out` \| `link lost` \| `scan fail` \| `auth fail` \| `no slot` \| `busy` \| `expired` \| `cancelled` \| `cleanup` \| `forgotten` \| `no secret` \| `error`. `error` is a failure the table does not name yet; never read it as success |
+| `pipePaired` | bool | Pipe builds only. A pipe enrollment is saved |
+| `console` | string | `not-here` (the console is not on this host: the phone pipe role with no console stream offered, the glasses without the pipe, or a failed registration) \| `off` \| `waiting` (server advertising, no app) \| `hidden` (server up, advertising off) \| `waiting-phone` (on the phone link, not open yet: the console stream offered and not open, or design A's slot the app has not joined: the pipe is not ready, or the app has not written yet) \| `no-secret` (design A on the pipe's link, `blesecret` not set, no stream offered) \| `signed-out` (an app attached, nobody signed in) \| `signed-in` (the console stream open on a `ready` pipe, its session signed in or not; or design A's joined slot) |
+| `consoleText` | string | The long form: `not available in this mode`, `off`, `waiting for the app`, `not visible (advertising off)`, `waiting for the phone link`, `set blesecret first`, `app connected, signed out`, `app signed in`. The OLED and lens show the short words (`n/a here`, `waiting`, `no secret`, `signed out`, `signed in`, ...) |
+| `consoleClients` | int | App centrals connected (the glasses and ring excluded); `0` unless the console server is up, or on the phone link while `console` is `signed-out` or `signed-in`: its console sessions (the stream's, and design A's joined slot), at least `1` |
+| `advertising` | bool | `false` unless the console server is up; never on the pipe's link |
+
+### 11.2 Saved mode vs running role
+
+`blemode` with no argument prints both, for example
+`Saved mode: client (Glasses+pipe); running: Off`. The saved mode is the boot
+role only; what runs is whatever was opened last. Drive the UI from `role`;
+offer the saved mode only as what boot will start.
+
+`blemode <mode>` takes `server`, `client` (alias `glasses`), or the dropdown's
+`0`/`1` (`g2` also means `client`); it changes the saved boot role and starts
+nothing. Anything else is refused with `Error: invalid arguments — Usage:
+blemode [client|server]`. The stored values, the saved keyword in replies and
+`mode` stay `server` \| `client`. The former `phone-client` mode is gone: the
+phone pipe is a device on the shared client stack.
+
+**Verbs (2026-10-21).** Every Bluetooth device is opened and closed with
+`openX`/`closeX`, and closing one never touches another: `openg2`/`closeg2`
+(the glasses), `openring`/`closering` (the R1 ring), `openphone`/`closephone`
+(the phone pipe). `openble`/`closeble` are the whole radio: `openble` brings the
+shared client stack up and the peers with auto-reconnect on reconnect by
+themselves; `closeble` closes every device and the app console and stops the
+host (`bleenabled 0` is `closeble` plus the persisted switch). The app console
+server is `openconsole`/`closeconsole`; it never coexists with the client stack
+(`openphone` while it runs is refused: `closeconsole` first). The former
+`phone start`, `phone stop`, `phone connect`, `phone disconnect`,
+`ring connect`, `ring disconnect`, `g2init`, `g2deinit` and the `closeg2 full`
+argument no longer exist; there are no aliases.
+
+### 11.3 `blestatus json`: `link` and `hint`
+
+- `link` is always present (sec. 11.1), whether or not the console runs.
+- `host` (string, 2026-10-21): what the Bluetooth host is doing, beside `link.role`:
+  `on` (a role runs), `idle` (the client stack is up with no device open),
+  `off` (verified stopped), `fault` (a teardown did not complete; reboot
+  required), `parked` (a host generation is still up with no owner). The text
+  form prints the same as a `Bluetooth:` line when no role runs.
+- `hint` is present only while `initialized` is false (the console server is
+  not up) and the console is not open on the phone link. It says how to reach
+  the console: with the pipe running what opens it (the console stream needs a
+  device code), with only the glasses what `openble` (server mode) would stop:
+
+| `link.role` | `link.console` | `hint` |
+|---|---|---|
+| `glasses-pipe`, `phone-pipe` | `waiting-phone`, stream offered, pipe not `ready` | `the app console opens on the phone link once it is ready; see 'phone status'` |
+| | `waiting-phone`, stream offered, pipe `ready` | `the phone link is ready; the app console opens when the app asks for it` |
+| `glasses`, `glasses-pipe` | `waiting-phone` (design A), pipe not `ready` | `the app console attaches to the phone link once the relay pipe is ready; see 'phone status'` |
+| | `waiting-phone` (design A), pipe `ready` | `the phone link is ready; the app console attaches when the app opens it` |
+| | `no-secret` | `run 'phone pair new' for the app console on the phone link (or set 'blesecret' for its Secure Channel attach)` |
+| | `off` | `'bleconsole on' attaches the app console to the phone link` |
+| `glasses` | `not-here` | `'openble' switches to server mode for a direct app connection (stops the glasses)` |
+| `glasses-pipe`, `phone-pipe` | `not-here`, `bleconsole` on | `the app console on the phone link needs a device pairing code: run 'phone pair new' on serial or the OLED` |
+| | `not-here`, `bleconsole` off | `'bleconsole on' offers the app console on the phone link` |
+| any but `off` | `signed-out`, `signed-in` | none |
+| `off` | | `to start the app console, run 'openble'` |
+
+- Outside the console server the reply is `{"schema":1,"initialized":false,"link":{...},"phoneLink"?:{...},"hint"?:"..."}`
+  (`phoneLink` in pipe builds, in every role: sec. 11.9).
+- Errors: `{"schema":1,"error":"unavailable"}` (Bluetooth busy; retry), `"buffer"`,
+  `"oom"`, `"status too large"`.
+- Plain `blestatus` outside the console server answers
+  `Role: ...` / `App console: ...` and the phone link block (pipe builds only,
+  sec. 11.9; no `Clients:` line on the phone link) and prints the hint, when
+  there is one, as a separate `Hint: ...` console line. In server mode the
+  block sits between the `Clients:` line and the per-client lines.
+
+### 11.4 `status json`: `connectivity.bluetooth`
+
+The existing keys stay: `running`, `state`, `mode`, `server`, `client`,
+`g2Connected`. Changes:
+
+- `state` is the pipe's `pipeText` while only the pipe runs.
+- Added in pipe builds: `phoneConnected` (bool: `pipe` is `ready`) and
+  `phoneState` (the pipe line: `ready`, `fail: not found`, ...).
+- Added: every `link` key of sec. 11.1 (`role`, `roleText`, `saved`, `savedText`,
+  `savedDiffers`, `pipe`, `pipeText`, `pipeReason`, `pipePaired`, `console`,
+  `consoleText`, `consoleClients`, `advertising`), at the same level. None
+  collides with an existing key.
+- Added in pipe builds: `phoneLink`, the compact form of sec. 11.9 (no
+  `stateText`, `secretText`, `consoleText` or `endReasons`).
+
+### 11.5 `GET /api/ble/status`
+
+Top level: `schema` (1), `mode` (the saved keyword: `server` \| `client`),
+`ble` (as `bleinfo json`, without its `phoneLink`), then in G2
+builds `g2`, `g2Text` and `ring`, then:
+
+- `link`: sec. 11.1.
+- `phone` (pipe builds): the phone object below.
+- `phoneLink` (pipe builds): the full form of sec. 11.9, from the same reading as
+  `link`.
+
+Errors: `503 {"error":"BLE status unavailable"}` (also `G2 status unavailable`,
+`Ring status unavailable`), `500 {"error":"Out of memory"}`.
+
+### 11.6 The phone object (schema 2)
+
+`GET /api/ble/status` `phone`, and `phone status json` (the same object). It is
+the relay pipe, from the device's side.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `schema` | int | `2` |
+| `active` | bool | The pipe runs (beside the glasses, or alone) |
+| `standalone` | bool | The pipe runs with no glasses runtime beside it (the host belongs to the shared stack either way) |
+| `connected` | bool | `pipe` is `ready` |
+| `state` | string | The pipe's own text, for diagnostics only (e.g. `stopped`, `scanning`, `phone not found`); not a contract, use `pipe` |
+| `text` | string | The pipe line as shown: `ready`, `searching`, `fail: not found`, ... |
+| `role` | string | The pipe's place: `off` \| `with-glasses` \| `phone-only`. Not the device role (that is `link.role`) |
+| `enrolled` | bool | A pipe enrollment is saved |
+| `autoReconnect` | bool | Reconnect the paired phone at boot |
+| `pipe`, `pipeText`, `pipeReason`? | string | As in sec. 11.1 |
+| `console`, `consoleText` | string | As in sec. 11.1 |
+
+`phone status json` errors: `{"error":"oom"}`, `{"error":"unavailable"}`,
+`{"error":"status too large"}`. Plain `phone status` prints
+`pipe=<text> role=<role> paired=yes|no auto=on|off console=<console> state='<state>'`.
+
+### 11.7 Web SSE: `phone-status`
+
+On the web event stream (`GET /api/events`), event `phone-status` is pushed when
+the pipe's flags, setup step or text change (checked every 250 ms; no event at
+boot, so read `/api/ble/status` first). Compact keys, since an SSE payload is
+capped at 128 characters:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `u` | bool | Pipe link up (`connected`) |
+| `on` | bool | Pipe running (`active`) |
+| `own` | bool | Phone-only (`standalone`) |
+| `en` | bool | Enrolled (`enrolled`) |
+| `ar` | bool | `autoReconnect` |
+| `p` | string | The pipe id, as `pipe` (`ready`, `not-paired`, ...) |
+| `r` | string | Its reason, as `pipeReason`; only when there is one |
+
+The pipe's own text (`state`) is not in the event. The event carries no console
+or role keys: re-read `/api/ble/status` for those.
+
+### 11.8 The console session on the pipe's link
+
+In `blemode client` the device keeps one console session on the pipe's link
+while the pipe is `ready`, `blesecret` is set and `bleconsole` is on. The
+command service and Secure Channel v1 are unchanged; these rules are the
+difference from server mode:
+
+- **Joining.** The session waits for the app: it is not a connected app (no
+  `signed-out` console word, no BLE connect event, `consoleClients` 0) until the
+  device admits the app's first write on `…de01`.
+- **Status read.** `…de03` answers the pipe's link with
+  `{"state":"connected","uptime":...,"rx":...,"tx":...}` while the session
+  exists (before the first write too), and every other link, or the phone
+  outside a session, with `{"state":"unavailable"}`.
+- **Renewed under a live link.** `bledisconnect` (the OLED "End console", the
+  web Disconnect), `bleconsole off` then `on`, and `blesecret` cleared and set
+  again end the session without dropping the link, and the device starts a
+  fresh one there with no channel. The app's next DATA frame then gets `SC_REJECT` reason
+  `0x03` ("no channel"), once per session: run the Secure Channel handshake
+  again, then `login`. Frames sent before that reject arrived get nothing;
+  resend the command that got no reply. Ignore a reason `0x03` that arrives
+  while a new handshake runs.
+- **Console off.** With `bleconsole off` the link's writes get no reply at all;
+  `…de03` reads `unavailable`.
+- **Pipe gone.** When the pipe leaves `ready` the session ends at once: a write
+  after that is not run. The next `ready` starts a fresh session.
+
+### 11.9 The phone link block (`phoneLink`, phone link v2)
+
+The phone link as one block: the link (the pipe words), its console stream,
+relay forwarding, live streams and how READY sessions ended. Counts and words
+only: no address, secret or content. Present in pipe builds only (every role,
+also while the pipe is stopped), in `bleinfo json`, `blestatus json` and
+`GET /api/ble/status` (full form) and in `status json`
+`connectivity.bluetooth` (compact form).
+
+| Key | Type | Values |
+|---|---|---|
+| `state` | string | The link, as `link.pipe`: `off` \| `no-secret` \| `not-paired` \| `pairing` \| `waiting` \| `searching` \| `linking` \| `ready` \| `closing` \| `idle` \| `fail` \| `fault` |
+| `stateText` | string | Full form. As `link.pipeText` |
+| `reason` | string | Only when there is one, as `link.pipeReason` (adds `version`: a phone app with the wrong pipe version, and `app old`: three of those in a row; reconnects are held until `openphone`, `phone pair` or `phone pair new`) |
+| `paired` | bool | As `link.pipePaired` |
+| `secret` | string | The phone secret's kind: `code` (a device code from `phone pair new`; offers the console) \| `passphrase` (set with `phone secret`; relay only) \| `none` |
+| `secretText` | string | Full form. `device code` \| `passphrase` \| `no secret` |
+| `console` | string | The console stream: `off` (`bleconsole off`) \| `needs-code` (no device code) \| `waiting` (offered; the link is not READY) \| `not-wanted` (READY; the app has the console off, or closed it) \| `opening` \| `open` (signed out) \| `signed-in` \| `closing` \| `backoff` (reopening after an error) \| `stopped` (refused by the app; not reopened this session) |
+| `consoleText` | string | Full form. `off`, `needs a device code`, `waiting for the link`, `not wanted by the app`, `opening`, `open, signed out`, `signed in`, `closing`, `backing off`, `refused by the app` |
+| `relay` | string | Relay forwarding as the phone reports it: `on` \| `off` \| `unknown` (the link is not READY). Chat and Terminal use the phone only while `on`; the link and the console do not depend on it |
+| `streams` | object | Live streams by class: `{"relay": 0..2, "console": 0..1}` |
+| `ended` | int | READY sessions ended since boot |
+| `lastEnd` | string | Only when `ended` > 0: the last one's end reason (names below) |
+| `endReasons` | object | Full form. `{name: count}` of the end reasons since boot; names with no count are left out |
+
+End reason names, by the pipe error code: 0 `other` (also any code the pipe
+does not know), 1 `protocol`, 2 `version`, 3 `unauthorized`, 4 `target`, 5
+`vpn`, 6 `dns`, 7 `connect`, 8 `connect-timeout`, 9 `busy`, 10 `resources`, 11
+`tcp`, 12 `flow`, 13 `deadline`, 14 `cancelled`, 15 `display`, 16 `service-off`,
+17 `unsupported`, 18 `paused`.
+
+Plain `bleinfo` (after its own lines) and `blestatus` (after `App console:`)
+print the same block in pipe builds, for example:
+
+```
+Phone link: ready
+  Paired: yes (device code)
+  Console: signed in
+  Relay: off
+  Streams: relay 0/2, console 1/1
+  Ended: 3 (last: paused)
+  End reasons: cancelled=2 paused=1
+```
+
+The `End reasons:` line is left out while nothing has ended.
+
+## 12. Status
 
 These contracts describe the current source. The Phase 2 catalog path passes
 the complete artifact matrix, while physical transport/fault acceptance remains

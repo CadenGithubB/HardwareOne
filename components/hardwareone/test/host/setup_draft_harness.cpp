@@ -253,6 +253,13 @@ static void navigationAndModes() {
   wizardSetFeatureEnabled("bluetooth", true);
   const auto* bluetooth = wizardModeMenuForFeature("bluetooth");
   check(bluetooth && wizardIsPageVisible(WIZARD_PAGE_BTMODE));
+  // Two boot roles: the app console server and the shared client stack (named
+  // by the glasses, with the pipe in a pipe build); the phone-client mode is gone.
+  check(bluetooth->modeCount == 2);
+  check(!std::strcmp(bluetooth->modes[0].label, "App console") &&
+        bluetooth->modes[0].value == BLE_MODE_SERVER);
+  check(!std::strcmp(bluetooth->modes[1].label, ENABLE_BLE_PHONE_PIPE ? "Glasses+pipe" : "Glasses") &&
+        bluetooth->modes[1].value == BLE_MODE_G2_CLIENT);
   wizardModeApply(bluetooth, 1); check(getWizardDraftValues().bleMode == 1 && gSettings.bleMode == 0);
 #endif
   for (size_t i = 0; i < getWizardMenuItemCount(WIZARD_PAGE_SENSORS); ++i) {
@@ -460,6 +467,18 @@ static void completionFailuresAndNoop() {
   auto unavailableDraft = completed();
   check(!wizardSaveAndApplySettings(unavailableDraft));
   check(liveValues() == initialFailureState && changed.empty() && applyCalls == 0);
+
+  // A BLE role this build cannot run (Bluetooth.h's bleModeIsAvailable) is
+  // refused as a whole; nothing is applied.
+  reset(); initSetupWizard();
+  check(bleModeIsAvailable(BLE_MODE_SERVER));
+  const int unavailableMode = 2;  // the removed phone-client value (a stale saved setting)
+  check(!bleModeIsAvailable(unavailableMode));
+  const auto beforeMode = liveValues();
+  sWizardDraft.values.bleMode = unavailableMode;
+  auto unavailableResult = completed();
+  check(!wizardSaveAndApplySettings(unavailableResult));
+  check(liveValues() == beforeMode && changed.empty() && applyCalls == 0);
 
   reset(); initSetupWizard(); toggleFeature("automation");
   auto cancelledResult = completed(); cancelledResult.wifiConfigured = true;

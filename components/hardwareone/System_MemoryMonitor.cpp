@@ -94,13 +94,22 @@ static const MemoryRequirement gMemoryRequirements[] = {
   // to PSRAM. The BLE-core figure independently matches openble's 42,944 (3 runs).
   //
   // 86016 = 80,980 + ~5 KB. NOTE this is deliberately a tight floor: it still
-  // admits g2init on a WiFi+HTTP device (~95.8 KB free), which lands near 9 KB and
+  // admits the G2 client start on a WiFi+HTTP device (~95.8 KB free), which lands near 9 KB and
   // has been observed to fail afterwards at openg2. Raising this toward ~102,400
   // would refuse that combination outright.
-  { "g2client",      86016,    0,                     0 },       // 84KB DRAM (BLE core 43K + 4 G2 worker stacks 38K)
+  // Split 2026-10-21 with the shared central stack (BLE_CentralStack.cpp):
+  // "blestack" is the host + controller link + setup worker, checked by
+  // bleStackUp() before the host comes up (BLE core 43,272 measured above +
+  // ble_setup 5,120 + ~5 KB margin); "g2client" is the glasses runtime only
+  // (page-swap 8192 + tap 10240 + session 10240 + TCBs/queues ~3 KB + temple
+  // mirrors), checked by initG2Client AFTER the stack is up. Their sum keeps
+  // the old 84 KB cold-start budget; a ring-only or phone-only open pays just
+  // the stack row.
+  { "blestack",      53248,    0,                     0 },       // 52KB DRAM: BLE host 43K + setup worker 5K + margin
+  { "g2client",      40960,    0,                     0 },       // 40KB DRAM: 3 G2 worker stacks 29K + TCBs/queues + GATT mirrors
   // 52 KB, against an HONEST INTERNAL|8BIT reading. MEASURED on feather_esp32_v2,
   // not estimated: BLE init costs 42,944 B (four runs, 4-byte spread) --
-  //   g2init at boot   148,115 -> 104,843
+  //   client at boot   148,115 -> 104,843   (the G2 client start of the day, then `g2init`)
   //   openble x3        107,383 ->  64,439 / 95,931 -> 52,987 / 84,559 -> 41,611
   // 53248 = 42,944 init + ~10 KB survivable floor.
   //
@@ -201,7 +210,7 @@ static size_t gLowestHeapSeen = UINT32_MAX;
 // Measured on feather_esp32_v2 (honest INTERNAL|8BIT figures):
 //   boot, WiFi + HTTP, no BLE ......... 95,927 B
 //   after openble (server mode) ....... 33,435 B
-//   after g2init (client + G2) ........ 26,495 B
+//   after the G2 client start ......... 26,495 B   (then `g2init`; now openble + openg2)
 //   G2 connected, hijack page open .... 21,299 B  <- still warns at 25 KB, intended
 static const size_t HEAP_WARNING_THRESHOLD = 25600;  // 25KB warning threshold
 

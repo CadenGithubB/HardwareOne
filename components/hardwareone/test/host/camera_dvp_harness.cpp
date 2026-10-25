@@ -134,7 +134,7 @@ camera_fb_t* esp_camera_fb_get() {
 }
 void esp_camera_fb_return(camera_fb_t*) { --Fake::liveBuffers; ++Fake::returned; }
 namespace hwjpeg { namespace detail {
-bool validateSoftwareEntropy(const uint8_t*, size_t, const Info&, const char** error) {
+bool validateSoftwareEntropy(const uint8_t*, size_t, const Info&, const char** error, OutputAllocator) {
   ++Fake::entropyCalls;
   if (Fake::entropyFailures > 0) {
     --Fake::entropyFailures;

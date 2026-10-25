@@ -136,7 +136,7 @@ static void displayCLIViewer() {
       // Content - word wrap across 2 lines (44px content area)
       int contentY = OLED_CONTENT_START_Y + 24;
       int lineHeight = 10;
-      int maxLines = 2;  // 2 lines of content fit in 44px
+      int maxLines = oledVisibleRows(10, 24, 2);
       int charsPerLine = 20;
       
       size_t lineLen = strlen(line);

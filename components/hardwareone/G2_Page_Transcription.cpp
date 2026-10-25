@@ -112,10 +112,10 @@ EXT_RAM_BSS_ATTR static char rows[12][72], sidebar[512], textBody[1200], textPag
 // unchanged polls send nothing instead of an identical UPDATE_TEXT).
 EXT_RAM_BSS_ATTR static char liveText[kTailBytes + kWindowBytes + 2], renderedSidebar[512];
 EXT_RAM_BSS_ATTR static char body[kSidebarUpdateMax + 8], renderedBody[kSidebarUpdateMax + 8];
-static const char* rowPtrs[12];
-static uint16_t pageOffsets[9];
+EXT_RAM_BSS_ATTR static const char* rowPtrs[12];
+EXT_RAM_BSS_ATTR static uint16_t pageOffsets[9];
 static View renderedView = View::File;
-static char renderedRows[12][72];
+EXT_RAM_BSS_ATTR static char renderedRows[12][72];
 static size_t renderedCount = 0;
 static uint32_t renderedEpoch = 0, renderedGeneration = 0, renderedMenuGen = 0;
 EXT_RAM_BSS_ATTR static char labelledText[2048];
@@ -192,6 +192,13 @@ static void buildLabelledText(const State& s) {
     if (used > out && liveSourceCount < sizeof(liveSources) / sizeof(liveSources[0]))
       liveSources[liveSourceCount++] = {uint16_t(out), uint16_t(used), uint16_t(begin), draft};
   };
+  // Display casing only (the source bytes and anchors are untouched): a
+  // paragraph, i.e. a known speaker's turn or the plain prose when speakers
+  // are off, starts with a capital. Unassigned "?:" text keeps the decoder's
+  // casing so its words do not change case when a label joins them to a turn.
+  auto capitalize = [&](size_t at) {
+    if (at < used && labelledText[at] >= 'a' && labelledText[at] <= 'z') labelledText[at] = char(labelledText[at] - ('a' - 'A'));
+  };
   int lastSpeaker = -2;
   auto phrase = [&](size_t begin, size_t end, int speaker) {
     while (begin < end && s.tail[begin] == ' ') ++begin;
@@ -206,10 +213,12 @@ static void buildLabelledText(const State& s) {
       else snprintf(tag, sizeof(tag), "?: "); // unassigned text, never a guessed person
       append(tag, strlen(tag));
     }
+    const size_t words = used;
     source(begin, end, false); lastSpeaker = speaker;
+    if (!sameRun && speaker >= 0) capitalize(words);
   };
   const size_t tailLength = strlen(s.tail);
-  if (!s.speakersAvailable) source(0, tailLength, false);
+  if (!s.speakersAvailable) { source(0, tailLength, false); capitalize(0); }
   else {
     size_t cursor = 0;
     for (size_t i = 0; i < s.phraseCount; ++i) {
@@ -649,7 +658,12 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
         const uint32_t sequence = doc["sequence"] | 0u, offset = doc["offset"] | 0u;
         const bool duplicate = state.sequence == sequence && state.receiptOffset == offset && state.receiptLength == length;
         state.sequence = sequence; state.receiptOffset = offset; state.receiptLength = length;
-        if (!duplicate) appendTailLocked(text, length, state.receiptOffset == 0);
+        // The receipt names the raw bytes; the tail shows the display copy
+        // (vocabulary spellings) when the adapter supplied one.
+        const char* display = doc["display"] | text;
+        const size_t shown = strlen(display);
+        if (!duplicate) appendTailLocked(shown && shown <= kWindowBytes ? display : text,
+                                         shown && shown <= kWindowBytes ? shown : length, state.receiptOffset == 0);
         state.ackPending = true;
       } else snprintf(state.message, sizeof(state.message), "Invalid text receipt");
     }

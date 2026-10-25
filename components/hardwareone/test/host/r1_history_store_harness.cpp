@@ -268,6 +268,55 @@ static void normal() {
     std::cout << "normal:" << dense << ':' << mode << ':' << std::quoted(path) << '\n' << disk.at(path);
   }
 }
+// 2.3.2 sleep records: stored with the day, sealed with it, and validated on
+// both stage and load. A day without sleep writes no S line.
+static void sleepCases() {
+  for (int mode : {0, 1}) {
+    reset(); gSettings.captureEncryptMode = mode;
+    const auto plain = fixture();
+    save(plain, 1); good(plain, 1);
+    check(disk.at(primary(plain)).find("\nS,") == std::string::npos || mode != 0,
+          "a day without sleep writes no sleep line");
+    auto day = fixture();
+    R1HealthSleepRecord& night = day.sleep.records[0];
+    night.type = 1; night.timezoneMinutes = -240;
+    night.endEpoch = day.dayStart + 6 * 3600; night.startEpoch = night.endEpoch - 25200;
+    night.stageCount = 4;
+    night.stageEpochs[0] = 40; night.stageEpochs[1] = 200; night.stageEpochs[2] = 400; night.stageEpochs[3] = 200;
+    night.sourceSerial = 31; night.sourceCrc32 = 0xCAFEBABE;
+    R1HealthSleepRecord& nap = day.sleep.records[1];
+    nap.type = 2; nap.timezoneMinutes = -240;
+    nap.startEpoch = day.dayStart + 14 * 3600; nap.endEpoch = nap.startEpoch + 1800;
+    nap.sourceSerial = 32; nap.sourceCrc32 = 0x0D15EA5E;
+    day.sleep.count = 2;
+    check(r1HealthHistoryDayValidate(day), "a day with a staged night and a nap validates");
+    check(contentHash(day) != contentHash(plain), "sleep records change the content hash");
+    save(day, 2); good(day, 2);
+    check(mode != 0 || disk.at(primary(day)).find("\nS,1,-240,") != std::string::npos,
+          "plaintext policy writes one S line per record");
+    R1HealthSleepSummary summary; r1HealthHistorySleepSummary(day, summary);
+    check(summary.available && summary.count == 2 &&
+          summary.firstStartEpoch == night.startEpoch && summary.lastEndEpoch == nap.endEpoch &&
+          summary.asleepSeconds == (200u + 400u + 200u) * 30u + 1800u &&
+          summary.stageSeconds[0] == 1200u && summary.stageSeconds[3] == 6000u,
+          "summary counts staged sleep plus whole naps");
+    // Fail closed: a period ending on another day, stages that do not account
+    // for the period, records out of order, or records without PRESENT.
+    auto bad = day; bad.sleep.records[1].endEpoch = day.dayStart + 86400; bad.sleep.records[1].startEpoch = bad.sleep.records[1].endEpoch - 60;
+    check(!r1HealthHistoryDayValidate(bad), "a period ending on the next day is refused");
+    bad = day; bad.sleep.records[0].stageEpochs[2] -= 1;
+    check(!r1HealthHistoryDayValidate(bad), "stages that miss part of the period are refused");
+    bad = day; std::swap(bad.sleep.records[0], bad.sleep.records[1]);
+    check(!r1HealthHistoryDayValidate(bad), "records must be ascending by start");
+    bad = day; bad.sleepState = R1_HISTORY_SLEEP_EMPTY;
+    check(!r1HealthHistoryDayValidate(bad), "stored records require the PRESENT state");
+    bad = day; bad.sleep.records[1].stageEpochs[0] = 1;
+    check(!r1HealthHistoryDayValidate(bad), "a stage-less period carries no stage epochs");
+    check(!r1HealthHistoryStoreStage(bad, 3), "an invalid sleep day is never staged");
+    released();
+  }
+}
+
 static void failureCases() {
   for (int mode : {0, 1}) for (int fault = 0; fault < 9; ++fault) {
     reset(); gSettings.captureEncryptMode = mode; auto day = fixture(); const auto path = primary(day);
@@ -359,6 +408,9 @@ static G2HealthNav sNav = HEALTH_NAV_MAIN;
 static void clearTypedTrends() {}
 static void rebuildTypedTrends(const R1HealthHistoryDay&) {}
 void g2HealthArmGraphPush(uint32_t) {}
+bool r1ProfileSupportsSleepRecords(R1ProtocolProfile profile) {
+  return profile == R1_PROFILE_FW_2_3_2_0007 || profile == R1_PROFILE_FW_2_3_2_0008;
+}
 bool r1ProfileSupportsSingleFrameDaily(R1ProtocolProfile profile, uint8_t cmd) {
   return profile == R1_PROFILE_FW_2_2_9_0003 && cmd == R1_CMD_HEARTRATE;
 }
@@ -421,6 +473,34 @@ static void storeLoadExistence() {
         "a day never stored is NOT_FOUND");
   released();
 }
+// A 2.3.2.0008 backlog page repeats the ring-wide newest sample, which lies on
+// a later day. The older day must not store it as its own latest.
+static void modelBacklogLatest() {
+  reset(); const auto day = fixture(); modelReboot(day.peerId);
+  auto page = hrPage(day.dayStart, 5);
+  page.latestTimestampMode = R1_DAILY_TIMESTAMP_EPOCH;
+  page.latestTimestamp = day.dayStart + 3 * 86400u + 40000u;
+  page.latestValue = 99;
+  g2HealthHistoryFetchStarted();
+  expect(g2HealthApplyCommonDaily(page), "the older day's page is accepted");
+  released(); g2HealthHistoryFetchFinished(true, 0); released();
+  mainLoop(3);
+  expect(sHistoryLoadedExact && sHistoryDay.dayStart == day.dayStart && sHistoryDay.heartRate.have &&
+             !sHistoryDay.heartRate.latestValid,
+         "an older day never stores a later day's newest sample as its latest");
+  // A latest inside the day is still kept.
+  page.latestTimestamp = day.dayStart + 5 * 3600u + 600u;
+  page.latestValue = 71;
+  g2HealthHistoryFetchStarted();
+  expect(g2HealthApplyCommonDaily(page), "the same day's next page is accepted");
+  released(); g2HealthHistoryFetchFinished(true, 0); released();
+  mainLoop(3);
+  expect(sHistoryDay.heartRate.latestValid &&
+             sHistoryDay.heartRate.latestTimestamp == day.dayStart + 5 * 3600u + 600u &&
+             sHistoryDay.heartRate.latestValue == 71,
+         "a latest sample inside the day is stored");
+}
+
 static void modelOpenFailure() {
   reset(); const auto day = fixture(); save(day, 1); modelReboot(day.peerId);
   check(sweep(day.dayStart, 5), "the model accepts a sweep page for the stored day");
@@ -492,7 +572,9 @@ int main() {
                                              "boot restores missing primary but retains existing primary, discarding stale backups and temps");
   normal(); failureCases(); firstSaveFailures(); recoveryAndGeneration();
 #if !BASELINE
+  sleepCases();
   storeLoadExistence(); modelOpenFailure(); modelCorruptDay(); modelCorruptDayDuringSweep();
+  modelBacklogLatest();
 #endif
   if (!BASELINE) {
     check(unguardedIo > 0, "store data writes still run under the shared filesystem guard");

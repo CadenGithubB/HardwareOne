@@ -300,8 +300,10 @@ bool currentSecureBleConnection(uint16_t& connId, char* reason, size_t reasonSiz
   }
   char* sidEnd = nullptr;
   const unsigned long parsed = strtoul(sidText, &sidEnd, 10);
+  // Confidential: an established Secure Channel, or the phone link's console
+  // row (the pipe's encryption), for this command's own session epoch.
   if (!sidEnd || *sidEnd != '\0' || parsed > UINT16_MAX ||
-      !bleScEstablished(static_cast<uint16_t>(parsed))) {
+      !bleSessionConfidential(static_cast<uint16_t>(parsed), context->transportSessionEpoch)) {
     snprintf(reason, reasonSize, "Error: otawrite requires the encrypted Bluetooth channel");
     return false;
   }

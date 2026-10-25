@@ -2,11 +2,15 @@
 #include "System_Debug.h"   // ERROR_SYSTEMF / DEBUG_SYSTEMF
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "esp_random.h"
+#include "esp_system.h"
 
 // One tiny namespace holds all cross-power-cycle boot state. Keys are <=15 chars
 // (NVS limit). Kept deliberately separate from any file-backed store.
 static const char* kNvsNamespace = "bootstate";
 static const char* kKeyBootCount = "bootcount";
+static const char* kKeyPowerOnCount = "poweron";
+static const char* kKeyOrderingDomain = "domain";
 static const char* kKeyAccountIdHighWater = "acctidhw";
 
 static bool sNvsReady = false;
@@ -31,16 +35,18 @@ void bootStateInit() {
   sNvsReady = true;
 }
 
-static uint32_t readCountLocked() {
+static uint32_t readKey(const char* key) {
   nvs_handle_t h;
   // NVS_READONLY open fails with NOT_FOUND until the namespace exists (first
   // boot); treat that as 0 rather than an error.
   if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) return 0;
   uint32_t v = 0;
-  nvs_get_u32(h, kKeyBootCount, &v);  // leaves v untouched (0) on NOT_FOUND
+  nvs_get_u32(h, key, &v);  // leaves v untouched (0) on NOT_FOUND
   nvs_close(h);
   return v;
 }
+
+static uint32_t readCountLocked() { return readKey(kKeyBootCount); }
 
 static void writeCount(uint32_t v) {
   nvs_handle_t h;
@@ -55,13 +61,46 @@ static void writeCount(uint32_t v) {
   nvs_close(h);
 }
 
+// The power-on counter and the ordering domain ride the same once-per-boot
+// write. A missing domain (fresh or erased NVS) is drawn here, non-zero so a
+// reader can tell "no domain" from a real one.
+static void advanceOrderingLocked(bool powerOn) {
+  nvs_handle_t h;
+  if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) return;
+  bool changed = false;
+  uint32_t domain = 0;
+  if (nvs_get_u32(h, kKeyOrderingDomain, &domain) != ESP_OK || !domain) {
+    do { domain = esp_random(); } while (!domain);
+    changed = nvs_set_u32(h, kKeyOrderingDomain, domain) == ESP_OK;
+  }
+  if (powerOn) {
+    uint32_t count = 0;
+    nvs_get_u32(h, kKeyPowerOnCount, &count);
+    changed = (nvs_set_u32(h, kKeyPowerOnCount, count + 1) == ESP_OK) || changed;
+  }
+  if (changed) nvs_commit(h);
+  nvs_close(h);
+}
+
 uint32_t bootStateIncrementBootCount() {
   bootStateInit();
   if (!sNvsReady) return 0;
   uint32_t next = readCountLocked() + 1;
   writeCount(next);
-  DEBUG_SYSTEMF("[BootState] boot count -> %lu", (unsigned long)next);
+  advanceOrderingLocked(esp_reset_reason() == ESP_RST_POWERON);
+  DEBUG_SYSTEMF("[BootState] boot count -> %lu (power-on %lu, domain %08lx)", (unsigned long)next,
+                (unsigned long)readKey(kKeyPowerOnCount), (unsigned long)readKey(kKeyOrderingDomain));
   return next;
+}
+
+uint32_t bootStateGetPowerOnCount() {
+  bootStateInit();
+  return sNvsReady ? readKey(kKeyPowerOnCount) : 0;
+}
+
+uint32_t bootStateGetOrderingDomain() {
+  bootStateInit();
+  return sNvsReady ? readKey(kKeyOrderingDomain) : 0;
 }
 
 uint32_t bootStateGetBootCount() {

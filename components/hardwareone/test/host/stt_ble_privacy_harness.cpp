@@ -27,7 +27,8 @@ static std::atomic<int> sBleGattsIf{1};
 // Four-slot GATT peer table.  A directed send lands in the addressed slot's
 // inbox; the characteristic-wide notify lands in every connected slot's inbox,
 // as the vendored Arduino wrapper sends it to every peer behind one shared CCCD.
-struct BLEConnection { bool active=false; uint16_t connId=0; bool authed=false; std::string user; bool mirrorEligible=false; };
+struct BLEConnection { bool active=false; uint16_t connId=0; bool authed=false; std::string user; bool mirrorEligible=false;
+  bool pipeConsole=false; uint32_t pipeGeneration=0; uint16_t pipeStream=0; };  // + the phone link's console row
 struct State { int responsesSent=0; BLEConnection connections[BLE_MAX_CONNECTIONS]; } state;
 static State* gBLEState=&state;
 static std::atomic<TransportSessionEpoch> sBleSessionEpoch[BLE_MAX_CONNECTIONS];
@@ -56,7 +57,7 @@ enum class BleNotifyResult{PENDING,OK,TERMINAL};
 [[maybe_unused]] static BleNotifyResult gLastNotifyResult=BleNotifyResult::OK;
 static int guardDepth=0; static unsigned bindCalls=0, fenceCalls=0; static uint16_t lastBindConn=0xffff;
 struct BleLifecycleGuard { BleLifecycleGuard(){++guardDepth;} ~BleLifecycleGuard(){--guardDepth;} explicit operator bool()const{return true;} };
-struct BleCommandReplyContext { uint16_t connId;TransportSessionEpoch sessionEpoch; };
+struct BleCommandReplyContext { uint16_t connId;TransportSessionEpoch sessionEpoch;bool sendFailed; };
 bool bleDataDebugEnabled(){return debugEnabled;}
 bool bleConnectionEpochMatchesLocked(uint16_t conn,uint32_t epoch){
   const int slot=slotFor(conn);return epoch!=0&&slot>=0&&sBleSessionEpoch[slot].load()==epoch;
@@ -65,6 +66,11 @@ bool bleSessionEpochMatches(uint16_t conn,uint32_t epoch){return bleConnectionEp
 bool isBLEConnected(){for(const auto& c:state.connections) if(c.active) return true; return false;}
 bool bleScEstablished(uint16_t conn){const int slot=slotFor(conn);return slot>=0&&slotSecure[slot];}
 bool bleScRequired(){return scRequired;}
+// Server mode: no central TX gate and the operator's rule alone
+// (test_ble_sc_directed runs the client host's gate and rule).
+static bool bleSecureChannelOnly(){return bleScRequired();}
+struct BleConsoleTxGate{explicit BleConsoleTxGate(bool){} explicit operator bool()const{return true;} bool gated()const{return false;} void sent()const{}};
+static std::atomic<int> sBleConsoleSendsInFlight{0};  // client-host posts only
 bool bleScSendEncrypted(uint16_t conn,const char* data,size_t len,bool){
   const int slot=slotFor(conn);
   if(slot<0||slotCongested[slot]) return false;
@@ -117,7 +123,11 @@ bool sendBLEResponseToSession(uint16_t,uint32_t,const char*,size_t,bool=true);
 // INSERT_HISTORY
 // INSERT_RAW_SESSION
 // INSERT_RAW_BROADCAST
+static int findConnectionSlotByConnIdLocked(uint16_t conn){return slotFor(conn);}
+// INSERT_PIPE_ROUTER
 // INSERT_SEND
+// The command's own output batch (test_ble_command_output); these replies carry none.
+static void bleCommandOutputFlush(BleCommandReplyContext*){}
 // INSERT_CALLBACK
 // INSERT_MIRROR_COLLECT
 // INSERT_MIRROR_SEND
@@ -133,7 +143,7 @@ static void reset(){
 }
 static void callback(const std::string& body){
  auto* reply=static_cast<BleCommandReplyContext*>(malloc(sizeof(BleCommandReplyContext)));
- *reply={0,7};bleCommandResultCallback(true,body.c_str(),reply);
+ *reply={0,7,false};bleCommandResultCallback(true,body.c_str(),reply);
 }
 static void privateMirrors(){
  for(const auto& line:traces) assert(line.find("SECRET_SENTENCE")==std::string::npos);

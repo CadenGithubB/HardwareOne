@@ -46,7 +46,7 @@ def check_ui_boundary() -> None:
 def compile_and_run(cxx: str, sanitize: bool, display_type: int, power_pin: bool) -> None:
     with tempfile.TemporaryDirectory(prefix="hw1-display-hal-") as directory:
         work = Path(directory)
-        for name in ("HAL_Display.cpp", "HAL_Display.h"):
+        for name in ("HAL_Display.cpp", "HAL_Display.h", "HAL_Display_P4EyePixels.h", "OLED_Layout.h"):
             shutil.copy2(COMPONENT / name, work / name)
         for name in ("display_lifecycle_platform.h", "display_lifecycle_harness.cpp"):
             shutil.copy2(HERE / name, work / name)

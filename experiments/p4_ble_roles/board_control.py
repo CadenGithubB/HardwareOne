@@ -31,7 +31,7 @@ class RoleGuardError(RuntimeError):
 
 LIFECYCLE_COMMANDS = frozenset({
     'openble', 'closeble', 'blemode', 'g2init', 'g2deinit', 'openg2',
-    'closeg2', 'g2scan', 'g2recover', 'ringconnect', 'ringdisconnect',
+    'closeg2', 'g2scan', 'g2recover', 'ring connect', 'ring disconnect',
 })
 _G2_STATUS = re.compile(r'(?m)^(?:\$ )*(?:\[(?:serial|uart)[^\]\r\n]*\]\s*)?'
                         r'(?:OK: )?state=(\w+) L=(up|down) R=(up|down)\b')
@@ -79,7 +79,7 @@ class RolesConsole(ConnectivityConsole):
         states = _G2_STATUS.findall(ANSI.sub('', output))
         if len(states) != 1 or states[0] != ('off', 'down', 'down'):
             raise RoleGuardError('G2 client must be off before using the diagnostic BLE central')
-        rings = [obj for obj in extract_json_objects(super().command('ringstatus json', timeout=15))
+        rings = [obj for obj in extract_json_objects(super().command('ring status json', timeout=15))
                  if obj.get('schema') == 1 and 'connectPending' in obj]
         if len(rings) != 1 or rings[0].get('connected') is not False or rings[0].get('connectPending') is not False:
             raise RoleGuardError('R1 client must be disconnected with no connect pending')
@@ -87,7 +87,8 @@ class RolesConsole(ConnectivityConsole):
     def command(self, text, *, timeout=65):
         parts = command_parts(text)
         with self._transaction_lock:
-            if parts[0] in LIFECYCLE_COMMANDS:
+            # Verbs are one word (`closeg2`) or two (`ring connect`).
+            if parts[0] in LIFECYCLE_COMMANDS or ' '.join(parts[:2]) in LIFECYCLE_COMMANDS:
                 self._retire_probe()
             if parts[0] == 'bleprobe' and len(parts) > 1 and parts[1] in ('scan', 'connect'):
                 self._require_central_idle()

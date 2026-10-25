@@ -701,6 +701,20 @@ static void transactionCases() {
 }
 
 int main(int argc, char** argv) {
+  // No registered Bluetooth module in this fixture: its orphaned credentials
+  // survive ordinary merge writes, but factory reset strips only pipe fields.
+  reset();store(SETTINGS_JSON_FILE,R"({"network":{"bluetooth":{"phonePipeSecret":"AES:fixture","bleSecureChannelSecret":"AES:console","peers":{"phone":{"pipeChannelVersion":1,"pipeEnrolled":true,"pipeBondVersion":1,"pipeIdentity":"legacy","pipeIdentityType":1,"mac1":"console-address","pairedByUser":"owner"},"r1-ring":{"mac1":"ring-address"}}}}})");
+  check(writeSettingsJson(),"ordinary merge failed");
+  auto preserved=parse(files[SETTINGS_JSON_FILE]->bytes);
+  check(preserved["network"]["bluetooth"]["phonePipeSecret"]=="AES:fixture","ordinary save unexpectedly revoked pipe");
+  check(writeSettingsJsonForFactoryReset(),"factory credential clear failed");
+  auto cleared=parse(files[SETTINGS_JSON_FILE]->bytes);auto bluetooth=cleared["network"]["bluetooth"].as<JsonObject>();
+  check(bluetooth["phonePipeSecret"].isNull(),"disabled-module pipe secret survived factory reset");
+  auto phone=bluetooth["peers"]["phone"].as<JsonObject>();
+  for(const char* key:{"pipeChannelVersion","pipeEnrolled","pipeBondVersion","pipeIdentity","pipeIdentityType"})check(phone[key].isNull(),"pipe metadata survived factory reset");
+  check(bluetooth["bleSecureChannelSecret"]=="AES:console"&&phone["mac1"]=="console-address"&&phone["pairedByUser"]=="owner"&&bluetooth["peers"]["r1-ring"]["mac1"]=="ring-address","factory pipe clear changed unrelated credentials");
+  balanced();
+
   try {
     const std::string selected = argc > 1 ? argv[1] : "all";
     if (selected == "all") {

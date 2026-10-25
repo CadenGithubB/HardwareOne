@@ -212,6 +212,9 @@ extern bool appendLineWithCap(const char* path, const String& line, size_t capBy
 #endif
 #if ENABLE_BLUETOOTH
   #include "Bluetooth.h"
+  #include "BLE_PhonePipe.h"
+  #include "BLE_LinkStatus.h"  // status json: role, relay pipe, app console
+  #include "BLE_Peers.h"
 #endif
 #include "System_Settings.h"
 #include "System_User.h"
@@ -777,7 +780,7 @@ extern bool gCLIValidateOnly;
 // Read-only status commands that the web UI polls on a tick. Both the
 // serial broadcast and the audit-file write are skipped for these —
 // the broadcast was filling the serial log with one line per poll
-// (g2status, ringstatus, blestatus are each fetched every 1.5-15 s by
+// (g2status, ring status, blestatus are each fetched every 1.5-15 s by
 // the Bluetooth panel), and the audit file would grow without bound
 // for traffic that has zero security relevance (pure reads, no state
 // change). Keeping the list deliberately tight: only commands that
@@ -805,7 +808,7 @@ static bool isQuietPollCommand(const char* cmd) {
   if (!cmd || !cmd[0]) return false;
   // Match the leading verb; ignore any trailing args (json modifiers, etc.)
   static const char* const kQuiet[] = {
-    "g2status", "ringstatus", "blestatus",
+    "g2status", "ring status", "blestatus",
     "cm5 status", "cm5 capabilities",
   };
   for (size_t i = 0; i < sizeof(kQuiet) / sizeof(kQuiet[0]); i++) {
@@ -1069,6 +1072,12 @@ namespace {
     return safe;
   }
 
+  // `phone pair new` (phone link v2) takes no argument and its code is never on
+  // the line; the audit line, the [CMD] echo and the feeds say so all the same.
+  static String redactPhonePairNew(const String&) {
+    return String("phone pair new (code redacted)");
+  }
+
   static bool redactRuleMatches(const String& command,
                                 const char* rulePrefix) {
     CommandArgs actual(command);
@@ -1100,6 +1109,8 @@ namespace {
     { "espnowtagcmd ",     CALL_HANDLER,         0, &redactPeerCredCmd },  // <tag> <user> <pass> <cmd>
     { "espnowbrowse ",     CALL_HANDLER,         0, &redactPeerCredCmd },  // <target> <user> <pass> [path]
     { "espnowfetch ",      CALL_HANDLER,         0, &redactPeerCredCmd },  // <target> <user> <pass> <path>
+    { "phone secret ",     MASK_AFTER_TOKEN_POS, 2, nullptr },  // phone secret <passphrase>
+    { "phone pair new",    CALL_HANDLER,         0, &redactPhonePairNew },  // its code is shown once, never logged
     { "blesecret ",        MASK_AFTER_TOKEN_POS, 1, nullptr },  // blesecret <passphrase>
     // Passphrase setters — MASK_AFTER_TOKEN_POS masks the whole rest of the line
     // (robust to quoted / spaced passphrases), keeping the mesh label visible.
@@ -1163,6 +1174,36 @@ const char* settingBoolToggle(bool& field, const String& argsInput, const char* 
   return buf;
 }
 
+static bool macHexDigit(char ch) {
+  return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+}
+// A MAC's neighbour: more hex or another separator means a longer token.
+static bool macGlued(char ch) { return macHexDigit(ch) || ch == ':' || ch == '-'; }
+
+String maskMacTokens(const String& text) {
+  const char* s = text.c_str();
+  const size_t n = text.length();
+  String out;
+  out.reserve(n);
+  size_t i = 0;
+  while (i < n) {
+    // Six pairs and five separators of one kind, not glued to more hex.
+    bool mac = i + 17 <= n && (i == 0 || !macGlued(s[i - 1])) &&
+               (s[i + 2] == ':' || s[i + 2] == '-');
+    for (size_t k = 0; mac && k < 17; ++k) {
+      mac = (k % 3 == 2) ? s[i + k] == s[i + 2] : macHexDigit(s[i + k]);
+    }
+    if (mac && i + 17 < n && macGlued(s[i + 17])) mac = false;
+    if (mac) {
+      out += "<mac>";
+      i += 17;
+    } else {
+      out += s[i++];
+    }
+  }
+  return out;
+}
+
 String redactCmdForAudit(const String& argsInput) {
   const CommandResolution resolution = resolveCommand(argsInput);
   return redactCmdForAudit(argsInput, resolution);
@@ -1170,7 +1211,9 @@ String redactCmdForAudit(const String& argsInput) {
 
 String redactCmdForAudit(const String& argsInput,
                          const CommandResolution& resolution) {
-  String c = argsInput;
+  // Addresses first: masking one keeps it a single token, so the rules below
+  // still find their positions.
+  String c = maskMacTokens(argsInput);
   String cl = c; cl.toLowerCase();
 
   // Credential verbs accept the command registry's full whitespace grammar.
@@ -1791,7 +1834,7 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
     JsonObject bt = conn["bluetooth"].to<JsonObject>();
     bt["running"] = bleSubsystemActive();
     bt["state"]   = bleSubsystemStateString();
-    bt["mode"]    = getBleModeString();   // "server" | "client"
+    bt["mode"]    = getBleModeString();   // "server" | "client" (the saved boot role)
     bt["server"]  = isBleServerInitialized();
 #if ENABLE_G2_GLASSES
     bt["client"]    = isG2ClientInitialized();
@@ -1800,6 +1843,19 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
     bt["client"]    = false;
     bt["g2Connected"] = false;
 #endif
+    // One link reading: the role running now (+ the saved mode), the relay
+    // pipe and the app console in the words every surface shows
+    // (BLE_LinkStatus.h). None of its keys collide with the ones above.
+    const BleLinkStatus link = bleLinkStatus();
+#if ENABLE_BLE_PHONE_PIPE
+    // Android phone relay pipe: "ready", "fail: not found" (the lens/OLED words).
+    char pipeBuf[24];  // copied into the document
+    bt["phoneConnected"] = link.pipe.phase == hw1link::Pipe::Ready;
+    bt["phoneState"]     = hw1link::pipeLine(link.pipe, pipeBuf, sizeof(pipeBuf));
+    // The phone link block, compact (no texts, no end-reason counts).
+    bleLinkPhoneJson(bt["phoneLink"].to<JsonObject>(), link, false);
+#endif
+    bleLinkStatusJson(bt, link);
   }
 #endif
 
@@ -1887,14 +1943,19 @@ const char* cmd_status(const String& argsInput) {
   //      into a persistent PSRAM buffer. No broadcastOutput; no Arduino String
   //      (which would land in DRAM) — keeps the small-buffer / DRAM discipline.
   if (argWantsJson(argsInput)) {
+    // A P4 build (C6 companion, LLM, the Bluetooth link words) reaches about
+    // 2 KB; a document that does not fit is refused, never cut into bad JSON.
+    static constexpr size_t kStatusJsonCap = 3072;
     PSRAM_JSON_DOC(doc);
     buildSystemInfoJson(doc, /*includeDeviceList=*/false);
+    if (doc.overflowed()) return "{\"error\":\"oom\"}";
+    if (measureJson(doc) >= kStatusJsonCap) return "{\"error\":\"status too large\"}";
     static char* statusJsonBuf = nullptr;
     if (!statusJsonBuf) {
-      statusJsonBuf = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "status.json");
+      statusJsonBuf = (char*)ps_alloc(kStatusJsonCap, AllocPref::PreferPSRAM, "status.json");
     }
     if (!statusJsonBuf) return "{\"error\":\"oom\"}";
-    serializeJson(doc, statusJsonBuf, 2048);
+    serializeJson(doc, statusJsonBuf, kStatusJsonCap);
     return statusJsonBuf;
   }
 
@@ -2149,7 +2210,6 @@ const char* cmd_fsusage(const String& argsInput) {
 
 // Forward declarations for encryption/hashing functions (in settings.cpp and user_system.cpp)
 extern String encryptString(const String& plaintext);
-extern String decryptString(const String& encrypted);
 extern String hashUserPassword(const String& plaintext);
 extern bool verifyUserPassword(const String& plaintext, const String& hash);
 
@@ -2381,6 +2441,33 @@ static const char* factoryreset_confirmed(void* /*userData*/) {
   if (!finalizeMicRecordingForRestart("factory reset")) {
     return "Error: factory reset aborted — microphone recording did not finalize";
   }
+
+  {
+#if ENABLE_BLUETOOTH
+    // The BLE role is held from the pipe's stop through the secret's clear, as
+    // `phone stop` holds it: no link start (boot, the radio companion, stuck-
+    // phone recovery) may derive its key from the secret being cleared. It is
+    // this task's (re-entrant).
+    struct PhoneStopClaim {
+      const bool held=bleRoleTransitionBegin(BleRoleTransition::PHONE_STOP);
+      ~PhoneStopClaim(){if(held)bleRoleTransitionEnd();}
+    } role;
+    if(!role.held)return "Error: factory reset stopped; BLE role transition busy";
+    // Revoke the pipe before deleting account authority. A failed durable clear
+    // stops reset while the roster still exists; unrelated bond policy is unchanged.
+    if(!phonePipeStop())return "Error: factory reset stopped; phone pipe cleanup incomplete";
+    if(!phonePipeInvalidateSecret())return "Error: factory reset stopped; pipe key invalidation busy";
+#endif
+    if(!setInternalSecretSetting(gSettings.phonePipeSecret,String("")))
+      return "Error: factory reset stopped; pipe secret could not be cleared";
+    gSettings.phonePipeSecretGenerated=false;  // no device code is left to offer the console
+  }
+#if ENABLE_BLUETOOTH
+  if(!blePeerClearPhonePipeEnrollment())return "Error: factory reset stopped; pipe enrollment cleanup busy";
+#endif
+  // Persist even when Bluetooth is compiled out: a later firmware must not
+  // recover a pipe credential from the retained settings file after reset.
+  if(!writeSettingsJsonForFactoryReset())return "Error: factory reset stopped; pipe secret clear was not persisted";
 
   // Use the internal SYSTEM auth to delete users.json. The VFS path-rule
   // table grants admin only PERM_READ over /system/* -- only system auth
@@ -3134,7 +3221,7 @@ void printMemoryReport() {
         // heap (PSRAM stack, or a caller-owned buffer), so it is NOT part of
         // dram_used. Shown, never summed.
         unmeasured_tasks++;
-        BROADCAST_PRINTF("    %-20s     ? / ~%5lu bytes (not internal heap; free %lu)",
+        BROADCAST_PRINTF("    %-20s     ? / ~%5lu bytes (internal allocation unmeasured; free %lu)",
                          name, (unsigned long)taskMeasure[i].regBytes,
                          (unsigned long)freeBytes);
         continue;
@@ -3168,7 +3255,7 @@ void printMemoryReport() {
 
       if (taskMeasure[i].stackBytes == 0) {
         unmeasured_tasks++;
-        BROADCAST_PRINTF("    %-20s     ? /     ? bytes (not internal heap; free %lu)",
+        BROADCAST_PRINTF("    %-20s     ? /     ? bytes (internal allocation unmeasured; free %lu)",
                          name, (unsigned long)freeBytes);
         continue;
       }
@@ -3192,7 +3279,7 @@ void printMemoryReport() {
       (unsigned long)tcb_total,          tcb_count, (unsigned)actualCount);
 
     if (unmeasured_tasks > 0) {
-      BROADCAST_PRINTF("  (%u task stack(s) outside every registered internal heap - NOT attributed)",
+      BROADCAST_PRINTF("  (%u task stack(s) unmeasured in internal heap - NOT attributed)",
                        unmeasured_tasks);
     }
     if (actualCount == 0) {
@@ -4085,9 +4172,8 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
   const bool requiresSuperAdmin =
       resolution.entry && resolution.entry->requiresSuperAdmin;
   if (requiresSuperAdmin && !hasSuperAdminPrivilege(ctx)) {
-    String cmdName = line;
-    int spacePos = line.indexOf(' ');
-    if (spacePos > 0) cmdName = line.substring(0, spacePos);
+    // The row's own name, so a multi-word row reads `phone secret`, not `phone`.
+    const String cmdName = resolution.entry->name;
     snprintf(out, outSize, "Error: Super-admin access required for command '%s'.", cmdName.c_str());
     { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactedLine.c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
     if (ctx.user.length() > 0) {
@@ -4101,13 +4187,8 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
       (resolution.entry->requiresAdmin ||
        resolution.entry->requiresSuperAdmin);
   if (requiresAdmin && !hasAdminPrivilege(ctx)) {
-    // Extract command name for better error message (keep legacy format)
-    String cmdStr = line;
-    String cmdName = cmdStr;
-    int spacePos = cmdStr.indexOf(' ');
-    if (spacePos > 0) {
-      cmdName = cmdStr.substring(0, spacePos);
-    }
+    // The row's own name: `ring control`, not `ring` (whose status is open).
+    const String cmdName = resolution.entry->name;
     snprintf(out, outSize, "Error: Admin access required for command '%s'. Contact an administrator.", cmdName.c_str());
     { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactedLine.c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
     // A privileged command was refused. Post only when a username is resolved

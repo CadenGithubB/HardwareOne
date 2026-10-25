@@ -92,6 +92,8 @@ enum G2RingProtocolProfile : uint8_t {
   G2_RING_PROFILE_UNKNOWN = 0,
   G2_RING_PROFILE_FW_2_2_7_0005 = 1,
   G2_RING_PROFILE_FW_2_2_9_0003 = 2,
+  G2_RING_PROFILE_FW_2_3_2_0007 = 3,
+  G2_RING_PROFILE_FW_2_3_2_0008 = 4,
 };
 
 struct G2RingTransactionHandle {
@@ -222,6 +224,8 @@ inline const char* g2RingProtocolProfileName(G2RingProtocolProfile profile) {
   switch (profile) {
     case G2_RING_PROFILE_FW_2_2_7_0005: return "2.2.7.0005";
     case G2_RING_PROFILE_FW_2_2_9_0003: return "2.2.9.0003";
+    case G2_RING_PROFILE_FW_2_3_2_0007: return "2.3.2.0007";
+    case G2_RING_PROFILE_FW_2_3_2_0008: return "2.3.2.0008";
     default:                            return "unknown";
   }
 }
@@ -264,9 +268,24 @@ inline const char* g2RingProtocolProfileName(G2RingProtocolProfile profile) {
 // Public API (all return false / 0 / null when ring subsystem is disabled)
 // -----------------------------------------------------------------------------
 
-// Initialise the ring client (idempotent). Does NOT scan or connect —
-// that happens via the CLI command or g2RingConnect().
+// Create the ring's static objects (once: self-tests, settings clamp, peer
+// registration) and its owner task; idempotent while the owner lives. Does NOT
+// scan or connect. Prefer g2RingOpen(), which brings the shared stack up too.
 bool g2RingInit();
+
+// The ring as a device on the shared Bluetooth client stack (BLE_CentralStack):
+// g2RingOpen() brings the stack up if it is down, then g2RingInit();
+// g2RingClose() drops the link (userInitiated stamps the peer's intent so
+// auto-reconnect stays quiet; false keeps it, as `closeble` and the recoveries
+// do), retires the native client and releases the owner task — the stack stays
+// up. Both fail closed: a deferred close leaves the ring open and is retried.
+// g2RingIsOpen() is the owner task's presence; g2RingRegisterPeer() publishes
+// the peer spec so the reconnect scheduler can admit a closed ring (its
+// admission opens it). Task context only.
+bool g2RingOpen();
+bool g2RingClose(bool userInitiated);
+bool g2RingIsOpen();
+void g2RingRegisterPeer();
 
 // Scan for the ring advert (or use one already discovered by the main
 // glasses scan) and connect to it. Non-blocking: spawns a background
@@ -274,18 +293,31 @@ bool g2RingInit();
 // glasses. The background task auto-runs g2RingScan(15) if no advert is
 // stashed, so a prior `g2scan` is no longer required. Use
 // g2RingIsConnected() / g2RingGetStatus() to poll.
-// Synchronous connect helper used by the unified BLE-connect worker
-// (see G2_Glasses.h `g2SubmitBleConnect`). Public so the worker — which
-// lives in G2_Glasses.cpp — can dispatch RING_* job kinds to it without
-// reaching into Ring's static implementation. If `savedMac` is non-empty,
-// skips scan and tries to connect directly to that address; empty means
-// "scan-then-connect any matching ring." If an actual G2 recording is active,
-// the already-queued job waits for recorder IDLE before touching BLE; an
-// idle-open/autostarted mic does not block it. Returns true on successful link.
-// MUST run in a normal task context (allocations, delays, blocking BLE calls).
+// Synchronous connect helper run by the BLE setup worker (see G2_Glasses.h
+// `g2SubmitBleConnect`). Public so the ring's worker client — which lives in
+// G2_Glasses.cpp — can run RING_* jobs without reaching into Ring's static
+// implementation. If `savedMac` is non-empty, skips scan and tries to connect
+// directly to that address; empty means "scan-then-connect any matching
+// ring." Returns true on successful link. MUST run in a normal task context
+// (allocations, delays, blocking BLE calls).
 bool ringPerformConnect(const String& savedMac = String(),
                         const BlePeerConnectRequest* expectedRequest = nullptr,
                         uint32_t cancelGeneration = 0);
+// False once the job's connect generation was cancelled, its peer request or
+// manual fence is no longer current, or the ring must give way to the phone
+// pipe. A null request checks only the generation and the yield.
+bool g2RingConnectRequestCurrent(const BlePeerConnectRequest* request,
+                                 uint32_t cancelGeneration);
+#if ENABLE_MICROPHONE
+// A queued ring connect waits its turn while a G2 recording, ESP-SR or
+// transcription needs the glasses' full mic throughput, at most this long in
+// all; an idle-open/autostarted mic does not hold it.
+constexpr uint32_t kRingAudioWaitLimitMs = 90000;
+bool g2RingAudioThroughputCritical();
+void g2RingNoteAudioWait();
+void g2RingNoteAudioWaitEnded(uint32_t waitedMs);
+void g2RingNoteAudioWaitExpired(uint32_t waitedMs);
+#endif
 
 // Clear the per-family in-flight flag that the public g2RingConnect*
 // wrappers set before submitting to the unified worker. The worker calls
@@ -293,6 +325,11 @@ bool ringPerformConnect(const String& savedMac = String(),
 // (gRingConnectTaskActive itself is static to G2_Ring.cpp; this helper is
 // the worker's only handle on it.)
 void g2RingConnectMarkComplete();
+// Restarts the in-flight watchdog's clock when the queued job gets its turn.
+void g2RingConnectMarkRunning();
+// False once a ring disconnect, forget or teardown has cancelled the ring
+// connect generation a queued job captured (its cancelEpoch). 0 is current.
+bool g2RingConnectGenerationCurrent(uint32_t generation);
 
 // True while a ring connect job is queued or running on the BLE-connect
 // worker (producers set the flag before submitting; the worker clears it
@@ -307,10 +344,19 @@ bool g2RingConnect();
 // g2RingConnect() to use. Doesn't early-terminate on glasses-found like
 // the shared `g2scan` does, which makes it more reliable for picking up
 // the R1's slow advertising cycle. **Blocks the calling task** for up to
-// `timeoutSec` seconds (or until a ring is found, whichever comes first).
-// Returns true if a ring was stashed (either freshly seen or already
-// present from a prior scan). `timeoutSec` is clamped to [1, 300].
-bool g2RingScan(uint32_t timeoutSec, uint32_t cancelGeneration = 0);
+// `timeoutSec` seconds (or until a ring is found, whichever comes first),
+// polling every 100 ms: g2RingScanStop, a cancel or the phone-pipe yield end
+// it early, and so does another client's queued setup when
+// endWhenOtherQueued is set (the manual `ring scan`). Returns true if a ring
+// was stashed (either freshly seen or already present from a prior scan).
+// `timeoutSec` is clamped to [1, 300].
+bool g2RingScan(uint32_t timeoutSec, uint32_t cancelGeneration = 0,
+                bool endWhenOtherQueued = false);
+// Asks a ring scan in progress to end (preemption, cancel, teardown). Only
+// the worker stops the scan, within one 100 ms poll.
+void g2RingScanStop();
+// Clears a stop request; the ring job calls it before its scan starts.
+void g2RingScanStopReset();
 
 // Queue a ring-only scan on the shared central-operation worker. This is the
 // public/manual entry point; it prevents a CLI scan from replacing the
@@ -348,11 +394,27 @@ void g2RingInvalidateLink();
 // allowing teardown to free objects still reachable by r1_owner.
 bool g2RingPrepareForStackTeardown(uint32_t timeoutMs);
 
+// Let the persistent owner task (r1_owner) exit so its stack returns to the
+// heap, waiting up to timeoutMs for it. Precondition: the caller has already
+// run g2RingDisconnect(...) or g2RingPrepareForStackTeardown(), so the link is
+// logically down and the RX slabs are free; the owner exits only while the
+// link is down. Returns true when no owner remains (none existed, or it has
+// exited), false when the owner is kept: the timeout passed (the stop request
+// is withdrawn and nothing is freed) or the call came from the owner task
+// itself. g2RingInit() re-creates the owner afterwards. Not concurrent with
+// g2RingInit(): the stack owner serializes open and close.
+bool g2RingOwnerRelease(uint32_t timeoutMs);
+
 // Non-blocking compatibility hook: wake the serialized ring owner so queued
 // semantic transactions can retry the shared controller gate.
 void g2RingTryDrainPendingTx();
 
 // True if we currently have a live BLE link to the ring.
+// Main-loop policy: retire the ring only when an enabled pipe needs its slot
+// (a C6 with fewer than four links). The retirement itself runs on the setup
+// worker (g2RingRetireForPhonePipe); false if it must be retried.
+void g2RingYieldToPhonePipe();
+bool g2RingRetireForPhonePipe();
 bool g2RingIsConnected();
 
 // Fixed-capacity transaction/control snapshots. `true` from a setter means
@@ -380,6 +442,12 @@ bool g2RingRequestHistoryRefresh(bool force = false);
 // primitives and deviceStatus into one request. This is deliberately not the
 // legacy POINT query. Only exact R1 firmware 2.2.9.0003 is admitted.
 bool g2RingHealthPageRefreshSupported(void);
+bool g2RingSleepRecordsSupported(void);
+// "charging" / "not-charging" / "full" / "unknown"; "--" when not valid.
+const char* g2RingChargeStatusName(bool valid, uint8_t charge);
+// "on" / "off" / "maybe" (possiblyWear) / "?"; "--" when not valid. The one
+// wear wording for the G2, OLED, `ring health` and the web page.
+const char* g2RingWearName(bool valid, uint8_t wear);
 bool g2RingStartHealthPageRefresh(G2RingHealthRefreshHandle& out);
 bool g2RingGetHealthPageRefreshStatus(
     const G2RingHealthRefreshHandle& handle,
@@ -393,10 +461,10 @@ bool g2RingSubmitRawTransaction(
     const uint8_t* payload, size_t payloadLen,
     G2RingTransactionHandle* outHandle = nullptr);
 
-// Fill `buf` with the ringstatus CLI's short human-readable status line.
+// Fill `buf` with `ring status`'s short human-readable status line.
 void g2RingGetStatus(char* buf, size_t cap);
 
-// Shared ringstatus schema for CLI and web; JSON owns copied identity strings.
+// Shared `ring status json` schema for CLI and web (no address); JSON owns the copied name.
 // Fields retain the existing independently sampled status contract, not an
 // atomic link/scan snapshot. False means unavailable; discard partial output.
 // Callers also check their document's overflowed() before serializing.
@@ -420,7 +488,9 @@ struct G2RingTelemetry {
   uint8_t  spo2;          bool spo2Valid;
   int16_t  tempTenths;    bool tempValid;     // °C × 10 (skin/body from point)
   uint8_t  battery;       bool batteryValid;  // byte[0] of deviceStatus
-  uint8_t  wear;          bool wearValid;     // 0=unknown 1=notWear 2=wear
+  uint8_t  wear;          bool wearValid;     // 0=unknown 1=notWear 2=wear 3=possiblyWear
+  // 2.3.2 deviceStatus byte 1: 0 unknown, 1 charging, 2 not charging, 3 full.
+  uint8_t  charge;        bool chargeValid;
   // Sample age in seconds (−1 = unknown). Prefer ring epoch ts when wall
   // clock looks synced; else millis since local receive.
   int32_t  hrAgeSec;
@@ -497,14 +567,13 @@ extern BLEAdvertisedDevice* gRingAdvertisedDevice;
 extern String               gRingDeviceName;
 extern String               gRingDeviceAddress;
 extern volatile bool        gRingScanFound;
-// Cross-task identity copies (see G2_Ring.cpp). Writers refresh them whenever
-// the Strings above change; status readers on other tasks copy them out.
-void g2RingSetIdentity(const char* name, const char* addr);
-void g2RingCopyIdentity(char* name, size_t nameCap, char* addr, size_t addrCap);
+// Cross-task name copy (see G2_Ring.cpp). Writers refresh it whenever the
+// name above changes; status readers on other tasks copy it out.
+void g2RingSetIdentity(const char* name);
+void g2RingCopyIdentity(char* name, size_t nameCap);
 
-// Command table entry — wired into System_Utils.cpp alongside g2Commands.
-// The ring lives under the G2 umbrella but keeps its own command array for
-// clarity (ringstatus, ringconnect, ringdisconnect, ringdump).
+// The `ring` command module (ring status, connect, health, ...), registered by
+// System_CommandRegistry.cpp beside the G2 glasses' g2Commands.
 struct CommandEntry;
 extern const CommandEntry g2RingCommands[];
 extern const size_t       g2RingCommandsCount;
@@ -514,16 +583,25 @@ extern const size_t       g2RingCommandsCount;
 static constexpr uint8_t G2_RING_POLL_VITAL_COUNT = 5;
 
 inline bool g2RingInit()         { return false; }
+inline bool g2RingOpen()         { return false; }
+inline bool g2RingClose(bool)    { return true; }
+inline bool g2RingIsOpen()       { return false; }
+inline void g2RingRegisterPeer() {}
 inline bool g2RingConnect()      { return false; }
 inline bool g2RingConnectSaved() { return false; }
 inline bool g2RingConnectMac(const String& /*mac*/) { return false; }
-inline bool g2RingScan(uint32_t /*timeoutSec*/, uint32_t /*cancelGeneration*/ = 0) { return false; }
+inline bool g2RingScan(uint32_t /*timeoutSec*/, uint32_t /*cancelGeneration*/ = 0, bool = false) { return false; }
+inline void g2RingScanStop() {}
+inline void g2RingScanStopReset() {}
 inline bool g2RingScanAsync(uint32_t /*timeoutSec*/) { return false; }
 inline void g2RingDisconnect(bool = false)   {}
 inline void g2RingInvalidateLink() {}
 inline bool g2RingPrepareForStackTeardown(uint32_t /*timeoutMs*/) { return true; }
+inline bool g2RingOwnerRelease(uint32_t /*timeoutMs*/) { return true; }
 inline bool g2RingConnectInFlight() { return false; }
 inline void g2RingTryDrainPendingTx() {}
+inline void g2RingYieldToPhonePipe() {}
+inline bool g2RingRetireForPhonePipe() { return true; }
 inline bool g2RingIsConnected()  { return false; }
 inline bool g2RingGetTransactionStatus(const G2RingTransactionHandle&,
                                        G2RingTransactionStatus&) { return false; }
@@ -539,6 +617,9 @@ inline bool g2RingRefreshControlStatus(
     G2RingTransactionHandle* = nullptr) { return false; }
 inline bool g2RingRequestHistoryRefresh(bool = false) { return false; }
 inline bool g2RingHealthPageRefreshSupported(void) { return false; }
+inline bool g2RingSleepRecordsSupported(void) { return false; }
+inline const char* g2RingChargeStatusName(bool, uint8_t) { return "--"; }
+inline const char* g2RingWearName(bool, uint8_t) { return "--"; }
 inline bool g2RingStartHealthPageRefresh(G2RingHealthRefreshHandle& out) {
   out = G2RingHealthRefreshHandle{};
   return false;
@@ -564,6 +645,7 @@ struct G2RingTelemetry {
   int16_t  tempTenths;    bool tempValid;
   uint8_t  battery;       bool batteryValid;
   uint8_t  wear;          bool wearValid;
+  uint8_t  charge;        bool chargeValid;
   int32_t  hrAgeSec;
   int32_t  hrvAgeSec;
   int32_t  spo2AgeSec;

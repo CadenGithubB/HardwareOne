@@ -36,6 +36,7 @@ from test_web_batch_handlers import extract_block, require  # noqa: E402
 
 RUN_COMMAND = "bool oledRunCommand("
 REPLY_TEXT = "void oledCommandReplyText("
+REPORT_REPLY = "static bool oledReportCommandReply("  # oledRunCommand's verdict and toast
 POWER_SLEEP = ("static void executePowerSleepAction(", "static bool powerSleepInputHandler(")
 CMD_POWERSAVE = "static const char* cmd_powersave("
 POWERSAVE_ROW = re.compile(
@@ -101,7 +102,7 @@ def main() -> None:
     inserts = (
         ("// INSERT_CMD_POWERSAVE", extract_block(power, CMD_POWERSAVE)),
         ("// INSERT_RUN_COMMAND", "\n\n".join(extract_block(utils, marker)
-                                               for marker in (REPLY_TEXT, RUN_COMMAND)
+                                               for marker in (REPLY_TEXT, REPORT_REPLY, RUN_COMMAND)
                                                if marker in utils)),
         ("// INSERT_POWER_SLEEP", functions(read("OLED_Mode_Power.cpp"), "OLED_Mode_Power.cpp", POWER_SLEEP)),
     )

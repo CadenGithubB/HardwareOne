@@ -1,0 +1,16 @@
+{
+  "board": "p4x_eye",
+  "features": {
+    "ENABLE_BLE_PHONE_PIPE": 1,
+    "ENABLE_CAMERA_SENSOR": 0,
+    "ENABLE_ESP_SR": 0,
+    "ENABLE_G2_GLASSES": 0,
+    "ENABLE_LLM_BACKEND": 1,
+    "ENABLE_LLM_SOURCE_HTTP": 1,
+    "ENABLE_SDMMC_CARD": 1,
+    "ENABLE_STT_MODEL_15X5_GEN2": 1
+  },
+  "sdkconfig": {
+    "CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT": true
+  }
+}

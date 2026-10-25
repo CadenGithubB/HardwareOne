@@ -33,6 +33,10 @@ class String {
   bool operator==(const String& other) const { return value_ == other.value_; }
   bool operator!=(const String& other) const { return value_ != other.value_; }
   bool startsWith(const char* prefix) const { return value_.rfind(prefix, 0) == 0; }
+  void trim() {
+    const auto first = value_.find_first_not_of(" \t\r\n");
+    value_ = first == std::string::npos ? std::string() : value_.substr(first, value_.find_last_not_of(" \t\r\n") - first + 1);
+  }
   void replace(const char* from, const char* to) {
     size_t pos = 0;
     while ((pos = value_.find(from, pos)) != std::string::npos) {
@@ -242,9 +246,11 @@ class CommandArgs {
 static const char* notExercised() { return "Error: not exercised by this harness"; }
 static const char* cmd_ringstatus(const String&) { return notExercised(); }
 static const char* cmd_ringscan(const String&) { return notExercised(); }
-static const char* cmd_ringconnect(const String&) { return notExercised(); }
-static const char* cmd_ringdisconnect(const String&) { return notExercised(); }
+static const char* cmd_openring(const String&) { return notExercised(); }
+static const char* cmd_closering(const String&) { return notExercised(); }
 static const char* cmd_ringquery(const String&) { return notExercised(); }
+static const char* cmd_ringhealth(const String&) { return notExercised(); }
+static const char* cmd_ringpoll(const String&) { return notExercised(); }
 static const char* cmd_healthlogging(const String&) { return notExercised(); }
 static const char* cmd_healthlogmerge(const String&) { return notExercised(); }
 
@@ -277,6 +283,8 @@ static std::string lastOledResult;
 enum { INPUT_BUTTON_A = 1, INPUT_BUTTON_X = 2, INPUT_BUTTON_B = 4 };
 #define INPUT_CHECK(value, button) ((value) & (button))
 
+// The production `ring` handlers are compiled with the R1 health feature on.
+#define ENABLE_R1_HEALTH 1
 // INSERT_PRODUCTION
 
 // Registry executor double for System_Utils.cpp executeCommand: longest
@@ -320,7 +328,7 @@ static bool registryExecute(const AuthContext& who, const String& lineIn, String
   if (!entry) { out = "Error: Unknown command"; return false; }
   if ((entry->requiresAdmin || entry->requiresSuperAdmin) && !isAdminUser(who.user)) {
     out = std::string("Error: Admin access required for command '") +
-          line.substr(0, line.find(' ')) + "'. Contact an administrator.";
+          entry->name + "'. Contact an administrator.";
     deniedCommands.push_back(actor + " " + line);
     return false;
   }
@@ -360,7 +368,7 @@ int main() {
   g2HealthOpen();
   CHECK(!g2HealthConsumeLoggingToggleRequest());
   CHECK(sHistoryRefreshRequest && !sPollRequest);
-  g2HealthAction(10); g2HealthAction(10);
+  g2HealthAction(11); g2HealthAction(11);
   CHECK(g2Requests.empty());
   drainLoggingRequest(); drainLoggingRequest();
   CHECK(g2Requests.size() == 1);
@@ -378,19 +386,21 @@ int main() {
   CHECK(!sLoggingCmdPending && g2HealthLoggingStatusLine() == nullptr);
   CHECK(diagnosticMessages == beforeDiagnostic + 2);
   CHECK(!loggerActive && g2Requests.size() == 1);
-  g2HealthAction(10); g2HealthOpen(); drainLoggingRequest();
+  g2HealthAction(11); g2HealthOpen(); drainLoggingRequest();
   CHECK(g2Requests.size() == 1);
-  g2HealthAction(10); g2HealthSetPageActive(false); drainLoggingRequest();
+  g2HealthAction(11); g2HealthSetPageActive(false); drainLoggingRequest();
   CHECK(g2Requests.size() == 1 && !sPageActive);
-  g2HealthSetPageActive(true); g2HealthAction(10);
+  g2HealthSetPageActive(true); g2HealthAction(11);
   g2QueueAccepts = false; drainLoggingRequest();
   CHECK(g2Requests.size() == 1 && !g2HealthConsumeLoggingToggleRequest());
   CHECK(!sLoggingCmdPending && g2HealthLoggingStatusLine() &&
         std::string(g2HealthLoggingStatusLine()) == "Not paired");  // executor refusal is visible
   g2QueueAccepts = true;
-  g2HealthAction(3); g2HealthAction(10); drainLoggingRequest();
+  g2HealthAction(3);
+  CHECK(sSelected == HEALTH_METRIC_SLEEP);  // MAIN row 3: Sleep
+  g2HealthAction(4); g2HealthAction(11); drainLoggingRequest();
   CHECK(g2Requests.size() == 1 && sNav == HEALTH_NAV_TRENDS);
-  g2HealthAction(0); g2HealthAction(9);
+  g2HealthAction(0); g2HealthAction(10);
   CHECK(sNav == HEALTH_NAV_MAIN && sPollRequest);
 
   authenticated = false;
@@ -465,71 +475,87 @@ int main() {
   CHECK(!healthInputHandler(0, 0, INPUT_BUTTON_B) && oledRequests.size() == 2);
 
   // Ring controls and the forced history refresh: web, OLED and CLI submit the
-  // same command under their own identity. The registry rows (ringcontrol,
-  // healthstatus force-history) decide admin; nothing else does.
+  // same command under their own identity. The registry rows (ring control,
+  // ring history force) decide admin; nothing else does.
   routeCommands = true;
   adminUser = false;
   AuthContext serial{};
   serial.transport = SOURCE_SERIAL; serial.user = "root"; serial.ip = "local";
   size_t matched = 0;
-  const CommandEntry* ringcontrolRow = findRow("ringcontrol collection on", matched);
+  const CommandEntry* ringcontrolRow = findRow("ring control collection on", matched);
   const std::string refusal =
-      "Error: Admin access required for command 'ringcontrol'. Contact an administrator.";
+      "Error: Admin access required for command 'ring control'. Contact an administrator.";
   size_t webBefore = webRequests.size();
   r = request("action=collection&value=on");
   const bool webRingControlIsACommand = webRequests.size() == webBefore + 1 &&
-      webRequests.back().line == "ringcontrol collection on";
+      webRequests.back().line == "ring control collection on";
   CHECK(webRingControlIsACommand);
-  CHECK(ringcontrolRow && ringcontrolRow->requiresAdmin && matched == std::strlen("ringcontrol"));
+  CHECK(ringcontrolRow && ringcontrolRow->requiresAdmin && matched == std::strlen("ring control"));
   CHECK(r.status == "403 Forbidden" && r.output == refusal);
   r = request("action=low-power&value=off");
-  CHECK(r.status == "403 Forbidden" && webRequests.back().line == "ringcontrol lowpower off");
+  CHECK(r.status == "403 Forbidden" && webRequests.back().line == "ring control lowpower off");
   sHealthSel = HEALTH_ACTION_COLLECTION;
   size_t oledBefore = oledRequests.size();
   CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A));
-  CHECK(oledRequests.size() == oledBefore + 1 && oledRequests.back() == "ringcontrol collection on");
+  CHECK(oledRequests.size() == oledBefore + 1 && oledRequests.back() == "ring control collection on");
   CHECK(lastOledResult == refusal && sHealthDeniedUntilMs != 0 && oledDirtyMarks == 1);
   sHealthSel = HEALTH_ACTION_LOW_POWER;
   CHECK(healthInputHandler(0, 0, INPUT_BUTTON_X));
-  CHECK(oledRequests.back() == "ringcontrol lowpower on" && lastOledResult == refusal);
+  CHECK(oledRequests.back() == "ring control lowpower on" && lastOledResult == refusal);
   String out;
-  CHECK(!registryExecute(serial, "ringcontrol collection on", out) && out == refusal);
+  CHECK(!registryExecute(serial, "ring control collection on", out) && out == refusal);
   gCLIValidateOnly = true;  // the validate pass is refused at the same row
-  CHECK(!registryExecute(serial, "ringcontrol lowpower on", out) && out == refusal);
+  CHECK(!registryExecute(serial, "ring control lowpower on", out) && out == refusal);
   gCLIValidateOnly = false;
   CHECK((deniedCommands == std::vector<std::string>{
-      "alice@web ringcontrol collection on", "alice@web ringcontrol lowpower off",
-      "bob@display ringcontrol collection on", "bob@display ringcontrol lowpower on",
-      "root@serial ringcontrol collection on", "root@serial ringcontrol lowpower on"}));
+      "alice@web ring control collection on", "alice@web ring control lowpower off",
+      "bob@display ring control collection on", "bob@display ring control lowpower on",
+      "root@serial ring control collection on", "root@serial ring control lowpower on"}));
   CHECK(ringChanges.empty() && audit.empty());
-  // healthstatus force-history: its own admin row, so the registry refuses it
-  // from every transport before the handler runs (no audit of an execution).
-  const CommandEntry* forceRow = findRow("healthstatus force-history", matched);
-  CHECK(forceRow && forceRow->requiresAdmin && matched == std::strlen("healthstatus force-history"));
-  const CommandEntry* statusRow = findRow("healthstatus poll", matched);
-  CHECK(statusRow && !statusRow->requiresAdmin && matched == std::strlen("healthstatus"));
+  // ring history force: its own admin row, so the registry refuses it from
+  // every transport before the handler runs (no audit of an execution).
+  const CommandEntry* forceRow = findRow("ring history force", matched);
+  CHECK(forceRow && forceRow->requiresAdmin && matched == std::strlen("ring history force"));
+  const CommandEntry* historyRow = findRow("ring history", matched);
+  CHECK(historyRow && !historyRow->requiresAdmin && matched == std::strlen("ring history"));
   const std::string forceRefusal =
-      "Error: Admin access required for command 'healthstatus'. Contact an administrator.";
+      "Error: Admin access required for command 'ring history force'. Contact an administrator.";
   r = request("action=history-force");
-  CHECK(webRequests.back().line == "healthstatus force-history");
+  CHECK(webRequests.back().line == "ring history force");
   CHECK(r.status == "403 Forbidden" && r.output == forceRefusal);
   sHealthSel = HEALTH_ACTION_HISTORY_FORCE; sHealthDeniedUntilMs = 0;
   CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A));
-  CHECK(oledRequests.back() == "healthstatus force-history" && lastOledResult == forceRefusal);
+  CHECK(oledRequests.back() == "ring history force" && lastOledResult == forceRefusal);
   CHECK(sHealthDeniedUntilMs != 0);
-  CHECK(!registryExecute(serial, "healthstatus force-history", out) && out == forceRefusal);
+  CHECK(!registryExecute(serial, "ring history force", out) && out == forceRefusal);
   gCLIValidateOnly = true;  // the validate pass is refused at the same row
-  CHECK(!registryExecute(serial, "healthstatus force-history", out) && out == forceRefusal);
+  CHECK(!registryExecute(serial, "ring history force", out) && out == forceRefusal);
   gCLIValidateOnly = false;
   CHECK(ringChanges.empty() && audit.empty());
   CHECK(deniedCommands.size() == 10 &&
-        deniedCommands[6] == "alice@web healthstatus force-history" &&
-        deniedCommands[7] == "bob@display healthstatus force-history" &&
-        deniedCommands[8] == "root@serial healthstatus force-history");
-  // A line the registry matches only as plain `healthstatus` (double space)
-  // reaches the handler without the admin row: it is refused, never run.
-  CHECK(!registryExecute(serial, "healthstatus  force-history", out) && out.startsWith("Error"));
-  CHECK(ringChanges.empty());
+        deniedCommands[6] == "alice@web ring history force" &&
+        deniedCommands[7] == "bob@display ring history force" &&
+        deniedCommands[8] == "root@serial ring history force");
+  // A line the registry matches only as plain `ring history` (double space)
+  // reaches the handler without the admin row: it is refused, never run. One
+  // matched only as the `ring` root gets usage and runs nothing either.
+  unsigned mutationsBefore = ringMutations;
+  CHECK(!registryExecute(serial, "ring history  force", out) && out.startsWith("Error: invalid arguments"));
+  CHECK(!registryExecute(serial, "ring  history force", out) && out.startsWith("Error: invalid arguments — Usage: ring <"));
+  CHECK(!registryExecute(serial, "ring  control collection on", out) && out.startsWith("Error: invalid arguments — Usage: ring <"));
+  CHECK(!registryExecute(serial, "ring", out) && out.startsWith("Error: invalid arguments — Usage: ring <"));
+  CHECK(ringChanges.empty() && ringMutations == mutationsBefore);
+  // Reading the controls back and the normal history refresh are open to a
+  // signed-in user; the controls row behind them is not.
+  const CommandEntry* refreshRow = findRow("ring control refresh", matched);
+  CHECK(refreshRow && !refreshRow->requiresAdmin && matched == std::strlen("ring control refresh"));
+  CHECK(registryExecute(serial, "ring control refresh", out) && out == "OK: ring control refresh queued");
+  CHECK(registryExecute(serial, "ring history", out) && out == "OK: R1 typed history refresh queued");
+  CHECK(ringChanges.empty() && ringMutations == mutationsBefore + 2);
+  ringAccepted = false;
+  CHECK(!registryExecute(serial, "ring control refresh", out) && out == "Error: ring control refresh not queued");
+  ringAccepted = true;
+  audit.clear();
   // Only the registry's text is an admin refusal (403); any other refusal is
   // the command's own (409), whatever its wording.
   routeCommands = false; commandOk = false;
@@ -545,14 +571,14 @@ int main() {
   r = request("action=collection&value=on+reboot");
   CHECK(r.status == "400 Bad Request" && r.output == "value must be preserve, off, or on");
   CHECK(webRequests.size() == webBefore);
-  CHECK(!registryExecute(serial, "ringcontrol collection maybe", out) &&
+  CHECK(!registryExecute(serial, "ring control collection maybe", out) &&
         out == "Error: value must be preserve, off, or on");
-  CHECK(!registryExecute(serial, "ringcontrol volume on", out) && out.startsWith("Error: invalid arguments"));
-  CHECK(!registryExecute(serial, "ringcontrol collection", out) && out.startsWith("Error: invalid arguments"));
-  CHECK(!registryExecute(serial, "ringcontrol collection on extra", out) && out.startsWith("Error: invalid arguments"));
+  CHECK(!registryExecute(serial, "ring control volume on", out) && out.startsWith("Error: invalid arguments"));
+  CHECK(!registryExecute(serial, "ring control collection", out) && out.startsWith("Error: invalid arguments"));
+  CHECK(!registryExecute(serial, "ring control collection on extra", out) && out.startsWith("Error: invalid arguments"));
   CHECK(ringChanges.empty() && audit.size() == 4);
   gCLIValidateOnly = true;
-  CHECK(registryExecute(serial, "ringcontrol collection on", out) && out == "VALID" && ringChanges.empty());
+  CHECK(registryExecute(serial, "ring control collection on", out) && out == "VALID" && ringChanges.empty());
   gCLIValidateOnly = false;
 
   // Admin: every transport's change reaches the owner and is audited.
@@ -562,31 +588,31 @@ int main() {
         "OK: health collection policy accepted; 0x0E has no proven readback, so ACK is not observed state");
   ringStatus.lowPowerLastError = G2_RING_ERR_FEATURE_UNSUPPORTED;
   r = request("action=low-power&value=OFF");
-  CHECK(r.status == "202 Accepted" && webRequests.back().line == "ringcontrol lowpower off" && r.output ==
+  CHECK(r.status == "202 Accepted" && webRequests.back().line == "ring control lowpower off" && r.output ==
         "OK: low-power preference saved; unsupported on the active ring profile, so no command was sent");
   ringStatus.lowPowerLastError = G2_RING_ERR_NONE;
   sHealthDeniedUntilMs = 0;
   sHealthSel = HEALTH_ACTION_COLLECTION;  // on -> off
-  CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A) && oledRequests.back() == "ringcontrol collection off");
+  CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A) && oledRequests.back() == "ring control collection off");
   sHealthSel = HEALTH_ACTION_LOW_POWER;   // off -> preserve
-  CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A) && oledRequests.back() == "ringcontrol lowpower preserve");
+  CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A) && oledRequests.back() == "ring control lowpower preserve");
   CHECK(lastOledResult == "OK: low-power policy accepted; awaiting verified readback observation");
   CHECK(sHealthDeniedUntilMs == 0);
-  CHECK(registryExecute(serial, "ringcontrol Collection Preserve", out) &&
+  CHECK(registryExecute(serial, "ring control Collection Preserve", out) &&
         out == "OK: health collection policy accepted; 0x0E has no proven readback, so ACK is not observed state");
   r = request("action=history-force");
-  CHECK(r.status == "202 Accepted" && r.output == "SUCCESS: R1 forced typed history refresh queued");
+  CHECK(r.status == "202 Accepted" && r.output == "OK: R1 forced typed history refresh queued");
   sHealthSel = HEALTH_ACTION_HISTORY_FORCE;
   CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A) && sHealthDeniedUntilMs == 0);
-  CHECK(registryExecute(serial, "healthstatus force-history", out));
+  CHECK(registryExecute(serial, "ring history force", out));
   CHECK((ringChanges == std::vector<std::string>{
       "collection=on", "lowpower=off", "collection=off", "lowpower=preserve", "collection=preserve",
       "history=force", "history=force", "history=force"}));
   CHECK(audit.size() == 8 && std::all_of(audit.begin(), audit.end(), [](const AuditRecord& a) { return a.ok; }));
-  CHECK(audit[0].who == "alice@web" && audit[0].line == "ringcontrol collection on");
-  CHECK(audit[2].who == "bob@display" && audit[2].line == "ringcontrol collection off");
-  CHECK(audit[4].who == "root@serial" && audit[4].line == "ringcontrol Collection Preserve");
-  CHECK(audit[6].who == "bob@display" && audit[6].line == "healthstatus force-history");
+  CHECK(audit[0].who == "alice@web" && audit[0].line == "ring control collection on");
+  CHECK(audit[2].who == "bob@display" && audit[2].line == "ring control collection off");
+  CHECK(audit[4].who == "root@serial" && audit[4].line == "ring control Collection Preserve");
+  CHECK(audit[6].who == "bob@display" && audit[6].line == "ring history force");
   CHECK(deniedCommands.size() == 10);
   // A refusal that is not about the role keeps its own status and still flashes on OLED.
   ringAccepted = false;

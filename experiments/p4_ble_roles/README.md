@@ -120,10 +120,10 @@ and [offline evidence](results/2026-09-27/OFFLINE.md) for their separate scopes.
 
 The CLI separates mode preference from initialization. The intended Client
 sequence is `blemode client`, `g2init`, then deliberate accessory connection
-commands such as `openg2 auto` and `ringconnect`. The intended Server sequence
+commands such as `openg2 auto` and `ring connect`. The intended Server sequence
 is `blemode server` followed by `openble`. Status must establish the actual
 runtime state: `g2status` reports `state=off` only when G2 is uninitialized;
-`blestatus json` reports server initialization; `ringstatus json` reports the
+`blestatus json` reports server initialization; `ring status json` reports the
 ring connection and pending connect. A saved mode alone is insufficient proof.
 
 The inherited `bleprobe` diagnostic central is separate from production G2/R1

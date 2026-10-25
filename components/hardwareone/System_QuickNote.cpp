@@ -8,6 +8,8 @@
 #include <ArduinoJson.h>
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 #include <esp_random.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -88,8 +90,9 @@ struct Last {
 portMUX_TYPE gQnMux = portMUX_INITIALIZER_UNLOCKED;
 Note gNote;
 Last gLast;
-TaskHandle_t gQnTask = nullptr;
-bool gQnTaskStarting = false;
+// The worker (System_TaskUtils.h ServiceWorker: created on the first note,
+// leaves idle; its handle, claim and wake live under gQnMux with the note).
+ServiceWorker gQnWorker{gQnMux};
 // The note text. Worker only (and quickNoteStart before the worker can see
 // the note); wiped when each note ends.
 EXT_RAM_BSS_ATTR char gQnText[kMaxNoteBytes + 1];
@@ -141,13 +144,9 @@ void wipeText() {
   gQnTextLen = 0;
 }
 
-void wake() {
-  TaskHandle_t task = nullptr;
-  portENTER_CRITICAL(&gQnMux);
-  task = gQnTask;
-  portEXIT_CRITICAL(&gQnMux);
-  if (task) xTaskNotifyGive(task);
-}
+// Wakes the worker. With no worker (none yet, or one that left idle) the give
+// waits for the one the next start's ensureWorker() creates.
+void wake() { gQnWorker.give(); }
 
 // Applies one lifecycle event to the live note `id` (ignored if it ended).
 void noteEvent(uint64_t id, Event event) {
@@ -274,8 +273,8 @@ void restampPass() {
 
 // Once a boot, the first time this worker (started by the boot's first note
 // request) finds no note running: removes the in-progress files interrupted
-// saves left (QuickNoteStore::sweep). Only this worker writes note files, so
-// none of them is a save under way. A failed sweep is retried on the timed
+// saves left (QuickNoteStore::sweep). The store lock excludes writes by this
+// worker and the native G2 adapter. A failed sweep is retried on the timed
 // wait, kSweepTries passes in all. Logs a count, never a path.
 void sweepPass() {
   if (!gSweepDue || quickNoteActive()) return;
@@ -424,36 +423,33 @@ void servicePass() {
   }
 }
 
+// The worker's own exit after an idle wait (SERVICE_TASK_IDLE_RETIRE_MS): no
+// note running or starting, nothing due, no boot note waiting for the clock.
+// ServiceWorker::retireIf reads this and nulls the handle in one hold of
+// gQnMux, so a start claimed after it finds no worker and creates one.
+bool retireIfIdle() {
+  return gQnWorker.retireIf([] {
+    return !gNote.starting && !noteActive(gNote.phase) && !gRestampDue && !gSweepDue &&
+           gUnstampedCount == 0;
+  });
+}
+
 void workerBody(void*) {
   for (;;) {
-    (void)ulTaskNotifyTake(pdTRUE, quickNoteActive() ? pdMS_TO_TICKS(kPassMs)
-                                   : gRestampDue || gSweepDue ? pdMS_TO_TICKS(kRestampRetryMs)
-                                   : portMAX_DELAY);
+    const bool woken = gQnWorker.wait(quickNoteActive() ? kPassMs
+                                      : gRestampDue || gSweepDue ? kRestampRetryMs
+                                      : SERVICE_TASK_IDLE_RETIRE_MS);
     servicePass();
     restampPass();
     sweepPass();
+    if (!woken && retireIfIdle()) vTaskDelete(nullptr);
   }
 }
 
 bool ensureWorker() {
-  portENTER_CRITICAL(&gQnMux);
-  if (gQnTask || gQnTaskStarting) {
-    const bool ready = gQnTask != nullptr;
-    portEXIT_CRITICAL(&gQnMux);
-    return ready;
-  }
-  gQnTaskStarting = true;
-  portEXIT_CRITICAL(&gQnMux);
-  TaskHandle_t created = nullptr;
-  const BaseType_t rc = xTaskCreateLogged(workerBody, "qnote", kWorkerStackBytes, nullptr,
-                                          TASK_PRIORITY_LOW, &created, "quicknote.service",
-                                          PRO_CORE);
-  portENTER_CRITICAL(&gQnMux);
-  if (rc == pdPASS) gQnTask = created;
-  gQnTaskStarting = false;
-  portEXIT_CRITICAL(&gQnMux);
-  if (rc != pdPASS) WARN_SYSTEMF("[QNOTE] service task unavailable");
-  return rc == pdPASS;
+  const bool ok = gQnWorker.ensure(workerBody, "qnote", kWorkerStackBytes, "quicknote.service");
+  if (!ok && !gQnWorker.present()) WARN_SYSTEMF("[QNOTE] service task unavailable");
+  return ok;
 }
 }  // namespace
 
@@ -503,7 +499,6 @@ bool quickNoteStart(const QuickNoteStartReq& req, uint64_t* id, const char** why
   if (!audioSourceAvailable(req.mic))
     return refuse(why, req.mic == AUDIO_SRC_G2_LEFT ? "Glasses mic unavailable"
                                                     : "Board mic unavailable");
-  if (!ensureWorker()) return refuse(why, "Note service unavailable");
 
   // A note saved with the clock unset is boot-<id>.txt: its id keeps the
   // list newest first (noteNewId).
@@ -530,6 +525,15 @@ bool quickNoteStart(const QuickNoteStartReq& req, uint64_t* id, const char** why
   }
   portEXIT_CRITICAL(&gQnMux);
   if (!claimed) return refuse(why, "A note is already recording");
+  // The worker, with the note claimed: one that is idle cannot leave past a
+  // note that is starting, and a wake given to one that already left waits
+  // for this one. Refused, the claim goes back before anything began.
+  if (!ensureWorker()) {
+    portENTER_CRITICAL(&gQnMux);
+    if (gNote.id == noteId) gNote = Note{};
+    portEXIT_CRITICAL(&gQnMux);
+    return refuse(why, "Note service unavailable");
+  }
   wipeText();
 
   DictationAppOptions options;

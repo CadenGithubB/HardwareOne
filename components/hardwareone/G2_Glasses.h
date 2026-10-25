@@ -40,6 +40,10 @@ struct G2ConnectionStatus {
   bool running = false;
   G2TempleConnectionStatus left;
   G2TempleConnectionStatus right;
+  // The one-temple repair: "none", "1/7".."7/7" (fast tries), "slow" (every
+  // 10 minutes) or "held" (the user disconnected, the glasses are not owned
+  // here, or the surviving temple has no saved address).
+  char repair[8] = "none";
 };
 
 enum G2Eye {
@@ -136,31 +140,22 @@ bool deinitG2Client();
 bool isG2ClientInitialized();
 
 // =============================================================================
-// Unified BLE connect worker (Group B, see docs/G2_REFACTOR_PROPOSAL.md)
+// BLE connect jobs for the setup worker (BLE_SetupWorker.h)
 // =============================================================================
-// Single persistent task that drains a small queue of BleConnectJob entries.
-// Replaces the 5 distinct `xTaskCreate(*TaskBody)` patterns (g2 connect/saved
-// + ring connect/saved/mac) with one worker. Started lazily by the first
-// g2SubmitBleConnect (via bleConnectInit), then persists — the 5 KB
-// (5120-byte) stack is paid once, not per connect attempt.
-//
-// Public API for callers (g2Connect, g2RingConnect, etc.) stays unchanged;
-// internally those functions now build a BleConnectJob and call
-// g2SubmitBleConnect. The G2 family (G2_EYE/G2_SAVED) and Ring family
-// (RING_*) each maintain their own in-flight flag so producers serialize
-// per-family before submission — but at runtime, all kinds dispatch through
-// one worker, so a G2 connect and Ring connect run sequentially rather than
-// in parallel (intentional: BLE radio contention during overlapping connects
-// was a real source of failures).
+// Glasses and ring connects run on the one setup worker, `ble_setup`, which
+// also gives the phone pipe its turn: glasses first, then ring retirement, the
+// ring and the phone. The public API (g2Connect, g2RingConnect, ...) builds a
+// BleConnectJob and calls g2SubmitBleConnect. Each family keeps its own
+// in-flight flag (gConnectTaskActive / gRingConnectTaskActive), so it has at
+// most one job; the worker never runs two setups at once.
 enum class BleConnectKind : uint8_t {
   G2_EYE     = 0,   // single eye; uses `eye` field
   G2_SAVED   = 1,   // both eyes from saved MACs
   RING_SCAN  = 2,   // scan + connect any ring
-  RING_SAVED = 3,   // saved MAC reconnect (waits for glasses up first)
+  RING_SAVED = 3,   // saved MAC reconnect
   RING_MAC   = 4,   // direct MAC connect; uses `mac` field
   G2_REPAIR  = 5,   // topology-aware missing-temple repair
   RING_SCAN_ONLY = 6, // manual discovery only; uses `scanSeconds`
-  BARRIER    = 7,   // internal worker-owned teardown acknowledgement
 };
 
 struct BleConnectJob {
@@ -168,7 +163,7 @@ struct BleConnectJob {
   uint8_t        eye;        // valid for G2_EYE only (cast from G2Eye)
   // Immutable targets captured at admission. mac=G2 LEFT / Ring primary;
   // mac2=G2 RIGHT. They must never be repopulated from mutable settings after
-  // the job enters the queue.
+  // the job is submitted.
   char           mac[18];
   char           mac2[18];
   uint8_t        addressType1;
@@ -176,8 +171,8 @@ struct BleConnectJob {
   bool           addressType1Known;
   bool           addressType2Known;
   uint16_t       scanSeconds; // valid for RING_SCAN_ONLY (1..300)
-  // Coordinator epoch captured at admission. BARRIER jobs reuse this field
-  // for their acknowledgement generation; they never enter peer logic.
+  // Family cancel fence captured at admission: the G2 epoch or the ring's
+  // connect generation.
   uint32_t       cancelEpoch;
   uint32_t       peerIntentGeneration;
   uint32_t       peerIdentityGeneration;
@@ -185,18 +180,24 @@ struct BleConnectJob {
   bool           peerExplicitReseek;
 };
 
-// Heap-copies the job and pushes onto the BLE-connect queue, lazily starting
-// the worker (bleConnectInit) if it isn't running yet. Returns false if the
-// worker can't be started, the heap copy fails, or the queue stays full for
-// 50 ms (some other connect is queued ahead). Caller should set its
-// per-family in-flight flag (gConnectTaskActive / gRingConnectTaskActive)
-// BEFORE calling this and clear it from the worker's dispatch only after
-// the underlying *Sync function returns.
+// Queues the job in its family's slot on the setup worker, starting the
+// worker on first use. Never blocks or allocates. False when teardown is
+// active, the worker cannot start, or the family's slot is still in use. The
+// caller sets its family's in-flight flag before calling; the job's finish
+// clears it on every outcome (ran, dropped or withdrawn).
 bool g2SubmitBleConnect(const BleConnectJob& job);
+// Takes back a queued ring connect (g2RingDisconnect, teardown). A running
+// one ends through its generation instead.
+void g2RingWithdrawQueuedConnect();
+#if ENABLE_BLE_PHONE_PIPE
+// Queues the ring's retirement for the enabled phone pipe on a C6 with fewer
+// than four links (from g2RingYieldToPhonePipe). False if already queued.
+bool g2SubmitRingRetire();
+#endif
 
-// Stop the singleton scanner only when the shared worker is currently running
-// a Ring scan. Used by ringdisconnect to pre-empt a queued/manual scan without
-// accidentally stopping an unrelated G2 temple scan.
+// Stop the singleton scanner only when the worker is currently running a Ring
+// scan. Used by ring disconnect to pre-empt a manual scan without accidentally
+// stopping an unrelated G2 temple scan.
 void g2CancelActiveRingScan();
 
 // Local preferred ATT MTU for G2 client mode (temples + ring). Process-global
@@ -218,9 +219,11 @@ uint16_t bleNegotiateConnMtu(BLEClient* client, uint16_t preferred,
 // the firmware would retry a condition no retry can clear. Semantics and
 // return value are identical to connectTimeout; the only addition is the
 // timing classification. See the implementation for the full mechanism.
+// `purpose` (saved, discovery or repair) labels the coexistence record only.
 class BLEAdvertisedDevice;
+namespace hw1coex { enum class Purpose : uint8_t; }
 bool bleConnectWatched(BLEClient* client, BLEAdvertisedDevice* dev,
-                       uint32_t timeoutMs, const char* logTag);
+                       uint32_t timeoutMs, const char* logTag, hw1coex::Purpose purpose);
 
 // True only after the Arduino client has no GATTC interface and any requested
 // application unregister has been acknowledged. `getGattcIf()==NONE` alone
@@ -263,6 +266,14 @@ bool bleRetireClientForReplacement(BLEClient*& client,
 // Call only after BLEDevice::deinitChecked reports a terminal successful
 // host/controller teardown. All library-owned retired clients are then gone.
 void bleCentralClientsTerminalTeardownAcknowledged();
+// A quarantined client still waits for that terminal teardown. bleStackUp()
+// acknowledges it when the host is already stopped, so a client-only admission
+// block is not carried into a clean generation.
+bool bleCentralClientsRetirementPending();
+// Publishes the glasses' peer spec to the BLE peer registry (idempotent; a
+// repeat replaces the spec in place). bleStackUp() registers every device
+// owner's peer before it arms auto-reconnect.
+void g2RegisterBlePeer();
 
 // Count of consecutive synchronous connect refusals since the last successful
 // link. Non-zero means the host stack is suspect; >= 2 trips a recycle.
@@ -1492,7 +1503,8 @@ inline bool initG2Client() { return false; }
 inline bool deinitG2Client() { return true; }
 inline bool isG2ClientInitialized() { return false; }
 inline uint16_t bleNegotiateConnMtu(class BLEClient*, uint16_t, uint32_t, const char*) { return 23; }
-inline bool bleConnectWatched(class BLEClient*, class BLEAdvertisedDevice*, uint32_t, const char*) { return false; }
+namespace hw1coex { enum class Purpose : uint8_t; }
+inline bool bleConnectWatched(class BLEClient*, class BLEAdvertisedDevice*, uint32_t, const char*, hw1coex::Purpose) { return false; }
 inline void bleNoteConnectOutcome(bool, uint32_t, const char*) {}
 inline uint8_t bleStackWedgeStreak(void) { return 0; }
 inline bool bleStackRecycleIfWedged(void) { return false; }
@@ -1500,7 +1512,10 @@ inline bool bleStackRecycleIfWedged(void) { return false; }
 // slot is G2/R1), so there is nothing to release after a host teardown. Called
 // unconditionally from Bluetooth.cpp's deinit paths.
 inline void bleCentralClientsTerminalTeardownAcknowledged() {}
+inline bool bleCentralClientsRetirementPending() { return false; }
+inline void g2RegisterBlePeer() {}
 inline void g2CancelActiveRingScan() {}
+inline void g2RingWithdrawQueuedConnect() {}
 inline bool g2Connect(G2Eye eye = G2_EYE_LEFT) { return false; }
 inline bool g2ConnectSaved() { return false; }
 inline bool g2Disconnect(bool = false) { return true; }

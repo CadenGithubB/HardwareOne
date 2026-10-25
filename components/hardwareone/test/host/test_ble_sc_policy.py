@@ -8,11 +8,18 @@ the command tail with its file-browser gate, and the directed and session
 senders are spliced in from Bluetooth.cpp. The fake GATT keeps one inbox per
 connection and the executor records what would run; the GATT entry runs as
 BTC_TASK and deferred jobs run after it as cmd_exec_task. The suite checks that a
-plaintext write in secure-required mode gets the fixed refusal on its own
-connection, that file verbs run only when the command itself arrived encrypted,
+plaintext write in secure-required mode (and always on the G2 client host,
+whose console on the phone pipe's link serves Secure Channel only) gets the
+fixed refusal on its own connection, that file verbs run only when the command itself arrived encrypted,
 that no reply to a plaintext write waits on the secure-channel tx mutex on
 BTC_TASK (B cases), and that a plaintext write's pool slot, which can carry a
 login password and prefers PSRAM, is wiped before every release (W cases).
+On the G2 client host a DATA frame on a console session renewed under its live
+link gets one SC_REJECT "no channel" (reason 0x03) per session (N cases).
+The phone link's console row (phone link v2) must log in even with
+blerequireauth off: whoami and the gate answer it on its stream, its commands
+are never stamped AuthBypass, its encrypted lines run the file verbs, and a
+server session beside it keeps AuthBypass (P cases).
 A source check reads the command registry: blesecure,
 blesecret and blerequireauth share the superadmin tier. --component points the
 suite at another copy of the sources (the pre-fix tree fails the refusal,
@@ -26,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 from test_espsr_runtime import function
+import ble_pipe_console_host as pipe_host
 
 HERE = Path(__file__).resolve().parent
 STUBS = HERE / 'ble_sc_stubs'
@@ -36,14 +44,19 @@ STUBS = HERE / 'ble_sc_stubs'
 BLOCKS = [
     ('FENCE_STRUCT', 'struct BleSessionFence', True),
     ('FENCE_LIVE', 'static bool bleSessionFenceLive(', False),  # pre-fix sources only
+    ('SECURE_ONLY', 'static bool bleSecureChannelOnly(', False),  # the client host's rule
+    ('TX_GATE', 'class BleConsoleTxGate', False),  # the client host's central TX gate
     ('RAW_SESSION', 'bool bleRawNotifyToSession(', True),
     ('SEND', 'bool sendBLEResponseToSession(', True),
     ('LOGIN_JOB', 'struct BleLoginAsyncJob', True),
     ('REPLY_CTX', 'struct BleCommandReplyContext', True),
+    ('PIPE_ROW_ID', 'static bool bleIsPipeRowId(', False),  # the phone link's console row
+    ('REQUIRES_LOGIN', 'static bool bleRequiresLogin(', False),  # bleRequireAuth || console row
     ('AUTH_REQUIRED', 'static void bleSendAuthRequired(', True),
     ('FILE_VERB', 'static bool bleIsFileBrowserCommand(', True),
     ('LINE', 'static void processBleCommandLine(', True),
     ('DEFERRED_STRUCT', 'struct BleScDeferred', True),
+    ('NO_CHANNEL', 'static bool bleConsoleClaimNoChannelReject(', False),  # the client host's reject
     ('DEFERRED', 'static void bleScDeferredInbound(', True),
     ('PLAIN_DEFERRED', 'static void blePlaintextDeferredInbound(', False),  # fixed sources only
     ('INGRESS', 'static void processIncomingBLECommand(', True),
@@ -112,6 +125,11 @@ def main():
         print(line, file=sys.stderr, flush=True)
 
     harness = (HERE / 'ble_sc_policy_harness.cpp').read_text()
+    # The session router every sender goes through (phone link v2), with the
+    # console driver's doubles; empty in an older tree.
+    assert harness.count('/*@PIPE_ROUTER@*/') == 1
+    harness = harness.replace('/*@PIPE_ROUTER@*/', pipe_host.router_block(
+        args.component, source, 'guardDepth != 0'))
     for slot, marker, required in BLOCKS:
         token = '/*@' + slot + '@*/'
         assert harness.count(token) == 1, token
@@ -119,6 +137,11 @@ def main():
             harness = harness.replace(token, function(source, marker))
         elif required:
             raise SystemExit(f'{marker!r} not found in {args.component / "Bluetooth.cpp"}')
+        elif slot == 'REQUIRES_LOGIN':
+            # An older tree gates on the setting alone.
+            print(f'{marker[:-1]} absent from this source tree; the setting alone gates', flush=True)
+            harness = harness.replace(
+                token, 'static bool bleRequiresLogin(uint16_t) { return gSettings.bleRequireAuth; }')
         else:
             print(f'{marker[:-1]} absent from this source tree; slot left empty', flush=True)
             harness = harness.replace(token, '')
@@ -126,7 +149,7 @@ def main():
         work = Path(tmp)
         shutil.copytree(STUBS, work, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns('._*'))
-        for name in ('System_BleSecureChannel.cpp', 'System_BleSecureChannel.h', 'BLE_Types.h'):
+        for name in ('System_BleSecureChannel.cpp', 'System_BleSecureChannel.h', 'System_BleSecureCrypto.h', 'BLE_Types.h'):
             shutil.copy(args.component / name, work / name)
         unit = work / 'harness.cpp'
         unit.write_text(harness)

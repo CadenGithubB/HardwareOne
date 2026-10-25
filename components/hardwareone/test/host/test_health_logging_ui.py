@@ -6,8 +6,8 @@ web executor are compiled with boundary mocks. Logger mutations and the G2
 command bridge's authorization machinery have separate owner tests. The ring
 controls run the production ring/health command rows and handlers through a
 registry executor double, so web, OLED and CLI refusals and audit records can
-be compared; `healthstatus force-history` is refused by its own admin row, not
-by its handler. The action body is read by the shared bounded reader
+be compared; `ring history force` is refused by its own admin row, not by its
+handler. The action body is read by the shared bounded reader
 (WebServer_Utils.cpp webRecvRequestBody), compiled unchanged.
 """
 from __future__ import annotations
@@ -95,16 +95,12 @@ def generated(component: Path = COMPONENT, source_dir: Path | None = None,
                   extract_block(web, "esp_err_t handleR1HealthAction("),
                   extract_macro(read("System_Utils.h"), "RETURN_VALID_IF_VALIDATE_CSTR"),
                   *optional(ring, "static const char* cmd_ringcontrol("),
+                  # The ring history and control-refresh rows and the `ring` root.
+                  extract_block(ring, "static const char* cmd_ringhistory("),
+                  extract_block(ring, "static const char* cmd_ringhistoryforce("),
+                  extract_block(ring, "static const char* cmd_ringcontrolrefresh("),
+                  extract_block(ring, "static const char* cmd_ring("),
                   extract_block(ring, "extern const CommandEntry g2RingCommands[] =") + ";",
-                  # healthstatus is a set-1 handler: only its force-history branch is exercised.
-                  "static const char* cmd_healthstatus(const String& argsInput) {\n"
-                  "  CommandArgs a(argsInput);\n"
-                  "  String sub = a.has(0) ? a.arg(0) : String();\n"
-                  "  sub.toLowerCase();\n" +
-                  extract_block(sensor_logging, 'if (sub == "force-history")') +
-                  "\n  return \"Error: healthstatus form not modelled by this harness\";\n}",
-                  # The forced refresh's own admin row and handler (fixed trees).
-                  *optional(sensor_logging, "static const char* cmd_healthstatus_forcehistory("),
                   extract_block(sensor_logging, "const CommandEntry healthCommands[] =") + ";",
                   *optional(oled, "static const char* healthNextDesiredToken("),
                   *optional(oled, "static void healthRunCommand("),

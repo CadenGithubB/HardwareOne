@@ -9,6 +9,8 @@
 // Input: HAL_Input's real button mapping tables and INPUT_CHECK are inserted
 // for the device chosen with -DMAP_TEST_DEVICE, and frame() hands the handler
 // what processOLEDInput hands a mode for that device.
+#include <algorithm>
+using std::max;
 #include <cmath>
 #include <cstdint>
 #include <cstdio>

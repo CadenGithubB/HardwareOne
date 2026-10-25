@@ -63,10 +63,10 @@ bool bleCentralTxAccessoryPressure() {
       gAccessoryWaiters.load(std::memory_order_acquire) != 0 ||
       TickType_t(xTaskGetTickCount() - gLastAccessoryTx.load(std::memory_order_acquire)) < pdMS_TO_TICKS(20);
 }
-bool bleCentralTxTryPhone() {
+bool bleCentralTxTryPhone(bool bypassPriority) {
   bleCentralTxInit();
-  if (!gBleCentralTx || bleCentralTxAccessoryPressure()) return false;
+  if (!gBleCentralTx || (!bypassPriority && bleCentralTxAccessoryPressure())) return false;
   if (xSemaphoreTake(gBleCentralTx, 0) != pdTRUE) return false;
-  if (bleCentralTxAccessoryPressure()) { xSemaphoreGive(gBleCentralTx); return false; }
+  if (!bypassPriority && bleCentralTxAccessoryPressure()) { xSemaphoreGive(gBleCentralTx); return false; }
   return true;
 }

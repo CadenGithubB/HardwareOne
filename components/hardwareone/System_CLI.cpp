@@ -70,7 +70,7 @@ struct HelpSessionState {
 };
 
 static HelpSessionState sHelpSession;
-static char sHelpError[128];
+EXT_RAM_BSS_ATTR static char sHelpError[128];  // PSRAM: the reply is copied by the executor
 
 static void resetHelpSession() {
   sHelpSession = HelpSessionState{};

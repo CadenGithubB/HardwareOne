@@ -178,7 +178,11 @@ def main() -> None:
         disabled = work / "disabled-include"
         disabled.mkdir()
         shutil.copyfile(args.component / "Bluetooth.h", disabled / "Bluetooth.h")
-        (disabled / "System_BuildConfig.h").write_text("#define ENABLE_BLUETOOTH 0\n")
+        shutil.copyfile(args.component / "BLE_ConsoleAttachCore.h",
+                        disabled / "BLE_ConsoleAttachCore.h")
+        # A Bluetooth-off build, with the roles the derived rules turn off with it.
+        (disabled / "System_BuildConfig.h").write_text(
+            "#define ENABLE_BLUETOOTH 0\n#define ENABLE_G2_GLASSES 0\n#define ENABLE_BLE_PHONE_PIPE 0\n")
         (disabled / "System_User.h").write_text(
             "#include <cstdint>\nusing TransportSessionEpoch = uint32_t;\n")
         if not compile_and_run("disabled", DISABLED_CHECK,

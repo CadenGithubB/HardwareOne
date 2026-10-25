@@ -25,6 +25,19 @@ uint32_t bootStateIncrementBootCount();
 // Read-only accessor — no increment, no write. Returns 0 if never set.
 uint32_t bootStateGetBootCount();
 
+// Startup ordering for saved speech (transcripts and notes name the boot they
+// were made in, so an offline device with no clock still lists them in order):
+// the boot counter above, a power-on counter that advances only when this
+// boot's reset reason is a power-on reset (ESP_RST_POWERON: a reset-reason
+// count, not a perfect plug/unplug history), and a random ordering domain
+// drawn once when the namespace is first written. Both counters restart from
+// 0 and the domain changes when NVS is erased, so two files agree on
+// chronology only when their domains match. The increment runs once per
+// boot inside bootStateIncrementBootCount(); the reads below never write.
+// 0 when NVS is unavailable or the key was never set.
+uint32_t bootStateGetPowerOnCount();
+uint32_t bootStateGetOrderingDomain();
+
 // Reset the persisted boot counter to 0. Diagnostics only.
 void bootStateResetBootCount();
 

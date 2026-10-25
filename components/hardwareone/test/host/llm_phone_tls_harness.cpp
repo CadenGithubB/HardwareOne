@@ -1,4 +1,5 @@
 #include "System_LLMHttpTransportCore.h"
+#include "BLE_PhonePipeTypes.h"
 #include <mbedtls/ssl.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
@@ -19,21 +20,22 @@
 #include <iterator>
 #include <new>
 #include <string>
+#ifdef NDEBUG
+#error "Host checks require assertions"
+#endif
 #define ENABLE_BLE_PHONE_PIPE 1
+#undef CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
 #define CONFIG_MBEDTLS_CERTIFICATE_BUNDLE 0
-#define CONFIG_MBEDTLS_SSL_PROTO_TLS1_3 1
-#define CONFIG_MBEDTLS_SSL_RENEGOTIATION 1
 using hw1httptransport::Attempt;using hw1httptransport::Path;using hw1httptransport::Failure;
 constexpr int ERR_TCP_TRANSPORT_CONNECTION_FAILED=-2,ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN=-1,ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT=0;
-constexpr uint32_t kOpenMs=3000,kHandshakeMs=8000,kIoMs=2000;
+// INSERT_LIMITS
 struct LlmHttpIo;using esp_transport_handle_t=LlmHttpIo*;
 struct esp_tls_t{};
 static void esp_tls_conn_destroy(esp_tls_t*){assert(false);}
 static int esp_tls_conn_read(esp_tls_t*,void*,size_t){assert(false);return -1;}
 static int esp_tls_conn_write(esp_tls_t*,const void*,size_t){assert(false);return -1;}
-struct PhonePipeStream{uint32_t generation=1;uint16_t id=0;};
-enum class AllocPref{PreferPSRAM};
-static void* ps_alloc(size_t n,AllocPref,const char*){return std::malloc(n);}
+enum class AllocPref{PreferPSRAM,RequireInternal};
+static void* ps_alloc(size_t n,AllocPref pref,const char*){assert(pref==AllocPref::RequireInternal);return std::malloc(n);}
 static void ps_free(void* p){std::free(p);}
 static uint32_t clockMs=0;
 static uint32_t millis(){return clockMs;}
@@ -66,11 +68,16 @@ static void pause(){
   }
  }
 }
-static bool phonePipeOpen(PhonePipeStream& h,const char*,uint16_t,uint32_t,const std::atomic<bool>& cancel,const std::atomic<bool>* interrupted){if(cancel.load() || interrupted->load())return false;h.id=1;return true;}
+static PhonePipeOpenResult phonePipeOpen(PhonePipeStream& h,const char*,uint16_t,uint32_t,const std::atomic<bool>& cancel,const std::atomic<bool>* interrupted){
+ if(cancel.load() || interrupted->load())return {PhonePipeOpenStatus::Cancelled};
+ h.generation=1;h.id=1;h.openedAt=millis();return {PhonePipeOpenStatus::Opened};}
 static int phonePipeRead(PhonePipeStream,unsigned char* p,size_t n){int r=pop(toClient,p,n);return r==MBEDTLS_ERR_SSL_WANT_READ?0:r;}
 static int phonePipeWrite(PhonePipeStream,const unsigned char* p,size_t n){int r=push(toServer,p,n);return r==MBEDTLS_ERR_SSL_WANT_WRITE?0:r;}
 static void phonePipeClose(PhonePipeStream,bool){}
 static void phonePipeRelease(PhonePipeStream){}
+enum class LlmHttpRequestKind : uint8_t { Chat, Terminal };
+struct RequestSlot {std::atomic<bool> claimed{false};PhonePipeStream retiring;};
+RequestSlot requestSlots[2];
 // INSERT_TYPES
 static LlmHttpIo& context(esp_transport_handle_t io){return *io;}
 // INSERT_PRODUCTION

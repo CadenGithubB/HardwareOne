@@ -60,7 +60,14 @@ static std::string toast;
 void oledToastShow(const char* text,unsigned){toast=text;}
 void oledMarkDirty(){}
 void requestOLEDMode(OLEDMode mode,const char*){currentOLEDMode=mode;}
-constexpr int OLED_CONTENT_START_Y=12;
+#include "OLED_Layout.h"
+#ifndef TEST_CANVAS_HEIGHT
+#define TEST_CANVAS_HEIGHT 64
+#endif
+constexpr int OLED_CONTENT_START_Y=11;
+constexpr int oledVisibleRows(int rowHeight,int reservedHeight=0,int baselineRows=0) {
+  return oled_layout::visibleRows(TEST_CANVAS_HEIGHT-21,rowHeight,reservedHeight,baselineRows);
+}
 struct Display{std::string printed,body;void setTextSize(int){}void setCursor(int,int){}void write(char c){body+=c;}void print(const char* text){printed=text;}};
 static Display display;
 static Display* oledDisplay=&display;
@@ -92,7 +99,7 @@ int main(){
   answer("{\"success\":true,\"available\":true,\"sequence\":1,\"offset\":0,\"length\":6,\"sttText\":\"hello \"}");assert(v.recent[0]==0);tick(1);assert(std::string(v.recent)=="hello ");
   tick();assert(request()==std::string("transcription ack ")+id+" 1 0 6");answer("transport reply lost",false);tick(1);assert(std::string(v.recent)=="hello ");tick();assert(request()==std::string("transcription ack ")+id+" 1 0 6");answer("{\"success\":true}");tick(1);
   tick();assert(request()==std::string("transcription status ")+id);answer(status(true));tick(1);tick();assert(request()==std::string("transcription next ")+id);
-  answer("{\"success\":true,\"available\":true,\"sequence\":1,\"offset\":6,\"length\":5,\"sttText\":\"world\"}");tick(1);assert(std::string(v.recent)=="hello world");tick();answer("{\"success\":true}");tick(1);
+  answer("{\"success\":true,\"available\":true,\"sequence\":1,\"offset\":6,\"length\":5,\"sttText\":\"world\",\"display\":\"World\"}");tick(1);assert(std::string(v.recent)=="hello World");tick();assert(request()==std::string("transcription ack ")+id+" 1 6 5");answer("{\"success\":true}");tick(1);
   // Back invalidates the model and cancels its exact lease only.
   currentOLEDMode=OLED_MENU;tick(1);assert(v.recent[0]==0&&!v.entered&&!cancellations.empty());assert(cancellations.back().exchange==0x0123456789abcdefULL);
   // A start which finishes after exit/re-entry cannot publish into its successor.
@@ -119,5 +126,18 @@ int main(){
   // Compact display status cannot wrap into the menu; UTF-8 glyph walking is bounded.
   std::memset(v.message,'M',sizeof(v.message)-1);v.message[sizeof(v.message)-1]=0;displayTranscriptionHome();assert(display.printed.size()==21);
   assert(lines("\xc3\xa9\xe2\x82\xac\nend")==2);v.preparing=true;display.body.clear();displayTranscriptionLive();assert(display.body=="Preparing...");
+  reset();
+  // Additional rows must be drawn AND included in live/file scroll boundaries.
+  std::string longText;
+  for(int i=0;i<20;++i) longText+="x\n";
+  std::strcpy(v.recent,longText.c_str());
+  displayTranscriptionLive();
+  const unsigned rows=oledVisibleRows(8,0,4);
+  assert(display.body==std::string(rows,'x'));
+  gNavEvents.down=true;
+  for(unsigned i=0;i<21-rows;++i) assert(liveInput(0,0,0));
+  assert(v.line==21-rows && !liveInput(0,0,0));
+  v.line=0;std::strcpy(v.text,longText.c_str());
+  fileInput(0,0,0);assert(v.line==1);
   reset();std::puts("OLED transcription: actual source + bridge lifecycle, receipts, navigation and rendering passed");
 }

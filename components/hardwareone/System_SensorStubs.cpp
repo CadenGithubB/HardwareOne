@@ -241,3 +241,20 @@ const struct CommandEntry liveAudioCommands[] = {
 const size_t liveAudioCommandsCount =
     sizeof(liveAudioCommands) / sizeof(liveAudioCommands[0]);
 #endif
+
+#if ENABLE_BLUETOOTH && !ENABLE_BLE_PHONE_PIPE
+// BLE_PhonePipe.cpp's `phone` and `relay` tables are not built. Each module
+// keeps one root row, so `phone ...` and `relay ...` say why instead of
+// "Unknown command".
+static const char* phoneNotBuilt(const String&) {
+  return "Error: the phone pipe is not in this build";
+}
+extern const struct CommandEntry phoneCommands[] = {
+    {"phone", "Android phone link (not in this build)", false, phoneNotBuilt, nullptr},
+};
+extern const size_t phoneCommandsCount = 1;
+extern const struct CommandEntry relayCommands[] = {
+    {"relay", "Phone relay (not in this build)", false, phoneNotBuilt, nullptr},
+};
+extern const size_t relayCommandsCount = 1;
+#endif

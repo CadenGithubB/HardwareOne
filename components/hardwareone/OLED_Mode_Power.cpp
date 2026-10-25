@@ -48,7 +48,7 @@ static void populatePowerCpuMenu() {
   initPowerScrollStates();
   oledScrollClearKeepSelection(&sPowerCpuScroll);
   // Scroll items borrow these pointers; each row needs persistent storage.
-  static char modeLabels[POWER_MODE_COUNT][40];
+  EXT_RAM_BSS_ATTR static char modeLabels[POWER_MODE_COUNT][40];  // PSRAM: drawn into the framebuffer
   for (uint8_t mode = 0; mode < POWER_MODE_COUNT; ++mode) {
     const unsigned long active = getPowerModeActiveCpuFreq(mode);
     const unsigned long idle = getPowerModeIdleCpuFreq(mode);

@@ -51,7 +51,7 @@ well. Pick a board that keeps the BT stack: `qtpy_esp32` and `xiao_s3` set
 after Software Setup:
 
 1. `openg2` to connect the glasses. Tap a temple to open the on-lens menu.
-2. Pair the R1 ring from the OLED (**Connect → Bluetooth → R1 Ring**) or the web **Bluetooth** page, then `ringconnect`.
+2. Pair the R1 ring from the OLED (**Connect → Bluetooth → R1 Ring**) or the web **Bluetooth** page, then `openring`.
 3. `bleautoreconnect r1-ring on` makes the ring reconnect at boot and reseek after unexpected drops.
 4. `healthlogging on` starts background vitals logging; `healthlogging interval <sec>` sets how often it polls the ring (default 900).
 

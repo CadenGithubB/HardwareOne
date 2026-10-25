@@ -2,8 +2,9 @@
 """Execute G2 Files page code from shipping source.
 
 g2_files_psram_harness.cpp runs the reader/viewer and capture reveal
-definitions with the real PsramBuffer, streaming wrapper, TextPager,
-ArduinoJson, and System_MemUtil implementation. Filesystem/auth/render, crypto
+definitions with the real PsramBuffer, streaming wrapper, TextPager, shared
+JSON re-indenter (System_JsonPretty.h; ArduinoJson is only the layout
+reference), and System_MemUtil implementation. Filesystem/auth/render, crypto
 open/key, and ESP-IDF heap backends are mocked. The crypto loop/String wrapper
 are extracted unchanged; it does not claim hardware AEAD or UI transport.
 
@@ -100,10 +101,9 @@ def main() -> None:
     viewer = extract_block(source, "static bool showTextFileViaWidget(")
     require("String raw" not in viewer and "String display" not in viewer,
             "viewer must not restore ordinary input/display String temporaries")
-    require("PSRAM_JSON_DOC(doc)" in viewer and "JsonDocument doc;" not in viewer,
-            "pretty JSON uses the shared fallback-capable allocator")
-    require("deserializeJson(doc, raw.c_str(), raw.size())" in viewer,
-            "JSON input remains length-bounded like the original Arduino String reader")
+    require("JsonPrettyFormatter().write(raw.c_str(), raw.size()," in viewer and
+            "JsonDocument" not in viewer and "PSRAM_JSON_DOC" not in viewer,
+            "pretty JSON goes through the shared re-indenter, length-bounded, with no document")
     require(viewer.index("G2HijackCtxGuard ctxGuard") < viewer.index("canRead(") <
             viewer.index("filesReadTextBuffer(") < viewer.index("captureCryptoRevealText("),
             "paired identity and read authorization precede byte access and reveal")

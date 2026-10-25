@@ -46,8 +46,8 @@ cmake --build /tmp/hw1-hardwareone-host
 ctest --test-dir /tmp/hw1-hardwareone-host --output-on-failure
 ```
 
-Node.js is required for the three browser suites (`map_live_browser`,
-`g2_status_browser`, `sensor_mic_card`). Set `HW1_NODE_EXECUTABLE` at configure
+Node.js is required for the four browser suites (`map_live_browser`,
+`g2_status_browser`, `sensor_mic_card`, `logging_system_config_browser`). Set `HW1_NODE_EXECUTABLE` at configure
 time if it is outside PATH. Without it they stay registered but are reported as
 not run (disabled), so a green run then covers the remaining suites only.
 
@@ -1434,10 +1434,13 @@ three overviews against their command rows:
 - `oled` names only registered commands, so the removed `oledrequireauth` is
   gone. It names the display login switch as `displayrequireauth` (super
   admin, Settings module).
-- `even_r1` names `ringcontrol <collection|lowpower> <preserve|on|off>`
+- `ring` names `ring control <collection|lowpower> <preserve|on|off>`
   (admin), using the row's own syntax and tier. It names only registered
   commands and no longer claims that unregistered bridge commands "exist in
   the code".
+- `ring`, `phone` and `relay` each name every verb row of their module, and no
+  registered row or overview uses a retired name (`ringstatus`,
+  `healthstatus`, `phonepipe`, `phonestatus`, `phonepipesecret`, ...).
 
 `--source-dir <dir>` points the suite at another copy of the component, and
 that repository's tool is used. The pre-fix tree fails all three overviews.
@@ -1571,6 +1574,34 @@ restart. `wifi_connect_budget` runs the connect behaviour.
 `--component <dir>` reads another tree. The pre-fix tree fails the contract
 (no header include, decisions made from `isEspNowInitialized()`); a pre-fix
 `System_ESPNow.cpp` fails because the predicate is missing.
+
+## Wi-Fi radio state without driver calls
+
+```sh
+python3 components/hardwareone/test/host/test_wifi_radio_state.py --sanitize
+```
+
+On the P4X-EYE the Wi-Fi driver runs on the ESP32-C6, so every `esp_wifi_*`
+query is an RPC, and one against a deinitialized driver logs on both chips.
+After `radiopower off` the OLED Radio row and the Network and System screens
+read the radio state every frame, about eight failed `Req_GetWifiMode` RPCs a
+second. `wifiRadioState()` now asks Arduino's `WiFi.getMode()`, which answers
+NULL from its own init/start flags once the radio is stopped; every radio start
+and stop in this firmware goes through `WiFi.mode()`. Per-frame screens use
+`wifiRadioDisplayState()`/`wifiRadioDisplayOn()`, which reuse the driver's
+answer for up to a second while the Arduino interfaces are unchanged.
+
+`wifi_radio_state` compiles those functions unchanged together with Arduino's
+own `WiFiGenericClass::getMode` (from `components/arduino`) against a fake
+driver that counts calls: none while the radio was never started, after
+`radiopower off` or while associated; ESP-NOW's AP_STA hold, its close and
+`radiopower on` report correctly; the display read asks the driver once a
+second, and at once after `WiFi.mode()` enables or disables an interface; a
+driver that lost its state behind Arduino shows within a second. A source
+contract keeps the quick-menu Radio row, `prepareNetworkData` and
+`prepareSystemStatusData` on the display read, and the two screens' SSID/RSSI
+reads behind an `everyMs` gate. `--component <dir>` and `--arduino <dir>` read
+other trees; the previous `esp_wifi_get_mode` body fails the first check.
 
 ## Camera asynchronous power
 
@@ -2120,7 +2151,11 @@ physical SD behavior or a radio connection.
 Coverage includes complete listing JSON/text parity, independent HTTP/command
 output ownership, SD naming/counts, permissions-query order, allocation and
 capacity failure, fileread encoding/offset/EOF fields and raw-BLE send ordering,
-G2 raw/pretty/parse-error output, and malformed encrypted rows that expand on
+G2 raw/pretty output (pretty through the shared re-indenter, with no JSON
+document, including truncated JSON), serial `fileview` re-indenting JSON by
+default with `raw` in either argument order (repeats refused; a re-indented
+body sized by a counting pass and capped at the pager's 64 KB range, marked
+truncated), and malformed encrypted rows that expand on
 failure. The existing String reader/decrypt/wrap APIs remain available to other
 viewers. Streaming wrap state is additive and does not change chat/event calls.
 
@@ -2745,7 +2780,15 @@ connection fields independently of display text and all four combinations of
 their independent auto-reconnect policies, report unavailable G2/ring
 status and allocation errors, and accept ring JSON larger than the CLI
 buffer; the BLE-disabled public header is compiled and executed separately. `--baseline <component-dir>`
-compares successful CLI output against saved pre-change source.
+compares successful CLI output against saved pre-change source. The phone link
+block (phone link v2): `bleinfo` ends its text with it and adds `phoneLink`
+beside buildBLEInfoJson's 13 keys in a pipe build only (the identical-output
+rule across the glasses x pipe builds compares the CLI without the block, and
+`/api/ble/status` `ble` keeps exactly 13 keys); `blestatus` puts it after the
+link lines, with `phoneLink` (full form, end reasons by name) beside `link` in
+JSON; `/api/ble/status` adds it from its one link reading. The console view
+counts the console stream's own row in any client role (phone-client mode
+included) and design A's slot only once joined.
 
 `sensor_mic_card` executes the actual Sensors empty-grid JavaScript chunk with a
 small DOM boundary. It checks that a microphone-only page preserves the shared
@@ -2764,6 +2807,56 @@ with the extracted guard and formatter. This substitutes host locking for
 FreeRTOS and does not qualify radio callbacks, hardware or firmware scheduling.
 HTTP, String append failure and allocation policies are host boundaries.
 ASan/UBSan follow `HW1_SANITIZE`.
+
+`phone_status` compiles the production phone status owner (BLE_PhoneStatus)
+with the real CompactJson and JSON-argument parser; the pipe, the peer registry
+and the SSE sink are fakes. It checks the lens/OLED/web status phrase, the
+compact `phone-status` SSE event (seeded first tick, a push only on a change,
+the 250 ms cadence, the 128-character cap), the `/api/ble/status` phone object,
+`phone status [json]` (in G2 mode the console signed in on the pipe's link, and
+waiting for the phone link with a slot the old link left uncounted in `status
+json`), the console stream first in phone-only mode (signed in, then waiting
+while the app does not want it; a signed-out row after the idle logout keeps the
+stream open and the relay as it was), `status json`'s compact `phoneLink` block
+(exact dicts, no texts or end counts), the secret's kind with and without
+`Settings::phonePipeSecretGenerated` (two builds that differ only there), that
+no output carries an address or the secret, and that only the
+tick stub remains without the pipe (`phone` is then a one-row "not in this
+build" table in System_SensorStubs.cpp). The G2 Network page's Phone menu is covered by
+`wifi_saved_ui` and `g2_network_async_redraw`; the web Phone card by
+`g2_status_browser` (Node, or a Deno-backed `node` shim).
+
+`oled_bluetooth_link_watch` compiles all of OLED_Mode_Bluetooth.cpp, with the
+real BLE_LinkStatus.cpp behind it, against fakes
+(oled_bluetooth_link_watch_harness.cpp) in all four glasses x phone-pipe
+builds, on the 64 px OLED and the 128 px P4 canvas. The BT status screen shows
+`Role:` (+ `Saved:`), the glasses and ring, `Pipe:` and `Console:` in the
+link-status words with no `State:` row; the console's detail stops at the
+footer. The Phone screen shows `PIPE [OK]/[..]/[!!]/[--]/[off]`, the pipe's
+words and `Console:`, and its taps run what the drawn rows said. Beside the
+glasses `Console:` is the console on the pipe's link (`waiting`, `signed out`,
+`signed in`, `no secret`, `off`). The menu's Advertising/Disconnect rows come
+from bleConsoleView() with gBLEState freed; on the phone link the row reads
+`End console` (still `bledisconnect`) and Advertising is absent. The App console
+row's confirm says `Switch to server?`.
+No row wraps past 21 columns. The link watcher marks the display once per
+change of role, saved mode, pipe phase or text, pairing, auto-reconnect,
+console state, clients, advertising, glasses or ring, and never when idle.
+
+`g2_status_corner` compiles the G2 Status compound's geometry, child count,
+child builder and phone row from G2_Glasses.cpp in all four phone-pipe x
+battery-monitor builds. It checks that CREATE/REBUILD ship exactly the counted
+children with distinct container ids (the back list holds 1), that no rectangle
+overlaps another or leaves the 576x288 lens, that the phone row exists only
+with the pipe and sits right under the last device row, and its width budget
+(no wider than "ESP:~100%"). The phone row is `PH:` plus hw1link::pipeBrief's
+word for each phase a built pipe can show, driven from the pipe's own inputs
+through the real bleLinkStatus() (BLE_LinkStatus.cpp, console server down):
+`PH: off`, `PH: nokey`, `PH:unpair` (a six-letter word drops the space),
+`PH: pair`, `PH: wait`, `PH: scan`, `PH: link`, `PH: ready`, `PH: close`,
+`PH: idle`, `PH: fail` and `PH: fault`; the phone snapshot it reads must agree
+with bleLinkStatus()'s pipe. The lens firmware accepting the extra text child is
+not covered.
 
 `ring_info_status` compiles the production ring status owner, CLI command,
 state type, text formatter, pending-state reader, shared JSON-argument parser
@@ -2784,6 +2877,57 @@ Allocation policy, String storage and RTOS stack sampling are host boundaries;
 this suite does not claim coherent whole-ring snapshots, radio lifecycle or
 physical ring qualification. ASan/UBSan follow `HW1_SANITIZE`.
 
+`ble_link_status` runs `BLE_LinkStatusCore.h`, the words every Bluetooth
+status surface shows (docs/PHONE_CONSOLE_VS_PIPE.md): the running role and the
+saved mode it differs from, the relay pipe (the P4 central to the phone app's
+GATT server) and the app console (the phone app's client on this device's
+command service: alone in server mode, or on the pipe's own link in G2 client
+mode). It checks every role, pipe and console input combination, including the
+client host's (registered, enabled, a slot on the pipe's link, the pipe ready,
+the secret): "n/a here" where it is not registered, "off", "waiting" for the
+phone link, "no secret", then connected or signed in only while the pipe is
+ready; each console id distinct. Phone link v2: wherever the pipe runs the
+console stream comes first (open on a ready pipe is connected or signed in, a
+joined design-A slot still shows, offered and not open is waiting, the phone
+pipe's host has nothing else), and the phone link block's words: the stream
+console (`off`, `needs-code`, `waiting`, `not-wanted`, `opening`, `open`,
+`signed-in`, `closing`, `backoff`, `stopped`), relay `on`/`off`/`unknown`, a
+distinct name for every pipe error code 0..18 (`service-off`, `unsupported`,
+`paused`; codes past 18 are `other`), the slot counts pinned to
+BLE_PhonePipeCore.h, and the text lines exactly and bounded (worst case 539
+bytes). It also checks the column limits (pipe
+reasons at most 9 characters so `Pipe: fail: <reason>` fits 21 OLED columns;
+the lens brief at most 6), and that every status label `BLE_PhonePipe.cpp` can
+set is classified, so a new failure label never reads as success. Source checks
+pin the atomic step and enrolling reads, the Step/PipeStep order, the
+never-blocking console view counting the stream's row, the snapshot's
+compile-time mirrors of PipeConsoleState and the end-reason count, the secret
+read by length only, and the advertising re-arm below the maximum on connect
+and disconnect.
+
+`g2_repair_schedule` runs the G2 one-temple repair as shipped: the schedule
+(`G2_RepairCore.h`) and, from `G2_Glasses.cpp`, the heartbeat tick, the queue
+path, the setup worker's finish hook, the wear and gesture nudges, the status
+text, the reconnect ladder's admission and `g2recover`, on a fake clock with
+fake links, peer intent and setup worker. Over a simulated day with every try
+failing: tries 1-7 at 5, 10, 30, 60, 120, 240 and 300 s, then every 10 minutes,
+no restart at the cap (the v0.99.9 bug), one "retrying every 10 min" event, and
+the clock wrapping during the fast tries, and one `repair` SSE push per change
+(1/7 .. 7/7, slow). The wear edge sends a slow repair back to try 1; a lens
+gesture (click, scrolls, double click, long press; not foreground, exit or IMU
+events) does too, at most once per 30 minutes in an episode; a running slow
+try counts as try 1. Held (user disconnect, no owner authority, the surviving
+temple's address not saved) shows at the next heartbeat and makes no queue
+attempt; busy does not hold; neither leaks a claim; a late held result never
+marks another caller's running try. One try at a time. The episode ends with
+both temples up or down or the client off, but not while a try runs: a tick
+during the repair's own connect (both temples up while promoting) changes
+nothing, and a refused promotion is one failed try in the fast and slow
+phases. The ladder returns COALESCED while one temple is up. Source checks pin
+the wear-edge call, the three lens event parsers, the worker's attempt
+number, the SSE `rp` key before `w`, and the web JSON field. ASan/UBSan follow
+`HW1_SANITIZE`.
+
 `g2_connection_status` executes the production state-name function, topology
 snapshot, public connection snapshot and shared legacy text formatter. All seven FSM
 states, both lifecycle presence gates and four temple-link combinations are
@@ -2791,8 +2935,11 @@ covered, including off versus initialized idle, partially connected glasses,
 physical links before session promotion, unknown batteries, maximum counters,
 independent caller copies, and every output capacity through the complete text
 length. Formatting a captured copy does not resample the owner. Null/zero-length
-output skips capture. `--baseline <component-dir>`
-compares successful text bytes with saved production source. The real disabled
+output skips capture. The `repair=` field shows the one-temple repair only
+while running with exactly one temple up, and a captured copy keeps it after the
+schedule changes. `--baseline <component-dir>`
+compares successful text bytes with saved production source (the repair field
+is new, so the text differs from pre-repair sources). The real disabled
 header is separately compiled and executed by `g2_disabled_header` for all three
 feature/SDK-off configurations; unavailable snapshots leave caller data alone.
 That suite also compiles the same eight typed rendering signatures and default
@@ -2807,36 +2954,45 @@ until the runtime is published. Driver state carriers and critical-section
 primitives are host boundaries; MTUs, batteries and traffic counters still have
 independent writers and are not a coherent whole-device snapshot.
 
-`g2_client_lifecycle` executes the production initialization and teardown bodies,
-role/init claims, private runtime publication/read helpers, combined status and
-page/tap worker admission. BLE, resource allocation, clocks and worker outcomes
-are host boundaries. It exercises startup refusals, host/scan rollback (including
-failed rollback), repeated initialization, retryable worker allocation failures,
-and every deferred teardown barrier without retiring the runtime prematurely.
-It also executes the production memory checker and G2 registry entry against
-15 admission scenarios: cold startup and retained-worker restart below, at and
-above the threshold; server-to-client switching; and simultaneous low memory
-and failed/deferred cleanup. These check that old host cleanup and temple
-quiescence precede memory admission, while new temple/host/worker initialization
-follows it. Retained workers remain subject to the unchanged registry floor.
-The low-memory restart and role-switch cases retry the same stopped instance
-after memory becomes available, checking claim release and worker reuse. The
-worker boundary retains page-swap, tap and ring tasks across runtime shutdown;
-it retires the session worker and checks that an admitted restart recreates it
-once, without duplicating persistent workers or acknowledgement semaphores.
-Heap samples and retained allocations are boundary outcomes, not measured
-device usage. The existing shared TX mutex may initialize before cleanup.
-`--baseline <component-dir>` compares unchanged lifecycle outcomes with saved
-production `G2_Glasses.cpp/.h` and `System_MemoryMonitor.cpp/.h`. The additional
-admission cases reproduce an older source's early memory refusal and explicitly
-account for the intended change in cleanup-versus-memory refusal precedence.
-The production state writers and four concurrent readers use
-real host mutexes across 12,000 publication/reset cycles and 100 real init/deinit
-control-flow cycles; raw temple reconstruction in the host boundary checks that
-the existing init claim excludes status readers. This covers state lifetime and
-lock ordering, including worker admission without recursive lifecycle locking;
-it does not qualify BLE resources, temple teardown, scheduling on-device or
-independently sampled telemetry. ASan/UBSan follow `HW1_SANITIZE`. Run
+`g2_client_lifecycle` executes the production `initG2Client()`/`deinitG2Client()`
+bodies (the glasses runtime alone since the 2026-10-21 lifecycle rework), the
+role/init claims, the private runtime publication/read helpers, the combined
+status, the page/tap worker admission and the UI-worker creation gate
+(`g2UiWorkerCreationOpenLocked`, with the production `gClientUiCreationOpen`
+flag spliced in). The shared stack (`bleStackUp()`), resource allocation,
+clocks and worker outcomes are host boundaries; the stack's own refusals are
+checked with five of its real reason strings and allocate nothing. It
+exercises the startup refusals (role, claim, init, renderer, stack, memory,
+temples, scan), two scan failures that reset the runtime without touching the
+host and retry on the running stack, eight eager-worker combinations, the
+repeat-init early return, the exact stop sequence (notes release after the
+disconnect, the G2-only setup-slot wait, the UI-worker release before the last
+start-block release, worker mask 0 at the end; a release timeout is non-fatal
+and keeps page/tap), twelve deferral barriers and twelve memory cases (cold
+start, restart after a full stop recreating all three workers, restart with
+kept workers, refusal precedence). The creation gate is pinned by producer
+injection: a producer racing a start that the stack, the memory floor or the
+scan then refuses creates no worker; one racing the eager creation after
+admission creates all three, which the start then reuses; a producer racing
+the stop, a stopped client and a fresh boot create nothing; a published
+runtime lazily recreates each missing worker. Text checks hold the init order
+(`bleStackUp()` before the temple quiesce, the `g2client` memory check after
+it and before `templeInit`, `g2RegisterBlePeer()` after the publication,
+nothing after `g2SessionEnsureWorker()` but the log and `return true`), the
+ten deinit calls in order, the banned calls (`phonePipeStop`, `bleStackDown`,
+`g2RingDisconnect`, peer arming and the host calls now owned elsewhere), that
+`bleConsoleRegisterOnClientHost()` is called from `BLE_CentralStack.cpp`
+alone, and that each of the three creators reads the gate once, negated,
+inside the lifecycle critical section and claims its slot there, with every
+write of the admission flag under the same lock. The production state writers
+and four concurrent readers use real host mutexes across 12,000
+publication/reset cycles and 100 real init/deinit control-flow cycles. It does
+not qualify BLE resources, temple teardown, scheduling on-device or
+independently sampled telemetry. Both pipe lanes build the same code (the pipe
+no longer gates either function). `--component <dir>` reads another copy of
+the component for mutation runs; `--baseline` is gone (a saved pre-rework
+source implements the old contract and would not compile against these
+fakes). ASan/UBSan follow `HW1_SANITIZE`; run
 `python3 test_g2_client_lifecycle.py --thread-sanitize` separately for
 ThreadSanitizer (do not combine sanitizer modes).
 
@@ -2971,7 +3127,11 @@ timer and request boundaries. It covers unknown initial mode, command/refusal
 and transport failures, authoritative mode/reconnect readback, repeat clicks,
 stale responses, slow polling, persistent connected-ring feedback, and the
 G2/Sensors/microphone link guards. It verifies navigation issues no microphone,
-source-selection or recording command. It runs when Node.js is found at
+source-selection or recording command. The Bluetooth page shows the app
+console's clients/advertising line only for the console server, never for the
+console on the relay pipe's link (Glasses+pipe, which waits for the phone link
+by default), and the "Use app console" confirm asks to switch to server mode
+for a direct app connection. It runs when Node.js is found at
 configure time (otherwise it is registered but disabled); set
 `HW1_NODE_EXECUTABLE` for a runtime outside PATH. These tests do not qualify physical G2 traffic, radio lifecycle,
 actual HTTP transport, browser layout or device scheduling.
@@ -3375,9 +3535,9 @@ python3 components/hardwareone/test/host/test_stt_ble_privacy.py --sanitize
 
 ## BLE Secure Channel directed delivery
 
-`ble_sc_directed` compiles the production `System_BleSecureChannel.cpp` whole against harness-local libsodium, mbedTLS, FreeRTOS, settings and Arduino stand-ins (`ble_sc_stubs/`). It adds four pieces extracted from `Bluetooth.cpp`: the directed raw sender `bleRawNotifyToSession`, the session sender `sendBLEResponseToSession`, the console-mirror entry `sendBLEResponse` with its recipient collector, and the deferred inbound job `bleScDeferredInbound`. A two-peer fake GATT keeps one inbox per connection. A directed send lands only in the addressed connection; the characteristic-wide notify that pre-fix sources use lands in every connected one.
+`ble_sc_directed` compiles the production `System_BleSecureChannel.cpp` whole against harness-local libsodium, mbedTLS, FreeRTOS, settings and Arduino stand-ins (`ble_sc_stubs/`). It adds four pieces extracted from `Bluetooth.cpp`: the directed raw sender `bleRawNotifyToSession`, the session sender `sendBLEResponseToSession`, the console-mirror entry `sendBLEResponse` with its recipient collector, and the deferred inbound job `bleScDeferredInbound`. A two-peer fake GATT keeps one inbox per connection. A directed send lands only in the addressed connection; the characteristic-wide notify that pre-fix sources use lands in every connected one. On the G2 client host (the console on the phone pipe's link) it also splices `bleSecureChannelOnly` and the `BleConsoleTxGate` around the raw sender: every frame is one try of the shared central TX gate taken before the lifecycle guard, a reliable send skips the accessories' soft priority while a best-effort one yields to it, a busy gate gives the bounded six tries with nothing sent, each reliable frame counts as pipe activity (best-effort mirror and card frames do not), plaintext is refused although `blesecure` is off, and server mode never touches the gate.
 
-The suite checks that HELLO_ACK, CONFIRM_ACK, both REJECT reasons and every DATA fragment (command results and `fileread ... bin` chunks) reach only the connection and session epoch they belong to, admitted under the BLE lifecycle guard. It also checks these cases:
+The suite checks that HELLO_ACK, CONFIRM_ACK, both REJECT reasons and every DATA fragment (command results and `fileread ... bin` chunks) reach only the connection and session epoch they belong to, admitted under the BLE lifecycle guard (on the G2 client host the session is checked under it and the post made after it is released, counted in flight). It also checks these cases:
 - A stale session epoch sends nothing.
 - A session rotated mid-message stops the transfer at the next fragment without resetting the channel.
 - When the server stops during a handshake (every epoch invalidated), no reply reaches the radio.
@@ -3391,11 +3551,12 @@ python3 components/hardwareone/test/host/test_ble_sc_directed.py --sanitize
 
 ## BLE Secure Channel policy
 
-`ble_sc_policy` compiles the production `System_BleSecureChannel.cpp` whole against the `ble_sc_stubs/` stand-ins it shares with `ble_sc_directed`. It splices the BLE command ingress from `Bluetooth.cpp`: the GATT write entry `processIncomingBLECommand`, the deferred secure-frame and plaintext jobs (`bleScDeferredInbound`, `blePlaintextDeferredInbound`), the command tail `processBleCommandLine` with its file-browser gate, and the directed and session senders. The fake GATT keeps one inbox per connection. A write runs the GATT entry as BTC_TASK; deferred jobs queue in submission order and run as cmd_exec_task after it returns, and the executor records which command would run for which session. The FreeRTOS doubles count every tx-mutex take that may wait and every delay made on BTC_TASK.
+`ble_sc_policy` compiles the production `System_BleSecureChannel.cpp` whole against the `ble_sc_stubs/` stand-ins it shares with `ble_sc_directed`. It splices the BLE command ingress from `Bluetooth.cpp`: the GATT write entry `processIncomingBLECommand`, the deferred secure-frame and plaintext jobs (`bleScDeferredInbound`, `blePlaintextDeferredInbound`), the command tail `processBleCommandLine` with its file-browser gate, and the directed and session senders. The fake GATT keeps one inbox per connection. A write runs the GATT entry as BTC_TASK; deferred jobs queue in submission order and run as cmd_exec_task after it returns, and the executor records which command would run for which session. On the G2 client host (R4) a plaintext write, login included, gets the fixed refusal on its own link although `blesecure` is off, and the same link's encrypted commands run. The FreeRTOS doubles count every tx-mutex take that may wait and every delay made on BTC_TASK.
 
 The suite checks:
 - With the secure channel required, a plaintext write from a connection without a channel gets the fixed refusal on that connection only, in plaintext. A connection with a channel gets the refusal as one encrypted DATA frame, and its encrypted commands still run.
 - With no passphrase, plaintext commands run.
+- On the G2 client host, a DATA frame on a console session renewed under its live link (no channel while the app still holds one) gets one `SC_REJECT` reason `0x03` on that session, a second frame gets nothing, and after a new handshake the app's commands run; a replayed frame on a live channel, server mode and a host without `blesecret` (only the no-passphrase reject) never get it.
 - With encryption optional, file-browser verbs (`fileread`, `filewrite`, ...) written in plaintext are refused with `secure_channel_required`, even on a connection that holds a channel. `imagedelete` is a file verb too (F6): refused in plaintext with or without a channel, run when it arrived encrypted; `imagedeleted` is not a file verb. The same verbs inside DATA frames run. Non-file plaintext commands still run, and a verb that only shares a prefix (`filesystem`) is not treated as a file verb.
 - No reply to a plaintext write waits on the secure-channel tx mutex on BTC_TASK (which serves the GATT/GAP callbacks of every link while a paced reply holds that mutex): the replies the command tail sends itself (`whoami`, login usage, `logout`, auth-required) and the required-mode refusal reach a channel holder as encrypted DATA frames from cmd_exec, and with the command queue full the writer gets one best-effort `Error: Failed to queue command` and the pool slot is returned.
 - A plaintext write's pool slot (the line can be `login <user> <password>`, and the production pool prefers PSRAM) holds no byte of the line once it is released: after the command ran, after a full command queue, after the session changed before cmd_exec ran the job, and after a required-mode refusal; a shorter later write leaves no password tail.
@@ -3411,39 +3572,136 @@ python3 components/hardwareone/test/host/test_ble_sc_policy.py --sanitize
 
 `ble_server_stop` extracts the production `deinitBluetooth()`, its session
 and advertising helpers, the role-claim and lifecycle-guard classes, and the
-`closeble` and `blemode` commands unchanged from `Bluetooth.cpp`. Host
+`closeconsole` and `blemode` commands unchanged from `Bluetooth.cpp`. Host
 boundaries stand in for the role transition, the Ring owner
-(`g2RingPrepareForStackTeardown`), the host/controller teardown, transport
-sessions and settings writes. A stop deferred by a busy role transition or
-by a Ring owner that has not quiesced, and a host teardown that fails, must
-reach the caller. In each case `closeble` and `blemode client` answer
-`Error: ...; mode unchanged` and leave `bleMode` alone. A deferred stop must
-also leave the app session epochs live and advertising on: the Ring prepare
-runs before session admission closes. The exception is a companion reset: under
-its outer RECOVERING claim the caller retries the stop a bounded number of
-times and, if it never completes, lets the companion reboot under a host it
-does not force down (see `companion_ble_shutdown`), so no link survives; a
-Ring-deferred stop therefore closes the session epochs, clears the GATT
-interface id and stops advertising before it reports failure; a nested stop
-under any other claim keeps them. A retry after the Ring owner quiesces
-stops the server. A clean stop keeps its reply, its role reset, its freed
-state and the order Ring prepare, session close, advertising stop, host
-teardown. `closeble` with no server and `blemode server` keep their old
-outcomes. The suite builds with and without the G2 client. A second
-translation unit compiles the real `Bluetooth.h` with `ENABLE_BLUETOOTH=0`
-and checks that the stub returns `bool` true. `--component <dir>` runs the
-suite against another copy of `Bluetooth.cpp/.h`. On the pre-fix source the
-harness still compiles (a `void` stop is read as "reported stopped") and
-fails on the reported outcome, the persisted role and the closed sessions.
+(`g2RingPrepareForStackTeardown`), the host/controller teardown, the shared
+client stack (`bleStackReady()`), transport sessions and settings writes. A
+stop deferred by a busy role transition or by a Ring owner that has not
+quiesced, and a host teardown that fails, must reach the caller: `closeconsole`
+answers `Error: ...; mode unchanged` and leaves `bleMode` alone, and a deferred
+stop also leaves the app session epochs live and advertising on (the Ring
+prepare runs before session admission closes). The exception is a companion
+reset: under its outer RECOVERING claim the caller retries the stop a bounded
+number of times and, if it never completes, lets the companion reboot under a
+host it does not force down (see `companion_ble_shutdown`), so no link
+survives; a Ring-deferred stop therefore closes the session epochs, clears the
+GATT interface id and stops advertising before it reports failure; a nested
+stop under any other claim keeps them. A retry after the Ring owner quiesces
+stops the server. A clean stop keeps its reply (`App console server stopped
+(Bluetooth host off; 'openble' brings the client stack back)`), its role reset
+to the build's default, its freed state and the order Ring prepare, session
+close, advertising stop, host teardown. `closeconsole` with no server running,
+alone or beside the glasses and the pipe, answers `App console server not
+running` and changes nothing (no settings write, no pipe stop, no host call).
+`blemode` is the saved boot role only (`client|server`): it claims no role and
+stops nothing, so it succeeds beside a running server and while another role
+transition is active. The query speaks the link-status words
+(`BLE_LinkStatusCore.h`, through the shipped `bleLinkStatus()` over host role,
+pipe and console inputs: `Saved mode: client (Glasses+pipe); running:
+Glasses+pipe`, also for a pipe alone, a console, and nothing running); each
+set reply names the stored role, what runs now and the verb that starts the
+stored role (`[BLE] Boot role set to client (Glasses+pipe); running now: app
+console server; 'closeconsole', then 'openble' starts it`, `... running now:
+nothing; 'openble' starts it now`, `[BLE] Boot role set to server (App
+console); running now: client stack; 'openconsole' switches to it now`);
+`glasses` (any case), `g2` and `1` are `client`, `0` is `server`; the removed
+`phone-client` mode, its `phonelink` alias and `2`, the old `phone` alias (it
+meant server), `phone-only`, near misses (`phone-link`, `glass`, `phonelinks`)
+and any unknown mode answer `Usage: blemode [client|server]` before any role
+is touched; the registry row carries the two-role help (`client = the shared
+stack for glasses, ring and phone (default); server = the app console server
+(legacy)`) and a usage naming `openg2` / `openring` / `openphone` /
+`openconsole`; a build with no client device compiled in refuses `blemode
+client` (`Error: [BLE] no client device is compiled in`) without a settings
+write. The suite builds with and without the G2 client and the phone pipe. A
+second translation unit compiles the real `Bluetooth.h` with
+`ENABLE_BLUETOOTH=0` and checks that the stub returns `bool` true.
+`--component <dir>` runs the suite against another copy of `Bluetooth.cpp/.h`.
 `HW1_SANITIZE` enables ASan/UBSan. Real Ring/host timing still needs a device.
+
+The same suite runs the app console's registration on the client stack's host
+(`bleConsoleRegisterOnClientHost()`, which `bleStackUp()` calls in pipe builds), the shared state and command-service
+builders, the GATT registration tap, `ServerCallbacks` and the two host-teardown
+hooks unchanged, over recording Arduino BLE objects. Registration builds the
+command service alone, with today's three characteristics, and never touches
+advertising, the MTU or TX power; the console state stays uninitialized, so
+`isBleServerInitialized()` still means server mode. It checks the GATT
+registration status, also when the tap only sees the event after
+`createServer()` returns, and a refused or missing registration leaves nothing
+behind. It refuses before creating anything outside a role claim, under the
+lifecycle lock, on a host that is not ready, with any central link held, with
+the G2 runtime already up, with no free GATT app id, a second time on the same
+host and while server mode owns the host. The server app registers an id from
+the reserved 15-bit client allocator, also once the raw counter has passed
+`ESP_APP_ID_MAX` (where Arduino would wait forever), skipping ids clients
+hold. The request characteristic is write-only. On the client host no link
+Bluedroid reports (temples, ring, phone) gets a slot, count, event or
+advertising call; once the phone pipe is READY the shipped reconcile makes
+exactly its link's slot, which counts only after the app's first write joins
+it, a temple or ring drop leaves and the phone link's drop ends (its stale
+record gets no slot back); server mode still admits and ends its apps.
+The harness HAL stop calls the hooks the way `HAL_Bluetooth.cpp` does
+(`hal_bluetooth` checks the real one): when the host stops, admission, the
+session epochs, the characteristic pointers, the interface id and the tap are
+already closed and the phone-link slot ended, the attach state starts the next
+host empty; the state is freed only after a
+terminal stop and kept, closed, after a failed one; the server role's state is
+left to `deinitBluetooth()`, which in turn leaves the client host alone. Source
+checks keep `createService(BLE_COMMAND_SERVICE_UUID)` in its one builder,
+`initBluetooth()` on the shared helpers and the client-host path free of
+advertising, MTU and TX-power calls, with every precondition and the
+registration check ahead of what they guard. Android joining the link and
+Bluedroid's Service Changed behaviour still need the hardware.
+
+## Shared Bluetooth client stack
+
+`ble_central_stack` splices the whole `#if ENABLE_BLUETOOTH` region of
+`BLE_CentralStack.cpp` (nested blocks kept, includes blanked, `#line` directives
+so compiler errors name the production file), the real `HAL_Bluetooth.h` and
+`BLE_CentralStack.h`, the role-transition enum, the G2 MTU preference and
+Arduino's `constrain()`. Every boundary call is a fake that appends to one
+ordered event vector, the role claim included; after every up/down the harness
+checks that the claim is released, that no boundary call happens outside it,
+that no teardown step sees `bleStackReady()` or a scan pointer, that peers are
+registered only after ready is published, that the refusal is never null and
+that there is no scan without ready. Four lanes: full; no pipe; glasses without
+the ring; phone only without coex. Scenarios: the HAL fixtures under the
+production `ready()` / `stopped()` / `hostAbsent()`; up from an absent host (no
+handshake, no deinit; a stopped host acknowledges a pending retirement first; a
+Hosted absent-but-not-stopped host, the bench P4's first boot, gets no teardown
+and no early acknowledgement and succeeds); up twice; the refusals in order
+(disabled, fault, companion with its reason, server) with no HAL call, and a
+fault under an outer RECOVERING claim allowed; the stale-generation normalize
+(a ring connect in flight refuses; otherwise ready and the scan are withdrawn
+before the first teardown call, the teardown runs with one phone handshake,
+then the bring-up; each teardown failure's fault or no-fault outcome); the
+`blestack` memory refusal; the rollbacks (hal-init fails, the rollback fails,
+the setup worker fails, no scan object); TX power clamps and a failed set;
+down (the refusals peeled server, glasses, ring, phone with ready kept; from
+absent, native and Hosted; from ready with ready cleared before the teardown,
+the phone worker released after the host stopped and before the setup worker,
+a busy phone or setup worker non-fatal; a HAL failure faults and releases
+nothing; a ring refusal keeps the host up and the next up normalizes it; a
+verified down clears an earlier fault); a second down makes no HAL call;
+`bleStackNoteHostLost()`; a busy role claim. Text checks pin
+`registerDevicePeers()` before `bleArmAutoReconnectPeers()`, the four
+open-device refusals ahead of any effect in `bleStackDown`, `sReady.store(false`
+before `hostTeardown()`, the phone worker release after the teardown and before
+the setup worker release, `phonePipeHostStopped(` only in `hostTeardown`, the
+rollback and the absent branch of `bleStackDown` (never in `bleStackUp`), and
+no `xTaskCreate` / `EXT_RAM` in the file. `--component <dir>` and `--sanitize`
+as the neighbouring suites. The device owners it drives are covered by
+`g2_client_lifecycle` (glasses), the ring suites and the phone suites; the
+verbs over them by `ble_server_stop`, `ble_info_status`, `ble_recycle_phone`,
+`phone_recovery`, `ble_role_switch_reconnect` and `companion_ble_shutdown`.
 
 ## Bluetooth commands and status
 
-`ble_info_status` (see "Bluetooth status coverage") also runs the production `blesend`, `blestream` and `bleevent` handlers with the real `CommandArgs` parser and stream-flag helpers, and runs the data-service push functions against a fake directed GATT sender. Every keyword and the interval pair come from the dispatcher's arguments. `blestream sensors off` clears only that stream. Bad tokens and non-positive intervals are usage errors. `blesend` forwards the whole message. Sensor, system and event frames reach only the console-mirror recipients, by directed notify and never characteristic-wide. The checks also cover stale sessions, congestion, a missing GATT interface, a refused lifecycle lock and secure-required mode. `--component <dir>` points the suite at another copy of the BLE sources; the pre-fix tree fails at the `blestream on` case.
+`ble_info_status` (see "Bluetooth status coverage") also runs the production `blesend`, `blestream` and `bleevent` handlers with the real `CommandArgs` parser and stream-flag helpers, and runs the data-service push functions against a fake directed GATT sender. Every keyword and the interval pair come from the dispatcher's arguments. `blestream sensors off` clears only that stream. Bad tokens and non-positive intervals are usage errors. `blesend` forwards the whole message. Sensor, system and event frames reach only the console-mirror recipients, by directed notify and never characteristic-wide. The checks also cover stale sessions, congestion, a missing GATT interface, a refused lifecycle lock and secure-required mode. On the G2 client host, which serves no data service, `blestream` and `bleevent` refuse with the phone-link reason before touching a flag or a recipient. `--component <dir>` points the suite at another copy of the BLE sources; the pre-fix tree fails at the `blestream on` case.
 
 It also runs the production `bledisconnect` command and its owner functions (`bleDisconnectConnection`, `bleDisconnectAppClients`) against a recording GATT-server double. `bledisconnect <connId>` closes exactly that app client. The bare form, which the page-level button and the OLED and G2 items use, closes every app client and never a paired R1 ring or G2 temple link. Unknown ids, peer links and malformed ids (`abc`, `-1`, `1x`, `0x1`, `70000`) are refused without a close. The close is issued with the lifecycle guard released, and a missing BLE state, server or lifecycle lock closes nothing. A Node-free check reads `WebPage_Bluetooth.h`: each client's Kick button must pass that client's `connId` to `bledisconnect`. `--component <dir>` also points these reads at another tree; the pre-fix tree fails at the first per-id case.
 
-`ble_info_status` also runs the production `blestatus`/`bleread` command against the same connection table: a logged-in user named "Unknown", a logged-in user and an anonymous peer. Both forms render the guarded snapshot that `bleinfo json` uses. The checks: the JSON views list the same client set (connId, authed, MAC, age, commands, slot index, with the display user "Unknown" only for a peer that has not logged in); each call takes and releases the lifecycle guard once with the 100 ms budget and reads connection age inside it; a busy guard gives an explicit unavailable reply; a change published as the guard is released does not appear; the text form keeps its exact lines; uninitialized replies are unchanged; four 64-character usernames give complete JSON; and every JSON allocation failure gives the oom reply.
+`ble_info_status` also runs the production `blestatus`/`bleread` command against the same connection table: a logged-in user named "Unknown", a logged-in user and an anonymous peer. Both forms render the guarded snapshot that `bleinfo json` uses. The checks: the JSON views list the same client set (connId, authed, MAC, age, commands, slot index, with the display user "Unknown" only for a peer that has not logged in); each call takes the lifecycle guard once with the 100 ms budget (the console view only tries it, without waiting) and reads connection age inside it; a busy guard gives an explicit unavailable reply; a change published as the guard is released does not appear; the text form starts with the link lines (`Role: App console`, `App console: app signed in`, `  Clients: 3/4, advertising off`, and the `Phone link:` block in a pipe build) and keeps the client lines; outside the app console both forms answer with the role (`Role: Glasses`, `Role: Glasses+pipe`, `Role: Phone pipe (saved: App console)`, `Role: Off (saved: App console)`), `App console: not available in this mode` or `off`, the phone link block (`Phone link: ready`, `fail: not found`, ...) and how to reach the console (a `Hint:` line, or `hint` in JSON: with only the glasses that `openble` switches to server mode and what it stops; with the pipe running that the console stream needs a device code from `phone pair new`, or `bleconsole on`, or that it opens when the app asks for it), with a `link` JSON object, a `phoneLink` block and no address; in phone-client mode the console stream's row is the console (opening, signed in with five sessions ended and their reasons named in text and JSON, then open and signed out after the idle logout), and `bleinfo` carries the same block; on the G2 client host the console on the phone pipe's link reads `set blesecret first`, `waiting for the phone link` (also once the pipe left READY, when a slot it left is not counted), `app signed in` with its one slot in `consoleClients` and `off`, never with a `Clients:` line or advertising, and its hint says what attaches it (`blesecret`, `phone status`, `bleconsole on`; none once attached), never `openble`; the console view reports that host registered, attachable and attached without claiming the server role; a saved mode that differs, a waiting console and a ring link that is no app are named; four 64-character usernames give complete JSON; and every JSON allocation failure gives the oom reply.
 
 ## BLE area cleanup coverage
 
@@ -3480,9 +3738,9 @@ python3 components/hardwareone/test/host/test_ring_daily_ack.py --sanitize
 
 `health_logging_ui` reads the R1 Health action body with the shared bounded reader (`webRecvRequestBody` from WebServer_Utils.cpp, compiled unchanged); the page keeps no reader of its own. Checks: one idle wait between chunks is retried; two consecutive idle waits (a half-open socket) end the request with the 400 "invalid action body" reply; a socket error is never retried; an empty body or one of 160 bytes or more is refused before reading. `--component <component-directory>` reads production sources from another checkout and `--source-dir <directory>` overlays single files; the 0.99.97.4 sources fail the half-open case because that reader retried timeouts without bound.
 
-The ring controls run the production `g2RingCommands` and `healthCommands` rows, `cmd_ringcontrol` and the `healthstatus force-history` row (its own admin registry row, chosen by longest-prefix lookup over the non-admin `healthstatus`) through a registry executor double (longest-prefix lookup, the registry admin gate, an audit record per executed command). A non-admin is refused with the same text from the web handler (403), the OLED page ([DENIED]) and the serial CLI, nothing reaches the ring setters, and the validate pass is refused at the same admin row; an admin's change from each transport reaches the owner and is audited as `user@web`, `user@display` or `user@serial`. The 0.99.97.4 sources fail because the web and OLED adapters checked admin themselves and called the setters, and no command existed for collection or low power.
+The ring controls run the production `g2RingCommands` and `healthCommands` rows, `cmd_ringcontrol`, the `ring history` / `ring history force` / `ring control refresh` handlers and the `ring` root (`ring history force` is its own admin registry row, chosen by longest-prefix lookup over the non-admin `ring history`) through a registry executor double (longest-prefix lookup, the registry admin gate, an audit record per executed command). A non-admin is refused with the same text from the web handler (403), the OLED page ([DENIED]) and the serial CLI, nothing reaches the ring setters, and the validate pass is refused at the same admin row; an admin's change from each transport reaches the owner and is audited as `user@web`, `user@display` or `user@serial`. The 0.99.97.4 sources fail because the web and OLED adapters checked admin themselves and called the setters, and no command existed for collection or low power.
 
-The forced refresh is refused with the registry's text from web (403), OLED ([DENIED]) and serial. Nothing executes; each refusal is recorded as a denied command, and the validate pass is refused at the same row. A line the registry matches only as plain `healthstatus` (double space) is refused by the handler, never run. Only the registry's "Admin access required" text maps to 403; any other refusal is the command's own 409. The pre-fix sources fail: the forced refresh had no admin row and was refused inside its handler, and the page still carried its own reader and a second refusal prefix.
+The forced refresh is refused with the registry's text from web (403), OLED ([DENIED]) and serial. Nothing executes; each refusal is recorded as a denied command, and the validate pass is refused at the same row. A line the registry matches only as plain `ring history` (double space) is refused by the handler, and one matched only as the `ring` root gets usage; neither runs anything. `ring control refresh` and `ring history` run for a non-admin. The registry double names the matched row in its refusal (`ring control`), as authorizeCommand does. Only the registry's "Admin access required" text maps to 403; any other refusal is the command's own 409. The pre-fix sources fail: the forced refresh had no admin row and was refused inside its handler, and the page still carried its own reader and a second refusal prefix.
 
 `r1_history_store` (see "R1 history persistence") also compiles the production Health history model that drives the store (the pending-sweep load, merge and commit path of G2_Health.cpp; trend views, the graph push and the profile capability table are doubles). A stored day that exists but cannot be opened loads as `READ_FAILED`, never `NOT_FOUND`, and the retried load merges the sweep into it instead of replacing it; a backup an interrupted publish left alone is promoted and loaded; a corrupt stored day is retried a bounded number of times, is never replaced, and does not stop later sweeps from being accepted and stored. `--component <components/hardwareone>` runs these current expectations against another tree's production sources (the f4cc542 sources fail the twelve load-failure checks); `--baseline` keeps its store-only scope.
 
@@ -3499,6 +3757,9 @@ the Even-AI card, placeholder, backed-up queue and inline-fallback paths. `--com
 against another tree. ASan/UBSan follow `HW1_SANITIZE`; radio, ring, command, display and RTOS
 calls are host boundaries, not device scheduling. The list-page double models page-swap
 admission: a second list render inside one lens-applier job is refused, as on the device.
+The Phone menu and its tap handler are compiled too, over the real bleLinkStatus() with the
+console server down: a `phone connect` reply repaints the Phone menu while the user stays on it
+and never over a held note.
 
 ## G2 Files page tasks and redraws
 
@@ -3569,13 +3830,21 @@ pre-fix tree. Commands, lens, RTOS and settings-registry calls are host doubles;
 ## G2 Network row bindings
 
 `wifi_saved_ui` (see "Saved WiFi network coverage") also has a unit that compiles the
-G2 Network page's row bindings, its WiFi, ESP-NOW, HTTP(S), Bluetooth, G2 and R1
-menus and their tap handlers: each case draws a menu, changes the radio, link,
-server, BLE, ring or setting state behind its labels, taps a row and checks that
-the command matches the label that was shown (and that a refused render after a
-submenu change runs nothing), plus the unchanged-state row maps. Each case runs in
-its own process; the ENABLE_ESPNOW, ENABLE_HTTP_SERVER and ENABLE_WIFI off builds
-are compile-checked. `--component` runs it against another tree.
+G2 Network page's row bindings, its WiFi, ESP-NOW, HTTP(S), Bluetooth, G2, R1 and
+Phone menus and their tap handlers, with the real bleLinkStatus() over fake role,
+pipe, peer and console inputs: each case draws a menu, changes the radio, link,
+server, BLE, ring, pipe or setting state behind its labels, taps a row and checks
+that the command matches the label that was shown (and that a refused render after
+a submenu change runs nothing), plus the unchanged-state row maps. The Bluetooth
+menu's `Role:` (+ `Saved:`) rows use the link-status words; its server layout shows
+`Console:` in hw1link::consoleText's words (`waiting`, `hidden`, `signed out`,
+`signed in`) from the snapshot, never gBLEState, so a stray "connected" with no app
+client still reads `Console: hidden`. The Phone menu shows `Pipe:` (a failure names
+its reason, `Pipe: fail: not found`; a fault reads `Pipe: fault`), `Paired:` and
+`Console:` (the console on the pipe's link: `waiting`, `signed out`, `signed in`,
+`no secret`). Each case runs in its own process; the ENABLE_ESPNOW,
+ENABLE_HTTP_SERVER, ENABLE_WIFI and ENABLE_BLE_PHONE_PIPE off builds are
+compile-checked. `--component` runs it against another tree.
 
 ## Automation summaries
 
@@ -3588,10 +3857,35 @@ removes only names that parse as the store's own temporary spelling inside
 canonical `u<id>` notes folders, never opens a file for reading, and leaves
 user-placed names, directories, transcripts and other folders alone; nothing is
 promoted, because a note header carries no length. `quicknote_service` covers the
-worker that runs the sweep once a boot, and `g2_notes_page` checks the lens tier
+worker that runs the sweep once a boot and its idle exit: after 60 s with no
+note running or starting, nothing due and no boot note waiting for the clock,
+the worker leaves through the shared `ServiceWorker` (below), a start claims
+its note before it brings a worker back, and the suite pins that order and
+that the module keeps no lifecycle primitive of its own. `g2_notes_page` checks the lens tier
 row: with a card in, the last row lists the other tier (`note list sd|internal`),
 stale replies for the abandoned tier are dropped, and a new show returns to the
 save tier. The f4cc542 sources fail the sweep case (no sweep) and the tier row.
+
+## Idle service workers: the shared lifecycle
+
+```sh
+python3 components/hardwareone/test/host/test_service_worker.py --sanitize
+```
+
+`service_worker` splices `struct ServiceWorker` from `System_TaskUtils.h` over a
+faked kernel. It is the one lifecycle the lazily created, idle-retiring service
+tasks share (`qnote`, `dictation_svc`, `cm5_presence`): `ensure()` holds one
+creator's claim at a time, makes the wake semaphore once and publishes it under
+the module's spinlock before the task exists, then publishes the handle;
+`give()` reaches the semaphore and never a task handle (a give before the first
+task or between tasks waits for the next one); `wait()` passes the time through
+and reports the kernel's answer; `retireIf()` runs the module's idle predicate
+and nulls the handle in the same critical section, so a producer that publishes
+work and then calls `ensure()` finds the task or makes one. The suite checks a
+refused create leaves nothing published and is retried, that priority and core
+are the caller's to override, and that every kernel call lands outside the
+critical section. A source check pins the three users' declarations and that
+none of them creates a task or a semaphore, or notifies a task, on its own.
 
 ## G2 page and hijack-bridge API contract
 
@@ -3608,6 +3902,14 @@ python3 components/hardwareone/test/host/test_file_kind.py --sanitize
 ```
 
 `file_kind` compiles the shared classifier `FileBrowser_FileKind.h` and, over one table of names, the production G2 Files page file-tap branch (the `else` block of `g2FilesHandleTap` with the classification it calls, `showFileChooser` recording the chooser kind) beside the OLED browser's "View" decision (its `sFbActionViewable` assignment). The lens must offer a text or JSON view exactly when the OLED offers View: `.log`, `.md`, `.ini`, `.yaml`, `.html`, `.c` and the other OLED text types open in both, BMP/JPEG open only on the lens, and png, bin, `.tar.gz` and names without an extension get Info/Rename/Delete only. A second harness runs the OLED browser's rename/delete helpers (`fbRenameSelected`, `fbDeleteSelected`, `fbSubmitMutate`) against FileManager and executor doubles: both submit the user-level `filerename` and one-shot `filedelete ... confirm` commands with the selected entry's full path (a 70-byte SD name), re-scan only after the executor's `OK`, report the executor's admin refusal, give the handlers' path-policy refusal ("File does not exist or access denied") its own result and the toast "Not found or denied" (through `fbToastMutate`, which the harness also compiles), and submit nothing for an unresolved selection or a quote. Source contracts check that the OLED browser no longer calls `FileManager::renameItem`/`deleteItem`, that its prepare pass routes Rename/Delete through those helpers under the identity guard, that guests are still stopped on the input path, and that neither browser keeps a private extension list. `--component <dir>` reads the production sources from another tree; the f4cc542 sources fail the agreement checks (the lens gives `.log` and `.md` no viewer while the OLED offers View) and the contracts (direct FileManager rename/delete). No device, executor or FileManager is run.
+
+## Shared JSON Pretty view
+
+```sh
+python3 components/hardwareone/test/host/test_json_pretty.py --sanitize
+```
+
+`json_pretty` compiles the shared re-indenter `System_JsonPretty.h` with production code from the OLED browser: its viewer state, `fbFillView` body builder, `fbBuildActionRows` and its `sFbActionJson` decision. Valid JSON (empty `{}`/`[]`, nesting, escaped quotes and backslashes, structural characters inside strings, UTF-8) must come out in ArduinoJson's `serializeJsonPretty` layout with `\n` line ends; re-indenting pretty, CRLF or tab-spaced input gives the same text, and splitting the input at every byte across two `write` calls changes nothing. Truncated and malformed input is laid out as far as it goes (stray closers never drive the indent negative, an unterminated string passes through), and 40 levels of nesting indent no deeper than `kMaxIndentLevels`. The OLED's Pretty View must equal the re-indented text wrapped at the OLED width and JSON View the stored text wrapped; a full line table and a full body both mark the view truncated. JSON files get Pretty View / JSON View / Rename / Delete / Back, text gets View, other files no view. Source contracts check that the web viewer's Pretty mode, the G2 lens Files page, the OLED browser and serial `fileview` (which picks JSON with the shared `fileKindForName`; its own cases run in `fileread_psram`) all include the header and format through `JsonPrettyFormatter`, that the web handler keeps no private indenter state, that neither on-device browser re-serializes through ArduinoJson, and that the OLED's Pretty View row reaches `fbFillView` with `pretty` set through `LOAD_PRETTY_VIEW`. `--component <dir>` reads the production sources from another tree; the c0384687 sources fail every contract. No display, BLE or HTTP transport is run.
 
 ## Display login policy ownership
 
@@ -3704,8 +4006,9 @@ The live replacements must stay defined: `oledUIRender`, the toast and ribbon re
 python3 components/hardwareone/test/host/test_oled_command_feedback.py --sanitize
 ```
 
-`oled_command_feedback` compiles the shipping OLED action helper (`oledRunCommand` and its
-reply-to-toast mapping `oledCommandReplyText`, both from `OLED_Utils.cpp`) and real callers:
+`oled_command_feedback` compiles the shipping OLED action helpers (`oledRunCommand`, its
+reply-to-toast mapping `oledCommandReplyText` and `oledRunCommandAsync`, all from
+`OLED_Utils.cpp`) and real callers:
 
 - the Automations toggle and delete actions with their footer toast (`OLED_Mode_Automations.cpp`);
 - the Quick Settings radio, Wi-Fi, Bluetooth and HTTP rows (`OLED_SettingsEditor.cpp`);
@@ -3725,9 +4028,18 @@ The checks:
   success and the caller's fallback text for an empty refusal, and stays inside the caller's buffer.
 - Each caller shows its success text ("Enabled", "Deleted", "Radio OFF", "HTTP OFF", ...)
   only on success; local refusals ("Radio off!", "Need WiFi first!") still run no command.
+- The Quick Settings rows never wait for cmd_exec_task (the P4 radio toggle held the display
+  task for 637 ms). The executor double finishes a queued command only when a case says so.
+  The row shows "Working..." and returns at once; the executor only stores the reply and asks
+  for a frame; the next frame shows the row's result, once. A second row while one runs
+  toasts "Please wait" and queues nothing; a refused queue toasts "Busy - try again" and
+  leaves nothing in flight; a reply from a replaced display session shows nothing; an
+  over-long reply stays inside the mailbox.
 - Static: the Automations, Logging and Network screens, the Quick Settings section and the
   unavailable-page / Web Stats actions (`handleOLEDActionButton`) no longer fire commands
-  whose reply is dropped, and their `broadcastOutput` success lines are conditional.
+  whose reply is dropped, and their `broadcastOutput` success lines are conditional. The
+  Quick Settings section never calls the waiting `oledRunCommand`, and `updateOLEDDisplay`
+  delivers `oledRunCommandAsync` replies.
 
 `--component`/`--source-dir` point it at another tree; the f4cc542 sources fail it (no
 helper; "Disabled"/"Deleted"/"Radio OFF" shown for refused commands). ASan/UBSan follow
@@ -3894,6 +4206,7 @@ The checks:
 ```sh
 python3 components/hardwareone/test/host/test_oled_list_nav.py --sanitize
 python3 components/hardwareone/test/host/test_sensorlog_ui.py --sanitize
+python3 components/hardwareone/test/host/test_systemlog_config_ui.py --sanitize
 ```
 
 `oled_list_nav` compiles the Automations list navigation (`autoListUp`/`autoListDown` and
@@ -3927,6 +4240,33 @@ Logging list's arrows are drawn at x=128, off the panel, with 4 rows shown; Auto
 drop a nav event or press that follows the previous one within 200 ms; the editor's function-static
 item offset goes negative and shows a spurious down arrow in the next module). ASan/UBSan follow
 `--sanitize`. Physical input timing, the ANO encoder and the real display are not run.
+
+`systemlog_config_ui` runs the whole System Logging > Configure block of `OLED_Mode_Logging.cpp`
+(Tags, Categories as family > flag lists, the read-only Path) over the shipping debug-flag table
+(`System_DebugFlags.h`), the mask parse/format and `systemLogConfiguredFlags` (`System_Debug.cpp`)
+and the scroll primitives and single-line renderer (`OLED_Utils`). The executor stores
+`logcategorytags` / `systemlogflags` the way their set-commands do. It checks every frame against
+the 128x64 panel (beside the scrollbar when one is drawn), every family and flag row against the
+table with labels clipped to the 19 characters beside the cursor, that the saved mask wins over the
+live one, that a flag toggle keeps the other categories and is applied live, and that Back and B
+land on the row they came from. A row sized past the panel, or a toggle that sends only the one
+flag, fails it. The real commands, settings persistence and display are not run.
+
+## Web Logging page: System Logging configuration
+
+```sh
+node components/hardwareone/test/host/logging_system_config_browser_test.js
+```
+
+`logging_system_config_browser` runs the Logging page's own `window.onload`, category grid
+(`populateFlagsPane`), saved-options preload and `applySystemConfig` from `WebPage_Logging.h` in
+Node; only the DOM and HTTP are fake. With `/api/debug/flags` and `/api/logging/status` landing in
+either order, the boxes and the tags checkbox end on the saved `systemLog` options (no options in the
+reply leaves the HTML defaults). Apply sends one `beginwrite` / `systemlogflags 0x...` /
+`logcategorytags` / `savesettings` batch and reports success only when the batch is `ok` with no
+refused command; a refusal, an unsaved batch and a transport error are shown, and an empty selection
+sends nothing. Dropping either preload call fails it. The endpoint itself and the real commands are
+not run.
 
 ## OLED Map actions, input devices and waypoint saves
 
@@ -4073,6 +4413,28 @@ truncated entropy, normalization, unsupported formats, and allocation failure.
 An optional `--private-bad /path/to/observed.jpg` checks a local failure artifact
 without adding private photographs to the repository.
 
+## Speech vocabulary and display formatting
+
+`stt_transcript_tests` compiles the production `stt/stt_transcript.cpp` (the
+portable vocabulary table and display formatter ported from the standalone STT
+handoff): display aliases are exact whole words matched case-insensitively,
+standalone "I" and its contractions, paragraph-start casing, whitespace, the
+256-entry capacity, spoken/display validation, immutable raw input and output
+bounds with sentinels (an alias that does not fit yields an empty string, never
+a cut term).
+
+`stt_vocabulary` (`test_stt_vocabulary.py`) runs the actual
+`System_STTVocabulary.cpp` over guarded-VFS, staged-writer, lock and allocator
+fakes: card-first loading, the internal copy, whole-file validation (an invalid
+file or edit keeps the active list and its generation), staged replacement with
+the previous file kept on every failure (stage refused, commit failed, short
+write, lock busy, not writable, card read-only, allocation failed), the
+generation and hotword snapshot the decoder takes, and bounded display
+formatting while the list is busy. `stt_local_lm` covers the decoder side:
+hotwords come from the vocabulary snapshot, a new generation is re-taken once
+between phrases of the same session, and the retired `custom_words.txt` is
+noted once and never read.
+
 ## Local STT language-model decoder
 
 `stt_lm_tests` compiles the production `stt/stt_lm.cpp` (host SHA-256 and
@@ -4184,6 +4546,26 @@ checks the build after the warm-up, re-shaping, refusals and the internal-RAM
 floor, the hand-over (`dropResident`: the arena is freed and rebuilt by the next
 owner), metadata placement through the PSRAM hook with fallbacks and failures,
 `callBudget` against admission, and that every TL line stays numeric.
+The resident floor is fixed at 128 KiB independently of unrelated task
+allocations/frees during the build; the cold floor remains 150 KiB. Tests include
+the hardware refusal samples (149,747 / 150,371 B), both floor boundaries and
+preserving the PSRAM language model on internal-only refusal. Vendor doubles
+exercise admission policy, not real inference scratch peaks.
+
+`test_stt_conv_scratch.py` (CTest `stt_conv_scratch`) compiles the staged
+production ConvOpArgs and prepared-storage methods with fake tensors/heaps.
+ASan/UBSan covers repeated reuse, 16-byte alignment, per-channel values for
+8/16-bit activations, split-core pointer offsets, borrowed versus owned cleanup,
+transactional growth/failure, independent layers and the unprepared fallback.
+The SDK patch is also verified by applying it to the pinned pristine package.
+These tests do not emulate the ISA kernels or measure device latency.
+
+The speaker-enabled continuous broker suite checks per-session opt-out: no
+optional model start, submission, polling or drain, text still delivered, and
+default speaker behavior restored for the next native session. Native Terminal's
+harness requires its speech-start call to opt out; other consumers keep the
+API default. Firmware ELF checks verify external placement of text/performance/
+level/stage arrays; the performance ring explicitly constructs nonzero sentinels.
 
 `test_stt_dl_metadata.py` compiles the staged ESP-DL override's
 `dl_tool_metadata.cpp`, `dl_model_context.cpp` and TensorBase code (extracted
@@ -4285,6 +4667,601 @@ Completed empty recordings reset native speech UI without closing Terminal or
 sending an empty message; spoken-answer drafts restore the same question with
 a fresh presentation ID. Delayed state ACKs, stale confirmations, retry speech
 and genuine STT failures are covered separately.
+Background-poll transport failures during recording preserve the microphone,
+draft, view and confirmation gate on Wi-Fi and phone paths. Tests cover
+completion-based 3/6/12-second backoff, `more` and queued admission respecting
+that delay, successful recovery, and exhaustion pausing polls without sending
+or discarding the long draft. Mutating-request failures retain their separate
+no-replay behavior.
+New and queued polls are deferred while recording or draining speech; an
+already-running poll may finish. Tests check continued local heartbeats,
+no new HTTP admission in either phase and resumption at confirmation/idle.
 These checks are separate from physical Terminal display, microphone and gesture
 qualification, recorded in `docs/G2_TERMINAL_WORK.md`. Terminal conversations
 use host-issued session/view identities independently of the custom LLM reader.
+
+### Phone HTTP transport and TLS
+
+Run from the repository root, with `IDF_PATH` pointing at the pinned SDK and
+the phone-pipe profile already configured:
+
+```sh
+python3 -B components/hardwareone/test/host/test_llm_http_transport.py --sanitize
+python3 -B components/hardwareone/test/host/test_llm_http_idf_open.py --idf "$IDF_PATH" --sanitize
+python3 -B components/hardwareone/test/host/test_llm_direct_connect.py --idf "$IDF_PATH" --sanitize
+python3 -B components/hardwareone/test/host/test_llm_phone_tls.py --idf "$IDF_PATH" --sdkconfig build-config-p4-phone-pipe/config/sdkconfig.h --sanitize
+```
+
+The direct-connect test compiles production transport code with the SDK's actual
+ESP-TLS connection state machine. Socket/DNS/handshake boundaries are controlled;
+delayed secure/plain TCP, cleared select sets, socket errors, cancellation,
+deadlines and pre-HTTP fallback are exercised. The separate HTTP open test uses
+the pinned SDK's actual header-write path to verify the no-replay boundary.
+
+The TLS test builds the pinned mbedTLS source with generated device configuration
+and `esp_config.h`, substituting native hardware, allocator, entropy, time and
+mutex hooks. It preserves protocol, certificate/date and ticket choices. Nine
+certificate cases run at two fragment sizes over bounded queues. Expired/future
+certificate expectations follow `CONFIG_MBEDTLS_HAVE_TIME_DATE`, including its
+disabled state; the test does not impose a different host security policy.
+Only explicit synthetic CAs are exercised, not certificate-bundle fallback.
+Hardware crypto, complete direct/pipe certificate parity and live BLE remain
+hardware qualification items. CMake, a native C++ compiler and OpenSSL are
+required; temporary keys and native library builds are removed automatically.
+These checks are registered in CTest under the `phone_pipe` label. SDK and
+crypto suites additionally have the `phone_sdk` label. Select the pinned SDK
+and generated device header explicitly:
+
+```sh
+cmake -S components/hardwareone/test/host -B /tmp/hw1-hardwareone-host \
+  -DHW1_SANITIZE=ON \
+  -DHW1_PHONE_TEST_IDF="$IDF_PATH" \
+  -DHW1_PHONE_TEST_SDKCONFIG="$PWD/build-config-p4-phone-pipe/config/sdkconfig.h"
+ctest --test-dir /tmp/hw1-hardwareone-host --output-on-failure -j2 -L phone_pipe
+```
+
+### Phone pipe interoperability fixtures
+
+The Android port imports the JSON files in `tools/ble_secure/fixtures/`. Each
+is generated by production code with fixed test entropy and synthetic content,
+and the test compares it byte for byte. Ordinary runs never rewrite them; pass
+`--write-vectors` to regenerate deliberately, then update the SHA-256 pins in
+`test_phone_fixture_pins.py` (and in the app).
+
+Phone link v2 (inner protocol v2; the outer HW1-PIPE-v1 channel is unchanged):
+
+- `phone_secure_channel` builds `phone_handshake_vectors.cpp`, whose output is
+  `phone_secure_channel_v1_pipe_v2_vectors.json`: its 14 handshake and key
+  fields equal the frozen v1 golden, its first DATA each way is the v2 pipe
+  HELLO (flags 1, console offered) and HELLO_ACK (flags 3).
+- It builds `phone_session_vectors.cpp`, which drives the real
+  `BLE_PhoneGatt.cpp` and pipe core through `phone_gatt_fake_sdk.h` and writes
+  records through `BLE_PhonePipeConsoleCore.h`; the generator stands in only
+  for the console driver's decisions. X1 v2 (`phone_pipe_v2_sessions.json`):
+  sessions at MTU 64, 244, 247 and 517 with a relay stream interleaved 3:1
+  with the console, every record type and OPEN address type, relay CLOSE 0
+  and 1, LINK_STATE both ways, OPEN_ERR 16 with the console untouched, CLOSE 3
+  after the last TEXT, CLOSE 1/2/4/5 cycles, ABORT, the console-only 60 s PING
+  and the phone's PAUSED reset. A scripted phone answers and credits by
+  Android's rules (listed in the file). X2 v2
+  (`phone_pipe_v2_negative.json`): the adapter's outcome for negative and
+  boundary vectors, including the version signal and mismatch strikes
+  (`pipe_hello` stage), and `contract_synthetic` P4-to-phone vectors sealed
+  with `phone_secure_peer.h`'s P4-direction sealer for the phone's own rules.
+  Two `contract` vectors pin a production console CLOSE that crosses the
+  phone's own end of the stream: CLOSE 4 after the phone's LINK_STATE 0
+  crossed the OPEN it refused with 16 (`console_open_while_unwanted`), and
+  CLOSE 2 after its stream RESET 1 (`console_close_2_after_reset_1`). The
+  phone answers CLOSE_ACK: it takes a CLOSE 0..5 on an id it refused or reset
+  and bounds the reason by class only on live ids (`refused_or_reset_ids`).
+  Their frames are in P4 order (`frame_order`) and include the phone's crossed
+  frames, so a runner picks each frame's key by its `dir`.
+  The MTU-247 session reproduces the v2 golden, and the synthetic v1 P4 HELLO
+  equals the v1 golden's first DATA.
+- It builds `phone_console_vectors.cpp`: X4 (`phone_console_v2_records.json`),
+  console record streams with the P4 writer's output and the phone's and P4's
+  verdicts, and `code_vectors` for the pairing code (canonical and display
+  forms, entry normalisation, every single-symbol error, PSKs). The test
+  re-checks the record headers, the GF(32) check symbol and every PSK
+  independently in Python.
+- `phone_fixture_pins` (default suite, no compiler) pins the SHA-256 of every
+  fixture: the frozen v1 files (`phone_pipe_v1_sessions.json`,
+  `phone_pipe_v1_negative.json`, `phone_secure_channel_v1_vectors.json`,
+  `secure_channel_v1_vectors.json`), X3 and the v2 files.
+- `phone_passphrase` (X3, `phone_pipe_v1_passphrase.json`, unchanged by v2)
+  takes the same text through the agreed Android entry rule and through the
+  P4 serial path. That path runs the production String, command split,
+  `phone secret` handler and PBKDF2, built with `-funsigned-char` as on the
+  RISC-V target. Every text Android accepts must store identical bytes on the
+  P4. The generator also asserts that the host C locale classifies exactly the
+  target's ASCII-only sets, and the test asserts with `hw1code::isCode` that no
+  X3 text (as typed, cut at NUL, without CR, or as stored) is a pairing code.
+
+`ble_recycle_phone` runs the real `bleStackRecycleIfWedged` guard: a READY
+phone with the glasses off blocks an accessory-wedge recycle, and a forced
+client retirement requests the phone's reconnect.
+
+Path switching and the OPEN phases are covered as follows:
+
+- `llm_http_transport` runs the real selector. It checks Wi-Fi⇄phone fallback
+  for each OPEN_ERR class and stale-READY outcome, that each path is used at
+  most once, and that there is no fallback after an HTTP write. It also checks
+  the phone hint's scope, probe and clearing, the A-1 budget handed to
+  `phonePipeOpen`, and the F3 records and report text.
+- `phone_runtime` drives the real `phonePipeOpen` loop with a scripted worker:
+  2 s submission, 4 s from the last fragment, caller deadline, link loss,
+  cancellation, no budget and local rejection. It covers the pipe task's two
+  exits through the one `leaveIfReleased` step: the release on a stopped host
+  (`bleStackDown`) and the idle exit on an up host, 2 s after a pass found the
+  pipe stopped and idle (step Idle, GATT adapter idle, app id released, no job,
+  scan, forget, pair window or reset pending) with no phone setup turn held;
+  an app id, a job, an active pipe or a claimed turn keeps the task, and
+  `phoneLinkOpen` publishes `active` before it looks for the task under the
+  same lock. The same suite covers A-4
+  per-connection parameters and the F3 session counters, and the phone's turn
+  on the setup worker: claim-first admission and enrollment, one consumed
+  grant, the Waiting backstop, every exit giving the turn back exactly once
+  (at READY only once no scan flag is left), enrollment timed from the grant,
+  the overrun revoke and escalation races (a timed-out cleanup's own recovery
+  request is never lifted by the worker), the wait while a yielding ring still
+  holds its link, and `wait_ms` from admission to grant. It also covers the
+  app console's link record (`phonePipeLinkRecord`, S4). The record is set at
+  READY with the session's generation and link id. It is cleared by every end:
+  a command-task stop, link loss, `phone stop`, a replaced intent, a stream or
+  callback-queue failure, host reset and quiesce. A new session never sees the
+  last one's record. Every pass checks that a valid record means READY on this
+  session's link, and the copy takes a leaf lock but never the owner mutex. A
+  source check routes every `ready` write through `setReady`/`clearReady`.
+  Console traffic (`phonePipeNoteConsoleActivity`, S8) is stream activity for
+  A-4: it raises the active parameters and returns to idle 30 s after the last
+  note. Traffic noted before READY never counts for the new link. One request is
+  in flight at a time: an unanswered one blocks the next until its event or the
+  45 s backstop, Bluedroid's own status-16 timeout is not an answer, and success
+  is credited to the state that was asked for, only when the interval lands in
+  its range.
+- `ble_reconnect_schedule` runs the real `commitAdmission` through repeated
+  attempts: the phone caps at 30 s (A-3), and glasses and ring are unchanged.
+- `ble_coex_records` runs the shared coexistence records
+  (docs/WIFI_BLE_COEXISTENCE_STUDY.md, lever 1). It covers the Wi-Fi state
+  classifier's priorities (scanning over associated, associated over a connect
+  scope, the hunting heuristic, ESP-NOW parking) and the Wi-Fi span around a
+  record; the callback tally under two racing threads; a scan's end tied to
+  its own start, its duration source and the aborted/start-failed rules; the
+  first-wins disconnect reason; per-peer counters; and the 16 newest-first
+  records with their exact lines, worst-case widths and truncation. It also
+  compiles the records' no-op stubs (`ENABLE_BLE_COEX_RECORDS=0`) against every
+  declared function and checks the flag's wiring.
+- `ble_coex_hooks` pins the hooks in the production source: each G2 and ring
+  scan record opens after the epoch is claimed and before the radio starts,
+  closes after the callbacks quiesce, and has no exit in between; each temple
+  and ring connect is bracketed and carries its purpose; the passive GATTC
+  observer is installed with the G2 GAP handler; the records hold no addresses;
+  a user disconnect holds the pipe while it bumps the intent; and the Wi-Fi
+  mirror registers on Arduino's event list.
+- `wifi_coex_mirror` runs System_WiFi.cpp's mirror (the Arduino event handler,
+  its install and `wifiCoexTag`) over fake events: registering once and
+  retrying a failure, STA/AP/IP transitions, the hunting window, scan and
+  connect counts, a down companion and `radiopower off`.
+- `phone_scan` checks the reconnect scan's profile parser (including the scan
+  length).
+  `phone_runtime` runs the pipe's own use of it (firmware-007):
+  - the real GAP callback with 50 pipe reports and 200 others in one scan;
+  - the stop at the first match, and a stop that crosses the scan's own end;
+  - scan events that are not the pipe's own (ignored);
+  - a refused or failed stop, which no longer leaves a flag pending;
+  - the deadline of the scan length plus 1 s;
+  - found, missed, aborted and start-failed records with the Wi-Fi span,
+    handed to the log after the pass that made them;
+  - one attempt record per scan that found the phone: the adapter's stage,
+    status and reason; each cancel source; precheck and register attempts;
+    READY; Service Changed; the wait for its turn; a stop from a command task; the
+    10 ms blind spot when a cancel and a link failure share a tick;
+  - `phone scan` (six scans and six attempts within the reply limit), the
+    `phone` and `relay` handlers (validate pass, local-admin gates, the split
+    between `phone stats` and `relay status`), and
+    the setup-time breakdown.
+- `ble_peer_registry` registers the builtin phone, then the pipe's real spec, as
+  boot does. The pipe's spec must replace the builtin in place, and boot
+  reconnect and the tick must reach its admission.
+- `phone_gatt` compiles the `sizeof(Gatt) <= 9728` assert (the stub
+  `StaticQueue_t` is padded to the P4's 92 B), and drives the v2 HELLO, the
+  version signal under a v1 or v2 header, the silent-HELLO latch (link loss
+  within 1.5 s, or the 3 s deadline) and both pressure inputs through the real
+  adapter. It covers A-5 expiry attribution and the MTU phase as IDF 5.5.5
+  runs it: one Exchange MTU, queued behind automatic discovery, then a 2 s
+  answer deadline (10 s without discovery), both across the clock wrap. An
+  authenticated frame the pipe refuses keeps the core's cause (a phone RESET's
+  code), not Unauthorized. It also checks the per-phase setup stamps and the
+  attempt's end latch: the first stop's stage (register, open, discovery
+  including a failed or unreported one, mtu, search, subscribe, cccd), the
+  first non-OK status, the phone's own disconnect reason (another link's copy
+  ignored) and one-shot latching.
+- `ble_setup_worker` runs the one BLE setup worker's scheduler
+  (`BLE_SetupWorkerCore.h`, docs/BLE_SETUP_WORKER_PLAN.md) as is, under
+  ASan/UBSan and ThreadSanitizer: the turn order (glasses, ring retirement,
+  ring, phone), the pass-over bound (measured over a random schedule),
+  token-matched picks when a job is withdrawn and resubmitted during `ready()`,
+  exactly-once finish under a two-thread withdraw race, no allocations, wait
+  accounting (G2-audio time paused, never reset, by other waits and by another
+  client's run), the recorded wait, and the phone's turn (grant after the
+  priority raise, revoke at 75 s, the 10 s local stop, escalation and its
+  settling). Its text checks pin the FreeRTOS wrapper (task name, stack bytes,
+  priority, the ops table order and each client's record flag) and that the old
+  connect worker, its BARRIER and the setup gate are gone.
+- `ble_console_attach` runs the app console's attach decisions
+  (`BLE_ConsoleAttachCore.h`) as is: in G2 client mode the command service
+  rides the phone pipe's link, and only the authenticated, READY pipe's link
+  becomes a console slot, found by the pipe's live connection id and keyed by
+  its generation. It runs every input combination (mode, setting, secret, pipe
+  record, slot, closed generation) for reconcile and for a link coming up or
+  down: server mode keeps its path, client mode never admits on a connect, only
+  a slot on that very id ends, a fixpoint after one pass, and a connection id
+  reused by another link never inherits a slot. Named sequences cover the phone
+  link up before and after the console is enabled, temple and ring traffic, a
+  generation or id change, detach and re-attach, a removed secret, a failed
+  pipe, a missed disconnect and the host torn down. `join` (the app's first
+  admitted write) marks only the slot on its id, once; reconcile keeps a joined
+  slot and makes every new one unjoined; `bledisconnect` ends only a joined
+  slot on its id and the next reconcile makes a fresh one. A random walk
+  over the four C6 links (the pipe publishing while its link is up, or just
+  after a drop that races READY before the id is reused, and clearing late)
+  checks after every step that the slot sits on the very link its generation
+  ran on (or its dead, unused id), and after every reconcile that a live record
+  has its slot. The text check keeps the core free of BLE, OS and Arduino
+  includes.
+- `ble_console_phone_link` runs the shipped wiring of that core in
+  `Bluetooth.cpp` (server callbacks, the request characteristic's write,
+  the console plan helpers, the directed senders, the console view,
+  `bledisconnect`, `bleadv`, `bleconsole`, the host-teardown hooks and
+  `bleUpdateStreams`) with `BLE_LinkStatus.cpp`'s `bleLinkStatus()`, over
+  recording doubles of the pipe's link record, the Secure Channel, the central
+  TX gate, transport sessions and the Arduino GATT objects. A table over every
+  link id shows the temples and the ring never become a slot, whatever events
+  and writes they see; reused ids never inherit one (a later link on the id, a
+  missed disconnect, READY racing the drop, a generation change). It covers the
+  main loop reconciling before its no-client return, the first write's BTC
+  fast path (setting, blesecret and admission respected; a session that could
+  not open is retried), every write reconciling first (a slot whose pipe left
+  READY, or whose setting or secret went, takes no command before the next
+  pass), a pipe READY with no app being no connected app (no count, state or
+  event, none when it ends) until the app's first write joins it, Secure
+  Channel only (plaintext refused with the fixed notice, never output), each
+  console frame as one central TX gate try before the lifecycle lock, posted
+  with that lock released and counted in flight (BTC_TASK takes the lock for
+  the phone's writes, and the post waits forever on a full BTC queue), noted as
+  pipe activity, `bledisconnect` ending a joined session without a GATT close
+  (a session no app joined is no client; its hint reply falls back when the
+  debug buffer was never allocated), `bleadv` refusing,
+  `bleconsole on|off|status` with its persisted setting row, the status read
+  answering the slot's link only, the teardown ending the slot, resetting the
+  attach state and waiting for a post in flight, server mode unchanged, and the
+  console words on the status surfaces. A random walk over the four C6 links checks after every step that
+  only the pipe's link holds a slot or gets a write dispatched, with no
+  address, advertising call or GATT close. Source checks keep the BTC-side
+  helpers free of logging, waits, advertising, MTU and GATT open/close calls
+  and pin the call order in the callbacks, the raw sender, the main loop, the
+  registration and the teardown.
+- `ble_pipe_console_row` runs the phone link's console row (phone link v2: the
+  app console as stream slot 2 of the phone pipe) from `Bluetooth.cpp`: the
+  session table and epoch helpers, the row's lifecycle (gBLEState holders,
+  bind, end, the leaf identity snapshot, the main loop's reconcile), the auth
+  rule, revocation, the disconnect owner functions, the command tail, the
+  record ingress (`blePipeConsoleInbound`), the output router (TEXT, MIRROR,
+  CARD, BLOB) and design A's slot helpers, with `System_OTA.cpp`'s
+  `currentSecureBleConnection`, over recording doubles of the console driver
+  (`ble_pipe_console_host.py`, shared with the suites below), 12 transport
+  sessions, the Secure Channel and the executor. The row binds signed out on its
+  own id and the snapshot follows every login, logout, revoke and end; it must
+  log in even with `blerequireauth` off (never AuthBypass); design A's slot and
+  the row on the same link, signed in as different users, never authorise each
+  other (stamp, whoami, the OTA superadmin check, confidentiality,
+  revocation, `bledisconnect`); revocation ends the row and asks for CLOSE 5,
+  `bledisconnect` for CLOSE 2; COMMAND records run as encrypted lines and
+  BINARY records reach OTA after the activity stamp, fenced on their epoch;
+  TEXT is reliable only from cmd_exec, MIRROR goes in records of at most 512
+  bytes, CARD is the bare JSON object and BLOB needs a confidential session;
+  start/stop cycles return every transport session; and no call into the pipe
+  runs under the lifecycle lock. `ble_server_stop` runs the holders against the
+  real registration and teardown hooks (the client host joins a pipe-held state;
+  a host teardown ends the row before the stop and the pipe's hold keeps the
+  state), `ble_sc_policy` the row's whoami and gate with `blerequireauth` off,
+  and `fileread_psram` the BLOB path's confidential check and epoch fence.
+- `ble_session_idle` runs the BLE idle logout (`bleSessionTick`) from
+  `Bluetooth.cpp` with login (`bleBindSession`), the activity stamp
+  (`bleMarkActivity`), the phone-link slot maker and `System_User.cpp`'s idle
+  policy. A contender double stamps a command whenever the tick takes the
+  lifecycle lock, as cmd_exec_task can while the main loop waits for it. A
+  phone-link session with commands at +60 s, +120 s and one landing during
+  the tick at +180 s stays signed in. After 15 minutes idle it expires once,
+  with the notice sent on the new session. In server mode, one session's paced
+  expiry notice does not expire another whose command lands during the send.
+  An OTA upload in flight outranks the window, and 0 disables it. The phone
+  link's console row sends its notice as one TryNow record from the main loop;
+  a full stream keeps it pending, offered each tick while that session lasts,
+  and a new session drops it. Source checks
+  pin the command and OTA-frame stamps and keep every `lastActivityMs` writer
+  under the lifecycle lock.
+- `ble_command_output` runs a Bluetooth command's own `broadcastOutput` lines
+  to the session that sent it: `broadcastOutputCore` from `System_Debug.cpp`,
+  the help menu (`renderHelpMain`) from `System_CLI.cpp`, and the command tail,
+  reply callback, output batch, senders and mirror collector from
+  `Bluetooth.cpp`. In server mode and on the phone link, `help` and `help all`
+  answer the session with the menu in whole-line batches of at most 512 bytes,
+  then "OK"; the two modes send the same messages, and the phone link sends
+  them as reliable gated frames. Another session gets nothing, a JSON result
+  stays one byte-exact message, an over-long line keeps its start with a
+  `[CUT]` mark, a mirror recipient with `outble` on is not sent the lines
+  twice, a session that ends during the command gets nothing more, and lines
+  from outside a Bluetooth command and the send traces never reach a session.
+  A line printed while the command holds the lifecycle lock (the production
+  `BLE_DEBUGF` in `bleIsAuthed`) joins the batch when it fits and never sends
+  it under the lock: the Secure Channel sender and the phone link's post run
+  with the lock released. On the phone link's console row `help` and `help
+  all` arrive as reliable TEXT chains with the same messages, and a line
+  printed while the task holds the pipe owner or console chain mutex never
+  flushes the batch. On the console row a batch whose send fails drops the
+  command's later batches, and the result is still a reliable write (the
+  driver's stall latch makes it one try). A server-mode session, plaintext or
+  Secure Channel, and design A's slot whose GATT post is refused for one
+  batch's six tries lose that batch only: the later batches and "OK" still
+  arrive. A source without the batch still compiles and fails
+  the delivery cases.
+- `ble_role_switch_reconnect` switches to server mode with `openble` and back
+  to the glasses with `openg2 saved`. It runs the reconnect scheduler and tick
+  from `BLE_Peers.cpp`, `openble` from `Bluetooth.cpp`, the ring's disconnect,
+  logical down, admission and `ring disconnect` from `G2_Ring.cpp`, the
+  glasses' disconnect intent, admission, `openg2` and `g2ConnectSaved` from
+  `G2_Glasses.cpp`, and the phone pipe's peer ops. The role owners and the
+  pipe's worker are fakes in the production order, which text checks pin. A
+  role switch is not a user disconnect: the ring and the phone pipe come back
+  after `openg2 saved`, and ten minutes of server mode start nothing (no client
+  host either). A ring the user disconnected, before `openble` or during server
+  mode, stays down. With auto-reconnect off, a ring or phone pipe that was up
+  comes back once and a ring that was down does not. A boot in server mode
+  followed by `openg2 saved` arms the ring and the phone, and a refused
+  `openble` lets the glasses and ring come back on the running client host.
+  `--component <dir>` reads production from another copy.
+- `ring_phone_yield` runs the real `BLE_SetupWorker.cpp` and the glasses and
+  ring clients from `G2_Glasses.cpp` on a virtual clock, with the ring's
+  submitters, admission, disconnect and yield from `G2_Ring.cpp` and the real
+  coordinator. It covers the refusals while the ring gives way to the enabled
+  phone pipe below four links; the turn order, with a phone turn never
+  cancelled by a glasses or ring submit; cancels, faults, the recovery block
+  and the yield ending a queued job at the next 100 ms recheck with one finish
+  and the family flag released; role-transition waits; the one-shot reseek put
+  back for a yield drop; repair outcomes; the ring's 90 s G2-audio wait; the
+  recorded wait; withdraws from `g2Disconnect` and `g2RingDisconnect`;
+  preemption of a ring scan; ring retirement (queued only with a ring client
+  and the G2 client); the in-flight watchdog restamped at the job's turn; and
+  the polled `g2RingScan` with a fake BLEScan (other-queued cut, stop requests
+  kept from the job's start and acted on only by the scanning job, lost end
+  event, outcomes). Text checks cover the teardown order in `deinitG2Client`
+  and that every host teardown after a glasses session drops the ring's client
+  first. `--component <dir>` reads production from another copy.
+- `phone_pipe` checks the routing core (`Attempt`, `openRefusal`, `Health`),
+  the acceptance time of the last OPEN fragment and peer-ended streams, and the
+  inner protocol v2 core: slot classes (relays 0..1, console 2 with its exact
+  OPEN), HELLO/HELLO_ACK flags, LINK_STATE (on change, one per second,
+  overwritten while unsent, strict on receive), errors 16..18, CLOSE reasons
+  by class, `closeAfterDrain`, console credit consumed+4096 with `rxPeek` and
+  `consume`, whole-record pushes with the ABORT reserve, the 12-message control
+  queue (worst legal case exactly 12, the 13th is Resources, F-3 CREDIT purge),
+  R R R C scheduling counted at accept, a chat upload under 5 s beside a
+  saturated console (with and without relay pressure), a minute of display
+  pressure, the PING split, wiping of rings, `packet_` and `assembly_`, and the
+  version signal and silent-HELLO latch. It prints the host `sizeof` values.
+- `phone_console_codec` runs the phone link v2 console records
+  (`BLE_PhonePipeConsoleCore.h`) as is. It pins the header bytes (type, flags
+  with bit 0 MORE, len little-endian) and runs the P4 ingress validator over
+  every type, flag pattern and boundary length: COMMAND 1..511 and BINARY
+  13..489 starting with the OtaBleWire magic are delivered; the reserved
+  RESUME and unknown types are skipped (0..1024, no MORE); a P4-to-phone type,
+  MORE outside TEXT/BLOB, flag bits 1-7, a bad length or magic is malformed.
+  Long streams split anywhere (one byte at a time included) read back exactly
+  the records sent, and a malformed record shows exactly when its offending
+  byte arrives. Scans get only the bytes they may read, so ASan proves the
+  peek bound. The P4 egress chain machine is run at the cap (a 4608 B chain
+  passes; 4609 B, or MORE on the record reaching 4608 B, does not), with no
+  interleaving inside a chain and ABORT only while one is open. The phone-side
+  receiver adds INFO first and once and ignores a stray ABORT, and a random walk
+  shows the writer and the receiver agree record by record. The INFO payload is
+  pinned byte for byte with its escaping and 64-byte field cut; the driver
+  parses every printed INFO as JSON and checks the key order. Text checks keep
+  the header pure and tie BINARY to `System_OTA.cpp`'s magic and frame size.
+- `phone_pair_code` runs the `phone pair new` code (`BLE_PhonePairCode.h`) as
+  is: the GF(2^5) field (x^5+x^2+1 primitive), every single-symbol
+  substitution and every swap of two different symbols of 300 generated codes
+  rejected (exhaustive over positions and values), entry normalisation (outer
+  whitespace, case, `-` and space anywhere, I/L read as 1 and O as 0, U and any
+  other byte refused, exactly 16 symbols), a failed parse leaving no bytes
+  behind, generation from three random words and the display form. The driver
+  recomputes the printed vectors with its own field arithmetic.
+- `phone_console` runs the console driver (`BLE_PhonePipeConsole.cpp`) as
+  shipped, with the real pipe core, record layer and code headers, against
+  fakes of the headers it includes; the fakes carry the real declarations
+  extracted from `Bluetooth.h`, `BLE_PhonePipe.h` and the rest, so a changed
+  signature fails to compile. The harness co-simulates the pipe task, cmd_exec,
+  the main loop, the debug task, httpd and a phone on one clock. It covers
+  CONSOLE_OFFERED (bleconsole, the generated flag and a valid code), OPEN and
+  INFO first (before any writer), the reopen table (CLOSE 1 and stream RESET
+  back off 2, 5, 10 s and then wait for a flag change; 2 and 5 at once; 3 when
+  offered; 4, OPEN_ERR 16 and the phone's CLOSE on a CONSOLE_WANTED rise,
+  and while wanted still reads 1 also quiet retries after 2, 5, 10 s, a step
+  spent only when its timer reopens, so a coalesced 1->0->1 dip never wedges
+  the console; OPEN_ERR 17 never again; OPEN_ERR 9 three backoffs then never; link loss
+  until the next READY; a command resets the ladder), ingress records to
+  cmd_exec with credit withheld and nothing dropped or counted while the row
+  is unbound, the pool is full or cmd_exec has under two places, malformed and
+  late partial records (CLOSE 1; a record the phone lacks credit for is never
+  late), unknown types skipped, the close mailbox (CLOSE after queued output),
+  a lost row or refused bind, the 4 B ABORT reserve, Reliable on cmd_exec only,
+  TryNow drops counted, the 10 s eligible stall and 15 s ceiling with display
+  pressure, ABORT only with an open chain (epoch change, owed ABORT, none once
+  draining), no CARD or MIRROR inside a chain with two writers, and pool slots
+  wiped on release, close and link loss. Lock doubles enforce the lock order on
+  every acquisition. A stored code without
+  `Settings::phonePipeSecretGenerated` (typed with `phone secret`) is never
+  offered, and text checks pin the PSRAM pool, the source entry and no logging
+  on chain paths.
+- `phone_pair_sink` proves `phone pair new`'s code reaches exactly one sink. The
+  command and its pairing window run as shipped on the `phone_runtime`
+  co-simulation (built with `HW1_PAIR_SINK=1`), with the real one-shot serial
+  sink from `HardwareOne.cpp` and the code-screen sink from `OLED_Utils.cpp`;
+  every output path (Serial, `broadcastOutput`, the debug queue, the OLED
+  console, events, every log level) is a recording stand-in. On serial the code
+  is one `Serial.write` of the whole line after the output drain and appears
+  nowhere else, the window's attempts included; the sink refuses a non-serial
+  origin, serial output off, validate-only, a session that is not live or ends
+  during the drain; a short write ends the window. On the OLED there is no
+  Serial call, one code-screen request, and the code only in the window the
+  screen reads. `phone_runtime` runs the command's refusals (all before any
+  change), the window's 2 s re-arm with the setup turn free in between, the auth
+  cooldown, and its ends (READY, 3 min, B, phone stop/forget/pair new, the
+  session); `phone_secret` and `phone_passphrase` the code entry and the
+  device-made mark; `oled_bluetooth_link_watch` the menu entry and code screen.
+
+The label includes the existing native Terminal codec/adapter and HTTP worker
+regressions, including offline confirmation, the 15-second Busy limit, slot
+retirement and completion-based polling. It also includes pipe protocol,
+configuration, coordinator, runtime, forget, enrollment, secret, SDK lifetime,
+recovery, ring-yield and R1 protocol suites, plus the Arduino manifest/checker.
+No firmware build is run by CTest. The suites compile their own small host
+harnesses and remove temporary fixtures when they finish.
+
+With no SDK options, CMake reports which SDK/crypto tests are omitted and still
+registers the dependency-free group. `HW1_PHONE_TEST_IDF` adds native GATT,
+secure-channel, HTTP-open and direct-connect tests. `HW1_PHONE_TEST_SDKCONFIG`
+also requires that SDK and adds actual-config TLS parity. Invalid explicit paths
+fail configuration. Crypto suites require the vendored libsodium source under
+`managed_components`, Make and a native compiler; each owns a disposable build.
+The removed SMP `phone_identity` suite is not registered. Native QuickNote was
+already registered as `g2_native_notes`; it remains separate from this label.
+
+### Central link capacity and stuck-phone recovery
+
+```sh
+python3 -B components/hardwareone/test/host/test_ble_central_coordinator.py --sanitize
+python3 -B components/hardwareone/test/host/test_ble_central_stack.py --sanitize
+python3 -B components/hardwareone/test/host/test_phone_runtime.py --sanitize
+python3 -B components/hardwareone/test/host/test_phone_gatt.py --sanitize
+python3 -B components/hardwareone/test/host/test_phone_recovery.py --sanitize
+python3 -B components/hardwareone/test/host/test_ring_phone_yield.py --sanitize
+```
+
+The coordinator suite runs the production reservation owner with concurrent
+callers. It checks two/three/four-slot limits, pending reservations, duplicate
+owners, stale token release, allocation rollback, arm reservation, ring yielding
+and recovery admission blocking. Who sets up next is the setup worker's call
+(`ble_setup_worker`, `ring_phone_yield`, `phone_runtime`). Source-order checks additionally
+keep accessory capacity refusal before client creation and connect dispatch;
+the phone runtime exercises refusal before scanning or GATT registration.
+
+The runtime test keeps a stuck phone quarantined past the four-second cleanup
+deadline, verifies that the setup turn is given back and new admissions close, and
+retains callback storage/capacity until terminal host-stop acknowledgement. The
+native GATT suite separately exercises lost CLOSE/REG completions and late events.
+The recovery suite executes the production role-owner transaction with controlled
+HAL/worker boundaries: standalone and glasses roles, quiescence refusal, failed
+teardown/acknowledgement/restart, changed user intent, logging before restart,
+one attempt per incident and ten-minute restart spacing. Passing host checks
+does not establish controller/radio recovery on hardware. Registration remains
+part of the staged test-registration work.
+
+The ring policy regression runs the production yielding function with the shared
+coordinator for pipe-compiled and pipe-absent cases. Three-slot capacity admits
+both arms plus ring while the pipe is off. Enabling the pipe closes ring admission
+and requests a non-user disconnect; an active writer or unretired native route
+keeps its slot reserved until safe retirement. Disabling the pipe restores ring
+admission. Four-slot capacity keeps the ring when the pipe starts. Runtime-owner
+checks cover publication on start and clearing on normal stop/terminal teardown.
+
+### Runtime memory diagnostics
+
+`test_task_heap_measure.py` extracts the production walker and tests exact and
+P4 coprocessor-shifted stack bases, nested DMA-pool attribution in either
+traversal order (including a freed child), exclusive block ends, freed blocks and
+address arithmetic under ASan/UBSan. `tools/p4/test_ram_monitor.py` tests the
+live graph's numeric whitelist, malformed samples and private-log redaction.
+CTest names: `task_heap_measure`, `p4_ram_monitor`.
+The phone runtime suite additionally exercises the production session storage
+construction with external BSS enabled and disabled. For phone link v2 it runs
+the real v2 Session behind the fake adapter, with a fake phone that answers
+HELLO, PING and LINK_STATE. It covers one parked stream id per slot (cleared at
+GATT begin and host reset), end reasons 0..18 with unknown codes in 0, the
+CONSOLE_OFFERED flag set before the poll (the HELLO carries it, a change sends
+LINK_STATE), the console driver's pass after the step machine under the owner
+mutex and its row work after it (a stopped pipe included), the display-only
+console yield, RELAY_ON from HELLO_ACK and LINK_STATE (cleared with READY; no
+OPEN without it), an idle console stream keeping idle parameters, the console
+writer (`phonePipeConsolePush`), the status snapshot, version-mismatch strikes
+(the version RESET, a link loss within 1.5 s, the 3 s HELLO deadline), the hold
+after three (ROLE_BLOCKED, the ring's yield lifted) and its lift by `phone
+start|connect|pair` or READY, the gBLEState hold given back on stop and host
+reset, and 10 min of READY with RELAY_ON 0 (one link PING a minute, idle
+parameters). Native Terminal tests
+cover speech failure during capture and after release, retained view, discarded
+partial draft and late confirmation without submission.
+
+### Speech internal-memory admission
+
+`python3 components/hardwareone/test/host/test_stt_internal_memory.py --sanitize`
+compiles the production bounded allocation ledger and task-filtered heap hooks.
+It checks overlapping allocation lifetimes, in-place realloc, unrelated tasks,
+PSRAM/ISR exclusion, incomplete ledgers, cancellation, nested scopes and disabled
+hooks. `test_quartznet_cache.py --sanitize` covers admission with ample total
+SRAM but an insufficient contiguous internal block, plus recovery.
+
+The P4 speech profiles opt into `CONFIG_HEAP_USE_HOOKS`. This is not heap task
+tracking: it adds no owner header to every allocation and does not change the
+Task Manager's heap walker layout. Only the active transcribe task is measured;
+other tasks/ISRs and PSRAM allocations do not enter its ledger. Bounds retain the
+conservative cold/resident floors until hardware qualification. The ledger is
+bounded and never allocates in a hook; overflow invalidates learning. ESP-IDF's
+moved-realloc hook does not identify the old block, so retained old entries can
+only overestimate lifetime, not justify reducing a reserve.
+
+`phone_gatt` includes accepted `ESP_GATT_CONGESTED` completions during handshake
+and encrypted fragmented HELLO, no replay, congestion pacing, and transport
+failure without authentication cooldown. `llm_http_transport` checks readable
+failure categories and credential-free memory diagnostics, routes relay users
+on READY with the phone's RELAY_ON (path choice, fallback, admission), maps
+refusal 16 to Network and 17 to Protocol and counts refusals per code 0..18;
+`llm_http_runtime` checks the Terminal path with the relay on and off; `llm_direct_connect`
+checks that socket resource exhaustion is not misclassified as network failure
+and cannot trigger fallback.
+
+## Android handshake fixture and timing
+
+The registered `phone_secure_channel` suite compares the production responder,
+key schedule and AEAD with
+`tools/ble_secure/fixtures/phone_secure_channel_v1_pipe_v2_vectors.json` (whose
+handshake fields equal the frozen v1 golden). The generator
+replaces only entropy in its host translation unit; no test hooks enter firmware.
+It checks the first encrypted pipe HELLO/HELLO_ACK and accepts secure-counter
+gaps while rejecting regression. Use `--write-vectors` explicitly to regenerate.
+
+`phone_pipe`, `phone_gatt` and `ble_central_coordinator` cover the shared 2 s
+per-stream relay pressure budget, controls bypassing deferred CREDIT, relay
+round-robin DATA, clock wraparound and the non-bypassable controller mutex.
+`llm_http_transport` covers the 4.5 s deadline from OPEN_OK, including worker
+wakeup, TLS setup and a handshake call completing at/after expiry. The real
+`llm_phone_tls` certificate suite uses the production timing constants.
+
+## OLED and P4 layout capacity
+
+`oled_layout` executes production list rendering/navigation and map page packing
+at 64- and 128-pixel logical heights. `oled_transcription` executes its shipping
+mode at both heights, including additional text rows and scroll boundaries.
+The P4 pixel/lifecycle suites cover the full 240×240 output, sixteen canvas
+pages, inversion, DMA stripes and retained-canvas power/retry behavior.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host --output-on-failure \
+  -R '^(oled_layout|oled_transcription|p4eye_display_pixels|p4eye_display_lifecycle|display_lifecycle)$'
+```
+
+`test_oled_layout.py --sanitize --preview-dir /tmp/hw1-display-preview` emits
+layout illustrations using a graphics test double and the shipping bitmap font.
+Its optional `--baseline <component-directory>` compares OLED launcher and
+simple-list framebuffer bytes against saved sources. These are host checks,
+not physical display qualification.

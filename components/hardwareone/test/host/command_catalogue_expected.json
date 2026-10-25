@@ -8,6 +8,8 @@
     "c6|companionCommands|0|radio",
     "mqtt|mqttCommands|0|-",
     "bluetooth|bluetoothCommands|0|-",
+    "phone|phoneCommands|0|-",
+    "relay|relayCommands|0|-",
     "filesystem|filesystemCommands|0|-",
     "sd|sdCommands|0|sd",
     "oled|oledCommands|0|-",
@@ -51,7 +53,7 @@
     "ota|otaCommands|2|-",
     "setpattern|setPatternCommands|0|-",
     "even_g2|g2Commands|0|-",
-    "even_r1|g2RingCommands|0|-",
+    "ring|g2RingCommands|0|-",
     "llm|llmCommands|0|-",
     "settingsedit|settingEditorCommands|0|-"
   ],
@@ -68,7 +70,7 @@
         "ENABLE_BLUETOOTH",
         "HW1_RADIO_COMPANION"
       ],
-      "modules": "cli system wifi espnow c6 mqtt bluetooth filesystem oled debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
+      "modules": "cli system wifi espnow c6 mqtt bluetooth phone relay filesystem oled debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
     },
     "gamepad_peripherals": {
       "enabled": [
@@ -127,6 +129,7 @@
         "ENABLE_APDS_SENSOR",
         "ENABLE_AUTOMATION",
         "ENABLE_BATTERY_MONITOR",
+        "ENABLE_BLE_PHONE_PIPE",
         "ENABLE_BLUETOOTH",
         "ENABLE_CAMERA_SENSOR",
         "ENABLE_DICTATION",
@@ -159,7 +162,7 @@
         "ENABLE_WIFI",
         "HW1_RADIO_COMPANION"
       ],
-      "modules": "cli system wifi espnow c6 mqtt bluetooth filesystem sd oled neopixel led matrix servo thermal tof imu input gamepad apds gps fmradio rtc presence camera microphone edgeimpulse transcription note stt espsr i2c automation battery debug settings sensorlog health users features image map mapsettings power liveaudio cm5 ota setpattern even_g2 even_r1 llm settingsedit"
+      "modules": "cli system wifi espnow c6 mqtt bluetooth phone relay filesystem sd oled neopixel led matrix servo thermal tof imu input gamepad apds gps fmradio rtc presence camera microphone edgeimpulse transcription note stt espsr i2c automation battery debug settings sensorlog health users features image map mapsettings power liveaudio cm5 ota setpattern even_g2 ring llm settingsedit"
     }
   }
 }

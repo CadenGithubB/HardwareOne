@@ -7,7 +7,7 @@ depends on, and this directory is its home in the main tree:
 
 | Path | What |
 | --- | --- |
-| [`../../../components/esp_now_hosted/include/esp_now_hosted_companion.h`](../../../components/esp_now_hosted/include/esp_now_hosted_companion.h) | **The pins.** ESP-Hosted tag/SHA and version, esp-serial-flasher tag/SHA, and the BLE connection limit (`HW1_C6_BLE_MAX_CONNECTIONS`, 4). The P4 firmware checks the running C6's Hosted version against these at boot; `prepare.py` fetches exactly these and configures the C6 controller for that many connections. The bridge reports the C6's limit in `GET_INFO`; a C6 that does not report one (flashed before the report, or stock Hosted) counts as 3. `radioHalCompanionBleLinks()` gives the P4's link admission the smaller of the pin and the reported limit. |
+| [`../../../components/esp_now_hosted/include/esp_now_hosted_companion.h`](../../../components/esp_now_hosted/include/esp_now_hosted_companion.h) | **The pins.** ESP-Hosted tag/SHA and version, esp-serial-flasher tag/SHA, and the BLE connection limit (`HW1_C6_BLE_MAX_CONNECTIONS`, 4). The P4 firmware checks the running C6's Hosted version against these at boot; `prepare.py` fetches exactly these and configures the C6 controller for that many connections. The bridge reports the C6's limit in `GET_INFO`; a C6 that does not report one (flashed before the report, or stock Hosted) counts as 3. `radioHalCompanionBleLinks()` reports the smaller of the pin and the reported limit; reporting alone does not enforce admission. `BLE_CentralCoordinator` now owns reservations before client creation, including pending connections, and the ring yields below four slots only while the phone pipe runtime is enabled. With the pipe absent or stopped, both glasses arms plus the ring may use a three-link C6. |
 | `bridge/esp_now_hosted_slave.c`, `.h` | The C6 side of the HardwareOne ESP-NOW bridge (stock Hosted does not forward ESP-NOW). The host side and the shared wire header are the production component `components/esp_now_hosted`. |
 | [`bridge/README.md`](bridge/README.md) | Protocol, threading, timeouts, provenance and license of the bridge. |
 | `prepare.py` | Fetches the pinned ESP-Hosted MCU slave and esp-serial-flasher into the ignored `private/`, applies the recorded flasher patch, generates `private/c6-slave/` (pinned slave + bridge). `--check` verifies without writing. |
@@ -47,6 +47,12 @@ stops answering; `c6status` shows all of it, and the C6's own console is
 mirrored into the P4 log as `C6>` lines (`c6console`), which is how a crash
 in the companion shows up without the programmer. The P4 side is described in
 [docs/P4X_EYE_PERIPHERALS.md](../../../docs/P4X_EYE_PERIPHERALS.md#radio-companion-esp32-c6).
+The bridge lowers the Hosted slave's `slave_rpc` log tag to warnings at
+startup. That tag logs three info lines for every host RPC, and the P4 makes
+routine Wi-Fi queries, so those lines buried the rest of the mirror. Its
+warnings and errors still show. Its rare info lines (OTA progress, heartbeat
+timer, ESPInit, forwarded Wi-Fi events) are hidden too; `c6update` reports OTA
+progress on the P4.
 
 The bridge answers two requests for this beyond ESP-NOW itself: `GET_INFO`
 (above) and `CONFIRM_IMAGE`, which marks the running image valid so the
@@ -94,17 +100,23 @@ credentials. Never commit or publish them.**
      0 0x1000000 tools/p4/companion/private/backups/p4-before-$(date +%Y%m%d).bin
    ```
 
-2. **Flash the programmer service** onto the P4 (it replaces the factory app
-   at `0x10000`; bootloader and partition table are untouched):
+2. **Flash the programmer service** onto the P4. On a board that already runs
+   HardwareOne, write **only the application** at `0x10000`, into the existing
+   factory slot. Keep the board's bootloader and partition table: the
+   programmer's own table puts NVS at `0x9000`-`0xF000`, over HardwareOne's NVS
+   and NVS-key partitions, and has no LittleFS. The programmer touches no
+   partition, so settings and files survive. (Done this way on 2026-10-18.)
 
    ```sh
    "$ESPTOOL_PY" -m esptool --chip esp32p4 --port "$P4_PORT" --no-stub write-flash \
      --flash-mode dio --flash-size 16MB --flash-freq 80m \
-     0x2000 tools/p4/companion/private/build-programmer/bootloader/bootloader.bin \
-     0x8000 tools/p4/companion/private/build-programmer/partition_table/partition-table.bin \
      0x10000 tools/p4/companion/private/build-programmer/hw1_c6_programmer.bin
    "$ESPTOOL_PY" tools/p4/companion/c6_tool.py --port "$P4_PORT" info
    ```
+
+   Only a board without the HardwareOne layout also takes the programmer's
+   bootloader (`0x2000`) and partition table (`0x8000`); step 5 must then
+   restore HardwareOne's own bootloader and table as well.
 
    `info` puts the C6 into its loader and reports its real flash size (4 MiB
    on the EYE); the C6's radio firmware is interrupted until `run`.
@@ -141,10 +153,14 @@ credentials. Never commit or publish them.**
    `FLASH_READBACK_VERIFIED`. `run` resets only the C6; `monitor` shows about
    ten seconds of its UART log.
 
-5. **Put the HardwareOne image back on the P4** (`tools/build_board.sh p4x_eye
+5. **Put the HardwareOne image back on the P4.** After an application-only
+   step 2, write the HardwareOne application back at `0x10000` alone and read
+   it back. Otherwise flash the full image (`tools/build_board.sh p4x_eye
    flash`, or the deployment release in `deployments/handheld`). Its boot log
    should now report the companion version as matching and the bridge as
-   present.
+   present, without the "C6 allows N BLE links" warning (the P4 prints it
+   whenever the C6 reports fewer links than `HW1_C6_BLE_MAX_CONNECTIONS`, or
+   none).
 
 To restore the original C6, repeat step 2, then
 `c6_tool.py --port "$P4_PORT" write --offset 0 --file .../c6-original-4mb.bin`

@@ -259,7 +259,7 @@ bool validateSoftware(const uint8_t* data, size_t length, Info& info,
     data = normalized.bytes;
     length = normalizedLength;
   }
-  if (!detail::validateSoftwareEntropy(data, length, info, error)) return false;
+  if (!detail::validateSoftwareEntropy(data, length, info, error, options.softwareAllocator)) return false;
   if (error) *error = nullptr;
   return true;
 }

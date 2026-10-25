@@ -185,15 +185,15 @@ HijackState nextState(HijackState s, HijackEvent e, bool& legal) {
 // a mutex, so a notify-task post can never block on a slower task that
 // happens to be running through the transition table.
 //
-// Tag strings are copied into the queue entry so callers may pass a
-// transient pointer (in practice all current sites pass string literals;
-// the copy is cheap insurance for future callers).
+// The tag is a static-lifetime string (every caller passes a literal; the
+// header says so): the entry keeps the pointer, not a 24-byte copy, which
+// keeps the 32-entry queue 640 B smaller in internal DRAM.
 
 struct FsmEvent {
   HijackEvent        ev;
   HijackEventPayload payload;
   bool               hasPayload;
-  char               tag[24];
+  const char*        tag;
 };
 
 constexpr UBaseType_t kFsmQueueDepth = 32;
@@ -202,25 +202,18 @@ QueueHandle_t gFsmQueue = nullptr;
 TaskHandle_t  gFsmTaskHandle = nullptr;
 volatile uint32_t gFsmDropped = 0;
 
-void copyTag(char* dst, size_t dstSize, const char* src) {
-  if (dstSize == 0) return;
-  // The tag's only consumers are DEBUG_G2F lines in applyEvent — skip the
-  // copy under the same gate (applyEvent prints "?" for an empty tag).
-  if (!(getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2))) {
-    dst[0] = '\0';
-    return;
-  }
-  if (!src) { dst[0] = '\0'; return; }
-  size_t n = 0;
-  while (src[n] && n + 1 < dstSize) { dst[n] = src[n]; ++n; }
-  dst[n] = '\0';
+// The tag's only consumers are DEBUG_G2F lines in applyEvent — keep it only
+// under the same gate (applyEvent prints "?" for a missing tag).
+const char* tagFor(const char* src) {
+  if (!(getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2))) return nullptr;
+  return src;
 }
 
 void applyEvent(const FsmEvent& e) {
   const HijackState before = gFsmState;
   bool legal = true;
   const HijackState after = nextState(before, e.ev, legal);
-  const char* tag = e.tag[0] ? e.tag : "?";
+  const char* tag = e.tag ? e.tag : "?";
 
   if (after != before) {
     gFsmState = after;
@@ -350,7 +343,7 @@ void hijackFsmDispatch(HijackEvent ev, const char* tag) {
   FsmEvent e = {};
   e.ev = ev;
   e.hasPayload = false;
-  copyTag(e.tag, sizeof(e.tag), tag);
+  e.tag = tagFor(tag);
   postEvent(e);
 }
 
@@ -361,7 +354,7 @@ void hijackFsmDispatch(HijackEvent ev, const char* tag,
   e.ev = ev;
   e.payload = payload;
   e.hasPayload = true;
-  copyTag(e.tag, sizeof(e.tag), tag);
+  e.tag = tagFor(tag);
   postEvent(e);
 }
 

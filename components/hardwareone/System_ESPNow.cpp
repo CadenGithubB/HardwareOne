@@ -147,9 +147,13 @@ esp_err_t espnowSelfApMac(uint8_t out[6]) {
 
 bool isSelfMac(const uint8_t* mac) {
   if (!mac) return false;
+  // The caller's address may live in PSRAM (the RX ring, a peer record): read
+  // it before the spinlock, never inside it.
+  uint8_t probe[6];
+  memcpy(probe, mac, sizeof(probe));
   taskENTER_CRITICAL(&gEspNowSelfMacLock);
   const bool valid = gEspNowSelfMacValid;
-  const bool matches = valid && memcmp(mac, gEspNowSelfMac, sizeof(gEspNowSelfMac)) == 0;
+  const bool matches = valid && memcmp(probe, gEspNowSelfMac, sizeof(gEspNowSelfMac)) == 0;
   taskEXIT_CRITICAL(&gEspNowSelfMacLock);
   if (valid) return matches;
 
@@ -678,11 +682,14 @@ struct InboundRxItem {
 static constexpr uint8_t ESPNOW_RX_RING_SLOTS = 8;
 static volatile uint8_t gEspNowRxHead = 0;
 static volatile uint8_t gEspNowRxTail = 0;
-// ~2.1 KB of internal DRAM, allocated in initEspNow so devices with ESP-NOW off
-// never pay for it. Must be INTERNAL and must exist before the recv callback is
-// registered: onEspNowDataReceived runs on the WiFi task and can neither
-// allocate nor fault. closeespnow disables callback admission, waits admitted
-// callbacks to retire, then frees this ring; re-init allocates it again.
+// ~2.1 KB, allocated in initEspNow so devices with ESP-NOW off never pay for
+// it; PSRAM first (the recv callback runs on the Wi-Fi task, not an ISR, and
+// the drain parses frames in place outside every critical section, so nothing
+// here needs internal DRAM; isSelfMac copies its 6 bytes before its spinlock).
+// It must exist before the recv callback is registered: onEspNowDataReceived
+// can neither allocate nor fault. closeespnow disables callback admission,
+// waits admitted callbacks to retire, then frees this ring; re-init allocates
+// it again.
 static InboundRxItem* gEspNowRxRing = nullptr;
 static volatile uint32_t gEspNowRxDrops = 0;
 
@@ -11604,7 +11611,7 @@ static bool initEspNow() {
   // which is worse than refusing to start.
   if (!gEspNowRxRing) {
     gEspNowRxRing = (InboundRxItem*)ps_calloc(ESPNOW_RX_RING_SLOTS, sizeof(InboundRxItem),
-                                              AllocPref::RequireInternal, "espnow.rx.ring");
+                                              AllocPref::PreferPSRAM, "espnow.rx.ring");
     if (!gEspNowRxRing) {
       snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
                "out of internal DRAM (RX ring)");
@@ -11694,7 +11701,7 @@ static bool initEspNow() {
   size_t trackerBytes = sizeof(BroadcastTracker) * BROADCAST_TRACKER_SLOTS;
   if (!gBroadcastTrackers) {
     gBroadcastTrackers = (BroadcastTracker*)ps_calloc(BROADCAST_TRACKER_SLOTS, sizeof(BroadcastTracker),
-                                                      AllocPref::RequireInternal,
+                                                      AllocPref::PreferPSRAM,  // task context only, no critical section
                                                       "espnow.broadcast.trackers");
   }
   if (gBroadcastTrackers) {
@@ -11901,7 +11908,7 @@ const char* cmd_espnow_init(const String& argsInput) {
   {
     const char* companionReason = nullptr;
     if (radioCompanionBlocksRadio(&companionReason)) {
-      static char companionError[160];
+      EXT_RAM_BSS_ATTR static char companionError[160];  // PSRAM: the reply is copied by the executor
       snprintf(companionError, sizeof(companionError), "Error: %s", companionReason);
       return companionError;
     }

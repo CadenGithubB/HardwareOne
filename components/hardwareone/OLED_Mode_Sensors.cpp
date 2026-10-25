@@ -7,6 +7,7 @@
 #if ENABLE_OLED_DISPLAY
 
 #include <Adafruit_SSD1306.h>
+#include "OLED_Utils.h"
 #include "HAL_Input.h"  // Logical buttons are available without a fitted controller.
 #include "System_Settings.h"
 #include "System_I2C.h"
@@ -396,7 +397,7 @@ static void displayI2cDiag() {
     return;
   }
   const int rowH = 9;
-  const int visible = 4;
+  const int visible = oledVisibleRows(9, 11, 4);
   for (int i = 0; i < visible; i++) {
     int idx = sI2cDiagScroll + i;
     if (idx >= sI2cDiagCount) break;
@@ -418,7 +419,7 @@ static bool i2cDiagInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
     return true;
   }
   if (sI2cDiagPhase == 3) {
-    if (gNavEvents.down && sI2cDiagScroll + 4 < sI2cDiagCount) { sI2cDiagScroll++; return true; }
+    if (gNavEvents.down && sI2cDiagScroll + oledVisibleRows(9, 11, 4) < sI2cDiagCount) { sI2cDiagScroll++; return true; }
     if (gNavEvents.up   && sI2cDiagScroll > 0)                 { sI2cDiagScroll--; return true; }
   }
   return false;  // B falls through to the central back handler

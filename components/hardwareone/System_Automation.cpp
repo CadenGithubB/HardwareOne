@@ -669,7 +669,7 @@ struct AutomationsCacheEntry {
   bool enabled;
 };
 static_assert(sizeof(AutomationsCacheEntry) == 16,
-              "AutomationsCacheEntry must remain within its 16-byte DRAM budget");
+              "AutomationsCacheEntry must remain within its 16-byte entry budget");
 
 static constexpr int AUTOMATIONS_CACHE_MAX = 64;
 // Cache lifetime and publication share one short lock. File reads, JSON
@@ -738,7 +738,7 @@ static bool ensureAutomationsCache() {
   if (gAutomationsCache) return true;
   gAutomationsCache = (AutomationsCacheEntry*)ps_calloc(
       AUTOMATIONS_CACHE_MAX, sizeof(AutomationsCacheEntry),
-      AllocPref::RequireInternal, "auto.cache");
+      AllocPref::PreferPSRAM, "auto.cache");  // main task only, under a FreeRTOS mutex: PSRAM is fine
   if (!gAutomationsCache) {
     ERROR_SYSTEMF("[automations] Failed to allocate scheduler cache (%u bytes)",
                   (unsigned)(AUTOMATIONS_CACHE_MAX * sizeof(AutomationsCacheEntry)));

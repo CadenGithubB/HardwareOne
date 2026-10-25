@@ -11,8 +11,8 @@
 //   DEBUG_<SYM>                 — the 256-bit mask constants, same spellings
 //                                 — these spellings are frozen API: call
 //                                 sites all over the component depend on them
-//   kDbg* parallel columns      — bit / parent / bank / tag / mask, indexed
-//                                 by DbgFlagIdx
+//   kDbg* parallel columns      — bit / parent / bank / tag / mask / label,
+//                                 indexed by DbgFlagIdx
 // and, in the consumers:
 //   the settings→flag map       — System_Settings.cpp expands the
 //                                 settingsField column into DBG_MAP rows
@@ -410,6 +410,12 @@ inline constexpr const char* kDbgTag[DBG_FLAG_COUNT] = { DBG_FLAG_LIST(DBG_X) };
 
 #define DBG_X(SYM, bit, BANK, parentBit, tag, settingsField, ...) DEBUG_BIT(bit),
 inline constexpr DebugFlagMask kDbgMask[DBG_FLAG_COUNT] = { DBG_FLAG_LIST(DBG_X) };
+#undef DBG_X
+
+// UI text for each flag (the label column) — shared by the Settings-page
+// options string, /api/debug/flags and the OLED system-log category list.
+#define DBG_X(SYM, bit, BANK, parentBit, tag, settingsField, cmdIdent, group, jsonKey, label) label,
+inline constexpr const char* kDbgLabel[DBG_FLAG_COUNT] = { DBG_FLAG_LIST(DBG_X) };   // "" = control bit
 #undef DBG_X
 
 // ============================================================================

@@ -212,8 +212,10 @@ behavior operate through the backend. SPI transfers use a small DMA stripe
 buffer rather than an additional full RGB framebuffer.
 
 Wheel rotation scrolls through the same previous/next channel as ANO rotation.
-A short click sends A/select, a 700 ms hold sends B/back, and a
-double-click sends SELECT/function (quick settings or keyboard mode). Press-and-turn provides the secondary X/Y actions
+A short click sends A/select and a double-click sends B/back. For SELECT/function
+(quick settings or keyboard mode), tap and release, then press again within the
+250 ms double-click window and hold that second press for 700 ms. A plain hold
+has no button action. Press-and-turn provides the secondary X/Y actions
 (submit/delete where the active screen uses those actions; X also advances the
 setup wizard). The joystick pattern keyboard is skipped on this wheel. A single click
 waits for the 250 ms double-click window before being delivered. Gray-code

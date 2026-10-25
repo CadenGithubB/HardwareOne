@@ -285,7 +285,7 @@ void displayRemoteMode() {
     if (!bondPickerScroll) {
       bondPickerScroll = (OLEDScrollState*)ps_alloc(sizeof(OLEDScrollState), AllocPref::PreferPSRAM, "oled.bondpicker");
       if (!bondPickerScroll) return;
-      oledScrollInit(bondPickerScroll, nullptr, 4);
+      oledScrollInit(bondPickerScroll, nullptr, oledVisibleRows(10, 1, 4));
       oledScrollSetSplitPane(bondPickerScroll, 128, 0, 0);
     }
     if (!pickerLabels) {

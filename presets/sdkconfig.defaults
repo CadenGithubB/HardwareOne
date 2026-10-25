@@ -10,3 +10,6 @@ CONFIG_BT_ENABLED=y
 
 # Opt in for the BLE relay path in saved configurations that enable it.
 CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=n
+
+# Optional task-scoped speech allocation measurements (no heap header changes).
+CONFIG_HEAP_USE_HOOKS=n

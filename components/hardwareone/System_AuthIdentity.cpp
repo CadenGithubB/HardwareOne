@@ -49,7 +49,7 @@ struct TaskIdentity {
   // isAdminUser() — a full open+parse of users.json, ~20-26 ms — on EVERY
   // identity install, which means every command on every transport. But only a
   // handful of call sites ever read it (currentExecIsAdmin: automation
-  // ownership overrides, `ringquery raw`, `i2c detect apply`, `bootcount
+  // ownership overrides, `ring query raw`, `i2c detect apply`, `bootcount
   // reset`). Command-level admin gating does NOT come through here — that is
   // the registry's requiresAdmin flag going through hasAdminPrivilege. So the
   // overwhelming majority of commands paid a roster read for an answer nothing

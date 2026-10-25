@@ -22,7 +22,7 @@ from tools.ota.qualification.recovery_http import (
     parse_http,
 )
 from tools.ota.qualification.scenarios import SCENARIOS, get_scenario
-from tools.ota.qualification.serial_observer import SerialObserver
+from tools.ota.qualification.serial_observer import SerialObserver, _default_factory
 from tools.ota.qualification.transports import response_is_complete
 
 
@@ -237,6 +237,58 @@ class SerialObserverTests(unittest.TestCase):
             log = output.read_text(encoding="utf-8")
             self.assertIn("booting", log)
             self.assertIn("recovery ready", log)
+
+    def test_default_open_never_passes_through_the_reset_line_state(self) -> None:
+        class LineModel:
+            """Models pyserial's open on macOS: the OS asserts both lines, then
+            pyserial applies DTR and then RTS. Records every (DTR, RTS) state."""
+
+            def __init__(self, port=None, baudrate=0, timeout=0.0):
+                self.port, self.is_open, self.states = port, False, []
+                self._dtr = self._rts = None
+                self.lines = [False, False]
+
+            def _set(self, index: int, value: bool) -> None:
+                self.lines[index] = value
+                self.states.append(tuple(self.lines))
+
+            @property
+            def dtr(self):
+                return self._dtr
+
+            @dtr.setter
+            def dtr(self, value: bool) -> None:
+                self._dtr = value
+                if self.is_open:
+                    self._set(0, value)
+
+            @property
+            def rts(self):
+                return self._rts
+
+            @rts.setter
+            def rts(self, value: bool) -> None:
+                self._rts = value
+                if self.is_open:
+                    self._set(1, value)
+
+            def open(self) -> None:
+                self.lines = [True, True]
+                self.states.append((True, True))
+                self.is_open = True
+                if self._dtr is not None:
+                    self._set(0, self._dtr)
+                if self._rts is not None:
+                    self._set(1, self._rts)
+
+        fake_serial = mock.MagicMock()
+        fake_serial.Serial = LineModel
+        with mock.patch.dict(sys.modules, {"serial": fake_serial}):
+            stream = _default_factory("/dev/test-port", 115200, 0.25)
+        self.assertEqual(stream.port, "/dev/test-port")
+        # (DTR=0, RTS=1) resets USB-Serial-JTAG chips (P4, S3).
+        self.assertNotIn((False, True), stream.states)
+        self.assertEqual(stream.states[-1], (False, False))
 
 
 @unittest.skipUnless(shutil.which("openssl"), "openssl is required")

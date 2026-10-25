@@ -423,7 +423,7 @@ bool decodeHardware(const uint8_t*, size_t, const Info&, Image& image, const cha
   image.reset();
   return false;  // no hardware codec on the host; Auto falls back to software
 }
-bool validateSoftwareEntropy(const uint8_t*, size_t, const Info&, const char** error) {
+bool validateSoftwareEntropy(const uint8_t*, size_t, const Info&, const char** error, OutputAllocator) {
   if (error) *error = "not used";
   return false;
 }

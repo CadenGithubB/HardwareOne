@@ -90,6 +90,7 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
     utils_h = read_source(component, source_dir, "OLED_Utils.h")
     oled = read_source(component, source_dir, "OLED_Utils.cpp")
     menu = read_source(component, source_dir, "OLED_Mode_Menu.cpp")
+    layout = read_source(component, source_dir, "OLED_Layout.h").replace("#pragma once", "")
 
     max_items = re.search(r"(?m)^#define OLED_SCROLL_MAX_ITEMS\s+\d+", utils_h)
     require(max_items is not None, "OLED_SCROLL_MAX_ITEMS not found in OLED_Utils.h")
@@ -102,6 +103,9 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
         definition(display_h, "struct OLEDMenuItem") + ";",
         definition(utils_h, "struct OLEDScrollItem") + ";",
         definition(utils_h, "struct OLEDScrollState") + ";",
+        # Row capacity from the shared layout, as drawing and navigation use it.
+        layout,
+        definition(utils_h, "inline constexpr int oledVisibleRows("),
     ])
     utils = "\n\n".join([session_role_span(oled)] +
                         [definition(oled, signature) for signature in OLED_UTILS_FUNCTIONS

@@ -41,6 +41,12 @@ def definition(source: str, signature: str) -> str:
         start = index + len(signature)
 
 
+def optional_line(source: str, pattern: str) -> list[str]:
+    """A declaration the fixed sources add; absent on older trees."""
+    match = re.search(pattern, source, re.M)
+    return [match[0]] if match else []
+
+
 def line(source: str, pattern: str) -> str:
     match = re.search(pattern, source, re.M)
     require(match is not None, f"production declaration not found: {pattern}")
@@ -56,6 +62,7 @@ def generated(component: Path, source_dir: Path | None) -> tuple[str, dict[str, 
     ring_h = read("G2_Ring.h")
     health = read("G2_Health.cpp")
     protocol = read("System_R1_Protocol.cpp")
+    store = read("R1_HealthHistoryStore.cpp")
     headers = {name: read(name) for name in (
         "G2_Health.h", "R1_HealthHistoryStore.h", "System_R1_Protocol.h")}
 
@@ -77,9 +84,22 @@ def generated(component: Path, source_dir: Path | None) -> tuple[str, dict[str, 
                  r"^static bool sDropCurrentHistoryFetch = false;",
                  r"^static R1HealthHistoryFetchState sHistoryUiFetchState[^\n]*",
                  r"^static uint8_t sHistoryUiFetchError[^\n]*",
-                 r"^EXT_RAM_BSS_ATTR static PendingHistorySession sPendingHistory;"))]
+                 r"^EXT_RAM_BSS_ATTR static PendingHistorySession sPendingHistory;")),
+             *optional_line(health, r"^static std::atomic<bool> sHistoryBacklogPending\{false\};"),
+             *optional_line(ring, r"^static constexpr uint32_t RING_HISTORY_SETTLE_QUIET_MS = \d+;"),
+             *optional_line(ring, r"^static constexpr uint32_t RING_HISTORY_SETTLE_MAX_MS = \d+;"),
+             *optional_line(ring, r"^static uint32_t sLastHealthPageRxMs = 0;"),
+             *optional_line(ring, r"^static constexpr uint32_t RING_DEVICE_STATUS_POLL_MS = [^;]+;"),
+             *optional_line(ring, r"^static constexpr uint32_t RING_DEVICE_STATUS_RETRY_MS = [^;]+;"),
+             *[block + ";" for block in optional(ring, "struct RingDeviceStatusPollState")],
+             *optional(health, "static bool latestInDay(")]
+    if "struct G2RingTelemetry {" in ring_h and "struct RingTelemetrySnapshot {" in ring:
+        types += [extract_block(ring_h, "struct G2RingTelemetry") + ";",
+                  extract_block(ring, "struct RingTelemetrySnapshot") + ";"]
 
-    capabilities = protocol[protocol.index("namespace {\nbool r1Captured229DailyDataCmd("):
+    first_capability = next(protocol.index(name) for name in (
+        "bool r1DailyHistoryDataCmd(", "bool r1Captured229DailyDataCmd(") if name in protocol)
+    capabilities = protocol[protocol.rindex("namespace {", 0, first_capability):
                             protocol.index("const char* r1ParseErrorName(")]
     from_decoded = extract_block(protocol, "bool r1PacketAckDescriptorFromDecoded(R1ProtocolProfile profile,")
     ack_factory = protocol[protocol.index("R1ParseError r1ValidateDecoded(const R1Decoded& decoded)"):
@@ -95,6 +115,11 @@ def generated(component: Path, source_dir: Path | None) -> tuple[str, dict[str, 
         "static void mergePendingActivityResult(", "bool g2HealthApplyCommonDaily(",
         "bool g2HealthApplyHrvDaily(", "bool g2HealthApplyActivityDaily(",
         "void g2HealthHistoryFetchStarted(", "void g2HealthHistoryFetchFinished(")]
+    production += [*optional(health, "static void mergeSleepRecord("),
+                   *optional(health, "static uint32_t sleepRecordDayStart("),
+                   *optional(health, "bool g2HealthApplySleepDaily("),
+                   *optional(health, "bool g2HealthHistoryBacklogPending("),
+                   *optional(store, "bool r1HealthSleepRecordValid(")]
     production += [extract_block(ring, "static bool ringFingerprintEqual("),
                    extract_block(ring, "static bool ringRememberRx("),
                    extract_block(ring, "static void ringQueuePacketAck("),
@@ -103,6 +128,15 @@ def generated(component: Path, source_dir: Path | None) -> tuple[str, dict[str, 
                    extract_block(ring, "static bool ringDailyPayloadValid("),
                    extract_block(ring, "static void ringCacheDailyLatest(const R1CommonDailyResult& daily)"),
                    extract_block(ring, "static void ringCacheDailyLatest(const R1HrvDailyResult& daily)"),
+                   *optional(ring, "static uint32_t ringDailyPageEndTs("),
+                   *optional(ring, "static bool ringPageHoldsNewest("),
+                   *optional(ring, "static bool ringTelemetryDirectIdentityCurrent("),
+                   *optional(ring, "static int32_t ringSampleAgeSec("),
+                   *optional(ring, "static void ringPopulateTelemetryOutput("),
+                   *optional(ring, "static bool ringHistorySweepSettled("),
+                   *optional(ring, "const char* g2RingWearName("),
+                   *optional(ring, "static bool ringDeviceStatusPollDue("),
+                   *optional(health, "static const char* wearLabel("),
                    definition(ring, "static void ringExtractTelemetryCache("),
                    extract_block(ring, "static bool ringReasmFinalizeCurrentLocked("),
                    definition(ring, "static void ringReasmFinalize("),
@@ -116,6 +150,22 @@ def generated(component: Path, source_dir: Path | None) -> tuple[str, dict[str, 
     return harness, headers
 
 
+def check_wear_wording(component: Path, source_dir: Path | None) -> None:
+    """Every wear display reads g2RingWearName (the web page its JSON wearName)."""
+    def read(name: str) -> str:
+        overlay = source_dir / name if source_dir is not None else None
+        return (overlay if overlay is not None and overlay.exists() else component / name).read_text()
+
+    for name, shared in (("G2_Health.cpp", "g2RingWearName("),
+                         ("OLED_Mode_R1_Health.cpp", "g2RingWearName("),
+                         ("System_SensorLogging.cpp", "g2RingWearName("),
+                         ("WebPage_R1_Health.cpp", "s.wearName")):
+        text = read(name)
+        require(shared in text, f"{name} does not use the shared wear wording")
+        require(re.search(r"\bwear\s*={2,3}\s*\d|r1Wear\s*==\s*\d", text) is None,
+                f"{name} maps wear codes itself")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
@@ -126,6 +176,7 @@ def main() -> None:
                         help="directory whose files overlay --component file by file")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
+    check_wear_wording(args.component, args.source_dir)
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-Wno-unused-parameter",
              # Static helpers the fixed or base path no longer calls, and locals
              # read only by the compiled-out debug macros.

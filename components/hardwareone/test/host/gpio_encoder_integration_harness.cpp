@@ -89,12 +89,12 @@ int main() {
   sample(255); sample(275);
   assert(held() == 0 && consumePresses() == (y | start));
 
-  // A wheel hold and auxiliary press completing in the same sample both arrive.
+  // A plain wheel hold adds no action to an auxiliary key pressed alongside it.
   fixture::levels[GPIO_ENCODER_PIN_BUTTON] = LOW;
   sample(300); sample(320);
   fixture::levels[3] = LOW; sample(1000); sample(1020);
-  assert(held() == (x | rotary::Back));
-  assert(consumePresses() == (x | rotary::Back));
+  assert(held() == x);
+  assert(consumePresses() == x);
   sample(1025);
   assert(held() == x && consumePresses() == 0);
   fixture::levels[GPIO_ENCODER_PIN_BUTTON] = fixture::levels[3] = HIGH;
@@ -153,6 +153,36 @@ int main() {
     assert(fixture::modes[pin] == 0 && fixture::reads[pin] == 0 && fixture::resets[pin] == 0);
 #endif
   }
+  // Wheel gestures reach the shared input latches with their logical actions,
+  // with or without auxiliary board keys. Release must not leak another click.
+  for (int pin = 3; pin <= 5; ++pin) fixture::levels[pin] = HIGH;
+  fixture::now = 2000;
+  assert(inputStartInternal());
+  fixture::levels[GPIO_ENCODER_PIN_BUTTON] = LOW; sample(2010); sample(2030);
+  fixture::levels[GPIO_ENCODER_PIN_BUTTON] = HIGH; sample(2050); sample(2070);
+  assert(consumePresses() == 0);
+  sample(2321); assert(consumePresses() == rotary::Select); // A
+  fixture::levels[GPIO_ENCODER_PIN_BUTTON] = LOW; sample(2400); sample(2420);
+  fixture::levels[GPIO_ENCODER_PIN_BUTTON] = HIGH; sample(2440); sample(2460);
+  fixture::levels[GPIO_ENCODER_PIN_BUTTON] = LOW; sample(2500); sample(2520);
+  fixture::levels[GPIO_ENCODER_PIN_BUTTON] = HIGH; sample(2540); sample(2560);
+  assert(consumePresses() == rotary::Back); // B
+  sample(2900); assert(consumePresses() == 0);
+  // Tap, release, then hold the SECOND press for SELECT.
+  fixture::levels[GPIO_ENCODER_PIN_BUTTON] = LOW; sample(2920); sample(2940);
+  fixture::levels[GPIO_ENCODER_PIN_BUTTON] = HIGH; sample(2960); sample(2980);
+  fixture::levels[GPIO_ENCODER_PIN_BUTTON] = LOW; sample(3000); sample(3020);
+  sample(3719); assert(consumePresses() == 0);
+  sample(3720); assert(consumePresses() == rotary::Function); // SELECT/quick menu
+  fixture::levels[GPIO_ENCODER_PIN_BUTTON] = HIGH; sample(3740); sample(3760);
+  sample(4100); assert(consumePresses() == 0);
+  // A standalone hold must not open quick settings or click when released.
+  fixture::levels[GPIO_ENCODER_PIN_BUTTON] = LOW; sample(4200); sample(4220);
+  sample(4920); assert(consumePresses() == 0);
+  fixture::levels[GPIO_ENCODER_PIN_BUTTON] = HIGH; sample(4940); sample(4960);
+  sample(5300); assert(consumePresses() == 0);
+  gpioEncoderStop();
+
   // Task creation / initial publication failures always unwind IRQs and pins,
   // even when the shared cache becomes contended after initial admission.
   gInputTaskHandle = nullptr;

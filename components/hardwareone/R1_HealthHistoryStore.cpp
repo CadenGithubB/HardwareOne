@@ -134,6 +134,20 @@ uint32_t contentHash(const R1HealthHistoryDay& day) {
     h = fnvValue(h, b.totalKcal);
     h = fnvValue(h, b.bucketEpoch);
   }
+  if (day.sleep.count != 0) {
+    h = fnvValue(h, day.sleep.count);
+    for (uint8_t i = 0; i < day.sleep.count && i < R1_HEALTH_SLEEP_MAX_RECORDS; ++i) {
+      const R1HealthSleepRecord& r = day.sleep.records[i];
+      h = fnvValue(h, r.type);
+      h = fnvValue(h, r.timezoneMinutes);
+      h = fnvValue(h, r.startEpoch);
+      h = fnvValue(h, r.endEpoch);
+      h = fnvValue(h, r.stageCount);
+      for (size_t s = 0; s < R1_HEALTH_SLEEP_STAGES; ++s) h = fnvValue(h, r.stageEpochs[s]);
+      h = fnvValue(h, r.sourceSerial);
+      h = fnvValue(h, r.sourceCrc32);
+    }
+  }
   h = fnvValue(h, day.sleepState);
   h = fnvValue(h, day.fetchState);
   h = fnvValue(h, day.lastSuccessEpoch);
@@ -425,6 +439,22 @@ R1HealthHistoryStoreError commitDay(const R1HealthHistoryDay& day,
              static_cast<unsigned>(b.totalKcal));
     ok = lineWriteData(file, sLineBuf, encrypted, bytesWritten);
   }
+  for (uint8_t i = 0; ok && i < day.sleep.count; ++i) {
+    const R1HealthSleepRecord& r = day.sleep.records[i];
+    snprintf(sLineBuf, sizeof(sLineBuf),
+             "S,%u,%d,%lu,%lu,%u,%u,%u,%u,%u,%u,%08lx",
+             static_cast<unsigned>(r.type), static_cast<int>(r.timezoneMinutes),
+             static_cast<unsigned long>(r.startEpoch),
+             static_cast<unsigned long>(r.endEpoch),
+             static_cast<unsigned>(r.stageCount),
+             static_cast<unsigned>(r.stageEpochs[0]),
+             static_cast<unsigned>(r.stageEpochs[1]),
+             static_cast<unsigned>(r.stageEpochs[2]),
+             static_cast<unsigned>(r.stageEpochs[3]),
+             static_cast<unsigned>(r.sourceSerial),
+             static_cast<unsigned long>(r.sourceCrc32));
+    ok = lineWriteData(file, sLineBuf, encrypted, bytesWritten);
+  }
   file.flush();
   // File cannot report flush/close failures. Require all exposed completion
   // signals before the checked temporary may replace the previous generation.
@@ -620,6 +650,34 @@ bool parseStoredLine(const char* line, R1HealthHistoryDay& day,
     b.totalKcal = static_cast<uint16_t>(total);
     return true;
   }
+  if (line[0] == 'S' && line[1] == ',') {
+    unsigned type = 0, stages = 0, awake = 0, rem = 0, light = 0, deep = 0,
+             serial = 0;
+    int tz = 0;
+    unsigned long start = 0, end = 0, crc = 0;
+    char tail = 0;
+    if (day.sleep.count >= R1_HEALTH_SLEEP_MAX_RECORDS ||
+        sscanf(line, "S,%u,%d,%lu,%lu,%u,%u,%u,%u,%u,%u,%lx%c", &type, &tz,
+               &start, &end, &stages, &awake, &rem, &light, &deep, &serial,
+               &crc, &tail) != 11 ||
+        type > UINT8_MAX || tz < R1_HEALTH_TIMEZONE_MINUTES_MIN ||
+        tz > R1_HEALTH_TIMEZONE_MINUTES_MAX || stages > UINT16_MAX ||
+        awake > UINT16_MAX || rem > UINT16_MAX || light > UINT16_MAX ||
+        deep > UINT16_MAX || serial > UINT16_MAX) return false;
+    R1HealthSleepRecord& r = day.sleep.records[day.sleep.count++];
+    r.type = static_cast<uint8_t>(type);
+    r.timezoneMinutes = static_cast<int16_t>(tz);
+    r.startEpoch = static_cast<uint32_t>(start);
+    r.endEpoch = static_cast<uint32_t>(end);
+    r.stageCount = static_cast<uint16_t>(stages);
+    r.stageEpochs[0] = static_cast<uint16_t>(awake);
+    r.stageEpochs[1] = static_cast<uint16_t>(rem);
+    r.stageEpochs[2] = static_cast<uint16_t>(light);
+    r.stageEpochs[3] = static_cast<uint16_t>(deep);
+    r.sourceSerial = static_cast<uint16_t>(serial);
+    r.sourceCrc32 = static_cast<uint32_t>(crc);
+    return true;
+  }
   return false;
 }
 
@@ -798,8 +856,62 @@ bool r1HealthHistoryDayValidate(const R1HealthHistoryDay& day,
   if (day.fetchState == R1_HISTORY_COMPLETE &&
       (!day.activity.have || !day.activity.fullDayVerified))
     return fail(R1_HISTORY_STORE_BAD_DAY);
+  if (day.sleep.count > R1_HEALTH_SLEEP_MAX_RECORDS)
+    return fail(R1_HISTORY_STORE_BAD_BUCKET);
+  for (uint8_t i = 0; i < day.sleep.count; ++i) {
+    const R1HealthSleepRecord& r = day.sleep.records[i];
+    if (!r1HealthSleepRecordValid(r, day.dayStart) ||
+        (i > 0 && r.startEpoch <= day.sleep.records[i - 1].startEpoch))
+      return fail(R1_HISTORY_STORE_BAD_BUCKET);
+  }
+  if (day.sleep.count != 0 && day.sleepState != R1_HISTORY_SLEEP_PRESENT)
+    return fail(R1_HISTORY_STORE_BAD_DAY);
   if (error) *error = R1_HISTORY_STORE_OK;
   return true;
+}
+
+bool r1HealthSleepRecordValid(const R1HealthSleepRecord& r, uint32_t dayStart) {
+  // Ring codes 1 long / 2 short; a period of at most a day that ends inside
+  // the local day; stage epochs that account for the whole period when the
+  // ring sent stages (every captured long record), none otherwise.
+  if ((r.type != 1 && r.type != 2) ||
+      r.timezoneMinutes < R1_HEALTH_TIMEZONE_MINUTES_MIN ||
+      r.timezoneMinutes > R1_HEALTH_TIMEZONE_MINUTES_MAX ||
+      r.endEpoch <= r.startEpoch || r.endEpoch - r.startEpoch > 86400u ||
+      dayStart == 0 || r.endEpoch < dayStart ||
+      static_cast<uint64_t>(r.endEpoch) >= static_cast<uint64_t>(dayStart) + 86400u)
+    return false;
+  uint32_t epochs = 0;
+  for (size_t s = 0; s < R1_HEALTH_SLEEP_STAGES; ++s) epochs += r.stageEpochs[s];
+  if (r.stageCount == 0) return epochs == 0;
+  return epochs * 30u == r.endEpoch - r.startEpoch;
+}
+
+void r1HealthHistorySleepSummary(const R1HealthHistoryDay& day,
+                                 R1HealthSleepSummary& out) {
+  memset(&out, 0, sizeof(out));
+  const uint8_t count = day.sleep.count < R1_HEALTH_SLEEP_MAX_RECORDS
+      ? day.sleep.count : static_cast<uint8_t>(R1_HEALTH_SLEEP_MAX_RECORDS);
+  out.available = count != 0;
+  out.count = count;
+  for (uint8_t i = 0; i < count; ++i) {
+    const R1HealthSleepRecord& r = day.sleep.records[i];
+    if (out.firstStartEpoch == 0 || r.startEpoch < out.firstStartEpoch)
+      out.firstStartEpoch = r.startEpoch;
+    if (r.endEpoch >= out.lastEndEpoch) {
+      out.lastEndEpoch = r.endEpoch;
+      out.timezoneMinutes = r.timezoneMinutes;
+    }
+    if (r.stageCount == 0) {
+      out.asleepSeconds += r.endEpoch - r.startEpoch;
+      continue;
+    }
+    for (size_t s = 0; s < R1_HEALTH_SLEEP_STAGES; ++s) {
+      const uint32_t seconds = static_cast<uint32_t>(r.stageEpochs[s]) * 30u;
+      out.stageSeconds[s] += seconds;
+      if (s != 0) out.asleepSeconds += seconds;
+    }
+  }
 }
 
 void r1HealthHistoryActivitySummary(const R1HealthHistoryDay& day,

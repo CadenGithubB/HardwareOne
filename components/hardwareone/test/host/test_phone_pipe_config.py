@@ -60,5 +60,32 @@ class PhoneConfigTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(macros['ENABLE_BLE_PHONE_PIPE'], '1')
 
+    def test_p4_pipe_needs_psram_bss(self):
+        # The ~29 KB Session is EXT_RAM_BSS_ATTR; a P4 pipe build without PSRAM
+        # .bss must stop instead of landing it in internal RAM.
+        sdk = dict(CONFIG_BT_ENABLED=1, CONFIG_BT_BLUEDROID_ENABLED=1, CONFIG_BT_ACL_CONNECTIONS=4,
+                   CONFIG_IDF_TARGET_ESP32P4=1)
+        pipe = dict(ENABLE_BLE_PHONE_PIPE=1, ENABLE_G2_GLASSES=0)
+        for psram in (None, 0):
+            if psram is not None:
+                sdk['CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY'] = psram
+            result, _ = self.resolve(pipe, sdk)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('needs CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y', result.stderr)
+        sdk['CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY'] = 1
+        result, macros = self.resolve(pipe, sdk)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(macros['ENABLE_BLE_PHONE_PIPE'], '1')
+
+    def test_psram_rule_only_for_p4_pipe(self):
+        sdk = dict(CONFIG_BT_ENABLED=1, CONFIG_BT_BLUEDROID_ENABLED=1, CONFIG_BT_ACL_CONNECTIONS=4)
+        result, macros = self.resolve(dict(ENABLE_BLE_PHONE_PIPE=1, ENABLE_G2_GLASSES=0), sdk)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(macros['ENABLE_BLE_PHONE_PIPE'], '1')
+        sdk['CONFIG_IDF_TARGET_ESP32P4'] = 1
+        result, macros = self.resolve(dict(ENABLE_BLE_PHONE_PIPE=0, ENABLE_G2_GLASSES=0), sdk)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(macros['ENABLE_BLE_PHONE_PIPE'], '0')
+
 if __name__ == '__main__':
     unittest.main()

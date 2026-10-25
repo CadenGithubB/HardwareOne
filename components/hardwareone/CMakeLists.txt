@@ -166,11 +166,18 @@ set(hardwareone_srcs
         System_RadioCompanion.cpp
         System_BleSecureChannel.cpp
         G2_Glasses.cpp
+        G2_NativeNotes.cpp
         G2_Ring.cpp
         BLE_CentralTx.cpp
         BLE_CentralCoordinator.cpp
+        BLE_CentralStack.cpp
+        BLE_SetupWorker.cpp
         BLE_PhoneGatt.cpp
         BLE_PhonePipe.cpp
+        BLE_PhonePipeConsole.cpp
+        BLE_PhoneStatus.cpp
+        BLE_LinkStatus.cpp
+        BLE_CoexRecords.cpp
         BLE_Events.cpp
         BLE_Peers.cpp
         G2_Page_Sensors.cpp
@@ -587,10 +594,12 @@ endif()
 # The local backend has no display or UART dependency. Its model/runtime is
 # enabled explicitly by a deployment profile; all other builds keep Pi STT.
 if(HW_CFG_ENABLE_LOCAL_STT GREATER 0)
-    list(APPEND hardwareone_srcs System_STT.cpp System_STTLocal.cpp)
+    # The user vocabulary and display formatter (stt/stt_transcript.cpp,
+    # System_STTVocabulary.cpp) belong to the local backend on every target.
+    list(APPEND hardwareone_srcs System_STT.cpp System_STTLocal.cpp System_STTVocabulary.cpp stt/stt_transcript.cpp)
     if(IDF_TARGET STREQUAL "esp32p4")
         # stt_lm.cpp is inert unless System_STTLocal.cpp uses it (ENABLE_STT_LM).
-        list(APPEND hardwareone_srcs stt/quartznet_runtime.cpp stt/quartznet_frontend.cpp stt/stt_lm.cpp)
+        list(APPEND hardwareone_srcs stt/quartznet_runtime.cpp stt/quartznet_frontend.cpp stt/stt_lm.cpp stt/stt_internal_memory.cpp)
         # The resident model (stt/quartznet_runtime.h) is on unless the build is
         # configured with -DHW1_STT_RESIDENT_MODEL=0. stt_dl_metadata.cpp is its
         # PSRAM metadata hook for the tree-local ESP-DL (tools/p4/prepare_esp_dl.py).

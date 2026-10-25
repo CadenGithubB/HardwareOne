@@ -33,7 +33,7 @@
 #define EXT_RAM_BSS_ATTR
 #define DISPLAY_COLOR_WHITE 1
 #define OLED_CONTENT_START_Y 10
-#define OLED_CONTENT_HEIGHT 54
+#define OLED_CONTENT_HEIGHT 43   // the 128x64 OLED: 64 - 10 header - 10 footer - 1
 
 class String {
  public:
@@ -53,15 +53,27 @@ class String {
   std::string text_;
 };
 
-// Recording display for the launcher's right-pane decorator.
+// Recording display for the launcher's right-pane decorator: text and the
+// status dot, with where each was drawn.
 class Adafruit_SSD1306 {
  public:
   std::string printed;
+  int cursorX = 0, cursorY = 0, textX = -1, textY = -1, dotX = -1, dotY = -1, dotR = -1;
   void setTextSize(int) {}
   void setTextColor(int) {}
-  void setCursor(int, int) {}
+  void setCursor(int x, int y) { cursorX = x; cursorY = y; }
   void print(const char* text) {
+    textX = cursorX; textY = cursorY;
     printed += text;
+    printed += '|';
+  }
+  void fillCircle(int x, int y, int r, int) { dot(x, y, r, "filled"); }
+  void drawCircle(int x, int y, int r, int) { dot(x, y, r, "hollow"); }
+  void clear() { *this = Adafruit_SSD1306{}; }
+ private:
+  void dot(int x, int y, int r, const char* kind) {
+    dotX = x; dotY = y; dotR = r;
+    printed += kind;
     printed += '|';
   }
 };
@@ -302,7 +314,7 @@ static Adafruit_SSD1306 gPanel;
 static void launcherStep() {
   mainMenuPopulate();  // mainMenuInputHandler
   mainMenuPopulate();  // displayMenuListStyle
-  gPanel.printed.clear();
+  gPanel.clear();
   if (sMainScroll.rightPaneDraw && sMainScroll.itemCount > 0) {
     sMainScroll.rightPaneDraw(&gPanel, &sMainScroll.items[sMainScroll.selectedIndex], 78, 12, 32);
   }
@@ -345,8 +357,22 @@ static void caseLauncherCost() {
             " reads in 9 steps)");
   check(visibleRows() == "Users;Settings;Notifications;",
         "alice's Config rows are '" + visibleRows() + "'");
-  check(gPanel.printed == "D|Off|",
+  check(gPanel.printed == "D|hollow|",
         "alice's Users row right pane printed '" + gPanel.printed + "', expected the Admin-only badge");
+  // The badge and the dot stack in one column between the divider (74) and
+  // the main menu's icon (78 + (128 - 78 - 32) / 2 = 87), inside the content.
+  // The same gap (2 px) after the divider (x 74), below the header, and
+  // between the badge's 7 visible rows and the dot.
+  const int headerGap = gPanel.textY - OLED_CONTENT_START_Y;
+  const int badgeGap = (gPanel.dotY - gPanel.dotR) - (gPanel.textY + 7);
+  const int dividerGap = gPanel.textX - (74 + 1);
+  check(dividerGap == 2 && headerGap == 2 && badgeGap == headerGap,
+        "badge at (" + num(gPanel.textX) + "," + num(gPanel.textY) + "), gaps " + num(dividerGap) + "/" +
+            num(headerGap) + "/" + num(badgeGap));
+  check(gPanel.dotX - gPanel.dotR == gPanel.textX && gPanel.dotR == 2 &&
+            gPanel.dotX + gPanel.dotR < 87 && gPanel.dotX - gPanel.dotR > 74 &&
+            gPanel.dotY + gPanel.dotR < OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT,
+        "status dot drawn at (" + num(gPanel.dotX) + "," + num(gPanel.dotY) + ") r=" + num(gPanel.dotR));
   check(!oledIsGuestSession(), "alice (user) is treated as a guest");
   check(usersRow() == MenuAvailability::FEATURE_DISABLED, "alice (user) gets the Users row");
 }
@@ -381,7 +407,8 @@ static void caseGenerationBump() {
   launcherStep();
   check(usersRow() == MenuAvailability::AVAILABLE,
         "alice promoted to admin (generation bumped) does not get the Users row");
-  check(gPanel.printed == "Ready|", "promoted alice's Users pane printed '" + gPanel.printed + "'");
+  check(gPanel.printed == "filled|" && gPanel.textX == -1,
+        "promoted alice's Users pane printed '" + gPanel.printed + "'");
   check(rosterReads() <= 2,
         "after one generation bump, 2 launcher steps read users.json " + num(rosterReads()) +
             " times; expected one role and one admin read");

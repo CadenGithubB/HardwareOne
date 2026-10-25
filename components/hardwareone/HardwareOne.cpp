@@ -72,7 +72,9 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
   #include "System_ESPNow_Tx.h"
 #endif
 #include "Bluetooth.h"
+#include "BLE_CentralStack.h"  // the shared client stack: bleStackUp / bleStackDown / bleStackReady
 #include "BLE_PhonePipe.h"
+#include "BLE_PhoneStatus.h"
 #include "G2_Glasses.h"
 #include "G2_Ring.h"
 #include "BLE_Peers.h"
@@ -967,6 +969,30 @@ void deliverCommandResult(const String& result, const CommandContext& ctx) {
   }
 }
 
+// One-shot serial sink for a command's secret (`phone pair new`'s code, phone
+// link v2): the only path that may print one. It is never the result (the
+// result is mirrored to the log file, OLED and G2 above), never broadcastOutput,
+// the debug queue or a log. Ready only for the command running on this task
+// when it came from the serial console, that session is live, and serial
+// output is on for it, by the same gates deliverCommandResult applies.
+bool serialCommandSecretSinkReady() {
+  const CommandContext* ctx = static_cast<const CommandContext*>(currentCommandContext());
+  return ctx && ctx->origin == ORIGIN_SERIAL && ctx->auth.transport == SOURCE_SERIAL &&
+         !ctx->validateOnly && (ctx->outputMask & MSG_ROUTE_SERIAL) &&
+         (gOutputFlags & MSG_ROUTE_SERIAL) &&
+         transportSessionEpochIsLive(SOURCE_SERIAL, ctx->transportSessionEpoch);
+}
+
+// Writes text in ONE Serial.write (atomic against the debug drain's lines,
+// see deliverCommandResult) after streamed lines drained. True only when all
+// of it went out; the caller wipes its buffer either way.
+bool serialWriteCommandSecret(const char* text, size_t len) {
+  if (!text || !len || !serialCommandSecretSinkReady()) return false;
+  debugWaitOutputDrained(120);
+  if (!serialCommandSecretSinkReady()) return false;  // the session ended while waiting
+  return Serial.write(reinterpret_cast<const uint8_t*>(text), len) == len;
+}
+
 char* gFileReadBuf = nullptr;
 char* gFileOutBuf = nullptr;
 // `extern const`: WebServer_Server.cpp declares these `extern const size_t`,
@@ -1670,6 +1696,12 @@ void hardwareone_setup() {
     (void)otaSystemRecoverFromStorageFailure();
     while (1) delay(1000);
   }
+#if ENABLE_LOCAL_STT
+  // The speech vocabulary file lives beside the model (card or internal); it
+  // loads once here and again on `sttvocab reload`.
+  extern void sttVocabularyInit();
+  sttVocabularyInit();
+#endif
 #if DEBUG_MEM_SUMMARY
   heapLogSummary("boot.after_fs");
 #endif
@@ -2140,6 +2172,8 @@ void hardwareone_setup() {
   // monitor, so the feature starts below can ask whether the radio exists.
   radioCompanionBootInit();
 #if ENABLE_WIFI
+  // Before any radio start, so the BLE coexistence records see every Wi-Fi state.
+  if (!wifiCoexMirrorInstall()) WARN_WIFIF("[WiFi] coexistence state mirror unavailable");
   oledSetBootProgress(30, "Connecting WiFi");
 
   // Always attempt WiFi connection if credentials exist (controlled by wifiAutoStart setting)
@@ -2200,31 +2234,22 @@ void hardwareone_setup() {
 
   // Bluetooth - auto-start if enabled in settings.
   // Two triggers can bring up BT at boot:
-  //   1. bleAutoStart=true   → start whichever mode bleMode says
-  //   2. The selected central mode has an authorized saved reconnect target.
-  //      G2 mode admits accessories and the optional phone; phone-client mode
-  //      consults only the phone. Saved peers never override Server selection.
-  // BLE_Peers owns paced reconnect admission after the selected host starts.
+  //   1. bleAutoStart=true   → start whichever role bleMode says
+  //   2. The client role has an authorized saved reconnect target: the shared
+  //      stack comes up and each peer with auto-reconnect on (glasses, ring,
+  //      phone) opens itself. Saved peers never override Server selection.
+  // BLE_Peers owns paced reconnect admission after the stack starts.
 #if ENABLE_BLUETOOTH
   // Make sure built-in metadata-only peers (phone) are registered so
-  // bleAnyPeerWantsAutoReconnect can see them. Real peer modules register
-  // themselves from initG2Client / g2RingInit further down.
+  // bleAnyPeerWantsAutoReconnect can see them. bleStackUp() registers the
+  // device owners' connectable specs before it arms auto-reconnect.
   bleRegisterBuiltinPeers();
 
   // Persisted mode is authoritative. Saved accessory intents never turn an
   // explicitly selected Server into a central role.
   const int bootBleMode = gSettings.bleMode;
   bool wantClientForAutoReconnect = false;
-#if ENABLE_G2_GLASSES
   if (bootBleMode == BLE_MODE_G2_CLIENT) wantClientForAutoReconnect = bleAnyPeerWantsAutoReconnect();
-#endif
-#if ENABLE_BLE_PHONE_PIPE
-  if (bootBleMode == BLE_MODE_PHONE_CLIENT) {
-    BlePeerReconnectSnapshot phone;
-    wantClientForAutoReconnect = blePeerReconnectSnapshot(BLE_PEER_PHONE, phone) &&
-        phone.autoReconnect && phone.hasSavedTarget && phone.ownerAuthorityAvailable;
-  }
-#endif
 
   // Substitute only the setting read, not the whole condition: a G2/ring peer
   // brings the radio up in client mode independently of bleAutoStart.
@@ -2246,15 +2271,14 @@ void hardwareone_setup() {
     pollPause();
     vTaskDelay(pdMS_TO_TICKS(50));  // Let pending I2C ops complete
 
-#if ENABLE_G2_GLASSES
     if (bootBleMode == BLE_MODE_G2_CLIENT) {
-      // initG2Client also registers the G2 peer. If wantClientForAutoReconnect
-      // is true, bleBootReconnect will iterate the registry and kick off
-      // saved-MAC connects (with paced 2s gaps). The boot block is now
-      // peer-agnostic — adding a peer means adding a registry entry, not
-      // touching this code.
-      if (initG2Client()) {
-        broadcastOutput("G2 client initialized (run 'openg2' to connect)");
+      // The shared client stack only: no device opens here. If
+      // wantClientForAutoReconnect is true, bleBootReconnect iterates the
+      // peer registry and each admitted peer opens its own device (saved-MAC
+      // connects with paced 2 s gaps). The boot block is peer-agnostic —
+      // adding a peer means adding a registry entry, not touching this code.
+      if (bleStackUp()) {
+        broadcastOutput("Bluetooth client stack up (openg2 / openring / openphone open a device)");
         if (wantClientForAutoReconnect) {
           // Give the BLE stack ~2 s to settle before kicking off scans.
           vTaskDelay(pdMS_TO_TICKS(2000));
@@ -2262,18 +2286,9 @@ void hardwareone_setup() {
           bleBootReconnect();
         }
       } else {
-        broadcastOutput("G2 client initialization failed");
+        BROADCAST_PRINTF("Bluetooth client stack failed to start: %s", bleStackLastRefusal());
       }
     } else
-#endif
-#if ENABLE_BLE_PHONE_PIPE
-    if (bootBleMode == BLE_MODE_PHONE_CLIENT) {
-      if (phonePipeStart(true)) {
-        broadcastOutput("Phone pipe client initialized");
-        if (wantClientForAutoReconnect) bleBootReconnect();
-      } else broadcastOutput("Phone pipe client initialization failed");
-    } else
-#endif
     if (bootBleMode == BLE_MODE_SERVER && wantBleServerAtBoot) {
       // Server-mode path only runs when the user *explicitly* asked for BT
       // at boot, or when this boot is resuming the transport that just
@@ -2841,8 +2856,10 @@ void hardwareone_loop() {
   // Before scheduling another reseek: if the host stack is wedged, no number
   // of retries can clear it — recycle instead. Self-gating (worker idle,
   // nothing linked, rate-limited), so this is a cheap no-op the rest of the
-  // time. Runs HERE rather than inside the connect worker because the recycle
-  // vTaskDeletes that worker.
+  // time.
+  phonePipeTick();
+  phoneStatusTick();     // phone-status SSE on a link change
+  bleRecoverStuckPhone();
   bleStackRecycleIfWedged();
   bleAutoReconnectTick();
 #endif

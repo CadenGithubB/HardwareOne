@@ -953,6 +953,9 @@ bool parseSystemLogFlags(const String& flagsStr, DebugFlagMask& out);
 void formatSystemLogFlags(DebugFlagMask mask, char* out, size_t outSize);
 String formatSystemLogFlags(DebugFlagMask mask);
 bool systemLogApplyPersistedFlags();  // gSettings.systemLogFlags → gDebugFlags
+// The categories the next plain `log start` logs: the saved mask when one is
+// set and valid, otherwise the live gDebugFlags it leaves in place.
+DebugFlagMask systemLogConfiguredFlags();
 
 // Helper: Get category name from debug flag
 const char* getDebugCategoryName(DebugFlagMask flag);

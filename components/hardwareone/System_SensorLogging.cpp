@@ -50,13 +50,13 @@
 #if ENABLE_PRESENCE_SENSOR
   #include "i2csensor_sths34pf80.h"
 #endif
+#include "G2_Ring.h"       // ring telemetry + g2RingWearName (stubs without BT/G2)
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  #include "G2_Ring.h"
   #include "BLE_Peers.h"   // blePeerRequestReseek — Health logging mine when ring down
 #endif
 #if ENABLE_R1_HEALTH
   #include "G2_Health.h"   // g2HealthPageIsActive — don't race page poll bursts
-  #include "BLE_Events.h"  // CompactJson for healthstatus json
+  #include "BLE_Events.h"  // CompactJson for buildHealthStatusJson
 #endif
 #include "System_SensorStubs.h"  // Provides stubs for disabled sensors
 #include "System_CaptureCrypto.h"  // at-rest sealing of capture files
@@ -593,11 +593,7 @@ void sensorLogTick() {
                                                              : (s.r1TempTenths % 10)));
       else strcpy(temp, "--");
       if (s.r1BatteryValid) snprintf(bat, sizeof(bat), "%u", (unsigned)s.r1Battery); else strcpy(bat, "--");
-      if (s.r1WearValid) {
-        if (s.r1Wear == 2) strcpy(wear, "on");
-        else if (s.r1Wear == 1) strcpy(wear, "off");
-        else strcpy(wear, "?");
-      } else strcpy(wear, "--");
+      snprintf(wear, sizeof(wear), "%s", g2RingWearName(s.r1WearValid, s.r1Wear));
       written = snprintf(pos, remaining,
                          "r1: hr=%s hrv=%s spo2=%s temp=%s bat=%s wear=%s | ",
                          hr, hrv, spo2, temp, bat, wear);
@@ -1751,9 +1747,9 @@ void healthLoggingNotePageRefresh() {
 }
 
 #if ENABLE_R1_HEALTH
-// On-demand refresh (healthstatus poll / web / OLED Poll Now), independent of
-// Track. This public action is exact-2.2.9-only and uses the correlated
-// DAILY+deviceStatus composite. Legacy POINT remains internal to legacy timed
+// On-demand refresh (ring poll / web / OLED Poll Now), independent of
+// Track. This public action is for the exact DAILY-history profiles (2.2.9,
+// 2.3.2.0007/0008) and uses the correlated DAILY+deviceStatus composite. Legacy POINT remains internal to legacy timed
 // mining; it is not a fallback for the new Poll Now contract.
 enum : uint8_t { HT_OD_IDLE = 0, HT_OD_PROFILE_REFRESH };
 static uint8_t  sHtOdState = HT_OD_IDLE;
@@ -1831,7 +1827,10 @@ const char* buildHealthStatusJson(char* buf, size_t cap) {
    .kv("batteryAgeSec", (int)t.batteryAgeSec)
    .kv("wearValid", (bool)t.wearValid)
    .kv("wear", (unsigned)t.wear)
+   .kv("wearName", g2RingWearName(t.wearValid, t.wear))
    .kv("wearAgeSec", (int)t.wearAgeSec)
+   .kv("chargeValid", (bool)t.chargeValid)
+   .kv("charge", g2RingChargeStatusName(t.chargeValid, t.charge))
    .kv("healthCollectionDesired", g2RingDesiredStateName(control.healthDesired))
    .kv("healthCollectionObserved", g2RingObservedStateName(control.healthObserved))
    .kv("healthCollectionPending", (bool)control.healthPending)
@@ -1862,6 +1861,15 @@ const char* buildHealthStatusJson(char* buf, size_t cap) {
    .kv("historyLastPartialEpoch", (unsigned long)history.lastPartialEpoch)
    .kv("historyError", (unsigned)history.fetchError)
    .kv("sleepState", sleep)
+   .kv("sleepRecordsSupported", g2RingSleepRecordsSupported())
+   .kv("sleepRecordCount", (unsigned)history.sleep.count)
+   .kv("sleepAsleepSec", (unsigned long)history.sleep.asleepSeconds)
+   .kv("sleepFirstStartEpoch", (unsigned long)history.sleep.firstStartEpoch)
+   .kv("sleepLastEndEpoch", (unsigned long)history.sleep.lastEndEpoch)
+   .kv("sleepAwakeSec", (unsigned long)history.sleep.stageSeconds[R1_SLEEP_STAGE_AWAKE])
+   .kv("sleepRemSec", (unsigned long)history.sleep.stageSeconds[R1_SLEEP_STAGE_REM])
+   .kv("sleepLightSec", (unsigned long)history.sleep.stageSeconds[R1_SLEEP_STAGE_LIGHT])
+   .kv("sleepDeepSec", (unsigned long)history.sleep.stageSeconds[R1_SLEEP_STAGE_DEEP])
    .kv("activityAvailable", (bool)history.activity.available)
    .kv("activityFullDayVerified", (bool)history.activity.fullDayVerified)
    .kv("activityBucketCount", (unsigned)history.activity.bucketCount)
@@ -1886,132 +1894,6 @@ const char* buildHealthStatusJson(char* buf, size_t cap) {
   return buf;
 #endif
 }
-
-// The three health commands below live in their own #if ENABLE_R1_HEALTH block
-// and are registered through healthCommands[] (not sensorLoggingCommands[]), so
-// they disappear with the feature like every other gated command family. They
-// used to be rows in the always-compiled sensor-logging table, each carrying an
-// "#if !ENABLE_R1_HEALTH -> return Error:" stub; that made them permanently
-// registered on builds without R1, which is not how any other feature behaves.
-// The FeatureRegistry `r1health` row is what lets a client find out the feature
-// is absent, so these no longer need to stay reachable to say so themselves.
-#if ENABLE_R1_HEALTH
-const char* cmd_healthstatus(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  CommandArgs a(argsInput);
-  String sub = a.has(0) ? a.arg(0) : String();
-  sub.toLowerCase();
-
-  if (sub == "poll") {
-    if (!healthStartPollBurst()) {
-      if (!g2RingIsConnected()) {
-        return "Error: ring not connected — connect via Bluetooth → R1 Ring";
-      }
-      G2RingControlStatus control{};
-      g2RingGetControlStatus(control);
-      const bool refreshSupported = g2RingHealthPageRefreshSupported();
-      return control.protocolProfileKnown &&
-                     !refreshSupported
-                 ? "Error: health refresh is unsupported on the active ring profile; no command sent"
-                 : "Error: ring setup/profile is not ready for health refresh; no command sent";
-    }
-    return "SUCCESS: R1 Health refresh started";
-  }
-  if (sub == "history") {
-    if (!g2RingRequestHistoryRefresh(false))
-      return "Error: history refresh not queued — ring/setup/profile may be unavailable";
-    return "SUCCESS: R1 typed history refresh queued";
-  }
-  if (sub == "force-history") {
-    // `healthstatus force-history` is its own admin registry row (below), so a
-    // well-formed line never reaches this handler. Only a line the registry
-    // matched as plain `healthstatus` (a tab or a double space before the
-    // verb) gets here, past no admin check: refuse it, never run it.
-    return "Error: force-history is an admin command; type it as 'healthstatus force-history'";
-  }
-  if (sub == "refresh-controls") {
-    if (!g2RingRefreshControlStatus())
-      return "Error: ring control refresh not queued";
-    return "SUCCESS: ring control refresh queued";
-  }
-
-  if (argWantsJson(argsInput) || sub == "json") {
-    return buildHealthStatusJson(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
-  }
-
-  G2RingTelemetry t = {};
-  g2RingGetTelemetry(t);
-  G2RingControlStatus control = {};
-  g2RingGetControlStatus(control);
-  G2HealthHistorySummary history = {};
-  g2HealthHistoryGetSummary(history);
-  R1HealthHistoryStoreStatus store = {};
-  r1HealthHistoryStoreGetStatus(store);
-  char hr[8], hrv[8], spo2[8], temp[12], bat[8], wear[8];
-  if (t.hrValid) snprintf(hr, sizeof(hr), "%u", (unsigned)t.hr); else snprintf(hr, sizeof(hr), "--");
-  if (t.hrvValid) snprintf(hrv, sizeof(hrv), "%d", (int)t.hrv); else snprintf(hrv, sizeof(hrv), "--");
-  if (t.spo2Valid) snprintf(spo2, sizeof(spo2), "%u%%", (unsigned)t.spo2); else snprintf(spo2, sizeof(spo2), "--");
-  if (t.tempValid) snprintf(temp, sizeof(temp), "%d.%dC",
-                            (int)(t.tempTenths / 10),
-                            (int)(t.tempTenths < 0 ? -(t.tempTenths % 10) : (t.tempTenths % 10)));
-  else snprintf(temp, sizeof(temp), "--");
-  if (t.batteryValid) snprintf(bat, sizeof(bat), "%u%%", (unsigned)t.battery); else snprintf(bat, sizeof(bat), "--");
-  if (!t.wearValid) snprintf(wear, sizeof(wear), "--");
-  else if (t.wear == 2) snprintf(wear, sizeof(wear), "on");
-  else if (t.wear == 1) snprintf(wear, sizeof(wear), "off");
-  else snprintf(wear, sizeof(wear), "?");
-  snprintf(getDebugBuffer(), 1024,
-           "R1 Health: ring=%s  HR=%s  HRV=%s  SpO2=%s  T=%s  Bat=%s  Wear=%s\n"
-           "  ages(s): hr=%d hrv=%d spo2=%d temp=%d bat=%d wear=%d\n"
-           "  Ring setup=%s profile=%s\n"
-           "  Collection desired=%s observed=%s%s error=%s\n"
-           "  Low power desired=%s observed=%s%s error=%s\n"
-           "  Health logging=%s (enabled=%s, r1_mask=%s, worker=%s, poll=%us)\n"
-           "  History=%s day=%lu activity=%u/144 (%s) store=%s/%s\n"
-           "  At-rest encryption: %s%s\n"
-           "Usage: healthstatus [json|poll|history|force-history|refresh-controls]",
-           t.connected ? "up" : "down", hr, hrv, spo2, temp, bat, wear,
-           (int)t.hrAgeSec, (int)t.hrvAgeSec, (int)t.spo2AgeSec,
-           (int)t.tempAgeSec, (int)t.batteryAgeSec, (int)t.wearAgeSec,
-           g2RingSetupStateName(control.setupState),
-           g2RingProtocolProfileName(control.protocolProfile),
-           g2RingDesiredStateName(control.healthDesired),
-           g2RingObservedStateName(control.healthObserved),
-           control.healthPending ? " (pending)" : "",
-           g2RingTransactionErrorName(control.healthLastError),
-           g2RingDesiredStateName(control.lowPowerDesired),
-           g2RingObservedStateName(control.lowPowerObserved),
-           control.lowPowerPending ? " (pending)" : "",
-           g2RingTransactionErrorName(control.lowPowerLastError),
-           healthLoggingIsActive() ? "ACTIVE" : "inactive",
-           gSettings.healthLoggingEnabled ? "on" : "off",
-           (gSensorLogMask & LOG_R1) ? "yes" : "no",
-           gSensorLoggingRunning ? "running" : "stopped",
-           (unsigned)gSettings.healthLoggingPollIntervalSec,
-           r1HealthHistoryFetchStateName(history.fetchState),
-           (unsigned long)history.dayStart,
-           (unsigned)history.activity.bucketCount,
-           history.activity.fullDayVerified ? "message verified" : "unverified",
-           store.available ? "available" : "unavailable",
-           r1HealthHistoryStoreErrorName(store.error),
-           captureEncryptModeName(gSettings.captureEncryptMode),
-           (gSensorLoggingRunning && gSensorLogSealed) ? " (active session sealed)" : "");
-  return getDebugBuffer();
-}
-
-// `healthstatus force-history`: the admin freshness bypass for the typed
-// history refresh. Its registry row carries the admin flag, so authorizeCommand
-// refuses a non-admin (and the validate pass) on every transport before this
-// runs, with the registry's refusal text and record.
-static const char* cmd_healthstatus_forcehistory(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)argsInput;
-  if (!g2RingRequestHistoryRefresh(true))
-    return "Error: forced history refresh not queued — ring/setup/profile may be unavailable";
-  return "SUCCESS: R1 forced typed history refresh queued";
-}
-#endif  // ENABLE_R1_HEALTH — cmd_healthstatus
 
 void healthLoggingTick() {
 #if ENABLE_R1_HEALTH
@@ -2068,7 +1950,7 @@ void healthLoggingTick() {
           (long)(now - sHtMineLastReseekMs) >= (long)healthLoggingIntervalMs()) {
         sHtMineLastReseekMs = now;
         // Non-blocking: schedules connectSaved on the next bleAutoReconnectTick.
-        // Respects user ringdisconnect; works even if bleautoreconnect is off
+        // Respects user ring disconnect; works even if bleautoreconnect is off
         // (one-shot). With autoReconnect on, drop recovery continues via backoff.
         blePeerRequestReseek(BLE_PEER_R1_RING);
         if (isDebugFlagSet(DEBUG_LOGGER)) {
@@ -2762,13 +2644,11 @@ const CommandEntry sensorLoggingCommands[] = {
 
 const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof(sensorLoggingCommands[0]);
 
-// R1 ring health — its own gated command module, so the whole family is absent
-// on a build without the feature instead of being registered and answering with
-// an error. Lives here rather than in G2_Health.cpp because the handlers are
-// built on this file's local sensor-logging machinery; what matters for
-// discoverability is that the TABLE and its registration are gated, which they
-// now are. Clients learn the feature is missing from the FeatureRegistry
-// `r1health` row, not by probing a command.
+// HardwareOne's local R1 health logging — its own gated command module, so the
+// family is absent on a build without the feature. Lives here because the
+// handlers are built on this file's sensor-logging machinery. The ring's own
+// data (vitals, poll, history) is the `ring` module in G2_Ring.cpp. Clients
+// learn the feature is missing from the FeatureRegistry `r1health` row.
 #if ENABLE_R1_HEALTH
 const CommandEntry healthCommands[] = {
   { "healthlogging", "Start/stop local R1 health logging (independent of ring collection)", false, cmd_healthlogging,
@@ -2780,17 +2660,6 @@ const CommandEntry healthCommands[] = {
     "  On 2.2.9, logging is passive/on-demand and records Poll Now refreshes; it sends no timed POINT query\n"
     "  R1-only sessions write only on an admitted mine/refresh — no 5s empty heartbeats\n"
     "  This does not change the ring's health-collection privacy setting." },
-  { "healthstatus", "R1 live vitals, ring controls, local logging, and typed history status", false, cmd_healthstatus,
-    "Usage: healthstatus [json|poll|history|force-history|refresh-controls]\n"
-    "  bare/json: live values, desired/observed controls, local logging, history/store\n"
-    "  poll: exact-2.2.9 DAILY HR/HRV/SpO2/sleep/activity + deviceStatus refresh\n"
-    "  history: normal typed history refresh; force-history: admin freshness bypass\n"
-    "  refresh-controls: read low-power state; health collection has no proven GET and stays Unknown\n"
-    "  BLE App / Web use healthstatus json; connect via ringconnect / Bluetooth page" },
-  // Longest-prefix lookup picks this row over `healthstatus`, so the admin rule
-  // for the forced refresh is the registry's, not the handler's.
-  { "healthstatus force-history", "R1 typed history refresh that bypasses the freshness window (admin)", true,
-    cmd_healthstatus_forcehistory, "Usage: healthstatus force-history" },
   { "healthlogmerge", "Byte-concatenate sensor logs in the given order: \"<out>\" \"<in1>\" \"<in2>\" ...", true, cmd_healthlogmerge,
     "Usage: healthlogmerge \"<output>\" \"<in1>\" \"<in2>\" [...]\n"
     "  OUTPUT FIRST — arg 0 is TRUNCATED. Inputs follow, in the order you want them.\n"

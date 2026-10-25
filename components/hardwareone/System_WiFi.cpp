@@ -18,6 +18,7 @@
 #include "System_Debug.h"  // For DEBUG_WIFIF and BROADCAST_PRINTF macros
 #include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro + argWantsJson
 #include "System_RadioCompanion.h"  // radio companion gate (P4X-EYE); no-op with an on-chip radio
+#include "HAL_Radio.h"              // radioHalTransportUp for the coexistence tag
 #include "System_OTASafety.h"  // otaSafetySetupRemainingMs — boot connect budget on a trial image
 #include "System_AuthIdentity.h"  // currentCommandContext — which transport asked for a connect
 #include "System_Clock.h"  // Clock::syncSource ledger for ntpstatus
@@ -170,6 +171,40 @@ extern bool gSkipNTPInWifiConnect;
 
 // WiFi initialization state (lazy initialization like sensor tasks)
 static std::atomic<bool> wifiInitialized{false};
+
+// Coexistence mirror (wifiCoexTag): STA/AP/association bits kept by an
+// Arduino Wi-Fi event handler, plus flags and counters this module sets around
+// its one scan call and its connect attempts. Atomics only, so any task may
+// read them.
+#if ENABLE_BLE_COEX_RECORDS
+namespace {
+constexpr uint8_t kCoexStaUp = 1, kCoexApUp = 2, kCoexAssoc = 4, kCoexIp = 8;
+std::atomic<uint8_t> sCoexMirror{0}, sCoexLastReason{0}, sCoexConnectDepth{0};
+std::atomic<uint32_t> sCoexLastDiscMs{0};
+std::atomic<uint16_t> sCoexScans{0}, sCoexConnects{0}, sCoexDisconnects{0};
+std::atomic<bool> sCoexScanOnAir{false}, sCoexInstalled{false};
+struct CoexScanOnAir {
+  CoexScanOnAir() {
+    sCoexScans.fetch_add(1, std::memory_order_relaxed);
+    sCoexScanOnAir.store(true, std::memory_order_release);
+  }
+  ~CoexScanOnAir() { sCoexScanOnAir.store(false, std::memory_order_release); }
+};
+struct CoexConnectScope {
+  CoexConnectScope() {
+    sCoexConnects.fetch_add(1, std::memory_order_relaxed);
+    sCoexConnectDepth.fetch_add(1);
+  }
+  ~CoexConnectScope() { sCoexConnectDepth.fetch_sub(1); }
+};
+}  // namespace
+#else
+namespace {
+// Records compiled out: the scan and connect sites keep their scopes.
+struct CoexScanOnAir { CoexScanOnAir() {} };
+struct CoexConnectScope { CoexConnectScope() {} };
+}  // namespace
+#endif
 
 namespace {
 
@@ -346,7 +381,11 @@ WifiScanResult wifiScanForEach(bool includeHidden, WifiScanVisitor visitor,
     config.scan_time.active.max = 300;
 
     scanAttempted = true;
-    esp_err_t err = esp_wifi_scan_start(&config, /*block=*/true);
+    esp_err_t err;
+    {
+      CoexScanOnAir coexScan;  // the blocking scan is the only one on air
+      err = esp_wifi_scan_start(&config, /*block=*/true);
+    }
     if (err == ESP_ERR_WIFI_TIMEOUT) {
       // A timed-out blocking call may leave the driver scan alive and its AP
       // list allocated. Stop it before clearing and releasing the coordinator.
@@ -798,6 +837,71 @@ static void clearRadioRestoreSnapshot() {
 
 bool wifiRadioForcedOff() { return gRadioForcedOff; }
 
+#if ENABLE_BLE_COEX_RECORDS
+// Runs on Arduino's arduino_events task, whose stack is small: atomics only.
+static void wifiCoexEvent(arduino_event_id_t event, arduino_event_info_t info) {
+  uint8_t set = 0, clear = 0;
+  switch (event) {
+    // A fresh start can't be associated: this also clears bits left by a
+    // companion that restarted without a STA_STOP.
+    case ARDUINO_EVENT_WIFI_STA_START: set = kCoexStaUp; clear = kCoexAssoc | kCoexIp; break;
+    case ARDUINO_EVENT_WIFI_STA_STOP: clear = kCoexStaUp | kCoexAssoc | kCoexIp; break;
+    case ARDUINO_EVENT_WIFI_AP_START: set = kCoexApUp; break;
+    case ARDUINO_EVENT_WIFI_AP_STOP: clear = kCoexApUp; break;
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED: set = kCoexAssoc; break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      clear = kCoexAssoc | kCoexIp;
+      sCoexLastReason.store(uint8_t(info.wifi_sta_disconnected.reason));
+      sCoexLastDiscMs.store(millis() | 1u, std::memory_order_release);
+      sCoexDisconnects.fetch_add(1, std::memory_order_relaxed);
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP: set = kCoexIp; break;
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP: clear = kCoexIp; break;
+    // Arduino can drop an AP_STOP whose handler it unregistered while the
+    // event was queued (a mode change); its WIFI_OFF arrives in order.
+    case ARDUINO_EVENT_WIFI_OFF: clear = kCoexStaUp | kCoexApUp | kCoexAssoc | kCoexIp; break;
+    default: return;
+  }
+  if (clear) sCoexMirror.fetch_and(uint8_t(~clear));
+  if (set) sCoexMirror.fetch_or(set);
+}
+
+// Arduino's event list, not the default event loop: registering creates no
+// loop or task on a boot that never starts Wi-Fi, and every radio start
+// (Wi-Fi or ESP-NOW) goes through Arduino, which delivers STA/AP_START here.
+bool wifiCoexMirrorInstall() {
+  if (sCoexInstalled.exchange(true, std::memory_order_acq_rel)) return true;
+  if (WiFi.onEvent(wifiCoexEvent)) return true;
+  sCoexInstalled.store(false, std::memory_order_release);
+  return false;
+}
+
+WifiCoexTag wifiCoexTag() {
+  const uint8_t mirror = sCoexMirror.load(std::memory_order_acquire);
+  const uint32_t lastDisc = sCoexLastDiscMs.load(std::memory_order_acquire);
+  WifiCoexInputs in;
+  in.installed = sCoexInstalled.load(std::memory_order_acquire);
+  in.transportUp = radioHalTransportUp();  // a spinlock read on the P4; true on native radios
+  in.staUp = mirror & kCoexStaUp;
+  in.apUp = mirror & kCoexApUp;
+  in.associated = mirror & kCoexAssoc;
+  in.hasIp = mirror & kCoexIp;
+  in.scanOnAir = sCoexScanOnAir.load(std::memory_order_acquire);
+  in.connecting = sCoexConnectDepth.load() != 0;
+  in.bootHunt = sBackgroundConnectActive.load(std::memory_order_acquire);
+  // Arduino's flag defaults to true before Wi-Fi was ever started.
+  in.reconnectArmed = wifiInitialized.load() && WiFi.getAutoReconnect();
+  in.forcedOff = gRadioForcedOff;
+  in.espnow = espnowOwnsRadio();
+  in.lastReason = sCoexLastReason.load();
+  in.lastDiscAgeMs = lastDisc ? uint32_t(millis() - lastDisc) : UINT32_MAX;
+  in.scans = sCoexScans.load(std::memory_order_relaxed);
+  in.connects = sCoexConnects.load(std::memory_order_relaxed);
+  in.disconnects = sCoexDisconnects.load(std::memory_order_relaxed);
+  return wifiCoexClassify(in);
+}
+#endif  // ENABLE_BLE_COEX_RECORDS
+
 const char* cmd_wificonnect(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -998,15 +1102,59 @@ const char* cmd_wifidisconnect(const String& argsInput) {
 
 // Single source of truth for WiFi radio state (see System_WiFi.h). Derived from
 // live radio/association state only — no persisted flag.
-WifiRadioState wifiRadioState() {
-  if (WiFi.isConnected()) return WIFI_RADIO_CONNECTED;
-  wifi_mode_t mode = WIFI_MODE_NULL;
-  if (esp_wifi_get_mode(&mode) != ESP_OK) mode = WIFI_MODE_NULL;
-  if (mode == WIFI_MODE_NULL) return WIFI_RADIO_OFF;
-  extern bool isEspNowInitialized();
+//
+// On the P4 the driver runs on the C6, so every esp_wifi_* query is an RPC, and
+// one against a deinitialized driver logs on both chips. WiFi.isConnected()
+// reads Arduino's event bits, and WiFi.getMode() answers NULL from Arduino's own
+// init/start flags without a driver call once the radio is stopped. Every radio
+// start and stop in this firmware goes through WiFi.mode(), so those flags
+// follow the driver; only a started, unassociated radio asks it for the mode.
+extern bool isEspNowInitialized();
+static WifiRadioState unassociatedRadioState(bool driverUp) {
+  if (!driverUp) return WIFI_RADIO_OFF;
   if (isEspNowInitialized()) return WIFI_RADIO_UP_FOR_ESPNOW;
   return WIFI_RADIO_UP_DISCONNECTED;
 }
+
+WifiRadioState wifiRadioState() {
+  if (WiFi.isConnected()) return WIFI_RADIO_CONNECTED;
+  return unassociatedRadioState(WiFi.getMode() != WIFI_MODE_NULL);
+}
+
+// Screens redraw every frame, which on the P4 would be an RPC per frame while
+// the radio is up but unassociated. Reuse the driver's answer for up to a
+// second. WiFi.mode() sets or clears an interface's netif as it enables or
+// disables it, so a radio toggle changes the key and the next frame reads fresh.
+static constexpr uint32_t kRadioDisplayMaxAgeMs = 1000;
+static portMUX_TYPE sRadioDisplayMux = portMUX_INITIALIZER_UNLOCKED;
+struct RadioDisplayRead {
+  const void* sta;
+  const void* ap;
+  uint32_t atMs;
+  bool driverUp;
+  bool valid;
+};
+static RadioDisplayRead sRadioDisplayRead = {};
+
+WifiRadioState wifiRadioDisplayState() {
+  if (WiFi.isConnected()) return WIFI_RADIO_CONNECTED;
+  const void* sta = WiFi.STA.netif();
+  const void* ap = WiFi.AP.netif();
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&sRadioDisplayMux);
+  const RadioDisplayRead last = sRadioDisplayRead;
+  portEXIT_CRITICAL(&sRadioDisplayMux);
+  if (last.valid && last.sta == sta && last.ap == ap && now - last.atMs < kRadioDisplayMaxAgeMs) {
+    return unassociatedRadioState(last.driverUp);
+  }
+  const bool driverUp = WiFi.getMode() != WIFI_MODE_NULL;  // outside the lock: may be an RPC
+  portENTER_CRITICAL(&sRadioDisplayMux);
+  sRadioDisplayRead = {sta, ap, now, driverUp, true};
+  portEXIT_CRITICAL(&sRadioDisplayMux);
+  return unassociatedRadioState(driverUp);
+}
+
+bool wifiRadioDisplayOn() { return wifiRadioDisplayState() != WIFI_RADIO_OFF; }
 
 // True whenever the 2.4GHz radio is powered up at all — connected to an AP,
 // up-but-unassociated for WiFi, OR held by ESP-NOW. False ONLY when the radio
@@ -1567,6 +1715,7 @@ static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
     broadcastOutput("WiFi radio busy (scan or another connection in progress); retrying later.");
     return false;
   }
+  CoexConnectScope coexConnect;  // the whole attempt, retries included
 
   // Ensure previous attempts are not in-progress
   DEBUG_WIFIF("[connectWiFiIndex] Ensuring WiFi idle state");
@@ -2662,6 +2811,7 @@ bool ensureWiFiInitialized() {
   }
 
   DEBUG_WIFIF("[WiFi] Initializing WiFi subsystem (lazy init)");
+  (void)wifiCoexMirrorInstall();  // boot installs it first; this covers late starts
   // Register the log-only event handler once per boot (guarded in case
   // wifiInitialized is ever reset by a future deinit path).
   static bool sEventLoggerRegistered = false;

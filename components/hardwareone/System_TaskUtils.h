@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 
 // ============================================================================
@@ -222,6 +223,17 @@ constexpr BaseType_t I2C_SENSOR_CORE = APP_CORE;
 // ============================================================================
 
 // ============================================================================
+// Idle service workers
+// ============================================================================
+// A service task created on first use (qnote, dictation_svc, cm5_presence:
+// ServiceWorker below) leaves on its own once it has waited this long with
+// nothing to do, giving its stack and TCB back; the next request creates it
+// again, which may then fail under heap pressure where today it could not
+// (each refuses cleanly). mapRender (OLED map), the phone pipe and cam_pwr
+// keep their own figures and their own exits.
+constexpr uint32_t SERVICE_TASK_IDLE_RETIRE_MS = 60000;
+
+// ============================================================================
 // FreeRTOS Task Creation with Memory Logging
 // ============================================================================
 
@@ -236,6 +248,94 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
                               TaskHandle_t* pxCreatedTask,
                               const char* tag,
                               BaseType_t coreId = tskNO_AFFINITY);
+
+// ============================================================================
+// ServiceWorker: one lazily created service task that leaves when idle
+// ============================================================================
+// The module keeps the task body, its name and stack, and the idle predicate;
+// this keeps the lifecycle protocol, once, for every such worker:
+//   ensure(): the creator's claim (one at a time, under `mux`), the wake made
+//             once before the first task exists and published under `mux`,
+//             the task created and its handle published under `mux`. True
+//             while a task is published; false for a failed create or while
+//             another creator holds the claim (the caller refuses or retries).
+//   give():   the wake. Never a task handle: a give to a task that is leaving
+//             waits in the semaphore for its successor; before the first
+//             ensure() it is a no-op.
+//   wait(ms): the task's own wait on the wake. True when woken, false when
+//             the time ran out (the task then asks retireIf).
+//   retireIf(idle): the task's own exit. `idle` runs and, when true, the
+//             handle is nulled in ONE critical section of `mux` — the lock
+//             ensure() checks — so a producer that publishes its work under
+//             `mux` and then calls ensure() either finds this task or finds
+//             none and makes one. The caller then vTaskDelete(nullptr)s.
+//             `idle` runs inside the critical section: reads of state under
+//             `mux` only, no FreeRTOS call.
+// `mux` is the module's own spinlock, the one its state lives under, so the
+// predicate reads what the producers write with no second lock. The one rule
+// every producer keeps: publish the work, THEN ensure() (the usual shape is a
+// wake() that ensures and gives). The storage is internal .bss: a static
+// semaphore is a kernel object.
+struct ServiceWorker {
+  portMUX_TYPE& mux;
+  TaskHandle_t handle = nullptr;       // under mux
+  bool starting = false;               // under mux: one creator at a time
+  SemaphoreHandle_t wake = nullptr;    // written once, under mux
+  StaticSemaphore_t wakeStorage{};
+
+  constexpr explicit ServiceWorker(portMUX_TYPE& moduleMux) : mux(moduleMux) {}
+
+  bool present() {
+    portENTER_CRITICAL(&mux);
+    const bool up = handle != nullptr;
+    portEXIT_CRITICAL(&mux);
+    return up;
+  }
+
+  bool ensure(TaskFunction_t body, const char* name, uint32_t stackBytes, const char* tag,
+              UBaseType_t priority = TASK_PRIORITY_LOW, BaseType_t core = PRO_CORE) {
+    portENTER_CRITICAL(&mux);
+    if (handle || starting) {
+      const bool ready = handle != nullptr;
+      portEXIT_CRITICAL(&mux);
+      return ready;
+    }
+    starting = true;
+    portEXIT_CRITICAL(&mux);
+    if (!wake) {  // inside the claim, its only writer; published before the task exists
+      SemaphoreHandle_t made = xSemaphoreCreateBinaryStatic(&wakeStorage);
+      portENTER_CRITICAL(&mux);
+      wake = made;
+      portEXIT_CRITICAL(&mux);
+    }
+    TaskHandle_t created = nullptr;
+    const BaseType_t rc =
+        xTaskCreateLogged(body, name, stackBytes, nullptr, priority, &created, tag, core);
+    portENTER_CRITICAL(&mux);
+    if (rc == pdPASS) handle = created;
+    starting = false;
+    portEXIT_CRITICAL(&mux);
+    return rc == pdPASS;
+  }
+
+  void give() {
+    portENTER_CRITICAL(&mux);
+    SemaphoreHandle_t sem = wake;
+    portEXIT_CRITICAL(&mux);
+    if (sem) xSemaphoreGive(sem);
+  }
+
+  bool wait(uint32_t ms) { return xSemaphoreTake(wake, pdMS_TO_TICKS(ms)) == pdTRUE; }
+
+  template <class Idle>
+  bool retireIf(Idle idle) {
+    portENTER_CRITICAL(&mux);
+    const bool leave = idle();
+    if (leave) handle = nullptr;
+    portEXIT_CRITICAL(&mux);
+    return leave;
+  }
+};
 
 // ============================================================================
 // Task Stack-Size Registry
@@ -283,20 +383,23 @@ uint32_t taskStackLookup(const char* name);
 // TCB, and pvPortMalloc is heap_caps_malloc(INTERNAL|8BIT).
 //
 // How: ONE walk of the registered INTERNAL|8BIT heaps, matching each live
-// block's start address against the snapshot pointers. Never
+// block against the snapshot pointers (containing block for stacks, exact
+// start for TCBs). P4 lazily reserves coprocessor state inside a stack and
+// advances pxStackBase; those bytes still belong to its allocation. Never
 // heap_caps_get_allocated_size(): it asserts (aborts) on a pointer outside
 // every registered heap — a .bss stack, or a PSRAM stack via
 // xTaskCreateWithCaps — and it does no used/free check, so a task that
 // deleted itself between snapshot and query would return the size of the
-// coalesced FREE block. The walk only reports a block that is live AND starts
-// exactly at the pointer.
+// coalesced FREE block. The walk only reports live blocks. As with the task
+// snapshot itself, a concurrently deleted/replaced task is not a stable sample.
 //
 // 0 means UNKNOWN — the block is not a live INTERNAL|8BIT heap block — never
 // "zero bytes". Callers must show it as unmeasured, not fold it in as nothing.
 struct TaskHeapMeasure {
-  uint32_t stackBytes;  // allocated stack block, measured; 0 = not internal heap
+  uint32_t stackBytes;  // allocated stack block, measured; 0 = unmeasured
   uint32_t tcbBytes;    // allocated TCB block, measured; 0 = same
   uint32_t regBytes;    // taskStackLookup(name): size recorded at creation; 0 = not ours
+  uintptr_t stackHeapSpan; // walker scratch: innermost heap owning pxStackBase
 };
 
 // Fills out[i] for snapshot[i], i < count. Calls taskStackLookup() exactly

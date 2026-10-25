@@ -22,8 +22,9 @@ struct Info {
   bool needsMarkerNormalization = false;
 };
 
-// Optional application allocator for software pixels and normalized input; storage must be
-// releasable with free(). A failed custom allocation is not bypassed.
+// Optional application allocator for software pixels, normalized input and the
+// software decoder's workspace; storage must be releasable with free(). A failed
+// custom allocation is not bypassed.
 using OutputAllocator = uint8_t* (*)(size_t);
 
 struct DecodeOptions {

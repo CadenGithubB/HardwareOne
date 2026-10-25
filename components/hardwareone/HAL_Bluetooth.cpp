@@ -4,6 +4,7 @@
 
 #include <BLEDevice.h>
 #include <esp_bt_main.h>
+#include "Bluetooth.h"  // the app console's host-teardown hooks
 
 #if CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
 #include <esp32-hal-bt.h>
@@ -46,12 +47,33 @@ bool bluetoothHalInit(const char* deviceName) {
 }
 
 BluetoothHalShutdownResult bluetoothHalDeinit() {
+  // Idempotent: with no host of any generation up there is nothing to stop.
+  // Repeating the checked teardown would re-issue the Hosted controller RPCs
+  // (refused once the companion transport is lost) and fault Bluetooth until
+  // reboot for no reason. A stack verb may be followed by a role switch or a
+  // recovery that tears down again; both must see success here.
+  {
+    const BluetoothHalStatus before = bluetoothHalStatus();
+    if (before.hostAbsent()) {
+      return {
+        true, 0,
+        ESP_BLUEDROID_STATUS_UNINITIALIZED, ESP_BLUEDROID_STATUS_UNINITIALIZED,
+        static_cast<int32_t>(before.controller), static_cast<int32_t>(before.controller),
+        false
+      };
+    }
+  }
+  // Every host teardown passes here, so the app console's client-host state
+  // is closed before the stop and freed after a terminal one (Bluetooth.h).
+  bleConsoleHostTeardownBegin();
   // Arduino owns host callback retirement and controller shutdown ordering.
   // Never release controller memory: this application supports BLE off/on.
   const BLEDeviceDeinitResult native = BLEDevice::deinitChecked(false);
   const BluetoothHalStatus status = bluetoothHalStatus();
+  const bool stopped = native.success && status.stopped();
+  bleConsoleHostTeardownEnd(stopped);
   return {
-    native.success && status.stopped(),
+    stopped,
     static_cast<uint8_t>(native.phase),
     native.hostStatusBefore, native.hostStatusAfter,
     native.controllerStatusBefore, native.controllerStatusAfter,

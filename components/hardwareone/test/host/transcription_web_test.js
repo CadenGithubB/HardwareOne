@@ -13,11 +13,11 @@ class Element {
 }
 function fixture(options={}) {
   const elements={};
-  for(const name of ['panel','start','stop','cancel','status','provider','save','saving','live','files','refresh','file-status','file-list','prev','next','preview','mic','mic-note']) elements['transcription-'+name]=new Element();
+  for(const name of ['panel','start','stop','cancel','status','provider','save','saving','live','files','refresh','file-status','file-list','prev','next','preview','mic','mic-note','vocab','vocab-term','vocab-add','vocab-refresh','vocab-status','vocab-list']) elements['transcription-'+name]=new Element();
   elements['transcription-mic'].options=['auto','pdm','g2'].map(value=>Object.assign(new Element('option'),{value}));
   const timers=new Map(), events={}; let serial=0;
-  const state={id:'',capture:false,pieces:[],lastAck:'',starts:0,acks:0,cancels:0,continuous:true,canSave:true,save:false,calls:[],list:[],fileText:'',fileCancels:0,epoch:42,micSource:'auto',micPdm:true,micG2:false,...options};
-  const base=()=>({success:true,session:state.epoch,available:true,canSave:state.canSave,continuous:state.continuous,savePreference:state.save,roots:['/stt/u7','/sd/stt/u7'],id:state.id,busy:state.capture||state.pieces.length>0,active:state.capture||state.pieces.length>0,done:!!state.id&&!state.capture&&!state.pieces.length,captureActive:state.capture,transcriptEnabled:state.save,transcriptSaved:false,micSource:state.micSource,micPdm:state.micPdm,micG2:state.micG2});
+  const state={id:'',capture:false,pieces:[],lastAck:'',starts:0,acks:0,cancels:0,continuous:true,canSave:true,save:false,calls:[],list:[],fileText:'',fileCancels:0,epoch:42,micSource:'auto',micPdm:true,micG2:false,vocabulary:true,vocab:[['HardwareOne','hardwareone'],['ESP32','esp']],speakers:null,speakersAvailable:false,draft:'',...options};
+  const base=()=>({success:true,session:state.epoch,available:true,canSave:state.canSave,continuous:state.continuous,savePreference:state.save,roots:['/stt/u7','/sd/stt/u7'],id:state.id,busy:state.capture||state.pieces.length>0,active:state.capture||state.pieces.length>0,done:!!state.id&&!state.capture&&!state.pieces.length,captureActive:state.capture,transcriptEnabled:state.save,transcriptSaved:false,micSource:state.micSource,micPdm:state.micPdm,micG2:state.micG2,vocabulary:state.vocabulary});
   const response=(data,status=200)=>({ok:status>=200&&status<300,status,json:async()=>data});
   const stream=(text,status=200)=>{
     let offset=0;const bytes=new TextEncoder().encode(text);
@@ -46,11 +46,18 @@ function fixture(options={}) {
       return response({success:true,id:state.id});
     }
     const data=base();
-    if(state.pieces.length){const p=state.pieces[0];data.textPending=true;data.sttText=p.text;data.receipt={sequence:p.sequence,offset:p.offset,length:new TextEncoder().encode(p.text).length};}
+    if(state.pieces.length){const p=state.pieces[0];data.textPending=true;data.sttText=p.text;if(p.display)data.display=p.display;data.receipt={sequence:p.sequence,offset:p.offset,length:new TextEncoder().encode(p.text).length};}
+    if(state.speakers){data.speakers=state.speakers;data.speakersAvailable=state.speakersAvailable;}
+    if(state.draft){data.draft=state.draft;data.draftVersion=1;}
     return response(data);
   }
   const context={document:{getElementById:id=>elements[id]||null,createElement:tag=>new Element(tag)},window:{addEventListener:(name,fn)=>events[name]=fn},fetch:fetcher,
-    hw:{postFormText:async(url,form)=>{state.calls.push({url,form});if(form.cmd.startsWith('micsource '))state.micSource=form.cmd.slice(10);else state.save=form.cmd.endsWith('1');return 'OK';}},
+    hw:{postFormText:async(url,form)=>{state.calls.push({url,form});
+      if(form.cmd.startsWith('micsource '))state.micSource=form.cmd.slice(10);
+      else if(form.cmd==='sttvocab list')return 'OK: '+state.vocab.length+' words in /sd/STT Models/user_vocab.tsv (DISPLAY<TAB>spoken)'+state.vocab.map(([d,s])=>'\n'+d+'\t'+s).join('');
+      else if(form.cmd.startsWith('sttvocab add ')){const term=form.cmd.slice(13);if(/\s|bad/.test(term))return 'Error: Display must be one printable ASCII term without | or spaces; the previous vocabulary remains active';const bar=term.indexOf('|');state.vocab.push([bar>=0?term.slice(0,bar):term,bar>=0?term.slice(bar+1):term.toLowerCase()]);return 'OK: added '+term;}
+      else if(form.cmd.startsWith('sttvocab remove ')){state.vocab=state.vocab.filter(([,s])=>s!==form.cmd.slice(16));return 'OK: removed';}
+      else state.save=form.cmd.endsWith('1');return 'OK';}},
     setTimeout:(fn,delay)=>{const id=++serial;timers.set(id,{fn,delay});return id;},clearTimeout:id=>timers.delete(id),
     AbortController,TextEncoder,TextDecoder,URLSearchParams,console};
   vm.runInNewContext(source,context);
@@ -68,7 +75,7 @@ function fixture(options={}) {
   await f.tick();assert.match(f.el('status').textContent,/Lost ACK/);assert.equal(f.el('live').value,'hello ');
   await f.tick();assert.equal(f.state.acks,2);assert.equal(f.el('live').value,'hello ');
   await f.tick();assert.equal(f.el('live').value,'hello world');await f.tick();
-  f.el('panel').open=false;f.el('panel').dispatch('toggle');await f.tick();assert.equal(f.el('live').value,'hello world\nsecond phrase');await f.tick();assert.equal(f.state.pieces.length,0);
+  f.el('panel').open=false;f.el('panel').dispatch('toggle');await f.tick();assert.equal(f.el('live').value,'hello world second phrase');await f.tick();assert.equal(f.state.pieces.length,0);
   f.el('stop').onclick();await f.tick();await f.tick();assert.equal(f.el('stop').disabled,true);assert.equal([...f.timers.values()].filter(t=>t.delay<12000).length,0,'closed finished panel stops polling');
   // Recover an admitted start when its HTTP reply was lost; never start twice.
   f=fixture({loseStart:true});await f.open();await f.start();assert.equal(f.state.starts,1);await f.tick();assert.equal(f.el('stop').disabled,false);assert.equal(f.state.starts,1);
@@ -103,5 +110,29 @@ function fixture(options={}) {
   await f.el('file-list').children[0].children[1].onclick();assert.equal(f.el('preview').textContent,'');assert.equal(f.el('file-list').children.length,0);
   // The panel can expose files before initial metadata arrives; it loads once roots arrive.
   f=fixture();f.el('files').open=true;f.el('files').dispatch('toggle');await f.open();await f.settle();assert(f.state.calls.some(c=>c.url.startsWith('/api/files/list')));
-  console.log('Transcription JS: actual script passed retries, bounded views, collapse, exit, auth and file rendering');
+  // Display copies are shown while receipts acknowledge the raw bytes; the draft is a ~ line that a final replaces.
+  f=fixture();await f.open();await f.start();f.state.pieces=[{sequence:1,offset:0,text:'hardwareone said ',display:'HardwareOne said '},{sequence:1,offset:17,text:'hello',display:'hello'}];f.state.draft='more wor';
+  await f.tick();assert.equal(f.el('live').value,'HardwareOne said \n~ more wor');assert.deepEqual(f.state.calls.filter(c=>c.url==='/api/transcription/ack').length,0);
+  await f.tick();assert.equal(f.state.acks,1);assert.equal(f.state.pieces[0].offset,17);await f.tick();assert.equal(f.el('live').value,'HardwareOne said hello\n~ more wor');
+  f.state.draft='';await f.tick();await f.tick();assert.equal(f.el('live').value,'HardwareOne said hello');
+  // Speaker turns group like the lens page: known speakers flow into one capitalized paragraph, unlabelled text keeps its own ?: line, late labels regroup.
+  f=fixture();await f.open();await f.start();f.state.speakersAvailable=true;f.state.speakers=[];
+  f.state.pieces=[{sequence:1,offset:0,text:'alpha'},{sequence:2,offset:0,text:'beta'},{sequence:3,offset:0,text:'gamma'}];
+  for(let i=0;i<6;i++)await f.tick();assert.equal(f.el('live').value,'?: alpha\n?: beta\n?: gamma');
+  f.state.speakers=[{sequence:1,speaker:0,ready:true},{sequence:3,speaker:0,ready:true}];await f.tick();assert.equal(f.el('live').value,'Person 1: Alpha\n?: beta\nPerson 1: Gamma');
+  f.state.speakers=[{sequence:2,speaker:0,ready:true}];await f.tick();assert.equal(f.el('live').value,'Person 1: Alpha beta gamma');
+  f.state.speakers=[{sequence:2,speaker:1,ready:true}];await f.tick();assert.equal(f.el('live').value,'Person 1: Alpha\nPerson 2: Beta\nPerson 1: Gamma');
+  f.state.speakers=[{sequence:4,speaker:-1,ready:true},{sequence:5,speaker:99,ready:true},{sequence:6,speaker:2,ready:false}];await f.tick();assert.equal(f.el('live').value,'Person 1: Alpha\nPerson 2: Beta\nPerson 1: Gamma');
+  // A different session id clears the grouped text (unsafe speaker values above were never shown as a person).
+  f.state.fetchOverride=(url,opts)=>!opts.method?f.response({...f.state,success:true,session:f.state.epoch,id:'8877665544332211',active:true,valid:true}):undefined;await f.tick();assert.equal(f.el('live').value,'');
+  // Vocabulary editor: list, add and remove go through sttvocab; invalid terms report the device's reason; non-admins only read.
+  f=fixture();await f.open();assert.equal(f.el('vocab').hidden,false);f.el('vocab').open=true;f.el('vocab').dispatch('toggle');await f.settle();
+  assert.equal(f.el('vocab-list').children.length,2);assert.equal(f.el('vocab-list').children[1].children[0].textContent,'ESP32 (esp)');assert.match(f.el('vocab-status').textContent,/2 term/);
+  f.el('vocab-term').value='OpenAI';await f.el('vocab-add').onclick();await f.settle();assert.equal(f.state.calls.filter(c=>c.form&&c.form.cmd==='sttvocab add OpenAI').length,1);assert.equal(f.el('vocab-list').children.length,3);assert.equal(f.el('vocab-term').value,'');
+  f.el('vocab-term').value='bad term';await f.el('vocab-add').onclick();await f.settle();assert.match(f.el('vocab-status').textContent,/without spaces/);assert.equal(f.state.calls.filter(c=>c.form&&c.form.cmd&&c.form.cmd.startsWith('sttvocab add bad')).length,0);
+  f.el('vocab-term').value='badword';await f.el('vocab-add').onclick();await f.settle();assert.match(f.el('vocab-status').textContent,/Error: Display must/);
+  await f.el('vocab-list').children[1].children[1].onclick();await f.settle();assert.equal(f.state.calls.filter(c=>c.form&&c.form.cmd==='sttvocab remove esp').length,1);assert.equal(f.el('vocab-list').children.length,2);
+  f=fixture({canSave:false});await f.open();f.el('vocab').open=true;f.el('vocab').dispatch('toggle');await f.settle();assert.equal(f.el('vocab-add').hidden,true);assert.equal(f.el('vocab-list').children[0].children.length,1);
+  f=fixture({vocabulary:false});await f.open();assert.equal(f.el('vocab').hidden,true);
+  console.log('Transcription JS: actual script passed retries, bounded views, speaker turns, drafts, vocabulary, collapse, exit, auth and file rendering');
 })().catch(error=>{console.error(error);process.exitCode=1;});

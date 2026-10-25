@@ -1032,6 +1032,7 @@ REGISTER_OLED_MODE_MODULE(settingsOLEDModes, sizeof(settingsOLEDModes) / sizeof(
 
 #if ENABLE_WIFI
 #include <WiFi.h>
+#include "System_WiFi.h"  // wifiRadioDisplayOn — the Radio row
 #endif
 #if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
@@ -1073,6 +1074,20 @@ static void addQuickItem(const char* name, QuickGetStateFunc getState, QuickTogg
   }
 }
 
+// Every row's command runs without holding up the frame loop: radiopower,
+// openwifi and openble take from a fraction of a second to many seconds (on
+// the P4 each is a series of RPCs to the C6). The row shows its new state once
+// the command lands; until then the status line says it is running.
+static void quickCommandDone(bool ok, const void* okStatus) {
+  if (ok) setQuickStatus(static_cast<const char*>(okStatus));
+  else quickStatusMsg[0] = '\0';  // the failure toast says why
+}
+static void runQuickCommand(const char* command, const char* okStatus) {
+  if (oledRunCommandAsync(command, quickCommandDone, okStatus)) {
+    setQuickStatus("Working...", 60000);
+  }
+}
+
 // --- Radio power (airplane mode) ---
 // The RADIO axis: whether the 2.4GHz radio is powered up at all (ON whenever
 // WiFi is connecting/connected OR ESP-NOW holds it). Separate from the WiFi
@@ -1080,15 +1095,13 @@ static void addQuickItem(const char* name, QuickGetStateFunc getState, QuickTogg
 // runtime only — the radio returns to its configured state on the next boot.
 #if ENABLE_WIFI
 static bool getQuickRadioState() {
-  extern bool wifiRadioOn();
-  return wifiRadioOn();
+  return wifiRadioDisplayOn();  // read every frame
 }
 static void toggleQuickRadio() {
-  extern bool wifiRadioOn();
   if (wifiRadioOn()) {
-    if (oledRunCommand("radiopower off")) setQuickStatus("Radio OFF");
+    runQuickCommand("radiopower off", "Radio OFF");
   } else {
-    if (oledRunCommand("radiopower on")) setQuickStatus("Radio ON");
+    runQuickCommand("radiopower on", "Radio ON");
   }
 }
 #endif
@@ -1101,7 +1114,6 @@ static bool getQuickWiFiState() {
   return WiFi.isConnected();
 }
 static void toggleQuickWiFi() {
-  extern bool wifiRadioOn();
   // Can't connect a network with the radio powered down — mirror the HTTP row's
   // "Need WiFi first!" refusal instead of firing openwifi against a dead radio.
   if (!wifiRadioOn()) {
@@ -1109,9 +1121,9 @@ static void toggleQuickWiFi() {
     return;
   }
   if (WiFi.isConnected()) {
-    if (oledRunCommand("closewifi")) setQuickStatus("WiFi OFF");
+    runQuickCommand("closewifi", "WiFi OFF");
   } else {
-    if (oledRunCommand("openwifi --best")) setQuickStatus("WiFi ON");
+    runQuickCommand("openwifi --best", "WiFi ON");
   }
 }
 #endif
@@ -1123,21 +1135,9 @@ static bool getQuickBluetoothState() {
 }
 static void bluetoothToggleConfirmedQuick(void* userData) {
   (void)userData;
-  if (isBleServerInitialized()) {
-    if (oledRunCommand("closeble")) setQuickStatus("Bluetooth OFF");
-    return;
-  }
-#if ENABLE_G2_GLASSES
-  if (isG2ClientInitialized()) {
-    if (oledRunCommand("g2deinit")) setQuickStatus("Bluetooth OFF");
-    return;
-  }
-  if (gSettings.bleMode == BLE_MODE_G2_CLIENT) {
-    if (oledRunCommand("openg2")) setQuickStatus("Bluetooth ON");
-    return;
-  }
-#endif
-  if (oledRunCommand("openble")) setQuickStatus("Bluetooth ON");
+  const bool wasOn = bleSubsystemActive();
+  const char* cmd = oledBluetoothToggleCommand();
+  if (cmd) runQuickCommand(cmd, wasOn ? "Bluetooth OFF" : "Bluetooth ON");
 }
 static void toggleQuickBluetooth() {
   if (bleSubsystemActive()) {
@@ -1156,13 +1156,13 @@ static bool getQuickHTTPState() {
 static void httpToggleConfirmedQuick(void* userData) {
   (void)userData;
   if (server != nullptr) {
-    if (oledRunCommand("closehttp")) setQuickStatus("HTTP OFF");
+    runQuickCommand("closehttp", "HTTP OFF");
   } else {
     if (!WiFi.isConnected()) {
       setQuickStatus("Need WiFi first!");
       return;
     }
-    if (oledRunCommand("openhttp")) setQuickStatus("HTTP ON");
+    runQuickCommand("openhttp", "HTTP ON");
   }
 }
 static void toggleQuickHTTP() {

@@ -219,9 +219,35 @@ assert ble_plain_deferred.count("processBleCommandLine(") == 1
 assert "/*arrivedEncrypted=*/false)" in ble_plain_deferred
 assert "bleScPoolRelease(d);" in ble_plain_deferred
 assert bluetooth.count("processBleCommandLine(d->connId, d->sessionEpoch,") == 2
-# In required mode a plaintext writer without a channel gets the fixed refusal
-# through the directed per-session sender; the session sender would drop it.
-required_branch = function_body(ble_plain_deferred, "if (bleScRequired())")
+# In required mode (and always on the G2 client host, whose console serves
+# Secure Channel only) a plaintext writer without a channel gets the fixed
+# refusal through the directed per-session sender; the session sender would
+# drop it.
+required_branch = function_body(ble_plain_deferred, "if (bleSecureChannelOnly())")
+secure_only = function_body(bluetooth, "static bool bleSecureChannelOnly()")
+assert "bleScRequired()" in secure_only and "bleConsoleClientHost()" in secure_only
+# Every session sender goes through one router (bleSendToSession): the phone
+# link's console row first (console records), then the channel and plaintext
+# rules below, unchanged for every other row; a binary body is never plaintext.
+assert "return bleSendToSession(connId, expectedEpoch, PipeConsoleKind::Text," in function_body(
+    bluetooth, "bool sendBLEResponseToSession(")
+ble_router = function_body(bluetooth, "static bool bleSendToSession(")
+assert "if (!secure && bleSecureChannelOnly()) return false;" in ble_router
+assert "if (!secure && kind == PipeConsoleKind::Blob) return false;" in ble_router
+assert ble_router.index("pipe = blePipeRow(c);") < ble_router.index("secure = bleScEstablished(connId);")
+# The phone link's console stream (phone link v2): its records arrive through
+# the pipe's authenticated encryption, so its COMMAND ingress passes
+# arrivedEncrypted=true (the file-browser gate above is unchanged), and only
+# the console row takes them.
+ble_pipe_inbound = function_body(bluetooth, "void blePipeConsoleInbound(")
+assert ble_pipe_inbound.count("processBleCommandLine(") == 1
+assert "/*arrivedEncrypted=*/true);" in ble_pipe_inbound
+assert "!blePipeRow(gBLEState->connections[findConnectionSlotByConnIdLocked(rowConnId)])" in ble_pipe_inbound
+assert ble_pipe_inbound.index("bleConnectionEpochMatchesLocked(rowConnId, epoch)") < ble_pipe_inbound.index(
+    "processBleCommandLine(")
+assert ble_pipe_inbound.index("bleMarkActivity(rowConnId);") < ble_pipe_inbound.index(
+    "otaBleHandleEncryptedFrame(rowConnId, bytes, len)")
+assert bluetooth.count("/*arrivedEncrypted=*/true)") == 2  # the SC DATA job and the console stream
 assert "if (bleScEstablished(d->connId))" in required_branch
 assert "bleRawNotifyToSession(d->connId, d->sessionEpoch," in required_branch
 # The Bluetooth security-posture commands share the superadmin tier.

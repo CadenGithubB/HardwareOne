@@ -15,7 +15,8 @@ def main():
     args = parser.parse_args()
     clean = lambda text: re.sub(r'^#include.*\n|^#pragma once\n', '', text, flags=re.M)
     harness = (HERE / 'transcript_harness.cpp').read_text()
-    harness = harness.replace('// INSERT_INTERFACE', clean((SOURCE / 'System_Transcript.h').read_text()))
+    harness = harness.replace('// INSERT_INTERFACE', clean((SOURCE / 'Transcript_TextPolicy.h').read_text()) +
+                              clean((SOURCE / 'System_Transcript.h').read_text()))
     harness = harness.replace('// INSERT_RUNTIME', clean((SOURCE / 'System_Transcript.cpp').read_text()))
     with tempfile.TemporaryDirectory(prefix='hw1-transcript-') as tmp:
         source = Path(tmp) / 'test.cpp'

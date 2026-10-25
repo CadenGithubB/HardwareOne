@@ -132,7 +132,10 @@ static void acceptReply(const Ticket& ticket,bool ok) {
       if (length==strlen(text) && length) {
         if ((doc["offset"]|0U)==0 && v.recent[0])
           TranscriptionUI::appendRecent(v.recent,sizeof(v.recent),"\n",1);
-        TranscriptionUI::appendRecent(v.recent,sizeof(v.recent),text,length);
+        // The receipt below names the raw bytes; the screen shows the display
+        // copy (vocabulary spellings) when the adapter supplied one.
+        const char* display=doc["display"]|text;
+        TranscriptionUI::appendRecent(v.recent,sizeof(v.recent),display,strlen(display));
         pendingAck=command("ack")+" "+String(doc["sequence"]|0U)+" "+
             String(doc["offset"]|0U)+" "+String(length);
       }
@@ -151,7 +154,7 @@ static void acceptReply(const Ticket& ticket,bool ok) {
     }
     v.listOffset=doc["offset"]|0U; v.listNext=doc["nextOffset"]|0U;
     v.more=doc["more"]|false;
-    oledScrollInit(&v.list,nullptr,4);
+    oledScrollInit(&v.list,nullptr,oledVisibleRows(8,0,4));
   } else if (ticket.op==Op::Read) {
     copy(v.text,sizeof(v.text),doc["sttText"]|"");
     v.fileOffset=doc["offset"]|0U; v.fileNext=doc["nextOffset"]|0U;
@@ -179,7 +182,7 @@ static unsigned lines(const char* text) {
 static void drawText(const char* text) {
   unsigned row=0,col=0; int y=OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1); oledDisplay->setCursor(0,y);
-  for(size_t at=0;text[at] && row<v.line+4;) {
+  for(size_t at=0;text[at] && row<v.line+oledVisibleRows(8,0,4);) {
     char ch; at=nextGlyph(text,at,ch);
     if(ch=='\r') continue;
     if(row>=v.line && ch!='\n') oledDisplay->write(ch);
@@ -210,7 +213,7 @@ static void displayTranscriptionHome() {
   char line[22];
   snprintf(line,sizeof(line),"%.21s",v.message[0]?v.message:status);
   oledDisplay->print(line);
-  v.menu.visibleLines=3;
+  v.menu.visibleLines=oledVisibleRows(8,10,3);
   oledScrollRenderSimple(oledDisplay,&v.menu,true,OLED_CONTENT_START_Y+10);
 }
 static void displayTranscriptionLive() {
@@ -246,7 +249,7 @@ static bool menuInput(int,int,uint32_t buttons) {
     case 2: queue(v.saveDefault?"sttsavetranscripts 0":"sttsavetranscripts 1",Op::Toggle); break;
     case 3: case 4:
       v.sd=v.menu.selectedIndex==4; v.count=0; v.more=false; v.listOffset=0;
-      oledScrollInit(&v.list,nullptr,4); listAt(0);
+      oledScrollInit(&v.list,nullptr,oledVisibleRows(8,0,4)); listAt(0);
       requestOLEDMode(OLED_TRANSCRIPTS,"transcription.files"); break;
     case 5:
       // The source is claimed at session start; a change applies next session.
@@ -258,7 +261,7 @@ static bool menuInput(int,int,uint32_t buttons) {
 }
 static bool liveInput(int,int,uint32_t buttons) {
   if(gNavEvents.up && v.line) { --v.line; return true; }
-  if(gNavEvents.down && v.line+4<lines(v.recent)) { ++v.line; return true; }
+  if(gNavEvents.down && v.line+oledVisibleRows(8,0,4)<lines(v.recent)) { ++v.line; return true; }
   if(selected(buttons) && v.active) { queue(command("stop"),Op::Stop); return true; }
   return false;
 }
@@ -284,7 +287,7 @@ static bool fileInput(int,int,uint32_t buttons) {
     return true;
   }
   if(gNavEvents.down || selected(buttons)) {
-    if(v.line+4<lines(v.text)) ++v.line;
+    if(v.line+oledVisibleRows(8,0,4)<lines(v.text)) ++v.line;
     else if(!v.eof && v.fileNext>v.fileOffset) {
       if(v.historyCount==32) {
         memmove(v.history,v.history+1,31*sizeof(v.history[0])); --v.historyCount;
@@ -313,7 +316,7 @@ void prepareTranscriptionData() {
     wipeString(user);
     if(!authed || !v.epoch) return;
     v.entered=true; v.pollAt=0;
-    oledScrollInit(&v.menu,nullptr,3); oledScrollInit(&v.list,nullptr,4);
+    oledScrollInit(&v.menu,nullptr,oledVisibleRows(8,10,3)); oledScrollInit(&v.list,nullptr,oledVisibleRows(8,0,4));
   }
   if (here && v.entered && v.viewMode!=currentOLEDMode) {
     v.viewMode=currentOLEDMode; ++v.viewGeneration;

@@ -140,7 +140,7 @@ void renderWizardPage() {
   const SetupWizardPage page = getWizardCurrentPage();
   const int itemCount = (int)getWizardMenuItemCount(page);
   const int selection = getWizardCurrentSelection();
-  const int maxVisible = 4;
+  const int maxVisible = oledVisibleRows(8, 21 - OLED_CONTENT_START_Y, 4);
   int scrollOffset = getWizardScrollOffset();
   if (selection < scrollOffset) scrollOffset = selection;
   if (selection >= scrollOffset + maxVisible) scrollOffset = selection - maxVisible + 1;

@@ -8,6 +8,7 @@
 #if ENABLE_OLED_DISPLAY
 
 #include <Adafruit_SSD1306.h>
+#include "OLED_Utils.h"
 #include "System_Settings.h"
 #include "System_Battery.h"
 #include "System_Utils.h"
@@ -18,7 +19,7 @@
 
 #if ENABLE_WIFI
 #include <WiFi.h>
-#include "System_WiFi.h"  // wifiRadioOn() — RADIO power axis
+#include "System_WiFi.h"  // wifiRadioDisplayOn() — RADIO power axis
 #endif
 
 #if ENABLE_HTTP_SERVER
@@ -227,7 +228,7 @@ void displayMemoryStatsRendered() {
 // ============================================================================
 // Live Perf Stats (two-phase rendering, self-refreshing)
 // ============================================================================
-// Top-N task CPU% + stack low-watermarks on 128x64, backed directly by
+// Task CPU% + stack low-watermarks on the shared display canvas, backed directly by
 // uxTaskGetSystemState (the same raw API taskstats/perftop use — there is no
 // text parsing). CPU% is a NON-BLOCKING interval delta against the previous
 // 500 ms sample (reportAllTaskStacks' RunSample pattern) — never cmd_perftop's
@@ -243,7 +244,9 @@ void displayMemoryStatsRendered() {
 // up/down (the I2C-diag viewport-scroll pattern). ~20 tasks run on this
 // firmware, so 24 slots cover it; anything beyond is dropped (never seen).
 #define PERF_MAX_TASKS 24
-#define PERF_VISIBLE_ROWS 4
+// Each task row is 9px; reserve one 9px summary row above the list.
+// Preserve the established four-row OLED view, and fill taller canvases.
+#define PERF_VISIBLE_ROWS oledVisibleRows(9, 9, 4)
 // Live-refresh cadence: re-sample task stats twice a second (2 Hz). Both the
 // CPU% interval delta and the on-screen numbers advance at this rate.
 #define PERF_SAMPLE_MS 500
@@ -516,19 +519,24 @@ struct SystemStatusRenderData {
   BatteryState battery;
   bool valid;
 };
-static SystemStatusRenderData systemStatusRenderData = {0};
+EXT_RAM_BSS_ATTR static SystemStatusRenderData systemStatusRenderData = {};  // PSRAM: gathered and drawn on the OLED task
 
 // Gather system status data (called OUTSIDE I2C transaction to avoid blocking gamepad)
 void prepareSystemStatusData() {
-  // Get WiFi data OUTSIDE I2C transaction
+  // Get WiFi data OUTSIDE I2C transaction. This runs every frame and SSID is a
+  // driver query (an RPC to the C6 on the P4): refresh it once a second, and at
+  // once on a new association.
+  static uint32_t sSsidStamp = 0;
+  const bool ssidDue = everyMs(&sSsidStamp, 1000);
+  const bool wasConnected = systemStatusRenderData.wifiConnected;
   systemStatusRenderData.wifiConnected = WiFi.isConnected();
 #if ENABLE_WIFI
-  systemStatusRenderData.radioOn = wifiRadioOn();
+  systemStatusRenderData.radioOn = wifiRadioDisplayOn();
 #else
   systemStatusRenderData.radioOn = false;
 #endif
 
-  if (systemStatusRenderData.wifiConnected) {
+  if (systemStatusRenderData.wifiConnected && (ssidDue || !wasConnected)) {
     String ssid = WiFi.SSID();
     if (ssid.length() > 15) ssid = ssid.substring(0, 15);
     strncpy(systemStatusRenderData.ssid, ssid.c_str(), 15);

@@ -1,4 +1,13 @@
 #include "HAL_Display.h"
+#if DISPLAY_ENABLED
+static_assert(DISPLAY_WIDTH == 128);
+static_assert(DISPLAY_HEADER_HEIGHT == 10 && DISPLAY_FOOTER_HEIGHT == 10);
+#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+static_assert(DISPLAY_HEIGHT == 128 && DISPLAY_CONTENT_HEIGHT == 107);
+#else
+static_assert(DISPLAY_HEIGHT == 64 && DISPLAY_CONTENT_HEIGHT == 43);
+#endif
+#endif
 #include "display_lifecycle_platform.h"
 #include <algorithm>
 #include <cstdio>

@@ -15,7 +15,8 @@
 #include "System_FileManager.h"
 #include "FileBrowser_FileKind.h"   // file classifier shared with the G2 lens
 #include "System_Icons.h"
-#include "System_TextPager.h"       // textWrapInto — shared wrap/sanitize core
+#include "System_TextWrapStream.h"  // shared wrap/sanitize sink for the viewer body
+#include "System_JsonPretty.h"      // JSON re-indenter shared with the lens and web viewers
 #include "System_CaptureCrypto.h"   // reveal sealed captures in the OLED viewer
 #include "System_AuthIdentity.h"    // CommandIdentityScope — composed identity + notif install
 #include "System_User.h"            // AuthContext, SOURCE_LOCAL_DISPLAY
@@ -89,6 +90,7 @@ enum class FileBrowserPendingAction {
   NAVIGATE_UP,
   NAVIGATE_BACK,
   LOAD_VIEW,        // read the selected file into the text viewer
+  LOAD_PRETTY_VIEW, // the same, re-indented as JSON (Pretty View)
   DELETE_SELECTED   // delete the selected file (set only by the confirm dialog)
 };
 static FileBrowserPendingAction fileBrowserPendingAction = FileBrowserPendingAction::NONE;
@@ -96,8 +98,9 @@ static FileBrowserPendingAction fileBrowserPendingAction = FileBrowserPendingAct
 // ============================================================================
 // Per-file action menu + text viewer (LOCAL source only)
 // ============================================================================
-// Pressing A on a regular file opens an action menu (View / Rename / Delete)
-// instead of the old silent no-op. .hwmap still auto-loads into the map, and
+// Pressing A on a regular file opens an action menu (View / Rename / Delete;
+// JSON gets Pretty View / JSON View, as on the lens) instead of the old silent
+// no-op. .hwmap still auto-loads into the map, and
 // picker mode still fires its callback — both take precedence. PEER (remote)
 // files never reach this code: the input handler and renderer branch on
 // FsSource::PEER first, and the wire protocol has no read/rename opcode.
@@ -110,6 +113,7 @@ static FbLevel sFbLevel = FbLevel::LIST;
 // only for display + the file-kind check.
 static char     sFbActionName[FILE_MANAGER_MAX_NAME] = {0};
 static bool     sFbActionViewable = false;
+static bool     sFbActionJson = false;            // Pretty View / JSON View rows
 static bool     sFbRenameActive = false;         // keyboard open for a rename
 static char     sFbDeletePrompt[40] = {0};       // outlives the confirm dialog (raw ptr)
 
@@ -136,11 +140,12 @@ static void fbInitActionScroll() {
 // fbBuildActionRows(), so display / navigation / dispatch can never disagree.
 // KeepSelection preserves the cursor across the per-frame rebuild; the string
 // literals stored by oledScrollAddItem() have program lifetime.
-static int fbBuildActionRows(const char* labels[4]);  // defined below
+static constexpr int FB_ACTION_ROWS_MAX = 5;
+static int fbBuildActionRows(const char* labels[FB_ACTION_ROWS_MAX]);  // defined below
 static void fbPopulateActionScroll() {
   fbInitActionScroll();
   oledScrollClearKeepSelection(&sFbActionScroll);
-  const char* rows[4];
+  const char* rows[FB_ACTION_ROWS_MAX];
   const int n = fbBuildActionRows(rows);
   for (int i = 0; i < n; i++) oledScrollAddItem(&sFbActionScroll, rows[i]);
   oledScrollClampSelection(&sFbActionScroll);
@@ -168,11 +173,46 @@ static int fbViewVisibleLines() {
   return v > 0 ? v : 1;
 }
 
+// Wrap `len` bytes of file text into the viewer body (re-indented through the
+// shared JSON formatter when `pretty`) and index its line starts for the
+// scroll window (CLI-viewer model). Truncation covers both the body filling
+// up and the line table running out before the body ends.
+static void fbFillView(const char* text, size_t len, bool pretty) {
+  TextWrapStream body(sFbViewBody, sizeof(sFbViewBody), FB_VIEW_COLS,
+                      /*continuationIndent=*/0, /*stripControl=*/true);
+  if (pretty) {
+    JsonPrettyFormatter().write(text, len, [&](char c) {
+      body.write(static_cast<uint8_t>(c));
+    });
+  } else {
+    body.write(text, len);
+  }
+  const size_t bodyLen = body.size();
+  constexpr int kMaxLines = (int)(sizeof(sFbViewLineOff) / sizeof(sFbViewLineOff[0]));
+  bool linesFull = false;
+  int lc = 0;
+  sFbViewLineOff[lc++] = 0;
+  for (size_t i = 0; i + 1 < bodyLen; i++) {
+    if (sFbViewBody[i] != '\n') continue;
+    if (lc == kMaxLines) { linesFull = true; break; }
+    sFbViewLineOff[lc++] = (uint16_t)(i + 1);
+  }
+  sFbViewLineCount = lc;
+  sFbViewScroll    = 0;
+  sFbViewTruncated = body.truncated() || linesFull;
+}
+
 // The action-menu rows, built in one place so render / count / dispatch agree.
-// Returns the row count; fills labels[] (cap 4).
-static int fbBuildActionRows(const char* labels[4]) {
+// Returns the row count; fills labels[] (cap FB_ACTION_ROWS_MAX). JSON gets the
+// lens' two views: re-indented first, then the file as stored.
+static int fbBuildActionRows(const char* labels[FB_ACTION_ROWS_MAX]) {
   int n = 0;
-  if (sFbActionViewable) labels[n++] = "View";
+  if (sFbActionJson) {
+    labels[n++] = "Pretty View";
+    labels[n++] = "JSON View";
+  } else if (sFbActionViewable) {
+    labels[n++] = "View";
+  }
   labels[n++] = "Rename";
   labels[n++] = "Delete";
   labels[n++] = "< Back";
@@ -891,9 +931,10 @@ void prepareFileBrowserData() {
             // can't move while a menu/overlay owns input.
             strncpy(sFbActionName, entry.name, sizeof(sFbActionName) - 1);
             sFbActionName[sizeof(sFbActionName) - 1] = '\0';
-            // "View" for text and JSON, from the classifier the G2 lens
-            // shares (images and binaries get Rename/Delete only here).
+            // "View" for text, Pretty/JSON View for JSON, from the classifier
+            // the G2 lens shares (images and binaries get Rename/Delete only).
             sFbActionViewable = fileKindIsReadableText(fileKindForName(entry.name));
+            sFbActionJson = (fileKindForName(entry.name) == FileKind::Json);
             // Fresh entry: start the shared action menu at the top row.
             fbInitActionScroll();
             sFbActionScroll.selectedIndex = 0;
@@ -903,7 +944,10 @@ void prepareFileBrowserData() {
         }
         break;
       }
-      case FileBrowserPendingAction::LOAD_VIEW: {
+      case FileBrowserPendingAction::LOAD_VIEW:
+      case FileBrowserPendingAction::LOAD_PRETTY_VIEW: {
+        const bool pretty =
+            (fileBrowserPendingAction == FileBrowserPendingAction::LOAD_PRETTY_VIEW);
         FileEntry entry;
         if (gOledFileManager->getCurrentItem(entry) && !entry.isFolder) {
           if (entry.size > FB_VIEW_MAX_FILE) {
@@ -918,21 +962,7 @@ void prepareFileBrowserData() {
             // Sealed capture? Reveal for display — the read ran under the
             // OLED browser's guarded identity; the magic line stays visible.
             captureCryptoRevealText(content);
-            bool trunc = false;
-            const size_t len = textWrapInto(sFbViewBody, sizeof(sFbViewBody),
-                                            content.c_str(), FB_VIEW_COLS,
-                                            /*contIndent=*/0, /*stripCtrl=*/true,
-                                            &trunc);
-            // Line-start offsets for the scroll window (CLI-viewer model).
-            constexpr int kMaxLines = (int)(sizeof(sFbViewLineOff) / sizeof(sFbViewLineOff[0]));
-            int lc = 0;
-            sFbViewLineOff[lc++] = 0;
-            for (size_t i = 0; i + 1 < len && lc < kMaxLines; i++) {
-              if (sFbViewBody[i] == '\n') sFbViewLineOff[lc++] = (uint16_t)(i + 1);
-            }
-            sFbViewLineCount = lc;
-            sFbViewScroll    = 0;
-            sFbViewTruncated = trunc;
+            fbFillView(content.c_str(), content.length(), pretty);
             sFbLevel = FbLevel::VIEW;
           } else {
             oledToastShow("Read failed", 2500);
@@ -981,12 +1011,14 @@ void prepareFileBrowserData() {
   fileBrowserRenderData.path[FILE_MANAGER_MAX_PATH - 1] = '\0';
   fileBrowserRenderData.itemCount = gOledFileManager->getItemCount();
   fileBrowserRenderData.selectedIdx = gOledFileManager->getSelectedIndex();
-  fileBrowserRenderData.pageStart = gOledFileManager->getPageStart();
-  fileBrowserRenderData.pageEnd = gOledFileManager->getPageEnd();
+  // Fetch the display viewport rather than the service's default four-row page.
+  const int rows = min(oledVisibleRows(10, 1, 4), FILE_BROWSER_PAGE_CAPACITY);
+  fileBrowserRenderData.pageStart = max(0, fileBrowserRenderData.selectedIdx - rows + 1);
+  fileBrowserRenderData.pageEnd = min(fileBrowserRenderData.itemCount, fileBrowserRenderData.pageStart + rows);
   
   // Pre-fetch all visible items (filesystem I/O happens here)
   int itemsFetched = 0;
-  for (int i = fileBrowserRenderData.pageStart; i < fileBrowserRenderData.pageEnd && i < fileBrowserRenderData.itemCount && itemsFetched < FILE_MANAGER_PAGE_SIZE; i++) {
+  for (int i = fileBrowserRenderData.pageStart; i < fileBrowserRenderData.pageEnd && i < fileBrowserRenderData.itemCount && itemsFetched < FILE_BROWSER_PAGE_CAPACITY; i++) {
     if (gOledFileManager->getItem(i, fileBrowserRenderData.items[itemsFetched])) {
       itemsFetched++;
     }
@@ -996,7 +1028,7 @@ void prepareFileBrowserData() {
   fileBrowserRenderData.selectedIsFolder = false;
   if (fileBrowserRenderData.itemCount > 0) {
     int selectedItemIdx = fileBrowserRenderData.selectedIdx - fileBrowserRenderData.pageStart;
-    if (selectedItemIdx >= 0 && selectedItemIdx < FILE_MANAGER_PAGE_SIZE && selectedItemIdx < itemsFetched) {
+    if (selectedItemIdx >= 0 && selectedItemIdx < FILE_BROWSER_PAGE_CAPACITY && selectedItemIdx < itemsFetched) {
       fileBrowserRenderData.selectedIsFolder = fileBrowserRenderData.items[selectedItemIdx].isFolder;
     }
   }
@@ -1044,7 +1076,7 @@ void displayFileBrowserRendered() {
 
     // READY — render entries
     const int itemHeight = 10;
-    const int maxVisible = 4;
+    const int maxVisible = oledVisibleRows(10, 1, 4);
     int startY = OLED_CONTENT_START_Y + 1;
 
     // Clamp + scroll math
@@ -1117,7 +1149,7 @@ void displayFileBrowserRendered() {
   // Rename keyboard owns the whole content area while active.
   if (oledKeyboardDrawIfActive(oledDisplay)) return;
 
-  // Per-file action menu (View / Rename / Delete / Back) — shared scrolling list
+  // Per-file action menu (View(s) / Rename / Delete / Back) — shared scrolling list
   // (OLEDScrollState) with the filename on a one-line header above it, so the
   // options fit the content area and scroll instead of spilling under the footer.
   if (sFbLevel == FbLevel::ACTION_MENU) {
@@ -1184,7 +1216,7 @@ void displayFileBrowserRendered() {
   const int iconAreaX = 88;       // X position for icon area
   const int iconSize = 32;        // Full size icon for selected item
   const int itemHeight = 10;      // Height per item
-  const int maxVisibleItems = 4;  // Items visible at once
+  const int maxVisibleItems = min(oledVisibleRows(10, 1, 4), FILE_BROWSER_PAGE_CAPACITY);
   const int startY = OLED_CONTENT_START_Y + 1;  // Start 1px below header for even spacing
   
   // Header is now drawn globally
@@ -1200,14 +1232,14 @@ void displayFileBrowserRendered() {
     scrollOffset = fileBrowserRenderData.selectedIdx - maxVisibleItems + 1;
   }
   
-  // === File List: Show 4 items (text list on left) ===
+  // === File List (text list on left) ===
   int itemIdx = 0;
   for (int i = 0; i < maxVisibleItems && (scrollOffset + i) < fileBrowserRenderData.itemCount; i++) {
     int idx = scrollOffset + i;
     int y = startY + i * itemHeight;
     
     // Get the item from pre-fetched data
-    if (idx >= fileBrowserRenderData.pageStart && idx < fileBrowserRenderData.pageEnd && itemIdx < FILE_MANAGER_PAGE_SIZE) {
+    if (idx >= fileBrowserRenderData.pageStart && idx < fileBrowserRenderData.pageEnd && itemIdx < FILE_BROWSER_PAGE_CAPACITY) {
       FileEntry& entry = fileBrowserRenderData.items[itemIdx];
       itemIdx++;
       
@@ -1238,7 +1270,7 @@ void displayFileBrowserRendered() {
   if (fileBrowserRenderData.itemCount > 0) {
     // Get selected item
     int selectedItemIdx = fileBrowserRenderData.selectedIdx - fileBrowserRenderData.pageStart;
-    if (selectedItemIdx >= 0 && selectedItemIdx < FILE_MANAGER_PAGE_SIZE) {
+    if (selectedItemIdx >= 0 && selectedItemIdx < FILE_BROWSER_PAGE_CAPACITY) {
       FileEntry& selectedEntry = fileBrowserRenderData.items[selectedItemIdx];
       
       // Center the icon and its one-line label together between header/footer.
@@ -1407,14 +1439,16 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
     // Rebuild first so itemCount/labels are current for nav-clamping + dispatch,
     // then let the shared scroll helper consume up/down (with wrap).
     fbPopulateActionScroll();
-    const char* rows[4];
+    const char* rows[FB_ACTION_ROWS_MAX];
     const int n = fbBuildActionRows(rows);
     if (oledScrollHandleNav(&sFbActionScroll)) return true;
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
       int sel = sFbActionScroll.selectedIndex;
       if (sel < 0 || sel >= n) sel = 0;
       const char* pick = rows[sel];
-      if (strcmp(pick, "View") == 0) {
+      if (strcmp(pick, "Pretty View") == 0) {
+        fileBrowserPendingAction = FileBrowserPendingAction::LOAD_PRETTY_VIEW;
+      } else if (strcmp(pick, "View") == 0 || strcmp(pick, "JSON View") == 0) {
         fileBrowserPendingAction = FileBrowserPendingAction::LOAD_VIEW;
       } else if (strcmp(pick, "Rename") == 0) {
         if (!oledGuestBlocksMutate()) {

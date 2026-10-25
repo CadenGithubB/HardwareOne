@@ -1,5 +1,6 @@
 // Production definitions are inserted by test_g2_files_psram.py at every run.
 #include "System_PsramBuffer.h"
+#include "System_JsonPretty.h"
 #include "System_TextPager.h"
 #include "System_TextWrapStream.h"
 #include <algorithm>
@@ -351,42 +352,31 @@ static void testViewer() {
   std::string pretty;
   serializeJsonPretty(reference, pretty);
   check(showTextFileViaWidget(true), "pretty viewer succeeds");
-  check(std::string(gFilesTextBody) == wrapped(pretty), "streamed pretty matches prior pretty-then-wrap");
-  check(jsonCalls > 0 && !strcmp(gFilesTextTitle, "Pretty test.json"), "JSON allocator and title preserved");
-  for (const std::string& input : {
-      std::string("{\"value\":\"before") + '\0' + "after\"}",
-      std::string("{\"value\":1}") + '\0' + "trailing",
-      std::string("{\"value\":") + '\0' + "false}",
-      std::string("{\"truncated\": [1,2,")}) {
-    reset();
-    fileContents = input;
-    String oldInput;
-    check(oldInput.concat(input.data(), static_cast<unsigned int>(input.size())), "legacy JSON fixture copied");
-    JsonDocument oldDocument;
-    const auto oldError = deserializeJson(oldDocument, oldInput);
-    std::string oldDisplay;
-    if (oldError) {
-      oldDisplay = "// Pretty parse failed: " + std::string(oldError.c_str()) +
-          "\n// Falling back to raw JSON text\n\n" + input;
-    } else {
-      serializeJsonPretty(oldDocument, oldDisplay);
-    }
-    check(showTextFileViaWidget(true) && std::string(gFilesTextBody) == wrapped(oldDisplay),
-          "embedded-NUL/truncated JSON matches actual legacy Arduino String reader");
-  }
+  check(std::string(gFilesTextBody) == wrapped(pretty), "pretty view keeps ArduinoJson's layout, wrapped");
+  check(jsonCalls == 0 && !strcmp(gFilesTextTitle, "Pretty test.json"),
+        "pretty view allocates no JSON document; title preserved");
+  // Malformed JSON is laid out as far as its brackets go, with no error page.
   reset();
   fileContents = "{\"partial\": [1,2,";
-  const auto error = deserializeJson(reference, fileContents);
-  const std::string fallback = "// Pretty parse failed: " + std::string(error.c_str()) +
-      "\n// Falling back to raw JSON text\n\n" + fileContents;
-  check(showTextFileViaWidget(true) && std::string(gFilesTextBody) == wrapped(fallback),
-        "malformed JSON retains full raw fallback and prefix");
+  check(showTextFileViaWidget(true) &&
+            std::string(gFilesTextBody) == "{\n  \"partial\": [\n    1,\n    2,\n    ",
+        "truncated JSON is still re-indented");
+  // The whole read length reaches the formatter; wrapping stops at a NUL.
+  for (const std::string& input : {
+      std::string("{\"value\":\"before") + '\0' + "after\"}",
+      std::string("{\"value\":1}") + '\0' + "trailing"}) {
+    reset();
+    fileContents = input;
+    std::string expected;
+    JsonPrettyFormatter().write(input.data(), input.size(), [&](char c) { expected += c; });
+    check(showTextFileViaWidget(true) && std::string(gFilesTextBody) == wrapped(expected),
+          "embedded-NUL JSON stops at the NUL like the raw view");
+  }
   reset();
   fileContents = "{\"a\":1}";
   failAfterRead = true;
-  check(showTextFileViaWidget(true), "JSON OOM still shows raw fallback");
-  check(std::string(gFilesTextBody) == wrapped("// Pretty parse failed: NoMemory\n// Falling back to raw JSON text\n\n" + fileContents),
-        "JSON OOM fallback is explicit and original input unchanged");
+  check(showTextFileViaWidget(true) && std::string(gFilesTextBody) == "{\n  \"a\": 1\n}",
+        "pretty view needs no heap after the read");
   reset();
   fileContents = "fallback";
   failExternal = true;

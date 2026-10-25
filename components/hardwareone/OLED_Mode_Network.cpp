@@ -85,10 +85,15 @@ static NetworkRenderData networkRenderData = {};
 
 void prepareNetworkData() {
 #if ENABLE_WIFI
+  // Runs every frame. SSID and RSSI each query the driver, an RPC to the C6 on
+  // the P4, so refresh them once a second, and at once on a new association.
+  static uint32_t sDetailsStamp = 0;
+  const bool detailsDue = everyMs(&sDetailsStamp, 1000);
+  const bool wasConnected = networkRenderData.wifiConnected;
   networkRenderData.wifiConnected = WiFi.isConnected();
-  networkRenderData.radioOn = wifiRadioOn();
+  networkRenderData.radioOn = wifiRadioDisplayOn();
 
-  if (networkRenderData.wifiConnected) {
+  if (networkRenderData.wifiConnected && (detailsDue || !wasConnected)) {
     String ssid = WiFi.SSID();
     if (ssid.length() > 15) ssid = ssid.substring(0, 15);
     strncpy(networkRenderData.ssid, ssid.c_str(), 15);
@@ -348,7 +353,7 @@ static TransportSessionEpoch sWifiAddEpoch = kNoTransportSessionEpoch;
 // and the Power submenus (oledScrollRenderSimple) — no separate popup mechanism.
 EXT_RAM_BSS_ATTR static OLEDScrollState sSavedNetScroll;
 static bool sSavedNetInitialized = false;
-static WifiNetworkSnapshot sSavedNetSnapshot;
+EXT_RAM_BSS_ATTR static WifiNetworkSnapshot sSavedNetSnapshot;  // PSRAM: presentation copy, no credentials
 static bool sSavedNetSnapshotValid = false;
 EXT_RAM_BSS_ATTR static OLEDScrollState sWifiScanScroll;
 static bool sWifiScanInitialized = false;

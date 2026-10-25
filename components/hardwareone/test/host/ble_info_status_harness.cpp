@@ -56,6 +56,9 @@ class TestAllocator : public ArduinoJson::Allocator {
 static TestAllocator jsonAllocator;
 #define PSRAM_JSON_DOC(name) JsonDocument name(&jsonAllocator)
 using TransportSessionEpoch = uint32_t;
+#ifndef ENABLE_BLE_PHONE_PIPE
+#define ENABLE_BLE_PHONE_PIPE 0
+#endif
 // INSERT_TYPES
 
 static BLESystemState state{};
@@ -64,6 +67,8 @@ static struct {
   String bleDeviceName = "Bench \"Bluetooth\"\\unit\n";
   int bleTxPower = 5, bleMode = 0;
   bool bleAutoStart = true, bleRequireAuth = true;
+  bool bleConsoleOnPipe = true;
+  String bleSecureChannelSecret;
 } gSettings;
 static bool secureRequired = true;
 static std::atomic<unsigned> secureCalls{0};
@@ -75,11 +80,16 @@ static TickType_t pdMS_TO_TICKS(TickType_t value) { return value; }
 static std::recursive_timed_mutex lifecycleMutex;
 static void* sBleLifecycleMutex = &lifecycleMutex;
 static std::atomic<unsigned> takeCalls{0}, giveCalls{0};
-static std::atomic<TickType_t> lastWait{0};
+// Takes that only try the lock (0 ms): the never-blocking console view.
+static std::atomic<unsigned> tryTakes{0};
+// The last wait of any take, and of a take that may wait (not a try).
+static std::atomic<TickType_t> lastWait{0}, lastBoundedWait{0};
 static bool rejectLock = false, mutateOnUnlock = false;
 static thread_local unsigned lockDepth = 0;
 static int xSemaphoreTakeRecursive(void*, TickType_t wait) {
   ++takeCalls; lastWait = wait;
+  if (wait == 0) ++tryTakes;
+  else lastBoundedWait = wait;
   if (rejectLock) return 0;
   lifecycleMutex.lock(); ++lockDepth;
   return pdTRUE;
@@ -92,6 +102,28 @@ static void xSemaphoreGiveRecursive(void*) {
     state.totalConnections = 999;
   }
   --lockDepth; ++giveCalls; lifecycleMutex.unlock();
+}
+// The G2 client host's console (Bluetooth.cpp): the mode and slot the console
+// view, the write callback, bledisconnect and the stream commands read. The
+// write fast path and the plan applier run in test_ble_console_phone_link;
+// here they stand in for both modes.
+static std::atomic<hw1console::Mode> sBleConsoleMode{hw1console::Mode::Server};
+static hw1console::Mode bleConsoleMode() { return sBleConsoleMode.load(); }
+// Bluetooth.cpp's client-host check (folds away without the pipe).
+static inline bool bleConsoleClientHost() {
+  return ENABLE_BLE_PHONE_PIPE && sBleConsoleMode.load() == hw1console::Mode::ClientRegistered;
+}
+static hw1console::Attach sBleConsoleAttach;
+static unsigned admitCalls = 0, consolePlans = 0;
+static bool bleConsoleAdmitWriteLocked(uint16_t) {
+  check(lockDepth > 0, "the console admits a write under the lifecycle guard");
+  ++admitCalls;
+  return sBleConsoleMode.load() != hw1console::Mode::ClientRegistered;
+}
+static void bleConsoleApplyLocked(const hw1console::Plan& plan) {
+  check(lockDepth > 0, "a console plan is applied under the lifecycle guard");
+  ++consolePlans;
+  sBleConsoleAttach = plan.next;
 }
 static uint32_t nowMs = 10000;
 // The event stream stamps its JSON with millis() outside any guard.
@@ -152,7 +184,19 @@ struct BLEDevice {
   static void startAdvertising() { ++advertisingStarts; }
   static void stopAdvertising() { ++advertisingStops; }
 };
-static void* pAdvertising = &state;
+// The advertising object the re-arm helper starts; the owner's flag beside it.
+struct BLEAdvertising {
+  bool start() { ++advertisingStarts; return true; }
+};
+static BLEAdvertising advertisingObject;
+static BLEAdvertising* pAdvertising = &advertisingObject;
+static std::atomic<bool> sBleAdvertising{false};
+static bool bleServerUp() { return gBLEState && gBLEState->initialized; }  // the shipped flag's meaning
+// The console view's never-blocking fallback copy.
+using portMUX_TYPE = std::mutex;
+#define portMUX_INITIALIZER_UNLOCKED {}
+#define portENTER_CRITICAL(mux) (mux)->lock()
+#define portEXIT_CRITICAL(mux) (mux)->unlock()
 // GATT server double for bledisconnect: BLEServer::disconnect(connId) hands the
 // id to esp_ble_gatts_close. Records each id and whether the lifecycle guard was
 // held when the close was issued.
@@ -173,7 +217,8 @@ static constexpr int ESP_OK = 0, SOURCE_INTERNAL = 1, HTTPD_RESP_USE_STRLEN = -1
 // Stream CLI and data-service boundaries. sendBLEResponse is the console-mirror
 // sender `blesend` uses; the mirror-recipient collector, the epoch fence and the
 // GATT sender are the boundaries of the directed stream delivery.
-static void cliHint(const char*) {}
+static std::vector<std::string> cliHints;  // `Hint:` lines, in order
+static void cliHint(const char* text) { cliHints.emplace_back(text ? text : ""); }
 static std::vector<std::string> mirrorSent;
 static bool mirrorAccept = true;
 static bool sendBLEResponse(const char* data, size_t len, bool blocking = true) {
@@ -265,6 +310,68 @@ static bool g2ConnectionStatusSnapshot(G2ConnectionStatus* out) {
   *out = g2Connection;
   return true;
 }
+// bleLinkStatus() inputs other than the console server (read from gBLEState).
+static bool g2ClientUp = false;
+static bool isG2ClientInitialized() { return g2ClientUp; }
+static bool pipeActive = false, pipeStandalone = false, pipeReady = false;
+static const char* pipeLabel = "stopped";
+// Without the pipe, BLE_PhonePipe.h's stubs report it stopped.
+static bool phonePipeActive() { return ENABLE_BLE_PHONE_PIPE && pipeActive; }
+static bool phonePipeStandalone() { return phonePipeActive() && pipeStandalone; }
+static bool phonePipeReady() { return phonePipeActive() && pipeReady; }
+// The shared client stack (BLE_CentralStack.cpp) and the HAL, as blestatus
+// reads them for its "Bluetooth:" line / JSON `host`: nothing is faulted here,
+// the stack is up only with a client runtime, and with no host the HAL is absent.
+static bool bleStackLifecycleFaulted() { return false; }
+static bool bleStackReady() { return g2ClientUp; }
+struct BluetoothHalStatus { bool absent = true; bool hostAbsent() const { return absent; } };
+static BluetoothHalStatus bluetoothHalStatus() {
+  // bleServerUp() is the harness's own read of the shipped flag: the production
+  // isBleServerInitialized() would take the lifecycle guard a second time here.
+  BluetoothHalStatus s; s.absent = !(bleServerUp() || bleStackReady() || phonePipeActive()); return s;
+}
+static bool phonePipeEnrolling() { return false; }
+static uint8_t phonePipeStep() { return 0; }  // hw1link::PipeStep::Idle
+static const char* phonePipeStatus() { return pipeLabel; }
+#if !TEST_BASELINE
+// The phone link block's inputs (phone link v2; BLE_LinkStatus.cpp's reader
+// runs in test_phone_status): the cases set the stream console and the secret
+// kind; READY and the console setting follow the state above.
+static hw1link::PhoneLinkInputs phoneLink;
+static hw1link::PhoneLinkInputs bleLinkPhoneInputs() {
+  hw1link::PhoneLinkInputs in = phoneLink;
+  in.ready = phonePipeReady();
+  in.consoleEnabled = gSettings.bleConsoleOnPipe;
+  return in;
+}
+// The owner's summary the full block reads its end counts from.
+static bool phoneSummaryKnown = false;
+static PhonePipeLinkSummary phoneSummary;
+static bool phonePipeLinkSummary(PhonePipeLinkSummary* out) {
+  if (out) *out = phoneSummaryKnown ? phoneSummary : PhonePipeLinkSummary{};
+  return ENABLE_BLE_PHONE_PIPE && phoneSummaryKnown;
+}
+#endif
+#if ENABLE_BLE_PHONE_PIPE
+static bool phoneEnrolled = false;
+static unsigned phoneObjectCalls = 0;
+static bool blePeerReconnectSnapshot(BlePeerKind kind, BlePeerReconnectSnapshot& out) {
+  check(kind == BLE_PEER_PHONE, "the link reads only the phone's enrollment");
+  out = BlePeerReconnectSnapshot{};
+  out.hasSavedTarget = phoneEnrolled;
+  return true;
+}
+// The phone object's owner (BLE_PhoneStatus.cpp) has its own host test.
+static bool phoneBuildStatusJson(JsonObject out) {
+  ++phoneObjectCalls;
+  if (out.isNull()) return false;
+  out["schema"] = 2;
+  return true;
+}
+struct BleLinkStatus;
+// The handler passes the one link reading it took (checked in the .py).
+static bool phoneBuildStatusJson(JsonObject out, const BleLinkStatus&) { return phoneBuildStatusJson(out); }
+#endif
 static bool g2ControlStatusSnapshot(G2ControlStatus* out) {
   *out = {};
   out->revision = 7; out->rightGeneration = 11;
@@ -306,8 +413,15 @@ static void populate() {
   state.connections[0].authed = true; state.connections[0].user = "Unknown";
   state.connections[2].authed = false; state.connections[2].user = "";
 }
-static void checkSchema(JsonVariantConst doc, bool initialized) {
-  check(doc.as<JsonObjectConst>().size() == 13, "BLE schema contains exactly the characterized fields");
+// bleinfo json adds the phone link block beside buildBLEInfoJson's 13 keys in a
+// pipe build; buildBLEInfoJson itself (also /api/ble/status `ble`) never has it.
+static constexpr bool kPhoneBlock = ENABLE_BLE_PHONE_PIPE && !TEST_BASELINE;
+static void checkSchema(JsonVariantConst doc, bool initialized, bool cli = false) {
+  const bool block = cli && kPhoneBlock;
+  check(doc["phoneLink"].is<JsonObjectConst>() == block,
+        "the phone link block is bleinfo json's own, in pipe builds only");
+  check(doc.as<JsonObjectConst>().size() == 13u + (block ? 1u : 0u),
+        "BLE schema contains exactly the characterized fields");
   check(doc["schema"] == 1 && doc["deviceName"] == gSettings.bleDeviceName,
         "schema version and escaped device name preserved");
   check(doc["txPower"] == 5 && doc["autoStart"] == true && doc["requireAuth"] == true &&
@@ -320,20 +434,35 @@ static void checkSchema(JsonVariantConst doc, bool initialized) {
           doc["clients"].as<JsonArrayConst>().size() == 0, "uninitialized live fields empty");
   }
 }
+// The CLI output every build prints alike: bleinfo without its phone link
+// block, which a pipe build ends the text with and adds to the JSON.
+static std::string sameInEveryBuild(JsonDocument doc) {
+  check(doc["phoneLink"].is<JsonObject>() == kPhoneBlock, "bleinfo json phone link block");
+  doc.remove("phoneLink");
+  return jsonString(doc);
+}
+static std::string sameInEveryBuild(const char* reply) {
+  std::string text(reply);
+  const size_t at = text.find("\nPhone link: ");
+  check((at != std::string::npos) == kPhoneBlock && text.find("Phone link: ", at + 2) == std::string::npos,
+        "bleinfo ends with one phone link block, in pipe builds only");
+  if (at != std::string::npos) text.erase(at);
+  return text;
+}
 static void characterize() {
   psAllocAllowed = false;
   check(std::strcmp(cmd_bleinfo("json"), "{\"error\":\"oom\"}") == 0,
         "CLI initial allocation failure explicit");
   psAllocAllowed = true;
   gBLEState = nullptr;
-  JsonDocument empty = parsed(cmd_bleinfo("json")); checkSchema(empty.as<JsonVariantConst>(), false);
-  std::cout << jsonString(empty) << '\n';
-  std::cout << cmd_bleinfo("") << '\n';
+  JsonDocument empty = parsed(cmd_bleinfo("json")); checkSchema(empty.as<JsonVariantConst>(), false, true);
+  std::cout << sameInEveryBuild(empty) << '\n';
+  std::cout << sameInEveryBuild(cmd_bleinfo("")) << '\n';
   populate();
   for (BLEConnectionState value : {BLE_STATE_IDLE, BLE_STATE_ADVERTISING, BLE_STATE_SCANNING,
                                    BLE_STATE_CONNECTING, BLE_STATE_CONNECTED, BLE_STATE_DISCONNECTING}) {
     state.connectionState = value;
-    JsonDocument doc = parsed(cmd_bleinfo("json")); checkSchema(doc.as<JsonVariantConst>(), true);
+    JsonDocument doc = parsed(cmd_bleinfo("json")); checkSchema(doc.as<JsonVariantConst>(), true, true);
     check(doc["clients"].size() == 2 && doc["clients"][0]["connId"] == 7 &&
           doc["clients"][1]["connId"] == 9, "active sparse slots retain order and IDs");
     check(doc["clients"][0]["authed"] == true && doc["clients"][0]["user"] == "Unknown" &&
@@ -343,15 +472,15 @@ static void characterize() {
           doc["clients"][1]["mac"] == "14:15:16:17:18:19", "MAC stack buffers copied");
     check(doc["clients"][0]["since"] == 9 && doc["clients"][1]["since"] == 7,
           "connection age and ordering preserved");
-    std::cout << jsonString(doc) << '\n';
+    std::cout << sameInEveryBuild(doc) << '\n';
   }
-  std::cout << cmd_bleinfo("") << '\n';
+  std::cout << sameInEveryBuild(cmd_bleinfo("")) << '\n';
   populate(); state.connections[0].user = "user \"quote\"\\slash\n";
   nowMs = 30; state.connections[0].connectedSince = 0xfffffc18u;
   JsonDocument wrap = parsed(cmd_bleinfo("json"));
   check(wrap["clients"][0]["since"] == 1 &&
         wrap["clients"][0]["user"] == state.connections[0].user, "age wraparound and username escaping");
-  std::cout << jsonString(wrap) << '\n';
+  std::cout << sameInEveryBuild(wrap) << '\n';
   nowMs = 10000; populate();
 }
 
@@ -376,22 +505,136 @@ static void writerChecks() {
   interface.onWrite(&characteristic, &param);
   check(processed == 1, "failed callback admission cannot access state or dispatch");
   rejectLock = false; populate();
-  state.connectionState = BLE_STATE_IDLE;
+  state.connectionState = BLE_STATE_IDLE; state.activeConnectionCount = 0;
   unsigned takes = takeCalls;
   check(startBLEAdvertising() && state.connectionState == BLE_STATE_ADVERTISING &&
-        advertisingStarts == 1 && takeCalls == takes + 1 && lockDepth == 0,
+        sBleAdvertising && advertisingStarts == 1 && takeCalls == takes + 1 && lockDepth == 0,
         "advertising start publishes state under lifecycle guard");
   takes = takeCalls;
   stopBLEAdvertising();
-  check(state.connectionState == BLE_STATE_IDLE && advertisingStops == 1 &&
+  check(state.connectionState == BLE_STATE_IDLE && !sBleAdvertising && advertisingStops == 1 &&
         takeCalls == takes + 1 && lockDepth == 0,
         "advertising stop publishes state under lifecycle guard");
-  state.connectionState = BLE_STATE_CONNECTED;
-  check(!startBLEAdvertising() && advertisingStarts == 1, "already-connected advertising behavior preserved");
+  // A connected app no longer hides the device: advertising re-arms while
+  // another app fits, leaving the connected state; a full console refuses.
+  state.connectionState = BLE_STATE_CONNECTED; state.activeConnectionCount = 2;
+  check(startBLEAdvertising() && sBleAdvertising && advertisingStarts == 2 &&
+        state.connectionState == BLE_STATE_CONNECTED, "advertising re-arms beside a connected app");
+  stopBLEAdvertising();
+  check(!sBleAdvertising && advertisingStops == 2 && state.connectionState == BLE_STATE_CONNECTED,
+        "advertising stop leaves the connected state");
+  state.activeConnectionCount = BLE_MAX_CONNECTIONS;
+  check(!startBLEAdvertising() && !sBleAdvertising && advertisingStarts == 2,
+        "a full console does not advertise");
   state.initialized = false;
   check(!startBLEAdvertising(), "uninitialized advertising remains refused");
   stopBLEAdvertising();
   populate();
+}
+
+// The bluetoothMode setting names each boot role by the role it starts, in
+// BLE_LinkStatusCore.h's words, and offers the client role only when a client
+// device (glasses or phone pipe) is compiled in; the phone-client mode is gone.
+static void modeChoiceChecks() {
+  std::string fromRoles;
+  for (int mode = 0; mode <= 1; ++mode) {
+    if (mode == 1 && !ENABLE_G2_GLASSES && !ENABLE_BLE_PHONE_PIPE) continue;
+    if (!fromRoles.empty()) fromRoles += ",";
+    fromRoles += std::to_string(mode) + "|" +
+                 hw1link::roleText(hw1link::roleOfMode(mode, ENABLE_BLE_PHONE_PIPE));
+  }
+  const char* shown = ENABLE_BLE_PHONE_PIPE ? "0|App console,1|Glasses+pipe"
+                    : ENABLE_G2_GLASSES ? "0|App console,1|Glasses" : "0|App console";
+  check(fromRoles == kBleModeChoices && fromRoles == shown,
+        "bluetoothMode choices are not the roles their modes start");
+  check(kBleModeMaximum == ((ENABLE_G2_GLASSES || ENABLE_BLE_PHONE_PIPE) ? 1 : 0),
+        "bluetoothMode maximum is not the highest mode this build runs");
+}
+
+// The app console view behind the link words: app clients only (peer links
+// excluded), signed in while a logged-in user holds one, and a busy lifecycle
+// lock gives the last reading instead of waiting.
+static void consoleViewChecks() {
+  populate(); sBleAdvertising = true;
+  state.connections[2].deviceType = BLE_DEVICE_RING;
+  const unsigned gives = giveCalls;
+  lastWait = portMAX_DELAY;
+  BleConsoleView view = bleConsoleView();
+  check(view.up && view.advertising && view.clients == 1 && view.signedIn &&
+        lastWait == 0 && giveCalls == gives + 1 && lockDepth == 0,
+        "console view counts app clients only and never waits");
+  rejectLock = true; state.connections[0].authed = false;
+  view = bleConsoleView();
+  check(view.up && view.clients == 1 && view.signedIn, "a busy lock gives the last reading");
+  rejectLock = false;
+  view = bleConsoleView();
+  check(view.clients == 1 && !view.signedIn, "a free lock reads again");
+  state.initialized = false;
+  view = bleConsoleView();
+  check(!view.up && view.clients == 0 && !isBleServerInitialized() && !view.registered &&
+            !view.attachable && !view.attached,
+        "a stopped console is down");
+#if ENABLE_BLE_PHONE_PIPE
+  // The G2 client host: registered, never up or advertising; the phone pipe's
+  // link holds its one slot, typed Phone; the setting and blesecret are read.
+  populate(); sBleAdvertising = true;
+  state.initialized = false;
+  for (BLEConnection& c : state.connections) c.active = false;
+  sBleConsoleMode = hw1console::Mode::ClientRegistered;
+  gSettings.bleSecureChannelSecret = "Pass-phrase1!";
+  view = bleConsoleView();
+  check(!view.up && !view.advertising && view.registered && view.attachable && !view.attached &&
+            view.clients == 0 && view.secret,
+        "the client host's console view (registered, waiting) is wrong");
+  state.connections[1].active = true; state.connections[1].connId = 3;
+  state.connections[1].deviceType = BLE_DEVICE_PHONE;
+  state.connections[1].authed = true; state.connections[1].user = "alice";
+  // A slot no app has joined yet (the pipe went READY) is no client.
+  state.connections[1].authed = false; state.connections[1].user = "";
+  sBleConsoleAttach.slot = hw1console::Slot{true, 5, 3, false};
+  view = bleConsoleView();
+  check(!view.attached && view.clients == 0 && !view.signedIn,
+        "the client host counted a slot no app has joined as a client");
+  state.connections[1].authed = true; state.connections[1].user = "alice";
+  sBleConsoleAttach.slot.joined = true;
+  view = bleConsoleView();
+  check(view.attached && view.clients == 1 && view.signedIn && !view.up && !view.advertising,
+        "the client host's joined slot is not one signed-in client");
+  gSettings.bleConsoleOnPipe = false; gSettings.bleSecureChannelSecret = "";
+  view = bleConsoleView();
+  check(view.registered && !view.attachable && !view.secret, "bleconsole off or no blesecret not seen");
+  gSettings.bleConsoleOnPipe = true;
+  // Phone link v2: the console stream's own row counts beside a design-A slot
+  // no app has joined (which still does not), and is the one signed in.
+  sBleConsoleAttach.slot.joined = false;
+  state.connections[1].authed = false; state.connections[1].user = "";
+  BLEConnection& row = state.connections[3];
+  row.active = true; row.connId = 0x8007; row.deviceType = BLE_DEVICE_PHONE; row.pipeConsole = true;
+  row.authed = true; row.user = "bob";
+  view = bleConsoleView();
+  check(view.registered && !view.attached && view.clients == 1 && view.signedIn,
+        "the client host did not count the console stream's row alone");
+  // Phone-client mode: no server and no client host, the pipe holds the state.
+  sBleConsoleMode = hw1console::Mode::Off;
+  view = bleConsoleView();
+  check(!view.up && !view.registered && view.clients == 1 && view.signedIn,
+        "phone-client mode did not count the console stream's row");
+  row.authed = false; row.user = "";
+  view = bleConsoleView();
+  check(view.clients == 1 && !view.signedIn, "a signed-out stream row is still one session");
+  row.pipeConsole = false;  // any other row there is no app
+  view = bleConsoleView();
+  check(view.clients == 0, "phone-client mode counted a row that is not the stream's");
+  row = BLEConnection{};
+#else
+  // Without the pipe the client host never registers a console, whatever the mode reads.
+  sBleConsoleMode = hw1console::Mode::ClientRegistered;
+  view = bleConsoleView();
+  check(!view.registered && !view.attachable && !view.attached, "a build without the pipe shows a phone-link console");
+#endif
+  sBleConsoleMode = hw1console::Mode::Server;
+  sBleConsoleAttach = hw1console::Attach{};
+  sBleAdvertising = false; populate();
 }
 
 // blestatus / bleread render the guarded snapshot bleinfo json uses: the same
@@ -464,6 +707,18 @@ static void statusSameClients(const char* label) {
   }
 }
 
+// The phone link block blestatus and bleinfo end their link lines with in a
+// pipe build ("" otherwise), for the inputs these cases leave: no secret, the
+// console setting on, nothing ended.
+static std::string phoneBlock(const char* state, bool paired = false,
+                              const char* console = "needs a device code") {
+  if (!kPhoneBlock) return "";
+  return std::string("\nPhone link: ") + state + "\n  Paired: " + (paired ? "yes" : "no") +
+         " (no secret)\n  Console: " + console + "\n  Relay: " +
+         (pipeReady && pipeActive ? "off" : "unknown") +
+         "\n  Streams: relay 0/2, console 0/1\n  Ended: 0";
+}
+
 static void blestatusChecks() {
   millisGuardRequired = false;
   // S1: a logged-in user named "Unknown", a logged-in "alice" and an anonymous
@@ -481,17 +736,22 @@ static void blestatusChecks() {
   }
 
   // S2: each form takes and releases the lifecycle guard once, with the bounded
-  // 100 ms budget, and reads connection age inside it.
+  // 100 ms budget, and reads connection age inside it. The link lines' console
+  // view also tries the lock once, without waiting.
   for (const char* args : {"json", ""}) {
     statusTable();
-    const unsigned takes = takeCalls, gives = giveCalls;
-    lastWait = 0; unguardedMillis = 0;
+    const unsigned takes = takeCalls, gives = giveCalls, tries = tryTakes;
+    lastWait = 0; lastBoundedWait = 0; unguardedMillis = 0;
     cmd_blestatus(args);
     const std::string form = std::string("S2 `blestatus") + (*args ? " json" : "") + "`: ";
-    statusExpect(takeCalls - takes == 1 && giveCalls - gives == 1 && lockDepth == 0,
-                 form + "reads gBLEState without the lifecycle guard (takes " +
-                 std::to_string(takeCalls - takes) + ", releases " + std::to_string(giveCalls - gives) + ")");
-    statusExpect(lastWait == 100, form + "guard wait should be 100 ms; got " + std::to_string(lastWait));
+    const unsigned bounded = takeCalls - takes - (tryTakes - tries);
+    statusExpect(bounded == 1 && tryTakes - tries == 1 && giveCalls - gives == 2 && lockDepth == 0,
+                 form + "reads gBLEState without the lifecycle guard, or the console view waits (takes " +
+                 std::to_string(takeCalls - takes) + ", tries " + std::to_string(tryTakes - tries) +
+                 ", releases " + std::to_string(giveCalls - gives) + ")");
+    statusExpect(lastBoundedWait == 100 && lastWait == 0,
+                 form + "guard wait should be 100 ms and the console view's 0; got " +
+                 std::to_string(lastBoundedWait) + " / " + std::to_string(lastWait));
     statusExpect(unguardedMillis == 0,
                  form + "connection age read outside the lifecycle guard (" +
                  std::to_string(unguardedMillis.load()) + " reads)");
@@ -533,9 +793,10 @@ static void blestatusChecks() {
   // S5: the text form keeps its lines and format.
   statusTable();
   const std::string text = cmd_blestatus("");
-  const char* expectedText =
-      "BLE Status: connected\n"
-      "Active connections: 3/4\n"
+  const std::string expectedText =
+      "Role: App console\n"
+      "App console: app signed in\n"
+      "  Clients: 3/4, advertising off" + phoneBlock("off") + "\n"
       "[0] Unknown\n    MAC: 00:01:02:03:04:05 | 9 sec | 10 cmds\n"
       "[1] alice\n    MAC: 31:32:33:34:35:36 | 6 sec | 4 cmds\n"
       "[2] Unknown\n    MAC: 14:15:16:17:18:19 | 7 sec | 12 cmds\n"
@@ -544,24 +805,41 @@ static void blestatusChecks() {
       "Responses sent: 23";
   statusExpect(text == expectedText, "S5 `blestatus` text changed; got:\n" + text);
 
-  // S6: not initialized keeps the existing replies; with no lifecycle mutex
-  // blestatus agrees with bleinfo json and reads nothing.
-  const char* notInitJson = "{\"schema\":1,\"initialized\":false}";
-  const char* notInitText = "Error: Bluetooth not initialized. Run 'openble' first.";
+  // S6: not initialized: nothing runs, so the role is Off (the saved mode is
+  // the server) and the reply says how to start the console; with no lifecycle
+  // mutex blestatus agrees with bleinfo json and reads nothing.
+  // A pipe build adds the full phone link block beside `link`.
+  const std::string notInitJson = std::string(
+      "{\"schema\":1,\"initialized\":false,\"host\":\"off\",\"link\":{\"role\":\"off\",\"roleText\":\"Off\","
+      "\"saved\":\"console\",\"savedText\":\"App console\",\"savedDiffers\":true,") +
+      (ENABLE_BLE_PHONE_PIPE ? "\"pipe\":\"off\",\"pipeText\":\"off\",\"pipePaired\":false," : "") +
+      "\"console\":\"off\",\"consoleText\":\"off\",\"consoleClients\":0,\"advertising\":false}," +
+      (ENABLE_BLE_PHONE_PIPE
+           ? "\"phoneLink\":{\"state\":\"off\",\"stateText\":\"off\",\"paired\":false,"
+             "\"secret\":\"none\",\"secretText\":\"no secret\",\"console\":\"needs-code\","
+             "\"consoleText\":\"needs a device code\",\"relay\":\"unknown\","
+             "\"streams\":{\"relay\":0,\"console\":0},\"ended\":0,\"endReasons\":{}},"
+           : "") +
+      "\"hint\":\"to start the app console, run 'openconsole'\"}";
+  const std::string notInitText = "Role: Off (saved: App console)\nApp console: off\nBluetooth: off" + phoneBlock("off");
   statusTable(); state.initialized = false;
-  statusExpect(statusSame(cmd_blestatus("json"), notInitJson) && statusSame(cmd_blestatus(""), notInitText),
-               "S6 server not initialized: existing replies changed");
+  std::string replyJson = cmd_blestatus("json"), replyText = cmd_blestatus("");
+  statusExpect(replyJson == notInitJson && replyText == notInitText,
+               "S6 server not initialized: replies changed; got " + replyJson + " / " + replyText);
   statusTable(); gBLEState = nullptr;
-  statusExpect(statusSame(cmd_blestatus("json"), notInitJson) && statusSame(cmd_blestatus(""), notInitText),
-               "S6 no BLE state: existing replies changed");
+  replyJson = cmd_blestatus("json"); replyText = cmd_blestatus("");
+  statusExpect(replyJson == notInitJson && replyText == notInitText,
+               "S6 no BLE state: replies changed; got " + replyJson + " / " + replyText);
   statusTable(); sBleLifecycleMutex = nullptr; unguardedMillis = 0;
   {
-    const std::string json = cmd_blestatus("json");
-    JsonDocument info;
+    replyJson = cmd_blestatus("json");
+    JsonDocument info, status;
     deserializeJson(info, cmd_bleinfo("json"));
-    statusExpect(info["initialized"] == false && json == notInitJson && unguardedMillis == 0,
+    const bool parsedStatus = !deserializeJson(status, replyJson);
+    statusExpect(info["initialized"] == false && parsedStatus && status["initialized"] == false &&
+                 status["connections"].isNull() && status["state"].isNull() && unguardedMillis == 0,
                  "S6 no lifecycle mutex: bleinfo json reports uninitialized but blestatus json read the "
-                 "unguarded table; got " + json.substr(0, 120));
+                 "unguarded table; got " + replyJson.substr(0, 120));
   }
   sBleLifecycleMutex = &lifecycleMutex;
 
@@ -596,6 +874,297 @@ static void blestatusChecks() {
                "S8 allocation failure: " + std::to_string(partial) + " of " + std::to_string(allocations) +
                " failure sites returned a document instead of the oom reply, e.g. " + sample.substr(0, 120));
   statusExpect(leaked == 0, "S8 allocation failure leaked JSON memory or the lifecycle guard");
+
+  // S9: the link lines in every role, in BLE_LinkStatusCore.h's words. Outside
+  // the app console blestatus says what `openble` would stop (a Hint line, or
+  // "hint" in JSON); the console itself gives no hint. No line names an address.
+  const std::string pipeOff = phoneBlock("off");
+  const char* savedGlasses = ENABLE_BLE_PHONE_PIPE ? "Glasses+pipe" : "Glasses";
+  auto linkCase = [&](const char* name, const std::string& wantText, const char* wantHint,
+                      auto&& checkLink) {
+    cliHints.clear();
+    const std::string got = cmd_blestatus("");
+    const bool hinted = wantHint ? cliHints.size() == 1 && cliHints[0] == wantHint : cliHints.empty();
+    statusExpect(got.compare(0, wantText.size(), wantText) == 0 && hinted,
+                 std::string("S9 ") + name + ": text should start\n" + wantText + "\n(hint " +
+                 (wantHint ? wantHint : "none") + "); got\n" + got +
+                 (cliHints.empty() ? "" : "\n(hint " + cliHints[0] + ")"));
+    cliHints.clear();
+    const std::string json = cmd_blestatus("json");
+    JsonDocument doc;
+    const bool ok = !deserializeJson(doc, json);
+    std::string link;
+    if (ok) serializeJson(doc["link"], link);
+    statusExpect(ok && cliHints.empty() && checkLink(doc["link"].as<JsonObjectConst>()) &&
+                 (wantHint ? doc["hint"] == wantHint : doc["hint"].isNull()) &&
+                 link.find("00:01:02") == std::string::npos && link.find("mac") == std::string::npos,
+                 std::string("S9 ") + name + ": blestatus json link/hint wrong; got " + json);
+  };
+
+  // The console runs while the saved mode is the glasses: the role says both.
+  statusTable(); gSettings.bleMode = 1;
+  linkCase("console, saved glasses",
+           std::string("Role: App console (saved: ") + savedGlasses + ")\nApp console: app signed in\n"
+           "  Clients: 3/4, advertising off" + pipeOff + "\n[0] Unknown\n", nullptr,
+           [&](JsonObjectConst l) {
+             return l["role"] == "console" && l["roleText"] == "App console" &&
+                    l["saved"] == (ENABLE_BLE_PHONE_PIPE ? "glasses-pipe" : "glasses") &&
+                    l["savedDiffers"] == true && l["console"] == "signed-in" &&
+                    l["consoleText"] == "app signed in" && l["consoleClients"] == 3 &&
+                    l["advertising"] == false;
+           });
+  gSettings.bleMode = 0;
+
+  // An empty, advertising console waits for the app; a ring link is no app.
+  statusTable();
+  for (BLEConnection& c : state.connections) c.active = false;
+  state.activeConnectionCount = 0; sBleAdvertising = true;
+  linkCase("console waiting",
+           "Role: App console\nApp console: waiting for the app\n  Clients: 0/4, advertising on" + pipeOff +
+           "\nTotal connections: 19\n", nullptr,
+           [](JsonObjectConst l) {
+             return l["console"] == "waiting" && l["consoleText"] == "waiting for the app" &&
+                    l["consoleClients"] == 0 && l["advertising"] == true && l["savedDiffers"] == false;
+           });
+  statusTable(); sBleAdvertising = false;
+  state.connections[2].deviceType = BLE_DEVICE_RING;
+  linkCase("console with a ring link",
+           "Role: App console\nApp console: app signed in\n  Clients: 2/4, advertising off", nullptr,
+           [](JsonObjectConst l) { return l["consoleClients"] == 2; });
+
+  // The glasses run without the console registered on their host: no console
+  // here, and openble (server mode) would stop them.
+  statusTable(); state.initialized = false; gSettings.bleMode = 1; g2ClientUp = true;
+  linkCase("glasses",
+           "Role: Glasses\nApp console: not available in this mode" + pipeOff,
+           "'openconsole' switches to the app console server for a direct app connection (closes the glasses, ring and phone)",
+           [](JsonObjectConst l) {
+             return l["role"] == "glasses" && l["roleText"] == "Glasses" && l["savedDiffers"] == false &&
+                    l["console"] == "not-here" && l["consoleText"] == "not available in this mode" &&
+                    l["consoleClients"] == 0 && l["advertising"] == false;
+           });
+#if ENABLE_BLE_PHONE_PIPE
+  // The glasses with the pipe beside them, the pipe up, design A not
+  // registered and no device code: the stream console is not offered.
+  pipeActive = true; pipeReady = true; pipeLabel = "ready"; phoneEnrolled = true;
+  const char* kNeedsCode =
+      "the app console on the phone link needs a device pairing code: run 'phone pair new' on serial or the OLED";
+  linkCase("glasses and pipe",
+           "Role: Glasses+pipe\nApp console: not available in this mode" + phoneBlock("ready", true),
+           kNeedsCode,
+           [](JsonObjectConst l) {
+             return l["role"] == "glasses-pipe" && l["pipe"] == "ready" && l["pipeText"] == "ready" &&
+                    l["pipeReason"].isNull() && l["pipePaired"] == true && l["console"] == "not-here";
+           });
+  // The app console on the phone pipe's link (G2 client host, design A): its
+  // words, no Clients line (one slot, never advertising), the one slot in
+  // JSON, and a hint that says what attaches it (none once attached), never openble.
+  state.initialized = false;
+  for (BLEConnection& c : state.connections) c.active = false;
+  state.activeConnectionCount = 0; state.connectionState = BLE_STATE_IDLE;
+  sBleConsoleMode = hw1console::Mode::ClientRegistered;
+  const std::string pipeReadyLine = phoneBlock("ready", true);
+  linkCase("glasses and pipe, phone-link console without blesecret",
+           std::string("Role: Glasses+pipe\nApp console: set blesecret first") + pipeReadyLine,
+           "run 'phone pair new' for the app console on the phone link "
+           "(or set 'blesecret' for its Secure Channel attach)",
+           [](JsonObjectConst l) {
+             return l["console"] == "no-secret" && l["consoleText"] == "set blesecret first" &&
+                    l["consoleClients"] == 0 && l["advertising"] == false;
+           });
+  gSettings.bleSecureChannelSecret = "Pass-phrase1!";
+  linkCase("glasses and pipe, phone-link console waiting",
+           std::string("Role: Glasses+pipe\nApp console: waiting for the phone link") + pipeReadyLine,
+           "the phone link is ready; the app console attaches when the app opens it",
+           [](JsonObjectConst l) {
+             return l["console"] == "waiting-phone" && l["consoleText"] == "waiting for the phone link" &&
+                    l["consoleClients"] == 0 && l["advertising"] == false;
+           });
+  // The pipe went READY: its link holds a session waiting for the app, which
+  // is not an app until the app writes (no count, still waiting, the hint).
+  state.connections[0].active = true; state.connections[0].connId = 3;
+  state.connections[0].deviceType = BLE_DEVICE_PHONE;
+  sBleConsoleAttach.slot = hw1console::Slot{true, 5, 3, false};
+  linkCase("glasses and pipe, phone-link session the app has not joined",
+           std::string("Role: Glasses+pipe\nApp console: waiting for the phone link") + pipeReadyLine,
+           "the phone link is ready; the app console attaches when the app opens it",
+           [](JsonObjectConst l) {
+             return l["console"] == "waiting-phone" && l["consoleClients"] == 0 &&
+                    l["advertising"] == false;
+           });
+  state.connections[0].authed = true; state.connections[0].user = "alice";
+  state.activeConnectionCount = 1; state.connectionState = BLE_STATE_CONNECTED;
+  sBleConsoleAttach.slot.joined = true;  // the app's first write
+  linkCase("glasses and pipe, phone-link console signed in",
+           std::string("Role: Glasses+pipe\nApp console: app signed in") + pipeReadyLine,
+           nullptr,
+           [](JsonObjectConst l) {
+             return l["console"] == "signed-in" && l["consoleText"] == "app signed in" &&
+                    l["consoleClients"] == 1 && l["advertising"] == false;
+           });
+  // The pipe no longer ready: a stale slot is not shown as connected or counted.
+  pipeReady = false; pipeLabel = "phone link lost";
+  linkCase("glasses and pipe, phone-link console after the pipe dropped",
+           "Role: Glasses+pipe\nApp console: waiting for the phone link" + phoneBlock("fail: link lost", true),
+           "the app console attaches to the phone link once the relay pipe is ready; see 'phone status'",
+           [](JsonObjectConst l) {
+             return l["console"] == "waiting-phone" && l["consoleClients"] == 0 &&
+                    l["advertising"] == false;
+           });
+  pipeReady = true; pipeLabel = "ready";
+  gSettings.bleConsoleOnPipe = false;
+  linkCase("glasses and pipe, phone-link console off",
+           std::string("Role: Glasses+pipe\nApp console: off") + phoneBlock("ready", true, "off"),
+           "'bleconsole on' attaches the app console to the phone link",
+           [](JsonObjectConst l) {
+             return l["console"] == "off" && l["consoleClients"] == 0 && l["advertising"] == false;
+           });
+  gSettings.bleConsoleOnPipe = true;
+  // Phone link v2 beside the glasses: an offered console stream comes before
+  // design A's words (a joined design-A slot still shows; none joined here).
+  sBleConsoleAttach.slot.joined = false;
+  state.connections[0].authed = false; state.connections[0].user = "";
+  phoneLink.secret = hw1link::Secret::Code; phoneLink.consoleOffered = true;
+  phoneLink.stream = hw1link::StreamState::Waiting;
+  linkCase("glasses and pipe, console stream offered",
+           "Role: Glasses+pipe\nApp console: waiting for the phone link\nPhone link: ready\n"
+           "  Paired: yes (device code)\n  Console: not wanted by the app\n  Relay: off",
+           "the phone link is ready; the app console opens when the app asks for it",
+           [](JsonObjectConst l) { return l["console"] == "waiting-phone" && l["consoleClients"] == 0; });
+  phoneLink = {};
+  gSettings.bleSecureChannelSecret = "";
+  sBleConsoleMode = hw1console::Mode::Server;
+  sBleConsoleAttach = hw1console::Attach{};
+  statusTable(); state.initialized = false; gSettings.bleMode = 1; g2ClientUp = true;
+
+  // `phone connect` in server mode: the pipe alone, failing to find the phone.
+  g2ClientUp = false; gSettings.bleMode = 0;
+  pipeStandalone = true; pipeReady = false; pipeLabel = "phone not found";
+  linkCase("phone pipe failing, saved server",
+           "Role: Phone pipe (saved: App console)\nApp console: not available in this mode" +
+           phoneBlock("fail: not found", true),
+           kNeedsCode,
+           [](JsonObjectConst l) {
+             return l["role"] == "phone-pipe" && l["saved"] == "console" && l["savedDiffers"] == true &&
+                    l["pipe"] == "fail" && l["pipeText"] == "fail" && l["pipeReason"] == "not found" &&
+                    l["pipePaired"] == true && l["console"] == "not-here";
+           });
+  gSettings.bleConsoleOnPipe = false;
+  linkCase("phone pipe, bleconsole off",
+           "Role: Phone pipe (saved: App console)\nApp console: not available in this mode" +
+           phoneBlock("fail: not found", true, "off"),
+           "'bleconsole on' offers the app console on the phone link",
+           [](JsonObjectConst l) { return l["console"] == "not-here"; });
+  gSettings.bleConsoleOnPipe = true;
+
+  // Phone link v2, phone-client mode (the pipe holds the BLE state, no server,
+  // no client host): the console stream's row is the console. Offered while
+  // the link is READY, waiting for the app.
+  gSettings.bleMode = 1;  // the pipe alone runs on the client stack (no phone-client mode)
+  statusTable(); state.initialized = false;
+  for (BLEConnection& c : state.connections) c.active = false;
+  state.activeConnectionCount = 0; state.connectionState = BLE_STATE_IDLE;
+  pipeReady = true; pipeLabel = "ready";
+  phoneLink.secret = hw1link::Secret::Code; phoneLink.consoleOffered = true;
+  phoneLink.stream = hw1link::StreamState::Opening; phoneLink.consoleStreams = 1;
+  linkCase("phone link, console stream opening",
+           "Role: Phone pipe\nApp console: waiting for the phone link\nPhone link: ready\n"
+           "  Paired: yes (device code)\n  Console: opening\n  Relay: off\n"
+           "  Streams: relay 0/2, console 1/1\n  Ended: 0",
+           "the phone link is ready; the app console opens when the app asks for it",
+           [](JsonObjectConst l) { return l["console"] == "waiting-phone" && l["consoleClients"] == 0; });
+  // Open, its row bound and signed in: counted once by the console view (the
+  // pipe row is no peer link and needs no server or client host).
+  phoneLink.stream = hw1link::StreamState::Open; phoneLink.streamSignedIn = true;
+  BLEConnection& row = state.connections[2];
+  row.active = true; row.connId = 0x8005; row.deviceType = BLE_DEVICE_PHONE;
+  row.pipeConsole = true; row.authed = true; row.user = "alice";
+  std::memset(row.deviceAddr, 0, sizeof(row.deviceAddr));
+  state.activeConnectionCount = 1; state.connectionState = BLE_STATE_CONNECTED;
+  // Five sessions ended since boot, the last one paused by the app.
+  phoneSummaryKnown = true; phoneSummary = {};
+  phoneSummary.ended = 5; phoneSummary.lastEnd = 18;
+  phoneSummary.endReason[14] = 3; phoneSummary.endReason[16] = 1; phoneSummary.endReason[18] = 1;
+  linkCase("phone link, console stream signed in",
+           "Role: Phone pipe\nApp console: app signed in\nPhone link: ready\n"
+           "  Paired: yes (device code)\n  Console: signed in\n  Relay: off\n"
+           "  Streams: relay 0/2, console 1/1\n  Ended: 5 (last: paused)\n"
+           "  End reasons: cancelled=3 service-off=1 paused=1",
+           nullptr,
+           [](JsonObjectConst l) {
+             return l["role"] == "phone-pipe" && l["console"] == "signed-in" &&
+                    l["consoleText"] == "app signed in" && l["consoleClients"] == 1 &&
+                    l["advertising"] == false;
+           });
+  {
+    JsonDocument doc;
+    const std::string json = cmd_blestatus("json");
+    statusExpect(!deserializeJson(doc, json) &&
+                 doc["phoneLink"]["state"] == "ready" && doc["phoneLink"]["stateText"] == "ready" &&
+                 doc["phoneLink"]["paired"] == true && doc["phoneLink"]["secret"] == "code" &&
+                 doc["phoneLink"]["secretText"] == "device code" &&
+                 doc["phoneLink"]["console"] == "signed-in" && doc["phoneLink"]["consoleText"] == "signed in" &&
+                 doc["phoneLink"]["relay"] == "off" && doc["phoneLink"]["streams"]["relay"] == 0 &&
+                 doc["phoneLink"]["streams"]["console"] == 1 && doc["phoneLink"]["ended"] == 5 &&
+                 doc["phoneLink"]["lastEnd"] == "paused" &&
+                 doc["phoneLink"]["endReasons"].as<JsonObjectConst>().size() == 3 &&
+                 doc["phoneLink"]["endReasons"]["cancelled"] == 3 &&
+                 doc["phoneLink"]["endReasons"]["service-off"] == 1 &&
+                 doc["phoneLink"]["endReasons"]["paused"] == 1 &&
+                 doc["phoneLink"].as<JsonObjectConst>().size() == 12 && json.find("00:00:00") == std::string::npos,
+                 "S9 phone link: blestatus json phoneLink block wrong; got " + json);
+    // bleinfo carries the same block: text after its own lines, JSON beside its keys.
+    const std::string info = cmd_bleinfo("");
+    statusExpect(info.find("Status:       Not initialized\nPhone link: ready\n  Paired: yes (device code)\n"
+                           "  Console: signed in\n") != std::string::npos &&
+                 info.find("  End reasons: cancelled=3 service-off=1 paused=1") != std::string::npos,
+                 "S9 phone link: bleinfo text block wrong; got " + info);
+    JsonDocument infoDoc;
+    const std::string infoJson = cmd_bleinfo("json");
+    statusExpect(!deserializeJson(infoDoc, infoJson) && infoDoc["phoneLink"] == doc["phoneLink"] &&
+                 infoDoc.as<JsonObjectConst>().size() == 14,
+                 "S9 phone link: bleinfo json block differs from blestatus json; got " + infoJson);
+  }
+  // The idle logout signs the row out: the stream stays open, the relay as it was.
+  row.authed = false; row.user = ""; phoneLink.streamSignedIn = false;
+  linkCase("phone link, console stream signed out",
+           "Role: Phone pipe\nApp console: app connected, signed out\nPhone link: ready\n"
+           "  Paired: yes (device code)\n  Console: open, signed out\n  Relay: off\n",
+           nullptr,
+           [](JsonObjectConst l) { return l["console"] == "signed-out" && l["consoleClients"] == 1; });
+  phoneLink = {}; phoneSummaryKnown = false; phoneSummary = {};
+  row = BLEConnection{};
+  pipeActive = pipeStandalone = pipeReady = false; pipeLabel = "stopped"; phoneEnrolled = false;
+#endif
+  g2ClientUp = false; gSettings.bleMode = 0;
+
+  // The line writer stays inside a short buffer.
+  {
+    BleLinkStatus s;
+    s.role = hw1link::Role::PhonePipe; s.saved = hw1link::Role::Console;
+    s.pipeBuilt = true; s.pipe.phase = hw1link::Pipe::Failed; s.pipe.reason = "not found";
+    s.console = hw1link::Console::NotHere;
+    char full[512];
+    const int n = bleFormatLinkLines(full, sizeof(full), s);
+    const std::string want = std::string("Role: Phone pipe (saved: App console)\n"
+                                         "App console: not available in this mode") +
+        (ENABLE_BLE_PHONE_PIPE ? "\nPhone link: fail: not found\n  Paired: no (no secret)\n"
+                                 "  Console: off\n  Relay: unknown\n  Streams: relay 0/2, console 0/1\n"
+                                 "  Ended: 0" : "");
+    statusExpect(std::string(full, n) == want,
+                 std::string("S9 link lines: wrong; got ") + full);
+    // Every shorter buffer holds a prefix and its terminator.
+    for (size_t size : {size_t(16), size_t(60), size_t(66), size_t(67), size_t(68), size_t(100), want.size()}) {
+      char small[512];
+      std::memset(small, 'x', sizeof(small));
+      const int m = bleFormatLinkLines(small, int(size), s);
+      statusExpect(m <= int(size) - 1 && small[m] == '\0' && small[size] == 'x' &&
+                   std::string(small) == want.substr(0, size_t(m)) &&
+                   (size_t(m) == want.size() || want.size() >= size),
+                   std::string("S9 link lines: unbounded at ") + std::to_string(size) + "; got " + small);
+    }
+  }
+  cliHints.clear();
 
   millisGuardRequired = true; rejectLock = false; mutateOnUnlock = false;
   sBleLifecycleMutex = &lifecycleMutex;
@@ -712,10 +1281,12 @@ static void webChecks() {
         parsed(busy.output.c_str())["error"] == "BLE status unavailable" && ringOwnerCalls == 0 &&
         g2ConnectionCalls == 0 && peerPolicyCalls == 0,
         "HTTP lock contention gives explicit 503 before other status work");
-  rejectLock = false;
+  rejectLock = false; sBleAdvertising = false;
   g2Connection.state = "connecting"; g2Connection.running = true;
   g2Connection.left = {true, 517, -1, UINT32_MAX, 123456789};
   g2Connection.right = {false, 23, 0, 0, UINT32_MAX};
+  std::snprintf(g2Connection.repair, sizeof(g2Connection.repair), "3/7");
+  // The two boot roles (the phone-client mode is gone).
   for (int mode : {0, 1}) {
     gSettings.bleMode = mode;
     httpd_req_t req; ringOwnerCalls = 0; g2ConnectionCalls = 0; g2FormatCalls = 0;
@@ -725,9 +1296,44 @@ static void webChecks() {
     check(doc["schema"] == 1 && doc["mode"] == (mode ? "client" : "server"),
           "mode and schema preserved");
     checkSchema(doc["ble"], true);
+    // "link" and, with the pipe, "phone" and "phoneLink" follow the G2/ring objects.
+    const size_t linkObjects = 1 + (ENABLE_BLE_PHONE_PIPE ? 2 : 0);
+    // The server runs with two app clients, one signed in; the saved mode
+    // differs whenever it is not the server.
+    JsonVariantConst link = doc["link"];
+    const char* saved = mode == 0 ? "console"
+                      : mode == 2 ? "phone-pipe"
+                      : ENABLE_BLE_PHONE_PIPE ? "glasses-pipe" : "glasses";
+    const char* savedText = mode == 0 ? "App console"
+                          : mode == 2 ? "Phone pipe"
+                          : ENABLE_BLE_PHONE_PIPE ? "Glasses+pipe" : "Glasses";
+    check(link["role"] == "console" && link["roleText"] == "App console" &&
+          link["saved"] == saved && link["savedText"] == savedText &&
+          link["savedDiffers"] == (mode != 0) &&
+          link["console"] == "signed-in" && link["consoleText"] == "app signed in" &&
+          link["consoleClients"] == 2 && link["advertising"] == false,
+          "HTTP link object: the running role, the saved mode and the app console");
+#if ENABLE_BLE_PHONE_PIPE
+    check(link.as<JsonObjectConst>().size() == 12 && link["pipe"] == "off" &&
+          link["pipeText"] == "off" && link["pipePaired"] == false && link["pipeReason"].isNull() &&
+          doc["phone"]["schema"] == 2, "a pipe build adds the pipe words and the phone object");
+    // The phone link block, full form, from the same link reading.
+    JsonVariantConst block = doc["phoneLink"];
+    check(block.as<JsonObjectConst>().size() == 11 && block["state"] == "off" &&
+          block["stateText"] == "off" && block["paired"] == false && block["secret"] == "none" &&
+          block["secretText"] == "no secret" && block["console"] == "needs-code" &&
+          block["consoleText"] == "needs a device code" && block["relay"] == "unknown" &&
+          block["streams"]["relay"] == 0 && block["streams"]["console"] == 0 && block["ended"] == 0 &&
+          block["lastEnd"].isNull() && block["endReasons"].as<JsonObjectConst>().size() == 0,
+          "a pipe build adds the full phone link block");
+#else
+    check(link.as<JsonObjectConst>().size() == 9 && link["pipe"].isNull() && doc["phone"].isNull() &&
+          doc["phoneLink"].isNull(), "a build without the pipe has no pipe words");
+#endif
 #if ENABLE_G2_GLASSES
-    check(doc.as<JsonObject>().size() == 6 && ringOwnerCalls == 1 &&
-          g2ConnectionCalls == 1 && g2FormatCalls == 1,
+    // schema, mode, ble, host, g2, g2Text, ring + the link objects.
+    check(doc.as<JsonObject>().size() == 7 + linkObjects && doc["host"].is<const char*>() &&
+          ringOwnerCalls == 1 && g2ConnectionCalls == 1 && g2FormatCalls == 1,
           "G2 build obtains ring and connection status directly from owners");
     check(doc["g2Text"] == "G2 is connected" && doc["ring"]["connected"] == true &&
           doc["g2"]["revision"] == 7 && doc["g2"]["rightGeneration"] == 11 &&
@@ -736,8 +1342,9 @@ static void webChecks() {
           doc["g2"]["rx"]["queued"] == 3 && doc["g2"]["rx"]["drops"] == 2,
           "G2 and ring response data preserved");
     JsonVariantConst connection = doc["g2"]["connection"];
-    check(connection.as<JsonObjectConst>().size() == 4 &&
+    check(connection.as<JsonObjectConst>().size() == 5 &&
           connection["running"] == true && connection["state"] == "connecting" &&
+          connection["repair"] == "3/7" &&
           connection["left"].as<JsonObjectConst>().size() == 5 &&
           connection["left"]["connected"] == true && connection["left"]["mtu"] == 517 &&
           connection["left"]["battery"] == -1 && connection["left"]["tx"] == UINT32_MAX &&
@@ -752,11 +1359,41 @@ static void webChecks() {
           head["detail"] == "confirmed \"up\"" && head["changedAtMs"] == 123 &&
           head["appliedGeneration"] == 11, "G2 control state and detail preserved");
 #else
-    check(doc.as<JsonObject>().size() == 3 && ringOwnerCalls == 0 &&
-          g2ConnectionCalls == 0 && g2FormatCalls == 0,
+    // schema, mode, ble, host (bleHostStateWord) + the link objects.
+    check(doc.as<JsonObject>().size() == 4 + linkObjects && doc["host"].is<const char*>() &&
+          ringOwnerCalls == 0 && g2ConnectionCalls == 0 && g2FormatCalls == 0,
           "non-G2 status has no command executor or G2 fields");
 #endif
   }
+  // The glasses run without the server (and, in a pipe build, the pipe beside
+  // them failed its search): the console is not available in this mode.
+  gSettings.bleMode = 1; state.initialized = false; g2ClientUp = true;
+  pipeActive = true; pipeLabel = "phone not found";
+#if ENABLE_BLE_PHONE_PIPE
+  phoneEnrolled = true;
+#endif
+  {
+    httpd_req_t req; handleBleStatus(&req);
+    JsonDocument doc = parsed(req.output.c_str());
+    JsonVariantConst link = doc["link"];
+    check(req.status == "200 OK" && link["savedDiffers"] == false &&
+          link["console"] == "not-here" && link["consoleText"] == "not available in this mode" &&
+          link["consoleClients"] == 0,
+          "HTTP link object outside server mode: the console is not available");
+#if ENABLE_BLE_PHONE_PIPE
+    check(link["role"] == "glasses-pipe" && link["roleText"] == "Glasses+pipe" &&
+          link["pipe"] == "fail" && link["pipeText"] == "fail" &&
+          link["pipeReason"] == "not found" && link["pipePaired"] == true &&
+          link.as<JsonObjectConst>().size() == 13,
+          "HTTP link object: the glasses with a failed pipe and its reason");
+    phoneEnrolled = false;
+#else
+    check(link["role"] == "glasses" && link["roleText"] == "Glasses" && link["pipe"].isNull(),
+          "HTTP link object: the glasses alone in a build without the pipe");
+#endif
+  }
+  gSettings.bleMode = 0; g2ClientUp = false; pipeActive = false; pipeLabel = "stopped";
+  populate();
   // The HTTP handler must preserve independent owner values, including false,
   // without consulting human command text or reusing the other peer's policy.
   for (bool g2Auto : {false, true}) {
@@ -977,6 +1614,57 @@ static void streamCliChecks() {
   expect(same(got, "Error: Bluetooth not initialized") && state.streamFlags == 0,
          "C9 absent BLE state refuses; got " + shown(got));
 
+#if ENABLE_BLE_PHONE_PIPE
+  // C9b: the G2 client host has no data service (its console rides the phone
+  // pipe's link, Secure Channel only): blestream and bleevent refuse before
+  // touching a flag or a recipient, attached or not.
+  for (bool attached : {false, true}) {
+    streamReset();
+    sBleConsoleMode = hw1console::Mode::ClientRegistered;
+    state.initialized = false;
+    state.connectionState = attached ? BLE_STATE_CONNECTED : BLE_STATE_IDLE;
+    const unsigned frames = static_cast<unsigned>(directedFrames.size());
+    for (const char* args : {"", "on", "sensors on", "interval 1000 5000"}) {
+      got = cmd_blestream(args);
+      expect(same(got, kBlePhoneLinkNoDataService) && state.streamFlags == 0,
+             std::string("C9b client host: `blestream ") + args + "` should refuse with the phone-link "
+             "reason; got " + shown(got));
+    }
+    got = cmd_bleevent("x");
+    expect(same(got, kBlePhoneLinkNoDataService) && directedFrames.size() == frames,
+           "C9b client host: `bleevent x` should refuse without a frame; got " + shown(got));
+    sBleConsoleMode = hw1console::Mode::Server;
+    state.initialized = true;
+    state.connectionState = BLE_STATE_CONNECTED;
+  }
+  // C9c (REG-2): phone-client mode, where the pipe holds the state for its
+  // console row: no client host, no server, and a bound row is a connected
+  // app. The data service is still the server's alone, so both commands give
+  // the phone-link reason before the connected check, row bound or not.
+  for (bool bound : {false, true}) {
+    streamReset();
+    sBleConsoleMode = hw1console::Mode::Off;
+    pipeActive = true;
+    state.initialized = false;
+    state.connectionState = bound ? BLE_STATE_CONNECTED : BLE_STATE_IDLE;
+    const unsigned frames = static_cast<unsigned>(directedFrames.size());
+    for (const char* args : {"", "on", "sensors on", "interval 1000 5000"}) {
+      got = cmd_blestream(args);
+      expect(same(got, kBlePhoneLinkNoDataService) && state.streamFlags == 0,
+             std::string("C9c phone-client: `blestream ") + args + "` should refuse with the phone-link "
+             "reason; got " + shown(got));
+    }
+    got = cmd_bleevent("x");
+    expect(same(got, kBlePhoneLinkNoDataService) && directedFrames.size() == frames,
+           std::string("C9c phone-client") + (bound ? " (row bound)" : "") +
+           ": `bleevent x` should refuse with the phone-link reason, no frame; got " + shown(got));
+    pipeActive = false;
+    sBleConsoleMode = hw1console::Mode::Server;
+    state.initialized = true;
+    state.connectionState = BLE_STATE_CONNECTED;
+  }
+#endif  // the phone-link console exists only with the pipe
+
   // C10: blesend forwards the whole message through the console-mirror sender.
   streamReset();
   got = cmd_blesend("hi");
@@ -1028,10 +1716,14 @@ static void streamCliChecks() {
            doc["ts"].is<unsigned>(),
            "C11 event JSON carries the whole escaped message; got " + directedFrames[0].payload);
   }
-  expect(state.eventCount == 1 && lockDepth == 0 && takeCalls - takesBefore == 2 &&
-         giveCalls - givesBefore == 2,
-         "C11 one event counted, one guard per recipient, all released; events " +
-         std::to_string(state.eventCount));
+  // gBLEState is read only under the lifecycle lock: one guard per recipient,
+  // plus the server check's try, the command's and the push's connected checks
+  // and the count's.
+  expect(state.eventCount == 1 && lockDepth == 0 && takeCalls - takesBefore == 6 &&
+         giveCalls - givesBefore == 6,
+         "C11 one event counted, one guard per recipient plus the server, connected and count "
+         "reads', all released; events " + std::to_string(state.eventCount) + ", guards " +
+         std::to_string(takeCalls - takesBefore));
   directedFrames.clear();
   got = cmd_bleevent("x");
   expect(same(got, "Event sent via BLE") && directedFrames.size() == 2,
@@ -1082,8 +1774,9 @@ static void streamCliChecks() {
   sBleGattsIf = ESP_GATT_IF_NONE;
   unsigned gives = giveCalls;
   expect(!blePushSensorData("{}", 2) && directedFrames.empty() && broadcastNotifies == 0 &&
-         giveCalls - gives == 1 && lockDepth == 0,
-         "C14 no GATT interface: nothing sent, the one guard taken is released");
+         giveCalls - gives == 2 && lockDepth == 0,
+         "C14 no GATT interface: nothing sent, the connected check's and the recipient's "
+         "guards released");
   sBleGattsIf = 4;
 
   // C15: a refused lifecycle lock sends nothing and is never released.
@@ -1161,7 +1854,11 @@ static void disconnectChecks() {
   const char* usage = "Error: invalid arguments — Usage: bledisconnect [connId]";
   const char* notFound = "Error: No client with that connection id";
   const char* peerLink = "Error: That connection is a paired peer link, not an app client";
-  const char* unavailable = "Error: Bluetooth not initialized. Run 'openble' first.";
+  // No app console: say what `openble` does in the role that runs (nothing
+  // here: the state is gone). The console role with its server or lock
+  // unavailable has nothing to switch to: it is busy.
+  const char* unavailable = "Error: App console not running; to start the app console, run 'openconsole'.";
+  const char* busy = "Error: App console busy; retry";
   const char* none = "Error: No client connected";
 
   // K1: the web Kick on the second client (conn 1) closes conn 1 only.
@@ -1268,7 +1965,8 @@ static void disconnectChecks() {
     const char* byId = cmd_bledisconnect("1");
     const char* bare = cmd_bledisconnect("");
     const bool released = giveCalls == gives || !rejectLock;
-    disconnectExpect(closedConns.empty() && same(byId, unavailable) && same(bare, none) &&
+    const bool stateGone = std::string(fault.label).rfind("K9", 0) == 0;
+    disconnectExpect(closedConns.empty() && same(byId, stateGone ? unavailable : busy) && same(bare, none) &&
                      lockDepth == 0 && released,
                      std::string(fault.label) + ": nothing closed; `bledisconnect 1` got " +
                      shown(byId) + ", bare got " + shown(bare) + ", closed " + closedText());
@@ -1311,6 +2009,8 @@ int main() {
   characterize();
 #if !TEST_BASELINE
   writerChecks();
+  modeChoiceChecks();
+  consoleViewChecks();
   blestatusChecks();
   disconnectChecks();
   ownerChecks();
@@ -1318,6 +2018,7 @@ int main() {
   webChecks();
 #endif
   check(jsonAllocator.outstanding == 0, "JSON allocations released");
-  std::cerr << "BLE info (G2=" << ENABLE_G2_GLASSES << ", baseline=" << TEST_BASELINE
+  std::cerr << "BLE info (G2=" << ENABLE_G2_GLASSES << ", pipe=" << ENABLE_BLE_PHONE_PIPE
+            << ", baseline=" << TEST_BASELINE
             << "): " << assertions << " assertions passed\n";
 }

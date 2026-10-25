@@ -1,17 +1,21 @@
 #include "System_Transcript.h"
 #if ENABLE_DICTATION || ENABLE_LOCAL_STT
 #include "System_AuthIdentity.h"
+#include "System_BootState.h"
 #include "System_Clock.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_VFS.h"
 #include "System_Utils.h"
+#include "Transcript_TextPolicy.h"
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 #include "BLE_Peers.h"
 #endif
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+
+extern uint32_t gBootCounter;  // HardwareOne.cpp: the NVS boot counter, "boot #N"
 
 static void transcriptStartTime(char* out, size_t size) {
   const time_t now = Clock::epochSeconds();
@@ -74,6 +78,13 @@ void TranscriptSession::begin(const TranscriptOptions& options, const char* prov
   if (options.started[0] && strnlen(options.started, sizeof(options.started)) < sizeof(options.started))
     snprintf(start_, sizeof(start_), "%s", options.started);
   else transcriptStartTime(start_, sizeof(start_));
+  // Startup ordering for an offline device: with "Started: boot" the boot and
+  // power-on counters and this boot's session number still put sessions in
+  // order, within one NVS ordering domain. Read here, before any audio, never
+  // on the first write.
+  boot_ = gBootCounter;
+  powerOn_ = bootStateGetPowerOnCount();
+  domain_ = bootStateGetOrderingDomain();
   if (options.enabled && (!id || !options.epoch || !options.user[0] ||
       strnlen(options.user, sizeof(options.user)) == sizeof(options.user) ||
       (strcmp(provider_, "local") && strcmp(provider_, "pi"))))
@@ -138,8 +149,17 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
   size_t expected = length;
   size_t written = 0;
   if (first) {
-    char header[112];
-    const int n = snprintf(header, sizeof(header), "HardwareOne transcript\nStarted: %s\nBackend: %s\nAn End marker below confirms finalization.\n\n", start_, provider_);
+    // The header names the session's place in time two ways: the UTC start
+    // when the clock was synced ("boot" otherwise) and the startup counters
+    // (Transcript_TextPolicy.h and System_BootState.h describe them). Session
+    // is this boot's run number (the low half of the run id in the file name).
+    // The title is the first phrase's leading words, the same rule as a note.
+    char header[352];
+    const int n = snprintf(header, sizeof(header),
+        "HardwareOne transcript\nStarted: %s\nBackend: %s\nBoot: %lu\nPower-on: %lu\nSession: %lu\nDomain: %08lx\nTitle: %s\n"
+        "An End marker below confirms finalization.\n\n", start_, provider_,
+        static_cast<unsigned long>(boot_), static_cast<unsigned long>(powerOn_),
+        static_cast<unsigned long>(id_ & 0xffffffffu), static_cast<unsigned long>(domain_), title_);
     if (n < 0 || static_cast<size_t>(n) >= sizeof(header)) {
       file.close();
       return fail("Transcript header too long");
@@ -174,6 +194,13 @@ bool TranscriptSession::append(uint32_t sequence, const char* text, size_t lengt
   if (sequence != sequence_ + 1) return fail("Transcript sequence gap");
   sequence_ = sequence;
   if (!length) return true; // No file for silence-only sessions.
+  if (!status_.saved) {
+    // The title skips a speaker tag ("[Person 1] ") so it names the words.
+    const char* words = text;
+    const char* close = text[0] == '[' ? static_cast<const char*>(memchr(text, ']', length)) : nullptr;
+    if (close && close + 1 < text + length && close[1] == ' ') words = close + 2;
+    TranscriptText::title(words, length - size_t(words - text), title_, sizeof(title_));
+  }
   char line[514];
   memcpy(line, text, length);
   line[length] = '\n';

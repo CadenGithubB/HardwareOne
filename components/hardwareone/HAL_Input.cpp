@@ -204,8 +204,8 @@ static const uint32_t gClickWheelMapping[] = {
   (1 << 5)    // INPUT_BUTTON_SELECT - Select button
 };
 
-// Direct GPIO wheel gestures use HAL logical bit positions. Double-click is the
-// SELECT/function action; auxiliary board keys supply X, Y and START.
+// Direct GPIO wheel gestures use HAL logical bit positions: click=A,
+// double-click=B, tap-then-hold=SELECT/function. Auxiliary keys supply X, Y and START.
 static const uint32_t gGpioEncoderMapping[] = {
   1u, 2u, 4u, 8u, ENABLE_GPIO_ENCODER_BUTTONS ? 16u : 0u, 32u
 };
@@ -489,7 +489,7 @@ static const char* cmd_inputdevicepollms(const String& argsInput) {
 #else
   CommandArgs a(argsInput);
   if (a.count() == 0) {
-    static char buf[48];
+    EXT_RAM_BSS_ATTR static char buf[48];  // PSRAM: the reply is copied by the executor
     snprintf(buf, sizeof(buf), "[Input] Poll interval: %d ms", gSettings.inputDevicePollMs);
     return buf;
   }
@@ -503,7 +503,7 @@ static const char* cmd_inputdevicepollms(const String& argsInput) {
 #if ENABLE_GPIO_ENCODER
 static const char* cmd_gpioencoderread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char buf[256];
+  EXT_RAM_BSS_ATTR static char buf[256];  // PSRAM: the reply is copied by the executor
   return gpioEncoderBuildDataJSON(buf, sizeof(buf)) > 0 ? buf : "Error: GPIO encoder snapshot unavailable";
 }
 #endif

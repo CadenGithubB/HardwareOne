@@ -39,7 +39,7 @@ enum CommandSource { SOURCE_INTERNAL, SOURCE_G2_GLASSES };
 struct STTOwner { CommandSource source = SOURCE_INTERNAL; uint32_t epoch = 0; };
 struct TranscriptOptions { bool enabled = false; };
 enum class STTState { Preparing, Recording, Done, Cancelled, Failed };
-struct STTSnapshot { bool workerActive = false; STTState state = STTState::Done; };
+struct STTSnapshot { bool workerActive = false; STTState state = STTState::Done; char error[96] = {}; };
 struct STTTextChunk { uint32_t sequence = 0; char text[2049] = {}; };
 STTState stoppedSpeechState = STTState::Done;
 uint32_t liveOwner = 7;
@@ -52,18 +52,21 @@ bool g2TempleReadyAtGeneration(const G2Temple& t, uint32_t generation = 0) { ret
 bool transportSessionEpochIsLive(CommandSource, uint32_t epoch) { return epoch && epoch == liveOwner; }
 bool sttAnySessionActive() { return sttLive; }
 bool sttBeginContinuousG2Native(STTOwner owner, uint32_t gen, STTToken* token, char*, size_t,
-                                const TranscriptOptions* options, void (*)()) {
+                                const TranscriptOptions* options, void (*)(), bool speakerLabels) {
+  assert(!speakerLabels);
   assert(owner.epoch == liveOwner && gen == gL.connectionGeneration && options && !options->enabled);
   ++speechBegins; sttLive = true; *token = speechBegins; return true;
 }
 bool sttCancel(STTOwner, STTToken) { sttLive = false; textReady = false; return true; }
 bool sttRequestFinish(STTOwner, STTToken) { ++finishRequests; sttLive = false; textReady = !transcript.empty(); return true; }
-bool sttSnapshot(STTOwner, STTToken, STTSnapshot* s) { s->workerActive = sttLive; s->state = sttLive ? STTState::Recording : stoppedSpeechState; return true; }
+bool sttSnapshot(STTOwner, STTToken, STTSnapshot* s) { s->workerActive = sttLive; s->state = sttLive ? STTState::Recording : stoppedSpeechState; snprintf(s->error,sizeof(s->error),"%s",s->state==STTState::Failed?"Not enough free memory":""); return true; }
 bool sttReadChunk(STTOwner, STTToken, STTTextChunk* c) { if (!textReady) return false; c->sequence = 1; snprintf(c->text, sizeof(c->text), "%s", transcript.c_str()); return true; }
 bool sttAcknowledgeChunk(STTOwner, STTToken, uint32_t) { textReady = false; return true; }
 bool g2EvenAiSessionIsActive() { return false; }
 bool g2ConversateActive() { return false; }
 bool quickNoteActive() { return false; }
+static bool nativeNotesActive=false;
+bool g2NativeNotesActive() { return nativeNotesActive; }
 bool audioCaptureBusy() { return false; }
 bool gMicStreamOn = false, gMicProbeActive = false, gMicRecFile = false, gMicWavFile = false;
 constexpr int BLE_PEER_G2_GLASSES = 1;
@@ -105,9 +108,10 @@ bool sendPbFragmented(G2Temple& arm, uint8_t, uint8_t sid, uint8_t, const uint8_
 }
 constexpr size_t HTTP_TERMINAL_JSON_CAP = 4096;
 using HttpTerminalToken = uint32_t;
-struct HttpTerminalResult { bool done=false; int httpStatus=0; size_t length=0; uint32_t configRevision=0; char error[96]={}; };
+struct HttpTerminalResult { bool done=false; bool phonePath=false; uint32_t completedMs=0; int httpStatus=0; size_t length=0; uint32_t configRevision=0; char error[96]={}; };
 uint32_t configRevision=10, nextRpcToken=0, activeRpcToken=0;
 bool holdRpc=false, failRpc=false, wrongOpen=false;
+int forcedRpcStatus=200;
 std::string rpcResponse, rpcRequest;
 std::vector<std::string> rpcRequests;
 unsigned submissions=0, permissions=0, questions=0, interrupts=0, createdSessions=0;
@@ -173,18 +177,38 @@ static std::string responseFor(const char* body) {
   return stringify(r);
 }
 uint32_t httpTerminalConfigRevision(){return configRevision;}
-bool httpTerminalStart(const char* json,size_t length,HttpTerminalToken* token) {
-  assert(length&&length<=4096&&strlen(json)==length);if(activeRpcToken)return false;
+enum class HttpTerminalStartResult { Accepted, Busy, Unavailable };
+bool pathAvailable=true, admissionBusy=false, phonePath=false, relayBusy=false;
+#define ENABLE_BLE_PHONE_PIPE 1
+#include "BLE_PhonePipeCore.h"
+enum class LlmHttpRequestKind : uint8_t { Chat, Terminal };
+enum class LlmHttpAdmission : uint8_t { Accepted, Busy, Unavailable };
+struct PhonePipeStream { uint32_t generation=1; uint16_t id=0; };
+hw1pipe::Session admissionPipe;
+bool llmHttpPathAvailable(bool){return pathAvailable;}
+bool phonePipeRetired(PhonePipeStream h){
+  if (!h.id) return true;
+  auto* stream=admissionPipe.find(h.id);
+  if (stream && !stream->live()) admissionPipe.release(h.id);
+  return !admissionPipe.find(h.id);
+}
+// INSERT_ADMISSION
+bool httpTerminalPathAvailable(){return pathAvailable;}
+HttpTerminalStartResult httpTerminalStart(const char* json,size_t length,HttpTerminalToken* token) {
+  assert(length&&length<=4096&&strlen(json)==length);if(!pathAvailable)return HttpTerminalStartResult::Unavailable;
+  if(activeRpcToken || admissionBusy)return HttpTerminalStartResult::Busy;
+  const auto admission=llmHttpRequestAdmit(LlmHttpRequestKind::Terminal,true);
+  if(admission!=LlmHttpAdmission::Accepted)return admission==LlmHttpAdmission::Busy?HttpTerminalStartResult::Busy:HttpTerminalStartResult::Unavailable;
   rpcRequests.emplace_back(json,length);rpcRequest=rpcRequests.back();rpcResponse=responseFor(json);
-  *token=activeRpcToken=++nextRpcToken;return true;
+  *token=activeRpcToken=++nextRpcToken;return HttpTerminalStartResult::Accepted;
 }
 bool httpTerminalRead(HttpTerminalToken token,char* out,size_t cap,HttpTerminalResult* result) {
   if(token!=activeRpcToken)return false;*result={};out[0]=0;
-  if(holdRpc)return true;result->done=true;result->httpStatus=200;result->configRevision=configRevision;
-  if(failRpc){strcpy(result->error,"network failure");failRpc=false;}else{assert(rpcResponse.size()<cap);memcpy(out,rpcResponse.c_str(),rpcResponse.size()+1);result->length=rpcResponse.size();}
-  activeRpcToken=0;return true;
+  if(holdRpc)return true;result->done=true;result->phonePath=phonePath;result->completedMs=millis();result->httpStatus=relayBusy?503:forcedRpcStatus;result->configRevision=configRevision;
+  if(failRpc){result->httpStatus=0;strcpy(result->error,"network failure");failRpc=false;}else{assert(rpcResponse.size()<cap);memcpy(out,rpcResponse.c_str(),rpcResponse.size()+1);result->length=rpcResponse.size();}
+  activeRpcToken=0;llmHttpRequestRelease(LlmHttpRequestKind::Terminal);return true;
 }
-void httpTerminalCancel(HttpTerminalToken token){if(token==activeRpcToken)activeRpcToken=0;}
+void httpTerminalCancel(HttpTerminalToken token){if(token==activeRpcToken){activeRpcToken=0;llmHttpRequestRelease(LlmHttpRequestKind::Terminal);}}
 
 // INSERT_ADAPTER
 #if ENABLE_LOCAL_STT && ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_HTTP
@@ -280,6 +304,9 @@ int main(){
   strcpy(gL.firmwareVersion,"2.3.2.15");strcpy(gR.firmwareVersion,"2.3.2.14");
   assert(!strncmp(g2NativeTerminalRequestOpen(),"Error:",6)&&firmwareQueries==3);
   strcpy(gL.firmwareVersion,"2.3.2.14");
+  nativeNotesActive=true;
+  assert(!strncmp(g2NativeTerminalRequestOpen(),"Error:",6)&&!g2NativeTerminalActive());
+  nativeNotesActive=false;
   open();assert(hostSession==sessionA&&submissions==0);assert(gNativeTerminal.cursor==2);
   // Existing host session selection never creates a device-chat turn.
   const uint32_t sessionBId=gNativeTerminal.rows[1].id;
@@ -526,16 +553,17 @@ int main(){
   activity.remove("activity");activity["state"]="busy";assert(g2NativeTerminalStateFrom(activity.as<JsonObjectConst>()));assert(gNativeTerminal.state==G2_TERMINAL_STATE_THINKING);
   activity["activity"]="responding";assert(g2NativeTerminalStateFrom(activity.as<JsonObjectConst>()));
   const unsigned beforeSpeech=speechBegins;event(G2_TERMINAL_CMD_VOICE,1);assert(speechBegins==beforeSpeech&&gNativeTerminalCloseRequested.load());tick();ack();assert(!g2NativeTerminalActive());
-  // Repeated idle polls do not reset native Listening. A queued/read-only poll
-  // is compatible with voice; a held nonempty batch never presents over ASR.
+  // Idle cadence is unchanged; new polls defer while speech allocates.
+  // Native heartbeats continue, and queued host history waits until finishing.
   hostState="idle";hostRun.clear();open();settle(15);
   const size_t idleBegin=sent.size();settle(65);
   for(size_t i=idleBegin;i<sent.size();++i)assert(sent[i].command!=G2_TERMINAL_CMD_STATE);
   g2NativeTerminalCancelRpc();g2NativeTerminalQueueRpc(NativeRpc::Poll);
   event(G2_TERMINAL_CMD_VOICE,1);assert(sttLive&&gNativeTerminal.policy.phase==NativeTerm::Phase::Recording);
-  const size_t voiceBegin=sent.size();settle(10);
+  const size_t voiceBegin=sent.size(), voiceRequests=rpcRequests.size();settle(10);
   content(700,"History received during speech");hostStatus("idle");settle(65);
-  assert(gNativeTerminal.batch&&gNativeTerminal.policy.phase==NativeTerm::Phase::Recording);
+  assert(!gNativeTerminal.batch&&gNativeTerminal.policy.phase==NativeTerm::Phase::Recording);
+  assert(rpcRequests.size()==voiceRequests);
   bool heartbeat=false;for(size_t i=voiceBegin;i<sent.size();++i){assert(sent[i].command==G2_TERMINAL_CMD_HEARTBEAT);heartbeat=true;}assert(heartbeat);
   transcript="A confirmed draft survives a pending batch";event(G2_TERMINAL_CMD_VOICE,2);
   for(unsigned i=0;i<20&&gNativeTerminal.policy.phase!=NativeTerm::Phase::AwaitConfirm;++i){tick();ack();}
@@ -635,15 +663,173 @@ int main(){
     assert(request["pendingId"].as<std::string>()==emptyOtherPending&&request["questionId"].as<std::string>()==emptyOtherQuestion);
     assert(request["optionIds"].size()==1&&request["optionIds"][0].as<std::string>()=="o0");}
   hostClearQuery(emptyOtherPending);untilIdle();
-  // A real STT failure is still fatal; empty successful capture recovery must
-  // not silently convert Failed into a new listening turn.
+  // Failed recognition discards only this draft, reports the cause, and keeps
+  // the host view. A late confirmation must never send partial recognition.
   stoppedSpeechState=STTState::Failed;transcript.clear();const size_t failedSpeechBegin=sent.size();
+  const std::string failedView=gNativeTerminal.view;
   event(G2_TERMINAL_CMD_VOICE,1);tick(2);ack();event(G2_TERMINAL_CMD_VOICE,2);settle(20);
-  assert(!g2NativeTerminalActive()&&!sttLive);
+  assert(g2NativeTerminalActive()&&!sttLive&&!gNativeTerminal.speechToken);
+  assert(std::string(gNativeTerminal.view)==failedView);
   bool failedSpeechClosed=false;for(size_t i=failedSpeechBegin;i<sent.size();++i){
     failedSpeechClosed|=sent[i].command==G2_TERMINAL_CMD_CLOSE;assert(sent[i].command!=G2_TERMINAL_CMD_ASR);}
-  assert(failedSpeechClosed&&submissions==beforeEmptyPrompts+1&&questions==beforeEmptyQuestions+1);
+  assert(!failedSpeechClosed&&submissions==beforeEmptyPrompts+1&&questions==beforeEmptyQuestions+1);
+  assert(!strcmp(gNativeTerminalReason.load(),"speech-failed-view-kept"));
+  event(G2_TERMINAL_CMD_VOICE,4);settle(10);assert(submissions==beforeEmptyPrompts+1);
+  // The worker can fail while the mic is still held, with some earlier text.
+  untilIdle();event(G2_TERMINAL_CMD_VOICE,1);tick(2);ack();
+  strcpy(gNativeTerminal.prompt,"partial utterance");gNativeTerminal.promptLen=strlen(gNativeTerminal.prompt);
+  sttLive=false;settle(20);
+  assert(g2NativeTerminalActive()&&!gNativeTerminal.promptLen&&!gNativeTerminal.speechToken);
+  assert(std::string(gNativeTerminal.view)==failedView);
+  event(G2_TERMINAL_CMD_VOICE,2);event(G2_TERMINAL_CMD_VOICE,4);settle(20);
+  assert(g2NativeTerminalActive()&&submissions==beforeEmptyPrompts+1);
   stoppedSpeechState=STTState::Done;
+  close();
+  // R8: a confirmation with no path is dropped at that instant. A ready
+  // phone twenty seconds later cannot resurrect it or erase the transcript.
+  hostState="idle";open();dictate("Never send this offline confirmation");
+  const unsigned offlinePrompts=submissions;const std::string offlineView=gNativeTerminal.view;
+  pathAvailable=false;event(G2_TERMINAL_CMD_VOICE,4);
+  assert(gNativeTerminal.nextRpc==NativeRpc::None && std::string(gNativeTerminal.admissionNotice)=="Not sent: no connection");
+  settle(200);pathAvailable=true;phonePath=true;settle(40);
+  assert(submissions==offlinePrompts && g2NativeTerminalActive() && std::string(gNativeTerminal.view)==offlineView);
+  assert(std::string(gNativeTerminal.prompt)=="Never send this offline confirmation");
+  // An unavailable New operation also leaves the current view/draft intact.
+  pathAvailable=false;const auto offlineCreates=createdSessions;
+  event(G2_TERMINAL_CMD_NEW_SESSION,1);
+  assert(createdSessions==offlineCreates && std::string(gNativeTerminal.view)==offlineView);
+  assert(std::string(gNativeTerminal.prompt)=="Never send this offline confirmation");
+  pathAvailable=true;close();phonePath=false;
+  // Confirmation can arrive before the native ASR ACK. Its original path
+  // availability is retained even if the path comes back before that ACK.
+  hostState="idle";open();dictate("Deferred offline confirmation");
+  g2NativeTerminalPhase(NativeTerm::Phase::Confirming);assert(g2NativeTerminalSend(NativeTerm::Tx::Asr));
+  pathAvailable=false;event(G2_TERMINAL_CMD_VOICE,4);pathAvailable=true;ack();settle(40);
+  assert(submissions==offlinePrompts && g2NativeTerminalActive());close();
+  // Busy is silent, bounded by confirmation (including queued work behind a poll).
+  hostState="idle";open();dictate("Expire this busy confirmation");admissionBusy=true;
+  event(G2_TERMINAL_CMD_VOICE,4);const uint32_t confirmed=gNativeTerminal.confirmedMs;
+  settle(149);assert(gNativeTerminal.nextRpc==NativeRpc::Prompt && submissions==offlinePrompts);
+  settle(2);assert(uint32_t(millis()-confirmed)>=15000 && gNativeTerminal.nextRpc!=NativeRpc::Prompt);
+  admissionBusy=false;settle(40);assert(submissions==offlinePrompts && g2NativeTerminalActive());close();
+  // R9: production admission + production pipe state machine. Chat owns its
+  // slot, Terminal's worker has released but CLOSE_ACK is still outstanding.
+  hostState="idle";open();settle(2);g2NativeTerminalCancelRpc();
+  assert(llmHttpRequestAdmit(LlmHttpRequestKind::Chat,true)==LlmHttpAdmission::Accepted);
+  assert(llmHttpRequestAdmit(LlmHttpRequestKind::Terminal,true)==LlmHttpAdmission::Accepted);
+  admissionPipe.state=hw1pipe::State::Ready;admissionPipe.value=244;
+  admissionPipe.streams[0].id=1;admissionPipe.streams[0].state=hw1pipe::StreamState::Open;
+  admissionPipe.streams[1].id=2;admissionPipe.streams[1].state=hw1pipe::StreamState::Open;
+  assert(admissionPipe.close(2,millis()));requestSlots[1].retiring={1,2};
+  llmHttpRequestRelease(LlmHttpRequestKind::Terminal);
+  gNativeTerminal.more=true;g2NativeTerminalQueueRpc(NativeRpc::Poll);
+  const size_t beforeWaitingPoll=rpcRequests.size();const size_t beforeWaitingWire=sent.size();
+  assert(!g2NativeTerminalRpcStart());settle(5);
+  assert(rpcRequests.size()==beforeWaitingPoll && g2NativeTerminalActive());
+  uint8_t closeAck[hw1pipe::kHeader]{};closeAck[0]=hw1pipe::kVersion;closeAck[1]=uint8_t(hw1pipe::Op::CloseAck);
+  hw1pipe::put16(closeAck+2,2);closeAck[10]=hw1pipe::kFirst|hw1pipe::kLast;
+  assert(admissionPipe.receive(closeAck,sizeof(closeAck),millis()));
+  assert(g2NativeTerminalRpcStart() && rpcRequests.size()==beforeWaitingPoll+1);
+  assert(requestSlots[0].claimed.load() && admissionPipe.find(1)->live());
+  settle(2);assert(g2NativeTerminalActive());
+  for(size_t i=beforeWaitingWire;i<sent.size();++i)assert(sent[i].command!=G2_TERMINAL_CMD_CLOSE);
+  // Reverse ordering: ACK first still cannot free a worker-owned reservation.
+  assert(llmHttpRequestAdmit(LlmHttpRequestKind::Terminal,true)==LlmHttpAdmission::Accepted);
+  assert(llmHttpRequestAdmit(LlmHttpRequestKind::Terminal,true)==LlmHttpAdmission::Busy);
+  llmHttpRequestRelease(LlmHttpRequestKind::Terminal);llmHttpRequestRelease(LlmHttpRequestKind::Chat);
+  admissionPipe.down();close();
+  // Completion-based phone cadence; more bypasses the time gate, never admission.
+  hostState="idle";open();g2NativeTerminalCancelRpc();auto& cadence=gNativeTerminal;
+  cadence.phonePoll=true;cadence.pollMs=millis();cadence.more=false;
+  assert(!g2NativeTerminalPollDue(millis()+2999) && g2NativeTerminalPollDue(millis()+3000));
+  cadence.hostState=G2_TERMINAL_STATE_THINKING;
+  assert(!g2NativeTerminalPollDue(millis()+1999) && g2NativeTerminalPollDue(millis()+2000));
+  cadence.more=true;assert(g2NativeTerminalPollDue(millis()));cadence.more=false;
+  cadence.phonePoll=false;assert(!g2NativeTerminalPollDue(millis()+499) && g2NativeTerminalPollDue(millis()+500));
+  cadence.more=true;assert(!g2NativeTerminalPollDue(millis(),false));
+  cadence.phonePoll=true;assert(g2NativeTerminalPollDue(millis(),false));cadence.more=false;cadence.phonePoll=false;
+  cadence.hostState=G2_TERMINAL_STATE_IDLE;
+  // A slow phone poll anchors its delay at completion, not request start.
+  phonePath=true;holdPoll();const auto slowPollStart=millis();clockMs+=1900;
+  holdRpc=false;g2NativeTerminalRpcRead();
+  assert(gNativeTerminal.phonePoll && gNativeTerminal.pollMs==millis() && millis()>slowPollStart);
+  gNativeTerminal.more=false;
+  assert(!g2NativeTerminalPollDue(millis()+2999));
+  phonePath=false;settle(40);
+  // A 503 consumes the operation, reports outcome uncertainty, retains the
+  // view/transcript, and makes no retry until another explicit operation.
+  dictate("One attempt despite relay busy");event(G2_TERMINAL_CMD_VOICE,4);relayBusy=true;
+  tick();tick();assert(gNativeTerminal.choiceNotice);
+  assert(std::string(gNativeTerminal.text)=="relay busy with an earlier request (outcome unknown)");
+  const size_t after503=rpcRequests.size();settle(200);
+  assert(rpcRequests.size()==after503 && g2NativeTerminalActive());relayBusy=false;close();
+  // A failed background poll cannot tear down an active microphone/draft.
+  // Both paths back off from completion; `more` and queued admission cannot
+  // bypass the delay. Successful polling restores ordinary cadence.
+  for (bool viaPhone : {false,true}) {
+    phonePath=viaPhone;hostState="idle";hostRun.clear();open();holdPoll();
+    event(G2_TERMINAL_CMD_VOICE,1);assert(sttLive);
+    const auto view=std::string(gNativeTerminal.view);
+    const unsigned before=submissions;const size_t wireBegin=sent.size();
+    strcpy(gNativeTerminal.prompt,"Long question already transcribed");
+    gNativeTerminal.promptLen=strlen(gNativeTerminal.prompt);
+    failRpc=true;holdRpc=false;g2NativeTerminalRpcRead();
+    assert(g2NativeTerminalActive()&&sttLive&&gNativeTerminal.policy.phase==NativeTerm::Phase::Recording);
+    assert(std::string(gNativeTerminal.view)==view&&gNativeTerminal.promptLen==33);
+    assert(gNativeTerminal.pollFailures==1&&gNativeTerminal.pollRetryDelay==3000);
+    gNativeTerminal.more=true;
+    assert(!g2NativeTerminalPollDue(millis()+2999));
+    g2NativeTerminalQueueRpc(NativeRpc::Poll);assert(!g2NativeTerminalRpcStart());
+    clockMs+=3000;assert(!g2NativeTerminalRpcStart()); // active speech still wins
+    assert(!g2NativeTerminalPollDue(millis()+60000));
+    transcript="Finish the long question";event(G2_TERMINAL_CMD_VOICE,2);
+    assert(!g2NativeTerminalRpcStart()); // finishing/worker drain still wins
+    for(unsigned i=0;i<20&&gNativeTerminal.policy.phase!=NativeTerm::Phase::AwaitConfirm;++i){tick();ack();}
+    settle(2);
+    assert(!gNativeTerminal.pollFailures&&!gNativeTerminal.pollRetryDelay);
+    assert(!sttLive&&submissions==before&&g2NativeTerminalActive());
+    for(size_t i=wireBegin;i<sent.size();++i)assert(sent[i].command!=G2_TERMINAL_CMD_CLOSE);
+    close();
+  }
+  phonePath=false;
+  // Three retries, then pause without discarding the recording. Finishing
+  // still reaches transcript confirmation; it never submits by itself.
+  hostState="idle";open();holdPoll();
+  const unsigned beforeExhausted=submissions;
+  holdRpc=false;
+  for(unsigned failure=1;failure<=4;++failure) {
+    failRpc=true;g2NativeTerminalRpcRead();
+    assert(g2NativeTerminalActive()&&gNativeTerminal.pollFailures==failure);
+    if(failure<=3) {
+      const uint32_t delay=3000u<<(failure-1);
+      assert(gNativeTerminal.pollRetryDelay==delay);
+      gNativeTerminal.more=true;
+      assert(!g2NativeTerminalPollDue(millis()+delay-1));
+      clockMs+=delay;g2NativeTerminalQueueRpc(NativeRpc::Poll);
+      assert(g2NativeTerminalRpcStart());
+    }
+  }
+  assert(gNativeTerminal.pollPaused&&!g2NativeTerminalPollDue(millis()+60000));
+  const size_t exhaustedRequests=rpcRequests.size();
+  event(G2_TERMINAL_CMD_VOICE,1);assert(sttLive);
+  transcript="Long question preserved after failed background polling";
+  event(G2_TERMINAL_CMD_VOICE,2);
+  for(unsigned i=0;i<20&&gNativeTerminal.policy.phase!=NativeTerm::Phase::AwaitConfirm;++i){tick();ack();}
+  assert(gNativeTerminal.policy.phase==NativeTerm::Phase::AwaitConfirm);
+  assert(std::string(gNativeTerminal.prompt)==transcript);
+  settle(50);assert(submissions==beforeExhausted&&rpcRequests.size()==exhaustedRequests&&g2NativeTerminalActive());
+  close();
+  // Refused/expired views and relay 503 are not automatically retried, but
+  // their read-only poll failure still must not cancel active speech.
+  for(int status : {401,404,503}) {
+    hostState="idle";open();holdPoll();event(G2_TERMINAL_CMD_VOICE,1);
+    const unsigned before=submissions;
+    forcedRpcStatus=status;holdRpc=false;g2NativeTerminalRpcRead();forcedRpcStatus=200;
+    assert(gNativeTerminal.pollPaused&&sttLive&&g2NativeTerminalActive());
+    const size_t requests=rpcRequests.size();settle(50);
+    assert(rpcRequests.size()==requests&&submissions==before&&sttLive&&g2NativeTerminalActive());
+    close();
+  }
   NativeTerm magic;for(unsigned i=0;i<255;++i)assert(magic.allocate(100));assert(!magic.allocate(100));assert(magic.allocate(3101));
   puts("native Terminal host-session lifecycle tests passed");
 }

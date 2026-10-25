@@ -23,7 +23,10 @@ Each successful build writes `BUILD_INFO.md` with
 compiler-resolved feature flags, image size, and remaining app-partition space.
 These commands build only; they do not flash a device.
 
-`xiao-default` preserves the ordinary XIAO selection with MQTT off. `xiao-mqtt`
+`xiao-default` uses the ordinary XIAO selection with MQTT and Bluetooth off.
+Bluetooth is disabled in both the application and SDK for the 0.99.98.5 release
+to leave app-partition space. This is a saved-profile choice; board and shared
+defaults remain available to other profiles. `xiao-mqtt`
 enables MQTT, Wi-Fi, and the MQTT settings page, and disables offline maps to
 fit the existing app partition. Both use the existing Sense assembly selection
 and board defaults. This trade-off is an explicit saved choice, not a dependency
@@ -32,15 +35,21 @@ rule or an automatic size adjustment.
 `p4-openclaw` starts from the qualified `p4-glasses-test` speech profile and
 adds the LLM feature and HTTP source. It keeps local STT, the pinned 15x5 gen2
 model, speaker labels and SDMMC enabled, with ESP-SR and onboard/CM5 LLM sources
-off. Runtime relay credentials and the public CA are configured on the device.
+off. Like every P4 speech profile, both opt into `CONFIG_HEAP_USE_HOOKS` for the
+speech pipeline's internal-memory accounting (added to `p4-glasses-test` on
+2026-10-18; that profile has not been reflashed or requalified since). Runtime relay credentials and the public CA are configured on the device.
 Use the existing Stop → wait for transcription → review → Send interaction.
 The combined voice-to-agent path still needs hardware qualification.
 
 `xiao-openclaw` enables the HTTP agent source and keeps CM5 available. This test
-profile explicitly disables the onboard LLM to fit the existing app partition;
-the user selected that trade-off for remote-agent testing. `xiao-default` and
-shared defaults keep the onboard source enabled. TLS trust/verification and all
-other existing choices are unchanged. Endpoint credentials remain runtime device
+profile explicitly disables Bluetooth (application and SDK) and the onboard LLM
+to fit the existing app partition;
+the user selected that trade-off for remote-agent testing. It also turns off
+the BLE coexistence records (`ENABLE_BLE_COEX_RECORDS`): with them on, the image
+overflowed the partition by 5,696 bytes (2026-10-17; 2,480 bytes remain without
+them). Shared defaults retain the onboard LLM and BLE records; the records are
+derived off in profiles that disable Bluetooth. TLS
+trust/verification and all other existing choices are unchanged. Endpoint credentials remain runtime device
 settings; the saved configuration contains no secrets.
 
 `xiao-display` enables external I2C and an SSD1306 display. It explicitly disables
@@ -300,3 +309,13 @@ build inputs, cancellation, conflicting edits, and save/build ordering.
 These tooling checks do not require rebuilding or reflashing the firmware.
 Additional setup interfaces should reuse these functions as described in the
 [development guidelines](../CONTRIBUTING.md).
+
+## P4 phone-pipe camera-off qualification
+
+`p4-phone-pipe-camera-off-test` copies `p4-phone-pipe` and changes only
+`ENABLE_CAMERA_SENSOR=0`. It keeps G2 glasses and the ring compiled in for
+three-link C6 coexistence tests, unlike `p4-phone-no-camera-test` which disables
+G2. The camera fault remains a separate investigation; disabling the camera in
+this diagnostic profile is not a fix or qualification of camera-enabled firmware.
+Build with `python3 tools/build_config.py build p4-phone-pipe-camera-off-test`.
+Flashing requires separate approval; this profile does not update the C6.

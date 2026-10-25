@@ -29,41 +29,41 @@ extern void resetOLEDMenu();  // defined in OLED_Utils.cpp; called by the launch
 // Shared menu primitives (used by BOTH the sensor menu and the main launcher)
 // ============================================================================
 // These collapse the formerly hand-rolled list/menu systems onto OLEDScrollState:
-//   * menuItemRightPaneDraw - availability badge + status text in the icon pane
+//   * menuItemRightPaneDraw - availability badge + status dot in the icon pane
 //   * populateMenuScroll     - fill an OLEDScrollState from an OLEDMenuItem[]
 //   * oledMenuExecuteItem    - availability-aware "select" dispatch
 // Per-mode entry init for launched modes now runs via OLEDModeEntry::onEnterFunc,
 // so the dispatch here stays tiny.
 
-// Right-pane decorator for the SELECTED item: availability badge (D/X) in the
-// top-left of the icon pane, and a status word (Ready/Off/No HW/N/A) below the
-// icon. Reads the backing descriptor via item->userData. Ported verbatim from
-// the old displaySensorMenu / displayMenuListStyle right-pane logic.
+// Right-pane decorator for the SELECTED item. A column between the divider
+// and the icon, top to bottom: the availability badge (D: turned off, X: no
+// hardware or not built), then a status dot, filled when the item is ready
+// and hollow otherwise. It never moves the icon and fits every canvas height.
+// Reads the backing descriptor via item->userData.
 static void menuItemRightPaneDraw(Adafruit_SSD1306* d, OLEDScrollItem* item,
-                                  int areaX, int iconY, int iconSize) {
+                                  int areaX, int /*iconY*/, int /*iconSize*/) {
   if (!d || !item || !item->userData) return;
   const OLEDMenuItem* mi = (const OLEDMenuItem*)item->userData;
   MenuAvailability avail = getMenuAvailability(mi->targetMode, nullptr);
 
-  d->setTextSize(1);
-  d->setTextColor(DISPLAY_COLOR_WHITE);
-
+  // areaX is 4 px past the divider and the icon starts at least 4 px further.
+  // The same 2 px gap separates the divider and the header from the badge,
+  // and the badge from the dot; the badge row is kept even with no badge.
+  constexpr int kPaneDotRadius = 2;
+  constexpr int kPaneGap = 2;
+  constexpr int kGlyphHeight = 7;  // visible rows of a size-1 character
+  const int columnX = areaX - 4 + 1 + kPaneGap;  // divider, then the gap
+  const int badgeY = OLED_CONTENT_START_Y + kPaneGap;
   if (avail != MenuAvailability::AVAILABLE) {
-    d->setCursor(areaX + 2, OLED_CONTENT_START_Y);
+    d->setTextSize(1);
+    d->setTextColor(DISPLAY_COLOR_WHITE);
+    d->setCursor(columnX, badgeY);
     d->print(avail == MenuAvailability::FEATURE_DISABLED ? "D" : "X");
   }
-
-  int textY = iconY + iconSize + 2;
-  if (textY + 8 <= OLED_CONTENT_HEIGHT) {
-    d->setCursor(areaX + 2, textY);
-    switch (avail) {
-      case MenuAvailability::AVAILABLE:        d->print("Ready"); break;
-      case MenuAvailability::FEATURE_DISABLED: d->print("Off");   break;
-      case MenuAvailability::NOT_DETECTED:     d->print("No HW"); break;
-      case MenuAvailability::NOT_BUILT:        d->print("N/A");   break;
-      default: break;
-    }
-  }
+  const int dotX = columnX + kPaneDotRadius;
+  const int dotY = badgeY + kGlyphHeight + kPaneGap + kPaneDotRadius;
+  if (avail == MenuAvailability::AVAILABLE) d->fillCircle(dotX, dotY, kPaneDotRadius, DISPLAY_COLOR_WHITE);
+  else d->drawCircle(dotX, dotY, kPaneDotRadius, DISPLAY_COLOR_WHITE);
 }
 
 // Availability sort rank (lower = higher priority): Ready, then Off, then No-HW.
@@ -183,7 +183,7 @@ EXT_RAM_BSS_ATTR static char sCatLabels[8][20];  // "<Category> >" decorated lab
 
 static void mainMenuEnsureInit() {
   if (sMainScrollInit) return;
-  oledScrollInit(&sMainScroll, nullptr, 4);
+  oledScrollInit(&sMainScroll, nullptr, oledVisibleRows(10, 1, 4));
   oledScrollSetSplitPane(&sMainScroll, 68, 74, 32);
   sMainScrollInit = true;
 }
@@ -303,7 +303,7 @@ static bool sSensorScrollInit = false;
 
 static void sensorMenuPopulate() {
   if (!sSensorScrollInit) {
-    oledScrollInit(&sSensorScroll, nullptr, 4);
+    oledScrollInit(&sSensorScroll, nullptr, oledVisibleRows(10, 1, 4));
     oledScrollSetSplitPane(&sSensorScroll, 78, 84, 32);
     sSensorScroll.rightPaneDraw = menuItemRightPaneDraw;
     sSensorScrollInit = true;

@@ -231,9 +231,16 @@ bool bleAnyPeerWantsAutoReconnect(void);
 // ownership. Call AFTER initG2Client() so peer modules have registered.
 void bleBootReconnect(void);
 
+// Call when the G2 client host has started (initG2Client). Arms reconnect for
+// every registered peer that is down, has auto-reconnect on, a saved target
+// and owner authority, and no explicit user disconnect. A role switch away and
+// back, or a boot in another mode, otherwise leaves such a peer unarmed.
+// Non-blocking; an episode already scheduled keeps its time.
+void bleArmAutoReconnectPeers(void);
+
 // Mid-session drop recovery (when autoReconnect is on + saved MAC):
 //   blePeerNoteUserDisconnect — call from intentional disconnect paths
-//     (ringdisconnect / closeg2) so we do NOT reseek after a user tear-down.
+//     (ring disconnect / closeg2) so we do NOT reseek after a user tear-down.
 //   blePeerNoteLinkLost — call from BLE onDisconnect when the link was up;
 //     schedules a reconnect attempt if autoReconnect is on and the drop was
 //     not user-initiated.
@@ -246,7 +253,7 @@ void bleBootReconnect(void);
 //     only if the exact admitted request is still current, so a late success
 //     cannot undo a newer user disconnect or target/owner change.
 //   bleAutoReconnectTick — call from the main loop; fires due reconnects
-//     with exponential backoff (5s → ~3 min).
+//     with exponential backoff (5s → ~3 min; the phone caps at 30 s).
 void blePeerNoteUserDisconnect(BlePeerKind kind);
 void blePeerNoteUserConnectIntent(BlePeerKind kind);
 void blePeerNoteLinkLost(BlePeerKind kind);
@@ -280,16 +287,14 @@ bool blePeerCommitLearnedTargetIfCurrent(
 // Atomically validates a finite repair's intent+identity, applies any newly
 // discovered MAC, and commits LinkUp under the PeerData→reconnect lock order.
 // No separate policy or persistence window remains after this returns true.
-// Verified phone-pipe enrollment only. Never call from a generic MAC save.
-// Caller checks the stack bond's SC/MITM/key strength before this transaction.
-// Updates the generation references to the committed live incarnation.
-// Caller requests persistence after releasing its completion lock.
-bool blePeerCommitPhonePipeIdentityIfCurrent(
-    uint32_t& intentGeneration, uint32_t& identityGeneration,
-    const uint8_t identity[6], uint8_t addressType, bool* persistNeeded = nullptr);
-// Local, explicitly authorized pipe unpair. The fence also suppresses automatic
-// reconnect while the runtime drains streams and awaits native bond deletion.
-// Server/console MAC and shared phone-account ownership remain intact.
+// The pipe owner commits enrollment only after app-channel authentication and
+// pipe negotiation, under the original local authority/intent fence. No MAC or
+// SMP metadata grants pipe trust. Caller persists after releasing its lock.
+bool blePeerCommitPhonePipeEnrollmentIfCurrent(
+    uint32_t& intentGeneration,uint32_t& identityGeneration,bool* persistNeeded=nullptr);
+// Called after draining the pipe, when its dedicated secret changes or resets.
+bool blePeerClearPhonePipeEnrollment();
+// Scoped enrollment removal preserves the console address and shared account.
 struct BlePhoneForget {
   uint32_t intent = 0, identity = 0;
   BlePeerSavedTarget target;
@@ -308,6 +313,10 @@ void bleAutoReconnectTick(void);
 // disconnected, there is no saved MAC, or the peer is already linked.
 // Non-blocking — the next bleAutoReconnectTick fires connectSaved.
 void blePeerRequestReseek(BlePeerKind kind);
+// Re-arm a one-shot reseek whose admitted job was dropped unrun, only while the
+// job's intent and identity generations are still current. True if re-armed.
+bool blePeerRestoreDroppedReseek(BlePeerKind kind, uint32_t intentGeneration,
+                                 uint32_t identityGeneration);
 
 // Synchronized scheduler snapshot. intentGeneration changes whenever user or
 // link intent is created, replaced, or cancelled. Handing an admitted one-shot
@@ -393,6 +402,7 @@ void blePeersReadJson(JsonDocument& doc);
 inline bool bleRegisterPeer(const struct BlePeerSpec&) { return false; }
 inline bool bleAnyPeerWantsAutoReconnect(void)            { return false; }
 inline void bleBootReconnect(void)                      {}
+inline void bleArmAutoReconnectPeers(void)              {}
 inline void bleSavePeerMac(int, const String&, const String& = String()) {}
 inline void blePeerNoteUserDisconnect(int)              {}
 inline void blePeerNoteUserConnectIntent(int)           {}
@@ -413,6 +423,7 @@ inline bool blePeerCommitRepairIfCurrent(int, uint32_t, uint32_t,
                                           bool* = nullptr) { return false; }
 inline void bleAutoReconnectTick(void)                  {}
 inline void blePeerRequestReseek(int)                   {}
+inline bool blePeerRestoreDroppedReseek(int, uint32_t, uint32_t) { return false; }
 inline bool blePeerAutoReconnectEnabled(int)            { return false; }
 
 #endif  // ENABLE_BLUETOOTH

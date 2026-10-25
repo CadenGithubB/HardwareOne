@@ -15,7 +15,7 @@
 #include "System_Utils.h"  // executeUnifiedWebCommand
 
 // ===========================================================================
-// /api/health/status — identical schema to `healthstatus json`
+// /api/health/status — identical schema to `ring health json`
 // ===========================================================================
 esp_err_t handleR1HealthStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
@@ -56,8 +56,8 @@ static esp_err_t healthActionReply(httpd_req_t* req, const char* status,
 // signed-in identity, so the admin rule, the validate pass and the audit line
 // are the command layer's, the same as from serial, OLED, BLE or MQTT. An
 // admin refusal is 403 (as /api/cli maps it), any other refusal 409. Every
-// admin rule here is a registry row (`ringcontrol`, `healthstatus
-// force-history`), so the registry's "Error: Admin access required ..." is the
+// admin rule here is a registry row (`ring control`, `ring history
+// force`), so the registry's "Error: Admin access required ..." is the
 // only refusal text.
 static esp_err_t healthCommandReply(httpd_req_t* req, AuthContext& ctx,
                                     const char* line) {
@@ -123,7 +123,7 @@ esp_err_t handleR1HealthAction(httpd_req_t* req) {
         : healthActionReply(req, "409 Conflict", "history refresh not queued");
   }
   if (action == "history-force")
-    return healthCommandReply(req, ctx, "healthstatus force-history");
+    return healthCommandReply(req, ctx, "ring history force");
   if (action == "collection" || action == "low-power") {
     // Only fixed tokens reach the command line, never request text.
     const char* desired = value == "preserve" ? "preserve"
@@ -133,7 +133,7 @@ esp_err_t handleR1HealthAction(httpd_req_t* req) {
     if (!desired)
       return healthActionReply(req, "400 Bad Request", "value must be preserve, off, or on");
     char line[40];
-    snprintf(line, sizeof(line), "ringcontrol %s %s",
+    snprintf(line, sizeof(line), "ring control %s %s",
              action == "collection" ? "collection" : "lowpower", desired);
     return healthCommandReply(req, ctx, line);
   }
@@ -232,10 +232,7 @@ static void streamR1HealthContent(httpd_req_t* req, const String& username) {
     return Math.floor(sec/86400)+'d ago';
   }
   function wear(s){
-    if(!s||!s.wearValid)return '--';
-    if(s.wear===2)return 'on';
-    if(s.wear===1)return 'off';
-    return '?';
+    return (s&&s.wearName)||'--';  // g2RingWearName: on/off/maybe/?/--
   }
   function temp(s){
     if(!s||!s.tempValid)return '--';

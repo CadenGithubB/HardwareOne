@@ -134,7 +134,7 @@ struct SensorCacheSnapshot {
   uint8_t r1Spo2;
   int16_t r1TempTenths;  // °C × 10
   uint8_t r1Battery;
-  uint8_t r1Wear;        // 0=unknown 1=notWear 2=wear
+  uint8_t r1Wear;        // 0=unknown 1=notWear 2=wear 3=possiblyWear
 };
 
 // Sensor log format options
@@ -186,11 +186,10 @@ void sensorLogAutoStart();
 // and persists healthLoggingEnabled (+ sensorlog autostart) so boot resumes.
 // Off removes LOG_R1; stops logging when no other sensors remain.
 bool healthLoggingIsActive();
-// The three R1 health commands exist only when the feature is compiled — they
+// The R1 health logging commands exist only when the feature is compiled — they
 // are registered through healthCommands[] below, not sensorLoggingCommands[].
 #if ENABLE_R1_HEALTH
 const char* cmd_healthlogging(const String& argsInput);
-const char* cmd_healthstatus(const String& argsInput);
 // Byte-concatenate sensor logs in the caller's order (same pattern as
 // gpstrackmerge — and the same defects; see that command's usage text).
 // Not TEXT-only despite the name: an extensionless output gets .csv appended.
@@ -200,7 +199,7 @@ const char* cmd_healthlogmerge(const String& argsInput);
 const char* cmd_capturecrypt(const String& argsInput);
 
 // Snapshot vitals + Track into buf (JSON object). Returns buf, or "{}" on failure.
-// Shared by `healthstatus json` CLI/BLE and GET /api/health/status.
+// Shared by `ring health json` CLI/BLE and GET /api/health/status.
 const char* buildHealthStatusJson(char* buf, size_t cap);
 
 // Kick the exact-2.2.9 one-shot refresh (DAILY HR/HRV/SpO2/sleep/activity,

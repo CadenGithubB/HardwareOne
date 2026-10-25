@@ -2258,7 +2258,7 @@ const char* g2sidName(uint8_t sid) {
     case 0x0D: return "SyncInfo";
     case 0x0E: return "Health / WidgetXform";
     case 0x10: return "Onboarding";
-    case 0x12: return "QuickNote?";  // glasses-initiated on 2.3.2.14 (11/9 B); unmapped, log only
+    case 0x12: return "QuickNote";  // native note adapter, 2.3.2.14
     case 0x21: return "ForegroundSystemAlert";
     case 0x22: return "ForegroundSystemClose";
     case 0x80: return "DeviceSettings (DANGEROUS)";

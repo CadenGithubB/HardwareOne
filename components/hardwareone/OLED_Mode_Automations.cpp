@@ -631,7 +631,7 @@ void displayAutomations() {
   const int listWidth = 78;
   const int detailX = 86;
   const int itemHeight = 10;
-  const int maxVisibleItems = 4;
+  const int maxVisibleItems = oledVisibleRows(10, 1, 4);
   const int startY = OLED_CONTENT_START_Y + 1;
 
   oledDisplay->setTextSize(1);

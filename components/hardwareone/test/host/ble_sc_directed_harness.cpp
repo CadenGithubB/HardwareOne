@@ -132,6 +132,11 @@ struct BLEConnection {
   bool authed = false;
   String user;
   bool mirrorEligible = false;
+  bool noChannelRejected = false;
+  // The phone link's console row (phone link v2): its output is console records.
+  bool pipeConsole = false;
+  uint32_t pipeGeneration = 0;
+  uint16_t pipeStream = 0;
 };
 struct BLESystemState {
   BLEConnection connections[BLE_MAX_CONNECTIONS];
@@ -141,6 +146,8 @@ static BLESystemState sState;
 static BLESystemState* gBLEState = &sState;
 static std::atomic<TransportSessionEpoch> sBleSessionEpoch[BLE_MAX_CONNECTIONS];
 static std::atomic<int> sBleGattsIf{3};
+// Client-host posts made with the lifecycle guard released (Bluetooth.cpp).
+static std::atomic<int> sBleConsoleSendsInFlight{0};
 
 static int guardDepth = 0;
 struct BleLifecycleGuard {
@@ -154,6 +161,10 @@ static int slotFor(uint16_t connId) {
     if (sState.connections[i].active && sState.connections[i].connId == connId) return i;
   }
   return -1;
+}
+static int findConnectionSlotByConnIdLocked(uint16_t connId) {
+  EXPECT(guardDepth >= 1, "a connection slot was looked up outside the lifecycle guard");
+  return slotFor(connId);
 }
 static bool bleConnectionEpochMatchesLocked(uint16_t connId, TransportSessionEpoch epoch) {
   EXPECT(guardDepth >= 1, "epoch match read outside the lifecycle guard");
@@ -186,9 +197,44 @@ static int directedSends = 0;
 static int broadcastSends = 0;
 static void (*afterWireHook)() = nullptr;  // runs after each frame leaves
 
+// ---- the G2 client host: the console mode and the shared central TX gate ----
+namespace hw1console { enum class Mode : uint8_t { Off, Server, ClientRegistered }; }
+static hw1console::Mode consoleMode = hw1console::Mode::Server;
+hw1console::Mode bleConsoleMode() { return consoleMode; }
+// Bluetooth.cpp's client-host check, in a pipe build.
+static bool bleConsoleClientHost() { return consoleMode == hw1console::Mode::ClientRegistered; }
+static bool gateBusy = false;           // another submission holds the gate
+static bool accessoryPressure = false;  // glasses/ring traffic in flight
+static int gateTries = 0, gateBypasses = 0, gateHeld = 0, consoleActivity = 0;
+bool bleCentralTxTryPhone(bool bypassPriority) {
+  ++gateTries;
+  EXPECT(guardDepth == 0, "the central TX gate was tried under the lifecycle guard (lock order)");
+  if (bypassPriority) ++gateBypasses;
+  if (gateBusy || (!bypassPriority && accessoryPressure)) return false;
+  ++gateHeld;
+  return true;
+}
+void bleCentralTxGive() {
+  EXPECT(gateHeld == 1 && guardDepth == 0, "the central TX gate was released unheld or under the guard");
+  --gateHeld;
+}
+void phonePipeNoteConsoleActivity() { ++consoleActivity; }
+
 esp_err_t esp_ble_gatts_send_indicate(esp_gatt_if_t gattsIf, uint16_t connId, uint16_t handle,
                                       size_t len, uint8_t* value, bool needConfirm) {
-  EXPECT(guardDepth >= 1, "directed admission ran outside the BLE lifecycle guard");
+  // Server mode posts under the lifecycle guard; the client host after
+  // releasing it (BTC_TASK takes it for the phone's writes and link events,
+  // and the post waits forever on a full BTC queue), counted in flight.
+  if (consoleMode == hw1console::Mode::ClientRegistered) {
+    EXPECT(guardDepth == 0 && sBleConsoleSendsInFlight.load() == 1,
+           "a client-host post ran under the lifecycle guard or uncounted");
+  } else {
+    EXPECT(guardDepth >= 1, "directed admission ran outside the BLE lifecycle guard");
+  }
+  EXPECT(consoleMode != hw1console::Mode::ClientRegistered || gateHeld == 1,
+         "a client-host console frame left without the central TX gate");
+  EXPECT(consoleMode == hw1console::Mode::ClientRegistered || gateTries == 0,
+         "a server-mode frame touched the central TX gate");
   EXPECT(gattsIf == 3 && handle == 42 && !needConfirm, "directed send used the wrong interface/handle");
   const int slot = slotFor(connId);
   if (slot < 0) return ESP_FAIL;
@@ -233,12 +279,16 @@ bool sendBLEResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpo
 // ---- production blocks from Bluetooth.cpp ----------------------------------
 /*@FENCE_STRUCT@*/;
 /*@FENCE_LIVE@*/
+/*@SECURE_ONLY@*/
+/*@TX_GATE@*/;
 /*@RAW_SESSION@*/
+/*@PIPE_ROUTER@*/
 /*@SEND@*/
 /*@MIRROR_COLLECT@*/
 /*@MIRROR_SEND@*/
 /*@DEFERRED_STRUCT@*/;
 static void bleScPoolRelease(BleScDeferred*) { ++poolReleases; }
+/*@NO_CHANNEL@*/
 /*@DEFERRED@*/
 
 // ---- helpers ---------------------------------------------------------------
@@ -289,6 +339,7 @@ static void peer(int slot, uint16_t connId, TransportSessionEpoch epoch, const c
 static void clearWire() {
   for (auto& box : inbox) box.clear();
   directedSends = broadcastSends = pacingDelays = 0;
+  gateTries = gateBypasses = consoleActivity = 0;
   commandLines.clear();
 }
 // Conn 0 (slot 0, epoch 7) and conn 1 (slot 1, epoch 9) connected, nobody
@@ -309,6 +360,9 @@ static void resetWorld(const char* name) {
   keypairHook = nullptr;
   afterWireHook = nullptr;
   pCmdResponseChar = &sResponseChar;
+  consoleMode = hw1console::Mode::Server;
+  gateBusy = accessoryPressure = false;
+  gateHeld = 0;
   clearWire();
 }
 static void establish(uint16_t connId, TransportSessionEpoch epoch) {
@@ -465,12 +519,55 @@ int main() {
   EXPECT(inbox[0].empty() && inbox[1].empty(), "a frame left without a characteristic");
   pCmdResponseChar = &sResponseChar;
 
+  // C11: the G2 client host (the console on the phone pipe's link). Every
+  // frame is one try of the central TX gate before the lifecycle guard, and
+  // counts as pipe activity; plaintext is refused although blesecure is off.
+  resetWorld("C11 client host: gated, Secure Channel only");
+  consoleMode = hw1console::Mode::ClientRegistered;
+  EXPECT(!gSettings.bleRequireSecureChannel, "test setup: blesecure off");
+  EXPECT(!sendBLEResponseToSession(0, 7, "p", 1, true), "plaintext sent on the client host");
+  EXPECT(inbox[0].empty() && gateTries == 0, "a refused plaintext send reached the gate or a peer");
+  establish(1, 9);
+  EXPECT(inbox[1].size() == 2 && frameIs(inbox[1][0], kHelloAck, 49) &&
+             frameIs(inbox[1][1], kConfirmAck, 19) && bleScEstablished(1),
+         "the handshake did not complete through the gate");
+  clearWire();
+  accessoryPressure = true;  // a glasses image burst: reliable sends still go
+  EXPECT(sendBLEResponseToSession(1, 9, big.data(), big.size(), true), "reliable secure result not sent");
+  EXPECT(inbox[1].size() == 3 && inbox[0].empty() && directedSends == 3,
+         "the reliable result did not reach conn 1 as three directed fragments");
+  EXPECT(gateTries == 3 && gateBypasses == 3 && consoleActivity == 3 && gateHeld == 0,
+         "each fragment must be one gate try past the soft priority, noted as pipe activity");
+  // A best-effort send (mirror, notification card) yields to the accessories.
+  clearWire();
+  EXPECT(!sendBLEResponseToSession(1, 9, "n", 1, false), "a best-effort send went out under accessory pressure");
+  EXPECT(inbox[1].empty() && gateTries == 1 && gateBypasses == 0 && consoleActivity == 0,
+         "a best-effort send must try the gate once at the soft priority and send nothing");
+  accessoryPressure = false;
+  EXPECT(sendBLEResponseToSession(1, 9, "n", 1, false) && inbox[1].size() == 1 && consoleActivity == 0,
+         "a best-effort send failed with the radio free, or was noted as pipe activity");
+  // A gate held by another submission: the reliable sender retries, then fails.
+  clearWire();
+  gateBusy = true;
+  EXPECT(!sendBLEResponseToSession(1, 9, "r", 1, true), "a send went out with the gate held elsewhere");
+  EXPECT(inbox[1].empty() && gateTries == 6 && consoleActivity == 0 && gateHeld == 0,
+         "a busy gate must give the bounded six tries and send nothing");
+  gateBusy = false;
+  EXPECT(guardDepth == 0 && txMutexHeld == 0, "guard or tx mutex leaked");
+  // Server mode keeps its path: no gate (the send double checks every frame).
+  consoleMode = hw1console::Mode::Server;
+  clearWire();
+  EXPECT(sendBLEResponseToSession(1, 9, "s", 1, true) && inbox[1].size() == 1 && gateTries == 0 &&
+             consoleActivity == 0,
+         "a server-mode send touched the gate or counted as pipe activity");
+
   if (failures) {
     fprintf(stderr, "BLE secure-channel routing: %d expectation(s) failed\n", failures);
     return 1;
   }
   puts("BLE secure-channel routing: HELLO_ACK, CONFIRM_ACK, REJECT and every DATA fragment reach only their "
        "own connection and session under the lifecycle guard; stale, rotated and torn-down sessions receive "
-       "nothing; the console mirror sends one directed copy per recipient");
+       "nothing; the console mirror sends one directed copy per recipient; the client host gates every frame "
+       "through the central TX gate and serves Secure Channel only");
   return 0;
 }

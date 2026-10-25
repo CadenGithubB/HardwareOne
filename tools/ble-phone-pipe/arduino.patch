@@ -1,6 +1,6 @@
 --- a/libraries/BLE/src/BLEDevice.h
 +++ b/libraries/BLE/src/BLEDevice.h
-@@ -294,6 +294,14 @@
+@@ -294,6 +294,18 @@
  
  #if defined(CONFIG_BLUEDROID_ENABLED)
    static void setCustomGattcHandler(gattc_event_handler handler);
@@ -11,13 +11,87 @@
 +  static void setGapInterceptor(GapInterceptor handler);
 +  using GattcInterceptor = bool (*)(esp_gattc_cb_event_t, esp_gatt_if_t, esp_ble_gattc_cb_param_t*);
 +  static void setGattcInterceptor(GattcInterceptor handler);
-+#define HARDWAREONE_BLE_PHONE_PIPE_API 1
++  // IDs remain reserved through late callbacks/quarantine; only confirmed
++  // retirement or terminal host teardown may release them.
++  static bool allocateAppId(uint16_t& id);
++  static void releaseAppId(uint16_t id);
++#define HARDWAREONE_BLE_PHONE_PIPE_API 2
    static void setCustomGattsHandler(gatts_event_handler handler);
  #endif
  
 --- a/libraries/BLE/src/BLEDevice.cpp
 +++ b/libraries/BLE/src/BLEDevice.cpp
-@@ -1393,7 +1393,16 @@
+@@ -983,8 +983,49 @@
+       _st.peer_device = peer;
+       std::swap(m_connectedClientsMap[conn_id], _st);
+     }
++  }
++}
++
++#if defined(CONFIG_BLUEDROID_ENABLED)
++namespace {
++// [hardwareone local patch 2026-10-22, memory audit BLE-03] GATTC app ids held
++// by clients the routing map may not list (registering, retiring, quarantined):
++// a 64-entry table in place of a 4 KB bitmap over the 15-bit id space. Bluedroid
++// registers at most 4 GATTC apps and the application keeps at most 3 retired
++// clients, so a full table means a leak, not a load; allocateAppId then refuses
++// (connect() reads that as ESP_ERR_NO_MEM). Written under the client registry
++// guard, as the map is.
++constexpr size_t kReservedAppIdSlots = 64;
++uint16_t sReservedAppIds[kReservedAppIdSlots];
++size_t sReservedAppIdCount = 0;
++bool appIdReserved(uint16_t id) {
++  for (size_t i = 0; i < sReservedAppIdCount; ++i) if (sReservedAppIds[i] == id) return true;
++  return false;
++}
++void unreserveAppId(uint16_t id) {
++  for (size_t i = 0; i < sReservedAppIdCount; ++i) {
++    if (sReservedAppIds[i] != id) continue;
++    sReservedAppIds[i] = sReservedAppIds[--sReservedAppIdCount];
++    return;
++  }
++}
++}
++bool BLEDevice::allocateAppId(uint16_t& id) {
++  BLEClientRegistryGuard guard;
++  if(sReservedAppIdCount==kReservedAppIdSlots)return false;
++  for(unsigned tried=0;tried<32768;++tried) {
++    const uint16_t candidate=m_appId++ & 0x7fff;
++    if(appIdReserved(candidate) || m_connectedClientsMap.count(candidate))continue;
++    sReservedAppIds[sReservedAppIdCount++]=candidate;id=candidate;return true;
+   }
++  return false;
+ }
++void BLEDevice::releaseAppId(uint16_t id) {
++  if(id>0x7fff)return;
++  BLEClientRegistryGuard guard;
++  unreserveAppId(id);
++}
++#endif
+ 
+ void BLEDevice::addPeerDevice(void *peer, bool _client, uint16_t conn_id) {
+   log_i("add conn_id: %d, GATT role: %s", conn_id, _client ? "client" : "server");
+@@ -1024,6 +1065,9 @@
+     if (_client) client = static_cast<BLEClient *>(it->second.peer_device);
+     m_connectedClientsMap.erase(it);
+   }
++#if defined(CONFIG_BLUEDROID_ENABLED)
++  if(_client && conn_id<=0x7fff)unreserveAppId(conn_id);
++#endif
+   if (client != nullptr) {
+     bool stillRouted = false;
+     for (const auto &entry : m_connectedClientsMap) {
+@@ -1203,6 +1247,9 @@
+         if (client != nullptr) routedClients.insert(client);
+       }
+       m_connectedClientsMap.clear();
++#if defined(CONFIG_BLUEDROID_ENABLED)
++      sReservedAppIdCount=0;
++#endif
+       for (BLEClient *client : routedClients) {
+         client->m_routingDrainEvt.give();
+       }
+@@ -1393,7 +1440,16 @@
   * @param [in] gattc_if
   * @param [in] param
   */
@@ -34,7 +108,7 @@
  
    log_d("gattClientEventHandler [esp_gatt_if: %d] ... %s", gattc_if, BLEUtils::gattClientEventTypeToString(event).c_str());
    BLEUtils::dumpGattClientEvent(event, gattc_if, param);
-@@ -1454,7 +1463,17 @@
+@@ -1454,8 +1510,18 @@
  /**
   * @brief Handle GAP events.
   */
@@ -46,51 +120,37 @@
 +}
 +
  void BLEDevice::gapEventHandler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
-+
+ 
 +  auto interceptor = __atomic_load_n(&sGapInterceptor, __ATOMIC_ACQUIRE);
 +  if (interceptor && interceptor(event, param)) return;
- 
++
    BLEUtils::dumpGapEvent(event, param);
  
---- a/libraries/BLE/src/BLESecurity.h
-+++ b/libraries/BLE/src/BLESecurity.h
-@@ -114,6 +114,13 @@
+   switch (event) {
+--- a/libraries/BLE/src/BLEClient.cpp
++++ b/libraries/BLE/src/BLEClient.cpp
+@@ -604,7 +604,11 @@
  
- #if defined(CONFIG_BLUEDROID_ENABLED)
-   static char *esp_key_type_to_str(esp_ble_key_type_t key_type);
-+  struct Policy {
-+    uint8_t authentication, capability, initiatorKeys, responderKeys, keySize;
-+  };
-+  static Policy policy();
-+  // Caller serializes global SMP policy with other connection owners.
-+  // Attempts every field, reports the first rejected submission.
-+  static esp_err_t applyPolicy(const Policy& policy);
-   static void setEncryptionLevel(esp_ble_sec_act_t level);
-   static bool startSecurity(esp_bd_addr_t bd_addr, int *rcPtr = nullptr);
- #endif
---- a/libraries/BLE/src/BLESecurity.cpp
-+++ b/libraries/BLE/src/BLESecurity.cpp
-@@ -60,6 +60,23 @@
- #if defined(CONFIG_BLUEDROID_ENABLED)
- uint8_t BLESecurity::m_keySize = 16;
- esp_ble_sec_act_t BLESecurity::m_securityLevel;
-+BLESecurity::Policy BLESecurity::policy() {
-+  return {m_authReq, m_iocap, m_initKey, m_respKey, m_keySize};
-+}
-+esp_err_t BLESecurity::applyPolicy(const Policy& p) {
-+  const esp_ble_sm_param_t kinds[] = {ESP_BLE_SM_AUTHEN_REQ_MODE, ESP_BLE_SM_IOCAP_MODE,
-+    ESP_BLE_SM_SET_INIT_KEY, ESP_BLE_SM_SET_RSP_KEY, ESP_BLE_SM_MAX_KEY_SIZE};
-+  uint8_t values[] = {p.authentication, p.capability, p.initiatorKeys, p.responderKeys, p.keySize};
-+  uint8_t* mirrors[] = {&m_authReq, &m_iocap, &m_initKey, &m_respKey, &m_keySize};
-+  esp_err_t first = ESP_OK;
-+  for (unsigned i = 0; i < sizeof(values); ++i) {
-+    const esp_err_t result = esp_ble_gap_set_security_param(kinds[i], &values[i], sizeof(uint8_t));
-+    if (result == ESP_OK) *mirrors[i] = values[i];
-+    else if (first == ESP_OK) first = result;
+   // We need the connection handle that we get from registering the application.  We register the app
+   // and then block on its completion.  When the event has arrived, we will have the handle.
+-  m_appId = BLEDevice::m_appId++;
++  if (!BLEDevice::allocateAppId(m_appId)) {
++    setConnectOutcomeStage(BLEClientConnectStage::APP_REGISTER_API, ESP_ERR_NO_MEM);
++    finishConnectOutcome(false);
++    return false;
 +  }
-+  return first;
-+}
-+
- FreeRTOS::Semaphore *BLESecurity::m_authCompleteSemaphore = nullptr;
- #endif
+   BLEDevice::addPeerDevice(this, true, m_appId);
+   m_semaphoreRegEvt.take("connect");
  
+@@ -779,8 +783,9 @@
+     // - esp_bd_addr_t     remote_bda
+     case ESP_GATTC_DISCONNECT_EVT:
+     {
+-      if (evtParam->disconnect.conn_id != getConnId()) {
+-        break;
++      if (evtParam->disconnect.conn_id != getConnId() ||
++          memcmp(evtParam->disconnect.remote_bda, m_peerAddress.getNative(), ESP_BD_ADDR_LEN) != 0) {
++        return; // Foreign DISCONNECT must never reach service/characteristic waits.
+       }
+       // If we receive a disconnect event, set the class flag that indicates that we are
+       // no longer connected.

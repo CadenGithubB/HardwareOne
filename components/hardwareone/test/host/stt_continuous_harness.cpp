@@ -239,6 +239,11 @@ void* heap_caps_calloc(size_t n,size_t bytes,int){
 }
 void heap_caps_free(void* p){trackedFree(p);assert(speakerRingAllocations.fetch_sub(1)==1);}
 static std::atomic<bool> speakerEnabled{false},speakerDrainProduces{false};
+static unsigned speakerBegins=0;
+bool sttSpeakerBegin(STTLocalSession*,size_t,STTSpeakerStatus* out){
+ ++speakerBegins;*out={};out->ready=true;return true;
+}
+
 // These gates model a busy backend, without reimplementing its slot scheduler.
 // The real broker must forward cancellation and preserve pending saved lines.
 static std::atomic<bool> speakerSubmitHeld{false}, speakerSubmitEntered{false};
@@ -1891,7 +1896,9 @@ static void testNativeQueueFullWithCaches() {
   assert(chunks.size() == 4);
   for (size_t i = 0; i < chunks.size(); ++i) assert(chunks[i].sequence == i + 1);
   assert(chunks[3].startSample == kCalibrationSamples + 5 * 96000 - 4800);
-  assert(publishWakes == 4);
+  // The completion counter is published under the broker lock before its
+  // consumer wake runs outside the lock. Wait for that later action too.
+  await([] { return publishWakes == 4; }, "a publish wake for every retained native final");
   assert(sttRequestFinish(owner, token)); complete(token);
   s = snapshot(token);
   assert(s.state == STTState::Done && !s.error[0] && s.segmentsCompleted == 4);
@@ -2334,6 +2341,31 @@ static void testSpeakerSaveRingOverflow() {
  assert(labels.entries[1].ready&&labels.entries[1].speaker==-1); // no cross-row contamination
  assert(sttRequestFinish(owner,token));complete(token);assert(saved(token).chunks.size()==9);
 }
+static void testSpeakerOptOut() {
+ reset();speakerEnabled=true;speakerBegins=0;
+ auto& backend=gWarmSession;
+ sttStartSpeakers(backend,0,true,false);
+ sttStartSpeakers(backend,0,false,true);
+ assert(speakerBegins==0);
+ sttStartSpeakers(backend,0,true,true);
+ assert(speakerBegins==1);
+ reset();speakerEnabled=true;
+ allowedSamples=deliveredSamples=0;readCounter=0;
+ STTToken token=0;char error[96]{};
+ assert(sttBeginContinuousG2Native(owner,7,&token,error,sizeof(error),nullptr,nullptr,false));
+ started(token);feed(token,kPhraseCap);
+ await([&]{return snapshot(token).segmentsCompleted==1;},"opt-out final");
+ assert(peek(token).text[0]);
+ STTSpeakerSnapshot labels;
+ assert(sttReadSpeakers(owner,token,&labels)&&!labels.available&&labels.count==0);
+ assert(!speakerSubmitEntered&&!speakerDrainEntered&&speakerPolls==0);
+ assert(sttRequestFinish(owner,token));complete(token);
+ assert(!speakerSubmitEntered&&!speakerDrainEntered&&speakerPolls==0);
+ // The option belongs to one run; the next ordinary native consumer keeps labels.
+ reset();speakerEnabled=true;token=beginNative();started(token);feed(token,kPhraseCap);
+ await([&]{return speakerSubmitEntered.load();},"default speaker submit");
+ assert(sttRequestFinish(owner,token));complete(token);
+}
 static void testSpeakerMetadata() {
  reset();speakerEnabled=true;
  auto token=begin();started(token);
@@ -2455,6 +2487,7 @@ int main() {
   testNativeUtterance(); puts("PASS native voice question: pause endpoint, hard-cut continuation, timeout, PCM loss, cancellation, epoch and queue fences");
   setvbuf(stdout, nullptr, _IONBF, 0);
 #if HW1_STT_SPEAKER_LABELS
+  testSpeakerOptOut();puts("PASS speaker opt-out: no model start, label submission/drain, or cross-session policy leak");
   testDelayedSpeakerSaving();puts("PASS late speaker saving: 20-second labels, final-stop drain and bounded unknown completion");
   testSpeakerSubmissionWait();puts("PASS a busy speaker submit keeps captions readable and delivers labels completed during its wait");
   testSpeakerWaitPreservesCapture();puts("PASS full speaker backend releases admission on queued audio; native and regular capture keep all six phrases; last phrase still waits");

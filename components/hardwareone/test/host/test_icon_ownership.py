@@ -103,7 +103,7 @@ def compile_and_run(args: argparse.Namespace, source: Path, baseline: bool) -> d
     fixture = {"generated_source_sha256": hashlib.sha256(generated.encode()).hexdigest(), "variants": {}}
     with tempfile.TemporaryDirectory(prefix="hw1-icons-") as directory:
         work = Path(directory)
-        for name in ("System_Icons.h", "HAL_Display.h", "OLED_UI.h"):
+        for name in ("System_Icons.h", "HAL_Display.h", "OLED_Layout.h", "OLED_UI.h"):
             shutil.copy2(source / name, work / name)
         (work / "System_Icons.cpp").write_text(generated)
         (work / "Arduino.h").write_text(ARDUINO)

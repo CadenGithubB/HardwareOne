@@ -37,6 +37,7 @@ enum G2HealthMetric : uint8_t {
   HEALTH_METRIC_TEMP,
   HEALTH_METRIC_BATTERY,
   HEALTH_METRIC_ACTIVITY,
+  HEALTH_METRIC_SLEEP,
 };
 
 // MAIN = live Overview / metrics; TRENDS = daily-history submenu.
@@ -150,9 +151,17 @@ void g2HealthSetHistoryPeerId(const char* canonicalMac);
 bool g2HealthApplyCommonDaily(const R1CommonDailyResult& result);
 bool g2HealthApplyHrvDaily(const R1HrvDailyResult& result);
 bool g2HealthApplyActivityDaily(const R1ActivityDailyResult& result);
+// One anchored sleep record, filed under the local day its period ends on.
+bool g2HealthApplySleepDaily(const R1SleepDailyResult& result);
 void g2HealthHistoryFetchStarted(void);
 void g2HealthHistoryFetchFinished(bool successfulSweep, uint8_t errorCode);
 void g2HealthHistorySetSleepState(R1HealthSleepState state);
+// Backlog drain for an explicit Poll Now. A sweep holds one day (the first it
+// accepts; the ring sends its backlog oldest first). True when the finished
+// sweep refused a page from a newer day, so another sweep can take that day
+// once this one is persisted (g2HealthHistoryReadyForFetch).
+bool g2HealthHistoryBacklogPending(void);
+bool g2HealthHistoryReadyForFetch(void);
 struct G2HealthHistorySummary {
   bool available;
   uint8_t protocolProfile;  // persisted R1HealthHistoryLayout ID (legacy name)
@@ -164,6 +173,7 @@ struct G2HealthHistorySummary {
   uint8_t fetchError;
   R1HealthSleepState sleepState;
   R1HealthActivitySummary activity;
+  R1HealthSleepSummary sleep;
 };
 bool g2HealthHistorySnapshot(R1HealthHistoryDay& out);
 void g2HealthHistoryGetSummary(G2HealthHistorySummary& out);
@@ -186,6 +196,7 @@ enum G2HealthMetric : uint8_t {
   HEALTH_METRIC_TEMP,
   HEALTH_METRIC_BATTERY,
   HEALTH_METRIC_ACTIVITY,
+  HEALTH_METRIC_SLEEP,
 };
 enum G2HealthNav : uint8_t {
   HEALTH_NAV_MAIN = 0,
@@ -230,10 +241,13 @@ inline void g2HealthSetHistoryPeerId(const char*) {}
 inline bool g2HealthApplyCommonDaily(const R1CommonDailyResult&) { return false; }
 inline bool g2HealthApplyHrvDaily(const R1HrvDailyResult&) { return false; }
 inline bool g2HealthApplyActivityDaily(const R1ActivityDailyResult&) { return false; }
+inline bool g2HealthApplySleepDaily(const R1SleepDailyResult&) { return false; }
 #endif
 inline void g2HealthHistoryFetchStarted(void) {}
 inline void g2HealthHistoryFetchFinished(bool, uint8_t) {}
 inline void g2HealthHistorySetSleepState(R1HealthSleepState) {}
+inline bool g2HealthHistoryBacklogPending(void) { return false; }
+inline bool g2HealthHistoryReadyForFetch(void) { return true; }
 struct G2HealthHistorySummary {
   bool available;
   uint8_t protocolProfile;  // persisted R1HealthHistoryLayout ID (legacy name)
@@ -245,6 +259,7 @@ struct G2HealthHistorySummary {
   uint8_t fetchError;
   R1HealthSleepState sleepState;
   R1HealthActivitySummary activity;
+  R1HealthSleepSummary sleep;
 };
 inline bool g2HealthHistorySnapshot(R1HealthHistoryDay&) { return false; }
 inline void g2HealthHistoryGetSummary(G2HealthHistorySummary& out) { out = G2HealthHistorySummary{}; }

@@ -8,7 +8,7 @@
  * Currently supported:
  *   - DISPLAY_TYPE_SSD1306: 128x64 monochrome OLED (I2C)
  *   - DISPLAY_TYPE_ST7789: 240x320 color IPS TFT (SPI) - Adafruit 2.0" EYESPI
- *   - DISPLAY_TYPE_ST7789_P4_EYE: onboard 240x240 ST7789, existing 128x64 UI
+ *   - DISPLAY_TYPE_ST7789_P4_EYE: onboard 240x240 ST7789, 128x128 logical UI
  * 
  * Future support planned:
  *   - DISPLAY_TYPE_ILI9341: 320x240 color TFT (SPI)
@@ -67,10 +67,10 @@
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
   #include "HAL_Display_P4Eye.h"
   #define DISPLAY_ENABLED       1
-  // Logical canvas matches every existing OLED mode and raw-buffer consumer.
-  // The driver scales this 128x64 surface to 240x120, centered on the panel.
-  #define DISPLAY_WIDTH         128
-  #define DISPLAY_HEIGHT        64
+  // Keep OLED text wrapping; add rows on the taller software canvas.
+  #include "HAL_Display_P4EyePixels.h"
+  #define DISPLAY_WIDTH         P4EYE_CANVAS_WIDTH
+  #define DISPLAY_HEIGHT        P4EYE_CANVAS_HEIGHT
   #define DISPLAY_PANEL_WIDTH   240
   #define DISPLAY_PANEL_HEIGHT  240
   #define DISPLAY_COLOR_DEPTH   1
@@ -165,8 +165,13 @@
 
 #if DISPLAY_ENABLED
 
-// Header configuration (scales with display height)
-#if DISPLAY_HEIGHT <= 64
+// Monochrome canvases keep compact chrome as more content rows are added.
+#include "OLED_Layout.h"
+
+// Header configuration
+#if !DISPLAY_IS_COLOR
+  #define DISPLAY_HEADER_HEIGHT   oled_layout::kHeaderHeight
+#elif DISPLAY_HEIGHT <= 64
   #define DISPLAY_HEADER_HEIGHT   10
 #elif DISPLAY_HEIGHT <= 128
   #define DISPLAY_HEADER_HEIGHT   12
@@ -174,8 +179,10 @@
   #define DISPLAY_HEADER_HEIGHT   16
 #endif
 
-// Footer configuration (scales with display height)
-#if DISPLAY_HEIGHT <= 64
+// Footer configuration
+#if !DISPLAY_IS_COLOR
+  #define DISPLAY_FOOTER_HEIGHT   oled_layout::kFooterHeight
+#elif DISPLAY_HEIGHT <= 64
   #define DISPLAY_FOOTER_HEIGHT   10
 #elif DISPLAY_HEIGHT <= 128
   #define DISPLAY_FOOTER_HEIGHT   16

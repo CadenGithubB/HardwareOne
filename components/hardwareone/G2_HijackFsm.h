@@ -94,8 +94,8 @@ HijackState hijackFsmState();
 // Enqueue an event for the FSM worker task to apply. Non-blocking — if
 // the queue is full the event is dropped and counted (logged at the next
 // successful drain). Tag identifies the call site in the log
-// (e.g. "g2ShowListPage", "pageSwapWorker.cleanup") and is copied into
-// the queue entry, so the caller may pass a non-static pointer.
+// (e.g. "g2ShowListPage", "pageSwapWorker.cleanup"); the queue entry keeps
+// the pointer, so it must be a string literal or another static-lifetime string.
 void hijackFsmDispatch(HijackEvent ev, const char* tag);
 
 // Payload-carrying overload — used by ContainerCreated callers that need

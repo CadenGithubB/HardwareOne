@@ -43,7 +43,7 @@ struct State {
     std::vector<size_t> modelFrames;
     std::vector<int> runStages;
     size_t allocated=0, allocationCalls=0, failAllocation=0;
-    size_t psramTotal=32*1024*1024, internalFree=1024*1024;
+    size_t psramTotal=32*1024*1024, internalFree=1024*1024, internalLargest=1024*1024;
     size_t largest=32*1024*1024;
     bool fragmentAfterRaw=false;
     int rawAllocations=0, rawFrees=0, models=0, created=0, destroyed=0;
@@ -63,6 +63,7 @@ struct State {
     int reshapes=0;
     bool oddTensor=false;
     size_t modelInternalBytes=0;
+    int unrelatedBuildDelta=0;
     struct Meta { size_t size; int kind; bool psram; };
     std::map<void*,Meta> meta;          // blocks from ESP-DL's metadata allocator (fake vendor model)
     struct Ps { size_t size; std::string tag; bool psram; };
@@ -142,6 +143,7 @@ size_t heap_caps_get_free_size(unsigned caps) {
     return fake::state.psramTotal>fake::state.allocated?fake::state.psramTotal-fake::state.allocated:0;
 }
 size_t heap_caps_get_largest_free_block(unsigned caps) {
+    if(caps&MALLOC_CAP_INTERNAL)return fake::state.internalLargest;
     assert(caps==MALLOC_CAP_SPIRAM);
     if(fake::state.fragmentAfterRaw && fake::rawLive())return 1024;
     return fake::state.largest;
@@ -430,6 +432,7 @@ class Model {
         assert(index==0 && manager==MEMORY_MANAGER_GREEDY && !unused && !copy);
         assert(fake::state.models<=1);   // a resident model plus at most one per-call model
         ++fake::state.models;++fake::state.created;
+        if(fake::state.created==2) fake::state.internalFree-=fake::state.unrelatedBuildDelta;
         fake::state.events.push_back("create model");
         const auto shape=shapes.at(hw1::stt::identity::kInputName);
         assert(shape[0]==1 && shape[2]==1 && shape[3]==64);
@@ -678,7 +681,7 @@ void corruptedAndFailedHash() {
         assert(!result.ok && result.error=="STT model checksum mismatch");
         fake::settled(0);
         fake::state.failHash=0;fake::state.wrongHash=0;
-        Reader retry;assert(call(&cache,retry).ok);cache.reset();fake::settled(0);
+        test::Reader retry;assert(test::call(&cache,retry).ok);cache.reset();fake::settled(0);
     }
 }
 #endif
@@ -815,7 +818,7 @@ void decoderReleasesMemory() {
         fake::state.psramTotal=identity::kRawBytes+remainingBudget(320)-1; // short even after release
         const Decoder hook=fd.hook();
         auto r=callWith(&cache,&hook);
-        assert(!r.ok && r.error=="Not enough free memory; stop camera, speech and other large models");
+        assert(!r.ok && r.error=="Not enough PSRAM for speech");
         assert(fd.releases==1 && fd.decodes==0 && !fd.lm && fake::state.rawAllocations==0);
         fake::settled(0);
     }
@@ -855,7 +858,7 @@ void callBudgetMatchesAdmission() {
             Reader a;assert(call(&cache,a,n).ok);
             fake::state.psramTotal=fake::state.allocated+need-1;
             Reader b;auto refused=call(&cache,b,n);
-            assert(!refused.ok && refused.error=="Not enough free memory; stop camera, speech and other large models");
+            assert(!refused.ok && refused.error=="Not enough PSRAM for speech");
             fake::state.psramTotal=fake::state.allocated+need;fake::state.largest=contiguous-1;
             Reader c;auto split=call(&cache,c,n);
             assert(!split.ok && split.error=="Not enough contiguous memory for STT activations");
@@ -898,7 +901,7 @@ void perCallSession() {
         Reader atFloor;assert(call(&cache,atFloor,64000).ok);
         fake::state.internalFree=150*1024-1;
         Reader below;auto refused=call(&cache,below,64000);
-        assert(!refused.ok && refused.error=="Not enough free memory; stop camera, speech and other large models");
+        assert(!refused.ok && refused.error=="Not enough internal SRAM for speech");
         fake::state.internalFree=1024*1024;
         assert(fake::state.models==0);
         cache.reset();fake::settled(0);
@@ -1017,38 +1020,34 @@ void refusals() {
     }
 }
 void internalFloor() {
-    // The resident model's own internal RAM lowers the per-call floor by
-    // exactly that much (never below 48 KB); a per-call build keeps 150 KB.
-    fake::clean();
-    {
-        ModelCache cache;fake::state.modelInternalBytes=60*1024;fake::state.psramRefuses=true;
+    // A resident graph has a fixed remaining-work reserve, independent of
+    // model construction's process-wide heap delta and metadata placement.
+    for(bool fallback : {false,true}) for(int unrelated : {-20000,0,20000}) {
+        fake::clean();
+        fake::state.unrelatedBuildDelta=unrelated;
+        ModelCache cache;fake::state.modelInternalBytes=60*1024;fake::state.psramRefuses=fallback;
         Reader a;assert(call(&cache,a,320).ok);assertResident(2,1);
         fake::state.psramRefuses=false;
-        // PSRAM refused: the resident model's object, metadata and bookkeeping are all in
-        // internal RAM (fallbacks); int_used is all of it and the floor drops by exactly that.
-        const size_t held=fake::state.metaInternal+fake::state.psInternal;
-        assert(fake::state.metaInternal==60*1024+sizeof(dl::Model) && fake::state.psInternal>0);
-        {
-            const std::string e3=fake::linesWith("STT: TL e3 resident=1").at(0);
-            assert(size_t(fake::field(e3,"int_used"))==held && fake::field(e3,"fallback")==5);
-            assert(size_t(fake::field(e3,"fallback_bytes"))==60*1024+sizeof(dl::Model));
+        for(size_t free : {size_t(149747),size_t(150371),size_t(128*1024)}) {
+            fake::state.internalFree=free;
+            Reader b;assert(call(&cache,b,320).ok && fake::state.created==2);
         }
-        fake::state.internalFree=150*1024-held;
-        Reader b;assert(call(&cache,b,320).ok);
-        fake::state.internalFree=150*1024-held-1;
-        Reader c;auto low=call(&cache,c,320);
-        assert(!low.ok && low.error=="Not enough free memory; stop camera, speech and other large models");
-        assertResident(2,1);
-        fake::state.internalFree=1024*1024;
-        cache.reset();fake::settled(0);
+        fake::state.internalFree=128*1024-1;
+        test::FakeDecoder fd;const Decoder hook=fd.hook();
+        auto low=callWith(&cache,&hook,320);
+        assert(!low.ok && low.error=="Not enough internal SRAM for speech");
+        assert(fd.releases==0); // SRAM pressure must not discard the PSRAM LM.
+        fake::state.internalFree=1024*1024;cache.reset();fake::settled(0);
     }
-    // Without a resident model the floor stays 150 KB.
     fake::clean();
     {
+        // Cold build still has the original reserve; a cached weights-only
+        // path also must build the graph rather than use the resident budget.
         Reader a;fake::state.internalFree=150*1024-1;
         assert(!call(nullptr,a,320).ok);fake::settled(0);
     }
 }
+
 void handOver() {
     // A session that changes hands (STTLocalSession::moveTo, keep-warm park
     // and adopt) drops its resident model: the arena with the last call's
@@ -1102,7 +1101,7 @@ void everyTLLineNumeric() {
 void placement() {
     // The allocator is installed by the first call, before its per-call model; the
     // resident model's object, metadata and bookkeeping are all PSRAM blocks; internal RAM
-    // is the same before and after the build; the deployed 150 KB floor applies to every
+    // is the same before and after the build; the fixed 128 KiB reserve applies to every
     // resident call; everything goes back to the allocator at session end.
     fake::clean();
     {
@@ -1126,11 +1125,11 @@ void placement() {
         assert(m.size()==1 && fake::numericTL(m[0]) && fake::field(m[0],"model")==long(sizeof(dl::Model)));
         assert(fake::field(m[0],"module")==long(kMeta/2) && fake::field(m[0],"names")>0 && fake::field(m[0],"shape")==0);
         everyTLLineNumeric();
-        fake::state.internalFree=150*1024;
+        fake::state.internalFree=128*1024;
         Reader b;assert(call(&cache,b,480).ok && fake::state.created==2);
-        fake::state.internalFree=150*1024-1;
+        fake::state.internalFree=128*1024-1;
         Reader c;auto low=call(&cache,c,480);
-        assert(!low.ok && low.error=="Not enough free memory; stop camera, speech and other large models");
+        assert(!low.ok && low.error=="Not enough internal SRAM for speech");
         fake::state.internalFree=internal;
         // Longer than the resident length: a per-call model, its metadata through the
         // same allocator, all of it returned when the call ends.
@@ -1234,6 +1233,17 @@ void featurePoolBudget() {
 }
 }
 int main() {
+    {
+        fake::clean();
+        hw1::stt::ModelCache cache;test::Reader reader;
+        fake::state.internalLargest=32767;
+        auto denied=test::call(&cache,reader);
+        assert(!denied.ok && denied.error=="No contiguous internal SRAM block for speech");
+        assert(!cache.loaded());
+        fake::state.internalLargest=1024*1024;
+        test::Reader retry;assert(test::call(&cache,retry).ok);cache.reset();fake::settled(0);
+    }
+
     test::callBudgetMatchesAdmission();resident::lifecycle();resident::refusals();resident::internalFloor();resident::handOver();resident::decoderOnResident();
     placement::placement();placement::restarts();placement::failedBuilds();placement::featurePoolBudget();placement::everyTLLineNumeric();
     fake::clean();

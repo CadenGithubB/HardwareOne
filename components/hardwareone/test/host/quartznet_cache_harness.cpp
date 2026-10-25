@@ -41,7 +41,7 @@ struct State {
     std::vector<size_t> modelFrames;
     std::vector<int> runStages;
     size_t allocated=0, allocationCalls=0, failAllocation=0;
-    size_t psramTotal=32*1024*1024, internalFree=1024*1024;
+    size_t psramTotal=32*1024*1024, internalFree=1024*1024, internalLargest=1024*1024;
     size_t largest=32*1024*1024;
     bool fragmentAfterRaw=false;
     int rawAllocations=0, rawFrees=0, models=0, created=0, destroyed=0;
@@ -116,6 +116,7 @@ size_t heap_caps_get_free_size(unsigned caps) {
     return fake::state.psramTotal>fake::state.allocated?fake::state.psramTotal-fake::state.allocated:0;
 }
 size_t heap_caps_get_largest_free_block(unsigned caps) {
+    if(caps&MALLOC_CAP_INTERNAL)return fake::state.internalLargest;
     assert(caps==MALLOC_CAP_SPIRAM);
     if(fake::state.fragmentAfterRaw && fake::rawLive())return 1024;
     return fake::state.largest;
@@ -403,7 +404,7 @@ void corruptedAndFailedHash() {
         assert(!result.ok && result.error=="STT model checksum mismatch");
         fake::settled(0);
         fake::state.failHash=0;fake::state.wrongHash=0;
-        Reader retry;assert(call(&cache,retry).ok);cache.reset();fake::settled(0);
+        test::Reader retry;assert(test::call(&cache,retry).ok);cache.reset();fake::settled(0);
     }
 }
 #endif
@@ -540,7 +541,7 @@ void decoderReleasesMemory() {
         fake::state.psramTotal=identity::kRawBytes+remainingBudget(320)-1; // short even after release
         const Decoder hook=fd.hook();
         auto r=callWith(&cache,&hook);
-        assert(!r.ok && r.error=="Not enough free memory; stop camera, speech and other large models");
+        assert(!r.ok && r.error=="Not enough PSRAM for speech");
         assert(fd.releases==1 && fd.decodes==0 && !fd.lm && fake::state.rawAllocations==0);
         fake::settled(0);
     }
@@ -580,7 +581,7 @@ void callBudgetMatchesAdmission() {
             Reader a;assert(call(&cache,a,n).ok);
             fake::state.psramTotal=fake::state.allocated+need-1;
             Reader b;auto refused=call(&cache,b,n);
-            assert(!refused.ok && refused.error=="Not enough free memory; stop camera, speech and other large models");
+            assert(!refused.ok && refused.error=="Not enough PSRAM for speech");
             fake::state.psramTotal=fake::state.allocated+need;fake::state.largest=contiguous-1;
             Reader c;auto split=call(&cache,c,n);
             assert(!split.ok && split.error=="Not enough contiguous memory for STT activations");
@@ -623,7 +624,7 @@ void perCallSession() {
         Reader atFloor;assert(call(&cache,atFloor,64000).ok);
         fake::state.internalFree=150*1024-1;
         Reader below;auto refused=call(&cache,below,64000);
-        assert(!refused.ok && refused.error=="Not enough free memory; stop camera, speech and other large models");
+        assert(!refused.ok && refused.error=="Not enough internal SRAM for speech");
         fake::state.internalFree=1024*1024;
         assert(fake::state.models==0);
         cache.reset();fake::settled(0);
@@ -633,6 +634,17 @@ void perCallSession() {
 }
 }
 int main() {
+    {
+        fake::clean();
+        hw1::stt::ModelCache cache;test::Reader reader;
+        fake::state.internalLargest=32767;
+        auto denied=test::call(&cache,reader);
+        assert(!denied.ok && denied.error=="No contiguous internal SRAM block for speech");
+        assert(!cache.loaded());
+        fake::state.internalLargest=1024*1024;
+        test::Reader retry;assert(test::call(&cache,retry).ok);cache.reset();fake::settled(0);
+    }
+
     test::callBudgetMatchesAdmission();
     test::perCallSession();
     test::decoderHook();test::decoderReleasesMemory();

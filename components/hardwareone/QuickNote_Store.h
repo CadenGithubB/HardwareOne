@@ -17,9 +17,14 @@
 //
 // Every call takes the filesystem lock (bounded at 1 s) and can block on
 // flash/SD: run it on a worker or cmd_exec, never in a critical section,
-// display task, BLE owner task or audio callback. Only one task (the QuickNote
-// worker) creates notes and sweeps their in-progress files.
+// display task, BLE owner task or audio callback. The legacy QuickNote and
+// native G2 workers share this store; the filesystem lock serializes complete
+// writes and temporary-file sweeps.
 namespace QuickNoteStore {
+// Device-wide G2 directories on the currently writable tier. Called after a
+// paired G2 connects and after card availability changes, outside BLE callbacks.
+// cleanInterrupted sweeps only this native folder, under the same lock as saves.
+bool ensureG2Folders(const AuthContext& ctx, bool sd, const char** why, bool cleanInterrupted = false);
 constexpr uint64_t kReserveBytes = 100 * 1024;  // free space a note never eats into
 constexpr size_t kPageRows = 8;
 constexpr size_t kMaxNames = 500;               // newest names a listing considers
@@ -68,7 +73,10 @@ bool hasRoom(const char** why);
 // in *why (never note text).
 bool create(CommandSource source, TransportSessionEpoch epoch, const char* user,
             QuickNotePolicy::NoteHeader& header, const char* text, size_t length,
-            char* pathOut, size_t pathCap, const char** why);
+            char* pathOut, size_t pathCap, const char** why, bool nativeG2 = false);
+
+// Native G2 notes use device-wide /[sd/]g2/quicknotes, created lazily.
+// The native adapter still supplies a live paired-session identity.
 
 // Gives a note saved before the clock was set its real time: rewrites `path`,
 // a boot-<id>.txt in `user`'s own notes folder, as <stamp>-<id>.txt with
@@ -86,7 +94,7 @@ bool restamp(CommandSource source, const char* user, const char* path, const cha
 // One page of `owner`'s notes on one tier, newest name first; owner 0 means
 // the caller's own account. Reads only the visible rows' headers.
 bool list(const AuthContext& ctx, uint32_t owner, bool sd, uint32_t offset,
-          Page* out, const char** why);
+          Page* out, const char** why, bool nativeG2 = false);
 
 // A kReadWindow window of a note file from `offset`, never ending inside a
 // UTF-8 character unless that is the end of the file. `out` needs
@@ -103,7 +111,8 @@ bool remove(const AuthContext& ctx, const char* path, const char** why);
 // neither file (create's contract), and the header carries no length that
 // could prove a .tmp complete. Names only: no file is opened for reading, and
 // nothing but those names is removed. Runs as system confined to each tier's
-// transcript root. QuickNote worker only, while no save of its own runs.
+// transcript root or native G2 quicknotes folder. The filesystem lock excludes
+// concurrent writes from either worker.
 // *removed (optional) counts the files removed. False with a short reason
 // when a tier could not be walked or a file could not be removed; the rest
 // are still tried.

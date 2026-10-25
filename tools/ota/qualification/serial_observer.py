@@ -45,12 +45,17 @@ def _default_factory(port: str, baud: int, timeout: float) -> Any:
             "Python environment or install it explicitly"
         ) from exc
     stream = serial.Serial(port=None, baudrate=baud, timeout=timeout)
-    stream.dtr = False
+    # The OS asserts both lines on open, then pyserial applies DTR and then RTS.
+    # Releasing DTR first would pass through (DTR=0, RTS=1), which resets
+    # USB-Serial-JTAG chips such as the ESP32-P4 and S3. Keep DTR asserted
+    # through the open and release it afterwards.
+    stream.dtr = True
     stream.rts = False
     if hasattr(stream, "exclusive"):
         stream.exclusive = True
     stream.port = port
     stream.open()
+    stream.dtr = False
     return stream
 
 

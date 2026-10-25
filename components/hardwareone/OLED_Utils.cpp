@@ -7,6 +7,10 @@
 #include <esp_app_desc.h>
 #include "OLED_UI.h"
 #include "Bluetooth.h"
+#if ENABLE_BLUETOOTH
+#include "BLE_PhonePipe.h"  // phonePipeActive (oledBluetoothToggleCommand)
+#include "G2_Glasses.h"     // isG2ClientInitialized (oledBluetoothToggleCommand)
+#endif
 #include "System_Battery.h"
 #include "System_BuildConfig.h"
 #include "System_Command.h"
@@ -546,7 +550,7 @@ static void ncDraw() {
 
   int y = OLED_CONTENT_START_Y;
   const int lineH = 10;
-  const int visible = 4;  // title row + 4 item rows fill the content area
+  const int visible = oledVisibleRows(10, 10, 4);
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 
@@ -1119,7 +1123,7 @@ void oledScrollInit(OLEDScrollState* state, const char* title, int visibleLines)
   state->itemCount = 0;
   state->selectedIndex = 0;
   state->scrollOffset = 0;
-  state->visibleLines = visibleLines > 0 ? visibleLines : 4;
+  state->visibleLines = visibleLines > 0 ? visibleLines : oledVisibleRows(10, 1, 4);
   state->wrapAround = false;  // menus clamp at top/bottom (no wrap-around)
   state->title = title;  // Store pointer directly
   state->footer = nullptr;
@@ -3480,16 +3484,95 @@ void oledCommandReplyText(bool ok, const char* reply, const char* okText,
   }
 }
 
-bool oledRunCommand(const String& cmd) {
-  char out[96];
-  if (executeOLEDCommandWithResult(cmd, out, sizeof(out)) &&
-      strncmp(out, "Error", 5) != 0 && strncmp(out, "ERROR", 5) != 0) {
+// The verdict and refusal toast shared by oledRunCommand and oledRunCommandAsync.
+static bool oledReportCommandReply(bool executed, const char* reply) {
+  if (executed && strncmp(reply, "Error", 5) != 0 && strncmp(reply, "ERROR", 5) != 0) {
     return true;
   }
   char text[64];
-  oledCommandReplyText(false, out, nullptr, "Failed", text, sizeof(text));
+  oledCommandReplyText(false, reply, nullptr, "Failed", text, sizeof(text));
   oledToastShow(text, 2500);
   return false;
+}
+
+bool oledRunCommand(const String& cmd) {
+  char out[96];
+  const bool executed = executeOLEDCommandWithResult(cmd, out, sizeof(out));
+  return oledReportCommandReply(executed, out);
+}
+
+// One oledRunCommandAsync request at a time. cmd_exec_task only copies the
+// reply here and asks for a frame; the verdict, the toast and done() run on the
+// display task in oledDeliverCommandReply().
+namespace {
+struct OledCommandReply {
+  bool ready;
+  bool executed;
+  char text[96];
+};
+portMUX_TYPE sOledReplyMux = portMUX_INITIALIZER_UNLOCKED;
+OledCommandReply sOledReply = {};  // guarded by sOledReplyMux
+bool sOledCommandInFlight = false;  // display task only, like the fields below
+TransportSessionEpoch sOledCommandEpoch = kNoTransportSessionEpoch;
+OledCommandDoneFn sOledCommandDone = nullptr;
+const void* sOledCommandContext = nullptr;
+}  // namespace
+
+static void oledCommandReplyArrived(bool executed, const char* result, void*) {
+  OledCommandReply reply = {true, executed, {}};
+  snprintf(reply.text, sizeof(reply.text), "%s", result ? result : "");
+  portENTER_CRITICAL(&sOledReplyMux);
+  sOledReply = reply;
+  portEXIT_CRITICAL(&sOledReplyMux);
+  oledMarkDirty();
+}
+
+bool oledRunCommandAsync(const char* cmd, OledCommandDoneFn done, const void* context) {
+  if (sOledCommandInFlight) {
+    oledToastShow("Please wait", 1500);
+    return false;
+  }
+  const Command command = buildOLEDCommand(String(cmd));
+  if (!submitCommandAsync(command, oledCommandReplyArrived, nullptr)) {
+    oledToastShow("Busy - try again", 2500);
+    return false;
+  }
+  sOledCommandInFlight = true;
+  sOledCommandEpoch = command.ctx.transportSessionEpoch;
+  sOledCommandDone = done;
+  sOledCommandContext = context;
+  return true;
+}
+
+// Display task, every frame.
+static void oledDeliverCommandReply() {
+  if (!sOledCommandInFlight) return;
+  OledCommandReply reply;
+  portENTER_CRITICAL(&sOledReplyMux);
+  reply = sOledReply;
+  sOledReply.ready = false;
+  portEXIT_CRITICAL(&sOledReplyMux);
+  if (!reply.ready) return;
+  sOledCommandInFlight = false;
+  // A reply that outlived its display session (logout, or someone else logged
+  // in) is not shown to whoever holds the display now.
+  const bool ok = oledDisplayEpochLiveUnderWriter(sOledCommandEpoch) &&
+                  oledReportCommandReply(reply.executed, reply.text);
+  if (sOledCommandDone) sOledCommandDone(ok, sOledCommandContext);
+}
+
+const char* oledBluetoothToggleCommand() {
+#if ENABLE_BLUETOOTH
+  // The quick toggle is the whole radio: `closeble` closes every device and
+  // the console server and stops the shared stack. On it follows the saved
+  // boot role: `openble` brings the client stack up (the peers with
+  // auto-reconnect on come back by themselves); `openconsole` starts the app
+  // console server. The Bluetooth menu's rows open and close one device each.
+  if (bleSubsystemActive()) return "closeble";
+  return gSettings.bleMode == BLE_MODE_SERVER ? "openconsole" : "openble";
+#else
+  return nullptr;
+#endif
 }
 
 
@@ -4167,6 +4250,7 @@ void updateOLEDDisplay() {
   // blanking), in post order, against the session that is now current.
   oledApplyPendingOwnerRequests();
   prepareTranscriptionData();
+  oledDeliverCommandReply();
 
   if (!gOledRunning || !oledConnected || !displayIsReady() || oledDisplay == nullptr) {
     return;
@@ -5140,6 +5224,8 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_BLUETOOTH_G2: return "G2";
     case OLED_BLUETOOTH_G2_STATUS: return "G2 Status";
     case OLED_BLUETOOTH_R1: return "R1 Ring";
+    case OLED_BLUETOOTH_PHONE: return "Phone";
+    case OLED_BLUETOOTH_PHONE_CODE: return "Pair Code";
     case OLED_R1_HEALTH: return "R1 Health";
     case OLED_USER_MANAGER: return "Users";
     case OLED_TRANSCRIPTION: return "Transcription";
@@ -5255,6 +5341,8 @@ const char* slugFromMode(OLEDMode mode) {
     case OLED_BLUETOOTH_G2:     return "g2";
     case OLED_BLUETOOTH_G2_STATUS: return "g2status";
     case OLED_BLUETOOTH_R1:     return "r1ring";
+    case OLED_BLUETOOTH_PHONE:  return "phone";
+    case OLED_BLUETOOTH_PHONE_CODE: return "phonecode";  // never resolved by modeFromSlug: the command opens it
     case OLED_R1_HEALTH:        return "r1health";
     case OLED_USER_MANAGER:     return "users";
     case OLED_TRANSCRIPTION: return "transcription";
@@ -5915,9 +6003,9 @@ static MenuAvailability oledModeFeatureState(OLEDMode mode, String* outReason) {
       if (outReason) *outReason = "Not built";
       return MenuAvailability::NOT_BUILT;
 #else
-      // Check if Bluetooth is initialized at runtime
-      if (!gBLEState || !gBLEState->initialized) {
-        if (outReason) *outReason = "Disabled\nRun: openble";
+      // Off only when no role runs: the server, the G2 client or the phone pipe.
+      if (!bleSubsystemActive()) {
+        if (outReason) *outReason = "Disabled\nPress X to start";
         return MenuAvailability::FEATURE_DISABLED;
       }
       return MenuAvailability::AVAILABLE;
@@ -6255,7 +6343,7 @@ void handleOLEDActionButton() {
         oledMenuBack();
       } else if (unavailableOLEDTitle == "Bluetooth") {
 #if ENABLE_BLUETOOTH
-        // Initialize Bluetooth
+        // Bring the client stack up; the Bluetooth menu's rows open each device.
         oledRunCommand("openble");
         requestOLEDMode(OLED_BLUETOOTH, "unavail.start.bluetooth", false);
 #endif
@@ -6909,6 +6997,9 @@ void oledUpdate() {
 #if ENABLE_ESPNOW
     oledEspNowPollPairRequest();   // pop the accept/reject dialog on an incoming pair request
 #endif
+#if ENABLE_BLUETOOTH
+    oledBluetoothLinkWatch();      // redraw when a glasses/ring/phone link changes
+#endif
     oledKeyboardDictationTick();   // service KEYBOARD_MODE_MIC (no-op otherwise)
     updateOLEDDisplay();
   }
@@ -7156,6 +7247,34 @@ void oledNotifyLocalDisplayAuthChanged() {
   // cmd_exec, while all mutable OLED state belongs to the main render loop.
   sOledSessionBoundaryRequested.fetch_add(1, std::memory_order_release);
   oledMarkDirty();
+#endif
+}
+
+// ============================================================================
+// `phone pair new` code screen (phone link v2)
+// ============================================================================
+// The code is drawn only by OLED_Mode_Bluetooth.cpp's code screen, read there
+// from the pipe owner; it never goes through a command result, a toast or the
+// OLED console. The command posts the screen from cmd_exec.
+
+bool oledPhonePairCodeSinkReady() {
+#if ENABLE_OLED_DISPLAY && ENABLE_BLUETOOTH && ENABLE_BLE_PHONE_PIPE
+  const CommandContext* ctx = static_cast<const CommandContext*>(currentCommandContext());
+  return oledConnected && gOledRunning && ctx && ctx->origin == ORIGIN_LOCAL_DISPLAY &&
+         ctx->auth.transport == SOURCE_LOCAL_DISPLAY && !ctx->validateOnly &&
+         transportSessionEpochIsLive(SOURCE_LOCAL_DISPLAY, ctx->transportSessionEpoch);
+#else
+  return false;
+#endif
+}
+
+bool oledShowPhonePairCode() {
+#if ENABLE_OLED_DISPLAY && ENABLE_BLUETOOTH && ENABLE_BLE_PHONE_PIPE
+  if (!oledConnected || !gOledRunning) return false;
+  requestOLEDMode(OLED_BLUETOOTH_PHONE_CODE, "phone.pair.new");
+  return true;
+#else
+  return false;
 #endif
 }
 

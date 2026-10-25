@@ -37,12 +37,18 @@ constexpr size_t HTTP_TERMINAL_JSON_CAP = 4096;
 using HttpTerminalToken = uint32_t;
 struct HttpTerminalResult {
   bool done = false;
+  bool phonePath = false;
+  uint32_t completedMs = 0;
   int httpStatus = 0;
   size_t length = 0;
   uint32_t configRevision = 0;
   char error[96] = {};
 };
-bool httpTerminalStart(const char* json, size_t length, HttpTerminalToken* token);
+// Busy and Unavailable never create a worker and leave token zero.
+// Callers may retry Busy; a confirmed mutation must be dropped on Unavailable.
+enum class HttpTerminalStartResult : uint8_t { Accepted, Busy, Unavailable };
+bool httpTerminalPathAvailable();
+HttpTerminalStartResult httpTerminalStart(const char* json, size_t length, HttpTerminalToken* token);
 // False means a stale token or insufficient output capacity. Pending reads
 // return true with done=false and empty output; completed reads are repeatable.
 bool httpTerminalRead(HttpTerminalToken token, char* out, size_t cap,

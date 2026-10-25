@@ -247,6 +247,12 @@
 // Android peripheral TCP pipe. Independent of G2; requires authenticated BLE.
 #define ENABLE_BLE_PHONE_PIPE   0
 
+// Per-scan and per-connect records for G2, ring and phone, each tagged with
+// the Wi-Fi state (`blerecords`; docs/WIFI_BLE_COEXISTENCE_STUDY.md lever 1).
+// Measurement only: about 8 KB flash, 8 KB PSRAM and 0.2 KB internal RAM.
+// Off keeps the command, which then reports that the records are absent.
+#define ENABLE_BLE_COEX_RECORDS 1
+
 // Even G2 Smart Glasses: BLE client to connect to Even Realities G2 glasses.
 // ESP32 acts as BLE central; can share that role with the Android pipe.
 // Auto-disabled if ENABLE_BLUETOOTH=0.
@@ -875,12 +881,21 @@
   #undef ENABLE_BLE_PHONE_PIPE
   #define ENABLE_BLE_PHONE_PIPE 0
 #endif
+#if !ENABLE_BLUETOOTH
+  #undef ENABLE_BLE_COEX_RECORDS
+  #define ENABLE_BLE_COEX_RECORDS 0
+#endif
 #if ENABLE_BLE_PHONE_PIPE && defined(CONFIG_IDF_TARGET)
   #if !defined(CONFIG_BT_BLUEDROID_ENABLED)
     #error "The Android phone pipe requires Bluedroid"
   #endif
   #if ENABLE_G2_GLASSES && CONFIG_BT_ACL_CONNECTIONS < 4
     #error "G2 plus phone requires four BLE ACL slots (two arms, phone, optional ring)"
+  #endif
+  // The pipe Session (about 29 KB of stream windows) is EXT_RAM_BSS_ATTR; without
+  // PSRAM .bss BLE_PhonePipe.cpp would silently place it in internal RAM.
+  #if defined(CONFIG_IDF_TARGET_ESP32P4) && !(defined(CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY) && CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY)
+    #error "The phone pipe on ESP32-P4 needs CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y (its Session lives in PSRAM)"
   #endif
 #endif
 
@@ -1611,9 +1626,11 @@
 // Word n-gram language-model beam search for the local STT backend
 // (stt/stt_lm.h; format experiments/stt_train/lm/FORMAT.md). Defaults to the
 // backend's own switch, after the deployment profile has set it; a profile may
-// define 0 to keep greedy CTC only. At runtime /STT Models/meeting.lm (plus the
-// optional custom_words.txt) is read into PSRAM once per session; a missing or
-// invalid file or a memory shortfall logs once and decodes greedily.
+// define 0 to keep greedy CTC only. At runtime /STT Models/meeting.lm is read
+// into PSRAM once per session; a missing or invalid file or a memory shortfall
+// logs once and decodes greedily. The hotword list is the user vocabulary
+// (System_STTVocabulary.h, "STT Models/user_vocab.tsv"), re-read between
+// phrases when it is edited.
 #ifndef ENABLE_STT_LM
   #define ENABLE_STT_LM ENABLE_LOCAL_STT
 #endif

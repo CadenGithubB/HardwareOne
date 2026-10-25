@@ -45,10 +45,13 @@ struct FileEntry {
   uint16_t childCount = 0;
 };
 
+// Bounded snapshot capacity; each display chooses how many rows to fetch.
+#define FILE_BROWSER_PAGE_CAPACITY 16
+
 // Pre-rendered file browser data (shared between OLED_Mode_FileBrowser and OLED_Utils)
 struct FileBrowserRenderData {
   char path[FILE_MANAGER_MAX_PATH];
-  FileEntry items[FILE_MANAGER_PAGE_SIZE];
+  FileEntry items[FILE_BROWSER_PAGE_CAPACITY];
   int itemCount;
   int selectedIdx;
   int pageStart;

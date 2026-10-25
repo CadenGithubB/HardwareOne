@@ -56,7 +56,7 @@ int main(){
     harness=harness.replace('// INSERT_BEGIN','\n'.join(function(source,sig) for sig in ('static bool dictationBeginImpl(', 'bool dictationBeginFor(', 'bool dictationAppBeginWith(', 'bool dictationAppBegin(')))
     # The real prototype carries dictationAppCurrent's default purpose.
     current=re.search(r'\nbool dictationAppCurrent\([^;]*\);',dict_header).group(0)
-    harness=harness.replace('// INSERT_SAVE', current+'\n'+'\n'.join(function(source, sig) for sig in ('static void dictationProcessSave(', 'static bool dictationWorkerHasWork(', 'DictationSnapshot dictationSnapshotNow(', 'bool dictationAppCurrent(', 'bool dictationAppSnapshot(', 'static void dictationSupervise(')))
+    harness=harness.replace('// INSERT_SAVE', current+'\n'+'\n'.join(function(source, sig) for sig in ('static void dictationProcessSave(', 'static bool dictationWorkPendingLocked(', 'static bool dictationWorkerHasWork(', 'DictationSnapshot dictationSnapshotNow(', 'bool dictationAppCurrent(', 'bool dictationAppSnapshot(', 'static void dictationSupervise(')))
     # Verify the old host body remains selected by the compile-time provider
     # branch, and local tokens cannot enter either UART completion operation.
     assert 'return dictationBeginLocal(displaySource, displayEpoch, app, options);\n#endif' in function(source,'static bool dictationBeginImpl(')
@@ -64,6 +64,18 @@ int main(){
     assert 'gDict.requestHostEpoch != 0' in function(source,'static const char* dictationHandleArgs(')
     assert 'dictationSupervise();' in function(source,'static void dictationWorkerBody(')
     assert 'dictationWakeWorker' not in function(source,'static void dictationSupervise(')
+    # The worker's idle exit: a timed wait on the static wake semaphore, the
+    # predicate and the handle in one critical section, the task's own delete.
+    body=function(source,'static void dictationWorkerBody(')
+    assert 'const bool woken = gDictWorker.wait(SERVICE_TASK_IDLE_RETIRE_MS);' in body
+    assert body.index('while (dictationWorkerHasWork())') < body.index('if (!woken && dictationRetireIfIdle()) vTaskDelete(nullptr);')
+    retire=function(source,'static bool dictationRetireIfIdle(')
+    assert 'return gDictWorker.retireIf([] { return !dictationWorkPendingLocked(); });' in retire
+    wake=function(source,'static void dictationWakeWorker(')
+    assert wake.index('(void)dictationEnsureWorker();') < wake.index('gDictWorker.give();')
+    assert 'static ServiceWorker gDictWorker{gDictMux};' in source
+    for primitive in ('xTaskNotifyGive', 'ulTaskNotifyTake', 'xTaskCreateLogged(', 'xSemaphoreCreateBinaryStatic('):
+        assert primitive not in source, primitive
     with tempfile.TemporaryDirectory(prefix='hw1-local-dictation-') as tmp:
         unit=Path(tmp)/'test.cpp';exe=Path(tmp)/'test';unit.write_text(harness)
         cmd=['clang++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-Wno-missing-field-initializers',str(unit),'-o',str(exe),'-I',str(ROOT/'components/hardwareone')]

@@ -17,7 +17,6 @@
 #if ENABLE_BLUETOOTH
 
 #include "System_Settings.h"   // setSetting, persisted peer rows
-#include "BLE_PhoneIdentityCore.h"
 #include "Bluetooth.h"         // live server/client role predicates
 #include "System_Debug.h"
 #include "System_Utils.h"      // RETURN_VALID_IF_VALIDATE_CSTR, parseBoolArg
@@ -42,8 +41,7 @@ struct BlePeerData {
   String mac2;
   bool autoReconnect = false;
   // Separate from the legacy console MAC. Only verified pipe enrollment writes this.
-  String pipeIdentity;
-  uint8_t pipeIdentityType = 0;
+  String pipeEnrollment;
 };
 // PSRAM: every access holds the recursive PeerDataGuard mutex (task context
 // only), and peerConfigApply snapshots effAuto before taking sReconnectMux,
@@ -94,6 +92,8 @@ struct PeerReconnectRuntime {
   bool hasSavedTarget = false;
   bool ownerAuthorityAvailable = false;
   bool admissionInFlight = false;
+  // The admitted job was dropped unrun before its admission was committed.
+  bool droppedBeforeCommit = false;
   uint8_t launchedAttempts = 0;
   uint32_t dueMs = 0;
   uint32_t intentGeneration = 0;
@@ -184,11 +184,8 @@ PeerConfigApplyResult peerConfigApply(
   BlePeerSavedTarget target;
   // A legacy phone console MAC never grants pipe reconnect authority.
   const bool mac1Representable = copySavedAddress(
-      kind == BLE_PEER_PHONE ? data.pipeIdentity : data.mac1, target.mac1);
-  if (kind == BLE_PEER_PHONE && target.mac1[0]) {
-    target.addressType1 = data.pipeIdentityType;
-    target.addressType1Known = true;
-  }
+      kind == BLE_PEER_PHONE ? data.pipeEnrollment : data.mac1, target.mac1);
+
   const bool mac2Representable = copySavedAddress(data.mac2, target.mac2);
   // G2 can legitimately have only one temple persisted. The right temple is
   // stored in mac2, so treating mac1 as the universal gate strands a
@@ -637,8 +634,18 @@ bool bleRegisterPeer(const BlePeerSpec& spec) {
 
   const bool firstTime = (gPeerByKind[spec.kind] == nullptr);
   gPeerByKind[spec.kind] = &spec;
-  if (firstTime && gPeerCount < BLE_PEER_MAX) {
-    gPeerInOrder[gPeerCount++] = &spec;
+  if (firstTime) {
+    if (gPeerCount < BLE_PEER_MAX) gPeerInOrder[gPeerCount++] = &spec;
+  } else {
+    // A re-registration replaces the spec in place, keeping its order.
+    // Boot registers the metadata-only phone and the pipe later swaps in
+    // its connectable spec; reconnect and name lookup walk this list.
+    for (size_t i = 0; i < gPeerCount; i++) {
+      if (gPeerInOrder[i] && gPeerInOrder[i]->kind == spec.kind) {
+        gPeerInOrder[i] = &spec;
+        break;
+      }
+    }
   }
   DEBUG_G2F("[BLE-Peers] Registered '%s' (kind=%u, %s%s, macCount=%u)",
             spec.name, (unsigned)spec.kind,
@@ -919,44 +926,46 @@ bool blePeerCommitLearnedTargetIfCurrent(
   return true;
 }
 
-// Caller supplies a bond identity only after checking authenticated SC, a
-// 128-bit key and explicit numeric confirmation. This API owns persistence and
-// scheduler publication; it does not substitute for the runtime bond check.
-bool blePeerCommitPhonePipeIdentityIfCurrent(
-    uint32_t& intentGeneration, uint32_t& identityGeneration,
-    const uint8_t identity[6], uint8_t addressType, bool* persistNeeded) {
-  if (persistNeeded) *persistNeeded = false;
-  char address[18];
-  if (!hw1phone::formatIdentity(identity, addressType, address) ||
-      !intentGeneration || !identityGeneration) return false;
+// Runtime calls this only after the dedicated-key channel and inner HELLO
+// succeed under the enrollment authority. The saved target is a logical token,
+// never an observed Bluetooth address or an OS bond. Enrollment also turns on
+// automatic reconnect: an enrolled phone is the standing fallback path, so it
+// comes back at boot and after link loss in both client modes without a
+// separate `bleautoreconnect phone on`. That command can still turn it off.
+bool blePeerCommitPhonePipeEnrollmentIfCurrent(
+    uint32_t& intentGeneration,uint32_t& identityGeneration,bool* persistNeeded) {
+  if(persistNeeded)*persistNeeded=false;
+  if(!intentGeneration || !identityGeneration)return false;
+  constexpr char address[]="app-key-v1";
   bool changed = false;
   {
     PeerDataGuard guard;
     if (!guard) return false;
     BlePeerData& data = gBlePeerData[BLE_PEER_PHONE];
-    const String oldIdentity = data.pipeIdentity;
-    const uint8_t oldType = data.pipeIdentityType;
-    data.pipeIdentity = address;
-    if (data.pipeIdentity != address) { data.pipeIdentity = oldIdentity; return false; }
-    data.pipeIdentityType = addressType;
+    const String oldIdentity = data.pipeEnrollment;
+    const bool oldAutoReconnect = data.autoReconnect;
+    data.pipeEnrollment = address;
+    if (data.pipeEnrollment != address) { data.pipeEnrollment = oldIdentity; return false; }
+    // PSRAM mirror: write before the spinlock window, roll back after it.
+    data.autoReconnect = true;
     BlePeerSavedTarget target;
     strlcpy(target.mac1, address, sizeof(target.mac1));
-    target.addressType1 = addressType;
-    target.addressType1Known = true;
     portENTER_CRITICAL(&sReconnectMux);
     PeerReconnectRuntime& state = sReconnect[BLE_PEER_PHONE];
     if (state.intentGeneration != intentGeneration ||
         state.identityGeneration != identityGeneration ||
         state.userDisconnect || !state.ownerAuthorityAvailable) {
       portEXIT_CRITICAL(&sReconnectMux);
-      data.pipeIdentity = oldIdentity;
-      data.pipeIdentityType = oldType;
+      data.pipeEnrollment = oldIdentity;
+      data.autoReconnect = oldAutoReconnect;
       return false;
     }
-    changed = !savedTargetMatches(state.savedTarget, target);
+    const bool targetChanged = !savedTargetMatches(state.savedTarget, target);
+    changed = targetChanged || !oldAutoReconnect;
+    state.autoReconnect = true;
     state.savedTarget = target;
     state.hasSavedTarget = true;
-    if (changed) reconnectBumpIdentityLocked(state);
+    if (targetChanged) reconnectBumpIdentityLocked(state);
     noteLinkUpLocked(state);
     // Return the new incarnation for the live link's authority checks.
     intentGeneration = state.intentGeneration;
@@ -1013,8 +1022,20 @@ bool blePeerCommitPhonePipeForget(const BlePhoneForget& expected) {
     reconnectBumpIdentityLocked(state); reconnectBumpIntentLocked(state);
   }
   portEXIT_CRITICAL(&sReconnectMux);
-  if (current) { data.pipeIdentity = ""; data.pipeIdentityType = 0; }
+  if (current) { data.pipeEnrollment = ""; }
   return current;
+}
+
+bool blePeerClearPhonePipeEnrollment() {
+  PeerDataGuard guard;if(!guard)return false;
+  gBlePeerData[BLE_PEER_PHONE].pipeEnrollment="";
+  portENTER_CRITICAL(&sReconnectMux);
+  auto& state=sReconnect[BLE_PEER_PHONE];
+  state.savedTarget={};state.hasSavedTarget=state.wantReconnect=state.reseekEvenIfNoAuto=false;
+  state.launchedAttempts=0;state.dueMs=0;state.userDisconnect=true;
+  reconnectBumpIdentityLocked(state);reconnectBumpIntentLocked(state);
+  portEXIT_CRITICAL(&sReconnectMux);
+  return true;
 }
 
 bool blePeerCommitRepairIfCurrent(
@@ -1055,12 +1076,17 @@ bool bleAnyPeerWantsAutoReconnect(void) {
 // Reconnect admission and synchronized intent state
 // -----------------------------------------------------------------------------
 
-static uint32_t bleReconnectBackoffMs(uint8_t attempt) {
-  // 5s, 15s, 45s, 90s, then 180s capped.
+static uint32_t bleReconnectBackoffMs(BlePeerKind kind, uint8_t attempt) {
+  // 5s, 15s, 45s, 90s, then 180s capped. The phone is the standing fallback
+  // path, so its schedule stops growing at 30 s (A-3); glasses and ring keep
+  // the long tail.
   static const uint32_t kSteps[] = { 5000, 15000, 45000, 90000, 180000 };
-  const size_t n = sizeof(kSteps) / sizeof(kSteps[0]);
-  if (attempt >= n) return kSteps[n - 1];
-  return kSteps[attempt];
+  static const uint32_t kPhoneSteps[] = { 5000, 15000, 30000 };
+  const bool phone = kind == BLE_PEER_PHONE;
+  const uint32_t* steps = phone ? kPhoneSteps : kSteps;
+  const size_t n = phone ? sizeof(kPhoneSteps) / sizeof(kPhoneSteps[0])
+                         : sizeof(kSteps) / sizeof(kSteps[0]);
+  return steps[attempt < n ? attempt : n - 1];
 }
 
 static constexpr uint32_t kAdmissionBusyRetryMs = 2000;
@@ -1209,13 +1235,19 @@ static bool commitAdmission(const ReconnectAdmissionClaim& claim,
   // No second claim can start while this bit is true. Always release it even
   // when a newer callback invalidated the captured generations.
   state.admissionInFlight = false;
+  const bool droppedBeforeCommit = state.droppedBeforeCommit;
+  state.droppedBeforeCommit = false;
   if (sameIncarnation) {
     switch (result) {
       case BlePeerConnectAdmission::STARTED:
         if (state.launchedAttempts < 250) state.launchedAttempts++;
         // Explicit non-persistent nudges are consumed only after real work was
-        // admitted. Persistent auto-reconnect retains intent until LinkUp.
-        if (!state.autoReconnect && state.reseekEvenIfNoAuto) {
+        // admitted. Persistent auto-reconnect retains intent until LinkUp. A
+        // job dropped unrun before this commit keeps its nudge, retried like a
+        // restored one (blePeerRestoreDroppedReseek).
+        if (droppedBeforeCommit && !state.autoReconnect && state.reseekEvenIfNoAuto) {
+          state.dueMs = now + kAdmissionRoleRetryMs;
+        } else if (!state.autoReconnect && state.reseekEvenIfNoAuto) {
           state.wantReconnect = false;
           state.reseekEvenIfNoAuto = false;
           state.dueMs = 0;
@@ -1224,7 +1256,7 @@ static bool commitAdmission(const ReconnectAdmissionClaim& claim,
           // later user/link/config event replaces or cancels it.
         } else {
           state.dueMs = now +
-              bleReconnectBackoffMs(state.launchedAttempts);
+              bleReconnectBackoffMs(claim.kind, state.launchedAttempts);
         }
         break;
 
@@ -1306,6 +1338,20 @@ void bleBootReconnect(void) {
   }
 }
 
+// The client host is up. Arm every down peer the same way
+// `bleautoreconnect <peer> on` does: blePeerNoteLinkLost starts a reconnect
+// episode only with auto-reconnect on, a saved target, owner authority and no
+// explicit user disconnect, and leaves an episode already scheduled as it is.
+void bleArmAutoReconnectPeers(void) {
+  DEBUG_G2F("[BLE-Peers] Client host up: arming auto-reconnect peers");
+  for (size_t i = 0; i < gPeerCount; i++) {
+    const BlePeerSpec* p = gPeerInOrder[i];
+    if (!p) continue;
+    const bool linked = p->ops && p->ops->isConnected && p->ops->isConnected();
+    if (!linked) blePeerNoteLinkLost(p->kind);
+  }
+}
+
 // -----------------------------------------------------------------------------
 // Mid-session drop → reseek (autoReconnect peers with a saved MAC)
 // -----------------------------------------------------------------------------
@@ -1381,7 +1427,7 @@ void blePeerNoteLinkLost(BlePeerKind kind) {
   const BlePeerSpec* p = bleFindPeer(kind);
   if (!peerHasConnectAdmission(p)) return;
 
-  const uint32_t delayMs = bleReconnectBackoffMs(0);
+  const uint32_t delayMs = bleReconnectBackoffMs(kind, 0);
   const uint32_t now = millis();
   bool userSuppressed = false;
   bool scheduled = false;
@@ -1508,7 +1554,42 @@ void blePeerRequestReseek(BlePeerKind kind) {
   }
 }
 
+// Put back a one-shot nudge whose admitted job was dropped before it ran (the
+// connect worker drops ring jobs once the ring must give way to the phone
+// pipe). STARTED consumed it without changing the intent generation, so a
+// still-current generation means nothing newer replaced it. Auto-reconnect
+// keeps its own intent and needs nothing here. The worker can drop the job
+// before the main loop commits its admission; the commit then keeps the nudge.
+bool blePeerRestoreDroppedReseek(BlePeerKind kind, uint32_t intentGeneration,
+                                 uint32_t identityGeneration) {
+  if (kind >= BLE_PEER_MAX) return false;
+  const uint32_t now = millis();
+  bool restored = false;
+  portENTER_CRITICAL(&sReconnectMux);
+  PeerReconnectRuntime& state = sReconnect[kind];
+  if (state.intentGeneration == intentGeneration &&
+      state.identityGeneration == identityGeneration &&
+      !state.userDisconnect && state.hasSavedTarget &&
+      state.ownerAuthorityAvailable) {
+    if (state.admissionInFlight) {
+      state.droppedBeforeCommit = true;
+      restored = true;
+    } else if (!state.wantReconnect) {
+      state.wantReconnect = true;
+      state.reseekEvenIfNoAuto = true;
+      state.dueMs = now + kAdmissionRoleRetryMs;
+      restored = true;
+    }
+  }
+  portEXIT_CRITICAL(&sReconnectMux);
+  return restored;
+}
+
 void bleAutoReconnectTick(void) {
+  // Debug lines only. A peer that stays ROLE_BLOCKED retries every 15 s for as
+  // long as the block lasts (the ring paused for the phone pipe), so its
+  // repeats stay quiet until the result changes. Main loop only.
+  static BlePeerConnectAdmission sLastResult[BLE_PEER_MAX] = {};
   const uint32_t now = millis();
   for (size_t i = 0; i < gPeerCount; i++) {
     const BlePeerSpec* p = gPeerInOrder[i];
@@ -1516,8 +1597,12 @@ void bleAutoReconnectTick(void) {
     const BlePeerKind kind = p->kind;
     ReconnectAdmissionClaim claim;
     if (!claimDueAdmission(kind, now, claim)) continue;
-    DEBUG_G2F("[BLE-Peers] Reseek '%s' attempt=%u",
-              p->name, (unsigned)claim.launchedAttempts + 1);
+    const bool wasBlocked =
+        sLastResult[kind] == BlePeerConnectAdmission::ROLE_BLOCKED;
+    if (!wasBlocked) {
+      DEBUG_G2F("[BLE-Peers] Reseek '%s' attempt=%u",
+                p->name, (unsigned)claim.launchedAttempts + 1);
+    }
     // Dispatch against the live application owner, not the persisted desired
     // mode. Boot may intentionally coerce server-configured settings into the
     // client role for a saved-peer recovery without rewriting the setting.
@@ -1526,8 +1611,11 @@ void bleAutoReconnectTick(void) {
     const BlePeerConnectAdmission result =
         requestPeerConnectAdmission(p, claim, roleAllowed);
     const bool committed = commitAdmission(claim, result, now);
-    DEBUG_G2F("[BLE-Peers] Reseek '%s': admission=%s committed=%d",
-              p->name, admissionName(result), (int)committed);
+    sLastResult[kind] = result;
+    if (!wasBlocked || result != BlePeerConnectAdmission::ROLE_BLOCKED) {
+      DEBUG_G2F("[BLE-Peers] Reseek '%s': admission=%s committed=%d",
+                p->name, admissionName(result), (int)committed);
+    }
   }
 }
 
@@ -1696,17 +1784,15 @@ void blePeersWriteJson(JsonDocument& doc) {
     String mac1;
     String mac2;
     bool autoReconnect = false;
-    String pipeIdentity;
-    uint8_t pipeIdentityType = 0;
-    {
+    String pipeEnrollment;
+      {
       PeerDataGuard guard;
       if (!guard) continue;
       mac1 = gBlePeerData[row.kind].mac1;
       mac2 = gBlePeerData[row.kind].mac2;
       autoReconnect = gBlePeerData[row.kind].autoReconnect;
       if (row.kind == BLE_PEER_PHONE) {
-        pipeIdentity = gBlePeerData[row.kind].pipeIdentity;
-        pipeIdentityType = gBlePeerData[row.kind].pipeIdentityType;
+        pipeEnrollment = gBlePeerData[row.kind].pipeEnrollment;
       }
     }
     BlePeerOwnerSession owner;
@@ -1716,11 +1802,9 @@ void blePeersWriteJson(JsonDocument& doc) {
     // Only emit mac2 if it has content — keeps single-MAC peers tidy.
     if (mac2.length() > 0) e["mac2"] = mac2;
     e["autoReconnect"] = autoReconnect;
-    if (pipeIdentity.length()) {
-      e["pipeBondVersion"] = 1;
-      e["pipeIdentity"] = pipeIdentity;
-      e["pipeIdentityType"] = pipeIdentityType;
-    }
+    e.remove("pipeBondVersion");e.remove("pipeIdentity");e.remove("pipeIdentityType");
+    e.remove("pipeChannelVersion");e.remove("pipeEnrolled");
+    if(pipeEnrollment.length()) {e["pipeChannelVersion"]=1;e["pipeEnrolled"]=true;}
     // Only emit pairedByUser if set — legacy peers paired before this
     // field existed leave it blank.
     if (owner.user.length() > 0) e["pairedByUser"] = owner.user;
@@ -1777,19 +1861,10 @@ void blePeersReadJson(JsonDocument& doc) {
       PeerDataGuard guard;
       if (!guard) continue;
       if (row.kind == BLE_PEER_PHONE) {
-        // Missing, malformed and old schemas fail closed. Never derive an
-        // identity from mac1, an RPA or an address without an explicit type.
-        char canonical[18];
-        uint8_t address[6];
-        const char* text = e["pipeIdentity"] | "";
-        const int type = e["pipeIdentityType"].is<int>()
-            ? e["pipeIdentityType"].as<int>() : -1;
-        bool valid = e["pipeBondVersion"].is<int>() &&
-            e["pipeBondVersion"].as<int>() == 1 && type >= 0 && type <= 1 &&
-            hw1phone::parseIdentity(text, uint8_t(type), address) &&
-            hw1phone::formatIdentity(address, uint8_t(type), canonical);
-        gBlePeerData[row.kind].pipeIdentity = valid ? canonical : "";
-        gBlePeerData[row.kind].pipeIdentityType = valid ? uint8_t(type) : 0;
+        // Old SMP/console addresses never establish app-channel authority.
+        const bool valid=e["pipeChannelVersion"].is<int>() && e["pipeChannelVersion"].as<int>()==1 &&
+                         e["pipeEnrolled"].is<bool>() && e["pipeEnrolled"].as<bool>();
+        gBlePeerData[row.kind].pipeEnrollment=valid?"app-key-v1":"";
       }
       (void)peerConfigApply(row.kind, true, newMac1, true, newMac2,
                             true, newAutoReconnect);

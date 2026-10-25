@@ -1,0 +1,343 @@
+--- a/libraries/BLE/src/RTOS.h
++++ b/libraries/BLE/src/RTOS.h
+@@ -10,7 +10,7 @@
+ #define MAIN_FREERTOS_H_
+ #include "Arduino.h"
+ #include <stdint.h>
+-#include <pthread.h>
++#include <atomic>
+ 
+ #include <freertos/FreeRTOS.h>  // Include the base FreeRTOS definitions.
+ #include <freertos/task.h>      // Include the task definitions.
+@@ -28,30 +28,40 @@
+ 
+   static uint32_t getTimeSinceStart();
+ 
++  // [hardwareone local patch 2026-10-22, memory audit BLE-02/BLE-09] A binary
++  // semaphore with a value: 8 bytes, down from 48. The debug name and owner
++  // Strings (read only by toString(), itself reached only from compiled-out
++  // log_v and failure-path log_e lines) and the dead pthread branch
++  // (m_usePthreads was hard-coded false) are gone, and with them a heap String
++  // per take()/wait() on every GATTC/GAP dispatch. The kernel object (a 92 B
++  // internal queue) is made on the first take or wait, not in the constructor:
++  // most per-attribute semaphores (remote reads, RSSI, descriptor reads,
++  // indications) are never taken, and a give() before any take is exactly a
++  // give() on the already-available binary semaphore the constructor used to
++  // leave behind — no state is lost. Names stay as call-site literals for the
++  // failure logs only.
+   class Semaphore {
+   public:
+-    Semaphore(String owner = "<Unknown>");
++    Semaphore(const char* name = nullptr) : m_name(name) {}
+     ~Semaphore();
+     void give();
+     void give(uint32_t value);
+     void giveFromISR();
+-    void setName(String name);
+-    bool take(String owner = "<Unknown>");
+-    bool take(uint32_t timeoutMs, String owner = "<Unknown>");
++    void setName(const char* name) { m_name = name; }
++    bool take(const char* owner = nullptr);
++    bool take(uint32_t timeoutMs, const char* owner = nullptr);
+     String toString();
+-    uint32_t wait(String owner = "<Unknown>");
+-    bool timedWait(String owner = "<Unknown>", uint32_t timeoutMs = portMAX_DELAY);
++    uint32_t wait(const char* owner = nullptr);
++    bool timedWait(const char* owner = nullptr, uint32_t timeoutMs = portMAX_DELAY);
+     uint32_t value() {
+       return m_value;
+     };
+ 
+   private:
+-    SemaphoreHandle_t m_semaphore;
+-    pthread_mutex_t m_pthread_mutex;
+-    String m_name;
+-    String m_owner;
+-    uint32_t m_value;
+-    bool m_usePthreads;
++    SemaphoreHandle_t handle();  // made on first use (see above)
++    std::atomic<SemaphoreHandle_t> m_semaphore{nullptr};
++    uint32_t m_value = 0;
++    const char* m_name;  // a literal (or null): never owned
+   };
+ };
+ 
+--- a/libraries/BLE/src/FreeRTOS.cpp
++++ b/libraries/BLE/src/FreeRTOS.cpp
+@@ -49,27 +49,47 @@
+   return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+ }  // getTimeSinceStart
+ 
++// [hardwareone local patch 2026-10-22, memory audit BLE-02/BLE-09] Semaphore
++// slimmed to handle + value and its kernel object made on first use; see RTOS.h.
++namespace {
++// Guards the one-time publication of a Semaphore's kernel object.
++portMUX_TYPE sSemaphoreMakeMux = portMUX_INITIALIZER_UNLOCKED;
++}
++
+ /**
++ * @brief The kernel object, made on first use: a binary semaphore left
++ * available, as the constructor used to. Two tasks racing here make two and
++ * keep the first published; the loser's is deleted.
++ */
++SemaphoreHandle_t FreeRTOS::Semaphore::handle() {
++  SemaphoreHandle_t made = m_semaphore.load(std::memory_order_acquire);
++  if (made) return made;
++  made = xSemaphoreCreateBinary();
++  if (!made) return nullptr;
++  xSemaphoreGive(made);
++  SemaphoreHandle_t expected = nullptr;
++  portENTER_CRITICAL(&sSemaphoreMakeMux);
++  const bool published =
++    m_semaphore.compare_exchange_strong(expected, made, std::memory_order_acq_rel);
++  portEXIT_CRITICAL(&sSemaphoreMakeMux);
++  if (published) return made;
++  vSemaphoreDelete(made);
++  return expected;
++}
++
++/**
+  * @brief Wait for a semaphore to be released by trying to take it and
+  * then releasing it again.
+  * @param [in] owner A debug tag.
+  * @return The value associated with the semaphore.
+  */
+-uint32_t FreeRTOS::Semaphore::wait(String owner) {
+-  log_v(">> wait: Semaphore waiting: %s for %s", toString().c_str(), owner.c_str());
+-
+-  if (m_usePthreads) {
+-    pthread_mutex_lock(&m_pthread_mutex);
+-  } else {
+-    xSemaphoreTake(m_semaphore, portMAX_DELAY);
++uint32_t FreeRTOS::Semaphore::wait(const char* owner) {
++  log_v(">> wait: Semaphore waiting: %s for %s", toString().c_str(), owner ? owner : "");
++  SemaphoreHandle_t sem = handle();
++  if (sem) {
++    xSemaphoreTake(sem, portMAX_DELAY);
++    xSemaphoreGive(sem);
+   }
+-
+-  if (m_usePthreads) {
+-    pthread_mutex_unlock(&m_pthread_mutex);
+-  } else {
+-    xSemaphoreGive(m_semaphore);
+-  }
+-
+   log_v("<< wait: Semaphore released: %s", toString().c_str());
+   return m_value;
+ }  // wait
+@@ -81,70 +101,30 @@
+  * @param [in] timeoutMs timeout to wait in ms.
+  * @return True if we took the semaphore within timeframe.
+  */
+-bool FreeRTOS::Semaphore::timedWait(String owner, uint32_t timeoutMs) {
+-  log_v(">> wait: Semaphore waiting: %s for %s", toString().c_str(), owner.c_str());
+-
+-  if (m_usePthreads && timeoutMs != portMAX_DELAY) {
+-    assert(false);  // We apparently don't have a timed wait for pthreads.
+-  }
+-
+-  auto ret = pdTRUE;
+-
+-  if (m_usePthreads) {
+-    pthread_mutex_lock(&m_pthread_mutex);
+-  } else {
+-    ret = xSemaphoreTake(m_semaphore, timeoutMs);
+-  }
+-
+-  if (m_usePthreads) {
+-    pthread_mutex_unlock(&m_pthread_mutex);
+-  } else {
+-    xSemaphoreGive(m_semaphore);
+-  }
+-
++bool FreeRTOS::Semaphore::timedWait(const char* owner, uint32_t timeoutMs) {
++  log_v(">> wait: Semaphore waiting: %s for %s", toString().c_str(), owner ? owner : "");
++  SemaphoreHandle_t sem = handle();
++  if (!sem) return false;
++  const BaseType_t ret = xSemaphoreTake(sem, timeoutMs);
++  if (ret == pdTRUE) xSemaphoreGive(sem);
+   log_v("<< wait: Semaphore %s released: %d", toString().c_str(), ret);
+-  return ret;
++  return ret == pdTRUE;
+ }  // wait
+ 
+-FreeRTOS::Semaphore::Semaphore(String name) {
+-  m_usePthreads = false;  // Are we using pThreads or FreeRTOS?
+-  if (m_usePthreads) {
+-    pthread_mutex_init(&m_pthread_mutex, nullptr);
+-  } else {
+-    m_semaphore = xSemaphoreCreateBinary();
+-    xSemaphoreGive(m_semaphore);
+-  }
+-
+-  m_name = name;
+-  m_owner = String("<N/A>");
+-  m_value = 0;
+-}
+-
+ FreeRTOS::Semaphore::~Semaphore() {
+-  if (m_usePthreads) {
+-    pthread_mutex_destroy(&m_pthread_mutex);
+-  } else {
+-    vSemaphoreDelete(m_semaphore);
+-  }
++  SemaphoreHandle_t sem = m_semaphore.exchange(nullptr);
++  if (sem) vSemaphoreDelete(sem);
+ }
+ 
+ /**
+  * @brief Give a semaphore.
+- * The Semaphore is given.
++ * The Semaphore is given. Before the first take there is nothing to give back
++ * to: the semaphore made on that take is available already.
+  */
+ void FreeRTOS::Semaphore::give() {
+   log_v("Semaphore giving: %s", toString().c_str());
+-  m_owner = String("<N/A>");
+-
+-  if (m_usePthreads) {
+-    pthread_mutex_unlock(&m_pthread_mutex);
+-  } else {
+-    xSemaphoreGive(m_semaphore);
+-  }
+-  // #ifdef ARDUINO_ARCH_ESP32
+-  // 	FreeRTOS::sleep(10);
+-  // #endif
+-
++  SemaphoreHandle_t sem = m_semaphore.load(std::memory_order_acquire);
++  if (sem) xSemaphoreGive(sem);
+ }  // Semaphore::give
+ 
+ /**
+@@ -161,12 +141,9 @@
+  * @brief Give a semaphore from an ISR.
+  */
+ void FreeRTOS::Semaphore::giveFromISR() {
+-  BaseType_t higherPriorityTaskWoken;
+-  if (m_usePthreads) {
+-    assert(false);
+-  } else {
+-    xSemaphoreGiveFromISR(m_semaphore, &higherPriorityTaskWoken);
+-  }
++  BaseType_t higherPriorityTaskWoken = pdFALSE;
++  SemaphoreHandle_t sem = m_semaphore.load(std::memory_order_acquire);
++  if (sem) xSemaphoreGiveFromISR(sem, &higherPriorityTaskWoken);
+ }  // giveFromISR
+ 
+ /**
+@@ -175,19 +152,14 @@
+  * @param [in] owner The new owner (for debugging)
+  * @return True if we took the semaphore.
+  */
+-bool FreeRTOS::Semaphore::take(String owner) {
+-  log_v("Semaphore taking: %s for %s", toString().c_str(), owner.c_str());
+-  bool rc = false;
+-  if (m_usePthreads) {
+-    pthread_mutex_lock(&m_pthread_mutex);
+-  } else {
+-    rc = ::xSemaphoreTake(m_semaphore, portMAX_DELAY) == pdTRUE;
+-  }
++bool FreeRTOS::Semaphore::take(const char* owner) {
++  log_v("Semaphore taking: %s for %s", toString().c_str(), owner ? owner : "");
++  SemaphoreHandle_t sem = handle();
++  const bool rc = sem && ::xSemaphoreTake(sem, portMAX_DELAY) == pdTRUE;
+   if (rc) {
+-    m_owner = owner;
+     log_v("Semaphore taken:  %s", toString().c_str());
+   } else {
+-    log_e("Semaphore NOT taken:  %s", toString().c_str());
++    log_e("Semaphore NOT taken:  %s for %s", toString().c_str(), owner ? owner : "");
+   }
+   return rc;
+ }  // Semaphore::take
+@@ -199,19 +171,16 @@
+  * @param [in] owner The new owner (for debugging)
+  * @return True if we took the semaphore.
+  */
+-bool FreeRTOS::Semaphore::take(uint32_t timeoutMs, String owner) {
+-  log_v("Semaphore taking: %s for %s", toString().c_str(), owner.c_str());
+-  bool rc = false;
+-  if (m_usePthreads) {
+-    assert(false);  // We apparently don't have a timed wait for pthreads.
+-  } else {
+-    rc = ::xSemaphoreTake(m_semaphore, timeoutMs / portTICK_PERIOD_MS) == pdTRUE;
+-  }
++bool FreeRTOS::Semaphore::take(uint32_t timeoutMs, const char* owner) {
++  log_v("Semaphore taking: %s for %s", toString().c_str(), owner ? owner : "");
++  SemaphoreHandle_t sem = handle();
++  const bool rc = sem && ::xSemaphoreTake(sem, timeoutMs / portTICK_PERIOD_MS) == pdTRUE;
+   if (rc) {
+-    m_owner = owner;
+     log_v("Semaphore taken:  %s", toString().c_str());
+   } else {
+-    log_e("Semaphore NOT taken:  %s", toString().c_str());
++    // A zero-wait probe (the callback-drain gates) fails by design; only the
++    // timed waits are worth a line.
++    if (timeoutMs) log_e("Semaphore NOT taken:  %s for %s", toString().c_str(), owner ? owner : "");
+   }
+   return rc;
+ }  // Semaphore::take
+@@ -222,22 +191,16 @@
+  */
+ String FreeRTOS::Semaphore::toString() {
+   char hex[9];
+-  String res = "name: " + m_name + " (0x";
+-  snprintf(hex, sizeof(hex), "%08lx", (uint32_t)m_semaphore);
++  String res = "name: ";
++  res += m_name ? m_name : "";
++  res += " (0x";
++  snprintf(hex, sizeof(hex), "%08lx", (unsigned long)(uintptr_t)m_semaphore.load(std::memory_order_relaxed));
+   res += hex;
+-  res += "), owner: " + m_owner;
++  res += ")";
+   return res;
+ }  // toString
+ 
+ /**
+- * @brief Set the name of the semaphore.
+- * @param [in] name The name of the semaphore.
+- */
+-void FreeRTOS::Semaphore::setName(String name) {
+-  m_name = name;
+-}  // setName
+-
+-/**
+  * @brief Create a ring buffer.
+  * @param [in] length The amount of storage to allocate for the ring buffer.
+  * @param [in] type The type of buffer.  One of RINGBUF_TYPE_NOSPLIT, RINGBUF_TYPE_ALLOWSPLIT, RINGBUF_TYPE_BYTEBUF.
+--- a/libraries/BLE/src/BLERemoteService.h
++++ b/libraries/BLE/src/BLERemoteService.h
+@@ -85,7 +85,8 @@
+ 
+   bool m_haveCharacteristics;  // Have we previously obtained the characteristics.
+   BLEClient *m_pClient;
+-  FreeRTOS::Semaphore m_semaphoreGetCharEvt = FreeRTOS::Semaphore("GetCharEvt");
++  // [hardwareone local patch 2026-10-22, memory audit BLE-08] m_semaphoreGetCharEvt
++  // removed: its only references were inside a commented-out event handler.
+   BLEUUID m_uuid;          // The UUID of this service.
+   uint16_t m_startHandle;  // The starting handle of this service.
+   uint16_t m_endHandle;    // The ending handle of this service.
+--- a/libraries/BLE/src/BLEAdvertising.h
++++ b/libraries/BLE/src/BLEAdvertising.h
+@@ -192,7 +192,8 @@
+   std::vector<BLEUUID> m_serviceUUIDs;
+   bool m_customAdvData = false;
+   bool m_customScanResponseData = false;
+-  FreeRTOS::Semaphore m_semaphoreSetAdv = FreeRTOS::Semaphore("startAdvert");
++  // [hardwareone local patch 2026-10-22, memory audit BLE-08] m_semaphoreSetAdv
++  // removed: every give was commented out and nothing waited on it.
+   bool m_scanResp = true;
+ 
+   /***************************************************************************
+--- a/libraries/BLE/src/BLEScan.cpp
++++ b/libraries/BLE/src/BLEScan.cpp
+@@ -500,7 +500,7 @@
+ bool BLEScan::start(uint32_t duration, void (*scanCompleteCB)(BLEScanResults), bool is_continue) {
+   log_v(">> start(duration=%d)", duration);
+ 
+-  m_semaphoreScanEnd.take(String("start"));
++  m_semaphoreScanEnd.take("start");  // [hardwareone local patch 2026-10-22] literal: Semaphore takes const char*
+   m_scanCompleteCB = scanCompleteCB;  // Save the callback to be invoked when the scan completes.
+ 
+   //  if we are connecting to devices that are advertising even after being connected, multiconnecting peripherals

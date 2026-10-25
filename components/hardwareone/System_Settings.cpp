@@ -1,4 +1,5 @@
-#include "System_Settings.h"        // Settings struct definition and function declarations
+#include "System_Settings.h"
+#include "System_InternalSecretString.h"        // Settings struct definition and function declarations
 #include "System_UserSettings.h"   // Per-user settings declarations + transaction contract
 #include "System_SettingsWriteBatchCore.h"
 #include <cerrno>            // errno/ENOENT — distinguish absence from stat failure
@@ -897,7 +898,7 @@ String encryptString(const String& password) {
   return output;
 }
 
-String decryptString(const String& encryptedPassword) {
+String decryptString(const String& encryptedPassword, bool internalResult) {
   if (encryptedPassword.length() == 0) {
     return "";
   }
@@ -1003,7 +1004,8 @@ String decryptString(const String& encryptedPassword) {
   int plaintextLen = ciphertextLen - padValue;
   // Construct the return value directly from the length-delimited plaintext;
   // avoid a second temporary heap buffer containing the same secret.
-  String output((const char*)plaintext, (unsigned int)plaintextLen);
+  String output = internalResult ? makeInternalSecretString((const char*)plaintext, plaintextLen)
+                                 : String((const char*)plaintext, (unsigned int)plaintextLen);
   const bool outputOk = (plaintextLen == 0) || (output.length() == (unsigned int)plaintextLen);
   mbedtls_platform_zeroize(plaintext, ciphertextLen);
   free(plaintext);
@@ -1015,6 +1017,15 @@ String decryptString(const String& encryptedPassword) {
 
   DEBUG_STORAGEF("[AES] String decrypted successfully (len=%d)", output.length());
   return output;
+}
+
+bool setInternalSecretSetting(String& field,const String& value,const SettingEntry* entry) {
+  if(field==value)return true;
+  if(value.length()>128)return false;
+  String replacement=makeInternalSecretString(value.c_str(),value.length());
+  if(replacement.length()!=value.length())return false;
+  secureClearString(field);field=static_cast<String&&>(replacement);
+  finishSettingChange(&field,entry);return true;
 }
 
 // JSON-field secret helpers (declared in System_Settings.h). Encrypt-on-write /
@@ -1509,7 +1520,7 @@ static bool writeSettingsSnapshot(const JsonDocument& doc,
 // version through buildSettingsJsonDoc(); the next boot derives it again.
 static bool gSettingsVersionRestampPending = false;
 
-bool writeSettingsJson() {
+static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
   if (!filesystemReady) return false;
 
   SettingsFileWriteGuard writeGuard;
@@ -1628,6 +1639,15 @@ bool writeSettingsJson() {
     return false;
   }
 
+  if(clearPipeCredentials) {
+    // Merge preserves disabled modules. Factory reset must also revoke a pipe
+    // credential saved by an earlier Bluetooth-enabled firmware.
+    JsonObject bluetooth=doc["network"]["bluetooth"].as<JsonObject>();
+    bluetooth.remove("phonePipeSecret");bluetooth.remove("phonePipeSecretGenerated");
+    JsonObject phone=bluetooth["peers"]["phone"].as<JsonObject>();
+    for(const char* key:{"pipeChannelVersion","pipeEnrolled","pipeBondVersion","pipeIdentity","pipeIdentityType"})phone.remove(key);
+  }
+
   // Remove runtime-only fields that must never be persisted to disk
   doc.remove("wifiPrimarySSID");
 
@@ -1658,6 +1678,9 @@ bool writeSettingsJson() {
   clearSettingsWriteRetry(hw1_settings_batch::MAIN);
   return true;
 }
+
+bool writeSettingsJson() {return writeSettingsJsonImpl(false);}
+bool writeSettingsJsonForFactoryReset() {return writeSettingsJsonImpl(true);}
 
 // ============================================================================
 // Debug settings file (DEBUG_JSON_FILE = /system/debug.json)
@@ -3202,13 +3225,17 @@ size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bo
           if (e->isSecret) {
             // Decrypt secret strings when reading from disk
             const char* encrypted = val | (e->stringDefault ? e->stringDefault : "");
-            String dec = decryptString(encrypted);
+            String dec = decryptString(encrypted, e->internalSecret);
             if (strncmp(encrypted, "AES:", 4) == 0 && dec.length() == 0) {
               gSecretLoadFailures++;
               logSystemEvent("CRYPTO", "secret '%s' failed to decrypt at load — stored blob preserved", e->jsonKey);
               systemEventPost(SYSEVT_SECRET_DECRYPT_FAILED, e->jsonKey, "stored blob preserved");
             }
-            *((String*)e->valuePtr) = dec;
+            if(e->internalSecret) {
+              secureClearString(*((String*)e->valuePtr));
+              *((String*)e->valuePtr) = static_cast<String&&>(dec);
+            } else *((String*)e->valuePtr) = dec;
+            secureClearString(dec);
           } else {
             *((String*)e->valuePtr) = val | (e->stringDefault ? e->stringDefault : "");
           }
@@ -3376,7 +3403,7 @@ static void applyMasterEnableDisable(const char* cmdKey) {
   static const Pair kStops[] = {
     { "wifienabled",       "closewifi" },
     { "httpenabled",       "closehttp" },
-    { "bleenabled",        "g2deinit" },       // client first
+    { "bleenabled",        "closeble" },       // devices, console server, then the shared stack
     { "thermalenabled",    "closethermal" },
     { "tofenabled",        "closetof" },
     { "imuenabled",        "closeimu" },
@@ -3397,10 +3424,6 @@ static void applyMasterEnableDisable(const char* cmdKey) {
   for (size_t i = 0; i < sizeof(kStops) / sizeof(kStops[0]); ++i) {
     if (strcmp(cmdKey, kStops[i].key) != 0) continue;
     (void)executeCommandThroughRegistry(kStops[i].stopCmd);
-    // BLE: also drop server mode if client teardown left it (or was server-only).
-    if (strcmp(cmdKey, "bleenabled") == 0) {
-      (void)executeCommandThroughRegistry("closeble");
-    }
     return;
   }
 }
@@ -3416,6 +3439,7 @@ void finishSettingChange(const void* fieldPtr, const SettingEntry* entry) {
 }
 
 const char* handleSettingCommand(const SettingEntry* entry, const String& argsInput) {
+  if(entry && entry->internalSecret)return "Error: use the dedicated secret command";
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!entry || !entry->valuePtr || !entry->jsonKey) return "Error: Setting unavailable";
   

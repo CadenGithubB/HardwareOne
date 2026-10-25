@@ -52,7 +52,7 @@ void terminalWorker(void* context) {
     cfg.user_data = run;
     cfg.keep_alive_enable = false;
     io = llmHttpIoCreate(run->config.ca, !strncasecmp(run->config.url, "https://", 8),
-                         sTerminalCancel, started, kTerminalTotalMs, run->revision);
+                         sTerminalCancel, started, kTerminalTotalMs, run->revision, LlmHttpRequestKind::Terminal);
     if (io) { Lock lock(true); if (lock) sTerminalIo = io; }
     if (llmHttpIoConfigure(io, cfg)) client = esp_http_client_init(&cfg);
     if (!client) error = "Could not initialize Terminal connection";
@@ -67,8 +67,12 @@ void terminalWorker(void* context) {
     mbedtls_platform_zeroize(authorization, sizeof(authorization));
   }
   if (!error && client && !terminalCancelled()) {
-    if (esp_http_client_open(client, static_cast<int>(run->bodyLen)) != ESP_OK)
+    const esp_err_t opened = esp_http_client_open(client, static_cast<int>(run->bodyLen));
+    if (opened != ESP_OK) {
+      ESP_LOGW("LLM_TERMINAL", "connection open failed: esp=%d elapsed_ms=%lu",
+               int(opened), (unsigned long)(millis()-started));
       error = "Terminal connection failed; no retry";
+    }
     if (!error) {
       Lock lock(true);
       if (lock) {
@@ -94,6 +98,7 @@ void terminalWorker(void* context) {
                uint32_t(millis() - started) < kTerminalTotalMs);
       status = esp_http_client_get_status_code(client);
       if (length < 0) error = "Terminal headers failed; outcome unknown";
+      else if (status == 503) error = "relay busy with an earlier request (outcome unknown)";
       else if (length > int64_t(HTTP_TERMINAL_JSON_CAP)) error = "Terminal response too large";
       else if (!run->contentType) error = "Terminal host did not return JSON";
       else if (status < 200 || status >= 300) error = "Terminal host refused request";
@@ -122,8 +127,11 @@ void terminalWorker(void* context) {
     Lock lock(true);
     if (lock) sTerminalIo = nullptr;
   }
+  const bool phonePath=llmHttpIoUsedPhone(io);
+  llmHttpIoFinish(io, !error && !terminalCancelled());
   if (client) { esp_http_client_close(client); esp_http_client_cleanup(client); }
   llmHttpIoDestroy(io);
+  llmHttpRequestRelease(LlmHttpRequestKind::Terminal);
   {
     Lock lock(true);
     if (lock && sTerminalToken == run->token) {
@@ -131,6 +139,8 @@ void terminalWorker(void* context) {
         error = "Terminal stopped locally; host outcome may be unknown";
       sTerminalResult = {};
       sTerminalResult.done = true;
+      sTerminalResult.phonePath = phonePath;
+      sTerminalResult.completedMs = millis();
       sTerminalResult.httpStatus = status;
       sTerminalResult.configRevision = run->revision;
       memset(sTerminalResponse, 0, sizeof(sTerminalResponse));
@@ -155,26 +165,41 @@ uint32_t httpTerminalConfigRevision() {
       sConfig.enabled && sConfig.valid ? sRevision : 0;
 }
 
-bool httpTerminalStart(const char* json, size_t length, HttpTerminalToken* token) {
+bool httpTerminalPathAvailable() {
+  // Absence of either path is definitive even while the config lock is busy.
+  if(!llmHttpPathAvailable(true))return false;
+  Lock lock;
+  return !lock || (sConfig.enabled && sConfig.valid &&
+      llmHttpPathAvailable(!strncasecmp(sConfig.url,"https://",8)));
+}
+HttpTerminalStartResult httpTerminalStart(const char* json, size_t length, HttpTerminalToken* token) {
   if (token) *token = 0;
   if (!token || !json || !length || length > HTTP_TERMINAL_JSON_CAP ||
-      memchr(json, 0, length)) return false;
+      memchr(json, 0, length)) return HttpTerminalStartResult::Unavailable;
+  if (!httpTerminalPathAvailable()) return HttpTerminalStartResult::Unavailable;
   auto* memory = ps_calloc(1, sizeof(TerminalRun), AllocPref::PreferPSRAM, "llm.terminal.run");
-  if (!memory) return false;
+  if (!memory) return HttpTerminalStartResult::Busy;
   auto* run = new (memory) TerminalRun;
   Lock lock;
-  if (!lock || !sConfigAdmitted.load(std::memory_order_acquire) ||
-      !sConfig.enabled || !sConfig.valid || sTerminalWorker || !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8))) {
-    run->~TerminalRun(); ps_free(run); return false;
+  if(!lock){run->~TerminalRun();ps_free(run);return HttpTerminalStartResult::Busy;}
+  if(!sConfigAdmitted.load(std::memory_order_acquire) || !sConfig.enabled || !sConfig.valid ||
+      !llmHttpPathAvailable(!strncasecmp(sConfig.url,"https://",8))) {
+    run->~TerminalRun();ps_free(run);return HttpTerminalStartResult::Unavailable;
   }
+  if(sTerminalWorker){run->~TerminalRun();ps_free(run);return HttpTerminalStartResult::Busy;}
   run->config = sConfig;
   const char suffix[] = "/chat/completions";
   const size_t urlLen = strlen(run->config.url), suffixLen = sizeof(suffix) - 1;
   if (urlLen < suffixLen || strcmp(run->config.url + urlLen - suffixLen, suffix)) {
-    run->~TerminalRun(); mbedtls_platform_zeroize(run, sizeof(*run)); ps_free(run); return false;
+    run->~TerminalRun(); mbedtls_platform_zeroize(run, sizeof(*run)); ps_free(run); return HttpTerminalStartResult::Unavailable;
   }
   strlcpy(run->config.url + urlLen - suffixLen, "/terminal",
           sizeof(run->config.url) - (urlLen - suffixLen));
+  const auto admission=llmHttpRequestAdmit(LlmHttpRequestKind::Terminal,!strncasecmp(sConfig.url,"https://",8));
+  if(admission!=LlmHttpAdmission::Accepted) {
+    run->~TerminalRun();mbedtls_platform_zeroize(run,sizeof(*run));ps_free(run);
+    return admission==LlmHttpAdmission::Busy?HttpTerminalStartResult::Busy:HttpTerminalStartResult::Unavailable;
+  }
   run->revision = sRevision;
   if (++sTerminalNextToken == 0) ++sTerminalNextToken;
   run->token = sTerminalToken = sTerminalNextToken;
@@ -186,13 +211,14 @@ bool httpTerminalStart(const char* json, size_t length, HttpTerminalToken* token
   sTerminalCancel.store(false, std::memory_order_release);
   sTerminalWorker = true;
   if (xTaskCreate(terminalWorker, "g2_terminal_http", 8192, run, 1, nullptr) != pdPASS) {
+    llmHttpRequestRelease(LlmHttpRequestKind::Terminal);
     sTerminalWorker = false;
     sTerminalResult.done = true;
     strlcpy(sTerminalResult.error, "Could not start Terminal worker", sizeof(sTerminalResult.error));
-    run->~TerminalRun(); mbedtls_platform_zeroize(run, sizeof(*run)); ps_free(run); return false;
+    run->~TerminalRun(); mbedtls_platform_zeroize(run, sizeof(*run)); ps_free(run); return HttpTerminalStartResult::Busy;
   }
   *token = run->token;
-  return true;
+  return HttpTerminalStartResult::Accepted;
 }
 
 bool httpTerminalRead(HttpTerminalToken token, char* out, size_t cap, HttpTerminalResult* result) {

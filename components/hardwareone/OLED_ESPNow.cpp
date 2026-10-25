@@ -139,7 +139,7 @@ void oledEspNowInit() {
   oledEspNowScrubRemoteForm();
   
   // Initialize scrolling lists
-  oledScrollInit(&sEspNowDeviceListScroll, "ESP-NOW Devices", 3);
+  oledScrollInit(&sEspNowDeviceListScroll, "ESP-NOW Devices", oledVisibleRows(16, 10, 3));
   oledScrollInit(&sEspNowMessageListScroll, nullptr, 3);
   // Truthful visible-row count (footer-aware) so the shared scroll helpers and the
   // follow-tail restore never push the selection into/below the footer.
@@ -2535,7 +2535,7 @@ void oledEspNowDisplayRemoteFiles(Adafruit_SSD1306* display) {
   
   // Display files
   int startY = 12;
-  int visibleItems = 5;
+  const int visibleItems = oledVisibleRows(9, 1, 5);
   for (int i = 0; i < visibleItems && (i + gRemoteFileBrowse.scrollOffset) < gRemoteFileBrowse.itemCount; i++) {
     int idx = i + gRemoteFileBrowse.scrollOffset;
     int y = startY + (i * 9);
@@ -2570,8 +2570,8 @@ bool oledEspNowHandleRemoteFilesInput(int deltaX, int deltaY, uint32_t newlyPres
   }
   if (deltaY > 0 && gRemoteFileBrowse.selectedIndex < gRemoteFileBrowse.itemCount - 1) {
     gRemoteFileBrowse.selectedIndex++;
-    if (gRemoteFileBrowse.selectedIndex >= gRemoteFileBrowse.scrollOffset + 5) {
-      gRemoteFileBrowse.scrollOffset = gRemoteFileBrowse.selectedIndex - 4;
+    if (gRemoteFileBrowse.selectedIndex >= gRemoteFileBrowse.scrollOffset + oledVisibleRows(9, 1, 5)) {
+      gRemoteFileBrowse.scrollOffset = gRemoteFileBrowse.selectedIndex - oledVisibleRows(9, 1, 5) + 1;
     }
     return true;
   }

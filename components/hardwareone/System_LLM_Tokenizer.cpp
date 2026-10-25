@@ -8,6 +8,7 @@
 #include "System_LLM_Tokenizer.h"
 #include "System_LLM_Internal.h"
 #include "System_Debug.h"
+#include "System_MemUtil.h"  // ps_calloc / AllocPref
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <climits>
@@ -102,15 +103,13 @@ bool loadTokenizerFromFile(File& f) {
     return false;
   }
 
-  // Allocate vocab pointer array in internal RAM — it's only ~13KB for typical
-  // vocab sizes and is accessed frequently during tokenization. Keeping it in
-  // fast DRAM also reduces PSRAM fragmentation before the large weight/state allocs.
-  t->vocab = (char**)calloc(tok_vocab_size, sizeof(char*));
-  if (!t->vocab) {
-    // Fall back to PSRAM if DRAM is tight
-    t->vocab = (char**)llmPsramAlloc(tok_vocab_size * sizeof(char*), "tok.vocab");
-    if (!t->vocab) return false;
-  }
+  // The vocab pointer array (4 x V: 9-13 KB for the shipped models) lives in
+  // PSRAM with the strings it points to. The cost is one PSRAM pointer read
+  // per decoded token beside the matmuls; the gain is that much internal heap
+  // left to the task stacks and DMA buffers that cannot live anywhere else
+  // (memory audit APP2-02).
+  t->vocab = (char**)llmPsramAlloc(tok_vocab_size * sizeof(char*), "tok.vocab");
+  if (!t->vocab) return false;
 
   // First pass: calculate total string pool size, staying inside the blob
   const size_t vocabStart = f.position();
@@ -216,7 +215,8 @@ bool loadTokenizerFromFile(File& f) {
   if (multiByteCount > 0 && merge_count > 0) {
     // Build a set of token IDs that BPE merges can produce
     // Use a simple boolean array (vocab is small enough)
-    bool* bpeReachable = (bool*)calloc(tok_vocab_size, sizeof(bool));
+    bool* bpeReachable = (bool*)ps_calloc(tok_vocab_size, sizeof(bool),
+                                          AllocPref::PreferPSRAM, "tok.reach");
     if (bpeReachable) {
       for (uint32_t i = 0; i < merge_count; i++) {
         int mid = t->merges[i].merged_id;
@@ -246,8 +246,9 @@ bool loadTokenizerFromFile(File& f) {
       }
 
       if (unreachableCount > 0) {
-        // Presplit is tiny (~400 bytes) — use DRAM to reduce PSRAM fragmentation
-        t->presplit = (PreSplitToken*)calloc(unreachableCount, sizeof(PreSplitToken));
+        // Presplit (1-2 KB for the shipped models): PSRAM first, like the vocab.
+        t->presplit = (PreSplitToken*)ps_calloc(unreachableCount, sizeof(PreSplitToken),
+                                                AllocPref::PreferPSRAM, "tok.presplit");
         if (t->presplit) {
           int idx = 0;
           for (uint32_t i = 0; i < tok_vocab_size; i++) {
@@ -303,7 +304,7 @@ bool loadTokenizerFromFile(File& f) {
 
 void freeTokenizer() {
   TokenizerState* t = &gLLM.tokenizer;
-  // vocab and presplit may be in DRAM (calloc) or PSRAM — heap_caps_free handles both
+  // vocab is PSRAM; presplit PSRAM-first (free() reaches either heap)
   llmPsramFree((void**)&t->vocab);
   llmPsramFree((void**)&t->merges);
   llmPsramFree((void**)&t->merge_map);

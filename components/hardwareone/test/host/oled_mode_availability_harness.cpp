@@ -27,7 +27,9 @@
 #define ENABLE_GAMEPAD_SENSOR 0
 #define ENABLE_RTC_SENSOR 0
 #define ENABLE_PRESENCE_SENSOR 0
+#ifndef ENABLE_BLUETOOTH  // test_oled_mode_availability.py also builds it with 1
 #define ENABLE_BLUETOOTH 0
+#endif
 #define ENABLE_WIFI 0
 #define EXT_RAM_BSS_ATTR
 #define DEBUG_SYSTEMF(...) do { } while (0)
@@ -79,6 +81,10 @@ bool gNamedDisplaySession = false;  // a user is logged in on the display
 bool isTransportAuthenticated(CommandSource source) {
   return source == SOURCE_LOCAL_DISPLAY && gNamedDisplaySession;
 }
+
+// Any BLE role running: the server, the G2 client or the phone pipe.
+bool gBleActive = false;
+bool bleSubsystemActive() { return gBleActive; }
 
 struct Settings {
   bool bondModeEnabled = false;
@@ -179,6 +185,7 @@ static void resetWorld() {
   connectedDeviceCount = 0;
   gGpsConnected = gGpsRunning = false;
   gThermalConnected = false;
+  gBleActive = false;
 }
 
 // R1: the login rules of CLI Input, Gamepad PW and Logout apply.
@@ -227,8 +234,10 @@ static void caseSensorClassification() {
 // R3: modes without a registered rule, and rules that allow, are unchanged.
 static void caseUnchanged() {
   resetWorld();
+#if !ENABLE_BLUETOOTH
   expect(OLED_BLUETOOTH, "Bluetooth", MenuAvailability::NOT_BUILT, "Not built",
          "no registered entry, not built: central class");
+#endif
   expect(OLED_SYSTEM_STATUS, "Status", MenuAvailability::AVAILABLE, "",
          "no registered entry: available");
   expect(OLED_LOGGING, "Logging", MenuAvailability::AVAILABLE, "",
@@ -242,12 +251,28 @@ static void caseSilentRefusal() {
          "a rule that refuses without a reason: refused");
 }
 
+#if ENABLE_BLUETOOTH
+// R5: Bluetooth is off only when no BLE role runs. A G2 client or the phone
+// pipe without the BLE server is on, not "Disabled".
+static void caseBluetoothRole() {
+  resetWorld();
+  expect(OLED_BLUETOOTH, "Bluetooth", MenuAvailability::FEATURE_DISABLED,
+         "Disabled\nPress X to start", "no BLE role runs: off");
+  gBleActive = true;
+  expect(OLED_BLUETOOTH, "Bluetooth", MenuAvailability::AVAILABLE, "",
+         "a client role (no server) runs: on");
+}
+#endif
+
 int main() {
   registerModules();
   caseLoginRules();
   caseSensorClassification();
   caseUnchanged();
   caseSilentRefusal();
+#if ENABLE_BLUETOOTH
+  caseBluetoothRole();
+#endif
   std::printf("oled_mode_availability: %d checks, %d failed\n", gChecks, gFailures);
   return gFailures == 0 ? 0 : 1;
 }

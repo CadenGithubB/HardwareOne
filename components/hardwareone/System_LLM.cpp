@@ -52,6 +52,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"
+#include "System_TaskUtils.h"  // xTaskCreateLogged: the generation worker
 #include "System_Filesystem.h"
 #include "System_VFS.h"
 #include "System_Settings.h"
@@ -164,28 +165,20 @@ static char*          gLLMResultBuf  = nullptr;  // PSRAM, allocated on first us
 static volatile int   gLLMResultLen  = 0;         // bytes written (written by task, read by HTTP)
 static volatile bool  gLLMResultDone = true;      // true = idle / finished
 static volatile int   gLLMSessionId  = 0;         // bumped per llmStartAsync call
-static TaskHandle_t   gLLMTask       = nullptr;   // persistent gen worker handle (null until first create)
-// Stack + TCB for the persistent generation worker, claimed from internal DRAM
-// at model load (llmEnsureWorker) and retained for the rest of the boot. Devices
-// that never load a model never pay the ~12.4 KB — the reason these are pointers
-// and not link-time .bss.
-//
-// The worker is created once and never deleted: it parks on its notify between
-// generations, including across llmunload. Retiring it would buy nothing (these
-// blocks are deliberately not freed, so the task is the only thing that would go
-// away) while costing a race that has no safe form — a task cannot observe its
-// own deletion, the IDLE task unlinks its TCB some unbounded time after it stops
-// running, and re-creating on the same TCB before that lands corrupts the
-// termination list.
-//
-// They must be INTERNAL: the scheduler and ISR path touch a task's stack and TCB,
-// and task stacks in PSRAM have never been safe on this HW. Sized in StackType_t
-// units; on this build sizeof(StackType_t)==1 so the stack is LLM_TASK_STACK_SIZE
-// bytes. Static-task creation (rather than plain xTaskCreate) is what lets the
-// allocation happen exactly once, at model load on a clean heap — see the
-// fragmentation note in llmEnsureWorker.
-static StackType_t*   gLLMWorkerStack = nullptr;
-static StaticTask_t*  gLLMWorkerTcb   = nullptr;
+// The generation worker's handle and llmReleaseWorker's request. Both are
+// written under gLLM.mutex only: by llmEnsureWorker (create), by the worker
+// itself as it leaves, and by llmReleaseWorker (the request, raised and
+// withdrawn). The worker lives from model load to model unload: its 12 KB
+// internal stack and TCB (xTaskCreateLogged, so a device that never loads a
+// model never pays them) are claimed once at load, on the cleanest heap this
+// device sees — the reason creation is not per generation: once a model is
+// loaded and the G2 page has fragmented the heap, the largest free internal
+// block is often under 12 KB — and go back when the model is unloaded, to be
+// claimed again at the next load. Its exit is its own (llmWorkerTask): the
+// handle nulled under the mutex every wake takes first, then
+// vTaskDelete(nullptr), so no wake can ever name a task that is gone.
+static TaskHandle_t   gLLMTask       = nullptr;
+static bool           gLLMWorkerExit = false;
 
 struct LLMAsyncContext {
   char         prompt[1024];  // callers cap the prompt at 1024 (see llmStartAsync sites)
@@ -195,12 +188,13 @@ struct LLMAsyncContext {
 // reason — the async task reads it off the LLM (PSRAM-bound) path anyway.
 EXT_RAM_BSS_ATTR static LLMAsyncContext gLLMAsyncCtx;
 
-// Persistent generation worker. Created ONCE (at model load, on a clean heap)
-// and reused for every generation — it parks on a task-notification between
-// requests instead of being re-spawned per generation. That is what makes
-// generation immune to internal-DRAM fragmentation: the 12 KB stack is claimed
-// one time and never re-acquired against a fragmented heap. llmStartAsync stages
-// gLLMAsyncCtx + resets the result buffer, then xTaskNotifyGive()s us.
+// The generation worker. Created at model load (llmEnsureWorker, on a clean
+// heap) and reused for every generation while the model is loaded — it parks
+// on a task notification between requests instead of being re-spawned per
+// generation, so generation never re-acquires its 12 KB stack against a
+// fragmented heap. llmStartAsync stages gLLMAsyncCtx + resets the result
+// buffer, then xTaskNotifyGive()s us under gLLM.mutex. llmReleaseWorker (model
+// unloaded) wakes us with nothing staged: we leave.
 static void llmWorkerTask(void* /*pv*/) {
   for (;;) {
     // Park until a request arrives. pdTRUE clears the notification count on
@@ -210,6 +204,22 @@ static void llmWorkerTask(void* /*pv*/) {
     // here after the take — the same publish edge the old per-gen xTaskCreate
     // provided.
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+    // The exit, decided and published in one hold of gLLM.mutex: with a
+    // release asked and nothing staged (done is cleared by llmStartAsync
+    // before its give, so a staged generation always runs first and the
+    // request stays up for the wake after it), the handle goes and the task
+    // deletes itself. llmStartAsync takes the mutex before it wakes a worker,
+    // so it finds this one here or none and creates a new one.
+    bool leave = false;
+    if (gLLM.mutex) xSemaphoreTake(gLLM.mutex, portMAX_DELAY);
+    leave = gLLMWorkerExit && gLLMResultDone;
+    if (leave) {
+      gLLMTask = nullptr;
+      gLLMWorkerExit = false;
+    }
+    if (gLLM.mutex) xSemaphoreGive(gLLM.mutex);
+    if (leave) vTaskDelete(nullptr);
 
     const LLMAsyncContext* ac = &gLLMAsyncCtx;
     llmGenerate(ac->prompt, [](const char* token) -> bool {
@@ -229,8 +239,7 @@ static void llmWorkerTask(void* /*pv*/) {
     ac->params.suppressCount, ac->params.minP);
 
     // The chat layer's drainEngineLocked finalizes on this flag, so publish it
-    // before the epilogue below and then loop back to park. This task never
-    // exits — see gLLMWorkerStack for why retiring it has no safe form.
+    // before the epilogue below and then loop back to park.
     gLLMResultDone = true;
 
     // One-shot: report the deepest this task's stack got during a real
@@ -250,56 +259,76 @@ static void llmWorkerTask(void* /*pv*/) {
   }
 }
 
-// Create the persistent worker once, on demand. Idempotent + serialized under
-// gLLM.mutex so a model-load and a lazy fallback can't both create it (which
-// would leak a 12 KB task and double-consume the shared context).
+// Create the worker on demand. Idempotent + serialized under gLLM.mutex so a
+// model-load and a lazy fallback can't both create it (which would leak a
+// 12 KB task and double-consume the shared context).
 static bool llmEnsureWorker() {
   bool ok = true;
   if (gLLM.mutex) xSemaphoreTake(gLLM.mutex, portMAX_DELAY);
   if (!gLLMTask) {
     // Claim the stack + TCB HERE — at model load, on the cleanest heap this
     // device will see (the G2 viewer / map stacks are usually not up yet) — and
-    // then keep them for every subsequent generation. Timing is the whole design:
-    // the old per-generation xTaskCreatePinnedToCore asked for the same ~12 KB
-    // contiguous INTERNAL block at the worst possible moment, and once a model is
-    // loaded and the G2 page has fragmented the heap the largest free internal
-    // block is only ~9 KB — so generation returned "busy or failed to start"
-    // every time the viewer was open. Claiming once, early, dodges that; the
-    // static-task form is what makes "once" expressible.
+    // then keep them for every generation while the model stays loaded. Timing
+    // is the whole design: the old per-generation xTaskCreatePinnedToCore asked
+    // for the same ~12 KB contiguous INTERNAL block at the worst possible
+    // moment, and once a model is loaded and the G2 page has fragmented the heap
+    // the largest free internal block is only ~9 KB — so generation returned
+    // "busy or failed to start" every time the viewer was open.
     //
-    // A failure here is real (unlike the old link-time .bss, which could not
-    // fail) but benign: both callers treat it as "retry later" — llmLoadModel
-    // logs and loads anyway, llmStartAsync bails and re-enters on the next
-    // generation, by which point the heap may have recovered.
-    if (!gLLMWorkerStack) {
-      gLLMWorkerStack = (StackType_t*)ps_alloc(LLM_TASK_STACK_SIZE,
-                                               AllocPref::RequireInternal,
-                                               "llm.task.stack");
-    }
-    if (!gLLMWorkerTcb) {
-      gLLMWorkerTcb = (StaticTask_t*)ps_alloc(sizeof(StaticTask_t),
-                                              AllocPref::RequireInternal,
-                                              "llm.task.tcb");
-    }
-    if (gLLMWorkerStack && gLLMWorkerTcb) {
-      // xTaskCreateStatic* only returns null on invalid params, never on OOM.
-      gLLMTask = xTaskCreateStaticPinnedToCore(
-        llmWorkerTask, "llm_gen", LLM_TASK_STACK_SIZE / sizeof(StackType_t), nullptr,
-        LLM_TASK_PRIORITY, gLLMWorkerStack, gLLMWorkerTcb, 1);
-    }
-    if (!gLLMTask) {
-      // No task ever ran on these, so releasing the partial pair is unambiguously
-      // safe here — and it keeps a failed create from pinning 12 KB that the
-      // retry would only ask for again.
-      heap_caps_free(gLLMWorkerStack);
-      heap_caps_free(gLLMWorkerTcb);
-      gLLMWorkerStack = nullptr;
-      gLLMWorkerTcb   = nullptr;
+    // A failure here is benign: both callers treat it as "retry later" —
+    // llmLoadModel logs and loads anyway, llmStartAsync bails and re-enters on
+    // the next generation, by which point the heap may have recovered.
+    gLLMWorkerExit = false;
+    TaskHandle_t created = nullptr;
+    if (xTaskCreateLogged(llmWorkerTask, "llm_gen", LLM_TASK_STACK_SIZE, nullptr,
+                          LLM_TASK_PRIORITY, &created, "llm.gen", 1) == pdPASS) {
+      gLLMTask = created;
+    } else {
       ok = false;
     }
   }
   if (gLLM.mutex) xSemaphoreGive(gLLM.mutex);
   return ok;
+}
+
+// Lets the worker go once no model is loaded (the tail of llmUnload): the
+// request is raised and the worker woken under gLLM.mutex, and it leaves from
+// its own park (llmWorkerTask), nulling the handle there. Waits up to
+// kLlmWorkerReleaseMs; a worker that did not leave (a generation still
+// draining) keeps running with the request withdrawn — withdrawn and read in
+// one hold, so no late pass takes it down under a caller that gave up — and
+// the next unload asks again. Never from the worker itself.
+static constexpr uint32_t kLlmWorkerReleaseMs = 500;
+static void llmReleaseWorker() {
+  if (!gLLM.mutex) return;
+  xSemaphoreTake(gLLM.mutex, portMAX_DELAY);
+  TaskHandle_t task = gLLMTask;
+  if (task && task != xTaskGetCurrentTaskHandle()) {
+    gLLMWorkerExit = true;
+    xTaskNotifyGive(task);
+  } else {
+    task = nullptr;
+  }
+  xSemaphoreGive(gLLM.mutex);
+  if (!task) return;
+  const uint32_t started = millis();
+  for (;;) {
+    xSemaphoreTake(gLLM.mutex, portMAX_DELAY);
+    const bool gone = gLLMTask == nullptr;
+    const bool expired = !gone && millis() - started >= kLlmWorkerReleaseMs;
+    if (expired) gLLMWorkerExit = false;
+    xSemaphoreGive(gLLM.mutex);
+    if (gone) {
+      DEBUG_LLM_LOADF("[LLM] gen worker released (stack and TCB returned)");
+      return;
+    }
+    if (expired) {
+      DEBUG_LLM_LOADF("[LLM] gen worker kept: not parked within %lu ms",
+                      (unsigned long)kLlmWorkerReleaseMs);
+      return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
 }
 
 // ============================================================================
@@ -1004,6 +1033,10 @@ void llmUnload() {
     if (slash) base = slash + 1;
     systemEventPost(SYSEVT_LLM_MODEL_UNLOADED, base, nullptr);
   }
+  // No model: the generation worker's 12 KB stack and TCB go back too. A
+  // reload (llmLoadModel unloads first) claims them again at its end, on the
+  // same clean-heap timing the worker has always relied on.
+  llmReleaseWorker();
 }
 
 bool llmIsReady() {
@@ -1287,8 +1320,11 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   };
   static constexpr int NUM_FILLER = sizeof(FILLER_PREFIXES) / sizeof(FILLER_PREFIXES[0]);
 
-  // Work on a mutable copy for normalization
-  char* norm_prompt = strdup(prompt);
+  // Work on a mutable copy for normalization (PSRAM first: a transient the
+  // internal heap's stacks and DMA buffers need not fight for).
+  const size_t promptBytes = strlen(prompt) + 1;
+  char* norm_prompt = (char*)ps_alloc(promptBytes, AllocPref::PreferPSRAM, "llm.prompt.norm");
+  if (norm_prompt) memcpy(norm_prompt, prompt, promptBytes);
   if (norm_prompt) {
     // BLE intake (Bluetooth.cpp processBleCommandLine) normalizes \r\n\t → space,
     // so the app's "Q: ...\nA:" / "Q: ...\nDo:" framing arrives as "Q: ... A:" /
@@ -1405,7 +1441,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
 
   // Encode prompt — heap-allocated to avoid stack overflow on long prompts
   size_t prompt_buf_n = strlen(prompt) + 3;
-  int* prompt_tokens = (int*)malloc(prompt_buf_n * sizeof(int));
+  int* prompt_tokens = (int*)ps_alloc(prompt_buf_n * sizeof(int), AllocPref::PreferPSRAM,
+                                      "llm.prompt.tokens");
   if (!prompt_tokens) {
     setLlmError("OOM: prompt_tokens alloc");
     if (norm_prompt) free(norm_prompt);
@@ -2300,8 +2337,12 @@ int llmStartAsync(const char* prompt, const LLMGenParams& params) {
   strlcpy(gLLMAsyncCtx.prompt, prompt, sizeof(gLLMAsyncCtx.prompt));
   gLLMAsyncCtx.params = params;
 
-  // Wake the persistent worker (replaces the old per-generation xTaskCreate).
-  xTaskNotifyGive(gLLMTask);
+  // Wake the worker, under the mutex its exit and creation take: the handle
+  // read here is a task that is still parked (a worker leaves only under this
+  // mutex, with nothing staged — done was cleared above).
+  if (gLLM.mutex) xSemaphoreTake(gLLM.mutex, portMAX_DELAY);
+  if (gLLMTask) xTaskNotifyGive(gLLMTask);
+  if (gLLM.mutex) xSemaphoreGive(gLLM.mutex);
 
   DEBUG_HTTPF("[LLM] Async gen started: session=%d prompt='%.40s%s'",
               newSession, prompt, strlen(prompt) > 40 ? "..." : "");

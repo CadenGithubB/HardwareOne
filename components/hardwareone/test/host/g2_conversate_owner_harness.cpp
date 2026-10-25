@@ -1,6 +1,7 @@
 // Mock transport/platform boundaries around extracted SHIPPING owner and CLI.
 #include "G2_ConversateSession.h"
 #include <assert.h>
+#include <atomic>
 #include <stdio.h>
 #include <sstream>
 #include <string>
@@ -10,11 +11,12 @@ struct G2Temple {
   char side; uint32_t connectionGeneration; bool connected; bool audioNotifyChar;
   uint8_t* rxBuf = nullptr;
   size_t rxFrameHave = 0, rxFrameExpected = 0;
-  uint32_t rxFrameConversateEpoch = 0;
+  uint32_t rxFrameConversateEpoch = 0, rxFrameNativeTerminalEpoch = 0, rxFrameNoteEpoch = 0;
   G2RxReassembly rxReassembly{};
   uint32_t rxStartedMs = 0, rxReassemblyGeneration = 0;
   uint32_t rxReassemblyLifecycleEpoch = 0, rxReassemblyPresentationEpoch = 0;
-  uint32_t rxReassemblyConversateEpoch = 0, packetsReceived = 0;
+  uint32_t rxReassemblyConversateEpoch = 0, rxReassemblyNativeTerminalEpoch = 0;
+  uint32_t rxReassemblyNoteEpoch = 0, packetsReceived = 0;
 };
 static G2Temple gL{'L', 1, true, true}, gR{'R', 2, true, true};
 static G2ConversateSession gConversate;
@@ -65,6 +67,8 @@ static bool g2EvenAiSessionIsActive() { return evenAi; }
 struct Lens { bool containerReady; };
 static Lens g2LensGetState() { return {lens}; }
 static bool g2FsmHijackActive() { return hijack; }
+static bool nativeTerminal = false;
+static bool g2NativeTerminalActive() { return nativeTerminal; }
 static bool g2TempleReadyAtGeneration(const G2Temple& t, uint32_t generation = 0) {
   return t.connected && (!generation || generation == t.connectionGeneration);
 }
@@ -118,6 +122,12 @@ static void g2DispatchCompleteEnvelope(G2Temple& t, const G2EnvelopeView& env,
   if (env.sid == G2_SID_CONVERSATE) g2ConversateOnRx(t,generation,env.payload,env.payloadLen);
   else ++unrelatedDispatches;
 }
+// The native Terminal's RX boundary: no Terminal session in these cases, so
+// its early hook claims nothing and its epoch stays 0.
+static std::atomic<uint32_t> gNativeTerminalEpoch{0};
+static unsigned nativeTerminalRx = 0;
+static uint32_t g2NativeTerminalEarlyRx(const G2Temple&, const uint8_t*, size_t) { return 0; }
+static void g2NativeTerminalOnRx(G2Temple&, uint32_t, uint32_t, const uint8_t*, size_t) { ++nativeTerminalRx; }
 // INSERT_PRODUCTION_RX
 
 using CS = G2ConversateSession;
@@ -293,7 +303,8 @@ static void ownerTests() {
 
   // Competing capture/UI owners are refused without changing their state.
   const auto beforeBusy = sent.size();
-  for (bool* owner : {&capture,&gMicStreamOn,&gMicProbeActive,&gMicRecFile,&gMicWavFile,&evenAi,&lens,&hijack}) {
+  for (bool* owner : {&capture,&gMicStreamOn,&gMicProbeActive,&gMicRecFile,&gMicWavFile,&evenAi,&lens,&hijack,
+                      &nativeTerminal}) {
     *owner = true; rx(2,1,4);
     assert(!gConversate.active() && sent.size() == beforeBusy && fastDepth == 0);
     *owner = false;
@@ -356,7 +367,9 @@ static std::vector<uint8_t> notifyFrame(const char* hex, uint8_t sid = G2_SID_CO
 }
 static void drainRx() {
   G2RxPacket p;
-  while (g2RxPacketDequeue(&p)) processNotify(gR,p.data,p.len,p.generation,p.lifecycleEpoch,p.presentationEpoch,p.conversateEpoch);
+  while (g2RxPacketDequeue(&p))
+    processNotify(gR,p.data,p.len,p.generation,p.lifecycleEpoch,p.presentationEpoch,p.conversateEpoch,
+                  p.nativeTerminalEpoch,p.noteEpoch);
 }
 static void rxQueueTests() {
   static uint8_t storage[RX_MESSAGE_CAP + RX_FRAME_CAP];
@@ -382,19 +395,19 @@ static void rxQueueTests() {
   stopRun(); drainRx(); assert(!gConversate.active());
   // Also fence a raw envelope split across two BLE notifications.
   const uint32_t oldEpoch = gConversateRxEpoch;
-  processNotify(gR,prep.data(),9,2,1,1,oldEpoch);
+  processNotify(gR,prep.data(),9,2,1,1,oldEpoch,0,0);
   stopRun();
-  processNotify(gR,prep.data()+9,prep.size()-9,2,1,1,gConversateRxEpoch);
+  processNotify(gR,prep.data()+9,prep.size()-9,2,1,1,gConversateRxEpoch,0,0);
   assert(!gConversate.active());
   // Other protocols are not invalidated by Conversate's cancellation epoch.
-  processNotify(gR,background.data(),background.size(),2,1,1,oldEpoch);
+  processNotify(gR,background.data(),background.size(),2,1,1,oldEpoch,0,0);
   assert(unrelatedDispatches == 1);
 
   // Expiring an abandoned fragmented message must not erase the new frame's
   // epoch and incorrectly suppress an otherwise fresh PREP.
   gR.rxReassembly.active = true;
   gR.rxStartedMs = clockMs - 3000;
-  processNotify(gR,prep.data(),prep.size(),2,1,1,gConversateRxEpoch);
+  processNotify(gR,prep.data(),prep.size(),2,1,1,gConversateRxEpoch,0,0);
   assert(gConversate.phase == CS::Phase::Armed); stopRun();
 
   startRun();

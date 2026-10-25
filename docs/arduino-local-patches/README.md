@@ -29,6 +29,8 @@ All marked with `[hardwareone local patch YYYY-MM-DD]` comments:
 | Companion transport lost (2026-10-02) | 8 | `cores/esp32/esp32-hal-hosted.c/.h`: `hostedSetTransportLost`/`hostedTransportLost`; a successful `hostedInit` clears the flag and `hostedDeinitBLE` skips the controller RPCs while it is set. `cores/esp32/esp32-hal-bt.c`: controller disable/deinit report the controller as lost (`ESP_ERR_INVALID_STATE`) instead of pretending it acknowledged, so the BLE lifecycle records an incomplete retirement and refuses to reopen BLE until a reboot. `libraries/WiFi/src/WiFiGeneric.cpp`: `wifiLowLevelDeinit` and `espWiFiStop` forgive remote failures while lost. Lets `System_RadioCompanion` tear Wi-Fi down on a dead C6 without waiting out RPC timeouts (a live C6 is always stopped cleanly); recorded in `arduino-local-patches-2026-10-02-companion.patch`. |
 | Panic path without flash (2026-10-15) | 2 | `cores/esp32/esp32-hal-misc.c`: with `CONFIG_ESP_PANIC_HANDLER_IRAM` (set for every ESP32-P4 in `config/sdkconfig.defaults.esp32p4`), `__wrap_esp_panic_handler` and `handle_custom_backtrace` are placed in IRAM, and the custom panic handler runs only on the first entry. A fault while flash is unreadable (mid erase/program, or a cache error) previously re-faulted on every fetch of the flash-resident wrap, so the IDF handler never printed or restarted and only the HP watchdog recovered the P4 about ten minutes later. Recorded in `arduino-local-patches-2026-10-15-panic-iram.patch`. |
 
+| Bluetooth library heap (2026-10-22, memory audit tranche C) | 5 + 1 | `libraries/BLE/src/RTOS.h`, `FreeRTOS.cpp`: `FreeRTOS::Semaphore` is 8 bytes (atomic handle + value), down from 48; the debug name/owner Strings and the dead pthread branch are gone, the API takes `const char*` literals, and the kernel object is made on the first take/wait (a give before any take is a no-op, exactly a give on the constructor's available binary semaphore). `BLERemoteService.h`, `BLEAdvertising.h`: the never-waited `m_semaphoreGetCharEvt` and `m_semaphoreSetAdv` removed. `BLEScan.cpp`: `take("start")` literal. `BLEDevice.cpp` (the phone pipe's seam, so it lives in `tools/ble-phone-pipe/arduino.patch`): the 4 KB app-id bitmap is a 64-entry table. Recorded in `arduino-local-patches-2026-10-22-ble-memory.patch`; applies after the three dated patches below. |
+
 `arduino-local-patches.patch` is the full `git -C components/arduino diff`
 snapshot of all of the above.
 
@@ -53,6 +55,8 @@ git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-p
 git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-08-30-url-ota-removal.patch
 git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-10-02-companion.patch
 git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-10-15-panic-iram.patch
+git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-10-22-ble-memory.patch
+git -C components/arduino apply ../../tools/ble-phone-pipe/arduino.patch
 ```
 
 Patches after the snapshot are separate files applied on top of it, in date

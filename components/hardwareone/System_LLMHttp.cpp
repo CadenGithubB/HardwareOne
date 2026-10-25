@@ -314,6 +314,7 @@ void worker(void* context) {
     Lock lock(true);
     if (lock) { applyConfigurationFailureLocked(); sIo = nullptr; }
   }
+  llmHttpIoFinish(io, !error && !sCancel.load(std::memory_order_acquire));
   if (client) { esp_http_client_close(client); esp_http_client_cleanup(client); }
   llmHttpIoDestroy(io);
   if (stream) {
@@ -330,6 +331,7 @@ void worker(void* context) {
     publish(*run, kInterrupted, strlen(kInterrupted), error, true);
   }
   if (body) { mbedtls_platform_zeroize(body, kBodyCap); ps_free(body); }
+  llmHttpRequestRelease(LlmHttpRequestKind::Chat);
   {
     Lock lock(true);
     if (lock) { sDone = true; sWorker = false; }
@@ -463,6 +465,9 @@ int httpLlmStartAsync(const char* prompt, const LLMGenParams& /*params*/) {
       !sConfig.enabled || !sConfig.valid || sWorker || !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8))) {
     run->~Run(); ps_free(run); return 0;
   }
+  if(llmHttpRequestAdmit(LlmHttpRequestKind::Chat,!strncasecmp(sConfig.url,"https://",8))!=LlmHttpAdmission::Accepted) {
+    run->~Run();ps_free(run);return 0;
+  }
   run->config = sConfig; run->revision = sRevision;
   if (!sConversation[0]) rotateLocked();
   strlcpy(run->conversation, sConversation, sizeof(run->conversation));
@@ -474,6 +479,7 @@ int httpLlmStartAsync(const char* prompt, const LLMGenParams& /*params*/) {
   sCancel.store(false, std::memory_order_release); sWorker = true; sDone = false;
   sStartedMs = millis();
   if (xTaskCreate(worker, "llm_http", 8192, run, 1, nullptr) != pdPASS) {
+    llmHttpRequestRelease(LlmHttpRequestKind::Chat);
     sWorker = false; sDone = true;
     strlcpy(sError, "Could not start HTTP agent worker", sizeof(sError));
     run->~Run(); mbedtls_platform_zeroize(run, sizeof(*run)); ps_free(run); return 0;

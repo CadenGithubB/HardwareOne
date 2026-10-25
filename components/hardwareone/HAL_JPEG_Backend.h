@@ -7,7 +7,8 @@ namespace hwjpeg { namespace detail {
 bool decodeHardware(const uint8_t* data, size_t length, const Info& info,
                     Image& image, const char** error);
 bool validateSoftwareEntropy(const uint8_t* data, size_t length, const Info& info,
-                             const char** error);
+                             const char** error,
+                             OutputAllocator allocator);
 bool decodeSoftware(const uint8_t* data, size_t length, const Info& info,
                     Image& image, const char** error, OutputAllocator allocator = nullptr);
 } }

@@ -104,10 +104,11 @@ AuthContext g2HijackAuthContextForOwner(BlePeerOwnerSession* ownerOut) {
   // authority: only an explicit authenticated pairing/reconnect-enable action
   // may assign the lens owner. Fail closed and explain the recovery gesture.
   static std::atomic<bool> warnedStuck{false};
-  if (!owner.live() && target.target.mac1[0]) {
+  if (!owner.live() && (target.target.mac1[0] || target.target.mac2[0])) {
     if (!owner.live() && !warnedStuck.exchange(true)) {
-      WARN_BLUETOOTHF("g2-glasses peer STUCK: mac1='%s' but owner authority is unavailable (no device owner/session slot?).",
-                      target.target.mac1);
+      WARN_BLUETOOTHF("g2-glasses peer STUCK: saved target present (L=%s R=%s) but owner authority is unavailable (no device owner/session slot?).",
+                      target.target.mac1[0] ? "saved" : "none",
+                      target.target.mac2[0] ? "saved" : "none");
       WARN_BLUETOOTHF("  Recovery: finish first-time setup / create owner, then `bleautoreconnect g2-glasses on`.");
     }
   }

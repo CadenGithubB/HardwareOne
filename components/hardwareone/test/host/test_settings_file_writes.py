@@ -57,7 +57,7 @@ def generate(source: str) -> str:
         declaration = extract_block(source, marker)
         user_functions = user_functions.replace(declaration, declaration + ";")
     definitions = [extract_block(source, marker) for marker in (
-        "bool writeSettingsJson(", "static void buildDebugJsonDoc(",
+        "static bool writeSettingsJsonImpl(", "bool writeSettingsJson(", "bool writeSettingsJsonForFactoryReset(", "static void buildDebugJsonDoc(",
         "bool writeDebugJson(", "bool settingsFirmwareVersionRestampPending(",
         "bool settingsRestampFirmwareVersion(")]
     harness = (HERE / "settings_file_writes_harness.cpp").read_text()

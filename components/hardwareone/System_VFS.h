@@ -363,6 +363,10 @@ namespace Scopes {
   // their primary — "/sd" is its own rule — so a caller that accepts either
   // tier must pick the matching scope. captureScopeFor() below does that.
   constexpr const char* CAPTURES_SD     = "/sd/logging_captures";
+  // The local speech model folder (model, LM, speaker model, user vocabulary).
+  // Only the user vocabulary is ever written by firmware (System_STTVocabulary).
+  constexpr const char* STT_MODELS      = "/STT Models";
+  constexpr const char* STT_MODELS_SD   = "/sd/STT Models";
   // NOTE: domains with user-configurable folders (images → gSettings.cameraCaptureFolder)
   // or dual SD+LittleFS locations (LLM models) can't use a static constant — they need a
   // computed scope at the call site. Add those when those domains are scoped.

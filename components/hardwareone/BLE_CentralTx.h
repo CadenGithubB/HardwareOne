@@ -44,5 +44,7 @@ struct BleCentralTxGuard {
 // Phone writes have lower admission priority than G2/ring. These calls never
 // wait for the controller gate; the caller releases it immediately after API
 // submission, before any completion wait.
-bool bleCentralTxTryPhone();
+// Eligible control or pressure-budget-expired traffic may bypass soft priority,
+// but never the mutex held by another controller submission.
+bool bleCentralTxTryPhone(bool bypassPriority = false);
 bool bleCentralTxAccessoryPressure();

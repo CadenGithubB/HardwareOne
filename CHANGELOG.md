@@ -8,6 +8,407 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [Unreleased]
+
+### System logging options on the display
+
+- Logging > System Logging on the display has a **Configure** screen, as
+  Sensor Logging already did. **Tags** turns the `[CATEGORY]` prefix on log
+  lines on or off for the next start. **Categories** lists the debug-message
+  families with how many are on (for example `ESP-NOW 1/6`), and each family
+  opens a list of its categories to switch on or off. **Path** shows the log
+  file the next start writes to; it is read-only here.
+- Category changes save the whole selection through `systemlogflags`, so the
+  categories you didn't touch are kept and the change applies straight away.
+  Tags use `logcategorytags`, which takes effect the next time logging starts.
+- The settings page, `/api/debug/flags` and the display list now read each
+  category's name from one shared column of the debug-flag table.
+- On the web Logging page, System Logging > Configuration opens on the saved
+  tags and categories instead of an empty grid with tags always ticked, and
+  **Apply Configuration** now saves them (it used to only check the
+  selection). Starting from the web therefore no longer replaces the saved
+  categories or turns tags back on unless you changed them.
+  `/api/logging/status` includes the saved options for admins.
+
+### Readable JSON in every file viewer
+
+- The display file browser offers **Pretty View** and **JSON View** for
+  `.json` files, as the glasses Files page does: Pretty View indents the file
+  one member per line, JSON View shows it as stored. A file longer than the
+  viewer's line limit now ends with `[truncated]` instead of stopping silently.
+- `fileview` re-indents JSON files by default and says so in its page header;
+  add `raw`, before or after the page number, for the stored text.
+- The web file viewer, glasses Files page, display browser and `fileview` now
+  share one JSON re-indenter (`System_JsonPretty.h`). It formats as the text
+  goes by, keeps no parsed copy in memory, and still lays out malformed or
+  cut-off JSON. On the glasses, broken JSON is indented as far as it goes
+  instead of a "Pretty parse failed" note; in the web viewer, empty `{}` and
+  `[]` stay on one line and indentation stops growing after 16 levels.
+
+## [0.99.98.5] - 2026-10-24
+
+### Release review and connected P4 check
+
+- The XIAO default and OpenClaw saved profiles disable application Bluetooth
+  and its SDK stack for image space. Both build with more than 1.5 MB free in
+  their app partition; shared and board defaults are unchanged.
+- `p4-phone-pipe` explicitly enables the camera. The 0.99.98.5 image built at
+  6,019,808 bytes with 1,406,240 bytes free, and was flashed to the connected
+  P4X-EYE's existing factory app partition only. Accounts, NVS and the
+  filesystem were preserved. Serial confirmed the version and existing login,
+  a successful camera frame, Wi-Fi, the glasses, ring and phone link, with all
+  four companion BLE links active and no reported crash during the check.
+  This was a bench check; speech accuracy, field endurance and relay traffic
+  were not qualified by it.
+- Review fixed the protocol-vector harness's callback-slab allocation, a
+  race in the STT harness's publish-wake assertion, and stale icon baselines.
+  Passphrase tests now account for the renamed `openphone` CLI guidance while
+  keeping the frozen interoperability fixtures and their derived keys intact.
+  Phone crypto/session vectors, 226 phone-peer tests, Terminal/browser/TLS
+  checks and the corrected STT suite passed. The six recorded Arduino patches
+  reconstructed all 87 changed dependency paths exactly.
+
+### Speech: editable vocabulary, readable live text, ordered offline transcripts
+
+Ported from the standalone `HardwareOne_Speech_To_Text` handoff of 21 October
+2026 (docs/STT_VOCABULARY_AND_FORMATTING.md). Engine, model, LM, speaker
+labels, storage rules and receipts are unchanged.
+
+- `sttvocab list | add DISPLAY[|spoken] | remove <spoken> | reload`: a
+  device-wide vocabulary in `STT Models/user_vocab.tsv` (card copy wins). Each
+  entry is a decoder hotword and a display spelling; edits need an
+  administrator, validate the whole list, go through the staged file writer and
+  apply to the next phrase without a reload or reflash. The Transcription panel
+  on the Sensors page has a Vocabulary section. The fixed `custom_words.txt`
+  is no longer read; a card that still has one gets a one-time notice.
+- Recognized text is shown with collapsed whitespace, capitalized *I* and its
+  contractions, the vocabulary's spellings and a capital at the start of a
+  paragraph (a speaker's turn on the lens and in the browser). The raw words
+  are what receipts acknowledge and what the transcript saves. `transcription
+  next` and `GET /api/transcription` return the copy as `display`; the draft is
+  returned formatted.
+- The browser live view groups phrases by speaker like the lens page
+  (`Person 1:` paragraphs, `?:` while a label is pending) and shows the draft
+  as a `~` line.
+- Transcript headers gain `Boot:`, `Power-on:`, `Session:`, `Domain:` and
+  `Title:` (first phrase, same rule as notes), so transcripts saved with no
+  clock still list in order. `System_BootState` now keeps a power-on counter
+  and an NVS ordering domain beside the boot counter.
+- Host suites: new `stt_transcript_tests` and `stt_vocabulary`; extended
+  local-LM, transcript writer, adapter, OLED, lens and web suites. Built green
+  as `p4-glasses-test` (5,572,832 B, 25% headroom) and `xiao-no-bluetooth`
+  (+6.5 KB). `xiao-default` no longer fits its partition on this tree (over by
+  31 KB, of which about 6 KB is this change). Flashed to the bench P4X-EYE
+  (app slot only) and it boots to a complete setup; glasses qualification is
+  still pending.
+
+Bench-tested on the P4X-EYE (`p4-phone-pipe-camera-off-test`, 2026-10-21): with the
+glasses, the ring and the phone linked the device sits at 293.5 K of internal DRAM
+used; `closeg2` returns 65.8 K, `closering` 13.5 K, `closephone` the link only;
+`closeble` lands at 168.6 K — 1.3 K above a boot with Bluetooth disabled (167.3 K)
+and 22 tasks — and stays there across five open/close cycles; every `openble`,
+and a boot with `bleenabled 0` followed by `bleenabled 1` + `openble`, brought
+all three peers back by themselves. Not yet exercised by hand: peers out of
+range and back, the OLED/lens/web rows.
+
+### Bluetooth lifecycle: one shared stack, open/close per device, memory returned on close
+
+- The Bluetooth central stack (Bluedroid host, its controller link, the setup
+  worker) has one owner, `BLE_CentralStack`. The glasses, the R1 ring and the
+  phone pipe open on it independently: `closeg2` no longer drops the ring or
+  the phone, `closephone` touches only the phone, `closering` only the ring.
+  A soft disconnect (out of range, a timeout) powers nothing down.
+- The verbs follow `openX`/`closeX` throughout. `openble`/`closeble` are the
+  whole Bluetooth runtime, like `openwifi`/`closewifi`: `openble` brings the
+  client stack up and the peers with auto-reconnect on come back by
+  themselves; `closeble` closes every device and the app console and stops
+  the host. The app console server is `openconsole`/`closeconsole`
+  (previously `openble`/`closeble`). `openring`/`closering` replace
+  `ring connect`/`ring disconnect`; `openphone`/`closephone` replace
+  `phone start`/`phone stop`/`phone connect`/`phone disconnect`.
+  `g2init`/`g2deinit` and the `closeg2 full` argument are gone: `closeg2` is
+  the close. No aliases. The OLED Bluetooth menu, the lens Bluetooth rows and
+  the web Bluetooth page use the new verbs; the Android app must follow.
+- An explicit close returns memory. Measured on the P4 before this change,
+  Bluetooth with four links held 126,220 B of internal DRAM, 82,728 B of it in
+  eleven task stacks that never went away; `bleenabled 0` gave back 40 KB and
+  left the Bluedroid host and six parked worker tasks resident. Now `closeg2`
+  releases the glasses' page-swap, tap, notes, session and control workers
+  and the per-temple GATT mirrors; `closering` the ring owner task;
+  `closephone` the phone pipe task; `closeble` the setup worker and the host.
+  Each worker exits cooperatively and is recreated on the next open; the lazy
+  initialisers refuse while their device is closed. `blestatus` now says what
+  the host is doing after an off (`Bluetooth: off` / `on, client stack up, no
+  device open` / `fault (reboot required)`; JSON `host`).
+- The saved `blemode` keeps `client` and `server` only; the phone-client mode
+  folded into client (the pipe is a device on the shared stack). Stack
+  recoveries (wedged host, stuck phone, companion reset) and the role switch
+  to the console server use the stack owner's teardown and bring-up.
+- The ring owner is woken through a static semaphore instead of a task
+  notification, so a release can never notify a deleted task; the memory
+  floors split into `blestack` (host + setup worker) and `g2client` (the
+  glasses runtime).
+- Reconnects open their device: with the stack up and a device closed, the
+  reconnect scheduler's admission opens the glasses runtime, the ring owner or
+  the phone pipe itself (boot, `openble` and the stack recoveries rely on
+  this), so a boot with only the ring enabled opens only the ring. `blemode`
+  stores the boot role only and changes nothing running; a failed
+  `openconsole` puts the saved role back and brings the client stack back for
+  the devices it closed. The OLED quick toggle follows the saved boot role
+  (`openble` or `openconsole`; `closeble` either way). The lens and OLED phone
+  menus have one Open/Close Phone row; the web Bluetooth page reads the new
+  `host` field of `/api/ble/status` so a stack that is up with the glasses
+  closed no longer shows as Off; `bluetoothMode`'s choices use the role words
+  ("App console", "Glasses" / "Glasses+pipe"). `closering`/`closephone` on an
+  already-closed device still stamp the user's intent, so auto-reconnect stays
+  quiet until `openring`/`openphone`.
+- The repo-wide internal-DRAM/PSRAM audit that motivated this (41 confirmed
+  findings, the P4 measurements, what is left after the rework) is in
+  `docs/MEMORY_PRESSURE_AUDIT_2026_10_21.md`.
+
+### Internal DRAM to PSRAM: the audit's safe moves (tranche B)
+
+- Static scratch that only task code touches now lives in PSRAM
+  (`EXT_RAM_BSS_ATTR`): the G2 pages' row-label buffers, the Transcription
+  render rows, the OLED power-mode labels, remote-settings module table and
+  system-status render data, the CLI help/error reply buffers, the Wi-Fi
+  saved-network presentation snapshots (no credentials by contract), the OLED
+  map route scratch and the loaded-map record, and the phone pipe's DNS
+  hostnames (the slot state stays internal and is claimed under the spinlock;
+  the name is written after it).
+- The phone GATT adapter's 16-slot callback queue (8.5 KB) keeps only one-byte
+  slab indices and atomic ownership bytes internal; the 17 callback bodies are
+  PSRAM slabs owned by the pipe, filled on the BTC task after the reservation.
+- Heap that only tasks touch is PSRAM-first: the ESP-NOW inbound RX ring and
+  broadcast ACK trackers (`isSelfMac` now copies its six bytes before its
+  spinlock), the automation scheduler's due-cache, and the software JPEG
+  decoder's workspace, which follows the caller's allocator like the pixels
+  (the camera capture path now passes a PSRAM-first allocator).
+- The hijack FSM queue keeps a pointer to its (literal) debug tag instead of a
+  24-byte copy, and a no-op `__cxa_atexit` in `app_main`'s translation unit
+  keeps newlib's atexit registry out of an image that never exits.
+- Measured on the bench P4 (flashed and read over serial): internal `.bss`
+  72,176 → 58,192 B (−13,984 B); after `closeble` 168,604 → 154,484 B used,
+  still 22 tasks; the FeatherS3 image's `.bss` is 42,080 B after the moves.
+  The heap moves (ESP-NOW, automations, JPEG scratch, FSM queue) count at
+  runtime on the boards that run those features.
+
+### Bluetooth library heap: slimmer semaphores, no app-id bitmap, dead objects gone (tranche C)
+
+- The vendored BLE library's `FreeRTOS::Semaphore` is 8 bytes, down from 48:
+  the debug name and owner Strings (read only by `toString()`, itself reached
+  only from compiled-out verbose logs and failure lines) and the dead pthread
+  branch are gone, and with them a heap String per take or wait on every
+  GATTC/GAP dispatch. Its kernel object (a 92-byte internal queue) is made on
+  the first take or wait instead of in the constructor; most per-attribute
+  semaphores (remote reads, RSSI, descriptor reads, indications) are never
+  taken, and a give before any take is exactly a give on the already-available
+  semaphore the constructor used to leave behind. Call sites pass literals.
+- Two semaphores nothing ever waited on are deleted: one per remote service
+  (`m_semaphoreGetCharEvt`, referenced only inside a commented-out handler)
+  and the advertising singleton's `m_semaphoreSetAdv`.
+- The 4 KB GATTC app-id bitmap in internal `.bss` (`sReservedAppIds[1024]`)
+  is a 64-entry table (128 bytes). Bluedroid registers at most four GATTC
+  apps and the application keeps at most three retired clients, so a full
+  table means a leak, not a load; the allocator then refuses as it did when
+  the id space ran out, and `test_phone_sdk_lifetime` exercises the table.
+- Ring scans pass `wantDuplicates=true` like the glasses scans, so the
+  library frees each advertisement report after the callback instead of
+  keeping one object per advertiser (about 330 bytes each) until the scan
+  ends; the ring callback already stashes its own copy of the one match.
+- Static: FeatherS3 internal `.bss` 42,368 → 38,088 B. Flash: the FeatherS3
+  image's headroom grows from 41.3 KB to 74.4 KB as the Semaphore String code
+  leaves 77 call sites.
+- Not applied, recorded in the audit report: filtered GATT service discovery
+  (BLE-01, touches the historically fragile connect path for about 3.8 KB), a
+  native GATT server for the app console (BLE-10, large), and the P4
+  ESP-Hosted task stacks (BLE-12, P4 only, overflow margins unmeasured under
+  load).
+- Measured on the bench P4 (flashed 2026-10-21 22:06, same serial drive as
+  tranche A, right temple again silent): internal `.bss` 58,496 → 54,208 B;
+  with the left temple, ring and phone linked 248,588 B used, where the
+  tranche A image read 260,956 B (−12,368 B); `closephone` → 239,008 B
+  (−9,580 B, as before); `closeble` → 151,304 B used, 22 tasks (tranche A:
+  154,880); `openble` → all three back, 248,720 B, 32 tasks, no drift. The
+  P4 image is 31.7 KB smaller.
+
+### One lifecycle for the idle service workers (`ServiceWorker`)
+
+- The three idle-retiring service tasks (`qnote`, `dictation_svc`,
+  `cm5_presence`) no longer each hand-roll the create claim, the wake
+  semaphore and the exit: `ServiceWorker` in System_TaskUtils.h holds that
+  protocol once (one creator at a time, the wake made once and published
+  under the module's spinlock before the task exists, the handle published
+  under it, `give()` to the semaphore and never a task handle, `retireIf()`
+  running the module's idle predicate and nulling the handle in the same
+  critical section). Each module keeps its body, its name and stack, and its
+  predicate. The new `service_worker` host suite runs the struct over a faked
+  kernel and pins that the three users keep no lifecycle primitive of their
+  own. The map renderer, the phone pipe task and the LLM worker keep their
+  own exits: each has a different lock and a different exit ground.
+
+### Idle workers leave: service tasks, the map renderer, the LLM worker, stale glasses clients (tranche A)
+
+- The lazily created service workers `qnote` (5 KB), `dictation_svc` (5 KB,
+  6 KB with local STT) and `cm5_presence` (2 KB) leave on their own after 60 s
+  with nothing to do (`SERVICE_TASK_IDLE_RETIRE_MS`, System_TaskUtils.h) and
+  give their stack and TCB back; the next request creates them again. The
+  exit is the task's own: it re-checks its idle predicate and nulls its
+  published handle in one critical section of the lock its creator checks,
+  then deletes itself. Wakes go to a static binary semaphore each module
+  keeps across workers, never to a task handle, so a wake given to a worker
+  that is leaving waits for its successor. `qnote` never leaves past a note
+  running or starting, a restamp or sweep due, or a boot note waiting for
+  the clock, and a start claims its note before it brings the worker;
+  `dictation_svc` never leaves with work pending and every publisher's wake
+  brings a worker back; `cm5_presence` leaves only while the host's evidence
+  is stale, and every new evidence re-creates it before waking it.
+- The OLED map's render task (8 KB) comes with the map and leaves 10 s after
+  the OLED left it (`ensureMapRenderTask`, `mapRenderTask`); the render
+  semaphore outlives the task. A create the heap refuses is retried every
+  2 s and the frame shows "Map: low memory" instead of a raster that will not
+  update (before, a failed create was never retried and the map never
+  appeared).
+- The on-device LLM's generation worker (12 KB stack + TCB) is now a logged
+  dynamic task created at model load and released when the model is unloaded
+  (`llmReleaseWorker` from `llmUnload`: raised and woken under `gLLM.mutex`,
+  the worker leaves from its own park, 500 ms fail-closed). `llmStartAsync`
+  wakes the worker under the same mutex. The tokenizer's vocab pointer array,
+  reachability scratch and presplit table, and the per-generation prompt
+  copy and token array, are PSRAM-first (the raw-allocation ratchet drops
+  from 10 to 6 sites).
+- Glasses: a temple's stale `BLEClient` and its remote GATT mirror (about
+  8 KB of internal heap per temple) are retired before every connect job's
+  scan (`g2RetireStaleTempleClients`), not only when its own temple
+  advertises again, so they go while the glasses are off or away instead of
+  staying until the next successful connect. `connectTemple` keeps the late
+  catch through the same helper.
+- The phone pipe task (8 KB) leaves on its own 2 s after the pipe is idle on
+  an up host (`closephone`: stopped, step Idle, GATT adapter idle with its
+  app id released, no job, scan, forget, pair window or reset pending, no
+  phone setup turn held); `openphone` makes a new one. `phoneLinkOpen`
+  publishes `active` and then looks for the task under the same lock the
+  exit nulls it under, so it finds the task or makes one. `bleStackDown`'s
+  release of a still-parked task is unchanged.
+- Host suites: `quicknote_service` gains the idle-exit scenario and pins the
+  claim-then-ensure order; `dictation_local` splices the work predicate and
+  pins the exit; `g2_client_lifecycle` pins the pre-scan retirement;
+  `phone_runtime` gains the idle exit on an up host (held by an app id, a
+  job, an active pipe or a phone turn); the tokenizer harness fakes the
+  PSRAM-first calloc; `raw_allocation_inventory` ratchets to 6/6.
+- Measured on the bench P4 (flashed 2026-10-21 21:37, driven over serial;
+  the glasses' right temple again never advertised, as in the tranche B run):
+  with the left temple, ring and phone linked 260,956 B used; `closephone` →
+  251,376 B used ten seconds later (−9,580 B; the `phone_pipe` task is gone
+  from the task list, 32 → 31 tasks) where the lifecycle rework measured
+  −880 B (link only, task parked); `openphone` → pipe back and ready in
+  7.6 s, 260,920 B used (no drift); `closeble` → 154,880 B used, 22 tasks
+  (tranche B measured 154,484: run-to-run noise); `openble` → all three
+  back, 261,148 B used, 32 tasks. The service-worker, map, LLM and
+  glasses-away levers are not on this bench (no mic session, no OLED map or
+  LLM on the P4, temples never out of range); they count on the boards and
+  in the sessions that use them.
+
+### Phone link v2: the app console inside the phone pipe, relay optional
+
+- The phone pipe's inner protocol is version 2. Phones that speak only v1
+  (the Android app up to 2.7.x) can no longer connect over the phone link;
+  after three tries the device stops reconnecting and shows "phone app too
+  old". `openconsole` keeps the direct app-console connection available.
+- The app console runs as a third stream inside the pipe, beside the two
+  relay streams, on the one phone link. It needs no `blesecret`: the link is
+  paired once with a code the device makes. The console still needs `login`,
+  even with `blerequireauth` off.
+- New `phone pair new` (superadmin, on serial or the OLED only): makes a
+  16-symbol pairing code, shows it once (one serial line, or the OLED code
+  screen), and keeps pairing open for 3 minutes. The OLED has Bluetooth >
+  Phone > New code and pair. A passphrase set with `phone secret` still
+  works for the relay only.
+- Relay forwarding is optional: the link and the console stay up when the
+  phone has relay off or no destination, and the LLM HTTP source uses the
+  phone only while it reports relay on. The relay never needs a login, and
+  the 15-minute console idle logout never closes the link or the relay.
+- `bleinfo`, `blestatus`, `/api/ble/status`, `status json` and the web
+  Bluetooth page show a "Phone link" block: state, console, relay, streams
+  and end reasons.
+- `blemode` saves `client` or `server`; `glasses` is a client alias. The phone
+  pipe is a device on the shared client stack, not a separate boot role.
+- `bledisconnect` answers "App console session ended; the phone link stays
+  and the console starts a new signed-out session".
+- Fixes: a Bluetooth console session could be logged out at once by a race
+  in the idle check (also behind the unexplained OTA logout of 2026-08-30);
+  `help` sent its menu only to `outble` users, so apps got a bare "OK";
+  switching from the app console back to the shared client stack left the R1
+  ring disconnected.
+
+### Bluetooth: the app console beside the glasses, ring and relay pipe
+
+- In glasses mode on builds with the phone relay pipe, the app console now
+  runs on the phone pipe's existing link. The glasses, the R1 ring, the pipe
+  and the app console can all be connected at once, with no extra link and no
+  advertising.
+  - Only the authenticated phone pipe's link can use the console; the glasses'
+    and ring's links are ignored.
+  - The legacy GATT console attach requires its own Secure Channel
+    (`blesecret`), and commands per write are smaller (the link's MTU is 244).
+    The v2 console stream described above instead uses the phone link's
+    encryption and a device-made pairing code.
+  - The console session follows the pipe: when the pipe drops, the app signs
+    in again on the next link.
+  - The Android app needs a matching update to attach over the phone link;
+    see docs/ANDROID_AGENT_PROMPT_CONSOLE_ON_PHONE_LINK.md.
+- New `bleconsole on|off|status` (on by default) controls this.
+- Secure Channel has a new REJECT reason `0x03` ("no channel"): the app runs
+  the handshake again.
+- The command request characteristic is write-only.
+- Server mode (`openconsole`) provides a direct app connection that stops the
+  glasses and the pipe.
+
+### Bluetooth status: role, relay pipe and app console shown separately
+
+- Every Bluetooth status surface (OLED, lens, web Bluetooth page and
+  dashboard, `blestatus`, `phone status`, `status json`) shows three things in
+  the same words:
+  - the shared client stack or app-console server running now (and the saved
+    boot role when it differs);
+  - the relay pipe (for example "ready", "searching", "fail: not found");
+  - the app console (for example "waiting for the phone link", "app signed
+    in").
+
+  Before, "phone connected" meant the pipe and could be mistaken for the app.
+- A phone attempt that never connected keeps its reason ("phone not found",
+  "BLE setup timed out") instead of reading "disconnected".
+- `/api/ble/status` has a new `link` object, and its `phone` object is
+  schema 2.
+- `status json` `connectivity.bluetooth` gains the same keys; the existing
+  keys are unchanged.
+- The `phone-status` event carries the pipe phase (`p`) and reason (`r`)
+  instead of the raw text.
+- OLED, lens and web controls open and close the glasses, ring and phone
+  independently on the client stack. `openconsole` selects the direct
+  app-console server; `openble` starts the shared client stack.
+- `blemode phone` and `blemode phone-client` are gone; use
+  `blemode server|client`.
+- Server mode keeps advertising while fewer than four apps are connected.
+  Before, one connected (or stale) app made the device invisible until every
+  app had gone.
+
+### G2: the one-temple repair keeps trying
+
+- When one temple drops, the repair tries 7 times over about 13 minutes, then
+  once every 10 minutes for as long as one temple is up and you haven't
+  disconnected.
+  - Before, it restarted its 7-try cycle forever, and its give-up message never
+    printed.
+  - Putting the glasses back on restarts the quick tries. A lens gesture does
+    too, at most once per 30 minutes.
+  - `g2recover` restarts them at once.
+- `g2status`, the `g2-status` event and `/api/ble/status` show the repair
+  state (`repair=3/7`, `slow`, `held` or `none`).
+- With `bleautoreconnect g2-glasses on`, the reconnect ladder now waits while
+  one temple is up instead of scanning for it too.
+- The repair's log line no longer prints the temple's address.
+
 ## [0.99.98.4] - 2026-10-15
 
 Work-in-progress checkpoint of the Android BLE relay pipe and the P4X-EYE
@@ -27,7 +428,8 @@ in phone-client mode (see Known issue).
 - Boot joins Wi-Fi in the background, so setup no longer waits for the network
   hunt; network services start when the connection resolves.
 - The ESP32-C6 companion reports how many BLE links it allows, and `c6status`
-  shows `BLE links:`. The P4 admits no more than the companion supports.
+  shows `BLE links:`. This release added reporting; shared P4 admission was
+  not yet implemented.
 - ESP32-P4 panics no longer need flash: the panic handler, Arduino's panic
   wrap and the crash-record hook run from IRAM. A fault during a flash write
   previously left the board silent until a watchdog reset about ten minutes

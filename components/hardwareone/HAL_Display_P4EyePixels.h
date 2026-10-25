@@ -1,19 +1,23 @@
 #pragma once
 #include <stdint.h>
 
+#define P4EYE_CANVAS_WIDTH 128
+#define P4EYE_CANVAS_HEIGHT 128
+
 namespace p4eye_display {
 constexpr int kWidth = 240;
 constexpr int kHeight = 240;
-constexpr int kCanvasWidth = 128;
-constexpr int kCanvasHeight = 64;
-constexpr int kImageWidth = 192;   // 1.5x, retaining the monochrome OLED layout.
-constexpr int kImageHeight = 96;
+constexpr int kCanvasWidth = P4EYE_CANVAS_WIDTH;
+constexpr int kCanvasHeight = P4EYE_CANVAS_HEIGHT;
+constexpr int kImageWidth = kWidth;   // 1.875x on both axes; keep 128px text wrapping.
+constexpr int kImageHeight = kHeight;
 constexpr int kImageLeft = (kWidth - kImageWidth) / 2;
 constexpr int kImageTop = (kHeight - kImageHeight) / 2;
 constexpr int kStripRows = 8;
 
 // Nearest-neighbor scaling preserves aspect ratio without introducing gray.
-// The centered 1.5x image leaves black borders on all four sides. White and
+// The square canvas fills the panel. Fractional scaling duplicates source
+// pixels unevenly (as the previous 1.5x path did). White and
 // black RGB565 are byte-order invariant; no SPI endian conversion is needed.
 inline void rasterize(const uint8_t* canvas, uint16_t* output,
                       int startY, int rows, bool inverted) {

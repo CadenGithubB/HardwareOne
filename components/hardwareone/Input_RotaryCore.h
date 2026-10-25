@@ -73,7 +73,7 @@ class Gestures {
       } else if (suppress_) {
         suppress_ = false;
       } else if (!held_ && !turned_) {
-        if (secondClick_) out.actions |= Function;
+        if (secondClick_) out.actions |= Back;
         else { clickPending_ = true; releasedAt_ = now; }
         secondClick_ = false;
       }
@@ -92,8 +92,10 @@ class Gestures {
     }
     if (stable_ && !suppress_ && !held_ && !turned_ && uint32_t(now - pressedAt_) >= HoldMs) {
       held_ = true;
+      // SELECT requires a short tap followed by holding the second press.
+      // An ordinary hold is consumed without a click or quick-menu action.
+      if (secondClick_) out.actions |= Function;
       clickPending_ = secondClick_ = false;
-      out.actions |= Back;
     }
     const bool secondPressDebouncing = raw_ && uint32_t(rawSince_ - releasedAt_) <= DoubleClickMs;
     if (clickPending_ && !secondPressDebouncing && uint32_t(now - releasedAt_) > DoubleClickMs) {

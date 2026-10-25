@@ -56,9 +56,17 @@ ReadCount validationRead(JDEC* decoder, uint8_t* buffer, ReadCount requested) {
 }
 WriteResult validationDiscard(JDEC*, void*, JRECT*) { return 1; }
 }
+// The decoder's scratch is plain CPU memory read through the cache: the
+// caller's allocator (PSRAM first on every board that has it) takes it when
+// given, as it does the pixels; internal DRAM is the fallback. free() releases
+// either (OutputAllocator's contract).
+static void* workspaceAlloc(OutputAllocator allocator) {
+  if (allocator) return allocator(kWorkspaceBytes);
+  return heap_caps_malloc(kWorkspaceBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
 bool validateSoftwareEntropy(const uint8_t* data, size_t length, const Info& info,
-                             const char** error) {
-  void* workspace = heap_caps_malloc(kWorkspaceBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                             const char** error, OutputAllocator allocator) {
+  void* workspace = workspaceAlloc(allocator);
   if (!workspace) {
     if (error) *error = "out of memory for JPEG validation workspace";
     return false;
@@ -96,7 +104,7 @@ bool decodeSoftware(const uint8_t* data, size_t length, const Info& info,
     if (error) *error = "out of memory decoding JPEG";
     return false;
   }
-  void* workspace = heap_caps_malloc(kWorkspaceBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  void* workspace = workspaceAlloc(allocator);
   if (!workspace) {
     free(pixels);
     if (error) *error = "out of memory for JPEG workspace";

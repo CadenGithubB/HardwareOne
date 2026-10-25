@@ -285,6 +285,11 @@ bool capture(CameraFrame& out, size_t maxBytes) {
     limits.maxWidth = 640; limits.maxHeight = 480;
     limits.maxOutputBytes = 640 * 480 * 3;
     limits.maxInputBytes = maxBytes;
+    // Validation scratch (decoder workspace, marker-normalized copy) in PSRAM
+    // first, as the G2 decode path does; internal DRAM only as the fallback.
+    limits.softwareAllocator = [](size_t size) -> uint8_t* {
+      return static_cast<uint8_t*>(ps_alloc(size, AllocPref::PreferPSRAM, "camera.jpeg.scratch"));
+    };
     const bool valid = fb->format == PIXFORMAT_JPEG && fb->buf && fb->len >= 4 &&
       fb->len <= maxBytes && hwjpeg::inspect(fb->buf, fb->len, jpeg, limits);
     // esp_camera_fb_get overwrites fb width/height from current sensor status,

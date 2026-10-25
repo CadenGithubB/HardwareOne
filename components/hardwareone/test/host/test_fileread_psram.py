@@ -2,7 +2,8 @@
 """Compile the shipping fileread handler/writers with hardware boundary mocks.
 
 Uses the actual bounded PSRAM owner and real vendored ArduinoJson to parse the
-wire output. VFS, argument tokenization, BLE and allocation backends are mocks;
+wire output. cmd_fileview runs with the real pager, wrap sink, shared JSON
+re-indenter and file classifier. VFS, argument tokenization, BLE and allocation backends are mocks;
 MemUtil tests separately exercise the real PSRAM/internal fallback policy.
 """
 from __future__ import annotations
@@ -46,14 +47,17 @@ def main() -> None:
         "a.has(2) ? a.argInt(2, 0) : 0", "for (int i = 3; i < a.count(); i++)",
         'VFS::openGuarded(path, "r", ctx)', 'FsLockGuard _g("fileread")',
         "if (offset > 0) f.seek((uint32_t)offset);", "got = f.read(buf, want);",
-        "ctx.transport == SOURCE_BLUETOOTH", "bleScEstablished(connId)",
-        "/*blocking=*/true, /*binaryFrame=*/true", "(got == 0) ||",
+        "ctx.transport == SOURCE_BLUETOOTH", "bleSessionConfidential(connId, epoch)",
+        "command ? command->transportSessionEpoch : 0",
+        "bleSendBinaryToSession(connId, epoch, buf, got)", "(got == 0) ||",
     ):
         require(contract in handler, f"fileread compatibility boundary changed: {contract}")
-    require(handler.index("s_readJson.reserve(OUT_CAP)") < handler.index("bleScSendEncrypted("),
+    require(handler.index("s_readJson.reserve(OUT_CAP)") < handler.index("bleSendBinaryToSession("),
             "reply allocation must finish before raw body delivery")
-    require(handler.index('buf, got, eof, "raw", false)') < handler.index("bleScSendEncrypted("),
+    require(handler.index('buf, got, eof, "raw", false)') < handler.index("bleSendBinaryToSession("),
             "complete checked raw metadata must precede binary body delivery")
+    require("bleScSendEncrypted" not in handler and "bleScEstablished" not in handler,
+            "the raw body is fenced on the command's epoch (never the connection's current one)")
     definitions = [extract_block(source, "bool normalizeFsPath("),
                    extract_block(source, "static bool filePathIsPrivateTranscript("),
                    extract_block(source, "const char* cmd_fileview(")]
@@ -69,7 +73,10 @@ def main() -> None:
     harness = ((args.source_dir / "fileread_psram_harness.cpp") if args.source_dir else component / "test/host/fileread_psram_harness.cpp").read_text()
     for marker, production in {
         "// INSERT_POLICY_HERE": read("Transcript_PathPolicy.h").replace("#pragma once", ""),
-        "// INSERT_PAGER_HERE": read("System_TextPager.h").replace("#pragma once", ""),
+        "// INSERT_PAGER_HERE": "\n".join(
+            read(name).replace("#pragma once", "") for name in (
+                "System_TextPager.h", "System_TextWrapStream.h", "System_JsonPretty.h",
+                "FileBrowser_FileKind.h")),
         "// INSERT_PRODUCTION_BUFFER_HERE": buffer,
         "// INSERT_PRODUCTION_LIMITS_HERE": limits,
         "// INSERT_PRODUCTION_FILEREAD_HERE": "\n\n".join(definitions),

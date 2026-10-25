@@ -113,7 +113,9 @@ struct CommandContext {
   uint8_t behaviorFlags = COMMAND_CONTEXT_DEFAULT;
   bool validateOnly = false;
   bool captureOutput = false;  // capture broadcastOutput into HTTP response
-  void* replyHandle = nullptr;     // placeholder for future sync replies
+  // ORIGIN_BLUETOOTH: the command's reply context in Bluetooth.cpp, which
+  // collects its broadcastOutput lines for its session. Null elsewhere.
+  void* replyHandle = nullptr;
   httpd_req_t* httpReq = nullptr;  // used by web origin if needed
   // Non-empty when the command is an automation sub-command. Used by
   // executeCommand to write COMMAND/OUTPUT lines to the autolog, attributed
