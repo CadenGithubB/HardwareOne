@@ -12,6 +12,8 @@
 #include <ArduinoJson.h>
 #include "Bluetooth.h"
 #include "System_MemUtil.h"
+#include "BLE_LinkStatus.h"
+#include "BLE_PhoneStatus.h"
 #if ENABLE_G2_GLASSES
 #include "BLE_Peers.h"
 #include "G2_Glasses.h"
@@ -87,7 +89,8 @@ static void addG2TempleConnectionJson(JsonObject out,
 }
 #endif
 
-// GET /api/ble/status — owner-built BLE info + optional G2/ring status.
+// GET /api/ble/status — owner-built BLE info, the link words (role, relay pipe,
+// app console) + optional G2/ring/phone status.
 static esp_err_t handleBleStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   httpd_resp_set_type(req, "application/json");
@@ -120,6 +123,7 @@ static esp_err_t handleBleStatus(httpd_req_t* req) {
     link["state"] = connection.state;
     addG2TempleConnectionJson(link["left"].to<JsonObject>(), connection.left);
     addG2TempleConnectionJson(link["right"].to<JsonObject>(), connection.right);
+    link["repair"] = connection.repair;  // char[]: copied, outlives this block
     char g2Buf[256];
     formatG2Status(connection, g2Buf, sizeof(g2Buf));
     doc["g2Text"] = g2Buf;
@@ -146,6 +150,19 @@ static esp_err_t handleBleStatus(httpd_req_t* req) {
     return httpd_resp_send(req, "{\"error\":\"Ring status unavailable\"}", HTTPD_RESP_USE_STRLEN);
   }
   doc["ring"]["autoReconnect"] = blePeerAutoReconnectEnabled(BLE_PEER_R1_RING);
+#endif
+  // The role running now, the relay pipe and the app console in the words
+  // every surface shows (BLE_LinkStatus.h). Last, with the phone object, so an
+  // allocation failure here is the final overflow check's 500.
+  const BleLinkStatus link = bleLinkStatus();
+  bleLinkStatusJson(doc["link"].to<JsonObject>(), link);
+  // The host itself (on / idle / off / fault / parked): the page's header reads
+  // it when the glasses runtime is closed but the client stack is still up.
+  doc["host"] = bleHostStateWord(link.role != hw1link::Role::Off);
+#if ENABLE_BLE_PHONE_PIPE
+  (void)phoneBuildStatusJson(doc["phone"].to<JsonObject>(), link);
+  // The phone link block (console stream, relay, streams, end reasons).
+  bleLinkPhoneJson(doc["phoneLink"].to<JsonObject>(), link, true);
 #endif
 
   String out;

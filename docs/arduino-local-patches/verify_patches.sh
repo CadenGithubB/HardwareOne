@@ -34,12 +34,20 @@ check_markers() { # relative-file min_marker_count
 check_markers libraries/BLE/src/BLECharacteristic.cpp 2
 check_markers libraries/BLE/src/BLECharacteristic.h 1
 check_markers libraries/BLE/src/BLEClient.cpp 13
-check_markers libraries/BLE/src/BLEDevice.cpp 2
+check_markers libraries/BLE/src/BLEDevice.cpp 3
 check_markers libraries/BLE/src/BLERemoteCharacteristic.cpp 7
 check_markers libraries/BLE/src/BLERemoteDescriptor.cpp 4
 check_markers libraries/WiFi/src/STA.cpp 1
 check_markers cores/esp32/esp32-hal-i2c-ng.c 1
 check_markers cores/esp32/esp32-hal-periman.c 2
+# Memory audit 2026-10-22 (marked): Semaphore 48 -> 8 B with its kernel object
+# made on first use, two dead semaphores removed, the app-id table (counted in
+# BLEDevice.cpp above). Recorded in arduino-local-patches-2026-10-22-ble-memory.patch.
+check_markers libraries/BLE/src/RTOS.h 1
+check_markers libraries/BLE/src/FreeRTOS.cpp 1
+check_markers libraries/BLE/src/BLERemoteService.h 1
+check_markers libraries/BLE/src/BLEAdvertising.h 1
+check_markers libraries/BLE/src/BLEScan.cpp 1
 
 # ESP32-P4 (ESP-Hosted companion radio) support, 2026-09-29. These hunks are
 # unmarked upstream-style changes; check a signature symbol from each instead.

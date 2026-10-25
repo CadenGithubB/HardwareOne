@@ -6,25 +6,47 @@
 
 #include "System_BuildConfig.h"
 #include "System_User.h"
+#include "BLE_ConsoleAttachCore.h"  // hw1console::Mode
 
 // =============================================================================
 // BLE MODE CONSTANTS (available regardless of ENABLE_BLUETOOTH)
 // =============================================================================
-// The firmware can run the BLE radio in one of two mutually exclusive roles.
-// Which one is active at runtime is stored in gSettings.bleMode and also
-// controlled by the `blemode` CLI / the Bluetooth web page mode toggle.
-#define BLE_MODE_SERVER     0   // Peripheral / GATT server for phone clients (Bluetooth)
-#define BLE_MODE_PHONE_CLIENT 2 // Central / Android opaque TCP pipe
-#define BLE_MODE_G2_CLIENT  1   // Central / GATT client for Even Realities G2 glasses (G2_Glasses)
+// The BLE radio runs in one of two mutually exclusive roles: the shared client
+// stack (BLE_CentralStack.cpp) that the glasses, the ring and the phone pipe
+// open on, or the app-console server (openconsole). gSettings.bleMode is the
+// saved BOOT role, set by `blemode`, `openconsole` / `closeconsole` and the
+// Bluetooth web page; the running role is whatever was opened last.
+#define BLE_MODE_SERVER     0   // Peripheral / GATT server for the app (Bluetooth)
+#define BLE_MODE_G2_CLIENT  1   // The client stack: glasses, ring and phone pipe open on it
 
 inline bool bleModeIsAvailable(int mode) {
   return mode == BLE_MODE_SERVER ||
-      (ENABLE_G2_GLASSES && mode == BLE_MODE_G2_CLIENT) ||
-      (ENABLE_BLE_PHONE_PIPE && mode == BLE_MODE_PHONE_CLIENT);
+      ((ENABLE_G2_GLASSES || ENABLE_BLE_PHONE_PIPE) && mode == BLE_MODE_G2_CLIENT);
 }
 
 // Result of a bledisconnect request; the close itself completes asynchronously in onDisconnect.
-enum class BleDisconnectResult : uint8_t { REQUESTED, NOT_FOUND, PEER_LINK, UNAVAILABLE };
+// SESSION_ENDED: a console on the phone link ended its session at once (the
+// client host's slot in G2 mode, or the pipe's console row in any client
+// role); the link stays and the console starts a fresh signed-out session.
+enum class BleDisconnectResult : uint8_t { REQUESTED, NOT_FOUND, PEER_LINK, UNAVAILABLE, SESSION_ENDED };
+
+// The app console as stream slot 2 of the phone pipe (phone link v2,
+// BLE_PhonePipeConsole.h). Its session is a gBLEState row with its own id,
+// 0x8000 | (generation & 0x7FFF), never a Bluedroid connection id, so design
+// A's slot on the same link keeps its identity. The lifecycle lock and the
+// pipe's locks are never nested: the pipe side reads the row only through
+// blePipeConsoleIdentity()'s leaf snapshot.
+struct BlePipeConsoleIdentity {
+  bool bound = false;
+  uint32_t generation = 0;           // the pipe GATT generation it was bound for
+  uint16_t streamId = 0;             // the console stream it serves
+  uint16_t rowConnId = 0;            // the row's own id (its sid)
+  TransportSessionEpoch epoch = 0;   // the row's live session epoch
+  bool authed = false;
+};
+inline constexpr uint16_t blePipeConsoleRowId(uint32_t generation) {
+  return uint16_t(0x8000u | (generation & 0x7FFFu));
+}
 
 #if ENABLE_BLUETOOTH
 
@@ -84,7 +106,23 @@ struct BLEConnection {
   // session logged in (the web console mirror's rule).  Meaningful only while
   // authed; bleBindSession is the single writer of a true value.
   bool mirrorEligible;
+  // Client host (the console on the phone pipe's link): this session has had
+  // its one SC_REJECT "no channel" (bleScDeferredInbound).
+  bool noChannelRejected;
   uint32_t lastActivityMs;
+  // The phone link's console row (phone link v2): connId is
+  // blePipeConsoleRowId(pipeGeneration), never a Bluedroid id; its output goes
+  // to stream pipeStream of that pipe session as console records.
+  // pipeLinkConnId is the link's own id, for display only.
+  bool pipeConsole;
+  uint32_t pipeGeneration;
+  uint16_t pipeStream;
+  uint16_t pipeLinkConnId;
+  // Its idle-logout notice did not fit the stream (TryNow): offered again
+  // while the session epoch is still noticeEpoch.
+  bool noticePending;
+  TransportSessionEpoch noticeEpoch;
+  String noticeUser;
 };
 
 struct BLESystemState {
@@ -155,13 +193,58 @@ BLEDeviceType bleIdentifyDeviceByMAC(const uint8_t* mac);
 // Advertising control
 bool startBLEAdvertising();
 void stopBLEAdvertising();
+// Connectable advertising is running (re-armed while another app fits).
+bool bleAdvertising();
+// The console server is up; lock-free, for status surfaces.
+bool bleServerUp();
+// The app console (this device's command service) for the status surfaces:
+// BLE_LinkStatus.h turns it into words. Never blocks.
+struct BleConsoleView {
+  bool up = false;           // the console GATT server is initialized (server mode)
+  bool advertising = false;  // visible to a scanning app
+  uint8_t clients = 0;       // app sessions: centrals connected (peer links excluded)
+                             // and the phone link's console row, once bound
+  bool signedIn = false;     // one of them is logged in
+  // The client host (G2 mode): the command service on the phone pipe's link.
+  bool registered = false;   // registered on this host
+  bool attachable = false;   // ... and `bleconsole` is on
+  bool attached = false;     // the app has joined the console slot on the pipe's link
+  bool secret = false;       // blesecret is set: the phone link serves Secure Channel only
+};
+BleConsoleView bleConsoleView();
+// Where the app console's command service lives (BLE_ConsoleAttachCore.h):
+// Server while openble owns the host (isBleServerInitialized()), and
+// ClientRegistered from bleConsoleRegisterOnClientHost() until the host
+// teardown that frees its state. Lock-free, any task (BTC included).
+hw1console::Mode bleConsoleMode();
+// Registers the command service on the G2 client host initG2Client has just
+// started, before any scan or connect: with no link up, starting it sends no
+// Service Changed. Allocates the console state (initialized stays false, so
+// isBleServerInitialized() still means server mode), never advertises and
+// leaves the MTU and TX power to the client. Call it there only, under the
+// role claim, never on BTC or under the lifecycle lock. False (reason logged)
+// leaves the console off; the glasses and pipe are unaffected. Never start a
+// GATT service later in client mode: every open link would be sent Service
+// Changed.
+bool bleConsoleRegisterOnClientHost();
+// The console's side of every host teardown; only bluetoothHalDeinit() calls
+// them. Begin closes admission, ends every console session and drops the GATT
+// pointers before the host stops; End(stopped) frees the client-host state once
+// the stop is terminal (a failed stop keeps it, closed). Server mode is left
+// to deinitBluetooth().
+void bleConsoleHostTeardownBegin();
+void bleConsoleHostTeardownEnd(bool stopped);
 
 // Connection management
 bool isBLEConnected();
 // Close one app client by its BLE connection id. Peer links (G2 temples, R1 ring)
-// are refused; the slot is cleared later by onDisconnect.
+// are refused; the slot is cleared later by onDisconnect. A console on the phone
+// link (the G2 client host's slot, or the pipe's console row, whose id is its
+// blePipeConsoleRowId) ends its session instead, never a GATT close: the pipe
+// owns the link, and that console starts a fresh signed-out session.
 BleDisconnectResult bleDisconnectConnection(uint16_t connId);
-// Close every app client (never a peer link); returns the number of close requests issued.
+// Close every app client (never a peer link); returns the number of close
+// requests issued plus the phone link's console sessions ended.
 int bleDisconnectAppClients();
 
 // Console mirror / blesend: delivered as a directed notify (or the session's own
@@ -186,12 +269,59 @@ bool sendBLEResponseToSession(uint16_t connId,
                               TransportSessionEpoch expectedEpoch,
                               const char* data, size_t len, bool blocking = true);
 
+// broadcastOutputCore passes each line routed to Bluetooth. While cmd_exec runs
+// a command a Bluetooth session sent, the line goes to that session (batched,
+// before the command's result) unless the console mirror already streams to it;
+// any other caller is ignored.
+void bleCommandOutputLine(const char* text, size_t len);
+
 // Push one notification card to a specific authenticated session. The line is
 // framed as `#NOTIF {json}\n` — see the wire-format contract at the definition
 // in Bluetooth.cpp. Best-effort: returns false if the link is busy or gone.
 bool blePushNotification(uint16_t connId, TransportSessionEpoch expectedEpoch,
                          const char* kindName, const char* level,
                          const char* title, const char* msg, uint16_t durMs);
+
+// The session may receive confidential output (`fileread ... bin`, `otawrite
+// begin`): it holds an established Secure Channel, or it is a phone-link
+// console row (the pipe's authenticated encryption). epoch fences the check.
+bool bleSessionConfidential(uint16_t connId, TransportSessionEpoch epoch);
+// A raw binary body for one confidential session (`fileread ... bin`), fenced on
+// the command's epoch: a BLOB chain on a phone-link console row, one binary
+// Secure Channel message otherwise; never plaintext. cmd_exec, before the
+// command's result.
+bool bleSendBinaryToSession(uint16_t connId, TransportSessionEpoch epoch,
+                            const uint8_t* data, size_t len);
+#if ENABLE_BLE_PHONE_PIPE
+// Holder bit for gBLEState: the pipe takes it at start (before its owner lock)
+// and gives it back at stop or host teardown. The state is freed when no
+// holder (server, client-host console, pipe) is left.
+bool blePipeConsoleStateAcquire();
+void blePipeConsoleStateRelease();
+// Pipe task, owner mutex released: make a fresh, signed-out row for the
+// console stream (false: no state or no free row/transport slot), or end it.
+// End is idempotent and matches generation and stream.
+bool blePipeConsoleBind(uint32_t generation, uint16_t streamId, uint16_t linkConnId);
+void blePipeConsoleEnd(uint32_t generation, uint16_t streamId);
+// Leaf snapshot of the bound row; any task, never blocks.
+void blePipeConsoleIdentity(BlePipeConsoleIdentity* out);
+// cmd_exec: one COMMAND (0x81) or BINARY (0x82) record admitted by the
+// console driver, fenced on the epoch captured at its admission.
+void blePipeConsoleInbound(uint16_t rowConnId, TransportSessionEpoch epoch, uint8_t type,
+                           const uint8_t* bytes, size_t len);
+// The calling task holds the BLE lifecycle lock (never blocks; false before
+// the scheduler runs or the lock exists): a pipe-side write refuses then, as
+// the lock is never held with the pipe's locks.
+bool bleLifecycleHeldByCurrentTask();
+#else
+inline bool blePipeConsoleStateAcquire() { return false; }
+inline void blePipeConsoleStateRelease() {}
+inline bool blePipeConsoleBind(uint32_t, uint16_t, uint16_t) { return false; }
+inline void blePipeConsoleEnd(uint32_t, uint16_t) {}
+inline void blePipeConsoleIdentity(BlePipeConsoleIdentity* out) { if (out) *out = {}; }
+inline void blePipeConsoleInbound(uint16_t, TransportSessionEpoch, uint8_t, const uint8_t*, size_t) {}
+inline bool bleLifecycleHeldByCurrentTask() { return false; }
+#endif
 
 // BLE auth/session maintenance
 void bleClearConnectionByConnId(uint16_t connId);
@@ -249,6 +379,8 @@ enum class BleRoleTransition : uint8_t {
   PHONE_START,
   PHONE_STOP,
   RECOVERING,
+  STACK_UP,     // bleStackUp(): the shared central stack comes up (BLE_CentralStack.cpp)
+  STACK_DOWN,   // bleStackDown(): verified terminal teardown of the shared stack
 };
 bool bleRoleTransitionBegin(BleRoleTransition state);
 void bleRoleTransitionEnd();
@@ -258,6 +390,8 @@ bool bleRoleTransitionHeldByCurrentTask();
 // verified terminal state. Normal init paths must fail closed until reboot;
 // the recovery transaction clears it only after a fully verified re-init.
 bool bleStackLifecycleFaulted();
+// Main-loop recovery after bounded phone retirement fails; never from a BLE callback.
+void bleRecoverStuckPhone();
 void bleStackSetLifecycleFault(bool faulted);
 const char* getBLEStateString();
 // Shared bleinfo schema for CLI and web. Copies live connection fields into
@@ -277,6 +411,15 @@ const char* getBleModeString();
 // running regardless of which mode is active.
 bool bleSubsystemActive();
 const char* bleSubsystemStateString();
+// What the Bluetooth host is doing, for the status surfaces (`blestatus`'s
+// "Bluetooth:" line and JSON `host`, /api/ble/status `host`): "on" = a role
+// runs (the console server, or a device on the client stack); "idle" = the
+// client stack is up with no device open; "off" = verified stopped; "fault" =
+// a teardown did not complete (reboot required); "parked" = a host generation
+// is still up with no owner (teardown pending). `roleRunning` is the link
+// status's running role != Off, read by the caller under the lifecycle guard
+// (the owner flags are not re-read here, where the guard may be held).
+const char* bleHostStateWord(bool roleRunning);
 
 // =============================================================================
 // COMMAND REGISTRY
@@ -284,6 +427,13 @@ const char* bleSubsystemStateString();
 
 extern const CommandEntry bluetoothCommands[];
 extern const size_t bluetoothCommandsCount;
+#if ENABLE_BLE_PHONE_PIPE
+// `phone secret <passphrase|clear>`, a row of BLE_PhonePipe.cpp's phoneCommands.
+const char* phoneSecretCommand(const String& argsInput);
+// The `phone secret` steps (stop, key, store with the device-made mark, clear
+// the enrollment, persist), shared with `phone pair new`. nullptr when done.
+const char* phonePipeReplaceSecret(const char* value, size_t len, bool generated, bool* replaced);
+#endif
 
 // =============================================================================
 // SETTINGS ENTRIES
@@ -302,6 +452,19 @@ inline bool deinitBluetooth() { return true; }
 inline void bleSecurityBootNotice() {}
 inline bool startBLEAdvertising() { return false; }
 inline void stopBLEAdvertising() {}
+inline bool bleAdvertising() { return false; }
+inline bool bleServerUp() { return false; }
+struct BleConsoleView {
+  bool up = false, advertising = false;
+  uint8_t clients = 0;
+  bool signedIn = false;
+  bool registered = false, attachable = false, attached = false, secret = false;
+};
+inline BleConsoleView bleConsoleView() { return {}; }
+inline hw1console::Mode bleConsoleMode() { return hw1console::Mode::Off; }
+inline bool bleConsoleRegisterOnClientHost() { return false; }
+inline void bleConsoleHostTeardownBegin() {}
+inline void bleConsoleHostTeardownEnd(bool) {}
 inline bool isBLEConnected() { return false; }
 inline BleDisconnectResult bleDisconnectConnection(uint16_t) { return BleDisconnectResult::UNAVAILABLE; }
 inline int bleDisconnectAppClients() { return 0; }
@@ -309,9 +472,21 @@ inline bool sendBLEResponse(const char*, size_t, bool = true) { return false; }
 inline int bleMirrorRecipientCount() { return 0; }
 inline bool sendBLEResponseToSession(uint16_t, TransportSessionEpoch,
                                      const char*, size_t, bool = true) { return false; }
+inline void bleCommandOutputLine(const char*, size_t) {}
 inline bool blePushNotification(uint16_t, TransportSessionEpoch, const char*,
                                 const char*, const char*, const char*,
                                 uint16_t) { return false; }
+inline bool bleSessionConfidential(uint16_t, TransportSessionEpoch) { return false; }
+inline bool bleSendBinaryToSession(uint16_t, TransportSessionEpoch, const uint8_t*, size_t) {
+  return false;
+}
+inline bool blePipeConsoleStateAcquire() { return false; }
+inline void blePipeConsoleStateRelease() {}
+inline bool blePipeConsoleBind(uint32_t, uint16_t, uint16_t) { return false; }
+inline void blePipeConsoleEnd(uint32_t, uint16_t) {}
+inline void blePipeConsoleIdentity(BlePipeConsoleIdentity* out) { if (out) *out = {}; }
+inline void blePipeConsoleInbound(uint16_t, TransportSessionEpoch, uint8_t, const uint8_t*, size_t) {}
+inline bool bleLifecycleHeldByCurrentTask() { return false; }
 inline void bleClearConnectionByConnId(uint16_t) {}
 inline void bleSessionTick() {}
 inline bool bleHasAuthenticatedSession() { return false; }
@@ -328,6 +503,7 @@ inline bool isBluedroidHostEnabled() { return false; }
 inline bool isBleServerInitialized() { return false; }
 enum class BleRoleTransition : uint8_t {
   IDLE = 0, SERVER_START, SERVER_STOP, G2_START, G2_STOP, PHONE_START, PHONE_STOP, RECOVERING,
+  STACK_UP, STACK_DOWN,
 };
 inline bool bleRoleTransitionBegin(BleRoleTransition) { return false; }
 inline void bleRoleTransitionEnd() {}
@@ -340,6 +516,7 @@ inline bool buildBLEInfoJson(JsonObject) { return false; }
 inline const char* getBleModeString() { return "disabled"; }
 inline bool bleSubsystemActive() { return false; }
 inline const char* bleSubsystemStateString() { return "disabled"; }
+inline const char* bleHostStateWord(bool) { return "off"; }
 
 // Streaming API stubs
 inline bool blePushSensorData(const char*, size_t) { return false; }

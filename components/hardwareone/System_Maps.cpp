@@ -50,7 +50,7 @@
 // MapCore Static Member (works without GPS)
 // =============================================================================
 
-LoadedMap MapCore::_currentMap = {};
+EXT_RAM_BSS_ATTR LoadedMap MapCore::_currentMap = {};  // PSRAM: its constructor runs after PSRAM init, like _filename below
 LocationContext LocationContextManager::_context = {"", 0, MAP_FEATURE_HIGHWAY, "", 0, MAP_FEATURE_PARK, 0, 0, 0, false};
 
 float gMapRotation = 0.0f;  // Rotation angle in degrees

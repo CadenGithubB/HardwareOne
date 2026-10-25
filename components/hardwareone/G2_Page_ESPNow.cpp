@@ -253,9 +253,9 @@ void g2BuildESPNowAppInfo(char* out, size_t cap) {
 static void showMainMenu() {
   setSub(ESPN_APP_SUB_MAIN);
 
-  static char stateLine[40];
-  static char peersLine[32];
-  static char inboxLine[32];
+  EXT_RAM_BSS_ATTR static char stateLine[40];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char peersLine[32];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char inboxLine[32];  // PSRAM: deep-copied by g2ShowListPage
 
   snprintf(stateLine, sizeof(stateLine), "%s", phaseLabel(currentPhase()));
 
@@ -386,10 +386,10 @@ static void showPeerDetail() {
   }
   const EspNowDevice& d = gEspNow->devices[gSelectedPeer];
 
-  static char nameLine[40];
-  static char macLine[24];
-  static char pingLine[32];
-  static char msgsLine[32];
+  EXT_RAM_BSS_ATTR static char nameLine[40];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char macLine[24];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char pingLine[32];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char msgsLine[32];  // PSRAM: deep-copied by g2ShowListPage
 
   const char* nm =
       (d.friendlyName.length() > 0) ? d.friendlyName.c_str() :
@@ -584,7 +584,7 @@ static void showBondDetailMenu() {
     return;
   }
 
-  static char hdr[40];
+  EXT_RAM_BSS_ATTR static char hdr[40];  // PSRAM: deep-copied by g2ShowListPage
   EXT_RAM_BSS_ATTR static char body[200];
   const char* dn = (e->deviceName[0]) ? e->deviceName : "?";
   snprintf(hdr, sizeof(hdr), "%s - %s", dn, sensorTypeToString(e->sensorType));
@@ -927,6 +927,12 @@ static bool submitForgetSelectedPeer() {
   snprintf(line, sizeof(line),
            "espnowunpair %02X:%02X:%02X:%02X:%02X:%02X",
            d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
+  // Named for the log now (the device list changes once the unpair lands);
+  // the always-on line never carries the address.
+  char who[40];
+  snprintf(who, sizeof(who), "%s",
+           d.friendlyName.length() > 0 ? d.friendlyName.c_str() :
+           d.name.length()         > 0 ? d.name.c_str()         : "(peer)");
   G2CmdCookie cookie = buildCookie();
   // After unpair the selected index will point at a different (or removed)
   // peer, so the redraw target is the peers list, not peer-detail.
@@ -937,7 +943,7 @@ static bool submitForgetSelectedPeer() {
     showPeersMenu();
     return false;
   }
-  BROADCAST_PRINTF("[G2-ESP-NOW-APP] forget peer: %s", line + 13);
+  BROADCAST_PRINTF("[G2-ESP-NOW-APP] forget peer: %s", who);
   return true;
 }
 

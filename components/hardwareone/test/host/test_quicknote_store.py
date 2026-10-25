@@ -38,7 +38,7 @@ def main():
     args = parser.parse_args()
     component = args.component.resolve()
     policies = '\n'.join(clean((component / name).read_text()) for name in
-                         ('Transcript_PathPolicy.h', 'Transcription_UI_Policy.h', 'QuickNote_Policy.h'))
+                         ('Transcript_PathPolicy.h', 'Transcript_TextPolicy.h', 'Transcription_UI_Policy.h', 'QuickNote_Policy.h'))
     normalizer = function((component / 'System_Filesystem.cpp').read_text(), 'bool normalizeFsPath(')
     store = (clean((component / 'QuickNote_Store.h').read_text()) +
              clean((component / 'QuickNote_Store.cpp').read_text()))

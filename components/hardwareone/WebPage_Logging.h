@@ -421,6 +421,10 @@ window.onload = function() {
     // Dedicated status endpoint (replaces CLI batch so guests can load the page)
     hw.fetchJSON('/api/logging/status')
     .then(function(data) {
+      if (data && data.systemLog) {  // saved options; admins only
+        gSysLogSaved = data.systemLog;
+        applySavedSystemLogConfig();
+      }
       if (!data || !Array.isArray(data.results) || data.results.length < 3) {
         console.warn('[LOGGING] Status response invalid, falling back to individual requests');
         generateDefaultFilename();
@@ -945,32 +949,50 @@ async function stopSystemLogging() {
   });
 }
 
+// Save the categories and tags through their set-commands in one settings
+// write. `systemlogflags` also applies the categories live; `logcategorytags`
+// and the file path take effect at the next start.
 function applySystemConfig() {
   console.log('[LOGGING] applySystemConfig called');
-  
-  // Get selected debug flags
-  const flags = [];
+  const status = hw.$('sys-config-status');
+
+  // Combined flag value (BigInt required for flags > bit 31)
+  let flagValue = BigInt(0);
   hw.qsa('#sys-flags-pane input[type="checkbox"]:checked').forEach(cb => {
-    flags.push(cb.value);
+    flagValue |= BigInt(cb.value);
   });
-  
-  if (flags.length === 0) {
-    hw.$('sys-config-status').textContent = 'Warning: No debug categories selected. No messages will be logged.';
-    hw.$('sys-config-status').style.color = '#ffc107';
+
+  if (flagValue === BigInt(0)) {
+    status.textContent = 'Warning: No debug categories selected. No messages will be logged.';
+    status.style.color = '#ffc107';
     return;
   }
-  
-  // Calculate combined flag value (BigInt required for flags > bit 31)
-  let flagValue = BigInt(0);
-  flags.forEach(f => {
-    flagValue |= BigInt(f);
+
+  const categoryTags = hw.$('sys-config-tags').checked ? 1 : 0;
+  console.log('[LOGGING] Saving debug flags', '0x' + flagValue.toString(16), 'tags', categoryTags);
+  status.textContent = 'Saving...';
+  status.style.color = 'var(--accent)';
+  hw.postJSON('/api/cli/batch', {commands: [
+    'beginwrite',
+    'systemlogflags 0x' + flagValue.toString(16),
+    'logcategorytags ' + categoryTags,
+    'savesettings'
+  ]})
+  .then(data => {
+    const results = (data && Array.isArray(data.results)) ? data.results : [];
+    const refused = results.find(r => /^(?:Error|Failed)/i.test(String(r || '')));
+    if (refused || !(data && data.ok)) {
+      throw new Error(refused || (data && data.error) || 'settings were not saved');
+    }
+    gSysLogSaved = {tags: categoryTags === 1, flags: '0x' + flagValue.toString(16)};
+    status.textContent = 'Saved. Categories apply now; tags and the file path apply when logging starts.';
+    status.style.color = 'var(--success)';
+  })
+  .catch(e => {
+    console.error('[LOGGING] Save system config error:', e);
+    status.textContent = /^error/i.test(e.message) ? e.message : 'Error: ' + e.message;
+    status.style.color = 'var(--danger)';
   });
-  
-  console.log('[LOGGING] Setting debug flags to:', '0x' + flagValue.toString(16));
-  
-  // Store for use when starting logging
-  hw.$('sys-config-status').textContent = 'Configuration saved. Click "Start System Logging" to apply with these flags.';
-  hw.$('sys-config-status').style.color = 'var(--success)';
 }
 
 function selectAllFlags() {
@@ -998,6 +1020,30 @@ function selectNoFlags() {
 // but still feed the tag->bank colour map. gFlagBankByTag is consumed by
 // getCategoryColor() to colour the log viewer by family bank.
 var gFlagBankByTag = {};
+
+// Saved System Logging options from /api/logging/status ({tags, flags}, with
+// flags as formatSystemLogFlags prints them: 0xW3:W2:W1:W0, each word 16 hex
+// digits). The grid and the status arrive separately, so whichever lands
+// second ticks the boxes.
+var gSysLogSaved = null;
+
+function parseSavedSystemLogFlags(text) {
+  try {
+    return BigInt('0x' + String(text).replace(/^0x/i, '').replace(/:/g, ''));
+  } catch (e) {
+    return null;
+  }
+}
+
+function applySavedSystemLogConfig() {
+  if (!gSysLogSaved) return;
+  hw.$('sys-config-tags').checked = !!gSysLogSaved.tags;
+  const mask = parseSavedSystemLogFlags(gSysLogSaved.flags);
+  if (mask === null) return;
+  hw.qsa('#sys-flags-pane input[type="checkbox"]').forEach(cb => {
+    cb.checked = (mask & BigInt(cb.value)) !== BigInt(0);
+  });
+}
 // Brand colours for the named non-CORE families; any bank not listed here (the
 // individual sensor banks) gets a stable hashed hue in getCategoryColor().
 var gBankColor = {
@@ -1042,6 +1088,7 @@ function populateFlagsPane() {
              +  '</label>';
       });
       pane.innerHTML = html;
+      applySavedSystemLogConfig();
     })
     .catch(function(e) {
       console.error('[LOGGING] Failed to load debug flags:', e);

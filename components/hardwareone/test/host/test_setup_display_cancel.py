@@ -64,7 +64,10 @@ def generate(component: Path = COMPONENT) -> str:
     harness = (HERE / "setup_display_cancel_harness.cpp").read_text()
     for marker, replacement in (("// INSERT_TYPES", types), ("// INSERT_TIMEOUT_STATE", state),
                                 ("// INSERT_TIMEOUT_FUNCTIONS", time_functions),
-                                ("// INSERT_PRODUCTION", functions)):
+                                ("// INSERT_PRODUCTION", (
+                                    (component / "OLED_Layout.h").read_text().replace("#pragma once", "") + "\n" +
+                                    extract_block((component / "OLED_Utils.h").read_text(), "inline constexpr int oledVisibleRows(") + "\n"
+                                    if (component / "OLED_Layout.h").exists() else "") + functions)):
         require(harness.count(marker) == 1, f"bad harness marker: {marker}")
         harness = harness.replace(marker, replacement)
     return harness

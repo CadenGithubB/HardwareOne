@@ -463,6 +463,14 @@ esp_err_t esp_now_hosted_slave_init(void)
      * reference from a linker-rooted function keeps section garbage
      * collection from dropping it too. */
     __asm__ __volatile__("" : : "r"(esp_now_hosted_bridge_marker) : "memory");
+    /* The pinned Hosted slave logs three INFO lines under "slave_rpc" for every
+     * host RPC (received, supported, response id). The P4 mirrors this console
+     * as "C6>" lines and polls Wi-Fi state, so they buried everything else.
+     * Its warnings and errors stay. The tag's few lifecycle INFO lines (OTA
+     * progress, heartbeat timer, ESPInit, Wi-Fi event forwarding) go with them;
+     * c6update reports OTA progress on the P4. Safe before the scheduler
+     * starts: the log lock is a no-op then and the heap is up. */
+    esp_log_level_set("slave_rpc", ESP_LOG_WARN);
     esp_err_t err = esp_hosted_register_custom_callback(ESP_NOW_HOSTED_MSG_REQ, slave_req_cb, NULL);
     if (err != ESP_OK) ESP_LOGE(TAG, "CustomRpc handler registration failed: %s", esp_err_to_name(err));
     else ESP_LOGI(TAG, "HardwareOne ESP-NOW bridge registered; awaiting host init");

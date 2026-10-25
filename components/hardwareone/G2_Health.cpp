@@ -132,6 +132,12 @@ struct PendingHistorySession {
   bool activityPending;
   bool sleepPending;
   R1HealthSleepState sleepState;
+  // Typed sleep records accepted for this sweep's day (2.3.2).
+  bool sleepRecordsPending;
+  // A page from a day newer than this sweep's key was refused: the ring still
+  // holds newer days, so an explicit poll can run another sweep for them.
+  bool newerDayRefused;
+  R1HealthSleepDay sleepRecords;
   R1CommonDailyResult heartRate;
   R1HrvDailyResult hrv;
   R1CommonDailyResult spo2;
@@ -143,6 +149,8 @@ struct PendingHistorySession {
 // open failure that outlasts the retries) ends that sweep after this many tries.
 static constexpr uint32_t kHistoryLoadRetryMs = 5000;
 static constexpr uint8_t kHistoryLoadMaxAttempts = 12;
+// Set when a finished sweep refused a newer day (see g2HealthHistoryBacklogPending).
+static std::atomic<bool> sHistoryBacklogPending{false};
 
 EXT_RAM_BSS_ATTR static PendingHistorySession sPendingHistory;
 
@@ -573,6 +581,8 @@ static R1HealthHistoryLayout historyLayoutForProfile(
   switch (profile) {
     case R1_PROFILE_FW_2_2_7_0005:
     case R1_PROFILE_FW_2_2_9_0003:
+    case R1_PROFILE_FW_2_3_2_0007:
+    case R1_PROFILE_FW_2_3_2_0008:
       return R1_HISTORY_LAYOUT_DAILY_V1;
     default:
       return R1_HISTORY_LAYOUT_UNKNOWN;
@@ -594,9 +604,23 @@ static bool pendingKeyAcceptLocked(R1HealthHistoryLayout layout,
     sPendingHistory.loadError = R1_HISTORY_STORE_OK;
     return true;
   }
-  return sPendingHistory.layout == static_cast<uint8_t>(layout) &&
-         sPendingHistory.dayStart == dayStart &&
-         sPendingHistory.timezoneMinutes == timezoneMinutes;
+  const bool matches = sPendingHistory.layout == static_cast<uint8_t>(layout) &&
+                       sPendingHistory.dayStart == dayStart &&
+                       sPendingHistory.timezoneMinutes == timezoneMinutes;
+  if (!matches && sPendingHistory.layout == static_cast<uint8_t>(layout) &&
+      sPendingHistory.timezoneMinutes == timezoneMinutes &&
+      dayStart > sPendingHistory.dayStart) {
+    sPendingHistory.newerDayRefused = true;
+  }
+  return matches;
+}
+
+// On 2.3.2.0008 every backlog page repeats the ring-wide newest sample. That
+// sample belongs to a day's record only when it falls inside the day; 2.2.x
+// latest stamps always do.
+static bool latestInDay(uint32_t ts, uint32_t dayStart) {
+  return ts != 0 && ts >= dayStart &&
+         static_cast<uint64_t>(ts) < static_cast<uint64_t>(dayStart) + 86400u;
 }
 
 template <typename Result>
@@ -614,7 +638,7 @@ static void mergePendingHourlyResult(Result& dst, const Result& incoming,
   dst.dayMode = incoming.dayMode;
   dst.dayStart = incoming.dayStart;
   dst.trailer = incoming.trailer;
-  if (incoming.latestTimestamp != 0 &&
+  if (latestInDay(incoming.latestTimestamp, incoming.dayStart) &&
       (dst.latestTimestamp == 0 ||
        incoming.latestTimestamp >= dst.latestTimestamp)) {
     dst.latestTimestampMode = incoming.latestTimestampMode;
@@ -728,12 +752,73 @@ bool g2HealthApplyActivityDaily(const R1ActivityDailyResult& result) {
   return true;
 }
 
+// Insert or replace (same start) keeping records ascending by start. A full
+// day keeps its newest periods.
+static void mergeSleepRecord(R1HealthSleepDay& day,
+                             const R1HealthSleepRecord& record) {
+  uint8_t at = 0;
+  while (at < day.count && day.records[at].startEpoch < record.startEpoch) ++at;
+  if (at < day.count && day.records[at].startEpoch == record.startEpoch) {
+    day.records[at] = record;
+    return;
+  }
+  if (day.count >= R1_HEALTH_SLEEP_MAX_RECORDS) {
+    if (at == 0) return;  // older than everything kept
+    memmove(&day.records[0], &day.records[1],
+            sizeof(day.records[0]) * (size_t)(at - 1));
+    day.records[at - 1] = record;
+    return;
+  }
+  memmove(&day.records[at + 1], &day.records[at],
+          sizeof(day.records[0]) * (size_t)(day.count - at));
+  day.records[at] = record;
+  ++day.count;
+}
+
+// Local midnight (expressed as UTC) of the day a period ends on, in the
+// record's own timezone, which is the same key form the daily pages use.
+static uint32_t sleepRecordDayStart(uint32_t endEpoch, int16_t timezoneMinutes) {
+  const int64_t localEnd = static_cast<int64_t>(endEpoch) +
+                           static_cast<int64_t>(timezoneMinutes) * 60;
+  const int64_t localDay = localEnd - (localEnd % 86400);
+  const int64_t dayStart = localDay - static_cast<int64_t>(timezoneMinutes) * 60;
+  return dayStart > 0 && dayStart < 0xFFFFFFFFLL
+      ? static_cast<uint32_t>(dayStart) : 0;
+}
+
+bool g2HealthApplySleepDaily(const R1SleepDailyResult& result) {
+  if (!r1ProfileSupportsSleepRecords(result.profile) || !result.anchored) {
+    return false;
+  }
+  R1HealthSleepRecord record{};
+  record.type = result.type;
+  record.timezoneMinutes = result.timezoneMinutes;
+  record.startEpoch = result.startEpoch;
+  record.endEpoch = result.endEpoch;
+  record.stageCount = result.stageCount;
+  for (size_t i = 0; i < R1_HEALTH_SLEEP_STAGES; ++i) {
+    record.stageEpochs[i] = result.stageEpochs[i];
+  }
+  record.sourceSerial = result.sourceSerial;
+  record.sourceCrc32 = result.sourceCrc32;
+  const uint32_t dayStart = sleepRecordDayStart(result.endEpoch,
+                                                result.timezoneMinutes);
+  if (!r1HealthSleepRecordValid(record, dayStart)) return false;
+  HistoryLock lock(false);
+  if (!lock.locked() ||
+      !pendingKeyAcceptLocked(historyLayoutForProfile(result.profile),
+                              dayStart, result.timezoneMinutes)) return false;
+  mergeSleepRecord(sPendingHistory.sleepRecords, record);
+  sPendingHistory.sleepRecordsPending = true;
+  return true;
+}
+
 static void applyCommonToDayLocked(const R1CommonDailyResult& result) {
   R1HealthHourlyMetricDay* metric = result.metric == R1_DAILY_METRIC_HEART_RATE
       ? &sHistoryDay.heartRate : &sHistoryDay.spo2;
   metric->sourceSerial = result.sourceSerial;
   metric->sourceCrc32 = result.sourceCrc32;
-  if (result.latestTimestamp != 0 &&
+  if (latestInDay(result.latestTimestamp, result.dayStart) &&
       (!metric->latestValid ||
        result.latestTimestamp >= metric->latestTimestamp)) {
     metric->latestValid = true;
@@ -761,7 +846,7 @@ static void applyHrvToDayLocked(const R1HrvDailyResult& result) {
   R1HealthHourlyMetricDay& metric = sHistoryDay.hrv;
   metric.sourceSerial = result.sourceSerial;
   metric.sourceCrc32 = result.sourceCrc32;
-  if (result.latestTimestamp != 0 &&
+  if (latestInDay(result.latestTimestamp, result.dayStart) &&
       (!metric.latestValid || result.latestTimestamp >= metric.latestTimestamp)) {
     metric.latestValid = true;
     metric.latestTimestamp = result.latestTimestamp;
@@ -845,7 +930,8 @@ static void rebuildOneTrendLocked(const R1HealthHourlyMetricDay& source,
   }
   meta.have = meta.count != 0;
   meta.avg = meta.count ? static_cast<int16_t>(sum / meta.count) : 0;
-  if (source.latestValid && source.latestTimestamp > meta.endTs)
+  if (source.latestValid && source.latestTimestamp > meta.endTs &&
+      source.latestTimestamp < dayEnd)
     meta.endTs = source.latestTimestamp;
 }
 
@@ -884,6 +970,7 @@ void g2HealthResetLiveTelemetry(void) {
 static void historyResetForPeerSwitchLocked() {
   r1HealthHistoryDayClear(sHistoryDay);
   memset(&sPendingHistory, 0, sizeof(sPendingHistory));
+  sHistoryBacklogPending.store(false, std::memory_order_release);
   sHistoryLoadedExact = false;
   sHistoryUiFetchState = R1_HISTORY_FETCH_IDLE;
   sHistoryUiFetchError = 0;
@@ -922,7 +1009,8 @@ void g2HealthHistoryFetchStarted(void) {
   const bool priorUncommitted = sHistoryDirty.load(std::memory_order_acquire) ||
       sPendingHistory.terminalPending || sPendingHistory.heartRatePending ||
       sPendingHistory.hrvPending || sPendingHistory.spo2Pending ||
-      sPendingHistory.activityPending || sPendingHistory.sleepPending;
+      sPendingHistory.activityPending || sPendingHistory.sleepPending ||
+      sPendingHistory.sleepRecordsPending;
   if (priorUncommitted) {
     // Preserve the older terminal/pending generation. This transport sweep is
     // intentionally ignored; the user can refresh again after persistence.
@@ -946,6 +1034,9 @@ void g2HealthHistoryFetchFinished(bool successfulSweep, uint8_t errorCode) {
   }
   sPendingHistory.active = false;
   sTypedHistoryFetchActive.store(false, std::memory_order_release);
+  sHistoryBacklogPending.store(
+      sPendingHistory.keyKnown && sPendingHistory.newerDayRefused,
+      std::memory_order_release);
   if (!sPendingHistory.keyKnown) {
     sHistoryUiFetchState = successfulSweep ? R1_HISTORY_PARTIAL : R1_HISTORY_ERROR;
     sHistoryUiFetchError = errorCode;
@@ -968,6 +1059,20 @@ void g2HealthHistorySetSleepState(R1HealthSleepState state) {
   if (!lock.locked() || !sPendingHistory.active) return;
   sPendingHistory.sleepPending = true;
   sPendingHistory.sleepState = state;
+}
+
+bool g2HealthHistoryBacklogPending(void) {
+  return sHistoryBacklogPending.load(std::memory_order_acquire);
+}
+
+bool g2HealthHistoryReadyForFetch(void) {
+  HistoryLock lock(false);
+  if (!lock.locked()) return false;
+  return !sHistoryDirty.load(std::memory_order_acquire) &&
+         !sPendingHistory.active && !sPendingHistory.terminalPending &&
+         !sPendingHistory.heartRatePending && !sPendingHistory.hrvPending &&
+         !sPendingHistory.spo2Pending && !sPendingHistory.activityPending &&
+         !sPendingHistory.sleepPending && !sPendingHistory.sleepRecordsPending;
 }
 
 static bool historyKeyMatchesLocked(uint8_t layout, uint32_t dayStart,
@@ -1075,9 +1180,23 @@ static void processPendingHistoryMainTask() {
       sPendingHistory.activityPending = false;
       modelChanged = true;
     }
+    if (sPendingHistory.sleepRecordsPending) {
+      for (uint8_t i = 0; i < sPendingHistory.sleepRecords.count; ++i) {
+        mergeSleepRecord(sHistoryDay.sleep, sPendingHistory.sleepRecords.records[i]);
+      }
+      sPendingHistory.sleepRecordsPending = false;
+      modelChanged = true;
+    }
     if (sPendingHistory.sleepPending) {
-      sHistoryDay.sleepState = sPendingHistory.sleepState;
+      // An empty sleep answer never hides records the day already holds.
+      sHistoryDay.sleepState = sHistoryDay.sleep.count != 0
+          ? R1_HISTORY_SLEEP_PRESENT : sPendingHistory.sleepState;
       sPendingHistory.sleepPending = false;
+      modelChanged = true;
+    }
+    if (sHistoryDay.sleep.count != 0 &&
+        sHistoryDay.sleepState != R1_HISTORY_SLEEP_PRESENT) {
+      sHistoryDay.sleepState = R1_HISTORY_SLEEP_PRESENT;
       modelChanged = true;
     }
     if (sPendingHistory.active) sHistoryDay.fetchState = R1_HISTORY_FETCHING;
@@ -1149,6 +1268,7 @@ void g2HealthHistoryGetSummary(G2HealthHistorySummary& out) {
   out.fetchError = sHistoryUiFetchError;
   out.sleepState = sHistoryDay.sleepState;
   r1HealthHistoryActivitySummary(sHistoryDay, out.activity);
+  r1HealthHistorySleepSummary(sHistoryDay, out.sleep);
 }
 
 void g2HealthActivitySummary(R1HealthActivitySummary& out) {
@@ -1257,6 +1377,7 @@ const char* const* g2HealthMenuRows(size_t* count) {
     "<- Apps",
     "Overview",
     "Activity",
+    "Sleep",
     "Trends",
     "Heart Rate",
     "HRV",
@@ -1270,6 +1391,7 @@ const char* const* g2HealthMenuRows(size_t* count) {
     "<- Apps",
     "Overview",
     "Activity",
+    "Sleep",
     "Trends",
     "Heart Rate",
     "HRV",
@@ -1302,7 +1424,8 @@ bool g2HealthInTrendsNav(void) { return sNav == HEALTH_NAV_TRENDS; }
 
 bool g2HealthWantTextOnlyShape(void) {
   return sSelected == HEALTH_METRIC_OVERVIEW ||
-         sSelected == HEALTH_METRIC_ACTIVITY;
+         sSelected == HEALTH_METRIC_ACTIVITY ||
+         sSelected == HEALTH_METRIC_SLEEP;
 }
 
 bool g2HealthLoggingIsActive(void) {
@@ -1406,8 +1529,8 @@ void g2HealthAction(uint32_t rowIdx) {
     return;
   }
 
-  // MAIN: 0 Back (worker) · 1 Overview · 2 Activity · 3 Trends · 4 HR ·
-  // 5 HRV · 6 SpO2 · 7 Temp · 8 Bat · 9 Poll · 10 Health Logging
+  // MAIN: 0 Back (worker) · 1 Overview · 2 Activity · 3 Sleep · 4 Trends ·
+  // 5 HR · 6 HRV · 7 SpO2 · 8 Temp · 9 Bat · 10 Poll · 11 Health Logging
   switch (rowIdx) {
     case 1:
       sSelected = HEALTH_METRIC_OVERVIEW;
@@ -1423,33 +1546,39 @@ void g2HealthAction(uint32_t rowIdx) {
       requestHistoryRefresh(false);
       break;
     case 3:
+      sSelected = HEALTH_METRIC_SLEEP;
+      g2HealthClearGraphPush();
+      // Sleep records arrive with the typed daily sweep, like Activity.
+      requestHistoryRefresh(false);
+      break;
+    case 4:
       enterTrendsNav();
       DEBUG_G2_PAGESF("[HEALTH] → Trends");
       break;
-    case 4:
+    case 5:
       sSelected = HEALTH_METRIC_HR;
       requestHistoryRefresh(false);
       g2HealthArmGraphPush(1200);
       break;
-    case 5:
+    case 6:
       sSelected = HEALTH_METRIC_HRV;
       requestHistoryRefresh(false);
       g2HealthArmGraphPush(1200);
       break;
-    case 6:
+    case 7:
       sSelected = HEALTH_METRIC_SPO2;
       requestHistoryRefresh(false);
       g2HealthArmGraphPush(1200);
       break;
-    case 7:
+    case 8:
       sSelected = HEALTH_METRIC_TEMP;
       g2HealthArmGraphPush(1200);
       break;
-    case 8:
+    case 9:
       sSelected = HEALTH_METRIC_BATTERY;
       g2HealthArmGraphPush(400);  // no daily for battery
       break;
-    case 9:
+    case 10:
       if (!g2RingHealthPageRefreshSupported()) {
         g2HealthNotePollUnsupported();
         DEBUG_RING_HEALTHF(
@@ -1461,7 +1590,7 @@ void g2HealthAction(uint32_t rowIdx) {
       // sweep and deviceStatus read. Do not also arm the normal throttled lane.
       DEBUG_RING_HEALTHF("[HEALTH] Poll Now requested");
       break;
-    case 10: {
+    case 11: {
       sLoggingToggleRequest = true;
       break;
     }
@@ -1951,11 +2080,10 @@ static void fmtTempAge(char* out, size_t cap, bool valid, int16_t tenths,
   else        snprintf(out, cap, "%s", base);
 }
 
-static const char* wearLabel(const G2RingTelemetry& t) {
-  if (!t.wearValid) return "Wear --";
-  if (t.wear == 2) return "Wear on";
-  if (t.wear == 1) return "Wear off";
-  return "Wear ?";
+// "Wear on" / "Wear off" / "Wear maybe" / "Wear ?" / "Wear --".
+static const char* wearLabel(const G2RingTelemetry& t, char* buf, size_t cap) {
+  snprintf(buf, cap, "Wear %s", g2RingWearName(t.wearValid, t.wear));
+  return buf;
 }
 
 void g2HealthBuildOverviewText(char* out, size_t cap) {
@@ -1980,15 +2108,18 @@ void g2HealthBuildOverviewText(char* out, size_t cap) {
   fmtAge(age, sizeof(age), freshestVitalAge(t));
 
   const char* logging = g2HealthLoggingStatusLine();
+  char wear[16];
   char status[48];
   if (poll && poll[0]) {
     snprintf(status, sizeof(status), "%s", poll);
   } else if (logging) {
     snprintf(status, sizeof(status), "%s", logging);
   } else if (age[0]) {
-    snprintf(status, sizeof(status), "%s · %s · %s", wearLabel(t), track, age);
+    snprintf(status, sizeof(status), "%s · %s · %s",
+             wearLabel(t, wear, sizeof(wear)), track, age);
   } else {
-    snprintf(status, sizeof(status), "%s · %s", wearLabel(t), track);
+    snprintf(status, sizeof(status), "%s · %s",
+             wearLabel(t, wear, sizeof(wear)), track);
   }
 
   char hr[20], hrv[20], spo2[20], temp[20], bat[20];
@@ -2000,6 +2131,10 @@ void g2HealthBuildOverviewText(char* out, size_t cap) {
                 (int)(t.tempTenths / 10),
                 (int)(t.tempTenths < 0 ? -(t.tempTenths % 10) : (t.tempTenths % 10)));
   fmtVal(bat,  sizeof(bat),  t.batteryValid, t.battery, "%");
+  if (t.chargeValid && (t.charge == 1 || t.charge == 3)) {
+    const size_t used = strlen(bat);
+    snprintf(bat + used, sizeof(bat) - used, t.charge == 1 ? " chg" : " full");
+  }
 
   snprintf(out, cap,
            "HR   %s\n"
@@ -2476,9 +2611,75 @@ static void g2HealthBuildActivityText(char* out, size_t cap) {
            summary.fullDayVerified ? "Message verified" : "Unverified");
 }
 
+// "7h05" style for a whole-minute duration.
+static void fmtSleepDuration(char* out, size_t cap, uint32_t seconds) {
+  const uint32_t minutes = seconds / 60u;
+  snprintf(out, cap, "%luh%02lu", static_cast<unsigned long>(minutes / 60u),
+           static_cast<unsigned long>(minutes % 60u));
+}
+
+// Local "HH:MM" of an epoch in the record's own timezone.
+static void fmtSleepClock(char* out, size_t cap, uint32_t epoch,
+                          int16_t timezoneMinutes) {
+  const int64_t local = static_cast<int64_t>(epoch) +
+                        static_cast<int64_t>(timezoneMinutes) * 60;
+  const uint32_t secondsOfDay = static_cast<uint32_t>(((local % 86400) + 86400) % 86400);
+  snprintf(out, cap, "%02lu:%02lu",
+           static_cast<unsigned long>(secondsOfDay / 3600u),
+           static_cast<unsigned long>((secondsOfDay % 3600u) / 60u));
+}
+
+static void g2HealthBuildSleepText(char* out, size_t cap) {
+  if (!out || !cap) return;
+  G2HealthHistorySummary history{};
+  g2HealthHistoryGetSummary(history);
+  if (!history.available || history.dayStart == 0) {
+    if (!g2RingIsConnected()) {
+      snprintf(out, cap, "Sleep\nRing offline\nPair via BT / R1");
+    } else if (history.fetchState == R1_HISTORY_FETCHING) {
+      snprintf(out, cap, "Sleep\nFetching history...\nPlease wait");
+    } else {
+      snprintf(out, cap, "Sleep\nNo sleep loaded yet\n%s",
+               g2RingHealthPageRefreshSupported() ? "Tap Poll Now"
+                                                  : "Poll unsupported");
+    }
+    return;
+  }
+  char dayLabel[16];
+  fmtTrendDayLabel(dayLabel, sizeof(dayLabel), history.dayStart);
+  const R1HealthSleepSummary& sleep = history.sleep;
+  if (!sleep.available) {
+    snprintf(out, cap, "Sleep (%s)\n%s\nHistory: %s", dayLabel,
+             history.sleepState == R1_HISTORY_SLEEP_EMPTY
+                 ? "No sleep recorded"
+                 : (g2RingSleepRecordsSupported() ? "No sleep page yet"
+                                                  : "Sleep not supported"),
+             r1HealthHistoryFetchStateName(history.fetchState));
+    return;
+  }
+  char asleep[12], from[8], to[8], deep[12], rem[12], light[12], awake[12];
+  fmtSleepDuration(asleep, sizeof(asleep), sleep.asleepSeconds);
+  fmtSleepClock(from, sizeof(from), sleep.firstStartEpoch, sleep.timezoneMinutes);
+  fmtSleepClock(to, sizeof(to), sleep.lastEndEpoch, sleep.timezoneMinutes);
+  fmtSleepDuration(deep, sizeof(deep), sleep.stageSeconds[R1_SLEEP_STAGE_DEEP]);
+  fmtSleepDuration(rem, sizeof(rem), sleep.stageSeconds[R1_SLEEP_STAGE_REM]);
+  fmtSleepDuration(light, sizeof(light), sleep.stageSeconds[R1_SLEEP_STAGE_LIGHT]);
+  fmtSleepDuration(awake, sizeof(awake), sleep.stageSeconds[R1_SLEEP_STAGE_AWAKE]);
+  snprintf(out, cap,
+           "Sleep (%s)\n"
+           "%s asleep, %u period%s\n"
+           "%s -> %s\n"
+           "Deep %s  REM %s\n"
+           "Light %s  Awake %s",
+           dayLabel, asleep, static_cast<unsigned>(sleep.count),
+           sleep.count == 1 ? "" : "s", from, to, deep, rem, light, awake);
+}
+
 void g2HealthBuildTextOnly(char* out, size_t cap) {
   if (sSelected == HEALTH_METRIC_ACTIVITY) {
     g2HealthBuildActivityText(out, cap);
+  } else if (sSelected == HEALTH_METRIC_SLEEP) {
+    g2HealthBuildSleepText(out, cap);
   } else if (sNav == HEALTH_NAV_TRENDS) {
     g2HealthBuildTrendsOverviewText(out, cap);
   } else {
@@ -2716,6 +2917,7 @@ void g2HealthBuildInfo(char* out, size_t cap) {
   G2RingTelemetry t;
   g2RingGetTelemetry(t);
   char temp[12];
+  char wear[16];
   if (!t.tempValid) snprintf(temp, sizeof(temp), "?");
   else snprintf(temp, sizeof(temp), "%d.%d",
                 (int)(t.tempTenths / 10),
@@ -2736,7 +2938,7 @@ void g2HealthBuildInfo(char* out, size_t cap) {
            t.spo2Valid ? "" : "?", (unsigned)t.spo2,
            temp,
            t.batteryValid ? "" : "?", (unsigned)t.battery,
-           wearLabel(t),
+           wearLabel(t, wear, sizeof(wear)),
            (unsigned)hrCount, (unsigned)hrvCount,
            (unsigned)spo2Count, (unsigned)tempCount, (unsigned)batCount);
 }

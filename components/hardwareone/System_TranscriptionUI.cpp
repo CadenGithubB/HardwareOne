@@ -7,6 +7,9 @@
 #include "System_Filesystem.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
+#if ENABLE_LOCAL_STT
+#include "System_STTVocabulary.h"
+#endif
 #include "System_Utils.h"
 #include "System_VFS.h"
 #include "Transcription_UI_Policy.h"
@@ -112,12 +115,31 @@ const char* commandSession(const String& input) {
       doc["available"] = available; doc["sttText"] = text;
       doc["sequence"] = receipt.sequence; doc["offset"] = receipt.offset;
       doc["length"] = receipt.length;
+#if ENABLE_LOCAL_STT
+      // The display copy (System_STTVocabulary.h): the receipt above still
+      // names the raw bytes, which is what the renderer acknowledges. The
+      // session's first words start its paragraph; later casing is the
+      // renderer's (speaker turns on the glasses).
+      char display[2 * DICTATION_MAX_TEXT + 1]{};
+      if (available && sttFormatDisplay(text, receipt.sequence == 1 && receipt.offset == 0, display, sizeof(display)))
+        doc["display"] = display;
+      TranscriptionUI::clear(display, sizeof(display));
+#endif
       TranscriptionUI::clear(text, sizeof(text));
       // Live mode: provisional words still being spoken (same private reply).
       uint32_t draftVersion = 0;
       if (dictationAppPeekDraft(lease, text, sizeof(text), &draftVersion)) {
-        doc["draft"] = text; doc["draftVersion"] = draftVersion;
+#if ENABLE_LOCAL_STT
+        // A draft has no receipt, so its display copy may replace it outright.
+        if (sttFormatDisplay(text, false, display, sizeof(display))) doc["draft"] = display;
+        else
+#endif
+        doc["draft"] = text;
+        doc["draftVersion"] = draftVersion;
       }
+#if ENABLE_LOCAL_STT
+      TranscriptionUI::clear(display, sizeof(display));
+#endif
       TranscriptionUI::clear(text, sizeof(text));
       STTSpeakerSnapshot speakers;
       if (dictationAppReadSpeakers(lease, &speakers)) {

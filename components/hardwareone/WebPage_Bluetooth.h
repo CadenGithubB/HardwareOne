@@ -8,6 +8,14 @@
 #include <esp_http_server.h>
 #endif
 
+// Phone relay pipe parts of the page script. Builds without the pipe get "",
+// so their page and image size are unchanged.
+#if ENABLE_BLUETOOTH && ENABLE_BLE_PHONE_PIPE
+#define BT_PHONE_JS(text) text
+#else
+#define BT_PHONE_JS(text) ""
+#endif
+
 // Registration function - registers /bluetooth URI handler
 #if ENABLE_HTTP_SERVER
 void registerBluetoothHandlers(httpd_handle_t server);
@@ -48,6 +56,8 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 .bt-header-left{display:flex;align-items:center;gap:10px}
 .bt-header-title{font-size:1.15em;font-weight:700;color:var(--panel-fg)}
 .bt-header-right{display:flex;gap:6px;flex-wrap:wrap}
+.bt-header-link{font-size:.85em;color:var(--muted);margin-top:6px}
+.bt-header-roles{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 .bt-header-status{font-family:'Courier New',monospace;font-size:.85em;color:var(--muted);line-height:1.35;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);white-space:pre-line;display:none}
 .bt-not-init{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 20px;text-align:center;background:var(--panel-bg);border:1px solid var(--border);border-radius:10px;margin-bottom:16px}
 .bt-not-init h3{color:var(--panel-fg);margin-bottom:6px;font-size:1.1em}
@@ -104,9 +114,10 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 
 #if ENABLE_G2_GLASSES
   // The mode toggle only makes sense in builds that actually include the G2
-  // client — otherwise there's no second role to switch to.
+  // client — otherwise there's no second role to switch to. It names and
+  // switches the saved mode; the pill beside the title shows what runs now.
   httpd_resp_send_chunk(req, R"HTML(
-      <button class='btn' id='btn-bt-mode' title='Switch BLE role (server phone-peripheral vs. G2 glasses client)' disabled data-guest-hide>Mode: --</button>
+      <button class='btn' id='btn-bt-mode' title='Switch the saved Bluetooth mode (App console or Glasses)' disabled data-guest-hide>Mode: --</button>
 )HTML", HTTPD_RESP_USE_STRLEN);
 #endif
 
@@ -118,6 +129,37 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       <button class='btn' id='btn-bt-refresh' style='background:none;border-color:var(--border);color:var(--muted)'>↻</button>
     </div>
   </div>
+  <!-- The app console (the HardwareOne app's command link), shown in every
+       role: beside the glasses it rides the relay pipe's link. -->
+  <div class='bt-header-link'>App console: <span id='bt-console-text'>--</span><span id='bt-console-meta'></span></div>
+)HTML", HTTPD_RESP_USE_STRLEN);
+
+#if ENABLE_G2_GLASSES || ENABLE_BLE_PHONE_PIPE
+  // Role switch, as on the device's own screen: one button for each role that
+  // is not running. Each starts its role and saves it as the mode, stopping the
+  // role that runs (the app console server and the relay pipe never run
+  // together; in the Glasses role the console rides the pipe's link instead).
+  // JS shows the buttons once the device reports its role.
+  httpd_resp_send_chunk(req, R"HTML(
+  <div class='bt-header-roles'>
+    <button class='btn' id='btn-bt-use-console' style='display:none' title='Switch to server mode for a direct app connection and save it as the mode (stops the running role)' disabled data-guest-hide>Use app console</button>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_G2_GLASSES
+  httpd_resp_send_chunk(req, R"HTML(
+    <button class='btn' id='btn-bt-use-glasses' style='display:none' title='Connect to the G2 glasses and save Glasses as the mode' disabled data-guest-hide>Use glasses</button>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+#if ENABLE_BLE_PHONE_PIPE
+  httpd_resp_send_chunk(req, R"HTML(
+    <button class='btn' id='btn-bt-use-phone' style='display:none' title='Start the phone relay pipe on its own and save Phone pipe as the mode' disabled data-guest-hide>Use phone pipe</button>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req, R"HTML(
+  </div>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+
+  httpd_resp_send_chunk(req, R"HTML(
   <div class='bt-header-status' id='bt-status-text'></div>
   <div id='bt-action-status' role='status' style='font-size:.82em;color:var(--muted);margin-top:8px'></div>
 </div>
@@ -309,9 +351,6 @@ inline void streamBluetoothInner(httpd_req_t* req) {
             <div class='bt-conn-meta'>
               <span id='ring-name'>--</span>
             </div>
-            <div class='bt-conn-meta' style='font-family:monospace'>
-              <span id='ring-mac'>--</span>
-            </div>
           </div>
         </div>
         <div class='bt-section-label' style='margin-top:14px'>Connect</div>
@@ -428,6 +467,64 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 )HTML", HTTPD_RESP_USE_STRLEN);
 #endif // ENABLE_G2_GLASSES
 
+#if ENABLE_BLE_PHONE_PIPE
+  // Android phone link (the relay pipe): beside the glasses (client mode) or
+  // the phone-only role. JS shows it whenever a central role or the pipe runs.
+  // The link rows are the status response's `phoneLink` block (no addresses).
+  httpd_resp_send_chunk(req, R"HTML(
+<div id='bt-phone-panel' style='display:none'>
+  <div class='bt-grid'>
+    <div class='bt-card'>
+      <div class='bt-card-header'>
+        <span class='bt-card-title'>Phone link</span>
+        <span id='phone-state-summary' style='font-size:.8em;color:var(--muted)'>--</span>
+      </div>
+      <div class='bt-card-body'>
+        <div class='bt-conn-item'>
+          <div>
+            <div class='bt-conn-name'>Android phone</div>
+            <div class='bt-conn-meta'>
+              <span id='phone-state'>--</span> &nbsp;·&nbsp;
+              paired <span id='phone-paired'>--</span> &nbsp;·&nbsp;
+              <span id='phone-link-secret'>--</span>
+            </div>
+          </div>
+        </div>
+        <div class='bt-conn-meta' style='margin-top:8px;line-height:1.5'>
+          Console: <span id='phone-link-console'>--</span><br>
+          Relay: <span id='phone-link-relay'>--</span> &nbsp;·&nbsp;
+          streams <span id='phone-link-streams'>--</span><br>
+          Sessions ended: <span id='phone-link-ends'>--</span>
+        </div>
+        <div class='bt-section-label' style='margin-top:14px'>Link</div>
+        <div class='bt-stream-grid'>
+          <button class='btn bt-stream-btn' id='btn-phone-start' data-guest-hide>Start</button>
+          <button class='btn bt-stream-btn' id='btn-phone-stop' style='display:none' data-guest-hide>Stop</button>
+          <button class='btn bt-stream-btn' id='btn-phone-connect' data-guest-hide>Connect</button>
+          <button class='btn bt-stream-btn' id='btn-phone-disconnect' data-guest-hide>Disconnect</button>
+          <button class='btn bt-stream-btn' id='btn-phone-stats' data-guest-hide>Stats</button>
+        </div>
+        <div id='phone-conn-status' style='font-size:.82em;color:var(--muted);min-height:1.2em;margin-top:8px'></div>
+        <label style='display:flex;align-items:center;gap:8px;font-size:.85em;margin-top:10px;cursor:pointer;flex-wrap:wrap;line-height:1.3'
+               title='When enabled, reconnects to the enrolled phone at boot and after unexpected drops.' data-guest-hide>
+          <input type='checkbox' id='cb-phone-autoreconnect' style='flex-shrink:0'>
+          <span>Auto-reconnect</span>
+        </label>
+        <div id='phone-auto-status' role='status' style='font-size:.82em;color:var(--muted);margin-top:8px'></div>
+        <div style='font-size:.78em;color:var(--muted);margin-top:8px;line-height:1.4'>
+          Pair on this device's own screen (Bluetooth &rarr; Phone &rarr; New code and pair)
+          or its serial console (<code>phone pair new</code>), then type the code it shows
+          into the app; the code is never shown here. A passphrase set with
+          <code>phone secret</code> carries the relay only, without the app console.
+        </div>
+        <pre id='phone-stats' style='white-space:pre-wrap;font-size:.75em;color:var(--muted);margin:8px 0 0'></pre>
+      </div>
+    </div>
+  </div>
+</div>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+
   // Inject compile-time feature flag so the JS below can branch without
   // duplicating the ENABLE_G2_GLASSES guard for every code path.
 #if ENABLE_G2_GLASSES
@@ -462,7 +559,17 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     _cliBusy = true;
     _cliLastDispatchedAt = now;
     var job = _cliQueue.shift();
-    hw.postFormText('/api/cli', { cmd: job.cmd })
+    // A refusal still rejects, but carries the reply (hw.postFormText drops
+    // the body of a 4xx) so a caller can show why.
+    hw.postForm('/api/cli', { cmd: job.cmd })
+    .then(function(r){
+      return r.text().then(function(text){
+        if (r.ok) return text;
+        var err = new Error('HTTP ' + r.status);
+        err.reply = text;
+        throw err;
+      });
+    })
     .then(function(text){
       job.resolve(text);
     }).catch(function(err){
@@ -484,7 +591,9 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   function setText(id,v){ var e=el(id); hw.setText(e,v||''); }
 
   // ── state ─────────────────────────────────────────────────────────────────
-  var bleMode = null;      // Unknown until the owner reports 'server' or 'client'.
+  var bleMode = null;      // The view ('server' | 'client'): viewMode().
+  var savedMode = null;    // The saved mode (`mode`); the mode button switches it.
+  var shownLink = null;    // The last `link` rendered; the role switch names its role.
   var btState = 'unknown'; // 'off' | 'advertising' | 'connected' | 'on' (server) or 'on' (client)
   var autoStartState = null;
   var requireAuthState = null;
@@ -496,6 +605,57 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   var statusRequest = 0;
 
   var G2_ENABLED = !!window.__bluetoothG2Enabled;
+)JS"
+BT_PHONE_JS(R"JS(
+  // ── phone relay pipe ──────────────────────────────────────────────────────
+  // The phone card in the client view (the pipe is a device on the shared
+  // client stack, beside the glasses or alone). The status response's
+  // `phone` object comes from BLE_PhoneStatus on the device, in the shared
+  // pipe words (BLE_LinkStatusCore.h): pipeText is one word ("ready", "fail"),
+  // text adds a failure's reason ("fail: not found"). The mode pill names the
+  // role the pipe runs in, so the card does not.
+  var phoneRunning = false;
+  function renderPhone(p){
+    phoneRunning = !!p.active;
+    var stEl = el('phone-state');
+    if(stEl){
+      stEl.textContent = p.text || '--';
+      stEl.style.color = p.connected ? 'var(--success,#00c853)'
+                       : (p.pipeReason ? 'var(--warning,#c8a000)' : 'var(--muted)');
+    }
+    setText('phone-state-summary', p.pipeText || '--');
+    setText('phone-paired', p.enrolled ? 'yes' : 'no');
+    hw.toggle(el('btn-phone-start'), !p.active);
+    hw.toggle(el('btn-phone-stop'), !!p.active);
+  }
+
+  // The phone link block (`phoneLink`): the console stream, relay forwarding,
+  // live streams by class and how sessions ended, in the device's own words.
+  function renderPhoneLink(l){
+    setText('phone-link-secret', l.secretText || '--');
+    setText('phone-link-console', l.consoleText || '--');
+    setText('phone-link-relay', l.relay || '--');
+    var s = l.streams || {};
+    setText('phone-link-streams', 'relay ' + (s.relay || 0) + '/2, console ' + (s.console || 0) + '/1');
+    var ends = String(l.ended || 0);
+    if(l.ended && l.lastEnd) ends += ' (last: ' + l.lastEnd + ')';
+    var counts = Object.keys(l.endReasons || {}).map(function(name){
+      return name + ' ' + l.endReasons[name];
+    });
+    if(counts.length) ends += ' · ' + counts.join(', ');
+    setText('phone-link-ends', ends);
+  }
+
+  var bleApplyState = applyState;
+  applyState = function(state){
+    bleApplyState(state);
+    var isOn = (state === 'advertising' || state === 'connected' ||
+                state === 'connecting' || state === 'on');
+    // A running pipe always shows its card, whatever the view.
+    hw.toggle(el('bt-phone-panel'), phoneRunning || (bleMode !== 'server' && isOn));
+  };
+)JS")
+R"JS(
 
   // ── UI helpers ────────────────────────────────────────────────────────────
   function updateToggle(btnId, enabled){
@@ -509,20 +669,16 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     if(mode !== 'server' && mode !== 'client') return;
     if(mode === bleMode) return;
     bleMode = mode;
-
-    var modePill = el('bt-mode-pill');
-    hw.setText(modePill, (bleMode === 'client') ? 'G2 Client' : 'Server');
-    var modeBtn = el('btn-bt-mode');
-    hw.setText(modeBtn, 'Mode: ' + (bleMode === 'client' ? 'G2 Client' : 'Server'));
+    // The mode pill and button follow `link` (renderLink), not the view.
 
     // Swap the not-init copy to match the mode the user is about to act on.
     var nit = el('bt-not-init-title');
     var nib = el('bt-not-init-body');
     var ob2 = el('btn-bt-open2');
     if(bleMode === 'client'){
-      hw.setText(nit, 'G2 client is not running');
-      hw.setText(nib, 'Initialize the BLE central stack to scan for and connect to Even Realities G2 glasses.');
-      hw.setText(ob2, 'Initialize G2');
+      hw.setText(nit, 'Bluetooth client stack is off');
+      hw.setText(nib, 'Open Bluetooth to bring the client stack up; the glasses, ring and phone with auto-reconnect on come back on it.');
+      hw.setText(ob2, 'Open Bluetooth');
     } else {
       hw.setText(nit, 'Bluetooth is not running');
       hw.setText(nib, 'Enable the BLE server to begin advertising and accept connections from clients.');
@@ -539,13 +695,54 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     // The same status response supplies the mode and its runtime state.
   }
 
+  // ── link status ───────────────────────────────────────────────────────────
+  // The status response's `link` object (BLE_LinkStatus.h) names the role
+  // running now (roleText), the saved mode (savedText), the relay pipe and the
+  // app console, in the words every surface shows.
+
+  // The panels follow the role running now: the pipe alone (the glasses
+  // closed) is the client view with the phone card, not "Bluetooth is not
+  // running". With nothing running they follow the saved mode.
+  function viewMode(d){
+    var role = d.link.role;
+    if(role === 'console') return 'server';
+    if(role === 'glasses' || role === 'glasses-pipe') return 'client';
+    if(role === 'phone-pipe') return 'client';   // the phone alone on the shared client stack
+    return d.mode;
+  }
+
+  // The role switch: a button for each role that is not running. Beside the
+  // glasses `openphone` only opens the pipe and stops nothing, so the phone
+  // card's Open covers that instead of "Use phone pipe".
+  function renderRoleSwitch(role){
+    var glasses = role === 'glasses' || role === 'glasses-pipe';
+    hw.toggle(el('btn-bt-use-console'), role !== 'console');
+    hw.toggle(el('btn-bt-use-glasses'), !glasses);
+    hw.toggle(el('btn-bt-use-phone'), role !== 'phone-pipe' && !glasses);
+  }
+
+  function renderLink(link, maxConnections){
+    shownLink = link;
+    setText('bt-mode-pill', link.roleText + (link.savedDiffers ? ' (saved: ' + link.savedText + ')' : ''));
+    setText('btn-bt-mode', 'Mode: ' + link.savedText);
+    renderRoleSwitch(link.role);
+    // Clients and advertising mean something only while the console server is
+    // up; the console on the pipe's link (Glasses+pipe) has one slot and never
+    // advertises.
+    var up = link.role === 'console' && link.console !== 'not-here' && link.console !== 'off';
+    setText('bt-console-text', link.consoleText);
+    setText('bt-console-meta', up ? ' · clients ' + link.consoleClients + '/' + maxConnections +
+                                    ' · advertising ' + (link.advertising ? 'on' : 'off') : '');
+  }
+
   function updateControlAvailability(){
     var disabled = controlPending || !controlsConfirmed;
     ['btn-bt-mode', 'btn-bt-open', 'btn-bt-open2', 'btn-bt-close',
-     'btn-bt-adv', 'btn-bt-disconnect'].forEach(function(id){
+     'btn-bt-adv', 'btn-bt-disconnect',
+     'btn-bt-use-console', 'btn-bt-use-glasses', 'btn-bt-use-phone'].forEach(function(id){
       var button = el(id); if(button) button.disabled = disabled;
     });
-    ['g2', 'ring'].forEach(function(peer){
+    ['g2', 'ring', 'phone'].forEach(function(peer){
       var cb = el('cb-' + peer + '-autoreconnect'); if(!cb) return;
       var state = reconnectState[peer];
       cb.checked = state === true;
@@ -620,7 +817,10 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   }
 
   function renderG2(status){
-    setText('g2-state-summary', 'state: ' + g2OverallState(status));
+    // repair: the one-temple repair ("3/7", "slow", "held"; "none" or absent).
+    var repair = status.repair && status.repair !== 'none'
+        ? ', repair ' + (status.repair === 'slow' ? 'every 10 min' : status.repair) : '';
+    setText('g2-state-summary', 'state: ' + g2OverallState(status) + repair);
     function setSide(prefix, temple){
       var stEl = el('g2-' + prefix + '-state');
       if(stEl){
@@ -647,13 +847,12 @@ inline void streamBluetoothInner(httpd_req_t* req) {
             status.up ? 'connected'
                       : (status.scan === 'found' ? 'found — click Connect' : 'not scanned'));
     setText('ring-name', status.name);
-    setText('ring-mac',  status.addr);
     setText('ring-mtu',  status.mtu);
     setText('ring-rx',   status.rx);
 
     // Clear the per-action conn-status line once the ring actually
     // reaches the steady state. The Connect button writes a transient
-    // "RING: connect task started — use ringstatus to watch" line into
+    // "RING: connect task started — use ring status to watch" line into
     // #ring-conn-status; once we see the ring as `connected up` (or
     // see it firmly `down`), that message is stale — clear it so the
     // card stops showing irrelevant past state. Disconnect path
@@ -738,25 +937,50 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     return hw.fetchJSON('/api/ble/status').then(function(d){
       if(request !== statusRequest || !d) return false;
       if(d.mode !== 'server' && d.mode !== 'client') return false;
+      if(!d.link || typeof d.link.role !== 'string' || typeof d.link.roleText !== 'string' ||
+         typeof d.link.savedText !== 'string') return false;
+      var view = viewMode(d);
       // Validate the selected owner's state before publishing any part of it.
-      if(d.mode === 'client' && G2_ENABLED){
+      if(view === 'client' && G2_ENABLED){
         var connection = d.g2 && d.g2.connection;
         if(!connection || typeof connection.running !== 'boolean' ||
            !connection.left || !connection.right) return false;
       } else if(!d.ble || typeof d.ble.initialized !== 'boolean') return false;
-      applyMode(d.mode);
+      savedMode = d.mode;
+      applyMode(view);
+      renderLink(d.link, (d.ble && d.ble.maxConnections) || 4);
       reconnectState.g2 = d.g2 && typeof d.g2.autoReconnect === 'boolean'
         ? d.g2.autoReconnect : null;
       reconnectState.ring = d.ring && typeof d.ring.autoReconnect === 'boolean'
         ? d.ring.autoReconnect : null;
+)JS"
+BT_PHONE_JS(R"JS(
+      reconnectState.phone = d.phone && typeof d.phone.autoReconnect === 'boolean'
+        ? d.phone.autoReconnect : null;
+)JS")
+R"JS(
       controlsConfirmed = true;
       updateControlAvailability();
+)JS"
+BT_PHONE_JS(R"JS(
+      if(d.phone) renderPhone(d.phone);
+      if(d.phoneLink) renderPhoneLink(d.phoneLink);
+)JS")
+R"JS(
       if(bleMode === 'client' && G2_ENABLED){
         var out = d.g2Text || '';
         var status = d.g2 && d.g2.connection;
         if(!status.running){
-          applyState('off');
-          showStatusText('');
+          // The glasses runtime is closed; the client stack may still be up
+          // (the phone or the ring on it, or idle): `host` says
+          // (bleHostStateWord). Off hides the Disable button, so only a host
+          // that is really down reads off; with the stack up the glasses
+          // panels stay hidden (nothing to show for closed glasses).
+          var hostUp = d.host === 'on' || d.host === 'idle';
+          applyState(hostUp ? 'on' : 'off');
+          if(hostUp) hw.hide(el('bt-g2-panels'));
+          showStatusText(d.host === 'idle' ? 'Client stack up; no device open'
+                       : hostUp ? 'Glasses closed; the Bluetooth client stack is up' : '');
         } else {
           var overall = g2OverallState(status);
           applyState(overall === 'connected' ? 'connected'
@@ -770,12 +994,18 @@ inline void streamBluetoothInner(httpd_req_t* req) {
           renderRing({
             up: !!d.ring.connected,
             name: d.ring.name || '--',
-            addr: d.ring.addr || '--',
             mtu: (d.ring.mtu != null) ? String(d.ring.mtu) : '--',
             rx: (d.ring.rx != null) ? String(d.ring.rx) : '0',
             scan: d.ring.scanFound ? 'found' : 'not-found'
           });
         }
+      } else if(bleMode === 'client'){
+        // No glasses in the build: the client stack carries the phone (and
+        // the ring); its header follows `host`, not the console server.
+        var stackUp = d.host === 'on' || d.host === 'idle';
+        applyState(stackUp ? 'on' : 'off');
+        showStatusText(d.host === 'idle' ? 'Client stack up; no device open'
+                     : stackUp ? 'The Bluetooth client stack is up' : '');
       } else {
         var info = d.ble || {};
         applyState(stateFromInfo(info));
@@ -840,7 +1070,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     return cli(cmd).then(function(out){
       message = out || 'Command completed.';
     }, function(error){
-      message = 'Request failed: ' + error.message;
+      message = (error && error.reply) || ('Request failed: ' + error.message);
     }).then(function(){
       setText(statusId, message + ' Checking device state…');
       return refresh(true);
@@ -851,9 +1081,14 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     });
   }
 
-  // Mode-aware open / close dispatchers
-  function openCmd(){  return (bleMode === 'client') ? 'g2init'   : 'openble';  }
-  function closeCmd(){ return (bleMode === 'client') ? 'g2deinit' : 'closeble'; }
+  // Mode-aware open / close dispatchers: the client view's power buttons are
+  // the whole radio (openble brings the stack up and the devices with
+  // auto-reconnect come back; closeble closes every device and stops the
+  // host); the server view's are the app console server.
+  function openCmd(){  return (bleMode === 'client') ? 'openble'  : 'openconsole';  }
+  function closeCmd(){ return (bleMode === 'client') ? 'closeble' : 'closeconsole'; }
+)JS"
+R"JS(
 
   function bind(id, fn){
     var e = el(id); hw.on(e, 'click', fn);
@@ -871,12 +1106,28 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     bind('btn-bt-disconnect', function(){ cli('bledisconnect').then(function(){ setTimeout(refresh,400); }); });
     bind('btn-bt-refresh',    function(){ refresh(); });
 
-    // Mode toggle (only present when G2 is compiled in)
+    // Mode toggle (only present when G2 is compiled in): switches the saved mode.
     bind('btn-bt-mode', function(){
       if(controlPending || !controlsConfirmed) return;
-      var next = (bleMode === 'server') ? 'client' : 'server';
+      var next = (savedMode === 'server') ? 'client' : 'server';
       runControl('blemode ' + next, 'bt-action-status');
     });
+
+    // Role switch: each button starts its role (and saves it as the mode)
+    // through the confirmed-control path, after a confirm that names the role
+    // it stops. With nothing running there is nothing to stop or confirm.
+    function bindRole(id, cmd, question){
+      bind(id, function(){
+        if(controlPending || !controlsConfirmed || !shownLink) return;
+        var ask = shownLink.role === 'off' ? Promise.resolve(true)
+          : window.hwConfirm(question + ' This stops the running role (' + shownLink.roleText + ').');
+        ask.then(function(ok){ if(ok) runControl(cmd, 'bt-action-status'); });
+      });
+    }
+    // App console is server mode: beside the glasses the console already rides
+    // the phone link, so the confirm names the direct connection it gives.
+    bindRole('btn-bt-use-console', 'openconsole', 'Switch to server mode for a direct app connection?');
+    if(G2_ENABLED) bindRole('btn-bt-use-glasses', 'openg2', 'Use the glasses?');
 
     // Streaming (server mode only, but binding is harmless when panels hidden)
     bind('btn-stream-on',      function(){ cli('blestream on').then(function(o){ setText('bt-stream-status', o); }); });
@@ -923,6 +1174,17 @@ inline void streamBluetoothInner(httpd_req_t* req) {
         updateToggle('btn-bt-requireauth', requireAuthState);
       });
     });
+
+    function bindAutoToggle(peer, cmd, statusId) {
+      var cbId = 'cb-' + peer + '-autoreconnect';
+      var cb = el(cbId); if (!cb) return;
+      cb.addEventListener('change', function() {
+        var wanted = cb.checked;
+        updateControlAvailability(); // Keep the confirmed checkmark while pending.
+        if(reconnectState[peer] === null) return;
+        runControl(cmd + ' ' + (wanted ? 'on' : 'off'), statusId);
+      });
+    }
 
     // G2 actions — only bound when the G2 panel is in the DOM
     if(G2_ENABLED){
@@ -997,7 +1259,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       // independent of the Temples card's status.
       bind('btn-ring-connect', function(){
         setText('ring-conn-status', 'Connecting...');
-        cli('ringconnect').then(function(o){
+        cli('openring').then(function(o){
           setText('ring-conn-status', o);
           // Ring BLE connect + service discovery + notify subscribe is
           // observed at 5-9 seconds total on this stack. The 1.5 s poll
@@ -1009,25 +1271,17 @@ inline void streamBluetoothInner(httpd_req_t* req) {
           setTimeout(refresh,  4000);
           setTimeout(refresh,  8000);
           setTimeout(refresh, 15000);
+        }).catch(function(e){
+          setText('ring-conn-status', (e && e.reply) || 'Ring connect failed');
         });
       });
       bind('btn-ring-disconnect', function(){
-        cli('ringdisconnect').then(function(o){
+        cli('closering').then(function(o){
           setText('ring-conn-status', o);
           setTimeout(refresh, 500);
         });
       });
 
-      function bindAutoToggle(peer, cmd, statusId) {
-        var cbId = 'cb-' + peer + '-autoreconnect';
-        var cb = el(cbId); if (!cb) return;
-        cb.addEventListener('change', function() {
-          var wanted = cb.checked;
-          updateControlAvailability(); // Keep the confirmed checkmark while pending.
-          if(reconnectState[peer] === null) return;
-          runControl(cmd + ' ' + (wanted ? 'on' : 'off'), statusId);
-        });
-      }
       bindAutoToggle('g2', 'bleautoreconnect g2-glasses', 'g2-auto-status');
       bindAutoToggle('ring', 'bleautoreconnect r1-ring', 'ring-auto-status');
 
@@ -1054,6 +1308,23 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       });
     }
 
+)JS"
+BT_PHONE_JS(R"JS(
+    // Phone card. Pairing (enroll) needs a local admin on the device's own
+    // screen or serial console, so the card only says where to do it.
+    bind('btn-phone-start',      function(){ runAndRefresh('openphone',  'phone-conn-status', 'Opening…'); });
+    bind('btn-phone-stop',       function(){ runAndRefresh('closephone', 'phone-conn-status', 'Closing…'); });
+    bind('btn-phone-connect',    function(){ runAndRefresh('openphone',  'phone-conn-status', 'Connecting…'); });
+    bind('btn-phone-disconnect', function(){ runAndRefresh('closephone', 'phone-conn-status', 'Disconnecting…'); });
+    bind('btn-phone-stats', function(){
+      cli('phone stats').then(function(o){ setText('phone-stats', o); }).catch(function(e){
+        setText('phone-stats', (e && e.reply) || ('Error: ' + e.message));
+      });
+    });
+    bindAutoToggle('phone', 'bleautoreconnect phone', 'phone-auto-status');
+    bindRole('btn-bt-use-phone', 'openphone', 'Use the phone pipe?');
+)JS")
+R"JS(
     // Configuration fields load separately so status polling cannot overwrite
     // edits in progress. pollTick below is the single source of mode/state.
     loadConfig();
@@ -1155,5 +1426,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 </script>
 )JS", HTTPD_RESP_USE_STRLEN);
 }
+
+#undef BT_PHONE_JS
 
 #endif

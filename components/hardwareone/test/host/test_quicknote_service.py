@@ -53,7 +53,7 @@ def unit_source():
                  'struct DictationAppSnapshot', 'struct DictationAppOptions'):
         types += extract_block(dictation, name) + ';\n'
     policies = '\n'.join(clean((COMPONENT / name).read_text()) for name in
-                         ('Transcript_PathPolicy.h', 'Transcription_UI_Policy.h', 'QuickNote_Policy.h'))
+                         ('Transcript_PathPolicy.h', 'Transcript_TextPolicy.h', 'Transcription_UI_Policy.h', 'QuickNote_Policy.h'))
     policies += '\n' + between(header, '// How the last note ended.', '#else')
     parser = extract_block((COMPONENT / 'System_Command.h').read_text(), 'class CommandArgs') + \
         ';\nconst String CommandArgs::empty_;\n'
@@ -64,8 +64,9 @@ def unit_source():
         '}  // namespace QuickNoteStore\n'
     production = between(source, 'using namespace QuickNotePolicy;', '#endif  // ENABLE_QUICKNOTE')
     ble = extract_block((COMPONENT / 'BLE_Peers.h').read_text(), 'struct BlePeerOwnerSession') + ';\n'
+    worker = extract_block((COMPONENT / 'System_TaskUtils.h').read_text(), 'struct ServiceWorker') + ';\n'
     unit = (HERE / 'quicknote_service_harness.cpp').read_text()
-    for marker, value in (('// INSERT_BLE_OWNER', ble), ('// INSERT_TYPES', types),
+    for marker, value in (('// INSERT_SERVICE_WORKER', worker), ('// INSERT_BLE_OWNER', ble), ('// INSERT_TYPES', types),
                           ('// INSERT_POLICIES', policies), ('// INSERT_PARSER', parser),
                           ('// INSERT_STORE_API', store_api), ('// INSERT_PRODUCTION', production)):
         assert unit.count(marker) == 1, marker
@@ -81,7 +82,7 @@ def check_wiring():
     start = function(source, 'bool quickNoteStart(')
     assert 'options.purpose = DictationAppPurpose::QuickNote;' in start
     assert 'options.saveTranscript = false;' in start
-    assert 'xTaskCreateLogged(workerBody, "qnote", kWorkerStackBytes' in source
+    assert 'gQnWorker.ensure(workerBody, "qnote", kWorkerStackBytes, "quicknote.service")' in source
     for call in ('dictationAppRequestStop(', 'dictationAppCancel(', 'dictationAppPeekText(',
                  'dictationAppCommitText('):
         for name in ('bool quickNoteStop(', 'bool quickNoteCancel(', 'bool quickNoteSnapshot(',
@@ -134,7 +135,9 @@ def check_wiring():
 
     g2 = (c / 'G2_Glasses.cpp').read_text()
     native = function(g2, 'bool g2NativeVoiceActive()')
-    assert 'return g2EvenAiSessionIsActive() || g2ConversateActive();' in native
+    for owner in ('g2EvenAiSessionIsActive()', 'g2ConversateActive()',
+                  'g2NativeTerminalActive()', 'g2NativeNotesActive()'):
+        assert owner in native
     header = (c / 'G2_Glasses.h').read_text()
     assert header.count('bool g2NativeVoiceActive();') == 1
     assert 'inline bool g2NativeVoiceActive() { return false; }' in header
@@ -153,8 +156,25 @@ def check_wiring():
     assert 'inline void quickNoteClockSet() {}' in qn_header.split('#else', 1)[1]
     assert function(source, 'void quickNoteClockSet(') .strip().endswith('{ wake(); }')
     worker = extract_block(source, 'void workerBody(void*) ')
-    ordered(worker, 'gRestampDue || gSweepDue ? pdMS_TO_TICKS(kRestampRetryMs)', 'servicePass();',
-            'restampPass();', 'sweepPass();')
+    ordered(worker, 'gQnWorker.wait(quickNoteActive() ? kPassMs', 'gRestampDue || gSweepDue ? kRestampRetryMs',
+            'SERVICE_TASK_IDLE_RETIRE_MS', 'servicePass();',
+            'restampPass();', 'sweepPass();', 'if (!woken && retireIfIdle()) vTaskDelete(nullptr);')
+    # The idle exit goes through the shared ServiceWorker (its own suite pins
+    # the protocol: predicate and handle in one critical section, the wake a
+    # semaphore made once, never a task handle); the module keeps only the
+    # predicate, and a start claims its note before it brings the worker (back).
+    retire = extract_block(source, 'bool retireIfIdle() ')
+    ordered(retire, 'gQnWorker.retireIf([] {',
+            'return !gNote.starting && !noteActive(gNote.phase) && !gRestampDue && !gSweepDue &&',
+            'gUnstampedCount == 0;')
+    for primitive in ('xTaskNotifyGive', 'ulTaskNotifyTake', 'xTaskCreateLogged(', 'xSemaphoreCreateBinaryStatic(',
+                      'xSemaphoreGive(', 'xSemaphoreTake('):
+        assert primitive not in source, primitive
+    assert 'ServiceWorker gQnWorker{gQnMux};' in source
+    assert 'ensureWorker()' not in start.split('claimed = noteTransition(gNote.phase, Event::Start);')[0]
+    ordered(start, 'if (!claimed) return refuse(why, "A note is already recording");', 'if (!ensureWorker()) {',
+            'if (gNote.id == noteId) gNote = Note{};', 'return refuse(why, "Note service unavailable");',
+            'wipeText();', 'dictationAppBeginWith(')
     # Keep-warm exists only on local-STT builds and never loads from a note pass.
     service = extract_block(source, 'void servicePass() ')
     ordered(service, '#if ENABLE_LOCAL_STT', 'sttKeepWarm(kWarmHoldMs, false);', '#endif')

@@ -51,7 +51,7 @@ static G2CmdCookie buildCookie() {
 static void showRootMenu() {
   // Live brightness label — static buffer because g2ShowListPage expects the
   // row pointers to stay valid until it returns (same idiom everywhere).
-  static char brightRow[28];
+  EXT_RAM_BSS_ATTR static char brightRow[28];  // PSRAM: deep-copied by g2ShowListPage
   snprintf(brightRow, sizeof(brightRow), "Brightness: %d%%", gSettings.ledBrightness);
   const char* items[] = {
     "<- Hardware",   // 0
@@ -74,7 +74,7 @@ static G2Paginator gColorPg;   // window of the color rows on the lens
 
 static void showColorsMenu() {
   EXT_RAM_BSS_ATTR static char rows[kColorRowMax][20];
-  static const char* ptrs[kColorRowMax];
+  EXT_RAM_BSS_ATTR static const char* ptrs[kColorRowMax];  // PSRAM: deep-copied by g2ShowListPage
   const size_t total = 1 + (size_t)numColors;   // "off" + palette
 
   G2Paginator pg = g2PaginatorPrepare(total, kColorsPerPage, gColorPage);

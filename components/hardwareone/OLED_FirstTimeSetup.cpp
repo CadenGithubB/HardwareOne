@@ -575,7 +575,7 @@ bool getOLEDWiFiSelection(String& outSSID) {
 
     while (!confirmed) {
       if (gWizardOwnsSerial && isWizardCancelRequested()) { outSSID = ""; return false; }
-      const int maxVisible = 5;
+      const int maxVisible = oledVisibleRows(10, 1, 5);
       if (selection < scrollOffset) {
         scrollOffset = selection;
       } else if (selection >= scrollOffset + maxVisible) {
@@ -623,7 +623,7 @@ bool getOLEDWiFiSelection(String& outSSID) {
           oledDisplay->print("^");
         }
         if (scrollOffset + maxVisible < displayCount) {
-          oledDisplay->setCursor(120, 52);
+          oledDisplay->setCursor(120, 12 + (maxVisible - 1) * 10);
           oledDisplay->print("v");
         }
         oledDisplay->display();
@@ -753,7 +753,7 @@ void showOLEDMessage(const char* message, bool waitForButton) {
     int lineY = 10;
     int startIdx = 0;
     
-    while (startIdx < (int)msg.length() && lineY < 54) {
+    while (startIdx < (int)msg.length() && lineY < SCREEN_HEIGHT - 10) {
       int endIdx = startIdx + 21;  // ~21 chars per line
       if (endIdx > (int)msg.length()) endIdx = msg.length();
       

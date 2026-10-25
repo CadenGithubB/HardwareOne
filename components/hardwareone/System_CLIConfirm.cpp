@@ -21,7 +21,7 @@
 // (this file has zero portENTER_CRITICAL), not reached during a flash op.
 // Credential audit 2026-08-19: wifiadd/useradd/login never route through
 // cliRequestConfirm, so no password/PSK/token lands here. The one residue is
-// `ringquery raw` SET text in originatingCmd — the same bytes already go to
+// `ring query raw` SET text in originatingCmd — the same bytes already go to
 // the plaintext on-flash audit log, so PSRAM adds no exposure that did not
 // already exist. Keep that true: do not start confirming credential commands.
 //

@@ -27,6 +27,7 @@ def generated(component: Path, baseline: bool) -> str:
     header = (component / "G2_Glasses.h").read_text()
     runtime = "struct G2ClientRuntime" in owner
     typed = "bool g2ConnectionStatusSnapshot(" in owner
+    repair = "static const char* g2RepairDescribe(" in owner
     types = [extract_block(header, "enum G2State") + ";"]
     if runtime:
         types.append(extract_block(owner, "struct G2ClientRuntime") + ";")
@@ -58,13 +59,16 @@ def generated(component: Path, baseline: bool) -> str:
                          "static const char* g2ClientStateName(")]
     definitions += [extract_block(owner, "G2State getG2State("),
                     extract_block(owner, "const char* getG2StateString(")]
+    if repair:
+        definitions.append(extract_block(owner, "static const char* g2RepairDescribe("))
     if typed:
         types += [extract_block(header, marker) + ";" for marker in
                   ("struct G2TempleConnectionStatus", "struct G2ConnectionStatus")]
         definitions += [extract_block(owner, "bool g2ConnectionStatusSnapshot("),
                         extract_block(owner, "void formatG2Status(")]
     definitions.append(extract_block(owner, "void getG2Status("))
-    types.insert(0, f"#define TEST_RUNTIME {int(runtime)}\n#define TEST_TYPED {int(typed)}")
+    types.insert(0, f"#define TEST_RUNTIME {int(runtime)}\n#define TEST_TYPED {int(typed)}\n"
+                    f"#define TEST_REPAIR {int(repair)}")
     harness = (HERE / "g2_connection_status_harness.cpp").read_text()
     return harness.replace("// INSERT_TYPES", "\n".join(types)).replace(
         "// INSERT_PRODUCTION", "\n\n".join(definitions))
@@ -87,7 +91,7 @@ def main() -> None:
         def run(name: str, component: Path, baseline: bool) -> str:
             source = work / (name + ".cpp")
             source.write_text(generated(component, baseline))
-            subprocess.run([args.cxx, *flags, f"-DTEST_BASELINE={int(baseline)}",
+            subprocess.run([args.cxx, *flags, f"-DTEST_BASELINE={int(baseline)}", "-I", str(COMPONENT),
                             str(source), "-o", str(work / name)], check=True, timeout=120)
             return subprocess.check_output([str(work / name)], text=True, timeout=60)
 
@@ -96,7 +100,7 @@ def main() -> None:
             old = run("baseline", args.baseline, True)
             require(output == old, "G2 status text differs from characterized production")
             print("G2 connection status: text matches pre-change production byte-for-byte")
-    print("G2 connection status: state, topology, snapshot and text boundaries passed")
+    print("G2 connection status: state, topology, repair, snapshot and text boundaries passed")
 
 
 if __name__ == "__main__":

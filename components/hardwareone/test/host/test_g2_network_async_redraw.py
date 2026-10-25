@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 
+from test_g2_status_corner import link_status_unit
 from test_web_batch_handlers import extract_block, require
 
 HERE = Path(__file__).resolve().parent
@@ -31,11 +32,12 @@ COMPONENT = HERE.parents[1]
 # type still matches; forward declarations are skipped.
 FUNCTIONS = (
     "showWiFiMenu", "showWiFiScanningPlaceholder", "showScanResults",
-    "showBluetoothR1Menu",
+    "showBluetoothR1Menu", "showBluetoothPhoneMenu",
     None,  # the WiFi scan block goes here
     "wifiPendingWatchdogTask", "onWifiMenuRefreshDone", "onWifiConnectRefreshDone",
     "ringPendingWatchdogTask", "onBluetoothR1MenuRefreshDone",
-    "handleWiFiTap", "handleBluetoothR1Tap",
+    "onBluetoothPhoneMenuRefreshDone",
+    "handleWiFiTap", "handleBluetoothR1Tap", "handleBluetoothPhoneTap",
 )
 
 
@@ -76,6 +78,10 @@ def generated(component: Path) -> str:
     types += [extract_block(wifi, marker) + ";" for marker in (
         "struct WifiScanRecord", "enum class WifiScanStatus", "struct WifiScanResult")]
     types.append(declaration(wifi, "using WifiScanVisitor"))
+    # The Phone menu's words come from bleLinkStatus(), compiled as shipped over
+    # the harness's role inputs and fake pipe/peer/console (`linkIn`).
+    link_types, link_status = link_status_unit(component)
+    types.append(link_types)
 
     state = region(page, "enum NetworkSubMode", "// Info text")
     state += "\n" + region(page, "enum WifiMenuAction", "static void showWiFiMenu() {")
@@ -91,6 +97,7 @@ def generated(component: Path) -> str:
     harness = (HERE / "g2_network_async_redraw_harness.cpp").read_text()
     replacements = (
         ("// INSERT_TYPES", "\n\n".join(types)),
+        ("// INSERT_LINK_STATUS", link_status),
         ("// INSERT_REDRAW_HELPER", extract_block(bridge, "bool g2EnqueueRedraw(")),
         ("// INSERT_STATE", state),
         ("// INSERT_FUNCTIONS", "\n\n".join(functions)),

@@ -6,8 +6,9 @@ Ported from experiments/p4_connectivity/test_hal_bluetooth.py so the HAL that
 ships on every Bluetooth board is covered by the tracked suite. The checks
 prove the interface (incomplete startup, uncertain remote state, failed or
 incomplete teardown, restart, native power error propagation and explicit
-Hosted power unavailability); they do not prove controller behaviour, Wi-Fi
-coexistence or C6 recovery.
+Hosted power unavailability, and the app console's teardown hooks around
+every stop: closed before the host stops, released only after a terminal stop);
+they do not prove controller behaviour, Wi-Fi coexistence or C6 recovery.
 
 The HAL sources are copied into a temporary directory with the stub headers
 because HAL_Bluetooth.h includes "System_BuildConfig.h" with quotes, which
@@ -51,11 +52,18 @@ inline esp_err_t esp_ble_tx_power_set(int, esp_power_level_t) {
   return ++powerCalls == powerFailAt ? 91 : ESP_OK;
 }
 """,
+    # The console owner's hooks (Bluetooth.h); checks.cpp records each call.
+    "Bluetooth.h": """#pragma once
+void bleConsoleHostTeardownBegin();
+void bleConsoleHostTeardownEnd(bool stopped);
+""",
     "BLEDevice.h": """#pragma once
 #include <stdint.h>
 #include <assert.h>
 extern int mockHost, mockController, initCalls;
 extern bool mockInitialized, initFail, stopFail, stopLeavesController;
+extern char trace[64];
+extern int traceLen;
 struct BLEDeviceDeinitResult {
   bool success;
   uint8_t phase;
@@ -72,6 +80,7 @@ struct BLEDevice {
   }
   static BLEDeviceDeinitResult deinitChecked(bool releaseMemory) {
     assert(!releaseMemory);
+    if (traceLen < 63) trace[traceLen++] = 'D';
     const int oldHost=mockHost, oldController=mockController;
     if (!stopFail) {
       mockInitialized=false;
@@ -87,8 +96,22 @@ struct BLEDevice {
 CHECKS = r"""
 #include "HAL_Bluetooth.h"
 #include <assert.h>
+#include "Bluetooth.h"
+#include <string.h>
 int mockHost=0, mockController=0, initCalls=0, powerCalls=0, powerFailAt=-1;
 bool mockInitialized=false, initFail=false, stopFail=false, stopLeavesController=false;
+// B = console hook before the stop, D = deinitChecked, E/e = the after-hook
+// told the stop was terminal / not.
+char trace[64];
+int traceLen=0;
+void bleConsoleHostTeardownBegin() { if (traceLen < 63) trace[traceLen++]='B'; }
+void bleConsoleHostTeardownEnd(bool stopped) { if (traceLen < 63) trace[traceLen++]=stopped ? 'E' : 'e'; }
+static bool traced(const char* want) {
+  trace[traceLen]='\0';
+  const bool same=strcmp(trace, want)==0;
+  traceLen=0;
+  return same;
+}
 int main() {
   assert(!bluetoothHalInit(nullptr));
   assert(!bluetoothHalInit(""));
@@ -118,17 +141,23 @@ int main() {
   assert(bluetoothHalSetTxPower(4)==91 && powerCalls==2);
 #endif
   assert(bluetoothHalSetTxPower(8)==ESP_ERR_INVALID_ARG);
+  assert(traced("")); // starting the host never touches the console hooks
   stopFail=true;
   auto failed=bluetoothHalDeinit();
   assert(!failed.success && failed.clientQuarantined);
   assert(bluetoothHalStatus().ready());
+  assert(traced("BDe")); // closed before the stop; kept after a failed one
   stopFail=false; stopLeavesController=true;
   assert(!bluetoothHalDeinit().success); // a success flag cannot hide a live controller
+  assert(traced("BDe")); // ... nor release the console's state
   stopLeavesController=false;
   assert(bluetoothHalDeinit().success);
   assert(!bluetoothHalStatus().ready());
+  assert(traced("BDE")); // released only after the terminal stop
   assert(bluetoothHalInit("restart"));
+  assert(traced(""));
   assert(bluetoothHalDeinit().success);
+  assert(traced("BDE"));
   return 0;
 }
 """

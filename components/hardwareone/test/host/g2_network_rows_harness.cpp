@@ -1,6 +1,8 @@
 // test_wifi_saved_ui.py also compiles the production G2 Network page's local
-// state (row bindings), its WiFi / ESP-NOW / HTTP(S) / Bluetooth / G2 / R1
-// menus and their tap handlers beside these host boundaries. A case draws a
+// state (row bindings), its WiFi / ESP-NOW / HTTP(S) / Bluetooth / G2 / R1 /
+// Phone menus and their tap handlers beside these host boundaries (and
+// BLE_LinkStatus.cpp's bleLinkStatus() with BLE_LinkStatusCore.h, over the fake
+// pipe, peer and console inputs `linkIn`). A case draws a
 // menu, changes the live state its labels came from (as web, CLI, an
 // automation or a link event would), taps a row and checks that the command
 // matches the label that was on the lens. Command callbacks, leaf pages and
@@ -20,6 +22,9 @@
 #endif
 #ifndef ENABLE_HTTP_SERVER
 #define ENABLE_HTTP_SERVER 1
+#endif
+#ifndef ENABLE_BLE_PHONE_PIPE
+#define ENABLE_BLE_PHONE_PIPE 1
 #endif
 #define EXT_RAM_BSS_ATTR
 template <typename... Args> void quietLog(const char*, Args...) {}
@@ -125,17 +130,17 @@ static bool gServerIsHttps = false;
 static bool isHttpServerRunning() { return server != nullptr; }
 
 enum { BLE_MODE_SERVER = 0, BLE_MODE_G2_CLIENT = 1 };
-enum { BLE_PEER_G2_GLASSES = 0, BLE_PEER_R1_RING = 1 };
 static bool serverUp = false, clientUp = true, phoneConnected = false, ringUp = false;
 static bool peerAutoReconnect[2] = {false, false};
-static bool isBleServerInitialized() { return serverUp; }
+static bool bleServerUp() { return serverUp; }
 static bool isG2ClientInitialized() { return clientUp; }
-static bool bleSubsystemActive() { return serverUp || clientUp; }
+static bool bleSubsystemActive() { return serverUp || clientUp || linkIn.pipeActive; }
 static const char* bleSubsystemStateString() { return "running"; }
 static bool isG2Connected() { return clientUp; }
-static bool isBLEConnected() { return phoneConnected; }
+static bool isBLEConnected() { return phoneConnected; }  // the Disconnect row's no-op check
 static bool blePeerAutoReconnectEnabled(int peer) { return peerAutoReconnect[peer]; }
 static bool g2RingIsConnected() { return ringUp; }
+static bool bleCentralRingShouldYield() { return false; }  // phone pipe off here
 
 struct Settings {
   bool wifiEnabled = true;
@@ -174,6 +179,7 @@ CALLBACK(onEspNowNameThenOpenDone)
 CALLBACK(onBluetoothMenuRefreshDone)
 CALLBACK(onBluetoothG2MenuRefreshDone)
 CALLBACK(onBluetoothR1MenuRefreshDone)
+CALLBACK(onBluetoothPhoneMenuRefreshDone)
 CALLBACK(onHttpMenuRefreshDone)
 static void showHttpMenu();
 
@@ -466,9 +472,9 @@ static void r1_connect_row_after_ring_up() {
   const size_t row = rowOf("Connect Ring");
   ringUp = true;                             // auto-reconnect got there first
   handleBluetoothR1Tap(tapRow(row));
-  EXPECT(std::strcmp(lastCommand, "ringconnect reconnect") != 0,
-         "'Connect Ring' sent 'ringconnect reconnect' (drops the ring) after it connected");
-  EXPECT(sent("ringconnect"), "'Connect Ring' did not send ringconnect");
+  EXPECT(std::strcmp(lastCommand, "openring reconnect") != 0,
+         "'Connect Ring' sent 'openring reconnect' (drops the ring) after it connected");
+  EXPECT(sent("openring"), "'Connect Ring' did not send openring");
 }
 
 static void ble_peer_toggles_follow_label() {
@@ -487,21 +493,25 @@ static void ble_peer_toggles_follow_label() {
          "'R1 AutoReconnect: OFF' sent off after the setting changed");
 }
 
-// Server role only: the layout shows Conn / Toggle Adv / Disconnect while it runs.
+// Server role only: the layout shows Console / Toggle Adv / Disconnect while it runs.
 static void bluetooth_server_rows_after_stop() {
   clientUp = false;
   serverUp = true;
   phoneConnected = true;
+  linkIn.console.up = true;
+  linkIn.console.clients = 1;
+  linkIn.console.signedIn = true;
   gSettings.bleMode = BLE_MODE_SERVER;
   showBluetoothMenu();
   CHECK(shownCount == 7);
-  const size_t conn = rowOf("Conn: yes"), state = rowOf("BLE: ON"),
+  const size_t console = rowOf("Console: signed in"), state = rowOf("BLE: ON"),
                autoStart = rowOf("Auto Start: OFF");
-  serverUp = false;                          // closeble from the web meanwhile
-  handleBluetoothTap(tapRow(conn));
-  EXPECT(submits == 0, "'Conn: yes' (info row) toggled bleautostart after the server stopped");
+  serverUp = false;                          // closeconsole from the web meanwhile
+  linkIn.console = BleConsoleView{};
+  handleBluetoothTap(tapRow(console));
+  EXPECT(submits == 0, "'Console: signed in' (info row) toggled bleautostart after the server stopped");
   handleBluetoothTap(tapRow(state));
-  EXPECT(sent("closeble"), "'BLE: ON' sent openble after the server stopped");
+  EXPECT(sent("closeconsole"), "'BLE: ON' sent openconsole after the server stopped");
   handleBluetoothTap(tapRow(autoStart));
   EXPECT(sent("bleautostart on"), "'Auto Start: OFF' (row 6) did nothing after the server stopped");
 }
@@ -510,24 +520,84 @@ static void bluetooth_mode_follows_label() {
   clientUp = false;
   gSettings.bleMode = BLE_MODE_SERVER;
   showBluetoothMenu();
-  const size_t row = rowOf("Mode: server");
+  const size_t row = rowOf("Role: Off");     // with "Saved: App console" under it
   gSettings.bleMode = BLE_MODE_G2_CLIENT;    // blemode client from the web meanwhile
   handleBluetoothTap(tapRow(row));
-  EXPECT(sent("blemode client"), "'Mode: server' sent 'blemode server' after the mode changed");
+  EXPECT(sent("blemode client"), "'Role: Off' (saved server) sent 'blemode server' after the mode changed");
+}
+
+// The Role row names what runs now (hw1link::roleText) and the layout follows
+// it: the phone pipe alone is a central-host role, so it gets the client rows.
+// A saved mode that differs gets its own "Saved: ..." info row.
+static void bluetooth_role_rows() {
+  using hw1link::PipeStep;
+  // The glasses with the pipe beside them, as G2 mode starts them.
+  linkIn.pipeActive = true;
+  linkIn.step = PipeStep::Scanning;
+  linkIn.label = "scanning";
+  showBluetoothMenu();
+  EXPECT(std::strcmp(shownRows[2], "Role: Glasses+pipe") == 0 &&
+         std::strcmp(shownRows[3], "G2 >>") == 0,
+         "the glasses with the pipe read 'Role: Glasses+pipe' with no Saved row");
+
+  // The phone pipe alone: the client stack with the glasses closed, which is
+  // the saved client mode too (no Saved row).
+  clientUp = false;
+  showBluetoothMenu();
+  const char* pipe[] = {"<- Connect", "BLE: ON (running)", "Role: Phone pipe", "G2 >>",
+                        "R1 >>", "Phone >>", "Auto Start: OFF"};
+  EXPECT(shownCount == 7, "the phone pipe role shows the client layout");
+  for (size_t i = 0; i < 7; ++i) CHECK(std::strcmp(shownRows[i], pipe[i]) == 0);
+  handleBluetoothTap(tapRow(2));
+  CHECK(sent("blemode server"));
+
+  // Opened by `openphone` while the saved mode is the server.
+  gSettings.bleMode = BLE_MODE_SERVER;
+  showBluetoothMenu();
+  EXPECT(shownCount == 8 && std::strcmp(shownRows[2], "Role: Phone pipe") == 0 &&
+         std::strcmp(shownRows[3], "Saved: App console") == 0 &&
+         std::strcmp(shownRows[4], "G2 >>") == 0,
+         "a pipe under a saved server reads 'Role: Phone pipe' then 'Saved: App console'");
+  handleBluetoothTap(tapRow(3));
+  CHECK(submits == 0);
+
+  // Nothing running: the saved mode's role and the layout it starts.
+  linkIn = FakeLinkInputs{};
+  gSettings.bleMode = BLE_MODE_G2_CLIENT;
+  showBluetoothMenu();
+  EXPECT(std::strcmp(shownRows[1], "BLE: OFF") == 0 &&
+         std::strcmp(shownRows[2], "Role: Off") == 0 &&
+         std::strcmp(shownRows[3], "Saved: Glasses+pipe") == 0 &&
+         std::strcmp(shownRows[4], "G2 >>") == 0,
+         "BLE off reads 'Role: Off' / 'Saved: Glasses+pipe' with the client layout");
+
+  // The console server outranks a client role that also claims the host.
+  serverUp = clientUp = true;
+  gSettings.bleMode = BLE_MODE_G2_CLIENT;
+  showBluetoothMenu();
+  EXPECT(std::strcmp(shownRows[2], "Role: App console") == 0 &&
+         std::strcmp(shownRows[3], "Saved: Glasses+pipe") == 0 &&
+         rowOf("Toggle Adv") > 3,
+         "server and client both up reads 'Role: App console' with the server rows");
 }
 
 static void bluetooth_rows_unchanged_state() {
   // Client role running.
   showBluetoothMenu();
-  const char* client[] = {"<- Connect", "BLE: ON (running)", "Mode: client (G2)", "G2 >>",
-                          "R1 >>", "Auto Start: OFF"};
-  CHECK(shownCount == 6);
-  for (size_t i = 0; i < 6; ++i) CHECK(std::strcmp(shownRows[i], client[i]) == 0);
+  const char* client[] = {"<- Connect", "BLE: ON (running)", "Role: Glasses", "G2 >>",
+                          "R1 >>",
+#if ENABLE_BLE_PHONE_PIPE
+                          "Phone >>",
+#endif
+                          "Auto Start: OFF"};
+  const size_t clientRows = sizeof(client) / sizeof(client[0]);
+  CHECK(shownCount == clientRows);
+  for (size_t i = 0; i < clientRows; ++i) CHECK(std::strcmp(shownRows[i], client[i]) == 0);
   handleBluetoothTap(tapRow(1));
-  CHECK(sent("g2deinit"));
+  CHECK(sent("closeg2"));
   handleBluetoothTap(tapRow(2));
   CHECK(sent("blemode server"));
-  handleBluetoothTap(tapRow(5));
+  handleBluetoothTap(tapRow(clientRows - 1));
   CHECK(sent("bleautostart on"));
   handleBluetoothTap(tapRow(3));
   CHECK(gNetSub == NET_SUB_BLUETOOTH_G2 && submits == 0);
@@ -535,11 +605,34 @@ static void bluetooth_rows_unchanged_state() {
   handleBluetoothTap(tapRow(4));
   CHECK(gNetSub == NET_SUB_BLUETOOTH_R1 && submits == 0);
 
-  // Server role running, then stopped; client role stopped.
+  // Server role running, then stopped; client role stopped. The Console row
+  // reads the app console's own words (hw1link::consoleText), never gBLEState:
+  // advertising with no app yet reads "waiting".
   clientUp = false;
   serverUp = true;
+  linkIn.console.up = linkIn.console.advertising = true;
   gSettings.bleMode = BLE_MODE_SERVER;
   showBluetoothMenu();
+  const char* server[] = {"<- Connect", "BLE: ON (running)", "Role: App console",
+                          "Console: waiting", "Toggle Adv", "Disconnect", "Auto Start: OFF"};
+  CHECK(shownCount == 7);
+  for (size_t i = 0; i < 7; ++i) CHECK(std::strcmp(shownRows[i], server[i]) == 0);
+  linkIn.console.advertising = false;
+  showBluetoothMenu();
+  CHECK(std::strcmp(shownRows[3], "Console: hidden") == 0);
+  linkIn.console.clients = 1;
+  showBluetoothMenu();
+  CHECK(std::strcmp(shownRows[3], "Console: signed out") == 0);
+  linkIn.console.signedIn = true;
+  showBluetoothMenu();
+  CHECK(std::strcmp(shownRows[3], "Console: signed in") == 0);
+  // A stray gBLEState "connected" with no app client never shows as one.
+  linkIn.console = BleConsoleView{};
+  linkIn.console.up = true;
+  phoneConnected = true;
+  showBluetoothMenu();
+  CHECK(std::strcmp(shownRows[3], "Console: hidden") == 0);
+  phoneConnected = false;
   handleBluetoothTap(tapRow(3));
   CHECK(submits == 0);
   handleBluetoothTap(tapRow(4));
@@ -554,14 +647,21 @@ static void bluetooth_rows_unchanged_state() {
   CHECK(sent("bleautostart on"));
   serverUp = false;
   showBluetoothMenu();
-  CHECK(shownCount == 4 && std::strcmp(shownRows[3], "Auto Start: OFF") == 0);
+  const char* stopped[] = {"<- Connect", "BLE: OFF", "Role: Off", "Saved: App console",
+                           "Auto Start: OFF"};
+  CHECK(shownCount == 5);
+  for (size_t i = 0; i < 5; ++i) CHECK(std::strcmp(shownRows[i], stopped[i]) == 0);
   handleBluetoothTap(tapRow(1));
-  CHECK(sent("openble"));
+  CHECK(sent("openconsole"));
   handleBluetoothTap(tapRow(3));
+  CHECK(submits == 0);
+  handleBluetoothTap(tapRow(4));
   CHECK(sent("bleautostart on"));
   gSettings.bleMode = BLE_MODE_G2_CLIENT;
   showBluetoothMenu();
-  CHECK(shownCount == 6);
+  CHECK(shownCount == clientRows + 1 &&
+        std::strcmp(shownRows[3], ENABLE_BLE_PHONE_PIPE ? "Saved: Glasses+pipe"
+                                                        : "Saved: Glasses") == 0);
   handleBluetoothTap(tapRow(1));
   CHECK(sent("openg2"));
   handleBluetoothTap(tapRow(0));
@@ -586,19 +686,166 @@ static void g2_r1_rows_unchanged_state() {
   showBluetoothR1Menu();
   CHECK(shownCount == 5 && std::strcmp(shownRows[1], "Ring: connected") == 0);
   handleBluetoothR1Tap(tapRow(3));
-  CHECK(sent("ringconnect reconnect") && tasksSpawned == 0);
+  CHECK(sent("openring reconnect") && tasksSpawned == 0);
   handleBluetoothR1Tap(tapRow(4));
-  CHECK(sent("ringdisconnect"));
+  CHECK(sent("closering"));
   ringUp = false;
   showBluetoothR1Menu();
   CHECK(shownCount == 4 && std::strcmp(shownRows[3], "Connect Ring") == 0);
   handleBluetoothR1Tap(tapRow(3));
-  CHECK(sent("ringconnect") && tasksSpawned == 1);
+  CHECK(sent("openring") && tasksSpawned == 1);
   CHECK(std::strcmp(shownRows[1], "Ring: connecting...") == 0);
   handleBluetoothR1Tap(tapRow(2));
   CHECK(sent("bleautoreconnect r1-ring on"));
   handleBluetoothR1Tap(tapRow(7));
   CHECK(submits == 0);
+}
+
+// ---- Phone relay pipe ----------------------------------------------------------
+// A pipe running on the glasses' host in `step`, saying `label`.
+static void pipeRunning(hw1link::PipeStep step, const char* label) {
+  linkIn.pipeActive = true;
+  linkIn.step = step;
+  linkIn.label = label;
+}
+
+// Drawn "Open Phone" / "Close Phone"; the pipe opens or stops elsewhere before
+// the tap: the row still sends what it said.
+static void phone_rows_follow_label() {
+  linkIn = FakeLinkInputs{};
+  showBluetoothPhoneMenu();
+  size_t row = rowOf("Open Phone");
+  pipeRunning(hw1link::PipeStep::Scanning, "scanning");  // opened from the CLI meanwhile
+  handleBluetoothPhoneTap(tapRow(row));
+  EXPECT(sent("openphone"), "'Open Phone' closed the pipe after it opened");
+
+  showBluetoothPhoneMenu();
+  row = rowOf("Close Phone");
+  linkIn = FakeLinkInputs{};               // stopped from the CLI meanwhile
+  handleBluetoothPhoneTap(tapRow(row));
+  EXPECT(sent("closephone"), "'Close Phone' opened the pipe after it stopped");
+
+  showBluetoothPhoneMenu();
+  row = rowOf("Phone AutoReconnect: OFF");
+  linkIn.autoReconnect = true;             // enabled from the web meanwhile
+  handleBluetoothPhoneTap(tapRow(row));
+  EXPECT(sent("bleautoreconnect phone on"),
+         "'Phone AutoReconnect: OFF' sent off after the setting changed");
+}
+
+static void phone_rows_unchanged_state() {
+  using hw1link::PipeStep;
+  // Pipe stopped, never paired, the console not registered on this host.
+  linkIn = FakeLinkInputs{};
+  showBluetoothPhoneMenu();
+  const char* off[] = {"<- Bluetooth", "Pipe: off", "Paired: no", "Console: n/a here",
+                       "Phone AutoReconnect: OFF", "Open Phone"};
+  CHECK(shownCount == 6);
+  for (size_t i = 0; i < 6; ++i) CHECK(std::strcmp(shownRows[i], off[i]) == 0);
+  handleBluetoothPhoneTap(tapRow(1));
+  handleBluetoothPhoneTap(tapRow(2));
+  handleBluetoothPhoneTap(tapRow(3));
+  CHECK(submits == 0);
+  handleBluetoothPhoneTap(tapRow(4));
+  CHECK(sent("bleautoreconnect phone on") && lastCallback == &onBluetoothPhoneMenuRefreshDone);
+  handleBluetoothPhoneTap(tapRow(5));
+  CHECK(sent("openphone"));
+
+  // Pipe stopped with a paired phone: the same row opens the pipe and connects it.
+  linkIn.paired = true;
+  showBluetoothPhoneMenu();
+  CHECK(shownCount == 6 && std::strcmp(shownRows[2], "Paired: yes") == 0 &&
+        std::strcmp(shownRows[5], "Open Phone") == 0);
+  handleBluetoothPhoneTap(tapRow(5));
+  CHECK(sent("openphone"));
+
+  // Stopped because no phone secret is configured: still "Open Phone".
+  linkIn = FakeLinkInputs{};
+  linkIn.label = "configure phone secret first";
+  showBluetoothPhoneMenu();
+  CHECK(std::strcmp(shownRows[1], "Pipe: no secret") == 0 &&
+        std::strcmp(shownRows[shownCount - 1], "Open Phone") == 0);
+
+  // Running with the link up.
+  pipeRunning(PipeStep::Link, "ready");
+  linkIn.pipeReady = linkIn.paired = linkIn.autoReconnect = true;
+  showBluetoothPhoneMenu();
+  const char* up[] = {"<- Bluetooth", "Pipe: ready", "Paired: yes", "Console: n/a here",
+                      "Phone AutoReconnect: ON", "Close Phone"};
+  CHECK(shownCount == 6);
+  for (size_t i = 0; i < 6; ++i) CHECK(std::strcmp(shownRows[i], up[i]) == 0);
+  handleBluetoothPhoneTap(tapRow(4));
+  CHECK(sent("bleautoreconnect phone off"));
+  handleBluetoothPhoneTap(tapRow(5));
+  CHECK(sent("closephone"));
+
+  // Running and paired, the last attempt failed: the reason shows.
+  linkIn.pipeReady = false;
+  pipeRunning(PipeStep::Idle, "phone not found");
+  showBluetoothPhoneMenu();
+  EXPECT(std::strcmp(shownRows[1], "Pipe: fail: not found") == 0 &&
+         std::strcmp(shownRows[5], "Close Phone") == 0,
+         "a failed pipe reads 'Pipe: fail: not found' and still offers Close");
+  // A cleanup fault reads "fault" (only a failure names its reason on the
+  // line; JSON carries the rest), and the pipe still runs.
+  pipeRunning(PipeStep::Fault, "phone cleanup incomplete");
+  showBluetoothPhoneMenu();
+  CHECK(std::strcmp(shownRows[1], "Pipe: fault") == 0 &&
+        std::strcmp(shownRows[5], "Close Phone") == 0);
+
+  // Running, not paired yet: the pipe's phase shows.
+  linkIn.paired = false;
+  pipeRunning(PipeStep::Waiting, "waiting for radio");
+  showBluetoothPhoneMenu();
+  CHECK(shownCount == 6 && std::strcmp(shownRows[1], "Pipe: waiting") == 0 &&
+        std::strcmp(shownRows[2], "Paired: no") == 0 &&
+        std::strcmp(shownRows[5], "Close Phone") == 0);
+  handleBluetoothPhoneTap(tapRow(9));
+  CHECK(submits == 0);
+  handleBluetoothPhoneTap(tapRow(0));
+  CHECK(gNetSub == NET_SUB_BLUETOOTH && submits == 0);
+  // Parent menu drill-in.
+  handleBluetoothTap(tapRow(rowOf("Phone >>")));
+  CHECK(gNetSub == NET_SUB_BLUETOOTH_PHONE && submits == 0);
+
+  // Beside the glasses the console rides the pipe's own link: waiting until
+  // the pipe is ready and a slot is on its link, then signed out / signed in.
+  linkIn = FakeLinkInputs{};
+  pipeRunning(PipeStep::Scanning, "scanning");
+  linkIn.paired = true;
+  linkIn.console.registered = linkIn.console.attachable = linkIn.console.secret = true;
+  showBluetoothPhoneMenu();
+  CHECK(std::strcmp(shownRows[1], "Pipe: searching") == 0 &&
+        std::strcmp(shownRows[3], "Console: waiting") == 0);
+  pipeRunning(PipeStep::Link, "ready");
+  linkIn.pipeReady = true;
+  linkIn.console.attached = true;
+  linkIn.console.clients = 1;
+  showBluetoothPhoneMenu();
+  CHECK(std::strcmp(shownRows[3], "Console: signed out") == 0);
+  linkIn.console.signedIn = true;
+  showBluetoothPhoneMenu();
+  CHECK(std::strcmp(shownRows[3], "Console: signed in") == 0);
+  handleBluetoothPhoneTap(tapRow(3));  // an info row
+  CHECK(submits == 0);
+  linkIn.console = BleConsoleView{};
+  linkIn.console.registered = linkIn.console.attachable = true;  // no blesecret
+  showBluetoothPhoneMenu();
+  CHECK(std::strcmp(shownRows[3], "Console: no secret") == 0);
+
+  // The console row reads the console's own state: here the app console
+  // server runs (the pipe cannot) with a signed-in app.
+  linkIn = FakeLinkInputs{};
+  serverUp = true;
+  clientUp = false;
+  linkIn.console.up = true;
+  linkIn.console.clients = 1;
+  linkIn.console.signedIn = true;
+  showBluetoothPhoneMenu();
+  CHECK(std::strcmp(shownRows[3], "Console: signed in") == 0);
+  linkIn.console.signedIn = false;
+  showBluetoothPhoneMenu();
+  CHECK(std::strcmp(shownRows[3], "Console: signed out") == 0);
 }
 
 struct Case { const char* name; void (*run)(); };
@@ -617,11 +864,14 @@ static const Case kCases[] = {
   {"ble_peer_toggles_follow_label", ble_peer_toggles_follow_label},
   {"bluetooth_server_rows_after_stop", bluetooth_server_rows_after_stop},
   {"bluetooth_mode_follows_label", bluetooth_mode_follows_label},
+  {"bluetooth_role_rows", bluetooth_role_rows},
   {"espnow_rows_unchanged_state", espnow_rows_unchanged_state},
   {"http_rows_unchanged_state", http_rows_unchanged_state},
   {"wifi_rows_unchanged_state", wifi_rows_unchanged_state},
   {"bluetooth_rows_unchanged_state", bluetooth_rows_unchanged_state},
   {"g2_r1_rows_unchanged_state", g2_r1_rows_unchanged_state},
+  {"phone_rows_follow_label", phone_rows_follow_label},
+  {"phone_rows_unchanged_state", phone_rows_unchanged_state},
 };
 
 int main(int argc, char** argv) {

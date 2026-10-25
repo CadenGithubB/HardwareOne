@@ -586,7 +586,7 @@ const char* cmd_notifydevicekind(const String& argsInput) {
 
   int k = systemEventKindFromName(kindName.c_str());
   if (k <= 0 || k >= SYSEVT_COUNT) {
-    static char err[80];
+    EXT_RAM_BSS_ATTR static char err[80];  // PSRAM: the reply is copied by the executor
     snprintf(err, sizeof(err), "Error: unknown event kind '%.40s'", kindName.c_str());
     cliHint("list valid kinds with 'events kinds'");
     return err;
@@ -766,7 +766,7 @@ bool applyNotifUserKindMutation(JsonDocument& settings, void* opaque) {
 }
 
 const char* notifKindMutationError(const notif_kind_core::Result& result) {
-  static char error[112];
+  EXT_RAM_BSS_ATTR static char error[112];  // PSRAM: the reply is copied by the executor
   if (result.errorIndex == notif_kind_core::kNoErrorIndex) {
     snprintf(error, sizeof(error),
              "Error: invalid notification kind mutation (%s)",

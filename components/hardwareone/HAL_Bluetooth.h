@@ -37,6 +37,18 @@ struct BluetoothHalStatus {
     return !stackInitialized && hostUninitialized &&
            controller == BluetoothHalControllerState::Idle;
   }
+
+  // No host or stack of any generation runs and the controller is not known
+  // to be up, so no BLE callback can arrive and there is nothing to tear down.
+  // Weaker than stopped(): Hosted reports the controller as Unknown until its
+  // first acknowledged lifecycle step, so a host that was never started is
+  // absent but not "stopped". This is the skip predicate for a teardown;
+  // stopped() stays the positive barrier a verified teardown must reach.
+  bool hostAbsent() const {
+    return !stackInitialized && hostUninitialized &&
+           controller != BluetoothHalControllerState::Initialized &&
+           controller != BluetoothHalControllerState::Enabled;
+  }
 };
 
 // Preserve useful teardown diagnostics without exposing a backend's C++ type.

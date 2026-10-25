@@ -5,6 +5,7 @@
 #define ARDUINOJSON_ENABLE_PROGMEM 0
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -53,17 +54,32 @@ using SemaphoreHandle_t = void*;
 static G2RingState gRing;
 static String gRingDeviceName, gRingDeviceAddress;
 static volatile bool gRingScanFound = false, gRingConnectTaskActive = false;
-static void* sRingOwnerTask = nullptr;
 typedef int portMUX_TYPE;
 #define portMUX_INITIALIZER_UNLOCKED 0
 static int gRingConnectMux = 0;
 static unsigned criticalDepth = 0, criticalCalls = 0, stackCalls = 0, timeCalls = 0;
-static uint32_t fakeNow = 10000, stackFree = 4096;
+static uint32_t fakeNow = 10000;
 static uint32_t millis() { ++timeCalls; return fakeNow; }
+// INSERT_OWNER_STACK
+#if TEST_BASELINE
+// The pre-change readers sampled the owner task's handle directly.
+static void* sRingOwnerTask = nullptr;
+static uint32_t stackFree = 4096;
 static unsigned uxTaskGetStackHighWaterMark(void* task) {
   check(task == sRingOwnerTask && task != nullptr, "stack sampled for current owner only");
   ++stackCalls; return stackFree;
 }
+static void publishOwnerStack(uint32_t free) { sRingOwnerTask = &gRing; stackFree = free; }
+static void publishNoOwner() { sRingOwnerTask = nullptr; }
+static uint32_t publishedOwnerStack() { return sRingOwnerTask ? stackFree : RING_OWNER_STACK_BYTES; }
+#else
+// The owner publishes its own high-water mark (production sRingOwnerStackFreeMin,
+// inserted above) once per lap; its exit and ringOwnerEnsure publish the whole
+// stack. Readers never hold the owner's task handle, which may be gone.
+static void publishOwnerStack(uint32_t free) { sRingOwnerStackFreeMin.store(free); }
+static void publishNoOwner() { sRingOwnerStackFreeMin.store(RING_OWNER_STACK_BYTES); }
+static uint32_t publishedOwnerStack() { return sRingOwnerStackFreeMin.load(); }
+#endif
 #define portENTER_CRITICAL(mux) do { \
   check((mux) == &gRingConnectMux || (mux) == &sRingIdentityMux, "readers use a known critical section"); \
   ++criticalDepth; ++criticalCalls; \
@@ -85,14 +101,14 @@ static uint32_t expectedUp() {
   return gRing.connected && gRing.connectedSince ? fakeNow - gRing.connectedSince : 0;
 }
 static void checkSchema(JsonVariantConst doc) {
-  const uint32_t free = sRingOwnerTask ? stackFree : RING_OWNER_STACK_BYTES;
-  check(doc.as<JsonObjectConst>().size() == 12, "complete twelve-field ring schema preserved");
+  const uint32_t free = publishedOwnerStack();
+  check(doc.as<JsonObjectConst>().size() == 11, "complete eleven-field ring schema, with no address");
   check(doc["schema"] == 1 && doc["connected"] == gRing.connected &&
         doc["connectPending"] == gRingConnectTaskActive, "connection and pending facts preserved");
   // Compare against the published copies directly (same translation unit), so
   // the schema check itself adds no critical section to the counts below.
-  check(doc["name"] == sRingIdentityName && doc["addr"] == sRingIdentityAddr,
-        "names and address preserve complete escaped values");
+  check(doc["name"] == sRingIdentityName && doc["addr"].isNull(),
+        "the name preserves its complete escaped value; no address field");
   check(doc["mtu"] == gRing.mtu && doc["rx"] == gRing.packetsReceived &&
         doc["upMs"] == expectedUp(), "MTU, counters and wrapping uptime preserved");
   check(doc["stackBytes"] == RING_OWNER_STACK_BYTES && doc["stackFreeMin"] == free &&
@@ -100,7 +116,7 @@ static void checkSchema(JsonVariantConst doc) {
         doc["scanFound"] == gRingScanFound, "stack units, clamping and discovery preserved");
 }
 // Writers refresh the cross-task copies whenever the owner's Strings change.
-static void syncIdentity() { g2RingSetIdentity(gRingDeviceName.c_str(), gRingDeviceAddress.c_str()); }
+static void syncIdentity() { g2RingSetIdentity(gRingDeviceName.c_str()); }
 static void emit(const char* kind) {
   const std::string output = cmd_ringstatus("json");
   JsonDocument doc = parsed(output.c_str());
@@ -113,7 +129,7 @@ static void populate() {
   gRing.packetsReceived = 42; gRing.mtu = 247;
   gRingDeviceName = "EVEN R1 Bench"; gRingDeviceAddress = "00:11:22:33:44:55"; syncIdentity();
   gRingConnectTaskActive = true; gRingScanFound = true;
-  sRingOwnerTask = &gRing; stackFree = 4096; fakeNow = 10000;
+  publishOwnerStack(4096); fakeNow = 10000;
 }
 static void characterize() {
   emit("JSON");
@@ -126,6 +142,12 @@ static void characterize() {
   emit("JSON");
   check(std::string(cmd_ringstatus("")).find("name='EVEN R1 Bench'") != std::string::npos,
         "status text reads the published identity copy, not the String");
+  {
+    // The owner knows an address (populate() set one); no output carries it.
+    const std::string text = cmd_ringstatus("");
+    check(text.find("addr") == std::string::npos && text.find("00:11:22") == std::string::npos,
+          "status text carries no address");
+  }
   std::cout << "TEXT\t" << cmd_ringstatus("") << '\n';
   populate(); emit("JSON");
   std::cout << "TEXT\t" << cmd_ringstatus("jsonish") << '\n';
@@ -138,9 +160,9 @@ static void characterize() {
   gRing.packetsReceived = 0xffffffffu; gRing.mtu = 0xffff;
   gRing.connectedSince = 1; fakeNow = 0; emit("JSON");
   for (uint32_t free : {0u, RING_OWNER_STACK_BYTES, RING_OWNER_STACK_BYTES + 100u}) {
-    stackFree = free; emit("JSON");
+    publishOwnerStack(free); emit("JSON");
   }
-  sRingOwnerTask = nullptr; emit("JSON");
+  publishNoOwner(); emit("JSON");
   populate();
   for (unsigned value = 1; value < 32; ++value) {
     gRingDeviceName = std::string("control-") + static_cast<char>(value) + "-end";
@@ -196,8 +218,8 @@ static void ownerChecks() {
     check(criticalCalls == beforeCritical + 2 && criticalDepth == 0,
           "identity copy and pending state each come through a synchronized accessor");
     gRingDeviceName = "changed after sampling"; gRingDeviceAddress = "different address";
-    check(first["name"] == "EVEN R1 Bench" && first["addr"] == "00:11:22:33:44:55",
-          "names and address are owned after source replacement");
+    check(first["name"] == "EVEN R1 Bench" && first["addr"].isNull(),
+          "the name is owned after source replacement; no address");
     check(g2RingBuildStatusJson(second.to<JsonObject>()), "independent second caller succeeds");
     second["name"] = "consumer edit";
     check(first["name"] == "EVEN R1 Bench" && gRingDeviceName == "changed after sampling",
@@ -206,7 +228,7 @@ static void ownerChecks() {
   populate();
   // Locate the exact 320-byte boundary using the actual serializer. Only the
   // string length changes: no duplicate model of the formatter's field sizes.
-  // Identity copies are bounded (31-character name, 17-character address), so
+  // The name copy is bounded (31 characters), so
   // even the longest identity leaves the CLI's 320-byte buffer with margin and
   // the "status too large" refusal remains a guard rather than a reachable path.
   {
@@ -214,8 +236,8 @@ static void ownerChecks() {
     gRingDeviceName = std::string(200, 'R'); gRingDeviceAddress = std::string(40, 'A'); syncIdentity();
     JsonDocument doc;
     check(g2RingBuildStatusJson(doc.to<JsonObject>()), "owner permits variable caller-sized output");
-    check(doc["name"] == std::string(31, 'R') && doc["addr"] == std::string(17, 'A'),
-          "identity copies are bounded");
+    check(doc["name"] == std::string(31, 'R') && doc["addr"].isNull(),
+          "the name copy is bounded");
     check(measureJson(doc) < 320, "the longest identity still fits the CLI buffer");
     checkSchema(parsed(cmd_ringstatus("json")).as<JsonVariantConst>());
   }

@@ -9,7 +9,7 @@
 
 // GET /r1-health           — R1 Health page (vitals + Track; connect on /bluetooth)
 esp_err_t handleR1HealthPage(httpd_req_t* req);
-// GET /api/health/status   — same JSON as `healthstatus json`
+// GET /api/health/status   — same JSON as `ring health json`
 esp_err_t handleR1HealthStatus(httpd_req_t* req);
 // POST /api/health/action  — typed, authenticated actions (no raw ring writes)
 esp_err_t handleR1HealthAction(httpd_req_t* req);

@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-972 commands across 53 modules (981 registry entries).
+991 commands across 55 modules (1000 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -18,7 +18,9 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`espnow`](#espnow) — 119 commands
 - [`c6`](#c6) — 9 commands
 - [`mqtt`](#mqtt) — 27 commands
-- [`bluetooth`](#bluetooth) — 19 commands
+- [`bluetooth`](#bluetooth) — 23 commands
+- [`phone`](#phone) — 10 commands
+- [`relay`](#relay) — 2 commands
 - [`filesystem`](#filesystem) — 10 commands
 - [`sd`](#sd) — 5 commands
 - [`oled`](#oled) — 19 commands
@@ -50,7 +52,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`debug`](#debug) — 181 commands
 - [`settings`](#settings) — 17 commands
 - [`sensorlog`](#sensorlog) — 2 commands
-- [`health`](#health) — 4 commands
+- [`health`](#health) — 2 commands
 - [`users`](#users) — 22 commands
 - [`features`](#features) — 2 commands
 - [`image`](#image) — 4 commands
@@ -61,8 +63,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`cm5`](#cm5) — 15 commands
 - [`ota`](#ota) — 18 commands
 - [`setpattern`](#setpattern) — 1 commands
-- [`even_g2`](#even-g2) — 57 commands
-- [`even_r1`](#even-r1) — 6 commands
+- [`even_g2`](#even-g2) — 56 commands
+- [`ring`](#ring) — 12 commands
 - [`llm`](#llm) — 36 commands
 - [`settingsedit`](#settingsedit) — 62 commands
 
@@ -317,29 +319,59 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## bluetooth
 
-> The Bluetooth subsystem runs the device BLE stack in one of two mutually exclusive roles selected by blemode: server mode (the device advertises and a phone/app connects to it) or client mode (the device acts as a BLE central for Even G2 glasses; the even_g2 commands then apply). Switching modes tears down the other role automatically. In server mode, openble/closeble start and stop advertising, blesend pushes a one-off message and bleevent an event to the connected client, and blestream toggles periodic pushes as a bitmask of sensors/system/events (blestream on/off/sensors/system/events, plus interval) -- all of which require an active connection. An app-layer Secure Channel (X25519 + passphrase + ChaCha20-Poly1305, independent of BLE bonding) is configured with blesecret and required with blesecure; both require super admin, as does blerequireauth. Boot reconnection to saved-MAC peers is per-peer via bleautoreconnect <name> [on|off] (see blepeers for names).
+> The Bluetooth radio runs one role at a time. openble brings up the shared client stack (the host, its controller link and the setup worker; like openwifi) and closeble takes the whole radio down again; the stack stays up until closeble or bleenabled 0, never because the last device closed. On the stack each device opens and closes on its own: openg2/closeg2 for the Even G2 glasses (the even_g2 commands then apply), openring/closering for the R1 ring, openphone/closephone for the phone link; closing one leaves the others and the stack alone, and a device out of range stays open and reconnects. openconsole starts the app console server instead (legacy: the device advertises the App console and the HardwareOne app connects to it; it closes the three devices first and never coexists with the client stack) and closeconsole stops it. blemode stores the boot role only (client, the default, or server). The phone link carries the relay (the LLM fallback and the Terminal, while the app forwards) and the app console as a stream inside it, which the device offers when its phone secret is a device code from phone pair new and bleconsole is on (bleconsole on|off|status); every console session there signs in. Beside the glasses the console can also ride the link's own command service (Secure Channel only, never advertised). blestatus and bleinfo show the role running now, the host state, the app console and the Phone link block (state, console, relay, streams and session end reasons; phone status has the pipe's detail). blesend pushes a one-off message to the connected app (on the phone link too); in server mode bleevent sends an event and blestream toggles periodic pushes as a bitmask of sensors/system/events (blestream on/off/sensors/system/events, plus interval) -- all of which require an active connection. An app-layer Secure Channel (X25519 + passphrase + ChaCha20-Poly1305, independent of BLE bonding) is configured with blesecret and required with blesecure; both require super admin, as does blerequireauth. Boot reconnection to saved-MAC peers is per-peer via bleautoreconnect <name> [on|off] (see blepeers for names).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `bleadv` | A | Start/stop/toggle BLE advertising [start\|stop\|toggle].<br/>`Usage: bleadv [start\|stop\|toggle]` |
-| `bleautoreconnect` | A | Per-peer auto-reconnect (boot + mid-session drop): bleautoreconnect <name> [on\|off]. `blepeers` lists names.<br/>`Usage: bleautoreconnect <peer-name> [on\|off] on: reconnect at boot and reseek after unexpected drops (not after ringdisconnect/closeg2)` |
+| `bleautoreconnect` | A | Per-peer auto-reconnect (boot + mid-session drop): bleautoreconnect <name> [on\|off]. `blepeers` lists names.<br/>`Usage: bleautoreconnect <peer-name> [on\|off] on: reconnect at boot and reseek after unexpected drops (not after closering / closeg2 / closephone)` |
 | `bleautostart` | A | Enable/disable BLE auto-start after boot [on\|off].<br/>`Usage: bleautostart [on\|off]` |
+| `bleconsole` | A | App console on the phone link: its console stream (a device code from 'phone pair new'), and beside the glasses the Secure Channel attach [on\|off\|status].<br/>`Usage: bleconsole [on\|off\|status]` |
 | `bledisconnect` | A | Disconnect BLE app clients: all, or one by connection id [connId].<br/>`Usage: bledisconnect [connId]` |
 | `bleevent` |  | Send event to BLE client: <event>.<br/>`Usage: bleevent <message>` |
 | `bleinfo` |  | Show BLE configuration and settings. (add 'json' for JSON output) |
-| `blemode` | A | Get/set BLE mode [server\|client].<br/>`Usage: blemode [server\|client]` |
+| `blemode` | A | Get/set the saved Bluetooth boot role: client = the shared stack for glasses, ring and phone (default); server = the app console server (legacy).<br/>`Usage: blemode [client\|server] client = the shared client stack: glasses, ring and phone open on it (openg2 / openring / openphone; auto-reconnect at boot) server = the app console server, advertising at boot (openconsole starts it now; it never coexists with the client stack)` |
 | `blename` |  | Get/set BLE device name [name].<br/>`Usage: blename [name]` |
 | `blepeers` |  | List all registered BLE peers and their state. |
-| `bleread` |  | Read Bluetooth connection status. (add 'json' for JSON output) |
+| `bleread` |  | Read the Bluetooth role, app console and relay pipe. (add 'json' for JSON output) |
+| `blerecords` | A | BLE scan/connect records with the Wi-Fi state (no addresses).<br/>`Usage: blerecords [scans\|connects\|clear]` |
 | `blerequireauth` | S | Enable/disable BLE authentication requirement [on\|off].<br/>`Usage: blerequireauth [on\|off]` |
 | `blesecret` | S | Set/clear the BLE Secure Channel passphrase: blesecret <phrase\|clear>.<br/>`Usage: blesecret <passphrase\|clear>` |
 | `blesecure` | S | Require app-layer BLE encryption [on\|off].<br/>`Usage: blesecure [on\|off]` |
 | `blesend` |  | Send message to BLE client: <message>.<br/>`Usage: blesend <message>` |
-| `blestatus` |  | Show Bluetooth connection status. (add 'json' for JSON output) |
+| `blestatus` |  | Show the Bluetooth role, app console and relay pipe. (add 'json' for JSON output) |
 | `blestream` |  | Control streaming: <on\|off\|sensors\|system\|events\|interval>.<br/>`Usage: blestream [on\|off\|sensors\|system\|events\|interval] \| interval <sensor_ms> <system_ms>` |
 | `bletxpower` |  | Get/set BLE TX power [0-7].<br/>`Usage: bletxpower [0..7]` |
-| `closeble` | A | Stop Bluetooth LE and deinitialize. |
-| `openble` | A | Start Bluetooth LE and begin advertising. |
+| `closeble` | A | Bluetooth off: close the glasses, ring, phone and the app console, then stop the host (bleenabled 0 also persists it). |
+| `closeconsole` | A | Stop the app console server (saved boot role back to client; 'openble' brings the client stack back). |
+| `openble` | A | Bluetooth on: bring the shared client stack up; devices with auto-reconnect come back (openg2 / openring / openphone open one). |
+| `openconsole` | A | Start the app console server for a direct app connection (closes the glasses, ring and phone; saved boot role = server). |
+
+## phone
+
+> The Android phone as a BLE device, reached through the authenticated phone pipe. The pipe is a device on the shared client stack: openphone opens the phone link (bringing the stack up if it is down; it opens by itself at boot and after openble when its auto-reconnect is on) and closephone closes it, with the app console on its link, leaving the glasses, the ring and the stack as they were; the app console can ride its link (bleconsole). phone status [json] shows the link. First-time pairing: sign in as a super admin on serial or the OLED and run phone pair new (or Bluetooth > Phone > New code and pair): the device replaces the phone secret with a 16-symbol code, shows it once (printed on serial, or on its own OLED screen, never in a log) and keeps pairing open for up to 3 minutes, until the first success; type the code in the app. Only such a device code offers the app console on the phone link. A passphrase of your own set with phone secret <passphrase> (super admin, not over Bluetooth) carries the relay only; then phone pair from serial or the OLED opens a 60 s window. phone connect, phone disconnect and phone forget act on the paired phone; phone connect, phone pair, phone pair new and phone forget refuse while the app console server runs (phone start switches). bleautoreconnect phone [on|off] reconnects it at boot. phone scan shows or sets the reconnect scan and phone stats the link counters.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `closephone` | A | Close the phone link (glasses, ring and Bluetooth stay up). |
+| `openphone` | A | Open the phone link on the Bluetooth client stack and connect to the paired phone. |
+| `phone` |  | Android phone link. |
+| `phone forget` | A | Forget the paired phone (serial or OLED admin). |
+| `phone pair` | A | Open a 60 s pairing window (serial or OLED admin). |
+| `phone pair new` | S | Make a new pairing code (the phone secret), show it once on serial or the OLED and pair for 3 min.<br/>`Usage: phone pair new` |
+| `phone scan` | A | Show or set the phone reconnect scan.<br/>`Usage: phone scan [default\|legacy\|<interval_ms> <window_ms> dup\|nodup]` |
+| `phone secret` | S | Set/clear the phone pairing passphrase.<br/>`Usage: phone secret <passphrase\|clear>` |
+| `phone stats` | A | Phone link sessions, counters and setup timings. |
+| `phone status` |  | Show the phone link. (add 'json' for JSON output) |
+
+## relay
+
+> The phone pipe relays TCP for HardwareOne's network users: the LLM HTTP source and the G2 Terminal. relay status shows how their requests reached the network (Wi-Fi or the phone), with outcomes and the last eight requests.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `relay` |  | What the phone link carries. |
+| `relay status` | A | How relay users' requests reached the network (Wi-Fi or phone). |
 
 ## filesystem
 
@@ -352,7 +384,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `fileread` |  | Read file chunk as JSON: "<path>" [offset] [len] [b64\|bin] |
 | `filerename` |  | Rename file: "<oldpath>" "<newname>"<br/>`Usage: filerename "<oldpath>" "<newname>"` |
 | `files` |  | List files ["path"] \| files json ["path"] \| files stats json ["path"] |
-| `fileview` |  | View file (paged): "<path>" [page]<br/>`Usage: fileview "<path>" [page] (pages are ~3.5KB, split at line boundaries)` |
+| `fileview` |  | View file (paged): "<path>" [page] [raw]<br/>`Usage: fileview "<path>" [page] [raw] (pages are ~3.5KB, split at line boundaries; JSON is re-indented unless raw)` |
 | `filewrite` |  | Write file chunk: "<path>" <offset> <b64chunk> [final] |
 | `logtier` |  | Show current log storage tier (LittleFS vs SD overflow). |
 | `mkdir` |  | Create directory: "<path>"<br/>`Usage: mkdir "<path>"` |
@@ -1071,14 +1103,12 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## health
 
-> Live vitals from a paired R1 ring (HR, HRV, SpO2, temperature, battery) plus the on-device health logger. healthstatus reads live values, ring control state, logging state and typed-history status; healthstatus json is what the app and web page consume. healthlogging drives the local CSV logger independently of the ring's own health-collection privacy setting, and healthlogmerge stitches captures together. The ring rides the G2 BLE transport, so this whole family requires Bluetooth + G2; connect via ringconnect.
+> HardwareOne's own CSV logger for R1 ring vitals. healthlogging on|off|toggle drives it independently of the ring's own health-collection privacy setting, healthlogging status shows it, and healthlogmerge stitches captures together. The ring's live vitals, refresh and history are the ring module (ring health).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `healthlogging` |  | Start/stop local R1 health logging (independent of ring collection)<br/>`Usage: healthlogging <on\|off\|toggle\|status\|interval [sec]> on: enable LOG_R1, force format=CSV, start under /logging_captures/sensors/, persist for boot (one dated per-day file when the clock is set, boot-<N>/ until sync then roll) off: remove LOG_R1; stop logging if no other sensors remain interval <sec>: legacy POINT mining interval (default 900 = 15 min) On 2.2.9, logging is passive/on-demand and records Poll Now refreshes; it sends no timed POINT query R1-only sessions write only on an admitted mine/refresh — no 5s empty heartbeats This does not change the ring's health-collection privacy setting.` |
 | `healthlogmerge` | A | Byte-concatenate sensor logs in the given order: "<out>" "<in1>" "<in2>" ...<br/>`Usage: healthlogmerge "<output>" "<in1>" "<in2>" [...] OUTPUT FIRST — arg 0 is TRUNCATED. Inputs follow, in the order you want them. Bare output name → /logging_captures/sensors/; INPUTS need a full path. Extensionless output gets .csv appended even for TEXT inputs. Concatenation is byte-exact: CSV inputs keep their header lines mid-file, rows are NOT time-ordered, and mixing formats/sensor masks yields an unparseable result. Max 8 inputs (arg limit).` |
-| `healthstatus` |  | R1 live vitals, ring controls, local logging, and typed history status<br/>`Usage: healthstatus [json\|poll\|history\|force-history\|refresh-controls] bare/json: live values, desired/observed controls, local logging, history/store poll: exact-2.2.9 DAILY HR/HRV/SpO2/sleep/activity + deviceStatus refresh history: normal typed history refresh; force-history: admin freshness bypass refresh-controls: read low-power state; health collection has no proven GET and stays Unknown BLE App / Web use healthstatus json; connect via ringconnect / Bluetooth page` |
-| `healthstatus force-history` | A | R1 typed history refresh that bypasses the freshness window (admin)<br/>`Usage: healthstatus force-history` |
 
 ## users
 
@@ -1233,11 +1263,11 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## even_g2
 
-> This subsystem drives Even Reality G2 smart glasses while Bluetooth is in client mode (blemode client); the two temples are addressed as left/right/auto. openg2 starts scan-and-connect IN THE BACKGROUND and returns immediately -- it does not block, so poll g2status (or g2info for firmware/MAC/battery) to see when the link is up, and nearly every other command here requires that connection first. Display commands render to the lens: g2show prints text, g2ai/g2ai-noask/g2ai-direct push a front-pane AI answer card through the EvenAI pipeline, g2bmp shows a BMP file, and g2sensors/g2network/g2files/g2settingspage show built-in info pages; g2nav [on|off] enables menu-navigation mode and g2clear blanks the display. For audio, use the shared Microphone controls: micsource selects auto, pdm or g2; openmic/closemic start and stop the selected source; micrecord controls WAV recording. g2micon/g2micoff are low-level stream probes; g2micrec and g2micwav remain SD-backed raw-LC3 and decoded-WAV diagnostics. closeg2 disconnects but keeps the GATT cache for fast reconnect; closeg2 full also frees the cache to recover about 30 KB. The remaining g2* commands are low-level protocol probes and diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).
+> This subsystem drives Even Reality G2 smart glasses in the Glasses mode (blemode client or glasses: the glasses, plus the phone link whenever a phone secret is set, with the app console on that link); the two temples are addressed as left/right/auto. openg2 starts scan-and-connect IN THE BACKGROUND and returns immediately -- it does not block, so poll g2status (or g2info for firmware/MAC/battery) to see when the link is up, and nearly every other command here requires that connection first. Display commands render to the lens: g2show prints text, g2ai/g2ai-noask/g2ai-direct push a front-pane AI answer card through the EvenAI pipeline, g2bmp shows a BMP file, and g2sensors/g2network/g2files/g2settingspage show built-in info pages; g2nav [on|off] enables menu-navigation mode and g2clear blanks the display. For audio, use the shared Microphone controls: micsource selects auto, pdm or g2; openmic/closemic start and stop the selected source; micrecord controls WAV recording. g2micon/g2micoff are low-level stream probes; g2micrec and g2micwav remain SD-backed raw-LC3 and decoded-WAV diagnostics. closeg2 disconnects but keeps the GATT cache for fast reconnect; closeg2 full also frees the cache to recover about 30 KB. The remaining g2* commands are low-level protocol probes and diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closeg2` | A | Disconnect G2 glasses [full=also free ~30KB GATT cache].<br/>`Usage: closeg2 [full]` |
+| `closeg2` | A | Close the G2 glasses: drop both links and release the glasses runtime (ring, phone and Bluetooth stay up). |
 | `g2ai` |  | Front-pane AI card (full pipeline): g2ai <text><br/>`Usage: g2ai <text>` |
 | `g2ai-direct` |  | Variant: CTRL+REPLY only: g2ai-direct <text><br/>`Usage: g2ai-direct <text>` |
 | `g2ai-noask` |  | Variant: skip ASK step: g2ai-noask <text><br/>`Usage: g2ai-noask <text>` |
@@ -1249,7 +1279,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `g2connpri` | A | Probe the BLE conn-interval admission boundary: g2connpri [<min> <max>\|default] (bare = report)<br/>`Usage: g2connpri [<min> <max>\|default] (ticks of 1.25 ms; runtime only; bare = report)` |
 | `g2control` | A | Persist/reconcile G2 device policy without overwriting official-app state by default<br/>`Usage: g2control [<headup\|notifications> <preserve\|off\|on>] (bare = status; work is queued to g2 control owner)` |
 | `g2conversate` |  | Native Conversate mic keepalive (no STT or file)<br/>`Usage: g2conversate on \| test [seconds 10..3600, default 300] \| status \| stop \| off` |
-| `g2deinit` |  | Deinitialize G2 client mode |
 | `g2devcfg` |  | Typed sid=0x80 sender: g2devcfg <heartbeat\|auth\|role\|time\|ring> [args]<br/>`Usage: g2devcfg <heartbeat\|auth\|role <both\|right\|left>\|time [tzQuarterHours]\|ring <mac> <name>>` |
 | `g2dumpframes` |  | Print the recent G2 envelope ring buffer |
 | `g2envgap` | A | Image inter-envelope gap override: g2envgap [<5..500>\|auto] (bare = report)<br/>`Usage: g2envgap [<5..500>\|auto] (runtime only; bare = report)` |
@@ -1261,7 +1290,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `g2hold` |  | Long-press (hold) input: firmware profile, pairing, routes and last 16 hold records<br/>`Usage: g2hold [status\|clear\|sim <press [ring\|right\|left\|unknown]\|release\|abort>] bare = status; clear empties the record ring and counters sim (admin; press only by the paired wearer): synthetic right-arm hold through the real pairing and dispatcher (default source ring)` |
 | `g2imgprobe` |  | Probe Cmd=3 multi-frag wire path: g2imgprobe [size_bytes]<br/>`Usage: g2imgprobe [size_bytes] (1..4096, default 1024)` |
 | `g2info` |  | Dump device info (firmware, MAC, battery, etc.) |
-| `g2init` |  | Initialize G2 client mode |
 | `g2listrebuild` |  | REBUILD-list on swap when pure list + same row count [on\|off] (default ON)<br/>`Usage: g2listrebuild [<on\|off>] (bare = report state)` |
 | `g2liveloop` |  | Q13/Q14 lens-idle keep-alive: g2liveloop keep [on\|off] (default off → break on lens timeout)<br/>`Usage: g2liveloop keep [<on\|off>] (bare = report state)` |
 | `g2liverate` |  | Get/set live-update probe cadence (ms), default 600: g2liverate [N]<br/>`Usage: g2liverate [ms>=100] (bare = report)` |
@@ -1292,21 +1320,28 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `g2status` |  | Show G2 connection status |
 | `g2streamres` |  | Lens stream resolution: g2streamres [<W>x<H>] (bare = report; e.g., 96x96, 160x120, 288x144)<br/>`Usage: g2streamres [<W>x<H>] (W 16..288, H 16..144; bare = report)` |
 | `g2streamtonemap` |  | Lens stream 4-bpp tone: 0=Linear 1=Balanced 2=Shadows 3=Legacy (bare = report)<br/>`Usage: g2streamtonemap [<0\|1\|2\|3\|linear\|balanced\|shadows\|legacy\|off\|on>] (bare = report state)` |
+| `g2terminal` |  | Native Terminal voice/chat (firmware 2.3.2.14)<br/>`Usage: g2terminal open \| status \| close. Browse Mingus host sessions and recent history; no automatic submission.` |
 | `g2verbose` |  | Scan-verbose logging: g2verbose [on\|off\|toggle] (bare = report state)<br/>`Usage: g2verbose [on\|off\|toggle] (bare = report state)` |
 | `openg2` | A | Connect to G2 glasses: openg2 [left\|right\|auto\|saved]<br/>`Usage: openg2 [left\|right\|auto\|saved] (default auto; saved = peer MACs)` |
 
-## even_r1
+## ring
 
-> This subsystem talks to the Even R1 smart ring over BLE through a serialized, profile-gated transaction owner. ringscan [seconds] discovers the ring and ringconnect [mac] connects (auto-scanning when no MAC is given, or connecting directly when one is), with ringstatus and ringdisconnect for state and teardown. ringquery is the main data command, requesting wear/heart-rate/HRV/SpO2/temperature/activity/sleep readings. Its raw diagnostic form is admin-only, requires confirmation for SETs, and prohibits user-profile writes. Ring health collection and low power are set with ringcontrol <collection|lowpower> <preserve|on|off> (admin): a persisted desired state applied to the ring asynchronously, which healthstatus reports as desired and observed (the OLED and web Health controls run the same command). Health SETs remain ACKed-unverified while low power has capture-proven readback. debugringdump toggles a redacted byte dump for debugging. Bridging ring data onto the G2 glasses is not supported: both approaches proved to be dead ends and were removed.
+> The Even R1 smart ring over BLE, through a serialized, profile-gated transaction owner. ring scan [seconds] finds it and ring connect [mac|reconnect] connects (scanning first without a MAC); ring status [json] and ring disconnect show and end the link. ring health [json] reads vitals, ring controls and typed history; ring poll refreshes the vitals and ring history the history (ring history force, admin, skips the freshness window). ring query requests one reading; its raw form is admin-only, confirms every SET and refuses user-profile writes. ring control <collection|lowpower> <preserve|on|off> (admin) saves a desired state applied asynchronously, which the OLED and web Health controls also use; ring control refresh reads low power back. Bridging ring data onto the G2 glasses proved a dead end and was removed.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `ringconnect` | A | Connect to the R1 ring: ringconnect [mac\|reconnect]<br/>`Usage: ringconnect [mac\|reconnect] (no arg = scan-then-connect; mac = direct; reconnect = drop+settle+connect)` |
-| `ringcontrol` | A | Set ring health collection or low power: ringcontrol <collection\|lowpower> <preserve\|on\|off><br/>`Usage: ringcontrol <collection\|lowpower> <preserve\|on\|off> (persisted desired state, applied to the ring asynchronously; healthstatus shows desired/observed)` |
-| `ringdisconnect` | A | Disconnect from the R1 ring |
-| `ringquery` |  | Queue an R1 query: ringquery <wear\|hr\|hrv\|spo2\|temp\|activity\|sleep\|raw> [type]<br/>`Usage: ringquery <wear\|hr\|hrv\|spo2\|temp\|activity\|sleep> [daily\|point\|measure] \| raw <module> <cmd> <subCmd> [hex_payload] [status=NN] (raw is admin-only; SET requires confirmation)` |
-| `ringscan` |  | Scan for the R1 ring: ringscan [seconds] (default 30, max 300)<br/>`Usage: ringscan [seconds] (1..300, default 30)` |
-| `ringstatus` |  | Show R1 ring connection status |
+| `closering` | A | Close the R1 ring: drop its link and release its owner task (glasses, phone and Bluetooth stay up). |
+| `openring` | A | Open the R1 ring on the Bluetooth client stack and connect (scan, the saved address, reconnect, or a MAC).<br/>`Usage: openring [saved\|reconnect\|<mac>] (none = scan then connect; saved = the saved address; reconnect = drop, settle, connect)` |
+| `ring` |  | Even R1 ring.<br/>`Usage: ring <status\|scan\|connect\|disconnect\|health\|poll\|history\|query\|control>` |
+| `ring control` | A | Set the ring's health collection or low power.<br/>`Usage: ring control <collection\|lowpower> <preserve\|on\|off> (saved, applied asynchronously; ring health shows desired/observed)` |
+| `ring control refresh` |  | Read the ring's low-power state back. |
+| `ring health` |  | R1 vitals, ring controls and typed history. (add 'json' for JSON output) |
+| `ring history` |  | Refresh R1 typed history. |
+| `ring history force` | A | Refresh R1 typed history past the freshness window. |
+| `ring poll` |  | Refresh R1 vitals now. |
+| `ring query` |  | Queue one R1 query.<br/>`Usage: ring query <wear\|hr\|hrv\|spo2\|temp\|activity\|sleep> [daily\|point\|measure] ring query raw <module> <cmd> <subCmd> [hex_payload] [status=NN] (admin; a SET asks to confirm) status: bit0 type (0 notify, 1 ack), bit1 method (0 get, 1 set), bits2-3 ack (0 ok, 1 err, 2 refuse, 3 notSup)` |
+| `ring scan` |  | Scan for the R1 ring.<br/>`Usage: ring scan [seconds] (1..300, default 30)` |
+| `ring status` |  | R1 link status. (add 'json' for JSON output) |
 
 ## llm
 
@@ -1348,7 +1383,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `llmstop` |  | Stop in-progress generation |
 | `llmtemperature` | A | Set default sampling temperature<br/>`Usage: llmtemperature <0.0-2.0>` |
 | `llmtopp` | A | Set default Top-P threshold<br/>`Usage: llmtopp <0.0-1.0>` |
-| `llmturns` |  | Read a conversation turn (JSON)<br/>`Usage: llmturns json <index>` |
+| `llmturns` |  | Read a conversation turn (JSON)<br/>`Usage: llmturns json <index> [offset] (follow next while more=true)` |
 | `llmunload` | A | Unload model and free PSRAM |
 
 ## settingsedit

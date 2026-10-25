@@ -169,7 +169,7 @@ void displayUserManager() {
 
   if (gUmLevel == UM_LIST) {
     const int total = gUmCount + 1;   // + Add User row
-    const int lineH = 10, visible = 4;
+    const int lineH = 10, visible = oledVisibleRows(lineH, 0, 4);
     if (gUmSel < gUmScroll) gUmScroll = gUmSel;
     if (gUmSel >= gUmScroll + visible) gUmScroll = gUmSel - visible + 1;
     for (int row = 0; row < visible; row++) {

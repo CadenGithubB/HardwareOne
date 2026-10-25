@@ -119,6 +119,8 @@ const char* r1ProtocolProfileName(R1ProtocolProfile profile) {
   switch (profile) {
     case R1_PROFILE_FW_2_2_7_0005: return "2.2.7.0005";
     case R1_PROFILE_FW_2_2_9_0003: return "2.2.9.0003";
+    case R1_PROFILE_FW_2_3_2_0007: return "2.3.2.0007";
+    case R1_PROFILE_FW_2_3_2_0008: return "2.3.2.0008";
     case R1_PROFILE_UNKNOWN:
     default:                       return "unknown";
   }
@@ -131,40 +133,73 @@ R1ProtocolProfile r1ProfileForFirmware(const char* firmware) {
   if (firmware && strcmp(firmware, "2.2.9.0003") == 0) {
     return R1_PROFILE_FW_2_2_9_0003;
   }
+  if (firmware && strcmp(firmware, "2.3.2.0007") == 0) {
+    return R1_PROFILE_FW_2_3_2_0007;
+  }
+  if (firmware && strcmp(firmware, "2.3.2.0008") == 0) {
+    return R1_PROFILE_FW_2_3_2_0008;
+  }
   return R1_PROFILE_UNKNOWN;
 }
 
 namespace {
-bool r1Captured229DailyDataCmd(uint8_t cmd) {
+// DAILY metrics whose pages HardwareOne parses, acknowledges and stores on the
+// 2.2.9 and 2.3.2 profiles. Sleep is queried for presence only.
+bool r1DailyHistoryDataCmd(uint8_t cmd) {
   return cmd == R1_CMD_HEARTRATE || cmd == R1_CMD_HRV ||
          cmd == R1_CMD_SPO2 || cmd == R1_CMD_ACTIVITY;
 }
 
-bool r1Captured229DailyQueryCmd(uint8_t cmd) {
-  return r1Captured229DailyDataCmd(cmd) || cmd == R1_CMD_SLEEP;
+bool r1DailyHistoryQueryCmd(uint8_t cmd) {
+  return r1DailyHistoryDataCmd(cmd) || cmd == R1_CMD_SLEEP;
+}
+
+// 2.3.2.0007 (2026-10-15, app 2.3.1) and 2.3.2.0008 (2026-10-18, app 2.3.2
+// build 243) captures both show the stock app's DAILY sync: empty notify/get
+// requests for HR, HRV, SpO2, sleep and activity, notify/set pages in the
+// exact 2.2.9 lengths, 3-part countdown activity frames and a 10-byte
+// packetAck per page. Build 243 sends that sync with no firmware gate. See
+// docs/R1_HEALTH_2_3_2_RESEARCH.md.
+bool r1Profile232Health(R1ProtocolProfile profile) {
+  return profile == R1_PROFILE_FW_2_3_2_0007 ||
+         profile == R1_PROFILE_FW_2_3_2_0008;
+}
+
+bool r1ProfileDailyHistory(R1ProtocolProfile profile) {
+  return profile == R1_PROFILE_FW_2_2_9_0003 || r1Profile232Health(profile);
 }
 }  // namespace
 
 bool r1ProfileSupportsAdvStart(R1ProtocolProfile profile) {
+  // 2026-10-15 stock-app trace: exact 2.3.2.0007 deviceInfo, 12-byte
+  // right/left temple addresses and matching successful advStart ACKs.
+  // 2.3.2.0008 (2026-10-18): the Even 2.3.2 build 243 app that installed it
+  // sends the same auth, systemTime and 12-byte advStart to every ring and
+  // never reads the ring's firmware on that path; a 0008 ring accepted
+  // HardwareOne's pairAuth and deviceInfo. This admits connection setup,
+  // not older firmware's health layouts.
   return profile == R1_PROFILE_FW_2_2_7_0005 ||
-         profile == R1_PROFILE_FW_2_2_9_0003;
+         profile == R1_PROFILE_FW_2_2_9_0003 ||
+         profile == R1_PROFILE_FW_2_3_2_0007 ||
+         profile == R1_PROFILE_FW_2_3_2_0008;
 }
 
 bool r1ProfileSupportsHealthCollectionSet(R1ProtocolProfile profile,
                                           bool enabled) {
   if (profile == R1_PROFILE_FW_2_2_7_0005) return true;
-  // The 2.2.9 capture contains the enabled form only. Do not infer OFF.
-  return profile == R1_PROFILE_FW_2_2_9_0003 && enabled;
+  // The 2.2.9 and 2.3.2 captures contain the enabled form only. Do not infer
+  // OFF.
+  return r1ProfileDailyHistory(profile) && enabled;
 }
 
 bool r1ProfileSupportsHealthQuery(R1ProtocolProfile profile, uint8_t cmd,
                                   uint8_t subCmd) {
   // Preserve the established 2.2.7 diagnostic builder behavior exactly.
   if (profile == R1_PROFILE_FW_2_2_7_0005) return true;
-  if (profile != R1_PROFILE_FW_2_2_9_0003 || subCmd != R1_SUB_DAILY) {
+  if (!r1ProfileDailyHistory(profile) || subCmd != R1_SUB_DAILY) {
     return false;
   }
-  return r1Captured229DailyQueryCmd(cmd);
+  return r1DailyHistoryQueryCmd(cmd);
 }
 
 bool r1ProfileSupportsPointMeasureQuery(R1ProtocolProfile profile) {
@@ -186,8 +221,9 @@ bool r1ProfileSupportsHealthPageRefresh(R1ProtocolProfile profile) {
   // Even 2.2.9 build 230 exposes getDailyData (not a POINT/MEASURE sender),
   // and the matching 2.2.9.0003 capture uses DAILY for HR/HRV/SpO2/sleep/
   // activity. HardwareOne composes those proven primitives into its refresh;
-  // the capture does not claim a causal stock-app page action.
-  return profile == R1_PROFILE_FW_2_2_9_0003;
+  // the capture does not claim a causal stock-app page action. Both 2.3.2
+  // captures show the same DAILY round.
+  return r1ProfileDailyHistory(profile);
 }
 
 bool r1ProfileSupportsSingleFrameDaily(R1ProtocolProfile profile, uint8_t cmd) {
@@ -195,8 +231,7 @@ bool r1ProfileSupportsSingleFrameDaily(R1ProtocolProfile profile, uint8_t cmd) {
     return cmd == R1_CMD_HEARTRATE || cmd == R1_CMD_HRV ||
            cmd == R1_CMD_SPO2 || cmd == R1_CMD_ACTIVITY;
   }
-  return profile == R1_PROFILE_FW_2_2_9_0003 &&
-         r1Captured229DailyDataCmd(cmd);
+  return r1ProfileDailyHistory(profile) && r1DailyHistoryDataCmd(cmd);
 }
 
 bool r1ProfileSupportsDailyPacketAck(R1ProtocolProfile profile, uint8_t cmd) {
@@ -205,16 +240,33 @@ bool r1ProfileSupportsDailyPacketAck(R1ProtocolProfile profile, uint8_t cmd) {
            cmd == R1_CMD_SPO2 || cmd == R1_CMD_SLEEP ||
            cmd == R1_CMD_ACTIVITY;
   }
-  return profile == R1_PROFILE_FW_2_2_9_0003 &&
-         r1Captured229DailyDataCmd(cmd);
+  // 2.3.2 also acknowledges a sleep record once the Health history model has
+  // stored it, as the stock app does for every sleep notify.
+  if (cmd == R1_CMD_SLEEP) return r1ProfileSupportsSleepRecords(profile);
+  return r1ProfileDailyHistory(profile) && r1DailyHistoryDataCmd(cmd);
 }
 
 bool r1ProfileSupportsActivityReassembly(R1ProtocolProfile profile) {
-  return profile == R1_PROFILE_FW_2_2_7_0005;
+  // Both 2.3.2 captures carry full activity days as 3-part frames with the
+  // 2/1/0 countdown and repeated whole-model CRC32 this reassembler expects.
+  return profile == R1_PROFILE_FW_2_2_7_0005 || r1Profile232Health(profile);
 }
 
 bool r1ProfileSupportsSleepDataIngestion(R1ProtocolProfile profile) {
   return profile == R1_PROFILE_FW_2_2_7_0005;
+}
+
+bool r1ProfileSupportsSleepRecords(R1ProtocolProfile profile) {
+  // Both 2.3.2 captures: every long record's stage epochs x 30 s equal
+  // end - start, and the stock app acknowledges each record.
+  return r1Profile232Health(profile);
+}
+
+bool r1ProfileSupportsChargeStatus(R1ProtocolProfile profile) {
+  // 2.3.2.0008 charger/desk/finger capture: byte 1 was 1 on the charger and
+  // 2 both on a desk and on a finger; the ring pushed the same 7-byte status
+  // as notify/set/ok every ~30 s while charging.
+  return r1Profile232Health(profile);
 }
 
 bool r1ProfileSupportsLowPower(R1ProtocolProfile profile) {
@@ -227,11 +279,41 @@ bool r1ProfileSupportsUserInfo(R1ProtocolProfile profile) {
 
 bool r1ProfileSupportsDeviceStatusIngestion(R1ProtocolProfile profile) {
   return profile == R1_PROFILE_FW_2_2_7_0005 ||
+         r1ProfileDailyHistory(profile);
+}
+
+bool r1ProfileSupportsDeviceStatusWear(R1ProtocolProfile profile) {
+  // Even 2.3.2 build 243 parses deviceStatus byte 1 as charge status
+  // (0 unknown, 1 charging, 2 notCharging, 3 full), not wear. Keep the older
+  // wear reading on the profiles it was established for; 2.3.2 never feeds it.
+  return profile == R1_PROFILE_FW_2_2_7_0005 ||
          profile == R1_PROFILE_FW_2_2_9_0003;
 }
 
 bool r1ProfileSupportsWearStatus(R1ProtocolProfile profile) {
-  return profile == R1_PROFILE_FW_2_2_7_0005;
+  // 2.3.2: Even 2.3.2 build 243 sends the same empty GET (getWearStatus) and
+  // reads a 1-byte reply; HardwareOne asks once after setup so wear is known
+  // before the ring's next push.
+  return profile == R1_PROFILE_FW_2_2_7_0005 || r1Profile232Health(profile);
+}
+
+bool r1ProfileSupportsWearQueryOnConnect(R1ProtocolProfile profile) {
+  return r1Profile232Health(profile);
+}
+
+bool r1ProfileSupportsDeviceStatusPoll(R1ProtocolProfile profile) {
+  // 2.3.2 has no point-poll cycle (the 2.2.7 cycle carries deviceStatus), so
+  // without this only Poll Now asks for battery. Same empty GET Poll Now sends;
+  // the 7-byte reply is the capture-proven battery + charge status. 2.2.9
+  // would likely work too, but no 2.2.9 ring has been tested with it.
+  return r1Profile232Health(profile);
+}
+
+bool r1ProfileSupportsWearStatusIngestion(R1ProtocolProfile profile) {
+  // 2.3.2.0008 (2026-10-18 charger/desk/finger capture): the ring pushes a
+  // one-byte system/0x03 notify on every wear change (1 notWear, 2 wear,
+  // 3 possiblyWear) without being asked.
+  return r1ProfileSupportsWearStatus(profile) || r1Profile232Health(profile);
 }
 
 const char* r1ParseErrorName(R1ParseError error) {
@@ -811,18 +893,21 @@ static size_t formatEpoch(uint32_t epochSec, char* out, size_t cap) {
 // (75 → 70). Best fit is **ring battery percent**: realistic 0..100 range,
 // stable while connected (drains slowly), drops over time. Not 100%
 // confirmed — could also be a session-id or other persisted counter.
-// byte[1] is consistently 0x02 = WEAR per BleRing1SystemWearStatus enum.
-// byte[2] is 0x01 — meaning unknown but stable, possibly version flag.
+// byte[1] was read as wear on 2.2.x. Even 2.3.2 build 243 parses it as charge
+// status, and a 2.3.2.0008 capture (2026-10-18) confirms that: 1 on the
+// charger, 2 both worn and lying on a desk. 3 is "full" in the app's enum.
+// byte[2] is 0x01 in GET replies and 0x00 in the ring's own pushes; unknown.
 // bytes[3..6] are always zero in our captures.
 static size_t annotateDeviceStatus(const uint8_t* p, size_t len, char* out, size_t cap) {
   if (len < 7) return 0;
-  const char* wear =
+  const char* charge =
       (p[1] == 0) ? "unknown" :
-      (p[1] == 1) ? "notWear" :
-      (p[1] == 2) ? "wear"    : "?";
+      (p[1] == 1) ? "charging" :
+      (p[1] == 2) ? "notCharging" :
+      (p[1] == 3) ? "full" : "?";
   return (size_t)snprintf(out, cap,
-      "deviceStatus byte0=%u(maybe-batt%%?) wear=%s flag=%u tail=%02X%02X%02X%02X",
-      p[0], wear, p[2], p[3], p[4], p[5], p[6]);
+      "deviceStatus byte0=%u(maybe-batt%%?) byte1=%u(2.3.2 charge=%s) flag=%u tail=%02X%02X%02X%02X",
+      p[0], p[1], charge, p[2], p[3], p[4], p[5], p[6]);
 }
 
 // system/system/deviceSn — identifier material. Routine diagnostics expose
@@ -846,13 +931,15 @@ static size_t annotateAlgoKey(const uint8_t* p, size_t len, char* out, size_t ca
 }
 
 // system/system/wearStatus — 1 byte: 0=unknown 1=notWear 2=wear (per
-// BleRing1SystemWearStatus in r1_ring_enums.proto).
+// BleRing1SystemWearStatus in r1_ring_enums.proto); Even 2.3.2 adds
+// 3=possiblyWear, which a 2.3.2.0008 ring pushes.
 static size_t annotateWearStatus(const uint8_t* p, size_t len, char* out, size_t cap) {
   if (len < 1) return 0;
   const char* state =
       (p[0] == 0) ? "unknown" :
       (p[0] == 1) ? "notWear" :
-      (p[0] == 2) ? "wear"    : "?";
+      (p[0] == 2) ? "wear"    :
+      (p[0] == 3) ? "possiblyWear" : "?";
   return (size_t)snprintf(out, cap, "wearStatus=%u(%s)", p[0], state);
 }
 
@@ -991,9 +1078,14 @@ const char* r1DailyTimestampModeName(R1DailyTimestampMode mode) {
   }
 }
 
+// secondsWithinDay: whether a sub-day raw value is a time of day (2.2.x). A
+// 2.3.2 ring stamps samples taken before its time sync in its uptime domain
+// (the stock app's "reboot 1970" fix-up); after a reset that value can be
+// below one day, and it must stay unanchored rather than become dayStart+raw.
 static R1ParseError classifyDailyTimestamp(uint32_t raw,
                                            R1DailyDayMode dayMode,
                                            uint32_t dayStart,
+                                           bool secondsWithinDay,
                                            R1DailyTimestampMode& mode,
                                            uint32_t& absoluteTimestamp) {
   absoluteTimestamp = 0;
@@ -1006,7 +1098,7 @@ static R1ParseError classifyDailyTimestamp(uint32_t raw,
     absoluteTimestamp = raw;
     return R1_PARSE_OK;
   }
-  if (raw < 86400UL) {
+  if (raw < 86400UL && secondsWithinDay) {
     mode = R1_DAILY_TIMESTAMP_SECONDS_WITHIN_DAY;
     if (dayMode != R1_DAILY_DAY_EPOCH) return R1_PARSE_OK;
     const uint64_t normalized = static_cast<uint64_t>(dayStart) + raw;
@@ -1076,7 +1168,8 @@ R1ParseError r1ParseCommonDaily(R1ProtocolProfile profile,
   out.dayStart = dayStart;
   out.latestTimestampRaw = readU32LE(payload + 7);
   error = classifyDailyTimestamp(out.latestTimestampRaw, out.dayMode,
-                                 out.dayStart, out.latestTimestampMode,
+                                 out.dayStart, !r1Profile232Health(profile),
+                                 out.latestTimestampMode,
                                  out.latestTimestamp);
   if (error != R1_PARSE_OK) {
     out = R1CommonDailyResult{};
@@ -1152,7 +1245,8 @@ R1ParseError r1ParseHrvDaily(R1ProtocolProfile profile,
   out.dayStart = dayStart;
   out.latestTimestampRaw = readU32LE(payload + 7);
   error = classifyDailyTimestamp(out.latestTimestampRaw, out.dayMode,
-                                 out.dayStart, out.latestTimestampMode,
+                                 out.dayStart, !r1Profile232Health(profile),
+                                 out.latestTimestampMode,
                                  out.latestTimestamp);
   if (error != R1_PARSE_OK) {
     out = R1HrvDailyResult{};
@@ -1312,6 +1406,110 @@ R1ParseError r1ParseReassembledActivityDaily(R1ProtocolProfile profile,
 
   return parseActivityDailyPayload(profile, model + 12, declaredModelLen - 12,
                                    serial, crc32Whole, out);
+}
+
+// Shared sleep-record core for the single-notification and reassembled paths.
+// Fail closed on anything the captures do not show: an exact length, a known
+// type and stage set, a bounded period, and (when stages exist) stage epochs
+// that account for the whole period.
+static R1ParseError parseSleepDailyPayload(R1ProtocolProfile profile,
+                                           const uint8_t* payload,
+                                           size_t payloadLength,
+                                           uint16_t serial,
+                                           uint32_t crc32Received,
+                                           R1SleepDailyResult& out) {
+  out = R1SleepDailyResult{};
+  if (!payload || payloadLength < R1_SLEEP_HEADER_BYTES + 4U) {
+    return R1_PARSE_LENGTH;
+  }
+  const uint16_t stageCount = readU16LE(payload + 30);
+  const size_t expectedLength =
+      R1_SLEEP_HEADER_BYTES + (size_t)stageCount * 3U + 4U;
+  if (payloadLength != expectedLength) return R1_PARSE_LENGTH;
+  const uint8_t type = payload[0];
+  if (type != R1_SLEEP_TYPE_LONG && type != R1_SLEEP_TYPE_SHORT) {
+    return R1_PARSE_UNSUPPORTED_LAYOUT;
+  }
+  const int16_t timezoneMinutes = readI16LE(payload + 10);
+  if (timezoneMinutes < -720 || timezoneMinutes > 840) {
+    return R1_PARSE_VALUE_RANGE;
+  }
+  const uint32_t start = readU32LE(payload + 12);
+  const uint32_t end = readU32LE(payload + 16);
+  if (end < start || end - start > 86400UL) return R1_PARSE_VALUE_RANGE;
+
+  uint32_t epochs[R1_SLEEP_STAGE_COUNT] = {};
+  uint32_t totalEpochs = 0;
+  const uint8_t* stage = payload + R1_SLEEP_HEADER_BYTES;
+  for (uint16_t i = 0; i < stageCount; ++i, stage += 3) {
+    if (stage[0] >= R1_SLEEP_STAGE_COUNT) return R1_PARSE_VALUE_RANGE;
+    const uint16_t duration = readU16LE(stage + 1);
+    epochs[stage[0]] += duration;
+    totalEpochs += duration;
+  }
+  if (stageCount != 0 &&
+      totalEpochs * (uint32_t)R1_SLEEP_EPOCH_SECONDS != end - start) {
+    return R1_PARSE_VALUE_RANGE;
+  }
+
+  out.profile = profile;
+  out.sourceSerial = serial;
+  out.sourceCrc32 = crc32Received;
+  out.type = type;
+  out.timezoneMinutes = timezoneMinutes;
+  out.startEpoch = start;
+  out.endEpoch = end;
+  out.anchored = dailyEpochPlausible(start) && dailyEpochPlausible(end);
+  out.stageCount = stageCount;
+  for (size_t i = 0; i < R1_SLEEP_STAGE_COUNT; ++i) {
+    // A period is at most one day: 2880 epochs, well inside 16 bits.
+    out.stageEpochs[i] = (uint16_t)epochs[i];
+  }
+  out.trailer = readU32LE(payload + expectedLength - 4);
+  return R1_PARSE_OK;
+}
+
+R1ParseError r1ParseSleepDaily(R1ProtocolProfile profile,
+                               const R1Decoded& decoded,
+                               R1SleepDailyResult& out) {
+  out = R1SleepDailyResult{};
+  const R1ParseError gate = validateProfileAndFrame(
+      r1ProfileSupportsSleepRecords(profile), decoded);
+  if (gate != R1_PARSE_OK) return gate;
+  if (decoded.module != R1_MODULE_HEALTH || decoded.cmd != R1_CMD_SLEEP ||
+      decoded.subCmd != R1_SUB_DAILY ||
+      decoded.statusType != R1_STATUS_TYPE_NOTIFY ||
+      decoded.statusMethod != R1_STATUS_METHOD_SET ||
+      decoded.statusAck != R1_STATUS_ACK_OK) {
+    return R1_PARSE_UNSUPPORTED_LAYOUT;
+  }
+  return parseSleepDailyPayload(profile, decoded.payload,
+                                decoded.payloadLength, decoded.serial,
+                                decoded.crc32Received, out);
+}
+
+R1ParseError r1ParseReassembledSleepDaily(R1ProtocolProfile profile,
+                                          const uint8_t* model,
+                                          size_t modelLen,
+                                          uint32_t crc32Whole,
+                                          R1SleepDailyResult& out) {
+  out = R1SleepDailyResult{};
+  if (!r1ProfileSupportsSleepRecords(profile)) return R1_PARSE_WRONG_PROFILE;
+  if (!model || modelLen < 12) return R1_PARSE_LENGTH;
+  uint8_t statusType = 0, statusMethod = 0, statusAck = 0;
+  r1DecodeStatus(model[5], statusType, statusMethod, statusAck);
+  const size_t declaredModelLen = (size_t)model[8] | ((size_t)model[9] << 8);
+  if (model[0] != 0x64 || model[2] != 0x64) return R1_PARSE_UNSUPPORTED_LAYOUT;
+  if (declaredModelLen < 12 || declaredModelLen > modelLen) return R1_PARSE_LENGTH;
+  if (model[1] != R1_MODULE_HEALTH || model[6] != R1_CMD_SLEEP ||
+      model[7] != R1_SUB_DAILY || statusType != R1_STATUS_TYPE_NOTIFY ||
+      statusMethod != R1_STATUS_METHOD_SET || statusAck != R1_STATUS_ACK_OK) {
+    return R1_PARSE_UNSUPPORTED_LAYOUT;
+  }
+  if (r1Crc32(model, declaredModelLen) != crc32Whole) return R1_PARSE_BAD_CRC;
+  const uint16_t serial = (uint16_t)model[3] | ((uint16_t)model[4] << 8);
+  return parseSleepDailyPayload(profile, model + 12, declaredModelLen - 12,
+                                serial, crc32Whole, out);
 }
 
 bool r1MakeDailyPacketAckDescriptor(R1ProtocolProfile profile, uint16_t serial,
@@ -1494,6 +1692,25 @@ size_t r1AnnotatePayload(R1ProtocolProfile profile, const R1Decoded& d,
     }
     if (d.cmd == R1_CMD_ACTIVITY && d.subCmd == R1_SUB_DAILY) {
       return annotateActivityDaily(profile, d, out, cap);
+    }
+    if (d.cmd == R1_CMD_SLEEP && d.subCmd == R1_SUB_DAILY &&
+        r1ProfileSupportsSleepRecords(profile)) {
+      R1SleepDailyResult sleep;
+      const R1ParseError error = r1ParseSleepDaily(profile, d, sleep);
+      if (error != R1_PARSE_OK) {
+        return (size_t)snprintf(out, cap, "sleep rejected=%s",
+                                r1ParseErrorName(error));
+      }
+      return (size_t)snprintf(
+          out, cap,
+          "sleep type=%u tz=%d minutes=%lu %s stages=%u awake/rem/light/deep=%u/%u/%u/%u",
+          sleep.type, (int)sleep.timezoneMinutes,
+          (unsigned long)((sleep.endEpoch - sleep.startEpoch) / 60U),
+          sleep.anchored ? "anchored" : "unanchored", sleep.stageCount,
+          sleep.stageEpochs[R1_SLEEP_STAGE_AWAKE],
+          sleep.stageEpochs[R1_SLEEP_STAGE_REM],
+          sleep.stageEpochs[R1_SLEEP_STAGE_LIGHT],
+          sleep.stageEpochs[R1_SLEEP_STAGE_DEEP]);
     }
   }
   return 0;

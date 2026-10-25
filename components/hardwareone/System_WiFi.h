@@ -6,6 +6,7 @@
 #include "System_Debug.h"
 
 #include "network/wifi/System_WiFiNetworks.h"
+#include "System_WiFiCoex.h"
 
 #if ENABLE_WIFI
 
@@ -180,6 +181,12 @@ WifiRadioState wifiRadioState();
 // the driver has any active mode — connected, disconnected, or held up by
 // ESP-NOW; false only when fully off.
 bool wifiRadioOn();
+// The same answers for screens that redraw every frame. On the P4 the
+// "started but unassociated" case is an RPC to the C6, so it may be up to a
+// second old; a mode change made through WiFi.mode() shows at once. Decisions
+// and commands use wifiRadioState()/wifiRadioOn().
+WifiRadioState wifiRadioDisplayState();
+bool wifiRadioDisplayOn();
 bool connectToBestWiFiNetwork(uint32_t budgetMs = kWifiConnectHuntBudgetMs,
                               WifiConnectOrigin origin = WifiConnectOrigin::COMMAND);
 // Main-loop drain for the disconnect snapshot captured on the arduino_events
@@ -192,5 +199,24 @@ extern const CommandEntry wifiCommands[];
 extern const size_t wifiCommandsCount;
 
 #endif // ENABLE_WIFI
+
+// The device's own Wi-Fi state for the BLE coexistence records (lever 1 of
+// docs/WIFI_BLE_COEXISTENCE_STUDY.md). wifiCoexTag() is callable from any task:
+// it reads atomics kept by an esp_event mirror plus cached flags, never makes
+// an RPC to the P4's companion, and stays safe while Wi-Fi turns off (unlike
+// WiFi.isConnected(), whose event group Arduino frees). Install the mirror
+// before the radio first starts; installing again does nothing. Without the
+// records (ENABLE_BLE_COEX_RECORDS=0) there is no mirror and no reader.
+#if ENABLE_WIFI && ENABLE_BLE_COEX_RECORDS
+WifiCoexTag wifiCoexTag();
+bool wifiCoexMirrorInstall();
+#else
+inline WifiCoexTag wifiCoexTag() {
+  WifiCoexTag t;
+  t.state = ENABLE_WIFI ? WifiCoex::Unknown : WifiCoex::NoWifi;
+  return t;
+}
+inline bool wifiCoexMirrorInstall() { return true; }
+#endif
 
 #endif // SYSTEM_WIFI_H

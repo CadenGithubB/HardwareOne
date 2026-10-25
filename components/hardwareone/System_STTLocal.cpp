@@ -29,6 +29,7 @@ using hw1::stt::sttPsramFree;
 #endif
 #if ENABLE_STT_LM
 #include "System_Debug.h"
+#include "System_STTVocabulary.h"
 #include "esp_heap_caps.h"
 #include "stt/stt_lm.h"
 #include <algorithm>
@@ -54,28 +55,32 @@ namespace lm=hw1::stt::lm;
 static_assert(HW1_STT_LM_STRENGTH>=0.0f && HW1_STT_LM_STRENGTH<=1.0f,
               "HW1_STT_LM_STRENGTH must be finite and within [0, 1]");
 // The microSD copy wins when present, so the LM can be swapped with the card
-// (like the 15x5 model) and the onboard copy removed to free LittleFS.
-struct LmFiles { const char* lm; const char* words; };
+// (like the 15x5 model) and the onboard copy removed to free LittleFS. The
+// hotword list beside it is the user vocabulary (System_STTVocabulary.h); the
+// former fixed custom_words.txt is no longer read, and its presence is noted
+// once so a card prepared for an older build is not silently ignored.
+struct LmFiles { const char* lm; const char* legacyWords; };
 constexpr LmFiles kLmFiles[]={
     {"/sd/STT Models/meeting.lm","/sd/STT Models/custom_words.txt"},
     {"/STT Models/meeting.lm","/STT Models/custom_words.txt"},
 };
 // Free PSRAM kept beside a resident LM: a warm worst-case (30 s) runtime call
 // needs ~5 MiB; the beam workspace is separately checked per decode.
-constexpr size_t kLmMaxBytes=32u<<20, kWordsMaxBytes=64u<<10, kLmReserveBytes=6u<<20;
+constexpr size_t kLmMaxBytes=32u<<20, kLmReserveBytes=6u<<20;
 enum class LmState : uint8_t { Unloaded, Ready, Unavailable };
-enum LmNote : uint32_t { kLmMissing=1, kLmInvalid=2, kLmMemory=4, kLmLoaded=8, kLmDecode=16, kLmShed=32, kLmWords=64 };
+enum LmNote : uint32_t { kLmMissing=1, kLmInvalid=2, kLmMemory=4, kLmLoaded=8, kLmDecode=16, kLmShed=32, kLmWords=64, kLmLegacyWords=128 };
 std::atomic<uint32_t> gLmNoted{0};
 bool firstNote(LmNote note) { return !(gLmNoted.fetch_or(note)&note); }
 struct LanguageModel {
     uint8_t* blob=nullptr;
-    lm::CustomWords* words=nullptr;   // PSRAM, trivially destructible
+    lm::CustomWords* words=nullptr;   // PSRAM, trivially destructible; null while the vocabulary is empty
+    uint32_t wordsGeneration=0;      // the vocabulary generation `words` reflects
     lm::Lm view;
     const LmFiles* files=nullptr;      // where the loaded copy came from
     LmState state=LmState::Unloaded;
     uint32_t decodeCalls=0;          // metadata only; includes draft/final calls in this backend lifetime
     ~LanguageModel() { reset(); }
-    void reset() { view=lm::Lm{}; heap_caps_free(words); words=nullptr; heap_caps_free(blob); blob=nullptr; }
+    void reset() { view=lm::Lm{}; heap_caps_free(words); words=nullptr; wordsGeneration=0; heap_caps_free(blob); blob=nullptr; }
 };
 bool stopRequested(const STTLocalControl& c) { return c.cancelled && c.cancelled(c.context); }
 bool readAll(File& file,uint8_t* dest,size_t bytes,const STTLocalControl& control) {
@@ -87,22 +92,28 @@ bool readAll(File& file,uint8_t* dest,size_t bytes,const STTLocalControl& contro
     }
     return true;
 }
+// The decoder's hotwords are the user vocabulary's spoken forms. Taken as one
+// complete snapshot (never a half-edited list) and parsed into the model's own
+// table, so a decode in progress is never affected; re-taken between phrases
+// when the vocabulary generation moved (decodeWithLanguageModel). An empty
+// vocabulary leaves `words` null: the LM then decodes with no hotwords.
 void loadCustomWords(LanguageModel& model) {
-    // trusted: fixed optional hotword list beside the model.
-    const auto auth=VFS::systemAuth("stt.lm_words_read");
-    const char* kWordsPath=model.files->words;   // beside the LM that was loaded
-    if(!VFS::existsGuarded(kWordsPath,auth))return;
-    File file=VFS::openGuarded(kWordsPath,"r",auth);
-    const size_t bytes=file && !file.isDirectory() ? file.size() : 0;
-    char* text=bytes && bytes<=kWordsMaxBytes ? static_cast<char*>(heap_caps_malloc(bytes,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)) : nullptr;
-    void* storage=text ? heap_caps_malloc(sizeof(lm::CustomWords),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT) : nullptr;
-    if(storage && readAll(file,reinterpret_cast<uint8_t*>(text),bytes,{})) {
-        model.words=new(storage) lm::CustomWords;
-        if(!model.words->parse(text,bytes)) { heap_caps_free(storage); model.words=nullptr; }
-    } else {
-        heap_caps_free(storage);
-        if(firstNote(kLmWords))WARN_SYSTEMF("[STT] Ignoring %s (empty, over %u bytes, unreadable or no memory)",kWordsPath,unsigned(kWordsMaxBytes));
+    char* text=static_cast<char*>(heap_caps_malloc(STT_VOCAB_HOTWORD_BYTES,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+    if(!text) {
+        if(firstNote(kLmWords))WARN_SYSTEMF("[STT] No memory for the vocabulary hotwords; decoding without them");
+        return;
     }
+    size_t bytes=0;
+    const uint32_t generation=sttVocabularyHotwords(text,STT_VOCAB_HOTWORD_BYTES,&bytes);
+    if(bytes) {
+        if(!model.words) {
+            void* storage=heap_caps_malloc(sizeof(lm::CustomWords),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+            if(storage)model.words=new(storage) lm::CustomWords;
+            else if(firstNote(kLmWords))WARN_SYSTEMF("[STT] No memory for the vocabulary hotwords; decoding without them");
+        }
+        if(model.words && !model.words->parse(text,bytes)) { heap_caps_free(model.words); model.words=nullptr; }
+    } else { heap_caps_free(model.words); model.words=nullptr; }
+    model.wordsGeneration=generation;
     heap_caps_free(text);
 }
 // One attempt per LanguageModel lifetime (state Ready or Unavailable after);
@@ -145,6 +156,9 @@ bool loadLanguageModel(LanguageModel& model,const STTLocalControl& control) {
     }
     loadCustomWords(model);
     model.state=LmState::Ready;
+    // trusted: an existence probe of the retired fixed hotword file beside this LM.
+    if(VFS::existsGuarded(model.files->legacyWords,auth) && firstNote(kLmLegacyWords))
+        WARN_SYSTEMF("[STT] %s is no longer read; add its words with sttvocab (user_vocab.tsv)",model.files->legacyWords);
     if(firstNote(kLmLoaded))
         ESP_LOGI("STT","Language model %s: %u words, %u bigrams, %u trigrams, beam %u, %u custom words, %u bytes, "
                       "lm_strength=%.3f alpha=%.3f->%.3f beta=%.3f->%.3f hotword_bonus=%.3f->%.3f",
@@ -171,6 +185,8 @@ hw1::stt::DecodeResult decodeWithLanguageModel(void* context,const int8_t* logit
         note("load_cancelled"); return DecodeResult::Cancelled;
     }
     if(model.state!=LmState::Ready) { note("unavailable"); return DecodeResult::Fallback; }
+    // Between phrases only: an edit never changes a decode already running.
+    if(model.wordsGeneration!=sttVocabularyGeneration())loadCustomWords(model);
     const lm::DecodeStatus status=lm::decode(logits,frames,exponent,model.view,model.words,text,capacity,
                                              {control.context,control.cancelled},0,&stats,HW1_STT_LM_STRENGTH);
     switch(status) {

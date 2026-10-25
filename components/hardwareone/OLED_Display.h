@@ -52,6 +52,13 @@ void oledNotifyLocalDisplayAuthChanged();
 // Returns true if the display should be blocked pending authentication.
 bool shouldBlockForDisplayAuth();
 
+// `phone pair new` (phone link v2) shows its code only on the code screen.
+// Ready: the command on this task came from the display UI and its session is
+// live, and this build has the screen. Show: posts the screen to the display
+// owner (any task). Both false without the display or the phone link.
+bool oledPhonePairCodeSinkReady();
+bool oledShowPhonePairCode();
+
 // Display power control (abstracted from hardware-specific commands)
 void oledDisplayOff();
 void oledDisplayOn();
@@ -154,7 +161,9 @@ enum OLEDMode {
   OLED_BLUETOOTH_R1,       // R1 ring submenu — connect only (pushed from OLED_BLUETOOTH)
   OLED_R1_HEALTH,          // R1 Health — vitals / Poll / Track (ENABLE_R1_HEALTH)
   OLED_USER_MANAGER,       // Admin user manager — list / add / delete / role (Config menu)
-  OLED_TRANSCRIPTION, OLED_TRANSCRIPTION_LIVE, OLED_TRANSCRIPTS, OLED_TRANSCRIPT_VIEW
+  OLED_TRANSCRIPTION, OLED_TRANSCRIPTION_LIVE, OLED_TRANSCRIPTS, OLED_TRANSCRIPT_VIEW,
+  OLED_BLUETOOTH_PHONE,    // Phone relay pipe submenu (pushed from OLED_BLUETOOTH)
+  OLED_BLUETOOTH_PHONE_CODE, // `phone pair new` code screen (pushed by the command; never for a guest)
 };
 
 // Guest OLED session helpers (view-only UX). Allowlist drives menu filter +

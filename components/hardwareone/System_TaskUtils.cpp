@@ -179,7 +179,7 @@ uint32_t taskStackLookup(const char* name) {
 // ============================================================================
 
 // The walker below equates a TLSF block's start (what tlsf_walk_pool hands
-// heap_caps_walk) with the pointer the kernel holds in pxStackBase / xHandle.
+// heap_caps_walk) with xHandle, and uses containment for pxStackBase.
 // That is only true while nothing sits between the block header and the user
 // data: heap poisoning prepends a poison_head_t and task tracking prepends
 // the owner handle (heap_caps_base.c MULTI_HEAP_ADD_BLOCK_OWNER_OFFSET). No
@@ -211,14 +211,25 @@ struct TaskHeapWalkCtx {
 // a PSRAM stack is one xTaskCreateWithCaps away; with the narrow set it simply
 // stays 0 (unmeasured) and the caller reports it rather than mis-adding it.
 bool taskHeapWalker(walker_heap_into_t heap_info, walker_block_info_t block, void* user) {
-  (void)heap_info;
-  if (!block.used) return true;
   const TaskHeapWalkCtx* ctx = static_cast<const TaskHeapWalkCtx*>(user);
   for (size_t i = 0; i < ctx->count; i++) {
-    if (block.ptr == (const void*)ctx->snapshot[i].pxStackBase) {
-      ctx->out[i].stackBytes = (uint32_t)block.size;
+    // P4's RISC-V port reserves lazy coprocessor state inside the stack and
+    // advances pxStackBase past it. Attribute the containing LIVE allocation,
+    // including that reserved state, rather than requiring its first byte.
+    // Subtraction avoids overflow at the upper address boundary.
+    const uintptr_t base = reinterpret_cast<uintptr_t>(block.ptr);
+    const uintptr_t stack = reinterpret_cast<uintptr_t>(ctx->snapshot[i].pxStackBase);
+    // IDF's reserved internal/DMA pool is itself a live block in a parent
+    // heap. Prefer the innermost heap, independent of traversal order: the
+    // parent's 32 KiB reservation is not each task's stack. A freed child
+    // block must also mask that parent (the snapshot can race task deletion).
+    const uintptr_t span = uintptr_t(heap_info.end) - uintptr_t(heap_info.start);
+    if (stack >= base && stack - base < block.size &&
+        span <= ctx->out[i].stackHeapSpan) {
+      ctx->out[i].stackHeapSpan = span;
+      ctx->out[i].stackBytes = block.used ? (uint32_t)block.size : 0;
     }
-    if (block.ptr == (const void*)ctx->snapshot[i].xHandle) {
+    if (block.used && block.ptr == (const void*)ctx->snapshot[i].xHandle) {
       ctx->out[i].tcbBytes = (uint32_t)block.size;
     }
   }
@@ -233,6 +244,7 @@ void taskHeapMeasureSnapshot(const TaskStatus_t* snapshot, TaskHeapMeasure* out,
     out[i].stackBytes = 0;
     out[i].tcbBytes   = 0;
     out[i].regBytes   = 0;
+    out[i].stackHeapSpan = UINTPTR_MAX;
   }
   // Walk FIRST: the pointer reads are the time-sensitive part (a task that
   // deletes itself after the snapshot has its blocks freed by IDLE), so they

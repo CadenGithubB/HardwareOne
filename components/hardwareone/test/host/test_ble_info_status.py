@@ -8,18 +8,30 @@ JSON/text output against a saved pre-change component directory.
 
 Also runs the production blesend/blestream/bleevent handlers (real CommandArgs
 parser and stream-flag helpers) and the data-service push functions against a
-fake directed GATT sender. --component points the suite at another copy of the
+fake directed GATT sender. Outside the server role on the phone link (the G2
+client host, or phone-client mode where the pipe's console row is a connected
+app) blestream and bleevent give the phone-link reason before anything else. --component points the suite at another copy of the
 BLE sources (Bluetooth.cpp/.h, WebPage_Bluetooth.cpp/.h).
 
 Also runs the production `blestatus`/`bleread` command against the same table:
 both forms read the guarded snapshot `bleinfo json` uses, so the JSON views
 list the same client set (connId, authed, user) and a busy lifecycle guard
-gives an explicit unavailable reply.
+gives an explicit unavailable reply. Both start with the role, app console and
+relay pipe lines (BLE_LinkStatusCore.h's words) in every role; the source must
+have them. The bluetoothMode setting names each mode by the role it starts.
+
+The phone link block (phone link v2): bleinfo and blestatus end their link
+lines with it and carry `phoneLink` in JSON in pipe builds only (bleinfo's
+13 buildBLEInfoJson keys unchanged; the identical-output rule across builds
+compares the CLI without the block); /api/ble/status adds it from its one link
+reading; the console view counts the console stream's own row.
 
 Also runs the production `bledisconnect` command and its owner functions
 against a recording GATT-server double: a connection id closes exactly that app
 client, the bare form closes every app client and never a paired ring/glasses
-link, and unknown, peer and malformed ids are refused without a close.
+link, and unknown, peer and malformed ids are refused without a close; with no
+app console it says how to reach one: beside the glasses what attaches it to
+the phone link, elsewhere that `openble` switches to server mode and what it stops.
 """
 from __future__ import annotations
 
@@ -32,6 +44,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require, JSON_INCLUDE
+import ble_pipe_console_host as pipe_host
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -76,15 +89,32 @@ def stream_definitions(owner: str) -> list[str]:
 def disconnect_definitions(owner: str) -> list[str]:
     """The bledisconnect command with its owner functions (after isBLEConnected)."""
     out = [extract_block(owner, "int findConnectionSlotByConnIdLocked(")]
+    if "static inline bool blePipeRow(" in owner:
+        # The phone link's console row (phone link v2) the disconnect owner ends
+        # first: its helpers and the console driver's doubles, with no row in
+        # this suite (test_ble_pipe_console_row runs it).
+        out += [pipe_host.pipe_types(COMPONENT), pipe_host.PIPE_DOUBLES,
+                pipe_host.row_helpers(owner),
+                "static bool blePipeRowEndLocked(bool, uint32_t, uint16_t, PipeConsoleTarget*) "
+                "{ return false; }",
+                "static void blePipeConsoleIdentity(BlePipeConsoleIdentity* out) { if (out) *out = {}; }"]
     if "BleDisconnectResult bleDisconnectConnection(" in owner:
         out += [extract_block(owner, marker) for marker in
-                ("static bool bleIsPeerLinkType(",
+                # The definition, not the forward declaration bleConsoleView needs.
+                ("static bool bleIsPeerLinkType(BLEDeviceType type) ",
                  "BleDisconnectResult bleDisconnectConnection(",
                  "int bleDisconnectAppClients(")]
     else:
         out.append(extract_block(owner, "void disconnectBLE("))
     out.append(extract_block(owner, "static const char* cmd_bledisconnect("))
     return out
+
+
+def mode_choices(owner: str) -> str:
+    """The bluetoothMode setting's choice list and maximum, as shipped."""
+    start = owner.index("static constexpr const char* kBleModeChoices")
+    maximum = owner.index("static constexpr int kBleModeMaximum", start)
+    return owner[start:owner.index("\n", maximum)]
 
 
 def generated(component: Path, baseline: bool) -> str:
@@ -98,6 +128,7 @@ def generated(component: Path, baseline: bool) -> str:
     types += "\n" + "\n".join(extract_block(header, marker) + ";" for marker in
                                 ("struct BLEConnection", "struct BLESystemState"))
     types += "\n" + extract_block(owner, "struct BleSessionFence") + ";"
+    types += "\n" + "\n".join(re.findall(r"(?m)^#define BLE_MODE_\w+\s+\d+.*$", header))
     # The disconnect owner API exists once bledisconnect targets a connection id.
     if "enum class BleDisconnectResult" in header:
         types += ("\n#define BLE_DISCONNECT_OWNER 1\n" +
@@ -111,11 +142,31 @@ def generated(component: Path, baseline: bool) -> str:
                                  "enum G2ControlDesired", "enum G2ControlObserved",
                                  "enum G2ControlPhase", "struct G2ControlFeatureStatus",
                                  "struct G2ControlStatus"))
+    # The link words (/api/ble/status "link", blestatus): the core header,
+    # copied beside the harness, and the shipped types bleLinkStatus() fills.
+    # Required: extract_block fails when the source lacks them.
+    if not baseline:
+        peers = (COMPONENT / "BLE_Peers.h").read_text()
+        types += "\n".join(["", '#include "BLE_LinkStatusCore.h"', '#include "BLE_ConsoleAttachCore.h"',
+                            extract_block(header, "struct BleConsoleView") + ";",
+                            extract_block(peers, "struct BlePeerReconnectSnapshot") + ";",
+                            extract_block((component / "BLE_LinkStatus.h").read_text(),
+                                          "struct BleLinkStatus") + ";",
+                            # The phone link block's end counts (phone link v2).
+                            extract_block((component / "BLE_PhonePipe.h").read_text(),
+                                          "struct PhonePipeLinkSummary") + ";"])
     definitions = [extract_block(owner, "class BleLifecycleGuard") + ";",
                    extract_block((COMPONENT / "System_Utils.h").read_text(),
                                  "inline void macToDisplay("),
-                   extract_block(owner, "static void macToStackBuf("),
-                   extract_block(owner, "const char* getBLEStateString(")]
+                   extract_block(owner, "static void macToStackBuf(")]
+    # The host word behind blestatus's "Bluetooth:" line, its JSON `host` and
+    # /api/ble/status `host` (fault / on / idle / off / parked).
+    definitions.append(extract_block(owner, "const char* bleHostStateWord("))
+    # The state word under the caller's lock (the snapshot's), then the public
+    # reader that takes the lock itself.
+    if "static const char* bleStateTextLocked(" in owner:
+        definitions.append(extract_block(owner, "static const char* bleStateTextLocked("))
+    definitions.append(extract_block(owner, "const char* getBLEStateString("))
     # blestatus/bleread and buildBLEInfoJson render one guarded snapshot.
     if "struct BleStatusSnapshot" in owner:
         definitions += [extract_block(owner, "struct BleStatusSnapshot") + ";",
@@ -123,7 +174,9 @@ def generated(component: Path, baseline: bool) -> str:
     elif not baseline:
         print("BLE status snapshot absent (pre-fix source)")
     if not baseline:
-        definitions += [extract_block(owner, "class CmdRequestCallbacks") + ";",
+        definitions.append(extract_block(owner, "class CmdRequestCallbacks") + ";")
+        # Advertising re-arms below the maximum through one BTC-safe helper.
+        definitions += [extract_block(owner, "static bool bleAdvertiseIfRoomLocked() "),
                         extract_block(owner, "bool startBLEAdvertising("),
                         extract_block(owner, "void stopBLEAdvertising(")]
         definitions.append(extract_block(owner, "bool buildBLEInfoJson("))
@@ -136,8 +189,33 @@ def generated(component: Path, baseline: bool) -> str:
                 "BLE status must fill its response directly without parse fallback")
         require(handler.index("WEB_AUTH_OR_RETURN") < handler.index("buildBLEInfoJson"),
                 "authentication must precede BLE owner access")
+        # The client host's refusals the stream commands give (multi-line literals).
+        definitions += re.findall(r"(?ms)^static const char kBlePhoneLink\w+\[\] =.*?;$", owner)
+        # The stream commands ask isBleServerInitialized() first (defined below
+        # with the console view), and it reads its mirror while the lock is busy.
+        mirror = re.search(r"(?m)^static std::atomic<bool> sBleServerStateInitialized\{false\};", owner)
+        require(mirror is not None, "Bluetooth.cpp mirrors the server state's initialized flag")
+        definitions += [mirror[0], "bool isBleServerInitialized();"]
         definitions += stream_definitions(owner)
+        # bledisconnect's refusal says how to reach the console (defined below).
+        definitions.append("BleLinkStatus bleLinkStatus();\n"
+                           "static const char* bleConsoleSwitchHint(const BleLinkStatus& s);")
         definitions += disconnect_definitions(owner)
+        # bleLinkStatus() as shipped, over the real console view and
+        # server-initialized reads (after bleIsPeerLinkType), before the
+        # commands and the handler that show it.
+        link_source = (component / "BLE_LinkStatus.cpp").read_text()
+        definitions += [extract_block(owner, "BleConsoleView bleConsoleView() "),
+                        extract_block(owner, "bool isBleServerInitialized() "),
+                        extract_block(link_source, "BleLinkStatus bleLinkStatus()"),
+                        extract_block(link_source, "void bleLinkStatusJson("),
+                        extract_block(link_source, "void bleLinkPhoneJson("),
+                        extract_block(link_source, "int bleLinkPhoneLines(")]
+        # blestatus's link lines: the role, the app console and the relay pipe
+        # in every role, and how to reach the console outside its server.
+        definitions += [extract_block(owner, "static const char* bleConsoleSwitchHint("),
+                        extract_block(owner, "static int bleFormatLinkLines(")]
+        definitions.append(mode_choices(owner))
     definitions.append(extract_block(owner, "static const char* cmd_bleinfo("))
     if not baseline:
         # The pre-fix blestatus passes uint32_t to %lu (unsigned long on the target).
@@ -145,6 +223,12 @@ def generated(component: Path, baseline: bool) -> str:
                         extract_block(owner, "static const char* cmd_blestatus("),
                         '#pragma GCC diagnostic pop']
     if not baseline:
+        # /api/ble/status names the mode through the owner's own helper.
+        definitions.append(extract_block(owner, "const char* getBleModeString("))
+        require("const BleLinkStatus link = bleLinkStatus();" in handler and
+                "bleLinkStatusJson(doc[\"link\"].to<JsonObject>(), link);" in handler and
+                handler.count("bleLinkStatus()") == 1,
+                "/api/ble/status fills its link and phone objects from one link reading")
         definitions += ["#if ENABLE_G2_GLASSES", *[
             extract_block(web, marker) for marker in
             ("static const char* g2DesiredJsonName(",
@@ -221,11 +305,15 @@ def main() -> None:
                             *extra, str(path), "-o", str(work / name)], check=True, timeout=120)
             return subprocess.check_output([str(work / name)], text=True, timeout=60)
 
+        shutil.copyfile(args.component / "BLE_LinkStatusCore.h", work / "BLE_LinkStatusCore.h")
+        shutil.copyfile(args.component / "BLE_ConsoleAttachCore.h", work / "BLE_ConsoleAttachCore.h")
         output = None
-        for g2 in (0, 1):
-            result = run(f"ble-{g2}", generated(args.component, False),
-                         ["-DTEST_BASELINE=0", f"-DENABLE_G2_GLASSES={g2}"])
-            require(output is None or output == result, "G2 must not change BLE CLI output")
+        for g2, pipe in ((0, 0), (1, 0), (1, 1)):
+            result = run(f"ble-{g2}-{pipe}", generated(args.component, False),
+                         ["-DTEST_BASELINE=0", f"-DENABLE_G2_GLASSES={g2}",
+                          f"-DENABLE_BLE_PHONE_PIPE={pipe}"])
+            require(output is None or output == result,
+                    "G2 and the phone pipe must not change BLE CLI output")
             output = result
         if args.baseline:
             old = run("baseline", generated(args.baseline, True),
@@ -234,7 +322,9 @@ def main() -> None:
             print("BLE status: successful CLI JSON/text matches pre-change production")
 
         shutil.copyfile(args.component / "Bluetooth.h", work / "Bluetooth.h")
-        (work / "System_BuildConfig.h").write_text("#define ENABLE_BLUETOOTH 0\n")
+        # A Bluetooth-off build, with the roles the derived rules turn off with it.
+        (work / "System_BuildConfig.h").write_text(
+            "#define ENABLE_BLUETOOTH 0\n#define ENABLE_G2_GLASSES 0\n#define ENABLE_BLE_PHONE_PIPE 0\n")
         (work / "System_User.h").write_text("#include <cstdint>\nusing TransportSessionEpoch = uint32_t;\n")
         # Disabled bledisconnect owner stubs report unavailable / nothing done.
         disconnect_stubs = ""

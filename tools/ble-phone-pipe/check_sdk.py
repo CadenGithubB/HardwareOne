@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
-EXPECTED_FILES={f'libraries/BLE/src/{name}' for name in ('BLEDevice.cpp','BLEDevice.h','BLESecurity.cpp','BLESecurity.h')}
+EXPECTED_FILES={f'libraries/BLE/src/{name}' for name in ('BLEDevice.cpp','BLEDevice.h','BLESecurity.cpp','BLESecurity.h','BLEClient.cpp')}
 
 def check(source, assets=HERE):
     manifest=json.loads((assets/'manifest.json').read_text())

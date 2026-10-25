@@ -23,6 +23,8 @@ def main():
     types=(COMPONENT/'System_Dictation.h').read_text()
     transcript=(COMPONENT/'System_Transcript.h').read_text()
     definitions=extract_block(transcript,'struct TranscriptStatus')+';\n'
+    metadata=(COMPONENT/'System_STTMetadata.h').read_text()
+    definitions+='constexpr size_t STT_SPEAKER_HISTORY = 16;\n'+extract_block(metadata,'struct STTSpeakerEntry')+';\n'+extract_block(metadata,'struct STTSpeakerSnapshot')+';\n'
     for marker in ('enum class DictationState','struct DictationSnapshot','struct DictationTextReceipt','enum class DictationAppPurpose','struct DictationAppLease','struct DictationAppSnapshot'):
         definitions+=extract_block(types,marker)+';\n'
     harness=(HERE/'transcription_web_harness.cpp').read_text().replace('// INSERT_PRODUCTION_TYPES',definitions).replace('// INSERT_PRODUCTION_HTTP',http)

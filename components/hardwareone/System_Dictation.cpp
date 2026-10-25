@@ -6,6 +6,8 @@
 #if ENABLE_DICTATION
 
 #include <esp_random.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <algorithm>
 
 #include "HAL_Audio.h"
@@ -179,10 +181,12 @@ static void dictationStageTextLocked(uint64_t exchange, uint32_t sequence,
 // Capability is deliberately an epoch, not a sticky bool: UART logout/login
 // revokes it without depending on a delayed session-change callback.
 static uint32_t gDictHostReadyEpoch = 0;
-static TaskHandle_t gDictWorkerTask = nullptr;
-static bool gDictWorkerStarting = false;
+// The worker (System_TaskUtils.h ServiceWorker: created on the first use,
+// leaves idle; its handle, claim and wake live under gDictMux with the work).
+static ServiceWorker gDictWorker{gDictMux};
 
 static void dictationWakeWorker();
+static bool dictationEnsureWorker();
 static void dictationSupervise();
 
 // Hand the mic back if — and only if — this module was what powered it up.
@@ -312,12 +316,12 @@ static bool dictationHostReadyForEpoch(uint32_t liveEpoch,
   return ready;
 }
 
+// Wakes the worker. Work published to a worker that left idle brings one
+// back first; a create that fails leaves the work for the next wake (the
+// publishers that face the user refuse through dictationEnsureWorker).
 static void dictationWakeWorker() {
-  TaskHandle_t task = nullptr;
-  portENTER_CRITICAL(&gDictMux);
-  task = gDictWorkerTask;
-  portEXIT_CRITICAL(&gDictMux);
-  if (task) xTaskNotifyGive(task);
+  (void)dictationEnsureWorker();
+  gDictWorker.give();
 }
 
 static bool dictationQueueCleanup(uint64_t owner, bool resolved,
@@ -979,10 +983,11 @@ static void dictationProcessSave() {
   for (size_t i = 0; i < sizeof(job.text); ++i) privateText[i] = 0;
 }
 
-static bool dictationWorkerHasWork() {
-  bool work = false;
-  portENTER_CRITICAL(&gDictMux);
-  work =
+// The work predicate, gDictMux held: dictationWorkerHasWork takes the lock
+// for it; the worker's idle exit reads it in the critical section that nulls
+// the handle.
+static bool dictationWorkPendingLocked() {
+  return
 #if ENABLE_LOCAL_STT
          gLocalReadyPending || gLocalDict.exchange != 0 ||
 #endif
@@ -991,13 +996,26 @@ static bool dictationWorkerHasWork() {
          gDict.published.pending || gDict.cancelEvent.pending ||
          gDict.cleanupOwner != 0 ||
          (gDict.micStopPending && !gDict.owner);
+}
+
+static bool dictationWorkerHasWork() {
+  portENTER_CRITICAL(&gDictMux);
+  const bool work = dictationWorkPendingLocked();
   portEXIT_CRITICAL(&gDictMux);
   return work;
 }
 
+// The worker's own exit after an idle wait (SERVICE_TASK_IDLE_RETIRE_MS with
+// nothing pending). ServiceWorker::retireIf reads the predicate and nulls the
+// handle in one hold of gDictMux, so work published after it finds no worker
+// and creates one (dictationWakeWorker).
+static bool dictationRetireIfIdle() {
+  return gDictWorker.retireIf([] { return !dictationWorkPendingLocked(); });
+}
+
 static void dictationWorkerBody(void*) {
   for (;;) {
-    (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    const bool woken = gDictWorker.wait(SERVICE_TASK_IDLE_RETIRE_MS);
     while (dictationWorkerHasWork()) {
       dictationSupervise(); // Independent of the visible keyboard/web page.
 #if ENABLE_LOCAL_STT
@@ -1008,38 +1026,17 @@ static void dictationWorkerBody(void*) {
       dictationProcessCancelEvent();
       (void)dictationProcessCleanup();
       dictationReleaseMicIfDue();
-      if (dictationWorkerHasWork()) {
-        (void)ulTaskNotifyTake(pdTRUE,
-                               pdMS_TO_TICKS(kDictationWorkerRetryMs));
-      }
+      if (dictationWorkerHasWork()) (void)gDictWorker.wait(kDictationWorkerRetryMs);
     }
+    if (!woken && dictationRetireIfIdle()) vTaskDelete(nullptr);
   }
 }
 
 static bool dictationEnsureWorker() {
-  portENTER_CRITICAL(&gDictMux);
-  if (gDictWorkerTask) {
-    portEXIT_CRITICAL(&gDictMux);
-    return true;
-  }
-  if (gDictWorkerStarting) {
-    portEXIT_CRITICAL(&gDictMux);
-    return false;
-  }
-  gDictWorkerStarting = true;
-  portEXIT_CRITICAL(&gDictMux);
-
-  TaskHandle_t created = nullptr;
-  const BaseType_t rc = xTaskCreateLogged(
-      dictationWorkerBody, "dictation_svc", kDictationWorkerStackBytes,
-      nullptr, TASK_PRIORITY_LOW, &created, "dictation.service", PRO_CORE);
-
-  portENTER_CRITICAL(&gDictMux);
-  if (rc == pdPASS) gDictWorkerTask = created;
-  gDictWorkerStarting = false;
-  portEXIT_CRITICAL(&gDictMux);
-  if (rc != pdPASS) {
-    WARN_SYSTEMF("[DICTATE] service task unavailable");
+  if (gDictWorker.present()) return true;
+  if (!gDictWorker.ensure(dictationWorkerBody, "dictation_svc", kDictationWorkerStackBytes,
+                          "dictation.service")) {
+    if (!gDictWorker.present()) WARN_SYSTEMF("[DICTATE] service task unavailable");
     return false;
   }
   dictationWakeWorker();

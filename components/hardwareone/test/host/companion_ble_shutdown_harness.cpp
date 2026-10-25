@@ -30,6 +30,7 @@ enum class BleRoleTransition { NONE, SERVER_START, SERVER_STOP, G2_START, G2_STO
 struct BluetoothHalStatus {
   bool hostStopped;
   bool stopped() const { return hostStopped; }
+  bool hostAbsent() const { return hostStopped; }
 };
 struct BluetoothHalShutdownResult {
   bool success;
@@ -46,6 +47,11 @@ int ringBusyAttempts = 0;   // deinitBluetooth() calls that find the Ring owner 
 int deinitCalls = 0, halDeinits = 0, forcedWhileRingBusy = 0;
 bool fault = false;
 bool phoneStops = true;
+bool phoneActive = false;    // the phone pipe is open (a device owner on the shared stack)
+bool ringOpen = false;       // the ring owner is open (a device owner on the shared stack)
+bool ringPrepareOk = true;   // the ring owner closes before the host goes
+int ringPrepares = 0;
+bool preparedBeforeHalDeinit = false;
 uint32_t delayedMs = 0;
 std::vector<std::string> logs;
 bool ringBusy() { return ringBusyAttempts < 0 || deinitCalls < ringBusyAttempts; }
@@ -72,7 +78,14 @@ bool deinitG2Client() {
   world::g2Up = false;
   return true;
 }
+// The glasses teardown keeps the ring's client; the host teardown frees it, so
+// the pointer must be dropped first.
+bool g2RingPrepareForStackTeardown(uint32_t timeoutMs) {
+  ++world::ringPrepares;
+  return timeoutMs > 0 && world::ringPrepareOk;
+}
 BluetoothHalShutdownResult bluetoothHalDeinit() {
+  world::preparedBeforeHalDeinit = world::ringPrepares > 0;
   ++world::halDeinits;
   if (world::serverUp && world::ringBusy()) ++world::forcedWhileRingBusy;
   world::halStopped = true;
@@ -92,6 +105,25 @@ void vTaskDelay(TickType_t ms) { world::delayedMs += ms; }
 
 bool phonePipeStop() {return world::phoneStops;}
 bool phonePipeHostStopped() {return world::halStopped;}
+// The device owners on the shared stack, and the stack owner's own teardown
+// (BLE_CentralStack.cpp), which the production reset calls instead of the HAL.
+bool phonePipeActive() { return world::phoneActive; }
+bool phoneLinkClose(bool) { if (world::phoneStops) world::phoneActive = false; return world::phoneStops; }
+bool g2RingIsOpen() { return world::ringOpen; }
+bool g2RingClose(bool) {
+  ++world::ringPrepares;
+  if (world::ringPrepareOk) world::ringOpen = false;
+  return world::ringPrepareOk;
+}
+bool bleStackDown() {
+  world::preparedBeforeHalDeinit = !world::ringOpen;
+  ++world::halDeinits;
+  if (world::serverUp && world::ringBusy()) ++world::forcedWhileRingBusy;
+  world::halStopped = true;
+  return true;
+}
+const char* bleStackLastRefusal() { return "busy"; }
+void bleStackNoteHostLost() {}
 
 /*@SHUTDOWN@*/
 
@@ -116,6 +148,11 @@ static RadioUsers reset(const char* name, bool server, bool g2, bool halUp) {
   world::deinitCalls = world::halDeinits = world::forcedWhileRingBusy = 0;
   world::fault = false;
   world::phoneStops = true;
+  world::phoneActive = false;
+  world::ringOpen = false;
+  world::ringPrepareOk = true;
+  world::ringPrepares = 0;
+  world::preparedBeforeHalDeinit = false;
   world::delayedMs = 0;
   world::logs.clear();
   RadioUsers users;
@@ -163,11 +200,23 @@ int main() {
          "a server stop that completed at once was retried or followed by a forced teardown");
 
   // K4: no server, the host is up (a G2 client stopped or a bare host): the
-  // checked HAL teardown still runs (unchanged).
+  // stack owner's checked teardown still runs, after the open ring owner closed.
   users = reset("K4 G2 client, host up", false, true, true);
+  world::ringOpen = true;
   shutDownBleForCompanionReset(users);
   EXPECT(world::deinitCalls == 0 && world::halDeinits == 1 && world::halStopped && !world::fault,
          "the host teardown without a server changed");
+  EXPECT(world::preparedBeforeHalDeinit, "the ring's kept client was not dropped before the host teardown");
+  EXPECT(world::roleEnds == 1, "the RECOVERING claim was not released");
+
+  // K4b: the ring owner cannot drop its client: the host is not forced down
+  // and Bluetooth stays off until a reboot.
+  users = reset("K4b ring owner busy, host up", false, true, true);
+  world::ringOpen = true;
+  world::ringPrepareOk = false;
+  shutDownBleForCompanionReset(users);
+  EXPECT(world::halDeinits == 0 && world::fault && logged("did not stop"),
+         "the host was forced down while the ring still held its client");
   EXPECT(world::roleEnds == 1, "the RECOVERING claim was not released");
 
   // K5: another role transition holds the claim: nothing is touched (unchanged).
@@ -181,17 +230,18 @@ int main() {
   // K6: nothing runs and the host is stopped: an early return (unchanged).
   users = reset("K6 nothing to stop", false, false, false);
   shutDownBleForCompanionReset(users);
-  EXPECT(world::roleBegins == 0 && world::deinitCalls == 0 && world::halDeinits == 0,
+  EXPECT(world::roleBegins == 0 && world::deinitCalls == 0 && world::halDeinits == 0 && world::ringPrepares == 0,
          "an idle stack was touched");
 
   users = reset("K7 phone owner busy", false, false, true);
-  users.phoneClient = true; world::phoneStops = false;
+  users.g2Client = true; world::phoneActive = true; world::phoneStops = false;
   shutDownBleForCompanionReset(users);
   EXPECT(world::halDeinits == 0 && world::fault, "host forced down under a busy phone owner");
   users = reset("K8 phone owner stopped", false, false, true);
-  users.phoneClient = true;
+  users.g2Client = true; world::phoneActive = true;
   shutDownBleForCompanionReset(users);
-  EXPECT(world::halDeinits == 1 && world::halStopped && !world::fault, "standalone phone host was not retired");
+  EXPECT(world::halDeinits == 1 && world::halStopped && !world::fault && !world::phoneActive,
+         "the shared stack was not retired after the phone closed");
 
   if (failures) {
     std::fprintf(stderr, "companion BLE shutdown: %d expectation(s) failed\n", failures);

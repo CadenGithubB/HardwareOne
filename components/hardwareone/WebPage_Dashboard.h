@@ -656,8 +656,16 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9);display:flex;align-items:center;gap:0.5rem'>"
     "<span class='status-indicator status-disabled' id='conn-bt-dot'></span>Bluetooth</div>"
     "<div class='sys-card-row'><span>Running:</span><strong id='conn-bt-running'>--</strong></div>"
-    "<div class='sys-card-row'><span>Mode:</span><strong id='conn-bt-mode'>--</strong></div>"
+    // The role running now; a second row names the saved mode when it differs
+    // (the card is too narrow for "Phone pipe (saved: App console)").
+    "<div class='sys-card-row'><span>Role:</span><strong id='conn-bt-role'>--</strong></div>"
+    "<div class='sys-card-row' id='conn-bt-saved-row' style='display:none'><span>Saved:</span><strong id='conn-bt-saved'>--</strong></div>"
     "<div class='sys-card-row'><span>State:</span><strong id='conn-bt-state'>--</strong></div>"
+#if ENABLE_BLE_PHONE_PIPE
+    "<div class='sys-card-row'><span>Pipe:</span><strong id='conn-bt-pipe'>--</strong></div>"
+#endif
+    // The app console's long text ("waiting for the phone link") wraps.
+    "<div class='sys-card-row'><span>Console:</span><strong id='conn-bt-console' style='white-space:normal;text-align:right'>--</strong></div>"
     "</div>",
     HTTPD_RESP_USE_STRLEN);
 #endif
@@ -753,9 +761,12 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
             "var bt=c.bluetooth;"
             "window.Dash.setIndicator('conn-bt-dot',!!bt.running);"
             "window.Dash.setText('conn-bt-running',bt.running?'Yes':'No');"
-            "var modeTxt=(bt.mode==='client')?'Client (G2)':((bt.mode==='server')?'Server':(bt.mode||'--'));"
-            "window.Dash.setText('conn-bt-mode',modeTxt);"
+            // BLE_LinkStatus words: the role running now and the saved mode.
+            "window.Dash.setText('conn-bt-role',bt.roleText||'--');"
+            "window.Dash.setText('conn-bt-saved',bt.savedText||'--');"
+            "hw.toggle('conn-bt-saved-row',!!bt.savedDiffers);"
             "window.Dash.setText('conn-bt-state',bt.state||'--');"
+            "window.Dash.setText('conn-bt-console',bt.consoleText||'--');"
           "}"
           "if(c.webserver){"
             "var ws=c.webserver;"
@@ -788,6 +799,21 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
       "};"
     "}"
     "</script>", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_BLUETOOTH && ENABLE_BLE_PHONE_PIPE
+  // Relay pipe row: the pipe line every surface shows (hw1link::pipeLine, e.g.
+  // "ready", "fail: not found").
+  httpd_resp_send_chunk(req, "<script>"
+    "if(window.Dash){"
+      "var _phoneUpdateSystem=window.Dash.updateSystem;"
+      "window.Dash.updateSystem=function(d){"
+        "_phoneUpdateSystem(d);"
+        "var bt=d&&d.connectivity&&d.connectivity.bluetooth;"
+        "if(!bt)return;"
+        "if(bt.phoneState!=null)window.Dash.setText('conn-bt-pipe',bt.phoneState);"
+      "};"
+    "}"
+    "</script>", HTTPD_RESP_USE_STRLEN);
+#endif
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 6: Setting up global variables');window.__sensorStatusSeq=0;window.__probeCooldownMs=10000;window.__lastProbeAt=0;console.log('[Dashboard] Section 6a: Global variables set');</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 7a: Adding applySensorStatus function');window.applySensorStatus=function(s){console.log('[Dashboard] applySensorStatus called with:',s);if(!s)return;window.__sensorStatusSeq=s.seq||0;window.__lastSensorStatus=s;};console.log('[Dashboard] Section 7a: applySensorStatus function added');</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 7b: Adding sensor card creation');window.createSensorCards=function(sensorStatus,deviceRegistry){console.log('[Dashboard] createSensorCards called with status:',sensorStatus,'registry:',deviceRegistry);var loading=hw.$('sensor-loading');var grid=hw.$('sensor-grid');hw.hide(loading);if(grid){grid.style.display='grid';grid.innerHTML=''}var availableSensors=window.getAvailableSensors(deviceRegistry);console.log('[Dashboard] Available sensors from getAvailableSensors:',availableSensors);var cardCount=0;for(var i=0;i<availableSensors.length;i++){var sensor=availableSensors[i];var enabled=window.getSensorEnabled(sensor.key,sensorStatus);var card=document.createElement('div');card.className='sensor-status-card';card.id='dash-'+sensor.key+'-card';card.dataset.panel=sensor.key;card.style.cssText='background:rgba(255,255,255,0.1);border-radius:8px;padding:1rem;border:1px solid rgba(255,255,255,0.2)';var statusText=enabled?'Running':'Available';var statusColor=enabled?'#28a745':'#87ceeb';var dotsHtml='';if(sensor&&sensor.key==='mic'){var enabledClass=enabled?'status-enabled':'status-disabled';var recordingClass=(sensorStatus&&sensorStatus.micRecording)?'status-recording':'status-disabled';dotsHtml='<span class=\"status-indicator '+enabledClass+'\" id=\"dash-mic-status\"></span><span class=\"status-indicator '+recordingClass+'\" id=\"dash-mic-recording\" style=\"margin-left:4px\"></span>';if(sensorStatus&&sensorStatus.micRecording){statusText='Recording';statusColor='#e74c3c'}}else if(sensor&&sensor.key==='camera'){var enabledClass=enabled?'status-enabled':'status-disabled';var streamClass=(sensorStatus&&sensorStatus.cameraStreaming)?'status-recording':'status-disabled';var mlClass=(sensorStatus&&sensorStatus.eiEnabled)?'status-enabled':'status-disabled';dotsHtml='<span class=\"status-indicator '+enabledClass+'\" id=\"dash-camera-status\" title=\"Enabled\"></span><span class=\"status-indicator '+streamClass+'\" id=\"dash-camera-stream\" title=\"Streaming\" style=\"margin-left:4px\"></span><span class=\"status-indicator '+mlClass+'\" id=\"dash-camera-ml\" title=\"ML Inference\" style=\"margin-left:4px\"></span>'}else{var statusClass=enabled?'status-enabled':'status-disabled';dotsHtml='<span class=\"status-indicator '+statusClass+'\" id=\"dash-'+sensor.key+'-status\"></span>'}card.innerHTML='<div style=\"display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem\">'+dotsHtml+'<strong style=\"line-height:1.2\">'+sensor.name+'</strong></div>'+'<div style=\"font-size:0.85rem;opacity:0.8;margin-bottom:0.5rem\">'+sensor.desc+'</div>'+'<div style=\"font-size:0.9rem;color:'+statusColor+'\">'+statusText+'</div>';if(grid)grid.appendChild(card);cardCount++}if(cardCount===0&&grid){grid.innerHTML='<div style=\"grid-column:1/-1;text-align:center;padding:2rem;color:#87ceeb;font-style:italic\">No sensors are currently available.</div>'}console.log('[Dashboard] Created '+cardCount+' sensor cards')};console.log('[Dashboard] Section 7b: createSensorCards added');</script>", HTTPD_RESP_USE_STRLEN);

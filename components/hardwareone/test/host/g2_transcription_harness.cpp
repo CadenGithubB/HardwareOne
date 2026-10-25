@@ -170,7 +170,7 @@ int main(){
     answer("{\"success\":true,\"exchange\":\"0123456789abcdef\",\"available\":true,\"sequence\":2,\"offset\":0,\"length\":12,\"sttText\":\"hello world!\"}");
     assert(std::string(state.tail)=="hello world!"&&state.ackPending);tick(1);
     assert(commands.front().line==std::string("transcription ack ")+id+" 2 0 12");answer("{\"success\":true}");tick(1);
-    g2TranscriptionHandleTap(2);drainUi();enqueueRender();drainUi();assert(displayed.find("hello world!")!=std::string::npos&&navCallback&&exitCallback);
+    g2TranscriptionHandleTap(2);drainUi();enqueueRender();drainUi();assert(displayed.find("Hello world!")!=std::string::npos&&navCallback&&exitCallback);
     const unsigned before=renders;enqueueRender();drainUi();assert(renders==before); // unchanged live text does not repeatedly recreate
     exitCallback();drainUi();g2TranscriptionHandleTap(1);tick(1);assert(commands.front().line==std::string("transcription stop ")+id);answer(status(false,true).c_str());tick(1);
     // Explicit Back cancels only the exact lease; no keyboard/source-only call exists.
@@ -292,7 +292,7 @@ int main(){
     assert(commands.front().line==std::string("transcription status ")+id);answer(status(true).c_str());tick(1);
     assert(commands.front().line==std::string("transcription next ")+id);
     answer("{\"success\":true,\"exchange\":\"0123456789abcdef\",\"available\":false,\"speakersAvailable\":true,\"speakerVersion\":2,\"speakers\":[{\"sequence\":1,\"speaker\":1,\"ready\":true}]}");tick(1);
-    assert(displayed.find("Person 2: hello")!=std::string::npos&&std::string(state.tail)=="hello"&&creates==1);
+    assert(displayed.find("Person 2: Hello")!=std::string::npos&&std::string(state.tail)=="hello"&&creates==1);
     // A foreign reply cannot relabel; trimming preserves sequence associations.
     tick(800u-uint32_t(clockMs-state.lastTextPoll));assert(commands.front().line==std::string("transcription next ")+id);
     answer("{\"success\":true,\"exchange\":\"fedcba9876543210\",\"available\":false,\"speakers\":[{\"sequence\":1,\"speaker\":8,\"ready\":true}]}");tick(1);
@@ -311,44 +311,45 @@ int main(){
     liveFixture();{
         std::string words;
         for(unsigned i=1;i<=13;++i){std::string chunk="topic"+std::to_string(i)+" continues";if(!words.empty())words+=' ';words+=chunk;phraseReply(i,chunk,0);}
-        assert(std::string(labelledText)=="Person 1: "+words&&std::string(state.tail)==words&&state.phraseCount==13&&creates==1);
+        std::string paragraph=words;paragraph[0]=char(paragraph[0]-('a'-'A'));  // the turn starts with a capital; the tail stays raw
+        assert(std::string(labelledText)=="Person 1: "+paragraph&&std::string(state.tail)==words&&state.phraseCount==13&&creates==1);
         patches.clear();labelReply({{13,0},{1,0}});assert(patches.empty()&&creates==1);
     }
     // Unknown gaps do not inherit a known ID. Late, out-of-order labels can
     // join and split existing runs without recreating the lens page.
     liveFixture();phraseReply(1,"alpha",0);phraseReply(2,"beta");phraseReply(3,"gamma",0);
-    assert(std::string(labelledText)=="Person 1: alpha\n?: beta\nPerson 1: gamma");
-    labelReply({{3,0},{2,0}});assert(std::string(labelledText)=="Person 1: alpha beta gamma");
-    labelReply({{2,1}});assert(std::string(labelledText)=="Person 1: alpha\nPerson 2: beta\nPerson 1: gamma"&&creates==1);
+    assert(std::string(labelledText)=="Person 1: Alpha\n?: beta\nPerson 1: Gamma");
+    labelReply({{3,0},{2,0}});assert(std::string(labelledText)=="Person 1: Alpha beta gamma");
+    labelReply({{2,1}});assert(std::string(labelledText)=="Person 1: Alpha\nPerson 2: Beta\nPerson 1: Gamma"&&creates==1);
     // Unknown final phrases stay separate from each other and the live draft.
     phraseReply(4,"delta");phraseReply(5,"epsilon");draftReply("maybe zeta");
-    assert(std::string(labelledText)=="Person 1: alpha\nPerson 2: beta\nPerson 1: gamma\n?: delta\n?: epsilon\n~ maybe zeta");
+    assert(std::string(labelledText)=="Person 1: Alpha\nPerson 2: Beta\nPerson 1: Gamma\n?: delta\n?: epsilon\n~ maybe zeta");
     const uint32_t pendingDraftVersion=state.draftVersion;
     patches.clear();labelReply({{4,-1},{5,-1}}); // completed but unassigned is still unknown
     assert(patches.empty()&&state.draftVersion==pendingDraftVersion&&std::string(state.draft)=="maybe zeta");
-    labelReply({{5,2}});assert(std::string(labelledText).find("?: delta\nPerson 3: epsilon\n~ maybe zeta")!=std::string::npos);
-    labelReply({{4,2}});assert(std::string(labelledText).find("Person 3: delta epsilon\n~ maybe zeta")!=std::string::npos);
+    labelReply({{5,2}});assert(std::string(labelledText).find("?: delta\nPerson 3: Epsilon\n~ maybe zeta")!=std::string::npos);
+    labelReply({{4,2}});assert(std::string(labelledText).find("Person 3: Delta epsilon\n~ maybe zeta")!=std::string::npos);
     assert(state.draftVersion==pendingDraftVersion&&std::string(state.tail)=="alpha beta gamma delta epsilon"&&creates==1);
     draftReply("zeta");assert(std::string(labelledText).find("maybe")==std::string::npos);
-    phraseReply(6,"zeta",0);assert(std::string(labelledText).find("~")==std::string::npos&&std::string(labelledText).find("Person 1: zeta")!=std::string::npos);
+    phraseReply(6,"zeta",0);assert(std::string(labelledText).find("~")==std::string::npos&&std::string(labelledText).find("Person 1: Zeta")!=std::string::npos);
     // Receipt fragments of the same unknown phrase still form one line.
     // A new phrase starts another unknown line; only matching known labels join them.
     liveFixture();phraseReply(1,"inter");phraseReply(1,"national",-1,5);
     assert(std::string(labelledText)=="?: international"&&state.phraseCount==1);
     patches.clear();phraseReply(1,"national",-1,5);assert(std::string(state.tail)=="international"&&patches.empty());
     phraseReply(2,"team");assert(std::string(labelledText)=="?: international\n?: team"&&state.phraseCount==2);
-    labelReply({{2,0}});assert(std::string(labelledText)=="?: international\nPerson 1: team");
-    labelReply({{1,0}});assert(std::string(labelledText)=="Person 1: international team"&&creates==1);
+    labelReply({{2,0}});assert(std::string(labelledText)=="?: international\nPerson 1: Team");
+    labelReply({{1,0}});assert(std::string(labelledText)=="Person 1: International team"&&creates==1);
     // Speaker-disabled text flows across finalization boundaries, preserving
     // supplied punctuation. Draft replacement remains visibly provisional.
     liveFixture();phraseReply(1,"hello,",-1,0,false);phraseReply(2,"world!",-1,0,false);draftReply("more words");
-    assert(std::string(labelledText)=="hello, world!\n~ more words");
-    phraseReply(3,"more words",-1,0,false);assert(std::string(labelledText)=="hello, world! more words");
+    assert(std::string(labelledText)=="Hello, world!\n~ more words");
+    phraseReply(3,"more words",-1,0,false);assert(std::string(labelledText)=="Hello, world! more words");
     // Metadata eviction preserves the orphan text, with neutral attribution.
     liveFixture();{
         std::string prefix;
         for(unsigned i=1;i<=20;++i){std::string chunk="word"+std::to_string(i);phraseReply(i,chunk,0);if(i<=4){if(!prefix.empty())prefix+=' ';prefix+=chunk;}}
-        assert(state.phraseCount==16&&std::string(labelledText).find("?: "+prefix+"\nPerson 1: word5")==0);
+        assert(state.phraseCount==16&&std::string(labelledText).find("?: "+prefix+"\nPerson 1: Word5")==0);
         assert(std::string(labelledText).find("word20")!=std::string::npos);
     }
     // Tail eviction may clip a retained phrase. Its surviving UTF-8 bytes
@@ -361,7 +362,9 @@ int main(){
         while(!retained.empty()&&retained.front()==' ')retained.erase(0,1);
         // Only whitespace at phrase joins is normalized; every UTF-8 token remains.
         auto tokens=[](const std::string& value){std::string result;for(char c:value)if(c!=' ')result+=c;return result;};
-        assert(tokens(std::string(labelledText).substr(10))==tokens(retained));
+        std::string shownWords=std::string(labelledText).substr(10);
+        if(!shownWords.empty()&&shownWords[0]>='A'&&shownWords[0]<='Z')shownWords[0]=char(shownWords[0]+('a'-'A'));  // display casing of the turn start only
+        assert(tokens(shownWords)==tokens(retained));
         for(const auto& line:lineText)assert(line.size()<=180&&TranscriptionUI::completePrefix(line.c_str(),line.size())==line.size());
         assert(creates==1);
     }
@@ -381,7 +384,7 @@ int main(){
         // Return to newest, then split labels without new text/draft versions.
         while(!state.followTail)scroll(G2_TAP_PAGE_NEXT);
         labelReply({{2,1},{4,1},{6,1},{8,1},{10,1},{12,1},{14,1},{16,1}});
-        assert(state.followTail&&state.liveFirstLine==state.liveNewestLine&&displayed.find("word16")!=std::string::npos&&creates==1);
+        assert(state.followTail&&state.liveFirstLine==state.liveNewestLine&&displayed.find("Word16")!=std::string::npos&&creates==1);  // its own turn now: capitalized
     }
     // Navigation arriving after the render snapshot cannot be overwritten by
     // that stale snapshot's follow-tail anchor/layout commit.

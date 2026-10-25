@@ -180,7 +180,7 @@ bash experiments/board_qualification/build-jpeg-diagnostic.sh s3
 ```
 
 **Ready with G2/R1:** use `blemode client`, `g2init`, `openg2 auto`,
-`ringconnect`, then inspect `g2status` and `ringstatus json`. With the prepared
+`ring connect`, then inspect `g2status` and `ring status json`. With the prepared
 accessories, `g2hijacktest` starts the same Blocks/menu path; navigate Apps →
 Files → the synthetic JPEG → View and View Full. Capture fragment acknowledgments
 and errors, and ask for visible orientation/tone/cropping plus ring navigation.
@@ -286,7 +286,7 @@ Server/Client initialization, peer targets/owners/auto-reconnect flags, active
 clock/preset and log routing. It refuses existing BLE server, G2, ring or
 diagnostic-central connections, and refuses ownerless enabled peer flags whose
 restoration could silently assign ownership. Automatic reconnect flags are
-temporarily disabled and verified. Normal `ringdisconnect` and `closeg2`
+temporarily disabled and verified. Normal `ring disconnect` and `closeg2`
 commands cancel work first; a bounded 12-second poll requires G2 idle/off with
 both arms down and the ring disconnected with no pending connect. Exactly one
 `g2deinit` then must acknowledge and produce `state=off`. `closeg2` success text

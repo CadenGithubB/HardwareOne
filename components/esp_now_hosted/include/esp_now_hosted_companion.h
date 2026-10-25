@@ -25,8 +25,9 @@
  * and the phone pipe). prepare.py builds the slave with this value as
  * CONFIG_BT_LE_MAX_CONNECTIONS and reserves that many connections at controller
  * init. Hosted cannot report the limit and its version does not change with
- * it, so the bridge reports it in GET_INFO; the P4 admits
- * radioHalCompanionBleLinks() = min(this, reported) links. A companion that
+ * it, so the bridge reports it in GET_INFO.
+ * radioHalCompanionBleLinks() returns min(this, reported) as metadata; the
+ * shared BLE_CentralCoordinator owns P4 admission separately. A companion that
  * reports no limit (stock Hosted, or a bridge built before the report) was
  * built with the IDF default of 3 and refuses a 4th connection in the
  * controller. */

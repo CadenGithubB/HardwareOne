@@ -399,6 +399,8 @@ struct Settings {
       c6HeartbeatSec(5),
       bleRequireSecureChannel(true),
       bleSecureChannelSecret(""),
+      bleConsoleOnPipe(true),
+      phonePipeSecretGenerated(false),
       // BLE peer fields moved to gBlePeerData[] (see BLE_Peers.h)
       powerMode(0),
       powerDisplayDimLevel(30),
@@ -1120,6 +1122,11 @@ struct Settings {
   int  c6HeartbeatSec;          // Companion heartbeat interval in seconds, 0 = watchdog off (default: 5)
   bool bleRequireSecureChannel; // Require the app-layer Secure Channel (server mode); refuse plaintext commands when set
   String bleSecureChannelSecret;// Pre-shared passphrase for the Secure Channel (PBKDF2 -> PSK). Secret.
+  String phonePipeSecret;       // Dedicated pipe secret; registry loads/mutates into internal RAM.
+  bool bleConsoleOnPipe;        // App console on the relay pipe's phone link in G2 client mode (default: true)
+  // The phone secret is a code `phone pair new` made (phone link v2): only then is the
+  // app console offered on the phone link. `phone secret` and factory reset clear it.
+  bool phonePipeSecretGenerated;
   // BLE peer MACs and auto-reconnect flags now live in BLE_Peers.cpp's
   // gBlePeerData[BLE_PEER_MAX] array, persisted under "bluetooth.peers"
   // in settings.json. See BLE_Peers.h. Removed flat keys:
@@ -1229,6 +1236,8 @@ void settingsDefaults();
 bool buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords = false, bool mainFileOnly = false);
 bool readSettingsJson();
 bool writeSettingsJson();
+// Same checked writer, also removes retained pipe credentials from disabled modules.
+bool writeSettingsJsonForFactoryReset();
 
 // True when readSettingsJson() found an on-disk firmwareVersion different from
 // the running build. Cleared when settingsRestampFirmwareVersion() succeeds or
@@ -1365,7 +1374,8 @@ inline void setDebugSetting(T& field, const T& value) {
 
 // AES-128-CBC string encryption/decryption (device-bound key)
 String encryptString(const String& plaintext);
-String decryptString(const String& encrypted);
+String decryptString(const String& encrypted, bool internalResult = false);
+bool setInternalSecretSetting(String& field,const String& value,const SettingEntry* entry = nullptr);
 String getDeviceEncryptionKey();
 
 // JSON-field secret helpers — the uniform way to (de)serialize a *recoverable*
@@ -1477,6 +1487,7 @@ struct SettingEntry {
   const char* cmdKey = nullptr; // CLI command name override (nullptr = use jsonKey as command)
   bool readOnly = false;      // If true: UI renders as display-only text (no input). For system-managed
                               // counters (crashCount, lastResetReason, etc.) that the user reads but never edits.
+  bool internalSecret = false; // Secret String: bounded 128-byte internal allocation, moved on load.
 };
 
 // Connection check callback - returns true if module is available/connected

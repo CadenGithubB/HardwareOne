@@ -27,6 +27,14 @@
 //   0x05 REJECT       body = reason(1)            (device->app only; handshake refused)
 //                     reason 0x01 = no passphrase set on device (run `blesecret`)
 //                     reason 0x02 = auth failed (wrong passphrase or tampering/MITM)
+//                     reason 0x03 = no channel (the G2 client host's console on the
+//                                   phone pipe's link only): a DATA frame reached a
+//                                   console session that holds no channel, because
+//                                   the device renewed the session while the link
+//                                   stayed up (bledisconnect, bleconsole off/on,
+//                                   blesecret cleared and set again).
+//                                   Run the handshake again, then log in. Sent once
+//                                   per session, for its first such frame.
 //     REJECT is sent best-effort right before the device aborts a handshake, so
 //     the app shows a real cause instead of a generic timeout. Treat any other
 //     reason byte as a generic auth failure.
@@ -79,6 +87,11 @@ void bleScWarmPsk();
 // is byte-exact (not text-filtered) and returns BLE_SC_BINARY_READY.
 BleScResult bleScHandleInbound(uint16_t connId, TransportSessionEpoch epoch, const uint8_t* data,
                                size_t len, char* out, size_t outCap, size_t* outLen);
+
+// REJECT reason 0x03 to this (connId, epoch) only, through the directed raw
+// sender: the app's DATA frame found no channel on its console session (the G2
+// client host renewed it under a live link). Call from cmd_exec, never BTC.
+void bleScRejectNoChannel(uint16_t connId, TransportSessionEpoch epoch);
 
 // Encrypt a plaintext reply as one or more DATA frames and notify them to this
 // connection's current session only. Chunks to fit the negotiated MTU. Returns

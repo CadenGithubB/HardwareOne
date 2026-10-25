@@ -167,10 +167,12 @@ def main() -> None:
                    "-Wno-unused-function", "-Wno-unused-parameter", str(unit), "-o", str(binary)]
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
-        subprocess.run(command, check=True)
-        result = subprocess.run([str(binary)], check=False)
-        if result.returncode != 0:
-            failures.append("availability harness checks failed (see FAIL lines above)")
+        # Bluetooth off (central class) and on (the running-role rule).
+        for extra in ([], ["-DENABLE_BLUETOOTH=1"]):
+            subprocess.run(command + extra, check=True)
+            result = subprocess.run([str(binary)], check=False)
+            if result.returncode != 0:
+                failures.append(f"availability harness checks failed {extra} (see FAIL lines above)")
     for failure in failures:
         print(f"FAIL: {failure}")
     if failures:

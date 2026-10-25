@@ -8,6 +8,7 @@
 #include <sys/time.h>
 
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 
 #include "G2_Glasses.h"
@@ -62,8 +63,11 @@ static PresenceRecord sPresence;
 static char sPresenceReason[CM5_PRESENCE_REASON_MAX + 1] = {0};
 
 static portMUX_TYPE sPresenceMux = portMUX_INITIALIZER_UNLOCKED;
-static TaskHandle_t sPresenceTask = nullptr;
-static std::atomic<bool> sTaskCreateClaim{false};
+// The monitor (System_TaskUtils.h ServiceWorker: created on the first
+// heartbeat, leaves while the host is stale; its handle, claim and wake live
+// under sPresenceMux with the record).
+static ServiceWorker sPresenceWorker{sPresenceMux};
+static bool ensurePresenceTask();
 
 struct Token {
   const char* ptr = nullptr;
@@ -145,12 +149,13 @@ static bool parseMode(const Token& token, Cm5PresenceMode& mode) {
   return true;
 }
 
+// Wakes the monitor. Evidence published to a monitor that left (idle: the host
+// silent for SERVICE_TASK_IDLE_RETIRE_MS) brings one back first, so the edge
+// the evidence starts is observed; a create that fails leaves the readers
+// their timestamps (they never trust the monitor for authority).
 static void notifyMonitor() {
-  TaskHandle_t task = nullptr;
-  portENTER_CRITICAL(&sPresenceMux);
-  task = sPresenceTask;
-  portEXIT_CRITICAL(&sPresenceMux);
-  if (task) xTaskNotifyGive(task);
+  (void)ensurePresenceTask();
+  sPresenceWorker.give();
 }
 
 static bool observeMonitorFreshness(uint32_t generation,
@@ -181,6 +186,78 @@ static void observeTaskStackHighWater() {
   portEXIT_CRITICAL(&sPresenceMux);
 }
 
+// The snapshot of one record copy: arithmetic only, so the monitor's idle exit
+// can evaluate it inside the critical section that nulls its handle.
+static Cm5PresenceSnapshot snapshotFromRecord(const PresenceRecord& record,
+                                              TaskHandle_t task,
+                                              uint32_t activeSessionEpoch,
+                                              uint32_t nowMs) {
+  Cm5PresenceSnapshot out{};
+  out.sessionEpoch = record.sessionEpoch;
+  out.sequence = record.sequence;
+  out.lastSeenMs = record.lastSeenMs;
+  out.ageMs = record.seen ? static_cast<uint32_t>(nowMs - record.lastSeenMs) : 0;
+  out.leaseMs = cm5PresenceLeaseMs(record.mode);
+  out.commandAgeMs = record.commandInFlight
+                         || record.commandGrace
+                     ? static_cast<uint32_t>(nowMs - record.commandStartedMs)
+                     : 0;
+  out.staleTransitions = record.staleTransitions;
+  out.lastTransitionMs = record.lastTransitionMs;
+  out.stackFreeMinBytes = record.stackFreeMinBytes;
+  out.mode = record.mode;
+  out.taskRunning = task != nullptr;
+  out.monitorFresh = record.monitorFresh;
+  out.seenForSession = record.seen && activeSessionEpoch != 0 &&
+                       record.sessionEpoch == activeSessionEpoch;
+  const bool heartbeatFresh = out.seenForSession &&
+      cm5PresenceFreshAt(true, nowMs, record.lastSeenMs, out.leaseMs);
+  const bool commandWithinCap = out.seenForSession && record.commandWasFresh &&
+      cm5PresenceFreshAt(true, nowMs, record.commandStartedMs,
+                         CM5_PRESENCE_BUSY_LEASE_MS);
+  const bool commandGraceFresh = commandWithinCap && record.commandGrace &&
+      cm5PresenceFreshAt(true, nowMs, record.commandFinishedMs,
+                         CM5_PRESENCE_COMMAND_GRACE_MS);
+  const bool commandFresh = commandWithinCap &&
+      (record.commandInFlight || commandGraceFresh);
+  out.fresh = heartbeatFresh || commandFresh;
+  out.commandInFlight = out.seenForSession && record.commandInFlight;
+  out.commandGrace = commandGraceFresh;
+
+  uint32_t heartbeatRemaining = 0;
+  if (heartbeatFresh) heartbeatRemaining = out.leaseMs - out.ageMs;
+  uint32_t commandRemaining = 0;
+  if (commandFresh) {
+    const uint32_t capRemaining =
+        CM5_PRESENCE_BUSY_LEASE_MS - out.commandAgeMs;
+    commandRemaining = capRemaining;
+    if (commandGraceFresh) {
+      const uint32_t graceAge =
+          static_cast<uint32_t>(nowMs - record.commandFinishedMs);
+      const uint32_t graceRemaining =
+          CM5_PRESENCE_COMMAND_GRACE_MS - graceAge;
+      if (graceRemaining < commandRemaining)
+        commandRemaining = graceRemaining;
+    }
+  }
+  out.freshRemainingMs = heartbeatRemaining > commandRemaining
+                             ? heartbeatRemaining : commandRemaining;
+  return out;
+}
+
+
+// The monitor's own exit after an idle wait. ServiceWorker::retireIf re-reads
+// freshness and nulls the handle in one hold of sPresenceMux: evidence
+// published after it finds no monitor and creates one (notifyMonitor), and a
+// wake given meanwhile waits for that successor. Nothing is lost either way.
+static bool retireIfStale() {
+  const uint32_t activeEpoch = uartLinkSessionEpoch();
+  const uint32_t nowMs = millis();
+  return sPresenceWorker.retireIf([activeEpoch, nowMs] {
+    return !snapshotFromRecord(sPresence, sPresenceWorker.handle, activeEpoch, nowMs).fresh;
+  });
+}
+
 static void cm5PresenceTaskBody(void*) {
   for (;;) {
     PresenceRecord record{};
@@ -204,40 +281,23 @@ static void cm5PresenceTaskBody(void*) {
     }
     if (!snapshot.fresh) {
       // No polling while absent/stale.  A heartbeat, command edge, or session
-      // transition wakes us to recompute the exact deadline.
-      (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+      // transition wakes us to recompute the exact deadline. Still stale after
+      // SERVICE_TASK_IDLE_RETIRE_MS, the monitor leaves and its stack goes
+      // back; the next evidence's notifyMonitor() creates it again.
+      if (sPresenceWorker.wait(SERVICE_TASK_IDLE_RETIRE_MS)) continue;
+      if (retireIfStale()) vTaskDelete(nullptr);
       continue;
     }
 
     uint32_t waitMs = snapshot.freshRemainingMs;
     if (waitMs == 0) waitMs = 1;
-    TickType_t waitTicks = pdMS_TO_TICKS(waitMs);
-    if (waitTicks == 0) waitTicks = 1;
-    (void)ulTaskNotifyTake(pdTRUE, waitTicks);
+    (void)sPresenceWorker.wait(waitMs);
   }
 }
 
 static bool ensurePresenceTask() {
-  portENTER_CRITICAL(&sPresenceMux);
-  const bool alreadyRunning = sPresenceTask != nullptr;
-  portEXIT_CRITICAL(&sPresenceMux);
-  if (alreadyRunning) return true;
-
-  bool expected = false;
-  if (!sTaskCreateClaim.compare_exchange_strong(
-          expected, true, std::memory_order_acq_rel)) return false;
-
-  TaskHandle_t created = nullptr;
-  const BaseType_t rc = xTaskCreateLogged(
-      cm5PresenceTaskBody, "cm5_presence", CM5_PRESENCE_STACK_BYTES,
-      nullptr, TASK_PRIORITY_LOW, &created, "cm5.presence", PRO_CORE);
-  if (rc == pdPASS && created != nullptr) {
-    portENTER_CRITICAL(&sPresenceMux);
-    sPresenceTask = created;
-    portEXIT_CRITICAL(&sPresenceMux);
-  }
-  sTaskCreateClaim.store(false, std::memory_order_release);
-  return rc == pdPASS && created != nullptr;
+  return sPresenceWorker.ensure(cm5PresenceTaskBody, "cm5_presence", CM5_PRESENCE_STACK_BYTES,
+                                "cm5.presence");
 }
 
 static bool recordHeartbeat(uint32_t sessionEpoch, uint32_t sequence,
@@ -352,64 +412,13 @@ static Cm5PresenceSnapshot snapshotForSessionImpl(uint32_t activeSessionEpoch,
   TaskHandle_t task = nullptr;
   portENTER_CRITICAL(&sPresenceMux);
   record = sPresence;
-  task = sPresenceTask;
+  task = sPresenceWorker.handle;
   if (reasonOut && reasonCap > 0) {
     strncpy(reasonOut, sPresenceReason, reasonCap - 1);
     reasonOut[reasonCap - 1] = '\0';
   }
   portEXIT_CRITICAL(&sPresenceMux);
-
-  Cm5PresenceSnapshot out{};
-  out.sessionEpoch = record.sessionEpoch;
-  out.sequence = record.sequence;
-  out.lastSeenMs = record.lastSeenMs;
-  out.ageMs = record.seen ? static_cast<uint32_t>(nowMs - record.lastSeenMs) : 0;
-  out.leaseMs = cm5PresenceLeaseMs(record.mode);
-  out.commandAgeMs = record.commandInFlight
-                         || record.commandGrace
-                     ? static_cast<uint32_t>(nowMs - record.commandStartedMs)
-                     : 0;
-  out.staleTransitions = record.staleTransitions;
-  out.lastTransitionMs = record.lastTransitionMs;
-  out.stackFreeMinBytes = record.stackFreeMinBytes;
-  out.mode = record.mode;
-  out.taskRunning = task != nullptr;
-  out.monitorFresh = record.monitorFresh;
-  out.seenForSession = record.seen && activeSessionEpoch != 0 &&
-                       record.sessionEpoch == activeSessionEpoch;
-  const bool heartbeatFresh = out.seenForSession &&
-      cm5PresenceFreshAt(true, nowMs, record.lastSeenMs, out.leaseMs);
-  const bool commandWithinCap = out.seenForSession && record.commandWasFresh &&
-      cm5PresenceFreshAt(true, nowMs, record.commandStartedMs,
-                         CM5_PRESENCE_BUSY_LEASE_MS);
-  const bool commandGraceFresh = commandWithinCap && record.commandGrace &&
-      cm5PresenceFreshAt(true, nowMs, record.commandFinishedMs,
-                         CM5_PRESENCE_COMMAND_GRACE_MS);
-  const bool commandFresh = commandWithinCap &&
-      (record.commandInFlight || commandGraceFresh);
-  out.fresh = heartbeatFresh || commandFresh;
-  out.commandInFlight = out.seenForSession && record.commandInFlight;
-  out.commandGrace = commandGraceFresh;
-
-  uint32_t heartbeatRemaining = 0;
-  if (heartbeatFresh) heartbeatRemaining = out.leaseMs - out.ageMs;
-  uint32_t commandRemaining = 0;
-  if (commandFresh) {
-    const uint32_t capRemaining =
-        CM5_PRESENCE_BUSY_LEASE_MS - out.commandAgeMs;
-    commandRemaining = capRemaining;
-    if (commandGraceFresh) {
-      const uint32_t graceAge =
-          static_cast<uint32_t>(nowMs - record.commandFinishedMs);
-      const uint32_t graceRemaining =
-          CM5_PRESENCE_COMMAND_GRACE_MS - graceAge;
-      if (graceRemaining < commandRemaining)
-        commandRemaining = graceRemaining;
-    }
-  }
-  out.freshRemainingMs = heartbeatRemaining > commandRemaining
-                             ? heartbeatRemaining : commandRemaining;
-  return out;
+  return snapshotFromRecord(record, task, activeSessionEpoch, nowMs);
 }
 
 Cm5PresenceSnapshot cm5PresenceSnapshotForSession(uint32_t activeSessionEpoch,

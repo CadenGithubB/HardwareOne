@@ -316,7 +316,8 @@ static void booleanAndStopPolicy() {
   reset(); context = "BLE dual teardown";
   SettingEntry ble = entries[5]; ble.cmdKey = "bleenabled";
   check(!error(handleSettingCommand(&ble, "off")), "BLE disable failed");
-  check(stopRequests == std::vector<std::string>{"g2deinit", "closeble"}, "BLE teardown order changed");
+  // One stop verb: closeble closes every device, the console server and the shared stack.
+  check(stopRequests == std::vector<std::string>{"closeble"}, "BLE teardown order changed");
   clearEffects(); ble.cmdKey = "bleautostart";
   check(!error(handleSettingCommand(&ble, "off")) && stopRequests.empty(), "autostart invoked runtime stop");
 }

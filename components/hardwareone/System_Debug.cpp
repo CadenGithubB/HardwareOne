@@ -998,6 +998,13 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
     sendEspNowStreamMessage(String(text));
   }
 #endif
+
+  // 8. A Bluetooth command's own lines also go to the session that sent it
+  //    (Bluetooth.cpp batches them before its result). Lines kept off
+  //    Bluetooth, such as the BLE send traces, never reach it.
+#if ENABLE_BLUETOOTH
+  if (route & MSG_ROUTE_BLE) bleCommandOutputLine(text, len);
+#endif
 }
 
 // --- Public overloads: thin wrappers around broadcastOutputCore ---
@@ -1771,6 +1778,15 @@ bool systemLogApplyPersistedFlags() {
   if (!parseSystemLogFlags(gSettings.systemLogFlags, restored)) return false;
   gDebugFlags = restored;
   return true;
+}
+
+DebugFlagMask systemLogConfiguredFlags() {
+  DebugFlagMask saved = (DebugFlagMask)0;
+  if (gSettings.systemLogFlags.length() > 0 &&
+      parseSystemLogFlags(gSettings.systemLogFlags, saved)) {
+    return saved;
+  }
+  return gDebugFlags;  // nothing saved: `log start` keeps the live mask
 }
 
 void formatSystemLogStatus(char* out, size_t outSize) {
@@ -2604,10 +2620,6 @@ void systemLogAutoStart() {
 // 1<<32=0x100000000, ...). Output is byte-identical to the old builder.
 namespace {
 
-#define DBG_X(SYM, bit, BANK, parentBit, tag, settingsField, cmdIdent, group, jsonKey, label) label,
-constexpr const char* kDbgOptLabel[DBG_FLAG_COUNT] = { DBG_FLAG_LIST(DBG_X) };
-#undef DBG_X
-
 // Emit the BitmaskField options dialect into `out` (nullptr = dry run),
 // returning the emitted length (excluding the NUL). Same algorithm as the
 // old runtime builder; iterates the generated kDbgBank/kDbgBit columns,
@@ -2636,7 +2648,7 @@ constexpr size_t dbgEmitLogFlagOptions(char* out) {
     put("1248"[bit & 3]);
     for (int z = bit >> 2; z > 0; --z) put('0');
     put('|');
-    puts_(kDbgOptLabel[i]);
+    puts_(kDbgLabel[i]);
   }
   if (out) out[n] = '\0';
   return n;

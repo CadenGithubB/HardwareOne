@@ -194,6 +194,10 @@ String redactCmdForAudit(const String& argsInput);
 String redactCmdForAudit(const String& argsInput,
                          const CommandResolution& resolution);
 String redactOutputForLog(const String& output);
+// Replaces every MAC address in the text (six hex pairs joined by ':' or '-')
+// with "<mac>", so a Bluetooth, Wi-Fi or ESP-NOW address never reaches a log,
+// the command audit or a lens trace. redactCmdForAudit applies it to every line.
+String maskMacTokens(const String& text);
 
 // CLI validation macro - returns "VALID" early when gCLIValidateOnly is set.
 // gCLIValidateOnly mirrors the validateOnly flag of the command the executor

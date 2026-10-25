@@ -9,7 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-// Keep the established 128x64, page-packed UI surface, including getBuffer()
+// Keep the 128px-wide, page-packed UI surface, including getBuffer()
 // consumers and Adafruit_SSD1306* drawing helpers. The base is used ONLY as a
 // software canvas: its begin/display/command methods must never reach I2C.
 // Panel transport and all resources belong to this concrete driver.

@@ -27,6 +27,17 @@ extern "C" bool verifyRollbackLater(void)
     return true;
 }
 
+// The firmware never exits: app_main() never returns and esp_restart() runs
+// no atexit handlers. Every static with a destructor still registers one
+// through __cxa_atexit, which drags newlib's atexit registry (412 B of
+// internal RAM: __atexit0, _on_exit_args_instance, the mutex) into the image.
+// A strong no-op here wins the link; it must stay in this translation unit,
+// because '-u app_main' is what pulls this object in before -lc is searched.
+extern "C" int __cxa_atexit(void (*)(void*), void*, void*) noexcept
+{
+    return 0;
+}
+
 // Arduino-style hooks that ESP-IDF's Arduino core will call.
 void setup()
 {

@@ -643,6 +643,25 @@ int main() {
   }
 #endif
 
+  // The coexistence mirror reads the attempt as "connecting" while it runs,
+  // retries included, and not after it returns.
+  {
+    static uint8_t sDepthSeen = 0;
+    reset(missing(1), &gWebContext, 0);
+    gDelayHook = [] {
+      const uint8_t depth = sCoexConnectDepth.load();
+      if (depth > sDepthSeen) sDepthSeen = depth;
+    };
+    WifiConnectionTarget target;
+    require(wifiNetworkConnectionById(1, target), "coex scope: lookup");
+    const uint16_t attemptsBefore = sCoexConnects.load();
+    require(!connectWiFiTarget(target, 35000, false), "coex scope: missing target fails");
+    require(sDepthSeen == 1, "coex scope: the attempt counts as connecting while it runs");
+    require(sCoexConnectDepth.load() == 0, "coex scope: released when the attempt returns");
+    require(uint16_t(sCoexConnects.load() - attemptsBefore) == 1,
+            "coex scope: one counted attempt per target, its retries included");
+  }
+
   std::fprintf(stderr, "checks=%d\n", gChecks);
   std::printf("wifi connect budget: OK\n");
   return 0;

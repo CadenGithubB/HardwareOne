@@ -16,6 +16,8 @@
 #include "G2_Ring.h"   // g2RingIsConnected (R1 menu status)
 #include "Bluetooth.h"
 #include "BLE_Peers.h"       // gBlePeerData — G2 AutoReconnect in Bluetooth → G2
+#include "BLE_CentralCoordinator.h"  // bleCentralRingShouldYield (R1 menu status)
+#include "BLE_LinkStatus.h"   // role / relay pipe / app console words (Bluetooth + Phone menus)
 #include "System_Settings.h" // setSetting — peer autoReconnect + bleAutoStart
 #include "G2_Page_TextEntry.h"   // on-glasses keyboard for "Set Name"
 #include "G2_HijackCmd.h"        // g2BumpMenuGen() for setNetSub navigation tracking
@@ -56,13 +58,14 @@ enum NetworkSubMode : uint8_t {
   NET_SUB_HTTP          = 9,  // HTTP(S) server controls (start/stop, HTTPS toggle, auto-start)
   NET_SUB_BLUETOOTH_R1  = 10, // R1 ring controls (under Bluetooth) — mirror of G2 submenu
   NET_SUB_WIFI_SAVED_ACT= 11, // per-saved-network action menu (Connect / Forget)
+  NET_SUB_BLUETOOTH_PHONE = 12, // phone relay pipe controls (under Bluetooth)
 };
 static NetworkSubMode gNetSub = NET_SUB_MAIN;
 // Index into the admitted list snapshot, preserved through the action submenu.
 // Commands use the selected entry's stable identity, never its live array index.
 static int gWifiSavedSel = -1;
 #if ENABLE_WIFI
-static WifiNetworkSnapshot gWifiSavedSnapshot;
+EXT_RAM_BSS_ATTR static WifiNetworkSnapshot gWifiSavedSnapshot;  // PSRAM: presentation copy, no credentials
 #endif
 
 // Rows of the Network action menu the lens shows now (WiFi, ESP-NOW, HTTP(S),
@@ -157,12 +160,13 @@ enum HttpRowAction : uint8_t {
 };
 enum BluetoothRowAction : uint8_t {
   BT_ROW_BACK = 0,        // -> Network chooser
-  BT_ROW_INFO,            // Conn: no action
-  BT_ROW_CLIENT_POWER,    // on: openg2; off: g2deinit
-  BT_ROW_SERVER_POWER,    // on: openble; off: closeble
-  BT_ROW_MODE,            // on: blemode client; off: blemode server
+  BT_ROW_INFO,            // Conn / Saved: no action
+  BT_ROW_CLIENT_POWER,    // on: openg2; off: closeg2 (glasses only; ring, phone, stack stay)
+  BT_ROW_SERVER_POWER,    // on: openconsole; off: closeconsole
+  BT_ROW_MODE,            // Role row: on: blemode client; off: blemode server
   BT_ROW_G2,              // G2 >> submenu
   BT_ROW_R1,              // R1 >> submenu
+  BT_ROW_PHONE,           // Phone >> submenu (ENABLE_BLE_PHONE_PIPE)
   BT_ROW_TOGGLE_ADV,      // bleadv toggle
   BT_ROW_DISCONNECT,      // bledisconnect
   BT_ROW_AUTO_START,      // bleautostart on|off
@@ -178,9 +182,15 @@ enum R1RowAction : uint8_t {
   R1_ROW_BACK = 0,        // -> Bluetooth submenu
   R1_ROW_INFO,            // Ring / BLE stopped: no action
   R1_ROW_AUTO_RECONNECT,  // bleautoreconnect r1-ring on|off
-  R1_ROW_CONNECT,         // ringconnect, with the "connecting..." overlay
-  R1_ROW_RECONNECT,       // ringconnect reconnect
-  R1_ROW_DISCONNECT,      // ringdisconnect
+  R1_ROW_CONNECT,         // openring, with the "connecting..." overlay
+  R1_ROW_RECONNECT,       // openring reconnect
+  R1_ROW_DISCONNECT,      // closering
+};
+enum PhoneRowAction : uint8_t {
+  PHONE_ROW_BACK = 0,     // -> Bluetooth submenu
+  PHONE_ROW_INFO,         // Pipe / Paired / Console: no action
+  PHONE_ROW_AUTO_RECONNECT, // bleautoreconnect phone on|off
+  PHONE_ROW_PIPE,         // on: openphone (open the pipe, connect the paired phone); off: closephone
 };
 
 // Cache of the most recent scan results so tap-to-connect knows which
@@ -253,7 +263,7 @@ static bool claimWifiPendingWatchdog() {
 }
 
 // Same "Pending..." treatment for the R1 ring connect (see showBluetoothR1Menu /
-// handleBluetoothR1Tap). `ringconnect` returns OK the instant the connect is
+// handleBluetoothR1Tap). `openring` returns OK the instant the connect is
 // KICKED, but the scan+connect+auth finishes ~5-8 s later with no completion
 // event — so the immediate menu re-render showed "disconnected" and never
 // updated. While pending, showBluetoothR1Menu() renders "Ring: connecting..."
@@ -398,11 +408,11 @@ enum WifiMenuAction : uint8_t {
 static void showWiFiMenu() {
   setNetSub(NET_SUB_WIFI);
   const uint32_t viewGen = g2CurrentMenuGen();  // this view, before drawing
-  static char radioLine[24];  // "Radio: ON/OFF" — whole-radio power (airplane mode)
-  static char wifiLine[64];
-  static char autoLine[32];   // "Auto Start: ON/OFF" — boot-time auto-connect
-  static char httpLine[40];
-  static char espnowLine[40];
+  EXT_RAM_BSS_ATTR static char radioLine[24];  // "Radio: ON/OFF" — whole-radio power (airplane mode)
+  EXT_RAM_BSS_ATTR static char wifiLine[64];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char autoLine[32];   // "Auto Start: ON/OFF" — boot-time auto-connect
+  EXT_RAM_BSS_ATTR static char httpLine[40];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char espnowLine[40];  // PSRAM: deep-copied by g2ShowListPage
 
 #if ENABLE_WIFI
   // Two separate axes shown as two rows: RADIO power vs WiFi CONNECTION.
@@ -641,7 +651,7 @@ static void showWiFiSavedList() {
 // old behaviour where a tap immediately forgot it.
 static void showWiFiSavedActionMenu() {
 #if ENABLE_WIFI
-  static char back[48];
+  EXT_RAM_BSS_ATTR static char back[48];  // PSRAM: deep-copied by g2ShowListPage
   if (gWifiSavedSel >= 0 && gWifiSavedSel < gWifiSavedSnapshot.count) {
     snprintf(back, sizeof(back), "<- %s", gWifiSavedSnapshot.entries[gWifiSavedSel].ssid.c_str());
   } else {
@@ -662,15 +672,15 @@ static void showWiFiSavedActionMenu() {
 
 static void showEspNowMenu() {
   setNetSub(NET_SUB_ESPNOW);
-  static char stateLine[40];
-  static char modeLine[40];
-  static char devsLine[32];
-  static char autoLine[32];   // "Auto Start: ON/OFF" — boot-time auto-init
+  EXT_RAM_BSS_ATTR static char stateLine[40];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char modeLine[40];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char devsLine[32];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char autoLine[32];   // "Auto Start: ON/OFF" — boot-time auto-init
   NetRowList rows;
   rows.add("<- WiFi", ESPNOW_ROW_BACK);  // WiFi submenu is ESP-NOW's parent
 
 #if ENABLE_ESPNOW
-  static char nameLine[48];
+  EXT_RAM_BSS_ATTR static char nameLine[48];  // PSRAM: deep-copied by g2ShowListPage
   snprintf(nameLine, sizeof(nameLine), "Name: %s",
            gSettings.espnowDeviceName.length() > 0
                ? gSettings.espnowDeviceName.c_str()
@@ -743,23 +753,23 @@ static void showEspNowDevices() {
 // Bluetooth submenu
 // -----------------------------------------------------------------------------
 
+// The Bluetooth menu's layout: the central-host roles (the glasses, the pipe
+// beside them, the phone pipe alone) get the client rows, the app console the
+// server rows. The running role wins (hw1link::roleOf, where a live console
+// server outranks the rest); with nothing running, the saved mode is the role
+// the BLE row starts.
+static bool bluetoothClientRoleForUi(const BleLinkStatus& link) {
+  const hw1link::Role role = link.role == hw1link::Role::Off ? link.saved : link.role;
+  return role != hw1link::Role::Console && role != hw1link::Role::Off;
+}
+
 // G2-specific rows (mode/conn, boot AutoReconnect, saved-MAC reconnect,
 // disconnect) live here so the parent Bluetooth list stays short. Parent
 // keeps BLE on/off, Auto Start, and R1 ring rows only.
-static bool bluetoothClientRoleForUi() {
-  const bool serverUp = isBleServerInitialized();
-  const bool clientUp = isG2ClientInitialized();
-  // Runtime ownership wins while exactly one role is initialized. Persisted
-  // mode is only the role to start when neither role is live (and a fallback
-  // for the invariant-violation case where both claim ownership).
-  if (serverUp != clientUp) return clientUp;
-  return gSettings.bleMode == BLE_MODE_G2_CLIENT;
-}
-
 static void showBluetoothG2Menu() {
   setNetSub(NET_SUB_BLUETOOTH_G2);
-  static char connLine[40];
-  static char autoReconnLine[44];
+  EXT_RAM_BSS_ATTR static char connLine[40];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char autoReconnLine[44];  // PSRAM: deep-copied by g2ShowListPage
 
   // Mode row used to live here as info-only; promoted to the parent
   // Bluetooth menu as a toggle 2026-05-09 so the user can flip
@@ -795,8 +805,8 @@ static void showBluetoothG2Menu() {
 static void showBluetoothR1Menu() {
   setNetSub(NET_SUB_BLUETOOTH_R1);
   const uint32_t viewGen = g2CurrentMenuGen();  // this view, before drawing
-  static char connLine[40];
-  static char autoReconnLine[44];
+  EXT_RAM_BSS_ATTR static char connLine[40];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char autoReconnLine[44];  // PSRAM: deep-copied by g2ShowListPage
 
   const bool active = isG2ClientInitialized();
   const bool ringUp = g2RingIsConnected();
@@ -804,9 +814,13 @@ static void showBluetoothR1Menu() {
   // event) so the user gets feedback instead of a stale "disconnected".
   const bool pending = !ringUp && gRingPendingDeadlineMs > 0 &&
                        (int32_t)(millis() - gRingPendingDeadlineMs) < 0;
+  // On a radio with fewer than four links the enabled phone pipe holds the
+  // ring's slot (BLE_CentralCoordinator.h), so say why it stays down.
+  const bool paused = !ringUp && bleCentralRingShouldYield();
   if (active) {
     snprintf(connLine, sizeof(connLine), "Ring: %s",
-             pending ? "connecting..." : (ringUp ? "connected" : "disconnected"));
+             pending ? "connecting..."
+                     : (ringUp ? "connected" : (paused ? "paused (phone pipe on)" : "disconnected")));
   } else {
     snprintf(connLine, sizeof(connLine), "BLE: stopped");
   }
@@ -832,44 +846,95 @@ static void showBluetoothR1Menu() {
             active ? 1 : 0, ringUp ? 1 : 0);
 }
 
+#if ENABLE_BLE_PHONE_PIPE
+// Phone relay pipe submenu — beside G2 and R1. The pipe joins the glasses'
+// central host; pairing (`phone pair`) needs a local admin on the
+// device's own screen or console, so the lens only says whether it is paired.
+// The rows use the words every surface shares (BLE_LinkStatusCore.h): the pipe
+// ("ready", "searching", "fail: not found", ...), its enrollment, and the app
+// console, which rides the pipe's own link beside the glasses ("waiting" until
+// the pipe is ready, then "signed out" / "signed in"; "no secret" without
+// blesecret).
+static void showBluetoothPhoneMenu() {
+  setNetSub(NET_SUB_BLUETOOTH_PHONE);
+  EXT_RAM_BSS_ATTR static char pipeRow[32];      // "Pipe: fail: not found" is the longest
+  EXT_RAM_BSS_ATTR static char consoleRow[24];   // "Console: signed out" is the longest
+  EXT_RAM_BSS_ATTR static char autoReconnLine[44];  // PSRAM: deep-copied by g2ShowListPage
+  const BleLinkStatus link = bleLinkStatus();
+  // A stopped pipe reads "off" or "no secret" (hw1link::pipeOf).
+  const bool active = link.pipe.phase != hw1link::Pipe::Off &&
+                      link.pipe.phase != hw1link::Pipe::NoSecret;
+  char pipeWords[24];
+  snprintf(pipeRow, sizeof(pipeRow), "Pipe: %s",
+           hw1link::pipeLine(link.pipe, pipeWords, sizeof(pipeWords)));
+  snprintf(consoleRow, sizeof(consoleRow), "Console: %s", hw1link::consoleText(link.console));
+  snprintf(autoReconnLine, sizeof(autoReconnLine), "Phone AutoReconnect: %s",
+           link.pipeAutoReconnect ? "ON" : "OFF");
+
+  NetRowList rows;
+  rows.add("<- Bluetooth", PHONE_ROW_BACK);
+  rows.add(pipeRow, PHONE_ROW_INFO);
+  rows.add(link.pipePaired ? "Paired: yes" : "Paired: no", PHONE_ROW_INFO);
+  rows.add(consoleRow, PHONE_ROW_INFO);
+  rows.add(autoReconnLine, PHONE_ROW_AUTO_RECONNECT, /*on=*/!link.pipeAutoReconnect);
+  // One verb each way: `openphone` opens the pipe on the client stack and
+  // connects the paired phone; `closephone` drops the link and stops the pipe.
+  rows.add(active ? "Close Phone" : "Open Phone", PHONE_ROW_PIPE, /*on=*/!active);
+  showNetRows(NET_SUB_BLUETOOTH_PHONE, rows);
+  DEBUG_G2F("[G2] Bluetooth → Phone submenu shown (pipe=%s console=%s)",
+            hw1link::pipeId(link.pipe.phase), hw1link::consoleId(link.console));
+}
+#endif
+
 static void showBluetoothMenu() {
   setNetSub(NET_SUB_BLUETOOTH);
-  static char stateLine[40];
-  static char modeLine[40];
-  static char connLine[40];
-  static char autoLine[32];   // "Auto Start: ON/OFF" — boot-time auto-init
+  EXT_RAM_BSS_ATTR static char stateLine[40];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char roleRow[24];    // "Role: Glasses+pipe" is the longest
+  EXT_RAM_BSS_ATTR static char savedRow[24];   // "Saved: Glasses+pipe"
+  EXT_RAM_BSS_ATTR static char consoleRow[24]; // "Console: signed out" (server layout) is the longest
+  EXT_RAM_BSS_ATTR static char autoLine[32];   // "Auto Start: ON/OFF" — boot-time auto-init
 
   // Aggregate-status pattern (mirrors the dashboard tile + ESPNow): the
   // BLE subsystem is "on" when EITHER the server OR the G2 client is
   // initialized, and the rendered state reflects whichever is active.
   // Without this, viewing the menu from the lens (which means G2 client
   // is connected) showed "BLE: OFF" — confusing and wrong.
+  const BleLinkStatus link = bleLinkStatus();
   const bool active   = bleSubsystemActive();
-  const bool isClient = bluetoothClientRoleForUi();
-  const bool clientUp = isG2ClientInitialized();
-  const bool serverUp = isBleServerInitialized();
+  const bool isClient = bluetoothClientRoleForUi(link);
   snprintf(autoLine, sizeof(autoLine), "Auto Start: %s",
            gSettings.bleAutoStart ? "ON" : "OFF");
-  // Per-mode "connected" semantics: server cares about phone connection,
-  // client cares about whether the temple BLE links are live.
-  const bool connected = isClient ? isG2Connected() : isBLEConnected();
-  // Mode is now a toggle (was info-only inside the G2 submenu before
-  // 2026-05-09). Lives between the BLE on/off row and the G2/R1
-  // drill-ins so it's visible regardless of mode and immediately
-  // adjacent to the BLE toggle that flipping it may also disrupt.
+  // The server layout's Console row is the app console in the shared words
+  // (hw1link::consoleText: "waiting", "hidden", "signed out", "signed in"),
+  // read from the snapshot, never from gBLEState. It replaced "Conn: yes/no".
+  // In the client layout the console rides the phone pipe's link, so its row
+  // is under Phone >>. The lens offers no switch to server mode (openconsole):
+  // starting it would drop the glasses the lens runs on.
+  // The Role row names what runs now in the words every surface shares
+  // (hw1link::roleText: "App console", "Glasses", "Glasses+pipe", "Phone pipe",
+  // "Off"); it replaced "Mode: server" / "Mode: client (G2)", which named
+  // neither the phone pipe nor the app console. It is also the mode toggle
+  // (was info-only inside the G2 submenu before 2026-05-09), between the BLE
+  // on/off row and the G2/R1 drill-ins so it's visible regardless of mode and
+  // immediately adjacent to the BLE toggle that flipping it may also disrupt.
   // Tap dispatches `blemode <other>` via cmd_exec — that handler
   // tears down the active mode (deinitG2Client / deinitBluetooth)
   // before flipping the persisted setting, mirroring the destructive
-  // semantics of the BLE on/off toggle on idx=1.
-  snprintf(modeLine, sizeof(modeLine), "Mode: %s",
-           isClient ? "client (G2)" : "server");
+  // semantics of the BLE on/off toggle on idx=1. A saved mode that differs
+  // (always, while nothing runs) gets its own "Saved: ..." row rather than
+  // roleLine's "(saved: ...)" suffix, so each lens row stays short.
+  snprintf(roleRow, sizeof(roleRow), "Role: %s", hw1link::roleText(link.role));
+  const bool savedDiffers = hw1link::savedDiffers(link.role, link.saved);
+  if (savedDiffers) {
+    snprintf(savedRow, sizeof(savedRow), "Saved: %s", hw1link::roleText(link.saved));
+  }
   if (active) {
     snprintf(stateLine, sizeof(stateLine), "BLE: ON (%s)",
              bleSubsystemStateString());
-    snprintf(connLine, sizeof(connLine), "Conn: %s",
-             connected ? "yes" : "no");
+    snprintf(consoleRow, sizeof(consoleRow), "Console: %s",
+             hw1link::consoleText(link.console));
   } else {
-    // Subsystem fully inactive — Mode toggle still useful so the user
+    // Subsystem fully inactive — Role toggle still useful so the user
     // can pre-select what the BLE-on toggle starts.
     snprintf(stateLine, sizeof(stateLine), "BLE: OFF");
   }
@@ -879,26 +944,30 @@ static void showBluetoothMenu() {
   // The BLE row starts or stops the role the menu shows.
   rows.add(stateLine, isClient ? BT_ROW_CLIENT_POWER : BT_ROW_SERVER_POWER,
            /*on=*/!active);
-  rows.add(modeLine, BT_ROW_MODE, /*on (to client)=*/!isClient);
+  rows.add(roleRow, BT_ROW_MODE, /*on (to client)=*/!isClient);
+  if (savedDiffers) rows.add(savedRow, BT_ROW_INFO);
   if (isClient) {
     // Client mode: G2 + R1 controls each live under their own
-    // submenu so the parent stays at BLE / Mode / G2 >> / R1 >> /
+    // submenu so the parent stays at BLE / Role / G2 >> / R1 >> /
     // Auto Start. Ring action rows (Connect/Reconnect/Disconnect
     // Ring) moved into the R1 submenu 2026-05-09 alongside this
     // restructure. With BLE off they still hold the AutoReconnect rows.
     rows.add("G2 >>", BT_ROW_G2);
     rows.add("R1 >>", BT_ROW_R1);
+#if ENABLE_BLE_PHONE_PIPE
+    rows.add("Phone >>", BT_ROW_PHONE);
+#endif
   } else if (active) {
-    // Server mode (legacy layout, plus Mode toggle slotted in).
-    rows.add(connLine, BT_ROW_INFO);
+    // Server mode (legacy layout, plus Role toggle slotted in).
+    rows.add(consoleRow, BT_ROW_INFO);
     rows.add("Toggle Adv", BT_ROW_TOGGLE_ADV);
     rows.add("Disconnect", BT_ROW_DISCONNECT);
   }
   rows.add(autoLine, BT_ROW_AUTO_START, /*on=*/!gSettings.bleAutoStart);
   showNetRows(NET_SUB_BLUETOOTH, rows);
-  DEBUG_G2F("[G2] Bluetooth submenu shown (server=%d client=%d conn=%d mode=%s)",
-            serverUp ? 1 : 0, clientUp ? 1 : 0, connected ? 1 : 0,
-            isClient ? "client" : "server");
+  DEBUG_G2F("[G2] Bluetooth submenu shown (role=%s saved=%s console=%s layout=%s)",
+            hw1link::roleId(link.role), hw1link::roleId(link.saved),
+            hw1link::consoleId(link.console), isClient ? "client" : "server");
 }
 
 // -----------------------------------------------------------------------------
@@ -1341,8 +1410,24 @@ static void onBluetoothR1MenuRefreshDone(bool ok,
   DEBUG_G2F("[G2] Bluetooth-R1-menu refresh cmd done: ok=%d seq=%llu menuGen=%u result='%s'",
             (int)ok, (unsigned long long)cookie.seq,
             (unsigned)cookie.menuGen, result ? result : "");
+  // A refused connect never goes in flight, so drop the "connecting..."
+  // overlay now instead of after the watchdog's kick-off grace.
+  if (!ok || (result && strncmp(result, "Error:", 6) == 0)) gRingPendingDeadlineMs = 0;
   (void)g2EnqueueRedraw(cookie, &showBluetoothR1Menu, "Bluetooth-R1-menu refresh");
 }
+
+#if ENABLE_BLE_PHONE_PIPE
+// Phone submenu refresh — same pattern as the R1 callback above.
+static void onBluetoothPhoneMenuRefreshDone(bool ok,
+                                            const char* result,
+                                            const G2CmdCookie& cookie,
+                                            void* /*userData*/) {
+  DEBUG_G2F("[G2] Bluetooth-Phone-menu refresh cmd done: ok=%d seq=%llu menuGen=%u result='%s'",
+            (int)ok, (unsigned long long)cookie.seq,
+            (unsigned)cookie.menuGen, result ? result : "");
+  (void)g2EnqueueRedraw(cookie, &showBluetoothPhoneMenu, "Bluetooth-Phone-menu refresh");
+}
+#endif
 
 static void handleWiFiTap(uint32_t idx) {
   NetRowBinding row;
@@ -1933,8 +2018,8 @@ static void handleBluetoothG2Tap(uint32_t idx) {
     }
     return;
   }
-  // G2_ROW_DISCONNECT: soft disconnect (keep GATT cache). Full teardown is
-  // g2deinit / closeg2 full.
+  // G2_ROW_DISCONNECT: closeg2 drops the links and releases the glasses
+  // runtime (GATT cache included); the ring, the phone and the stack stay up.
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
   cookie.targetNetSub = (uint8_t)gNetSub;
@@ -1994,20 +2079,23 @@ static void handleBluetoothR1Tap(uint32_t idx) {
   if (action != R1_ROW_DISCONNECT) {
     // "Reconnect Ring" (drawn while the ring was up) → drop + settle + connect
     // on cmd_exec; "Connect Ring" → a fresh connect, even if the ring came up
-    // since. Heap guard + 500 ms settle live inside `ringconnect reconnect`.
+    // since. Heap guard + 500 ms settle live inside `openring reconnect`.
     const bool fresh = (action == R1_ROW_CONNECT);
-    const char* line = fresh ? "ringconnect" : "ringconnect reconnect";
+    const char* line = fresh ? "openring" : "openring reconnect";
     G2CmdCookie cookie{};
     cookie.targetPage   = g2GetHijackPage();
     cookie.targetNetSub = (uint8_t)gNetSub;
     BROADCAST_PRINTF("[G2] Bluetooth: %s Ring via cmd_exec",
                      fresh ? "Connect" : "Reconnect");
-    // Fresh connect: `ringconnect` returns OK on kick-off, but scan+connect+auth
+    // Fresh connect: `openring` returns OK on kick-off, but scan+connect+auth
     // finishes ~5-8 s later with no completion event. Arm the "connecting..."
     // overlay + watchdog so the menu flips to "connected" when it actually is,
     // instead of staying stuck on "disconnected". (Reconnect keeps ringUp true,
     // so its menu already reads right — no overlay needed.) Mirrors WiFi connect.
-    if (fresh) {
+    // While the ring gives way to the phone pipe the command refuses at once,
+    // so there is nothing to wait for; the menu already reads "paused".
+    const bool armOverlay = fresh && !bleCentralRingShouldYield();
+    if (armOverlay) {
       gRingPendingDeadlineMs = millis() + 12000;
       showBluetoothR1Menu();            // immediate "Ring: connecting..." render
       vTaskDelay(pdMS_TO_TICKS(150));   // let the REBUILD hit the air before the scan storms BLE
@@ -2018,7 +2106,7 @@ static void handleBluetoothR1Tap(uint32_t idx) {
                 fresh ? "connect" : "reconnect");
       gRingPendingDeadlineMs = 0;
       if (fresh) showBluetoothR1Menu();
-    } else if (fresh && !gRingPendingTaskActive) {
+    } else if (armOverlay && !gRingPendingTaskActive) {
       gRingPendingTaskActive = true;
       taskStackRecord("g2_ring_pending", 4096);
       if (xTaskCreatePinnedToCore(ringPendingWatchdogTask, "g2_ring_pending",
@@ -2035,20 +2123,49 @@ static void handleBluetoothR1Tap(uint32_t idx) {
   cookie.targetPage   = g2GetHijackPage();
   cookie.targetNetSub = (uint8_t)gNetSub;
   BROADCAST_PRINTF("[G2] Bluetooth: Disconnect Ring via cmd_exec");
-  if (!g2SubmitHijackCommand("ringdisconnect", cookie,
+  if (!g2SubmitHijackCommand("closering", cookie,
                              onBluetoothR1MenuRefreshDone, nullptr)) {
     DEBUG_G2F("[G2] R1 disconnect submit FAILED — no inline mutate");
   }
 }
 
+#if ENABLE_BLE_PHONE_PIPE
+static void handleBluetoothPhoneTap(uint32_t idx) {
+  // Rows as showBluetoothPhoneMenu bound them:
+  //   0=Back 1=Pipe 2=Paired 3=Console 4=AutoReconnect 5=Open/Close Phone.
+  NetRowBinding row;
+  if (!netRowAt(NET_SUB_BLUETOOTH_PHONE, idx, &row)) return;
+  const char* line = nullptr;
+  switch ((PhoneRowAction)row.action) {
+    case PHONE_ROW_BACK:           showBluetoothMenu(); return;
+    case PHONE_ROW_AUTO_RECONNECT: line = row.on ? "bleautoreconnect phone on"
+                                                 : "bleautoreconnect phone off"; break;
+    case PHONE_ROW_PIPE:           line = row.on ? "openphone" : "closephone"; break;
+    default:
+      DEBUG_G2F("[G2] Bluetooth → Phone: info row %u (no action)", (unsigned)idx);
+      return;
+  }
+  // cmd_exec as the glasses' owner (admin-gated like the G2/R1 rows).
+  G2CmdCookie cookie{};
+  cookie.targetPage   = g2GetHijackPage();
+  cookie.targetNetSub = (uint8_t)gNetSub;
+  if (!g2SubmitHijackCommand(line, cookie, onBluetoothPhoneMenuRefreshDone, nullptr)) {
+    DEBUG_G2F("[G2] Phone '%s' submit FAILED — no inline mutate", line);
+  }
+}
+#endif
+
 static void handleBluetoothTap(uint32_t idx) {
   // Rows as showBluetoothMenu bound them — restructured 2026-05-09
-  // to promote Mode out of the G2 submenu and consolidate ring controls
-  // under a new R1 >> drill-in:
-  //   active + server:           0=Back 1=BLE 2=Mode 3=Conn 4=ToggleAdv 5=Disconnect 6=Auto
-  //   active + client:           0=Back 1=BLE 2=Mode 3=G2>> 4=R1>> 5=Auto
-  //   inactive + server:         0=Back 1=BLE 2=Mode 3=Auto
-  //   inactive + client:         0=Back 1=BLE 2=Mode 3=G2>> 4=R1>> 5=Auto
+  // to promote Mode (now the Role row) out of the G2 submenu and consolidate
+  // ring controls under a new R1 >> drill-in:
+  //   active + server:           0=Back 1=BLE 2=Role 3=Conn 4=ToggleAdv 5=Disconnect 6=Auto
+  //   active + client:           0=Back 1=BLE 2=Role 3=G2>> 4=R1>> 5=Auto
+  //                              (phone pipe builds: 5=Phone>> 6=Auto)
+  //   inactive + server:         0=Back 1=BLE 2=Role 3=Auto
+  //   inactive + client:         0=Back 1=BLE 2=Role 3=G2>> 4=R1>> 5=Auto
+  //   A "Saved: ..." info row follows Role when the saved mode differs (always
+  //   while inactive), shifting the rest down by one.
   NetRowBinding row;
   if (!netRowAt(NET_SUB_BLUETOOTH, idx, &row)) return;
   const BluetoothRowAction action = (BluetoothRowAction)row.action;
@@ -2056,16 +2173,16 @@ static void handleBluetoothTap(uint32_t idx) {
 
   if (action == BT_ROW_CLIENT_POWER || action == BT_ROW_SERVER_POWER) {
     // BLE row — starts or stops the role it showed, via cmd_exec:
-    //   client + on  → openg2      client + off → g2deinit (yanks the lens out from under the user)
-    //   server + on  → openble     server + off → closeble
+    //   client + on  → openg2      client + off → closeg2 (yanks the lens out from under the user)
+    //   server + on  → openconsole server + off → closeconsole
     // Client+off is destructive to the lens redraw — the connection
     // we'd repaint on goes down. The completion callback will find the
     // lens disconnected and the redraw will skip silently in
     // g2EnqueueLensJob, which is fine.
     const bool client = (action == BT_ROW_CLIENT_POWER);
     const char* line;
-    if (row.on) line = client ? "openg2"   : "openble";
-    else        line = client ? "g2deinit" : "closeble";
+    if (row.on) line = client ? "openg2"  : "openconsole";
+    else        line = client ? "closeg2" : "closeconsole";
 
     G2CmdCookie cookie{};
     cookie.targetPage   = g2GetHijackPage();
@@ -2078,14 +2195,12 @@ static void handleBluetoothTap(uint32_t idx) {
     return;
   }
 
-  if (action == BT_ROW_MODE) {  // Mode toggle (server ↔ client) — routed via cmd_exec.
-    // `blemode <other>` tears down whichever side is currently active
-    // before flipping the persisted setting (see cmd_blemode in
-    // Bluetooth.cpp). Destructive to the lens hijack when going from
-    // client + active → server: the BLE link we render through is
-    // about to drop. Same caveat as the BLE on/off toggle on idx=1;
-    // the completion callback's redraw will silently no-op once the
-    // link is gone. "Other" is the role the row showed (on = to client).
+  if (action == BT_ROW_MODE) {  // Role row: boot role toggle (server ↔ client) — via cmd_exec.
+    // `blemode <other>` stores the boot role only; nothing running changes
+    // (see cmd_blemode in Bluetooth.cpp), so the lens hijack survives it. The
+    // server switch itself is `openconsole` on the server power row, which
+    // does drop the link we render through. "Other" is the role the row
+    // showed (on = to client).
     const char* arg = row.on ? "client" : "server";
     char line[24];
     snprintf(line, sizeof(line), "blemode %s", arg);
@@ -2103,8 +2218,11 @@ static void handleBluetoothTap(uint32_t idx) {
   switch (action) {
     case BT_ROW_G2:  showBluetoothG2Menu(); break;
     case BT_ROW_R1:  showBluetoothR1Menu(); break;
+#if ENABLE_BLE_PHONE_PIPE
+    case BT_ROW_PHONE: showBluetoothPhoneMenu(); break;
+#endif
 
-    case BT_ROW_INFO:  // Conn info row (server layout)
+    case BT_ROW_INFO:  // Console (server layout) or Saved info row
       DEBUG_G2F("[G2] Bluetooth: info row %u (no action)", (unsigned)idx);
       break;
 
@@ -2165,10 +2283,10 @@ static void handleBluetoothTap(uint32_t idx) {
 
 static void showHttpMenu() {
   setNetSub(NET_SUB_HTTP);
-  static char serverLine[40];
-  static char httpsLine[32];
-  static char autoLine[32];
-  static char ipLine[40];
+  EXT_RAM_BSS_ATTR static char serverLine[40];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char httpsLine[32];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char autoLine[32];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char ipLine[40];  // PSRAM: deep-copied by g2ShowListPage
 
 #if ENABLE_HTTP_SERVER
   bool running = (server != nullptr);
@@ -2322,6 +2440,11 @@ void g2NetworkHandleTap(uint32_t idx) {
     case NET_SUB_BLUETOOTH:   handleBluetoothTap(idx);   break;
     case NET_SUB_BLUETOOTH_G2: handleBluetoothG2Tap(idx); break;
     case NET_SUB_BLUETOOTH_R1: handleBluetoothR1Tap(idx); break;
+#if ENABLE_BLE_PHONE_PIPE
+    case NET_SUB_BLUETOOTH_PHONE: handleBluetoothPhoneTap(idx); break;
+#else
+    case NET_SUB_BLUETOOTH_PHONE: break;  // no Phone menu without the pipe
+#endif
     case NET_SUB_HTTP:        handleHttpTap(idx);        break;
   }
 }

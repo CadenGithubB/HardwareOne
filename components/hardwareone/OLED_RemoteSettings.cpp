@@ -387,7 +387,7 @@ void freeRemoteSettingsModules() {
  * Get remote settings modules
  */
 const SettingsModule** getRemoteSettingsModules(size_t& count) {
-  static const SettingsModule* modulePointers[MAX_SETTINGS_MODULES];
+  EXT_RAM_BSS_ATTR static const SettingsModule* modulePointers[MAX_SETTINGS_MODULES];  // PSRAM: filled and read on the OLED task
   
   // Clamp BOTH the reported count and the fill. These used to disagree: count
   // was the peer's raw gRemoteModuleCount while the loop stopped at

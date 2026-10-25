@@ -37,6 +37,9 @@ dependencies.lock.esp32p4 pins plus tools/p4/esp-dl-3.3.12-hw1.patch:
     templated ConvOpArgs constructor needs (braced lists do not deduce);
   - hw1_dl_log_kernel_binds: when set (speaker diagnostics only), each
     distinct conv kernel key is logged once as it binds (TL kbind);
+  - Conv setup borrows per-channel factors from its existing aligned prepared
+    PSRAM block; temporary argument vectors use the metadata allocator, removing
+    repeated internal allocations without changing kernels or split ownership;
   - dl_fft pinned to ==0.7.0: a local component's dependencies join the root
     solve, which would otherwise be free to pick a newer dl_fft.
 
@@ -63,8 +66,8 @@ VERSION = "3.3.12"
 COMPONENT_HASH = "d792e72ab3858d805d8918d1215a862541344625f62134597866834de666fd04"
 SOURCE_TREE_SHA256 = "e5c5155078c46e090ad7f08a7239bb52d456394fab1356d78b4c127eefcb6e86"
 PATCH = ROOT / "esp-dl-3.3.12-hw1.patch"
-PATCH_SHA256 = "a8e46fd492c3c474a8ad757cdf2401e1cbd76aaaa7bc915cfa83b6bda4fc6d75"
-PATCHED_TREE_SHA256 = "684fd6e837b2ad74c8eaebf148567462861e875322c745e3766d0645fedc019b"
+PATCH_SHA256 = "0dc9782643ce3d2332b2c4a54624fce27150736314d065b48b55d5cf2a54d593"
+PATCHED_TREE_SHA256 = "b217d41df9f399d7958496ae62f075cfbc8adecd222f9fe9c03064a452ddcd2c"
 MANIFEST = "hw1-esp-dl-override.json"
 # Present only in component-manager copies; not part of the package itself.
 IGNORED = {".component_hash", MANIFEST}

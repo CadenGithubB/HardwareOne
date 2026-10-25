@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "G2_RepairCore.h"
+
 using String = std::string;
 static unsigned assertions = 0, entries = 0, exits = 0, depth = 0;
 static void check(bool condition, const char* message) {
@@ -31,14 +33,16 @@ static void selectLifecycle(int lifecycle) {
 }
 static G2Temple gL{}, gR{};
 static int8_t gBatteryL = -1, gBatteryR = -1;
-static int gTopologyMux = 0, gControlLifecycleMux = 0;
+static int gTopologyMux = 0, gControlLifecycleMux = 0, gRecoveryMux = 0;
+static g2repair::Schedule gRepair{};
 static uint8_t gClientInitters = 0;
 static std::vector<int*> held;
 static void portENTER_CRITICAL(int* mux) {
-  check(mux == &gTopologyMux || mux == &gControlLifecycleMux,
-        "only existing topology/lifecycle guards are used");
+  check(mux == &gTopologyMux || mux == &gControlLifecycleMux || mux == &gRecoveryMux,
+        "only existing topology/lifecycle/repair guards are used");
   check(held.empty() || (held.size() == 1 && held.back() == &gControlLifecycleMux &&
-                        mux == &gTopologyMux), "lock nesting follows lifecycle then topology");
+                        mux == &gTopologyMux),
+        "lock nesting follows lifecycle then topology; the repair lock is taken alone");
   held.push_back(mux); ++entries; ++depth;
 }
 static void portEXIT_CRITICAL(int* mux) {
@@ -47,6 +51,21 @@ static void portEXIT_CRITICAL(int* mux) {
 }
 
 // INSERT_PRODUCTION
+
+// The one-temple repair: 0 off, 1 fast try 3, 2 slow, 3 held.
+static void selectRepair(int r) {
+  gRepair = g2repair::Schedule{};
+  if (r == 0) return;
+  gRepair.restart(1000, 0);
+  if (r == 1) gRepair.failed = 2;
+  if (r == 2) gRepair.failed = g2repair::kFastTries;
+  if (r == 3) gRepair.held = true;
+}
+// What status shows: the schedule only while running with exactly one temple up.
+static const char* repairText(int r, int lifecycle) {
+  static const char* const names[] = {"none", "3/7", "slow", "held"};
+  return lifecycle == 2 && gL.connected != gR.connected ? names[r] : "none";
+}
 
 static void checkText(const std::string& expected) {
   char text[256];
@@ -80,9 +99,11 @@ static void characterize() {
     selectLifecycle(lifecycle);
     for (int fsm = 0; fsm < 7; ++fsm) {
       client.state = lifecycle == 0 ? G2_STATE_IDLE : static_cast<G2State>(fsm);
-      for (int links = 0; links < 4; ++links) {
+      for (int links = 0; links < 4; ++links) for (int r = 0; r < (TEST_REPAIR ? 4 : 1); ++r) {
         gL.connected = (links & 1) != 0;
         gR.connected = (links & 2) != 0;
+        selectRepair(r);
+        const bool repairRead = TEST_REPAIR && lifecycle == 2 && gL.connected != gR.connected;
         const char* expectedState = lifecycle != 2 ? "off" :
             fsm == G2_STATE_CONNECTED ? links == 3 ? "connected" :
             links ? "connecting" : "idle" : names[fsm];
@@ -103,8 +124,13 @@ static void characterize() {
                 "null snapshot is unavailable without state access");
           G2ConnectionStatus status;
           check(g2ConnectionStatusSnapshot(&status), "compiled owner always offers status");
-          check(entries == before + (TEST_RUNTIME ? 2 : 1) && entries == exits && depth == 0,
+          check(entries == before + (TEST_RUNTIME ? 2 : 1) + (repairRead ? 1 : 0) &&
+                entries == exits && depth == 0,
                 "snapshot takes and releases existing ownership guards");
+#if TEST_REPAIR
+          check(std::strcmp(status.repair, repairText(r, lifecycle)) == 0,
+                "repair shows only while running with one temple up");
+#endif
           check(std::strcmp(status.state, expectedState) == 0 &&
                 status.running == (lifecycle == 2), "running distinguishes off from initialized idle");
           check(status.left.connected == gL.connected && status.right.connected == gR.connected &&
@@ -125,6 +151,10 @@ static void characterize() {
               unsigned(gL.mtu), unsigned(gR.mtu), int(gBatteryL), int(gBatteryR),
               static_cast<unsigned long>(gL.packetsSent), static_cast<unsigned long>(gR.packetsSent),
               static_cast<unsigned long>(gL.packetsReceived), static_cast<unsigned long>(gR.packetsReceived));
+#if TEST_REPAIR
+          std::strcat(expected, " repair=");
+          std::strcat(expected, repairText(r, lifecycle));
+#endif
 #if TEST_TYPED
           check(std::strcmp(formatted, expected) == 0, "explicit snapshot formatter matches legacy text");
           for (size_t cap = 0; cap <= std::strlen(expected) + 2; ++cap) {
@@ -207,7 +237,25 @@ static void topologyAndCopies() {
   char retainedText[256]; formatG2Status(first, retainedText, sizeof(retainedText));
   check(std::strcmp(firstText, retainedText) == 0,
         "captured status text survives later owner mutations");
+#if TEST_REPAIR
+  // The repair text is copied into the caller's status, not pointed at.
+  client.initialized = true;
+  gL.connected = true; gR.connected = false;
+  selectRepair(2);
+  G2ConnectionStatus half;
+  check(g2ConnectionStatusSnapshot(&half) && std::strcmp(half.repair, "slow") == 0, "slow repair captured");
+  char halfText[256]; formatG2Status(half, halfText, sizeof(halfText));
+  selectRepair(1);
+  char laterText[256]; formatG2Status(half, laterText, sizeof(laterText));
+  check(std::strcmp(halfText, laterText) == 0 && std::strstr(halfText, " repair=slow") != nullptr,
+        "captured repair state survives a later schedule change");
+  check(g2ConnectionStatusSnapshot(&half) && std::strcmp(half.repair, "3/7") == 0, "fresh capture sees it");
+  selectRepair(0);
+#endif
   G2ConnectionStatus empty;
+#if TEST_REPAIR
+  check(std::strcmp(empty.repair, "none") == 0, "repair defaults to none");
+#endif
   check(!empty.running && std::strcmp(empty.state, "off") == 0 &&
         !empty.left.connected && !empty.right.connected &&
         empty.left.mtu == 0 && empty.right.mtu == 0 &&

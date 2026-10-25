@@ -197,6 +197,26 @@ MOD_NAME_RE = re.compile(r'\{\s*"([A-Za-z0-9_\-]+)"')
 MOD_ARRAY_RE = re.compile(r",\s*(\w+Commands|commands)\s*,")
 
 
+def first_branches(text: str) -> str:
+    """Drop each #else/#elif alternative, keeping every #if's first branch.
+
+    The reference describes builds that have a feature; a module's
+    "not in this build" alternative row would otherwise read as a duplicate.
+    """
+    out, skipping = [], []
+    for line in text.splitlines(keepends=True):
+        directive = line.lstrip()
+        if directive.startswith("#if"):
+            skipping.append(False)
+        elif directive.startswith(("#else", "#elif")) and skipping:
+            skipping[-1] = True
+        elif directive.startswith("#endif") and skipping:
+            skipping.pop()
+        elif not any(skipping):
+            out.append(line)
+    return "".join(out)
+
+
 def parse_modules() -> list[dict]:
     """gCommandModules[] in registration order — this is also help-page order."""
     for path in sources():
@@ -205,7 +225,7 @@ def parse_modules() -> list[dict]:
         if not m:
             continue
         start = m.end() - 1
-        body = src[start:match_brace(src, start)]
+        body = first_branches(src[start:match_brace(src, start)])
         mods = []
         for item in iter_initializers(body):
             nm = MOD_NAME_RE.match(item)

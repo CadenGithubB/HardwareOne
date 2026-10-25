@@ -1,7 +1,7 @@
 // Host harness for test_oled_command_feedback.py. The driver splices production
-// code in at the INSERT_* markers: the OLED action helper (OLED_Utils.cpp
-// oledRunCommand and oledCommandReplyText, when the tree has them) and real
-// callers: the Automations
+// code in at the INSERT_* markers: the OLED action helpers (OLED_Utils.cpp
+// oledRunCommand, oledCommandReplyText and oledRunCommandAsync with its
+// frame-loop delivery, when the tree has them) and real callers: the Automations
 // toggle/delete actions and their footer toast, the Quick Settings rows and
 // the Network screen's HTTP confirm callbacks. Everything else is a double:
 // the OLED command executor, the global toast, the Automations list rows and
@@ -40,6 +40,8 @@ static const char* gCase = "";
 
 // ---- platform --------------------------------------------------------------------
 #define ENABLE_G2_GLASSES 1
+#define ENABLE_BLUETOOTH 1
+#define ENABLE_BLE_PHONE_PIPE 1
 static uint32_t gNowMs = 1000;
 static uint32_t millis() { return gNowMs; }
 
@@ -49,10 +51,11 @@ static uint32_t millis() { return gNowMs; }
 // executeOLEDCommandWithResult).
 static std::vector<std::string> gChecked;       // executeOLEDCommandWithResult lines
 static std::vector<std::string> gFireAndForget; // executeOLEDCommand lines (reply dropped)
+static void recordChecked(const char* line) { gChecked.emplace_back(line); }
 static bool gExecOk = true;
 static std::string gExecText = "OK";
 bool executeOLEDCommandWithResult(const String& cmd, char* out, size_t outSize) {
-  gChecked.emplace_back(cmd.c_str());
+  recordChecked(cmd.c_str());
   if (out && outSize) std::snprintf(out, outSize, "%s", gExecText.c_str());
   return gExecOk;
 }
@@ -66,6 +69,47 @@ static void oledToastShow(const char* message, uint32_t = 3000, OledUIIcon = Ole
   gToast = message ? message : "";
   ++gToastCount;
 }
+
+// ---- async executor doubles (oledRunCommandAsync) -------------------------------------
+// submitCommandAsync queues; the executor runs a queued line only when a case
+// calls finishCommand(), on the case's own schedule, as cmd_exec_task would.
+#if HW1_HAVE_ASYNC_COMMAND
+using TransportSessionEpoch = uint32_t;
+inline constexpr TransportSessionEpoch kNoTransportSessionEpoch = 0;
+typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
+typedef void (*OledCommandDoneFn)(bool ok, const void* context);
+struct Command {
+  String line;
+  struct { TransportSessionEpoch transportSessionEpoch = kNoTransportSessionEpoch; } ctx;
+};
+typedef int portMUX_TYPE;
+#define portMUX_INITIALIZER_UNLOCKED 0
+#define portENTER_CRITICAL(mux) ((void)(mux))
+#define portEXIT_CRITICAL(mux) ((void)(mux))
+static TransportSessionEpoch gUiEpoch = 7;    // the display session a command is built for
+static TransportSessionEpoch gLiveEpoch = 7;  // the display session live now
+static Command buildOLEDCommand(const String& line) {
+  Command command;
+  command.line = line;
+  command.ctx.transportSessionEpoch = gUiEpoch;
+  return command;
+}
+struct QueuedCommand { std::string line; ExecAsyncCallback callback; void* userData; };
+static std::vector<QueuedCommand> gQueued;
+static bool gQueueAccepts = true;
+static void recordChecked(const char* line);
+bool submitCommandAsync(const Command& command, ExecAsyncCallback callback, void* userData) {
+  if (!gQueueAccepts) return false;
+  recordChecked(command.line.c_str());
+  gQueued.push_back({command.line.c_str(), callback, userData});
+  return true;
+}
+static bool oledDisplayEpochLiveUnderWriter(TransportSessionEpoch epoch) {
+  return epoch != kNoTransportSessionEpoch && epoch == gLiveEpoch;
+}
+static int gDirtyMarks = 0;
+static void oledMarkDirty() { ++gDirtyMarks; }
+#endif
 
 // ---- production: the OLED action helper ---------------------------------------------
 #if HW1_HAVE_RUN_COMMAND
@@ -102,10 +146,12 @@ struct HarnessWiFi {
   bool isConnected() const { return connected; }
 };
 static HarnessWiFi WiFi;
-static bool gBleServer = false, gG2Client = false;
+static bool gBleServer = false, gG2Client = false, gPhonePipe = false;
 static bool isBleServerInitialized() { return gBleServer; }
 static bool isG2ClientInitialized() { return gG2Client; }
-static const int BLE_MODE_SERVER = 1, BLE_MODE_G2_CLIENT = 2;
+static bool phonePipeActive() { return gPhonePipe; }
+static bool bleSubsystemActive() { return gBleServer || gG2Client || gPhonePipe; }
+static const int BLE_MODE_SERVER = 1, BLE_MODE_G2_CLIENT = 2;  // the phone-client mode is gone
 struct HarnessSettings { int bleMode = BLE_MODE_SERVER; };
 static HarnessSettings gSettings;
 static int gHttpHandle = 0;
@@ -137,10 +183,43 @@ static void resetWorld() {
   quickStatusExpireMs = 0;
   gRadioOn = true;
   WiFi.connected = true;
-  gBleServer = gG2Client = false;
+  gBleServer = gG2Client = gPhonePipe = false;
   gSettings.bleMode = BLE_MODE_SERVER;
   server = nullptr;
   gNowMs += 10000;
+#if HW1_HAVE_ASYNC_COMMAND
+  gQueued.clear();
+  gQueueAccepts = true;
+  gUiEpoch = gLiveEpoch = 7;
+  gDirtyMarks = 0;
+  sOledCommandInFlight = false;
+  sOledReply = OledCommandReply();
+#endif
+}
+
+// cmd_exec_task runs the oldest queued line with the scripted verdict and reply.
+static void finishCommand() {
+#if HW1_HAVE_ASYNC_COMMAND
+  if (gQueued.empty()) return;
+  const QueuedCommand next = gQueued.front();
+  gQueued.erase(gQueued.begin());
+  char out[512];  // cmd_exec_task's reply buffer
+  std::snprintf(out, sizeof(out), "%s", gExecText.c_str());
+  next.callback(gExecOk, out, next.userData);
+#endif
+}
+
+// The next display frame.
+static void nextFrame() {
+#if HW1_HAVE_ASYNC_COMMAND
+  oledDeliverCommandReply();
+#endif
+}
+
+// A quick row's command runs and its reply reaches the screen.
+static void land() {
+  finishCommand();
+  nextFrame();
 }
 
 static void refuse(const char* reply) {
@@ -301,6 +380,7 @@ static void case_quick_radio_wifi() {
   resetWorld();
   refuse(kAdminRefusal);
   toggleQuickRadio();
+  land();
   EXPECT(ran() == "radiopower off", "the radio row runs radiopower, ran: " + ran());
   EXPECT(quickStatusMsg[0] == '\0' && gToast == "Admin required",
          "a refused radio toggle shows the refusal, not a status, status: '" +
@@ -308,12 +388,14 @@ static void case_quick_radio_wifi() {
 
   resetWorld();
   toggleQuickRadio();
+  land();
   EXPECT(std::string(quickStatusMsg) == "Radio OFF" && gToastCount == 0,
          "an accepted radio toggle shows 'Radio OFF', status: '" + std::string(quickStatusMsg) + "'");
 
   resetWorld();
   refuse(kAdminRefusal);
   toggleQuickWiFi();
+  land();
   EXPECT(ran() == "closewifi" && quickStatusMsg[0] == '\0' && gToast == "Admin required",
          "a refused Wi-Fi toggle shows the refusal, ran: " + ran() + ", status: '" +
              std::string(quickStatusMsg) + "'");
@@ -321,12 +403,14 @@ static void case_quick_radio_wifi() {
   resetWorld();
   WiFi.connected = false;
   toggleQuickWiFi();
+  land();
   EXPECT(ran() == "openwifi --best" && std::string(quickStatusMsg) == "WiFi ON",
          "an accepted Wi-Fi connect shows 'WiFi ON', status: '" + std::string(quickStatusMsg) + "'");
 
   resetWorld();
   gRadioOn = false;
   toggleQuickWiFi();
+  land();
   EXPECT(ran() == "(none)" && std::string(quickStatusMsg) == "Radio off!",
          "with the radio off the Wi-Fi row refuses locally without a command");
 }
@@ -336,19 +420,45 @@ static void case_quick_bluetooth_http() {
   resetWorld();
   refuse(kAdminRefusal);
   bluetoothToggleConfirmedQuick(nullptr);
-  EXPECT(ran() == "openble" && quickStatusMsg[0] == '\0' && gToast == "Admin required",
+  land();
+  EXPECT(ran() == "openconsole" && quickStatusMsg[0] == '\0' && gToast == "Admin required",
          "a refused Bluetooth start shows the refusal, ran: " + ran() + ", status: '" +
              std::string(quickStatusMsg) + "'");
 
   resetWorld();
   gBleServer = true;
   bluetoothToggleConfirmedQuick(nullptr);
+  land();
   EXPECT(ran() == "closeble" && std::string(quickStatusMsg) == "Bluetooth OFF",
          "an accepted Bluetooth stop shows 'Bluetooth OFF', status: '" + std::string(quickStatusMsg) + "'");
+
+  // The toggle is the whole radio: anything running (server, glasses, phone)
+  // is closed with `closeble`; off, it starts the saved boot role (`openble`
+  // for the client stack, `openconsole` for the app console server). It never
+  // opens or closes one device.
+  struct RoleCase { bool server, g2, phone; int mode; const char* command; const char* status; };
+  const RoleCase roles[] = {
+    {false, true, false, BLE_MODE_G2_CLIENT, "closeble", "Bluetooth OFF"},
+    {false, true, true, BLE_MODE_G2_CLIENT, "closeble", "Bluetooth OFF"},
+    {false, false, true, BLE_MODE_G2_CLIENT, "closeble", "Bluetooth OFF"},
+    {true, false, false, BLE_MODE_G2_CLIENT, "closeble", "Bluetooth OFF"},
+    {false, false, false, BLE_MODE_G2_CLIENT, "openble", "Bluetooth ON"},
+    {false, false, false, BLE_MODE_SERVER, "openconsole", "Bluetooth ON"},
+  };
+  for (const RoleCase& role : roles) {
+    resetWorld();
+    gBleServer = role.server; gG2Client = role.g2; gPhonePipe = role.phone;
+    gSettings.bleMode = role.mode;
+    bluetoothToggleConfirmedQuick(nullptr);
+    land();
+    EXPECT(ran() == role.command && std::string(quickStatusMsg) == role.status,
+           std::string("the Bluetooth toggle runs ") + role.command + ", ran: " + ran());
+  }
 
   resetWorld();
   refuse(kAdminRefusal);
   httpToggleConfirmedQuick(nullptr);
+  land();
   EXPECT(ran() == "openhttp" && quickStatusMsg[0] == '\0' && gToast == "Admin required",
          "a refused HTTP start shows the refusal, ran: " + ran() + ", status: '" +
              std::string(quickStatusMsg) + "'");
@@ -356,15 +466,103 @@ static void case_quick_bluetooth_http() {
   resetWorld();
   server = &gHttpHandle;
   httpToggleConfirmedQuick(nullptr);
+  land();
   EXPECT(ran() == "closehttp" && std::string(quickStatusMsg) == "HTTP OFF",
          "an accepted HTTP stop shows 'HTTP OFF', status: '" + std::string(quickStatusMsg) + "'");
 
   resetWorld();
   WiFi.connected = false;
   httpToggleConfirmedQuick(nullptr);
+  land();
   EXPECT(ran() == "(none)" && std::string(quickStatusMsg) == "Need WiFi first!",
          "without Wi-Fi the HTTP row refuses locally without a command");
 }
+
+#if HW1_HAVE_ASYNC_COMMAND
+// The quick rows hand their command to cmd_exec_task and return: the frame loop
+// keeps running while radiopower or openwifi works (the P4 radio toggle held
+// the display task for 637 ms).
+static void case_quick_async() {
+  gCase = "quick_async";
+  resetWorld();
+  gExecText = "Radio off";
+  toggleQuickRadio();
+  EXPECT(ran() == "radiopower off" && gQueued.size() == 1,
+         "the radio row queues radiopower, ran: " + ran());
+  EXPECT(std::string(quickStatusMsg) == "Working..." && gToastCount == 0,
+         "while it runs the status line says so, status: '" + std::string(quickStatusMsg) + "'");
+  nextFrame();
+  EXPECT(std::string(quickStatusMsg) == "Working...",
+         "a frame before the command finishes changes nothing");
+
+  // One request at a time: another row is refused locally and queues nothing.
+  toggleQuickWiFi();
+  EXPECT(gQueued.size() == 1 && gChecked.size() == 1 && gToast == "Please wait",
+         "a second row while one runs toasts 'Please wait', ran: " + ran() + ", toast: '" + gToast + "'");
+
+  finishCommand();
+  EXPECT(gDirtyMarks == 1 && std::string(quickStatusMsg) == "Working...",
+         "the executor only stores the reply and asks for a frame");
+  nextFrame();
+  EXPECT(std::string(quickStatusMsg) == "Radio OFF" && gToast == "Please wait",
+         "the next frame shows the result, status: '" + std::string(quickStatusMsg) + "'");
+  nextFrame();
+  EXPECT(std::string(quickStatusMsg) == "Radio OFF" && gToastCount == 1,
+         "a reply is delivered once");
+
+  // After it lands the next row runs.
+  WiFi.connected = false;
+  toggleQuickWiFi();
+  EXPECT(gQueued.size() == 1 && gQueued[0].line == "openwifi --best",
+         "the next row runs after the first finished, ran: " + ran());
+  land();
+  EXPECT(std::string(quickStatusMsg) == "WiFi ON", "and shows its own result");
+
+  // A full command queue: told at once, nothing in flight, the next press works.
+  resetWorld();
+  gQueueAccepts = false;
+  toggleQuickRadio();
+  EXPECT(gQueued.empty() && quickStatusMsg[0] == '\0' && gToast == "Busy - try again",
+         "a refused queue toasts 'Busy - try again', status: '" + std::string(quickStatusMsg) +
+             "', toast: '" + gToast + "'");
+  gQueueAccepts = true;
+  toggleQuickRadio();
+  land();
+  EXPECT(std::string(quickStatusMsg) == "Radio OFF", "the next press runs normally");
+
+  // The display session changed while the command ran (logout, another user):
+  // its reply is not shown to the new session, and the row is free again.
+  resetWorld();
+  refuse(kAdminRefusal);
+  toggleQuickRadio();
+  gLiveEpoch = 8;
+  land();
+  EXPECT(gToastCount == 0 && quickStatusMsg[0] == '\0',
+         "a reply from a replaced session shows nothing, toast: '" + gToast + "', status: '" +
+             std::string(quickStatusMsg) + "'");
+  gUiEpoch = 8;
+  gExecOk = true;
+  gExecText = "OK";
+  toggleQuickRadio();
+  land();
+  EXPECT(std::string(quickStatusMsg) == "Radio OFF", "the new session's own press runs");
+
+  // An executor 'ok' whose reply is an error is still a failure.
+  resetWorld();
+  gExecText = "Error: radio busy";
+  toggleQuickRadio();
+  land();
+  EXPECT(quickStatusMsg[0] == '\0' && gToast == "radio busy",
+         "an 'Error' reply toasts its reason, toast: '" + gToast + "'");
+
+  // A reply longer than the mailbox stays bounded (ASan watches).
+  resetWorld();
+  refuse(("Error: " + std::string(400, 'x')).c_str());
+  toggleQuickRadio();
+  land();
+  EXPECT(!gToast.empty() && gToast.size() < 64, "an over-long reply is bounded");
+}
+#endif
 
 static void case_network_http_callbacks() {
   gCase = "network_http_callbacks";
@@ -394,6 +592,9 @@ int main() {
   case_automations_delete();
   case_quick_radio_wifi();
   case_quick_bluetooth_http();
+#if HW1_HAVE_ASYNC_COMMAND
+  case_quick_async();
+#endif
   case_network_http_callbacks();
   if (gFailures) {
     std::fprintf(stderr, "%d check(s) failed\n", gFailures);

@@ -50,18 +50,18 @@ int main() {
   assert(sample(g, false, 341).actions == rotary::Select);
   assert(sample(g, false, 400).actions == 0);
 
-  // A hold has exactly one Back event and no preliminary Select on press.
+  // An ordinary hold emits neither SELECT/function nor a delayed A on release.
   g.reset(false, 0);
   sample(g, true, 10);
   sample(g, true, 30);
   assert(sample(g, true, 729).actions == 0);
-  assert(sample(g, true, 730).actions == rotary::Back);
+  assert(sample(g, true, 730).actions == 0);
   assert(sample(g, true, 1500).actions == 0);
   sample(g, false, 1510);
   assert(sample(g, false, 1530).actions == 0);
   assert(sample(g, false, 2000).actions == 0);
 
-  // Double click emits Function only. Pressing just inside the window still
+  // Double click emits B/back only. Pressing just inside the window still
   // qualifies when debounce completes just outside it.
   g.reset(false, 0);
   sample(g, true, 10); sample(g, true, 30);
@@ -70,8 +70,32 @@ int main() {
   assert(sample(g, true, 321).actions == 0);
   assert(sample(g, true, 339).actions == 0);
   sample(g, false, 360);
-  assert(sample(g, false, 380).actions == rotary::Function);
+  assert(sample(g, false, 380).actions == rotary::Back);
   assert(sample(g, false, 1000).actions == 0);
+
+  // Holding the second press opens the quick menu once; releasing it cannot
+  // leak a Back or delayed A event from the initial short click.
+  g.reset(false, 0);
+  sample(g, true, 10); sample(g, true, 30);
+  sample(g, false, 50); sample(g, false, 70);
+  sample(g, true, 100); sample(g, true, 120);
+  assert(sample(g, true, 819).actions == 0);
+  assert(sample(g, true, 820).actions == rotary::Function);
+  sample(g, false, 830);
+  assert(sample(g, false, 850).actions == 0);
+  assert(sample(g, false, 1200).actions == 0);
+
+  // A second press starting after the double-click window is a separate hold,
+  // so the first tap becomes A and the later hold must not produce SELECT.
+  g.reset(false, 0);
+  sample(g, true, 10); sample(g, true, 30);
+  sample(g, false, 50); sample(g, false, 70);
+  assert(sample(g, true, 321).actions == rotary::Select);
+  assert(sample(g, true, 341).actions == 0);
+  assert(sample(g, true, 1041).actions == 0);
+  sample(g, false, 1050);
+  assert(sample(g, false, 1070).actions == 0);
+  assert(sample(g, false, 1400).actions == 0);
 
   // Press-turn routes to secondary actions, suppressing scroll, click and hold.
   g.reset(false, 0);

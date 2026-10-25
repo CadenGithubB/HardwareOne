@@ -34,6 +34,11 @@ BLE_CONFIG = ('deviceName', 'txPower', 'autoStart', 'requireAuth', 'secureChanne
 PEER_CONFIG = ('name', 'autoReconnect', 'mac1', 'mac2', 'pairedBy')
 POWER_CONFIG = ('mode', 'activeMhz', 'idleMhz', 'powerSaveMinutes')
 QUIESCE_SECONDS = 12.0
+# `blemode` with no argument: "Saved mode: client (Glasses+pipe); running: Off".
+# The keyword is what `blemode <keyword>` restores; the texts are hw1link's.
+_BLE_MODE = re.compile(r'Saved mode: (server|client|phone-client) \([^)\n]*\); running: ')
+# `blestatus json` link.role (hw1link::roleId): what runs now.
+CLIENT_ROLES = ('glasses', 'glasses-pipe')
 
 
 def peer_config(peers):
@@ -78,9 +83,16 @@ class BoardRoles:
         return states[0]
 
     def mode(self, key):
-        values = re.findall(r'BLE mode: (server|client)\b', self.command(key, 'blemode'))
-        require(len(values) == 1, f'{key}: missing unambiguous BLE mode')
+        values = _BLE_MODE.findall(ANSI.sub('', self.command(key, 'blemode')))
+        require(len(values) == 1, f'{key}: missing unambiguous saved BLE mode')
         return values[0]
+
+    def role(self, key):
+        # The running role, never the saved mode; blestatus json answers outside
+        # the app console too.
+        link = self.obj(key, 'blestatus json', 'link')['link']
+        require(isinstance(link.get('role'), str), f'{key}: missing running BLE role')
+        return link['role']
 
     def snapshot(self, key):
         # Refuse a pre-existing diagnostic connection before RolesConsole's
@@ -91,7 +103,7 @@ class BoardRoles:
         info = self.obj(key, 'bleinfo json', 'deviceName')
         peers = self.obj(key, 'blepeers json', 'peers')['peers']
         g2 = self.g2(key)
-        ring = self.obj(key, 'ringstatus json', 'connectPending')
+        ring = self.obj(key, 'ring status json', 'connectPending')
         require(info.get('connections') == 0 and g2[1:] == ('down', 'down')
                 and ring.get('connected') is False and not any(p.get('connected') for p in peers),
                 f'{key}: live accessory/server connection exists; refusing disruption')
@@ -106,10 +118,13 @@ class BoardRoles:
                 and power.get('cpuMhz') in CLOCKS[key], f'{key}: unexpected clock capability/profile')
         loglink = re.findall(r'loglink: (ON|OFF)\b', self.command(key, 'loglink'))
         require(len(loglink) == 1, f'{key}: missing loglink state')
-        saved = {'mode': self.mode(key), 'ble': info, 'peers': peer_config(peers),
+        role = self.role(key)
+        saved = {'mode': self.mode(key), 'role': role, 'ble': info, 'peers': peer_config(peers),
                  'g2': list(g2), 'ringConnectPending': ring.get('connectPending'),
                  'power': power, 'loglink': loglink[0].lower()}
         require(not (info['initialized'] and g2[0] != 'off'), f'{key}: both production roles initialized')
+        # Restoration restarts the app console or the glasses only.
+        require(role != 'phone-pipe', f'{key}: a standalone phone pipe runs; refusing disruption')
         self.saved[key] = saved
         return saved
 
@@ -128,12 +143,12 @@ class BoardRoles:
         # The public deinit error collapses many internal deferrals. Cancel
         # normal user work first, allow its shared worker to settle, then ask
         # for exactly one positive deinit. closeg2's text alone is not a fence.
-        self.command(key, 'ringdisconnect')
+        self.command(key, 'ring disconnect')
         self.command(key, 'closeg2')
         deadline = time.monotonic() + QUIESCE_SECONDS
         while True:
             g2 = self.g2(key)
-            ring = self.obj(key, 'ringstatus json', 'connectPending')
+            ring = self.obj(key, 'ring status json', 'connectPending')
             if (g2[0] in ('off', 'idle') and g2[1:] == ('down', 'down')
                     and ring.get('connected') is False and ring.get('connectPending') is False):
                 break
@@ -145,14 +160,15 @@ class BoardRoles:
 
     def require_idle(self, key):
         require(self.g2(key) == ('off', 'down', 'down'), f'{key}: G2 owner did not stop')
-        ring = self.obj(key, 'ringstatus json', 'connectPending')
+        ring = self.obj(key, 'ring status json', 'connectPending')
         require(ring.get('connected') is False and ring.get('connectPending') is False,
                 f'{key}: R1 owner did not stop')
 
     def cycle(self, key):
         self.command(key, 'blemode client')
         self.command(key, 'g2init')
-        require(self.mode(key) == 'client' and self.g2(key) == ('idle', 'down', 'down'),
+        require(self.mode(key) == 'client' and self.g2(key) == ('idle', 'down', 'down')
+                and self.role(key) in CLIENT_ROLES,
                 f'{key}: empty Client mode did not initialize')
         require(self.obj(key, 'bleinfo json', 'deviceName')['initialized'] is False,
                 f'{key}: Server remained initialized in Client mode')
@@ -161,7 +177,8 @@ class BoardRoles:
         self.command(key, 'openble')
         self.require_idle(key)
         info = self.obj(key, 'bleinfo json', 'deviceName')
-        require(self.mode(key) == 'server' and info['initialized'] is True and info['connections'] == 0,
+        require(self.mode(key) == 'server' and info['initialized'] is True and info['connections'] == 0
+                and self.role(key) == 'console',
                 f'{key}: empty Server mode did not initialize')
         return {'clientInitializedThenStopped': True, 'serverInitialized': True}
 

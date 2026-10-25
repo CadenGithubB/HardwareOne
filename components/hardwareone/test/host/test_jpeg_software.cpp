@@ -17,7 +17,11 @@ Failure failure = Failure::None;
 int calls = 0, allocations = 0, customCalls = 0, hardwareCalls = 0, workspaceCalls = 0;
 bool bypassEnabled = false;
 bool customFails = false;
+// The caller's allocator takes the pixels (969 B for the fixture) and, since
+// the workspace moved off the hard-coded internal path, the decoder scratch
+// too; customCalls still counts the pixel allocations alone.
 uint8_t* customAllocate(size_t size) {
+ if (size >= 3100) { ++workspaceCalls; return static_cast<uint8_t*>(std::malloc(size)); }
  ++customCalls; assert(size == 969);
  return customFails ? nullptr : static_cast<uint8_t*>(std::malloc(size));
 }

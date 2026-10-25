@@ -141,6 +141,11 @@ struct BLEConnection {
   bool authed = false;
   String user;
   bool mirrorEligible = false;
+  bool noChannelRejected = false;
+  // The phone link's console row (phone link v2): its output is console records.
+  bool pipeConsole = false;
+  uint32_t pipeGeneration = 0;
+  uint16_t pipeStream = 0;
 };
 struct BLESystemState {
   BLEConnection connections[BLE_MAX_CONNECTIONS];
@@ -150,6 +155,8 @@ static BLESystemState sState;
 static BLESystemState* gBLEState = &sState;
 static std::atomic<TransportSessionEpoch> sBleSessionEpoch[BLE_MAX_CONNECTIONS];
 static std::atomic<int> sBleGattsIf{3};
+// Client-host posts made with the lifecycle guard released (Bluetooth.cpp).
+static std::atomic<int> sBleConsoleSendsInFlight{0};
 
 static int guardDepth = 0;
 struct BleLifecycleGuard {
@@ -163,6 +170,10 @@ static int slotFor(uint16_t connId) {
     if (sState.connections[i].active && sState.connections[i].connId == connId) return i;
   }
   return -1;
+}
+static int findConnectionSlotByConnIdLocked(uint16_t connId) {
+  EXPECT(guardDepth >= 1, "a connection slot was looked up outside the lifecycle guard");
+  return slotFor(connId);
 }
 static bool bleConnectionEpochMatchesLocked(uint16_t connId, TransportSessionEpoch epoch) {
   EXPECT(guardDepth >= 1, "epoch match read outside the lifecycle guard");
@@ -202,9 +213,31 @@ static FakeResponseCharacteristic* pCmdResponseChar = &sResponseChar;
 static std::vector<std::string> inbox[BLE_MAX_CONNECTIONS];
 static int broadcastSends = 0;
 
+// The G2 client host: the console mode and the shared central TX gate (its
+// routing is test_ble_sc_directed's; here the gate is always free).
+namespace hw1console { enum class Mode : uint8_t { Off, Server, ClientRegistered }; }
+static hw1console::Mode consoleMode = hw1console::Mode::Server;
+hw1console::Mode bleConsoleMode() { return consoleMode; }
+// Bluetooth.cpp's client-host check, in a pipe build.
+static bool bleConsoleClientHost() { return consoleMode == hw1console::Mode::ClientRegistered; }
+static int gateHeld = 0;
+bool bleCentralTxTryPhone(bool) { ++gateHeld; return true; }
+void bleCentralTxGive() { --gateHeld; }
+void phonePipeNoteConsoleActivity() {}
+
 esp_err_t esp_ble_gatts_send_indicate(esp_gatt_if_t gattsIf, uint16_t connId, uint16_t handle,
                                       size_t len, uint8_t* value, bool needConfirm) {
-  EXPECT(guardDepth >= 1, "directed admission ran outside the BLE lifecycle guard");
+  EXPECT(consoleMode != hw1console::Mode::ClientRegistered || gateHeld == 1,
+         "a client-host console frame left without the central TX gate");
+  // Server mode posts under the lifecycle guard; the client host after
+  // releasing it (BTC_TASK takes it for the phone's writes and link events,
+  // and the post waits forever on a full BTC queue), counted in flight.
+  if (consoleMode == hw1console::Mode::ClientRegistered) {
+    EXPECT(guardDepth == 0 && sBleConsoleSendsInFlight.load() == 1,
+           "a client-host post ran under the lifecycle guard or uncounted");
+  } else {
+    EXPECT(guardDepth >= 1, "directed admission ran outside the BLE lifecycle guard");
+  }
   EXPECT(gattsIf == 3 && handle == 42 && !needConfirm, "directed send used the wrong interface/handle");
   const int slot = slotFor(connId);
   if (slot < 0) return ESP_FAIL;
@@ -286,6 +319,8 @@ struct Command {
 typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
 typedef void (*DeferredFn)(void* arg);
 
+// Bluetooth.cpp's AuthBypass stamp rule (never on the phone link's console row).
+static bool bleRequiresLogin(uint16_t connId);
 static bool bleFillCommandAuth(uint16_t connId, AuthContext& auth, bool,
                                TransportSessionEpoch& epochOut) {
   epochOut = bleSessionEpochForConnection(connId);
@@ -293,6 +328,7 @@ static bool bleFillCommandAuth(uint16_t connId, AuthContext& auth, bool,
   auth.transport = SOURCE_BLUETOOTH;
   String user;
   if (bleIsAuthed(connId, user)) auth.user = user;
+  else if (!bleRequiresLogin(connId)) auth.user = "AuthBypass";
   return true;
 }
 
@@ -334,7 +370,12 @@ bool sendBLEResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpo
 // ---- production blocks from Bluetooth.cpp ----------------------------------
 /*@FENCE_STRUCT@*/;
 /*@FENCE_LIVE@*/
+/*@SECURE_ONLY@*/
+/*@TX_GATE@*/;
 /*@RAW_SESSION@*/
+/*@PIPE_ROUTER@*/
+/*@PIPE_ROW_ID@*/
+/*@REQUIRES_LOGIN@*/
 /*@SEND@*/
 /*@LOGIN_JOB@*/;
 /*@REPLY_CTX@*/;
@@ -348,6 +389,7 @@ struct Queued {
   uint16_t connId;
   TransportSessionEpoch epoch;
   std::string line;
+  std::string user;  // the identity the command was stamped with
 };
 static std::vector<Queued> queued;
 static bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData) {
@@ -355,7 +397,7 @@ static bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, v
   EXPECT(callback == bleCommandResultCallback, "command queued without the BLE reply callback");
   const auto* reply = static_cast<const BleCommandReplyContext*>(userData);
   queued.push_back({reply ? reply->connId : static_cast<uint16_t>(0xFFFF),
-                    cmd.ctx.transportSessionEpoch, cmd.line});
+                    cmd.ctx.transportSessionEpoch, cmd.line, cmd.ctx.auth.user});
   free(userData);
   return true;
 }
@@ -383,6 +425,7 @@ static void bleScPoolRelease(BleScDeferred* d) {
     }
   }
 }
+/*@NO_CHANNEL@*/
 /*@DEFERRED@*/
 /*@PLAIN_DEFERRED@*/
 /*@INGRESS@*/
@@ -452,6 +495,7 @@ static void resetWorld(const char* name, bool required) {
   gSettings.bleSecureChannelSecret = "pw";
   gSettings.bleRequireSecureChannel = required;
   bleScInvalidatePsk();
+  consoleMode = hw1console::Mode::Server;
   clearWire();
 }
 static void establish(uint16_t connId) {
@@ -506,6 +550,96 @@ int main() {
   write(0, "status");
   EXPECT(onlyQueued(0, 7, "status"), "a plaintext command did not run without a secret");
   EXPECT(inbox[0].empty() && inbox[1].empty(), "a runnable plaintext command produced a refusal");
+
+  // R4: the G2 client host serves Secure Channel only, even with `blesecure off`:
+  // a plaintext write gets the fixed refusal on its own link and never runs;
+  // the same link's encrypted commands run.
+  resetWorld("R4 client host refuses plaintext with blesecure off", false);
+  consoleMode = hw1console::Mode::ClientRegistered;
+  write(0, "status");
+  EXPECT(queued.empty(), "a plaintext command ran on the client host");
+  EXPECT(inbox[0].size() == 1 && inbox[0][0] == kRequiredNotice && inbox[1].empty(),
+         "the client host's plaintext refusal did not reach exactly the writer");
+  clearWire();
+  write(0, "login admin secret");
+  EXPECT(queued.empty() && inbox[0].size() == 1 && inbox[0][0] == kRequiredNotice,
+         "a plaintext login ran on the client host");
+  establish(1);
+  consoleMode = hw1console::Mode::ClientRegistered;
+  write(1, dataFrame(1, "status"));
+  EXPECT(onlyQueued(1, 9, "status"), "an encrypted command did not run on the client host");
+  EXPECT(gateHeld == 0, "the central TX gate leaked");
+
+  // N1: the G2 client host renewed conn 1's console session under its live
+  // link (bledisconnect, bleconsole off/on, blesecret cleared and set): a new epoch
+  // and no channel, while the app still holds its old one. Its next DATA frame
+  // gets one SC_REJECT "no channel" (0x05 0x03) on that session, so it runs the
+  // handshake again; later frames get nothing; after the new handshake its
+  // commands run. Never on conn 0.
+  static const std::string kNoChannel("\x05\x03", 2);
+  resetWorld("N1 client host: DATA on a renewed session", false);
+  consoleMode = hw1console::Mode::ClientRegistered;
+  establish(1);
+  write(1, dataFrame(1, "status"));
+  EXPECT(onlyQueued(1, 9, "status"), "test setup: an encrypted command on the established channel");
+  clearWire();
+  bleScReset(1);
+  peer(1, 1, 10);  // the renewed session
+  write(1, dataFrame(1, "status"));
+  EXPECT(queued.empty() && inbox[1].size() == 1 && inbox[1][0] == kNoChannel && inbox[0].empty(),
+         "a DATA frame on a renewed session did not get exactly one no-channel reject on its own link");
+  clearWire();
+  write(1, dataFrame(1, "whoami"));
+  EXPECT(queued.empty() && inbox[1].empty(), "a second DATA frame on the renewed session got another reject");
+  establish(1);
+  write(1, dataFrame(1, "status"));
+  EXPECT(onlyQueued(1, 10, "status"), "the app's command did not run after its new handshake");
+  EXPECT(gateHeld == 0 && guardDepth == 0, "the gate or the lifecycle guard leaked");
+
+  // N2: an established channel's bad DATA frame (a replayed counter) is no
+  // missing channel: nothing is sent, on a session that has had no reject yet.
+  currentCase = "N2 client host: a replayed DATA frame on a live channel";
+  bleScReset(1);
+  peer(1, 1, 11);
+  establish(1);
+  {
+    std::string replay = dataFrame(1, "status");
+    write(1, replay);
+    EXPECT(onlyQueued(1, 11, "status"), "test setup: the frame ran once");
+    clearWire();
+    write(1, replay);
+  }
+  EXPECT(queued.empty() && inbox[1].empty(), "a replayed DATA frame on a live channel was answered");
+
+  // N5: a handshake frame out of order on a session without a channel (a
+  // CONFIRM with no HELLO) stays unanswered, as before, and leaves the
+  // session's one reject for its first DATA frame.
+  currentCase = "N5 client host: a stray CONFIRM on a renewed session";
+  bleScReset(1);
+  peer(1, 1, 12);
+  clearWire();
+  write(1, confirm());
+  EXPECT(queued.empty() && inbox[1].empty(), "a stray CONFIRM was answered");
+  write(1, dataFrame(1, "status"));
+  EXPECT(queued.empty() && inbox[1].size() == 1 && inbox[1][0] == kNoChannel,
+         "the session's first DATA frame did not get its no-channel reject");
+
+  // N3: server mode is unchanged: a DATA frame without a channel is dropped
+  // silently, as before (its link drops with every session there).
+  resetWorld("N3 server mode: DATA without a channel", false);
+  write(1, dataFrame(1, "status"));
+  EXPECT(queued.empty() && inbox[0].empty() && inbox[1].empty(),
+         "server mode answered a DATA frame without a channel");
+
+  // N4: without a secret the channel cannot run: the module's own
+  // no-passphrase reject is the one answer (no second, no-channel reject).
+  resetWorld("N4 client host without a secret", false);
+  consoleMode = hw1console::Mode::ClientRegistered;
+  gSettings.bleSecureChannelSecret = "";
+  bleScInvalidatePsk();
+  write(1, dataFrame(1, "status"));
+  EXPECT(queued.empty() && inbox[1].size() == 1 && inbox[1][0] == std::string("\x05\x01", 2),
+         "a DATA frame without a secret did not get only the no-passphrase reject");
 
   // F1: encryption optional (secret set, `blesecure off`), conn 1 holds a channel
   // but writes `fileread` in plaintext: refused like any cleartext file verb.
@@ -687,6 +821,73 @@ int main() {
   write(0, kLogin);
   EXPECT(!releasedWithResidue, "a refused plaintext login slot was released still holding the line");
   EXPECT(!slotHoldsPassword(), "the cleartext password stayed in the inbound pool after a refusal");
+
+  // P: the phone link's console row (phone link v2). Its pairing authenticates
+  // the link, never a user: even with blerequireauth off it must log in
+  // (whoami, the gate), and AuthBypass is never stamped on its commands; a
+  // server session beside it keeps the setting's rule. Its records arrive
+  // through the pipe's encryption (arrivedEncrypted=true, the file verbs run)
+  // and its replies are TEXT records on its stream, never GATT.
+  struct PipeReply { const char* name; const char* line; const char* reply; };
+  static const PipeReply kPipeReplies[] = {
+      {"P1 whoami on the console row, auth off", "whoami", "You are (unknown)"},
+      {"P1 gate on the console row, auth off", "status",
+       "Authentication required. Use: login <username> <password>"},
+  };
+  const uint16_t pipeRow = 0x8000 | 7;
+  const auto pipeWorld = [&](const char* name) {
+    resetWorld(name, false);
+    gSettings.bleRequireAuth = false;
+    BLEConnection& c = sState.connections[2];
+    c = BLEConnection{};
+    c.active = true;
+    c.connId = pipeRow;
+    c.pipeConsole = true;
+    c.pipeGeneration = 7;
+    c.pipeStream = 5;
+    sBleSessionEpoch[2].store(11);
+    gPipeHost = PipeHost{};
+  };
+  const auto pipeLine = [&](const char* line) {
+    processBleCommandLine(pipeRow, 11, line, strlen(line), /*arrivedEncrypted=*/true);
+    drainCmdExec();
+  };
+  for (const PipeReply& t : kPipeReplies) {
+    pipeWorld(t.name);
+    pipeLine(t.line);
+    const std::vector<PipeHostCall> writes = pipeHostWrites();
+    EXPECT(queued.empty(), "the console row ran a command without logging in (blerequireauth off)");
+    EXPECT(writes.size() == 1 && writes[0].data == t.reply && writes[0].kind == PipeConsoleKind::Text &&
+           writes[0].generation == 7 && writes[0].streamId == 5 && writes[0].epoch == 11 &&
+           !writes[0].underLifecycle,
+           "the console row's answer was not one TEXT record on its stream");
+    for (const auto& box : inbox) EXPECT(box.empty(), "the console row's answer went out on GATT");
+  }
+  pipeWorld("P2 a server session beside it keeps AuthBypass");
+  write(1, "whoami");
+  EXPECT(inbox[1].size() == 1 && inbox[1][0] == "You are AuthBypass",
+         "a server session with blerequireauth off lost AuthBypass");
+  clearWire();
+  write(1, "status");
+  EXPECT(onlyQueued(1, 9, "status") && queued[0].user == "AuthBypass",
+         "a server session's command was not stamped AuthBypass with blerequireauth off");
+  pipeWorld("P3 the console row signed in");
+  sState.connections[2].authed = true;
+  sState.connections[2].user = "bob";
+  pipeLine("status");
+  EXPECT(onlyQueued(pipeRow, 11, "status") && queued[0].user == "bob",
+         "a signed-in console row's command was not stamped with its user");
+  clearWire();
+  pipeLine("fileread /notes.txt 0 64 bin");
+  EXPECT(onlyQueued(pipeRow, 11, "fileread /notes.txt 0 64 bin"),
+         "a file verb from the console stream was refused (it arrived encrypted)");
+  pipeWorld("P4 the console row never AuthBypass");
+  sState.connections[2].authed = false;
+  for (const char* line : {"status", "help", "files /"}) {
+    clearWire();
+    pipeLine(line);
+    EXPECT(queued.empty(), "the signed-out console row ran a command");
+  }
 
   EXPECT(guardDepth == 0, "lifecycle guard leaked");
   EXPECT(poolClaims == poolReleases, "secure-frame pool slot not released exactly once per frame");

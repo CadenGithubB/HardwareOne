@@ -56,6 +56,7 @@ static bool externalAvailable = true;
 static unsigned allocationAttempts = 0, fallbackAllocations = 0;
 static std::string failAllocationTag;
 static unsigned failAllocationCount = 0;
+static std::unordered_map<std::string, size_t> lastAllocationSize;  // by tag
 
 static bool allocationFails(AllocPref policy, const char* tag) {
   ++allocationAttempts;
@@ -71,6 +72,7 @@ static void* ps_alloc(size_t size, AllocPref policy, const char* tag) {
   void* result = std::malloc(size);
   check(result != nullptr, "host allocation succeeds");
   allocations[result] = {size, tag, externalAvailable};
+  lastAllocationSize[tag] = size;
   if (!externalAvailable) ++fallbackAllocations;
   return result;
 }
@@ -101,6 +103,7 @@ class CommandArgs {
   bool has(int index) const { return index >= 0 && (size_t)index < tokens.size(); }
   int count() const { return (int)tokens.size(); }
   const String& arg(int index) const { return tokens.at((size_t)index); }
+  bool argWasQuoted(int index) const { return index == 0 && quotedPath; }
   int argInt(int index, int defaultValue) const {
     return has(index) ? (int)arg(index).toInt() : defaultValue;
   }
@@ -174,11 +177,26 @@ static unsigned binarySends = 0;
 static std::string binaryBody;
 static unsigned attemptsAtBinarySend = 0;
 static uint16_t expectedConnId = 7;
+// The running command's session epoch (CommandContext) and the session's live
+// one: a session renewed since the command was admitted is not confidential.
+using TransportSessionEpoch = uint32_t;
+struct CommandContext { TransportSessionEpoch transportSessionEpoch = 41; };
 #if ENABLE_BLUETOOTH
-static bool bleScEstablished(uint16_t id) { check(id == expectedConnId, "existing connection ID is preserved"); return secureEstablished; }
-static bool bleScSendEncrypted(uint16_t id, const char* bytes, size_t length,
-                               bool blocking, bool binaryFrame) {
-  check(id == expectedConnId && blocking && binaryFrame, "raw BLE framing/pacing flags are preserved");
+static CommandContext commandContext;
+static bool haveCommandContext = true;
+static void* currentCommandContext() { return haveCommandContext ? &commandContext : nullptr; }
+static TransportSessionEpoch liveEpoch = 41;
+// Bluetooth.cpp: an established Secure Channel or the phone link's console row,
+// for this epoch; the body goes as a binary message or a BLOB chain, fenced on it.
+static bool bleSessionConfidential(uint16_t id, TransportSessionEpoch epoch) {
+  check(id == expectedConnId, "existing connection ID is preserved");
+  return secureEstablished && epoch != 0 && epoch == liveEpoch;
+}
+static bool bleSendBinaryToSession(uint16_t id, TransportSessionEpoch epoch,
+                                   const uint8_t* body, size_t length) {
+  const char* bytes = reinterpret_cast<const char*>(body);
+  check(id == expectedConnId && epoch == commandContext.transportSessionEpoch,
+        "the raw body is fenced on the command's connection and session epoch");
   check(fsDepth == 0, "BLE send cannot hold the filesystem lock");
   check(length > 0, "zero-length EOF never sends a binary body");
   ++binarySends;
@@ -426,8 +444,19 @@ int main(int argc, char** argv) {
     auth.sid = "65535"; expectedConnId = 65535; sends = binarySends;
     check(parseSuccess(invoke("/a", 0, 12, {"bin"}))["enc"] == "raw" && binarySends == sends + 1,
           "the largest connection ID takes the raw path");
-    // No usable connection ID: bleScEstablished is never asked (its check
-    // would reject any ID) and the reply falls back to base64.
+    // The session was renewed (logout, revoke, a new console stream) since the
+    // command was admitted, or no command context: no raw body, base64.
+    auth.sid = "7"; expectedConnId = 7; sends = binarySends;
+    commandContext.transportSessionEpoch = 40;
+    checkPayload(invoke("/a", 0, 12, {"bin"}), fileBytes, "/a", 0, true);
+    check(binarySends == sends, "a command from a renewed session sent a raw body");
+    commandContext.transportSessionEpoch = 41;
+    haveCommandContext = false;
+    checkPayload(invoke("/a", 0, 12, {"bin"}), fileBytes, "/a", 0, true);
+    check(binarySends == sends, "a command without its context sent a raw body");
+    haveCommandContext = true;
+    // No usable connection ID: bleSessionConfidential is never asked (its
+    // check would reject any ID) and the reply falls back to base64.
     expectedConnId = 7;
     for (const char* sid : {"", "abc", "7x", "-1", " 7", "65536", "99999999999"}) {
       auth.sid = sid; sends = binarySends;
@@ -467,6 +496,52 @@ int main(int argc, char** argv) {
     check(std::strcmp(cmd_fileview(""),"[FS] File displayed")==0,"ordinary fileview remains available");
     check(std::find(broadcasts.begin(),broadcasts.end(),"ordinary page")!=broadcasts.end(),
           "ordinary fileview still broadcasts its page");
+
+    // JSON is re-indented by default (the shared re-indenter); `raw`, before or
+    // after the page number, shows the stored text. Other files ignore `raw`.
+    auto view=[&](std::vector<String> args){tokens=std::move(args);broadcasts.clear();return std::string(cmd_fileview(""));};
+    auto shown=[&](const std::string& text){return std::find(broadcasts.begin(),broadcasts.end(),text)!=broadcasts.end();};
+    auto headerHas=[&](const char* text){return !broadcasts.empty()&&broadcasts.front().find(text)!=std::string::npos;};
+    const std::string json="{\"a\":1,\"b\":[],\"c\":{\"d\":\"x,y\"}}";
+    const std::string indented="{\n  \"a\": 1,\n  \"b\": [],\n  \"c\": {\n    \"d\": \"x,y\"\n  }\n}";
+    fixture(json);
+    check(view({String("/cfg.json")})=="[FS] File displayed"&&shown(indented)&&headerHas(", re-indented)"),
+          "fileview re-indents JSON by default");
+    check(view({String("/CFG.JSON"),String("1")})=="[FS] File displayed"&&shown(indented),
+          "JSON is recognised by the shared classifier, page given");
+    for(const auto& args:{std::vector<String>{String("/cfg.json"),String("raw")},
+                          std::vector<String>{String("/cfg.json"),String("raw"),String("1")},
+                          std::vector<String>{String("/cfg.json"),String("1"),String("raw")}})
+      check(view(args)=="[FS] File displayed"&&shown(json)&&!headerHas("re-indented"),
+            "raw shows the stored JSON in either argument order");
+    fixture("ordinary page");
+    check(view({String("/ordinary.txt"),String("raw")})=="[FS] File displayed"&&shown("ordinary page")&&
+              !headerHas("re-indented"),
+          "raw is accepted and changes nothing for a text file");
+    fixture(json);
+    for(const auto& args:{std::vector<String>{String("/cfg.json"),String("raw"),String("raw")},
+                          std::vector<String>{String("/cfg.json"),String("1"),String("2")}})
+      check(view(args)=="Error: unexpected argument — usage: fileview \"<path>\" [page] [raw]"&&broadcasts.empty(),
+            "a repeated page or raw is refused before reading");
+    check(view({String("/cfg.json"),String("0")})=="Error: page must be >= 1 — usage: fileview \"<path>\" [page] [raw]",
+          "page validation names the raw keyword");
+
+    // A re-indented body is sized from a counting pass and stops at the
+    // pager's 64 KB offset range, marked truncated; raw stays exact.
+    std::string list="[";
+    for(int i=0;i<14000;++i) list+="1,";  // ~28 KB stored, ~70 KB re-indented
+    list+="1]";
+    fixture(list);
+    check(view({String("/big.json")})=="[FS] File displayed"&&headerHas(", re-indented, truncated)"),
+          "a re-indented body past 64 KB is marked truncated");
+    check(lastAllocationSize["fs.fileview.body"]==65535,"re-indented body is capped at the uint16_t page range");
+    check(view({String("/big.json"),String("raw")})=="[FS] File displayed"&&!headerHas("truncated"),
+          "the same file pages raw without truncation");
+    check(lastAllocationSize["fs.fileview.body"]==list.size()+list.size()/200+16,"raw body keeps its exact sizing");
+    fixture(json);
+    check(view({String("/small.json")})=="[FS] File displayed"&&
+              lastAllocationSize["fs.fileview.body"]==indented.size()+indented.size()/200+16,
+          "a small re-indented body is sized from the counted output");
     for(const char* path:{"/stt/u2/session.txt","/sd/stt/u2/session.txt"," //./stt//u2/session.txt "}) {
       fixture("words: \"quoted\"\n");
       checkPayload(invoke(path),fileBytes,path,0,true,true);

@@ -13,7 +13,8 @@ if __name__=='__main__':
     source=(ROOT/'BLE_Peers.cpp').read_text()
     functions='\n'.join(extract_block(source,k) for k in (
         'bool blePeerBeginPhonePipeForget(', 'bool blePeerPhonePipeForgetIsCurrent(',
-        'bool blePeerCommitPhonePipeForget('))
+        'bool blePeerCommitPhonePipeForget(', 'bool blePeerClearPhonePipeEnrollment(',
+        'bool blePeerCommitPhonePipeEnrollmentIfCurrent('))
     unit=(HERE/'phone_forget_harness.cpp').read_text().replace('// INSERT_PRODUCTION',functions)
     with tempfile.TemporaryDirectory(prefix='hw1-phone-forget-') as tmp:
         path=Path(tmp)/'forget.cpp';binary=Path(tmp)/'forget';path.write_text(unit)

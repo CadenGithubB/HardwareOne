@@ -92,6 +92,16 @@ File openGuarded(const char* path, const char* mode, const AuthContext& auth) {
     return it==fake::state.files.end() ? File() : File(&it->second);
 }
 }
+// System_STTVocabulary fake: the hotword snapshot the backend parses between phrases.
+[[maybe_unused]] constexpr size_t STT_VOCAB_HOTWORD_BYTES=256*32+1;
+namespace fakevocab { std::string text; uint32_t generation=1; int snapshots=0; }
+uint32_t sttVocabularyGeneration() { return fakevocab::generation; }
+uint32_t sttVocabularyHotwords(char* out, size_t cap, size_t* bytes) {
+    ++fakevocab::snapshots;
+    const size_t n=std::min(fakevocab::text.size(),cap-1);
+    std::memcpy(out,fakevocab::text.data(),n); out[n]=0; if(bytes)*bytes=n;
+    return fakevocab::generation;
+}
 namespace hw1::stt {
 ModelCache::~ModelCache() { reset(); }
 void ModelCache::reset() { raw_=nullptr; }
@@ -135,6 +145,7 @@ std::vector<uint8_t> meetingLm() {
 void reset() {
     assert(fake::state.heap.empty()); // every scenario ends without leaks
     fake::state=fake::State{};
+    fakevocab::text.clear(); fakevocab::generation=1; fakevocab::snapshots=0;
 #if ENABLE_STT_LM
     gLmNoted=0;
 #endif
@@ -207,7 +218,9 @@ void loadedOncePerSession() {
         assert(run(&session)=="cat");
         assert(fake::used()==bytes); // blob resident between calls; no word list
         assert(run(&session)=="cat" && run(&session)=="cat");
-        assert(fake::state.opens[kLm]==1 && fake::state.exists[kWords]==1);
+        // One hotword snapshot at the load; an unchanged generation takes no more.
+        assert(fake::state.opens[kLm]==1 && fake::state.exists[kWords]==1 && fake::state.opens[kWords]==0);
+        assert(fakevocab::snapshots==1);
         assert(fake::state.lastCache!=nullptr);
     }
     assert(fake::state.heap.empty()); // session destruction frees the LM
@@ -224,17 +237,26 @@ void loadedOncePerSession() {
 }
 void customWords() {
     reset(); fake::state.files[kLm]=meetingLm();
-    const std::string list="Kat\nnot a word\n";
-    fake::state.files[kWords]=std::vector<uint8_t>(list.begin(),list.end());
-    { STTLocalSession session; assert(run(&session)=="kat" && run(&session)=="kat"); assert(fake::state.opens[kWords]==1); }
-    assert(logged("1 custom words")==1);
-    // Oversized list: ignored with one warning; the LM itself still decodes.
+    fakevocab::text="kat\nnot a word\n";   // the vocabulary's spoken forms (one line each)
+    {
+        STTLocalSession session;
+        assert(run(&session)=="kat" && run(&session)=="kat" && fakevocab::snapshots==1);
+        // An edit (new generation) is taken once, between phrases, by the same session.
+        fakevocab::text.clear(); ++fakevocab::generation;
+        assert(run(&session)=="cat" && fakevocab::snapshots==2 && run(&session)=="cat" && fakevocab::snapshots==2);
+        fakevocab::text="kat\n"; ++fakevocab::generation;
+        assert(run(&session)=="kat" && fakevocab::snapshots==3);
+    }
+    assert(logged("1 custom words")==1 && fake::state.opens[kWords]==0);
+    // The retired fixed list beside the LM is noted once and never read.
     reset(); fake::state.files[kLm]=meetingLm();
-    fake::state.files[kWords]=std::vector<uint8_t>(64*1024+1,'a');
+    fake::state.files[kWords]={'k','a','t','\n'};
     { STTLocalSession session; assert(run(&session)=="cat" && run(&session)=="cat"); }
-    assert(logged("W [STT] Ignoring /STT Models/custom_words.txt")==1 && logged("0 custom words")==1);
-    // Empty after normalisation: no list, no warning.
-    reset(); fake::state.files[kLm]=meetingLm(); fake::state.files[kWords]={'\n','-','\n'};
+    { STTLocalSession session; assert(run(&session)=="cat"); }
+    assert(logged("W [STT] /STT Models/custom_words.txt is no longer read")==1 && fake::state.opens[kWords]==0);
+    assert(logged("0 custom words")==1);
+    // An empty vocabulary: no hotword table, no warning.
+    reset(); fake::state.files[kLm]=meetingLm();
     { STTLocalSession session; assert(run(&session)=="cat"); }
     assert(fake::state.logs.size()==1 && logged("0 custom words")==1);
 }

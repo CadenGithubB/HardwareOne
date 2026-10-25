@@ -36,6 +36,27 @@ namespace VFS {
 // ---------------------------------------------------------------------------
 // Doubles for what the callback reaches outside the filesystem.
 // ---------------------------------------------------------------------------
+#ifndef ENABLE_BLUETOOTH
+#define ENABLE_BLUETOOTH 1
+#endif
+// The pipe secret is a device code (`phone pair new` marked it, phone link v2).
+static struct {String phonePipeSecret="fixture-secret";bool phonePipeSecretGenerated=true;} gSettings;
+static int pipeFailure=0;static bool keyCleared=false,enrollmentCleared=false,secretPersisted=false,generatedPersisted=true;
+// The BLE role token (Bluetooth.h): the reset holds PHONE_STOP from the pipe's
+// stop through the secret's clear, so no link start takes the old secret; it
+// is refused while another task holds the token. outsideRole counts the stop,
+// key drop and clear made without it.
+enum class BleRoleTransition : uint8_t { IDLE = 0, PHONE_STOP };
+static bool roleBusy=false;static unsigned roleDepth=0,outsideRole=0;static int roleKind=-1;
+static bool bleRoleTransitionBegin(BleRoleTransition kind){if(roleBusy)return false;if(!roleDepth++)roleKind=int(kind);return true;}
+static void bleRoleTransitionEnd(){--roleDepth;}
+static bool phonePipeStop(){if(!roleDepth)++outsideRole;return pipeFailure!=1;}
+static bool phonePipeInvalidateSecret(){if(!roleDepth)++outsideRole;keyCleared=pipeFailure!=2;return keyCleared;}
+static bool setInternalSecretSetting(String& field,const String& value){
+  if(!roleDepth)++outsideRole;if(pipeFailure==3)return false;field=value;return true;}
+static bool blePeerClearPhonePipeEnrollment(){enrollmentCleared=pipeFailure!=4;return enrollmentCleared;}
+static bool writeSettingsJsonForFactoryReset(){
+  generatedPersisted=gSettings.phonePipeSecretGenerated;secretPersisted=pipeFailure!=5;return secretPersisted;}
 #define EXT_RAM_BSS_ATTR
 #define RETURN_VALID_IF_VALIDATE_CSTR() ((void)0)
 const char* USERS_JSON_FILE = "/system/users/users.json";
@@ -197,6 +218,9 @@ static fake_vfs::Fs& populate() {
   fs.put("/sd/stt/u4/notes/n.txt", "sd note");
   fs.put("/sd/stt/shared.txt", "shared");
   fs.put("/sd/VIDEOS/v.avi", "video");
+  pipeFailure=0;keyCleared=enrollmentCleared=secretPersisted=false;gSettings.phonePipeSecret="fixture-secret";
+  roleBusy=false;roleDepth=outsideRole=0;roleKind=-1;
+  gSettings.phonePipeSecretGenerated=generatedPersisted=true;
   micFinalizeOk = true; overlayClears = 0;
   ESP = FakeEsp{};
   timersCreated = timersStarted = 0; timerDelayUs = 0; timerCallback = nullptr;
@@ -245,6 +269,13 @@ static void wipeRemovesAccountData() {
   check(committed() && timerDelayUs == 1000000ULL && timerCallback != nullptr && rebootIntents == 1);
   check(events[0] == std::to_string(SYSEVT_FACTORY_RESET) + ":fixture-owner");
   check(overlayClears == 1 && ESP.restarts == 0);
+  check(secretPersisted&&!gSettings.phonePipeSecret.length());
+  check(!gSettings.phonePipeSecretGenerated&&!generatedPersisted);  // no device code is left
+#if ENABLE_BLUETOOTH
+  check(keyCleared&&enrollmentCleared);
+  // The role was held at the stop, the key drop and the clear, and given back.
+  check(outsideRole==0&&roleDepth==0&&roleKind==int(BleRoleTransition::PHONE_STOP));
+#endif
   timerCallback(nullptr);
   check(ESP.restarts == 1);
 
@@ -345,8 +376,34 @@ static void promptNamesWhatIsDeleted() {
   check(capturedPrompt.find("/stt/u*") != std::string::npos && capturedPrompt.find("/sd/stt/u*") != std::string::npos);
 }
 
+static void pipeClearFailurePreservesAccounts() {
+  for(int failure=1;failure<=5;++failure){
+#if !ENABLE_BLUETOOTH
+    if(failure==1||failure==2||failure==4)continue;
+#endif
+    auto& fs=populate();pipeFailure=failure;
+    const size_t start=fs.log.size();const char* reply=factoryreset_confirmed(nullptr);
+    check(startsWith(reply,"Error:")&&fs.exists(USERS_JSON_FILE)&&notCommitted());
+    check(fs.log.size()==start&&overlayClears==0&&idRecords==0);
+    if(failure<=3)check(gSettings.phonePipeSecret=="fixture-secret"&&gSettings.phonePipeSecretGenerated);
+  }
+}
+// Another task's BLE role transition: the reset stops before the pipe stops,
+// with the secret, the mark, the accounts and the reboot untouched.
+static void roleBusyTouchesNothing() {
+#if ENABLE_BLUETOOTH
+  auto& fs=populate();roleBusy=true;
+  const size_t start=fs.log.size();const char* reply=factoryreset_confirmed(nullptr);
+  check(std::strcmp(reply,"Error: factory reset stopped; BLE role transition busy")==0);
+  check(!keyCleared&&!enrollmentCleared&&!secretPersisted&&roleDepth==0);
+  check(gSettings.phonePipeSecret=="fixture-secret"&&gSettings.phonePipeSecretGenerated);
+  check(fs.log.size()==start&&fs.exists(USERS_JSON_FILE)&&notCommitted()&&overlayClears==0&&idRecords==0);
+#endif
+}
 struct Case { const char* name; void (*run)(); };
 static const Case kCases[] = {
+  {"pipeClearFailurePreservesAccounts",pipeClearFailurePreservesAccounts},
+  {"roleBusyTouchesNothing",roleBusyTouchesNothing},
   {"wipeRemovesAccountData", wipeRemovesAccountData},
   {"sdNotMountedKeepsSdFolders", sdNotMountedKeepsSdFolders},
   {"accountDataFailureStopsBeforeRoster", accountDataFailureStopsBeforeRoster},

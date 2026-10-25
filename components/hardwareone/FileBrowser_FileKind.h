@@ -14,7 +14,7 @@
 enum class FileKind : unsigned char {
   Other = 0,  // no on-device viewer: Info / Rename / Delete only
   Text,       // plain text (logs, notes, config, source): raw paged view
-  Json,       // JSON: raw view; the lens also has a pretty view
+  Json,       // JSON: Pretty View (System_JsonPretty.h) or the raw JSON View
   ImageBmp,   // BMP: lens image viewer
   ImageJpeg,  // JPEG (.jpg / .jpeg): lens image viewer (decoded to BMP)
 };

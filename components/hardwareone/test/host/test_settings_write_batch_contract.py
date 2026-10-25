@@ -249,7 +249,8 @@ for signature in (
     "bool bleSavePeerMacIfIdentityCurrent(",
 ):
     body = block_after(ble_peers, signature)
-    require("targetChanged" in body, f"{signature} lost change-only persistence")
+    require("if (applied.persistenceChanged) (void)requestSettingsPersist();" in body,
+            f"{signature} lost change-only persistence")
     require("requestSettingsPersist(" in body, f"{signature} bypasses batching")
     require("writeSettingsJson(" not in cpp_code(body), f"{signature} writes flash directly")
 
@@ -426,7 +427,7 @@ require(
 
 # Full-file replacement uses shared temporary paths. Both writers therefore
 # must hold the same recursive single-flight guard for their complete bodies.
-main_writer = block_after(settings_cpp, "bool writeSettingsJson(")
+main_writer = block_after(settings_cpp, "static bool writeSettingsJsonImpl(")
 debug_writer = block_after(settings_cpp, "bool writeDebugJson(")
 guard_pattern = re.compile(r"\b(\w*(?:Write|File)\w*Guard)\s+\w+")
 main_guards = set(guard_pattern.findall(main_writer))

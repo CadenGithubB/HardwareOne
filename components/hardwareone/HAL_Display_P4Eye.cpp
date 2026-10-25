@@ -20,7 +20,7 @@ constexpr size_t kStripBytes = p4eye_display::kWidth *
 }
 
 P4EyeDisplay::P4EyeDisplay()
-    : Adafruit_SSD1306(128, 64, static_cast<TwoWire*>(nullptr), -1) {
+    : Adafruit_SSD1306(p4eye_display::kCanvasWidth, p4eye_display::kCanvasHeight, static_cast<TwoWire*>(nullptr), -1) {
   lock_ = xSemaphoreCreateMutex();
 }
 
@@ -68,7 +68,7 @@ bool P4EyeDisplay::begin() {
   // buffer is owned/freed by the SSD1306 base. Do not call its begin(), which
   // would issue real SSD1306 commands to a nonexistent OLED bus.
   if (!buffer) buffer = static_cast<uint8_t*>(ps_calloc(
-      128 * 64 / 8, 1, AllocPolicy::PreferInternal, "display.p4eye.canvas"));
+      p4eye_display::kCanvasWidth * ((p4eye_display::kCanvasHeight + 7) / 8), 1, AllocPolicy::PreferInternal, "display.p4eye.canvas"));
   // The transfer stripe must be DMA-capable; the generic project allocator
   // has no DMA policy. Keep this explicitly constrained allocation internal.
   strip_ = static_cast<uint16_t*>(heap_caps_malloc(

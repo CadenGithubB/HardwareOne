@@ -4,6 +4,7 @@
 #include <vector>
 
 // The production fragmenter is compiled immediately after these boundaries.
+struct G2NoteContext; // Opaque in Terminal/reader tests; native Notes has its own suite.
 using SemaphoreHandle_t = int;
 struct G2Temple {
   char side = 'R';
@@ -75,7 +76,9 @@ static void vTaskDelay(uint32_t) {
 static bool sendEnvelopeNoMutex(G2Temple& arm, const uint8_t* bytes, size_t length,
     uint64_t = 0, bool* attempted = nullptr, uint32_t = 0, uint32_t = 0,
     uint32_t exactGeneration = 0, uint32_t exactLifecycle = 0,
-    uint32_t exactPresentation = 0, uint32_t nativeTerminalEpoch = 0) {
+    uint32_t exactPresentation = 0, uint32_t nativeTerminalEpoch = 0,
+    const G2NoteContext* noteContext = nullptr) {
+  assert(!noteContext);
   if (nativeTerminalEpoch && !g2NativeTerminalGuardMatches(nativeTerminalEpoch, arm)) return false;
   assert(testCentralHeld && testPeerHeld);
   assert(exactGeneration == 52 && exactLifecycle == kTestLifecycle);

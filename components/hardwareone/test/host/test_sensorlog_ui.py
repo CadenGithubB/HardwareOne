@@ -91,7 +91,10 @@ def generated_config_list(read) -> str:
     require(cap is not None, "OLED_Utils.h: OLED_SCROLL_MAX_ITEMS missing")
     types = logging_types(read) + [cap.group(0),
                                    extract_block(utils_header, "struct OLEDScrollItem") + ";",
-                                   extract_block(utils_header, "struct OLEDScrollState") + ";"]
+                                   extract_block(utils_header, "struct OLEDScrollState") + ";",
+                                   # Row capacity from the shared layout, as the renderers use it.
+                                   read("OLED_Layout.h").replace("#pragma once", ""),
+                                   extract_block(utils_header, "inline constexpr int oledVisibleRows(")]
     scroll = []
     for marker in SCROLL_FUNCTIONS:
         require(utils.count(marker) == 1, f"OLED_Utils.cpp: marker missing or not unique: {marker}")

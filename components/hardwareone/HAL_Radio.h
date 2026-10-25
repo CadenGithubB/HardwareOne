@@ -115,8 +115,9 @@ bool radioHalEspNowAvailable();
 
 const RadioCompanionIdentity& radioHalIdentity();
 esp_err_t radioHalRefreshIdentity();            // RPCs; transport must be up
-// BLE links the companion's controller accepts, for central-link admission:
-// min(HW1_C6_BLE_MAX_CONNECTIONS, the limit the bridge reports). A companion
+// Reported controller capacity (metadata only; this getter admits no links):
+// min(HW1_C6_BLE_MAX_CONNECTIONS, the limit the bridge reported in this
+// transport session; a later failed identity probe keeps it). A companion
 // that reports none (no bridge, a bridge built before the report, or no
 // identity read yet) counts as 3, the IDF default those images were built with.
 uint8_t radioHalCompanionBleLinks();

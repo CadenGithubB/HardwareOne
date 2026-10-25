@@ -373,8 +373,8 @@ static void showConfirmMenu(ConfirmAction action) {
   }
   gConfirmAction = action;
   setSub(USERS_SUB_CONFIRM_ACTION);
-  static char warning[72];
-  static char confirm[72];
+  EXT_RAM_BSS_ATTR static char warning[72];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char confirm[72];  // PSRAM: deep-copied by g2ShowListPage
   switch (action) {
     case CONFIRM_ACTION_KICK:
       snprintf(warning, sizeof(warning), "Sign out %.55s?", gUsers[gSelected].username);
@@ -425,7 +425,7 @@ static void showPendingMenu() {
 
 static void showResultMenu() {
   setSub(USERS_SUB_RESULT);
-  static char back[72];
+  EXT_RAM_BSS_ATTR static char back[72];  // PSRAM: deep-copied by g2ShowListPage
   if (selectedUserValid())
     snprintf(back, sizeof(back), "<- %.60s", gUsers[gSelected].username);
   else

@@ -19,7 +19,9 @@ def main():
     harness=harness.replace('// INSERT_BRIDGE',bridge)
     with tempfile.TemporaryDirectory(prefix='hw1-oled-transcription-') as tmp:
         unit=Path(tmp)/'test.cpp';exe=Path(tmp)/'test';unit.write_text(harness)
-        cmd=['clang++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-const-variable','-I',str(COMPONENT.parent/'hardwareone_libs/ArduinoJson/src'),str(unit),'-o',str(exe)]
+        cmd=['clang++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-const-variable','-I',str(COMPONENT.parent/'hardwareone_libs/ArduinoJson/src'),'-I',str(COMPONENT),str(unit),'-o',str(exe)]
         if args.sanitize:cmd[1:1]=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g']
-        subprocess.run(cmd,check=True);subprocess.run([str(exe)],check=True)
+        for height in (64,128):
+            subprocess.run(cmd+['-DTEST_CANVAS_HEIGHT='+str(height)],check=True)
+            subprocess.run([str(exe)],check=True)
 if __name__=='__main__':main()

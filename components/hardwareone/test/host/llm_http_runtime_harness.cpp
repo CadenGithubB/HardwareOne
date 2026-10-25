@@ -10,6 +10,7 @@
 #include <atomic>
 #include <new>
 #include <unordered_map>
+#define ESP_LOGW(...) ((void)0)
 
 // Arduino declares this global type; the HTTP SSE parser must stay qualified.
 class Stream {};
@@ -162,11 +163,10 @@ static void esp_http_client_close(Client*) {}
 static void esp_http_client_cleanup(Client* c) { ++cleanups; delete c; }
 static bool esp_http_client_is_complete_data_received(Client*) { return completeResponse; }
 
-static bool phonePipeReady() { return false; }
-namespace Clock {
-static long epochSeconds(){return 0;}
-static bool isPlausibleEpoch(long){return true;}
-}
+// A READY phone link with its relay on (RELAY_ON): the only phone state relay
+// users route on (phone link v2).
+static bool phoneRelay = false;
+static bool phonePipeRelayAvailable() { return phoneRelay; }
 // INSERT_IO
 // INSERT_INTERFACE
 // INSERT_IMPLEMENTATION
@@ -297,9 +297,20 @@ int main() {
   HttpTerminalResult terminalResult{};
   char terminalOutput[HTTP_TERMINAL_JSON_CAP + 1];
   resetServer(); terminalJson = true; wire = "{\"schema\":1,\"ok\":true}";
+  WiFi.connected=false;
+  assert(!httpTerminalPathAvailable());
+  assert(httpTerminalStart(operation, strlen(operation), &token)==HttpTerminalStartResult::Unavailable && !token);
+  assert(opens==0);
+  // Without Wi-Fi the phone is the path only while its relay is on; a READY
+  // link with relay off carries the console only.
+  phoneRelay=true;assert(httpTerminalPathAvailable());phoneRelay=false;assert(!httpTerminalPathAvailable());
+  WiFi.connected=true;
+  assert(llmHttpRequestAdmit(LlmHttpRequestKind::Terminal,true)==LlmHttpAdmission::Accepted);
+  assert(httpTerminalStart(operation, strlen(operation), &token)==HttpTerminalStartResult::Busy && !token);
+  assert(opens==0);llmHttpRequestRelease(LlmHttpRequestKind::Terminal);
   const uint32_t revision = httpTerminalConfigRevision();
-  assert(revision && httpTerminalStart(operation, strlen(operation), &token));
-  assert(!httpTerminalStart(operation, strlen(operation), &refused) && !refused);
+  assert(revision && httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  assert(httpTerminalStart(operation, strlen(operation), &refused) == HttpTerminalStartResult::Busy && !refused);
   assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult) && !terminalResult.done);
   drainWorker();
   assert(opens == 1 && cleanups == 1 && requestUrl == "https://relay/v1/terminal");
@@ -308,9 +319,14 @@ int main() {
   assert(terminalResult.done && !terminalResult.error[0] && terminalOutput == wire);
   assert(terminalResult.configRevision == revision && response() == priorChat);
   assert(!httpTerminalRead(token, terminalOutput, 2, &terminalResult));
+  resetServer();status=503;wire="busy";terminalJson=false;
+  assert(httpTerminalStart(operation, strlen(operation), &token)==HttpTerminalStartResult::Accepted);
+  drainWorker();assert(httpTerminalRead(token,terminalOutput,sizeof(terminalOutput),&terminalResult));
+  assert(terminalResult.httpStatus==503 && !strcmp(terminalResult.error,"relay busy with an earlier request (outcome unknown)"));
+  assert(opens==1 && !terminalOutput[0]);
   const HttpTerminalToken previousToken = token;
   resetServer(); terminalJson = true; wire = "{}";
-  assert(httpTerminalStart(operation, strlen(operation), &token));
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
   assert(!httpTerminalRead(previousToken, terminalOutput, sizeof(terminalOutput), &terminalResult));
   httpTerminalCancel(previousToken); // A stale close cannot cancel the new view.
   drainWorker(); assert(!shuts);
@@ -320,18 +336,18 @@ int main() {
     if (fault == 1) completeResponse = false;
     if (fault == 2) status = 302;
     if (fault == 3) failWrite = true;
-    assert(httpTerminalStart(operation, strlen(operation), &token));
+    assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
     drainWorker();
     assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult));
     assert(terminalResult.done && terminalResult.error[0] && !terminalOutput[0] && opens == 1);
   }
   resetServer(); terminalJson = true; wire = "{}";
-  assert(httpTerminalStart(operation, strlen(operation), &token));
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
   httpTerminalCancel(token); drainWorker(); assert(opens == 0);
   resetServer(); terminalJson = true; wire = "{}";
   readHook = [] { if (!readOffset) assert(httpLlmConfigure(true, "https://replacement/v1",
       "openclaw/default", "replacement-token", false, "test-ca")); };
-  assert(httpTerminalStart(operation, strlen(operation), &token));
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
   drainWorker();
   assert(httpTerminalConfigRevision() != revision && shuts == 1);
   assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult));

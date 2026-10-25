@@ -53,9 +53,11 @@ class TranscriptSession {
   uint64_t id_ = 0;
   uint32_t userId_ = 0;
   uint32_t sequence_ = 0;
+  uint32_t boot_ = 0, powerOn_ = 0, domain_ = 0;  // startup ordering (header)
   bool finished_ = false;
   bool sd_ = false;
   char provider_[8] = {};
   char start_[24] = {};
+  char title_[49] = {};  // TranscriptText::kTitleMax + 1
 };
 #endif

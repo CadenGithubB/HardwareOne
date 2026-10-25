@@ -128,11 +128,38 @@ int main() {
     "llmhttptoken \"" + std::string(secret) + " trailing\"",
     "llmhttptoken \"" + std::string(secret),
     "espnowremote peer user test-password llmhttptoken " + std::string(secret),
+    // `phone secret` is a two-word row: the passphrase after both words is
+    // masked, including when extra whitespace makes the registry match `phone`.
+    "phone secret " + std::string(secret),
+    "PHONE  secret\t" + std::string(secret),
   };
   for (const auto& line : lines) {
     String redacted = redactCmdForAudit(String(line));
     assert(std::string(redacted.c_str()).find(secret) == std::string::npos);
   }
+  // No MAC address (Bluetooth, Wi-Fi, ESP-NOW) reaches the command audit, and
+  // only a whole six-pair address is masked.
+  const std::pair<std::string, std::string> macCases[] = {
+    {"openring aa:bb:cc:dd:ee:01", "openring <mac>"},
+    {"espnowunpair AA-BB-CC-DD-EE-02", "espnowunpair <mac>"},
+    {"espnowsend 0A:1B:2C:3D:4E:5F hi 0a:1b:2c:3d:4e:60", "espnowsend <mac> hi <mac>"},
+    {"x aa:bb-cc:dd:ee:ff", "x aa:bb-cc:dd:ee:ff"},          // mixed separators
+    {"x aa:bb:cc:dd:ee:ff:00", "x aa:bb:cc:dd:ee:ff:00"},    // seven pairs
+    {"x 0aa:bb:cc:dd:ee:ff", "x 0aa:bb:cc:dd:ee:ff"},        // glued to more hex
+    {"x aa:bb:cc:dd:ee", "x aa:bb:cc:dd:ee"},                // five pairs
+    {"x 00:aa:bb:cc:dd:ee:ff", "x 00:aa:bb:cc:dd:ee:ff"},    // seven pairs, the tail six
+    {"(aa:bb:cc:dd:ee:ff)", "(<mac>)"},
+  };
+  for (const auto& c : macCases) {
+    assert(std::string(maskMacTokens(String(c.first)).c_str()) == c.second);
+  }
+  assert(std::string(redactCmdForAudit(String("openring aa:bb:cc:dd:ee:01")).c_str()) == "openring <mac>");
+  assert(std::string(redactCmdForAudit(String("phone secret ")+String(secret)).c_str()) == "phone secret ***");
+  // `phone pair new` (phone link v2): its code is never on the line; the audit says so.
+  assert(std::string(redactCmdForAudit(String("phone pair new")).c_str()) == "phone pair new (code redacted)");
+  assert(std::string(redactCmdForAudit(String("PHONE  pair NEW extra")).c_str()) == "phone pair new (code redacted)");
+  assert(std::string(redactCmdForAudit(String("phone pair")).c_str()) == "phone pair");
+  assert(std::string(redactCmdForAudit(String("espnowunpair AA:BB:CC:DD:EE:02")).c_str()).find("AA:BB") == std::string::npos);
   const std::string sensitiveUrl = "https://operator:" + std::string(secret) + "@agent/v1";
   const auto broadcastCount = broadcasts.size();
   const auto eventCount = events.size();
@@ -213,6 +240,9 @@ def main():
         "CommandArgs::CommandArgs(", "void CommandArgs::parse(", "const String& CommandArgs::arg("))
     redactor_start = utils.index("namespace {", utils.index("// Audit / Redaction utilities"))
     redaction = block(utils[redactor_start:], "namespace {") + "\n"
+    redaction += block(utils, "static bool macHexDigit(char ch) {") + "\n"
+    redaction += block(utils, "static bool macGlued(char ch) {") + "\n"
+    redaction += block(utils, "String maskMacTokens(const String& text) {") + "\n"
     redaction += block(utils, "String redactCmdForAudit(const String& argsInput) {") + "\n"
     redaction += block(utils, "String redactCmdForAudit(const String& argsInput,\n")
     unit = HARNESS
@@ -224,6 +254,7 @@ def main():
     arduino = (HERE / "web_batch_stubs/Arduino.h").read_text()
     arduino = arduino.replace(" private:\n", r'''
   bool reserve(size_t count) { text_.reserve(count); return true; }
+  String& operator+=(char ch) { text_.push_back(ch); return *this; }
   bool equalsIgnoreCase(const String& value) const { return equalsIgnoreCase(value.c_str()); }
   void replace(const char* before, const char* after) {
     size_t offset = 0;

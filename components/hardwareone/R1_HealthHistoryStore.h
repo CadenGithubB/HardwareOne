@@ -109,6 +109,28 @@ struct R1HealthActivityDay {
   R1HealthActivityBucket slots[R1_HEALTH_ACTIVITY_SLOTS];
 };
 
+// Sleep periods that END on this day (local midnight to midnight), oldest
+// first and unique by start. The ring sends a night as one or more records
+// (long sleep with stages, short sleep without), so a day holds a few.
+static constexpr size_t R1_HEALTH_SLEEP_MAX_RECORDS = 8;
+static constexpr size_t R1_HEALTH_SLEEP_STAGES = 4;  // awake, REM, light, deep
+
+struct R1HealthSleepRecord {
+  uint8_t type;                 // ring code: 1 long, 2 short
+  int16_t timezoneMinutes;
+  uint32_t startEpoch;
+  uint32_t endEpoch;
+  uint16_t stageCount;
+  uint16_t stageEpochs[R1_HEALTH_SLEEP_STAGES];  // 30-second epochs
+  uint16_t sourceSerial;
+  uint32_t sourceCrc32;
+};
+
+struct R1HealthSleepDay {
+  uint8_t count;
+  R1HealthSleepRecord records[R1_HEALTH_SLEEP_MAX_RECORDS];
+};
+
 struct R1HealthHistoryDay {
   uint32_t schemaVersion;
   char peerId[18];                 // canonical ring MAC; never emitted by status JSON
@@ -121,6 +143,9 @@ struct R1HealthHistoryDay {
   R1HealthHourlyMetricDay hrv;
   R1HealthHourlyMetricDay spo2;
   R1HealthActivityDay activity;
+  // Optional in the stored file: a day without sleep records hashes and
+  // serializes exactly as before sleep was added.
+  R1HealthSleepDay sleep;
   R1HealthSleepState sleepState;
   R1HealthHistoryFetchState fetchState;
   uint32_t lastSuccessEpoch;
@@ -138,6 +163,18 @@ struct R1HealthActivitySummary {
   uint32_t totalKcal;
   uint32_t firstBucketEpoch;
   uint32_t lastBucketEpoch;
+};
+
+struct R1HealthSleepSummary {
+  bool available;
+  uint8_t count;
+  uint32_t firstStartEpoch;
+  uint32_t lastEndEpoch;
+  int16_t timezoneMinutes;          // of the last record
+  // Time asleep: REM + light + deep epochs for staged records, the whole
+  // period for a short record the ring sends without stages.
+  uint32_t asleepSeconds;
+  uint32_t stageSeconds[R1_HEALTH_SLEEP_STAGES];
 };
 
 struct R1HealthHistoryStoreStatus {
@@ -172,6 +209,12 @@ bool r1HealthHistoryDayValidate(const R1HealthHistoryDay& day,
                                 R1HealthHistoryStoreError* error = nullptr);
 void r1HealthHistoryActivitySummary(const R1HealthHistoryDay& day,
                                     R1HealthActivitySummary& out);
+// A record may join a day when it is internally consistent and ends inside
+// [dayStart, dayStart + 86400).
+bool r1HealthSleepRecordValid(const R1HealthSleepRecord& record,
+                              uint32_t dayStart);
+void r1HealthHistorySleepSummary(const R1HealthHistoryDay& day,
+                                 R1HealthSleepSummary& out);
 
 // Coordinator/main-task staging. It copies the fixed-capacity RAM day behind
 // a normal mutex; do not call it from the ring notify callback. Notify-side
@@ -210,6 +253,13 @@ inline bool r1HealthHistoryDayValidate(const R1HealthHistoryDay&,
 inline void r1HealthHistoryActivitySummary(const R1HealthHistoryDay&,
                                            R1HealthActivitySummary& out) {
   out = R1HealthActivitySummary{};
+}
+inline bool r1HealthSleepRecordValid(const R1HealthSleepRecord&, uint32_t) {
+  return false;
+}
+inline void r1HealthHistorySleepSummary(const R1HealthHistoryDay&,
+                                        R1HealthSleepSummary& out) {
+  out = R1HealthSleepSummary{};
 }
 inline bool r1HealthHistoryStoreStage(const R1HealthHistoryDay&, uint32_t) { return false; }
 inline void r1HealthHistoryStoreTick(void) {}

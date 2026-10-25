@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import tempfile
 from test_espsr_runtime import function
+import ble_pipe_console_host as pipe_host
 
 HERE = Path(__file__).resolve().parent
 
@@ -36,6 +37,8 @@ def main():
            ('SEND','bool sendBLEResponseToSession('),
            ('CALLBACK','static void bleCommandResultCallback('),
            ('MIRROR_SEND','bool sendBLEResponse(')]
+    # The session router every sender goes through (phone link v2); empty in an older tree.
+    harness=harness.replace('// INSERT_PIPE_ROUTER',pipe_host.router_block(args.component,source,'guardDepth!=0'))
     for marker,name in names:
         harness=harness.replace('// INSERT_'+marker,function(source,name))
     # The characteristic-wide sender and the callback session fence exist only in

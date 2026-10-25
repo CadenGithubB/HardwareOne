@@ -15,6 +15,7 @@
 #include "System_MemUtil.h"
 #include "System_Microphone.h"
 #include "System_Settings.h"
+#include "System_STTVocabulary.h"
 #include "System_TaskUtils.h"
 #include "stt/stt_segmenter.h"
 #include "stt/quartznet_frontend.h"
@@ -26,6 +27,16 @@
 #endif
 #include <cmath>
 #include <cstring>
+#include <new>
+
+// Task-owned payload/diagnostic storage; locks and session control stay internal.
+// No DMA, ISR or cache-disabled path accesses these arrays.
+#if defined(ESP_PLATFORM) && CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+#include "esp_attr.h"
+#define STT_PSRAM_BSS EXT_RAM_BSS_ATTR
+#else
+#define STT_PSRAM_BSS
+#endif
 
 #ifndef ESP_PLATFORM
 size_t sttPsramFree();  // host builds: the test harness supplies free PSRAM
@@ -114,6 +125,7 @@ struct STTRun {
   // whether that session is paused by the wearer.
   uint32_t nativeG2Generation = 0;
   bool singleUtterance = false;
+  bool speakerLabels = true;
   bool paused = false;
   // The consumer's wake (Conversate: g2ControlWake), called by the worker
   // right after a final or a draft is published, outside gSTTMux, when
@@ -131,7 +143,7 @@ struct STTRun {
 };
 static portMUX_TYPE gSTTMux = portMUX_INITIALIZER_UNLOCKED;
 static STTRun gSTT;
-static STTTextChunk gSTTChunks[kTextQueueDepth];
+STT_PSRAM_BSS static STTTextChunk gSTTChunks[kTextQueueDepth];
 static void sttContinuousWorker(void*);
 static uint32_t gSTTNonce = 0;
 static uint32_t gSTTCounter = 0;
@@ -688,6 +700,7 @@ struct StreamSlot {
   StreamSlotState state = StreamSlotState::Free;
 };
 struct StreamRun {
+  bool speakerLabels = true;
   STTToken token = 0;
   AudioSource requested = AUDIO_SRC_NONE;
   int16_t* working = nullptr;
@@ -763,7 +776,7 @@ struct StreamRun {
 #ifdef ESP_PLATFORM
 struct TLLevel { uint32_t t; uint16_t rms, noise, thr; bool open; };
 static constexpr uint32_t kTLLevels = 64;
-static TLLevel gTLLevels[kTLLevels];
+STT_PSRAM_BSS static TLLevel gTLLevels[kTLLevels];
 static uint32_t gTLLevelHead = 0, gTLLevelTail = 0;
 #endif
 static void sttDrainLevelLog(StreamRun& run) {
@@ -905,7 +918,14 @@ struct STTPerfRecord {
   STTPerfTask tasks[4] = {};
 };
 constexpr size_t kPerfRecords = 16;
+#if defined(ESP_PLATFORM) && CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+// Preserve nonzero idle/slow-stage sentinels: external BSS starts zeroed.
+struct STTPerfRecords { STTPerfRecord records[kPerfRecords]; };
+alignas(STTPerfRecords) STT_PSRAM_BSS static uint8_t gSTTPerfStorage[sizeof(STTPerfRecords)];
+static auto& gSTTPerf = (*new (gSTTPerfStorage) STTPerfRecords).records;
+#else
 static STTPerfRecord gSTTPerf[kPerfRecords];
+#endif
 static uint32_t gSTTPerfCount = 0;
 static volatile bool gSTTPerfLog = false;
 
@@ -1622,6 +1642,31 @@ static void sttFeatureStop(StreamRun& run) {
 }
 #endif
 #if HW1_STT_SPEAKER_LABELS
+static void sttStartSpeakers(STTLocalSession& backendSession, STTToken token,
+                             bool primaryReady, bool requested) {
+  if (!primaryReady || !requested) return;
+  STTSpeakerStatus sp;
+  (void)sttSpeakerBegin(&backendSession, kStreamSamples, &sp);
+  portENTER_CRITICAL(&gSTTMux);
+  if (gSTT.snapshot.token == token && !gSTT.cancelRequested) {
+    gSTT.speakers.available = sp.ready;
+    ++gSTT.speakers.version;
+  }
+  portEXIT_CRITICAL(&gSTTMux);
+#ifdef ESP_PLATFORM
+  ESP_LOGI("STT", "TL spk_load ok=%d why=%s bytes=%u psram_used=%u int_used=%ld ms=%lu th=%.2f fixture_cos=%.4f psram_free=%u",
+           sp.ready ? 1 : 0, sp.why[0] ? sp.why : "none", unsigned(sp.bytes), unsigned(sp.psramUsed),
+           sp.internalUsed, (unsigned long)sp.loadMs, double(sp.threshold), double(sp.fixtureCos),
+           unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+  // where the load went: file read, SHA-256, ESP-DL build, ESP-DL self-test, fixture embed; memory parts
+  ESP_LOGI("STT", "TL spk_load2 read_ms=%lu sha_us=%lu build_us=%lu test=%d test_us=%lu fixture_us=%lu arena_psram=%u arena_int=%u work=%u modules=%u int_min=%u",
+           (unsigned long)sp.readMs, (unsigned long)sp.shaUs, (unsigned long)sp.buildUs, sp.testResult,
+           (unsigned long)sp.testUs, (unsigned long)sp.fixtureUs, unsigned(sp.arenaPsram), unsigned(sp.arenaInternal),
+           unsigned(sp.workspaceBytes), sp.modules,
+           unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+#endif
+}
+
 // Only the STT worker publishes speaker metadata; readers copy it under the
 // broker lock. A late result may update a retained phrase, never resurrect one
 // dropped from the bounded history, cancelled, or owned by another run.
@@ -1762,6 +1807,7 @@ static void sttContinuousWorker(void*) {
   run.requested = gSTT.requestedSource;
   run.nativeGeneration = gSTT.nativeG2Generation;
   run.singleUtterance = gSTT.singleUtterance;
+  run.speakerLabels = gSTT.speakerLabels;
   run.publishWake = gSTT.publishWake;
   run.clockMs = millis();
   transcriptOptions = gSTT.transcriptOptions;
@@ -1847,28 +1893,10 @@ static void sttContinuousWorker(void*) {
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                  unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
 #if HW1_STT_SPEAKER_LABELS
-        {
-          // The optional speaker model, after the STT model and LM are resident.
-          STTSpeakerStatus sp;
-          (void)sttSpeakerBegin(&backendSession, kStreamSamples, &sp);
-          portENTER_CRITICAL(&gSTTMux);
-          if (gSTT.snapshot.token == run.token && !gSTT.cancelRequested) {
-            gSTT.speakers.available = sp.ready;
-            ++gSTT.speakers.version;
-          }
-          portEXIT_CRITICAL(&gSTTMux);
-          ESP_LOGI("STT", "TL spk_load ok=%d why=%s bytes=%u psram_used=%u int_used=%ld ms=%lu th=%.2f fixture_cos=%.4f psram_free=%u",
-                   sp.ready ? 1 : 0, sp.why[0] ? sp.why : "none", unsigned(sp.bytes), unsigned(sp.psramUsed),
-                   sp.internalUsed, (unsigned long)sp.loadMs, double(sp.threshold), double(sp.fixtureCos),
-                   unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
-          // where the load went: file read, SHA-256, ESP-DL build, ESP-DL self-test, fixture embed; memory parts
-          ESP_LOGI("STT", "TL spk_load2 read_ms=%lu sha_us=%lu build_us=%lu test=%d test_us=%lu fixture_us=%lu arena_psram=%u arena_int=%u work=%u modules=%u int_min=%u",
-                   (unsigned long)sp.readMs, (unsigned long)sp.shaUs, (unsigned long)sp.buildUs, sp.testResult,
-                   (unsigned long)sp.testUs, (unsigned long)sp.fixtureUs, unsigned(sp.arenaPsram), unsigned(sp.arenaInternal),
-                   unsigned(sp.workspaceBytes), sp.modules,
-                   unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
-        }
+        sttStartSpeakers(backendSession, run.token, warmed, run.speakerLabels);
 #endif
+        if (!warmed)
+          ESP_LOGW("STT", "warm-up failed: %s", warmError[0] ? warmError : "unknown error");
         if (gSTTPerfLog)
           INFO_SYSTEMF("[STTPERF] warm-up %s in %lu ms (load %lu, lm %s)", warmed ? "ok" : warmError,
                        (unsigned long)(millis() - warmStart), (unsigned long)warmStats.loadMs,
@@ -1890,11 +1918,11 @@ static void sttContinuousWorker(void*) {
 #if HW1_STT_SPEAKER_LABELS
       // Consume label results even when saving is disabled or its line ring
       // could not be allocated. UI metadata never depends on the saved copy.
-      sttLabelledPump(labelledLines, backendSession, transcript, run.token, false);
+      if (run.speakerLabels) sttLabelledPump(labelledLines, backendSession, transcript, run.token, false);
 #if HW1_STT_SPEAKER_DIAGNOSTICS
       // Per-layer speaker trunk profile (TL spkstg), 240 s after capture start: the
       // conversation playlists end by ~233 s and the harness reads 20 s past the end.
-      if (!speakerProfileDumped && gSTT.captureStartedMs && millis() - gSTT.captureStartedMs > 240000) {
+      if (run.speakerLabels && !speakerProfileDumped && gSTT.captureStartedMs && millis() - gSTT.captureStartedMs > 240000) {
         speakerProfileDumped = true;
         sttSpeakerProfileLog();
       }
@@ -2246,7 +2274,7 @@ static void sttContinuousWorker(void*) {
 #if HW1_STT_SPEAKER_LABELS
         // Blank markers share this ordered ring so they cannot overtake a
         // preceding text line that is still waiting for its speaker label.
-        if (!(transcriptOptions.enabled && sttSpeakerBackground(&backendSession) &&
+        if (!(run.speakerLabels && transcriptOptions.enabled && sttSpeakerBackground(&backendSession) &&
               sttLabelledQueue(labelledLines, backendSession, transcript, run.token, slot->sequence, transcriptText)))
 #endif
         {
@@ -2256,7 +2284,7 @@ static void sttContinuousWorker(void*) {
         saveEndMs = millis();
       }
 #if HW1_STT_SPEAKER_LABELS
-      if (acceptedText) {
+      if (acceptedText && run.speakerLabels) {
         // Label the already-published phrase. If its background queue fills,
         // yield to that worker before accepting more work; the current caption
         // remains visible while later finals may wait. Stop that wait when
@@ -2282,7 +2310,7 @@ static void sttContinuousWorker(void*) {
         }
         // Submission can wait for space. Deliver labels completed during that
         // wait immediately, including when this was the final phrase.
-        sttLabelledPump(labelledLines, backendSession, transcript, run.token, false);
+        if (run.speakerLabels) sttLabelledPump(labelledLines, backendSession, transcript, run.token, false);
       }
 #endif
       sttWipe(text, sizeof(text));
@@ -2386,9 +2414,9 @@ static void sttContinuousWorker(void*) {
     }
 #if HW1_STT_SPEAKER_LABELS
     // The last phrases' labels (bounded wait), then every held transcript line, in order.
-    if (!sttStreamCancelled(&run))
+    if (run.speakerLabels && !sttStreamCancelled(&run))
       sttSpeakerDrain(&backendSession, 30000, {&run, sttStreamCancelled, nullptr});
-    sttLabelledPump(labelledLines, backendSession, transcript, run.token, true);
+    if (run.speakerLabels) sttLabelledPump(labelledLines, backendSession, transcript, run.token, true);
     sttFinishSpeakers(run.token);
 #endif
   } while (false);
@@ -2458,7 +2486,7 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
                          uint32_t nativeG2Generation = 0,
                          AudioSource preferredSource = AUDIO_SRC_NONE,
                          void (*publishWake)() = nullptr,
-                         bool singleUtterance = false) {
+                         bool singleUtterance = false, bool speakerLabels = true) {
   sttReapTerminal();
   if (token) *token = 0;
   if (!token || !sttOwnerLive(owner)) return sttError(error, errorCap, "A live authenticated session is required");
@@ -2510,6 +2538,7 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
     gSTT.requestedSource = nativeG2Generation ? AUDIO_SRC_G2_LEFT : requestedSource;
     gSTT.nativeG2Generation = nativeG2Generation;
     gSTT.singleUtterance = singleUtterance;
+    gSTT.speakerLabels = speakerLabels;
     gSTT.publishWake = publishWake;
     gSTT.snapshot.token = (static_cast<uint64_t>(gSTTNonce) << 32) | gSTTCounter;
     gSTT.snapshot.state = STTState::Preparing;
@@ -2557,14 +2586,14 @@ bool sttBeginContinuous(STTOwner owner, STTToken* token,
 bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
                                 char* error, size_t errorCap,
                                 const TranscriptOptions* transcriptOptions,
-                                void (*publishWake)()) {
+                                void (*publishWake)(), bool speakerLabels) {
   if (!leftGeneration) {
     if (token) *token = 0;
     return sttError(error, errorCap, "No glasses microphone connection");
   }
   // The glasses stream is the source; the caller's wake is kept for the run.
   return sttBeginMode(owner, 0, true, token, error, errorCap, transcriptOptions, leftGeneration,
-                      AUDIO_SRC_NONE, publishWake);
+                      AUDIO_SRC_NONE, publishWake, false, speakerLabels);
 }
 
 bool sttBeginUtteranceG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
@@ -3005,7 +3034,7 @@ static const char* cmd_stt(const String& argsInput) {
 #include "stt/quartznet_runtime.h"
 // Per-network-stage profile: average ms per segment, slowest first.
 static const char* sttStageReport(char* out, size_t cap) {
-  static uint32_t totals[256];
+  STT_PSRAM_BSS static uint32_t totals[256];
   uint32_t segments = 0;
   const size_t n = hw1::stt::stageProfile(totals, 256, &segments);
   if (!segments) return "STT stage profile: no segments recorded yet (run a transcription)";
@@ -3026,7 +3055,7 @@ static const char* sttStageReport(char* out, size_t cap) {
   return out;
 }
 static const char* sttStageDump(char* out, size_t cap) {
-  static uint32_t totals[256];
+  STT_PSRAM_BSS static uint32_t totals[256];
   uint32_t segments = 0;
   const size_t n = hw1::stt::stageProfile(totals, 256, &segments);
   int w = snprintf(out, cap, "stages %u segments %lu us:", (unsigned)n, (unsigned long)segments);
@@ -3087,9 +3116,62 @@ static const char* cmd_sttperf(const String& argsInput) {
   return out;
 }
 
+// The user vocabulary (System_STTVocabulary.h): any signed-in user may list
+// it; edits change recognition and display for every account on the device,
+// so they take an administrator. Replies are plain text: a list reply is one
+// "OK: N words ..." line followed by DISPLAY<TAB>spoken lines.
+static const char* cmd_sttvocab(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static String reply;
+  CommandArgs args(argsInput);
+  const String op = args.count() ? args.arg(0) : "list";
+  if (args.unterminatedQuote()) return "Error: malformed sttvocab arguments";
+  char error[128] = {};
+  if (op == "list") {
+    if (args.count() > 1) return "Error: Usage: sttvocab list";
+    const size_t count = sttVocabularyCount();
+    reply = String("OK: ") + count + " word" + (count == 1 ? "" : "s") + " in " +
+            (sttVocabularyPath()[0] ? sttVocabularyPath() : "(no vocabulary file)") + " (DISPLAY<TAB>spoken)";
+    hw1::transcript::Word word;
+    for (size_t i = 0; i < count && sttVocabularyEntry(i, &word); ++i) {
+      reply += '\n'; reply += word.display; reply += '\t'; reply += word.spoken;
+    }
+    return reply.c_str();
+  }
+  if (!isAdminUser(currentAuthContext().user)) return "Error: vocabulary edits require an administrator";
+  bool ok = false;
+  if (op == "add") {
+    // DISPLAY, or DISPLAY|spoken when the spoken form is not the lowercase display.
+    if (args.count() != 2) return "Error: Usage: sttvocab add DISPLAY[|spoken]   (e.g. sttvocab add HardwareOne, sttvocab add ESP32|esp)";
+    String term = args.arg(1);
+    const int bar = term.indexOf('|');
+    const String display = bar >= 0 ? term.substring(0, bar) : term;
+    const String spoken = bar >= 0 ? term.substring(bar + 1) : String();
+    ok = sttVocabularyAdd(display.c_str(), spoken.c_str(), error, sizeof(error));
+    if (ok) { reply = String("OK: added ") + display + "; the next phrase decodes with it"; return reply.c_str(); }
+  } else if (op == "remove") {
+    if (args.count() != 2) return "Error: Usage: sttvocab remove <spoken>   (the lowercase recognition form)";
+    ok = sttVocabularyRemove(args.arg(1).c_str(), error, sizeof(error));
+    if (ok) { reply = String("OK: removed ") + args.arg(1); return reply.c_str(); }
+  } else if (op == "reload") {
+    if (args.count() != 1) return "Error: Usage: sttvocab reload";
+    ok = sttVocabularyReload(error, sizeof(error));
+    if (ok) {
+      reply = String("OK: vocabulary reloaded: ") + sttVocabularyCount() + " words from " + sttVocabularyPath();
+      return reply.c_str();
+    }
+  } else {
+    return "Error: Usage: sttvocab [list] | add DISPLAY[|spoken] | remove <spoken> | reload";
+  }
+  reply = String("Error: ") + (error[0] ? error : "vocabulary change failed") + "; the previous vocabulary remains active";
+  return reply.c_str();
+}
+
 const CommandEntry sttCommands[] = {
   {"sttperf", "STT pacing/profiling per segment (timings and CPU only, never text).", false, cmd_sttperf,
    "Usage: sttperf [show|clear|log on|off|stages [all|clear]]"},
+  {"sttvocab", "Speech vocabulary: names and terms with their display spelling (STT Models/user_vocab.tsv).", false, cmd_sttvocab,
+   "Usage: sttvocab [list] | add DISPLAY[|spoken] | remove <spoken> | reload  (edits need an administrator)"},
   {"stt", "Local continuous or bounded speech-to-text with private session-owned results.", false, cmd_stt,
    "Usage: stt start | record [1..20 seconds] | status [id] | stop|cancel|result|next|draft <id> | ack <id> <sequence>"}
 };

@@ -101,8 +101,9 @@ def main() -> None:
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                             "-fno-omit-frame-pointer", "-g"]
-        subprocess.run(command, check=True, timeout=180)
-        subprocess.run([str(binary)] + ([args.case] if args.case else []), check=True, timeout=60)
+        for bluetooth in (0, 1):
+            subprocess.run(command + [f"-DENABLE_BLUETOOTH={bluetooth}"], check=True, timeout=180)
+            subprocess.run([str(binary)] + ([args.case] if args.case else []), check=True, timeout=60)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,20 @@ class FakeBoard:
     pass
 
 
+# Bluetooth.cpp cmd_blemode's saved keyword and hw1link::roleText of its role.
+SAVED_TEXT = {'server': 'App console', 'client': 'Glasses+pipe', 'phone-client': 'Phone pipe'}
+ROLE_TEXT = {'console': 'App console', 'glasses': 'Glasses', 'glasses-pipe': 'Glasses+pipe',
+             'phone-pipe': 'Phone pipe', 'off': 'Off'}
+
+
+def running_role(s):
+    if s['ble']['initialized']:
+        return 'console'
+    if s.get('pipe'):
+        return 'phone-pipe'
+    return 'glasses' if s['g2'] != 'off' else 'off'
+
+
 class FakeRunner:
     def __init__(self):
         self.boards = {'p4': FakeBoard(), 's3': FakeBoard()}
@@ -52,12 +66,13 @@ class FakeRunner:
         if command == 'closeg2':
             s['g2'] = 'idle' if s['g2'] != 'off' else 'off'
             return 'G2: disconnected'
-        if command == 'bleprobe disconnect' or command == 'ringdisconnect':
+        if command == 'bleprobe disconnect' or command == 'ring disconnect':
             return 'OK'
         if command == 'g2status':
             return f"state={s['g2']} L=down R=down"
         if command == 'blemode':
-            return 'BLE mode: ' + s['mode']
+            return (f"Saved mode: {s['mode']} ({SAVED_TEXT[s['mode']]}); "
+                    f"running: {ROLE_TEXT[running_role(s)]}")
         if command == 'loglink':
             return 'loglink: ' + s['loglink'].upper()
         if parts[0] == 'loglink':
@@ -92,8 +107,13 @@ class FakeRunner:
             value = s['ble']
         elif command == 'blepeers json':
             value = {'peers': s['peers']}
-        elif command == 'ringstatus json':
+        elif command == 'ring status json':
             value = {'connectPending': False, 'connected': False}
+        elif command == 'blestatus json':
+            role = running_role(s)
+            value = {'schema': 1, 'initialized': s['ble']['initialized'],
+                     'link': {'role': role, 'roleText': ROLE_TEXT[role],
+                              'saved': 'glasses-pipe', 'savedText': 'Glasses+pipe'}}
         elif command == 'power json':
             value = s['power']
         elif command == 'espnowstatus json':
@@ -153,7 +173,7 @@ class RolesTests(unittest.TestCase):
         test = roles.BoardRoles(runner)
         test.stop_client('p4')
         sent = [c for key, c in runner.commands]
-        self.assertLess(sent.index('ringdisconnect'), sent.index('closeg2'))
+        self.assertLess(sent.index('ring disconnect'), sent.index('closeg2'))
         self.assertLess(sent.index('closeg2'), sent.index('g2deinit'))
         self.assertEqual(sent.count('g2deinit'), 1)
         self.assertEqual(runner.state['p4']['g2'], 'off')
@@ -185,6 +205,56 @@ class RolesTests(unittest.TestCase):
             roles.verify_restored_peers(saved, [])
         with self.assertRaisesRegex(Exception, 'differs'):
             roles.verify_restored_peers(saved, [{'name': 'phone', 'autoReconnect': True}])
+
+    def test_mode_parses_saved_keyword_not_running_role(self):
+        runner = FakeRunner()
+        test = roles.BoardRoles(runner)
+        self.assertEqual(test.mode('p4'), 'client')
+        for mode in ('server', 'phone-client'):
+            runner.state['p4']['mode'] = mode
+            self.assertEqual(test.mode('p4'), mode)
+        replies = {
+            'Saved mode: phone-client (Phone pipe); running: Glasses+pipe': 'phone-client',
+            '\x1b[0mSaved mode: server (App console); running: Phone pipe\n': 'server',
+        }
+        for reply, mode in replies.items():
+            with self.subTest(reply=reply), patch.object(runner, 'command', return_value=reply):
+                self.assertEqual(test.mode('p4'), mode)
+        # The removed "BLE mode: ..." line, an unknown keyword and two lines are refused.
+        for reply in ('BLE mode: server', 'Saved mode: phone (App console); running: Off',
+                      'Saved mode: client (Glasses); running: Off\n'
+                      'Saved mode: server (App console); running: Off'):
+            with self.subTest(reply=reply), patch.object(runner, 'command', return_value=reply), \
+                 self.assertRaisesRegex(Exception, 'unambiguous saved BLE mode'):
+                test.mode('p4')
+
+    def test_cycle_checks_running_role(self):
+        runner = FakeRunner()
+        test = roles.BoardRoles(runner)
+        self.assertEqual(test.role('p4'), 'glasses')
+        roles_seen = []
+        real_role = test.role
+        def record(key):
+            roles_seen.append(real_role(key))
+            return roles_seen[-1]
+        with patch.object(test, 'role', side_effect=record):
+            test.cycle('p4')
+        self.assertEqual(roles_seen, ['glasses', 'console'])
+        # A Client mode whose glasses never came up is refused.
+        with patch.object(test, 'role', return_value='off'), \
+             self.assertRaisesRegex(Exception, 'Client mode did not initialize'):
+            test.cycle('p4')
+
+    def test_standalone_phone_pipe_rejected_before_changes(self):
+        runner = FakeRunner()
+        runner.state['s3']['pipe'] = True
+        runner.state['s3']['g2'] = 'off'
+        original = copy.deepcopy(runner.state)
+        with self.assertRaisesRegex(Exception, 'standalone phone pipe'):
+            self.run_case(runner)
+        self.assertEqual(runner.state, original)
+        self.assertFalse(any(c.startswith(('bleautoreconnect ', 'cpufreq ', 'loglink ', 'blemode '))
+                             for _, c in runner.commands))
 
     def test_ownerless_auto_peer_rejected_before_changes(self):
         runner = FakeRunner()

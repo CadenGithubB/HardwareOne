@@ -223,6 +223,15 @@ target_compile_options(event_catalog_text_tests PRIVATE
 # (stt/stt_lm.cpp, host SHA-256/allocation path) against test-written LMs, and
 # randomised cases against the independent map-based reference decoder in
 # stt_lm_testlib.h.
+# The user vocabulary and display formatter the local STT UIs share
+# (stt/stt_transcript.cpp): production source, ported from the standalone STT
+# handoff with its own suite. System_STTVocabulary.cpp (file, locking) has the
+# Python-driven stt_vocabulary suite below.
+add_executable(stt_transcript_tests test_stt_transcript.cpp ../../stt/stt_transcript.cpp)
+set_target_properties(stt_transcript_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(stt_transcript_tests PRIVATE ../..)
+target_compile_options(stt_transcript_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 add_executable(stt_lm_tests test_stt_lm.cpp ../../stt/stt_lm.cpp)
 set_target_properties(stt_lm_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
@@ -326,6 +335,10 @@ if(HW1_SANITIZE)
     -fsanitize=address,undefined -g)
   target_link_options(event_catalog_text_tests PRIVATE
     -fsanitize=address,undefined)
+  target_compile_options(stt_transcript_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(stt_transcript_tests PRIVATE
+    -fsanitize=address,undefined)
   target_compile_options(stt_lm_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(stt_lm_tests PRIVATE
@@ -398,7 +411,8 @@ enable_testing()
 add_test(NAME esp_now_hosted_protocol COMMAND esp_now_hosted_protocol_tests)
 add_test(NAME radio_companion_core COMMAND radio_companion_core_tests)
 # The real HAL_Bluetooth.cpp under native and Hosted (P4 + C6) controller
-# substitutes; see test_hal_bluetooth.py for what it does and does not prove.
+# substitutes, with the app console's teardown hooks around every stop; see
+# test_hal_bluetooth.py for what it does and does not prove.
 set(HAL_BLUETOOTH_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND HAL_BLUETOOTH_TEST_ARGS --sanitize)
@@ -752,6 +766,14 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_file_kind.py
           ${FILE_KIND_TEST_ARGS})
 
+# JSON Pretty view (README "Shared JSON Pretty view"): one re-indenter for the web,
+# G2 lens and OLED file viewers; the OLED body builder and action rows run on the host.
+add_test(
+  NAME json_pretty
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_json_pretty.py
+          ${FILE_KIND_TEST_ARGS})
+
 # Login policy ownership (README "Display login policy ownership"): every settings row and
 # command that writes serial/UART/display RequireAuth is super-admin, one row per policy.
 set(DISPLAY_AUTH_POLICY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
@@ -1058,6 +1080,7 @@ add_test(NAME vfs_capacity_cache_tests COMMAND vfs_capacity_cache_tests)
 add_test(NAME event_catalog_tests COMMAND event_catalog_tests)
 add_test(NAME event_catalog_json_tests COMMAND event_catalog_json_tests)
 add_test(NAME event_catalog_text_tests COMMAND event_catalog_text_tests)
+add_test(NAME stt_transcript_tests COMMAND stt_transcript_tests)
 add_test(NAME stt_lm_tests COMMAND stt_lm_tests)
 add_test(
   NAME stt_lm_parity
@@ -1076,6 +1099,13 @@ add_test(
   NAME stt_local_lm
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_stt_local_lm.py
+          ${STT_LOCAL_LM_TEST_ARGS})
+# The actual System_STTVocabulary.cpp (file load/reload/edit, staged replacement,
+# generation, hotword snapshot and display formatting) over VFS/lock fakes.
+add_test(
+  NAME stt_vocabulary
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_vocabulary.py
           ${STT_LOCAL_LM_TEST_ARGS})
 add_test(
   NAME event_catalog_json_parse
@@ -1144,6 +1174,10 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_command_resolution_contract.py)
 add_test(
+  NAME ble_log_privacy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_log_privacy.py)
+add_test(
   NAME mqtt_lifecycle_contract
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_lifecycle_contract.py)
@@ -1172,9 +1206,29 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_ring_info_status.py
           ${SETUP_MQTT_TEST_ARGS})
 add_test(
+  NAME g2_status_corner
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_status_corner.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME oled_bluetooth_link_watch
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_bluetooth_link_watch.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
   NAME g2_connection_status
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_g2_connection_status.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME g2_repair_schedule
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_repair_schedule.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME ble_link_status
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ble_link_status.py
           ${SETUP_MQTT_TEST_ARGS})
 add_test(
   NAME g2_client_lifecycle
@@ -1205,6 +1259,11 @@ add_test(
   NAME sensorlog_ui
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_sensorlog_ui.py
+          ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME systemlog_config_ui
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_systemlog_config_ui.py
           ${SETUP_MQTT_TEST_ARGS})
 add_test(
   NAME sensorlog_settings
@@ -1257,11 +1316,17 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_sensor_mic_card.py
           --node ${HW1_NODE_CMD})
+add_test(
+  NAME logging_system_config_browser
+  COMMAND ${HW1_NODE_CMD}
+          ${CMAKE_CURRENT_LIST_DIR}/logging_system_config_browser_test.js)
 if(NOT HW1_NODE_EXECUTABLE)
   set_tests_properties(map_live_browser g2_status_browser sensor_mic_card
+                       logging_system_config_browser
                        PROPERTIES DISABLED TRUE)
-  message(WARNING "Node.js not found: map_live_browser, g2_status_browser and sensor_mic_card "
-                  "are registered but disabled; pass -DHW1_NODE_EXECUTABLE=/path/to/node")
+  message(WARNING "Node.js not found: map_live_browser, g2_status_browser, sensor_mic_card "
+                  "and logging_system_config_browser are registered but disabled; "
+                  "pass -DHW1_NODE_EXECUTABLE=/path/to/node")
 endif()
 add_test(
   NAME setup_espnow_application
@@ -1388,6 +1453,72 @@ foreach(terminal_suite g2_terminal_protocol g2_native_terminal)
             ${CMAKE_CURRENT_LIST_DIR}/test_${terminal_suite}.py
             ${G2_LLM_READER_TEST_ARGS})
 endforeach()
+# Staged phone relay regressions: default suites need no ESP-IDF source.
+# SDK-internal and crypto suites use explicit sources/configuration, never an
+# arbitrary installed SDK or a test-local TLS policy.
+set(PHONE_TEST_ARGS)
+if(HW1_SANITIZE)
+  list(APPEND PHONE_TEST_ARGS --sanitize)
+endif()
+set(PHONE_TEST_SUITES
+  ble_central_coordinator ble_central_stack phone_pipe phone_runtime phone_forget
+  phone_enrollment_schema phone_secret phone_sdk_lifetime phone_recovery
+  ring_phone_yield r1_protocol llm_http_transport ble_recycle_phone
+  ble_reconnect_schedule ble_peer_registry phone_scan ble_coex_records ble_coex_hooks wifi_coex_mirror
+  ble_setup_worker phone_status ble_console_attach ble_console_phone_link ble_pipe_console_row
+  ble_session_idle
+  ble_command_output ble_role_switch_reconnect
+  phone_console_codec phone_pair_code phone_console phone_fixture_pins
+  phone_pair_sink)
+foreach(phone_suite IN LISTS PHONE_TEST_SUITES)
+  add_test(NAME ${phone_suite}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_${phone_suite}.py
+            ${PHONE_TEST_ARGS})
+  set_tests_properties(${phone_suite} PROPERTIES LABELS phone_pipe TIMEOUT 300)
+endforeach()
+add_test(NAME phone_pipe_config
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_phone_pipe_config.py)
+add_test(NAME phone_sdk_manifest
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/ble-phone-pipe/check_sdk.py)
+add_test(NAME phone_sdk_checker
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/ble-phone-pipe/test_check_sdk.py)
+set_tests_properties(phone_pipe_config phone_sdk_manifest phone_sdk_checker
+  PROPERTIES LABELS phone_pipe)
+set_property(TEST g2_terminal_protocol g2_native_terminal llm_http_runtime
+  APPEND PROPERTY LABELS phone_pipe)
+
+set(HW1_PHONE_TEST_IDF "" CACHE PATH "Pinned ESP-IDF source tree for phone crypto and SDK regression tests")
+set(HW1_PHONE_TEST_SDKCONFIG "" CACHE FILEPATH "Generated phone-profile config/sdkconfig.h for TLS parity")
+if(HW1_PHONE_TEST_IDF)
+  foreach(required_sdk_file components/esp-tls/esp_tls.c
+                            components/esp_http_client/esp_http_client.c
+                            components/mbedtls/mbedtls/CMakeLists.txt)
+    if(NOT EXISTS "${HW1_PHONE_TEST_IDF}/${required_sdk_file}")
+      message(FATAL_ERROR "HW1_PHONE_TEST_IDF is missing ${required_sdk_file}")
+    endif()
+  endforeach()
+  foreach(phone_sdk_suite phone_gatt phone_secure_channel phone_passphrase llm_http_idf_open llm_direct_connect)
+    add_test(NAME ${phone_sdk_suite}
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_${phone_sdk_suite}.py
+              --idf ${HW1_PHONE_TEST_IDF} ${PHONE_TEST_ARGS})
+    set_tests_properties(${phone_sdk_suite} PROPERTIES LABELS "phone_pipe;phone_sdk")
+  endforeach()
+else()
+  message(STATUS "Phone crypto/SDK suites need HW1_PHONE_TEST_IDF pointing to the pinned ESP-IDF sources")
+endif()
+if(HW1_PHONE_TEST_SDKCONFIG)
+  if(NOT HW1_PHONE_TEST_IDF OR NOT EXISTS "${HW1_PHONE_TEST_SDKCONFIG}")
+    message(FATAL_ERROR "HW1_PHONE_TEST_SDKCONFIG requires HW1_PHONE_TEST_IDF and an existing generated sdkconfig.h")
+  endif()
+  add_test(NAME llm_phone_tls
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_llm_phone_tls.py
+            --idf ${HW1_PHONE_TEST_IDF} --sdkconfig ${HW1_PHONE_TEST_SDKCONFIG}
+            ${PHONE_TEST_ARGS})
+  set_tests_properties(llm_phone_tls PROPERTIES LABELS "phone_pipe;phone_sdk")
+else()
+  message(STATUS "Phone TLS parity needs HW1_PHONE_TEST_SDKCONFIG from a configured phone-pipe profile")
+endif()
+
 # The production QuickNote store (create/list/read/delete with tmp+rename and
 # the free-space reserve) against a fake guarded VFS whose owner decision is
 # the production transcript path policy. Same xcrun shim note.
@@ -1405,6 +1536,10 @@ add_test(
 # fakes, once per transcription backend, plus its event/settings/CLI wiring.
 # Same xcrun shim note.
 add_test(
+  NAME service_worker
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_service_worker.py)
+add_test(
   NAME quicknote_service
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_quicknote_service.py
@@ -1414,6 +1549,11 @@ add_test(
 # refusal without navigation, privacy) against fakes, plus its Apps row,
 # watchdog keep-alive, container-ready mic re-arm, unlogged row labels and
 # registration in G2_Glasses.cpp. Same xcrun shim note.
+add_test(
+  NAME g2_native_notes
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_native_notes.py
+          ${QUICKNOTE_STORE_TEST_ARGS})
 add_test(
   NAME g2_notes_page
   COMMAND ${Python3_EXECUTABLE}
@@ -1712,6 +1852,8 @@ add_test(
 # Camera asynchronous power (README "Camera asynchronous power"): `opencamera async` /
 # `closecamera async` are gated on cameraEnabled and admitted by cam_pwr; the G2
 # Sensors page requests no camera power itself.
+# The Wi-Fi radio-state read makes no driver call (an RPC on the P4) while the
+# radio is stopped, and per-frame screens read it at most once a second.
 # Structured Add-WiFi (README "Structured Add-WiFi"): wifiAddCommandLine's line parses
 # back through CommandArgs to the given fields, and cmd_wifiadd names a control-character
 # refusal.
@@ -1719,7 +1861,8 @@ set(DEVICES_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND DEVICES_TEST_ARGS --sanitize)
 endif()
-foreach(test_name IN ITEMS espnow_radio_ownership camera_async_power wifi_structured_add)
+foreach(test_name IN ITEMS espnow_radio_ownership camera_async_power wifi_structured_add
+                          wifi_radio_state)
   add_test(
     NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE}
@@ -1979,4 +2122,29 @@ add_test(
           # (8/3) is what the tree has carried since 0.99.94; the earlier 6 was
           # recorded before two calloc sites became malloc and never updated.
           # The migration restore's raw malloc went with its staged rewrite (10/7).
-          --expect 10 --expect-malloc 7)
+          # Memory audit tranche A moved the LLM tokenizer's three callocs and the
+          # prompt-token malloc behind System_MemUtil, PSRAM first (6/6).
+          --expect 6 --expect-malloc 6)
+add_test(NAME task_heap_measure COMMAND ${Python3_EXECUTABLE}
+  ${CMAKE_CURRENT_LIST_DIR}/test_task_heap_measure.py)
+add_test(NAME stt_conv_scratch COMMAND ${Python3_EXECUTABLE}
+  ${CMAKE_CURRENT_LIST_DIR}/test_stt_conv_scratch.py)
+set_tests_properties(stt_conv_scratch PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME p4_ram_monitor COMMAND ${Python3_EXECUTABLE}
+  ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_ram_monitor.py)
+
+add_test(NAME stt_internal_memory COMMAND ${Python3_EXECUTABLE}
+  ${CMAKE_CURRENT_LIST_DIR}/test_stt_internal_memory.py ${PHONE_TEST_ARGS})
+
+# Production monochrome list rendering/navigation and page-packed map buffers
+# at the OLED and P4 canvas sizes.
+set(OLED_LAYOUT_TEST_ARGS)
+if(HW1_SANITIZE)
+  list(APPEND OLED_LAYOUT_TEST_ARGS --sanitize)
+endif()
+add_test(NAME oled_layout
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_layout.py
+          ${OLED_LAYOUT_TEST_ARGS})
+add_test(NAME oled_transcription
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_transcription.py
+          ${OLED_LAYOUT_TEST_ARGS})

@@ -22,6 +22,8 @@
 #include "HAL_Bluetooth.h"
 #endif
 #include "G2_Glasses.h"
+#include "G2_Ring.h"     // g2RingIsOpen / g2RingClose: the ring as a device owner
+#include "BLE_CentralStack.h"  // the shared client stack: bleStackDown for the reset, bleStackUp after
 #include "Radio_CompanionCore.h"
 #include "System_AuthIdentity.h"
 #include "System_BuildConfig.h"
@@ -88,8 +90,7 @@ struct RadioUsers {
   bool espnow = false;
   bool wifi = false;              // radio on for Wi-Fi (also true while ESP-NOW runs)
   bool bleServer = false;
-  bool g2Client = false;
-  bool phoneClient = false;
+  bool g2Client = false;          // the shared client stack is up (glasses, ring and phone open on it)
   bool radioPoweredOff = false;   // stopUsers ran `radiopower off`; `radiopower on` replays its snapshot
 };
 RadioUsers sHeldUsers;  // restored by `c6hold off`
@@ -176,15 +177,14 @@ RadioUsers snapshotUsers() {
 #endif
 #if ENABLE_BLUETOOTH
   u.bleServer = isBleServerInitialized();
-  u.g2Client = isG2ClientInitialized();
-  u.phoneClient = phonePipeStandalone();
+  u.g2Client = bleStackReady();
 #endif
   return u;
 }
 
 bool anyRadioUser() {
   const RadioUsers u = snapshotUsers();
-  return u.espnow || u.wifi || u.bleServer || u.g2Client || u.phoneClient;
+  return u.espnow || u.wifi || u.bleServer || u.g2Client;
 }
 
 #if ENABLE_BLUETOOTH
@@ -206,12 +206,14 @@ bool anyRadioUser() {
 // lifecycle fault keeps Bluetooth off until a reboot, so no role restart
 // re-initialises a host that missed the companion's reboot.
 void shutDownBleForCompanionReset(const RadioUsers& users) {
-  if (!users.bleServer && !users.g2Client && !users.phoneClient && bluetoothHalStatus().stopped()) return;
+  if (!users.bleServer && !users.g2Client && bluetoothHalStatus().hostAbsent()) return;
   if (!bleRoleTransitionBegin(BleRoleTransition::RECOVERING)) {
     logSystemEvent("C6", "BLE role transition busy; the host stays up across the companion reset");
     return;
   }
-  const bool phoneStopped = phonePipeStop();
+  // The phone pipe closes as a device owner (its reconnect intent is kept);
+  // the shared stack's teardown below runs its host-stopped handshake.
+  const bool phoneStopped = !phonePipeActive() || phoneLinkClose(/*userInitiated=*/false);
   bool serverStopped = true;
   if (users.bleServer && isBleServerInitialized()) {
     constexpr int kServerStopAttempts = 3;  // each waits up to 2 s for the Ring owner
@@ -227,23 +229,23 @@ void shutDownBleForCompanionReset(const RadioUsers& users) {
     vTaskDelay(pdMS_TO_TICKS(500));  // a worker still owns the runtime; it settles
   }
 #endif
-  if (!serverStopped || !phoneStopped) {
+  // The ring owner closes as a device owner too (a no-op without the ring).
+  const bool ringQuiet = !g2RingIsOpen() || g2RingClose(/*userInitiated=*/false);
+  if (!serverStopped || !phoneStopped || !ringQuiet) {
     bleStackSetLifecycleFault(true);
     logSystemEvent("C6", "BLE owner did not stop (phone, ring, or server teardown incomplete): "
                    "host not forced down for the companion reset; Bluetooth stays off until a reboot");
-  } else if (!bluetoothHalStatus().stopped()) {
-    const BluetoothHalShutdownResult result = bluetoothHalDeinit();
-    if (result.success) {
-      (void)phonePipeHostStopped();
-#if ENABLE_G2_GLASSES
-      bleCentralClientsTerminalTeardownAcknowledged();
-#endif
-      bleStackSetLifecycleFault(false);
-    } else {
-      bleStackSetLifecycleFault(true);
-      logSystemEvent("C6", "BLE host teardown incomplete (phase %u): Bluetooth stays off until a reboot",
-                     (unsigned)result.phase);
+  } else if (!bluetoothHalStatus().hostAbsent()) {
+    // The shared stack's verified teardown: the checked HAL teardown, the
+    // retired-client acknowledgement, the phone pipe's host-stopped handshake,
+    // the setup worker release. It sets the lifecycle fault itself when the
+    // companion no longer answers.
+    if (!bleStackDown()) {
+      logSystemEvent("C6", "BLE host teardown incomplete (%s): Bluetooth stays off until a reboot",
+                     bleStackLastRefusal());
     }
+  } else {
+    bleStackNoteHostLost();
   }
   bleRoleTransitionEnd();
 }
@@ -296,12 +298,12 @@ void restoreUsers(const RadioUsers& users) {
   if (users.bleServer) {
     if (initBluetooth()) startBLEAdvertising();
   } else if (users.g2Client) {
-    if (initG2Client()) {
+    // The shared client stack; the devices reopen through the boot reconnect
+    // and their reseeks (each admission opens its device).
+    if (bleStackUp()) {
       vTaskDelay(pdMS_TO_TICKS(2000));
       bleBootReconnect();
     }
-  } else if (users.phoneClient) {
-    if (phonePipeStart(true)) bleBootReconnect();
   }
 #endif
 }
@@ -319,7 +321,6 @@ void bringUpConfiguredUsers() {
   if (gSettings.bleEnabled && gSettings.bleAutoStart) {
     wanted.bleServer = gSettings.bleMode == BLE_MODE_SERVER;
     wanted.g2Client = gSettings.bleMode == BLE_MODE_G2_CLIENT;
-    wanted.phoneClient = gSettings.bleMode == BLE_MODE_PHONE_CLIENT;
   }
 #endif
   const RadioUsers running = snapshotUsers();
@@ -333,12 +334,12 @@ void bringUpConfiguredUsers() {
   if (wanted.bleServer && !running.bleServer) {
     if (initBluetooth()) startBLEAdvertising();
   } else if (wanted.g2Client && !running.g2Client) {
-    if (initG2Client()) {
+    // The shared stack, then each peer with auto-reconnect on opens its own
+    // device, as at boot.
+    if (bleStackUp()) {
       vTaskDelay(pdMS_TO_TICKS(2000));
       bleBootReconnect();
     }
-  }  else if (wanted.phoneClient && !running.phoneClient) {
-    if (phonePipeStart(true)) bleBootReconnect();
   }
 
 #endif

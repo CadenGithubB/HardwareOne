@@ -37,6 +37,7 @@
 #include "System_SelfDevice.h"
 #include "System_Clock.h"
 #include "System_Filesystem.h"
+#include "System_JsonPretty.h"     // shared JSON re-indenter for the Pretty view
 #include "System_CaptureCrypto.h"  // reveal sealed captures in the themed viewer
 #include "System_User.h"
 #include "System_AuthIdentity.h"  // ExecIdentityGuard — install web ctx into TLS before calling userChangePasswordCore
@@ -3236,9 +3237,9 @@ static esp_err_t handleEventsKinds(httpd_req_t* req) {
 // Admin-gated like the other config/admin surfaces; all mutation stays on the
 // CLI (`log start flags=`, the `debug*` commands) — this endpoint only reads.
 //
-// The header already exposes bit / parentBit / bank / tag as parallel kDbg*
-// columns keyed by DbgFlagIdx, but NOT the settings-registry string columns
-// (jsonKey / group / label / cmdIdent). Regenerate just those four here from
+// The header already exposes bit / parentBit / bank / tag / label as parallel
+// kDbg* columns keyed by DbgFlagIdx, but NOT the other settings-registry string
+// columns (jsonKey / group / cmdIdent). Regenerate just those three here from
 // the same DBG_FLAG_LIST / DBG_SUBBOOL_LIST rows so they stay in lockstep with
 // the numeric columns. Only string literals are emitted and cmdIdent is
 // #stringized at this first macro level — SYM/BANK (which collide with Arduino
@@ -3246,15 +3247,12 @@ static esp_err_t handleEventsKinds(httpd_req_t* req) {
 // X-macro paste rule.
 #define DBG_WEB_FLAG_KEY(SYM, bit, BANK, parentBit, tag, settingsField, cmdIdent, group, jsonKey, label)   jsonKey,
 #define DBG_WEB_FLAG_GROUP(SYM, bit, BANK, parentBit, tag, settingsField, cmdIdent, group, jsonKey, label) group,
-#define DBG_WEB_FLAG_LABEL(SYM, bit, BANK, parentBit, tag, settingsField, cmdIdent, group, jsonKey, label) label,
 #define DBG_WEB_FLAG_CMD(SYM, bit, BANK, parentBit, tag, settingsField, cmdIdent, group, jsonKey, label)   #cmdIdent,
 static const char* const kDbgWebFlagKey[DBG_FLAG_COUNT]   = { DBG_FLAG_LIST(DBG_WEB_FLAG_KEY) };
 static const char* const kDbgWebFlagGroup[DBG_FLAG_COUNT] = { DBG_FLAG_LIST(DBG_WEB_FLAG_GROUP) };
-static const char* const kDbgWebFlagLabel[DBG_FLAG_COUNT] = { DBG_FLAG_LIST(DBG_WEB_FLAG_LABEL) };
 static const char* const kDbgWebFlagCmd[DBG_FLAG_COUNT]   = { DBG_FLAG_LIST(DBG_WEB_FLAG_CMD) };
 #undef DBG_WEB_FLAG_KEY
 #undef DBG_WEB_FLAG_GROUP
-#undef DBG_WEB_FLAG_LABEL
 #undef DBG_WEB_FLAG_CMD
 
 #define DBG_WEB_SUB_KEY(SYM, subField, settingsField, PARENT_SYM, cmdIdent, group, jsonKey, label)   jsonKey,
@@ -3288,7 +3286,7 @@ static esp_err_t handleDebugFlags(httpd_req_t* req) {
     JsonObject o = arr.add<JsonObject>();
     o["key"]       = kDbgWebFlagKey[i];
     o["group"]     = kDbgWebFlagGroup[i];
-    o["label"]     = kDbgWebFlagLabel[i];
+    o["label"]     = kDbgLabel[i];
     o["cmd"]       = kDbgWebFlagCmd[i];
     o["bit"]       = kDbgBit[i];
     o["bank"]      = kDbgBankLabel[kDbgBank[i]];
@@ -3350,6 +3348,16 @@ static esp_err_t handleLoggingStatus(httpd_req_t* req) {
   results.add(timeBuf);
   results.add(sensorBuf);
   results.add(logBuf);
+  // The saved System Logging options, so the Configuration pane opens on
+  // them: tags, and the categories the next plain `log start` uses. Admin
+  // only, like /api/debug/flags that renders the category grid.
+  if (isAdminUser(ctx.user)) {
+    char flags[80];
+    formatSystemLogFlags(systemLogConfiguredFlags(), flags, sizeof(flags));
+    JsonObject systemLog = doc["systemLog"].to<JsonObject>();
+    systemLog["tags"] = gSettings.systemLogCategoryTags;
+    systemLog["flags"] = flags;  // mutable buffer: ArduinoJson copies it
+  }
   String out;
   serializeJson(doc, out);
   httpd_resp_send(req, out.c_str(), out.length());
@@ -4427,10 +4435,9 @@ esp_err_t handleFileView(httpd_req_t* req) {
       return sendErr == ESP_OK ? ESP_OK : ESP_FAIL;
     }
 
-    // Pretty-print streaming
-    int indent = 0;
-    bool inString = false;
-    bool escaped = false;
+    // Pretty-print streaming through the formatter every file viewer shares;
+    // its state carries across the read buffers.
+    JsonPrettyFormatter pretty;
     size_t outLen = 0;
     // Escape on the way out: the pretty-printer passes file content through
     // verbatim, so an unescaped "</pre><script>" inside the JSON would run
@@ -4447,48 +4454,12 @@ esp_err_t handleFileView(httpd_req_t* req) {
       if (outLen >= kFileOutBufSize - 1) flushOut(false);
       gFileOutBuf[outLen++] = ch;
     };
-    auto emitIndent = [&]() {
-      int spaces = indent * 2;
-      for (int j = 0; j < spaces; j++) {
-        if (outLen >= kFileOutBufSize - 1) flushOut(false);
-        gFileOutBuf[outLen++] = ' ';
-      }
-    };
     while (true) {
       int bytesRead = file.readBytes(gFileReadBuf, kFileReadBufSize);
       if (bytesRead <= 0) break;
       fsUnlock();
       for (int i = 0; i < bytesRead; i++) {
-        char c = gFileReadBuf[i];
-        if (!inString) {
-          if (c == '"' && !escaped) {
-            inString = true;
-            emit(c);
-          } else if (c == '{' || c == '[') {
-            emit(c);
-            emit('\n');
-            indent++;
-            emitIndent();
-          } else if (c == '}' || c == ']') {
-            emit('\n');
-            if (indent > 0) indent--;
-            emitIndent();
-            emit(c);
-          } else if (c == ',') {
-            emit(c);
-            emit('\n');
-            emitIndent();
-          } else if (c == ':') {
-            emit(c);
-            emit(' ');
-          } else if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
-            emit(c);
-          }
-        } else {
-          emit(c);
-          if (c == '"' && !escaped) { inString = false; }
-        }
-        escaped = (c == '\\' && !escaped);
+        pretty.put(gFileReadBuf[i], emit);
         if (outLen >= kFileOutBufSize - 4) flushOut(false);
         if (sendErr != ESP_OK) break;
       }

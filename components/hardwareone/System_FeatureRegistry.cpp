@@ -478,7 +478,7 @@ static constexpr FeatureEntry featureRegistry[] = {
   { "r1health", "R1 Ring Health", FEATURE_CAT_SENSOR, 1,
     FEATURE_FLAG_COMPILE_TIME,
     nullptr, isR1HealthCompiled,
-    "R1 ring vitals: HR, HRV, SpO2, temp (healthstatus, healthlogging)" },
+    "R1 ring vitals: HR, HRV, SpO2, temp (ring health, healthlogging)" },
 
   { "camera", "Camera", FEATURE_CAT_SENSOR, 18,
     FEATURE_FLAG_RUNTIME_TOGGLE,

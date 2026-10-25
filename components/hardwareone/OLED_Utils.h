@@ -12,6 +12,11 @@
 
 #include <Adafruit_SSD1306.h>
 #include "HAL_Display.h"
+#include "OLED_Layout.h"
+
+inline constexpr int oledVisibleRows(int rowHeight, int reservedHeight = 0, int baselineRows = 0) {
+  return oled_layout::visibleRows(OLED_CONTENT_HEIGHT, rowHeight, reservedHeight, baselineRows);
+}
 
 // =============================================================================
 // OLED Utilities - Scrolling Lists & Virtual Keyboard
@@ -180,7 +185,7 @@ struct OLEDScrollState {
                         int areaX, int iconY, int iconSize);
 };
 
-void oledScrollInit(OLEDScrollState* state, const char* title = nullptr, int visibleLines = 4);
+void oledScrollInit(OLEDScrollState* state, const char* title = nullptr, int visibleLines = oledVisibleRows(10, 1, 4));
 bool oledScrollAddItem(OLEDScrollState* state, const char* line1, const char* line2 = nullptr, 
                        bool selectable = true, void* userData = nullptr);
 void oledScrollClear(OLEDScrollState* state);
@@ -368,6 +373,10 @@ bool oledConfirmIsActive();
 // Poll for an incoming ESP-NOW pair request and pop the shared accept/reject
 // dialog (defined in OLED_ESPNow.cpp; called from oledUpdate each tick).
 void oledEspNowPollPairRequest();
+// Mark the display dirty when the BLE role or a glasses, ring or phone link
+// changes, so the Bluetooth screens redraw without input (OLED_Mode_Bluetooth.cpp;
+// called from oledUpdate each tick in Bluetooth builds).
+void oledBluetoothLinkWatch();
 
 // ============= Shared Command Execution =============
 // Execute a CLI command with OLED display authentication context
@@ -392,6 +401,22 @@ void oledCommandReplyText(bool ok, const char* reply, const char* okText,
 // returns false; true only when the command succeeded, so the caller shows its
 // own success text only then.
 bool oledRunCommand(const String& cmd);
+// oledRunCommand for an action that can take a while (radio, Wi-Fi, Bluetooth,
+// HTTP): returns at once and the frame loop never waits on cmd_exec_task. When
+// the command finishes, the display task reports it as oledRunCommand would (a
+// refusal toast) and then calls done(ok, context), ok true only on success. A
+// reply that outlives its display session is dropped (done gets false). One
+// request at a time: false means nothing was queued, and a toast already says
+// why ("Please wait" while one is running, "Busy - try again" if the queue
+// refused it); done is not called then.
+typedef void (*OledCommandDoneFn)(bool ok, const void* context);
+bool oledRunCommandAsync(const char* cmd, OledCommandDoneFn done, const void* context);
+// The command that starts or stops the BLE role this device runs, or is set to
+// run: the server, the G2 client (with any phone pipe attached to it) or the
+// phone-only pipe. The Quick Settings Bluetooth row uses it so it never
+// switches roles; the OLED Bluetooth menu has one row per role instead.
+// nullptr in builds without Bluetooth.
+const char* oledBluetoothToggleCommand();
 
 // ============= OLED AuthContext Builder =============
 // Single source of truth for "what AuthContext represents OLED-originated
@@ -425,7 +450,11 @@ enum LoggingMenuState {
   LOG_MENU_MAIN,
   LOG_MENU_SENSOR,
   LOG_MENU_SYSTEM,
-  LOG_MENU_SENSOR_CONFIG
+  LOG_MENU_SENSOR_CONFIG,
+  LOG_MENU_SYSTEM_CONFIG,   // Tags / Categories / Path
+  LOG_MENU_SYSTEM_BANKS,    // debug-flag families
+  LOG_MENU_SYSTEM_FLAGS,    // flags in the chosen family
+  LOG_MENU_SYSTEM_PATH      // full log path, read-only
 };
 
 extern LoggingMenuState loggingCurrentState;

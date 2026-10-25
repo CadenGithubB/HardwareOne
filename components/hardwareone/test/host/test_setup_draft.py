@@ -35,6 +35,12 @@ def generate() -> str:
     types += "\n" + "\n".join(extract_block(feature_header, name) + ";" for name in
                                   ("enum FeatureCategory", "enum FeatureFlags", "struct FeatureEntry"))
     types += "\n" + extract_block(wifi_header, "enum class WifiNetworkSaveResult") + ";"
+    # The wizard refuses a BLE role this build cannot run; the rule lives in Bluetooth.h.
+    bluetooth = (COMPONENT / "Bluetooth.h").read_text()
+    types += "\n" + "\n".join(re.findall(r"(?m)^#define BLE_MODE_\w+\s+\d+.*$", bluetooth))
+    types += "\n" + extract_block(bluetooth, "inline bool bleModeIsAvailable(")
+    # The Bluetooth modes are named by the roles they start (the pure header the wizard includes).
+    types += '\n#include "BLE_LinkStatusCore.h"'
     registry = "\n\n".join(extract_block(feature_source, name) for name in
         ("size_t getFeatureCount(", "const FeatureEntry* getFeatureByIndex(",
          "const FeatureEntry* getFeatureById(", "bool isFeatureCompiled(",
@@ -70,7 +76,7 @@ def main() -> None:
             flags = [f"-D{feature}={full}" for feature in
                      ("ENABLE_WIFI", "ENABLE_ESPNOW", "ENABLE_MQTT", "ENABLE_NEOPIXEL",
                       "ENABLE_HTTP_SERVER", "ENABLE_HTTPS", "ENABLE_BLUETOOTH",
-                      "ENABLE_G2_GLASSES", "ENABLE_OLED_DISPLAY")]
+                      "ENABLE_G2_GLASSES", "ENABLE_BLE_PHONE_PIPE", "ENABLE_OLED_DISPLAY")]
             command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                        "-Wno-unused-function", "-Wno-unused-parameter", *flags,
                        "-Wno-zero-length-array", "-Wno-unused-but-set-variable",

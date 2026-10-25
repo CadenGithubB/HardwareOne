@@ -106,7 +106,7 @@ static struct { String sensorLogPath{"/logs/sensors.txt"}; } gSettings;
 static LoggingMenuState loggingCurrentState = LOG_MENU_MAIN;
 static int loggingMenuSelection = 0, loggingSensorConfigSelection = 0;
 static const int loggingMainMenuCount = 3, loggingSensorMenuCount = 3;
-static const int loggingSystemMenuCount = 2;
+static const int loggingSystemMenuCount = 3;
 static OLEDScrollState loggingConfigScroll;
 static Adafruit_SSD1306 display;
 static Adafruit_SSD1306* oledDisplay = &display;
@@ -116,6 +116,12 @@ bool oledGuestBlocksMutate() { return false; }
 static std::vector<std::string> requests;
 void executeOLEDCommand(const String& command) { requests.emplace_back(command.c_str()); }
 bool oledRunCommand(const String& command) { requests.emplace_back(command.c_str()); return true; }
+// System Logging > Configure has its own block and test (systemlog_config_ui);
+// these record the hand-off from the shared handler.
+static bool systemConfigOpened = false;
+static bool loggingStateIsSystemConfig(LoggingMenuState) { return false; }
+static bool handleSystemConfigInput(uint32_t) { return false; }
+static void openSystemConfig() { systemConfigOpened = true; }
 
 // INSERT_PRODUCTION
 

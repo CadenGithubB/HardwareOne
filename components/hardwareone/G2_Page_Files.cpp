@@ -52,13 +52,13 @@
 #include "System_CaptureCrypto.h"  // reveal sealed captures on the lens viewer
 #include "System_MemUtil.h"   // ps_alloc — gFilesFm lives in PSRAM (placement-new)
 #include "System_PsramBuffer.h"
+#include "System_JsonPretty.h"   // JSON re-indenter shared with the OLED and web viewers
 #include "System_TextWrapStream.h"
 #include "System_Mutex.h"
 #include <new>                // placement-new
 #include "System_Debug.h"
 #include "System_AuthIdentity.h"
 
-#include <ArduinoJson.h>
 #include "esp_attr.h"   // EXT_RAM_BSS_ATTR
 
 // -----------------------------------------------------------------------------
@@ -743,12 +743,12 @@ static void showDeleteConfirm() {
 // "View Full" — same source upscaled 2× to 576×288 via 4-tile push.
 // "Info"      — metadata page (name / size / type).
 static void showFileChooser(const FileEntry& e, FilesChooserKind kind) {
-  static char title[FILES_ROW_LEN];
+  EXT_RAM_BSS_ATTR static char title[FILES_ROW_LEN];  // PSRAM: deep-copied by g2ShowListPage
   snprintf(title, sizeof(title), "%s", e.name);
 
   // Build rows + the action table in lockstep (see FilesAction). The table,
   // entry and kind become the chooser's only once the lens accepted the rows.
-  static const char* rows[FILES_CHOOSER_MAX_ROWS];
+  EXT_RAM_BSS_ATTR static const char* rows[FILES_CHOOSER_MAX_ROWS];  // PSRAM: deep-copied by g2ShowListPage
   FilesAction acts[FILES_CHOOSER_MAX_ROWS];
   uint8_t rowN = 0;
   auto add = [&](const char* label, FilesAction act) {
@@ -852,7 +852,7 @@ static bool filesReadTextBuffer(const char* path, PsramBuffer& out,
   return out.setSize(total);
 }
 
-// Read the chooser entry, optionally JSON-pretty-print it, wrap it, and page it
+// Read the chooser entry, optionally re-indent it as JSON, wrap it, and page it
 // onto the lens via the shared TextPager. `pretty` only applies to JSON;
 // .txt/.csv always call with pretty=false. Returns false if the swap couldn't
 // be shown (caller falls back to the file list).
@@ -896,26 +896,17 @@ static bool showTextFileViaWidget(bool pretty) {
     return false;
   }
 
-  // Serialize directly into the existing PSRAM body. The stateful sink keeps
-  // wrap columns across JSON serializer writes; no display String is needed.
+  // Write directly into the existing PSRAM body. The stateful sink keeps wrap
+  // columns across the formatter's byte-at-a-time output; no display String.
   TextWrapStream display(gFilesTextBody, sizeof(gFilesTextBody),
                          G2_TEXT_DEFAULT_COLS, /*contIndent=*/0,
                          /*stripControl=*/true);
   if (pretty) {
-    PSRAM_JSON_DOC(doc);
-    // Match ArduinoJson's String reader, which is length-bounded (including
-    // embedded NUL bytes); presentation wrapping still stops at the first NUL.
-    DeserializationError err = deserializeJson(doc, raw.c_str(), raw.size());
-    if (err) {
-      display.write("// Pretty parse failed: ");
-      display.write(err.c_str());
-      display.write("\n// Falling back to raw JSON text\n\n");
-      display.write(raw.c_str());
-      DEBUG_G2F("[G2] Files text: pretty parse failed '%s' (%s)",
-                path, err.c_str());
-    } else {
-      serializeJsonPretty(doc, display);
-    }
+    // The re-indenter every file viewer shares: no document allocation, and
+    // malformed JSON is still laid out as far as its brackets go.
+    JsonPrettyFormatter().write(raw.c_str(), raw.size(), [&](char c) {
+      display.write(static_cast<uint8_t>(c));
+    });
   } else {
     display.write(raw.c_str());
   }
@@ -975,10 +966,10 @@ static void showFileInfo(const FileEntry& e) {
   else if (sz < 1024UL * 1024UL)  snprintf(sizeStr, sizeof(sizeStr), "%.1f KB",   sz / 1024.0);
   else                            snprintf(sizeStr, sizeof(sizeStr), "%.2f MB",   sz / (1024.0 * 1024.0));
 
-  static char nameRow[FILES_ROW_LEN];
-  static char sizeRow[FILES_ROW_LEN];
-  static char typeRow[FILES_ROW_LEN];
-  static const char* rows[4];
+  EXT_RAM_BSS_ATTR static char nameRow[FILES_ROW_LEN];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char sizeRow[FILES_ROW_LEN];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char typeRow[FILES_ROW_LEN];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static const char* rows[4];  // PSRAM: deep-copied by g2ShowListPage
   rows[0] = "<- Files";   // back to the directory listing
   snprintf(nameRow, sizeof(nameRow), "Name: %s", e.name);
   snprintf(sizeRow, sizeof(sizeRow), "Size: %s", sizeStr);

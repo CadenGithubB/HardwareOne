@@ -53,6 +53,9 @@
 #endif
 #if ENABLE_MICROPHONE && ENABLE_DICTATION
 #include "System_Dictation.h"
+#if ENABLE_LOCAL_STT
+#include "System_STTVocabulary.h"
+#endif
 #include "HAL_Audio.h"
 #include "Transcription_UI_Policy.h"
 #endif
@@ -915,6 +918,8 @@ static esp_err_t handleTranscriptionGet(httpd_req_t* req) {
     doc["micSource"] = gSettings.micSource;
     doc["micPdm"] = audioSourceAvailable(AUDIO_SRC_LOCAL_PDM);
     doc["micG2"] = audioSourceAvailable(AUDIO_SRC_G2_LEFT);
+    // The editable speech vocabulary (sttvocab) exists with the local backend.
+    doc["vocabulary"] = static_cast<bool>(ENABLE_LOCAL_STT);
     uint32_t userId = 0;
     JsonArray roots = doc["roots"].to<JsonArray>();
     if (getUserIdByUsername(ctx.user, userId) && userId) {
@@ -952,6 +957,40 @@ static esp_err_t handleTranscriptionGet(httpd_req_t* req) {
       r["sequence"] = receipt.sequence;
       r["offset"] = receipt.offset;
       r["length"] = receipt.length;
+    }
+    // The same display, draft and speaker metadata the lens page reads from
+    // `transcription next`, so the browser groups turns the same way. The
+    // receipt above still names the raw bytes the page acknowledges.
+    struct PrivateDisplay {
+      char value[2 * DICTATION_MAX_TEXT + 1]{};
+      ~PrivateDisplay() { TranscriptionUI::clear(value, sizeof(value)); }
+    } display;
+#if ENABLE_LOCAL_STT
+    if (hasText && sttFormatDisplay(text.value, receipt.sequence == 1 && receipt.offset == 0,
+                                    display.value, sizeof(display.value)))
+      doc["display"] = display.value;
+#endif
+    uint32_t draftVersion = 0;
+    if (dictationAppPeekDraft(lease, text.value, sizeof(text.value), &draftVersion)) {
+#if ENABLE_LOCAL_STT
+      if (sttFormatDisplay(text.value, false, display.value, sizeof(display.value))) doc["draft"] = display.value;
+      else
+#endif
+      doc["draft"] = text.value;
+      doc["draftVersion"] = draftVersion;
+    }
+    STTSpeakerSnapshot speakers;
+    if (dictationAppReadSpeakers(lease, &speakers)) {
+      doc["speakerVersion"] = speakers.version;
+      doc["speakersAvailable"] = speakers.available;
+      JsonArray labels = doc["speakers"].to<JsonArray>();
+      for (size_t i = 0; i < speakers.count; ++i) {
+        const auto& entry = speakers.entries[i];
+        JsonObject label = labels.add<JsonObject>();
+        label["sequence"] = entry.sequence;
+        label["speaker"] = entry.speaker;
+        label["ready"] = entry.ready;
+      }
     }
   }
   return transcriptionWebReply(req, epoch, doc);

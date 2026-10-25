@@ -6,11 +6,11 @@ selection, and command-submission code must retain the displayed entry identity
 across those changes. Owner storage/JSON behavior is tested separately.
 
 A second unit compiles the G2 Network page's row bindings, its WiFi, ESP-NOW,
-HTTP(S), Bluetooth, G2 and R1 menus and their tap handlers: a tap must run the
+HTTP(S), Bluetooth, G2, R1 and Phone menus and their tap handlers: a tap must run the
 action and toggle direction of the row the lens showed, even when the live
 state behind the labels changed in between. Each of its cases runs in its own
-process; the ENABLE_ESPNOW / ENABLE_HTTP_SERVER / ENABLE_WIFI off variants are
-compile-checked.
+process; the ENABLE_ESPNOW / ENABLE_HTTP_SERVER / ENABLE_WIFI /
+ENABLE_BLE_PHONE_PIPE off variants are compile-checked.
 
 A third unit compiles the Add-WiFi forms: the OLED keyboard flow (manual Add and
 scan pick, with OLED_Utils.cpp's shared reply-to-toast mapping) and the G2
@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 
+from test_g2_status_corner import link_status_unit
 from test_web_batch_handlers import extract_block
 
 HERE = Path(__file__).resolve().parent
@@ -40,11 +41,11 @@ COMPONENT = HERE.parents[1]
 # changed signature still matches, skipping forward declarations.
 NETWORK_ROW_FUNCTIONS = (
     "bluetoothClientRoleForUi", "showWiFiMenu", "showEspNowMenu",
-    "showBluetoothG2Menu", "showBluetoothR1Menu", "showBluetoothMenu",
+    "showBluetoothG2Menu", "showBluetoothR1Menu", "showBluetoothPhoneMenu", "showBluetoothMenu",
     "handleWiFiTap", "espnowNameCommit", "espnowNameCancel",
     "beginEspNowNameEntry", "espnowNameThenOpenCommit", "handleEspNowTap",
     "bluetoothToggleAutoStart", "handleBluetoothG2Tap", "handleBluetoothR1Tap",
-    "handleBluetoothTap", "showHttpMenu", "handleHttpTap",
+    "handleBluetoothPhoneTap", "handleBluetoothTap", "showHttpMenu", "handleHttpTap",
 )
 # Add-WiFi form functions; the helpers exist only on fixed trees, so a base tree
 # still compiles and fails on behavior. Spliced in source order.
@@ -60,6 +61,7 @@ DISABLED_VARIANTS = (
     ["-DENABLE_ESPNOW=0"],
     ["-DENABLE_HTTP_SERVER=0"],
     ["-DENABLE_WIFI=0", "-DENABLE_ESPNOW=0", "-DENABLE_HTTP_SERVER=0"],
+    ["-DENABLE_BLE_PHONE_PIPE=0"],
 )
 
 
@@ -124,11 +126,15 @@ def g2_bridge_types(component):
 
 def network_rows_unit(component):
     page = (component / "G2_Page_Network.cpp").read_text()
-    types = g2_bridge_types(component)
+    # The Bluetooth and Phone menus' words come from bleLinkStatus(), compiled
+    # as shipped over the harness's role inputs and fake pipe/peer/console.
+    link_types, link_status = link_status_unit(component)
+    types = g2_bridge_types(component) + [link_types]
     # Local state (sub-mode, overlays, row bindings) and WiFi's action enum.
     state = (region(page, "enum NetworkSubMode", "// Info text") + "\n" +
              region(page, "enum WifiMenuAction", "static void showWiFiMenu() {"))
-    functions = "\n\n".join(definition(page, name) for name in NETWORK_ROW_FUNCTIONS)
+    functions = "\n\n".join([link_status] +
+                            [definition(page, name) for name in NETWORK_ROW_FUNCTIONS])
     harness = (HERE / "g2_network_rows_harness.cpp").read_text()
     for marker, body in (("// INSERT_TYPES", "\n".join(types)),
                          ("// INSERT_STATE", state),

@@ -169,6 +169,11 @@ def main() -> None:
     component = args.component.resolve()
     # MAP_TEST_DEVICE: 0 seesaw gamepad, 1 ANO encoder, 2 GPIO wheel + P4X-EYE keys.
     map_unit = map_actions_unit(component)
+    if 'oledVisibleRows(' in (component / 'OLED_Mode_Map.cpp').read_text():
+        geometry = (component / 'OLED_Layout.h').read_text().replace('#pragma once', '')
+        wrapper = extract_block((component / 'OLED_Utils.h').read_text(), 'inline constexpr int oledVisibleRows(')
+        map_unit = map_unit.replace('static constexpr int OLED_CONTENT_START_Y = 10;',
+            'static constexpr int OLED_CONTENT_START_Y = 10;\n#define OLED_CONTENT_HEIGHT 43\n' + geometry + wrapper)
     builds = [(f"map_actions_{name}_gps{gps}", map_unit,
                [f"-DMAP_TEST_DEVICE={device}", f"-DENABLE_GPS_SENSOR={gps}"])
               for name, device, gps in (("seesaw", 0, 0), ("seesaw", 0, 1), ("ano", 1, 1), ("gpio", 2, 0))]

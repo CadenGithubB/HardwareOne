@@ -65,7 +65,7 @@ def generated(component: Path) -> str:
     # the same fields wider; that architecture assertion is not host behavior.
     cache, removed = re.subn(
         r'static_assert\(sizeof\(AutomationsCacheEntry\) == 16,\s*'
-        r'"AutomationsCacheEntry must remain within its 16-byte DRAM budget"\);',
+        r'"AutomationsCacheEntry must remain within its 16-byte entry budget"\);',
         "// ESP-specific cache size assertion checked by firmware builds.", cache)
     require(removed == 1, "cache ABI assertion extraction changed")
     functions = "\n".join(extract_block(owner, signature) for signature in (

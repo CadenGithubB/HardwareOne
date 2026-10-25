@@ -38,6 +38,10 @@ extern const CommandEntry mqttCommands[];
 extern const size_t mqttCommandsCount;
 extern const CommandEntry bluetoothCommands[];
 extern const size_t bluetoothCommandsCount;
+extern const CommandEntry phoneCommands[];
+extern const size_t phoneCommandsCount;
+extern const CommandEntry relayCommands[];
+extern const size_t relayCommandsCount;
 extern const CommandEntry filesystemCommands[];
 extern const size_t filesystemCommandsCount;
 extern const CommandEntry sdCommands[];
@@ -219,12 +223,26 @@ static constexpr CommandModule gCommandModules[] = {
     "received from those topics are cached and read back with mqttExternalSensors.", mqttCommands,         &mqttCommandsCount, 0, nullptr },
 #endif
   #if ENABLE_BLUETOOTH
-  { "bluetooth",  "Bluetooth LE control and status", "The Bluetooth subsystem runs the device BLE stack in one of two mutually exclusive "
-    "roles selected by blemode: server mode (the device advertises and a phone/app "
-    "connects to it) or client mode (the device acts as a BLE central for Even G2 "
-    "glasses; the even_g2 commands then apply). Switching modes tears down the other "
-    "role automatically. In server mode, openble/closeble start and stop advertising, "
-    "blesend pushes a one-off message and bleevent an event to the connected client, "
+  { "bluetooth",  "Bluetooth LE control and status", "The Bluetooth radio runs one role at a time. "
+    "openble brings up the shared client stack (the host, its controller link and the setup "
+    "worker; like openwifi) and closeble takes the whole radio down again; the stack stays up "
+    "until closeble or bleenabled 0, never because the last device closed. On the stack each "
+    "device opens and closes on its own: openg2/closeg2 for the Even G2 glasses (the even_g2 "
+    "commands then apply), openring/closering for the R1 ring, openphone/closephone for the "
+    "phone link; closing one leaves the others and the stack alone, and a device out of range "
+    "stays open and reconnects. openconsole starts the app console server instead (legacy: the "
+    "device advertises the App console and the HardwareOne app connects to it; it closes the "
+    "three devices first and never coexists with the client stack) and closeconsole stops it. "
+    "blemode stores the boot role only (client, the default, or server). The phone link carries "
+    "the relay (the LLM fallback and the Terminal, while the app forwards) and the app console "
+    "as a stream inside it, which the device offers when its phone secret is a device code from "
+    "phone pair new and bleconsole is on (bleconsole on|off|status); every console session there "
+    "signs in. Beside the glasses the console can also ride the link's own command service "
+    "(Secure Channel only, never advertised). blestatus and bleinfo show the role running now, "
+    "the host state, the app console and the Phone link block (state, console, relay, streams "
+    "and session end reasons; phone status has the pipe's detail). blesend "
+    "pushes a one-off message to the connected app (on the phone link too); in server mode "
+    "bleevent sends an event "
     "and blestream toggles periodic pushes as a bitmask of sensors/system/events "
     "(blestream on/off/sensors/system/events, plus interval) -- all of which require an "
     "active connection. An app-layer Secure Channel (X25519 + passphrase + "
@@ -232,6 +250,32 @@ static constexpr CommandModule gCommandModules[] = {
     "required with blesecure; both require super admin, as does blerequireauth. Boot "
     "reconnection to saved-MAC peers is per-peer via bleautoreconnect <name> [on|off] "
     "(see blepeers for names).", bluetoothCommands, &bluetoothCommandsCount, 0, nullptr },
+#if ENABLE_BLE_PHONE_PIPE
+  { "phone",      "Android phone link", "The Android phone as a BLE device, reached through the "
+    "authenticated phone pipe. The pipe is a device on the shared client stack: openphone opens "
+    "the phone link (bringing the stack up if it is down; it opens by itself at boot and after "
+    "openble when its auto-reconnect is on) and closephone closes it, with the app console on "
+    "its link, leaving the glasses, the ring and the stack as they were; the app console can "
+    "ride its link (bleconsole). phone status [json] shows the link. First-time pairing: sign in as a super admin on serial "
+    "or the OLED and run phone pair new (or Bluetooth > Phone > New code and pair): the device "
+    "replaces the phone secret with a 16-symbol code, shows it once (printed on serial, or on its "
+    "own OLED screen, never in a log) and keeps pairing open for up to 3 minutes, until the first "
+    "success; type the code in the app. Only such a device code offers the app console on the "
+    "phone link. A passphrase of your own set with phone secret <passphrase> (super admin, not "
+    "over Bluetooth) carries the relay only; then phone pair from serial or the OLED opens a 60 s "
+    "window. phone connect, phone disconnect and phone forget act on the paired phone; phone "
+    "connect, phone pair, phone pair new and phone forget refuse while the app console server "
+    "runs (phone start switches). bleautoreconnect phone [on|off] reconnects it at boot. phone "
+    "scan shows or sets the reconnect scan and phone stats the link counters.",
+    phoneCommands, &phoneCommandsCount, 0, nullptr },
+  { "relay",      "What the phone link carries", "The phone pipe relays TCP for HardwareOne's network "
+    "users: the LLM HTTP source and the G2 Terminal. relay status shows how their requests reached "
+    "the network (Wi-Fi or the phone), with outcomes and the last eight requests.",
+    relayCommands, &relayCommandsCount, 0, nullptr },
+#else
+  { "phone",      "Android phone link (not in this build)", nullptr, phoneCommands, &phoneCommandsCount, 0, nullptr },
+  { "relay",      "Phone relay (not in this build)", nullptr, relayCommands, &relayCommandsCount, 0, nullptr },
+#endif
   #endif
   { "filesystem", "File operations and storage management", "Manages files and directories on the device internal LittleFS flash. Browse with "
     "files [\"/path\"] (add json for app/BLE, or files stats json for storage usage); "
@@ -644,12 +688,10 @@ static constexpr CommandModule gCommandModules[] = {
     "resume on the next boot using the last-used parameters; the "
     "format/maxsize/rotations/sensors/autostart choices are persisted.", sensorLoggingCommands, &sensorLoggingCommandsCount, 0, nullptr },
 #if ENABLE_R1_HEALTH
-  { "health",     "R1 ring health vitals and local health logging", "Live vitals from a paired R1 ring (HR, HRV, SpO2, temperature, battery) "
-    "plus the on-device health logger. healthstatus reads live values, ring control state, "
-    "logging state and typed-history status; healthstatus json is what the app and web page consume. "
-    "healthlogging drives the local CSV logger independently of the ring's own health-collection "
-    "privacy setting, and healthlogmerge stitches captures together. The ring rides the G2 BLE "
-    "transport, so this whole family requires Bluetooth + G2; connect via ringconnect.",
+  { "health",     "Local logging of R1 ring vitals", "HardwareOne's own CSV logger for R1 ring vitals. "
+    "healthlogging on|off|toggle drives it independently of the ring's own health-collection "
+    "privacy setting, healthlogging status shows it, and healthlogmerge stitches captures together. "
+    "The ring's live vitals, refresh and history are the ring module (ring health).",
     healthCommands, &healthCommandsCount, 0, nullptr },
 #endif
   { "users",      "User authentication and management", "The users subsystem provides admin-gated account management, authentication, "
@@ -771,8 +813,9 @@ static constexpr CommandModule gCommandModules[] = {
     "entry and confirmation happen on the device screen.", setPatternCommands,   &setPatternCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  { "even_g2",    "Even G2 smart glasses control", "This subsystem drives Even Reality G2 smart glasses while Bluetooth is in client "
-    "mode (blemode client); the two temples are addressed as left/right/auto. openg2 "
+  { "even_g2",    "Even G2 smart glasses control", "This subsystem drives Even Reality G2 smart glasses in the Glasses mode "
+    "(blemode client or glasses: the glasses, plus the phone link whenever a phone secret is "
+    "set, with the app console on that link); the two temples are addressed as left/right/auto. openg2 "
     "starts scan-and-connect IN THE BACKGROUND and returns immediately -- it does not "
     "block, so poll g2status (or g2info for firmware/MAC/battery) to see when the link "
     "is up, and nearly every other command here requires that connection first. Display "
@@ -787,20 +830,16 @@ static constexpr CommandModule gCommandModules[] = {
     "the GATT cache for fast reconnect; closeg2 full also frees the cache to recover "
     "about 30 KB. The remaining g2* commands are low-level protocol probes and "
     "diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).", g2Commands,           &g2CommandsCount, 0, nullptr },
-  { "even_r1",    "Even R1 ring link, health, and controls", "This subsystem talks to the Even R1 smart ring over BLE through a serialized, "
-    "profile-gated transaction owner. ringscan [seconds] discovers the ring and "
-    "ringconnect [mac] connects "
-    "(auto-scanning when no MAC is given, or connecting directly when one is), with "
-    "ringstatus and ringdisconnect for state and teardown. ringquery is the main data "
-    "command, requesting wear/heart-rate/HRV/SpO2/temperature/activity/sleep readings. "
-    "Its raw diagnostic form is admin-only, requires confirmation for SETs, and "
-    "prohibits user-profile writes. Ring health collection and low power are set with "
-    "ringcontrol <collection|lowpower> <preserve|on|off> (admin): a persisted desired "
-    "state applied to the ring asynchronously, which healthstatus reports as desired and "
-    "observed (the OLED and web Health controls run the same command). Health SETs remain "
-    "ACKed-unverified while low power has capture-proven readback. debugringdump toggles "
-    "a redacted byte dump for debugging. Bridging ring data onto the G2 glasses is not "
-    "supported: both approaches proved to be dead ends and were removed.", g2RingCommands,   &g2RingCommandsCount, 0, nullptr },
+  { "ring",       "Even R1 ring link, health and controls", "The Even R1 smart ring over BLE, through a serialized, "
+    "profile-gated transaction owner. ring scan [seconds] finds it and ring connect [mac|reconnect] "
+    "connects (scanning first without a MAC); ring status [json] and ring disconnect show and end the "
+    "link. ring health [json] reads vitals, ring controls and typed history; ring poll refreshes the "
+    "vitals and ring history the history (ring history force, admin, skips the freshness window). "
+    "ring query requests one reading; its raw form is admin-only, confirms every SET and refuses "
+    "user-profile writes. ring control <collection|lowpower> <preserve|on|off> (admin) saves a desired "
+    "state applied asynchronously, which the OLED and web Health controls also use; ring control "
+    "refresh reads low power back. Bridging ring data onto the G2 glasses proved a dead end and was "
+    "removed.", g2RingCommands, &g2RingCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_LLM_BACKEND
   { "llm",        "On-device LLM text generation", "On-device large language model that runs a quantized model file entirely on the "

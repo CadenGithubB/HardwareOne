@@ -49,7 +49,7 @@ template <typename... Args> static void logSink(const char*, Args&&...) {}
 constexpr uint32_t DEBUG_LLM = 1, DEBUG_LLM_TOKENIZER = 2;
 static bool isDebugOutputEnabled(uint32_t) { return false; }
 // PSRAM blocks still owned by the tokenizer. The vocab pointer array comes
-// from calloc and is also released through llmPsramFree, as on the device.
+// from llmPsramAlloc and is released through llmPsramFree, as on the device.
 static std::set<void*> psramLive;
 static void* llmPsramAlloc(size_t size, const char*) {
   const uint32_t deviceSize = static_cast<uint32_t>(size);
@@ -61,6 +61,10 @@ static void llmPsramFree(void** p) {
   if (*p) { psramLive.erase(*p); free(*p); }
   *p = nullptr;
 }
+// System_MemUtil's PSRAM-first zeroed allocation (the reachability scratch and
+// the presplit table); the device frees both with free(), as here.
+enum class AllocPref { PreferPSRAM, RequirePSRAM, RequireInternal };
+static void* ps_calloc(size_t n, size_t size, AllocPref, const char*) { return calloc(n ? n : 1, size ? size : 1); }
 
 // INSERT_PRODUCTION
 

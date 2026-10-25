@@ -4,7 +4,7 @@
 // Hybrid surface: connect stays under Bluetooth → R1 Ring. This mode shows
 // live HR/HRV/SpO2/temp/battery/wear from g2RingGetTelemetry, with entry/Poll
 // refresh delegated to the exact-profile coordinator. Ring collection/low-power controls and the
-// forced history refresh run as admin commands (`ringcontrol`, `healthstatus force-history`), so
+// forced history refresh run as admin commands (`ring control`, `ring history force`), so
 // the command layer decides and audits; local logging is independent.
 
 #include "OLED_Display.h"
@@ -168,19 +168,9 @@ static void displayR1Health() {
   }
   oledDisplay->setCursor(64, r3);
   // Wear + one shared recentness (not per-vital ages).
-  if (!t.wearValid) {
-    if (age[0]) snprintf(v, sizeof(v), "-- %s", age);
-    else        snprintf(v, sizeof(v), "Wear --");
-  } else if (t.wear == 2) {
-    if (age[0]) snprintf(v, sizeof(v), "on %s", age);
-    else        snprintf(v, sizeof(v), "Wear on");
-  } else if (t.wear == 1) {
-    if (age[0]) snprintf(v, sizeof(v), "off %s", age);
-    else        snprintf(v, sizeof(v), "Wear off");
-  } else {
-    if (age[0]) snprintf(v, sizeof(v), "? %s", age);
-    else        snprintf(v, sizeof(v), "Wear ?");
-  }
+  const char* wear = g2RingWearName(t.wearValid, t.wear);
+  if (age[0]) snprintf(v, sizeof(v), "%s %s", wear, age);
+  else        snprintf(v, sizeof(v), "Wear %s", wear);
   oledDisplay->print(v);
 
   G2RingControlStatus control = {};
@@ -251,7 +241,7 @@ static bool healthInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPre
         G2RingControlStatus status = {};
         g2RingGetControlStatus(status);
         char line[40];
-        snprintf(line, sizeof(line), "ringcontrol collection %s",
+        snprintf(line, sizeof(line), "ring control collection %s",
                  healthNextDesiredToken(status.healthDesired));
         healthRunCommand(line);
         break;
@@ -260,13 +250,13 @@ static bool healthInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPre
         (void)g2RingRequestHistoryRefresh(false);
         break;
       case HEALTH_ACTION_HISTORY_FORCE:
-        healthRunCommand("healthstatus force-history");
+        healthRunCommand("ring history force");
         break;
       case HEALTH_ACTION_LOW_POWER: {
         G2RingControlStatus status = {};
         g2RingGetControlStatus(status);
         char line[40];
-        snprintf(line, sizeof(line), "ringcontrol lowpower %s",
+        snprintf(line, sizeof(line), "ring control lowpower %s",
                  healthNextDesiredToken(status.lowPowerDesired));
         healthRunCommand(line);
         break;

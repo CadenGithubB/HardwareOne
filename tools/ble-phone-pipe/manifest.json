@@ -3,20 +3,24 @@
   "files": {
     "libraries/BLE/src/BLEDevice.h": {
       "before": "f504c61f420a546535fc110a5d69898b7f91f95c4f23aa7d8ebe2649ee919a27",
-      "after": "0191ac1fafd1e9e8e7808855bd16e083cd2e1be310ed3f4f95fc153d3fbfdbce"
+      "after": "8493c324308d207beda7927d261c6aabe7ef82e76b0b1af480c5ac8edb41c83a"
     },
     "libraries/BLE/src/BLEDevice.cpp": {
       "before": "e9d253a7b4bffe0feaacacd91ceccb54484054e8c3b6900da14463e635716bb7",
-      "after": "eceea84ed250f1737e951f7d9e795cb6a0dbfdba15cdb83271e70d87d67c9f7b"
+      "after": "5970b2c819fbe02fcbe304af96cc3e2778ca20119a21e6e4240ec53270eebbb8"
     },
     "libraries/BLE/src/BLESecurity.h": {
       "before": "4d0d24cf4fadc721687b4e42769ca6cc006023e2989b99fabf4b039489b46b41",
-      "after": "096ab22566b7092aabb06b387adbca380f43bfef5e3344b60e42e3b71d1520c7"
+      "after": "4d0d24cf4fadc721687b4e42769ca6cc006023e2989b99fabf4b039489b46b41"
     },
     "libraries/BLE/src/BLESecurity.cpp": {
       "before": "d2472be03ba52b6b61aa060259473a86dc5103b6e664d1dc1e6aacaa756733a8",
-      "after": "414c5fdee673fab86cecfb3ba39e3adcb3c06955090e9e9b1eb3d680a9ea1868"
+      "after": "d2472be03ba52b6b61aa060259473a86dc5103b6e664d1dc1e6aacaa756733a8"
+    },
+    "libraries/BLE/src/BLEClient.cpp": {
+      "before": "f029aecef0e6ac89ed367de87bf4927c11550063f4bb42215cda929e4446bcbd",
+      "after": "19454458be7738c0b6920fa0b6b01b38c92ba2981ac350da3997c48c976a505d"
     }
   },
-  "patch_sha256": "92012232adf72989f8de7b61f4a9c04e7eed98abb332b764e15447f3b6ef85e5"
+  "patch_sha256": "8256510c6d014c13bfd743e5dd814e9c768b5b01198c539ac88111f2e2b11c22"
 }

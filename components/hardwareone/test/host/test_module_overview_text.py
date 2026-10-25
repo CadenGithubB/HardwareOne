@@ -11,9 +11,12 @@ parser the reference uses) and each overview is checked against the rows:
   oled       every ble/oled/ring/display command it names is registered (the
              removed oledrequireauth is not), and the display login switch is
              named as displayrequireauth with its tier and owning module;
-  even_r1    it names `ringcontrol` with the row's own syntax and tier, every
-             command it names is registered, and it no longer claims bridge
-             commands that "exist in the code".
+  ring, phone, relay
+             each overview names every one of its module's verb rows, `ring`
+             names `ring control` with the row's own syntax and tier and no
+             longer claims bridge commands that "exist in the code", and no
+             registered row or overview uses a retired name (ringstatus,
+             healthstatus, phonepipe, phonestatus, phonepipesecret, ...).
 
 --source-dir points the suite at another copy of the component; its repository's
 tools/command_registry.py is used (the pre-fix tree fails all three).
@@ -84,24 +87,43 @@ def main():
     check('super admin' in sentence and owner.lower() == 'settings' and 'Settings module' in sentence,
           f'oled overview does not give displayrequireauth its tier and module ({owner}): "{sentence}"')
 
-    # R1 ring: ringcontrol with its syntax and tier; no bridge commands in the code.
-    ring = modules['even_r1']['summary']
-    control = rows.get('ringcontrol')
+    # R1 ring: ring control with its syntax and tier; no bridge commands in the code.
+    ring = modules['ring']['summary']
+    control = rows.get('ring control')
     check(control is not None and control['admin'] and not control['superadmin'],
-          'test premise: ringcontrol is not an admin row')
-    syntax = 'ringcontrol <collection|lowpower> <preserve|on|off>'
-    check(control is not None and syntax in control['usage'], 'test premise: ringcontrol usage changed')
-    check(syntax + ' (admin)' in ring, f'even_r1 overview does not name `{syntax}` (admin)')
-    check(not unregistered(ring), f'even_r1 overview names unregistered commands: {unregistered(ring)}')
+          'test premise: ring control is not an admin row')
+    syntax = 'ring control <collection|lowpower> <preserve|on|off>'
+    check(control is not None and syntax in control['usage'], 'test premise: ring control usage changed')
+    check(syntax + ' (admin)' in ring, f'ring overview does not name `{syntax}` (admin)')
+    check(not unregistered(ring), f'ring overview names unregistered commands: {unregistered(ring)}')
     check('exist in the code' not in ring and 'left unregistered' not in ring,
-          'even_r1 overview still claims unregistered bridge commands exist in the code')
+          'ring overview still claims unregistered bridge commands exist in the code')
+
+    # Each device module's overview names every one of its verb rows (the
+    # root row, e.g. `ring`, only answers with usage).
+    for key in ('ring', 'phone', 'relay'):
+        module = modules.get(key)
+        check(module is not None, f'no `{key}` module')
+        if not module:
+            continue
+        verbs = [c['name'] for c in by_array.get(module['array'], []) if ' ' in c['name']]
+        check(bool(verbs), f'`{key}` module has no verb rows')
+        missing = [v for v in verbs if v not in module['summary']]
+        check(not missing, f'{key} overview does not name {missing}')
+    retired = ('ringstatus', 'ringscan', 'ringconnect', 'ringdisconnect', 'ringquery', 'ringcontrol',
+               'healthstatus', 'phonepipe', 'phonestatus', 'phonepipesecret')
+    check(not any(r in rows for r in retired), f'retired names are registered: {[r for r in retired if r in rows]}')
+    for m in modules.values():
+        words = set(re.findall(r'[a-z0-9]+', m['summary']))
+        check(not words & set(retired), f"{m['module']} overview names retired commands: {sorted(words & set(retired))}")
 
     for message in failures:
         print('FAIL', message, file=sys.stderr)
     if failures:
         sys.exit(1)
     print('module overviews: bluetooth posture commands super admin; oled names displayrequireauth '
-          '(super admin, Settings); even_r1 names ringcontrol (admin) and no bridge commands')
+          '(super admin, Settings); ring names ring control (admin) and no bridge commands; ring, '
+          'phone and relay name all their verbs; no retired ring/phone names')
 
 
 if __name__ == '__main__':

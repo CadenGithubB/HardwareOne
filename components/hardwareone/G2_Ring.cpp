@@ -5,6 +5,9 @@
 // poll vitals, decode into the R1 cache. Shares bleCentralTx with G2 temples.
 
 #include "G2_Ring.h"
+#include "BLE_CentralCoordinator.h"
+#include "BLE_SetupWorker.h"     // the one central setup worker
+#include <atomic>
 #include <esp_attr.h>
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
@@ -24,6 +27,8 @@
 #include "System_Settings.h"   // gSettings + setSetting() for MAC persistence
 #include "BLE_Events.h"        // CompactJson + blePushEvent
 #include "BLE_Peers.h"         // peer registry
+#include "BLE_CoexRecords.h"   // scan/connect records for the coexistence study
+#include "BLE_CentralStack.h"  // bleStackUp / bleStackReady: the ring is a device on the shared stack
 #include "Bluetooth.h"         // explicit BLE role/transition ownership
 #include "BLE_CentralTx.h"     // controller-level TX gate (shared with G2)
 #include "G2_Glasses.h"        // g2SetAllTemplesConnPriority, g2WaitForBothConnected
@@ -34,6 +39,8 @@
 #include "System_R1_Protocol.h"  // R1Encoder + decoder (real wire format)
 #include "System_G2_Protocol.h"  // g2PbReadTag/g2PbReadVarint for forwarded RingDataPackage frames
 #include "G2_Health.h"           // history append + daily backfill
+#include "R1_HealthHistoryStore.h" // `ring health` history/store status
+#include "System_SensorLogging.h"  // `ring health json`, `ring poll`
 #include "System_Events.h"       // systemEventPost — ring connect/disconnect bus events
 #include "System_Clock.h"        // isSynced/isValidEpoch — ring-clock custody gates
 
@@ -52,6 +59,12 @@ static_assert(static_cast<uint8_t>(G2_RING_PROFILE_FW_2_2_7_0005) ==
 static_assert(static_cast<uint8_t>(G2_RING_PROFILE_FW_2_2_9_0003) ==
                   static_cast<uint8_t>(R1_PROFILE_FW_2_2_9_0003),
               "public/internal R1 profile 2.2.9 IDs must match");
+static_assert(static_cast<uint8_t>(G2_RING_PROFILE_FW_2_3_2_0007) ==
+                  static_cast<uint8_t>(R1_PROFILE_FW_2_3_2_0007),
+              "public/internal R1 profile 2.3.2.0007 IDs must match");
+static_assert(static_cast<uint8_t>(G2_RING_PROFILE_FW_2_3_2_0008) ==
+                  static_cast<uint8_t>(R1_PROFILE_FW_2_3_2_0008),
+              "public/internal R1 profile 2.3.2.0008 IDs must match");
 
 #if !CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
 #error "G2/R1 transport slabs require external BSS in PSRAM"
@@ -70,14 +83,14 @@ String               gRingDeviceName;
 String               gRingDeviceAddress;
 volatile bool        gRingScanFound       = false;
 
-// Fixed-size identity copies for readers on other tasks (status JSON on the
-// HTTP task, ringstatus on cmd_exec). The Strings above stay the ring owner's
-// working values; every writer refreshes the copies under this lock and the
-// readers copy them out under it, so a scan or connect reassigning the
-// Strings can no longer free a buffer underneath a reader.
+// Fixed-size name copy for readers on other tasks (status JSON on the HTTP
+// task, ring status on cmd_exec). The Strings above stay the ring owner's
+// working values; every writer refreshes the copy under this lock and the
+// readers copy it out under it, so a scan or connect reassigning the Strings
+// can no longer free a buffer underneath a reader. No status output carries
+// the ring's address, so only the name is published.
 static portMUX_TYPE sRingIdentityMux = portMUX_INITIALIZER_UNLOCKED;
 static char sRingIdentityName[32];
-static char sRingIdentityAddr[18];
 
 static void ringCopyBounded(char* dst, size_t cap, const char* src) {
   if (!dst || !cap) return;
@@ -86,17 +99,15 @@ static void ringCopyBounded(char* dst, size_t cap, const char* src) {
   dst[n] = '\0';
 }
 
-void g2RingSetIdentity(const char* name, const char* addr) {
+void g2RingSetIdentity(const char* name) {
   portENTER_CRITICAL(&sRingIdentityMux);
   ringCopyBounded(sRingIdentityName, sizeof(sRingIdentityName), name);
-  ringCopyBounded(sRingIdentityAddr, sizeof(sRingIdentityAddr), addr);
   portEXIT_CRITICAL(&sRingIdentityMux);
 }
 
-void g2RingCopyIdentity(char* name, size_t nameCap, char* addr, size_t addrCap) {
+void g2RingCopyIdentity(char* name, size_t nameCap) {
   portENTER_CRITICAL(&sRingIdentityMux);
   ringCopyBounded(name, nameCap, sRingIdentityName);
-  ringCopyBounded(addr, addrCap, sRingIdentityAddr);
   portEXIT_CRITICAL(&sRingIdentityMux);
 }
 
@@ -188,14 +199,6 @@ static constexpr uint32_t RING_CENTRAL_TX_MS = 50;
 static constexpr uint32_t RING_WRITE_MUTEX_MS = 1500;
 static constexpr uint32_t RING_TRANSACTION_TIMEOUT_MS = 5000;
 static constexpr uint32_t RING_SETUP_TIMEOUT_MS = 7000;
-#if ENABLE_MICROPHONE
-// A WAV/EvenAI recording has a hard 60 s capture cap. Keep its already-queued
-// ring job alive through finalization, but bound the wait so a wedged recorder
-// cannot pin the shared BLE-connect worker forever. The full saved-ring path
-// remains below the separate 240 s in-flight watchdog.
-static constexpr uint32_t RING_AUDIO_DEFER_TIMEOUT_MS = 90000;
-static constexpr uint32_t RING_AUDIO_DEFER_POLL_MS = 100;
-#endif
 static constexpr uint32_t RING_OWNER_STACK_BYTES = 6144;
 static constexpr uint8_t  RING_INTENT_QUEUE_DEPTH = 12;
 static constexpr uint8_t  RING_TRANSACTION_HISTORY_DEPTH = 24;
@@ -288,24 +291,36 @@ static bool ringRememberSuccessfulCommandAck(
 // sleep/daily request, remember only that something answered. The caller must
 // still reject the frame before packet ACK, dedupe, typed ingestion, or any
 // PRESENT/VERIFIED publication.
-static bool ringRememberRejectedSleepCandidate(
+// Header fields only, so a stitched multi-part model (which never becomes an
+// R1Decoded) can report sleep presence too.
+static bool ringRememberSleepCandidateHeader(
     RingActiveTransaction& transaction, uint32_t currentGeneration,
-    const R1Decoded& decoded) {
+    uint8_t module, uint8_t cmd, uint8_t subCmd, uint8_t statusType,
+    uint8_t statusMethod, uint8_t statusAck, size_t payloadLength) {
   if (!transaction.valid || !transaction.written ||
       transaction.intent.handle.generation != currentGeneration ||
       transaction.intent.module != R1_MODULE_HEALTH ||
       transaction.intent.cmd != R1_CMD_SLEEP ||
       transaction.intent.subCmd != R1_SUB_DAILY ||
       !transaction.intent.expectsPayload ||
-      decoded.module != R1_MODULE_HEALTH || decoded.cmd != R1_CMD_SLEEP ||
-      decoded.subCmd != R1_SUB_DAILY ||
-      decoded.statusType != R1_STATUS_TYPE_NOTIFY ||
-      decoded.statusMethod != R1_STATUS_METHOD_SET ||
-      decoded.statusAck != R1_STATUS_ACK_OK || decoded.payloadLength == 0) {
+      module != R1_MODULE_HEALTH || cmd != R1_CMD_SLEEP ||
+      subCmd != R1_SUB_DAILY ||
+      statusType != R1_STATUS_TYPE_NOTIFY ||
+      statusMethod != R1_STATUS_METHOD_SET ||
+      statusAck != R1_STATUS_ACK_OK || payloadLength == 0) {
     return false;
   }
   transaction.sleepDataCandidateSeen = true;
   return true;
+}
+
+static bool ringRememberRejectedSleepCandidate(
+    RingActiveTransaction& transaction, uint32_t currentGeneration,
+    const R1Decoded& decoded) {
+  return ringRememberSleepCandidateHeader(
+      transaction, currentGeneration, decoded.module, decoded.cmd,
+      decoded.subCmd, decoded.statusType, decoded.statusMethod,
+      decoded.statusAck, decoded.payloadLength);
 }
 
 struct RingSetupOwner {
@@ -362,7 +377,25 @@ struct RingHistoryCoordinator {
   uint8_t firstError = G2_RING_ERR_NONE;
   uint32_t generation = 0;
   G2RingTransactionHandle transaction{};
+  uint32_t settleSinceMs = 0;  // last stage done; waiting for trailing pages
 };
+
+// A DAILY query is answered by several pages (one per backlog day, a
+// zero-base page, or a multi-part frame), and the first page that parses
+// completes the stage. When the packetAck waits for the history model, the
+// sweep therefore stays open after its last stage until the ring has been
+// quiet, so a later page for the session's day is still stored and ACKed.
+static constexpr uint32_t RING_HISTORY_SETTLE_QUIET_MS = 800;
+static constexpr uint32_t RING_HISTORY_SETTLE_MAX_MS = 4000;
+static uint32_t sLastHealthPageRxMs = 0;  // owner task: health notify/fragment
+
+static bool ringHistorySweepSettled(uint32_t nowMs, uint32_t sinceMs,
+                                    uint32_t lastRxMs) {
+  if ((uint32_t)(nowMs - sinceMs) >= RING_HISTORY_SETTLE_MAX_MS) return true;
+  const uint32_t quietFrom =
+      (int32_t)(lastRxMs - sinceMs) > 0 ? lastRxMs : sinceMs;
+  return (uint32_t)(nowMs - quietFrom) >= RING_HISTORY_SETTLE_QUIET_MS;
+}
 
 static RingIntent sIntentQueue[RING_INTENT_QUEUE_DEPTH];
 static uint8_t sIntentQueueHead = 0;
@@ -407,7 +440,25 @@ static portMUX_TYPE sRxSlabMux = portMUX_INITIALIZER_UNLOCKED;
 static StaticQueue_t sRxQueueStorage;
 static uint8_t sRxQueueBytes[RING_RX_QUEUE_DEPTH * sizeof(uint8_t)];
 static QueueHandle_t sRxQueue = nullptr;
+// Owner task lifetime. r1_owner is created by ringOwnerEnsure() (the first
+// g2RingInit, and again after a release) and exits on its own once the link is
+// logically down and g2RingOwnerRelease() has asked it to. The handle is
+// nulled only under sRingOwnerMux, by the owner itself, so whoever holds the
+// mux and sees a non-null handle sees a live task. Nothing else ever uses the
+// handle: wakes go through sRingWake and the stack figure through
+// sRingOwnerStackFreeMin, both safe with no owner at all.
 static TaskHandle_t sRingOwnerTask = nullptr;
+static portMUX_TYPE sRingOwnerMux = portMUX_INITIALIZER_UNLOCKED;
+static bool sRingOwnerStop = false;  // written only under sRingOwnerMux
+// The owner publishes its own high-water mark once per lap; with no owner the
+// figure is the whole stack (set by the owner's exit and by ringOwnerEnsure).
+static std::atomic<uint32_t> sRingOwnerStackFreeMin{RING_OWNER_STACK_BYTES};
+// Owner wake: a binary semaphore, never a direct-to-task notification, so a
+// producer on BTC, cmd/web/OLED, the G2 send path or the main loop can wake an
+// owner that may already be gone. A stale give costs one spurious lap.
+// Static RTOS object, internal .bss, created once in g2RingInit.
+static StaticSemaphore_t sRingWakeStorage;
+static SemaphoreHandle_t sRingWake = nullptr;
 static SemaphoreHandle_t sSetupDone = nullptr;
 static StaticSemaphore_t sSetupDoneStorage;
 
@@ -482,6 +533,9 @@ enum RingHealthPageRefreshPhase : uint8_t {
   RING_HEALTH_REFRESH_IDLE = 0,
   RING_HEALTH_REFRESH_WAIT_PRIOR,
   RING_HEALTH_REFRESH_WAIT_DAILY,
+  // A finished round refused a newer day: wait until that round's day is
+  // persisted, then sweep again so one Poll Now drains the ring's backlog.
+  RING_HEALTH_REFRESH_WAIT_BACKLOG,
   RING_HEALTH_REFRESH_QUEUE_DEVICE_STATUS,
   RING_HEALTH_REFRESH_WAIT_DEVICE_STATUS,
   RING_HEALTH_REFRESH_TERMINAL,
@@ -498,6 +552,7 @@ struct RingHealthPageRefresh {
   uint8_t dailyError = G2_RING_ERR_NONE;
   G2RingTransactionHandle deviceStatus{};
   uint8_t dailyVerifiedCount = 0;
+  uint8_t dailyRounds = 0;
   bool deviceStatusCompleted = false;
   bool deviceStatusVerified = false;
   uint8_t deviceStatusError = G2_RING_ERR_NONE;
@@ -511,6 +566,8 @@ static RingHealthPageRefresh sHealthPageRefreshTerminalHistory[2];
 static uint8_t sHealthPageRefreshTerminalCursor = 0;
 static uint32_t sNextHealthPageRefreshId = 1;
 static constexpr uint32_t RING_HEALTH_PAGE_REFRESH_TIMEOUT_MS = 75000;
+// Daily rounds one Poll Now may run while the ring still holds newer days.
+static constexpr uint8_t RING_HEALTH_PAGE_REFRESH_MAX_ROUNDS = 8;
 
 static uint8_t ringHealthPageRefreshResolvedError(
     const RingHealthPageRefresh& refresh, uint8_t fallback) {
@@ -535,8 +592,7 @@ static void ringOwnerTask(void* arg);
 static void ringClockCustodyReset();
 
 static void ringWakeOwner() {
-  TaskHandle_t owner = sRingOwnerTask;
-  if (owner) xTaskNotifyGive(owner);
+  if (sRingWake) xSemaphoreGive(sRingWake);
 }
 
 static int ringReserveRxSlab() {
@@ -597,9 +653,11 @@ static void ringReleaseRxSlab(uint8_t slot) {
   portEXIT_CRITICAL(&sRxSlabMux);
 }
 
-// Called only while gRing.initialized is false, before any notify callback can
-// be registered. It makes a failed partial init retry deterministic without
-// touching external memory or inventing a disconnect-time ABA reset.
+// Called only while no owner task exists and no notify callback can be
+// registered: before the first init completes, and again from ringOwnerEnsure()
+// after a release (the link is logically down and the slabs are free; see
+// g2RingOwnerRelease). It makes a failed partial init retry deterministic
+// without touching external memory or inventing a disconnect-time ABA reset.
 static void ringResetRxIngressForInit() {
   if (sRxQueue) xQueueReset(sRxQueue);
   portENTER_CRITICAL(&sRxSlabMux);
@@ -1421,6 +1479,30 @@ bool g2RingHealthPageRefreshSupported(void) {
   return r1ProfileSupportsHealthPageRefresh(ringSnapshotProtocolProfile());
 }
 
+bool g2RingSleepRecordsSupported(void) {
+  return r1ProfileSupportsSleepRecords(ringSnapshotProtocolProfile());
+}
+
+const char* g2RingChargeStatusName(bool valid, uint8_t charge) {
+  if (!valid) return "--";
+  switch (charge) {
+    case 1: return "charging";
+    case 2: return "not-charging";
+    case 3: return "full";
+    default: return "unknown";
+  }
+}
+
+const char* g2RingWearName(bool valid, uint8_t wear) {
+  if (!valid) return "--";
+  switch (wear) {
+    case 1: return "off";
+    case 2: return "on";
+    case 3: return "maybe";  // possiblyWear: 2.3.2 sends it before deciding
+    default: return "?";
+  }
+}
+
 bool g2RingStartHealthPageRefresh(G2RingHealthRefreshHandle& out) {
   out = G2RingHealthRefreshHandle{};
   if (!gRing.connected) return false;
@@ -1569,6 +1651,7 @@ struct R1TelemetryCache {
   int16_t  tempTenths;   uint32_t tempTs;      uint32_t tempRxMs;     bool tempValid;
   uint8_t  battery;                            uint32_t batteryRxMs;  bool batteryValid;
   uint8_t  wear;                               uint32_t wearRxMs;     bool wearValid;
+  uint8_t  charge;                             uint32_t chargeRxMs;   bool chargeValid;
 };
 static R1TelemetryCache gR1Cache;
 
@@ -1776,8 +1859,8 @@ static void ringPopulateTelemetryOutput(
        r1ProfileSupportsPointMeasureQuery(snapshot->profile)) ||
       r1ProfileSupportsHealthPageRefresh(snapshot->profile);
   const bool wearDataSupported = forwardedCacheCurrent ||
-      r1ProfileSupportsWearStatus(snapshot->profile) ||
-      r1ProfileSupportsDeviceStatusIngestion(snapshot->profile);
+      r1ProfileSupportsWearStatusIngestion(snapshot->profile) ||
+      r1ProfileSupportsDeviceStatusWear(snapshot->profile);
   out.hr = cache.hr;
   out.hrValid = liveVitalsSupported && cache.hrValid;
   out.hrv = cache.hrv;
@@ -1790,6 +1873,9 @@ static void ringPopulateTelemetryOutput(
   out.batteryValid = cache.batteryValid;
   out.wear = cache.wear;
   out.wearValid = wearDataSupported && cache.wearValid;
+  out.charge = cache.charge;
+  out.chargeValid = directCacheCurrent &&
+      r1ProfileSupportsChargeStatus(snapshot->profile) && cache.chargeValid;
   out.hrAgeSec = out.hrValid
       ? ringSampleAgeSec(cache.hrTs, cache.hrRxMs) : -1;
   out.hrvAgeSec = out.hrvValid
@@ -2156,33 +2242,108 @@ static bool ringAdoptClockIfDark(void) {
   return true;
 }
 
-// Main-loop tick (called next to timeAnchorsTick). Two duties: dark-clock
-// adoption from the ring cache, and the one-shot corrective systemTime push
-// once the clock is valid and the setup ritual has finished. Both branches
-// are cheap gated no-ops in the steady state.
+// Battery between Poll Nows on profiles without the point-poll cycle (2.3.2):
+// ask deviceStatus as soon as setup is done on a link, then whenever no battery
+// sample has arrived for RING_DEVICE_STATUS_POLL_MS. The ring's own status
+// pushes (every ~30 s on the charger) and Poll Now's read are samples too, so
+// they push the next ask back. Never during a Poll Now; a refused enqueue
+// waits RING_DEVICE_STATUS_RETRY_MS. The intent queue and the owner's write
+// path apply the usual link, yield and central-TX gates.
+static constexpr uint32_t RING_DEVICE_STATUS_POLL_MS = 5u * 60u * 1000u;
+static constexpr uint32_t RING_DEVICE_STATUS_RETRY_MS = 30u * 1000u;
+
+struct RingDeviceStatusPollState {
+  uint32_t linkGeneration;  // link the times below belong to
+  uint32_t lastAskMs;       // last queued ask on that link; 0 = none
+  uint32_t lastRefusedMs;   // last refused enqueue on that link; 0 = none
+};
+
+static bool ringDeviceStatusPollDue(R1ProtocolProfile profile, bool setupDone,
+                                    bool refreshActive, uint32_t linkGeneration,
+                                    bool batteryHeard, uint32_t batteryRxMs,
+                                    const RingDeviceStatusPollState& state,
+                                    uint32_t nowMs) {
+  if (!setupDone || refreshActive || linkGeneration == 0 ||
+      !r1ProfileSupportsDeviceStatusPoll(profile)) {
+    return false;
+  }
+  const bool sameLink = state.linkGeneration == linkGeneration;
+  if (sameLink && state.lastRefusedMs != 0 &&
+      (uint32_t)(nowMs - state.lastRefusedMs) < RING_DEVICE_STATUS_RETRY_MS) {
+    return false;
+  }
+  uint32_t quietMs = UINT32_MAX;
+  if (batteryHeard) quietMs = nowMs - batteryRxMs;
+  if (sameLink && state.lastAskMs != 0 &&
+      (uint32_t)(nowMs - state.lastAskMs) < quietMs) {
+    quietMs = nowMs - state.lastAskMs;
+  }
+  return quietMs >= RING_DEVICE_STATUS_POLL_MS;
+}
+
+static RingDeviceStatusPollState sDeviceStatusPoll{};
+
+static void ringServiceDeviceStatusPoll() {
+  if (!gRing.connected || !sRingSetupDone) return;
+  RingTelemetrySnapshot snapshot{};
+  if (!ringSnapshotTelemetry(snapshot)) return;
+  portENTER_CRITICAL(&sTransportMux);
+  const bool refreshActive =
+      sHealthPageRefresh.generation == snapshot.linkGeneration &&
+      sHealthPageRefresh.phase != RING_HEALTH_REFRESH_IDLE &&
+      sHealthPageRefresh.phase != RING_HEALTH_REFRESH_TERMINAL;
+  portEXIT_CRITICAL(&sTransportMux);
+  // Only this link's own samples count; the cache resets on every new link.
+  const bool batteryHeard =
+      ringTelemetryDirectIdentityCurrent(snapshot) && snapshot.cache.batteryValid;
+  const uint32_t nowMs = millis();
+  if (!ringDeviceStatusPollDue(snapshot.profile, true, refreshActive,
+                               snapshot.online ? snapshot.linkGeneration : 0,
+                               batteryHeard, snapshot.cache.batteryRxMs,
+                               sDeviceStatusPoll, nowMs)) {
+    return;
+  }
+  if (sDeviceStatusPoll.linkGeneration != snapshot.linkGeneration) {
+    sDeviceStatusPoll = RingDeviceStatusPollState{snapshot.linkGeneration, 0, 0};
+  }
+  G2RingTransactionHandle handle{};
+  if (ringEnqueueSystemQuery(R1_SUB_DEVICE_STATUS, 5, &handle)) {
+    sDeviceStatusPoll.lastAskMs = nowMs;
+    sDeviceStatusPoll.lastRefusedMs = 0;
+    DEBUG_RING_TXNF("[RING] battery poll queued deviceStatus tx=%lu gen=%lu",
+                    (unsigned long)handle.id, (unsigned long)handle.generation);
+  } else {
+    sDeviceStatusPoll.lastRefusedMs = nowMs;
+  }
+}
+
+// Main-loop tick (called next to timeAnchorsTick). Three duties: the 2.3.2
+// battery poll, dark-clock adoption from the ring cache, and the one-shot
+// corrective systemTime push once the clock is valid and the setup ritual has
+// finished. All are cheap gated no-ops in the steady state.
 void g2RingTimeSyncTick(void) {
   static uint32_t sLastMs = 0;
   if (!everyMs(&sLastMs, 500)) return;
 
+  ringServiceDeviceStatusPoll();
   ringAdoptClockIfDark();
 
   // Post-setup solicit: still dark with a live link — use the exact profile's
-  // supported HR request (2.2.9 DAILY, legacy POINT). Capped per link: if the
-  // ring's own clock is dark too, re-asking won't help. A factory-dark 2.2.9
+  // supported HR request (2.2.9/2.3.2 DAILY, legacy POINT). Capped per link:
+  // if the ring's own clock is dark too, re-asking won't help. A factory-dark
   // DAILY response remains deliberately insufficient to prove its epoch.
   if (!Clock::isSynced() && gRing.connected && sRingSetupDone &&
       sDarkProbesSent < 3) {
     static uint32_t sProbeMs = 0;
     if (!everyMs(&sProbeMs, 5000)) return;
     const R1ProtocolProfile profile = ringSnapshotProtocolProfile();
-    const bool queued = profile == R1_PROFILE_FW_2_2_9_0003
-                            ? g2RingQueryDaily(R1_CMD_HEARTRATE)
-                            : g2RingPollVital(0);
+    const bool daily = r1ProfileSupportsHealthPageRefresh(profile);
+    const bool queued = daily ? g2RingQueryDaily(R1_CMD_HEARTRATE)
+                              : g2RingPollVital(0);
     if (queued) {
       sDarkProbesSent = (uint8_t)(sDarkProbesSent + 1);
       DEBUG_RING_SETUPF("[RING] dark-clock: queued hr/%s solicit %u/3",
-                profile == R1_PROFILE_FW_2_2_9_0003 ? "daily" : "point",
-                (unsigned)sDarkProbesSent);
+                daily ? "daily" : "point", (unsigned)sDarkProbesSent);
     }
   }
 
@@ -2296,6 +2457,16 @@ void g2RingConnectMarkComplete() {
   gRingConnectTaskActive = false;
   portEXIT_CRITICAL(&gRingConnectMux);
 }
+void g2RingConnectMarkRunning() {
+  // The in-flight watchdog times the job's own turn; its wait in the queue is
+  // bounded separately (one phone turn and one glasses job at most).
+  portENTER_CRITICAL(&gRingConnectMux);
+  if (gRingConnectTaskActive) gRingConnectTaskSinceMs = millis();
+  portEXIT_CRITICAL(&gRingConnectMux);
+}
+bool g2RingConnectGenerationCurrent(uint32_t generation) {
+  return generation == 0 || ringConnectGenerationCurrent(generation);
+}
 bool g2RingConnectInFlight() {
   portENTER_CRITICAL(&gRingConnectMux);
   const bool active = gRingConnectTaskActive;
@@ -2330,9 +2501,9 @@ static void ringNoteConnectFailure(const char* reason, uint32_t elapsedMs) {
 // an overdue job is reported as reboot-required if it cannot finish safely.
 static bool ringConnectGateOpen(uint32_t* generationOut) {
   if (generationOut) *generationOut = 0;
-  if (!isG2ClientInitialized() || isBleServerInitialized() ||
+  if (!bleStackReady() || isBleServerInitialized() ||
       bleRoleTransitionState() != BleRoleTransition::IDLE) {
-    DEBUG_RING_LIFECYCLEF("[RING] Connect deferred: G2 central role is not ready");
+    DEBUG_RING_LIFECYCLEF("[RING] Connect deferred: the client stack is not up");
     return false;
   }
   portENTER_CRITICAL(&gRingConnectMux);
@@ -2358,8 +2529,15 @@ static bool ringConnectGateOpen(uint32_t* generationOut) {
                     d);
     return false;
   }
-  WARN_RINGF("Connect skipped — attempt already in flight (%lus)",
-             (unsigned long)inflightS);
+  // A job waiting its turn on the setup worker is normal for a while; say so
+  // loudly only once it is long.
+  if (inflightS >= 120) {
+    WARN_RINGF("Connect skipped — attempt already in flight (%lus)",
+               (unsigned long)inflightS);
+  } else {
+    DEBUG_RING_LIFECYCLEF("[RING] Connect skipped — attempt already in flight (%lus)",
+                          (unsigned long)inflightS);
+  }
   if (inflightS > 120) ringNoteConnectFailure("stuck", inflightS * 1000);
   return false;
 }
@@ -2373,10 +2551,9 @@ static bool ringConnectGateOpen(uint32_t* generationOut) {
 // /api/ble/status instead (see "Why not pure SSE" in WebPage_Bluetooth.h),
 // so this event's only consumers are external SSE subscribers.
 //
-// Schema:
+// Schema (no address, like `ring status`):
 //   u  = up     (bool)  — BLE link live
 //   n  = name   (str)   — advert name ("EVEN R1_XXXXXX")
-//   a  = addr   (str)   — MAC
 //   m  = mtu    (int)
 //   rx = rx     (int)   — cumulative packet count
 //   s  = scan   (str)   — "found" | "not-found"
@@ -2387,7 +2564,6 @@ static void ringPushStatusEvent(const char* reason) {
   CompactJson j(buf, sizeof(buf));
   j.kv("u",  (bool)gRing.connected)
    .kv("n",  gRingDeviceName.length()    ? gRingDeviceName.c_str()    : "")
-   .kv("a",  gRingDeviceAddress.length() ? gRingDeviceAddress.c_str() : "")
    .kv("m",  (unsigned)gRing.mtu)
    .kv("rx", (unsigned long)gRing.packetsReceived)
    .kv("s",  gRingScanFound ? "found" : "not-found")
@@ -2447,7 +2623,8 @@ static RingDownTransition ringBeginLogicalDown(
 // Each metric only updates the cache when the response is the expected
 // shape (length / opcode), so a malformed/refused frame can't poison the
 // cache with garbage. Readers check each `*Valid` flag.
-static bool ringDeviceStatusPayloadValid(const R1Decoded& d);
+static bool ringDeviceStatusPayloadValid(R1ProtocolProfile profile,
+                                         const R1Decoded& d);
 
 static bool ringHealthTimestampPlausible(uint32_t timestamp) {
   if (!Clock::isPlausibleEpoch((time_t)timestamp)) return false;
@@ -2522,12 +2699,36 @@ static void ringCacheDailyLatest(const R1HrvDailyResult& daily) {
   }
 }
 
+// End of one dated DAILY page's trend/backfill span. The latest timestamp is
+// ring-wide: a 2.3.2.0008 backlog repeats the newest sample's time on every
+// day's page, so it may end only the page whose day contains it. Older pages,
+// and pages whose latest stamp could not be anchored, end inside their last
+// hourly bucket.
+static uint32_t ringDailyPageEndTs(uint32_t dayStart, uint32_t lastBucketEpoch,
+                                   uint32_t latestTs) {
+  if (latestTs >= lastBucketEpoch &&
+      (uint64_t)latestTs < (uint64_t)dayStart + 86400u) {
+    return latestTs;
+  }
+  return lastBucketEpoch + 3599u;
+}
+
+// The live backfill pins a page's newest sample at "now". A 2.3.2 backlog
+// arrives oldest day first, each page repeating the ring-wide newest sample,
+// so only the page whose day is not older than that sample may seed it. An
+// unanchored latest (0) gives no ordering and keeps the old behaviour.
+static bool ringPageHoldsNewest(uint32_t dayStart, uint32_t latestTs) {
+  return latestTs == 0 ||
+         (uint64_t)latestTs < (uint64_t)dayStart + 86400u;
+}
+
 // *historyAccepted (optional) reports whether a daily page was accepted by the
 // Health history model; the RX path's packetAck follows that verdict.
 static void ringExtractTelemetryCache(const R1Decoded& d,
                                       uint32_t generation,
                                       bool* historyAccepted) {
   if (historyAccepted) *historyAccepted = false;
+  if (d.module == R1_MODULE_HEALTH) sLastHealthPageRxMs = millis();
   RingTelemetryGuard telemetry;
   if (!telemetry.locked()) return;
   uint32_t linkGeneration = 0;
@@ -2679,7 +2880,7 @@ static void ringExtractTelemetryCache(const R1Decoded& d,
   if (d.module == R1_MODULE_SYSTEM && d.cmd == R1_CMD_SYSTEM &&
       d.subCmd == R1_SUB_DEVICE_STATUS &&
       (!r1ProfileSupportsDeviceStatusIngestion(profile) ||
-       !ringDeviceStatusPayloadValid(d))) {
+       !ringDeviceStatusPayloadValid(profile, d))) {
     return;
   }
   ringTransitionTelemetrySourceLocked(RING_TELEMETRY_DIRECT);
@@ -2699,12 +2900,23 @@ static void ringExtractTelemetryCache(const R1Decoded& d,
     return;
   }
   if (d.module == R1_MODULE_HEALTH && d.subCmd == R1_SUB_DAILY &&
+      d.cmd == R1_CMD_SLEEP && r1ProfileSupportsSleepRecords(profile)) {
+    R1SleepDailyResult sleep{};
+    if (r1ParseSleepDaily(profile, d, sleep) == R1_PARSE_OK) {
+      const bool accepted = g2HealthApplySleepDaily(sleep);
+      if (historyAccepted) *historyAccepted = accepted;
+    }
+    return;
+  }
+  if (d.module == R1_MODULE_HEALTH && d.subCmd == R1_SUB_DAILY &&
       (d.cmd == R1_CMD_HEARTRATE || d.cmd == R1_CMD_HRV ||
        d.cmd == R1_CMD_SPO2)) {
     uint8_t values[R1_COMMON_DAILY_MAX_RECORDS]{};
     uint8_t count = 0;
     uint32_t startTs = 0;
     uint32_t endTs = 0;
+    uint32_t latestTs = 0;
+    bool liveBackfill = true;
     G2HealthMetric metric = HEALTH_METRIC_HR;
 
     if (d.cmd == R1_CMD_HRV) {
@@ -2716,7 +2928,12 @@ static void ringExtractTelemetryCache(const R1Decoded& d,
         if (daily.dayMode == R1_DAILY_DAY_EPOCH) {
           count = daily.count;
           startTs = count ? daily.records[0].bucketEpoch : daily.dayStart;
-          endTs = daily.latestTimestamp;
+          latestTs = daily.latestTimestamp;
+          liveBackfill = ringPageHoldsNewest(daily.dayStart, latestTs);
+          endTs = count ? ringDailyPageEndTs(
+                              daily.dayStart,
+                              daily.records[count - 1].bucketEpoch, latestTs)
+                        : latestTs;
           metric = HEALTH_METRIC_HRV;
           for (uint8_t i = 0;
                i < count && i < R1_COMMON_DAILY_MAX_RECORDS; ++i) {
@@ -2735,7 +2952,12 @@ static void ringExtractTelemetryCache(const R1Decoded& d,
         if (daily.dayMode == R1_DAILY_DAY_EPOCH) {
           count = daily.count;
           startTs = count ? daily.records[0].bucketEpoch : daily.dayStart;
-          endTs = daily.latestTimestamp;
+          latestTs = daily.latestTimestamp;
+          liveBackfill = ringPageHoldsNewest(daily.dayStart, latestTs);
+          endTs = count ? ringDailyPageEndTs(
+                              daily.dayStart,
+                              daily.records[count - 1].bucketEpoch, latestTs)
+                        : latestTs;
           metric = d.cmd == R1_CMD_SPO2 ? HEALTH_METRIC_SPO2
                                         : HEALTH_METRIC_HR;
           for (uint8_t i = 0; i < count; ++i)
@@ -2745,12 +2967,15 @@ static void ringExtractTelemetryCache(const R1Decoded& d,
     }
 
     if (count > 0) {
-      if (endTs > sRingTsSeen) {
+      // Clock custody wants the ring's newest sample, wherever it lands.
+      if (latestTs > sRingTsSeen) {
         sRingTsSeenRxMs = millis();
-        sRingTsSeen = endTs;
+        sRingTsSeen = latestTs;
       }
       g2HealthApplyTrendDaily(metric, values, count, startTs, endTs);
-      g2HealthApplyDailyBackfill(metric, values, count, startTs, endTs);
+      if (liveBackfill) {
+        g2HealthApplyDailyBackfill(metric, values, count, startTs, endTs);
+      }
     }
     return;
   }
@@ -2770,8 +2995,14 @@ static void ringExtractTelemetryCache(const R1Decoded& d,
       gR1Cache.batteryValid = true;
       g2HealthNoteSample(HEALTH_METRIC_BATTERY, (int16_t)b, 0);
     }
+    if (r1ProfileSupportsChargeStatus(profile) && d.payloadLength >= 2 &&
+        d.payload[1] <= 3) {
+      gR1Cache.charge      = d.payload[1];
+      gR1Cache.chargeRxMs  = rx;
+      gR1Cache.chargeValid = true;
+    }
     const bool wearIngestion = deviceStatus
-        ? r1ProfileSupportsDeviceStatusIngestion(profile)
+        ? r1ProfileSupportsDeviceStatusWear(profile)
         : r1ProfileSupportsWearStatus(profile);
     if (wearIngestion &&
         d.payloadLength >= 2 && d.payload[1] <= 2) {
@@ -2780,10 +3011,13 @@ static void ringExtractTelemetryCache(const R1Decoded& d,
     return;
   }
 
-  // system/system/wearStatus — dedicated 1-byte wear probe.
+  // system/system/wearStatus — dedicated 1-byte wear probe, or on 2.3.2 the
+  // ring's own push on each wear change. possiblyWear (3) is recorded as its
+  // own state: the ring sends it while it decides (lifted off the charger, on
+  // a desk), and the previous on/off would be stale by then.
   if (d.module == R1_MODULE_SYSTEM && d.cmd == R1_CMD_SYSTEM &&
       d.subCmd == R1_SUB_WEAR_STATUS && d.payloadLength >= 1 &&
-      d.payload[0] <= 2 && r1ProfileSupportsWearStatus(profile)) {
+      d.payload[0] <= 3 && r1ProfileSupportsWearStatusIngestion(profile)) {
     ringNoteWear(d.payload[0], millis());
   }
 }
@@ -3009,6 +3243,10 @@ static G2RingProtocolProfile ringPublicProfile(R1ProtocolProfile profile) {
       return G2_RING_PROFILE_FW_2_2_7_0005;
     case R1_PROFILE_FW_2_2_9_0003:
       return G2_RING_PROFILE_FW_2_2_9_0003;
+    case R1_PROFILE_FW_2_3_2_0007:
+      return G2_RING_PROFILE_FW_2_3_2_0007;
+    case R1_PROFILE_FW_2_3_2_0008:
+      return G2_RING_PROFILE_FW_2_3_2_0008;
     default:
       return G2_RING_PROFILE_UNKNOWN;
   }
@@ -3031,6 +3269,10 @@ static void ringFinishSetup(bool success, uint8_t error) {
   sRingSetupDone = success;
   ringSetSetupState(success ? G2_RING_SETUP_READY : G2_RING_SETUP_ERROR,
                     success ? (uint8_t)G2_RING_ERR_NONE : error);
+  if (success && r1ProfileSupportsWearQueryOnConnect(sR1Profile)) {
+    // The reply lands in ringExtractTelemetryCache's wearStatus branch.
+    (void)ringEnqueueSystemQuery(R1_SUB_WEAR_STATUS, 6);
+  }
   if (sSetupDone) xSemaphoreGive(sSetupDone);
   DEBUG_RING_SETUPF("[RING] setup %s profile=%s error=%s",
             success ? "ready" : "failed",
@@ -3299,23 +3541,28 @@ static void ringHandleSetupRx(const R1Decoded& d) {
   }
 }
 
-static bool ringDeviceStatusPayloadValid(const R1Decoded& d) {
+static bool ringDeviceStatusPayloadValid(R1ProtocolProfile profile,
+                                         const R1Decoded& d) {
   // Captured 2.2.9 contract: the GET is answered by one ACK/SET/OK envelope
   // with exactly seven payload bytes. Only battery and wear have established
-  // meanings; the remaining five bytes stay opaque.
+  // meanings; the remaining five bytes stay opaque. 2.3.2 reads byte 1 as
+  // charge status (0..3, 3 = full) and also pushes the same seven bytes as
+  // NOTIFY/SET/OK while charging.
+  const bool charge = r1ProfileSupportsChargeStatus(profile);
   return d.module == R1_MODULE_SYSTEM && d.cmd == R1_CMD_SYSTEM &&
          d.subCmd == R1_SUB_DEVICE_STATUS &&
-         d.statusType == R1_STATUS_TYPE_ACK &&
+         (d.statusType == R1_STATUS_TYPE_ACK ||
+          (charge && d.statusType == R1_STATUS_TYPE_NOTIFY)) &&
          d.statusMethod == R1_STATUS_METHOD_SET &&
          d.statusAck == R1_STATUS_ACK_OK && d.payloadLength == 7 &&
-         d.payload[0] <= 100 && d.payload[1] <= 2;
+         d.payload[0] <= 100 && d.payload[1] <= (charge ? 3 : 2);
 }
 
 static bool ringDailyPayloadValid(const R1Decoded& d) {
   if (d.module == R1_MODULE_SYSTEM && d.cmd == R1_CMD_SYSTEM &&
       d.subCmd == R1_SUB_DEVICE_STATUS) {
     return r1ProfileSupportsDeviceStatusIngestion(sR1Profile) &&
-           ringDeviceStatusPayloadValid(d);
+           ringDeviceStatusPayloadValid(sR1Profile, d);
   }
   if (d.module != R1_MODULE_HEALTH || d.subCmd != R1_SUB_DAILY) return true;
   if (d.cmd == R1_CMD_HRV) {
@@ -3330,6 +3577,12 @@ static bool ringDailyPayloadValid(const R1Decoded& d) {
   if (d.cmd == R1_CMD_HEARTRATE || d.cmd == R1_CMD_SPO2) {
     R1CommonDailyResult result{};
     return r1ParseCommonDaily(sR1Profile, d, result) == R1_PARSE_OK;
+  }
+  if (d.cmd == R1_CMD_SLEEP && r1ProfileSupportsSleepRecords(sR1Profile)) {
+    // A layout-valid record answers the request even when the history model
+    // files it elsewhere (another day, or an unanchored period).
+    R1SleepDailyResult result{};
+    return r1ParseSleepDaily(sR1Profile, d, result) == R1_PARSE_OK;
   }
   return false;
 }
@@ -3497,6 +3750,45 @@ static void ringReasmFinalize(uint32_t generation) {
         (unsigned long)generation, (unsigned long)sTelemetryGeneration);
     return;
   }
+  // A night with more stages than one notification carries arrives the same
+  // way as a full activity day; route it by the stitched model's cmd byte.
+  if (sRingReasm.len >= 12 && sRingReasmBuf[1] == R1_MODULE_HEALTH &&
+      sRingReasmBuf[6] == R1_CMD_SLEEP &&
+      r1ProfileSupportsSleepRecords(profile)) {
+    R1SleepDailyResult sleep{};
+    const R1ParseError sleepError = r1ParseReassembledSleepDaily(
+        profile, sRingReasmBuf, sRingReasm.len, sRingReasm.crc32, sleep);
+    if (sleepError != R1_PARSE_OK) {
+      DEBUG_RING_PROTOCOLF("[RING] reasm sleep/daily rejected: %s (%u B)",
+                           r1ParseErrorName(sleepError),
+                           (unsigned)sRingReasm.len);
+      // The body is untrusted, but the ring did answer with sleep data: never
+      // let the deadline conclude EMPTY. No ACK, ingestion or VERIFIED.
+      const size_t declared = (size_t)sRingReasmBuf[8] |
+                              ((size_t)sRingReasmBuf[9] << 8);
+      const uint8_t status = sRingReasmBuf[5];
+      (void)ringRememberSleepCandidateHeader(
+          sActiveTransaction, generation, sRingReasmBuf[1], sRingReasmBuf[6],
+          sRingReasmBuf[7], (uint8_t)(status & 0x01),
+          (uint8_t)((status >> 1) & 0x01), (uint8_t)((status >> 2) & 0x03),
+          declared > 12 ? declared - 12 : 0);
+      return;
+    }
+    R1ProtocolProfile currentProfile = R1_PROFILE_UNKNOWN;
+    if (!ringReasmFinalizeCurrentLocked(generation, currentProfile) ||
+        currentProfile != profile) return;
+    const bool historyAccepted = g2HealthApplySleepDaily(sleep);
+    if (!ringReasmFinalizeCurrentLocked(generation, currentProfile) ||
+        currentProfile != profile) return;
+    R1PacketAckDescriptor descriptor;
+    if ((historyAccepted || !ringDailyAckWaitsForHistory(profile)) &&
+        r1MakeDailyPacketAckDescriptor(profile, sleep.sourceSerial,
+                                       R1_CMD_SLEEP, descriptor)) {
+      ringQueuePacketAck(descriptor, generation);
+    }
+    ringCompleteReassembledDaily(R1_MODULE_HEALTH, R1_CMD_SLEEP, R1_SUB_DAILY);
+    return;
+  }
   const R1ParseError e = r1ParseReassembledActivityDaily(
       profile, sRingReasmBuf, sRingReasm.len, sRingReasm.crc32,
       sRingActivityScratch);
@@ -3575,6 +3867,7 @@ static bool ringReasmConsume(const uint8_t* data, size_t len,
                          ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 24);
   const uint8_t* chunk = data + 5;
   const size_t chunkLen = len - 5;
+  sLastHealthPageRxMs = millis();
 
   // TEMP-REASM-DIAG: dump the WHOLE fragment frame (32-byte rows) so the
   // fragment framing can be reverse-engineered off hardware. Gated on
@@ -4145,7 +4438,7 @@ static bool ringServicePacketAck() {
 // tick's own solicit is gated on sRingSetupDone. Without this probe the wait
 // is circular and every dark-boot connect dies at the stage deadline with
 // clock-unavailable. So the setup owner asks for a profile-safe HR sample here
-// (2.2.9 DAILY, legacy POINT). A plausible response stamp feeds sRingTsSeen no
+// (2.2.9/2.3.2 DAILY, legacy POINT). A plausible response stamp feeds sRingTsSeen no
 // matter what setup stage is active, and adoption follows within one 500 ms
 // tick—comfortably inside the stage's 7 s deadline (HW legs answered in
 // ~250 ms). Only the capture-established legacy POINT layout can prove a dark
@@ -4159,7 +4452,7 @@ static void ringSetupServiceDarkProbe() {
   const uint32_t nowMs = millis();
   if (sSetupOwner.darkProbeLastMs != 0 &&
       (uint32_t)(nowMs - sSetupOwner.darkProbeLastMs) < 1500u) return;
-  const uint8_t subCmd = sR1Profile == R1_PROFILE_FW_2_2_9_0003
+  const uint8_t subCmd = r1ProfileSupportsHealthPageRefresh(sR1Profile)
                              ? R1_SUB_DAILY
                              : R1_SUB_POINT;
   const R1Frame probe =
@@ -4194,6 +4487,36 @@ static bool ringSetupRingProvenDark() {
   if (sSetupOwner.darkProbesSent == 0) return false;
   const uint32_t ts = sRingTsSeen;
   return ts != 0 && !Clock::isValidEpoch((time_t)ts);
+}
+
+// advStart names both temples of the glasses the ring belongs to. A connected
+// temple supplies its own address; a temple that is down (the left one carries
+// no ring traffic and drops more often) falls back to the saved G2 pair. The
+// saved pair is used only when both of its addresses parse and every connected
+// temple matches it, so a newly paired pair never mixes with the old saved
+// half. No live or saved address for a temple still fails setup closed.
+static bool ringResolveAdvIdentity(bool haveLiveRight, const uint8_t liveRight[6],
+                                   bool haveLiveLeft, const uint8_t liveLeft[6],
+                                   const char* savedRight, const char* savedLeft,
+                                   uint8_t right[6], uint8_t left[6],
+                                   bool* usedSaved) {
+  static const uint8_t kZero[6] = {};
+  uint8_t storedRight[6]{};
+  uint8_t storedLeft[6]{};
+  const bool savedValid = macParse(savedRight, storedRight) &&
+                          macParse(savedLeft, storedLeft) &&
+                          memcmp(storedRight, kZero, 6) != 0 &&
+                          memcmp(storedLeft, kZero, 6) != 0;
+  const bool savedMatches =
+      savedValid &&
+      (!haveLiveRight || memcmp(liveRight, storedRight, 6) == 0) &&
+      (!haveLiveLeft || memcmp(liveLeft, storedLeft, 6) == 0);
+  if (usedSaved) *usedSaved = false;
+  if ((!haveLiveRight || !haveLiveLeft) && !savedMatches) return false;
+  memcpy(right, haveLiveRight ? liveRight : storedRight, 6);
+  memcpy(left, haveLiveLeft ? liveLeft : storedLeft, 6);
+  if (usedSaved) *usedSaved = !haveLiveRight || !haveLiveLeft;
+  return true;
 }
 
 static void ringServiceSetup() {
@@ -4241,16 +4564,31 @@ static void ringServiceSetup() {
         break;
       }
       case G2_RING_SETUP_ADV_START: {
+        uint8_t liveRight[6]{};
+        uint8_t liveLeft[6]{};
+        const bool haveRight = g2GetRightTempleMac(liveRight);
+        const bool haveLeft = g2GetLeftTempleMac(liveLeft);
+        BlePeerSavedTargetSnapshot saved{};
+        (void)blePeerSavedTargetSnapshot(BLE_PEER_G2_GLASSES, saved);
         uint8_t right[6]{};
         uint8_t left[6]{};
-        const bool haveRight = g2GetRightTempleMac(right);
-        const bool haveLeft = g2GetLeftTempleMac(left);
+        bool usedSaved = false;
+        const bool identityKnown = ringResolveAdvIdentity(
+            haveRight, liveRight, haveLeft, liveLeft, saved.target.mac2,
+            saved.target.mac1, right, left, &usedSaved);
         portENTER_CRITICAL(&sTransportMux);
-        sControlStatus.advIdentityKnown = haveRight && haveLeft;
+        sControlStatus.advIdentityKnown = identityKnown;
         portEXIT_CRITICAL(&sTransportMux);
-        if (!haveRight || !haveLeft) {
+        if (!identityKnown) {
           ringFinishSetup(false, G2_RING_ERR_IDENTITY_UNKNOWN);
           return;
+        }
+        if (usedSaved) {
+          INFO_RINGF("advStart uses the saved glasses address for the %s "
+                     "temple (not connected)",
+                     !haveRight && !haveLeft ? "right and left"
+                     : !haveRight            ? "right"
+                                             : "left");
         }
         sSetupOwner.frame = gR1Encoder.buildAdvStart(sR1Profile, right, left);
         break;
@@ -4617,6 +4955,14 @@ static void ringServiceHistoryCoordinator() {
   }
 
   if (sHistoryCoordinator.metricIndex >= sizeof(kMetrics)) {
+    if (ringDailyAckWaitsForHistory(sR1Profile)) {
+      const uint32_t now = millis();
+      if (sHistoryCoordinator.settleSinceMs == 0) {
+        sHistoryCoordinator.settleSinceMs = now != 0 ? now : 1;
+      }
+      if (!ringHistorySweepSettled(now, sHistoryCoordinator.settleSinceMs,
+                                   sLastHealthPageRxMs)) return;
+    }
     const bool success = sHistoryCoordinator.firstError == G2_RING_ERR_NONE;
     const uint8_t error = sHistoryCoordinator.firstError;
     DEBUG_RING_HEALTHF("[RING] history sweep %s error=%s",
@@ -4722,11 +5068,54 @@ static void ringServiceHealthPageRefreshCoordinator() {
     return;
   }
 
+  if (refresh.phase == RING_HEALTH_REFRESH_WAIT_BACKLOG) {
+    if (ringDeadlinePassed(refresh.deadlineMs)) {
+      ringFinishHealthPageRefresh(
+          refresh.id, refresh.generation, false,
+          refresh.dailyVerifiedCount != 0, G2_RING_ERR_TIMEOUT);
+      return;
+    }
+    // The previous round's day must be persisted first; a sweep started over
+    // an uncommitted day is dropped by the history model.
+    if (!g2HealthHistoryReadyForFetch()) return;
+    bool admitted = false;
+    portENTER_CRITICAL(&sTransportMux);
+    if (sHealthPageRefresh.id == refresh.id &&
+        sHealthPageRefresh.generation == refresh.generation &&
+        sHealthPageRefresh.phase == RING_HEALTH_REFRESH_WAIT_BACKLOG &&
+        !sHistorySweepActive && !sHistorySweepClaimed &&
+        !sHistoryRefreshRequested) {
+      sHealthPageRefresh.dailyBaselineSequence =
+          sHistorySweepCompletionSequence;
+      sHealthPageRefresh.deadlineMs =
+          millis() + RING_HEALTH_PAGE_REFRESH_TIMEOUT_MS;
+      sHealthPageRefresh.dailyCompleted = false;
+      sHealthPageRefresh.phase = RING_HEALTH_REFRESH_WAIT_DAILY;
+      sHistoryRefreshRequested = true;
+      sHistoryRefreshForce = true;
+      sHistoryRefreshExclusive = true;
+      sHistoryRefreshGeneration = refresh.generation;
+      admitted = true;
+    }
+    portEXIT_CRITICAL(&sTransportMux);
+    if (admitted) {
+      DEBUG_RING_HEALTHF(
+          "[RING] Health-page refresh id=%lu backlog round %u admitted",
+          (unsigned long)refresh.id, (unsigned)(refresh.dailyRounds + 1));
+      ringWakeOwner();
+    }
+    return;
+  }
+
   if (refresh.phase == RING_HEALTH_REFRESH_WAIT_DAILY) {
     bool dailyFinished = false;
     bool dailySuccessful = false;
     uint8_t dailyError = G2_RING_ERR_NONE;
     uint8_t dailyVerified = 0;
+    bool backlogRound = false;
+    // ringFinishHistorySweep (same owner task) publishes the backlog verdict
+    // before it advances the completion sequence checked below.
+    const bool backlogPending = g2HealthHistoryBacklogPending();
     portENTER_CRITICAL(&sTransportMux);
     if (sHealthPageRefresh.id == refresh.id &&
         sHealthPageRefresh.generation == refresh.generation &&
@@ -4741,10 +5130,24 @@ static void ringServiceHealthPageRefreshCoordinator() {
       sHealthPageRefresh.dailySuccessful = dailySuccessful;
       sHealthPageRefresh.dailyError = dailyError;
       sHealthPageRefresh.dailyVerifiedCount = dailyVerified;
-      sHealthPageRefresh.phase = RING_HEALTH_REFRESH_QUEUE_DEVICE_STATUS;
+      ++sHealthPageRefresh.dailyRounds;
+      backlogRound = backlogPending &&
+          sHealthPageRefresh.dailyRounds < RING_HEALTH_PAGE_REFRESH_MAX_ROUNDS;
+      sHealthPageRefresh.phase = backlogRound
+          ? RING_HEALTH_REFRESH_WAIT_BACKLOG
+          : RING_HEALTH_REFRESH_QUEUE_DEVICE_STATUS;
+      if (backlogRound) {
+        sHealthPageRefresh.deadlineMs =
+            millis() + RING_HEALTH_PAGE_REFRESH_TIMEOUT_MS;
+      }
     }
     portEXIT_CRITICAL(&sTransportMux);
-    if (dailyFinished) {
+    if (dailyFinished && backlogRound) {
+      DEBUG_RING_HEALTHF(
+          "[RING] Health-page refresh id=%lu round %u left newer days on the ring",
+          (unsigned long)refresh.id, (unsigned)(refresh.dailyRounds + 1));
+      ringWakeOwner();
+    } else if (dailyFinished) {
       DEBUG_RING_HEALTHF(
           "[RING] Health-page refresh id=%lu DAILY done ok=%d verified=%u error=%s",
           (unsigned long)refresh.id, (int)dailySuccessful,
@@ -4843,12 +5246,32 @@ static void ringServiceHealthPageRefreshCoordinator() {
 static void ringOwnerTask(void* /*arg*/) {
   uint32_t ownedGeneration = 0;
   for (;;) {
+    // Published by the owner about itself: status readers never hold this
+    // task's handle, which is invalid the moment the owner has exited.
+    sRingOwnerStackFreeMin.store(
+        (uint32_t)uxTaskGetStackHighWaterMark(nullptr));
     uint32_t currentGeneration = 0;
     const bool online = ringSnapshotLink(currentGeneration);
     if (ownedGeneration != 0 &&
         (!online || currentGeneration != ownedGeneration)) {
       ringDropOwnedGeneration(ownedGeneration);
       ownedGeneration = 0;
+    }
+    // Cooperative exit for g2RingOwnerRelease(), only with the link logically
+    // down: nothing is owned here and no TX gate or writeMutex is held. The
+    // owner alone nulls its handle, under the mux, and deletes itself at once;
+    // no other call sits between the two, so a release that sees a null
+    // handle sees a task that is gone or has nothing left to do.
+    if (!online) {
+      portENTER_CRITICAL(&sRingOwnerMux);
+      if (sRingOwnerStop) {
+        sRingOwnerStop = false;
+        sRingOwnerStackFreeMin.store(RING_OWNER_STACK_BYTES);
+        sRingOwnerTask = nullptr;
+        portEXIT_CRITICAL(&sRingOwnerMux);
+        vTaskDelete(nullptr);
+      }
+      portEXIT_CRITICAL(&sRingOwnerMux);
     }
     if (online && currentGeneration != 0 &&
         ownedGeneration != currentGeneration && sSetupRequested) {
@@ -4867,7 +5290,7 @@ static void ringOwnerTask(void* /*arg*/) {
         (sActivePacketAck.valid || sPacketAckCount != 0)) {
       (void)ringServicePacketAck();
       if (sActivePacketAck.valid || sPacketAckCount != 0) {
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+        (void)xSemaphoreTake(sRingWake, pdMS_TO_TICKS(10));
         continue;
       }
     }
@@ -4903,7 +5326,7 @@ static void ringOwnerTask(void* /*arg*/) {
         ringSnapshotLink(currentServiceGeneration) &&
         ownedGeneration == currentServiceGeneration) {
       if (ringServicePacketAck()) {
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+        (void)xSemaphoreTake(sRingWake, pdMS_TO_TICKS(10));
         continue;
       }
       if (sSetupOwner.active) {
@@ -4921,8 +5344,33 @@ static void ringOwnerTask(void* /*arg*/) {
         }
       }
     }
-    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+    (void)xSemaphoreTake(sRingWake, pdMS_TO_TICKS(20));
   }
+}
+
+// Create r1_owner when none exists; true when an owner is present afterwards.
+// Owner-only state is re-established exactly as the first init does, strictly
+// before the task can exist: sActiveTransaction sits in NOLOAD PSRAM and boots
+// zeroed (its NSDMI defaults were discarded), and the RX ingress is emptied.
+// Callers hold the open/close serialization (g2RingInit, the stack owner), so
+// this never runs beside g2RingOwnerRelease; after a release the link is
+// logically down and the RX slabs are free. sRingWake already exists.
+static bool ringOwnerEnsure() {
+  portENTER_CRITICAL(&sRingOwnerMux);
+  const bool present = sRingOwnerTask != nullptr;
+  if (!present) sRingOwnerStop = false;
+  portEXIT_CRITICAL(&sRingOwnerMux);
+  if (present) return true;
+  sActiveTransaction = RingActiveTransaction{};
+  ringResetRxIngressForInit();
+  sRingOwnerStackFreeMin.store(RING_OWNER_STACK_BYTES);
+  if (xTaskCreateLogged(ringOwnerTask, "r1_owner", RING_OWNER_STACK_BYTES,
+                        nullptr, 4,
+                        &sRingOwnerTask, "r1.owner", PRO_CORE) != pdPASS) {
+    DEBUG_RING_LIFECYCLEF("[RING] owner task creation failed");
+    return false;
+  }
+  return true;
 }
 
 // =============================================================================
@@ -4960,7 +5408,7 @@ class RingClientCallbacks : public BLEClientCallbacks {
 // The shared G2 scan callback (G2_Glasses.cpp) also stashes ring adverts as a
 // side effect, but that scan early-terminates the moment both temples are
 // found. The R1's slower advert cycle (battery-saving) often falls outside
-// that ~3-5s window, so the ring goes undetected and `ringconnect` bails.
+// that ~3-5s window, so the ring goes undetected and `openring` bails.
 //
 // This dedicated scan uses a separate callback that ONLY watches for
 // "EVEN R1_XXXXXX" adverts. It runs for the full requested timeout (no
@@ -4969,7 +5417,7 @@ class RingClientCallbacks : public BLEClientCallbacks {
 // Caveat: scanning while the glasses are connected splits BLE-controller
 // time between scan and the active connections, lowering scan duty-cycle.
 // If the ring stays elusive: physically tap it to wake, check battery, or
-// run a longer scan (e.g. `ringscan 60`). If still nothing, the ring may
+// run a longer scan (e.g. `ring scan 60`). If still nothing, the ring may
 // already be paired with another central (phone) and refusing connectable
 // advertising.
 
@@ -4979,6 +5427,10 @@ static uint16_t gRingScanCallbacksInFlight = 0;
 static uint32_t gRingScanEpoch = 0;
 static uint32_t gRingScanCancelGeneration = 0;
 static bool gRingScanCallbackQuarantined = false;
+// The polled scan's end: its own end (the completion callback), an early stop
+// by the result callback on a find, or a stop request (preemption, cancel).
+static std::atomic<bool> gRingScanEnded{false}, gRingScanStoppedEarly{false},
+    gRingScanStopRequested{false};
 
 class RingScanCallbackClaim {
  public:
@@ -5084,6 +5536,7 @@ public:
       s++; hex++;
     }
     if (hex != 6 || *s != '\0') return;
+    bleCoexOnScanMatch(advertisedDevice.getRSSI());
 
     if (gRingAdvertisedDevice) return;  // already stashed (perhaps by G2 scan)
     BLEAdvertisedDevice* copy =
@@ -5096,17 +5549,28 @@ public:
     gRingAdvertisedDevice = copy;
     gRingDeviceName       = name;
     gRingDeviceAddress    = advertisedDevice.getAddress().toString().c_str();
-    g2RingSetIdentity(gRingDeviceName.c_str(), gRingDeviceAddress.c_str());
+    g2RingSetIdentity(gRingDeviceName.c_str());
     gRingScanFound        = true;
     DEBUG_RING_LIFECYCLEF("[RING] ringscan: Found %s @ %s (RSSI %d) — stashed",
               name.c_str(), gRingDeviceAddress.c_str(),
               advertisedDevice.getRSSI());
+    gRingScanStoppedEarly = true;
     BLEDevice::getScan()->stop();  // got it; bail out of remaining timeout
   }
 };
 static RingScanCallbacks gRingScanCallbacks;
 
-bool g2RingScan(uint32_t timeoutSec, uint32_t cancelGeneration) {
+// Only the worker stops its own scan (the poll sees this within 100 ms), so a
+// late request from another task can never stop the next client's scan.
+void g2RingScanStop() { gRingScanStopRequested = true; }
+void g2RingScanStopReset() { gRingScanStopRequested = false; }
+
+bool g2RingScan(uint32_t timeoutSec, uint32_t cancelGeneration,
+                bool endWhenOtherQueued) {
+  if (bleCentralRingShouldYield()) {
+    DEBUG_RING_LIFECYCLEF("[RING] Connect deferred: ring yields to enabled phone pipe below four links");
+    return false;
+  }
   if (cancelGeneration == 0) {
     cancelGeneration = ringConnectCancelGenerationSnapshot();
   }
@@ -5129,20 +5593,56 @@ bool g2RingScan(uint32_t timeoutSec, uint32_t cancelGeneration) {
     return false;
   }
 
-  scan->setAdvertisedDeviceCallbacks(&gRingScanCallbacks);
+  // wantDuplicates=true, as the G2 scans: the library then frees each report
+  // right after the callback instead of keeping one BLEAdvertisedDevice per
+  // advertiser (about 330 B of internal heap each) until the scan ends. The
+  // callback stashes its own copy of the one match and is idempotent on repeats
+  // (memory audit BLE-11).
+  scan->setAdvertisedDeviceCallbacks(&gRingScanCallbacks, true);
   scan->setActiveScan(true);
   scan->setInterval(100);
   scan->setWindow(99);
-  // BLEScan::start(durationSec, continueScanning=false) blocks the calling
-  // task until the scan completes — either by `timeoutSec` elapsing or by
-  // a callback calling stop() (which we do on first ring match).
   const uint32_t scanEpoch = ringScanCallbackBegin(cancelGeneration);
   if (scanEpoch == 0) {
     DEBUG_RING_LIFECYCLEF("[RING] ringscan: callback generation unavailable");
     return false;
   }
-  scan->start(timeoutSec, /*continueScanning*/ false);
-  if (!ringScanCallbackEnd(scanEpoch)) {
+  // A stop request is kept from the start of the job (ringSetupRun clears it),
+  // so one made before start() still ends this scan.
+  gRingScanEnded = false;
+  gRingScanStoppedEarly = false;
+  bleCoexScanBegin(hw1coex::Peer::Ring, hw1coex::Purpose::Discovery, 160, 158, true, false,
+                   uint8_t(timeoutSec > 255 ? 255 : timeoutSec));
+  // The non-blocking start, polled every 100 ms, so a stop request, a cancel
+  // or (for a manual scan) another client's queued job ends it early.
+  const bool started = scan->start(timeoutSec, [](BLEScanResults) { gRingScanEnded = true; }, false);
+  bool cut = false;
+  const uint32_t deadline = millis() + timeoutSec * 1000u + 1000u;
+  while (started && (int32_t)(millis() - deadline) < 0) {
+    if (gRingScanEnded || gRingScanStoppedEarly) break;
+    if (gRingScanStopRequested || bleCentralRingShouldYield() ||
+        !ringConnectGenerationCurrent(cancelGeneration)) {
+      cut = true;
+      break;
+    }
+    if (endWhenOtherQueued && bleSetupOtherQueued(BleSetupClient::Ring)) {
+      INFO_RINGF("ringscan ended early: another BLE setup is waiting");
+      cut = true;
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+  // Unless the scan ended on its own or the result callback stopped it, stop
+  // it here. That also frees the scanner's end semaphore, which the next
+  // start() takes first, if the scan's end event was lost.
+  if (started && !gRingScanEnded && !gRingScanStoppedEarly) scan->stop();
+  const bool scanQuiesced = ringScanCallbackEnd(scanEpoch);
+  bleCoexScanEnd(!started ? hw1coex::ScanOutcome::StartFailed
+                 : !scanQuiesced || cut || !ringConnectGenerationCurrent(cancelGeneration)
+                     ? hw1coex::ScanOutcome::Aborted
+                 : bleCoexScanMatches() ? hw1coex::ScanOutcome::Found
+                                        : hw1coex::ScanOutcome::Missed);
+  if (!scanQuiesced) {
     DEBUG_RING_LIFECYCLEF("[RING] ringscan: callback did not quiesce; host quarantined");
     return false;
   }
@@ -5154,19 +5654,24 @@ bool g2RingScan(uint32_t timeoutSec, uint32_t cancelGeneration) {
   }
 
   if (gRingAdvertisedDevice) {
-    INFO_RINGF("ringscan: found %s @ %s",
-               gRingDeviceName.c_str(), gRingDeviceAddress.c_str());
+    INFO_RINGF("ringscan: found %s", gRingDeviceName.c_str());
     return true;
   }
+  if (!started) {
+    DEBUG_RING_LIFECYCLEF("[RING] ringscan: scanner refused to start");
+    return false;
+  }
+  if (cut) return false;
 
   DEBUG_RING_LIFECYCLEF("[RING] ringscan: timed out after %us — ring not advertising. "
             "Try: tap the ring to wake it, check battery, move it closer, "
-            "or run 'ringscan 60' for a longer window.",
+            "or run 'ring scan 60' for a longer window.",
             (unsigned)timeoutSec);
   return false;
 }
 
 bool g2RingScanAsync(uint32_t timeoutSec) {
+  if (bleCentralRingShouldYield()) return false;  // see g2RingConnect
   if (!g2RingInit()) return false;
   uint32_t cancelGeneration = 0;
   if (!ringConnectGateOpen(&cancelGeneration)) return false;
@@ -5219,7 +5724,7 @@ struct GlassesPriorityGuard {
 // are gone; only the worker calls this.
 static bool ringRequestCurrent(const BlePeerConnectRequest* request,
                                uint32_t cancelGeneration) {
-  if (!ringConnectGenerationCurrent(cancelGeneration)) return false;
+  if (bleCentralRingShouldYield() || !ringConnectGenerationCurrent(cancelGeneration)) return false;
   if (!request) return true;
   if (!request->autoReconnect && !request->explicitReseek) {
     return blePeerIntentIsCurrent(BLE_PEER_R1_RING,
@@ -5241,9 +5746,53 @@ static bool ringAbortSupersededRequest(
   return true;
 }
 
+bool g2RingConnectRequestCurrent(const BlePeerConnectRequest* request,
+                                 uint32_t cancelGeneration) {
+  return ringRequestCurrent(request, cancelGeneration);
+}
+
+#if ENABLE_MICROPHONE
+// BALANCED ring-connect intervals deliver only ~15 G2 mic notifications/s
+// versus the 20/s required by a live recorder, so an actual G2 recording
+// gets priority. `audioCaptureActive()` is deliberately NOT the authority:
+// mic autostart/openmic holds that HAL lease indefinitely even while the
+// recorder is IDLE. ESP-SR and local transcription are separate continuous
+// consumers and remain throughput-critical reasons to wait. A WAV/EvenAI
+// recording has a hard 60 s capture cap, so the queued job's 90 s bound
+// (kRingAudioWaitLimitMs) covers its finalization.
+bool g2RingAudioThroughputCritical() {
+  return audioGetSource() == AUDIO_SRC_G2_LEFT &&
+         (micRecordingBusy() || audioCaptureOwnedBy("sr") ||
+          audioCaptureOwnedBy("stt"));
+}
+
+void g2RingNoteAudioWait() {
+  INFO_RINGF("connect queued: active G2 audio session — "
+             "waiting to start safely");
+}
+
+void g2RingNoteAudioWaitEnded(uint32_t waitedMs) {
+  INFO_RINGF("G2 audio idle — starting queued connect after "
+             "%lu.%03lus",
+             (unsigned long)(waitedMs / 1000u),
+             (unsigned long)(waitedMs % 1000u));
+}
+
+void g2RingNoteAudioWaitExpired(uint32_t waitedMs) {
+  WARN_RINGF("queued connect expired after %lus waiting "
+             "for G2 audio to become idle",
+             (unsigned long)(waitedMs / 1000u));
+  ringNoteConnectFailure("audio-wait", waitedMs);
+}
+#endif
+
 bool ringPerformConnect(const String& savedMac /* = String() */,
                         const BlePeerConnectRequest* expectedRequest,
                         uint32_t cancelGeneration) {
+  if (bleCentralRingShouldYield()) {
+    DEBUG_RING_LIFECYCLEF("[RING] Connect deferred: ring yields to enabled phone pipe below four links");
+    return false;
+  }
   if (cancelGeneration == 0) {
     cancelGeneration = ringConnectCancelGenerationSnapshot();
   }
@@ -5251,45 +5800,11 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
     DEBUG_RING_LIFECYCLEF("[RING] Connect request stale/cancelled before dispatch");
     return false;
   }
-#if ENABLE_MICROPHONE
-  // BALANCED ring-connect intervals deliver only ~15 G2 mic notifications/s
-  // versus the 20/s required by a live recorder, so an actual G2 recording
-  // gets priority. `audioCaptureActive()` is deliberately NOT the authority:
-  // mic autostart/openmic holds that HAL lease indefinitely even while the
-  // recorder is IDLE. ESP-SR and local transcription are separate continuous
-  // consumers and remain throughput-critical reasons to wait.
-  auto g2AudioThroughputCritical = []() {
-    return audioGetSource() == AUDIO_SRC_G2_LEFT &&
-           (micRecordingBusy() || audioCaptureOwnedBy("sr") ||
-            audioCaptureOwnedBy("stt"));
-  };
-
-  if (g2AudioThroughputCritical()) {
-    const uint32_t waitStartedMs = millis();
-    INFO_RINGF("connect queued: active G2 audio session — "
-               "waiting to start safely");
-    while (g2AudioThroughputCritical()) {
-      if (!ringRequestCurrent(expectedRequest, cancelGeneration)) return false;
-      const uint32_t waitedMs = (uint32_t)(millis() - waitStartedMs);
-      if (waitedMs >= RING_AUDIO_DEFER_TIMEOUT_MS) {
-        WARN_RINGF("queued connect expired after %lus waiting "
-                   "for G2 audio to become idle",
-                   (unsigned long)(waitedMs / 1000u));
-        ringNoteConnectFailure("audio-wait", waitedMs);
-        return false;
-      }
-      vTaskDelay(pdMS_TO_TICKS(RING_AUDIO_DEFER_POLL_MS));
-    }
-    const uint32_t waitedMs = (uint32_t)(millis() - waitStartedMs);
-    INFO_RINGF("G2 audio idle — starting queued connect after "
-               "%lu.%03lus",
-               (unsigned long)(waitedMs / 1000u),
-               (unsigned long)(waitedMs % 1000u));
-  }
-  // A recorder can still start immediately after this check. Preserving an
-  // already-started voice request would require a cross-subsystem admission
-  // fence; the existing delivered-rate watchdog surfaces that narrow race.
-#endif
+  // The wait for G2 audio to go idle happens before the job's turn (the ring's
+  // ready() on the setup worker). A recorder can still start right after it.
+  // Preserving an already-started voice request would require a
+  // cross-subsystem admission fence; the existing delivered-rate watchdog
+  // surfaces that narrow race.
   // Drop glasses to BALANCED for the entire connect attempt. Auto-restored
   // on any return path. Cheap no-op if no glasses are connected.
   GlassesPriorityGuard prio_guard;
@@ -5304,10 +5819,10 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
     // on glasses-found which often misses the ring's slower advert cycle.
     DEBUG_RING_LIFECYCLEF("[RING] connect: no advertisedDevice stashed; running "
               "dedicated ring scan (15s)...");
-    if (!g2RingScan(15, cancelGeneration) || !gRingAdvertisedDevice) {
-      DEBUG_RING_LIFECYCLEF("[RING] connect: ring not visible — try 'ringscan 60' with "
+    if (!g2RingScan(15, cancelGeneration, false) || !gRingAdvertisedDevice) {
+      DEBUG_RING_LIFECYCLEF("[RING] connect: ring not visible — try 'ring scan 60' with "
                 "the ring close + woken (tap it) first, then retry "
-                "'ringconnect'");
+                "'openring'");
       return false;
     }
     if (!ringRequestCurrent(expectedRequest, cancelGeneration)) return false;
@@ -5335,7 +5850,7 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
     // (measured ~10-14 KB per drop on the glasses path) — but freeing it is
     // only legal once nothing can still reach it:
     //
-    // Gate 1 — the library. After a MANUAL ringdisconnect, clientStale was
+    // Gate 1 — the library. After a MANUAL ring disconnect, clientStale was
     // set by us, not by onDisconnect, so the async DISCONNECT_EVT (which
     // unregisters the gattc app and pulls the client out of BLEDevice's
     // routing map) may still be in flight — the R1's power-save conn
@@ -5360,6 +5875,11 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
     xSemaphoreGive(gRing.writeMutex);
     if (!retired) return false;
     gRing.clientStale = false;
+  }
+  BleCentralLinkGuard link(BleCentralLink::Ring);
+  if (!link) {
+    DEBUG_RING_LIFECYCLEF("[RING] Connect deferred: central link capacity");
+    return false;
   }
   if (!gRing.client) {
     gRing.clientStale = false;
@@ -5403,17 +5923,24 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
     // OPEN event into a forever-wedged connect worker (root-cause candidate
     // for the 2026-07-28 2h no-reconnect window). 35s clears the ring's
     // normal ~30s direct-connect timeout with margin.
+    link.retain(gRing.client);
+    bleCoexConnectBegin(hw1coex::Peer::Ring, hw1coex::Purpose::Saved, addr.getNative());
     connOk = gRing.client->connect(addr, addrType, 35000);
     if (connOk) {
       // Populate the cached descriptors so subsequent disconnect / status
       // paths print sensible names.
       gRingDeviceAddress = savedMac;
       if (gRingDeviceName.length() == 0) gRingDeviceName = "saved-ring";
-      g2RingSetIdentity(gRingDeviceName.c_str(), gRingDeviceAddress.c_str());
+      g2RingSetIdentity(gRingDeviceName.c_str());
     }
   } else {
     // Same 35s bound as the saved-MAC path (the plain connect(device)
     // overload hardwires the portMAX_DELAY default).
+    link.retain(gRing.client);
+    {
+      BLEAddress target = gRingAdvertisedDevice->getAddress();
+      bleCoexConnectBegin(hw1coex::Peer::Ring, hw1coex::Purpose::Discovery, target.getNative());
+    }
     connOk = gRing.client->connectTimeout(gRingAdvertisedDevice, 35000);
   }
   // Classify BOTH overloads above (the saved-MAC path takes a BLEAddress, so
@@ -5422,9 +5949,9 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
   bleNoteClientConnectOutcome(gRing.client, connOk, millis() - t0, "RING");
   if (!connOk) {
     const uint32_t dt = millis() - t0;
-    ERROR_RINGF("BLE connect FAILED after %u ms (%s)",
+    ERROR_RINGF("BLE connect FAILED after %u ms (%s target)",
                 (unsigned)dt,
-                useSavedMac ? savedMac.c_str() : "scan target");
+                useSavedMac ? "saved" : "scan");
     ringNoteConnectFailure("link", dt);
     (void)bleQuarantineClientAfterFailedConnect(
         gRing.client, BLE_CLIENT_RETIRE_R1,
@@ -5618,7 +6145,10 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
 // =============================================================================
 
 bool g2RingInit() {
-  if (gRing.initialized) return true;
+  // Idempotent while the owner lives. After g2RingOwnerRelease() this brings
+  // r1_owner back without repeating the boot-once self-tests, the settings
+  // clamp or the peer registration.
+  if (gRing.initialized) return ringOwnerEnsure();
   bleCentralTxInit();
   if (!gRing.writeMutex) {
     gRing.writeMutex = xSemaphoreCreateMutex();
@@ -5631,7 +6161,12 @@ bool g2RingInit() {
   if (!sSetupDone) {
     sSetupDone = xSemaphoreCreateBinaryStatic(&sSetupDoneStorage);
   }
-  if (!sRxQueue || !sSetupDone || !ringTelemetryMutex()) return false;
+  if (!sRingWake) {
+    sRingWake = xSemaphoreCreateBinaryStatic(&sRingWakeStorage);
+  }
+  if (!sRxQueue || !sSetupDone || !sRingWake || !ringTelemetryMutex()) {
+    return false;
+  }
   ringResetRxIngressForInit();
   if (!ringStorageSelfTest()) {
     DEBUG_RING_LIFECYCLEF("[RING] Module disabled: storage self-test failed");
@@ -5669,17 +6204,7 @@ bool g2RingInit() {
     DEBUG_RING_LIFECYCLEF("[RING] Module disabled: protocol self-test failed");
     return false;
   }
-  if (!sRingOwnerTask) {
-    // sActiveTransaction sits in NOLOAD PSRAM and boots zeroed — its NSDMI
-    // defaults were discarded. Re-establish them strictly before the owner
-    // task can exist. Guarded so a re-entrant init after a mid-way failure
-    // never writes the struct while a live owner task uses it.
-    sActiveTransaction = RingActiveTransaction{};
-  }
-  if (!sRingOwnerTask &&
-      xTaskCreateLogged(ringOwnerTask, "r1_owner", RING_OWNER_STACK_BYTES,
-                        nullptr, 4,
-                        &sRingOwnerTask, "r1.owner", PRO_CORE) != pdPASS) {
+  if (!ringOwnerEnsure()) {
     DEBUG_RING_LIFECYCLEF("[RING] Module disabled: owner task creation failed");
     return false;
   }
@@ -5689,7 +6214,108 @@ bool g2RingInit() {
   return true;
 }
 
+// The ring as a device on the shared client stack (BLE_CentralStack.cpp).
+// Open = the r1_owner task exists; the static objects g2RingInit() creates
+// once stay for the boot's lifetime.
+bool g2RingIsOpen() {
+  portENTER_CRITICAL(&sRingOwnerMux);
+  const bool open = sRingOwnerTask != nullptr;
+  portEXIT_CRITICAL(&sRingOwnerMux);
+  return open;
+}
+
+void g2RingRegisterPeer() {
+  // ringPeerSpec is file-static; registration publishes a stable pointer, so
+  // the reconnect scheduler can admit the ring before its owner exists (the
+  // admission thunk opens it).
+  bleRegisterPeer(ringPeerSpec);
+}
+
+bool g2RingOpen() {
+  // The stack stays up until `closeble`; bringing it up here is `openring` on
+  // a radio that is off (like `openwifi`).
+  if (!bleStackUp()) return false;   // bleStackLastRefusal() says why
+  return g2RingInit();
+}
+
+bool g2RingClose(bool userInitiated) {
+  if (!g2RingIsOpen()) return true;
+  // Link down first (a user close stamps the peer's intent so auto-reconnect
+  // stays quiet; a stack close keeps it), then the native client goes back to
+  // the host through the retirement registry (deleting it here would race the
+  // async DISCONNECT_EVT; leaving it would hold its 10-14 KB until the next
+  // connect's reap), then the owner task leaves. Each step fails closed: a
+  // deferral keeps the ring open and the caller retries.
+  g2RingDisconnect(userInitiated);
+#if ENABLE_BLE_PHONE_PIPE
+  // A yield retirement still queued on the setup worker would retire a client
+  // this close retires itself: take it back.
+  (void)bleSetupWithdraw(BleSetupClient::RingRetire, 0);
+#endif
+  if (gRing.client) {
+    const bool locked = !gRing.writeMutex ||
+        xSemaphoreTake(gRing.writeMutex, pdMS_TO_TICKS(500)) == pdTRUE;
+    if (!locked) {
+      DEBUG_RING_LIFECYCLEF("[RING] Close deferred: owner write still active");
+      return false;
+    }
+    const bool retired = bleRetireClientForReplacement(
+        gRing.client, BLE_CLIENT_RETIRE_R1, (uint8_t)BLE_PEER_R1_RING, "RING-CLOSE");
+    if (gRing.writeMutex) xSemaphoreGive(gRing.writeMutex);
+    if (!retired) {
+      DEBUG_RING_LIFECYCLEF("[RING] Close deferred: native client not retired");
+      return false;
+    }
+    gRing.clientStale = false;
+  }
+  if (!g2RingOwnerRelease(1000)) {
+    DEBUG_RING_LIFECYCLEF("[RING] Close deferred: owner task kept (busy)");
+    return false;
+  }
+  return true;
+}
+
+// Precondition: the caller has already run g2RingDisconnect(...) or
+// g2RingPrepareForStackTeardown(), so the link is logically down and the RX
+// slabs are free; the owner exits only while the link is down (see the top of
+// its lap). Fail closed: on timeout the stop request is withdrawn and the owner
+// is kept, so a later lap cannot delete a task a caller has stopped waiting for.
+bool g2RingOwnerRelease(uint32_t timeoutMs) {
+  // The owner cannot wait for its own exit.
+  const TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  portENTER_CRITICAL(&sRingOwnerMux);
+  const TaskHandle_t owner = sRingOwnerTask;
+  if (owner && owner != self) sRingOwnerStop = true;
+  portEXIT_CRITICAL(&sRingOwnerMux);
+  if (!owner) return true;
+  if (owner == self) {
+    WARN_RINGF("owner release refused from the owner task");
+    return false;
+  }
+  ringWakeOwner();
+  const uint32_t started = millis();
+  for (;;) {
+    portENTER_CRITICAL(&sRingOwnerMux);
+    const bool gone = sRingOwnerTask == nullptr;
+    portEXIT_CRITICAL(&sRingOwnerMux);
+    if (gone || millis() - started >= timeoutMs) break;
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  portENTER_CRITICAL(&sRingOwnerMux);
+  sRingOwnerStop = false;
+  const bool released = sRingOwnerTask == nullptr;
+  portEXIT_CRITICAL(&sRingOwnerMux);
+  if (!released) {
+    WARN_RINGF("owner release timed out after %lu ms; owner kept",
+               (unsigned long)timeoutMs);
+  }
+  return released;
+}
+
 bool g2RingConnect() {
+  // Same rule as ringPeerConnectSavedAdmissionThunk: never queue ring work the
+  // worker would hold the setup gate for and then refuse.
+  if (bleCentralRingShouldYield()) return false;
   if (!g2RingInit()) return false;
   uint32_t cancelGeneration = 0;
   // Group B: submit to the unified worker. Active flag flips true here so
@@ -5719,6 +6345,7 @@ bool g2RingConnect() {
 }
 
 bool g2RingConnectSaved() {
+  if (bleCentralRingShouldYield()) return false;  // see g2RingConnect
   if (!g2RingInit()) return false;
   uint32_t cancelGeneration = 0;
   BlePeerConnectRequest request;
@@ -5746,7 +6373,7 @@ bool g2RingConnectSaved() {
 
 static BlePeerConnectAdmission ringPeerConnectSavedAdmissionThunk(
     const BlePeerConnectRequest& request) {
-  if (!isG2ClientInitialized() || isBleServerInitialized() ||
+  if (!bleStackReady() || isBleServerInitialized() ||
       bleRoleTransitionState() != BleRoleTransition::IDLE) {
     return BlePeerConnectAdmission::ROLE_BLOCKED;
   }
@@ -5758,6 +6385,27 @@ static BlePeerConnectAdmission ringPeerConnectSavedAdmissionThunk(
   }
   if (!blePeerConnectRequestIsCurrent(BLE_PEER_R1_RING, request)) {
     return BlePeerConnectAdmission::ROLE_BLOCKED;
+  }
+  // While the enabled phone pipe owns the spare link (fewer than four), the
+  // worker would wait for the setup gate, holding a Waiting phone back, only
+  // for ringPerformConnect to refuse. So refuse before any job or gate:
+  // ROLE_BLOCKED spends no ladder step and
+  // retries in 15 s, so the ring returns soon after the pipe stops. The
+  // reason is logged once per pause, not on every retry.
+  static bool sYieldLogged = false;
+  if (bleCentralRingShouldYield()) {
+    if (!sYieldLogged) {
+      DEBUG_RING_LIFECYCLEF("[RING] Reconnect paused: ring yields to the enabled phone pipe below four links");
+      sYieldLogged = true;
+    }
+    return BlePeerConnectAdmission::ROLE_BLOCKED;
+  }
+  sYieldLogged = false;
+  // The ring is a device on the shared stack: closed, it opens on the first
+  // admitted reconnect (boot, `openble`, a recycle), as `openring` opens it.
+  // A refused open (owner task memory) is retried on the BUSY backoff.
+  if (!g2RingIsOpen() && !g2RingInit()) {
+    return BlePeerConnectAdmission::BUSY;
   }
   uint32_t cancelGeneration = 0;
   if (!ringConnectGateOpen(&cancelGeneration)) {
@@ -5786,6 +6434,7 @@ bool g2RingConnectMac(const String& mac) {
               m.c_str());
     return false;
   }
+  if (bleCentralRingShouldYield()) return false;  // see g2RingConnect
   if (!g2RingInit()) return false;
   uint32_t cancelGeneration = 0;
   BleConnectJob job{};
@@ -5816,8 +6465,9 @@ bool g2RingConnectMac(const String& mac) {
 
 bool g2RingPrepareForStackTeardown(uint32_t timeoutMs) {
   (void)ringBeginLogicalDown("disconnect");
-  // A manual scan can occupy the sole central worker for up to 300 seconds.
-  // Stop it only after releasing the completion mutex.
+  // A queued connect is taken back; a running one sees the new generation.
+  // Stop a running scan only after releasing the completion mutex.
+  g2RingWithdrawQueuedConnect();
   g2CancelActiveRingScan();
   portENTER_CRITICAL(&gRingScanCallbackMux);
   const bool scanCallbacksIdle = !gRingScanCallbackAdmission &&
@@ -5896,6 +6546,7 @@ void g2RingDisconnect(bool userInitiated) {
     portEXIT_CRITICAL(&gRingConnectMux);
     (void)ringBeginLogicalDown("disconnect", userInitiated);
   }
+  g2RingWithdrawQueuedConnect();
   g2CancelActiveRingScan();
   // Producer admission is now closed. The owner is a boot-lifetime task, so a
   // connected boolean alone is not a teardown barrier.
@@ -5926,7 +6577,7 @@ void g2RingDisconnect(bool userInitiated) {
   // deleting it here would race the async DISCONNECT_EVT still headed for it,
   // and the old null-without-delete leaked it (~10-14 KB) AND stranded
   // clientStale=true forever — the delete branch was the only reset, so a
-  // manual ringdisconnect → ringconnect came up connected-but-mute (every TX
+  // manual ring disconnect → ring connect came up connected-but-mute (every TX
   // gate checks clientStale).
   ringClearGattPointers(/*dropClientPtr=*/false);
   if (gRing.writeMutex) xSemaphoreGive(gRing.writeMutex);
@@ -5934,6 +6585,37 @@ void g2RingDisconnect(bool userInitiated) {
   portENTER_CRITICAL(&gRingConnectMux);
   gRingDisconnecting = false;
   portEXIT_CRITICAL(&gRingConnectMux);
+}
+
+void g2RingYieldToPhonePipe() {
+  if (!bleCentralRingShouldYield()) return;
+  // Cancel a scan that began before pipe enablement; an in-flight OPEN also
+  // rechecks ringRequestCurrent before publishing success.
+  g2CancelActiveRingScan();
+  // Nothing to retire without a native client. Without the client stack any
+  // ring client predates the current host (its teardown freed it); the next
+  // open normalizes the pointer.
+  if (!gRing.client || !bleStackReady()) return;
+#if ENABLE_BLE_PHONE_PIPE
+  // The retirement takes its turn on the setup worker, ahead of the ring and
+  // the phone. If it does not finish, the next main-loop pass asks again.
+  (void)g2SubmitRingRetire();
+#endif
+}
+
+bool g2RingRetireForPhonePipe() {
+  if (!bleCentralRingShouldYield() || !gRing.client) return true;
+  // Preserve user reconnect intent. Stop admission/writes through the existing
+  // owner, then retire the native client before releasing its capacity slot.
+  g2RingDisconnect(false);
+  const bool locked = !gRing.writeMutex ||
+      xSemaphoreTake(gRing.writeMutex, pdMS_TO_TICKS(50)) == pdTRUE;
+  if (!locked) return false;  // never free an active writer
+  const bool retired = bleRetireClientForReplacement(
+      gRing.client, BLE_CLIENT_RETIRE_R1, (uint8_t)BLE_PEER_R1_RING, "RING-YIELD");
+  if (gRing.writeMutex) xSemaphoreGive(gRing.writeMutex);
+  if (retired) gRing.clientStale = false;
+  return retired;
 }
 
 bool g2RingIsConnected() {
@@ -6022,23 +6704,20 @@ void g2RingGetTelemetry(G2RingTelemetry& out) {
 
 void g2RingGetStatus(char* buf, size_t cap) {
   if (!buf || cap == 0) return;
-  char name[32], addr[18];
-  g2RingCopyIdentity(name, sizeof(name), addr, sizeof(addr));
+  char name[32];
+  g2RingCopyIdentity(name, sizeof(name));
   const uint32_t nowMs = millis();
   const uint32_t upMs  = gRing.connected && gRing.connectedSince
                          ? (nowMs - gRing.connectedSince) : 0;
-  const uint32_t stackFree = sRingOwnerTask
-      ? (uint32_t)uxTaskGetStackHighWaterMark(sRingOwnerTask)
-      : RING_OWNER_STACK_BYTES;
+  const uint32_t stackFree = sRingOwnerStackFreeMin.load();
   const uint32_t stackUsed = stackFree < RING_OWNER_STACK_BYTES
       ? RING_OWNER_STACK_BYTES - stackFree
       : 0;
   snprintf(buf, cap,
-           "ring=%s name='%s' addr=%s mtu=%u rx=%lu up=%u.%03us "
+           "ring=%s name='%s' mtu=%u rx=%lu up=%u.%03us "
            "stack=%lu/%luB (scan=%s pending=%u)",
            gRing.connected ? "up" : "down",
            name[0] ? name : "<unknown>",
-           addr[0] ? addr : "--",
            (unsigned)gRing.mtu,
            (unsigned long)gRing.packetsReceived,
            (unsigned)(upMs / 1000), (unsigned)(upMs % 1000),
@@ -6050,20 +6729,17 @@ void g2RingGetStatus(char* buf, size_t cap) {
 
 bool g2RingBuildStatusJson(JsonObject out) {
   if (out.isNull()) return false;
-  char name[32], addr[18];
-  g2RingCopyIdentity(name, sizeof(name), addr, sizeof(addr));
+  char name[32];
+  g2RingCopyIdentity(name, sizeof(name));
   const uint32_t upMs = (gRing.connected && gRing.connectedSince)
       ? (millis() - gRing.connectedSince) : 0;
-  const uint32_t stackFree = sRingOwnerTask
-      ? (uint32_t)uxTaskGetStackHighWaterMark(sRingOwnerTask)
-      : RING_OWNER_STACK_BYTES;
+  const uint32_t stackFree = sRingOwnerStackFreeMin.load();
   const uint32_t stackUsed = stackFree < RING_OWNER_STACK_BYTES
       ? RING_OWNER_STACK_BYTES - stackFree : 0;
   out["schema"] = 1;
   out["connected"] = (bool)gRing.connected;
   out["connectPending"] = g2RingConnectInFlight();
-  out["name"] = JsonString(name, false);  // copied into the document: stack buffers
-  out["addr"] = JsonString(addr, false);
+  out["name"] = JsonString(name, false);  // copied into the document: stack buffer
   out["mtu"] = (unsigned)gRing.mtu;
   out["rx"] = (unsigned long)gRing.packetsReceived;
   out["upMs"] = (unsigned long)upMs;
@@ -6094,8 +6770,12 @@ static const char* cmd_ringstatus(const String& args) {
   return buf;
 }
 
-// ringconnect [mac]
+// openring [saved|reconnect|<mac>]
+//   Opens the ring on the shared Bluetooth client stack (bringing the stack up
+//   when it is off, like `openwifi`) and connects:
 //   No args: scan-then-connect (uses the new self-scan in ringDoConnect).
+//   saved: the saved address, the reconnect scheduler's own path.
+//   reconnect: drop, settle, connect (the lens "Reconnect Ring" row).
 //   With MAC: skip the scan entirely, attempt a direct BLE connection to
 //   that address. Use this when the ring is bonded to another central
 //   (e.g. your phone via the Even app) and so doesn't broadcast where
@@ -6105,8 +6785,30 @@ static const char* cmd_ringstatus(const String& args) {
 //     - "BLE connect FAILED after Nms" → ring not reachable / not advertising
 //       to us / already at its central-count limit
 //     - Hangs ~30s then times out → no response from peer at that address
-static const char* cmd_ringconnect(const String& args) {
+// The ring gives way to the enabled phone pipe on a radio with fewer than four
+// BLE links (BLE_CentralCoordinator.h), so its commands refuse up front. The
+// way out needs an admin: `closephone`, or a C6 with four links.
+static const char* ringYieldRefusal() {
+  if (currentExecIsAdmin()) {
+    cliHint("to use the ring now, run 'closephone'; to keep both, reflash the C6 "
+            "for four BLE links (tools/p4/companion/README.md)");
+  }
+  EXT_RAM_BSS_ATTR static char buf[96];
+  snprintf(buf, sizeof(buf),
+           "Error: RING: paused while the phone pipe is on (this radio allows %u BLE links)",
+           (unsigned)bleCentralLinkLimit());
+  return buf;
+}
+
+static const char* cmd_openring(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (bleCentralRingShouldYield()) return ringYieldRefusal();
+  if (!g2RingOpen()) {
+    if (bleStackReady()) return "Error: RING: open failed (the ring owner task could not start)";
+    EXT_RAM_BSS_ATTR static char why[160];
+    snprintf(why, sizeof(why), "Error: RING: the Bluetooth client stack is not up (%s)", bleStackLastRefusal());
+    return why;
+  }
   // This authenticated, user-originated command is the Ring pairing intent.
   // Automatic reconnect and passive MAC persistence must never manufacture
   // owner authority on their own.
@@ -6115,7 +6817,16 @@ static const char* cmd_ringconnect(const String& args) {
   String a0 = ca.arg(0);
   a0.toLowerCase();
 
-  // `ringconnect reconnect` — glasses R1 "Reconnect Ring" path. Same heap
+  if (a0 == "saved") {
+    if (g2RingIsConnected()) return "RING: already connected";
+    if (!g2RingConnectSaved()) {
+      if (bleCentralRingShouldYield()) return ringYieldRefusal();
+      return "Error: RING: saved-address connect not started (no saved ring, one already running, or BLE not ready)";
+    }
+    return "RING: saved-address connect queued — use ring status to watch";
+  }
+
+  // `openring reconnect` — glasses R1 "Reconnect Ring" path. Same heap
   // guard + disconnect settle as the old tap-inline helper; runs on
   // cmd_exec (which can afford the 500 ms delay) instead of g2_tap_disp.
   if (a0 == "reconnect") {
@@ -6129,40 +6840,49 @@ static const char* cmd_ringconnect(const String& args) {
       vTaskDelay(pdMS_TO_TICKS(500));
     }
     if (!g2RingConnect()) {
+      if (bleCentralRingShouldYield()) return ringYieldRefusal();  // pipe started meanwhile
       return g2RingIsConnected() ? "RING: already connected"
                                  : "Error: RING: reconnect failed to start connect task";
     }
-    return "RING: reconnect queued — use ringstatus to watch";
+    return "RING: reconnect queued — use ring status to watch";
   }
 
   if (ca.count() >= 1) {
     String mac = ca.arg(0);
     if (!g2RingConnectMac(mac)) {
+      if (bleCentralRingShouldYield()) return ringYieldRefusal();
       return "Error: RING: direct-MAC connect failed (already running? MAC format?)";
     }
-    EXT_RAM_BSS_ATTR static char buf[200];
-    snprintf(buf, sizeof(buf),
-             "RING: direct-connect to %s queued (no scan) — watch ringstatus / log",
-             mac.c_str());
-    return buf;
+    // The address the caller typed is not echoed: no output carries it.
+    return "RING: direct connect queued (no scan) — watch ring status / log";
   }
   if (!g2RingConnect()) {
+    if (bleCentralRingShouldYield()) return ringYieldRefusal();
     return gRing.connected ? "RING: already connected"
-                           : "RING: connect failed (see log)";
+                           : "Error: RING: connect not started (one already running, BLE not ready, "
+                             "or no ring owner)";
   }
-  return "RING: connect queued — use ringstatus to watch";
+  return "RING: connect queued — use ring status to watch";
 }
 
-static const char* cmd_ringdisconnect(const String& /*args*/) {
+static const char* cmd_closering(const String& /*args*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  g2RingDisconnect(/*userInitiated=*/true);
-  return "RING: disconnect requested";
+  if (!g2RingIsOpen()) {
+    // Closed already (a stack close or `openconsole` did it without the user's
+    // stamp): the user's close still means "stay down until openring".
+    blePeerNoteUserDisconnect(BLE_PEER_R1_RING);
+    return "RING: already closed (auto-reconnect stays quiet until openring)";
+  }
+  if (!g2RingClose(/*userInitiated=*/true)) {
+    return "Error: RING: close deferred (owner busy or link still settling); retry closering";
+  }
+  return "RING: closed (link dropped, owner task released; glasses, phone and Bluetooth stay up)";
 }
 
-// ringcontrol <collection|lowpower> <preserve|on|off>
+// ring control <collection|lowpower> <preserve|on|off>
 //   The ring's health-collection (privacy) and low-power policies. Each is a
 //   persisted desired state that the transport owner applies to the ring
-//   asynchronously; `healthstatus` shows desired vs observed. The registry
+//   asynchronously; `ring health` shows desired vs observed. The registry
 //   row is admin-only, so serial, web, OLED, BLE and MQTT get one refusal and
 //   the executor's audit line; the web and OLED Health controls submit this
 //   command instead of calling the setters.
@@ -6175,7 +6895,7 @@ static const char* cmd_ringcontrol(const String& args) {
   value.toLowerCase();
   const bool collection = control == "collection";
   if (ca.count() != 2 || (!collection && control != "lowpower")) {
-    return "Error: invalid arguments — Usage: ringcontrol <collection|lowpower> <preserve|on|off>";
+    return "Error: invalid arguments — Usage: ring control <collection|lowpower> <preserve|on|off>";
   }
   G2RingDesiredState desired;
   if (value == "preserve") desired = G2_RING_PRESERVE;
@@ -6197,12 +6917,13 @@ static const char* cmd_ringcontrol(const String& args) {
       : "low-power policy accepted; awaiting verified readback observation";
 }
 
-// ringscan [seconds]
+// ring scan [seconds]
 // Dedicated ring-only scan. It is queued on the same central-operation
 // worker as G2/Ring connects so it cannot replace BLEScan's process-global
 // callback during an in-flight create-connection.
 static const char* cmd_ringscan(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (bleCentralRingShouldYield()) return ringYieldRefusal();
   CommandArgs ca(args);
   uint32_t seconds = 30;
   if (ca.count() >= 1) {
@@ -6210,11 +6931,12 @@ static const char* cmd_ringscan(const String& args) {
     if (n > 0 && n <= 300) seconds = (uint32_t)n;
   }
   if (!g2RingScanAsync(seconds)) {
+    if (bleCentralRingShouldYield()) return ringYieldRefusal();
     return "Error: RING: scan already queued/running or BLE worker unavailable";
   }
   EXT_RAM_BSS_ATTR static char buf[128];
   snprintf(buf, sizeof(buf),
-           "RING: %us scan queued — use ringstatus, then ringconnect",
+           "RING: %us scan queued — use ring status, then ring connect",
            (unsigned)seconds);
   return buf;
 }
@@ -6266,7 +6988,7 @@ static const char* ringCancelRawSet(void* /*userData*/) {
   return "RING: raw SET cancelled";
 }
 
-// ringquery <subject> [type]
+// ring query <subject> [type]
 //
 // Submit an R1 health/status transaction to the serialized owner.
 //
@@ -6285,19 +7007,13 @@ static const char* cmd_ringquery(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   EXT_RAM_BSS_ATTR static char ret[200];
   if (!gRing.connected || !gRing.writeChar) {
-    return "Error: RING: not connected (run 'ringconnect' first)";
+    return "Error: RING: not connected (run 'ring connect' first)";
   }
 
   CommandArgs ca(args);
   if (ca.count() < 1) {
-    return "Error: invalid arguments — Usage: ringquery <wear|hr|hrv|spo2|temp|activity|sleep|raw> [type]\n"
-           "       ringquery hr [daily|point|measure]   (same shape for hrv/spo2/temp/activity/sleep)\n"
-           "       ringquery raw <module> <cmd> <subCmd> [hex_payload] [status=NN]\n"
-           "         admin only; SET status requires yes/no confirmation.\n"
-           "         decimal mod/cmd/sub; hex payload optional; status byte hex (default 00 = notify/get/ok).\n"
-           "         Common status bytes: 00=notify/get/ok (queries), 02=notify/set/ok (writes/SET),\n"
-           "         03=ack/set/ok (echoing an ack). Bit layout: bit0 type(0=notify,1=ack), bit1 method\n"
-           "         (0=get,1=set), bits2-3 ack(0=ok,1=err,2=refuse,3=notSup).";
+    return "Error: invalid arguments — Usage: ring query <wear|hr|hrv|spo2|temp|activity|sleep> "
+           "[daily|point|measure] | raw <module> <cmd> <subCmd> [hex_payload] [status=NN]";
   }
   String subject = ca.arg(0); subject.toLowerCase();
 
@@ -6319,14 +7035,14 @@ static const char* cmd_ringquery(const String& args) {
     tag = "wearStatus";
   } else if (subject == "raw") {
     if (!currentExecIsAdmin()) {
-      return "Error: ringquery raw requires admin authorization";
+      return "Error: ring query raw requires admin authorization";
     }
-    if (ca.count() < 4) return "Error: ringquery raw: need <module> <cmd> <subCmd> [hex_payload]";
+    if (ca.count() < 4) return "Error: ring query raw: need <module> <cmd> <subCmd> [hex_payload]";
     long mod = ca.argInt(1, -1);
     long cmd = ca.argInt(2, -1);
     long sub = ca.argInt(3, -1);
     if (mod < 0 || mod > 0xFF || cmd < 0 || cmd > 0xFF || sub < 0 || sub > 0xFF) {
-      return "Error: ringquery raw: module/cmd/subCmd must be 0..255";
+      return "Error: ring query raw: module/cmd/subCmd must be 0..255";
     }
 
     // Optional hex payload (e.g. "01" or "01FF" or "0x01 0xFF" — strip
@@ -6371,12 +7087,12 @@ static const char* cmd_ringquery(const String& args) {
             val.toLowerCase();
             if (val.startsWith("0x")) val = val.substring(2);
             if (val.length() == 0 || val.length() > 2) {
-              return "Error: ringquery raw: status=NN must be 1-2 hex digits (00..FF)";
+              return "Error: ring query raw: status=NN must be 1-2 hex digits (00..FF)";
             }
             char* end = nullptr;
             long parsed = strtol(val.c_str(), &end, 16);
             if (end == val.c_str() || parsed < 0 || parsed > 0xFF) {
-              return "Error: ringquery raw: status=NN must be a hex byte 00..FF";
+              return "Error: ring query raw: status=NN must be a hex byte 00..FF";
             }
             statusByte = (uint8_t)parsed;
           }
@@ -6403,11 +7119,11 @@ static const char* cmd_ringquery(const String& args) {
       }
       if (clean.length() > 0) {
         if (clean.length() & 1) {
-          return "Error: ringquery raw: hex payload must be an even number of hex digits";
+          return "Error: ring query raw: hex payload must be an even number of hex digits";
         }
         payloadLen = clean.length() / 2;
         if (payloadLen > R1_MAX_PAYLOAD) {
-          return "Error: ringquery raw: payload too large";
+          return "Error: ring query raw: payload too large";
         }
         for (size_t i = 0; i < payloadLen; i++) {
           char hi = clean.charAt(2 * i);
@@ -6424,7 +7140,7 @@ static const char* cmd_ringquery(const String& args) {
     }
 
     if ((statusByte & 0xF0) != 0) {
-      return "Error: ringquery raw: status upper bits must be zero (00..0F)";
+      return "Error: ring query raw: status upper bits must be zero (00..0F)";
     }
     // Decompose the status byte into the three fields the encoder takes.
     const uint8_t statusType   = (statusByte >> 0) & 0x01;
@@ -6465,7 +7181,7 @@ static const char* cmd_ringquery(const String& args) {
       prompt += "/";
       prompt += String((unsigned)sub);
       prompt += "? This may change ring state.";
-      if (!cliRequestConfirm(prompt, String("ringquery ") + args,
+      if (!cliRequestConfirm(prompt, String("ring query ") + args,
                              ringConfirmRawSet, ringCancelRawSet, nullptr,
                              ringRawSetConfirmAccepted, &candidate)) {
         return "Error: another interactive mode is active; raw SET not queued";
@@ -6485,11 +7201,11 @@ static const char* cmd_ringquery(const String& args) {
     else if (subject == "activity")                             cmdId = R1_CMD_ACTIVITY;
     else if (subject == "sleep")                                cmdId = R1_CMD_SLEEP;
     else {
-      snprintf(ret, sizeof(ret), "ringquery: unknown subject '%s'", subject.c_str());
+      snprintf(ret, sizeof(ret), "Error: ring query: unknown subject '%s'", subject.c_str());
       return ret;
     }
     int subCmd = resolveSubCmd(ca.arg(1));
-    if (subCmd < 0) return "ringquery: type must be daily|point|measure";
+    if (subCmd < 0) return "Error: ring query: type must be daily|point|measure";
     const uint8_t coalesceKey = subCmd == R1_SUB_DAILY
                                     ? (uint8_t)(0x20 + cmdId)
                                     : 0;
@@ -6518,13 +7234,160 @@ void g2RingNoteBridgePoll(uint64_t connRet, bool hasConnRet,
   (void)hasConnectRing;
 }
 
+// The R1 health rows (health, poll, history) belong to the R1 health feature.
+// Without it they stay registered and refuse, like every other `ring` verb.
+#if !ENABLE_R1_HEALTH
+static const char kRingHealthNotBuilt[] = "Error: R1 health is not in this build";
+#endif
+
+// ring health [json]: live vitals and their ages, setup state and profile, the
+// ring's collection and low-power controls, and typed history. The JSON is GET
+// /api/health/status, which also carries HardwareOne's local logging state
+// (`healthlogging status`).
+static const char* cmd_ringhealth(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+#if ENABLE_R1_HEALTH
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  if (argWantsJson(args)) return buildHealthStatusJson(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
+  G2RingTelemetry t = {};
+  g2RingGetTelemetry(t);
+  G2RingControlStatus control = {};
+  g2RingGetControlStatus(control);
+  G2HealthHistorySummary history = {};
+  g2HealthHistoryGetSummary(history);
+  R1HealthHistoryStoreStatus store = {};
+  r1HealthHistoryStoreGetStatus(store);
+  char hr[8], hrv[8], spo2[8], temp[12], bat[8];
+  if (t.hrValid) snprintf(hr, sizeof(hr), "%u", (unsigned)t.hr); else snprintf(hr, sizeof(hr), "--");
+  if (t.hrvValid) snprintf(hrv, sizeof(hrv), "%d", (int)t.hrv); else snprintf(hrv, sizeof(hrv), "--");
+  if (t.spo2Valid) snprintf(spo2, sizeof(spo2), "%u%%", (unsigned)t.spo2); else snprintf(spo2, sizeof(spo2), "--");
+  if (t.tempValid) snprintf(temp, sizeof(temp), "%d.%dC",
+                            (int)(t.tempTenths / 10),
+                            (int)(t.tempTenths < 0 ? -(t.tempTenths % 10) : (t.tempTenths % 10)));
+  else snprintf(temp, sizeof(temp), "--");
+  if (t.batteryValid) snprintf(bat, sizeof(bat), "%u%%", (unsigned)t.battery); else snprintf(bat, sizeof(bat), "--");
+  const char* charge = t.chargeValid ? g2RingChargeStatusName(true, t.charge) : "";
+  snprintf(getDebugBuffer(), 1024,
+           "R1 health: ring=%s  HR=%s  HRV=%s  SpO2=%s  T=%s  Bat=%s%s%s  Wear=%s\n"
+           "  ages(s): hr=%d hrv=%d spo2=%d temp=%d bat=%d wear=%d\n"
+           "  Ring setup=%s profile=%s\n"
+           "  Collection desired=%s observed=%s%s error=%s\n"
+           "  Low power desired=%s observed=%s%s error=%s\n"
+           "  History=%s day=%lu activity=%u/144 (%s) sleep=%s/%u records/%lum store=%s/%s",
+           t.connected ? "up" : "down", hr, hrv, spo2, temp, bat,
+           charge[0] ? " " : "", charge, g2RingWearName(t.wearValid, t.wear),
+           (int)t.hrAgeSec, (int)t.hrvAgeSec, (int)t.spo2AgeSec,
+           (int)t.tempAgeSec, (int)t.batteryAgeSec, (int)t.wearAgeSec,
+           g2RingSetupStateName(control.setupState),
+           g2RingProtocolProfileName(control.protocolProfile),
+           g2RingDesiredStateName(control.healthDesired),
+           g2RingObservedStateName(control.healthObserved),
+           control.healthPending ? " (pending)" : "",
+           g2RingTransactionErrorName(control.healthLastError),
+           g2RingDesiredStateName(control.lowPowerDesired),
+           g2RingObservedStateName(control.lowPowerObserved),
+           control.lowPowerPending ? " (pending)" : "",
+           g2RingTransactionErrorName(control.lowPowerLastError),
+           r1HealthHistoryFetchStateName(history.fetchState),
+           (unsigned long)history.dayStart,
+           (unsigned)history.activity.bucketCount,
+           history.activity.fullDayVerified ? "message verified" : "unverified",
+           history.sleepState == R1_HISTORY_SLEEP_EMPTY ? "empty" :
+               (history.sleepState == R1_HISTORY_SLEEP_PRESENT ? "present" : "unknown"),
+           (unsigned)history.sleep.count,
+           (unsigned long)(history.sleep.asleepSeconds / 60u),
+           store.available ? "available" : "unavailable",
+           r1HealthHistoryStoreErrorName(store.error));
+  return getDebugBuffer();
+#else
+  (void)args;
+  return kRingHealthNotBuilt;
+#endif
+}
+
+// ring poll: DAILY HR/HRV/SpO2/sleep/activity, then deviceStatus (2.2.9, 2.3.2).
+static const char* cmd_ringpoll(const String& /*args*/) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+#if ENABLE_R1_HEALTH
+  if (healthStartPollBurst()) return "R1 health refresh started";
+  if (!g2RingIsConnected()) return "Error: ring not connected (run 'ring connect' first)";
+  G2RingControlStatus control{};
+  g2RingGetControlStatus(control);
+  return control.protocolProfileKnown && !g2RingHealthPageRefreshSupported()
+             ? "Error: health refresh is unsupported on the active ring profile; no command sent"
+             : "Error: ring setup/profile is not ready for health refresh; no command sent";
+#else
+  return kRingHealthNotBuilt;
+#endif
+}
+
+// ring history: the normal typed history refresh. `ring history force` is its
+// own admin row, so only a line the registry matched as plain `ring history`
+// (a tab or a double space before "force") brings arguments here: refuse them.
+static const char* cmd_ringhistory(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+#if ENABLE_R1_HEALTH
+  String extra = args; extra.trim();
+  if (extra.length())
+    return "Error: invalid arguments — Usage: ring history (an admin types 'ring history force')";
+  if (!g2RingRequestHistoryRefresh(false))
+    return "Error: history refresh not queued — ring/setup/profile may be unavailable";
+  return "R1 typed history refresh queued";
+#else
+  (void)args;
+  return kRingHealthNotBuilt;
+#endif
+}
+
+// ring history force: the admin freshness bypass. Its registry row carries the
+// admin flag, so authorizeCommand refuses a non-admin (and the validate pass)
+// on every transport before this runs.
+static const char* cmd_ringhistoryforce(const String& /*args*/) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+#if ENABLE_R1_HEALTH
+  if (!g2RingRequestHistoryRefresh(true))
+    return "Error: forced history refresh not queued — ring/setup/profile may be unavailable";
+  return "R1 forced typed history refresh queued";
+#else
+  return kRingHealthNotBuilt;
+#endif
+}
+
+// ring control refresh: read the low-power state back. Health collection has
+// no proven GET and stays Unknown.
+static const char* cmd_ringcontrolrefresh(const String& /*args*/) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!g2RingRefreshControlStatus()) return "Error: ring control refresh not queued";
+  return "ring control refresh queued";
+}
+
+static const char* cmd_ring(const String& /*args*/) {
+  return "Error: invalid arguments — Usage: ring <status|scan|connect|disconnect|health|poll|history|query|control>";
+}
+
+// One row per verb, so each keeps its own tier; longest prefix picks a verb
+// over the `ring` root, which only answers with usage and never dispatches.
+// `ring history force` and `ring control refresh` are rows for the same
+// reason: the forced refresh is admin, reading the controls back is not.
 extern const CommandEntry g2RingCommands[] = {
-  { "ringstatus",     "Show R1 ring connection status",            false, cmd_ringstatus     },
-  { "ringscan",       "Scan for the R1 ring: ringscan [seconds] (default 30, max 300)", false, cmd_ringscan, "Usage: ringscan [seconds] (1..300, default 30)" },
-  { "ringconnect",    "Connect to the R1 ring: ringconnect [mac|reconnect]", true, cmd_ringconnect, "Usage: ringconnect [mac|reconnect]  (no arg = scan-then-connect; mac = direct; reconnect = drop+settle+connect)" },
-  { "ringdisconnect", "Disconnect from the R1 ring",               true, cmd_ringdisconnect },
-  { "ringquery",      "Queue an R1 query: ringquery <wear|hr|hrv|spo2|temp|activity|sleep|raw> [type]", false, cmd_ringquery, "Usage: ringquery <wear|hr|hrv|spo2|temp|activity|sleep> [daily|point|measure] | raw <module> <cmd> <subCmd> [hex_payload] [status=NN]  (raw is admin-only; SET requires confirmation)" },
-  { "ringcontrol",    "Set ring health collection or low power: ringcontrol <collection|lowpower> <preserve|on|off>", true, cmd_ringcontrol, "Usage: ringcontrol <collection|lowpower> <preserve|on|off>  (persisted desired state, applied to the ring asynchronously; healthstatus shows desired/observed)" },
+  { "ring status",     "R1 link status. (add 'json' for JSON output)", false, cmd_ringstatus },
+  { "ring scan",       "Scan for the R1 ring.",                        false, cmd_ringscan, "Usage: ring scan [seconds] (1..300, default 30)" },
+  { "openring",        "Open the R1 ring on the Bluetooth client stack and connect (scan, the saved address, reconnect, or a MAC).", true, cmd_openring,
+    "Usage: openring [saved|reconnect|<mac>]  (none = scan then connect; saved = the saved address; reconnect = drop, settle, connect)" },
+  { "closering",       "Close the R1 ring: drop its link and release its owner task (glasses, phone and Bluetooth stay up).", true, cmd_closering },
+  { "ring health",     "R1 vitals, ring controls and typed history. (add 'json' for JSON output)", false, cmd_ringhealth },
+  { "ring poll",       "Refresh R1 vitals now.",                       false, cmd_ringpoll },
+  { "ring history force", "Refresh R1 typed history past the freshness window.", true, cmd_ringhistoryforce },
+  { "ring history",    "Refresh R1 typed history.",                    false, cmd_ringhistory },
+  { "ring query",      "Queue one R1 query.",                          false, cmd_ringquery,
+    "Usage: ring query <wear|hr|hrv|spo2|temp|activity|sleep> [daily|point|measure]\n"
+    "  ring query raw <module> <cmd> <subCmd> [hex_payload] [status=NN]  (admin; a SET asks to confirm)\n"
+    "  status: bit0 type (0 notify, 1 ack), bit1 method (0 get, 1 set), bits2-3 ack (0 ok, 1 err, 2 refuse, 3 notSup)" },
+  { "ring control refresh", "Read the ring's low-power state back.",   false, cmd_ringcontrolrefresh },
+  { "ring control",    "Set the ring's health collection or low power.", true, cmd_ringcontrol,
+    "Usage: ring control <collection|lowpower> <preserve|on|off>  (saved, applied asynchronously; ring health shows desired/observed)" },
+  { "ring",            "Even R1 ring.",                                false, cmd_ring,
+    "Usage: ring <status|scan|connect|disconnect|health|poll|history|query|control>" },
   // Ring data is not pushed into the G2's built-in health UI: the temple
   // ignores host-sent sid=0x90 RingDataPackage frames, and a temple-side
   // RING_CONNECT_INFO bridge fails (connRet=8) because the R1 accepts one

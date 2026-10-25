@@ -55,12 +55,14 @@ using UBaseType_t = unsigned;
 using TaskFunction_t = void (*)(void*);
 #define pdPASS 1
 #define pdTRUE 1
+#define pdFALSE 0
 #define portMAX_DELAY 0xffffffffu
 #define pdMS_TO_TICKS(ms) (ms)
 static constexpr UBaseType_t TASK_PRIORITY_LOW = 1;
 static constexpr BaseType_t PRO_CORE = 0;
+static constexpr uint32_t SERVICE_TASK_IDLE_RETIRE_MS = 60000;
 static int gTaskToken = 0;
-static unsigned tasksCreated = 0, notifies = 0;
+static unsigned tasksCreated = 0, notifies = 0, semaphoresCreated = 0, deletes = 0;
 static std::string taskName;
 static uint32_t taskStack = 0;
 static BaseType_t xTaskCreateLogged(TaskFunction_t, const char* name, uint32_t stack, void*,
@@ -71,8 +73,23 @@ static BaseType_t xTaskCreateLogged(TaskFunction_t, const char* name, uint32_t s
   *out = &gTaskToken;
   return pdPASS;
 }
-static uint32_t ulTaskNotifyTake(int, uint32_t) { return 0; }
-static void xTaskNotifyGive(TaskHandle_t task) { CHECK(task == &gTaskToken); CHECK(gDepth == 0); ++notifies; }
+// The worker's own exit (retireIfIdle then vTaskDelete(nullptr)): off every lock.
+static void vTaskDelete(TaskHandle_t task) { CHECK(task == nullptr); CHECK(gDepth == 0); ++deletes; }
+// The wake: one static binary semaphore for every worker. A give lands outside
+// gQnMux and never names a task; the take only ever times out here (the
+// worker's passes are driven by hand).
+using SemaphoreHandle_t = void*;
+struct StaticSemaphore_t { int unused; };
+static int gSemaphoreToken = 0;
+static SemaphoreHandle_t xSemaphoreCreateBinaryStatic(StaticSemaphore_t* storage) {
+  CHECK(storage != nullptr);
+  ++semaphoresCreated;
+  return &gSemaphoreToken;
+}
+static void xSemaphoreGive(SemaphoreHandle_t sem) { CHECK(sem == &gSemaphoreToken); CHECK(gDepth == 0); ++notifies; }
+static BaseType_t xSemaphoreTake(SemaphoreHandle_t sem, uint32_t) { CHECK(sem == &gSemaphoreToken); return pdFALSE; }
+// The worker's lifecycle helper, the production one (System_TaskUtils.h).
+// INSERT_SERVICE_WORKER
 static uint32_t gRandom = 0x1000;
 static uint32_t esp_random() { return ++gRandom; }
 
@@ -370,7 +387,8 @@ bool hasRoom(const char** why) {
 }
 bool create(CommandSource source, TransportSessionEpoch epoch, const char* user,
             QuickNotePolicy::NoteHeader& header, const char* text, size_t length, char* pathOut,
-            size_t pathCap, const char** why) {
+            size_t pathCap, const char** why, bool nativeG2) {
+  CHECK(!nativeG2);
   CHECK(gDepth == 0);
   if (why) *why = nullptr;
   creates.push_back({source, epoch, user, std::string(text, length), header});
@@ -384,7 +402,8 @@ bool create(CommandSource source, TransportSessionEpoch epoch, const char* user,
   std::snprintf(pathOut, pathCap, "/stt/u7/notes/%s", name);
   return true;
 }
-bool list(const AuthContext& ctx, uint32_t owner, bool sd, uint32_t offset, Page* out, const char** why) {
+bool list(const AuthContext& ctx, uint32_t owner, bool sd, uint32_t offset, Page* out, const char** why, bool nativeG2) {
+  CHECK(!nativeG2);
   listUser = ctx.user.c_str();
   listOwner = owner;
   listSd = sd;
@@ -1149,6 +1168,48 @@ static void testSweep() {
   CHECK(sweeps == 4 && !gSweepDue && logs.empty());
 }
 
+// The worker's idle exit: never past a note that runs or is starting, never
+// with a restamp, the sweep or a clock-wait pending; the handle goes under the
+// lock and the next start creates a worker again (one semaphore throughout).
+static void testIdleRetire() {
+  reset();
+  gSweepDue = false;
+  const unsigned created = tasksCreated;
+  CHECK(gQnWorker.handle == &gTaskToken && gQnWorker.wake == &gSemaphoreToken && semaphoresCreated == 1);
+  uint64_t id = idOf(note("start"));
+  CHECK(!retireIfIdle() && gQnWorker.handle == &gTaskToken);  // starting
+  capture();
+  CHECK(!retireIfIdle() && gQnWorker.handle == &gTaskToken);  // recording
+  CHECK(ok(noteFor("cancel", id)));
+  servicePass();
+  CHECK(!quickNoteActive());
+  gUnstampedCount = 1;
+  CHECK(!retireIfIdle());  // a boot note still waits for the clock
+  gUnstampedCount = 0;
+  gRestampDue = true;
+  CHECK(!retireIfIdle());
+  gRestampDue = false;
+  gSweepDue = true;
+  CHECK(!retireIfIdle());
+  gSweepDue = false;
+  CHECK(retireIfIdle() && gQnWorker.handle == nullptr && !gQnWorker.starting);
+  CHECK(retireIfIdle() && gQnWorker.handle == nullptr);  // idle stays idle; nothing else changes
+  // A wake with no worker is a give that waits (no task named).
+  const unsigned woken = notifies;
+  quickNoteClockSet();
+  CHECK(notifies == woken + 1 && tasksCreated == created);
+  // The next note claims first, then brings a worker back on the same wake.
+  reset();
+  id = idOf(note("start"));
+  CHECK(tasksCreated == created + 1 && gQnWorker.handle == &gTaskToken && semaphoresCreated == 1);
+  CHECK(!retireIfIdle());
+  capture();
+  CHECK(ok(noteFor("cancel", id)));
+  servicePass();
+  gSweepDue = false;
+  CHECK(retireIfIdle() && gQnWorker.handle == nullptr);
+}
+
 static void testWarm() {
   reset();
   quickNoteWarm();
@@ -1182,12 +1243,13 @@ int main() {
   testRestampFailures();
   testSweep();
   testWarm();
+  testIdleRetire();
   if (failures) {
     std::fprintf(stderr, "%d QuickNote service check(s) failed\n", failures);
     return 1;
   }
   std::printf("QuickNote service (ENABLE_LOCAL_STT=%d): authority, one note, refusals, save/discard/fail, "
               "revocation, limits, private CLI replies, list times and tiers, restamping, the "
-              "unfinished-file sweep and keep-warm passed\n", ENABLE_LOCAL_STT);
+              "unfinished-file sweep, keep-warm and the idle exit passed\n", ENABLE_LOCAL_STT);
   return 0;
 }

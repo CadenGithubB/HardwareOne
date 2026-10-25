@@ -27,13 +27,22 @@ COMPONENT = HERE.parents[1]
 
 def generated(component: Path, baseline: bool) -> str:
     source = (component / 'G2_Ring.cpp').read_text()
+    # The owner's stack figure: the budget constant and, since the owner task
+    # became releasable, the high-water mark the owner publishes about itself.
+    owner_stack = [re.search(r'static constexpr uint32_t RING_OWNER_STACK_BYTES = \d+;',
+                             source).group()]
+    status = extract_block(source, 'void g2RingGetStatus(')
+    if not baseline:
+        owner_stack.append(re.search(
+            r'^static std::atomic<uint32_t> sRingOwnerStackFreeMin\{RING_OWNER_STACK_BYTES\};',
+            source, re.M).group())
+        require('sRingOwnerTask' not in status and 'uxTaskGetStackHighWaterMark' not in status,
+                'the status text reads the published high-water mark, never the owner handle')
     definitions = [extract_macro((COMPONENT / 'System_Utils.h').read_text(),
                                  'RETURN_VALID_IF_VALIDATE_CSTR'),
                    extract_block((COMPONENT / 'System_Utils.cpp').read_text(),
                                  'bool argWantsJson('),
-                   re.search(r'static constexpr uint32_t RING_OWNER_STACK_BYTES = \d+;',
-                             source).group(),
-                   extract_block(source, 'void g2RingGetStatus(')]
+                   status]
     if baseline:
         events = (component / 'BLE_Events.cpp').read_text()
         definitions += [extract_block((component / 'BLE_Events.h').read_text(),
@@ -42,18 +51,28 @@ def generated(component: Path, baseline: bool) -> str:
                                events.index('// blePushEvent\n')]]
     else:
         definitions[-1:-1] = [re.search(pattern, source, re.M).group() for pattern in (
-            r'^static portMUX_TYPE sRingIdentityMux[^\n]+', r'^static char sRingIdentityName[^\n]+',
-            r'^static char sRingIdentityAddr[^\n]+')]
+            r'^static portMUX_TYPE sRingIdentityMux[^\n]+', r'^static char sRingIdentityName[^\n]+')]
         definitions[-1:-1] = [extract_block(source, 'static void ringCopyBounded('),
                               extract_block(source, 'void g2RingSetIdentity('),
                               extract_block(source, 'void g2RingCopyIdentity(')]
         builder = extract_block(source, 'bool g2RingBuildStatusJson(')
+        # Source guards (the event and the connect reply need the BLE owner to
+        # run): neither the ring-status event nor the direct-connect reply
+        # carries the ring's address.
+        event = extract_block(source, 'static void ringPushStatusEvent(')
+        require('gRingDeviceAddress' not in event and '.kv("a"' not in event,
+                'the ring-status event must not carry the ring address')
+        connect = extract_block(source, 'static const char* cmd_openring(')
+        require('mac.c_str()' not in connect, 'the openring connect reply must not echo the address')
         require('g2RingConnectInFlight()' in builder,
                 'ring pending status must use its existing synchronized reader')
+        require('sRingOwnerTask' not in builder and 'uxTaskGetStackHighWaterMark' not in builder,
+                'the status JSON reads the published high-water mark, never the owner handle')
         definitions += [extract_block(source, 'bool g2RingConnectInFlight('), builder]
     definitions.append(extract_block(source, 'static const char* cmd_ringstatus('))
     return (HERE / 'ring_info_status_harness.cpp').read_text().replace(
         '// INSERT_STATE', extract_block(source, 'struct G2RingState') + ';').replace(
+        '// INSERT_OWNER_STACK', '\n'.join(owner_stack)).replace(
         '// INSERT_PRODUCTION', '\n\n'.join(definitions))
 
 
@@ -100,7 +119,9 @@ def main() -> None:
                     continue
                 if kind != 'TEXT':
                     parsed = json.loads(payload)  # rejects raw control characters
-                    require(len(parsed) == 12, 'ring status schema must contain all twelve fields')
+                    require(len(parsed) == 11 and 'addr' not in parsed,
+                            'ring status schema must contain all eleven fields and no address')
+                require('00:11:22' not in payload, 'no ring status output carries the address')
                 records.append((kind, json.loads(payload) if kind == 'ESCAPE' else payload))
             return records
 

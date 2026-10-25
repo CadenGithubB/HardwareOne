@@ -38,6 +38,7 @@
 #include <string.h>
 
 #include "Transcript_PathPolicy.h"
+#include "Transcript_TextPolicy.h"
 
 namespace QuickNotePolicy {
 
@@ -124,7 +125,6 @@ constexpr uint32_t noteFinishTimeoutMs(bool localStt) {
   return localStt ? kFinishTimeoutLocalMs : kFinishTimeoutCm5Ms;
 }
 constexpr size_t kMaxNoteBytes = 4096;  // note text, header excluded
-constexpr size_t kTitleMax = 48;
 constexpr size_t kHeaderMax = 512;      // a whole header fits one list read
 constexpr size_t kStampMax = 16;        // "yyyymmddThhmmssZ"
 constexpr size_t kFileNameMax = kStampMax + 1 + 16 + 4;  // <stamp>-<id16>.txt
@@ -162,56 +162,17 @@ inline bool noteMicParse(const char* text, size_t length, Mic* out) {
 }
 
 // --- Words, title and junk ----------------------------------------------------
-// Whitespace and control bytes separate words. A word is a token holding at
-// least one letter, digit or non-ASCII byte, so stray punctuation ("...", "-")
-// from the recogniser is not one.
-inline bool noteGap(unsigned char c) { return c <= ' ' || c == 0x7f; }
-inline bool noteWordByte(unsigned char c) {
-  return c >= 0x80 || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
-         (c >= 'A' && c <= 'Z');
-}
+// Words and the title are the shared speech-text rules in
+// Transcript_TextPolicy.h (transcripts use the same ones); these names keep
+// QuickNote's callers and tests unchanged.
+constexpr size_t kTitleMax = TranscriptText::kTitleMax;
+inline bool noteGap(unsigned char c) { return TranscriptText::gap(c); }
+inline bool noteWordByte(unsigned char c) { return TranscriptText::wordByte(c); }
 inline uint32_t noteWordCount(const char* text, size_t length) {
-  uint32_t words = 0;
-  bool inToken = false, counted = false;
-  for (size_t i = 0; text && i < length; ++i) {
-    const unsigned char c = static_cast<unsigned char>(text[i]);
-    if (noteGap(c)) { inToken = false; continue; }
-    if (!inToken) { inToken = true; counted = false; }
-    if (!counted && noteWordByte(c)) { counted = true; ++words; }
-  }
-  return words;
+  return TranscriptText::wordCount(text, length);
 }
-
-// The title: the text's leading words, whitespace collapsed, at most
-// kTitleMax bytes (and cap - 1), cut at a word boundary. A first word longer
-// than that is cut at a UTF-8 character boundary instead. Returns the length.
 inline size_t noteTitle(const char* text, size_t length, char* out, size_t cap) {
-  if (!out || !cap) return 0;
-  const size_t limit = cap - 1 < kTitleMax ? cap - 1 : kTitleMax;
-  size_t len = 0;       // bytes in out
-  size_t complete = 0;  // length through the last complete word
-  bool gap = false;     // whitespace since the last word byte
-  for (size_t i = 0; text && i < length; ++i) {
-    const unsigned char c = static_cast<unsigned char>(text[i]);
-    if (noteGap(c)) { gap = len != 0; continue; }
-    if (gap) {            // a new word starts; the previous one is complete
-      complete = len;
-      if (len + 1 >= limit) break;  // no room for " x"
-      out[len++] = ' ';
-      gap = false;
-    }
-    if (len == limit) {   // this word does not fit
-      if (complete) len = complete;
-      else if ((c & 0xc0) == 0x80) {  // mid-character: drop the partial one
-        while (len && (static_cast<unsigned char>(out[len - 1]) & 0xc0) == 0x80) --len;
-        if (len) --len;
-      }
-      break;
-    }
-    out[len++] = static_cast<char>(c);
-  }
-  out[len] = '\0';
-  return len;
+  return TranscriptText::title(text, length, out, cap);
 }
 
 // True when the text is not worth a file: nothing but whitespace or
@@ -326,6 +287,17 @@ inline size_t noteFolder(bool sd, uint32_t owner, char* out, size_t cap) {
                          static_cast<unsigned long>(owner));
   if (n <= 0 || static_cast<size_t>(n) >= cap) { out[0] = '\0'; return 0; }
   return static_cast<size_t>(n);
+}
+// Device-wide native G2 notes. Deliberately not an account directory.
+inline size_t g2NoteFolder(bool sd, char* out, size_t cap) {
+  const int n = snprintf(out, cap, "%s/g2/quicknotes", sd ? "/sd" : "");
+  return n > 0 && static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : 0;
+}
+inline bool g2NotePath(const char* path) {
+  if (!path) return false;
+  const char* prefix = !strncmp(path, "/sd/", 4) ? "/sd/g2/quicknotes/" : "/g2/quicknotes/";
+  return !strncmp(path, prefix, strlen(prefix)) &&
+         noteFileNameParse(path + strlen(prefix), nullptr, nullptr);
 }
 // True only for a canonical note file path, "<noteFolder>/<note file name>",
 // as the guarded VFS's normalizer spells it. Backslashes, dot segments,

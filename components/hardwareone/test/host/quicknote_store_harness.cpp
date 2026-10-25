@@ -31,7 +31,8 @@ static bool lockAvailable = true;
 struct FsLockGuard {
   bool held;
   FsLockGuard(const char* owner, unsigned ms) : held(lockAvailable && !locks) {
-    assert(owner && !std::strcmp(owner, "qnote.store") && ms == 1000);
+    assert(owner && (!std::strcmp(owner, "qnote.store") ||
+                     !std::strcmp(owner, "g2.notes.folders")) && ms == 1000);
     if (held) { ++locks; ++lockTakes; }
   }
   ~FsLockGuard() { if (held) --locks; }
@@ -1099,6 +1100,48 @@ static void test_clock_helpers() {
   assert(QuickNoteStore::stampSince(3605, stamp, sizeof(stamp)) && !std::strcmp(stamp, "20261004T163011Z"));
 }
 
+static void test_native_g2_storage() {
+  reset();
+  const char* why = nullptr;
+  char path[QuickNotePolicy::kPathMax];
+  assert(QuickNoteStore::ensureG2Folders(actor("alice"), false, &why));
+  assert(dirExists("/g2/quicknotes"));
+  NoteHeader header = meta(900);
+  assert(QuickNoteStore::create(SOURCE_G2_GLASSES, kEpoch, "alice", header, kText,
+      strlen(kText), path, sizeof(path), &why, true));
+  assert(std::string(path).find("/g2/quicknotes/") == 0);
+  assert(!dirExists("/stt/u7/notes"));
+  QuickNoteStore::Page page;
+  assert(QuickNoteStore::list(actor("bob"), 0, false, 0, &page, &why, true));
+  assert(page.count == 1); // device-wide as requested, no per-user namespace
+  std::string text;
+  assert(reading("bob",path,0,&text));
+  const std::string internal = path;
+  VFS::sdWritable = VFS::sdPresent = true;
+  assert(QuickNoteStore::ensureG2Folders(actor("alice"), true, &why));
+  header = meta(901);
+  assert(QuickNoteStore::create(SOURCE_G2_GLASSES,kEpoch,"alice",header,kText,
+      strlen(kText),path,sizeof(path),&why,true));
+  assert(std::string(path).find("/sd/g2/quicknotes/")==0);
+  const std::string onCard = path;
+  VFS::sdWritable = VFS::sdPresent = false;
+  assert(!QuickNoteStore::ensureG2Folders(actor("alice"), true, &why));
+  assert(QuickNoteStore::ensureG2Folders(actor("alice"), false, &why));
+  header = meta(902);
+  assert(QuickNoteStore::create(SOURCE_G2_GLASSES,kEpoch,"alice",header,kText,
+      strlen(kText),path,sizeof(path),&why,true));
+  assert(std::string(path).find("/g2/quicknotes/")==0);
+  assert(tree.count(internal) && tree.count(onCard));
+  assert(!g2NotePath("/g2/quicknotes/../secrets.txt"));
+  // Clean only interrupted native writes, retaining committed and unrelated files.
+  const std::string orphan="/g2/quicknotes/boot-0000000000000999.tmp";
+  tree[orphan]=Node{false,"partial"};
+  tree["/g2/quicknotes/keep.tmp"]=Node{false,"unrelated"};
+  uint32_t removed=0;
+  assert(QuickNoteStore::sweep(&removed,&why)&&removed==1&&!tree.count(orphan));
+  assert(tree.count(internal)&&tree.count(onCard)&&tree.count("/g2/quicknotes/keep.tmp"));
+}
+
 int main() {
   test_create();
   test_create_refusals();
@@ -1109,6 +1152,7 @@ int main() {
   test_restamp();
   test_sweep();
   test_clock_helpers();
+  test_native_g2_storage();
   assert(!locks && !filesOpen && allocs == frees);
   std::puts("QuickNote store: owner-only create/list/read/delete/restamp, tmp+rename, reserve, faults, aliases, "
             "unfinished-file sweep and boot clock passed");

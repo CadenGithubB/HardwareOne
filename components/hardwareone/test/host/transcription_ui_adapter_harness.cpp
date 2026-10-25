@@ -78,7 +78,11 @@ static bool dictationAppBegin(CommandSource source,uint32_t epoch,DictationAppLe
 static bool dictationAppRequestStop(const DictationAppLease& lease){++stopCalls;return owns(lease);}
 static bool dictationAppCancel(const DictationAppLease& lease){++cancelCalls;return owns(lease);}
 static bool dictationAppPeekText(const DictationAppLease& lease,char* text,size_t size,DictationTextReceipt* receipt){if(!owns(lease)||!haveText)return false;snprintf(text,size,"private words");*receipt={lease.exchange,9,0,13};if(peekHook){auto hook=peekHook;peekHook=nullptr;hook();}return true;}
-static bool dictationAppPeekDraft(const DictationAppLease&,char* out,size_t size,uint32_t* version){if(out&&size)out[0]=0;if(version)*version=0;return false;}
+static std::string draftText; static uint32_t draftVersion=0;
+static bool dictationAppPeekDraft(const DictationAppLease&,char* out,size_t size,uint32_t* version){if(out&&size)out[0]=0;if(version)*version=0;if(draftText.empty())return false;snprintf(out,size,"%s",draftText.c_str());if(version)*version=draftVersion;return true;}
+// System_STTVocabulary fake: the display copy uppercases a configured word; a raw copy is never changed.
+static bool formatBusy=false; static bool lastParagraphStart=false;
+static bool sttFormatDisplay(const char* raw,bool paragraphStart,char* out,size_t cap){if(out&&cap)out[0]=0;if(formatBusy||!raw||!out||!cap)return false;lastParagraphStart=paragraphStart;std::string s(raw);size_t at=s.find("private");if(at!=std::string::npos)s.replace(at,7,"Private");if(paragraphStart&&!s.empty())s[0]=char(toupper(s[0]));if(s.size()>=cap)return false;snprintf(out,cap,"%s",s.c_str());return true;}
 static bool dictationAppReadSpeakers(const DictationAppLease& lease,STTSpeakerSnapshot* out){*out={};if(!owns(lease))return false;*out=speakerSnapshot;return true;}
 static bool dictationAppCommitText(const DictationAppLease& lease,const DictationTextReceipt& receipt,size_t accepted){++commitCalls;committed=receipt;return owns(lease)&&receipt.sequence==9&&receipt.offset==0&&accepted==13;}
 // INSERT_ADAPTER
@@ -118,6 +122,10 @@ static void testSession(){
  reset();d=session("start");assert(d["success"]==true&&beginCalls==1);
  reset();guest=true;d=session("start");assert(d["success"]==false&&beginCalls==0);
  reset();d=session("next 1122334455667788");assert(d["success"]==true&&d["sttText"]=="private words"&&d["sequence"]==9&&d["length"]==13);
+ // The display copy rides beside the raw text; the receipt still names the raw bytes. Sequence 9 is not the session's first phrase.
+ assert(d["display"]=="Private words"&&!lastParagraphStart&&d["length"]==13);
+ draftText="private draft";draftVersion=4;d=session("next 1122334455667788");assert(d["draft"]=="Private draft"&&d["draftVersion"]==4);
+ formatBusy=true;d=session("next 1122334455667788");assert(!d.containsKey("display")&&d["sttText"]=="private words"&&d["draft"]=="private draft");formatBusy=false;draftText.clear();
  reset();haveText=false;speakerSnapshot.available=true;speakerSnapshot.version=8;speakerSnapshot.count=2;
  speakerSnapshot.entries[0]={9,1,true};speakerSnapshot.entries[1]={10,-1,false};
  d=session("next 1122334455667788");assert(d["available"]==false&&d["speakerVersion"]==8&&d["speakersAvailable"]==true);

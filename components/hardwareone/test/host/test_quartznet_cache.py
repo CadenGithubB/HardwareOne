@@ -35,7 +35,16 @@ def main():
 
 def run(resident, harness_name, sanitize):
     interface = '\n'.join(no_includes((SOURCE / name).read_text()) for name in (
-        'System_STTLocal.h', 'stt/quartznet_runtime.h', 'stt/quartznet_frontend.h'))
+        'System_STTLocal.h', 'stt/quartznet_runtime.h', 'stt/quartznet_frontend.h',
+        'stt/stt_internal_memory.h', 'stt/stt_internal_memory_core.h'))
+    interface += '''
+namespace hw1::stt {
+InternalMemoryBudget internalMemoryBudget(bool resident) { return InternalMemoryPolicy{}.budget(resident); }
+InternalMemoryScope::InternalMemoryScope() {}
+InternalMemoryScope::~InternalMemoryScope() {}
+void InternalMemoryScope::success(bool) {}
+}
+'''
     runtime = no_includes((SOURCE / 'stt/quartznet_runtime.cpp').read_text())
     container = no_includes((SOURCE / 'stt/stt_model_container.h').read_text())
     harness = (HERE / harness_name).read_text()

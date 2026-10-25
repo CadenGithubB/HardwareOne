@@ -355,7 +355,7 @@ Run `help g2` on the device for the full list. `g2hold status` reports the hold
 input, and `note` starts, stops and browses QuickNotes (`note start glasses`
 from serial, the BLE app or UART).
 
-> `openg2` and `ringconnect` return OK when the connection is *kicked off*, not
+> `openg2` and `openring` return OK when the connection is *kicked off*, not
 > when it completes. A menu that reads the link state immediately after may
 > still show "disconnected".
 
@@ -1139,8 +1139,10 @@ mqttExternalSensors             - List external sensor data received via MQTT
 <summary><strong>bluetooth - BLE (requires ENABLE_BLUETOOTH)</strong></summary>
 
 ```
-openble                         - Start BLE and begin advertising
-closeble                        - Stop BLE and deinitialize
+openble                         - Bluetooth on: bring the shared client stack up (devices with auto-reconnect come back)
+closeble                        - Bluetooth off: close the glasses, ring, phone and the app console, then stop the host
+openconsole                     - Start the app console server for a direct app connection (closes the devices)
+closeconsole                    - Stop the app console server
 blestatus                       - Show connection status
 bleinfo                         - Show BLE configuration and settings
 blename [name]                  - Get/set BLE device name
@@ -1379,7 +1381,7 @@ Settings: `logging.sensorlog` -> **Health logging** / **Health logging poll inte
 
 **Surfaces** (requires `ENABLE_R1_HEALTH`): G2 Apps -> Health (graphs), OLED **R1 Health**,
 Web **`/r1-health`**. Ring connect remains under Bluetooth (OLED / Web). Snapshot CLI
-for Web and a future Bluetooth App: `healthstatus` / `healthstatus json` / `healthstatus poll`.
+for Web and a future Bluetooth App: `ring health` / `ring health json` / `ring poll`.
 Stitch split captures: `healthlogmerge "<out>" "<in1>" "<in2>" ...` (same idea as `gpstrackmerge`).
 **Output goes first and is truncated** - passing it last overwrites a real capture. The merge is a
 byte concatenation: it does not reorder rows by time, does not drop the header lines of later CSV
@@ -1389,7 +1391,7 @@ same-day sessions already land in one file, so stitching is only for spanning da
 **Keep the ring up:** `bleautoreconnect r1-ring on` reconnects at boot **and** reseeks after
 unexpected drops (backoff). While health logging is on, each due mine (default 15 min)
 also nudges a ring reseek if the link is down (one non-blocking connect attempt;
-not a continuous scan). `ringdisconnect` / `closeg2` do not reseek.
+not a continuous scan). `closering` / `closeg2` do not reseek.
 
 You can still use raw `sensorlog sensors r1` + `sensorlog start ...` if you want
 manual control without the `healthlogging` product switch (that path still uses the
@@ -1609,13 +1611,11 @@ srdebugreset                    - Reset SR counters
 
 ```
 openg2 [left|right|auto]        - Connect to G2 glasses
-closeg2                         - Disconnect from G2 glasses
+closeg2                         - Close the glasses: drop both links and release the glasses runtime (ring, phone and Bluetooth stay up)
 g2status                        - Show connection status
 g2scan                          - Scan for G2 glasses
 g2show <text>                   - Display text on G2 glasses
 g2clear                         - Clear G2 display
-g2init                          - Initialize G2 client mode (disables BLE server)
-g2deinit                        - Deinitialize G2 client mode
 g2nav [on|off]                  - Map G2 gestures to OLED menu navigation
 g2verbose [on|off]              - Toggle verbose packet logging
 g2health                        - Open Apps -> Health (R1 vitals + graphs) on the lens (ENABLE_R1_HEALTH)
@@ -1636,8 +1636,8 @@ sparklines (weekly aggregation later).
 mined every `healthLoggingPollIntervalSec` seconds (default 900 = 15 min). Opening the page or **Poll Now**
 also logs a sample when R1 logging is active. Pair the R1 under Bluetooth -> R1 Ring;
 vitals also on OLED **R1 Health** and Web **`/r1-health`**.
-Ring/Health CLI: `ringconnect`, `ringstatus`, `ringquery hr|temp|wear`,
-`healthstatus [json|poll]`, `healthlogging status|interval`. A Bluetooth App can call the
+Ring/Health CLI: `openring`, `closering`, `ring status`, `ring query hr|temp|wear`,
+`ring health [json]`, `ring poll`, `healthlogging status|interval`. A Bluetooth App can call the
 same commands over GATT (no dedicated phone UI yet).
 3-pane list+text+image experiments: Tests -> Image -> Com2 (LZ4 multi) -> Q30*.
 </details>

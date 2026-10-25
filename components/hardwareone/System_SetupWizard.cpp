@@ -6,6 +6,7 @@
  */
 
 #include "System_SetupWizard.h"
+#include "BLE_LinkStatusCore.h"  // Bluetooth mode labels
 #include "System_Utils.h"  // waitForSerialInputBlocking
 #include "System_MemUtil.h"
 #include <esp_attr.h>
@@ -741,25 +742,28 @@ bool wizardStageMQTTSettings(const SetupWizardResult& result) {
 }
 
 // ---- Shared "enable -> pick a mode" table (used by BOTH wizard engines) ----
-// Web Interface -> HTTP/HTTPS (bound to httpsEnabled); Bluetooth -> Server/G2
-// (bound to bleMode). The blocking FTS wizard and the CLI-mode `featuresetup`
-// command both read this same table so their behaviour is identical.
+// Web Interface -> HTTP/HTTPS (bound to httpsEnabled); Bluetooth -> App
+// console/Glasses/Phone pipe (bound to bleMode). The blocking FTS wizard and the
+// CLI-mode `featuresetup` command both read this same table so their behaviour
+// is identical.
 // Per-mode extraHeapKB: estimated RAM the mode adds over the feature's base.
 // HTTPS +20KB (mbedTLS session buffers, ~20KB each per HEAP_OPTIMIZATION_FINDINGS);
 // G2 +10KB (glasses protocol state + persistent heartbeat worker over a plain
-// BLE server). Baseline modes (HTTP, Server) add 0.
+// BLE server). Baseline modes (HTTP, App console) add 0.
 #if ENABLE_HTTP_SERVER && ENABLE_HTTPS
 static const WizardModeOption kWebModes[] = { {"HTTP", 0, 0}, {"HTTPS", 1, 20} };
 #endif
 #if ENABLE_BLUETOOTH && (ENABLE_G2_GLASSES || ENABLE_BLE_PHONE_PIPE)
+// Each boot role is named in BLE_LinkStatusCore.h's words: "App console" (the
+// server) and "Glasses" ("Glasses+pipe" in a pipe build) for the shared client
+// stack that glasses, ring and phone open on. Shown only when a client device
+// is compiled in (otherwise the server is the only role).
+static const char* btModeLabel(int mode) {
+  return hw1link::roleText(hw1link::roleOfMode(mode, ENABLE_BLE_PHONE_PIPE));
+}
 static const WizardModeOption kBtModes[] = {
-  {"Server (console)", BLE_MODE_SERVER, 0},
-#if ENABLE_G2_GLASSES
-  {"G2 Glasses", BLE_MODE_G2_CLIENT, 10},
-#endif
-#if ENABLE_BLE_PHONE_PIPE
-  {"Phone pipe client", BLE_MODE_PHONE_CLIENT, 32},
-#endif
+  {btModeLabel(BLE_MODE_SERVER), BLE_MODE_SERVER, 0},
+  {btModeLabel(BLE_MODE_G2_CLIENT), BLE_MODE_G2_CLIENT, 10},
 };
 #endif
 

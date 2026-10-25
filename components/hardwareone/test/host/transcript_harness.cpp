@@ -33,6 +33,10 @@ uint32_t localDisplayTransportSessionSnapshot(String& user,bool& a){user=localUs
 void secureClearString(String& user){user.assign(user.size(),'\0');user.clear();}
 struct Settings {bool sttSaveTranscripts=false;} gSettings;
 namespace Clock {static bool synced=true;time_t epochSeconds(){return 1790640000;}bool isSynced(){return synced;}}
+// Startup ordering (System_BootState / HardwareOne.cpp) as the header records it.
+uint32_t gBootCounter=76; static uint32_t powerOnCount=3, orderingDomain=0x0badf00d;
+uint32_t bootStateGetPowerOnCount(){return powerOnCount;}
+uint32_t bootStateGetOrderingDomain(){return orderingDomain;}
 static bool lockAvailable=true;
 static unsigned locks=0, filesOpen=0, writes=0, opens=0, userLookups=0;
 static unsigned shortWrite=0;
@@ -109,6 +113,8 @@ static void complete(){
  assert(session.append(3,"second phrase",13));session.finish("done");
  assert(session.snapshot().complete&&!session.snapshot().error[0]&&session.snapshot().chunks==2);
  assert(text(session).find("first words\nsecond phrase\n\n[End: done]\n")!=std::string::npos);
+ // The header carries the startup ordering and the first phrase's title.
+ assert(text(session).find("HardwareOne transcript\nStarted: 20260929T000000Z\nBackend: local\nBoot: 76\nPower-on: 3\nSession: 2596069104\nDomain: 0badf00d\nTitle: first words\nAn End marker below confirms finalization.\n\nfirst words\n")==0);
  assert(session.snapshot().bytes==text(session).size()&&!filesOpen&&!locks);
  count=writes;session.finish("done");assert(writes==count&&!session.append(4,"late",4));
  TranscriptSession collision;collision.begin(opt,"local",0x123456789abcdef0ULL);

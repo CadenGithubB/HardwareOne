@@ -93,8 +93,8 @@ static OLEDMapRenderer* gOledMapRenderer = nullptr;
 // Async Double-Buffer Rendering
 // =============================================================================
 
-static const size_t SSD1306_BUF_SIZE = (128 * 64) / 8;  // 1024 bytes
-static const size_t MAP_SHADE_BUF_SIZE = 128 * 64;      // byte-per-pixel shade scratch
+static const size_t SSD1306_BUF_SIZE = DISPLAY_WIDTH * ((DISPLAY_HEIGHT + 7) / 8);
+static const size_t MAP_SHADE_BUF_SIZE = DISPLAY_WIDTH * DISPLAY_HEIGHT;  // one shade byte per pixel
 
 // Double framebuffers in PSRAM (1-bit SSD1306 page layout, blitted per UI frame)
 static uint8_t* sMapBufA = nullptr;   // Buffer A (PSRAM)
@@ -132,8 +132,18 @@ static uint16_t sRenderedLayers = 0;
 // Force re-render flag (set when layers toggled, etc.)
 static volatile bool sForceRender = false;
 
-// Render task handle
+// Render task handle. Written under sSwapSpinlock: by ensureMapRenderTask()
+// (display task) when it creates the task and by the task itself as it leaves.
 static TaskHandle_t sRenderTaskHandle = nullptr;
+// The task leaves on its own this long after the last render request once the
+// OLED has left the map (a still frame on the map is no reason to go), giving
+// its 8 KB internal stack and TCB back; the next map frame creates it again.
+// A create the heap refuses (fragmented internal DRAM, e.g. Feather V2 with
+// the glasses up) is retried every kMapRenderRetryMs and the frame says so.
+static constexpr uint32_t kMapRenderIdleRetireMs = 10000;
+static constexpr uint32_t kMapRenderRetryMs = 2000;
+static bool sRenderTaskRefused = false;     // display task only
+static uint32_t sRenderTaskRefusedMs = 0;   // display task only
 
 // Forward declaration
 static void mapRenderTask(void* param);
@@ -419,7 +429,7 @@ static void drawFeatures() {
   MapCacheGuard mapGuard("OLED.drawFeatures");
   const LoadedMap& map = MapCore::getCurrentMap();
   
-  oledDisplay->fillRect(0, 0, 128, 64, DISPLAY_COLOR_BLACK);
+  oledDisplay->fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_COLOR_BLACK);
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
@@ -441,7 +451,8 @@ static void drawFeatures() {
   snprintf(header, sizeof(header), "Names (%d)", nameCount);
   oledDisplay->print(header);
   
-  int itemsPerPage = 5;
+  // Title starts at 0, rows at 10; the custom hint line starts at contentHeight + 2.
+  const int itemsPerPage = oledVisibleRows(10, 8, 5);
   int displayIdx = 0;
   int itemIdx = 0;
   
@@ -475,7 +486,7 @@ static void drawRoutes() {
   MapCacheGuard mapGuard("OLED.drawRoutes");
   const LoadedMap& map = MapCore::getCurrentMap();
   
-  oledDisplay->fillRect(0, 0, 128, 64, DISPLAY_COLOR_BLACK);
+  oledDisplay->fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_COLOR_BLACK);
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
@@ -492,7 +503,7 @@ static void drawRoutes() {
   
   // Count transit features with names (rail, bus, ferry)
   int routeCount = 0;
-  static RouteInfo routes[32];
+  EXT_RAM_BSS_ATTR static RouteInfo routes[32];  // PSRAM: OLED task only, under MapCacheGuard
   
   // Iterate through all tiles to find transit features
   for (uint16_t tileIdx = 0; tileIdx < map.tileCount && routeCount < 32; tileIdx++) {
@@ -548,7 +559,8 @@ static void drawRoutes() {
   }
   
   // Display routes with type indicator
-  int itemsPerPage = 5;
+  // Title starts at 0, rows at 10; the custom hint line starts at contentHeight + 2.
+  const int itemsPerPage = oledVisibleRows(10, 8, 5);
   for (int i = 0; i < itemsPerPage && (i + gRoutesScrollOffset) < routeCount; i++) {
     int idx = i + gRoutesScrollOffset;
     oledDisplay->setCursor(0, 10 + i * 10);
@@ -806,7 +818,7 @@ static void executeSubtypeMenuAction(int typeIdx, int action) {
     // Back → return to layers submenu, restore selection
     gMapSubmenuLevel = 1;
     gMapMenuSelection = gLayerTypeSelectIdx;
-    gMapMenuScrollOffset = (gLayerTypeSelectIdx >= 4) ? gLayerTypeSelectIdx - 3 : 0;
+    gMapMenuScrollOffset = max(0, gLayerTypeSelectIdx - oledVisibleRows(9, 18 - OLED_CONTENT_START_Y, 4) + 1);
   }
 }
 
@@ -917,7 +929,7 @@ static void drawMapMenu() {
   
   oledDisplay->print(menuTitle);
   
-  const int maxVisible = 4;
+  const int maxVisible = oledVisibleRows(9, 18 - OLED_CONTENT_START_Y, 4);
   const int itemHeight = 9;
   const int startY = 18;
   
@@ -979,31 +991,61 @@ static void initAsyncMapRenderer() {
   sMapBackBuf  = sMapBufB;
   sFrontBufReady = false;
   
-  // Create render semaphore
+  // The render semaphore outlives every render task: a give to a task that
+  // is leaving waits for its successor.
   sRenderSemaphore = xSemaphoreCreateBinary();
   
-  // Create render task (8KB stack in PSRAM, low priority). No core affinity:
-  // prio-LOW on Core 0 was getting starved by WiFi/BT/esp_timer; let the
-  // scheduler place it wherever there's actual slack.
-  // APP_CORE: offscreen map raster is pure compute; keep it off the Wi-Fi/BLE core.
-  taskStackRecord("mapRender", MAP_RENDER_STACK_WORDS);
-  xTaskCreatePinnedToCore(mapRenderTask, "mapRender", MAP_RENDER_STACK_WORDS, nullptr, TASK_PRIORITY_LOW, &sRenderTaskHandle, APP_CORE);
-  
-  DEBUG_MAPSF("[MAP_ASYNC] Async renderer initialized (double-buffer + render task)");
+  DEBUG_MAPSF("[MAP_ASYNC] Async renderer initialized (double buffers)");
 }
 
-// Crush the shade scratch (128x64 bytes, values 0-15) into a 1-bit SSD1306
-// page buffer (byte = 8 vertical pixels, LSB = top). shade>0 => pixel on, so
+// The render task, created on the first map frame that needs it and again
+// after it left (mapRenderTask's idle exit). APP_CORE: the offscreen raster is
+// pure compute; keep it off the Wi-Fi/BLE core. False while the heap refuses
+// the task (retried every kMapRenderRetryMs): the frame keeps its dirty state
+// and shows a notice instead of a raster that will not update.
+static bool ensureMapRenderTask() {
+  if (!sRenderSemaphore) return false;  // initAsyncMapRenderer's PSRAM buffers failed
+  taskENTER_CRITICAL(&sSwapSpinlock);
+  const bool present = sRenderTaskHandle != nullptr;
+  taskEXIT_CRITICAL(&sSwapSpinlock);
+  if (present) return true;
+  const uint32_t now = millis();
+  if (sRenderTaskRefused && now - sRenderTaskRefusedMs < kMapRenderRetryMs) return false;
+  TaskHandle_t created = nullptr;
+  taskStackRecord("mapRender", MAP_RENDER_STACK_WORDS);
+  if (xTaskCreatePinnedToCore(mapRenderTask, "mapRender", MAP_RENDER_STACK_WORDS, nullptr,
+                              TASK_PRIORITY_LOW, &created, APP_CORE) != pdPASS ||
+      !created) {
+    if (!sRenderTaskRefused) {
+      DEBUG_MAPSF("[MAP_ASYNC] render task refused (internal heap); retrying every %lu ms",
+                  (unsigned long)kMapRenderRetryMs);
+    }
+    sRenderTaskRefused = true;
+    sRenderTaskRefusedMs = now;
+    return false;
+  }
+  taskENTER_CRITICAL(&sSwapSpinlock);
+  sRenderTaskHandle = created;
+  taskEXIT_CRITICAL(&sSwapSpinlock);
+  sRenderTaskRefused = false;
+  DEBUG_MAPSF("[MAP_ASYNC] render task started");
+  return true;
+}
+
+// Crush the shade scratch (one byte per logical pixel, values 0-15) into a
+// 1-bit SSD1306 page buffer (byte = 8 vertical pixels, LSB = top). shade>0 => pixel on, so
 // OLED output is byte-identical to the old direct 1-bit rendering no matter
 // how the per-class shade values are tuned.
 static void packShadeBufTo1Bit(const uint8_t* shades, uint8_t* pageBuf) {
-  for (int page = 0; page < 8; page++) {
-    const uint8_t* rows = shades + (size_t)page * 8 * 128;
-    uint8_t* out = pageBuf + (size_t)page * 128;
-    for (int x = 0; x < 128; x++) {
+  for (int page = 0; page < (DISPLAY_HEIGHT + 7) / 8; page++) {
+    const uint8_t* rows = shades + (size_t)page * 8 * DISPLAY_WIDTH;
+    uint8_t* out = pageBuf + (size_t)page * DISPLAY_WIDTH;
+    for (int x = 0; x < DISPLAY_WIDTH; x++) {
       uint8_t b = 0;
       for (int bit = 0; bit < 8; bit++) {
-        if (rows[(size_t)bit * 128 + x]) b |= (uint8_t)(1 << bit);
+        if (page * 8 + bit < DISPLAY_HEIGHT && rows[(size_t)bit * DISPLAY_WIDTH + x]) {
+          b |= (uint8_t)(1 << bit);
+        }
       }
       out[x] = b;
     }
@@ -1011,9 +1053,21 @@ static void packShadeBufTo1Bit(const uint8_t* shades, uint8_t* pageBuf) {
 }
 
 static void mapRenderTask(void* param) {
+  const TaskHandle_t self = xTaskGetCurrentTaskHandle();
   for (;;) {
-    // Block until display task signals us
-    xSemaphoreTake(sRenderSemaphore, portMAX_DELAY);
+    // Block until the display task signals us. Nothing in
+    // kMapRenderIdleRetireMs and the OLED off the map: leave, the handle
+    // nulled under the swap lock in the step that decides (the lock
+    // ensureMapRenderTask checks), then the task's own delete. The stack and
+    // TCB go back to internal heap; a give meanwhile waits in the semaphore.
+    if (xSemaphoreTake(sRenderSemaphore, pdMS_TO_TICKS(kMapRenderIdleRetireMs)) != pdTRUE) {
+      taskENTER_CRITICAL(&sSwapSpinlock);
+      const bool leave = currentOLEDMode != OLED_GPS_MAP && sRenderTaskHandle == self;
+      if (leave) sRenderTaskHandle = nullptr;
+      taskEXIT_CRITICAL(&sSwapSpinlock);
+      if (leave) vTaskDelete(nullptr);
+      continue;
+    }
     
     // Copy snapshot to local (tiny critical section)
     float lat, lon, zoom, rotation;
@@ -1041,7 +1095,7 @@ static void mapRenderTask(void* param) {
     taskEXIT_CRITICAL(&sSwapSpinlock);
     
     // Create a local offscreen renderer targeting the shade scratch buffer
-    OffscreenMapRenderer localRenderer(sMapShadeBuf, 128, 64,
+    OffscreenMapRenderer localRenderer(sMapShadeBuf, DISPLAY_WIDTH, DISPLAY_HEIGHT,
                                        DISPLAY_WIDTH, DISPLAY_CONTENT_HEIGHT,
                                        DISPLAY_CONTENT_START_Y);
     localRenderer.clear();
@@ -1200,8 +1254,10 @@ static void displayGPSMap() {
                           (long)map.header.minLon, (long)map.header.maxLon);
   }
   
-  // Initialize async renderer on first call
+  // Initialize async renderer on first call; the render task comes and goes
+  // with the map (ensureMapRenderTask / mapRenderTask's idle exit).
   initAsyncMapRenderer();
+  const bool renderer = ensureMapRenderTask();
   
   // Create OLED renderer for overlays (context bar, text, etc.)
   if (!gOledMapRenderer) {
@@ -1217,7 +1273,8 @@ static void displayGPSMap() {
                   gMapRotation != sRenderedRotation ||
                   currentLayers != sRenderedLayers;
   
-  if (mapDirty && sRenderSemaphore) {
+  // With the render task refused the frame stays dirty for the retry.
+  if (mapDirty && sRenderSemaphore && renderer) {
     // Precompute outside critical section
     MapRenderParams tmpParams = mapRenderParamsFromGlobals();
     bool hasTrack = GPSTrackManager::hasTrack();
@@ -1259,6 +1316,11 @@ static void displayGPSMap() {
     taskENTER_CRITICAL(&sSwapSpinlock);
     memcpy(oledDisplay->getBuffer(), sMapFrontBuf, SSD1306_BUF_SIZE);
     taskEXIT_CRITICAL(&sSwapSpinlock);
+  }
+  if (!renderer) {
+    // No task to draw the raster (or refresh the one shown): say so.
+    oledDisplay->setCursor(0, DISPLAY_CONTENT_START_Y);
+    oledDisplay->println("Map: low memory");
   }
   
   // Update location context if GPS has fix and enough time has passed
@@ -1966,7 +2028,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
         gFeaturesScrollOffset--;
         return true;
       }
-      if (gNavEvents.down && gFeaturesScrollOffset < map.nameCount - 5) {
+      if (gNavEvents.down && gFeaturesScrollOffset < map.nameCount - oledVisibleRows(10, 8, 5)) {
         gFeaturesScrollOffset++;
         return true;
       }
@@ -1990,9 +2052,9 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     // (file delete) can't invalidate the pool or name table mid-branch.
     MapCacheGuard mapGuard("OLED.routesList");
     const LoadedMap& map = MapCore::getCurrentMap();
-    static RouteInfo routeList[32];
-    static float routeFirstLat[32];  // Store first point coords for goto
-    static float routeFirstLon[32];
+    EXT_RAM_BSS_ATTR static RouteInfo routeList[32];  // PSRAM: OLED task only, under MapCacheGuard
+    EXT_RAM_BSS_ATTR static float routeFirstLat[32];  // Store first point coords for goto
+    EXT_RAM_BSS_ATTR static float routeFirstLon[32];
     int routeCount = 0;
     if (map.valid && map.tileDir) {
       for (uint16_t tileIdx = 0; tileIdx < map.tileCount && routeCount < 32; tileIdx++) {
@@ -2097,7 +2159,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     }
     if (gNavEvents.down && gRoutesSelectedIdx < routeCount - 1) {
       gRoutesSelectedIdx++;
-      if (gRoutesSelectedIdx >= gRoutesScrollOffset + 5) gRoutesScrollOffset = gRoutesSelectedIdx - 4;
+      if (gRoutesSelectedIdx >= gRoutesScrollOffset + oledVisibleRows(10, 8, 5)) gRoutesScrollOffset = gRoutesSelectedIdx - oledVisibleRows(10, 8, 5) + 1;
       return true;
     }
 
@@ -2205,7 +2267,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   // Menu navigation when open
   if (gMapMenuOpen) {
-    const int maxVisible = 4;
+    const int maxVisible = oledVisibleRows(9, 18 - OLED_CONTENT_START_Y, 4);
     
     // Get item count for current menu level
     int menuItemCount;
@@ -2241,7 +2303,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
         // Subtype submenu → layers submenu, restore selection
         gMapSubmenuLevel = 1;
         gMapMenuSelection = gLayerTypeSelectIdx;
-        gMapMenuScrollOffset = (gLayerTypeSelectIdx >= 4) ? gLayerTypeSelectIdx - 3 : 0;
+        gMapMenuScrollOffset = max(0, gLayerTypeSelectIdx - oledVisibleRows(9, 18 - OLED_CONTENT_START_Y, 4) + 1);
       } else if (gMapSubmenuLevel > 0) {
         goBackToMainMenu();
       } else {

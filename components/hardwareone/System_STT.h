@@ -109,10 +109,13 @@ bool sttRunActive(STTToken token);
 // lock, right after each final or draft is published (HW1_STT_PUBLISH_WAKE),
 // so the consumer can read it at once; it must only signal (e.g. give a
 // semaphore).
+// Consumers that do not use speaker identities can opt out for this session;
+// this skips loading/submitting to the optional speaker model, not recognition.
 bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
                                 char* error, size_t errorCap,
                                 const TranscriptOptions* transcriptOptions = nullptr,
-                                void (*publishWake)() = nullptr);
+                                void (*publishWake)() = nullptr,
+                                bool speakerLabels = true);
 // Native voice question: same broker, exact G2 PCM claim and chunk/ACK API,
 // but capture ends on the first 1.5 s speech pause. Hard segment cuts continue
 // the question; a 30 s limit fails it rather than submitting a truncated request.
