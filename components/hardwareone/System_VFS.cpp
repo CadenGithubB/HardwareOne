@@ -582,7 +582,9 @@ static FS* fsForPath(const String& path) {
   return (getStorageType(path) == SDCARD) ? (FS*)&SD : (FS*)&LittleFS;
 }
 
-bool exists(const String& path) {
+// ---- Backend dispatchers: private to this file. Every public operation is a
+// guarded call below that authorizes an identity first and then lands here.
+static bool exists(const String& path) {
   String p = normalize(path);
   if (p.indexOf("..") >= 0) return false;  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.exists");
@@ -597,22 +599,34 @@ bool exists(const String& path) {
   return LittleFS.exists(p);
 }
 
-File open(const String& path, const char* mode, bool create) {
+static File open(const String& path, const char* mode = FILE_READ, bool create = false) {
   String p = normalize(path);
   if (p.indexOf("..") >= 0) return File();  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.open");
 
+  // `create` means "make missing parent directories", not "create the file":
+  // every write mode already creates a missing file. Arduino's
+  // VFSImpl::open(path, mode, create=true) runs mkdir() on EVERY parent
+  // component on EVERY call, so a one-line append to /system/sys_logs/x.log
+  // paid two LittleFS directory walks before its own open — ~75 ms of the
+  // ~115 ms per append measured on the P4X-EYE (2026-10-27), on every command's
+  // audit line. Open without it first; the directory walk runs only when the
+  // plain open fails, which is the one case (a missing directory) it is for.
   if (getStorageType(p) == SDCARD) {
     if (!isSDAvailable()) return File();
     const char* sdPath = (p == "/sd") ? "/" : p.c_str() + 3;
-    return SD.open(sdPath, mode, create);
+    File f = SD.open(sdPath, mode, false);
+    if (!f && create && mode && mode[0] != 'r') f = SD.open(sdPath, mode, true);
+    return f;
   }
 
   if (!filesystemReady) return File();
-  return LittleFS.open(p.c_str(), mode, create);
+  File f = LittleFS.open(p.c_str(), mode, false);
+  if (!f && create && mode && mode[0] != 'r') f = LittleFS.open(p.c_str(), mode, true);
+  return f;
 }
 
-bool mkdir(const String& path) {
+static bool mkdir(const String& path) {
   String p = normalize(path);
   if (p.indexOf("..") >= 0) return false;  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.mkdir");
@@ -636,7 +650,7 @@ static void postFileDeleted(const char* path) {
   systemEventPost(SYSEVT_FILE_DELETED, name, path);
 }
 
-bool remove(const String& path) {
+static bool remove(const String& path) {
   String p = normalize(path);
   if (p.indexOf("..") >= 0) return false;  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.remove");
@@ -658,7 +672,7 @@ bool remove(const String& path) {
   return ok;
 }
 
-bool rename(const String& pathFrom, const String& pathTo) {
+static bool rename(const String& pathFrom, const String& pathTo) {
   String from = normalize(pathFrom);
   String to = normalize(pathTo);
   if (from.indexOf("..") >= 0 || to.indexOf("..") >= 0) return false;  // reject traversal
@@ -683,7 +697,7 @@ bool rename(const String& pathFrom, const String& pathTo) {
   return ok;
 }
 
-bool rmdir(const String& path) {
+static bool rmdir(const String& path) {
   String p = normalize(path);
   if (p.indexOf("..") >= 0) return false;  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.rmdir");

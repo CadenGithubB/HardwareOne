@@ -33,7 +33,11 @@ const char* AUTOMATIONS_JSON_FILE = "/system/automations.json";
 static String store;
 static bool storeReadable = true;
 static unsigned reads = 0;
-bool readText(const char* path, String& out) {
+namespace VFS {
+namespace Scopes { constexpr const char* SYSTEM_STATE = "/system"; }
+static int systemAuth(const char*, const char*) { return 0; }
+}
+bool readText(const char* path, String& out, int) {
   ++reads;
   if (!storeReadable || std::strcmp(path, AUTOMATIONS_JSON_FILE) != 0) return false;
   out = store;

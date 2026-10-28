@@ -6,7 +6,7 @@ its reply-to-toast mapping oledCommandReplyText, and oledRunCommandAsync with
 its frame-loop delivery) and real callers: the
 Automations toggle/delete actions with their footer toast
 (OLED_Mode_Automations.cpp), the Quick Settings radio, Wi-Fi, Bluetooth and HTTP
-rows (OLED_SettingsEditor.cpp) and the Network menu's HTTP confirm callbacks
+rows (OLED_SettingsEditor.cpp) and the Web menu's server confirm callbacks
 (OLED_Mode_Network.cpp). The OLED command executor, the global toast, the
 Automations rows and the radio/BLE/HTTP state are doubles.
 
@@ -17,11 +17,11 @@ only when the command succeeded. The Quick Settings rows submit without
 waiting: the executor double finishes each command only when a case says so,
 and the reply is delivered by the display-task poll (one request at a time, a
 refused queue toasts, a reply from a replaced display session is dropped). Static checks cover the call sites the harness
-does not run: the Logging and Network screens, the Quick Settings section and the
-unavailable-page / Web Stats actions (OLED_Utils.cpp handleOLEDActionButton) no
-longer fire commands whose reply is dropped, and their success lines are
-conditional; the Bluetooth-unavailable page's X runs openble (the app console),
-not the role-aware Quick Settings toggle. `--component <dir>` runs the same cases against saved sources (the
+does not run: the Logging, WiFi and Web screens, the Quick Settings section and the
+unavailable-page actions (OLED_Utils.cpp handleOLEDActionButton) no longer fire
+commands whose reply is dropped, and their success lines are conditional; the
+Bluetooth menu's on/off row runs openble, not the role-aware Quick Settings
+toggle. `--component <dir>` runs the same cases against saved sources (the
 base tree has no helper and shows success texts for refused commands).
 """
 from __future__ import annotations
@@ -54,7 +54,7 @@ AUTOMATIONS = ("static void autoShowToast(", "static void autoToggleSelected(",
 QUICK_SETTINGS = ("static void setQuickStatus(", "static void toggleQuickRadio(",
                   "static void toggleQuickWiFi(", "static void bluetoothToggleConfirmedQuick(",
                   "static void httpToggleConfirmedQuick(")
-NETWORK = ("static void httpStartConfirmedNetwork(", "static void httpStopConfirmedNetwork(")
+NETWORK = ("static void webServerStartConfirmed(", "static void webServerStopConfirmed(")
 
 
 def functions(source: str, name: str, markers: tuple[str, ...]) -> str:
@@ -105,14 +105,17 @@ def static_checks(read) -> list[str]:
         statement_start = max(action.rfind(";", 0, match.start()), action.rfind("}", 0, match.start()))
         if "if (oledRunCommand(" not in action[statement_start + 1:match.start()]:
             failures.append(f"handleOLEDActionButton prints {match.group(0)} whatever the command answered")
-    # The Bluetooth-unavailable page's X starts the app console, as it did before
-    # the role rows; Quick Settings alone keeps the role-aware toggle.
-    bluetooth = re.search(r'unavailableOLEDTitle == "Bluetooth"\)\s*\{(.*?)\}\s*else if', action, re.S)
-    if not bluetooth:
-        failures.append("handleOLEDActionButton has no Bluetooth-unavailable action")
-    elif ('oledRunCommand("openble")' not in bluetooth.group(1)
-          or "oledBluetoothToggleCommand" in bluetooth.group(1)):
-        failures.append("the Bluetooth-unavailable page's X does not run openble (the app console)")
+    # The Bluetooth menu always opens now; its first row starts the client stack
+    # with openble (as the unavailable page's X did) and reports the reply.
+    # Quick Settings alone keeps the role-aware toggle.
+    bt_input = strip_comments(extract_block(read("OLED_Mode_Bluetooth.cpp"),
+                                            "static bool bluetoothInputHandler("))
+    power = re.search(r"case BT_ACT_POWER:(.*?)break;", bt_input, re.S)
+    if not power:
+        failures.append("the Bluetooth menu has no on/off row")
+    elif ('oledRunCommand("openble")' not in power.group(1)
+          or "oledBluetoothToggleCommand" in power.group(1)):
+        failures.append("the Bluetooth menu's on/off row does not run openble through oledRunCommand")
     return failures
 
 

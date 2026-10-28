@@ -13,6 +13,9 @@ void webBatchTestStringAppend() {}
 #define EXT_RAM_BSS_ATTR
 #define CAPTURE_SENSORLOG_DEFAULT "/logging_captures/sensors/sensors.txt"
 #define CAPTURE_HEALTHLOG_DEFAULT "/logging_captures/sensors/health.csv"
+#ifndef CAPTURE_DIR
+#define CAPTURE_DIR "/logging_captures"
+#endif
 bool gCLIValidateOnly = false;
 
 // INSERT_TYPES
@@ -106,7 +109,7 @@ const char* sensorLogStartConfiguredSession() {
   startSawAutoStart = gSettings.gpsAutoStart || gSettings.sensorLogAutoStart;
   if (startupReply && std::strncmp(startupReply, "SUCCESS:", 8) == 0) {
     gSensorLoggingRunning = true;
-    gSensorLogPath = "/logs/a quoted \"trip\"/track.track";
+    gSensorLogPath = "/logging_captures/logs/a quoted \"trip\"/track.track";
   }
   return borrowed(startupReply);
 }
@@ -161,7 +164,20 @@ struct File {
 struct FsLockGuard { explicit FsLockGuard(const char*) {} };
 namespace VFS {
 enum Storage { INTERNAL, SDCARD };
+namespace Scopes {
+constexpr const char* CAPTURES    = "/logging_captures";
+constexpr const char* CAPTURES_SD = "/sd/logging_captures";
+}
+inline const char* captureScopeFor(const String& path) {
+  return std::strncmp(path.c_str(), "/sd/", 4) == 0 ? Scopes::CAPTURES_SD : Scopes::CAPTURES;
+}
+inline bool pathInCaptureTree(const String& path) {
+  const std::string p = path.c_str();
+  const std::string base = captureScopeFor(path);
+  return p == base || p.compare(0, base.size() + 1, base + "/") == 0;
+}
 const char* systemAuth(const char* tag) { return tag; }
+const char* systemAuth(const char* scope, const char* tag) { (void)scope; return tag; }
 bool existsGuarded(const String&, const char*) { return pathExists; }
 void mkdirGuarded(const String&, const char*) { pathExists = true; }
 File openGuarded(const String&, const char*, const char*, bool) { return {}; }
@@ -207,13 +223,13 @@ static void check(bool ok, const char* message) {
 static bool error(const std::string& text) { return text.rfind("Error", 0) == 0; }
 static void reset() {
   gSettings = {true, false, false, false, LOG_GPS, SENSOR_LOG_TRACK,
-               1000, 256000, 3, String("/logs/saved track.track")};
+               1000, 256000, 3, String("/logging_captures/logs/saved track.track")};
   gSensorLogMask = LOG_TOF;
   gSensorLogFormat = SENSOR_LOG_CSV;
   gSensorLogIntervalMs = 5000;
   gSensorLogMaxSize = 10240;
   gSensorLogMaxRotations = 1;
-  gSensorLogPath = "/logs/previous.csv";
+  gSensorLogPath = "/logging_captures/logs/previous.csv";
   gSensorLoggingRunning = gCLIValidateOnly = false;
   persistCalls = 0;
   actions.clear();
@@ -348,7 +364,7 @@ static void failedSteps() {
 }
 #else
 static void manualAndBootPaths() {
-  for (const char* path : {"", "relative.track", "/logs/simple.track", "/logs/a space/track.track", "/logs/a \"quoted\" track.track"}) {
+  for (const char* path : {"", "relative.track", "/logging_captures/logs/simple.track", "/logging_captures/logs/a space/track.track", "/logging_captures/logs/a \"quoted\" track.track"}) {
     for (bool boot : {false, true}) {
       context = std::string(boot ? "boot literal path: " : "manual literal path: ") + path;
       reset();
@@ -434,7 +450,7 @@ static void legacyRestoreBounds() {
 }
 static void healthBootPolicy() {
   for (SensorLogFormat format : {SENSOR_LOG_TEXT, SENSOR_LOG_CSV, SENSOR_LOG_TRACK}) {
-    for (const char* path : {"/logs/track.track", "/my health folder/vitals.csv"}) {
+    for (const char* path : {"/logging_captures/logs/track.track", "/logging_captures/my health folder/vitals.csv"}) {
       for (bool boot : {false, true}) {
         context = "health boot/manual policy";
         reset();
@@ -454,6 +470,32 @@ static void healthBootPolicy() {
     }
   }
 }
+// Paths outside the capture tree are refused before any directory walk, file
+// open, session resolution or persistence: the start runs as the system
+// identity, so the gate is what keeps a typed path off the roster/settings.
+static void outOfTreeRefused() {
+  for (const char* path : {"/system/users/users.json", "/captures/outside.csv",
+                           "/logging_capturesX/x.csv", "/sd/system/settings.json"}) {
+    for (bool boot : {false, true}) {
+      context = std::string(boot ? "boot out-of-tree path: " : "typed out-of-tree path: ") + path;
+      reset();
+      std::string result;
+      if (boot) {
+        gSettings.sensorLogAutoStart = true;
+        gSettings.sensorLogPath = path;
+        sensorLogAutoStart();
+        result = logEvents.empty() ? "" : logEvents.back();
+        check(result.find("FAILED") != std::string::npos, "boot out-of-tree start was not logged as failed");
+      } else {
+        result = commandStart(String("start \"") + path + "\" 1000");
+        check(error(result) && result.find(CAPTURE_DIR) != std::string::npos, "typed out-of-tree path was accepted");
+      }
+      check(!gSensorLoggingRunning, "out-of-tree path started a session");
+      check(resolvedCalls == 0 && fileCloses == 0 && persistCalls == 0,
+            "out-of-tree path reached resolution, a file open or persistence");
+    }
+  }
+}
 static void admissionFailuresAndAdapter() {
   for (int failure = 0; failure < 6; ++failure) {
     for (bool boot : {false, true}) {
@@ -467,7 +509,7 @@ static void admissionFailuresAndAdapter() {
       if (failure == 5) fileOpenable = false;
       if (boot) { gSettings.sensorLogAutoStart = true; sensorLogAutoStart(); }
       else check(error(sensorLogStartConfiguredSession()), "admission error hidden");
-      check(!gSensorLoggingRunning && gSensorLogPath == "/logs/previous.csv", "failed start published live session");
+      check(!gSensorLoggingRunning && gSensorLogPath == "/logging_captures/logs/previous.csv", "failed start published live session");
       check(sensorLogCurrentSessionId() == 0 && sSensorLogSessionId == 0,
             "failed start consumed a logger session identity");
       check(persistCalls == 0, "failed admission persisted session parameters");
@@ -477,9 +519,9 @@ static void admissionFailuresAndAdapter() {
   for (const char* interval : {"", " 99", " 3600001", " -1", " bad", " 777"}) {
     context = "explicit command adapter";
     reset();
-    const String command = String("start \"/logs/literal path.csv\"") + interval;
+    const String command = String("start \"/logging_captures/logs/literal path.csv\"") + interval;
     check(std::string(commandStart(command)).rfind("SUCCESS:", 0) == 0, "command start adapter failed");
-    check(resolvedPath == "/logs/literal path.csv", "command adapter changed quoted path");
+    check(resolvedPath == "/logging_captures/logs/literal path.csv", "command adapter changed quoted path");
     const unsigned expected = !std::strcmp(interval, " 99") ? 100 :
         (!std::strcmp(interval, " 3600001") || !std::strcmp(interval, " -1")) ? 3600000 :
         !std::strcmp(interval, " 777") ? 777 : 5000;
@@ -502,7 +544,7 @@ static void sessionOwnership() {
   reset();
   check(sensorLogCurrentSessionId() == 0 && !sensorLogStopSession(0),
         "idle session exposes or accepts an owner token");
-  check(!error(commandStart("start /logs/reused.csv 1000")), "first owned start failed");
+  check(!error(commandStart("start /logging_captures/logs/reused.csv 1000")), "first owned start failed");
   const uint32_t first = sensorLogCurrentSessionId();
   check(first != 0, "successful start has no identity");
   check(!sensorLogStopSession(first + 1) && gSensorLoggingRunning,
@@ -512,17 +554,17 @@ static void sessionOwnership() {
   const size_t eventsAfterStop = systemEvents.size();
   check(!sensorLogStopSession(first) && systemEvents.size() == eventsAfterStop,
         "repeated stop posted a duplicate event");
-  check(!error(commandStart("start /logs/reused.csv 1000")), "replacement start failed");
+  check(!error(commandStart("start /logging_captures/logs/reused.csv 1000")), "replacement start failed");
   const uint32_t replacement = sensorLogCurrentSessionId();
   check(replacement != 0 && replacement != first, "same path reused previous identity");
   check(!sensorLogStopSession(first) && sensorLogCurrentSessionId() == replacement,
         "old consumer stopped unrelated same-path replacement");
-  gSensorLogPath = "/logs/rolled.csv";
+  gSensorLogPath = "/logging_captures/logs/rolled.csv";
   check(sensorLogCurrentSessionId() == replacement,
         "rolling a file changed its session owner identity");
   check(sensorLogStopSession(replacement), "replacement owner could not stop");
   sSensorLogSessionId = UINT32_MAX;
-  check(!error(commandStart("start /logs/reused.csv 1000")) && sensorLogCurrentSessionId() == 1,
+  check(!error(commandStart("start /logging_captures/logs/reused.csv 1000")) && sensorLogCurrentSessionId() == 1,
         "session identity wrap published the zero sentinel");
 }
 #if HAVE_LIVE_TRACK_START
@@ -581,8 +623,8 @@ static void liveTrackTransientSession() {
 
   context = "typed starts still persist, and their stop restores nothing";
   reset(); configuredSession();
-  check(!error(commandStart("start /logs/typed.csv 700")), "typed start refused");
-  check(gSettings.sensorLogPath == "/logs/typed.csv" && gSettings.sensorLogIntervalMs == 700 &&
+  check(!error(commandStart("start /logging_captures/logs/typed.csv 700")), "typed start refused");
+  check(gSettings.sensorLogPath == "/logging_captures/logs/typed.csv" && gSettings.sensorLogIntervalMs == 700 &&
         gSettings.sensorLogMask == (LOG_TOF | LOG_IMU) && persistCalls == 2, "typed start no longer persists its session");
   gSensorLogFormat = SENSOR_LOG_TEXT;  // a later live change that no stop may undo
   check(sensorLogMarkStopped() && gSensorLogFormat == SENSOR_LOG_TEXT && gSensorLogIntervalMs == 700,
@@ -606,6 +648,7 @@ int main() {
   run("legacy saved-parameter restoration", legacyRestoreBounds);
   run("manual versus boot health policy", healthBootPolicy);
   run("typed admission and command adapter", admissionFailuresAndAdapter);
+  run("paths outside the capture tree are refused", outOfTreeRefused);
   run("logger session ownership", sessionOwnership);
 #if HAVE_LIVE_TRACK_START
   run("transient live-track session", liveTrackTransientSession);

@@ -97,6 +97,8 @@ HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_SENSOR_STARTED,      "sensor_started", SYSEVT_
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_SENSOR_STOPPED,      "sensor_stopped", SYSEVT_FAM_SENSORS)       /* subject=sensor name */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_SENSOR_START_FAILED, "sensor_start_failed", SYSEVT_FAM_SENSORS)  /* subject=sensor name */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_SENSOR_FAULT,        "sensor_fault", SYSEVT_FAM_SENSORS)         /* sensor auto-disabled after repeated errors  subject=name */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_SENSOR_UNRESPONSIVE, "sensor_unresponsive", SYSEVT_FAM_SENSORS)  /* an I2C device that answered this boot stopped (once per outage)  subject=name detail=0xAA bus N nack|timeout */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_SENSOR_RECOVERED,    "sensor_recovered", SYSEVT_FAM_SENSORS)     /* that device answered again  subject=name detail=0xAA bus N */
   /* --- Sensor / input events --- */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PRESENCE_DETECTED,   "presence_detected", SYSEVT_FAM_SENSORS)    /* STHS34PF80 presence trip  subject=value */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PRESENCE_CLEARED,    "presence_cleared", SYSEVT_FAM_SENSORS)     /* presence gone (held-down) */

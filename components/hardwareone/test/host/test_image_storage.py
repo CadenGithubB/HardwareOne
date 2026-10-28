@@ -40,7 +40,7 @@ def generate(baseline: Path | None) -> str:
         "String normalize(", "StorageType getStorageType(", "String stripSdPrefix(",
         "size_t listVirtualEntries(")) + "\n}\n"
     reader = "namespace VFS {\n" + header[header.index("struct DirectoryEntry {"):
-        header.index("bool exists(const String& path);")]
+        header.index("bool getStats(StorageType type")]
     reader += vfs[vfs.index("DirectoryReader::DirectoryReader("):vfs.index("static FS* fsForPath(")] + "\n}\n"
     markers = ["ImageManager::ImageManager()", "ImageManager::~ImageManager()",
                "bool ImageManager::init()", "bool ImageManager::initSD()",

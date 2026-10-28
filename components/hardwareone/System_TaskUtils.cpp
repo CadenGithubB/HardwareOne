@@ -33,9 +33,6 @@ extern "C" __attribute__((weak)) UBaseType_t uxTaskGetSystemState(
   return 0;
 }
 
-// Filesystem log append helper (implemented in System_Filesystem.cpp).
-bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
-
 // Per-sensor TaskHandle_t and enabled-flag externs come from the sensor
 // headers (each header gates its decls on ENABLE_*_SENSOR; System_SensorStubs.h
 // supplies stubs for sensors compiled out).

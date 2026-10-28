@@ -698,7 +698,7 @@ void getTimestampPrefixMsCached(char* out, size_t outSize) {
 // behavior change — these state files should never overflow to SD (see the
 // design contract in System_VFS.h).
 
-bool readText(const char* path, String& out) {
+bool readText(const char* path, String& out, const AuthContext& ctx) {
   out = "";
 
   // Pause sensor polling during file I/O to prevent I2C contention (RAII —
@@ -706,7 +706,7 @@ bool readText(const char* path, String& out) {
   PollPauseGuard pollGuard;
 
   FsLockGuard guard("readText");
-  File f = VFS::open(String(path), "r");
+  File f = VFS::openGuarded(String(path), "r", ctx);
   if (!f) {
     return false;
   }
@@ -716,7 +716,7 @@ bool readText(const char* path, String& out) {
   return true;
 }
 
-bool writeText(const char* path, const String& in) {
+bool writeText(const char* path, const String& in, const AuthContext& ctx) {
   if (!path || !*path) return false;
   String destination;
   if (!destination.concat(path)) return false;
@@ -724,7 +724,7 @@ bool writeText(const char* path, const String& in) {
   PollPauseGuard pollGuard;   // pause sensor polling during file I/O (RAII)
 
   FsLockGuard guard("writeText");
-  File f = VFS::open(destination, "w", true);
+  File f = VFS::openGuarded(destination, "w", ctx, true);
   if (!f || f.isDirectory()) {
     if (f) f.close();
     return false;
@@ -740,7 +740,7 @@ bool writeText(const char* path, const String& in) {
   return complete;
 }
 
-bool writeTextAtomic(const char* path, const String& content) {
+bool writeTextAtomic(const char* path, const String& content, const AuthContext& ctx) {
   if (!path || !*path) return false;
   String destination;
   String tmp;
@@ -753,13 +753,13 @@ bool writeTextAtomic(const char* path, const String& content) {
   PollPauseGuard pollGuard;
   FsLockGuard guard("writeTextAtomic");
 
-  if (writeText(tmp.c_str(), content) && VFS::rename(tmp, destination)) {
+  if (writeText(tmp.c_str(), content, ctx) && VFS::renameGuarded(tmp, destination, ctx)) {
     return true;
   }
 
   // Failed write or rename: discard only the temp, never truncate or delete
   // the destination. Cleanup is best-effort and cannot turn failure into success.
-  VFS::remove(tmp);
+  VFS::removeGuarded(tmp, ctx);
   return false;
 }
 
@@ -2480,6 +2480,7 @@ static const char* factoryreset_confirmed(void* /*userData*/) {
   // a device that was reset could come back resuming the feature set it just wiped.
   ramFlushClearOverlay();
 
+  // trusted, deliberately unconfined: a factory reset wipes every tree.
   AuthContext sysCtx = VFS::systemAuth("factory.reset");
   bool sdSkipped = false;
   String settingsLeft;
@@ -2721,7 +2722,7 @@ const char* cmd_crashlog(const String& argsInput) {
     if (!nl) break;
     line = nl + 1;
   }
-  if (VFS::exists("/system/sys_logs/crash-history.log")) {
+  if (VFS::existsGuarded("/system/sys_logs/crash-history.log", currentAuthContext())) {
     cliHint("full history (survives reboots): /system/sys_logs/crash-history.log");
   }
   return "OK";
@@ -4368,17 +4369,22 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // generation, so stale queued work cannot inherit the replacement session.
   CommandContext* cmdCtx = static_cast<CommandContext*>(currentCommandContext());
 
-  // A real user/peer command resets the power-save idle timer (and wakes the
-  // device if it's dark). SOURCE_INTERNAL (automations, scheduler, internal
-  // helpers) is excluded so background command execution can't pin the device
-  // awake. This is what lets a headless box with no input device still power-
-  // save yet wake on a serial / web / G2 / ESP-NOW command.
+  // A real user/peer command counts as activity for the power policy: it keeps
+  // the clock at the mode's in-use clock and, only when someone is at the
+  // device, wakes the local panel. Local means the local display's own
+  // commands and on-device voice; a command from the glasses, phone, web,
+  // serial, ESP-NOW or MQTT is remote and never lights the panel. This is what
+  // lets a headless box with no input device still drop its clock yet come
+  // back up on a serial / web / G2 / ESP-NOW command.
+  // SOURCE_INTERNAL (automations, scheduler, internal helpers) is excluded so
+  // background command execution can't pin the device out of idle.
   // SOURCE_UART is excluded for the same reason: the UART host link is a
   // machine daemon that may poll sensors continuously — a human isn't there,
   // and its traffic must not hold the device out of power-save forever.
   if (ctx.transport != SOURCE_INTERNAL && ctx.transport != SOURCE_UART &&
       !isPassiveTranscriptionCommand(cmd)) {
-    powerSaveNoteActivity();
+    powerSaveNoteActivity(ctx.transport == SOURCE_LOCAL_DISPLAY ||
+                          ctx.transport == SOURCE_VOICE);
   }
 
   // Install the command's identity + notification source into the calling

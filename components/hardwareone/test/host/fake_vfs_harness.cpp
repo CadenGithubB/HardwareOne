@@ -61,50 +61,62 @@ static void rootsAndHelpers() {
   check(VFS::isStagingName("/a/b.tmp") && VFS::isStagingName("x.bak") && !VFS::isStagingName("x.json"), "isStagingName");
 }
 
+// The firmware's VFS has no raw open/exists/... any more, so neither does the
+// fake's VFS namespace. These drive the fake backend directly with the
+// unguarded Auth the old forwarders used, to test the backend model itself.
+static File unguardedOpen(const String& path, const char* mode, bool create = false) {
+  return fake_vfs::fs().open(path.c_str(), mode, create, fake_vfs::Fs::Auth{});
+}
+static bool unguardedExists(const String& path) { return fake_vfs::fs().exists(path.c_str(), fake_vfs::Fs::Auth{}); }
+static bool unguardedMkdir(const String& path) { return fake_vfs::fs().mkdir(path.c_str(), fake_vfs::Fs::Auth{}); }
+static bool unguardedRemove(const String& path) { return fake_vfs::fs().remove(path.c_str(), fake_vfs::Fs::Auth{}); }
+static bool unguardedRename(const String& from, const String& to) { return fake_vfs::fs().rename(from.c_str(), to.c_str(), fake_vfs::Fs::Auth{}); }
+static bool unguardedRmdir(const String& path) { return fake_vfs::fs().rmdir(path.c_str(), fake_vfs::Fs::Auth{}); }
+
 static void openModes() {
   auto& fs = reset();
-  check(!VFS::open("/missing.txt", "r"), "read of a missing file fails");
+  check(!unguardedOpen("/missing.txt", "r"), "read of a missing file fails");
   check(fs.count("open") == 1 && !fs.last("open")->ok && fs.last("open")->other == "r", "failed open is logged with its mode");
-  File w = VFS::open("/note.txt", "w");
+  File w = unguardedOpen("/note.txt", "w");
   check(static_cast<bool>(w) && fs.liveHandles() == 1, "write open creates the file");
   check(w.print("hello") == 5 && w.print(String(" world")) == 6, "print accepts const char* and String");
   check(w.size() == 11 && w.position() == 11, "size and position track writes");
   w.close();
   check(fs.liveHandles() == 0 && fs.text("/note.txt") == "hello world", "close releases the handle, bytes stored");
-  File a = VFS::open("/note.txt", "a");
+  File a = unguardedOpen("/note.txt", "a");
   check(a.println("!") == 3, "println appends CRLF");
   a.close();
   check(fs.text("/note.txt") == "hello world!\r\n", "append mode appends");
-  File t = VFS::open("/note.txt", "w");
+  File t = unguardedOpen("/note.txt", "w");
   check(t.size() == 0, "write mode truncates");
   t.write(static_cast<uint8_t>('x'));
   t.close();
   check(fs.text("/note.txt") == "x", "single-byte write");
-  File rw = VFS::open("/note.txt", "r+");
+  File rw = unguardedOpen("/note.txt", "r+");
   check(rw.read() == 'x' && rw.write(reinterpret_cast<const uint8_t*>("yz"), 2) == 2, "r+ reads then writes in place");
   rw.close();
   check(fs.text("/note.txt") == "xyz", "r+ does not truncate");
-  check(!VFS::open("/nodir/file.txt", "w"), "write without a parent directory fails");
-  check(static_cast<bool>(VFS::open("/nodir/file.txt", "w", true)), "create=true makes parents");
+  check(!unguardedOpen("/nodir/file.txt", "w"), "write without a parent directory fails");
+  check(static_cast<bool>(unguardedOpen("/nodir/file.txt", "w", true)), "create=true makes parents");
   check(fs.isDirectory("/nodir"), "parent was created");
   fs.policy.createFlagMakesParents = false;
-  check(!VFS::open("/other/file.txt", "w", true), "policy can refuse parent creation");
+  check(!unguardedOpen("/other/file.txt", "w", true), "policy can refuse parent creation");
   fs.policy.createFlagMakesParents = true;
-  check(!VFS::open("/nodir", "w"), "write open on a directory fails");
-  File dir = VFS::open("/nodir", "r");
+  check(!unguardedOpen("/nodir", "w"), "write open on a directory fails");
+  File dir = unguardedOpen("/nodir", "r");
   check(static_cast<bool>(dir) && dir.isDirectory() && dir.size() == 0, "read open of a directory yields a directory handle");
   File copy = dir;
   dir.close();
   check(!copy, "copies share one handle");
-  check(!VFS::open("/", "w") && !VFS::open("/sd", "w"), "roots cannot be opened for writing");
-  check(!VFS::open("/a/../etc", "r"), "traversal is rejected");
+  check(!unguardedOpen("/", "w") && !unguardedOpen("/sd", "w"), "roots cannot be opened for writing");
+  check(!unguardedOpen("/a/../etc", "r"), "traversal is rejected");
   check(fs.liveHandles() == 0 && fs.implicitCloses == 1, "every handle closed; the dropped temporary closed implicitly");
 }
 
 static void streamSurface() {
   auto& fs = reset();
   fs.put("/data.txt", "line one\nline two\n");
-  File f = VFS::open("/data.txt", FILE_READ);
+  File f = unguardedOpen("/data.txt", FILE_READ);
   check(f.available() == 18 && f.peek() == 'l', "available and peek");
   check(f.readStringUntil('\n') == "line one", "readStringUntil consumes the terminator");
   check(f.position() == 9, "position after readStringUntil");
@@ -119,7 +131,7 @@ static void streamSurface() {
   check(f.write(reinterpret_cast<const uint8_t*>("x"), 1) == 0, "read handle refuses writes");
   check(f.name() != nullptr && std::string(f.name()) == "data.txt" && std::string(f.path()) == "/data.txt", "name and path");
   f.close();
-  File p = VFS::open("/fmt.txt", "w");
+  File p = unguardedOpen("/fmt.txt", "w");
   check(p.printf("%s=%d", "n", 42) == 4 && p.print('c') == 1 && p.print(7) == 1 && p.println(8) == 3, "printf and numeric prints");
   std::string big(300, 'q');
   check(p.printf("%s", big.c_str()) == 300, "printf beyond the stack buffer");
@@ -130,24 +142,24 @@ static void streamSurface() {
 
 static void directories() {
   auto& fs = reset();
-  check(!VFS::mkdir("/a/b"), "mkdir needs its parent");
-  check(VFS::mkdir("/a") && VFS::mkdir("/a/b") && !VFS::mkdir("/a"), "mkdir chain; existing refused");
+  check(!unguardedMkdir("/a/b"), "mkdir needs its parent");
+  check(unguardedMkdir("/a") && unguardedMkdir("/a/b") && !unguardedMkdir("/a"), "mkdir chain; existing refused");
   fs.put("/a/file", "1");
-  check(!VFS::mkdir("/a/file"), "mkdir over a file refused");
-  check(!VFS::mkdir("/") && !VFS::mkdir("/sd"), "roots cannot be made");
-  check(!VFS::rmdir("/a"), "rmdir of a non-empty directory refused");
-  check(!VFS::remove("/a/b"), "remove refuses a directory by default");
-  check(VFS::rmdir("/a/b") && !fs.exists("/a/b"), "rmdir of an empty directory");
-  check(!VFS::rmdir("/a/file"), "rmdir of a file refused");
-  VFS::mkdir("/a/c");
+  check(!unguardedMkdir("/a/file"), "mkdir over a file refused");
+  check(!unguardedMkdir("/") && !unguardedMkdir("/sd"), "roots cannot be made");
+  check(!unguardedRmdir("/a"), "rmdir of a non-empty directory refused");
+  check(!unguardedRemove("/a/b"), "remove refuses a directory by default");
+  check(unguardedRmdir("/a/b") && !fs.exists("/a/b"), "rmdir of an empty directory");
+  check(!unguardedRmdir("/a/file"), "rmdir of a file refused");
+  unguardedMkdir("/a/c");
   fs.policy.removeUnlinksDirectory = true;
-  check(VFS::remove("/a/c") && !fs.exists("/a/c"), "policy lets remove unlink an empty directory");
+  check(unguardedRemove("/a/c") && !fs.exists("/a/c"), "policy lets remove unlink an empty directory");
   fs.put("/a/c/x", "1");
-  check(!VFS::remove("/a/c"), "even then a non-empty directory stays");
+  check(!unguardedRemove("/a/c"), "even then a non-empty directory stays");
   fs.policy.removeUnlinksDirectory = false;
-  check(VFS::remove("/a/file") && !fs.exists("/a/file"), "remove unlinks a file");
-  check(!VFS::remove("/a/file"), "removing it again fails");
-  check(!VFS::remove("/") && !VFS::remove("/sd"), "roots cannot be removed");
+  check(unguardedRemove("/a/file") && !fs.exists("/a/file"), "remove unlinks a file");
+  check(!unguardedRemove("/a/file"), "removing it again fails");
+  check(!unguardedRemove("/") && !unguardedRemove("/sd"), "roots cannot be removed");
 
   // Listing, as VFS::DirectoryReader drives it.
   fs.put("/sd/VIDEOS/a.avi", "aaaa");
@@ -155,7 +167,7 @@ static void directories() {
   fs.mkdirAll("/sd/VIDEOS/sub");
   fs.now = 1234;
   fs.put("/sd/VIDEOS/c.avi", "c");
-  File dir = VFS::open("/sd/VIDEOS", "r");
+  File dir = unguardedOpen("/sd/VIDEOS", "r");
   std::vector<std::string> names;
   std::vector<size_t> sizes;
   for (File child = dir.openNextFile(); child; child = dir.openNextFile()) {
@@ -173,13 +185,13 @@ static void directories() {
   check(std::string(first.name()) == "/VIDEOS/a.avi", "BackendRooted names strip /sd like the FAT backend");
   first.close();
   dir.close();
-  File littlefsDir = VFS::open("/a", "r");
+  File littlefsDir = unguardedOpen("/a", "r");
   File onlyChild = littlefsDir.openNextFile();
   check(std::string(onlyChild.name()) == "/a/c", "BackendRooted on LittleFS is the full path");
   onlyChild.close();
   littlefsDir.close();
   fs.policy.nameStyle = fake_vfs::NameStyle::Leaf;
-  File plain = VFS::open("/sd/VIDEOS/a.avi", "r");
+  File plain = unguardedOpen("/sd/VIDEOS/a.avi", "r");
   check(!plain.openNextFile(), "openNextFile on a file yields nothing");
   plain.close();
   check(fs.liveHandles() == 0, "listing closed every child");
@@ -189,55 +201,55 @@ static void renames() {
   auto& fs = reset();
   fs.put("/one", "1");
   fs.put("/two", "2");
-  check(!VFS::rename("/missing", "/x"), "rename of a missing source fails");
-  check(VFS::rename("/one", "/two") && fs.text("/two") == "1" && !fs.exists("/one"), "LittleFS renames over an existing file");
+  check(!unguardedRename("/missing", "/x"), "rename of a missing source fails");
+  check(unguardedRename("/one", "/two") && fs.text("/two") == "1" && !fs.exists("/one"), "LittleFS renames over an existing file");
   fs.put("/sd/a", "a");
   fs.put("/sd/b", "b");
-  check(!VFS::rename("/sd/a", "/sd/b") && fs.text("/sd/b") == "b" && fs.exists("/sd/a"), "SD refuses rename over an existing file");
+  check(!unguardedRename("/sd/a", "/sd/b") && fs.text("/sd/b") == "b" && fs.exists("/sd/a"), "SD refuses rename over an existing file");
   fs.policy.sdRenameOverExisting = true;
-  check(VFS::rename("/sd/a", "/sd/b") && fs.text("/sd/b") == "a", "policy lets SD replace");
+  check(unguardedRename("/sd/a", "/sd/b") && fs.text("/sd/b") == "a", "policy lets SD replace");
   fs.policy.littlefsRenameOverExisting = false;
   fs.put("/p", "p"); fs.put("/q", "q");
-  check(!VFS::rename("/p", "/q"), "policy makes LittleFS refuse replacement");
-  check(!VFS::rename("/p", "/sd/p"), "cross-backend rename fails");
-  check(!VFS::rename("/p", "/nodir/p"), "destination parent must exist");
-  check(!VFS::rename("/p", "/p"), "rename onto itself fails");
+  check(!unguardedRename("/p", "/q"), "policy makes LittleFS refuse replacement");
+  check(!unguardedRename("/p", "/sd/p"), "cross-backend rename fails");
+  check(!unguardedRename("/p", "/nodir/p"), "destination parent must exist");
+  check(!unguardedRename("/p", "/p"), "rename onto itself fails");
   fs.mkdirAll("/dir/inner");
   fs.put("/dir/inner/leaf", "L");
-  check(!VFS::rename("/dir", "/dir/inner/x"), "rename into own subtree fails");
-  check(!VFS::rename("/dir", "/two"), "directory over a file fails");
-  check(VFS::rename("/dir", "/moved") && fs.text("/moved/inner/leaf") == "L" && !fs.exists("/dir/inner/leaf"), "directory rename moves the subtree");
-  check(!VFS::rename("/two", "/moved"), "file over a directory fails");
-  check(!VFS::rename("/", "/x") && !VFS::rename("/two", "/sd"), "roots are not renamed");
+  check(!unguardedRename("/dir", "/dir/inner/x"), "rename into own subtree fails");
+  check(!unguardedRename("/dir", "/two"), "directory over a file fails");
+  check(unguardedRename("/dir", "/moved") && fs.text("/moved/inner/leaf") == "L" && !fs.exists("/dir/inner/leaf"), "directory rename moves the subtree");
+  check(!unguardedRename("/two", "/moved"), "file over a directory fails");
+  check(!unguardedRename("/", "/x") && !unguardedRename("/two", "/sd"), "roots are not renamed");
   check(fs.freeCacheInvalidations > 0, "rename invalidates the free-space cache");
 }
 
 static void nameLimit() {
   auto& fs = reset();
   const std::string ok(63, 'n'), tooLong(64, 'n');
-  check(static_cast<bool>(VFS::open(("/" + tooLong).c_str(), "w")), "no limit by default");
+  check(static_cast<bool>(unguardedOpen(("/" + tooLong).c_str(), "w")), "no limit by default");
   fs.reset(); fake_vfs::wireLockDouble();
   fs.policy.littlefsNameLimit = 63;
-  check(static_cast<bool>(VFS::open(("/" + ok).c_str(), "w")), "63-byte name accepted");
-  check(!VFS::open(("/" + tooLong).c_str(), "w"), "64-byte name refused on LittleFS");
-  check(!VFS::mkdir(("/" + tooLong).c_str()), "mkdir follows the limit");
-  check(!VFS::rename(("/" + ok).c_str(), ("/" + tooLong).c_str()), "rename destination follows the limit");
-  check(static_cast<bool>(VFS::open(("/sd/" + tooLong).c_str(), "w")), "SD has no such limit");
+  check(static_cast<bool>(unguardedOpen(("/" + ok).c_str(), "w")), "63-byte name accepted");
+  check(!unguardedOpen(("/" + tooLong).c_str(), "w"), "64-byte name refused on LittleFS");
+  check(!unguardedMkdir(("/" + tooLong).c_str()), "mkdir follows the limit");
+  check(!unguardedRename(("/" + ok).c_str(), ("/" + tooLong).c_str()), "rename destination follows the limit");
+  check(static_cast<bool>(unguardedOpen(("/sd/" + tooLong).c_str(), "w")), "SD has no such limit");
 }
 
 static void faults() {
   auto& fs = reset();
   fs.put("/f", "old");
   fs.faults.open.add("/f");
-  check(!VFS::open("/f", "r") && !VFS::open("/f", "w") && fs.text("/f") == "old", "open fault refuses both modes and keeps the file");
+  check(!unguardedOpen("/f", "r") && !unguardedOpen("/f", "w") && fs.text("/f") == "old", "open fault refuses both modes and keeps the file");
   fs.faults.open.clear();
   fs.faults.shortWriteAfter["/g"] = 4;
-  File g = VFS::open("/g", "w");
+  File g = unguardedOpen("/g", "w");
   check(g.print("abcdef") == 4 && g.print("gh") == 0 && g.size() == 4 && !g.getWriteError(), "short write caps total bytes");
   g.close();
   check(fs.text("/g") == "abcd", "short-written bytes stored");
   fs.faults.writeError.add("/h");
-  File h = VFS::open("/h", "w");
+  File h = unguardedOpen("/h", "w");
   check(!h.getWriteError(), "no error before a write");
   h.print("x");
   check(h.getWriteError() == 1 && h.size() == 1, "write error flag after a write");
@@ -245,7 +257,7 @@ static void faults() {
   check(!h.getWriteError(), "clearWriteError");
   h.close();
   fs.faults.flush.add("/i");
-  File i = VFS::open("/i", "w");
+  File i = unguardedOpen("/i", "w");
   i.print("x");
   check(!i.getWriteError(), "flush fault waits for flush");
   i.flush();
@@ -253,14 +265,14 @@ static void faults() {
   i.close();
   fs.put("/r1", "1");
   fs.faults.rename.add("/r1");
-  check(!VFS::rename("/r1", "/r2") && fs.exists("/r1") && !fs.exists("/r2"), "rename fault keyed by source");
+  check(!unguardedRename("/r1", "/r2") && fs.exists("/r1") && !fs.exists("/r2"), "rename fault keyed by source");
   fs.faults.remove.add("/r1");
-  check(!VFS::remove("/r1") && fs.exists("/r1"), "remove fault keeps the file");
+  check(!unguardedRemove("/r1") && fs.exists("/r1"), "remove fault keeps the file");
   fs.faults.mkdir.add("/m");
-  check(!VFS::mkdir("/m") && !fs.exists("/m"), "mkdir fault");
+  check(!unguardedMkdir("/m") && !fs.exists("/m"), "mkdir fault");
   fs.mkdirAll("/d");
   fs.faults.rmdir.add("/d");
-  check(!VFS::rmdir("/d") && fs.exists("/d"), "rmdir fault");
+  check(!unguardedRmdir("/d") && fs.exists("/d"), "rmdir fault");
   fs.faults.stat["/s"] = EACCES;
   fs.put("/s", "s");
   struct FakeVfsStat info;
@@ -268,9 +280,9 @@ static void faults() {
   check(FakeVfsStat("/littlefs/s", &info) == -1 && errno == EACCES, "stat fault sets errno");
   fs.faults.clear();
   fs.faults.open.add("*");
-  check(!VFS::open("/s", "r") && !VFS::open("/sd/anything", "w", true), "wildcard matches every path");
+  check(!unguardedOpen("/s", "r") && !unguardedOpen("/sd/anything", "w", true), "wildcard matches every path");
   fs.faults.clear();
-  check(static_cast<bool>(VFS::open("/s", "r")), "faults.clear restores opens");
+  check(static_cast<bool>(unguardedOpen("/s", "r")), "faults.clear restores opens");
 }
 
 static void statSeam() {
@@ -296,14 +308,14 @@ static void availability() {
   check(VFS::isSDAvailable() && VFS::isSDWritable() && VFS::isLittleFSReady(), "both tiers up by default");
   fs.sdAvailable() = false;
   check(!VFS::isSDAvailable() && !VFS::isSDWritable(), "SD reported unavailable");
-  check(!VFS::exists("/sd/x") && !VFS::open("/sd/x", "r") && !VFS::mkdir("/sd/d") && !VFS::remove("/sd/x") &&
-        !VFS::rename("/sd/x", "/sd/z"), "every /sd operation fails");
-  check(VFS::exists("/y"), "LittleFS unaffected");
+  check(!unguardedExists("/sd/x") && !unguardedOpen("/sd/x", "r") && !unguardedMkdir("/sd/d") && !unguardedRemove("/sd/x") &&
+        !unguardedRename("/sd/x", "/sd/z"), "every /sd operation fails");
+  check(unguardedExists("/y"), "LittleFS unaffected");
   fs.sdAvailable() = true;
   fs.capacity[1].writable = false;
-  check(VFS::isSDAvailable() && !VFS::isSDWritable() && VFS::exists("/sd/x"), "read-only SD stays mounted");
+  check(VFS::isSDAvailable() && !VFS::isSDWritable() && unguardedExists("/sd/x"), "read-only SD stays mounted");
   fs.littlefsReady() = false;
-  check(!VFS::isLittleFSReady() && !VFS::exists("/y") && !VFS::open("/y", "r"), "LittleFS not ready fails its operations");
+  check(!VFS::isLittleFSReady() && !unguardedExists("/y") && !unguardedOpen("/y", "r"), "LittleFS not ready fails its operations");
   fs.littlefsReady() = true;
   VFS::noteSDWriteFailure("probe");
   VFS::noteLittleFsBytesWritten(10);
@@ -331,7 +343,7 @@ static void stats() {
 static void lockSeam() {
   auto& fs = reset();
   fs.put("/x", "x");
-  VFS::exists("/x");
+  unguardedExists("/x");
   check(fs.unlockedCalls() == 1 && fs.lockedCalls() == 0 && fs.unguardedCalls() == 1, "raw call outside the lock");
   {
     FsLockGuard guard("test");
@@ -355,11 +367,11 @@ static void lockSeam() {
   const AuthContext scoped = VFS::systemAuth("/sd/VIDEOS", "video.save");
   VFS::existsGuarded("/sd/VIDEOS/clip", scoped);
   check(fs.last("exists")->authScope == "/sd/VIDEOS" && fs.last("exists")->authReason == "system:video.save", "scoped systemAuth recorded");
-  VFS::exists("/x");
+  unguardedExists("/x");
   check(!fs.last("exists")->guarded && fs.last("exists")->authUser.empty(), "raw calls carry no identity");
   bool heldDuringProbe = false;
   fs.lockHeld = [&] { heldDuringProbe = true; return true; };
-  VFS::exists("/x");
+  unguardedExists("/x");
   check(heldDuringProbe && fs.last("exists")->locked, "custom lockHeld predicate is consulted");
   fake_vfs::wireLockDouble();
   xSemaphoreTake(gFsMutex, portMAX_DELAY);
@@ -397,39 +409,39 @@ static void productionWriters() {
   auto& fs = reset();
   fs.mkdirAll("/system");
   fs.put("/system/users.json", "[old]");
-  check(writeTextAtomic("/system/users.json", String("[new]")) && fs.text("/system/users.json") == "[new]" &&
+  check(writeTextAtomic("/system/users.json", String("[new]"), VFS::systemAuth("self-test")) && fs.text("/system/users.json") == "[new]" &&
         !fs.exists("/system/users.json.tmp"), "writeTextAtomic promotes a complete temporary");
   check(fs.unlockedCalls() == 0 && fs.count("rename") == 1 && fs.count("remove") == 0, "every call under the lock; no cleanup after success");
   check(!isFsLockedByCurrentTask() && pauseDepth == 0, "lock and poll pause released");
   fs.log.clear();
   fs.faults.shortWriteAfter["/system/users.json.tmp"] = 2;
-  check(!writeTextAtomic("/system/users.json", String("[newer]")) && fs.text("/system/users.json") == "[new]" &&
+  check(!writeTextAtomic("/system/users.json", String("[newer]"), VFS::systemAuth("self-test")) && fs.text("/system/users.json") == "[new]" &&
         !fs.exists("/system/users.json.tmp"), "short write keeps the previous file and removes the temp");
   check(fs.count("rename") == 0 && fs.count("remove") == 1, "no promotion of an incomplete temporary");
   fs.faults.clear();
   fs.faults.flush.add("/system/users.json.tmp");
-  check(!writeTextAtomic("/system/users.json", String("[flush]")) && fs.text("/system/users.json") == "[new]", "flush fault is a reported write error");
+  check(!writeTextAtomic("/system/users.json", String("[flush]"), VFS::systemAuth("self-test")) && fs.text("/system/users.json") == "[new]", "flush fault is a reported write error");
   fs.faults.clear();
   fs.faults.writeError.add("/system/users.json.tmp");
-  check(!writeTextAtomic("/system/users.json", String("[err]")) && fs.text("/system/users.json") == "[new]", "write error flag refuses promotion");
+  check(!writeTextAtomic("/system/users.json", String("[err]"), VFS::systemAuth("self-test")) && fs.text("/system/users.json") == "[new]", "write error flag refuses promotion");
   fs.faults.clear();
   fs.faults.rename.add("/system/users.json.tmp");
-  check(!writeTextAtomic("/system/users.json", String("[ren]")) && fs.text("/system/users.json") == "[new]" &&
+  check(!writeTextAtomic("/system/users.json", String("[ren]"), VFS::systemAuth("self-test")) && fs.text("/system/users.json") == "[new]" &&
         !fs.exists("/system/users.json.tmp"), "failed rename keeps the destination, temp cleaned");
   fs.faults.clear();
   fs.faults.open.add("/system/users.json.tmp");
-  check(!writeTextAtomic("/system/users.json", String("[open]")) && fs.text("/system/users.json") == "[new]", "open fault");
+  check(!writeTextAtomic("/system/users.json", String("[open]"), VFS::systemAuth("self-test")) && fs.text("/system/users.json") == "[new]", "open fault");
   fs.faults.clear();
   fs.mkdirAll("/system/users.json.tmp");
-  check(!writeTextAtomic("/system/users.json", String("[dir]")) && fs.text("/system/users.json") == "[new]", "a directory in the temporary's place");
-  check(writeText("/deep/parent/x", String("y")) && fs.text("/deep/parent/x") == "y", "writeText creates parents via create=true");
+  check(!writeTextAtomic("/system/users.json", String("[dir]"), VFS::systemAuth("self-test")) && fs.text("/system/users.json") == "[new]", "a directory in the temporary's place");
+  check(writeText("/deep/parent/x", String("y"), VFS::systemAuth("self-test")) && fs.text("/deep/parent/x") == "y", "writeText creates parents via create=true");
   check(fs.unlockedCalls() == 0 && fs.liveHandles() == 0 && pauseDepth == 0, "no unlocked call, no leaked handle");
 }
 
 static void callLog() {
   auto& fs = reset();
   fs.put("/a", "1");
-  VFS::exists("/a"); VFS::exists("/b"); VFS::remove("/a");
+  unguardedExists("/a"); unguardedExists("/b"); unguardedRemove("/a");
   check(fs.count("exists") == 2 && fs.count("exists", "/b") == 1 && fs.count("exists", "b") == 1, "count by op and normalised path");
   check(fs.last("exists")->path == "/b" && !fs.last("exists")->ok && fs.last("remove")->ok, "last() finds the newest entry");
   check(fs.last("rename") == nullptr, "absent op yields null");

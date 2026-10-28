@@ -27,6 +27,7 @@
 #endif
 #include "System_Settings.h"
 #include "System_UserSettings.h"
+#include "System_AuthIdentity.h"  // bumpIdentityGeneration: the roster was just created
 #include "OLED_SetupWizard.h"
 #include "System_SetupWizard.h"
 #include "System_FeatureRegistry.h"
@@ -116,7 +117,7 @@ bool parseSetupModeInput(const String& input, SetupMode& mode) {
 void detectFirstTimeSetupState() {
   // Use USERS_JSON_FILE as the determinant - this is the actual indicator
   // that first-time setup has been completed. Settings can exist without users.
-  bool usersExist = VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("setup.detect"));
+  bool usersExist = VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth(VFS::Scopes::USERS, "setup.detect"));
   gFirstTimeSetupState = usersExist ? SETUP_NOT_NEEDED : SETUP_REQUIRED;
 
   DEBUG_SYSTEMF("[SETUP_STATE] Early detection: %s (users file exists: %s)",
@@ -336,11 +337,14 @@ static bool createInitialAdminUser(const String& username, const String& plainte
 
   // Atomic create (tmp + rename) — the commit token. A failed publication leaves
   // only an orphan credential file, which the next setup attempt can replace.
-  if (!writeTextAtomic(USERS_JSON_FILE, json)) {
+  if (!writeTextAtomic(USERS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::USERS, "setup.users_write"))) {
     broadcastOutput("ERROR: Failed to write users.json");
     return false;
   }
   broadcastOutput("Saved /system/users/users.json");
+  // A new roster: every cached account verdict (System_User authority cache,
+  // display session role) must be refilled from it.
+  bumpIdentityGeneration("user.setup");
 
   // Re-sync the RAM global to the authoritative NVS counter (loadAndIncrementBootSeq
   // already loaded it). Must NOT hardcode 1 — the device may have power-cycled
@@ -435,10 +439,10 @@ void firstTimeSetupIfNeeded() {
   // A cross-device (partial) restore writes settings but intentionally skips user
   // credentials, leaving users.json absent. Instead of the full Basic/Advanced/Import
   // menu, guide the user through creating just their admin login.
-  if (VFS::existsGuarded(PENDING_CRED_SETUP_FILE, VFS::systemAuth("setup.restore.cred_marker"))) {
+  if (VFS::existsGuarded(PENDING_CRED_SETUP_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "setup.restore.cred_marker"))) {
     // Clear the marker first so a power-cycle mid-flow falls back to the normal menu
     // (prevents a boot loop).
-    VFS::removeGuarded(PENDING_CRED_SETUP_FILE, VFS::systemAuth("setup.restore.cred_marker"));
+    VFS::removeGuarded(PENDING_CRED_SETUP_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "setup.restore.cred_marker"));
     if (runPostRestoreCredentialSetup()) {
       return;  // unreached (success path reboots)
     }
@@ -925,7 +929,7 @@ void firstTimeSetupIfNeeded() {
 
   // Create automations.json (empty) on first-time setup
  #if ENABLE_AUTOMATION
-  if (!VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth("setup.automations.init"))) {
+  if (!VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "setup.automations.init"))) {
     String a = "{\n  \"version\": 2,\n  \"automations\": []\n}\n";
     if (!writeAutomationsJsonAtomic(a)) {
       broadcastOutput("ERROR: Failed to write automations.json");

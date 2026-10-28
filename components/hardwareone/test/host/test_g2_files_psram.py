@@ -109,10 +109,11 @@ def main() -> None:
             "paired identity and read authorization precede byte access and reveal")
     require(viewer.index("const bool hitReadCap") < viewer.index("captureCryptoRevealText("),
             "read-limit truncation is recorded before decryption shrinks input")
-    require("readTextLimited(p, head, sizeof(CAPCRYPT_MAGIC_PREFIX) - 1)" in source,
+    require("readTextLimited(p, head, sizeof(CAPCRYPT_MAGIC_PREFIX) - 1, currentAuthContext())" in source,
             "the existing shared String reader remains available to Info sniff")
-    require("FsLockGuard guard" in reader and "VFS::open(String(path), \"r\")" in reader,
-            "G2 reader preserves policy-free VFS dispatch under the FS lock")
+    require("FsLockGuard guard" in reader and
+            "VFS::openGuarded(String(path), \"r\", currentAuthContext())" in reader,
+            "G2 reader opens through the guarded VFS as the installed identity, under the FS lock")
     require("textWrapAppend" not in viewer and "TextWrapStream display" in viewer,
             "chunked serialization must retain wrap state")
     state = source[source.index("#define FILES_TEXT_MAX_PAGES"):

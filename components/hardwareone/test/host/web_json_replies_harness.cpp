@@ -88,6 +88,10 @@ inline esp_err_t sendJsonResponse(httpd_req_t* req, const char* body, long len =
 
 struct AuthContext { String user; };
 AuthContext makeWebAuthCtx(httpd_req_t*) { AuthContext ctx; ctx.user = "admin"; return ctx; }
+namespace VFS {
+namespace Scopes { constexpr const char* SYSTEM_STATE = "/system"; }
+static AuthContext systemAuth(const char*, const char*) { AuthContext ctx; ctx.user = "system"; return ctx; }
+}
 bool tgRequireAuth(const AuthContext&) { return true; }
 bool webGuestAccessAllowed(httpd_req_t*, const AuthContext&) { return true; }
 #define WEB_AUTH_OR_RETURN(req, ctx) \
@@ -101,7 +105,7 @@ esp_err_t sendJsonError(httpd_req_t* req, const String& message);
 // ---- automation export fixtures ----
 static std::string gAutomations;
 const char* AUTOMATIONS_JSON_FILE = "/system/automations.json";
-bool readText(const char*, String& out) { out = gAutomations.c_str(); return true; }
+bool readText(const char*, String& out, const AuthContext&) { out = gAutomations.c_str(); return true; }
 bool extractArrayByKey(const String& src, const char* key, String& outArray) {
   JsonDocument doc;
   if (deserializeJson(doc, src.c_str())) return false;

@@ -19,6 +19,9 @@ from test_web_batch_handlers import extract_block, require
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
+# System_Power.h only tells the ESP32-P4 apart from every other target, so the
+# S3 compiles the same code as the classic ESP32; a separate S3 profile would
+# only repeat the esp32 runs.
 PROFILES = (
     ("esp32", []),
     ("p4", ["-DCONFIG_IDF_TARGET_ESP32P4=1"]),
@@ -43,10 +46,13 @@ def generate() -> str:
             "cpufreq must retain its admin authorization")
     for name, body in (("mode", extract_block(power, "bool applyPowerMode(")),
                        ("command", command),
-                       ("idle/wake", extract_block(hardware, "static void powerSaveTick("))):
+                       ("policy", extract_block(power, "void powerPolicyTick("))):
         require("powerSetCpuFrequencyMhz(" in body, f"{name} must use the shared owner")
         require(not re.search(r"\bsetCpuFrequencyMhz\s*\(", body), f"{name} bypasses owner")
     require("setCpuFrequencyDrained" not in hardware, "old clock helper must be removed")
+    # The local panel's tick no longer touches the clock at all.
+    require("powerSetCpuFrequencyMhz(" not in extract_block(hardware, "static void powerDisplayTick("),
+            "the display tick must leave the clock to powerPolicyTick")
     # The owner region ends where the telemetry JSON (ArduinoJson) begins. An
     # older source still has the inert auto-mode stub there; stop before it.
     start = power.index("static StaticSemaphore_t sCpuFrequencyMutexStorage;")

@@ -65,6 +65,7 @@ public:
     uint8_t consecutiveErrors;
     uint16_t totalErrors;
     bool degraded;
+    bool reportedLost;      // sensor_unresponsive posted, sensor_recovered not yet
     uint32_t lastErrorTime;
     uint32_t lastSuccessTime;
     uint32_t registrationTime;

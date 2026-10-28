@@ -252,7 +252,6 @@ const char* AUTOMATIONS_JSON_FILE = "/system/automations.json";
 // Forward declarations
 class VL53L4CX;
 class Adafruit_BNO055;
-bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 String setSession(httpd_req_t* req, const String& u);
 String getCookieSID(httpd_req_t* req);
 void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
@@ -1723,7 +1722,7 @@ void hardwareone_setup() {
   bool haveSettings = false;
   if (filesystemReady) {
     FsLockGuard guard("settings.exists");
-    haveSettings = VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth("hwone.settings_load_check"));
+    haveSettings = VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "hwone.settings_load_check"));
   }
 
   if (filesystemReady && haveSettings) {
@@ -1752,7 +1751,7 @@ void hardwareone_setup() {
   // first boot after upgrading onto a device whose settings.json predates the split).
   if (filesystemReady) {
     readDebugJson();
-    if (!VFS::existsGuarded(DEBUG_JSON_FILE, VFS::systemAuth("hwone.debug_seed_check"))) {
+    if (!VFS::existsGuarded(DEBUG_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "hwone.debug_seed_check"))) {
       writeDebugJson();
     }
   }
@@ -2038,6 +2037,9 @@ void hardwareone_setup() {
     broadcastOutput("  [Y] DISPLAY  | " DISPLAY_NAME " enabled");
 #else
     broadcastOutput("  [N] OLED     | Disabled (~8-12KB flash, ~5KB RAM saved)");
+#endif
+#if ENABLE_DEBUG_ALL_BY_DEFAULT
+    broadcastOutput("  [Y] DEBUG    | ENABLE_DEBUG_ALL_BY_DEFAULT: every debug flag defaults ON");
 #endif
     broadcastOutput("========================================================");
     broadcastOutput("");
@@ -2564,27 +2566,25 @@ void hardwareone_setup() {
 
 #if ENABLE_OLED_DISPLAY
 // ---------------------------------------------------------------------------
-// Power saving (Tier 1: display off + CPU downclock)
+// Local display power-save (panel only)
 //
-// After gSettings.powerSaveTimeoutMinutes with no activity, blank and (on
-// power-gated boards like the FeatherS3) power down the OLED, stop refreshing
-// it, and drop the CPU to the 80 MHz WiFi floor (restored on wake). The radio
-// stays up, so HTTP/ESP-NOW keep working with the screen dark. "Activity" is
-// source-agnostic: any input-device event (gamepad OR ANO) and any real
-// user/peer command (serial, web, G2, ESP-NOW RCE, ...) — routed through
-// powerSaveNoteActivity() — resets the idle timer and wakes it. So a headless
-// box with no input device benefits too: a command wakes it. Held off only
-// while genuinely busy with local capture (camera or mic). A bonded peer being
-// online no longer holds it awake — real peer commands wake it via the hook.
+// After gSettings.powerSaveTimeoutMinutes with no LOCAL activity, blank and (on
+// power-gated boards like the FeatherS3) power down the OLED and stop
+// refreshing it; the next local activity brings it back. Local activity is
+// someone at the device: an input-device event (gamepad OR ANO), or a command
+// from the local display or on-device voice. A command from the glasses,
+// phone, web, serial, ESP-NOW or MQTT does not light the panel — it only keeps
+// the clock at the mode's in-use clock. The clock itself is not this tick's
+// business: powerPolicyTick() in System_Power.cpp owns it, on every build, and
+// raises it for transcription, camera and recording whether or not the panel
+// is lit. The countdown is held off only while genuinely busy with local
+// capture (camera or mic), so a screen showing a recording stays up.
 // 0 minutes = disabled.
 // ---------------------------------------------------------------------------
 static bool powerSaveInhibited() {
-  // Only genuinely heavy / screen-bound local work blocks power-save. ESP-NOW is
-  // intentionally NOT here: a bonded peer being *online* is mere presence (the
-  // 5 s heartbeat), not use, so it no longer pins the device awake. Real peer
-  // activity — an @BOND/RCE command — flows through executeCommand and resets
-  // the idle timer via the activity hook instead, so the device wakes on actual
-  // use while an idle-but-bonded link is free to power-save.
+  // Only local capture holds the panel up. ESP-NOW is intentionally NOT here:
+  // a bonded peer being *online* is mere presence (the 5 s heartbeat), not use;
+  // a real peer command flows through executeCommand as remote activity.
   // The camera module owns its busy answer: open stream and recording sessions.
 #if ENABLE_CAMERA_SENSOR
   extern bool cameraCaptureBusy();
@@ -2594,188 +2594,67 @@ static bool powerSaveInhibited() {
 #endif
 }
 
-static void powerSaveTick() {
+static void powerDisplayTick() {
   static bool          asleep = false;
-  static bool          wakePending = false;
   static uint32_t      lastSeq = 0;
-  static uint32_t      savedCpuMhz = 0;
-  static unsigned long lastSeenActivityMs = 0;
-  static unsigned long nextClockAttemptMs = 0;  // backoff after a refused clock change
+  static unsigned long lastSeenLocalMs = 0;
+  static uint32_t      lastBusyMs = 0;   // last lap with local capture running
   static bool          inited = false;
-  // A refused clock change means the shared owner could not drain an I2C bus
-  // within its wait. Retrying on the very next lap would pin the whole loop to
-  // that wait; space the attempts instead. Private to this tick: the sleep
-  // cooldown stamp is shared with lightsleep/deepsleep and must not record an
-  // entry that never happened.
-  constexpr unsigned long kClockRetryBackoffMs = 5000;
 
-  const unsigned long now = millis();
-  const bool clockAttemptDue = (long)(now - nextClockAttemptMs) >= 0;
+  // 32-bit stamps: the elapsed-time checks below are differences of two of
+  // them, so they stay right across the millis() wrap.
+  const uint32_t now = (uint32_t)millis();
+  if (!inited) {
+    inited = true;
+    inputActivitySequence(lastSeq, 5);
+    powerSaveNoteActivity(true);
+    lastSeenLocalMs = powerSaveLastLocalActivityMs();
+    lastBusyMs = now;
+    powerSetLocalDisplayAwake(true);
+  }
 
-  // Wake: restore the CPU clock (only if we lowered it), then bring the panel
-  // back. Centralized so every wake path stays in sync. A refused clock
-  // restore does not hold the panel hostage: the display comes back now and
-  // only the clock stays pending, retried once the backoff has passed.
-  auto wake = [&]() {
-    // Restore the interactive clock iff idle-enter actually lowered it. Compare
-    // to the LIVE clock rather than a fixed ">80" test: UltraSaver's interactive
-    // floor is exactly 80 MHz yet it sinks to 40 MHz while asleep, so a ">80"
-    // test would strand it at 40 after wake. savedCpuMhz holds the pre-idle
-    // (interactive) clock; 0 means "we never lowered".
-    if (savedCpuMhz != 0 && getCpuFrequencyMhz() < savedCpuMhz) {
-      if (!clockAttemptDue) {
-        wakePending = true;
-      } else if (!powerSetCpuFrequencyMhz(savedCpuMhz)) {
-        // The activity stamp may already have been consumed. Remember this
-        // request independently so a later loop still retries restoration.
-        wakePending = true;
-        nextClockAttemptMs = now + kClockRetryBackoffMs;
-      } else {
-        savedCpuMhz = 0;
-        wakePending = false;
-      }
-    } else {
-      savedCpuMhz = 0;
-      wakePending = false;
-    }
-    // A refused idle transition can still need clock recovery if the HAL
-    // changed it before reporting failure. The panel never slept in that case.
-    if (!asleep) return;
+  // Any input device (gamepad or ANO) advancing seq is local activity.
+  uint32_t seq = lastSeq;
+  inputActivitySequence(seq, 5);
+  if (seq != lastSeq) { lastSeq = seq; powerSaveNoteActivity(true); }
+
+  // New local activity wakes the panel. Sources only stamp the timestamp from
+  // their own task; the panel work runs here on the main loop.
+  const unsigned long local = powerSaveLastLocalActivityMs();
+  const bool fresh = local != lastSeenLocalMs;
+  lastSeenLocalMs = local;
+  const bool disabled = gSettings.powerSaveTimeoutMinutes == 0;
+  if (asleep) {
+    if (!fresh && !disabled) return;   // still dark, waiting for someone
     gOledRunning = true;
     oledResumeFromSleep();
     oledMarkDirty();
     asleep = false;
+    powerSetLocalDisplayAwake(true);
     batteryLogEvent("powersave:wake");
     // Automation commands run as SOURCE_INTERNAL and skip the activity
     // stamp, so an automation reacting to this can't re-trigger the wake.
     systemEventPost(SYSEVT_POWER_SAVE_EXIT);
-  };
-
-  if (!inited) {
-    inited = true;
-    inputActivitySequence(lastSeq, 5);
-    powerSaveNoteActivity();
-    lastSeenActivityMs = powerSaveLastActivityMs();
-  }
-
-  if (wakePending) {
-    wake();
     return;
   }
+  if (fresh || disabled) return;
 
-  // Feature disabled — keep the panel up and the idle clock fresh.
-  if (gSettings.powerSaveTimeoutMinutes == 0) {
-    if (asleep) wake();
-    inputActivitySequence(lastSeq, 5);
-    powerSaveNoteActivity();
-    lastSeenActivityMs = powerSaveLastActivityMs();
-    return;
-  }
+  // Defer the countdown while genuinely busy with local capture (camera/mic).
+  if (powerSaveInhibited()) { lastBusyMs = now; return; }
 
-  // Any input device (gamepad or ANO) advancing seq counts as activity.
-  uint32_t seq = lastSeq;
-  inputActivitySequence(seq, 5);
-  if (seq != lastSeq) { lastSeq = seq; powerSaveNoteActivity(); }
+  const uint32_t timeoutMs = gSettings.powerSaveTimeoutMinutes * 60000UL;
+  if ((uint32_t)(now - local) < timeoutMs || (uint32_t)(now - lastBusyMs) < timeoutMs) return;
 
-  // Any noted activity (input OR a user/peer command) wakes it / resets idle.
-  // Sources only stamp the timestamp from their own task; the wake runs here
-  // on the main loop, so OLED/CPU work never happens off-task.
-  const unsigned long act = powerSaveLastActivityMs();
-  if (act != lastSeenActivityMs) {
-    lastSeenActivityMs = act;
-    if (asleep) wake();
-    return;
-  }
-
-#if ENABLE_LOCAL_STT
-  // Local transcription is real-time inference on this CPU: at the idle clock
-  // (100 MHz on the P4) it runs ~3x slower than speech and falls behind
-  // (measured 2026-10-01). Hold the interactive clock for the whole session,
-  // and wake if it started while asleep (e.g. Conversate opened on the glasses,
-  // which is not local activity).
-  extern bool sttAnySessionActive();
-  if (sttAnySessionActive()) {
-    if (asleep) wake();
-    powerSaveNoteActivity();
-    lastSeenActivityMs = powerSaveLastActivityMs();
-    return;
-  }
-#endif
-
-  if (asleep) return;  // already dark, waiting for activity
-
-  // Defer the countdown while genuinely busy (camera/mic, or a bonded peer).
-  if (powerSaveInhibited()) {
-    powerSaveNoteActivity();
-    lastSeenActivityMs = powerSaveLastActivityMs();
-    return;
-  }
-
-  const unsigned long timeoutMs = (unsigned long)gSettings.powerSaveTimeoutMinutes * 60000UL;
-  if ((now - act) < timeoutMs) return;
-
-  // Idle long enough — enter power-save, respecting the anti-flap cooldown and
-  // the backoff of a refused clock change.
+  // Idle long enough — blank the panel, respecting the anti-flap cooldown it
+  // shares with lightsleep/deepsleep. The clock is left to powerPolicyTick,
+  // which runs after this tick, sees the panel dark and sinks to the mode's
+  // idle clock on the same lap; a refused clock change never strands the screen.
   if (!powerSleepTransitionAllowed(nullptr)) return;
-  if (!clockAttemptDue) return;
-  // Downclock to the current mode's IDLE floor. Locked keeps 240 through idle
-  // (OLED blanks, core stays hot). Performance/Balanced/PowerSaver hold the
-  // 80 MHz Wi-Fi floor while asleep — radio stays up so HTTP/ESP-NOW remain
-  // reachable; we only shed dynamic core power. UltraSaver is the exception:
-  // it sinks all the way to 40 MHz here (its headline deep-save clock). The
-  // panel is blanked immediately after the confirmed clock change — 40 MHz
-  // makes the interactive UI unusably laggy, so it is reserved for idle and
-  // any input (the input activity sequence) or command wakes it back to >=80 via wake()
-  // above. Only switch if the floor is actually below the live clock (never
-  // raise here).
-  savedCpuMhz = getCpuFrequencyMhz();
-  uint32_t idleFloorMhz = getPowerModeIdleCpuFreq(gSettings.powerMode);
-
-  // A UART host link running above REF_TICK is clocked from APB, and on chips
-  // whose HAL has that fallback (ESP32 / ESP32-S2) APB follows the CPU clock
-  // once it sinks below 80 MHz. UltraSaver's 40 MHz idle floor would therefore
-  // halve the link's effective baud and corrupt every byte — including the
-  // CM5's heartbeat, so freshness would lapse with no way to recover: UART
-  // traffic deliberately does not wake the device (see the SOURCE_UART
-  // exclusion in executeCommand), and a garbled command cannot be parsed into
-  // a wake in the first place. Clamp to the interactive floor instead; 240/160/
-  // 80 are all PLL-derived and pin APB at 80 MHz, so 80 is enough — the other
-  // three power modes already idle there. Costs UltraSaver some deep-idle
-  // saving only while a fast link is actually up.
-#if SOC_UART_SUPPORT_REF_TICK
-  if (idleFloorMhz < POWER_INTERACTIVE_FLOOR_MHZ && uartLinkIsRunning() &&
-      uartLinkEffectiveBaud() > UART_LINK_REF_TICK_BAUD_LIMIT) {
-    DEBUG_SYSTEMF("[POWER] idle floor %lu -> %lu MHz: UART link at %d baud is "
-                  "APB-clocked and cannot survive a sub-80 MHz CPU",
-                  (unsigned long)idleFloorMhz,
-                  (unsigned long)POWER_INTERACTIVE_FLOOR_MHZ,
-                  uartLinkEffectiveBaud());
-    idleFloorMhz = POWER_INTERACTIVE_FLOOR_MHZ;
-  }
-#endif
-
-  if (idleFloorMhz < savedCpuMhz) {
-    // The shared owner drains I2C before switching. Leave the display and
-    // transition state untouched when it cannot confirm the requested clock.
-    bool clockChanged = false;
-    if (!powerSetCpuFrequencyMhz(idleFloorMhz, &clockChanged)) {
-      nextClockAttemptMs = now + kClockRetryBackoffMs;
-      // A busy refusal can race another command's accepted clock change.
-      // Recover only our own partial transition, never that other request.
-      if (clockChanged && getCpuFrequencyMhz() < savedCpuMhz) {
-        wakePending = true;
-      } else {
-        savedCpuMhz = 0;
-      }
-      return;
-    }
-  } else {
-    savedCpuMhz = 0;  // nothing lowered → wake() must not "restore" a raise
-  }
   powerSleepTransitionMark();
   oledPrepareForSleep();   // DISPLAYOFF (+ LDO2 cut on FeatherS3); board-aware
   gOledRunning = false;    // updateOLEDDisplay() now early-returns → refresh stops
   asleep = true;
+  powerSetLocalDisplayAwake(false);
   batteryLogEvent("powersave:enter");
   {
     char det[20];
@@ -2955,11 +2834,19 @@ void hardwareone_loop() {
   radioCompanionTick();
 
 #if ENABLE_OLED_DISPLAY
-  powerSaveTick();
+  // Local panel: blank after the idle timeout with no local activity, wake on
+  // the next. Before the clock policy, so a blank and its downclock, or a wake
+  // and its raise, land on the same lap.
+  powerDisplayTick();
   // Idle-logout the local-display (OLED) session after sessionIdleDisplay min of
   // no physical input. Separate from power-save: revokes the login, not pixels.
   localDisplaySessionTick();
 #endif
+
+  // CPU clock policy — every build, with or without a local display: the idle
+  // downclock after the timeout and the boost for transcription / camera /
+  // recording.
+  powerPolicyTick();
 
   // Periodic tick for an active CLIMode (no-op when no mode is active or
   // when the mode doesn't define onTick). Used by the Phase 5 wizard's

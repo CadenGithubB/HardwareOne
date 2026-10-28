@@ -129,7 +129,7 @@ String readCachedSchemaJson() {
   char filePath[80];
   peerCachePath(pm, "schema.json", filePath, sizeof(filePath));
 
-  if (!VFS::existsGuarded(filePath, VFS::systemAuth("bond.schema.read"))) {
+  if (!VFS::existsGuarded(filePath, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "bond.schema.read"))) {
     sLastError = "No cached schema — call requestSchemaSync first";
     return "";
   }
@@ -137,7 +137,7 @@ String readCachedSchemaJson() {
   String out;
   {
     FsLockGuard fsGuard("bond.schema.read");
-    File f = VFS::openGuarded(filePath, "r", VFS::systemAuth("bond.schema.read"));
+    File f = VFS::openGuarded(filePath, "r", VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "bond.schema.read"));
     if (!f) { sLastError = "Failed to open cached schema"; return ""; }
     out = f.readString();
     f.close();

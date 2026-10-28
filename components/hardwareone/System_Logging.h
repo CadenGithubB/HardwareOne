@@ -73,7 +73,4 @@ void logBootAnchorToLogs(const char* resetReason, const char* detail = nullptr);
 void logI2CError(uint8_t address, const char* deviceName, int consecutiveErrors, int totalErrors, bool nowDegraded);
 void logI2CRecovery(uint8_t address, const char* deviceName, int totalErrors);
 
-// Generic logging utility (wraps appendLineWithCap)
-void logToFile(const char* path, const String& line, size_t capBytes);
-
 #endif // SYSTEM_LOGGING_H

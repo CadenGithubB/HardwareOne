@@ -87,6 +87,8 @@ static void cleanupBootTemporaryFiles() {
   int cleaned = 0;
   {
     FsLockGuard guard("fs.init.tmp_cleanup");
+    // trusted, deliberately unconfined: the boot sweep walks every tree for
+    // leftover staging files.
     const AuthContext sys = VFS::systemAuth("fs.init.tmp_cleanup");
     for (const char* path : cleanupDirs) {
       File directory = VFS::openGuarded(path, "r", sys);
@@ -165,7 +167,7 @@ bool initFilesystem() {
 
 #if ENABLE_G2_GLASSES
   if (VFS::isSDAvailable()) {
-    (void)VFS::mkdirGuarded(String(G2_ICON_ANIMATIONS_VFS_PATH), VFS::systemAuth("filesystem.g2_icon_anim_init"));
+    (void)VFS::mkdirGuarded(String(G2_ICON_ANIMATIONS_VFS_PATH), VFS::systemAuth(G2_ICON_ANIMATIONS_VFS_PATH, "filesystem.g2_icon_anim_init"));
   }
 #endif
 
@@ -188,6 +190,7 @@ bool initFilesystem() {
   // Ensure system directories exist. All run as system — boot init is the
   // canonical trusted-internal context (no user identity exists yet).
   {
+    // trusted, deliberately unconfined: creates the top-level trees themselves.
     AuthContext sys = VFS::systemAuth("fs.init.mkdirs");
     // Whole capture tree up-front so writers never depend on a parent existing
     // by luck (mkdir is non-recursive). Subdirs used to appear ad-hoc from
@@ -222,7 +225,7 @@ bool initFilesystem() {
 
   // Boot-time JSON validation: warn about corrupt critical config files
   {
-    AuthContext sys = VFS::systemAuth("fs.init.json_validate");
+    AuthContext sys = VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "fs.init.json_validate");
     // "/settings.json" removed: it is DEAD. The real path is "/system/settings.json"
     // and a repo-wide grep for this literal finds only this line — so settings.json
     // has never actually been validated here. Do NOT repoint it: settings already
@@ -233,7 +236,7 @@ bool initFilesystem() {
     for (const char* path : criticalFiles) {
       if (!VFS::existsGuarded(path, sys)) continue;
       String content;
-      if (readText(path, content) && content.length() > 0) {
+      if (readText(path, content, sys) && content.length() > 0) {
         content.trim();
         if (content.length() > 0 && content[0] != '{' && content[0] != '[') {
           // QUARANTINE, do not delete. Deleting turns "corrupt" into "absent", and
@@ -274,9 +277,9 @@ bool initFilesystem() {
   // Skip if automation system is disabled
   DebugFlagMask _dbgSaved = getDebugFlags();
   setDebugFlag(DEBUG_AUTO_SCHEDULER);
-  if (gSettings.automationEnabled && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth("fs.init.automations_check"))) {
+  if (gSettings.automationEnabled && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "fs.init.automations_check"))) {
     String json;
-    if (readText(AUTOMATIONS_JSON_FILE, json)) {
+    if (readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "fs.init.automations_check"))) {
       bool modified = false;
 
       // First: sanitize duplicate IDs
@@ -583,7 +586,7 @@ void runFileWritePostSaveHooks(const String& path) {
 #if ENABLE_AUTOMATION
   if (path == AUTOMATIONS_JSON_FILE) {
     String json;
-    if (readText(AUTOMATIONS_JSON_FILE, json) && sanitizeAutomationsJson(json)) {
+    if (readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "fs.post_save.automations")) && sanitizeAutomationsJson(json)) {
       writeAutomationsJsonAtomic(json);  // best-effort atomic writeback
     }
     // The caller has already saved the file. Refresh even when sanitation
@@ -828,7 +831,7 @@ const char* cmd_fileview(const String& argsInput) {
   // explicit truncation flag).
   const size_t kReadCap = 60000;
   String content;
-  if (!readTextLimited(path.c_str(), content, kReadCap)) {
+  if (!readTextLimited(path.c_str(), content, kReadCap, ctx)) {
     if (ensureDebugBuffer()) {
       snprintf(getDebugBuffer(), 1024, "Error: Unable to open: %s", path.c_str());
       broadcastOutput(getDebugBuffer());
@@ -2212,14 +2215,10 @@ bool copyFileContents(fs::File& input, fs::File& output,
   return true;
 }
 
-bool readTextLimited(const char* path, String& out, size_t maxBytes) {
+bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthContext& ctx) {
   out = "";
   FsLockGuard guard("readTextLimited");
-  // Unguarded VFS::open by design — readTextLimited is a policy-free byte
-  // shovel called from many trusted callers that already gated their own
-  // access checks. Routing through VFS keeps the LittleFS-vs-SD dispatch
-  // consistent without re-running perms here.
-  File f = VFS::open(String(path), "r");
+  File f = VFS::openGuarded(String(path), "r", ctx);
   if (!f) return false;
   out.reserve(maxBytes);
   const size_t chunk = 512;
@@ -2283,6 +2282,10 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   char dest[128];
   VFS::resolveOverflowPath(path, line.length() + 512, dest, sizeof(dest));
   STACK_TRACEF("appendLineWithCap.resolved dest=%s", dest);
+  // trusted: the capped-log writer, confined to the sys_logs tree of the tier
+  // the overflow latch resolved. Every caller's path lives there; one that
+  // does not is refused by the scope and shows up as a [PERM] line.
+  const AuthContext ctx = VFS::systemAuth(VFS::sysLogScopeFor(String(dest)), "log.append");
 
   // 1. Append the new line — fast path, same as before.
   //
@@ -2298,7 +2301,7 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   size_t written = 0;
   bool appended = false;
   {
-    File a = VFS::open(String(dest), "a", true);
+    File a = VFS::openGuarded(String(dest), "a", ctx, true);
     if (!a) { STACK_TRACEF("appendLineWithCap.open_a_failed"); return false; }
     STACK_TRACEF("appendLineWithCap.opened_for_append");
     written = a.println(line);
@@ -2323,7 +2326,7 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   if (sz <= capBytes) { STACK_TRACEF("appendLineWithCap.no_rotate_exit"); return true; }
 
   // Rotation is due — only now is a read handle worth its open.
-  File r = VFS::open(String(dest), "r");
+  File r = VFS::openGuarded(String(dest), "r", ctx);
   if (!r) { STACK_TRACEF("appendLineWithCap.open_r_failed"); return false; }
   // close() cannot report a buffered append failure. Before discarding any
   // old data, require the reopened file to contain the size we observed.
@@ -2361,7 +2364,7 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   //    the task during a first-of-session error-log write.
   char tmpPath[140];
   snprintf(tmpPath, sizeof(tmpPath), "%s.tmp", dest);
-  VFS::remove(String(tmpPath));  // clear any stale .tmp from a prior crash
+  VFS::removeGuarded(String(tmpPath), ctx);  // clear any stale .tmp from a prior crash
 
   static uint8_t* sRotateBuf = nullptr;
   static const size_t ROTATE_BUF_SIZE = 1024;
@@ -2370,7 +2373,7 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
     if (!sRotateBuf) { r.close(); STACK_TRACEF("appendLineWithCap.rotatebuf_alloc_failed"); return false; }
   }
 
-  File w = VFS::open(String(tmpPath), "w", true);
+  File w = VFS::openGuarded(String(tmpPath), "w", ctx, true);
   if (!w) { r.close(); STACK_TRACEF("appendLineWithCap.open_tmp_failed"); return false; }
   STACK_TRACEF("appendLineWithCap.tmp_opened copying...");
 
@@ -2390,7 +2393,7 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   w.close();
   STACK_TRACEF("appendLineWithCap.copy_done bytes=%u", (unsigned)copied);
   if (!complete) {
-    VFS::remove(String(tmpPath));
+    VFS::removeGuarded(String(tmpPath), ctx);
     STACK_TRACEF("appendLineWithCap.incomplete_copy");
     return false;
   }
@@ -2400,14 +2403,14 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   // existing recovery protocol, now only with a checked complete temp file.
   const bool onSD = VFS::getStorageType(String(dest)) == VFS::SDCARD;
   if (onSD) {
-    if (!VFS::remove(String(dest))) {
-      VFS::remove(String(tmpPath));
+    if (!VFS::removeGuarded(String(dest), ctx)) {
+      VFS::removeGuarded(String(tmpPath), ctx);
       STACK_TRACEF("appendLineWithCap.remove_orig_failed");
       return false;
     }
   }
-  if (!VFS::rename(String(tmpPath), String(dest))) {
-    if (!onSD) VFS::remove(String(tmpPath));
+  if (!VFS::renameGuarded(String(tmpPath), String(dest), ctx)) {
+    if (!onSD) VFS::removeGuarded(String(tmpPath), ctx);
     STACK_TRACEF("appendLineWithCap.rename_failed");
     return false;
   }
@@ -2429,20 +2432,22 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
 static void recoverLogOrphanAt(const char* dest) {
   char tmpPath[140];
   snprintf(tmpPath, sizeof(tmpPath), "%s.tmp", dest);
+  // trusted: same confinement as the writer whose rotation it repairs.
+  const AuthContext ctx = VFS::systemAuth(VFS::sysLogScopeFor(String(dest)), "log.orphan_recovery");
 
-  if (!VFS::exists(String(tmpPath))) return;
+  if (!VFS::existsGuarded(String(tmpPath), ctx)) return;
 
-  if (VFS::exists(String(dest))) {
+  if (VFS::existsGuarded(String(dest), ctx)) {
     // Case (b): stale temp, destination is authoritative.
-    VFS::remove(String(tmpPath));
+    VFS::removeGuarded(String(tmpPath), ctx);
   } else {
     // Case (c): promote the temp. Logs what it did via Serial since our
     // own logging infrastructure may depend on this path being valid.
-    if (VFS::rename(String(tmpPath), String(dest))) {
+    if (VFS::renameGuarded(String(tmpPath), String(dest), ctx)) {
       Serial.printf("[FS] Recovered log file from partial rotation: %s\n", dest);
     } else {
       // Rename failed — delete the orphan so we don't try again next boot.
-      VFS::remove(String(tmpPath));
+      VFS::removeGuarded(String(tmpPath), ctx);
       Serial.printf("[FS] Could not recover %s from .tmp; discarded orphan\n", dest);
     }
   }

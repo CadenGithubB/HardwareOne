@@ -65,7 +65,7 @@ static constexpr auto kProductionFamilyIndex =
 
 static_assert(arrayCount(kProductionFamilies) == 13,
               "reviewed fixture family count changed");
-static_assert(arrayCount(kProductionKinds) == 165,
+static_assert(arrayCount(kProductionKinds) == 167,
               "reviewed fixture kind count changed");
 static_assert(catalog_core::validate(kProductionFamilies, kProductionKinds)
                   .ok(),

@@ -106,7 +106,7 @@ void runExec() {
 
 Settings gSettings;
 namespace SelfDevice {
-const char* firmwareVersion() { return "0.99.98.5 \"host\""; }
+const char* firmwareVersion() { return "0.99.99 \"host\""; }
 }
 
 // ---- The BLE row (Bluetooth.cpp) -----------------------------------------
@@ -470,7 +470,7 @@ void openAndInfo() {
   const size_t n = hw1rec::buildInfo(info, sizeof info, SelfDevice::firmwareVersion(), BOARD_NAME);
   REQUIRE(phone.records.size() == 2 && phone.records[0].type == hw1rec::kInfo && phone.records[0].flags == 0 &&
           phone.records[0].payload == std::string(info, n));
-  REQUIRE(phone.records[0].payload.find("\"fw\":\"0.99.98.5 \\\"host\\\"\"") != std::string::npos &&
+  REQUIRE(phone.records[0].payload.find("\"fw\":\"0.99.99 \\\"host\\\"\"") != std::string::npos &&
           phone.records[0].payload.find("\"model\":\"Host \\\"Board\\\"\"") != std::string::npos);
   REQUIRE(phone.records[1].type == hw1rec::kText && phone.records[1].payload == "early");
   const PipeConsoleStatus st = status();

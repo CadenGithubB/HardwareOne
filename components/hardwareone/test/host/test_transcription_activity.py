@@ -43,7 +43,7 @@ int main() {
 }
 '''
     execution=function(commands,'bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize)')
-    before_activity=execution[:execution.index('powerSaveNoteActivity();')]
+    before_activity=execution[:execution.index('powerSaveNoteActivity(')]
     assert '!isPassiveTranscriptionCommand(cmd)' in before_activity, 'Classifier must gate the actual activity call'
     assert 'isQuietPollCommand(cmd)' in function(commands,'static bool commandExecutionLogSuppressed(')
     with tempfile.TemporaryDirectory(prefix='hw1-transcription-activity-') as t:

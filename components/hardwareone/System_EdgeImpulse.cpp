@@ -158,11 +158,11 @@ static bool loadLabelsFromExplicitPath(const String& labelsPath, int classCount)
   if (classCount > kMaxModelClasses) classCount = kMaxModelClasses;
 
   FsLockGuard fsGuard("edge.labels_load");
-  if (!VFS::existsGuarded(labelsPath, VFS::systemAuth("edge.labels_load"))) {
+  if (!VFS::existsGuarded(labelsPath, VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.labels_load"))) {
     return false;
   }
 
-  File labelsFile = VFS::openGuarded(labelsPath, "r", VFS::systemAuth("edge.labels_load"));
+  File labelsFile = VFS::openGuarded(labelsPath, "r", VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.labels_load"));
   if (!labelsFile) {
     return false;
   }
@@ -591,7 +591,7 @@ static bool loadModelLocked(const char* path) {
   uint32_t readTime = 0;
   {
     FsLockGuard fsGuard("edge.model_load");
-    File modelFile = VFS::openGuarded(path, "r", VFS::systemAuth("edge.model_load"));
+    File modelFile = VFS::openGuarded(path, "r", VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.model_load"));
     if (!modelFile) {
       ERROR_SYSTEMF("[EdgeImpulse] Failed to open model file: %s", path);
       return false;
@@ -854,7 +854,7 @@ void unloadModel() {
 
 static void listModelsRecursive(const String& absDir, const String& relPrefix, String& output, int& count) {
   FsLockGuard fsGuard("edge.list_models");
-  File dir = VFS::openGuarded(absDir, "r", VFS::systemAuth("edge.list_models"));
+  File dir = VFS::openGuarded(absDir, "r", VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.list_models"));
   if (!dir || !dir.isDirectory()) return;
 
   File file = dir.openNextFile();
@@ -896,7 +896,7 @@ void listAvailableModels(String& output) {
   snprintf(hdrBuf, sizeof(hdrBuf), "Available models in %s:\n", MODEL_DIR);
   output = hdrBuf;
   
-  File root = VFS::openGuarded(MODEL_DIR, "r", VFS::systemAuth("edge.list_models"));
+  File root = VFS::openGuarded(MODEL_DIR, "r", VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.list_models"));
   if (!root || !root.isDirectory()) {
     char errBuf[64];
     snprintf(errBuf, sizeof(errBuf), "  (directory not found - create %s)\n", MODEL_DIR);
@@ -914,8 +914,8 @@ void listAvailableModels(String& output) {
 
 // Create models directory if it doesn't exist
 static void ensureModelDirectory() {
-  if (!VFS::existsGuarded(MODEL_DIR, VFS::systemAuth("edge.ensure_model_dir"))) {
-    VFS::mkdirGuarded(MODEL_DIR, VFS::systemAuth("edge.ensure_model_dir"));
+  if (!VFS::existsGuarded(MODEL_DIR, VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.ensure_model_dir"))) {
+    VFS::mkdirGuarded(MODEL_DIR, VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.ensure_model_dir"));
     DEBUG_SYSTEMF("[EdgeImpulse] Created models directory: %s", MODEL_DIR);
   }
 }
@@ -1023,7 +1023,7 @@ void initEdgeImpulse() {
 
   // Try to load default model if it exists
   DEBUG_SYSTEMF("[EI_DEBUG] Checking for default model: %s", DEFAULT_MODEL);
-  if (VFS::existsGuarded(DEFAULT_MODEL, VFS::systemAuth("edge.default_model_check"))) {
+  if (VFS::existsGuarded(DEFAULT_MODEL, VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.default_model_check"))) {
     DEBUG_SYSTEMF("[EI_DEBUG] Default model found, loading...");
     if (loadModelFromFile(DEFAULT_MODEL)) {
       DEBUG_SYSTEMF("[EI_DEBUG] Default model loaded successfully");
@@ -1034,7 +1034,7 @@ void initEdgeImpulse() {
     DEBUG_SYSTEMF("[EI_DEBUG] No default model at %s", DEFAULT_MODEL);
 
     // List available models
-    File dir = VFS::openGuarded(MODEL_DIR, "r", VFS::systemAuth("edge.list_models_init"));
+    File dir = VFS::openGuarded(MODEL_DIR, "r", VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.list_models_init"));
     if (dir && dir.isDirectory()) {
       int modelCount = 0;
       File file = dir.openNextFile();
@@ -1269,7 +1269,7 @@ EIResults runEdgeImpulseInference() {
 // Inference from Stored Image File
 // ============================================================================
 
-EIResults runInferenceFromFile(const char* imagePath) {
+EIResults runInferenceFromFile(const char* imagePath, const AuthContext& ctx) {
   EIResults results = {};
   EIInferenceLock lock(0);
   if (!lock.held) {
@@ -1287,7 +1287,8 @@ EIResults runInferenceFromFile(const char* imagePath) {
   uint8_t* imgBuffer = nullptr;
   {
     FsLockGuard fsGuard("edge.image_classify");
-    File imgFile = VFS::openGuarded(imagePath, "r", VFS::systemAuth("edge.image_classify"));
+    // The image is read as the caller who named it, never as the system.
+    File imgFile = VFS::openGuarded(imagePath, "r", ctx);
     if (!imgFile) {
       results.errorMessage = "Failed to open image file";
       return results;
@@ -1783,7 +1784,7 @@ const char* cmd_ei_file(const String& argsInput) {
     return gEICmdBuffer;
   }
 
-  EIResults results = runInferenceFromFile(path.c_str());
+  EIResults results = runInferenceFromFile(path.c_str(), currentAuthContext());
   
   if (!results.success) {
     snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Error: Inference failed: %s",

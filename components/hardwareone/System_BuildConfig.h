@@ -20,6 +20,7 @@
 // ║    3. Wireless Peripherals — BLE radio / G2 Glasses                       ║
 // ║    4. On-device Subsystems — Speech / Edge Impulse / LLM / Automation     ║
 // ║    5. User-facing Apps     — Games / Maps                                 ║
+// ║    6. Diagnostics          — Debug-output defaults for test images        ║
 // ║                                                                           ║
 // ║  Flag conventions:                                                        ║
 // ║    *_FEATURE_LEVEL — coarse preset (0–4); 4 means "use CUSTOM_* below"    ║
@@ -444,6 +445,21 @@
 
 // Maps: offline maps and waypoints web page.
 #define ENABLE_MAPS             1   // CARRIER BUILD: dropped for BT flash headroom; was 1
+
+
+// =============================================================================
+// 6. DIAGNOSTICS  —  Debug-output defaults
+// =============================================================================
+// Debug flags are runtime settings (/system/debug.json; `debug*` commands and
+// the /logging page). A freshly erased device boots with every flag OFF.
+//
+// Set this to 1 for a test image that should boot with EVERY debug flag and
+// sub-flag ON — the registry defaults, the early-boot mask used before
+// settings load, and the page console.log switch — so the very first boot
+// already logs everything. The flags stay runtime-editable; only their
+// default changes. Expect a much busier console and a heavier debug queue:
+// not for release images.
+#define ENABLE_DEBUG_ALL_BY_DEFAULT 0
 
 
 // =============================================================================
@@ -1109,9 +1125,9 @@
   // only the XTAL-derived 40 MHz moves it).
   //
   // MAX is therefore 460800, not 230400: the one state that would corrupt an
-  // APB-clocked link is UltraSaver's 40 MHz idle floor, and the idle power-save
-  // path clamps that floor to 80 MHz while a >REF_TICK link is running (see
-  // powerSaveTick in HardwareOne.cpp). 460800 is worth reaching for — captured
+  // APB-clocked link is UltraSaver's 40 MHz idle floor, and the clock policy
+  // clamps that floor to 80 MHz while a >REF_TICK link is running (see
+  // powerDecide in System_Power.cpp). 460800 is worth reaching for — captured
   // audio is 32000 B/s, so 230400 (23040 B/s) transfers a recording SLOWER than
   // real time while 460800 (46080 B/s) outruns it.
   //

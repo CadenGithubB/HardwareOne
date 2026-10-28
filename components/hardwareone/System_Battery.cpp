@@ -518,6 +518,8 @@ static void batteryLogAppend(const char* event) {
   // trusted: the system owns its own infrastructure log. Both the periodic
   // sampler and the power-event annotations write as system, regardless of
   // whether a CLI command happened to trigger the event.
+  // trusted, deliberately unconfined: the battery log and its rotations live
+  // at the filesystem root, so no directory scope is tighter than everything.
   auto ctx = VFS::systemAuth("batlog");
   File f = VFS::openGuarded(String(kBatteryLogPath), "a", ctx, true);
   if (f && f.isDirectory()) {

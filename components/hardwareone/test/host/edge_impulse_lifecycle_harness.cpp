@@ -162,7 +162,7 @@ static void scenarioDetectDuringContinuous() {
           "camera detect reports busy");
   const std::string cli = cmd_ei_detect(String(""));
   eiCheck(cli.find("busy") != std::string::npos, "eidetect reports busy");
-  const EIResults file = runInferenceFromFile("/images/frame.jpg");
+  const EIResults file = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));
   eiCheck(!file.success && file.errorMessage && std::strstr(file.errorMessage, "busy"),
           "file inference reports busy");
   httpd_req_t req;

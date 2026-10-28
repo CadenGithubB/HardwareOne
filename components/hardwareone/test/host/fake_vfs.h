@@ -28,9 +28,9 @@
 // Opting in
 //   1. Include this header after the String double is visible.
 //   2. #define FAKE_VFS_PROVIDE_VFS_NAMESPACE before the include to get the
-//      production `VFS::` signatures (openGuarded, open, exists[Guarded],
-//      remove[Guarded], rename[Guarded], replaceFileGuarded, mkdir[Guarded],
-//      rmdir[Guarded], isSDAvailable, isSDWritable, isLittleFSReady, getStats,
+//      production `VFS::` signatures (openGuarded, existsGuarded,
+//      removeGuarded, renameGuarded, replaceFileGuarded, mkdirGuarded,
+//      rmdirGuarded, isSDAvailable, isSDWritable, isLittleFSReady, getStats,
 //      getStorageType, normalize, stripSdPrefix, isStagingName, systemAuth) as
 //      thin forwarders onto fake_vfs::fs(). Leave it out when the harness
 //      extracts the real VFS helpers and only needs the File class.
@@ -847,7 +847,6 @@ inline fake_vfs::Fs::Auth authOf(const AuthContext& ctx) {
   auth.guarded = true;
   return auth;
 }
-inline fake_vfs::Fs::Auth unguarded() { return fake_vfs::Fs::Auth{}; }
 inline fake_vfs::Backend backendOf(StorageType type) {
   return type == SDCARD ? fake_vfs::Backend::SD : fake_vfs::Backend::LittleFS;
 }
@@ -875,15 +874,11 @@ inline bool isStagingName(const String& nameOrPath) {
   return ends(".tmp") || ends(".bak");
 }
 
-inline bool exists(const String& path) { return fake_vfs::fs().exists(path.c_str(), unguarded()); }
-inline File open(const String& path, const char* mode = FILE_READ, bool create = false) {
-  return fake_vfs::fs().open(path.c_str(), mode, create, unguarded());
-}
-inline bool mkdir(const String& path) { return fake_vfs::fs().mkdir(path.c_str(), unguarded()); }
-inline bool remove(const String& path) { return fake_vfs::fs().remove(path.c_str(), unguarded()); }
-inline bool rename(const String& from, const String& to) { return fake_vfs::fs().rename(from.c_str(), to.c_str(), unguarded()); }
-inline bool rmdir(const String& path) { return fake_vfs::fs().rmdir(path.c_str(), unguarded()); }
-
+// No raw exists/open/mkdir/remove/rename/rmdir forwarders: the firmware's
+// VFS no longer exposes them (they are file-static backend dispatchers in
+// System_VFS.cpp), so extracted code that still named one would not compile
+// against the real header either. Harness code that wants to touch the fake
+// filesystem directly calls fake_vfs::fs().
 inline bool getStats(StorageType type, uint64_t& total, uint64_t& used, uint64_t& free) {
   return fake_vfs::fs().getStats(backendOf(type), total, used, free);
 }
@@ -918,6 +913,57 @@ inline AuthContext systemAuth(const char* scope, const char* reason) {
   AuthContext ctx = systemAuth(reason);
   ctx.scope = scope ? scope : "";
   return ctx;
+}
+
+// The production scope constants and tier pickers (System_VFS.h), so extracted
+// code that names them compiles unchanged. Keep in step with the real header.
+namespace Scopes {
+  constexpr const char* VIDEOS          = "/sd/VIDEOS";
+  constexpr const char* CERTS           = "/system/certs";
+  constexpr const char* OTA             = "/system/ota";
+  constexpr const char* ESPNOW_RECEIVED = "/espnow/received";
+  constexpr const char* CAPTURES        = "/logging_captures";
+  constexpr const char* CAPTURES_SD     = "/sd/logging_captures";
+  constexpr const char* STT_MODELS      = "/STT Models";
+  constexpr const char* STT_MODELS_SD   = "/sd/STT Models";
+  constexpr const char* SYS_LOGS        = "/system/sys_logs";
+  constexpr const char* SYS_LOGS_SD     = "/sd/system/sys_logs";
+  constexpr const char* SYSTEM_STATE    = "/system";
+  constexpr const char* USERS           = "/system/users";
+  constexpr const char* MAPS            = "/maps";
+  constexpr const char* EI_MODELS       = "/EI Models";
+  constexpr const char* RECORDINGS      = "/recordings";
+  constexpr const char* RECORDINGS_SD   = "/sd/recordings";
+  constexpr const char* ESPNOW_STATE    = "/system/espnow";
+  constexpr const char* ESPNOW_CAPTURES = "/sd/espnow";
+  constexpr const char* LLM_MODELS      = "/system/llm";
+  constexpr const char* LLM_MODELS_SD   = "/sd/llm";
+  constexpr const char* ESPSR           = "/ESPSR";
+  constexpr const char* ESPSR_SD        = "/sd/ESPSR";
+  constexpr const char* PICTURES_SD     = "/sd/PICTURES";
+}
+inline const char* captureScopeFor(const String& path) {
+  return std::strncmp(path.c_str(), "/sd/", 4) == 0 ? Scopes::CAPTURES_SD : Scopes::CAPTURES;
+}
+inline const char* llmModelScopeFor(const String& path) {
+  return std::strncmp(path.c_str(), "/sd/", 4) == 0 ? Scopes::LLM_MODELS_SD : Scopes::LLM_MODELS;
+}
+inline const char* espsrScopeFor(const String& path) {
+  return std::strncmp(path.c_str(), "/sd/", 4) == 0 ? Scopes::ESPSR_SD : Scopes::ESPSR;
+}
+inline const char* sttModelScopeFor(const String& path) {
+  return std::strncmp(path.c_str(), "/sd/", 4) == 0 ? Scopes::STT_MODELS_SD : Scopes::STT_MODELS;
+}
+inline const char* recordingScopeFor(const String& path) {
+  return std::strncmp(path.c_str(), "/sd/", 4) == 0 ? Scopes::RECORDINGS_SD : Scopes::RECORDINGS;
+}
+inline const char* sysLogScopeFor(const String& path) {
+  return std::strncmp(path.c_str(), "/sd/", 4) == 0 ? Scopes::SYS_LOGS_SD : Scopes::SYS_LOGS;
+}
+inline bool pathInCaptureTree(const String& path) {
+  const std::string p = path.c_str();
+  const std::string base = captureScopeFor(path);
+  return p == base || p.compare(0, base.size() + 1, base + "/") == 0;
 }
 
 }  // namespace VFS

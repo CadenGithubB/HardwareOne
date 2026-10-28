@@ -72,18 +72,23 @@ void rebootDevice(const char* reason, const char* auditDetail, uint32_t flushDel
 
 // Note: BROADCAST_PRINTF is defined as a macro in debug_system.h, not a function
 
-// File I/O functions
-bool readText(const char* path, String& out);
-// Trusted internal persistence helpers; callers own authorization. True means
-// the expected bytes were written, no write error was reported, and the file
-// size matched after flush. The Arduino API cannot report flush/close failure.
-// Direct writes may leave a truncated/partial destination when they fail.
-bool writeText(const char* path, const String& content);
+// File I/O helpers. Every one runs through the guarded VFS under the identity
+// the caller passes; there is no identity-free overload. Internal callers pass
+// VFS::systemAuth(<scope>, "<owner>.<reason>") with the narrowest scope that
+// holds the file and, for the atomic writer, its ".tmp" sibling.
+struct AuthContext;
+bool readText(const char* path, String& out, const AuthContext& ctx);
+// Persistence helpers; the guarded VFS authorizes `ctx` on every open, rename
+// and remove. True means the expected bytes were written, no write error was
+// reported, and the file size matched after flush. The Arduino API cannot
+// report flush/close failure. Direct writes may leave a truncated/partial
+// destination when they fail.
+bool writeText(const char* path, const String& content, const AuthContext& ctx);
 // Writes a sibling .tmp and renames it only after checked completion. One FS
 // lock covers writing, promotion and best-effort temp cleanup. Failure never
 // falls back to deleting or rewriting the destination; backend rename and
 // power-loss durability guarantees still apply.
-bool writeTextAtomic(const char* path, const String& content);
+bool writeTextAtomic(const char* path, const String& content, const AuthContext& ctx);
 
 // ============================================================================
 // Diagnostics primitives — shared scaffolding for queue/saturation reporters

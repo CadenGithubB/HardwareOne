@@ -307,7 +307,7 @@ static void scenarioParity() {
 
   const EIResults camera = runEdgeImpulseInference();
   const int trackedAfterCamera = gTrackedObjectCount;
-  const EIResults file = runInferenceFromFile("/images/frame.jpg");
+  const EIResults file = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));
   eiCheck(camera.success && camera.detectionCount == 2, "camera detect");
   expectSameResults(camera, file);
   eiCheck(gFakeInvokeInputHashes.size() == 2 && gFakeInvokeInputHashes[0] == gFakeInvokeInputHashes[1],
@@ -316,7 +316,7 @@ static void scenarioParity() {
 
   gSettings.eiEnabled = false;
   const EIResults cameraOff = runEdgeImpulseInference();
-  const EIResults fileOff = runInferenceFromFile("/images/frame.jpg");
+  const EIResults fileOff = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));
   eiCheck(!cameraOff.success && !fileOff.success, "disabled refuses both paths");
   eiCheck(cameraOff.errorMessage && fileOff.errorMessage &&
           std::strcmp(cameraOff.errorMessage, fileOff.errorMessage) == 0, "same disabled error");
@@ -324,7 +324,7 @@ static void scenarioParity() {
 
   unloadModel();
   const EIResults cameraNone = runEdgeImpulseInference();
-  const EIResults fileNone = runInferenceFromFile("/images/frame.jpg");
+  const EIResults fileNone = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));
   eiCheck(!cameraNone.success && !fileNone.success, "no model refuses both paths");
   eiCheck(cameraNone.errorMessage && fileNone.errorMessage &&
           std::strcmp(cameraNone.errorMessage, fileNone.errorMessage) == 0, "same no-model error");

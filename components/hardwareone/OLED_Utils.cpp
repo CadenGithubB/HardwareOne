@@ -3043,7 +3043,7 @@ void drawOLEDFooter() {
      #endif
       break;
       
-    // OLED_NETWORK_INFO / OLED_NETWORK_STATUS / OLED_NETWORK_WIFI_MENU hints
+    // OLED_NETWORK_INFO / OLED_NETWORK_STATUS / OLED_WEB_STATS / OLED_WEB_STATUS hints
     // provided via OLEDModeEntry::hints in OLED_Mode_Network.cpp
 
     case OLED_FILE_BROWSER: {
@@ -3067,16 +3067,6 @@ void drawOLEDFooter() {
 
     // OLED_SYSTEM_STATUS, OLED_SENSOR_DATA, OLED_SENSOR_LIST, OLED_BOOT_SENSORS, OLED_MEMORY_STATS
     // hints provided via OLEDModeEntry registration (static "B:Back")
-
-    case OLED_WEB_STATS:
-#if ENABLE_HTTP_SERVER
-      {
-        hints = server ? "X:Stop B:Back" : "X:Start B:Back";
-      }
-#else
-      hints = "B:Back";
-#endif
-      break;
 
     case OLED_RTC_DATA:
 #if ENABLE_RTC_SENSOR
@@ -3121,7 +3111,20 @@ void drawOLEDFooter() {
     case OLED_CLI_INPUT:
       hints = "A:Send B:Back";
       break;
-      
+
+    case OLED_LLM:
+      {
+#if ENABLE_LLM_BACKEND
+        // The LLM screen's hint changes with its state (home, chat, pickers)
+        // and carries its status lines; it sets it while rendering.
+        extern const char* oledLLMFooterHint();
+        hints = oledLLMFooterHint();
+#else
+        hints = "B:Back";
+#endif
+      }
+      break;
+
     case OLED_LOGIN:
       {
         // Check if user is already authenticated
@@ -3164,10 +3167,6 @@ void drawOLEDFooter() {
         hints = "X:Setup B:Back";  // X opens ESP-NOW setup (then Y to name device)
       } else if (unavailableOLEDTitle == "Automations") {
         hints = "X:Enable B:Back";  // X enables automation system
-      } else if (unavailableOLEDTitle == "Bluetooth") {
-        hints = "X:Start B:Back";  // X initializes Bluetooth
-      } else if (unavailableOLEDTitle == "Web") {
-        hints = "X:Start B:Back";  // X starts HTTP server
       } else {
         hints = "X:Start B:Back";  // X attempts to initialize/start sensor, B returns to menu
       }
@@ -3297,6 +3296,7 @@ bool oledModeAllowedForGuest(OLEDMode mode) {
     case OLED_NOTIFICATIONS:
     case OLED_CLI_VIEWER:
     case OLED_WEB_STATS:
+    case OLED_WEB_STATUS:
     case OLED_MESH_STATUS:
     case OLED_NETWORK_STATUS:
     case OLED_SPEECH_STATUS:
@@ -4371,6 +4371,8 @@ void updateOLEDDisplay() {
 #endif
       break;
     case OLED_WEB_STATS:
+    case OLED_WEB_STATUS:
+      // Both the Web menu and its Status screen read webStatsRenderData.
       prepareWebStatsData();
       break;
     case OLED_SYSTEM_STATUS:
@@ -5046,7 +5048,7 @@ const char* cmd_oledstatus(const String& argsInput) {
         case OLED_SENSOR_LIST:    modeStr = "Sensor List"; break;
         case OLED_THERMAL_VISUAL: modeStr = "Thermal Visual"; break;
         case OLED_GAMEPAD_VISUAL: modeStr = "Gamepad Visual"; break;
-        case OLED_NETWORK_INFO:   modeStr = "Network Info"; break;
+        case OLED_NETWORK_INFO:   modeStr = "WiFi"; break;
         case OLED_MESH_STATUS:    modeStr = "Mesh Status"; break;
         case OLED_CUSTOM_TEXT:    modeStr = "Custom Text"; break;
         case OLED_LOGO:           modeStr = "Logo"; break;
@@ -5087,7 +5089,7 @@ const char* cmd_oledstatus(const String& argsInput) {
       case OLED_SENSOR_LIST: modeStr = "Sensor List"; break;
       case OLED_THERMAL_VISUAL: modeStr = "Thermal Visual"; break;
       case OLED_GAMEPAD_VISUAL: modeStr = "Gamepad Visual"; break;
-      case OLED_NETWORK_INFO: modeStr = "Network Info"; break;
+      case OLED_NETWORK_INFO: modeStr = "WiFi"; break;
       case OLED_MESH_STATUS: modeStr = "Mesh Status"; break;
       case OLED_CUSTOM_TEXT: modeStr = "Custom Text"; break;
       case OLED_LOGO: modeStr = "Logo"; break;
@@ -5195,9 +5197,8 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_SENSOR_DATA: return "Sensors";
     case OLED_SENSOR_LIST: return "Devices";
     case OLED_THERMAL_VISUAL: return "Thermal";
-    case OLED_NETWORK_INFO: return "Network";
-    case OLED_NETWORK_STATUS: return "Status";
-    case OLED_NETWORK_WIFI_MENU: return "WiFi";
+    case OLED_NETWORK_INFO: return "WiFi";
+    case OLED_NETWORK_STATUS: return "WiFi Status";
     case OLED_NETWORK_WIFI_LIST: return "Saved";
     case OLED_NETWORK_WIFI_REMOVE: return "Remove";
     case OLED_NETWORK_WIFI_SCAN: return "Scan";
@@ -5216,7 +5217,7 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_TOF_DATA: return "ToF";
     case OLED_APDS_DATA: return "APDS";
     case OLED_POWER: return "Power";
-    case OLED_POWER_CPU: return "CPU Power";
+    case OLED_POWER_CPU: return "CPU (MHz)";  // unit for the rows below (OLED_Mode_Power.cpp)
     case OLED_POWER_SLEEP: return "Sleep";
     case OLED_GAMEPAD_VISUAL: return "Gamepad";
     case OLED_BLUETOOTH: return "Bluetooth";
@@ -5234,7 +5235,8 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_TRANSCRIPT_VIEW: return "Transcript";
     case OLED_REMOTE_SENSORS: return "Remote";
     case OLED_MEMORY_STATS: return "Memory";
-    case OLED_WEB_STATS: return "Web Stats";
+    case OLED_WEB_STATS: return "Web";
+    case OLED_WEB_STATUS: return "Web Status";
     case OLED_RTC_DATA: return "RTC";
     case OLED_PRESENCE_DATA: return "Presence";
     case OLED_REMOTE: return "Bond";
@@ -5255,7 +5257,12 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_LED: return "LED";
     case OLED_PERF_STATS: return "Perf";
     case OLED_I2C_DIAG: return "I2C Scan";
-    default: return "Unknown";
+    default: {
+      // A screen missing from this table still has the name it registered
+      // (LLM Chat and Change Password showed "Unknown" in the header).
+      const OLEDModeEntry* entry = findOLEDMode(mode);
+      return (entry && entry->name && entry->name[0]) ? entry->name : "Unknown";
+    }
   }
 }
 
@@ -5294,6 +5301,7 @@ OLEDMode modeFromSlug(const String& slug) {
   if (slug == "users") return OLED_USER_MANAGER;
   if (slug == "transcription") return OLED_TRANSCRIPTION;
   if (slug == "web") return OLED_WEB_STATS;
+  if (slug == "webstatus") return OLED_WEB_STATUS;
   if (slug == "rtc") return OLED_RTC_DATA;
   if (slug == "presence") return OLED_PRESENCE_DATA;
   if (slug == "notifs" || slug == "notifications") return OLED_NOTIFICATIONS;
@@ -5314,7 +5322,6 @@ const char* slugFromMode(OLEDMode mode) {
     case OLED_THERMAL_VISUAL:  return "thermal";
     case OLED_NETWORK_INFO:    return "network";
     case OLED_NETWORK_STATUS:  return "networkstatus";
-    case OLED_NETWORK_WIFI_MENU: return "wifimenu";
     case OLED_NETWORK_WIFI_LIST: return "wifilist_oled";
     case OLED_NETWORK_WIFI_REMOVE: return "wifiremove_oled";
     case OLED_NETWORK_WIFI_SCAN: return "wifiscan_oled";
@@ -5354,6 +5361,7 @@ const char* slugFromMode(OLEDMode mode) {
     case OLED_PERF_STATS:      return "perf";
     case OLED_I2C_DIAG:        return "i2cdiag";
     case OLED_WEB_STATS:       return "web";
+    case OLED_WEB_STATUS:      return "webstatus";
     case OLED_RTC_DATA:        return "rtc";
     case OLED_PRESENCE_DATA:   return "presence";
     case OLED_NOTIFICATIONS:   return "notifs";
@@ -5626,7 +5634,7 @@ const int oledMenuCategory1Count = sizeof(oledMenuCategory1) / sizeof(oledMenuCa
 // Columns: name, iconName, targetMode
 const OLEDMenuItem oledMenuCategory2[] = {
 #if ENABLE_WIFI
-  { "Network",    "notify_server",     OLED_NETWORK_INFO },
+  { "WiFi",       "notify_server",     OLED_NETWORK_INFO },
 #endif
   // ESP-NOW moved to the Apps category (it's a messaging program). Unlike the
   // G2, OLED_ESPNOW bundles the ESP-NOW settings into the same mode, so those
@@ -5647,10 +5655,8 @@ const int oledMenuCategory2Count = sizeof(oledMenuCategory2) / sizeof(oledMenuCa
 // Columns: name, iconName, targetMode
 const OLEDMenuItem oledMenuCategory3[] = {
 #if ENABLE_I2C_SYSTEM || ENABLE_CAMERA_SENSOR || ENABLE_MICROPHONE
+  // Microphone is reached through Sensors, where it is listed with the others.
   { "Sensors",    "notify_sensor",     OLED_SENSOR_MENU },
-#endif
-#if ENABLE_MICROPHONE
-  { "Microphone", "notify_sensor",     OLED_MICROPHONE },
 #endif
 #if ENABLE_ESP_SR
   { "Speech",     "notify_sensor",     OLED_SPEECH },
@@ -6003,27 +6009,19 @@ static MenuAvailability oledModeFeatureState(OLEDMode mode, String* outReason) {
       if (outReason) *outReason = "Not built";
       return MenuAvailability::NOT_BUILT;
 #else
-      // Off only when no role runs: the server, the G2 client or the phone pipe.
-      if (!bleSubsystemActive()) {
-        if (outReason) *outReason = "Disabled\nPress X to start";
-        return MenuAvailability::FEATURE_DISABLED;
-      }
+      // Always enterable: the menu's first row starts or stops Bluetooth, and
+      // Auto Start and the boot role are set from it while it is off.
       return MenuAvailability::AVAILABLE;
 #endif
 
     case OLED_WEB_STATS:
-#if !ENABLE_WIFI
+#if !ENABLE_WIFI || !ENABLE_HTTP_SERVER
       if (outReason) *outReason = "Not built";
       return MenuAvailability::NOT_BUILT;
-#endif
-      // Check if HTTP server is running
-      {
-        if (!server) {
-          if (outReason) *outReason = "Disabled\nRun: openhttp";
-          return MenuAvailability::FEATURE_DISABLED;
-        }
-      }
+#else
+      // Always enterable: the Web menu starts and stops the server itself.
       return MenuAvailability::AVAILABLE;
+#endif
 
     default:
       return MenuAvailability::AVAILABLE;
@@ -6341,46 +6339,9 @@ void handleOLEDActionButton() {
           broadcastOutput("[OLED] Automation system enabled - restart required");
         }
         oledMenuBack();
-      } else if (unavailableOLEDTitle == "Bluetooth") {
-#if ENABLE_BLUETOOTH
-        // Bring the client stack up; the Bluetooth menu's rows open each device.
-        oledRunCommand("openble");
-        requestOLEDMode(OLED_BLUETOOTH, "unavail.start.bluetooth", false);
-#endif
-      } else if (unavailableOLEDTitle == "Web") {
-#if ENABLE_HTTP_SERVER
-        // Start HTTP server with confirmation
-        static auto httpStartConfirmedUnavail = [](void* userData) {
-          (void)userData;
-          if (oledRunCommand("openhttp")) broadcastOutput("[OLED] HTTP server started");
-          requestOLEDMode(OLED_WEB_STATS, "unavail.confirm.web", false);
-        };
-        oledConfirmRequest("Start HTTP?", nullptr, httpStartConfirmedUnavail, nullptr);
-#endif
       } else {
         DEBUG_DISPLAYF("[GAMEPAD_ACTION] No action for unavailable: %s\n", unavailableOLEDTitle.c_str());
       }
-      break;
-      
-    case OLED_WEB_STATS:
-#if ENABLE_HTTP_SERVER
-      {
-        // Toggle HTTP server with confirmation
-        static auto httpStopConfirmedWebStats = [](void* userData) {
-          (void)userData;
-          if (oledRunCommand("closehttp")) broadcastOutput("[OLED] HTTP server stopped");
-        };
-        static auto httpStartConfirmedWebStats = [](void* userData) {
-          (void)userData;
-          if (oledRunCommand("openhttp")) broadcastOutput("[OLED] HTTP server started");
-        };
-        if (server) {
-          oledConfirmRequest("Stop HTTP?", nullptr, httpStopConfirmedWebStats, nullptr, false);
-        } else {
-          oledConfirmRequest("Start HTTP?", nullptr, httpStartConfirmedWebStats, nullptr);
-        }
-      }
-#endif
       break;
       
     default:

@@ -12,6 +12,7 @@
 #include "freertos/semphr.h"
 
 #include "System_Debug.h"
+#include "System_Events.h"      // systemEventPost — sensor_unresponsive / sensor_recovered
 #include "System_I2C_Manager.h"
 #include "System_Logging.h"
 #include "System_Settings.h"
@@ -848,6 +849,7 @@ void I2CDevice::init(uint8_t addr, const char* deviceName, uint8_t busIdx) {
   health.consecutiveErrors = 0;
   health.totalErrors = 0;
   health.degraded = false;
+  health.reportedLost = false;
   health.lastErrorTime = 0;
   health.lastSuccessTime = 0;
   health.registrationTime = millis();
@@ -855,6 +857,34 @@ void I2CDevice::init(uint8_t addr, const char* deviceName, uint8_t busIdx) {
   health.timeoutCount = 0;
   health.busErrorCount = 0;
   health.lastErrorType = I2CErrorType::NONE;
+}
+
+// User-facing edges of device health. `degraded` cannot be the edge: it is set
+// again by every failed retry (a degraded device is retried every 30 s) and
+// attemptRecovery/i2crecover clear it without a success. So the announcement
+// keeps its own latch: one sensor_unresponsive per outage, and only for a
+// device that has answered since boot, because every compiled-in sensor is
+// pre-registered whether or not it is plugged in.
+static void postDeviceHealthEvent(uint8_t kind, const I2CDevice& dev, const char* cause) {
+  char subject[24];
+  if (dev.name && dev.name[0] && strcmp(dev.name, "Auto") != 0) {
+    snprintf(subject, sizeof(subject), "%s", dev.name);
+  } else {
+    snprintf(subject, sizeof(subject), "I2C 0x%02X", dev.address);
+  }
+  char detail[24];
+  if (cause) {
+    snprintf(detail, sizeof(detail), "0x%02X bus %u %s", dev.address, (unsigned)dev.bus, cause);
+  } else {
+    snprintf(detail, sizeof(detail), "0x%02X bus %u", dev.address, (unsigned)dev.bus);
+  }
+  systemEventPost(kind, subject, detail);
+}
+
+static void announceUnresponsive(I2CDevice& dev, const char* cause) {
+  if (dev.health.reportedLost || dev.health.lastSuccessTime == 0) return;
+  dev.health.reportedLost = true;
+  postDeviceHealthEvent(SYSEVT_SENSOR_UNRESPONSIVE, dev, cause);
 }
 
 void I2CDevice::recordSuccess() {
@@ -865,6 +895,10 @@ void I2CDevice::recordSuccess() {
     health.degraded = false;
     INFO_I2CF("Device 0x%02X (%s) recovered", address, name);
     logI2CRecovery(address, name, health.totalErrors);
+  }
+  if (health.reportedLost) {
+    health.reportedLost = false;
+    postDeviceHealthEvent(SYSEVT_SENSOR_RECOVERED, *this, nullptr);
   }
 }
 
@@ -886,7 +920,8 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
         ERROR_I2CF("Device 0x%02X (%s) marked DEGRADED after %d NACKs",
                    address, name, health.nackCount);
         logI2CError(address, name, health.consecutiveErrors, health.totalErrors, true);
-        
+        announceUnresponsive(*this, "nack");
+
         // Check if bus recovery is needed (decentralized check).
         // Note: checkBusRecoveryNeeded currently evaluates the WHOLE device
         // table; with dual-bus it may decide to recover, defaulting to
@@ -906,7 +941,8 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
         ERROR_I2CF("Device 0x%02X (%s) marked DEGRADED after %d timeouts",
                    address, name, health.timeoutCount);
         logI2CError(address, name, health.consecutiveErrors, health.totalErrors, true);
-        
+        announceUnresponsive(*this, "timeout");
+
         // Check if bus recovery is needed (decentralized check).
         // Note: checkBusRecoveryNeeded currently evaluates the WHOLE device
         // table; with dual-bus it may decide to recover, defaulting to

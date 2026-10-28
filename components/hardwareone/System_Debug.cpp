@@ -46,6 +46,15 @@
 // could express both without inventing a bootDefault column nothing else
 // reads; one expression over the frozen DEBUG_* spellings is cheaper and
 // cannot drift structurally (an unknown symbol is a compile error).
+#if ENABLE_DEBUG_ALL_BY_DEFAULT
+// Test image (System_BuildConfig.h §6): every flag row, so the early-boot
+// window logs everything too. The ALWAYS control bit names no producer and
+// is left clear; DEBUG_##SYM is pasted at the first macro level (see DBG_MAP).
+#define DBG_ALL_OR(SYM, ...) | DEBUG_##SYM
+static constexpr DebugFlagMask kBootDefaultDebugFlags =
+    (((DebugFlagMask)0) DBG_FLAG_LIST(DBG_ALL_OR)) & ~DEBUG_ALWAYS;
+#undef DBG_ALL_OR
+#else
 static constexpr DebugFlagMask kBootDefaultDebugFlags =
     DEBUG_AUTH | DEBUG_HTTP | DEBUG_SSE | DEBUG_CLI |
     DEBUG_CMD_FLOW | DEBUG_COMMAND_SYSTEM | DEBUG_USERS | DEBUG_SYSTEM |
@@ -56,8 +65,22 @@ static constexpr DebugFlagMask kBootDefaultDebugFlags =
     DEBUG_ESPNOW_TOPO | DEBUG_ESPNOW_STREAM |
     DEBUG_AUTOMATIONS | DEBUG_AUTO_EXEC | DEBUG_AUTO_CONDITION |
     DEBUG_AUTO_TIMING | DEBUG_AUTO_SCHEDULER;
+#endif
 DebugFlagMask gDebugFlags = kBootDefaultDebugFlags;
+#if ENABLE_DEBUG_ALL_BY_DEFAULT
+// Bitless sub-flags on from static init as well; applySettings() re-mirrors
+// them from gSettings (same value) once debug.json has loaded.
+static constexpr DebugSubFlags dbgAllSubFlagsOn() {
+  DebugSubFlags s = {};
+#define DBG_SUB_ON(SYM, subField, ...) s.subField = true;
+  DBG_SUBBOOL_LIST(DBG_SUB_ON)
+#undef DBG_SUB_ON
+  return s;
+}
+DebugSubFlags gDebugSubFlags = dbgAllSubFlagsOn();
+#else
 DebugSubFlags gDebugSubFlags = {}; // All sub-flags initialized to false
+#endif
 char* gDebugBuffer = nullptr;
 QueueHandle_t gDebugOutputQueue = nullptr;
 QueueHandle_t gDebugFreeQueue = nullptr;
@@ -300,8 +323,10 @@ void debugOutputTask(void* parameter) {
       if ((msg->routing & MSG_ROUTE_FILE) && (gOutputFlags & MSG_ROUTE_FILE) &&
           gSystemLogRunning && gSystemLogPath.length() > 0) {
         fsLock("debug.log");
-        if (!gSystemLogFile) {
-          gSystemLogFile = VFS::openGuarded(gSystemLogPath, "a", VFS::systemAuth("debug.system_log_append"), true);
+        // Re-check under the lock: `log stop` closes the file and clears the
+        // path in one lock hold, so a stale pre-lock check must not reopen.
+        if (!gSystemLogFile && gSystemLogRunning && gSystemLogPath.length() > 0) {
+          gSystemLogFile = VFS::openGuarded(gSystemLogPath, "a", VFS::systemAuth(VFS::captureScopeFor(gSystemLogPath), "debug.system_log_append"), true);
           if (gSystemLogFile) {
             gSystemLogLastFlush = millis();
             gSystemLogUnflushedCount = 0;
@@ -1853,20 +1878,23 @@ const char* cmd_log(const String& argsInput) {
       return "Error: System logging is not running";
     }
     
-    // Flush and close persistent file handle if open
+    // Close the handle and retire the path under ONE lock hold. The debug
+    // task re-checks the running flag and the path under the same lock before
+    // it reopens, so it can never see the file closed but the path not yet
+    // cleared (which used to reopen an empty path and log a [PERM] denial).
+    String msg;
+    fsLock("debug.log");
     if (gSystemLogFile) {
-      fsLock("debug.log");
       gSystemLogFile.flush();
       gSystemLogFile.close();
       // Note: close() resets the handle internally
       gSystemLogUnflushedCount = 0;
-      fsUnlock();
     }
-    
     gSystemLogRunning = false;
     gOutputFlags &= ~MSG_ROUTE_FILE;
-    String msg = "System logging stopped. Log saved to: " + gSystemLogPath;
+    msg = "System logging stopped. Log saved to: " + gSystemLogPath;
     gSystemLogPath = "";
+    fsUnlock();
     snprintf(gDebugBuffer, 1024, "%s", msg.c_str());
     return gDebugBuffer;
   }
@@ -1930,6 +1958,13 @@ const char* cmd_log(const String& argsInput) {
     if (filepath.length() == 0 || filepath.charAt(0) != '/') {
       return "Error: Filepath must start with / (e.g., /logging_captures/system/system.log)";
     }
+    // The system log is written by the system identity; confine it to the
+    // capture tree (either tier) so an admin-typed path can never point that
+    // identity at the roster, settings or the audit logs.
+    if (!VFS::pathInCaptureTree(filepath)) {
+      return "Error: Filepath must be inside " CAPTURE_DIR " or /sd" CAPTURE_DIR
+             " (e.g., " CAPTURE_DIR_SYSTEM "/system.log)";
+    }
     
     // Apply debug flags if specified; otherwise restore last-used system-log mask
     if (flagsSet) {
@@ -1961,18 +1996,18 @@ const char* cmd_log(const String& argsInput) {
     int lastSlash = filepath.lastIndexOf('/');
     if (lastSlash > 0) {
       String dir = filepath.substring(0, lastSlash);
-      if (!VFS::existsGuarded(dir, VFS::systemAuth("debug.log_setup_mkdir"))) {
+      if (!VFS::existsGuarded(dir, VFS::systemAuth(VFS::captureScopeFor(filepath), "debug.log_setup_mkdir"))) {
         fsLock("log.mkdir");
         for (int i = 1; i <= (int)dir.length(); i++) {
           if (i == (int)dir.length() || dir.charAt(i) == '/') {
             String parent = dir.substring(0, i);
-            if (parent.length() > 0 && !VFS::existsGuarded(parent, VFS::systemAuth("debug.log_setup_mkdir"))) {
-              VFS::mkdirGuarded(parent, VFS::systemAuth("debug.log_setup_mkdir"));
+            if (parent.length() > 0 && !VFS::existsGuarded(parent, VFS::systemAuth(VFS::captureScopeFor(filepath), "debug.log_setup_mkdir"))) {
+              VFS::mkdirGuarded(parent, VFS::systemAuth(VFS::captureScopeFor(filepath), "debug.log_setup_mkdir"));
             }
           }
         }
         fsUnlock();
-        if (!VFS::existsGuarded(dir, VFS::systemAuth("debug.log_setup_mkdir"))) {
+        if (!VFS::existsGuarded(dir, VFS::systemAuth(VFS::captureScopeFor(filepath), "debug.log_setup_mkdir"))) {
           snprintf(gDebugBuffer, 1024, "Error: Failed to create directory: %s", dir.c_str());
           return gDebugBuffer;
         }
@@ -1982,8 +2017,8 @@ const char* cmd_log(const String& argsInput) {
 
     // Create file if needed
     fsLock("log.create");
-    if (!VFS::existsGuarded(filepath, VFS::systemAuth("debug.log_setup_create"))) {
-      File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("debug.log_setup_create"), true);
+    if (!VFS::existsGuarded(filepath, VFS::systemAuth(VFS::captureScopeFor(filepath), "debug.log_setup_create"))) {
+      File f = VFS::openGuarded(filepath, "w", VFS::systemAuth(VFS::captureScopeFor(filepath), "debug.log_setup_create"), true);
       if (!f) {
         fsUnlock();
         snprintf(gDebugBuffer, 1024, "Error: Failed to create file: %s", filepath.c_str());
@@ -2354,10 +2389,6 @@ extern const char* const LOG_ERROR_FILE = "/system/sys_logs/errors.log";        
 extern const char* const LOG_EVENTS_FILE = "/system/sys_logs/system-events.log";              // LOG_EVENTS_CAP
 extern const char* const LOG_EVENT_STREAM_FILE = "/system/sys_logs/events.log";               // LOG_EVENT_STREAM_CAP
 
-void logToFile(const char* path, const String& line, size_t capBytes) {
-  appendLineWithCap(path, line, capBytes);
-}
-
 // ============================================================================
 // Auth Logging
 // ============================================================================
@@ -2561,6 +2592,13 @@ void systemLogAutoStart() {
   
   // Use persisted path if set, otherwise auto-generate
   String filepath = (gSettings.systemLogPath.length() > 0) ? gSettings.systemLogPath : generateSystemLogFilename();
+  // Same confinement as `log start`: the persisted path is only a setting and
+  // could have been edited to point outside the capture tree.
+  if (!VFS::pathInCaptureTree(filepath)) {
+    broadcastOutput("[SYSTEM_LOG] Auto-start refused: " + filepath + " is outside " CAPTURE_DIR);
+    logSystemEvent("LOG", "debug-capture log autostart REFUSED — %s is outside " CAPTURE_DIR, filepath.c_str());
+    return;
+  }
   gSystemLogCategoryTags = gSettings.systemLogCategoryTags;
 
   // Restore last-used category mask so autostart logs the same categories
@@ -2577,7 +2615,7 @@ void systemLogAutoStart() {
   
   // Create the log file
   fsLock("debug.log");
-  File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("debug.log_autostart"), true);
+  File f = VFS::openGuarded(filepath, "w", VFS::systemAuth(VFS::captureScopeFor(filepath), "debug.log_autostart"), true);
   if (!f) {
     fsUnlock();
     broadcastOutput("[SYSTEM_LOG] Auto-start failed: Could not create file: " + filepath);

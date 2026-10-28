@@ -847,7 +847,7 @@ static bool saveEspNowDevices() {
   // A full filesystem, short write, or power loss therefore cannot leave the
   // live registry truncated or missing peers.
   File f = VFS::openGuarded(ESPNOW_DEVICES_TEMP_FILE, "w",
-                            VFS::systemAuth("espnow.devices_save"), true);
+                            VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_save"), true);
   if (!f) return false;
   const size_t expected = measureJson(doc);
   const size_t written = serializeJson(doc, f);
@@ -857,15 +857,15 @@ static bool saveEspNowDevices() {
     ERROR_ESPNOWF("[ESP-NOW] Incomplete registry write (%u/%u bytes); existing registry preserved",
                   (unsigned)written, (unsigned)expected);
     VFS::removeGuarded(ESPNOW_DEVICES_TEMP_FILE,
-                       VFS::systemAuth("espnow.devices_save"));
+                       VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_save"));
     return false;
   }
   if (!VFS::renameGuarded(ESPNOW_DEVICES_TEMP_FILE, ESPNOW_DEVICES_FILE,
-                          VFS::systemAuth("espnow.devices_save"))) {
+                          VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_save"))) {
     ERROR_ESPNOWF("[ESP-NOW] Failed to atomically replace %s; existing registry preserved",
                   ESPNOW_DEVICES_FILE);
     VFS::removeGuarded(ESPNOW_DEVICES_TEMP_FILE,
-                       VFS::systemAuth("espnow.devices_save"));
+                       VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_save"));
     return false;
   }
   DEBUGF(DEBUG_ESPNOW_MESH, "[ESP-NOW] Saved %d device(s) to %s", count, ESPNOW_DEVICES_FILE);
@@ -7265,7 +7265,7 @@ static bool ensureCaptureFile(time_t now) {
   }
   if (!gEspNowCaptureMkdirTried) {
     gEspNowCaptureMkdirTried = true;
-    if (!VFS::existsGuarded("/sd/espnow", VFS::systemAuth("espnow.capture_mkdir"))) VFS::mkdirGuarded("/sd/espnow", VFS::systemAuth("espnow.capture_mkdir"));
+    if (!VFS::existsGuarded("/sd/espnow", VFS::systemAuth(VFS::Scopes::ESPNOW_CAPTURES, "espnow.capture_mkdir"))) VFS::mkdirGuarded("/sd/espnow", VFS::systemAuth(VFS::Scopes::ESPNOW_CAPTURES, "espnow.capture_mkdir"));
   }
   return true;
 }
@@ -7324,7 +7324,7 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
   // an unrelated long FS operation; capture is diagnostic and may drop a line.
   FsLockGuard fsGuard("espnow.capture_append", 0);
   if (!fsGuard.held && !isFsLockedByCurrentTask()) return;
-  File f = VFS::openGuarded(gEspNowCapturePath, "a", VFS::systemAuth("espnow.capture_append"), true);
+  File f = VFS::openGuarded(gEspNowCapturePath, "a", VFS::systemAuth(VFS::Scopes::ESPNOW_CAPTURES, "espnow.capture_append"), true);
   if (!f) return;
   f.write((const uint8_t*)line, (size_t)n);
   f.close();
@@ -7791,8 +7791,9 @@ static char* serializeBondJson(JsonDocument& doc, size_t* outLen, const char* ta
 // Writes `len` bytes to `path` in one write and checks the count; a short write
 // removes the partial file so a later reader never sees it. The caller holds
 // the filesystem lock.
-static bool writeBondJsonFileLocked(const char* path, const char* data, size_t len, const char* authReason) {
-  File f = VFS::openGuarded(path, "w", VFS::systemAuth(authReason), true);
+static bool writeBondJsonFileLocked(const char* path, const char* data, size_t len,
+                                    const char* scope, const char* authReason) {
+  File f = VFS::openGuarded(path, "w", VFS::systemAuth(scope, authReason), true);
   if (!f) {
     ERROR_ESPNOWF("[BOND] cannot open %s for writing", path);
     return false;
@@ -7801,7 +7802,7 @@ static bool writeBondJsonFileLocked(const char* path, const char* data, size_t l
   f.close();
   if (written != len) {
     ERROR_ESPNOWF("[BOND] incomplete write of %s (%u of %u bytes)", path, (unsigned)written, (unsigned)len);
-    VFS::removeGuarded(path, VFS::systemAuth(authReason));
+    VFS::removeGuarded(path, VFS::systemAuth(scope, authReason));
     return false;
   }
   return true;
@@ -7824,13 +7825,13 @@ static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const char* manife
   snprintf(path, sizeof(path), "/system/manifests/%s.json", keyHex);
   
   // Ensure directory exists
-  if (!VFS::existsGuarded("/system/manifests", VFS::systemAuth("espnow.manifest_cache_mkdir"))) {
-    VFS::mkdirGuarded("/system/manifests", VFS::systemAuth("espnow.manifest_cache_mkdir"));
+  if (!VFS::existsGuarded("/system/manifests", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.manifest_cache_mkdir"))) {
+    VFS::mkdirGuarded("/system/manifests", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.manifest_cache_mkdir"));
   }
 
   // Write manifest
   FsLockGuard fsGuard("pair.manifest.cache");
-  if (!writeBondJsonFileLocked(path, manifest, len, "espnow.manifest_cache_write")) {
+  if (!writeBondJsonFileLocked(path, manifest, len, VFS::Scopes::SYSTEM_STATE, "espnow.manifest_cache_write")) {
     broadcastOutput("[BOND] ERROR: Failed to cache the manifest");
     return false;
   }
@@ -7912,10 +7913,10 @@ static bool cacheSettingsToLittleFS(const uint8_t* peerMac, const String& settin
   
   // Ensure per-peer directory exists (parent dirs created at filesystem init)
   FsLockGuard fsGuard("pair.settings.cache");
-  if (!VFS::existsGuarded(dirPath, VFS::systemAuth("espnow.settings_cache_mkdir"))) { VFS::mkdirGuarded(dirPath, VFS::systemAuth("espnow.settings_cache_mkdir")); }
+  if (!VFS::existsGuarded(dirPath, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.settings_cache_mkdir"))) { VFS::mkdirGuarded(dirPath, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.settings_cache_mkdir")); }
 
   // Write settings
-  File f = VFS::openGuarded(filePath, "w", VFS::systemAuth("espnow.settings_cache_write"), true);
+  File f = VFS::openGuarded(filePath, "w", VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.settings_cache_write"), true);
   if (!f) {
     ERROR_ESPNOWF("[SETTINGS_CACHE] Failed to open %s for writing", filePath);
     return false;
@@ -7949,13 +7950,13 @@ String loadSettingsFromCache(const uint8_t* peerMac) {
   peerCachePath(peerMac, "settings.json", filePath, sizeof(filePath));
   DEBUG_ESPNOWF("[SETTINGS_LOAD] Checking path: %s", filePath);
   
-  if (!VFS::existsGuarded(filePath, VFS::systemAuth("espnow.settings_cache_load"))) {
+  if (!VFS::existsGuarded(filePath, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.settings_cache_load"))) {
     DEBUG_ESPNOWF("[SETTINGS_LOAD] File does not exist");
     return "";  // Not cached
   }
 
   FsLockGuard fsGuard("pair.settings.load");
-  File f = VFS::openGuarded(filePath, "r", VFS::systemAuth("espnow.settings_cache_load"));
+  File f = VFS::openGuarded(filePath, "r", VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.settings_cache_load"));
   if (!f) {
     ERROR_ESPNOWF("[SETTINGS_LOAD] Failed to open file");
     return "";
@@ -8067,7 +8068,7 @@ static void sendBondSettings(const uint8_t* peerMac) {
     DEBUG_ESPNOWF("[SETTINGS_SEND] Generated settings JSON: %d bytes", settingsLen);
 
     FsLockGuard guard("pair.settings.send");
-    File f = VFS::openGuarded(tempPath, "w", VFS::systemAuth("espnow.settings_send_temp"), true);
+    File f = VFS::openGuarded(tempPath, "w", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.settings_send_temp"), true);
     if (!f) {
       ERROR_ESPNOWF("[SETTINGS_SEND] Cannot create %s", tempPath.c_str());
       sSettingsTransferInProgress = false;
@@ -8094,7 +8095,7 @@ static void sendBondSettings(const uint8_t* peerMac) {
   // Cleanup temp file
   {
     FsLockGuard guard("pair.settings.cleanup");
-    VFS::removeGuarded(tempPath, VFS::systemAuth("espnow.settings_send_cleanup"));
+    VFS::removeGuarded(tempPath, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.settings_send_cleanup"));
     DEBUG_ESPNOWF("[SETTINGS_SEND] Cleaned up temp file");
   }
   
@@ -8111,7 +8112,7 @@ static void sendBondSettings(const uint8_t* peerMac) {
   // the master's sync tick will re-request settings and we'll retry both.
   if (sent) {
     extern const char* AUTOMATIONS_JSON_FILE;
-    if (filesystemReady && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth("espnow.bond_automations_check"))) {
+    if (filesystemReady && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.bond_automations_check"))) {
       vTaskDelay(pdMS_TO_TICKS(200));  // Brief gap between transfers
       bool autoSent = sendFileToMac(peerMac, String(AUTOMATIONS_JSON_FILE));
       if (autoSent) {
@@ -8222,7 +8223,7 @@ static void sendBondSchema(const uint8_t* peerMac) {
     bool written = false;
     {
       FsLockGuard guard("bond.schema.send");
-      written = writeBondJsonFileLocked(tempPath.c_str(), schema, schemaLen, "espnow.schema_send_temp");
+      written = writeBondJsonFileLocked(tempPath.c_str(), schema, schemaLen, VFS::Scopes::ESPNOW_STATE, "espnow.schema_send_temp");
     }
     ps_free(schema);  // freed before the transfer, which streams from the file
     if (!written) {
@@ -8242,7 +8243,7 @@ static void sendBondSchema(const uint8_t* peerMac) {
 
   {
     FsLockGuard guard("bond.schema.cleanup");
-    VFS::removeGuarded(tempPath, VFS::systemAuth("espnow.schema_send_cleanup"));
+    VFS::removeGuarded(tempPath, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.schema_send_cleanup"));
     DEBUG_ESPNOWF("[SCHEMA_SEND] Cleaned up temp file");
   }
 
@@ -8322,10 +8323,10 @@ static void sendBondManifest(const uint8_t* peerMac) {
   {
     FsLockGuard guard("bond.manifest.send");
     if (filesystemReady) {
-      if (!VFS::existsGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"))) {
-        VFS::mkdirGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"));
+      if (!VFS::existsGuarded("/system", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.bond_manifest_send"))) {
+        VFS::mkdirGuarded("/system", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.bond_manifest_send"));
       }
-      written = writeBondJsonFileLocked(tempPath.c_str(), manifest, manifestLen, "espnow.bond_manifest_send");
+      written = writeBondJsonFileLocked(tempPath.c_str(), manifest, manifestLen, VFS::Scopes::SYSTEM_STATE, "espnow.bond_manifest_send");
     } else {
       BROADCAST_PRINTF("[BOND] manifest-send: ERROR fs not ready");
     }
@@ -8342,7 +8343,7 @@ static void sendBondManifest(const uint8_t* peerMac) {
 
   {
     FsLockGuard guard("bond.manifest.cleanup");
-    VFS::removeGuarded(tempPath, VFS::systemAuth("espnow.bond_manifest_cleanup"));
+    VFS::removeGuarded(tempPath, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.bond_manifest_cleanup"));
   }
 
   sManifestTransferInProgress = false;
@@ -8457,10 +8458,10 @@ static void processBondSchema(const uint8_t* srcMac, const String& deviceName, c
 
   {
     FsLockGuard fsGuard("pair.schema.cache");
-    if (!VFS::existsGuarded(dirPath, VFS::systemAuth("espnow.schema_cache_mkdir"))) {
-      VFS::mkdirGuarded(dirPath, VFS::systemAuth("espnow.schema_cache_mkdir"));
+    if (!VFS::existsGuarded(dirPath, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.schema_cache_mkdir"))) {
+      VFS::mkdirGuarded(dirPath, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.schema_cache_mkdir"));
     }
-    if (!writeBondJsonFileLocked(filePath, schema, len, "espnow.schema_cache_write")) {
+    if (!writeBondJsonFileLocked(filePath, schema, len, VFS::Scopes::ESPNOW_STATE, "espnow.schema_cache_write")) {
       return;
     }
   }
@@ -8607,10 +8608,10 @@ static bool manifestCachedFor(const uint8_t fwHash[16]) {
   snprintf(path, sizeof(path), "/system/manifests/%s.json", keyHex);
 
   FsLockGuard fsGuard("pair.manifest.load");
-  if (!VFS::existsGuarded(path, VFS::systemAuth("espnow.manifest_load"))) {
+  if (!VFS::existsGuarded(path, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.manifest_load"))) {
     return false;  // Not cached
   }
-  File f = VFS::openGuarded(path, "r", VFS::systemAuth("espnow.manifest_load"));
+  File f = VFS::openGuarded(path, "r", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.manifest_load"));
   if (!f) {
     return false;
   }
@@ -9289,11 +9290,11 @@ const char* checkEspNowFirstTimeSetup() {
 // Load named ESP-NOW devices (paired devices with names/keys) from filesystem
 static void loadEspNowDevices() {
   if (!gEspNow) return;
-  if (!VFS::existsGuarded(ESPNOW_DEVICES_FILE, VFS::systemAuth("espnow.devices_load"))) {
+  if (!VFS::existsGuarded(ESPNOW_DEVICES_FILE, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_load"))) {
     DEBUGF(DEBUG_ESPNOW_MESH, "[ESP-NOW] No saved devices file at %s", ESPNOW_DEVICES_FILE);
     return;
   }
-  File f = VFS::openGuarded(ESPNOW_DEVICES_FILE, "r", VFS::systemAuth("espnow.devices_load"));
+  File f = VFS::openGuarded(ESPNOW_DEVICES_FILE, "r", VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_load"));
   if (!f) {
     WARN_ESPNOWF("[ESP-NOW] Failed to open %s for reading", ESPNOW_DEVICES_FILE);
     return;
@@ -9433,13 +9434,13 @@ static void loadEspNowDevices() {
   if (migrationBackupNeeded) {
     bool backupReady = VFS::existsGuarded(
         ESPNOW_DEVICES_MIGRATION_BACKUP_FILE,
-        VFS::systemAuth("espnow.devices_migration_backup_check"));
+        VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_migration_backup_check"));
     if (!backupReady) {
       // Publish the backup only after a complete write. A reset during this
       // step leaves merely a .tmp file, so the next boot safely retries.
       File backup = VFS::openGuarded(
           ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE, "w",
-          VFS::systemAuth("espnow.devices_migration_backup"), true);
+          VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_migration_backup"), true);
       if (backup) {
         const size_t backedUp = backup.print(content);
         backup.flush();
@@ -9447,7 +9448,7 @@ static void loadEspNowDevices() {
         if (backedUp == content.length() &&
             VFS::renameGuarded(ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE,
                                ESPNOW_DEVICES_MIGRATION_BACKUP_FILE,
-                               VFS::systemAuth("espnow.devices_migration_backup"))) {
+                               VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_migration_backup"))) {
           backupReady = true;
           WARN_ESPNOWF("[ESP-NOW] Preserved pre-migration registry at %s",
                        ESPNOW_DEVICES_MIGRATION_BACKUP_FILE);
@@ -9455,7 +9456,7 @@ static void loadEspNowDevices() {
           WARN_ESPNOWF("[ESP-NOW] Registry migration backup was incomplete (%u/%u bytes)",
                        (unsigned)backedUp, (unsigned)content.length());
           VFS::removeGuarded(ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE,
-                             VFS::systemAuth("espnow.devices_migration_backup"));
+                             VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_migration_backup"));
         }
       } else {
         WARN_ESPNOWF("[ESP-NOW] Could not create registry migration backup at %s",

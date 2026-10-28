@@ -127,7 +127,7 @@ static bool saveUserSettings(uint32_t userId, const JsonDocument& doc) {
   String json;
   serializeJson(doc, json);
   FsLockGuard guard("user_settings.save");
-  return writeTextAtomic(getUserSettingsPath(userId).c_str(), json);
+  return writeTextAtomic(getUserSettingsPath(userId).c_str(), json, VFS::systemAuth(VFS::Scopes::USERS, "user_settings.save"));
 }
 
 // The account-id high-water mark (an NVS key) as a variable.

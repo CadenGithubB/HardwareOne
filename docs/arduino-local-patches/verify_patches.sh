@@ -33,7 +33,10 @@ check_markers() { # relative-file min_marker_count
 # bump the count here and regenerate arduino-local-patches.patch (see README).
 check_markers libraries/BLE/src/BLECharacteristic.cpp 2
 check_markers libraries/BLE/src/BLECharacteristic.h 1
-check_markers libraries/BLE/src/BLEClient.cpp 13
+# 14 since 2026-10-25: getServices() never waits before its request and skips a
+# disconnected client (R1 ring wedge). Recorded in
+# arduino-local-patches-2026-10-25-ble-search-wait.patch.
+check_markers libraries/BLE/src/BLEClient.cpp 14
 check_markers libraries/BLE/src/BLEDevice.cpp 3
 check_markers libraries/BLE/src/BLERemoteCharacteristic.cpp 7
 check_markers libraries/BLE/src/BLERemoteDescriptor.cpp 4
@@ -123,6 +126,8 @@ if [ "$fail" -ne 0 ]; then
   echo "  arduino-local-patches-2026-08-30-url-ota-removal.patch"
   echo "  arduino-local-patches-2026-10-02-companion.patch"
   echo "  arduino-local-patches-2026-10-15-panic-iram.patch"
+  echo "  arduino-local-patches-2026-10-22-ble-memory.patch"
+  echo "  arduino-local-patches-2026-10-25-ble-search-wait.patch"
   exit 1
 fi
 echo "All arduino local patches present."

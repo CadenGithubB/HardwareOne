@@ -851,6 +851,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_oled_power_settings.py
           ${OLED_POWER_SETTINGS_TEST_ARGS})
+# OLED Power > CPU rows fit one 21-glyph line on every chip's clock set; the
+# MHz unit sits in the header title.
+add_test(
+  NAME oled_power_cpu_rows
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_power_cpu_rows.py
+          ${OLED_POWER_SETTINGS_TEST_ARGS})
 
 # OLED automation wizard (README "OLED automation wizard"): names and commands up to the
 # keyboard cap reach automationadd whole; the confirm screen shows the whole command.
@@ -1467,7 +1474,7 @@ set(PHONE_TEST_SUITES
   ble_reconnect_schedule ble_peer_registry phone_scan ble_coex_records ble_coex_hooks wifi_coex_mirror
   ble_setup_worker phone_status ble_console_attach ble_console_phone_link ble_pipe_console_row
   ble_session_idle
-  ble_command_output ble_role_switch_reconnect
+  ble_command_output ble_role_switch_reconnect ble_service_search
   phone_console_codec phone_pair_code phone_console phone_fixture_pins
   phone_pair_sink)
 foreach(phone_suite IN LISTS PHONE_TEST_SUITES)
@@ -1576,6 +1583,11 @@ add_test(
   NAME i2c_device_queue
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_i2c_device_queue.py
+          ${I2C_PROBE_TEST_ARGS})
+add_test(
+  NAME i2c_health_events
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_i2c_health_events.py
           ${I2C_PROBE_TEST_ARGS})
 add_test(
   NAME sensor_lifecycle_requests
@@ -1998,6 +2010,20 @@ add_test(
   NAME llm_load_policy
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_llm_load_policy.py
+          ${SETUP_MQTT_TEST_ARGS})
+# The LLM app's home rows (System_LLMHomeMenuCore.h), shared by the glasses and
+# the local display; both surfaces must build their home list from it.
+add_test(
+  NAME llm_home_menu
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_llm_home_menu.py
+          ${SETUP_MQTT_TEST_ARGS})
+# The OLED LLM chat view's reply reader: the latest question and whole reply,
+# opened at the top and scrollable to the end, on both display geometries.
+add_test(
+  NAME oled_llm_reader
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_llm_reader.py
           ${SETUP_MQTT_TEST_ARGS})
 # Account authority in System_User: the reserved bond name is privileged only
 # as the live ESP-NOW bond, unban/sessionrevoke/targeted logout follow the rank

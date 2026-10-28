@@ -31,6 +31,7 @@
 #include "System_ESPSR.h"  // srSyncDebugLevel() — derive legacy gSrDebugLevel from flags
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() — Stage 1 consolidation
 #include "System_SensorLogging.h"  // Logger-owned settings editors
+#include "System_Power.h"    // applyPowerMode — the saved mode is re-applied in applySettings
 #include "System_UartLink.h"       // uartLinkStart/Stop/StatusLine — cmd_uartlink live apply
 #include "System_User.h"           // rotate transport generations on auth-policy changes
 #include <LittleFS.h>
@@ -1329,7 +1330,6 @@ void applySettings() {
 
   // Apply power mode from settings. The saved oledBrightness is the user's
   // value; re-applying the saved mode must not overwrite it.
-  #include "System_Power.h"
   applyPowerMode(gSettings.powerMode, /*setDisplayBrightness=*/false);
 
   DEBUG_SYSTEMF("Settings applied (I2C hardware config skipped - requires sensor restart to apply)");
@@ -1462,7 +1462,7 @@ static JsonSnapshotWriteResult writeJsonSnapshot(const JsonDocument& doc,
     // One lock covers the fixed temp's lifetime, including failed cleanup.
     // Guarded VFS calls reuse this lock when called from the same task.
     FsLockGuard guard(owner);
-    File file = VFS::openGuarded(temporary, "w", VFS::systemAuth(owner));
+    File file = VFS::openGuarded(temporary, "w", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, owner));
     if (!file || file.isDirectory()) {
       if (file) file.close();
       failure = "open";
@@ -1481,13 +1481,13 @@ static JsonSnapshotWriteResult writeJsonSnapshot(const JsonDocument& doc,
       // completion signal before allowing the temp to replace the live file.
       if (bytesWritten != expectedBytes || observedBytes != expectedBytes || writeError) {
         failure = "serialize";
-      } else if (!VFS::renameGuarded(temporary, destination, VFS::systemAuth(owner))) {
+      } else if (!VFS::renameGuarded(temporary, destination, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, owner))) {
         failure = "rename";
       }
     }
     if (failure) {
       // Best-effort cleanup never deletes or rewrites the previous snapshot.
-      VFS::removeGuarded(temporary, VFS::systemAuth(owner));
+      VFS::removeGuarded(temporary, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, owner));
     }
   }
 
@@ -1575,9 +1575,9 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
   
   // CRITICAL: Read existing settings first to preserve orphaned sensor sections
   // This allows settings from disabled sensors to persist and show as grayed-out in UI
-  if (VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth("settings.write"))) {
+  if (VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.write"))) {
     fsLock("settings.read_for_merge");
-    File existingFile = VFS::openGuarded(SETTINGS_JSON_FILE, "r", VFS::systemAuth("settings.write"));
+    File existingFile = VFS::openGuarded(SETTINGS_JSON_FILE, "r", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.write"));
     if (existingFile) {
       DeserializationError err = deserializeJson(doc, existingFile);
       existingFile.close();
@@ -1656,7 +1656,7 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
   // or burn the 5120-byte budget. No-op once the on-disk file is already clean.
   { JsonObject sysObj = doc["system"].as<JsonObject>(); if (!sysObj.isNull()) sysObj.remove("debug"); }
 
-  if (!writeSettingsSnapshot(doc, SETTINGS_JSON_FILE, "/settings.tmp", "settings.write")) {
+  if (!writeSettingsSnapshot(doc, SETTINGS_JSON_FILE, "/system/settings.tmp", "settings.write")) {
     pollResume();
     return false;
   }
@@ -1719,7 +1719,7 @@ bool writeDebugJson() {
   PSRAM_JSON_DOC(doc);
   buildDebugJsonDoc(doc);
 
-  if (!writeSettingsSnapshot(doc, DEBUG_JSON_FILE, "/debug.tmp", "settings.write")) {
+  if (!writeSettingsSnapshot(doc, DEBUG_JSON_FILE, "/system/debug.tmp", "settings.write")) {
     pollResume();
     return false;
   }
@@ -1738,7 +1738,7 @@ bool writeDebugJson() {
 
 bool readDebugJson() {
   if (!filesystemReady) return false;
-  if (!VFS::existsGuarded(DEBUG_JSON_FILE, VFS::systemAuth("settings.read"))) {
+  if (!VFS::existsGuarded(DEBUG_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.read"))) {
     // Absent is a SAVABLE state — RAM is legitimately the truth on a fresh
     // device, and without this the first save could never create the file.
     gDebugLoadedOk = true;
@@ -1746,7 +1746,7 @@ bool readDebugJson() {
   }
   pollPause();
 
-  File file = VFS::openGuarded(DEBUG_JSON_FILE, "r", VFS::systemAuth("settings.read"));
+  File file = VFS::openGuarded(DEBUG_JSON_FILE, "r", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.read"));
   if (!file) {
     ERROR_STORAGEF("Failed to open debug settings file");
     pollResume();
@@ -1880,7 +1880,7 @@ bool settingsRestampFirmwareVersion() {
   if (!filesystemReady) return false;
 
   String json;
-  if (!readText(SETTINGS_JSON_FILE, json) || json.length() == 0) return false;
+  if (!readText(SETTINGS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.restamp")) || json.length() == 0) return false;
 
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json) != DeserializationError::Ok) return false;
@@ -1891,7 +1891,7 @@ bool settingsRestampFirmwareVersion() {
   // it keeps its own log-only report instead of the full writers' error line
   // and save-failed event, which mean a user change was lost.
   const JsonSnapshotWriteResult result =
-      writeJsonSnapshot(doc, SETTINGS_JSON_FILE, "/settings.tmp", "settings.restamp");
+      writeJsonSnapshot(doc, SETTINGS_JSON_FILE, "/system/settings.tmp", "settings.restamp");
   if (result.failure) {
     logSystemEvent("SETTINGS", "firmwareVersion re-stamp FAILED (%s): serialized=%zu, size=%zu, expected=%zu",
                    result.failure, result.bytesWritten, result.observedBytes, result.expectedBytes);
@@ -1916,14 +1916,14 @@ bool readSettingsJson() {
   // different points; mechanically swapping them would risk altering behavior.
   pollPause();
 
-  if (!VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth("settings.read"))) {
+  if (!VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.read"))) {
     DEBUG_STORAGEF("[Settings] File does not exist: %s", SETTINGS_JSON_FILE);
     pollResume();
     return false;
   }
 
   // Open file and parse JSON directly (no intermediate String)
-  File file = VFS::openGuarded(SETTINGS_JSON_FILE, "r", VFS::systemAuth("settings.read"));
+  File file = VFS::openGuarded(SETTINGS_JSON_FILE, "r", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.read"));
   if (!file) {
     ERROR_STORAGEF("Failed to open settings file");
     pollResume();
@@ -2175,7 +2175,9 @@ const char* cmd_httpsEnabled(const String& argsInput) {
 // (docs/DEBUG_FLAG_XMACRO_PLAN.md §3), and one green build proves the whole
 // registry.
 //
-// intDefault is the constant 0 for every generated row — the C2 defaults audit
+// intDefault is ENABLE_DEBUG_ALL_BY_DEFAULT — 0 in ordinary builds — for every
+// generated row (and for webConsole below); a test image built with it set to
+// 1 boots with everything on. In ordinary builds the C2 defaults audit
 // found registry-0 is the effective persisted default for all 159 bools
 // (applyRegisteredDefaults() stomps every field with the registry default at
 // each boot before debug.json loads). The one dissenter, debugStoragePermissions'
@@ -2192,7 +2194,7 @@ const char* cmd_httpsEnabled(const String& argsInput) {
 // the FIRST macro level — the only non-string token reaching the deferred
 // call is the settings field name (safe: same exposure as DBG_MAP above).
 #define DBG_REG_ROW_0(field, cmdStr, group, jsonKey, label) \
-  { jsonKey, SETTING_BOOL, &gSettings.field, 0, 0, nullptr, 0, 1, label, nullptr, false, group, cmdStr },
+  { jsonKey, SETTING_BOOL, &gSettings.field, ENABLE_DEBUG_ALL_BY_DEFAULT, 0, nullptr, 0, 1, label, nullptr, false, group, cmdStr },
 #define DBG_REG_ROW_1(field, cmdStr, group, jsonKey, label) {},
 #define DBG_REG(SYM, bit, BANK, parentBit, tag, field, cmdIdent, group, jsonKey, label) \
   DBG_PP_CAT(DBG_REG_ROW_, DBG_SF_IS_NONE(field))(field, #cmdIdent, group, jsonKey, label)
@@ -2204,7 +2206,7 @@ static constexpr SettingEntry kDbgFlagRegEntry[DBG_FLAG_COUNT] = {
 #undef DBG_REG_ROW_0
 
 #define DBG_REG_SUB(SYM, subField, field, PARENT_SYM, cmdIdent, group, jsonKey, label) \
-  { jsonKey, SETTING_BOOL, &gSettings.field, 0, 0, nullptr, 0, 1, label, nullptr, false, group, #cmdIdent },
+  { jsonKey, SETTING_BOOL, &gSettings.field, ENABLE_DEBUG_ALL_BY_DEFAULT, 0, nullptr, 0, 1, label, nullptr, false, group, #cmdIdent },
 static constexpr SettingEntry kDbgSubRegEntry[DBG_SUBBOOL_COUNT] = {
   DBG_SUBBOOL_LIST(DBG_REG_SUB)
 };
@@ -2437,7 +2439,7 @@ static constexpr SettingEntry debugSettingEntries[] = {
   // suppressed via a <script> injection (WebServer_Utils.cpp:515). Default
   // OFF = suppress; ON = allow normal JS console output. Does NOT route
   // firmware broadcastOutput anywhere — that's plumbed via MSG_ROUTE_*.
-  { "webConsole", SETTING_BOOL, &gSettings.webConsoleDebug,     0, 0, nullptr, 0, 1, "Allow page console.log", nullptr, false, "page", "webconsole" },
+  { "webConsole", SETTING_BOOL, &gSettings.webConsoleDebug,     ENABLE_DEBUG_ALL_BY_DEFAULT, 0, nullptr, 0, 1, "Allow page console.log", nullptr, false, "page", "webconsole" },
   { "logLevel",         SETTING_INT,  &gSettings.logLevel,            3, 0, nullptr, 0, 3, "Log Level",            "0:error,1:warn,2:info,3:debug", false, nullptr, "loglevel" },
 };
 #undef DBG_SUBROW
@@ -4049,7 +4051,7 @@ bool loadUserSettings(uint32_t userId, JsonDocument& doc) {
       doc.to<JsonObject>();
       return true;
     }
-    File f = VFS::openGuarded(path.c_str(), "r", VFS::systemAuth("user_settings.load"));
+    File f = VFS::openGuarded(path.c_str(), "r", VFS::systemAuth(VFS::Scopes::USERS, "user_settings.load"));
     if (!f) return false;
     DeserializationError err = deserializeJson(doc, f);
     f.close();

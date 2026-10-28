@@ -25,7 +25,7 @@ DECLARATION_ORDER_FIXTURE_PATH = (
     HERE / "fixtures" / "event_catalog_declaration_order_v1.txt"
 )
 EXPECTED_FAMILY_COUNT = 13
-EXPECTED_KIND_COUNT = 165
+EXPECTED_KIND_COUNT = 167
 
 if not __debug__:
     raise RuntimeError(
@@ -194,9 +194,9 @@ class EventCatalogFixtureTest(unittest.TestCase):
 
         # Keep readable boundary diagnostics in addition to the exhaustive
         # frozen declaration-order comparison above.
-        self.assertEqual(declaration_names[126], "ota_rolled_back")
-        self.assertEqual(declaration_names[127], "ota_recovery_entered")
-        self.assertEqual(declaration_names[151], "automation_action_dropped")
+        self.assertEqual(declaration_names[128], "ota_rolled_back")
+        self.assertEqual(declaration_names[129], "ota_recovery_entered")
+        self.assertEqual(declaration_names[153], "automation_action_dropped")
 
 
 if __name__ == "__main__":

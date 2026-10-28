@@ -192,6 +192,37 @@ static void caseBackupWalk() {
   check(measureJson(doc) <= 512u * 1024u);
 }
 
+// A bundle may only name what a backup emits. Anything else is refused before
+// a byte is staged, and the device's files stay as they were.
+static void caseForeignPathRefused() {
+  auto& fs = resetDevice();
+  std::string json = bundle();
+  json.replace(json.find("\"files\":{"), 9, "\"files\":{\"/system/sys_logs/errors.log\":\"planted\",");
+  stage(json, true);
+  check(!applyStagedMigrationRestore());
+  check(!gRestoreComplete);
+  check(fs.text(kSettings) == "{\"device\":\"old\"}");
+  check(!fs.exists("/system/sys_logs/errors.log"));
+  check(!fs.exists("/system/sys_logs/errors.log.restore.tmp"));
+  check(noStagingLeft(fs));
+}
+
+// The map tree is the one place outside /system a backup carries; its files
+// restore under the /maps scope and everything else under /system.
+static void caseMapFileRestored() {
+  auto& fs = resetDevice();
+  fs.mkdirAll("/maps");
+  std::string json = bundle();
+  json.replace(json.find("\"files\":{"), 9, "\"files\":{\"/maps/tiles/a.txt\":\"tile\",");
+  stage(json, true);
+  check(applyStagedMigrationRestore());
+  check(gRestoreComplete);
+  check(fs.text("/maps/tiles/a.txt") == "tile");
+  check(fs.text(kSettings).find("new") != std::string::npos);
+  check(!fs.exists("/maps/tiles/a.txt.restore.tmp"));
+  check(noStagingLeft(fs));
+}
+
 int main(int argc, char** argv) {
   const std::string only = argc > 1 ? argv[1] : "";
   struct Case { const char* name; void (*run)(); };
@@ -201,6 +232,8 @@ int main(int argc, char** argv) {
       {"cross-device-marker-failure", caseCrossDeviceMarkerFailure},
       {"cross-device-success", caseCrossDeviceSuccess},
       {"backup-walk", caseBackupWalk},
+      {"foreign-path-refused", caseForeignPathRefused},
+      {"map-file-restored", caseMapFileRestored},
   };
   bool ran = false;
   for (const Case& c : cases) {

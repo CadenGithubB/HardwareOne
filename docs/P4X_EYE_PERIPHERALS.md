@@ -248,10 +248,13 @@ removing a card; removal detection blocks new VFS use and requires remounting.
 ## Power
 
 CPU presets use the P4's PLL steps: Performance 400 MHz, Balanced 200 MHz and
-PowerSaver 100 MHz (the interactive floor); UltraSaver drops to 40 MHz only
-while idle power-save has blanked the display. `cpufreq` lists and accepts the
-same 100/200/400 MHz steps. 100/200/400 MHz switching was verified on hardware;
-idle 40 MHz, light/deep sleep and battery life have not been measured.
+Adaptive 100 MHz (the interactive floor, and the default); UltraSaver drops to
+40 MHz only after the idle timeout, once the display has blanked. Every mode
+runs transcription, the camera and a recording at 400 MHz while they are busy
+and drops back when they finish. `cpufreq` lists and accepts the same
+100/200/400 MHz steps. 100/200/400 MHz switching was verified on hardware; the
+busy-workload boost, idle 40 MHz, light/deep sleep and battery life have not
+been measured.
 
 ## Qualification
 

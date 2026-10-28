@@ -17,7 +17,7 @@
 //
 //   Level 3 (CPU presets — mirrors the OLED "Adjust CPU Power" menu):
 //     [0] <- Back
-//     [1..5] [X] Performance/Balanced/PowerSaver/UltraSaver/Locked <MHz>
+//     [1..5] [X] Performance/Balanced/Adaptive/UltraSaver/Locked <MHz>
 //
 // Presets apply DIRECTLY (non-destructive, no confirm — matching the OLED CPU
 // menu and Camera Settings). Everything dispatches through g2SubmitHijackCommand
@@ -50,18 +50,22 @@ enum PowerLevel : uint8_t {
   POWER_LEVEL_CPU     = 2,   // CPU-freq / power-mode preset picker
 };
 
-// The five presets, in gSettings.powerMode order, and the command each
-// dispatches. `power mode X` (not raw `cpufreq N`) is the OLED-established
-// path — it also sets display brightness and selects UltraSaver, whose
-// idle-only XTAL clock the interactive `cpufreq` choices cannot express.
-// Active/idle values below come from the shared target power policy.
-static const char* const kPowerModeCmds[POWER_MODE_COUNT] = {
+// The presets, in gSettings.powerMode order, and the command each dispatches.
+// `power mode X` (not raw `cpufreq N`) is the OLED-established path — it also
+// sets display brightness and selects UltraSaver, whose idle-only XTAL clock
+// the interactive `cpufreq` choices cannot express. Active/idle values below
+// come from the shared target power policy.
+static const char* const kPowerModeCmds[] = {
   "power mode perf",      // POWER_MODE_PERFORMANCE
   "power mode balanced",  // POWER_MODE_BALANCED
-  "power mode saver",     // POWER_MODE_POWERSAVER
+  "power mode adaptive",  // POWER_MODE_ADAPTIVE
   "power mode ultra",     // POWER_MODE_ULTRASAVER
   "power mode locked",    // POWER_MODE_LOCKED
 };
+// A mode added to System_Power.h without a row here would otherwise compile
+// as a null command and crash on the tap.
+static_assert(sizeof(kPowerModeCmds) / sizeof(kPowerModeCmds[0]) == POWER_MODE_COUNT,
+              "kPowerModeCmds needs one command per power mode");
 
 enum PowerAction : uint8_t {
   POWER_ACTION_NONE     = 0,
@@ -74,7 +78,7 @@ static PowerLevel  gLevel = POWER_LEVEL_ACTIONS;
 static PowerAction gPending = POWER_ACTION_NONE;
 
 #define POWER_ROW_LEN  24
-#define POWER_MAX_ROWS  6   // back + POWER_MODE_COUNT
+#define POWER_MAX_ROWS  (1 + POWER_MODE_COUNT)   // back + one row per mode (the ACTIONS level uses 5)
 
 EXT_RAM_BSS_ATTR static char        gRows[POWER_MAX_ROWS][POWER_ROW_LEN];
 static const char* gRowPtrs[POWER_MAX_ROWS];
@@ -184,7 +188,7 @@ void g2BuildPowerInfo(char* out, size_t cap) {
   if (!out || cap == 0) return;
   snprintf(out, cap,
            "Power - %s %uMHz\n"
-           "CPU Power  pick a mode (Perf/Bal/Saver/Ultra/Locked)\n"
+           "CPU Power  pick a mode (Perf/Bal/Adaptive/Ultra/Locked)\n"
            "Restart    reboot the device\n"
            "RAM Flush  reboot, restore running features\n"
            "Power Off  enter deep sleep",

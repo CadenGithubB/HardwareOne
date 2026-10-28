@@ -158,7 +158,7 @@ static bool ensureDebugBuffer(){return true;}
 static char* getDebugBuffer(){return debugBuffer;}
 static void broadcastOutput(const char* text){broadcasts.emplace_back(text);}
 template<class... Args>static void cliHintf(const char*,Args...){ }
-static bool readTextLimited(const char*,String& text,size_t cap){++viewReads;text=fileBytes.substr(0,cap);return true;}
+static bool readTextLimited(const char*,String& text,size_t cap,const AuthContext&){++viewReads;text=fileBytes.substr(0,cap);return true;}
 static void captureCryptoRevealText(String&){ }
 namespace VFS {
 static bool existsGuarded(const String&,const AuthContext& ctx){check(&ctx==&auth,"fileview preserves caller identity");++existsCalls;return fileExists;}

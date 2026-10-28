@@ -28,24 +28,26 @@
 #include "System_Settings.h"
 #include "Bluetooth.h"
 #include "OLED_SettingsEditor.h"  // openSettingsEditorForModule
+#include "OLED_UI.h"              // oledToastShow (boot role, ring refusals, pairing)
 #if ENABLE_G2_GLASSES
 #include "G2_Glasses.h"
 #include "G2_Ring.h"      // R1 ring telemetry + poll (submenu below, mirrors G2)
 #include "BLE_Peers.h"    // gBlePeerData[BLE_PEER_R1_RING].autoReconnect
 #include "BLE_CentralCoordinator.h"  // bleCentralRingShouldYield (ring paused for the phone pipe)
-#include "OLED_UI.h"      // oledToastShow
 #endif
 #include "BLE_PhonePipe.h"    // phonePipeReady (stub without the pipe)
 #include "BLE_LinkStatus.h"   // role, relay pipe and app console words (status, Phone, watcher)
 #if ENABLE_BLE_PHONE_PIPE
-#include "OLED_UI.h"          // oledToastShow
 #include "BLE_PhonePairCode.h"  // hw1code::wipe for the code screen's copy
 #endif
 
 // ---- Main menu model -------------------------------------------------------
 enum BtAction {
+  BT_ACT_POWER,
   BT_ACT_STATUS,
   BT_ACT_SETTINGS,
+  BT_ACT_BOOT_ROLE,
+  BT_ACT_AUTO_START,
   BT_ACT_CONSOLE,
   BT_ACT_GLASSES,
   BT_ACT_PIPE,
@@ -144,10 +146,15 @@ static void populateBtMenu() {
   }
   oledScrollClearKeepSelection(&sBtMenuScroll);
   sBtShown = bleLinkStatus();
+  const bool active = bleSubsystemActive();
 
+  // The glasses' Bluetooth page leads with the on/off state; the menu opens
+  // with Bluetooth off too, so Auto Start and the boot role stay reachable.
+  addBtItem(active ? "Bluetooth: ON" : "Bluetooth: OFF", BT_ACT_POWER);
   addBtItem("Status", BT_ACT_STATUS);
-  addBtItem("Settings", BT_ACT_SETTINGS);
   for (const BtRoleRow& r : kBtRoles) {
+    // A role row also starts Bluetooth when it is off, as the glasses' BLE row
+    // does (`openg2` / `openconsole` bring the stack up).
     // Beside the glasses the phone is the Phone >> submenu's row (Open/Close
     // phone on the shared stack); there is no phone-only role to switch to.
     if (r.act == BT_ACT_PIPE && (sBtShown.role == hw1link::Role::Glasses ||
@@ -168,8 +175,20 @@ static void populateBtMenu() {
   if (sBtShown.consoleView.clients) {
     addBtItem(sBtShown.consoleView.up ? "Disconnect" : "End console", BT_ACT_DISCONNECT);
   }
+  // The saved boot role and Auto Start, as on the glasses (the role in the
+  // link status's words); the rest of the module is under Settings.
+  static char sBootLabel[24];
+  snprintf(sBootLabel, sizeof(sBootLabel), "Boot: %s", hw1link::roleText(sBtShown.saved));
+  addBtItem(sBootLabel, BT_ACT_BOOT_ROLE);
+  addBtItem(gSettings.bleAutoStart ? "Auto Start: ON" : "Auto Start: OFF", BT_ACT_AUTO_START);
+  addBtItem("Settings", BT_ACT_SETTINGS);
 
   oledScrollClampSelection(&sBtMenuScroll);
+}
+
+// `closeble` closes every device and the app console and stops the host.
+static void btStopConfirmed(void* /*userData*/) {
+  (void)oledRunCommand("closeble");
 }
 
 // ---- OLED_BLUETOOTH_STATUS: BT status detail (read-only, pushed) -----------
@@ -371,8 +390,28 @@ static bool bluetoothInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newly
     int idx = sBtMenuScroll.selectedIndex;
     if (idx < 0 || idx >= sBtMenuScroll.itemCount) return true;
     switch (sBtActions[idx]) {
+      case BT_ACT_POWER:
+        // Bring the client stack up (the device rows then open each device),
+        // or stop all of Bluetooth.
+        if (bleSubsystemActive()) {
+          oledConfirmRequest("Stop Bluetooth?", "Closes every device", btStopConfirmed,
+                             nullptr, false);
+        } else {
+          (void)oledRunCommand("openble");
+        }
+        break;
       case BT_ACT_STATUS:
         requestOLEDMode(OLED_BLUETOOTH_STATUS, "bluetooth.status");
+        break;
+      case BT_ACT_BOOT_ROLE:
+        // The saved role only; what runs now is unchanged until a reboot.
+        if (oledRunCommand(sBtShown.saved == hw1link::Role::Console ? "blemode client"
+                                                                    : "blemode server")) {
+          oledToastShow("Applies at next boot", 2000);
+        }
+        break;
+      case BT_ACT_AUTO_START:
+        (void)oledRunCommand(gSettings.bleAutoStart ? "bleautostart off" : "bleautostart on");
         break;
       case BT_ACT_SETTINGS:
         if (openSettingsEditorForModule("bluetooth")) {
@@ -415,22 +454,41 @@ static bool bluetoothInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newly
 
 #if ENABLE_G2_GLASSES
 // ---- OLED_BLUETOOTH_G2: G2 glasses submenu --------------------------------
+// The glasses' own G2 submenu (G2_Page_Network.cpp showBluetoothG2Menu):
+// connect or disconnect, Reconnect to the saved pair, AutoReconnect, then this
+// screen's Status, Show Text and Nav Mode. A status line sits above a scrolling
+// list, so no row lands under the footer on the 64 px panel.
 static const char g2TextInputBuffer[] = "Hello from ESP32!";  // fixed "Show Text" payload (const: .rodata, was 64 B of .data)
 
+enum G2Action { G2_ACT_CONNECT, G2_ACT_RECONNECT, G2_ACT_DISCONNECT, G2_ACT_AUTORECON,
+                G2_ACT_STATUS, G2_ACT_SHOW_TEXT, G2_ACT_NAV_MODE };
 EXT_RAM_BSS_ATTR static OLEDScrollState sG2MenuScroll;  // PSRAM, matching sBtMenuScroll
+EXT_RAM_BSS_ATTR static G2Action sG2Actions[OLED_SCROLL_MAX_ITEMS];
 static bool sG2MenuInit = false;
-// Index → action: 0 Connect, 1 Disconnect, 2 Status, 3 Show Text, 4 Nav Mode
-static const char* kG2MenuItems[] = { "Connect", "Disconnect", "Status", "Show Text", "Nav Mode" };
 
 static void populateG2Menu() {
   if (!sG2MenuInit) {
-    oledScrollInit(&sG2MenuScroll, nullptr, OLED_CONTENT_HEIGHT / 8);
+    const int visible = (OLED_CONTENT_HEIGHT - 8) / 8;   // one status line above
+    oledScrollInit(&sG2MenuScroll, nullptr, visible > 0 ? visible : 1);
     sG2MenuInit = true;
   }
   oledScrollClearKeepSelection(&sG2MenuScroll);
-  for (unsigned i = 0; i < sizeof(kG2MenuItems) / sizeof(kG2MenuItems[0]); i++) {
-    oledScrollAddItem(&sG2MenuScroll, kG2MenuItems[i]);
-  }
+  auto add = [](const char* label, G2Action act) {
+    if (oledScrollAddItem(&sG2MenuScroll, label)) {
+      const int idx = sG2MenuScroll.itemCount - 1;
+      if (idx >= 0 && idx < (int)(sizeof(sG2Actions) / sizeof(sG2Actions[0]))) sG2Actions[idx] = act;
+    }
+  };
+  extern bool gG2MenuNavEnabled;
+  const bool connected = isG2Connected();
+  if (connected) add("Disconnect", G2_ACT_DISCONNECT);
+  else add("Connect", G2_ACT_CONNECT);
+  if (isG2ClientInitialized()) add("Reconnect", G2_ACT_RECONNECT);
+  add(blePeerAutoReconnectEnabled(BLE_PEER_G2_GLASSES) ? "AutoReconnect: ON"
+                                                       : "AutoReconnect: OFF", G2_ACT_AUTORECON);
+  add("Status", G2_ACT_STATUS);
+  if (connected) add("Show Text", G2_ACT_SHOW_TEXT);
+  add(gG2MenuNavEnabled ? "Nav Mode: ON" : "Nav Mode: OFF", G2_ACT_NAV_MODE);
   oledScrollClampSelection(&sG2MenuScroll);
 }
 
@@ -440,58 +498,57 @@ static void displayG2Menu() {
   oledDisplay->setTextColor(SSD1306_WHITE);
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
 
-  // Header with connection status
+  // Status line
   oledDisplay->print("G2 GLASSES ");
   if (isG2Connected()) {
-    oledDisplay->println("[OK]");
+    oledDisplay->print("[OK]");
   } else if (isG2ClientInitialized()) {
     G2State state = getG2State();
     if (state == G2_STATE_SCANNING) {
-      oledDisplay->println("[SCAN]");
+      oledDisplay->print("[SCAN]");
     } else if (state == G2_STATE_CONNECTING || state == G2_STATE_AUTHENTICATING) {
-      oledDisplay->println("[...]");
+      oledDisplay->print("[...]");
     } else {
-      oledDisplay->println("[--]");
+      oledDisplay->print("[--]");
     }
   } else {
-    oledDisplay->println("[OFF]");
+    oledDisplay->print("[OFF]");
   }
 
   populateG2Menu();
-
-  extern bool gG2MenuNavEnabled;
-  for (int i = 0; i < sG2MenuScroll.itemCount; i++) {
-    oledDisplay->print(i == sG2MenuScroll.selectedIndex ? "> " : "  ");
-    if (sG2MenuScroll.items[i].line1) oledDisplay->print(sG2MenuScroll.items[i].line1);
-    if (i == 0 && isG2Connected()) oledDisplay->print(" *");        // Connect
-    else if (i == 4 && gG2MenuNavEnabled) oledDisplay->print(" *"); // Nav Mode
-    oledDisplay->println();
-  }
+  oledScrollRenderSimple(oledDisplay, &sG2MenuScroll, true, OLED_CONTENT_START_Y + 8);
 }
 
 static bool g2InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
   if (oledGuestBlocksMutate()) return true;
+  if (!sG2MenuInit) return false;
   if (oledScrollHandleNav(&sG2MenuScroll)) return true;
 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    switch (sG2MenuScroll.selectedIndex) {
-      case 0:  // Connect — admin-gated via cmd_exec (cmd_g2connect stamps)
-        if (!isG2Connected()) {
-          executeOLEDCommand("openg2");
-        }
+    const int idx = sG2MenuScroll.selectedIndex;
+    if (idx < 0 || idx >= sG2MenuScroll.itemCount) return true;
+    switch (sG2Actions[idx]) {
+      case G2_ACT_CONNECT:  // admin-gated via cmd_exec (cmd_g2connect stamps)
+        if (!isG2Connected()) executeOLEDCommand("openg2");
         break;
-      case 1:  // Disconnect — admin-gated via cmd_exec
-        if (isG2Connected()) {
-          executeOLEDCommand("closeg2");
-        }
+      case G2_ACT_RECONNECT:  // the saved pair, as the glasses' "Reconnect G2"
+        (void)oledRunCommand("openg2 saved");
         break;
-      case 2:  // Status
+      case G2_ACT_DISCONNECT:
+        if (isG2Connected()) executeOLEDCommand("closeg2");
+        break;
+      case G2_ACT_AUTORECON:  // dispatch the opposite of the current state
+        (void)oledRunCommand(blePeerAutoReconnectEnabled(BLE_PEER_G2_GLASSES)
+                             ? "bleautoreconnect g2-glasses off"
+                             : "bleautoreconnect g2-glasses on");
+        break;
+      case G2_ACT_STATUS:
         requestOLEDMode(OLED_BLUETOOTH_G2_STATUS, "bluetooth.g2.status");
         break;
-      case 3:  // Show Text (fixed payload)
+      case G2_ACT_SHOW_TEXT:  // fixed payload
         if (isG2Connected()) g2ShowText(g2TextInputBuffer);
         break;
-      case 4:  // Nav Mode toggle
+      case G2_ACT_NAV_MODE:
         { extern bool gG2MenuNavEnabled; gG2MenuNavEnabled = !gG2MenuNavEnabled; }
         break;
     }
@@ -507,8 +564,7 @@ static void displayG2StatusDetail() {
   oledDisplay->setTextColor(SSD1306_WHITE);
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
 
-  oledDisplay->println("== G2 GLASSES ==");
-  oledDisplay->println();
+  // The header names the screen; every line fits the 64 px panel's 5 rows.
   oledDisplay->print("State: ");
   oledDisplay->println(getG2StateString());
 
@@ -520,7 +576,6 @@ static void displayG2StatusDetail() {
     oledDisplay->print("Nav Mode: ");
     oledDisplay->println(gG2MenuNavEnabled ? "ON" : "OFF");
   } else {
-    oledDisplay->println();
     oledDisplay->println("Not connected.");
     oledDisplay->println("Use Connect to");
     oledDisplay->println("pair glasses.");
@@ -528,13 +583,44 @@ static void displayG2StatusDetail() {
 }
 
 // ---- OLED_BLUETOOTH_R1: R1 ring connect submenu -----------------------------
-// Connection controls only. Live vitals / Poll / Track live in OLED_R1_HEALTH
-// (ENABLE_R1_HEALTH) so Bluetooth stays the link surface.
-static int sR1Sel = 0;   // 0 Connect, 1 Disconnect, 2 AutoReconnect
+// Connection controls only, as on the glasses' R1 submenu: connect, or
+// Reconnect and Disconnect while up, then AutoReconnect. Live vitals / Poll /
+// Track live in OLED_R1_HEALTH (ENABLE_R1_HEALTH) so Bluetooth stays the link
+// surface. A status line above a scrolling list; AutoReconnect used to sit
+// under the footer on the 64 px panel.
+enum R1Action { R1_ACT_CONNECT, R1_ACT_RECONNECT, R1_ACT_DISCONNECT, R1_ACT_AUTORECON };
+EXT_RAM_BSS_ATTR static OLEDScrollState sR1MenuScroll;
+EXT_RAM_BSS_ATTR static R1Action sR1Actions[OLED_SCROLL_MAX_ITEMS];
+static bool sR1MenuInit = false;
+
+static void populateR1Menu() {
+  if (!sR1MenuInit) {
+    const int visible = (OLED_CONTENT_HEIGHT - 8) / 8;   // one status line above
+    oledScrollInit(&sR1MenuScroll, nullptr, visible > 0 ? visible : 1);
+    sR1MenuInit = true;
+  }
+  oledScrollClearKeepSelection(&sR1MenuScroll);
+  auto add = [](const char* label, R1Action act) {
+    if (oledScrollAddItem(&sR1MenuScroll, label)) {
+      const int idx = sR1MenuScroll.itemCount - 1;
+      if (idx >= 0 && idx < (int)(sizeof(sR1Actions) / sizeof(sR1Actions[0]))) sR1Actions[idx] = act;
+    }
+  };
+  if (g2RingIsConnected()) {
+    add("Reconnect", R1_ACT_RECONNECT);
+    add("Disconnect", R1_ACT_DISCONNECT);
+  } else {
+    add("Connect", R1_ACT_CONNECT);
+  }
+  add(blePeerAutoReconnectEnabled(BLE_PEER_R1_RING) ? "AutoReconnect: ON"
+                                                    : "AutoReconnect: OFF", R1_ACT_AUTORECON);
+  oledScrollClampSelection(&sR1MenuScroll);
+}
 
 static void r1OnEnter(bool isForward) {
-  if (!isForward) return;
-  sR1Sel = 0;
+  if (!isForward || !sR1MenuInit) return;
+  sR1MenuScroll.selectedIndex = 0;
+  sR1MenuScroll.scrollOffset = 0;
 }
 
 static void displayR1Ring() {
@@ -542,39 +628,26 @@ static void displayR1Ring() {
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(SSD1306_WHITE);
 
-  const bool conn = g2RingIsConnected();
-
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->print("R1 RING ");
-  if (!bleSubsystemActive()) oledDisplay->println("[BLE off]");
-  else if (conn)             oledDisplay->println("[OK]");
-  else if (bleCentralRingShouldYield()) oledDisplay->println("[paused]");  // phone pipe has its link
-  else                       oledDisplay->println("[--]");
+  if (!bleSubsystemActive()) oledDisplay->print("[BLE off]");
+  else if (g2RingIsConnected()) oledDisplay->print("[OK]");
+  else if (bleCentralRingShouldYield()) oledDisplay->print("[paused]");  // phone pipe has its link
+  else                          oledDisplay->print("[--]");
 
-  oledDisplay->setCursor(0, OLED_CONTENT_START_Y + 10);
-#if ENABLE_R1_HEALTH
-  oledDisplay->println("Vitals: R1 Health");
-#else
-  oledDisplay->println("Connect / AutoRecon");
-#endif
-
-  const int a0 = OLED_CONTENT_START_Y + 28;
-  for (int i = 0; i < 3; i++) {
-    oledDisplay->setCursor(0, a0 + i * 8);
-    oledDisplay->print(i == sR1Sel ? "> " : "  ");
-    if (i == 0)      { oledDisplay->print("Connect"); if (conn) oledDisplay->print(" *"); }
-    else if (i == 1) oledDisplay->print("Disconnect");
-    else             { oledDisplay->print("AutoRecon "); oledDisplay->print(blePeerAutoReconnectEnabled(BLE_PEER_R1_RING) ? "ON" : "OFF"); }
-  }
+  populateR1Menu();
+  oledScrollRenderSimple(oledDisplay, &sR1MenuScroll, true, OLED_CONTENT_START_Y + 8);
 }
 
 static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
   if (oledGuestBlocksMutate()) return true;
-  if (gNavEvents.up   && sR1Sel > 0) { sR1Sel--; return true; }
-  if (gNavEvents.down && sR1Sel < 2) { sR1Sel++; return true; }
+  if (!sR1MenuInit) return false;
+  if (oledScrollHandleNav(&sR1MenuScroll)) return true;
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    switch (sR1Sel) {
-      case 0:  // Connect — async, self-scans; admin-gated on cmd_exec
+    const int idx = sR1MenuScroll.selectedIndex;
+    if (idx < 0 || idx >= sR1MenuScroll.itemCount) return true;
+    switch (sR1Actions[idx]) {
+      case R1_ACT_CONNECT:  // async, self-scans; admin-gated on cmd_exec
         if (!g2RingIsConnected()) {
           char out[96];
           if (!executeOLEDCommandWithResult("openring", out, sizeof(out)) ||
@@ -583,10 +656,13 @@ static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
           }
         }
         break;
-      case 1:  // Disconnect — async, admin-gated
+      case R1_ACT_RECONNECT:  // as the glasses' "Reconnect Ring"
+        (void)oledRunCommand("openring reconnect");
+        break;
+      case R1_ACT_DISCONNECT:  // async, admin-gated
         if (g2RingIsConnected()) executeOLEDCommand("closering");
         break;
-      case 2:  // AutoReconnect toggle — dispatch the opposite of the current state
+      case R1_ACT_AUTORECON:  // dispatch the opposite of the current state
         executeOLEDCommand(blePeerAutoReconnectEnabled(BLE_PEER_R1_RING)
                            ? "bleautoreconnect r1-ring off"
                            : "bleautoreconnect r1-ring on");

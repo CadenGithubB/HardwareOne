@@ -3100,7 +3100,8 @@ bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize, int* savedPoi
 
   // Keep this system-owned export serialized through promotion and cleanup.
   // The owned point snapshot needs no track-state lock during filesystem I/O.
-  const AuthContext sys = VFS::systemAuth("gpstrack.save");
+  // trusted: confined to the capture tree of the tier the track folder is on.
+  const AuthContext sys = VFS::systemAuth(VFS::captureScopeFor(String(dir)), "gpstrack.save");
   {
     FsLockGuard fsGuard("gpstrack.save");
     if (!VFS::existsGuarded(dir, sys) && !VFS::mkdirGuarded(dir, sys)) return false;

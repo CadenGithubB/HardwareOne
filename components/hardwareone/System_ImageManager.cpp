@@ -119,8 +119,9 @@ bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
 
   String folder = getCaptureFolder(location);
   const char* storageName = isSD ? "SD" : "LittleFS";
-  AuthContext sys = VFS::systemAuth(isSD ? "imgmgr.ensure_capture_folder.sd"
-                                       : "imgmgr.ensure_capture_folder");
+  // trusted: confined to the configured capture folder of this tier.
+  AuthContext sys = VFS::systemAuth(folder.c_str(), isSD ? "imgmgr.ensure_capture_folder.sd"
+                                                        : "imgmgr.ensure_capture_folder");
   FsLockGuard guard("ImageManager.ensureCaptureFolder");
   if (!VFS::existsGuarded(folder, sys)) {
     if (!VFS::mkdirGuarded(folder, sys)) {
@@ -152,7 +153,7 @@ bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
 // removed.
 void ImageManager::sweepStaleTemporaries(ImageStorageLocation location, const String& folder) {
   const bool isSD = location == IMAGE_STORAGE_SD;
-  const AuthContext sys = VFS::systemAuth(isSD ? "imgmgr.sweep_stale.sd" : "imgmgr.sweep_stale");
+  const AuthContext sys = VFS::systemAuth(folder.c_str(), isSD ? "imgmgr.sweep_stale.sd" : "imgmgr.sweep_stale");
   File dir = VFS::openGuarded(folder, "r", sys);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
@@ -250,7 +251,9 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
     path = normalizedPath;
     String temporary = path;
     if (temporary.length() != path.length() || !temporary.concat(".tmp")) return "";
-    AuthContext sys = VFS::systemAuth(isSD ? "imgmgr.save_sd" : "imgmgr.save_image_lfs");
+    // trusted: the file and its ".tmp" sibling sit in this tier's capture folder.
+    AuthContext sys = VFS::systemAuth(getCaptureFolder(target).c_str(),
+                                      isSD ? "imgmgr.save_sd" : "imgmgr.save_image_lfs");
     FsLockGuard guard("ImageManager.saveImage");
     uint64_t total = 0, used = 0, free = 0;
     if (!VFS::getStats(storage, total, used, free)) {
@@ -322,7 +325,7 @@ std::vector<ImageInfo> ImageManager::listImages(ImageStorageLocation location) {
   String folder = getCaptureFolder(location);
   FsLockGuard guard("ImageManager.listImages");
   File dir = VFS::openGuarded(folder, "r",
-                            VFS::systemAuth(isSD ? "imgmgr.list_sd" : "imgmgr.list_images"));
+                            VFS::systemAuth(folder.c_str(), isSD ? "imgmgr.list_sd" : "imgmgr.list_images"));
   if (!dir || !dir.isDirectory()) return images;
 
   // SD modification times determine retention order. LittleFS retains its
@@ -392,7 +395,8 @@ uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
     FsLockGuard guard("ImageManager.getImage.open");
     if (!tierAvailable(isSD)) return nullptr;
     f = VFS::openGuarded(normalizedPath, "r",
-                         VFS::systemAuth("imgmgr.get_image"));
+                         VFS::systemAuth(getCaptureFolder(isSD ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS).c_str(),
+                                         "imgmgr.get_image"));
     if (f) len = f.size();
   }
   if (!f) return nullptr;
@@ -466,6 +470,7 @@ bool ImageManager::deleteOldestImages(int count, ImageStorageLocation location) 
   // trusted: retention removes only paths listImages produced inside the
   // capture folder, so no caller identity exists to confine it further.
   const AuthContext retention = VFS::systemAuth(
+      getCaptureFolder(location).c_str(),
       location == IMAGE_STORAGE_SD ? "imgmgr.delete.sd" : "imgmgr.delete_image");
   int deleted = 0;
   for (int i = 0; i < count && i < (int)images.size(); i++) {

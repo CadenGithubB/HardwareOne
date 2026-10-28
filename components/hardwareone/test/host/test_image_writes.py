@@ -47,7 +47,7 @@ def generate(baseline: Path | None) -> str:
         "size_t listVirtualEntries(")) + "\n}\n"
     # The stale-temporary sweep walks the folder with the shared directory reader.
     reader = "namespace VFS {\n" + vfs_header[vfs_header.index("struct DirectoryEntry {"):
-                                              vfs_header.index("bool exists(const String& path);")]
+                                              vfs_header.index("bool getStats(StorageType type")]
     reader += vfs[vfs.index("DirectoryReader::DirectoryReader("):vfs.index("static FS* fsForPath(")] + "\n}\n"
     markers = ["ImageManager::ImageManager()", "ImageManager::~ImageManager()",
                "bool ImageManager::init()", "bool ImageManager::initSD()",

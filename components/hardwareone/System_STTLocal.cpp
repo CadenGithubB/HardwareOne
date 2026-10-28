@@ -40,7 +40,7 @@ namespace {
 constexpr const char* kModelPath=HW1_STT_MODEL_PATH;
 File openModel() {
     // trusted: fixed, pinned inference weights; no caller-selected file path.
-    return VFS::openGuarded(kModelPath,"r",VFS::systemAuth("stt.model_read"));
+    return VFS::openGuarded(kModelPath,"r",VFS::systemAuth(VFS::sttModelScopeFor(kModelPath),"stt.model_read"));
 }
 size_t readModel(void* context,void* dest,size_t bytes) {
     return static_cast<File*>(context)->read(static_cast<uint8_t*>(dest),bytes);
@@ -122,15 +122,17 @@ bool loadLanguageModel(LanguageModel& model,const STTLocalControl& control) {
     model.state=LmState::Unavailable;
     model.files=nullptr;
     // trusted: fixed LM path beside the pinned model; content is SHA-checked.
-    const auto auth=VFS::systemAuth("stt.lm_read");
+    // Each candidate LM lives on its own tier; confine the probe and the read
+    // to that tier's model folder.
+    auto authFor=[](const char* path){ return VFS::systemAuth(VFS::sttModelScopeFor(path),"stt.lm_read"); };
     for(const LmFiles& f:kLmFiles)
-        if(VFS::existsGuarded(f.lm,auth)) { model.files=&f; break; }
+        if(VFS::existsGuarded(f.lm,authFor(f.lm))) { model.files=&f; break; }
     if(!model.files) {
         if(firstNote(kLmMissing))INFO_SYSTEMF("[STT] No %s or %s; using greedy decoding",kLmFiles[0].lm,kLmFiles[1].lm);
         return true;
     }
     const char* kLmPath=model.files->lm;
-    File file=VFS::openGuarded(kLmPath,"r",auth);
+    File file=VFS::openGuarded(kLmPath,"r",authFor(kLmPath));
     const size_t bytes=file && !file.isDirectory() ? file.size() : 0;
     if(bytes<96 || bytes>kLmMaxBytes) {
         if(firstNote(kLmInvalid))WARN_SYSTEMF("[STT] %s unreadable or wrong size (%u bytes); using greedy decoding",kLmPath,unsigned(bytes));
@@ -157,7 +159,7 @@ bool loadLanguageModel(LanguageModel& model,const STTLocalControl& control) {
     loadCustomWords(model);
     model.state=LmState::Ready;
     // trusted: an existence probe of the retired fixed hotword file beside this LM.
-    if(VFS::existsGuarded(model.files->legacyWords,auth) && firstNote(kLmLegacyWords))
+    if(VFS::existsGuarded(model.files->legacyWords,authFor(model.files->legacyWords)) && firstNote(kLmLegacyWords))
         WARN_SYSTEMF("[STT] %s is no longer read; add its words with sttvocab (user_vocab.tsv)",model.files->legacyWords);
     if(firstNote(kLmLoaded))
         ESP_LOGI("STT","Language model %s: %u words, %u bigrams, %u trigrams, beam %u, %u custom words, %u bytes, "
@@ -367,7 +369,7 @@ float speakerFixtureAgain(SpeakerState& s) {
 #if HW1_STT_SPEAKER_DIAGNOSTICS
 // Optional parity check: a phrase and the embedding the Mac computed for it.
 float speakerFixtureCosine(SpeakerState& s) {
-    const auto auth=VFS::systemAuth("stt.speaker_read");
+    const auto auth=VFS::systemAuth(VFS::sttModelScopeFor(kSpeakerFixturePath),"stt.speaker_read");
     if(!VFS::existsGuarded(kSpeakerFixturePath,auth))return -2.0f;
     File f=VFS::openGuarded(kSpeakerFixturePath,"r",auth);
     const size_t bytes=f && !f.isDirectory() ? f.size() : 0;
@@ -504,7 +506,7 @@ bool sttSpeakerBegin(STTLocalSession* session,size_t maxSamples,STTSpeakerStatus
     if(b->speakerTried)return why("already tried");
     b->speakerTried=true;
     // trusted: fixed optional model path beside the STT model; content is SHA-checked.
-    const auto auth=VFS::systemAuth("stt.speaker_read");
+    const auto auth=VFS::systemAuth(VFS::sttModelScopeFor(kSpeakerPath),"stt.speaker_read");
     if(!VFS::existsGuarded(kSpeakerPath,auth))return why("no speaker.spk");
     File file=VFS::openGuarded(kSpeakerPath,"r",auth);
     const size_t bytes=file && !file.isDirectory() ? file.size() : 0;

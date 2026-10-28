@@ -132,11 +132,12 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
   if (first) {
     // trusted: only create the protected transcript root; owner folder/file
     // creation below always uses the admitted named user's guarded context.
-    if (!VFS::exists(root) && !VFS::mkdirGuarded(root, VFS::systemAuth(root, "transcript root")))
+    const AuthContext rootAuth = VFS::systemAuth(root, "transcript root");
+    if (!VFS::existsGuarded(root, rootAuth) && !VFS::mkdirGuarded(root, rootAuth))
       return fail("Cannot create transcript folder");
     if (!VFS::existsGuarded(folder, ctx) && !VFS::mkdirGuarded(folder, ctx))
       return fail("Cannot create transcript folder");
-    if (VFS::exists(status_.path)) return fail("Transcript filename already exists");
+    if (VFS::existsGuarded(status_.path, ctx)) return fail("Transcript filename already exists");
   }
   if (!first && !VFS::existsGuarded(status_.path, ctx)) return fail("Transcript file missing");
   File file = VFS::openGuarded(status_.path, first ? "w" : "a", ctx, true);

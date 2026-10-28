@@ -6,6 +6,7 @@ Build different feature selections for the same board without editing shared hea
 python3 tools/build_config.py build xiao-default
 python3 tools/build_config.py build xiao-openclaw
 python3 tools/build_config.py build p4-openclaw
+python3 tools/build_config.py build p4-full-debug
 python3 tools/build_config.py build xiao-mqtt
 python3 tools/build_config.py build xiao-display
 python3 tools/build_config.py build xiao-no-bluetooth
@@ -24,7 +25,7 @@ compiler-resolved feature flags, image size, and remaining app-partition space.
 These commands build only; they do not flash a device.
 
 `xiao-default` uses the ordinary XIAO selection with MQTT and Bluetooth off.
-Bluetooth is disabled in both the application and SDK for the 0.99.98.5 release
+Bluetooth is disabled in both the application and SDK for the 0.99.99 release
 to leave app-partition space. This is a saved-profile choice; board and shared
 defaults remain available to other profiles. `xiao-mqtt`
 enables MQTT, Wi-Fi, and the MQTT settings page, and disables offline maps to
@@ -40,6 +41,12 @@ speech pipeline's internal-memory accounting (added to `p4-glasses-test` on
 2026-10-18; that profile has not been reflashed or requalified since). Runtime relay credentials and the public CA are configured on the device.
 Use the existing Stop → wait for transcription → review → Send interaction.
 The combined voice-to-agent path still needs hardware qualification.
+
+`p4-full-debug` is `p4-phone-pipe` (phone pipe, camera, glasses, ring, local
+STT, HTTP LLM source, microSD) with `ENABLE_DEBUG_ALL_BY_DEFAULT`, so a freshly
+erased P4X-EYE boots with every debug flag and sub-flag on and logs everything
+from its first boot. It is a bench image for finding unnecessary work in the
+console log; the flags stay runtime-editable, and no release profile sets it.
 
 `xiao-openclaw` enables the HTTP agent source and keeps CM5 available. This test
 profile explicitly disables Bluetooth (application and SDK) and the onboard LLM

@@ -49,14 +49,16 @@ static void populatePowerCpuMenu() {
   oledScrollClearKeepSelection(&sPowerCpuScroll);
   // Scroll items borrow these pointers; each row needs persistent storage.
   EXT_RAM_BSS_ATTR static char modeLabels[POWER_MODE_COUNT][40];  // PSRAM: drawn into the framebuffer
+  // The unit is in the header title ("CPU (MHz)"): with it on every row,
+  // "> Performance 400/100MHz" is 24 characters on a 21-character line.
   for (uint8_t mode = 0; mode < POWER_MODE_COUNT; ++mode) {
     const unsigned long active = getPowerModeActiveCpuFreq(mode);
     const unsigned long idle = getPowerModeIdleCpuFreq(mode);
     if (idle < active) {
-      snprintf(modeLabels[mode], sizeof(modeLabels[mode]), "%s %lu/%luMHz",
+      snprintf(modeLabels[mode], sizeof(modeLabels[mode]), "%s %lu/%lu",
                getPowerModeName(mode), active, idle);
     } else {
-      snprintf(modeLabels[mode], sizeof(modeLabels[mode]), "%s %luMHz",
+      snprintf(modeLabels[mode], sizeof(modeLabels[mode]), "%s %lu",
                getPowerModeName(mode), active);
     }
     oledScrollAddItem(&sPowerCpuScroll, modeLabels[mode]);
@@ -180,13 +182,17 @@ static void executePowerAction() {
 }
 
 static void executePowerCpuAction() {
-  const char* cmds[] = {
+  // One command per gPowerModes row, in mode order; the rows above come from
+  // the same table, so a mode without a command here would select nothing.
+  static const char* const cmds[] = {
     "power mode perf",
     "power mode balanced",
-    "power mode saver",
+    "power mode adaptive",
     "power mode ultra",
     "power mode locked",
   };
+  static_assert(sizeof(cmds) / sizeof(cmds[0]) == POWER_MODE_COUNT,
+                "OLED CPU menu needs one command per power mode");
   int sel = sPowerCpuScroll.selectedIndex;
   if (sel >= 0 && sel < (int)(sizeof(cmds) / sizeof(cmds[0]))) {
     DEBUG_SYSTEMF("[POWER_OLED] Executing: %s (selection=%d)", cmds[sel], sel);

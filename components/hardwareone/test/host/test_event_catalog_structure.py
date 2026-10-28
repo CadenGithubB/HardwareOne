@@ -166,8 +166,8 @@ assert not re.search(r"^\s*#ifndef\s+SYSTEM_EVENTCATALOGROWS", rows, re.M)
 assert "define exactly one System Event catalog row macro" in rows
 assert len(FAMILY_ROW_RE.findall(rows)) == 13
 kind_names = KIND_ROW_RE.findall(rows)
-assert len(kind_names) == 165
-assert len(set(kind_names)) == 165
+assert len(kind_names) == 167
+assert len(set(kind_names)) == 167
 assert not ({"boot", "none", "set", "patch", "all", "list"} & set(kind_names))
 
 literal_row_owners: list[Path] = []

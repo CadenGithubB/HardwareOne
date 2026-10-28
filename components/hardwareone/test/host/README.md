@@ -1,5 +1,17 @@
 # HardwareOne host tests
 
+## Cross-board power policy
+
+`power_cpu_frequency` explicitly exercises classic ESP32, ESP32-S3 and both P4
+PLL/revision branches with I2C enabled/disabled (eight variants).
+`power_save_tick` runs the production idle/wake policy across those same target
+branches, UART constraints and STT gates (240 fresh-process scenarios).
+Both standalone Python runners accept `--sanitize`. Hardware/RTOS boundaries
+are controlled: these suites do not establish real radio connection retention,
+sleep residency or current draw. See the
+[shared power-policy investigation](../../../../docs/CROSS_BOARD_POWER_POLICY.md)
+for native-radio versus Hosted qualification requirements.
+
 ## Transferred Terminal and P4 regressions
 
 `openclaw_terminal` runs the provider and device-API tests when Node.js is

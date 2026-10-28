@@ -827,13 +827,13 @@ static void exitTextViewBackToFiles() {
 
 // G2-only checked reader. The shared String reader remains unchanged for CLI
 // fileview and the tiny Info sniff. The caller has installed the paired user's
-// identity and checked canRead; like readTextLimited this helper is policy-free
-// and serializes its whole VFS read with the filesystem lock.
+// identity; the guarded open authorizes that identity and serializes the
+// whole read with the filesystem lock.
 static bool filesReadTextBuffer(const char* path, PsramBuffer& out,
                                  size_t maxBytes) {
   out.clear();
   FsLockGuard guard("g2.files.text");
-  File f = VFS::open(String(path), "r");
+  File f = VFS::openGuarded(String(path), "r", currentAuthContext());
   if (!f) return false;
   // Avoid reserving a full 12 KiB for a tiny file. File writes using the same
   // FS lock cannot grow it during this read; retain the caller's hard cap.
@@ -956,7 +956,7 @@ static void showFileInfo(const FileEntry& e) {
     char p[FILE_MANAGER_MAX_PATH + 32];
     String head;
     if (buildChooserPath(p, sizeof(p)) && canRead(String(p), currentAuthContext()) &&
-        readTextLimited(p, head, sizeof(CAPCRYPT_MAGIC_PREFIX) - 1)) {
+        readTextLimited(p, head, sizeof(CAPCRYPT_MAGIC_PREFIX) - 1, currentAuthContext())) {
       sealedFile = captureCryptoIsMagicLine(head.c_str());
     }
   }

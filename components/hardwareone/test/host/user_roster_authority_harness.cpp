@@ -27,6 +27,17 @@
 #include "fake_vfs.h"
 #include <ArduinoJson.h>
 #include "System_PollPause.h"
+#include <atomic>
+
+// Identity generation and critical sections for the authority cache: the
+// harness is single-threaded, and every roster swap below bumps the
+// generation the way the production mutators do.
+std::atomic<uint32_t> gIdentityGeneration{1};
+void bumpIdentityGeneration(const char*) { gIdentityGeneration.fetch_add(1, std::memory_order_release); }
+struct portMUX_TYPE {};
+#define portMUX_INITIALIZER_UNLOCKED {}
+#define portENTER_CRITICAL(m) ((void)(m))
+#define portEXIT_CRITICAL(m) ((void)(m))
 
 void webBatchTestStringAppend() {}
 volatile bool gSensorPollingPaused = false;
@@ -242,6 +253,7 @@ static std::string record(unsigned id, const std::string& name, const char* role
 }
 
 static fake_vfs::Fs& resetStore() {
+  bumpIdentityGeneration("test.reset");
   auto& fs = fake_vfs::fs();
   fs.reset();
   fake_vfs::wireLockDouble();
@@ -261,6 +273,7 @@ static void putRoster(fake_vfs::Fs& fs, const std::vector<std::string>& records)
   std::string json = "{\"version\":1,\"nextId\":99,\"users\":[";
   for (size_t i = 0; i < records.size(); ++i) json += (i ? "," : "") + records[i];
   fs.put(USERS_JSON_FILE, json + "]}");
+  bumpIdentityGeneration("test.roster");
 }
 
 static void putPassword(fake_vfs::Fs& fs, unsigned id, const char* password) {
