@@ -304,14 +304,16 @@ bool create(CommandSource source, TransportSessionEpoch epoch, const char* user,
   if (!VFS::getStats(sd ? VFS::SDCARD : VFS::INTERNAL, total, used, free) ||
       free < kReserveBytes + bytes + 256)
     return fail(why, "Note storage full or unavailable");
-  // trusted: only create the protected transcript root; the owner and notes
-  // folders and the file below always use the named owner's guarded context.
-  if (!VFS::exists(root) && !VFS::mkdirGuarded(root, VFS::systemAuth(root, "note root")))
+  // trusted: only probe and create the protected transcript root; the owner
+  // and notes folders and the file below always use the named owner's
+  // guarded context.
+  const AuthContext rootAuth = VFS::systemAuth(root, "note root");
+  if (!VFS::existsGuarded(root, rootAuth) && !VFS::mkdirGuarded(root, rootAuth))
     return fail(why, "Cannot create notes folder");
   if ((!VFS::existsGuarded(owner, ctx) && !VFS::mkdirGuarded(owner, ctx)) ||
       (!VFS::existsGuarded(folder, ctx) && !VFS::mkdirGuarded(folder, ctx)))
     return fail(why, "Cannot create notes folder");
-  if (VFS::exists(path)) return fail(why, "Note filename already exists");
+  if (VFS::existsGuarded(path, ctx)) return fail(why, "Note filename already exists");
   if (!writeNote(ctx, sd, tmp, path, head, headLength, text, nullptr, bytes, why)) return false;
   if (pathOut && pathCap) snprintf(pathOut, pathCap, "%s", path);
   return true;
@@ -372,7 +374,7 @@ bool restamp(CommandSource source, const char* user, const char* path, const cha
   if (!ok) {
     *retry = !read;
     fail(why, read ? "Note header unreadable" : "Note read incomplete");
-  } else if (!VFS::exists(copy)) {
+  } else if (!VFS::existsGuarded(copy, ctx)) {
     uint64_t total = 0, used = 0, free = 0;
     ok = VFS::getStats(sd ? VFS::SDCARD : VFS::INTERNAL, total, used, free) &&
          free >= kReserveBytes + bytes + 256;
@@ -537,14 +539,14 @@ bool sweep(uint32_t* removed, const char** why) {
     // The lock serializes this sweep with both note workers' entire writes.
     char nativeFolder[kPathMax];
     g2NoteFolder(sd, nativeFolder, sizeof(nativeFolder));
-    if (VFS::exists(nativeFolder) &&
-        !sweepFolder(nativeFolder, VFS::systemAuth(nativeFolder, "note sweep"), &count))
+    const AuthContext nativeAuth = VFS::systemAuth(nativeFolder, "note sweep");
+    if (VFS::existsGuarded(nativeFolder, nativeAuth) && !sweepFolder(nativeFolder, nativeAuth, &count))
       ok = fail(why, "Cannot remove unfinished note");
     const char* root = sd ? "/sd/stt" : "/stt";
-    if (!VFS::exists(root)) continue;
     // trusted: lists account folders by name and removes only in-progress
     // note files, never reading one; confined to this tier's transcript root.
     const AuthContext sys = VFS::systemAuth(root, "note sweep");
+    if (!VFS::existsGuarded(root, sys)) continue;
     File top = VFS::openGuarded(root, "r", sys);
     if (!top || !top.isDirectory()) {
       if (top) top.close();

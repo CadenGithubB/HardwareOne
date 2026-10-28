@@ -1441,13 +1441,13 @@ static void srSnipWriterTask(void* param) {
         continue;
       }
       String folder = srSnipGetFolder();
-      if (!VFS::existsGuarded(folder, VFS::systemAuth("espsr.snip_writer_mkdir"))) {
-        VFS::mkdirGuarded(folder, VFS::systemAuth("espsr.snip_writer_mkdir"));
+      if (!VFS::existsGuarded(folder, VFS::systemAuth(VFS::espsrScopeFor(folder), "espsr.snip_writer_mkdir"))) {
+        VFS::mkdirGuarded(folder, VFS::systemAuth(VFS::espsrScopeFor(folder), "espsr.snip_writer_mkdir"));
       }
       char fname[128];
       snprintf(fname, sizeof(fname), "%s/%s_%lu_%ld.wav",
                folder.c_str(), job.reason, (unsigned long)job.session_id, (long)job.cmd_id);
-      File f = VFS::openGuarded(fname, FILE_WRITE, VFS::systemAuth("espsr.snip_writer"), true);
+      File f = VFS::openGuarded(fname, FILE_WRITE, VFS::systemAuth(VFS::espsrScopeFor(folder), "espsr.snip_writer"), true);
       if (!f) {
         ERROR_SRF("SnipWriter: failed to open %s", fname);
         ps_free(job.pcm);
@@ -2022,11 +2022,11 @@ static bool loadCommandsFileLocked(size_t& outAdded, size_t& outErrors) {
     return false;
   }
 
-  if (!VFS::existsGuarded(kESPSRCommandFile, VFS::systemAuth("espsr.commands_load"))) {
+  if (!VFS::existsGuarded(kESPSRCommandFile, VFS::systemAuth(VFS::Scopes::ESPSR_SD, "espsr.commands_load"))) {
     return true;
   }
 
-  File f = VFS::openGuarded(kESPSRCommandFile, "r", VFS::systemAuth("espsr.commands_load"));
+  File f = VFS::openGuarded(kESPSRCommandFile, "r", VFS::systemAuth(VFS::Scopes::ESPSR_SD, "espsr.commands_load"));
   if (!f) {
     return false;
   }
@@ -2065,8 +2065,8 @@ static bool saveCommandsFileLocked(size_t& outSaved) {
     return false;
   }
 
-  VFS::mkdirGuarded("/sd/ESPSR", VFS::systemAuth("espsr.commands_save_mkdir"));
-  File f = VFS::openGuarded(kESPSRCommandFile, "w", VFS::systemAuth("espsr.commands_save"), true);
+  VFS::mkdirGuarded("/sd/ESPSR", VFS::systemAuth(VFS::Scopes::ESPSR_SD, "espsr.commands_save_mkdir"));
+  File f = VFS::openGuarded(kESPSRCommandFile, "w", VFS::systemAuth(VFS::Scopes::ESPSR_SD, "espsr.commands_save"), true);
   if (!f) {
     return false;
   }
@@ -2132,7 +2132,7 @@ static void deinitSRModels() {
 }
 
 static bool loadSRModelFile(const char* path) {
-  File file = VFS::openGuarded(path, "r", VFS::systemAuth("espsr.models_load"));
+  File file = VFS::openGuarded(path, "r", VFS::systemAuth(VFS::espsrScopeFor(String(path)), "espsr.models_load"));
   if (!file) {
     srSetError("Speech model bundle is missing or unreadable");
     return false;
@@ -2776,19 +2776,19 @@ void initESPSR() {
   bool folderCreated = false;
   
   if (VFS::isSDAvailable()) {
-    if (VFS::mkdirGuarded("/sd/ESPSR", VFS::systemAuth("espsr.init_mkdir"))) {
+    if (VFS::mkdirGuarded("/sd/ESPSR", VFS::systemAuth(VFS::Scopes::ESPSR_SD, "espsr.init_mkdir"))) {
       INFO_SRF("Created /sd/ESPSR folder on SD card");
       folderCreated = true;
-    } else if (VFS::existsGuarded("/sd/ESPSR", VFS::systemAuth("espsr.init_mkdir"))) {
+    } else if (VFS::existsGuarded("/sd/ESPSR", VFS::systemAuth(VFS::Scopes::ESPSR_SD, "espsr.init_mkdir"))) {
       DEBUG_SRF("/sd/ESPSR already exists");
       folderCreated = true;
     }
   }
 
   if (!folderCreated) {
-    if (VFS::mkdirGuarded("/ESPSR", VFS::systemAuth("espsr.init_mkdir"))) {
+    if (VFS::mkdirGuarded("/ESPSR", VFS::systemAuth(VFS::Scopes::ESPSR, "espsr.init_mkdir"))) {
       INFO_SRF("Created /ESPSR folder on LittleFS");
-    } else if (VFS::existsGuarded("/ESPSR", VFS::systemAuth("espsr.init_mkdir"))) {
+    } else if (VFS::existsGuarded("/ESPSR", VFS::systemAuth(VFS::Scopes::ESPSR, "espsr.init_mkdir"))) {
       DEBUG_SRF("/ESPSR already exists on LittleFS");
     }
   }

@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-991 commands across 55 modules (1000 registry entries).
+992 commands across 55 modules (1001 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -44,7 +44,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`edgeimpulse`](#edgeimpulse) — 16 commands
 - [`transcription`](#transcription) — 2 commands
 - [`note`](#note) — 1 commands
-- [`stt`](#stt) — 2 commands
+- [`stt`](#stt) — 3 commands
 - [`espsr`](#espsr) — 45 commands
 - [`i2c`](#i2c) — 24 commands
 - [`automation`](#automation) — 8 commands
@@ -771,6 +771,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | ------- | :-: | ----------- |
 | `stt` |  | Local continuous or bounded speech-to-text with private session-owned results.<br/>`Usage: stt start \| record [1..20 seconds] \| status [id] \| stop\|cancel\|result\|next\|draft <id> \| ack <id> <sequence>` |
 | `sttperf` |  | STT pacing/profiling per segment (timings and CPU only, never text).<br/>`Usage: sttperf [show\|clear\|log on\|off\|stages [all\|clear]]` |
+| `sttvocab` |  | Speech vocabulary: names and terms with their display spelling (STT Models/user_vocab.tsv).<br/>`Usage: sttvocab [list] \| add DISPLAY[\|spoken] \| remove <spoken> \| reload (edits need an administrator)` |
 
 ## espsr
 
@@ -1190,11 +1191,11 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## power
 
-> The power subsystem manages CPU frequency and battery-oriented power saving. The main command is power: power alone prints the current mode, CPU clock and display brightness; power mode <perf|balanced|saver|ultra|locked|0-4> selects one of five target-specific presets: Performance, Balanced, PowerSaver, UltraSaver, or Locked. Run power or power json to see their active and idle MHz. Modes set the CPU clock and display brightness; the chosen mode is persisted. Locked keeps the maximum active clock when the OLED blanks. UltraSaver uses its lower idle-only clock when powersave blanks the display; input or a command restores the target's interactive floor. Nothing switches the mode on battery level in this firmware: power auto and power threshold report that automatic mode is not available. Two related idle controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; 0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) while the radio stays up so the device remains reachable, and powercooldown <0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid back-to-back sleep transitions. All of these values persist.
+> The power subsystem manages CPU frequency and battery-oriented power saving. The main command is power: power alone prints the current mode, CPU clock and display brightness; power mode <perf|balanced|adaptive|ultra|locked|0-4> selects one of five target-specific presets: Performance, Balanced, Adaptive (the default), UltraSaver, or Locked. Run power or power json to see their active and idle MHz. A mode sets the clock while the device is in use and while idle, plus the display brightness; the chosen mode is persisted. Every mode runs transcription, camera and recording at the maximum clock while they are busy and drops back when they finish; Adaptive stays at the floor clock otherwise. Locked keeps the maximum clock through idle. UltraSaver uses its lower idle-only clock once the local display blanks; input or a command restores the target's interactive floor. A command from the glasses, phone, web or serial keeps the clock up but does not light the local display; only local input, the display's own commands and on-device voice do. Nothing switches the mode on battery level in this firmware: power auto and power threshold report that automatic mode is not available. Two related idle controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; 0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) while the radio stays up so the device remains reachable, and powercooldown <0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid back-to-back sleep transitions. All of these values persist.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `power` | A | Power management [mode]<br/>`Usage: power - show current power status power json - status as one JSON blob (same schema as /api/power/status) power mode <perf\|balanced\|saver\|ultra\|locked\|0-4>` |
+| `power` | A | Power management [mode]<br/>`Usage: power - show current power status power json - status as one JSON blob (same schema as /api/power/status) power mode <perf\|balanced\|adaptive\|ultra\|locked\|0-4>` |
 | `powercooldown` | A | Sleep transition cooldown (ms; 0 disables)<br/>`Usage: powercooldown <0..60000>` |
 | `powersave` | A | Idle power-save: OLED off + optional downclock (0 disables)<br/>`Usage: powersave <0..1440>` |
 

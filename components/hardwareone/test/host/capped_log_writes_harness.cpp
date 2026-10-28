@@ -143,6 +143,23 @@ static bool rename(const String& from, const String& to) {
 }
 static void noteLittleFsBytesWritten(size_t count) { io("note:" + std::to_string(count)); bytesNoted += count; }
 }
+// The production writer now runs as a system identity confined to the
+// sys_logs tier it resolved; this harness exercises the write algorithm, so
+// the guarded forwarders only record the scope and dispatch to the raw fake.
+struct AuthContext { std::string tag; std::string scope; };
+static std::vector<std::string> scopesSeen;
+namespace VFS {
+namespace Scopes {
+constexpr const char* SYS_LOGS    = "/system/sys_logs";
+constexpr const char* SYS_LOGS_SD = "/sd/system/sys_logs";
+}
+static const char* sysLogScopeFor(const String& path) { return text(path).rfind("/sd/", 0) == 0 ? Scopes::SYS_LOGS_SD : Scopes::SYS_LOGS; }
+static AuthContext systemAuth(const char* scope, const char* tag) { scopesSeen.push_back(scope); return {tag, scope}; }
+static File openGuarded(const String& path, const char* mode, const AuthContext&, bool create = false) { return open(path, mode, create); }
+static bool existsGuarded(const String& path, const AuthContext&) { return exists(path); }
+static bool removeGuarded(const String& path, const AuthContext&) { return remove(path); }
+static bool renameGuarded(const String& from, const String& to, const AuthContext&) { return rename(from, to); }
+}
 struct SerialOutput {
   template <typename... Args> void printf(const char*, Args...) { events.push_back("serial"); }
 } Serial;

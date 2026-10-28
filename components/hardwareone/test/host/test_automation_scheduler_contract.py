@@ -71,7 +71,7 @@ assert "gAutomationsCacheValid = true;" in empty
 
 rebuild = function_body(automation, "static void rebuildAutomationsCache()")
 read_failure = function_body(
-    rebuild, "if (!readText(AUTOMATIONS_JSON_FILE, json))"
+    rebuild, "if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, \"automation.state\")))"
 )
 parse_failure = function_body(rebuild, "if (deserializeJson(doc, json))")
 assert "markAutomationsCacheEmptyValid();" in read_failure
@@ -83,7 +83,7 @@ assert "markAutomationsCacheEmptyValid();" in parse_failure
 tick = function_body(automation, "void schedulerTickMinute()")
 assert "gAutomationEventsPending.exchange(false);" in tick
 tick_read_failure = function_body(
-    tick, "if (!readText(AUTOMATIONS_JSON_FILE, json))"
+    tick, "if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, \"automation.state\")))"
 )
 assert "markAutomationsCacheEmptyValid();" in tick_read_failure
 assert tick_read_failure.index("markAutomationsCacheEmptyValid();") < (
@@ -140,7 +140,7 @@ reschedule = function_body(
     automation,
     "static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt, bool notify) {")
 assert "if (notify) writeAutomationsJsonAtomic(json);" in reschedule
-assert "else writeTextAtomic(AUTOMATIONS_JSON_FILE, json);" in reschedule
+assert "else writeTextAtomic(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, \"automation.state\"));" in reschedule
 assert tick.count("rescheduleAfterFire(") == 3
 assert tick.count("rescheduleAfterFire(id, obj.c_str(), now, false)") == 3
 assert "rescheduleAfterFire(idStr.toInt(), obj.c_str(), now, true);" in automation

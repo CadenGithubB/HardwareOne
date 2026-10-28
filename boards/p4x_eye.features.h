@@ -111,8 +111,6 @@
 // --- Not used on this board --------------------------------------------------
 #undef ENABLE_EDGE_IMPULSE
 #define ENABLE_EDGE_IMPULSE 0
-#undef ENABLE_AUTOMATION
-#define ENABLE_AUTOMATION 0
 #undef ENABLE_UART_HOST_LINK
 #define ENABLE_UART_HOST_LINK 0
 #undef ENABLE_RASPBERRY_PI_HOST_POWER

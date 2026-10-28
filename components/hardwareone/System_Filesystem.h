@@ -222,16 +222,21 @@ bool copyFileContents(fs::File& input, fs::File& output,
                       unsigned long& totalBytes, uint8_t& lastByte);
 
 /**
- * Read up to maxBytes from a file into a String
+ * Read up to maxBytes from a file into a String, through the guarded VFS as
+ * `ctx`. A denial reads as "cannot open" and is logged by the VFS.
  * @param path File path
  * @param out Output string
  * @param maxBytes Maximum bytes to read
+ * @param ctx Identity the read is authorized as
  * @return true on success
  */
-bool readTextLimited(const char* path, String& out, size_t maxBytes);
+bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthContext& ctx);
 
 /**
  * Append a CRLF-terminated line and trim old lines when the size exceeds cap.
+ * The writer is the system identity confined to the capped-log tree
+ * (VFS::Scopes::SYS_LOGS, or its SD mirror once the overflow latch fires), so
+ * no caller can point it at another file; every caller's path lives there.
  * Checks accepted append bytes and the complete temporary rotation copy.
  * LittleFS replacement preserves the original on failure; SD retains its
  * remove/rename recovery window. A failed append may leave a partial line.

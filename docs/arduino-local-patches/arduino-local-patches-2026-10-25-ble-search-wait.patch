@@ -1,0 +1,29 @@
+--- a/libraries/BLE/src/BLEClient.cpp
++++ b/libraries/BLE/src/BLEClient.cpp
+@@ -1001,12 +1001,25 @@
+   // TODO implement retrieving services from cache
+   clearServices();  // Clear any services that may exist.
+ 
++  // [hardwareone local patch 2026-10-25] Never wait before the request.
++  // A search that timed out leaves this semaphore taken; only SEARCH_CMPL_EVT
++  // or the link's DISCONNECT_EVT gives it, and a link that is already gone
++  // sends neither again. The unbounded take that stood after the request
++  // then blocked forever, even when the request itself was refused, and held
++  // the shared BLE-connect worker (R1 ring, 2026-10-25). A disconnected client
++  // cannot be searched, so it returns at once; otherwise the semaphore is
++  // claimed without waiting (taken already, or now) BEFORE the request, so a
++  // fast SEARCH_CMPL_EVT is left for the bounded wait below to see.
++  if (!isConnected()) {
++    log_e("getServices: not connected");
++    return &m_servicesMap;
++  }
++  m_semaphoreSearchCmplEvt.take(0, "getServices");
+   esp_err_t errRc = esp_ble_gattc_search_service(
+     getGattcIf(), getConnId(),
+     NULL  // Filter UUID
+   );
+ 
+-  m_semaphoreSearchCmplEvt.take("getServices");
+   if (errRc != ESP_OK) {
+     log_e("esp_ble_gattc_search_service: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
+     // [hardwareone local patch 2026-07-27] Release the semaphore taken at line

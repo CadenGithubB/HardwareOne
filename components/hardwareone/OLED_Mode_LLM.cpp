@@ -2,26 +2,29 @@
 // OLED LLM Chat Mode
 // ============================================================================
 // State-machine driven chat surface backed by System_LLMChat (the shared
-// conversation module). Four sub-states:
+// conversation module). It works like the glasses' LLM app: it opens on a
+// home menu whose rows come from System_LLMHomeMenuCore.h, the list the G2
+// builds too (Open chat / Ask (Mic / Keys) / Ask (guided) / New chat /
+// Re-run last / Model, plus a low-context warning). The chat view:
 //
-//   NO_MODEL    — model isn't loaded. Footer: "A: pick model".
+//   NO_MODEL    — no model is loaded. A opens the model picker.
 //   LOADING     — model load in progress (`llmload` runs on cmd_exec; this
 //                 screen holds until its reply arrives and the engine settles).
-//   READY       — chat view with turn history. "A: ask  Y: retry".
-//   GENERATING  — streaming the active turn, "B: stop".
+//   READY       — the latest question and its whole reply, opened at the first
+//                 line like the glasses' reader. Up/down scroll a line,
+//                 left/right a screen; A asks, Y re-runs, B or X returns home.
+//   GENERATING  — the same view while the reply arrives; B stops it.
 //
-// Model selection is now delegated to the shared file picker (OLED_Display.h's
-// FilePickerRequest): NO_MODEL → A pushes a picker, the file browser opens
-// scoped to /system/llm and filtered to *.bin, the callback loads the picked
-// model. The prior inline picker (own ArduinoJson parse of llmListModels())
-// is gone.
+// The model picker lists every source's models through the backend registry,
+// with "Unload model" first, as on the glasses. Footer hints go through the
+// shared footer (oledLLMFooterHint), which owns the bottom of the screen.
 //
-// Other carry-overs from the previous version:
-//   - No local conversation buffer; turns come from chatGetTurnCount/InfoCopy.
+//   - The reader re-reads the latest run (chatReadRun) only when it changes and
+//     wraps it with the shared System_TextPager core; turns stay in the chat
+//     module.
 //   - No private xTaskCreate'd worker; generation rides the engine's existing
 //     async task and we pull-on-read each render.
 //   - Settings actually apply (gSettings.llm* is consumed by chatBeginTurn).
-//   - Retry is a single button press (Y), no retyping the prompt.
 
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
@@ -37,6 +40,7 @@
 #endif
 #include "System_LLMBackend.h"   // registry + source dispatch
 #include "System_LLMChat.h"
+#include "System_TextPager.h"     // textWrapAppend — the shared wrap core
 #include "System_Debug.h"
 #include "System_MemUtil.h"
 
@@ -46,13 +50,13 @@
 
 static const int LLM_CHARS         = 21;   // Characters per line at text size 1
 static const int LLM_LINE_H        = 10;   // Pixels per text line
-static const int LLM_VISIBLE_LINES = 4;    // Chat lines visible above the footer
-static const int LLM_FOOTER_H      = 10;   // Footer bar height
-
-// Render scratch — flat-out copy of the conversation as wrapped lines. Sized
-// to cover full visible window plus a couple of lines of headroom for the
-// streaming case. Lives in DRAM but is small (~600 B).
-static const int LLM_RENDER_LINES = 12;
+// Lines between the header and the shared footer: 4 on the 128x64 OLED, 9 on
+// the P4X-EYE's 128x128 canvas.
+static const int LLM_VISIBLE_LINES = OLED_CONTENT_HEIGHT / LLM_LINE_H > 0
+                                     ? OLED_CONTENT_HEIGHT / LLM_LINE_H : 1;
+// The reply reader wraps one column short so the scroll marks in the last
+// column never cover text.
+static const int LLM_READER_COLS   = LLM_CHARS - 1;
 
 // ============================================================================
 // UI state
@@ -63,33 +67,45 @@ enum class LLMUIState : uint8_t {
   LOADING,
   READY,
   GENERATING,
-  // Action menu + model picker. MENU is reached with X from READY (where X was
-  // previously inert whenever the model shipped no guided menu); PICK_MODEL is
-  // reached from MENU or with A from NO_MODEL. Both are list pickers over
-  // OLEDScrollState, the same shape as the three guided levels below.
-  MENU,
+  // Home menu + model picker, both list pickers over OLEDScrollState, the same
+  // shape as the three guided levels below. HOME is where the mode opens and
+  // where B returns from the chat view and the pickers; PICK_MODEL is reached
+  // from HOME's Model row or with A from NO_MODEL.
+  HOME,
   PICK_MODEL,
   // Guided-input menu pickers (LLM_GUIDED_MENU_SPEC §8) — nested sub-states
-  // entered with X from READY when the loaded model ships a menu. Back (B) pops
-  // one level: ENTITY -> TEMPLATE -> GROUP -> READY.
+  // entered from HOME's "Ask (guided)" row when the loaded model ships a menu.
+  // Back (B) pops one level: ENTITY -> TEMPLATE -> GROUP -> HOME.
   PICK_GROUP,
   PICK_TEMPLATE,
   PICK_ENTITY,
 };
 
-static LLMUIState sUIState = LLMUIState::NO_MODEL;
+static LLMUIState sUIState = LLMUIState::HOME;
 static bool       sKeyboardActive = false;
-static int        sScrollOffset = 0;        // 0 = newest at bottom; positive = scrolled back
+static LLMUIState sKeyboardReturn = LLMUIState::HOME;  // where a cancelled or empty prompt goes
+static bool       sLoadReturnsHome = false; // a picker load settles on HOME, not the chat view
 
-// Render scratch — wrapped lines built from chatReadTurn() during display.
-// Each "line" is a (turn-index, byte-offset-into-turn, length) triple plus a
-// pre-wrapped 21-char snippet. Used to make scroll/wrap math local.
-struct WrappedLine {
-  char text[LLM_CHARS + 1];
-  bool isUserPrompt;   // affects rendering (prepended ">" for user turns)
-};
-EXT_RAM_BSS_ATTR static WrappedLine sRenderLines[LLM_RENDER_LINES];
-static int sRenderLineCount = 0;
+// The shared footer (drawOLEDFooter) clears and draws the bottom strip after
+// this mode renders, so the mode hands it its hint instead of drawing one.
+static char sFooterHint[LLM_CHARS + 1] = "";
+
+// Reply reader, as on the glasses: the latest exchange (the question, then the
+// whole reply), wrapped once whenever the reply changes and scrolled by line.
+// The buffers are PSRAM; a remote reply can be 16 KiB.
+#define LLM_READER_MAX_LINES 1024
+static const size_t LLM_READER_WRAP_CAP =
+    LLM_CHAT_TURN_MAX_BYTES + LLM_CHAT_TURN_MAX_BYTES / LLM_READER_COLS + 256;
+static_assert(LLM_READER_WRAP_CAP <= UINT16_MAX, "line offsets are uint16_t");
+EXT_RAM_BSS_ATTR static char     sReplyRaw[LLM_CHAT_TURN_MAX_BYTES];
+EXT_RAM_BSS_ATTR static char     sReplyWrapped[LLM_READER_WRAP_CAP];
+EXT_RAM_BSS_ATTR static uint16_t sReplyLineOff[LLM_READER_MAX_LINES];
+static int          sReplyLines  = 0;      // lines in sReplyWrapped
+static ChatRunToken sReplyRun    = 0;      // the run the buffers hold
+static int          sReplyRawLen = 0;      // raw bytes read from that run
+static bool         sReplyDone   = false;  // that run had finished at the last read
+static bool         sReplyStale  = true;   // rebuild on the next frame
+static int          sReaderTop   = 0;      // first visible line
 
 // ============================================================================
 // Guided-input menu picker state (LLM_GUIDED_MENU_SPEC §8)
@@ -114,11 +130,13 @@ EXT_RAM_BSS_ATTR static OLEDScrollState sTplScroll;
 EXT_RAM_BSS_ATTR static OLEDScrollState sEntScroll;
 static bool sPickScrollInit = false;
 
-// Action menu + model picker. sModelDescs is the selection source of truth —
+// Home menu + model picker. sModelDescs is the selection source of truth —
 // rows are display text only, and every choice is made by INDEX into this array,
 // so no pointer into a rebuilt list can go stale.
 #define LLM_MODEL_ROWS 12
-EXT_RAM_BSS_ATTR static OLEDScrollState sMenuScroll;
+#define LLM_HOME_ROWS  8
+EXT_RAM_BSS_ATTR static OLEDScrollState sHomeScroll;
+EXT_RAM_BSS_ATTR static llmhome::Row    sHomeRows[LLM_HOME_ROWS];
 EXT_RAM_BSS_ATTR static OLEDScrollState sModelScroll;
 EXT_RAM_BSS_ATTR static char         sModelRows[LLM_MODEL_ROWS][LLM_CHARS + 1];
 EXT_RAM_BSS_ATTR static LlmModelDesc sModelDescs[LLM_MODEL_ROWS];
@@ -165,7 +183,7 @@ static void clearChatForOled() {
   }
   sLastTurnGuided = false;
   sGuidedAskSession = 0;
-  sScrollOffset = 0;
+  sReplyStale = true;
   sMenuStatus = "New chat ready";
 }
 
@@ -246,19 +264,29 @@ static void pollLlmCommandReply() {
   portEXIT_CRITICAL(&sCmdMux);
   if (!ready) return;
   sCmdInFlight = LLM_CMD_NONE;
+  if (op == LLM_CMD_UNLOAD) {
+    // Unload starts in the model picker and lands on HOME, whose Model row
+    // follows the engine; only the outcome is left to say.
+    if (!status) {
+      sMenuStatus = "Model unloaded";
+    } else if (reason[0]) {
+      strlcpy(sMenuStatusBuffer, reason, sizeof(sMenuStatusBuffer));
+      sMenuStatus = sMenuStatusBuffer;
+    } else {
+      sMenuStatus = status;
+    }
+    return;
+  }
   if (!status) return;
   if (op == LLM_CMD_LOAD && sUIState == LLMUIState::LOADING) {
     sUIState = LLMUIState::PICK_MODEL;
+    sLoadReturnsHome = false;
     if (reason[0]) {
       strlcpy(sMenuStatusBuffer, reason, sizeof(sMenuStatusBuffer));
       sMenuStatus = sMenuStatusBuffer;
     } else {
       sMenuStatus = status;
     }
-  } else if (op == LLM_CMD_UNLOAD && sUIState == LLMUIState::NO_MODEL &&
-             llmBackendIsReady()) {
-    sUIState = LLMUIState::MENU;
-    sMenuStatus = status;
   }
 }
 
@@ -269,7 +297,7 @@ static void pollLlmCommandReply() {
 // True for every sub-state that owns the screen until the user leaves it.
 // Keep in sync with the switch inside syncStateFromEngine().
 static bool stateOwnsUI(LLMUIState s) {
-  return s == LLMUIState::MENU        || s == LLMUIState::PICK_MODEL ||
+  return s == LLMUIState::HOME        || s == LLMUIState::PICK_MODEL ||
          s == LLMUIState::PICK_GROUP  || s == LLMUIState::PICK_TEMPLATE ||
          s == LLMUIState::PICK_ENTITY;
 }
@@ -295,17 +323,11 @@ static void syncStateFromEngine() {
   // loaded and the guided levels require one.
   if (stateOwnsUI(sUIState)) {
     switch (sUIState) {
+      case LLMUIState::HOME:
       case LLMUIState::PICK_MODEL:
-        // No engine precondition at all — this screen is how a model gets
-        // chosen in the first place. Leaves only on select or back.
-        break;
-      case LLMUIState::MENU:
-        // Actions here act on a loaded model; if it went away, so does the menu.
-        if (st.state != LLMState::READY) {
-          sUIState = (st.state == LLMState::LOADING) ? LLMUIState::LOADING
-                                                     : LLMUIState::NO_MODEL;
-          sMenuStatus = nullptr;
-        }
+        // No engine precondition: HOME's rows are rebuilt from the engine every
+        // frame, and the picker is how a model gets chosen in the first place.
+        // Both leave only on a selection or back.
         break;
       default:
         // Guided levels (spec §8): an unload/swap bumps menuGeneration and an
@@ -314,8 +336,7 @@ static void syncStateFromEngine() {
         if (st.state != LLMState::READY ||
             llmMenuGroupCount() == 0 ||
             llmMenuGeneration() != sPickGen) {
-          sUIState = (st.state == LLMState::READY) ? LLMUIState::READY
-                                                   : LLMUIState::NO_MODEL;
+          sUIState = LLMUIState::HOME;
           sPickStatus = nullptr;
         }
         break;
@@ -326,7 +347,6 @@ static void syncStateFromEngine() {
   // Generation overrides everything else
   if (chatIsGenerating()) {
     if (sUIState != LLMUIState::GENERATING) {
-      sScrollOffset = 0;
       sUIState = LLMUIState::GENERATING;
     }
     return;
@@ -341,18 +361,22 @@ static void syncStateFromEngine() {
   // From LOADING → READY/NO_MODEL based on engine state. While our own
   // `llmload` is queued or running, the engine still shows the previous model
   // (or none), so hold until its reply arrives.
+  // A load started from the picker settles on HOME, as on the glasses, where
+  // the Model row now names it. A load the chat view only watched (another
+  // surface started it) settles back on the chat view.
   if (sUIState == LLMUIState::LOADING) {
     if (sCmdInFlight == LLM_CMD_LOAD) return;
-    if (st.state == LLMState::READY) {
-      sUIState = LLMUIState::READY;
-    } else if (st.state == LLMState::ERROR || st.state == LLMState::UNLOADED) {
-      sUIState = LLMUIState::NO_MODEL;
+    if (st.state == LLMState::READY ||
+        st.state == LLMState::ERROR || st.state == LLMState::UNLOADED) {
+      if (sLoadReturnsHome) {
+        sUIState = LLMUIState::HOME;
+        sLoadReturnsHome = false;
+      } else {
+        sUIState = (st.state == LLMState::READY) ? LLMUIState::READY : LLMUIState::NO_MODEL;
+      }
     }
     return;
   }
-
-  // Our own `llmunload` is queued: keep the empty screen until it replies.
-  if (sCmdInFlight == LLM_CMD_UNLOAD && sUIState == LLMUIState::NO_MODEL) return;
 
   // Otherwise reflect whatever the engine reports.
   if (st.state == LLMState::READY) {
@@ -376,34 +400,20 @@ static void ensurePickScrollInit();
 // path here at all — was literally unrepresentable. This is the same
 // OLEDScrollState pattern the guided levels below already use.
 
-// Fit a model name into `cap` columns, dropping a known extension and, if still
-// too long, eliding the MIDDLE. Model families differ in their SUFFIX
-// ("…-Q3_K_XL" vs "…-Q4_0"), so a plain head-truncation renders two different
-// quantisations of one model as the same row.
-static void modelDisplayName(const char* name, char* out, size_t cap) {
-  if (!out || cap == 0) return;
-  char base[LLM_MODEL_NAME_LEN];
-  strlcpy(base, name ? name : "", sizeof(base));
-  char* dot = strrchr(base, '.');
-  if (dot && (strcasecmp(dot, ".gguf") == 0 || strcasecmp(dot, ".bin") == 0)) *dot = '\0';
+// Model rows carry (void*)(index + 1); the Unload row sits past every index.
+static void* const MODEL_ROW_UNLOAD = (void*)(uintptr_t)(LLM_MODEL_ROWS + 1);
 
-  const size_t len = strlen(base);
-  if (len < cap) { strlcpy(out, base, cap); return; }
-  // head + '~' + tail
-  const size_t keep = cap - 2;              // room for the '~' and the NUL
-  const size_t head = (keep + 1) / 2;
-  const size_t tail = keep - head;
-  memcpy(out, base, head);
-  out[head] = '~';
-  memcpy(out + head + 1, base + len - tail, tail);
-  out[head + 1 + tail] = '\0';
-}
-
+// "Unload model" first, then every source's models, with the loaded one marked
+// by a leading '*' — the glasses' picker in the same order.
 static void populateModelPicker() {
   ensurePickScrollInit();
   oledScrollClearKeepSelection(&sModelScroll);
   sModelCount = (int)llmEnumerateModels(sModelDescs, LLM_MODEL_ROWS);
+  oledScrollAddItem(&sModelScroll, "Unload model", nullptr, true, MODEL_ROW_UNLOAD);
 
+  // Compare IDs, not paths: a remote model has no path.
+  LlmModelDesc active;
+  const bool haveActive = llmBackendIsReady() && llmBackendActiveModel(&active);
   for (int i = 0; i < sModelCount; i++) {
     const LlmModelDesc& d = sModelDescs[i];
     // 21 glyphs total, and oledScrollRenderSimple prints a 2-char "> " cursor
@@ -412,13 +422,14 @@ static void populateModelPicker() {
     // than the last few characters of its name.
     const char* tag = (d.backend == LlmBackendKind::Cm5) ? "[pi]"
                     : (d.storage == LLM_STORAGE_SD)      ? "[sd]" : "";
+    const bool isActive = haveActive && strcmp(d.id, active.id) == 0;
     char nameBuf[LLM_CHARS + 1];
     const size_t tagLen  = strlen(tag) ? strlen(tag) + 1 : 0;   // tag + space
-    const size_t markLen = d.available ? 0 : 2;                 // trailing " x"
+    const size_t markLen = (d.available ? 0 : 2) + (isActive ? 1 : 0);  // " x", "*"
     size_t room = 19;
     room = (room > tagLen + markLen) ? room - tagLen - markLen : 1;
-    modelDisplayName(d.name, nameBuf, room + 1);
-    snprintf(sModelRows[i], sizeof(sModelRows[i]), "%s%s%s%s",
+    llmhome::fitName(d.name, room, nameBuf, sizeof(nameBuf));
+    snprintf(sModelRows[i], sizeof(sModelRows[i]), "%s%s%s%s%s", isActive ? "*" : "",
              tag, tagLen ? " " : "", nameBuf, d.available ? "" : " x");
     oledScrollAddItem(&sModelScroll, sModelRows[i], nullptr, true,
                       (void*)(uintptr_t)(i + 1));   // +1 so index 0 isn't nullptr
@@ -443,6 +454,13 @@ static void enterPickModel() {
 static void commitModelPick() {
   OLEDScrollItem* sel = oledScrollGetSelected(&sModelScroll);
   if (!sel || !sel->userData) return;
+  if (sel->userData == MODEL_ROW_UNLOAD) {
+    if (sCmdInFlight != LLM_CMD_NONE) { sMenuStatus = "busy"; return; }
+    if (!submitLlmCommand("llmunload", LLM_CMD_UNLOAD)) { sMenuStatus = "unload failed"; return; }
+    sMenuStatus = "Unloading...";   // pollLlmCommandReply replaces it with the outcome
+    sUIState = LLMUIState::HOME;
+    return;
+  }
   const int idx = (int)((uintptr_t)sel->userData) - 1;
   if (idx < 0 || idx >= sModelCount) return;
   if (!sModelDescs[idx].available) { sMenuStatus = "not available"; return; }
@@ -458,37 +476,32 @@ static void commitModelPick() {
     return;
   }
   sMenuStatus = nullptr;
+  sLoadReturnsHome = true;
   sUIState = LLMUIState::LOADING;
 }
 
 // ============================================================================
-// Action menu (X from READY)
+// Home menu — the rows the glasses show too (System_LLMHomeMenuCore.h)
 // ============================================================================
-// X used to open the guided menu and was INERT whenever the model shipped none,
-// which is most of them. Reusing it for a small action list costs no affordance
-// and gives the model picker a home — the ANO encoder has only A/B/X/Y plus a
-// chorded START, all already assigned, so a new button was not available.
+// Rebuilt every frame so the Model row and the optional rows (guided, re-run,
+// low context) follow the engine. Each row's action rides in its userData,
+// offset by one so no row carries nullptr.
 
-enum : uintptr_t { MENU_ROW_ASK = 1, MENU_ROW_GUIDED, MENU_ROW_NEW_CHAT, MENU_ROW_MODEL, MENU_ROW_UNLOAD };
-
-static void populateMenuPicker() {
+static void populateHomeMenu() {
   ensurePickScrollInit();
-  oledScrollClearKeepSelection(&sMenuScroll);
-  oledScrollAddItem(&sMenuScroll, "Ask a question", nullptr, true, (void*)MENU_ROW_ASK);
-  if (llmMenuGroupCount() > 0)   // 0 on every remote model, and on local ones with no MENU blob
-    oledScrollAddItem(&sMenuScroll, "Guided questions", nullptr, true, (void*)MENU_ROW_GUIDED);
-  oledScrollAddItem(&sMenuScroll, "New chat",       nullptr, true, (void*)MENU_ROW_NEW_CHAT);
-  oledScrollAddItem(&sMenuScroll, "Switch model",   nullptr, true, (void*)MENU_ROW_MODEL);
-  oledScrollAddItem(&sMenuScroll, "Unload model",   nullptr, true, (void*)MENU_ROW_UNLOAD);
+  oledScrollClearKeepSelection(&sHomeScroll);
+  const size_t n = llmHomeMenuRowsNow(false, LLM_CHARS - 2, sHomeRows, LLM_HOME_ROWS);
+  for (size_t i = 0; i < n; i++) {
+    oledScrollAddItem(&sHomeScroll, sHomeRows[i].label, nullptr, true,
+                      (void*)(uintptr_t)((uint8_t)sHomeRows[i].action + 1));
+  }
+  oledScrollClampSelection(&sHomeScroll);
 }
 
-static void enterMenu() {
+static void enterHome() {
   ensurePickScrollInit();
-  sMenuScroll.selectedIndex = 0;
-  sMenuScroll.scrollOffset  = 0;
-  sMenuStatus = nullptr;
-  populateMenuPicker();
-  sUIState = LLMUIState::MENU;
+  sPickStatus = nullptr;
+  sUIState = LLMUIState::HOME;
 }
 
 // ============================================================================
@@ -499,7 +512,7 @@ static void ensurePickScrollInit() {
   if (sPickScrollInit) return;
   int vis = OLED_CONTENT_HEIGHT / 8;   // single-line (8px) rows in the content area
   if (vis < 1) vis = 1;
-  oledScrollInit(&sMenuScroll,  nullptr, vis);
+  oledScrollInit(&sHomeScroll,  nullptr, vis);
   oledScrollInit(&sModelScroll, nullptr, vis);
   oledScrollInit(&sGroupScroll, nullptr, vis);
   oledScrollInit(&sTplScroll,   nullptr, vis);
@@ -627,100 +640,115 @@ static void submitGuided(int entityIndex) {
     sLastTurnGuided   = true;
     sGuidedAskSession = rc;
     sPickStatus       = nullptr;
-    sScrollOffset     = 0;
     sUIState          = LLMUIState::GENERATING;   // stream the answer (existing view)
   } else if (rc == 0) {
     // Busy — a generation is already in flight. Stay in the picker; show status.
     sPickStatus = "Busy: answer in progress";
   } else {
-    // -1 stale gen (model swapped) / -2 bad index / -3 no menu — bail to READY;
-    // syncStateFromEngine reflects NO_MODEL from there if the model is truly gone.
+    // -1 stale gen (model swapped) / -2 bad index / -3 no menu — back to HOME,
+    // whose rows show what the engine has now.
     sPickStatus = nullptr;
-    sUIState    = LLMUIState::READY;
+    sUIState    = LLMUIState::HOME;
   }
 }
 
 // ============================================================================
-// Conversation rendering — build wrapped lines from the chat module
+// Reply reader — the latest exchange, wrapped once per change (as on the G2)
 // ============================================================================
 
-// Walk the conversation, wrap each turn into LLM_CHARS-wide lines, append into
-// sRenderLines (newest at the end). Stops when sRenderLines is full — we keep
-// the newest lines because scroll defaults to bottom.
-static void rebuildRenderLines() {
-  sRenderLineCount = 0;
-  int turnCount = chatGetTurnCount();
-  if (turnCount == 0) return;
-
-  // Two-pass strategy: figure out total lines, then skip the oldest ones if
-  // they'd overflow our scratch (favor newer content).
-  // Pass 1: count lines for each turn into a small array.
-  struct TurnLineSpan { int lineStart; int lineCount; };
-  TurnLineSpan spans[LLM_CHAT_MAX_TURNS];
-  int totalLines = 0;
-
-  // The display task is the sole renderer. Retain this scratch in PSRAM:
-  // remote replies can be 16 KiB and must never live on the OLED task stack.
-  EXT_RAM_BSS_ATTR static char turnBuf[LLM_CHAT_TURN_MAX_BYTES];
-  for (int i = 0; i < turnCount; i++) {
-    spans[i].lineStart = totalLines;
-    int copied = chatReadTurn(i, 0, turnBuf, sizeof(turnBuf));
-    if (copied <= 0) {
-      spans[i].lineCount = 0;
-      continue;
-    }
-    // Fold to the ASCII the classic GFX font can actually draw, BEFORE counting
-    // lines. This pass and the emit pass below must fold identically or the
-    // line count and the emitted text disagree and the view scrolls wrong.
-    //
-    // Folding is what makes the byte arithmetic below correct: post-fold one
-    // byte is one glyph, so ceil(copied / LLM_CHARS) is a real line count and
-    // the memcpy slice is a real 21-glyph line. Un-folded, a multi-byte
-    // character both drew as garbage AND stole glyphs from the line.
-    copied = (int)utf8FoldToAscii(turnBuf, (size_t)copied);
-    turnBuf[copied] = '\0';
-    // Count wrapped lines = ceil(copied / LLM_CHARS), minimum 1 if any chars.
-    int lc = (copied + LLM_CHARS - 1) / LLM_CHARS;
-    if (lc < 1) lc = 1;
-    spans[i].lineCount = lc;
-    totalLines += lc;
+// Fold to the ASCII the classic GFX font can draw, one line at a time:
+// utf8FoldToAscii turns control bytes, newlines included, into spaces, and the
+// reader keeps the reply's line breaks. Folding never grows text, so it runs in
+// place. Returns the new length.
+static size_t foldKeepingNewlines(char* s, size_t n) {
+  size_t w = 0, start = 0;
+  for (size_t i = 0; i <= n; ++i) {
+    if (i < n && s[i] != '\n') continue;
+    const size_t segment = i - start;
+    memmove(s + w, s + start, segment);
+    w += utf8FoldToAscii(s + w, segment);
+    if (i < n) s[w++] = '\n';
+    start = i + 1;
   }
+  s[w] = '\0';
+  return w;
+}
 
-  // Pass 2: emit the newest LLM_RENDER_LINES into sRenderLines.
-  int skipLines = totalLines > LLM_RENDER_LINES ? totalLines - LLM_RENDER_LINES : 0;
-  int emitted = 0;
-  for (int i = 0; i < turnCount && emitted < LLM_RENDER_LINES; i++) {
-    if (spans[i].lineCount == 0) continue;
+// Re-read the latest run and its question and wrap them. A new run opens at its
+// first line, as the glasses' reader opens a new reply on page one.
+static void rebuildReader(ChatRunToken run) {
+  if (run != sReplyRun) sReaderTop = 0;
+  sReplyRun = run;
+  sReplyStale = false;
+  bool done = false;
+  int len = run ? chatReadRun(run, 0, sReplyRaw, (int)sizeof(sReplyRaw), &done) : 0;
+  if (len < 0) { len = 0; done = true; }   // cleared or replaced since the token was read
+  sReplyRawLen = len;
+  sReplyDone = done;
 
-    // Where does this turn's content overlap with the visible window?
-    int turnLineStart = spans[i].lineStart;
-    int firstWantedLineInTurn = skipLines > turnLineStart ? skipLines - turnLineStart : 0;
-    if (firstWantedLineInTurn >= spans[i].lineCount) continue;
+  size_t pos = 0;
+  bool truncated = false;
+  sReplyWrapped[0] = '\0';
+  sReplyLines = 0;
+  if (!run) return;
 
+  // The question: the newest user turn, up to two lines.
+  for (int i = chatGetTurnCount() - 1; i >= 0; --i) {
     ChatTurnInfo info;
-    if (!chatGetTurnInfo(i, &info)) continue;
-
-    int copied = chatReadTurn(i, 0, turnBuf, sizeof(turnBuf));
-    if (copied <= 0) continue;
-    // Must match the fold in the counting pass above exactly.
-    copied = (int)utf8FoldToAscii(turnBuf, (size_t)copied);
-    turnBuf[copied] = '\0';
-
-    for (int line = firstWantedLineInTurn;
-         line < spans[i].lineCount && emitted < LLM_RENDER_LINES;
-         line++) {
-      int offset = line * LLM_CHARS;
-      int len = copied - offset;
-      if (len <= 0) break;
-      if (len > LLM_CHARS) len = LLM_CHARS;
-      WrappedLine& wl = sRenderLines[emitted];
-      memcpy(wl.text, turnBuf + offset, len);
-      wl.text[len] = '\0';
-      wl.isUserPrompt = (info.role == ChatTurnRole::USER);
-      emitted++;
+    if (!chatGetTurnInfo(i, &info) || info.role != ChatTurnRole::USER) continue;
+    // "> " then two rows: 18 glyphs on the first, 18 after the 2-space indent.
+    char question[2 + (LLM_READER_COLS - 2) * 2 + 1] = "> ";
+    const int n = chatReadTurn(i, 0, question + 2, (int)sizeof(question) - 2);
+    if (n > 0) {
+      question[2 + utf8FoldToAscii(question + 2, (size_t)n)] = '\0';
+      textWrapAppend(sReplyWrapped, sizeof(sReplyWrapped), pos, question,
+                     LLM_READER_COLS, 2, true, &truncated);
+      textWrapAppend(sReplyWrapped, sizeof(sReplyWrapped), pos, "\n",
+                     LLM_READER_COLS, 0, true, &truncated);
     }
+    break;
   }
-  sRenderLineCount = emitted;
+
+  const size_t folded = foldKeepingNewlines(sReplyRaw, (size_t)len);
+  const char* reply = folded ? sReplyRaw : done ? "(empty reply)" : "Waiting for reply...";
+  textWrapAppend(sReplyWrapped, sizeof(sReplyWrapped), pos, reply,
+                 LLM_READER_COLS, 0, true, &truncated);
+  while (pos > 0 && sReplyWrapped[pos - 1] == '\n') sReplyWrapped[--pos] = '\0';
+
+  if (pos == 0) return;
+  sReplyLineOff[sReplyLines++] = 0;
+  for (size_t i = 0; i < pos && sReplyLines < LLM_READER_MAX_LINES; ++i) {
+    if (sReplyWrapped[i] == '\n') sReplyLineOff[sReplyLines++] = (uint16_t)(i + 1);
+  }
+}
+
+// Called every frame. Cheap unless the reply changed: a finished run is left
+// alone, and a live one is probed for one byte past what was read.
+static void syncReader() {
+  const ChatRunToken run = chatGetRunToken();
+  if (sReplyStale || run != sReplyRun) { rebuildReader(run); return; }
+  if (!run || sReplyDone) return;
+  char probe[2];
+  bool done = false;
+  const int n = chatReadRun(run, sReplyRawLen, probe, (int)sizeof(probe), &done);
+  if (n != 0 || done) rebuildReader(run);   // more text, finished, or replaced (-1)
+}
+
+// Line `index` of the wrapped reply, copied into `out` (at most one row).
+static void readerLine(int index, char* out, size_t cap) {
+  out[0] = '\0';
+  if (index < 0 || index >= sReplyLines || cap == 0) return;
+  const char* p = sReplyWrapped + sReplyLineOff[index];
+  size_t n = 0;
+  while (p[n] && p[n] != '\n' && n + 1 < cap) { out[n] = p[n]; ++n; }
+  out[n] = '\0';
+}
+
+static void scrollReader(int lines) {
+  const int maxTop = sReplyLines > LLM_VISIBLE_LINES ? sReplyLines - LLM_VISIBLE_LINES : 0;
+  sReaderTop += lines;
+  if (sReaderTop > maxTop) sReaderTop = maxTop;
+  if (sReaderTop < 0) sReaderTop = 0;
 }
 
 // ============================================================================
@@ -728,11 +756,12 @@ static void rebuildRenderLines() {
 // ============================================================================
 
 static void drawFooter(const char* line) {
-  if (!line || !oledDisplay) return;
-  int y = DISPLAY_HEIGHT - LLM_FOOTER_H;
-  oledDisplay->drawFastHLine(0, y, DISPLAY_WIDTH, DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(0, y + 1);
-  oledDisplay->print(line);
+  strlcpy(sFooterHint, line ? line : "", sizeof(sFooterHint));
+}
+
+// The hint drawOLEDFooter() shows for this mode: whatever the last frame set.
+const char* oledLLMFooterHint() {
+  return sFooterHint;
 }
 
 static void displayLLM_noModel() {
@@ -742,7 +771,7 @@ static void displayLLM_noModel() {
   oledDisplay->println("Press A to pick one,");
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y + LLM_LINE_H * 2);
   oledDisplay->println("or use /llmload.");
-  drawFooter("A: pick");
+  drawFooter("A:pick  B:menu");
 }
 
 static void displayLLM_loading() {
@@ -751,19 +780,20 @@ static void displayLLM_loading() {
   static const char* spin[] = {".  ", ".. ", "..."};
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y + LLM_LINE_H);
   oledDisplay->print(spin[(millis() / 300) % 3]);
-  drawFooter("");
+  drawFooter("B:menu");
 }
 
 // Fill the content area with the loaded model's info-block icon + description, so
 // a freshly loaded model shows what it is before the first question. Called only
 // on the empty-conversation READY screen (there are no chat lines to draw yet).
-static void drawModelCard() {
+// Returns false when the model has neither (every remote source).
+static bool drawModelCard() {
   const uint8_t* iconBits = nullptr;
   uint8_t iw = 0, ih = 0;
   const bool hasIcon = llmModelIcon(&iconBits, &iw, &ih) && iconBits;
   const char* desc = llmModelDescription();
   const bool hasDesc = desc && desc[0];
-  if (!hasIcon && !hasDesc) return;  // nothing to show — leave the plain empty view
+  if (!hasIcon && !hasDesc) return false;
 
   int textX = 0;
   if (hasIcon) {
@@ -772,7 +802,7 @@ static void drawModelCard() {
     textX = 2 + iw + 4;  // description sits to the right of the icon
   }
 
-  if (!hasDesc) return;
+  if (!hasDesc) return true;
 
   int charsPerLine = (DISPLAY_WIDTH - textX) / 6;
   if (charsPerLine < 1) charsPerLine = 1;
@@ -799,65 +829,39 @@ static void drawModelCard() {
     while (*p == ' ') p++;  // swallow the break space(s)
     y += LLM_LINE_H;
   }
+  return true;
 }
 
 static void displayLLM_chat(bool generating) {
-  rebuildRenderLines();
+  syncReader();
 
-  // Clamp scroll
-  int maxScroll = sRenderLineCount > LLM_VISIBLE_LINES
-                  ? sRenderLineCount - LLM_VISIBLE_LINES : 0;
-  if (sScrollOffset > maxScroll) sScrollOffset = maxScroll;
-  if (sScrollOffset < 0) sScrollOffset = 0;
-
-  // Empty conversation on a loaded model: show its info-block icon + description
-  // instead of a blank content area. (The chat loop below draws nothing here.)
-  if (!generating && chatGetTurnCount() == 0) {
-    drawModelCard();
-  }
-
-  int firstVisible = sRenderLineCount - LLM_VISIBLE_LINES - sScrollOffset;
-  if (firstVisible < 0) firstVisible = 0;
-
-  int y = OLED_CONTENT_START_Y;
-  for (int i = 0; i < LLM_VISIBLE_LINES; i++) {
-    int idx = firstVisible + i;
-    if (idx >= sRenderLineCount) break;
-    oledDisplay->setCursor(0, y);
-    if (sRenderLines[idx].isUserPrompt && (i == 0 || !sRenderLines[idx - 1].isUserPrompt
-        || idx == 0 || sRenderLines[idx - 1].text[0] != '>')) {
-      // Visual distinction: prefix with ">" if this is the first line of a user turn
-      char buf[LLM_CHARS + 2];
-      snprintf(buf, sizeof(buf), ">%.*s", LLM_CHARS - 1, sRenderLines[idx].text);
-      oledDisplay->print(buf);
-    } else {
-      oledDisplay->print(sRenderLines[idx].text);
+  if (sReplyLines == 0) {
+    // No exchange yet: the loaded model's icon + description, or, for a model
+    // without one, how to start.
+    if (!drawModelCard()) {
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
+      oledDisplay->print("No messages yet.");
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y + LLM_LINE_H);
+      oledDisplay->print("Press A to ask.");
     }
-    y += LLM_LINE_H;
-  }
-
-  // Streaming cursor (blink underscore at the end of the last rendered line)
-  if (generating && sRenderLineCount > 0) {
-    int lastVisible = firstVisible + LLM_VISIBLE_LINES - 1;
-    if (lastVisible >= sRenderLineCount) lastVisible = sRenderLineCount - 1;
-    if (lastVisible >= 0 && (millis() / 500) % 2 == 0) {
-      int len = (int)strlen(sRenderLines[lastVisible].text);
-      if (len < LLM_CHARS) {
-        oledDisplay->setCursor(len * 6,
-                               OLED_CONTENT_START_Y + (lastVisible - firstVisible) * LLM_LINE_H);
-        oledDisplay->print("_");
-      }
+  } else {
+    scrollReader(0);   // clamp after a rebuild shortened the reply
+    char line[LLM_CHARS + 1];
+    for (int i = 0; i < LLM_VISIBLE_LINES; i++) {
+      readerLine(sReaderTop + i, line, sizeof(line));
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y + i * LLM_LINE_H);
+      oledDisplay->print(line);
     }
-  }
-
-  // Scroll indicators
-  if (firstVisible > 0) {
-    oledDisplay->setCursor(121, OLED_CONTENT_START_Y);
-    oledDisplay->print("^");
-  }
-  if (sScrollOffset > 0) {
-    oledDisplay->setCursor(121, OLED_CONTENT_START_Y + (LLM_VISIBLE_LINES - 1) * LLM_LINE_H);
-    oledDisplay->print("v");
+    // Scroll marks in the column the reader leaves free.
+    const int markX = LLM_READER_COLS * 6 + 2;
+    if (sReaderTop > 0) {
+      oledDisplay->setCursor(markX, OLED_CONTENT_START_Y);
+      oledDisplay->print("^");
+    }
+    if (sReaderTop + LLM_VISIBLE_LINES < sReplyLines) {
+      oledDisplay->setCursor(markX, OLED_CONTENT_START_Y + (LLM_VISIBLE_LINES - 1) * LLM_LINE_H);
+      oledDisplay->print("v");
+    }
   }
 
   // Footer — a PSRAM-starved context (ctx auto-fit unusably low) makes every
@@ -871,16 +875,16 @@ static void displayLLM_chat(bool generating) {
   } else if (generating) {
     drawFooter("B: stop");
   } else if (chatGetTurnCount() > 0 && llmBackendSupportsRetry()) {
-    drawFooter("A: ask  Y: retry");
+    drawFooter("A:ask Y:retry B:menu");
   } else {
-    drawFooter("A: ask");
+    drawFooter("A:ask  B:menu");
   }
 }
 
-static void displayLLM_menu() {
-  populateMenuPicker();
-  oledScrollRenderSimple(oledDisplay, &sMenuScroll);
-  drawFooter(sMenuStatus ? sMenuStatus : "A: pick  B: back");
+static void displayLLM_home() {
+  populateHomeMenu();
+  oledScrollRenderSimple(oledDisplay, &sHomeScroll);
+  drawFooter(sMenuStatus ? sMenuStatus : "A:pick  B:back");
 }
 
 static void displayLLM_pickModel() {
@@ -909,6 +913,15 @@ static void displayLLM_pickEntity() {
   drawFooter(sPickStatus ? sPickStatus : "A: pick  B: back");
 }
 
+// The OLED redraws only a screen marked dirty. While something here changes on
+// its own (a reply arriving, a model loading, a load or unload command out),
+// the screen asks for its next frame, as the Speech screen does; without that a
+// reply was never drawn until a key was pressed. Idle, it waits for input.
+static bool llmScreenIsLive() {
+  return sUIState == LLMUIState::GENERATING || sUIState == LLMUIState::LOADING ||
+         sCmdInFlight != LLM_CMD_NONE || (sReplyRun != 0 && !sReplyDone);
+}
+
 static void displayLLM() {
   if (!oledDisplay) return;
   oledDisplay->setTextSize(1);
@@ -927,17 +940,67 @@ static void displayLLM() {
     case LLMUIState::LOADING:       displayLLM_loading();      break;
     case LLMUIState::READY:         displayLLM_chat(false);    break;
     case LLMUIState::GENERATING:    displayLLM_chat(true);     break;
-    case LLMUIState::MENU:          displayLLM_menu();         break;
+    case LLMUIState::HOME:          displayLLM_home();         break;
     case LLMUIState::PICK_MODEL:    displayLLM_pickModel();    break;
     case LLMUIState::PICK_GROUP:    displayLLM_pickGroup();    break;
     case LLMUIState::PICK_TEMPLATE: displayLLM_pickTemplate(); break;
     case LLMUIState::PICK_ENTITY:   displayLLM_pickEntity();   break;
   }
+  if (llmScreenIsLive()) oledMarkDirty();
 }
 
 // ============================================================================
 // Input
 // ============================================================================
+
+// Opens the prompt keyboard (it can also dictate); a cancelled or empty prompt
+// returns to `from`, a submitted one to the chat view to watch the answer.
+static void openPrompt(LLMUIState from) {
+  oledKeyboardInit("Prompt:", nullptr, OLED_KEYBOARD_MAX_LENGTH,
+                   OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+  sKeyboardActive = true;
+  sKeyboardReturn = from;
+}
+
+// Re-run the last question. A guided ask must be re-run PLAIN via
+// llmMenuRepeatLast() — chatRetryLast() suppresses the previous answer's tokens,
+// which bans the memorized-correct answer for a guided question (spec §5).
+// Branch on whether our last submission was guided and the menu module still
+// holds that same session; otherwise fall back to a normal free-text retry.
+static void rerunLast() {
+  if (!llmBackendSupportsRetry()) return;
+  int gs = 0;
+  if (sLastTurnGuided && llmMenuLastAskInfo(&gs) && gs == sGuidedAskSession) {
+    // llmMenuRepeatLast advances the module's last-ask session to the new turn;
+    // track it locally so a SECOND consecutive retry still matches (otherwise
+    // gs != sGuidedAskSession and it falls through to chatRetryLast, banning
+    // the memorized-correct answer). (spec §5)
+    int sid = llmMenuRepeatLast();
+    if (sid > 0) sGuidedAskSession = sid;
+  } else {
+    chatRetryLast(nullptr);
+  }
+}
+
+// Up/down move the reply one line, left/right a screen (keeping one line of
+// context), as the glasses page through a reply.
+static bool scrollReaderByNav() {
+  const int page = LLM_VISIBLE_LINES > 1 ? LLM_VISIBLE_LINES - 1 : 1;
+  if (gNavEvents.up)    { scrollReader(-1);    return true; }
+  if (gNavEvents.down)  { scrollReader(1);     return true; }
+  if (gNavEvents.left)  { scrollReader(-page); return true; }
+  if (gNavEvents.right) { scrollReader(page);  return true; }
+  return false;
+}
+
+// The chat view; the next sync settles it on GENERATING, LOADING or NO_MODEL
+// when the engine says so.
+static void openChatView() {
+  sReplyStale = true;   // reread, and open at the first line as the glasses do
+  sReaderTop = 0;
+  sMenuStatus = nullptr;
+  sUIState = LLMUIState::READY;
+}
 
 static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
   if (oledGuestBlocksMutate()) return true;
@@ -951,12 +1014,16 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       if (prompt.length() > 0) {
         chatBeginTurn(prompt.c_str(), nullptr);
         sLastTurnGuided = false;   // free-text turn — Y retry uses chatRetryLast
+        openChatView();
+      } else {
+        sUIState = sKeyboardReturn;
       }
       return true;
     }
     if (oledKeyboardIsCancelled()) {
       oledKeyboardReset();
       sKeyboardActive = false;
+      sUIState = sKeyboardReturn;
       return true;
     }
     return false;
@@ -970,22 +1037,18 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         enterPickModel();
         return true;
       }
-      return false;  // B falls through to global back-handler
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) { enterHome(); return true; }
+      return false;
     }
 
     case LLMUIState::LOADING:
-      // The "hypothetical async-load future" this case was written for is here:
-      // a CM5-routed select returns immediately and the host may take tens of
-      // seconds to restart llama-server, so this is now a long-lived state that
-      // the input handler DOES run in.
-      //
-      // The old body could not escape it. Setting NO_MODEL achieved nothing —
-      // syncStateFromEngine re-derives LOADING from the engine on the very next
-      // frame — and returning true swallowed B, so the central dispatcher's
-      // "handler declined and B was pressed" path never ran oledMenuBack() and
-      // the user could not leave the mode at all short of the global Quick
-      // Settings key. Decline B so that back-handler fires.
-      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) return false;
+      // A CM5-routed select returns immediately and the host may take tens of
+      // seconds to restart llama-server, so this is a long-lived state. B goes
+      // home while the load carries on; HOME's Model row shows when it lands.
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+        sLoadReturnsHome = false;
+        enterHome();
+      }
       return true;
 
     case LLMUIState::GENERATING: {
@@ -995,93 +1058,63 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       }
       // Allow scroll while streaming so the user can read back without
       // stopping the generation.
-      if (gNavEvents.up)   { sScrollOffset++; return true; }
-      if (gNavEvents.down) { if (sScrollOffset > 0) sScrollOffset--; return true; }
+      if (scrollReaderByNav()) return true;
       return false;
     }
 
     case LLMUIState::READY: {
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-        oledKeyboardInit("Prompt:", nullptr, OLED_KEYBOARD_MAX_LENGTH,
-                         OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
-        sKeyboardActive = true;
-        return true;
-      }
-      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-        // X opens the action menu, which is where guided questions now live
-        // alongside Switch model / Unload. Previously X went straight to the
-        // guided picker and was inert whenever the model shipped no menu.
-        enterMenu();
+        openPrompt(LLMUIState::READY);
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
-        if (!llmBackendSupportsRetry()) return true;
-        // Retry. A guided ask must be re-run PLAIN via llmMenuRepeatLast() —
-        // chatRetryLast() suppresses the previous answer's tokens, which bans the
-        // memorized-correct answer for a guided question (spec §5). Branch on
-        // whether our last submission was guided and the menu module still holds
-        // that same session; otherwise fall back to a normal free-text retry.
-        int gs = 0;
-        if (sLastTurnGuided && llmMenuLastAskInfo(&gs) && gs == sGuidedAskSession) {
-          // llmMenuRepeatLast advances the module's last-ask session to the new
-          // turn; track it locally so a SECOND consecutive retry still matches
-          // (otherwise gs != sGuidedAskSession and it falls through to
-          // chatRetryLast, banning the memorized-correct answer). (spec §5)
-          int sid = llmMenuRepeatLast();
-          if (sid > 0) sGuidedAskSession = sid;
-        } else {
-          chatRetryLast(nullptr);
-        }
+        rerunLast();
         return true;
       }
-      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-        return false;  // global back
+      // B returns home, as the glasses' viewer does; X does too, where it used
+      // to open the action menu that HOME replaced.
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+        enterHome();
+        return true;
       }
-      if (gNavEvents.up)   { sScrollOffset++; return true; }
-      if (gNavEvents.down) { if (sScrollOffset > 0) sScrollOffset--; return true; }
+      if (scrollReaderByNav()) return true;
       return false;
     }
 
-    case LLMUIState::MENU: {
-      if (oledScrollHandleNav(&sMenuScroll)) { sMenuStatus = nullptr; return true; }
+    case LLMUIState::HOME: {
+      if (oledScrollHandleNav(&sHomeScroll)) { sMenuStatus = nullptr; return true; }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-        OLEDScrollItem* sel = oledScrollGetSelected(&sMenuScroll);
-        if (!sel) return true;
-        switch ((uintptr_t)sel->userData) {
-          case MENU_ROW_ASK:
-            oledKeyboardInit("Prompt:", nullptr, OLED_KEYBOARD_MAX_LENGTH,
-                             OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
-            sKeyboardActive = true;
-            sUIState = LLMUIState::READY;   // keyboard overlay owns the screen
+        OLEDScrollItem* sel = oledScrollGetSelected(&sHomeScroll);
+        if (!sel || !sel->userData) return true;
+        sMenuStatus = nullptr;
+        switch ((LlmHomeAction)((uintptr_t)sel->userData - 1)) {
+          case LlmHomeAction::Open:
+            openChatView();
             break;
-          case MENU_ROW_GUIDED:
+          case LlmHomeAction::Ask:
+            if (llmBackendIsReady()) openPrompt(LLMUIState::HOME);
+            else sMenuStatus = "No model loaded";
+            break;
+          case LlmHomeAction::Guided:
             if (llmMenuGroupCount() > 0) enterPickGroup();
             break;
-          case MENU_ROW_NEW_CHAT:
+          case LlmHomeAction::NewChat:
             clearChatForOled();
             break;
-          case MENU_ROW_MODEL:
+          case LlmHomeAction::Rerun:
+            rerunLast();
+            openChatView();
+            break;
+          case LlmHomeAction::Model:
             enterPickModel();
             break;
-          case MENU_ROW_UNLOAD:
-            if (sCmdInFlight != LLM_CMD_NONE) { sMenuStatus = "busy"; break; }
-            if (!submitLlmCommand("llmunload", LLM_CMD_UNLOAD)) {
-              sMenuStatus = "unload failed";
-              break;
-            }
-            sMenuStatus = nullptr;
-            sUIState = LLMUIState::NO_MODEL;
+          case LlmHomeAction::Back:
+          case LlmHomeAction::Terminal:   // glasses only; never listed here
             break;
-          default: break;
         }
         return true;
       }
-      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-        sUIState = LLMUIState::READY;
-        sMenuStatus = nullptr;
-        return true;
-      }
-      return true;   // modal — don't leak keys to the global handlers
+      return false;   // B falls through to the global back-handler: leave the app
     }
 
     case LLMUIState::PICK_MODEL: {
@@ -1095,10 +1128,8 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-        // Back goes wherever we came from: the chat view if a model is already
-        // live, otherwise the empty-state screen.
-        sUIState = llmBackendIsReady() ? LLMUIState::READY : LLMUIState::NO_MODEL;
         sMenuStatus = nullptr;
+        enterHome();   // as the glasses' picker returns to its submenu
         return true;
       }
       return true;
@@ -1111,8 +1142,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-        sUIState = LLMUIState::READY;   // back one level
-        sPickStatus = nullptr;
+        enterHome();   // back one level
         return true;
       }
       return true;  // picker is modal — don't leak other keys to global handlers
@@ -1195,13 +1225,15 @@ void resetLLMOLEDState() {
     sKeyboardActive = false;
   }
   sPickStatus = nullptr;   // drop any stale guided-picker busy status
-  // Snap state to whatever the engine is actually doing right now.
-  LLMStatus st = llmBackendStatus();
-  if (chatIsGenerating())                                sUIState = LLMUIState::GENERATING;
-  else if (st.state == LLMState::READY)                  sUIState = LLMUIState::READY;
-  else if (st.state == LLMState::LOADING)                sUIState = LLMUIState::LOADING;
-  else                                                   sUIState = LLMUIState::NO_MODEL;
-  sScrollOffset = 0;
+  sMenuStatus = nullptr;
+  sLoadReturnsHome = false;
+  // The app opens on its home menu, as on the glasses, with the cursor on top.
+  ensurePickScrollInit();
+  sHomeScroll.selectedIndex = 0;
+  sHomeScroll.scrollOffset  = 0;
+  sUIState = LLMUIState::HOME;
+  sReplyStale = true;
+  sReaderTop = 0;
 }
 
 // ============================================================================

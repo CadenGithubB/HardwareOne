@@ -78,7 +78,7 @@ bool g2SubmitHijackCommand(const char* line, const G2CmdCookie&, Completion, voi
 struct G2HijackCtxGuard { G2HijackCtxGuard() {} };
 static int currentAuthContext() { return 1; }
 static bool canRead(const String&, int) { return true; }
-static bool readTextLimited(const char*, String&, size_t) { return false; }
+static bool readTextLimited(const char*, String&, size_t, int) { return false; }
 static bool captureCryptoIsMagicLine(const char*) { return false; }
 #define CAPCRYPT_MAGIC_PREFIX "HW1CAP1"
 

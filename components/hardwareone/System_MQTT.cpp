@@ -1280,7 +1280,7 @@ bool startMQTT() {
     // TLS + Certificate Verification
     if (gSettings.mqttCACertPath.length() > 0) {
       FsLockGuard fsGuard("mqtt.cert.load");
-      File certFile = VFS::openGuarded(gSettings.mqttCACertPath, "r", VFS::systemAuth("mqtt.cert.load"));
+      File certFile = VFS::openGuarded(gSettings.mqttCACertPath, "r", VFS::systemAuth(VFS::Scopes::CERTS, "mqtt.cert.load"));
       if (certFile) {
         caCertData = certFile.readString();
         certFile.close();

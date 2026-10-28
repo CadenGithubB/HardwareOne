@@ -24,14 +24,15 @@ extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic,
 // JavaScript.
 //
 // Deliberately a plain GET rather than a wrapper around `power`: executeCommand
-// stamps powerSaveNoteActivity() for every non-internal transport, so polling
-// this through /api/cli would hold the device out of idle power-save forever —
-// the page would break the very feature it reports on.
+// counts every non-internal command as activity, so polling this through
+// /api/cli would keep the clock at the in-use clock forever — the page would
+// break the very feature it reports on.
 esp_err_t handlePowerStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   httpd_resp_set_type(req, "application/json");
-  // Worst case (widest numbers, longest mode names) serializes to 785 B, and
-  // the `modes` table is fixed-size so it cannot grow at runtime. serializeJson
+  // Worst case (widest numbers, longest mode names, "recording" boost)
+  // serializes to about 910 B (test_power_save_tick.py measures it), and the
+  // `modes` table is fixed-size so it cannot grow at runtime. serializeJson
   // silently TRUNCATES to fit rather than failing, so a short buffer would emit
   // invalid JSON the page cannot parse — keep the headroom.
   static char* buf = nullptr;
@@ -63,11 +64,13 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
   <div style='display:flex;flex-wrap:wrap;gap:1.5rem;align-items:baseline'>
     <div><span id='pw-mode' style='font-size:2rem;font-weight:bold'>--</span></div>
     <div><span id='pw-cpu' style='font-size:2rem;font-weight:bold'>--</span><span style='font-size:1.1rem'> MHz</span></div>
-    <div id='pw-downclocked' class='text-muted' style='display:none'>idle power-save has downclocked the core</div>
+    <div id='pw-downclocked' class='text-muted' style='display:none'>idle: the clock has dropped to the idle clock</div>
+    <div id='pw-boost' class='text-muted' style='display:none'></div>
   </div>
   <div class='settings-grid' style='margin-top:1.25rem'>
     <div class='sys-card'>
-      <div class='sys-card-row'><span>Active clock</span><strong id='pw-active'>--</strong></div>
+      <div class='sys-card-row'><span>Target clock</span><strong id='pw-target'>--</strong></div>
+      <div class='sys-card-row'><span>In-use clock</span><strong id='pw-active'>--</strong></div>
       <div class='sys-card-row'><span>Idle clock</span><strong id='pw-idle'>--</strong></div>
       <div class='sys-card-row'><span>XTAL / APB</span><strong id='pw-xtal'>--</strong></div>
     </div>
@@ -89,10 +92,10 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
 
 <div class='card' data-guest-hide id='pw-card-mode'>
   <h3 style='margin-top:0'>CPU &amp; power mode</h3>
-  <p class='text-muted text-sm'>Applies immediately and persists. The second figure is the clock idle power-save may sink to once the display blanks.</p>
+  <p class='text-muted text-sm'>Applies immediately and persists. The first figure is the clock while the device is in use, the second the clock after the idle timeout. Every mode runs transcription, camera and recording at the maximum clock while they are busy.</p>
   <div class='btn-row' id='pw-modes'></div>
   <h4 style='margin:1.25rem 0 .5rem'>Set the clock directly</h4>
-  <p class='text-muted text-sm'>One-off override; the next power-mode change or wake replaces it. Interactive floor: <span id='pw-cpu-floor'>--</span> MHz.</p>
+  <p class='text-muted text-sm'>One-off override; it lasts until the policy next changes its target (idle, wake, or a workload starting or ending). Interactive floor: <span id='pw-cpu-floor'>--</span> MHz.</p>
   <div class='btn-row' id='pw-frequencies'></div>
 </div>
 
@@ -102,7 +105,7 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     <div>
       <label for='pw-in-save'>Power saving (minutes, 0 disables)</label>
       <input type='number' id='pw-in-save' min='0' max='1440' class='input-fit input-m'>
-      <div class='text-muted text-sm' id='pw-save-note'>Blanks the display and downclocks after this much idle time. The radio stays up.</div>
+      <div class='text-muted text-sm' id='pw-save-note'>After this much idle time the clock drops to the idle clock and the display blanks. The radio stays up.</div>
       <button class='btn btn-small space-top-sm' id='pw-save-apply'>Apply</button>
     </div>
     <div>
@@ -244,8 +247,15 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     renderFrequencies(s);
     hw.setText('pw-mode', s.modeName || '--');
     hw.setText('pw-cpu', s.cpuMhz != null ? s.cpuMhz : '--');
-    hw.toggle('pw-downclocked', s.cpuMhz != null && s.activeMhz != null && s.cpuMhz < s.activeMhz);
+    // The busy workload holding the clock at maximum, named by the policy
+    // ("stt" / "camera" / "recording"), or "none".
+    var boostNames = {stt: 'transcription', camera: 'the camera', recording: 'recording'};
+    var boosted = s.boost && s.boost !== 'none';
+    hw.setText('pw-boost', boosted ? 'at the maximum clock for ' + (boostNames[s.boost] || s.boost) : '');
+    hw.toggle('pw-boost', boosted);
+    hw.toggle('pw-downclocked', !boosted && s.cpuMhz != null && s.activeMhz != null && s.cpuMhz < s.activeMhz);
 
+    hw.setText('pw-target', s.targetMhz != null ? s.targetMhz + ' MHz' : '--');
     hw.setText('pw-active', s.activeMhz + ' MHz');
     hw.setText('pw-idle', s.idleMhz + ' MHz');
     hw.setText('pw-xtal', s.xtalMhz + ' / ' + s.apbMhz + ' MHz');
@@ -253,17 +263,17 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     hw.setText('pw-auto', s.autoModeSupported ? (s.autoMode ? 'On' : 'Off') : 'not available');
     hw.setText('pw-bright', s.displayBrightness + '/255 (dim ' + s.displayDimLevel + '%)');
 
-    if (!s.powerSaveSupported) {
-      hw.setText('pw-ps', 'not supported on this build');
-      hw.setText('pw-idlefor', '--');
-      hw.setText('pw-save-note', 'This build has no display, so nothing consumes the idle timeout.');
-    } else if (s.powerSaveMinutes === 0) {
+    // The idle timeout drops the clock on every build; only a build with a
+    // local display also blanks a panel.
+    if (s.powerSaveMinutes === 0) {
       hw.setText('pw-ps', 'disabled');
-      hw.setText('pw-idlefor', dur(s.idleMsAgo));
     } else {
-      hw.setText('pw-ps', s.powerSaveMinutes + ' min');
-      hw.setText('pw-idlefor', dur(s.idleMsAgo));
+      hw.setText('pw-ps', s.powerSaveMinutes + ' min' + (s.displayPowerSave ? '' : ' (clock only)'));
     }
+    hw.setText('pw-idlefor', dur(s.idleMsAgo));
+    hw.setText('pw-save-note', s.displayPowerSave
+      ? 'After this much idle time the clock drops to the idle clock, and the display blanks when no one has used the device itself. The radio stays up.'
+      : 'After this much idle time the clock drops to the idle clock. This build has no local display to blank. The radio stays up.');
     hw.setText('pw-cooldown', s.cooldownMs === 0 ? 'disabled'
       : (s.cooldownMs + ' ms' + (s.cooldownRemainingMs > 0 ? ' (' + s.cooldownRemainingMs + ' ms to go)' : '')));
 

@@ -1,4 +1,4 @@
-# Hardware One v0.99.98.4 - User Guide
+# Hardware One v0.99.99 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -648,6 +648,7 @@ setting, regardless of which setting it was.
 | `sensor_started` / `sensor_stopped` | sensor came up / stopped (includes Camera) | sensor name |
 | `sensor_start_failed` | sensor failed to start | sensor name |
 | `sensor_fault` | sensor auto-disabled after repeated I2C errors | sensor name / errors |
+| `sensor_unresponsive` / `sensor_recovered` | a sensor that answered since boot stopped responding / answered again (once per outage) | sensor name / address, bus, nack\|timeout |
 | `presence_detected` / `presence_cleared` | IR presence trip / cleared (held ~2s) | value |
 | `gesture` | APDS swipe detected | UP\|DOWN\|LEFT\|RIGHT |
 | `imu_shake` / `imu_tap` / `imu_freefall` | device shaken / knocked / dropped | intensity |
@@ -1440,11 +1441,21 @@ maporganize                     - Organize map files in /maps into subdirectorie
 <summary><strong>power - Power management</strong></summary>
 
 ```
-power                           - Show power mode status
-power mode <mode>               - Set power mode
-power auto                      - Enable automatic power management
-power threshold <value>         - Set power threshold
+power                           - Show the mode, live and target clock, and any busy workload
+power json                      - The same as one JSON blob (the schema of /api/power/status)
+power mode <mode>               - perf, balanced, adaptive (the default), ultra, locked, or 0-4
+power auto / power threshold    - Not available in this firmware
 ```
+
+A mode sets the clock while the device is in use and after the idle timeout
+(`powersave`). Every mode runs transcription, the camera and a recording at the
+maximum clock while they are busy and drops back when they finish; Adaptive
+stays at the lowest clock otherwise. The idle downclock runs on every board. A
+board with a local display also blanks it after the timeout, and only local
+input, the display's own commands or on-device voice light it again: a command
+from the glasses, phone, web or serial keeps the clock up but leaves the screen
+dark. `cpufreq` sets the clock directly and lasts until the policy next changes
+its target.
 </details>
 
 <details>

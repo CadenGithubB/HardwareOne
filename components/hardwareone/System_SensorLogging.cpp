@@ -288,7 +288,8 @@ static bool writeHeaderChecked(File& f) {
 // every backend (an existing destination on SD would make replaceFileGuarded
 // keep a .bak of it), and a failed header leaves no empty file behind.
 static File openSensorLogForAppend(const String& path) {
-  const auto ctx = VFS::systemAuth("senlog.append");
+  // Confined to the capture root of the tier `path` resolved to.
+  const auto ctx = VFS::systemAuth(VFS::captureScopeFor(path), "senlog.append");
   const bool headerless = !gSensorLogSealed && gSensorLogFormat == SENSOR_LOG_TEXT;
   if (VFS::existsGuarded(path, ctx)) {
     File file = VFS::openGuarded(path, "a", ctx, true);
@@ -352,7 +353,7 @@ static size_t sensorLogResolvedSize(const String& path) {
   VFS::resolveOverflowPath(path.c_str(), (size_t)gSensorLogMaxSize,
                            resolved, sizeof(resolved));
   File f = VFS::openGuarded(String(resolved), "r",
-                            VFS::systemAuth("senlog.sizeseed"));
+                            VFS::systemAuth(VFS::captureScopeFor(String(resolved)), "senlog.sizeseed"));
   if (!f) return 0;
   size_t sz = f.size();
   f.close();
@@ -390,7 +391,7 @@ static String resolveSessionTarget(const String& shaped) {
     VFS::resolveOverflowPath(candidate.c_str(), (size_t)gSensorLogMaxSize,
                              resolved, sizeof(resolved));
     File f = VFS::openGuarded(String(resolved), "r",
-                              VFS::systemAuth("senlog.compat"));
+                              VFS::systemAuth(VFS::captureScopeFor(String(resolved)), "senlog.compat"));
     if (!f) return candidate;                       // missing → fresh
     if (f.size() == 0) { f.close(); return candidate; }  // empty → adopt
     // Read the first line. 1024-byte buffer: the worst-case header with
@@ -1091,7 +1092,7 @@ void sensorLogTick() {
         // keeps the estimate rather than resetting it or resolving a new tier.
         gApproxSizeBytes += written;
         if (!complete) {
-          File sizeFile = VFS::openGuarded(String(activePath), "r", VFS::systemAuth("senlog.size"));
+          File sizeFile = VFS::openGuarded(String(activePath), "r", VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.size"));
           if (sizeFile) {
             gApproxSizeBytes = sizeFile.size();
             sizeFile.close();
@@ -1119,8 +1120,8 @@ void sensorLogTick() {
             {
               char oldestFile[128];
               snprintf(oldestFile, sizeof(oldestFile), "%s.%d", activePath, gSensorLogMaxRotations);
-              if (VFS::existsGuarded(String(oldestFile), VFS::systemAuth("senlog.rotate"))) {
-                VFS::removeGuarded(String(oldestFile), VFS::systemAuth("senlog.rotate"));
+              if (VFS::existsGuarded(String(oldestFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"))) {
+                VFS::removeGuarded(String(oldestFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
               }
             }
 
@@ -1131,17 +1132,17 @@ void sensorLogTick() {
               char fromFile[128], toFile[128];
               snprintf(fromFile, sizeof(fromFile), "%s.%d", activePath, i);
               snprintf(toFile, sizeof(toFile), "%s.%d", activePath, i + 1);
-              if (VFS::existsGuarded(String(fromFile), VFS::systemAuth("senlog.rotate"))) {
-                VFS::renameGuarded(String(fromFile), String(toFile), VFS::systemAuth("senlog.rotate"));
+              if (VFS::existsGuarded(String(fromFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"))) {
+                VFS::renameGuarded(String(fromFile), String(toFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
               }
             }
 
-            if (VFS::existsGuarded(String(activePath), VFS::systemAuth("senlog.rotate"))) {
+            if (VFS::existsGuarded(String(activePath), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"))) {
               String rotatedFile = String(activePath) + ".1";
-              VFS::renameGuarded(String(activePath), rotatedFile, VFS::systemAuth("senlog.rotate"));
+              VFS::renameGuarded(String(activePath), rotatedFile, VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
             }
           } else {
-            VFS::removeGuarded(String(activePath), VFS::systemAuth("senlog.rotate"));
+            VFS::removeGuarded(String(activePath), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
           }
 
           gApproxSizeBytes = 0;
@@ -1359,6 +1360,15 @@ static const char* sensorLogStart(String filepath, uint32_t interval, bool persi
   if (filepath.length() == 0 || filepath.charAt(0) != '/') {
     return "Error: Filepath must start with / (e.g., /logging_captures/sensors/sensors.txt)";
   }
+  // Sensor logs live in the capture tree on either tier and nowhere else. The
+  // writes below run as the system identity, so without this gate a caller
+  // could append sensor rows to any file on the device (settings, roster).
+  // The scoped contexts below refuse an out-of-tree path too, but only after
+  // a directory walk; refuse it here, before anything is touched.
+  if (!VFS::pathInCaptureTree(filepath)) {
+    return "Error: Filepath must be inside " CAPTURE_DIR " or /sd" CAPTURE_DIR
+           " (e.g., " CAPTURE_SENSORLOG_DEFAULT ")";
+  }
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
@@ -1366,18 +1376,18 @@ static const char* sensorLogStart(String filepath, uint32_t interval, bool persi
   int lastSlash = filepath.lastIndexOf('/');
   if (lastSlash > 0) {
     String dir = filepath.substring(0, lastSlash);
-    if (!VFS::existsGuarded(dir, VFS::systemAuth("senlog.setup_mkdir"))) {
+    if (!VFS::existsGuarded(dir, VFS::systemAuth(VFS::captureScopeFor(filepath), "senlog.setup_mkdir"))) {
       // Create parent directories iteratively via VFS so the sensor log's
       // write path and directory creation use the same dispatcher.
       for (int i = 1; i <= (int)dir.length(); i++) {
         if (i == (int)dir.length() || dir.charAt(i) == '/') {
           String parent = dir.substring(0, i);
-          if (parent.length() > 0 && !VFS::existsGuarded(parent, VFS::systemAuth("senlog.setup_mkdir"))) {
-            VFS::mkdirGuarded(parent, VFS::systemAuth("senlog.setup_mkdir"));
+          if (parent.length() > 0 && !VFS::existsGuarded(parent, VFS::systemAuth(VFS::captureScopeFor(filepath), "senlog.setup_mkdir"))) {
+            VFS::mkdirGuarded(parent, VFS::systemAuth(VFS::captureScopeFor(filepath), "senlog.setup_mkdir"));
           }
         }
       }
-      if (!VFS::existsGuarded(dir, VFS::systemAuth("senlog.setup_mkdir"))) {
+      if (!VFS::existsGuarded(dir, VFS::systemAuth(VFS::captureScopeFor(filepath), "senlog.setup_mkdir"))) {
         snprintf(getDebugBuffer(), 1024, "Error: Failed to create directory: %s", dir.c_str());
         return getDebugBuffer();
       }
@@ -1404,7 +1414,7 @@ static const char* sensorLogStart(String filepath, uint32_t interval, bool persi
   // and the next base created after rotation or an overflow-tier change.
   {
     FsLockGuard fsGuard("sensorlog.setup_create");
-    const bool created = !VFS::existsGuarded(filepath, VFS::systemAuth("senlog.setup_create"));
+    const bool created = !VFS::existsGuarded(filepath, VFS::systemAuth(VFS::captureScopeFor(filepath), "senlog.setup_create"));
     File f = openSensorLogForAppend(filepath);
     if (!f) {
       snprintf(getDebugBuffer(), 1024, "Error: Failed to prepare log file: %s", filepath.c_str());

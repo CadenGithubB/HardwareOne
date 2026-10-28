@@ -568,15 +568,15 @@ static void case_network_http_callbacks() {
   gCase = "network_http_callbacks";
   resetWorld();
   refuse(kAdminRefusal);
-  httpStartConfirmedNetwork(nullptr);
+  webServerStartConfirmed(nullptr);
   EXPECT(ran() == "openhttp" && gToast == "Admin required",
-         "a refused HTTP start from the Network menu shows the refusal, ran: " + ran() +
+         "a refused HTTP start from the Web menu shows the refusal, ran: " + ran() +
              ", toast: '" + gToast + "'");
   resetWorld();
   refuse(kAdminRefusal);
-  httpStopConfirmedNetwork(nullptr);
+  webServerStopConfirmed(nullptr);
   EXPECT(ran() == "closehttp" && gToast == "Admin required",
-         "a refused HTTP stop from the Network menu shows the refusal, toast: '" + gToast + "'");
+         "a refused HTTP stop from the Web menu shows the refusal, toast: '" + gToast + "'");
 }
 
 int main() {

@@ -34,6 +34,7 @@
 #if ENABLE_LLM_BACKEND
 
 #include <Arduino.h>
+#include "System_LLMHomeMenuCore.h"
 #include "System_LLMTypes.h"
 
 // ============================================================================
@@ -168,6 +169,11 @@ bool llmBackendSupportsCommandMode();
 
 // Agents may perform actions. Regeneration must not replay their last request.
 bool llmBackendSupportsRetry();
+
+// The LLM app's home menu rows for the backend's current state, shared by the
+// glasses and the local display (System_LLMHomeMenuCore.h). `terminal` adds the
+// glasses' Terminal row; `width` is the surface's characters per row.
+size_t llmHomeMenuRowsNow(bool terminal, size_t width, llmhome::Row* out, size_t cap);
 
 // Starts a fresh remote conversation; does not erase host history or memory.
 // False while the source is still releasing an active request.

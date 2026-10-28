@@ -347,11 +347,12 @@ static void test_create() {
   assert(save(0x6f1c9a2e00000007ull, &path));
   assert(path == "/stt/u7/notes/20261004T153012Z-6f1c9a2e00000007.txt");
   assert(dirExists("/stt") && dirExists("/stt/u7") && dirExists("/stt/u7/notes"));
-  // Only the protected root uses the trusted context; everything else is the
-  // named owner, confined to her own folder.
+  // Only the protected root uses the trusted context (one context, used for
+  // the probe and the create); everything else is the named owner, confined
+  // to her own folder.
   assert(VFS::systemAuths == 1);
   for (size_t i = 0; i < VFS::contexts.size(); ++i)
-    assert(VFS::contexts[i] == (i == 0 ? "system|/stt" : "alice|/stt/u7"));
+    assert(VFS::contexts[i] == (i < 2 ? "system|/stt" : "alice|/stt/u7"));
   // tmp then rename, then nothing but the note.
   assert(VFS::renames.size() == 1 &&
          VFS::renames[0].first == "/stt/u7/notes/20261004T153012Z-6f1c9a2e00000007.tmp" &&
@@ -402,7 +403,9 @@ static void test_create() {
   assert(!std::strcmp(out, "/stt/u7/notes/20250101T000000Z-0000000000000001.txt") &&
          countFiles(".tmp") == 0 && header.words == 2 && !std::strcmp(header.title, "hi there"));
   assert(header.boot == 0 && header.uptimeS == 0);  // stamped by the caller: left as given
-  assert(VFS::systemAuths == 0);  // the root already existed
+  // Probing the protected root is itself a guarded read, so one context
+  // confined to that root is minted even when nothing needs creating.
+  assert(VFS::systemAuths == 1);
 }
 
 static void test_create_refusals() {
@@ -1035,11 +1038,13 @@ static void test_sweep() {
                                    rootTmp, fileAccount})
     assert(tree.count(stays));
   assert(tree.at(kept).data == keptData);
-  // As system confined to each tier's transcript root, one lock per tier,
-  // and only folders opened: no note (or anything else) is read.
-  assert(VFS::systemAuths == 2 && lockTakes == 2 && reads == 0);
+  // As system confined to each tier's native folder and transcript root (one
+  // context per probe), one lock per tier, and only folders opened: no note
+  // (or anything else) is read.
+  assert(VFS::systemAuths == 4 && lockTakes == 2 && reads == 0);
   for (const std::string& context : VFS::contexts)
-    assert(context == "system|/stt" || context == "system|/sd/stt");
+    assert(context == "system|/stt" || context == "system|/sd/stt" ||
+           context == "system|/g2/quicknotes" || context == "system|/sd/g2/quicknotes");
   for (const std::string& path : VFS::opened) assert(tree.at(path).dir);
   // The notes are all still listed; a second sweep finds nothing.
   assert(listing("alice", 0, false, 0) && page.total == 2);
@@ -1053,9 +1058,10 @@ static void test_sweep() {
   tree[complete] = Node{false, "x"};
   assert(QuickNoteStore::sweep(&removed, &why) && !why && removed == 1);
   assert(tree.count(cardTmp) && !tree.count(complete));
-  // No transcript root yet: nothing to do.
+  // No transcript root yet: nothing to do beyond the two guarded probes of
+  // the internal tier's native folder and root (the card is not writable).
   reset();
-  assert(QuickNoteStore::sweep(&removed, &why) && !why && removed == 0 && !VFS::systemAuths);
+  assert(QuickNoteStore::sweep(&removed, &why) && !why && removed == 0 && VFS::systemAuths == 2);
   // Busy: nothing removed, and the caller may try again.
   reset();
   makeFolder("/stt/u7/notes");

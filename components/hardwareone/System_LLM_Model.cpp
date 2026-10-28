@@ -1080,7 +1080,7 @@ bool loadWeights(const char* path) {
   // is a foreground lifecycle operation and cannot tolerate SD unmount or a
   // concurrent replacement midway through the weights.
   FsLockGuard fsGuard("llm.load_weights");
-  File f = VFS::openGuarded(path, "r", VFS::systemAuth("llm.load_weights"));
+  File f = VFS::openGuarded(path, "r", VFS::systemAuth(VFS::llmModelScopeFor(path), "llm.load_weights"));
   if (!f) {
     setLlmError("Cannot open model: %s", path);
     return false;

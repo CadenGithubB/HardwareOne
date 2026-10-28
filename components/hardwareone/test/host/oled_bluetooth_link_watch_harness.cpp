@@ -122,6 +122,20 @@ static void oledScrollClampSelection(OLEDScrollState* st) {
     st->scrollOffset = st->selectedIndex - st->visibleLines + 1;
 }
 static bool oledScrollHandleNav(OLEDScrollState*) { return false; }
+// OLED_Utils.cpp oledScrollRenderSimple: one 8 px row per visible item, "> " on
+// the selection. Its scrollbar is pixels, not text, so it is left out here.
+static void oledScrollRenderSimple(FakeDisplay* display, OLEDScrollState* state,
+                                   bool showSelection = true, int startY = OLED_CONTENT_START_Y) {
+  oledScrollClampSelection(state);
+  const int end = std::min(state->itemCount, state->scrollOffset + state->visibleLines);
+  int y = startY;
+  for (int i = state->scrollOffset; i < end; i++, y += 8) {
+    display->setCursor(0, y);
+    display->print((showSelection && i == state->selectedIndex) ? "> " : "  ");
+    if (state->items[i].line1) display->print(state->items[i].line1);
+    display->println();
+  }
+}
 static void oledScrollUp(OLEDScrollState*) {}
 static void oledScrollDown(OLEDScrollState*) {}
 inline constexpr int oledVisibleRows(int rowHeight, int reservedHeight = 0, int baselineRows = 0) {
@@ -240,7 +254,7 @@ static void getG2Status(char* out, size_t n) { std::snprintf(out, n, "ok"); }
 static void g2ShowText(const char*) {}
 bool gG2MenuNavEnabled = false;
 static bool g2RingIsConnected() { return w.ring; }
-enum BlePeerKind { BLE_PEER_G2_LEFT, BLE_PEER_G2_RIGHT, BLE_PEER_R1_RING, BLE_PEER_PHONE, BLE_PEER_MAX };
+enum BlePeerKind { BLE_PEER_G2_GLASSES, BLE_PEER_R1_RING, BLE_PEER_PHONE, BLE_PEER_MAX };  // BLE_Peers.h
 struct BlePeerReconnectSnapshot { bool autoReconnect = false; bool hasSavedTarget = false; };
 static bool blePeerReconnectSnapshot(BlePeerKind kind, BlePeerReconnectSnapshot& out) {
   out = BlePeerReconnectSnapshot{};
@@ -316,7 +330,7 @@ static void phonePipePairClose(uint32_t id) {
 
 // System_Settings.h
 struct Settings {
-  String bleDeviceName; int bleTxPower = 3; int bleMode = 0;
+  String bleDeviceName; int bleTxPower = 3; int bleMode = 0; bool bleAutoStart = false;
   bool bleConsoleOnPipe = true; String phonePipeSecret; bool phonePipeSecretGenerated = false;
 };
 static Settings gSettings;
@@ -631,11 +645,47 @@ static std::string menuRow(const char* label) {
 static void mainMenu() {
   reset();
   render(OLED_BLUETOOTH);
-  CHECK(menuIndex("Status") == 0 && menuIndex("Advertising") < 0 && menuIndex("Disconnect") < 0);
+  // The glasses' order: on/off first, then Status; Settings last.
+  CHECK(menuIndex("Bluetooth: OFF") == 0 && menuIndex("Status") == 1);
+  CHECK(menuIndex("Advertising") < 0 && menuIndex("Disconnect") < 0);
   CHECK((menuIndex("Phone >>") >= 0) == bool(ENABLE_BLE_PHONE_PIPE));
   // One row per role in the build where Start/Stop was.
   CHECK(menuIndex("Start/Stop") < 0);
-  CHECK(menuIndex("Settings") == 1 && menuIndex("App console") == 2);
+  CHECK(menuIndex("App console") == 2 && menuIndex("Settings") == sBtMenuScroll.itemCount - 1);
+  // Boot role and Auto Start sit above Settings, as on the glasses' page.
+  CHECK(menuIndex("Boot: App console") >= 0 && menuIndex("Auto Start: OFF") >= 0);
+  // Off: the first row opens the client stack, with no confirm.
+  gCommands.clear();
+  sBtMenuScroll.selectedIndex = 0;
+  CHECK(modeEntry(OLED_BLUETOOTH).inputFunc(0, 0, INPUT_BUTTON_A));
+  CHECK(!gConfirm.open && gCommands.size() == 1 && gCommands.back() == "openble");
+  // Auto Start sends the opposite of the setting; the boot role toggles the
+  // saved mode only, and says when it applies.
+  gCommands.clear();
+  sBtMenuScroll.selectedIndex = menuIndex("Auto Start: OFF");
+  CHECK(modeEntry(OLED_BLUETOOTH).inputFunc(0, 0, INPUT_BUTTON_A));
+  CHECK(gCommands.size() == 1 && gCommands.back() == "bleautostart on");
+  gSettings.bleAutoStart = true;
+  render(OLED_BLUETOOTH);
+  CHECK(menuIndex("Auto Start: ON") >= 0);
+  gCommands.clear();
+  sBtMenuScroll.selectedIndex = menuIndex("Boot: App console");
+  CHECK(modeEntry(OLED_BLUETOOTH).inputFunc(0, 0, INPUT_BUTTON_A));
+  CHECK(gCommands.size() == 1 && gCommands.back() == "blemode client");
+  CHECK(gToast == "Applies at next boot");
+  // On: the first row stops all of Bluetooth only after a confirm (default No).
+  w.server = true;
+  render(OLED_BLUETOOTH);
+  CHECK(menuIndex("Bluetooth: ON") == 0);
+  gCommands.clear();
+  sBtMenuScroll.selectedIndex = 0;
+  CHECK(modeEntry(OLED_BLUETOOTH).inputFunc(0, 0, INPUT_BUTTON_A));
+  CHECK(gConfirm.open && !gConfirm.defaultYes && gCommands.empty());
+  confirmYes();
+  CHECK(gCommands.size() == 1 && gCommands.back() == "closeble");
+  w.server = false;
+  gSettings.bleAutoStart = false;
+  render(OLED_BLUETOOTH);
   CHECK(menuIndex("Glasses") == (ENABLE_G2_GLASSES ? 3 : -1));
   CHECK(menuIndex("Phone pipe") == (ENABLE_BLE_PHONE_PIPE ? 3 + ENABLE_G2_GLASSES : -1));
   // The console's rows come from bleConsoleView(): gBLEState stays freed.
@@ -685,6 +735,54 @@ static void mainMenu() {
 #endif
   sBtMenuScroll.selectedIndex = 0;
 }
+
+#if ENABLE_G2_GLASSES
+// The G2 and R1 submenus: the glasses' rows (AutoReconnect, Reconnect) in a
+// scrolling list under a status line, so render() finds nothing under the
+// footer; each row sends the command the glasses' row sends.
+static int rowIndex(const OLEDScrollState& st, const char* label) {
+  for (int i = 0; i < st.itemCount; ++i)
+    if (std::strcmp(st.items[i].line1, label) == 0) return i;
+  return -1;
+}
+
+static void peerMenus() {
+  reset();
+  render(OLED_BLUETOOTH_G2);
+  CHECK(rowIndex(sG2MenuScroll, "Connect") == 0 && rowIndex(sG2MenuScroll, "Reconnect") < 0);
+  CHECK(rowIndex(sG2MenuScroll, "AutoReconnect: OFF") >= 0);
+  CHECK(rowIndex(sG2MenuScroll, "Nav Mode: OFF") >= 0);
+  gCommands.clear();
+  sG2MenuScroll.selectedIndex = rowIndex(sG2MenuScroll, "AutoReconnect: OFF");
+  CHECK(modeEntry(OLED_BLUETOOTH_G2).inputFunc(0, 0, INPUT_BUTTON_A));
+  CHECK(gCommands.size() == 1 && gCommands.back() == "bleautoreconnect g2-glasses on");
+  w.glassesClient = w.glasses = true;
+  render(OLED_BLUETOOTH_G2);
+  CHECK(rowIndex(sG2MenuScroll, "Disconnect") == 0 && rowIndex(sG2MenuScroll, "Reconnect") == 1);
+  CHECK(rowIndex(sG2MenuScroll, "Show Text") >= 0);
+  gCommands.clear();
+  sG2MenuScroll.selectedIndex = 1;
+  CHECK(modeEntry(OLED_BLUETOOTH_G2).inputFunc(0, 0, INPUT_BUTTON_A));
+  CHECK(gCommands.size() == 1 && gCommands.back() == "openg2 saved");
+
+  reset();
+  render(OLED_BLUETOOTH_R1);
+  CHECK(rowIndex(sR1MenuScroll, "Connect") == 0);
+  CHECK(rowIndex(sR1MenuScroll, "AutoReconnect: OFF") == 1);   // was under the footer
+  gCommands.clear();
+  sR1MenuScroll.selectedIndex = 1;
+  CHECK(modeEntry(OLED_BLUETOOTH_R1).inputFunc(0, 0, INPUT_BUTTON_A));
+  CHECK(gCommands.size() == 1 && gCommands.back() == "bleautoreconnect r1-ring on");
+  w.ring = true;
+  render(OLED_BLUETOOTH_R1);
+  CHECK(rowIndex(sR1MenuScroll, "Reconnect") == 0 && rowIndex(sR1MenuScroll, "Disconnect") == 1);
+  gCommands.clear();
+  sR1MenuScroll.selectedIndex = 0;
+  CHECK(modeEntry(OLED_BLUETOOTH_R1).inputFunc(0, 0, INPUT_BUTTON_A));
+  CHECK(gCommands.size() == 1 && gCommands.back() == "openring reconnect");
+  reset();
+}
+#endif
 
 // ---- Role rows ---------------------------------------------------------------------------
 // Taps a role row as last drawn.
@@ -1149,6 +1247,9 @@ int main() {
   statusCentral();
   statusConsole();
   mainMenu();
+#if ENABLE_G2_GLASSES
+  peerMenus();
+#endif
   roleRows();
 #if ENABLE_BLE_PHONE_PIPE
   phoneScreen();

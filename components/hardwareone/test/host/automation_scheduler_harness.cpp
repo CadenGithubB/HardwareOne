@@ -78,11 +78,13 @@ static std::function<void()> afterRead, beforeTick;
 static void io() { CHECK(stateLockDepth == 0); }
 namespace VFS {
 static int systemAuth(const char*) { return 0; }
+static int systemAuth(const char*, const char*) { return 0; }
+namespace Scopes { constexpr const char* SYSTEM_STATE = "/system"; }
 static bool existsGuarded(const char*, int) {
   io(); std::lock_guard<std::mutex> lock(storeMutex); return storeExists;
 }
 }
-static bool readText(const char*, String& out) {
+static bool readText(const char*, String& out, int) {
   io(); ++reads;
   {
     std::lock_guard<std::mutex> lock(storeMutex);
@@ -92,7 +94,7 @@ static bool readText(const char*, String& out) {
   if (afterRead) afterRead();
   return true;
 }
-static bool writeTextAtomic(const char*, const String& json) {
+static bool writeTextAtomic(const char*, const String& json, int) {
   io(); ++writes; std::lock_guard<std::mutex> lock(storeMutex);
   if (!writeSucceeds) return false;
   storeJson = json; storeExists = true; return true;

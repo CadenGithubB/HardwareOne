@@ -33,7 +33,7 @@ static void systemEventPost(int kind, const char* subject, const char* detail = 
 }
 
 namespace VFS {
-namespace Scopes { constexpr const char* VIDEOS = "/sd/VIDEOS"; }
+// Scopes::VIDEOS comes from fake_vfs.h.
 static unsigned sdInUseEnds = 0;
 inline void sdInUseEnd(const char*) { ++sdInUseEnds; }
 }  // namespace VFS

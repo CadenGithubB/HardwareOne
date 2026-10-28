@@ -402,10 +402,10 @@ struct Settings {
       bleConsoleOnPipe(true),
       phonePipeSecretGenerated(false),
       // BLE peer fields moved to gBlePeerData[] (see BLE_Peers.h)
-      powerMode(0),
+      powerMode(2),                     // POWER_MODE_ADAPTIVE (= POWER_MODE_DEFAULT in System_Power.h): floor clock, work raises it
       powerDisplayDimLevel(30),
       powerTransitionCooldownMs(5000),  // 5s anti-flap guard on sleep entry; 0 = disabled
-      powerSaveTimeoutMinutes(10),      // Idle power-save: blank OLED + 80MHz downclock after 10 min idle; 0 = disabled
+      powerSaveTimeoutMinutes(10),      // Idle timeout: CPU drops to the mode's idle clock (and the local panel blanks) after 10 min; 0 = disabled
       batteryLogEnabled(true),          // Auto-append battery time-series CSV to /battery.csv
       batteryLogIntervalMs(60000),      // Battery-log sample period (ms)
       srAutoStart(false),
@@ -1133,10 +1133,10 @@ struct Settings {
   //   bleGlassesLeftMAC, bleGlassesRightMAC, bleRingMAC, blePhoneMAC,
   //   g2AutoReconnect, ringAutoReconnect
   // Power Management settings
-  uint8_t powerMode;            // 0=Performance(240/80), 1=Balanced(160/80), 2=PowerSaver(80), 3=UltraSaver(80 active / 40 idle), 4=Locked(240 always)
+  uint8_t powerMode;            // 0=Performance(max/floor), 1=Balanced(mid/floor), 2=Adaptive(floor/floor; default), 3=UltraSaver(floor/40), 4=Locked(max always); every mode runs busy work at max — see System_Power.h
   uint8_t powerDisplayDimLevel; // Brightness % in power saver modes (0-100, default: 30)
   uint32_t powerTransitionCooldownMs; // Anti-flap cooldown between sleep entries (ms); 0 disables
-  uint32_t powerSaveTimeoutMinutes;   // Idle power-save: blank OLED + 80MHz downclock after N min idle; 0 = disabled
+  uint32_t powerSaveTimeoutMinutes;   // Idle timeout: CPU drops to the mode's idle clock (and the local panel blanks) after N min; 0 = disabled
   bool     batteryLogEnabled;         // Auto-log battery time-series CSV to /battery.csv (default on)
   uint32_t batteryLogIntervalMs;      // Battery-log sample period in ms (default 60000)
   // ESP-SR Speech Recognition settings

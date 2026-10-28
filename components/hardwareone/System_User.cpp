@@ -705,11 +705,11 @@ bool tgRequireAuth(AuthContext& ctx) {
 String getDeviceOwnerUsername() {
   if (!filesystemReady) return String();
   FsLockGuard _g("user.deviceOwner");
-  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.deviceOwner"))) {
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth(VFS::Scopes::USERS, "user.deviceOwner"))) {
     return String();
   }
   String json;
-  if (!readText(USERS_JSON_FILE, json)) return String();
+  if (!readText(USERS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::USERS, "user.deviceOwner"))) return String();
   int usersIdx = json.indexOf("\"users\"");
   if (usersIdx < 0) return String();
   int firstUKey = json.indexOf("\"username\"", usersIdx);
@@ -729,6 +729,108 @@ static bool superFromRosterJson(const String& json, const String& who);
 static bool roleFromRosterJson(const String& json, const String& username, String& roleOut);
 static bool legacyRoleFromRosterJson(const String& json, const String& username, String& outRole);
 
+// ----------------------------------------------------------------------------
+// Account authority cache
+// ----------------------------------------------------------------------------
+// authorizeCommand() asks for the caller's role on EVERY command, and the web
+// and display gates ask isAdminUser / isSuperAdminUser / userAccountRank on
+// their own schedules. Each answer used to cost one users.json read (~33 ms of
+// flash on the P4X-EYE) plus a parse, under the filesystem lock. The four
+// verdicts an account can get from the roster — role (roleFromRosterJson),
+// admin (adminFromRosterJson), super (superFromRosterJson) and legacy guest
+// (legacyRoleFromRosterJson) — are therefore computed from ONE read and kept
+// per username. The parsers are untouched and deliberately disagree (see the
+// notes above each), so all four verdicts are stored, never a merged one.
+//
+// Validity: an entry is used only while gIdentityGeneration is the value it
+// was filled under — bumped by every roster mutation (add, approve, set-role,
+// ban/unban, delete, ESP-NOW user sync, first-time setup). The generation is
+// read BEFORE the roster, so a bump that lands during a fill leaves that entry
+// stale and it is refilled on its next use. As with the display's session-role
+// cache (OLED_Utils.cpp), a users.json edit through generic file operations
+// bumps nothing; the entry then follows at the next bump or boot. Only
+// accounts the role parser resolves are cached — a banned, unknown, malformed
+// or unreadable account keeps the original fail-closed read path — and only
+// the verdicts are stored, never the roster text or any hash.
+//
+// Internal SRAM on purpose (plain .bss, no EXT_RAM_BSS_ATTR): these are
+// authority answers, and PSRAM is readable off the board.
+namespace authority_cache {
+
+constexpr size_t kSlots = 4;
+struct Entry {
+  char user[kPublicUsernameMaxLen + 1];  // "" = unused
+  char role[12];                          // a value isKnownUserRole() accepts
+  uint32_t generation;
+  bool admin;
+  bool super;
+  bool legacyGuest;
+};
+Entry sEntries[kSlots];
+size_t sNext = 0;
+portMUX_TYPE sMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Copy of the entry for `who` at the current generation, if there is one.
+static bool lookup(const String& who, Entry& out) {
+  if (who.length() == 0 || who.length() > kPublicUsernameMaxLen) return false;
+  const uint32_t generation = gIdentityGeneration.load(std::memory_order_acquire);
+  bool hit = false;
+  portENTER_CRITICAL(&sMux);
+  for (const Entry& entry : sEntries) {
+    if (entry.generation == generation && strcmp(entry.user, who.c_str()) == 0) {
+      out = entry;
+      hit = true;
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&sMux);
+  return hit;
+}
+
+// One roster read, all four parsers. The caller holds the filesystem lock.
+static bool fill(const String& who, Entry& out) {
+  if (who.length() == 0 || who.length() > kPublicUsernameMaxLen) return false;
+  const uint32_t generation = gIdentityGeneration.load(std::memory_order_acquire);
+  String json;
+  if (!readRosterJson("user.authority", json)) return false;
+  String role;
+  if (!roleFromRosterJson(json, who, role)) return false;
+  if (role.length() >= sizeof(out.role)) return false;
+  memset(&out, 0, sizeof(out));
+  memcpy(out.user, who.c_str(), who.length() + 1);
+  memcpy(out.role, role.c_str(), role.length() + 1);
+  out.generation = generation;
+  out.admin = adminFromRosterJson(json, who);
+  out.super = superFromRosterJson(json, who);
+  String legacy;
+  out.legacyGuest = legacyRoleFromRosterJson(json, who, legacy) && legacy == "guest";
+  portENTER_CRITICAL(&sMux);
+  size_t slot = sNext;
+  for (size_t i = 0; i < kSlots; ++i) {
+    if (strcmp(sEntries[i].user, out.user) == 0) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot == sNext) sNext = (sNext + 1) % kSlots;
+  sEntries[slot] = out;
+  portEXIT_CRITICAL(&sMux);
+  return true;
+}
+
+}  // namespace authority_cache
+
+// The cached verdicts for a named account, filling the cache on a miss. False
+// when the account does not resolve or the lock is unavailable; the callers
+// then run their original fail-closed path. The lock is taken only for a fill.
+static bool accountAuthority(const String& who, authority_cache::Entry& out) {
+  if (authority_cache::lookup(who, out)) return true;
+  if (!filesystemReady) return false;
+  FsLockGuard guard("user.authority");
+  if (!guard.held) return false;
+  return authority_cache::fill(who, out);
+}
+
 bool isAdminUser(const String& who) {
   // An empty identity is nobody — never admin. Checked before anything else so the
   // invariant holds regardless of how the roster parses below: a users.json with no
@@ -744,6 +846,11 @@ bool isAdminUser(const String& who) {
     return bondIdentityLive(currentAuthContext());
   }
   if (!filesystemReady) return false;
+  {
+    authority_cache::Entry account;
+    if (accountAuthority(who, account)) return account.admin;
+  }
+  // Unresolved account: the original fail-closed read.
   // Serialize with role writes (reentrant per task) so this hot-path privilege
   // check can't tear-read a users.json mid-write.
   FsLockGuard _g("user.isAdmin");
@@ -853,7 +960,7 @@ static bool readRosterJson(const char* tag, String& out) {
   // (System_Utils.cpp:823). Sharing the read must not silently drop that.
   PollPauseGuard pollGuard;
   out = "";
-  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth(tag));
+  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth(VFS::Scopes::USERS, tag));
   if (!f) return false;
   out = f.readString();
   f.close();
@@ -990,6 +1097,11 @@ bool isSuperAdminUser(const String& who) {
     return bondIdentityLive(currentAuthContext());
   }
   if (!filesystemReady) return false;
+  {
+    authority_cache::Entry account;
+    if (accountAuthority(who, account)) return account.super;
+  }
+  // Unresolved account: the original fail-closed read.
   // Serialize with role writes — an unlocked read can tear mid-write and
   // misjudge privilege. Reentrant per task, so nested FS ops are fine.
   FsLockGuard _g("user.isSuperAdmin");
@@ -1026,6 +1138,14 @@ bool getUserRoleAndSuper(const String& who, String& roleOut, bool& isSuperOut) {
   roleOut = String();
   isSuperOut = false;
   if (!filesystemReady || who.length() == 0) return false;
+  {
+    authority_cache::Entry account;
+    if (accountAuthority(who, account)) {
+      roleOut = account.role;
+      isSuperOut = account.super;
+      return true;
+    }
+  }
   FsLockGuard guard("users.roleAndSuper");
   if (!guard.held && !isFsLockedByCurrentTask()) return false;
   String json;
@@ -1080,6 +1200,13 @@ bool getUserAuthorizationRole(const String& username, String& roleOut) {
   AuthPerfScope _perf("getUserAuthorizationRole");
   roleOut = String();
   if (!filesystemReady || username.length() == 0) return false;
+  {
+    authority_cache::Entry account;
+    if (accountAuthority(username, account)) {
+      roleOut = account.role;
+      return true;
+    }
+  }
   FsLockGuard guard("users.authorization_role");
   if (!guard.held && !isFsLockedByCurrentTask()) return false;
   String json;
@@ -2147,11 +2274,11 @@ static bool mutateUsersJson(const char* tag, UsersJsonMutator mutator, void* con
     return false;
   }
   FsLockGuard guard(tag);
-  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth(tag))) {
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth(VFS::Scopes::USERS, tag))) {
     errorOut = "users.json not found";
     return false;
   }
-  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth(tag));
+  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth(VFS::Scopes::USERS, tag));
   if (!f) {
     errorOut = "Failed to read users.json";
     return false;
@@ -2180,7 +2307,7 @@ static bool mutateUsersJson(const char* tag, UsersJsonMutator mutator, void* con
     errorOut = "Failed to prepare users.json";
     return false;
   }
-  if (!writeTextAtomic(USERS_JSON_FILE, json)) {
+  if (!writeTextAtomic(USERS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::USERS, tag))) {
     logSystemEvent("USERS", "users.json REWRITE FAILED during %s - auth database may be inconsistent", tag);
     errorOut = "Failed to write users.json";
     return false;
@@ -2208,8 +2335,8 @@ static JsonObject findRosterUser(JsonArray users, const String& username, size_t
 static bool writePendingUsers(JsonDocument& doc, const char* tag, String& errorOut) {
   JsonArray list = doc.as<JsonArray>();
   if (!list || list.size() == 0) {
-    if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth(tag)) &&
-        !VFS::removeGuarded(PENDING_USERS_FILE, VFS::systemAuth(tag))) {
+    if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth(VFS::Scopes::USERS, tag)) &&
+        !VFS::removeGuarded(PENDING_USERS_FILE, VFS::systemAuth(VFS::Scopes::USERS, tag))) {
       errorOut = "Could not update pending list";
       return false;
     }
@@ -2218,7 +2345,7 @@ static bool writePendingUsers(JsonDocument& doc, const char* tag, String& errorO
   String json;
   const size_t expected = doc.overflowed() ? 0 : measureJson(doc);
   if (expected == 0 || !json.reserve(expected) || serializeJson(doc, json) != expected ||
-      json.length() != expected || !writeTextAtomic(PENDING_USERS_FILE, json)) {
+      json.length() != expected || !writeTextAtomic(PENDING_USERS_FILE, json, VFS::systemAuth(VFS::Scopes::USERS, tag))) {
     errorOut = "Could not update pending list";
     return false;
   }
@@ -2348,7 +2475,7 @@ bool createAccount(const NewAccount& account, uint32_t& idOut, String& errorOut)
   FsLockGuard guard("user.create");
   if (!mutateUsersJson("user.create", createAccountMutation, &ctx, errorOut)) {
     if (ctx.id != 0) {
-      (void)VFS::removeGuarded(getUserSettingsPath(ctx.id).c_str(), VFS::systemAuth("user.create"));
+      (void)VFS::removeGuarded(getUserSettingsPath(ctx.id).c_str(), VFS::systemAuth(VFS::Scopes::USERS, "user.create"));
     }
     return false;
   }
@@ -2390,8 +2517,8 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
   }
 
   // Reject if already pending registration
-  if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.admin.create"))) {
-    File pf = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth("user.admin.create"));
+  if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth(VFS::Scopes::USERS, "user.admin.create"))) {
+    File pf = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth(VFS::Scopes::USERS, "user.admin.create"));
     if (pf) {
       PSRAM_JSON_DOC(pdoc);
       if (!deserializeJson(pdoc, pf)) {
@@ -2486,7 +2613,7 @@ bool isUserBanned(const String& username) {
   if (!filesystemReady || username.length() == 0) return false;
   FsLockGuard guard("users.is_banned");
   // See getUserRole: the exists probe was a duplicate path resolution only.
-  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.isBanned"));
+  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth(VFS::Scopes::USERS, "user.isBanned"));
   if (!f) return false;
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, f);
@@ -2693,7 +2820,7 @@ bool getUserIdByUsername(const String& username, uint32_t& outUserId) {
     // No existsGuarded probe: openGuarded already fails closed on a missing
     // file and is still the permission check. The probe only bought a second
     // resolution of the same 3-level path.
-    File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.getId"));
+    File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth(VFS::Scopes::USERS, "user.getId"));
     if (!f) return false;
 
     PSRAM_JSON_DOC(doc);
@@ -2730,7 +2857,7 @@ bool getUserRole(const String& username, String& outRole) {
   FsLockGuard guard("users.get_role");
   // openGuarded fails closed on a missing file and is the permission check;
   // the old existsGuarded probe just resolved this 3-level path a second time.
-  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.getRole"));
+  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth(VFS::Scopes::USERS, "user.getRole"));
   if (!f) return false;
 
   PSRAM_JSON_DOC(doc);
@@ -2790,6 +2917,14 @@ int userAccountRank(const String& username) {
   }
 #endif
   if (!filesystemReady) return kRoleRankUser;
+  {
+    authority_cache::Entry account;
+    if (accountAuthority(username, account)) {
+      if (account.super) return kRoleRankSuperAdmin;
+      if (account.admin) return kRoleRankAdmin;
+      return account.legacyGuest ? kRoleRankGuest : kRoleRankUser;
+    }
+  }
   FsLockGuard guard("users.accountRank");
   String json;
   if (!readRosterJson("user.accountRank", json)) return kRoleRankUser;
@@ -2823,11 +2958,11 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
   // only copy of the credential hash is removed only once the account exists.
   FsLockGuard guard("user.approve");
 
-  if (!VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.approve"))) {
+  if (!VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth(VFS::Scopes::USERS, "user.approve"))) {
     errorOut = "User not found in pending list";
     return false;
   }
-  File file = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth("user.approve"));
+  File file = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth(VFS::Scopes::USERS, "user.approve"));
   if (!file) {
     errorOut = "Could not read pending list";
     return false;
@@ -2902,11 +3037,11 @@ bool denyPendingUserInternal(const String& username, String& errorOut) {
     return false;
   }
   FsLockGuard guard("user.deny");
-  if (!VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.deny"))) {
+  if (!VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth(VFS::Scopes::USERS, "user.deny"))) {
     errorOut = "User not found in pending list";
     return false;
   }
-  File file = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth("user.deny"));
+  File file = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth(VFS::Scopes::USERS, "user.deny"));
   if (!file) {
     errorOut = "Could not read pending list";
     return false;
@@ -2957,9 +3092,9 @@ AccountRequestResult submitAccountRequest(const String& usernameInput, const Str
   // another task meanwhile is not overwritten by this stale copy.
   FsLockGuard guard("user.request");
   PSRAM_JSON_DOC(doc);
-  if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.request"))) {
+  if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth(VFS::Scopes::USERS, "user.request"))) {
     String json;
-    if (!readText(PENDING_USERS_FILE, json)) {
+    if (!readText(PENDING_USERS_FILE, json, VFS::systemAuth(VFS::Scopes::USERS, "user.request"))) {
       DEBUG_CMD_FLOWF("[users] ERROR: Failed to read existing /system/pending_users.json");
       return AccountRequestResult::ReadFailed;
     }
@@ -3136,8 +3271,8 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
   // Delete user settings file (contains password and preferences)
   if (userId > 0) {
     String settingsPath = getUserSettingsPath(userId);
-    if (VFS::existsGuarded(settingsPath.c_str(), VFS::systemAuth("user.settings.remove"))) {
-      VFS::removeGuarded(settingsPath.c_str(), VFS::systemAuth("user.settings.remove"));
+    if (VFS::existsGuarded(settingsPath.c_str(), VFS::systemAuth(VFS::Scopes::USERS, "user.settings.remove"))) {
+      VFS::removeGuarded(settingsPath.c_str(), VFS::systemAuth(VFS::Scopes::USERS, "user.settings.remove"));
       DEBUG_USERSF("[users] Deleted settings file for userId=%u", (unsigned)userId);
     }
   }
@@ -3637,7 +3772,7 @@ static RosterReadResult visitUserRoster(UserRosterVisitor visit, void* context) 
   String json;
   {
     FsLockGuard guard("users.roster");
-    if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.roster"))) {
+    if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth(VFS::Scopes::USERS, "user.roster"))) {
       return RosterReadResult::Missing;
     }
     if (!readRosterJson("user.roster", json)) return RosterReadResult::Unreadable;
@@ -3788,14 +3923,14 @@ const char* cmd_pending_list(const String& argsInput) {
   // Check if JSON output is requested
   bool jsonOutput = argWantsJson(argsInput);
 
-  if (!VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.pending.list"))) {
+  if (!VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth(VFS::Scopes::USERS, "user.pending.list"))) {
     if (jsonOutput) return "{\"schema\":1,\"pending\":[]}";
     broadcastOutput("No pending users");
     return "OK";
   }
 
   // Open and parse pending users file with ArduinoJson
-  File file = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth("user.pending.list"));
+  File file = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth(VFS::Scopes::USERS, "user.pending.list"));
   if (!file) {
     if (jsonOutput) return "{\"schema\":1,\"pending\":[]}";
     ERROR_SESSIONF("Failed to read pending users file");
@@ -4271,7 +4406,7 @@ static int parseBootAnchors(const String& usersJson, BootAnchor* anchors, int ma
 static int readBootAnchors(BootAnchor* anchors, int maxCount) {
   if (!filesystemReady) return 0;
   String json;
-  if (!readText(BOOT_ANCHORS_FILE, json) || json.length() == 0) return 0;
+  if (!readText(BOOT_ANCHORS_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "user.bootAnchors")) || json.length() == 0) return 0;
   return parseBootAnchors(json, anchors, maxCount);
 }
 
@@ -4383,7 +4518,7 @@ void cleanupOldBootAnchors(void* usersDocPtr) {
     JsonDocument* usersDoc = static_cast<JsonDocument*>(usersDocPtr);
     if (!usersDoc) {
       String usersJson;
-      if (readText(USERS_JSON_FILE, usersJson) && usersJson.length() > 0) {
+      if (readText(USERS_JSON_FILE, usersJson, VFS::systemAuth(VFS::Scopes::USERS, "user.bootAnchors")) && usersJson.length() > 0) {
         DeserializationError err = deserializeJson(localUsers, usersJson);
         if (!err) usersDoc = &localUsers;
       }
@@ -4426,7 +4561,7 @@ void cleanupOldBootAnchors(void* usersDocPtr) {
 
   String out;
   serializeJson(doc, out);
-  writeTextAtomic(BOOT_ANCHORS_FILE, out);
+  writeTextAtomic(BOOT_ANCHORS_FILE, out, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "user.bootAnchors"));
 }
 
 struct ResolveCreationTimesContext {
@@ -4539,7 +4674,7 @@ void writeBootAnchor() {
   // permanently breaks timestamp resolution for every user still pending.
   PSRAM_JSON_DOC(doc);
   String existing;
-  if (readText(BOOT_ANCHORS_FILE, existing) && existing.length() > 0) {
+  if (readText(BOOT_ANCHORS_FILE, existing, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "user.bootAnchor")) && existing.length() > 0) {
     DeserializationError error = deserializeJson(doc, existing);
     if (error) {
       ERROR_STORAGEF("[anchor] %s unreadable (%s) - anchor NOT written; file preserved",
@@ -4563,7 +4698,7 @@ void writeBootAnchor() {
       a["millisAtSync"] = (uint32_t)currentMillis;
       String updated;
       serializeJson(doc, updated);
-      writeTextAtomic(BOOT_ANCHORS_FILE, updated);
+      writeTextAtomic(BOOT_ANCHORS_FILE, updated, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "user.bootAnchor"));
       return;
     }
   }
@@ -4579,7 +4714,7 @@ void writeBootAnchor() {
 
   String out;
   serializeJson(doc, out);
-  writeTextAtomic(BOOT_ANCHORS_FILE, out);
+  writeTextAtomic(BOOT_ANCHORS_FILE, out, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "user.bootAnchor"));
 }
 
 // ============================================================================
@@ -4682,15 +4817,15 @@ void loadAndIncrementBootSeq() {
   setDebugFlag(DEBUG_SYSTEM);
   DEBUG_SYSTEMF("BootSeqInit: filesystemReady=%d, users.json exists=%d, bootCounter=%lu, maxAnchorId=%lu",
                 (int)filesystemReady,
-                (int)(filesystemReady && VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.bootSeq"))),
+                (int)(filesystemReady && VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth(VFS::Scopes::USERS, "user.bootSeq"))),
                 (unsigned long)gBootCounter, (unsigned long)gNTPAnchorId);
 
   // Read-only integrity pass over users.json: if it's corrupt, quarantine it so
   // first-time setup re-arms cleanly (otherwise every login fails silently with
   // no recovery path, since serial itself requires auth). No write-back on the
   // healthy path — the file is never modified here.
-  if (filesystemReady && VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.bootSeq"))) {
-    File file = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.bootSeq"));
+  if (filesystemReady && VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth(VFS::Scopes::USERS, "user.bootSeq"))) {
+    File file = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth(VFS::Scopes::USERS, "user.bootSeq"));
     if (!file) {
       ERROR_SYSTEMF("BootSeqInit: Failed to open users.json");
     } else {
@@ -4701,8 +4836,8 @@ void loadAndIncrementBootSeq() {
       if (error) {
         ERROR_SYSTEMF("BootSeqInit: Failed to parse users.json");
         String bad = String(USERS_JSON_FILE) + ".bad";
-        VFS::removeGuarded(bad.c_str(), VFS::systemAuth("user.bootSeq"));
-        bool q = VFS::renameGuarded(USERS_JSON_FILE, bad.c_str(), VFS::systemAuth("user.bootSeq"));
+        VFS::removeGuarded(bad.c_str(), VFS::systemAuth(VFS::Scopes::USERS, "user.bootSeq"));
+        bool q = VFS::renameGuarded(USERS_JSON_FILE, bad.c_str(), VFS::systemAuth(VFS::Scopes::USERS, "user.bootSeq"));
         logSystemEvent("USERS", "users.json corrupt at boot (%s) — %s; first-time setup will re-arm",
                        error.c_str(), q ? "quarantined to users.json.bad" : "quarantine rename FAILED");
       } else {

@@ -26,6 +26,7 @@
 #include "System_CommandTypes.h"  // CMD_RESULT_MAX — json branch returns the document
 #include "System_EventKindMask.h"
 #include "System_NotificationKindListCore.h"
+#include "System_VFS.h"           // VFS::systemAuth / Scopes for the policy file
 #if ENABLE_BLUETOOTH
 #include "Bluetooth.h"     // blePushNotification / bleGetAuthenticatedSessionInfo — app sink
 #include "BLE_Types.h"     // BLE_MAX_CONNECTIONS — bound on the app-sink session sweep
@@ -92,6 +93,10 @@ static NotifRule notifDefaultRuleFor(uint8_t kind) {
     case SYSEVT_SENSOR_STARTED:      return {ALL, 1, 1500, 0};
     case SYSEVT_SENSOR_STOPPED:      return {ALL, 0, 1500, 0};
     case SYSEVT_SENSOR_START_FAILED: return {ALL, 3, 1500, 0};
+    // No cooldown: it would hide a second sensor dropping off the same cable.
+    // The I2C manager already posts each at most once per outage per device.
+    case SYSEVT_SENSOR_UNRESPONSIVE: return {ALL, 2, 3000, 0};
+    case SYSEVT_SENSOR_RECOVERED:    return {ALL, 1, 2000, 0};
     case SYSEVT_FILE_DELETED:        return {ALL, 2, 2000, 0};
     case SYSEVT_VOICE_WAKE:          return {ALL, 0, 2000, 0};
     case SYSEVT_VOICE_COMMAND:       return {ALL, 1, 2000, 0};
@@ -201,7 +206,7 @@ void notifPolicyLoad() {
   if (!gUserPrefsMutex) gUserPrefsMutex = xSemaphoreCreateMutex();
   uint32_t off[NOTIF_KIND_MASK_WORDS] = {0}, adm[NOTIF_KIND_MASK_WORDS] = {0};
   String json;
-  if (readText(NOTIF_POLICY_FILE, json) && json.length() > 0) {
+  if (readText(NOTIF_POLICY_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "notif.policy")) && json.length() > 0) {
     PSRAM_JSON_DOC(doc);
     DeserializationError perr = deserializeJson(doc, json);
     if (perr) {
@@ -244,7 +249,7 @@ static bool notifPolicySave() {
   }
   String out;
   serializeJson(doc, out);
-  return writeTextAtomic(NOTIF_POLICY_FILE, out);
+  return writeTextAtomic(NOTIF_POLICY_FILE, out, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "notif.policy"));
 }
 
 // --- Per-user prefs cache -------------------------------------------------
@@ -940,6 +945,8 @@ void notifFormatEvent(const SystemEvent& e, char* out, size_t outLen) {
     case SYSEVT_SENSOR_STARTED:      snprintf(out, outLen, "%s: started", e.subject[0] ? e.subject : "Sensor"); return;
     case SYSEVT_SENSOR_STOPPED:      snprintf(out, outLen, "%s: stopped", e.subject[0] ? e.subject : "Sensor"); return;
     case SYSEVT_SENSOR_START_FAILED: snprintf(out, outLen, "%s: failed", e.subject[0] ? e.subject : "Sensor"); return;
+    case SYSEVT_SENSOR_UNRESPONSIVE: snprintf(out, outLen, "%s not responding", e.subject[0] ? e.subject : "Sensor"); return;
+    case SYSEVT_SENSOR_RECOVERED:    snprintf(out, outLen, "%s reconnected", e.subject[0] ? e.subject : "Sensor"); return;
     case SYSEVT_FILE_DELETED: snprintf(out, outLen, "Deleted: %s", e.subject[0] ? e.subject : "file"); return;
     case SYSEVT_VOICE_WAKE:    snprintf(out, outLen, "Listening..."); return;
     case SYSEVT_VOICE_COMMAND: snprintf(out, outLen, "Voice: %s", e.subject[0] ? e.subject : "cmd"); return;

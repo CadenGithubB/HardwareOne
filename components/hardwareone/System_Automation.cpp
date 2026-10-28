@@ -766,7 +766,7 @@ static void releaseAutomationsCache() {
 // full tick so post-fire nextAt updates are captured on the same pass.
 static void rebuildAutomationsCache() {
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
     markAutomationsCacheEmptyValid();
     return;
   }
@@ -895,7 +895,7 @@ static bool automationsAnyDue(time_t now) {
 // Notify only after a successful save. The next owner tick refreshes the cache;
 // a failed replacement leaves both the previous file and schedule intact.
 bool writeAutomationsJsonAtomic(const String& json) {
-  if (!writeTextAtomic(AUTOMATIONS_JSON_FILE, json)) return false;
+  if (!writeTextAtomic(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return false;
   notifyAutomationScheduler();
   return true;
 }
@@ -906,7 +906,7 @@ bool writeAutomationsJsonAtomic(const String& json) {
 // never replace an existing malformed/unreadable file and risk losing rules.
 static bool ensureAutomationsFile() {
   if (VFS::existsGuarded(AUTOMATIONS_JSON_FILE,
-                         VFS::systemAuth("automation.init"))) {
+                         VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.init"))) {
     return true;
   }
 
@@ -926,7 +926,7 @@ static bool ensureAutomationsFile() {
 // Phase 1B will remove the alias and force an explicit trigger index.
 bool updateAutomationTriggerNextAt(long automationId, int triggerIdx, time_t newNextAt) {
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) return false;
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return false;
 
   PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, json);
@@ -992,7 +992,7 @@ void runAutomationsOnBoot() {
 
   // Read automations.json
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
     DEBUGF(DEBUG_AUTOMATIONS, "[automations] No automations file found");
     return;
   }
@@ -1268,7 +1268,7 @@ void runAutomationCommandUnified(const String& argsInput) {
 const char* cmd_automation_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
     broadcastOutput("Error: failed to read automations.json");
     return "ERROR";
   }
@@ -1447,7 +1447,7 @@ const char* cmd_automation_add(const String& argsInput) {
   bool runAtBoot = (runAtBootStr.equalsIgnoreCase("1") || runAtBootStr.equalsIgnoreCase("true") || runAtBootStr.equalsIgnoreCase("yes"));
   
   String json;
-  bool hadFile = readText(AUTOMATIONS_JSON_FILE, json);
+  bool hadFile = readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"));
   if (!hadFile || json.length() == 0) {
     json = String("{\n  \"version\": 2,\n  \"automations\": []\n}\n");
     if (!validateOnly) {
@@ -1748,7 +1748,7 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
   }
   
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
     broadcastOutput("Error: failed to read automations.json");
     return "ERROR";
   }
@@ -1825,7 +1825,7 @@ const char* cmd_automation_delete(const String& argsInput) {
   }
   
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
     BROADCAST_PRINTF("Error: failed to read automations.json");
     return "ERROR";
   }
@@ -1936,7 +1936,7 @@ const char* cmd_automation_run(const String& argsInput) {
   }
   
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
     broadcastOutput("Error: failed to read automations.json");
     return "ERROR";
   }
@@ -2187,7 +2187,7 @@ const char* cmd_automation_trigger(const String& argsInput) {
   }
 
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
     broadcastOutput("Error: failed to read automations.json");
     return "ERROR";
   }
@@ -2323,7 +2323,7 @@ const char* cmd_automation(const String& argsInput) {
     return cmd_automation_delete(subArgs);
   } else if (subCmd == "sanitize") {
     String json;
-    if (!readText(AUTOMATIONS_JSON_FILE, json)) return "Error: failed to read automations.json";
+    if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return "Error: failed to read automations.json";
     if (sanitizeAutomationsJson(json)) {
       if (!writeAutomationsJsonAtomic(json)) return "Error: failed to write automations.json";
       DEBUGF(DEBUG_AUTOMATIONS, "[autos] CLI sanitize: fixed duplicate IDs; scheduler refresh queued");
@@ -2685,7 +2685,7 @@ static void fillAutomationSummary(JsonObjectConst a, AutomationSummary& out) {
 bool automationCopySummaries(AutomationSummary* out, size_t maxCount, size_t* count) {
   if (count) *count = 0;
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) return false;
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return false;
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json)) return false;
   JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
@@ -2701,7 +2701,7 @@ bool automationCopySummaries(AutomationSummary* out, size_t maxCount, size_t* co
 bool automationFindSummary(long id, AutomationSummary* out) {
   if (!out) return false;
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) return false;
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return false;
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json)) return false;
   JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
@@ -2865,7 +2865,7 @@ static void rescheduleAfterFire(long id, const char* automationJson, time_t fire
 
   // Rewrite the triggers array in the file.
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) return;
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return;
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json)) return;
   JsonArray autos = doc["automations"].as<JsonArray>();
@@ -2891,7 +2891,7 @@ static void rescheduleAfterFire(long id, const char* automationJson, time_t fire
   // Inside a pass the trailing rebuild picks this write up; a notification
   // would only schedule a second full pass. Other callers notify as usual.
   if (notify) writeAutomationsJsonAtomic(json);
-  else writeTextAtomic(AUTOMATIONS_JSON_FILE, json);
+  else writeTextAtomic(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"));
 }
 
 // Force-recompute every clock trigger of every enabled automation.
@@ -2913,7 +2913,7 @@ static int automationRecomputeAllClockTriggers(time_t now, int* outSkipped) {
   if (outSkipped) *outSkipped = 0;
 
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) return -1;
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return -1;
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json)) return -1;
   JsonArray autos = doc["automations"].as<JsonArray>();
@@ -4230,7 +4230,7 @@ static void schedulerTickMinute() {
 
   // Load automations.json
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
     // Missing is a valid empty deployment state (notably when upgrading a
     // profile that previously compiled Automations out).  Publish that state
     // so the fast due check remains I/O-free until the 60-second safety tick
@@ -4584,7 +4584,7 @@ static void schedulerTickMinute() {
     unsigned long nowMs = millis();
     if (nowMs - s_lastAutoSanitizeMs > 5000UL) {
       String fix;
-      if (readText(AUTOMATIONS_JSON_FILE, fix)) {
+      if (readText(AUTOMATIONS_JSON_FILE, fix, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
         if (sanitizeAutomationsJson(fix)) {
           if (writeAutomationsJsonAtomic(fix)) {
             DEBUGF(DEBUG_AUTOMATIONS, "[autos] Runtime sanitize applied after duplicate detection; scheduler refresh queued");

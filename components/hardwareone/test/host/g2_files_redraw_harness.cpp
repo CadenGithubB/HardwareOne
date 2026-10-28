@@ -134,7 +134,7 @@ struct AuthContext { int user; };
 inline AuthContext currentAuthContext() { return AuthContext{1}; }
 inline bool canRead(const String&, const AuthContext&) { return true; }
 static std::string sniffPath;  // the Info overlay's sealed-capture peek
-inline bool readTextLimited(const char* path, String&, size_t) {
+inline bool readTextLimited(const char* path, String&, size_t, const AuthContext&) {
   sniffPath = path ? path : "";
   return false;
 }

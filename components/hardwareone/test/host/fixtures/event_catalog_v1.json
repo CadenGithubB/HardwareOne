@@ -75,6 +75,8 @@
         "sensor_stopped",
         "sensor_start_failed",
         "sensor_fault",
+        "sensor_unresponsive",
+        "sensor_recovered",
         "presence_detected",
         "presence_cleared",
         "gesture",

@@ -126,6 +126,7 @@ class File {
  private:
   std::shared_ptr<Node> node_;
 };
+struct AuthContext {};
 namespace VFS {
 File open(const String& path, const char* mode, bool create) {
   FsLockGuard guard("mock.VFS.open"); io(); ++opens;
@@ -146,7 +147,14 @@ bool remove(const String& path) {
   if (fault == Fault::Cleanup || fault == Fault::RenameCleanup) return false;
   return files.erase(path.c_str()) != 0;
 }
+// The writers run every open, rename and remove through the guarded VFS as
+// the identity their caller passes. This harness exercises the write
+// algorithm, so the guarded forwarders dispatch straight to the raw fakes.
+File openGuarded(const String& path, const char* mode, const AuthContext&, bool create = false) { return open(path, mode, create); }
+bool renameGuarded(const String& from, const String& to, const AuthContext&) { return rename(from, to); }
+bool removeGuarded(const String& path, const AuthContext&) { return remove(path); }
 }
+static const AuthContext kWriterCtx{};
 // INSERT_WRITERS
 
 static constexpr const char* target = "/system/test.json";
@@ -167,7 +175,7 @@ static void reset(Fault next = Fault::None) {
 static std::string destination() { return files.at(target)->bytes; }
 static void failedWrite(Fault failure, bool atomic) {
   reset(failure);
-  const bool result = atomic ? writeTextAtomic(target, "replacement") : writeText(target, "replacement");
+  const bool result = atomic ? writeTextAtomic(target, "replacement", kWriterCtx) : writeText(target, "replacement", kWriterCtx);
   check(!result, std::string(atomic ? "atomic" : "direct") + " writer returned success; destination='" + destination() + "'");
   if (atomic) {
     check(destination() == "original", "failed atomic save preserves prior destination");
@@ -180,14 +188,14 @@ static void failedWrite(Fault failure, bool atomic) {
 }
 static void successfulWrite(bool atomic, const char* text) {
   reset();
-  check(atomic ? writeTextAtomic(target, text) : writeText(target, text), "valid write succeeds");
+  check(atomic ? writeTextAtomic(target, text, kWriterCtx) : writeText(target, text, kWriterCtx), "valid write succeeds");
   check(destination() == text && !files.count(temporary), "saved bytes match including empty content");
   check(opens == 1 && prints == 1 && flushes == 1 && closes == 1, "one complete file lifecycle");
   check(renames == unsigned(atomic) && !removes && !unpausedIo, "only complete atomic save promotes under pause"); balanced();
 }
 static void renameFailure() {
   reset(Fault::Rename);
-  check(!writeTextAtomic(target, "replacement"), "rename refusal returns false");
+  check(!writeTextAtomic(target, "replacement", kWriterCtx), "rename refusal returns false");
   check(destination() == "original" && !files.count(temporary), "rename failure preserves original and removes temp");
   check(renames == 1 && removes == 1 && !unpausedIo, "failed promotion cleans up within operation scope"); balanced();
 }
@@ -196,7 +204,7 @@ static void nestedScopes(Fault failure = Fault::None) {
   {
     PollPauseGuard poll;
     FsLockGuard fs("outer.caller");
-    check(writeTextAtomic(target, "nested") == (failure == Fault::None), "nested caller receives actual save result");
+    check(writeTextAtomic(target, "nested", kWriterCtx) == (failure == Fault::None), "nested caller receives actual save result");
     check(ownsFs && ownPauses == 1 && pauseDepth == 1 && lockTakes == 1 && lockGives == 0,
           "nested helper preserves caller's mutex and pause ownership");
   }
@@ -206,7 +214,7 @@ static void nestedScopes(Fault failure = Fault::None) {
 static void existingTemp(Fault failure) {
   reset(failure);
   files[temporary] = std::make_shared<Node>(Node{"stale temp"});
-  const bool okay = writeTextAtomic(target, "replacement");
+  const bool okay = writeTextAtomic(target, "replacement", kWriterCtx);
   check(okay == (failure == Fault::None), "stale temporary file does not alter write outcome");
   check(destination() == (okay ? "replacement" : "original"), "stale temp cannot replace preserved destination on failure");
   if (failure == Fault::RenameCleanup) check(files.count(temporary) == 1 && removes == 1,
@@ -216,7 +224,7 @@ static void existingTemp(Fault failure) {
 }
 static void newEmptyDestination() {
   reset(); files.erase(target);
-  check(writeTextAtomic(target, ""), "new empty destination is a valid atomic save");
+  check(writeTextAtomic(target, "", kWriterCtx), "new empty destination is a valid atomic save");
   check(destination().empty() && !files.count(temporary) && renames == 1,
         "new empty file is promoted exactly once"); balanced();
 }
@@ -224,7 +232,7 @@ static void invalidPaths() {
   for (const char* path : {static_cast<const char*>(nullptr), ""}) {
     for (bool atomic : {false, true}) {
       reset();
-      check(!(atomic ? writeTextAtomic(path, "value") : writeText(path, "value")), "missing path rejected");
+      check(!(atomic ? writeTextAtomic(path, "value", kWriterCtx) : writeText(path, "value", kWriterCtx)), "missing path rejected");
       check(!opens && !renames && !removes && destination() == "original", "missing path performs no filesystem operation");
       balanced();
     }
@@ -235,13 +243,13 @@ static void allocationFailures() {
     for (unsigned stage = 1; stage <= (atomic ? 3u : 1u); ++stage) {
       reset(); files[temporary] = std::make_shared<Node>(Node{"stale temp"});
       const String input("replacement"); failConcatCall = stage;
-      check(!(atomic ? writeTextAtomic(target, input) : writeText(target, input)), "path concat allocation failure rejected");
+      check(!(atomic ? writeTextAtomic(target, input, kWriterCtx) : writeText(target, input, kWriterCtx)), "path concat allocation failure rejected");
       check(!opens && !renames && !removes && destination() == "original" && files.at(temporary)->bytes == "stale temp",
             "partial path construction touches neither destination nor temp"); balanced();
     }
   }
   reset(); failConcatCall = 4;
-  check(!writeTextAtomic(target, "replacement"), "nested writer's path allocation failure propagates");
+  check(!writeTextAtomic(target, "replacement", kWriterCtx), "nested writer's path allocation failure propagates");
   check(!opens && !renames && removes == 1 && destination() == "original" && !unpausedIo,
         "inner allocation failure preserves destination and balances best-effort cleanup"); balanced();
 }
@@ -262,14 +270,14 @@ static void overlap() {
   std::exception_ptr firstError, secondError;
   std::thread first([&] {
     worker = 1;
-    try { firstResult = writeTextAtomic(target, "first"); } catch (...) { firstError = std::current_exception(); }
+    try { firstResult = writeTextAtomic(target, "first", kWriterCtx); } catch (...) { firstError = std::current_exception(); }
   });
   std::thread second([&] {
     worker = 2;
     try {
       std::unique_lock<std::mutex> lock(scheduleMutex);
       check(scheduleChanged.wait_for(lock, std::chrono::seconds(5), [] { return firstUnlocked; }), "first save never releases mutex");
-      lock.unlock(); secondResult = writeTextAtomic(target, "second");
+      lock.unlock(); secondResult = writeTextAtomic(target, "second", kWriterCtx);
     } catch (...) { secondError = std::current_exception(); }
     { std::lock_guard<std::mutex> lock(scheduleMutex); secondFinished = true; }
     scheduleChanged.notify_all();

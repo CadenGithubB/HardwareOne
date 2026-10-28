@@ -5976,10 +5976,18 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
     ringNoteConnectFailure("service", millis() - t0);
     DEBUG_RING_LIFECYCLEF("[RING] Service %s NOT FOUND (listing all services below)",
               G2RING_SERVICE_UUID);
-    auto* services = gRing.client->getServices();
-    if (services) {
-      for (const auto& entry : *services) {
-        DEBUG_RING_LIFECYCLEF("[RING]   svc: %s", entry.first.c_str());
+    // getServices() re-runs a full GATT discovery (up to 30 s) only to feed the
+    // listing, so it takes the listing's gate, as the notify-char branch does.
+    // Ungated, it ran on every failure: on 2026-10-25 a ring that left range
+    // mid-discovery made it the third search on a dead link, and the library's
+    // then-unbounded wait held this job, and the shared BLE-connect worker,
+    // until reboot.
+    if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_RING | DEBUG_RING_LIFECYCLE)) {
+      auto* services = gRing.client->getServices();
+      if (services) {
+        for (const auto& entry : *services) {
+          DEBUG_RING_LIFECYCLEF("[RING]   svc: %s", entry.first.c_str());
+        }
       }
     }
     gRing.client->disconnect();

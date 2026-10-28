@@ -19,7 +19,7 @@
     },
     "libraries/BLE/src/BLEClient.cpp": {
       "before": "f029aecef0e6ac89ed367de87bf4927c11550063f4bb42215cda929e4446bcbd",
-      "after": "19454458be7738c0b6920fa0b6b01b38c92ba2981ac350da3997c48c976a505d"
+      "after": "f4820719f3fc9063c5457859c31240fbe2430fbb62d82c2460ce4c11006d33f4"
     }
   },
   "patch_sha256": "8256510c6d014c13bfd743e5dd814e9c768b5b01198c539ac88111f2e2b11c22"

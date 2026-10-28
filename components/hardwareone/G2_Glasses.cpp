@@ -9065,19 +9065,9 @@ enum LlmMenuLevel : uint8_t {
   LLM_MENU_MSG,
 };
 
-// Submenu row actions (row count varies — "Ask (guided)" is hidden when the
-// model has no menu — so taps map through a per-row action table, mirroring
-// g2AppsBuildRows).
-enum LlmHomeAction : uint8_t {
-  LLM_HOME_BACK = 0,   // <- Apps launcher
-  LLM_HOME_OPEN,       // Open chat  → g2ShowLlmPage (today's viewer)
-  LLM_HOME_TERMINAL,   // verified native app, latest retained answer only
-  LLM_HOME_PROMPT,     // Ask (Mic / Keys) → shared text-entry surface
-  LLM_HOME_ASK,        // Ask (guided) → start/resume the picker
-  LLM_HOME_NEW_CHAT,   // Clear turns before starting a new conversation/source
-  LLM_HOME_RERUN,      // Re-run last → guided-branch retry, then the viewer
-  LLM_HOME_MODEL,      // Select Model → unload / pick a .bin via llmload
-};
+// Submenu rows come from the shared home menu (System_LLMHomeMenuCore.h, also
+// used by the local display); the row count varies, so taps map through a
+// per-row action table, mirroring g2AppsBuildRows.
 
 #define LLM_MENU_ROW_LEN         52   // wide enough for a ≤48 B entity + NUL
 #define LLM_MENU_VIS_ROWS        10   // picker items per page (>10 → paginator chrome)
@@ -9122,7 +9112,7 @@ EXT_RAM_BSS_ATTR static uint16_t sLlmEntIdx[LLM_MENU_MAX_BUCKET_ENTS];
 static uint16_t     sLlmEntIdxCount = 0;
 
 // Submenu row→action map + transient message text.
-static uint8_t      sLlmHomeAct[LLM_MENU_MAX_ROWS];
+static LlmHomeAction sLlmHomeAct[LLM_MENU_MAX_ROWS];
 static uint8_t      sLlmHomeActCount = 0;
 static char         sLlmMsg[40] = {0};
 
@@ -9692,24 +9682,23 @@ static void llmMenuRerunLast() {
 static void llmMenuHomeTap(uint32_t idx) {
   if (idx >= sLlmHomeActCount) return;
   switch (sLlmHomeAct[idx]) {
-    case LLM_HOME_BACK:  g2ShowAppsMenu();            return;
-    case LLM_HOME_OPEN:  g2ShowLlmPage(g2ShowLlmMenu); return;
-    case LLM_HOME_TERMINAL: {
+    case LlmHomeAction::Back:   g2ShowAppsMenu();            return;
+    case LlmHomeAction::Open:   g2ShowLlmPage(g2ShowLlmMenu); return;
+    case LlmHomeAction::Terminal: {
       const char* result = g2NativeTerminalRequestOpen();
       if (strncmp(result, "Error:", 6) == 0) llmMenuShowMsg(result);
       return;
     }
-    case LLM_HOME_PROMPT:
+    case LlmHomeAction::Ask:
       if (!llmMenuStartPromptEntry(LlmPromptReturn::MENU))
         llmMenuShowMsg("Keyboard unavailable");
       return;
-    case LLM_HOME_ASK:   llmMenuStartAsk();           return;
-    case LLM_HOME_NEW_CHAT:
+    case LlmHomeAction::Guided: llmMenuStartAsk();           return;
+    case LlmHomeAction::NewChat:
       llmMenuShowMsg(llmMenuClearChat() ? "New chat ready" : "Stop or wait, then New chat");
       return;
-    case LLM_HOME_RERUN: llmMenuRerunLast();          return;
-    case LLM_HOME_MODEL: llmMenuOpenModels();         return;
-    default: return;
+    case LlmHomeAction::Rerun:  llmMenuRerunLast();          return;
+    case LlmHomeAction::Model:  llmMenuOpenModels();         return;
   }
 }
 
@@ -9749,10 +9738,12 @@ static const G2PageModule kLlmMenuPage = {
   /*liveRender=*/    nullptr,
 };
 
-// Entry point — the LLM submenu (Apps → LLM). Rows: Open chat / Ask (Mic /
-// Keys) / Ask (guided, hidden when the model has no menu) / New chat / Re-run last /
-// Select Model. Re-showing it after a picker (Back, or the viewer's onDone)
-// captures the abandoned guided level so the next Ask can resume there.
+// Entry point — the LLM submenu (Apps → LLM): "<- Back", then the shared home
+// rows (System_LLMHomeMenuCore.h): Open chat / Open Terminal / Ask (Mic / Keys) /
+// Ask (guided) / New chat / Re-run last / Model, plus the low-context warning,
+// which opens the model picker since reloading is one fix (a restart the other).
+// Re-showing it after a picker (Back, or the viewer's onDone) captures the
+// abandoned guided level so the next Ask can resume there.
 static void g2ShowLlmMenu() {
   if (sLlmLevel >= LLM_MENU_GROUP && sLlmLevel <= LLM_MENU_ENTITY)
     sLlmResume = sLlmLevel;
@@ -9765,46 +9756,16 @@ static void g2ShowLlmMenu() {
     if (n < LLM_MENU_MAX_ROWS) {
       snprintf(sLlmRows[n], LLM_MENU_ROW_LEN, "%s", label);
       sLlmRowPtrs[n]  = sLlmRows[n];
-      sLlmHomeAct[n]  = (uint8_t)act;
+      sLlmHomeAct[n]  = act;
       n++;
     }
   };
-  add("<- Back",      LLM_HOME_BACK);
-  add("Open chat",    LLM_HOME_OPEN);
-#if ENABLE_LOCAL_STT
-  add("Open Terminal", LLM_HOME_TERMINAL);
-#endif
-  add("Ask (Mic / Keys)", LLM_HOME_PROMPT);
-  if (haveMenu) add("Ask (guided)", LLM_HOME_ASK);
-  add("New chat", LLM_HOME_NEW_CHAT);
-  if (llmBackendSupportsRetry()) add("Re-run last", LLM_HOME_RERUN);
-
-  // Select Model row — label reflects the loaded basename (Maps-style) so the
-  // glasses can show which weights are active before opening the picker.
-  {
-    char modelRow[LLM_MENU_ROW_LEN];
-    LLMStatus st = llmBackendStatus();
-    if (st.state == LLMState::READY && st.modelPath[0]) {
-      const char* base = strrchr(st.modelPath, '/');
-      base = base ? base + 1 : st.modelPath;
-      snprintf(modelRow, sizeof(modelRow), "Model: %s", base);
-    } else {
-      snprintf(modelRow, sizeof(modelRow), "Select Model");
-    }
-    add(modelRow, LLM_HOME_MODEL);
-  }
-
-  // Degraded-context warning row (PSRAM was low at model load → ctx auto-fit
-  // unusably small; answers truncate). Tapping it opens the model picker, since
-  // reloading the model is one of the fixes (a device restart is the other).
-  {
-    int llmCtx = 0;
-    if (llmContextDegraded(&llmCtx, nullptr)) {
-      char warnRow[LLM_MENU_ROW_LEN];
-      snprintf(warnRow, sizeof(warnRow), "! ctx %d low - restart", llmCtx);
-      add(warnRow, LLM_HOME_MODEL);
-    }
-  }
+  add("<- Back", LlmHomeAction::Back);
+  // Static, like sLlmRows: ~600 B is too much for the lens tasks' stacks.
+  EXT_RAM_BSS_ATTR static llmhome::Row homeRows[LLM_MENU_MAX_ROWS - 1];
+  const size_t homeCount = llmHomeMenuRowsNow(ENABLE_LOCAL_STT, LLM_MENU_ROW_LEN - 1,
+                                              homeRows, LLM_MENU_MAX_ROWS - 1);
+  for (size_t i = 0; i < homeCount; i++) add(homeRows[i].label, homeRows[i].action);
   sLlmHomeActCount = (uint8_t)n;
 
   sLlmLevel = LLM_MENU_HOME;
@@ -38032,7 +37993,7 @@ static void g2CameraStreamWorker(void* arg) {
         // parent dir must still pre-exist (open does not create it).
         FsLockGuard fsGuard("g2.cam_snapshot.write");
         File f = VFS::openGuarded(String(path), "w",
-                                  VFS::systemAuth("g2.cam_snapshot"), true);
+                                  VFS::systemAuth(VFS::Scopes::PICTURES_SD, "g2.cam_snapshot"), true);
         if (f) {
           const size_t wrote = f.write((const uint8_t*)jpegBuf, jpegLen);
           f.close();

@@ -181,12 +181,10 @@ private:
   size_t virtualIndex_ = 0;
 };
 
-bool exists(const String& path);
-File open(const String& path, const char* mode = FILE_READ, bool create = false);
-bool mkdir(const String& path);
-bool remove(const String& path);
-bool rename(const String& pathFrom, const String& pathTo);
-bool rmdir(const String& path);
+// There is no unguarded exists/open/mkdir/remove/rename/rmdir in this API.
+// The backend dispatchers that pick LittleFS or SD for a path are private to
+// System_VFS.cpp; every access from outside goes through the guarded calls
+// below with an identity, and internal code uses systemAuth(scope, reason).
 
 // Authoritative capacity query: always samples the backing filesystem and
 // never serves the snapshot cache below. Keep admission and correctness
@@ -225,10 +223,11 @@ void invalidateStatsSnapshot(StorageType type);
 //   2. canX(path, ctx) — three-role permission lookup. Failure → log + deny.
 //   3. Dispatch to the underlying VFS::open/exists/etc.
 //
-// Use these instead of raw VFS::open / LittleFS.open / etc. anywhere you
-// have an AuthContext available (web handlers, CLI handlers via
-// currentAuthContext(), etc.). For internal trusted code, construct a
-// context via systemAuth("reason") and pass it through.
+// These are the only file operations the firmware exposes. Pass the
+// AuthContext you have (web handlers, CLI handlers via currentAuthContext(),
+// etc.). For internal trusted code, construct a context via
+// systemAuth(scope, "reason") with the narrowest scope that holds the files
+// it touches, and pass it through.
 //
 // Naming convention: every callsite that uses systemAuth() should be
 // commented "// trusted: <reason>" so a future reader sees the explicit
@@ -367,6 +366,41 @@ namespace Scopes {
   // Only the user vocabulary is ever written by firmware (System_STTVocabulary).
   constexpr const char* STT_MODELS      = "/STT Models";
   constexpr const char* STT_MODELS_SD   = "/sd/STT Models";
+  // The capped system logs (logins, I2C, errors, events, command audit, crash
+  // history). Only appendLineWithCap and its orphan recovery write here, and
+  // they confine themselves to the tier the overflow latch resolved;
+  // sysLogScopeFor() below picks the twin.
+  constexpr const char* SYS_LOGS        = "/system/sys_logs";
+  constexpr const char* SYS_LOGS_SD     = "/sd/system/sys_logs";
+  // Device state files directly under /system (settings.json, debug.json,
+  // automations.json, boot_anchors.json, notifications.json, the pending-
+  // credential marker) and the ".tmp" sibling every atomic writer stages
+  // through. A directory scope on purpose: pathWithinScope is boundary-aware,
+  // so an exact-file scope would reject that sibling.
+  constexpr const char* SYSTEM_STATE    = "/system";
+  // The account roster family: users.json, pending_users.json, ip_bans.json
+  // and the per-user settings folder.
+  constexpr const char* USERS           = "/system/users";
+  // Map tiles and tracks; the only tree outside /system a backup may restore.
+  constexpr const char* MAPS            = "/maps";
+  // Edge Impulse models and their label files (System_EdgeImpulse MODEL_DIR).
+  constexpr const char* EI_MODELS       = "/EI Models";
+  // Microphone recordings (System_Microphone), on either tier.
+  constexpr const char* RECORDINGS      = "/recordings";
+  constexpr const char* RECORDINGS_SD   = "/sd/recordings";
+  // ESP-NOW device state: devices.json, this device's identity, peer
+  // identities and the bond caches (System_ESPNow, System_ESPNow_Identity).
+  constexpr const char* ESPNOW_STATE    = "/system/espnow";
+  // ESP-NOW frame captures (System_ESPNow ensureCaptureFile), SD only.
+  constexpr const char* ESPNOW_CAPTURES = "/sd/espnow";
+  // On-device LLM model folders (System_LLMBackend / System_LLM_Model).
+  constexpr const char* LLM_MODELS      = "/system/llm";
+  constexpr const char* LLM_MODELS_SD   = "/sd/llm";
+  // ESP-SR command file, snippets and models (System_ESPSR), either tier.
+  constexpr const char* ESPSR           = "/ESPSR";
+  constexpr const char* ESPSR_SD        = "/sd/ESPSR";
+  // Lens camera snapshots (G2_Glasses cam snapshot), SD only.
+  constexpr const char* PICTURES_SD     = "/sd/PICTURES";
   // NOTE: domains with user-configurable folders (images → gSettings.cameraCaptureFolder)
   // or dual SD+LittleFS locations (LLM models) can't use a static constant — they need a
   // computed scope at the call site. Add those when those domains are scoped.
@@ -377,6 +411,29 @@ namespace Scopes {
 // them doesn't silently reject captures that overflowed to SD.
 inline const char* captureScopeFor(const String& path) {
   return path.startsWith("/sd/") ? Scopes::CAPTURES_SD : Scopes::CAPTURES;
+}
+
+// Tier pickers for the folders that live on either storage: each returns the
+// scope constant above that holds `path`.
+inline const char* llmModelScopeFor(const String& path) {
+  return path.startsWith("/sd/") ? Scopes::LLM_MODELS_SD : Scopes::LLM_MODELS;
+}
+inline const char* espsrScopeFor(const String& path) {
+  return path.startsWith("/sd/") ? Scopes::ESPSR_SD : Scopes::ESPSR;
+}
+inline const char* sttModelScopeFor(const String& path) {
+  return path.startsWith("/sd/") ? Scopes::STT_MODELS_SD : Scopes::STT_MODELS;
+}
+
+// Pick the recordings scope matching the tier `path` names.
+inline const char* recordingScopeFor(const String& path) {
+  return path.startsWith("/sd/") ? Scopes::RECORDINGS_SD : Scopes::RECORDINGS;
+}
+
+// Pick the system-log scope matching the tier `path` names: the overflow
+// mirror of /system/sys_logs is /sd/system/sys_logs.
+inline const char* sysLogScopeFor(const String& path) {
+  return path.startsWith("/sd/") ? Scopes::SYS_LOGS_SD : Scopes::SYS_LOGS;
 }
 
 /** True if `path` names a location inside the capture tree on either tier.

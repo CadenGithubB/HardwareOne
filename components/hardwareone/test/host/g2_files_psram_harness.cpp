@@ -200,14 +200,14 @@ struct File {
     if (failAfterRead) failExternal = failInternal = true;
   }
 };
+static int currentAuthContext() { check(identity, "read gate uses paired identity"); return 0; }
 namespace VFS {
-static File open(const String&, const char*) {
-  check(fsDepth == 1 && identity, "VFS dispatch follows lock and authorization");
+static File openGuarded(const String&, const char*, int) {
+  check(fsDepth == 1 && identity, "guarded VFS dispatch follows lock and installed identity");
   ++opens;
   return {};
 }
 }
-static int currentAuthContext() { check(identity, "read gate uses paired identity"); return 0; }
 static bool canRead(const String&, int) { return allowed; }
 #define FILE_MANAGER_MAX_PATH 256
 #define FILES_ROW_LEN 48

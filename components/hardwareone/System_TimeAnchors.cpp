@@ -68,7 +68,7 @@ static void registryLoad() {
   gRegistryPartial = false;
   gRegistryTailOpen = false;
   File f = VFS::openGuarded(kAnchorsPath, "r",
-                            VFS::systemAuth("timeanchor.load"));
+                            VFS::systemAuth(VFS::Scopes::CAPTURES, "timeanchor.load"));
   if (!f) return;
   char line[64];
   size_t ll = 0;
@@ -136,7 +136,7 @@ static bool registryRewrite(size_t skip, const Anchor* extra) {
     formatAnchorRow(row, sizeof(row), *extra);
     if (!text.concat(row)) return false;
   }
-  if (!writeTextAtomic(kAnchorsPath, text)) return false;
+  if (!writeTextAtomic(kAnchorsPath, text, VFS::systemAuth(VFS::Scopes::CAPTURES, "timeanchor.rewrite"))) return false;
   gRegistryTailOpen = false;  // the rewrite holds whole rows only
   return true;
 }
@@ -182,7 +182,7 @@ static bool writeAnchorLine() {
     const size_t len = strlen(row);
     FsLockGuard guard("timeAnchors.append");
     File f = VFS::openGuarded(kAnchorsPath, "a",
-                              VFS::systemAuth("timeanchor.append"));
+                              VFS::systemAuth(VFS::Scopes::CAPTURES, "timeanchor.append"));
     if (f) {
       const size_t before = f.size();
       const size_t written = f.print(row);
@@ -256,7 +256,7 @@ static int promoteFolderPass(const char* folderName, const Anchor& a,
   snprintf(folderPath, sizeof(folderPath), "%s/%s", CAPTURE_DIR_SENSORS,
            folderName);
 
-  const AuthContext ctx = VFS::systemAuth("timeanchor.sweep");
+  const AuthContext ctx = VFS::systemAuth(VFS::Scopes::CAPTURES, "timeanchor.sweep");
   FsLockGuard guard("timeAnchors.sweep");
 
   File dir = VFS::openGuarded(folderPath, "r", ctx);
@@ -403,7 +403,7 @@ static bool sweepPass() {
   {
     FsLockGuard guard("timeAnchors.scan");
     File dir = VFS::openGuarded(CAPTURE_DIR_SENSORS, "r",
-                                VFS::systemAuth("timeanchor.scan"));
+                                VFS::systemAuth(VFS::Scopes::CAPTURES, "timeanchor.scan"));
     if (!dir || !dir.isDirectory()) {
       if (dir) dir.close();
       return true;  // nothing to sweep without the capture tree

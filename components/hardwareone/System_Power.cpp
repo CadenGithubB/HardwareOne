@@ -24,6 +24,8 @@
 #include "System_I2C_Manager.h"
 #include "System_PollPause.h"
 #endif
+#include "System_UartLink.h"   // uartLinkIsRunning / uartLinkEffectiveBaud — idle-clock clamp
+#include "soc/soc_caps.h"      // SOC_UART_SUPPORT_REF_TICK
 
 // Serialize the complete HAL transition, including its before/after callbacks.
 // A concurrent or recursive request is refused without waiting on its caller.
@@ -94,10 +96,14 @@ struct PowerModeConfig {
   uint8_t displayBrightnessPercent;
 };
 
+// The clock while in use (idle derives from it: getPowerModeIdleCpuFreq) and
+// the brightness a user's choice of the mode applies. Busy workloads raise any
+// mode to the maximum clock (powerPolicyTick), so Adaptive — floor in use and
+// idle — is the mode that leaves the clock to the work.
 static const PowerModeConfig gPowerModes[] = {
   {"Performance", POWER_CPU_PERFORMANCE_MHZ, 100},
   {"Balanced",    POWER_CPU_BALANCED_MHZ,     80},
-  {"PowerSaver",  POWER_INTERACTIVE_FLOOR_MHZ, 50},
+  {"Adaptive",    POWER_INTERACTIVE_FLOOR_MHZ, 80},
   {"UltraSaver",  POWER_CPU_ULTRA_IDLE_MHZ,   30},
   {"Locked",      POWER_CPU_PERFORMANCE_MHZ, 100}
 };
@@ -248,17 +254,21 @@ bool applyPowerMode(uint8_t mode, bool setDisplayBrightness) {
 void buildPowerJson(JsonDocument& doc) {
   const uint8_t mode = gSettings.powerMode;
 
-  doc["schema"]            = 1;
+  doc["schema"]            = 2;
   doc["mode"]              = mode;
   doc["modeName"]          = getPowerModeName(mode);
-  // Live HAL read — shows the power-save downclock, not just the mode's table
-  // value. cpuMhz < activeMhz means idle power-save has already sunk the clock.
+  // Live HAL read — shows the policy's downclock or boost, not just the mode's
+  // table value. cpuMhz differing from targetMhz means a change is pending.
   doc["cpuMhz"]            = (unsigned long)getCpuFrequencyMhz();
+  doc["targetMhz"]         = (unsigned long)powerTargetCpuMhz();
+  const char* boost = powerWorkloadBoost();
+  doc["boost"]             = boost ? boost : "none";
   doc["xtalMhz"]           = (unsigned long)getXtalFrequencyMhz();
   doc["apbMhz"]            = (unsigned long)(getApbFrequency() / 1000000UL);
   doc["activeMhz"]         = (unsigned long)getPowerModeActiveCpuFreq(mode);
   doc["idleMhz"]           = (unsigned long)getPowerModeIdleCpuFreq(mode);
   doc["interactiveFloorMhz"] = (unsigned long)POWER_INTERACTIVE_FLOOR_MHZ;
+  doc["maxMhz"]            = (unsigned long)POWER_CPU_PERFORMANCE_MHZ;
   JsonArray frequencies = doc["supportedCpuMhz"].to<JsonArray>();
   for (size_t i = 0; i < getPowerCpuFrequencyCount(); ++i) {
     frequencies.add(getPowerCpuFrequencyMhz(i));
@@ -271,16 +281,16 @@ void buildPowerJson(JsonDocument& doc) {
   doc["displayBrightness"] = gSettings.oledBrightness;          // 0..255
   doc["displayDimLevel"]   = gSettings.powerDisplayDimLevel;    // percent
 
-  // Idle power-save. powerSaveTick() only runs under ENABLE_OLED_DISPLAY, so
-  // on a headless build the timeout setting exists but nothing consumes it —
-  // `powerSaveSupported` tells the UI to say so instead of showing a countdown
-  // that will never fire.
+  // Idle timeout. The clock drops to the mode's idle clock after it on every
+  // build; the local panel also blanks where there is one (`displayPowerSave`
+  // tells the UI whether to describe that part).
   doc["powerSaveMinutes"]  = (unsigned long)gSettings.powerSaveTimeoutMinutes;
 #if ENABLE_OLED_DISPLAY
-  doc["powerSaveSupported"] = true;
+  doc["displayPowerSave"]  = true;
 #else
-  doc["powerSaveSupported"] = false;
+  doc["displayPowerSave"]  = false;
 #endif
+  doc["localDisplayAwake"] = powerLocalDisplayAwake();
   doc["idleMsAgo"]         = (unsigned long)(millis() - powerSaveLastActivityMs());
 
   // Sleep gating: why a lightsleep/deepsleep request would be refused right now.
@@ -315,10 +325,12 @@ const char* cmd_power(const String& argsInput) {
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
     buildPowerJson(doc);
-    // Worst case (widest numbers, longest mode names) serializes to 785 B and
-    // the `modes` table is fixed-size, so it cannot grow at runtime. 1 KB
-    // leaves ~230 B of headroom; serializeJson silently TRUNCATES to fit,
-    // which would emit invalid JSON rather than failing loudly.
+    // Worst case (widest numbers, longest mode names, "recording" boost)
+    // serializes to about 910 B and the `modes` table is fixed-size, so it
+    // cannot grow at runtime. 1 KB leaves over 100 B of headroom; serializeJson
+    // silently TRUNCATES to fit, which would emit invalid JSON rather than
+    // failing loudly. test_power_save_tick.py measures the worst case and
+    // fails below 64 B of headroom.
     static char* jbuf = nullptr;
     if (!jbuf) jbuf = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "power.json");
     if (!jbuf) return "{\"error\":\"oom\"}";
@@ -336,9 +348,13 @@ const char* cmd_power(const String& argsInput) {
   if (a.count() == 0) {
     // Show current power status
     broadcastOutput("Power Management Status:");
-    BROADCAST_PRINTF("  Mode: %s (CPU: %lu MHz)", 
+    BROADCAST_PRINTF("  Mode: %s (CPU: %lu MHz)",
                      getPowerModeName(gSettings.powerMode),
                      (unsigned long)getCpuFrequencyMhz());
+    // Why the policy wants that clock: locked, a busy workload (stt / camera /
+    // recording), active (in use) or idle.
+    BROADCAST_PRINTF("  Target: %lu MHz (%s)", (unsigned long)powerTargetCpuMhz(),
+                     powerTargetReason());
     BROADCAST_PRINTF("  Display Brightness: %d/255 (%d%%)",
                      gSettings.oledBrightness,
                      (gSettings.oledBrightness * 100) / 255);
@@ -360,30 +376,31 @@ const char* cmd_power(const String& argsInput) {
                          gPowerModes[i].displayBrightnessPercent);
       }
     }
-    BROADCAST_PRINTF("  (Locked holds %lu MHz through idle power-save; UltraSaver uses %lu MHz only after the screen blanks; see 'powersave')",
+    BROADCAST_PRINTF("  (Every mode runs transcription, camera and recording at %lu MHz. Locked holds %lu MHz through idle; UltraSaver uses %lu MHz only after the idle timeout, once the screen has blanked where there is one; see 'powersave')",
+                     (unsigned long)POWER_CPU_PERFORMANCE_MHZ,
                      (unsigned long)getPowerModeActiveCpuFreq(POWER_MODE_LOCKED),
                      (unsigned long)getPowerModeIdleCpuFreq(POWER_MODE_ULTRASAVER));
     return "[Power] Status displayed";
   }
-  
+
   // Parse subcommand
   String subCmd = a.arg(0);
   String subArgs = a.remaining(0);
-  
+
   if (subCmd.equalsIgnoreCase("mode")) {
     if (subArgs.length() == 0) {
-      return "Error: invalid arguments — Usage: power mode [perf|balanced|saver|ultra|locked|0-4]";
+      return "Error: invalid arguments — Usage: power mode [perf|balanced|adaptive|ultra|locked|0-4]";
     }
-    
+
     uint8_t newMode = 255;
-    
+
     // Parse mode name or number
     if (subArgs.equalsIgnoreCase("perf") || subArgs.equalsIgnoreCase("performance")) {
       newMode = POWER_MODE_PERFORMANCE;
     } else if (subArgs.equalsIgnoreCase("balanced") || subArgs.equalsIgnoreCase("bal")) {
       newMode = POWER_MODE_BALANCED;
-    } else if (subArgs.equalsIgnoreCase("saver") || subArgs.equalsIgnoreCase("powersaver")) {
-      newMode = POWER_MODE_POWERSAVER;
+    } else if (subArgs.equalsIgnoreCase("adaptive")) {
+      newMode = POWER_MODE_ADAPTIVE;
     } else if (subArgs.equalsIgnoreCase("ultra") || subArgs.equalsIgnoreCase("ultrasaver")) {
       newMode = POWER_MODE_ULTRASAVER;
     } else if (subArgs.equalsIgnoreCase("locked") || subArgs.equalsIgnoreCase("lock") ||
@@ -398,7 +415,7 @@ const char* cmd_power(const String& argsInput) {
     }
     
     if (newMode >= POWER_MODE_COUNT) {
-      return "Error: Invalid mode. Use: perf, balanced, saver, ultra, locked, or 0-4";
+      return "Error: Invalid mode. Use: perf, balanced, adaptive, ultra, locked, or 0-4";
     }
     
     const uint8_t previousMode = gSettings.powerMode;
@@ -462,12 +479,167 @@ void powerSleepTransitionMark() {
 }
 
 // ----------------------------------------------------------------------------
-// Adaptive power-save activity timestamp. Stamped by powerSaveNoteActivity()
-// from any task (the input poll, the command executor, ...). A 32-bit aligned
-// read/write is atomic on the ESP32, so no lock is needed for cross-task use.
+// Activity timestamps. Stamped by powerSaveNoteActivity() from any task (the
+// input poll, the command executor, ...). A 32-bit aligned read/write is
+// atomic on the ESP32, so no lock is needed for cross-task use. The local
+// stamp is a subset of the general one: someone at the device.
 static volatile unsigned long sPowerSaveLastActivityMs = 0;
-void powerSaveNoteActivity()            { sPowerSaveLastActivityMs = millis(); }
-unsigned long powerSaveLastActivityMs() { return sPowerSaveLastActivityMs; }
+static volatile unsigned long sPowerSaveLastLocalActivityMs = 0;
+void powerSaveNoteActivity(bool local) {
+  const unsigned long now = millis();
+  sPowerSaveLastActivityMs = now;
+  if (local) sPowerSaveLastLocalActivityMs = now;
+}
+unsigned long powerSaveLastActivityMs()      { return sPowerSaveLastActivityMs; }
+unsigned long powerSaveLastLocalActivityMs() { return sPowerSaveLastLocalActivityMs; }
+
+// ============================================================================
+// Clock policy
+// ============================================================================
+// Demand is read from the workloads' own busy flags on every pass instead of
+// being held as a request. Each flag stays set until its work has fully
+// finished — the STT workers clear theirs as their last step before
+// vTaskDelete, after the transcript is saved; recording's covers the file's
+// finalization — and a worker that is cancelled, fails to start or deletes
+// its own task (vTaskDelete runs no destructors) clears it too. So there is
+// nothing to release and nothing that can leak.
+const char* powerWorkloadBoost() {
+#if ENABLE_LOCAL_STT
+  // Real-time inference on this CPU: at the floor clock (100 MHz on the P4)
+  // it runs ~3x slower than speech and falls behind (measured 2026-10-01).
+  extern bool sttAnySessionActive();
+  if (sttAnySessionActive()) return "stt";
+#endif
+#if ENABLE_CAMERA_SENSOR
+  extern bool cameraCaptureBusy();   // open stream or recording session
+  if (cameraCaptureBusy()) return "camera";
+#endif
+#if ENABLE_MICROPHONE
+  extern bool micRecordingBusy();    // STARTING through FINALIZING
+  if (micRecordingBusy()) return "recording";
+#endif
+  return nullptr;
+}
+
+static volatile bool sLocalDisplayAwake = false;
+void powerSetLocalDisplayAwake(bool awake) { sLocalDisplayAwake = awake; }
+bool powerLocalDisplayAwake()              { return sLocalDisplayAwake; }
+
+// Why the policy wants the clock it wants; the battery log and `power` show it.
+struct PowerDecision {
+  uint32_t mhz;
+  const char* reason;   // "locked", a boost name, "active" or "idle"
+  bool mandatory;       // re-asserted every lap (Locked, a boost), not applied once on change
+};
+
+static PowerDecision powerDecide() {
+  const uint8_t mode = gSettings.powerMode;
+  if (mode == POWER_MODE_LOCKED) return {POWER_CPU_PERFORMANCE_MHZ, "locked", true};
+  if (const char* boost = powerWorkloadBoost()) return {POWER_CPU_PERFORMANCE_MHZ, boost, true};
+
+  // In use: any real interaction within the idle timeout, the timeout
+  // disabled, or the local panel still lit (its blanking can lag the countdown
+  // behind the shared sleep cooldown, and UltraSaver's 40 MHz is idle-only).
+  // The elapsed time is a 32-bit difference so it stays right across the
+  // millis() wrap (and the host tests see the target's arithmetic).
+  const uint32_t timeoutMs = gSettings.powerSaveTimeoutMinutes * 60000UL;
+  const uint32_t sinceActivityMs = (uint32_t)(millis() - powerSaveLastActivityMs());
+  const bool inUse = timeoutMs == 0 || sLocalDisplayAwake || sinceActivityMs < timeoutMs;
+  if (inUse) return {getPowerModeActiveCpuFreq(mode), "active", false};
+
+  uint32_t idleMhz = getPowerModeIdleCpuFreq(mode);
+  // A UART host link running above REF_TICK is clocked from APB, and on chips
+  // whose HAL has that fallback (ESP32 / ESP32-S2) APB follows the CPU clock
+  // once it sinks below 80 MHz. UltraSaver's 40 MHz idle floor would therefore
+  // halve the link's effective baud and corrupt every byte — including the
+  // CM5's heartbeat, so freshness would lapse with no way to recover: UART
+  // traffic deliberately does not count as activity (see the SOURCE_UART
+  // exclusion in executeCommand), and a garbled command cannot be parsed into
+  // a wake in the first place. Clamp to the interactive floor instead; 240/160/
+  // 80 are all PLL-derived and pin APB at 80 MHz, so 80 is enough — the other
+  // modes already idle there. Costs UltraSaver some deep-idle saving only
+  // while a fast link is actually up.
+#if SOC_UART_SUPPORT_REF_TICK
+  const bool clamp = idleMhz < POWER_INTERACTIVE_FLOOR_MHZ && uartLinkIsRunning() &&
+                     uartLinkEffectiveBaud() > UART_LINK_REF_TICK_BAUD_LIMIT;
+  static bool sClampSaid = false;   // decided every lap: say it once per fast link
+  if (clamp && !sClampSaid) {
+    DEBUG_SYSTEMF("[POWER] idle floor %lu -> %lu MHz: UART link at %d baud is "
+                  "APB-clocked and cannot survive a sub-80 MHz CPU",
+                  (unsigned long)idleMhz,
+                  (unsigned long)POWER_INTERACTIVE_FLOOR_MHZ,
+                  uartLinkEffectiveBaud());
+  }
+  sClampSaid = clamp;
+  if (clamp) idleMhz = POWER_INTERACTIVE_FLOOR_MHZ;
+#endif
+  return {idleMhz, "idle", false};
+}
+
+uint32_t powerTargetCpuMhz()    { return powerDecide().mhz; }
+const char* powerTargetReason() { return powerDecide().reason; }
+
+void powerPolicyTick() {
+  static uint32_t appliedMhz = 0;      // last target this tick confirmed; 0 = none yet
+  static bool     retryPending = false;
+  static uint32_t refusedMhz = 0;      // the target the owner refused ...
+  static uint32_t nextAttemptMs = 0;   // ... and when it may be tried again
+  static bool     inited = false;
+  // A refused change means the shared owner could not take its gate or drain
+  // an I2C bus within its wait. Retrying on the very next lap would pin the
+  // whole loop to that wait; space the attempts instead. A raise retries
+  // sooner: a transcription may already be running on too slow a clock.
+  constexpr uint32_t kRaiseRetryMs = 500;
+  constexpr uint32_t kLowerRetryMs = 5000;
+
+  // 32-bit on purpose: millis() wraps at 2^32 ms, and the backoff below is
+  // only ever compared while retryPending, so the difference never spans more
+  // than one backoff. (A gate compared against a stamp from before the wrap
+  // would otherwise freeze this tick for 24.85 days.)
+  const uint32_t now = (uint32_t)millis();
+  if (!inited) {
+    // Boot counts as use: the idle countdown starts at the first tick, not at
+    // millis() == 0, so a slow boot cannot land straight in idle.
+    inited = true;
+    powerSaveNoteActivity(false);
+  }
+
+  const PowerDecision decision = powerDecide();
+  const uint32_t before = getCpuFrequencyMhz();
+  // Locked and a boost are re-asserted: a `power mode` or `cpufreq` issued
+  // while a workload runs must not leave it at the lower clock. "active" and
+  // "idle" act only when the target changes, so a manual clock holds there
+  // until the policy itself wants something new.
+  const bool due = decision.mandatory ? before != decision.mhz : decision.mhz != appliedMhz;
+  if (!due) {
+    appliedMhz = decision.mhz;
+    return;
+  }
+  if (retryPending) {
+    // Only the refused target waits out its backoff; a new target is a new attempt.
+    if (decision.mhz == refusedMhz && (int32_t)(now - nextAttemptMs) < 0) return;
+    retryPending = false;
+  }
+  if (before != decision.mhz && !powerSetCpuFrequencyMhz(decision.mhz)) {
+    retryPending = true;
+    refusedMhz = decision.mhz;
+    nextAttemptMs = now + (decision.mhz > before ? kRaiseRetryMs : kLowerRetryMs);
+    // The HAL can move the clock and still report failure. Remember what is
+    // really there, so the next lap judges against reality, not the old target.
+    appliedMhz = getCpuFrequencyMhz();
+    return;
+  }
+  appliedMhz = decision.mhz;
+  if (before == decision.mhz) return;   // already there (applyPowerMode / cpufreq set it)
+  DEBUG_SYSTEMF("[POWER] clock %lu -> %lu MHz (%s)", (unsigned long)before,
+                (unsigned long)decision.mhz, decision.reason);
+  {
+    extern void batteryLogEvent(const char* event);
+    char ev[32];
+    snprintf(ev, sizeof(ev), "cpu:%s:%luMHz", decision.reason, (unsigned long)decision.mhz);
+    batteryLogEvent(ev);
+  }
+}
 
 // CLI: powercooldown [ms]
 //   no arg → print current value
@@ -520,7 +692,7 @@ static const char* cmd_powersave(const String& argsInput) {
 // Command table
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry powerCommands[] = {
-  {"power",         "Power management [mode]", true, cmd_power,         "Usage:\n  power - show current power status\n  power json - status as one JSON blob (same schema as /api/power/status)\n  power mode <perf|balanced|saver|ultra|locked|0-4>"},
+  {"power",         "Power management [mode]", true, cmd_power,         "Usage:\n  power - show current power status\n  power json - status as one JSON blob (same schema as /api/power/status)\n  power mode <perf|balanced|adaptive|ultra|locked|0-4>"},
   {"powercooldown", "Sleep transition cooldown (ms; 0 disables)", true, cmd_powercooldown, "Usage: powercooldown <0..60000>"},
   {"powersave",     "Idle power-save: OLED off + optional downclock (0 disables)", true, cmd_powersave, "Usage: powersave <0..1440>"}
 };
@@ -540,7 +712,7 @@ static bool isPowerModuleConnected() {
 static const SettingEntry powerSettingEntries[] = {
   // Fields are uint8_t — must use SETTING_U8 to avoid 4-byte-write overflow
   // into adjacent struct members. See System_Settings.h SettingType enum.
-  { "mode", SETTING_U8, &gSettings.powerMode, 0, 0, nullptr, 0, 4, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver,Locked", false, nullptr, "power mode" },
+  { "mode", SETTING_U8, &gSettings.powerMode, POWER_MODE_DEFAULT, 0, nullptr, 0, POWER_MODE_COUNT - 1, "Power Mode", "Performance,Balanced,Adaptive,UltraSaver,Locked", false, nullptr, "power mode" },
   { "displayDimLevel", SETTING_U8, &gSettings.powerDisplayDimLevel, 30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr, false, nullptr, "powerdim" },
   { "transitionCooldownMs", SETTING_INT, &gSettings.powerTransitionCooldownMs, 5000, 0, nullptr, 0, 60000, "Sleep cooldown (ms, 0=disabled)", nullptr, false, nullptr, "powercooldown" },
   { "powerSaveMinutes", SETTING_INT, &gSettings.powerSaveTimeoutMinutes, 10, 0, nullptr, 0, 1440, "Power saving (min, 0=disabled)", nullptr, false, nullptr, "powersave" }

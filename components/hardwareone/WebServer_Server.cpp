@@ -1096,12 +1096,12 @@ static void loadIpBansFromFile(bool replace) {
     return;
   }
   int count = 0;
-  if (filesystemReady && VFS::existsGuarded(IP_BANS_FILE, VFS::systemAuth("ipbans.load"))) {
+  if (filesystemReady && VFS::existsGuarded(IP_BANS_FILE, VFS::systemAuth(VFS::Scopes::USERS, "ipbans.load"))) {
     PSRAM_JSON_DOC(doc);
     DeserializationError err = DeserializationError::InvalidInput;
     {
       FsLockGuard guard("ipbans.load");
-      File f = VFS::openGuarded(IP_BANS_FILE, "r", VFS::systemAuth("ipbans.load"));
+      File f = VFS::openGuarded(IP_BANS_FILE, "r", VFS::systemAuth(VFS::Scopes::USERS, "ipbans.load"));
       if (f) {
         err = deserializeJson(doc, f);
         f.close();
@@ -1196,7 +1196,7 @@ static bool saveIpBans() {
   String json;
   serializeJson(doc, json);
   if (json.length() != expected) return false;
-  return writeTextAtomic(IP_BANS_FILE, json);
+  return writeTextAtomic(IP_BANS_FILE, json, VFS::systemAuth(VFS::Scopes::USERS, "ipbans.save"));
 }
 
 // Saves the list; on failure the in-memory list stays as it is and is marked
@@ -3577,7 +3577,7 @@ esp_err_t handleAutomationsGet(httpd_req_t* req) {
 
   httpd_resp_set_type(req, "application/json");
   String body;
-  if (!readText(AUTOMATIONS_JSON_FILE, body)) {
+  if (!readText(AUTOMATIONS_JSON_FILE, body, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "web.automations"))) {
     httpd_resp_send(req,
       "{\"success\":false,\"systemEnabled\":false,\"error\":\"Failed to read automations.json\"}",
       HTTPD_RESP_USE_STRLEN);
@@ -5020,7 +5020,7 @@ esp_err_t handleAutomationsExport(httpd_req_t* req) {
     if (httpd_query_key_value(query, "id", idParam, sizeof(idParam)) == ESP_OK) {
       // Export single automation
       String json;
-      if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+      if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "web.automations"))) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to read automations");
         return ESP_OK;
       }
@@ -5081,7 +5081,7 @@ esp_err_t handleAutomationsExport(httpd_req_t* req) {
 
   // Export all automations (bulk export)
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "web.automations"))) {
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to read automations");
     return ESP_OK;
   }

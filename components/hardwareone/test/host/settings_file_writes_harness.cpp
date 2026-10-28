@@ -165,11 +165,37 @@ class File {
 struct AuthContext { const char* owner; };
 static bool isSettingsTemporary(const char* path) {
   const String value(path);
-  return value == "/settings.tmp" || value == "/debug.tmp" ||
+  return value == "/system/settings.tmp" || value == "/system/debug.tmp" ||
          (value.startsWith("/system/users/user_settings/") && value.endsWith(".json.tmp"));
 }
 namespace VFS {
 static AuthContext systemAuth(const char* owner) { return {owner}; }
+namespace Scopes {  // the production Scopes (System_VFS.h); keep in step
+  inline constexpr const char* VIDEOS = "/sd/VIDEOS"; inline constexpr const char* CERTS = "/system/certs";
+  inline constexpr const char* OTA = "/system/ota"; inline constexpr const char* ESPNOW_RECEIVED = "/espnow/received";
+  inline constexpr const char* CAPTURES = "/logging_captures"; inline constexpr const char* CAPTURES_SD = "/sd/logging_captures";
+  inline constexpr const char* STT_MODELS = "/STT Models"; inline constexpr const char* STT_MODELS_SD = "/sd/STT Models";
+  inline constexpr const char* SYS_LOGS = "/system/sys_logs"; inline constexpr const char* SYS_LOGS_SD = "/sd/system/sys_logs";
+  inline constexpr const char* SYSTEM_STATE = "/system"; inline constexpr const char* USERS = "/system/users";
+  inline constexpr const char* MAPS = "/maps"; inline constexpr const char* EI_MODELS = "/EI Models";
+  inline constexpr const char* RECORDINGS = "/recordings"; inline constexpr const char* RECORDINGS_SD = "/sd/recordings";
+  inline constexpr const char* ESPNOW_STATE = "/system/espnow"; inline constexpr const char* ESPNOW_CAPTURES = "/sd/espnow";
+  inline constexpr const char* LLM_MODELS = "/system/llm"; inline constexpr const char* LLM_MODELS_SD = "/sd/llm";
+  inline constexpr const char* ESPSR = "/ESPSR"; inline constexpr const char* ESPSR_SD = "/sd/ESPSR";
+  inline constexpr const char* PICTURES_SD = "/sd/PICTURES";
+}  // namespace Scopes
+// Tier pickers mirroring System_VFS.h (accept const char* or any String-like).
+inline const char* fakeVfsCStr(const char* p) { return p; }
+template <class S> inline const char* fakeVfsCStr(const S& s) { return s.c_str(); }
+template <class P> inline bool fakeVfsOnSd(const P& p) { return std::strncmp(fakeVfsCStr(p), "/sd/", 4) == 0; }
+template <class P> inline const char* captureScopeFor(const P& p) { return fakeVfsOnSd(p) ? Scopes::CAPTURES_SD : Scopes::CAPTURES; }
+template <class P> inline const char* sysLogScopeFor(const P& p) { return fakeVfsOnSd(p) ? Scopes::SYS_LOGS_SD : Scopes::SYS_LOGS; }
+template <class P> inline const char* recordingScopeFor(const P& p) { return fakeVfsOnSd(p) ? Scopes::RECORDINGS_SD : Scopes::RECORDINGS; }
+template <class P> inline const char* llmModelScopeFor(const P& p) { return fakeVfsOnSd(p) ? Scopes::LLM_MODELS_SD : Scopes::LLM_MODELS; }
+template <class P> inline const char* espsrScopeFor(const P& p) { return fakeVfsOnSd(p) ? Scopes::ESPSR_SD : Scopes::ESPSR; }
+template <class P> inline const char* sttModelScopeFor(const P& p) { return fakeVfsOnSd(p) ? Scopes::STT_MODELS_SD : Scopes::STT_MODELS; }
+// end tier pickers
+static AuthContext systemAuth(const char*, const char* owner) { return {owner}; }
 static bool existsGuarded(const char* path, AuthContext) { return files.count(path) != 0; }
 static File openGuarded(const char* path, const char* mode, AuthContext auth) {
   check(ownsFs, "file open outside FS lock"); authOwners.emplace_back(auth.owner);
@@ -278,7 +304,7 @@ static size_t writeRegisteredSettings(JsonDocument& doc, const char* path, bool 
   jsonAllocator.fail = false;
   return 1;
 }
-static bool readText(const char* path, String& output) {
+static bool readText(const char* path, String& output, const AuthContext&) {
   {
     PollPauseGuard pause;
     FsLockGuard guard("test.read");
@@ -352,7 +378,7 @@ static void balanced() {
 }
 enum class Writer { Main, Debug, Restamp };
 static const char* destination(Writer writer) { return writer == Writer::Debug ? DEBUG_JSON_FILE : SETTINGS_JSON_FILE; }
-static const char* temporary(Writer writer) { return writer == Writer::Debug ? "/debug.tmp" : "/settings.tmp"; }
+static const char* temporary(Writer writer) { return writer == Writer::Debug ? "/system/debug.tmp" : "/system/settings.tmp"; }
 static bool run(Writer writer) {
   if (writer == Writer::Main) return writeSettingsJson();
   if (writer == Writer::Debug) return writeDebugJson();
@@ -471,14 +497,14 @@ static void helperOverflowAndReentry() {
 #if HAS_SNAPSHOT_HELPER
   reset();
   { SettingsFileWriteGuard writer; FsLockGuard outer("test.outer"); JsonDocument doc; doc["ok"] = true;
-    check(writeSettingsSnapshot(doc, SETTINGS_JSON_FILE, "/settings.tmp", "test.helper"), "nested helper failed");
+    check(writeSettingsSnapshot(doc, SETTINGS_JSON_FILE, "/system/settings.tmp", "test.helper"), "nested helper failed");
     check(ownsFs && lockTakes == 1 && lockGives == 0, "nested helper released caller's filesystem lock"); }
   balanced();
   reset();
   { PSRAM_JSON_DOC(doc); jsonAllocator.fail = true; doc["fail"] = std::string(8192, 'x'); jsonAllocator.fail = false;
     check(doc.overflowed(), "allocation boundary did not overflow real ArduinoJson");
     SettingsFileWriteGuard writer;
-    check(!writeSettingsSnapshot(doc, SETTINGS_JSON_FILE, "/settings.tmp", "test.helper"), "overflowed document persisted"); }
+    check(!writeSettingsSnapshot(doc, SETTINGS_JSON_FILE, "/system/settings.tmp", "test.helper"), "overflowed document persisted"); }
   balanced();
   check(writeOpens == 0 && events.size() == 1 && events[0].reason == "overflow", "overflow not rejected before temp open");
 #endif

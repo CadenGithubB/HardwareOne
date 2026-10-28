@@ -483,7 +483,9 @@ static bool micRecordingRemoveExactPath(const char* path, const char* authTag) {
   if (!path || !path[0]) return true;
   FsLockGuard fsGuard(authTag);
   const String ownedPath(path);
-  const AuthContext auth = VFS::systemAuth(authTag);
+  // trusted: recorder-owned paths only, confined to the recordings tree of
+  // the tier the path names.
+  const AuthContext auth = VFS::systemAuth(VFS::recordingScopeFor(ownedPath), authTag);
   if (!VFS::existsGuarded(ownedPath, auth)) return true;
   return VFS::removeGuarded(ownedPath, auth);
 }

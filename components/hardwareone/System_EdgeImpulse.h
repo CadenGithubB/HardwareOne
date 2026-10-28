@@ -75,7 +75,9 @@ EIResults runEdgeImpulseInference();
 
 // Run single inference on a stored JPEG file (same pipeline as the camera;
 // does not update tracked objects). Busy rule as above.
-EIResults runInferenceFromFile(const char* imagePath);
+struct AuthContext;
+// Reads `imagePath` as `ctx`: the identity that named the file, never the system.
+EIResults runInferenceFromFile(const char* imagePath, const AuthContext& ctx);
 
 // Start/stop continuous inference mode. Stop returns once the continuous task
 // has finished its current frame and exited.

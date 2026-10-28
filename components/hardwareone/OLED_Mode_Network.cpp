@@ -1,11 +1,12 @@
 // OLED_Mode_Network.cpp — Network / Mesh / Web / ESP-NOW / Remote-Sensors modes
 //
 // This file registers the following OLED modes:
-//   OLED_NETWORK_INFO       — Network main menu (scrollable, Power-style)
+//   OLED_NETWORK_INFO       — WiFi menu (scrollable, Power-style; owns the Add-WiFi
+//                             keyboard flow)
 //   OLED_NETWORK_STATUS     — WiFi status detail (pushed sub-mode, read-only)
-//   OLED_NETWORK_WIFI_MENU  — WiFi management (pushed sub-mode, owns Add-WiFi keyboard flow)
+//   OLED_NETWORK_WIFI_LIST / _REMOVE / _SCAN — saved-network and scan pickers
 //   OLED_MESH_STATUS        — Mesh role + peer count (read-only)
-//   OLED_WEB_STATS          — HTTP server stats (read-only)
+//   OLED_WEB_STATS          — Web menu (server, Auto Start, HTTPS); OLED_WEB_STATUS detail
 //   OLED_ESPNOW             — ESP-NOW peer/state UI (delegates to OLED_ESPNow)
 //   OLED_REMOTE_SENSORS     — Bonded device sensor data (scrollable)
 //
@@ -41,6 +42,7 @@
 #include "System_WiFi.h"           // ensureWiFiInitialized, scan operations
 #include "network/wifi/System_WiFiNetworks.h"   // credential-free saved-network snapshots
 #include "OLED_UI.h"               // oledToastShow — Add-WiFi refusals and replies
+#include "OLED_SettingsEditor.h"   // openSettingsEditorForModule — WiFi and Web settings rows
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -78,7 +80,10 @@ struct NetworkRenderData {
   bool radioOn;        // RADIO axis: powered up at all (WiFi or ESP-NOW)
   char ssid[16];
   char ip[16];
+  char gateway[16];
+  char mac[18];
   int rssi;
+  int channel;
   bool valid;
 };
 static NetworkRenderData networkRenderData = {};
@@ -104,6 +109,16 @@ void prepareNetworkData() {
     networkRenderData.ip[15] = '\0';
 
     networkRenderData.rssi = WiFi.RSSI();
+
+    String gateway = WiFi.gatewayIP().toString();
+    strncpy(networkRenderData.gateway, gateway.c_str(), 15);
+    networkRenderData.gateway[15] = '\0';
+    networkRenderData.channel = WiFi.channel();
+  }
+  if (networkRenderData.radioOn && (detailsDue || networkRenderData.mac[0] == '\0')) {
+    String mac = WiFi.macAddress();
+    strncpy(networkRenderData.mac, mac.c_str(), 17);
+    networkRenderData.mac[17] = '\0';
   }
   networkRenderData.valid = true;
 #else
@@ -114,37 +129,48 @@ void prepareNetworkData() {
 }
 
 // ============================================================================
-// OLED_NETWORK_INFO — Network main menu (Power-style OLEDScrollState)
+// OLED_NETWORK_INFO — WiFi menu (Power-style OLEDScrollState)
 // ============================================================================
-// One static OLEDScrollState owns selection + items + scroll. Items rebuild
-// every frame from current WiFi/HTTP state. Items that don't apply are simply
-// not added — no "---" placeholders, no skip-disabled cursor dance. Each item
-// carries a NetworkMainAction in a parallel array so the input handler can
-// dispatch without re-parsing strings.
+// The glasses' WiFi page in the same order (G2_Page_Network.cpp showWiFiMenu):
+// radio, connect or disconnect, status, scan, saved networks, Auto Start; plus
+// the add and remove pickers and the module settings. The web server moved to
+// the Web menu. Rows rebuild every frame from current state; each carries a
+// NetworkMainAction in a parallel array so input dispatches without re-parsing.
 
 enum NetworkMainAction {
-  NET_ACT_VIEW_STATUS,
+  NET_ACT_RADIO,
   NET_ACT_CONNECT_BEST,
-  NET_ACT_WIFI_MENU,
   NET_ACT_DISCONNECT,
-  NET_ACT_TOGGLE_HTTP,
+  NET_ACT_VIEW_STATUS,
+  NET_ACT_SCAN,
+  NET_ACT_SAVED,
+  NET_ACT_ADD,
+  NET_ACT_REMOVE,
+  NET_ACT_AUTO_START,
+  NET_ACT_SETTINGS,
 };
 
 EXT_RAM_BSS_ATTR static OLEDScrollState sNetworkMainScroll;
 EXT_RAM_BSS_ATTR static NetworkMainAction sNetworkMainActions[OLED_SCROLL_MAX_ITEMS];
 static bool sNetworkMainInitialized = false;
 
+// Defined with the Add-WiFi flow and the scan picker below; Add Network and
+// Scan Networks start them from this menu.
+static bool wifiAddKeyboardTick(bool* handled);
+static void startWifiAddSSID();
+static void startWifiScan();
+
 static void initNetworkMainScroll() {
   if (sNetworkMainInitialized) return;
-  oledScrollInit(&sNetworkMainScroll, nullptr, 4);
+  // One status line above the list, as on the Power menu.
+  const int visible = (OLED_CONTENT_HEIGHT - 8) / 8;
+  oledScrollInit(&sNetworkMainScroll, nullptr, visible > 0 ? visible : 1);
   sNetworkMainInitialized = true;
 }
 
 static void populateNetworkMainMenu() {
   initNetworkMainScroll();
   oledScrollClearKeepSelection(&sNetworkMainScroll);
-
-  bool wifiConnected = networkRenderData.wifiConnected;
 
   auto addAction = [&](const char* label, NetworkMainAction act) {
     if (oledScrollAddItem(&sNetworkMainScroll, label)) {
@@ -155,35 +181,29 @@ static void populateNetworkMainMenu() {
     }
   };
 
-  addAction("View Status", NET_ACT_VIEW_STATUS);
-  if (!wifiConnected) {
-    addAction("Connect", NET_ACT_CONNECT_BEST);
-  }
-  addAction("WiFi Management", NET_ACT_WIFI_MENU);
-  if (wifiConnected) {
-    addAction("Disconnect", NET_ACT_DISCONNECT);
-  }
-#if ENABLE_HTTP_SERVER
-  {
-    bool httpRunning = (server != nullptr);
-    const char* httpLabel;
-    if (httpRunning) {
-      httpLabel = gServerIsHttps ? "Close HTTPS" : "Close HTTP";
-    } else {
-      httpLabel = "Open HTTP";
-    }
-    addAction(httpLabel, NET_ACT_TOGGLE_HTTP);
-  }
+#if ENABLE_WIFI
+  addAction(networkRenderData.radioOn ? "Radio: ON" : "Radio: OFF", NET_ACT_RADIO);
+  if (networkRenderData.wifiConnected) addAction("Disconnect", NET_ACT_DISCONNECT);
+  else addAction("Connect", NET_ACT_CONNECT_BEST);
+  addAction("Status", NET_ACT_VIEW_STATUS);
+  addAction("Scan Networks", NET_ACT_SCAN);
+  addAction("Saved Networks", NET_ACT_SAVED);
+  addAction("Add Network", NET_ACT_ADD);
+  addAction("Remove Network", NET_ACT_REMOVE);
+  addAction(gSettings.wifiAutoStart ? "Auto Start: ON" : "Auto Start: OFF", NET_ACT_AUTO_START);
+  addAction("Settings", NET_ACT_SETTINGS);
 #endif
 
-  // Cursor preserved across the rebuild; clamp in case an item disappeared
-  // (e.g. "Connect" vanishing once we're connected).
+  // Cursor preserved across the rebuild; clamp in case an item disappeared.
   oledScrollClampSelection(&sNetworkMainScroll);
 }
 
-// Render network main menu from pre-gathered data (called INSIDE I2C transaction)
+// Render the WiFi menu from pre-gathered data (called INSIDE I2C transaction)
 void displayNetworkInfoRendered() {
   if (!oledDisplay || !oledConnected) return;
+
+  // Add Network's keyboard flow runs inside this mode.
+  if (oledKeyboardDrawIfActive(oledDisplay)) return;
 
   if (!networkRenderData.valid) {
     oledDisplay->setTextSize(1);
@@ -199,32 +219,20 @@ void displayNetworkInfoRendered() {
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
 
 #if ENABLE_WIFI
-  // Status banner row — distinguishes radio power from network connection
-  // (the old "(off)" meant merely disconnected, which read as radio-off).
+  // Status line: the network and its signal, or which axis is down (radio
+  // power vs connection; "No WiFi" is a radio up for ESP-NOW only).
   if (networkRenderData.wifiConnected) {
-    oledDisplay->print(networkRenderData.rssi);
-    oledDisplay->println("dBm");
-  } else if (networkRenderData.radioOn) {
-    oledDisplay->println("No WiFi");   // radio up (e.g. ESP-NOW), no network
+    char rssi[12];
+    snprintf(rssi, sizeof(rssi), "%ddBm", networkRenderData.rssi);
+    const int room = 21 - 1 - (int)strlen(rssi);
+    char line[24];
+    snprintf(line, sizeof(line), "%.*s %s", room > 0 ? room : 0,
+             networkRenderData.ssid, rssi);
+    oledDisplay->print(line);
   } else {
-    oledDisplay->println("Radio off");
+    oledDisplay->print(networkRenderData.radioOn ? "No WiFi" : "Radio off");
   }
-
-  // Power-style decorated rendering: read items from the scroll state.
-  // OLEDScrollState owns selection; we only paint.
-  for (int i = 0; i < sNetworkMainScroll.itemCount; i++) {
-    oledDisplay->print(i == sNetworkMainScroll.selectedIndex ? "> " : "  ");
-    oledDisplay->print(sNetworkMainScroll.items[i].line1);
-#if ENABLE_HTTP_SERVER
-    // Tiny suffix on the HTTP row showing protocol while running.
-    if (sNetworkMainActions[i] == NET_ACT_TOGGLE_HTTP) {
-      if (server != nullptr) {
-        oledDisplay->print(gServerIsHttps ? " [S]" : " *");
-      }
-    }
-#endif
-    oledDisplay->println();
-  }
+  oledScrollRenderSimple(oledDisplay, &sNetworkMainScroll, true, OLED_CONTENT_START_Y + 8);
 #else
   oledDisplay->println("WiFi: Disabled");
   oledDisplay->println();
@@ -233,20 +241,20 @@ void displayNetworkInfoRendered() {
 #endif
 }
 
-// Confirmation callbacks for HTTP Start/Stop. Network actions run through
-// oledRunCommand, which toasts a refusal; the rows show the new state.
-static void httpStartConfirmedNetwork(void* userData) {
+// The radio carries WiFi and ESP-NOW, so turning it off asks first. Network
+// actions run through oledRunCommand, which toasts a refusal; the rows then
+// show the new state.
+static void radioOffConfirmed(void* userData) {
   (void)userData;
-  oledRunCommand("openhttp");
-}
-
-static void httpStopConfirmedNetwork(void* userData) {
-  (void)userData;
-  oledRunCommand("closehttp");
+  oledRunCommand("radiopower off");
 }
 
 static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
   if (oledGuestBlocksMutate()) return true;
+  // Add Network's keyboard flow owns input while it is up.
+  bool kbHandled;
+  if (wifiAddKeyboardTick(&kbHandled)) return kbHandled;
+
   initNetworkMainScroll();
   if (oledScrollHandleNav(&sNetworkMainScroll)) return true;
 
@@ -254,30 +262,43 @@ static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t new
     int idx = sNetworkMainScroll.selectedIndex;
     if (idx < 0 || idx >= sNetworkMainScroll.itemCount) return true;
     switch (sNetworkMainActions[idx]) {
-      case NET_ACT_VIEW_STATUS:
-        requestOLEDMode(OLED_NETWORK_STATUS, "network.status");
+      case NET_ACT_RADIO:
+        if (networkRenderData.radioOn) {
+          oledConfirmRequest("Turn radio off?", "Stops WiFi + ESP-NOW", radioOffConfirmed,
+                             nullptr, false);
+        } else {
+          oledRunCommand("radiopower on");
+        }
         break;
       case NET_ACT_CONNECT_BEST:
         oledRunCommand("openwifi --best");
         break;
-      case NET_ACT_WIFI_MENU:
-        requestOLEDMode(OLED_NETWORK_WIFI_MENU, "network.wifi.menu");
-        break;
       case NET_ACT_DISCONNECT:
-        // Drop the AP but keep the radio (and HTTP) up — HTTP has its own
-        // toggle in this menu, so Disconnect should only leave the network.
+        // Drop the AP but keep the radio (and the web server) up.
         oledRunCommand("wifidisconnect");
         break;
-      case NET_ACT_TOGGLE_HTTP:
-#if ENABLE_HTTP_SERVER
-        {
-          if (server != nullptr) {
-            oledConfirmRequest("Stop HTTP?", nullptr, httpStopConfirmedNetwork, nullptr, false);
-          } else {
-            oledConfirmRequest("Start HTTP?", nullptr, httpStartConfirmedNetwork, nullptr);
-          }
+      case NET_ACT_VIEW_STATUS:
+        requestOLEDMode(OLED_NETWORK_STATUS, "network.status");
+        break;
+      case NET_ACT_SCAN:
+        startWifiScan();
+        break;
+      case NET_ACT_SAVED:
+        requestOLEDMode(OLED_NETWORK_WIFI_LIST, "network.wifi.list");
+        break;
+      case NET_ACT_ADD:
+        startWifiAddSSID();
+        break;
+      case NET_ACT_REMOVE:
+        requestOLEDMode(OLED_NETWORK_WIFI_REMOVE, "network.wifi.remove");
+        break;
+      case NET_ACT_AUTO_START:
+        oledRunCommand(gSettings.wifiAutoStart ? "wifiautostart 0" : "wifiautostart 1");
+        break;
+      case NET_ACT_SETTINGS:
+        if (openSettingsEditorForModule("wifi")) {
+          requestOLEDMode(OLED_SETTINGS, "network.settings");
         }
-#endif
         break;
     }
     return true;
@@ -290,6 +311,13 @@ static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t new
 // ============================================================================
 // OLED_NETWORK_STATUS — WiFi status detail (pushed sub-mode, read-only)
 // ============================================================================
+// The glasses' WiFi Status page. More lines than the 128x64 panel shows, so the
+// lines live in an OLEDScrollState drawn without a cursor; up/down move the
+// window a line at a time.
+
+EXT_RAM_BSS_ATTR static OLEDScrollState sNetStatusScroll;
+EXT_RAM_BSS_ATTR static char sNetStatusLines[8][24];
+static bool sNetStatusInitialized = false;
 
 static void displayNetworkStatusRendered() {
   if (!oledDisplay || !oledConnected) return;
@@ -304,34 +332,62 @@ static void displayNetworkStatusRendered() {
   }
 
 #if ENABLE_WIFI
-  // Two separate axes: RADIO power, then WiFi CONNECTION.
-  oledDisplay->print("Radio: ");
-  oledDisplay->println(networkRenderData.radioOn ? "ON" : "OFF");
-  if (networkRenderData.wifiConnected) {
-    oledDisplay->print("SSID: ");
-    oledDisplay->println(networkRenderData.ssid);
-    oledDisplay->print("IP: ");
-    oledDisplay->println(networkRenderData.ip);
-    oledDisplay->print("RSSI: ");
-    oledDisplay->print(networkRenderData.rssi);
-    oledDisplay->println(" dBm");
-  } else {
-    oledDisplay->println("WiFi: Disconnected");
+  if (!sNetStatusInitialized) {
+    const int visible = OLED_CONTENT_HEIGHT / 8;
+    oledScrollInit(&sNetStatusScroll, nullptr, visible > 0 ? visible : 1);
+    sNetStatusInitialized = true;
   }
+  oledScrollClearKeepSelection(&sNetStatusScroll);
+  int n = 0;
+  auto line = [&](const char* text) {
+    if (n >= (int)(sizeof(sNetStatusLines) / sizeof(sNetStatusLines[0]))) return;
+    snprintf(sNetStatusLines[n], sizeof(sNetStatusLines[n]), "%s", text);
+    oledScrollAddItem(&sNetStatusScroll, sNetStatusLines[n], nullptr, false);
+    ++n;
+  };
+  char buf[24];
+  // Two separate axes: RADIO power, then WiFi CONNECTION.
+  line(networkRenderData.radioOn ? "Radio: ON" : "Radio: OFF");
+  line(networkRenderData.wifiConnected ? "State: connected" : "State: offline");
+  if (networkRenderData.wifiConnected) {
+    snprintf(buf, sizeof(buf), "SSID: %s", networkRenderData.ssid); line(buf);
+    snprintf(buf, sizeof(buf), "IP: %s", networkRenderData.ip); line(buf);
+    snprintf(buf, sizeof(buf), "GW: %s", networkRenderData.gateway); line(buf);
+    snprintf(buf, sizeof(buf), "RSSI: %ddBm ch%d", networkRenderData.rssi,
+             networkRenderData.channel);
+    line(buf);
+  }
+  if (networkRenderData.mac[0]) {
+    snprintf(buf, sizeof(buf), "MAC %s", networkRenderData.mac); line(buf);
+  }
+  oledScrollClampSelection(&sNetStatusScroll);
+  oledScrollRenderSimple(oledDisplay, &sNetStatusScroll, /*showSelection=*/false);
 #else
   oledDisplay->println("WiFi: Disabled");
 #endif
 }
 
-// No input handler — B falls through to global oledMenuBack() pop.
+// Up/down move the window; B falls through to the global oledMenuBack() pop.
+static bool networkStatusInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t /*newlyPressed*/) {
+  if (!sNetStatusInitialized) return false;
+  const int maxTop = sNetStatusScroll.itemCount > sNetStatusScroll.visibleLines
+                     ? sNetStatusScroll.itemCount - sNetStatusScroll.visibleLines : 0;
+  int top = sNetStatusScroll.scrollOffset;
+  if (gNavEvents.up && top > 0) --top;
+  else if (gNavEvents.down && top < maxTop) ++top;
+  else return false;
+  sNetStatusScroll.scrollOffset = top;
+  sNetStatusScroll.selectedIndex = top;
+  return true;
+}
 
 // ============================================================================
-// OLED_NETWORK_WIFI_MENU — WiFi management (pushed sub-mode, scrollable)
+// Add-WiFi keyboard flow, saved-network and scan pickers
 // ============================================================================
-// "Add Network" launches a multi-step keyboard flow lived inside this same
-// mode, mirroring OLED_Mode_SetPattern.cpp: one step enum + one sKeyboardActive
-// bool. The central input pump owns input while the keyboard is up; we just
-// poll completion per frame to advance SSID → PASS → submit.
+// "Add Network" (WiFi menu) and a scan pick launch a multi-step keyboard flow,
+// mirroring OLED_Mode_SetPattern.cpp: one step enum + one sKeyboardActive
+// bool. The central input pump owns input while the keyboard is up; the mode
+// that started it polls completion per frame to advance SSID → PASS → submit.
 
 enum WifiAddStep {
   WIFI_ADD_NONE,
@@ -339,8 +395,6 @@ enum WifiAddStep {
   WIFI_ADD_PASS,
 };
 
-EXT_RAM_BSS_ATTR static OLEDScrollState sWifiMenuScroll;
-static bool sWifiMenuInitialized = false;
 static WifiAddStep sWifiAddStep = WIFI_ADD_NONE;
 static bool sWifiKeyboardActive = false;
 static bool sWifiAddConnectAfter = false;   // true when password flow began from a scan pick
@@ -369,37 +423,6 @@ static int  sWifiScanCount = 0;
 // prompt as a const char* pointer (it does NOT copy), so the buffer must persist.
 static uint32_t sPendingRemoveId = 0;
 static char   sRemovePromptBuf[40];
-
-static void populateWifiMenu() {
-  if (!sWifiMenuInitialized) {
-    // Single-line list: ~8px per item, so the whole content area's worth of
-    // items shows at once (the global header already labels this "WiFi", so no
-    // in-list title). visibleLines drives scroll math only — all 5 items fit.
-    oledScrollInit(&sWifiMenuScroll, nullptr, OLED_CONTENT_HEIGHT / 8);
-    sWifiMenuInitialized = true;
-  }
-  oledScrollClearKeepSelection(&sWifiMenuScroll);
-  oledScrollAddItem(&sWifiMenuScroll, "List Networks");
-  oledScrollAddItem(&sWifiMenuScroll, "Add Network");
-  oledScrollAddItem(&sWifiMenuScroll, "Remove Network");
-  oledScrollAddItem(&sWifiMenuScroll, "Connect Best");
-  oledScrollAddItem(&sWifiMenuScroll, "Scan Networks");
-  oledScrollClampSelection(&sWifiMenuScroll);
-}
-
-static void displayNetworkWifiMenuRendered() {
-  if (!oledDisplay || !oledConnected) return;
-
-  // Defensive curtain: while keyboard is active, draw it ourselves.
-  // (Matches OLED_Mode_Auth.cpp:50, OLED_Mode_SetPattern.cpp:88, OLED_ESPNow.cpp:506.)
-  if (oledKeyboardDrawIfActive(oledDisplay)) return;
-
-  populateWifiMenu();
-  // Single-line list renderer — shows every option at once, matching the
-  // Network main menu (NOT oledScrollRender, which is the 16px two-line/
-  // split-pane renderer that only fit one item here).
-  oledScrollRenderSimple(oledDisplay, &sWifiMenuScroll);
-}
 
 static void startWifiAddSSID() {
   String sessionUser;
@@ -749,41 +772,6 @@ static void startWifiScan() {
   requestOLEDMode(OLED_NETWORK_WIFI_SCAN, "network.wifi.scan");
 }
 
-static bool networkWifiMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
-  if (oledGuestBlocksMutate()) return true;
-  // --- Multi-step Add-WiFi keyboard flow (shared with scan-pick) ---
-  bool kbHandled;
-  if (wifiAddKeyboardTick(&kbHandled)) return kbHandled;
-
-  // --- Menu navigation ---
-  if (oledScrollHandleNav(&sWifiMenuScroll)) return true;
-
-  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    switch (sWifiMenuScroll.selectedIndex) {
-      case 0: // List Networks — push the saved-network picker (A connects)
-        requestOLEDMode(OLED_NETWORK_WIFI_LIST, "network.wifi.list");
-        break;
-      case 1: // Add Network — manual SSID → PASS keyboard flow
-        startWifiAddSSID();
-        break;
-      case 2: // Remove Network — push the saved-network picker (A confirms+deletes)
-        requestOLEDMode(OLED_NETWORK_WIFI_REMOVE, "network.wifi.remove");
-        break;
-      case 3: // Connect Best
-        oledRunCommand("openwifi --best");
-        oledMenuBack();  // close this submenu after kicking off the connect
-        break;
-      case 4: // Scan Networks — scan, then push the scan picker (A adds + connects)
-        startWifiScan();
-        break;
-    }
-    return true;
-  }
-
-  // B: return false so the global handler pops the mode stack.
-  return false;
-}
-
 // ============================================================================
 // OLED_ESPNOW — delegates to OLED_ESPNow module
 // ============================================================================
@@ -846,8 +834,12 @@ void displayEspNow() {
 }
 
 // ============================================================================
-// OLED_WEB_STATS — HTTP server stats (read-only, two-phase rendering)
+// OLED_WEB_STATS — Web menu, OLED_WEB_STATUS — Web status (two-phase rendering)
 // ============================================================================
+// The menu follows the glasses' HTTP(S) page (G2_Page_Network.cpp showHttpMenu):
+// start or stop the server, Auto Start, HTTPS (builds with it), plus Status and
+// the module settings. The menu is always enterable; it used to open only while
+// the server ran, so there was no way to start it or set Auto Start from here.
 
 #if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
@@ -859,13 +851,16 @@ extern SessionEntry* gSessions;
 struct WebStatsRenderData {
   int activeSessions;
   int totalSessions;
-  unsigned long uptimeSeconds;
   int failedLoginAttempts;
   bool httpServerRunning;
+  bool https;
+  bool wifiConnected;
+  char ip[16];
   bool valid;
 };
 static WebStatsRenderData webStatsRenderData = {};
 
+// Gathered OUTSIDE the I2C transaction (WiFi API calls), like the WiFi menu.
 void prepareWebStatsData() {
   webStatsRenderData.activeSessions = 0;
   webStatsRenderData.totalSessions = 0;
@@ -882,10 +877,9 @@ void prepareWebStatsData() {
     }
   }
 
-  webStatsRenderData.uptimeSeconds = millis() / 1000;
-
 #if ENABLE_HTTP_SERVER
   webStatsRenderData.httpServerRunning = (server != nullptr);
+  webStatsRenderData.https = gServerIsHttps;
   // System_User's credential attempt table (System_User.h): failed credential
   // attempts on every transport since boot. Monotonic, unlike a peer's
   // windowed failure count, which clears on success; this is the "did anyone
@@ -893,57 +887,182 @@ void prepareWebStatsData() {
   webStatsRenderData.failedLoginAttempts = (int)getTotalFailedLoginCount();
 #else
   webStatsRenderData.httpServerRunning = false;
+  webStatsRenderData.https = false;
   webStatsRenderData.failedLoginAttempts = 0;
+#endif
+
+#if ENABLE_WIFI
+  // The address is a driver query (an RPC on the P4): refresh once a second.
+  static uint32_t sIpStamp = 0;
+  const bool wasConnected = webStatsRenderData.wifiConnected;
+  webStatsRenderData.wifiConnected = WiFi.isConnected();
+  if (webStatsRenderData.wifiConnected && (everyMs(&sIpStamp, 1000) || !wasConnected)) {
+    String ip = WiFi.localIP().toString();
+    strncpy(webStatsRenderData.ip, ip.c_str(), 15);
+    webStatsRenderData.ip[15] = '\0';
+  }
+#else
+  webStatsRenderData.wifiConnected = false;
 #endif
 
   webStatsRenderData.valid = true;
 }
 
+enum WebMenuAction {
+  WEB_ACT_SERVER,
+  WEB_ACT_AUTO_START,
+  WEB_ACT_HTTPS,
+  WEB_ACT_STATUS,
+  WEB_ACT_SETTINGS,
+};
+
+EXT_RAM_BSS_ATTR static OLEDScrollState sWebMenuScroll;
+EXT_RAM_BSS_ATTR static WebMenuAction sWebMenuActions[OLED_SCROLL_MAX_ITEMS];
+static bool sWebMenuInitialized = false;
+
+static void populateWebMenu() {
+  if (!sWebMenuInitialized) {
+    const int visible = (OLED_CONTENT_HEIGHT - 8) / 8;   // one status line above
+    oledScrollInit(&sWebMenuScroll, nullptr, visible > 0 ? visible : 1);
+    sWebMenuInitialized = true;
+  }
+  oledScrollClearKeepSelection(&sWebMenuScroll);
+  auto addAction = [&](const char* label, WebMenuAction act) {
+    if (oledScrollAddItem(&sWebMenuScroll, label)) {
+      const int idx = sWebMenuScroll.itemCount - 1;
+      if (idx >= 0 && idx < (int)(sizeof(sWebMenuActions) / sizeof(sWebMenuActions[0]))) {
+        sWebMenuActions[idx] = act;
+      }
+    }
+  };
+#if ENABLE_HTTP_SERVER
+  if (webStatsRenderData.httpServerRunning) {
+    addAction(webStatsRenderData.https ? "Stop HTTPS" : "Stop HTTP", WEB_ACT_SERVER);
+  } else {
+    addAction(gSettings.httpsEnabled ? "Start HTTPS" : "Start HTTP", WEB_ACT_SERVER);
+  }
+  addAction(gSettings.httpAutoStart ? "Auto Start: ON" : "Auto Start: OFF", WEB_ACT_AUTO_START);
+#if ENABLE_HTTPS
+  // The glasses list this row without the build check and send a command an
+  // HTTP-only build does not have; here it follows the command.
+  addAction(gSettings.httpsEnabled ? "HTTPS: ON" : "HTTPS: OFF", WEB_ACT_HTTPS);
+#endif
+  addAction("Status", WEB_ACT_STATUS);
+  addAction("Settings", WEB_ACT_SETTINGS);
+#endif
+  oledScrollClampSelection(&sWebMenuScroll);
+}
+
 void displayWebStatsRendered() {
   if (!oledDisplay || !oledConnected) return;
-
-  if (!webStatsRenderData.valid) {
-    oledDisplay->setTextSize(1);
-    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-    oledDisplay->println("Web Stats Error");
-    return;
-  }
-
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-  oledDisplay->println();
 
-  oledDisplay->print("Status: ");
-  if (webStatsRenderData.httpServerRunning) {
-    oledDisplay->println(gServerIsHttps ? "HTTPS" : "HTTP");
-  } else {
-    oledDisplay->println("Stopped");
+  if (!webStatsRenderData.valid) {
+    oledDisplay->println("Web data unavailable");
+    return;
   }
 
+  populateWebMenu();
+  // Status line: where the server answers, or why it does not.
+  char line[24];
+  if (webStatsRenderData.httpServerRunning && webStatsRenderData.wifiConnected) {
+    snprintf(line, sizeof(line), "%s %s", webStatsRenderData.https ? "HTTPS" : "HTTP",
+             webStatsRenderData.ip);
+  } else if (webStatsRenderData.httpServerRunning) {
+    snprintf(line, sizeof(line), "%s (no WiFi)", webStatsRenderData.https ? "HTTPS" : "HTTP");
+  } else {
+    snprintf(line, sizeof(line), "%s",
+             webStatsRenderData.wifiConnected ? "Server stopped" : "Stopped (no WiFi)");
+  }
+  oledDisplay->print(line);
+  oledScrollRenderSimple(oledDisplay, &sWebMenuScroll, true, OLED_CONTENT_START_Y + 8);
+}
+
+#if ENABLE_HTTP_SERVER
+// oledRunCommand toasts a refusal; the menu's rows show the new state.
+static void webServerStartConfirmed(void* userData) {
+  (void)userData;
+  oledRunCommand("openhttp");
+}
+
+static void webServerStopConfirmed(void* userData) {
+  (void)userData;
+  oledRunCommand("closehttp");
+}
+#endif
+
+static bool webMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
+  if (!sWebMenuInitialized) return false;
+  if (oledScrollHandleNav(&sWebMenuScroll)) return true;
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+    const int idx = sWebMenuScroll.selectedIndex;
+    if (idx < 0 || idx >= sWebMenuScroll.itemCount) return true;
+    switch (sWebMenuActions[idx]) {
+      case WEB_ACT_SERVER:
+#if ENABLE_HTTP_SERVER
+        if (webStatsRenderData.httpServerRunning) {
+          oledConfirmRequest("Stop web server?", nullptr, webServerStopConfirmed, nullptr, false);
+        } else {
+          oledConfirmRequest("Start web server?", nullptr, webServerStartConfirmed, nullptr);
+        }
+#endif
+        break;
+      case WEB_ACT_AUTO_START:
+        oledRunCommand(gSettings.httpAutoStart ? "httpAutoStart 0" : "httpAutoStart 1");
+        break;
+      case WEB_ACT_HTTPS:
+#if ENABLE_HTTPS
+        if (oledRunCommand(gSettings.httpsEnabled ? "httpsEnabled 0" : "httpsEnabled 1")) {
+          oledToastShow("Reboot to apply", 2500);
+        }
+#endif
+        break;
+      case WEB_ACT_STATUS:
+        requestOLEDMode(OLED_WEB_STATUS, "web.status");
+        break;
+      case WEB_ACT_SETTINGS:
+        if (openSettingsEditorForModule("http")) {
+          requestOLEDMode(OLED_SETTINGS, "web.settings");
+        }
+        break;
+    }
+    return true;
+  }
+  return false;   // B: the global handler pops back
+}
+
+// The server's state, address and sessions; read-only (B falls through to back).
+static void displayWebStatusRendered() {
+  if (!oledDisplay || !oledConnected) return;
+  oledDisplay->setTextSize(1);
+  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
+  if (!webStatsRenderData.valid) {
+    oledDisplay->println("Web data unavailable");
+    return;
+  }
+  oledDisplay->print("Server: ");
+  oledDisplay->println(!webStatsRenderData.httpServerRunning ? "Stopped"
+                       : webStatsRenderData.https ? "HTTPS" : "HTTP");
+  if (webStatsRenderData.wifiConnected) {
+    oledDisplay->print("IP: ");
+    oledDisplay->println(webStatsRenderData.ip);
+  } else {
+    oledDisplay->println("IP: no WiFi");
+  }
   oledDisplay->print("Active: ");
   oledDisplay->print(webStatsRenderData.activeSessions);
   oledDisplay->print("/");
   oledDisplay->print(MAX_SESSIONS);
   oledDisplay->println(" users");
-
   oledDisplay->print("Total: ");
   oledDisplay->print(webStatsRenderData.totalSessions);
   oledDisplay->println(" sessions");
-
-  oledDisplay->print("Uptime: ");
-  unsigned long hours = webStatsRenderData.uptimeSeconds / 3600;
-  unsigned long minutes = (webStatsRenderData.uptimeSeconds % 3600) / 60;
-  oledDisplay->print(hours);
-  oledDisplay->print("h ");
-  oledDisplay->print(minutes);
-  oledDisplay->println("m");
-
-  if (webStatsRenderData.failedLoginAttempts > 0) {
-    oledDisplay->print("Failed: ");
-    oledDisplay->println(webStatsRenderData.failedLoginAttempts);
-  }
+  oledDisplay->print("Failed logins: ");
+  oledDisplay->println(webStatsRenderData.failedLoginAttempts);
 }
 
 // ============================================================================
@@ -1460,12 +1579,10 @@ REGISTER_OLED_MODE_MODULE(remoteSensorsOLEDModes,
 //          showInMenu, menuOrder, hints, onEnter
 
 static const OLEDModeEntry sNetworkModes[] = {
-  { OLED_NETWORK_INFO,      "Network", "wifi",          displayNetworkInfoRendered,
+  { OLED_NETWORK_INFO,      "WiFi",    "wifi",          displayNetworkInfoRendered,
     nullptr, networkMainInputHandler,     false, -1, "A:Select B:Back" },
-  { OLED_NETWORK_STATUS,    "Status",  "wifi",          displayNetworkStatusRendered,
-    nullptr, nullptr,                     false, -1, "B:Back" },
-  { OLED_NETWORK_WIFI_MENU, "WiFi",    "wifi",          displayNetworkWifiMenuRendered,
-    nullptr, networkWifiMenuInputHandler, false, -1, "A:Select B:Back" },
+  { OLED_NETWORK_STATUS,    "WiFi Status", "wifi",      displayNetworkStatusRendered,
+    nullptr, networkStatusInputHandler,   false, -1, "\x18\x19:Scroll B:Back" },
   { OLED_NETWORK_WIFI_LIST, "Saved",   "wifi",          displaySavedNetworksRendered,
     nullptr, networkWifiListInputHandler,   false, -1, "A:Connect B:Back", savedNetworksOnEnter },
   { OLED_NETWORK_WIFI_REMOVE,"Remove", "wifi",          displaySavedNetworksRendered,
@@ -1475,7 +1592,9 @@ static const OLEDModeEntry sNetworkModes[] = {
   { OLED_MESH_STATUS,       "Mesh",    "wifi",          displayMeshStatusRendered,
     nullptr, nullptr,                     false, -1, "B:Back" },
   { OLED_WEB_STATS,         "Web",     "web",           displayWebStatsRendered,
-    nullptr, nullptr,                     false, -1, nullptr  },  // dynamic hints in OLED_Utils.cpp
+    nullptr, webMenuInputHandler,         false, -1, "A:Select B:Back" },
+  { OLED_WEB_STATUS,        "Web Status", "web",        displayWebStatusRendered,
+    nullptr, nullptr,                     false, -1, "B:Back" },
   { OLED_ESPNOW,            "ESP-NOW", "notify_espnow", displayEspNow,
     nullptr, nullptr,                     false, -1, nullptr, espnowOnEnter },  // dynamic hints in OLED_Utils.cpp
 };

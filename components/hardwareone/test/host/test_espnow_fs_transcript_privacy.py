@@ -81,7 +81,7 @@ def main():
                             ('String normalize(', 'StorageType getStorageType(',
                              'String stripSdPrefix('))
     reader = vfs_header[vfs_header.index('struct DirectoryEntry {'):
-                        vfs_header.index('bool exists(const String& path);')]
+                        vfs_header.index('bool getStats(StorageType type')]
     reader += vfs[vfs.index('DirectoryReader::DirectoryReader('):
                   vfs.index('static FS* fsForPath(')]
     for tag, value in [('// INSERT_POLICY', read('Transcript_PathPolicy.h').replace('#pragma once','')),

@@ -127,7 +127,7 @@ enum OLEDMode {
   OLED_BLUETOOTH,      // Bluetooth connection and message view
   OLED_MEMORY_STATS,   // Memory/heap/PSRAM usage statistics
   OLED_REMOTE_SENSORS, // Remote sensor data from ESP-NOW mesh workers
-  OLED_WEB_STATS,      // Web server statistics (connections, failed logins, etc)
+  OLED_WEB_STATS,      // Web menu: server start/stop, auto start, HTTPS, status
   OLED_SETTINGS,       // Settings editor with visual slider/dial controls
   OLED_CLI_VIEWER,     // CLI output viewer (read-only console)
   OLED_CLI_INPUT,      // CLI command input (keyboard + last output lines)
@@ -147,10 +147,9 @@ enum OLEDMode {
   OLED_NOTIFICATIONS,  // Notification history viewer
   OLED_LLM,            // On-device LLM chat
   OLED_NETWORK_STATUS,    // WiFi status detail (pushed from OLED_NETWORK_INFO)
-  OLED_NETWORK_WIFI_MENU, // WiFi management submenu (pushed from OLED_NETWORK_INFO)
-  OLED_NETWORK_WIFI_LIST, // Saved-network list → connect (pushed from WIFI_MENU)
-  OLED_NETWORK_WIFI_REMOVE, // Saved-network list → confirm + delete (pushed from WIFI_MENU)
-  OLED_NETWORK_WIFI_SCAN, // Scanned-network list → password + add (pushed from WIFI_MENU)
+  OLED_NETWORK_WIFI_LIST, // Saved-network list → connect (pushed from OLED_NETWORK_INFO)
+  OLED_NETWORK_WIFI_REMOVE, // Saved-network list → confirm + delete (pushed from OLED_NETWORK_INFO)
+  OLED_NETWORK_WIFI_SCAN, // Scanned-network list → password + add (pushed from OLED_NETWORK_INFO)
   OLED_SPEECH_STATUS,     // ESP-SR live status detail (pushed from OLED_SPEECH)
   OLED_BLUETOOTH_STATUS,  // BT status detail (pushed from OLED_BLUETOOTH)
   OLED_BLUETOOTH_G2,      // G2 glasses submenu (pushed from OLED_BLUETOOTH)
@@ -164,6 +163,7 @@ enum OLEDMode {
   OLED_TRANSCRIPTION, OLED_TRANSCRIPTION_LIVE, OLED_TRANSCRIPTS, OLED_TRANSCRIPT_VIEW,
   OLED_BLUETOOTH_PHONE,    // Phone relay pipe submenu (pushed from OLED_BLUETOOTH)
   OLED_BLUETOOTH_PHONE_CODE, // `phone pair new` code screen (pushed by the command; never for a guest)
+  OLED_WEB_STATUS,         // Web server status detail (pushed from OLED_WEB_STATS)
 };
 
 // Guest OLED session helpers (view-only UX). Allowlist drives menu filter +
@@ -376,8 +376,8 @@ extern String customOLEDText;
 extern unsigned long oledLastUpdate;
 extern unsigned long animationFrame;
 
-// (Network menu state flags removed — OLED_NETWORK_STATUS / OLED_NETWORK_WIFI_MENU
-//  are now real pushed sub-modes; footer hints come from OLEDModeEntry::hints.)
+// (Network menu state flags removed — OLED_NETWORK_STATUS and the saved/scan
+//  pickers are real pushed sub-modes; footer hints come from OLEDModeEntry::hints.)
 extern unsigned long animationLastUpdate;
 extern int animationFPS;
 
@@ -429,10 +429,10 @@ void displayPowerSleep();
 
 // Network mode functions (OLED_Mode_Network.cpp)
 // All display/input/navigation registered via REGISTER_OLED_MODE_MODULE for:
-//   OLED_NETWORK_INFO       — main menu (OLEDScrollState, Power-style)
+//   OLED_NETWORK_INFO       — WiFi menu (OLEDScrollState; owns the Add-WiFi keyboard flow)
 //   OLED_NETWORK_STATUS     — WiFi status detail (pushed sub-mode)
-//   OLED_NETWORK_WIFI_MENU  — WiFi management (pushed sub-mode, owns Add-WiFi keyboard flow)
-//   OLED_MESH_STATUS, OLED_WEB_STATS, OLED_ESPNOW, OLED_REMOTE_SENSORS
+//   OLED_WEB_STATS          — Web menu (server, auto start, HTTPS); OLED_WEB_STATUS detail
+//   OLED_MESH_STATUS, OLED_ESPNOW, OLED_REMOTE_SENSORS
 
 // System mode functions (OLED_Mode_System.cpp)
 void displayCustomText();

@@ -223,7 +223,8 @@ static void keepBackupWithinRestoreLimit(const JsonDocument& bundle, JsonObject&
 static void addFileToBackup(JsonObject& files, JsonArray& warnings, const char* path) {
   if (!filesystemReady) return;
   String content;
-  if (!readText(path, content)) {
+  // trusted: every bundled file is a fixed /system state path (see the callers).
+  if (!readText(path, content, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "migration.backup"))) {
     char warn[128];
     snprintf(warn, sizeof(warn), "%s not found, skipped", path);
     warnings.add(warn);
@@ -539,8 +540,34 @@ static String restoreStagingPath(const String& dest) {
 
 // Apply a validated HWBACKUP JsonDocument to flash. Used by applyStagedMigrationRestore.
 // True only when every file was written and moved into place.
+// A bundle may only restore what a backup emits: the fixed /system state
+// files, the per-user settings folder, the TLS certificate folder and the
+// map tree. Anything else is refused before it is staged, by name.
+static bool restorePathAllowed(const String& path) {
+  const char* p = path.c_str();
+  static const char* const kExact[] = { SETTINGS_FILE, DEBUG_FILE, USERS_FILE, BOOT_ANCHORS_FILE,
+                                        AUTOMATIONS_FILE, ESPNOW_DEVICES };
+  for (const char* exact : kExact) if (strcmp(p, exact) == 0) return true;
+  static const char* const kTrees[] = { USER_SETTINGS_DIR, "/system/certs", MAPS_DIR };
+  for (const char* tree : kTrees) {
+    const size_t n = strlen(tree);
+    if (strncmp(p, tree, n) == 0 && p[n] == '/' && p[n + 1] != '\0') return true;
+  }
+  return false;
+}
+
+// trusted: the restore writes the device's own state files as the system
+// identity, confined to the tree the destination lives in (/maps for map
+// files, /system for everything else); the ".restore.tmp" staging sibling
+// and the parent directory share that tree.
+static AuthContext restoreAuthFor(const String& destination) {
+  const bool maps = strncmp(destination.c_str(), "/maps/", 6) == 0;
+  return VFS::systemAuth(maps ? VFS::Scopes::MAPS : VFS::Scopes::SYSTEM_STATE, "migration.restore");
+}
+
 static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
                                      int* outWritten, int* outErrored) {
+  const AuthContext restoreAuth = restoreAuthFor(SETTINGS_FILE);  // /system state
   // Cross-device restore: preserve the WiFi network the user entered during Import.
   // The source device's wifiNetworks (under network.wifi.networks) carry passwords
   // encrypted with the source's device key and won't decrypt here, so we keep THIS
@@ -549,7 +576,7 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
   bool haveDeviceWifi = false;
   if (!compatible) {
     String curSettings;
-    if (readText(SETTINGS_FILE, curSettings)) {
+    if (readText(SETTINGS_FILE, curSettings, restoreAuth)) {
       DeserializationError derr = deserializeJson(deviceSettingsDoc, curSettings);
       if (derr) {
         // Falling through with haveDeviceWifi == false keeps the SOURCE device's
@@ -589,6 +616,11 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
     }
 
     String pathStr = String(path);
+    if (!restorePathAllowed(pathStr)) {
+      ERROR_STORAGEF("[migrate] bundle names %s, which a backup never contains - restore refused", path);
+      filesErrored++;
+      continue;
+    }
 
     // On different device: skip user credential files and encrypted cert files
     if (!compatible) {
@@ -603,7 +635,7 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
     int lastSlash = pathStr.lastIndexOf('/');
     if (lastSlash > 0) {
       String dir = pathStr.substring(0, lastSlash);
-      VFS::mkdirGuarded(dir, VFS::systemAuth("migration.restore_mkdir"));
+      VFS::mkdirGuarded(dir, restoreAuthFor(pathStr));
     }
 
     String content;
@@ -639,7 +671,7 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
       }
     }
 
-    if (writeText(restoreStagingPath(pathStr).c_str(), content)) {
+    if (writeText(restoreStagingPath(pathStr).c_str(), content, restoreAuthFor(pathStr))) {
       staged.push_back(pathStr);
     } else {
       failedStage = restoreStagingPath(pathStr);
@@ -650,7 +682,7 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
   if (!compatible && filesErrored == 0) {
     // Next boot: streamlined credential-only flow (admin login), not full FTS menu.
     const String marker(PENDING_CRED_SETUP_FILE);
-    if (writeText(restoreStagingPath(marker).c_str(), "1")) {
+    if (writeText(restoreStagingPath(marker).c_str(), "1", restoreAuth)) {
       staged.push_back(marker);
     } else {
       failedStage = restoreStagingPath(marker);
@@ -665,7 +697,7 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
       for (int pass = 0; pass < 2 && filesErrored == 0; ++pass) {
         for (const String& dest : staged) {
           if ((dest == USERS_FILE) != (pass == 1)) continue;
-          if (!VFS::rename(restoreStagingPath(dest), dest)) {
+          if (!VFS::renameGuarded(restoreStagingPath(dest), dest, restoreAuthFor(dest))) {
             ERROR_STORAGEF("[migrate] could not move the restored %s into place", dest.c_str());
             filesErrored++;
             break;
@@ -677,9 +709,10 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
     // Drop whatever is still staged (all of it when a write failed).
     for (const String& dest : staged) {
       const String stagingPath = restoreStagingPath(dest);
-      if (VFS::exists(stagingPath)) VFS::remove(stagingPath);
+      const AuthContext auth = restoreAuthFor(dest);
+      if (VFS::existsGuarded(stagingPath, auth)) VFS::removeGuarded(stagingPath, auth);
     }
-    if (failedStage.length()) VFS::remove(failedStage);
+    if (failedStage.length()) VFS::removeGuarded(failedStage, restoreAuthFor(failedStage));
   }
 
   if (outWritten) *outWritten = filesWritten;
@@ -1021,11 +1054,11 @@ void startRestoreOnlyHttpServer() {
     static const char* CERT_PATH = "/system/certs/https_server.crt";
     static const char* KEY_PATH  = "/system/certs/https_server.key";
     bool certsOk = false;
-    if (VFS::existsGuarded(CERT_PATH, VFS::systemAuth("migration.restore_certs")) &&
-        VFS::existsGuarded(KEY_PATH, VFS::systemAuth("migration.restore_certs"))) {
+    if (VFS::existsGuarded(CERT_PATH, VFS::systemAuth(VFS::Scopes::CERTS, "migration.restore_certs")) &&
+        VFS::existsGuarded(KEY_PATH, VFS::systemAuth(VFS::Scopes::CERTS, "migration.restore_certs"))) {
       FsLockGuard fsGuard("migration.restore_certs");
-      File cf = VFS::openGuarded(CERT_PATH, "r", VFS::systemAuth("migration.restore_certs"));
-      File kf = VFS::openGuarded(KEY_PATH, "r", VFS::systemAuth("migration.restore_certs"));
+      File cf = VFS::openGuarded(CERT_PATH, "r", VFS::systemAuth(VFS::Scopes::CERTS, "migration.restore_certs"));
+      File kf = VFS::openGuarded(KEY_PATH, "r", VFS::systemAuth(VFS::Scopes::CERTS, "migration.restore_certs"));
       if (cf && kf) {
         sRestoreCertData = cf.readString();
         sRestoreKeyData  = kf.readString();

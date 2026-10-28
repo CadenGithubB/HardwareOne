@@ -57,7 +57,7 @@ bool hexToBytes(const char* in, size_t inLen, uint8_t* out, size_t outLen) {
 }
 
 bool ensureIdentityDirs() {
-  auto auth = VFS::systemAuth("espnow.identity.mkdir");
+  auto auth = VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.identity.mkdir");
   if (!VFS::existsGuarded("/system", auth)) {
     if (!VFS::mkdirGuarded("/system", auth)) return false;
   }
@@ -102,7 +102,7 @@ bool writeIdentityFile(const EspNowIdentity& id) {
   FsLockGuard fsGuard("espnow.identity.write");
 
   File f = VFS::openGuarded(kIdentityTempPath, "w",
-                            VFS::systemAuth("espnow.identity.write"), true);
+                            VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.identity.write"), true);
   if (!f) {
     ERROR_ESPNOWF("identity write: cannot open %s", kIdentityTempPath);
     return false;
@@ -112,15 +112,15 @@ bool writeIdentityFile(const EspNowIdentity& id) {
   f.close();
   if (written == 0) {
     ERROR_ESPNOWF("identity write: serializeJson produced 0 bytes");
-    VFS::removeGuarded(kIdentityTempPath, VFS::systemAuth("espnow.identity.write"));
+    VFS::removeGuarded(kIdentityTempPath, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.identity.write"));
     return false;
   }
 
   if (!VFS::renameGuarded(kIdentityTempPath, kIdentityPath,
-                          VFS::systemAuth("espnow.identity.write"))) {
+                          VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.identity.write"))) {
     ERROR_ESPNOWF("identity write: rename %s -> %s failed",
                   kIdentityTempPath, kIdentityPath);
-    VFS::removeGuarded(kIdentityTempPath, VFS::systemAuth("espnow.identity.write"));
+    VFS::removeGuarded(kIdentityTempPath, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.identity.write"));
     return false;
   }
   return true;
@@ -139,14 +139,14 @@ bool readIdentityFile(EspNowIdentity& out, bool& absent) {
     return false;
   }
 
-  if (!VFS::existsGuarded(kIdentityPath, VFS::systemAuth("espnow.identity.read"))) {
+  if (!VFS::existsGuarded(kIdentityPath, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.identity.read"))) {
     absent = true;
     return false;
   }
 
   FsLockGuard fsGuard("espnow.identity.read");
 
-  File f = VFS::openGuarded(kIdentityPath, "r", VFS::systemAuth("espnow.identity.read"));
+  File f = VFS::openGuarded(kIdentityPath, "r", VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.identity.read"));
   if (!f) {
     ERROR_ESPNOWF("identity read: cannot open %s", kIdentityPath);
     return false;
@@ -353,7 +353,7 @@ bool buildPeerPath(const uint8_t mac[6], const char* leaf,
 }
 
 bool ensurePeerDir(const uint8_t mac[6]) {
-  auto auth = VFS::systemAuth("espnow.peer_identity_mkdir");
+  auto auth = VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.peer_identity_mkdir");
   if (!VFS::existsGuarded("/system", auth) && !VFS::mkdirGuarded("/system", auth)) return false;
   if (!VFS::existsGuarded("/system/espnow", auth) && !VFS::mkdirGuarded("/system/espnow", auth)) return false;
   if (!VFS::existsGuarded(kPeersDir, auth) && !VFS::mkdirGuarded(kPeersDir, auth)) return false;
@@ -395,7 +395,7 @@ bool writePeerIdentityFile(const PeerIdentity& p) {
 
   FsLockGuard fsGuard("espnow.peer_identity_write");
   File f = VFS::openGuarded(tmp, "w",
-                            VFS::systemAuth("espnow.peer_identity_write"), true);
+                            VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_write"), true);
   if (!f) {
     ERROR_ESPNOWF("peer identity write: open %s failed", tmp);
     return false;
@@ -404,11 +404,11 @@ bool writePeerIdentityFile(const PeerIdentity& p) {
   f.flush();
   f.close();
   if (written == 0) {
-    VFS::removeGuarded(tmp, VFS::systemAuth("espnow.peer_identity_write"));
+    VFS::removeGuarded(tmp, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_write"));
     return false;
   }
-  if (!VFS::renameGuarded(tmp, path, VFS::systemAuth("espnow.peer_identity_write"))) {
-    VFS::removeGuarded(tmp, VFS::systemAuth("espnow.peer_identity_write"));
+  if (!VFS::renameGuarded(tmp, path, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_write"))) {
+    VFS::removeGuarded(tmp, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_write"));
     return false;
   }
   return true;
@@ -416,7 +416,7 @@ bool writePeerIdentityFile(const PeerIdentity& p) {
 
 bool readPeerIdentityFile(const char* path, PeerIdentity& out) {
   if (!filesystemReady) return false;
-  auto auth = VFS::systemAuth("espnow.peer_identity_read");
+  auto auth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_read");
   if (!VFS::existsGuarded(path, auth)) return false;
 
   FsLockGuard fsGuard("espnow.peer_identity_read");
@@ -541,7 +541,7 @@ bool peerIdentityWantsEvent(const uint8_t mac[6], uint32_t category) {
 
 bool peerIdentityForget(const uint8_t mac[6]) {
   int idx = findSlotByMac(mac);
-  auto auth = VFS::systemAuth("espnow.peer_identity_forget");
+  auto auth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_forget");
   // Remove the identity file(s) even if the slot wasn't cached, so manual flash
   // editing or a stale file gets cleaned up.
   char path[80];
@@ -569,7 +569,7 @@ uint8_t peerIdentityLoadAll() {
   // Reset cache.
   for (uint8_t i = 0; i < kPeerSlots; i++) gPeerIdentities[i] = PeerIdentity{};
 
-  auto auth = VFS::systemAuth("espnow.peer_identity_scan");
+  auto auth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_scan");
   if (!VFS::existsGuarded(kPeersDir, auth)) return 0;
 
   FsLockGuard fsGuard("espnow.peer_identity_scan");

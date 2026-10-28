@@ -186,7 +186,7 @@ static void testProductionCatalogOutput() {
   assert(written == capture.accepted);
   assert(capture.calls == capture.accepted);
   assert(capture.accepted > systemEventCatalogFamilyCount());
-  expectLine(capture, 0, "OK: 165 event kinds in 13 families:");
+  expectLine(capture, 0, "OK: 167 event kinds in 13 families:");
 
   size_t visited = 0;
   for (size_t familyIndex = 0;

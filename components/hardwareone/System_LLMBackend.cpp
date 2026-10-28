@@ -68,7 +68,7 @@ static size_t onboardEnumerate(LlmModelDesc* out, size_t cap) {
 
   auto scanDir = [&](const char* dirPath, uint8_t storage) {
     if (w >= cap) return;
-    File dir = VFS::openGuarded(dirPath, FILE_READ, VFS::systemAuth("llm.enumerate"));
+    File dir = VFS::openGuarded(dirPath, FILE_READ, VFS::systemAuth(VFS::llmModelScopeFor(dirPath), "llm.enumerate"));
     if (!dir || !dir.isDirectory()) return;
     File entry;
     while (w < cap && (entry = dir.openNextFile())) {
@@ -138,7 +138,7 @@ static bool onboardFindByName(const char* name, LlmModelDesc* out) {
     if (!dirs[i]) continue;
     char full[LLM_MODEL_PATH_LEN];
     snprintf(full, sizeof(full), "%s/%s", dirs[i], name);
-    File f = VFS::openGuarded(full, FILE_READ, VFS::systemAuth("llm.resolve"));
+    File f = VFS::openGuarded(full, FILE_READ, VFS::systemAuth(VFS::llmModelScopeFor(full), "llm.resolve"));
     if (!f || f.isDirectory()) { if (f) f.close(); continue; }
     memset(out, 0, sizeof(*out));
     snprintf(out->id, sizeof(out->id), "onboard:%s", name);
@@ -344,6 +344,22 @@ bool llmBackendActiveModel(LlmModelDesc* out) {
   }
 #endif
   return true;
+}
+
+static_assert(llmhome::kModelNameCap == LLM_MODEL_NAME_LEN,
+              "the home menu's model name buffer follows the registry's");
+
+size_t llmHomeMenuRowsNow(bool terminal, size_t width, llmhome::Row* out, size_t cap) {
+  llmhome::State s;
+  s.terminal = terminal;
+  s.guided = llmMenuGroupCount() > 0;
+  s.retry = llmBackendSupportsRetry();
+  LlmModelDesc active;
+  if (llmBackendIsReady() && llmBackendActiveModel(&active)) {
+    strlcpy(s.model, active.name[0] ? active.name : active.id, sizeof(s.model));
+  }
+  s.lowContext = llmContextDegraded(&s.context, nullptr);
+  return llmhome::rows(s, width, out, cap);
 }
 
 // ============================================================================

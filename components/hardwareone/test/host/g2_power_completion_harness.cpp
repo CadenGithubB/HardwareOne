@@ -105,11 +105,11 @@ void vTaskDelay(unsigned ms) {
   ++delays; delayedMs += ms;
 }
 
-enum { POWER_MODE_PERFORMANCE, POWER_MODE_BALANCED, POWER_MODE_POWERSAVER,
+enum { POWER_MODE_PERFORMANCE, POWER_MODE_BALANCED, POWER_MODE_ADAPTIVE,
        POWER_MODE_ULTRASAVER, POWER_MODE_LOCKED, POWER_MODE_COUNT };
 struct { uint8_t powerMode = POWER_MODE_BALANCED; } gSettings;
 const char* getPowerModeName(uint8_t mode) {
-  static const char* names[] = {"Performance", "Balanced", "PowerSaver", "UltraSaver", "Locked"};
+  static const char* names[] = {"Performance", "Balanced", "Adaptive", "UltraSaver", "Locked"};
   CHECK(mode < POWER_MODE_COUNT);
   return names[mode];
 }

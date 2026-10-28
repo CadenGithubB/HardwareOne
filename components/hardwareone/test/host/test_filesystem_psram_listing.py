@@ -28,7 +28,7 @@ def directory_reader_source() -> str:
     header = (COMPONENT / "System_VFS.h").read_text()
     source = (COMPONENT / "System_VFS.cpp").read_text()
     declarations = header[header.index("struct DirectoryEntry {"):
-                          header.index("bool exists(const String& path);")]
+                          header.index("bool getStats(StorageType type")]
     methods = source[source.index("DirectoryReader::DirectoryReader("):
                      source.index("static FS* fsForPath(")]
     return "namespace VFS {\n" + declarations + methods + "\n}\n"

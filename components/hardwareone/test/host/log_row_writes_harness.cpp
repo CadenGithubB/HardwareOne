@@ -90,7 +90,15 @@ public:
 using fs::File;
 namespace VFS {
 struct Context { std::string tag; };
+namespace Scopes {
+constexpr const char* CAPTURES    = "/logging_captures";
+constexpr const char* CAPTURES_SD = "/sd/logging_captures";
+}
+static const char* captureScopeFor(const String& path) {
+  return std::strncmp(path.c_str(), "/sd/", 4) == 0 ? Scopes::CAPTURES_SD : Scopes::CAPTURES;
+}
 static Context systemAuth(const char* tag) { return {tag}; }
+static Context systemAuth(const char* scope, const char* tag) { (void)scope; return {tag}; }
 static bool resolveOverflowPath(const char* path, size_t need, char* output, size_t capacity) {
   io("resolve:" + std::to_string(need)); snprintf(output, capacity, "%s%s", overflow ? "/sd" : "", path); return overflow;
 }
