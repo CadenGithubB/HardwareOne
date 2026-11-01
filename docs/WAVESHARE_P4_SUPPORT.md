@@ -218,8 +218,9 @@ DSI timing are unchanged. Host checks cover immediate directions, no duplicate
 release actions, border tolerance, cancellation, extra fingers and UI ownership
 handoff. The 2,394,624-byte image (5,993,984 bytes of application headroom) was flashed
 with hash verification and rebooted with GT911 online. The three touch host
-tests and display lifecycle sanitizer variants passed. Perceived-responsiveness
-feedback is pending. The encoder baseline also built successfully
+tests and display lifecycle sanitizer variants passed. On 2026-11-01 the user
+confirmed that touch is more responsive. This reply did not separately confirm
+screen stability with the adjusted firmware. The encoder baseline also built successfully
 (5,471,344 bytes). Its temporary build was removed after
 preserving configuration and hash evidence, recovering 1,079,861,248 allocated file
 bytes. The active Waveshare build remains for hardware work. Evidence uses the
