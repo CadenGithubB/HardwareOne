@@ -1,3 +1,4 @@
+#include "OLED_Touch.h"
 /**
  * @file first_time_setup.cpp
  * @brief First-time device setup and initialization
@@ -701,7 +702,7 @@ void firstTimeSetupIfNeeded() {
 #endif
         // Back actions can be short wheel gestures; consume the shared latch.
         if (!goBack) {
-          const uint32_t newPressed = inputConsumeButtonPresses(lastBtnState, btnStateInit);
+          const uint32_t newPressed = oledWizardButtonPresses(lastBtnState, btnStateInit);
           if (INPUT_CHECK(newPressed, INPUT_BUTTON_B)) goBack = true;
         }
 #endif

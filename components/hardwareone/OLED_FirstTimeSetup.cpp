@@ -233,6 +233,7 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
     getJoystickDelta(deltaX, deltaY);
     uint32_t newlyPressed = getNewlyPressedButtons();
     if (gWizardOwnsSerial && (newlyPressed || gNavEvents.wheelDelta ||
+        gNavEvents.up || gNavEvents.down || gNavEvents.left || gNavEvents.right ||
         abs(deltaX) > JOYSTICK_DEADZONE || abs(deltaY) > JOYSTICK_DEADZONE)) {
       noteWizardInputActivity();
     }
@@ -384,10 +385,10 @@ bool getOLEDYesNoPrompt(const char* prompt, bool defaultYes) {
     uint32_t newlyPressed = getNewlyPressedButtons();
     
     // Left/Right to change selection
-    if (deltaX < -JOYSTICK_DEADZONE || gNavEvents.wheelDelta < 0) {
+    if (deltaX < -JOYSTICK_DEADZONE || gNavEvents.wheelDelta < 0 || gNavEvents.left) {
       selection = 0;  // Yes
       delay(200);
-    } else if (deltaX > JOYSTICK_DEADZONE || gNavEvents.wheelDelta > 0) {
+    } else if (deltaX > JOYSTICK_DEADZONE || gNavEvents.wheelDelta > 0 || gNavEvents.right) {
       selection = 1;  // No
       delay(200);
     }
@@ -688,14 +689,15 @@ bool getOLEDWiFiSelection(String& outSSID) {
       getJoystickDelta(deltaX, deltaY);
       const uint32_t newlyPressed = getNewlyPressedButtons();
       if (gWizardOwnsSerial && (newlyPressed || gNavEvents.wheelDelta ||
+        gNavEvents.up || gNavEvents.down || gNavEvents.left || gNavEvents.right ||
           abs(deltaX) > JOYSTICK_DEADZONE || abs(deltaY) > JOYSTICK_DEADZONE)) {
         noteWizardInputActivity();
       }
 
-      if (deltaY < -JOYSTICK_DEADZONE || gNavEvents.wheelDelta < 0) {
+      if (deltaY < -JOYSTICK_DEADZONE || gNavEvents.wheelDelta < 0 || gNavEvents.up) {
         if (selection > 0) --selection;
         delay(150);
-      } else if (deltaY > JOYSTICK_DEADZONE || gNavEvents.wheelDelta > 0) {
+      } else if (deltaY > JOYSTICK_DEADZONE || gNavEvents.wheelDelta > 0 || gNavEvents.down) {
         if (selection < displayCount - 1) ++selection;
         delay(150);
       }

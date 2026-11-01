@@ -14,7 +14,7 @@ the initially pasted 4.3-inch ST7701 page is not this device.
   test. CPU is 360 MHz; UART0 TX37/RX38, console 115200 baud.
 - User authorized P4/C6 installation, declined a factory backup, and explicitly
   approved erasing the new filesystem region. The P4 was flashed and verified.
-- Touch, microphone capture, camera, battery and SD remain disabled/unqualified.
+- Microphone capture, camera, battery and SD remain disabled/unqualified.
   Speaker listening was explicitly deferred by the user after the driver test.
 
 ## Configuration and wiring
@@ -56,7 +56,7 @@ explicit approval and Hardware One now mounts it successfully.
 `HAL_Display_Waveshare` adapts the existing 128×64 software UI canvas to a
 640×320 region centered on the portrait panel. It owns DSI, framebuffer,
 backlight and cleanup. The UI remains the existing Hardware One interface.
-Input is independent and disabled. DSI command draining has a deadline so an
+Input has an independent lifecycle. DSI command draining has a deadline so an
 unresponsive panel does not fill IDF 5.5's indefinitely-blocking command FIFO.
 
 Two physical bring-up issues were addressed:
@@ -121,7 +121,8 @@ No Wi-Fi credentials were supplied.
 - Latest-image 65,536-byte filesystem upload/delete passed with zero reported
   display underruns or watchdog warnings; display status remained connected.
   This is a short stress check, not long-duration display qualification.
-- These checks do not qualify touch, microphone, SD or untested radio features.
+- These original checks do not qualify microphone, SD or untested radio features;
+  touch verification is recorded below.
 
 Local logs, firmware hashes, resolved profiles and baseline evidence are in
 `work/waveshare-p4/`. The active Waveshare build retains matching firmware,
@@ -133,37 +134,62 @@ SDK overrides (134 MiB), managed dependencies (426 MiB), and pinned companion
 source caches (about 35 MB) remain for rebuilding. The active P4 build remains
 for incremental display bring-up; no disposable baseline or C6 build remains.
 
-## Future touch integration (design only)
+## Single-touch input
 
-Touch remains disabled. Add a GT911 input backend under the existing input
-lifecycle, publishing through `HAL_InputInternal.h`; UI readers use only
-`HAL_Input.h`. Shared I2C transactions and board-owned wiring remain the owners.
-Do not initialize touch from the display driver or let touch failure stop display.
+Single-contact GT911 support is selected by `INPUT_DEVICE_TYPE=4` in the board
+profile. It shares I2C bus0 (SDA7/SCL8) with the codec and probes addresses 0x5d
+and 0x14 through the manager. The backend verifies its product ID and owns a
+20 ms polling task. The board does not expose touch reset/interrupt GPIOs;
+touch does not toggle the display reset or change its backlight policy.
 
-Extend HAL input with a separate touch channel: contact ID, panel coordinates,
-timestamp, sequence and Down/Move/Up/Cancel phases. Keep a peekable snapshot and
-a bounded event queue with one consumer. Preserve down/up transitions between
-UI frames, coalesce moves where appropriate, and cancel on device loss or queue
-overflow. Coordinate mapping belongs beside display geometry: orientation,
-viewport and scale must match drawing (currently a centered 640x320 viewport).
+`HAL_Input` owns a distinct touch snapshot and bounded Down/Move/Up/Cancel
+queue. Only UI dispatch consumes events; `touchread` is a non-consuming status
+command. Short taps survive between UI frames. Overflow, extra contacts,
+changed tracking IDs, I/O failure and polling interruptions cancel contact.
+A held contact cannot become a new press after cancellation. No multi-touch
+or synthetic joystick/encoder motion is implemented.
 
-A shared UI adapter translates visible navigation controls/gestures into the
-existing actions; direct-touch screens consume mapped pointer events for their
-own hit-testing. Keep raw touch distinct from joystick deflection and rotary
-detents, following `NavEvents`' existing separation. Setup wizard and regular
-screens must share the adapter and hand off event consumption on mode changes;
-a wake gesture should not accidentally activate the newly visible screen.
-All resulting commands retain the existing authenticated UI command path.
+`OLED_Touch` maps completed taps to existing navigation and logical buttons.
+The visible controls below the centered 640×320 UI canvas share their hit-test
+rectangles with rendering: directions, SELECT (A), BACK (B), X / OK, Y / DEL,
+MENU (Start), and FN (Select/function). Dragging outside a control cancels its
+tap. Existing screen handlers, keyboard and authenticated command execution
+remain the action owners. Touching a menu row directly is not implemented.
 
-Start with single-contact input and visible navigation controls, then direct
-menu-row tapping. Multi-touch and gesture expansion can wait. Current controller
-selection assumes one active source; concurrent touch plus encoder would need
-explicit multiple-source support, rather than silently replacing one source's
-cached buttons with another's. Tests should cover short taps, cancellation,
-rotation/viewport boundaries, wizard handoff, and unchanged encoder/gamepad use.
+The normal UI and setup wizard share this adapter; changing owner/page discards
+pending contacts. Display wake discards the wake gesture. Raw coordinates and
+controls are in the panel's fixed portrait space; canvas rotation does not
+rotate the physical control bank. Start/stop goes through the existing I2C
+request queue, and `inputenabled` / `inputautostart` retain settings ownership.
+
+Host tests: `python3 components/hardwareone/test/host/test_touch_input.py`
+exercises the production queue, hit-testing and adapter with sanitizers and
+checks that existing input controller numeric IDs remain unchanged.
+Input-cache, setup-cancellation and optional-peripheral configuration checks
+also passed (14 peripheral configurations, 24 saved-config workflow tests,
+3 input-cache tests, setup cancellation under four variants, and Wi-Fi navigation
+with Wi-Fi enabled/disabled).
+
+The affected Waveshare image built at 2,394,592 bytes with 5,994,016 bytes of
+application headroom and was flashed with hash verification. The P4 EYE baseline
+built at 5,471,344 bytes with 1,954,704 bytes free. The initial startup attempt
+exposed a missing GT911 exclusion in the no-input stub; that guard is corrected.
+The physical GT911 now verifies its identity and starts successfully at boot;
+`touchread` reports connected. Normal authenticated settings enabled input and
+autostart persistently. Queued stop/restart also succeeded. The C6 remained
+online with zero missed heartbeats or transport errors. Visual control/coordinate verification is pending the
+user's response. The first contact after initialization/cancellation may be
+consumed until release, preventing a held finger from becoming a new tap.
+
+Evidence and image hashes are in `work/waveshare-p4/touch-*`. The temporary
+baseline build was removed after retaining its configuration, size and hashes,
+recovering 1,079,857,152 allocated file bytes. The active Waveshare build remains
+for incremental hardware work; shared dependencies and compact C6 recovery
+inputs remain as described above.
 
 ## Vendor sources
 
+- [Espressif GT911 register protocol reference](https://github.com/espressif/esp-bsp/blob/master/components/lcd_touch/esp_lcd_touch_gt911/esp_lcd_touch_gt911.c)
 - [Board documentation](https://docs.waveshare.com/ESP32-P4-WIFI6-Touch-LCD-5)
 - [LCD-5 examples](https://github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-5),
   revision `d144b34d8f384e84d2442e8733523560216a2f63`

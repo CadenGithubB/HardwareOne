@@ -1,3 +1,4 @@
+#include "OLED_Touch.h"
 /**
  * System Setup Wizard Implementation
  * 
@@ -1677,7 +1678,7 @@ SetupWizardResult runSetupWizard() {
     // ------------------------------------------------------------------
 #if ENABLE_OLED_DISPLAY
     if (oledDisplay && oledConnected) {
-      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+      const uint32_t newButtons = oledWizardButtonPresses(lastButtons, lastButtonsInitialized);
       if (newButtons) noteWizardInputActivity();
 
       JoystickNav nav = readWizardJoystickNav();

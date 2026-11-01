@@ -3281,6 +3281,9 @@ void printMemoryReport() {
 #if ENABLE_GAMEPAD_SENSOR
   broadcastOutput("  [Y] GAMEPAD  | inputTask() in i2csensor_seesaw.cpp");
   enabled_count++;
+#elif ENABLE_GT911_TOUCH
+  broadcastOutput("  [Y] TOUCH    | GT911 single-contact input task");
+  enabled_count++;
 #elif ENABLE_GPIO_ENCODER
   broadcastOutput("  [Y] GPIO_ENC | Input_GPIOEncoder task");
   enabled_count++;

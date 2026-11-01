@@ -9,3 +9,8 @@
 #define WS_SPEAKER_DATA_PIN 9
 #define WS_SPEAKER_I2C_PORT 1
 #define WS_SPEAKER_I2C_BUS 0
+
+// GT911 shares the codec bus; reset and interrupt are not wired to the MCU.
+#define WS_TOUCH_I2C_BUS 0
+#define WS_TOUCH_WIDTH 720
+#define WS_TOUCH_HEIGHT 1280

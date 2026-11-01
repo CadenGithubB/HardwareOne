@@ -167,6 +167,7 @@
 //   1 = SEESAW_GAMEPAD   (Adafruit Mini I2C Gamepad, 0x50)
 //   2 = ANO_ENCODER      (Adafruit ANO Rotary Encoder breakout, 0x49)
 //   3 = GPIO_ENCODER     (quadrature wheel + click and optional board buttons)
+//   4 = GT911_TOUCH      (Waveshare LCD-5 single-contact touchscreen over I2C)
 //
 // Board profiles default to SEESAW_GAMEPAD on FeatherS3 and NONE on XIAO.
 // The two Seesaw options require I2C; GPIO input needs explicit assembly pins.
@@ -501,6 +502,7 @@
 #define INPUT_DEVICE_TYPE_SEESAW_GAMEPAD 1
 #define INPUT_DEVICE_TYPE_ANO_ENCODER    2
 #define INPUT_DEVICE_TYPE_GPIO_ENCODER   3
+#define INPUT_DEVICE_TYPE_GT911_TOUCH    4
 
 // The generic color TFT branches still use example wiring and do not supply
 // the SSD1306-compatible framebuffer/commands expected by the shared UI.
@@ -640,6 +642,10 @@
 // because both occupy the same role (the OLED input source) and the seesaw
 // driver would race the ANO driver for the STEMMA QT bus if both compiled in.
 // The CMakeLists gate also skips the disabled driver's .cpp.
+#define ENABLE_GT911_TOUCH (INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_GT911_TOUCH)
+#if ENABLE_GT911_TOUCH && (!HW_BOARD_WAVESHARE_P4_TOUCH || !ENABLE_I2C_SYSTEM)
+  #error "GT911 touch requires the Waveshare LCD-5 board and I2C"
+#endif
 #define ENABLE_GPIO_ENCODER (INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_GPIO_ENCODER)
 // The EYE's three user keys belong to the same optional input controller.
 // Profiles can disable them while retaining wheel gestures. Other boards do
@@ -670,7 +676,7 @@
 // gate the OLED's input-handling code so it compiles for either driver.
 // The two source-specific paths inside each block stay gated on their own
 // ENABLE_* flag.
-#define ENABLE_OLED_INPUT  (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER)
+#define ENABLE_OLED_INPUT  (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER || ENABLE_GT911_TOUCH)
 
 // Keep legacy auto-disable behavior, but reject an ineffective saved choice.
 #if defined(HW1_FEATURE_CONFIG_HEADER)
@@ -687,7 +693,7 @@
 // not pay for an idle 4 KB task that wakes every 100 ms.
 #define ENABLE_I2C_SENSOR_QUEUE \
   (ENABLE_THERMAL_SENSOR || ENABLE_TOF_SENSOR || ENABLE_IMU_SENSOR || \
-   ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_APDS_SENSOR || ENABLE_GPS_SENSOR || \
+   ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH || ENABLE_APDS_SENSOR || ENABLE_GPS_SENSOR || \
    ENABLE_FM_RADIO || ENABLE_RTC_SENSOR || ENABLE_PRESENCE_SENSOR)
 
 // =============================================================================

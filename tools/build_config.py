@@ -66,7 +66,7 @@ def choice_schema():
     features = {}
     for name in sorted(editable_choices()):
         maximum = 5 if name == "DISPLAY_TYPE" else 4 if name.endswith("_FEATURE_LEVEL") else (
-            3 if name == "INPUT_DEVICE_TYPE" else 1)
+            4 if name == "INPUT_DEVICE_TYPE" else 1)
         features[name] = {"type": "integer", "minimum": 0, "maximum": maximum}
     return {"features": features,
             "sdkconfig": {name: {"type": "boolean"} for name in sorted(sdk_choices())}}

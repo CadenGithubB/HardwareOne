@@ -2,6 +2,9 @@
 
 #include "HAL_Input.h"
 
+void inputTouchPublish(uint8_t count, uint8_t id, uint16_t x, uint16_t y, uint32_t stamp);
+void inputTouchCancel();
+
 // Input producer operations. UI/transport readers use HAL_Input.h instead.
 bool inputCacheInit();
 bool inputCacheInvalidate();

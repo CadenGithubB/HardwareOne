@@ -15,7 +15,7 @@
 #if ENABLE_OLED_INPUT
 #include "System_Command.h"
 #include "System_Settings.h"
-#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER
+#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH
 #include "System_I2C.h"
 #endif
 #include "System_Utils.h"
@@ -24,6 +24,9 @@
 // Shared input readings and edge ownership, independent of the selected driver.
 #if ENABLE_OLED_INPUT
 static InputCache sInputCache;
+#if ENABLE_GT911_TOUCH
+static TouchQueue sTouch;
+#endif
 static StaticSemaphore_t sInputCacheMutexStorage;
 static SemaphoreHandle_t sInputCacheMutex = xSemaphoreCreateMutexStatic(&sInputCacheMutexStorage);
 #endif
@@ -38,7 +41,11 @@ bool inputCacheInit() {
 
 size_t inputCacheStorageBytes() {
 #if ENABLE_OLED_INPUT
-  return sizeof(sInputCache) + sizeof(sInputCacheMutex) + sizeof(sInputCacheMutexStorage);
+  return sizeof(sInputCache) + sizeof(sInputCacheMutex) + sizeof(sInputCacheMutexStorage)
+#if ENABLE_GT911_TOUCH
+      + sizeof(sTouch)
+#endif
+      ;
 #else
   return 0;
 #endif
@@ -162,7 +169,9 @@ bool inputPublishGamepadState(uint32_t buttons, int joyX, int joyY,
 // On a normal boot path that never fires, so IN/A/B/X/Y were dead from
 // boot through every menu mode until the user manually restarted the OLED.
 // Runtime inputSetControllerType() can still change this later.
-#if INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
+#if INPUT_TYPE == INPUT_TYPE_GT911_TOUCH
+static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_GT911_TOUCH;
+#elif INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
 static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_GPIO_ENCODER;
 #elif INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
 static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_ANO_ENCODER;
@@ -250,7 +259,9 @@ static uint32_t gCustomMapping[] = {
 
 void inputAbstractionInit() {
   // Set default controller type based on compile-time INPUT_TYPE
-#if INPUT_TYPE == INPUT_TYPE_SEESAW_GAMEPAD
+#if INPUT_TYPE == INPUT_TYPE_GT911_TOUCH
+  gCurrentControllerType = INPUT_CONTROLLER_GT911_TOUCH;
+#elif INPUT_TYPE == INPUT_TYPE_SEESAW_GAMEPAD
   gCurrentControllerType = INPUT_CONTROLLER_GAMEPAD_SEESAW;
 #elif INPUT_TYPE == INPUT_TYPE_CLICK_WHEEL
   gCurrentControllerType = INPUT_CONTROLLER_CLICK_WHEEL;
@@ -294,6 +305,7 @@ uint32_t inputGetButtonMask(InputButton button) {
     case INPUT_CONTROLLER_GAMEPAD_SEESAW:
       return gGamepadSeesawMapping[button];
 
+    case INPUT_CONTROLLER_GT911_TOUCH:
     case INPUT_CONTROLLER_CLICK_WHEEL:
       return gClickWheelMapping[button];
 
@@ -427,7 +439,9 @@ uint32_t inputConsumeButtonPresses(uint32_t& previousActiveLow, bool& initialize
 
 #if !ENABLE_GPIO_ENCODER
 static const char* inputDeviceLabel() {
-#if ENABLE_ANO_ENCODER
+#if ENABLE_GT911_TOUCH
+  return "GT911 Touch";
+#elif ENABLE_ANO_ENCODER
   return "ANO Encoder";
 #else
   return "Gamepad";
@@ -443,7 +457,9 @@ static const char* cmd_openinput(const String& argsInput) {
 #else
   // The device starts asynchronously and this command returns no button state —
   // point at the driver read command so the next step is to read live input.
-#if ENABLE_ANO_ENCODER
+#if ENABLE_GT911_TOUCH
+  static const char* const kReadHint = "to inspect touch, run touchread";
+#elif ENABLE_ANO_ENCODER
   static const char* const kReadHint = "to read live input, run 'anoencoderread' once the device is up";
 #else
   static const char* const kReadHint = "to read live input, run 'gamepadread' once the device is up";
@@ -484,7 +500,9 @@ static const char* cmd_inputautostart(const String& argsInput) {
 
 static const char* cmd_inputdevicepollms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-#if ENABLE_GPIO_ENCODER
+#if ENABLE_GT911_TOUCH
+  return "[Input] GT911 uses a fixed 20 ms sample interval";
+#elif ENABLE_GPIO_ENCODER
   return "[Input] GPIO encoder uses interrupts and a fixed 5 ms switch sample; poll interval applies to I2C input only";
 #else
   CommandArgs a(argsInput);
@@ -508,9 +526,25 @@ static const char* cmd_gpioencoderread(const String& argsInput) {
 }
 #endif
 
+#if ENABLE_GT911_TOUCH
+static const char* cmd_touchread(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  TouchSnapshot touch;
+  if (!inputTouchSnapshot(touch)) return "Error: touch snapshot unavailable";
+  static char buf[192];
+  snprintf(buf, sizeof(buf), "{\"connected\":%s,\"valid\":%s,\"down\":%s,\"x\":%u,\"y\":%u,\"sequence\":%lu}",
+           gInputConnected ? "true" : "false", touch.valid ? "true" : "false", touch.down ? "true" : "false",
+           touch.contact.x, touch.contact.y, static_cast<unsigned long>(touch.contact.sequence));
+  return buf;
+}
+#endif
+
 // Command registry — registered unconditionally as the "input" module since
 // it works under either driver.
 const CommandEntry inputCommands[] = {
+#if ENABLE_GT911_TOUCH
+  { "touchread", "Read the single-touch snapshot without consuming events.", false, cmd_touchread },
+#endif
   { "openinput",         "Start the configured input device.",              false, cmd_openinput },
   { "closeinput",        "Stop the input device.",                            false, cmd_closeinput },
   { "inputautostart",    "Enable/disable input device auto-start [on|off]",   false, cmd_inputautostart,    "Usage: inputautostart [on|off]" },
@@ -527,7 +561,7 @@ const size_t inputCommandsCount = sizeof(inputCommands) / sizeof(inputCommands[0
 static const SettingEntry inputSettingEntries[] = {
   { "inputEnabled", SETTING_BOOL, &gSettings.inputEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "inputenabled" },
   { "inputAutoStart",    SETTING_BOOL, &gSettings.inputAutoStart,     0, 0, nullptr, 0,  1,    "Auto-start after boot", nullptr, false, nullptr, "inputautostart" },
-#if !ENABLE_GPIO_ENCODER
+#if !ENABLE_GPIO_ENCODER && !ENABLE_GT911_TOUCH
   { "inputDevicePollMs", SETTING_INT,  &gSettings.inputDevicePollMs, 90, 0, nullptr, 10, 1000, "Poll Interval (ms)",   nullptr, false, nullptr, "inputdevicepollms" },
 #endif
 };
@@ -546,3 +580,56 @@ extern const SettingsModule inputSettingsModule = {
 };
 
 #endif // ENABLE_OLED_INPUT
+
+bool inputTouchSnapshot(TouchSnapshot& out) {
+  out = {};
+#if ENABLE_GT911_TOUCH
+  SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(10), "touch.snapshot");
+  if (!guard.held) return false;
+  out = sTouch.snapshot;
+  return true;
+#else
+  return false;
+#endif
+}
+bool inputTouchPending() {
+#if ENABLE_GT911_TOUCH
+  SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(10), "touch.pending");
+  return guard.held && sTouch.pending();
+#else
+  return false;
+#endif
+}
+bool inputTouchConsume(TouchEvent& out) {
+  out = {};
+#if ENABLE_GT911_TOUCH
+  SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(10), "touch.consume");
+  return guard.held && sTouch.pop(out);
+#else
+  return false;
+#endif
+}
+void inputTouchDiscard() {
+#if ENABLE_GT911_TOUCH
+  SensorCacheGuard guard(sInputCacheMutex, portMAX_DELAY, "touch.discard");
+  if (guard.held) sTouch.discard(millis());
+#endif
+}
+void inputTouchCancel() {
+#if ENABLE_GT911_TOUCH
+  SensorCacheGuard guard(sInputCacheMutex, portMAX_DELAY, "touch.cancel");
+  if (guard.held) sTouch.cancel(millis());
+#endif
+}
+void inputTouchPublish(uint8_t count, uint8_t id, uint16_t x, uint16_t y, uint32_t stamp) {
+#if ENABLE_GT911_TOUCH
+  SensorCacheGuard guard(sInputCacheMutex, portMAX_DELAY, "touch.publish");
+  if (!guard.held) return;
+  const uint32_t before = sTouch.snapshot.contact.sequence;
+  sTouch.sample(count, id, x, y, stamp);
+  if (before != sTouch.snapshot.contact.sequence) ++sInputCache.seq;
+  sInputCache.lastUpdate = stamp;
+#else
+  (void)count; (void)id; (void)x; (void)y; (void)stamp;
+#endif
+}
