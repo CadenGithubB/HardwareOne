@@ -68,8 +68,9 @@ Two physical bring-up issues were addressed:
    strobing at default maximum brightness. An initial cap at 1022 was still
    unstable after startup power policy reapplied maximum brightness. The backend now maps logical 255 to duty 720
    (about 70%), matching the range the user confirmed stable at brightness 180
-   with the earlier mapping. Boot policy can no longer exceed that range. Visual confirmation of this
-   final mapping after reboot is pending; full brightness is not qualified.
+   with the earlier mapping. Boot policy can no longer exceed that range.
+   The user confirmed the latest firmware is visually steady after reboot
+   on 2026-11-01. Full physical brightness remains unqualified.
 
 The backend skips unchanged canvas frames and synchronizes only the centered
 UI band after drawing, reducing PSRAM bandwidth. This follows observed DSI
