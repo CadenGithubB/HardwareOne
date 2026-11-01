@@ -1,8 +1,8 @@
 #include "HAL_SDCard.h"
 
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
-#if !HW_BOARD_P4X_EYE || !CONFIG_IDF_TARGET_ESP32P4
-#error "The SDMMC backend requires the ESP32-P4X-EYE board profile"
+#if !(HW_BOARD_P4X_EYE || HW_BOARD_WAVESHARE_P4_TOUCH) || !CONFIG_IDF_TARGET_ESP32P4
+#error "The SDMMC backend requires a supported ESP32-P4 board profile"
 #endif
 
 #include <Arduino.h>
@@ -19,7 +19,7 @@
 namespace {
 constexpr char kMountPoint[] = "/sd";
 constexpr char kTag[] = "SDMMC";
-static_assert(SD_MMC_SLOT == 0, "Slot 1 is reserved for ESP-Hosted on P4X-EYE");
+static_assert(SD_MMC_SLOT == 0, "Slot 1 is reserved for ESP-Hosted");
 }
 
 SdMmcCardFS gSdMmcCard;
@@ -38,12 +38,15 @@ bool SdMmcCardFS::configurePower() {
   if (error_ != ESP_OK) return false;
   pinsConfigured_ = true;
 
+#if SD_MMC_DETECT_PIN >= 0
   pins = {};
   pins.pin_bit_mask = 1ULL << SD_MMC_DETECT_PIN;
   pins.mode = GPIO_MODE_INPUT;
   pins.pull_up_en = GPIO_PULLUP_ENABLE;
   error_ = gpio_config(&pins);
   if (error_ != ESP_OK) return false;
+
+#endif
 
   sd_pwr_ctrl_ldo_config_t ldo = {};
   ldo.ldo_chan_id = SD_MMC_LDO_CHANNEL;
@@ -69,12 +72,20 @@ void SdMmcCardFS::releasePower() {
 }
 
 bool SdMmcCardFS::cardPresent() const {
+#if SD_MMC_DETECT_PIN >= 0
   return pinsConfigured_ &&
       gpio_get_level(static_cast<gpio_num_t>(SD_MMC_DETECT_PIN)) == 0;
+#else
+  // No presence switch: only a successful mount establishes presence.
+  // Removal is detected by filesystem I/O; explicitly unmount before removal.
+  return card_ && !removed_;
+#endif
 }
 
 bool SdMmcCardFS::available() {
+#if SD_MMC_DETECT_PIN >= 0
   if (card_ && !cardPresent()) removed_ = true;
+#endif
   return card_ && !removed_;
 }
 
@@ -91,12 +102,15 @@ bool SdMmcCardFS::mount(bool allowFormat) {
     releasePower();
     return false;
   }
+#if SD_MMC_DETECT_PIN >= 0
   if (!cardPresent()) {
     error_ = ESP_ERR_NOT_FOUND;
     ESP_LOGI(kTag, "No card inserted");
     releasePower();
     return false;
   }
+
+#endif
 
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
   host.slot = SD_MMC_SLOT;

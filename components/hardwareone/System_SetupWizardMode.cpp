@@ -1,3 +1,4 @@
+#include "OLED_Touch.h"
 // System_SetupWizardMode.cpp
 //
 // CLIMode-based setup wizard. See System_SetupWizardMode.h for the
@@ -882,7 +883,7 @@ static void wizardMode_onTick(void* /*ud*/) {
   if (!oledDisplay || !oledConnected) return;
 
   // ---- 1. Joystick poll ----
-  const uint32_t newButtons = inputConsumeButtonPresses(sLastButtons, sLastButtonsValid);
+  const uint32_t newButtons = oledWizardButtonPresses(sLastButtons, sLastButtonsValid);
   if (sLastButtonsValid) {
 
     JoystickNav nav = readWizardJoystickNav();

@@ -50,6 +50,7 @@ def generate(component: Path = COMPONENT) -> str:
     cache_start = first.index("static constexpr int FTS_WIFI_MENU_MAX")
     cache_end = first.index("bool getOLEDWiFiSelection(", cache_start)
     functions = "\n\n".join([
+        extract_block((COMPONENT / "OLED_Touch.cpp").read_text().split("#else")[-1], "uint32_t oledWizardButtonPresses("),
         extract_block(first, "static bool isOLEDAvailable("),
         extract_block(first, "static uint32_t waitForButtonPress("),
         extract_block(first, "static uint32_t waitForRetryOrSkip("),

@@ -48,6 +48,10 @@ extern const CommandEntry sdCommands[];
 extern const size_t sdCommandsCount;
 extern const CommandEntry oledCommands[];
 extern const size_t oledCommandsCount;
+#if ENABLE_SPEAKER
+extern const CommandEntry speakerCommands[];
+extern const size_t speakerCommandsCount;
+#endif
 extern const CommandEntry neopixelCommands[];
 extern const size_t neopixelCommandsCount;
 extern const CommandEntry ledCommands[];
@@ -315,6 +319,9 @@ static constexpr CommandModule gCommandModules[] = {
     "oledthermalcolormode, and oledenabled tune appearance and timing. Whether a user "
     "must log in at the display before interacting with it is set with "
     "displayrequireauth <0|1> (super admin, Settings module).", oledCommands,        &oledCommandsCount, 0, nullptr },
+#if ENABLE_SPEAKER
+  { "speaker", "Onboard ES8311 speaker", "speakertone plays a short test tone; frequency, duration and volume are optional.", speakerCommands, &speakerCommandsCount, 0, nullptr },
+#endif
 #if ENABLE_NEOPIXEL
   { "neopixel",   "RGB LED strip and effects", "Controls the addressable RGB status LED (WS2812/NeoPixel). ledcolor <name> lights "
     "it a solid color from a fixed palette (red, green, blue, yellow, magenta, cyan, "

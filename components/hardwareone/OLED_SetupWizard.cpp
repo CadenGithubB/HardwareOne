@@ -1,3 +1,4 @@
+#include "OLED_Touch.h"
 /**
  * OLED Setup Wizard Implementation
  * 
@@ -229,11 +230,12 @@ void resetWizardJoystickState() {
 }
 
 JoystickNav readWizardJoystickNav() {
-  JoystickNav nav = {false, false, false, false};
+  const auto touch = oledWizardTouchNavigation();
+  JoystickNav nav = {touch.up, touch.down, touch.left, touch.right};
   // Consume outside the cache lock: GPIO wheels share that mutex with buttons.
   const int detent = inputConsumeOneDetent();
-  nav.up = detent < 0;
-  nav.down = detent > 0;
+  nav.up |= detent < 0;
+  nav.down |= detent > 0;
 
   InputCache input{};
   if (inputCacheSnapshot(input)) {
@@ -380,7 +382,7 @@ static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
       continue;
     }
 
-    const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+    const uint32_t newButtons = oledWizardButtonPresses(lastButtons, lastButtonsInitialized);
     if (newButtons) noteWizardInputActivity();
 
     if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
@@ -483,7 +485,7 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
       JoystickNav nav = readWizardJoystickNav();
       if (nav.up || nav.down) { selection = selection == 0 ? 1 : 0; delay(150); continue; }
 
-      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+      const uint32_t newButtons = oledWizardButtonPresses(lastButtons, lastButtonsInitialized);
       if (newButtons) noteWizardInputActivity();
 
       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
@@ -640,7 +642,7 @@ void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& runni
       // other wizard pages — without this, right did nothing on the mode pages.
       if (nav.right) { wizardModeApply(sub, sel); if (!wizardNextPage(result)) running = false; return; }
 
-      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+      const uint32_t newButtons = oledWizardButtonPresses(lastButtons, lastButtonsInitialized);
       if (newButtons) noteWizardInputActivity();
       if (newButtons & (INPUT_MASK(INPUT_BUTTON_A) | INPUT_MASK(INPUT_BUTTON_START))) {
         wizardModeApply(sub, sel);
@@ -742,7 +744,7 @@ bool getOLEDSetupModeSelection(int& setupMode) {
         delay(150);
         continue;
       }
-      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+      const uint32_t newButtons = oledWizardButtonPresses(lastButtons, lastButtonsInitialized);
       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
         setupMode = (int)getSetupModeOption(selection)->mode;
         return true;
@@ -815,7 +817,7 @@ int getOLEDArchetypeSelection() {
       if (nav.up)   { selection = (selection > 0) ? selection - 1 : NUM - 1; delay(150); continue; }
       if (nav.down) { selection = (selection < NUM - 1) ? selection + 1 : 0; delay(150); continue; }
 
-      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+      const uint32_t newButtons = oledWizardButtonPresses(lastButtons, lastButtonsInitialized);
       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) return avail[selection];
       if (newButtons & INPUT_MASK(INPUT_BUTTON_B)) return -1;
     }
@@ -900,7 +902,7 @@ bool getOLEDThemeSelection(bool& darkMode) {
       }
       
       // Read buttons
-      const uint32_t newButtons = inputConsumeButtonPresses(lastButtons, lastButtonsInitialized);
+      const uint32_t newButtons = oledWizardButtonPresses(lastButtons, lastButtonsInitialized);
       
       // A button = select
       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {

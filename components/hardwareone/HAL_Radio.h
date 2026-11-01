@@ -2,8 +2,8 @@
  * HAL_Radio - where this board's radio lives and how it is kept alive.
  *
  * On native boards (ESP32, ESP32-S3) the Wi-Fi/BLE radio is on the chip and
- * every function here is a no-op that reports "native". On the ESP32-P4X-EYE
- * the radio is an ESP32-C6 companion behind ESP-Hosted over SDIO; this HAL
+ * every function here is a no-op that reports "native". On supported ESP32-P4
+ * boards the radio is an ESP32-C6 companion behind ESP-Hosted over SDIO; this HAL
  * owns the companion's transport lifecycle (boot, restart, hold-in-reset,
  * firmware update) and the raw facts about it (identity, bridge, heartbeat
  * and memory events). Policy (when to retry, when to recover, what to notify)

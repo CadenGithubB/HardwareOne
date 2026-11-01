@@ -149,3 +149,5 @@ class P4EyeDisplay {
  private:
   uint8_t canvas_[1024]{};
 };
+
+using WaveshareDisplay = P4EyeDisplay;

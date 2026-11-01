@@ -1,3 +1,4 @@
+#include "OLED_Touch.h"
 #include "WebServer_Handle.h"
 #include "HAL_Input.h"
 #include "OLED_Utils.h"
@@ -1916,6 +1917,18 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     inputHandled = true;
   }
 
+#if ENABLE_GT911_TOUCH
+  if (gOledKeyboardState.showingSuggestions) {
+    if (gNavEvents.up && gOledKeyboardState.selectedSuggestion > 0) --gOledKeyboardState.selectedSuggestion;
+    if (gNavEvents.down && gOledKeyboardState.selectedSuggestion + 1 < gOledKeyboardState.suggestionCount) ++gOledKeyboardState.selectedSuggestion;
+  } else {
+    if (gNavEvents.up) oledKeyboardMoveUp();
+    if (gNavEvents.down) oledKeyboardMoveDown();
+    if (gNavEvents.left) oledKeyboardMoveLeft();
+    if (gNavEvents.right) oledKeyboardMoveRight();
+  }
+  inputHandled |= gNavEvents.up || gNavEvents.down || gNavEvents.left || gNavEvents.right;
+#endif
   // Handle suggestion mode differently
   if (gOledKeyboardState.showingSuggestions) {
     // Y-axis navigates suggestions
@@ -2359,8 +2372,8 @@ void oledKeyboardCancel() {
 // Can this mode be entered right now? Every mode is unconditional except MIC,
 // which needs field permission, a mic source, and an authenticated host link.
 static bool oledKeyboardModeUsable(OLEDKeyboardMode mode) {
-#if ENABLE_GPIO_ENCODER
-  // The onboard wheel has no analog directions for gamepad-pattern input.
+#if ENABLE_GPIO_ENCODER || ENABLE_GT911_TOUCH
+  // These controls have no analog directions for gamepad-pattern input.
   if (mode == KEYBOARD_MODE_PATTERN) return false;
 #endif
   if (mode == KEYBOARD_MODE_MIC) {
@@ -4299,13 +4312,13 @@ void updateOLEDDisplay() {
     if (now - animationLastUpdate >= animInterval) {
       animationLastUpdate = now;
       if (currentOLEDMode == OLED_ANIMATION) animationFrame++;
-    } else if (!modeChanged) {
+    } else if (!modeChanged && !(ENABLE_GT911_TOUCH && inputProcessed)) {
       return;
     }
   } else {
     // Timer-based throttle: check at most every updateInterval ms
     unsigned long updateInterval = (gSettings.oledUpdateInterval > 0) ? (unsigned long)gSettings.oledUpdateInterval : 125;
-    if (now - oledLastUpdate < updateInterval) {
+    if (now - oledLastUpdate < updateInterval && !(ENABLE_GT911_TOUCH && inputProcessed)) {
       return;  // Not time to check yet
     }
     
@@ -5034,7 +5047,7 @@ const char* cmd_oledstatus(const String& argsInput) {
 #endif
       doc["interface"] = DISPLAY_INTERFACE;
       doc["driver"] = DISPLAY_NAME;
-#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE || DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
       doc["panelWidth"] = DISPLAY_PANEL_WIDTH;
       doc["panelHeight"] = DISPLAY_PANEL_HEIGHT;
 #endif
@@ -6161,6 +6174,7 @@ static bool gInputStateValid = false;
  * Call this at the start of each input polling cycle
  */
 void updateInputState() {
+  oledTouchContext(0x20000u + static_cast<uint32_t>(currentOLEDMode));
 #if ENABLE_OLED_INPUT
   gNavEvents = {false, false, false, false, 0, 0, 0};
   gInputStateValid = false;
@@ -6183,6 +6197,10 @@ void updateInputState() {
     gNavEvents.up = gNavEvents.wheelDelta < 0;
     gNavEvents.down = gNavEvents.wheelDelta > 0;
   }
+  const auto touch = oledTouchRead();
+  gNavEvents.up |= touch.up; gNavEvents.down |= touch.down;
+  gNavEvents.left |= touch.left; gNavEvents.right |= touch.right;
+  gHelperPressedAccum |= touch.buttons;
 #else
   gNavEvents = {false, false, false, false, 0, 0, 0};
 #endif
@@ -6356,6 +6374,7 @@ void handleOLEDActionButton() {
  * Returns true if input was processed
  */
 bool processOLEDInput() {
+  oledTouchContext(static_cast<uint32_t>(currentOLEDMode) + (oledKeyboardIsActive() ? 0x30000u : 0u));
   unsigned long now = millis();
   bool shouldDebug = (now - lastGamepadDebugTime >= GAMEPAD_DEBUG_INTERVAL);
   
@@ -6419,14 +6438,15 @@ bool processOLEDInput() {
   // the encoder's pending-detents cache here, a wheel-only spin would early-
   // exit and never reach the consumer below — detents would pile up forever
   // and only get drained the next time the user pressed a button.
-  bool hasEncoderInput = inputHasPendingDetents();
+  bool hasEncoderInput = inputHasPendingDetents() || inputTouchPending();
   if (!hasJoystickInput && !hasButtonChange && !wasDeflectedX && !wasDeflectedY && !hasEncoderInput) {
     if (!oledKeyboardIsActive()) return false;
   }
   
   // Debounce navigation - don't update lastButtonState here or edge detection breaks!
   // Skip debounce when keyboard is active: keyboard has its own timing (pattern mode needs continuous polling)
-  if (now - lastGamepadNavTime < GAMEPAD_NAV_DEBOUNCE) {
+  // GT911 already reports contact edges; mechanical-button debounce only adds lag.
+  if (!ENABLE_GT911_TOUCH && now - lastGamepadNavTime < GAMEPAD_NAV_DEBOUNCE) {
     if (!oledKeyboardIsActive()) return false;
   }
   
@@ -6606,6 +6626,10 @@ bool processOLEDInput() {
     }
   }
 #endif  // !ENABLE_ANO_ENCODER (joystick → nav events)
+  const auto touch = oledTouchRead();
+  gNavEvents.up |= touch.up; gNavEvents.down |= touch.down;
+  gNavEvents.left |= touch.left; gNavEvents.right |= touch.right;
+  latchedPresses |= touch.buttons;
   // =========================================================================
 
   {
@@ -7256,6 +7280,7 @@ void oledPrepareForSleep() {
 }
 
 void oledResumeFromSleep() {
+  inputTouchDiscard();
 #if ENABLE_OLED_DISPLAY
   const bool wasRunning = oledConnected && gOledRunning;
   const bool restored = displayResumeFromSleep();
