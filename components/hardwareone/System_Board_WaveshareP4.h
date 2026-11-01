@@ -31,3 +31,16 @@
 #ifndef SD_MMC_MAX_FREQ_KHZ
 #define SD_MMC_MAX_FREQ_KHZ 40000
 #endif
+
+// BAT_ADC: R12=200k from BAT, R15=100k to GND (schematic LCD-5).
+// Charger STAT goes to TP1, not a P4 GPIO; no cell/USB/charge detection.
+#define BATTERY_ADC_PIN 20
+#define BATTERY_MONITOR_AVAILABLE 1
+#define BATTERY_BACKEND_ADC 1
+#define BATTERY_BACKEND_FUEL_GAUGE 0
+#ifndef BATTERY_ADC_DIVIDER
+#define BATTERY_ADC_DIVIDER 3.0f
+#endif
+#ifndef BATTERY_ADC_ATTEN
+#define BATTERY_ADC_ATTEN ADC_ATTEN_DB_6
+#endif

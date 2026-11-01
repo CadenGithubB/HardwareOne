@@ -71,7 +71,8 @@ class PeripheralConfig(unittest.TestCase):
             'ENABLE_SD_CARD == 1', 'SD_MMC_SLOT == 0',
             'SD_MMC_POWER_PIN == 45', 'SD_MMC_DETECT_PIN == -1',
             'ENABLE_CAMERA_SENSOR == 0',
-            'ENABLE_MICROPHONE_SENSOR == 0', 'ENABLE_BATTERY_MONITOR == 0',
+            'ENABLE_MICROPHONE_SENSOR == 0', 'ENABLE_BATTERY_MONITOR == 1',
+            'BATTERY_ADC_PIN == 20', 'BATTERY_ADC_DIVIDER == 3.0f',
             'ENABLE_LOCAL_STT == 0', 'ENABLE_WIFI == 1', 'ENABLE_SPEAKER == 1',
             'I2C_SDA_PIN_DEFAULT == 7', 'I2C_SCL_PIN_DEFAULT == 8'],
             board_profile=repo / 'boards/waveshare_p4_touch_lcd_5.features.h')
@@ -91,6 +92,14 @@ class PeripheralConfig(unittest.TestCase):
         for flags in ({'DISPLAY_TYPE': 4}, {'INPUT_DEVICE_TYPE': 3}):
             with self.subTest(flags=flags):
                 self.check_profile(flags, [], succeeds=False, board_profile=board)
+
+    def test_waveshare_battery_can_be_disabled(self):
+        repo = SOURCE.parents[1]
+        flags = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())['features']
+        self.check_profile(dict(flags, ENABLE_BATTERY_MONITOR=0),
+                           ['ENABLE_BATTERY_MONITOR == 0', 'ENABLE_WEB_BATTERY == 0',
+                            'ENABLE_SD_CARD == 1', 'ENABLE_GT911_TOUCH == 1'],
+                           board_profile=repo / 'boards/waveshare_p4_touch_lcd_5.features.h')
 
     def test_waveshare_sd_can_be_disabled(self):
         repo = SOURCE.parents[1]

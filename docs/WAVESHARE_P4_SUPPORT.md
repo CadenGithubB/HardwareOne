@@ -14,7 +14,8 @@ the initially pasted 4.3-inch ST7701 page is not this device.
   test. CPU is 360 MHz; UART0 TX37/RX38, console 115200 baud.
 - User authorized P4/C6 installation, declined a factory backup, and explicitly
   approved erasing the new filesystem region. The P4 was flashed and verified.
-- Microphone capture, camera and battery remain disabled/unqualified.
+- Microphone capture and camera remain disabled/unqualified.
+  Battery ADC support is enabled; only USB-powered/no-cell behavior is tested.
   SD is enabled and mount/read/write/remount tested (see below).
   Speaker listening was explicitly deferred by the user after the driver test.
 
@@ -296,3 +297,45 @@ free). Its compact configuration/hash evidence is in `sd-baseline-evidence`;
 removing the completed temporary build recovered 1,079,574,528 allocated bytes.
 The active Waveshare build is retained for firmware/debugging and incremental
 work.
+
+## Battery voltage sensing (2026-11-01)
+
+The Waveshare board header now selects the shared calibrated ADC backend:
+GPIO20, R12=200k from BAT and R15=100k to ground, gain3, 6dB attenuation.
+These values were visually checked in the official LCD-5 schematic (local
+reference `work/waveshare-p4/vendor/schematic.pdf`). The board default enables
+battery monitoring; saved configurations can disable it independently.
+The EYE's GPIO49/divider configuration is unchanged.
+
+The charger STAT signal terminates at TP1 rather than a P4 GPIO. ADC voltage
+alone cannot establish cell presence, charging or USB state; the existing
+shared policy continues to report those as unknown and marks percentage as a
+voltage estimate. A powered charger can produce BAT-node voltage with no cell
+connected. No charger or power-button behavior is changed by this feature.
+
+The user has no battery connected. USB-only checks can qualify ADC startup,
+calibrated sampling and honest validity metadata, but cannot establish cell
+voltage accuracy, runtime, charging behavior or state-of-charge accuracy.
+Those require an appropriate battery and comparison with a meter. Waveshare
+specifies a 3.7V lithium battery and MX1.25 two-pin main BAT connector; verify
+connector polarity and do not substitute the separate RTC battery header.
+
+Host battery policy/backend/fault/OTA tests passed with ASan/UBSan, including
+the Waveshare board's pin/divider/attenuation selection. All 16 optional
+peripheral configuration tests passed, including disabling battery monitoring
+while retaining SD and touch support.
+
+Flashed image: 2,448,608 bytes, 5,940,000 bytes free, ELF prefix `936507ce9`;
+flash hash verified. USB-only sampling passed with calibrated voltage valid,
+raw ADC 2680–2681, measured BAT-node voltage 4.18875–4.19025V, and cell presence,
+charging and USB state all unknown. The voltage-derived ~99% indication is not
+proof of a battery: the user explicitly confirmed no cell is connected.
+The SD card remained mounted; HX8394/GT911 initialized and no display underrun
+or panic was logged during the bounded test. Evidence is under
+`work/waveshare-p4/battery-*`.
+
+The P4 EYE baseline built successfully at 5,471,344 bytes, 1,954,704 bytes free.
+After preserving config/hash evidence, its temporary build was removed,
+recovering 1,085,513,728 allocated bytes. The active Waveshare build is retained
+for firmware/debugging. The temporary schematic render was removed; the
+official PDF reference is retained.
