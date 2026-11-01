@@ -14,6 +14,11 @@ CONFIG_SECURE_FLASH_ENC_ENABLED=n
 CONFIG_NVS_ENCRYPTION=n
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 
+# The attached DSI panel needs its end-of-frame DMA interrupt during flash
+# writes (including login audit records). Otherwise refresh pauses while the
+# flash cache is disabled. This also selects cache-safe DW-GDMA interrupts.
+CONFIG_LCD_DSI_ISR_CACHE_SAFE=y
+
 # USB-to-UART bridge; native USB/JTAG is not the connected console.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=n
 CONFIG_ESP_CONSOLE_UART_CUSTOM=y

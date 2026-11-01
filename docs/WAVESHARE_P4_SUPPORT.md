@@ -225,3 +225,31 @@ screen stability with the adjusted firmware. The encoder baseline also built suc
 preserving configuration and hash evidence, recovering 1,079,861,248 allocated file
 bytes. The active Waveshare build remains for hardware work. Evidence uses the
 `work/waveshare-p4/touch-responsive-*` prefix.
+
+## Login-popup whole-panel flashes (2026-11-01)
+
+The user reported two whole-panel flashes on a login error, including the fixed
+touch controls. No DSI underrun was captured during the reported reproduction.
+The popup itself only draws into the 128x64 canvas; notification icon blinking
+does not change backlight duty or panel power.
+
+The Waveshare SDK defaults now enable `CONFIG_LCD_DSI_ISR_CACHE_SAFE`, which
+also selects `CONFIG_DW_GDMA_ISR_IRAM_SAFE`. The DSI driver restarts frame DMA
+from its end-of-frame interrupt; masking that interrupt during flash operations
+can pause refresh. Failed credential checks write a security audit record. This
+is a targeted candidate fix for that path, pending physical popup verification.
+The existing 720/1024 maximum backlight duty is unchanged.
+
+Validation: Waveshare image 2,395,056 bytes, 5,993,552 bytes free; flash hash
+verified, ELF prefix `1dda41c94`, HX8394 and GT911 initialized. A 65,536-byte
+filesystem write/delete test completed with zero display warnings. The P4 EYE
+baseline built at 5,471,344 bytes with its LCD cache-safe option still disabled.
+Evidence is in `work/waveshare-p4/popup-refresh-*`. The temporary baseline build
+was removed after preserving its config/hash evidence, recovering 1,097,347,072
+allocated bytes; the active Waveshare build remains for incremental work.
+
+The old firmware later logged one DSI underrun around 634 seconds uptime, then
+SDIO failures, C6 recovery and an instruction-access panic. This was separate
+from the initially monitored popup reproduction; its preserved log is
+`popup-refresh-before.log`. The short new-firmware test does not establish that
+this longer-running failure is resolved.
