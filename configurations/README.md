@@ -95,6 +95,13 @@ unchanged; a GPS fix is required to collect coordinates. The Maps image has
 passed build and host checks; command/lifecycle hardware qualification is
 recorded in [the Map test results](../docs/LOGGER_TEST.md#map-live-recording--2026-10-10).
 
+`waveshare-p4-bringup` targets the **Waveshare ESP32-P4-WIFI6-Touch-LCD-5**
+with observed rev1.3 silicon. It enables UART serial, Wi-Fi, basic web and BLE
+for initial headless bring-up. The HX8394 display, GT911 touch and onboard
+codec audio are not implemented by this profile. It uses a new 32 MB factory
+partition layout; do not flash it over the demo without a backup and planned
+layout migration. See [support status](../docs/WAVESHARE_P4_SUPPORT.md).
+
 ## Guided setup
 
 Start the terminal wizard from the repository root:

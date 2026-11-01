@@ -2,6 +2,8 @@
 
 #if HW1_RADIO_COMPANION
 
+#include "System_BuildConfig.h"
+
 #include <inttypes.h>
 #include <string.h>
 
@@ -27,27 +29,28 @@ namespace {
 
 constexpr const char* kTag = "HW1_RADIO";
 
-// ESP32-P4X-EYE / EYE-MB v2.3 board profile, the only Hosted board so far.
-// Keep wiring here rather than in the shared mesh protocol; a second Hosted
-// board needs its own pin set selected here.
-namespace eye {
-constexpr gpio_num_t kC6Boot = GPIO_NUM_33;
-constexpr gpio_num_t kC6UartRx = GPIO_NUM_35;  // Also the P4 BOOT strap.
-constexpr gpio_num_t kC6UartTx = GPIO_NUM_36;
-constexpr gpio_num_t kC6Enable = GPIO_NUM_9;   // Low holds the C6 in reset.
-constexpr int8_t kSdioClk = 28;
-constexpr int8_t kSdioCmd = 27;
-constexpr int8_t kSdioD0 = 29;
-constexpr int8_t kSdioD1 = 30;
-constexpr int8_t kSdioD2 = 31;
-constexpr int8_t kSdioD3 = 32;
-}  // namespace eye
+// Transport wiring has one owner: the selected board's SDK defaults.
+namespace board {
+constexpr gpio_num_t kC6Enable = static_cast<gpio_num_t>(CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE);
+constexpr int8_t kSdioClk = CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CLK_SLOT_1;
+constexpr int8_t kSdioCmd = CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CMD_SLOT_1;
+constexpr int8_t kSdioD0 = CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D0_SLOT_1;
+constexpr int8_t kSdioD1 = CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D1_4BIT_BUS_SLOT_1;
+constexpr int8_t kSdioD2 = CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D2_4BIT_BUS_SLOT_1;
+constexpr int8_t kSdioD3 = CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D3_4BIT_BUS_SLOT_1;
+#if defined(RADIO_C6_UART_TX_PIN)
+constexpr gpio_num_t kC6Boot = static_cast<gpio_num_t>(RADIO_C6_BOOT_PIN);
+constexpr gpio_num_t kC6UartRx = static_cast<gpio_num_t>(RADIO_C6_UART_RX_PIN);
+constexpr gpio_num_t kC6UartTx = static_cast<gpio_num_t>(RADIO_C6_UART_TX_PIN);
+#endif
+}  // namespace board
 
 // ---- companion console mirror ------------------------------------------------
 // The C6's UART0 console reaches the P4 on GPIO36. Mirroring it into the P4 log
 // is the only way to see the companion's own boot messages, crashes and
 // backtraces while HardwareOne drives it (the programmer service is the
 // alternative, and it replaces the application).
+#if defined(RADIO_C6_UART_TX_PIN)
 constexpr uart_port_t kConsoleUart = UART_NUM_1;
 TaskHandle_t sConsoleTask = nullptr;
 volatile bool sConsoleStop = false;
@@ -73,6 +76,8 @@ void consoleTask(void*) {
   sConsoleTask = nullptr;
   vTaskDelete(nullptr);
 }
+
+#endif
 
 constexpr int kBootAttempts = 2;  // each attempt resets the C6 and waits up to ~20 s
 
@@ -101,26 +106,28 @@ void copyBounded(char* dst, size_t cap, const char* src, size_t srcCap) {
   dst[n] = '\0';
 }
 
-esp_err_t prepareEyeBoard() {
+esp_err_t prepareBoard() {
   if (sBoardPrepared) return ESP_OK;
   // After a deep-sleep wake the enable line may still be held low by
   // radioHalPrepareForDeepSleep(); release every hold before Hosted drives it.
 #if !SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP
   gpio_deep_sleep_hold_dis();
 #endif
-  gpio_hold_dis(eye::kC6Enable);
+  gpio_hold_dis(board::kC6Enable);
+#if defined(RADIO_C6_UART_TX_PIN)
   // Set the output latch before enabling it: C6 BOOT must be high when Hosted
   // pulses EN. Leave the ROM UART idle; never pull P4 BOOT low.
-  ESP_RETURN_ON_ERROR(gpio_set_level(eye::kC6Boot, 1), kTag, "C6 BOOT level");
-  ESP_RETURN_ON_ERROR(gpio_set_direction(eye::kC6Boot, GPIO_MODE_OUTPUT), kTag, "C6 BOOT direction");
-  ESP_RETURN_ON_ERROR(gpio_set_direction(eye::kC6UartRx, GPIO_MODE_INPUT), kTag, "C6 UART RX direction");
-  ESP_RETURN_ON_ERROR(gpio_set_pull_mode(eye::kC6UartRx, GPIO_PULLUP_ONLY), kTag, "C6 UART RX pull-up");
-  ESP_RETURN_ON_ERROR(gpio_set_direction(eye::kC6UartTx, GPIO_MODE_INPUT), kTag, "C6 UART TX direction");
+  ESP_RETURN_ON_ERROR(gpio_set_level(board::kC6Boot, 1), kTag, "C6 BOOT level");
+  ESP_RETURN_ON_ERROR(gpio_set_direction(board::kC6Boot, GPIO_MODE_OUTPUT), kTag, "C6 BOOT direction");
+  ESP_RETURN_ON_ERROR(gpio_set_direction(board::kC6UartRx, GPIO_MODE_INPUT), kTag, "C6 UART RX direction");
+  ESP_RETURN_ON_ERROR(gpio_set_pull_mode(board::kC6UartRx, GPIO_PULLUP_ONLY), kTag, "C6 UART RX pull-up");
+  ESP_RETURN_ON_ERROR(gpio_set_direction(board::kC6UartTx, GPIO_MODE_INPUT), kTag, "C6 UART TX direction");
+#endif
   // Arduino's generic esp32p4 variant overrides the Kconfig SDIO pins with a
   // different board's wiring. Set its pin map before the first hostedInitWiFi().
-  if (!hostedSetPins(eye::kSdioClk, eye::kSdioCmd, eye::kSdioD0, eye::kSdioD1, eye::kSdioD2,
-                     eye::kSdioD3, static_cast<int8_t>(eye::kC6Enable))) {
-    ESP_LOGE(kTag, "Could not set EYE SDIO pins before Hosted startup");
+  if (!hostedSetPins(board::kSdioClk, board::kSdioCmd, board::kSdioD0, board::kSdioD1, board::kSdioD2,
+                     board::kSdioD3, static_cast<int8_t>(board::kC6Enable))) {
+    ESP_LOGE(kTag, "Could not set board SDIO pins before Hosted startup");
     return ESP_ERR_INVALID_STATE;
   }
   sBoardPrepared = true;
@@ -268,6 +275,7 @@ esp_err_t startOnce() {
 
 }  // namespace
 
+#if defined(RADIO_C6_UART_TX_PIN)
 esp_err_t radioHalConsoleMirror(bool on) {
   if (on == (sConsoleTask != nullptr)) return ESP_OK;
   if (on) {
@@ -281,7 +289,7 @@ esp_err_t radioHalConsoleMirror(bool on) {
     ESP_RETURN_ON_ERROR(uart_driver_install(kConsoleUart, 2048, 0, 0, nullptr, 0), kTag, "C6 console UART");
     esp_err_t err = uart_param_config(kConsoleUart, &cfg);
     if (err == ESP_OK) {
-      err = uart_set_pin(kConsoleUart, UART_PIN_NO_CHANGE, eye::kC6UartTx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+      err = uart_set_pin(kConsoleUart, UART_PIN_NO_CHANGE, board::kC6UartTx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     }
     if (err == ESP_OK) {
       sConsoleStop = false;
@@ -300,10 +308,15 @@ esp_err_t radioHalConsoleMirror(bool on) {
 }
 
 bool radioHalConsoleMirrorOn() { return sConsoleTask != nullptr; }
+#else
+// This assembly has no P4-connected companion UART console.
+esp_err_t radioHalConsoleMirror(bool on) { return on ? ESP_ERR_NOT_SUPPORTED : ESP_OK; }
+bool radioHalConsoleMirrorOn() { return false; }
+#endif
 
 esp_err_t radioHalPrepare() {
   quietRpcLogs();
-  ESP_RETURN_ON_ERROR(prepareEyeBoard(), kTag, "EYE board preparation failed");
+  ESP_RETURN_ON_ERROR(prepareBoard(), kTag, "Board preparation failed");
   radioHalConsoleMirror(true);  // not fatal; c6console off silences it
   ESP_RETURN_ON_ERROR(registerEvents(), kTag, "Hosted events");
   esp_err_t err = ESP_FAIL;
@@ -439,7 +452,7 @@ esp_err_t radioHalConfigureMonitoring(uint16_t heartbeatSec, uint32_t lowMemoryB
 }
 
 esp_err_t radioHalStartTransport() {
-  ESP_RETURN_ON_ERROR(prepareEyeBoard(), kTag, "EYE board preparation failed");
+  ESP_RETURN_ON_ERROR(prepareBoard(), kTag, "Board preparation failed");
   ESP_RETURN_ON_ERROR(registerEvents(), kTag, "Hosted events");
   // A new link starts from a clean slate on both sides.
   hostedSetTransportLost(false);
@@ -501,10 +514,10 @@ bool radioHalTransportLost() {
 
 esp_err_t radioHalHold(bool hold) {
   if (hold && hostedIsInitialized()) return ESP_ERR_INVALID_STATE;  // stop the transport first
-  ESP_RETURN_ON_ERROR(prepareEyeBoard(), kTag, "EYE board preparation failed");
-  gpio_hold_dis(eye::kC6Enable);
-  ESP_RETURN_ON_ERROR(gpio_set_level(eye::kC6Enable, hold ? 0 : 1), kTag, "C6 EN level");
-  ESP_RETURN_ON_ERROR(gpio_set_direction(eye::kC6Enable, GPIO_MODE_OUTPUT), kTag, "C6 EN direction");
+  ESP_RETURN_ON_ERROR(prepareBoard(), kTag, "Board preparation failed");
+  gpio_hold_dis(board::kC6Enable);
+  ESP_RETURN_ON_ERROR(gpio_set_level(board::kC6Enable, hold ? 0 : 1), kTag, "C6 EN level");
+  ESP_RETURN_ON_ERROR(gpio_set_direction(board::kC6Enable, GPIO_MODE_OUTPUT), kTag, "C6 EN direction");
   portENTER_CRITICAL(&sLock);
   sHeld = hold;
   if (hold) sTransportUp = false;
@@ -522,14 +535,14 @@ bool radioHalHeld() {
 
 void radioHalPrepareForDeepSleep() {
   // The caller has stopped the radio users and the transport. Keep the
-  // companion in reset through sleep; prepareEyeBoard() releases the hold at
+  // companion in reset through sleep; prepareBoard() releases the hold at
   // the next boot before Hosted drives the pin.
   if (radioHalHold(true) != ESP_OK) return;
   // On the ESP32-P4 (rev 3.0 and later) a held pad keeps its level through
   // deep sleep by itself; chips without per-IO deep-sleep hold also need the
   // global switch. An older P4 revision releases the line during sleep, which
   // only lets the companion boot idle without a host until the next reset.
-  gpio_hold_en(eye::kC6Enable);
+  gpio_hold_en(board::kC6Enable);
 #if !SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP
   gpio_deep_sleep_hold_en();
 #endif

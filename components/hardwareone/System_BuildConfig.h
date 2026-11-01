@@ -1012,6 +1012,24 @@
   #define BATTERY_BACKEND_ADC 0
   #define BATTERY_BACKEND_FUEL_GAUGE 0
 
+// --- Waveshare ESP32-P4-WIFI6-Touch-LCD-5 (initial headless support). ---
+#elif HW_BOARD_WAVESHARE_P4_TOUCH
+  #if !defined(CONFIG_IDF_TARGET_ESP32P4)
+    #error "Waveshare P4 Touch requires ESP32-P4"
+  #endif
+  #define BOARD_SUPPORTED 1
+  #define BOARD_NAME "Waveshare ESP32-P4-WIFI6-Touch-LCD-5"
+  #define I2C_SDA_PIN_DEFAULT 7
+  #define I2C_SCL_PIN_DEFAULT 8
+  #define NEOPIXEL_PIN_DEFAULT -1
+  #define NEOPIXEL_POWER_PIN -1
+  #define NEOPIXEL_COUNT_DEFAULT 0
+  #define USER_LED_PIN -1
+  #define BATTERY_ADC_PIN -1
+  #define BATTERY_MONITOR_AVAILABLE 0
+  #define BATTERY_BACKEND_ADC 0
+  #define BATTERY_BACKEND_FUEL_GAUGE 0
+
 // --- Adafruit QT Py ESP32 (ESP32-PICO) ---
 #elif defined(ARDUINO_ADAFRUIT_QTPY_ESP32_DEV)
   #define BOARD_SUPPORTED       1
