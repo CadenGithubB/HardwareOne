@@ -9,6 +9,7 @@
 #include <atomic>
 #include <ArduinoJson.h>
 #include "System_Power.h"
+#include "HAL_Display.h"
 #include "System_BuildConfig.h"
 #include "System_Settings.h"
 #include "System_Debug.h"
@@ -40,6 +41,10 @@ bool powerSetCpuFrequencyMhz(uint32_t mhz, bool* outClockChanged) {
     return false;
   }
 
+  if (displayRequiresFullSpeed() && mhz < POWER_CPU_PERFORMANCE_MHZ) {
+    xSemaphoreGive(sCpuFrequencyMutex);
+    return false;
+  }
   bool applied = true;
   if (getCpuFrequencyMhz() != mhz) {
 #if ENABLE_I2C_SYSTEM
@@ -185,7 +190,8 @@ bool applyPowerMode(uint8_t mode, bool setDisplayBrightness) {
   const PowerModeConfig& config = gPowerModes[mode];
   // UltraSaver's lower XTAL clock is reserved for the drain-guarded idle path.
   // Active mode changes always use the target's interactive PLL frequencies.
-  const uint32_t targetFreq = getPowerModeActiveCpuFreq(mode);
+  const uint32_t targetFreq = displayRequiresFullSpeed() ? POWER_CPU_PERFORMANCE_MHZ
+                                                        : getPowerModeActiveCpuFreq(mode);
   DEBUG_SYSTEMF("[POWER] Config: name=%s nominal=%lu active=%lu displayBright=%d",
                 config.name, (unsigned long)config.cpuFreqMhz,
                 (unsigned long)targetFreq, config.displayBrightnessPercent);
@@ -552,6 +558,7 @@ static PowerDecision powerDecide() {
   const uint8_t mode = gSettings.powerMode;
   if (mode == POWER_MODE_LOCKED) return {POWER_CPU_PERFORMANCE_MHZ, "locked", true};
   if (const char* boost = powerWorkloadBoost()) return {POWER_CPU_PERFORMANCE_MHZ, boost, true};
+  if (displayRequiresFullSpeed()) return {POWER_CPU_PERFORMANCE_MHZ, "display", true};
 
   // In use: any real interaction within the idle timeout, the timeout
   // disabled, or the local panel still lit (its blanking can lag the countdown

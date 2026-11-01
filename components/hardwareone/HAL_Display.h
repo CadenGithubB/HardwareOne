@@ -279,6 +279,8 @@ uint8_t displayI2cBus();  // Latched for the canvas lifetime; bus settings requi
 // benign only because displayPrepareForSleep is idempotent (off always wins,
 // the rail is cut once). Routing those command paths through the main loop is
 // the follow-up; until then no third task may call these.
+// Hardware clock constraint, including scanout while the panel is blank.
+bool displayRequiresFullSpeed();
 bool displayInit();
 // Synchronous physical-surface drawing, when supported. The callback must not
 // retain the canvas or re-enter the display HAL. Logical UI updates resume after it.
@@ -294,6 +296,7 @@ void displayDim(bool dim);               // Dim display (on/off brightness)
 void displaySetBrightness(uint8_t level); // Set brightness 0-255 (PWM for TFT, contrast for OLED)
 
 #else
+inline bool displayRequiresFullSpeed() { return false; }
 inline bool displayInit() { return false; }
 inline bool displayPaintSurface(void (*)(Adafruit_GFX&)) { return false; }
 inline bool displayIsReady() { return false; }

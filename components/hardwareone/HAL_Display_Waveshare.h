@@ -6,12 +6,14 @@
 #include "esp_ldo_regulator.h"
 #include "freertos/semphr.h"
 #include <Adafruit_SSD1306.h>
+#include <atomic>
 
 // Software-only SSD1306 canvas preserves the established Hardware One UI API.
 class WaveshareDisplay : public Adafruit_SSD1306 {
 public:
   WaveshareDisplay();
   bool begin();
+  bool requiresFullSpeed() const { return scanoutActive_.load(); }
   void end();
   void display();
   bool paintSurface(void (*paint)(Adafruit_GFX&));
@@ -32,6 +34,7 @@ private:
   uint16_t *pixels_ = nullptr;
   uint8_t presentedCanvas_[1024] = {};
   bool canvasPresented_ = false;
+  std::atomic<bool> scanoutActive_{false};
   bool wakePending_ = false;
   bool pwm_ = false, powered_ = false, inverted_ = false, contrast_ = false;
   uint8_t brightness_ = 180;

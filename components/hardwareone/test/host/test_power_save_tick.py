@@ -35,6 +35,7 @@ PROFILES = (
 )
 # Every build: the clock policy alone.
 HEADLESS_SCENARIOS = (
+    "display_clock",
     "normal", "boot_late", "timeout_zero", "remote_keeps_panel_dark", "adaptive_default", "already_idle",
     "boost_stt", "boost_camera", "boost_recording", "uart_fast", "uart_slow", "uart_stopped", "locked",
     "raise_refusal", "lower_refusal", "persistent_refusal", "foreign_change_refusal", "own_partial_failure",

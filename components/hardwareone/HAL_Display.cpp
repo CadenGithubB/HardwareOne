@@ -17,6 +17,14 @@
   #include <Wire.h>
 #endif
 
+bool displayRequiresFullSpeed() {
+#if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+  return gDisplay && gDisplay->requiresFullSpeed();
+#else
+  return false;
+#endif
+}
+
 // Global display instance
 DisplayDriver* gDisplay = nullptr;
 namespace {

@@ -17,6 +17,8 @@ static std::vector<std::string> trace;
 static void check(bool condition, const char* description) {
   if (!condition) throw std::runtime_error(description);
 }
+static bool displayClockRequired = false;
+bool displayRequiresFullSpeed() { return displayClockRequired; }
 static uint32_t nowMs = 1000;
 [[maybe_unused]] static bool otaSafetyIsPendingVerification() { return false; }
 static uint32_t liveMhz = POWER_CPU_PERFORMANCE_MHZ;
@@ -220,6 +222,16 @@ static void test(const std::string& name) {
     clearTrace(); activity(true);
     expectTrace(wakeItems(kMax)); check(liveMhz == kMax, "local activity restores the in-use clock");
     steady();
+  } else if (name == "display_clock") {
+    displayClockRequired = true;
+    gSettings.powerMode = POWER_MODE_ADAPTIVE;
+    ++nowMs; tick();
+    check(powerTargetCpuMhz()==kMax && liveMhz==kMax, "scanout overrides low active clock");
+    idle();
+    check(powerTargetCpuMhz()==kMax && liveMhz==kMax, "scanout holds clock while panel is blank");
+    displayClockRequired = false;
+    ++nowMs; tick();
+    check(powerTargetCpuMhz()==kFloor && liveMhz==kFloor, "teardown releases clock constraint");
   } else if (name == "manual_idle") {
 #if ENABLE_OLED_DISPLAY
     gSettings.powerSaveTimeoutMinutes = 0;

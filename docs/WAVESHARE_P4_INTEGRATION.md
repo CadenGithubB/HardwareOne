@@ -195,5 +195,47 @@ free. No baseline hardware was flashed. Its compiler build directory was removed
 after retaining manifest/config evidence (`manual-idle-cleanup.json`).
 User confirmed immediate sleep and touch wake work. A second immediate sleep
 was requested in temporary Locked power mode to isolate the clock transition;
-no underrun warning appeared at that entry. Visual comparison is pending and
-Performance mode must be restored afterward.
+no underrun warning appeared at that entry. The user confirmed no flash on
+wake in Locked mode. Performance mode was then restored successfully. This
+strongly implicates clock-transition/DSI-bandwidth behavior; distinguish reduced
+steady-state bandwidth from the clock transition itself in the next fix.
+The 80 ms delay alone did not fix it. `powersleep` remains available for repeatable
+testing, with the original 10-minute timeout preserved.
+
+## DSI clock requirement
+
+The user reproduced the flash again after restoring normal Performance idle.
+The IDF DPI implementation continues DMA/video output after the HX8394 DCS
+DISPLAYOFF command: the backlight and panel being blank does not stop scanout.
+The Waveshare backend now publishes a full-speed requirement from before DSI
+initialization through actual hardware teardown, using an atomic state flag.
+It raises the clock through the existing shared CPU owner before initialization.
+Blanking does not release the requirement; `end()` does. The generic display HAL
+returns false for other backends and disabled builds. Shared power policy and
+mode application honor the requirement; the CPU owner rejects manual requests
+below it. Saved modes/timeouts are not rewritten.
+
+This deliberately uses the qualified full-speed clock (360 MHz on this rev1.3
+P4) instead of assuming an untested lower clock is safe. It costs idle power
+while scanout runs. Lower stable clocks or true scanout suspension are future
+power optimizations, not claimed by this fix. The prior 80 ms panel-settling
+gate remains, but was insufficient on its own.
+
+Waveshare build passed (2,501,792 bytes). CPU-owner regression tests pass for
+ESP32 and both P4 clock families, with I2C on/off; display-lifecycle variants pass;
+696 power-policy scenarios pass with ASan/UBSan, including retaining the display
+requirement during blanking and releasing it after teardown. Flash checksum
+verified. Boot completed, HX8394/GT911 and the C6 bridge initialized normally.
+`powersleep` produced no underrun warning; telemetry showed Performance mode,
+10-minute timeout, panel asleep and CPU/target both 360 MHz. `cpufreq 90` was
+correctly refused. The user confirmed two clean wake cycles under normal Performance mode. The
+captured runtime log contains zero underrun warnings. P4-EYE baseline build
+passed; its manifest/config are retained in `artifacts/p4-eye-scanout-check`.
+The selected Waveshare image/debug/config are in `artifacts/waveshare-p4-scanout`.
+Completed compiler trees, private SDK dependencies and the superseded immediate-
+idle artifact set were removed; exact recovered file bytes are recorded in
+`scanout-cleanup.json`. The original integration artifact set remains retained
+for comparison. No STT device was touched; main remains unmerged.
+
+Evidence: `work/waveshare-integration/scanout-*`; interactive serial output is in
+the original checkout's redacted `work/waveshare-p4/runtime.log`.

@@ -145,6 +145,7 @@ class P4EyeDisplay {
   void display() { ++platform.updates; }
   void dim(bool) { ++platform.dims; }
   void setBrightness(uint8_t) { ++platform.commands; }
+  bool requiresFullSpeed() const { return false; }
   void setPower(bool) { ++platform.powerCalls; }
   uint8_t* getBuffer() { return canvas_; }
  private:

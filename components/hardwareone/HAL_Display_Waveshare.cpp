@@ -2,6 +2,7 @@
 #if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
 #include "HAL_Display_WaveshareInit.h"
 #include "System_MemUtil.h"
+#include "System_Power.h"
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
@@ -69,12 +70,23 @@ bool WaveshareDisplay::begin() {
     buffer = static_cast<uint8_t *>(ps_calloc(1024, 1, AllocPolicy::PreferInternal, "display.waveshare.canvas"));
   if (!buffer)
     return false;
+  // DISPLAYOFF only blanks the HX8394; DPI DMA keeps fetching PSRAM.
+  // 90 MHz idle produced underruns; fixed 360 MHz sleep/wake was qualified.
+  // Claim before raising the clock so concurrent policy cannot lower it during
+  // initialization. Retain the requirement through blanking, release at teardown.
+  scanoutActive_.store(true);
+  if (!powerSetCpuFrequencyMhz(POWER_CPU_PERFORMANCE_MHZ)) {
+    scanoutActive_.store(false);
+    return false;
+  }
   pinMode(WS_LCD_RESET_PIN, OUTPUT);
   pinMode(WS_LCD_BACKLIGHT_PIN, OUTPUT);
   digitalWrite(WS_LCD_BACKLIGHT_PIN, LOW);
   pwm_ = ledcAttach(WS_LCD_BACKLIGHT_PIN, 5000, 10);
-  if (!pwm_)
+  if (!pwm_) {
+    scanoutActive_.store(false);
     return false;
+  }
   // Waveshare's board reset circuit is active-high (BSP reset_active_high=1).
   digitalWrite(WS_LCD_RESET_PIN, LOW);
   delay(10);
@@ -287,6 +299,7 @@ void WaveshareDisplay::release() {
     pwm_ = false;
     digitalWrite(WS_LCD_BACKLIGHT_PIN, LOW);
   }
+  scanoutActive_.store(false);
 }
 void WaveshareDisplay::end() {
   if (!lock_)

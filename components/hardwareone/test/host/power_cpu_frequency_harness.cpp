@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 #include "System_Power.h"
+static bool displayClockRequired = false;
+bool displayRequiresFullSpeed() { return displayClockRequired; }
 #if ENABLE_I2C_SYSTEM
 #include "System_PollPause.h"
 #endif
@@ -342,5 +344,12 @@ int main() {
   busOutcomes();
 #endif
   consumerOutcomes();
+  reset(); displayClockRequired = true;
+  bool changed = true;
+  assert(!powerSetCpuFrequencyMhz(POWER_CPU_BALANCED_MHZ, &changed));
+  assert(!changed && !halCalls); released();
+  assert(applyPowerMode(POWER_MODE_ADAPTIVE, false));
+  assert(current == POWER_CPU_PERFORMANCE_MHZ);
+  displayClockRequired = false;
   std::printf("PASS CPU owner + command/modes: I2C=%d, max=%d MHz\n", ENABLE_I2C_SYSTEM, POWER_CPU_PERFORMANCE_MHZ);
 }
