@@ -369,7 +369,9 @@ static constexpr FeatureEntry featureRegistry[] = {
   // exposes itself here. Wizard / settings UI / feature list all use this one
   // entry; the active driver disambiguates at runtime.
   { "input",
-#if ENABLE_GPIO_ENCODER
+#if ENABLE_GT911_TOUCH
+    "Single Touchscreen",
+#elif ENABLE_GPIO_ENCODER
     "GPIO Rotary Encoder",
 #elif ENABLE_ANO_ENCODER
     "ANO Encoder",
@@ -379,7 +381,9 @@ static constexpr FeatureEntry featureRegistry[] = {
     FEATURE_CAT_SENSOR, 2,
     FEATURE_FLAG_RUNTIME_TOGGLE,
     &gSettings.inputAutoStart, isInputCompiled,
-#if ENABLE_GPIO_ENCODER
+#if ENABLE_GT911_TOUCH
+    "GT911 single-finger touch controls"
+#elif ENABLE_GPIO_ENCODER
     "GPIO quadrature wheel and click gestures for navigation"
 #elif ENABLE_ANO_ENCODER
     "ANO rotary encoder + 5-button D-pad for navigation"

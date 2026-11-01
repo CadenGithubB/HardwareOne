@@ -42,6 +42,7 @@ def main() -> None:
                            '#undef ENABLE_RASPBERRY_PI_HOST_POWER\n#define ENABLE_RASPBERRY_PI_HOST_POWER 0\n'
                            '#undef ENABLE_RASPBERRY_PI_HOST_FAN\n#define ENABLE_RASPBERRY_PI_HOST_FAN 0\n')
         boards = (
+            ('waveshare', ('HW_BOARD_WAVESHARE_P4_TOUCH=1', 'CONFIG_IDF_TARGET_ESP32P4=1'), 20, 1, 1, 0, -1, '3.0f', 6),
             ('eye', ('HW_BOARD_P4X_EYE=1', 'CONFIG_IDF_TARGET_ESP32P4=1'), 49, 1, 1, 0, -1, '1332.0f / 332.0f', 6),
             ('eye-disabled-marker', ('HW_BOARD_P4X_EYE=0', 'ARDUINO_XIAO_ESP32S3_DEV=1'), -1, 0, 0, 0, -1, '2.0f', 12),
             ('p4-generic', ('CONFIG_IDF_TARGET_ESP32P4=1',), -1, 0, 0, 0, -1, '2.0f', 12),

@@ -16,6 +16,8 @@
 
 #include <Arduino.h>
 #include "System_BuildConfig.h"
+#include "Input_TouchCore.h"
+#include "Input_GT911.h"
 
 // Gamepad input cache structure (always available for type-safe references)
 struct InputCache {
@@ -37,12 +39,15 @@ struct InputCache {
 #define INPUT_TYPE_CUSTOM          3
 #define INPUT_TYPE_ANO_ENCODER     4
 #define INPUT_TYPE_GPIO_ENCODER    5
+#define INPUT_TYPE_GT911_TOUCH     6
 
 // Default input type. BuildConfig owns the user-visible INPUT_DEVICE_TYPE
 // flag; this internal INPUT_TYPE is derived from it so HAL code has a single
 // constant to switch on regardless of which input device is built.
 #ifndef INPUT_TYPE
-  #if defined(INPUT_DEVICE_TYPE) && INPUT_DEVICE_TYPE == 3  /* INPUT_DEVICE_TYPE_GPIO_ENCODER */
+  #if ENABLE_GT911_TOUCH
+    #define INPUT_TYPE INPUT_TYPE_GT911_TOUCH
+  #elif defined(INPUT_DEVICE_TYPE) && INPUT_DEVICE_TYPE == 3  /* INPUT_DEVICE_TYPE_GPIO_ENCODER */
     #define INPUT_TYPE  INPUT_TYPE_GPIO_ENCODER
   #elif defined(INPUT_DEVICE_TYPE) && INPUT_DEVICE_TYPE == 2  /* INPUT_DEVICE_TYPE_ANO_ENCODER */
     #define INPUT_TYPE  INPUT_TYPE_ANO_ENCODER
@@ -58,7 +63,10 @@ struct InputCache {
 // stack/HWM reports showing the actual driver in use instead of a misleading
 // "input_gamepad" on ANO builds. FreeRTOS task name cap is
 // CONFIG_FREERTOS_MAX_TASK_NAME_LEN (16) — both names fit.
-#if INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
+#if INPUT_TYPE == INPUT_TYPE_GT911_TOUCH
+  #define INPUT_TASK_NAME "input_touch"
+  #define INPUT_TASK_TAG "touch"
+#elif INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
   #define INPUT_TASK_NAME "input_encoder"
   #define INPUT_TASK_TAG  "encoder"
 #elif INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
@@ -103,7 +111,8 @@ enum InputControllerType {
   INPUT_CONTROLLER_CLICK_WHEEL,     // Generic click wheel / rotary encoder
   INPUT_CONTROLLER_CUSTOM,          // Custom controller mapping
   INPUT_CONTROLLER_ANO_ENCODER,     // Adafruit ANO rotary encoder breakout
-  INPUT_CONTROLLER_GPIO_ENCODER     // Direct GPIO quadrature + push switch
+  INPUT_CONTROLLER_GPIO_ENCODER,    // Direct GPIO quadrature + push switch
+  INPUT_CONTROLLER_GT911_TOUCH      // Single-contact touchscreen
 };
 
 // =============================================================================
@@ -141,6 +150,13 @@ bool inputConsumeSnapshot(InputCache& out, uint32_t timeoutMs = 10);
 // On failure, preserve the caller's last sequence (no synthetic activity).
 bool inputActivitySequence(uint32_t& out, uint32_t timeoutMs = 10);
 size_t inputCacheStorageBytes();
+
+// Raw panel coordinates, independent of button/joystick data. One UI consumer.
+bool inputTouchSnapshot(TouchSnapshot& out);
+bool inputTouchPending();
+bool inputTouchConsume(TouchEvent& out);
+// Discard queued/held contacts across UI ownership changes or display wake.
+void inputTouchDiscard();
 
 int       inputGetX();
 int       inputGetY();

@@ -168,6 +168,7 @@
 //   1 = SEESAW_GAMEPAD   (Adafruit Mini I2C Gamepad, 0x50)
 //   2 = ANO_ENCODER      (Adafruit ANO Rotary Encoder breakout, 0x49)
 //   3 = GPIO_ENCODER     (quadrature wheel + click and optional board buttons)
+//   4 = GT911_TOUCH      (Waveshare LCD-5 single-contact touchscreen over I2C)
 //
 // Board profiles default to SEESAW_GAMEPAD on FeatherS3 and NONE on XIAO.
 // The two Seesaw options require I2C; GPIO input needs explicit assembly pins.
@@ -197,6 +198,9 @@
 // 10,566). An undefined macro evaluates to 0 in #if, so reading the value is
 // safe whether or not the define exists.
 #define XIAO_ESP32S3_SENSE_ENABLED 1
+
+// Speaker playback through a board-provided codec backend.
+#define ENABLE_SPEAKER 0
 
 // Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640). PICO board has none.
 // Auto-enabled on the XIAO ESP32S3 Sense, which ships with an OV2640 on its
@@ -517,11 +521,13 @@
 #define DISPLAY_TYPE_ST7789    2
 #define DISPLAY_TYPE_ILI9341   3
 #define DISPLAY_TYPE_ST7789_P4_EYE 4
+#define DISPLAY_TYPE_HX8394_WAVESHARE 5
 
 #define INPUT_DEVICE_TYPE_NONE           0
 #define INPUT_DEVICE_TYPE_SEESAW_GAMEPAD 1
 #define INPUT_DEVICE_TYPE_ANO_ENCODER    2
 #define INPUT_DEVICE_TYPE_GPIO_ENCODER   3
+#define INPUT_DEVICE_TYPE_GT911_TOUCH    4
 
 // The generic color TFT branches still use example wiring and do not supply
 // the SSD1306-compatible framebuffer/commands expected by the shared UI.
@@ -633,6 +639,17 @@
   #endif
 #endif
 
+#if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+  #undef ENABLE_OLED_DISPLAY
+  #define ENABLE_OLED_DISPLAY 1
+  #if !HW_BOARD_WAVESHARE_P4_TOUCH
+    #error "HX8394 display requires the Waveshare LCD-5 board profile"
+  #endif
+#endif
+#if ENABLE_SPEAKER && (!HW_BOARD_WAVESHARE_P4_TOUCH || !ENABLE_I2C_SYSTEM)
+  #error "Speaker requires the Waveshare ES8311 backend and I2C"
+#endif
+
 // Override ENABLE_OLED_DISPLAY if DISPLAY_TYPE is NONE
 #if DISPLAY_TYPE == DISPLAY_TYPE_NONE
   #undef ENABLE_OLED_DISPLAY
@@ -650,6 +667,10 @@
 // because both occupy the same role (the OLED input source) and the seesaw
 // driver would race the ANO driver for the STEMMA QT bus if both compiled in.
 // The CMakeLists gate also skips the disabled driver's .cpp.
+#define ENABLE_GT911_TOUCH (INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_GT911_TOUCH)
+#if ENABLE_GT911_TOUCH && (!HW_BOARD_WAVESHARE_P4_TOUCH || !ENABLE_I2C_SYSTEM)
+  #error "GT911 touch requires the Waveshare LCD-5 board and I2C"
+#endif
 #define ENABLE_GPIO_ENCODER (INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_GPIO_ENCODER)
 // The EYE's three user keys belong to the same optional input controller.
 // Profiles can disable them while retaining wheel gestures. Other boards do
@@ -680,7 +701,7 @@
 // gate the OLED's input-handling code so it compiles for either driver.
 // The two source-specific paths inside each block stay gated on their own
 // ENABLE_* flag.
-#define ENABLE_OLED_INPUT  (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER)
+#define ENABLE_OLED_INPUT  (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER || ENABLE_GT911_TOUCH)
 
 // Keep legacy auto-disable behavior, but reject an ineffective saved choice.
 #if defined(HW1_FEATURE_CONFIG_HEADER)
@@ -697,7 +718,7 @@
 // not pay for an idle 4 KB task that wakes every 100 ms.
 #define ENABLE_I2C_SENSOR_QUEUE \
   (ENABLE_THERMAL_SENSOR || ENABLE_TOF_SENSOR || ENABLE_IMU_SENSOR || \
-   ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_APDS_SENSOR || ENABLE_GPS_SENSOR || \
+   ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH || ENABLE_APDS_SENSOR || ENABLE_GPS_SENSOR || \
    ENABLE_FM_RADIO || ENABLE_RTC_SENSOR || ENABLE_PRESENCE_SENSOR)
 
 // =============================================================================
@@ -1060,6 +1081,21 @@
   #define BATTERY_BACKEND_ADC 0
   #define BATTERY_BACKEND_FUEL_GAUGE 0
 
+// --- Waveshare ESP32-P4-WIFI6-Touch-LCD-5 (initial headless support). ---
+#elif HW_BOARD_WAVESHARE_P4_TOUCH
+  #if !defined(CONFIG_IDF_TARGET_ESP32P4)
+    #error "Waveshare P4 Touch requires ESP32-P4"
+  #endif
+  #define BOARD_SUPPORTED 1
+  #define BOARD_NAME "Waveshare ESP32-P4-WIFI6-Touch-LCD-5"
+  #include "System_Board_WaveshareP4.h"
+  #define I2C_SDA_PIN_DEFAULT 7
+  #define I2C_SCL_PIN_DEFAULT 8
+  #define NEOPIXEL_PIN_DEFAULT -1
+  #define NEOPIXEL_POWER_PIN -1
+  #define NEOPIXEL_COUNT_DEFAULT 0
+  #define USER_LED_PIN -1
+
 // --- Adafruit QT Py ESP32 (ESP32-PICO) ---
 #elif defined(ARDUINO_ADAFRUIT_QTPY_ESP32_DEV)
   #define BOARD_SUPPORTED       1
@@ -1406,8 +1442,8 @@
     #define ENABLE_SD_CARD 0
   #endif
 #endif
-#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD && (!HW_BOARD_P4X_EYE || !defined(CONFIG_IDF_TARGET_ESP32P4))
-  #error "SDMMC card requires a supported board profile (currently P4X-EYE)"
+#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD && (!(HW_BOARD_P4X_EYE || HW_BOARD_WAVESHARE_P4_TOUCH) || !defined(CONFIG_IDF_TARGET_ESP32P4))
+  #error "SDMMC card requires a supported ESP32-P4 board profile"
 #endif
 #if ENABLE_STT_MODEL_15X5_GEN2 && (!ENABLE_LOCAL_STT || !defined(CONFIG_IDF_TARGET_ESP32P4) || !ENABLE_SD_CARD)
   #error "ENABLE_STT_MODEL_15X5_GEN2 requires ENABLE_LOCAL_STT, ESP32-P4 and ENABLE_SD_CARD."

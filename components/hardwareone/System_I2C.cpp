@@ -109,7 +109,7 @@ static bool isSensorCompiled(const I2CSensorEntry& sensor) {
   #if !ENABLE_IMU_SENSOR
     if (strcmp(sensor.moduleName, "imu") == 0) return false;
   #endif
-  #if !ENABLE_GAMEPAD_SENSOR && !ENABLE_ANO_ENCODER
+  #if !ENABLE_GAMEPAD_SENSOR && !ENABLE_ANO_ENCODER && !ENABLE_GT911_TOUCH
     if (strcmp(sensor.moduleName, "input") == 0) return false;
   #endif
   // (Removed: two branches matching sensor.moduleName against the pre-unification
@@ -283,7 +283,10 @@ const I2CSensorEntry i2cSensors[] = {
   // appear at either address depending on hardware jumpers. The compiled-in
   // driver disambiguates at runtime; the descriptions show the relevant
   // device for the active build.
-#if ENABLE_ANO_ENCODER
+#if ENABLE_GT911_TOUCH
+  { 0x5d, "GT911", "Single touchscreen", "Goodix", false, 0x00, 100, NULL, NULL, "input", 400000, 100 },
+  { 0x14, "GT911", "Single touchscreen (alt)", "Goodix", false, 0x00, 100, NULL, NULL, "input", 400000, 100 },
+#elif ENABLE_ANO_ENCODER
   { 0x49, "Seesaw", "ANO Rotary Encoder (default)", "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200 },
   { 0x50, "Seesaw", "ANO Rotary Encoder (alt addr)", "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200 },
 #else
@@ -358,7 +361,9 @@ static uint8_t i2cAddressForDeviceType(I2CDeviceType sensor) {
     case I2C_DEVICE_TOF:      return I2C_ADDR_TOF;
     case I2C_DEVICE_IMU:      return I2C_ADDR_IMU;
     case I2C_DEVICE_INPUT:
-#if ENABLE_ANO_ENCODER
+#if ENABLE_GT911_TOUCH
+      return 0; // Backend probes 0x5d and 0x14 through the shared manager.
+#elif ENABLE_ANO_ENCODER
       return (gSettings.anoEncoderI2cAddr > 0 && gSettings.anoEncoderI2cAddr < 0x80)
                ? (uint8_t)gSettings.anoEncoderI2cAddr : I2C_ADDR_ANO_ENCODER;
 #else
@@ -1819,6 +1824,8 @@ static void buildSensorsJson(JsonDocument& doc, bool includeData = true) {
   // encoder). Matches controls json / open<id>/close<id> / sensorautostart /
   // the I2C DB moduleName, so the app correlates on one name with no overrides.
   addSensorEntry(arr, "input",    "Seesaw gamepad",         SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? gamepadBuildDataJSON : nullptr);
+#elif ENABLE_GT911_TOUCH
+  addSensorEntry(arr, "input", "GT911 single touch", SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, nullptr);
 #elif ENABLE_GPIO_ENCODER
   addSensorEntry(arr, "input",    "GPIO rotary encoder",    SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? gpioEncoderBuildDataJSON : nullptr);
 #endif
@@ -2344,7 +2351,9 @@ const char* deviceTypeDisplayName(I2CDeviceType sensor) {
     case I2C_DEVICE_THERMAL:  return "Thermal";
     case I2C_DEVICE_TOF:      return "ToF";
     case I2C_DEVICE_IMU:      return "IMU";
-#if ENABLE_ANO_ENCODER
+#if ENABLE_GT911_TOUCH
+    case I2C_DEVICE_INPUT: return "GT911 Touch";
+#elif ENABLE_ANO_ENCODER
     case I2C_DEVICE_INPUT:  return "ANO Encoder";
 #else
     case I2C_DEVICE_INPUT:  return "Gamepad";
@@ -2409,7 +2418,9 @@ static void applySensorStop(I2CDeviceType sensor) {
 #endif
       break;
     case I2C_DEVICE_INPUT:
-#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER
+#if ENABLE_GT911_TOUCH
+      touchStop();
+#elif ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER
       gInputRunning = false;
 #if ENABLE_ANO_ENCODER
       gAnoEncoderEnabled = false;
@@ -2772,7 +2783,7 @@ static bool startSensorInternal(I2CDeviceType sensor) {
     case I2C_DEVICE_TOF: return tofStartInternal();
     case I2C_DEVICE_IMU: return imuStartInternal();
     case I2C_DEVICE_GPS: return gpsStartInternal();
-#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER
+#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH
     case I2C_DEVICE_INPUT: return inputStartInternal();
 #endif
 #if ENABLE_APDS_SENSOR
@@ -3206,7 +3217,7 @@ void processAutoStartSensors() {
   }
   #endif
   
-  #if ENABLE_GAMEPAD_SENSOR
+  #if ENABLE_GAMEPAD_SENSOR || ENABLE_GT911_TOUCH
   if (gSettings.inputEnabled && ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
     // "input" (not the pre-unification "gamepad") — isSensorConnected matches
     // against i2cSensors[].moduleName, and every seesaw row is named "input".

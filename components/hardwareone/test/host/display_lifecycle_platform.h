@@ -130,6 +130,7 @@ class Adafruit_SSD1306 {
 
 class P4EyeDisplay {
  public:
+  bool paintSurface(void (*)(class Adafruit_GFX&)) { return true; }
   P4EyeDisplay() { ++platform.constructors; }
   ~P4EyeDisplay() { ++platform.destructors; }
   bool begin() {
@@ -144,8 +145,11 @@ class P4EyeDisplay {
   void display() { ++platform.updates; }
   void dim(bool) { ++platform.dims; }
   void setBrightness(uint8_t) { ++platform.commands; }
+  bool requiresFullSpeed() const { return false; }
   void setPower(bool) { ++platform.powerCalls; }
   uint8_t* getBuffer() { return canvas_; }
  private:
   uint8_t canvas_[1024]{};
 };
+
+using WaveshareDisplay = P4EyeDisplay;

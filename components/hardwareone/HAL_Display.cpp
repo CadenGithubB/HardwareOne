@@ -17,6 +17,14 @@
   #include <Wire.h>
 #endif
 
+bool displayRequiresFullSpeed() {
+#if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+  return gDisplay && gDisplay->requiresFullSpeed();
+#else
+  return false;
+#endif
+}
+
 // Global display instance
 DisplayDriver* gDisplay = nullptr;
 namespace {
@@ -64,6 +72,15 @@ void restoreDisplayRail() {
 }
 #endif
 } // namespace
+
+bool displayPaintSurface(void (*paint)(Adafruit_GFX&)) {
+#if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+  return displayIsReady() && gDisplay && gDisplay->paintSurface(paint);
+#else
+  (void)paint;
+  return false;
+#endif
+}
 
 bool displayIsReady() { return displayReady.load(); }
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
@@ -124,8 +141,8 @@ bool displayInit() {
   displayUpdate();
   return true;
 
-#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
-  if (!gDisplay) gDisplay = new P4EyeDisplay();
+#elif (DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE || DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE)
+  if (!gDisplay) gDisplay = new DisplayDriver();
   if (!gDisplay) return false;
   if (!gDisplay->begin()) {
     // Keep the canvas stable for legacy UI pointers. A retry calls begin()
@@ -199,7 +216,7 @@ bool displayInit() {
 void displayClear() {
   if (!displayIsReady() || !gDisplay) return;
   
-#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 || DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 || (DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE || DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE)
   gDisplay->clearDisplay();
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
   gDisplay->fillScreen(DISPLAY_COLOR_BLACK);
@@ -229,7 +246,7 @@ void displayUpdate() {
   i2cDeviceTransactionVoid(oledBus, gDisplayI2cAddress, kOledClockHz, 15, [&]() {
     gDisplay->display();  // Push framebuffer to OLED (~20ms at 400kHz)
   });
-#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+#elif (DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE || DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE)
   gDisplay->display();
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
   // No-op for TFT (direct rendering)
@@ -248,7 +265,7 @@ void displayDim(bool dim) {
   i2cDeviceTransactionVoid(oledBus, gDisplayI2cAddress, kOledClockHz, 500, [&]() {
     gDisplay->dim(dim);
   });
-#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+#elif (DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE || DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE)
   gDisplay->dim(dim);
   
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
@@ -275,7 +292,7 @@ void displaySetBrightness(uint8_t level) {
     gDisplay->ssd1306_command(level);
   });
   
-#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+#elif (DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE || DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE)
   gDisplay->setBrightness(level);
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
   // TFT brightness via backlight PWM
@@ -294,7 +311,7 @@ bool displaySetPower(bool on) {
     gDisplay->ssd1306_command(on ? SSD1306_DISPLAYON : SSD1306_DISPLAYOFF);
     return true;
   });
-#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+#elif (DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE || DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE)
   gDisplay->setPower(on);
   return true;
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789
@@ -322,7 +339,7 @@ void displayStop() {
       gDisplay->ssd1306_command(SSD1306_DISPLAYOFF);
     });
   }
-#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+#elif (DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE || DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE)
   gDisplay->end();
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789
   if (wasReady) gDisplay->enableDisplay(false);

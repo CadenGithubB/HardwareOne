@@ -11,6 +11,7 @@ set(HW_CFG_I2C_FEATURE_LEVEL 0)
 set(HW_CFG_DISPLAY_TYPE 0)
 set(HW_CFG_INPUT_DEVICE_TYPE 0)  # 0 = NONE; header values 1/2 select a driver
 set(HW_CFG_ENABLE_MQTT 0)
+set(HW_CFG_ENABLE_SPEAKER 0)
 set(HW_CFG_ENABLE_LLM_BACKEND 0)         # the LLM feature (registry/chat/commands/surfaces)
 set(HW_CFG_ENABLE_LLM_SOURCE_ONBOARD 0)  # on-device PSRAM engine as a source
 set(HW_CFG_ENABLE_LLM_SOURCE_HTTP 0)     # optional Wi-Fi OpenClaw source
@@ -93,7 +94,7 @@ if(EXISTS "${hw_cfg_file}")
     # while CMake drops its sources, so stop the configure instead. A flag
     # with no definition keeps its 0 default above.
     set(HW_CFG_TEXT_FLAGS
-        I2C_FEATURE_LEVEL DISPLAY_TYPE INPUT_DEVICE_TYPE ENABLE_MQTT
+        I2C_FEATURE_LEVEL DISPLAY_TYPE INPUT_DEVICE_TYPE ENABLE_MQTT ENABLE_SPEAKER
         ENABLE_LLM_BACKEND ENABLE_LLM_SOURCE_ONBOARD ENABLE_LLM_SOURCE_CM5
         ENABLE_LLM_SOURCE_HTTP
         ENABLE_MAPS ENABLE_CAMERA_SENSOR ENABLE_ESP_SR ENABLE_LOCAL_STT
@@ -140,7 +141,7 @@ endif()
 # inside each file when the bus + display are present but a sub-feature
 # (ESPNOW, ESP_SR, BONDED_MODE) is off.
 set(HW_CFG_BUILD_OLED_MODES 0)
-if(HW_CFG_DISPLAY_TYPE EQUAL 4 OR
+if(HW_CFG_DISPLAY_TYPE EQUAL 4 OR HW_CFG_DISPLAY_TYPE EQUAL 5 OR
    (HW_CFG_DISPLAY_TYPE GREATER 0 AND HW_CFG_I2C_FEATURE_LEVEL GREATER 0))
     set(HW_CFG_BUILD_OLED_MODES 1)
 endif()
@@ -387,6 +388,8 @@ if(HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
     if(HW_CFG_INPUT_DEVICE_TYPE EQUAL 2)
         list(APPEND hardwareone_srcs i2csensor_ano_encoder.cpp)
         message(STATUS "Input device: ANO rotary encoder")
+    elseif(HW_CFG_INPUT_DEVICE_TYPE EQUAL 4)
+        list(APPEND hardwareone_srcs Input_GT911.cpp)
     elseif(HW_CFG_INPUT_DEVICE_TYPE EQUAL 1)
         list(APPEND hardwareone_srcs i2csensor_seesaw.cpp)
         message(STATUS "Input device: Seesaw mini gamepad")
@@ -404,6 +407,12 @@ if(HW_CFG_INPUT_DEVICE_TYPE EQUAL 3)
 endif()
 if(HW_CFG_DISPLAY_TYPE EQUAL 4)
     list(APPEND hardwareone_srcs HAL_Display_P4Eye.cpp)
+elseif(HW_CFG_DISPLAY_TYPE EQUAL 5)
+    list(APPEND hardwareone_srcs HAL_Display_Waveshare.cpp)
+endif()
+list(APPEND hardwareone_srcs HAL_Speaker.cpp System_Speaker.cpp OLED_Touch.cpp OLED_TouchControls.cpp)
+if(HW_CFG_ENABLE_SPEAKER GREATER 0)
+    list(APPEND hardwareone_srcs HAL_Speaker_Waveshare.cpp third_party/es8311/es8311.c)
 endif()
 
 if(HW_CFG_BUILD_OLED_MODES GREATER 0)
@@ -479,7 +488,7 @@ set(hardwareone_requires
         espressif__libsodium
 )
 
-if(HW_CFG_DISPLAY_TYPE EQUAL 4)
+if(HW_CFG_DISPLAY_TYPE EQUAL 4 OR HW_CFG_DISPLAY_TYPE EQUAL 5)
     list(APPEND hardwareone_requires esp_lcd esp_driver_spi esp_driver_ledc)
 endif()
 

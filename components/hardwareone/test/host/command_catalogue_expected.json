@@ -13,6 +13,7 @@
     "filesystem|filesystemCommands|0|-",
     "sd|sdCommands|0|sd",
     "oled|oledCommands|0|-",
+    "speaker|speakerCommands|0|-",
     "neopixel|neopixelCommands|0|-",
     "led|ledCommands|0|-",
     "matrix|matrixCommands|0|-",
@@ -163,6 +164,12 @@
         "HW1_RADIO_COMPANION"
       ],
       "modules": "cli system wifi espnow c6 mqtt bluetooth phone relay filesystem sd oled neopixel led matrix servo thermal tof imu input gamepad apds gps fmradio rtc presence camera microphone edgeimpulse transcription note stt espsr i2c automation battery debug settings sensorlog health users features image map mapsettings power liveaudio cm5 ota setpattern even_g2 ring llm settingsedit"
+    },
+    "speaker": {
+      "enabled": [
+        "ENABLE_SPEAKER"
+      ],
+      "modules": "cli system filesystem oled speaker debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
     }
   }
 }

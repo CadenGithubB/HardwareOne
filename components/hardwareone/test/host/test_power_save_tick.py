@@ -35,6 +35,7 @@ PROFILES = (
 )
 # Every build: the clock policy alone.
 HEADLESS_SCENARIOS = (
+    "display_clock",
     "normal", "boot_late", "timeout_zero", "remote_keeps_panel_dark", "adaptive_default", "already_idle",
     "boost_stt", "boost_camera", "boost_recording", "uart_fast", "uart_slow", "uart_stopped", "locked",
     "raise_refusal", "lower_refusal", "persistent_refusal", "foreign_change_refusal", "own_partial_failure",
@@ -43,6 +44,7 @@ HEADLESS_SCENARIOS = (
 )
 # With a local display: the panel tick as well.
 DISPLAY_SCENARIOS = HEADLESS_SCENARIOS + (
+    "manual_idle",
     "capture_holds_panel", "stt_does_not_hold_panel", "cooldown_keeps_panel_and_clock",
     "ultra_lit_panel", "wake_input",
 )
@@ -102,10 +104,13 @@ def generate(main: str, power: str) -> str:
         line = re.search(rf"(?m)^static volatile \w+(?: \w+)? {name}[^\n]+", power)
         require(line is not None, f"System_Power.cpp must keep {name} on one line")
         state.append(line[0])
+    for name in ("sDisplayIdleRequest", "sManualIdle"):
+        state.append(re.search(rf"(?m)^static std::atomic<bool> {name}[^\n]+", power)[0])
     state.append(re.search(r"(?m)^#define UART_LINK_REF_TICK_BAUD_LIMIT[^\n]+",
                            (COMPONENT / "System_UartLink.h").read_text())[0])
     definitions = [extract_block(power, marker) for marker in (
-        "uint32_t getPowerModeCpuFreq(", "uint32_t getPowerModeActiveCpuFreq(",
+        "bool powerRequestDisplayIdle(", "bool powerTakeDisplayIdleRequest(",
+        "void powerSetManualIdle(", "uint32_t getPowerModeCpuFreq(", "uint32_t getPowerModeActiveCpuFreq(",
         "uint32_t getPowerModeIdleCpuFreq(", "void powerSaveNoteActivity(",
         "unsigned long powerSaveLastActivityMs(", "unsigned long powerSaveLastLocalActivityMs(",
         "const char* powerWorkloadBoost(", "void powerSetLocalDisplayAwake(",

@@ -5,6 +5,7 @@
 // mocked. One scenario per process so the function-static state is genuine.
 #include "System_Power.h"
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <deque>
 #include <iostream>
@@ -16,7 +17,10 @@ static std::vector<std::string> trace;
 static void check(bool condition, const char* description) {
   if (!condition) throw std::runtime_error(description);
 }
+static bool displayClockRequired = false;
+bool displayRequiresFullSpeed() { return displayClockRequired; }
 static uint32_t nowMs = 1000;
+[[maybe_unused]] static bool otaSafetyIsPendingVerification() { return false; }
 static uint32_t liveMhz = POWER_CPU_PERFORMANCE_MHZ;
 static uint32_t inputSeq = 1;
 static bool cooldownAllowed = true, micBusy = false, sttActive = false, cameraSessionOpen = false;
@@ -68,7 +72,7 @@ static bool inputActivitySequence(uint32_t& sequence, uint32_t waitMs) {
 static constexpr int SYSEVT_POWER_SAVE_ENTER = 1, SYSEVT_POWER_SAVE_EXIT = 2;
 static void systemEventPost(int event, const char* detail = nullptr) {
   if (event == SYSEVT_POWER_SAVE_ENTER) {
-    check(!gOledRunning && detail && std::string(detail) == "idle 1min",
+    check(!gOledRunning && detail && (std::string(detail) == "idle 1min" || std::string(detail) == "manual idle"),
           "entry is published after display state changes");
     check(!powerLocalDisplayAwake(), "the policy learns the panel is dark before the event");
     trace.push_back("enter");
@@ -218,6 +222,32 @@ static void test(const std::string& name) {
     clearTrace(); activity(true);
     expectTrace(wakeItems(kMax)); check(liveMhz == kMax, "local activity restores the in-use clock");
     steady();
+  } else if (name == "display_clock") {
+    displayClockRequired = true;
+    gSettings.powerMode = POWER_MODE_ADAPTIVE;
+    ++nowMs; tick();
+    check(powerTargetCpuMhz()==kMax && liveMhz==kMax, "scanout overrides low active clock");
+    idle();
+    check(powerTargetCpuMhz()==kMax && liveMhz==kMax, "scanout holds clock while panel is blank");
+    displayClockRequired = false;
+    ++nowMs; tick();
+    check(powerTargetCpuMhz()==kFloor && liveMhz==kFloor, "teardown releases clock constraint");
+  } else if (name == "manual_idle") {
+#if ENABLE_OLED_DISPLAY
+    gSettings.powerSaveTimeoutMinutes = 0;
+    cooldownAllowed = false;
+    check(!powerRequestDisplayIdle(), "cooldown refuses immediate idle");
+    cooldownAllowed = true; micBusy = true;
+    check(!powerRequestDisplayIdle(), "recording refuses immediate idle");
+    micBusy = false;
+    check(powerRequestDisplayIdle(), "immediate idle accepted");
+    ++nowMs; tick();
+    check(!gOledRunning && liveMhz==kFloor, "normal blank and downclock without timeout");
+    check(gSettings.powerSaveTimeoutMinutes==0, "saved timeout unchanged");
+    ++nowMs; tick(); check(!gOledRunning, "disabled timeout does not immediately wake manual idle");
+    activity(false); check(!gOledRunning && liveMhz==kMax, "remote activity raises clock without lighting panel");
+    activity(true); check(gOledRunning, "local activity wakes manual idle");
+#endif
   } else if (name == "boot_late") {
     // millis() is already past the timeout at the first tick: the countdown
     // starts at that tick, not at zero.

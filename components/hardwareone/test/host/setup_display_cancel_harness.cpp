@@ -89,7 +89,7 @@ static void oledDrawBackArrowIcon(DisplayBoundary*, int) {}
 struct PhysicalInput { unsigned long at; uint32_t buttons; int x = 0, y = 0, wheel = 0; };
 static std::deque<PhysicalInput> physicalInputs;
 static PhysicalInput currentInput{};
-static struct { int wheelDelta = 0; } gNavEvents;
+static struct { int wheelDelta = 0; bool up=false, down=false, left=false, right=false; } gNavEvents;
 static void updateInputState() {
   currentInput = {};
   if (!physicalInputs.empty() && physicalInputs.front().at <= nowMs) {

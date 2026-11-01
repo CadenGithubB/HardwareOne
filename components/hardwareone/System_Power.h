@@ -74,7 +74,8 @@ bool isPowerCpuFrequencySupported(uint32_t mhz);
 // fails. Lock refusal leaves the clock unchanged; a HAL failure may require the
 // caller to inspect the live clock. Optional outClockChanged reports only a
 // change made by this call, even on HAL failure; refusal/no-op sets it false.
-// The caller chooses active/idle policy.
+// The caller chooses active/idle policy. A request below a running display
+// hardware requirement is refused without changing the clock.
 // Task context only; call outside I2C/SPI transactions and clock callbacks.
 bool powerSetCpuFrequencyMhz(uint32_t mhz, bool* outClockChanged = nullptr);
 
@@ -112,6 +113,11 @@ void powerSleepTransitionMark();
 // lights the panel. Cheap + task-safe: it only stamps timestamps (a 32-bit
 // aligned write is atomic on the ESP32); the work runs on the main loop in
 // powerPolicyTick() and the local display's own tick.
+// Queue immediate display idle on the owner loop; no persistent setting change.
+// Busy workloads and cooldown still gate entry. Unsupported without a display.
+bool powerRequestDisplayIdle();
+bool powerTakeDisplayIdleRequest();
+void powerSetManualIdle(bool idle);
 void powerSaveNoteActivity(bool local);
 unsigned long powerSaveLastActivityMs();       // any real interaction
 unsigned long powerSaveLastLocalActivityMs();  // someone at the device

@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-992 commands across 55 modules (1001 registry entries).
+994 commands across 56 modules (1003 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -24,6 +24,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`filesystem`](#filesystem) — 10 commands
 - [`sd`](#sd) — 5 commands
 - [`oled`](#oled) — 19 commands
+- [`speaker`](#speaker) — 1 commands
 - [`neopixel`](#neopixel) — 3 commands
 - [`led`](#led) — 6 commands
 - [`matrix`](#matrix) — 3 commands
@@ -31,7 +32,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`thermal`](#thermal) — 23 commands
 - [`tof`](#tof) — 10 commands
 - [`imu`](#imu) — 16 commands
-- [`input`](#input) — 5 commands
+- [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
 - [`anoencoder`](#anoencoder) — 5 commands
 - [`apds`](#apds) — 9 commands
@@ -58,7 +59,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`image`](#image) — 4 commands
 - [`map`](#map) — 12 commands
 - [`mapsettings`](#mapsettings) — 3 commands
-- [`power`](#power) — 3 commands
+- [`power`](#power) — 4 commands
 - [`liveaudio`](#liveaudio) — 1 commands
 - [`cm5`](#cm5) — 15 commands
 - [`ota`](#ota) — 18 commands
@@ -66,7 +67,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`even_g2`](#even-g2) — 56 commands
 - [`ring`](#ring) — 12 commands
 - [`llm`](#llm) — 36 commands
-- [`settingsedit`](#settingsedit) — 62 commands
+- [`settingsedit`](#settingsedit) — 61 commands
 
 ---
 
@@ -273,10 +274,10 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 | Command | | Description |
 | ------- | :-: | ----------- |
+| `c6_console` | A | Mirror the C6's own console into the P4 log: c6_console [on\|off]. |
 | `c6autohold` | A | Hold the companion in reset while no radio feature runs: c6autohold [on\|off] (persists). |
 | `c6autorecover` | A | Auto-recover the companion after an outage: c6autorecover [on\|off] (persists). |
 | `c6confirm` | A | Confirm the companion's running image so it cannot roll back. |
-| `c6_console` | A | Mirror the C6's own console into the P4 log: c6_console [on\|off]. |
 | `c6heartbeat` | A | Companion heartbeat interval in seconds, 0 disables the watchdog: c6heartbeat <0..60> (persists). |
 | `c6hold` | A | Hold the C6 in reset (radio fully off) or release it: c6hold [on\|off].<br/>`Usage: c6hold [on\|off] on - stop Wi-Fi, Bluetooth and ESP-NOW and hold the companion in reset off - release it and restore what was running` |
 | `c6restart` | A | Restart the C6 companion in place (radio features stop and come back). |
@@ -428,6 +429,14 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `oledupdateinterval` |  | Display update interval (ms): <10-1000><br/>`Usage: oledupdateinterval <10..1000>` |
 | `openoled` |  | Start OLED display. |
 
+## speaker
+
+> speakertone plays a short test tone; frequency, duration and volume are optional.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `speakertone` |  | Play a short speaker test tone.<br/>`Usage: speakertone [100..4000 Hz] [50..2000 ms] [0..60 volume]` |
+
 ## neopixel
 
 > Controls the addressable RGB status LED (WS2812/NeoPixel). ledcolor <name> lights it a solid color from a fixed palette (red, green, blue, yellow, magenta, cyan, white, orange, purple, pink), and ledclear turns it off. ledeffect <fade|blink|pulse|strobe> [color] [color2] [duration 100-60000ms] runs an animated effect (defaults: red/blue, 3000 ms; ledeffect off clears it). These commands change the LED immediately and are not saved -- the persistent power-on brightness and startup animation live in the led settings module, not here. Note the effect call runs synchronously for its full duration before returning.
@@ -555,6 +564,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `inputautostart` |  | Enable/disable input device auto-start [on\|off]<br/>`Usage: inputautostart [on\|off]` |
 | `inputdevicepollms` | A | Set input device poll interval ms [10-1000]<br/>`Usage: inputdevicepollms <10-1000>` |
 | `openinput` |  | Start the configured input device. |
+| `touchread` |  | Read the single-touch snapshot without consuming events. |
 
 ## gamepad
 
@@ -1191,13 +1201,14 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## power
 
-> The power subsystem manages CPU frequency and battery-oriented power saving. The main command is power: power alone prints the current mode, CPU clock and display brightness; power mode <perf|balanced|adaptive|ultra|locked|0-4> selects one of five target-specific presets: Performance, Balanced, Adaptive (the default), UltraSaver, or Locked. Run power or power json to see their active and idle MHz. A mode sets the clock while the device is in use and while idle, plus the display brightness; the chosen mode is persisted. Every mode runs transcription, camera and recording at the maximum clock while they are busy and drops back when they finish; Adaptive stays at the floor clock otherwise. Locked keeps the maximum clock through idle. UltraSaver uses its lower idle-only clock once the local display blanks; input or a command restores the target's interactive floor. A command from the glasses, phone, web or serial keeps the clock up but does not light the local display; only local input, the display's own commands and on-device voice do. Nothing switches the mode on battery level in this firmware: power auto and power threshold report that automatic mode is not available. Two related idle controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; 0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) while the radio stays up so the device remains reachable, and powercooldown <0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid back-to-back sleep transitions. All of these values persist.
+> The power subsystem manages CPU frequency and battery-oriented power saving. The main command is power: power alone prints the current mode, CPU clock and display brightness; power mode <perf|balanced|adaptive|ultra|locked|0-4> selects one of five target-specific presets: Performance, Balanced, Adaptive (the default), UltraSaver, or Locked. Run power or power json to see their active and idle MHz. A mode sets the clock while the device is in use and while idle, plus the display brightness; the chosen mode is persisted. Every mode runs transcription, camera and recording at the maximum clock while they are busy and drops back when they finish; Adaptive stays at the floor clock otherwise. Locked keeps the maximum clock through idle. UltraSaver uses its lower idle-only clock once the local display blanks; input or a command restores the target's interactive floor. A command from the glasses, phone, web or serial keeps the clock up but does not light the local display; only local input, the display's own commands and on-device voice do. Nothing switches the mode on battery level in this firmware: power auto and power threshold report that automatic mode is not available. Two related idle controls are separate commands: powersleep enters display idle immediately without changing the timeout; powersave <0..1440> sets an idle timeout (minutes; 0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) while the radio stays up so the device remains reachable, and powercooldown <0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid back-to-back sleep transitions. All of these values persist.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `power` | A | Power management [mode]<br/>`Usage: power - show current power status power json - status as one JSON blob (same schema as /api/power/status) power mode <perf\|balanced\|adaptive\|ultra\|locked\|0-4>` |
 | `powercooldown` | A | Sleep transition cooldown (ms; 0 disables)<br/>`Usage: powercooldown <0..60000>` |
 | `powersave` | A | Idle power-save: OLED off + optional downclock (0 disables)<br/>`Usage: powersave <0..1440>` |
+| `powersleep` | A | Enter display idle now; local input wakes it<br/>`Usage: powersleep` |
 
 ## liveaudio
 

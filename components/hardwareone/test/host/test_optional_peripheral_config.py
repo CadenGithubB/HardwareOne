@@ -61,6 +61,66 @@ class PeripheralConfig(unittest.TestCase):
                             'EYE_BUTTON_1_PIN == 3', 'EYE_BUTTON_2_PIN == 4',
                             'EYE_BUTTON_3_PIN == 5'])
 
+    def test_waveshare_bringup_does_not_inherit_eye_peripherals(self):
+        repo = SOURCE.parents[1]
+        config = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())
+        self.check_profile(config['features'], [
+            'BOARD_SUPPORTED == 1', 'HW_BOARD_WAVESHARE_P4_TOUCH == 1',
+            'ENABLE_OLED_DISPLAY == 1', 'ENABLE_GPIO_ENCODER == 0',
+            'ENABLE_GT911_TOUCH == 1', 'ENABLE_OLED_INPUT == 1',
+            'ENABLE_SD_CARD == 1', 'SD_MMC_SLOT == 0',
+            'SD_MMC_POWER_PIN == 45', 'SD_MMC_DETECT_PIN == -1',
+            'ENABLE_CAMERA_SENSOR == 0',
+            'ENABLE_MICROPHONE_SENSOR == 0', 'ENABLE_BATTERY_MONITOR == 1',
+            'BATTERY_ADC_PIN == 20', 'BATTERY_ADC_DIVIDER == 3.0f',
+            'ENABLE_LOCAL_STT == 0', 'ENABLE_WIFI == 1', 'ENABLE_SPEAKER == 1',
+            'I2C_SDA_PIN_DEFAULT == 7', 'I2C_SCL_PIN_DEFAULT == 8'],
+            board_profile=repo / 'boards/waveshare_p4_touch_lcd_5.features.h')
+
+    def test_waveshare_optional_peripherals_disabled(self):
+        repo = SOURCE.parents[1]
+        flags = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())['features']
+        board = repo / 'boards/waveshare_p4_touch_lcd_5.features.h'
+        self.check_profile(dict(flags, INPUT_DEVICE_TYPE=0, DISPLAY_TYPE=0,
+                                ENABLE_SPEAKER=0, ENABLE_SDMMC_CARD=0, ENABLE_BATTERY_MONITOR=0),
+                           ['ENABLE_GT911_TOUCH == 0', 'ENABLE_OLED_DISPLAY == 0',
+                            'ENABLE_SPEAKER == 0', 'ENABLE_SD_CARD == 0',
+                            'ENABLE_BATTERY_MONITOR == 0'], board_profile=board)
+        self.check_profile(dict(flags, DISPLAY_TYPE=0),
+                           ['ENABLE_GT911_TOUCH == 1', 'ENABLE_OLED_DISPLAY == 0'],
+                           board_profile=board)
+
+    def test_touch_requires_supported_board_and_i2c(self):
+        self.check_profile(self.profile(wheel=4), [], succeeds=False)
+        board = SOURCE.parents[1] / 'boards/waveshare_p4_touch_lcd_5.features.h'
+        flags = json.loads((SOURCE.parents[1] / 'configurations/waveshare-p4-bringup.json').read_text())['features']
+        self.check_profile(dict(flags, I2C_FEATURE_LEVEL=0, ENABLE_SPEAKER=0), [],
+                           succeeds=False, board_profile=board)
+        self.check_profile(dict(flags, INPUT_DEVICE_TYPE=0),
+                           ['ENABLE_GT911_TOUCH == 0', 'ENABLE_OLED_INPUT == 0',
+                            'ENABLE_OLED_DISPLAY == 1'], board_profile=board)
+
+    def test_waveshare_rejects_eye_only_peripheral_selections(self):
+        board = SOURCE.parents[1] / 'boards/waveshare_p4_touch_lcd_5.features.h'
+        for flags in ({'DISPLAY_TYPE': 4}, {'INPUT_DEVICE_TYPE': 3}):
+            with self.subTest(flags=flags):
+                self.check_profile(flags, [], succeeds=False, board_profile=board)
+
+    def test_waveshare_battery_can_be_disabled(self):
+        repo = SOURCE.parents[1]
+        flags = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())['features']
+        self.check_profile(dict(flags, ENABLE_BATTERY_MONITOR=0),
+                           ['ENABLE_BATTERY_MONITOR == 0', 'ENABLE_WEB_BATTERY == 0',
+                            'ENABLE_SD_CARD == 1', 'ENABLE_GT911_TOUCH == 1'],
+                           board_profile=repo / 'boards/waveshare_p4_touch_lcd_5.features.h')
+
+    def test_waveshare_sd_can_be_disabled(self):
+        repo = SOURCE.parents[1]
+        flags = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())['features']
+        self.check_profile(dict(flags, ENABLE_SDMMC_CARD=0),
+                           ['ENABLE_SD_CARD == 0', 'ENABLE_GT911_TOUCH == 1'],
+                           board_profile=repo / 'boards/waveshare_p4_touch_lcd_5.features.h')
+
     def test_p4_board_sd_saved_selection(self):
         board = SOURCE.parents[1] / 'boards/p4x_eye.features.h'
         for selected in (None, 0, 1):

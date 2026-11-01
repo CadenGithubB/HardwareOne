@@ -5277,3 +5277,12 @@ layout illustrations using a graphics test double and the shipping bitmap font.
 Its optional `--baseline <component-directory>` compares OLED launcher and
 simple-list framebuffer bytes against saved sources. These are host checks,
 not physical display qualification.
+
+## Waveshare integration
+
+`touch_input` exercises the production contact queue, hit testing and UI handoff.
+`battery` covers the shared battery policy, backend failures and OTA admission.
+`radio_legacy_update` runs production Hosted admission and OTA chunking with
+controlled RPC results: normal boot remains strict, legacy OTA requires a remote
+reply, update-only sessions are unavailable to radio users, and failed chunks
+stop the transfer. These tests do not qualify physical I2C, DSI, audio or radio.

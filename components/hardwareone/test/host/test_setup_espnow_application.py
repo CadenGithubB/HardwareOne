@@ -46,6 +46,8 @@ def main():
         extract_block(mode, "struct WizardRender") + ";",
     ])
     functions = "\n\n".join([
+        extract_block((COMPONENT / "OLED_Touch.cpp").read_text().split("#else")[-1],
+                      "uint32_t oledWizardButtonPresses("),
         extract_block(setup, "bool wizardHandleCancelInput("),
         extract_block(setup, "static String waitForWizardInput("),
         extract_block(mode, "static WizardSubMode subModeForPage("),

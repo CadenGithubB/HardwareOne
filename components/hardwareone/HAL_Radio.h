@@ -2,8 +2,8 @@
  * HAL_Radio - where this board's radio lives and how it is kept alive.
  *
  * On native boards (ESP32, ESP32-S3) the Wi-Fi/BLE radio is on the chip and
- * every function here is a no-op that reports "native". On the ESP32-P4X-EYE
- * the radio is an ESP32-C6 companion behind ESP-Hosted over SDIO; this HAL
+ * every function here is a no-op that reports "native". On supported ESP32-P4
+ * boards the radio is an ESP32-C6 companion behind ESP-Hosted over SDIO; this HAL
  * owns the companion's transport lifecycle (boot, restart, hold-in-reset,
  * firmware update) and the raw facts about it (identity, bridge, heartbeat
  * and memory events). Policy (when to retry, when to recover, what to notify)
@@ -138,6 +138,9 @@ esp_err_t radioHalConfigureMonitoring(uint16_t heartbeatSec, uint32_t lowMemoryB
 // and ESP-NOW. MarkTransportLost makes every remaining RPC fail at once so a
 // teardown with a dead companion takes milliseconds, not timeouts.
 esp_err_t radioHalStartTransport();
+// Explicit OTA-only compatibility path for factory firmware without version RPC.
+// A legacy session never reports normal radio availability; stop it after failure.
+esp_err_t radioHalStartUpdateTransport();
 void radioHalStopTransport();
 void radioHalMarkTransportLost();
 bool radioHalTransportLost();
@@ -188,6 +191,7 @@ inline const RadioCompanionMemory& radioHalLastMemory() {
 inline void radioHalSetEventHandler(RadioHalEventFn) {}
 inline esp_err_t radioHalConfigureMonitoring(uint16_t, uint32_t) { return ESP_ERR_NOT_SUPPORTED; }
 inline esp_err_t radioHalStartTransport() { return ESP_OK; }
+inline esp_err_t radioHalStartUpdateTransport() { return ESP_ERR_NOT_SUPPORTED; }
 inline void radioHalStopTransport() {}
 inline void radioHalMarkTransportLost() {}
 inline bool radioHalTransportLost() { return false; }

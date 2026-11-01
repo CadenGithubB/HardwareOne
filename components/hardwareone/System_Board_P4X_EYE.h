@@ -61,3 +61,9 @@
 #ifndef SD_MMC_MAX_FREQ_KHZ
 #define SD_MMC_MAX_FREQ_KHZ 40000
 #endif
+
+// Companion ROM boot strap and UART0 lines wired to the P4. Other hosted
+// assemblies may expose only SDIO/reset and have no console mirror.
+#define RADIO_C6_BOOT_PIN 33
+#define RADIO_C6_UART_RX_PIN 35
+#define RADIO_C6_UART_TX_PIN 36

@@ -2596,6 +2596,7 @@ static bool powerSaveInhibited() {
 
 static void powerDisplayTick() {
   static bool          asleep = false;
+  static bool          manualSleep = false;
   static uint32_t      lastSeq = 0;
   static unsigned long lastSeenLocalMs = 0;
   static uint32_t      lastBusyMs = 0;   // last lap with local capture running
@@ -2624,12 +2625,15 @@ static void powerDisplayTick() {
   const bool fresh = local != lastSeenLocalMs;
   lastSeenLocalMs = local;
   const bool disabled = gSettings.powerSaveTimeoutMinutes == 0;
+  const bool requested = powerTakeDisplayIdleRequest();
   if (asleep) {
-    if (!fresh && !disabled) return;   // still dark, waiting for someone
+    if (!fresh && (!disabled || manualSleep)) return;   // still dark, waiting for someone
     gOledRunning = true;
     oledResumeFromSleep();
     oledMarkDirty();
     asleep = false;
+    manualSleep = false;
+    powerSetManualIdle(false);
     powerSetLocalDisplayAwake(true);
     batteryLogEvent("powersave:wake");
     // Automation commands run as SOURCE_INTERNAL and skip the activity
@@ -2637,13 +2641,13 @@ static void powerDisplayTick() {
     systemEventPost(SYSEVT_POWER_SAVE_EXIT);
     return;
   }
-  if (fresh || disabled) return;
+  if (!requested && (fresh || disabled)) return;
 
   // Defer the countdown while genuinely busy with local capture (camera/mic).
-  if (powerSaveInhibited()) { lastBusyMs = now; return; }
+  if (powerSaveInhibited() || (requested && powerWorkloadBoost())) { lastBusyMs = now; return; }
 
   const uint32_t timeoutMs = gSettings.powerSaveTimeoutMinutes * 60000UL;
-  if ((uint32_t)(now - local) < timeoutMs || (uint32_t)(now - lastBusyMs) < timeoutMs) return;
+  if (!requested && ((uint32_t)(now - local) < timeoutMs || (uint32_t)(now - lastBusyMs) < timeoutMs)) return;
 
   // Idle long enough — blank the panel, respecting the anti-flap cooldown it
   // shares with lightsleep/deepsleep. The clock is left to powerPolicyTick,
@@ -2654,11 +2658,14 @@ static void powerDisplayTick() {
   oledPrepareForSleep();   // DISPLAYOFF (+ LDO2 cut on FeatherS3); board-aware
   gOledRunning = false;    // updateOLEDDisplay() now early-returns → refresh stops
   asleep = true;
+  manualSleep = requested;
+  if (requested) powerSetManualIdle(true);
   powerSetLocalDisplayAwake(false);
   batteryLogEvent("powersave:enter");
   {
     char det[20];
-    snprintf(det, sizeof(det), "idle %dmin", (int)gSettings.powerSaveTimeoutMinutes);
+    if (requested) snprintf(det, sizeof(det), "manual idle");
+    else snprintf(det, sizeof(det), "idle %dmin", (int)gSettings.powerSaveTimeoutMinutes);
     systemEventPost(SYSEVT_POWER_SAVE_ENTER, det);
   }
 }

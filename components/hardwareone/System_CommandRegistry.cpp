@@ -48,6 +48,10 @@ extern const CommandEntry sdCommands[];
 extern const size_t sdCommandsCount;
 extern const CommandEntry oledCommands[];
 extern const size_t oledCommandsCount;
+#if ENABLE_SPEAKER
+extern const CommandEntry speakerCommands[];
+extern const size_t speakerCommandsCount;
+#endif
 extern const CommandEntry neopixelCommands[];
 extern const size_t neopixelCommandsCount;
 extern const CommandEntry ledCommands[];
@@ -315,6 +319,9 @@ static constexpr CommandModule gCommandModules[] = {
     "oledthermalcolormode, and oledenabled tune appearance and timing. Whether a user "
     "must log in at the display before interacting with it is set with "
     "displayrequireauth <0|1> (super admin, Settings module).", oledCommands,        &oledCommandsCount, 0, nullptr },
+#if ENABLE_SPEAKER
+  { "speaker", "Onboard ES8311 speaker", "speakertone plays a short test tone; frequency, duration and volume are optional.", speakerCommands, &speakerCommandsCount, 0, nullptr },
+#endif
 #if ENABLE_NEOPIXEL
   { "neopixel",   "RGB LED strip and effects", "Controls the addressable RGB status LED (WS2812/NeoPixel). ledcolor <name> lights "
     "it a solid color from a fixed palette (red, green, blue, yellow, magenta, cyan, "
@@ -770,7 +777,7 @@ static constexpr CommandModule gCommandModules[] = {
     "commands and on-device voice do. Nothing switches the mode on battery "
     "level in this firmware: power auto and power threshold report that automatic "
     "mode is not available. Two related idle "
-    "controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; "
+    "controls are separate commands: powersleep enters display idle immediately without changing the timeout; powersave <0..1440> sets an idle timeout (minutes; "
     "0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) "
     "while the radio stays up so the device remains reachable, and powercooldown "
     "<0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid "

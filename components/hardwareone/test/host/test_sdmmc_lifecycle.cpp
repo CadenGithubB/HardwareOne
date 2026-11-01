@@ -2,10 +2,20 @@
 // c++ -std=c++17 -Isdmmc_stubs test_sdmmc_lifecycle.cpp -o /tmp/sdmmc-test
 #define SYSTEM_BUILDCONFIG_H
 #define CONFIG_IDF_TARGET_ESP32P4 1
+#ifdef TEST_WAVESHARE
+#define HW_BOARD_WAVESHARE_P4_TOUCH 1
+#define HW_BOARD_P4X_EYE 0
+#else
 #define HW_BOARD_P4X_EYE 1
+#define HW_BOARD_WAVESHARE_P4_TOUCH 0
+#endif
 #define ENABLE_SDMMC_CARD 1
 #define ENABLE_SD_CARD 1
+#ifdef TEST_WAVESHARE
+#include "../../System_Board_WaveshareP4.h"
+#else
 #include "../../System_Board_P4X_EYE.h"
+#endif
 #include "../../HAL_SDCard.cpp"
 #include <cassert>
 #include <vector>
@@ -32,7 +42,10 @@ esp_err_t gpio_set_level(gpio_num_t pin, int level) {
   return ESP_OK;
 }
 esp_err_t gpio_config(const gpio_config_t*) { return ESP_OK; }
-int gpio_get_level(gpio_num_t pin) { assert(pin == 45); return inserted ? 0 : 1; }
+int gpio_get_level(gpio_num_t pin) {
+  assert(SD_MMC_DETECT_PIN >= 0 && pin == SD_MMC_DETECT_PIN);
+  return inserted ? 0 : 1;
+}
 esp_err_t sd_pwr_ctrl_new_on_chip_ldo(const sd_pwr_ctrl_ldo_config_t* c, sd_pwr_ctrl_handle_t* out) {
   assert(c->ldo_chan_id == 4);
   if (ldoResult != ESP_OK) return ldoResult;
@@ -61,7 +74,7 @@ esp_err_t esp_vfs_fat_sdmmc_mount(const char* path, const sdmmc_host_t* h,
   assert(h->deinit_p == sdmmc_host_deinit_slot && h->pwr_ctrl_handle == &card);
   assert(s->width == 4 && s->clk == 43 && s->cmd == 44);
   assert(s->d0 == 39 && s->d1 == 40 && s->d2 == 41 && s->d3 == 42);
-  assert(s->cd == 45 && s->d4 == -1 && s->d5 == -1 && s->d6 == -1 && s->d7 == -1);
+  assert(s->cd == SD_MMC_DETECT_PIN && s->d4 == -1 && s->d5 == -1 && s->d6 == -1 && s->d7 == -1);
   capturedHost = *h;
   capturedFormat = c->format_if_mount_failed;
   if (mountResult == ESP_OK) *out = &card;
@@ -103,7 +116,17 @@ esp_err_t esp_vfs_fat_info(const char* path, uint64_t* total, uint64_t* free) {
 int main() {
   // Empty slot is optional: no FAT/host mount, no retained LDO or card power.
   inserted = false;
+#if SD_MMC_DETECT_PIN >= 0
   assert(!gSdMmcCard.begin() && mounts == 0 && ldoCount == 0 && powerLevel == 1);
+#else
+  // Without a switch we must try the bus; a failed probe releases slot/power.
+  assert(!gSdMmcCard.cardPresent());
+  mountResult = ESP_FAIL;
+  assert(!gSdMmcCard.begin() && mounts == 1 && ldoCount == 0 && powerLevel == 1);
+  assert(!capturedFormat && formats == 0 && !gSdMmcCard.cardPresent());
+  mountResult = ESP_OK;
+  mounts = 0;
+#endif
   inserted = true;
   ldoResult = ESP_FAIL;
   assert(!gSdMmcCard.begin() && mounts == 0 && ldoCount == 0 && powerLevel == 1);
@@ -124,9 +147,15 @@ int main() {
 
   // An observed removal stays unavailable after reinsertion until remount.
   inserted = false;
+#if SD_MMC_DETECT_PIN >= 0
   assert(!gSdMmcCard.available());
   inserted = true;
   assert(!gSdMmcCard.available());
+#else
+  // No GPIO can signal removal: retain mount state until explicit unmount.
+  assert(gSdMmcCard.available());
+  inserted = true;
+#endif
   calls.clear();
   assert(gSdMmcCard.end());
   assert((calls == std::vector<std::string>{"unmount", "release-slot", "power-off", "release-ldo"}));

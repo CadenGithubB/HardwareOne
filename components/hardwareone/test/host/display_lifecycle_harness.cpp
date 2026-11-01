@@ -241,15 +241,22 @@ int main(int argc, char** argv) {
   assert(argc == 3);
   exerciseSsd1306(static_cast<uint8_t>(std::atoi(argv[1])),
                  static_cast<uint8_t>(std::strtol(argv[2], nullptr, 16)));
-#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE || DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
   (void)argc;
   (void)argv;
   platform.beginResults = {false, true};
   assert(!displayInit() && !displayIsReady());
+  assert(!displayPaintSurface(nullptr));
   auto* retained = gDisplay;
   assert(retained);
   auto* canvas = retained->getBuffer();
   assert(displayInit() && displayIsReady() && gDisplay == retained);
+#if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+  assert(displayPaintSurface(+[](Adafruit_GFX&) {}));
+#else
+  assert(!displayPaintSurface(+[](Adafruit_GFX&) {}));
+#endif
+
   displaySetBrightness(60);
   displayDim(true);
   assert(displaySetPower(false));
@@ -270,6 +277,7 @@ int main(int argc, char** argv) {
   (void)argv;
   assert(!DISPLAY_ENABLED);
   assert(!displayInit() && !displayIsReady());
+  assert(!displayPaintSurface(nullptr));
   assert(!displaySetPower(true) && !displayResumeFromSleep());
   displayStop();
   displayPrepareForSleep();

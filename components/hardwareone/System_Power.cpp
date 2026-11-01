@@ -6,8 +6,10 @@
  */
 
 #include <Arduino.h>
+#include <atomic>
 #include <ArduinoJson.h>
 #include "System_Power.h"
+#include "HAL_Display.h"
 #include "System_BuildConfig.h"
 #include "System_Settings.h"
 #include "System_Debug.h"
@@ -39,6 +41,10 @@ bool powerSetCpuFrequencyMhz(uint32_t mhz, bool* outClockChanged) {
     return false;
   }
 
+  if (displayRequiresFullSpeed() && mhz < POWER_CPU_PERFORMANCE_MHZ) {
+    xSemaphoreGive(sCpuFrequencyMutex);
+    return false;
+  }
   bool applied = true;
   if (getCpuFrequencyMhz() != mhz) {
 #if ENABLE_I2C_SYSTEM
@@ -184,7 +190,8 @@ bool applyPowerMode(uint8_t mode, bool setDisplayBrightness) {
   const PowerModeConfig& config = gPowerModes[mode];
   // UltraSaver's lower XTAL clock is reserved for the drain-guarded idle path.
   // Active mode changes always use the target's interactive PLL frequencies.
-  const uint32_t targetFreq = getPowerModeActiveCpuFreq(mode);
+  const uint32_t targetFreq = displayRequiresFullSpeed() ? POWER_CPU_PERFORMANCE_MHZ
+                                                        : getPowerModeActiveCpuFreq(mode);
   DEBUG_SYSTEMF("[POWER] Config: name=%s nominal=%lu active=%lu displayBright=%d",
                 config.name, (unsigned long)config.cpuFreqMhz,
                 (unsigned long)targetFreq, config.displayBrightnessPercent);
@@ -482,9 +489,24 @@ void powerSleepTransitionMark() {
 // input poll, the command executor, ...). A 32-bit aligned read/write is
 // atomic on the ESP32, so no lock is needed for cross-task use. The local
 // stamp is a subset of the general one: someone at the device.
+static std::atomic<bool> sDisplayIdleRequest{false};
+static std::atomic<bool> sManualIdle{false};
+bool powerRequestDisplayIdle() {
+#if ENABLE_OLED_DISPLAY
+  if (!powerLocalDisplayAwake() || powerWorkloadBoost() ||
+      !powerSleepTransitionAllowed(nullptr) || otaSafetyIsPendingVerification()) return false;
+  sDisplayIdleRequest.store(true);
+  return true;
+#else
+  return false;
+#endif
+}
+bool powerTakeDisplayIdleRequest() { return sDisplayIdleRequest.exchange(false); }
+void powerSetManualIdle(bool idle) { sManualIdle.store(idle); }
 static volatile unsigned long sPowerSaveLastActivityMs = 0;
 static volatile unsigned long sPowerSaveLastLocalActivityMs = 0;
 void powerSaveNoteActivity(bool local) {
+  sManualIdle.store(false);
   const unsigned long now = millis();
   sPowerSaveLastActivityMs = now;
   if (local) sPowerSaveLastLocalActivityMs = now;
@@ -535,6 +557,7 @@ static PowerDecision powerDecide() {
   const uint8_t mode = gSettings.powerMode;
   if (mode == POWER_MODE_LOCKED) return {POWER_CPU_PERFORMANCE_MHZ, "locked", true};
   if (const char* boost = powerWorkloadBoost()) return {POWER_CPU_PERFORMANCE_MHZ, boost, true};
+  if (displayRequiresFullSpeed()) return {POWER_CPU_PERFORMANCE_MHZ, "display", true};
 
   // In use: any real interaction within the idle timeout, the timeout
   // disabled, or the local panel still lit (its blanking can lag the countdown
@@ -543,7 +566,8 @@ static PowerDecision powerDecide() {
   // millis() wrap (and the host tests see the target's arithmetic).
   const uint32_t timeoutMs = gSettings.powerSaveTimeoutMinutes * 60000UL;
   const uint32_t sinceActivityMs = (uint32_t)(millis() - powerSaveLastActivityMs());
-  const bool inUse = timeoutMs == 0 || sLocalDisplayAwake || sinceActivityMs < timeoutMs;
+  const bool inUse = sLocalDisplayAwake ||
+      (!sManualIdle.load() && (timeoutMs == 0 || sinceActivityMs < timeoutMs));
   if (inUse) return {getPowerModeActiveCpuFreq(mode), "active", false};
 
   uint32_t idleMhz = getPowerModeIdleCpuFreq(mode);
@@ -688,9 +712,19 @@ static const char* cmd_powersave(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// Immediate normal display-idle path, not MCU light/deep sleep.
+static const char* cmd_powersleep(const String& argsInput) {
+  String arg = argsInput; arg.trim();
+  if (arg.length()) return "Error: Usage: powersleep";
+  if (!powerRequestDisplayIdle())
+    return "Error: idle unavailable (display absent/asleep, busy, cooldown or OTA probation)";
+  return "Display idle requested; touch or local input wakes it. Timeout unchanged.";
+}
+
 // Command table
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry powerCommands[] = {
+  {"powersleep", "Enter display idle now; local input wakes it", true, cmd_powersleep, "Usage: powersleep"},
   {"power",         "Power management [mode]", true, cmd_power,         "Usage:\n  power - show current power status\n  power json - status as one JSON blob (same schema as /api/power/status)\n  power mode <perf|balanced|adaptive|ultra|locked|0-4>"},
   {"powercooldown", "Sleep transition cooldown (ms; 0 disables)", true, cmd_powercooldown, "Usage: powercooldown <0..60000>"},
   {"powersave",     "Idle power-save: OLED off + optional downclock (0 disables)", true, cmd_powersave, "Usage: powersave <0..1440>"}

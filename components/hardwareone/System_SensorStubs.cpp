@@ -61,7 +61,7 @@ void imuUpdateActions() {
 // Gamepad stub variables. Only the symbols NOT supplied by the ANO encoder
 // or GPIO driver get stubbed here. HAL_Input owns the reading cache; the
 // selected driver owns gInputRunning/gInputConnected.
-#if !ENABLE_ANO_ENCODER && !ENABLE_GPIO_ENCODER
+#if !ENABLE_ANO_ENCODER && !ENABLE_GPIO_ENCODER && !ENABLE_GT911_TOUCH
 bool gInputRunning = false;
 bool gInputConnected = false;
 #endif
