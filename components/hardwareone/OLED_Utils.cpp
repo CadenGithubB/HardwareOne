@@ -4086,13 +4086,13 @@ void updateOLEDDisplay() {
     if (now - animationLastUpdate >= animInterval) {
       animationLastUpdate = now;
       if (currentOLEDMode == OLED_ANIMATION) animationFrame++;
-    } else if (!modeChanged) {
+    } else if (!modeChanged && !(ENABLE_GT911_TOUCH && inputProcessed)) {
       return;
     }
   } else {
     // Timer-based throttle: check at most every updateInterval ms
     unsigned long updateInterval = (gSettings.oledUpdateInterval > 0) ? (unsigned long)gSettings.oledUpdateInterval : 125;
-    if (now - oledLastUpdate < updateInterval) {
+    if (now - oledLastUpdate < updateInterval && !(ENABLE_GT911_TOUCH && inputProcessed)) {
       return;  // Not time to check yet
     }
     
@@ -6472,7 +6472,8 @@ bool processOLEDInput() {
   
   // Debounce navigation - don't update lastButtonState here or edge detection breaks!
   // Skip debounce when keyboard is active: keyboard has its own timing (pattern mode needs continuous polling)
-  if (now - lastGamepadNavTime < GAMEPAD_NAV_DEBOUNCE) {
+  // GT911 already reports contact edges; mechanical-button debounce only adds lag.
+  if (!ENABLE_GT911_TOUCH && now - lastGamepadNavTime < GAMEPAD_NAV_DEBOUNCE) {
     if (!oledKeyboardIsActive()) return false;
   }
   

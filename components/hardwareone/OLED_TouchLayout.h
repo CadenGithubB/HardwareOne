@@ -22,14 +22,36 @@ inline TouchAction touchHitTest(int x, int y) {
     if (x >= c.x && x < c.x+c.w && y >= c.y && y < c.y+c.h) return c.action;
   return TouchAction::None;
 }
+inline bool touchActionIsDirection(TouchAction action) {
+  return action == TouchAction::Up || action == TouchAction::Down ||
+         action == TouchAction::Left || action == TouchAction::Right;
+}
+inline bool touchWithinControl(TouchAction action, int x, int y) {
+  // Small finger motion at a border should not discard an otherwise valid tap.
+  // Capture starts inside the drawn button; adjacent controls remain separate.
+  constexpr int slop = 8;
+  for (const auto& c : touchControls)
+    if (c.action == action)
+      return x >= c.x-slop && x < c.x+c.w+slop &&
+             y >= c.y-slop && y < c.y+c.h+slop;
+  return false;
+}
 class TouchTap {
  public:
   void reset() { armed_ = TouchAction::None; }
   TouchAction accept(const TouchEvent& e) {
-    const auto hit = touchHitTest(e.x, e.y);
-    if (e.phase == TouchPhase::Down) { armed_ = hit; id_ = e.id; }
-    else if (e.phase == TouchPhase::Cancel || e.id != id_ || hit != armed_) reset();
-    else if (e.phase == TouchPhase::Up) { const auto action = armed_; reset(); return action; }
+    if (e.phase == TouchPhase::Down) {
+      armed_ = touchHitTest(e.x, e.y); id_ = e.id;
+      // Directions are reversible navigation. Emit one step immediately,
+      // without a second step on release or movement into another button.
+      if (touchActionIsDirection(armed_)) {
+        const auto action = armed_; reset(); return action;
+      }
+    } else if (e.phase == TouchPhase::Cancel || e.id != id_ ||
+               !touchWithinControl(armed_, e.x, e.y)) reset();
+    else if (e.phase == TouchPhase::Up) {
+      const auto action = armed_; reset(); return action;
+    }
     return TouchAction::None;
   }
  private:

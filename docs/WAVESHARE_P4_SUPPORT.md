@@ -145,15 +145,17 @@ touch does not toggle the display reset or change its backlight policy.
 `HAL_Input` owns a distinct touch snapshot and bounded Down/Move/Up/Cancel
 queue. Only UI dispatch consumes events; `touchread` is a non-consuming status
 command. Short taps survive between UI frames. Overflow, extra contacts,
-changed tracking IDs, I/O failure and polling interruptions cancel contact.
+changed tracking IDs, I/O failure and polling interruptions longer than 250 ms cancel contact.
 A held contact cannot become a new press after cancellation. No multi-touch
 or synthetic joystick/encoder motion is implemented.
 
-`OLED_Touch` maps completed taps to existing navigation and logical buttons.
+`OLED_Touch` maps directional contact-down events and completed action-button
+taps to existing navigation and logical buttons.
 The visible controls below the centered 640×320 UI canvas share their hit-test
 rectangles with rendering: directions, SELECT (A), BACK (B), X / OK, Y / DEL,
-MENU (Start), and FN (Select/function). Dragging outside a control cancels its
-tap. Existing screen handlers, keyboard and authenticated command execution
+MENU (Start), and FN (Select/function). Action buttons allow 8 pixels of edge
+movement; dragging farther outside cancels the tap. Directions emit one step
+on contact, with no duplicate on release. Existing screen handlers, keyboard and authenticated command execution
 remain the action owners. Touching a menu row directly is not implemented.
 
 The normal UI and setup wizard share this adapter; changing owner/page discards
@@ -200,3 +202,25 @@ inputs remain as described above.
 Vendor ES8311 source retains its Apache-2.0 copyright/SPDX notices and license
 in `components/hardwareone/speaker/`. The panel register table is attributed to
 the vendor Arduino display profile.
+
+## Touch responsiveness adjustment
+
+The user reported that the initial controls felt sluggish. Touch now bypasses
+mechanical gamepad debounce (100 ms) and redraws immediately when an input
+handler accepts an action, bypassing the ordinary display refresh timer for
+that frame. Other input backends retain their existing timing. Directional
+buttons act on contact; Select/Back/other action buttons retain release-to-act
+and drag-away cancellation. No hold-to-repeat is enabled.
+
+Polling stays at 20 ms / 400 kHz. Brief shared-bus pauses preserve contacts;
+I/O failure and pauses over 250 ms still cancel. The backlight duty cap and
+DSI timing are unchanged. Host checks cover immediate directions, no duplicate
+release actions, border tolerance, cancellation, extra fingers and UI ownership
+handoff. The 2,394,624-byte image (5,993,984 bytes of application headroom) was flashed
+with hash verification and rebooted with GT911 online. The three touch host
+tests and display lifecycle sanitizer variants passed. Perceived-responsiveness
+feedback is pending. The encoder baseline also built successfully
+(5,471,344 bytes). Its temporary build was removed after
+preserving configuration and hash evidence, recovering 1,079,861,248 allocated file
+bytes. The active Waveshare build remains for hardware work. Evidence uses the
+`work/waveshare-p4/touch-responsive-*` prefix.

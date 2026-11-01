@@ -45,6 +45,19 @@ int main() {
   // A changed tracking ID never completes another contact's gesture.
   q.sample(1,0,500,880,160); q.sample(1,1,500,880,161); q.sample(0,0,0,0,162);
   assert(drain(q,tap)==TouchAction::None);
+  // Direction feedback is immediate and emits no duplicate on release.
+  q.sample(1,0,300,880,170);
+  assert(drain(q,tap)==TouchAction::Up);
+  q.sample(1,0,301,881,171); q.sample(0,0,0,0,172);
+  assert(drain(q,tap)==TouchAction::None);
+  // Action buttons still wait for release and tolerate small edge motion.
+  q.sample(1,0,481,880,173); assert(drain(q,tap)==TouchAction::None);
+  q.sample(1,0,475,880,174); q.sample(0,0,0,0,175);
+  assert(drain(q,tap)==TouchAction::Select);
+  // Moving past the tolerance permanently cancels, even if it returns.
+  q.sample(1,0,481,880,176); q.sample(1,0,470,880,177);
+  q.sample(1,0,500,880,178); q.sample(0,0,0,0,179);
+  assert(drain(q,tap)==TouchAction::None);
   assert(touchHitTest(0,0)==TouchAction::None);
   assert(touchHitTest(680,880)==TouchAction::None);
   for(const auto& c:touchControls) assert(touchHitTest(c.x+c.w/2,c.y+c.h/2)==c.action);

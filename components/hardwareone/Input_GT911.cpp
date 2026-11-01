@@ -29,14 +29,13 @@ bool acknowledge() {
 }
 }
 void inputTask(void*) {
-  bool wasPaused = false;
   uint32_t lastPoll = millis();
   for (;;) {
     xSemaphoreTake(stateLock, portMAX_DELAY);
     const bool paused = pollPaused(WS_TOUCH_I2C_BUS);
-    if (gInputRunning && paused && !wasPaused) inputTouchCancel();
-    wasPaused = paused;
     if (gInputRunning && !paused) {
+      // Brief shared-bus pauses preserve taps; an interruption over 250 ms
+      // cancels before accepting more data from a potentially stale contact.
       if (millis() - lastPoll > 250) inputTouchCancel();
       uint8_t status = 0, point[8]{};
       bool entered = false;
