@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sensors page completions redraw through the lens applier, never inline.
 
-The cam_pwr post-hook (after every camera power operation, from any source)
+The cam_power post-hook (after every camera power operation, from any source)
 and the openmic/closemic completion on cmd_exec used to re-render the CAM/MIC
 detail on their own task after a level/page check, writing the Sensors level
 and hijack page around the render. A tap between that check and the render
@@ -10,7 +10,7 @@ while taps routed to the Sensors DETAIL rows (camera power toggle,
 cameraautostart). g2_sensors_redraw_harness.cpp compiles the whole production
 page (includes stripped; camera and microphone compiled in) beside a lens
 double with swap admission, a generation-checked Redraw queue and task-context
-tags, and runs that interleaving: no render on cam_pwr or cmd_exec, the
+tags, and runs that interleaving: no render on cam_power or cmd_exec, the
 navigated page keeps its routing, and an unchanged view is still refreshed.
 It also covers out-of-range list taps (no CAM-detail "recovery") and the live
 view's level committed only after the live page started.

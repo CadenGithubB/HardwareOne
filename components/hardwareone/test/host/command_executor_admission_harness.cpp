@@ -77,7 +77,7 @@ int main() {
   CHECK(gErrorLines == 0, "early boot logs no refusal");
 
   // The executor task itself.
-  world(true, true, &gExecTaskObject, "cmd_exec_task");
+  world(true, true, &gExecTaskObject, "cmd_exec");
   CHECK(executeCommandCallerAdmitted(), "cmd_exec is admitted");
   CHECK(run(secret, out, sizeof(out)), "cmd_exec reaches the handlers");
   CHECK(gErrorLines == 0, "cmd_exec logs no refusal");

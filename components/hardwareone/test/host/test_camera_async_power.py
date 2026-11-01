@@ -5,7 +5,7 @@
 UI adapters submit through the command executor, so the registry authorizes
 the change, the live-session fence applies and the [CMD] audit records it. A
 start honours the cameraEnabled master switch exactly as the synchronous
-`opencamera` does; both forms only report whether cam_pwr admitted the request
+`opencamera` does; both forms only report whether cam_power admitted the request
 and never wait for the camera. The production handlers are compiled unchanged
 against power-request doubles; the synchronous forms must behave as before.
 
@@ -55,7 +55,7 @@ static bool gCLIValidateOnly = false;
 #define RETURN_VALID_IF_VALIDATE_CSTR() do { if (gCLIValidateOnly) return "VALID"; } while (0)
 static struct { bool cameraEnabled = true; } gSettings;
 
-// cam_pwr admission doubles: what reached the owner's power requests.
+// cam_power admission doubles: what reached the owner's power requests.
 static bool queueAccepts = true, syncResult = true;
 static int startAsync = 0, stopAsync = 0, startSync = 0, stopSync = 0;
 static unsigned lastWaitMs = 0;
@@ -80,7 +80,7 @@ static bool startsWith(const char* text, const char* prefix) {
 static int requests() { return startAsync + stopAsync + startSync + stopSync; }
 
 int main() {
-  // Asynchronous start: admitted when cam_pwr takes it, never waited for.
+  // Asynchronous start: admitted when cam_power takes it, never waited for.
   reset();
   const char* reply = cmd_camerastart("async");
   CHECK(startAsync == 1 && requests() == 1);
@@ -93,7 +93,7 @@ int main() {
   gSettings.cameraEnabled = false;
   reply = cmd_camerastart("async");
   CHECK(requests() == 0 && startsWith(reply, "ERROR: Camera is disabled"));
-  // cam_pwr could not take it (worker or queue unavailable): an error reply.
+  // cam_power could not take it (worker or queue unavailable): an error reply.
   reset();
   queueAccepts = false;
   reply = cmd_camerastart("async");

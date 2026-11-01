@@ -356,7 +356,7 @@ static constexpr FeatureEntry featureRegistry[] = {
   // when Bluetooth is compiled out, so a `bluetooth` row reading compiled:true
   // says nothing about whether the ~60 g2* commands exist — this row is the
   // only way to tell. Unconditional for the same reason as every row here.
-  // Heap 8 KB: the persistent g2_ctrl_owner task (6 KB stack, G2_Glasses.cpp)
+  // Heap 8 KB: the persistent g2_owner task (6 KB stack, G2_Glasses.cpp)
   // plus its TCB and BLE-central client state. The 5 KB g2_ble_connect worker
   // is transient (it exits once the link is up) so it is not counted.
   { "g2", "G2 Glasses", FEATURE_CAT_DISPLAY, 8,

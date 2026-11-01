@@ -326,7 +326,7 @@ void hijackFsmInit() {
   // peak on the former 2560-byte allocation, leaving only 280 bytes (10.9%).
   // 4096 leaves 1816 bytes (44.3%) at that observed peak and costs 1536 bytes
   // of additional internal DRAM. Keep measuring on both ESP32-S3 and ESP32.
-  const BaseType_t ok = xTaskCreateLogged(fsmWorkerTask, "g2-fsm",
+  const BaseType_t ok = xTaskCreateLogged(fsmWorkerTask, "g2_fsm",
                                     /*stack bytes*/ 4096,
                                     nullptr, 5, &gFsmTaskHandle,
                                     "g2.fsm", APP_CORE);

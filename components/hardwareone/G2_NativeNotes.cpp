@@ -62,9 +62,11 @@ TaskHandle_t taskHandle() {portENTER_CRITICAL(&taskMux);const TaskHandle_t t=tas
 AuthContext auth() {AuthContext a{};a.transport=SOURCE_G2_GLASSES;a.user=s.context.user;return a;}
 bool checkStorage(bool force=false) {
   const uint32_t now=millis();
-  // A failed card write probe performs I/O. Do not repeat it on every 50ms
-  // speech pass; commands still check immediately before their operations.
-  if(!force && uint32_t(now-s.storageChecked)<1000)return true;
+  // A card write probe performs I/O. While a note is in progress it is
+  // refreshed every second; idle, every 10 s (a card swap is caught within
+  // that, and commands still check immediately before their operations).
+  const uint32_t gap=(s.token||s.draft.open) ? 1000 : 10000;
+  if(!force && uint32_t(now-s.storageChecked)<gap)return true;
   s.storageChecked=now;
   const bool onSD=VFS::isSDWritable();
   const uint32_t mount=VFS::sdMountGeneration();
@@ -315,7 +317,7 @@ void worker(void*) {
   for(;;) {
     if(leaveOnStop())vTaskDelete(nullptr);
     G2NoteContext current{};
-    if(!g2NativeNotesContext(&current)) {reset();vTaskDelay(pdMS_TO_TICKS(100));continue;}
+    if(!g2NativeNotesContext(&current)) {reset();vTaskDelay(pdMS_TO_TICKS(500));continue;}
     if(!same(current,s.context)) {
       reset();s.context=current;s.owner={SOURCE_G2_GLASSES,current.epoch};s.connected=true;s.sd=VFS::isSDWritable();
       s.touched=millis();
@@ -329,7 +331,12 @@ void worker(void*) {
     }
     if(overflow.exchange(false))fail("native request queue full");
     Request r;
-    if(xQueueReceive(requestQueue,&r,pdMS_TO_TICKS(50))==pdTRUE && same(r.context,s.context) &&
+    // 50 ms only while a note is live (speech chunks arrive at that pace);
+    // otherwise this worker sits on its queue. Release sends a wake request,
+    // so a long wait never delays a stop. Before this, the worker woke 20
+    // times a second for the whole time the glasses were signed in.
+    const TickType_t wait=pdMS_TO_TICKS((s.token||s.draft.open) ? 50 : 1000);
+    if(xQueueReceive(requestQueue,&r,wait)==pdTRUE && same(r.context,s.context) &&
        g2NativeNotesContextLive(s.context)) {
       s.connected=true;request(r.event);
     }

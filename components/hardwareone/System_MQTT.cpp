@@ -780,7 +780,7 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   }
 #endif
 
-  // Route command execution through cmd_exec_task instead of calling
+  // Route command execution through cmd_exec instead of calling
   // executeCommand() directly on the esp-mqtt event task. This serializes MQTT
   // commands with every other command source (no concurrent-handler races on
   // shared state / static response buffers) and runs them on cmd_exec's 8 KB

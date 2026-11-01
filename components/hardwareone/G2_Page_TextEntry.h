@@ -82,7 +82,7 @@ struct TextEntryConfig {
 
 // Exact identity of an abandoned entry session. Terminal/lifecycle reduction
 // tombstones routing synchronously, then carries this value through the
-// g2_tap_disp FIFO. Cleanup never invokes commit/cancel; after older tap jobs
+// g2_taps FIFO. Cleanup never invokes commit/cancel; after older tap jobs
 // complete it may invoke the cleanup-only onAbandon hook. A stale token is
 // always a no-op.
 struct G2TextEntryCleanupToken {
@@ -143,7 +143,7 @@ bool g2TextEntryRouteBegin(bool* currentOut, bool* localOwnedOut,
                            bool* secretOut);
 
 // Internal lifecycle hook consumed by G2_Glasses.cpp's tap dispatcher.
-// Must run on g2_tap_disp. It never invokes onCommit/onCancel; onAbandon, when
+// Must run on g2_taps. It never invokes onCommit/onCancel; onAbandon, when
 // configured, is limited by contract to clearing caller-owned staging.
 bool g2TextEntryCleanupAbandoned(const G2TextEntryCleanupToken& token);
 

@@ -642,7 +642,9 @@ static bool mkdir(const String& path) {
 }
 
 // Post the file_deleted event: basename as subject (matchable), full path as
-// detail. Replaces the old notifyFileDeleted wrapper (Phase-1 cutover).
+// detail. Posted by the guarded entry points for a caller that is not the
+// firmware itself: temp-file housekeeping (systemAuth, SOURCE_INTERNAL) is not
+// a delete anyone asked for and must not read like one.
 static void postFileDeleted(const char* path) {
   const char* name = path;
   const char* slash = path ? strrchr(path, '/') : nullptr;
@@ -658,17 +660,12 @@ static bool remove(const String& path) {
   if (getStorageType(p) == SDCARD) {
     if (!isSDAvailable()) return false;
     if (p == "/sd") return false;
-    bool ok = SD.remove(p.c_str() + 3);
-    if (ok) postFileDeleted(p.c_str());
-    return ok;
+    return SD.remove(p.c_str() + 3);
   }
 
   if (!filesystemReady) return false;
   bool ok = LittleFS.remove(p);
-  if (ok) {
-    postFileDeleted(p.c_str());
-    invalidateLittleFsFreeCache();  // free space just grew; don't trust the stale reading
-  }
+  if (ok) invalidateLittleFsFreeCache();  // free space just grew; don't trust the stale reading
   return ok;
 }
 
@@ -705,15 +702,11 @@ static bool rmdir(const String& path) {
   if (getStorageType(p) == SDCARD) {
     if (!isSDAvailable()) return false;
     if (p == "/sd") return false;
-    bool ok = SD.rmdir(p.c_str() + 3);
-    if (ok) postFileDeleted(p.c_str());
-    return ok;
+    return SD.rmdir(p.c_str() + 3);
   }
 
   if (!filesystemReady) return false;
-  bool ok = LittleFS.rmdir(p);
-  if (ok) postFileDeleted(p.c_str());
-  return ok;
+  return LittleFS.rmdir(p);
 }
 
 struct FreshCapacitySample {
@@ -1196,7 +1189,9 @@ bool removeGuarded(const String& path, const AuthContext& ctx) {
     logFsAccessDeny(norm, ctx, PERM_DELETE, "delete");
     return false;
   }
-  return remove(norm);
+  const bool ok = remove(norm);
+  if (ok && ctx.transport != SOURCE_INTERNAL) postFileDeleted(norm.c_str());
+  return ok;
 }
 
 bool renameGuarded(const String& pathFrom, const String& pathTo, const AuthContext& ctx) {
@@ -1407,7 +1402,9 @@ bool rmdirGuarded(const String& path, const AuthContext& ctx) {
     logFsAccessDeny(norm, ctx, PERM_DELETE, "rmdir");
     return false;
   }
-  return rmdir(norm);
+  const bool ok = rmdir(norm);
+  if (ok && ctx.transport != SOURCE_INTERNAL) postFileDeleted(norm.c_str());
+  return ok;
 }
 
 // ============================================================================

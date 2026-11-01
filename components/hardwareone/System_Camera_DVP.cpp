@@ -579,11 +579,11 @@ static bool cameraPwrEnsureStartedLocked() {
     }
     return false;
   }
-  taskStackRecord("cam_pwr", kStack);
+  taskStackRecord("cam_power", kStack);
   const BaseType_t ok =
       // Keep camera SCCB initialization off the radio-heavy core. The backend
       // owns its camera bus; no application Wire scan runs here.
-      xTaskCreatePinnedToCore(cameraPwrWorker, "cam_pwr", kStack, sCamPwrQueue,
+      xTaskCreatePinnedToCore(cameraPwrWorker, "cam_power", kStack, sCamPwrQueue,
                   tskIDLE_PRIORITY + 2, &sCamPwrTask, I2C_SENSOR_CORE);
   if (ok != pdPASS) {
     ERROR_CAMERAF("[CAM_PWR] worker task create failed — need ~%u B internal stack "
@@ -625,7 +625,7 @@ static bool cameraPwrSend(CameraPwrMsg& m, TickType_t queueTicks,
 
   // Desired power is authoritative and published at admission, before any
   // allocation or queue operation can fail. In particular, a STOP that cannot
-  // recreate cam_pwr still fences captureFrame's inline recovery from re-init.
+  // recreate cam_power still fences captureFrame's inline recovery from re-init.
   // Plain initCamera()/stopCamera() and recovery do not mutate this latch.
   sCameraDesiredOn = m.cmd != CAM_PWR_CMD_STOP;
 
@@ -778,8 +778,8 @@ static const char* const kCameraDisabledError =
 // submitter's identity, so the registry authorizes it, the live-session fence
 // applies and the [CMD] audit records it. A start honours the cameraEnabled
 // master switch exactly as the synchronous start does. The reply says only
-// whether cam_pwr admitted the request; the power change and the post-hook
-// then run on cam_pwr, and nothing here waits for the camera.
+// whether cam_power admitted the request; the power change and the post-hook
+// then run on cam_power, and nothing here waits for the camera.
 static bool cameraAsyncForm(const String& argsInput) {
   String form = argsInput;
   form.trim();

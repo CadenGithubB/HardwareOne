@@ -215,7 +215,7 @@ struct TopoStreamsGuard {
 // The session layer was historically lock-free because espnow_task was the
 // ONLY task that sent on a session. That invariant broke when bonded sensor
 // streaming began calling the encrypted-send path from SENSOR_BCAST_TASK
-// (core 1) at 10 Hz while espnow_task (core 0) and cmd_exec_task also send
+// (core 1) at 10 Hz while espnow_task (core 0) and cmd_exec also send
 // heartbeats/ACKs/bond-sync on the same session. Two cores racing
 // `++s->txSeqNext` produce duplicate frameSeq → nonce reuse (a crypto break,
 // and the receiver replay-rejects the dup). This mutex makes the bump+seal

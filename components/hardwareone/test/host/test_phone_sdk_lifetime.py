@@ -24,13 +24,13 @@ struct BLEClientRegistryGuard{~BLEClientRegistryGuard(){}};
 struct BLEDevice {inline static uint16_t m_appId=0;inline static std::map<uint16_t,int> m_connectedClientsMap;static bool allocateAppId(uint16_t&);static void releaseAppId(uint16_t);};
 // ALLOCATOR
 constexpr int ESP_GATTC_DISCONNECT_EVT=1,ESP_GATT_IF_NONE=255,ESP_BD_ADDR_LEN=6;
-struct Event{struct {uint16_t conn_id;uint8_t remote_bda[6];}disconnect;};
+struct Event{struct {uint16_t conn_id;uint8_t remote_bda[6];uint16_t reason;}disconnect;};
 struct BLESecurity{inline static int resets=0;static void resetSecurity(){++resets;}};
 struct Semaphore{int gives=0;void give(int=0){++gives;}};
 struct Client {
   struct Address{uint8_t bytes[6]={1,2,3,4,5,6};uint8_t* getNative(){return bytes;}} m_peerAddress;
   struct Callback{int calls=0;void onDisconnect(Client*){++calls;}} callback,*m_pClientCallbacks=&callback;
-  bool m_isConnected=true;int m_conn_id=7,m_mtu=247,unregisters=0,fanout=0;
+  bool m_isConnected=true;int m_conn_id=7,m_mtu=247,unregisters=0,fanout=0;volatile uint16_t m_lastDisconnectReason=0;
   Semaphore m_semaphoreOpenEvt,m_semaphoreRssiCmplEvt,m_semaphoreSearchCmplEvt;
   int getConnId(){return m_conn_id;}void requestGattcUnregister(){++unregisters;}
   void dispatch(Event* evtParam){switch(ESP_GATTC_DISCONNECT_EVT){
@@ -51,8 +51,9 @@ int main(){
     if(foreign==0)e.disconnect.conn_id=8;else e.disconnect.remote_bda[5]^=1;
     c.dispatch(&e);assert(c.m_isConnected&&c.m_mtu==247&&!c.unregisters&&!c.fanout&&!c.callback.calls&&!c.m_semaphoreOpenEvt.gives&&!BLESecurity::resets);
   }
-  Client c;Event e{};e.disconnect.conn_id=7;memcpy(e.disconnect.remote_bda,c.m_peerAddress.bytes,6);c.dispatch(&e);
+  Client c;Event e{};e.disconnect.conn_id=7;e.disconnect.reason=0x13;memcpy(e.disconnect.remote_bda,c.m_peerAddress.bytes,6);c.dispatch(&e);
   assert(!c.m_isConnected&&c.m_conn_id==ESP_GATT_IF_NONE&&c.m_mtu==23&&c.unregisters==1&&c.fanout==1&&c.callback.calls==1&&BLESecurity::resets==1);
+  assert(c.m_lastDisconnectReason==0x13);
   puts("Phone SDK lifetime: 100000 registrations across wrap, the 64-slot reservation table and its exhaustion, retained client IDs, foreign/own DISCONNECT passed");
 }
 '''.replace('// ALLOCATOR',functions).replace('// DISCONNECT',case)

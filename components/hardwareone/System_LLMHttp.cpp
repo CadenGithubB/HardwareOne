@@ -1,4 +1,7 @@
 #include "System_LLMHttp.h"
+#ifdef ESP_PLATFORM
+#include "System_Events.h"  // systemEventPost: typed system-event ring (host builds have no ring)
+#endif
 #if ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_HTTP
 
 #include "System_LLMHttpCore.h"
@@ -156,7 +159,16 @@ void publish(const Run& run, const char* text, size_t size, const char* error, b
     memcpy(sResult, text, size + 1); sResultLen = size;
     if (error) strlcpy(sError, error, sizeof(sError));
   }
-  if (terminal) sDone = true;
+  if (terminal) {
+    sDone = true;
+#ifdef ESP_PLATFORM
+    if (!sCancel.load(std::memory_order_acquire)) {
+      char det[24];
+      snprintf(det, sizeof(det), "%u chars", (unsigned)sResultLen);
+      systemEventPost(SYSEVT_LLM_GEN_DONE, error ? "error" : "eos", det);
+    }
+#endif
+  }
 }
 
 void appendTerminalLocked(const char* message) {

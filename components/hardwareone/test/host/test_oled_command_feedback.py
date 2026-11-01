@@ -90,7 +90,7 @@ def static_checks(read) -> list[str]:
         failures.append("Quick Settings drops the reply of: " + ", ".join(calls))
     waits = re.findall(r"\boledRunCommand\(([^;]*)\)", strip_comments(quick))
     if waits:
-        failures.append("Quick Settings waits on cmd_exec_task in the frame loop for: " +
+        failures.append("Quick Settings waits on cmd_exec in the frame loop for: " +
                         ", ".join(" ".join(w.split()) for w in waits))
     utils = read("OLED_Utils.cpp")
     if ASYNC[1] in utils and "oledDeliverCommandReply();" not in strip_comments(

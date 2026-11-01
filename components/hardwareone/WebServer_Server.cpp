@@ -127,7 +127,7 @@ bool gServerIsHttps = false;
 // --- Deadlock-safe teardown (contract documented in WebServer_Handle.h) ------
 //
 // httpd_stop() waits for the httpd task to exit, but the httpd task only
-// notices the shutdown between requests. Commands run on cmd_exec_task, and a
+// notices the shutdown between requests. Commands run on cmd_exec, and a
 // web handler mid-request is blocked in submitAndExecuteSync waiting on that
 // same task — so an inline httpd_stop from a command deadlocks both until
 // submitAndExecuteSync's 60 s timeout fires, freezing every command source.
@@ -153,7 +153,7 @@ bool httpServerStopSafe() {
 
   const int webWaiters = gWebCmdWaiters.load(std::memory_order_acquire);
   if (webWaiters > 0) {
-    // A web handler is blocked on cmd_exec_task right now. Stopping here would
+    // A web handler is blocked on cmd_exec right now. Stopping here would
     // wait on the task that is waiting on us. Hand it to the main loop.
     sHttpStopPending = true;
     DEBUG_CMD_FLOWF("[http] stop deferred — %d web waiter(s) in flight", webWaiters);
@@ -5181,7 +5181,7 @@ static bool settingsSaveOutputConfirmed(const String& output) {
 
 // A local settings batch must be finalized even if the cookie generation is
 // revoked, one command stops the server, or the handler returns early. Submit
-// that finalizer through cmd_exec_task: submitAndExecuteSync may time out while
+// that finalizer through cmd_exec: submitAndExecuteSync may time out while
 // its command remains queued/running, and only the shared FIFO can guarantee
 // cleanup runs after every command already published by this request.
 class SettingsBatchRequestCleanup {

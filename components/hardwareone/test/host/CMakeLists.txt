@@ -716,7 +716,7 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_g2_network_async_redraw.py
           ${G2_NETWORK_ASYNC_REDRAW_TEST_ARGS})
 
-# Sensors completions (cam_pwr post-hook, openmic/closemic on cmd_exec) queue a
+# Sensors completions (cam_power post-hook, openmic/closemic on cmd_exec) queue a
 # generation-checked Redraw instead of rendering on their own task (README
 # "G2 Sensors completion redraws").
 set(G2_SENSORS_REDRAW_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
@@ -1412,7 +1412,7 @@ add_test(
   NAME g2_hold_decode
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_g2_hold_decode.py)
-# The production G2 hold section (pairing, gates, g2_tap_disp routing, page
+# The production G2 hold section (pairing, gates, g2_taps routing, page
 # side table, events, aborts, sim) and the SysEvent exit tail of
 # handleDevEvent run against fakes. Same xcrun shim note.
 add_test(
@@ -1862,7 +1862,7 @@ add_test(
 # initialized-or-closing with a compiled-out stub, and the five System_WiFi radio
 # decisions ask it instead of isEspNowInitialized().
 # Camera asynchronous power (README "Camera asynchronous power"): `opencamera async` /
-# `closecamera async` are gated on cameraEnabled and admitted by cam_pwr; the G2
+# `closecamera async` are gated on cameraEnabled and admitted by cam_power; the G2
 # Sensors page requests no camera power itself.
 # The Wi-Fi radio-state read makes no driver call (an RPC on the P4) while the
 # radio is stopped, and per-frame screens read it at most once a second.

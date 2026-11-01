@@ -1,7 +1,7 @@
 // test_g2_sensors_redraw.py compiles the complete production Sensors page
 // (G2_Page_Sensors.cpp, includes stripped; camera and microphone compiled in,
 // the other sensors off) beside these boundaries. Background completions
-// (the cam_pwr post-hook, the openmic/closemic completion on cmd_exec) must
+// (the cam_power post-hook, the openmic/closemic completion on cmd_exec) must
 // not render or write page state on their own task: the page queues a Redraw
 // for the lens applier, which drops it when the user navigated since. An
 // "interleave" runs a scripted user tap at the first page boundary the
@@ -175,7 +175,7 @@ bool cameraPowerRequestStartAsync() { ++camStarts; return true; }
 bool cameraPowerRequestStopAsync() { ++camStops; return true; }
 // The camera owner behind `opencamera async` / `closecamera async`
 // (System_Camera_DVP): refused while the camera is disabled (start only),
-// admitted when cam_pwr accepts. It runs when a case executes the submitted
+// admitted when cam_power accepts. It runs when a case executes the submitted
 // command on cmd_exec.
 static bool cameraEnabled = true, camPwrAccepts = true;
 static unsigned ownerStarts = 0, ownerStops = 0;
@@ -256,7 +256,7 @@ static void reset() {
 
 // cmd_exec runs the camera command the page submitted last: the registry
 // (authorized: the line reaches the owner), the owner's enable gate and
-// cam_pwr admission, then the page's completion with the owner's reply. A
+// cam_power admission, then the page's completion with the owner's reply. A
 // disabled camera answers "ERROR: ..." with ok=true, as the executor reports
 // a handler that ran.
 static bool runCameraCommand(bool authorized = true) {
@@ -296,7 +296,7 @@ static void openCamDetail() {
   CHECK(shows(1, "CAM: OFF") && shows(5, "Settings >"));
 }
 
-// The cam_pwr worker finishes a power operation and runs the post-hook.
+// The cam_power worker finishes a power operation and runs the post-hook.
 static void cameraPowerDone(bool running) {
   gCameraRunning = running;
   renders.clear();
@@ -310,7 +310,7 @@ static void cameraPowerDone(bool running) {
 }
 
 // --- Cases ------------------------------------------------------------------
-// CAM: OFF -> start queued; the user opens Camera Settings while cam_pwr runs.
+// CAM: OFF -> start queued; the user opens Camera Settings while cam_power runs.
 static void testHookVsCameraSettings() {
   reset();
   openCamDetail();
@@ -346,7 +346,7 @@ static void testHookAfterCameraSettingsShown() {
   CHECK(!staleHookReplacedCameraSettings);
 }
 
-// The user backs out to the Sensors list while cam_pwr runs.
+// The user backs out to the Sensors list while cam_power runs.
 static void testHookVsBackToList() {
   reset();
   openCamDetail();
@@ -533,7 +533,7 @@ static void testCameraRefusalPersistsNothing() {
     settle();
     CHECK(renders.size() == 1 && renders[0].ctx == Ctx::Applier && shows(1, "CAM: OFF"));
   }
-  // cam_pwr could not take the request: no preference saved either.
+  // cam_power could not take the request: no preference saved either.
   reset();
   camPwrAccepts = false;
   openCamDetail();

@@ -25,7 +25,7 @@ enum CommandOrigin {
   ORIGIN_SYSTEM,
   ORIGIN_BLUETOOTH,
   ORIGIN_G2_HIJACK,   // G2 glasses hijack UI — taps that mutate system state
-                      // are routed through cmd_exec_task via g2SubmitHijackCommand()
+                      // are routed through cmd_exec via g2SubmitHijackCommand()
                       // (see G2_HijackCmd.h). Distinguished from ORIGIN_BLUETOOTH
                       // because G2 hijack has no logged-in user and a different
                       // audit path (/g2/hijack/...) than the BLE CLI characteristic.
@@ -38,11 +38,11 @@ enum CommandOrigin {
                        // (transport SOURCE_LOCAL_DISPLAY). Split from ORIGIN_SYSTEM
                        // for the same audit-attribution reason.
   ORIGIN_MQTT,         // command received over MQTT (transport SOURCE_MQTT), run as the
-                       // authenticated MQTT user. Routed through cmd_exec_task via
+                       // authenticated MQTT user. Routed through cmd_exec via
                        // submitAndExecuteSync so it serializes with all other commands
                        // instead of racing them on the esp-mqtt event task.
   ORIGIN_VOICE,        // command issued by on-device voice recognition (SOURCE_VOICE),
-                       // armed-user identity. Also routed through cmd_exec_task.
+                       // armed-user identity. Also routed through cmd_exec.
   ORIGIN_UART          // command received on the UART host link (SOURCE_UART) —
                        // the board-to-board channel a Linux host (CM5 carrier)
                        // drives. Appended at the END of this enum deliberately:
@@ -121,7 +121,7 @@ struct CommandContext {
   // executeCommand to write COMMAND/OUTPUT lines to the autolog, attributed
   // to the named automation. Stamped at queue time in queueAutomationSubCommand
   // so there's no race between the scheduler advancing to the next automation
-  // and cmd_exec_task actually running the command.
+  // and cmd_exec actually running the command.
   char automationName[64] = {};
 };
 
@@ -148,12 +148,12 @@ struct ExecReq {
   void* asyncUserData;              // Passed to callback
 
   // Deferred-work mode — used by espnow_task to push heavy crypto onto
-  // cmd_exec_task's deeper stack. When deferredFn is set, commandExecTask
+  // cmd_exec's deeper stack. When deferredFn is set, commandExecTask
   // bypasses the CLI executeCommand() path entirely and just invokes
   // deferredFn(deferredArg). The deferred fn is responsible for freeing
   // its own arg. line/ctx/out/done/asyncCallback are all ignored.
   //
-  // Why this instead of a separate task: cmd_exec_task is single-threaded,
+  // Why this instead of a separate task: cmd_exec is single-threaded,
   // so the new HWM is max(existing CLI peak, deferred crypto peak) — and
   // crypto peak (~5 KB) is far below the existing CLI peak (~17 KB), so
   // total stack budget stays unchanged. Adds zero new task overhead.
@@ -162,7 +162,7 @@ struct ExecReq {
   void*      deferredArg;
 
   // Synchronous-request lifetime. Before queue publication, submitSync gives
-  // one reference to the caller and one to cmd_exec_task. Each side releases
+  // one reference to the caller and one to cmd_exec. Each side releases
   // exactly once; the last release deletes `done` and destroys/frees this
   // request. This keeps both objects alive across the timeout-vs-completion
   // boundary without a check-then-act ownership handoff.
@@ -195,7 +195,7 @@ struct CmdExecItem {
 };
 
 // Drop one synchronous-request owner. Safe from either the submitting task or
-// cmd_exec_task; the last owner performs all request/semaphore destruction.
+// cmd_exec; the last owner performs all request/semaphore destruction.
 void releaseSyncExecReqOwner(ExecReq* request);
 
 #endif // SYSTEM_COMMANDTYPES_H

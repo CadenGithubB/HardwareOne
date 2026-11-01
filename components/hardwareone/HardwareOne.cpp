@@ -676,7 +676,7 @@ static void commandExecTask(void* pv) {
     if (receiveResult == pdTRUE) {
       // Deferred-work fast path — used by espnow_task to run heavy crypto
       // (Ed25519 sign/verify in SESSION_OPEN/CONFIRM) and by the BLE
-      // secure-channel RX path on cmd_exec_task's deeper stack. Skip the entire
+      // secure-channel RX path on cmd_exec's deeper stack. Skip the entire
       // CLI execution pipeline: no auth context push, no capture buffer, no
       // output formatting. The deferred function owns its arg's lifetime.
       // Nothing to free here — the item travelled by value.
@@ -700,7 +700,7 @@ static void commandExecTask(void* pv) {
 
       // Set up output capture if requested (for HTTP responses that need
       // the actual broadcast output, not just the return code).
-      // Heap-allocate the capture buffer to avoid blowing cmd_exec_task stack.
+      // Heap-allocate the capture buffer to avoid blowing cmd_exec stack.
       // Per-task TLS now — broadcastOutput on other tasks won't see this
       // buffer and won't append into it.
       static constexpr size_t CAPTURE_BUF_SIZE = 4096;
@@ -902,7 +902,7 @@ void deliverCommandResult(const String& result, const CommandContext& ctx) {
     debugWaitOutputDrained(120);
 
     // Blob + trailing newline in ONE write() call == one locked CDC/UART
-    // transaction, atomic against debug_out's per-line printf: a debug line
+    // transaction, atomic against log_out's per-line printf: a debug line
     // can land before or after this write, never inside it. (Two separate
     // writes would let a line glue itself between the blob and its newline.)
     // USB-CDC short-writes when the host stops draining (100 ms window) —
@@ -1951,7 +1951,7 @@ void hardwareone_setup() {
     // generation, so BLE/serial command replies (e.g. the llmgenerate {session})
     // arrive seconds late and IDLE1 starves → task-WDT. Keeping command I/O on core 0
     // gives the BLE path the same isolation the web path already enjoys.
-    if (xTaskCreateLogged(commandExecTask, "cmd_exec_task", cmdExecStackWords, nullptr, TASK_PRIORITY_LOW, &gCmdExecTaskHandle, "cmd.exec", 0) != pdPASS) {
+    if (xTaskCreateLogged(commandExecTask, "cmd_exec", cmdExecStackWords, nullptr, TASK_PRIORITY_LOW, &gCmdExecTaskHandle, "cmd.exec", 0) != pdPASS) {
       ERROR_SYSTEMF("FATAL: Failed to create command exec task");
       while (1) delay(1000);
     }
@@ -2054,7 +2054,7 @@ void hardwareone_setup() {
     // Pin to Core 1 (I2C_SENSOR_CORE): this task runs the I2C device-init
     // transactions, so it carries the same starve-mid-transaction → bus-storm →
     // panic(4) hazard as the sensor pollers. Must not float onto Wi-Fi-saturated Core 0.
-    if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue_task", queueStackWords, nullptr, TASK_PRIORITY_LOW, &queueProcessorTask, "sensor.queue", I2C_SENSOR_CORE) != pdPASS) {
+    if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue", queueStackWords, nullptr, TASK_PRIORITY_LOW, &queueProcessorTask, "sensor.queue", I2C_SENSOR_CORE) != pdPASS) {
       ERROR_SYSTEMF("FATAL: Failed to create sensor queue processor task");
       while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -2677,6 +2677,7 @@ void hardwareone_loop() {
   // section[0] timing start here. Always-on stall WARN (with section attribution);
   // verbose period + section distribution self-gate on DEBUG_PERFORMANCE inside.
   loopHealthTick();
+  taskCpuSampleTick();   // shared task-CPU sampler: 500 ms cadence while anyone reads it, idle otherwise
 
   // periodicMemorySample() now does an always-on DRAM-pressure check before
   // its DEBUG_MEMORY-gated verbose sample, so a shipping device warns before
@@ -2700,7 +2701,7 @@ void hardwareone_loop() {
 
   // Finish an HTTP server teardown that a command had to defer because a web
   // request was mid-flight (see WebServer_Handle.h). This task is neither the
-  // httpd task nor cmd_exec_task, so it can wait on httpd_stop safely; it is a
+  // httpd task nor cmd_exec, so it can wait on httpd_stop safely; it is a
   // flag test in the overwhelmingly common case where nothing is pending.
 #if ENABLE_HTTP_SERVER
   httpServerStopPendingTick();
@@ -2979,6 +2980,7 @@ void hardwareone_loop() {
             // is still the live one once they are done.
             recordLoginAttempt(SOURCE_SERIAL, u, serialIp, true,
                                "Login successful");
+            systemEventPost(SYSEVT_LOGIN_OK, u.c_str(), "serial");  // the `login` command path posts the same
             const bool isCurrentlyAdmin = isAdminUser(u);
             String liveSerialUser;
             bool liveSerialAuthed = false;
@@ -3015,7 +3017,11 @@ void hardwareone_loop() {
           handleSerialLocalLogin();
         } else if (serialLineArgs.count() == 1 &&
                    serialLineArgs.arg(0).equalsIgnoreCase("logout")) {
+          // The console's own logout bypasses logoutTransport(), so it posts
+          // the sign-out itself; every other transport reads the same way.
+          const String who = getTransportUser(SOURCE_SERIAL);
           if (serialTransportSessionClearIfEpoch(admittedSerialEpoch)) {
+            if (who.length()) systemEventPost(SYSEVT_LOGOUT, who.c_str(), "serial");
             Serial.println("Logged out.");
           }
         } else if (serialLineArgs.count() == 1 &&

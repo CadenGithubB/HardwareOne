@@ -310,7 +310,7 @@ bool sessionWrapFrame(SessionState* s,
   // Serialize the nonce-counter bump + AEAD seal against every other session
   // sender. Before bonded sensor streaming, espnow_task was the sole sender so
   // this was race-free by construction; now SENSOR_BCAST_TASK (core 1, 10 Hz)
-  // and cmd_exec_task also reach here. Without this, two cores racing the
+  // and cmd_exec also reach here. Without this, two cores racing the
   // ++txSeqNext below would mint duplicate frameSeq values → nonce reuse.
   // The guard holds only for the bump+seal (microseconds, no blocking calls).
   EspNowTxGuard txGuard("sessionWrap");
@@ -463,7 +463,7 @@ bool pendingFrameQueue(const uint8_t peerMac[6], uint8_t type, uint16_t flags,
     return false;
   }
   // Serialize the lazy table alloc + slot scan/claim against the drain and the
-  // timeout sweep (which run on espnow_task / cmd_exec_task). Same lock as the
+  // timeout sweep (which run on espnow_task / cmd_exec). Same lock as the
   // session seal; this path does no blocking work, so the hold is brief.
   EspNowTxGuard g("pendQueue");
 
@@ -793,7 +793,7 @@ void sessionApplyRekeyedKeys(SessionState* s,
   {
     // Serialize the key + seq swap against in-flight senders. sessionWrapFrame
     // holds gEspNowSessionTxMutex while it reads aeadKeyTx and bumps txSeqNext;
-    // without this guard a rekey running on cmd_exec_task could swap the TX key
+    // without this guard a rekey running on cmd_exec could swap the TX key
     // or reset txSeqNext mid-seal on another core, producing a frame sealed
     // with a torn key/nonce pair. Same lock, so the seal and the swap are
     // mutually exclusive. Scope ends BEFORE the drain below — the drain sends

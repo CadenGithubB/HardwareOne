@@ -674,7 +674,7 @@ static void peerActivate() {
 }
 
 // ----------------------------------------------------------------------------
-// ESP-NOW Send: defer sendFileToMac onto cmd_exec_task so the multi-second
+// ESP-NOW Send: defer sendFileToMac onto cmd_exec so the multi-second
 // FILE_START/DATA/END pump never blocks the OLED render/input task.
 struct EspnowSendFileJob { uint8_t mac[6]; char path[FILE_MANAGER_MAX_PATH]; };
 static void runEspnowSendFile(void* arg) {

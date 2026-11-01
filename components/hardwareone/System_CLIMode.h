@@ -227,7 +227,7 @@ bool cliModeDispatchInput(const String& line, char* out, size_t outSize);
 // has no onTick (also no-op).
 void cliModeTick();
 
-// Run pending onExit cleanup on cmd_exec_task. Queries and transport callback
+// Run pending onExit cleanup on cmd_exec. Queries and transport callback
 // tasks only request cancellation; they never execute mode cleanup themselves.
 bool cliModeExecutorDrainPending();
 

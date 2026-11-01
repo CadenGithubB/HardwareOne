@@ -118,7 +118,7 @@ bool uartLinkSessionRestrictCm5PresenceIfUser(
 //
 // THREADING: call only from the main loop task (uartLinkInitFromSettings at
 // boot, or uartLinkTick applying a pending request). Commands run on
-// cmd_exec_task, which ticks concurrently with the loop task, so command
+// cmd_exec, which ticks concurrently with the loop task, so command
 // handlers must use uartLinkRequest* below instead — tearing the port down
 // underneath an in-flight drain corrupts the line accumulator.
 bool uartLinkStart();

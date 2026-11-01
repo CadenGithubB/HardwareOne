@@ -18,7 +18,7 @@
 //   always land here and keep their in-RAM FILE_END processing. Files LARGER than
 //   that STREAM to a .part file on flash, bounded by flash, not PSRAM. espnow_task
 //   only memcpy's each chunk into a 4 KB double-buffer; a filled buffer is handed to
-//   cmd_exec_task (via submitDeferredToCmdExec), which does the actual flash write —
+//   cmd_exec (via submitDeferredToCmdExec), which does the actual flash write —
 //   so the RX drain is never blocked on flash (the single-task inline-flush variant
 //   dropped chunks at ~87 when an erase stalled RX). This is purely additive:
 //   anything that worked at <= 128 KB behaves byte-for-byte as before; only
@@ -37,7 +37,7 @@
 //   (the RX drain), so within a transfer the frames are serialized by that single
 //   task. The timeout sweep runs on the heartbeat task and the slot table is shared,
 //   so a single mutex protects allocation / find / release. In STREAMING mode the
-//   actual .part writes (and all teardown) run on cmd_exec_task, never espnow_task;
+//   actual .part writes (and all teardown) run on cmd_exec, never espnow_task;
 //   the mutex guards the buffer/FIFO metadata while the flash write happens outside
 //   it, and a streaming slot is only ever freed by its cmd_exec finalize/abort job
 //   (RECEIVING → COMPLETING → FREE), so the sweep never closes a handle mid-write.
@@ -164,9 +164,9 @@ bool fileSlotsIsComplete(const FileTransferSlot* slot);
 // Big files don't buffer whole in PSRAM; they stream to a .part file on flash.
 // CRITICAL: the flash writes do NOT run on espnow_task (that stalls RX and drops
 // chunks). espnow_task only memcpy's each chunk into a small double-buffer; when a
-// buffer fills it's handed to cmd_exec_task (via submitDeferredToCmdExec) which does
+// buffer fills it's handed to cmd_exec (via submitDeferredToCmdExec) which does
 // the actual flash write. All teardown (close/rename/delete/free) also runs on
-// cmd_exec_task so it never races espnow_task's fills. This mirrors the established
+// cmd_exec so it never races espnow_task's fills. This mirrors the established
 // "defer heavy/FS work off the RX task" pattern used by SESSION_OPEN/CONFIRM/REKEY.
 //
 // Lifecycle: RECEIVING → (FILE_END or gap/timeout) → COMPLETING (a finalize/abort
@@ -225,7 +225,7 @@ uint32_t       fileSlotsGetReceivedCrc(const FileTransferSlot* slot);
 bool           fileSlotsIsReceiving(const FileTransferSlot* slot);
 
 // Release a slot — free PSRAM buffer, return to FREE state. Idempotent.
-// STREAMING slots: only call this from cmd_exec_task (their .part handle and
+// STREAMING slots: only call this from cmd_exec (their .part handle and
 // buffers may be mid-write there). From espnow_task use
 // fileSlotsMarkTeardownPending instead.
 void fileSlotsRelease(FileTransferSlot* slot);

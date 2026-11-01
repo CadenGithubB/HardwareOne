@@ -2,6 +2,9 @@
 // Design rationale lives in System_LLMBackend.h.
 
 #include "System_LLMBackend.h"
+#ifdef ESP_PLATFORM
+#include "System_Events.h"  // systemEventPost: typed system-event ring (host builds have no ring)
+#endif
 
 #if ENABLE_LLM_BACKEND
 
@@ -282,6 +285,9 @@ bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
 #endif
       sActiveDesc = d;                      // descriptor before kind — see above
       sActiveKind = LlmBackendKind::Cm5;
+#ifdef ESP_PLATFORM
+      systemEventPost(SYSEVT_LLM_MODEL_LOADED, d.name, "cm5");
+#endif
       return true;
     }
 #endif
@@ -290,6 +296,9 @@ bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
       if (!httpLlmSelectByName(d.name, errOut, errCap)) return false;
       sActiveDesc = d;
       sActiveKind = LlmBackendKind::Http;
+#ifdef ESP_PLATFORM
+      systemEventPost(SYSEVT_LLM_MODEL_LOADED, d.name, "http");
+#endif
       return true;
     }
 #endif

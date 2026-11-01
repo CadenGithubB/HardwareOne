@@ -1,4 +1,7 @@
 #include "BLE_PhonePipe.h"
+#ifdef ESP_PLATFORM
+#include "System_Events.h"  // systemEventPost: typed system-event ring (host builds have no ring)
+#endif
 #include "BLE_CentralStack.h"  // bleStackUp / bleStackReady: the pipe is a device on the shared stack
 #if ENABLE_BLUETOOTH && ENABLE_BLE_PHONE_PIPE
 #include "BLE_PhoneGatt.h"
@@ -717,9 +720,15 @@ void tickLocked(uint32_t now) {
       if(!accepted){fail(now,Error::Cancelled,"phone intent replaced",hw1coex::CauseDetail::Replaced);}
       else {
         noteAttempt(now,true);
+        const bool wasEnrolling=enrolling;
         // The turn goes back once no scan flag is left (below), so the route
         // has stopped claiming scan events.
         published=true;enrolling=false;setReady();status="ready";leaveWanted=true;++sessionStats.ready;
+#ifdef ESP_PLATFORM
+        systemEventPost(SYSEVT_PHONE_LINK_UP,nullptr,wasEnrolling?"enrolled":"reconnected");
+#else
+        (void)wasEnrolling;
+#endif
         endPairWindow(PhonePairWindow::Paired);  // the first success ends `phone pair new`'s window
         versionStrikes=0;if(versionLatched.exchange(false))bleCentralPhoneEnabled(true);  // it speaks v2
         noteSetup(now);
@@ -783,6 +792,9 @@ void tickLocked(uint32_t now) {
       // client's scan events (consume() ends a retiring scan without routeSet).
       // An attempt that never reached READY keeps its failure ("phone not
       // found", "BLE setup timed out"); only a link that was up reads disconnected.
+#ifdef ESP_PLATFORM
+      if(published)systemEventPost(SYSEVT_PHONE_LINK_DOWN,nullptr,stopWanted.load()?"stopped":"disconnected");
+#endif
       setStep(Step::Idle,stopWanted.load()?"stopped":published?"disconnected":status.load(),now);routeSet();
       if(nativeAppId!=0xffff){BLEDevice::releaseAppId(nativeAppId);nativeAppId=0xffff;}
       bleCentralLinkReleaseClient(&phoneGatt);

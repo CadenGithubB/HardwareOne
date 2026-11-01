@@ -279,7 +279,6 @@ void buildPowerJson(JsonDocument& doc) {
   doc["autoMode"]          = false;
   doc["autoModeSupported"] = false;
   doc["displayBrightness"] = gSettings.oledBrightness;          // 0..255
-  doc["displayDimLevel"]   = gSettings.powerDisplayDimLevel;    // percent
 
   // Idle timeout. The clock drops to the mode's idle clock after it on every
   // build; the local panel also blanks where there is one (`displayPowerSave`
@@ -713,7 +712,6 @@ static const SettingEntry powerSettingEntries[] = {
   // Fields are uint8_t — must use SETTING_U8 to avoid 4-byte-write overflow
   // into adjacent struct members. See System_Settings.h SettingType enum.
   { "mode", SETTING_U8, &gSettings.powerMode, POWER_MODE_DEFAULT, 0, nullptr, 0, POWER_MODE_COUNT - 1, "Power Mode", "Performance,Balanced,Adaptive,UltraSaver,Locked", false, nullptr, "power mode" },
-  { "displayDimLevel", SETTING_U8, &gSettings.powerDisplayDimLevel, 30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr, false, nullptr, "powerdim" },
   { "transitionCooldownMs", SETTING_INT, &gSettings.powerTransitionCooldownMs, 5000, 0, nullptr, 0, 60000, "Sleep cooldown (ms, 0=disabled)", nullptr, false, nullptr, "powercooldown" },
   { "powerSaveMinutes", SETTING_INT, &gSettings.powerSaveTimeoutMinutes, 10, 0, nullptr, 0, 1440, "Power saving (min, 0=disabled)", nullptr, false, nullptr, "powersave" }
 };

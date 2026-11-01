@@ -228,7 +228,7 @@ const char* cmd_gps(const String& argsInput) {
     return "Error: [GPS] Debug buffer unavailable";
   }
   
-  // Read from the GPS cache — the gps_task is the sole reader of the device;
+  // Read from the GPS cache — the sensor_gps is the sole reader of the device;
   // every consumer goes through the cache, like the other sensors.
   GPSCache gps;
   if (!gpsCacheSnapshot(gps)) {
@@ -392,10 +392,10 @@ void gpsTask(void* parameter) {
       if (checkTaskStackSafety("gps", GPS_STACK_WORDS, &gGpsRunning)) continue;
       if (gGpsRunning && isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
-        DEBUG_PERFORMANCEF("[STACK] gps_task watermark=%u words", (unsigned)watermark);
+        DEBUG_PERFORMANCEF("[STACK] sensor_gps watermark=%u words", (unsigned)watermark);
       }
       if (gGpsRunning && isDebugFlagSet(DEBUG_MEMORY)) {
-        DEBUG_MEMORY_HEAPF("[HEAP] gps_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+        DEBUG_MEMORY_HEAPF("[HEAP] sensor_gps: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     

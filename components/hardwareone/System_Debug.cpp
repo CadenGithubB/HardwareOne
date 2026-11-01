@@ -370,14 +370,14 @@ void debugOutputTask(void* parameter) {
         bool isDup = (now - lastErrTimeMs < DEDUPE_WINDOW_MS) &&
                      (strncmp(lastErrText, msg->text, sizeof(lastErrText) - 1) == 0);
 
-        STACK_TRACEF("debug_out.err_entry dup=%d text=%.40s", isDup ? 1 : 0, msg->text);
+        STACK_TRACEF("log_out.err_entry dup=%d text=%.40s", isDup ? 1 : 0, msg->text);
 
         if (!isDup) {
           String line = buildTimestampPrefix();
           line += msg->text;
-          STACK_TRACEF("debug_out.before_appendLineWithCap");
+          STACK_TRACEF("log_out.before_appendLineWithCap");
           appendLineWithCap(LOG_ERROR_FILE, line, LOG_ERROR_CAP);
-          STACK_TRACEF("debug_out.after_appendLineWithCap");
+          STACK_TRACEF("log_out.after_appendLineWithCap");
           strncpy(lastErrText, msg->text, sizeof(lastErrText) - 1);
           lastErrText[sizeof(lastErrText) - 1] = '\0';
           lastErrTimeMs = now;
@@ -712,10 +712,10 @@ void initDebugSystem() {
 
   // Create debug output task
   if (!gDebugOutputTaskHandle) {
-    taskStackRecord("debug_out", DEBUG_OUT_STACK_WORDS);
+    taskStackRecord("log_out", DEBUG_OUT_STACK_WORDS);
     BaseType_t result = xTaskCreatePinnedToCore(
       debugOutputTask,
-      "debug_out",
+      "log_out",
       DEBUG_OUT_STACK_WORDS,  // ~14KB stack — see System_TaskUtils.h for sizing rationale
       nullptr,
       TASK_PRIORITY_LOW,
@@ -1098,7 +1098,7 @@ void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route) {
 // ============================================================================
 // ESP-IDF log bridge — route ESP_LOGx output (wifi:/cam_hal:/i2c: ...) through
 // the firmware's single output queue so the IDF logger and broadcastOutput
-// share ONE UART writer (debug_out). Without it they are two unsynchronized
+// share ONE UART writer (log_out). Without it they are two unsynchronized
 // writers to the same UART and interleave mid-byte (e.g. "PSRAM" -> "PS7391").
 //
 // Deliberately dumb: format -> strip ANSI color -> trim trailing newline ->

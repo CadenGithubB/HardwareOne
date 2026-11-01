@@ -88,7 +88,7 @@ bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel);
 // to that reply, without replying again.
 //
 // Handler runs on espnow_task: size-check + PSRAM copy + submitDeferredToCmdExec.
-// Heavy crypto (verify, ECDH, KDF, optional sign) runs on cmd_exec_task.
+// Heavy crypto (verify, ECDH, KDF, optional sign) runs on cmd_exec.
 
 void v4hSessionRekey(const V4RxCtx& ctx);
 

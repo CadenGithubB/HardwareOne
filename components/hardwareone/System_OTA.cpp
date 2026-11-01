@@ -579,10 +579,10 @@ bool hashAndDescribeImage(const char* path, CandidateInfo& candidate,
   mbedtls_sha256_context sha;
   mbedtls_sha256_init(&sha);
   int cryptoError = mbedtls_sha256_starts(&sha, 0);
-  // Off the stack deliberately. This runs on cmd_exec_task, whose stack is 8192
+  // Off the stack deliberately. This runs on cmd_exec, whose stack is 8192
   // BYTES, so a 4 KB automatic buffer here overflowed it and panicked the device
   // mid-validation — after the signature had verified but before anything was
-  // journaled. Observed as "stack overflow in task cmd_exec_task" on the first
+  // journaled. Observed as "stack overflow in task cmd_exec" on the first
   // staging attempt that ever survived long enough to reach this code.
   constexpr size_t kHashChunk = 4096;
   uint8_t* buffer = static_cast<uint8_t*>(
@@ -951,7 +951,7 @@ const char* cmdOtaWrite(const String& argsInput) {
     // check at `finish` still covers the whole member, so a resume that picked
     // up mismatched bytes fails there and installs nothing.
     if (resumeFrom > 0) {
-      // Cooperative, because this runs on cmd_exec_task (pinned to core 0) and
+      // Cooperative, because this runs on cmd_exec (pinned to core 0) and
       // walks up to several megabytes. Holding FsLockGuard around the whole
       // loop blocked the main loop for seconds — starving the BLE connection
       // events that resume exists to survive — and starved IDLE0 badly enough

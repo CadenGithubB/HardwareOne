@@ -267,7 +267,7 @@ static bool currentSettingsBatchOwner(SettingsBatchOwner& ownerOut) {
 
   // A background caller has no command ownership boundary. It must write
   // immediately; using task identity here would collapse every transport onto
-  // cmd_exec_task and recreate the old process-global suppression bug.
+  // cmd_exec and recreate the old process-global suppression bug.
   ownerOut = {};
   return false;
 }
@@ -1184,7 +1184,7 @@ void settingsDefaults() {
   // - fmradio (i2csensor_rda5807.cpp): autoStart, polling
   // - oled (OLED_Settings.cpp): enabled, autoInit, modes, brightness
   // - led (System_NeoPixel.cpp): brightness, startup effect/color/duration
-  // - power (System_Power.cpp): mode, dim level, sleep cooldown, power-save timeout
+  // - power (System_Power.cpp): mode, sleep cooldown, power-save timeout
   // - bluetooth (Bluetooth.cpp): autoStart, requireAuth, deviceName
   // ============================================================================
   applyRegisteredDefaults();
@@ -1599,7 +1599,7 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
         // Refusing is strictly better. A file we cannot parse is a file whose
         // contents we cannot preserve, so replacing it can only lose data.
         // ERROR_ rather than WARN_ so this reaches errors.log, which is fed by
-        // the "[ERROR]" prefix in the debug_out task.
+        // the "[ERROR]" prefix in the log_out task.
         ERROR_STORAGEF("save REFUSED: on-disk settings.json is unparseable (%s) "
                        "- refusing to replace it from RAM", err.c_str());
         logSystemEvent("SETTINGS",
@@ -2611,7 +2611,7 @@ const char* cmd_uartlink(const String& argsInput) {
   t.toLowerCase();
   if (!t.length() || t == "status") return uartLinkStatusLine();
   // Port lifecycle is REQUESTED, not performed here: this handler runs on
-  // cmd_exec_task while the drain runs on the loop task, and tearing the port
+  // cmd_exec while the drain runs on the loop task, and tearing the port
   // (and its line accumulator) down from another task while bytes are in
   // flight is heap corruption. uartLinkTick applies the request.
   if (t == "on" || t == "1") {
@@ -3397,7 +3397,7 @@ void notifySettingChanged(const void* fieldPtr, const SettingEntry* entry) {
 // any live instance immediately (mqttclientenabled pattern). Autostart flags
 // are intentionally NOT here — those only affect the next boot.
 // Uses executeCommandThroughRegistry (direct handler call, no cmd queue) so
-// this is safe from inside a settings command on cmd_exec_task.
+// this is safe from inside a settings command on cmd_exec.
 static void applyMasterEnableDisable(const char* cmdKey) {
   if (!cmdKey || !cmdKey[0]) return;
 
@@ -3605,7 +3605,6 @@ SETTING_EDITOR_CMD(cmd_set_sessionidledisplay,  "sessionidledisplay")
 #ifdef UART_LINK_PORT
 SETTING_EDITOR_CMD(cmd_set_sessionidleuart,     "sessionidleuart")
 #endif
-SETTING_EDITOR_CMD(cmd_set_powerdim,            "powerdim")
 SETTING_EDITOR_CMD(cmd_set_logcategorytags,     "logcategorytags")
 SETTING_EDITOR_CMD(cmd_set_tofi2cclockhz,       "tofi2cclockhz")
 SETTING_EDITOR_CMD(cmd_set_presencedevicepollms,"presencedevicepollms")
@@ -3686,7 +3685,6 @@ const CommandEntry settingEditorCommands[] = {
 #ifdef UART_LINK_PORT
   { "sessionidleuart",     "Set UART link session idle-logout (min)",    true, cmd_set_sessionidleuart,     "Usage: sessionidleuart <0-1440>" },
 #endif
-  { "powerdim",            "Set display dim level (%)",                  true, cmd_set_powerdim,            "Usage: powerdim <0-100>" },
   { "logcategorytags",     "Set log category-tags flag (persist only)",  true, cmd_set_logcategorytags,     "Usage: logcategorytags <0|1>" },
   { "tofi2cclockhz",       "Set ToF I2C clock (Hz)",                     true, cmd_set_tofi2cclockhz,       "Usage: tofi2cclockhz <50000-400000>" },
   { "presencedevicepollms","Set presence sensor poll interval (ms)",     true, cmd_set_presencedevicepollms,"Usage: presencedevicepollms <50-5000>" },

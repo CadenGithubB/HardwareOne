@@ -2,7 +2,7 @@
 """G2 long-press (hold) dispatch: the production hold section, run.
 
 Splices the whole hold section of G2_Glasses.cpp (pairing, gates, watchdog
-activity, job queueing, g2_tap_disp delivery, page side table, global action,
+activity, job queueing, g2_taps delivery, page side table, global action,
 events, implicit aborts, expiry and `g2hold sim`), and the exit tail of
 handleDevEvent's SysEvent branch (SYSTEM_EXIT's own-echo/terminal split and
 the implicit hold releases), into g2_hold_dispatch_harness.cpp, which fakes the
@@ -17,7 +17,7 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 START = ('// -----------------------------------------------------------------------------\n'
          '// Long-press ("hold") input: decode, pair, record and dispatch\n')
-END = '// Called by g2_tap_disp after g2_ctrl_owner sees and deduplicates a ListEvent\n'
+END = '// Called by g2_taps after g2_owner sees and deduplicates a ListEvent\n'
 TAIL_START = 'bool ownShutdownEcho = false;'
 TAIL_END = 'if ((etype == 4 || etype == 5 || etype == 6 || etype == 7) &&'
 

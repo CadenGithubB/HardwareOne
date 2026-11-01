@@ -15,7 +15,7 @@
 // Before: every task that wanted to send an ESP-NOW frame had to be sized for
 // the *full* AEAD + frame + capture + Wi-Fi-ISR depth (~4–5 KB local on top of
 // the caller's own stack). When AEAD was added in Phase 3.5, only espnow_task
-// and cmd_exec_task were re-sized. sensor_bcast (sized for plaintext mesh
+// and cmd_exec were re-sized. sensor_bcast (sized for plaintext mesh
 // broadcast) overflowed the moment the first bond-encrypted sensor stream
 // transmit took the deep path — see the SENSOR_BCAST_STACK_WORDS history in
 // System_TaskUtils.h.
@@ -59,7 +59,7 @@
 // What it does NOT do
 // -------------------
 //   * RX path is unchanged. Handlers still dispatch on espnow_task; heavy
-//     work still defers to cmd_exec_task via submitDeferredToCmdExec. The
+//     work still defers to cmd_exec via submitDeferredToCmdExec. The
 //     ONLY change is where the *send half* lives.
 //   * V4 ACK tracking (sendStatus*) is unchanged. submit() is fire-and-
 //     forget at the wire level; per-message delivery confirmation still flows

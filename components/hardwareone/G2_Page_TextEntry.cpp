@@ -68,7 +68,7 @@ static void secureClear(char* buf, size_t cap) {
 }
 
 // Local execution lease for the mutable page/pad state above. Text-entry can
-// be started from g2_tap_disp or from an off-tap session worker; terminal
+// be started from g2_taps or from an off-tap session worker; terminal
 // cleanup must never free the pad's shades/BMP while that startup is still
 // allocating, CREATEing, or pushing. The coordinator token remains the
 // routing/callback authority; this lease only serializes destructive local
@@ -95,7 +95,7 @@ static bool textEntryExecAcquire(uint32_t serial, bool cleanup) {
   } else if (!cleanup && !gTextEntryExecCleanup &&
              gTextEntryExecOwner == task && gTextEntryExecDepth != UINT16_MAX) {
     // Normal same-task recursion only. A cleanup token never nests with page
-    // work, even on g2_tap_disp, so its exact teardown remains one operation.
+    // work, even on g2_taps, so its exact teardown remains one operation.
     gTextEntryExecDepth++;
     acquired = true;
   }
@@ -409,7 +409,7 @@ bool g2BeginTextEntry(const TextEntryConfig& cfg) {
 
   // Replace an ordinary live session only if its exact callback claim is still
   // ours. A terminal-tombstoned session is intentionally not replaceable until
-  // its FIFO cleanup has freed pad buffers on g2_tap_disp.
+  // its FIFO cleanup has freed pad buffers on g2_taps.
   if (__atomic_load_n(&gTE.active, __ATOMIC_ACQUIRE)) {
     const uint32_t oldSerial = __atomic_load_n(&gTE.serial, __ATOMIC_ACQUIRE);
     if (!g2TextEntrySessionFinishClaim(
@@ -730,7 +730,7 @@ void g2TextEntryOperationEnd() {
 bool g2TextEntryCleanupAbandoned(const G2TextEntryCleanupToken& token) {
   // Claim local execution before claiming the coordinator cleanup token. If an
   // off-tap begin is still inside pad allocation/CREATE/push, leave the exact
-  // tombstone pending; g2_tap_disp clears its queued claim and retries later.
+  // tombstone pending; g2_taps clears its queued claim and retries later.
   TextEntryExecGuard execution(token.serial, /*cleanup*/ true);
   if (!execution) return false;
   if (!g2TextEntrySessionCleanupClaim(

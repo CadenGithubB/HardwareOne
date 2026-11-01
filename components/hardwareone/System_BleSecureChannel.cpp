@@ -82,7 +82,7 @@ static uint32_t gScGeneration = 0;
 static uint8_t  gPsk[32];
 static bool     gPskValid = false;
 
-// Serializes device->app encryption: path A (debug_out task) and path B (cmd_exec task)
+// Serializes device->app encryption: path A (log_out task) and path B (cmd_exec task)
 // both emit DATA frames using the per-connection txCtr. Without this they could race the
 // counter (nonce reuse / out-of-order frames the app rejects). Created in bleScInit().
 static SemaphoreHandle_t gScTxMutex = nullptr;

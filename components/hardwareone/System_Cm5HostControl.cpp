@@ -76,7 +76,7 @@ struct RequestDelivery {
 static portMUX_TYPE sStateMux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t sBootNonce = 0;
 static uint32_t sLastCounter = 0;
-// Registry-command replies are serialized by cmd_exec_task, so both protocols
+// Registry-command replies are serialized by cmd_exec, so both protocols
 // format into one buffer rather than each holding its own 640 bytes of PSRAM.
 // UART intrinsics always pass separate loop-owned storage into their shared
 // callback cores and never touch this buffer.

@@ -50,7 +50,7 @@ struct Device {
   EspNowIdentity id;
   PeerIdentity peer;                 // the other device's stored identity
   SessionState table[kTableSlots];   // this device's gSessions
-  std::deque<std::pair<DeferredFn, void*>> queue;  // cmd_exec_task work
+  std::deque<std::pair<DeferredFn, void*>> queue;  // cmd_exec work
   std::vector<Frame> outbox;         // every frame this device sent
   size_t delivered;                  // outbox frames already handed to the peer
   std::vector<std::string> log;

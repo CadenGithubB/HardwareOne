@@ -8,7 +8,7 @@
 // plaintext jobs, the command tail with its file-browser gate, and the directed
 // and session senders. The fake GATT keeps one inbox per connection. write()
 // runs the GATT entry as BTC_TASK; deferred jobs queue in submission order and
-// run as cmd_exec_task once it returns. submitCommandAsync records what would
+// run as cmd_exec once it returns. submitCommandAsync records what would
 // execute. The FreeRTOS doubles count every mutex take that may wait (only the
 // secure-channel tx mutex is taken) and every delay made on BTC_TASK. Crypto is a
 // routing-neutral stand-in ("encryption" copies the plaintext and appends a
@@ -337,7 +337,7 @@ static void* ps_alloc(size_t size, AllocPref, const char*) { return malloc(size)
 
 static int drops = 0;
 static void cmdExecDropCountIncrement() { ++drops; }
-// cmd_exec_task stand-in: deferred jobs queue in submission order and run when
+// cmd_exec stand-in: deferred jobs queue in submission order and run when
 // write() has returned from the GATT entry (drainCmdExec). cmdExecQueueFull
 // models a full gCmdExecQ, which refuses both submit paths.
 static bool cmdExecQueueFull = false;
@@ -436,7 +436,7 @@ static const char kRequiredNotice[] = "Secure channel required — connect with 
 static const char kFileRefusal[] = "{\"success\":false,\"error\":\"secure_channel_required\"}";
 
 // A GATT write from the app: what the characteristic's onWrite hands over, on
-// BTC_TASK; then cmd_exec_task runs whatever the entry deferred.
+// BTC_TASK; then cmd_exec runs whatever the entry deferred.
 static void write(uint16_t connId, const std::string& bytes) {
   onBtcTask = true;
   processIncomingBLECommand(connId, bytes.data(), bytes.size());

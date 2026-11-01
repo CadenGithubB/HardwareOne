@@ -3118,7 +3118,7 @@ void processAutoStartSensors() {
     // Pin to Core 1 (I2C_SENSOR_CORE) — same rationale as the primary create site
     // in HardwareOne.cpp: this task runs the I2C device-init transactions and must
     // not float onto Wi-Fi-saturated Core 0 (starve → bus-storm → panic(4)).
-    if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue_task", queueStackWords, nullptr, TASK_PRIORITY_LOW, &queueProcessorTask, "sensor.queue", I2C_SENSOR_CORE) != pdPASS) {
+    if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue", queueStackWords, nullptr, TASK_PRIORITY_LOW, &queueProcessorTask, "sensor.queue", I2C_SENSOR_CORE) != pdPASS) {
       ERROR_I2CF("[I2C_SENSORS] Failed to create sensor queue processor task (late init)");
       queueProcessorTask = nullptr;
       return;

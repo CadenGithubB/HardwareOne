@@ -5,6 +5,9 @@
 // from here.
 
 #include "System_LLMChat.h"
+#ifdef ESP_PLATFORM
+#include "System_Events.h"  // systemEventPost: typed system-event ring (host builds have no ring)
+#endif
 
 #if ENABLE_LLM_BACKEND
 
@@ -322,6 +325,14 @@ int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt, ChatRunT
 
   ChatLock lk;
   if (!lk.held) return 0;
+#ifdef ESP_PLATFORM
+  {
+    // One post covers web, CLI, OLED, the lens and the BLE app; never the text.
+    char det[24];
+    snprintf(det, sizeof(det), "%u chars", (unsigned)strlen(userPrompt));
+    systemEventPost(SYSEVT_LLM_REQUEST, llmBackendKindName(llmBackendActiveKind()), det);
+  }
+#endif
 
   // Refuse to start if another generation is in flight.
   if (sStreamingTurnSlot >= 0) {

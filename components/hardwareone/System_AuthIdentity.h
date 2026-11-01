@@ -280,7 +280,7 @@ void bumpIdentityGeneration(const char* reason);
 // These were globals (gCurrentCommandContext, gCmdCaptureBuf/Len/Cap) read
 // by broadcastOutput on any task. Cross-task reads routed output and
 // captured bytes to whichever task happened to have set the globals last
-// — i.e. cmd_exec_task's current command. A non-cmd_exec broadcast (e.g.
+// — i.e. cmd_exec's current command. A non-cmd_exec broadcast (e.g.
 // from a sensor task) used to be silently routed to the WebSocket session
 // running the current command, and was captured into its buffer.
 //
@@ -288,7 +288,7 @@ void bumpIdentityGeneration(const char* reason);
 // see nullptr / inactive defaults; broadcastOutput skips capture and
 // falls back to MSG_ROUTE_ALL.
 
-// Output capture state. Lives in the TLS slot owned by cmd_exec_task while
+// Output capture state. Lives in the TLS slot owned by cmd_exec while
 // a capture is active. broadcastOutput reads via currentCaptureState() and
 // appends in-place (modifying buf/len via the returned pointer).
 struct CaptureBufState {
@@ -302,7 +302,7 @@ struct CaptureBufState {
 void* currentCommandContext();
 CaptureBufState* currentCaptureState();
 
-// cmd_exec_task lifecycle helpers. These allocate the calling task's
+// cmd_exec lifecycle helpers. These allocate the calling task's
 // slot on first use (same lazy-init pattern as ExecIdentityGuard).
 void setCurrentCommandContext(void* ctx);
 void clearCurrentCommandContext();

@@ -709,8 +709,8 @@ void tofTask(void* parameter) {
       if (checkTaskStackSafety("tof", TOF_STACK_WORDS, &gTofRunning)) continue;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
       if (gTofRunning) {
-        DEBUG_PERFORMANCEF("[STACK] tof_task watermark_now=%u min=%u bytes", (unsigned)gTofWatermarkNow, (unsigned)gTofWatermarkMin);
-        DEBUG_MEMORY_HEAPF("[HEAP] tof_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+        DEBUG_PERFORMANCEF("[STACK] sensor_tof watermark_now=%u min=%u bytes", (unsigned)gTofWatermarkNow, (unsigned)gTofWatermarkMin);
+        DEBUG_MEMORY_HEAPF("[HEAP] sensor_tof: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     const uint8_t tofBus = (uint8_t)gSettings.tofBus;

@@ -1062,7 +1062,7 @@ const char* cmd_c6console(const String& argsInput) {
     return radioHalConsoleMirrorOn() ? "C6 console mirror: on (the companion's log appears as C6> lines)"
                                      : "C6 console mirror: off";
   }
-  if (arg != "on" && arg != "off") return "Usage: c6console [on|off]";
+  if (arg != "on" && arg != "off") return "Usage: c6_console [on|off]";
   const esp_err_t err = radioHalConsoleMirror(arg == "on");
   if (err != ESP_OK) {
     if (!ensureDebugBuffer()) return "Error: console mirror failed";
@@ -1229,7 +1229,7 @@ const CommandEntry companionCommands[] = {
   { "c6update",      "Flash companion firmware from a file over SDIO: c6update \"<path>\".", true, cmd_c6update,
     "Usage: c6update \"/sd/firmware/network_adapter.bin\"\nThe file must be an ESP32-C6 image built by tools/p4/companion (it is checked for the ESP-NOW bridge marker before anything is sent).", true },
   { "c6confirm",     "Confirm the companion's running image so it cannot roll back.", true, cmd_c6confirm },
-  { "c6console",     "Mirror the C6's own console into the P4 log: c6console [on|off].", true, cmd_c6console },
+  { "c6_console",     "Mirror the C6's own console into the P4 log: c6_console [on|off].", true, cmd_c6console },
   { "c6autorecover", "Auto-recover the companion after an outage: c6autorecover [on|off] (persists).", true, cmd_c6autorecover },
   { "c6autohold",    "Hold the companion in reset while no radio feature runs: c6autohold [on|off] (persists).", true, cmd_c6autohold },
   { "c6heartbeat",   "Companion heartbeat interval in seconds, 0 disables the watchdog: c6heartbeat <0..60> (persists).", true, cmd_c6heartbeat },

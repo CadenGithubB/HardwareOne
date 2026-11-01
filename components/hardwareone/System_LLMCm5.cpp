@@ -2,6 +2,9 @@
 // Protocol and escaping contract are documented in System_LLMCm5.h.
 
 #include "System_LLMCm5.h"
+#ifdef ESP_PLATFORM
+#include "System_Events.h"  // systemEventPost: typed system-event ring (host builds have no ring)
+#endif
 
 #if ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_CM5
 
@@ -361,6 +364,13 @@ Cm5LlmCallbackResult cm5LlmHandleCallbackIntrinsic(
       if (errored) strlcpy(sLastError, "host reported a generation error", sizeof(sLastError));
     }
     portEXIT_CRITICAL(&sMux);
+#ifdef ESP_PLATFORM
+    if (sessionOk && epochOk) {
+      char det[32];
+      snprintf(det, sizeof(det), "%lu tok, %.1f tok/s", (unsigned long)toks, (double)tpsX10 / 10.0);
+      systemEventPost(SYSEVT_LLM_GEN_DONE, errored ? "error" : tokIs(pSt, "stopped") ? "user" : "eos", det);
+    }
+#endif
 
     if (!sessionOk) return fail("stale session");
     if (!epochOk)   return fail("session epoch mismatch");

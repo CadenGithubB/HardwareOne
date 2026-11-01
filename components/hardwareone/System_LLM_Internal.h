@@ -262,7 +262,7 @@ struct LLMRuntime {
   // Guided-input menu (optional MENU section in the info block v2). Parsed at
   // load into one PSRAM blob; the descriptors below index into it. Mutated ONLY
   // under System_LLM_Menu.cpp's sMenuLock — readers run on the OLED loop, httpd,
-  // g2_tap_disp and cmd_exec while llmUnload can free the blob from another task,
+  // g2_taps and cmd_exec while llmUnload can free the blob from another task,
   // so every accessor copies out under the lock (no interior pointer escapes).
   // menuGeneration bumps on EVERY load and unload so a surface can detect a model
   // swap and refetch. Absence of a menu (menuGroupCount==0) is a first-class

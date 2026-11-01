@@ -153,6 +153,19 @@ static NotifRule notifDefaultRuleFor(uint8_t kind) {
     // own lens page mid-note. note_started stays event-only.
     case SYSEVT_NOTE_SAVED:           return {NSINK_QUEUE, 1, 0, 0};
     case SYSEVT_NOTE_FAILED:          return {NSINK_QUEUE, 2, 0, 0};
+    // Speech to text: the run's start and end are worth a queue row, never an
+    // interrupt (a toast/banner would also grant the G2 card sink over the
+    // transcription lens page). Segment and speaker posts are per-utterance
+    // chatter for automations and the `events` ring only.
+    case SYSEVT_STT_STARTED:          return {NSINK_QUEUE, 1, 0, 0};
+    case SYSEVT_STT_STOPPED:          return {NSINK_QUEUE, 1, 0, 0};
+    // Phone relay pipe: the link's own up/down is a queue row; the console row
+    // join still posts ble_connected with its toast, so a second toast here
+    // would double every phone connect.
+    case SYSEVT_PHONE_LINK_UP:        return {NSINK_QUEUE, 1, 0, 0};
+    case SYSEVT_PHONE_LINK_DOWN:      return {NSINK_QUEUE, 0, 0, 0};
+    // llm_request, stt_segment, stt_speaker: event-only (default below), as
+    // voice_wake-style input chatter — the answer/outcome kinds carry the sinks.
     // Everything else: event-only (automations/`events`/queue-off).
     default: return {NSINK_NONE, 0, 0, 0};
   }

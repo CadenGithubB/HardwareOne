@@ -1012,8 +1012,8 @@ static bool ensureMapRenderTask() {
   const uint32_t now = millis();
   if (sRenderTaskRefused && now - sRenderTaskRefusedMs < kMapRenderRetryMs) return false;
   TaskHandle_t created = nullptr;
-  taskStackRecord("mapRender", MAP_RENDER_STACK_WORDS);
-  if (xTaskCreatePinnedToCore(mapRenderTask, "mapRender", MAP_RENDER_STACK_WORDS, nullptr,
+  taskStackRecord("map_render", MAP_RENDER_STACK_WORDS);
+  if (xTaskCreatePinnedToCore(mapRenderTask, "map_render", MAP_RENDER_STACK_WORDS, nullptr,
                               TASK_PRIORITY_LOW, &created, APP_CORE) != pdPASS ||
       !created) {
     if (!sRenderTaskRefused) {
@@ -1167,7 +1167,7 @@ static void displayGPSMap() {
   bool usingRemoteGPS = false;
   
 #if ENABLE_GPS_SENSOR
-  // Use cached GPS data (gps_task continuously polls and updates the cache).
+  // Use cached GPS data (sensor_gps continuously polls and updates the cache).
   // Read the cache struct, never gPA1010D directly — the cache lat/lon are
   // already signed (S/W negative).
   if (gGpsConnected && gGpsRunning) {

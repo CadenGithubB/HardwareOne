@@ -276,7 +276,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `c6autohold` | A | Hold the companion in reset while no radio feature runs: c6autohold [on\|off] (persists). |
 | `c6autorecover` | A | Auto-recover the companion after an outage: c6autorecover [on\|off] (persists). |
 | `c6confirm` | A | Confirm the companion's running image so it cannot roll back. |
-| `c6console` | A | Mirror the C6's own console into the P4 log: c6console [on\|off]. |
+| `c6_console` | A | Mirror the C6's own console into the P4 log: c6_console [on\|off]. |
 | `c6heartbeat` | A | Companion heartbeat interval in seconds, 0 disables the watchdog: c6heartbeat <0..60> (persists). |
 | `c6hold` | A | Hold the C6 in reset (radio fully off) or release it: c6hold [on\|off].<br/>`Usage: c6hold [on\|off] on - stop Wi-Fi, Bluetooth and ESP-NOW and hold the companion in reset off - release it and restore what was running` |
 | `c6restart` | A | Restart the C6 companion in place (radio features stop and come back). |
@@ -808,7 +808,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `srsnipstart` |  | Start manual snippet capture now.<br/>`Usage: srsnipstart` |
 | `srsnipstatus` |  | Show snippet capture status.<br/>`Usage: srsnipstatus` |
 | `srsnipstop` |  | Stop manual snippet capture and save.<br/>`Usage: srsnipstop` |
-| `srstack` |  | Show sr_task stack high-water mark (run after voice stress test).<br/>`Usage: srstack` |
+| `srstack` |  | Show sr_main stack high-water mark (run after voice stress test).<br/>`Usage: srstack` |
 | `srstart` |  | Start ESP-SR pipeline and arm voice as the current user.<br/>`Usage: srstart` |
 | `srstatus` |  | Show ESP-SR status.<br/>`Usage: srstatus` |
 | `srstop` |  | Stop ESP-SR pipeline.<br/>`Usage: srstop` |
@@ -1431,7 +1431,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `notifyusermute` |  | Mute event kinds from notifications for YOUR user<br/>`Usage: notifyusermute [<kind,kind,...>\|set <kind> <on\|off>\|patch <+kind,-kind>\|all\|none] Bare: show; legacy list: replace; set: change one; patch: change several all/none: mute every current kind/clear; applies only to your logged-in user List valid kinds with 'events kinds'` |
 | `notifyusershow` |  | Force event kinds through YOUR importance floor<br/>`Usage: notifyusershow [<kind,kind,...>\|set <kind> <on\|off>\|patch <+kind,-kind>\|all\|none] Bare: show; legacy list: replace; set: change one; patch: change several all/none: force every current kind/clear; overrides your notifylevel List valid kinds with 'events kinds'` |
 | `oledautostart` | A | Start the OLED display at boot<br/>`Usage: oledautostart <0\|1>` |
-| `powerdim` | A | Set display dim level (%)<br/>`Usage: powerdim <0-100>` |
 | `presencedevicepollms` | A | Set presence sensor poll interval (ms)<br/>`Usage: presencedevicepollms <50-5000>` |
 | `presenceenabled` | A | Enable/disable the presence sensor subsystem<br/>`Usage: presenceenabled <0\|1>` |
 | `rtcenabled` | A | Enable/disable the RTC subsystem<br/>`Usage: rtcenabled <0\|1>` |

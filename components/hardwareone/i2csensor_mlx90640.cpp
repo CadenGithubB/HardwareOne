@@ -1481,8 +1481,8 @@ void thermalTask(void* parameter) {
       if (checkTaskStackSafety("thermal", THERMAL_STACK_WORDS, &gThermalRunning)) continue;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
       if (gThermalRunning) {
-        DEBUG_PERFORMANCEF("[STACK] thermal_task watermark_now=%u min=%u words", (unsigned)gThermalWatermarkNow, (unsigned)gThermalWatermarkMin);
-        DEBUG_MEMORY_HEAPF("[HEAP] thermal_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+        DEBUG_PERFORMANCEF("[STACK] sensor_thermal watermark_now=%u min=%u words", (unsigned)gThermalWatermarkNow, (unsigned)gThermalWatermarkMin);
+        DEBUG_MEMORY_HEAPF("[HEAP] sensor_thermal: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     // Handle deferred initialization request

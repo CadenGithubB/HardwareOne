@@ -15,6 +15,17 @@
 
 void webBatchTestStringAppend() {}
 using UBaseType_t = uint32_t;
+using BaseType_t = int32_t;
+using TaskHandle_t = uintptr_t;
+struct portMUX_TYPE { int x = 0; };
+#define portMUX_INITIALIZER_UNLOCKED portMUX_TYPE{}
+static void portENTER_CRITICAL(portMUX_TYPE*) {}
+static void portEXIT_CRITICAL(portMUX_TYPE*) {}
+static uint32_t nowMs = 1000;
+static uint32_t millis() { return nowMs; }
+#define TASK_CPU_SAMPLE_MS   500
+#define TASK_CPU_INTEREST_MS 15000
+static constexpr size_t kPerftopMaxRows = 48;
 enum eTaskState { eRunning, eReady, eBlocked, eSuspended, eDeleted, eInvalid };
 struct TaskStatus_t {
   uintptr_t xHandle;
@@ -51,11 +62,13 @@ static char* getDebugBuffer() { return debugBuffer; }
 static void* ps_alloc(size_t bytes, AllocPref pref, const char* tag) {
   CHECK(pref == AllocPref::PreferPSRAM && bytes > 0);
   ++allocCalls; events.emplace_back("allocate");
-  const char* expectedTag = !cpuCommand ? "taskstats" :
-      jsonCommand ? (allocCalls == 1 ? "perftop.ja" : "perftop.jb") :
-                    (allocCalls == 1 ? "perftop.a" : "perftop.b");
+  // The shared sampler grows five arrays per attempt, in this order; a failed
+  // attempt is retried on the next tick, so the failure index is per attempt.
+  static const char* const kSamplerTags[] = {"taskcpu.snap","taskcpu.prevh","taskcpu.prevr","taskcpu.stage","taskcpu.pub"};
+  const unsigned inAttempt = cpuCommand ? ((allocCalls - 1) % 5) + 1 : allocCalls;
+  const char* expectedTag = !cpuCommand ? "taskstats" : kSamplerTags[inAttempt - 1];
   CHECK(std::strcmp(tag, expectedTag) == 0);
-  if (allocCalls == failAllocation) return nullptr;
+  if (inAttempt == failAllocation) return nullptr;
   void* memory = std::calloc(1, bytes);
   CHECK(memory != nullptr); live.emplace(memory, Allocation{bytes, tag}); return memory;
 }
@@ -65,6 +78,7 @@ static void snapshotFree(void* memory) {
   std::memset(memory, 0xa5, live.at(memory).bytes);
   live.erase(memory); std::free(memory);
 }
+static BaseType_t xTaskGetCoreID(uintptr_t) { return 0x7FFFFFFF; }  // unpinned: production then omits "core"
 static UBaseType_t uxTaskGetNumberOfTasks() {
   ++countCalls; events.emplace_back("count"); return reportedCount;
 }
@@ -72,7 +86,7 @@ static UBaseType_t uxTaskGetSystemState(TaskStatus_t* destination, UBaseType_t c
   CHECK(snapshotCalls < snapshots.size());
   CHECK(live.count(destination) == 1 && live.at(destination).bytes >= capacity * sizeof(TaskStatus_t));
   if (cpuCommand) CHECK(live.at(destination).bytes == capacity * sizeof(TaskStatus_t));
-  CHECK(capacity == reportedCount + (cpuCommand ? 6 : 0));
+  CHECK(capacity == reportedCount + (cpuCommand ? 4 : 0));  // the sampler grows to n + 4
   CHECK(cpuCommand == (total != nullptr));
   events.emplace_back("snapshot");
   const auto& snapshot = snapshots[snapshotCalls++];
@@ -87,8 +101,6 @@ static void vTaskDelay(uint32_t ticks) {
   ++delayCalls; events.emplace_back("delay750");
 }
 static void broadcastOutput(const char* text) {
-  if (cpuCommand && (!std::strcmp(text, "========== END PERFTOP ==========") ||
-                     !std::strcmp(text, "  (cannot allocate task snapshot buffers)"))) CHECK(live.empty());
   CHECK(std::strlen(text) < 256); output.emplace_back(text); events.emplace_back("broadcast");
 }
 static void broadcastPrintf(const char* format, ...) {
@@ -107,9 +119,9 @@ static uint32_t taskStackLookup(const char* name) {
   return name && !std::strcmp(name, "worker") ? 4096 : 0;
 }
 static size_t checkedSerializeJson(const JsonDocument& doc, char* destination, size_t capacity) {
-  // Serialization must run before snapshot buffers are released. The buffers
-  // do not own FreeRTOS task names; this assertion checks only their lifetime.
-  CHECK(live.size() == (cpuCommand ? (failAllocation ? 1u : 2u) : 1u));
+  // The shared sampler keeps its five arrays for the process lifetime; a failed
+  // grow frees its partial attempt. taskstats keeps its one cache.
+  CHECK(live.size() == (cpuCommand ? (failAllocation ? 0u : 5u) : 1u));
   events.emplace_back("serialize");
   return ArduinoJson::serializeJson(doc, destination, capacity);
 }
@@ -141,10 +153,15 @@ static void transcript(const char* command, const char* result) {
   std::string text; serializeJson(record, text); std::cout << text << '\n';
 }
 static void checkLifetimeAndTiming(bool json, bool allocationFailure = false) {
-  CHECK(countCalls == 1 && allocCalls == 2 && live.empty());
-  CHECK(freeCalls == (allocationFailure ? 1u : 2u));
+  // Two sampler ticks: each asks the task count. grow() requests all five
+  // arrays, then checks; a failed attempt frees the four it did get and the
+  // next tick tries again, so a failure costs 10 allocations and 8 frees.
+  CHECK(countCalls == 2);
+  CHECK(allocCalls == (allocationFailure ? 10u : 5u));
+  CHECK(freeCalls == (allocationFailure ? 8u : 0u));
+  CHECK(live.size() == (allocationFailure ? 0u : 5u));
   CHECK(snapshotCalls == (allocationFailure ? 0u : 2u));
-  CHECK(delayCalls == (allocationFailure ? 0u : 1u));
+  CHECK(delayCalls == 0);  // nothing sleeps to measure any more
   CHECK(loopReads == (json ? 1u : 0u) && loopPrints == (json ? 0u : 1u));
   const auto count = std::find(events.begin(), events.end(), "count");
   CHECK(std::find(events.begin(), events.end(), json ? "loop.read" : "loop.print") < count);
@@ -192,38 +209,65 @@ static void cpuFixture(const std::string& scenario, std::vector<std::string>& na
     if (scenario == "no-visible") { snapshots[1].rows = {task(1,"worker",109),task(2,"new",1000)}; }
     if (scenario == "fail-first") failAllocation=1;
     if (scenario == "fail-second") failAllocation=2;
+    // no-visible: worker 0.9% is a share the sampler publishes (JSON keeps
+    // it, text drops it); the empty/zero/fail scenarios never get an interval.
     available = scenario == "no-visible";
     names.clear(); percentages.clear(); idle.clear();
     loopValid = false; laps = avg = maximum = stalls = allStalls = 0;
   }
   reportedCount = static_cast<UBaseType_t>(snapshots[0].rows.size());
 }
+static void resetSampler() {
+  for (void* buffer : {(void*)sTaskCpu.buf,(void*)sTaskCpu.prevHandle,(void*)sTaskCpu.prevRun,(void*)sTaskCpu.staging,(void*)sTaskCpu.published})
+    if (buffer) snapshotFree(buffer);
+  sTaskCpu = TaskCpuSampler{};
+}
 static void cpuCases(const std::string& scenario) {
   for (bool json : {false,true}) {
-    resetCommand(); std::vector<std::string> names; std::vector<unsigned> percentages; std::vector<bool> idle;
+    resetSampler(); resetCommand(); std::vector<std::string> names; std::vector<unsigned> percentages; std::vector<bool> idle;
     bool available; cpuFixture(scenario,names,percentages,idle,available);
     jsonCommand = json;
+    // Drive the shared sampler the way the main loop does: a reader registers
+    // interest, then two ticks 500 ms apart give one interval of shares.
+    nowMs = 1000; (void)taskCpuShares(nullptr, 0, nullptr, nullptr); taskCpuSampleTick();
+    nowMs = 1500; taskCpuSampleTick();
+    events.clear();  // the ordering checks below concern the command itself, not the sampler ticks
     const char* command = json ? "perftop json" : "perftop";
     const char* result = cmd_perftop(command);
     if (json) {
       CHECK(output.empty()); const auto doc=parse(result);
-      CHECK(doc.size()==4 && doc["schema"]==1 && doc["cpuValid"]==available);
+      CHECK(doc.size()==5 && doc["schema"]==1 && doc["cpuValid"]==available && doc["windowMs"]==(available ? 500u : 0u));
       const JsonObjectConst loop=doc["loop"].as<JsonObjectConst>();
       CHECK(loop.size()==6 && loop["valid"]==loopValid && loop["lapsPerSec"]==laps && loop["avgMs"]==avg);
       CHECK(loop["maxMs"]==maximum && loop["stalls5s"]==stalls && loop["totalStalls"]==allStalls);
-      const auto rows=doc["tasks"].as<JsonArrayConst>(); CHECK(rows.size()==names.size());
-      for(size_t i=0;i<names.size();++i) {
-        CHECK(rows[i].size()==3 && rows[i]["name"].as<std::string>()==names[i]);
-        CHECK(rows[i]["cpuPct"].as<unsigned>()==percentages[i] && rows[i]["idle"].as<bool>()==idle[i]);
+      // The JSON keeps every non-idle task that ran at all (>= 0.1%), so it
+      // carries rows the text path (whole percent, >= 1%) drops. Those extra
+      // rows, with their per-mille, per scenario:
+      std::vector<std::string> jn=names; std::vector<unsigned> jp=percentages, jpm; std::vector<bool> ji=idle;
+      for(size_t i=0;i<jp.size();++i) jpm.push_back(jp[i]*10);
+      auto insert=[&](size_t at,const char* name,unsigned pm){ jn.insert(jn.begin()+at,name); jp.insert(jp.begin()+at,pm/10); jpm.insert(jpm.begin()+at,pm); ji.insert(ji.begin()+at,false); };
+      if(scenario=="normal") insert(2,"tiny",9);          // 9/1000 after IDLE1
+      else if(scenario=="cutoff") insert(2,"tiny",7);     // 3/400 after edge
+      else if(scenario=="no-visible") insert(0,"worker",9); // 9/1000, the only row
+      if(scenario=="wide") jpm[0]=800;                     // 2400000000/3000000000
+      else if(scenario=="cutoff") { jpm[0]=jpm[1]=1000; } // capped
+      else if(scenario=="cutoff-odd") jpm[0]=1000;
+      const auto rows=doc["tasks"].as<JsonArrayConst>(); CHECK(rows.size()==jn.size());
+      for(size_t i=0;i<jn.size();++i) {
+        CHECK(rows[i].size()==4 && rows[i]["name"].as<std::string>()==jn[i]);  // name, cpuPct, cpuPermille, idle
+        CHECK(rows[i]["cpuPct"].as<unsigned>()==jp[i] && rows[i]["idle"].as<bool>()==ji[i]);
+        CHECK(rows[i]["cpuPermille"].as<unsigned>()==jpm[i]);
       }
     } else {
       CHECK(std::string(result)=="OK");
-      CHECK(output.size()>=7 && output[0].empty() && output[1]=="========== PERFTOP ==========");
-      CHECK(output[2]=="fixture loop health" && output[3].empty() && output[4]=="[PERFTOP] live task CPU (0.75s sample):");
+      CHECK(output.size()>=6 && output[0].empty() && output[1]=="========== PERFTOP ==========");
+      CHECK(output[2]=="fixture loop health" && output[3].empty());
       CHECK(output.back()=="========== END PERFTOP ==========");
-      if(failAllocation) CHECK(output[5]=="  (cannot allocate task snapshot buffers)");
-      else if(!available) CHECK(output[5]=="  (run-time stats unavailable)");
-      else {
+      if(failAllocation || !available) {
+        CHECK(output[4]=="[PERFTOP] task CPU: sampler arming — the first interval needs about a second; run again");
+        CHECK(output.size()==6);
+      } else {
+        CHECK(output[4]=="[PERFTOP] task CPU over the last 500 ms (shared sampler):");
         size_t row=5; bool anyNonIdle=false;
         for(bool idlePass : {true,false}) for(size_t i=0;i<names.size();++i) {
           if(idle[i]!=idlePass) continue;

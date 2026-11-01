@@ -1460,7 +1460,7 @@ enum class G2WorkerInitState : uint8_t {
 static bool pageSwapInit();
 
 // Forward decls — tap dispatcher. BLE callbacks only copy packets into the RX
-// ring now; g2_ctrl_owner parses them and produces tap/nav/exit work. The
+// ring now; g2_owner parses them and produces tap/nav/exit work. The
 // dispatcher keeps deep UI, filesystem, formatting, and settings paths off
 // that 6144-byte control/ACK-owner stack. It also ensures the task that must
 // decode CREATE/REBUILD responses never waits for those responses itself.
@@ -1478,13 +1478,13 @@ static bool tapDispatcherEnqueueNav(G2TapFn fn, G2TapKind kind,
                                     uint32_t lifecycleEpoch,
                                     uint32_t slotSerial);
 // Hold jobs (press, release, abort) for g2HoldDeliver. Zero-wait like every
-// producer here; callable from g2_ctrl_owner, the main loop and cmd_exec.
+// producer here; callable from g2_owner, the main loop and cmd_exec.
 static bool tapDispatcherEnqueueHold(const G2HoldJob& job,
                                      uint32_t presentationEpoch);
 
 // Forward decls — long-press ("hold") input. Defined with the tap dedup state;
-// handleDevEvent (g2_ctrl_owner) feeds 9/10 and the page-exit events, the
-// terminal path and g2Tick close an open press, g2_tap_disp delivers. The
+// handleDevEvent (g2_owner) feeds 9/10 and the page-exit events, the
+// terminal path and g2Tick close an open press, g2_taps delivers. The
 // producers are all non-blocking.
 static void g2HoldIngest(G2Temple& t, uint32_t etype, uint32_t src,
                          G2HoldVia via, uint32_t rxGeneration,
@@ -1857,6 +1857,12 @@ static bool firmwareRoutesEvenHubRepliesToRight() {
   // string (the following protobuf tags are not string suffixes).
   if (strcmp(left, "2.2.9.22") == 0 &&
       strcmp(right, "2.2.9.22") == 0) return true;
+  // 2.3.2.14 (bench pair, 2026-10-29): g2info shows the LEFT identity echo
+  // absent (name '--', battery -1) with RIGHT answering, the same right-routed
+  // shape as 2.2.9.22, and LEFT counted as plugin-silent within a minute of
+  // every boot while nothing was wrong with it.
+  if (strcmp(left, "2.3.2.14") == 0 &&
+      strcmp(right, "2.3.2.14") == 0) return true;
 
   static constexpr const char* kLegacyRightRouted[] = {
     "2.2.0.24",
@@ -1929,7 +1935,7 @@ static volatile uint32_t gTextViewSlotSerial;
 // newly queued navigation.
 static volatile uint32_t gTextNavPendingSerial;
 static volatile uint32_t gTextExitPendingSerial;
-// Exact callback currently executing on g2_tap_disp.  Downstream page-swap
+// Exact callback currently executing on g2_taps.  Downstream page-swap
 // admission consumes this context instead of resampling the latest lifecycle,
 // closing the validate-then-call TOCTOU window.
 static volatile uint32_t gTextDispatchLifecycleEpoch;
@@ -1946,11 +1952,11 @@ struct G2TextViewClaim {
 };
 
 // Published by the production keyboard while it owns the gesture surface.
-// The SysEvent decoder runs on g2_ctrl_owner while keyboard state belongs to
+// The SysEvent decoder runs on g2_owner while keyboard state belongs to
 // other UI workers, so every access must use an __atomic operation. A nonzero
 // owner token consumes rowless doubles even during SHUTDOWN→CREATE; a nonzero
 // epoch means the new mixed surface is live and may enqueue selection.
-// g2_tap_disp still revalidates the epoch plus live text-entry/pad state.
+// g2_taps still revalidates the epoch plus live text-entry/pad state.
 // One atomically published owner token replaces a plain active bool. Its low
 // two bits identify the temple hosting the surface (1=L, 2=R); the remaining
 // bits are a per-claim generation. A disconnect can therefore revoke exactly
@@ -2192,7 +2198,7 @@ bool g2TextEntrySessionCleanupClaim(uint32_t serial,
                                     uint32_t connectionGeneration, char side) {
   if (!gTapTaskHandle ||
       xTaskGetCurrentTaskHandle() != gTapTaskHandle) {
-    DEBUG_G2F("[G2] text-entry cleanup rejected off g2_tap_disp");
+    DEBUG_G2F("[G2] text-entry cleanup rejected off g2_taps");
     return false;
   }
   bool claimed = false;
@@ -2681,7 +2687,7 @@ static void kbdAbRecoveryDisarm() {
 
 // If the normal completion callback transiently fails to enqueue the Keyboard
 // Tests picker (for example, allocation pressure), a tap on the still-visible
-// Q33 list must remain an escape hatch. Run the retry on g2_tap_disp rather
+// Q33 list must remain an escape hatch. Run the retry on g2_taps rather
 // than the control/ACK owner that decoded the ListEvent.
 static void kbdAbRetryRestoreFromTap() {
   const uint32_t epoch = __atomic_load_n(&gKbdAbRecoveryEpoch,
@@ -2805,7 +2811,7 @@ static G2Temple* volatile gCreateCleanupArm = nullptr;
 static volatile uint32_t gCreateCleanupGeneration = 0;
 static volatile uint32_t gCreateCleanupLifecycleEpoch = 0;
 
-// Manual/safety terminal Shutdown is deferred off g2_ctrl_owner.  The exact
+// Manual/safety terminal Shutdown is deferred off g2_owner.  The exact
 // pending token is also a wire-ordering gate: no CREATE may be admitted while
 // it is live.  This lets an older in-flight CREATE finish (or be revoked), then
 // puts terminal Cmd=9 on the serialized lens worker before any replacement
@@ -2832,7 +2838,7 @@ static volatile uint8_t  gExpectRebuildMagic = 0;
 static volatile bool     gRebuildOk          = false;
 
 // BLE callback-task handle — captured defensively on first notification. The
-// callback now only copies into the RX ring; g2_ctrl_owner parses responses
+// callback now only copies into the RX ring; g2_owner parses responses
 // and gives the CREATE/REBUILD semaphores. Sync-wait guards reject both tasks:
 // blocking the owner is a direct self-deadlock, while blocking the callback
 // can prevent the response from reaching the owner in the first place.
@@ -2921,6 +2927,15 @@ static volatile uint32_t gImgPushSeenMagic[8] = {};
 static const uint32_t kBleInstantFailMs = 250;
 static const uint8_t  kBleWedgeStreakTrip = 2;
 static volatile uint8_t gBleWedgeStreak = 0;
+// Half-connected repair tries that FOUND the missing temple advertising and
+// still could not open a link (slow OPEN failure or the 35 s timeout). A slow
+// failure alone says nothing (the peer may be away), but a peer that answers
+// scans and refuses connects for a whole fast ladder is the host-orphaned
+// link seen 2026-10-29: the controller still owned the LEFT link while the
+// host had freed it, so every OPEN against that address failed and nothing
+// escalated for hours. This streak lets bleStackRecycleIfWedged() act on it.
+static volatile uint8_t gRepairOpenFailStreak = 0;
+static const uint8_t  kRepairOpenFailTrip = 7;  // == g2repair::kFastTries
 // A client whose accepted APP_REGISTER/UNREGISTER never delivered its
 // retirement event cannot be reused or freed while Bluedroid may still route
 // callbacks to it. Unlike the ordinary cancel wedge, leaving another link up
@@ -2967,6 +2982,11 @@ static void bleClassifyConnectOutcome(const BLEClientConnectOutcome* detail,
                      BLEClient::unregisterStateToString(detail->unregisterState),
                      (long)detail->unregisterEspStatus,
                      (unsigned long)detail->unregisterElapsedMs);
+    // Durable twin: a failed try must say what it saw after the console is gone.
+    logSystemEvent("BLE", "%s connect failed: stage=%s elapsed=%lums esp=%ld gatt=0x%04lx",
+                   logTag, BLEClient::connectStageToString(detail->stage),
+                   (unsigned long)elapsedMs, (long)detail->espStatus,
+                   (unsigned long)(uint32_t)detail->gattStatus);
     // Registration/precheck failures are application/resource problems, not
     // evidence that Bluedroid's global create-connection admission is wedged.
     hostRefusalEvidence = hostRefusalEvidence &&
@@ -3794,7 +3814,22 @@ static uint8_t g2TemplePublishedBit(const G2Temple& temple) {
 // Completion mutex is outermost. It serializes cancel-generation advance,
 // topology-down publication, scheduler LinkLost, and durable event ordering.
 // All physical BLE disconnect work happens after this helper returns.
-static G2TempleDownTransition g2BeginTempleDown(G2Temple& temple) {
+// esp_gatt_conn_reason_t → a short word for logs and the g2_disconnected detail.
+static const char* g2DisconnectReasonName(uint16_t reason) {
+  switch (reason) {
+    case 0x08:   return "supervision timeout";
+    case 0x13:   return "peer ended it";
+    case 0x16:   return "local host ended it";
+    case 0x22:   return "lmp timeout";
+    case 0x3e:   return "failed to establish";
+    case 0x01:   return "l2cap failure";
+    case 0x0100: return "cancelled";
+    case 0x0101: return "no connection";
+    default:     return "unknown";
+  }
+}
+
+static G2TempleDownTransition g2BeginTempleDown(G2Temple& temple, uint16_t hciReason = 0) {
   G2TempleDownTransition transition;
   G2CompletionGuard completion;
   if (!completion) return transition;
@@ -3822,12 +3857,15 @@ static G2TempleDownTransition g2BeginTempleDown(G2Temple& temple) {
   transition.downEventPublished = (gG2PublishedTempleMask & bit) != 0;
   gG2PublishedTempleMask &= (uint8_t)~bit;
   if (transition.downEventPublished) {
-    BROADCAST_PRINTF("[G2] %s temple dropped",
-                     temple.side == 'L' ? "LEFT" : "RIGHT");
-    systemEventPost(SYSEVT_G2_DISCONNECTED,
-                    temple.side == 'L' ? "LEFT" : "RIGHT",
-                    (!gL.connected && !gR.connected)
-                        ? "none left" : "one side up");
+    const char* sideStr = temple.side == 'L' ? "LEFT" : "RIGHT";
+    const char* left = (!gL.connected && !gR.connected) ? "none left" : "one side up";
+    char det[SYSEVT_DETAIL_LEN];
+    snprintf(det, sizeof(det), "%s; reason 0x%02x %s", left, (unsigned)hciReason, g2DisconnectReasonName(hciReason));
+    BROADCAST_PRINTF("[G2] %s temple dropped (reason 0x%02x %s)", sideStr, (unsigned)hciReason, g2DisconnectReasonName(hciReason));
+    // Durable: the curated log is what survives to the next session's review.
+    logSystemEvent("G2", "%s temple dropped: %s; HCI reason 0x%02x %s",
+                   sideStr, left, (unsigned)hciReason, g2DisconnectReasonName(hciReason));
+    systemEventPost(SYSEVT_G2_DISCONNECTED, sideStr, det);
   }
   if ((transition.wasConnected || transition.downEventPublished) &&
       !g2BothConnected()) {
@@ -3879,7 +3917,8 @@ public:
       DEBUG_G2F("[G2-%c] Ignoring stale-client disconnect callback", temple->side);
       return;
     }
-    const G2TempleDownTransition down = g2BeginTempleDown(*temple);
+    const G2TempleDownTransition down =
+        g2BeginTempleDown(*temple, pClient->getLastDisconnectReason());
     const bool wasConnected = down.wasConnected;
     if (wasConnected) kbdPadSysDoubleUnpublishForSide(temple->side);
     if (wasConnected) {
@@ -4318,7 +4357,7 @@ static void micWavCloseLocked(const char* reason) {
 // — comfortably absorbs WiFi-coexist scheduling jitter.
 //
 // Mutex protects the ring against the writer (BLE notify task) and the
-// reader (SR loop on cmd_exec_task). gMicAfeDataReadySem wakes a
+// reader (SR loop on cmd_exec). gMicAfeDataReadySem wakes a
 // blocked reader when fresh samples arrive.
 static SemaphoreHandle_t  gMicAfeMutex      = nullptr;
 static SemaphoreHandle_t  gMicAfeReadySem   = nullptr;
@@ -5866,7 +5905,7 @@ static uint32_t g2SyncLifecyclePendingWaitMs() {
   return waitMs;
 }
 
-// Runs only on g2_ctrl_owner. It claims no teardown while holding a spinlock;
+// Runs only on g2_owner. It claims no teardown while holding a spinlock;
 // the tokenized terminal path revalidates immediately before its atomic claim.
 static void g2SyncLifecycleTick() {
   const uint32_t now = millis();
@@ -6296,7 +6335,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
           // normally because gHijackStartedMs only advances on input.
           if (g2FsmHijackActive()) gHijackStartedMs = millis();
           // Defer the actual handler AND the "Hijack tap: …" log line off
-          // g2_ctrl_owner. BLE callback delivery is copy-only now; parsing
+          // g2_owner. BLE callback delivery is copy-only now; parsing
           // runs on the 6144-byte owner that must remain free to decode ACKs.
           tapDispatcherEnqueue(idx, iname);
         }
@@ -6408,7 +6447,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
             }
           }
           if (!deferred) {
-            DEBUG_G2F("[G2] TEXT view: TextEvent CLICK → deferring exit handler to g2_tap_disp");
+            DEBUG_G2F("[G2] TEXT view: TextEvent CLICK → deferring exit handler to g2_taps");
             // Enqueue before disarming. If the zero-time send fails the view
             // remains armed, so the user can retry instead of losing its only
             // exit callback.
@@ -6486,7 +6525,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
       // highlighted nav-row index. The current grid cursor is already owned by
       // the pad, so no row index is needed. Match the atomically published
       // presentation epoch, dedup a possible opposite-temple mirror, and defer
-      // selection to g2_tap_disp — selecting may push images and wait for ACKs.
+      // selection to g2_taps — selecting may push images and wait for ACKs.
       const bool keyboardOwnsDouble = kbdPadSysDoubleOwned();
       if (etype == 3 && src == 2 && keyboardOwnsDouble) {
         const uint32_t keyboardEpoch = __atomic_load_n(
@@ -6626,7 +6665,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
             }
           }
           DEBUG_G2F("[G2] TEXT view: SysEvent %s(%u) src=%u → deferring exit "
-                    "handler to g2_tap_disp", osEventTypeName(etype),
+                    "handler to g2_taps", osEventTypeName(etype),
                     (unsigned)etype, (unsigned)src);
           // Enqueue first; disarm only after ownership transfers. Queue-full
           // leaves the view retryable instead of silently losing its exit.
@@ -8324,7 +8363,7 @@ static void onMicDetailRuntimeDone(bool ok, const char* result,
 // micrecord start/stop done — re-CREATE so the Record row label flips
 // (list rows can't UPDATE_TEXT). No micautostart chaining — recording is a
 // one-shot, not a boot preference. The ~1 s worst-case flush on `stop` (WAV
-// header) runs on cmd_exec_task, not here.
+// header) runs on cmd_exec, not here.
 static void onMicDetailRecordDone(bool ok, const char* result,
                                   const G2CmdCookie& cookie, void* /*userData*/) {
   if (!ok || (result && strncmp(result, "Error", 5) == 0)) {
@@ -9035,12 +9074,12 @@ bool g2ShowFmTunerPage() {
 // (g2ShowLlmPage, unchanged) below.
 //
 // Why ordinary list pages: they ride the "app" container tap path
-// (handleDevEvent → tapDispatcherEnqueue → g2_tap_disp → handleHijackMenuTap
+// (handleDevEvent → tapDispatcherEnqueue → g2_taps → handleHijackMenuTap
 // → this page's handleTap), so every genuine tap already stamps
 // gHijackStartedMs (the watchdog refresh) — nothing new is fed from acks.
 // Picker state lives in file statics so a 60 s watchdog force-exit resumes
 // at the last level on re-entry (Apps → LLM → Ask). All picker/compose work
-// stays off BTC_TASK: the terminal `llmask` runs on cmd_exec_task via
+// stays off BTC_TASK: the terminal `llmask` runs on cmd_exec via
 // g2SubmitHijackCommand, and its completion opens the viewer (or a
 // busy/stale message) on the lens-applier context.
 //
@@ -9163,7 +9202,7 @@ static void llmMenuClassLabel(uint8_t lo, uint8_t hi, char* out, size_t cap) {
 // Partition the group's entities into ≤8 alpha buckets balanced by count,
 // computed from the ACTUAL first letters present. Returns the bucket count
 // (fills sLlmBucketLo/Hi). Reads each entity's first byte via the copy-out
-// API (µs lock per call; runs once on the g2_tap_disp tap, not a hot loop).
+// API (µs lock per call; runs once on the g2_taps tap, not a hot loop).
 static uint8_t llmMenuComputeBuckets(uint8_t g, uint16_t entCount) {
   uint16_t cnt[27] = {0};
   char eb[8];
@@ -9497,7 +9536,7 @@ static void llmMenuAskDone(bool ok, const char* result, const G2CmdCookie& c, vo
   (void)g2EnqueueRedraw(c, llmMenuMsgRender, "LLM ask-msg");
 }
 
-// Compose + submit on cmd_exec_task under the paired user's auth. entityIdx < 0
+// Compose + submit on cmd_exec under the paired user's auth. entityIdx < 0
 // for a slotless ("canned") template. The gen is the one cached when the pick
 // started; a raced model swap fails cleanly (llmask → stale → message).
 static void llmMenuSubmit(int entityIdx) {
@@ -10153,9 +10192,9 @@ static bool shouldDedupKeyboardSysDouble(char side,
 // does not consume native QuickNote traffic; G2_NativeNotes handles SID 0x12
 // separately when QuickNote and local transcription are compiled in.
 //
-// g2_ctrl_owner (g2HoldIngest) only pairs, records, samples the gates that need
+// g2_owner (g2HoldIngest) only pairs, records, samples the gates that need
 // no page state, counts the hold as user activity and queues a G2HoldJob.
-// g2_tap_disp (g2HoldDeliver) routes the press to the current page's hold
+// g2_taps (g2HoldDeliver) routes the press to the current page's hold
 // handler or the global hold action (g2holdaction), hands its release or abort
 // to that same consumer, and posts g2_long_press / g2_long_release. Records and
 // events carry source, phase, consumer and timing only, never text (R22).
@@ -10167,8 +10206,8 @@ static bool shouldDedupKeyboardSysDouble(char side,
 // SYSTEM_EXIT (never the echo of HW1's own page-swap Shutdown), terminal
 // widget loss, the end of the widget lifecycle that admitted them, or
 // g2HoldMaxOpenMs().
-// State is shared by g2_ctrl_owner (ingest/aborts), the main loop (expiry),
-// cmd_exec (status, sim) and g2_tap_disp (route results), hence gHoldMux; every
+// State is shared by g2_owner (ingest/aborts), the main loop (expiry),
+// cmd_exec (status, sim) and g2_taps (route results), hence gHoldMux; every
 // clock read that stamps or ages a press is taken inside it, and every log line
 // and queue send after it.
 static portMUX_TYPE gHoldMux = portMUX_INITIALIZER_UNLOCKED;
@@ -10283,7 +10322,7 @@ static void g2HoldRecordRouteLocked(uint32_t pressId, G2HoldConsumer consumer,
 }
 
 // "Press→quicknote", "Press→ignored:overlay", "Aborted(fg-exit)", "stale"...
-// A press row with no route yet is still queued for g2_tap_disp ("pending").
+// A press row with no route yet is still queued for g2_taps ("pending").
 static void g2HoldRecordOutcome(const G2HoldRecord& r, char* out, size_t cap) {
   const char* reason = g2HoldReasonName((G2HoldReason)r.reason);
   if (r.verdict == kHoldRecNoVerdict) {
@@ -10354,7 +10393,7 @@ static bool g2HoldAbortLocked(G2HoldReason reason, char side, uint32_t now,
   return true;
 }
 
-// Hands one job to g2_tap_disp (zero-wait). A press the queue refuses is
+// Hands one job to g2_taps (zero-wait). A press the queue refuses is
 // marked queue-full on its row; its release or abort still goes out, and the
 // dispatcher, which never saw that press, delivers and posts nothing for it.
 static void g2HoldQueue(const G2HoldJob& job, uint32_t presentationEpoch) {
@@ -10371,7 +10410,7 @@ static void g2HoldQueue(const G2HoldJob& job, uint32_t presentationEpoch) {
 }
 
 // The press gates that need no page state (R6, R11, R19), sampled by the
-// producer before the press is queued. g2_tap_disp re-checks all of them, with
+// producer before the press is queued. g2_taps re-checks all of them, with
 // the page-level ones, when it routes. A press dropped here still pairs (so
 // its release is absorbed) and still reaches the dispatcher for its event.
 static G2HoldReason g2HoldIngestGate(uint32_t presentationEpoch,
@@ -10389,10 +10428,10 @@ static G2HoldReason g2HoldIngestGate(uint32_t presentationEpoch,
 }
 
 // Shared by the RX hooks and `g2hold sim`: pair one copy and record it, count
-// a hold on a live HW1 page as user activity, then queue for g2_tap_disp the
+// a hold on a live HW1 page as user activity, then queue for g2_taps the
 // end of any press this copy closed implicitly, followed by the copy's own
 // press or release. Duplicates and orphans queue nothing. Non-blocking for
-// every caller (g2_ctrl_owner, cmd_exec): one spinlock, then zero-wait sends.
+// every caller (g2_owner, cmd_exec): one spinlock, then zero-wait sends.
 static void g2HoldAccept(char side, uint32_t etype, uint8_t src, G2HoldVia via,
                          bool current, uint32_t lifecycleEpoch,
                          uint32_t presentationEpoch, bool profileBypass) {
@@ -10463,7 +10502,7 @@ static void g2HoldAccept(char side, uint32_t etype, uint8_t src, G2HoldVia via,
     }
     if (verdict == G2HoldVerdict::Press ||
         verdict == G2HoldVerdict::PressAfterLostRelease) {
-      rec.reason = (uint8_t)gate;   // ignored here, or routed by g2_tap_disp
+      rec.reason = (uint8_t)gate;   // ignored here, or routed by g2_taps
       G2HoldJob& job = jobs[jobCount++];
       job = {};
       job.phase = (uint8_t)G2HoldPhase::Press;
@@ -10642,7 +10681,7 @@ static bool g2HoldEndOwner(const G2HoldOwner& owner, bool release,
 }
 
 // At most two hold events per second (a press and its release); automations
-// and the event log never see a burst. g2_tap_disp only.
+// and the event log never see a burst. g2_taps only.
 static void g2HoldPostEvent(uint8_t kind, uint8_t source, const char* detail) {
   static G2HoldEventRate sRate;
   const bool admit = sRate.admit(millis());
@@ -10653,13 +10692,13 @@ static void g2HoldPostEvent(uint8_t kind, uint8_t source, const char* detail) {
   if (admit) systemEventPost(kind, g2HoldSourceName(source), detail);
 }
 
-// g2_tap_disp side of the hold input. A press is re-gated with page state and
+// g2_taps side of the hold input. A press is re-gated with page state and
 // routed: the current page's hold handler first (the page applies the source
 // policy itself, via g2HoldSourceAdmitted), else the global action. Its
 // release or abort then reaches exactly that consumer. Events are posted here,
-// never on g2_ctrl_owner; they carry no text (R22, R23: event-only rows).
+// never on g2_owner; they carry no text (R22, R23: event-only rows).
 static void g2HoldDeliver(const G2HoldJob& job, uint32_t pressEpoch) {
-  static G2HoldDelivery sDelivery;   // g2_tap_disp only
+  static G2HoldDelivery sDelivery;   // g2_taps only
   char detail[48];
   if (job.phase != (uint8_t)G2HoldPhase::Press) {
     const bool release = job.phase == (uint8_t)G2HoldPhase::Release;
@@ -10813,7 +10852,7 @@ static const char* g2HoldSim(const String& what, uint8_t src) {
   return out;
 }
 
-// Called by g2_tap_disp after g2_ctrl_owner sees and deduplicates a ListEvent
+// Called by g2_taps after g2_owner sees and deduplicates a ListEvent
 // CLICK on container "app". This worker may allocate and enqueue UI work; the
 // separate control owner remains available to decode synchronous ACKs.
 //
@@ -11080,7 +11119,7 @@ static void handleHijackMenuTap(uint32_t idx, const char* wireName,
             (unsigned)idx, (unsigned)visibleIdx);
 }
 
-// Runs only on g2_tap_disp. The producer stamps the exact keyboard
+// Runs only on g2_taps. The producer stamps the exact keyboard
 // presentation epoch; recheck publication and pad/text-entry state so a queued
 // double cannot mutate a replacement surface. SysEvent DOUBLE_CLICK is rowless
 // on captured firmware, so selection uses the pad's current logical cursor.
@@ -11217,7 +11256,7 @@ static bool handleMenuStartUp(G2Temple& t, uint32_t widgetId,
 
   // Step 5/Group D: enqueue the Shutdown+CREATE handshake onto the lens
   // applier instead of spawning a per-call stack here. handleMenuStartUp runs
-  // on g2_ctrl_owner, so this hop is load-bearing: the task that decodes the
+  // on g2_owner, so this hop is load-bearing: the task that decodes the
   // CREATE response must never block waiting for that response itself.
   CustomSpec* spec = new (std::nothrow) CustomSpec{};
   if (!spec) {
@@ -11715,7 +11754,7 @@ static bool g2NoteEvenCoreRendererActivity(G2Temple& t,
     // Wear automations retain their historical heartbeat semantics. A page
     // response can safely reopen rendering, but cannot claim the glasses were
     // picked up; only the strict heartbeat ACK path reaches this edge.
-    systemEventPost(SYSEVT_G2_WORN, t.side == 'L' ? "LEFT" : "RIGHT");
+    systemEventPost(SYSEVT_G2_PLUGIN_ALIVE, t.side == 'L' ? "LEFT" : "RIGHT");
     g2RepairNudge(/*gesture=*/false);
   }
   return true;
@@ -12287,7 +12326,7 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
         // separates them — the same way logPbFlat is used for unmapped sids.
         // Gated on the same test DEBUG_G2F applies (log level + debugg2) so
         // the hex formatting and the pb walk are skipped, not just the
-        // emission, when the flag is off — this runs on g2_ctrl_owner for
+        // emission, when the flag is off — this runs on g2_owner for
         // every EVENT frame, in the same drain lap as the EvenAI session.
         if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2)) {
           char raw[3 * 24 + 1]; size_t rp = 0;
@@ -12340,7 +12379,7 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
       }
       // Body fields (skip the cmd+magic prefix we already named). Same gate
       // as above: logPbFlat only emits via DEBUG_G2F, so don't walk when
-      // nothing would print (these glasses->host frames land on g2_ctrl_owner
+      // nothing would print (these glasses->host frames land on g2_owner
       // during a live EvenAI session).
       if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2)) {
         logPbFlat(t.side, "  body", env.payload, env.payloadLen);
@@ -13546,12 +13585,13 @@ static void beatOne(G2Temple& t) {
                      (unsigned)missed);
     g2RingDump(t.side == 'L' ? "plugin silent (L)" : "plugin silent (R)");
     g2PushStatusEvent(t.side == 'L' ? "plugin-silent-L" : "plugin-silent-R");
-    // Best available "glasses set down / not worn" proxy — the plugin task
-    // goes dormant when the glasses aren't on a head. Keep this edge latched
+    // The plugin task goes dormant when no HW1 page is being rendered AND
+    // when the glasses are off a head, so this is at most a "set down" proxy
+    // and the kind is named for what is measured. Keep this edge latched
     // across generic renderer recovery; only a strict heartbeat ACK pairs it
-    // with WORN and permits another NOT_WORN edge.
+    // with PLUGIN_ALIVE and permits another PLUGIN_SILENT edge.
     if (emitNotWorn) {
-      systemEventPost(SYSEVT_G2_NOT_WORN,
+      systemEventPost(SYSEVT_G2_PLUGIN_SILENT,
                       t.side == 'L' ? "LEFT" : "RIGHT");
     }
   }
@@ -13732,6 +13772,8 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
                    haveMac ? "saved-address match"
                            : "no saved MAC — name-based match",
                    tryText);
+  logSystemEvent("G2", "half-connected repair: scanning for %s temple (%s, %s)",
+                 sideStr, haveMac ? "saved address" : "name match", tryText);
 
   // Tear down any stale advert object so the scan callback can claim
   // the new one. The callback's `if (t.advertisedDevice) return` guard
@@ -13973,6 +14015,9 @@ static void missingArmRecoveryComplete(bool ok) {
   portENTER_CRITICAL(&gRecoveryMux);
   gRepair.finished(ok, links.left != links.right, millis());
   portEXIT_CRITICAL(&gRecoveryMux);
+  // The episode ended (both up or both down): the found-but-refused streak
+  // belongs to this pair only.
+  if (ok || links.left == links.right) gRepairOpenFailStreak = 0;
 }
 
 // Pushes g2-status whenever the repair text changes, so the SSE's "rp" follows
@@ -15960,7 +16005,7 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
 #if HW1_CONVERSATE_CAPTION_TEST || HW1_CONVERSATE_LOCAL_STT
 #if HW1_CONVERSATE_LOCAL_STT
 namespace {
-// Live timing (TL send), all on g2_ctrl_owner: g2ConversateSendCaption notes
+// Live timing (TL send), all on g2_owner: g2ConversateSendCaption notes
 // each final caption the pump flags (gConvTLSendSeq), the RX path notes the
 // glasses' COMM_RSP for it, and g2ConvTLFlush prints both from
 // g2ConversateLocalTick, outside the pump's and the RX chain's frames (the
@@ -16171,7 +16216,7 @@ static void g2ConversateLocalArm() {
 
 // The local session ended: log why and, if Conversate is still open and the
 // wearer did not close it, start again. Kept out of g2ConversateLocalTick and
-// off the stack: g2_ctrl_owner has ~6 KB and the tick already holds a chunk
+// off the stack: g2_owner has ~6 KB and the tick already holds a chunk
 // and a draft (a stack frame here overflowed it, 2026-10-01).
 static __attribute__((noinline)) void g2ConversateLocalEnded() {
   static STTSnapshot end;
@@ -17975,7 +18020,7 @@ static bool g2ControlWorkerEnsure() {
     DEBUG_G2F("[G2] control owner start cancelled by teardown");
     return false;
   }
-  BaseType_t rc = xTaskCreateLogged(heartbeatWorkerTask, "g2_ctrl_owner",
+  BaseType_t rc = xTaskCreateLogged(heartbeatWorkerTask, "g2_owner",
                               /*stack bytes*/ G2_CONTROL_STACK_BYTES, nullptr,
                               /*prio*/ 5, &gBeatTaskHandle,
                               "g2.control", APP_CORE);
@@ -18691,6 +18736,9 @@ static bool connectTemple(G2Temple& t, hw1coex::Purpose purpose) {
   if (!bleConnectWatched(t.client, t.advertisedDevice, 35000, connTag, purpose)) {
     DEBUG_G2F("[G2-%c] BLE connect failed after %u ms",
               t.side, (unsigned)(millis() - tConnStart));
+    if (purpose == hw1coex::Purpose::Repair && gRepairOpenFailStreak < 255) {
+      ++gRepairOpenFailStreak;  // the scan found it; the open did not take
+    }
     (void)bleQuarantineClientAfterFailedConnect(
         t.client,
         t.side == 'L' ? BLE_CLIENT_RETIRE_G2_LEFT
@@ -18700,6 +18748,7 @@ static bool connectTemple(G2Temple& t, hw1coex::Purpose purpose) {
   }
   DEBUG_G2F("[G2-%c] BLE connect OK in %u ms",
             t.side, (unsigned)(millis() - tConnStart));
+  gRepairOpenFailStreak = 0;
 
   t.mtu = bleNegotiateConnMtu(t.client, MTU_TARGET, 1000, connTag);
 
@@ -19037,7 +19086,7 @@ bool initG2Client() {
   g2RegisterBlePeer();
 
 #if ENABLE_CAMERA_SENSOR
-  // Sensors detail redraw hook only — cam_pwr stays lazy until first power op.
+  // Sensors detail redraw hook only — cam_power stays lazy until first power op.
   g2RegisterSensorsCameraPowerHook();
 #endif
 
@@ -19200,8 +19249,13 @@ static const uint32_t kBleRecycleMinGapMs  = 10UL * 60UL * 1000UL;
 static uint32_t sBleLastRecycleMs = 0;
 
 bool bleStackRecycleIfWedged(void) {
+  // A half-connected pair whose missing temple answers scans but refuses a
+  // whole fast ladder of opens is a host-orphaned link; only a controller
+  // reset clears it, so it is admitted even while the sibling temple, the
+  // ring or the phone are up (the restore intent below brings them back).
+  const bool halfStuck = gRepairOpenFailStreak >= kRepairOpenFailTrip;
   if (gBleWedgeStreak < kBleWedgeStreakTrip &&
-      gBleClientRetirementPeerMask == 0) return false;
+      gBleClientRetirementPeerMask == 0 && !halfStuck) return false;
   G2BleRoleTransitionClaim role(BleRoleTransition::RECOVERING);
   if (!role)                                              return false;
   // Normal DISCONNECT→UNREG retirement is asynchronous. Give the fixed slots
@@ -19210,10 +19264,10 @@ bool bleStackRecycleIfWedged(void) {
   const uint32_t retirementAgeMs = bleReapRetiredClients();
   const uint8_t retirementPeers = gBleClientRetirementPeerMask;
   const bool mustRetireClient = retirementPeers != 0;
-  if (gBleWedgeStreak < kBleWedgeStreakTrip && !mustRetireClient) return false;
+  if (gBleWedgeStreak < kBleWedgeStreakTrip && !mustRetireClient && !halfStuck) return false;
   if (mustRetireClient && retirementAgeMs < kBleRetirementGraceMs) return false;
   const bool hadClientRuntime = isG2ClientInitialized();
-  if (!hadClientRuntime && !mustRetireClient)              return false;
+  if (!hadClientRuntime && !mustRetireClient && !halfStuck) return false;
   if (!bleSetupIdle(hw1setup::kAll))                     return false;
   // A forced terminal reset for one lost native route tears down the whole
   // central role. Preserve every peer that was physically up beforehand as a
@@ -19234,19 +19288,27 @@ bool bleStackRecycleIfWedged(void) {
   if (phoneLive) previouslyLivePeers |= (uint8_t)(1U << BLE_PEER_PHONE);
   const uint8_t restorePeers = retirementPeers | previouslyLivePeers;
   if ((gL.connected || gR.connected || g2RingIsConnected() || phoneLive) &&
-      !mustRetireClient)                                  return false;
+      !mustRetireClient && !halfStuck)                    return false;
   if (isBleServerInitialized())                           return false;
 
   const uint32_t now = millis();
   if (sBleLastRecycleMs && (now - sBleLastRecycleMs) < kBleRecycleMinGapMs) {
     return false;
   }
+  const char* why = mustRetireClient ? "unretired client route"
+                  : halfStuck ? "half-connected pair: temple found but refuses to open"
+                  : "connect admission wedged";
   BROADCAST_PRINTF("[BLE] Host stack recovery required (%s, streak=%u) — recycling",
-                   mustRetireClient ? "unretired client route" : "connect admission wedged",
-                   (unsigned)gBleWedgeStreak);
-  char det[48];
-  snprintf(det, sizeof(det), "%u instant refusals", (unsigned)gBleWedgeStreak);
-  systemEventPost(SYSEVT_BLE_STACK_RECYCLED, "wedged", det);
+                   why, (unsigned)(halfStuck && !mustRetireClient ? gRepairOpenFailStreak : gBleWedgeStreak));
+  char det[64];
+  if (halfStuck && !mustRetireClient) {
+    snprintf(det, sizeof(det), "%u found-but-refused repair tries", (unsigned)gRepairOpenFailStreak);
+  } else {
+    snprintf(det, sizeof(det), "%u instant refusals", (unsigned)gBleWedgeStreak);
+  }
+  logSystemEvent("BLE", "host stack recycle: %s (%s)", why, det);
+  systemEventPost(SYSEVT_BLE_STACK_RECYCLED, halfStuck && !mustRetireClient ? "half-connected" : "wedged", det);
+  gRepairOpenFailStreak = 0;
 
   if (hadClientRuntime && !deinitG2Client()) {
     BROADCAST_PRINTF("[BLE] Stack recycle aborted — G2 control owner did not stop");
@@ -20644,8 +20706,8 @@ static bool connReqBusy(const G2Temple& t, uint32_t* ageMs) {
 // that still needed BALANCED — silently defeating the guard that was protecting
 // it. Depth counting makes nesting order irrelevant.
 //
-// Cross-core: requesters run on g2_session_w / g2_img_probe / g2_ble_connect
-// (APP_CORE) and cmd_exec_task (PRO_CORE), so the depth needs a portMUX, not a
+// Cross-core: requesters run on g2_session / g2_img_probe / g2_ble_connect
+// (APP_CORE) and cmd_exec (PRO_CORE), so the depth needs a portMUX, not a
 // bare volatile. Modelled on System_PollPause, the existing house arbiter.
 static portMUX_TYPE sConnPriMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile int sBalancedDepth = 0;
@@ -21729,7 +21791,7 @@ static bool g2TerminalInvalidate(const char* reason, char side,
 // Caller log ID. The string lives at the public helper's call site so
 // log lines can stay distinct ("CREATE-list" vs "CREATE-text" etc.).
 //
-// The callback only copies RX now; g2_ctrl_owner decodes the matching
+// The callback only copies RX now; g2_owner decodes the matching
 // CreateResp/RebuildResp and gives the semaphore. Sleeping on that owner is a
 // guaranteed self-deadlock, and sleeping on the callback is still unsafe
 // because it can prevent the response from being copied. Refuse both.
@@ -22982,7 +23044,7 @@ bool g2ClearDisplay() {
 //   4. Block on the CreateResp ack
 //
 // Why a worker task: sendCreateListAndWait blocks on a semaphore signaled by
-// g2_ctrl_owner after it parses the copied RX packet. Running this handshake
+// g2_owner after it parses the copied RX packet. Running this handshake
 // on the owner would deadlock waiting for an ACK only that owner can decode.
 
 // Args carried across to the worker. We deep-copy strings into the
@@ -23524,7 +23586,7 @@ cleanup:
 static volatile uint32_t gNotifyGen = 0;
 
 // The queue carries LensUiJob* instead of PageSwapArgs*. The legacy
-// names ("gPageSwapQueue", "pageSwapWorkerLoop", task name "g2_page_swap_w")
+// names ("gPageSwapQueue", "pageSwapWorkerLoop", task name "g2_pages")
 // are retained to minimise churn; functionally this is the lens applier from
 // G2_REFACTOR_PROPOSAL.md §5.2. Depth 8 is shared by PageSwap, Redraw,
 // Notify, Custom and NativeNotif work. Toast is reserved but unimplemented.
@@ -23996,7 +24058,7 @@ static void pageSwapWorkerLoop(void* arg) {
 
     // Stack peak after each job — the datum that decides whether
     // kG2PageSwapStackBytes is right. Mirrors the tap dispatcher's block for
-    // the same reason: g2_page_swap_w isn't in reportAllTaskStacks' knownTasks
+    // the same reason: g2_pages isn't in reportAllTaskStacks' knownTasks
     // table, so it lands in the "system tasks" section where the alloc/used
     // columns are an assumed 4 KB margin rather than a measurement and
     // everything prints in whole KB. Here the real allocation is known, so
@@ -24081,7 +24143,7 @@ static bool pageSwapInit() {
   // the end of the old allocation. This is the ONLY xTaskCreate on the
   // page-swap path now — all navigation re-uses this worker via the queue.
   TaskHandle_t task = nullptr;
-  BaseType_t rc = xTaskCreateLogged(pageSwapWorkerLoop, "g2_page_swap_w",
+  BaseType_t rc = xTaskCreateLogged(pageSwapWorkerLoop, "g2_pages",
                               /*stack bytes*/ kG2PageSwapStackBytes, queue,
                               /*prio*/  tskIDLE_PRIORITY + 2,
                               &task, "g2.page-swap", APP_CORE);
@@ -24200,7 +24262,7 @@ bool g2EnqueueLensJob(LensUiJob* job, G2LensEnqueueWait wait) {
 // Tap dispatcher — runs handleHijackMenuTap() on its own worker task
 // =============================================================================
 // Why this exists:
-//   The Bluedroid callback is copy-only; g2_ctrl_owner drains and parses the
+//   The Bluedroid callback is copy-only; g2_owner drains and parses the
 //   RX ring. Calling handleHijackMenuTap inline on that 6144-byte task would
 //   run formatting, settings, filesystem, and page builders on the same task
 //   that must keep draining CREATE/REBUILD responses.
@@ -24350,7 +24412,7 @@ static bool tapRuntimeSnapshot(QueueHandle_t* queueOut) {
 // under encryptString, String heap ops), so 5920 B is a floor, not a total.
 //
 // The two paths a tap runs INLINE on this stack rather than deferring to
-// cmd_exec_task are both ON that chain, which is why it dominates:
+// cmd_exec are both ON that chain, which is why it dominates:
 //   * G2HijackCtxGuard → g2HijackAuthContext → bleStampPairedByIfBlank →
 //     setSetting → writeSettingsJson (JSON doc build + encryptString). Fires
 //     once, on the first-time owner stamp when pairedByUser is still blank.
@@ -24507,7 +24569,7 @@ static void tapDispatcherWorkerLoop(void* arg) {
         kbdPadDictationServiceOnTap(e.presentationEpoch);
         break;
       case TAP_DISPATCH_EXIT_FN: {
-        // TEXT-view exit handler deferred off g2_ctrl_owner. The exit fn
+        // TEXT-view exit handler deferred off g2_owner. The exit fn
         // typically redraws the previous page (file chooser, menu, …) which
         // is a heavy call chain: G2HijackCtxGuard → FS access → page-swap
         // enqueue → BLE frame send. Generic exits have no text token. A TEXT
@@ -24586,7 +24648,7 @@ static void tapDispatcherWorkerLoop(void* arg) {
 
     // Stack peak after each dispatch — the datum that decides whether
     // kG2TapDispatchStackBytes is right. The generic task-stack report can't
-    // answer it: g2_tap_disp isn't in reportAllTaskStacks' knownTasks table, so
+    // answer it: g2_taps isn't in reportAllTaskStacks' knownTasks table, so
     // it lands in the "system tasks" section, where the alloc/used columns are
     // an assumed 4 KB margin rather than a measurement and everything prints in
     // whole KB. Here the real allocation is known, so report exact bytes.
@@ -24673,7 +24735,7 @@ static bool tapDispatcherInit() {
     return false;
   }
   TaskHandle_t task = nullptr;
-  BaseType_t rc = xTaskCreateLogged(tapDispatcherWorkerLoop, "g2_tap_disp",
+  BaseType_t rc = xTaskCreateLogged(tapDispatcherWorkerLoop, "g2_taps",
                               /*stack bytes*/ kG2TapDispatchStackBytes, queue,
                               /*prio*/  tskIDLE_PRIORITY + 2,
                               &task, "g2.tap-dispatch", APP_CORE);
@@ -24759,7 +24821,7 @@ static bool g2TextEntryCleanupKick() {
   return true;
 }
 
-// Producer. Called from handleDevEvent on g2_ctrl_owner.
+// Producer. Called from handleDevEvent on g2_owner.
 // Non-blocking: zero-tick send, drop on full. Falling back to inline
 // handleHijackMenuTap() would re-introduce deep work and ACK self-deadlock
 // hazards on the control owner, so the failure
@@ -24886,12 +24948,12 @@ static bool tapDispatcherEnqueueHold(const G2HoldJob& job,
 
 // Producer for the TEXT-view exit handler. Same rationale as
 // tapDispatcherEnqueue: the exit fn does heavy work (file chooser redraw,
-// page swap, FS access) that does not belong on g2_ctrl_owner. The caller
+// page swap, FS access) that does not belong on g2_owner. The caller
 // disarms the view only after this zero-time enqueue succeeds; failure leaves
 // the callback retryable.
 //
 // On queue-full or pre-init we drop (don't fall back to inline) — calling
-// fn() from g2_ctrl_owner is exactly the hazard this dispatcher exists to
+// fn() from g2_owner is exactly the hazard this dispatcher exists to
 // prevent. User can re-tap to retry. The drop counter surfaces in the
 // worker log so a stuck dispatcher is visible.
 static bool tapDispatcherEnqueueExit(void (*fn)()) {
@@ -26271,7 +26333,7 @@ bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   // because this path is ALREADY single-flight by design: the unguarded
   // gLivePageBuildFn / gLivePageActive globals set below mean a concurrent second
   // call is broken today regardless, so a shared buffer adds no new hazard.
-  // Takes 2 KB off g2_tap_disp's 6400-byte stack (~32% of the frame).
+  // Takes 2 KB off g2_taps's 6400-byte stack (~32% of the frame).
   EXT_RAM_BSS_ATTR static char seed[2048];
   seed[0] = '\0';
   buildFn(seed, sizeof(seed));
@@ -26290,7 +26352,7 @@ bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   gLivePageActive     = true;
   gLivePageLifecycleEpoch = lifecycleEpoch;
 
-  // Runs on persistent g2_session_w (kG2SessionStackBytes). Heap buffers keep stack pressure low.
+  // Runs on persistent g2_session (kG2SessionStackBytes). Heap buffers keep stack pressure low.
   if (!g2SessionSubmit(livePageWorker, nullptr, nullptr, "live_page",
                        lifecycleEpoch)) {
     DEBUG_G2F("[G2] live-page: session enqueue failed");
@@ -26310,7 +26372,7 @@ void g2StopLiveListPage() {
   // Kick the refresh sem so the worker wakes immediately and notices
   // the stop flag rather than waiting out the full interval.
   if (gLivePageRefreshSem) xSemaphoreGive(gLivePageRefreshSem);
-  // Session job returns to g2_session_w idle; spin so cleanup is observable.
+  // Session job returns to g2_session idle; spin so cleanup is observable.
   for (int i = 0; i < 30 && gLivePageActive; i++) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
@@ -26378,7 +26440,7 @@ static void liveTextWorker(void* arg);
 // =============================================================================
 // G2 session worker — one long-lived INTERNAL stack (kG2SessionStackBytes) for
 // hijack UI sessions (Health/Map/LLM/viewers/live pages). Sibling to
-// g2_page_swap_w (the lens applier, kG2PageSwapStackBytes, which stays
+// g2_pages (the lens applier, kG2PageSwapStackBytes, which stays
 // responsive). Single-flight: a new enqueue aborts the current session, waits
 // for idle, then runs.
 // =============================================================================
@@ -26598,7 +26660,7 @@ static bool g2SessionEnsureWorker() {
   TaskHandle_t task = nullptr;
   gSessionStop = false;
   BaseType_t rc = xTaskCreateLogged(
-      g2SessionWorkerLoop, "g2_session_w",
+      g2SessionWorkerLoop, "g2_session",
       /*stack bytes*/ kG2SessionStackBytes, queue,
       /*prio*/ tskIDLE_PRIORITY + 2,
       &task, "g2.session", APP_CORE);
@@ -27407,7 +27469,7 @@ bool g2StartLiveTextPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   // Stash worker config BEFORE xTaskCreate so the worker can read it
   // immediately. The synchronous tearDown + initial CREATE handshake
   // runs INSIDE liveTextWorker — see the prologue there for why we
-  // can't do it here. The common caller is g2_tap_disp; this also keeps the
+  // can't do it here. The common caller is g2_taps; this also keeps the
   // session lifetime and blocking ACK wait out of the tap lane.
   gLiveTextBuildFn    = buildFn;
   gLiveTextRenderFn   = renderFn;
@@ -27424,7 +27486,7 @@ bool g2StartLiveTextPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   // the Shutdown→CREATE window can't trip our exit handler before
   // the widget exists.
 
-  // Runs on persistent g2_session_w (same stack as other hijack sessions).
+  // Runs on persistent g2_session (same stack as other hijack sessions).
   if (!g2SessionSubmit(liveTextWorker, nullptr, nullptr, "live_text",
                        lifecycleEpoch)) {
     DEBUG_G2F("[G2] live-text: session enqueue failed");
@@ -27443,7 +27505,7 @@ void g2StopLiveTextPage() {
   if (!gLiveTextActive) return;
   gLiveTextStopFlag = true;
   if (gLiveTextRefreshSem) xSemaphoreGive(gLiveTextRefreshSem);
-  // Session job returns to g2_session_w idle; spin so cleanup is observable.
+  // Session job returns to g2_session idle; spin so cleanup is observable.
   for (int i = 0; i < 30 && gLiveTextActive; i++) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
@@ -27774,7 +27836,7 @@ void g2Tick() {
   // adoption, NTP, timeset) or a tz change — self-throttled, cheap no-op.
   g2TimeSyncTick();
   // The OLED services its mic-input page from the display tick. The G2 pad has
-  // the same input method, but queues all buffer/image work onto g2_tap_disp so
+  // the same input method, but queues all buffer/image work onto g2_taps so
   // this main-loop tick never mutates the text-entry session cross-task.
   kbdPadDictationTickMain();
   g2TranscriptionTick(); // async command scheduling only; no filesystem work here
@@ -28697,7 +28759,7 @@ static const char* cmd_g2evenai(const String& argsInput) {
 // =============================================================================
 // Protocol exploration helpers — g2protostats + g2probe
 // =============================================================================
-// Both run from cmd_exec_task (CLI/web), not the BLE notify task, so the
+// Both run from cmd_exec (CLI/web), not the BLE notify task, so the
 // reentrancy concern that bit our on-glasses AI tap handler doesn't apply
 // here. Probe is allow-listed against a small block of dangerous sids.
 
@@ -33546,7 +33608,7 @@ static void g2BmpViewerDrop(void* p) {
 
 bool g2ShowBmpFile(const char* path, void (*onDone)()) {
   if (!path || !*path) return false;
-  // Heap-low guard — BMP decode buffer can be tens of KB (stack is on g2_session_w).
+  // Heap-low guard — BMP decode buffer can be tens of KB (stack is on g2_session).
   if (ESP.getFreeHeap() < 16 * 1024) {
     DEBUG_G2F("[G2] BMP viewer: declining — heap low (%u B free)",
               (unsigned)ESP.getFreeHeap());
@@ -33587,7 +33649,7 @@ bool g2ShowBmpFile(const char* path, void (*onDone)()) {
 // Ownership/threading: g2KbdPadBegin runs synchronously in the caller's
 // context (tap dispatcher, or the map worker's Search flow — the same
 // contexts that run showMapCompound-style teardown+CREATE+ack today).
-// g2KbdPadHandleTap runs on g2_tap_disp via the "app" ListEvent branch →
+// g2KbdPadHandleTap runs on g2_taps via the "app" ListEvent branch →
 // handleHijackMenuTap → text-entry interception, exactly like the legacy
 // keyboard. Image pushes block for acks there; acks pump on the BLE tasks,
 // so no deadlock. G2_Page_TextEntry stays the single owner of the buffer,
@@ -34675,8 +34737,8 @@ static void kbdPadDictationTickMain() {
 
 // Terminal/cmd17 lifecycle reset tombstones the exact text-entry identity
 // immediately, so routing and callbacks stop synchronously. It deliberately
-// does not free these ~63 KB buffers on g2_ctrl_owner: an exact cleanup token
-// is queued behind older work on g2_tap_disp, which calls g2KbdPadEnd only
+// does not free these ~63 KB buffers on g2_owner: an exact cleanup token
+// is queued behind older work on g2_taps, which calls g2KbdPadEnd only
 // after any in-flight push has returned. Queue saturation and a busy session
 // worker leave the tombstone pending; g2Tick retries the FIFO wake.
 
@@ -34845,7 +34907,7 @@ static void kbdPadSelectCurrentKey() {
   }
 }
 
-// Runs on g2_tap_disp after the SysEvent's presentation epoch and paired-user
+// Runs on g2_taps after the SysEvent's presentation epoch and paired-user
 // context have been checked. The mic status page remains non-editable.
 static bool kbdPadHandleDoubleTap() {
   if (!gKbdPad.active || !gKbdPad.surfaceLive ||
@@ -34854,7 +34916,7 @@ static bool kbdPadHandleDoubleTap() {
   return true;
 }
 
-// Nav-list tap handler. Runs on g2_tap_disp (via the text-entry
+// Nav-list tap handler. Runs on g2_taps (via the text-entry
 // interception in handleHijackMenuTap) — safe for blocking image pushes.
 void g2KbdPadHandleTap(uint32_t idx) {
   if (!gKbdPad.active) return;
@@ -36458,7 +36520,7 @@ static void g2MapPageWorker(void* arg) {
 
 static void g2MapPageDrop(void* p) { delete (MapPageArgs*)p; }
 
-// Public entry — enqueue on g2_session_w (8 KB stack paid at G2 init).
+// Public entry — enqueue on g2_session (8 KB stack paid at G2 init).
 static bool g2ShowMapPage(void (*onDone)()) {
   // Tile-read staging still needs contiguous internal DRAM; stack does not
   // (session worker already owns 8 KB). Gate on largest free for the margin only.
@@ -38446,7 +38508,7 @@ static void g2BmpFullViewerDrop(void* p) {
 
 bool g2ShowBmpFileFullScreen(const char* path, void (*onDone)()) {
   if (!path || !*path) return false;
-  // Heap-low guard — source + tile staging are PSRAM; stack is on g2_session_w.
+  // Heap-low guard — source + tile staging are PSRAM; stack is on g2_session.
   if (ESP.getFreeHeap() < 16 * 1024) {
     DEBUG_G2F("[G2] BMP full-viewer: declining — heap low (%u B free)",
               (unsigned)ESP.getFreeHeap());

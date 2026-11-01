@@ -293,7 +293,7 @@ inline G2HoldRoute g2HoldRouteDecide(const G2HoldGateInputs& in,
 }
 
 // ---------------------------------------------------------------------------
-// Dispatcher (g2_tap_disp) side
+// Dispatcher (g2_taps) side
 // ---------------------------------------------------------------------------
 // One queued hold job: the tap-dispatch payload (16 B, inside its 36 B union).
 // phase 9 / 10 / 0 (abort). reason = the ingest gate that dropped a press

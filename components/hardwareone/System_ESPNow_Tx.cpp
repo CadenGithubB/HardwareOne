@@ -27,7 +27,7 @@ extern bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags,
 // a smaller budget than a direct one). Owned by System_ESPNow.cpp beside the
 // fragmenting sender so the dispatcher and the sender never disagree.
 extern uint16_t v4_single_frame_cap(const uint8_t* dst);
-// cmd_exec_task (HardwareOne.cpp): the one task whose synchronous multi-frame
+// cmd_exec (HardwareOne.cpp): the one task whose synchronous multi-frame
 // sends run their fragment loop on the submitting task (see submitSync).
 extern TaskHandle_t gCmdExecTaskHandle;
 

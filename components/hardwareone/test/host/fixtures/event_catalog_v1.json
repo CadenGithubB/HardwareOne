@@ -39,6 +39,8 @@
         "ble_disconnected",
         "time_synced",
         "ble_stack_recycled",
+        "phone_link_up",
+        "phone_link_down",
         "mqtt_start_failed",
         "http_server_started",
         "http_server_stopped",
@@ -53,8 +55,8 @@
       "k": [
         "g2_connected",
         "g2_disconnected",
-        "g2_worn",
-        "g2_not_worn",
+        "g2_plugin_alive",
+        "g2_plugin_silent",
         "ring_connected",
         "ring_disconnected",
         "ring_worn",
@@ -107,6 +109,7 @@
         "video_saved",
         "mic_saved",
         "llm_gen_done",
+        "llm_request",
         "llm_model_loaded",
         "voice_armed",
         "llm_load_failed",
@@ -119,7 +122,11 @@
         "note_started",
         "note_saved",
         "note_failed",
-        "video_record_failed"
+        "video_record_failed",
+        "stt_started",
+        "stt_stopped",
+        "stt_segment",
+        "stt_speaker"
       ]
     },
     {

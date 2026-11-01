@@ -58,8 +58,8 @@ HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_TIME_SYNCED,         "time_synced", SYSEVT_FAM
   /* --- G2 glasses --- */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_CONNECTED,        "g2_connected", SYSEVT_FAM_GLASSES)         /* subject=sides (L+R/L/R) */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_DISCONNECTED,     "g2_disconnected", SYSEVT_FAM_GLASSES)      /* subject=side that dropped */
-HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_WORN,             "g2_worn", SYSEVT_FAM_GLASSES)              /* plugin heartbeats resumed (picked up)  subject=side */
-HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_NOT_WORN,         "g2_not_worn", SYSEVT_FAM_GLASSES)          /* plugin heartbeats stopped (set down)   subject=side */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_PLUGIN_ALIVE,     "g2_plugin_alive", SYSEVT_FAM_GLASSES)      /* the temple's app plugin answered a strict renderer heartbeat again (our only "picked up" proxy; no wear sensor is read)  subject=side */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_PLUGIN_SILENT,    "g2_plugin_silent", SYSEVT_FAM_GLASSES)     /* the temple's app plugin stopped answering renderer heartbeats: app idle (no HW1 page shown) or set down  subject=side */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_RING_CONNECTED,      "ring_connected", SYSEVT_FAM_GLASSES)       /* R1 ring GATT up after setup  subject=name detail=mac */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_RING_DISCONNECTED,   "ring_disconnected", SYSEVT_FAM_GLASSES)    /* R1 ring link lost  subject=name detail=mac */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_RING_WORN,           "ring_worn", SYSEVT_FAM_GLASSES)            /* R1 wearStatus→wear (on finger)  subject=name */
@@ -67,6 +67,8 @@ HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_RING_NOT_WORN,       "ring_not_worn", SYSEVT_F
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_RING_RECONNECT_FAILED, "ring_reconnect_failed", SYSEVT_FAM_GLASSES) /* R1 connect attempt failed  subject=name detail=reason fail# elapsed; throttled 10min/streak */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_RECONNECT_FAILED, "g2_reconnect_failed", SYSEVT_FAM_GLASSES)  /* glasses connect attempt failed  subject=sides sought detail=reason fail#; throttled 10min/streak */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_BLE_STACK_RECYCLED,  "ble_stack_recycled", SYSEVT_FAM_NETWORK)   /* Bluedroid host torn down + re-inited to clear a wedge  subject=wedged|reinit-failed */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PHONE_LINK_UP,       "phone_link_up", SYSEVT_FAM_NETWORK)        /* phone relay pipe reached READY  detail=enrolled|reconnected */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PHONE_LINK_DOWN,     "phone_link_down", SYSEVT_FAM_NETWORK)      /* a phone relay pipe that was up ended  detail=stopped|disconnected */
   /* --- Auth / users --- */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_LOGIN_OK,            "login_ok", SYSEVT_FAM_AUTH)             /* subject=username detail=transport */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_LOGIN_FAIL,          "login_fail", SYSEVT_FAM_AUTH)           /* subject=username detail=transport */
@@ -120,6 +122,7 @@ HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PHOTO_SAVED,         "photo_saved", SYSEVT_FAM
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_VIDEO_SAVED,         "video_saved", SYSEVT_FAM_MEDIA)          /* subject=filename detail=frames */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_MIC_SAVED,           "mic_saved", SYSEVT_FAM_MEDIA)            /* recording saved  subject=filename */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_LLM_GEN_DONE,        "llm_gen_done", SYSEVT_FAM_MEDIA)         /* subject=stop reason detail=tokens */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_LLM_REQUEST,         "llm_request", SYSEVT_FAM_MEDIA)          /* a question was handed to the assistant (any surface, any backend; never the text)  subject=backend detail=<n> chars */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_LLM_MODEL_LOADED,    "llm_model_loaded", SYSEVT_FAM_MEDIA)     /* subject=model filename */
   /* --- Lifecycle --- */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_BOOT_STARTED,        "boot_started", SYSEVT_FAM_SYSTEM)         /* setup entered  subject=reset-reason (boot counter is not loaded yet) */
@@ -226,4 +229,9 @@ HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_NOTE_SAVED,          "note_saved", SYSEVT_FAM_
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_NOTE_FAILED,         "note_failed", SYSEVT_FAM_MEDIA)            /* that note was not saved  subject=reason (a discarded slip posts nothing) */
   /* --- Video recording outcome --- */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_VIDEO_RECORD_FAILED, "video_record_failed", SYSEVT_FAM_MEDIA)    /* a clip did not finalize (no video_saved)  subject=filename detail=frames */
+  /* --- Speech to text (event-only; never the transcript text) --- */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_STT_STARTED,         "stt_started", SYSEVT_FAM_MEDIA)          /* a transcription run began  subject=continuous|question|capture */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_STT_STOPPED,         "stt_stopped", SYSEVT_FAM_MEDIA)          /* that run ended  subject=done|cancelled|failed */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_STT_SEGMENT,         "stt_segment", SYSEVT_FAM_MEDIA)          /* a speech segment closed and went to the recogniser  subject=segment number detail=<s> s voice */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_STT_SPEAKER,         "stt_speaker", SYSEVT_FAM_MEDIA)          /* a segment was attributed to a speaker  subject=speaker number detail=segment */
 #endif

@@ -7,7 +7,7 @@ hooks in handleDevEvent: each hold copy is taken before any gesture handling
 that keys on 0..3 (List containers, TextEvent's `etype > 2` drop, the Sys
 keyboard select). The producers (BLE control owner, main loop, cmd_exec) only
 pair, record, gate and queue; page handlers, the global action and events run
-only on g2_tap_disp; nothing writes glasses settings. Behaviour is exercised by
+only on g2_taps; nothing writes glasses settings. Behaviour is exercised by
 test_g2_hold_dispatch.py.
 """
 import argparse
@@ -177,12 +177,12 @@ def main() -> None:
     assert 'static uint32_t g2HoldMaxOpenMs() { return quickNoteMaxMs() + 15000u; }' in source
     assert 'kHoldMaxOpenMs' not in source
 
-    # 4. Producers (g2_ctrl_owner, main loop, cmd_exec) only pair, record,
+    # 4. Producers (g2_owner, main loop, cmd_exec) only pair, record,
     # sample the cheap gates, refresh the watchdog and queue a job: freshness
     # first, the pairing under its own spinlock, logging and queueing only
     # after it, and no handler, event, settings or wire traffic (R1/R3, R22).
     hold_section = section(source, '// Long-press ("hold") input: decode, pair, record and dispatch',
-                           '// Called by g2_tap_disp after g2_ctrl_owner sees')
+                           '// Called by g2_taps after g2_owner sees')
     for forbidden in ('g2BuildSettingInfoWrite', 'gestureControl', 'g2SubmitHijackCommand',
                       'vTaskDelay', 'xQueueSend', 'g2SendEnvelope', 'sendEnvelope',
                       'BROADCAST_PRINTF', '"2.2.9.22"', '"2.3.2.14"'):
@@ -295,7 +295,7 @@ def main() -> None:
         'expiry must age the press with a clock read taken under gHoldMux'
     assert 'firmwareOverlayActive' not in locked_expire
 
-    # 5. Dispatch (B1.3): one tap-dispatch kind, delivered on g2_tap_disp ahead
+    # 5. Dispatch (B1.3): one tap-dispatch kind, delivered on g2_taps ahead
     # of the generic presentation filter (a release or abort must reach the
     # consumer of its press whatever the lens shows); the layout guards stand.
     assert 'TAP_DISPATCH_HOLD = 7,' in source

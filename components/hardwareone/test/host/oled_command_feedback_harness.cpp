@@ -72,7 +72,7 @@ static void oledToastShow(const char* message, uint32_t = 3000, OledUIIcon = Ole
 
 // ---- async executor doubles (oledRunCommandAsync) -------------------------------------
 // submitCommandAsync queues; the executor runs a queued line only when a case
-// calls finishCommand(), on the case's own schedule, as cmd_exec_task would.
+// calls finishCommand(), on the case's own schedule, as cmd_exec would.
 #if HW1_HAVE_ASYNC_COMMAND
 using TransportSessionEpoch = uint32_t;
 inline constexpr TransportSessionEpoch kNoTransportSessionEpoch = 0;
@@ -197,13 +197,13 @@ static void resetWorld() {
 #endif
 }
 
-// cmd_exec_task runs the oldest queued line with the scripted verdict and reply.
+// cmd_exec runs the oldest queued line with the scripted verdict and reply.
 static void finishCommand() {
 #if HW1_HAVE_ASYNC_COMMAND
   if (gQueued.empty()) return;
   const QueuedCommand next = gQueued.front();
   gQueued.erase(gQueued.begin());
-  char out[512];  // cmd_exec_task's reply buffer
+  char out[512];  // cmd_exec's reply buffer
   std::snprintf(out, sizeof(out), "%s", gExecText.c_str());
   next.callback(gExecOk, out, next.userData);
 #endif
@@ -479,7 +479,7 @@ static void case_quick_bluetooth_http() {
 }
 
 #if HW1_HAVE_ASYNC_COMMAND
-// The quick rows hand their command to cmd_exec_task and return: the frame loop
+// The quick rows hand their command to cmd_exec and return: the frame loop
 // keeps running while radiopower or openwifi works (the P4 radio toggle held
 // the display task for 637 ms).
 static void case_quick_async() {

@@ -109,7 +109,7 @@ in P4 images; every other board compiles it to nothing.
   the P4 does that by itself after the radio has been idle for 30 s, and
   releases the companion when a feature asks for the radio.
 - **Console mirror.** The C6's own UART console reaches the P4 on GPIO36 and
-  is mirrored into the P4 log as `C6>` lines (`c6console [on|off]`, on by
+  is mirrored into the P4 log as `C6>` lines (`c6_console [on|off]`, on by
   default). It is the only view of the companion's boot messages and crash
   backtraces while HardwareOne is running; it found the first hardware bug of
   this subsystem within minutes.

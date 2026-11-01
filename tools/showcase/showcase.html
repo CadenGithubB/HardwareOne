@@ -1,0 +1,739 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HardwareOne Live</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131824; --panel2: #1a2130; --line: #26304a;
+    --text: #e8ecf3; --muted: #8b96ad; --accent: #5ad1ff; --accent2: #8affc1;
+    --warn: #ffbe5a; --bad: #ff6b7a; --radio: #5ad1ff; --wear: #c59bff; --power: #ffbe5a;
+    --sense: #8affc1; --memory: #ff9ad5; --brain: #ffd66b; --mesh: #6bd5ff; --auth: #b0bcd6;
+    --system: #9aa6c0; --voice: #ff9a6b; --auto: #a1ff8a; --store: #d0c3ff; --cmd: #8b96ad; --tool: #8b96ad; --media: #7fe6e6; --security: #ff6b7a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.4 -apple-system, "Inter", "Segoe UI", system-ui, sans-serif; }
+  body { padding: 18px 20px 28px; }
+  header { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-bottom: 14px; }
+  .id { display: flex; align-items: baseline; gap: 12px; }
+  .id h1 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: .3px; }
+  .id .sub { color: var(--muted); font-size: 14px; }
+  .live { display: inline-flex; align-items: center; gap: 8px; padding: 5px 11px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--panel); font-size: 12px; letter-spacing: 1px; text-transform: uppercase; }
+  .live .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
+  .live.on .dot { background: var(--accent2); box-shadow: 0 0 0 0 rgba(138,255,193,.7); animation: pulse 1.6s infinite; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(138,255,193,.6)} 100%{box-shadow:0 0 0 10px rgba(138,255,193,0)} }
+  .spacer { flex: 1; }
+  .hint { color: var(--muted); font-size: 12px; }
+  kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 11px; background: var(--panel2); }
+  .clock { color: var(--muted); font-size: 12px; text-align: right; line-height: 1.35; white-space: nowrap; margin-right: 14px; }
+  .clock b { color: var(--text); font-weight: 600; font-size: 14px; font-variant-numeric: tabular-nums; }
+
+  .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; min-height: 150px;
+    position: relative; transition: transform .35s, opacity .35s, box-shadow .35s; overflow: hidden; }
+  .card h2 { margin: 0 0 12px; padding-bottom: 8px; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted);
+    display: flex; width: fit-content; align-items: center; gap: 8px; position: relative; }
+  .card h2::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
+    background: linear-gradient(90deg, rgba(232,236,243,0) 0%, rgba(232,236,243,.45) 15%, rgba(232,236,243,.45) 85%, rgba(232,236,243,0) 100%); }
+  .subrow { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .subrow h3.sub { margin-bottom: 4px; }
+  .subrow .kv { margin-top: 18px; white-space: nowrap; }
+  .card h3.sub { margin: 18px 0 4px; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .card h2::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: var(--c, var(--accent)); }
+  .c3 { grid-column: span 3; } .c4 { grid-column: span 4; } .c6 { grid-column: span 6; } .c8 { grid-column: span 8; } .c12 { grid-column: span 12; }
+  @media (max-width: 1100px) { .c3, .c4 { grid-column: span 6; } .c8 { grid-column: span 12; } }
+  .card.c6.collapsible { grid-column: auto; }
+  @media (max-width: 700px) { .card, .col { grid-column: span 12 !important; } }
+
+  .big { font-size: 40px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .big small { font-size: 16px; color: var(--muted); font-weight: 500; margin-left: 6px; }
+  .row { display: flex; gap: 0.3em; align-items: baseline; flex-wrap: wrap; }  /* one word space, not a column gap */
+  .row .big + .kv { font-size: 16px; }
+  .kv { color: var(--muted); font-size: 13px; }
+  .trow { display: flex; align-items: center; gap: 8px; height: var(--trh, 12px); margin-top: 1px; }
+  .trow .tname { width: 100px; flex: none; font-size: 9.5px; line-height: 1; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+  .trow.idle .tname, .trow.poll .tname { color: var(--muted); }
+  .trow canvas { flex: 1; height: calc(var(--trh, 12px) - 2px); display: block; border-radius: 2px; background: rgba(255,255,255,.04); }
+  .taxis { display: flex; justify-content: space-between; margin: 3px 0 0 108px; font-size: 10px; color: var(--muted); }
+  .kv b { color: var(--text); font-weight: 600; }
+  .kvrow { display: flex; align-items: center; gap: 10px; }
+  .kvrow .kv { flex: 1; min-width: 0; }
+  .kvrow canvas { width: 110px; height: 22px; flex: none; }
+  .kv.cols { display: grid; grid-template-columns: 96px 60px 1fr; column-gap: 6px; align-items: baseline; }
+  .kv.cols b { text-align: right; font-variant-numeric: tabular-nums; }
+  .bar { height: 10px; border-radius: 6px; background: var(--panel2); overflow: hidden; position: relative; margin: 6px 0; }
+  .bar > i { display: block; height: 100%; background: var(--c, var(--accent)); border-radius: 6px; transition: width .6s; }
+  .bar > em { position: absolute; top: -2px; width: 2px; height: 14px; background: var(--bad); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .chip { padding: 3px 9px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); background: var(--panel2); color: var(--muted); }
+  .chip.on { color: var(--text); border-color: var(--c, var(--accent)); background: color-mix(in srgb, var(--c, var(--accent)) 16%, var(--panel2)); }
+  .chip.bad { border-color: var(--bad); color: var(--bad); }
+  .tasks { margin-top: 8px; display: grid; grid-template-columns: 1fr; gap: 4px; }
+  .task { display: grid; grid-template-columns: 120px 1fr 40px; gap: 8px; align-items: center; font-size: 12px; }
+  .task .bar { margin: 0; height: 7px; }
+  .task .n { font-family: ui-monospace, Menlo, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task .p { text-align: right; font-variant-numeric: tabular-nums; }
+  .radio { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px 16px; }
+  .radio .item { border-left: 2px solid var(--line); padding-left: 10px; }
+  .radio .item.on { border-color: var(--radio); }
+  .radio .item .t { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+  .radio .item .v { font-size: 17px; font-weight: 600; }
+  .radio .item .d { font-size: 12px; color: var(--muted); }
+  .sig { display: inline-flex; gap: 2px; align-items: flex-end; height: 14px; margin-left: 6px; vertical-align: middle; }
+  .sig i { width: 4px; background: var(--line); border-radius: 1px; }
+  .sig i.on { background: var(--accent2); }
+  .feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 420px; overflow: hidden; }
+  .feed li { display: grid; grid-template-columns: 62px 10px 1fr; gap: 10px; align-items: baseline; padding: 6px 8px; border-radius: 8px; background: var(--panel2); }
+  .feed li.new { animation: slidein .4s ease-out; }
+  .feed li .t { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .feed li .d { width: 8px; height: 8px; border-radius: 50%; background: var(--c, var(--muted)); align-self: center; }
+  .feed li .x { font-size: 15px; }
+  .feed li:first-child .x { font-weight: 600; }
+  @keyframes slidein { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+  .console { font: 12px/1.45 ui-monospace, Menlo, monospace; color: #b9c4dc; white-space: pre-wrap; word-break: break-all;
+    max-height: 230px; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+  .console .ms { color: var(--muted); }
+  .wear { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .wear .w { background: var(--panel2); border-radius: 10px; padding: 10px; text-align: center; }
+  .wear .w .t { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+  .wear .w .v { font-size: 20px; font-weight: 700; margin: 4px 0; }
+  .wear .w .d { font-size: 12px; color: var(--muted); }
+  .wear .w.on { outline: 1px solid var(--wear); }
+  .empty { color: var(--muted); font-size: 13px; margin-top: 10px; }
+  .col { display: flex; flex-direction: column; gap: 14px; }
+  .collapsible { display: flex; flex-direction: column; min-height: 0; }
+  .collapsible:not(.open) { height: var(--rowh, 180px); }
+  .collapsible .body { flex: 1; min-height: 0; overflow: hidden; }
+  .collapsible.open { height: auto; }
+  .collapsible.open .body { max-height: 520px; }
+  .collapsible .feed, .collapsible .console { max-height: none; }
+  .collapsible .console { justify-content: flex-start; }
+  .expand { position: absolute; top: 10px; right: 12px; width: 28px; height: 28px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel2); color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
+  .expand:hover { color: var(--text); border-color: var(--accent); }
+  .collapsible.open .expand { transform: rotate(180deg); }
+  img.cam { width: 100%; border-radius: 8px; display: block; background: #000; }
+
+  /* tour */
+  body.tour { padding-bottom: 240px; }
+  body.tour .card { opacity: .22; transform: scale(.985); }
+  body.tour .card.focus { opacity: 1; transform: scale(1.015); box-shadow: 0 0 0 2px var(--accent), 0 20px 60px rgba(0,0,0,.6); z-index: 2; }
+  #caption { position: absolute; left: 0; top: 0; width: 420px;
+    background: #0f1420ee; border: 1px solid var(--line); border-radius: 14px; padding: 16px 22px; display: none;
+    box-shadow: 0 20px 60px rgba(0,0,0,.6); backdrop-filter: blur(8px); z-index: 5; }
+  body.tour #caption { display: block; }
+  body.tour .card.focus { z-index: 2; }
+  #caption .ct { font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--accent); margin-bottom: 6px; }
+  #caption .cx { font-size: 20px; line-height: 1.35; }
+  #caption .cp { height: 3px; background: var(--line); border-radius: 2px; margin-top: 12px; overflow: hidden; }
+  #caption .cp i { display: block; height: 100%; width: 0; background: var(--accent); }
+  #caption .cn { color: var(--muted); font-size: 12px; margin-top: 8px; display: flex; justify-content: space-between; }
+  #toast { position: fixed; top: 16px; right: 20px; background: var(--bad); color: #fff; padding: 8px 14px; border-radius: 10px; display: none; z-index: 9; }
+</style>
+</head>
+<body>
+<header>
+  <div class="id"><h1 id="devname">HardwareOne</h1><span class="sub" id="devsub">connecting…</span></div>
+  <div class="live" id="live"><span class="dot"></span><span id="livetext">offline</span></div>
+  <div class="spacer"></div>
+  <div class="clock"><b id="uptime">—</b> uptime<br><span id="devtime"></span></div>
+  <div class="hint"><kbd>T</kbd> tour &nbsp; <kbd>←</kbd><kbd>→</kbd> step &nbsp; <kbd>F</kbd> fullscreen</div>
+</header>
+
+<div class="grid">
+  <div class="card c4" id="card-brain" style="--c: var(--brain)">
+    <h2>Processor</h2>
+    <h3 class="sub" style="margin-top:0">Speed</h3>
+    <div class="big" id="mhz">—<small>MHz</small></div>
+    <div class="kvrow"><div class="kv" id="mode"></div><canvas id="sp-mhz"></canvas></div>
+    <div class="subrow"><h3 class="sub">Usage</h3><span class="kv" id="usagepct"></span></div>
+    <div class="kvrow"><div class="kv" id="loop"></div><canvas id="sp-busy"></canvas></div>
+    <div class="tasks" id="toptasks"></div>
+  </div>
+
+  <div class="card c4" id="card-memory" style="--c: var(--memory)">
+    <h2>Memory &amp; Storage</h2>
+    <h3 class="sub" style="margin-top:0">Memory</h3>
+    <div class="kvrow"><div class="kv cols" id="heapfree"></div><canvas id="sp-heap"></canvas></div>
+    <div class="kv" id="heapnote"></div>
+    <div class="kvrow" style="margin-top:8px"><div class="kv cols" id="psram"></div><canvas id="sp-psram"></canvas></div>
+    <div class="bar"><i id="psrambar" style="--c: #c58bff"></i></div>
+    <h3 class="sub">Storage</h3>
+    <div class="kvrow"><div class="kv cols" id="storage"></div><canvas id="sp-flash"></canvas></div>
+    <div class="bar"><i id="storagebar" style="--c: var(--store)"></i></div>
+    <div class="kvrow"><div class="kv cols" id="sd"></div><canvas id="sp-sd"></canvas></div>
+    <div class="bar" id="sdbarwrap"><i id="sdbar" style="--c: var(--store)"></i></div>
+  </div>
+
+  <div class="card c4" id="card-radio" style="--c: var(--radio)">
+    <h2>WiFi and Bluetooth</h2>
+    <h3 class="sub" style="margin-top:0">WiFi</h3>
+    <div class="radio" id="radios-wifi"></div>
+    <div class="kvrow" id="rssirow" style="margin-top:6px"><div class="kv">signal over time</div><canvas id="sp-rssi"></canvas></div>
+    <h3 class="sub">Bluetooth</h3>
+    <div class="radio" id="radios-bt"></div>
+    <h3 class="sub">Wearables</h3>
+    <div class="wear" id="wear"></div>
+    <div class="empty" id="wearnote"></div>
+  </div>
+
+  <div class="card c6" id="card-sense" style="--c: var(--sense)">
+    <h2>Sensors</h2>
+    <div class="kv" id="i2c"></div>
+    <div class="chips" id="sensors"></div>
+    <div class="chips" id="i2cdevs"></div>
+  </div>
+
+  <div class="card c6" id="card-power" style="--c: var(--power)">
+    <h2>Power</h2>
+    <div class="row"><div class="big" id="batt">—<small>%</small></div><div class="kv" id="battnote"></div></div>
+    <div class="bar"><i id="battbar"></i></div>
+    <div class="kv" id="powernote"></div>
+  </div>
+
+  <div class="col c6">
+    <div class="card collapsible" id="card-story" style="--c: var(--accent)">
+      <h2>What just happened</h2>
+      <button class="expand" data-card="card-story" title="Expand">▾</button>
+      <div class="body"><ul class="feed" id="feed"></ul></div>
+    </div>
+    <div class="card collapsible" id="card-console" style="--c: var(--cmd)">
+      <h2>Console <span class="kv" id="taskcount"></span></h2>
+      <button class="expand" data-card="card-console" title="Expand">▾</button>
+      <div class="body"><div class="console" id="console"></div></div>
+    </div>
+  </div>
+
+  <div class="card c6" id="card-tasks" style="--c: var(--system)">
+    <h2>Tasks</h2>
+    <div id="taskstates"></div>
+    <div class="kv" id="stacks" style="margin-top:6px"></div>
+    <h3 class="sub" style="margin-top:10px">What just ran</h3>
+    <div class="kv" id="trailnote">Every task, last five minutes, sampled every 2 s. A mark's width is the time the task actually took in that sample (1 px floor). Solid: on a core at that instant (core 1's runner is inferred from the ready set). Faint: waiting, or a measured share.</div>
+    <div id="trail"></div>
+    <div class="taxis"><span>5 min ago</span><span>now</span></div>
+  </div>
+
+  <div class="card c6" id="card-camera" style="--c: var(--sense); display:none">
+    <h2>Camera</h2>
+    <img class="cam" id="cam" alt="">
+  </div>
+</div>
+
+<div id="caption"><div class="ct" id="ct"></div><div class="cx" id="cx"></div><div class="cp"><i id="cp"></i></div><div class="cn"><span id="cn"></span><span>← → step · esc ends</span></div></div>
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmtKB = b => b == null ? '—' : (b >= 1048576 ? (b/1048576).toFixed(1) + ' MB' : Math.round(b/1024) + ' KB');
+const pctOrQ = v => (typeof v === 'number' && v >= 0) ? v + '%' : '?';
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const hhmm = t => new Date(t*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+let S = null, lastFeedKey = null, lastConsoleKey = null;
+
+function spark(id, pts, opts = {}) {
+  const c = $(id); if (!c) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (!w || !h) return;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext('2d'); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
+  if (!pts || pts.length < 2) { if (opts.mini) return; g.fillStyle = '#4a5570'; g.font = '11px system-ui'; g.fillText('collecting…', 2, h - 4); return; }
+  const vals = pts.map(p => p[1]);
+  let lo = opts.min ?? Math.min(...vals), hi = opts.max ?? Math.max(...vals);
+  // Never stretch a tiny wobble to full height: an auto-scaled axis spans at
+  // least minSpan (default 10% of the value), centred on the data.
+  const minSpan = opts.minSpan ?? Math.abs(hi) * 0.1;
+  if (opts.min == null && opts.max == null && hi - lo < minSpan) {
+    const mid = (hi + lo) / 2; lo = mid - minSpan / 2; hi = mid + minSpan / 2;
+  }
+  if (hi === lo) { hi += 1; lo -= 1; }
+  const t0 = pts[0][0], t1 = pts[pts.length - 1][0] || t0 + 1;
+  const x = t => 2 + (w - 4) * ((t - t0) / Math.max(1, t1 - t0));
+  const top = opts.mini ? 2 : 13;  // label band: the trace stays below it so the figure is always readable
+  const y = v => h - 3 - (h - 3 - top) * ((v - lo) / (hi - lo));
+  const color = getComputedStyle(c.closest('.card')).getPropertyValue('--c').trim() || '#5ad1ff';
+  g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(x(p[0]), y(p[1])) : g.moveTo(x(p[0]), y(p[1])));
+  (opts.marks || []).forEach(mk => {  // reference levels, e.g. the low-water mark, as a thin dashed line
+    g.save(); g.setLineDash([3, 3]); g.strokeStyle = mk.color || '#ff6b7a'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(0, y(mk.v)); g.lineTo(w, y(mk.v)); g.stroke(); g.restore();
+  });
+  g.strokeStyle = color; g.lineWidth = 1.8; g.lineJoin = 'round'; g.stroke();
+  // Solid fill under the trace: the level stays readable after the samples
+  // that established it have scrolled off (a bare line at a steady value
+  // loses its height reference; the filled area keeps it).
+  g.lineTo(x(t1), h); g.lineTo(x(t0), h); g.closePath();
+  if (opts.mini) {
+    g.fillStyle = color + '40'; g.fill();
+    return;
+  }
+  const grad = g.createLinearGradient(0, 0, 0, h); grad.addColorStop(0, color + '55'); grad.addColorStop(1, color + '00');
+  g.fillStyle = grad; g.fill();
+  g.fillStyle = '#b4bdd0'; g.font = '10px system-ui'; g.textAlign = 'right';
+  g.fillText(opts.label ? opts.label(vals[vals.length - 1]) : vals[vals.length - 1], w - 2, 10);
+}
+
+const TRAIL_WINDOW = 300;
+const trailRows = new Map();
+let trailNeed = 0;
+function trailOrder(names) {
+  // alphabetical (case-insensitive), with our own poll's executor and the idle tasks last
+  const isIdle = n => /^IDLE\d/.test(n), isPoll = n => n === 'cmd_exec';
+  const cmp = (a, b) => a.toLowerCase().localeCompare(b.toLowerCase());
+  return names.filter(n => !isIdle(n) && !isPoll(n)).sort(cmp).concat(names.filter(isPoll), names.filter(isIdle).sort(cmp));
+}
+function drawTrail(trail, now) {
+  const box = $('trail'); if (!box) return;
+  const card = box.closest('.card');
+  const names = trailOrder(Object.keys(trail));
+  // fit every row into the height the card already has beside the two stacked panels
+  const target = 2 * parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--rowh')) + 14;
+  const used = box.getBoundingClientRect().top - card.getBoundingClientRect().top + 16 + 17;
+  const trh = names.length ? Math.max(9, Math.min(14, Math.floor((target - used) / names.length) - 1)) : 12;
+  card.style.setProperty('--trh', trh + 'px');
+  // content height the card needs at the smallest legible row, independent of
+  // how far the grid stretches the card (that box would feed back on itself)
+  trailNeed = used + names.length * 10 + 16;
+  const keep = new Set(names);
+  for (const [name, el] of trailRows) if (!keep.has(name)) { el.remove(); trailRows.delete(name); }
+  const color = getComputedStyle(card).getPropertyValue('--c').trim() || '#5ad1ff';
+  const t0 = now - TRAIL_WINDOW;
+  names.forEach((name, i) => {
+    let row = trailRows.get(name);
+    if (!row) {
+      row = document.createElement('div');
+      row.className = 'trow' + (/^IDLE\d/.test(name) ? ' idle' : name === 'cmd_exec' ? ' poll' : '');
+      const label = name === 'cmd_exec' ? 'cmd_exec (this page)' : name;
+      row.innerHTML = `<span class="tname" title="${esc(name)}">${esc(label)}</span><canvas></canvas>`;
+      trailRows.set(name, row);
+    }
+    if (box.children[i] !== row) box.insertBefore(row, box.children[i] || null);
+    const c = row.querySelector('canvas'), dpr = window.devicePixelRatio || 1;
+    const w = c.clientWidth, h = c.clientHeight; if (!w || !h) return;
+    c.width = w * dpr; c.height = h * dpr;
+    const g = c.getContext('2d'); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
+    (trail[name] || []).forEach(([t, v, sp, pct]) => {
+      if (t < t0 || v <= 0) return;
+      // Width is the time the task actually took, not the sample's span: a
+      // measured share paints share × span (so 1% of a 12 s window is a sliver),
+      // a bare state snapshot paints a 2 px tick at its instant. Floor 1 px.
+      const span = sp || 2, spanPx = span / TRAIL_WINDOW * w, x2 = (t - t0) / TRAIL_WINDOW * w;
+      const width = pct != null ? Math.max(1, spanPx * Math.min(1, pct / 100)) : 2;
+      const a = v >= 2 ? 1 : pct != null ? 0.45 + 0.55 * Math.min(1, pct / 50) : 0.5;
+      g.fillStyle = color + Math.round(a * 255).toString(16).padStart(2, '0');
+      g.fillRect(Math.max(0, x2 - width), 0, width, h);
+    });
+  });
+  $('trailnote').style.display = names.length ? '' : 'none';
+  card.querySelector('.taxis').style.display = names.length ? '' : 'none';
+}
+
+function sigBars(rssi) {
+  const n = rssi == null ? 0 : rssi >= -55 ? 4 : rssi >= -67 ? 3 : rssi >= -75 ? 2 : 1;
+  return '<span class="sig">' + [1,2,3,4].map(i => `<i class="${i <= n ? 'on' : ''}" style="height:${3 + i*3}px"></i>`).join('') + '</span>';
+}
+
+function render(s) {
+  S = s;
+  const sys = s.system || {}, net = sys.net || {}, conn = sys.connectivity || {}, mem = s.mem || {}, power = s.power || {};
+  const bat = s.battery || {}, ble = s.ble || {}, sens = s.sensors || {}, perf = s.perf || {}, tasks = s.tasks || {}, mesh = s.mesh || {};
+
+  // header / link
+  $('live').classList.toggle('on', !!s.tool.connected);
+  $('livetext').textContent = s.tool.connected ? 'live · ' + s.tool.transport : 'offline';
+  $('toast').style.display = s.tool.lastError ? 'block' : 'none';
+  $('toast').textContent = s.tool.lastError;
+  $('devname').textContent = sys.board ? sys.board : 'HardwareOne';
+  $('devsub').textContent = [sys.fw ? 'fw ' + sys.fw : '', net.ip || '', sys.reset_reason ? 'boot: ' + sys.reset_reason : ''].filter(Boolean).join(' · ');
+  $('uptime').textContent = sys.uptime_hms || '—';
+  $('devtime').textContent = sys.system_time ? 'device clock ' + sys.system_time.replace('T', ' ') : 'clock not synced';
+
+  // processor
+  $('mhz').innerHTML = power._forbidden ? '<small>admin only</small>' : `${power.cpuMhz ?? '—'}<small>MHz</small>`;
+  $('mode').innerHTML = power.modeName ? `mode <b>${esc(power.modeName)}</b>${power.autoMode ? ' · auto' : ''}${power.boost ? ` · boost: <b>${typeof power.boost === 'string' ? esc(power.boost) : 'on'}</b>` : ''}<br>idle ${power.idleMhz} → busy ${power.activeMhz} MHz · max ${power.maxMhz}` : '';
+  $('loop').innerHTML = perf.loop?.valid ? `main loop <b>${perf.loop.lapsPerSec}</b> laps/s · avg ${perf.loop.avgMs} ms · worst ${perf.loop.maxMs} ms` : (perf.loop ? 'main loop: measuring…' : '');
+  spark('sp-mhz', s.series.cpuMhz, {mini: true, min: 0, max: power.maxMhz || undefined});
+  spark('sp-busy', s.series.busy, {mini: true, min: 0, max: 100});
+  {
+    // Overall usage = 100 minus the mean idle share across the cores, from the
+    // same sample the task rows come from; per-core figures follow.
+    const idle = (perf.tasks || []).filter(t => t.idle).sort((a, b) => a.name.localeCompare(b.name));
+    const sh = t => t.cpuPermille != null ? t.cpuPermille / 10 : t.cpuPct;
+    if (perf.cpuValid && idle.length) {
+      const busy = Math.max(0, 100 - idle.reduce((a, t) => a + sh(t), 0) / idle.length);
+      $('usagepct').innerHTML = `<b>${busy.toFixed(1)}%</b> busy · ` + idle.map(t => `${esc(t.name.replace('IDLE', 'core '))} ${Math.max(0, 100 - sh(t)).toFixed(0)}%`).join(' · ');
+    } else $('usagepct').textContent = '';
+  }
+  const share = t => t.cpuPermille != null ? t.cpuPermille / 10 : t.cpuPct;
+  // Every non-idle task the 0.75 s sample caught (the firmware reports down to
+  // 0.1%); the rest of the task table ran for less than that in the window.
+  const tt = (perf.tasks || []).filter(t => !t.idle).sort((a, b) => share(b) - share(a));
+  const idleRows = (perf.tasks || []).filter(t => t.idle);
+  const others = Math.max(0, ((s.tasks || {}).total || 0) - idleRows.length - tt.length);
+  $('toptasks').innerHTML = tt.map(t => `<div class="task"><span class="n">${esc(t.name)}</span><div class="bar"><i style="width:${Math.min(100, share(t))}%"></i></div><span class="p">${t.cpuPermille != null ? share(t).toFixed(1) : share(t)}%</span></div>`).join('')
+    + (perf.cpuValid && (s.tasks || {}).total ? `<div class="kv" style="margin-top:6px">${others} other task${others === 1 ? '' : 's'} used under 0.1% in the last ${perf.windowMs ? (perf.windowMs / 1000).toFixed(1) + ' s' : 'sample'}${idleRows.length ? ' · cores idle ' + idleRows.map(t => esc(t.name.replace('IDLE', 'core ')) + ' ' + share(t).toFixed(0) + '%').join(', ') : ''}</div>` : '')
+    || (perf.cpuValid === false ? '<div class="kv">per-task CPU: warming up</div>' : '');
+
+  // one memory/storage line as label | value | rest, so the four rows read as columns
+  const memline = (label, value, rest) => `<span>${label}</span><b>${value}</b><span>${rest}</span>`;
+  // memory
+  const d = mem.dram || {};
+  const total = d.total || (sys.mem?.heap_total_kb || 0) * 1024;
+  const free = d.free ?? (sys.mem?.heap_free_kb || 0) * 1024;
+  $('heapfree').innerHTML = memline('Internal RAM:', d.free != null ? fmtKB(d.free) : (sys.mem?.heap_free_kb != null ? fmtKB(sys.mem.heap_free_kb * 1024) : '—'), `free${total ? ` of ${fmtKB(total)}` : ''}`);
+  $('heapnote').innerHTML = d.minFree != null ? `low-water mark <b>${fmtKB(d.minFree)}</b> (dashed line) · largest block ${fmtKB(mem.heapCaps?.internalLargest)}` : '';
+  spark('sp-heap', s.series.heapFree, {mini: true, min: 0, max: (mem.dram || {}).total || sys.mem?.heap_total_kb * 1024 || undefined,
+        marks: d.minFree != null ? [{v: d.minFree, color: '#ff6b7a'}] : []});
+  const ps = mem.psram || {};
+  if (ps.available || sys.mem?.psram_total_kb) {
+    const pt = ps.total || sys.mem.psram_total_kb * 1024, pf = ps.free ?? sys.mem.psram_free_kb * 1024;
+    $('psram').innerHTML = memline('PSRAM:', fmtKB(pf), `free of ${fmtKB(pt)}`);
+    $('psrambar').style.width = pt ? (100 * (pt - pf) / pt) + '%' : 0;
+  } else { $('psram').innerHTML = '<span style="grid-column:1/-1">no PSRAM on this board</span>'; $('psrambar').style.width = 0; }
+
+  // radios
+  const items = [];
+  items.push({on: net.wifiConnected, t: 'Wi-Fi', v: net.wifiConnected ? esc(net.ssid) + sigBars(net.rssi) : (net.radioOn === false ? 'radio off' : 'not connected'),
+    d: net.wifiConnected ? `${net.ip} · ch ${net.channel} · ${net.rssi} dBm` : (net.radioHeldForEspnow ? 'radio held for ESP-NOW' : '')});
+  const bt = conn.bluetooth || {};
+  items.push({on: bt.running, t: 'Bluetooth', v: bt.running ? esc(bt.state || 'on') : 'off', d: bt.mode ? `mode ${esc(bt.mode)}` + (bt.phoneState ? ` · phone ${esc(bt.phoneState)}` : '') : ''});
+  const en = conn.espnow || {};
+  items.push({on: en.running, t: 'ESP-NOW mesh', v: en.running ? (mesh.totalPeers != null ? `${mesh.totalPeers} peer${mesh.totalPeers == 1 ? '' : 's'}` : 'running') : (en.enabled ? 'enabled, idle' : 'off'),
+    d: en.running ? `${esc(en.deviceName || '')}${en.encrypted ? ' · encrypted' : ''}${en.mesh ? ' · mesh' : ''}` : ''});
+  const mq = conn.mqtt || {};
+  items.push({on: mq.connected, t: 'MQTT', v: mq.connected ? 'connected' : (mq.enabled ? 'connecting' : 'off'), d: mq.host || ''});
+  const ws = conn.webserver || {};
+  items.push({on: ws.running, t: 'Web server', v: ws.running ? `${ws.https ? 'https' : 'http'}:${ws.port}` : 'off', d: ws.running ? `${ws.sessions}/${ws.maxSessions} sessions` : ''});
+  if (sys.companion) items.push({on: true, t: 'Radio companion', v: 'C6 attached', d: ''});
+  const radioHtml = list => list.map(i => `<div class="item ${i.on ? 'on' : ''}"><div class="t">${i.t}</div><div class="v">${i.v}</div><div class="d">${i.d}</div></div>`).join('');
+  $('radios-wifi').innerHTML = radioHtml(items.filter(i => i.t !== 'Bluetooth'));
+  $('radios-bt').innerHTML = radioHtml(items.filter(i => i.t === 'Bluetooth'));
+  const showRssi = net.wifiConnected && (s.series.rssi || []).length > 1;
+  $('rssirow').style.display = showRssi ? '' : 'none';
+  if (showRssi) spark('sp-rssi', s.series.rssi, {mini: true, min: -90, max: -30});
+
+  // wearables
+  const g2 = ble.g2 || {}, g2c = g2.connection || {}, ring = ble.ring || {}, pl = ble.phoneLink || {};
+  const g2on = g2c.state === 'connected' || bt.g2Connected;
+  const w = [];
+  w.push({on: g2on, t: 'Glasses', v: g2on ? 'connected' : (g2c.state || (g2.autoReconnect ? 'seeking' : 'off')),
+    d: g2on ? `L ${pctOrQ(g2c.left?.battery)} · R ${pctOrQ(g2c.right?.battery)}${g2.controls?.headUp ? ' · head up' : ''}` : (g2.firmware?.right ? 'fw ' + esc(g2.firmware.right) : '')});
+  const ringBits = [];
+  if (ring.connected && ring.battery != null) ringBits.push(`${ring.battery}%${ring.charge === 'charging' ? ' charging' : ''}`);
+  if (ring.connected && ring.worn) ringBits.push(ring.worn === 'on' ? 'worn' : 'off finger');
+  w.push({on: ring.connected, t: 'Ring', v: ring.connected ? 'connected' : (ring.connectPending ? 'connecting' : 'off'), d: ringBits.length ? ringBits.join(' · ') : (ring.name ? esc(ring.name) : '')});
+  const phoneUp = !!pl.connected || pl.state === 'ready';  // 'ready' is the pipe's own word for a link that is up
+  w.push({on: phoneUp, t: 'Phone', v: phoneUp ? (pl.state || 'ready') : (pl.state || (bt.phoneState || 'off')), d: pl.paired || pl.enrolled ? 'paired' : ''});
+  $('wear').innerHTML = w.map(i => `<div class="w ${i.on ? 'on' : ''}"><div class="t">${i.t}</div><div class="v">${esc(i.v)}</div><div class="d">${i.d}</div></div>`).join('');
+  $('wearnote').textContent = ble._status === 404 || ble._text ? 'Bluetooth details need the web transport' : (bt.running ? '' : 'Bluetooth stack is off');
+
+  // senses
+  const i2c = conn.i2c || {};
+  $('i2c').innerHTML = i2c.compiled ? `I²C bus <b>${i2c.activeDevices ?? i2c.devices ?? 0}</b> devices answering (SDA ${i2c.sdaPin} / SCL ${i2c.sclPin})` : 'no I²C bus in this build';
+  const compiled = Object.keys(sens).filter(k => k.endsWith('Compiled') && sens[k]).map(k => k.slice(0, -8));
+  const running = Object.keys(sens).filter(k => k.endsWith('Running') && sens[k]).map(k => k.slice(0, -7));
+  const names = compiled.length ? compiled : running;
+  const voiceLive = s.voiceSeenAt && (s.now - s.voiceSeenAt) < 8;
+  const voiceChip = s.voiceSeenAt ? `<span class="chip ${voiceLive ? 'on' : ''}" style="--c: var(--voice)">voice pipeline${voiceLive ? ' · live' : ''}</span>` : '';
+  $('sensors').innerHTML = voiceChip + names.map(n => `<span class="chip ${running.includes(n) ? 'on' : ''}">${esc(n)}${running.includes(n) ? ' · live' : ''}</span>`).join('') || '<span class="kv">no sensors compiled in</span>';
+  $('i2cdevs').innerHTML = (i2c.deviceList || []).map(dv => `<span class="chip on" style="--c: var(--system)">${esc(dv.name || dv.address)}</span>`).join('');
+
+  // power
+  const pct = typeof bat.percentage === 'number' ? bat.percentage : null;
+  $('batt').innerHTML = pct != null ? `${Math.round(pct)}<small>%</small>` : (bat.present === false || bat._status ? '<small>no battery monitor</small>' : '—');
+  $('battnote').innerHTML = pct != null ? `${bat.charging ? '<b>charging</b>' : bat.usbPresent ? 'on USB' : (bat.charging === false || bat.usbPresent === false) ? 'on battery' : 'source not sensed'}${bat.voltage ? ` · ${Number(bat.voltage).toFixed(2)} V` : ''}${bat.etaMinutes ? ` · ${bat.etaMinutes} min left` : ''}` : '';
+  $('battbar').style.width = (pct ?? 0) + '%';
+  $('battbar').style.setProperty('--c', pct != null && pct < 20 ? 'var(--bad)' : 'var(--power)');
+  $('powernote').innerHTML = power.modeName ? `${esc(power.modeName)} mode${power.idleMsAgo >= 5000 ? ` · idle for ${Math.round(power.idleMsAgo/1000)} s` : ''}${power.sleepAllowed ? ' · sleep allowed' : ''}${power.displayBrightness != null ? ` · display brightness ${Math.round(100 * power.displayBrightness / 255)}%` : ''}${power.displayPowerSave && power.powerSaveMinutes ? ` · display off after ${power.powerSaveMinutes} min idle` : ''}` : '';
+
+  // story
+  const moments = (s.moments || []).slice(-14).reverse();
+  const feedKey = moments.map(mm => mm.t.toFixed(0) + mm.text).join('|');
+  if (feedKey !== lastFeedKey) {
+    const fresh = lastFeedKey === null ? new Set() : new Set(moments.filter(mm => !lastFeedKey.includes(mm.t.toFixed(0) + mm.text)).map(mm => mm.t.toFixed(0) + mm.text));
+    lastFeedKey = feedKey;
+    $('feed').innerHTML = moments.map(mm => `<li class="${fresh.has(mm.t.toFixed(0) + mm.text) ? 'new' : ''}" style="--c: var(--${esc(mm.cat)})"><span class="t">${hhmm(mm.t)}</span><span class="d"></span><span class="x">${esc(mm.text)}</span></li>`).join('')
+      || '<li><span class="t"></span><span class="d"></span><span class="x" style="color:var(--muted)">Nothing has changed yet. The feed fills as the device works.</span></li>';
+  }
+
+  // console
+  const lines = (s.console || []).slice(-30);
+  const consoleKey = lines.join('\n');
+  if (consoleKey !== lastConsoleKey) {
+    lastConsoleKey = consoleKey;
+    $('console').innerHTML = lines.map(l => esc(l).replace(/^(\[\d+\])/, '<span class="ms">$1</span>')).join('\n') || '<span class="ms">no console output mirrored yet</span>';
+    const body = $('console').parentElement; body.scrollTop = body.scrollHeight;
+  }
+
+  // tasks & storage
+  const tl = tasks.tasks || [];
+  const states = {};
+  tl.forEach(t => { states[t.state] = (states[t.state] || 0) + 1; });
+  $('taskcount').textContent = tasks.total ? `· ${tasks.total} tasks` : '';
+  const stateWords = {RUN: 'running on a core right now', READY: 'ready and waiting for a turn on a core', BLOCK: 'asleep until something happens (a timer, a message, I/O)', SUSP: 'paused on purpose', DEL: 'finishing', UNK: 'unknown'};
+  const stateShort = {RUN: 'on a core', READY: 'waiting for a core', BLOCK: 'asleep', SUSP: 'paused', DEL: 'finishing'};
+  $('taskstates').innerHTML = tasks.total
+    ? `<div class="kv">The firmware is <b>${tasks.total}</b> FreeRTOS tasks sharing two cores: ` +
+      Object.entries(states).map(([k, v]) => `<b>${v}</b> ${esc(stateShort[k] || k.toLowerCase())}`).join(' · ') + '</div>'
+    : '<span class="kv">task table: waiting</span>';
+  const tight = tl.filter(t => t.stackFree != null).sort((a, b) => a.stackFree - b.stackFree).slice(0, 3);
+  $('stacks').innerHTML = tight.length ? 'Each task has a fixed slice of RAM for its stack; the three with the least headroom left: ' + tight.map(t => `<b>${esc(t.name)}</b> ${t.stackFree} B`).join(' · ') : '';
+  drawTrail(s.trail || {}, s.now);
+  const st = sys.storage || {};
+  $('storage').innerHTML = st.total_kb ? memline('Internal flash:', fmtKB(st.used_kb*1024), `used of ${fmtKB(st.total_kb*1024)}`) : '';
+  $('storagebar').style.width = st.total_kb ? (100 * st.used_kb / st.total_kb) + '%' : 0;
+  const sd = st.sd;
+  $('sd').innerHTML = sd && sd.total_mb ? memline('SD card:', sd.used_mb >= 1024 ? (sd.used_mb/1024).toFixed(1) + ' GB' : sd.used_mb + ' MB', `used of ${sd.total_mb >= 1024 ? (sd.total_mb/1024).toFixed(1) + ' GB' : sd.total_mb + ' MB'}`) : '<span style="grid-column:1/-1">no SD card</span>';
+  $('sdbarwrap').style.display = sd && sd.total_mb ? '' : 'none';
+  $('sdbar').style.width = sd && sd.total_mb ? (100 * sd.used_mb / sd.total_mb) + '%' : 0;
+  spark('sp-psram', s.series.psramFree, {mini: true, min: 0, max: (mem.psram || {}).total || undefined});
+  spark('sp-flash', s.series.flashUsed, {mini: true, min: 0, max: st.total_kb ? st.total_kb * 1024 : undefined});
+  $('sp-sd').style.display = sd && sd.total_mb ? '' : 'none';
+  spark('sp-sd', s.series.sdUsed, {mini: true, min: 0, max: sd && sd.total_mb ? sd.total_mb * 1024 * 1024 : undefined});
+
+  // collapsed feed/console match the Sensors/Power row height
+  // Collapsed feed/console match the Sensors/Power row, unless the Tasks card
+  // beside them needs more (every task gets a trail row); then the stacked
+  // pair grows to meet it so the two columns stay level.
+  let rowh = Math.max($('card-sense').getBoundingClientRect().height, $('card-power').getBoundingClientRect().height);
+  if (trailNeed > 2 * rowh + 14) rowh = (trailNeed - 14) / 2;
+  if (rowh > 0) document.documentElement.style.setProperty('--rowh', rowh + 'px');
+
+  // camera
+  const camCard = $('card-camera');
+  camCard.style.display = s.camera?.available ? '' : 'none';
+  if (s.camera?.available) $('cam').src = '/camera.jpg?t=' + s.camera.ts;
+}
+
+async function tick() {
+  try {
+    const r = await fetch('/api/state', {cache: 'no-store'});
+    render(await r.json());
+  } catch (e) {
+    $('live').classList.remove('on'); $('livetext').textContent = 'showcase server gone';
+  }
+}
+tick(); setInterval(tick, 1000);
+
+// ---------------- guided tour ----------------
+// Template-driven captions. Each step has an intro and a list of observations;
+// an observation is shown when its `when` holds against the live context and
+// its `say` template is filled from that context. Placeholders are {key} or
+// {key|filter} with filters kb, pct, int, s. The top `max` observations by
+// rank are shown, so what the audience reads follows what the device is doing.
+const TOUR_TEMPLATES = [
+  {id: 'card-brain', title: 'Processor', max: 3,
+   intro: 'A dual-core ESP32 whose clock is not fixed: it runs at the floor until a task flags itself busy.',
+   notes: [
+     {rank: 5, when: c => c.boost, say: 'Right now it is boosted to {mhz} MHz for {boost}.'},
+     {rank: 4, when: c => !c.boost && c.mhz != null && c.mhz <= c.idleMhz, say: 'It is idling at {mhz} MHz; nothing is asking for more than the {activeMhz} MHz busy clock or the {maxMhz} MHz ceiling.'},
+     {rank: 3, when: c => c.topTask, say: '{topTask} is the busiest task at {topPct|pct} of a core; the cores are {busyPct|pct} busy overall.'},
+     {rank: 4, when: c => c.worstMs >= 300, say: 'The main loop\'s worst lap recently was {worstMs} ms, a stall the firmware logs as loop health.'},
+     {rank: 2, when: c => c.laps, say: 'The main loop is turning {laps} times a second, {avgMs} ms per lap.'},
+     {rank: 1, when: c => c.mode, say: 'Power mode {mode}: {idleMhz} MHz idle, {activeMhz} MHz for work.'},
+   ]},
+  {id: 'card-memory', title: 'Memory & Storage', max: 3,
+   intro: 'Everything has to fit in {ramTotal|kb} of fast internal RAM; big buffers go to slower external PSRAM so radios and task stacks keep the fast pool.',
+   notes: [
+     {rank: 5, when: c => c.ramPct != null && c.ramPct < 25, say: 'Only {ramFree|kb} internal is free, {ramPct|pct}: this is the tight state.'},
+     {rank: 3, when: c => c.ramPct != null && c.ramPct >= 25 && c.ramLargest, say: '{ramFree|kb} internal is free, {ramPct|pct} of the pool, and the largest single block is {ramLargest|kb}.'},
+     {rank: 3, when: c => c.ramPct != null && c.ramPct >= 25 && !c.ramLargest, say: '{ramFree|kb} internal is free, {ramPct|pct} of the pool.'},
+     {rank: 4, when: c => c.ramMin != null, say: 'Since boot the free pool has never dropped below {ramMin|kb} (the red tick).'},
+     {rank: 4, when: c => c.heapDipText, say: '{heapDipText}'},
+     {rank: 2, when: c => c.psramTotal, say: 'PSRAM: {psramFree|kb} of {psramTotal|kb} free.'},
+     {rank: 1, when: c => c.flashTotal, say: 'Settings, users, logs and recordings live on {flashTotal|kb} of flash{sdText}.'},
+   ]},
+  {id: 'card-radio', title: 'WiFi and Bluetooth', max: 4,
+   intro: 'One 2.4 GHz radio is shared between Wi-Fi, Bluetooth and ESP-NOW; the firmware arbitrates who owns it.',
+   notes: [
+     {rank: 4, when: c => c.wifi, say: 'Wi-Fi is on {ssid} at {rssi} dBm ({rssiWord}).'},
+     {rank: 3, when: c => !c.wifi && c.radioOn === false, say: 'The Wi-Fi radio is off; the device is running headless over Bluetooth.'},
+     {rank: 3, when: c => c.espnow, say: 'ESP-NOW is up: {peers} peer{peersS} in the mesh, no router needed.'},
+     {rank: 5, when: c => c.g2 === 'connected', say: 'The Even G2 glasses are connected on both temples{g2Batt}; the right temple takes commands, the left carries the microphone.'},
+     {rank: 5, when: c => c.g2 === 'connecting', say: 'The glasses are half-connected: {g2Missing} temple is missing and the repair is retrying it.'},
+     {rank: 3, when: c => c.ring, say: 'The R1 ring {ringName} is connected{ringWorn} for health data.'},
+     {rank: 3, when: c => c.phone === 'ready', say: 'A phone is linked and can relay the device to the internet when there is no Wi-Fi.'},
+     {rank: 2, when: c => c.btState, say: 'Bluetooth role: {btState}.'},
+     {rank: 1, when: c => c.companion, say: 'On this board the radio lives on a companion chip ({companion}).'},
+   ]},
+  {id: 'card-sense', title: 'Sensors', max: 2,
+   intro: 'Sensors hang off one I²C bus; each is a task that can be started and stopped at runtime.',
+   notes: [
+     {rank: 4, when: c => c.sensorsRunning.length, say: 'Polling now: {sensorsRunningText}. Readings feed automations, the displays and the glasses.'},
+     {rank: 3, when: c => c.i2c && !c.sensorsRunning.length, say: 'The bus has {i2cDevices} device{i2cS} answering but nothing is polling right now.'},
+     {rank: 3, when: c => !c.i2c, say: 'This build has no I²C bus compiled in, so the card is empty on purpose.'},
+   ]},
+  {id: 'card-power', title: 'Power', max: 3,
+   intro: 'The device tracks its own supply, and the supply steers the clock and the display.',
+   notes: [
+     {rank: 5, when: c => c.battPct != null, say: 'Battery {battPct|pct}, {battState}{battV}.'},
+     {rank: 3, when: c => c.battPct == null, say: 'No battery gauge on this board.'},
+     {rank: 3, when: c => c.saveMin, say: 'After {saveMin} minutes idle the display goes off and the clock sinks to the idle floor.'},
+     {rank: 2, when: c => c.brightPct != null, say: 'Display brightness {brightPct|pct}.'},
+   ]},
+  {id: 'card-story', title: 'What just happened', max: 3,
+   intro: 'The device keeps a ring of typed system events; this feed reads it and the live state and narrates changes as they happen. Nothing here is scripted.',
+   notes: [
+     {rank: 5, when: c => c.lastMoment, say: 'Most recent: "{lastMoment}" {lastMomentAgo}.'},
+     {rank: 4, when: c => c.moments5 > 0, say: '{moments5} thing{moments5S} happened in the last five minutes, mostly {topCat}.'},
+     {rank: 3, when: c => c.moments5 === 0, say: 'Quiet for five minutes: do something to the device and watch it land here.'},
+   ]},
+  {id: 'card-console', title: 'Console', max: 2,
+   intro: 'The same text console you get over USB. Every command, from serial, web, glasses, voice or phone, runs through one registry with one permission model.',
+   notes: [
+     {rank: 4, when: c => c.consoleErrors, say: '{consoleErrors} of the last {consoleLines} lines are errors; the latest: "{consoleLastError}".'},
+     {rank: 3, when: c => !c.consoleErrors && c.consoleLines, say: '{consoleLines} lines mirrored, none of them errors.'},
+     {rank: 2, when: c => c.voiceSeen, say: 'The speech pipeline is active right now.'},
+   ]},
+  {id: 'card-tasks', title: 'Tasks', max: 3,
+   intro: '{taskTotal} FreeRTOS tasks share the two cores; most sleep until a timer, a message or I/O wakes them.',
+   notes: [
+     {rank: 4, when: c => c.trailTop.length, say: 'Over the last five minutes the busiest were {trailTopText}.'},
+     {rank: 3, when: c => c.tightTask, say: '{tightTask} has the least stack headroom left at {tightFree} bytes; the firmware watches that.'},
+     {rank: 2, when: c => c.taskReady != null, say: '{taskRun} on a core, {taskReady} waiting, {taskAsleep} asleep at this instant.'},
+   ]},
+];
+
+// Flat facts for the templates, derived once per render from the live state.
+function tourContext(s) {
+  const sys = s.system || {}, net = sys.net || {}, conn = sys.connectivity || {}, power = s.power || {};
+  const mem = s.mem || {}, d = mem.dram || {}, ps = mem.psram || {}, st = sys.storage || {}, sd = st.sd || {};
+  const perf = s.perf || {}, bat = s.battery || {}, ble = s.ble || {}, g2 = (ble.g2 || {}).connection || {};
+  const ring = ble.ring || {}, pl = ble.phoneLink || {}, bt = conn.bluetooth || {}, sens = s.sensors || {};
+  const c = {};
+  c.mhz = power.cpuMhz; c.idleMhz = power.idleMhz; c.activeMhz = power.activeMhz; c.maxMhz = power.maxMhz; c.mode = power.modeName;
+  c.boost = typeof power.boost === 'string' && power.boost !== 'none' ? power.boost : (power.boost === true ? 'work' : null);
+  const share = t => t.cpuPermille != null ? t.cpuPermille / 10 : t.cpuPct;
+  const busyTasks = (perf.tasks || []).filter(t => !t.idle).sort((a, b) => share(b) - share(a));
+  if (busyTasks.length) { c.topTask = busyTasks[0].name; c.topPct = share(busyTasks[0]); }
+  if (perf.cpuValid) { const idle = (perf.tasks || []).filter(t => t.idle); c.busyPct = Math.max(0, 100 - idle.reduce((a, t) => a + share(t), 0) / Math.max(1, idle.length)); }
+  if (perf.loop?.valid) { c.laps = perf.loop.lapsPerSec; c.avgMs = perf.loop.avgMs; c.worstMs = perf.loop.maxMs; }
+  c.ramTotal = d.total; c.ramFree = d.free; c.ramMin = d.minFree; c.ramLargest = mem.heapCaps?.internalLargest;
+  if (d.total && d.free != null) c.ramPct = 100 * d.free / d.total;
+  if (ps.available) { c.psramTotal = ps.total; c.psramFree = ps.free; }
+  if (st.total_kb) c.flashTotal = st.total_kb * 1024;
+  c.sdText = sd.total_mb ? ` plus a ${sd.total_mb >= 1024 ? (sd.total_mb / 1024).toFixed(0) + ' GB' : sd.total_mb + ' MB'} SD card` : '';
+  const dip = (s.moments || []).slice().reverse().find(m => /RAM dipped/.test(m.text) && s.now - m.t < 600);
+  if (dip) c.heapDipText = dip.text + ', ' + agoText(s.now - dip.t) + '.';
+  c.wifi = !!net.wifiConnected; c.ssid = net.ssid; c.rssi = net.rssi; c.radioOn = net.radioOn;
+  c.rssiWord = net.rssi >= -55 ? 'strong' : net.rssi >= -67 ? 'good' : net.rssi >= -75 ? 'fair' : 'weak';
+  c.espnow = !!conn.espnow?.running; c.peers = (s.mesh || {}).totalPeers || 0; c.peersS = c.peers === 1 ? '' : 's';
+  c.g2 = g2.state; c.g2Missing = g2.left?.connected ? 'the right' : 'the left';
+  const lb = g2.left?.battery, rb = g2.right?.battery;
+  c.g2Batt = (lb >= 0 || rb >= 0) ? ` (battery left ${pctOrQ(lb)}, right ${pctOrQ(rb)})` : '';
+  c.ring = !!ring.connected; c.ringName = ring.name || ''; c.ringWorn = ring.worn === 'on' ? ', worn' : ring.worn === 'off' ? ', off the finger' : '';
+  if (ring.battery != null) c.ringWorn += ` at ${ring.battery}% battery`;
+  c.phone = pl.connected ? 'ready' : (bt.phoneState || pl.state);
+  c.btState = bt.running ? `${bt.state || 'on'}${bt.mode ? ', ' + bt.mode : ''}` : null;
+  c.companion = sys.companion?.attached ? 'C6' : (sys.companion?.name || null);
+  c.sensorsRunning = Object.keys(sens).filter(k => k.endsWith('Running') && sens[k]).map(k => k.slice(0, -7));
+  c.sensorsRunningText = c.sensorsRunning.join(', ');
+  const i2c = conn.i2c || {}; c.i2c = !!i2c.compiled; c.i2cDevices = i2c.activeDevices ?? i2c.devices ?? 0; c.i2cS = c.i2cDevices === 1 ? '' : 's';
+  if (typeof bat.percentage === 'number') { c.battPct = bat.percentage; c.battState = bat.charging ? 'charging' : bat.usbPresent ? 'on USB power' : 'discharging'; c.battV = bat.voltage ? `, ${Number(bat.voltage).toFixed(2)} V` : ''; }
+  c.saveMin = power.displayPowerSave ? power.powerSaveMinutes : null;
+  if (power.displayBrightness != null) c.brightPct = 100 * power.displayBrightness / 255;
+  const ms = s.moments || []; const last = ms[ms.length - 1];
+  if (last) { c.lastMoment = last.text; c.lastMomentAgo = agoText(s.now - last.t); }
+  const recent = ms.filter(m => s.now - m.t < 300); c.moments5 = recent.length; c.moments5S = recent.length === 1 ? '' : 's';
+  const cats = {}; recent.forEach(m => { cats[m.cat] = (cats[m.cat] || 0) + 1; });
+  c.topCat = Object.entries(cats).sort((a, b) => b[1] - a[1]).map(e => ({radio: 'radio changes', wear: 'wearables', voice: 'speech', power: 'power', auth: 'sign-ins', sense: 'sensors', mesh: 'the mesh', auto: 'automations', system: 'system events', store: 'storage', memory: 'memory', cmd: 'commands', media: 'media', security: 'security'}[e[0]] || e[0]))[0];
+  const con = s.console || []; c.consoleLines = con.length;
+  const errs = con.filter(l => /^E \(|\berror\b|FAIL/i.test(l)); c.consoleErrors = errs.length;
+  if (errs.length) c.consoleLastError = errs[errs.length - 1].replace(/^[EWI] \(\d+\) /, '').slice(0, 90);
+  c.voiceSeen = s.voiceSeenAt && s.now - s.voiceSeenAt < 8;
+  const tl = (s.tasks || {}).tasks || []; c.taskTotal = (s.tasks || {}).total || tl.length;
+  if (tl.length) { c.taskRun = tl.filter(t => t.state === 'RUN').length; c.taskReady = tl.filter(t => t.state === 'READY').length; c.taskAsleep = tl.filter(t => t.state === 'BLOCK').length; }
+  const tight = tl.filter(t => t.stackFree != null).sort((a, b) => a.stackFree - b.stackFree)[0];
+  if (tight) { c.tightTask = tight.name; c.tightFree = tight.stackFree; }
+  const t0 = s.now - 300;
+  c.trailTop = Object.entries(s.trail || {}).filter(([n]) => !/^IDLE|^cmd_exec$/.test(n))
+    .map(([n, pts]) => [n, pts.reduce((a, p) => a + (p[0] >= t0 && p[1] > 0 ? p[1] * (p[2] || 2) : 0), 0)])
+    .filter(e => e[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 3).map(e => e[0]);
+  c.trailTopText = c.trailTop.join(', ');
+  return c;
+}
+function agoText(sec) { sec = Math.max(0, Math.round(sec)); return sec < 60 ? `${sec} s ago` : sec < 3600 ? `${Math.round(sec / 60)} min ago` : `${(sec / 3600).toFixed(1)} h ago`; }
+const FILTERS = {
+  kb: v => v == null ? '?' : fmtKB(v),
+  pct: v => v == null ? '?' : (Math.abs(v - Math.round(v)) < 0.05 ? Math.round(v) : Number(v).toFixed(1)) + '%',
+  int: v => v == null ? '?' : Math.round(v),
+  s: v => v == null ? '?' : (Number(v) / 1000).toFixed(1) + ' s',
+};
+function fill(tmpl, c) {
+  return tmpl.replace(/\{(\w+)(?:\|(\w+))?\}/g, (_, key, f) => {
+    const v = c[key];
+    if (f && FILTERS[f]) return FILTERS[f](v);
+    return v == null ? '?' : String(v);
+  });
+}
+function tourText(step) {
+  const c = tourContext(S || {});
+  const notes = step.notes.filter(n => { try { return !!n.when(c); } catch (e) { return false; } })
+    .sort((a, b) => (b.rank || 0) - (a.rank || 0)).slice(0, step.max || 3).map(n => fill(n.say, c));
+  return [fill(step.intro, c), ...notes].join(' ');
+}
+const TOUR = TOUR_TEMPLATES;
+let tour = {on: false, i: 0, t0: 0, dur: 14000};
+function setTour(on) {
+  tour.on = on; document.body.classList.toggle('tour', on);
+  document.querySelectorAll('.card').forEach(c => c.classList.remove('focus'));
+  if (on) showStep(tour.i);
+}
+function showStep(i) {
+  const steps = TOUR.filter(st => $(st.id).style.display !== 'none');
+  tour.i = (i + steps.length) % steps.length;
+  const st = steps[tour.i];
+  document.querySelectorAll('.card').forEach(c => c.classList.toggle('focus', c.id === st.id));
+  placeCaption();
+  $(st.id).scrollIntoView({behavior: 'smooth', block: 'center'});
+  $('ct').textContent = `${tour.i + 1} / ${steps.length} · ${st.title}`;
+  $('cx').textContent = tourText(st);
+  $('cn').textContent = 'auto-advancing · updates live';
+  tour.t0 = performance.now();
+}
+function placeCaption() {
+  const card = document.querySelector('.card.focus'); const cap = $('caption');
+  if (!card) return;
+  const r = card.getBoundingClientRect();
+  const w = Math.max(360, Math.min(r.width, window.innerWidth - 32));
+  let left = r.left + window.scrollX + (r.width - w) / 2;
+  left = Math.max(16, Math.min(left, window.scrollX + window.innerWidth - w - 16));
+  cap.style.width = w + 'px'; cap.style.left = left + 'px';
+  cap.style.top = (r.bottom + window.scrollY + 12) + 'px';
+}
+function tourLoop(now) {
+  if (tour.on) {
+    placeCaption();
+    const frac = Math.min(1, (now - tour.t0) / tour.dur);
+    $('cp').style.width = (frac * 100) + '%';
+    if (frac >= 1) showStep(tour.i + 1);
+    else if ((now - tour.t0) % 3000 < 20) { const st = TOUR.filter(x => $(x.id).style.display !== 'none')[tour.i]; if (st) { const t = tourText(st); if (t !== $('cx').textContent) $('cx').textContent = t; } }
+  }
+  requestAnimationFrame(tourLoop);
+}
+requestAnimationFrame(tourLoop);
+document.addEventListener('keydown', e => {
+  if (e.key === 't' || e.key === 'T') setTour(!tour.on);
+  else if (e.key === 'Escape') setTour(false);
+  else if (e.key === 'f' || e.key === 'F') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); }
+  else if (!tour.on) return;
+  else if (e.key === 'ArrowRight') showStep(tour.i + 1);
+  else if (e.key === 'ArrowLeft') showStep(tour.i - 1);
+});
+document.querySelectorAll('.card').forEach(c => c.addEventListener('click', e => {
+  if (!tour.on || e.target.closest('.expand')) return;
+  const idx = TOUR.filter(st => $(st.id).style.display !== 'none').findIndex(st => st.id === c.id);
+  if (idx >= 0) showStep(idx);
+}));
+document.querySelectorAll('.expand').forEach(b => b.addEventListener('click', e => {
+  e.stopPropagation();
+  const card = $(b.dataset.card); card.classList.toggle('open');
+  b.title = card.classList.contains('open') ? 'Collapse' : 'Expand';
+  if (b.dataset.card === 'card-console') { const body = $('console').parentElement; body.scrollTop = body.scrollHeight; }
+}));
+</script>
+</body>
+</html>

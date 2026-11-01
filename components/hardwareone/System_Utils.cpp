@@ -2700,7 +2700,7 @@ const char* cmd_crashlog(const String& argsInput) {
   }
 
   // Static + PSRAM rather than a stack buffer: command handlers run on
-  // cmd_exec_task and stack figures in this codebase are BYTES, so a 512 B frame
+  // cmd_exec and stack figures in this codebase are BYTES, so a 512 B frame
   // is not free.
   static char* text = nullptr;
   if (!text) text = (char*)ps_alloc(640, AllocPref::PreferPSRAM, "crashlog.text");
@@ -3656,57 +3656,10 @@ const char* taskStateLabel(eTaskState state) {
   }
 }
 
-// Per-command samples shared by perftop's text and JSON renderers. Owns the
-// arrays only; task-name pointers retain FreeRTOS's existing lifetime contract.
-// OLED and periodic stack reports keep their own sampling intervals/baselines.
-struct TaskCpuSample {
-  TaskStatus_t* before = nullptr;
-  TaskStatus_t* after = nullptr;
-  UBaseType_t beforeCount = 0;
-  UBaseType_t afterCount = 0;
-  uint32_t totalDelta = 0;
-
-  TaskCpuSample(const char* beforeTag, const char* afterTag) {
-    const UBaseType_t capacity = uxTaskGetNumberOfTasks() + 6;
-    before = (TaskStatus_t*)ps_alloc(capacity * sizeof(TaskStatus_t),
-                                   AllocPref::PreferPSRAM, beforeTag);
-    after = (TaskStatus_t*)ps_alloc(capacity * sizeof(TaskStatus_t),
-                                  AllocPref::PreferPSRAM, afterTag);
-    if (!allocated()) return;
-
-    uint32_t beforeTotal = 0, afterTotal = 0;
-    beforeCount = uxTaskGetSystemState(before, capacity, &beforeTotal);
-    vTaskDelay(pdMS_TO_TICKS(750));
-    afterCount = uxTaskGetSystemState(after, capacity, &afterTotal);
-    totalDelta = afterTotal - beforeTotal;
-  }
-
-  ~TaskCpuSample() {
-    if (before) free(before);
-    if (after) free(after);
-  }
-  TaskCpuSample(const TaskCpuSample&) = delete;
-  TaskCpuSample& operator=(const TaskCpuSample&) = delete;
-
-  bool allocated() const { return before && after; }
-  bool available() const {
-    return beforeCount != 0 && afterCount != 0 && totalDelta != 0;
-  }
-
-  // -1 means no usable baseline (new task or suspected handle reuse).
-  int cpuPercent(UBaseType_t index) const {
-    if (!available() || index >= afterCount) return -1;
-    for (UBaseType_t i = 0; i < beforeCount; ++i) {
-      if (before[i].xHandle != after[index].xHandle) continue;
-      const uint32_t delta = after[index].ulRunTimeCounter - before[i].ulRunTimeCounter;
-      if (delta > totalDelta + totalDelta / 4) return -1;
-      const uint32_t percent = (uint32_t)((uint64_t)delta * 100 / totalDelta);
-      return percent > 100 ? 100 : (int)percent;
-    }
-    return -1;
-  }
-};
-
+// Per-task CPU shares come from the shared sampler (System_TaskUtils) so
+// perftop, the OLED page and the JSON readers all report the same interval
+// and no caller has to sleep to measure. Up to this many rows are copied.
+static constexpr size_t kPerftopMaxRows = 48;
 }  // namespace
 
 const char* cmd_taskstats(const String& originalCmd) {
@@ -3753,6 +3706,22 @@ const char* cmd_taskstats(const String& originalCmd) {
       t["name"]  = taskArray[i].pcTaskName ? taskArray[i].pcTaskName : "?";
       t["state"] = taskStateLabel(taskArray[i].eCurrentState);
       t["prio"]  = (unsigned)taskArray[i].uxCurrentPriority;
+      // Core affinity: 0/1 for a pinned task; the key is absent when the task
+      // may run on either core. Lets a reader resolve the FreeRTOS quirk that
+      // uxTaskGetSystemState marks only the sampling core's task as RUN.
+      // Queried by handle right after the snapshot (TaskStatus_t carries no
+      // core id in this kernel config); a task deleted in between is the same
+      // race every by-handle reader of this array already accepts.
+      {
+#if CONFIG_FREERTOS_SMP
+        const UBaseType_t mask = vTaskCoreAffinityGet(taskArray[i].xHandle);
+        const int core = (mask == 0x1) ? 0 : (mask == 0x2) ? 1 : -1;
+#else
+        const BaseType_t cid = xTaskGetCoreID(taskArray[i].xHandle);
+        const int core = (cid == 0 || cid == 1) ? (int)cid : -1;
+#endif
+        if (core >= 0) t["core"] = core;
+      }
       // usStackHighWaterMark is already BYTES under ESP-IDF — emit raw, never
       // *4 (see System_TaskUtils.h / feedback_task_stack_bytes_not_words).
       t["stackFree"] = (unsigned)taskArray[i].usStackHighWaterMark;
@@ -3790,15 +3759,16 @@ const char* cmd_taskstats(const String& originalCmd) {
 
 
 // perftop — live performance snapshot. Prints the main-loop health (from the
-// loopHealthTick profiler in HardwareOne.cpp) plus a fresh per-task CPU%
-// sampled over ~0.75 s on cmd_exec. Synchronous callers wait for this sample.
-// uint64 math avoids the *100 overflow in run-time percentage calculations.
+// loopHealthTick profiler in HardwareOne.cpp) plus per-task CPU% over the
+// shared sampler's last interval (System_TaskUtils taskCpuShares), the same
+// figures the OLED Perf page shows. Nothing blocks: the sampler ticks on the
+// main loop every 500 ms while anyone is reading it.
 const char* cmd_perftop(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // JSON form — the OLED Perf "CPU" page mirror for the app/web: loop-health
-  // strip (struct-read, same source as the OLED) + a fresh per-task CPU% over a
-  // 0.75 s sample. Returns one object; the text path below is unchanged.
+  // strip (struct-read, same source as the OLED) + per-task CPU% from the
+  // shared sampler. Returns one object; the text path below is unchanged.
   if (argWantsJson(originalCmd)) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
@@ -3814,26 +3784,23 @@ const char* cmd_perftop(const String& originalCmd) {
     loop["totalStalls"] = (unsigned long)totalStalls;
 
     JsonArray tasks = doc["tasks"].to<JsonArray>();
-    TaskCpuSample sample("perftop.ja", "perftop.jb");
-    if (sample.available()) {
-      for (UBaseType_t i = 0; i < sample.afterCount; i++) {
-        const char* nm = sample.after[i].pcTaskName;
-        if (!nm) continue;
-        const int pct = sample.cpuPercent(i);
-        if (pct < 0) continue;
-        const bool isIdle = (strncmp(nm, "IDLE", 4) == 0);
-        // Keep IDLE rows (per-core headroom) + non-idle >= 1%.
-        if (!isIdle && pct < 1) continue;
-        JsonObject t = tasks.add<JsonObject>();
-        t["name"]   = nm;
-        t["cpuPct"] = (unsigned long)pct;
-        t["idle"]   = isIdle;
-      }
+    TaskCpuShare shares[kPerftopMaxRows];
+    size_t count = 0; uint32_t windowMs = 0;
+    const bool haveShares = taskCpuShares(shares, kPerftopMaxRows, &count, &windowMs);
+    for (size_t i = 0; i < count; i++) {
+      // Keep IDLE rows (per-core headroom) + every non-idle task that ran at
+      // all in the window (>= 0.1%). cpuPct stays for existing readers;
+      // cpuPermille carries the tenths.
+      if (!shares[i].idle && shares[i].permille < 1) continue;
+      JsonObject t = tasks.add<JsonObject>();
+      t["name"]   = shares[i].name;
+      t["cpuPct"] = (unsigned long)(shares[i].permille / 10);
+      t["cpuPermille"] = (unsigned long)shares[i].permille;
+      t["idle"]   = shares[i].idle;
     }
-    doc["cpuValid"] = sample.available();
+    doc["cpuValid"] = haveShares;
+    doc["windowMs"] = (unsigned long)windowMs;  // 0 while the sampler is arming
 
-    // Retain the sample arrays through serialization. Task names are borrowed
-    // from FreeRTOS; retaining the arrays does not pin a task's TCB.
     serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
     return getDebugBuffer();
   }
@@ -3844,34 +3811,28 @@ const char* cmd_perftop(const String& originalCmd) {
   // 1) Main-loop health snapshot (laps/s, period, per-section avg, worst stalls)
   perfPrintLoopHealth();
 
-  // 2) Live per-task CPU%: two run-time-stat snapshots ~750 ms apart, delta by
-  //    handle (handles can be reused, so a delta > elapsed is rejected).
+  // 2) Per-task CPU% over the shared sampler's last interval (the same figures
+  //    the OLED Perf page and the JSON readers show; nothing sleeps to measure).
   broadcastOutput("");
-  broadcastOutput("[PERFTOP] live task CPU (0.75s sample):");
-
-  bool allocationFailed = false;
   {
-    TaskCpuSample sample("perftop.a", "perftop.b");
-    if (!sample.allocated()) {
-      allocationFailed = true;
-    } else if (!sample.available()) {
-      broadcastOutput("  (run-time stats unavailable)");
+    TaskCpuShare shares[kPerftopMaxRows];
+    size_t count = 0; uint32_t windowMs = 0;
+    const bool haveShares = taskCpuShares(shares, kPerftopMaxRows, &count, &windowMs);
+    if (!haveShares) {
+      broadcastOutput("[PERFTOP] task CPU: sampler arming — the first interval needs about a second; run again");
     } else {
+      BROADCAST_PRINTF("[PERFTOP] task CPU over the last %lu ms (shared sampler):", (unsigned long)windowMs);
       // pass 0: IDLE0/IDLE1 (per-core headroom); pass 1: non-idle tasks >= 1%.
       int shown = 0;
       for (int pass = 0; pass < 2; pass++) {
-        for (UBaseType_t i = 0; i < sample.afterCount; i++) {
-          const char* nm = sample.after[i].pcTaskName;
-          if (!nm) continue;
-          bool isIdle = (strncmp(nm, "IDLE", 4) == 0);
-          if (pass == 0 && !isIdle) continue;
-          if (pass == 1 && isIdle) continue;
-          const int pct = sample.cpuPercent(i);
-          if (pct < 0) continue;
+        for (size_t i = 0; i < count; i++) {
+          if (pass == 0 && !shares[i].idle) continue;
+          if (pass == 1 && shares[i].idle) continue;
+          const unsigned pct = shares[i].permille / 10;
           if (pass == 0) {
-            BROADCAST_PRINTF("  %-16.16s idle %3lu%%", nm, (unsigned long)pct);
+            BROADCAST_PRINTF("  %-16.16s idle %3u%%", shares[i].name, pct);
           } else if (pct >= 1) {
-            BROADCAST_PRINTF("  %-16.16s %3lu%%", nm, (unsigned long)pct);
+            BROADCAST_PRINTF("  %-16.16s %3u%%", shares[i].name, pct);
             shown++;
           }
         }
@@ -3879,7 +3840,6 @@ const char* cmd_perftop(const String& originalCmd) {
       if (shown == 0) broadcastOutput("  (all non-idle tasks <1% this interval)");
     }
   }
-  if (allocationFailed) broadcastOutput("  (cannot allocate task snapshot buffers)");
   broadcastOutput("========== END PERFTOP ==========");
   return "OK";
 }
@@ -4399,7 +4359,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   CommandIdentityScope scope(ctx);
 
   // The full CommandContext also carries automationName.
-  // cmd_exec_task always calls setCurrentCommandContext(&r->ctx) before
+  // cmd_exec always calls setCurrentCommandContext(&r->ctx) before
   // invoking executeCommand, so this returns the correct ctx for queued
   // automation sub-commands. Direct callers that don't set it get nullptr,
   // which correctly suppresses autolog (non-automation paths).
@@ -4858,7 +4818,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
     return false;
   }
 
-  // Publish "the httpd task is blocked on cmd_exec_task" before the request
+  // Publish "the httpd task is blocked on cmd_exec" before the request
   // can become visible. cmd_exec may receive on another core immediately after
   // xQueueSend(), and a shutdown command must not observe a transient zero and
   // enter httpd_stop() while this handler is waiting (including for queue room).
@@ -4868,7 +4828,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
   if (waiterIsHttpd) gWebCmdWaiters.fetch_add(1, std::memory_order_release);
 #endif
 
-  // Reserve both owners before publishing the pointer. cmd_exec_task can run
+  // Reserve both owners before publishing the pointer. cmd_exec can run
   // and complete as soon as xQueueSend succeeds, even before this task starts
   // waiting on the semaphore.
   r->syncOwnerRefs.store(2, std::memory_order_relaxed);
@@ -4973,9 +4933,9 @@ bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* us
   return true;
 }
 
-// Deferred work submission — runs an arbitrary callback on cmd_exec_task,
+// Deferred work submission — runs an arbitrary callback on cmd_exec,
 // bypassing the CLI execution pipeline. Used by espnow_task to push heavy
-// Ed25519 / X25519 work onto cmd_exec_task's deeper stack without bloating
+// Ed25519 / X25519 work onto cmd_exec's deeper stack without bloating
 // espnow_task's budget. The callback owns its arg's lifetime (must free it).
 // Counts submissions lost because the command queue was full or memory was
 // unavailable. This path drops silently by design (the caller is a time-critical

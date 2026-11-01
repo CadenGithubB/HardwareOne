@@ -81,7 +81,7 @@ def worst_case_json_bytes(power: str) -> int:
         "schema": 2, "mode": 4, "modeName": "Performance", "cpuMhz": 400, "targetMhz": 400,
         "boost": "recording", "xtalMhz": 40, "apbMhz": 80, "activeMhz": 400, "idleMhz": 400,
         "interactiveFloorMhz": 100, "maxMhz": 400, "supportedCpuMhz": [100, 200, 400],
-        "autoMode": False, "autoModeSupported": False, "displayBrightness": 255, "displayDimLevel": 100,
+        "autoMode": False, "autoModeSupported": False, "displayBrightness": 255,
         "powerSaveMinutes": 1440, "displayPowerSave": False, "localDisplayAwake": False,
         "idleMsAgo": 4294967295, "localIdleMsAgo": 4294967295, "cooldownMs": 60000,
         "cooldownRemainingMs": 60000, "otaProbation": False, "sleepAllowed": False,

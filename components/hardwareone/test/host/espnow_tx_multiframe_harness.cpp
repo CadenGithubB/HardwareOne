@@ -6,7 +6,7 @@
 //    multi-frame path models the per-fragment ACK wait. While a sender waits
 //    for an ACK, other tasks run: producers submit fire-and-forget jobs, and
 //    the dispatcher drains the queue unless it is the task that is waiting.
-//    CALLER plays cmd_exec_task (gCmdExecTaskHandle); HTTPD plays any other
+//    CALLER plays cmd_exec (gCmdExecTaskHandle); HTTPD plays any other
 //    synchronous sender (httpd, the OLED loop).
 //  * STREAM: the real STREAM line sender (sendEspNowStreamMessage, its session
 //    helper and session lookup, plus v4_single_frame_cap, the per-task session
@@ -410,7 +410,7 @@ EspNowState* gEspNow = &gState;
 TaskHandle_t gCmdExecTaskHandle = CALLER;
 
 // Per-task command context (System_AuthIdentity's TLS slot): CALLER plays
-// cmd_exec_task, OTHER_TASK any other task. The two fields the stream owner
+// cmd_exec, OTHER_TASK any other task. The two fields the stream owner
 // reads mirror System_CommandTypes.h (the driver checks that they still exist).
 enum CommandOrigin { ORIGIN_SERIAL, ORIGIN_WEB, ORIGIN_SYSTEM, ORIGIN_ESPNOW };
 struct CommandContext {

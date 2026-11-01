@@ -33,7 +33,7 @@ constexpr uint32_t CMD_EXEC_STACK_WORDS = 8192;     // 8 KB (was annotated ~32KB
 constexpr uint32_t BOOT_NET_STACK_WORDS = CMD_EXEC_STACK_WORDS;  // 8 KB, one boot only: runs the connect + NTP path `openwifi` runs on cmd_exec.
 constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 4096;     // 4 KB (was annotated 16KB — 4x wrong). History below cites 4x-inflated HWMs:
                                                      // runtime task-stack reports flagged
-                                                     // sensor_queue_task CRITICAL at ~79%
+                                                     // sensor_queue CRITICAL at ~79%
                                                      // peak (free ~2.5KB) with all sensors
                                                      // enabled + remote-sensor JSON. History:
                                                      // gamepadInit (seesaw.begin → SWReset →
@@ -50,7 +50,7 @@ constexpr uint32_t ESPNOW_HB_STACK_WORDS = 6656;     // 6.5 KB (was annotated 26
                                                      // ambient depth is RX-side (WiFi interrupt frame +
                                                      // AEAD unwrap + handler dispatch); Phase 3.4+ heavy
                                                      // crypto (Ed25519/X25519/HKDF/sign) still defers via
-                                                     // submitDeferredToCmdExec → cmd_exec_task (32 KB stack).
+                                                     // submitDeferredToCmdExec → cmd_exec (32 KB stack).
                                                      // Step 4 (sendFileToMac chunk loop migration) may lower
                                                      // this peak further; re-measure HWM after Step 4 lands
                                                      // and consider trimming back if the post-Step-4 peak
@@ -74,7 +74,7 @@ constexpr uint32_t DEBUG_OUT_STACK_WORDS = 4096;     // 4 KB (was annotated 16KB
                                                      // through appendLineWithCap()->LittleFS append,
                                                      // whose deep write path + the timestamp String
                                                      // exceeded the headroom and overflowed. The HWM
-                                                     // is driven entirely by debug_out doing inline
+                                                     // is driven entirely by log_out doing inline
                                                      // FILE I/O (system-log + error-log writes); see
                                                      // the drain loop. Do NOT trim below this 4 KB
                                                      // unless those file writes are moved off this task.
@@ -210,7 +210,7 @@ constexpr BaseType_t I2C_SENSOR_CORE = APP_CORE;
 // so nothing would drain the flag — that deadlocks by construction.
 //
 // Default to the flag. A worker task per UI action is the thing we're avoiding;
-// cam_pwr is the justified exception and even it retires itself once its queue
+// cam_power is the justified exception and even it retires itself once its queue
 // has been idle, rather than holding a stack forever.
 //
 // NAMING CONTRACT — the call site must reveal whether it blocks:
@@ -229,7 +229,7 @@ constexpr BaseType_t I2C_SENSOR_CORE = APP_CORE;
 // ServiceWorker below) leaves on its own once it has waited this long with
 // nothing to do, giving its stack and TCB back; the next request creates it
 // again, which may then fail under heap pressure where today it could not
-// (each refuses cleanly). mapRender (OLED map), the phone pipe and cam_pwr
+// (each refuses cleanly). mapRender (OLED map), the phone pipe and cam_power
 // keep their own figures and their own exits.
 constexpr uint32_t SERVICE_TASK_IDLE_RETIRE_MS = 60000;
 
@@ -459,6 +459,31 @@ void reportAllTaskStacks();
 // Print the main-loop performance snapshot (laps/s, period, per-section avg,
 // worst-N stalls) gathered by loopHealthTick() in HardwareOne.cpp. Used by the
 // `perftop` command. Implemented in HardwareOne.cpp.
+// ---------------------------------------------------------------------------
+// Shared task-CPU sampler. ONE non-blocking sampler feeds the OLED perf page,
+// `perftop` (text and JSON) and every reader of those (web, app, the showcase),
+// so they agree and none of them has to sleep to measure. The old per-caller
+// sample (two snapshots 750 ms apart on the calling task) could not see the
+// task that ran it, which is why the command executor read ~1% there and ~20%
+// on the OLED at the same moment.
+//
+// taskCpuSampleTick() runs on the main loop: it takes a snapshot every
+// TASK_CPU_SAMPLE_MS while some reader has asked within TASK_CPU_INTEREST_MS,
+// and idles otherwise (a headless device pays nothing). taskCpuShares()
+// registers interest and copies the shares over the last completed interval;
+// the first read after idleness returns false until two samples exist, about
+// a second later.
+#define TASK_CPU_SAMPLE_MS   500
+#define TASK_CPU_INTEREST_MS 15000
+struct TaskCpuShare {
+  const char* name;    // borrowed from FreeRTOS; valid while the task lives
+  uint16_t permille;   // of one core's time over the interval, 0..1000
+  uint32_t stackFree;  // high-water mark, BYTES
+  bool idle;           // IDLE0/IDLE1: per-core headroom, not load
+};
+void taskCpuSampleTick();
+bool taskCpuShares(TaskCpuShare* out, size_t cap, size_t* count, uint32_t* intervalMs);
+
 void perfPrintLoopHealth();
 
 // Struct-read form of the same snapshot for on-device renderers (OLED perf

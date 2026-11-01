@@ -17,6 +17,8 @@ static const uint8_t kBleWedgeStreakTrip=2;
 static volatile uint8_t gBleWedgeStreak=0;
 static volatile uint8_t gBleClientRetirementPeerMask=0;
 static const uint32_t kBleRetirementGraceMs=3000;
+static volatile uint8_t gRepairOpenFailStreak=0;
+static const uint8_t kRepairOpenFailTrip=7;
 static const uint32_t kBleRecycleMinGapMs=10UL*60UL*1000UL;
 static uint32_t sBleLastRecycleMs=0,retirementAge=0,clockMs=1000;
 static bool clientRuntime=true,ringUp=false,ringOpen=false,phoneReady=false,halUp=true;
@@ -51,6 +53,7 @@ static uint32_t millis() { return clockMs; }
 #define BROADCAST_PRINTF(...) ((void)0)
 enum { SYSEVT_BLE_STACK_RECYCLED };
 static void systemEventPost(int,const char*,const char*) {}
+static void logSystemEvent(const char*,const char*,...) {}
 // Glasses only now: the phone pipe is a device owner of its own (phoneLinkClose).
 static bool deinitG2Client() { calls.emplace_back("g2-deinit"); clientRuntime=false; return true; }
 static bool g2RingPrepareForStackTeardown(uint32_t) { return true; }
@@ -76,7 +79,7 @@ static void blePeerRequestReseek(BlePeerKind kind) { reseeks.push_back(kind); }
 // INSERT_PRODUCTION
 static void reset() {
   roleAvailable=true; gBleWedgeStreak=kBleWedgeStreakTrip; gBleClientRetirementPeerMask=0;
-  sBleLastRecycleMs=0; retirementAge=0; clockMs+=kBleRecycleMinGapMs+1;
+  sBleLastRecycleMs=0; retirementAge=0; clockMs+=kBleRecycleMinGapMs+1; gRepairOpenFailStreak=0;
   clientRuntime=halUp=true; ringUp=ringOpen=phoneReady=false; gL={}; gR={}; calls.clear(); reseeks.clear();
   setupIdle=true; setupIdleMask=0; stackDownOk=true;
 }
@@ -103,6 +106,16 @@ int main() {
    assert(setupIdleMask==hw1setup::kAll);}
   // A live temple still blocks the wedge recycle, as before.
   {reset();gL.connected=true;assert(!bleStackRecycleIfWedged()&&calls.empty());}
+  // A half-connected pair whose missing temple was found but refused a whole
+  // fast ladder of opens is admitted even with the sibling temple and the
+  // phone up; both are restored afterwards and the streak is spent.
+  {reset();gBleWedgeStreak=0;gRepairOpenFailStreak=kRepairOpenFailTrip;gR.connected=true;phoneReady=true;
+   assert(bleStackRecycleIfWedged());
+   assert((calls==std::vector<std::string>{"g2-deinit","phone-close","stack-down","stack-up","g2-init"}));
+   assert(gRepairOpenFailStreak==0);}
+  // One try short of the ladder is not evidence: a live temple still blocks.
+  {reset();gBleWedgeStreak=0;gRepairOpenFailStreak=kRepairOpenFailTrip-1;gR.connected=true;
+   assert(!bleStackRecycleIfWedged()&&calls.empty());}
   // A lost native route must still be retired: recycle, then restore the
   // phone that was READY along with the retiring peer.
   {reset();gBleWedgeStreak=0;gBleClientRetirementPeerMask=uint8_t(1U<<BLE_PEER_G2_GLASSES);

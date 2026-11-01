@@ -584,10 +584,10 @@ void presenceTask(void* parameter) {
       if (checkTaskStackSafety("presence", PRESENCE_STACK_WORDS, &gPresenceRunning)) continue;
       if (gPresenceRunning && isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
-        DEBUG_PERFORMANCEF("[STACK] presence_task watermark=%u words", (unsigned)watermark);
+        DEBUG_PERFORMANCEF("[STACK] sensor_presence watermark=%u words", (unsigned)watermark);
       }
       if (gPresenceRunning && isDebugFlagSet(DEBUG_MEMORY)) {
-        DEBUG_MEMORY_HEAPF("[HEAP] presence_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+        DEBUG_MEMORY_HEAPF("[HEAP] sensor_presence: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     

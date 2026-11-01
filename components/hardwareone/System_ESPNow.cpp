@@ -483,7 +483,7 @@ EXT_RAM_BSS_ATTR static V4FragAckWait gV4FragAckWait[V4_FRAG_ACK_WAIT_MAX];  // 
 static V4FragAckWait* v4_frag_ack_alloc(const uint8_t* dst, uint32_t msgId, uint8_t fragIdx) {
   // Serialize the slot scan + claim against the RX ACK handler (which marks
   // acked under the same lock) and other fragmented senders. Fragmented sends
-  // run off espnow_task (cmd_exec_task / SENSOR_BCAST_TASK), so this array is
+  // run off espnow_task (cmd_exec / SENSOR_BCAST_TASK), so this array is
   // genuinely multi-task. Brief scan only — never held across the ACK wait
   // (the caller polls ->acked WITHOUT the lock; see v4_send_*_chunked).
   EspNowTxGuard g("fragAckAlloc");
@@ -698,7 +698,7 @@ static volatile uint32_t gEspNowRxDrops = 0;
 // whose radio source MAC matches — before any parsing, heartbeats included, so
 // the blocked peer goes offline within MESH_PEER_TIMEOUT_MS exactly like real
 // RF loss. RAM-only: reboot or `espnowrelayblock clear` lifts it.
-// Written by cmd_exec_task (the command), read by espnow_task (the drain) —
+// Written by cmd_exec (the command), read by espnow_task (the drain) —
 // volatile like the ring indices. The command DISARMS (active=false) before
 // rewriting the MAC and re-arms after, so the drain never matches against a
 // half-written MAC of an ACTIVE block — including the re-arm-with-new-MAC case.
@@ -1266,10 +1266,10 @@ static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t l
 // global id set at queue time used to stream whatever cmd_exec printed to the
 // peer that queued last, and the first completion cleared the other's stream.)
 //
-// Task gate: only cmd_exec_task streams session output. Lines from unrelated
+// Task gate: only cmd_exec streams session output. Lines from unrelated
 // tasks would pollute the command's response (heartbeat ACKs, bond status
 // pushes) and run the STREAM send on small stacks: an `opengamepad` bonded
-// command's Seesaw init on sensor_queue_task (11 KB) once overflowed that way.
+// command's Seesaw init on sensor_queue (11 KB) once overflowed that way.
 static uint32_t streamCmdIdForCurrentTask() {
   extern TaskHandle_t gCmdExecTaskHandle;
   if (gCmdExecTaskHandle == nullptr || xTaskGetCurrentTaskHandle() != gCmdExecTaskHandle) {
@@ -2196,7 +2196,7 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFl
   // TXDEPTH instrumentation — measures where the shared send path spends stack.
   // uxTaskGetStackHighWaterMark returns the task's lifetime MIN free words, so
   // the value only drops; a drop between checkpoints localizes the consumer.
-  // task name lets us compare text (cmd_exec_task) vs sensor (espnow_tx).
+  // task name lets us compare text (cmd_exec) vs sensor (espnow_tx).
   UBaseType_t hwmPre = uxTaskGetStackHighWaterMark(nullptr);
   if (!sessionWrapFrame(s, h, plaintext, plaintextLen, outPayload)) {
     setErr("sessionWrapFrame failed");
@@ -3013,7 +3013,7 @@ static bool bondSessionActiveWith(const uint8_t* mac) {
   return (s && s->state == SESSION_ACTIVE);
 }
 
-// Invoked from the session layer (cmd_exec_task) the moment a session with
+// Invoked from the session layer (cmd_exec) the moment a session with
 // `peerMac` reaches ACTIVE — whether we were initiator (got CONFIRM) or
 // responder (completed OPEN). Replaces the old "plaintext heartbeat == peer
 // online" discovery: the encrypted session itself is now the liveness signal.
@@ -3034,7 +3034,7 @@ void bondNotifySessionEstablished(const uint8_t* peerMac) {
     // handshake; this transition is the point command-execution over the bond
     // becomes usable. One line per session (guarded by wasOffline, not per
     // heartbeat) and already filtered to the configured bond peer above. Fires on
-    // both master and worker. Runs on cmd_exec_task — safe for the log file write.
+    // both master and worker. Runs on cmd_exec — safe for the log file write.
     String bondWho = getEspNowDeviceName(peerMac);
     if (bondWho.length() == 0) bondWho = formatMacAddress(peerMac);
     logAuthAttempt(true, "espnow/bond", bondWho, String("espnow"),
@@ -4142,7 +4142,7 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
 // in failed_login.log exactly like a bad password does. Two constraints shape
 // this: (1) the failures are detected on espnow_task (RX drain / super-loop)
 // where synchronous FS writes are forbidden — so we defer the actual write to
-// cmd_exec_task via submitDeferredToCmdExec (same model as runDeferredSession-
+// cmd_exec via submitDeferredToCmdExec (same model as runDeferredSession-
 // Confirm); (2) a hostile or looping peer can spam attempts, so we throttle to
 // one logged failure per window to protect the 680 KB-capped log file.
 struct BondAuthFailLog { char who[40]; char ip[20]; char reason[72]; };
@@ -4175,7 +4175,7 @@ static void logBondAuthFailure(const uint8_t* mac, const char* reason) {
 // read/modify/write, target password hashing, per-user settings write. All of
 // that is CPU- and FS-bound and must NOT run inline on espnow_task (it stalls
 // the RX-ring drain and can starve session handshakes). We snapshot the frame
-// into PSRAM and defer the whole body to cmd_exec_task — same model as
+// into PSRAM and defer the whole body to cmd_exec — same model as
 // runDeferredSessionConfirm. The deferred body also OWNS all the response
 // sends, so they run off the dispatcher.
 struct DeferredUserSyncWork {
@@ -5207,7 +5207,7 @@ static void v4h_file_end(const V4RxCtx& ctx) {
 // mismatch, or rejected-at-start). Two jobs:
 //   1. Correct the record — surface it to the operator, count a failed send.
 //   2. ABORT the in-flight send: if (peer, msgId) matches the transfer that
-//      sendFileToMac is pumping right now on cmd_exec_task, publish the msgId
+//      sendFileToMac is pumping right now on cmd_exec, publish the msgId
 //      into fileSendAbortMsgId so its chunk loop stops within one chunk
 //      instead of burning the rest of the file's airtime into a dead slot.
 // msgId echoes the original FILE_START, so correlation is exact.
@@ -5644,7 +5644,7 @@ static void v4_send_route_adverts() {
 // light, and (c) does NO filesystem I/O, NO deserializeJson of attacker-sized
 // input, and NO heavy crypto beyond a single HMAC verify. Anything heavier MUST
 // snapshot its inputs into PSRAM and hand off via submitDeferredToCmdExec(), so
-// the slow work runs on cmd_exec_task and never stalls RX.
+// the slow work runs on cmd_exec and never stalls RX.
 //
 // Handlers that DEFER today (heavy crypto / FS+JSON): USER_SYNC, SESSION_OPEN,
 // SESSION_CONFIRM, SESSION_REKEY, PAIR_BEACON (auto-pair mutates the device
@@ -5911,7 +5911,7 @@ static bool pairCtrlForUs(const V4RxCtx& ctx, uint8_t senderMac[6], char* nameOu
   return true;
 }
 
-// Deferred to cmd_exec_task — cmd_espnow_pairsecure does FS + crypto. Reused by
+// Deferred to cmd_exec — cmd_espnow_pairsecure does FS + crypto. Reused by
 // the initiator's PAIR_ACCEPT handler (the target pairs inline from its CLI).
 struct PairCompleteJob { uint8_t mac[6]; char name[24]; };
 static void runDeferredPairComplete(void* arg) {
@@ -8349,7 +8349,7 @@ static void sendBondManifest(const uint8_t* peerMac) {
   sManifestTransferInProgress = false;
 }
 
-// cmd_exec_task runner — dispatches to the right sendBondX() by kind. Each
+// cmd_exec runner — dispatches to the right sendBondX() by kind. Each
 // branch installs the same identity scope the previously-inline super-loop
 // code installed around the same call, so canRead()/canWrite() gates on
 // /system/_*_out.json behave identically.
@@ -8948,7 +8948,7 @@ static void processMetadata(const uint8_t* srcMac, const V4PayloadMetadata* meta
 uint32_t generateMessageId() {
   if (!gEspNow) return 0;
   // Atomic post-increment: called by every sender on every task (espnow_task,
-  // cmd_exec_task, SENSOR_BCAST_TASK). A plain `++` is a non-atomic
+  // cmd_exec, SENSOR_BCAST_TASK). A plain `++` is a non-atomic
   // read-modify-write — two cores racing it mint duplicate msgIds, which the
   // receiver's (origin,msgId) dedup then drops as a false duplicate. The GCC
   // builtin keeps the struct member a plain uint32_t (no std::atomic copyability
@@ -11877,7 +11877,7 @@ static bool initEspNow() {
 // synchronously while the browser's fetch
 // is held open races the HTTPS connection against the radio reconfiguration,
 // which surfaces intermittently as "TypeError: Load failed". So for SOURCE_WEB
-// we ACK immediately and run the real init here, a beat later, on cmd_exec_task.
+// we ACK immediately and run the real init here, a beat later, on cmd_exec.
 static void deferredEspNowInitFn(void* /*arg*/) {
   // Re-check: a second queued request (double-click) must not re-init.
   if (gEspNow && gEspNow->initialized) return;

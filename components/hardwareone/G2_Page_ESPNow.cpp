@@ -3,7 +3,7 @@
 // =============================================================================
 // See header for the contract. This page surfaces ESP-NOW actions on the
 // lens (send / broadcast / ping / per-peer detail / stats). State-mutating
-// taps route through g2SubmitHijackCommand so they run on cmd_exec_task
+// taps route through g2SubmitHijackCommand so they run on cmd_exec
 // with the glasses user's auth identity (same path the Network page uses).
 // Ping is the one exception — it uses the espnowAppPing* API in
 // System_ESPNow.h to time the HEARTBEAT+ACK round-trip directly.

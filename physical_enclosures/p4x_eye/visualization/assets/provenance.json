@@ -1,0 +1,11 @@
+{
+  "source_url": "https://docs.espressif.com/projects/esp-hardware-design-guidelines/en/latest/esp32p4/_downloads/0857ce9b0e3668c3e56170a8a595db07/ESP32-P4X-EYE-EN.zip",
+  "archive_sha256": "7e11e6e8b0aae43f3f27636f62c1715b8c4335c4fe460bfb3c51ae3e951ac9c1",
+  "placement_archive_member": "ESP32-P4X-EYE/06_Placement/Placement_ESP32-P4-EYE-MB_V2.3_20250411.xls",
+  "note": "Official archive contains MB V2.3 physical layout and V2.4 schematic. Enclosure references MB V2.3. Visual component body dimensions are approximations unless explicitly sourced in build_scene.py.",
+  "extracted_files": {
+    "placement-v2.3.txt": "fb19bdb1af25ed175ed86a8bcc8abbebbf002eb10185db2c1579a23f657e033c",
+    "SILK_TOP.art": "26f47678f2ee97f9f929348e2d7be127dad6e9a1c2310133f5ddc5a116e6fb45",
+    "SILK_BOT.art": "afbbaa096d389b5a15a71fa2e161ed62fcd8f70ba8ddbae4bfa79735facf7a2c"
+  }
+}

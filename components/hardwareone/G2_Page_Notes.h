@@ -10,7 +10,7 @@ void g2ShowNotesMenu();
 void g2BuildNotesInfo(char* out, size_t cap);
 void g2NotesHandleTap(uint32_t index);
 void g2NotesTick();
-// Hold consumers, called on g2_tap_disp only (G2_Glasses.h, G2PageHoldFn).
+// Hold consumers, called on g2_taps only (G2_Glasses.h, G2PageHoldFn).
 // g2NotesHandleHold is this page's own handler (g2RegisterPageHold). The
 // HoldBegin/End/Abort trio is the global hold action (g2holdaction 1) for a
 // press on any other HW1 page: Begin shows this page and starts a hold note,

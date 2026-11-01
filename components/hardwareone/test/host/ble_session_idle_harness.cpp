@@ -6,7 +6,7 @@
 // mutex, transport sessions, the directed sender and OTA are host boundaries.
 //
 // Another task can win the lifecycle lock while the main loop waits for it:
-// cmd_exec_task stamps a command (bleMarkActivity) and the main loop's tick
+// cmd_exec stamps a command (bleMarkActivity) and the main loop's tick
 // then reads that slot. The contender double models exactly that interleaving,
 // one millisecond later, at each lock take the tick makes.
 #include "Arduino.h"
@@ -176,7 +176,7 @@ static void login(uint16_t connId, const char* user) {
 }
 
 // The main loop's tick, with a command from connId landing while it waits for
-// the lifecycle lock (cmd_exec_task stamps it one millisecond later each time).
+// the lifecycle lock (cmd_exec stamps it one millisecond later each time).
 static void tickWhileCommandLands(uint16_t connId) {
   gContender = [connId] {
     gClockMs += 1;

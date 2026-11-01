@@ -247,9 +247,9 @@ void displayMemoryStatsRendered() {
 // Each task row is 9px; reserve one 9px summary row above the list.
 // Preserve the established four-row OLED view, and fill taller canvases.
 #define PERF_VISIBLE_ROWS oledVisibleRows(9, 9, 4)
-// Live-refresh cadence: re-sample task stats twice a second (2 Hz). Both the
-// CPU% interval delta and the on-screen numbers advance at this rate.
-#define PERF_SAMPLE_MS 500
+// Live-refresh cadence: read the shared sampler twice a second (2 Hz), the
+// sampler's own cadence (TASK_CPU_SAMPLE_MS).
+#define PERF_SAMPLE_MS TASK_CPU_SAMPLE_MS
 
 struct PerfRenderData {
   // loop-health strip (from perfGetLoopSnapshot)
@@ -271,17 +271,9 @@ static uint8_t sPerfPage  = 0;   // 0 = CPU, 1 = STACK
 static int     sCpuScroll = 0;   // viewport offsets, one per page
 static int     sStkScroll = 0;
 
-// Grow-only sample buffers (cmd_taskstats' ps_alloc cache pattern).
-static TaskStatus_t* sPerfTaskBuf = nullptr;
-static UBaseType_t   sPerfTaskCap = 0;
-// Previous-sample runtime baseline, matched by handle.
-static TaskHandle_t* sPerfPrevHandle = nullptr;
-static uint32_t*     sPerfPrevRun    = nullptr;
-static UBaseType_t   sPerfPrevCount  = 0;
-static uint32_t      sPerfPrevTotal  = 0;
-
+// Both pages read the shared task-CPU sampler (System_TaskUtils), the same
+// source as `perftop` and the JSON readers, so every surface shows one number.
 void preparePerfData() {
-  // Expensive sampling at 2 Hz; between samples the cached data re-renders.
   static uint32_t sSampleStamp = 0;
   if (!everyMs(&sSampleStamp, PERF_SAMPLE_MS)) return;
 
@@ -289,46 +281,19 @@ void preparePerfData() {
       perfRenderData.lapsPerSec, perfRenderData.avgMs, perfRenderData.maxMs,
       perfRenderData.stalls5s, perfRenderData.totalStalls);
 
-  UBaseType_t n = uxTaskGetNumberOfTasks();
-  if (n + 4 > sPerfTaskCap) {
-    UBaseType_t cap = n + 4;
-    TaskStatus_t* buf = (TaskStatus_t*)ps_alloc(cap * sizeof(TaskStatus_t),
-                                                AllocPref::PreferPSRAM, "oled.perf.tasks");
-    TaskHandle_t* ph  = (TaskHandle_t*)ps_alloc(cap * sizeof(TaskHandle_t),
-                                                AllocPref::PreferPSRAM, "oled.perf.prevh");
-    uint32_t*     pr  = (uint32_t*)ps_alloc(cap * sizeof(uint32_t),
-                                            AllocPref::PreferPSRAM, "oled.perf.prevr");
-    if (!buf || !ph || !pr) return;  // keep old buffers/data; retry next tick
-    // Grow-only: old buffers stay allocated on the rare regrow (task count is
-    // near-constant after boot); tracking-tagged so the leak-hunt sees them.
-    sPerfTaskBuf = buf; sPerfPrevHandle = ph; sPerfPrevRun = pr;
-    sPerfTaskCap = cap;
-    sPerfPrevCount = 0;  // baseline invalid at the new size — skip one interval
-  }
+  // Reading registers interest, which keeps the main-loop sampler ticking
+  // while this page is shown. ~48 rows × 16 B on the stack.
+  static constexpr size_t kMaxRows = 48;
+  TaskCpuShare shares[kMaxRows];
+  size_t got = 0; uint32_t windowMs = 0;
+  const bool haveShares = taskCpuShares(shares, kMaxRows, &got, &windowMs);
 
-  uint32_t totalRun = 0;
-  UBaseType_t got = uxTaskGetSystemState(sPerfTaskBuf, sPerfTaskCap, &totalRun);
-  if (got == 0) return;  // capacity race — sample again next second
-
-  // --- CPU page: interval delta vs previous sample, FULL sorted list ------
-  // Prepare and render both run sequentially on the main loop, so inserting
-  // straight into the render arrays is race-free.
-  uint32_t dTotal = totalRun - sPerfPrevTotal;  // unsigned wrap-safe (u32 us counters)
+  // --- CPU page: interval shares, FULL sorted list (IDLE excluded) ---------
   perfRenderData.cpuCount = 0;
-  if (sPerfPrevCount > 0 && dTotal > 0) {
-    for (UBaseType_t i = 0; i < got; i++) {
-      const char* nm = sPerfTaskBuf[i].pcTaskName;
-      if (strncmp(nm, "IDLE", 4) == 0) continue;  // idle time isn't load
-      // Find this handle in the previous sample (order can shift).
-      uint32_t prev = 0; bool found = false;
-      for (UBaseType_t j = 0; j < sPerfPrevCount; j++) {
-        if (sPerfPrevHandle[j] == sPerfTaskBuf[i].xHandle) { prev = sPerfPrevRun[j]; found = true; break; }
-      }
-      if (!found) continue;  // new task this interval — no baseline yet
-      uint32_t dRun = sPerfTaskBuf[i].ulRunTimeCounter - prev;
-      uint32_t p = (uint32_t)(((uint64_t)dRun * 100U) / dTotal);
-      if (p > 125) continue;  // handle reuse artifact (taskstats' rejection rule)
-      if (p > 100) p = 100;
+  if (haveShares) {
+    for (size_t i = 0; i < got; i++) {
+      if (shares[i].idle) continue;  // idle time isn't load
+      const uint32_t p = shares[i].permille / 10;
       // Sorted insert (descending pct), capped at PERF_MAX_TASKS.
       int cnt = perfRenderData.cpuCount;
       int at = cnt < PERF_MAX_TASKS ? cnt : PERF_MAX_TASKS;
@@ -340,7 +305,7 @@ void preparePerfData() {
         memcpy(perfRenderData.cpuName[m], perfRenderData.cpuName[m - 1],
                sizeof(perfRenderData.cpuName[m]));
       }
-      strncpy(perfRenderData.cpuName[at], nm, 10);
+      strncpy(perfRenderData.cpuName[at], shares[i].name, 10);
       perfRenderData.cpuName[at][10] = '\0';
       perfRenderData.cpuPct[at] = (uint8_t)p;
       if (cnt < PERF_MAX_TASKS) perfRenderData.cpuCount++;
@@ -349,8 +314,8 @@ void preparePerfData() {
 
   // --- STACK page: FULL list, lowest free-bytes first (HWM is BYTES) ------
   perfRenderData.stkCount = 0;
-  for (UBaseType_t i = 0; i < got; i++) {
-    uint32_t f = (uint32_t)sPerfTaskBuf[i].usStackHighWaterMark;
+  for (size_t i = 0; i < got; i++) {
+    uint32_t f = shares[i].stackFree;
     int cnt = perfRenderData.stkCount;
     int at = cnt < PERF_MAX_TASKS ? cnt : PERF_MAX_TASKS;
     while (at > 0 && perfRenderData.stkFree[at - 1] > f) at--;
@@ -361,20 +326,12 @@ void preparePerfData() {
       memcpy(perfRenderData.stkName[m], perfRenderData.stkName[m - 1],
              sizeof(perfRenderData.stkName[m]));
     }
-    strncpy(perfRenderData.stkName[at], sPerfTaskBuf[i].pcTaskName, 10);
+    strncpy(perfRenderData.stkName[at], shares[i].name, 10);
     perfRenderData.stkName[at][10] = '\0';
     perfRenderData.stkFree[at] = f;
     if (cnt < PERF_MAX_TASKS) perfRenderData.stkCount++;
   }
-
-  // Roll the baseline.
-  for (UBaseType_t i = 0; i < got; i++) {
-    sPerfPrevHandle[i] = sPerfTaskBuf[i].xHandle;
-    sPerfPrevRun[i]    = sPerfTaskBuf[i].ulRunTimeCounter;
-  }
-  sPerfPrevCount = got;
-  sPerfPrevTotal = totalRun;
-  perfRenderData.valid = true;
+  perfRenderData.valid = haveShares;
 }
 
 static void displayPerfStatsRendered() {
@@ -407,8 +364,8 @@ static void displayPerfStatsRendered() {
     y += 9;
 
     if (perfRenderData.cpuCount == 0) {
-      // CPU% is a delta between two 500 ms samples — the first visit needs
-      // ~1 s before rows appear. The final dirty-hold keeps us ticking.
+      // The shared sampler needs two 500 ms samples after this page starts
+      // reading it, so the first visit shows this for about a second.
       oledDisplay->setCursor(0, y);
       oledDisplay->print("Measuring CPU...");
     } else {

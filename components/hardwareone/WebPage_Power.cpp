@@ -114,12 +114,6 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
       <div class='text-muted text-sm'>Anti-flap: the minimum gap between light/deep sleep entries.</div>
       <button class='btn btn-small space-top-sm' id='pw-cooldown-apply'>Apply</button>
     </div>
-    <div>
-      <label for='pw-in-dim'>Display dim level (%)</label>
-      <input type='number' id='pw-in-dim' min='0' max='100' class='input-fit input-m'>
-      <div class='text-muted text-sm'>Brightness used when the display is dimmed rather than blanked.</div>
-      <button class='btn btn-small space-top-sm' id='pw-dim-apply'>Apply</button>
-    </div>
   </div>
 </div>
 
@@ -261,7 +255,7 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     hw.setText('pw-xtal', s.xtalMhz + ' / ' + s.apbMhz + ' MHz');
 
     hw.setText('pw-auto', s.autoModeSupported ? (s.autoMode ? 'On' : 'Off') : 'not available');
-    hw.setText('pw-bright', s.displayBrightness + '/255 (dim ' + s.displayDimLevel + '%)');
+    hw.setText('pw-bright', s.displayBrightness + '/255');
 
     // The idle timeout drops the clock on every build; only a build with a
     // local display also blanks a panel.
@@ -295,7 +289,6 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     renderModes(s);
     setField('pw-in-save', s.powerSaveMinutes);
     setField('pw-in-cooldown', s.cooldownMs);
-    setField('pw-in-dim', s.displayDimLevel);
   }
 
   function refresh(){
@@ -325,7 +318,6 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     }
     bindField('pw-in-save');
     bindField('pw-in-cooldown');
-    bindField('pw-in-dim');
 
     function applyField(id, verb){
       var el = hw.$(id);
@@ -337,7 +329,6 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     }
     hw.on(hw.$('pw-save-apply'),      'click', function(){ applyField('pw-in-save', 'powersave'); });
     hw.on(hw.$('pw-cooldown-apply'),  'click', function(){ applyField('pw-in-cooldown', 'powercooldown'); });
-    hw.on(hw.$('pw-dim-apply'),       'click', function(){ applyField('pw-in-dim', 'powerdim'); });
 
     // --- actions ---
     function note(msg){ hw.setText('pw-act-result', msg); }

@@ -149,7 +149,7 @@ static void redrawCurrentCameraSettings();
 // Group A: each camera-setting tap used to call cmd_camera*(arg) inline on
 // tap_disp, which in turn does setSetting + writeSettingsJson + camera
 // restart — the deepest stack chain in the hijack tap path. Submit through
-// cmd_exec_task instead, then redraw from the committed gSettings value. This
+// cmd_exec instead, then redraw from the committed gSettings value. This
 // keeps flash I/O and mutation on the executor and makes queue failure a true
 // no-op rather than leaving an unpersisted optimistic value in RAM.
 static void onCameraSettingDone(bool ok, const char* result,

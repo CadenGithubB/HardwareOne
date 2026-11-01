@@ -697,10 +697,10 @@ void apdsTask(void* parameter) {
       }
       if (anyEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
-        DEBUG_PERFORMANCEF("[STACK] apds_task watermark=%u words", (unsigned)watermark);
+        DEBUG_PERFORMANCEF("[STACK] sensor_apds watermark=%u words", (unsigned)watermark);
       }
       if (anyEnabled && isDebugFlagSet(DEBUG_MEMORY)) {
-        DEBUG_MEMORY_HEAPF("[HEAP] apds_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+        DEBUG_MEMORY_HEAPF("[HEAP] sensor_apds: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     

@@ -290,7 +290,7 @@ extern volatile unsigned long gDebugDropped;
 extern volatile bool gDebugVerbose;
 
 // ── Low-level stack/heap diagnostic trace (runtime-only) ────────────────────
-// Emits directly to Serial — bypasses the debug_out queue and the broadcast
+// Emits directly to Serial — bypasses the log_out queue and the broadcast
 // fan-out. The point is to stay visible when the thing you're diagnosing IS
 // the debug subsystem (queue saturation, task stack overflow, LittleFS deep
 // recursion, etc).
@@ -411,7 +411,7 @@ void deliverCommandResult(const String& result, const CommandContext& ctx);
 // Output capture is now per-task (System_AuthIdentity.h). Use
 // setCaptureBuffer() / clearCaptureBuffer() / currentCaptureState() instead
 // of the previous gCmdCaptureBuf/Len/Cap globals — those routed cross-task
-// broadcasts into whichever buffer cmd_exec_task had set.
+// broadcasts into whichever buffer cmd_exec had set.
 
 void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...);
 

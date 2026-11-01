@@ -1785,7 +1785,25 @@ bool logoutTransportFromNamedSession(CommandSource target,
   return true;
 }
 
+static const char* transportEventLabel(CommandSource s) {
+  switch (s) {
+    case SOURCE_SERIAL:        return "serial";
+    case SOURCE_UART:          return "uart";
+    case SOURCE_LOCAL_DISPLAY: return "display";
+    case SOURCE_G2_GLASSES:    return "g2";
+    case SOURCE_BLUETOOTH:     return "bluetooth";
+    case SOURCE_WEB:           return "web";
+    default:                   return "internal";
+  }
+}
+
 void logoutTransport(CommandSource transport) {
+  // Web logout posts from its own session table; every other transport posts
+  // here so a sign-out reads the same whichever surface it came from.
+  if (transport != SOURCE_WEB) {
+    const String who = getTransportUser(transport);
+    if (who.length()) systemEventPost(SYSEVT_LOGOUT, who.c_str(), transportEventLabel(transport));
+  }
   switch (transport) {
     case SOURCE_SERIAL:
       serialTransportSessionCleared();

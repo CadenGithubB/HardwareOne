@@ -17,7 +17,7 @@
 //     STATS           mode / peers / TX/RX / channel / MAC
 //
 // All state-mutating actions route through g2SubmitHijackCommand so they
-// run on cmd_exec_task with the glasses user's auth identity (same path
+// run on cmd_exec with the glasses user's auth identity (same path
 // the Network page uses). Ping is the one exception — it uses the
 // espnowAppPing* API in System_ESPNow.h to time the HEARTBEAT+ACK
 // round-trip directly, since no CLI command for "ping with RTT" exists.

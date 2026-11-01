@@ -414,7 +414,7 @@ bool createInputTask() {
 bool createThermalTask() {
   if (gThermalTaskHandle == nullptr) {
     const uint32_t thermalStack = THERMAL_STACK_WORDS;  // words; ~24KB (16KB was too tight on ESP32-classic — overflowed on failed-read retry storm + debug logging)
-    if (xTaskCreateLogged(thermalTask, "thermal_task", thermalStack, nullptr, TASK_PRIORITY_LOW, &gThermalTaskHandle, "thermal", I2C_SENSOR_CORE) != pdPASS) {
+    if (xTaskCreateLogged(thermalTask, "sensor_thermal", thermalStack, nullptr, TASK_PRIORITY_LOW, &gThermalTaskHandle, "thermal", I2C_SENSOR_CORE) != pdPASS) {
       return false;
     }
   }
@@ -424,7 +424,7 @@ bool createThermalTask() {
 bool createIMUTask() {
   if (gImuTaskHandle == nullptr) {
     const uint32_t imuStack = IMU_STACK_WORDS;  // words; ~16KB (BNO055 init retries need extra stack)
-    if (xTaskCreateLogged(imuTask, "imu_task", imuStack, nullptr, TASK_PRIORITY_LOW, &gImuTaskHandle, "imu", I2C_SENSOR_CORE) != pdPASS) {
+    if (xTaskCreateLogged(imuTask, "sensor_imu", imuStack, nullptr, TASK_PRIORITY_LOW, &gImuTaskHandle, "imu", I2C_SENSOR_CORE) != pdPASS) {
       return false;
     }
     DEBUG_CLIF("imustart: IMU task created successfully");
@@ -435,7 +435,7 @@ bool createIMUTask() {
 bool createToFTask() {
   if (gTofTaskHandle == nullptr) {
     const uint32_t tofStack = TOF_STACK_WORDS;  // ESP-IDF task stack size in bytes
-    if (xTaskCreateLogged(tofTask, "tof_task", tofStack, nullptr, TASK_PRIORITY_LOW, &gTofTaskHandle, "tof", I2C_SENSOR_CORE) != pdPASS) {
+    if (xTaskCreateLogged(tofTask, "sensor_tof", tofStack, nullptr, TASK_PRIORITY_LOW, &gTofTaskHandle, "tof", I2C_SENSOR_CORE) != pdPASS) {
       DEBUG_CLIF("tofstart: FAILED to create ToF task");
       return false;
     }
@@ -446,7 +446,7 @@ bool createToFTask() {
 bool createFMRadioTask() {
   if (gFmRadioTaskHandle == nullptr) {
     const uint32_t fmRadioStack = FMRADIO_STACK_WORDS;  // words; ~18KB
-    if (xTaskCreateLogged(fmRadioTask, "fmradio_task", fmRadioStack, nullptr, TASK_PRIORITY_LOW, &gFmRadioTaskHandle, "fmradio", I2C_SENSOR_CORE) != pdPASS) {
+    if (xTaskCreateLogged(fmRadioTask, "sensor_fmradio", fmRadioStack, nullptr, TASK_PRIORITY_LOW, &gFmRadioTaskHandle, "fmradio", I2C_SENSOR_CORE) != pdPASS) {
       DEBUG_CLIF("fmradiostart: FAILED to create FM Radio task");
       return false;
     }
@@ -458,7 +458,7 @@ bool createFMRadioTask() {
 bool createAPDSTask() {
   if (gApdsTaskHandle == nullptr) {
     const uint32_t apdsStack = APDS_STACK_WORDS;  // words; ~12KB
-    if (xTaskCreateLogged(apdsTask, "apds_task", apdsStack, nullptr, TASK_PRIORITY_LOW, &gApdsTaskHandle, "apds", I2C_SENSOR_CORE) != pdPASS) {
+    if (xTaskCreateLogged(apdsTask, "sensor_apds", apdsStack, nullptr, TASK_PRIORITY_LOW, &gApdsTaskHandle, "apds", I2C_SENSOR_CORE) != pdPASS) {
       return false;
     }
     DEBUG_CLIF("APDS task created successfully");
@@ -469,7 +469,7 @@ bool createAPDSTask() {
 bool createPresenceTask() {
   if (gPresenceTaskHandle == nullptr) {
     const uint32_t presenceStack = PRESENCE_STACK_WORDS;  // words; ~12KB
-    if (xTaskCreateLogged(presenceTask, "presence_task", presenceStack, nullptr, TASK_PRIORITY_LOW, &gPresenceTaskHandle, "presence", I2C_SENSOR_CORE) != pdPASS) {
+    if (xTaskCreateLogged(presenceTask, "sensor_presence", presenceStack, nullptr, TASK_PRIORITY_LOW, &gPresenceTaskHandle, "presence", I2C_SENSOR_CORE) != pdPASS) {
       return false;
     }
     DEBUG_CLIF("Presence task created successfully");
@@ -480,7 +480,7 @@ bool createPresenceTask() {
 bool createGPSTask() {
   if (gGpsTaskHandle == nullptr) {
     const uint32_t gpsStack = GPS_STACK_WORDS;  // words; ~12KB
-    if (xTaskCreateLogged(gpsTask, "gps_task", gpsStack, nullptr, TASK_PRIORITY_LOW, &gGpsTaskHandle, "gps", I2C_SENSOR_CORE) != pdPASS) {
+    if (xTaskCreateLogged(gpsTask, "sensor_gps", gpsStack, nullptr, TASK_PRIORITY_LOW, &gGpsTaskHandle, "gps", I2C_SENSOR_CORE) != pdPASS) {
       return false;
     }
     DEBUG_CLIF("GPS task created successfully");
@@ -491,7 +491,7 @@ bool createGPSTask() {
 bool createRTCTask() {
   if (gRtcTaskHandle == nullptr) {
     const uint32_t rtcStack = RTC_STACK_WORDS;  // words; ~16KB
-    if (xTaskCreateLogged(rtcTask, "rtc_task", rtcStack, nullptr, TASK_PRIORITY_LOW, &gRtcTaskHandle, "rtc", I2C_SENSOR_CORE) != pdPASS) {
+    if (xTaskCreateLogged(rtcTask, "sensor_rtc", rtcStack, nullptr, TASK_PRIORITY_LOW, &gRtcTaskHandle, "rtc", I2C_SENSOR_CORE) != pdPASS) {
       return false;
     }
     DEBUG_CLIF("RTC task created successfully");
@@ -696,17 +696,17 @@ void reportAllTaskStacks() {
   const KnownTask knownTasks[] = {
     {"espnow_task", espnowHandle, ESPNOW_HB_STACK_WORDS},
     {"espnow_tx", espnowTxHandle, ESPNOW_TX_STACK_WORDS},
-    {"cmd_exec_task", gCmdExecTaskHandle, CMD_EXEC_STACK_WORDS},
-    {"sensor_queue_task", queueProcessorTask, SENSOR_QUEUE_STACK_WORDS},
+    {"cmd_exec", gCmdExecTaskHandle, CMD_EXEC_STACK_WORDS},
+    {"sensor_queue", queueProcessorTask, SENSOR_QUEUE_STACK_WORDS},
     {INPUT_TASK_NAME, gInputTaskHandle, INPUT_STACK_WORDS},
-    {"thermal_task", gThermalTaskHandle, THERMAL_STACK_WORDS},
-    {"imu_task", gImuTaskHandle, IMU_STACK_WORDS},
-    {"tof_task", gTofTaskHandle, TOF_STACK_WORDS},
-    {"fmradio_task", gFmRadioTaskHandle, FMRADIO_STACK_WORDS},
-    {"gps_task", gGpsTaskHandle, GPS_STACK_WORDS},
-    {"apds_task", gApdsTaskHandle, APDS_STACK_WORDS},
-    {"presence_task", gPresenceTaskHandle, PRESENCE_STACK_WORDS},
-    {"rtc_task", gRtcTaskHandle, RTC_STACK_WORDS}
+    {"sensor_thermal", gThermalTaskHandle, THERMAL_STACK_WORDS},
+    {"sensor_imu", gImuTaskHandle, IMU_STACK_WORDS},
+    {"sensor_tof", gTofTaskHandle, TOF_STACK_WORDS},
+    {"sensor_fmradio", gFmRadioTaskHandle, FMRADIO_STACK_WORDS},
+    {"sensor_gps", gGpsTaskHandle, GPS_STACK_WORDS},
+    {"sensor_apds", gApdsTaskHandle, APDS_STACK_WORDS},
+    {"sensor_presence", gPresenceTaskHandle, PRESENCE_STACK_WORDS},
+    {"sensor_rtc", gRtcTaskHandle, RTC_STACK_WORDS}
   };
 
   auto isTaskHandleInSnapshot = [&](TaskHandle_t h) -> bool {
@@ -731,17 +731,17 @@ void reportAllTaskStacks() {
   const bool taskAlive[] = {
     espnowSnapshotValid,                                            // espnow_task
     espnowTxSnapshotValid,                                         // espnow_tx
-    gCmdExecTaskHandle != nullptr,                                  // cmd_exec_task
-    queueProcessorTask != nullptr,                                  // sensor_queue_task
-    gInputRunning,                                                 // gamepad_task
-    gThermalRunning,                                                 // thermal_task
-    gImuRunning,                                                     // imu_task
-    gTofRunning,                                                     // tof_task
-    gFmRadioRunning,                                                 // fmradio_task
-    gGpsRunning,                                                     // gps_task
-    (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning), // apds_task
-    gPresenceRunning,                                                // presence_task
-    gRtcRunning,                                                     // rtc_task
+    gCmdExecTaskHandle != nullptr,                                  // cmd_exec
+    queueProcessorTask != nullptr,                                  // sensor_queue
+    gInputRunning,                                                 // input_gamepad
+    gThermalRunning,                                                 // sensor_thermal
+    gImuRunning,                                                     // sensor_imu
+    gTofRunning,                                                     // sensor_tof
+    gFmRadioRunning,                                                 // sensor_fmradio
+    gGpsRunning,                                                     // sensor_gps
+    (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning), // sensor_apds
+    gPresenceRunning,                                                // sensor_presence
+    gRtcRunning,                                                     // sensor_rtc
   };
 
   // First print known tasks
@@ -1008,4 +1008,123 @@ void reportAllTaskStacks() {
   broadcastOutput("========== END TASK STACK REPORT ==========");
   broadcastOutput("");
 
+}
+
+
+// ===========================================================================
+// Shared task-CPU sampler (see System_TaskUtils.h). Main-loop producer, any
+// task may read: results are published under a spinlock as a plain copy.
+// ===========================================================================
+struct TaskCpuSampler {
+  TaskStatus_t* buf = nullptr;        // current snapshot (PSRAM, grow-only)
+  TaskHandle_t* prevHandle = nullptr; // previous snapshot, matched by handle
+  uint32_t*     prevRun = nullptr;
+  TaskCpuShare* staging = nullptr;    // computed here, then published
+  TaskCpuShare* published = nullptr;  // what readers copy
+  UBaseType_t cap = 0, prevCount = 0;
+  size_t publishedCount = 0;
+  uint32_t prevTotal = 0, prevSampleMs = 0, lastSampleMs = 0, lastReadMs = 0, intervalMs = 0;
+  bool valid = false, everRead = false;
+
+  bool grow(UBaseType_t need) {
+    if (buf && need <= cap) return true;
+    const UBaseType_t next = need + 4;  // >= 4 even if the count read 0 mid-shutdown
+    TaskStatus_t* b = (TaskStatus_t*)ps_alloc(next * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "taskcpu.snap");
+    TaskHandle_t* ph = (TaskHandle_t*)ps_alloc(next * sizeof(TaskHandle_t), AllocPref::PreferPSRAM, "taskcpu.prevh");
+    uint32_t* pr = (uint32_t*)ps_alloc(next * sizeof(uint32_t), AllocPref::PreferPSRAM, "taskcpu.prevr");
+    TaskCpuShare* st = (TaskCpuShare*)ps_alloc(next * sizeof(TaskCpuShare), AllocPref::PreferPSRAM, "taskcpu.stage");
+    TaskCpuShare* pb = (TaskCpuShare*)ps_alloc(next * sizeof(TaskCpuShare), AllocPref::PreferPSRAM, "taskcpu.pub");
+    if (!b || !ph || !pr || !st || !pb) {  // keep the old buffers; retry next tick
+      if (b) free(b);
+      if (ph) free(ph);
+      if (pr) free(pr);
+      if (st) free(st);
+      if (pb) free(pb);
+      return false;
+    }
+    // Grow-only: the task count is near-constant after boot, so the rare
+    // regrow leaks the small old arrays by design (tracking-tagged).
+    buf = b; prevHandle = ph; prevRun = pr; staging = st; published = pb; cap = next;
+    prevCount = 0; valid = false;  // baseline invalid at the new size
+    return true;
+  }
+
+  // One snapshot; shares become valid once a previous snapshot exists.
+  bool sample(uint32_t nowMs, portMUX_TYPE& mux) {
+    const UBaseType_t n = uxTaskGetNumberOfTasks();
+    if (!grow(n)) return false;
+    uint32_t total = 0;
+    const UBaseType_t got = uxTaskGetSystemState(buf, cap, &total);
+    if (got == 0) return false;  // capacity race; sample again next tick
+    const uint32_t dTotal = total - prevTotal;  // unsigned wrap-safe
+    size_t count = 0;
+    bool haveShares = false;
+    if (prevCount > 0 && dTotal > 0) {
+      for (UBaseType_t i = 0; i < got; i++) {
+        const char* nm = buf[i].pcTaskName;
+        if (!nm) continue;
+        uint32_t prev = 0; bool found = false;
+        for (UBaseType_t j = 0; j < prevCount; j++) {
+          if (prevHandle[j] == buf[i].xHandle) { prev = prevRun[j]; found = true; break; }
+        }
+        if (!found) continue;  // new this interval: no baseline yet
+        const uint32_t dRun = buf[i].ulRunTimeCounter - prev;
+        uint32_t permille = (uint32_t)(((uint64_t)dRun * 1000U) / dTotal);
+        if (permille > 1250) continue;  // handle reused by a new task: counters unrelated
+        if (permille > 1000) permille = 1000;
+        staging[count++] = TaskCpuShare{nm, (uint16_t)permille, (uint32_t)buf[i].usStackHighWaterMark,
+                                        strncmp(nm, "IDLE", 4) == 0};
+      }
+      haveShares = count > 0;
+    }
+    if (haveShares) {
+      portENTER_CRITICAL(&mux);
+      memcpy(published, staging, count * sizeof(TaskCpuShare));
+      publishedCount = count;
+      intervalMs = nowMs - prevSampleMs;
+      valid = true;
+      portEXIT_CRITICAL(&mux);
+    }
+    for (UBaseType_t i = 0; i < got; i++) { prevHandle[i] = buf[i].xHandle; prevRun[i] = buf[i].ulRunTimeCounter; }
+    prevCount = got; prevTotal = total; prevSampleMs = nowMs;
+    return haveShares;
+  }
+};
+static TaskCpuSampler sTaskCpu;
+static portMUX_TYPE sTaskCpuMux = portMUX_INITIALIZER_UNLOCKED;
+
+void taskCpuSampleTick() {
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&sTaskCpuMux);
+  const bool wanted = sTaskCpu.everRead && (uint32_t)(now - sTaskCpu.lastReadMs) <= TASK_CPU_INTEREST_MS;
+  const bool due = (uint32_t)(now - sTaskCpu.lastSampleMs) >= TASK_CPU_SAMPLE_MS;
+  portEXIT_CRITICAL(&sTaskCpuMux);
+  if (!wanted) {
+    // Nobody is looking: forget the baseline so a stale interval is never
+    // served when interest returns.
+    if (sTaskCpu.valid || sTaskCpu.prevCount) {
+      portENTER_CRITICAL(&sTaskCpuMux);
+      sTaskCpu.valid = false; sTaskCpu.publishedCount = 0;
+      portEXIT_CRITICAL(&sTaskCpuMux);
+      sTaskCpu.prevCount = 0;
+    }
+    return;
+  }
+  if (!due) return;
+  sTaskCpu.lastSampleMs = now;
+  (void)sTaskCpu.sample(now, sTaskCpuMux);
+}
+
+bool taskCpuShares(TaskCpuShare* out, size_t cap, size_t* count, uint32_t* intervalMs) {
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&sTaskCpuMux);
+  sTaskCpu.lastReadMs = now; sTaskCpu.everRead = true;
+  const bool valid = sTaskCpu.valid;
+  size_t n = valid ? sTaskCpu.publishedCount : 0;
+  if (n > cap) n = cap;
+  if (out && n) memcpy(out, sTaskCpu.published, n * sizeof(TaskCpuShare));
+  if (intervalMs) *intervalMs = valid ? sTaskCpu.intervalMs : 0;
+  portEXIT_CRITICAL(&sTaskCpuMux);
+  if (count) *count = n;
+  return valid && n > 0;
 }

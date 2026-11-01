@@ -1040,7 +1040,7 @@ class CmdRequestCallbacks : public BLECharacteristicCallbacks {
                  (unsigned)len);
 
       // processIncomingBLECommand copies the write into a pool slot and defers
-      // it to cmd_exec_task; nothing on this task waits for a reply to go out
+      // it to cmd_exec; nothing on this task waits for a reply to go out
       processIncomingBLECommand(param->write.conn_id, (const char*)data, len);
     }
   }
@@ -1298,7 +1298,7 @@ static bool bleIsFileBrowserCommand(const char* line) {
   return false;
 }
 
-// Command tail — runs on cmd_exec_task (deep stack), called by the deferred plaintext
+// Command tail — runs on cmd_exec (deep stack), called by the deferred plaintext
 // job (blePlaintextDeferredInbound) or by the deferred secure-channel job after a DATA
 // frame is decrypted. Its replies may wait for the secure-channel tx mutex, which is
 // why it never runs on BTC_TASK.
@@ -1532,7 +1532,7 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
   }
 }
 
-// Defer secure-channel work off BTC_TASK (8 KB) onto cmd_exec_task (deep stack) —
+// Defer secure-channel work off BTC_TASK (8 KB) onto cmd_exec (deep stack) —
 // the X25519/HKDF handshake won't fit comfortably on the BLE callback stack. Mirrors
 // how ESP-NOW pushes radio-callback crypto onto cmd_exec via submitDeferredToCmdExec.
 struct BleScDeferred {
@@ -1544,7 +1544,7 @@ struct BleScDeferred {
 
 /*
  * Fixed slot pool for inbound writes: secure-channel frames and plaintext
- * command lines both travel to cmd_exec_task in a slot. A plaintext line can be
+ * command lines both travel to cmd_exec in a slot. A plaintext line can be
  * `login <user> <password>`, so a plaintext slot is wiped before every release
  * (secure-channel frames carry no cleartext command).
  *
@@ -1568,10 +1568,10 @@ struct BleScDeferred {
  * Allocated lazily on the first inbound write, so a device that never takes a
  * BLE command pays nothing -- and Bluetooth is off by default on
  * this build. Never freed: the pool is bounded and reused, and freeing it would
- * need a proof that no slot is still queued on cmd_exec_task.
+ * need a proof that no slot is still queued on cmd_exec.
  */
 // 26, deliberately NOT 24. A pool slot is held from the claim on BTC_TASK until
-// the deferred job finishes on cmd_exec_task, but the QUEUE slot is released at
+// the deferred job finishes on cmd_exec, but the QUEUE slot is released at
 // dequeue -- so peak pool usage is (frames queued) + (1 being processed), i.e.
 // gCmdExecQ's depth of 24 plus one, plus a slot of margin. At 24 the pool, not
 // the queue, would have been the binding constraint, and frames would have been
@@ -1583,7 +1583,7 @@ static portMUX_TYPE gBleScPoolMux = portMUX_INITIALIZER_UNLOCKED;
 
 // Claim a slot. Called only from BTC_TASK (the sole inbound producer), so the
 // lazy allocation below needs no lock; only the in-use mask is shared, and it
-// is released from cmd_exec_task.
+// is released from cmd_exec.
 static BleScDeferred* bleScPoolClaim() {
   if (!gBleScPool) {
     gBleScPool = (BleScDeferred*)ps_alloc(sizeof(BleScDeferred) * kBleScPoolSlots,
@@ -1638,7 +1638,7 @@ static bool bleConsoleClaimNoChannelReject(uint16_t connId, TransportSessionEpoc
   return true;
 }
 
-// Runs on cmd_exec_task. Frees its own arg (per submitDeferredToCmdExec contract).
+// Runs on cmd_exec. Frees its own arg (per submitDeferredToCmdExec contract).
 static void bleScDeferredInbound(void* arg) {
   BleScDeferred* d = (BleScDeferred*)arg;
   if (!bleSessionEpochMatches(d->connId, d->sessionEpoch)) {
@@ -1682,7 +1682,7 @@ static bool bleSecureChannelOnly() {
   return bleScRequired() || bleConsoleClientHost();
 }
 
-// Runs on cmd_exec_task: a plaintext write copied off BTC_TASK by
+// Runs on cmd_exec: a plaintext write copied off BTC_TASK by
 // processIncomingBLECommand. Wipes, then releases, its pool slot: the line may be
 // `login <user> <password>` and the pool prefers PSRAM. When the secure channel
 // is required the write gets a fixed refusal that carries no command output or
@@ -1715,7 +1715,7 @@ static void blePlaintextDeferredInbound(void* arg) {
 // Console records the pipe's console driver hands over (BLE_PhonePipeConsoleCore.h).
 constexpr uint8_t kBlePipeRecordCommand = 0x81, kBlePipeRecordBinary = 0x82;
 
-// Runs on cmd_exec_task: one record the console driver admitted from the phone
+// Runs on cmd_exec: one record the console driver admitted from the phone
 // link's console stream, fenced on the epoch captured at its admission (a
 // logout or revoke since then drops it silently, as on the other paths). Only
 // the console row takes it: the pipe's authenticated encryption carried it,
@@ -1775,7 +1775,7 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
       }
       if (!submitDeferredToCmdExec(bleScDeferredInbound, d)) bleScPoolRelease(d);
     } else {
-      // Pool exhausted: the peer is bursting faster than cmd_exec_task drains.
+      // Pool exhausted: the peer is bursting faster than cmd_exec drains.
       // Same visible outcome as a full queue (the frame is dropped and the
       // sender's next checkpoint re-sends from the accepted offset), so it is
       // counted in the same place rather than failing silently.
@@ -3218,7 +3218,7 @@ void bleSessionTick() {
       BleLifecycleGuard lifecycle;
       if (!lifecycle || !gBLEState) return;
       // Read the clock under the lock every lastActivityMs writer holds. A
-      // clock read before it (while cmd_exec_task stamped a command, or while
+      // clock read before it (while cmd_exec stamped a command, or while
       // an earlier slot's notice was sent) is older than that stamp, so the
       // idle time underflowed and a session that had just run a command was
       // logged out.

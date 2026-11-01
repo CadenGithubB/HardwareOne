@@ -11,7 +11,7 @@
 //     DETAIL "<- <name>" / <trigger summary> / Run now / Enable|Disable
 //
 // State-mutating taps (run / enable / disable) route through
-// g2SubmitHijackCommand so they run on cmd_exec_task with the glasses user's
+// g2SubmitHijackCommand so they run on cmd_exec with the glasses user's
 // auth identity — the same path the ESP-NOW App and Network pages use. Auth
 // denials (non-admin / non-creator) come back as clean "Error:" results and
 // leave the on/off badge unchanged. Reached from the Apps launcher; hidden

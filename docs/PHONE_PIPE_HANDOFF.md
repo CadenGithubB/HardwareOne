@@ -1,0 +1,576 @@
+# Android phone-pipe integration handoff
+
+Historical v1 handoff, updated 2026-10-16. The 0.99.99 working tree uses phone
+link v2, with its console inside the pipe and `client|server` boot roles. Use
+the [phone-link peer guide](../tools/phone_link_peer/README.md), its fixtures,
+and the current [command reference](COMMAND_REFERENCE.md) for v2 integration.
+The v1 wire contract below superseded older SMP/write-with-response handoffs. Its implementation
+is uncommitted on top of `c0384687`. Android is being implemented separately.
+Host tests and firmware builds do not establish physical phone interoperability.
+No real addresses, credentials or captures belong in this document.
+
+## D2/D3 channel contract
+
+RX requires WRITE_NO_RESPONSE; TX requires NOTIFY; CCCD uses a normal write
+request. All three attributes require no SMP authentication. The P4 never
+requests encryption, sets global SMP policy or creates/removes a phone bond.
+Android must not call createBond/removeBond. Discover by advertised service UUID;
+addresses (including RPAs) are only connection hints, never authorization.
+
+Use a dedicated pipe secret (`phone secret`), provisioned by a superadmin through a
+non-Bluetooth command source, with the same passphrase-strength rules as
+`blesecret`, bounded to 128 UTF-8 bytes after trimming outer whitespace. It is an encrypted isSecret setting. Cached PSK and live channel
+keys must use internal RAM. Changing/clearing it drains the pipe and invalidates
+its enrollment. Factory reset clears this secret durably before deleting the
+accounts; accessory bonds and the console secret retain their existing policy.
+
+The phone initiates the console Secure Channel v1 handshake; P4 responds.
+The messages are unchanged: HELLO `01 || appPub[32] || appNonce[16]`, HELLO_ACK
+`02 || devicePub[32] || deviceNonce[16]`, CONFIRM `03 || ct[2] || tag[16]`,
+CONFIRM_ACK `04 || ct[2] || tag[16]`, REJECT `05 || reason[1]`. CONFIRM plaintext
+is ASCII `ok`. REJECT reason `02` means handshake failure; P4 attempts it for
+at most 250 ms before closing. Without a configured pipe secret, the pipe does not start. Use PBKDF2-HMAC-SHA256, 100000 iterations, 32 bytes, with salt
+`HW1-PIPE-v1`; HKDF-SHA256 input `X25519 shared || PSK`, salt
+`appNonce || deviceNonce`, info `HW1-PIPE-v1`, output 64 bytes. First 32 are
+phone-to-P4, last 32 P4-to-phone. ChaCha20-Poly1305-IETF has no AAD. Nonce is
+big-endian direction[4] (0 phone-to-P4, 1 P4-to-phone) || counter[8]. Confirmation
+uses counter zero; DATA starts at one. Each accepted DATA counter must be
+strictly greater than the last accepted counter in that direction; gaps are
+allowed. This differs from the contiguous inner frame sequence below. There is
+no resumption. All failures clear keys and close.
+
+Android sends HELLO immediately after CCCD enable. Finish both confirmations
+within about 4.5 seconds. The P4's hard five-second secure-channel deadline
+starts when it submits the CCCD enable write, not when Android receives HELLO
+or when the CCCD completion callback arrives. P4 submits pipe HELLO only after
+a valid CONFIRM and successful local CONFIRM_ACK submission; Android accepts it only
+after verifying CONFIRM_ACK. Neither endpoint opens TCP before authentication
+and normal pipe HELLO/HELLO_ACK. An invalid authentication/protocol exchange or peer handshake expiry imposes a
+global 30-second cooldown on P4, regardless of advertiser address. Local write
+timeouts, disconnection, resource exhaustion and cancellation do not count as
+authentication failures. There is no initial boot-time cooldown. Android applies the same
+attempt limit per central.
+
+Every complete pipe frame (12-byte header plus body) is encrypted as exactly
+one DATA value: `10 || counter[8] || ciphertext || tag[16]`. No console 5-byte
+application-fragment header is included. Pipe header/body integers remain little
+endian; secure counters/nonces are big endian. Plaintext after the handshake,
+bad tags or counter regression terminate the entire session.
+
+The fixed [phone handshake JSON fixture](../tools/ble_secure/fixtures/phone_secure_channel_v1_vectors.json)
+is the Android interoperability reference. It includes a synthetic passphrase,
+fixed X25519 private/public keys and nonces, PSK, both directional session keys,
+HELLO, HELLO_ACK, CONFIRM, CONFIRM_ACK, and counter-one DATA values carrying the
+known P4 pipe HELLO and phone pipe HELLO_ACK (MTU 247). Hex fields are exact wire
+bytes; private keys/passphrase are public test inputs, never device credentials.
+The host `phone_secure_channel` test regenerates the transcript in memory using
+the production channel and pipe framing with fixed test-only entropy, verifies
+both directions and compares every field with the JSON. Explicit regeneration:
+`python3 components/hardwareone/test/host/test_phone_secure_channel.py --idf /path/to/esp-idf --write-vectors`.
+Ordinary tests never rewrite the fixture.
+
+Three more fixtures sit beside it. Each is generated by production code with the
+same synthetic keys and compared field by field:
+
+- X1, [`phone_pipe_v1_sessions.json`](../tools/ble_secure/fixtures/phone_pipe_v1_sessions.json):
+  complete sessions at MTU 64, 244, 247 and 517, from the CCCD write to two
+  retired streams. They cover IPv4 and DNS OPEN (fragmented at MTU 64), OPEN_OK
+  1024, a phone CREDIT of consumed+4096, DATA and CREDIT both ways, PING/PONG
+  in both directions, FIN, CLOSE 0 and 1, and CLOSE_ACK. P4 values are what the
+  real `BLE_PhoneGatt.cpp` adapter wrote. The MTU-247 session reproduces the
+  handshake golden byte for byte.
+- X2, [`phone_pipe_v1_negative.json`](../tools/ble_secure/fixtures/phone_pipe_v1_negative.json):
+  handshake, outer-counter (gaps, regression, replay, 2^63, 2^64-1), crypto,
+  framing, flow-control and transport vectors. Each records the adapter's own
+  REJECT, cooldown and teardown outcome. Four P4-to-phone vectors give
+  production bytes that Android must reject.
+- X3, [`phone_pipe_v1_passphrase.json`](../tools/ble_secure/fixtures/phone_pipe_v1_passphrase.json):
+  the same text taken through the agreed Android entry rule and through
+  `phone secret <text>` on the P4 serial console. Every text Android accepts
+  stores identical bytes, and so the same PSK, on the P4.
+
+`test_phone_secure_channel.py` regenerates X1 and X2 with `--write-vectors`,
+and `test_phone_passphrase.py` regenerates X3 the same way.
+
+## Automatic start, glasses-off admission and Server mode (F1, F2, FW-2)
+
+A verified enrollment turns on the phone peer's automatic reconnect
+(`blePeerCommitPhonePipeEnrollmentIfCurrent`), in both the persisted setting and
+the live scheduler. Nothing else is needed in G2-client or phone-client mode: at
+boot the selected client role starts and admits the enrolled phone, and after
+link loss or Service Changed it reconnects on the paced schedule. This needs
+owner authority. Wi-Fi state does not start or stop the pipe. Turning it off
+still works: `bleautoreconnect phone off`, `phone disconnect` (suppressed
+until the next connect), Forget, or Bluetooth disabled.
+
+Boot registers a metadata-only phone peer so `blepeers` lists it early. When
+the pipe starts, its connectable spec replaces that entry in place
+(`bleRegisterPeer`). Boot reconnect, the reconnect tick and name lookup all walk
+the ordered list, so until the first pipe start in a boot,
+`bleautoreconnect phone` still reports metadata-only. The `ble_peer_registry`
+host test runs this order against the real dispatch loops.
+
+There is no migration code. An enrollment made by an earlier image keeps its
+stored `autoReconnect` value. Re-enroll, or run `bleautoreconnect phone on`
+once. If the C6 companion misses boot, the later bring-up path still starts
+Bluetooth only when `bleAutoStart` is set.
+
+In G2-client mode the phone no longer waits for both temples to connect. The
+arms keep their capacity through `reserveArms`, and glasses and ring setups go
+before the phone on the one BLE setup worker (`docs/BLE_SETUP_WORKER_PLAN.md`):
+the phone waits for its turn, and a phone setup in progress is never cancelled. A READY phone counts as a live link for the host-recycle
+guard, so an accessory admission wedge with the glasses off does not tear it
+down. If a forced client retirement does recycle the host, the phone is asked
+to reconnect.
+
+Selected BLE Server mode has no phone pipe. Losing Wi-Fi there has no phone
+fallback, and enrollment never switches the role.
+
+## Path switching, OPEN budgets and path records (F5, A-1, F3, A-3, A-4, A-5)
+
+Each request takes Wi-Fi first. The phone goes first only when the direct
+reachability hint is negative and the phone's is not. After a Network failure
+before any HTTP byte is written, the request tries the other path once, in
+either direction. A path is never tried twice, so Wi-Fi → phone → Wi-Fi cannot
+happen. Once an HTTP byte may have gone out, there is no fallback and no replay.
+
+`phonePipeOpen` returns a cause instead of a boolean. The transport routes it
+with `hw1httptransport::openRefusal` (`System_LLMHttpTransportCore.h`):
+
+| Phone answer or local outcome | Route |
+| --- | --- |
+| OPEN_ERR 5, 6, 7, 8 or 11 | Network: mark the phone negative for 30 s, Wi-Fi once |
+| OPEN_ERR 9 or 10 | Resources: no penalty, no other path |
+| OPEN_ERR 14 | Cancelled |
+| OPEN_ERR 4 or any other code | Protocol: no bypass |
+| Submit timeout, response timeout, link lost, not ready | Network (stale READY): Wi-Fi once |
+| No budget, caller cancellation or deadline | Cancelled |
+
+A negative phone hint is a preference, never a ban. It is scoped to the phone
+session generation and the configuration revision. Only a completed phone TLS
+handshake clears it; an idle READY does not. When the phone is the only path it
+is still used. After 30 s it gets one probe, while the direct hint is still
+negative.
+
+OPEN budgets (A-1):
+- Every OPEN fragment must be submitted within 2 s.
+- The phone then has 4 s to answer, measured from local acceptance of the last
+  fragment.
+- No OPEN starts with less than 4 s of the caller's budget left.
+- The caller's own deadline and cancellation always win.
+- The 4.5 s TLS budget from OPEN_OK is unchanged.
+
+Path records (F3):
+- When a request is destroyed, the transport writes one record: its kind, the
+  first path tried, the path that may have carried HTTP bytes, each path's
+  result, the phone's OPEN outcome and code, and the worker's final result.
+  Phone requests also carry `corr` (the session's pipe HELLO nonce) and the
+  stream id.
+- The record holds no host, port, credential or content.
+- `phone stats` prints the pipe session counters (READY, authentication
+  failures, ends by reason, ends by Service Changed) and the measured connection
+  interval; `relay status` prints the path counters and the last eight records. The same line is
+  logged under `LLM_PATH`.
+
+Reconnect, parameters and expiry:
+- **A-3:** the phone's reconnect schedule is 5 s, 15 s, then 30 s capped. Glasses
+  and ring keep 5/15/45/90/180 s.
+- **A-4:** connection parameters are per connection. A new connection starts idle
+  and asks for idle parameters at once. It goes active on relay or console
+  traffic and back to idle 30 s after the last of it. One request is in flight at
+  a time: it is answered by its event (Bluedroid's own status-16 timeout is not an
+  answer) or released after 45 s. A request counts as applied only when the
+  controller reports success with an interval in the asked range. Refused
+  requests are retried at most three times, 5 s apart.
+- **A-5:** the 5 s secure cap stays absolute. It is charged as a failed
+  authentication only when the phone owed the next step and the P4 itself owed
+  nothing for more than 1 s. A queued reply or an unfinished write at expiry ends
+  the session as Deadline, with no cooldown.
+
+Let physical GATT value limit be V=min(MTU-3,512). Require MTU >=64; reject a
+smaller negotiated MTU before subscription. The pipe HELLO max_value is P=V-25,
+and DATA body limit is P-12. At MTU244, V241/P216/body204; at MTU247,
+V244/P219/body207; at MTU517, V512/P487/body475. All existing inner sequence,
+credit, stream, cancellation and no-replay rules remain. Write completion means
+local stack completion, not a peer ATT response; use WRITE_NO_RESPONSE, one
+pending local write, bounded deadline and the accessory-priority TX gate.
+
+Enrollment remains an explicit local operation tied to the requesting session,
+but proves the dedicated key instead of a bond or six-digit comparison. Persist
+only app-channel enrollment version 1 after the authenticated pipe is ready.
+Ignore old bond metadata for reconnect authority. Forget drains the pipe and
+clears this enrollment, preserving console ownership/address and unrelated bonds.
+The phone's target allowlist is explicitly configured for this app channel.
+
+D9 changes a foreign BLEClient DISCONNECT from switch-break to function-return
+before remote service fan-out. Shared application IDs wrap within 0..32767 and
+skip reserved/live/quarantined registrations under the registry lock. Release
+only after registration failure, confirmed UNREG or verified host shutdown.
+
+Android implementation must consume this revised contract before interoperability
+qualification. This firmware task changes only the design/handoff, not Android,
+relay behavior, firewall or companion firmware.
+
+
+The complete inner protocol, UUIDs, stream bounds and error numbers are
+reproduced below from the approved design. The stage 4 section takes precedence
+over the historical checkpoint. Firmware source is in hardwareone-idf on
+codex/android-ble-relay, with uncommitted changes. Firmware and phone must
+qualify mutual authentication, wrong key/domain, replay, minimum MTU, rotated
+addresses, disconnect, simultaneous streams and G2 coexistence together.
+
+Stage 1: three camera-off 780-second runs, 78/78 USB replies, no silence; web
+response during silence remains unobserved. Stages 2 and 3 host tests/builds
+passed; home-Wi-Fi chat and Terminal load passed. (Since 2026-10-18 the bench
+C6 runs the four-link image; see below.) The ring yields only with the runtime
+pipe enabled on a C6 that reports fewer than four links. Connected-ring
+yielding remains a hardware gate. Phone-only v1 is a runtime mode
+on G2-compiled firmware (D7), not a dependency on connected glasses.
+
+
+## Write completion and cooldown correction
+
+The pinned ESP-IDF returns `ESP_GATT_CONGESTED` (0x8f) for an accepted
+write-without-response PDU when the channel becomes congested after enqueue.
+P4 treats that completion as accepted and never resends the encrypted value or
+rewinds its counter. Separate congestion events pause/resume fresh submissions.
+A genuinely rejected write remains a terminal transport failure; it cannot be
+silently retried once bytes/counters may have been committed. CCCD retains the
+normal write-with-response completion rules.
+
+Transport failure during subscription/authentication does not establish a wrong
+key and cannot impose the bad-key cooldown. Invalid authentication and peer
+handshake expiry still do. Failed attempts across rotating addresses share the
+same cooldown. The native adapter tests both classes and wraparound timing.
+
+## Terminal admission and polling (R8/R9)
+
+The shared transport reserves one request slot for chat and one for Terminal.
+A phone slot is reusable only after stream retirement (CLOSE_ACK, RESET,
+OPEN_ERR, or terminal link loss) and release by its worker. Busy is returned
+synchronously before creating the HTTP worker. Busy admission neither sends
+bytes nor closes the native Terminal view.
+
+Mutating Terminal operations retain the user's original confirmation time.
+Unavailable drops the operation immediately with `Not sent: no connection` while
+keeping the view/transcript. Busy may retry for at most 15 seconds; restoring a
+path later cannot resurrect a dropped prompt. List/poll may retry. A relay 503
+shows `relay busy with an earlier request (outcome unknown)`, keeps the view open,
+and never replays that operation.
+
+Phone polling is scheduled from completion: at least 2 seconds while the host
+is busy, 3 seconds when idle. `more` permits immediate next polling only once
+stream retirement allows admission. The Wi-Fi cadence remains 500 ms. New polls
+pause while recording/finalizing speech. A failed background poll keeps the
+view and draft; bounded 3/6/12-second retries then pause until explicit user action.
+No mutation is automatically replayed because a poll failed.
+
+## Reconnect scan, MTU phase and end reasons (firmware-007)
+
+**Why reconnects took 60–120 s.** The C6 shares one radio between Wi-Fi and
+Bluetooth. While Wi-Fi is associated, a running BLE scan gets about 40% of each
+~102 ms beacon period. The old scan listened 30 ms of every 100 ms for 2 s, and
+it missed an advertising phone about half the time; each miss cost a 30 s retry.
+
+**The scan now** (`BLE_PhonePipeScan.h`):
+- **Shape.** It listens continuously (60 ms interval and window) for up to 4 s,
+  without the duplicate filter. It stops at the first pipe advertisement, and
+  the link starts right away.
+- **Queueing.** The callback queues only the first usable match per scan.
+- **Deadline.** The setup deadline is the scan length plus 1 s.
+- **Records.** `phone scan` shows the profile, then the newest six phone
+  scans and the newest six phone attempts from the shared BLE records
+  (`blerecords`; see `WIFI_BLE_COEXISTENCE_STUDY.md` §3), one `BLE_COEX` log
+  line each, with no addresses. A scan gives its outcome, duration, time to
+  the first match, all reports, pipe matches, best RSSI and the Wi-Fi around
+  it. An attempt (one per scan that found the phone) gives the step reached,
+  the first non-OK GATT status, the phone's own disconnect reason, the cause
+  and, for a cancel, its source (stopped, replaced, expired). The yield to
+  glasses or ring setup is gone: a phone setup now runs to its end and an
+  accessory waits for it (S1 of `docs/BLE_SETUP_WORKER_PLAN.md`). The four cancels that shared "phone operation cancelled"
+  now have their own status text. With `ENABLE_BLE_COEX_RECORDS=0` the
+  readouts say the records are not in the build.
+- **Runtime change.** `phone scan default|legacy|<interval_ms> <window_ms>
+  dup|nodup [<seconds>]` changes the profile until reboot (local admin only).
+
+**Scan event ownership.** Only the pipe's own scan events count. Either answer
+to a stop ends the scan, so a stop that crosses the scan's own end no longer
+wedges the pipe into a Bluetooth host restart. The ring's main-loop yield only
+queues the ring's retirement on the setup worker, and only with a ring client
+and the G2 client.
+
+**MTU phase.** IDF 5.5.5 queues the CFG_MTU sent at OPEN behind automatic
+discovery (this build keeps no GATT cache). The phase waits for DIS_SRVC_CMPL
+for up to 10 s, then 2 s for the answer. It sends exactly one Exchange MTU.
+
+**End reasons.** An authenticated frame the pipe refuses keeps the core's cause:
+a phone RESET's code, Flow or Protocol. Unauthorized is only for frames that fail
+authentication. `peer_reset=` counts sessions the phone ended. `phone stats`
+adds the last session's `setup_ms` breakdown.
+
+## What has and has not been verified
+
+Stage 5 admission/polling and stage 6 test registration are implemented and
+host-tested. The production CTest phone group includes 22 tests with pinned SDK
+and TLS configuration. The remaining-review pass adds congestion/cooldown,
+fragmented internal SRAM and task-scoped allocation checks, without changing
+the Android app, relay, firewall or D5 heartbeat.
+
+The currently installed camera-off P4 passed four Terminal speech recordings
+(eight successful final segments), and the wearer confirmed it worked well.
+Those were direct Wi-Fi tests, not proof of the phone pipe. No host-side
+exactly-once audit has yet been performed. New review fixes require a separately
+approved P4 flash and a repeat check; build identities are recorded in the
+firmware memory report after validation.
+
+The bench C6 runs the four-link image since 2026-10-18 (approved; see
+`P4_RUNTIME_MEMORY.md`, "C6 four-link companion installed"): glasses, ring and
+phone connected together at boot. The ring yields only while the pipe is
+enabled on a C6 that reports fewer than four links, and pipe-off glasses/ring
+behavior remains supported. Four-link coexistence with Wi-Fi still needs
+qualification with the Android implementation. Keep the camera fault on its
+separate track.
+
+## End-to-end acceptance checklist
+
+1. Provision the dedicated passphrase privately on both sides; connect without
+   creating an SMP bond. Check handshake and MTU/HELLO values.
+2. Send one chat and one Terminal operation with Wi-Fi unavailable. Correlate
+   firmware stream IDs and Android/host request records to verify one delivery
+   per user confirmation. Logs must omit credentials and user content.
+3. Exercise chat plus a Terminal stream awaiting CLOSE_ACK, followed by another
+   poll; the next poll waits and Terminal stays open.
+4. Exercise congestion, disconnect during handshake, wrong key, phone restart,
+   rotating address, cancellation and lost CLOSE_ACK. No replay; bounded cleanup.
+5. Confirm a prompt without a path, restore the pipe after 20 seconds, and
+   verify zero delayed sends. Check relay 503 without automatic retry.
+6. Qualify glasses, ring and phone together on the four-link C6 (flashed
+   2026-10-18; `c6status` shows the reported capacity). Do not infer this from
+   a P4 build limit.
+
+See [runtime memory results](P4_RUNTIME_MEMORY.md) and
+[the pipe SDK integration](../tools/ble-phone-pipe/README.md).
+
+## GATT pipe protocol v1 — Android implementation contract
+
+### Service, attributes and MTU
+
+The following private 128-bit UUIDs are fixed by this proposal:
+
+| Item | UUID | Properties |
+| --- | --- | --- |
+| Pipe service | `b7e10000-6f7d-4b2e-a8c4-3d9f5021c6a0` | Primary service; advertised |
+| RX, device → phone | `b7e10001-6f7d-4b2e-a8c4-3d9f5021c6a0` | Write without response only |
+| TX, phone → device | `b7e10002-6f7d-4b2e-a8c4-3d9f5021c6a0` | Notify only, standard CCCD `0x2902` |
+
+RX and CCCD require no SMP authentication. The application channel above gates
+all pipe traffic. Reject reads, prepared/execute writes and nonzero write offsets;
+v1 has no long writes, indications or separate data characteristic. RX uses only
+WRITE_NO_RESPONSE. CCCD remains a write request. A single ordered queue in each
+direction preserves secure and inner-frame ordering. Unsupported or malformed
+RX commands close the session, since commands have no ATT response. For CCCD
+requests, use request-not-supported (0x06), invalid-offset (0x07), or
+invalid-attribute-value-length (0x0d), as appropriate. CCCD accepts only `01 00`
+(enable) or `00 00` (disable); disable closes all streams and requires a new BLE
+session and handshake.
+
+Use the actual negotiated ATT MTU and reject values below 64 before subscription.
+Physical value capacity is `V=min(MTU-3,512)`; secure overhead is 25 bytes, giving
+inner capacity `P=V-25`. HELLO negotiates no larger than P, fixed for the session.
+Inner body capacity is P-12: 24 at MTU64, 204 at MTU244, 207 at MTU247, and 475 at
+MTU517. TLS records are independently split/reassembled across these frames.
+
+### Frame header and ordering
+
+Each authenticated DATA plaintext holds exactly one inner frame; no
+concatenation, padding or trailing bytes. Inner multibyte integers are unsigned
+little-endian; outer secure counters/nonces use big-endian. UUID strings above use
+normal UUID notation, not little-endian integer notation.
+
+| Byte offset | Size | Meaning |
+| --- | --- | --- |
+| 0 | 1 | Version, exactly `1` |
+| 1 | 1 | Opcode |
+| 2 | 2 | Stream ID; zero is session control |
+| 4 | 4 | Direction-wide frame sequence, starting at 0 for each BLE session |
+| 8 | 2 | Body length, exactly decrypted inner frame length minus 12 |
+| 10 | 1 | Flags: `FIRST=0x01`, `LAST=0x02`; other bits zero |
+| 11 | 1 | Reserved, zero |
+
+The next sequence must equal the expected value, across all streams/control
+frames in that direction. Sequence numbers detect gaps/duplicates, not replay
+recovery. Do not wrap; close the session before exhaustion. No application-level
+retransmission. A definite local failure *before* submission can retain a queued
+frame; an uncertain submission/completion failure terminates the session.
+Assign sequence and advance DATA `sent` only at successful local submission,
+not when queuing, so discarding unsent queued DATA creates no sequence gaps.
+
+DATA always uses flags 0 and a nonempty body of at most `P-12` bytes. All other
+opcodes are control messages: even an empty control body uses FIRST|LAST. Larger
+control messages are fragmented using FIRST, zero or more continuation frames,
+then LAST; each fragment has its own sequence/header, same opcode/stream ID.
+Control fragments must be contiguous in that direction. Allow one reassembly
+buffer per direction, at most 272 bytes and a 2 s completion deadline. Reject
+interleaving, extra FIRST, orphan continuation, unexpected lengths or overflow.
+
+### Session and stream messages
+
+| Opcode | Name / direction | Reassembled body |
+| --- | --- | --- |
+| `0x01` | HELLO, P4 → phone, stream 0 | `nonce:u64, max_streams:u8, reserved:u8=0, max_value:u16` |
+| `0x02` | HELLO_ACK, phone → P4, stream 0 | `echo_nonce:u64, phone_nonce:u64, max_streams:u8, reserved:u8=0, max_value:u16` |
+| `0x10` | OPEN, P4 → phone, stream nonzero | `receive_limit:u32, port:u16, address_type:u8, host_length:u8, host[host_length]` |
+| `0x11` | OPEN_OK, phone → P4, same stream | `receive_limit:u32` |
+| `0x12` | OPEN_ERR, phone → P4, same stream | `error:u16` |
+| `0x20` | DATA, either direction | Opaque TLS bytes |
+| `0x21` | CREDIT, either direction | `absolute_limit:u32` |
+| `0x22` | FIN, either direction | `final_byte_count:u32` |
+| `0x23` | CLOSE, either direction | `reason:u16` (0 normal, 1 cancelled) |
+| `0x24` | CLOSE_ACK, either direction | Empty |
+| `0x25` | RESET, either direction | `error:u16` |
+| `0x30` | PING, either direction, stream 0 | `cookie:u32` |
+| `0x31` | PONG, opposite direction, stream 0 | Matching `cookie:u32` |
+
+HELLO begins only after security, discovery, MTU and CCCD completion. Nonces come
+from a cryptographic RNG and are nonzero; echo must match. They label a fresh
+session, not authenticate it. Local connection generations must additionally
+reject callbacks from an old link. Each side offers `max_streams=2`; reject a
+peer that cannot support two. HELLO_ACK chooses `max_value` no greater than both
+local decrypted capacity P and HELLO's offer, at least 20. HELLO is framed at
+the local decrypted limit P; ACK is framed at the chosen limit. No OPEN before ACK. No repeated
+HELLO on an established session. A reconnect starts entirely new state.
+
+Only the P4 opens streams. Allocate monotonically increasing nonzero 16-bit IDs,
+never reused in a session. Permit two live streams, including opening/closing
+streams: one chat and one Terminal request. A third request fails locally as
+busy. Round-robin DATA between credit-eligible streams; control messages precede
+the next DATA frame. Concurrent TLS connections are independent; never multiplex
+two HTTP requests into one TLS connection. If IDs exhaust, drain and reconnect
+between requests.
+
+OPEN `address_type`: 1 = IPv4 (length 4, network-order address bytes), 2 = IPv6
+(length 16, network-order bytes, no zone ID), 3 = ASCII DNS name (1–253 bytes,
+lowercase A-labels, no trailing dot/NUL/path/userinfo). Port is 1–65535. Extract
+the authority from the validated configured HTTPS URL, preserving that original
+authority separately for HTTP Host and certificate identity. Do not pass the
+URL path, token, CA or HTTP body in OPEN. A parser that cannot represent an
+authority safely fails locally rather than changing the destination.
+
+Android permits only the relay host/port explicitly approved for the dedicated
+application channel. Key possession authenticates that channel; MAC addresses
+and OS bonds do not authorize a target. Provision this allowlist from the device's
+validated target with explicit local enrollment confirmation; no runtime target
+learning from arbitrary OPEN frames. A later relay-target change requires an
+explicit allowlist update, not a second home/away setting. Reject other targets
+before DNS/TCP. Resolve DNS through the VPN-covered network; the device still
+verifies TLS against its original configured hostname/IP. No HTTP proxy,
+CONNECT handling, TLS termination, token injection or alternative endpoint.
+
+OPEN_OK means a TCP connection is established and buffers allocated, **not** that
+TLS or a request succeeded. P4 caps TLS establishment at 4.5 seconds from receipt
+of OPEN_OK, including worker wakeup and TLS configuration, to fit inside the
+relay's five-second handshake timeout. No fresh timer starts after setup or
+partial handshake progress; expiry closes the stream without request replay.
+Android attempts TCP connect once (3 s cap); no
+socket reconnect, alternate route, stream resume or replay of buffered bytes.
+OPEN_ERR retires that ID without DATA. On VPN loss, process death, BLE loss or
+TCP error, close sockets and fail streams. Do not retain data for later delivery.
+Before OPEN_OK, only OPEN_OK/OPEN_ERR and cancellation CLOSE/RESET are legal on
+that stream. After OPEN_OK, DATA/CREDIT/FIN/CLOSE/RESET are legal; CLOSE_ACK is
+legal only in closing state. A pending TCP-connect callback after cancellation
+must close its new socket, never publish a late OPEN_OK. Ordinary stream
+messages require a nonzero ID; RESET on ID zero terminates the whole session.
+
+### Flow control and bounded memory
+
+Each direction of each stream has independent `sent`, `received`, `consumed` and
+`limit` byte counters starting at zero. Initial limits arrive in OPEN (phone's
+send allowance) and OPEN_OK (P4's send allowance), between 1 and 4096 inclusive;
+recommended initial value is 1024. DATA consumes credit by **body bytes only**.
+Sender must satisfy `sent + body_length <= peer_limit` before submission.
+
+Receiver sends CREDIT with a monotonically nondecreasing cumulative absolute
+limit. A repeated equal value has no effect. It may advance the limit only when
+storage has been freed, with `limit - consumed <= 4096`. A sender rejects credit
+that decreases or exceeds `sent + 4096`. Never wrap counters; terminate before
+32-bit exhaustion. Receipt beyond the granted limit is a session protocol error.
+
+For phone → device, bytes are consumed when the mbedTLS receive BIO removes them
+from the RX buffer. For device → phone, bytes are consumed when a partial TCP
+write accepts them into the socket; this is **not** proof of relay receipt or
+execution. Stop socket reads when the outbound buffer/credit is exhausted; stop
+BLE DATA submissions when peer credit is exhausted. Limit every socket read to
+available bounded space; never allocate based on peer lengths. Coalesce credit
+updates after 512 bytes consumed or 100 ms, unless display policy withholds them.
+P4 bounds combined display/accessory and microphone-pressure deferral of DATA
+and CREDIT to 2 seconds total per stream once TLS starts. Firmware conservatively
+starts accounting at OPEN_OK, including TLS setup. Quiet gaps, successive frames
+and successful sends do not replenish that stream's budget; after exhaustion,
+DATA and CREDIT remain eligible despite pressure. Other control frames (including
+OPEN, FIN, CLOSE, RESET and PING/PONG) are exempt from this deferral. Existing
+credit limits, GATT congestion, one-write completion and controller mutex rules
+still apply; the budget never authorizes a concurrent controller submission.
+
+Reserve two 4 KiB byte buffers per stream per endpoint (TX/RX), 16 KiB total for
+two streams; plus bounded frame/control queues. P4 pipe storage target is at most
+24 KiB excluding mbedTLS, HTTP and task stacks. The phone-only P4 object files
+currently contain 23,851 bytes of writable phone-owner/GATT static storage,
+plus 117 bytes for the shared setup coordinator. This fits that target; it does
+not measure total Bluetooth/TLS heap use or stack high-water marks. The pipe
+worker additionally reserves an 8 KiB stack. Allocate before advertising
+capacity in OPEN/OPEN_OK. Allocation failure returns NO_RESOURCES. TLS record
+buffers can be larger than a credit window: the BIO must make partial progress
+and never wait for a whole TLS record to fit.
+
+Reserve eight control-message descriptors and reassembly storage independently
+of DATA buffers. Coalesce pending CREDIT; CLOSE/RESET can discard queued DATA.
+Control is not credit-controlled. On control queue overflow fail the session;
+do not silently drop a control message or deadlock waiting for DATA credit.
+
+Android validates each RX write command and copies it into bounded owned state
+before processing it. WRITE_NO_RESPONSE commands have no ATT response; invalid
+or unqueueable commands close the session. P4 has at most one outstanding local
+RX command submission, paced by its SDK completion and congestion events. Local
+completion is not a TCP/relay ACK. Android has one outstanding TX notification
+submission and waits for `onNotificationSent` before submitting the next; that
+callback is local completion, not remote application delivery. Failed/uncertain
+completion ends the session, except the accepted P4 NO_RSP congestion status
+specified above. Callback work must remain short and must not block on TCP.
+Only requests that require an ATT response (such as CCCD writes) receive one.
+Android's callback contract is described in the official
+[GATT server callbacks](https://developer.android.com/reference/android/bluetooth/BluetoothGattServerCallback).
+
+### EOF, close, errors and liveness
+
+FIN is directional EOF after all preceding DATA; its byte count must equal the
+receiver's count. After queued bytes drain, phone FIN becomes EOF at the P4 BIO;
+P4 FIN becomes TCP `shutdownOutput` after queued TCP writes complete. Reverse
+traffic remains allowed. No DATA after FIN in that direction. A TLS close-notify
+remains opaque DATA; FIN never substitutes for TLS or HTTP completion checks.
+
+CLOSE aborts any remaining traffic and closes the TCP stream in both directions;
+the peer discards remaining buffers and sends CLOSE_ACK. Keep the protocol slot
+until ACK, and its consumer reservation until the worker also releases it. On
+the 2 s timeout close the BLE session to avoid uncertain ID lifetime.
+RESET is terminal and requires no ACK; OPEN_ERR also retires its ID immediately.
+Simultaneous CLOSE is allowed; each sends ACK. For IDs already retired, discard
+late DATA/CREDIT/FIN/ACK/CLOSE/RESET without reviving a stream; ACK a late CLOSE.
+Duplicate/nonmonotonic OPEN, an unknown future ID, or a sequence violation is a
+session error. IDs are never recycled, so old frames cannot enter a new stream.
+
+Errors are fixed numeric values, without free-text OS/network details:
+`1 BAD_PROTOCOL`, `2 UNSUPPORTED_VERSION`, `3 NOT_AUTHORIZED`, `4 TARGET_DENIED`,
+`5 VPN_UNAVAILABLE`, `6 DNS_FAILED`, `7 CONNECT_FAILED`, `8 CONNECT_TIMEOUT`,
+`9 BUSY`, `10 NO_RESOURCES`, `11 TCP_IO`, `12 FLOW_VIOLATION`, `13 DEADLINE`,
+`14 CANCELLED`, `15 DISPLAY_PRIORITY`. OPEN failures use OPEN_ERR; established
+stream failures use RESET. A malformed frame, sequence/flow violation or failed
+GATT completion fails all streams and disconnects (best-effort stream-0 RESET).
+Other RESET errors affect only their stream. Never echo arbitrary received bytes
+into errors or logs. Unknown opcode/version/flags fail closed.
+
+PING/PONG use no stream credit. While streams exist, send PING after 5 s without
+inbound frames and require PONG within 5 s. Only one ping per endpoint may be
+outstanding. No idle application keepalive with zero streams; supervision and
+explicit operations detect loss. HELLO deadline is 3 s. A BLE disconnect closes
+all streams immediately, discards all reassembly/credit state and wakes waiters.
+

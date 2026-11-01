@@ -215,7 +215,7 @@ static char     gScanFailure[32] = {};
 // "Pending..." overlay state for the WiFi toggle row.
 //
 // Rationale: WiFi.disconnect() returns immediately, while openwifi runs the
-// potentially long connection transaction on cmd_exec_task. Without this
+// potentially long connection transaction on cmd_exec. Without this
 // overlay, the user sees the prior state until that command completes, which
 // feels like the tap was ignored.
 //
@@ -1228,7 +1228,7 @@ static void wifiPendingWatchdogTask(void* /*arg*/) {
 #endif  // ENABLE_WIFI
 
 // Step 4 + Group A: hijack-tap cmd_exec completion callbacks.
-// All run on cmd_exec_task after the underlying CLI command finishes; each
+// All run on cmd_exec after the underlying CLI command finishes; each
 // just enqueues a Redraw of the appropriate WiFi-related view. Naming
 // reflects which view gets redrawn so the call site is self-documenting.
 
@@ -1242,7 +1242,7 @@ static void onWifiMenuRefreshDone(bool ok,
   (void)g2EnqueueRedraw(cookie, &showWiFiMenu, "WiFi-menu refresh");
 }
 
-// openwifi is a synchronous command on cmd_exec_task: by callback time it has
+// openwifi is a synchronous command on cmd_exec: by callback time it has
 // either associated or finished failing. End the optimistic overlay here so a
 // no-saved-network/auth failure immediately reveals the live radio state rather
 // than leaving "Pending..." on the lens until the watchdog deadline.

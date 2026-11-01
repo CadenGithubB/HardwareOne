@@ -1255,7 +1255,7 @@ debug and capture buffers, static result buffers), so:
 
 - before the executor queue exists (the early-boot path of
   `submitAndExecuteSync`) any task is admitted;
-- `cmd_exec_task` is admitted;
+- `cmd_exec` is admitted;
 - any other task once the queue exists (httpd, an automation, a BLE callback)
   is refused: false, an `Error` result (terminated in a 6-byte buffer too) and
   one log line that names the task and never the command text;
@@ -1626,7 +1626,7 @@ UI adapters submit `opencamera async` / `closecamera async`
 them, the live-session fence applies and the `[CMD]` audit records them. A
 start honours the `cameraEnabled` master switch as the synchronous
 `opencamera` does; a stop is allowed while the camera is disabled. Both report
-only whether cam_pwr admitted the request and never wait for the camera.
+only whether cam_power admitted the request and never wait for the camera.
 
 `camera_async_power` compiles the production `cmd_camerastart` /
 `cmd_camerastop` and their helpers against power-request doubles. It checks:
@@ -3563,7 +3563,7 @@ python3 components/hardwareone/test/host/test_ble_sc_directed.py --sanitize
 
 ## BLE Secure Channel policy
 
-`ble_sc_policy` compiles the production `System_BleSecureChannel.cpp` whole against the `ble_sc_stubs/` stand-ins it shares with `ble_sc_directed`. It splices the BLE command ingress from `Bluetooth.cpp`: the GATT write entry `processIncomingBLECommand`, the deferred secure-frame and plaintext jobs (`bleScDeferredInbound`, `blePlaintextDeferredInbound`), the command tail `processBleCommandLine` with its file-browser gate, and the directed and session senders. The fake GATT keeps one inbox per connection. A write runs the GATT entry as BTC_TASK; deferred jobs queue in submission order and run as cmd_exec_task after it returns, and the executor records which command would run for which session. On the G2 client host (R4) a plaintext write, login included, gets the fixed refusal on its own link although `blesecure` is off, and the same link's encrypted commands run. The FreeRTOS doubles count every tx-mutex take that may wait and every delay made on BTC_TASK.
+`ble_sc_policy` compiles the production `System_BleSecureChannel.cpp` whole against the `ble_sc_stubs/` stand-ins it shares with `ble_sc_directed`. It splices the BLE command ingress from `Bluetooth.cpp`: the GATT write entry `processIncomingBLECommand`, the deferred secure-frame and plaintext jobs (`bleScDeferredInbound`, `blePlaintextDeferredInbound`), the command tail `processBleCommandLine` with its file-browser gate, and the directed and session senders. The fake GATT keeps one inbox per connection. A write runs the GATT entry as BTC_TASK; deferred jobs queue in submission order and run as cmd_exec after it returns, and the executor records which command would run for which session. On the G2 client host (R4) a plaintext write, login included, gets the fixed refusal on its own link although `blesecure` is off, and the same link's encrypted commands run. The FreeRTOS doubles count every tx-mutex take that may wait and every delay made on BTC_TASK.
 
 The suite checks:
 - With the secure channel required, a plaintext write from a connection without a channel gets the fixed refusal on that connection only, in plaintext. A connection with a channel gets the refusal as one encrypted DATA frame, and its encrypted commands still run.
@@ -3781,8 +3781,8 @@ python3 components/hardwareone/test/host/test_g2_files_psram.py --sanitize
 
 Besides the reader/viewer harness, `g2_files_psram` compiles the rest of the production Files page
 (`G2_Page_Files.cpp`, includes stripped, the reader/viewer stubbed) in `g2_files_redraw_harness.cpp` and drives it from
-simulated tasks: taps on `g2_tap_disp`, queued redraws on the lens applier, the rename/delete completion on
-`cmd_exec_task`, the info-overlay expiry on the main loop and the image viewers' `onDone` on the session worker. The
+simulated tasks: taps on `g2_taps`, queued redraws on the lens applier, the rename/delete completion on
+`cmd_exec`, the info-overlay expiry on the main loop and the image viewers' `onDone` on the session worker. The
 completion, the expiry and the viewer return must not draw, delay or touch FileManager; each queues one Redraw (the
 completion with its submit cookie) that the applier drops after a menuGen bump. The result shows once in the list's
 back row, and a successful rename/delete is re-scanned even when its redraw was dropped. Every FileManager call and
@@ -3804,19 +3804,19 @@ nothing submitted and no viewer started; and folder rows keep the closing "]" of
 python3 components/hardwareone/test/host/test_g2_sensors_redraw.py --sanitize
 ```
 
-The camera power post-hook (cam_pwr, after every camera power operation from any source) and the openmic/closemic
+The camera power post-hook (cam_power, after every camera power operation from any source) and the openmic/closemic
 completion (cmd_exec) refresh the Sensors CAM/MIC detail. They never render or write the Sensors level or hijack
 page on their own task: they queue a Redraw on the lens applier (the hook with the menu generation taken when it
 fires, the mic completion with its submit-time cookie), and the render re-checks level DETAIL and page SENSORS.
 `g2_sensors_redraw` compiles the whole production Sensors page (camera and microphone on, other sensors off) beside
 a lens double with swap admission, a generation-checked Redraw queue and task-context tags, and runs a user tap
-("Settings >", "<- Hardware") between a completion's check and its render: nothing renders on cam_pwr or
+("Settings >", "<- Hardware") between a completion's check and its render: nothing renders on cam_power or
 cmd_exec, Camera Settings keeps its rows and routing, the list keeps routing list taps, and an undisturbed detail is
 still refreshed. It also checks that an out-of-range list tap does nothing and that the live view's level is
 committed only after the live page started. The CAM toggle submits the camera owner's gated `opencamera async` /
 `closecamera async` through `g2SubmitHijackCommand` and never powers the camera on the tap task. `cameraautostart`
 is submitted only from the completion, after the owner admitted the change. A refusal (camera disabled, not
-authorized, cam_pwr unavailable) persists nothing, clears the pending start and redraws through the lens applier. A
+authorized, cam_power unavailable) persists nothing, clears the pending start and redraws through the lens applier. A
 refused submission re-renders the unchanged detail on the tap task. The E3 cases now run the admitted command before
 the post-hook. `--component <dir>` replays it against a pre-fix tree. Lens, camera,
 audio, registry and command calls are host doubles; ASan/UBSan follow `HW1_SANITIZE`.
@@ -4040,7 +4040,7 @@ The checks:
   success and the caller's fallback text for an empty refusal, and stays inside the caller's buffer.
 - Each caller shows its success text ("Enabled", "Deleted", "Radio OFF", "HTTP OFF", ...)
   only on success; local refusals ("Radio off!", "Need WiFi first!") still run no command.
-- The Quick Settings rows never wait for cmd_exec_task (the P4 radio toggle held the display
+- The Quick Settings rows never wait for cmd_exec (the P4 radio toggle held the display
   task for 637 ms). The executor double finishes a queued command only when a case says so.
   The row shows "Working..." and returns at once; the executor only stores the reply and asks
   for a frame; the next frame shows the row's result, once. A second row while one runs
@@ -4982,7 +4982,7 @@ Path switching and the OPEN phases are covered as follows:
   `Bluetooth.cpp` with login (`bleBindSession`), the activity stamp
   (`bleMarkActivity`), the phone-link slot maker and `System_User.cpp`'s idle
   policy. A contender double stamps a command whenever the tick takes the
-  lifecycle lock, as cmd_exec_task can while the main loop waits for it. A
+  lifecycle lock, as cmd_exec can while the main loop waits for it. A
   phone-link session with commands at +60 s, +120 s and one landing during
   the tick at +180 s stays signed in. After 15 minutes idle it expires once,
   with the notice sent on the new session. In server mode, one session's paced

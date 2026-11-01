@@ -91,7 +91,7 @@ static String redactAutomationCommandForAudit(const String& command);
 // Queue an automation sub-command through the FreeRTOS command queue (async, non-blocking).
 // This avoids deadlock when already on cmd_exec task and avoids blocking the main loop.
 // `owner` is the automation's createdBy user — stamped into cmd.ctx.auth so VFS permission
-// checks and audit logs attribute the work to the correct principal on cmd_exec_task.
+// checks and audit logs attribute the work to the correct principal on cmd_exec.
 // `autoName` is the automation's display name — stamped into ctx.automationName so
 // executeCommand can write COMMAND/OUTPUT autolog entries attributed to this automation,
 // with no race against the scheduler advancing to the next automation before the command runs.
@@ -1370,7 +1370,7 @@ const char* cmd_automation_add(const String& argsInput) {
           // Validate this individual command exists in the registry.
           // Using findCommand() instead of recursive executeCommand() — a full
           // executeCommand() call from inside cmd_automation_add (which is
-          // itself running inside executeCommand on cmd_exec_task) doubles the
+          // itself running inside executeCommand on cmd_exec) doubles the
           // already-deep stack and causes an overflow on 24 KB budgets.
           // findCommand() is a plain registry walk with no stack-heavy setup.
           if (!findCommand(part)) {

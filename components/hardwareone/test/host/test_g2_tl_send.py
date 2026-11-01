@@ -9,7 +9,7 @@ pending slots and the overflow count. No board or BLE involved.
 import re, subprocess, sys, tempfile
 from pathlib import Path
 SRC = (Path(__file__).resolve().parents[2] / 'G2_Glasses.cpp').read_text()
-start = SRC.index('// Live timing (TL send), all on g2_ctrl_owner')
+start = SRC.index('// Live timing (TL send), all on g2_owner')
 end = SRC.index('}  // namespace', start)
 state = SRC[start:end]
 def func(marker):

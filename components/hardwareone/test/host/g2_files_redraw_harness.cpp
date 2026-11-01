@@ -1,8 +1,8 @@
 // test_g2_files_psram.py compiles the production G2 Files page
 // (G2_Page_Files.cpp with its includes stripped and the text reader/viewer
 // replaced by a stub) beside the doubles below, and drives it from simulated
-// tasks: taps on g2_tap_disp, queued redraws on the lens applier, the
-// rename/delete completion on cmd_exec_task, the info-overlay expiry on the
+// tasks: taps on g2_taps, queued redraws on the lens applier, the
+// rename/delete completion on cmd_exec, the info-overlay expiry on the
 // main loop and the image viewers' onDone on the session worker.
 //
 // The completion, the expiry and the viewer return must only queue a

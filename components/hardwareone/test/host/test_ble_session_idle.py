@@ -7,7 +7,7 @@ bleSessionTick run here with System_User.cpp's shared idle policy, over doubles
 of the clock, the lifecycle mutex, transport sessions, the directed sender and
 OTA.
 
-The main loop's tick and cmd_exec_task's command stamp meet at the lifecycle
+The main loop's tick and cmd_exec's command stamp meet at the lifecycle
 lock. The tick must read the clock under that lock, after any stamp made while
 it waited: a clock read before the lock is older than such a stamp, the idle
 time underflows and the session that just ran a command is logged out (the

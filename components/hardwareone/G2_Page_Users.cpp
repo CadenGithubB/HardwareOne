@@ -215,7 +215,7 @@ static void setResultMessage(bool failed, const char* result) {
   snprintf(gResultMessage, sizeof(gResultMessage), "%.108s", msg);
 }
 
-// Completion runs on cmd_exec_task and never touches the lens directly.
+// Completion runs on cmd_exec and never touches the lens directly.
 static void onUserCmdDone(bool ok, const char* result,
                           const G2CmdCookie& cookie, void* userData) {
   const uint32_t token = (uint32_t)(uintptr_t)userData;
@@ -582,7 +582,7 @@ static void addPassConfirmCommit(const char* text) {
   gAddUser[0] = '\0';
 }
 
-// Text-entry commits run on g2_tap_disp. Keep each callback to bounded copies
+// Text-entry commits run on g2_taps. Keep each callback to bounded copies
 // plus the next keyboard/menu transition.
 static void addPassCommit(const char* text) {
   if (!text || !text[0]) { addUserCancel(); return; }

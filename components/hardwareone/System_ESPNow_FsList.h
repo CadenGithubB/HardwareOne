@@ -12,7 +12,7 @@
 //       │                                         │
 //       │── fsListSendRequest(peerMac, path) ────►│
 //       │            (V4_TYPE_FS_LIST_REQ)        │
-//       │                                         ├─ defers to cmd_exec_task
+//       │                                         ├─ defers to cmd_exec
 //       │                                         │  reads VFS, builds reply
 //       │◄──── V4_TYPE_FS_LIST_REPLY ─────────────┤
 //       │   (header + N V4PayloadFsEntry)         │
@@ -166,7 +166,7 @@ uint32_t fsGetSendRequest(const uint8_t peerMac[6],
 // espnow_task's RX-handler dispatch (6656 B stack, and its job is to drain the
 // RX ring fast) — minimal work only: validates the payload, copies fields into
 // static storage, returns. Actual VFS read + reply send is handed to
-// cmd_exec_task, which is where the heavy work belongs.
+// cmd_exec, which is where the heavy work belongs.
 void fsListOnRequestReceived(const uint8_t srcMac[6],
                              const uint8_t* payload, uint16_t payloadLen);
 
@@ -195,7 +195,7 @@ void fsGetOnAckReceived(const uint8_t srcMac[6],
 // sweeps the pending-request table for timeouts and fires callbacks with a
 // synthesized error status for any that expired.
 //
-// Receiver-side reply building is NOT here. It runs on cmd_exec_task, submitted
+// Receiver-side reply building is NOT here. It runs on cmd_exec, submitted
 // the moment the request is captured — an FS_LIST reply cannot be built on
 // espnow_task without overflowing it.
 void fsListTick();

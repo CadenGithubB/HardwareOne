@@ -88,8 +88,8 @@ static const MemoryRequirement gMemoryRequirements[] = {
   //   post-BLEDevice::init  104,843   -> BLE core   43,272
   //   initG2Client COMPLETE  67,135   -> G2 workers 37,708
   //   TOTAL                                        80,980
-  // The worker figure reconciles with the four stacks it creates -- g2_page_swap_w
-  // 8192 + g2_tap_disp 10240 + g2_session_w 10240 + r1_owner 6144 = 34,816, plus
+  // The worker figure reconciles with the four stacks it creates -- g2_pages
+  // 8192 + g2_taps 10240 + g2_session 10240 + r1_owner 6144 = 34,816, plus
   // 2,892 of TCBs/queues -- all MALLOC_CAP_INTERNAL|8BIT and unable to fall back
   // to PSRAM. The BLE-core figure independently matches openble's 42,944 (3 runs).
   //
@@ -350,33 +350,33 @@ void sampleMemoryState(bool forceFullScan) {
     
     const TaskEntry tasks[] = {
       {"espnow_task",        espnowHandle,          ESPNOW_HB_STACK_WORDS},
-      {"cmd_exec_task",      gCmdExecTaskHandle,    CMD_EXEC_STACK_WORDS},
-      {"sensor_queue_task",  queueProcessorTask,    SENSOR_QUEUE_STACK_WORDS},
+      {"cmd_exec",      gCmdExecTaskHandle,    CMD_EXEC_STACK_WORDS},
+      {"sensor_queue",  queueProcessorTask,    SENSOR_QUEUE_STACK_WORDS},
       {INPUT_TASK_NAME,      gInputTaskHandle,     INPUT_STACK_WORDS},
-      {"thermal_task",  gThermalTaskHandle,     THERMAL_STACK_WORDS},
-      {"imu_task",      gImuTaskHandle,         IMU_STACK_WORDS},
-      {"tof_task",      gTofTaskHandle,         TOF_STACK_WORDS},
-      {"fmradio_task",  gFmRadioTaskHandle,     FMRADIO_STACK_WORDS},
-      {"gps_task",      gGpsTaskHandle,         GPS_STACK_WORDS},
-      {"apds_task",     gApdsTaskHandle,        APDS_STACK_WORDS},
-      {"presence_task", gPresenceTaskHandle,    PRESENCE_STACK_WORDS},
-      {"rtc_task",      gRtcTaskHandle,         RTC_STACK_WORDS},
+      {"sensor_thermal",  gThermalTaskHandle,     THERMAL_STACK_WORDS},
+      {"sensor_imu",      gImuTaskHandle,         IMU_STACK_WORDS},
+      {"sensor_tof",      gTofTaskHandle,         TOF_STACK_WORDS},
+      {"sensor_fmradio",  gFmRadioTaskHandle,     FMRADIO_STACK_WORDS},
+      {"sensor_gps",      gGpsTaskHandle,         GPS_STACK_WORDS},
+      {"sensor_apds",     gApdsTaskHandle,        APDS_STACK_WORDS},
+      {"sensor_presence", gPresenceTaskHandle,    PRESENCE_STACK_WORDS},
+      {"sensor_rtc",      gRtcTaskHandle,         RTC_STACK_WORDS},
     };
     
     // Enabled flags for each task — if false, handle may be stale (task self-deleted)
     const bool taskAlive[] = {
       espnowSnapshotValid,                                            // espnow_task
-      gCmdExecTaskHandle != nullptr,                                  // cmd_exec_task
-      queueProcessorTask != nullptr,                                  // sensor_queue_task
-      gInputRunning,                                                 // gamepad_task
-      gThermalRunning,                                                 // thermal_task
-      gImuRunning,                                                     // imu_task
-      gTofRunning,                                                     // tof_task
-      gFmRadioRunning,                                                 // fmradio_task
-      gGpsRunning,                                                     // gps_task
-      (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning), // apds_task
-      gPresenceRunning,                                                // presence_task
-      gRtcRunning,                                                     // rtc_task
+      gCmdExecTaskHandle != nullptr,                                  // cmd_exec
+      queueProcessorTask != nullptr,                                  // sensor_queue
+      gInputRunning,                                                 // input_gamepad
+      gThermalRunning,                                                 // sensor_thermal
+      gImuRunning,                                                     // sensor_imu
+      gTofRunning,                                                     // sensor_tof
+      gFmRadioRunning,                                                 // sensor_fmradio
+      gGpsRunning,                                                     // sensor_gps
+      (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning), // sensor_apds
+      gPresenceRunning,                                                // sensor_presence
+      gRtcRunning,                                                     // sensor_rtc
     };
     
     bool anyTask = false;

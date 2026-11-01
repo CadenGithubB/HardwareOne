@@ -7,7 +7,7 @@ stand-ins). The GATT write entry, the deferred secure-frame and plaintext jobs,
 the command tail with its file-browser gate, and the directed and session
 senders are spliced in from Bluetooth.cpp. The fake GATT keeps one inbox per
 connection and the executor records what would run; the GATT entry runs as
-BTC_TASK and deferred jobs run after it as cmd_exec_task. The suite checks that a
+BTC_TASK and deferred jobs run after it as cmd_exec. The suite checks that a
 plaintext write in secure-required mode (and always on the G2 client host,
 whose console on the phone pipe's link serves Secure Channel only) gets the
 fixed refusal on its own connection, that file verbs run only when the command itself arrived encrypted,

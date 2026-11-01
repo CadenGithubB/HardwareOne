@@ -402,7 +402,7 @@ void oledCommandReplyText(bool ok, const char* reply, const char* okText,
 // own success text only then.
 bool oledRunCommand(const String& cmd);
 // oledRunCommand for an action that can take a while (radio, Wi-Fi, Bluetooth,
-// HTTP): returns at once and the frame loop never waits on cmd_exec_task. When
+// HTTP): returns at once and the frame loop never waits on cmd_exec. When
 // the command finishes, the display task reports it as oledRunCommand would (a
 // refusal toast) and then calls done(ok, context), ok true only on success. A
 // reply that outlives its display session is dropped (done gets false). One

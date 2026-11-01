@@ -170,12 +170,12 @@ bool executeInternalStatusCommand(const char* cmd, char* out, size_t outSize);
 bool submitAndExecuteSync(const Command& cmd, String& out);
 bool submitAndExecuteSync(const Command& cmd, String& out, bool* completedOut);
 
-// True means queued, not executed. The optional callback runs on cmd_exec_task
+// True means queued, not executed. The optional callback runs on cmd_exec
 // and must not block; its result pointer is valid only during that callback.
 bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback,
                         void* userData);
 
-// Firmware-internal work on cmd_exec_task, bypassing command dispatch. On
+// Firmware-internal work on cmd_exec, bypassing command dispatch. On
 // success the callback owns arg's cleanup; on failure the caller retains it.
 bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
 

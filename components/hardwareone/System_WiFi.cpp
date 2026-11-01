@@ -2093,7 +2093,8 @@ static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
       BROADCAST_PRINTF("WiFi connected: %s", WiFi.localIP().toString().c_str());
       logSystemEvent("WIFI", "connected to '%s' (%s)",
                      nw.ssid.c_str(), WiFi.localIP().toString().c_str());
-      systemEventPost(SYSEVT_WIFI_CONNECTED, WiFi.localIP().toString().c_str());
+      // wifi_connected is posted from the GOT_IP edge (wifiEventLogger), which
+      // this join also raised; posting here too would double it.
       wifiNetworkMarkConnected(nw.id, millis());
       radioGuard.release();
       saveWiFiNetworks();
@@ -2462,7 +2463,7 @@ const char* cmd_certgen(const String& argsInput) {
     broadcastOutput("Generating ECDSA P-256 key pair...");
   }
 
-  // PSRAM-allocate all mbedTLS contexts to avoid stack overflow in cmd_exec_task (18KB stack)
+  // PSRAM-allocate all mbedTLS contexts to avoid stack overflow in cmd_exec (18KB stack)
   // mbedtls_entropy_context alone is ~1KB, plus ctr_drbg + x509write_cert + internal call depth
   // Use PSRAM instead of DRAM to preserve precious internal RAM
   int ret = 0;
@@ -2714,6 +2715,8 @@ const size_t wifiCommandsCount = sizeof(wifiCommands) / sizeof(wifiCommands[0]);
 // gate yields at most one snapshot per association.
 static portMUX_TYPE sWifiDiscMux = portMUX_INITIALIZER_UNLOCKED;
 static bool          sWifiDiscPending = false;
+static bool          sWifiConnPending = false;   // GOT_IP edge: drained like the disconnect below
+static char          sWifiConnIp[16];
 static char          sWifiDiscSsid[33];
 static int           sWifiDiscReason = 0;
 static uint32_t      sWifiDiscConnSecs = 0;
@@ -2725,6 +2728,13 @@ static void wifiEventLogger(arduino_event_id_t event, arduino_event_info_t info)
     sWasConnected = true;
     sConnectedAtMs = millis();
     espnowNoteWifiChannelMayHaveChanged();  // radio just moved to the AP's channel
+    // Every join lands here, commanded or the driver's own auto-reconnect, so
+    // this edge (not connectWiFiTarget) is where wifi_connected is posted.
+    const String ip = IPAddress(info.got_ip.ip_info.ip.addr).toString();
+    portENTER_CRITICAL(&sWifiDiscMux);
+    snprintf(sWifiConnIp, sizeof(sWifiConnIp), "%s", ip.c_str());
+    sWifiConnPending = true;
+    portEXIT_CRITICAL(&sWifiDiscMux);
   } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
     espnowNoteWifiChannelMayHaveChanged();  // left the AP — re-pin the preferred channel offline
     if (sWasConnected) {
@@ -2747,6 +2757,18 @@ static void wifiEventLogger(arduino_event_id_t event, arduino_event_info_t info)
 // never get drained (esp_restart preempts the loop) — acceptable: that
 // teardown is commanded, and the reboot itself is already logged.
 void wifiEventLogDrain() {
+  {
+    char ip[sizeof(sWifiConnIp)];
+    bool conn = false;
+    portENTER_CRITICAL(&sWifiDiscMux);
+    if (sWifiConnPending) {
+      memcpy(ip, sWifiConnIp, sizeof(ip));
+      sWifiConnPending = false;
+      conn = true;
+    }
+    portEXIT_CRITICAL(&sWifiDiscMux);
+    if (conn) systemEventPost(SYSEVT_WIFI_CONNECTED, ip, WiFi.SSID().c_str());
+  }
   char ssid[sizeof(sWifiDiscSsid)];
   int reason = 0;
   uint32_t connSecs = 0;

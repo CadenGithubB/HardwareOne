@@ -1212,8 +1212,8 @@ void imuTask(void* parameter) {
       if (checkTaskStackSafety("imu", IMU_STACK_WORDS, &gImuRunning)) continue;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
       if (gImuRunning) {
-        DEBUG_PERFORMANCEF("[STACK] imu_task watermark_now=%u min=%u words", (unsigned)gImuWatermarkNow, (unsigned)gImuWatermarkMin);
-        DEBUG_MEMORY_HEAPF("[HEAP] imu_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+        DEBUG_PERFORMANCEF("[STACK] sensor_imu watermark_now=%u min=%u words", (unsigned)gImuWatermarkNow, (unsigned)gImuWatermarkMin);
+        DEBUG_MEMORY_HEAPF("[HEAP] sensor_imu: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     // Handle deferred IMU initialization on task stack

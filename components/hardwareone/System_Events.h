@@ -24,7 +24,7 @@
  * it ("by web:hub"), and automation event-trigger `match` patterns test it.
  *
  * Task-safety: systemEventPost() is a bounded copy under a spinlock —
- * callable from any task (espnow_task, sensor workers, sr_task, cmd_exec,
+ * callable from any task (espnow_task, sensor workers, sr_main, cmd_exec,
  * BLE callbacks). Not for ISRs. Consumers each keep their own cursor and
  * call systemEventFetchSince() from their own task.
  */

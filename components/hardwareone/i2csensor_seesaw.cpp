@@ -469,10 +469,10 @@ void inputTask(void* parameter) {
         if (watermark < gGamepadWatermarkMin) {
           gGamepadWatermarkMin = watermark;
         }
-        DEBUG_PERFORMANCEF("[STACK] gamepad_task watermark_now=%u min=%u words", (unsigned)gGamepadWatermarkNow, (unsigned)gGamepadWatermarkMin);
+        DEBUG_PERFORMANCEF("[STACK] input_gamepad watermark_now=%u min=%u words", (unsigned)gGamepadWatermarkNow, (unsigned)gGamepadWatermarkMin);
       }
       if (isDebugFlagSet(DEBUG_MEMORY)) {
-        DEBUG_MEMORY_HEAPF("[HEAP] gamepad_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+        DEBUG_MEMORY_HEAPF("[HEAP] input_gamepad: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
 

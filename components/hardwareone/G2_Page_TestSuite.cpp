@@ -252,7 +252,7 @@ static constexpr size_t kActionCount =
 // -----------------------------------------------------------------------------
 // Each entry fires a named pipeline against a fixed sample. The pipelines
 // inside g2ShowEvenAIReply* do four sequential BLE sends with vTaskDelays
-// between them. Tap handlers now run on g2_tap_disp, not the BLE callback,
+// between them. Tap handlers now run on g2_taps, not the BLE callback,
 // but holding that serialized input lane for the whole exchange would still
 // stall every other lens gesture. Mirror the page-swap-worker pattern: the tap
 // handler spawns a one-shot task, returns immediately, and the worker runs the
@@ -495,7 +495,7 @@ static void aiWorker(void* arg) {
   vTaskDelete(nullptr);
 }
 
-// Spawn the worker so g2_tap_disp can return immediately. Heap-allocates args;
+// Spawn the worker so g2_taps can return immediately. Heap-allocates args;
 // the worker frees them.
 static void spawnAIWorker(AIWorkerKind kind, const char* heading, const char* body) {
   // Worker args (~340 B) — short-lived, freed by the worker. PSRAM is fine
@@ -3001,7 +3001,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 // dismisses after ~10 s but a stuck card (firmware-side) blocks
 // subsequent CTRL ENTER calls with errorCode=7. Sends CTRL EXIT,
 // which is a no-op if no card is active. Single envelope — runs directly on
-// g2_tap_disp without a worker.
+// g2_taps without a worker.
 static void actionHideAICard() {
   const bool ok = g2HideEvenAICard();
   DEBUG_G2F("[G2] Hide AI Card: %s", ok ? "sent CTRL EXIT" : "send failed");

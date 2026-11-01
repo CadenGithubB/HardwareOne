@@ -10,7 +10,7 @@ are extracted unchanged; it does not claim hardware AEAD or UI transport.
 
 g2_files_redraw_harness.cpp compiles the rest of the page (includes stripped,
 the reader/viewer stubbed) and drives it from simulated tasks: the rename /
-delete completion (cmd_exec_task), the info-overlay expiry (main loop) and the
+delete completion (cmd_exec), the info-overlay expiry (main loop) and the
 image viewers' onDone (session worker) must only queue a menuGen-fenced lens
 redraw, and every FileManager call and lens draw must run under the Files page
 lock. Chooser actions must use FileManager's selected-entry path (a 70-byte

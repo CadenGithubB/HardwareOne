@@ -64,13 +64,13 @@ def main() -> None:
                 f"{file} must complete shutdown cleanup before publishing restart")
 
     rtc = (COMPONENT / "i2csensor_ds3231.cpp").read_text()
-    rtc_task = extract_block(rtc, "void rtcTask(void* pvParameters)")
+    sensor_rtc = extract_block(rtc, "void rtcTask(void* pvParameters)")
     require(re.search(r"while\s*\(!rtcInvalidateCache\(\)\)\s*vTaskDelay\(pdMS_TO_TICKS\(10\)\);\s*"
-                      r"gRtcTaskHandle\s*=\s*nullptr;\s*vTaskDelete\(nullptr\);\s*}$", rtc_task) is not None,
+                      r"gRtcTaskHandle\s*=\s*nullptr;\s*vTaskDelete\(nullptr\);\s*}$", sensor_rtc) is not None,
             "RTC must invalidate before publishing null and immediately self-delete")
     require("eTaskGetState" not in extract_block(rtc, "bool rtcStartInternal()"),
             "RTC start must not inspect a retired task handle")
-    rtc_exit = rtc_task[rtc_task.rindex("gRtcTaskHandle = nullptr;"):].rstrip()[:-1]
+    rtc_exit = sensor_rtc[sensor_rtc.rindex("gRtcTaskHandle = nullptr;"):].rstrip()[:-1]
 
     constants = []
     for family in ("INPUT", "THERMAL", "IMU", "TOF", "FMRADIO", "APDS", "PRESENCE", "GPS", "RTC"):

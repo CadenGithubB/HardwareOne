@@ -29,10 +29,17 @@ SCENARIOS = (
 
 
 def generate(source: str) -> str:
-    helpers = []
-    for marker in ("const char* taskStateLabel(", "struct TaskCpuSample"):
-        if marker in source:
-            helpers.append(extract_block(source, marker) + (";" if marker.startswith("struct") else ""))
+    helpers = [extract_block(source, "const char* taskStateLabel(")]
+    # The shared task-CPU sampler (System_TaskUtils) that perftop now reads.
+    header = (COMPONENT / "System_TaskUtils.h").read_text()
+    utils = (COMPONENT / "System_TaskUtils.cpp").read_text()
+    helpers.append(extract_block(header, "struct TaskCpuShare") + ";")
+    helpers.append(extract_block(utils, "struct TaskCpuSampler") + ";")
+    for line in ("static TaskCpuSampler sTaskCpu;", "static portMUX_TYPE sTaskCpuMux = portMUX_INITIALIZER_UNLOCKED;"):
+        require(line in utils, f"missing {line}")
+        helpers.append(line)
+    helpers.append(extract_block(utils, "void taskCpuSampleTick()"))
+    helpers.append(extract_block(utils, "bool taskCpuShares("))
     handlers = [extract_block(source, marker) for marker in
                 ("const char* cmd_taskstats(", "const char* cmd_perftop(")]
     harness = (HERE / "task_reporting_harness.cpp").read_text()

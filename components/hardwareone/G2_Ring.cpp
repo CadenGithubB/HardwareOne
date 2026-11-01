@@ -6836,7 +6836,7 @@ static const char* cmd_openring(const String& args) {
 
   // `openring reconnect` — glasses R1 "Reconnect Ring" path. Same heap
   // guard + disconnect settle as the old tap-inline helper; runs on
-  // cmd_exec (which can afford the 500 ms delay) instead of g2_tap_disp.
+  // cmd_exec (which can afford the 500 ms delay) instead of g2_taps.
   if (a0 == "reconnect") {
     const uint32_t freeNow = ESP.getFreeHeap();
     if (freeNow < 16 * 1024) {

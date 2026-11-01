@@ -27,8 +27,8 @@ ble_disconnected
 time_synced
 g2_connected
 g2_disconnected
-g2_worn
-g2_not_worn
+g2_plugin_alive
+g2_plugin_silent
 ring_connected
 ring_disconnected
 ring_worn
@@ -36,6 +36,8 @@ ring_not_worn
 ring_reconnect_failed
 g2_reconnect_failed
 ble_stack_recycled
+phone_link_up
+phone_link_down
 login_ok
 login_fail
 user_request
@@ -83,6 +85,7 @@ photo_saved
 video_saved
 mic_saved
 llm_gen_done
+llm_request
 llm_model_loaded
 boot_started
 boot_finished
@@ -165,3 +168,7 @@ note_started
 note_saved
 note_failed
 video_record_failed
+stt_started
+stt_stopped
+stt_segment
+stt_speaker

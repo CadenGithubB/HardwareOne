@@ -2909,8 +2909,8 @@ bool startESPSR() {
   setESPSRCommandCallback(onVoiceCommandDetected);
   gSRTaskShouldRun.store(true, std::memory_order_release);
   gSRTaskExited.store(false, std::memory_order_release);
-  taskStackRecord("sr_task", SR_STACK_WORDS);
-  if (xTaskCreatePinnedToCore(srTask, "sr_task", SR_STACK_WORDS, nullptr,
+  taskStackRecord("sr_main", SR_STACK_WORDS);
+  if (xTaskCreatePinnedToCore(srTask, "sr_main", SR_STACK_WORDS, nullptr,
       SR_TASK_PRIORITY_LEVEL, &gSRTaskHandle, 1) != pdPASS) {
     gSRTaskExited.store(true, std::memory_order_release);
     srSetError("Failed to create speech detection task");
@@ -3161,13 +3161,13 @@ const char* cmd_sr_status(const String& argsInput) {
   return out.c_str();
 }
 
-// Stack watermark for sr_task — run after wake/commands/G2 mic stress; see cmd_sr().
+// Stack watermark for sr_main — run after wake/commands/G2 mic stress; see cmd_sr().
 static const char* cmd_sr_stack(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   static char buf[224];
   if (!gSRTaskHandle || !gESPSRRunning) {
-    return "Error: sr_task: not running — use srstart first";
+    return "Error: sr_main: not running — use srstart first";
   }
   const UBaseType_t hwm = gSRStackHwm.load(std::memory_order_relaxed);
   const uint32_t allocB = (uint32_t)SR_STACK_WORDS;
@@ -3175,7 +3175,7 @@ static const char* cmd_sr_stack(const String& argsInput) {
   const uint32_t usedEst =
       (SR_STACK_WORDS > hwm) ? (uint32_t)(SR_STACK_WORDS - hwm) : 0u;
   snprintf(buf, sizeof(buf),
-           "sr_task: alloc=%uB est_peak_used=%uB hwm_free=%uB. "
+           "sr_main: alloc=%uB est_peak_used=%uB hwm_free=%uB. "
            "Shrink SR_STACK_WORDS in System_TaskUtils.h only if hwm_free stays "
            ">= ~25%% of alloc after your worst-case voice test.",
            (unsigned)allocB, (unsigned)usedEst, (unsigned)freeB);
@@ -4121,7 +4121,7 @@ const CommandEntry espsrCommands[] = {
   { "opensr", "Start ESP-SR pipeline and arm voice as the current user.", false, cmd_sr_start, "Usage: opensr" },
   { "closesr", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: closesr" },
   { "srstatus", "Show ESP-SR status.", false, cmd_sr_status, "Usage: srstatus" },
-  { "srstack", "Show sr_task stack high-water mark (run after voice stress test).", false, cmd_sr_stack, "Usage: srstack" },
+  { "srstack", "Show sr_main stack high-water mark (run after voice stress test).", false, cmd_sr_stack, "Usage: srstack" },
   { "srstart", "Start ESP-SR pipeline and arm voice as the current user.", false, cmd_sr_start, "Usage: srstart" },
   { "srstop", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: srstop" },
   { "voicearm", "Arm voice command execution as the current authenticated user.", false, cmd_voice_arm_cli, "Usage: voicearm" },

@@ -291,7 +291,8 @@ esp_err_t radioHalConsoleMirror(bool on) {
     }
     if (err == ESP_OK) {
       sConsoleStop = false;
-      if (xTaskCreate(consoleTask, "c6console", 3072, nullptr, 3, &sConsoleTask) != pdPASS) err = ESP_ERR_NO_MEM;
+      // 4096 B: 3072 left 740 B free on the P4X-EYE (2026-10-29), the tightest stack of ours.
+      if (xTaskCreate(consoleTask, "c6_console", 4096, nullptr, 3, &sConsoleTask) != pdPASS) err = ESP_ERR_NO_MEM;
     }
     if (err != ESP_OK) {
       sConsoleTask = nullptr;
@@ -310,7 +311,7 @@ bool radioHalConsoleMirrorOn() { return sConsoleTask != nullptr; }
 esp_err_t radioHalPrepare() {
   quietRpcLogs();
   ESP_RETURN_ON_ERROR(prepareEyeBoard(), kTag, "EYE board preparation failed");
-  radioHalConsoleMirror(true);  // not fatal; c6console off silences it
+  radioHalConsoleMirror(true);  // not fatal; c6_console off silences it
   ESP_RETURN_ON_ERROR(registerEvents(), kTag, "Hosted events");
   esp_err_t err = ESP_FAIL;
   for (int attempt = 1; attempt <= kBootAttempts; attempt++) {

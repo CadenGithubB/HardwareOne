@@ -3,7 +3,7 @@
 
 // =============================================================================
 // G2 hijack command bridge — routes glasses-tap-driven system mutations
-// through cmd_exec_task instead of running them inline on g2_tap_disp.
+// through cmd_exec instead of running them inline on g2_taps.
 // =============================================================================
 // See docs/G2_REFACTOR_PROPOSAL.md §5 for the full architectural rationale.
 //
@@ -17,7 +17,7 @@
 //   };
 //   g2SubmitHijackCommand("wifi disconnect", cookie, onWifiDoneCb, nullptr);
 //
-// The callback runs on cmd_exec_task. It must NOT touch the lens directly —
+// The callback runs on cmd_exec. It must NOT touch the lens directly —
 // instead it should call g2EnqueueRedraw with the completion cookie. The lens
 // applier discards the redraw if its navigation generation is no longer current.
 // =============================================================================
@@ -71,13 +71,13 @@ typedef void (*G2HijackCmdCallback)(bool ok,
                                     const G2CmdCookie& cookie,
                                     void* userData);
 
-// Submit a hijack-originated command to cmd_exec_task.
+// Submit a hijack-originated command to cmd_exec.
 //
 // `line`     : command line, same form as serial/web (e.g. "wifi disconnect").
 // `cookie`   : caller-populated UI snapshot. The helper does NOT mutate it; it
 //              copies the cookie into a heap wrapper that survives until the
 //              completion callback fires.
-// `callback` : invoked on cmd_exec_task with (ok, result, cookie, userData).
+// `callback` : invoked on cmd_exec with (ok, result, cookie, userData).
 //              May be nullptr for fire-and-forget submissions.
 // `userData` : opaque pointer forwarded to the callback. Lifetime is the
 //              caller's responsibility.
@@ -100,14 +100,14 @@ bool g2SubmitHijackCommand(const char* line,
 // =============================================================================
 // AuthContext for in-callback hijack work (no cmd_exec dispatch).
 //
-// g2SubmitHijackCommand sends taps through cmd_exec_task, which installs the
+// g2SubmitHijackCommand sends taps through cmd_exec, which installs the
 // command's identity (cmd.ctx.auth.user = pairedByUser) into the executor
 // task's TLS slot for the duration of the command. That covers any tap that
 // mutates state via a CLI command.
 //
 // But some hijack handlers — notably the file browser (g2ShowFilesMenu /
 // g2FilesHandleTap) — don't go through cmd_exec. They run synchronously on
-// g2_tap_disp and call FileManager / VFS::*Guarded directly. Those
+// g2_taps and call FileManager / VFS::*Guarded directly. Those
 // reads need an AuthContext too: without one the task's TLS slot is still
 // ANON and every guarded call fails "anonymous never permitted".
 //
@@ -159,7 +159,7 @@ class G2HijackCtxGuard {
 // LensUiJob — unified message type for the lens applier queue.
 // =============================================================================
 // This wraps the existing PageSwapArgs path and the Redraw/Notify/Custom/
-// NativeNotif variants consumed by the persistent `g2_page_swap_w` lens
+// NativeNotif variants consumed by the persistent `g2_pages` lens
 // applier. The current worker stack is 8192 bytes; see G2_Glasses.cpp for the
 // measured sizing evidence. Toast remains reserved but unimplemented.
 //
@@ -281,7 +281,7 @@ bool g2EnqueueLensJob(
 // Queue a command-completion redraw on the existing lens applier. Copies the
 // original completion cookie unchanged; never refresh its generation here or
 // render inline. The applier checks that generation before calling render.
-// Uses the queue's bounded 50 ms wait, suitable for cmd_exec_task callbacks.
+// Uses the queue's bounded 50 ms wait, suitable for cmd_exec callbacks.
 // Returns false for a null renderer, allocation failure or queue rejection;
 // all allocations are cleaned up on failure. Pages retain their result state
 // and any additional staleness/recovery policy. tag is only used for immediate

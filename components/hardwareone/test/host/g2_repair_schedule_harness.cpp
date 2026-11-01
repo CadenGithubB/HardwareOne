@@ -67,6 +67,10 @@ static void g2PushStatusEvent(const char* reason) {
 
 // INSERT_TYPES
 
+// The half-connected found-but-refused streak (G2_Glasses.cpp); reset by
+// missingArmRecoveryComplete when an episode ends.
+static volatile uint8_t gRepairOpenFailStreak = 0;
+
 // Links: gL/gR.connected are the published topology.
 static bool gClientUp = true, gPairPublished = false;
 static G2LinkSnapshot g2LinkSnapshot() {

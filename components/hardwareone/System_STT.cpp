@@ -1,4 +1,7 @@
 #include "System_STT.h"
+#ifdef ESP_PLATFORM
+#include "System_Events.h"  // systemEventPost: typed system-event ring (host builds have no ring)
+#endif
 
 #if ENABLE_LOCAL_STT
 #if !ENABLE_MICROPHONE
@@ -583,6 +586,9 @@ static void sttWorker(void*) {
   // during finish only retires delivery; it cannot rewrite an accepted file.
   transcript.finish(finallyCancelled ? "cancelled" : ok ? "done" : "failed");
   sttPublishTranscript(token, transcript.snapshot());
+#ifdef ESP_PLATFORM
+  systemEventPost(SYSEVT_STT_STOPPED, finallyCancelled ? "cancelled" : ok ? "done" : "failed");
+#endif
   // Include the optional writer/VFS call depth in this worker's final margin.
   const uint32_t stackFree = uxTaskGetStackHighWaterMark(nullptr);
   portENTER_CRITICAL(&gSTTMux);
@@ -1682,6 +1688,7 @@ static void sttSpeakerPendingLocked(uint32_t sequence) {
   ++history.version;
 }
 static void sttPublishSpeaker(STTToken token, uint32_t sequence, int8_t speaker) {
+  bool attributed = false;
   portENTER_CRITICAL(&gSTTMux);
   if (gSTT.snapshot.token == token && !gSTT.cancelRequested) {
     auto& history = gSTT.speakers;
@@ -1692,11 +1699,22 @@ static void sttPublishSpeaker(STTToken token, uint32_t sequence, int8_t speaker)
         entry.speaker = speaker;
         entry.ready = true;
         ++history.version;
+        attributed = speaker >= 0;
       }
       break;
     }
   }
   portEXIT_CRITICAL(&gSTTMux);
+#ifdef ESP_PLATFORM
+  if (attributed) {
+    char spk[8], seg[16];
+    snprintf(spk, sizeof(spk), "%d", (int)speaker);
+    snprintf(seg, sizeof(seg), "%lu", (unsigned long)sequence);
+    systemEventPost(SYSEVT_STT_SPEAKER, spk, seg);
+  }
+#else
+  (void)attributed;
+#endif
 }
 static void sttFinishSpeakers(STTToken token) {
   portENTER_CRITICAL(&gSTTMux);
@@ -2331,7 +2349,7 @@ static void sttContinuousWorker(void*) {
         // boot (includes this phrase's inference arena and LM workspace).
         // int_free/int_min: internal RAM now and its low-water mark since
         // boot, so anything eroding the runtime's per-call internal floor (or
-        // BLE's and the 6 KB g2_ctrl_owner stack's headroom) shows on every
+        // BLE's and the 6 KB g2_owner stack's headroom) shows on every
         // phrase.
         ESP_LOGI("STT", "TL seg=%lu a0=%lu a1=%lu q=%lu s=%lu m=%lu f=%lu n=%lu d=%lu sv0=%lu sv1=%lu e=%lu ok=%d lm=%d psram_min=%u"
                  " int_free=%u int_min=%u",
@@ -2352,6 +2370,12 @@ static void sttContinuousWorker(void*) {
                  unsigned(retainedSamples), unsigned(inferenceSamples), HW1_STT_TRIM_SILENCE);
         // 0=pause, 1=hard limit, 2=session end. Offsets are absolute 16 kHz
         // sample positions, so the log shows gaps/overlap and continuations.
+        {
+          char seg[16], voiced[24];
+          snprintf(seg, sizeof(seg), "%lu", (unsigned long)slot->sequence);
+          snprintf(voiced, sizeof(voiced), "%.1f s voice", (double)slot->voicedSamples / 16000.0);
+          systemEventPost(SYSEVT_STT_SEGMENT, seg, voiced);
+        }
         ESP_LOGI("STT", "TL boundary seg=%lu start=%llu end=%llu kind=%u continuation=%d overlap=%u vad_voiced=%u",
                  (unsigned long)slot->sequence, (unsigned long long)slot->start,
                  (unsigned long long)slot->end, unsigned(slot->endKind), slot->continuation ? 1 : 0,
@@ -2474,7 +2498,14 @@ static void sttContinuousWorker(void*) {
   gSTT.snapshot.workerStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
   gSTT.completedMs = millis();
   gSTT.snapshot.workerActive = false;
+  const STTState endState = gSTT.snapshot.state;
   portEXIT_CRITICAL(&gSTTMux);
+#ifdef ESP_PLATFORM
+  systemEventPost(SYSEVT_STT_STOPPED, endState == STTState::Cancelled ? "cancelled"
+                                      : endState == STTState::Failed ? "failed" : "done");
+#else
+  (void)endState;
+#endif
   vTaskDelete(nullptr);
 }
 
@@ -2568,6 +2599,9 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
     return sttError(error, errorCap, "Could not create STT worker");
   }
   if (error && errorCap) error[0] = '\0';
+#ifdef ESP_PLATFORM
+  systemEventPost(SYSEVT_STT_STARTED, continuous ? "continuous" : singleUtterance ? "question" : "capture");
+#endif
   return true;
 }
 

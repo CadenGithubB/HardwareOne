@@ -34,7 +34,7 @@ bool otaSystemCanMarkImageValid();
 void otaSystemOnImageMarkedValid(bool provisioningShortcut);
 
 // Encrypted BLE bulk-staging sink. The secure-channel layer recognizes the
-// binary envelope and calls this on cmd_exec_task. The implementation checks
+// binary envelope and calls this on cmd_exec. The implementation checks
 // the live BLE identity on every frame and accepts data only after an
 // authorized `otawrite begin` command established an exact transfer contract.
 bool otaBleHandleEncryptedFrame(uint16_t connId, const uint8_t* frame, size_t size);

@@ -3362,7 +3362,7 @@ AuthContext oledAuthContext(const char* path) {
 }
 
 // Build a Command struct for OLED-originated commands.
-// Routed through cmd_exec_task via submitAndExecuteSync for unified
+// Routed through cmd_exec via submitAndExecuteSync for unified
 // output routing, audit logging, and stack safety.
 static Command buildOLEDCommand(const String& cmdLine) {
   Command uc;
@@ -3501,7 +3501,7 @@ bool oledRunCommand(const String& cmd) {
   return oledReportCommandReply(executed, out);
 }
 
-// One oledRunCommandAsync request at a time. cmd_exec_task only copies the
+// One oledRunCommandAsync request at a time. cmd_exec only copies the
 // reply here and asks for a frame; the verdict, the toast and done() run on the
 // display task in oledDeliverCommandReply().
 namespace {
@@ -3596,7 +3596,7 @@ static void drawProgressBar(int percent);
 // the displayUpdate() at its tail pushes the 1 KB framebuffer over I2C (~20 ms
 // at 400 kHz, plus however long it waits for the bus lock). The frame runs on
 // the main loop task, but oledMarkDirty() is called from OTHER tasks —
-// cmd_exec_task for every CLI/web/BLE/ESP-NOW command, sensor tasks, ESP-NOW
+// cmd_exec for every CLI/web/BLE/ESP-NOW command, sensor tasks, ESP-NOW
 // callbacks. With a bool, any mark that landed after the oledIsDirty() check
 // but before the oledClearDirty() at the tail was wiped by that clear, and the
 // change never reached the panel: the screen sat stale (or blank, if whatever
@@ -6991,7 +6991,7 @@ void applyOLEDBrightness() {
 //
 // This only REQUESTS the rotation: the render task applies it at the top of the
 // next frame (see oledRotationPending in updateOLEDDisplay). Callers are on
-// other tasks — cmd_exec_task for `oledflip` and the on-device settings editor,
+// other tasks — cmd_exec for `oledflip` and the on-device settings editor,
 // the sleep-resume path — and both setRotation() and the framebuffer belong to
 // the render task.
 //

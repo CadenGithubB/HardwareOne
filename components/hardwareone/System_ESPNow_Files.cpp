@@ -23,7 +23,7 @@ namespace {
 
 constexpr uint8_t kFileSlots = 4;
 
-// Streaming double-buffer: espnow_task fills one 4 KB half while cmd_exec_task
+// Streaming double-buffer: espnow_task fills one 4 KB half while cmd_exec
 // writes the other to the .part. Two halves = the 8 KB/slot we already used, just
 // split so the radio task is never blocked on flash. One filled buffer = ~20 chunks
 // (~430 ms) of slack for the writer to drain a NOR erase — plenty (writer turnaround
@@ -61,7 +61,7 @@ struct FileTransferSlotImpl {
   uint16_t chunkMapBytes;
 
   // --- Streaming mode (file > kFileSlotMaxFileSize): chunks stream to a .part file
-  //     via cmd_exec_task; dataBuffer/chunkMap stay null. espnow_task fills the
+  //     via cmd_exec; dataBuffer/chunkMap stay null. espnow_task fills the
   //     active buffer (memcpy only); a full buffer is committed to streamPendQ and a
   //     drain job is queued; cmd_exec writes pending buffers to gStreamFile[idx].
   //     Strictly sequential (sender transmits in order); any gap aborts the
@@ -94,7 +94,7 @@ SemaphoreHandle_t      gFileSlotsMutex = nullptr;
 // memset on alloc/release) because File is a C++ object with a destructor — a
 // memset over it would leak the underlying handle. Indexed by slot index.
 //
-// Every touch of this handle is cmd_exec_task's, and DELIBERATELY OUTSIDE
+// Every touch of this handle is cmd_exec's, and DELIBERATELY OUTSIDE
 // gFileSlotsMutex: streamDrainPending lazy-opens it and writes it holding only the
 // FS lock, and finalize/release close it. That is the whole point of the module —
 // espnow_task must never block on flash — so the mutex covers the FIFO/metadata

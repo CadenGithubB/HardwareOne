@@ -423,7 +423,7 @@ static bool sDiscardingLine = false;         // true = swallow bytes until the n
 // passwords or tokens (verified 2026-08-19).
 EXT_RAM_BSS_ATTR static char sUartControlReply[256];
 
-// Deferred lifecycle request. Command handlers run on cmd_exec_task, which
+// Deferred lifecycle request. Command handlers run on cmd_exec, which
 // ticks concurrently with the loop task that owns the drain — calling
 // end()/begin() there would free the port and the line accumulator underneath
 // an in-flight uartLinkTick (concurrent String mutation = heap corruption).
@@ -455,7 +455,7 @@ static const char* kUartLockoutKey = "uart";
 // TX serialization (P2). The HAL's own mutex is per-write()-call only, and a
 // text reply used to be TWO calls (blob, then newline) — any second-task
 // writer could split it. All TX now goes through ONE write() call under this
-// link-level mutex, so frames from cmd_exec_task (voicefetch) and the loop
+// link-level mutex, so frames from cmd_exec (voicefetch) and the loop
 // task's replies can never interleave mid-message. Created lazily on first
 // start and never deleted — deleting a mutex a writer may be blocked on is
 // exactly the lifecycle race the sPending mechanism exists to avoid.
@@ -1472,7 +1472,7 @@ const char* cmd_voicefetch(const String& argsInput) {
       return "Error: file empty or larger than the 2MB voicefetch cap";
     }
     // Refuse a transfer that would outrun the 60s synchronous-wait window:
-    // voicefetch streams synchronously on cmd_exec_task, and if it ran past
+    // voicefetch streams synchronously on cmd_exec, and if it ran past
     // ~60s the loop task's submitAndExecuteSync would time out and write its
     // own reply INTO the middle of the frame stream (desync). At the classic
     // 230400 ceiling a full 2MB file is ~87s, so this bites there. ~1% frame

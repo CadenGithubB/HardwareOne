@@ -1204,7 +1204,7 @@ const G2PageModule*   g2FindPageByHijackPage(G2HijackPage page);
 
 // Long-press ("hold") handler for a page, kept in a side table keyed by page
 // id instead of a 12th G2PageModule member. Register once at startup, next
-// to g2RegisterPage; nullptr unregisters. The handler runs on g2_tap_disp:
+// to g2RegisterPage; nullptr unregisters. The handler runs on g2_taps:
 //   phase 9  = press on this page while it is current; return true to
 //              consume it (false lets the global hold action try);
 //   phase 10 = release of a press this page consumed, while still current;

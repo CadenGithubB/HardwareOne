@@ -103,7 +103,7 @@ static const SettingEntry* gEditEntry       = nullptr;    // entry being edited 
 static uint32_t            gNavGen          = 0;
 
 // At most one setting mutation is allowed to own the current Settings view.
-// The command itself runs on cmd_exec_task; its completion only publishes a
+// The command itself runs on cmd_exec; its completion only publishes a
 // gen-guarded Redraw job. The lens-applier worker consumes this small result
 // record and performs the actual refresh/banner work. Protect it because the
 // tap dispatcher, cmd_exec task, and lens applier can run on different cores.
@@ -591,7 +591,7 @@ static bool settingsRenderPick() {
 }
 
 // Flash a short message, then return to the entry list. This is only for
-// synchronous pre-flight refusals on g2_tap_disp; async command completions
+// synchronous pre-flight refusals on g2_taps; async command completions
 // marshal their UI work to the lens-applier worker below.
 static void settingsShowBannerThenEntries(const char* msg) {
   g2ShowText(msg);
@@ -755,7 +755,7 @@ static void settingsCommit(const SettingEntry* e, const char* value) {
   }
 }
 
-// Keyboard commit/cancel (run on g2_tap_disp). The keyboard teardown leaves the
+// Keyboard commit/cancel (run on g2_taps). The keyboard teardown leaves the
 // hijack page at TEXT_VIEW, so both re-assert SETTINGS before doing anything.
 static void onSettingsKeyboardCommit(const char* text) {
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);

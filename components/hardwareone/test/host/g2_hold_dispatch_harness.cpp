@@ -1,6 +1,6 @@
 // Behavioural harness for the production G2 long-press ("hold") section of
 // G2_Glasses.cpp: ingest (pairing, gates, watchdog activity, job queueing),
-// the g2_tap_disp delivery (routes, page side table, global action, events),
+// the g2_taps delivery (routes, page side table, global action, events),
 // implicit aborts, expiry and `g2hold sim`. test_g2_hold_dispatch.py splices
 // the section verbatim at INSERT_PRODUCTION, and the exit tail of
 // handleDevEvent's SysEvent branch at INSERT_SYS_EXIT_TAIL; everything else is

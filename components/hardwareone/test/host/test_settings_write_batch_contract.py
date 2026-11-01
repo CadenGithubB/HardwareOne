@@ -294,7 +294,7 @@ for source_name, source in (("G2_Ring.cpp", g2_ring), ("G2_Glasses.cpp", g2_glas
 
 
 # A queued CommandContext carries a boot-local value, never an HTTP request or
-# pointer whose lifetime can end before cmd_exec_task consumes the command.
+# pointer whose lifetime can end before cmd_exec consumes the command.
 command_context = block_after(command_types, "struct CommandContext")
 require(
     re.search(r"\buint32_t\s+settingsBatchId\s*=\s*0\s*;", command_context)
@@ -512,7 +512,7 @@ for required_identity_part in (
     )
 
 # Direct/background callers have no request boundary. They must write now,
-# never inherit cmd_exec_task as a shared owner. Abandoned command owners are
+# never inherit cmd_exec as a shared owner. Abandoned command owners are
 # reaped from the main loop and failed durability intent is retained.
 owner_resolver = block_after(settings_cpp, "static bool currentSettingsBatchOwner(")
 require(
@@ -573,12 +573,12 @@ require(
 
 # The RTC worker can persist calibration. Force-deleting it while the shared
 # writer guard is live would skip C++ destructors and strand the mutex forever.
-rtc_task = block_after(rtc, "void rtcTask(")
+sensor_rtc = block_after(rtc, "void rtcTask(")
 rtc_start = block_after(rtc, "bool rtcStartInternal(")
 require(
     "vTaskDelete(gRtcTaskHandle)" not in cpp_code(rtc) and
-    "gRtcConnected = false;" in rtc_task and
-    "while (!rtcInvalidateCache())" in rtc_task,
+    "gRtcConnected = false;" in sensor_rtc and
+    "while (!rtcInvalidateCache())" in sensor_rtc,
     "RTC cleanup must remain task-owned and invalidate before self-deletion",
 )
 require(

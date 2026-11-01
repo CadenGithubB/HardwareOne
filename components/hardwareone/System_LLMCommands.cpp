@@ -39,7 +39,7 @@
   #include "System_LLM_Internal.h"   // cmd_llm_menu / cmd_llm_ask live in System_LLM_Menu.cpp
 #endif
 
-// Shared reply scratch. Command handlers are serialized by cmd_exec_task, so a
+// Shared reply scratch. Command handlers are serialized by cmd_exec, so a
 // single buffer is safe; PSRAM keeps it off the tight internal heap.
 EXT_RAM_BSS_ATTR static char llmCmdBuf[1024];
 

@@ -506,7 +506,7 @@ static SensorsLevel gSensorsLevel    = SENSORS_LEVEL_LIST;
 static size_t       gSensorsDetailIdx = 0;   // index into the LIST-level rows
 
 #if ENABLE_CAMERA_SENSOR
-// Set when CAM ON was submitted (`opencamera async`); cleared by the cam_pwr
+// Set when CAM ON was submitted (`opencamera async`); cleared by the cam_power
 // post-hook (g2SensorsOnCameraPowerDone) or by a refused start
 // (onCameraRuntimeDone). Avoids "not connected" on Capture/Stream while
 // initCamera() is still running.
@@ -1259,7 +1259,7 @@ static void onMicAutostartRuntimeDone(bool ok, const char* result,
 
 #if ENABLE_CAMERA_SENSOR
 // After `opencamera async` / `closecamera async` on cmd_exec. The camera owner
-// either admitted the power change to cam_pwr (its post-hook redraws once the
+// either admitted the power change to cam_power (its post-hook redraws once the
 // change completes) or refused it: camera disabled, not authorized, or the
 // power worker unavailable. cameraautostart is persisted only after admission,
 // so the saved preference never records a change the owner refused.
@@ -1476,12 +1476,12 @@ void g2SensorsHandleTap(uint32_t idx) {
     // (authorization, live-owner fence, audit), never inline on tap_disp; the
     // auto-start preference is persisted in their completion, only after the
     // owner accepted the change. The camera uses the owner's asynchronous
-    // form (`opencamera async`), which queues to cam_pwr and returns at once:
+    // form (`opencamera async`), which queues to cam_power and returns at once:
     // the synchronous `opencamera` would hold cmd_exec for up to 60 s.
     bool skipImmediateRedraw = false;
 #if ENABLE_CAMERA_SENSOR
     // Only a change of the live state needs the owner; otherwise the toggle
-    // just saves the preference below. Camera power then runs on cam_pwr and
+    // just saves the preference below. Camera power then runs on cam_power and
     // its post-hook redraws when done.
     const bool cameraRuntime = strcmp(r.featureId, "camera") == 0 &&
                                next != gCameraRunning;
@@ -1496,7 +1496,7 @@ void g2SensorsHandleTap(uint32_t idx) {
 #endif
 
     // A preference-only toggle re-renders now; a runtime change redraws from
-    // its completion or the cam_pwr post-hook.
+    // its completion or the cam_power post-hook.
     if (!skipImmediateRedraw) {
       buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
       if (gSensorsDetailIdx < count) {
@@ -1647,7 +1647,7 @@ void g2SensorsHandleTap(uint32_t idx) {
 }
 
 #if ENABLE_CAMERA_SENSOR
-// cam_pwr post-hook: runs after every camera power operation, whichever
+// cam_power post-hook: runs after every camera power operation, whichever
 // source asked for it. It never renders or writes page state here; the CAM
 // detail refresh goes to the lens applier with the navigation generation
 // taken before the page check, so a navigation after the check drops it.
@@ -1667,7 +1667,7 @@ static void g2SensorsOnCameraPowerDone() {
 }
 
 void g2RegisterSensorsCameraPowerHook() {
-  // Hook only — cam_pwr is created lazily on the first power request
+  // Hook only — cam_power is created lazily on the first power request
   // (cameraPowerRequestStart*/Stop* → cameraPwrSend → ensureStarted).
   cameraPowerSetPostHook(g2SensorsOnCameraPowerDone);
 }

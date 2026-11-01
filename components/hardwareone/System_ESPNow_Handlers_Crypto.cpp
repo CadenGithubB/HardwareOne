@@ -201,7 +201,7 @@ static void sendKeyExConfirm(const uint8_t peerMac[6], uint16_t meshFingerprint,
 // reject floods the log. Returns the rejects accumulated for this peer since the
 // last emit when it is time to log again (one line per ~30s per peer), else 0.
 // Shared by both reject branches so the count is per-peer regardless of branch.
-// Single-task (runDeferredSessionOpen runs on cmd_exec_task) so the ring needs
+// Single-task (runDeferredSessionOpen runs on cmd_exec) so the ring needs
 // no lock; logCooldownOk is the shared throttle primitive.
 static uint16_t sessionRejectLogCount(const uint8_t mac[6]) {
   static struct { uint8_t mac[6]; uint32_t lastMs; uint16_t n; bool used; } slots[4] = {};
@@ -711,13 +711,13 @@ void buildRekeyTranscript(uint8_t out[75],
 }  // namespace
 
 // ----------------------------------------------------------------------------
-// Deferred-to-cmd_exec_task work structs + worker functions.
+// Deferred-to-cmd_exec work structs + worker functions.
 //
 // Ed25519 sign+verify each use ~3 KB of libsodium internal stack. espnow_task's
 // whole budget is 6656 B (ESPNOW_HB_STACK_WORDS — the values in
 // System_TaskUtils.h are BYTES, not words, despite the name), so one signature
 // is most of the task's stack; on top of the ambient RX depth it overflowed
-// during SESSION_OPEN handling. cmd_exec_task has 8192 B and is single-threaded
+// during SESSION_OPEN handling. cmd_exec has 8192 B and is single-threaded
 // w.r.t. the existing CLI peak (~4.25 KB), so deferring keeps everything under
 // budget without bumping any task's stack. The margin is real but not roomy —
 // ~3 KB of libsodium against an 8 KB budget is worth re-measuring if the
@@ -725,7 +725,7 @@ void buildRekeyTranscript(uint8_t out[75],
 //
 // On-wire RX handlers (v4hSessionOpen/Confirm) do only size validation +
 // PSRAM copy + enqueue. Heavy lifting runs in runDeferredSessionOpen/Confirm
-// on cmd_exec_task. The work struct + callback own their own lifetime.
+// on cmd_exec. The work struct + callback own their own lifetime.
 // ----------------------------------------------------------------------------
 
 namespace {
@@ -999,7 +999,7 @@ void runDeferredSessionConfirm(void* arg) {
                msg->responderMac[3], msg->responderMac[4], msg->responderMac[5],
                (unsigned)msg->sessionId, s->myDirection == 0 ? 'A' : 'B');
   // Phase 3.5 step 3 — drain any frames the app queued while we were handshaking.
-  // Runs on cmd_exec_task (same task that handled the heavy crypto above), so
+  // Runs on cmd_exec (same task that handled the heavy crypto above), so
   // the drain's session-wrap + esp_now_send fits in this task's stack.
   pendingFrameDrainForPeer(msg->responderMac);
   // Session ACTIVE on our side (initiator) — notify bond logic (discovery via
@@ -1011,7 +1011,7 @@ void runDeferredSessionConfirm(void* arg) {
 }  // namespace
 
 // On-RX handlers — espnow_task scope. Lightweight: size-check + PSRAM copy +
-// enqueue. All heavy crypto runs in the deferred function on cmd_exec_task.
+// enqueue. All heavy crypto runs in the deferred function on cmd_exec.
 void v4hSessionOpen(const V4RxCtx& ctx) {
   if (ctx.payloadLen != sizeof(V4PayloadSessionOpen)) {
     WARN_ESPNOWF("SESSION_OPEN: bad payload size %u", (unsigned)ctx.payloadLen);
@@ -1473,7 +1473,7 @@ void v4hSessionRekey(const V4RxCtx& ctx) {
                  (unsigned)ctx.payloadLen, (unsigned)sizeof(V4PayloadSessionRekey));
     return;
   }
-  // PSRAM-copy + defer to cmd_exec_task (verify+ECDH+KDF+optional sign+send
+  // PSRAM-copy + defer to cmd_exec (verify+ECDH+KDF+optional sign+send
   // is the same crypto profile as SESSION_OPEN/CONFIRM, so the same defer
   // architecture applies — keeps it off espnow_task's 6656 B stack).
   auto* w = (DeferredRekeyWork*)ps_alloc(sizeof(DeferredRekeyWork),

@@ -14,11 +14,11 @@
 //
 // TASKS / LOCKING
 // ---------------
-// Taps, the rename keyboard and the text pager run on g2_tap_disp; queued
-// redraws run on the lens applier (g2_page_swap_w); the g2files CLI summary
-// runs on cmd_exec_task. All of them take the Files page lock (FilesPageLock)
+// Taps, the rename keyboard and the text pager run on g2_taps; queued
+// redraws run on the lens applier (g2_pages); the g2files CLI summary
+// runs on cmd_exec. All of them take the Files page lock (FilesPageLock)
 // before touching gFilesFm, the row buffers or the page/mode state. The
-// rename/delete completion (cmd_exec_task), the overlay expiry (main loop) and
+// rename/delete completion (cmd_exec), the overlay expiry (main loop) and
 // the image viewers' onDone (session worker) never take it and never draw:
 // they publish under gFilesRedrawMux and queue a menuGen-fenced redraw.
 //
@@ -649,7 +649,7 @@ static void renderFilesResult() {
   if (ready) showFilesList(message);
 }
 
-// Completion on cmd_exec_task: copy the result and queue a redraw with the
+// Completion on cmd_exec: copy the result and queue a redraw with the
 // submit cookie (G2HijackCmd.h contract — no lens, FileManager or Files page
 // lock here). The lens applier drops the redraw if the user navigated since
 // the submit. Success marks a forced re-scan for the next list render —
@@ -697,7 +697,7 @@ static void filesSubmitMutate(const char* line) {
   }
 }
 
-// Keyboard callbacks run on g2_tap_disp — String build + submit only; the
+// Keyboard callbacks run on g2_taps — String build + submit only; the
 // list redraw on cancel is cache-hot, no FS scan.
 static void filesRenameCommit(const char* text) {
   FilesPageLock lock;
@@ -858,7 +858,7 @@ static bool filesReadTextBuffer(const char* path, PsramBuffer& out,
 // be shown (caller falls back to the file list).
 static bool showTextFileViaWidget(bool pretty) {
   // Install the G2-paired user's identity + notification source for this
-  // page action. The g2_tap_disp worker that drives this page leaves the
+  // page action. The g2_taps worker that drives this page leaves the
   // task's TLS slots at their defaults (ANON identity, UNKNOWN notif src),
   // so canRead/readTextLimited below would see no user and deny restricted
   // files, and any notify*() fired during the read would attribute to
@@ -1004,7 +1004,7 @@ static void showFileInfo(const FileEntry& e) {
 void g2BuildFilesInfo(char* out, size_t cap) {
   if (!out || cap == 0) return;
   out[0] = '\0';
-  FilesPageLock lock;  // g2files CLI on cmd_exec_task shares gFilesFm
+  FilesPageLock lock;  // g2files CLI on cmd_exec shares gFilesFm
 
   String s;
   s.reserve(384);

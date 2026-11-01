@@ -87,7 +87,7 @@ def check_sources(component: Path) -> None:
         require(old not in owner, f'old repair state remains: {old}')
     # The wear edge: the surviving temple put back on.
     activity = last_block(owner, 'static bool g2NoteEvenCoreRendererActivity(')
-    order(activity, 'if (wearResumed) {', 'systemEventPost(SYSEVT_G2_WORN', 'g2RepairNudge(/*gesture=*/false);')
+    order(activity, 'if (wearResumed) {', 'systemEventPost(SYSEVT_G2_PLUGIN_ALIVE', 'g2RepairNudge(/*gesture=*/false);')
     # Each lens event parser hears the gesture before any branch can return.
     dev = extract_block(owner, 'static void handleDevEvent(')
     for event in ('ListEvent: container', 'TextEvent: container', 'SysEvent: type'):

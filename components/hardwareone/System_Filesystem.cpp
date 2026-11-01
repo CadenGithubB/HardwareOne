@@ -2249,7 +2249,7 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
 // Previously this function slurped the whole file into a String and called
 // String::remove(0, n) in a loop to trim old lines — O(N²) memmove, which
 // under a flood of [ERROR] writes ate seconds of fs-lock time and once
-// crashed the debug_out task via a stack overflow.
+// crashed the log_out task via a stack overflow.
 //
 // Now:
 //   • Rotate trigger: when the appended file exceeds capBytes.
@@ -2358,7 +2358,7 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   const size_t tailBytes = sz - tailStart;
 
   // 5. Stream the tail into a temp file. The copy buffer lives in PSRAM and
-  //    is allocated once per boot, then reused — keeping it off the debug_out
+  //    is allocated once per boot, then reused — keeping it off the log_out
   //    task's stack. LittleFS internals already use several KB of stack in
   //    deep write paths, and a 1 KB automatic here was enough to overflow
   //    the task during a first-of-session error-log write.

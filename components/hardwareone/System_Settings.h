@@ -403,7 +403,6 @@ struct Settings {
       phonePipeSecretGenerated(false),
       // BLE peer fields moved to gBlePeerData[] (see BLE_Peers.h)
       powerMode(2),                     // POWER_MODE_ADAPTIVE (= POWER_MODE_DEFAULT in System_Power.h): floor clock, work raises it
-      powerDisplayDimLevel(30),
       powerTransitionCooldownMs(5000),  // 5s anti-flap guard on sleep entry; 0 = disabled
       powerSaveTimeoutMinutes(10),      // Idle timeout: CPU drops to the mode's idle clock (and the local panel blanks) after 10 min; 0 = disabled
       batteryLogEnabled(true),          // Auto-append battery time-series CSV to /battery.csv
@@ -1134,7 +1133,6 @@ struct Settings {
   //   g2AutoReconnect, ringAutoReconnect
   // Power Management settings
   uint8_t powerMode;            // 0=Performance(max/floor), 1=Balanced(mid/floor), 2=Adaptive(floor/floor; default), 3=UltraSaver(floor/40), 4=Locked(max always); every mode runs busy work at max — see System_Power.h
-  uint8_t powerDisplayDimLevel; // Brightness % in power saver modes (0-100, default: 30)
   uint32_t powerTransitionCooldownMs; // Anti-flap cooldown between sleep entries (ms); 0 disables
   uint32_t powerSaveTimeoutMinutes;   // Idle timeout: CPU drops to the mode's idle clock (and the local panel blanks) after N min; 0 = disabled
   bool     batteryLogEnabled;         // Auto-log battery time-series CSV to /battery.csv (default on)

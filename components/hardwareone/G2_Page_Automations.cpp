@@ -7,7 +7,7 @@
 // automationFindSummary), capped at G2_AUTO_MAX rows. The page keeps the ids
 // of the rows the lens shows, so a tap opens the automation it showed.
 //
-// Action taps route through g2SubmitHijackCommand (cmd_exec_task, glasses
+// Action taps route through g2SubmitHijackCommand (cmd_exec, glasses
 // auth). The completion callback marshals a re-render back onto the lens
 // applier via g2EnqueueLensJob so the on/off badge reflects the TRUE result
 // (an auth-denied toggle leaves the badge unchanged).
@@ -153,7 +153,7 @@ static void showRunResult() {
 }
 
 // -----------------------------------------------------------------------------
-// Command completion callbacks (run on cmd_exec_task)
+// Command completion callbacks (run on cmd_exec)
 // -----------------------------------------------------------------------------
 static void autoToggleDone(bool ok, const char* /*result*/,
                            const G2CmdCookie& c, void* /*ud*/) {

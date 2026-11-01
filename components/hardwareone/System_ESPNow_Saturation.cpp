@@ -47,7 +47,7 @@ uint16_t    gAckRttCount           = 0;
 uint16_t    gAckRttMaxMs           = 0;
 
 // The sampler/ACK accumulator runs on espnow_task, while the report/reset
-// commands run on cmd_exec_task. Keep this control block in internal RAM and
+// commands run on cmd_exec. Keep this control block in internal RAM and
 // serialize every access to the PSRAM ring and its indexes/accumulators. Report
 // formatting snapshots under this mutex, then releases it before emitting any
 // output so the heartbeat task is never held behind console I/O.

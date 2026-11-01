@@ -8,7 +8,7 @@
  * question once, on-device, and hands it to the existing chat pipeline.
  *
  * Locking (mandatory — verified race). Menu readers run on the OLED loop task,
- * httpd, g2_tap_disp and cmd_exec, while llmUnload can free the blob from ANOTHER
+ * httpd, g2_taps and cmd_exec, while llmUnload can free the blob from ANOTHER
  * task. So all menu state is guarded by a single static mutex (sMenuLock). Every
  * accessor takes it, checks state, COPIES the requested item out, and releases
  * (µs hold). llmMenuPublish / llmMenuClear take it around the free/publish +
