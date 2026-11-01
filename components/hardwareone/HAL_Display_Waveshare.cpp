@@ -13,12 +13,18 @@ namespace {
 constexpr int kWidth = 720, kHeight = 1280;
 class PanelCanvas : public Adafruit_GFX {
  public:
-  explicit PanelCanvas(uint16_t* pixels) : Adafruit_GFX(kWidth, kHeight), pixels_(pixels) {}
+  explicit PanelCanvas(uint16_t* pixels, bool landscape)
+      : Adafruit_GFX(kWidth, kHeight), pixels_(pixels), landscape_(landscape) {
+    setRotation(landscape ? 1 : 0);
+  }
   void drawPixel(int16_t x, int16_t y, uint16_t color) override {
-    if (x >= 0 && y >= 0 && x < kWidth && y < kHeight) pixels_[y*kWidth+x] = color;
+    if (x < 0 || y < 0 || x >= width() || y >= height()) return;
+    const auto p = waveshare_display::toPanel(x, y, landscape_);
+    pixels_[p.y*kWidth+p.x] = color;
   }
  private:
   uint16_t* pixels_;
+  bool landscape_;
 };
 constexpr size_t kBytes = kWidth * kHeight * sizeof(uint16_t);
 // IDF 5.5's DBI transmit spins indefinitely when its FIFO fills. Drain each
@@ -55,7 +61,7 @@ struct Guard {
 };
 } // namespace
 WaveshareDisplay::WaveshareDisplay()
-    : Adafruit_SSD1306(128, 64, static_cast<TwoWire *>(nullptr), -1) {
+    : Adafruit_SSD1306(WAVESHARE_CANVAS_WIDTH, WAVESHARE_CANVAS_HEIGHT, static_cast<TwoWire *>(nullptr), -1) {
   lock_ = xSemaphoreCreateMutex();
 }
 bool WaveshareDisplay::begin() {
@@ -67,7 +73,7 @@ bool WaveshareDisplay::begin() {
   if (panel_)
     return true;
   if (!buffer)
-    buffer = static_cast<uint8_t *>(ps_calloc(1024, 1, AllocPolicy::PreferInternal, "display.waveshare.canvas"));
+    buffer = static_cast<uint8_t *>(ps_calloc(waveshare_display::kCanvasBytes, 1, AllocPolicy::PreferInternal, "display.waveshare.canvas"));
   if (!buffer)
     return false;
   // DISPLAYOFF only blanks the HX8394; DPI DMA keeps fetching PSRAM.
@@ -155,14 +161,23 @@ bool WaveshareDisplay::begin() {
   powered_ = true;
   backlight();
   ESP_LOGI("WaveshareLCD",
-           "HX8394 ready: 720x1280, 128x64 UI canvas");
+           "HX8394 ready: 720x1280, 128x88 UI canvas");
+  return true;
+}
+bool WaveshareDisplay::setLandscape(bool landscape) {
+  if (!lock_) return false;
+  Guard guard(lock_);
+  if (landscape_.load() == landscape) return false;
+  landscape_.store(landscape);
+  canvasPresented_ = false;
+  if (pixels_) memset(pixels_, 0, kBytes);
   return true;
 }
 bool WaveshareDisplay::paintSurface(void (*paint)(Adafruit_GFX&)) {
   if (!lock_ || !paint) return false;
   Guard guard(lock_);
   if (!pixels_ || !powered_) return false;
-  PanelCanvas canvas(pixels_);
+  PanelCanvas canvas(pixels_, landscape_.load());
   paint(canvas);
   canvasPresented_ = false;  // The next update restores the logical UI viewport.
   return esp_cache_msync(pixels_, kBytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M) == ESP_OK;
@@ -176,22 +191,15 @@ void WaveshareDisplay::display() {
   if (!wakePending_ && canvasPresented_ &&
       memcmp(presentedCanvas_, buffer, sizeof(presentedCanvas_)) == 0)
     return;
-  // Integer scaling preserves crisp text. The unused panel area stays black.
-  constexpr int scale = 5, left = (kWidth - 128 * scale) / 2,
-                top = (kHeight - 64 * scale) / 2;
-  for (int y = 0; y < 64; y++)
-    for (int x = 0; x < 128; x++) {
-      const bool on = ((buffer[x + (y / 8) * 128] >> (y % 8)) & 1) != 0;
-      const uint16_t color = (on != inverted_) ? 0xffff : 0;
-      for (int dy = 0; dy < scale; dy++)
-        for (int dx = 0; dx < scale; dx++)
-          pixels_[(top + y * scale + dy) * kWidth + left + x * scale + dx] =
-              color;
-    }
-  // Only the centered UI band changed. Avoid flushing the unused panel area,
-  // which competes with continuous DSI reads and other PSRAM users.
+  const bool landscape = landscape_.load();
+  waveshare_display::rasterize(buffer, pixels_, landscape, inverted_);
+  // Portrait changes only a horizontal band; landscape spans native scanlines.
+  const auto view = waveshare_display::viewport(landscape);
+  const int top = landscape ? 0 : view.y;
+  const int rows = landscape ? WAVESHARE_CANVAS_WIDTH * view.scale
+                             : WAVESHARE_CANVAS_HEIGHT * view.scale;
   const esp_err_t result = esp_cache_msync(
-      pixels_ + top * kWidth, 64 * scale * kWidth * sizeof(uint16_t),
+      pixels_ + top * kWidth, rows * kWidth * sizeof(uint16_t),
       ESP_CACHE_MSYNC_FLAG_DIR_C2M);
   if (result == ESP_OK) {
     memcpy(presentedCanvas_, buffer, sizeof(presentedCanvas_));

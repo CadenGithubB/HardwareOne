@@ -130,6 +130,8 @@ class Adafruit_SSD1306 {
 
 class P4EyeDisplay {
  public:
+  bool setLandscape(bool) { return false; }
+  bool isLandscape() const { return false; }
   bool paintSurface(void (*)(class Adafruit_GFX&)) { return true; }
   P4EyeDisplay() { ++platform.constructors; }
   ~P4EyeDisplay() { ++platform.destructors; }

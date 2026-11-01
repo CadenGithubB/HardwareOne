@@ -35,7 +35,7 @@ class TouchTests(unittest.TestCase):
     def test_ui_owner_handoff(self):
         with tempfile.TemporaryDirectory(prefix='hw1-touch-ui-') as temp:
             work = Path(temp)
-            for name in ('OLED_Touch.cpp', 'OLED_Touch.h', 'OLED_TouchLayout.h', 'Input_TouchCore.h'):
+            for name in ('OLED_Touch.cpp', 'OLED_Touch.h', 'OLED_TouchLayout.h', 'Input_TouchCore.h', 'HAL_Display_WavesharePixels.h'):
                 shutil.copy2(SOURCE / name, work / name)
             (work / 'HAL_Input.h').write_text('''#pragma once
 #include "Input_TouchCore.h"
@@ -47,6 +47,7 @@ extern TouchQueue queue;
 inline bool inputTouchConsume(TouchEvent& out) { return queue.pop(out); }
 inline void inputTouchDiscard() { queue.discard(0); }
 ''')
+            (work / 'HAL_Display.h').write_text('inline bool displayIsLandscape() { return false; }\n')
             (work / 'System_SetupWizard.h').write_text('extern int page; inline int getWizardCurrentPage() { return page; }\n')
             unit = work / 'test.cpp'
             unit.write_text('''#include "OLED_Touch.cpp"

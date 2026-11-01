@@ -2,16 +2,25 @@
 #include "HAL_Input.h"
 #if ENABLE_GT911_TOUCH && ENABLE_OLED_DISPLAY
 #include "OLED_TouchLayout.h"
+#include "HAL_Display.h"
 #include "System_SetupWizard.h"
 namespace {
 TouchTap tap;
 uint32_t context = UINT32_MAX;
 TouchNavigation pending;
+bool landscape = false;
+void syncLayout() {
+  const bool current = displayIsLandscape();
+  if (landscape == current) return;
+  landscape = current; tap.reset(); pending = {};
+  inputTouchDiscard();
+}
 TouchNavigation next() {
+  syncLayout();
   TouchNavigation n;
   TouchEvent e;
   while (inputTouchConsume(e)) {
-    const auto action = tap.accept(e);
+    const auto action = tap.accept(e, landscape);
     switch (action) {
       case TouchAction::Up: n.up=true; break;
       case TouchAction::Down: n.down=true; break;
@@ -35,6 +44,7 @@ void wizardPump() {
 }
 }
 void oledTouchContext(uint32_t value) {
+  syncLayout();
   if (context == value) return;
   context = value; tap.reset(); pending = {};
   inputTouchDiscard();

@@ -100,3 +100,19 @@ Local evidence is retained under `.scratch/local-waveshare-merge` (approximately
 Local `main` is advanced to the completed merge without pushing. The integration
 branch and `codex/local-fixes-v0.99.99` recovery branch are retained. The latter
 points directly at `64713c0d`, before any Waveshare changes.
+
+## Subsequent physical verification — 2026-11-01
+
+After the merge, the Waveshare P4 was fully erased and flashed with the verified
+image; bootloader, application and partition-table hashes passed. The user
+confirmed it works. Its blank LittleFS partition formatted successfully; a
+one-time task-watchdog warning during that first initialization is retained in
+the local boot log.
+
+The connected P4X-EYE (MAC e8:f6:0a:e3:a7:73, revision 3.2) had a partition table
+matching the verified baseline byte-for-byte. Only the 6,125,808-byte application
+at 0x10000 was flashed, with hash verification; setup/data partitions were
+preserved. Boot mounted LittleFS/SDMMC and brought up the display and C6, with
+crashCount=0. The user confirmed it works as expected. Push was then held while
+implementing the newly requested Waveshare landscape setting; that feature's
+physical qualification remains separate from these successful merge tests.

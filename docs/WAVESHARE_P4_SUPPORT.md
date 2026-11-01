@@ -340,3 +340,40 @@ After preserving config/hash evidence, its temporary build was removed,
 recovering 1,085,513,728 allocated bytes. The active Waveshare build is retained
 for firmware/debugging. The temporary schematic render was removed; the
 official PDF reference is retained.
+
+## Optional landscape UI — local integration, 2026-11-01
+
+The Display/OLED settings module now has **Landscape UI (90 degrees)**,
+stored as `oledLandscape` under its `display` group. It defaults off on existing
+and fresh settings. `oledlandscape 1` enables the layout, `oledlandscape 0`
+returns to portrait, and `oledlandscape` reads the saved choice. It uses the
+shared settings validation/persistence and authorized command path, so the
+local settings editor and remote command/settings surfaces share one value.
+The setting and command are registered only for the Waveshare display backend.
+
+Landscape rotates the physical surface 90 degrees clockwise. Its 1280x720
+surface has a 1024x704 UI viewport on the left (8x integer scaling, 8-pixel
+vertical margins) and a 256-pixel strip on the right for the ten touch controls.
+The underlying page-packed UI is 128x88: it retains 128-pixel text wrapping and
+adds 24 logical rows compared with the previous 128x64 canvas. Portrait also
+uses the taller canvas, scaled 5x into 640x440 at (40,380); the original portrait
+control positions remain below it. Other display backends retain their canvas
+sizes. `oledflip` remains the independent 180-degree logical-UI option.
+
+The native panel/framebuffer and GT911 diagnostic coordinates stay 720x1280.
+The HAL owns the surface transform; touch hit-testing applies its inverse, and
+the UI still owns the drawn buttons. Display-owner frame boundaries apply
+layout changes before input, erase old geometry, repaint the controls, and
+discard held/pending contacts. A failed control submission is retried. Logical
+frame caching includes all 1408 canvas bytes, including the extra bottom pages.
+Wake brightness gating and the running-scanout full-speed clock requirement
+remain in force in both layouts.
+
+Host checks cover both pixel transforms, every output pixel, framebuffer bounds,
+control bounds/separation, all ten rotated actions, gesture cancellation across
+layout changes, control painting, bottom-page cache changes and wake sequencing.
+Affected settings/command tests and P4-EYE/disabled-display checks also pass.
+Firmware build: Waveshare 2,504,128 bytes, 5,884,480 bytes app headroom.
+P4-EYE phone-pipe baseline build passed: 6,125,808-byte application,
+1,300,240 bytes headroom. All 19 affected host suites passed. Physical landscape
+testing is pending; the user has requested flashing and enabling the setting.

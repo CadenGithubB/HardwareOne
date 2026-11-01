@@ -7,6 +7,7 @@
 #include "freertos/semphr.h"
 #include <Adafruit_SSD1306.h>
 #include <atomic>
+#include "HAL_Display_WavesharePixels.h"
 
 // Software-only SSD1306 canvas preserves the established Hardware One UI API.
 class WaveshareDisplay : public Adafruit_SSD1306 {
@@ -16,6 +17,8 @@ public:
   bool requiresFullSpeed() const { return scanoutActive_.load(); }
   void end();
   void display();
+  bool setLandscape(bool landscape); // Render-owner only; returns whether changed.
+  bool isLandscape() const { return landscape_.load(); }
   bool paintSurface(void (*paint)(Adafruit_GFX&));
   void dim(bool dimmed);
   void setBrightness(uint8_t level);
@@ -32,8 +35,9 @@ private:
   esp_lcd_panel_handle_t panel_ = nullptr;
   esp_ldo_channel_handle_t ldo_ = nullptr;
   uint16_t *pixels_ = nullptr;
-  uint8_t presentedCanvas_[1024] = {};
+  uint8_t presentedCanvas_[waveshare_display::kCanvasBytes] = {};
   bool canvasPresented_ = false;
+  std::atomic<bool> landscape_{false};
   std::atomic<bool> scanoutActive_{false};
   bool wakePending_ = false;
   bool pwm_ = false, powered_ = false, inverted_ = false, contrast_ = false;

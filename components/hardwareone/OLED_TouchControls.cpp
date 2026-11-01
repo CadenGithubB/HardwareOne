@@ -7,11 +7,14 @@
 #include <cstring>
 namespace {
 void drawControls(Adafruit_GFX& canvas) {
-  canvas.setTextSize(3);
+  const bool landscape = displayIsLandscape();
+  constexpr int textSize = 3;
+  canvas.setTextSize(textSize);
   canvas.setTextColor(0xffff);
-  for (const auto& c : touchControls) {
+  for (size_t i = 0; i < touchControlCount; ++i) {
+    const auto& c = touchControlsFor(landscape)[i];
     canvas.drawRoundRect(c.x, c.y, c.w, c.h, 8, 0xffff);
-    canvas.setCursor(c.x + (c.w - strlen(c.label)*18)/2, c.y+27);
+    canvas.setCursor(c.x + (c.w - strlen(c.label)*6*textSize)/2, c.y + (c.h - 8*textSize)/2);
     canvas.print(c.label);
   }
 }

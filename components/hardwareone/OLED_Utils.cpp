@@ -4080,7 +4080,11 @@ bool initOLEDDisplay() {
   bool success = displayInit();
   
   if (success) {
-    if (!wasReady) oledTouchDrawControls();
+    bool redrawControls = !wasReady;
+#if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+    redrawControls = displaySetLandscape(gSettings.oledLandscape) || redrawControls;
+#endif
+    if (redrawControls) oledTouchDrawControls();
     oledConnected = true;
     gOledRunning = true;
     gOledConsole.init();
@@ -4269,6 +4273,19 @@ void updateOLEDDisplay() {
   if (!gOledRunning || !oledConnected || !displayIsReady() || oledDisplay == nullptr) {
     return;
   }
+
+#if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+  static bool layoutControlsPending = false;
+  if (displaySetLandscape(gSettings.oledLandscape)) {
+    inputTouchDiscard();
+    layoutControlsPending = true;
+  }
+  if (layoutControlsPending) {
+    oledMarkDirty();
+    if (!oledTouchDrawControls()) return; // Retry a failed surface submission.
+    layoutControlsPending = false;
+  }
+#endif
 
   // Skip normal rendering during First-Time Setup - FTS screens render directly
   extern volatile FirstTimeSetupState gFirstTimeSetupState;
@@ -5049,6 +5066,9 @@ const char* cmd_oledstatus(const String& argsInput) {
       doc["interface"] = DISPLAY_INTERFACE;
       doc["driver"] = DISPLAY_NAME;
 #if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE || DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+#if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+      doc["landscape"] = displayIsLandscape();
+#endif
       doc["panelWidth"] = DISPLAY_PANEL_WIDTH;
       doc["panelHeight"] = DISPLAY_PANEL_HEIGHT;
 #endif
@@ -5491,6 +5511,9 @@ bool earlyOLEDInit() {
     }
     return false;
   }
+#if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+  displaySetLandscape(gSettings.oledLandscape);
+#endif
   oledTouchDrawControls();
   oledConnected = true;
   gOledRunning = true;
@@ -6918,8 +6941,20 @@ bool oledFileBrowserNeedsInit = true;
 // OLED Command Registry
 // ============================================================================
 
+#if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+static const char* cmd_oled_landscape(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  const SettingEntry* entry = findSettingByCmdKey("oledlandscape");
+  if (!entry) return "Error: display layout setting unavailable";
+  return handleSettingCommand(entry, args);
+}
+#endif
+
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry oledCommands[] = {
+#if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+  { "oledlandscape", "Landscape UI with right-side controls: [0|1]", false, cmd_oled_landscape, "Usage: oledlandscape [0|1]" },
+#endif
   { "openoled", "Start OLED display.", false, cmd_oledstart },
   { "closeoled", "Stop OLED display.", false, cmd_oledstop },
   { "oledread", "Read OLED display status. (add 'json' for JSON output)", false, cmd_oledstatus },

@@ -278,6 +278,7 @@ struct Settings {
       oledBootDuration(2000),
       oledUpdateInterval(125),
       oledBrightness(255),
+      oledLandscape(false),
       oledFlipped(false),         // false → setRotation(0) normal; true → setRotation(2) 180°
       oledThermalScale(2.5f),
       oledThermalColorMode("3level"),
@@ -912,6 +913,7 @@ struct Settings {
   int oledBootDuration;         // Milliseconds to show boot mode before switching to default
   int oledUpdateInterval;       // Update interval in milliseconds (8 Hz = 125ms)
   int oledBrightness;           // Display brightness/contrast 0-255
+  bool oledLandscape;           // Waveshare: 90-degree surface with right-side controls
   bool oledFlipped;             // Rotate display 180° (true → setRotation(2), false → setRotation(0))
   float oledThermalScale;       // Scaling factor for thermal image (2.5 = 80x60)
   String oledThermalColorMode;  // Visualization style: 3level, 2level, gradient

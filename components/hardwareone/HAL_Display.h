@@ -87,10 +87,10 @@
 #elif DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
   #include "HAL_Display_Waveshare.h"
   #define DISPLAY_ENABLED       1
-  // Logical canvas matches every existing OLED mode and raw-buffer consumer.
-  // The driver scales this 128x64 surface to 640x320, centered on the panel.
-  #define DISPLAY_WIDTH         128
-  #define DISPLAY_HEIGHT        64
+  #include "HAL_Display_WavesharePixels.h"
+  // Preserve 128px text wrapping and add three content rows.
+  #define DISPLAY_WIDTH         WAVESHARE_CANVAS_WIDTH
+  #define DISPLAY_HEIGHT        WAVESHARE_CANVAS_HEIGHT
   #define DISPLAY_PANEL_WIDTH   720
   #define DISPLAY_PANEL_HEIGHT  1280
   #define DISPLAY_COLOR_DEPTH   1
@@ -285,6 +285,10 @@ bool displayInit();
 // Synchronous physical-surface drawing, when supported. The callback must not
 // retain the canvas or re-enter the display HAL. Logical UI updates resume after it.
 bool displayPaintSurface(void (*paint)(Adafruit_GFX&));
+// Render-owner surface layout; unsupported backends report false.
+// Setter returns true only when the layout changed.
+bool displaySetLandscape(bool landscape);
+bool displayIsLandscape();
 bool displayIsReady();
 void displayStop();
 bool displaySetPower(bool on);            // Whether the power operation ran
@@ -299,6 +303,8 @@ void displaySetBrightness(uint8_t level); // Set brightness 0-255 (PWM for TFT, 
 inline bool displayRequiresFullSpeed() { return false; }
 inline bool displayInit() { return false; }
 inline bool displayPaintSurface(void (*)(Adafruit_GFX&)) { return false; }
+inline bool displaySetLandscape(bool) { return false; }
+inline bool displayIsLandscape() { return false; }
 inline bool displayIsReady() { return false; }
 inline void displayStop() {}
 inline bool displaySetPower(bool) { return false; }
