@@ -105,17 +105,16 @@ def static_checks(read) -> list[str]:
         statement_start = max(action.rfind(";", 0, match.start()), action.rfind("}", 0, match.start()))
         if "if (oledRunCommand(" not in action[statement_start + 1:match.start()]:
             failures.append(f"handleOLEDActionButton prints {match.group(0)} whatever the command answered")
-    # The Bluetooth menu always opens now; its first row starts the client stack
-    # with openble (as the unavailable page's X did) and reports the reply.
-    # Quick Settings alone keeps the role-aware toggle.
+    # Client-capable builds start their shared stack; server-only profiles
+    # start the app console. Both paths must report the command outcome.
     bt_input = strip_comments(extract_block(read("OLED_Mode_Bluetooth.cpp"),
                                             "static bool bluetoothInputHandler("))
     power = re.search(r"case BT_ACT_POWER:(.*?)break;", bt_input, re.S)
     if not power:
         failures.append("the Bluetooth menu has no on/off row")
-    elif ('oledRunCommand("openble")' not in power.group(1)
-          or "oledBluetoothToggleCommand" in power.group(1)):
-        failures.append("the Bluetooth menu's on/off row does not run openble through oledRunCommand")
+    elif any(call not in power.group(1) for call in
+             ('oledRunCommand("openble")', 'oledRunCommand("openconsole")')):
+        failures.append("the Bluetooth menu's on/off row must report both client and server-only starts")
     return failures
 
 
@@ -165,7 +164,7 @@ def main() -> None:
         return (overlay if overlay and overlay.exists() else args.component / name).read_text()
 
     unit_text, have_helper, have_reply_text, have_async = generated(read)
-    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-Wno-unused-function",
+    flags = ["-I", str(args.component), "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-Wno-unused-function",
              f"-DHW1_HAVE_RUN_COMMAND={1 if have_helper else 0}",
              f"-DHW1_HAVE_REPLY_TEXT={1 if have_reply_text else 0}",
              f"-DHW1_HAVE_ASYNC_COMMAND={1 if have_async else 0}"]

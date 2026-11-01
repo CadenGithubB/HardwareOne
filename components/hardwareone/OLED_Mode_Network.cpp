@@ -482,7 +482,7 @@ static const char* wifiAddFieldRefusal(WifiFieldProblem problem) {
 static void startWifiAddFromScan(const char* ssid) {
   const char* refusal = wifiAddFieldRefusal(wifiNetworkFieldProblem(ssid));
   if (refusal) {
-    oledToastShow(refusal, 2500);
+    oledToastShow(refusal, oled_message::kErrorDurationMs, OledUIIcon::ERROR);
     return;
   }
   String sessionUser;
@@ -520,7 +520,7 @@ static bool wifiAddKeyboardTick(bool* handled) {
       const char* refusal = wifiAddFieldRefusal(wifiNetworkFieldProblem(text.c_str()));
       if (refusal) {
         wifiAddReset();
-        oledToastShow(refusal, 2500);
+        oledToastShow(refusal, oled_message::kErrorDurationMs, OledUIIcon::ERROR);
       } else {
         sWifiAddSSID = text;
         startWifiAddPass();
@@ -528,7 +528,8 @@ static bool wifiAddKeyboardTick(bool* handled) {
     } else if (sWifiAddStep == WIFI_ADD_PASS) {
       sWifiAddPass = text;
       secureClearString(text);
-      char toast[40] = {};
+      char toast[oled_message::kMessageBytes] = {};
+      bool outcomeOk = false;
       // Structured add: the owner writes the line (no priority or hidden
       // flag, as the form always sent) or refuses a field it cannot carry.
       String command;
@@ -540,16 +541,18 @@ static bool wifiAddKeyboardTick(bool* handled) {
         const bool connectAfter = sWifiAddConnectAfter;
         // Expected-epoch admission/result fencing below fails closed if a
         // replacement arrives during FS/network I/O.
-        char result[128] = {};
+        char result[oled_message::kMessageBytes] = {};
         const bool added = executeOLEDCommandWithResultForSession(
             command, sessionEpoch, result, sizeof(result));
         secureClearString(command);
+        outcomeOk = added;
         // The owner's reply becomes the toast text (OLED_Utils mapping).
         oledCommandReplyText(added, result, "Network saved", "Add failed",
                              toast, sizeof(toast));
         if (added && connectAfter) {
           const bool connected = executeOLEDCommandWithResultForSession(
               "openwifi --best", sessionEpoch, result, sizeof(result));
+          outcomeOk = connected;
           oledCommandReplyText(connected, result, "Connected", "Connect failed",
                                toast, sizeof(toast));
         }
@@ -561,7 +564,8 @@ static bool wifiAddKeyboardTick(bool* handled) {
       if (transportSessionEpochIsLive(
               SOURCE_LOCAL_DISPLAY, sessionEpoch)) {
         wifiAddReset();
-        oledToastShow(toast, 2500);
+        oledToastShow(toast, outcomeOk ? 2500 : oled_message::kErrorDurationMs,
+                      outcomeOk ? OledUIIcon::SUCCESS : OledUIIcon::ERROR);
       }
     } else {
       secureClearString(text);

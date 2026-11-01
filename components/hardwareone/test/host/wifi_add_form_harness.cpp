@@ -1,3 +1,4 @@
+#include "OLED_MessageText.h"
 // test_wifi_saved_ui.py also compiles the Add-WiFi forms: the production OLED
 // keyboard flow (OLED_Mode_Network.cpp: manual Add and scan pick) and the G2
 // join-a-scanned-AP flow (G2_Page_Network.cpp). Both submit a quoted
@@ -123,7 +124,7 @@ static bool executeOLEDCommandWithResultForSession(const String& line, Transport
   return reply.ok;
 }
 
-enum class OledUIIcon : uint8_t { NONE };
+enum class OledUIIcon : uint8_t { NONE, INFO, WARNING, ERROR, SUCCESS, QUESTION };
 static std::string gToast;
 static int gToastCount = 0;
 static void oledToastShow(const char* message, uint32_t = 3000, OledUIIcon = OledUIIcon::NONE) {

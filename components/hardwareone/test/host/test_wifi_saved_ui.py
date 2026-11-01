@@ -304,7 +304,7 @@ def main():
         subprocess.run([str(executable)], check=True, timeout=60)
         print("saved-network UI: production snapshot/selection cases passed")
 
-        flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
+        flags = ["-I", str(component), "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                  "-Wno-unused-function", "-Wno-unused-variable"]
         if args.sanitize:
             flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]

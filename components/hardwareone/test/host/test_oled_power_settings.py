@@ -110,7 +110,7 @@ def main() -> None:
         require(harness.count(marker) == 1, f"harness marker missing/duplicated: {marker}")
         harness = harness.replace(marker, body)
 
-    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-Wno-unused-function",
+    flags = ["-I", str(args.component), "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-Wno-unused-function",
              "-Wno-unused-parameter",
              f"-DHW1_HAVE_RUN_COMMAND={1 if have_helper else 0}",
              f"-DHW1_POWERSAVE_REQUIRES_ADMIN={1 if power_row_admin else 0}"]

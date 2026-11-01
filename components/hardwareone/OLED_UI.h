@@ -8,6 +8,7 @@
 #include <Arduino.h>
 #include <Adafruit_GFX.h>
 #include "HAL_Display.h"
+#include "OLED_MessageText.h"
 
 // ============================================================================
 // OLED UI Component System
@@ -41,7 +42,7 @@ enum class OledUIIcon : uint8_t {
 // Does not block input - just overlays on current content.
 
 struct OledToast {
-  char message[64];
+  char message[oled_message::kMessageBytes];
   uint32_t expireMs;
   OledUIIcon icon;
   bool active;
@@ -154,7 +155,7 @@ void oledUIRender();
 // ----------------------------------------------------------------------------
 
 // Draw an icon at position (simple 8x8 built-in shapes)
-void oledDrawIcon(int x, int y, OledUIIcon icon);
+void oledDrawIcon(int x, int y, OledUIIcon icon, uint16_t color = DISPLAY_FG);
 
 // Draw an embedded icon by name, scaled to targetSize pixels (e.g. 12, 16, 32)
 void oledDrawIcon(int x, int y, const char* iconName, int targetSize);

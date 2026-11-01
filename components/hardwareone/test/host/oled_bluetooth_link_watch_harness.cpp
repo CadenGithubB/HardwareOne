@@ -567,18 +567,13 @@ static void statusConsole() {
              "Name: HardwareOne", "Rx:12 Tx:30"}
       : Rows{"Role: App console", "Console: signed in", "Clients: 1/4 Adv: off",
              "Name: HardwareOne", "Rx:12 Tx:30"};
-  if (kTall) {
-    Rows all = head;
-    for (const char* r : {"Peers:", "#0 Phone 5s", "Streams: S sys ev", "Int:1000/5000", "", "Last:",
-                          "status", "help"})
-      all.push_back(r);
-    all.resize(13);  // the P4 canvas holds 13 rows: the rest is not drawn
-    EXPECT_EXACT(rows, all[0], all[1], all[2], all[3], all[4], all[5], all[6], all[7], all[8], all[9],
-                 all[10], all[11], all[12]);
-  } else {
-    const Rows five(head.begin(), head.begin() + 5);  // the detail stops at the footer
-    EXPECT_EXACT(rows, five[0], five[1], five[2], five[3], five[4]);
-  }
+  Rows all = head;
+  for (const char* r : {"Peers:", "#0 Phone 5s", "Streams: S sys ev", "Int:1000/5000", "", "Last:",
+                        "status", "help"})
+    all.push_back(r);
+  all.resize(std::min(all.size(), size_t(OLED_CONTENT_HEIGHT / 8)));
+  CHECK(rows.size() == all.size());
+  expectRows(rows, all, __LINE__);
   CHECK(!anyRowStarts(rows, "State:"));
 
   // No app yet, advertising; the idle detail.
@@ -654,11 +649,12 @@ static void mainMenu() {
   CHECK(menuIndex("App console") == 2 && menuIndex("Settings") == sBtMenuScroll.itemCount - 1);
   // Boot role and Auto Start sit above Settings, as on the glasses' page.
   CHECK(menuIndex("Boot: App console") >= 0 && menuIndex("Auto Start: OFF") >= 0);
-  // Off: the first row opens the client stack, with no confirm.
+  // Off: start clients where built; server-only profiles start the console.
   gCommands.clear();
   sBtMenuScroll.selectedIndex = 0;
   CHECK(modeEntry(OLED_BLUETOOTH).inputFunc(0, 0, INPUT_BUTTON_A));
-  CHECK(!gConfirm.open && gCommands.size() == 1 && gCommands.back() == "openble");
+  CHECK(!gConfirm.open && gCommands.size() == 1);
+  CHECK(gCommands.back() == ((ENABLE_G2_GLASSES || ENABLE_BLE_PHONE_PIPE) ? "openble" : "openconsole"));
   // Auto Start sends the opposite of the setting; the boot role toggles the
   // saved mode only, and says when it applies.
   gCommands.clear();
@@ -931,13 +927,11 @@ static void phoneScreen() {
   w.autoReconnect = true;
   runPipe(PipeStep::Link, "ready", true);
   const Rows rows = render(OLED_BLUETOOTH_PHONE);
-  if (kTall) {
-    EXPECT_EXACT(rows, "PIPE [OK] paired", "ready", "Console: n/a here", "> Close Phone *", "  AutoRecon ON",
-                 "- Pipe settings -", "  Pair Phone", "  New code and pair", "  Forget Phone");
-  } else {
-    // Three status rows leave two menu rows on a 64 px OLED.
-    EXPECT_EXACT(rows, "PIPE [OK] paired", "ready", "Console: n/a here", "> Close Phone *", "  AutoRecon ON");
-  }
+  Rows expected = {"PIPE [OK] paired", "ready", "Console: n/a here", "> Close Phone *", "  AutoRecon ON",
+                   "- Pipe settings -", "  Pair Phone", "  New code and pair", "  Forget Phone"};
+  expected.resize(std::min(expected.size(), size_t(OLED_CONTENT_HEIGHT / 8)));
+  CHECK(rows.size() == expected.size());
+  expectRows(rows, expected, __LINE__);
 
   runPipe(PipeStep::Scanning, "scanning");
   EXPECT_ROWS(render(OLED_BLUETOOTH_PHONE), "PIPE [..] paired", "searching", "Console: n/a here",

@@ -3,8 +3,8 @@
 
 The whole file is compiled as shipped, with the real BLE_LinkStatus.cpp behind
 it, against fakes for the live state (oled_bluetooth_link_watch_harness.cpp):
-every ENABLE_G2_GLASSES x ENABLE_BLE_PHONE_PIPE build, on the 64 px OLED (5
-content rows) and the 128 px P4 canvas (13). Checks:
+every ENABLE_G2_GLASSES x ENABLE_BLE_PHONE_PIPE build, on the 64 px OLED,
+88 px Waveshare and 128 px P4-EYE canvases. Checks:
 - the BT status screen shows Role (+ Saved), Glasses/Ring, Pipe and Console in
   BLE_LinkStatusCore.h's words, with no State: row, for off, the glasses, the
   phone pipe and the app console; the console's detail stops at the footer;
@@ -49,7 +49,7 @@ COMPONENT = HERE.parents[1]
 REAL = ("OLED_Mode_Bluetooth.cpp", "BLE_LinkStatus.cpp", "BLE_LinkStatus.h", "BLE_LinkStatusCore.h",
         "OLED_Layout.h", "BLE_PhonePairCode.h")
 SYSTEM = {"cstdarg", "cstddef", "cstdint", "cstdio", "cstring"}
-HEIGHTS = (43, 107)  # content rows: 5 on a 64 px OLED, 13 on the P4 canvas
+HEIGHTS = (43, 67, 107)  # Content heights for 64, 88 and 128 px canvases.
 
 
 def stand_ins(sources: list[str]) -> set[str]:
@@ -106,7 +106,7 @@ def main() -> None:
                             f"height={height} g2={g2} pipe={pipe}: {result.stderr.strip()}")
                     total += int(result.stdout.strip())
     print(f"OLED Bluetooth: status, Phone and menu rows in the link words; watcher marks once per "
-          f"change; New code and pair, the code screen and its window watch; 8 builds ({total} checks)")
+          f"change; New code and pair, the code screen and its window watch; 12 builds ({total} checks)")
 
 
 if __name__ == "__main__":

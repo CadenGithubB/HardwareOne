@@ -1,4 +1,5 @@
 #include "OLED_Touch.h"
+#include "OLED_MessageText.h"
 #include "WebServer_Handle.h"
 #include "HAL_Input.h"
 #include "OLED_Utils.h"
@@ -3485,10 +3486,7 @@ void oledCommandReplyText(bool ok, const char* reply, const char* okText,
     snprintf(out, outSize, "Admin required");
     return;
   }
-  const char* reason = reply;
-  if (strncmp(reason, "[ERROR]", 7) == 0) reason += 7;
-  else if (strncmp(reason, "Error", 5) == 0 || strncmp(reason, "ERROR", 5) == 0) reason += 5;
-  while (*reason == ':' || *reason == ' ') reason++;
+  const char* reason = oled_message::reason(reply);
   const size_t lineLength = strcspn(reason, "\r\n");
   if (lineLength == 0) {
     snprintf(out, outSize, "%s", failText ? failText : "");
@@ -3499,17 +3497,17 @@ void oledCommandReplyText(bool ok, const char* reply, const char* okText,
 
 // The verdict and refusal toast shared by oledRunCommand and oledRunCommandAsync.
 static bool oledReportCommandReply(bool executed, const char* reply) {
-  if (executed && strncmp(reply, "Error", 5) != 0 && strncmp(reply, "ERROR", 5) != 0) {
+  if (executed && !oled_message::isError(reply)) {
     return true;
   }
-  char text[64];
-  oledCommandReplyText(false, reply, nullptr, "Failed", text, sizeof(text));
-  oledToastShow(text, 2500);
+  char text[oled_message::kMessageBytes];
+  oledCommandReplyText(false, reply, nullptr, "Command failed. Check logs.", text, sizeof(text));
+  oledToastShow(text, oled_message::kErrorDurationMs, OledUIIcon::ERROR);
   return false;
 }
 
 bool oledRunCommand(const String& cmd) {
-  char out[96];
+  char out[oled_message::kMessageBytes];
   const bool executed = executeOLEDCommandWithResult(cmd, out, sizeof(out));
   return oledReportCommandReply(executed, out);
 }
@@ -3521,7 +3519,7 @@ namespace {
 struct OledCommandReply {
   bool ready;
   bool executed;
-  char text[96];
+  char text[oled_message::kMessageBytes];
 };
 portMUX_TYPE sOledReplyMux = portMUX_INITIALIZER_UNLOCKED;
 OledCommandReply sOledReply = {};  // guarded by sOledReplyMux
@@ -3654,6 +3652,7 @@ void oledMarkDirtyUntil(unsigned long untilMs) {
 }
 
 bool oledIsDirty() {
+  (void)oledToastActive(); // Expiry must invalidate even an otherwise static frame.
   extern volatile unsigned long gSensorStatusSeq;
 
   if (oledDirtySeq.load(std::memory_order_acquire) !=

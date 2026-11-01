@@ -902,12 +902,26 @@ WifiCoexTag wifiCoexTag() {
 }
 #endif  // ENABLE_BLE_COEX_RECORDS
 
+// One diagnostic owner for Wi-Fi connect and radio-enable entry paths.
+// Do not replace a known refusal with a list of unrelated possible causes.
+static const char* wifiStartFailure(bool wifiRequired, const char* fallback) {
+  if (wifiRequired && !gSettings.wifiEnabled)
+    return "Error: Wi-Fi is disabled. Enable Wi-Fi in Settings.";
+  const char* companionReason = nullptr;
+  if (radioCompanionBlocksRadio(&companionReason) && companionReason) {
+    if (!ensureDebugBuffer()) return "Error: Radio companion unavailable. Retry shortly.";
+    snprintf(getDebugBuffer(), 1024, "Error: %s", companionReason);
+    return getDebugBuffer();
+  }
+  return fallback;
+}
+
 const char* cmd_wificonnect(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // Ensure WiFi is initialized (lazy init)
   if (!ensureWiFiInitialized()) {
-    return "ERROR: Failed to initialize WiFi";
+    return wifiStartFailure(true, "Error: Wi-Fi radio could not start. Retry shortly.");
   }
 
   // Re-arm the runtime reconnect hunt that closewifi disables, if the user
@@ -986,12 +1000,19 @@ const char* cmd_wificonnect(const String& originalCmd) {
     return "[WiFi] Connected successfully";
   }
 
+  if (useBest) {
+    WifiNetworkSnapshot saved;
+    if (!wifiNetworkSnapshot(saved))
+      return "Error: Saved Wi-Fi list unavailable. Try again.";
+    if (saved.count == 0)
+      return "Error: No saved Wi-Fi networks. Add one in Wi-Fi settings.";
+  }
   broadcastOutput("Failed to connect");
   if (prevSSID.length() > 0) {
     broadcastOutput("Attempted rollback to previous connection");
   }
   broadcastOutput("Check 'wifistatus' for status");
-  return "ERROR";
+  return "Error: Could not join a saved network. Check signal and password.";
 }
 
 const char* cmd_wifidisconnect(const String& argsInput) {
@@ -1375,7 +1396,8 @@ const char* cmd_radiopower(const String& originalCmd) {
       return "Radio already on.";
     }
     if (!radioPowerOn()) {
-      return "Error: radio could not be enabled (WiFi disabled, radio busy, or restore failed).";
+      return wifiStartFailure(!(gRadioForcedOff && gRadioPrevEspNow),
+          "Error: Radio could not start. Retry or check Radio Status.");
     }
     return "Radio on (runtime only).";
   }

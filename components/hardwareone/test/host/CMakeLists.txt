@@ -2180,3 +2180,9 @@ foreach(test_name IN ITEMS touch_input touch_controls battery radio_legacy_updat
   add_test(NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py)
 endforeach()
+
+add_test(NAME oled_toast
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_toast.py)
+
+add_test(NAME wifi_command_errors
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_wifi_command_errors.py)

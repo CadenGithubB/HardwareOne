@@ -1,3 +1,4 @@
+#include "OLED_MessageText.h"
 // Host harness for test_oled_command_feedback.py. The driver splices production
 // code in at the INSERT_* markers: the OLED action helpers (OLED_Utils.cpp
 // oledRunCommand, oledCommandReplyText and oledRunCommandAsync with its
@@ -65,7 +66,10 @@ void executeOLEDCommand(const String& cmd) { gFireAndForget.emplace_back(cmd.c_s
 enum class OledUIIcon : uint8_t { NONE, INFO, SUCCESS, WARNING, ERROR, QUESTION };
 static std::string gToast;
 static int gToastCount = 0;
-static void oledToastShow(const char* message, uint32_t = 3000, OledUIIcon = OledUIIcon::NONE) {
+static uint32_t gToastDuration = 0;
+static OledUIIcon gToastIcon = OledUIIcon::NONE;
+static void oledToastShow(const char* message, uint32_t duration = 3000, OledUIIcon icon = OledUIIcon::NONE) {
+  gToastDuration = duration; gToastIcon = icon;
   gToast = message ? message : "";
   ++gToastCount;
 }
@@ -261,9 +265,9 @@ static void case_helper_error_replies() {
     {"[ERROR] Command timed out", "Command timed out"},
     {"Error: first line\nsecond line", "first line"},
     {"Unknown command: frob\nType 'help' for available commands", "Unknown command: frob"},
-    {"ERROR", "Failed"},
-    {"Error:", "Failed"},
-    {"", "Failed"},
+    {"ERROR", "Command failed. Check logs."},
+    {"Error:", "Command failed. Check logs."},
+    {"", "Command failed. Check logs."},
   };
   for (const auto& c : kCases) {
     resetWorld();
@@ -272,6 +276,12 @@ static void case_helper_error_replies() {
            std::string("reply '") + c.reply + "' toasts '" + c.toast + "', got '" + gToast + "'");
   }
 
+  EXPECT(gToastDuration == 8000 && gToastIcon == OledUIIcon::ERROR,
+         "command failures share the longer error toast style");
+  for (const char* prefix : {"[ERROR]", "error:", "Usage:", "Unknown command:"}) {
+    resetWorld(); gExecOk = true; gExecText = std::string(prefix) + " refused";
+    EXPECT(!oledRunCommand("cmd"), "error prefixes cannot turn into success feedback");
+  }
   // The executor's verdict is double-checked against the reply's error token.
   resetWorld();
   gExecOk = true;
@@ -282,7 +292,7 @@ static void case_helper_error_replies() {
   // A reply longer than the helper's buffer stays bounded (ASan watches).
   resetWorld();
   refuse(("Error: " + std::string(300, 'x')).c_str());
-  EXPECT(!oledRunCommand("cmd") && !gToast.empty() && gToast.size() < 64,
+  EXPECT(!oledRunCommand("cmd") && !gToast.empty() && gToast.size() < oled_message::kMessageBytes,
          "an over-long reply is bounded to the toast buffer");
 }
 
@@ -560,7 +570,7 @@ static void case_quick_async() {
   refuse(("Error: " + std::string(400, 'x')).c_str());
   toggleQuickRadio();
   land();
-  EXPECT(!gToast.empty() && gToast.size() < 64, "an over-long reply is bounded");
+  EXPECT(!gToast.empty() && gToast.size() < oled_message::kMessageBytes, "an over-long reply is bounded");
 }
 #endif
 

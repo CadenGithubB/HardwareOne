@@ -391,13 +391,17 @@ static bool bluetoothInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newly
     if (idx < 0 || idx >= sBtMenuScroll.itemCount) return true;
     switch (sBtActions[idx]) {
       case BT_ACT_POWER:
-        // Bring the client stack up (the device rows then open each device),
-        // or stop all of Bluetooth.
+        // Start an application role available in this build, or stop all of
+        // Bluetooth. Server-only profiles have no central setup worker.
         if (bleSubsystemActive()) {
           oledConfirmRequest("Stop Bluetooth?", "Closes every device", btStopConfirmed,
                              nullptr, false);
         } else {
+#if ENABLE_G2_GLASSES || ENABLE_BLE_PHONE_PIPE
           (void)oledRunCommand("openble");
+#else
+          (void)oledRunCommand("openconsole");
+#endif
         }
         break;
       case BT_ACT_STATUS:

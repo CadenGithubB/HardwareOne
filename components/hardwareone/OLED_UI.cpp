@@ -28,33 +28,33 @@ OledToast gOledToast = {{0}, 0, OledUIIcon::NONE, false};
 // Drawing Helpers
 // ============================================================================
 
-void oledDrawIcon(int x, int y, OledUIIcon icon) {
+void oledDrawIcon(int x, int y, OledUIIcon icon, uint16_t color) {
   if (!gDisplay || icon == OledUIIcon::NONE) return;
   
   // Simple 8x8 icons using basic shapes
   switch (icon) {
     case OledUIIcon::INFO:
-      gDisplay->drawCircle(x + 4, y + 4, 4, DISPLAY_FG);
-      gDisplay->fillRect(x + 3, y + 3, 2, 2, DISPLAY_FG);
-      gDisplay->fillRect(x + 3, y + 5, 2, 3, DISPLAY_FG);
+      gDisplay->drawCircle(x + 4, y + 4, 4, color);
+      gDisplay->fillRect(x + 3, y + 3, 2, 2, color);
+      gDisplay->fillRect(x + 3, y + 5, 2, 3, color);
       break;
     case OledUIIcon::WARNING:
-      gDisplay->drawTriangle(x + 4, y, x, y + 8, x + 8, y + 8, DISPLAY_FG);
-      gDisplay->fillRect(x + 3, y + 3, 2, 3, DISPLAY_FG);
-      gDisplay->fillRect(x + 3, y + 7, 2, 1, DISPLAY_FG);
+      gDisplay->drawTriangle(x + 4, y, x, y + 8, x + 8, y + 8, color);
+      gDisplay->fillRect(x + 3, y + 3, 2, 3, color);
+      gDisplay->fillRect(x + 3, y + 7, 2, 1, color);
       break;
     case OledUIIcon::ERROR:
-      gDisplay->drawCircle(x + 4, y + 4, 4, DISPLAY_FG);
-      gDisplay->drawLine(x + 2, y + 2, x + 6, y + 6, DISPLAY_FG);
-      gDisplay->drawLine(x + 6, y + 2, x + 2, y + 6, DISPLAY_FG);
+      gDisplay->drawCircle(x + 4, y + 4, 4, color);
+      gDisplay->drawLine(x + 2, y + 2, x + 6, y + 6, color);
+      gDisplay->drawLine(x + 6, y + 2, x + 2, y + 6, color);
       break;
     case OledUIIcon::SUCCESS:
-      gDisplay->drawCircle(x + 4, y + 4, 4, DISPLAY_FG);
-      gDisplay->drawLine(x + 2, y + 4, x + 4, y + 6, DISPLAY_FG);
-      gDisplay->drawLine(x + 4, y + 6, x + 7, y + 2, DISPLAY_FG);
+      gDisplay->drawCircle(x + 4, y + 4, 4, color);
+      gDisplay->drawLine(x + 2, y + 4, x + 4, y + 6, color);
+      gDisplay->drawLine(x + 4, y + 6, x + 7, y + 2, color);
       break;
     case OledUIIcon::QUESTION:
-      gDisplay->drawCircle(x + 4, y + 4, 4, DISPLAY_FG);
+      gDisplay->drawCircle(x + 4, y + 4, 4, color);
       gDisplay->setCursor(x + 2, y + 1);
       gDisplay->print("?");
       break;
@@ -163,8 +163,14 @@ void oledDrawLevelBars(int x, int y, int level, int maxBars, int barHeight) {
 // ============================================================================
 
 void oledToastShow(const char* message, uint32_t durationMs, OledUIIcon icon) {
+  if (icon == OledUIIcon::NONE && oled_message::isError(message)) icon = OledUIIcon::ERROR;
+  if (icon == OledUIIcon::ERROR) {
+    if (durationMs < oled_message::kErrorDurationMs) durationMs = oled_message::kErrorDurationMs;
+    message = oled_message::reason(message);
+    if (!message[0]) message = "Command failed. Check logs.";
+  }
   portENTER_CRITICAL(&sToastMux);
-  strncpy(gOledToast.message, message, sizeof(gOledToast.message) - 1);
+  strncpy(gOledToast.message, message ? message : "", sizeof(gOledToast.message) - 1);
   gOledToast.message[sizeof(gOledToast.message) - 1] = '\0';
   gOledToast.expireMs = millis() + durationMs;
   gOledToast.icon = icon;
@@ -183,54 +189,45 @@ void oledToastClear() {
 }
 
 bool oledToastActive() {
+  bool expired = false;
   portENTER_CRITICAL(&sToastMux);
   bool active = gOledToast.active;
-  if (active && millis() > gOledToast.expireMs) {
+  if (active && static_cast<int32_t>(millis() - gOledToast.expireMs) >= 0) {
     gOledToast.active = false;
     gOledToast.message[0] = '\0';
-    active = false;
+    active = false; expired = true;
   }
   portEXIT_CRITICAL(&sToastMux);
+  if (expired) oledMarkDirty(); // Repaint a static screen when the toast disappears.
   return active;
 }
 
 void oledToastRender() {
   if (!oledToastActive() || !gDisplay) return;
-  
-  // Draw toast box at bottom of screen
-  int boxW = SCREEN_WIDTH - 16;
-  int boxH = 18;
-  int boxX = 8;
-  int boxY = SCREEN_HEIGHT - boxH - 12;  // Above footer
-  
-  // Background with border
+  OledToast toast;
+  portENTER_CRITICAL(&sToastMux);
+  toast = gOledToast;
+  portEXIT_CRITICAL(&sToastMux);
+  if (!toast.active) return;
+
+  const int boxW = SCREEN_WIDTH - 16, boxX = 8;
+  const int iconSpace = toast.icon == OledUIIcon::NONE ? 0 : 10;
+  const int textX = boxX + 4 + iconSpace;
+  const int columns = (boxW - 8 - iconSpace) / 6;
+  const int maxLines = (OLED_CONTENT_HEIGHT - 10) / 8;
+  const auto lines = oled_message::wrap(toast.message, columns, maxLines);
+  const int boxH = (lines.count ? lines.count : 1) * 8 + 8;
+  const int boxY = SCREEN_HEIGHT - boxH - 12;
   gDisplay->fillRect(boxX, boxY, boxW, boxH, DISPLAY_FG);
   gDisplay->drawRect(boxX, boxY, boxW, boxH, DISPLAY_BG);
-  
-  // Icon if present
-  int textX = boxX + 4;
-  if (gOledToast.icon != OledUIIcon::NONE) {
-    oledDrawIcon(boxX + 4, boxY + 5, gOledToast.icon);
-    textX = boxX + 14;
-  }
-  
-  // Message text
+  if (toast.icon != OledUIIcon::NONE)
+    oledDrawIcon(boxX + 4, boxY + 5, toast.icon, DISPLAY_BG);
   gDisplay->setTextSize(1);
   gDisplay->setTextColor(DISPLAY_BG);
-  gDisplay->setCursor(textX, boxY + 5);
-  
-  // Truncate if needed
-  int maxChars = (boxW - (textX - boxX) - 4) / 6;
-  if ((int)strlen(gOledToast.message) > maxChars) {
-    char truncated[64];
-    strncpy(truncated, gOledToast.message, maxChars - 2);
-    truncated[maxChars - 2] = '\0';
-    strcat(truncated, "..");
-    gDisplay->print(truncated);
-  } else {
-    gDisplay->print(gOledToast.message);
+  for (int row = 0; row < lines.count; ++row) {
+    gDisplay->setCursor(textX, boxY + 5 + row*8);
+    gDisplay->print(lines.text[row]);
   }
-  
   gDisplay->setTextColor(DISPLAY_FG);
 }
 

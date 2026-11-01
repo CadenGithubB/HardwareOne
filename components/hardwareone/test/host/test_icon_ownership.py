@@ -105,6 +105,8 @@ def compile_and_run(args: argparse.Namespace, source: Path, baseline: bool) -> d
         work = Path(directory)
         for name in ("System_Icons.h", "HAL_Display.h", "OLED_Layout.h", "OLED_UI.h"):
             shutil.copy2(source / name, work / name)
+        if (source / "OLED_MessageText.h").exists():
+            shutil.copy2(source / "OLED_MessageText.h", work / "OLED_MessageText.h")
         (work / "System_Icons.cpp").write_text(generated)
         (work / "Arduino.h").write_text(ARDUINO)
         flags = sorted(set(re.findall(r"!defined\((ENABLE_\w+)\)", generated)))

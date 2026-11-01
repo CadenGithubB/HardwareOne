@@ -377,3 +377,41 @@ Firmware build: Waveshare 2,504,128 bytes, 5,884,480 bytes app headroom.
 P4-EYE phone-pipe baseline build passed: 6,125,808-byte application,
 1,300,240 bytes headroom. All 19 affected host suites passed. Physical landscape
 testing is pending; the user has requested flashing and enabling the setting.
+
+## Glasses/phone Bluetooth and readable errors — 2026-11-01
+
+The saved Waveshare profile now includes `ENABLE_G2_GLASSES=1` and
+`ENABLE_BLE_PHONE_PIPE=1`, as requested. The shared client host supports the
+Glasses and Phone pipe menu roles; the app-console server remains selectable.
+Existing accounts, layout choice and network settings are preserved by an
+application-only update. Pairing/enrollment remain explicit user operations.
+
+A reproduced Bluetooth ON failure came from a menu action that always ran
+`openble`, including on the earlier server-only profile. Its central setup
+worker was compiled out, so it misleadingly reported unavailable worker memory.
+The menu now starts `openconsole` on server-only builds and `openble` where
+client devices are built. Host checks exercise all four glasses/pipe selections
+at 64-, 88- and 128-pixel canvas heights (12 builds, 14,869 checks). Direct
+hardware testing confirmed the old client refusal and working server advertising.
+
+Display failures now use the shared error style: an error icon, word-wrapped
+text, an eight-second minimum duration, and automatic return to the underlying
+screen. The reply and toast buffers retain up to 191 characters; the available
+screen area shows up to six lines (four on a 64-pixel OLED), with an ellipsis
+when text exceeds that space. Error prefixes are normalized consistently. Toast
+expiry invalidates an otherwise static screen, handles timer wrap, and rendering
+uses a locked snapshot without holding the lock through graphics operations.
+The Add Wi-Fi flow uses the same error/success severity convention.
+
+Wi-Fi connect/radio commands now preserve known causes in their returned reply,
+including disabled Wi-Fi and companion startup refusal. Empty saved-network
+lists return `No saved Wi-Fi networks. Add one in Wi-Fi settings.` instead of a
+bare `ERROR`; a failed list snapshot is reported separately. Connection failures
+suggest checking signal and password without claiming an unobserved cause.
+
+Verification: both profile builds passed; 26 affected host suites passed across
+the initial run and the icon-harness dependency retest, plus final Add Wi-Fi and
+command-feedback reruns. Toast tests execute production rendering/lifetime on
+64/88/128-pixel canvases; command tests execute the real Wi-Fi refusal paths.
+Waveshare application: 3,369,712 bytes, 5,018,896 bytes app headroom.
+Final installation and live client-stack checks are pending.
