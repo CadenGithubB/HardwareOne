@@ -563,7 +563,7 @@ void updateProc(void* arg) {
 #endif
     // Closing BLE while Wi-Fi is off closes the transport too (Arduino deinits
     // Hosted when nothing uses it); the transfer needs it up.
-    esp_err_t err = radioHalTransportUp() ? ESP_OK : radioHalStartTransport();
+    esp_err_t err = radioHalTransportUp() ? ESP_OK : radioHalStartUpdateTransport();
     BROADCAST_PRINTF("[C6] Updating companion firmware from %s (%u bytes)", job->path.c_str(),
                      static_cast<unsigned>(size));
     uint8_t* buf = static_cast<uint8_t*>(ps_alloc(kUpdateChunk, AllocPref::PreferPSRAM, "c6.update"));
@@ -588,6 +588,7 @@ void updateProc(void* arg) {
     if (err == ESP_OK) err = radioHalUpdateEnd();
     if (err == ESP_OK) err = radioHalUpdateActivate();
     if (err != ESP_OK) {
+      if (!radioHalTransportUp()) radioHalStopTransport();
       snprintf(why, sizeof(why), "transfer failed after %u bytes: %s", static_cast<unsigned>(sent),
                esp_err_to_name(err));
       withMonitor([&](CompanionMonitor& m) { m.onUpdateFinished(millis(), radioHalTransportUp()); });
@@ -1004,7 +1005,7 @@ const char* cmd_c6update(const String& argsInput) {
   const char* quoted = requireQuotedPath(a, 0, path);
   if (quoted) return quoted;
   if (otaSafetyIsPendingVerification()) return "Error: refused while the new firmware is in OTA health probation";
-  if (!radioHalTransportUp()) return "Error: the C6 is not answering; c6restart first";
+  // The worker validates the image before opening an explicit legacy update link.
   if (sOpInFlight.load()) return "Error: another companion operation is running";
   if (!VFS::existsGuarded(path, currentAuthContext())) return "Error: file not found or not permitted";
   UpdateJob* job = new (std::nothrow) UpdateJob();

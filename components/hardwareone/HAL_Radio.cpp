@@ -84,6 +84,7 @@ constexpr int kBootAttempts = 2;  // each attempt resets the C6 and waits up to 
 
 bool sBoardPrepared = false;
 bool sPrepared = false;        // radioHalPrepare() ran and the transport came up at least once
+bool sUpdateOnly = false;     // Explicit legacy OTA session; unavailable to radio users.
 bool sTransportUp = false;     // last TRANSPORT_UP without a DOWN/FAILURE since
 bool sTransportLost = false;
 bool sHeld = false;
@@ -254,7 +255,7 @@ esp_err_t applyMonitoring() {
 // One Hosted bring-up attempt: Arduino's helper resets the companion, waits
 // for the SDIO link and records its lifecycle state. The version query is the
 // first RPC and proves the link end to end.
-esp_err_t startOnce() {
+esp_err_t startOnce(bool allowLegacyUpdate) {
   if (!hostedInitWiFi()) {
     ESP_LOGE(kTag, "Hosted transport initialization failed");
     return ESP_FAIL;
@@ -262,6 +263,10 @@ esp_err_t startOnce() {
   esp_hosted_coprocessor_fwver_t version = {};
   const esp_err_t err = esp_hosted_get_coprocessor_fwversion(&version);
   if (err != ESP_OK) {
+    if (!allowLegacyUpdate) {
+      ESP_LOGE(kTag, "C6 firmware version query failed: %s", esp_err_to_name(err));
+      return err;
+    }
     // Older factory companions predate the version RPC but implement the
     // standard Wi-Fi/OTA RPCs. Require a successful round trip before making
     // their update path available; a transport INIT event alone is insufficient.
@@ -279,6 +284,7 @@ esp_err_t startOnce() {
   sTransportUp = true;
   sTransportLost = false;
   sHeld = false;
+  sUpdateOnly = err != ESP_OK;
   sIdentity.versionKnown = err == ESP_OK;
   sIdentity.major = version.major1;
   sIdentity.minor = version.minor1;
@@ -348,11 +354,18 @@ esp_err_t radioHalPrepare() {
 
 bool radioHalPrepared() { return sPrepared; }
 
-bool radioHalTransportUp() {
+static bool updateTransportUp() {
   portENTER_CRITICAL(&sLock);
   const bool up = sTransportUp && !sTransportLost;
   portEXIT_CRITICAL(&sLock);
   return up && hostedIsInitialized();
+}
+
+bool radioHalTransportUp() {
+  portENTER_CRITICAL(&sLock);
+  const bool normal = !sUpdateOnly;
+  portEXIT_CRITICAL(&sLock);
+  return normal && updateTransportUp();
 }
 
 bool radioHalEspNowAvailable() {
@@ -480,7 +493,7 @@ esp_err_t radioHalConfigureMonitoring(uint16_t heartbeatSec, uint32_t lowMemoryB
   return applyMonitoring();
 }
 
-esp_err_t radioHalStartTransport() {
+static esp_err_t startTransport(bool allowLegacyUpdate) {
   ESP_RETURN_ON_ERROR(prepareBoard(), kTag, "Board preparation failed");
   ESP_RETURN_ON_ERROR(registerEvents(), kTag, "Hosted events");
   // A new link starts from a clean slate on both sides.
@@ -489,16 +502,22 @@ esp_err_t radioHalStartTransport() {
   esp_now_hosted_host_reset_local();
   portENTER_CRITICAL(&sLock);
   sTransportLost = false;
+  sUpdateOnly = allowLegacyUpdate;
+  sIdentity = {};
   sSessionBleLinks = 0;
   portEXIT_CRITICAL(&sLock);
   // Hosted's own reset pulse releases a held companion; the pin reconfigures.
-  const esp_err_t err = startOnce();
+  const esp_err_t err = startOnce(allowLegacyUpdate);
   if (err != ESP_OK) {
     portENTER_CRITICAL(&sLock);
     sTransportUp = false;
     sSessionBleLinks = 0;
     portEXIT_CRITICAL(&sLock);
     return err;
+  }
+  if (sUpdateOnly) {
+    ESP_LOGW(kTag, "Legacy C6 transport available for firmware update only");
+    return updateTransportUp() ? ESP_OK : ESP_FAIL;
   }
   radioHalRefreshIdentity();
   applyMonitoring();
@@ -520,6 +539,9 @@ esp_err_t radioHalStartTransport() {
   }
   return ESP_OK;
 }
+
+esp_err_t radioHalStartTransport() { return startTransport(false); }
+esp_err_t radioHalStartUpdateTransport() { return startTransport(true); }
 
 void radioHalStopTransport() {
   if (hostedIsInitialized()) {
@@ -591,13 +613,13 @@ void radioHalPrepareForDeepSleep() {
 }
 
 esp_err_t radioHalUpdateBegin() {
-  if (!radioHalTransportUp()) return ESP_ERR_INVALID_STATE;
+  if (!updateTransportUp()) return ESP_ERR_INVALID_STATE;
   return esp_hosted_slave_ota_begin();
 }
 
 esp_err_t radioHalUpdateWrite(const uint8_t* data, size_t len) {
   if (!data || !len) return ESP_ERR_INVALID_ARG;
-  if (!radioHalTransportUp()) return ESP_ERR_INVALID_STATE;
+  if (!updateTransportUp()) return ESP_ERR_INVALID_STATE;
   // Old factory companions cannot reassemble the modern 4 KB OTA request.
   // Keep their protobuf request inside a single transport packet. Qualified
   // companions retain the existing larger transfer size.
@@ -614,12 +636,12 @@ esp_err_t radioHalUpdateWrite(const uint8_t* data, size_t len) {
 }
 
 esp_err_t radioHalUpdateEnd() {
-  if (!radioHalTransportUp()) return ESP_ERR_INVALID_STATE;
+  if (!updateTransportUp()) return ESP_ERR_INVALID_STATE;
   return esp_hosted_slave_ota_end();
 }
 
 esp_err_t radioHalUpdateActivate() {
-  if (!radioHalTransportUp()) return ESP_ERR_INVALID_STATE;
+  if (!updateTransportUp()) return ESP_ERR_INVALID_STATE;
   return esp_hosted_slave_ota_activate();
 }
 
