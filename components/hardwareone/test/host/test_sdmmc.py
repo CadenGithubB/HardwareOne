@@ -17,9 +17,10 @@ with tempfile.TemporaryDirectory(prefix="hw1-sdmmc-") as tmp:
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror"]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
-    subprocess.run([args.cxx, *flags, "-I" + str(host / "sdmmc_stubs"),
-                    str(host / "test_sdmmc_lifecycle.cpp"), "-o", str(exe)], check=True)
-    subprocess.run([str(exe)], check=True)
+    for board_flags in ([], ["-DTEST_WAVESHARE=1"]):
+        subprocess.run([args.cxx, *flags, *board_flags, "-I" + str(host / "sdmmc_stubs"),
+                        str(host / "test_sdmmc_lifecycle.cpp"), "-o", str(exe)], check=True)
+        subprocess.run([str(exe)], check=True)
     # A disabled card must compile to an empty backend even if the board
     # requests SDMMC. No Arduino/SDK include path is supplied on purpose.
     subprocess.run([args.cxx, *flags, "-DSYSTEM_BUILDCONFIG_H",

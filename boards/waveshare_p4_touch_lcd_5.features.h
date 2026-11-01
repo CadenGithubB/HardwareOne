@@ -1,6 +1,6 @@
 #pragma once
 // Waveshare LCD-5: HX8394 display and ES8311 speaker support.
-// Microphone, camera, SD and battery remain disabled.
+// Microphone, camera and battery remain disabled.
 // Optional application choices belong in the saved bring-up configuration.
 #undef HW_BOARD_WAVESHARE_P4_TOUCH
 #define HW_BOARD_WAVESHARE_P4_TOUCH 1
@@ -21,7 +21,7 @@
 #undef ENABLE_BATTERY_MONITOR
 #define ENABLE_BATTERY_MONITOR 0
 #undef ENABLE_SDMMC_CARD
-#define ENABLE_SDMMC_CARD 0
+#define ENABLE_SDMMC_CARD 1
 #undef HW1_SR_MODELS_IN_FILESYSTEM
 #define HW1_SR_MODELS_IN_FILESYSTEM 1
 

@@ -14,3 +14,20 @@
 #define WS_TOUCH_I2C_BUS 0
 #define WS_TOUCH_WIDTH 720
 #define WS_TOUCH_HEIGHT 1280
+
+// MicroSD: slot 0 IO-MUX pins, separate from the C6 on slot 1.
+// Schematic: GPIO45 drives the active-low AO3401 power switch; no CD GPIO.
+#define SD_MMC_SLOT 0
+#define SD_MMC_CLK_PIN 43
+#define SD_MMC_CMD_PIN 44
+#define SD_MMC_D0_PIN 39
+#define SD_MMC_D1_PIN 40
+#define SD_MMC_D2_PIN 41
+#define SD_MMC_D3_PIN 42
+#define SD_MMC_DETECT_PIN -1
+#define SD_MMC_POWER_PIN 45
+#define SD_MMC_POWER_ACTIVE_LEVEL 0
+#define SD_MMC_LDO_CHANNEL 4
+#ifndef SD_MMC_MAX_FREQ_KHZ
+#define SD_MMC_MAX_FREQ_KHZ 40000
+#endif

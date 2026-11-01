@@ -14,7 +14,8 @@ the initially pasted 4.3-inch ST7701 page is not this device.
   test. CPU is 360 MHz; UART0 TX37/RX38, console 115200 baud.
 - User authorized P4/C6 installation, declined a factory backup, and explicitly
   approved erasing the new filesystem region. The P4 was flashed and verified.
-- Microphone capture, camera, battery and SD remain disabled/unqualified.
+- Microphone capture, camera and battery remain disabled/unqualified.
+  SD is enabled and mount/read/write/remount tested (see below).
   Speaker listening was explicitly deferred by the user after the driver test.
 
 ## Configuration and wiring
@@ -254,3 +255,44 @@ SDIO failures, C6 recovery and an instruction-access panic. This was separate
 from the initially monitored popup reproduction; its preserved log is
 `popup-refresh-before.log`. The short new-firmware test does not establish that
 this longer-running failure is resolved.
+
+## SD card slot (2026-11-01)
+
+The default Waveshare profile enables the existing SDMMC HAL and `/sd` VFS.
+Board wiring is CLK43, CMD44, D0–D3 GPIO39–42, slot0, four-bit, max40MHz,
+LDO4. GPIO45 is the active-low card power switch, **not** card detect.
+The socket has no MCU card-detect signal; `SD_MMC_DETECT_PIN=-1` skips that
+GPIO and allows a mount attempt. The P4X-EYE's detect45/power46 behavior is
+preserved. Slot-specific teardown leaves the C6's SDIO slot1 running.
+
+Normal mounting never formats. On this board physical removal cannot be
+reported by a detect switch: use `sdunmount` before removal and `sdmount`
+after insertion. Diagnostics explicitly report the absent detect switch.
+
+Flashed image: 2,428,704 bytes, 5,959,904 bytes of application headroom,
+ELF prefix `27def58d3`; esptool verified the flash hash. The inserted card
+mounted at boot and reported 117,942 MiB capacity. A unique 512-byte test file
+was written and read byte-for-byte, read again after unmount/remount, then
+deleted. No formatting was requested; pre-existing files were not changed by
+the test. No display underrun or panic appeared during this bounded check.
+Evidence: `work/waveshare-p4/sd-runtime.log` and `sd-verification.json`.
+
+Host validation: production SD lifecycle tests with ASan/UBSan for both board
+wirings, mount/LDO failures, explicit formatting, removal handling, cleanup and
+disabled backend; all 15 optional-peripheral configuration tests passed.
+The physical no-card case has not yet been exercised; failed probes are covered
+by the host test. Long-running SD/radio/display stress remains unqualified.
+
+Remaining board-specific work includes battery sensing (schematic BAT_ADC on
+GPIO20; qualify the divider and measured voltage with the existing ADC battery
+backend), ES7210 microphone capture, and an attached MIPI camera's sensor/pin
+configuration. Charging and accurate charge-state reporting are separate from
+voltage estimation; battery support remains disabled in this SD change.
+Reference: [Waveshare LCD-5 schematic](https://files.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-5/ESP32-P4-WIFI6-Touch-LCD-5-Schematic.pdf)
+and the saved vendor BSP `work/waveshare-p4/vendor/bsp.c`.
+
+The P4 EYE baseline build also passed (5,471,344-byte image, 1,954,704 bytes
+free). Its compact configuration/hash evidence is in `sd-baseline-evidence`;
+removing the completed temporary build recovered 1,079,574,528 allocated bytes.
+The active Waveshare build is retained for firmware/debugging and incremental
+work.

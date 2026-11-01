@@ -1398,8 +1398,8 @@
     #define ENABLE_SD_CARD 0
   #endif
 #endif
-#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD && (!HW_BOARD_P4X_EYE || !defined(CONFIG_IDF_TARGET_ESP32P4))
-  #error "SDMMC card requires a supported board profile (currently P4X-EYE)"
+#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD && (!(HW_BOARD_P4X_EYE || HW_BOARD_WAVESHARE_P4_TOUCH) || !defined(CONFIG_IDF_TARGET_ESP32P4))
+  #error "SDMMC card requires a supported ESP32-P4 board profile"
 #endif
 #if ENABLE_STT_MODEL_15X5_GEN2 && (!ENABLE_LOCAL_STT || !defined(CONFIG_IDF_TARGET_ESP32P4) || !ENABLE_SD_CARD)
   #error "ENABLE_STT_MODEL_15X5_GEN2 requires ENABLE_LOCAL_STT, ESP32-P4 and ENABLE_SD_CARD."

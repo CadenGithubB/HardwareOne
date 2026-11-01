@@ -1468,7 +1468,8 @@ static const char* cmd_sddiag(const String& argsInput) {
       SD_MMC_CLK_PIN, SD_MMC_CMD_PIN, SD_MMC_D0_PIN, SD_MMC_D1_PIN,
       SD_MMC_D2_PIN, SD_MMC_D3_PIN, SD_MMC_POWER_PIN,
       SD_MMC_POWER_ACTIVE_LEVEL, SD_MMC_LDO_CHANNEL, SD_MMC_DETECT_PIN,
-      SD.cardPresent() ? "inserted" : "absent",
+      SD_MMC_DETECT_PIN < 0 ? "no detect switch (presence determined at mount)" :
+          (SD.cardPresent() ? "inserted" : "absent"),
       VFS::isSDAvailable() ? "mounted" : "not mounted", SD.lastError());
   return buf;
 #elif !ENABLE_SD_CARD

@@ -68,7 +68,9 @@ class PeripheralConfig(unittest.TestCase):
             'BOARD_SUPPORTED == 1', 'HW_BOARD_WAVESHARE_P4_TOUCH == 1',
             'ENABLE_OLED_DISPLAY == 1', 'ENABLE_GPIO_ENCODER == 0',
             'ENABLE_GT911_TOUCH == 1', 'ENABLE_OLED_INPUT == 1',
-            'ENABLE_SD_CARD == 0', 'ENABLE_CAMERA_SENSOR == 0',
+            'ENABLE_SD_CARD == 1', 'SD_MMC_SLOT == 0',
+            'SD_MMC_POWER_PIN == 45', 'SD_MMC_DETECT_PIN == -1',
+            'ENABLE_CAMERA_SENSOR == 0',
             'ENABLE_MICROPHONE_SENSOR == 0', 'ENABLE_BATTERY_MONITOR == 0',
             'ENABLE_LOCAL_STT == 0', 'ENABLE_WIFI == 1', 'ENABLE_SPEAKER == 1',
             'I2C_SDA_PIN_DEFAULT == 7', 'I2C_SCL_PIN_DEFAULT == 8'],
@@ -86,10 +88,16 @@ class PeripheralConfig(unittest.TestCase):
 
     def test_waveshare_rejects_eye_only_peripheral_selections(self):
         board = SOURCE.parents[1] / 'boards/waveshare_p4_touch_lcd_5.features.h'
-        for flags in ({'DISPLAY_TYPE': 4}, {'INPUT_DEVICE_TYPE': 3},
-                      {'ENABLE_SDMMC_CARD': 1}):
+        for flags in ({'DISPLAY_TYPE': 4}, {'INPUT_DEVICE_TYPE': 3}):
             with self.subTest(flags=flags):
                 self.check_profile(flags, [], succeeds=False, board_profile=board)
+
+    def test_waveshare_sd_can_be_disabled(self):
+        repo = SOURCE.parents[1]
+        flags = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())['features']
+        self.check_profile(dict(flags, ENABLE_SDMMC_CARD=0),
+                           ['ENABLE_SD_CARD == 0', 'ENABLE_GT911_TOUCH == 1'],
+                           board_profile=repo / 'boards/waveshare_p4_touch_lcd_5.features.h')
 
     def test_p4_board_sd_saved_selection(self):
         board = SOURCE.parents[1] / 'boards/p4x_eye.features.h'
