@@ -469,3 +469,12 @@ The existing normal build caches are retained for active hardware qualification:
 Waveshare approximately 981 MiB and P4X-EYE approximately 1.1 GiB. Host suites
 remove their temporary build directories automatically. Retain only compact
 firmware/debug evidence once hardware iteration ends.
+
+The Waveshare application-only update passed esptool hash verification. Live
+status confirms `continuous:true` and the new actionable missing-microphone
+message while the glasses are disconnected; landscape remains enabled and C6
+transport reports zero errors/timeouts. The supplied model was copied to
+`STT Models` on the Waveshare's FAT32 card, its complete SHA-256 read back and
+verified, and the card safely ejected. Device model readiness and a spoken
+transcription test await reinsertion/reconnection and user qualification.
+Compact matching firmware/debug evidence is approximately 23 MiB.
