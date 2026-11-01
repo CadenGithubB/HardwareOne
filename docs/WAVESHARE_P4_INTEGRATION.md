@@ -140,3 +140,30 @@ Previous physical evidence and limitations are in
 rendering and improved touch response on earlier firmware, and SD persistence
 was tested. Battery checks used USB without a cell; audible speaker confirmation
 was deferred. These builds do not extend that physical qualification.
+
+## Wake flicker investigation — 2026-11-01
+
+After the integrated-image touch/popup smoke test passed, the user reported
+flicker when waking from sleep. The Waveshare backend previously illuminated
+immediately after DISPLAYON, before the UI refreshed. This ordering predates
+the integration; it is a hypothesis for the reported flicker, not a proven
+merge regression.
+
+The backend now blanks before DISPLAYOFF and gates backlight PWM through the
+first successful refreshed-frame cache flush after DISPLAYON. It then waits
+80 ms, matching the vendor initialization table's display-on settling interval.
+Brightness updates cannot bypass the gate; unchanged canvas comparisons cannot
+skip the initial wake flush. The 720/1024 PWM cap is preserved. Shared power
+policy and other display backends are unchanged. CPU clock-transition effects
+remain an alternative cause if hardware still flickers.
+
+Production-method regression checks pass with ASan/UBSan for sequencing,
+brightness gating, failed cache flush, repeated DISPLAYON, wake cancellation
+and failed DISPLAYON. Existing shared display lifecycle variants also pass.
+The saved Waveshare configuration check passes. Physical confirmation remains
+pending; do not label the flicker fixed until the user retests.
+
+The isolated integration build directory and its provisioned SDK dependencies
+are retained temporarily for this active hardware investigation. Remove compiler
+objects and private dependency copies after wake behavior is accepted, retaining
+selected firmware/debug/config artifacts and the small verification logs.

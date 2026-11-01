@@ -161,7 +161,7 @@ void WaveshareDisplay::display() {
   Guard guard(lock_);
   if (!pixels_ || !powered_ || !buffer)
     return;
-  if (canvasPresented_ &&
+  if (!wakePending_ && canvasPresented_ &&
       memcmp(presentedCanvas_, buffer, sizeof(presentedCanvas_)) == 0)
     return;
   // Integer scaling preserves crisp text. The unused panel area stays black.
@@ -184,6 +184,15 @@ void WaveshareDisplay::display() {
   if (result == ESP_OK) {
     memcpy(presentedCanvas_, buffer, sizeof(presentedCanvas_));
     canvasPresented_ = true;
+    if (wakePending_) {
+      // The retained DSI stream continues while blanked. Keep the backlight
+      // dark until the refreshed frame has had several scanout periods after
+      // DISPLAYON. Match the vendor initialization table's 80 ms
+      // display-on settling interval, conservatively after the frame flush.
+      delay(80);
+      wakePending_ = false;
+      backlight();
+    }
   } else {
     ESP_LOGE("WaveshareLCD", "frame cache sync: %s", esp_err_to_name(result));
   }
@@ -194,7 +203,7 @@ void WaveshareDisplay::backlight() {
   // low time even when boot power policy requests logical brightness 255.
   // Arduino also promotes duty 1023 to constant HIGH, so never request it.
   if (pwm_)
-    ledcWrite(WS_LCD_BACKLIGHT_PIN, powered_ ? brightness_ * 720u / 255u : 0);
+    ledcWrite(WS_LCD_BACKLIGHT_PIN, powered_ && !wakePending_ ? brightness_ * 720u / 255u : 0);
 }
 void WaveshareDisplay::setBrightness(uint8_t level) {
   if (!lock_)
@@ -210,8 +219,22 @@ void WaveshareDisplay::setPower(bool on) {
   Guard g(lock_);
   if (!io_)
     return;
-  if (sendCommand(io_, on ? 0x29 : 0x28, nullptr, 0) == ESP_OK)
+  if (on == powered_)
+    return;
+  // Blank before DISPLAYOFF, and defer illumination on DISPLAYON until
+  // display() has submitted the first refreshed frame. Brightness updates
+  // during resume must not bypass this gate.
+  wakePending_ = true;
+  backlight();
+  const esp_err_t result = sendCommand(io_, on ? 0x29 : 0x28, nullptr, 0);
+  if (result == ESP_OK) {
     powered_ = on;
+    wakePending_ = on;
+    if (on) canvasPresented_ = false;
+  } else {
+    wakePending_ = false;
+    ESP_LOGE("WaveshareLCD", "display power: %s", esp_err_to_name(result));
+  }
   backlight();
 }
 void WaveshareDisplay::invertDisplay(bool inverted) {
@@ -240,6 +263,7 @@ void WaveshareDisplay::ssd1306_command(uint8_t cmd) {
 void WaveshareDisplay::release() {
   canvasPresented_ = false;
   powered_ = false;
+  wakePending_ = false;
   backlight();
   if (panel_) {
     esp_lcd_panel_del(panel_);

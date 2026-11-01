@@ -32,6 +32,7 @@ private:
   uint16_t *pixels_ = nullptr;
   uint8_t presentedCanvas_[1024] = {};
   bool canvasPresented_ = false;
+  bool wakePending_ = false;
   bool pwm_ = false, powered_ = false, inverted_ = false, contrast_ = false;
   uint8_t brightness_ = 180;
 };

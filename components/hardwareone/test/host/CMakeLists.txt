@@ -2176,7 +2176,7 @@ add_test(NAME oled_transcription
           ${OLED_LAYOUT_TEST_ARGS})
 
 # Waveshare input and shared battery policy/backend regressions.
-foreach(test_name IN ITEMS touch_input touch_controls battery radio_legacy_update)
+foreach(test_name IN ITEMS touch_input touch_controls battery radio_legacy_update waveshare_wake)
   add_test(NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py)
 endforeach()
