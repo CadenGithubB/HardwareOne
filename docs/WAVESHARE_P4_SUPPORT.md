@@ -237,7 +237,8 @@ The Waveshare SDK defaults now enable `CONFIG_LCD_DSI_ISR_CACHE_SAFE`, which
 also selects `CONFIG_DW_GDMA_ISR_IRAM_SAFE`. The DSI driver restarts frame DMA
 from its end-of-frame interrupt; masking that interrupt during flash operations
 can pause refresh. Failed credential checks write a security audit record. This
-is a targeted candidate fix for that path, pending physical popup verification.
+is a targeted fix for that path. On 2026-11-01, after flashing this change, the
+user retried the invalid-credentials popup and confirmed: "The popup is steady now."
 The existing 720/1024 maximum backlight duty is unchanged.
 
 Validation: Waveshare image 2,395,056 bytes, 5,993,552 bytes free; flash hash
