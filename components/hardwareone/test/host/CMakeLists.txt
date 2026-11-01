@@ -2186,3 +2186,13 @@ add_test(NAME oled_toast
 
 add_test(NAME wifi_command_errors
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_wifi_command_errors.py)
+
+# Actual Waveshare ES7210 capture + ES8311 playback: driver failures and the
+# shared-clock lifetime claim, using fake I2C/I2S boundaries.
+set(WAVESHARE_AUDIO_TEST_ARGS)
+if(HW1_SANITIZE)
+  list(APPEND WAVESHARE_AUDIO_TEST_ARGS --sanitize)
+endif()
+add_test(NAME waveshare_audio
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_waveshare_audio.py
+          ${WAVESHARE_AUDIO_TEST_ARGS})

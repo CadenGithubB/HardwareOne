@@ -328,7 +328,8 @@ static void writeFinalText(char* text, size_t cap, uint32_t sequence) {
   if (result == finalTextOverrides.end()) snprintf(text, cap, "segment %u", sequence);
   else snprintf(text, cap, "%s", result->second.c_str());
 }
-bool sttLocalAvailable(char* error, size_t cap) {
+bool sttLocalAvailable(char* error, size_t cap, const char** reason) {
+  if(reason)*reason=modelAvailable ? nullptr : "Model missing";
   if (!modelAvailable) snprintf(error, cap, "Model missing");
   return modelAvailable.load();
 }

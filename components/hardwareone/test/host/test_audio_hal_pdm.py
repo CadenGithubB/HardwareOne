@@ -107,7 +107,23 @@ static_assert(MIC_POWER_PIN == EXPECT_POWER, "board microphone power");
                    f'-DEXPECT_DATA={data}', f'-DEXPECT_POWER={power}']
             cmd.extend('-D' + value for value in definitions)
             subprocess.run(cmd, check=True)
-    print('Audio board wiring and disable overrides: 10 configurations passed')
+    wave = directory / 'waveshare.cpp'
+    wave.write_text('#include "System_BuildConfig.h"\n'
+                    'static_assert(MIC_BACKEND_ES7210 == 1, "codec backend");\n'
+                    'static_assert(ENABLE_MICROPHONE_SENSOR == EXPECT_MIC, "microphone selection");\n'
+                    'static_assert(WS_MIC_DATA_PIN == 11 && WS_MIC_I2C_ADDRESS == 0x40, "codec wiring");\n')
+    for disabled in (False, True):
+        deployment=directory/f'wave-{disabled}.h'
+        deployment.write_text('#undef ENABLE_LLM_SOURCE_CM5\n#define ENABLE_LLM_SOURCE_CM5 0\n'
+                              '#undef ENABLE_RASPBERRY_PI_HOST_POWER\n#define ENABLE_RASPBERRY_PI_HOST_POWER 0\n'
+                              '#undef ENABLE_RASPBERRY_PI_HOST_FAN\n#define ENABLE_RASPBERRY_PI_HOST_FAN 0\n'+
+                              ('#undef ENABLE_MICROPHONE_SENSOR\n#define ENABLE_MICROPHONE_SENSOR 0\n' if disabled else ''))
+        subprocess.run([cxx,'-std=c++17','-Wno-cpp','-I',str(COMPONENT),'-fsyntax-only',str(wave),
+                        '-DCONFIG_IDF_TARGET_ESP32P4=1',
+                        f'-DHW1_BOARD_CONFIG_HEADER="{REPOSITORY / "boards/waveshare_p4_touch_lcd_5.features.h"}"',
+                        f'-DHW1_DEPLOYMENT_CONFIG_HEADER="{deployment}"',f'-DEXPECT_MIC={0 if disabled else 1}'],check=True)
+    print('Waveshare codec wiring and microphone disable override passed')
+    print('Audio board wiring and disable overrides: 10 PDM/default configurations passed')
 
     # Use the actual deployment headers too: defaults-only checks miss an
     # override that enables the microphone while suppressing its board wiring.

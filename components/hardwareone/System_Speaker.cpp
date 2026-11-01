@@ -27,7 +27,10 @@ const char *tone(const String &args) {
   }
   RETURN_VALID_IF_VALIDATE_CSTR();
   const esp_err_t result = speakerPlayTone(values[0], values[1], values[2]);
-  return result == ESP_OK ? "Speaker tone completed" : esp_err_to_name(result);
+  if(result==ESP_OK)return "Speaker tone completed";
+  if(result==ESP_ERR_INVALID_STATE)
+    return "Error: Onboard audio is busy. Stop microphone capture or playback first.";
+  return "Error: Speaker playback failed. Check the device log and retry.";
 }
 } // namespace
 extern const CommandEntry speakerCommands[] = {

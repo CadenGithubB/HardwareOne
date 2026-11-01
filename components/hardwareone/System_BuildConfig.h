@@ -215,8 +215,8 @@
   #endif
 #endif
 
-// Onboard PDM microphone via the shared audio HAL. Board wiring below selects
-// XIAO Sense GPIO42/41 or P4X-EYE GPIO22/21 and its peripheral power rail.
+// Onboard microphone via the shared audio HAL. Board wiring below selects
+// PDM on XIAO/P4X-EYE or the ES7210 I2S ADC on Waveshare.
 // Overridable by a pre-define; other boards default off.
 #ifndef ENABLE_MICROPHONE_SENSOR
   #if (defined(HW_BOARD_P4X_EYE) && HW_BOARD_P4X_EYE) || defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && XIAO_ESP32S3_SENSE_ENABLED)
@@ -1432,6 +1432,11 @@
   // MSM261DHP006 clock bands (same decimation policy as the XIAO mic).
   #define MIC_PDM_LOW_POWER_MAX_HZ 900000
   #define MIC_PDM_STANDARD_MIN_HZ 1100000
+#endif
+
+// Physical microphone interface; boards opt into codec capture explicitly.
+#ifndef MIC_BACKEND_ES7210
+#define MIC_BACKEND_ES7210 0
 #endif
 
 // Optional storage capability: the card never gates the internal filesystem.

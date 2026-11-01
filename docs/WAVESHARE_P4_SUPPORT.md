@@ -14,7 +14,8 @@ the initially pasted 4.3-inch ST7701 page is not this device.
   test. CPU is 360 MHz; UART0 TX37/RX38, console 115200 baud.
 - User authorized P4/C6 installation, declined a factory backup, and explicitly
   approved erasing the new filesystem region. The P4 was flashed and verified.
-- Microphone capture and camera remain disabled/unqualified.
+- ES7210 onboard microphone capture is now enabled (see the onboard audio section below).
+  Camera remains disabled/unqualified.
   Battery ADC support is enabled; only USB-powered/no-cell behavior is tested.
   SD is enabled and mount/read/write/remount tested (see below).
   Speaker listening was explicitly deferred by the user after the driver test.
@@ -285,7 +286,7 @@ disabled backend; all 15 optional-peripheral configuration tests passed.
 The physical no-card case has not yet been exercised; failed probes are covered
 by the host test. Long-running SD/radio/display stress remains unqualified.
 
-Remaining board-specific work includes battery sensing (schematic BAT_ADC on
+At this earlier SD milestone, remaining board-specific work included battery sensing (schematic BAT_ADC on
 GPIO20; qualify the divider and measured voltage with the existing ADC battery
 backend), ES7210 microphone capture, and an attached MIPI camera's sensor/pin
 configuration. Charging and accurate charge-state reporting are separate from
@@ -484,3 +485,73 @@ selected model with 20,112,224 bytes. The G2 microphone is currently disconnecte
 and scans do not find the glasses, so live speech qualification awaits their
 reconnection. Local continuous transcription remains selected. Serial was
 logged out and closed; no audio was recorded during these checks.
+
+## Onboard ES7210 microphone (2026-11-01)
+
+Waveshare now enables the existing onboard-microphone feature. Its physical
+`MIC_BACKEND_ES7210` selection and wiring live with the board; P4X-EYE/XIAO
+retain their PDM backend and existing pin/power behavior. No application-specific
+board checks were added to transcription or recording.
+
+`HAL_Audio_Waveshare` implements ES7210 standard-I2S capture behind the existing
+audio HAL. The schematic routes physical MIC1/2 to ADC1/2, with ADC3/4 reserved
+for speaker-feedback circuitry. Only ADC1/2 are powered, at 37.5 dB analog
+gain, with 16-bit Philips I2S left-slot capture. Mono PCM reaches the existing
+recorder, VAD and STT consumers unchanged. Driver-supported rates are 8, 16,
+32, 44.1 and 48 kHz; other requested rates fail before claiming hardware.
+The STT engine continues to request 16 kHz.
+
+The codec's control address is 0x40 on the existing shared I2C manager bus 0;
+MCLK/BCLK/WS are GPIO13/12/10 and DIN is GPIO11. Start probes only the address,
+then configures the known codec through managed transactions. PCM reads and
+settling wait outside the I2C lock. Failure paths release the channel, codec
+power and shared audio claim. Receive-overflow events feed the existing HAL
+overrun counter.
+
+The mic and speaker have one lifetime claim for their shared I2S pins. Speaker
+playback refuses while onboard capture owns the pins and works again after
+release. This does not block G2 capture, which has its independent BLE source.
+The standard source selector now says “Onboard microphone”; `micsource onboard`
+is an alias for the existing persisted/protocol `pdm` key. Source IDs, settings
+schema, recording ownership, STT model selection and G2 behavior are preserved.
+
+Codec register setup is adapted from Waveshare's
+[10_Mic_Record reference](https://github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-5/tree/main/examples/arduino/examples/10_Mic_Record),
+with channel selection/gain checked against the
+[official schematic](https://files.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-5/ESP32-P4-WIFI6-Touch-LCD-5-Schematic.pdf).
+The original Espressif license is retained in the backend source.
+
+Nine affected host suites passed: the production Waveshare mic/speaker backend
+(enabled/disabled, clock ratios, cleanup, partial-timeout reads, overflow and
+exclusion), PDM HAL/board selection, requested-source recording, WAV completion,
+VAD policy, local dictation, OLED transcription, continuous STT and bounded STT.
+Two older STT fake-backend signatures were brought into agreement with the
+previous readiness-message API; production broker code was not changed.
+Both firmware profiles were built, using the existing build directories.
+
+Device evidence is under `.scratch/waveshare-onboard-mic`. Initial hardware
+checks passed microphone startup, speaker refusal/recovery, model readiness,
+landscape retention and a two-second bounded local-inference run (32,000 samples,
+20,112,128 model bytes, no error). No audio or transcript was saved. Final
+schematic-correct gain/clock installation and checks are recorded there as well.
+Spoken accuracy and audible speaker confirmation remain user qualification.
+
+Vendor driver reference snapshot SHA-256: `2bddb3c23623a987242614b544241f3effed315b30908c4380d286615129430f`.
+
+Final application-only flash passed hash verification. Onboard was selected
+through the normal source setting. The physical ADC produced nonzero live
+levels; speaker playback was refused during capture and succeeded after stop.
+The final two-second local-STT run captured 32,000 samples, verified/loaded the
+20,112,128-byte model and completed without errors or saved audio/transcripts.
+After capture stopped, the Transcription status reported `available:true`,
+`micPdm:true` (the compatibility key for Onboard), and `micSource:pdm`. G2
+availability remained independently true. Landscape stayed enabled.
+
+Final images: Waveshare 3,724,704 bytes with 4,663,904 bytes app headroom;
+P4X-EYE 6,128,944 bytes with 1,297,104 bytes headroom. P4X-EYE was build-checked
+only and still awaits its application-only update after Waveshare qualification.
+Removed 1,462,272 allocated bytes of generated schematic previews; the original
+PDF and small codec-reference sources are retained as evidence. The single
+Waveshare build cache (~983 MiB) and pre-existing P4X-EYE cache (~1.1 GiB) remain
+for this hardware qualification. Remove compiler objects after user testing
+finishes without further edits; retain compact matching firmware/debug evidence.

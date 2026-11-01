@@ -2,14 +2,13 @@
 #include "System_BuildConfig.h"
 #if ENABLE_SPEAKER
 #include "System_I2C.h"
+#include "HAL_Audio_Waveshare.h"
 #include "driver/i2s_std.h"
 #include "third_party/es8311/es8311.h"
 #include <Arduino.h>
-#include <atomic>
 #include <cmath>
 
 namespace {
-std::atomic_flag busy = ATOMIC_FLAG_INIT;
 constexpr uint32_t rate = 16000;
 struct Playback {
   i2s_chan_handle_t tx = nullptr;
@@ -23,7 +22,7 @@ struct Playback {
       i2s_del_channel(tx);
     if (codec)
       es8311_delete(codec);
-    busy.clear();
+    waveshareAudioRelease();
   }
 };
 } // namespace
@@ -33,7 +32,7 @@ esp_err_t speakerPlayTone(uint32_t frequencyHz, uint32_t durationMs,
   if (frequencyHz < 100 || frequencyHz > 4000 || durationMs < 50 ||
       durationMs > 2000 || volume > 60)
     return ESP_ERR_INVALID_ARG;
-  if (busy.test_and_set())
+  if (!waveshareAudioTryClaim())
     return ESP_ERR_INVALID_STATE;
   Playback playback;
   pinMode(WS_SPEAKER_AMP_PIN, OUTPUT);

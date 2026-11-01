@@ -20,11 +20,14 @@
 #include "G2_Glasses.h"       // g2LeftConnected / g2MicStreamEnable / g2MicSetAfeFeedActive / g2MicReadPcmSamples (stubs if G2 off)
 
 #if ENABLE_MICROPHONE_SENSOR
+#include "System_Mutex.h"
+#if MIC_BACKEND_ES7210
+#include "HAL_Audio_Waveshare.h"
+#else
 #include <driver/i2s_pdm.h>
 #include <driver/gpio.h>
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
-#include "System_Mutex.h"     // I2sMicLockGuard — shared I2S-mic hardware lock (PDM only)
 // The board owns its wiring. Enabling a mic on an unconfigured board must not
 // silently drive the XIAO pins (which can have different roles on other chips).
 #if !defined(MIC_CLK_PIN) || !defined(MIC_DATA_PIN)
@@ -33,6 +36,7 @@
 #ifndef MIC_POWER_PIN
 #define MIC_POWER_PIN -1
 #endif
+#endif // PDM backend
 #endif // ENABLE_MICROPHONE_SENSOR
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -71,8 +75,8 @@ static bool ensureAudioStateMutex() {
   return ready;
 }
 
-// ── PDM backend (onboard I2S mic — inner-gated on ENABLE_MICROPHONE_SENSOR) ────
-#if ENABLE_MICROPHONE_SENSOR
+// ── PDM backend; ES7210 supplies the same onboard source on its boards. ─────
+#if ENABLE_MICROPHONE_SENSOR && !MIC_BACKEND_ES7210
 static i2s_chan_handle_t gPdmRx = nullptr;
 // ISR context never takes a mutex or allocates. Teardown disables/deletes the
 // old channel before another owner can reset this internal-memory counter.
@@ -216,7 +220,11 @@ static void pdmStopLocked() {
 static uint32_t sourceOverruns(AudioSource source) {
 #if ENABLE_MICROPHONE_SENSOR
   if (source == AUDIO_SRC_LOCAL_PDM)
+#if MIC_BACKEND_ES7210
+    return waveshareMicOverruns();
+#else
     return __atomic_load_n(&gPdmOverruns, __ATOMIC_RELAXED);
+#endif
 #endif
   return source == AUDIO_SRC_G2_LEFT ? g2MicAfeIntegrityErrors() : 0;
 }
@@ -244,7 +252,7 @@ bool audioSourceAvailable(AudioSource src) {
   switch (src) {
     case AUDIO_SRC_LOCAL_PDM:
 #if ENABLE_MICROPHONE_SENSOR
-      return true;   // I2S/PDM is unprobeable — the soldered mic is present iff compiled
+      return true;   // Board-selected onboard hardware; startup validates the driver.
 #else
       return false;
 #endif
@@ -361,7 +369,11 @@ static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
   if (src == AUDIO_SRC_LOCAL_PDM) {
 #if ENABLE_MICROPHONE_SENSOR
     I2sMicLockGuard guard("audio.start");
+#if MIC_BACKEND_ES7210
+    ok = waveshareMicStart(sampleRate);
+#else
     ok = pdmStartLocked(sampleRate);
+#endif
 #endif
   } else if (src == AUDIO_SRC_G2_LEFT) {
     // Native control owns mic start/stop. Legacy capture needs both a decoder
@@ -403,7 +415,11 @@ static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
     if (src == AUDIO_SRC_LOCAL_PDM) {
 #if ENABLE_MICROPHONE_SENSOR
       I2sMicLockGuard guard("audio.start.cancel");
+#if MIC_BACKEND_ES7210
+      waveshareMicStop();
+#else
       pdmStopLocked();
+#endif
 #endif
     } else if (src == AUDIO_SRC_G2_LEFT) {
       if (!nativeGeneration) g2MicStreamEnable(false);
@@ -479,7 +495,11 @@ void audioCaptureStop(const char* owner) {
   if (src == AUDIO_SRC_LOCAL_PDM) {
 #if ENABLE_MICROPHONE_SENSOR
     I2sMicLockGuard guard("audio.stop");
+#if MIC_BACKEND_ES7210
+    waveshareMicStop();
+#else
     pdmStopLocked();
+#endif
 #endif
   } else if (src == AUDIO_SRC_G2_LEFT) {
     if (!nativeG2) {
@@ -507,6 +527,10 @@ size_t audioReadPcm(int16_t* out, size_t maxSamples, uint32_t timeoutMs) {
 
 #if ENABLE_MICROPHONE_SENSOR
   if (gAudioSource != AUDIO_SRC_LOCAL_PDM) return 0;
+#if MIC_BACKEND_ES7210
+  I2sMicLockGuard guard("audio.read");
+  return waveshareMicRead(out,maxSamples,timeoutMs);
+#else
   if (!gPdmRx) return 0;
   size_t bytesRead = 0;
   esp_err_t err;
@@ -521,6 +545,7 @@ size_t audioReadPcm(int16_t* out, size_t maxSamples, uint32_t timeoutMs) {
   // read is full. Discarding it would punch gaps in recordings and DSP input.
   if (err != ESP_OK && err != ESP_ERR_TIMEOUT) return 0;
   return bytesRead / sizeof(int16_t);
+#endif
 #else
   return 0;   // no PDM backend on this board; G2 handled above
 #endif

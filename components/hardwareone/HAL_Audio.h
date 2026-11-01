@@ -2,7 +2,7 @@
  * HAL_Audio.h — Audio capture Hardware Abstraction Layer
  *
  * Single owner of microphone PCM capture. Abstracts the physical sources —
- * the onboard PDM mic (I2S) and the G2 glasses left-temple mic (BLE LC3 → PCM
+ * the onboard mic (PDM or ES7210 I2S) and the G2 glasses left-temple mic (BLE LC3 → PCM
  * ring) — behind ONE pull API, the same way HAL_Input abstracts the gamepad and
  * ANO encoder behind a shared input API. Unlike HAL_Input (which
  * is poll-and-cache: many cheap readers), audio is an exclusive single-drainer
@@ -16,9 +16,9 @@
  * recorders must use the effective source rate for WAV headers and duration.
  * The HAL does not resample.
  *
- * Availability is RUNTIME, not a compile-time default: PDM is available iff the
- * board physically has it (ENABLE_MICROPHONE_SENSOR — I2S/PDM is unprobeable, so
- * compiled == present); G2 is available iff the LEFT temple is connected and
+ * Availability is RUNTIME, not a compile-time default: The onboard mic is available iff the
+ * board physically has it (ENABLE_MICROPHONE_SENSOR — board wiring selects the backend; codec initialization
+ * is validated at capture start); G2 is available iff the LEFT temple is connected and
  * subscribed. There is NO implicit default source — gAudioSource starts NONE and
  * is resolved against availability at each capture start.
  *
@@ -47,7 +47,7 @@ static const uint8_t  AUDIO_HAL_CHANNELS    = 1;
 
 enum AudioSource : uint8_t {
   AUDIO_SRC_NONE      = 0,   // no source resolved yet — the default; never captures
-  AUDIO_SRC_LOCAL_PDM = 1,   // onboard PDM mic via I2S
+  AUDIO_SRC_LOCAL_PDM = 1,   // legacy onboard source key: PDM or board codec I2S
   AUDIO_SRC_G2_LEFT   = 2,   // G2 glasses LEFT-temple mic, BLE LC3 ring (RIGHT never a source)
 };
 

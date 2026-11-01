@@ -119,7 +119,8 @@ static bool modelAvailable = true, engineOK = true, engineOverlong = false;
 static size_t engineSamples = 0;
 static unsigned engineCalls = 0;
 static std::function<void(const STTLocalControl&)> engineHook;
-bool sttLocalAvailable(char* error, size_t cap) {
+bool sttLocalAvailable(char* error, size_t cap, const char** reason) {
+  if(reason)*reason=modelAvailable ? nullptr : "Model missing";
   if (!modelAvailable) snprintf(error, cap, "Model missing");
   return modelAvailable;
 }

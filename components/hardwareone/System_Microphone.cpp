@@ -3087,16 +3087,17 @@ const char* cmd_micautostart(const String& argsInput) {
 const char* cmd_micsource(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = argsInput; arg.trim(); arg.toLowerCase();
+  if (arg == "onboard") arg = "pdm"; // Keep the persisted/protocol source key compatible.
   if (arg.length() == 0) {
     snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
-      "Mic source: preference=%s, active=%s (available: pdm=%s g2=%s). Set with: micsource <auto|pdm|g2>",
+      "Mic source: preference=%s, active=%s (available: pdm=%s g2=%s). Set with: micsource <auto|onboard|pdm|g2>",
       gSettings.micSource.c_str(), micSourceName(),
       audioSourceAvailable(AUDIO_SRC_LOCAL_PDM) ? "yes" : "no",
       audioSourceAvailable(AUDIO_SRC_G2_LEFT) ? "yes" : "no");
     return gMicCmdBuffer;
   }
   if (arg != "auto" && arg != "pdm" && arg != "g2") {
-    return "Error: invalid arguments — Usage: micsource <auto|pdm|g2>";
+    return "Error: invalid arguments — Usage: micsource <auto|onboard|pdm|g2>";
   }
   const bool wasEnabled = gMicRunning;
   if (wasEnabled || micRecordingBusy()) {
@@ -3112,7 +3113,7 @@ const char* cmd_micsource(const String& argsInput) {
   if (arg == "g2" && !audioSourceAvailable(AUDIO_SRC_G2_LEFT)) {
     note = " (glasses not connected — applies when they connect)";
   } else if (arg == "pdm" && !audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)) {
-    note = " (no onboard PDM mic on this board)";
+    note = " (onboard microphone unavailable in this build)";
   }
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
            "Mic source preference set to '%s'%s (active=%s)", arg.c_str(), note, micSourceName());
@@ -3144,7 +3145,7 @@ const CommandEntry micCommands[] = {
   { "micsamplerate", "Get/set sample rate.", false, cmd_micsamplerate, "Usage: micsamplerate [8000-48000]" },
   { "micgain", "Get/set microphone gain.", false, cmd_micgain, "Usage: micgain [0-100]" },
   { "micbitdepth", "Get/set bit depth.", false, cmd_micbitdepth, "Usage: micbitdepth [16|32]" },
-  { "micsource", "Get/set mic source: onboard PDM or G2 glasses.", false, cmd_micsource, "Usage: micsource [auto|pdm|g2]" },
+  { "micsource", "Get/set mic source: onboard microphone or G2 glasses.", false, cmd_micsource, "Usage: micsource [auto|onboard|pdm|g2]" },
 
   // Auto-start
   { "micautostart", "Enable/disable microphone auto-start after boot [on|off]", false, cmd_micautostart, "Usage: micautostart [on|off]" },
@@ -3158,10 +3159,10 @@ static const SettingEntry micSettingEntries[] = {
   { "micEnabled", SETTING_BOOL, &gSettings.micEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "micenabled" },
   { "microphoneAutoStart", SETTING_BOOL, &gSettings.micAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "micautostart" },
   // Source preference {auto,pdm,g2}. Resolved lazily against availability.
-  { "micSource", SETTING_STRING, &gSettings.micSource, 0, 0, "auto", 0, 0, "Mic source", "auto|Auto,pdm|Onboard PDM,g2|G2 glasses", false, nullptr, "micsource" },
+  { "micSource", SETTING_STRING, &gSettings.micSource, 0, 0, "auto", 0, 0, "Mic source", "auto|Auto,pdm|Onboard microphone,g2|G2 glasses", false, nullptr, "micsource" },
   // These three were previously reported as "(saved)" but never registered, so
   // they silently reset to defaults on reboot. Registering them fixes that.
-  { "microphoneSampleRate", SETTING_INT, &gSettings.microphoneSampleRate, 16000, 0, nullptr, 8000, 48000, "Sample rate (Hz, PDM only)", nullptr, false, nullptr, "micsamplerate" },
+  { "microphoneSampleRate", SETTING_INT, &gSettings.microphoneSampleRate, 16000, 0, nullptr, 8000, 48000, "Sample rate (Hz, onboard)", nullptr, false, nullptr, "micsamplerate" },
   { "microphoneGain", SETTING_INT, &gSettings.microphoneGain, 70, 0, nullptr, 0, 100, "Software gain (%)", nullptr, false, nullptr, "micgain" },
   // Only 16 and 32 are accepted (cmd_micbitdepth); the 16..32 min/max would
   // otherwise render as a number box offering values the command rejects.
@@ -3181,7 +3182,7 @@ extern const SettingsModule micSettingsModule = {
   micSettingEntries,
   sizeof(micSettingEntries) / sizeof(micSettingEntries[0]),
   isMicConnected,
-  "Microphone (onboard PDM or G2 glasses)"
+  "Microphone (onboard or G2 glasses)"
 };
 
 // Registration handled by gCommandModules[] in System_Utils.cpp

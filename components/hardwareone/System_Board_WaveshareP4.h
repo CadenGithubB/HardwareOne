@@ -10,6 +10,12 @@
 #define WS_SPEAKER_I2C_PORT 1
 #define WS_SPEAKER_I2C_BUS 0
 
+// ES7210 ADC: standard I2S capture, sharing MCLK/BCLK/WS with playback.
+#define MIC_BACKEND_ES7210 1
+#define WS_MIC_DATA_PIN 11
+#define WS_MIC_I2C_ADDRESS 0x40
+#define WS_MIC_I2C_BUS 0
+
 // GT911 shares the codec bus; reset and interrupt are not wired to the MCU.
 #define WS_TOUCH_I2C_BUS 0
 #define WS_TOUCH_WIDTH 720
