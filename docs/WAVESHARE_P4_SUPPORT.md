@@ -478,3 +478,9 @@ transport reports zero errors/timeouts. The supplied model was copied to
 verified, and the card safely ejected. Device model readiness and a spoken
 transcription test await reinsertion/reconnection and user qualification.
 Compact matching firmware/debug evidence is approximately 23 MiB.
+
+After card reinsertion, the board confirmed `/sd` mounted and listed the exact
+selected model with 20,112,224 bytes. The G2 microphone is currently disconnected
+and scans do not find the glasses, so live speech qualification awaits their
+reconnection. Local continuous transcription remains selected. Serial was
+logged out and closed; no audio was recorded during these checks.
