@@ -6,3 +6,6 @@ void oledTouchContext(uint32_t context);
 TouchNavigation oledTouchRead();
 uint32_t oledWizardButtonPresses(uint32_t& previous, bool& initialized);
 TouchNavigation oledWizardTouchNavigation();
+
+// UI-owned physical controls; false when unavailable or drawing fails.
+bool oledTouchDrawControls();

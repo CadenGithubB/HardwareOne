@@ -4080,6 +4080,7 @@ bool initOLEDDisplay() {
   bool success = displayInit();
   
   if (success) {
+    if (!wasReady) oledTouchDrawControls();
     oledConnected = true;
     gOledRunning = true;
     gOledConsole.init();
@@ -5490,6 +5491,7 @@ bool earlyOLEDInit() {
     }
     return false;
   }
+  oledTouchDrawControls();
   oledConnected = true;
   gOledRunning = true;
   gOledConsole.init();
@@ -6174,8 +6176,8 @@ static bool gInputStateValid = false;
  * Call this at the start of each input polling cycle
  */
 void updateInputState() {
-  oledTouchContext(0x20000u + static_cast<uint32_t>(currentOLEDMode));
 #if ENABLE_OLED_INPUT
+  oledTouchContext(0x20000u + static_cast<uint32_t>(currentOLEDMode));
   gNavEvents = {false, false, false, false, 0, 0, 0};
   gInputStateValid = false;
   InputCache input{};

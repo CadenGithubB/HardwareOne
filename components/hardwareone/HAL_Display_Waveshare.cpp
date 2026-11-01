@@ -1,7 +1,7 @@
 #include "HAL_Display_Waveshare.h"
 #if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
 #include "HAL_Display_WaveshareInit.h"
-#include "OLED_TouchLayout.h"
+#include "System_MemUtil.h"
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
@@ -10,7 +10,6 @@
 #include <cstring>
 namespace {
 constexpr int kWidth = 720, kHeight = 1280;
-#if ENABLE_GT911_TOUCH
 class PanelCanvas : public Adafruit_GFX {
  public:
   explicit PanelCanvas(uint16_t* pixels) : Adafruit_GFX(kWidth, kHeight), pixels_(pixels) {}
@@ -20,17 +19,6 @@ class PanelCanvas : public Adafruit_GFX {
  private:
   uint16_t* pixels_;
 };
-void drawTouchControls(uint16_t* pixels) {
-  PanelCanvas canvas(pixels);
-  canvas.setTextSize(3);
-  canvas.setTextColor(0xffff);
-  for (const auto& c : touchControls) {
-    canvas.drawRoundRect(c.x, c.y, c.w, c.h, 8, 0xffff);
-    canvas.setCursor(c.x + (c.w - strlen(c.label)*18)/2, c.y+27);
-    canvas.print(c.label);
-  }
-}
-#endif
 constexpr size_t kBytes = kWidth * kHeight * sizeof(uint16_t);
 // IDF 5.5's DBI transmit spins indefinitely when its FIFO fills. Drain each
 // small command with a deadline so a missing/reset panel cannot block boot.
@@ -78,7 +66,7 @@ bool WaveshareDisplay::begin() {
   if (panel_)
     return true;
   if (!buffer)
-    buffer = static_cast<uint8_t *>(calloc(1024, 1));
+    buffer = static_cast<uint8_t *>(ps_calloc(1024, 1, AllocPolicy::PreferInternal, "display.waveshare.canvas"));
   if (!buffer)
     return false;
   pinMode(WS_LCD_RESET_PIN, OUTPUT);
@@ -143,9 +131,6 @@ bool WaveshareDisplay::begin() {
   pixels_ = static_cast<uint16_t *>(frameBuffer);
   if (err == ESP_OK) {
     memset(pixels_, 0, kBytes);
-#if ENABLE_GT911_TOUCH
-    drawTouchControls(pixels_);
-#endif
     err = esp_cache_msync(pixels_, kBytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
   }
   if (err == ESP_OK)
@@ -160,6 +145,15 @@ bool WaveshareDisplay::begin() {
   ESP_LOGI("WaveshareLCD",
            "HX8394 ready: 720x1280, 128x64 UI canvas");
   return true;
+}
+bool WaveshareDisplay::paintSurface(void (*paint)(Adafruit_GFX&)) {
+  if (!lock_ || !paint) return false;
+  Guard guard(lock_);
+  if (!pixels_ || !powered_) return false;
+  PanelCanvas canvas(pixels_);
+  paint(canvas);
+  canvasPresented_ = false;  // The next update restores the logical UI viewport.
+  return esp_cache_msync(pixels_, kBytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M) == ESP_OK;
 }
 void WaveshareDisplay::display() {
   if (!lock_)

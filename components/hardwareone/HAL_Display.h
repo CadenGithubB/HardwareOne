@@ -252,6 +252,7 @@
 // =============================================================================
 // Display Runtime Functions
 // =============================================================================
+class Adafruit_GFX;
 #if DISPLAY_ENABLED
 
 // Global display instance (replaces oledDisplay)
@@ -279,6 +280,9 @@ uint8_t displayI2cBus();  // Latched for the canvas lifetime; bus settings requi
 // the rail is cut once). Routing those command paths through the main loop is
 // the follow-up; until then no third task may call these.
 bool displayInit();
+// Synchronous physical-surface drawing, when supported. The callback must not
+// retain the canvas or re-enter the display HAL. Logical UI updates resume after it.
+bool displayPaintSurface(void (*paint)(Adafruit_GFX&));
 bool displayIsReady();
 void displayStop();
 bool displaySetPower(bool on);            // Whether the power operation ran
@@ -291,6 +295,7 @@ void displaySetBrightness(uint8_t level); // Set brightness 0-255 (PWM for TFT, 
 
 #else
 inline bool displayInit() { return false; }
+inline bool displayPaintSurface(void (*)(Adafruit_GFX&)) { return false; }
 inline bool displayIsReady() { return false; }
 inline void displayStop() {}
 inline bool displaySetPower(bool) { return false; }

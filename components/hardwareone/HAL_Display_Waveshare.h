@@ -14,6 +14,7 @@ public:
   bool begin();
   void end();
   void display();
+  bool paintSurface(void (*paint)(Adafruit_GFX&));
   void dim(bool dimmed);
   void setBrightness(uint8_t level);
   void setPower(bool on);

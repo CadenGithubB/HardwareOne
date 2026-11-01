@@ -65,6 +65,15 @@ void restoreDisplayRail() {
 #endif
 } // namespace
 
+bool displayPaintSurface(void (*paint)(Adafruit_GFX&)) {
+#if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+  return displayIsReady() && gDisplay && gDisplay->paintSurface(paint);
+#else
+  (void)paint;
+  return false;
+#endif
+}
+
 bool displayIsReady() { return displayReady.load(); }
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
 uint8_t gDisplayI2cAddress = DISPLAY_I2C_ADDR_ALT;

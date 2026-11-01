@@ -130,6 +130,7 @@ class Adafruit_SSD1306 {
 
 class P4EyeDisplay {
  public:
+  bool paintSurface(void (*)(class Adafruit_GFX&)) { return true; }
   P4EyeDisplay() { ++platform.constructors; }
   ~P4EyeDisplay() { ++platform.destructors; }
   bool begin() {
