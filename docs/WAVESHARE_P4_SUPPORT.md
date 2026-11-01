@@ -428,3 +428,44 @@ test, alongside the pre-existing P4-EYE cache (approximately 1.1 GiB) for its
 pending application-only update. Matching firmware/debug and compact evidence
 are retained in `.scratch/waveshare-feedback` (approximately 21 MiB). Remove
 Waveshare compiler objects once qualification completes without further edits.
+
+## Local transcription parity (2026-11-01)
+
+The saved Waveshare profile now enables `ENABLE_LOCAL_STT` and
+`ENABLE_STT_MODEL_15X5_GEN2`, matching the model selection of `p4-phone-pipe`.
+The other saved P4X-EYE profiles already inherit local transcription from their
+existing feature profile. The Waveshare uses the connected G2 microphone; its
+onboard microphone remains disabled. No UART host or Wi-Fi is required.
+
+The selected model is `/sd/STT Models/quartznet15x5-gen2-25397.p4.stt`.
+The user supplied the matching 20,112,224-byte model; its envelope, frontend
+identity and payload SHA-256 were verified against the generated identity.
+The model file SHA-256 is
+`dccef3a8cead069d97d780e0d08ddfc65d9f0870c0af4673b29327f00158f048`.
+
+Readiness now distinguishes a missing microphone, microphone contention,
+unmounted model card, inaccessible model, wrong model size, disabled engine,
+and CM5 session/service failures, with a next action. The local readiness
+worker retains the backend's static refusal instead of replacing it with
+“local model unavailable.” Its cheap check verifies presence/size; inference
+still verifies the pinned model identity before use.
+
+The shared transcription screen wraps status text while retaining menu space.
+Explicit failed actions use the shared eight-second error toast, and setting
+failures preserve the actual refusal. Polling does not repeatedly show toasts.
+Larger bounded message buffers preserve the model path and next action.
+
+Verification: eight affected host suites passed, with sanitizer coverage where
+supported: local dictation (both providers plus disabled stubs), local backend
+LM/readiness (including the SD gen2 selection), OLED transcription at
+64/88/128 pixels, command adapter, HTTP/JavaScript, OLED/G2 dictation consumers,
+G2 transcription, and activity policy. Both final firmware builds passed:
+Waveshare 3,720,672 bytes with 4,667,936 bytes app headroom; P4X-EYE
+6,128,864 bytes with 1,297,184 bytes headroom. P4X-EYE is build-checked only;
+its updated application flash and user verification remain pending.
+
+Deployment/model-installation evidence is in `.scratch/waveshare-local-stt`.
+The existing normal build caches are retained for active hardware qualification:
+Waveshare approximately 981 MiB and P4X-EYE approximately 1.1 GiB. Host suites
+remove their temporary build directories automatically. Retain only compact
+firmware/debug evidence once hardware iteration ends.

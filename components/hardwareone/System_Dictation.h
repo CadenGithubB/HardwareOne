@@ -62,7 +62,7 @@ struct DictationSnapshot {
   const char* sourceName;   // "PDM", "G2", or "none" — which mic is live
   uint32_t elapsedMs;       // time in the current non-idle state
   int level;                // 0..100 audio level while RECORDING, else 0
-  char failure[40];
+  char failure[192];
   bool continuous = false; // Session keeps listening between completed phrases.
   bool captureActive = false;
   bool inferenceActive = false;

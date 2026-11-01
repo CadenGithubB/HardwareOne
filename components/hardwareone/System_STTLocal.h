@@ -173,7 +173,8 @@ class STTLocalSession {
 
 // Cheap availability check for the configured, fixed model path; does not load
 // a model. A true result is readiness to attempt a run, not proof of its result.
-bool sttLocalAvailable(char* error, size_t cap);
+// Optional reason points to a static actionable message, safe to cache.
+bool sttLocalAvailable(char* error, size_t cap, const char** reason = nullptr);
 bool sttLocalTranscribe(const int16_t* pcm, size_t samples,
                         char* text, size_t textCap,
                         const STTLocalControl& control, STTLocalStats& stats,

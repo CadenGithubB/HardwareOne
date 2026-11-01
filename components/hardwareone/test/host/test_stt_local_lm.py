@@ -36,13 +36,14 @@ def main():
         unit = Path(tmp) / 'test.cpp'
         unit.write_text(harness)
         variants = ((1, 'configured', strength.group(1)), (1, 'override', '0.75f'),
-                    (0, 'disabled', strength.group(1)))
+                    (0, 'disabled', strength.group(1)), (1, 'sd-gen2', strength.group(1)))
         for enabled, name, configured_strength in variants:
             exe = Path(tmp) / f'test-{name}'
             cmd = [args.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                    '-DENABLE_LOCAL_STT=1', f'-DENABLE_STT_LM={enabled}', '-DCONFIG_IDF_TARGET_ESP32P4=1',
                    f'-DHW1_STT_LM_STRENGTH={configured_strength}',
                    f'-I{SOURCE}', f'-I{HERE}', str(unit), str(SOURCE / 'stt' / 'stt_lm.cpp'), '-o', str(exe)]
+            if name == 'sd-gen2': cmd.insert(1, '-DENABLE_STT_MODEL_15X5_GEN2=1')
             if args.sanitize:
                 cmd[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
             subprocess.run(cmd, check=True, timeout=180)

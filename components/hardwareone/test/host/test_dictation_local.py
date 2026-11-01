@@ -51,6 +51,7 @@ int main(){
     harness=harness.replace('// INSERT_LOCAL',function(source,'static TranscriptOptions dictationTranscriptOptions(')+'\n'+local)
     harness=harness.replace('// INSERT_LIVE',function(source,'static bool displaySessionStillLive('))
     shared='\n'.join(function(source, sig) for sig in ['static bool dictFailOwned(', 'static bool dictationPeekTextImpl(', 'static bool dictationCommitTextImpl(', 'bool dictationPeekTextFor(', 'bool dictationCommitTextFor(', 'bool dictationAppPeekText(', 'bool dictationAppCommitText(', 'bool dictationAppReadSpeakers(', 'bool dictationTakeTextFor(', 'static bool dictationCancelImpl(', 'bool dictationAppCancel(', 'void dictationFieldFullFor(', 'static const char* dictDeliver('])
+    harness=harness.replace('// INSERT_AVAILABILITY',function(source,'bool dictationAvailable('))
     harness=harness.replace('// INSERT_DRAIN',shared)
     harness=harness.replace('// INSERT_STOP','\n'.join(function(source,sig) for sig in ('static bool dictationRequestStopImpl(', 'void dictationRequestStopFor(', 'bool dictationAppRequestStop(')))
     harness=harness.replace('// INSERT_BEGIN','\n'.join(function(source,sig) for sig in ('static bool dictationBeginImpl(', 'bool dictationBeginFor(', 'bool dictationAppBeginWith(', 'bool dictationAppBegin(')))

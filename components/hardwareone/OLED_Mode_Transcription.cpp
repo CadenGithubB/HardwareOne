@@ -5,6 +5,7 @@
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
 #include "OLED_UI.h"
+#include "OLED_MessageText.h"
 #include "HAL_Input.h"
 #include "System_Dictation.h"
 #include "System_AuthIdentity.h"
@@ -24,7 +25,7 @@ struct View {
   bool entered=false, active=false, busy=false, saveDefault=false, saveEnabled=false;
   bool continuous=false, preparing=false, captureActive=false, inferenceActive=false;
   bool nextPoll=false, more=false, eof=true, micPdm=false, micG2=false;
-  char exchange[17]{}, recent[1024]{}, text[513]{}, path[128]{}, message[96]{}, micSource[8]{};
+  char exchange[17]{}, recent[1024]{}, text[513]{}, path[128]{}, message[192]{}, micSource[8]{};
   Entry files[8]{};
   unsigned count=0, listOffset=0, listNext=0, fileOffset=0, fileNext=0;
   uint32_t history[32]{};
@@ -104,7 +105,11 @@ static void acceptReply(const Ticket& ticket,bool ok) {
        (ticket.op==Op::List && currentOLEDMode!=OLED_TRANSCRIPTS) ||
        (ticket.op==Op::Read && currentOLEDMode!=OLED_TRANSCRIPT_VIEW))) return;
   if (!ok || !parsed || doc["success"]==false) {
-    copy(v.message,sizeof(v.message),parsed ? (doc["error"]|"Request failed") : "Request failed");
+    copy(v.message,sizeof(v.message),parsed ? (doc["error"]|"Transcription request failed. Retry; check logs if it persists.") : "Invalid transcription reply. Retry; check logs if it persists.");
+    // Polling failures stay in the status line; explicit actions show the full
+    // actionable refusal once through the shared, auto-dismiss error toast.
+    if (ticket.op==Op::Start || ticket.op==Op::Stop || ticket.op==Op::List || ticket.op==Op::Read)
+      oledToastShow(v.message,oled_message::kErrorDurationMs,OledUIIcon::ERROR);
     v.pollAt=millis()+1000;
     return; // Keep an unacknowledged receipt for retry, without copying twice.
   }
@@ -207,14 +212,18 @@ static void populateMenu() {
 }
 static void displayTranscriptionHome() {
   populateMenu();
-  oledDisplay->setCursor(0,OLED_CONTENT_START_Y);
   const char* status=v.active?(v.saveEnabled?"Active; saving":"Active; not saving"):
       (v.continuous?"Local continuous":"Pi: one recording");
-  char line[22];
-  snprintf(line,sizeof(line),"%.21s",v.message[0]?v.message:status);
-  oledDisplay->print(line);
-  v.menu.visibleLines=oledVisibleRows(8,10,3);
-  oledScrollRenderSimple(oledDisplay,&v.menu,true,OLED_CONTENT_START_Y+10);
+  const int available=oledVisibleRows(8)-2; // Keep at least two menu rows.
+  const auto wrapped=oled_message::wrap(v.message[0]?v.message:status,21,
+      available<1?1:(available>3?3:available));
+  for(int i=0;i<wrapped.count;++i) {
+    oledDisplay->setCursor(0,OLED_CONTENT_START_Y+i*8);
+    oledDisplay->print(wrapped.text[i]);
+  }
+  const int reserved=wrapped.count*8+2;
+  v.menu.visibleLines=oledVisibleRows(8,reserved,wrapped.count==1?3:0);
+  oledScrollRenderSimple(oledDisplay,&v.menu,true,OLED_CONTENT_START_Y+reserved);
 }
 static void displayTranscriptionLive() {
   drawText(v.recent[0]?v.recent:(v.preparing?"Preparing...":v.captureActive?"Listening...":
@@ -334,8 +343,10 @@ void prepareTranscriptionData() {
   if(got) {
     inFlight=false;
     if(ticket.op==Op::Toggle && ticket.generation==v.generation && ticket.epoch==v.epoch) {
-      const bool changed=ok && strncmp(received,"Error",5)!=0 && strncmp(received,"Failed",6)!=0;
-      copy(v.message,sizeof(v.message),changed?"Setting updated":"Setting change failed");
+      const bool changed=ok && received[0] && !oled_message::isError(received);
+      copy(v.message,sizeof(v.message),changed?"Setting updated":
+           (received[0]?received:"Setting could not be updated. Retry; check logs if it persists."));
+      if(!changed) oledToastShow(v.message,oled_message::kErrorDurationMs,OledUIIcon::ERROR);
       v.nextPoll=false; v.pollAt=0;
     } else acceptReply(ticket,ok);
     TranscriptionUI::clear(received,sizeof(received)); oledMarkDirty();

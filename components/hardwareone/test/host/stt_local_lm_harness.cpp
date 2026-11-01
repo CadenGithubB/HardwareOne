@@ -81,6 +81,8 @@ class File {
     size_t offset_=0;
 };
 namespace VFS {
+static bool sdAvailable=true;
+bool isSDAvailable() { return sdAvailable; }
 AuthContext systemAuth(const char* reason) { return {reason}; }
 namespace Scopes {  // the production Scopes (System_VFS.h); keep in step
   inline constexpr const char* VIDEOS = "/sd/VIDEOS"; inline constexpr const char* CERTS = "/system/certs";
@@ -141,7 +143,7 @@ bool transcribe(ModelReader reader, const int16_t*, size_t, char* text, size_t c
                 const STTLocalControl& control, STTLocalStats&, char* error, size_t errorCapacity,
                 Diagnostics*, ModelCache* cache, const Decoder* decoder, const STTFeaturePrefix* prefix) {
     assert(!prefix);  // no capture-time rows in these calls
-    assert(reader.read && reader.bytes==fake::state.files.at("/STT Models/quartznet5x5.p4.stt").size());
+    assert(reader.read && reader.bytes==fake::state.files.at(HW1_STT_MODEL_PATH).size());
     fake::state.lastCache=cache;
     if(cache && !cache->loaded())cache->raw_=&fakeWeights;
     text[0]=0; error[0]=0;
@@ -160,7 +162,7 @@ bool transcribe(ModelReader reader, const int16_t*, size_t, char* text, size_t c
 
 namespace {
 using lmtest::Logits;
-constexpr const char* kModel="/STT Models/quartznet5x5.p4.stt";
+constexpr const char* kModel=HW1_STT_MODEL_PATH;
 constexpr const char* kLm="/STT Models/meeting.lm";
 constexpr const char* kWords="/STT Models/custom_words.txt";
 std::vector<uint8_t> meetingLm() {
@@ -170,7 +172,7 @@ std::vector<uint8_t> meetingLm() {
 }
 void reset() {
     assert(fake::state.heap.empty()); // every scenario ends without leaks
-    fake::state=fake::State{};
+    fake::state=fake::State{};VFS::sdAvailable=true;
     fakevocab::text.clear(); fakevocab::generation=1; fakevocab::snapshots=0;
 #if ENABLE_STT_LM
     gLmNoted=0;
@@ -259,7 +261,11 @@ void loadedOncePerSession() {
     assert(logged(weighting)==1);
     assert(fake::state.logs.size()==1);
     assert(fake::state.modelLogs.size()==2); // cold session plus one-shot, never warm calls
-    assert(fake::state.modelLogs[0].find("Model /STT Models/quartznet5x5.p4.stt: file=5487504 expected=5487504 raw=7171984 nodes=71 output_exp=-2")!=std::string::npos);
+    char modelLog[256];
+    std::snprintf(modelLog,sizeof(modelLog),"Model %s: file=%u expected=%u raw=%u nodes=%u output_exp=%d",
+        HW1_STT_MODEL_PATH,unsigned(96+hw1::stt::identity::kCompressedBytes),unsigned(96+hw1::stt::identity::kCompressedBytes),
+        unsigned(hw1::stt::identity::kRawBytes),unsigned(hw1::stt::identity::kNodeCount),hw1::stt::identity::kOutputExponent);
+    assert(fake::state.modelLogs[0].find(modelLog)!=std::string::npos);
 }
 void customWords() {
     reset(); fake::state.files[kLm]=meetingLm();
@@ -381,6 +387,25 @@ void cancellation() {
 }
 
 int main() {
+    // Readiness preserves the known model refusal and the exact selected path.
+    reset(); char error[192]{}; const char* reason=nullptr;
+    assert(sttLocalAvailable(error,sizeof(error),&reason)&&!reason&&!error[0]);
+    if(std::strncmp(kModel,"/sd/",4)==0) {
+        VFS::sdAvailable=false;
+        assert(!sttLocalAvailable(error,sizeof(error),&reason)&&std::strstr(reason,"SD card unavailable"));
+        VFS::sdAvailable=true;
+    }
+    fake::state.files.erase(kModel);
+    assert(!sttLocalAvailable(error,sizeof(error),&reason));
+    assert(reason&&std::strstr(reason,"cannot be opened")&&std::strstr(reason,HW1_STT_MODEL_PATH));
+    assert(std::string(error)==reason);
+    fake::state.files[kModel]={1};
+    assert(!sttLocalAvailable(error,sizeof(error),&reason)&&std::strstr(reason,"wrong size"));
+#if defined(ENABLE_STT_MODEL_15X5_GEN2) && ENABLE_STT_MODEL_15X5_GEN2
+    // Decoder fixtures below are calibrated for the original 5x5 exponent.
+    reset();std::puts("System_STTLocal SD gen2 readiness errors passed");return 0;
+#endif
+
 #if ENABLE_STT_LM
     missing(); crossPhraseMetadata(); configuredStrengthReachesDecoder(); loadedOncePerSession(); customWords(); invalid(); memory(); released(); handOff(); cancellation();
 #else

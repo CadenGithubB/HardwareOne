@@ -2,6 +2,7 @@
 #include "System_STTLocal.h"
 #if ENABLE_LOCAL_STT
 #include <cstdio>
+#include <cstring>
 #include <new>
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
 #include "System_VFS.h"
@@ -296,12 +297,18 @@ struct Backend {
 #endif
 };
 }
-bool sttLocalAvailable(char* error,size_t cap) {
-    if(error&&cap)error[0]=0;
+bool sttLocalAvailable(char* error,size_t cap,const char** reason) {
     File file=openModel();
-    const bool ok=file&&!file.isDirectory()&&file.size()==96+hw1::stt::identity::kCompressedBytes;
-    if(!ok&&error&&cap)snprintf(error,cap,"Install the matching local STT model in /STT Models");
-    return ok;
+    const char* problem=nullptr;
+    if(strncmp(kModelPath,"/sd/",4)==0 && !VFS::isSDAvailable())
+        problem="Speech model SD card unavailable. Insert the model card and mount SD.";
+    else if(!file || file.isDirectory())
+        problem="Speech model cannot be opened. Install the matching model at " HW1_STT_MODEL_PATH ".";
+    else if(file.size()!=96+hw1::stt::identity::kCompressedBytes)
+        problem="Speech model has the wrong size. Reinstall the matching model at " HW1_STT_MODEL_PATH ".";
+    if(reason)*reason=problem;
+    if(error&&cap)snprintf(error,cap,"%s",problem ? problem : "");
+    return !problem;
 }
 bool sttLocalTranscribe(const int16_t* pcm,size_t samples,char* text,size_t textCap,
                        const STTLocalControl& control,STTLocalStats& stats,
@@ -736,8 +743,10 @@ STTLocalCallBudget sttLocalCallBudget(size_t samples,const STTLocalSession* sess
 }
 #else
 STTLocalCallBudget sttLocalCallBudget(size_t,const STTLocalSession*) { return {}; }
-bool sttLocalAvailable(char* error,size_t cap) {
-    if(error&&cap)snprintf(error,cap,"No local STT backend is qualified for this target");
+bool sttLocalAvailable(char* error,size_t cap,const char** reason) {
+    const char* problem="Local transcription is unsupported on this target. Use a supported build.";
+    if(reason)*reason=problem;
+    if(error&&cap)snprintf(error,cap,"%s",problem);
     return false;
 }
 bool sttLocalTranscribe(const int16_t*,size_t,char* text,size_t cap,const STTLocalControl&,

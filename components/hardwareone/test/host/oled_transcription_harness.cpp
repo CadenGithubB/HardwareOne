@@ -57,7 +57,10 @@ static struct{bool up=false,down=false;}gNavEvents;
 constexpr uint32_t INPUT_BUTTON_A=1,INPUT_BUTTON_B=2,INPUT_BUTTON_X=4;
 #define INPUT_CHECK(buttons,mask) ((buttons)&(mask))
 static std::string toast;
-void oledToastShow(const char* text,unsigned){toast=text;}
+enum class OledUIIcon {NONE,ERROR};
+static unsigned toastDuration;
+static OledUIIcon toastIcon;
+void oledToastShow(const char* text,unsigned duration,OledUIIcon icon=OledUIIcon::NONE){toast=text;toastDuration=duration;toastIcon=icon;}
 void oledMarkDirty(){}
 void requestOLEDMode(OLEDMode mode,const char*){currentOLEDMode=mode;}
 #include "OLED_Layout.h"
@@ -95,6 +98,12 @@ static void home(){currentOLEDMode=OLED_TRANSCRIPTION;tick();assert(request()=="
 static void start(){v.menu.selectedIndex=0;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="transcription start");answer(status(true));tick(1);}
 static void list(){v.menu.selectedIndex=3;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="transcripts list internal 0");answer("{\"success\":true,\"offset\":0,\"nextOffset\":2,\"more\":true,\"entries\":[{\"name\":\"one.txt\",\"path\":\"/stt/u7/one.txt\"},{\"name\":\"two.txt\",\"path\":\"/stt/u7/two.txt\"}]}");tick(1);}
 int main(){
+  reset();home();v.menu.selectedIndex=0;menuInput(0,0,INPUT_BUTTON_A);tick(1);
+  const char* refusal="Speech model cannot be opened. Install the matching model at /sd/STT Models/quartznet15x5-gen2-25397.p4.stt.";
+  const std::string failure=std::string("{\"success\":false,\"error\":\"")+refusal+"\"}";
+  answer(failure);tick(1);
+  assert(std::string(v.message)==refusal&&toast==refusal&&toastDuration==8000&&toastIcon==OledUIIcon::ERROR);
+
   reset();home();start();tick();assert(request()==std::string("transcription next ")+id);
   answer("{\"success\":true,\"available\":true,\"sequence\":1,\"offset\":0,\"length\":6,\"sttText\":\"hello \"}");assert(v.recent[0]==0);tick(1);assert(std::string(v.recent)=="hello ");
   tick();assert(request()==std::string("transcription ack ")+id+" 1 0 6");answer("transport reply lost",false);tick(1);assert(std::string(v.recent)=="hello ");tick();assert(request()==std::string("transcription ack ")+id+" 1 0 6");answer("{\"success\":true}");tick(1);
@@ -109,7 +118,7 @@ int main(){
   // Exact bridge epoch fence is independent of a caller's command contents.
   assert(!submitOLEDCommandForSession("transcription start",99,nullptr,nullptr));
   // Numeric toggle reports ordinary command failure and refreshes state.
-  v.menu.selectedIndex=2;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="sttsavetranscripts 1");answer("Error: Admin required",true);tick(1);assert(std::string(v.message)=="Setting change failed");assert(request()=="transcription status");answer(status(false,""));tick(1);
+  v.menu.selectedIndex=2;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="sttsavetranscripts 1");answer("Error: Admin required",true);tick(1);assert(std::string(v.message)=="Error: Admin required");assert(toast=="Error: Admin required"&&toastDuration==8000&&toastIcon==OledUIIcon::ERROR);assert(request()=="transcription status");answer(status(false,""));tick(1);
   // List and file reads cannot publish after Back or selecting another file.
   // Mic row cycles reachable sources through micsource, then refreshes status.
   v.micPdm=true;v.micG2=false;std::strcpy(v.micSource,"auto");populateMenu();assert(std::string(v.menu.items[5])=="Mic: Auto");
@@ -123,8 +132,8 @@ int main(){
   queueOkay=false;gNavEvents.down=true;fileInput(0,0,0);gNavEvents={};tick(1);assert(pending.length());currentOLEDMode=OLED_TRANSCRIPTS;tick(1);assert(!pending.length());queueOkay=true;
   // Session boundary reset clears cached private file/live text before rendering.
   std::strcpy(v.recent,"old user");std::strcpy(v.text,"old file");resetOLEDTranscription();liveEpoch=11;currentOLEDMode=OLED_MENU;tick(1);assert(v.recent[0]==0&&v.text[0]==0);
-  // Compact display status cannot wrap into the menu; UTF-8 glyph walking is bounded.
-  std::memset(v.message,'M',sizeof(v.message)-1);v.message[sizeof(v.message)-1]=0;displayTranscriptionHome();assert(display.printed.size()==21);
+  // Wrapped display status reserves menu space; UTF-8 glyph walking is bounded.
+  std::memset(v.message,'M',sizeof(v.message)-1);v.message[sizeof(v.message)-1]=0;displayTranscriptionHome();assert(display.printed.size()<=21&&v.menu.visibleLines>=2);
   assert(lines("\xc3\xa9\xe2\x82\xac\nend")==2);v.preparing=true;display.body.clear();displayTranscriptionLive();assert(display.body=="Preparing...");
   reset();
   // Additional rows must be drawn AND included in live/file scroll boundaries.

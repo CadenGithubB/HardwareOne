@@ -11,6 +11,7 @@
 #include "System_DictationPolicy.h"
 #define ENABLE_ESP_SR 1
 #define ENABLE_DICTATION 1
+#define ENABLE_UART_HOST_LINK 0
 #define INFO_SYSTEMF(...) ((void)0)
 #define DICTATION_MAX_TEXT 256
 #define EXT_RAM_BSS_ATTR
@@ -115,7 +116,7 @@ static void dictationResolveCleanup(uint64_t){}
 static void dictFormatId(uint64_t id,char out[17]){snprintf(out,17,"%016llx",static_cast<unsigned long long>(id));}
 static bool modelReady=true;
 static int readyChecks=0;
-bool sttLocalAvailable(char*,size_t){++readyChecks;return modelReady;}
+bool sttLocalAvailable(char*,size_t,const char** reason){++readyChecks;if(reason)*reason=modelReady?nullptr:"Speech model SD card unavailable. Insert the model card and mount SD.";return modelReady;}
 static int beginCalls=0,cancelCalls=0,finishCalls=0,ackCalls=0;
 static bool beginOK=true,ackOK=true;
 static STTOwner brokerOwner;
@@ -166,14 +167,13 @@ static std::vector<uint64_t> cleanup,stops,cancelEvents;
 void requestStopRecordingOwned(uint64_t id,bool){stops.push_back(id);}
 bool dictationQueueCleanup(uint64_t id,bool){cleanup.push_back(id);return true;}
 void dictationQueueCancelEvent(uint64_t id,uint32_t){cancelEvents.push_back(id);}
+static bool micAvailable=true;
+static bool audioAnySourceAvailable(){return micAvailable;}
+static bool uartLinkIsRunning();
+static uint32_t uartLinkSessionEpoch();
+static bool dictationHostReadyForEpoch(uint32_t,const char**);
 // INSERT_LOCAL
-bool dictationAvailable(const char** why){
-#if ENABLE_LOCAL_STT
- return dictationLocalAvailable(why);
-#else
- (void)why;return true;
-#endif
-}
+// INSERT_AVAILABILITY
 // INSERT_DRAIN
 // INSERT_STOP
 // INSERT_BEGIN
@@ -191,7 +191,7 @@ static void reset(){
  brokerRequestedSource=micInitSource=recorderSource=AUDIO_SRC_NONE;micInitCalls=recorderStarts=0;recorderSilenceMs=0;
  activeSource=AUDIO_SRC_LOCAL_PDM;
 #if ENABLE_LOCAL_STT
- gLocalDict=LocalDictation{};gLocalReadyKnown=gLocalReady=gLocalReadyPending=false;gLocalReadyCheckedMs=0;
+ gLocalDict=LocalDictation{};gLocalReadyKnown=gLocalReady=gLocalReadyPending=false;gLocalReadyCheckedMs=0;gLocalReadyReason=nullptr;
 #endif
  assert(criticalDepth==0);savePreference=inTranscriptWorker=false;transcriptWriteOK=true;
  transcriptUser="wearer";transcriptCaptureCalls=transcriptAppendCalls=transcriptFinishCalls=0;
@@ -345,8 +345,8 @@ static void testLocalSaving(){
 static void testLocal(){
  char text[257];DictationTextReceipt receipt,old;
  reset();ready();for(int i=0;i<100;++i)assert(dictationAvailable(nullptr));assert(readyChecks==1);
- srBusy=true;const char* why=nullptr;assert(!dictationAvailable(&why)&&std::string(why)=="run closesr first");srBusy=false;
- gMicRunning=true;assert(!dictationAvailable(&why)&&std::string(why)=="run closemic first");gMicRunning=false;
+ srBusy=true;const char* why=nullptr;assert(!dictationAvailable(&why)&&std::string(why)=="Speech commands are using the mic. Stop speech recognition first.");srBusy=false;
+ gMicRunning=true;assert(!dictationAvailable(&why)&&std::string(why)=="Mic recording is active. Stop recording before transcription.");gMicRunning=false;
  begin();assert(gDict.requestHostEpoch==0&&!gDict.requestWasPushed&&!gDict.cleanupOwner);
  produce(1,std::string(512,'a'));dictationProcessLocal();assert(gDict.state==DictationState::RECORDING&&gDict.textPending&&ackCalls==0);
  assert(dictationPeekTextFor(glasses.source,text,sizeof(text),&receipt)&&receipt.length==256);
@@ -377,7 +377,7 @@ static void testLocal(){
  reset();ready();begin();produce(1,"ok");dictationProcessLocal();assert(dictationTakeTextFor(glasses.source,text,sizeof(text)));ackOK=false;dictationProcessLocal();assert(gDict.state==DictationState::FAILED&&strstr(gDict.failure,"acknowledgment"));
  reset();ready();begin();produce(1,"\n control");dictationProcessLocal();assert(gDict.state==DictationState::FAILED&&!gDict.textPending);
  reset();ready();beginOK=false;assert(dictationBeginLocal(glasses.source,glasses.epoch));dictationProcessLocal();assert(gDict.state==DictationState::FAILED&&strstr(gDict.failure,"closemic")&&!gLocalDict.exchange);
- reset();modelReady=false;assert(!dictationAvailable(&why));dictationProcessLocal();assert(!dictationAvailable(&why)&&!dictationBeginLocal(glasses.source,glasses.epoch));
+ reset();modelReady=false;assert(!dictationAvailable(&why));dictationProcessLocal();assert(!dictationAvailable(&why)&&std::string(why)=="Speech model SD card unavailable. Insert the model card and mount SD."&&!dictationBeginLocal(glasses.source,glasses.epoch));
 }
 #endif
 static void testAppAdmission() {
@@ -707,7 +707,14 @@ static void testAppSpeakers() {
 #endif
  assert(!dictationAppReadSpeakers(app,nullptr));
 }
-int main(){testAppSpeakers();testAppLocalLifecycle();testWorkerSupervision();testAppSnapshotAndRecovery();testAppDelivery();testAppControls();testAppAdmission();testConsumerIdentity();testAppPurpose();testAppOptions();testPiMailbox();
+int main(){
+ const char* unavailable=nullptr;micAvailable=false;
+ assert(!dictationAvailable(&unavailable)&&std::strstr(unavailable,"Connect glasses"));micAvailable=true;
+#if !ENABLE_LOCAL_STT
+ hostRunning=false;assert(!dictationAvailable(&unavailable)&&std::strstr(unavailable,"No transcription engine enabled"));hostRunning=true;
+ hostEpoch=0;assert(!dictationAvailable(&unavailable)&&std::strstr(unavailable,"CM5 host is not signed in"));hostEpoch=9;
+#endif
+testAppSpeakers();testAppLocalLifecycle();testWorkerSupervision();testAppSnapshotAndRecovery();testAppDelivery();testAppControls();testAppAdmission();testConsumerIdentity();testAppPurpose();testAppOptions();testPiMailbox();
 #if ENABLE_LOCAL_STT
  testLocalSaving();testLocal();
 #else

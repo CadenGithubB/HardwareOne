@@ -63,7 +63,7 @@ struct DictationControl {
   bool micStopPending;               // deferred teardown; see dictationTick()
   bool textPending;
   char text[DICTATION_MAX_TEXT + 1];
-  char failure[40];
+  char failure[192];
   uint64_t exchangePathOwner;
   char exchangePath[64];
   // At most one debt exists because admission is refused until it clears. The
@@ -296,7 +296,7 @@ static bool dictationHostReadyForEpoch(uint32_t liveEpoch,
   portEXIT_CRITICAL(&gDictMux);
 
   if (liveEpoch == 0 || capabilityEpoch != liveEpoch) {
-    if (whyNot) *whyNot = "host not ready";
+    if (whyNot) *whyNot = "CM5 transcription service not ready. Start its dictation service.";
     return false;
   }
 
@@ -308,9 +308,9 @@ static bool dictationHostReadyForEpoch(uint32_t liveEpoch,
       liveEpoch, capabilityEpoch, presence.seenForSession, presence.fresh,
       readyOrBusy);
   if (!ready && whyNot) {
-    *whyNot = !presence.seenForSession ? "host not present"
-             : !presence.fresh         ? "host stale"
-                                       : "host not ready";
+    *whyNot = !presence.seenForSession ? "CM5 has not checked in. Check its host service."
+             : !presence.fresh         ? "CM5 heartbeat expired. Check its connection and host service."
+                                       : "CM5 transcription service not ready. Start its dictation service.";
   }
   if (ready && whyNot) *whyNot = nullptr;
   return ready;
@@ -664,6 +664,7 @@ static LocalDictation gLocalDict;
 static bool gLocalReadyPending = false;
 static bool gLocalReadyKnown = false;
 static bool gLocalReady = false;
+static const char* gLocalReadyReason = nullptr; // Static backend message; gDictMux protected.
 static uint32_t gLocalReadyCheckedMs = 0;
 static bool dictationEnsureWorker();
 
@@ -674,10 +675,12 @@ static void dictationRefreshLocalReady() {
   gLocalReadyPending = false;
   portEXIT_CRITICAL(&gDictMux);
   if (!due) return;
-  char error[96] = {};
-  const bool ready = sttLocalAvailable(error, sizeof(error));
+  char error[192] = {};
+  const char* reason = nullptr;
+  const bool ready = sttLocalAvailable(error, sizeof(error), &reason);
   portENTER_CRITICAL(&gDictMux);
   gLocalReady = ready;
+  gLocalReadyReason = reason;
   gLocalReadyKnown = true;
   gLocalReadyCheckedMs = millis();
   portEXIT_CRITICAL(&gDictMux);
@@ -685,25 +688,27 @@ static void dictationRefreshLocalReady() {
 
 static bool dictationLocalAvailable(const char** whyNot) {
   if (!dictationEnsureWorker()) {
-    if (whyNot) *whyNot = "local worker unavailable";
+    if (whyNot) *whyNot = "Transcription worker could not start. Stop other tasks and retry.";
     return false;
   }
   bool known, ready;
+  const char* modelReason;
   portENTER_CRITICAL(&gDictMux);
   known = gLocalReadyKnown;
   ready = gLocalReady;
+  modelReason = gLocalReadyReason;
   if (!known || millis() - gLocalReadyCheckedMs >= 5000) gLocalReadyPending = true;
   portEXIT_CRITICAL(&gDictMux);
   dictationWakeWorker();
   const char* why = nullptr;
 #if ENABLE_ESP_SR
-  if (isESPSRRunning() || audioCaptureOwnedBy("sr")) why = "run closesr first";
+  if (isESPSRRunning() || audioCaptureOwnedBy("sr")) why = "Speech commands are using the mic. Stop speech recognition first.";
 #endif
   if (!why && (gMicRunning || micRecordingBusy() || audioCaptureOwnedBy("mic")))
-    why = "run closemic first";
-  if (!why && audioCaptureBusy() && !audioCaptureOwnedBy("stt")) why = "microphone busy";
-  if (!why && !known) why = "checking local model";
-  if (!why && !ready) why = "local model unavailable";
+    why = "Mic recording is active. Stop recording before transcription.";
+  if (!why && audioCaptureBusy() && !audioCaptureOwnedBy("stt")) why = "Microphone is in use. Stop the other audio session and retry.";
+  if (!why && !known) why = "Checking speech model. Please wait.";
+  if (!why && !ready) why = modelReason ? modelReason : "Speech model unavailable. Install the model for this build.";
   if (whyNot) *whyNot = why;
   return why == nullptr;
 }
@@ -813,7 +818,7 @@ static void dictationProcessLocal() {
 
   if (run.beginPending) {
     STTToken token = 0;
-    char error[96] = {};
+    char error[192] = {};
     const bool accepted = current &&
         displaySessionStillLive(run.actor.source, run.actor.epoch) &&
         sttBeginContinuous(run.actor, &token, error, sizeof(error), &run.transcriptOptions,
@@ -1047,7 +1052,7 @@ bool dictationAvailable(const char** whyNot) {
   if (!audioAnySourceAvailable()) {
     // Covers both boards with no PDM silicon and a board whose glasses are not
     // connected right now. Either way there is nothing to record with.
-    if (whyNot) *whyNot = "no mic";
+    if (whyNot) *whyNot = "No microphone available. Connect glasses or enable a supported mic.";
     return false;
   }
 #if ENABLE_LOCAL_STT
@@ -1056,12 +1061,14 @@ bool dictationAvailable(const char** whyNot) {
   return dictationLocalAvailable(whyNot);
 #endif
   if (!uartLinkIsRunning()) {
-    if (whyNot) *whyNot = "no host link";
+    if (whyNot) *whyNot = ENABLE_UART_HOST_LINK
+        ? "CM5 UART link is off. Connect the CM5 and enable its host link."
+        : "No transcription engine enabled. Use a local STT build or a CM5 host build.";
     return false;
   }
   const uint32_t hostEpoch = uartLinkSessionEpoch();
   if (hostEpoch == 0) {
-    if (whyNot) *whyNot = "host not logged in";
+    if (whyNot) *whyNot = "CM5 host is not signed in. Authenticate its UART session.";
     return false;
   }
   return dictationHostReadyForEpoch(hostEpoch, whyNot);

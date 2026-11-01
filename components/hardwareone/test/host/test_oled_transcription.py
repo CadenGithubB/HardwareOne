@@ -13,6 +13,7 @@ def main():
     source=(COMPONENT/'OLED_Mode_Transcription.cpp').read_text()
     source=re.sub(r'^#include.*\n','',source,flags=re.M)
     harness=(HERE/'oled_transcription_harness.cpp').read_text()
+    harness='#include \"OLED_MessageText.h\"\n'+harness
     harness=harness.replace('// INSERT_PRODUCTION',source)
     harness=harness.replace('// INSERT_POLICY',(COMPONENT/'Transcription_UI_Policy.h').read_text().replace('#pragma once',''))
     bridge=extract_block((COMPONENT/'OLED_Utils.cpp').read_text(),'bool submitOLEDCommandForSession(')
@@ -21,7 +22,7 @@ def main():
         unit=Path(tmp)/'test.cpp';exe=Path(tmp)/'test';unit.write_text(harness)
         cmd=['clang++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-const-variable','-I',str(COMPONENT.parent/'hardwareone_libs/ArduinoJson/src'),'-I',str(COMPONENT),str(unit),'-o',str(exe)]
         if args.sanitize:cmd[1:1]=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g']
-        for height in (64,128):
+        for height in (64,88,128):
             subprocess.run(cmd+['-DTEST_CANVAS_HEIGHT='+str(height)],check=True)
             subprocess.run([str(exe)],check=True)
 if __name__=='__main__':main()
