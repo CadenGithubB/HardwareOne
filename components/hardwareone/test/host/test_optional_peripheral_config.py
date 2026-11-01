@@ -66,10 +66,10 @@ class PeripheralConfig(unittest.TestCase):
         config = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())
         self.check_profile(config['features'], [
             'BOARD_SUPPORTED == 1', 'HW_BOARD_WAVESHARE_P4_TOUCH == 1',
-            'ENABLE_OLED_DISPLAY == 0', 'ENABLE_GPIO_ENCODER == 0',
+            'ENABLE_OLED_DISPLAY == 1', 'ENABLE_GPIO_ENCODER == 0',
             'ENABLE_SD_CARD == 0', 'ENABLE_CAMERA_SENSOR == 0',
             'ENABLE_MICROPHONE_SENSOR == 0', 'ENABLE_BATTERY_MONITOR == 0',
-            'ENABLE_LOCAL_STT == 0', 'ENABLE_WIFI == 1',
+            'ENABLE_LOCAL_STT == 0', 'ENABLE_WIFI == 1', 'ENABLE_SPEAKER == 1',
             'I2C_SDA_PIN_DEFAULT == 7', 'I2C_SCL_PIN_DEFAULT == 8'],
             board_profile=repo / 'boards/waveshare_p4_touch_lcd_5.features.h')
 

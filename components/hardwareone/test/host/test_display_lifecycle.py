@@ -51,7 +51,7 @@ def compile_and_run(cxx: str, sanitize: bool, display_type: int, power_pin: bool
         for name in ("display_lifecycle_platform.h", "display_lifecycle_harness.cpp"):
             shutil.copy2(HERE / name, work / name)
         for name in ("System_I2C.h", "System_Settings.h", "OLED_Display.h", "Wire.h",
-                     "Arduino.h", "Adafruit_SSD1306.h", "HAL_Display_P4Eye.h"):
+                     "Arduino.h", "Adafruit_SSD1306.h", "HAL_Display_P4Eye.h", "HAL_Display_Waveshare.h"):
             (work / name).write_text('#pragma once\n#include "display_lifecycle_platform.h"\n')
         config = """#pragma once
 #include <cstdint>
@@ -60,6 +60,7 @@ def compile_and_run(cxx: str, sanitize: bool, display_type: int, power_pin: bool
 #define DISPLAY_TYPE_ST7789 2
 #define DISPLAY_TYPE_ILI9341 3
 #define DISPLAY_TYPE_ST7789_P4_EYE 4
+#define DISPLAY_TYPE_HX8394_WAVESHARE 5
 """
         config += f"#define DISPLAY_TYPE {display_type}\n"
         if power_pin:
@@ -81,7 +82,7 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     args = parser.parse_args()
-    for display_type, power_pin in ((1, False), (1, True), (4, False), (0, False)):
+    for display_type, power_pin in ((1, False), (1, True), (4, False), (5, False), (0, False)):
         compile_and_run(args.cxx, args.sanitize, display_type, power_pin)
     check_ui_boundary()
     print("display_lifecycle: SSD1306, power-gated SSD1306, P4 canvas and disabled builds pass")

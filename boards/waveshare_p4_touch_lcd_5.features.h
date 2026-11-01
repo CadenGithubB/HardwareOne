@@ -1,15 +1,15 @@
 #pragma once
-// Initial Waveshare P4 Touch base-board support. Display/touch, codec audio,
-// camera, SD and battery drivers are not qualified for this assembly yet.
+// Waveshare LCD-5: HX8394 display and ES8311 speaker support.
+// Touch, microphone, camera, SD and battery remain disabled.
 // Optional application choices belong in the saved bring-up configuration.
 #undef HW_BOARD_WAVESHARE_P4_TOUCH
 #define HW_BOARD_WAVESHARE_P4_TOUCH 1
 #undef DISPLAY_TYPE
-#define DISPLAY_TYPE 0
+#define DISPLAY_TYPE 5
 #undef INPUT_DEVICE_TYPE
 #define INPUT_DEVICE_TYPE 0
 #undef I2C_FEATURE_LEVEL
-#define I2C_FEATURE_LEVEL 0
+#define I2C_FEATURE_LEVEL 1
 #undef XIAO_ESP32S3_SENSE_ENABLED
 #define XIAO_ESP32S3_SENSE_ENABLED 0
 #undef ENABLE_NEOPIXEL
@@ -24,3 +24,6 @@
 #define ENABLE_SDMMC_CARD 0
 #undef HW1_SR_MODELS_IN_FILESYSTEM
 #define HW1_SR_MODELS_IN_FILESYSTEM 1
+
+#undef ENABLE_SPEAKER
+#define ENABLE_SPEAKER 1

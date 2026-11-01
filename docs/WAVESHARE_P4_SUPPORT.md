@@ -1,127 +1,175 @@
-# Waveshare P4 support investigation
+# Waveshare ESP32-P4-WIFI6-Touch-LCD-5
 
-Initial inspection: 2026-11-01. Branch: `codex/waveshare-p4-support`,
-created from `40261a39`. Existing uncommitted STT/G2/OpenClaw work was
-preserved in the checkout; it is not part of this investigation's changes.
+Bring-up: 2026-11-01, branch `codex/waveshare-p4-support`. Existing unrelated
+STT/G2/OpenClaw edits were preserved. The user confirmed the **5-inch model**;
+the initially pasted 4.3-inch ST7701 page is not this device.
 
-## Device identity and observed factory boot
+## Device and scope
 
-- USB hub device: `/dev/cu.usbmodem5ABA0541421`, USB serial `5ABA054142`,
-  VID:PID `1a86:55d3`, USB name `USB Single Serial`.
-- Existing STT board remains separate: USB serial `E8:F6:0A:E3:A7:68`,
-  `/dev/cu.usbmodem101`. Do not use that port for this board's work.
-- Read the new device at 115200 baud with DTR/RTS initially false. A complete
-  boot sequence appeared during the read; opening the bridge may have reset
-  the device. No commands, flash writes or erase operations were issued.
-- Factory firmware identifies `Waveshare ESP32-P4-WIFI6-Touch-LCD-5`.
-- ESP32-P4 revision v1.3; runtime CPU frequency 360 MHz.
-- 32 MB PSRAM, 200 MHz; memory test passed. Flash vendor reports `gd`, QIO;
-  flash capacity has not yet been measured.
-- Application `phone_p4_function_ev_board`, version
-  `v0.4.2-113-ge0e613f-dirty`, compiled Jan 27 2026.
-- Factory SDK `v5.5.2-249-gf56bea3d1f-dirty`.
-- HX8394 MIPI DSI display initialized; demo stylesheet 720x1280.
-- GT911 touch initialized at I2C address 0x5d.
-- ES8311 output codec and ES7210 microphone codec initialized; MIC1/MIC2,
-  16 kHz, 16-bit, two channels reported.
-- ESP-Hosted SDIO initialized successfully: CLK18, CMD19, D0=14, D1=15,
-  D2=16, D3=17, companion reset GPIO54, four-bit bus at 40 MHz.
-- Console UART uses GPIO38/37.
+- Target USB hub port `/dev/cu.usbmodem5ABA0541421`, bridge serial `5ABA054142`,
+  VID:PID `1a86:55d3`. P4 MAC `80:f1:b2:d1:c3:12`, silicon revision v1.3.
+- Existing STT board `/dev/cu.usbmodem101`, serial `E8:F6:0A:E3:A7:68`, was
+  not flashed or reset. Never substitute that port for this bring-up.
+- esptool verified 32 MB flash; 32 MB PSRAM at 200 MHz passed the boot memory
+  test. CPU is 360 MHz; UART0 TX37/RX38, console 115200 baud.
+- User authorized P4/C6 installation, declined a factory backup, and explicitly
+  approved erasing the new filesystem region. The P4 was flashed and verified.
+- Touch, microphone capture, camera, battery and SD remain disabled/unqualified.
+  Speaker listening was explicitly deferred by the user after the driver test.
 
-These observations establish factory peripheral initialization, not Hardware
-One qualification. Exact PCB revision, physically measured flash size, remaining wiring and radio
-firmware compatibility still need verification.
+## Configuration and wiring
 
-## Integration approach
-
-Use the separate board identity `waveshare_p4_touch_lcd_5`, following
-CONTRIBUTING.md. The existing `boards/p4x_eye.defaults` has different Hosted
-SDIO pins (27–32, reset9) and must not be used unchanged on this board.
-
-1. Verify schematic/BSP pin ownership, flash geometry, SD slot, audio clocks,
-   display reset/backlight and touch wiring against the actual board.
-2. Add board defaults and pin definitions through the existing board-selection
-   mechanism, plus a minimal saved configuration for serial bring-up.
-3. Reuse P4 services and HAL interfaces; add the appropriate display/touch and
-   codec backends without making shared services depend on the board name.
-4. Verify SDK support for silicon revision v1.3 and compatibility with the
-   factory radio firmware. Preserve recovery inputs before firmware changes.
-5. Build the new profile and a P4X-EYE baseline, then qualify serial, memory,
-   radio, display/touch and audio incrementally on this device.
-
-The user physically confirmed the **5-inch model** on 2026-11-01. The pasted
-4.3-inch product page was a different variant; its ST7701 display parameters
-must not be used here.
-
-## Initial implementation
-
-- `boards/waveshare_p4_touch_lcd_5.defaults`: rev1.x silicon, 360 MHz,
-  32 MB flash, shared P4 PSRAM policy (200 MHz), UART0 GPIO37/38 console,
-  C6 SDIO on GPIO14–19 and reset54. Radio clock starts at 20 MHz.
-- Board feature header and System_BuildConfig identity: no EYE display,
-  encoder, PDM microphone, battery ADC or SD power/detect assumptions.
-- `configurations/waveshare-p4-bringup.json`: serial, Wi-Fi, basic web and BLE
-  bring-up. No ESP-NOW bridge is assumed in the factory companion firmware.
-- A factory-only 32 MB partition layout with an 8 MB app slot and remaining
-  LittleFS space. This is not the vendor layout and has no recovery-OTA contract.
-- `HAL_Radio` now reads SDIO/reset pins from the selected SDK board defaults;
-  optional companion boot/UART wiring belongs to the P4X-EYE board header.
-  Console mirroring reports unsupported on the Waveshare instead of touching
-  EYE pins. EYE pins and behavior are preserved for its own profile.
-
-Build with the existing setup tool after exporting ESP-IDF 5.5.5 and staging
-`tools/p4/prepare_sdk.sh`:
+Use `configurations/waveshare-p4-bringup.json` with board
+`waveshare_p4_touch_lcd_5`. Build through the saved-profile tool:
 
 ```sh
+source /Users/cadbecaimacmini/esp/esp-idf/export.sh
 python3 tools/build_config.py build waveshare-p4-bringup
 ```
 
-This is **initial headless support**, not complete peripheral support. The
-HX8394 DSI display, GT911 touch, ES8311/ES7210 audio and optional OV5647 need
-separate backend integration. SD qualification remains deferred under the
-project guidance. Do not enable the EYE drivers to substitute for these.
-The factory radio's version compatibility remains unqualified.
+For direct incremental `idf.py` use, retain `HW_BOARD=waveshare_p4_touch_lcd_5`
+in the environment. Otherwise a CMake regeneration drops the board selection.
+Do not flash an image whose resolved board, flash size or partition table differs.
 
-No device was flashed. Before deploying the new layout, preserve the complete
-factory flash and establish recovery, verify actual capacity and companion
-compatibility, then explicitly authorize the layout-changing flash.
+| Hardware | Configuration |
+| --- | --- |
+| C6 Hosted SDIO | CLK18, CMD19, D0–D3 GPIO14–17, reset54; slot1, 4-bit, 20 MHz |
+| Shared I2C | SDA7, SCL8; project bus0, Arduino Wire1/I2C1 |
+| HX8394 DSI panel | 720×1280, two lanes at 700 Mbps, DPI 58 MHz |
+| Panel timing | H pulse/back/front 20/20/40; V pulse/back/front 4/10/24 |
+| Panel reset | GPIO27, **active-high** |
+| Panel power | MIPI PHY LDO3, 2.5 V |
+| Backlight | GPIO26, 5 kHz, 10-bit PWM |
+| ES8311 speaker | I2C address 0x18; MCLK13, BCLK12, WS10, DOUT9; amplifier GPIO53 high |
 
-Build directories are isolated by saved profile; shared SDK override and
-managed dependency directories belong to this checkout. No source snapshot
-or extra worktree was created.
+Board defaults own wiring and ordinary feature defaults. Shared services use
+HAL interfaces. The EYE profile's GPIO33/35/36 companion programming/console
+wiring is not available on this board; do not run its temporary programmer here.
 
-## Vendor references
+The factory-only partition layout has an 8 MB application at `0x10000` and
+LittleFS at `0x810000`, length `0x17f0000` (through `0x1FFFFFF`). It has no
+recovery-OTA slot contract. The filesystem region was erased with the user's
+explicit approval and Hardware One now mounts it successfully.
 
-- https://docs.waveshare.com/ESP32-P4-WIFI6-Touch-LCD-5
-- https://github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-5
-- https://files.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-5/ESP32-P4-WIFI6-Touch-LCD-5-Schematic.pdf
+## Display and speaker
 
-The official repository provides examples, schematic and factory firmware;
-inspect those sources before implementing pin assignments beyond the observed
-serial log.
+`HAL_Display_Waveshare` adapts the existing 128×64 software UI canvas to a
+640×320 region centered on the portrait panel. It owns DSI, framebuffer,
+backlight and cleanup. The UI remains the existing Hardware One interface.
+Input is independent and disabled. DSI command draining has a deadline so an
+unresponsive panel does not fill IDF 5.5's indefinitely-blocking command FIFO.
 
-## Validation completed 2026-11-01
+Two physical bring-up issues were addressed:
 
-- `waveshare-p4-bringup`: ESP-IDF 5.5.5 build and link passed. Image
-  2,095,664 bytes; 8,388,608-byte app partition; 6,292,944 bytes free.
-  App SHA-256: `03706eb4e9a2ef123e759395c30773d5ba0c54635e4603a54ed9a82f0ffd5192`.
-- `p4-glasses-test` regression build and link passed: 5,470,848-byte image,
-  1,955,200 bytes free. Resolved EYE clock=400 MHz, SDIO CLK28/reset9;
-  Waveshare clock=360 MHz, SDIO CLK18/reset54. EYE console mirror wiring
-  remains GPIO33/35/36. No physical EYE regression test was performed.
-- 13 optional-peripheral configuration tests passed, including Waveshare
-  identity/defaults and rejection of EYE-only display/encoder/SD choices.
-- 21 saved-configuration tests and 10 SDK-policy tests passed.
-- Explicit checks of the generated Waveshare SDK configuration passed for
-  silicon revision, flash/PSRAM, UART and all SDIO/reset pins.
-- Existing dependency/compiler warnings remain; no build errors. No flash or
-  runtime Hardware One qualification was performed on either device.
+1. The board reset circuit is active-high. Leaving GPIO27 high holds the panel
+   in reset and stalls DSI initialization. The backend now releases it low.
+2. Arduino `ledcWrite` promotes duty 1023 to constant-high 1024. This board's
+   AC-coupled backlight needs PWM edges, so that caused severe whole-screen
+   strobing at default maximum brightness. An initial cap at 1022 was still
+   unstable after startup power policy reapplied maximum brightness. The backend now maps logical 255 to duty 720
+   (about 70%), matching the range the user confirmed stable at brightness 180
+   with the earlier mapping. Boot policy can no longer exceed that range. Visual confirmation of this
+   final mapping after reboot is pending; full brightness is not qualified.
 
-Local evidence is in `work/waveshare-p4/` (logs, build manifests, resolved SDK
-settings and image hashes). The selected Waveshare build, including ELF and
-partition/bootloader binaries, is retained in
-`build-config-waveshare-p4-bringup/` (about 858 MiB) for incremental bring-up.
-The temporary P4X-EYE regression build was removed after preserving its
-manifest/configuration/hash, recovering 1,081,741,312 allocated bytes (about
-1.01 GiB). Shared patched SDK sources (134 MiB) and managed dependencies
-(426 MiB) remain for builds in this checkout. No additional cleanup is pending.
+The backend skips unchanged canvas frames and synchronizes only the centered
+UI band after drawing, reducing PSRAM bandwidth. This follows observed DSI
+underruns during heavy filesystem activity in an earlier image.
+
+`HAL_Speaker` owns TX-only I2S, ES8311 initialization and amplifier gating.
+Codec accesses use the existing shared I2C transaction mechanism. Every error
+path releases the I2S channel, codec and amplifier. The command
+`speakertone [100..4000 Hz] [50..2000 ms] [0..60 volume]` validates arguments
+before accessing hardware; defaults are 660 Hz, 400 ms, 25 volume.
+
+On-device `speakertone 660 600 40` initialized ES8311, completed I2S writes and
+returned success. **Audible output has not been confirmed**: the user was away
+and asked to skip listening for now. This is tone playback support, not a media
+player or microphone integration.
+
+## Companion installation
+
+Factory C6 firmware responds to legacy Wi-Fi RPCs but lacks current version,
+application-description and bridge queries. HAL accepts either a successful
+MAC query or its explicit remote `ESP_ERR_WIFI_NOT_INIT` response as transport
+evidence, enabling the existing authenticated SDIO firmware update path.
+Unanswered probes still fail; version/bridge qualification remains separate.
+
+Hardware One's pinned C6 companion built successfully (1,245,888 bytes).
+Serial upload completed. The first SDIO attempt began successfully but timed
+out on a 4 KB write; the legacy path now uses 1 KB requests and completed.
+The factory firmware rebooted automatically after OTA end, so the subsequent
+new-protocol activation request timed out and the updater reported failure.
+Recovery reconnected successfully: `c6status` verified Hosted 2.12.13, the
+ESP-NOW bridge, and a valid running `ota_1` image. The latest P4 reboot again
+confirmed those results, with zero missed heartbeats or transport errors.
+The temporary uploaded image was deleted from the device after verification.
+
+## Provisioning and verification
+
+Normal Advanced Setup created the admin account and enabled the display and
+I2C. Device name is `HardwareOne-Waveshare`. Credentials are saved privately in
+ignored `work/waveshare-p4/device-admin.json` (mode 0600); do not commit them.
+No Wi-Fi credentials were supplied.
+
+- Waveshare build/link passed: application 2,370,544 bytes, 8,388,608-byte slot,
+  6,018,064 bytes free. Final flash hash verified, reboot and display init passed.
+- P4X-EYE `p4-glasses-test` baseline passed: 5,471,072 bytes, 1,954,976 bytes free.
+  No physical EYE regression test was performed.
+- 13 optional-peripheral config tests and 21 saved-config tests passed.
+- Display lifecycle sanitizer checks passed including the type 5 backend boundary.
+- Latest-image 65,536-byte filesystem upload/delete passed with zero reported
+  display underruns or watchdog warnings; display status remained connected.
+  This is a short stress check, not long-duration display qualification.
+- These checks do not qualify touch, microphone, SD or untested radio features.
+
+Local logs, firmware hashes, resolved profiles and baseline evidence are in
+`work/waveshare-p4/`. The active Waveshare build retains matching firmware,
+ELF and partition/bootloader binaries for incremental hardware work. The
+completed baseline and companion build directories were removed after retaining
+baseline manifests/configuration and matching C6 firmware/debug/layout files.
+Final cleanup recovered 1,314,566,144 allocated bytes (about 1.22 GiB). Shared
+SDK overrides (134 MiB), managed dependencies (426 MiB), and pinned companion
+source caches (about 35 MB) remain for rebuilding. The active P4 build remains
+for incremental display bring-up; no disposable baseline or C6 build remains.
+
+## Future touch integration (design only)
+
+Touch remains disabled. Add a GT911 input backend under the existing input
+lifecycle, publishing through `HAL_InputInternal.h`; UI readers use only
+`HAL_Input.h`. Shared I2C transactions and board-owned wiring remain the owners.
+Do not initialize touch from the display driver or let touch failure stop display.
+
+Extend HAL input with a separate touch channel: contact ID, panel coordinates,
+timestamp, sequence and Down/Move/Up/Cancel phases. Keep a peekable snapshot and
+a bounded event queue with one consumer. Preserve down/up transitions between
+UI frames, coalesce moves where appropriate, and cancel on device loss or queue
+overflow. Coordinate mapping belongs beside display geometry: orientation,
+viewport and scale must match drawing (currently a centered 640x320 viewport).
+
+A shared UI adapter translates visible navigation controls/gestures into the
+existing actions; direct-touch screens consume mapped pointer events for their
+own hit-testing. Keep raw touch distinct from joystick deflection and rotary
+detents, following `NavEvents`' existing separation. Setup wizard and regular
+screens must share the adapter and hand off event consumption on mode changes;
+a wake gesture should not accidentally activate the newly visible screen.
+All resulting commands retain the existing authenticated UI command path.
+
+Start with single-contact input and visible navigation controls, then direct
+menu-row tapping. Multi-touch and gesture expansion can wait. Current controller
+selection assumes one active source; concurrent touch plus encoder would need
+explicit multiple-source support, rather than silently replacing one source's
+cached buttons with another's. Tests should cover short taps, cancellation,
+rotation/viewport boundaries, wizard handoff, and unchanged encoder/gamepad use.
+
+## Vendor sources
+
+- [Board documentation](https://docs.waveshare.com/ESP32-P4-WIFI6-Touch-LCD-5)
+- [LCD-5 examples](https://github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-5),
+  revision `d144b34d8f384e84d2442e8733523560216a2f63`
+- [Waveshare BSP](https://github.com/waveshareteam/Waveshare-ESP32-components/tree/e619f5b128072b42cffe628caa9baccecd8b4d96/bsp/esp32_p4_wifi6_touch_lcd_5),
+  including active-high panel reset and PWM backlight configuration
+- [Schematic](https://files.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-5/ESP32-P4-WIFI6-Touch-LCD-5-Schematic.pdf)
+
+Vendor ES8311 source retains its Apache-2.0 copyright/SPDX notices and license
+in `components/hardwareone/speaker/`. The panel register table is attributed to
+the vendor Arduino display profile.

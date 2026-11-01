@@ -84,6 +84,26 @@
   #define DISPLAY_FG            SSD1306_WHITE
   #define DISPLAY_BG            SSD1306_BLACK
 
+#elif DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+  #include "HAL_Display_Waveshare.h"
+  #define DISPLAY_ENABLED       1
+  // Logical canvas matches every existing OLED mode and raw-buffer consumer.
+  // The driver scales this 128x64 surface to 640x320, centered on the panel.
+  #define DISPLAY_WIDTH         128
+  #define DISPLAY_HEIGHT        64
+  #define DISPLAY_PANEL_WIDTH   720
+  #define DISPLAY_PANEL_HEIGHT  1280
+  #define DISPLAY_COLOR_DEPTH   1
+  #define DISPLAY_IS_COLOR      0
+  #define DISPLAY_INTERFACE     "mipi-dsi"
+  #define DISPLAY_NAME          "Waveshare HX8394"
+  typedef WaveshareDisplay DisplayDriver;
+  #define DISPLAY_COLOR_BLACK   SSD1306_BLACK
+  #define DISPLAY_COLOR_WHITE   SSD1306_WHITE
+  #define DISPLAY_COLOR_INVERSE SSD1306_INVERSE
+  #define DISPLAY_FG            SSD1306_WHITE
+  #define DISPLAY_BG            SSD1306_BLACK
+
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789
   // ST7789 2.0" 320x240 Color IPS TFT (SPI) - Adafruit EYESPI
   // Product: https://www.adafruit.com/product/4311

@@ -232,7 +232,7 @@ int main(int argc, char** argv) {
   assert(argc == 3);
   exerciseSsd1306(static_cast<uint8_t>(std::atoi(argv[1])),
                  static_cast<uint8_t>(std::strtol(argv[2], nullptr, 16)));
-#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE || DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
   (void)argc;
   (void)argv;
   platform.beginResults = {false, true};

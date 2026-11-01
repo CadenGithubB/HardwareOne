@@ -1,0 +1,11 @@
+#pragma once
+// Waveshare LCD-5 BSP/schematic: docs/WAVESHARE_P4_SUPPORT.md.
+#define WS_LCD_RESET_PIN 27
+#define WS_LCD_BACKLIGHT_PIN 26
+#define WS_SPEAKER_AMP_PIN 53
+#define WS_SPEAKER_MCLK_PIN 13
+#define WS_SPEAKER_BCLK_PIN 12
+#define WS_SPEAKER_WS_PIN 10
+#define WS_SPEAKER_DATA_PIN 9
+#define WS_SPEAKER_I2C_PORT 1
+#define WS_SPEAKER_I2C_BUS 0

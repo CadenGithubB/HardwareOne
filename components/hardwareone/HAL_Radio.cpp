@@ -21,6 +21,7 @@
 #include "esp_now_hosted_host.h"
 #include "esp_now_hosted_rpc.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "esp32-hal-hosted.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -255,18 +256,28 @@ esp_err_t startOnce() {
   esp_hosted_coprocessor_fwver_t version = {};
   const esp_err_t err = esp_hosted_get_coprocessor_fwversion(&version);
   if (err != ESP_OK) {
-    ESP_LOGE(kTag, "C6 firmware version query failed: %s", esp_err_to_name(err));
-    return err;
+    // Older factory companions predate the version RPC but implement the
+    // standard Wi-Fi/OTA RPCs. Require a successful round trip before making
+    // their update path available; a transport INIT event alone is insufficient.
+    // WIFI_NOT_INIT is a valid remote reply before Wi-Fi initialization.
+    uint8_t mac[6] = {};
+    const esp_err_t probe = esp_wifi_get_mac(WIFI_IF_STA, mac);
+    if (probe != ESP_OK && probe != ESP_ERR_WIFI_NOT_INIT) {
+      ESP_LOGE(kTag, "C6 version and legacy MAC probes failed: %s / %s",
+               esp_err_to_name(err), esp_err_to_name(probe));
+      return probe;
+    }
+    ESP_LOGW(kTag, "C6 responds to legacy MAC RPC; version unavailable, update recommended");
   }
   portENTER_CRITICAL(&sLock);
   sTransportUp = true;
   sTransportLost = false;
   sHeld = false;
-  sIdentity.versionKnown = true;
+  sIdentity.versionKnown = err == ESP_OK;
   sIdentity.major = version.major1;
   sIdentity.minor = version.minor1;
   sIdentity.patch = version.patch1;
-  sIdentity.versionMatches = version.major1 == HW1_C6_HOSTED_VERSION_MAJOR &&
+  sIdentity.versionMatches = err == ESP_OK && version.major1 == HW1_C6_HOSTED_VERSION_MAJOR &&
                              version.minor1 == HW1_C6_HOSTED_VERSION_MINOR &&
                              version.patch1 == HW1_C6_HOSTED_VERSION_PATCH;
   portEXIT_CRITICAL(&sLock);
@@ -556,7 +567,19 @@ esp_err_t radioHalUpdateBegin() {
 esp_err_t radioHalUpdateWrite(const uint8_t* data, size_t len) {
   if (!data || !len) return ESP_ERR_INVALID_ARG;
   if (!radioHalTransportUp()) return ESP_ERR_INVALID_STATE;
-  return esp_hosted_slave_ota_write(const_cast<uint8_t*>(data), static_cast<uint32_t>(len));
+  // Old factory companions cannot reassemble the modern 4 KB OTA request.
+  // Keep their protobuf request inside a single transport packet. Qualified
+  // companions retain the existing larger transfer size.
+  const size_t limit = sIdentity.versionKnown ? len : 1024;
+  while (len) {
+    const size_t chunk = len < limit ? len : limit;
+    const esp_err_t err = esp_hosted_slave_ota_write(const_cast<uint8_t*>(data),
+                                                   static_cast<uint32_t>(chunk));
+    if (err != ESP_OK) return err;
+    data += chunk;
+    len -= chunk;
+  }
+  return ESP_OK;
 }
 
 esp_err_t radioHalUpdateEnd() {

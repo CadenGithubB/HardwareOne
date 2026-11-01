@@ -4674,7 +4674,7 @@ const char* cmd_oledstatus(const String& argsInput) {
 #endif
       doc["interface"] = DISPLAY_INTERFACE;
       doc["driver"] = DISPLAY_NAME;
-#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
+#if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE || DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
       doc["panelWidth"] = DISPLAY_PANEL_WIDTH;
       doc["panelHeight"] = DISPLAY_PANEL_HEIGHT;
 #endif

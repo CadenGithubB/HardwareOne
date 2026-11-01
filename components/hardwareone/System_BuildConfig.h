@@ -197,6 +197,9 @@
 // safe whether or not the define exists.
 #define XIAO_ESP32S3_SENSE_ENABLED 1
 
+// Speaker playback through a board-provided codec backend.
+#define ENABLE_SPEAKER 0
+
 // Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640). PICO board has none.
 // Auto-enabled on the XIAO ESP32S3 Sense, which ships with an OV2640 on its
 // expansion board (camera GPIOs are hardcoded for that board in
@@ -492,6 +495,7 @@
 #define DISPLAY_TYPE_ST7789    2
 #define DISPLAY_TYPE_ILI9341   3
 #define DISPLAY_TYPE_ST7789_P4_EYE 4
+#define DISPLAY_TYPE_HX8394_WAVESHARE 5
 
 #define INPUT_DEVICE_TYPE_NONE           0
 #define INPUT_DEVICE_TYPE_SEESAW_GAMEPAD 1
@@ -606,6 +610,17 @@
   #if !HW_BOARD_P4X_EYE
     #error "P4X-EYE display requires its explicit board profile"
   #endif
+#endif
+
+#if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
+  #undef ENABLE_OLED_DISPLAY
+  #define ENABLE_OLED_DISPLAY 1
+  #if !HW_BOARD_WAVESHARE_P4_TOUCH
+    #error "HX8394 display requires the Waveshare LCD-5 board profile"
+  #endif
+#endif
+#if ENABLE_SPEAKER && (!HW_BOARD_WAVESHARE_P4_TOUCH || !ENABLE_I2C_SYSTEM)
+  #error "Speaker requires the Waveshare ES8311 backend and I2C"
 #endif
 
 // Override ENABLE_OLED_DISPLAY if DISPLAY_TYPE is NONE
@@ -1019,6 +1034,7 @@
   #endif
   #define BOARD_SUPPORTED 1
   #define BOARD_NAME "Waveshare ESP32-P4-WIFI6-Touch-LCD-5"
+  #include "System_Board_WaveshareP4.h"
   #define I2C_SDA_PIN_DEFAULT 7
   #define I2C_SCL_PIN_DEFAULT 8
   #define NEOPIXEL_PIN_DEFAULT -1
