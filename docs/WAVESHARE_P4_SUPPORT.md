@@ -414,4 +414,17 @@ the initial run and the icon-harness dependency retest, plus final Add Wi-Fi and
 command-feedback reruns. Toast tests execute production rendering/lifetime on
 64/88/128-pixel canvases; command tests execute the real Wi-Fi refusal paths.
 Waveshare application: 3,369,712 bytes, 5,018,896 bytes app headroom.
-Final installation and live client-stack checks are pending.
+Installed application-only with hash verification. Selected the client role,
+closed the previously running app-console server, and verified shared client
+stack startup. Landscape remained enabled. The live `openwifi` command returned
+the explicit no-saved-network error, with the original Wi-Fi enable setting
+preserved; C6 transport remained online with zero errors/timeouts. Serial was
+logged out and closed. Physical pairing/link qualification awaits the user;
+P4-EYE was build-checked but has not been reflashed with these shared changes.
+
+Cleanup removed approximately 23 MiB of temporary host build. The single normal
+Waveshare build cache (approximately 957 MiB) is retained for this active board
+test, alongside the pre-existing P4-EYE cache (approximately 1.1 GiB) for its
+pending application-only update. Matching firmware/debug and compact evidence
+are retained in `.scratch/waveshare-feedback` (approximately 21 MiB). Remove
+Waveshare compiler objects once qualification completes without further edits.
