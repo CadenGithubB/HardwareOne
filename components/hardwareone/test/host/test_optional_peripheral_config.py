@@ -77,6 +77,19 @@ class PeripheralConfig(unittest.TestCase):
             'I2C_SDA_PIN_DEFAULT == 7', 'I2C_SCL_PIN_DEFAULT == 8'],
             board_profile=repo / 'boards/waveshare_p4_touch_lcd_5.features.h')
 
+    def test_waveshare_optional_peripherals_disabled(self):
+        repo = SOURCE.parents[1]
+        flags = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())['features']
+        board = repo / 'boards/waveshare_p4_touch_lcd_5.features.h'
+        self.check_profile(dict(flags, INPUT_DEVICE_TYPE=0, DISPLAY_TYPE=0,
+                                ENABLE_SPEAKER=0, ENABLE_SDMMC_CARD=0, ENABLE_BATTERY_MONITOR=0),
+                           ['ENABLE_GT911_TOUCH == 0', 'ENABLE_OLED_DISPLAY == 0',
+                            'ENABLE_SPEAKER == 0', 'ENABLE_SD_CARD == 0',
+                            'ENABLE_BATTERY_MONITOR == 0'], board_profile=board)
+        self.check_profile(dict(flags, DISPLAY_TYPE=0),
+                           ['ENABLE_GT911_TOUCH == 1', 'ENABLE_OLED_DISPLAY == 0'],
+                           board_profile=board)
+
     def test_touch_requires_supported_board_and_i2c(self):
         self.check_profile(self.profile(wheel=4), [], succeeds=False)
         board = SOURCE.parents[1] / 'boards/waveshare_p4_touch_lcd_5.features.h'

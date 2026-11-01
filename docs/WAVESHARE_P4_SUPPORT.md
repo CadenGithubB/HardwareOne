@@ -78,7 +78,7 @@ The backend skips unchanged canvas frames and synchronizes only the centered
 UI band after drawing, reducing PSRAM bandwidth. This follows observed DSI
 underruns during heavy filesystem activity in an earlier image.
 
-`HAL_Speaker` owns TX-only I2S, ES8311 initialization and amplifier gating.
+`HAL_Speaker_Waveshare` implements the shared speaker API and owns TX-only I2S, ES8311 initialization and amplifier gating.
 Codec accesses use the existing shared I2C transaction mechanism. Every error
 path releases the I2S channel, codec and amplifier. The command
 `speakertone [100..4000 Hz] [50..2000 ms] [0..60 volume]` validates arguments
@@ -92,10 +92,11 @@ player or microphone integration.
 ## Companion installation
 
 Factory C6 firmware responds to legacy Wi-Fi RPCs but lacks current version,
-application-description and bridge queries. HAL accepts either a successful
-MAC query or its explicit remote `ESP_ERR_WIFI_NOT_INIT` response as transport
-evidence, enabling the existing authenticated SDIO firmware update path.
-Unanswered probes still fail; version/bridge qualification remains separate.
+application-description and bridge queries. During an explicit authenticated
+`c6update`, HAL accepts either a successful MAC query or its explicit remote
+`ESP_ERR_WIFI_NOT_INIT` response as update-transport evidence. Normal startup
+and recovery require the version query to succeed. Legacy update-only sessions
+report normal radio availability as false; unanswered probes still fail.
 
 Hardware One's pinned C6 companion built successfully (1,245,888 bytes).
 Serial upload completed. The first SDIO attempt began successfully but timed
@@ -202,7 +203,7 @@ inputs remain as described above.
 - [Schematic](https://files.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-5/ESP32-P4-WIFI6-Touch-LCD-5-Schematic.pdf)
 
 Vendor ES8311 source retains its Apache-2.0 copyright/SPDX notices and license
-in `components/hardwareone/speaker/`. The panel register table is attributed to
+in `components/hardwareone/third_party/es8311/`. The panel register table is attributed to
 the vendor Arduino display profile.
 
 ## Touch responsiveness adjustment
