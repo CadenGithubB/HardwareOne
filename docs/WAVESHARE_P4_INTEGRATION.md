@@ -167,3 +167,33 @@ The isolated integration build directory and its provisioned SDK dependencies
 are retained temporarily for this active hardware investigation. Remove compiler
 objects and private dependency copies after wake behavior is accepted, retaining
 selected firmware/debug/config artifacts and the small verification logs.
+
+## Immediate idle command and new evidence
+
+User reports the 80 ms wake gate still flashes. Added admin-only `powersleep`
+to request the normal display-idle path on its owner loop without changing the
+saved timeout. Local input wakes the display; remote activity can restore the
+active CPU clock without lighting the panel. Busy workloads, transition cooldown
+and OTA probation reject admission. An accepted request is asynchronous; the
+owner loop rechecks workload/cooldown before entry. A disabled automatic timeout
+does not immediately undo manual idle. Unsupported headless builds reject it.
+
+Power policy tests passed 672 fresh-process scenarios across ESP32/P4 revisions,
+display and UART/STT combinations under ASan/UBSan; OLED power settings and the
+command catalogue's eight feature selections passed. Waveshare build passed
+(2,501,648-byte application) and esptool verified its flash. Existing timeout
+was confirmed as 10 minutes. Serial `powersleep` returned accepted, followed
+immediately by an LCD DSI external-memory-fetch underrun warning. This is new
+evidence for the continuously running DSI stream being disturbed by idle
+clock/downclock behavior; it does not yet prove the cause of the visible flash.
+Next diagnostic: compare sleep/wake at a fixed CPU clock, then restore the saved
+Performance mode. Do not label the earlier settling delay a confirmed fix.
+
+Current logs: `work/waveshare-integration/manual-idle-{build,flash,runtime,tests,baseline}.log`.
+P4-EYE baseline build passed: 5,630,224-byte application with 1,795,824 bytes
+free. No baseline hardware was flashed. Its compiler build directory was removed
+after retaining manifest/config evidence (`manual-idle-cleanup.json`).
+User confirmed immediate sleep and touch wake work. A second immediate sleep
+was requested in temporary Locked power mode to isolate the clock transition;
+no underrun warning appeared at that entry. Visual comparison is pending and
+Performance mode must be restored afterward.

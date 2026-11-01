@@ -112,6 +112,11 @@ void powerSleepTransitionMark();
 // lights the panel. Cheap + task-safe: it only stamps timestamps (a 32-bit
 // aligned write is atomic on the ESP32); the work runs on the main loop in
 // powerPolicyTick() and the local display's own tick.
+// Queue immediate display idle on the owner loop; no persistent setting change.
+// Busy workloads and cooldown still gate entry. Unsupported without a display.
+bool powerRequestDisplayIdle();
+bool powerTakeDisplayIdleRequest();
+void powerSetManualIdle(bool idle);
 void powerSaveNoteActivity(bool local);
 unsigned long powerSaveLastActivityMs();       // any real interaction
 unsigned long powerSaveLastLocalActivityMs();  // someone at the device

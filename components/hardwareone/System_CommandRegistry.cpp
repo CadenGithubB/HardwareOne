@@ -777,7 +777,7 @@ static constexpr CommandModule gCommandModules[] = {
     "commands and on-device voice do. Nothing switches the mode on battery "
     "level in this firmware: power auto and power threshold report that automatic "
     "mode is not available. Two related idle "
-    "controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; "
+    "controls are separate commands: powersleep enters display idle immediately without changing the timeout; powersave <0..1440> sets an idle timeout (minutes; "
     "0 disables) after which the OLED blanks and the CPU may downclock (mode-dependent) "
     "while the radio stays up so the device remains reachable, and powercooldown "
     "<0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid "
