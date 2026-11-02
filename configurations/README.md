@@ -112,11 +112,12 @@ passed build and host checks; command/lifecycle hardware qualification is
 recorded in [the Map test results](../docs/LOGGER_TEST.md#map-live-recording--2026-10-10).
 
 `waveshare-p4-bringup` targets the **Waveshare ESP32-P4-WIFI6-Touch-LCD-5**
-with observed rev1.3 silicon. It enables UART serial, Wi-Fi, basic web and BLE
-for initial headless bring-up. The HX8394 display, GT911 touch and onboard
-codec audio are not implemented by this profile. It uses a new 32 MB factory
-partition layout; do not flash it over the demo without a backup and planned
-layout migration. See [support status](../docs/WAVESHARE_P4_SUPPORT.md).
+with observed rev1.3 silicon. It includes Wi-Fi/HTTP and the standard Sensors
+web page for OV5647 camera preview, photos and recording. HX8394 display,
+GT911 touch, ES7210 onboard microphone, speaker support, local STT, G2 glasses
+and the phone pipe are included. It uses the qualified 32 MB factory partition
+layout; incremental updates flash the application only after verifying that
+layout. See [support status](../docs/WAVESHARE_P4_SUPPORT.md).
 
 ## Guided setup
 

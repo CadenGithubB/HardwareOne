@@ -637,3 +637,27 @@ of superseded task logs. Existing build caches remain: Waveshare ~995 MiB and
 EYE ~1.1 GiB for pending hardware qualification, and the pre-existing XIAO
 ~1.3 GiB baseline. Remove their compiler objects after hardware approval when
 no further edits are needed; retain the compact matching recovery archive.
+
+## Web camera access enabled (2026-11-02)
+
+The saved Waveshare profile now selects `NETWORK_FEATURE_LEVEL=2` (Wi-Fi/HTTP)
+and `WEB_FEATURE_LEVEL=2` (standard pages including Sensors). Previously network
+level 1 excluded the server, and web level 1 excluded the camera page. Other
+feature choices were preserved. Build/link passed: 4,982,544-byte application,
+3,406,064-byte headroom. All 100 HTTP gate profiles and the shipping camera
+JavaScript behavior test passed; the existing EYE baseline at the same shared
+source checkpoint remains unchanged.
+
+Application-only flash matched MAC/partition layout and verified the image
+hash. Existing saved Wi-Fi connected to `TestESPNetwork` at `192.168.21.75`;
+HTTP started automatically on port 80. The Sensors page is
+`http://192.168.21.75/sensors` (address may change with DHCP). The user verified
+the web interface, camera capture and recording from a computer on that network.
+This Mac was on a different subnet and could not independently reach that IP;
+its failed browser/TCP attempts are not camera/server failures.
+
+Matching web firmware/debug, the profile patch and compact logs are in ignored
+`.scratch/waveshare-web/`. The normal Waveshare build directory is reused for
+the subsequent OLED preview work. Retain the web recovery archive until that
+combined firmware is qualified; then remove this superseded archive while
+keeping the small configuration/hash and verification evidence. No push yet.
