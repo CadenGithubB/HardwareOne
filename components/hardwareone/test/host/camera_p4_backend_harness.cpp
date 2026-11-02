@@ -18,7 +18,7 @@ const char* esp_err_to_name(int err) { return err == 0 ? "OK" : "mock_error"; }
 void mockLog(const char*, const char*, ...) {}
 #define ESP_LOGW(...) mockLog(__VA_ARGS__)
 #define ESP_LOGI(...) mockLog(__VA_ARGS__)
-#define CAMERA_SCCB_I2C_PORT 0
+// INSERT_BOARD_CONFIG
 using gpio_num_t = int;
 constexpr int GPIO_NUM_12 = 12, GPIO_NUM_11 = 11, GPIO_NUM_26 = 26,
     GPIO_NUM_14 = 14, GPIO_NUM_13 = 13, GPIO_NUM_NC = -1, GPIO_MODE_OUTPUT = 1;
@@ -67,7 +67,7 @@ struct jpeg_encode_engine_cfg_t { int timeout_ms; };
 struct jpeg_encode_memory_alloc_cfg_t { int buffer_direction; };
 struct jpeg_encode_cfg_t { unsigned width, height, src_type, sub_sample, image_quality; bool pixel_reverse; };
 namespace fake {
-constexpr size_t rawBytes = 1280 * 720 * 2;
+constexpr size_t rawBytes = CAMERA_NATIVE_WIDTH * CAMERA_NATIVE_HEIGHT * 2;
 bool foreignBus = false, bus = false, clock = false, clockRunning = false,
     video = false, stream = false, encoder = false, fd = false;
 bool failVideo = false, failEncoder = false, failStreamOff = false, failJpeg = false,
@@ -116,7 +116,7 @@ esp_err_t esp_cam_sensor_xclk_start(void* h, const esp_cam_sensor_xclk_config_t*
 esp_err_t esp_cam_sensor_xclk_stop(void* h) { assert(h && fake::clockRunning); fake::clockRunning = false; return ESP_OK; }
 esp_err_t esp_cam_sensor_xclk_free(void* h) { assert(h && fake::clock && !fake::clockRunning); fake::clock = false; return ESP_OK; }
 esp_err_t esp_video_init_with_flags(const esp_video_init_config_t* cfg, unsigned flags) {
-  assert(fake::bus && fake::clockRunning && cfg->csi->sccb_config.i2c_handle && flags == 3);
+  assert(fake::bus && (CAMERA_XCLK_PIN<0 || fake::clockRunning) && cfg->csi->sccb_config.i2c_handle && flags == 3);
   // The real esp_video2.2 initializer unwinds its own partial failure.
   if (fake::failVideo) return ESP_FAIL;
   fake::video = true; return ESP_OK;
@@ -140,9 +140,9 @@ int mockIoctl(int fd, int request, void* arg) {
   assert(fd == 7 && fake::fd);
   if (request == fake::failRequest) return -1;
   switch (request) {
-    case VIDIOC_G_EXT_CTRLS: reinterpret_cast<esp_cam_sensor_id_t*>(static_cast<v4l2_ext_controls*>(arg)->controls->p_u8)->pid = 0x2710; break;
-    case VIDIOC_G_SENSOR_FMT: *static_cast<esp_cam_sensor_format_t*>(arg) = {fake::badNative ? 1920u : 1280u, 720}; break;
-    case VIDIOC_G_FMT: { auto* f = static_cast<v4l2_format*>(arg); f->fmt.pix.width = 1280; f->fmt.pix.height = 720; break; }
+    case VIDIOC_G_EXT_CTRLS: reinterpret_cast<esp_cam_sensor_id_t*>(static_cast<v4l2_ext_controls*>(arg)->controls->p_u8)->pid = CAMERA_SCCB_SHARED?0x5647:0x2710; break;
+    case VIDIOC_G_SENSOR_FMT: *static_cast<esp_cam_sensor_format_t*>(arg) = {fake::badNative ? 1920u : CAMERA_NATIVE_WIDTH, CAMERA_NATIVE_HEIGHT}; break;
+    case VIDIOC_G_FMT: { auto* f = static_cast<v4l2_format*>(arg); f->fmt.pix.width = CAMERA_NATIVE_WIDTH; f->fmt.pix.height = CAMERA_NATIVE_HEIGHT; break; }
     case VIDIOC_S_FMT: break;
     case VIDIOC_S_DQBUF_TIMEOUT: {
       auto* t = static_cast<timeval*>(arg); fake::maxDqWait = int64_t(t->tv_sec) * 1000000 + t->tv_usec; break;
@@ -163,7 +163,7 @@ int mockIoctl(int fd, int request, void* arg) {
       const int64_t waited = std::min(fake::frameUs, fake::maxDqWait);
       fake::now += waited;
       if (waited < fake::frameUs) return -1;
-      auto* b = static_cast<v4l2_buffer*>(arg); b->index = fake::badIndex ? 99 : fake::dequeue % 3;
+      auto* b = static_cast<v4l2_buffer*>(arg); b->index = fake::badIndex ? 99 : fake::dequeue % CAMERA_BUFFER_COUNT;
       b->bytesused = fake::badFrame ? 0 : fake::rawBytes; ++fake::dequeue; break;
     }
     default: assert(false);
@@ -209,6 +209,9 @@ esp_err_t jpeg_encoder_process(void* h, const jpeg_encode_cfg_t* cfg, const uint
 #define munmap mockMunmap
 #define ioctl mockIoctl
 
+[[maybe_unused]] static struct {int i2cSdaPin=CAMERA_SDA_PIN,i2cSclPin=CAMERA_SCL_PIN;} gSettings;
+bool cameraSharedSccbAcquire(uint8_t bus,int port,void** out){assert(bus==0&&port==1);if(fake::foreignBus)return false;fake::bus=true;*out=fake::token(1);return true;}
+void cameraSharedSccbRelease(){assert(fake::bus&&!fake::video);fake::bus=false;}
 // INSERT_PRODUCTION_P4_BACKEND
 
 int main() {
@@ -224,7 +227,7 @@ int main() {
   // Every ordinary partial initialization failure must unwind our resources.
   for (int fault = 0; fault < 6; ++fault) {
     fake::reset();
-    if (fault == 0) fake::noClock = true;
+    if (fault == 0) {if(CAMERA_SCCB_SHARED)fake::foreignBus=true;else fake::noClock = true;}
     if (fault == 1) fake::failVideo = true;
     if (fault == 2) fake::badNative = true;
     if (fault == 3) fake::failRequest = VIDIOC_QUERYBUF;
@@ -239,7 +242,7 @@ int main() {
   CameraFrame frame;
   assert(b.capture(frame, 128 * 1024));
   assert(frame.width == 640 && frame.height == 480 && frame.length == 8 && frame.data);
-  assert(fake::dequeue == 51 && fake::requeue == 54 && fake::jpegQuality == 81);
+  assert(fake::dequeue == 51 && fake::requeue == 51+CAMERA_BUFFER_COUNT && fake::jpegQuality == 81);
   // The first returned frame is independent of the stream lifetime.
   uint8_t* owned = frame.data;
   assert(b.end()); assert(owned[0] == 255 && owned[7] == 217); cameraFrameRelease(frame);
@@ -254,7 +257,7 @@ int main() {
   assert(frame.width == 160 && frame.height == 120 && fake::outputCapacity == 8128 && fake::jpegQuality == 1);
   cameraFrameRelease(frame);
   const int before = fake::dequeue;
-  assert(b.capture(frame, 128 * 1024)); assert(fake::dequeue - before == 4); cameraFrameRelease(frame);
+  assert(b.capture(frame, 128 * 1024)); assert(fake::dequeue - before == CAMERA_BUFFER_COUNT+1); cameraFrameRelease(frame);
   assert(!b.capture(frame, 999) && !frame.data);
   fake::failFlush = true; assert(!b.capture(frame, 128 * 1024) && !frame.data);
   fake::failFlush = false;
@@ -267,7 +270,7 @@ int main() {
   assert(!b.capture(frame, 128 * 1024)); fake::badIndex = false;
   // A failed stream stop retains DMA storage and bus/clock for a retry.
   fake::failStreamOff = true;
-  assert(!b.end() && fake::stream && fake::fd && fake::bus && fake::clockRunning && !fake::raw.empty());
+  assert(!b.end() && fake::stream && fake::fd && fake::bus && (CAMERA_XCLK_PIN<0 || fake::clockRunning) && !fake::raw.empty());
   assert(!b.begin(config) && fake::stream);
   fake::failStreamOff = false;
   assert(b.end());

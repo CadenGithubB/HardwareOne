@@ -15,7 +15,7 @@ the initially pasted 4.3-inch ST7701 page is not this device.
 - User authorized P4/C6 installation, declined a factory backup, and explicitly
   approved erasing the new filesystem region. The P4 was flashed and verified.
 - ES7210 onboard microphone capture is now enabled (see the onboard audio section below).
-  Camera remains disabled/unqualified.
+  The saved bring-up profile now includes the attached OV5647 camera; see camera qualification below.
   Battery ADC support is enabled; only USB-powered/no-cell behavior is tested.
   SD is enabled and mount/read/write/remount tested (see below).
   Speaker listening was explicitly deferred by the user after the driver test.
@@ -38,6 +38,7 @@ Do not flash an image whose resolved board, flash size or partition table differ
 | --- | --- |
 | C6 Hosted SDIO | CLK18, CMD19, D0–D3 GPIO14–17, reset54; slot1, 4-bit, 20 MHz |
 | Shared I2C | SDA7, SCL8; project bus0, Arduino Wire1/I2C1 |
+| OV5647 camera | MIPI-CSI image data; SCCB control on the shared SDA7/SCL8 bus; module-provided clock |
 | HX8394 DSI panel | 720×1280, two lanes at 700 Mbps, DPI 58 MHz |
 | Panel timing | H pulse/back/front 20/20/40; V pulse/back/front 4/10/24 |
 | Panel reset | GPIO27, **active-high** |
@@ -562,3 +563,77 @@ without error. The quiet test produced no speech segment; bounded model
 inference was verified separately. Capture was stopped and serial logged out
 and closed. Matching firmware/debug and test evidence occupies approximately
 24 MiB; the build caches remain retained for pending hardware qualification.
+
+## OV5647 camera through the shared backend (2026-11-02)
+
+The user confirmed the attached OV5647; serial detection read PID `0x5647`.
+CSI carries image data, and the ribbon's SCCB/I2C lines share GPIO7/8 with
+touch/audio. P4X-EYE retains its dedicated camera control bus and wiring.
+`HAL_Camera_P4` now takes wiring and native geometry from board definitions;
+commands, authorization, persisted size IDs, frame ownership and consumers
+continue through the existing common camera service.
+
+The saved Waveshare profile selects OV5647 RAW8 800×640 at the sensor's 50 fps
+mode, with two native RGB565 buffers and hardware JPEG encoding. Delivered
+sizes extend through 800×600; HD and larger choices are refused without saving.
+Application recording/preview cadence remains separately controlled (5 fps in
+this check). This conservative mode preserves room for local STT. EYE retains
+its 1280×720 native mode and HD output. Shared settings, web and G2 editors
+derive available controls/resolutions from backend capabilities; unsupported
+P4 tuning controls are hidden and commands explicitly refuse them.
+
+The SCCB adapter uses the existing I2C manager's locks/clock policy and a bus
+lifetime lease. Camera stop releases the lease; reset/recovery cannot destroy
+an active borrowed bus. Cache-safe DSI and CSI are both selected. Hardware
+testing exposed a pinned-IDF DMA helper left in flash; `p4_camera_iram.lf`
+supplies its missing RAM placement. Fresh SDK frame descriptors are relocated
+to internal RAM by `HAL_Camera_VideoBuffers`, preserving PSRAM pixels and SDK
+cleanup. Tests use the pinned SDK's real descriptor layout and allocator.
+No managed dependency or SDK source is edited.
+
+Application-only flashing verified the board MAC, unchanged partition table
+and image hash. Setup, SD contents and landscape preference were preserved.
+On-device checks passed:
+
+- Three start/capture/stop cycles, including a restart after bus recovery.
+- JPEG capture at 240×240, 640×480 and 800×600; mirror toggled and restored.
+  The saved 5,567-byte 240×240 JPEG decoded fully on the host.
+- A six-second MJPEG AVI finalized with 31 frames (174,946 bytes); RIFF size,
+  dimensions, frame count, index entries and the first JPEG marker were checked.
+- Reset while running returned “Stop camera before resetting the bus”; reset
+  after stop succeeded. Touch stayed connected; onboard mic capture had a
+  nonzero meter while the camera ran.
+- A two-second local STT run completed with 32,000 samples, no overruns and no
+  error while the camera remained active; another camera capture then passed.
+- Live `controls json camera` exposed nine supported sizes and mirror/flip,
+  without unsupported tuning rows. Requested size 10 and mirror/flip defaults
+  were restored. Camera/mic/recording were stopped and serial logged out.
+- C6 stayed online with zero missed heartbeats, bridge timeouts or transport
+  errors. No panic or watchdog occurred during these camera checks.
+
+The serial login itself still emitted watchdog warnings during its roughly
+ten-second credential check, before camera startup. This is distinct from
+the camera cache fault corrected above. A pre-existing G2 static command test
+also still fails its expected call-count assertion in unchanged `G2_Glasses.cpp`.
+The affected production camera, bus ownership/lease, settings, consumers,
+recording and web checks passed, including 12 web tests. Absent-camera and
+capture-failure cleanup are host-tested; module disconnect, sustained stress,
+image-quality calibration and physical S3 camera testing remain unqualified.
+
+| Saved profile | Application bytes | Application headroom |
+| --- | ---: | ---: |
+| waveshare-p4-bringup | 3,936,416 | 4,452,192 |
+| p4-phone-pipe (EYE) | 6,132,608 | 1,293,440 |
+| xiao-default | 4,390,432 | 1,593,824 |
+
+All three builds passed. EYE/S3 results here are build/host checks; EYE still
+awaits its application-only update after the user's Waveshare verification.
+Nothing has been pushed. The test photo `/sd/photos/img_000000.jpg` and clip
+`/sd/VIDEOS/VID_125006.AVI` are deliberately retained for user review.
+
+Matching firmware/debug, hashes, compact media checks and logs are retained in
+ignored `.scratch/waveshare-camera/`. Cleanup removed 1,060,864 allocated bytes
+of superseded task logs. Existing build caches remain: Waveshare ~995 MiB and
+EYE ~1.1 GiB for pending hardware qualification, and the pre-existing XIAO
+~1.3 GiB baseline. Remove their compiler objects after hardware approval when
+no further edits are needed; retain the compact matching recovery archive.

@@ -41,7 +41,7 @@ var failures=[];
 function check(ok,message){if(!ok)failures.push(message);}
 function disabled(id,want){check(node(id).disabled===want,id+' disabled='+node(id).disabled+' expected '+want);}
 function optionIds(){return node('camera-framesize').children.map(function(o){return Number(o.value);}).join(',');}
-eval(slurp(__argv[0]));
+// INSERT_SHIPPING_SCRIPT
 
 // Before the capability reply, even a synthetic click cannot send a control.
 applyCameraAdjustment('camerahmirror','toggle');
@@ -105,13 +105,25 @@ __cameraApplyCapabilities(s3);check(node('camera-quality').value===33,'refresh i
 document.activeElement=null;__cameraApplyCapabilities(s3);
 check(node('camera-quality').value===20,'quality did not refresh after edit');
 
+// Waveshare uses the same CSI controls with its smaller qualified native mode.
+var waveshare={enabled:true,model:'OV5647',backend:'p4-csi',sourceWidth:800,sourceHeight:640,
+               controls:['hmirror','vflip'],
+               resolutions:[{id:2,name:'svga',width:800,height:600},{id:10,name:'240x240',width:240,height:240}],
+               requestedFramesize:10,framesize:10,quality:12};
+__cameraApplyCapabilities(waveshare);
+check(optionIds()==='2,10','Waveshare picker kept another backend\'s resolutions');
+disabled('camera-brightness',true);disabled('btn-hmirror',false);disabled('btn-vflip',false);
+var waveBefore=sent.length;applyCameraAdjustment('cameraframesize',11);
+check(sent.length===waveBefore,'Waveshare dispatched unsupported HD resolution');
+applyCameraAdjustment('cameraframesize',2);
+check(sent[sent.length-1]==='cameraframesize 2','Waveshare supported size did not dispatch');
+
 __cameraApplyCapabilities(null);
 check(optionIds()==='','lost capability data left stale options');
 disabled('camera-quality',true);disabled('camera-framesize',true);disabled('btn-hmirror',true);
 var before=sent.length;applyCameraAdjustment('cameraquality',12);
 check(sent.length===before,'unknown capabilities dispatched quality');
 if(failures.length)throw new Error(failures.join('\n'));
-__out('CAMERA_PAGE PASS');
 """
 
 
@@ -128,7 +140,11 @@ class CameraPageTests(unittest.TestCase):
             script, markup, harness = work / 'page.js', work / 'ids.json', work / 'test.js'
             script.write_text(script_body)
             markup.write_text(json.dumps(ids))
-            harness.write_text(HARNESS)
+            # Strict-mode engines keep eval declarations local to the eval.
+            # Execute shipping code and assertions in the same script scope,
+            # matching browser script declarations without changing production.
+            harness.write_text('(function(){\n' + HARNESS.replace('// INSERT_SHIPPING_SCRIPT', script_body)
+                               + "\n})();\n__out('CAMERA_PAGE PASS');\nundefined;\n")
             result = run_js(harness, [str(script), str(markup)])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines().count('CAMERA_PAGE PASS'), 1,

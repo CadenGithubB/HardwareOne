@@ -1,0 +1,11 @@
+# IDF 5.5's cache-safe CSI ISR calls this DMA setter, but the SDK's DW-GDMA
+# linker fragment omits it from its IRAM setter list. Place that one function
+# and its literals in RAM so command/settings flash writes can coexist with
+# a running camera. Keep the workaround outside regenerated SDK dependencies.
+# Remove when the pinned IDF supplies the same noflash mapping.
+
+[mapping:hw1_csi_dma_transfer]
+archive: libesp_hw_support.a
+entries:
+    if CAM_CTLR_MIPI_CSI_ISR_CACHE_SAFE = y:
+        dw_gdma:dw_gdma_channel_config_transfer (noflash)

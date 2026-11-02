@@ -18,6 +18,9 @@ CONFIG_PARTITION_TABLE_OFFSET=0x8000
 # writes (including login audit records). Otherwise refresh pauses while the
 # flash cache is disabled. This also selects cache-safe DW-GDMA interrupts.
 CONFIG_LCD_DSI_ISR_CACHE_SAFE=y
+# CSI uses the same DW-GDMA driver: its callback context must also stay in
+# internal RAM when the panel has selected cache-safe DMA interrupts.
+CONFIG_CAM_CTLR_MIPI_CSI_ISR_CACHE_SAFE=y
 
 # USB-to-UART bridge; native USB/JTAG is not the connected console.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=n
@@ -44,3 +47,10 @@ CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE=54
 CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH=y
 CONFIG_ESP_HOSTED_SLAVE_RESET_ON_EVERY_HOST_BOOTUP=y
 CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_STREAMING_MODE=y
+
+# Attached OV5647: conservative RAW8 sensor mode; ISP delivers RGB565 to the HAL.
+CONFIG_CAMERA_OV5647=y
+CONFIG_CAMERA_OV5647_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+CONFIG_CAMERA_OV5647_MIPI_RAW8_800X640_50FPS=y
+CONFIG_CAMERA_OV5647_MIPI_RAW8_800X800_50FPS=n
+CONFIG_CAMERA_OV5647_MIPI_DEFAULT_FMT_RAW8_800X640_50FPS=y

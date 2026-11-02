@@ -503,7 +503,7 @@ void displaySettingsEditor() {
         for (int i = 0; i < maxVisible &&
                         (gSettingsEditor.optionScroll + i) < gSettingsEditor.optionCount; i++) {
           const int idx = gSettingsEditor.optionScroll + i;
-          if (!enumOptionAt(gSettingsEditor.currentEntry->options, idx,
+          if (!enumOptionAt(gSettingsEditor.currentEntry->optionsText(), idx,
                             nullptr, 0, optLabel, sizeof(optLabel))) {
             break;
           }
@@ -815,7 +815,7 @@ void settingsEditorSelect() {
       if (entryHasEnumOptions(gSettingsEditor.currentEntry) &&
           gSettingsEditor.currentEntry->type != SETTING_BOOL) {
         gSettingsEditor.editKind = SETTINGS_EDIT_PICKLIST;
-        gSettingsEditor.optionCount = enumOptionCount(gSettingsEditor.currentEntry->options);
+        gSettingsEditor.optionCount = enumOptionCount(gSettingsEditor.currentEntry->optionsText());
         gSettingsEditor.optionIndex = enumOptionIndexForCurrent(gSettingsEditor.currentEntry);
         gSettingsEditor.optionScroll = 0;
         gSettingsEditor.hasChanges = false;
@@ -854,7 +854,7 @@ void settingsEditorSelect() {
       if (gSettingsEditor.editKind == SETTINGS_EDIT_PICKLIST) {
         // Commit the highlighted option's VALUE token (never the label).
         char val[48];
-        if (!enumOptionAt(gSettingsEditor.currentEntry->options,
+        if (!enumOptionAt(gSettingsEditor.currentEntry->optionsText(),
                           gSettingsEditor.optionIndex, val, sizeof(val),
                           nullptr, 0)) {
           break;

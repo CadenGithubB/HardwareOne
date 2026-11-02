@@ -1557,12 +1557,19 @@
 // If the user force-enabled the monitor on a board with no backend hardware
 // claimed, runtime reports measurement unavailable — no compile error.
 
-// Reserve the actual camera SCCB controller across start/stop so general
-// sensor bus recovery cannot tear it down. P4 CSI owns I2C0. DVP follows the
-// esp32-camera SDK selection; board profiles should choose I2C0 to leave the
-// primary Wire1/I2C1 sensor bus available.
+#ifndef CAMERA_SCCB_SHARED
+#define CAMERA_SCCB_SHARED 0
+#endif
+#if ENABLE_CAMERA_SENSOR && CAMERA_SCCB_SHARED && !ENABLE_I2C_SYSTEM
+  #error "Shared camera SCCB requires the I2C subsystem; enable I2C_FEATURE_LEVEL or disable ENABLE_CAMERA_SENSOR"
+#endif
+// Dedicated camera buses remain reserved across start/stop. Shared SCCB uses
+// the manager's transaction locks and an active lifetime lease instead. EYE
+// owns I2C0; Waveshare shares Wire1/I2C1. DVP follows its SDK port selection.
 #if !ENABLE_CAMERA_SENSOR
   #define CAMERA_SCCB_I2C_PORT -1
+#elif CAMERA_SCCB_SHARED
+  #define CAMERA_SCCB_I2C_PORT 1
 #elif defined(CONFIG_IDF_TARGET_ESP32P4)
   #define CAMERA_SCCB_I2C_PORT 0
 #elif defined(CONFIG_SCCB_HARDWARE_I2C_PORT1) && CONFIG_SCCB_HARDWARE_I2C_PORT1
@@ -1575,7 +1582,7 @@
 // enforced at runtime too, but an image selecting both owners cannot provide
 // its requested external peripherals. Select SCCB I2C0 in the SDK or omit the
 // camera; changing GPIO numbers alone cannot resolve a controller collision.
-#if ENABLE_I2C_SYSTEM && CAMERA_SCCB_I2C_PORT == 1
+#if ENABLE_I2C_SYSTEM && CAMERA_SCCB_I2C_PORT == 1 && !CAMERA_SCCB_SHARED
   #error "External I2C uses controller 1, reserved by camera SCCB; select SCCB I2C0 in sdkconfig or disable ENABLE_CAMERA_SENSOR"
 #endif
 

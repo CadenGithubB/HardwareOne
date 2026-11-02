@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string>
+#include <atomic>
 
 static_assert(ENABLE_CAMERA_SENSOR==EXPECTED_CAMERA_ENABLED,"camera test profile selected");
 static_assert(CAMERA_SCCB_I2C_PORT==EXPECTED_RESERVED_PORT,"camera reservation follows the selected backend SDK controller");
@@ -29,6 +30,11 @@ struct TwoWire {
 } Wire,Wire1;
 void beginBusOnCpu1(TwoWire* wire,int sda,int scl){++cpu1Begins;wire->begin(sda,scl);}
 using SemaphoreHandle_t=void*;
+constexpr int pdTRUE=1;constexpr unsigned portMAX_DELAY=~0u;
+unsigned pdMS_TO_TICKS(unsigned ms){return ms;}
+int xSemaphoreTake(void* mutex,unsigned){return mutex?pdTRUE:0;}
+void xSemaphoreGive(void* mutex){assert(mutex);}
+
 struct I2CDevice {};
 struct I2CBusMetrics {uint32_t unused;};
 // INSERT_PRODUCTION_REQUEST_TYPES
@@ -60,6 +66,8 @@ char* getDebugBuffer(){static char output[1024];return output;}
 
 int main() {
   I2CDeviceManager manager;
+  int semaphore;for(auto& mutex:manager.busMutexes)mutex=&semaphore;
+  assert(!manager.retainBus(0)&&!manager.retainBus(2));
   assert(manager.wires[0]==&Wire1 && manager.wires[1]==&Wire);
   assert(!manager.busInitialized[0] && !manager.busInitialized[1]);
   for(unsigned logical=0;logical<2;++logical) {
@@ -68,7 +76,7 @@ int main() {
     const unsigned powerBefore=pinModes+pinWrites+delays,eventsBefore=events,cpuBefore=cpu1Begins;
     const uint32_t clockBefore=manager.currentClockHz[logical],defaultBefore=manager.defaultClockHz[logical];
     manager.initBus(logical,14,13,400000);
-    if(hardware==EXPECTED_RESERVED_PORT) {
+    if(hardware==EXPECTED_RESERVED_PORT && !CAMERA_SCCB_SHARED) {
       assert(wire.beginCalls==0 && wire.clockCalls==0 && wire.timeoutCalls==0);
       assert(!manager.busInitialized[logical]);
       assert(manager.currentClockHz[logical]==clockBefore && manager.defaultClockHz[logical]==defaultBefore);
@@ -81,6 +89,14 @@ int main() {
       assert(manager.busInitialized[logical] && manager.currentClockHz[logical]==400000 && manager.defaultClockHz[logical]==400000);
       assert(events==eventsBefore+1 && cpu1Begins==cpuBefore+(logical==0?1:0));
     }
+  }
+  // Actual lifetime lease blocks reconfiguration until the last client leaves.
+  for(unsigned bus=0;bus<2;++bus)if(manager.busInitialized[bus]) {
+    auto* wire=manager.wires[bus];const auto before=wire->beginCalls;
+    assert(manager.retainBus(bus)&&manager.retainBus(bus)&&manager.busHasClients(bus));
+    manager.initBus(bus,2,3,100000);assert(wire->beginCalls==before);
+    manager.releaseBus(bus);assert(manager.busHasClients(bus));
+    manager.releaseBus(bus);manager.releaseBus(bus);assert(!manager.busHasClients(bus));
   }
   // Boundaries do not alias an invalid logical bus onto an available bus.
   unsigned totalBegins=Wire.beginCalls+Wire1.beginCalls;
@@ -100,7 +116,7 @@ int main() {
     for(bool initial : {false,true}) {
       *slots[logical]=initial;*slots[1-logical]=!initial;settingCalls=0;
       const char* reply=commands[logical](" 1 ");
-      if(hardware==EXPECTED_RESERVED_PORT) {
+      if(hardware==EXPECTED_RESERVED_PORT && !CAMERA_SCCB_SHARED) {
         assert(strstr(reply,"reserved"));
         assert(*slots[logical]==initial && settingCalls==0);
         reply=commands[logical]("-1");

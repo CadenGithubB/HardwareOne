@@ -65,6 +65,11 @@ static unsigned lastWaitMs = 0;
 static bool cameraPowerRequestStartSync(unsigned waitMs) { ++startSync; lastWaitMs = waitMs; return syncResult; }
 static bool cameraPowerRequestStopSync(unsigned waitMs) { ++stopSync; lastWaitMs = waitMs; return syncResult; }
 
+struct MockCameraInfo {const char* error;};
+struct MockCameraBackend {MockCameraInfo info(){return {"Camera not detected. Check the cable and retry."};}};
+static MockCameraBackend& cameraBackend(){static MockCameraBackend backend;return backend;}
+static bool lockCameraMutex(unsigned){return true;}
+static void unlockCameraMutex(){}
 // INSERT_PRODUCTION
 
 static void reset() {
@@ -121,7 +126,7 @@ int main() {
   CHECK(startsWith(cmd_camerastart(""), "ERROR: Camera is disabled") && requests() == 0);
   reset();
   syncResult = false;
-  CHECK(std::strcmp(cmd_camerastart(""), "Error: Camera initialization failed") == 0);
+  CHECK(std::strcmp(cmd_camerastart(""), "Error: Camera not detected. Check the cable and retry.") == 0);
   reset();
   CHECK(std::strcmp(cmd_camerastop(""), "Camera stopped") == 0);
   CHECK(stopSync == 1 && lastWaitMs == 30000 && requests() == 1);
@@ -130,7 +135,7 @@ int main() {
 }
 '''
 
-OPTIONAL_HELPERS = ("static bool cameraAsyncForm(", "static const char* cameraPowerAsyncCommand(")
+OPTIONAL_HELPERS = ("static const char* cameraCommandFailure(", "static bool cameraAsyncForm(", "static const char* cameraPowerAsyncCommand(")
 
 
 def production(camera: str) -> str:

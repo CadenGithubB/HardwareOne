@@ -1,12 +1,16 @@
 #include "System_BuildConfig.h"
 
 #if ENABLE_CAMERA_SENSOR && defined(CONFIG_IDF_TARGET_ESP32P4)
-#if !defined(HW_BOARD_P4X_EYE) || !HW_BOARD_P4X_EYE
+#if !defined(CAMERA_NATIVE_WIDTH) || !defined(CAMERA_NATIVE_HEIGHT) || !defined(CAMERA_SDA_PIN)
 #error "The CSI camera wiring must be selected by an explicit supported board profile"
 #endif
 
 #include "HAL_Camera.h"
 #include "CameraRgb565.h"
+#include "HAL_Camera_SCCB.h"
+#if CAMERA_SCCB_SHARED
+#include "System_Settings.h"
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -33,23 +37,26 @@
 // No shared application consumer sees CSI buffers or esp_video types.
 namespace {
 constexpr char kTag[] = "CameraP4";
-constexpr uint32_t kWidth = 1280, kHeight = 720;
+constexpr uint32_t kWidth = CAMERA_NATIVE_WIDTH, kHeight = CAMERA_NATIVE_HEIGHT;
 constexpr size_t kRawBytes = size_t(kWidth) * kHeight * 2;
-constexpr unsigned kBufferCount = 3;
+constexpr unsigned kBufferCount = CAMERA_BUFFER_COUNT;
 constexpr uint32_t kVideoFlags = ESP_VIDEO_INIT_FLAGS_MIPI_CSI | ESP_VIDEO_INIT_FLAGS_ISP;
-constexpr uint32_t kResolutionMask = ((1u << unsigned(CameraFrameSize::Count)) - 1) &
-    ~(cameraResolutionBit(CameraFrameSize::XGA) | cameraResolutionBit(CameraFrameSize::SXGA) |
-      cameraResolutionBit(CameraFrameSize::UXGA));
+uint32_t resolutionMask() {
+  uint32_t mask=0;
+  for(unsigned i=0;i<unsigned(CameraFrameSize::Count);++i) {
+    const auto* size=cameraFrameSizeInfo(CameraFrameSize(i));
+    if(size && size->width<=kWidth && size->height<=kHeight)mask|=1u<<i;
+  }
+  return mask;
+}
 constexpr i2c_port_num_t kSccbPort = static_cast<i2c_port_num_t>(CAMERA_SCCB_I2C_PORT);
-static_assert(CAMERA_SCCB_I2C_PORT == 0, "P4X-EYE camera owns I2C controller0");
 constexpr uint64_t kControls = cameraControlBit(CameraControl::HMirror) |
                                cameraControlBit(CameraControl::VFlip);
-// P4X-EYE MB v2.4: camera/LCD enable12, XCLK11, reset26, SDA14/SCL13.
-// The common sensor manager's primary bus uses controller1. Controller0 is
-// reserved for the on-board camera while this backend is enabled. We do not
-// borrow an arbitrary Arduino Wire handle: its pins/lifetime are not leased.
-constexpr gpio_num_t kPower = GPIO_NUM_12, kXclk = GPIO_NUM_11;
-constexpr gpio_num_t kReset = GPIO_NUM_26, kSda = GPIO_NUM_14, kScl = GPIO_NUM_13;
+constexpr gpio_num_t kPower = static_cast<gpio_num_t>(CAMERA_POWER_PIN);
+constexpr gpio_num_t kXclk = static_cast<gpio_num_t>(CAMERA_XCLK_PIN);
+constexpr gpio_num_t kReset = static_cast<gpio_num_t>(CAMERA_RESET_PIN);
+constexpr gpio_num_t kSda = static_cast<gpio_num_t>(CAMERA_SDA_PIN);
+constexpr gpio_num_t kScl = static_cast<gpio_num_t>(CAMERA_SCL_PIN);
 
 struct State {
   i2c_master_bus_handle_t bus = nullptr;
@@ -74,18 +81,23 @@ struct State {
 } state;
 
 bool fail(const char* stage, esp_err_t err = ESP_FAIL) {
-  snprintf(state.error, sizeof(state.error), "%s: %s", stage, esp_err_to_name(err));
+  if(err==ESP_ERR_NO_MEM)
+    snprintf(state.error,sizeof(state.error),"%s: Not enough memory. Stop unused tasks and retry.",stage);
+  else if(err==ESP_ERR_TIMEOUT)
+    snprintf(state.error,sizeof(state.error),"%s: Timed out. Check the camera connection and retry.",stage);
+  else snprintf(state.error, sizeof(state.error), "%s: %s", stage, esp_err_to_name(err));
   ESP_LOGW(kTag, "%s", state.error);
   return false;
 }
 bool io(int request, void* value, const char* stage) {
   if (ioctl(state.fd, request, value) == 0) return true;
-  snprintf(state.error, sizeof(state.error), "%s: errno=%d", stage, errno);
+  snprintf(state.error, sizeof(state.error),
+           "%s failed (errno=%d). Close and reopen camera; check cameraread.", stage, errno);
   ESP_LOGW(kTag, "%s", state.error);
   return false;
 }
 CameraCapabilities capabilities() {
-  return {"p4-csi", kResolutionMask, kControls, true, false, kWidth, kHeight};
+  return {"p4-csi", resolutionMask(), kControls, true, false, kWidth, kHeight};
 }
 CameraBackendInfo info() {
   const auto* size = cameraFrameSizeInfo(state.resolution);
@@ -136,8 +148,12 @@ bool end() {
     state.clock = nullptr;
   }
   if (state.bus) {
+#if CAMERA_SCCB_SHARED
+    cameraSharedSccbRelease();
+#else
     const esp_err_t err = i2c_del_master_bus(state.bus);
     if (err != ESP_OK) return fail("release camera SCCB bus", err);
+#endif
     state.bus = nullptr;
   }
   // Never pull GPIO12 low or reset it: the optional LCD owns the same rail.
@@ -148,6 +164,13 @@ bool end() {
 }
 
 bool initialize(const CameraConfig& config) {
+  esp_err_t err = ESP_OK;
+#if CAMERA_SCCB_SHARED
+  if(gSettings.i2cSdaPin!=int(kSda) || gSettings.i2cSclPin!=int(kScl))
+    return fail("Camera needs board I2C pins 7/8. Restore I2C pins and reboot",ESP_ERR_INVALID_STATE);
+  if(!cameraSharedSccbAcquire(CAMERA_SCCB_MANAGER_BUS,CAMERA_SCCB_I2C_PORT,&state.bus))
+    return fail("Camera control bus unavailable. Enable board I2C and retry",ESP_ERR_INVALID_STATE);
+#else
   i2c_master_bus_handle_t occupied = nullptr;
   if (i2c_master_get_bus_handle(kSccbPort, &occupied) == ESP_OK && occupied) {
     return fail("camera requires free I2C0; another owner is active", ESP_ERR_INVALID_STATE);
@@ -156,29 +179,38 @@ bool initialize(const CameraConfig& config) {
   bus.i2c_port = kSccbPort; bus.sda_io_num = kSda; bus.scl_io_num = kScl;
   bus.clk_source = I2C_CLK_SRC_DEFAULT; bus.glitch_ignore_cnt = 7;
   bus.flags.enable_internal_pullup = true;
-  esp_err_t err = i2c_new_master_bus(&bus, &state.bus);
+  err = i2c_new_master_bus(&bus, &state.bus);
   if (err != ESP_OK) return fail("acquire camera SCCB bus", err);
+
+#endif
 
   // These operations only assert the shared rail. Failures do not power down
   // the display, and a headless board does not need LCD initialization.
-  err = rtc_gpio_hold_dis(kPower);
-  if (err == ESP_OK) err = rtc_gpio_deinit(kPower);
-  if (err == ESP_OK) err = gpio_set_direction(kPower, GPIO_MODE_OUTPUT);
-  if (err == ESP_OK) err = gpio_set_level(kPower, 1);
-  if (err != ESP_OK) return fail("enable camera/LCD rail", err);
-  vTaskDelay(pdMS_TO_TICKS(20));
-  err = esp_cam_sensor_xclk_allocate(ESP_CAM_SENSOR_XCLK_ESP_CLOCK_ROUTER, &state.clock);
-  if (err != ESP_OK) return fail("allocate camera clock", err);
-  esp_cam_sensor_xclk_config_t clock = {};
-  clock.esp_clock_router_cfg.xclk_pin = kXclk;
-  clock.esp_clock_router_cfg.xclk_freq_hz = 24000000;
-  err = esp_cam_sensor_xclk_start(state.clock, &clock);
-  if (err != ESP_OK) return fail("start camera clock", err);
-  state.clockRunning = true;
-  err = gpio_set_direction(kReset, GPIO_MODE_OUTPUT);
-  if (err == ESP_OK) err = gpio_set_level(kReset, 1);
-  if (err != ESP_OK) return fail("release camera reset", err);
-  vTaskDelay(pdMS_TO_TICKS(20));
+  if(kPower!=GPIO_NUM_NC) {
+    err = rtc_gpio_hold_dis(kPower);
+    if (err == ESP_OK) err = rtc_gpio_deinit(kPower);
+    if (err == ESP_OK) err = gpio_set_direction(kPower, GPIO_MODE_OUTPUT);
+    if (err == ESP_OK) err = gpio_set_level(kPower, 1);
+    if (err != ESP_OK) return fail("enable camera/LCD rail", err);
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+  if(kXclk!=GPIO_NUM_NC) {
+    err = esp_cam_sensor_xclk_allocate(ESP_CAM_SENSOR_XCLK_ESP_CLOCK_ROUTER, &state.clock);
+    if (err != ESP_OK) return fail("allocate camera clock", err);
+    esp_cam_sensor_xclk_config_t clock = {};
+    clock.esp_clock_router_cfg.xclk_pin = kXclk;
+    clock.esp_clock_router_cfg.xclk_freq_hz = 24000000;
+    err = esp_cam_sensor_xclk_start(state.clock, &clock);
+    if (err != ESP_OK) return fail("start camera clock", err);
+    state.clockRunning = true;
+  }
+  if(kReset!=GPIO_NUM_NC) {
+    err = gpio_set_direction(kReset, GPIO_MODE_OUTPUT);
+    if (err == ESP_OK) err = gpio_set_level(kReset, 1);
+    if (err != ESP_OK) return fail("release camera reset", err);
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+  }
 
   esp_video_init_csi_config_t csi = {};
   csi.sccb_config.init_sccb = false;
@@ -193,7 +225,7 @@ bool initialize(const CameraConfig& config) {
   if (err != ESP_OK) return fail("initialize CSI/ISP", err);
   state.video = true;
   state.fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDONLY);
-  if (state.fd < 0) return fail("open CSI device");
+  if (state.fd < 0) return fail("Camera not detected. Check the camera cable/module and retry");
   esp_cam_sensor_id_t chip = {};
   v4l2_ext_control ctrl = {};
   ctrl.id = ESP_CAM_SENSOR_IOC_G_CHIP_ID;
@@ -204,13 +236,13 @@ bool initialize(const CameraConfig& config) {
   if (!io(VIDIOC_G_EXT_CTRLS, &ctrls, "read camera identity")) return false;
   state.detected = true;
   snprintf(state.model, sizeof(state.model), "%s (CSI 0x%04x)",
-           chip.pid == 0x2710 ? "OV2710" : "Sensor", chip.pid);
+           chip.pid == 0x2710 ? "OV2710" : chip.pid == 0x5647 ? "OV5647" : chip.pid == 0xcb3a ? "SC2336" : "Sensor", chip.pid);
   esp_cam_sensor_format_t sensor = {};
   if (!io(VIDIOC_G_SENSOR_FMT, &sensor, "read native camera format")) return false;
-  // Pinned OV2710 configuration is 720p RAW10/25fps. Refuse a differently
-  // configured module instead of allocating unchecked sensor-sized buffers.
+  // Each board selects a qualified sensor mode. Check native dimensions before
+  // using bounded frame allocations; never trust unchecked sensor-sized buffers.
   if (sensor.width != kWidth || sensor.height != kHeight) {
-    return fail("camera native mode must be 1280x720", ESP_ERR_NOT_SUPPORTED);
+    return fail("Camera native mode differs from board profile. Check sensor format", ESP_ERR_NOT_SUPPORTED);
   }
   v4l2_format format = {};
   format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -266,7 +298,7 @@ bool initialize(const CameraConfig& config) {
 
 bool begin(const CameraConfig& config) {
   if (!cameraFrameSizeInfo(config.resolution) ||
-      !(kResolutionMask & cameraResolutionBit(config.resolution)) ||
+      !(resolutionMask() & cameraResolutionBit(config.resolution)) ||
       camera_rgb565::qualityToJpeg(config.quality) == 0) {
     return fail("invalid camera resolution or quality", ESP_ERR_INVALID_ARG);
   }
@@ -373,7 +405,7 @@ bool capture(CameraFrame& frame, size_t maxBytes) {
 }
 
 bool setResolution(CameraFrameSize resolution) {
-  if (!cameraFrameSizeInfo(resolution) || !(kResolutionMask & cameraResolutionBit(resolution)))
+  if (!cameraFrameSizeInfo(resolution) || !(resolutionMask() & cameraResolutionBit(resolution)))
     return fail("resolution would upscale the native camera image", ESP_ERR_NOT_SUPPORTED);
   state.resolution = resolution; state.error[0] = 0; return true;
 }

@@ -1,6 +1,8 @@
 # Waveshare camera support plan
 
-Status: planned; no camera code, configuration or firmware changed by this plan.
+Status: implementation, host/build checks and Waveshare command-level hardware
+checks passed. User preview/orientation verification and the P4X-EYE hardware
+update remain pending. See [Waveshare support](WAVESHARE_P4_SUPPORT.md) for measured results.
 
 ## Objective and scope
 
@@ -9,10 +11,9 @@ service, so its commands, settings, web/G2 interfaces, snapshots and recording
 use the same public contract as P4X-EYE and XIAO Sense. Keep current P4X-EYE,
 S3 DVP and camera-disabled behavior compatible.
 
-The attached sensor has not been confirmed. OV5647 is the initial candidate
-because it is documented by Waveshare and its driver is already in the checked
-`esp_cam_sensor` dependency. Confirm the actual module, cable orientation and
-clock/reset/power wiring before selecting sensor defaults or testing hardware.
+The user confirmed the attached OV5647, and hardware detection read PID `0x5647`.
+Its existing `esp_cam_sensor` driver is selected in the Waveshare SDK defaults.
+The module supplies its clock and exposes no board-controlled reset/power GPIO.
 Other attached sensors require their own supported driver and format selection.
 
 ## Existing architecture to extend
@@ -60,6 +61,12 @@ If this requires a shared-bus lease or SCCB adapter, add it in the existing I2C
 owner and cover it with actual implementation tests. Do not migrate unrelated
 I2C devices or dependencies as a side effect. This milestone must pass before
 enabling camera support in the normal Waveshare profile.
+
+Implemented with `HAL_Camera_SCCB`: only the SDK's public SCCB factory is
+link-wrapped. Shared sensor transfers use the existing manager's device lock
+and clock policy; dedicated buses pass through to the SDK. A manager lease
+prevents bus recreation until camera teardown completes. No SDK or managed
+dependency source is patched. This also preserves Wire ownership for touch/audio.
 
 ### 2. Parameterize the existing P4 backend
 
@@ -116,6 +123,17 @@ absent sensor, capture timeout and recovery must preserve touch, audio, SD,
 display and radio. Memory admission failure must be explicit, without silently
 turning off unrelated features. Camera startup remains opt-in and an absent
 module must not cause boot failures or restart loops.
+
+The Waveshare DSI display selects cache-safe DW-GDMA interrupts. Its CSI driver
+must therefore also select `CONFIG_CAM_CTLR_MIPI_CSI_ISR_CACHE_SAFE`, keeping
+the DMA callback context in internal RAM. Hardware testing caught the mismatched
+SDK defaults before capture qualification; both options are now board defaults.
+The pinned IDF also omits `dw_gdma_channel_config_transfer` from its cache-safe
+link placement. `p4_camera_iram.lf` supplies that single missing mapping.
+`HAL_Camera_VideoBuffers` relocates fresh SDK buffer descriptors to internal
+RAM while preserving PSRAM pixels and SDK cleanup. Its private layout is
+checked against the pinned SDK constructor/destructor in host tests. These
+workarounds can be removed when the SDK provides both guarantees itself.
 
 ### 5. Verify and deploy
 

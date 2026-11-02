@@ -1488,6 +1488,11 @@ struct SettingEntry {
   bool readOnly = false;      // If true: UI renders as display-only text (no input). For system-managed
                               // counters (crashCount, lastResetReason, etc.) that the user reads but never edits.
   bool internalSecret = false; // Secret String: bounded 128-byte internal allocation, moved on load.
+  // Optional owner-provided hardware capability/presentation hooks.
+  bool (*isAvailable)() = nullptr;
+  const char* (*optionsProvider)() = nullptr;
+  bool supported() const { return !isAvailable || isAvailable(); }
+  const char* optionsText() const { return optionsProvider ? optionsProvider() : options; }
 };
 
 // Connection check callback - returns true if module is available/connected

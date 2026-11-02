@@ -128,6 +128,25 @@ static void case_schema_cmdkey_only_for_registered_setters() {
   EXPECT(doc["count"] == 1, "count is the module count");
 }
 
+static bool hardwareAvailable=false;
+static bool availability(){return hardwareAvailable;}
+static const char* hardwareOptions(){return "0|320x240,1|640x480";}
+static void case_hardware_capabilities() {
+  gDisplayEntries={row("cameraBrightness",SETTING_INT,"camerabrightness"),
+                   row("cameraFramesize",SETTING_INT,"cameraframesize")};
+  gDisplayEntries[0].isAvailable=availability;
+  gDisplayEntries[1].options="0|old,5|unsupported";
+  gDisplayEntries[1].optionsProvider=hardwareOptions;
+  SettingsModule camera{};camera.name="camera";camera.entries=gDisplayEntries.data();camera.count=2;
+  gModules={camera};
+  JsonDocument doc;buildSettingsSchemaJson(doc);
+  auto entries=doc["modules"][0]["entries"].as<JsonArray>();
+  EXPECT(entries.size()==1,"unsupported camera control omitted by shared schema");
+  EXPECT(std::string(entries[0]["options"]|"")=="0|320x240,1|640x480","owner capability options replace static list");
+  hardwareAvailable=true;doc.clear();buildSettingsSchemaJson(doc);
+  EXPECT(doc["modules"][0]["entries"].size()==2,"supported camera control returns without changing settings");
+}
+
 // (maybe_unused: a tree without the schema filter compiles the case to one failure.)
 [[maybe_unused]] static const char* kWorkerSchema = R"FIXTURE({"modules":[
  {"name":"users","section":"users","entries":[{"key":"x","cmdKey":"userx"}]},
@@ -196,6 +215,7 @@ static void case_schema_narrowed_to_remote_edit_policy() {
 int main() {
   case_schema_cmdkey_only_for_registered_setters();
   case_schema_narrowed_to_remote_edit_policy();
+  case_hardware_capabilities();
   std::fprintf(stderr, "checks=%d\n", gChecks);
   std::printf("settings schema setters: %s (%d failures)\n", gFailures ? "FAILED" : "PASSED", gFailures);
   return gFailures ? 1 : 0;

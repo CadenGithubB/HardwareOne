@@ -265,6 +265,8 @@ set(hardwareone_srcs
         HAL_Camera.cpp
         HAL_Camera_DVP.cpp
         HAL_Camera_P4.cpp
+        HAL_Camera_SCCB.cpp
+        HAL_Camera_VideoBuffers.cpp
         System_Camera_DVP.cpp
         System_Camera_Video.cpp
         System_ImageManager.cpp
@@ -647,7 +649,7 @@ endif()
 
 # CSI/ISP stays behind the shared camera API; native S3 uses esp32-camera.
 if(IDF_TARGET STREQUAL "esp32p4" AND HW_CFG_ENABLE_CAMERA_SENSOR GREATER 0)
-    list(APPEND hardwareone_requires esp_video esp_cam_sensor esp_driver_gpio)
+    list(APPEND hardwareone_requires esp_video esp_cam_sensor esp_sccb_intf esp_driver_gpio)
 endif()
 
 # ESP32-C6 radio companion over ESP-Hosted. HAL_Radio.cpp and
@@ -665,6 +667,7 @@ idf_component_register(
         ${hardwareone_requires}
     LDFRAGMENTS
         esp32_camera_psram.lf
+        p4_camera_iram.lf
 )
 
 # IDF evaluates component requirements in script mode before registration.
@@ -795,3 +798,19 @@ add_custom_target(hardwareone_check_web_assets
     VERBATIM
 )
 add_dependencies(${COMPONENT_LIB} hardwareone_check_web_assets)
+
+# The CSI SDK accepts a bus handle but constructs its own SCCB IO. Bridge that
+# factory to managed transactions on shared-bus boards; dedicated buses pass through.
+if(IDF_TARGET STREQUAL "esp32p4" AND HW_CFG_ENABLE_CAMERA_SENSOR GREATER 0)
+    target_link_options(${COMPONENT_LIB} INTERFACE "LINKER:--wrap=sccb_new_i2c_io"
+        "LINKER:--undefined=__wrap_sccb_new_i2c_io")
+    if(CONFIG_CAM_CTLR_MIPI_CSI_ISR_CACHE_SAFE)
+        # The pinned SDK allocates buffer descriptors with the pixel caps. CSI
+        # ISR bookkeeping must remain accessible while flash cache is disabled.
+        idf_component_get_property(_hw_video_dir espressif__esp_video COMPONENT_DIR)
+        target_include_directories(${COMPONENT_LIB} PRIVATE "${_hw_video_dir}/private_include")
+        target_link_options(${COMPONENT_LIB} INTERFACE
+            "LINKER:--wrap=esp_video_buffer_create"
+            "LINKER:--undefined=__wrap_esp_video_buffer_create")
+    endif()
+endif()

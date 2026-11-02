@@ -3482,6 +3482,7 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
     return buf;
   }
   if (entry->readOnly) return "Error: Setting is read-only";
+  if (!entry->supported()) return "Error: Setting unavailable on this hardware. Check device capabilities.";
   
   const char* p = valStr.c_str();
   
@@ -3791,6 +3792,7 @@ static void buildModuleControlsJson(JsonDocument& doc, const char* moduleName) {
     if (m->description) doc["name"] = m->description;
     for (size_t i = 0; i < m->count; i++) {
       const SettingEntry* e = &m->entries[i];
+      if (!e->supported()) continue;
       if (!e || !e->jsonKey || !e->valuePtr || e->isSecret) continue;  // never expose secrets
       JsonObject o = entries.add<JsonObject>();
       // "key" identifies the setting. It is NOT reliably the set command: the
@@ -3818,7 +3820,7 @@ static void buildModuleControlsJson(JsonDocument& doc, const char* moduleName) {
         o["min"] = e->minVal;
         o["max"] = e->maxVal;
       }
-      if (e->options)  o["options"]  = e->options;   // comma-separated -> select
+      if (e->optionsText())  o["options"]  = e->optionsText();   // comma-separated -> select
       if (e->readOnly) o["readOnly"] = true;
       if (e->group)    o["group"]    = e->group;
     }
@@ -3891,7 +3893,7 @@ void buildSettingsSchemaJson(JsonDocument& doc) {
     JsonArray entries = modObj["entries"].to<JsonArray>();
     for (size_t i = 0; i < mod->count; i++) {
       const SettingEntry* e = &mod->entries[i];
-      if (!e || !e->jsonKey) continue;
+      if (!e || !e->jsonKey || !e->supported()) continue;
 
       JsonObject entry = entries.add<JsonObject>();
       entry["key"] = e->jsonKey;
@@ -3931,7 +3933,7 @@ void buildSettingsSchemaJson(JsonDocument& doc) {
           entry["max"] = e->maxVal;
         }
       }
-      if (e->options) entry["options"] = e->options;
+      if (e->optionsText()) entry["options"] = e->optionsText();
 
       switch (e->type) {
         case SETTING_INT:

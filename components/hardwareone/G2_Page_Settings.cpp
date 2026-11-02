@@ -480,19 +480,19 @@ static size_t buildEntryRows(int moduleIdx, const char* group) {
 static size_t buildPickRows(const SettingEntry* e) {
   writeBackRow("<- Cancel");
   settingsResetPendingMap();
-  if (!e || !e->options) {
+  if (!e || !e->optionsText()) {
     snprintf(gRows[1], SET_ROW_LEN, "(no options)");
     gRowPtrs[1] = gRows[1];
     return 2;
   }
 
-  const int n = settingsEditorEnumCount(e->options);
+  const int n = settingsEditorEnumCount(e->optionsText());
   const int curIdx = settingsEditorEnumIndexForCurrent(e);
   G2Paginator p = g2PaginatorPrepare((size_t)n, SET_VISIBLE_ENTRY_ROWS, gPickPage);
   size_t row = 1;
   for (size_t oi = p.startIdx; oi < p.endIdx && row < SET_TOTAL_MODULES_ROWS; oi++) {
     char lab[32];
-    if (!settingsEditorEnumAt(e->options, (int)oi, nullptr, 0, lab, sizeof(lab))) continue;
+    if (!settingsEditorEnumAt(e->optionsText(), (int)oi, nullptr, 0, lab, sizeof(lab))) continue;
     snprintf(gRows[row], SET_ROW_LEN, "%s %s", ((int)oi == curIdx) ? "[X]" : "[ ]", lab);
     gRowPtrs[row] = gRows[row];
     gPendingMap.item[row] = (int)oi;
@@ -818,7 +818,7 @@ static void settingsEditEntry(int moduleIdx, int entryIdx) {
 
   if (e.readOnly) { settingsShowBannerThenEntries("Read-only"); return; }
   if (e.isSecret) { settingsShowBannerThenEntries("Secret - edit on web"); return; }
-  if (e.options && strncmp(e.options, "bitmask:", 8) == 0) {
+  if (e.optionsText() && strncmp(e.optionsText(), "bitmask:", 8) == 0) {
     settingsShowBannerThenEntries("Bitmask - edit on web");
     return;
   }
@@ -1218,7 +1218,7 @@ void g2SettingsHandleTap(uint32_t idx) {
       if ((int)idx == gRowMap.nextRow) { gPickPage++; settingsRenderPick(); return; }
       if (idx < SET_TOTAL_MODULES_ROWS && gRowMap.item[idx] >= 0 && gEditEntry) {
         char val[48];
-        if (settingsEditorEnumAt(gEditEntry->options, gRowMap.item[idx],
+        if (settingsEditorEnumAt(gEditEntry->optionsText(), gRowMap.item[idx],
                                  val, sizeof(val), nullptr, 0)) {
           // Stay at SET_LEVEL_PICK; onSettingsCommitDone lands on entries once
           // the write completes. This keeps a tap in the in-flight window routed

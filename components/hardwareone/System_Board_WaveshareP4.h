@@ -50,3 +50,15 @@
 #ifndef BATTERY_ADC_ATTEN
 #define BATTERY_ADC_ATTEN ADC_ATTEN_DB_6
 #endif
+
+// OV5647 CSI module: SCCB shares the managed touch/audio bus; module supplies XCLK.
+#define CAMERA_SCCB_SHARED 1
+#define CAMERA_SCCB_MANAGER_BUS 0
+#define CAMERA_POWER_PIN -1
+#define CAMERA_XCLK_PIN -1
+#define CAMERA_RESET_PIN -1
+#define CAMERA_SDA_PIN 7
+#define CAMERA_SCL_PIN 8
+#define CAMERA_NATIVE_WIDTH 800
+#define CAMERA_NATIVE_HEIGHT 640
+#define CAMERA_BUFFER_COUNT 2

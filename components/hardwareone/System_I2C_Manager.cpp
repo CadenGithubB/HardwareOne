@@ -253,12 +253,19 @@ static void beginBusOnCpu1(TwoWire* wire, int sda, int scl) {
 void I2CDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t hz) {
   if (busIdx >= NUM_BUSES) return;
   const int hardwarePort = busIdx == 0 ? 1 : 0;
-  if (hardwarePort == CAMERA_SCCB_I2C_PORT) {
+  if (hardwarePort == CAMERA_SCCB_I2C_PORT && !CAMERA_SCCB_SHARED) {
     WARN_I2CF("Sensor bus %u unavailable: I2C%d is reserved for the camera", busIdx, hardwarePort);
     return;
   }
   if (sdaPin < 0 || sclPin < 0) {
     INFO_I2CF("initBus skipped: bus %u pins invalid (sda=%d scl=%d)", busIdx, sdaPin, sclPin);
+    return;
+  }
+  SemaphoreHandle_t mutex = busMutexes[busIdx];
+  if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(2000)) != pdTRUE) return;
+  struct Unlock { SemaphoreHandle_t mutex; ~Unlock(){xSemaphoreGive(mutex);} } unlock{mutex};
+  if (busHasClients(busIdx)) {
+    WARN_I2CF("Bus %u reconfiguration refused: active client; stop camera first", busIdx);
     return;
   }
   TwoWire* wire = wires[busIdx];
@@ -340,6 +347,23 @@ void I2CDeviceManager::initBuses() {
   delay(100);
 }
 
+bool I2CDeviceManager::retainBus(uint8_t busIdx) {
+  if (busIdx >= NUM_BUSES) return false;
+  auto mutex = busMutexes[busIdx];
+  if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(500)) != pdTRUE) return false;
+  const bool ready = busInitialized[busIdx] && wires[busIdx];
+  if (ready) busClients[busIdx].fetch_add(1);
+  xSemaphoreGive(mutex);
+  return ready;
+}
+void I2CDeviceManager::releaseBus(uint8_t busIdx) {
+  if (busIdx >= NUM_BUSES) return;
+  auto mutex = busMutexes[busIdx];
+  if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return;
+  if (busClients[busIdx].load()) busClients[busIdx].fetch_sub(1);
+  xSemaphoreGive(mutex);
+}
+
 void I2CDeviceManager::performBusRecovery(uint8_t busIdx) {
   if (busIdx >= NUM_BUSES) busIdx = 0;
   if (!busInitialized[busIdx]) {
@@ -367,6 +391,13 @@ void I2CDeviceManager::performBusRecovery(uint8_t busIdx) {
   if (!locked) {
     pollResume(busIdx);
     ERROR_I2CF("Bus %u recovery failed - couldn't acquire mutex", busIdx);
+    return;
+  }
+
+  if (busHasClients(busIdx)) {
+    xSemaphoreGive(mutex);
+    pollResume(busIdx);
+    WARN_I2CF("Bus %u recovery refused: active client; stop camera first", busIdx);
     return;
   }
 

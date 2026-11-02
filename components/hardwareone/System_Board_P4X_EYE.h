@@ -67,3 +67,13 @@
 #define RADIO_C6_BOOT_PIN 33
 #define RADIO_C6_UART_RX_PIN 35
 #define RADIO_C6_UART_TX_PIN 36
+
+// CSI camera wiring and qualified native format (OV2710 / compatible module).
+#define CAMERA_POWER_PIN 12
+#define CAMERA_XCLK_PIN 11
+#define CAMERA_RESET_PIN 26
+#define CAMERA_SDA_PIN 14
+#define CAMERA_SCL_PIN 13
+#define CAMERA_NATIVE_WIDTH 1280
+#define CAMERA_NATIVE_HEIGHT 720
+#define CAMERA_BUFFER_COUNT 3

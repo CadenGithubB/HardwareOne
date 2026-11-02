@@ -2196,3 +2196,16 @@ endif()
 add_test(NAME waveshare_audio
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_waveshare_audio.py
           ${WAVESHARE_AUDIO_TEST_ARGS})
+
+set(CAMERA_SCCB_TEST_ARGS)
+if(HW1_SANITIZE)
+  list(APPEND CAMERA_SCCB_TEST_ARGS --sanitize)
+endif()
+add_test(NAME camera_managed_sccb
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_camera_sccb.py
+          ${CAMERA_SCCB_TEST_ARGS})
+set_tests_properties(camera_managed_sccb PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME camera_video_buffers
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_camera_video_buffers.py
+          ${CAMERA_SCCB_TEST_ARGS})
+set_tests_properties(camera_video_buffers PROPERTIES SKIP_RETURN_CODE 77)

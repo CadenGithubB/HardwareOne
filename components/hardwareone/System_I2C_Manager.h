@@ -9,6 +9,7 @@
 #define SYSTEM_I2C_MANAGER_H
 
 #include <Arduino.h>
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <Wire.h>
@@ -184,6 +185,7 @@ private:
   uint32_t          currentClockHz[NUM_BUSES];
   uint32_t          defaultClockHz[NUM_BUSES];
   bool              busInitialized[NUM_BUSES];
+  std::atomic<unsigned> busClients[NUM_BUSES]{};
   I2CBusMetrics     busMetrics[NUM_BUSES];
   uint32_t          lastRecoveryMs[NUM_BUSES];  // throttles error-driven recovery
 
@@ -265,6 +267,13 @@ public:
   // Initialize a specific bus. Idempotent — safe to call repeatedly; later
   // calls only re-apply the clock + pins on the existing TwoWire.
   void initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t defaultHz);
+  // Lifetime lease for clients borrowing the underlying bus. Transactions still
+  // use the ordinary device mutex/clock path; a lease blocks bus recreation.
+  bool retainBus(uint8_t busIdx);
+  void releaseBus(uint8_t busIdx);
+  bool busHasClients(uint8_t busIdx) const {
+    return busIdx < NUM_BUSES && busClients[busIdx].load() != 0;
+  }
   // Bus recovery — targets a specific bus's mutex + pins + Wire instance.
   // performBusRecovery() defaults to bus 0 for legacy callers; the bus-aware
   // overload is used when the failing device is on bus 1.

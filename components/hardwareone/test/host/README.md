@@ -4339,8 +4339,9 @@ backend and RGB565 resize code under host faults (ownership, cleanup,
 stream-stop retry, deadlines, budget and capture failures). No hardware is
 touched.
 
-The five camera suites (`camera_core`, `camera_dvp`, `camera_p4`,
-`camera_i2c_reservation` and `camera_consumers`) are registered CTest suites;
+The seven camera suites (`camera_core`, `camera_dvp`, `camera_p4`,
+`camera_i2c_reservation`, `camera_managed_sccb`, `camera_video_buffers` and
+`camera_consumers`) are registered CTest suites;
 ASan/UBSan follow `HW1_SANITIZE`.
 
 ## Shared camera controls and consumers
@@ -4394,17 +4395,17 @@ TFLite kernels, arena placement, camera hardware, the hardware JPEG codec.
 
 ```sh
 python3 components/hardwareone/test/host/test_camera_i2c_reservation.py --sanitize
+python3 components/hardwareone/test/host/test_camera_sccb.py --sanitize
+python3 components/hardwareone/test/host/test_camera_video_buffers.py --sanitize
 ```
 
-This runs the actual `System_BuildConfig.h` reservation policy and unchanged
-manager constructor, `initBus`, `cmd_i2cbusenabled` and `cmd_i2c2busenabled`
-definitions across 18 configurations: P4, S3 and classic ESP32, camera enabled and
-disabled, with the DVP SDK I2C1 option undefined, explicitly false, and true.
-P4 always reserves hardware I2C0 when its camera is compiled. DVP follows the
-SDK-selected port, and camera-disabled builds reserve neither controller.
-Sixteen configurations compile and run. The two DVP configurations selecting
-camera SCCB I2C1 with external I2C enabled must fail compilation with the specific
-controller-ownership conflict diagnostic.
+The reservation suite runs the actual `System_BuildConfig.h`, manager constructor,
+`initBus`, lifetime leases, `cmd_i2cbusenabled` and `cmd_i2c2busenabled` across
+P4X-EYE, Waveshare, S3 and classic ESP32 with camera enabled/disabled and three
+DVP SDK port selections. EYE reserves I2C0; Waveshare shares managed I2C1; DVP
+follows its SDK port. Camera-disabled builds reserve neither controller.
+Twenty-two configurations run. Two dedicated-camera/external-I2C conflicts and
+a shared camera without the I2C subsystem must fail compilation explicitly.
 
 The runtime checks verify logical bus 0 maps to Wire1 / hardware I2C1 and bus 1
 to Wire / hardware I2C0. The unreserved controller initializes normally while
@@ -4413,6 +4414,22 @@ online event or bus-state update. Each CLI enable command rejects its reserved
 controller without persisting or changing either bus's existing configuration;
 the unreserved bus remains independently configurable. Disabling remains allowed,
 and empty and validation-only commands make no writes.
+Active leases reject bus reconfiguration until the last client releases it.
+
+The SCCB suite compiles `HAL_Camera_SCCB.cpp` with transport/manager adapters and
+the pinned SDK's actual `esp_sccb_io_t` interface. Resolve managed dependencies
+with a P4 camera profile build first, or pass `--sccb-component` to the component
+directory. An unavailable SDK header skips this test (exit 77). It covers dedicated-bus pass-through,
+managed transfers, repeated-start reads, short reads, transport/lock failures,
+bounded arguments and borrowed-bus lifetime. It does not emulate a sensor.
+
+The video-buffer suite executes the actual pinned SDK constructor/destructor
+and `HAL_Camera_VideoBuffers.cpp`. It checks that interrupt descriptors move to
+internal RAM, pixel allocations and ownership stay intact, self-references
+target the relocated descriptor, SDK-internal allocations pass through, and
+failed allocations unwind completely. It requires a resolved P4 `esp_video`
+component (`--video-component`), otherwise skips with exit 77. Link placement
+and cache-disabled capture still require the real firmware and hardware.
 
 Wire, GPIO, logging, core-affinity dispatch, Arduino String parsing and settings
 persistence are host adapters. These tests do not prove physical controller

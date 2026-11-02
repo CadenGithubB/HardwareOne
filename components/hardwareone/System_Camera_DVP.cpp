@@ -582,7 +582,7 @@ static bool cameraPwrEnsureStartedLocked() {
   taskStackRecord("cam_power", kStack);
   const BaseType_t ok =
       // Keep camera SCCB initialization off the radio-heavy core. The backend
-      // owns its camera bus; no application Wire scan runs here.
+      // owns or leases its bus; shared transfers use the I2C manager.
       xTaskCreatePinnedToCore(cameraPwrWorker, "cam_power", kStack, sCamPwrQueue,
                   tskIDLE_PRIORITY + 2, &sCamPwrTask, I2C_SENSOR_CORE);
   if (ok != pdPASS) {
@@ -795,6 +795,17 @@ static const char* cameraPowerAsyncCommand(bool start) {
                : "Error: camera stop not queued (camera power worker unavailable)";
 }
 
+static const char* cameraCommandFailure(const char* fallback) {
+  static thread_local char result[192];
+  snprintf(result,sizeof(result),"Error: %s",fallback);
+  if(lockCameraMutex(0)) {
+    const auto state=cameraBackend().info();
+    if(state.error && state.error[0])snprintf(result,sizeof(result),"Error: %s",state.error);
+    unlockCameraMutex();
+  }
+  return result;
+}
+
 const char* cmd_camerastart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (cameraAsyncForm(argsInput)) return cameraPowerAsyncCommand(true);
@@ -804,7 +815,7 @@ const char* cmd_camerastart(const String& argsInput) {
   if (cameraPowerRequestStartSync(60000)) {
     return "Camera started successfully";
   }
-  return "Error: Camera initialization failed";
+  return cameraCommandFailure("Camera start did not finish. Check cameraread and retry.");
 }
 
 const char* cmd_camerastop(const String& argsInput) {
@@ -832,7 +843,7 @@ const char* cmd_cameracapture(const String& argsInput) {
     cliHint("to save a photo to storage, run 'camerasave'");
     return result;
   }
-  return "Error: Frame capture failed";
+  return cameraCommandFailure("No frame received. Check cameraread and retry.");
 }
 
 static const char* applyCameraResolutionSetting(CameraFrameSize size) {
@@ -1394,21 +1405,41 @@ const CommandEntry cameraCommands[] = {
 };
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
+template<CameraControl Control> static bool cameraSettingAvailable() {
+  return cameraSupportsControl(Control);
+}
+static const char* cameraResolutionOptions() {
+  // Every caller consumes/copies the string synchronously on its own task.
+  static thread_local char options[384];
+  size_t used=0;options[0]=0;
+  const auto caps=getCameraCapabilities();
+  for(unsigned i=0;i<unsigned(CameraFrameSize::Count);++i) {
+    if(!(caps.resolutions & cameraResolutionBit(CameraFrameSize(i))))continue;
+    const auto* size=cameraFrameSizeInfo(CameraFrameSize(i));
+    if(!size)continue;
+    const int count=snprintf(options+used,sizeof(options)-used,"%s%u|%ux%u (%s)",
+        used?",":"",i,size->width,size->height,size->name);
+    if(count<0 || size_t(count)>=sizeof(options)-used){options[used]=0;break;}
+    used+=count;
+  }
+  return options;
+}
+
 static const SettingEntry cameraSettingEntries[] = {
   { "cameraEnabled", SETTING_BOOL, &gSettings.cameraEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "cameraenabled" },
   { "cameraAutoStart", SETTING_BOOL, &gSettings.cameraAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "cameraautostart" },
   { "cameraFramesize", SETTING_INT, &gSettings.cameraFramesize, 10, 0, nullptr, 0, 12, "Resolution", "0:320x240 (QVGA),1:640x480 (VGA),2:800x600 (SVGA),3:1024x768 (XGA),4:1280x1024 (SXGA),5:1600x1200 (UXGA),"
-    "6:96x96,7:160x120 (QQVGA),8:176x144 (QCIF),9:240x176 (HQVGA),10:240x240,11:1280x720 (HD),12:400x296 (CIF)", false, "image", nullptr },
-  { "cameraBrightness", SETTING_INT, &gSettings.cameraBrightness, 2, 0, nullptr, -2, 2, "Brightness (-2 to 2)", nullptr, false, "tuning", "camerabrightness" },
-  { "cameraContrast", SETTING_INT, &gSettings.cameraContrast, 2, 0, nullptr, -2, 2, "Contrast (-2 to 2)", nullptr, false, "tuning", "cameracontrast" },
-  { "cameraSaturation", SETTING_INT, &gSettings.cameraSaturation, 2, 0, nullptr, -2, 2, "Saturation (-2 to 2)", nullptr, false, "tuning", "camerasaturation" },
-  { "cameraAELevel", SETTING_INT, &gSettings.cameraAELevel, 0, 0, nullptr, -2, 2, "Exposure Compensation (-2 to 2)", nullptr, false, "tuning", "cameraexposure" },
-  { "cameraWBMode", SETTING_INT, &gSettings.cameraWBMode, 0, 0, nullptr, 0, 4, "White Balance", "0:Auto,1:Sunny,2:Cloudy,3:Office,4:Home", false, "tuning", "camerawb" },
-  { "cameraSharpness", SETTING_INT, &gSettings.cameraSharpness, 0, 0, nullptr, -2, 2, "Sharpness (-2 to 2, OV3660)", nullptr, false, "tuning", "camerasharpness" },
-  { "cameraDenoise", SETTING_INT, &gSettings.cameraDenoise, 0, 0, nullptr, 0, 8, "Denoise (0-8)", nullptr, false, "tuning", "cameradenoise" },
-  { "cameraSpecialEffect", SETTING_INT, &gSettings.cameraSpecialEffect, 0, 0, nullptr, 0, 6, "Special Effect", "0:None,1:Negative,2:Grayscale,3:Red Tint,4:Green Tint,5:Blue Tint,6:Sepia", false, "tuning", "cameraeffect" },
-  { "cameraHMirror", SETTING_BOOL, &gSettings.cameraHMirror, 0, 0, nullptr, 0, 1, "Horizontal mirror", nullptr, false, "image", "camerahmirror" },
-  { "cameraVFlip", SETTING_BOOL, &gSettings.cameraVFlip, 0, 0, nullptr, 0, 1, "Vertical flip", nullptr, false, "image", "cameravflip" },
+    "6:96x96,7:160x120 (QQVGA),8:176x144 (QCIF),9:240x176 (HQVGA),10:240x240,11:1280x720 (HD),12:400x296 (CIF)", false, "image", "cameraframesize", false, false, nullptr, cameraResolutionOptions },
+  { "cameraBrightness", SETTING_INT, &gSettings.cameraBrightness, 2, 0, nullptr, -2, 2, "Brightness (-2 to 2)", nullptr, false, "tuning", "camerabrightness", false, false, cameraSettingAvailable<CameraControl::Brightness>, nullptr },
+  { "cameraContrast", SETTING_INT, &gSettings.cameraContrast, 2, 0, nullptr, -2, 2, "Contrast (-2 to 2)", nullptr, false, "tuning", "cameracontrast", false, false, cameraSettingAvailable<CameraControl::Contrast>, nullptr },
+  { "cameraSaturation", SETTING_INT, &gSettings.cameraSaturation, 2, 0, nullptr, -2, 2, "Saturation (-2 to 2)", nullptr, false, "tuning", "camerasaturation", false, false, cameraSettingAvailable<CameraControl::Saturation>, nullptr },
+  { "cameraAELevel", SETTING_INT, &gSettings.cameraAELevel, 0, 0, nullptr, -2, 2, "Exposure Compensation (-2 to 2)", nullptr, false, "tuning", "cameraexposure", false, false, cameraSettingAvailable<CameraControl::ExposureLevel>, nullptr },
+  { "cameraWBMode", SETTING_INT, &gSettings.cameraWBMode, 0, 0, nullptr, 0, 4, "White Balance", "0:Auto,1:Sunny,2:Cloudy,3:Office,4:Home", false, "tuning", "camerawb", false, false, cameraSettingAvailable<CameraControl::WhiteBalanceMode>, nullptr },
+  { "cameraSharpness", SETTING_INT, &gSettings.cameraSharpness, 0, 0, nullptr, -2, 2, "Sharpness (-2 to 2, OV3660)", nullptr, false, "tuning", "camerasharpness", false, false, cameraSettingAvailable<CameraControl::Sharpness>, nullptr },
+  { "cameraDenoise", SETTING_INT, &gSettings.cameraDenoise, 0, 0, nullptr, 0, 8, "Denoise (0-8)", nullptr, false, "tuning", "cameradenoise", false, false, cameraSettingAvailable<CameraControl::Denoise>, nullptr },
+  { "cameraSpecialEffect", SETTING_INT, &gSettings.cameraSpecialEffect, 0, 0, nullptr, 0, 6, "Special Effect", "0:None,1:Negative,2:Grayscale,3:Red Tint,4:Green Tint,5:Blue Tint,6:Sepia", false, "tuning", "cameraeffect", false, false, cameraSettingAvailable<CameraControl::Effect>, nullptr },
+  { "cameraHMirror", SETTING_BOOL, &gSettings.cameraHMirror, 0, 0, nullptr, 0, 1, "Horizontal mirror", nullptr, false, "image", "camerahmirror", false, false, cameraSettingAvailable<CameraControl::HMirror>, nullptr },
+  { "cameraVFlip", SETTING_BOOL, &gSettings.cameraVFlip, 0, 0, nullptr, 0, 1, "Vertical flip", nullptr, false, "image", "cameravflip", false, false, cameraSettingAvailable<CameraControl::VFlip>, nullptr },
   { "cameraQuality", SETTING_INT, &gSettings.cameraQuality, 12, 0, nullptr, 0, 63, "JPEG quality (0-63, lower=better)", nullptr, false, "image", "cameraquality" },
   { "cameraStreamFps", SETTING_INT, &gSettings.cameraStreamFps, 5, 0, nullptr, 1, 20, "Camera FPS (higher=smoother)", nullptr, false, "image", "camerafps" },
   { "g2StreamToneMap", SETTING_INT, &gSettings.g2StreamToneMap, 1, 0, nullptr, 0, 3,

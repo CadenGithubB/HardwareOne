@@ -26,6 +26,7 @@
 // -----------------------------------------------------------------------------
 bool settingsEditorIsVisible(const SettingEntry* entry) {
   if (!entry || !entry->jsonKey) return true;
+  if (!entry->supported()) return false;
 
   // Hide Thermal I2C clock if thermal sensor not compiled or not connected.
   if (strcmp(entry->jsonKey, "i2cClockThermalHz") == 0) {
@@ -78,8 +79,8 @@ int settingsEditorCurrentValue(const SettingEntry* entry) {
 // Enum "options" parser
 // -----------------------------------------------------------------------------
 bool settingsEditorHasEnumOptions(const SettingEntry* entry) {
-  if (!entry || !entry->options || !entry->options[0]) return false;
-  if (strncmp(entry->options, "bitmask:", 8) == 0) return false;
+  if (!entry || !entry->optionsText() || !entry->optionsText()[0]) return false;
+  if (strncmp(entry->optionsText(), "bitmask:", 8) == 0) return false;
   return true;
 }
 
@@ -128,17 +129,17 @@ bool settingsEditorEnumAt(const char* options, int idx,
 }
 
 int settingsEditorEnumIndexForCurrent(const SettingEntry* entry) {
-  if (!entry || !entry->options) return 0;
+  if (!entry || !entry->optionsText()) return 0;
   char cur[48];
   if (entry->type == SETTING_STRING) {
     snprintf(cur, sizeof(cur), "%s", ((String*)entry->valuePtr)->c_str());
   } else {
     snprintf(cur, sizeof(cur), "%d", settingsEditorCurrentValue(entry));
   }
-  const int n = settingsEditorEnumCount(entry->options);
+  const int n = settingsEditorEnumCount(entry->optionsText());
   char val[48];
   for (int i = 0; i < n; i++) {
-    if (settingsEditorEnumAt(entry->options, i, val, sizeof(val), nullptr, 0) &&
+    if (settingsEditorEnumAt(entry->optionsText(), i, val, sizeof(val), nullptr, 0) &&
         strcasecmp(val, cur) == 0) {
       return i;
     }
