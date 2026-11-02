@@ -656,11 +656,10 @@ the web interface, camera capture and recording from a computer on that network.
 This Mac was on a different subnet and could not independently reach that IP;
 its failed browser/TCP attempts are not camera/server failures.
 
-Matching web firmware/debug, the profile patch and compact logs are in ignored
-`.scratch/waveshare-web/`. The normal Waveshare build directory is reused for
-the subsequent OLED preview work. Retain the web recovery archive until that
-combined firmware is qualified; then remove this superseded archive while
-keeping the small configuration/hash and verification evidence. No push yet.
+The profile patch and compact web logs remain in ignored `.scratch/waveshare-web/`.
+The combined OLED/web image below supersedes the intermediate web firmware;
+its recovery archive was removed after the user's viewer acceptance, preserving
+the small configuration/hash and verification evidence. No push yet.
 
 ## Shared monochrome camera viewer (2026-11-02)
 
@@ -702,12 +701,13 @@ HTTP still starts automatically on port 80 at `192.168.21.75`, touch remains
 connected, and C6 stays online with zero bridge timeouts/transport errors.
 Saved landscape, resolution and mirror/flip settings remain intact. The current
 user-selected quality 0 and FPS 20 are preserved; preview does not rewrite them.
-The viewer is left open for the user's image/readability and physical-control
-check. EYE and a true OLED have build/host coverage only for this addition.
+The user confirmed that the viewer looks good and the physical controls work.
+EYE and a true OLED have build/host coverage only for this addition.
 
 Matching firmware/debug and compact test/runtime evidence are retained in
-ignored `.scratch/oled-camera/`. The earlier web archive remains a rollback
-until the user's preview check; remove it after acceptance. Existing build
+ignored `.scratch/oled-camera/`. Its 27,317,542-byte firmware/debug archive was
+reverified before removing the superseded web archive, reclaiming 27,205,632
+allocated bytes. Existing build
 caches (~1.0 GiB Waveshare, ~1.1 GiB EYE, ~1.3 GiB XIAO) remain for the agreed
 hardware validation and any resulting edits. Cleanup reclaimed 229,376
 allocated bytes of superseded preview build logs and the temporary serial

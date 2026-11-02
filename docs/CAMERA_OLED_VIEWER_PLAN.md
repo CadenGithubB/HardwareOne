@@ -72,8 +72,8 @@ power, display feedback, layout, availability and session-role checks pass.
 
 Waveshare, P4X-EYE and the XIAO baseline firmware build successfully. Physical
 results are recorded in `WAVESHARE_P4_SUPPORT.md`; EYE and a true monochrome OLED
-still require their own physical preview/control qualification. Hold/photo
-semantics and readability need the user's check on the actual display.
+still require their own physical preview/control qualification. The user has
+confirmed the Waveshare image and physical controls work as expected.
 
 Both P4 panels physically support color; their current shared UI adapters expose
 a one-bit canvas. A later color-preview operation can live behind the display
