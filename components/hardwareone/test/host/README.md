@@ -4339,10 +4339,26 @@ backend and RGB565 resize code under host faults (ownership, cleanup,
 stream-stop retry, deadlines, budget and capture failures). No hardware is
 touched.
 
-The seven camera suites (`camera_core`, `camera_dvp`, `camera_p4`,
+The eight camera suites (`camera_core`, `camera_dvp`, `camera_p4`,
 `camera_i2c_reservation`, `camera_managed_sccb`, `camera_video_buffers` and
-`camera_consumers`) are registered CTest suites;
+`camera_consumers`, plus `camera_oled_preview`) are registered CTest suites;
 ASan/UBSan follow `HW1_SANITIZE`.
+
+## Shared monochrome camera preview
+
+```sh
+python3 components/hardwareone/test/host/test_oled_camera.py --sanitize
+```
+
+`camera_oled_preview` executes the production luminance/downsampling/dither
+renderer and the complete OLED camera mode against RTOS, display and camera
+boundary doubles, using the real ArduinoJson serializer. It checks 64, 88 and
+128 pixel canvas heights, bitmap bounds, flat/gradient scenes, freeze/resume,
+stopped-source restart, capture/decode drain before photo commands, late-frame
+rejection after view/session changes, allocation failures and worker/stream
+cleanup. OLED/camera-disabled combinations compile separately. Hardware JPEG,
+panel output, physical input and sustained camera/web/STT coexistence require
+device qualification.
 
 ## Shared camera controls and consumers
 

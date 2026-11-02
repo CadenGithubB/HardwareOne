@@ -432,6 +432,7 @@ if(HW_CFG_BUILD_OLED_MODES GREATER 0)
         OLED_Mode_Network.cpp
         OLED_Mode_System.cpp
         OLED_Mode_Sensors.cpp
+        OLED_Mode_Camera.cpp
         OLED_Mode_Animations.cpp
         OLED_Mode_Menu.cpp
         OLED_Mode_FileBrowser.cpp

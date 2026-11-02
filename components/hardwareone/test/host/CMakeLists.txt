@@ -2209,3 +2209,6 @@ add_test(NAME camera_video_buffers
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_camera_video_buffers.py
           ${CAMERA_SCCB_TEST_ARGS})
 set_tests_properties(camera_video_buffers PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME camera_oled_preview
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_camera.py
+          ${CAMERA_SCCB_TEST_ARGS})

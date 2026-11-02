@@ -168,7 +168,8 @@ def main() -> None:
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
         # Bluetooth off (central class) and on (the running-role rule).
-        for extra in ([], ["-DENABLE_BLUETOOTH=1"]):
+        for extra in ([], ["-DENABLE_BLUETOOTH=1"], ["-DENABLE_CAMERA_SENSOR=1"],
+                      ["-DENABLE_BLUETOOTH=1", "-DENABLE_CAMERA_SENSOR=1"]):
             subprocess.run(command + extra, check=True)
             result = subprocess.run([str(binary)], check=False)
             if result.returncode != 0:

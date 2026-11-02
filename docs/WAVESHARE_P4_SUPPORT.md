@@ -661,3 +661,54 @@ Matching web firmware/debug, the profile patch and compact logs are in ignored
 the subsequent OLED preview work. Retain the web recovery archive until that
 combined firmware is qualified; then remove this superseded archive while
 keeping the small configuration/hash and verification evidence. No push yet.
+
+## Shared monochrome camera viewer (2026-11-02)
+
+Sensors → Camera now opens the shared one-bit viewer. `oledmode camera` is the
+equivalent command after display login. The image preserves aspect ratio in a
+128×58 viewport on the saved landscape layout. A holds/resumes, X starts/stops
+the camera, Y saves a new full-color photo, up/down adjust preview contrast,
+left selects threshold and right selects ordered dithering. B retains standard
+back navigation. Holding affects the displayed bitmap only; Y always takes a
+new photo. See `CAMERA_OLED_VIEWER_PLAN.md` for ownership and lifetime details.
+
+The production renderer and full mode pass sanitizer-backed host checks at 64,
+88 and 128 pixel canvas heights and with camera/display disabled. Shared camera
+core, consumers, async power, display feedback, layout, availability and
+session-role checks pass. The final builds are:
+
+| Saved profile | Application bytes | Application headroom |
+| --- | ---: | ---: |
+| waveshare-p4-bringup | 4,989,776 | 3,398,832 |
+| p4-phone-pipe (EYE) | 6,139,984 | 1,286,064 |
+| xiao-default | 4,390,400 | 1,593,856 |
+
+Waveshare application-only flashing matched the installed partition layout,
+board MAC and application digest. All 12 camera interrupt-path symbols remain
+in IRAM. An initial revision hit a startup stdio-lock assertion; replacing its
+additional 1 KB thread-local status buffer with the existing serialized command
+reply buffer removed that observed fault. The corrected image boots and runs.
+The prior boot/credential-check watchdog warnings remain separate from preview.
+
+On-device checks passed: live preview at about two updates/second, advancing
+frame count, 128×58 bitmap, capture/decode typically around 80/25 ms at 240×240,
+and at least 7,216 bytes of unused preview-worker stack. A foreground capture
+passed while preview was live. A two-second onboard-mic/local-STT job completed
+32,000 samples in 7.15 seconds, without overruns or errors, while preview kept
+advancing. Leaving Camera cleared the bitmap and retired the worker; the
+camera remained available for capture. Reentry started a fresh live preview.
+
+HTTP still starts automatically on port 80 at `192.168.21.75`, touch remains
+connected, and C6 stays online with zero bridge timeouts/transport errors.
+Saved landscape, resolution and mirror/flip settings remain intact. The current
+user-selected quality 0 and FPS 20 are preserved; preview does not rewrite them.
+The viewer is left open for the user's image/readability and physical-control
+check. EYE and a true OLED have build/host coverage only for this addition.
+
+Matching firmware/debug and compact test/runtime evidence are retained in
+ignored `.scratch/oled-camera/`. The earlier web archive remains a rollback
+until the user's preview check; remove it after acceptance. Existing build
+caches (~1.0 GiB Waveshare, ~1.1 GiB EYE, ~1.3 GiB XIAO) remain for the agreed
+hardware validation and any resulting edits. Cleanup reclaimed 229,376
+allocated bytes of superseded preview build logs and the temporary serial
+helper. No push before that validation.

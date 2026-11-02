@@ -32,6 +32,11 @@ def run(component, output, baseline=False, sanitize=False):
     harness = harness.replace('// INSERT_MAP_PACK', extract_block((COMPONENT/'OLED_Mode_Map.cpp').read_text(), 'static void packShadeBufTo1Bit('))
     perf = (component/'OLED_Mode_System.cpp').read_text()
     perf_code = '\n'.join(re.findall(r'(?m)^#define PERF_(?:MAX_TASKS|VISIBLE_ROWS|SAMPLE_MS) .+$', perf))
+    if 'TASK_CPU_SAMPLE_MS' in perf_code:
+        task_header = (component/'System_TaskUtils.h').read_text()
+        sample = re.search(r'(?m)^#define TASK_CPU_SAMPLE_MS\s+\d+', task_header)
+        assert sample, 'production task CPU sample interval missing'
+        perf_code = sample.group(0) + '\n' + perf_code
     perf_code += '\n' + extract_block(perf, 'struct PerfRenderData') + ';\n'
     perf_code += 'static PerfRenderData perfRenderData{}; static uint8_t sPerfPage=0; static int sCpuScroll=0,sStkScroll=0;\n'
     perf_code += '\n'.join(extract_block(perf, name) for name in (

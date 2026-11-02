@@ -82,6 +82,13 @@ bool getCameraControl(CameraControl control, int& value);
 bool setCameraControl(CameraControl control, int value);
 // Releases any prior owned frame in out before attempting a new capture.
 bool captureCameraFrame(CameraFrame& out, size_t maxBytes = kCameraMaxFrameBytes);
+// Owned nonblocking status for asynchronous consumers; false means camera busy.
+struct CameraStateSnapshot {
+  bool running = false;
+  char model[40]{};
+  char error[128]{};
+};
+bool cameraStateSnapshot(CameraStateSnapshot& out);
 
 // Resolution and quality control
 bool setCameraResolution(CameraFrameSize size);

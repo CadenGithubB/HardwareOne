@@ -164,6 +164,7 @@ enum OLEDMode {
   OLED_BLUETOOTH_PHONE,    // Phone relay pipe submenu (pushed from OLED_BLUETOOTH)
   OLED_BLUETOOTH_PHONE_CODE, // `phone pair new` code screen (pushed by the command; never for a guest)
   OLED_WEB_STATUS,         // Web server status detail (pushed from OLED_WEB_STATS)
+  OLED_CAMERA,             // One-bit live camera preview (append to preserve existing IDs)
 };
 
 // Guest OLED session helpers (view-only UX). Allowlist drives menu filter +

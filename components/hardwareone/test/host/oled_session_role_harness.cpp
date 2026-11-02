@@ -164,6 +164,8 @@ TransportSessionEpoch localDisplayTransportSessionBeginUiSync(String& user, bool
 void localDisplayTransportSessionEndUiSync() { --gWriterHeld; }
 void secureClearString(String& value) { value.clear(); }
 void resetOLEDTranscription() {}
+static unsigned cameraPreviewResets = 0;
+void resetOLEDCameraPreview() { ++cameraPreviewResets; }
 void oledResetLocalDisplaySessionTransients() {}
 void oledMarkDirty() {}
 void tryAutoStartInputForMenu() {}
@@ -439,7 +441,10 @@ static void caseSessionBoundary() {
   check(usersRow() == MenuAvailability::AVAILABLE, "superadmin root does not get the Users row");
   check(!gLastGateGuest, "the boundary's menu request saw root as a guest");
 
+  const unsigned beforePreviewReset = cameraPreviewResets;
   applyBoundary("gina");  // no generation bump: login of another account
+  check(cameraPreviewResets == beforePreviewReset + 1,
+        "display identity replacement did not clear the camera preview");
   check(gModeRequests == 1 && gLastGateGuest,
         "the boundary's menu request did not see the new identity gina as a guest");
   check(oledIsGuestSession(), "gina (guest) after root is not a guest: the role outlived the boundary");

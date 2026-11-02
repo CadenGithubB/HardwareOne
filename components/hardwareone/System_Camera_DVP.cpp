@@ -201,6 +201,16 @@ static bool stopCameraInternal(bool isRecovery) {
 }
 void stopCamera(bool isRecovery) { (void)stopCameraInternal(isRecovery); }
 
+bool cameraStateSnapshot(CameraStateSnapshot& out) {
+  if (!lockCameraMutex(0)) return false;
+  const auto state = cameraBackend().info();
+  out.running = gCameraRunning;
+  snprintf(out.model, sizeof(out.model), "%s", state.model ? state.model : "Unknown");
+  snprintf(out.error, sizeof(out.error), "%s", state.error ? state.error : "");
+  unlockCameraMutex();
+  return true;
+}
+
 bool captureCameraFrame(CameraFrame& out, size_t maxBytes) {
   cameraFrameRelease(out);
   if (maxBytes < 4 || !lockCameraMutex(0)) return false;

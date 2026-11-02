@@ -225,6 +225,8 @@ int main(int argc, char** argv) {
   if (argc > 1) { fprintf(stderr, "unknown scenario %s\n", argv[1]); return 2; }
   CameraFrame frame;
   reset(); assert(!captureCameraFrame(frame)); assert(Fake::captureCount == 0);
+  CameraStateSnapshot status;
+  assert(cameraStateSnapshot(status) && !status.running);
   Fake::failBegin = true; assert(!initCamera()); assert(!gCameraRunning && !cameraConnected);
   stopCamera(); assert(Fake::endCount == 1); // retries cleanup even after failed begin
   assert(cameraResolutionBit(CameraFrameSize(255)) == 0);
@@ -233,6 +235,7 @@ int main(int argc, char** argv) {
   Fake::sizeMask = cameraResolutionBit(CameraFrameSize::VGA);
   start(); assert(Fake::size == CameraFrameSize::VGA); assert(gSettings.cameraFramesize == 5);
   reset(); start(); assert(captureCameraFrame(frame));
+  assert(cameraStateSnapshot(status) && status.running && status.model[0]);
   assert(captureCameraFrame(frame)); // replaces/releases a previous owned allocation
   auto* owned = frame.data; stopCamera(); assert(owned[0] == 0xff && owned[7] == 0xd9);
   cameraFrameRelease(frame); assert(!frame.data && !frame.length);
@@ -311,6 +314,7 @@ int main(int argc, char** argv) {
   assert(getCameraCapabilities().resolutions & cameraResolutionBit(CameraFrameSize::VGA));
   assert(std::chrono::steady_clock::now() - beforeCaps < std::chrono::milliseconds(100));
   CameraFrame busy;
+  assert(!cameraStateSnapshot(status)); // A snapshot never queues behind a capture.
   assert(!captureCameraFrame(busy)); // no queuing behind another capture
   std::thread stop([&] { stopCamera(); stopped = true; });
   std::this_thread::sleep_for(std::chrono::milliseconds(30)); assert(!stopped);

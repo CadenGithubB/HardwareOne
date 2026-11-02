@@ -16,6 +16,9 @@
 // GPS and thermal compiled in; every other optional feature off.
 #define ENABLE_GPS_SENSOR 1
 #define ENABLE_THERMAL_SENSOR 1
+#ifndef ENABLE_CAMERA_SENSOR
+#define ENABLE_CAMERA_SENSOR 0
+#endif
 #define ENABLE_NEOPIXEL 0
 #define ENABLE_AUTOMATION 0
 #define ENABLE_ESPNOW 0
@@ -170,6 +173,7 @@ static void registerModules() {
   addEntry(OLED_THERMAL_VISUAL, "Thermal", thermalOLEDModeAvailable);
   addEntry(OLED_LOGGING, "Logging", noteRule);
   addEntry(OLED_PERF_STATS, "Perf", silentRefusal);
+  addEntry(OLED_CAMERA, "Camera", nullptr);
   registerOLEDModes(gEntries, gEntryCount);
 }
 
@@ -252,12 +256,12 @@ static void caseSilentRefusal() {
 }
 
 #if ENABLE_BLUETOOTH
-// R5: Bluetooth is off only when no BLE role runs. A G2 client or the phone
-// pipe without the BLE server is on, not "Disabled".
+// R5: The Bluetooth menu remains enterable while off: its first row starts
+// the selected role, and its other rows configure that role.
 static void caseBluetoothRole() {
   resetWorld();
-  expect(OLED_BLUETOOTH, "Bluetooth", MenuAvailability::FEATURE_DISABLED,
-         "Disabled\nPress X to start", "no BLE role runs: off");
+  expect(OLED_BLUETOOTH, "Bluetooth", MenuAvailability::AVAILABLE,
+         "", "no BLE role runs: menu still allows startup");
   gBleActive = true;
   expect(OLED_BLUETOOTH, "Bluetooth", MenuAvailability::AVAILABLE, "",
          "a client role (no server) runs: on");
@@ -270,6 +274,13 @@ int main() {
   caseSensorClassification();
   caseUnchanged();
   caseSilentRefusal();
+#if ENABLE_CAMERA_SENSOR
+  expect(OLED_CAMERA, "Camera", MenuAvailability::AVAILABLE, "",
+         "built camera viewer permits entry before sensor start");
+#else
+  expect(OLED_CAMERA, "Camera", MenuAvailability::NOT_BUILT, "Not built",
+         "camera-disabled image refuses viewer entry");
+#endif
 #if ENABLE_BLUETOOTH
   caseBluetoothRole();
 #endif

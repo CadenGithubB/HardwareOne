@@ -35,6 +35,7 @@ def main():
     header = (ROOT / 'System_Camera_DVP.h').read_text()
     session_kind = re.search(r'(?m)^enum class CameraSessionKind[^\n]+', header)
     types = '#define HAS_CAMERA_SESSIONS %d\n' % (1 if session_kind else 0)
+    types += extract_block(header, 'struct CameraStateSnapshot') + ';\n'
     if session_kind:
         types += session_kind[0] + '\n'
     worker = '\n'.join([

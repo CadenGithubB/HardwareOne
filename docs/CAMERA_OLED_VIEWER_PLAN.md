@@ -1,8 +1,55 @@
 # Camera preview on the shared OLED-style UI
 
-The camera backend is now qualified on Waveshare for snapshots and recording.
-There is currently no registered OLED camera-preview mode. The web preview and
-G2 camera/image paths are separate existing consumers.
+The shared UI now has a Camera mode under Sensors. It uses the existing camera
+service and JPEG decoder, so camera commands, backend selection, settings, web
+capture and color photos retain their existing owners. Open it through the
+sensor menu or `oledmode camera` after signing in on the display.
+
+## Controls and presentation
+
+| Input | Action |
+| --- | --- |
+| A | Hold/resume the displayed preview |
+| X | Start/stop the camera through the authorized command executor |
+| Y | Save a new full-color photo through `camerasave` |
+| Up/down | Increase/decrease preview contrast, from -2 through +2 |
+| Left/right | Hard threshold / ordered dithering |
+| B | Standard back navigation |
+
+Holding freezes the displayed bitmap only. Y takes a new photo, including when
+the preview is held; it does not save that held frame. The preview drains its
+own capture/decode operation before submitting the photo command, then restores
+the previous held/live state. Presentation choices are session-local and do not
+change persisted camera resolution, quality, mirror or photo storage settings.
+
+The image preserves aspect ratio inside the actual content rectangle. The
+128-pixel-wide canvas leaves room for the normal header/footer plus an eight
+pixel status line: image viewports are 128×34 on a 64-pixel OLED, 128×58 on the
+Waveshare's 88-pixel logical landscape canvas, and 128×98 on the EYE canvas.
+These are shared UI coordinates, not the physical P4 panel resolution.
+
+## Rendering and lifetime
+
+`CameraMonochrome.h` area-downsamples RGB luminance before conversion to an
+MSB-first one-bit bitmap. Bounded histogram contrast avoids amplifying nearly
+flat dark scenes; smoothed tone limits reduce pumping. A fixed destination-
+anchored 4×4 Bayer pattern represents gray as dot density without temporal
+flashing. Hard threshold is available for high-contrast subjects.
+
+`OLED_Mode_Camera` owns a low-priority worker with a 400 ms delay between
+capture/decode passes. It uses owned camera frames, bounded shared JPEG decoding
+and PSRAM-preferred scratch. The UI copies a completed bitmap under a short lock
+and draws after releasing it. `cameraStateSnapshot` supplies nonblocking owned
+service status; camera contention is reported as busy rather than blocking the
+UI. `oledcameraread` returns bounded metadata, timings and worker stack headroom,
+without exporting cached pixels.
+
+The worker runs only while the signed-in, non-Guest display session is awake
+and showing Camera. View generations, setting revisions and transport epochs
+discard late results after navigation, hold or identity replacement. Leaving,
+display sleep and logout clear cached pixels and retire the worker. Camera
+power remains with the common service and explicit X/start/stop commands.
+Preview failures use the shared error toast with an eight-second minimum.
 
 ## What the thermal viewer teaches us
 
@@ -14,34 +61,19 @@ the literal height 64. Its per-frame min/max mapping can also change contrast
 as a hot/cold extreme enters the scene. Reuse its integration pattern, rather
 than copying these rendering restrictions into camera preview.
 
-## Recommended first version
+## Verification and remaining hardware checks
 
-1. Add one Camera mode through the existing OLED registry, using the common
-   camera service and owned frames. Keep photo resolution, quality and saved
-   color images independent of the preview's presentation choices.
-2. Capture/decode on a bounded preview worker while this mode is visible.
-   Draw only a completed cached bitmap on the UI task. Start conservatively
-   around 2–3 updates/second and measure frame time, memory and touch latency;
-   busy/failure states keep navigation responsive and identify the real cause.
-   Mode changes cancel preview work and discard late results safely.
-3. Use the shared JPEG decoder; fit the image into the actual content rectangle,
-   preserve aspect ratio, and downsample before converting to one bit. Do not
-   change the camera's global saved frame size to suit one screen.
-4. Convert to luminance, apply bounded contrast/shadow adjustment, then use a
-   fixed spatial ordered-dither pattern anchored to destination pixels. This
-   approximates gray with dot density. Smooth automatic contrast over time to
-   avoid pumping; do not alternate frames to fake gray. Offer a simple hard
-   threshold as an optional high-contrast mode. Defer edge detection and extra
-   filters until the basic live view is useful.
-5. Provide live/frozen indication, freeze/resume, and save through the existing
-   authorized camera command path. Keep controls and status outside the image.
-   Support 128×64 OLED, the taller EYE canvas and Waveshare landscape without
-   fixed panel dimensions in the renderer. Leaving the page stops preview work;
-   camera power remains with the existing service and explicit start/stop actions.
-6. Verify gradients/dark scenes/edges, aspect ratio, bitmap bounds, late-worker
-   cancellation, unavailable hardware, save failures and camera-disabled builds.
-   Measure real preview/touch/STT coexistence on Waveshare, then verify EYE and
-   a true monochrome OLED if connected.
+Production renderer/mode host tests pass for 64, 88 and 128 pixel canvas heights,
+including flat/gradient inputs, bounds/stride failures, freeze/resume, drained
+photo requests, stopped-source recovery, stale view/session rejection, allocation
+failures, stream ownership and worker cleanup. Camera/OLED-disabled combinations
+also compile and report unavailable. Shared camera lifecycle, consumers, async
+power, display feedback, layout, availability and session-role checks pass.
+
+Waveshare, P4X-EYE and the XIAO baseline firmware build successfully. Physical
+results are recorded in `WAVESHARE_P4_SUPPORT.md`; EYE and a true monochrome OLED
+still require their own physical preview/control qualification. Hold/photo
+semantics and readability need the user's check on the actual display.
 
 Both P4 panels physically support color; their current shared UI adapters expose
 a one-bit canvas. A later color-preview operation can live behind the display

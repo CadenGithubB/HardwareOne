@@ -28,6 +28,7 @@
 #include "System_Dictation.h"  // KEYBOARD_MODE_MIC: dictation state + control
 #include "OLED_ConsoleBuffer.h"
 #include "OLED_Mode_Transcription.h"
+#include "OLED_Mode_Camera.h"
 
 #include <atomic>
 
@@ -4948,7 +4949,7 @@ const char* cmd_oledmode(const String& argsInput) {
   mode.trim();
   
   if (mode.length() == 0) {
-    broadcastOutput("Usage: oledmode <menu|status|sensordata|sensorlist|thermal|network|mesh|gps|text|logo|anim|imuactions|fmradio|files|logging|automations|espnow|memory|off>");
+    broadcastOutput("Usage: oledmode <menu|status|sensordata|sensorlist|thermal|camera|network|mesh|gps|text|logo|anim|imuactions|fmradio|files|logging|automations|espnow|memory|off>");
     return "ERROR";
   }
 
@@ -5270,6 +5271,7 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_MEMORY_STATS: return "Memory";
     case OLED_WEB_STATS: return "Web";
     case OLED_WEB_STATUS: return "Web Status";
+    case OLED_CAMERA: return "Camera";
     case OLED_RTC_DATA: return "RTC";
     case OLED_PRESENCE_DATA: return "Presence";
     case OLED_REMOTE: return "Bond";
@@ -5308,6 +5310,7 @@ OLEDMode modeFromSlug(const String& slug) {
   if (slug == "sensordata" || slug == "sensors") return OLED_SENSOR_DATA;
   if (slug == "sensorlist") return OLED_SENSOR_LIST;
   if (slug == "thermal") return OLED_THERMAL_VISUAL;
+  if (slug == "camera") return OLED_CAMERA;
   if (slug == "network") return OLED_NETWORK_INFO;
   if (slug == "mesh") return OLED_MESH_STATUS;
   if (slug == "text") return OLED_CUSTOM_TEXT;
@@ -5395,6 +5398,7 @@ const char* slugFromMode(OLEDMode mode) {
     case OLED_I2C_DIAG:        return "i2cdiag";
     case OLED_WEB_STATS:       return "web";
     case OLED_WEB_STATUS:      return "webstatus";
+    case OLED_CAMERA:          return "camera";
     case OLED_RTC_DATA:        return "rtc";
     case OLED_PRESENCE_DATA:   return "presence";
     case OLED_NOTIFICATIONS:   return "notifs";
@@ -5784,7 +5788,7 @@ extern const OLEDMenuItem oledSensorMenuItems[] = {
   { "Presence",   "presence",          OLED_PRESENCE_DATA },
 #endif
 #if ENABLE_CAMERA_SENSOR
-  { "Camera",     "notify_sensor",     OLED_SENSOR_DATA },
+  { "Camera",     "notify_sensor",     OLED_CAMERA },
 #endif
 #if ENABLE_MICROPHONE
   { "Microphone", "notify_sensor",     OLED_MICROPHONE },
@@ -5866,6 +5870,13 @@ static MenuAvailability oledModeFeatureState(OLEDMode mode, String* outReason) {
     
       // Sensor modes - always allow navigation, display functions handle "not active" state
       // Block if the sensor is not built at compile time or not currently detected/connected
+      case OLED_CAMERA:
+#if ENABLE_CAMERA_SENSOR
+        return MenuAvailability::AVAILABLE; // The view owns stopped/missing-sensor feedback.
+#else
+        if (outReason) *outReason = "Not built";
+        return MenuAvailability::NOT_BUILT;
+#endif
       case OLED_THERMAL_VISUAL:
 #if !ENABLE_THERMAL_SENSOR
         if (outReason) *outReason = "Not built";
@@ -6951,6 +6962,7 @@ static const char* cmd_oled_landscape(const String& args) {
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry oledCommands[] = {
+  { "oledcameraread", "Read the local camera preview state (JSON)", false, cmd_oledcameraread },
 #if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
   { "oledlandscape", "Landscape UI with right-side controls: [0|1]", false, cmd_oled_landscape, "Usage: oledlandscape [0|1]" },
 #endif
@@ -6960,7 +6972,7 @@ const CommandEntry oledCommands[] = {
   { "oledstart", "Start OLED display.", false, cmd_oledstart },
   { "oledstop", "Stop OLED display.", false, cmd_oledstop },
   { "oledmode", "Set display mode: <mode>", false, cmd_oledmode,
-    "Usage: oledmode <menu|status|sensordata|sensorlist|thermal|network|mesh|gps|text|logo|anim|imuactions|fmradio|files|logging|automations|espnow|memory|off>\n"
+    "Usage: oledmode <menu|status|sensordata|sensorlist|thermal|camera|network|mesh|gps|text|logo|anim|imuactions|fmradio|files|logging|automations|espnow|memory|off>\n"
     "Example: oledmode memory\n"
     "Example: oledmode off" },
   { "oledtext", "Set custom text: <message>", false, cmd_oledtext, "Usage: oledtext <message>" },
@@ -7014,6 +7026,7 @@ void oledUpdate() {
   oledApplyPendingSessionBoundary();
   // Posted display commands drain on every pass, panel running or not.
   oledApplyPendingOwnerRequests();
+  prepareCameraPreviewData();
   if (gOledRunning && oledConnected) {
 #if ENABLE_ESPNOW
     oledEspNowPollPairRequest();   // pop the accept/reject dialog on an incoming pair request
@@ -7229,6 +7242,7 @@ static void oledApplyPendingSessionBoundary() {
     // is a hard identity boundary and discards all prior-session UI state.
     if (hadUiIdentity || requested != 0) {
       resetOLEDTranscription();
+      resetOLEDCameraPreview();
       oledResetLocalDisplaySessionTransients();
 
       if (shouldBlockForDisplayAuth()) {
