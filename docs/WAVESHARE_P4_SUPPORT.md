@@ -555,3 +555,10 @@ PDF and small codec-reference sources are retained as evidence. The single
 Waveshare build cache (~983 MiB) and pre-existing P4X-EYE cache (~1.1 GiB) remain
 for this hardware qualification. Remove compiler objects after user testing
 finishes without further edits; retain compact matching firmware/debug evidence.
+
+The final continuous-path smoke test also started on Onboard, observed 47,104
+samples with zero audio overruns, and stopped to `done`/`workerActive:false`
+without error. The quiet test produced no speech segment; bounded model
+inference was verified separately. Capture was stopped and serial logged out
+and closed. Matching firmware/debug and test evidence occupies approximately
+24 MiB; the build caches remain retained for pending hardware qualification.
