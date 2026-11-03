@@ -441,3 +441,13 @@ nested menus verified in Safari. Backup/source/media URL/verification files
 retained in the session artifact folder. Removed exact temporary upload
 copies and preparation script, recovering 10,311,721 bytes. Clear render
 continues untouched; no active polling or goal-state change.
+
+Clear1080p production completed. Render session29814 and finish session7574
+exited0. Verified both actual MP4 SHA256 values against their decode/probe
+reports:1920x1080,24fps,720frames/30s annotated and576frames/24s clean.
+Inspected encoded contact sheets across orbit, explosion, white callouts,
+reassembly and horizontal overhead hold. Production status set verified and
+deliverables manifest written. Retained native scene, movies, stills, settings,
+compact label timing and quality evidence; earlier review files unchanged.
+Removed exact completed720-frame cache, label PNG passes and completed job
+logs, recovering 1,476,929,914 bytes. Goal state left paused as requested.
