@@ -1202,3 +1202,21 @@ out-of-range fallback), systemlog_config_ui and log_level_application pass.
 `tools/settings_registry.py` does not run on this Mac's Python 3.9 (an
 f-string with a backslash) and docs/SETTINGS_MATRIX.md is not tracked, so no
 settings doc was regenerated; the command reference was.
+
+### Rotation candidate deployed — 2026-11-06 14:41 UTC
+
+`log-rotation-candidate` (ELF `dfc6640b…`, commit a33742bc) was app-only
+flashed with the MAC, rollback-hash and partition checks and the flash digest
+verified (`log-rotation.json`). First boot: no crash record, zero debug flags,
+log level info, `status` says "Last Reset: USB", `log status` reports
+"Rotation: at 1024 KB, keep 3 old file(s); rotated 0 time(s) this boot", and
+`log maxsize` / `log rotations` answer with the defaults. Phone link ready and
+companion online at 48 s; glasses and ring were still reconnecting, as on
+every boot so far. Board images: this candidate on flash; `log-hygiene`,
+`setup-worker-recovery`, `quicknote-stack-netevents-mutex`, `heapdiag` and the
+original application retained for rollback.
+
+Seen once at boot during the first scan and left alone: an error-level
+library line, `BLEAdvertisedDevice.cpp:437 parseAdvertisement(): Failed to
+allocate 0 bytes for payload` — the Arduino BLE scanner treats a zero-length
+payload allocation as a failure. Harmless; a hygiene item for the error log.
