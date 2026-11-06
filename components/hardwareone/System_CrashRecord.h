@@ -69,8 +69,8 @@ const char* crashPhaseName(uint8_t phase);
 // link error. Arduino's wrapper is dead code in an ESP-IDF build until something
 // supplies -Wl,--wrap=esp_panic_handler (only its Arduino-IDE platform.txt does),
 // which our CMakeLists now adds — so the flag activates their wrapper and this
-// hook is what it calls. Bonus: their wrapper already walks a full backtrace with
-// esp_backtrace_get_next_frame(), which we get for free.
+// hook is what it calls. Xtensa walks frames with esp_backtrace_get_next_frame;
+// RISC-V only scans stack words and must not be presented as a call chain.
 void crashRecordInstallPanicHook();
 
 // Advance the boot-phase marker. Cheap (one RTC byte store); safe anywhere.
@@ -98,8 +98,21 @@ uint32_t    crashRecordRepeatCount();      // how many boots in a row produced t
 uint8_t     crashRecordPrevPhase();        // CrashBootPhase the PREVIOUS boot died in
 const char* crashRecordReasonText();       // abort/assert text, or the exception string ("" if none)
 
-// Captured backtrace (PC values, innermost first). Decodable with addr2line only
-// when the build id matches — crashRecordDetail() says so explicitly.
+// Immutable after boot consume. A RISC-V Arduino trace is a heuristic stack
+// scan, not an unwound call chain; its initial SP is kept separately here.
+struct CrashExecutionContext {
+  char task[16];
+  uint32_t stackPointer;
+  uint32_t guardPc;
+  uint32_t stackMin;
+  uint32_t stackMax;
+  bool stackGuard;
+  bool stackScan;
+};
+const CrashExecutionContext& crashRecordExecutionContext();
+
+// Captured candidate PCs. Xtensa supplies an unwound backtrace; RISC-V supplies
+// a stack scan (see execution context). Decode only with the matching build.
 uint8_t         crashRecordBacktraceLen();
 const uint32_t* crashRecordBacktrace();
 

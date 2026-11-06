@@ -2692,10 +2692,22 @@ const char* cmd_crashlog(const String& argsInput) {
     doc["repeat"]      = (unsigned long)crashRecordRepeatCount();
     doc["boot_phase"]  = crashPhaseName(crashRecordPrevPhase());
     doc["detail"]      = crashRecordReasonText();
+    const CrashExecutionContext& context = crashRecordExecutionContext();
+    doc["task"] = context.task;
+    doc["stack_pointer"] = context.stackPointer;
+    doc["stack_guard"] = context.stackGuard;
+    doc["stack_guard_pc"] = context.guardPc;
+    doc["stack_min"] = context.stackMin;
+    doc["stack_max"] = context.stackMax;
+    doc["trace_kind"] = !crashRecordHavePrevious() ? "none"
+                         : context.stackScan ? "stack-scan" : "backtrace";
+    JsonArray pcs = doc["pcs"].to<JsonArray>();
+    for (uint8_t i = 0; i < crashRecordBacktraceLen(); ++i)
+      pcs.add(crashRecordBacktrace()[i]);
     static char* buf = nullptr;
-    if (!buf) buf = (char*)ps_alloc(512, AllocPref::PreferPSRAM, "crashlog.json");
+    if (!buf) buf = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "crashlog.json");
     if (!buf) return "{\"error\":\"oom\"}";
-    serializeJson(doc, buf, 512);
+    serializeJson(doc, buf, 1024);
     return buf;
   }
 
@@ -2703,14 +2715,14 @@ const char* cmd_crashlog(const String& argsInput) {
   // cmd_exec and stack figures in this codebase are BYTES, so a 512 B frame
   // is not free.
   static char* text = nullptr;
-  if (!text) text = (char*)ps_alloc(640, AllocPref::PreferPSRAM, "crashlog.text");
+  if (!text) text = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "crashlog.text");
   if (!text) return "Error: out of memory";
 
   BROADCAST_PRINTF("Last crash");
   BROADCAST_PRINTF("  reset reason : %s (%lu)",
                    resetReasonLabel(gSettings.lastResetReason),
                    (unsigned long)gSettings.lastResetReason);
-  crashRecordDetail(text, 640);
+  crashRecordDetail(text, 1024);
 
   // Emit line-by-line: broadcastOutput clamps at 255 B, so a multi-line blob
   // would be silently cut.

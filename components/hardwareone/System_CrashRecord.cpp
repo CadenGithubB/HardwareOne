@@ -8,6 +8,11 @@
 #include "esp_system.h"
 #include "esp_rom_sys.h"
 #include "esp_app_desc.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#if CONFIG_ESP_SYSTEM_HW_STACK_GUARD
+#include "esp_private/hw_stack_guard.h"
+#endif
 #include "esp_private/panic_internal.h"   // g_panic_abort, g_panic_abort_details
 #include "esp32-hal.h"                    // set_arduino_panic_handler / arduino_panic_info_t
 #include "System_Filesystem.h"            // appendLineWithCap — boot-time persist ONLY, never panic context
@@ -30,14 +35,14 @@
 // these fields, while the device stays powered, would otherwise consume the old
 // bytes through a still-valid magic and emit a plausible, WRONG record. Folding
 // the field sizes into the magic makes any layout change self-invalidating.
-#define CRASH_LAYOUT_VERSION 3u
+#define CRASH_LAYOUT_VERSION 4u
 #define CRASH_REASON_MAX     128   // assert text runs long: "assert failed: xQueueGenericSend queue.c:832 (pxQueue)"
 #define CRASH_ELFSHA_MAX     16    // CONFIG_APP_RETRIEVE_LEN_ELF_SHA=9 -> 9 chars + NUL
 #define CRASH_BT_MAX         12    // Arduino walks up to 60 frames; 12 is plenty to place a fault and costs 48 B
 
 #define CRASH_PANIC_MAGIC \
   (0x43505200u ^ (CRASH_LAYOUT_VERSION * 0x9E37u) ^ (CRASH_REASON_MAX << 8) ^ \
-   (CRASH_BT_MAX << 4) ^ CRASH_ELFSHA_MAX)
+   (CRASH_BT_MAX << 4) ^ CRASH_ELFSHA_MAX ^ sizeof(CrashExecutionContext))
 #define CRASH_STATE_MAGIC \
   (0x43535400u ^ (CRASH_LAYOUT_VERSION * 0x9E37u))
 
@@ -55,6 +60,7 @@ static RTC_NOINIT_ATTR uint8_t           rtcPanicWasAbort;
 static RTC_NOINIT_ATTR uint8_t           rtcPanicBtLen;
 static RTC_NOINIT_ATTR uint8_t           rtcPanicBtCorrupt;
 static RTC_NOINIT_ATTR uint32_t          rtcPanicBt[CRASH_BT_MAX];
+static RTC_NOINIT_ATTR CrashExecutionContext rtcPanicContext;
 
 // --- boot-managed state record ----------------------------------------------
 static RTC_NOINIT_ATTR volatile uint32_t rtcStateMagic;
@@ -84,6 +90,7 @@ static bool     sWasAbort       = false;
 static uint8_t  sBtLen          = 0;
 static bool     sBtCorrupt      = false;
 static uint32_t sBt[CRASH_BT_MAX] = {0};
+static CrashExecutionContext sContext{};
 
 static const char* const kPhaseNames[] = {
   "unknown", "pre-serial", "fs+settings", "debug-buffers", "hardware",
@@ -121,8 +128,8 @@ static uint32_t fnv1a(const void* data, size_t len, uint32_t seed) {
 // Panic-context capture
 // =============================================================================
 // Invoked from Arduino's __wrap_esp_panic_handler (esp32-hal-misc.c), which our
-// -Wl,--wrap=esp_panic_handler flag activates. Arduino has already walked the
-// backtrace for us by this point.
+// -Wl,--wrap=esp_panic_handler flag activates. Arduino has already collected an
+// Xtensa backtrace or a RISC-V heuristic stack scan by this point.
 //
 // WHAT IS SAFE HERE — the other core is stalled, the TIMG watchdogs are off and
 // the RTC WDT is armed at ~10 s (the hard budget for everything below).
@@ -147,12 +154,47 @@ static void CRASH_PANIC_ATTR crashPanicHook(arduino_panic_info_t* info, void* /*
   rtcPanicMagic = 0;
   __asm__ __volatile__("" ::: "memory");
 
+  rtcPanicContext.task[0] = '\0';
+  rtcPanicContext.stackPointer = 0;
+  rtcPanicContext.guardPc = 0;
+  rtcPanicContext.stackMin = 0;
+  rtcPanicContext.stackMax = 0;
+  rtcPanicContext.stackGuard = false;
+  rtcPanicContext.stackScan = false;
+
   if (info) {
     rtcPanicAddr      = (uint32_t)(uintptr_t)info->pc;
     rtcPanicCore      = (uint8_t)info->core;
     rtcPanicBtCorrupt = info->backtrace_corrupt ? 1 : 0;
+    // Match ESP-IDF's own panic diagnostic: these reads neither allocate nor
+    // acquire a scheduler lock. Never pass an invalid core to the RTOS API.
+    if (info->core >= 0 && info->core < portNUM_PROCESSORS) {
+      TaskHandle_t task = xTaskGetCurrentTaskHandleForCore(info->core);
+      if (task) crashCopyStr(rtcPanicContext.task, pcTaskGetName(task),
+                             sizeof(rtcPanicContext.task));
+    }
+#if CONFIG_ESP_SYSTEM_HW_STACK_GUARD
+    const uint32_t guardCore = esp_hw_stack_guard_get_fired_cpu();
+    if (guardCore < portNUM_PROCESSORS && guardCore == (uint32_t)info->core) {
+      rtcPanicContext.stackGuard = true;
+      rtcPanicContext.guardPc = esp_hw_stack_guard_get_pc(guardCore);
+      esp_hw_stack_guard_get_bounds(guardCore, &rtcPanicContext.stackMin,
+                                    &rtcPanicContext.stackMax);
+    }
+#endif
+    unsigned first = 0;
+#if CONFIG_IDF_TARGET_ARCH_RISCV
+    // The pinned Arduino RISC-V shim puts SP first, then scans stack words for
+    // executable-looking values. SP is not a return PC or a call-chain frame.
+    rtcPanicContext.stackScan = true;
+    if (info->backtrace_len) {
+      rtcPanicContext.stackPointer = info->backtrace[0];
+      first = 1;
+    }
+#endif
     uint8_t n = 0;
-    for (; n < CRASH_BT_MAX && n < info->backtrace_len; n++) rtcPanicBt[n] = info->backtrace[n];
+    for (; n < CRASH_BT_MAX && first + n < info->backtrace_len; n++)
+      rtcPanicBt[n] = info->backtrace[first + n];
     rtcPanicBtLen = n;
   } else {
     rtcPanicAddr = 0;
@@ -273,6 +315,7 @@ void crashRecordBootConsume(uint32_t resetReason) {
     sBtCorrupt = (rtcPanicBtCorrupt != 0);
     sBtLen     = (rtcPanicBtLen > CRASH_BT_MAX) ? CRASH_BT_MAX : rtcPanicBtLen;
     for (uint8_t i = 0; i < sBtLen; i++) sBt[i] = rtcPanicBt[i];
+    sContext = rtcPanicContext;
 
     sElfShaMatches = (nowSha && sElfSha[0] && strcmp(nowSha, sElfSha) == 0);
   } else {
@@ -280,6 +323,7 @@ void crashRecordBootConsume(uint32_t resetReason) {
     sElfSha[0] = '\0';
     sAddr = 0; sCore = 0; sWasAbort = false;
     sBtLen = 0; sBtCorrupt = false;
+    sContext = {};
     sElfShaMatches = false;
   }
 
@@ -291,6 +335,7 @@ void crashRecordBootConsume(uint32_t resetReason) {
     h = fnv1a(sReason, strlen(sReason), h);
     h = fnv1a(&sAddr, sizeof(sAddr), h);
     h = fnv1a(&sWasAbort, sizeof(sWasAbort), h);
+    if (sContext.stackGuard) h = fnv1a(&sContext.guardPc, sizeof(sContext.guardPc), h);
     h = fnv1a(sElfSha, strlen(sElfSha), h);
     sSignature = h ? h : 1u;
   } else if (fault) {
@@ -344,8 +389,15 @@ void crashRecordEmitEarly() {
                    (unsigned)sAddr, crashPhaseName(sPrevPhase));
     esp_rom_printf("  build=%s%s\r\n", sElfSha[0] ? sElfSha : "?",
                    sElfShaMatches ? "" : " (DIFFERENT BUILD - pc not decodable here)");
+    esp_rom_printf("  task=%s sp=0x%08x\r\n",
+                   sContext.task[0] ? sContext.task : "?", (unsigned)sContext.stackPointer);
+    if (sContext.stackGuard) {
+      esp_rom_printf("  stack guard pc=0x%08x bounds=0x%08x-0x%08x\r\n",
+                     (unsigned)sContext.guardPc, (unsigned)sContext.stackMin,
+                     (unsigned)sContext.stackMax);
+    }
     if (sBtLen) {
-      esp_rom_printf("  backtrace:");
+      esp_rom_printf("  %s:", sContext.stackScan ? "stack scan (not a call chain)" : "backtrace");
       for (uint8_t i = 0; i < sBtLen; i++) esp_rom_printf(" 0x%08x", (unsigned)sBt[i]);
       esp_rom_printf("%s\r\n", sBtCorrupt ? " (CORRUPT)" : "");
     }
@@ -366,6 +418,7 @@ uint32_t    crashRecordSignature()    { return sSignature; }
 uint32_t    crashRecordRepeatCount()  { return sRepeat; }
 uint8_t     crashRecordPrevPhase()    { return sPrevPhase; }
 const char* crashRecordReasonText()   { return sReason; }
+const CrashExecutionContext& crashRecordExecutionContext() { return sContext; }
 
 size_t crashRecordSummary(char* buf, size_t n) {
   if (!buf || n == 0) return 0;
@@ -402,7 +455,7 @@ size_t crashRecordDetail(char* buf, size_t n) {
                         (unsigned long)sConsecutive, (unsigned long)sConsecutiveSoftware,
                         (unsigned long)sSignature, (unsigned long)sRepeat);
   if (sHavePrev) {
-    w += (size_t)snprintf(buf + w, (w < n) ? n - w : 0,
+    if (w < n) w += (size_t)snprintf(buf + w, n - w,
                           "  detail       : %s\n"
                           "  class        : %s\n"
                           "  core / pc    : %u / 0x%08lx\n"
@@ -413,15 +466,26 @@ size_t crashRecordDetail(char* buf, size_t n) {
                           (unsigned)sCore, (unsigned long)sAddr,
                           sElfSha[0] ? sElfSha : "?",
                           sElfShaMatches ? " (this build)" : " (DIFFERENT build - pc not decodable here)");
+    if (w < n) w += (size_t)snprintf(buf + w, n - w,
+                          "  task / sp    : %s / 0x%08lx\n",
+                          sContext.task[0] ? sContext.task : "?",
+                          (unsigned long)sContext.stackPointer);
+    if (sContext.stackGuard && w < n) {
+      w += (size_t)snprintf(buf + w, n - w,
+                          "  stack guard  : pc=0x%08lx bounds=0x%08lx-0x%08lx\n",
+                          (unsigned long)sContext.guardPc,
+                          (unsigned long)sContext.stackMin, (unsigned long)sContext.stackMax);
+    }
     if (sBtLen && w < n) {
-      w += (size_t)snprintf(buf + w, n - w, "  backtrace    :");
+      w += (size_t)snprintf(buf + w, n - w, "  %s:",
+                            sContext.stackScan ? "stack scan (not a call chain)" : "backtrace    ");
       for (uint8_t i = 0; i < sBtLen && w < n; i++) {
         w += (size_t)snprintf(buf + w, n - w, " 0x%08lx", (unsigned long)sBt[i]);
       }
       if (w < n) w += (size_t)snprintf(buf + w, n - w, "%s\n", sBtCorrupt ? "  (CORRUPT)" : "");
     }
   } else {
-    w += (size_t)snprintf(buf + w, (w < n) ? n - w : 0,
+    if (w < n) w += (size_t)snprintf(buf + w, n - w,
                           "  detail       : none - the reset happened without reaching the panic\n"
                           "                 handler (brownout, or a stage-1 watchdog reset).\n"
                           "                 Signature is low-confidence on this path.\n");
@@ -435,9 +499,8 @@ size_t crashRecordPersistToFile(const char* resetReasonLabel,
   if (!sHavePrev && sConsecutive == 0) return 0;
 
   // Transient, not static: one write per crashed boot doesn't earn a permanent
-  // buffer. Sized for header + crashRecordDetail's worst case (~620 B with a
-  // full 12-frame backtrace — same budget as crashlog's 640 B render buffer).
-  const size_t kCap = 1024;
+  // buffer. Allow the task, stack-guard context and full 12-candidate trace.
+  const size_t kCap = 1536;
   char* buf = (char*)malloc(kCap);
   if (!buf) return 0;
 

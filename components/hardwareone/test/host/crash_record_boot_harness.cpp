@@ -36,6 +36,35 @@ typedef enum {
 
 #define RTC_NOINIT_ATTR
 #define IRAM_ATTR
+#define CRASH_PANIC_ATTR
+#define portNUM_PROCESSORS 2
+
+struct arduino_panic_info_t {
+  int core;
+  const char* reason;
+  const void* pc;
+  bool backtrace_corrupt;
+  bool backtrace_continues;
+  unsigned backtrace_len;
+  unsigned backtrace[60];
+};
+static bool g_panic_abort = false;
+static const char* g_panic_abort_details = nullptr;
+using TaskHandle_t = const char*;
+static int gTaskCore = -1;
+static TaskHandle_t xTaskGetCurrentTaskHandleForCore(int core) {
+  gTaskCore = core;
+  return core == 0 ? "cmd_exec" : "g2_owner";
+}
+static const char* pcTaskGetName(TaskHandle_t task) { return task; }
+static uint32_t gGuardCore = UINT32_MAX;
+static uint32_t gGuardPc = 0x40001234;
+static uint32_t esp_hw_stack_guard_get_fired_cpu() { return gGuardCore; }
+static uint32_t esp_hw_stack_guard_get_pc(uint32_t) { return gGuardPc; }
+static void esp_hw_stack_guard_get_bounds(uint32_t, uint32_t* low, uint32_t* high) {
+  *low = 0x4ff90000;
+  *high = 0x4ff92000;
+}
 
 static char gElfSha[16] = "aaaaaaaaa";
 static const char* esp_app_get_elf_sha256_str() { return gElfSha; }
@@ -264,6 +293,112 @@ static void healthyRunAndPowerOnClearBothCounters() {
   CHECK(crashRecordConsecutiveSoftwareFaults() == 1);
 }
 
+static void panicContextSurvivesReset() {
+  coldRtc();
+  boot(ESP_RST_POWERON);
+  arduino_panic_info_t info{};
+  info.core = 0;
+  info.reason = "Stack protection fault";
+  info.pc = reinterpret_cast<void*>(0x40005678);
+  info.backtrace_len = 20;
+  info.backtrace[0] = 0x4ff8fff0;  // SP on RISC-V, an ordinary PC on Xtensa
+  for (unsigned i = 1; i < info.backtrace_len; ++i) info.backtrace[i] = 0x40001000 + 4 * i;
+  gGuardCore = 0;
+  gTaskCore = -1;
+  crashPanicHook(&info, nullptr);
+  CHECK(rtcPanicMagic == CRASH_PANIC_MAGIC);
+  CHECK(gTaskCore == 0);
+  boot(ESP_RST_PANIC);
+  CHECK(sHavePrev);
+  CHECK(rtcPanicMagic == 0);
+  CHECK(strcmp(sContext.task, "cmd_exec") == 0);
+  CHECK(sAddr == 0x40005678);
+  CHECK(sBtLen == CRASH_BT_MAX);
+#if CONFIG_IDF_TARGET_ARCH_RISCV
+  CHECK(sContext.stackScan);
+  CHECK(sContext.stackPointer == 0x4ff8fff0);
+  CHECK(sBt[0] == 0x40001004);
+#else
+  CHECK(!sContext.stackScan);
+  CHECK(sContext.stackPointer == 0);
+  CHECK(sBt[0] == 0x4ff8fff0);
+#endif
+#if CONFIG_ESP_SYSTEM_HW_STACK_GUARD
+  CHECK(sContext.stackGuard);
+  CHECK(sContext.guardPc == 0x40001234);
+  CHECK(sContext.stackMin == 0x4ff90000);
+  CHECK(sContext.stackMax == 0x4ff92000);
+#else
+  CHECK(!sContext.stackGuard);
+  CHECK(sContext.guardPc == 0);
+#endif
+  char detail[1024];
+  crashRecordDetail(detail, sizeof(detail));
+  CHECK(strstr(detail, "cmd_exec") != nullptr);
+#if CONFIG_IDF_TARGET_ARCH_RISCV
+  CHECK(strstr(detail, "stack scan (not a call chain)") != nullptr);
+#else
+  CHECK(strstr(detail, "backtrace") != nullptr);
+#endif
+#if CONFIG_ESP_SYSTEM_HW_STACK_GUARD
+  CHECK(strstr(detail, "pc=0x40001234 bounds=0x4ff90000-0x4ff92000") != nullptr);
+  const uint32_t signature = sSignature;
+  gGuardPc += 4;
+  crashPanicHook(&info, nullptr);
+  boot(ESP_RST_PANIC);
+  CHECK(sSignature != signature); // don't group every stack fault at the IRQ PC
+  gGuardPc -= 4;
+#endif
+  memset(sReason, 'R', sizeof(sReason) - 1);
+  sReason[sizeof(sReason) - 1] = 0;
+  memset(sContext.task, 'T', sizeof(sContext.task) - 1);
+  sContext.task[sizeof(sContext.task) - 1] = 0;
+  sElfShaMatches = false;
+  CHECK(crashRecordDetail(detail, sizeof(detail)) < sizeof(detail));
+  CHECK(strstr(detail, "DIFFERENT build") != nullptr);
+  CHECK(strstr(detail, CONFIG_IDF_TARGET_ARCH_RISCV ? "0x40001030" : "0x4000102c") != nullptr);
+  // Every output capacity, including truncation before the extra context,
+  // remains NUL terminated and does not touch the caller's adjacent bytes.
+  for (size_t capacity = 1; capacity <= sizeof(detail); ++capacity) {
+    memset(detail, 0x5a, sizeof(detail));
+    crashRecordDetail(detail, capacity);
+    CHECK(memchr(detail, 0, capacity) != nullptr);
+    if (capacity < sizeof(detail)) CHECK(detail[capacity] == 0x5a);
+  }
+  boot(ESP_RST_SW); // consumed context must not replay after an ordinary restart
+  CHECK(!sHavePrev);
+  CHECK(!sContext.task[0] && !sContext.stackGuard && !sContext.stackScan);
+}
+
+static void panicCaptureHandlesMissingContext() {
+  coldRtc();
+  boot(ESP_RST_POWERON);
+  arduino_panic_info_t info{};
+  info.core = 9;
+  info.reason = "fault";
+  gGuardCore = UINT32_MAX;
+  gTaskCore = -1;
+  crashPanicHook(&info, nullptr);
+  boot(ESP_RST_PANIC);
+  CHECK(gTaskCore == -1);
+  CHECK(!sContext.task[0]);
+  CHECK(!sContext.stackGuard && sContext.stackPointer == 0);
+  CHECK(sBtLen == 0);
+  g_panic_abort = true;
+  g_panic_abort_details = "assert failed: example";
+  crashPanicHook(nullptr, nullptr);
+  boot(ESP_RST_PANIC);
+  CHECK(strcmp(sReason, g_panic_abort_details) == 0);
+  CHECK(sWasAbort && sCore == 0xff && sAddr == 0);
+  CHECK(!sContext.task[0] && !sContext.stackScan && !sContext.stackGuard);
+  g_panic_abort = false;
+  g_panic_abort_details = nullptr;
+  // A previous RTC layout is rejected instead of reading new fields as valid.
+  rtcPanicMagic = CRASH_PANIC_MAGIC ^ 1;
+  boot(ESP_RST_PANIC);
+  CHECK(!sHavePrev);
+}
+
 int main() {
   brownoutsNeverEscape();
   panicsEscapeAtThree();
@@ -271,6 +406,8 @@ int main() {
   escapeThenSoftwareResetDoesNotBounce();
   escapeNeedsKnownPhaseAndSameBuild();
   healthyRunAndPowerOnClearBothCounters();
+  panicContextSurvivesReset();
+  panicCaptureHandlesMissingContext();
   printf("crash record boot: ok\n");
   fprintf(stderr, "checks=%d\n", gChecks);
   return 0;

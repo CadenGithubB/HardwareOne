@@ -28,6 +28,7 @@ STATE_END = "// Hand-rolled bounded copy"
 CRASH_RECORD_MARKERS = (
     "static void IRAM_ATTR crashCopyStr(",
     "static uint32_t fnv1a(",
+    "static void CRASH_PANIC_ATTR crashPanicHook(",
     "static bool isFaultReset(",
     "static bool isSoftwareFaultReset(",
     "void crashRecordBootConsume(",
@@ -57,6 +58,8 @@ def generate() -> str:
 
     phase_enum = re.search(r"(?ms)^enum CrashBootPhase : uint8_t \{.*?^\};", crash_h)
     require(phase_enum is not None, "System_CrashRecord.h defines the CrashBootPhase enum")
+    context = re.search(r"(?ms)^struct CrashExecutionContext \{.*?^\};", crash_h)
+    require(context is not None, "System_CrashRecord.h defines the execution context")
 
     require(crash.count(STATE_BEGIN) == 1 and crash.count(STATE_END) == 1,
             "System_CrashRecord.cpp has one RTC layout region")
@@ -77,7 +80,7 @@ def generate() -> str:
             "the committed escape consumes the counters before restarting")
 
     harness = (HERE / "crash_record_boot_harness.cpp").read_text()
-    for marker, value in (("// INSERT_PHASE_ENUM", phase_enum[0]),
+    for marker, value in (("// INSERT_PHASE_ENUM", phase_enum[0] + "\n" + context[0]),
                           ("// INSERT_CRASH_RECORD_STATE", state),
                           ("// INSERT_CRASH_RECORD_FUNCTIONS", functions),
                           ("// INSERT_OTA_ESCAPE", escape)):
@@ -100,12 +103,15 @@ def main() -> None:
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                             "-fno-omit-frame-pointer", "-g"]
-        subprocess.run(command, check=True, timeout=120)
-        result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
-        require(result.returncode == 0, f"crash record boot failed:\n{result.stdout}\n{result.stderr}")
-        count = re.search(r"(?m)^checks=(\d+)$", result.stderr)
-        require(count is not None, "missing completed check count")
-        print(f"{result.stdout.strip()} ({count[1]} checks)", flush=True)
+        for arch, guard in (("riscv", 1), ("riscv", 0), ("xtensa", 0)):
+            flags = [f"-DCONFIG_IDF_TARGET_ARCH_RISCV={int(arch == 'riscv')}",
+                     f"-DCONFIG_ESP_SYSTEM_HW_STACK_GUARD={guard}"]
+            subprocess.run(command + flags, check=True, timeout=120)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
+            require(result.returncode == 0, f"crash record boot failed:\n{result.stdout}\n{result.stderr}")
+            count = re.search(r"(?m)^checks=(\d+)$", result.stderr)
+            require(count is not None, "missing completed check count")
+            print(f"{arch} guard={guard}: {result.stdout.strip()} ({count[1]} checks)", flush=True)
 
 
 if __name__ == "__main__":
