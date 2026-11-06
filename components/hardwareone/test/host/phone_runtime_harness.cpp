@@ -299,7 +299,8 @@ struct Gatt {
  uint32_t enteredAt(Phase p)const{return unsigned(p)<=unsigned(Phase::Pipe)?entered[unsigned(p)]:0;}
  // The attempt-end latch, as in production: the first stop after begin().
  struct AttemptEnd{uint32_t at=0;hw1coex::ConnectStage stage=hw1coex::ConnectStage::None;Error error=Error::None;
-   int16_t gatt=-1;uint16_t reason=0;bool serviceChanged=false;};
+   int16_t gatt=-1;uint16_t reason=0;bool serviceChanged=false;
+   int16_t event=-1;uint16_t connection=0xffff;int32_t esp=0;};
  AttemptEnd endv;bool armed=false,concluded=false;
  hw1coex::ConnectStage stageNow=hw1coex::ConnectStage::Open;
  const AttemptEnd* attemptEnd()const{return concluded?&endv:nullptr;}
@@ -1835,6 +1836,26 @@ static void pipeAttempt(const std::function<void()>& ends){
 static void v2Tests() {
  using hw1pipe::Op;using St=PhonePipeOpenStatus;const auto npos=std::string::npos;
  static int handle;
+ // Record READY loss before retirement, retain it across a new failed attempt,
+ // and expose the same compact cause via stats. Maximum values fit the durable
+ // event's 80-byte detail without losing the uptime or writing past the buffer.
+ {linkUp(0);phoneGatt.concluded=true;phoneGatt.armed=false;
+  phoneGatt.endv={1234,hw1coex::ConnectStage::Ready,Error::Connect,-1,0x100,false,41,4,-1};
+  fail(clockMs,Error::Connect,"phone link lost");
+  const std::string expected="lost e=7 ev=41 c=0004 g=-1 h=0100 api=-1 t=1234";
+  assert(sessionStats.lastDown==expected);
+  assert(std::string(phoneStatsCommand("")).find("last_down: "+expected)!=npos);
+  phoneGatt.endv={};fail(clockMs,Error::Deadline,"scan missed");
+  assert(sessionStats.lastDown==expected && sessionStats.ended==1);
+  Gatt::AttemptEnd end;end.at=UINT32_MAX;end.event=INT16_MAX;end.connection=UINT16_MAX;
+  end.gatt=INT16_MIN;end.reason=UINT16_MAX;end.esp=INT32_MIN;
+  char buffer[82];std::memset(buffer,'!',sizeof(buffer));
+  formatPhoneEnd(buffer,80,&end,Error(UINT16_MAX),true);
+  assert(std::strlen(buffer)<80 && std::string(buffer).find("t=4294967295")!=npos);
+  assert(buffer[80]=='!' && buffer[81]=='!');}
+ {linkUp(0);disconnect();
+  assert(std::string(sessionStats.lastDown).rfind("stopped e=14 ",0)==0);
+  assert(sessionStats.ended==1);}
  // releaseIds: one per slot; every reset clears them all.
  {static_assert(sizeof(releaseIds)/sizeof(releaseIds[0])==hw1pipe::kMaxStreams,"one parked id per stream slot");
   reset();for(auto& id:releaseIds)id=77;runScan(1,0);drainGap();

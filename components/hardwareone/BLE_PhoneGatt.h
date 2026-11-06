@@ -83,6 +83,11 @@ class Gatt {
     int16_t gatt=-1;
     uint16_t reason=0;
     bool serviceChanged=false;
+    // Event being consumed at the first stop, or -1 for a local/timer stop.
+    // A synchronous write refusal keeps its ESP result separately from GATT.
+    int16_t event=-1;
+    uint16_t connection=0xffff;
+    int32_t esp=0;
   };
   const AttemptEnd* attemptEnd() const { return concluded_ ? &end_ : nullptr; }
   hw1pipe::Session& pipe;
@@ -123,6 +128,7 @@ class Gatt {
   uint32_t autoDiscoveryAt_=0;
   AttemptEnd end_;
   bool armed_=false, concluded_=false;
+  int16_t consuming_=-1;  // task-local callback provenance; never set on BTC
   // Bluedroid's own discovery failed: a non-OK DIS_SRVC_CMPL, or our queued
   // CFG_MTU ran without one (the partial cache is then searched). Either way
   // the attempt's stage reads discovery. mtuRefused_: the request never left.

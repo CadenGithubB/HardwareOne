@@ -37,6 +37,16 @@ confirmed UNREG or verified terminal host shutdown releases them, and a full
 table refuses a registration rather than reusing an ID. Wrap cannot collide with
 live/reserved Arduino or native owners.
 
+`phone stats` retains the last READY-session loss across later scans and
+connection attempts. Its `last_down` record is also posted as `phone_link_down`
+at the READY-to-down boundary, before cleanup completes. Fields are pipe error
+`e`, consumed SDK event `ev` (-1 for a local/timer stop), connection ID `c`
+(hex), GATT status `g` (-1 if none), own-phone HCI reason `h` (hex), synchronous
+write API result `api`, and board uptime `t` in milliseconds. Cleanup callbacks
+cannot replace the first terminal cause. No address, key or payload is included.
+The persistent system logger records the event when enabled; `phone stats`
+retention lasts until reboot or the next READY-session loss.
+
 ## Application channel
 
 `ENABLE_BLE_PHONE_PIPE` defaults off. `p4-phone-pipe` enables it alongside G2;

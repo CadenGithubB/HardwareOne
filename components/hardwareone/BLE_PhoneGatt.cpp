@@ -55,6 +55,7 @@ bool Gatt::post(esp_gattc_cb_event_t kind, esp_gatt_if_t interface,
       if (kind==ESP_GATTC_CONNECT_EVT) peer=p->connect.remote_bda;
       else if (kind==ESP_GATTC_SRVC_CHG_EVT) peer=p->srvc_chg.remote_bda;
       else if (kind==ESP_GATTC_DISCONNECT_EVT) peer=p->disconnect.remote_bda;
+      else if (kind==ESP_GATTC_CLOSE_EVT) peer=p->close.remote_bda;
       if (!peer || std::memcmp(peer,address_,6)) return false;
       interface=owned;
     }
@@ -99,7 +100,9 @@ bool Gatt::post(esp_gattc_cb_event_t kind, esp_gatt_if_t interface,
           uxQueueMessagesWaiting(queue_)>=kQueueSize-kControlSlots) { overflow_=true; keep=false; break; }
       std::memcpy(event.data,p->notify.value,event.length); break;
     case ESP_GATTC_CLOSE_EVT:
-      event.status=p->close.status; event.conn=p->close.conn_id; break;
+      event.status=p->close.status; event.conn=p->close.conn_id;
+      event.handle=uint16_t(p->close.reason);
+      std::memcpy(event.data,p->close.remote_bda,6); break;
     case ESP_GATTC_DISCONNECT_EVT:
       // Every registered app gets a copy of every link's DISCONNECT: keep the
       // address so consume() takes only the phone's own reason.
@@ -155,6 +158,7 @@ void Gatt::conclude(uint32_t now, hw1pipe::Error why) {
   if (!armed_) return;  // not registered yet, or already concluded
   armed_=false; concluded_=true;
   end_.at=now; end_.stage=stageNow(); end_.error=why; end_.serviceChanged=serviceChanged_;
+  end_.connection=conn_; end_.event=consuming_;
 }
 void Gatt::stop(uint32_t now, hw1pipe::Error reason) {
   conclude(now,reason);  // the first stop names the attempt's end
@@ -261,14 +265,24 @@ void Gatt::consume(const Event& e, uint32_t now) {
     return;
   }
   if (e.kind==ESP_GATTC_DISCONNECT_EVT || e.kind==ESP_GATTC_CLOSE_EVT) {
+    // A foreign link's teardown may carry an invalid/reused ID equal to ours.
+    // Both SDK events carry the peer address: require the phone's before
+    // changing either its diagnostics or its live transport.
+    if (std::memcmp(e.data,address_,6)) return;
     // A failed open's DISCONNECT carries the HCI reason and no usable conn_id;
     // a live link's carries ours. Other links' copies (G2 temples, ring) carry
     // their own addresses. The first reason of the attempt is kept.
-    if (e.kind==ESP_GATTC_DISCONNECT_EVT && armed_ && !end_.reason && !std::memcmp(e.data,address_,6) &&
+    if (armed_ && !end_.reason &&
         ((openPending_ && !opened_) || e.conn==conn_)) end_.reason=e.handle;
     if (e.conn!=conn_) return;
+    noteStatus(e.status);
     if (e.kind==ESP_GATTC_CLOSE_EVT && e.status!=ESP_GATT_OK) {
-      conclude(now,hw1pipe::Error::Connect); enter(Phase::Quarantined,now); return;
+      // An unsolicited failed CLOSE is still a terminal transport failure.
+      // End the protocol too: otherwise the owner sees READY/error=None while
+      // the adapter is quarantined and records an error-free session end.
+      // A close we already requested keeps its original stop cause.
+      if (!retiring) stop(now,hw1pipe::Error::Connect);
+      enter(Phase::Quarantined,now); return;
     }
     opened_=false; openPending_=false;
     if (!retiring) stop(now,hw1pipe::Error::Connect);
@@ -370,7 +384,9 @@ void Gatt::poll(uint32_t now, bool relayPressure, bool consoleDisplayBusy) {
   for (unsigned i=0; i<kQueueSize && xQueueReceive(queue_,&index,0)==pdTRUE; ++i) {
     if (index>=kSlabCount) continue;
     slabState_[index].store(kSlabProcessing,std::memory_order_relaxed);
+    consuming_=int16_t(slabs_[index].kind);
     consume(slabs_[index],now);
+    consuming_=-1;
     slabRelease(index);
   }
   if (idle()) return;
@@ -425,7 +441,7 @@ void Gatt::poll(uint32_t now, bool relayPressure, bool consoleDisplayBusy) {
   }
   // Local completion is bounded; NO_RSP never waits for a peer ATT response.
   bleCentralTxGive();sodium_memzero(plain,sizeof(plain));sodium_memzero(bytes,sizeof(bytes));
-  if(status!=ESP_OK){stop(now,hw1pipe::Error::Connect);return;}
+  if(status!=ESP_OK){if(armed_)end_.esp=status;stop(now,hw1pipe::Error::Connect);return;}
   if(!length)return;
   if(submitting==Phase::Cccd) {
     descriptorPending_=true;secureAt_=now;localMs_=0;localOwed_=false;enter(Phase::Secure,now);

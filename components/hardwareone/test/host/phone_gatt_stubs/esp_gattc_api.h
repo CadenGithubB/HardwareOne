@@ -27,7 +27,7 @@ struct esp_ble_gattc_cb_param_t {
  struct {int status=0;uint16_t app_id=0;} reg;
  struct {int status=0;uint16_t conn_id=0;uint8_t remote_bda[6]{};uint16_t mtu=23;} open;
  struct {uint8_t remote_bda[6]{};} connect;
- struct {int status=0;uint16_t conn_id=0;} close;
+ struct {int status=0;uint16_t conn_id=0;uint8_t remote_bda[6]{};int reason=0;} close;
  struct {uint16_t conn_id=0;uint8_t remote_bda[6]{};int reason=0;} disconnect;
  struct {int status=0;uint16_t conn_id=0;uint16_t mtu=23;} cfg_mtu;
  struct {uint16_t conn_id=0,start_handle=0,end_handle=0;esp_gatt_id_t srvc_id{};bool is_primary=false;} search_res;

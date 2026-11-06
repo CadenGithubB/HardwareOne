@@ -35,7 +35,7 @@ SPIED = (
 # BEFORE and AFTER.
 BEFORE = (
     'void setStep(', 'void routeSet(', 'bool matches(', 'bool hasService(', 'bool gapCallback(',
-    'bool currentJob(', 'void setReady() ', 'bool clearReady() ', 'void fail(', 'void cleanupExpired(',
+    'bool currentJob(', 'void setReady() ', 'bool clearReady() ', 'void formatPhoneEnd(', 'void fail(', 'void cleanupExpired(',
     'void leaveSetup() ', 'void endTurn() ',
     'void configureScan(', 'void startForget(', 'hw1coex::ScanRecord scanRecord(', 'void noteScan(',
     'void noteScanFailed(uint32_t now) ', 'void noteAttempt(', 'void noteAttemptIfWanted(', 'void flushRecords(',

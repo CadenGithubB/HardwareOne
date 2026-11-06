@@ -46,7 +46,7 @@ static void ready(Gatt& g,uint16_t mtu=247,uint8_t phoneFlags=hw1pipe::kPhoneRel
 }
 static void finish(Gatt& g) {
   g.stop(now);tick(g);assert(calls.back()=="close");assert(!g.ready());
-  esp_ble_gattc_cb_param_t e{};e.close.conn_id=4;post(g,ESP_GATTC_CLOSE_EVT,e);tick(g);
+  esp_ble_gattc_cb_param_t e{};e.close.conn_id=4;std::memcpy(e.close.remote_bda,address,6);post(g,ESP_GATTC_CLOSE_EVT,e);tick(g);
   assert(calls.back()=="unregister" && !g.idle());
   assert(g.post(ESP_GATTC_UNREG_EVT,7,nullptr));tick(g);assert(g.idle());
 }
@@ -107,7 +107,7 @@ int main() {
       opened(g);
       esp_ble_gattc_cb_param_t e{};const size_t n=calls.size();
       if(kind==0) {g.stop(now);tick(g,50);assert(calls.size()==n+1 && calls.back()=="close");}
-      if(kind==1) {e.disconnect.conn_id=4;post(g,ESP_GATTC_DISCONNECT_EVT,e);tick(g,50);
+      if(kind==1) {e.disconnect.conn_id=4;std::memcpy(e.disconnect.remote_bda,address,6);post(g,ESP_GATTC_DISCONNECT_EVT,e);tick(g,50);
         assert(calls.size()==n+1 && calls.back()=="unregister");}
       if(kind==3) {e.cfg_mtu.conn_id=4;e.cfg_mtu.status=ESP_GATT_OK;e.cfg_mtu.mtu=23;
         post(g,ESP_GATTC_CFG_MTU_EVT,e);tick(g);assert(g.pipe.error==hw1pipe::Error::Connect);}
@@ -117,7 +117,7 @@ int main() {
   // ---- The attempt's end, for the coexistence record ------------------------
   // Latched once, by the first stop after a successful registration.
   using S=hw1coex::ConnectStage;
-  const auto disconnect=[](Gatt& g,uint16_t conn,uint8_t reason,bool phone) {
+  const auto disconnect=[](Gatt& g,uint16_t conn,uint16_t reason,bool phone) {
     esp_ble_gattc_cb_param_t d{};d.disconnect.conn_id=conn;d.disconnect.reason=reason;
     std::memcpy(d.disconnect.remote_bda,address,6);if(!phone)d.disconnect.remote_bda[5]^=0x5a;
     post(g,ESP_GATTC_DISCONNECT_EVT,d);tick(g);
@@ -126,6 +126,61 @@ int main() {
     esp_ble_gattc_cb_param_t d{};d.dis_srvc_cmpl.conn_id=4;d.dis_srvc_cmpl.status=esp_gatt_status_t(status);
     post(g,ESP_GATTC_DIS_SRVC_CMPL_EVT,d);tick(g);
   };
+  // A failed accessory OPEN can broadcast a DISCONNECT with an invalid or
+  // reused connection ID. Even an ID matching this phone's must not stop the
+  // phone when the event belongs to another address (hardware ring incident).
+  for(unsigned phase=0;phase<3;++phase) {
+    now=100;hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};
+    if(phase==2)ready(g);else {begin(g);if(phase==1)opened(g);}
+    const Phase before=g.phase();const size_t count=calls.size();
+    for(uint16_t reason:{uint16_t(0x08),uint16_t(0x100),uint16_t(0x02)}) {
+      disconnect(g,phase?4:0xffff,reason,false);
+      assert(g.phase()==before && g.ready()==(phase==2));
+      assert(calls.size()==count && !g.attemptEnd());
+    }
+    // CLOSE also carries the peer address in IDF 5.5.5. It must obey the
+    // same ownership check, including a foreign failed-close status.
+    for(int status:{ESP_GATT_OK,ESP_GATT_BUSY}) {
+      esp_ble_gattc_cb_param_t e{};e.close.conn_id=phase?4:0xffff;e.close.status=status;
+      std::memcpy(e.close.remote_bda,address,6);e.close.remote_bda[5]^=0x5a;
+      post(g,ESP_GATTC_CLOSE_EVT,e);tick(g);
+      assert(g.phase()==before && g.ready()==(phase==2));
+      assert(calls.size()==count && !g.attemptEnd());
+    }
+    if(phase) {
+      disconnect(g,4,0x08,true);
+      assert(!g.ready() && g.phase()==Phase::Retiring);
+      assert(g.attemptEnd() && g.attemptEnd()->reason==0x08);
+      assert(g.attemptEnd()->event==ESP_GATTC_DISCONNECT_EVT && g.attemptEnd()->connection==4);
+    }
+    g.hostStopped();
+  }
+  // Genuine close acknowledgements still retire the phone, with either its
+  // app interface or a broadcast interface; genuine failed close quarantines.
+  for(auto interface:{esp_gatt_if_t(7),ESP_GATT_IF_NONE})for(bool failed:{false,true}) {
+    hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};ready(g);
+    g.stop(now);tick(g);assert(calls.back()=="close");
+    esp_ble_gattc_cb_param_t e{};e.close.conn_id=4;e.close.status=failed?ESP_GATT_BUSY:ESP_GATT_OK;
+    std::memcpy(e.close.remote_bda,address,6);
+    assert(g.post(ESP_GATTC_CLOSE_EVT,interface,&e));tick(g);
+    assert(g.phase()==(failed?Phase::Quarantined:Phase::Retiring));
+    if(!failed)assert(calls.back()=="unregister");
+    g.hostStopped();
+  }
+  // Unsolicited own CLOSE and a synchronous send refusal are distinct from
+  // an HCI disconnect. Later cleanup must preserve the original provenance.
+  {hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};ready(g);
+    esp_ble_gattc_cb_param_t e{};e.close.conn_id=4;e.close.status=ESP_GATT_BUSY;e.close.reason=0x100;
+    std::memcpy(e.close.remote_bda,address,6);post(g,ESP_GATTC_CLOSE_EVT,e);tick(g);
+    const auto* end=g.attemptEnd();assert(end && end->event==ESP_GATTC_CLOSE_EVT && end->connection==4);
+    assert(end->gatt==ESP_GATT_BUSY && end->reason==0x100 && !end->esp);
+    assert(g.pipe.state==hw1pipe::State::Down && g.pipe.error==hw1pipe::Error::Connect);
+    g.stop(now,hw1pipe::Error::Cancelled);assert(g.attemptEnd()->event==ESP_GATTC_CLOSE_EVT);g.hostStopped();}
+  {hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};ready(g);
+    failApi="write";g.pipe.open(1,address,4,80,now);tick(g,30);failApi.clear();
+    const auto* end=g.attemptEnd();assert(end && end->event==-1 && end->connection==4);
+    assert(end->esp==ESP_FAIL && end->gatt==-1 && !end->reason);
+    disconnect(g,4,0x16,true);assert(g.attemptEnd()->esp==ESP_FAIL && g.attemptEnd()->event==-1);g.hostStopped();}
   // G1: a failed open. Bluedroid's DISCONNECT for the phone (0x3e after its
   // silent retries) precedes the generic OPEN 0x85; another link's copy (a G2
   // temple's 0x08) is not the phone's; the first reason wins.
@@ -301,7 +356,7 @@ int main() {
   for(int kind=0;kind<3;++kind) {
     hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};begin(g);opened(g);discover(g);subscribed(g);
     esp_ble_gattc_cb_param_t e{};
-    if(kind==0){e.disconnect.conn_id=4;post(g,ESP_GATTC_DISCONNECT_EVT,e);tick(g);}
+    if(kind==0){e.disconnect.conn_id=4;std::memcpy(e.disconnect.remote_bda,address,6);post(g,ESP_GATTC_DISCONNECT_EVT,e);tick(g);}
     else if(kind==1){g.stop(now,hw1pipe::Error::Resources);tick(g);}
     else {peer=PhoneSecurePeer{};auto hello=peer.hello();notify(g,hello);tick(g,30);
       e.write.conn_id=4;e.write.handle=11;e.write.status=ESP_GATT_BUSY;
@@ -424,7 +479,7 @@ int main() {
   }
   {hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};hello(g);
    phoneFrame(g,hw1pipe::Op::HelloAck,0,Bytes(8,0x51),1);  // FIRST fragment only: the phone answered
-   esp_ble_gattc_cb_param_t e{};e.disconnect.conn_id=4;post(g,ESP_GATTC_DISCONNECT_EVT,e);tick(g);
+   esp_ble_gattc_cb_param_t e{};e.disconnect.conn_id=4;std::memcpy(e.disconnect.remote_bda,address,6);post(g,ESP_GATTC_DISCONNECT_EVT,e);tick(g);
    assert(g.pipe.error==hw1pipe::Error::Connect && g.pipe.helloEnd()==hw1pipe::HelloEnd::None);g.hostStopped();}
   // The core's 3 s HELLO deadline with nothing received is a silent HELLO.
   {hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};hello(g);const uint32_t helloAt=now-30;
@@ -460,5 +515,5 @@ int main() {
    assert(data[1]==uint8_t(hw1pipe::Op::Data) && data.size()==18 && !std::memcmp(data.data()+12,"\x02\x00\x02\x00OK",6));
    writeDone(g);finish(g);}
   std::printf("sizeof(Gatt)=%zu sizeof(Session)=%zu\n",sizeof(Gatt),sizeof(hw1pipe::Session));
-  puts("Native phone GATT: A-5 expiry attribution, security barrier, MTUs, discovery, callback routing, pacing, deadlines, retirement and quarantine, v2 HELLO/version signal/silent HELLO and both pressure inputs passed");
+  puts("Native phone GATT: foreign teardown ID aliases, own/broadcast close, A-5 expiry attribution, security barrier, MTUs, discovery, callback routing, pacing, deadlines, retirement and quarantine, v2 HELLO/version signal/silent HELLO and both pressure inputs passed");
 }

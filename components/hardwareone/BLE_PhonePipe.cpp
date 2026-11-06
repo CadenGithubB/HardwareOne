@@ -190,6 +190,7 @@ struct SessionStats {
   uint32_t ready=0,authFailures=0,ended=0,serviceChanged=0,peerReset=0,versionMismatches=0;
   uint32_t endReason[19]{};
   uint16_t lastEnd=0;
+  char lastDown[80]{};  // survives later failed scans/new GATT attempts
 };
 static_assert(sizeof(SessionStats::endReason)/sizeof(uint32_t)==unsigned(hw1pipe::Error::Paused)+1,
               "one end-reason bucket per pipe error code");
@@ -356,6 +357,14 @@ bool clearReady() {
   relayOn=false;
   return ready.exchange(false);
 }
+// One compact record for both the durable event and `phone stats`. Called
+// under the phone owner mutex, never from BTC; no addresses or payloads.
+void formatPhoneEnd(char* out,size_t size,const Gatt::AttemptEnd* end,Error why,bool stopped) {
+  snprintf(out,size,"%s e=%u ev=%d c=%04x g=%d h=%04x api=%ld t=%lu",
+      stopped?"stopped":"lost",unsigned(why),end?int(end->event):-1,
+      end?unsigned(end->connection):0xffffu,end?int(end->gatt):-1,
+      end?unsigned(end->reason):0u,end?long(end->esp):0L,end?(unsigned long)end->at:0UL);
+}
 void fail(uint32_t now,Error why,const char* label,hw1coex::CauseDetail detail=hw1coex::CauseDetail::None) {
   // The first stop of an attempt that found the phone names its record (the
   // step then leaves Scanning/Link, and READY sets published).
@@ -363,7 +372,8 @@ void fail(uint32_t now,Error why,const char* label,hw1coex::CauseDetail detail=h
     attemptWanted=true;
     attemptStop=AttemptStop{why,detail,enrolling,phoneGatt.ready(),linkBegun && phoneGatt.attemptEnd(),step};
   }
-  if(clearReady()) {
+  const bool wasReady=clearReady();
+  if(wasReady) {
     // Codes past 18 never fold onto a known one: they share bucket 0.
     const uint16_t code=uint16_t(why),slot=hw1pipe::knownError(code)?code:0;
     ++sessionStats.ended;++sessionStats.endReason[slot];sessionStats.lastEnd=slot;
@@ -371,6 +381,15 @@ void fail(uint32_t now,Error why,const char* label,hw1coex::CauseDetail detail=h
     if(phoneGatt.pipe.peerReset)++sessionStats.peerReset;
   }
   phoneGatt.stop(now,why);
+  if(wasReady) {
+    // The adapter may already have stopped on an SDK event. Preserve its
+    // first terminal cause before a new scan can replace it.
+    formatPhoneEnd(sessionStats.lastDown,sizeof(sessionStats.lastDown),phoneGatt.attemptEnd(),why,
+        stopWanted.load() || detail==hw1coex::CauseDetail::Stopped);
+#ifdef ESP_PLATFORM
+    systemEventPost(SYSEVT_PHONE_LINK_DOWN,nullptr,sessionStats.lastDown);
+#endif
+  }
   if(step!=Step::Retiring && step!=Step::Fault)setStep(Step::Retiring,label,now);
 }
 void cleanupExpired(uint32_t now,const char* label) {
@@ -792,9 +811,6 @@ void tickLocked(uint32_t now) {
       // client's scan events (consume() ends a retiring scan without routeSet).
       // An attempt that never reached READY keeps its failure ("phone not
       // found", "BLE setup timed out"); only a link that was up reads disconnected.
-#ifdef ESP_PLATFORM
-      if(published)systemEventPost(SYSEVT_PHONE_LINK_DOWN,nullptr,stopWanted.load()?"stopped":"disconnected");
-#endif
       setStep(Step::Idle,stopWanted.load()?"stopped":published?"disconnected":status.load(),now);routeSet();
       if(nativeAppId!=0xffff){BLEDevice::releaseAppId(nativeAppId);nativeAppId=0xffff;}
       bleCentralLinkReleaseClient(&phoneGatt);
@@ -1490,6 +1506,8 @@ static const char* phoneStatsCommand(const String&) {
       versionLatched.load()?" held":""));
   for(unsigned i=0;i<sizeof(st.endReason)/sizeof(st.endReason[0]) && used<sizeof(text);++i)if(st.endReason[i])
     used+=size_t(snprintf(text+used,sizeof(text)-used," %u=%lu",i,(unsigned long)st.endReason[i]));
+  if(st.lastDown[0] && used<sizeof(text))
+    used+=size_t(snprintf(text+used,sizeof(text)-used,"\nlast_down: %s",st.lastDown));
   // Console stream counters: counts only, never content. withheld_ms/max_ms:
   // ingress credit held back while a whole record waited on a gate (pool slot,
   // cmd_exec places, bound row), each gate counted once per record.
