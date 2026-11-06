@@ -1146,3 +1146,31 @@ retired-client path stayed silent, as they should with the known cause fixed.
 Ring drops track the ring moving, not time. Nothing committed; board left on
 `setup-worker-recovery-candidate` (ELF `f822cb24…`); console session closed,
 port free.
+
+## Log hygiene — 2026-11-06 13:40 UTC
+
+Device state, over the console (persistent settings, no reboot): the 34 debug
+flags left on by the investigation (BT, G2, RING, SR, MIC groups and their
+children) are off and the log level is back to `info`. A parent flag command
+(`debugring 0`) clears only its own bit, so every child was cleared by name.
+Six LLM flags remain set but inert: this build has no on-device LLM, so it has
+neither the `debugllm*` commands nor any code that reads those bits. The SD
+system log had reached 3.5 MB in ten hours at the debug level; the serial
+stream carries only command echoes now. The hourly interval automation `abc`
+(runs `status`) is still on the device, left for the user to decide.
+
+Firmware: the debug-capture system log had no size bound. The writer now
+rotates the file to `<path>.1` at `LOG_SYSTEM_CAP_BYTES` (8 MB), replacing the
+previous generation with one rename under the lock it already holds, and
+backs off a minute after a failed rename instead of retrying per line.
+`log status` shows the cap and the rotation count; the `log` help names the
+behavior. `status` printed "Last Reset: Unknown" for any reason past 10 (USB,
+JTAG and later) because of a hard-coded table bound; it now uses the shared
+reset-reason table. Host suites system_log_status, log_level_application and
+phone_status pass under sanitizers; `p4-phone-pipe` builds (6,144,032 B image,
+1.25 MB headroom). Not deployed yet; the board still runs
+`setup-worker-recovery-candidate`.
+
+Observed but left alone: `g2_plugin_silent`/`g2_plugin_alive` flip around
+every lens page by design (they are the wear proxy that automations use), and
+console commands stall the main loop by about 0.7 s each (`LOOPHEALTH` INPUT).

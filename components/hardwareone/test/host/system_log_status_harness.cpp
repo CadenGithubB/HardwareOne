@@ -21,6 +21,7 @@ volatile uint32_t gOutputFlags = 0;
 String gSystemLogPath = "";
 bool gSystemLogRunning = false;
 unsigned long gSystemLogLastWrite = 0;
+uint32_t gSystemLogRotations = 0;  // production: static in System_Debug.cpp, shown by the ACTIVE status
 DebugFlagMask gDebugFlags;
 struct HostSettings { bool systemLogAutoStart = false; String systemLogFlags; } gSettings;
 
@@ -65,9 +66,14 @@ int main() {
   nowMs = 63500;
   char routes[8];
   std::snprintf(routes, sizeof(routes), "0x%02X", static_cast<unsigned>(MSG_ROUTE_SERIAL | MSG_ROUTE_FILE));
+  const std::string cap = "\n  Size cap: " + std::to_string(LOG_SYSTEM_CAP_BYTES / (1024u * 1024u)) +
+                          " MB, rotated 0 time(s) this boot";
   const std::string active = std::string("System logging ACTIVE\n  File: /logging_captures/system/debug.log\n"
-                                         "  Last write: 62s ago\n  Output flags: ") + routes + "\n  Auto-start: ON";
+                                         "  Last write: 62s ago\n  Output flags: ") + routes + "\n  Auto-start: ON" + cap;
   for (size_t size : {kCliStatus, kWebStatus}) CHECK(status(size) == active);
+  gSystemLogRotations = 3;  // the writer's rename count reaches the status line
+  CHECK(status(kCliStatus).find("rotated 3 time(s) this boot") != std::string::npos);
+  gSystemLogRotations = 0;
 
   gOutputFlags = MSG_ROUTE_SERIAL;
   gSettings.systemLogAutoStart = false;

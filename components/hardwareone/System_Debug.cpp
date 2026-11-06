@@ -123,6 +123,34 @@ static uint16_t gSystemLogUnflushedCount = 0;
 static const uint16_t LOG_FLUSH_MESSAGE_COUNT = 20;      // Flush every 20 messages
 static const uint32_t LOG_FLUSH_INTERVAL_MS = 5000;      // Or every 5 seconds
 
+// Size bound for that file. Until 2026-11-06 it grew without limit (3.5 MB in
+// ten hours with ring and glasses debug on). At LOG_SYSTEM_CAP_BYTES the file
+// becomes <path>.1, replacing the previous generation, and a fresh file
+// continues: one rename under the lock the writer already holds, no copy.
+static uint32_t gSystemLogRotations = 0;
+static uint32_t gSystemLogRotateRetryAtMs = 0;  // set after a failed rename; 0 = no backoff
+
+// Caller holds the FS lock with gSystemLogFile open. Closes the file, moves
+// it to <path>.1 (the older .1 goes away) and leaves the handle closed: the
+// next line reopens the path for append exactly as a run's first write does.
+// No log line from here — this runs inside the log writer itself.
+static void systemLogRotateLocked() {
+  gSystemLogFile.flush();
+  gSystemLogFile.close();
+  gSystemLogUnflushedCount = 0;
+  const String previous = gSystemLogPath + ".1";
+  const AuthContext ctx =
+      VFS::systemAuth(VFS::captureScopeFor(gSystemLogPath), "debug.system_log_rotate");
+  if (VFS::existsGuarded(previous, ctx)) VFS::removeGuarded(previous, ctx);
+  if (VFS::renameGuarded(gSystemLogPath, previous, ctx)) {
+    ++gSystemLogRotations;
+    gSystemLogRotateRetryAtMs = 0;
+  } else {
+    // The file keeps growing past the cap; retry in a minute, not per line.
+    gSystemLogRotateRetryAtMs = millis() + 60000u;
+  }
+}
+
 // BLE broadcast output buffer (accumulates messages for periodic send to authenticated BLE clients)
 #if ENABLE_BLUETOOTH
 static String gBLEOutputBuffer;
@@ -348,6 +376,12 @@ void debugOutputTask(void* parameter) {
             gSystemLogFile.flush();
             gSystemLogLastFlush = millis();
             gSystemLogUnflushedCount = 0;
+          }
+          // Append mode: position() is the file size, buffered bytes included.
+          if (gSystemLogFile.position() >= LOG_SYSTEM_CAP_BYTES &&
+              (gSystemLogRotateRetryAtMs == 0 ||
+               (int32_t)(millis() - gSystemLogRotateRetryAtMs) >= 0)) {
+            systemLogRotateLocked();
           }
         }
         fsUnlock();
@@ -1823,9 +1857,12 @@ void formatSystemLogStatus(char* out, size_t outSize) {
              "  File: %s\n"
              "  Last write: %lus ago\n"
              "  Output flags: 0x%02X\n"
-             "  Auto-start: %s",
+             "  Auto-start: %s\n"
+             "  Size cap: %u MB, rotated %lu time(s) this boot",
              gSystemLogPath.c_str(), ageSeconds, (unsigned)gOutputFlags,
-             gSettings.systemLogAutoStart ? "ON" : "OFF");
+             gSettings.systemLogAutoStart ? "ON" : "OFF",
+             (unsigned)(LOG_SYSTEM_CAP_BYTES / (1024u * 1024u)),
+             (unsigned long)gSystemLogRotations);
   } else if (gSystemLogRunning) {
     snprintf(out, outSize,
              "System logging CONFIGURED but MSG_ROUTE_FILE flag not set\n"
@@ -2274,7 +2311,7 @@ const CommandEntry debugCommands[] = {
   { "debugfmradio", "Debug FM Radio operations.", true, cmd_debugfmradio, "Usage: debugfmradio <0|1> [temp|runtime]" },
   { "memorysampleintervalsec", "Set memory sampling interval in seconds (0=disabled).", true, cmd_memorysampleintervalsec, "Usage: memorysampleintervalsec <0-300>" },
   { "loglevel", "Set log level (error|warn|info|debug).", true, cmd_loglevel, "Usage: loglevel <error|warn|info|debug>" },
-  { "log", "System-wide logging to file.", true, cmd_log, "Usage: log <start|stop|status|autostart>\n  start [\"filepath\"] [flags=0x...] [tags=0|1]: Begin system logging\n    filepath: Log file path, quoted (auto-generated if omitted)\n    flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h)\n    tags: Prefix lines with category tags (0|1, default 1)\n  stop / status: Stop logging / show logging status\n  autostart [on|off]: Toggle logging auto-start on boot (bare = toggle)" },
+  { "log", "System-wide logging to file.", true, cmd_log, "Usage: log <start|stop|status|autostart>\n  start [\"filepath\"] [flags=0x...] [tags=0|1]: Begin system logging\n    filepath: Log file path, quoted (auto-generated if omitted)\n    flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h)\n    tags: Prefix lines with category tags (0|1, default 1)\n  stop / status: Stop logging / show logging status (the file rotates to <path>.1 at 8 MB)\n  autostart [on|off]: Toggle logging auto-start on boot (bare = toggle)" },
   { "webconsole", "Enable/disable browser-side debug console output in the web UI.", true, cmd_webconsole, "Usage: webconsole <0|1>" },
 };
 

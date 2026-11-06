@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-995 commands across 56 modules (1004 registry entries).
+996 commands across 56 modules (1005 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -23,7 +23,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`relay`](#relay) — 2 commands
 - [`filesystem`](#filesystem) — 10 commands
 - [`sd`](#sd) — 5 commands
-- [`oled`](#oled) — 20 commands
+- [`oled`](#oled) — 21 commands
 - [`speaker`](#speaker) — 1 commands
 - [`neopixel`](#neopixel) — 3 commands
 - [`led`](#led) — 6 commands
@@ -414,12 +414,13 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `oledbootduration` |  | Boot animation duration (ms): <500-10000><br/>`Usage: oledbootduration <500..10000>` |
 | `oledbootmode` |  | OLED boot mode: <logo\|status\|sensors\|thermal\|network\|mesh\|off><br/>`Usage: oledbootmode <logo\|status\|sensors\|thermal\|network\|mesh\|off>` |
 | `oledbrightness` |  | Display brightness: <0-255><br/>`Usage: oledbrightness <0..255>` |
+| `oledcameraread` |  | Read the local camera preview state (JSON) |
 | `oledclear` |  | Clear OLED display. |
 | `oleddefaultmode` |  | OLED default mode: <logo\|status\|sensors\|thermal\|network\|mesh\|off><br/>`Usage: oleddefaultmode <logo\|status\|sensors\|thermal\|network\|mesh\|off>` |
 | `oledenabled` |  | Enable/disable OLED: <0\|1><br/>`Usage: oledenabled <0\|1>` |
 | `oledflip` |  | Flip display 180°: [on\|off\|toggle]<br/>`Usage: oledflip [on\|off\|toggle]` |
 | `oledlandscape` |  | Landscape UI with right-side controls: [0\|1]<br/>`Usage: oledlandscape [0\|1]` |
-| `oledmode` |  | Set display mode: <mode><br/>`Usage: oledmode <menu\|status\|sensordata\|sensorlist\|thermal\|network\|mesh\|gps\|text\|logo\|anim\|imuactions\|fmradio\|files\|logging\|automations\|espnow\|memory\|off> Example: oledmode memory Example: oledmode off` |
+| `oledmode` |  | Set display mode: <mode><br/>`Usage: oledmode <menu\|status\|sensordata\|sensorlist\|thermal\|camera\|network\|mesh\|gps\|text\|logo\|anim\|imuactions\|fmradio\|files\|logging\|automations\|espnow\|memory\|off> Example: oledmode memory Example: oledmode off` |
 | `oledread` |  | Read OLED display status. (add 'json' for JSON output) |
 | `oledstart` |  | Start OLED display. |
 | `oledstatus` |  | Show OLED status. (add 'json' for JSON output) |
@@ -729,7 +730,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `micread` |  | Read microphone sensor status.<br/>`Usage: micread [json]` |
 | `micrecord` |  | Start/stop recording to WAV file (bare = show recording status).<br/>`Usage: micrecord [start [vad <200..10000>] [trim] \| stop \| 1 \| 0] micrecord startid <16hex> [vad <200..10000>] [trim] micrecord statusid <16hex> micrecord stopid <16hex> [discard]` |
 | `micsamplerate` |  | Get/set sample rate.<br/>`Usage: micsamplerate [8000-48000]` |
-| `micsource` |  | Get/set mic source: onboard PDM or G2 glasses.<br/>`Usage: micsource [auto\|pdm\|g2]` |
+| `micsource` |  | Get/set mic source: onboard microphone or G2 glasses.<br/>`Usage: micsource [auto\|onboard\|pdm\|g2]` |
 | `micviz` |  | Real-time audio level visualizer.<br/>`Usage: micviz (press any key to stop)` |
 | `openmic` |  | Start microphone sensor. |
 | `voicefetch` |  | Stream a recording to the UART host as binary frames (CM5 bulk pull).<br/>`Usage: voicefetch "<path>" - path must be under /recordings or /sd/recordings. Sends META+AUDIO frames on the UART link, then replies with byte/frame totals and crc16.` |
@@ -1070,7 +1071,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `debugwificonnection` | A | Debug WiFi connection.<br/>`Usage: debugwificonnection <0\|1> [temp\|runtime]` |
 | `debugwifidriver` | A | Debug WiFi driver.<br/>`Usage: debugwifidriver <0\|1> [temp\|runtime]` |
 | `debugwifiscanning` | A | Debug WiFi scanning.<br/>`Usage: debugwifiscanning <0\|1> [temp\|runtime]` |
-| `log` | A | System-wide logging to file.<br/>`Usage: log <start\|stop\|status\|autostart> start ["filepath"] [flags=0x...] [tags=0\|1]: Begin system logging filepath: Log file path, quoted (auto-generated if omitted) flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h) tags: Prefix lines with category tags (0\|1, default 1) stop / status: Stop logging / show logging status autostart [on\|off]: Toggle logging auto-start on boot (bare = toggle)` |
+| `log` | A | System-wide logging to file.<br/>`Usage: log <start\|stop\|status\|autostart> start ["filepath"] [flags=0x...] [tags=0\|1]: Begin system logging filepath: Log file path, quoted (auto-generated if omitted) flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h) tags: Prefix lines with category tags (0\|1, default 1) stop / status: Stop logging / show logging status (the file rotates to <path>.1 at 8 MB) autostart [on\|off]: Toggle logging auto-start on boot (bare = toggle)` |
 | `loglevel` | A | Set log level (error\|warn\|info\|debug).<br/>`Usage: loglevel <error\|warn\|info\|debug>` |
 | `loglink` | A | Route ESP-IDF logs through the unified output queue (stops UART interleave).<br/>`Usage: loglink [<0\|1\|on\|off>] (bare = show status)` |
 | `memorysampleintervalsec` | A | Set memory sampling interval in seconds (0=disabled).<br/>`Usage: memorysampleintervalsec <0-300>` |

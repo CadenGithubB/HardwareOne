@@ -56,6 +56,7 @@ constexpr size_t LOG_I2C_CAP = 64 * 1024;  // 64KB (for I2C errors)
 constexpr size_t LOG_ERROR_CAP = 256 * 1024;  // 256KB ring for application errors
 constexpr size_t LOG_EVENTS_CAP = 256 * 1024;  // 256KB ring for system events
 constexpr size_t LOG_EVENT_STREAM_CAP = 256 * 1024;  // 256KB ring-derived structured event history
+constexpr size_t LOG_SYSTEM_CAP_BYTES = 8u * 1024u * 1024u;  // debug-capture system log: rotates to <path>.1 at this size
 
 // Time sync marker flag
 extern bool gTimeSyncedMarkerWritten;
