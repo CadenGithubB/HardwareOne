@@ -125,7 +125,7 @@ Firmware builds (2026-10-21, on the current uncommitted tree):
 | `xiao-no-bluetooth` (CM5 dictation, web sensors, no local STT) | green; image 4,406,816 B, 1,577,440 B (26%) headroom; +6.5 KB (web turn grouping, handler metadata, header, counters) |
 | `xiao-default` | **does not fit**: 6,015,376 B against a 5,984,256 B partition. Its last green build (2026-10-18) had 5,952 B of headroom and the tree has since gained the uncommitted Bluetooth lifecycle rework; this change adds roughly 6 KB there, so the overflow is mostly not this feature's, but the profile needs a size decision before it ships. |
 
-Flashed 2026-10-21 to the P4X-EYE the handoff qualified (MAC ending a7:68,
+Flashed 2026-10-21 to the P4X-EYE the handoff qualified (MAC placeholder 02:48:57:31:04:68,
 revision v3.2): app slot only (`0x10000`, hash verified), replacing the
 standalone captions app that was on it; NVS and LittleFS untouched. The device
 reached "Setup complete", associated Wi-Fi and reconnected the left temple and

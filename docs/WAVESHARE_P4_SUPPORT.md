@@ -6,9 +6,10 @@ the initially pasted 4.3-inch ST7701 page is not this device.
 
 ## Device and scope
 
-- Target USB hub port `/dev/cu.usbmodem5ABA0541421`, bridge serial `5ABA054142`,
-  VID:PID `1a86:55d3`. P4 MAC `80:f1:b2:d1:c3:12`, silicon revision v1.3.
-- Existing STT board `/dev/cu.usbmodem101`, serial `E8:F6:0A:E3:A7:68`, was
+- Target USB hub port `/dev/cu.usbmodem<bridge-serial>1` (the bridge's serial
+  number is kept in the private archive), VID:PID `1a86:55d3`. P4 MAC placeholder
+  `02:48:57:31:06:12`, silicon revision v1.3.
+- Existing STT board `/dev/cu.usbmodem101`, MAC placeholder `02:48:57:31:04:68`, was
   not flashed or reset. Never substitute that port for this bring-up.
 - esptool verified 32 MB flash; 32 MB PSRAM at 200 MHz passed the boot memory
   test. CPU is 360 MHz; UART0 TX37/RX38, console 115200 baud.

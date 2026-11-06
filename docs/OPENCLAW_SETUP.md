@@ -127,7 +127,7 @@ The user requested a device account named `cm5` and the XIAO's IP after it joins
 `TestESPNetwork`, for updating the existing tool environment on the Studio.
 The account password is not recorded here. After the user supplied administrator
 access, USB status verified `/dev/cu.usbmodem11201` as a Seeed XIAO ESP32S3 Sense,
-firmware `0.99.97.4`, MAC `68:EE:8F:50:E9:D0`. The `cm5` account was created with
+firmware `0.99.97.4`, MAC `02:48:57:31:00:D0`. The `cm5` account was created with
 the requested password as an ordinary `user` (no forced password change), and
 the account listing confirmed it. The administrator serial session was retained.
 The user entered the Wi-Fi password in a masked Mac mini prompt. It was passed
@@ -404,7 +404,7 @@ region for updates or rollback. App rollback does not revert runtime data
 changes made after boot. Ordinary flash arguments also write the bootloader and
 partition table, and `littlefs-flash` writes a blank filesystem; neither is the
 intended update path. Confirm `/dev/cu.usbmodem11201` and target MAC
-`68:EE:8F:50:E9:D0` before further device access. Credentials remain private.
+`02:48:57:31:00:D0` before further device access. Credentials remain private.
 
 Before porting HTTP support to the P4, preserve the actual active STT working
 tree at `/Users/cadbecaimacmini/Documents/ChatGPT/HardwareOne-stt-speedups`:

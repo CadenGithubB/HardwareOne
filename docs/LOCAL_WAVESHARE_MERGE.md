@@ -109,7 +109,7 @@ confirmed it works. Its blank LittleFS partition formatted successfully; a
 one-time task-watchdog warning during that first initialization is retained in
 the local boot log.
 
-The connected P4X-EYE (MAC e8:f6:0a:e3:a7:73, revision 3.2) had a partition table
+The connected P4X-EYE (MAC placeholder 02:48:57:31:04:73, revision 3.2) had a partition table
 matching the verified baseline byte-for-byte. Only the 6,125,808-byte application
 at 0x10000 was flashed, with hash verification; setup/data partitions were
 preserved. Boot mounted LittleFS/SDMMC and brought up the display and C6, with
