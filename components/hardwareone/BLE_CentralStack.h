@@ -72,4 +72,11 @@ inline const char* bleStackLastRefusal() { return "Bluetooth is not compiled int
 inline void bleStackNoteHostLost() {}
 
 #endif  // ENABLE_BLUETOOTH
+
+// Main loop. Watches the setup worker's running job (bleSetupRunning,
+// hw1setup::overrunDecide): a run past the report line faults the stack and
+// logs once; past the escalation line the device restarts with the reason
+// recorded. A run that returns in time costs nothing here.
+void bleSetupOverrunTick();
+
 #endif  // BLE_CENTRAL_STACK_H

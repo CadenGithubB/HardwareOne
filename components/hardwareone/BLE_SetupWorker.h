@@ -56,6 +56,8 @@ bool bleSetupIdle(uint8_t mask);
 bool bleSetupWaitIdle(uint8_t mask, uint32_t timeoutMs);
 // A glasses or ring job (retirement included) is queued or running.
 bool bleSetupAccessoryBusy();
+// The job running right now, if any, and for how long. Any task.
+bool bleSetupRunning(BleSetupClient* client, uint32_t* runningMs);
 bool bleSetupOtherQueued(BleSetupClient self);
 void bleSetupWake();
 // The worker's own sleep, for a phone turn (worker task only).

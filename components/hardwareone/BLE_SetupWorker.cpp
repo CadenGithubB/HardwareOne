@@ -227,6 +227,18 @@ bool bleSetupAccessoryBusy() {
   return busy;
 }
 
+bool bleSetupRunning(BleSetupClient* client, uint32_t* runningMs) {
+  hs::Client c = hs::Client::G2;
+  uint32_t since = 0;
+  portENTER_CRITICAL(&sCoreMux);
+  const bool running = sCore.running(&c, &since);
+  portEXIT_CRITICAL(&sCoreMux);
+  if (!running) return false;
+  if (client) *client = c;
+  if (runningMs) *runningMs = millis() - since;
+  return true;
+}
+
 bool bleSetupOtherQueued(BleSetupClient self) {
   portENTER_CRITICAL(&sCoreMux);
   const bool queued = sCore.otherQueued(self);

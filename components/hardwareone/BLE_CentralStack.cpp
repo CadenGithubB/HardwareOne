@@ -23,6 +23,7 @@
 #include "System_MemoryMonitor.h"
 #include "System_RadioCompanion.h"
 #include "System_Settings.h"
+#include "System_Utils.h"  // rebootDevice
 
 #if ENABLE_G2_GLASSES
 // Defined in G2_Glasses.cpp; declared here rather than in G2_Glasses.h so the
@@ -326,3 +327,47 @@ void bleStackNoteHostLost() {
 }
 
 #endif  // ENABLE_BLUETOOTH
+
+// -----------------------------------------------------------------------------
+// Setup worker overrun watch (main loop)
+// -----------------------------------------------------------------------------
+// A glasses or ring connect body runs on the worker's own task; if it never
+// returns (2026-11-05: a reused client's open semaphore left taken by a timed
+// out wait), nothing else can cancel it on FreeRTOS. This watches the run's
+// age from the main loop: past the report line it says so once, logs the
+// event and faults the stack so no new BLE work is admitted; past the
+// escalation line it restarts the device with the reason recorded for the
+// boot event. hw1setup::overrunDecide holds the policy (host-tested).
+void bleSetupOverrunTick() {
+#if HW1_BLE_SETUP_WORKER
+  static uint32_t sReportedRunMs = 0;   // the reported run's age at report time (0: none)
+  static bool sReported = false;
+  BleSetupClient client = BleSetupClient::G2;
+  uint32_t runningMs = 0;
+  if (!bleSetupRunning(&client, &runningMs)) { sReported = false; sReportedRunMs = 0; return; }
+  // A new run shows as an age smaller than the one already reported.
+  if (sReported && runningMs < sReportedRunMs) sReported = false;
+  const hw1setup::OverrunPolicy policy{};
+  const hw1setup::Overrun verdict = hw1setup::overrunDecide(runningMs, sReported, policy);
+  if (verdict == hw1setup::Overrun::None) return;
+  static const char* const kClientNames[hw1setup::kClients] = {"glasses", "ring retire", "ring", "phone"};
+  const size_t idx = size_t(client) < hw1setup::kClients ? size_t(client) : 0;
+  const char* label = kClientNames[idx];
+  if (verdict == hw1setup::Overrun::Report) {
+    sReported = true;
+    sReportedRunMs = runningMs;
+    BROADCAST_PRINTF("[BLE] setup worker overrun: %s job running %lu s with no return; "
+                     "new BLE work refused, restart at %lu s unless it ends",
+                     label, (unsigned long)(runningMs / 1000), (unsigned long)(policy.escalateMs / 1000));
+    logSystemEvent("BLE", "setup worker overrun: %s job running %lu s; restart at %lu s",
+                   label, (unsigned long)(runningMs / 1000), (unsigned long)(policy.escalateMs / 1000));
+    bleStackSetLifecycleFault(true);
+    return;
+  }
+  char detail[96];
+  snprintf(detail, sizeof(detail), "BLE setup worker stuck: %s job %lu s with no return",
+           label, (unsigned long)(runningMs / 1000));
+  logSystemEvent("BLE", "%s; restarting", detail);
+  rebootDevice("ble-setup-overrun", detail, 1000);
+#endif
+}

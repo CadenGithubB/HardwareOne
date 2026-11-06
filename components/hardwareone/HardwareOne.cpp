@@ -2749,6 +2749,7 @@ void hardwareone_loop() {
   bleRecoverStuckPhone();
   bleStackRecycleIfWedged();
   bleAutoReconnectTick();
+  bleSetupOverrunTick();  // a setup run that never returns: report, fault, restart (self-guarded)
 #endif
 
 #if ENABLE_BATTERY_MONITOR

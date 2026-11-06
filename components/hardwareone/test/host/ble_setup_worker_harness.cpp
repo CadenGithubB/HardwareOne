@@ -487,6 +487,40 @@ struct TurnEnv {
   void settle(uint32_t) { if (l.needed) { l.needed = false; l.blocked = false; } l.seq.push_back('s'); }
 };
 
+// The overrun watch: which job runs and since when, and the policy that turns
+// a run's age into nothing, one report, or the escalation.
+static void runningAge() {
+  Core core;
+  Env env; env.core = &core;
+  Client c = Client::Phone;
+  uint32_t since = 0;
+  CHECK(!core.running(&c, &since));
+  const uint32_t t = submit(core, env, Client::Ring);
+  CHECK(!core.running(&c, &since));                         // queued is not running
+  env.clock = 5000;
+  const Pick p = pickOnce(core, env);
+  CHECK(p.run.valid && core.running(&c, &since) && c == Client::Ring && since == 5000);
+  CHECK(core.running(nullptr, nullptr));                    // the query takes no outputs too
+  CHECK(core.finishRun(Client::Ring, t));
+  core.finished(Client::Ring);
+  CHECK(!core.running(&c, &since));
+  // A later run reports its own start, not the previous one's.
+  const uint32_t t2 = submit(core, env, Client::G2);
+  env.clock = 9000;
+  CHECK(pickOnce(core, env).run.valid && core.running(&c, &since) && c == Client::G2 && since == 9000);
+  CHECK(core.finishRun(Client::G2, t2));
+  core.finished(Client::G2);
+  const OverrunPolicy policy{};
+  CHECK(policy.reportMs == 240000 && policy.escalateMs == 600000);
+  CHECK(overrunDecide(0, false, policy) == Overrun::None);
+  CHECK(overrunDecide(239999, false, policy) == Overrun::None);
+  CHECK(overrunDecide(240000, false, policy) == Overrun::Report);   // once past the line
+  CHECK(overrunDecide(240000, true, policy) == Overrun::None);      // not twice
+  CHECK(overrunDecide(599999, true, policy) == Overrun::None);
+  CHECK(overrunDecide(600000, true, policy) == Overrun::Escalate);
+  CHECK(overrunDecide(600000, false, policy) == Overrun::Escalate); // escalation needs no prior report
+}
+
 static void phoneTurn() {
   {  // A normal turn: consumed, ended, released.
     PhoneTurn turn; TurnLog l; l.turn = &turn; l.endToken = 9;
@@ -539,6 +573,7 @@ static void phoneTurn() {
 }
 
 int main() {
+  runningAge();
   basics();
   runAndFinishOnce();
   order();

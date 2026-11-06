@@ -45,6 +45,7 @@ struct Slot {
   uint32_t token = 0, submittedMs = 0, waitSinceMs = 0;
   uint32_t passedSeq = 0;      // when it was first passed over (orders those)
   uint32_t selfWaitMs = 0, audioMs = 0;  // closed Wait spells: all, and audio only
+  uint32_t runSinceMs = 0;     // when the slot became Running (the overrun watch reads it)
 };
 struct Ticket { Client client = Client::G2; uint32_t token = 0; RunInfo info; bool valid = false; };
 struct Record { Client client = Client::G2; uint32_t token = 0; uint8_t reason = kNone; uint32_t audioMs = 0; };
@@ -113,6 +114,16 @@ class Core {
   bool anyQueued() const { return busyState(0xff, State::Queued); }
   bool otherQueued(Client self) const { return busyState(uint8_t(0xff & ~clientMask(self)), State::Queued); }
   void snapshot(Slot (&out)[kClients]) const { for (size_t i = 0; i < kClients; ++i) out[i] = slots_[i]; }
+  // The one running job, if any: which client and when its run began.
+  bool running(Client* c, uint32_t* sinceMs) const {
+    for (size_t i = 0; i < kClients; ++i) {
+      if (slots_[i].state != State::Running) continue;
+      if (c) *c = Client(i);
+      if (sinceMs) *sinceMs = slots_[i].runSinceMs;
+      return true;
+    }
+    return false;
+  }
   // The commit half of a pick. A verdict counts only for the token it was
   // given for; a slot that changed since the snapshot is left alone.
   Applied apply(const Slot (&view)[kClients], const Verdict (&v)[kClients], uint32_t now);
@@ -158,6 +169,20 @@ class Core {
   uint32_t next_ = 0, passSeq_ = 0;
 };
 
+// A run that never returns (a connect body blocked in the SDK) cannot be
+// cancelled from outside on FreeRTOS, so another context watches its age:
+// past reportMs it is reported once and the stack is faulted (no new BLE
+// work); past escalateMs the device restarts with the reason recorded. The
+// longest legitimate run is a glasses pair (two 35 s connects plus bounded
+// discovery, about 135 s); the phone turn has its own 75 s ceiling.
+enum class Overrun : uint8_t { None, Report, Escalate };
+struct OverrunPolicy { uint32_t reportMs = 240000; uint32_t escalateMs = 600000; };
+inline Overrun overrunDecide(uint32_t runningMs, bool reported, const OverrunPolicy& p) {
+  if (runningMs >= p.escalateMs) return Overrun::Escalate;
+  if (runningMs >= p.reportMs && !reported) return Overrun::Report;
+  return Overrun::None;
+}
+
 inline uint32_t audioSoFar(const Slot& s, uint32_t now) {
   return s.audioMs + (s.waitReason == kAudio ? now - s.waitSinceMs : 0);
 }
@@ -188,7 +213,7 @@ inline Applied Core::apply(const Slot (&view)[kClients], const Verdict (&v)[kCli
   if (run >= 0 && same(size_t(run))) {
     Slot& s = slots_[size_t(run)];
     closeWait(s, now);
-    s.state = State::Running; s.passedOver = false;
+    s.state = State::Running; s.passedOver = false; s.runSinceMs = now;
     out.run = Ticket{Client(run), s.token, RunInfo{now - s.submittedMs, s.selfWaitMs, s.audioMs}, true};
     ran = true;
   }

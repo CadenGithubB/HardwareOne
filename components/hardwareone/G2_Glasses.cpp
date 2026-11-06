@@ -3156,6 +3156,14 @@ bool bleQuarantineClientAfterFailedConnect(BLEClient*& client,
 
   const bool registrationTimedOut =
       outcome.stage == BLEClientConnectStage::APP_REGISTER_TIMEOUT;
+  // No OPEN event at all within the connect budget: the host never answered
+  // the open. Until 2026-11-06 this reused the client, whose open semaphore
+  // the timed-out wait had left taken; the next connect() then blocked the
+  // setup worker forever (the 2026-11-05 four-hour stall). The library now
+  // releases that semaphore too; retiring the client here is the belt to
+  // that suspender, the same answer as a registration the host ignored.
+  const bool openTimedOut =
+      outcome.stage == BLEClientConnectStage::OPEN_TIMEOUT;
   const bool stalePrecheck =
       outcome.stage == BLEClientConnectStage::PRECHECK &&
       outcome.espStatus == ESP_ERR_INVALID_STATE;
@@ -3169,7 +3177,8 @@ bool bleQuarantineClientAfterFailedConnect(BLEClient*& client,
   // them at PRECHECK while the old app-id route remains live. APP_REG timeout
   // is included even if its late REG/UNREG happened to retire between our
   // snapshots; a fresh object avoids reusing its stale registration semaphore.
-  if (!registrationTimedOut && !stalePrecheck && !unregisterOutstanding) {
+  if (!registrationTimedOut && !openTimedOut && !stalePrecheck &&
+      !unregisterOutstanding) {
     bleCentralLinkReleaseClient(client);
     return false;
   }
