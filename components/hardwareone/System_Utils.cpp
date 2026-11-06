@@ -1935,7 +1935,7 @@ const char* cmd_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   uint32_t reason = gSettings.lastResetReason;
-  const char* reasonLabel = (reason < 11) ? kResetReasonLabels[reason] : "Unknown";
+  const char* reasonLabel = resetReasonLabel(reason);  // same table bound as crashlog/JSON
   size_t psTot = ESP.getPsramSize();
 
   // ---- Structured path: delegate to the shared buildSystemInfoJson() (the
