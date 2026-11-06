@@ -338,6 +338,8 @@ struct Settings {
       systemLogPath(""),
       systemLogCategoryTags(true),
       systemLogFlags(""),
+      systemLogMaxSize(1048576),
+      systemLogMaxRotations(3),
       cameraAutoStart(false),  // Camera does NOT auto-start by default
       micAutoStart(false),  // Microphone does NOT auto-start by default
       llmAutoStart(false),  // On-device LLM does NOT auto-load a model by default
@@ -1009,6 +1011,8 @@ struct Settings {
   String systemLogPath;         // Log file path (empty = auto-generate with timestamp)
   bool systemLogCategoryTags;   // Prefix log lines with [CATEGORY] tags
   String systemLogFlags;        // Last-used debug flag mask for system log (empty = leave gDebugFlags)
+  int systemLogMaxSize;         // System log file size before rotation (bytes; default: 1048576)
+  int systemLogMaxRotations;    // Old rotated system logs to keep (0-9; default: 3), as the sensor logger
   bool cameraAutoStart;         // Auto-start ESP32-S3 camera after boot
   bool micAutoStart;     // Auto-start ESP32-S3 PDM microphone after boot
   // NOTE: kept OUTSIDE the #if ENABLE_LLM_BACKEND block below so the always-

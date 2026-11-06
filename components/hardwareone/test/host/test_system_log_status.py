@@ -42,15 +42,14 @@ def generate() -> str:
     routes = re.findall(r"(?m)^#define MSG_ROUTE_\w+ .*$", debug_h)
     bit = re.findall(r"(?m)^#define DEBUG_BIT\(n\) .*$", debug_h)
     require(routes and len(bit) == 1, "MSG_ROUTE_* and DEBUG_BIT come from System_Debug.h")
-    logging_h = (COMPONENT / "System_Logging.h").read_text()
-    cap = re.findall(r"(?m)^constexpr size_t LOG_SYSTEM_CAP_BYTES = .*$", logging_h)
-    require(len(cap) == 1, "the system-log size cap comes from System_Logging.h")
-    types = "\n".join([extract_block(debug_h, "struct DebugFlagMask") + ";", *routes, *bit, *cap])
+    types = "\n".join([extract_block(debug_h, "struct DebugFlagMask") + ";", *routes, *bit])
     production = "\n\n".join(extract_block(debug, marker) for marker in (
         "bool parseSystemLogFlags(const String& flagsStr, DebugFlagMask& out)",
         "void formatSystemLogFlags(DebugFlagMask mask, char* out, size_t outSize)",
         "String formatSystemLogFlags(DebugFlagMask mask)",
         "bool systemLogApplyPersistedFlags()",
+        "static size_t systemLogMaxSizeBytes()",
+        "static int systemLogMaxRotations()",
         "void formatSystemLogStatus(char* out, size_t outSize)"))
     harness = (HERE / "system_log_status_harness.cpp").read_text()
     for marker, value in (("// INSERT_TYPES", types), ("// INSERT_PRODUCTION", production)):

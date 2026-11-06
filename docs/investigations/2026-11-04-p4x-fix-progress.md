@@ -1174,3 +1174,31 @@ phone_status pass under sanitizers; `p4-phone-pipe` builds (6,144,032 B image,
 Observed but left alone: `g2_plugin_silent`/`g2_plugin_alive` flip around
 every lens page by design (they are the wear proxy that automations use), and
 console commands stall the main loop by about 0.7 s each (`LOOPHEALTH` INPUT).
+
+### Log hygiene, second pass — 2026-11-06 14:30 UTC
+
+`log-hygiene-candidate` (ELF `26e50948…`) was app-only flashed at 13:58 UTC
+and booted clean (`status` now says "Last Reset: USB"; `log status` shows the
+rotation line). The boot also showed why the debug flags kept coming back:
+system-log autostart re-applies the mask saved by the last `log start
+flags=…` (`systemLogApplyPersistedFlags`) on every boot, after the per-flag
+settings have loaded, so `debugring 0` and friends were undone each boot by
+the mask Codex had started the capture with. Fix on the device: `log stop`,
+then `log start "<same path>" flags=0x0`, which saves an empty mask. A reboot
+afterwards came up with zero flags set, log level info, phone link ready. The
+design conflict itself (two persistent owners of the debug mask) is a 1.0
+item; the per-flag commands could update the saved mask, or autostart could
+stop re-applying it.
+
+The size bound was then held to the sensor logger's standard at the user's
+request: instead of a fixed 8 MB constant, `systemLogMaxSize` (10 KB–10 MB,
+default 1 MB) and `systemLogMaxRotations` (0–9, default 3) are settings with
+`log maxsize <bytes>` and `log rotations <n>`, and the writer shifts the kept
+generations (.1 → .2 …, oldest removed first because FAT refuses to rename
+over a file) exactly as `sensorlog` does; 0 rotations starts the file over.
+`log status` reports the limit, the kept count and the rotations so far.
+Host suites system_log_status (now also checks the settings and the
+out-of-range fallback), systemlog_config_ui and log_level_application pass.
+`tools/settings_registry.py` does not run on this Mac's Python 3.9 (an
+f-string with a backslash) and docs/SETTINGS_MATRIX.md is not tracked, so no
+settings doc was regenerated; the command reference was.
