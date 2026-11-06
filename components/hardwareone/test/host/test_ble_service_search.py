@@ -6,10 +6,8 @@ and its take/timedWait/give definitions) out of
 components/arduino/libraries/BLE/src into ble_service_search_harness.cpp, which
 supplies a fake kernel semaphore and a scripted search request.
 
-Static check: the R1 ring connect's "service not found" branch in G2_Ring.cpp
-re-runs discovery (getServices) only behind its debug-listing gate, as the
-glasses' branch does; on 2026-10-25 the ungated call was the third search on a
-dead link and wedged the shared BLE-connect worker until reboot.
+Also executes R1 discovery, GATT cleanup, transport admission and packet writes
+with missing services/characteristics and disconnects at blocking/read boundaries.
 """
 from __future__ import annotations
 
@@ -26,20 +24,6 @@ from test_web_batch_handlers import extract_block, require
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 BLE = COMPONENT.parent / "arduino" / "libraries" / "BLE" / "src"
-DEBUG_GATE = "if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_RING | DEBUG_RING_LIFECYCLE))"
-
-
-def static_checks() -> None:
-    ring = (COMPONENT / "G2_Ring.cpp").read_text()
-    marker = 'ERROR_RINGF("Connect FAILED — ring service not found");'
-    require(ring.count(marker) == 1, "G2_Ring.cpp: service-not-found branch missing or not unique")
-    start = ring.index(marker)
-    branch = re.sub(r"//[^\n]*", "", ring[start:ring.index("return false;", start)])
-    calls = [m.start() for m in re.finditer(r"getServices\s*\(", branch)]
-    gate = branch.find(DEBUG_GATE)
-    for call in calls:
-        require(gate != -1 and gate < call,
-                "G2_Ring.cpp: the service-not-found branch re-runs getServices() outside its debug gate")
 
 
 def main() -> None:
@@ -82,11 +66,28 @@ def main() -> None:
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                    "-Wno-unused-parameter", str(source), "-o", str(binary)]
         if args.sanitize:
-            command[1:1] = ["-fsanitize=address,undefined", "-g"]
+            command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined", "-g"]
         subprocess.run(command, check=True)
         subprocess.run([str(binary)], check=True)
-    static_checks()
-    print("ble_service_search: discovery never waits forever; the ring listing is gated")
+        ring = (COMPONENT / 'G2_Ring.cpp').read_text()
+        writer = (HERE / 'ring_owner_write_harness.cpp').read_text()
+        writer = writer.replace('// INSERT_WRITE',
+            extract_block(ring, 'enum RingWriteResult : uint8_t') + ';\n' +
+            extract_block(ring, 'static RingWriteResult ringOwnerWrite('))
+        source.write_text(writer)
+        subprocess.run(command, check=True)
+        subprocess.run([str(binary)], check=True)
+        connect = extract_block(ring, 'bool ringPerformConnect(')
+        start = connect.index('  BLERemoteService* svc = ')
+        end = connect.index('  sRingConnFailStreak  = 0;', start) + len('  sRingConnFailStreak  = 0;')
+        harness = (HERE / 'ring_discovery_failure_harness.cpp').read_text()
+        harness = harness.replace('// INSERT_CLEAR_GATT', extract_block(
+            ring, 'static void ringClearGattPointers(bool dropClientPtr)'))
+        harness = harness.replace('// INSERT_DISCOVERY', connect[start:end])
+        source.write_text('#include <initializer_list>\n' + harness)
+        subprocess.run(command, check=True)
+        subprocess.run([str(binary)], check=True)
+    print("ble_service_search: bounded library waits and immediate ring failure cleanup")
 
 
 if __name__ == "__main__":

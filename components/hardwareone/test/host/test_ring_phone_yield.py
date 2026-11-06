@@ -344,4 +344,11 @@ if __name__ == '__main__':
             build_and_run(yield_unit(component), f'yield{pipe}', [f'-DENABLE_BLE_PHONE_PIPE={pipe}'])
         build_and_run(scan_unit(component), 'scan', coordinator=False)
         build_and_run(owner_unit(component), 'owner', coordinator=False)
+        close = block((component / 'G2_Ring.cpp').read_text(),
+                      'bool g2RingClose(bool userInitiated) ')
+        close_harness = insert((HERE / 'ring_close_setup_harness.cpp').read_text(),
+                               {'// INSERT_CLOSE': close})
+        for pipe in (0, 1):
+            build_and_run(close_harness, f'close{pipe}',
+                          [f'-DENABLE_BLE_PHONE_PIPE={pipe}'], coordinator=False)
     check_text(component)

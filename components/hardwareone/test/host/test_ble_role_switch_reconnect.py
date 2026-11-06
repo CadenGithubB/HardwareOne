@@ -92,6 +92,9 @@ def unit(component: Path) -> str:
                 'void bleArmAutoReconnectPeers(void)'),
     ])
     rings = '\n\n'.join([
+        'namespace hw1coex { ' + extract_block(
+            (component / 'BLE_CoexRecords.h').read_text(),
+            'inline const char* reasonName(uint16_t r)') + ' }',
         between(ring, 'static bool ringPeerConnectSavedThunk()', 'struct G2RingState {'),
         between(ring, 'struct G2RingState {', '// Fixed, task-level transition fence'),
         line(ring, 'static bool gRingUpEventPublished'),
@@ -104,6 +107,7 @@ def unit(component: Path) -> str:
                 'static BlePeerConnectAdmission ringPeerConnectSavedAdmissionThunk(\n'
                 '    const BlePeerConnectRequest& request) ',
                 'bool g2RingIsConnected() ', 'static const char* cmd_closering('),
+        extract_block(ring, 'class RingClientCallbacks : public BLEClientCallbacks') + ';',
     ])
     glasses_state = '\n\n'.join([
         extract_block(glasses, 'struct G2LinkSnapshot ') + ';',

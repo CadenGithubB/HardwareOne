@@ -1135,13 +1135,17 @@ static RingWriteResult ringOwnerWrite(const uint8_t* data, size_t len) {
     bleCentralTxGive();
     return RING_WRITE_BUSY;
   }
-  if (!sLinkOnline || !gRing.connected || !gRing.writeChar || gRing.clientStale) {
+  // Disconnect can clear the published handle after this check. The write
+  // mutex prevents client/cache retirement, so retain one handle for the call
+  // instead of reloading the callback-mutable field at the dereference.
+  BLERemoteCharacteristic* const writeChar = gRing.writeChar;
+  if (!sLinkOnline || !gRing.connected || !writeChar || gRing.clientStale) {
     xSemaphoreGive(gRing.writeMutex);
     bleCentralTxGive();
     return RING_WRITE_DISCONNECTED;
   }
   const bool ok =
-      gRing.writeChar->writeValue(const_cast<uint8_t*>(data), len, false);
+      writeChar->writeValue(const_cast<uint8_t*>(data), len, false);
   if (ok) ++gRing.packetsSent;
   xSemaphoreGive(gRing.writeMutex);
   bleCentralTxGive();
@@ -2579,7 +2583,7 @@ struct RingDownTransition {
 // Completion mutex is outermost; no BLE method or TX/write lock is used here.
 // Callers may physically disconnect and clear GATT pointers only after return.
 static RingDownTransition ringBeginLogicalDown(
-    const char* reason, bool userInitiated = false) {
+    const char* reason, bool userInitiated = false, int hciReason = -1) {
   RingDownTransition transition;
   RingCompletionGuard completion;
   if (!completion) return transition;
@@ -2594,10 +2598,21 @@ static RingDownTransition ringBeginLogicalDown(
   if (transition.downEventPublished) {
     WARN_RINGF("Dropped BLE link — ring is no longer connected");
     ringPushStatusEvent(reason ? reason : "disconnect");
+    char detail[SYSEVT_DETAIL_LEN];
+    const char* address = gRingDeviceAddress.length() > 0
+        ? gRingDeviceAddress.c_str() : "unknown";
+    if (hciReason >= 0) {
+      snprintf(detail, sizeof(detail), "%s; reason 0x%02x", address,
+               (unsigned)hciReason);
+    } else {
+      // A logical/local teardown may publish DOWN before its callback. Do
+      // not attribute a stale reason from the preceding link to this one.
+      snprintf(detail, sizeof(detail), "%s; local teardown", address);
+    }
     systemEventPost(
         SYSEVT_RING_DISCONNECTED,
         gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1",
-        gRingDeviceAddress.length() > 0 ? gRingDeviceAddress.c_str() : nullptr);
+        detail);
     sRingWearPosted = 0;
     blePeerNoteLinkLost(BLE_PEER_R1_RING);
   } else if (transition.wasConnected) {
@@ -5386,10 +5401,13 @@ class RingClientCallbacks : public BLEClientCallbacks {
       DEBUG_RING_LIFECYCLEF("[RING] Ignoring stale-client disconnect callback");
       return;
     }
-    const RingDownTransition down = ringBeginLogicalDown("disconnect");
+    const uint16_t hciReason = c->getLastDisconnectReason();
+    const RingDownTransition down = ringBeginLogicalDown(
+        "disconnect", false, hciReason);
     g2CancelActiveRingScan();
-    DEBUG_RING_LIFECYCLEF("[RING] BLE onDisconnect — connected-was=%d",
-              down.wasConnected ? 1 : 0);
+    DEBUG_RING_LIFECYCLEF("[RING] BLE onDisconnect — connected-was=%d reason=0x%02x (%s)",
+              down.wasConnected ? 1 : 0, (unsigned)hciReason,
+              hw1coex::reasonName(hciReason));
     // Drop all GATT handles; client object may still exist until reconnect
     // replaces it, but must not be used for writes after this.
     gRing.writeChar   = nullptr;
@@ -5974,54 +5992,40 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
   if (!svc) {
     ERROR_RINGF("Connect FAILED — ring service not found");
     ringNoteConnectFailure("service", millis() - t0);
-    DEBUG_RING_LIFECYCLEF("[RING] Service %s NOT FOUND (listing all services below)",
+    DEBUG_RING_LIFECYCLEF("[RING] Service %s NOT FOUND",
               G2RING_SERVICE_UUID);
-    // getServices() re-runs a full GATT discovery (up to 30 s) only to feed the
-    // listing, so it takes the listing's gate, as the notify-char branch does.
-    // Ungated, it ran on every failure: on 2026-10-25 a ring that left range
-    // mid-discovery made it the third search on a dead link, and the library's
-    // then-unbounded wait held this job, and the shared BLE-connect worker,
-    // until reboot.
-    if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_RING | DEBUG_RING_LIFECYCLE)) {
-      auto* services = gRing.client->getServices();
-      if (services) {
-        for (const auto& entry : *services) {
-          DEBUG_RING_LIFECYCLEF("[RING]   svc: %s", entry.first.c_str());
-        }
-      }
-    }
+    // A diagnostic listing must not start another discovery on this failed
+    // link or hold the shared setup worker for another discovery timeout.
     gRing.client->disconnect();
+    ringClearGattPointers(/*dropClientPtr=*/false);
     return false;
   }
   DEBUG_RING_LIFECYCLEF("[RING] Service found, getting characteristics");
 
-  gRing.writeChar  = svc->getCharacteristic(BLEUUID(G2RING_CHAR_WRITE_UUID));
-  gRing.notifyChar = svc->getCharacteristic(BLEUUID(G2RING_CHAR_NOTIFY_UUID));
-  DEBUG_RING_LIFECYCLEF("[RING] writeChar=%p notifyChar=%p", gRing.writeChar, gRing.notifyChar);
+  // The disconnect callback clears the published handles asynchronously.
+  // Keep setup-local handles until discovery has finished: this client's
+  // cache is retained for the setup turn, including across DISCONNECT_EVT.
+  BLERemoteCharacteristic* const writeChar =
+      svc->getCharacteristic(BLEUUID(G2RING_CHAR_WRITE_UUID));
+  BLERemoteCharacteristic* const notifyChar =
+      svc->getCharacteristic(BLEUUID(G2RING_CHAR_NOTIFY_UUID));
+  DEBUG_RING_LIFECYCLEF("[RING] writeChar=%p notifyChar=%p", writeChar, notifyChar);
 
-  if (!gRing.notifyChar) {
+  if (!notifyChar) {
     ERROR_RINGF("Connect FAILED — notify characteristic not found");
     ringNoteConnectFailure("notify-char", millis() - t0);
-    DEBUG_RING_LIFECYCLEF("[RING] Notify char %s NOT FOUND (listing all chars):",
+    DEBUG_RING_LIFECYCLEF("[RING] Notify char %s NOT FOUND",
               G2RING_CHAR_NOTIFY_UUID);
-    // Listing exists only to feed DEBUG_RING_LIFECYCLEF — same gate.
-    if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_RING | DEBUG_RING_LIFECYCLE)) {
-      auto* chars = svc->getCharacteristics();
-      if (chars) {
-        for (const auto& entry : *chars) {
-          DEBUG_RING_LIFECYCLEF("[RING]   char: %s", entry.first.c_str());
-        }
-      }
-    }
     gRing.client->disconnect();
+    ringClearGattPointers(/*dropClientPtr=*/false);
     return false;
   }
   DEBUG_RING_LIFECYCLEF("[RING] Chars: write.canWriteNR=%d notify.canNotify=%d canIndicate=%d",
-            gRing.writeChar  ? gRing.writeChar->canWriteNoResponse() : 0,
-            gRing.notifyChar ? gRing.notifyChar->canNotify()         : 0,
-            gRing.notifyChar ? gRing.notifyChar->canIndicate()       : 0);
+            writeChar  ? writeChar->canWriteNoResponse() : 0,
+            notifyChar ? notifyChar->canNotify()         : 0,
+            notifyChar ? notifyChar->canIndicate()       : 0);
 
-  if (!gRing.writeChar || !gRing.notifyChar->canNotify()) {
+  if (!writeChar || !notifyChar->canNotify()) {
     ERROR_RINGF("Connect FAILED — mandatory write/notify capability missing");
     ringNoteConnectFailure("notify-capability", millis() - t0);
     if (gRing.client) gRing.client->disconnect();
@@ -6035,11 +6039,11 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
   // still requires the peripheral to acknowledge the descriptor write.
   // getDescriptor returns the characteristic-owned cached descriptor.
   if (BLERemoteDescriptor* cccd =
-          gRing.notifyChar->getDescriptor(BLEUUID((uint16_t)0x2902))) {
+          notifyChar->getDescriptor(BLEUUID((uint16_t)0x2902))) {
     cccd->setAuth(ESP_GATT_AUTH_REQ_NO_MITM);
   }
   const BLERemoteNotifyResult ringNotify =
-      gRing.notifyChar->registerForNotify(ringNotifyThunk);
+      notifyChar->registerForNotify(ringNotifyThunk);
   if (!ringNotify.success) {
     ERROR_RINGF("Connect FAILED — notify registration api=%ld evt=%ld "
                 "descApi=%ld descEvt=%ld timeout=%d",
@@ -6065,13 +6069,28 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
     ringClearGattPointers(/*dropClientPtr=*/false);
     return false;
   }
-  gRing.connected      = true;
-  // Belt for the invalidate path: g2RingInvalidateLink nulls the client and
-  // leaves clientStale=true with nothing left to reap, so the fresh-client
-  // branch above never runs the reset — without this line the next connect
-  // would be mute (all TX gates check clientStale).
-  gRing.clientStale    = false;
-  gRing.connectedSince = millis();
+  bool transportCurrent = false;
+  {
+    // The disconnect callback advances the generation under this same fence.
+    // A disconnect during telemetry reset must not resurrect a dead transport.
+    RingCompletionGuard completion;
+    transportCurrent = completion &&
+        ringRequestCurrent(expectedRequest, cancelGeneration) &&
+        gRing.client && gRing.client->isConnected();
+    if (transportCurrent) {
+      gRing.writeChar = writeChar;
+      gRing.notifyChar = notifyChar;
+      gRing.connected = true;
+      gRing.clientStale = false;
+      gRing.connectedSince = millis();
+    }
+  }
+  if (!transportCurrent) {
+    ringTransportDisconnected();
+    if (gRing.client) gRing.client->disconnect();
+    ringClearGattPointers(/*dropClientPtr=*/false);
+    return false;
+  }
   sRingConnFailStreak  = 0;
 
   // pairAuth → systemTime → advStart unlocks the notify/telemetry stream
@@ -6260,6 +6279,15 @@ bool g2RingClose(bool userInitiated) {
   // this close retires itself: take it back.
   (void)bleSetupWithdraw(BleSetupClient::RingRetire, 0);
 #endif
+  // Cancelling the request fences its eventual publication; it does not end
+  // an OPEN/discovery already running on ble_setup. Do not move or retire
+  // that worker's client pointer until its own turn (and finish) has ended.
+  // A running yield retirement owns the same pointer, so it must drain too.
+  if (!bleSetupIdle(hw1setup::clientMask(BleSetupClient::Ring) |
+                    hw1setup::clientMask(BleSetupClient::RingRetire))) {
+    DEBUG_RING_LIFECYCLEF("[RING] Close deferred: setup still finishing");
+    return false;
+  }
   if (gRing.client) {
     const bool locked = !gRing.writeMutex ||
         xSemaphoreTake(gRing.writeMutex, pdMS_TO_TICKS(500)) == pdTRUE;

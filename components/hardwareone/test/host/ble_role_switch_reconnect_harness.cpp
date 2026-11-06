@@ -130,17 +130,35 @@ class BLEClient {
  public:
   bool connected = false;
   unsigned disconnects = 0;
+  uint16_t lastReason = 0;
+  uint16_t getLastDisconnectReason() { return lastReason; }
   bool isConnected() { return connected; }
   void disconnect() { connected = false; ++disconnects; }
 };
+class BLEClientCallbacks {
+ public:
+  virtual ~BLEClientCallbacks() = default;
+  virtual void onConnect(BLEClient*) {}
+  virtual void onDisconnect(BLEClient*) {}
+};
 struct RingCompletionGuard { explicit operator bool() const { return true; } };
 enum SysEvt { SYSEVT_RING_DISCONNECTED, SYSEVT_RING_RECONNECT_FAILED, SYSEVT_G2_DISCONNECTED };
-static void systemEventPost(SysEvt, const char*, const char*) {}
+#define SYSEVT_DETAIL_LEN 80
+static std::string lastRingDownDetail;
+static unsigned ringDownEvents = 0;
+static void systemEventPost(SysEvt event, const char*, const char* detail) {
+  if (event == SYSEVT_RING_DISCONNECTED) {
+    ++ringDownEvents;
+    lastRingDownDetail = detail ? detail : "";
+  }
+}
 static String gRingDeviceName, gRingDeviceAddress;
 static uint8_t sRingWearPosted = 0;
 static void ringTransportDisconnected() {}
 static void ringPushStatusEvent(const char*) {}
 static void ringClearGattPointers(bool) {}
+static unsigned ringClockResets = 0;
+static void ringClockCustodyReset() { ++ringClockResets; }
 static void ringNoteConnectFailure(const char*, uint32_t) {}
 static void g2RingWithdrawQueuedConnect() {}
 static void g2CancelActiveRingScan() {}
@@ -350,6 +368,37 @@ static void serverMinutes() {
 }
 
 int main() {
+  // Durable HCI detail belongs to this callback's link; logical teardown is
+  // explicitly local, and a later callback must not publish a duplicate DOWN.
+  {
+    reset();
+    enroll(BLE_PEER_R1_RING, true);
+    ringUp();
+    gRingDeviceAddress = "aa:bb:cc:dd:ee:01";
+    const unsigned before = ringDownEvents;
+    RingClientCallbacks callbacks;
+    BLEClientCallbacks& callback = callbacks;
+    BLEClient foreignClient;
+    foreignClient.lastReason = 0x13;
+    const unsigned resetsBefore = ringClockResets;
+    callback.onDisconnect(&foreignClient);
+    CHECK(ringDownEvents == before && gRing.connected);
+    CHECK(ringClockResets == resetsBefore);
+    gRingClient.lastReason = 0x08;
+    callback.onDisconnect(&gRingClient);
+    CHECK(ringDownEvents == before + 1);
+    CHECK(lastRingDownDetail == "aa:bb:cc:dd:ee:01; reason 0x08");
+    CHECK(gRing.clientStale && !gRing.writeChar && !gRing.notifyChar);
+    CHECK(ringClockResets == resetsBefore + 1);
+    ringBeginLogicalDown("disconnect", false, 0x16);
+    CHECK(ringDownEvents == before + 1);
+    ringUp();
+    ringBeginLogicalDown("disconnect");
+    CHECK(lastRingDownDetail == "aa:bb:cc:dd:ee:01; local teardown");
+    ringUp();
+    ringBeginLogicalDown("disconnect", false, 0x100);
+    CHECK(lastRingDownDetail == "aa:bb:cc:dd:ee:01; reason 0x100");
+  }
   // The reported case: glasses, ring and phone up; openble; openg2 saved.
   // The ring (auto-reconnect on) comes back, and so does the phone pipe.
   {

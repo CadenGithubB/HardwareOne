@@ -61,14 +61,14 @@ HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_DISCONNECTED,     "g2_disconnected", SYSEVT
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_PLUGIN_ALIVE,     "g2_plugin_alive", SYSEVT_FAM_GLASSES)      /* the temple's app plugin answered a strict renderer heartbeat again (our only "picked up" proxy; no wear sensor is read)  subject=side */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_PLUGIN_SILENT,    "g2_plugin_silent", SYSEVT_FAM_GLASSES)     /* the temple's app plugin stopped answering renderer heartbeats: app idle (no HW1 page shown) or set down  subject=side */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_RING_CONNECTED,      "ring_connected", SYSEVT_FAM_GLASSES)       /* R1 ring GATT up after setup  subject=name detail=mac */
-HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_RING_DISCONNECTED,   "ring_disconnected", SYSEVT_FAM_GLASSES)    /* R1 ring link lost  subject=name detail=mac */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_RING_DISCONNECTED,   "ring_disconnected", SYSEVT_FAM_GLASSES)    /* R1 ring link lost  subject=name detail=mac + HCI reason or local teardown */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_RING_WORN,           "ring_worn", SYSEVT_FAM_GLASSES)            /* R1 wearStatus→wear (on finger)  subject=name */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_RING_NOT_WORN,       "ring_not_worn", SYSEVT_FAM_GLASSES)        /* R1 wearStatus→notWear (off finger)  subject=name */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_RING_RECONNECT_FAILED, "ring_reconnect_failed", SYSEVT_FAM_GLASSES) /* R1 connect attempt failed  subject=name detail=reason fail# elapsed; throttled 10min/streak */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_G2_RECONNECT_FAILED, "g2_reconnect_failed", SYSEVT_FAM_GLASSES)  /* glasses connect attempt failed  subject=sides sought detail=reason fail#; throttled 10min/streak */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_BLE_STACK_RECYCLED,  "ble_stack_recycled", SYSEVT_FAM_NETWORK)   /* Bluedroid host torn down + re-inited to clear a wedge  subject=wedged|reinit-failed */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PHONE_LINK_UP,       "phone_link_up", SYSEVT_FAM_NETWORK)        /* phone relay pipe reached READY  detail=enrolled|reconnected */
-HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PHONE_LINK_DOWN,     "phone_link_down", SYSEVT_FAM_NETWORK)      /* a phone relay pipe that was up ended  detail=stopped|disconnected */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PHONE_LINK_DOWN,     "phone_link_down", SYSEVT_FAM_NETWORK)      /* READY ended; detail=stopped|lost + pipe error, own GATT event/conn/status, HCI reason, local API result, uptime */
   /* --- Auth / users --- */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_LOGIN_OK,            "login_ok", SYSEVT_FAM_AUTH)             /* subject=username detail=transport */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_LOGIN_FAIL,          "login_fail", SYSEVT_FAM_AUTH)           /* subject=username detail=transport */
