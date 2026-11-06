@@ -75,6 +75,8 @@ static BaseType_t xTaskCreateLogged(TaskFunction_t, const char* name, uint32_t s
 }
 // The worker's own exit (retireIfIdle then vTaskDelete(nullptr)): off every lock.
 static void vTaskDelete(TaskHandle_t task) { CHECK(task == nullptr); CHECK(gDepth == 0); ++deletes; }
+// finish() reports the worker's stack minimum; the probe is off every lock.
+static UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task) { CHECK(task == nullptr); return 4096; }
 // The wake: one static binary semaphore for every worker. A give lands outside
 // gQnMux and never names a task; the take only ever times out here (the
 // worker's passes are driven by hand).
@@ -556,7 +558,7 @@ static void testAuthority() {
   CHECK(dict.options.purpose == DictationAppPurpose::QuickNote);
   CHECK(!dict.options.saveTranscript);  // no /stt/u<id>/*.txt duplicate
   CHECK(dict.options.preferredSource == AUDIO_SRC_LOCAL_PDM && dict.options.silenceStopMs == 0);
-  CHECK(tasksCreated == 1 && taskName == "qnote" && taskStack == 5120 && notifies > 0);
+  CHECK(tasksCreated == 1 && taskName == "qnote" && taskStack == 8192 && notifies > 0);
   CHECK(events.size() == 1 && events[0].kind == SYSEVT_NOTE_STARTED && events[0].subject == "web" &&
         events[0].detail == (ENABLE_LOCAL_STT ? "local" : "pi"));
   // The glasses mic is the paired wearer's alone.

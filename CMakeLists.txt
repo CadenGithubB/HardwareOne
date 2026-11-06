@@ -719,6 +719,15 @@ if(HW1_FEATURE_CONFIG_FILE)
     add_compile_definitions(HW1_FEATURE_CONFIG_HEADER="${HW1_FEATURE_CONFIG_FILE}")
 endif()
 
+# Arduino 3.3.5's NetworkEvents dispatcher iterates its callback list without a
+# lock unless this is defined (NetworkEvents.h/.cpp). HardwareOne registers WiFi
+# handlers (wifiCoexMirrorInstall, the lazy WiFi init) while the hosted radio's
+# first events are already being dispatched; the unlocked vector growth produced
+# the 2026-11-06 null-call panics in arduino_events. Project-wide, before
+# project(): the define changes the class layout seen by every translation unit
+# that includes the header.
+add_compile_definitions(NETWORK_EVENTS_MUTEX)
+
 # ESP32-P4 builds replace two ESP-IDF 5.5.5 components with verified patched
 # copies (never edits to the shared SDK): `bt` carries the upstream TinyCrypt
 # ECC fix that BLE Secure Connections needs on P4 (esp-idf#19002), and

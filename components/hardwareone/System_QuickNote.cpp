@@ -40,7 +40,11 @@ using namespace QuickNotePolicy;
 namespace {
 // The worker runs the note file create (guarded VFS, account lookup), the same
 // work as dictation_svc's transcript writer on its CM5 stack.
-constexpr uint32_t kWorkerStackBytes = 5120;
+// 8,192 B: the 2026-11-05 stack-protection fault (boots #53, #56, #66) was this
+// worker overflowing 5,120 B inside a printf-family frame (_svfprintf_r,
+// 1,152 B) at the end of a ring-long-press note; servicePass alone holds 944 B.
+// finish() reports the measured minimum so the margin stays visible.
+constexpr uint32_t kWorkerStackBytes = 8192;
 constexpr uint32_t kPassMs = 200;              // worker cadence while a note runs
 constexpr uint32_t kHoldSilenceStopMs = 6000;  // CM5 VAD: a held note pauses longer
 constexpr size_t kUserMax = 65;
@@ -195,6 +199,10 @@ void finish(const Note& n, QuickNoteOutcome outcome, const char* reason,
   } else {
     INFO_SYSTEMF("[QNOTE] note %s discarded: %s", id, reason ? reason : "");
   }
+  // Worst case of this note, in bytes on this port (System_TaskUtils.h); the
+  // overflow above left no margin to see, so every finish reports it.
+  INFO_SYSTEMF("[QNOTE] worker stack min free %u of %u B",
+               (unsigned)uxTaskGetStackHighWaterMark(nullptr), (unsigned)kWorkerStackBytes);
 }
 
 // Appends every staged piece to the note, then acknowledges it. A new chunk
