@@ -1474,7 +1474,7 @@ set(PHONE_TEST_SUITES
   ble_reconnect_schedule ble_peer_registry phone_scan ble_coex_records ble_coex_hooks wifi_coex_mirror
   ble_setup_worker phone_status ble_console_attach ble_console_phone_link ble_pipe_console_row
   ble_session_idle
-  ble_command_output ble_role_switch_reconnect ble_service_search
+  ble_command_output ble_role_switch_reconnect ble_service_search ble_client_connect_semaphores
   phone_console_codec phone_pair_code phone_console phone_fixture_pins
   phone_pair_sink)
 foreach(phone_suite IN LISTS PHONE_TEST_SUITES)

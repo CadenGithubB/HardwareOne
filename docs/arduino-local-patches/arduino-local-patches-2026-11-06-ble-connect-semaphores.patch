@@ -1,0 +1,28 @@
+--- a/libraries/BLE/src/BLEClient.cpp
++++ b/libraries/BLE/src/BLEClient.cpp
+@@ -635,6 +635,11 @@
+   setConnectOutcomeStage(BLEClientConnectStage::APP_REGISTER_EVENT, errRc);
+   if (!m_semaphoreRegEvt.timedWait("connect", pdMS_TO_TICKS(10000))) {
+     log_e("connect: REG_EVT never arrived (10s) — aborting");
++    // [hardwareone local patch 2026-11-06] A timed-out wait leaves the binary
++    // semaphore taken (timedWait gives it back only on success), so the next
++    // connect() on this object would block forever in take() above, before
++    // any host call. Give it back here; a late REG_EVT's give is then a no-op.
++    m_semaphoreRegEvt.give();
+     setConnectOutcomeStage(BLEClientConnectStage::APP_REGISTER_TIMEOUT);
+     finishConnectOutcome(false);
+     // Keep the app-id route alive. Registration was accepted synchronously,
+@@ -693,6 +698,13 @@
+   // check the status of the connection and cleanup in case of failure
+   if (!got_sem || rc != ESP_GATT_OK) {
+     if (!got_sem) {
++      // [hardwareone local patch 2026-11-06] Same leak on the OPEN timeout: a
++      // lost OPEN event left m_semaphoreOpenEvt taken, and the next connect()
++      // on the reused client wedged the BLE setup worker for four hours on
++      // 2026-11-05 (ring attempt after an open-timeout). Give it back so a
++      // reused client can connect again; the unregister below retires the
++      // pending application either way.
++      m_semaphoreOpenEvt.give();
+       setConnectOutcomeStage(BLEClientConnectStage::OPEN_TIMEOUT);
+     } else {
+       setConnectOutcomeStage(BLEClientConnectStage::OPEN_EVENT, BLE_CLIENT_STATUS_NOT_SET, (int32_t)rc);

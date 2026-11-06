@@ -18,9 +18,13 @@
       "after": "d2472be03ba52b6b61aa060259473a86dc5103b6e664d1dc1e6aacaa756733a8"
     },
     "libraries/BLE/src/BLEClient.cpp": {
-      "before": "f029aecef0e6ac89ed367de87bf4927c11550063f4bb42215cda929e4446bcbd",
-      "after": "f4820719f3fc9063c5457859c31240fbe2430fbb62d82c2460ce4c11006d33f4"
+      "before": "318e3d67dc1950adfa18fcb8f79781ecb569417e3ff525efe94557e82217ea57",
+      "after": "7c96809969d54317714f7eebc7a19a4b8b8f40fedbcdf6e173d9bdefa4bb51a2"
+    },
+    "libraries/BLE/src/BLEClient.h": {
+      "before": "3ecb21fa1273b7fc74b53a649cfff95325f08b03adeec0bebb72fb6133d94ba9",
+      "after": "1411b280a6c4fdb6a666f0f2ef04bf8b8c37a90030b0fbc12477bd436532a816"
     }
   },
-  "patch_sha256": "8256510c6d014c13bfd743e5dd814e9c768b5b01198c539ac88111f2e2b11c22"
+  "patch_sha256": "008e4a2b9e0fef423d9072c6c5b60b00a0351a43974aaeca3e59070858a64b71"
 }

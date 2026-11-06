@@ -21,13 +21,10 @@
  
 --- a/libraries/BLE/src/BLEDevice.cpp
 +++ b/libraries/BLE/src/BLEDevice.cpp
-@@ -983,8 +983,49 @@
-       _st.peer_device = peer;
-       std::swap(m_connectedClientsMap[conn_id], _st);
-     }
-+  }
-+}
-+
+@@ -986,6 +986,47 @@
+   }
+ }
+ 
 +#if defined(CONFIG_BLUEDROID_ENABLED)
 +namespace {
 +// [hardwareone local patch 2026-10-22, memory audit BLE-03] GATTC app ids held
@@ -59,18 +56,19 @@
 +    const uint16_t candidate=m_appId++ & 0x7fff;
 +    if(appIdReserved(candidate) || m_connectedClientsMap.count(candidate))continue;
 +    sReservedAppIds[sReservedAppIdCount++]=candidate;id=candidate;return true;
-   }
++  }
 +  return false;
- }
++}
 +void BLEDevice::releaseAppId(uint16_t id) {
 +  if(id>0x7fff)return;
 +  BLEClientRegistryGuard guard;
 +  unreserveAppId(id);
 +}
 +#endif
- 
++
  void BLEDevice::addPeerDevice(void *peer, bool _client, uint16_t conn_id) {
    log_i("add conn_id: %d, GATT role: %s", conn_id, _client ? "client" : "server");
+   conn_status_t status = {.peer_device = peer, .connected = true, .mtu = 23};
 @@ -1024,6 +1065,9 @@
      if (_client) client = static_cast<BLEClient *>(it->second.peer_device);
      m_connectedClientsMap.erase(it);
@@ -108,7 +106,7 @@
  
    log_d("gattClientEventHandler [esp_gatt_if: %d] ... %s", gattc_if, BLEUtils::gattClientEventTypeToString(event).c_str());
    BLEUtils::dumpGattClientEvent(event, gattc_if, param);
-@@ -1454,8 +1510,18 @@
+@@ -1454,7 +1510,17 @@
  /**
   * @brief Handle GAP events.
   */
@@ -120,13 +118,12 @@
 +}
 +
  void BLEDevice::gapEventHandler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
- 
++
 +  auto interceptor = __atomic_load_n(&sGapInterceptor, __ATOMIC_ACQUIRE);
 +  if (interceptor && interceptor(event, param)) return;
-+
+ 
    BLEUtils::dumpGapEvent(event, param);
  
-   switch (event) {
 --- a/libraries/BLE/src/BLEClient.cpp
 +++ b/libraries/BLE/src/BLEClient.cpp
 @@ -604,7 +604,11 @@
@@ -142,7 +139,7 @@
    BLEDevice::addPeerDevice(this, true, m_appId);
    m_semaphoreRegEvt.take("connect");
  
-@@ -779,8 +783,9 @@
+@@ -791,11 +795,15 @@
      // - esp_bd_addr_t     remote_bda
      case ESP_GATTC_DISCONNECT_EVT:
      {
@@ -154,3 +151,28 @@
        }
        // If we receive a disconnect event, set the class flag that indicates that we are
        // no longer connected.
++      // [hardwareone local patch 2026-11-04] Attribute the matched link loss
++      // before the application callback persists it. Foreign events returned above.
++      m_lastDisconnectReason = evtParam->disconnect.reason;
+       bool m_wasConnected = m_isConnected;
+       m_isConnected = false;
+       requestGattcUnregister();
+--- a/libraries/BLE/src/BLEClient.h
++++ b/libraries/BLE/src/BLEClient.h
+@@ -162,6 +162,8 @@
+   void setValue(BLEUUID serviceUUID, BLEUUID characteristicUUID, String value);
+   String toString();
+   uint16_t getConnId();
++  // Raw reason from this client's last matched Bluedroid DISCONNECT, before callbacks.
++  uint16_t getLastDisconnectReason() const { return m_lastDisconnectReason; }
+   esp_gatt_if_t getGattcIf();
+   uint16_t getMTU();
+   bool setMTU(uint16_t mtu);
+@@ -200,6 +202,7 @@
+   uint16_t m_conn_id;
+   bool m_haveServices = false;
+   bool m_isConnected = false;
++  volatile uint16_t m_lastDisconnectReason = 0;
+   BLEClientCallbacks *m_pClientCallbacks;
+   FreeRTOS::Semaphore m_semaphoreRegEvt = FreeRTOS::Semaphore("RegEvt");
+   FreeRTOS::Semaphore m_semaphoreOpenEvt = FreeRTOS::Semaphore("OpenEvt");

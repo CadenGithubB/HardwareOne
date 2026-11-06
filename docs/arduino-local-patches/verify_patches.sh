@@ -36,7 +36,7 @@ check_markers libraries/BLE/src/BLECharacteristic.h 1
 # 14 since 2026-10-25: getServices() never waits before its request and skips a
 # disconnected client (R1 ring wedge). Recorded in
 # arduino-local-patches-2026-10-25-ble-search-wait.patch.
-check_markers libraries/BLE/src/BLEClient.cpp 14
+check_markers libraries/BLE/src/BLEClient.cpp 16
 check_markers libraries/BLE/src/BLEDevice.cpp 3
 check_markers libraries/BLE/src/BLERemoteCharacteristic.cpp 7
 check_markers libraries/BLE/src/BLERemoteDescriptor.cpp 4
@@ -66,6 +66,8 @@ check_symbol cores/esp32/esp32-hal-hosted.h hostedSetPins
 check_symbol cores/esp32/esp32-hal-bt.h btHostedControllerStatus
 check_symbol libraries/BLE/src/BLEDevice.h CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
 check_symbol libraries/BLE/src/BLECharacteristic.h takeOwnership
+check_symbol libraries/BLE/src/BLEClient.h getLastDisconnectReason
+check_symbol libraries/BLE/src/BLEClient.cpp 'm_lastDisconnectReason = evtParam->disconnect.reason'
 check_symbol cores/esp32/esp32-hal-uart.c "CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32P4"
 
 # Companion "transport lost" teardown, 2026-10-02 (marked): Wi-Fi and BLE

@@ -8,7 +8,7 @@ SMP, request encryption, or create/remove OS bonds.
 
 `arduino.patch` is incremental against HardwareOne's recorded Arduino 3.3.5
 baseline, including its hosted BLE and client-lifetime fixes. It changes
-BLEDevice.h/.cpp and BLEClient.cpp. The five-file manifest also checks that
+BLEDevice.h/.cpp and BLEClient.h/.cpp. The six-file manifest also checks that
 BLESecurity.h/.cpp remain at baseline (the former pipe SMP-policy API is removed).
 It records exact inputs, outputs and patch hash, without deployment data.
 
@@ -25,7 +25,11 @@ Do not force-apply or discard unknown nested-repository changes. The checker is
 read-only; firmware builds and hardware qualification remain required.
 
 The DISCONNECT guard returns from BLEClient dispatch before service fan-out for
-another connection ID or peer address. Native phone and Arduino clients share a
+another connection ID or peer address. A matched Bluedroid disconnect records
+its raw reason before the application callback; `getLastDisconnectReason()`
+lets the owner persist the correct peer's cause. The header and event assignment
+are both covered by the patch verifier and exact-file manifest.
+Native phone and Arduino clients share a
 locked 15-bit registration allocator. Its 64-entry reservation table (in place
 of the original 4096-byte bitmap since 2026-10-22, memory audit BLE-03) holds IDs
 through registration, connection and quarantine; failed initial registration,
