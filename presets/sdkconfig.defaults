@@ -13,3 +13,6 @@ CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=n
 
 # Optional task-scoped speech allocation measurements (no heap header changes).
 CONFIG_HEAP_USE_HOOKS=n
+# Default off (its current value); listed so a saved configuration may
+# select it for a heap-corruption diagnostic build.
+CONFIG_HEAP_POISONING_COMPREHENSIVE=n

@@ -8,6 +8,9 @@
 #include <ArduinoJson.h>
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 #include <esp_random.h>
+#if CONFIG_HEAP_POISONING_COMPREHENSIVE
+#include <esp_heap_caps.h>  // heap_caps_check_integrity_all (diagnostic builds)
+#endif
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <algorithm>
@@ -354,6 +357,16 @@ void servicePass() {
   sttKeepWarm(kWarmHoldMs, false);
 #endif
 
+#if CONFIG_HEAP_POISONING_COMPREHENSIVE
+  // Diagnostic, poisoning builds only: on 2026-11-06 a console-started glasses
+  // note was followed within ~1.5 s by a corrupted PSRAM heap block that lwIP's
+  // timer tripped over. Checking every pass brackets the write to one 200 ms
+  // window and names the overflowed block (bad head/tail at its address).
+  if (!heap_caps_check_integrity_all(true)) {
+    WARN_SYSTEMF("[QNOTE] heap integrity FAILED, note phase %u, %lu ms in",
+                 (unsigned)n.phase, (unsigned long)(now - n.startedMs));
+  }
+#endif
   if (n.cancelWanted) {
     (void)dictationAppCancel(n.lease);
     finish(n, QuickNoteOutcome::Discarded, n.discardReason ? n.discardReason : "cancelled",

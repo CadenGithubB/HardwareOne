@@ -183,8 +183,14 @@ uint32_t taskStackLookup(const char* name) {
 // board profile in this repo sets either, and the failure mode would be
 // SILENT — every task reads '?', both reports sum zero — so refuse to build
 // rather than guess an offset nobody has tested here.
+// Diagnostic builds (heap poisoning for a corruption hunt) take the explicit
+// path below instead: no walk, every stack and TCB reported as unmeasured
+// (0, the documented meaning), the creation registry still consulted so the
+// task list keeps its classification. Nothing is guessed about the offset.
 #if CONFIG_HEAP_POISONING_LIGHT || CONFIG_HEAP_POISONING_COMPREHENSIVE || CONFIG_HEAP_TASK_TRACKING
-#error "taskHeapMeasureSnapshot(): heap poisoning / task tracking shift user pointers off the TLSF block start; add the offset before enabling"
+#define HW1_TASK_HEAP_MEASURE_UNAVAILABLE 1
+#else
+#define HW1_TASK_HEAP_MEASURE_UNAVAILABLE 0
 #endif
 
 namespace {
@@ -243,11 +249,13 @@ void taskHeapMeasureSnapshot(const TaskStatus_t* snapshot, TaskHeapMeasure* out,
     out[i].regBytes   = 0;
     out[i].stackHeapSpan = UINTPTR_MAX;
   }
+#if !HW1_TASK_HEAP_MEASURE_UNAVAILABLE
   // Walk FIRST: the pointer reads are the time-sensitive part (a task that
   // deletes itself after the snapshot has its blocks freed by IDLE), so they
   // go before the N mutex-guarded registry lookups, not after.
   TaskHeapWalkCtx ctx{ snapshot, out, count };
   heap_caps_walk(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT, taskHeapWalker, &ctx);
+#endif
   for (size_t i = 0; i < count; i++) {
     // pcTaskName points INTO the TCB (&pxTCB->pcTaskName[0]). The address
     // guard is the one reportAllTaskStacks() has always used against a
