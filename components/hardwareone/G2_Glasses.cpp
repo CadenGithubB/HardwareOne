@@ -19446,6 +19446,24 @@ static bool g2PeerRequestCurrent(const BlePeerConnectRequest* request) {
   return blePeerConnectRequestIsCurrent(BLE_PEER_G2_GLASSES, *request);
 }
 
+// AUTO can rediscover only one arm of an existing pair after range loss. If
+// that arm matches the admitted saved identity, keep its unseen mate; erasing
+// the mate here strands ring advStart, which needs both glasses addresses.
+// A different/new arm still replaces both slots, so old/new pairs never mix.
+static uint8_t g2LearnedTargetReplaceMask(G2Eye eye,
+                                        const G2LinkSnapshot& after,
+                                        const BlePeerSavedTarget& saved) {
+  if (eye == G2_EYE_LEFT) return 0x01;
+  if (eye == G2_EYE_RIGHT) return 0x02;
+  if (after.left && !after.right &&
+      templeMatchesSavedTarget(gL, saved.mac1, saved.addressType1,
+                               saved.addressType1Known)) return 0x01;
+  if (after.right && !after.left &&
+      templeMatchesSavedTarget(gR, saved.mac2, saved.addressType2,
+                               saved.addressType2Known)) return 0x02;
+  return 0x03;
+}
+
 static bool g2ConnectSync(G2Eye eye,
                           const BlePeerConnectRequest* expectedRequest = nullptr,
                           const BlePeerSavedTarget* savedFilter = nullptr,
@@ -19672,8 +19690,8 @@ static bool g2ConnectSync(G2Eye eye,
           ((!expectedRequest->savedTarget.mac1[0] || after.left) &&
            (!expectedRequest->savedTarget.mac2[0] || after.right));
       if (learnsTarget) {
-        const uint8_t replaceMask = eye == G2_EYE_LEFT ? 0x01 :
-                                    eye == G2_EYE_RIGHT ? 0x02 : 0x03;
+        const uint8_t replaceMask = g2LearnedTargetReplaceMask(
+            eye, after, expectedRequest->savedTarget);
         expectedCompletionCurrent = blePeerCommitLearnedTargetIfCurrent(
             BLE_PEER_G2_GLASSES,
             expectedRequest->intentGeneration,

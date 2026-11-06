@@ -1470,7 +1470,7 @@ endif()
 set(PHONE_TEST_SUITES
   ble_central_coordinator ble_central_stack phone_pipe phone_runtime phone_forget
   phone_enrollment_schema phone_secret phone_sdk_lifetime phone_recovery
-  ring_phone_yield r1_protocol llm_http_transport ble_recycle_phone
+  ring_phone_yield r1_protocol g2_saved_pair_identity llm_http_transport ble_recycle_phone
   ble_reconnect_schedule ble_peer_registry phone_scan ble_coex_records ble_coex_hooks wifi_coex_mirror
   ble_setup_worker phone_status ble_console_attach ble_console_phone_link ble_pipe_console_row
   ble_session_idle
