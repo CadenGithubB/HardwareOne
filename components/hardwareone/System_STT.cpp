@@ -19,8 +19,10 @@
 #include "System_Microphone.h"
 #include "System_Settings.h"
 #include "System_STTVocabulary.h"
+#include "System_STTRawCapture.h"
 #include "System_TaskUtils.h"
 #include "stt/stt_segmenter.h"
+#include "stt/stt_continuous_config.h"
 #include "stt/quartznet_frontend.h"
 #include <ArduinoJson.h>
 #include <esp_random.h>
@@ -1302,6 +1304,11 @@ static void sttCaptureWorker(void* context) {
     gSTT.captureStartedMs = millis();
     gSTT.captureSource = static_cast<uint8_t>(source);
     portEXIT_CRITICAL(&gSTTMux);
+#ifdef ESP_PLATFORM
+    // Bench tap (`sttraw on`, admin): saves exactly what the segmenter is fed
+    // below. Off unless armed; a failure here never affects the session.
+    sttRawCaptureSessionBegin(static_cast<uint8_t>(source), STT_SAMPLE_RATE);
+#endif
     uint32_t lastAudioMs = millis();
     const uint32_t captureStartMs = lastAudioMs;
     bool utteranceEnded = false;
@@ -1363,6 +1370,9 @@ static void sttCaptureWorker(void* context) {
       }
       if (count) {
         lastAudioMs = millis();
+#ifdef ESP_PLATFORM
+        sttRawCapturePush(block, count);  // copy only; never blocks
+#endif
         int64_t sum = 0;
         uint64_t square = 0;
         for (size_t i = 0; i < count; ++i) {
@@ -1516,6 +1526,9 @@ static void sttCaptureWorker(void* context) {
   if (g2Held) sttG2CaptureEnd();
   if (selected && !audioCaptureBusy())
     audioSetSource(audioSourceAvailable(previous) ? previous : AUDIO_SRC_NONE);
+#ifdef ESP_PLATFORM
+  sttRawCaptureSessionEnd();  // after the final phrase is queued; waits for the file
+#endif
   sttWipe(block, sizeof(block));
   // Publish join last: the parent may now free run.working and its own stack.
   portENTER_CRITICAL(&gSTTMux);
@@ -1845,35 +1858,9 @@ static void sttContinuousWorker(void*) {
     // Draft buffer is optional: without PSRAM for it, live mode just stays off.
     run.draftPcm = static_cast<int16_t*>(ps_alloc(kStreamSamples * sizeof(int16_t), AllocPref::RequirePSRAM, "stt.draft"));
     if (sttStreamCancelled(&run)) break;
-    hw1::stt::SegmenterConfig segmentConfig;
-    segmentConfig.adaptive = true;
-    // Close a phrase after >=4 s (was the 8 s default) plus the usual 600 ms
-    // pause, so text is finalised while the speaker is still talking and a
-    // Stop leaves only a short tail. The 15x5 transcribes at ~0.45x real time,
-    // so 4 s phrases keep up; less context at each cut is the trade-off.
-    segmentConfig.min_segment_samples = 4 * STT_SAMPLE_RATE;
-    segmentConfig.max_segment_samples = kStreamSamples;  // the 10 s phrase cap
-#if HW1_STT_SHORT_CLOSE
-    // Below 4 s a phrase closes after 1 s of silence instead of waiting for
-    // the 4 s floor (a short reply gets its caption); at 4 s or more the
-    // 600 ms end wait is unchanged.
-    segmentConfig.short_close_silence_samples = STT_SAMPLE_RATE;
-#endif
-    // The G2 glasses mic's quiet level jitters (~21..60+ RMS per 10 ms frame,
-    // measured 2026-09-30), so the window minimum underestimated the room and
-    // stray blips kept restarting the 600 ms pause: phrases ran to the 20 s
-    // limit and noise opened new ones. Track the lower quartile instead, and
-    // let up to 30 ms of louder frames pass without restarting the pause.
-    segmentConfig.noise_percentile = 25;
-    segmentConfig.silence_blip_samples = 3 * hw1::stt::kSegmentAnalysisSamples;
-    // A phrase that reaches the length limit is cut at the quietest point of
-    // its last 2 s (usually between words), not mid-word at the exact limit.
-    segmentConfig.hard_cut_search_samples = 2 * STT_SAMPLE_RATE;
-    if (run.singleUtterance) {
-      segmentConfig.min_segment_samples = segmentConfig.min_voice_samples;
-      segmentConfig.end_silence_samples = STT_SAMPLE_RATE * 3 / 2;
-      segmentConfig.short_close_silence_samples = 0;
-    }
+    // Settings shared with host replay (stt/stt_continuous_config.h).
+    const hw1::stt::SegmenterConfig segmentConfig = hw1::stt::continuousSegmenterConfig(
+        STT_SAMPLE_RATE, kStreamSamples, HW1_STT_SHORT_CLOSE != 0, run.singleUtterance);
     if (!run.segmenter.reset(run.working, kStreamSamples, segmentConfig)) {
       sttStreamFail(run, "Invalid continuous segmentation settings"); break;
     }
@@ -3201,9 +3188,30 @@ static const char* cmd_sttvocab(const String& argsInput) {
   return reply.c_str();
 }
 
+// Raw STT input recorder (System_STTRawCapture): admin only, because it saves
+// room audio to the card unencrypted. Arming is never persisted.
+static const char* cmd_sttraw(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char out[256];
+  CommandArgs args(argsInput);
+  const String op = args.count() ? args.arg(0) : "status";
+  if (args.count() > 1 || (op != "status" && op != "on" && op != "off"))
+    return "Error: Usage: sttraw [status|on|off]";
+  if (op == "on" || op == "off") {
+    char reason[64];
+    if (!sttRawCaptureArm(op == "on", reason, sizeof(reason))) {
+      snprintf(out, sizeof(out), "Error: %s. Insert or remount an SD card and retry.", reason);
+      return out;
+    }
+  }
+  return sttRawCaptureStatus(out, sizeof(out));
+}
+
 const CommandEntry sttCommands[] = {
   {"sttperf", "STT pacing/profiling per segment (timings and CPU only, never text).", false, cmd_sttperf,
    "Usage: sttperf [show|clear|log on|off|stages [all|clear]]"},
+  {"sttraw", "Save the raw microphone input of continuous STT sessions to /sd/STT Raw for bench replay.", true, cmd_sttraw,
+   "Usage: sttraw [status|on|off]  (on arms the next continuous session; not kept across reboot)"},
   {"sttvocab", "Speech vocabulary: names and terms with their display spelling (STT Models/user_vocab.tsv).", false, cmd_sttvocab,
    "Usage: sttvocab [list] | add DISPLAY[|spoken] | remove <spoken> | reload  (edits need an administrator)"},
   {"stt", "Local continuous or bounded speech-to-text with private session-owned results.", false, cmd_stt,

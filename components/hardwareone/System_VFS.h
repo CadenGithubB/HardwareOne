@@ -366,6 +366,8 @@ namespace Scopes {
   // Only the user vocabulary is ever written by firmware (System_STTVocabulary).
   constexpr const char* STT_MODELS      = "/STT Models";
   constexpr const char* STT_MODELS_SD   = "/sd/STT Models";
+  // Raw STT input recordings (System_STTRawCapture `sttraw`), SD only.
+  constexpr const char* STT_RAW_SD      = "/sd/STT Raw";
   // The capped system logs (logins, I2C, errors, events, command audit, crash
   // history). Only appendLineWithCap and its orphan recovery write here, and
   // they confine themselves to the tier the overflow latch resolved;
