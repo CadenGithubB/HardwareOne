@@ -608,7 +608,7 @@ endif()
 if(HW_CFG_ENABLE_LOCAL_STT GREATER 0)
     # The user vocabulary and display formatter (stt/stt_transcript.cpp,
     # System_STTVocabulary.cpp) belong to the local backend on every target.
-    list(APPEND hardwareone_srcs System_STT.cpp System_STTLocal.cpp System_STTVocabulary.cpp stt/stt_transcript.cpp)
+    list(APPEND hardwareone_srcs System_STT.cpp System_STTLocal.cpp System_STTVocabulary.cpp System_STTRawCapture.cpp stt/stt_transcript.cpp)
     if(IDF_TARGET STREQUAL "esp32p4")
         # stt_lm.cpp is inert unless System_STTLocal.cpp uses it (ENABLE_STT_LM).
         list(APPEND hardwareone_srcs stt/quartznet_runtime.cpp stt/quartznet_frontend.cpp stt/stt_lm.cpp stt/stt_internal_memory.cpp)

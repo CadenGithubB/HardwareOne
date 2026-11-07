@@ -1737,6 +1737,24 @@ the `-DHW1_STT_TRIM_SILENCE=0` opt-out and checks that full phrases are kept.
 `--speakers` adds the speaker-label path; `--trim-silence` is an alias of the
 default.
 
+## STT raw-input recorder and replay
+
+These cover the `sttraw` bench tap (System_STTRawCapture; see
+`tools/stt_raw/README.md`).
+- `stt_raw_ring_tests` runs the production `stt/stt_raw_ring.h`. It checks SPSC order across
+  wrap-around, whole-block drops recorded as coalesced gaps in session samples, the gap-list
+  cap, and invalid capacities. It also runs a two-thread producer/consumer check; run it under
+  ThreadSanitizer by hand with `-fsanitize=thread`.
+- `stt_raw_replay` builds the replay CLI and checks it on synthetic noise with one
+  ordinary-level and one quiet phrase:
+  - the production floors and continuous settings come from `stt/stt_continuous_config.h`;
+  - segments are the same at any push chunk size;
+  - lowering both floors admits the quiet phrase;
+  - `--cut-dir` output is byte-exact;
+  - the sidecar rate and drop count are checked.
+The firmware tap itself (file writes, drain task) is not host-tested; the
+broker calls it only under `ESP_PLATFORM`.
+
 ## Boot temporary-file cleanup
 
 `boot_temp_cleanup` executes the production startup sweep, `VFS::DirectoryReader`
