@@ -637,8 +637,9 @@ static int sPairingSel = 0;
 // from oledUpdate() so it pops on any screen but Login, and only for a display
 // identity that may answer it: espnowaccept/espnowreject are admin-only, so the
 // prompt needs a logged-in admin (the OLED session role cache, no roster read
-// per frame). A request is its sender MAC plus arrival time (a re-sent request
-// is a new one). The answer names the shown sender, and the request is kept as
+// per frame). A request is its sender MAC plus arrival time (the radio's
+// retransmits of a pending request keep it; a request made again after this one
+// ended is a new one). The answer names the shown sender, and the request is kept as
 // answered whatever the owner replies, so a refusal is toasted once instead of
 // the dialog re-opening every frame. A session boundary drops the dialog
 // without an answer, so the next admin session still sees the request. The
@@ -710,7 +711,19 @@ void oledEspNowDisplayPairing(Adafruit_SSD1306* display) {
     if (sPairingSel >= n) sPairingSel = n - 1;
     if (sPairingSel < 0)  sPairingSel = 0;
 
-    display->setCursor(0, y); display->println("Select to pair:"); y += 11;
+    // The header line shows our own request while it runs and its result for a
+    // while after: a timed-out request is retried by selecting the peer again
+    // (a peer that already paired us answers the repeat with Accept).
+    char outName[24];
+    char head[22];
+    switch (espnowGetPairRequestOutcome(outName, sizeof(outName))) {
+      case ESPNOW_PAIR_OUT_WAITING:   snprintf(head, sizeof(head), "Waiting: %.11s", outName); break;
+      case ESPNOW_PAIR_OUT_PAIRED:    snprintf(head, sizeof(head), "Paired: %.11s", outName); break;
+      case ESPNOW_PAIR_OUT_DECLINED:  snprintf(head, sizeof(head), "Declined: %.11s", outName); break;
+      case ESPNOW_PAIR_OUT_TIMED_OUT: snprintf(head, sizeof(head), "No answer: retry"); break;
+      default:                        snprintf(head, sizeof(head), "Select to pair:"); break;
+    }
+    display->setCursor(0, y); display->println(head); y += 11;
     const int maxRows = 3;
     int start = (sPairingSel >= maxRows) ? sPairingSel - maxRows + 1 : 0;
     for (int i = start; i < n && i < start + maxRows; i++) {

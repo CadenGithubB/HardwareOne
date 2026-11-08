@@ -3255,6 +3255,18 @@ accounting, fallback/failure counters, deterministic top-K snapshots,
 full-table handling without out-of-bounds writes, updates to existing tags at
 capacity, reset epochs, and counters beyond 4 GiB.
 
+`espnow_pair_core_tests` compiles `System_ESPNow_PairCore.h` (the
+discover-then-confirm pairing state) as is and runs two modelled devices over a
+lossy broadcast channel, with glue that mirrors `System_ESPNow.cpp`. Cases: the
+happy path, a lost first PAIR_REQUEST, a lost PAIR_ACCEPT (recovered by the
+re-sent REQUEST, by the unsolicited ACCEPT copies, or by the target's
+KEY_EX_HELLO), the initiator timing out with the target paired and the later
+re-request repairing that half pair, a duplicate REQUEST while pending (one
+prompt, same identity) and after an answer (same answer), a lost REJECT, a
+plain timeout on both sides, a closed discovery window, an initiator that sends
+once (older firmware), and the millis() wrap. A source contract pins the
+handler, sweep, command, KEY_EX_HELLO and OLED call sites.
+
 `raw_allocation_inventory` runs the comment/string-aware scanner over the main
 `components/hardwareone` application. The pre-migration boundary is 12 direct
 `malloc` calls plus five existing `calloc` calls. `System_MemUtil` itself,

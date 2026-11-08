@@ -1352,6 +1352,19 @@ bool espnowGetPairCandidate(int idx, char* name, size_t nameCap, uint8_t mac[6],
 // Pending accept/reject; optional `mac` (6 bytes) + `atMs` identify the request.
 bool espnowGetIncomingPairRequest(char* name, size_t nameCap,
                                   uint8_t* mac = nullptr, uint32_t* atMs = nullptr);
+// The last outgoing pair request: waiting, or its result for 30 s after it
+// ends; `name` (optional) gets the peer's name. Mirrors espnowpair::Outcome.
+enum EspNowPairOutcome : uint8_t {
+  ESPNOW_PAIR_OUT_NONE = 0,
+  ESPNOW_PAIR_OUT_WAITING,
+  ESPNOW_PAIR_OUT_PAIRED,
+  ESPNOW_PAIR_OUT_DECLINED,
+  ESPNOW_PAIR_OUT_TIMED_OUT,
+};
+EspNowPairOutcome espnowGetPairRequestOutcome(char* name, size_t nameCap);
+// Called by the KEY_EX_HELLO handler for an accepted HELLO: from the peer our
+// pair request waits on, it completes the request as an accept.
+void espnowPairNoteKeyExHello(const uint8_t mac[6]);
 bool startEspNowTask();        // Start ESP-NOW heartbeat task
 // Cooperatively stop and join the heartbeat/RX task. On timeout the task and
 // its resources remain intact so closeespnow can retry safely.

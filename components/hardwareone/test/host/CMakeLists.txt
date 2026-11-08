@@ -98,6 +98,20 @@ target_include_directories(memtracker_core_tests PRIVATE ../..)
 target_compile_options(memtracker_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# ESP-NOW discover-then-confirm pairing (System_ESPNow_PairCore.h, the
+# production dependency-free header): two modelled devices over a lossy
+# broadcast channel. Bounded REQUEST retransmit, re-answered repeats, the
+# half-pair repair after a lost ACCEPT, timeouts, plus a source contract on the
+# System_ESPNow.cpp / KEY_EX_HELLO / OLED call sites.
+add_executable(espnow_pair_core_tests test_espnow_pair_core.cpp)
+set_target_properties(espnow_pair_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_pair_core_tests PRIVATE ../..)
+target_compile_definitions(espnow_pair_core_tests PRIVATE
+  HW1_COMPONENT_DIR="${CMAKE_CURRENT_LIST_DIR}/../..")
+target_compile_options(espnow_pair_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # Projection and pan math shared by MapCore::renderMap and the G2 map page.
 # The production header is dependency-light so geometry can be verified here
 # without Arduino, ESP-IDF, filesystem, or BLE mocks.
@@ -301,6 +315,10 @@ if(HW1_SANITIZE)
   target_compile_options(memtracker_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(memtracker_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(espnow_pair_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(espnow_pair_core_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(map_viewport_core_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -1102,6 +1120,7 @@ add_test(NAME mqtt_lifecycle_gate_tests COMMAND mqtt_lifecycle_gate_tests)
 add_test(NAME memutil_tests COMMAND memutil_tests)
 add_test(NAME memutil_no_psram COMMAND memutil_no_psram_tests)
 add_test(NAME memtracker_core_tests COMMAND memtracker_core_tests)
+add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
 add_test(NAME map_viewport_core_tests COMMAND map_viewport_core_tests)
 add_test(NAME g2_health_graph_core_tests COMMAND g2_health_graph_core_tests)
 add_test(NAME event_kind_mask_tests COMMAND event_kind_mask_tests)

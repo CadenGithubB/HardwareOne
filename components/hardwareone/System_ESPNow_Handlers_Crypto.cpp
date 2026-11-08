@@ -305,6 +305,10 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
                      msg->senderMac[3], msg->senderMac[4], msg->senderMac[5]);
     }
     logMac("KEY_EX_HELLO accepted from", msg->senderMac);
+    // A HELLO from the peer our pair request waits on is its accept (it runs
+    // pairsecure only after its user accepted): finish our side even if every
+    // PAIR_ACCEPT frame was lost. No-op for any other sender.
+    espnowPairNoteKeyExHello(msg->senderMac);
   }
 
   // Add to ESPNOW peer table so we can send REPLY.
