@@ -1,14 +1,19 @@
 // Host harness for the SDMMC quiesce before an intentional restart and for the
 // companion start's wait for the slave. The runner
 // (test_restart_sdmmc_quiesce.py) inserts the shipping definitions unchanged:
+//   @MUTEX@      isHeldByCurrentTask, fsLockForRestart (System_Mutex.cpp)
 //   @UTILS@      quiesceSdmmcForRestart, rebootDevice, factoryreset_doRestart (System_Utils.cpp)
+//   @EVENTS@     deliver, hostedEventHandler, registerEvents (HAL_Radio.cpp)
+//   @START@      hostedLinkUp, startOnce and their constants (HAL_Radio.cpp)
 //   @SILENCE@    restartLatched, latchC6EnableLow, radioHalHold,
 //                radioHalSilenceForRestart (HAL_Radio.cpp)
-//   @START@      hostedLinkUp, startOnce and their constants (HAL_Radio.cpp)
-//   @COMPANION@  radioCompanionBeforeRestart, submitOp (System_RadioCompanion.cpp)
+//   @PREPARE@    radioHalStopTransport, radioHalPrepare (HAL_Radio.cpp)
+//   @COMPANION@  submitOp, radioCompanionBeforeRestart, radioCompanionTick,
+//                radioCompanionBlocksRadio (System_RadioCompanion.cpp)
 // and the real System_RestartQuiesceCore.h / Radio_CompanionCore.h. Only the
 // ESP-IDF, Arduino, FreeRTOS and Hosted boundaries are fakes: they record what
 // was called, in order, on a fake millisecond clock. ESP.restart() unwinds.
+// A fake TRANSPORT_UP goes through the real hostedEventHandler.
 #include <atomic>
 #include <cinttypes>
 #include <cstdint>
@@ -56,6 +61,51 @@ static const char* esp_err_to_name(esp_err_t) { return "err"; }
     const esp_err_t err_ = (x);          \
     if (err_ != ESP_OK) return err_;     \
   } while (0)
+#define pdMS_TO_TICKS(ms) (ms)
+#define portENTER_CRITICAL(x) ((void)(x))
+#define portEXIT_CRITICAL(x) ((void)(x))
+
+// HAL_Radio.h types
+enum class RadioHalEvent : uint8_t { TransportUp = 0, TransportDown, TransportFailure, Heartbeat, CompanionBoot, Memory };
+struct RadioHalEventData {
+  RadioHalEvent type;
+  uint32_t value;
+  uint32_t value2;
+};
+typedef void (*RadioHalEventFn)(const RadioHalEventData& event);
+struct RadioCompanionMemory {
+  bool known;
+  uint32_t totalHeap, freeHeap, minFreeHeap, internalFree, internalLargest, atMs;
+};
+
+// --- System_Mutex.cpp boundaries (a FreeRTOS mutex) ------------------------------
+#define configUSE_MUTEXES 1
+#define pdTRUE 1
+#define pdFALSE 0
+typedef uint32_t TickType_t;
+struct FakeMutex {};
+typedef FakeMutex* SemaphoreHandle_t;
+static FakeMutex gFsMutexObj;
+static SemaphoreHandle_t gFsMutex = &gFsMutexObj;
+static int gThisTask = 0, gOtherTask = 0;  // task handles
+static void* gFsHolder = nullptr;          // the task holding the filesystem lock
+static uint32_t gFsLockHoldMs = 0;         // how long another holder keeps it
+static void* xTaskGetCurrentTaskHandle() { return &gThisTask; }
+static void* xSemaphoreGetMutexHolder(SemaphoreHandle_t) { return gFsHolder; }
+static int xSemaphoreTake(SemaphoreHandle_t, TickType_t ticks) {
+  note("fslock " + std::to_string(ticks));
+  if (gFsHolder && gFsHolder != &gThisTask) {
+    if (gFsLockHoldMs >= ticks) {
+      gNow += ticks;
+      return pdFALSE;
+    }
+    gNow += gFsLockHoldMs;
+  }
+  gFsHolder = &gThisTask;
+  return pdTRUE;
+}
+
+/*@MUTEX@*/
 
 // --- System_Utils.cpp boundaries ------------------------------------------------
 #define HW1_RADIO_COMPANION 1
@@ -85,14 +135,6 @@ static void radioCompanionBeforeRestart() {
   note("companion-silence");
   if (gCompanionSilence) gCompanionSilence();
 }
-static uint32_t gFsLockHoldMs = 0;  // how long another task keeps the filesystem lock
-static bool fsLockForRestart(uint32_t timeoutMs) {
-  note("fslock " + std::to_string(timeoutMs));
-  const bool got = gFsLockHoldMs < timeoutMs;
-  gNow += got ? gFsLockHoldMs : timeoutMs;
-  return got;
-}
-
 namespace utils {
 /*@UTILS@*/
 }  // namespace utils
@@ -101,9 +143,6 @@ namespace utils {
 typedef void (*shutdown_handler_t)(void);
 typedef int gpio_num_t;
 enum { GPIO_MODE_OUTPUT = 2 };
-#define portENTER_CRITICAL(x) ((void)(x))
-#define portEXIT_CRITICAL(x) ((void)(x))
-#define pdMS_TO_TICKS(ms) (ms)
 static int gLock;
 static esp_err_t esp_wifi_stop(void) { return ESP_OK; }
 static esp_err_t esp_unregister_shutdown_handler(shutdown_handler_t h) {
@@ -151,15 +190,59 @@ static esp_err_t gpio_set_direction(gpio_num_t pin, int mode) {
 }
 static void vTaskDelay(uint32_t ticks) { advance(ticks); }
 
-// Hosted, as 2.12.13 behaves after its retry counter is spent: hostedInitWiFi()
-// returns at once; the rx task finishes the handshake later and posts
-// TRANSPORT_UP (here: at gUpAt). Every RPC first checks the link
+// Hosted 2.12.13: a fresh hostedInitWiFi() resets the C6 and returns when
+// Hosted's slave-ready wait ends (gInitReturnsAfterMs: its whole 20 s budget
+// on a fresh retry counter with a silent C6, about 1.7 s after the counter is
+// spent); a call on an initialised session returns at once. The rx task may
+// finish the handshake later and post TRANSPORT_UP (here: at gUpAt), through
+// the real hostedEventHandler. Every RPC first checks the link
 // (check_transport_up) and fails at once while it is not up.
 static bool gHostedInitialized = false;
 static uint32_t gInitReturnsAfterMs = 5;
 static uint32_t gUpAt = 0;  // 0: the slave never answers
+static bool gUpPosted = false;
+static int gResets = 0;                  // C6 reset pulses from a fresh hostedInitWiFi
+static void (*gOnReset)(int n) = nullptr;  // called at the n-th reset
 static int gRpcCalls = 0;
 static uint32_t gFirstRpcAt = 0;
+
+// esp_event / esp_hosted event boundaries
+typedef const char* esp_event_base_t;
+static const char kHostedEventBase[] = "ESP_HOSTED_EVENT";
+static const char kOtherEventBase[] = "WIFI_EVENT";
+static esp_event_base_t const ESP_HOSTED_EVENT = kHostedEventBase;
+#define ESP_EVENT_ANY_ID -1
+enum {
+  ESP_HOSTED_EVENT_CP_INIT = 0,
+  ESP_HOSTED_EVENT_CP_HEARTBEAT,
+  ESP_HOSTED_EVENT_TRANSPORT_UP,
+  ESP_HOSTED_EVENT_TRANSPORT_DOWN,
+  ESP_HOSTED_EVENT_TRANSPORT_FAILURE,
+  ESP_HOSTED_EVENT_MEM_MONITOR,
+};
+struct esp_hosted_event_heartbeat_t {
+  uint32_t heartbeat;
+};
+struct esp_hosted_event_init_t {
+  int reason;
+};
+struct esp_hosted_mem_cap_t {
+  uint32_t free_size, largest_free_block;
+};
+struct esp_hosted_mem_region_t {
+  esp_hosted_mem_cap_t cap_8bit;
+};
+struct esp_hosted_event_mem_info_t {
+  uint32_t curr_total_free_heap_size, curr_min_free_heap_size;
+  esp_hosted_mem_region_t curr_internal;
+};
+typedef void (*esp_event_handler_t)(void*, esp_event_base_t, int32_t, void*);
+static esp_event_handler_t gRegisteredHandler = nullptr;
+static esp_err_t esp_event_loop_create_default() { return ESP_OK; }
+static esp_err_t esp_event_handler_register(esp_event_base_t base, int32_t id, esp_event_handler_t h, void*) {
+  if (base == ESP_HOSTED_EVENT && id == ESP_EVENT_ANY_ID) gRegisteredHandler = h;
+  return ESP_OK;
+}
 
 struct esp_hosted_coprocessor_fwver_t {
   uint32_t major1, minor1, patch1;
@@ -188,15 +271,33 @@ bool sHeld = false;
 bool sRestartLatched = false;
 bool sUpdateOnly = false;
 bool sHostedLinkUp = false;
+bool sPrepared = false;
+bool sEventsRegistered = false;
+RadioHalEventFn sEventFn = nullptr;
+RadioCompanionMemory sMemory = {};
 uint8_t sSessionBleLinks = 0;
 Identity sIdentity = {};
 uint32_t nowMs() { return gNow; }
 bool hostedIsInitialized() { return gHostedInitialized; }
 esp_err_t prepareBoard() { return ESP_OK; }
+void quietRpcLogs() {}
+esp_err_t radioHalConsoleMirror(bool) { return ESP_OK; }
 bool hostedInitWiFi() {
   note("hostedInitWiFi");
-  if (!gHostedInitialized) gNow += gInitReturnsAfterMs;
-  gHostedInitialized = true;
+  if (!gHostedInitialized) {
+    gHostedInitialized = true;
+    note("c6-reset");  // Hosted's transport_gpio_reset
+    if (gOnReset) gOnReset(++gResets);
+    else ++gResets;
+    advance(gInitReturnsAfterMs);
+  }
+  return true;
+}
+bool hostedIsBLEActive() { return false; }
+void hostedReleaseBLE() { note("release-ble"); }
+bool hostedDeinitWiFi() {
+  note("hosted-deinit");
+  gHostedInitialized = false;
   return true;
 }
 esp_err_t esp_hosted_get_coprocessor_fwversion(esp_hosted_coprocessor_fwver_t* v) {
@@ -209,30 +310,73 @@ esp_err_t esp_hosted_get_coprocessor_fwversion(esp_hosted_coprocessor_fwver_t* v
   return ESP_OK;
 }
 
+/*@EVENTS@*/
+
 /*@START@*/
 
+// startTransport's own steps (identity, monitoring) are not under test here;
+// its restart gate is a source check in the runner.
+esp_err_t radioHalStartTransport() {
+  note("start");
+  return startOnce(false);
+}
+
 /*@SILENCE@*/
+
+/*@PREPARE@*/
 }  // namespace hal
 
 static void advance(uint32_t ms) {
   gNow += ms;
-  if (gUpAt && gNow >= gUpAt && !hal::sHostedLinkUp) {
-    hal::sHostedLinkUp = true;  // hostedEventHandler(TRANSPORT_UP)
-    hal::sTransportUp = true;
+  if (gUpAt && gNow >= gUpAt && !gUpPosted) {
+    gUpPosted = true;
     note("TRANSPORT_UP");
+    hal::hostedEventHandler(nullptr, ESP_HOSTED_EVENT, ESP_HOSTED_EVENT_TRANSPORT_UP, nullptr);
   }
 }
 
 // --- System_RadioCompanion.cpp boundaries ----------------------------------------
 namespace comp {
+using hw1::radio::CompanionAction;
+using hw1::radio::CompanionMonitor;
+using hw1::radio::CompanionState;
 enum class Op : uint8_t { None = 0, Start, Recover, Hold, Release, Update };
 struct ExecReq {
   typedef void (*DeferredFn)(void*);
 };
+int sLock;
+CompanionMonitor sMonitor;
+bool sBootInitDone = false;
 std::atomic<bool> sOpInFlight{false};
 std::atomic<uint8_t> sOp{0};
 std::atomic<bool> sRestarting{false};
-static void radioHalSilenceForRestart() { note("hal-silence"); }
+CompanionState gState = CompanionState::Online;  // what monitorState() reports
+static CompanionState monitorState() { return gState; }
+template <typename F>
+void withMonitor(F fn) {
+  fn(sMonitor);
+}
+// The silence records whether new companion work was already refused when it
+// ran: a worker op submitted after the silence would start the C6 again.
+static void radioHalSilenceForRestart() {
+  note(std::string("hal-silence restarting=") + (sRestarting.load() ? "1" : "0"));
+}
+static esp_err_t radioHalHold(bool hold) {
+  note(std::string("hal-hold ") + (hold ? "1" : "0"));
+  return ESP_OK;
+}
+static esp_err_t radioHalStartTransport() {
+  note("hal-start");
+  return ESP_OK;
+}
+static void applyPolicyFromSettings() {}
+static void reportIdentity() {}
+static bool popEvent(RadioHalEventData&) {
+  note("pop");
+  return false;
+}
+static void handleEvent(const RadioHalEventData&, uint32_t) {}
+static void dispatch(CompanionAction, uint32_t) { note("dispatch"); }
 static bool submitDeferredToCmdExec(ExecReq::DeferredFn, void*) {
   note("submitted");
   return true;
@@ -245,19 +389,37 @@ static void finishOp() {
 }  // namespace comp
 
 // --- scenarios ---------------------------------------------------------------
+static std::vector<RadioHalEvent> gDelivered;
+static void recordEvent(const RadioHalEventData& e) { gDelivered.push_back(e.type); }
+
 static void reset_world() {
   gNow = 1000;
   gEvents.clear();
+  gFsMutex = &gFsMutexObj;
+  gFsHolder = nullptr;
   gFsLockHoldMs = 0;
   gHostedInitialized = false;
   gInitReturnsAfterMs = 5;
   gUpAt = 0;
+  gUpPosted = false;
+  gResets = 0;
+  gOnReset = nullptr;
   gRpcCalls = 0;
   gFirstRpcAt = 0;
+  gRegisteredHandler = nullptr;
+  gDelivered.clear();
   hal::sTransportUp = false;
   hal::sHostedLinkUp = false;
   hal::sHeld = false;
   hal::sRestartLatched = false;
+  hal::sPrepared = false;
+  hal::sEventsRegistered = false;
+  hal::sEventFn = nullptr;
+  hal::sSessionBleLinks = 0;
+  comp::sRestarting.store(false);
+  comp::sOpInFlight.store(false);
+  comp::sBootInitDone = false;
+  comp::gState = comp::CompanionState::Online;
   gEnOut = gEnPad = 1;  // the C6 is running
   gEnPadHeld = false;
   gCompanionSilence = nullptr;
@@ -285,7 +447,8 @@ static void reboot_quiesces_sdmmc_after_the_flush_and_before_the_restart() {
 
 static void reboot_with_a_busy_filesystem_still_restarts_without_extra_wait() {
   reset_world();
-  gFsLockHoldMs = 5000;  // a writer stuck behind the dead link
+  gFsHolder = &gOtherTask;  // a writer stuck behind the dead link
+  gFsLockHoldMs = 5000;
   bool restarted = false;
   try {
     utils::rebootDevice("c6-companion", "outage", 750);
@@ -384,20 +547,129 @@ static void companion_silence_stops_new_work_then_silences_the_hal() {
   gEvents.clear();
   comp::radioCompanionBeforeRestart();
   CHECK(comp::sRestarting.load());
-  CHECK((gEvents == std::vector<std::string>{"hal-silence"}));
+  // New work was refused before the C6 went quiet, not after.
+  CHECK((gEvents == std::vector<std::string>{"hal-silence restarting=1"}));
   CHECK(!comp::submitOp(comp::Op::Recover, nullptr, nullptr));  // no recovery re-releases the C6
   CHECK(!comp::sOpInFlight.load());
-  CHECK((gEvents == std::vector<std::string>{"hal-silence"}));
+  CHECK((gEvents == std::vector<std::string>{"hal-silence restarting=1"}));
 }
 
+// A reboot can come before the companion's boot init finished (a command or
+// the web page right after boot): radio features are refused anyway.
+static void a_restart_before_boot_init_blocks_radio_features() {
+  reset_world();
+  const char* reason = nullptr;
+  CHECK(!comp::radioCompanionBlocksRadio(&reason));  // before boot init the HAL alone decides
+  comp::sRestarting.store(true);
+  CHECK(comp::radioCompanionBlocksRadio(&reason));
+  CHECK(reason && std::strcmp(reason, "the device is restarting") == 0);
+  CHECK(gEvents.empty());
+}
+
+// A feature start on a held companion releases it and starts the transport;
+// once the restart silenced it, the same call refuses and touches nothing.
+static void a_restart_never_releases_a_held_companion() {
+  reset_world();
+  comp::sBootInitDone = true;
+  comp::gState = comp::CompanionState::Held;
+  comp::sRestarting.store(true);
+  const char* reason = nullptr;
+  CHECK(comp::radioCompanionBlocksRadio(&reason));
+  CHECK(reason && std::strcmp(reason, "the device is restarting") == 0);
+  CHECK(gEvents.empty());
+  comp::sRestarting.store(false);  // control: without the restart it wakes the C6
+  CHECK(!comp::radioCompanionBlocksRadio(&reason));
+  CHECK((gEvents == std::vector<std::string>{"hal-hold 0", "hal-start"}));
+}
+
+static void the_health_tick_does_nothing_once_restarting() {
+  reset_world();
+  comp::sBootInitDone = true;
+  comp::radioCompanionTick();
+  CHECK((gEvents == std::vector<std::string>{"pop", "dispatch"}));  // control
+  gEvents.clear();
+  comp::sRestarting.store(true);
+  comp::radioCompanionTick();
+  CHECK(gEvents.empty());  // no event handling, no recovery dispatch
+}
+
+// The real fsLockForRestart over a fake FreeRTOS mutex.
+static void the_restart_lock_is_bounded_and_kept() {
+  reset_world();
+  CHECK(fsLockForRestart(2000));  // free
+  CHECK(gFsHolder == &gThisTask);
+  gEvents.clear();
+  CHECK(fsLockForRestart(2000));  // already ours (a command under FsLockGuard): no second take
+  CHECK(gEvents.empty());
+  gFsHolder = &gOtherTask;  // another task finishes its write in 300 ms
+  gFsLockHoldMs = 300;
+  uint32_t t = gNow;
+  CHECK(fsLockForRestart(2000));
+  CHECK(gNow - t == 300 && gFsHolder == &gThisTask);
+  gFsHolder = &gOtherTask;  // a holder that never lets go
+  gFsLockHoldMs = 5000;
+  t = gNow;
+  CHECK(!fsLockForRestart(2000));
+  CHECK(gNow - t == 2000 && gFsHolder == &gOtherTask);
+  gFsMutex = nullptr;  // before initMutexes()
+  CHECK(!fsLockForRestart(2000));
+}
+
+static void hosted_events_track_the_link() {
+  reset_world();
+  hal::sEventFn = recordEvent;
+  hal::hostedEventHandler(nullptr, ESP_HOSTED_EVENT, ESP_HOSTED_EVENT_TRANSPORT_UP, nullptr);
+  CHECK(hal::sTransportUp && hal::sHostedLinkUp);
+  hal::sSessionBleLinks = 4;
+  hal::hostedEventHandler(nullptr, ESP_HOSTED_EVENT, ESP_HOSTED_EVENT_TRANSPORT_DOWN, nullptr);
+  CHECK(!hal::sTransportUp && !hal::sHostedLinkUp && hal::sSessionBleLinks == 0);
+  hal::hostedEventHandler(nullptr, ESP_HOSTED_EVENT, ESP_HOSTED_EVENT_TRANSPORT_UP, nullptr);
+  hal::sSessionBleLinks = 4;
+  hal::hostedEventHandler(nullptr, ESP_HOSTED_EVENT, ESP_HOSTED_EVENT_TRANSPORT_FAILURE, nullptr);
+  CHECK(!hal::sTransportUp && !hal::sHostedLinkUp && hal::sSessionBleLinks == 0);
+  hal::hostedEventHandler(nullptr, kOtherEventBase, ESP_HOSTED_EVENT_TRANSPORT_UP, nullptr);
+  CHECK(!hal::sTransportUp && !hal::sHostedLinkUp);  // another event base is ignored
+  CHECK((gDelivered == std::vector<RadioHalEvent>{RadioHalEvent::TransportUp, RadioHalEvent::TransportDown,
+                                                  RadioHalEvent::TransportUp, RadioHalEvent::TransportFailure}));
+}
+
+static void stop_after_the_silence_leaves_hosted_up() {
+  reset_world();
+  gHostedInitialized = true;
+  hal::radioHalSilenceForRestart();
+  gEvents.clear();
+  hal::radioHalStopTransport();
+  CHECK(gEvents.empty());  // no teardown under live users
+  CHECK(gHostedInitialized);
+}
+
+// Bench log 2026-11-08, first companion retry after the boot spent Hosted's
+// retry counter (retry[100]): Hosted started at 45403 ms and gave up at 47138
+// ms (1735 ms, right after the card init, in the same millisecond as "Waiting
+// for esp_hosted slave to be ready"); the version query failed at 47148 ms and
+// Hosted opened the data path at the slave at 47211 ms. That SDMMC host was
+// wedged and TRANSPORT_UP never came: the start fails, after the full budget
+// counted from the start, with one version query.
+static void the_bench_retry_with_a_wedged_host_fails_after_the_budget() {
+  reset_world();
+  gNow = 45403;
+  gInitReturnsAfterMs = 1735;
+  CHECK(hal::startOnce(false) != ESP_OK);
+  CHECK(gNow == 45403 + hal::kSlaveReadyBudgetMs);
+  CHECK(gRpcCalls == 1 && gFirstRpcAt == gNow);
+}
+
+// The same retry on a healthy data path, where TRANSPORT_UP follows the data
+// path opening as at that boot's first, good start (Open data path at 3215 ms,
+// Transport active at 3244 ms): the start waits for it instead of failing.
 static void a_retry_waits_for_the_slave_when_hosted_gives_up_at_once() {
   reset_world();
-  const uint32_t start = gNow;
-  gUpAt = start + 420;  // the C6 opens its data path 420 ms after the start
+  gNow = 45403;
+  gInitReturnsAfterMs = 1735;
+  gUpAt = 47211 + 29;
   CHECK(hal::startOnce(false) == ESP_OK);
-  CHECK(gFirstRpcAt >= gUpAt);
-  CHECK(hal::sTransportUp);
-  CHECK(gNow - start < 1000);
+  CHECK(gFirstRpcAt >= gUpAt && gFirstRpcAt < gUpAt + hal::kSlaveReadyPollMs);
+  CHECK(hal::sTransportUp && gRpcCalls == 1);
 }
 
 static void a_stale_link_flag_from_the_last_session_is_not_trusted() {
@@ -426,6 +698,53 @@ static void an_initialized_live_session_does_not_wait() {
   CHECK(gNow == start);
 }
 
+// An initialised session announces nothing new: no TRANSPORT_UP will come, so
+// the start asks the companion at once instead of sitting out the budget.
+static void an_initialized_session_without_a_link_is_asked_at_once() {
+  reset_world();
+  gHostedInitialized = true;
+  hal::sHostedLinkUp = false;
+  const uint32_t start = gNow;
+  CHECK(hal::startOnce(false) != ESP_OK);
+  CHECK(gNow == start && gRpcCalls == 1);
+  CHECK(gResets == 0);
+}
+
+// Bench log 2026-11-08: boot attempt 1 spent Hosted's whole wait and failed;
+// attempt 2 reused the still-initialised session and failed in the same
+// millisecond (26756 ms). Attempt 2 must close the session, reset the C6 again
+// and wait for it.
+static void boot_attempt_two_resets_the_c6_and_waits_for_it() {
+  reset_world();
+  gInitReturnsAfterMs = hal::kSlaveReadyBudgetMs;  // attempt 1: Hosted's own wait runs out
+  gOnReset = [](int n) {
+    if (n != 2) return;
+    gInitReturnsAfterMs = 1735;     // the counter is spent: Hosted gives up after the card init
+    gUpAt = gNow + 1735 + 73 + 29;  // a healthy C6: up after the data path opens
+  };
+  CHECK(hal::radioHalPrepare() == ESP_OK);
+  CHECK(hal::sPrepared);
+  CHECK(gRegisteredHandler == &hal::hostedEventHandler);
+  const std::vector<std::string> want = {
+      "start", "hostedInitWiFi", "c6-reset", "version-rpc",                  // attempt 1
+      "hosted-deinit",                                                       // the dead session closes
+      "start", "hostedInitWiFi", "c6-reset", "TRANSPORT_UP", "version-rpc"};  // attempt 2
+  CHECK(gEvents == want);
+}
+
+static void a_dead_c6_at_boot_gets_two_real_attempts() {
+  reset_world();
+  gInitReturnsAfterMs = hal::kSlaveReadyBudgetMs;
+  gOnReset = [](int n) {
+    if (n == 2) gInitReturnsAfterMs = 1735;
+  };
+  const uint32_t start = gNow;
+  CHECK(hal::radioHalPrepare() != ESP_OK);
+  CHECK(!hal::sPrepared);
+  CHECK(gResets == 2 && gRpcCalls == 2);
+  CHECK(gNow - start == 2 * hal::kSlaveReadyBudgetMs);  // each attempt within Hosted's budget
+}
+
 int main() {
   reboot_quiesces_sdmmc_after_the_flush_and_before_the_restart();
   reboot_with_a_busy_filesystem_still_restarts_without_extra_wait();
@@ -435,10 +754,20 @@ int main() {
   a_release_racing_the_silence_leaves_en_low();
   a_hold_after_the_silence_changes_nothing();
   companion_silence_stops_new_work_then_silences_the_hal();
+  a_restart_before_boot_init_blocks_radio_features();
+  a_restart_never_releases_a_held_companion();
+  the_health_tick_does_nothing_once_restarting();
+  the_restart_lock_is_bounded_and_kept();
+  hosted_events_track_the_link();
+  stop_after_the_silence_leaves_hosted_up();
+  the_bench_retry_with_a_wedged_host_fails_after_the_budget();
   a_retry_waits_for_the_slave_when_hosted_gives_up_at_once();
   a_stale_link_flag_from_the_last_session_is_not_trusted();
   a_slave_that_never_answers_fails_inside_hosteds_budget();
   an_initialized_live_session_does_not_wait();
+  an_initialized_session_without_a_link_is_asked_at_once();
+  boot_attempt_two_resets_the_c6_and_waits_for_it();
+  a_dead_c6_at_boot_gets_two_real_attempts();
   std::puts("restart SDMMC quiesce and companion start wait: all scenarios passed");
   return 0;
 }

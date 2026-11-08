@@ -55,7 +55,10 @@ everything user-visible since the v0.99.99 tag (55 commits).
   start that was already running cannot release it before the restart. Separately, a companion retry
   now waits for the C6 instead of failing in the same millisecond once ESP-Hosted's retry counter is
   spent; that helps a healthy link after earlier failed starts, does not recover a wedged SDMMC host,
-  and makes a retry on a dead companion last up to 20 s. Not yet tested on hardware.
+  and makes a retry on a dead companion last up to 20 s. The boot's second C6 attempt reused the
+  failed Hosted session and gave up in the same millisecond; it now closes the session, resets the C6
+  and waits again, so a boot with a dead companion (or a wedged SDMMC host) takes up to about 20 s
+  longer. Not yet tested on hardware.
 - Two crashes: the QuickNote worker's stack and Arduino's unlocked `NetworkEvents`.
 - BLE setup worker retires a client after an OPEN timeout and bounds a stuck job.
 - Phone pipe isolates CLOSE and DISCONNECT by peer address and keeps the first cause of a lost session.

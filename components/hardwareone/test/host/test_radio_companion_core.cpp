@@ -209,16 +209,29 @@ struct FakeLink {
   }
 };
 
-static void a_start_waits_for_the_slave_after_hosted_gives_up_at_once() {
-  // Bench 2026-11-08: Hosted's spent retry counter made the start give up in
-  // the same millisecond as "Waiting for esp_hosted slave to be ready"; the
-  // C6 opened its data path a few hundred ms later.
+// Bench 2026-11-08, first companion retry after the boot spent Hosted's
+// counter (retry[100]): Hosted started at 45403 ms and gave up at 47138 ms, in
+// the same millisecond as "Waiting for esp_hosted slave to be ready", right
+// after the card init; it opened the data path at the slave at 47211 ms. That
+// SDMMC host was wedged, so TRANSPORT_UP never came: the wait runs out the
+// budget, counted from the start.
+static void the_bench_retry_with_a_wedged_host_waits_out_the_budget() {
   FakeLink l;
-  l.now = 47211 + 5;  // hostedInitWiFi() returned 5 ms after the start
-  l.upAt = 47211 + 420;
-  assert(l.wait(47211, 20000, 50));
+  l.now = 47138;  // hostedInitWiFi() returned when Hosted gave up
+  assert(!l.wait(45403, 20000, 50));
+  assert(l.now == 45403 + 20000);
+}
+
+// The same timing on a healthy data path: TRANSPORT_UP follows the data path
+// opening as it did at that boot's first, good start (Open data path at 3215
+// ms, Transport active at 3244 ms: 29 ms). The start now waits for it.
+static void a_start_waits_for_the_slave_after_hosted_gives_up_at_once() {
+  FakeLink l;
+  l.now = 47138;
+  l.upAt = 47211 + 29;
+  assert(l.wait(45403, 20000, 50));
   assert(l.now >= l.upAt && l.now < l.upAt + 50);
-  assert(l.slept < 500);
+  assert(l.slept < 200);
 }
 
 static void a_slave_that_never_answers_waits_only_the_budget() {
@@ -254,6 +267,7 @@ static void the_wait_survives_a_clock_wrap() {
 }
 
 int main() {
+  the_bench_retry_with_a_wedged_host_waits_out_the_budget();
   a_start_waits_for_the_slave_after_hosted_gives_up_at_once();
   a_slave_that_never_answers_waits_only_the_budget();
   hosted_already_spent_the_budget_so_no_second_wait();

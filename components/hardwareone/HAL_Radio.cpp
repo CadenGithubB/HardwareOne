@@ -289,8 +289,9 @@ esp_err_t startOnce(bool allowLegacyUpdate) {
     return ESP_FAIL;
   }
   // hostedInitWiFi() returns as soon as Hosted's reconfigure gives up, which
-  // after two failed starts in one boot is at once (its retry counter is never
-  // reset on failure). Wait for the slave ourselves, in Hosted's own budget.
+  // after one start that spent Hosted's whole wait is at once (its retry
+  // counter is never reset on failure). Wait for the slave ourselves, in
+  // Hosted's own budget.
   // This helps when the SDMMC host is healthy; it does not recover a wedged
   // one (the 2026-11-08 reboot outage), and a retry on a dead companion now
   // takes the full budget instead of returning at once.
@@ -385,6 +386,13 @@ esp_err_t radioHalPrepare() {
   ESP_RETURN_ON_ERROR(registerEvents(), kTag, "Hosted events");
   esp_err_t err = ESP_FAIL;
   for (int attempt = 1; attempt <= kBootAttempts; attempt++) {
+    // A failed start leaves Hosted initialised (Arduino's hostedInit keeps its
+    // flag: esp_hosted_connect_to_slave returns ESP_OK even when the slave
+    // never answered), so a second start would reuse the dead session: no C6
+    // reset, no wait, and the version query fails in the same millisecond
+    // (bench log 2026-11-08: attempts 1 and 2 both failed at 26756 ms). Close
+    // it first, as the companion's Recover does before every retry.
+    if (attempt > 1) radioHalStopTransport();
     err = radioHalStartTransport();
     if (err == ESP_OK) break;
     ESP_LOGW(kTag, "C6 did not come up (attempt %d of %d): %s", attempt, kBootAttempts, esp_err_to_name(err));

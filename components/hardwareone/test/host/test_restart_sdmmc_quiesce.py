@@ -12,17 +12,22 @@ after a failure.
 
 The harness compiles the shipping definitions against recording fakes:
 rebootDevice, quiesceSdmmcForRestart and factoryreset_doRestart
-(System_Utils.cpp), radioHalSilenceForRestart, hostedLinkUp and startOnce
-(HAL_Radio.cpp) with radioHalHold and its latch helpers, radioCompanionBeforeRestart and submitOp
+(System_Utils.cpp), fsLockForRestart (System_Mutex.cpp), hostedEventHandler,
+startOnce, radioHalPrepare, radioHalStopTransport, radioHalSilenceForRestart
+and radioHalHold with their helpers (HAL_Radio.cpp), and submitOp,
+radioCompanionBeforeRestart, radioCompanionTick and radioCompanionBlocksRadio
 (System_RadioCompanion.cpp), with the real System_RestartQuiesceCore.h and
-Radio_CompanionCore.h. A restart must silence the C6 (unregister the RPC
-handler, latch EN low with gpio_hold_en), take the filesystem lock and drain
-for the SDMMC timeout, after the flush delay and before ESP.restart(); an op
-already running (Hosted's reset pulse, a hold release, also one racing the
-silence) must not raise EN again before the restart; a start whose Hosted
-wait gave up must still wait for TRANSPORT_UP inside Hosted's budget. Source
-checks cover the companion gates the harness does not compile. --source-dir
-points the suite at another copy of the component (the pre-fix tree fails).
+Radio_CompanionCore.h. A restart must refuse new companion work before it
+silences the C6 (unregister the RPC handler, latch EN low with gpio_hold_en),
+take the filesystem lock for at most its timeout and drain for the SDMMC
+timeout, after the flush delay and before ESP.restart(); an op already
+running (Hosted's reset pulse, a hold release, also one racing the silence)
+must not raise EN again before the restart; nothing (the tick, a feature
+start, even before boot init) restarts the companion. A start whose Hosted
+wait gave up must still wait for TRANSPORT_UP inside Hosted's budget, and
+boot attempt 2 must reset the C6 again. A source check covers the one gate
+the harness does not compile (startTransport). --source-dir points the suite
+at another copy of the component (the pre-fix tree fails).
 """
 from __future__ import annotations
 
@@ -52,7 +57,7 @@ def one(source: str, marker: str, name: str) -> str:
 
 
 def constant(source: str, name: str) -> str:
-    match = re.search(r"constexpr uint32_t " + name + r" = [^;]+;", source)
+    match = re.search(r"constexpr (?:uint32_t|int) " + name + r" = [^;]+;", source)
     require(match is not None, f"HAL_Radio.cpp defines {name}")
     return match.group(0)
 
@@ -68,15 +73,27 @@ def main() -> None:
     utils = (src / "System_Utils.cpp").read_text()
     hal = (src / "HAL_Radio.cpp").read_text()
     companion = (src / "System_RadioCompanion.cpp").read_text()
+    mutex = (src / "System_Mutex.cpp").read_text()
 
     blocks = {
+        "/*@MUTEX@*/": "\n\n".join([
+            one(mutex, "static bool isHeldByCurrentTask(SemaphoreHandle_t mutex)", "System_Mutex.cpp"),
+            one(mutex, "bool fsLockForRestart(uint32_t timeoutMs)", "System_Mutex.cpp"),
+        ]),
         "/*@UTILS@*/": "\n\n".join([
             one(utils, "static void quiesceSdmmcForRestart()", "System_Utils.cpp"),
             one(utils, "void rebootDevice(const char* reason, const char* auditDetail, uint32_t flushDelayMs)",
                 "System_Utils.cpp"),
             one(utils, "static void factoryreset_doRestart(void* /*arg*/)", "System_Utils.cpp"),
         ]),
+        "/*@EVENTS@*/": "\n\n".join([
+            one(hal, "void deliver(RadioHalEvent type, uint32_t value, uint32_t value2 = 0)", "HAL_Radio.cpp"),
+            one(hal, "void hostedEventHandler(void*, esp_event_base_t base, int32_t id, void* data)",
+                "HAL_Radio.cpp"),
+            one(hal, "esp_err_t registerEvents()", "HAL_Radio.cpp"),
+        ]),
         "/*@START@*/": "\n\n".join([
+            constant(hal, "kBootAttempts"),
             constant(hal, "kSlaveReadyBudgetMs"),
             constant(hal, "kSlaveReadyPollMs"),
             one(hal, "bool hostedLinkUp()", "HAL_Radio.cpp"),
@@ -88,30 +105,25 @@ def main() -> None:
             one(hal, "esp_err_t radioHalHold(bool hold)", "HAL_Radio.cpp"),
             one(hal, "void radioHalSilenceForRestart()", "HAL_Radio.cpp"),
         ]),
+        "/*@PREPARE@*/": "\n\n".join([
+            one(hal, "void radioHalStopTransport()", "HAL_Radio.cpp"),
+            one(hal, "esp_err_t radioHalPrepare()", "HAL_Radio.cpp"),
+        ]),
         "/*@COMPANION@*/": "\n\n".join([
             one(companion, "bool submitOp(Op op, ExecReq::DeferredFn fn, void* arg)", "System_RadioCompanion.cpp"),
             one(companion, "void radioCompanionBeforeRestart()", "System_RadioCompanion.cpp"),
+            one(companion, "void radioCompanionTick()", "System_RadioCompanion.cpp"),
+            one(companion, "bool radioCompanionBlocksRadio(const char** reason)", "System_RadioCompanion.cpp"),
         ]),
     }
 
-    # The companion gates the harness does not compile: nothing restarts the
-    # companion (the health tick, a feature start) once the restart silenced it.
-    plain = strip_comments(companion)
-    tick = extract_block(plain, "void radioCompanionTick()")
-    require(re.search(r"if \(!sBootInitDone \|\| sRestarting\.load\(\)\) return;", tick) is not None,
-            "radioCompanionTick does nothing once the restart silenced the companion")
-    blocks_radio = extract_block(plain, "bool radioCompanionBlocksRadio(const char** reason)")
-    gate = blocks_radio.find("sRestarting.load()")
-    require(0 <= gate < blocks_radio.find("monitorState()"),
-            "radioCompanionBlocksRadio refuses radio features (and never releases the hold) while restarting")
-    # Once the silence latched, the HAL starts no transport and tears none down
-    # (an op already running in the companion worker may still call them).
+    # The gate the harness does not compile: once the silence latched, the HAL
+    # starts no transport (an op already running in the companion worker may
+    # still call it).
     hal_plain = strip_comments(hal)
-    for marker, first in (("static esp_err_t startTransport(bool allowLegacyUpdate)", "prepareBoard()"),
-                          ("void radioHalStopTransport()", "hostedIsInitialized()")):
-        body = extract_block(hal_plain, marker)
-        gate = body.find("if (restartLatched()) return")
-        require(0 <= gate < body.find(first), f"{marker} refuses once the restart latched the C6")
+    body = extract_block(hal_plain, "static esp_err_t startTransport(bool allowLegacyUpdate)")
+    gate = body.find("if (restartLatched()) return")
+    require(0 <= gate < body.find("prepareBoard()"), "startTransport refuses once the restart latched the C6")
     # The restart path does not tear Hosted down under live users.
     silence = strip_comments(blocks["/*@SILENCE@*/"])
     for forbidden in ("hostedDeinit", "esp_hosted_deinit", "radioHalStopTransport"):

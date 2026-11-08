@@ -324,14 +324,18 @@ class CompanionMonitor {
 // ---- transport start: wait for the slave ----------------------------------
 // ESP-Hosted 2.12.13 counts its "waiting for the slave to be ready" polls in a
 // static (transport_drv_reconfigure, 100 x 200 ms) that is reset only on
-// success. Two failed starts in one boot use it up, and every later start then
-// gives up in the same millisecond, although the freshly reset C6 is ready a
-// few hundred ms later (bench log 2026-11-08). Hosted's rx task still finishes
-// the handshake and posts TRANSPORT_UP, so the owner waits for that itself,
-// inside the same budget Hosted would have used: a start whose Hosted wait
-// already spent the budget does not wait twice. It helps only a healthy SDMMC
-// data path; a wedged one (every data transfer timing out) still fails, after
-// the full budget.
+// success. One start that waits it out (a C6 that never answers) uses it up,
+// and every later start in that boot then gives up in the same millisecond as
+// its "Waiting for esp_hosted slave to be ready" line: in the bench log of
+// 2026-11-08 (first retry, retry[100]) Hosted gave up 1735 ms after it
+// started, right after the card init; the version query failed 10 ms later,
+// and Hosted opened the data path at the slave 73 ms after giving up. Its rx
+// task can still finish the handshake and post TRANSPORT_UP (in that log it
+// never did: the SDMMC data path was wedged and every transfer timed out), so
+// the owner waits for it, inside the same budget Hosted would have used: a
+// start whose Hosted wait already spent the budget does not wait twice. It
+// helps only a healthy SDMMC data path; a wedged one (every data transfer
+// timing out) still fails, after the full budget.
 //
 // linkUp(): bool; now(): uint32_t ms (wraps); sleep(uint32_t ms): void.
 // Returns linkUp() at the end.
