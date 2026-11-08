@@ -24,8 +24,9 @@ Report it privately through GitHub's private vulnerability reporting for
 (<https://github.com/CadenGithubB/HardwareOne/security/advisories/new>). The report is visible only
 to you and the maintainer.
 
-If that button is not shown, open a public issue titled "Request for a private security contact"
-that contains no details of the problem, and the maintainer will arrange a private channel.
+If that button is not shown, open a new issue with the **Request a private security contact**
+form. It has no required fields: leave out every detail of the problem, and the maintainer will
+arrange a private channel.
 
 Please include:
 
@@ -73,16 +74,24 @@ here so you can choose a deployment with them in mind.
 
 ### Network and web UI
 
-- The web UI is served over plain **HTTP by default**. HTTPS is a setting (`httpsEnabled`, off by
-  default, needs certificates and a reboot). Over HTTP, logins and session cookies can be read by
-  anyone who can see the traffic on your network.
+- The web UI is served over plain **HTTP by default**. Over HTTP, logins and session cookies can be
+  read by anyone who can see the traffic on your network.
+- HTTPS exists only in builds compiled with `ENABLE_HTTPS=1`, where it is a setting
+  (`httpsEnabled`, off by default, needs certificates and a reboot). It is **compiled out** of the
+  `p4x_eye` board profile and of every deployment (`headless`, `pocket_assistant`, `handheld`).
+  Those builds serve the web UI over HTTP only and cannot be switched to HTTPS.
 
 ### Credentials at rest and physical access
 
-- **Flash encryption is enabled only on the `feathers3_fe` profile** (experimental). Every other
-  board profile (FeatherS3, XIAO ESP32-S3, Feather ESP32 V2, QT Py ESP32, ESP32-P4X-EYE, Waveshare
-  ESP32-P4) builds with flash and NVS encryption off.
-- On those boards, **anyone holding the device can read its stored credentials** by reading the
+- **Flash encryption is enabled only on the `feathers3_fe` profile**, and only in a limited form.
+  Every other board profile (FeatherS3, XIAO ESP32-S3, Feather ESP32 V2, QT Py ESP32, ESP32-P4X-EYE,
+  Waveshare ESP32-P4) and every deployment builds with flash and NVS encryption off.
+- `feathers3_fe` is **experimental**, and its first boot on a chip **burns eFuses and encrypts the
+  flash in place, irreversibly**. It uses Development-mode flash encryption without secure boot.
+  That stops a plain read-out of the flash, but the USB download mode stays open, so someone holding
+  the board can flash their own code and use it to read the decrypted credentials. It does not
+  protect a lost or stolen device.
+- On the other boards, **anyone holding the device can read its stored credentials** by reading the
   flash over USB. `settings.json` is encrypted with a key derived from the chip's eFuse MAC and the
   flash chip's unique ID, and both can be read from the board itself. That ties the file to one
   device; it does not protect it against someone holding the board.
@@ -92,8 +101,8 @@ here so you can choose a deployment with them in mind.
   turn it off. On the ESP32-P4 boards Wi-Fi runs on the ESP32-C6 through ESP-Hosted, and the host
   side keeps Wi-Fi configuration in RAM only; the C6 side has not yet been checked with a flash
   dump.
-- Treat a lost or stolen device as a disclosed Wi-Fi passphrase and disclosed account passwords:
-  change them.
+- On every profile, `feathers3_fe` included, treat a lost or stolen device as a disclosed Wi-Fi
+  passphrase and disclosed account passwords: change them.
 
 ### Bluetooth
 
@@ -113,6 +122,7 @@ here so you can choose a deployment with them in mind.
   device that copies a saved address, or that advertises a matching name before the address is
   saved, could be accepted as the glasses or ring. This has not been demonstrated on hardware.
 
-If you need more than this (an untrusted network, devices that may be lost, untrusted people within
-Bluetooth range), use the `feathers3_fe` profile, turn on HTTPS, set `blesecret` before you turn on
-Bluetooth, and keep the device on a network you control.
+If you need more than this (an untrusted network, untrusted people within Bluetooth range), use a
+build that includes HTTPS and turn it on (where HTTPS is compiled out, the web UI stays plain HTTP),
+set `blesecret` before you turn on Bluetooth, and keep the device on a network you control. No
+profile protects the stored credentials of a device that is lost: change the passwords.

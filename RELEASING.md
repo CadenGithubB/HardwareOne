@@ -43,6 +43,9 @@ Every step below must pass on the exact commit you intend to tag, from a clean t
 4. Tracked tree hygiene: `git grep -nIE '/Users/[a-z]|192\.168\.' -- . ':!components/hardwareone_libs'` is empty.
 5. CHANGELOG `[Unreleased]` lists every user-visible change since the last tag; COMPATIBILITY.md and the
    matrix in README match what you built.
+6. Private vulnerability reporting is on (SECURITY.md and the issue chooser link to it):
+   `gh api repos/CadenGithubB/HardwareOne/private-vulnerability-reporting` returns `{"enabled":true}`.
+   If not, the maintainer turns it on under Settings > Code security > Private vulnerability reporting.
 
 ## Cut a release
 1. Draft notes from `git log <last-tag>..HEAD --oneline`, grouped into Added / Changed / Fixed / Security / Docs.
