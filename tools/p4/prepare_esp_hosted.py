@@ -69,7 +69,9 @@ def cache_roots() -> list[Path]:
 def candidates(source: Path | None) -> list[Path]:
     if source is not None:
         return [source]
-    found = [REPO / "managed_components" / NAME]
+    # fetch_p4_packages.py (run by prepare_sdk.sh) downloads into registry-fetch on a fresh machine.
+    found = [REPO / "managed_components" / NAME,
+             REPO / ".sdk-overrides/registry-fetch/managed_components" / NAME]
     for root in cache_roots():
         if root.is_dir():
             found += sorted(root.glob(f"*/{NAME}_{VERSION}_*"))
@@ -82,8 +84,9 @@ def find_source(source: Path | None) -> Path:
             return path
     raise ValueError(
         f"no pristine esp-hosted {VERSION} (component hash {COMPONENT_HASH[:8]}) found in "
-        f"{'--source' if source else 'managed_components/ or the component manager cache'}. "
-        "Pass --source DIR with the espressif__esp_hosted directory a P4 build of an "
+        f"{'--source' if source else 'managed_components/, .sdk-overrides/registry-fetch/ or the component manager cache'}. "
+        "tools/p4/prepare_sdk.sh fetches it from the ESP Component Registry; offline, "
+        "pass --source DIR with the espressif__esp_hosted directory a P4 build of an "
         "earlier checkout left in managed_components/, or the package from "
         f"components.espressif.com (espressif/esp_hosted {VERSION}).")
 

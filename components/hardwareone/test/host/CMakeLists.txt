@@ -2208,6 +2208,10 @@ add_test(NAME stt_conv_scratch COMMAND ${Python3_EXECUTABLE}
 set_tests_properties(stt_conv_scratch PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME p4_ram_monitor COMMAND ${Python3_EXECUTABLE}
   ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_ram_monitor.py)
+# P4 SDK bootstrap: registry fetch on a fresh machine and the IDF PIE-fix report
+# in prepare_sdk.sh --check, on fake trees (readiness G-26).
+add_test(NAME p4_prepare_sdk COMMAND ${Python3_EXECUTABLE} -B
+  ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_prepare_sdk.py)
 
 add_test(NAME stt_internal_memory COMMAND ${Python3_EXECUTABLE}
   ${CMAKE_CURRENT_LIST_DIR}/test_stt_internal_memory.py ${PHONE_TEST_ARGS})

@@ -100,7 +100,12 @@ tools/vendor_arduino.sh      # clones arduino-esp32 3.3.5 into components/arduin
 `components/arduino` is git-ignored, so a fresh clone has none of it; the script
 vendors it once and `tools/build_board.sh` refuses to build if a patch is missing
 (`tools/vendor_arduino.sh --check` verifies, `--force` re-vendors). ESP32-P4 boards
-additionally need `tools/p4/prepare_sdk.sh` (see above).
+additionally need `tools/p4/prepare_sdk.sh` once per SDK install (see above). On a
+fresh machine it first fetches the pinned ESP-DL and ESP-Hosted packages from the
+ESP Component Registry, so it needs network access to components.espressif.com.
+`tools/p4/prepare_sdk.sh --check` verifies the staged copies and reports whether
+the IDF carries the PIE fix that P4X-EYE speaker labels need
+([`tools/p4/idf-patches/`](../tools/p4/idf-patches/README.md)).
 
 ### 2. Configure your build (optional)
 

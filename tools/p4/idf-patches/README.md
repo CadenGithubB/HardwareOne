@@ -13,4 +13,6 @@ Apply (from the IDF root):
 git -C ~/esp/esp-idf apply "$PWD"/tools/p4/idf-patches/0001-freertos-fix-xesppie-registers-save-restore.patch
 ```
 
-Check: `grep -c 'esp.vst.128.ip  *q3' ~/esp/esp-idf/components/freertos/FreeRTOS-Kernel/portable/riscv/portasm.S` prints 1.
+Check: `tools/p4/prepare_sdk.sh --check` (or `python3 -B tools/p4/check_idf_pie.py --idf ~/esp/esp-idf`) prints
+`present`, `MISSING` or `PARTIAL`. It recognises the instructions the fix adds to `portasm.S` (q3 save and restore,
+XACC stored without advancing the frame), so an upstream 6.0+ tree passes too.
