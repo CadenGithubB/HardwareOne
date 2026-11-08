@@ -691,6 +691,7 @@ setting, regardless of which setting it was.
 | `sd_mounted` / `sd_unmounted` | SD card mounted / unmounted | free MB / - |
 | `sd_write_failed` | SD went unwritable (once per episode) | hint |
 | `fs_low_space` | flash below the log reserve (once per boot) | free bytes |
+| `heap_low` | internal RAM free under 25 KB or its largest block under 16 KB (once per low spell, at most once a minute) | free bytes / `largest <bytes>` |
 | `setting_changed` | a setting was saved | key / value |
 | `settings_save_failed` | settings.json write failed | stage / file |
 | `sensor_started` / `sensor_stopped` | sensor came up / stopped (includes Camera) | sensor name |

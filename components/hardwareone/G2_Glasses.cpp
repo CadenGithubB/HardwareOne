@@ -16,7 +16,7 @@
 #include <stdarg.h>
 #include <atomic>
 #include <algorithm>
-#include <new>          // std::nothrow — for LensUiJob allocation in pageSwapEnqueue
+#include <new>          // std::nothrow — every heap object here refuses on OOM, never aborts
 
 #include <BLEDevice.h>
 #include <BLEClient.h>
@@ -18700,6 +18700,19 @@ static bool connectTemple(G2Temple& t, hw1coex::Purpose purpose) {
     return false;
   }
   if (!t.client) {
+    // One heap callbacks object per temple, reused across recreate cycles:
+    // ~BLEClient never frees the pointer, so a fresh `new` per cycle leaked.
+    // &t is stable (gL/gR are globals), so binding it once is safe. Allocated
+    // before the client so an out-of-memory refuses the connect instead of
+    // aborting, and never leaves a client without its disconnect callbacks.
+    static TempleClientCallbacks* cbL = nullptr;
+    static TempleClientCallbacks* cbR = nullptr;
+    TempleClientCallbacks*& cb = (t.side == 'L') ? cbL : cbR;
+    if (!cb) cb = new (std::nothrow) TempleClientCallbacks(&t);
+    if (!cb) {
+      DEBUG_G2F("[G2-%c] No memory for client callbacks; refusing connect", t.side);
+      return false;
+    }
     t.clientStale = false;
     DEBUG_G2F("[G2-%c] Creating new BLEClient", t.side);
     t.client = BLEDevice::createClient();
@@ -18707,13 +18720,6 @@ static bool connectTemple(G2Temple& t, hw1coex::Purpose purpose) {
       DEBUG_G2F("[G2-%c] BLEDevice::createClient() returned null", t.side);
       return false;
     }
-    // One heap callbacks object per temple, reused across recreate cycles:
-    // ~BLEClient never frees the pointer, so a fresh `new` per cycle leaked.
-    // &t is stable (gL/gR are globals), so binding it once is safe.
-    static TempleClientCallbacks* cbL = nullptr;
-    static TempleClientCallbacks* cbR = nullptr;
-    TempleClientCallbacks*& cb = (t.side == 'L') ? cbL : cbR;
-    if (!cb) cb = new TempleClientCallbacks(&t);
     t.client->setClientCallbacks(cb);
   }
   // Pause sensor polling for the whole connect + GATT-discovery window. This is
@@ -26805,7 +26811,7 @@ static bool g2SessionSubmit(void (*run)(void*), void* payload,
   gLivePageStopFlag = false;
   gLiveTextStopFlag = false;
 
-  auto* job = new G2SessionJob;
+  auto* job = new (std::nothrow) G2SessionJob;
   if (!job) {
     g2SessionSubmitDone();
     return false;
@@ -29947,7 +29953,7 @@ static const char* cmd_g2micrec(const String& argsInput) {
       return "Error: G2 mic rec: already recording — run g2micrec stop first";
     }
     FsLockGuard fsGuard("g2.mic_raw.open");
-    File* f = new File(VFS::openGuarded(path, "w", currentAuthContext(), true));
+    File* f = new (std::nothrow) File(VFS::openGuarded(path, "w", currentAuthContext(), true));
     if (!f || !*f) {
       delete f;
       xSemaphoreGive(gMicRecDrainMutex);
@@ -30110,7 +30116,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
       path = String("/sd/") + path;
     }
     FsLockGuard fsGuard("g2.mic_wav.open");
-    File* f = new File(VFS::openGuarded(path, "w", currentAuthContext(), true));
+    File* f = new (std::nothrow) File(VFS::openGuarded(path, "w", currentAuthContext(), true));
     if (!f || !*f) {
       delete f;
       free(mem);
@@ -33641,7 +33647,7 @@ bool g2ShowBmpFile(const char* path, void (*onDone)()) {
               (unsigned)ESP.getFreeHeap());
     return false;
   }
-  auto* a = new BmpViewerArgs;
+  auto* a = new (std::nothrow) BmpViewerArgs;
   if (!a) return false;
   a->path   = strdup(path);
   a->onDone = onDone;
@@ -35877,7 +35883,7 @@ bool g2ShowKeyboardChunkTest(bool (*onDone)()) {
     return false;
   }
 
-  auto* a = new KbdAbArgs;
+  auto* a = new (std::nothrow) KbdAbArgs;
   if (!a) {
     __atomic_store_n(&gKbdAbStarting, false, __ATOMIC_RELEASE);
     return false;
@@ -36559,7 +36565,7 @@ static bool g2ShowMapPage(void (*onDone)()) {
               (unsigned)(kNeeded / 1024), (unsigned)(kLargest / 1024));
     return false;
   }
-  auto* a = new MapPageArgs;
+  auto* a = new (std::nothrow) MapPageArgs;
   if (!a) return false;
   a->onDone = onDone;
   if (!g2SessionSubmit(g2MapPageWorker, a, g2MapPageDrop, "map_page",
@@ -37070,7 +37076,7 @@ static void g2HealthPageDrop(void* p) { delete (HealthPageArgs*)p; }
 
 static bool g2ShowHealthPage(void (*onDone)()) {
   // Session worker aborts any prior job (incl. Health) before running.
-  auto* a = new HealthPageArgs;
+  auto* a = new (std::nothrow) HealthPageArgs;
   if (!a) return false;
   a->onDone = onDone;
   a->gen = ++gHealthPageGen;
@@ -37748,7 +37754,7 @@ bool g2ShowCameraViewer(void (*onDone)()) {
               (unsigned)ESP.getFreeHeap());
     return false;
   }
-  auto* a = new CameraViewerArgs;
+  auto* a = new (std::nothrow) CameraViewerArgs;
   if (!a) return false;
   a->onDone = onDone;
   if (!g2SessionSubmit(g2CameraViewerWorker, a, g2CameraViewerDrop, "cam_view",
@@ -38217,7 +38223,7 @@ bool g2ShowCameraStream(void (*onDone)()) {
               (unsigned)ESP.getFreeHeap());
     return false;
   }
-  auto* a = new CameraStreamArgs;
+  auto* a = new (std::nothrow) CameraStreamArgs;
   if (!a) return false;
   a->onDone = onDone;
   if (!g2SessionSubmit(g2CameraStreamWorker, a, g2CameraStreamDrop, "cam_stream",
@@ -38541,7 +38547,7 @@ bool g2ShowBmpFileFullScreen(const char* path, void (*onDone)()) {
               (unsigned)ESP.getFreeHeap());
     return false;
   }
-  auto* a = new BmpFullViewerArgs;
+  auto* a = new (std::nothrow) BmpFullViewerArgs;
   if (!a) return false;
   a->path   = strdup(path);
   a->onDone = onDone;
@@ -38761,7 +38767,7 @@ bool g2ShowJpgFile(const char* path, void (*onDone)()) {
               (unsigned)ESP.getFreeHeap());
     return false;
   }
-  auto* a = new JpgViewerArgs;
+  auto* a = new (std::nothrow) JpgViewerArgs;
   if (!a) return false;
   a->path   = strdup(path);
   a->onDone = onDone;
@@ -38883,7 +38889,7 @@ bool g2ShowJpgFileFullScreen(const char* path, void (*onDone)()) {
               (unsigned)ESP.getFreeHeap());
     return false;
   }
-  auto* a = new JpgFullViewerArgs;
+  auto* a = new (std::nothrow) JpgFullViewerArgs;
   if (!a) return false;
   a->path   = strdup(path);
   a->onDone = onDone;

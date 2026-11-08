@@ -733,6 +733,7 @@ EVENT_SENTENCES = {
     'ota_recovery_entered': ('system', 'Entered the recovery updater ({subject})'),
     'ota_credential_changed': ('security', 'Recovery credential {subject} by {detail}'),
     'firmware_changed': ('system', 'Running new firmware: {subject}'),
+    'heap_low': ('system', 'Device memory running low: {subject} B free ({detail})'),
     # --- storage ---
     'sd_mounted': ('store', 'SD card mounted ({detail})'),
     'sd_unmounted': ('store', 'SD card unmounted'),

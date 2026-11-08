@@ -36,6 +36,8 @@ everything user-visible since the v0.99.99 tag (55 commits).
 - `NOTICE.md` listing bundled third-party code and licences; `docs/COMPATIBILITY.md` (peer versions and
   the 1.x upgrade promise); the 1.0 release-readiness assessment tracked in `docs/`.
 - Heap-poisoning diagnostic build profile for memory-corruption hunts (bench use).
+- New `heap_low` event when internal RAM runs low, so automations and `events.log` can react
+  (previously a console warning only).
 
 ### Changed
 - `g2_worn` event renamed `g2_plugin_alive`; the old name resolves as an alias so saved automations and
@@ -80,6 +82,8 @@ everything user-visible since the v0.99.99 tag (55 commits).
   updater, and gives the re-provisioning steps; the same warning is in `KNOWN_ISSUES.md`, and
   COMPATIBILITY and the user guide name the OTA re-provisioning steps after the 1.0 full erase.
   Host suite `ota_pair_audit_depends`.
+- Boot automations whose condition is false no longer leak their command strings on every boot.
+- Glasses pages and connects refuse when memory is short instead of rebooting the device.
 
 ### Docs
 - Private network names, addresses and account paths replaced with placeholders throughout the tracked

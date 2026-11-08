@@ -1184,6 +1184,11 @@ void runAutomationsOnBoot() {
                    id, autoName.c_str(), condition.c_str());
           appendAutoLogEntry("AUTO_SKIP", skipMsg);
         }
+        // The command copies were made before the condition was known; a
+        // skipped automation releases them here (they used to leak each boot).
+        for (int ci = 0; ci < cmdsCount; ++ci) {
+          free(cmdsList[ci]);
+        }
         pos = objEnd + 1;
         continue;
       }

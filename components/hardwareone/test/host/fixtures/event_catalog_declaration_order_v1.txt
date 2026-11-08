@@ -172,3 +172,4 @@ stt_started
 stt_stopped
 stt_segment
 stt_speaker
+heap_low

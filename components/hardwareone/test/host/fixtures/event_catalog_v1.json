@@ -224,7 +224,8 @@
         "backup_restored",
         "config_file_corrupt",
         "secret_decrypt_failed",
-        "display_init_failed"
+        "display_init_failed",
+        "heap_low"
       ]
     },
     {
