@@ -118,6 +118,13 @@ tools/build_board.sh feathers3                 # -> build-feathers3/
 tools/build_board.sh feathers3 -p PORT flash monitor
 ```
 
+> **First install on a used board.** A board that ran another firmware, an older HardwareOne
+> or a different partition layout should be erased first, or the old filesystem and NVS collide
+> with the new image: `idf.py -p PORT erase-flash`, then the flash command above. If the serial
+> monitor stops at `FATAL: Filesystem initialization failed`, that is this case: the board is not
+> damaged and nothing of yours is lost that was not already unreadable; erase and flash again.
+> (The same erase is what the move from 0.99.x to 1.0 asks for; see `docs/COMPATIBILITY.md`.)
+
 The wrapper reads the chip target from the board file's `# HW_TARGET:` marker and always passes `HW_BOARD`, so there is no separate `set-target` step. Any other idf.py action (`monitor`, `menuconfig`, `fullclean`, …) passes straight through. Run `tools/build_board.sh` with no arguments to list the boards it knows about.
 
 > **`boards/*.ota.defaults` files are not boards.** They are OTA-only sdkconfig

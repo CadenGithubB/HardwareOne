@@ -430,9 +430,41 @@ Sessions and bans are managed with `sessionlist`, `sessionrevoke`, `ban` /
 
 ### Account recovery
 
-`factoryreset` wipes user accounts and reboots into the setup wizard. It is the
-intended way back in if you lose admin credentials - device settings and files
-are not the target of the wipe, accounts are.
+`factoryreset` deletes every account, the pending account requests and each
+user's own settings, then reboots into the setup wizard; device settings and
+files stay. It is an administrator command that must be run from a logged-in
+admin session, so it is **not** a way back in once the admin credentials are
+lost:
+
+- With a second administrator account: that admin signs in and runs
+  `userresetpassword <user> <pass>` (the user chooses a new password at the next
+  login), or `factoryreset` to start over.
+- With a single admin account and no other way in: erase the device over the
+  cable (`idf.py -p PORT erase-flash`, or erase just the LittleFS region) and
+  flash again. This removes settings and captured data as well; keep backups
+  (`backup` / Backup & Restore below) if they matter.
+
+First-time setup refuses reserved owner names (`system`, `AuthBypass`, the
+bond admin) and passwords shorter than six characters, so a new device cannot
+be set up into a lockout. Compatibility and upgrade promises:
+[COMPATIBILITY.md](COMPATIBILITY.md).
+
+### Update and recovery
+
+- **Cable update** works on every board: build (or download) the image for your
+  board and flash the app over USB. On ESP32-P4 boards the app is written alone
+  (`esptool write_flash 0x10000 <app>.bin`); the filesystem and your data stay.
+- **Recovery OTA layout** (`HW_OTA_LAYOUT=1`, FeatherS3, Feather ESP32 V2, QT Py
+  ESP32; the XIAO ESP32-S3 through the `pocket_assistant` deployment): a signed
+  update is staged over Bluetooth or the recovery access point, applied on
+  probation and confirmed with `otaack`; `otastatus` shows the state. Setting it
+  up is a one-time, destructive migration described in
+  [OTA_DEVICE_SETUP.md](OTA_DEVICE_SETUP.md). A layout counts as supported only
+  when the support matrix in the README lists a dated PASS for it on a current
+  image; until then it is experimental and the cable path is the supported one.
+- **Moving from 0.99.x to 1.0** is a full-erase install (`erase-flash`, then
+  flash, then the setup wizard). Within 1.x, settings, accounts, networks and
+  automations are kept across updates ([COMPATIBILITY.md](COMPATIBILITY.md)).
 
 ---
 

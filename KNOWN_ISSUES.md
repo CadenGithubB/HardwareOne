@@ -1,0 +1,17 @@
+# Known issues
+
+Open problems that affect users, with the workaround where one exists. Entries leave when the fix
+is on `main` and has a dated hardware check. Readiness item P1-12; the release gate in `RELEASING.md`
+requires every open P1 defect to be listed here or fixed.
+
+| Area | Problem | Workaround | Status |
+|---|---|---|---|
+| ESP32-P4 (P4X-EYE, Waveshare) | Occasional reboot (`reset=panic`, heap-corruption abort or a load fault in the VFS table) a few seconds after a speech session ends or when one starts with the radio on. Root cause found on 2026-11-07: the CPU clock is switched (400 MHz during a session, lower afterwards) without the MSPI/PSRAM speed-mode sync, so PSRAM transfers land at the wrong address. | Keep the CPU at a constant clock (Performance power mode) until the fix lands. | Fix (clock switch with the MSPI sync and memory quiesce) is on branch `claude/stt-mic-path`, verified on the bench P4X-EYE for 300 clock toggles and 40 fast sessions; pending merge. See `docs/P4X_PANIC_HUNT_20261107.md`. |
+| ESP32-P4 | `task_wdt: IDLE0` register dumps ~8 s after boot and right after a Wi-Fi join: the main loop holds core 0 for 7-9 s (LOOPHEALTH IO stall). Cosmetic, the watchdog does not panic. | None needed. | Open; a ticket, not a release blocker. |
+| Local STT (P4) | A speech session occasionally fails to start with `warm-up failed: Cancelled` (4 of 40 fast start/stop cycles on 2026-11-07). | Start it again. | Open. |
+| Local STT (P4) | Quiet speech more than about a foot from the microphone is not captioned: the onset rule needs speech ~10 dB above the room. | Speak closer; a bench-verified pre-emphasis onset judge (`sttdecisionpre`) and PDM gain/high-pass knobs are on branch `claude/stt-mic-path`, default off. | Pending merge; see `docs/STT_MIC_PATH_INVESTIGATION_20261107.md`. |
+| Debug logging | Two persistent owners of the debug mask: the system-log autostart re-applies the saved `log start flags=` mask on every boot, so a mask turned off at runtime returns after a reboot. | Clear the saved flags with `log` before rebooting. | Open (readiness Section 8). |
+| Host test suite | The four browser suites (`map_live_browser`, `g2_status_browser`, `sensor_mic_card`, `logging_system_config_browser`) are disabled without Node.js; `ctest` reports them as not run. | Install Node.js (`HW1_NODE_EXECUTABLE` for a custom path) before the release gate. | By design; documented in `RELEASING.md`. |
+| OTA | The recovery OTA layouts have no dated PASS on a current image (last FeatherS3 record 2026-08-05 at v0.99.8; Feather V2 2026-08-25). | Cable update until the release bench run records PASS lines. | Scheduled for the release candidate bench (readiness P0-6). |
+| Account recovery | A single-account device cannot recover a lost admin password in place: `factoryreset` needs a super-admin login. | Keep a second admin, or erase the LittleFS region over the cable (settings and captures are lost). | Documented in `docs/COMPATIBILITY.md`; first-time setup now refuses names that would lock the device out. |
+| Waveshare ESP32-P4 Touch LCD 5 | Experimental board: bring-up acceptance records exist, but no soak or OTA qualification. | Use as a development board. | Experimental in the support matrix. |
