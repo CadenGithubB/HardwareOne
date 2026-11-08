@@ -110,6 +110,10 @@ everything user-visible since the v0.99.99 tag (55 commits).
   is single-hop (the code never relays `PAIR_*` frames), while key exchange and encrypted session setup
   between devices that share the mesh passphrase do travel through relays. It no longer also claims
   relays carry the initial pairing handshake.
+- `KNOWN_ISSUES.md` lists that `openwifi` holds the shared command executor while it connects: up to
+  about 150 s for the best-network hunt (the web "save and connect" button) and up to about 160 s for
+  `--index`/`--saved-id` (three 35 s attempts, then the rejoin of the previous network), with the web
+  caller timing out at 60 s. Deferred past 1.0.
 - Private network names, addresses and account paths replaced with placeholders throughout the tracked
   tree; the Arduino patch README names every patch in replay order and the stale variant note is gone;
   QUICKSTART and README make vendoring step 1; two P4X-EYE Bluetooth reliability investigations and the
