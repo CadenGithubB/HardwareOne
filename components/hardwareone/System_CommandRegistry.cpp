@@ -345,6 +345,7 @@ static constexpr CommandModule gCommandModules[] = {
     "matrix clear/fill and matrix on/off control the display. matrix brightness <0-15> and matrix rotation <0-3> persist; "
     "matrix blink <0-3> selects off/2Hz/1Hz/0.5Hz. matrixbus <0|1> and matrixaddress <0x70-0x77> require reboot. "
     "matrix size 8x8 uses one square; matrix panel <0|1> selects the physical square. matrix size 16x8 restores both. "
+    "matrixbrightness/matrixrotation/matrixsquare/matrixpanel save without applying (used by the settings editors). "
     "Use an unused non-0x70 address when sharing a bus with a PCA9685. Static text clips at the display edge.",
     matrixCommands, &matrixCommandsCount, 0, nullptr },
 #endif
@@ -856,8 +857,8 @@ static constexpr CommandModule gCommandModules[] = {
 #if ENABLE_LLM_BACKEND
   { "llm",        "On-device LLM text generation", "On-device large language model that runs a quantized model file entirely on the "
     "device (model weights held in PSRAM). A model must be loaded before generation: "
-    "llmload [file.bin] loads one (bare filenames are looked up on the SD card under "
-    "/sd/llm then internal /system/llm), llmmodels lists available files, llmunload "
+    "llmload [file.bin] loads one (bare filenames are looked up in internal /system/llm "
+    "first, then on the SD card under /sd/llm), llmmodels lists available files, llmunload "
     "frees the PSRAM, llmstatus shows engine state, and llmautostart 0|1 / "
     "llmdefaultmodel control boot-time loading. Two generate forms: bare 'llmgenerate "
     "<prompt>' BLOCKS and prints the whole reply, while 'llmgenerate json ...' starts "

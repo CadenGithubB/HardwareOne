@@ -586,10 +586,9 @@ ESP-NOW V3 is Hardware One's inter-device wireless protocol. Devices pair with a
 ### Multi-hop (reaching devices out of radio range)
 Devices relay for each other, so the mesh reaches further than any single radio.
 If A can hear B and B can hear C, then A and C can talk even though they cannot
-hear each other — including the initial pairing handshake. Nothing to configure:
-each device learns the routes automatically from its neighbours (allow about a
-minute after boot), and traffic goes back to the direct link the moment two
-devices can hear each other again.
+hear each other. Nothing to configure: each device learns the routes
+automatically from its neighbours (allow about a minute after boot), and traffic
+goes back to the direct link the moment two devices can hear each other again.
 
 ```
 espnowmeshroutes                - Who this device can reach, and via whom
@@ -604,9 +603,13 @@ else is being reached through the device named in the **VIA** column. Turn
 (a battery-tight node, say) — it will still send and receive over multi-hop
 itself. Set `espnowmeshttl 1` to opt a device out of multi-hop entirely.
 
-Two things stay deliberately single-hop: **pairing**, so you can only pair with
-something you are physically near, and **file transfers**, which are too large
-to relay. Messages and remote commands relay fine, but a relayed message is
+Two things stay deliberately single-hop: **discovery and pairing requests** (the
+discover, request and accept exchange in the steps above), so discovery only finds
+devices in radio range, and **file transfers**, which are too large to relay. Key
+exchange and encrypted session setup do travel through relays, so a paired peer
+that moves out of range stays reachable, and pairing by MAC
+(`espnowpairsecure <mac> <name>`) with a device that shares the mesh passphrase
+completes through relays too. The passphrase, not distance, controls who can join. Messages and remote commands relay fine, but a relayed message is
 capped at ~130 characters per piece.
 
 ### Bonding (Master/Worker)

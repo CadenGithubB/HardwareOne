@@ -1491,6 +1491,29 @@ three overviews against their command rows:
 `--source-dir <dir>` points the suite at another copy of the component, and
 that repository's tool is used. The pre-fix tree fails all three overviews.
 
+## Command-registry drift gate
+
+```sh
+python3 components/hardwareone/test/host/test_command_registry_gate.py
+```
+
+`command_registry_gate` runs the two release gates of
+`tools/command_registry.py` and fails if either exits non-zero:
+
+- `audit`: no duplicate command names, no unregistered or dangling
+  `CommandEntry` arrays, no command string in code that resolves to nothing,
+  and every `SettingEntry` cmdKey binds to a command. A table defined in
+  mutually exclusive `#if`/`#else` branches of one file (the two
+  `otaCommands[]` in `System_OTA.cpp`) counts once; the first branch is read.
+- `reference --check`: `docs/COMMAND_REFERENCE.md` is byte-identical to a
+  fresh render, so a registry or module-description change must be followed by
+  `python3 tools/command_registry.py reference`.
+
+On failure the gate's own report (the audit sections, or the drift summary
+with the missing and stale command rows) is printed. `--repo <dir>` runs
+another checkout's tool against its own sources; the pre-fix tree fails both
+gates (13 audit problems; no `--check`).
+
 ## Repository tool pins
 
 ```sh

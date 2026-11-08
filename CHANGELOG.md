@@ -92,8 +92,28 @@ everything user-visible since the v0.99.99 tag (55 commits).
   Host suite `ota_pair_audit_depends`.
 - Boot automations whose condition is false no longer leak their command strings on every boot.
 - Glasses pages and connects refuse when memory is short instead of rebooting the device.
+- The HT16K33 matrix brightness, rotation, square and panel settings can be saved from the web and
+  display settings editors: their rows named `matrixbrightness`, `matrixrotation`, `matrixsquare` and
+  `matrixpanel`, and no such commands existed. The four admin commands now save the value; the matrix
+  picks it up on the next `matrix` command, as before (`matrix brightness|rotation|size|panel` still
+  apply at once).
+- `help llm` gives the model search order the code uses: internal `/system/llm` first, then `/sd/llm`.
+- `tools/command_registry.py audit` exits 0 on a clean tree: the two `otaCommands[]` tables in opposite
+  `#if HW1_OTA_LAYOUT` branches count as one table instead of nine duplicate commands. New
+  `reference --check` fails when `docs/COMMAND_REFERENCE.md` is out of date; host suite
+  `command_registry_gate` runs both, and the RELEASING gate names it.
 
 ### Docs
+- `docs/COMMAND_REFERENCE.md` regenerated: it lacked `memdiag`, the four matrix setters and the
+  microphone/STT tuning commands added since the last regeneration, and listed the OTA commands twice.
+- The user guide's multi-hop section states one rule for pairing: the discover/request/accept exchange
+  is single-hop (the code never relays `PAIR_*` frames), while key exchange and encrypted session setup
+  between devices that share the mesh passphrase do travel through relays. It no longer also claims
+  relays carry the initial pairing handshake.
+- `KNOWN_ISSUES.md` lists that `openwifi` holds the shared command executor while it connects: up to
+  about 150 s for the best-network hunt (the web "save and connect" button) and up to about 160 s for
+  `--index`/`--saved-id` (three 35 s attempts, then the rejoin of the previous network), with the web
+  caller timing out at 60 s. Deferred past 1.0.
 - Private network names, addresses and account paths replaced with placeholders throughout the tracked
   tree; the Arduino patch README names every patch in replay order and the stale variant note is gone;
   QUICKSTART and README make vendoring step 1; two P4X-EYE Bluetooth reliability investigations and the

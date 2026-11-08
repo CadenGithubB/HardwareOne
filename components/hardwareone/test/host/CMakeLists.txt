@@ -1939,9 +1939,11 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_ble_retired_code.py
           ${BLE_RETIRED_CODE_TEST_ARGS})
 
-# Module overview text (README "Module overview text") and repository tool pins
-# (README "Repository tool pins"). Source text and Python only; nothing is compiled.
-foreach(test_name IN ITEMS module_overview_text tool_pins)
+# Module overview text (README "Module overview text"), repository tool pins
+# (README "Repository tool pins") and the command-registry drift gate (README
+# "Command-registry drift gate": `command_registry.py audit` and
+# `reference --check` both exit 0). Source text and Python only; nothing is compiled.
+foreach(test_name IN ITEMS module_overview_text tool_pins command_registry_gate)
   add_test(
     NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE}
