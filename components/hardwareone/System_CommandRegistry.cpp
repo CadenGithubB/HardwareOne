@@ -850,8 +850,11 @@ static constexpr CommandModule gCommandModules[] = {
     "ring query requests one reading; its raw form is admin-only, confirms every SET and refuses "
     "user-profile writes. ring control <collection|lowpower> <preserve|on|off> (admin) saves a desired "
     "state applied asynchronously, which the OLED and web Health controls also use; ring control "
-    "refresh reads low power back. Bridging ring data onto the G2 glasses proved a dead end and was "
-    "removed.", g2RingCommands, &g2RingCommandsCount, 0, nullptr },
+    "refresh reads low power back. The G2's own Health panel is fed the way the Even app feeds it: "
+    "ring panel status and ring panel preview [test] show the snapshot and its bytes; ring panel send "
+    "[test] (admin) sends one; ring panel feed [on|off] (admin; ring panel on and ring panel off are "
+    "shorthands) feeds it automatically, saved and off by default, refreshing ring history every "
+    "ring panel history [minutes] (admin, default 30).", g2RingCommands, &g2RingCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_LLM_BACKEND
   { "llm",        "On-device LLM text generation", "On-device large language model that runs a quantized model file entirely on the "

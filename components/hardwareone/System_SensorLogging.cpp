@@ -51,6 +51,7 @@
   #include "i2csensor_sths34pf80.h"
 #endif
 #include "G2_Ring.h"       // ring telemetry + g2RingWearName (stubs without BT/G2)
+#include "G2_HealthPush.h" // g2HealthPushWantsRingData (stub without BT/G2/R1)
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   #include "BLE_Peers.h"   // blePeerRequestReseek — Health logging mine when ring down
 #endif
@@ -1908,6 +1909,9 @@ const char* buildHealthStatusJson(char* buf, size_t cap) {
 void healthLoggingTick() {
 #if ENABLE_R1_HEALTH
   const uint32_t now = millis();
+  // The glasses' Health panel feed schedules its ring history refreshes here,
+  // beside the timed vitals read below, so ring work is planned in one place.
+  g2HealthPushMainTick(sHtMineState != HT_MINE_IDLE);
 
   // On-demand Health-page refresh → log whenever R1 sensorlog is running
   // (Track or manual `sensorlog sensors r1`), not only on the timed mine.
@@ -1937,7 +1941,10 @@ void healthLoggingTick() {
     }
   }
 
-  if (!gSettings.healthLoggingEnabled) {
+  // The glasses' Health panel feed reuses this timed vitals read while it runs
+  // and the right temple is connected, so the panel stays fresh with health
+  // logging off; the sample-to-file step below still needs logging on.
+  if (!gSettings.healthLoggingEnabled && !g2HealthPushWantsRingData()) {
     sHtMineState = HT_MINE_IDLE;
     return;
   }
@@ -1962,9 +1969,14 @@ void healthLoggingTick() {
         // Non-blocking: schedules connectSaved on the next bleAutoReconnectTick.
         // Respects user ring disconnect; works even if bleautoreconnect is off
         // (one-shot). With autoReconnect on, drop recovery continues via backoff.
-        blePeerRequestReseek(BLE_PEER_R1_RING);
+        // Only health logging asks for this: when the glasses' Health panel
+        // feed is the only reason this read runs, the ring's own reconnect
+        // settings decide.
+        if (gSettings.healthLoggingEnabled) blePeerRequestReseek(BLE_PEER_R1_RING);
         if (isDebugFlagSet(DEBUG_LOGGER)) {
-          DEBUG_LOGGERF("healthlogging: mine due but ring down — requested BLE reseek");
+          DEBUG_LOGGERF("healthlogging: mine due but ring down — %s",
+                        gSettings.healthLoggingEnabled ? "requested BLE reseek"
+                                                       : "panel feed only, no reseek");
         }
       }
     }
@@ -2696,6 +2708,11 @@ static const SettingEntry sensorLogSettingEntries[] = {
 #if ENABLE_R1_HEALTH
   { "healthLoggingEnabled", SETTING_BOOL, &gSettings.healthLoggingEnabled, 0, 0, nullptr, 0, 1, "Health logging", nullptr, false, nullptr, "healthlogging" },
   { "healthLoggingPollIntervalSec", SETTING_INT, &gSettings.healthLoggingPollIntervalSec, 900, 0, nullptr, 60, 86400, "Health logging poll interval (sec)", nullptr, false, nullptr, "healthlogging interval" },
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+  // Stock G2 Health panel feed (G2_HealthPush.cpp); the commands are the only writers.
+  { "g2HealthPanelFeed", SETTING_BOOL, &gSettings.g2HealthPanelFeed, 0, 0, nullptr, 0, 1, "Glasses Health panel feed", nullptr, false, nullptr, "ring panel feed" },
+  { "g2HealthPanelHistoryMin", SETTING_INT, &gSettings.g2HealthPanelHistoryMin, 30, 0, nullptr, 10, 1440, "Glasses Health panel history refresh (min)", nullptr, false, nullptr, "ring panel history" },
+#endif
   // These persisted desires are intentionally read-only in the generic
   // settings UI. Mutations must use G2_Ring's dedicated async setters so a
   // flash write is never mistaken for a ring ACK/readback.
