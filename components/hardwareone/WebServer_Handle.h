@@ -58,3 +58,9 @@ bool httpServerStopSafe();
 // Runs a pending deferred stop once the last web waiter has drained. Called
 // once per pass from hardwareone_loop().
 void httpServerStopPendingTick();
+
+// A deferred stop is waiting for its web request to drain: the handle is still
+// set, but the server goes away at the next main-loop pass that finds no
+// waiter. A caller that wants the server running afterwards must wait for it
+// (the C6 companion's HTTP restore after a radio reset).
+bool httpServerStopPending();

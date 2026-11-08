@@ -52,13 +52,25 @@ everything user-visible since the v0.99.99 tag (55 commits).
   the SDMMC host without idling its DMA and was taken with the C6 link streaming. An intentional
   restart now holds the C6 in reset, drops the Wi-Fi stop RPC, takes the filesystem lock and waits for
   a cut-off transfer to time out first; the C6 enable line is latched low (pad hold) so a companion
-  start that was already running cannot release it before the restart. Separately, a companion retry
+  start that was already running cannot release it before the restart. Before the hold it closes
+  ESP-Hosted's TX gate and gives the write task 100 ms to send what was already queued, so packets the
+  radio users keep producing during the drain are refused instead of timing out against the held C6
+  (bench 2026-11-08: `sdmmc_send_cmd returned 0x107` and `Unrecoverable host sdio state` in 7 of 15
+  reboots); a restart takes 100 ms longer and may log Hosted's `tx fail`/`drop pkt` lines in the
+  drain. Separately, a companion retry
   now waits for the C6 instead of failing in the same millisecond once ESP-Hosted's retry counter is
   spent; that helps a healthy link after earlier failed starts, does not recover a wedged SDMMC host,
   and makes a retry on a dead companion last up to 20 s. The boot's second C6 attempt reused the
   failed Hosted session and gave up in the same millisecond; it now closes the session, resets the C6
   and waits again, so a boot with a dead companion (or a wedged SDMMC host) takes up to about 20 s
   longer. Not yet tested on hardware.
+- P4X-EYE: after `c6restart`, `c6hold off`, an automatic companion recovery or a companion update
+  with Wi-Fi up, the web page stayed unreachable (connection refused) until a reboot, though Wi-Fi
+  and BLE came back. The companion stops Wi-Fi with `radiopower off`, which also stops the HTTP
+  server, and `radiopower on` restores only ESP-NOW and Wi-Fi (present since 2026-10-02, bench
+  2026-11-08). The companion now restarts a server that was running once Wi-Fi is back: at once, or,
+  when the link or a stop deferred past an open web request comes later, from the main loop within
+  60 s. A plain `radiopower off`/`on` still leaves the web server off. Not yet tested on hardware.
 - Two crashes: the QuickNote worker's stack and Arduino's unlocked `NetworkEvents`.
 - BLE setup worker retires a client after an OPEN timeout and bounds a stuck job.
 - Phone pipe isolates CLOSE and DISCONNECT by peer address and keeps the first cause of a lost session.

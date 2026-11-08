@@ -26,8 +26,20 @@ must not raise EN again before the restart; nothing (the tick, a feature
 start, even before boot init) restarts the companion. A start whose Hosted
 wait gave up must still wait for TRANSPORT_UP inside Hosted's budget, and
 boot attempt 2 must reset the C6 again. A source check covers the one gate
-the harness does not compile (startTransport). --source-dir points the suite
-at another copy of the component (the pre-fix tree fails).
+the harness does not compile (startTransport).
+
+Bench 2026-11-08, second run: 7 of 15 reboots still logged "sdmmc_send_cmd
+returned 0x107" and "Unrecoverable host sdio state" in the drain, packets the
+radio users queued after EN went low; and after `c6restart` the web server
+never came back (Wi-Fi and BLE did). The silence must close Hosted's TX gate
+(set_transport_state RX_ACTIVE) and let the write task flush before it latches
+EN, so no CMD53 meets the held C6. The real snapshotUsers, stopUsers,
+restoreUsers, recoverProc, holdProc and releaseProc and the HTTP restore run
+over a fake network whose `radiopower off` stops the server and whose
+`radiopower on` does not start it: after a c6restart or c6hold off the server
+must run again, also after a stop deferred past a web request or a late Wi-Fi
+link (main-loop tick, 60 s window). --source-dir points the suite at another
+copy of the component (the pre-fix tree fails).
 """
 from __future__ import annotations
 
@@ -56,9 +68,9 @@ def one(source: str, marker: str, name: str) -> str:
     return extract_block(source, marker)
 
 
-def constant(source: str, name: str) -> str:
-    match = re.search(r"constexpr (?:uint32_t|int) " + name + r" = [^;]+;", source)
-    require(match is not None, f"HAL_Radio.cpp defines {name}")
+def constant(source: str, name: str, where: str = "HAL_Radio.cpp") -> str:
+    match = re.search(r"constexpr (?:uint32_t|uint8_t|int) " + name + r" = [^;]+;", source)
+    require(match is not None, f"{where} defines {name}")
     return match.group(0)
 
 
@@ -100,6 +112,8 @@ def main() -> None:
             one(hal, "esp_err_t startOnce(bool allowLegacyUpdate)", "HAL_Radio.cpp"),
         ]),
         "/*@SILENCE@*/": "\n\n".join([
+            constant(hal, "kHostedTransportRxOnly"),
+            constant(hal, "kHostedTxFlushMs"),
             one(hal, "static bool restartLatched()", "HAL_Radio.cpp"),
             one(hal, "static void latchC6EnableLow()", "HAL_Radio.cpp"),
             one(hal, "esp_err_t radioHalHold(bool hold)", "HAL_Radio.cpp"),
@@ -109,6 +123,21 @@ def main() -> None:
             one(hal, "void radioHalStopTransport()", "HAL_Radio.cpp"),
             one(hal, "esp_err_t radioHalPrepare()", "HAL_Radio.cpp"),
         ]),
+        "/*@USERS_TYPE@*/": one(companion, "struct RadioUsers ", "System_RadioCompanion.cpp") + ";",
+        "/*@USERS@*/": "\n\n".join(
+            [constant(companion, "kHttpRestoreWindowMs", "System_RadioCompanion.cpp")]
+            + [one(companion, marker, "System_RadioCompanion.cpp") for marker in (
+                "RadioUsers snapshotUsers()",
+                "void stopUsers(RadioUsers& users)",
+                "void armHttpRestore()",
+                "void restartHttpServer()",
+                "void httpRestoreProc(void*)",
+                "void httpRestoreTick(uint32_t now)",
+                "void restoreUsers(const RadioUsers& users)",
+                "void recoverProc(void*)",
+                "void holdProc(void*)",
+                "void releaseProc(void*)",
+            )]),
         "/*@COMPANION@*/": "\n\n".join([
             one(companion, "bool submitOp(Op op, ExecReq::DeferredFn fn, void* arg)", "System_RadioCompanion.cpp"),
             one(companion, "void radioCompanionBeforeRestart()", "System_RadioCompanion.cpp"),

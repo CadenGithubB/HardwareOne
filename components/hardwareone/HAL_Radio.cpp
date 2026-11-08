@@ -28,6 +28,15 @@
 #include "freertos/task.h"
 #include "Radio_CompanionCore.h"
 
+// ESP-Hosted 2.12.13's own TX gate (host/drivers/transport/transport_drv.{h,c};
+// external linkage, but not in the component's public include dirs). Every
+// producer goes through esp_hosted_tx or the STA/AP/serial wrappers in front
+// of it (lwIP, RPC, BLE HCI), and each refuses a new packet unless the state
+// is TRANSPORT_TX_ACTIVE. radioHalSilenceForRestart lowers it before it holds
+// the C6.
+extern "C" uint8_t is_transport_tx_ready(void);
+extern "C" void set_transport_state(uint8_t state);
+
 namespace {
 
 constexpr const char* kTag = "HW1_RADIO";
@@ -88,6 +97,13 @@ constexpr int kBootAttempts = 2;  // each attempt resets the C6 and waits up to 
 // retry counter made it give up at once (hw1::radio::waitForTransportUp).
 constexpr uint32_t kSlaveReadyBudgetMs = 20000;
 constexpr uint32_t kSlaveReadyPollMs = 50;
+// transport_drv.h TRANSPORT_RX_ACTIVE: receive stays up, TX is refused.
+constexpr uint8_t kHostedTransportRxOnly = 1;
+// After the TX gate closes, Hosted's write task still empties its queue (the
+// packets producers had already queued) while the C6 runs and acknowledges
+// them. Its priority-23 task needs a few ms for a full queue at 20 MHz 4-bit;
+// the margin covers a slave briefly out of RX buffers.
+constexpr uint32_t kHostedTxFlushMs = 100;
 
 bool sBoardPrepared = false;
 bool sPrepared = false;        // radioHalPrepare() ran and the transport came up at least once
@@ -699,21 +715,8 @@ void radioHalSilenceForRestart() {
   // in the last milliseconds before the SDMMC reset; Hosted's own restart
   // helper (hosted_restart_host) unregisters it for the same reason.
   esp_unregister_shutdown_handler(reinterpret_cast<shutdown_handler_t>(&esp_wifi_stop));
-  // Hold the C6 in reset so it stops sending: no new rx data or interrupts,
-  // and a transfer it was in the middle of ends on the SDMMC timeout instead
-  // of streaming into the reset. Hosted stays initialised on purpose: its
-  // teardown deletes tasks that may be inside an SDMMC transaction, and its
-  // users are still running.
-  //
   // The latch flag goes first, so radioHalHold(false), startTransport and
-  // radioHalStopTransport refuse from here on. The pad is then latched low
-  // with gpio_hold_en: a Start/Recover op that was already inside
-  // hostedInitWiFi (Hosted's transport_gpio_reset pulses EN, at the start and
-  // every 50 slave-ready polls) cannot raise it again during the drain.
-  // Hosted never touches the hold in this build (host power save is off, so
-  // H_HOST_PS_ALLOWED is 0). EN stays low through the CPU reset; prepareBoard()
-  // releases the hold at the next boot before Hosted's reset pulse, as after
-  // deep sleep.
+  // radioHalStopTransport refuse from here on (see below).
   portENTER_CRITICAL(&sLock);
   sRestartLatched = true;
   sHeld = true;
@@ -721,6 +724,35 @@ void radioHalSilenceForRestart() {
   sSessionBleLinks = 0;
   sHostedLinkUp = false;
   portEXIT_CRITICAL(&sLock);
+  // Then stop Hosted TX at its own gate while the C6 still runs. The users
+  // keep running (lwIP's reply to `reboot`, TCP ACKs, BLE HCI, RPC polls), and
+  // each packet they queued after the C6 went into reset became a CMD53 with
+  // no answer: "sdmmc_send_cmd returned 0x107", "Failed to send data",
+  // "Unrecoverable host sdio state" during the drain (bench 2026-11-08, 7 of
+  // 15 reboots). With the gate closed every new packet is refused and freed
+  // by its producer; the short wait lets the write task send what was already
+  // queued to a C6 that still acknowledges it. Receive is left alone. Only
+  // the slave's INIT event reopens the gate, and the C6 sends it only as it
+  // boots (a Start op already resetting the C6 could reopen it, which brings
+  // back no more than the old exposure).
+  if (is_transport_tx_ready()) {
+    set_transport_state(kHostedTransportRxOnly);
+    vTaskDelay(pdMS_TO_TICKS(kHostedTxFlushMs));
+  }
+  // Hold the C6 in reset so it stops sending: no new rx data or interrupts,
+  // and a transfer it was in the middle of ends on the SDMMC timeout instead
+  // of streaming into the reset. Hosted stays initialised on purpose: its
+  // teardown deletes tasks that may be inside an SDMMC transaction, and its
+  // users are still running.
+  //
+  // The pad is latched low with gpio_hold_en: a Start/Recover op that was
+  // already inside hostedInitWiFi (Hosted's transport_gpio_reset pulses EN,
+  // at the start and every 50 slave-ready polls) cannot raise it again during
+  // the drain.
+  // Hosted never touches the hold in this build (host power save is off, so
+  // H_HOST_PS_ALLOWED is 0). EN stays low through the CPU reset; prepareBoard()
+  // releases the hold at the next boot before Hosted's reset pulse, as after
+  // deep sleep.
   latchC6EnableLow();
 }
 

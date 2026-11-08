@@ -166,6 +166,8 @@ bool httpServerStopSafe() {
   return true;
 }
 
+bool httpServerStopPending() { return sHttpStopPending.load(); }
+
 void httpServerStopPendingTick() {
   if (!sHttpStopPending) return;
   if (server == nullptr) { sHttpStopPending = false; return; }

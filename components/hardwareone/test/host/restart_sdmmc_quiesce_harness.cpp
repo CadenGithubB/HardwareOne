@@ -5,17 +5,28 @@
 //   @UTILS@      quiesceSdmmcForRestart, rebootDevice, factoryreset_doRestart (System_Utils.cpp)
 //   @EVENTS@     deliver, hostedEventHandler, registerEvents (HAL_Radio.cpp)
 //   @START@      hostedLinkUp, startOnce and their constants (HAL_Radio.cpp)
-//   @SILENCE@    restartLatched, latchC6EnableLow, radioHalHold,
-//                radioHalSilenceForRestart (HAL_Radio.cpp)
+//   @SILENCE@    kHostedTransportRxOnly, kHostedTxFlushMs, restartLatched,
+//                latchC6EnableLow, radioHalHold, radioHalSilenceForRestart
+//                (HAL_Radio.cpp)
 //   @PREPARE@    radioHalStopTransport, radioHalPrepare (HAL_Radio.cpp)
+//   @USERS_TYPE@ struct RadioUsers (System_RadioCompanion.cpp)
+//   @USERS@      kHttpRestoreWindowMs, snapshotUsers, stopUsers, the HTTP
+//                restore (armHttpRestore, restartHttpServer, httpRestoreProc,
+//                httpRestoreTick), restoreUsers, recoverProc, holdProc,
+//                releaseProc (System_RadioCompanion.cpp)
 //   @COMPANION@  submitOp, radioCompanionBeforeRestart, radioCompanionTick,
 //                radioCompanionBlocksRadio (System_RadioCompanion.cpp)
 // and the real System_RestartQuiesceCore.h / Radio_CompanionCore.h. Only the
 // ESP-IDF, Arduino, FreeRTOS and Hosted boundaries are fakes: they record what
 // was called, in order, on a fake millisecond clock. ESP.restart() unwinds.
-// A fake TRANSPORT_UP goes through the real hostedEventHandler.
+// A fake TRANSPORT_UP goes through the real hostedEventHandler. Hosted's TX
+// path is a gate plus a queue: the write task sends what is queued whenever
+// time passes, and a CMD53 to a C6 whose EN pad is low times out (0x107). The
+// companion's radio users (Wi-Fi, HTTP, ESP-NOW, BLE) are a small fake network
+// whose `radiopower off`/`on` do what System_WiFi.cpp's do to the web server.
 #include <atomic>
 #include <cinttypes>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -153,6 +164,7 @@ static esp_err_t esp_unregister_shutdown_handler(shutdown_handler_t h) {
 // The C6 EN pad: gpio_set_level writes the output register, and the pad
 // follows it unless gpio_hold_en latched it (ESP-IDF pad hold semantics).
 static uint32_t gEnOut = 1, gEnPad = 1;
+static uint32_t gEnLowAt = 0;  // the last write of EN low
 static bool gEnPadHeld = false;
 static void (*gBeforeHoldDis)() = nullptr;  // one-shot: another task runs first
 static esp_err_t gpio_hold_dis(gpio_num_t pin) {
@@ -173,6 +185,7 @@ static esp_err_t gpio_hold_en(gpio_num_t pin) {
 }
 static esp_err_t gpio_set_level(gpio_num_t pin, uint32_t level) {
   note("level " + std::to_string(pin) + "=" + std::to_string(level));
+  if (level == 0) gEnLowAt = gNow;
   gEnOut = level;
   if (!gEnPadHeld) gEnPad = level;
   return ESP_OK;
@@ -189,6 +202,33 @@ static esp_err_t gpio_set_direction(gpio_num_t pin, int mode) {
   return ESP_OK;
 }
 static void vTaskDelay(uint32_t ticks) { advance(ticks); }
+
+// ESP-Hosted's TX gate (transport_drv.c) and to_slave queue (sdio_drv.c).
+// esp_hosted_tx refuses a packet unless the state is TX_ACTIVE (2); the write
+// task (advance) sends whatever was queued.
+static uint8_t gHostedTransportState = 0;
+static std::vector<std::string> gTxQueue;
+static void (*gBeforeTxGate)() = nullptr;  // one-shot: a producer already past the check
+static uint32_t gTxGateAt = 0;
+extern "C" uint8_t is_transport_tx_ready(void) { return gHostedTransportState >= 2; }
+extern "C" void set_transport_state(uint8_t state) {
+  if (gBeforeTxGate) {
+    void (*hook)() = gBeforeTxGate;
+    gBeforeTxGate = nullptr;
+    hook();
+  }
+  note("hosted-tx state " + std::to_string(state));
+  gHostedTransportState = state;
+  gTxGateAt = gNow;
+}
+static void queueTx(const std::string& what) { gTxQueue.push_back(what); }
+static void hostedTx(const std::string& what) {  // a producer (lwIP, HCI, RPC)
+  if (!is_transport_tx_ready()) {
+    note("tx refused " + what);
+    return;
+  }
+  queueTx(what);
+}
 
 // Hosted 2.12.13: a fresh hostedInitWiFi() resets the C6 and returns when
 // Hosted's slave-ready wait ends (gInitReturnsAfterMs: its whole 20 s budget
@@ -327,6 +367,10 @@ esp_err_t radioHalStartTransport() {
 }  // namespace hal
 
 static void advance(uint32_t ms) {
+  // Hosted's write task runs as soon as time passes: each queued packet is a
+  // CMD53, answered by a running C6 and timed out (0x107) by a held one.
+  for (const auto& packet : gTxQueue) note((gEnPad ? "tx sent " : "tx 0x107 ") + packet);
+  gTxQueue.clear();
   gNow += ms;
   if (gUpAt && gNow >= gUpAt && !gUpPosted) {
     gUpPosted = true;
@@ -365,9 +409,10 @@ static esp_err_t radioHalHold(bool hold) {
   note(std::string("hal-hold ") + (hold ? "1" : "0"));
   return ESP_OK;
 }
+static bool gCompanionAnswers = true;  // the C6 comes back from a reset
 static esp_err_t radioHalStartTransport() {
   note("hal-start");
-  return ESP_OK;
+  return gCompanionAnswers ? ESP_OK : ESP_FAIL;
 }
 static void applyPolicyFromSettings() {}
 static void reportIdentity() {}
@@ -377,14 +422,113 @@ static bool popEvent(RadioHalEventData&) {
 }
 static void handleEvent(const RadioHalEventData&, uint32_t) {}
 static void dispatch(CompanionAction, uint32_t) { note("dispatch"); }
-static bool submitDeferredToCmdExec(ExecReq::DeferredFn, void*) {
+static ExecReq::DeferredFn gDeferredFn = nullptr;  // the last job handed to cmd_exec
+static void* gDeferredArg = nullptr;
+static bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg) {
   note("submitted");
+  gDeferredFn = fn;
+  gDeferredArg = arg;
   return true;
+}
+static void runDeferred() {  // cmd_exec runs the job
+  ExecReq::DeferredFn fn = gDeferredFn;
+  gDeferredFn = nullptr;
+  if (fn) fn(gDeferredArg);
 }
 static void finishOp() {
   sOp.store(0);
   sOpInFlight.store(false);
 }
+// The radio users. Every feature flag on, as in the P4X-EYE build.
+#define ENABLE_WIFI 1
+#define ENABLE_ESPNOW 1
+#define ENABLE_BLUETOOTH 1
+#define ENABLE_HTTP_SERVER 1
+/*@USERS_TYPE@*/
+RadioUsers sHeldUsers;
+
+// The fake network. `radiopower off` (System_WiFi.cpp radioPowerOff) stops
+// ESP-NOW, Wi-Fi and the HTTP server, the last through httpServerStopSafe:
+// inline, or deferred to the main loop while a web request waits on cmd_exec
+// (the handle stays set until then). `radiopower on` (radioPowerOn) restores
+// ESP-NOW and Wi-Fi from its snapshot and nothing else. `openhttp`
+// (cmd_httpstart) needs the Wi-Fi link.
+struct FakeNet {
+  bool wifiOn = false, linked = false, joinsOnPowerOn = true;
+  bool http = false, httpStopPending = false, webWaiter = false;
+  bool espnow = false, bleServer = false, g2 = false;
+};
+FakeNet gNet;
+static bool isEspNowInitialized() { return gNet.espnow; }
+static bool wifiRadioOn() { return gNet.wifiOn; }
+static bool isBleServerInitialized() { return gNet.bleServer; }
+static bool bleStackReady() { return gNet.g2; }
+static void stopBootWifiConnect() {}
+static void shutDownBleForCompanionReset(const RadioUsers&) {
+  gNet.bleServer = false;
+  gNet.g2 = false;
+}
+static const char* cmd_radiopower(const char* arg) {
+  note(std::string("radiopower ") + arg);
+  if (std::strcmp(arg, "off") == 0) {
+    gNet.espnow = false;
+    gNet.wifiOn = gNet.linked = false;
+    if (gNet.webWaiter) gNet.httpStopPending = true;
+    else gNet.http = false;
+  } else {
+    gNet.wifiOn = true;
+    gNet.linked = gNet.joinsOnPowerOn;
+  }
+  return "OK";
+}
+static const char* cmd_espnow_deinit(const char*) {
+  gNet.espnow = false;
+  return "ESP-NOW deinitialized successfully";
+}
+static const char* cmd_espnow_init(const char*) {
+  gNet.espnow = true;
+  return "OK";
+}
+static bool initBluetooth() { return gNet.bleServer = true; }
+static void startBLEAdvertising() {}
+static bool bleStackUp() { return gNet.g2 = true; }
+static void bleBootReconnect() {}
+static bool isHttpServerRunning() { return gNet.http; }
+static bool httpServerStopPending() { return gNet.httpStopPending; }
+static void mainLoopHttpStopTick() {  // httpServerStopPendingTick once the waiter drained
+  gNet.webWaiter = false;
+  if (gNet.httpStopPending) gNet.http = gNet.httpStopPending = false;
+}
+static const char* cmd_httpstart(const char*) {
+  note("openhttp");
+  if (!gNet.linked) return "ERROR: WiFi not connected. Connect to WiFi before starting HTTP server.";
+  if (gNet.http) return "HTTP server is already running";
+  gNet.http = true;
+  return "HTTP server started";
+}
+enum WifiRadioState { WIFI_RADIO_OFF = 0, WIFI_RADIO_UP_FOR_ESPNOW, WIFI_RADIO_CONNECTED, WIFI_RADIO_UP_DISCONNECTED };
+static WifiRadioState wifiRadioState() {
+  return gNet.linked ? WIFI_RADIO_CONNECTED : gNet.wifiOn ? WIFI_RADIO_UP_DISCONNECTED : WIFI_RADIO_OFF;
+}
+static WifiRadioState wifiRadioDisplayState() { return wifiRadioState(); }
+static void logSystemEvent(const char* category, const char* fmt, ...) {
+  char text[256];
+  va_list args;
+  va_start(args, fmt);
+  std::vsnprintf(text, sizeof(text), fmt, args);
+  va_end(args);
+  if (std::strstr(text, "HTTP")) note(std::string("log ") + category + ": " + text);
+}
+static void setLastResult(const char*) {}
+enum { SYSEVT_COMPANION_OFFLINE = 1 };
+static void systemEventPost(int, const char*, const char*) {}
+static bool radioHalTransportUp() { return true; }
+static void radioHalMarkTransportLost() {}
+static void radioHalStopTransport() { note("hal-stop"); }
+std::atomic<bool> sHttpRestorePending{false};
+std::atomic<uint32_t> sHttpRestoreArmedMs{0};
+/*@USERS@*/
+
 /*@COMPANION@*/
 }  // namespace comp
 
@@ -425,6 +569,37 @@ static void reset_world() {
   gCompanionSilence = nullptr;
   gDuringDelay = nullptr;
   gBeforeHoldDis = nullptr;
+  gHostedTransportState = 0;  // Hosted not initialised
+  gTxQueue.clear();
+  gBeforeTxGate = nullptr;
+  gTxGateAt = gEnLowAt = 0;
+  comp::sMonitor = comp::CompanionMonitor();
+  comp::gNet = comp::FakeNet();
+  comp::sHeldUsers = comp::RadioUsers();
+  comp::sHttpRestorePending.store(false);
+  comp::sHttpRestoreArmedMs.store(0);
+  comp::gDeferredFn = nullptr;
+  comp::gCompanionAnswers = true;
+}
+
+// The main loop after the recovery: the web request drains, the deferred stop
+// runs, then the companion tick hands the restart to cmd_exec.
+static void mainLoopHttpStopTickAndRun() {
+  comp::mainLoopHttpStopTick();
+  comp::radioCompanionTick();
+  CHECK(comp::gDeferredFn != nullptr);
+  comp::runDeferred();
+}
+
+static bool sawEvent(const std::string& prefix) {
+  for (const auto& e : gEvents)
+    if (e.compare(0, prefix.size(), prefix) == 0) return true;
+  return false;
+}
+static size_t eventIndex(const std::string& e) {
+  for (size_t i = 0; i < gEvents.size(); i++)
+    if (gEvents[i] == e) return i;
+  return gEvents.size();
 }
 
 static void reboot_quiesces_sdmmc_after_the_flush_and_before_the_restart() {
@@ -745,6 +920,152 @@ static void a_dead_c6_at_boot_gets_two_real_attempts() {
   CHECK(gNow - start == 2 * hal::kSlaveReadyBudgetMs);  // each attempt within Hosted's budget
 }
 
+// Bench 2026-11-08, 7 of 15 reboots: between "commanded restart" and "SDMMC
+// quiesced", Hosted's write task sent small packets (BLE HCI, RPC) to the
+// held C6: "sdmmc_send_cmd returned 0x107", "Failed to send data", then
+// "Unrecoverable host sdio state". The users keep producing through the
+// drain; a producer that passed the gate check just before it closed still
+// queues its packet. TX must be closed and that packet sent while EN is high.
+static void reboot_stops_hosted_tx_before_the_en_latch() {
+  reset_world();
+  gHostedTransportState = 2;  // TRANSPORT_TX_ACTIVE: a live link
+  gCompanionSilence = [] { hal::radioHalSilenceForRestart(); };
+  gBeforeTxGate = [] { queueTx("hci-racing-the-gate"); };
+  gDuringDelay = [] { hostedTx(hal::sRestartLatched ? "tcp-ack-in-drain" : "http-reply"); };
+  bool restarted = false;
+  try {
+    utils::rebootDevice("command", "commanded restart", 1000);
+  } catch (const RestartSignal&) {
+    restarted = true;
+  }
+  CHECK(restarted);
+  CHECK(!sawEvent("tx 0x107"));  // no CMD53 against the held C6
+  CHECK(sawEvent("tx sent http-reply"));
+  CHECK(sawEvent("tx refused tcp-ack-in-drain"));
+  const size_t gate = eventIndex("hosted-tx state 1");  // TRANSPORT_RX_ACTIVE
+  const size_t raced = eventIndex("tx sent hci-racing-the-gate");
+  const size_t latch = eventIndex("level 9=0");
+  CHECK(gate < raced && raced < latch && latch < gEvents.size());
+  CHECK(gEnLowAt - gTxGateAt >= hal::kHostedTxFlushMs);
+  CHECK(gEnPad == 0 && gEnPadHeld);
+  CHECK(gEvents.back() == "restart");
+}
+
+// The gate and its flush, in order, ahead of the hold; the drain still runs
+// in full after the hold (quietAt is taken when the silence returns).
+static void hal_silence_closes_hosted_tx_then_holds_the_c6() {
+  reset_world();
+  gHostedTransportState = 2;
+  hal::sTransportUp = true;
+  const uint32_t start = gNow;
+  hal::radioHalSilenceForRestart();
+  const std::vector<std::string> want = {"unregister esp_wifi_stop", "hosted-tx state 1", "hold_dis 9", "level 9=0",
+                                         "dir 9 out", "hold_en 9"};
+  CHECK(gEvents == want);
+  CHECK(gNow - start == hal::kHostedTxFlushMs);
+  CHECK(!is_transport_tx_ready() && hal::sRestartLatched && gEnPad == 0);
+}
+
+// ---- in-place companion resets and the web server --------------------------
+// Bench 2026-11-08: after `c6restart` the C6, Wi-Fi (same address, NTP) and
+// BLE came back, and every HTTP request was refused until an esptool reset:
+// stopUsers' `radiopower off` stopped the server and `radiopower on` does not
+// start it again.
+static void wifi_and_http_running() {
+  comp::gNet.wifiOn = comp::gNet.linked = true;
+  comp::gNet.http = true;
+  comp::gNet.g2 = true;
+}
+
+static void c6restart_brings_the_web_server_back() {
+  reset_world();
+  wifi_and_http_running();
+  comp::recoverProc(nullptr);
+  CHECK(comp::gNet.wifiOn && comp::gNet.linked && comp::gNet.g2);
+  CHECK(comp::gNet.http);
+  const size_t off = eventIndex("radiopower off"), on = eventIndex("radiopower on"), http = eventIndex("openhttp");
+  CHECK(off < on && on < http && http < gEvents.size());
+  CHECK(!comp::sHttpRestorePending.load());
+}
+
+static void a_reset_with_the_web_server_off_leaves_it_off() {
+  reset_world();
+  wifi_and_http_running();
+  comp::gNet.http = false;  // closehttp earlier
+  comp::recoverProc(nullptr);
+  CHECK(comp::gNet.linked && !comp::gNet.http);
+  CHECK(!sawEvent("openhttp") && !comp::sHttpRestorePending.load());
+}
+
+static void c6hold_off_brings_the_web_server_back() {
+  reset_world();
+  wifi_and_http_running();
+  comp::holdProc(nullptr);
+  CHECK(!comp::gNet.wifiOn && !comp::gNet.http);
+  comp::releaseProc(nullptr);
+  CHECK(comp::gNet.linked && comp::gNet.http);
+}
+
+// A web request waiting on cmd_exec (the bench polling c6status) defers the
+// server stop to the main loop, past the recovery that holds cmd_exec. The
+// restart waits for that stop, then runs on cmd_exec from the tick.
+static void a_deferred_stop_is_followed_by_a_restart() {
+  reset_world();
+  wifi_and_http_running();
+  comp::gNet.webWaiter = true;
+  comp::sBootInitDone = true;
+  comp::recoverProc(nullptr);
+  CHECK(comp::gNet.httpStopPending && !sawEvent("openhttp") && comp::sHttpRestorePending.load());
+  comp::radioCompanionTick();  // the stop has not run yet: nothing to do
+  CHECK(!sawEvent("submitted"));
+  mainLoopHttpStopTickAndRun();
+  CHECK(comp::gNet.http && !comp::sHttpRestorePending.load());
+}
+
+// Wi-Fi out of range when the restore runs: the server starts at the link,
+// inside the window; after the window, nothing starts on its own.
+static void a_late_link_still_gets_the_web_server() {
+  reset_world();
+  wifi_and_http_running();
+  comp::gNet.joinsOnPowerOn = false;
+  comp::sBootInitDone = true;
+  comp::recoverProc(nullptr);
+  CHECK(comp::gNet.wifiOn && !comp::gNet.linked && !comp::gNet.http);
+  CHECK(comp::sHttpRestorePending.load());
+  comp::radioCompanionTick();
+  CHECK(!sawEvent("submitted"));
+  advance(10000);
+  comp::gNet.linked = true;
+  comp::radioCompanionTick();
+  CHECK(sawEvent("submitted"));
+  comp::runDeferred();
+  CHECK(comp::gNet.http && !comp::sHttpRestorePending.load());
+
+  reset_world();
+  wifi_and_http_running();
+  comp::gNet.joinsOnPowerOn = false;
+  comp::sBootInitDone = true;
+  comp::recoverProc(nullptr);
+  advance(comp::kHttpRestoreWindowMs);
+  comp::radioCompanionTick();
+  CHECK(!comp::sHttpRestorePending.load() && sawEvent("log C6: HTTP server not restarted"));
+  comp::gNet.linked = true;
+  comp::radioCompanionTick();
+  CHECK(!sawEvent("submitted") && !comp::gNet.http);
+}
+
+// A second reset while a restart is still pending keeps the intent.
+static void a_pending_restart_survives_another_reset() {
+  reset_world();
+  wifi_and_http_running();
+  comp::gNet.joinsOnPowerOn = false;
+  comp::recoverProc(nullptr);
+  CHECK(comp::sHttpRestorePending.load() && !comp::gNet.http);
+  comp::gNet.joinsOnPowerOn = true;
+  comp::recoverProc(nullptr);
+  CHECK(comp::gNet.http && !comp::sHttpRestorePending.load());
+}
+
 int main() {
   reboot_quiesces_sdmmc_after_the_flush_and_before_the_restart();
   reboot_with_a_busy_filesystem_still_restarts_without_extra_wait();
@@ -768,6 +1089,14 @@ int main() {
   an_initialized_session_without_a_link_is_asked_at_once();
   boot_attempt_two_resets_the_c6_and_waits_for_it();
   a_dead_c6_at_boot_gets_two_real_attempts();
-  std::puts("restart SDMMC quiesce and companion start wait: all scenarios passed");
+  reboot_stops_hosted_tx_before_the_en_latch();
+  hal_silence_closes_hosted_tx_then_holds_the_c6();
+  c6restart_brings_the_web_server_back();
+  a_reset_with_the_web_server_off_leaves_it_off();
+  c6hold_off_brings_the_web_server_back();
+  a_deferred_stop_is_followed_by_a_restart();
+  a_late_link_still_gets_the_web_server();
+  a_pending_restart_survives_another_reset();
+  std::puts("restart SDMMC quiesce, Hosted TX gate, companion start wait and HTTP restore: all scenarios passed");
   return 0;
 }
