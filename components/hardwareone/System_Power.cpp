@@ -35,6 +35,10 @@
 #include "esp_private/esp_cache_private.h"
 #include "esp_private/esp_clk_utils.h"
 #define HW1_SYNC_MSPI_WITH_CPU_CLOCK 1
+#elif CONFIG_IDF_TARGET_ESP32S3 && !CONFIG_APP_BUILD_TYPE_PURE_RAM_APP
+#include "soc/rtc.h"
+#include "esp_private/esp_clk_utils.h"
+#define HW1_SYNC_S3_MSPI_WITH_XTAL_CLOCK 1
 #endif
 
 #if HW1_SYNC_MSPI_WITH_CPU_CLOCK
@@ -61,6 +65,41 @@ static IRAM_ATTR void p4SwitchCpuClock(const rtc_cpu_freq_config_t* target) {
   esp_ipc_isr_release_other_cpu();
   esp_clk_utils_mspi_speed_mode_sync_after_cpu_freq_switching(target->source_freq_mhz, target->freq_mhz);
   portEXIT_CRITICAL_SAFE(&sP4ClockSwitchMux);
+}
+#endif
+
+#if HW1_SYNC_S3_MSPI_WITH_XTAL_CLOCK
+// G-48 (S3 half). On the S3 the MSPI (flash + PSRAM) core clock follows the
+// CPU clock source (IDF hal/esp32s3/include/hal/mspi_ll.h:52
+// MSPI_TIMING_LL_FLASH_CPU_CLK_SRC_BINDED). UltraSaver's 40 MHz idle clock is
+// the XTAL source, so the MSPI would keep the RX delays that boot-time timing
+// tuning chose for the PLL clock (tuning is on for Octal PSRAM at 80 MHz DDR,
+// as on the XIAO S3, and for flash above 80 MHz). IDF moves the MSPI to its
+// untuned low-speed mode before every switch to XTAL and back to high speed
+// after a switch to PLL: esp_pm (pm_impl.c:708/726), sleep (sleep_modes.c:1030)
+// and the boot o-code calibration (port/esp32s3/rtc_init.c:275/324), through
+// clk_utils.c:35/57. Arduino's setCpuFrequencyMhz does not, so it is bracketed
+// here as esp_pm does, with interrupts off on this core around each sync (the
+// sync freezes the external-memory cache; an ISR that misses it would hang).
+// The after-sync uses the clock actually running, so a refused switch cannot
+// leave the PLL clock in low-speed mode. Arduino's switch itself (with its APB
+// callbacks, which matter on the S3 where APB follows XTAL) is unchanged.
+static portMUX_TYPE sS3ClockSwitchMux = portMUX_INITIALIZER_UNLOCKED;
+static bool s3SetCpuFrequencyMhz(uint32_t mhz) {
+  rtc_cpu_freq_config_t target = {};
+  if (!rtc_clk_cpu_freq_mhz_to_config(mhz, &target)) {
+    return setCpuFrequencyMhz(mhz);   // refuses and logs the supported list
+  }
+  portENTER_CRITICAL_SAFE(&sS3ClockSwitchMux);
+  esp_clk_utils_mspi_speed_mode_sync_before_cpu_freq_switching(target.source_freq_mhz, target.freq_mhz);
+  portEXIT_CRITICAL_SAFE(&sS3ClockSwitchMux);
+  const bool accepted = setCpuFrequencyMhz(mhz);
+  rtc_cpu_freq_config_t now = {};
+  rtc_clk_cpu_freq_get_config(&now);
+  portENTER_CRITICAL_SAFE(&sS3ClockSwitchMux);
+  esp_clk_utils_mspi_speed_mode_sync_after_cpu_freq_switching(now.source_freq_mhz, now.freq_mhz);
+  portEXIT_CRITICAL_SAFE(&sS3ClockSwitchMux);
+  return accepted;
 }
 #endif
 
@@ -119,6 +158,8 @@ bool powerSetCpuFrequencyMhz(uint32_t mhz, bool* outClockChanged) {
       rtc_cpu_freq_config_t target = {};
       const bool accepted = rtc_clk_cpu_freq_mhz_to_config(mhz, &target);
       if (accepted) p4SwitchCpuClock(&target);   // see p4SwitchCpuClock: never Arduino's unsynchronised switch
+#elif HW1_SYNC_S3_MSPI_WITH_XTAL_CLOCK
+      const bool accepted = s3SetCpuFrequencyMhz(mhz);   // G-48: MSPI speed-mode sync around XTAL
 #else
       const bool accepted = setCpuFrequencyMhz(mhz);
 #endif
