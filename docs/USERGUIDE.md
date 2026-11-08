@@ -451,7 +451,10 @@ lost:
 - With a single admin account and no other way in: erase the device over the
   cable (`tools/build_board.sh <board> -p PORT erase-flash`, or erase just the LittleFS region) and
   flash again. This removes settings and captured data as well; keep backups
-  (`backup` / Backup & Restore below) if they matter.
+  (`backup` / Backup & Restore below) if they matter. On a recovery OTA layout
+  erase only the filesystem (`littlefs-flash`, `encrypted-littlefs-flash` on
+  `feathers3_fe`); a full erase also removes the recovery updater (see Update
+  and recovery below).
 
 First-time setup refuses reserved owner names (`system`, `AuthBypass`, the
 bond admin) and passwords shorter than six characters, so a new device cannot
@@ -474,6 +477,10 @@ be set up into a lockout. Compatibility and upgrade promises:
 - **Moving from 0.99.x to 1.0** is a full-erase install (`erase-flash`, then
   flash, then the setup wizard). Within 1.x, settings, accounts, networks and
   automations are kept across updates ([COMPATIBILITY.md](COMPATIBILITY.md)).
+  On a recovery OTA layout the erase also removes the recovery updater and the
+  recovery credential, and the plain `flash` is refused there: install with
+  `migration-flash` (`encrypted-migration-flash` on `feathers3_fe`) and then
+  `setpin`, steps 3-4 of [OTA_DEVICE_SETUP.md](OTA_DEVICE_SETUP.md).
 
 ---
 
