@@ -132,7 +132,7 @@ Each device in your setup runs one board. Multiple boards can coexist on the sam
 | Unexpected Maker FeatherS3 | 16 / 8 MB | ❌ | ❌ | ✅ | Quad PSRAM; dual STEMMA QT (second I2C bus); onboard RGB LED; MAX17048 fuel gauge. Also built as `feathers3_fe` (flash encryption; experimental, first boot burns eFuses) |
 | Adafruit Feather ESP32 V2 | 8 / 2 MB | ❌ | ❌ | ✅ (GPIO35) | Onboard NeoPixel + battery monitoring |
 | Adafruit QT Py ESP32 | 8 / 2 MB | ❌ | ❌ | ❌ | ESP32-PICO; STEMMA QT onboard; compact |
-| Espressif ESP32-P4X-EYE | 16 / 32 MB | ✅ (MIPI) | ✅ | ✅ (voltage) | 240×240 LCD, wheel + 3 buttons; radio via onboard ESP32-C6; local speech-to-text (needs a model file on the microSD card, see [Local speech-to-text model](#local-speech-to-text-model-esp32-p4)). [Notes](docs/P4X_EYE_PERIPHERALS.md), [enclosure](physical_enclosures/p4x_eye/README.md) |
+| Espressif ESP32-P4X-EYE | 16 / 32 MB | ✅ (MIPI) | ✅ | ✅ (voltage) | 240×240 LCD, wheel + 3 buttons; radio via onboard ESP32-C6; local speech-to-text (needs a separately installed model file: the saved P4 configurations read the published model from microSD; the plain board build keeps microSD off and expects an unpublished model, see [Local speech-to-text model](#local-speech-to-text-model-esp32-p4)). [Notes](docs/P4X_EYE_PERIPHERALS.md), [enclosure](physical_enclosures/p4x_eye/README.md) |
 | Waveshare ESP32-P4 Touch LCD 5 | 32 / 32 MB | ✅ (MIPI, saved profile) | ✅ (ES7210) | ✅ (ADC) | Experimental. 5-inch 720×1280 HX8394 DSI panel with GT911 touch; radio via onboard ESP32-C6; ES8311 speaker output (driver-tested only). [Notes](docs/WAVESHARE_P4_SUPPORT.md) |
 
 > A **generic ESP32** fallback build also exists for unlisted boards - it compiles, but verify the I2C pins match your hardware.
@@ -273,8 +273,8 @@ tracked `config/sdkconfig`, which is set up for the XIAO ESP32-S3 (8 MB flash,
 octal PSRAM), while with no `HW_BOARD` the root `CMakeLists.txt` picks the
 default board for the chip (`feathers3` for esp32s3, `qtpy_esp32` for esp32) and
 that board's partition table. The two do not fit together (for esp32s3, a 16 MB
-table in an 8 MB flash setting), and the configure also rewrites the tracked
-`config/sdkconfig`.
+table in an 8 MB flash setting), so configure stops before touching the tracked
+`config/sdkconfig`, with a message naming `tools/build_board.sh`.
 
 Checked-in deployment profiles add a second, independent axis on top of the
 physical board. For example, paired Headless Node updater/main releases are:

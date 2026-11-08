@@ -1127,6 +1127,18 @@ covered: command names in prose elsewhere and argument syntax. Run with
 `ctest --test-dir build -R '^public_docs_commands$' --output-on-failure` (or
 `python3 test_public_docs_commands.py`).
 
+## Bare idf.py guard
+
+`bare_idf_guard` runs `cmake/HW1BoardGuard.cmake` with `cmake -P` (no ESP-IDF).
+With no `HW_BOARD` and no deployment, configure must stop with a message naming
+`tools/build_board.sh` when the sdkconfig is the tracked `config/sdkconfig`
+(left byte-for-byte unchanged) or was saved for another Arduino variant or flash
+size than the defaulted board; a fresh or matching sdkconfig and any explicit
+board pass. It also checks that the root `CMakeLists.txt` calls the guard before
+its first write to the sdkconfig. Run with
+`ctest --test-dir build -R '^bare_idf_guard$' --output-on-failure` (or
+`python3 test_bare_idf_guard.py`).
+
 ## Dead auth helpers removed
 
 `dead_auth_helpers_removed` is a source check over the firmware sources

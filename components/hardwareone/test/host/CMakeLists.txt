@@ -989,6 +989,8 @@ add_test(NAME xiao_peripheral_config
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_xiao_peripheral_config.py)
 add_test(NAME sdkconfig_policy
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_sdkconfig_policy.py)
+add_test(NAME bare_idf_guard
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_bare_idf_guard.py)
 add_test(NAME command_header_boundary
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_command_header_boundary.py
     --cxx ${CMAKE_CXX_COMPILER})

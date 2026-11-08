@@ -148,8 +148,9 @@ Do not run a bare `idf.py build` / `idf.py flash` in the repository root. Withou
 `HW_BOARD` it reads the tracked `config/sdkconfig`, which is set up for the XIAO
 ESP32-S3 (8 MB flash), while the root `CMakeLists.txt` defaults the board to
 `feathers3` for esp32s3 (`qtpy_esp32` for esp32) and picks that board's
-partition table, so the two do not fit together; the configure also rewrites
-the tracked `config/sdkconfig`. `tools/build_board.sh` (and the
+partition table, so the two do not fit together; configure stops there, before
+touching the tracked `config/sdkconfig`, with a message naming
+`tools/build_board.sh`. `tools/build_board.sh` (and the
 `tools/build_config.py build` and `tools/build_deployment.sh` front ends) always
 pass the board and a per-build sdkconfig.
 
