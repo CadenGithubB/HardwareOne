@@ -18,15 +18,8 @@ releases. If you are on an older release, update first and check that the proble
 
 **Do not open a public issue for a security problem.**
 
-Report it privately through GitHub's private vulnerability reporting for
-[CadenGithubB/HardwareOne](https://github.com/CadenGithubB/HardwareOne): open the repository's
-**Security** tab and choose **Report a vulnerability**
-(<https://github.com/CadenGithubB/HardwareOne/security/advisories/new>). The report is visible only
-to you and the maintainer.
-
-If that button is not shown, open a new issue with the **Request a private security contact**
-form. It has no required fields: leave out every detail of the problem, and the maintainer will
-arrange a private channel.
+Open a new issue with the **Request a private security contact** form. It has no required
+fields: leave out every detail of the problem, and the maintainer will arrange a private channel.
 
 Please include:
 

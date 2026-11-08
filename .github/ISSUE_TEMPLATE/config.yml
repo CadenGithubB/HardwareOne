@@ -1,8 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Report a security vulnerability (private)
-    url: https://github.com/CadenGithubB/HardwareOne/security/advisories/new
-    about: Do not open a public issue for security problems. Report them privately; see SECURITY.md.
   - name: Known issues
     url: https://github.com/CadenGithubB/HardwareOne/blob/main/KNOWN_ISSUES.md
     about: Check the list of open problems and workarounds before filing a bug.
