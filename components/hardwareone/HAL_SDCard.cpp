@@ -1,4 +1,5 @@
 #include "HAL_SDCard.h"
+#include "System_MemDiag.h"
 
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
 #if !(HW_BOARD_P4X_EYE || HW_BOARD_WAVESHARE_P4_TOUCH) || !CONFIG_IDF_TARGET_ESP32P4
@@ -140,7 +141,10 @@ bool SdMmcCardFS::mount(bool allowFormat) {
   config.max_files = 10;
   config.allocation_unit_size = 16 * 1024;
   config.disk_status_check_enable = true;
-  error_ = esp_vfs_fat_sdmmc_mount(kMountPoint, &host, &slot, &config, &card_);
+  {
+    MemDiagVfsWriteScope legit;
+    error_ = esp_vfs_fat_sdmmc_mount(kMountPoint, &host, &slot, &config, &card_);
+  }
   if (error_ != ESP_OK) {
     card_ = nullptr;
     ESP_LOGW(kTag, "Mount failed: %s (automatic format %s)",
@@ -157,7 +161,10 @@ bool SdMmcCardFS::mount(bool allowFormat) {
 bool SdMmcCardFS::end() {
   bool ok = true;
   if (card_) {
-    error_ = esp_vfs_fat_sdcard_unmount(kMountPoint, card_);
+    {
+      MemDiagVfsWriteScope legit;
+      error_ = esp_vfs_fat_sdcard_unmount(kMountPoint, card_);
+    }
     ok = error_ == ESP_OK;
     // IDF consumes the card before unregistering the VFS path. Even if that
     // final unregister reports an error, this pointer must never be reused.

@@ -346,6 +346,12 @@ struct Settings {
       microphoneSampleRate(16000),
       microphoneGain(70),
       microphoneBitDepth(16),
+      pdmAmplify(1),
+      pdmHpfHz(36),
+      sttSpeechFloor(45),
+      sttSilenceFloor(16),
+      sttNoisePercentile(25),
+      sttDecisionPre(0),
       micSource("auto"),  // Mic source preference: "auto" | "pdm" | "g2" (resolved at capture time)
       sttSaveTranscripts(false),
       noteMaxSec(HW1_NOTE_MAX_SEC_DEFAULT),
@@ -1022,6 +1028,18 @@ struct Settings {
   int microphoneSampleRate;     // Sample rate in Hz (8000, 16000, 22050, 44100, 48000) — PDM only
   int microphoneGain;           // Software gain 0-100% (default 90)
   int microphoneBitDepth;       // Bit depth (cosmetic; HAL/WAV are always 16-bit int)
+  // Onboard PDM mic path (applied when the PDM channel starts): the PDM->PCM
+  // hardware multiplier (1..15; IDF default 1) and the hardware high-pass
+  // cut-off in Hz (23..185, 0 = filter off; 36 stands for IDF's 35.5 default).
+  int pdmAmplify;
+  int pdmHpfHz;
+  // Continuous STT speech detector (stt/stt_continuous_config.h): onset floor
+  // and silence floor in frame-RMS counts, and the noise-window percentile
+  // tracked as the room level. Read at each session start.
+  int sttSpeechFloor;
+  int sttSilenceFloor;
+  int sttNoisePercentile;
+  int sttDecisionPre;           // pre-emphasis onset judge coefficient x100 (0 = off, 97 = bench value)
   String micSource;             // Preferred mic source: "auto" | "pdm" | "g2" (resolved lazily against availability)
   bool sttSaveTranscripts;      // Save recognized text; latched when a local or Pi dictation session starts
   // QuickNote (System_QuickNote.cpp), read when a note starts / each pass:

@@ -83,7 +83,9 @@ bool isESPSRRunning() { return srRunning; }
 bool gMicRunning = false;
 static bool recordingBusy = false;
 bool micRecordingBusy() { return recordingBusy; }
-struct { String micSource = "auto"; int microphoneGain = 70; int microphoneSampleRate = 48000; } gSettings;
+struct { String micSource = "auto"; int microphoneGain = 70; int microphoneSampleRate = 48000;
+         int sttSpeechFloor = 45; int sttSilenceFloor = 16; int sttNoisePercentile = 25; int sttDecisionPre = 0; } gSettings;
+void audioGetPdmTuning(uint8_t* amplify, uint16_t* hpfHz) { if (amplify) *amplify = 1; if (hpfHz) *hpfHz = 36; }
 static std::mutex halMutex;
 static AudioSource audioSource = AUDIO_SRC_LOCAL_PDM;
 static std::string halOwner;

@@ -55,6 +55,7 @@
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/ecp.h"
 #endif
+#include "System_MemDiag.h"
 
 // External dependencies from main .ino
 extern bool wifiConnected;
@@ -1399,6 +1400,7 @@ const char* cmd_radiopower(const String& originalCmd) {
       return wifiStartFailure(!(gRadioForcedOff && gRadioPrevEspNow),
           "Error: Radio could not start. Retry or check Radio Status.");
     }
+    memDiagCheckpoint("radiopower-on");
     return "Radio on (runtime only).";
   }
   // Stop a boot connect still hunting in the background before deciding the

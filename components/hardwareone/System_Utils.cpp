@@ -2351,6 +2351,7 @@ const char* cmd_reboot(const String& originalCmd) {
 #include "System_AuthIdentity.h"
 #include "System_User.h"   // USERS_JSON_FILE
 #include "System_VFS.h"
+#include "System_MemDiag.h"
 
 extern const char* USERS_JSON_FILE;  // defined in System_User.cpp
 
@@ -2740,8 +2741,19 @@ const char* cmd_crashlog(const String& argsInput) {
   return "OK";
 }
 
+#if HW1_BENCH_MEMDIAG
+static const char* cmd_memdiag(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return memDiagCommand(args.c_str());
+}
+#endif
+
 extern const CommandEntry commands[] = {
   // ---- Core / General ----
+#if HW1_BENCH_MEMDIAG
+  { "memdiag", "Bench memory diagnostics: [status|check|arm|disarm|dump|noabort]", true, cmd_memdiag,
+    "Usage: memdiag [status|check|arm|disarm|dump|noabort]" },
+#endif
   { "status", "Show system status (WiFi, FS, memory). (add 'json' for JSON output)", false, cmd_status },
   { "crashlog", "Show the last recorded crash (panic text, core/PC, boot phase, repeat count). (add 'json')", false, cmd_crashlog,
     "Usage: crashlog [json]" },

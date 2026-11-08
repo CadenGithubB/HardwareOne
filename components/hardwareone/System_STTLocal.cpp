@@ -1,5 +1,6 @@
 #include "System_BuildConfig.h"
 #include "System_STTLocal.h"
+#include "System_MemDiag.h"
 #if ENABLE_LOCAL_STT
 #include <cstdio>
 #include <cstring>
@@ -335,6 +336,9 @@ bool sttLocalTranscribe(const int16_t* pcm,size_t samples,char* text,size_t text
                  kModelPath,unsigned(file.size()),unsigned(96+hw1::stt::identity::kCompressedBytes),
                  unsigned(hw1::stt::identity::kRawBytes),unsigned(hw1::stt::identity::kNodeCount),
                  hw1::stt::identity::kOutputExponent);
+#if HW1_BENCH_MEMDIAG
+    if(!backend || !backend->weights.loaded()) memDiagCheckpoint("stt-model-open");
+#endif
 #if ENABLE_STT_LM
     // One-shot calls load (and free) the LM for this call only, like weights.
     LanguageModel oneShot;

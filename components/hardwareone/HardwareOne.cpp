@@ -391,6 +391,7 @@ volatile unsigned long gWebMirrorSeq = 0;
 #include "System_RamFlush.h"
 #include "System_Settings.h"
 #include "System_Power.h"  // Shared CPU transitions, power-save policy and cooldown
+#include "System_MemDiag.h"
 Settings gSettings;
 
 String gSerialCLI = "";
@@ -2534,6 +2535,7 @@ void hardwareone_setup() {
   printCommandModuleSummary();
   printSettingsModuleSummary();
   printMemoryReport();
+  memDiagBootInit();  // bench builds only (HW1_BENCH_MEMDIAG)
   // Gated at the call site: both helpers read their own autostart flag internally,
   // so the overlay has to decide here rather than inside them.
   if (gSettings.sensorLogEnabled && ramFlushResolve(RF_SENSORLOG, gSettings.sensorLogAutoStart)) sensorLogAutoStart();

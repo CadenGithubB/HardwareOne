@@ -2659,6 +2659,13 @@ static const SettingsModule outputSettingsModule = {
 #if ENABLE_DICTATION || ENABLE_LOCAL_STT
 static const SettingEntry sttSettingEntries[] = {
   { "sttsavetranscripts", SETTING_BOOL, &gSettings.sttSaveTranscripts, 0, 0, nullptr, 0, 1, "Save STT transcripts", nullptr, false, nullptr, "sttsavetranscripts" },
+  // Continuous speech detector (stt/stt_continuous_config.h), read at each session
+  // start: onset and silence floors in frame-RMS counts, and the noise-window
+  // percentile tracked as the room level. Bench knobs; defaults = shipped values.
+  { "sttspeechfloor", SETTING_INT, &gSettings.sttSpeechFloor, 45, 0, nullptr, 1, 32767, "Speech onset floor (frame RMS)", nullptr, false, nullptr, "sttspeechfloor" },
+  { "sttsilencefloor", SETTING_INT, &gSettings.sttSilenceFloor, 16, 0, nullptr, 1, 32767, "Silence floor (frame RMS)", nullptr, false, nullptr, "sttsilencefloor" },
+  { "sttnoisepercentile", SETTING_INT, &gSettings.sttNoisePercentile, 25, 0, nullptr, 0, 100, "Room-level percentile", nullptr, false, nullptr, "sttnoisepercentile" },
+  { "sttdecisionpre", SETTING_INT, &gSettings.sttDecisionPre, 0, 0, nullptr, 0, 99, "Pre-emphasis onset judge (x0.01, 0 = off)", nullptr, false, nullptr, "sttdecisionpre" },
 };
 
 static const SettingsModule sttSettingsModule = {
@@ -3620,6 +3627,10 @@ SETTING_EDITOR_CMD(cmd_set_srautostart,         "srautostart")
 SETTING_EDITOR_CMD(cmd_set_srmodelsource,       "srmodelsource")
 #if ENABLE_DICTATION || ENABLE_LOCAL_STT
 SETTING_EDITOR_CMD(cmd_set_sttsavetranscripts,   "sttsavetranscripts")
+SETTING_EDITOR_CMD(cmd_set_sttspeechfloor,       "sttspeechfloor")
+SETTING_EDITOR_CMD(cmd_set_sttsilencefloor,      "sttsilencefloor")
+SETTING_EDITOR_CMD(cmd_set_sttnoisepercentile,   "sttnoisepercentile")
+SETTING_EDITOR_CMD(cmd_set_sttdecisionpre,       "sttdecisionpre")
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 SETTING_EDITOR_CMD(cmd_set_g2holdaction,         "g2holdaction")
@@ -3704,6 +3715,10 @@ const CommandEntry settingEditorCommands[] = {
   { "srmodelsource",       "Set ESP-SR model source",                    true, cmd_set_srmodelsource,       "Usage: srmodelsource <value>" },
 #if ENABLE_DICTATION || ENABLE_LOCAL_STT
   { "sttsavetranscripts", "Save recognized text; changes apply to the next STT session.", true, cmd_set_sttsavetranscripts, "Usage: sttsavetranscripts [0|1]" },
+  { "sttspeechfloor", "Continuous-STT speech onset floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttspeechfloor, "Usage: sttspeechfloor [1-32767]" },
+  { "sttsilencefloor", "Continuous-STT silence floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttsilencefloor, "Usage: sttsilencefloor [1-32767]" },
+  { "sttnoisepercentile", "Continuous-STT noise-window percentile used as the room level; applies to the next session.", true, cmd_set_sttnoisepercentile, "Usage: sttnoisepercentile [0-100]" },
+  { "sttdecisionpre", "Continuous-STT onset judge on pre-emphasised audio (coefficient x0.01; 0 = off, 97 = bench value); applies to the next session.", true, cmd_set_sttdecisionpre, "Usage: sttdecisionpre [0-99]" },
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   { "g2holdaction",     "Set what a ring/temple hold on a HW1 lens page does", true, cmd_set_g2holdaction,
