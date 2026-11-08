@@ -10,10 +10,40 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 
 ## [Unreleased]
 
-The version stays 0.99.99 until the 1.0 gate in `RELEASING.md` is met; this section collects
-everything user-visible since the v0.99.99 tag (55 commits).
+The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this section collects
+everything user-visible since the v0.99.99.1 tag.
+
+### Fixed
+- ESP32-P4: every task, including ESP-IDF's fixed-size ones, lost 576 bytes of stack to two camera
+  `thread_local` buffers (added 2026-11-02): the P4's FreeRTOS port reserves thread-local storage on
+  each task's stack, which left Bluedroid's 2.5 KB `hciT` about 1.95 KB, and it overflowed by 4 bytes
+  printing a log line (bench 2026-11-08). The camera error text now uses a static buffer like the
+  other camera commands, and the resolution list is built once per sensor into its own buffer. A host
+  test rejects `thread_local` in HardwareOne code. Not yet tested on hardware.
+- ESP32-P4: a CPU clock change could hang both cores until the interrupt watchdog reset the chip
+  (`rst:0x7 (HP_SYS_HP_WDT_RESET)`, `reset=other_wdt`, no panic output). Bench 2026-11-08: 2 of 3
+  `stt start` attempts at the 100 MHz idle clock that failed at once (raise to 400 MHz, then straight
+  back). The clock switch added on 2026-11-07 freezes the external-memory cache with the other core
+  stalled, but the compiler had inlined it into flash code, so the frozen window itself was fetched
+  from flash; on the P4 a cache miss there never completes. The switch is now a separate internal-RAM
+  function, reads its configuration from internal RAM, and refuses (the power policy retries) on a
+  task whose stack is not in internal RAM. Any clock change was exposed (power mode, `cpufreq`, the
+  STT and display boosts). Not yet tested on hardware.
+
+## [0.99.99.1] - 2026-11-08
+
+Everything user-visible since v0.99.99.
 
 ### Added
+- G2 Health panel feed: the glasses' stock Health panel can show the R1 ring's steps, calories,
+  heart rate, SpO2 and sleep score, pushed by the device (`ring panel status|preview|send`,
+  `ring panel feed on|off`, off by default; `ring panel history <minutes>`). See `docs/G2_HEALTH_PANEL.md`.
+- STT raw recorder (`sttraw on|off|status`, admin, off by default): the next continuous session saves
+  exactly what the speech detector receives to `/sd/STT Raw/`, and `stt_raw_replay` replays it on a host.
+- Microphone and speech-detector tuning, applied at the next session: `pdmamplify` (PDM gain 1-15),
+  `pdmhpf` (hardware high-pass), `sttspeechfloor`, `sttsilencefloor`, `sttnoisepercentile` (0-50),
+  `sttdecisionpre` (pre-emphasis onset judge), separate `sttg2*` values for the G2 glasses' mic, and
+  `sttdetector` to show what is in effect.
 - Waveshare ESP32-P4 Touch LCD 5 board (`waveshare_p4_touch_lcd_5`, experimental): DSI display with
   GT911 single-touch navigation, landscape UI with right-side touch controls, onboard speaker, battery
   voltage sensing, SDMMC card slot, OV5647 camera through the shared CSI backend, ES7210 onboard
@@ -51,6 +81,12 @@ everything user-visible since the v0.99.99 tag (55 commits).
   (previously a console warning only).
 
 ### Changed
+- Local speech-to-text on the P4 is automatic: the pre-emphasis onset judge is on by default
+  (`sttdecisionpre 97`), and with `sttautogain 1` (default) STT opens the onboard mic with a 120 Hz
+  high-pass and a gain that changes only when three speech sessions agree. On the bench P4X-EYE at
+  about 1 ft, device captions went from 71% to 43-47% word errors and quiet speech is no longer missed.
+- ESP32-P4 local STT always runs the published 15x5 model from the microSD card. The plain `p4x_eye`
+  board and the handheld deployment build with local STT off unless the card is enabled.
 - `g2_worn` event renamed `g2_plugin_alive`; the old name resolves as an alias so saved automations and
   notification rules keep firing.
 - The C6 console-mirror command is `c6console` again (`c6_console` remains as an alias).
@@ -73,21 +109,10 @@ everything user-visible since the v0.99.99 tag (55 commits).
   without `formatVersion` is treated as format 1.
 
 ### Fixed
-- ESP32-P4: every task, including ESP-IDF's fixed-size ones, lost 576 bytes of stack to two camera
-  `thread_local` buffers (added 2026-11-02): the P4's FreeRTOS port reserves thread-local storage on
-  each task's stack, which left Bluedroid's 2.5 KB `hciT` about 1.95 KB, and it overflowed by 4 bytes
-  printing a log line (bench 2026-11-08). The camera error text now uses a static buffer like the
-  other camera commands, and the resolution list is built once per sensor into its own buffer. A host
-  test rejects `thread_local` in HardwareOne code. Not yet tested on hardware.
-- ESP32-P4: a CPU clock change could hang both cores until the interrupt watchdog reset the chip
-  (`rst:0x7 (HP_SYS_HP_WDT_RESET)`, `reset=other_wdt`, no panic output). Bench 2026-11-08: 2 of 3
-  `stt start` attempts at the 100 MHz idle clock that failed at once (raise to 400 MHz, then straight
-  back). The clock switch added on 2026-11-07 freezes the external-memory cache with the other core
-  stalled, but the compiler had inlined it into flash code, so the frozen window itself was fetched
-  from flash; on the P4 a cache miss there never completes. The switch is now a separate internal-RAM
-  function, reads its configuration from internal RAM, and refuses (the power policy retries) on a
-  task whose stack is not in internal RAM. Any clock change was exposed (power mode, `cpufreq`, the
-  STT and display boosts). Not yet tested on hardware.
+- ESP32-P4: occasional reboots (heap corruption or a VFS load fault) around speech sessions. The CPU
+  clock switch now runs with the PSRAM speed-mode sync and memory quiesced.
+- Local STT sessions no longer fail to start with `warm-up failed: Cancelled`.
+- Saved `pdmamplify` and `pdmhpf` values now apply to STT after a reboot.
 - Two crashes: the QuickNote worker's stack and Arduino's unlocked `NetworkEvents`.
 - Three resident task stacks raised, as they ran with 312 to 700 B free: the command executor
   (`cmd_exec`) 8 to 10 KB, the log writer (`log_out`) 4 to 6 KB, the glasses owner (`g2_owner`) 6 to

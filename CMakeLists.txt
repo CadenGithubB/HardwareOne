@@ -851,9 +851,9 @@ hw1_managed_components_stamp("${_hw1_dependencies_lock}"
     "${_hw1_managed_components_stamp}" PRE_SYNC)
 
 if(_ota_layout)
-    set(PROJECT_VER "0.99.99+${_ota_version_suffix}")
+    set(PROJECT_VER "0.99.99.1+${_ota_version_suffix}")
 else()
-    set(PROJECT_VER "0.99.99")
+    set(PROJECT_VER "0.99.99.1")
 endif()
 project(hardwareone-idf)
 hw1_managed_components_stamp("${_hw1_dependencies_lock}"
