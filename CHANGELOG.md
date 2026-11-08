@@ -23,6 +23,12 @@ everything user-visible since the v0.99.99 tag (55 commits).
 - System log bounded and rotated: the debug-capture log rotates to `<path>.1` at 8 MB; size limit and
   rotation count are settings, as for the sensor logger.
 - `status` labels USB and the later reset reasons instead of "Unknown".
+- `otastatus` names the recovery updater in the factory slot ("Factory updater" line,
+  `factoryUpdaterVersion` in `otastatus json`). The updater now has its own version (1.1.0, was a fixed
+  1.0.0 on every build), so a release can require a newer one through the signed manifest's
+  `minUpdaterVersion` (`HW1_MIN_UPDATER_VERSION` in `tools/build_deployment.sh`, which refuses a floor
+  newer than the updater it builds); the manifest format is unchanged. Updaters built before this report
+  `1.0.0+<suffix>` and cannot be told apart.
 - Crash record captures the faulting task, stack-guard bounds and a RISC-V stack scan.
 - Build and release tooling: `tools/vendor_arduino.sh` (a fresh clone vendors and patches arduino-esp32
   3.3.5 in one step), the OTA protocol host suite under the main ctest gate, and the pre-tag gate in
@@ -740,7 +746,9 @@ these fixes created are listed in `docs/MODULARIZATION_PLAN.md`.
 - OTA: the recovery updater no longer carries a failed update's downgrade or
   forced-power permission into a later upload. This takes an updater from
   this release in the factory slot; application images alone do not change
-  it.
+  it. Updaters up to 0.99.99 all report `1.0.0+<suffix>`, so a device cannot
+  show whether its factory updater has this fix; a factory updater reporting
+  1.1.0 or later in `otastatus` ("Factory updater" line) has it.
 
 ### Changed
 - P4 STT retains model state for a session, computes frontend features during

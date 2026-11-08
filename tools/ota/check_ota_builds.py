@@ -282,6 +282,26 @@ def check_version_contract(
     )
 
 
+def check_min_updater(
+    audit: Audit, updater_version: str, min_updater: str | None
+) -> None:
+    """A manifest floor above the updater built with it locks every device out."""
+
+    if min_updater is None:
+        return
+    if not semver.is_valid(min_updater):
+        audit.require(False, f"--min-updater {min_updater!r} is not valid SemVer")
+        return
+    if not semver.is_valid(updater_version):
+        return  # check_version_contract already reports it
+    audit.require(
+        semver.compare(updater_version, min_updater) >= 0,
+        f"minimum updater {min_updater!r} is newer than the updater built here "
+        f"({updater_version!r}); every device, even one cable-flashed with this "
+        f"release, would refuse the update",
+    )
+
+
 def check_common_config(
     audit: Audit, config: dict[str, str], owner: str, contract: dict[str, object]
 ) -> None:
@@ -347,6 +367,11 @@ def main() -> int:
     )
     parser.add_argument("--main-build", type=pathlib.Path, required=True)
     parser.add_argument("--updater-build", type=pathlib.Path, required=True)
+    parser.add_argument(
+        "--min-updater",
+        help="minUpdaterVersion the release manifest will carry; must not be "
+        "newer than the paired updater",
+    )
     args = parser.parse_args()
 
     main_build = args.main_build.resolve()
@@ -454,6 +479,7 @@ def main() -> int:
     check_version_contract(
         audit, updater_version, contract["updater_suffix"], "updater"
     )
+    check_min_updater(audit, updater_version, args.min_updater)
     main_release_gate = int(contract.get("main_release_max") or slots["ota_0"])
     configured_updater_gate = int(
         contract.get("updater_release_max") or UPDATER_RELEASE_GATE
