@@ -74,6 +74,14 @@ everything user-visible since the v0.99.99 tag (55 commits).
   checked temps before replacing either, so a failed save keeps the old matching pair and is reported
   instead of truncating them. Boot cleanup also removes
   leftover temps in `/system/espnow` and `/system/certs`. Host tests only.
+- First-time setup "Import from Backup": the confirm prompt now shows the staged bundle's claimed
+  hostname and board, the bytes received, the first 8 hex of their SHA-256 and whether its fingerprint
+  matched this device, did not, or was missing (shown as unverified, never as this device; such a bundle
+  is still restored with credentials, as before), on the serial line and the OLED prompt, still
+  defaulting to No. The serial line also says what to compare the size and hash with; for a forced
+  cross-device upload, whose body adds a `force` flag, it says they will not match the file. Discarding a staged bundle frees
+  it before clearing the pending flag, and stopping the restore server discards only after the server
+  has stopped. Host suite `migration_restore` covers both; not yet tested on hardware.
 - Host suite: nine harnesses re-pinned after the Waveshare merge; the event-catalog structure test walks
   what git would commit; the continuous-STT suites run serially under ctest.
 - Recovery OTA: the first `ota0-flash` in a fresh build directory no longer fails with

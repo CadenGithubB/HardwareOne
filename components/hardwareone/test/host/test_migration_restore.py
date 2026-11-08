@@ -14,6 +14,17 @@ backup walk keeps nested paths longer than 128 bytes whole and leaves out (with
 a warning) a map that would push the bundle past the 512 KB the restore accepts.
 The source contract checks that /api/backup refuses an overflowed or oversized
 bundle and shares its limit with /api/restore.
+
+It also checks the staged bundle's provenance summary (claimed hostname and
+board, bytes received, SHA-256 prefix, same or other device) on serial and in
+the three-line OLED prompt, with terminal escapes in the claims neutralised
+and a bundle without a fingerprint shown as unverified, never "this device";
+what the operator is told to compare the size and SHA-256 with (a forced
+cross-device upload carries an added "force" key and cannot match the file);
+that discarding frees the staged buffer while the confirm flag is still set;
+and, in source, that first-time setup shows the summary before its default-No
+prompt and that the restore server is stopped before its staged buffer is
+discarded.
 """
 from __future__ import annotations
 
@@ -96,6 +107,24 @@ def source_contract(migration: str) -> None:
     require("kMigrationPayloadMax" in restore, "handleRestore must use the shared limit")
     writer = unique_block(migration, "static bool writeRestoreFilesFromDoc(")
     require("filesWritten > 0 ||" not in writer, "a partial restore must not report success")
+    require("stageMigrationRestore(buf," in restore, "handleRestore must stage through stageMigrationRestore")
+    stop = unique_block(migration, "void stopRestoreOnlyHttpServer()")
+    discard = stop.find("discardStagedMigrationRestore();")
+    require(discard > stop.rfind("httpd_stop(server);") > 0,
+            "the restore server must be stopped before its staged buffer is discarded")
+
+
+def setup_contract(setup: str) -> None:
+    """First-time setup shows the bundle's provenance before a default-No confirm."""
+    marker = "if (migrationRestoreAwaitingConfirm())"
+    require(setup.count(marker) == 1, "one staged-restore confirm in first-time setup")
+    confirm = extract_block(setup[setup.index(marker):], marker)
+    summary = confirm.find('broadcastOutput("Backup staged " + migrationStagedSummary());')
+    advice = confirm.find("broadcastOutput(migrationStagedCheckAdvice());")
+    prompt = confirm.find("getOLEDYesNoPrompt(migrationStagedOledPrompt().c_str(), false)")
+    serial = confirm.find("waitForSerialInputBlocking()")
+    require(0 <= summary < prompt and summary < serial, "provenance is shown before either confirm")
+    require(summary < advice < prompt and advice < serial, "the check advice is shown before either confirm")
 
 
 def main() -> None:
@@ -131,6 +160,7 @@ def main() -> None:
         subprocess.run(command, check=True, timeout=180)
         subprocess.run([str(binary)] + ([args.case] if args.case else []), check=True, timeout=60)
     source_contract(migration)
+    setup_contract((COMPONENT / "System_FirstTimeSetup.cpp").read_text())
 
 
 if __name__ == "__main__":

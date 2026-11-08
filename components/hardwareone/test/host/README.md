@@ -722,6 +722,10 @@ successful restore moves `users.json` into place last; that a failed
 cross-device credential-setup marker fails the restore; and that the backup
 walk keeps nested paths longer than 128 bytes whole and leaves out, with a
 warning, a map that would push the bundle past the 512 KB the restore accepts.
+It also checks the confirm prompt's provenance summary (claims sanitised; a
+bundle without a fingerprint shown as unverified, never as this device), the
+size/SHA-256 advice for unforced and forced uploads, and that discard frees the
+staged buffer before clearing the pending flag.
 A source check requires `/api/backup` to refuse an overflowed or oversized
 bundle with the limit `/api/restore` uses. Not covered: the HTTP handlers
 themselves, the device AES helpers, a rename failing part-way through
