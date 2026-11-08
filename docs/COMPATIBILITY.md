@@ -33,7 +33,10 @@ keeps. Readiness item P0-7; keep this file in step with CHANGELOG `[Unreleased]`
 
 A lost admin password on a single-account device cannot be recovered in place (`factoryreset`
 needs a super-admin login). A second admin can reset it with `userresetpassword`; otherwise erase the
-LittleFS region over the cable, which also removes settings and captures. First-time setup refuses
+LittleFS region over the cable, which also removes settings and captures. An owner login file that
+can no longer be read (`/system/users/user_settings/1.json`) is moved aside to `1.json.corrupt-1`,
+and the next boot asks on the console or display for a new owner password; other accounts and
+settings stay as they are. First-time setup refuses
 reserved owner names (`system`, `AuthBypass`, the bond admin) and passwords shorter than 6
 characters, so a fresh device cannot be set up into a lockout.
 

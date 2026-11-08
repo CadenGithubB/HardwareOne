@@ -1736,8 +1736,21 @@ void hardwareone_setup() {
       // re-fires on every boot after an update rather than once.
       (void)settingsRestampFirmwareVersion();
     } else {
-      // Parse/open failure: the file is left on disk; RAM runs on defaults.
-      logSystemEvent("SETTINGS", "settings.json load FAILED — running on defaults (file left on disk)");
+      bool quarantined;
+      {
+        FsLockGuard guard("settings.exists");
+        quarantined = !VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "hwone.settings_load_check"));
+      }
+      if (quarantined) {
+        // G-38: readSettingsJson moved an unparseable file aside (it logged and
+        // posted the event) and RAM holds defaults, as on a fresh device, so
+        // persist them now. Settings saves and factoryreset work from here.
+        writeSettingsJson();
+      } else {
+        // Open failure, out of memory, or a quarantine that could not rename:
+        // the file is left on disk; RAM runs on defaults.
+        logSystemEvent("SETTINGS", "settings.json load FAILED — running on defaults (file left on disk)");
+      }
     }
   } else if (filesystemReady) {
     Serial.println("[Settings] No file found, writing defaults");
