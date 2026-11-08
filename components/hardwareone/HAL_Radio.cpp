@@ -96,6 +96,7 @@ bool sTransportUp = false;     // last TRANSPORT_UP without a DOWN/FAILURE since
 bool sHostedLinkUp = false;    // Hosted posted TRANSPORT_UP in this session (cleared before each start)
 bool sTransportLost = false;
 bool sHeld = false;
+bool sRestartLatched = false;  // radioHalSilenceForRestart ran: EN stays low until the CPU reset
 bool sEventsRegistered = false;
 RadioHalEventFn sEventFn = nullptr;
 RadioCompanionIdentity sIdentity = {};
@@ -290,6 +291,9 @@ esp_err_t startOnce(bool allowLegacyUpdate) {
   // hostedInitWiFi() returns as soon as Hosted's reconfigure gives up, which
   // after two failed starts in one boot is at once (its retry counter is never
   // reset on failure). Wait for the slave ourselves, in Hosted's own budget.
+  // This helps when the SDMMC host is healthy; it does not recover a wedged
+  // one (the 2026-11-08 reboot outage), and a retry on a dead companion now
+  // takes the full budget instead of returning at once.
   if (freshSession &&
       !hw1::radio::waitForTransportUp(
           startedAt, kSlaveReadyBudgetMs, kSlaveReadyPollMs, [] { return hostedLinkUp(); },
@@ -530,7 +534,15 @@ esp_err_t radioHalConfigureMonitoring(uint16_t heartbeatSec, uint32_t lowMemoryB
   return applyMonitoring();
 }
 
+static bool restartLatched() {
+  portENTER_CRITICAL(&sLock);
+  const bool latched = sRestartLatched;
+  portEXIT_CRITICAL(&sLock);
+  return latched;
+}
+
 static esp_err_t startTransport(bool allowLegacyUpdate) {
+  if (restartLatched()) return ESP_ERR_INVALID_STATE;  // the P4 restarts with the C6 held
   ESP_RETURN_ON_ERROR(prepareBoard(), kTag, "Board preparation failed");
   ESP_RETURN_ON_ERROR(registerEvents(), kTag, "Hosted events");
   // A new link starts from a clean slate on both sides.
@@ -581,6 +593,10 @@ esp_err_t radioHalStartTransport() { return startTransport(false); }
 esp_err_t radioHalStartUpdateTransport() { return startTransport(true); }
 
 void radioHalStopTransport() {
+  // After radioHalSilenceForRestart, Hosted stays up on purpose: its teardown
+  // deletes tasks that may be inside an SDMMC transaction (an op that was
+  // already running when the restart began).
+  if (restartLatched()) return;
   if (hostedIsInitialized()) {
     // Arduino closes the transport once neither Wi-Fi nor BLE claims it. The
     // callers have stopped both; clear a stale BLE claim so the close happens.
@@ -610,12 +626,32 @@ bool radioHalTransportLost() {
   return lost;
 }
 
+// Drive C6 EN low and latch the pad (gpio_hold_en): while it is held, a
+// gpio_set_level/gpio_config on the pin, Hosted's own reset pulse included,
+// does not reach the pad. The hold is in the LP domain and survives the CPU
+// reset; prepareBoard() releases it at the next boot before Hosted drives EN.
+static void latchC6EnableLow() {
+  gpio_hold_dis(board::kC6Enable);
+  gpio_set_level(board::kC6Enable, 0);
+  gpio_set_direction(board::kC6Enable, GPIO_MODE_OUTPUT);
+  gpio_hold_en(board::kC6Enable);
+}
+
 esp_err_t radioHalHold(bool hold) {
+  // A restart is under way and the C6 is latched in reset: it stays there.
+  if (restartLatched()) return hold ? ESP_OK : ESP_ERR_INVALID_STATE;
   if (hold && hostedIsInitialized()) return ESP_ERR_INVALID_STATE;  // stop the transport first
   ESP_RETURN_ON_ERROR(prepareBoard(), kTag, "Board preparation failed");
   gpio_hold_dis(board::kC6Enable);
   ESP_RETURN_ON_ERROR(gpio_set_level(board::kC6Enable, hold ? 0 : 1), kTag, "C6 EN level");
   ESP_RETURN_ON_ERROR(gpio_set_direction(board::kC6Enable, GPIO_MODE_OUTPUT), kTag, "C6 EN direction");
+  // A release that raced radioHalSilenceForRestart (checked above before it
+  // latched, wrote EN after it) puts the line back: whoever writes last with
+  // the latch set leaves EN low.
+  if (!hold && restartLatched()) {
+    latchC6EnableLow();
+    return ESP_ERR_INVALID_STATE;
+  }
   portENTER_CRITICAL(&sLock);
   sHeld = hold;
   if (hold) {
@@ -659,17 +695,25 @@ void radioHalSilenceForRestart() {
   // and a transfer it was in the middle of ends on the SDMMC timeout instead
   // of streaming into the reset. Hosted stays initialised on purpose: its
   // teardown deletes tasks that may be inside an SDMMC transaction, and its
-  // users are still running. EN stays low through the CPU reset; Hosted's
-  // reset pulse at the next boot releases it, as after deep sleep.
-  gpio_hold_dis(board::kC6Enable);
-  gpio_set_level(board::kC6Enable, 0);
-  gpio_set_direction(board::kC6Enable, GPIO_MODE_OUTPUT);
+  // users are still running.
+  //
+  // The latch flag goes first, so radioHalHold(false), startTransport and
+  // radioHalStopTransport refuse from here on. The pad is then latched low
+  // with gpio_hold_en: a Start/Recover op that was already inside
+  // hostedInitWiFi (Hosted's transport_gpio_reset pulses EN, at the start and
+  // every 50 slave-ready polls) cannot raise it again during the drain.
+  // Hosted never touches the hold in this build (host power save is off, so
+  // H_HOST_PS_ALLOWED is 0). EN stays low through the CPU reset; prepareBoard()
+  // releases the hold at the next boot before Hosted's reset pulse, as after
+  // deep sleep.
   portENTER_CRITICAL(&sLock);
+  sRestartLatched = true;
   sHeld = true;
   sTransportUp = false;
   sSessionBleLinks = 0;
   sHostedLinkUp = false;
   portEXIT_CRITICAL(&sLock);
+  latchC6EnableLow();
 }
 
 esp_err_t radioHalUpdateBegin() {

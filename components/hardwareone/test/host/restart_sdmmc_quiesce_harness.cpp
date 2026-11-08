@@ -2,7 +2,8 @@
 // companion start's wait for the slave. The runner
 // (test_restart_sdmmc_quiesce.py) inserts the shipping definitions unchanged:
 //   @UTILS@      quiesceSdmmcForRestart, rebootDevice, factoryreset_doRestart (System_Utils.cpp)
-//   @SILENCE@    radioHalSilenceForRestart (HAL_Radio.cpp)
+//   @SILENCE@    restartLatched, latchC6EnableLow, radioHalHold,
+//                radioHalSilenceForRestart (HAL_Radio.cpp)
 //   @START@      hostedLinkUp, startOnce and their constants (HAL_Radio.cpp)
 //   @COMPANION@  radioCompanionBeforeRestart, submitOp (System_RadioCompanion.cpp)
 // and the real System_RestartQuiesceCore.h / Radio_CompanionCore.h. Only the
@@ -50,6 +51,11 @@ static const char* esp_err_to_name(esp_err_t) { return "err"; }
 #define ESP_LOGI(tag, fmt, ...) std::fprintf(stderr, "I %s: " fmt "\n", tag, ##__VA_ARGS__)
 #define ESP_LOGW(tag, fmt, ...) std::fprintf(stderr, "W %s: " fmt "\n", tag, ##__VA_ARGS__)
 #define ESP_LOGE(tag, fmt, ...) std::fprintf(stderr, "E %s: " fmt "\n", tag, ##__VA_ARGS__)
+#define ESP_RETURN_ON_ERROR(x, tag, msg) \
+  do {                                   \
+    const esp_err_t err_ = (x);          \
+    if (err_ != ESP_OK) return err_;     \
+  } while (0)
 
 // --- System_Utils.cpp boundaries ------------------------------------------------
 #define HW1_RADIO_COMPANION 1
@@ -63,8 +69,10 @@ struct EspClass {
   }
 } ESP;
 static unsigned long millis() { return gNow; }
+static void (*gDuringDelay)() = nullptr;  // work another task does while rebootDevice waits
 static void delay(uint32_t ms) {
   note("delay " + std::to_string(ms));
+  if (gDuringDelay) gDuringDelay();
   advance(ms);
 }
 static bool finalizeMicRecordingForRestart(const char*) {
@@ -72,7 +80,11 @@ static bool finalizeMicRecordingForRestart(const char*) {
   return true;
 }
 static void recordRebootIntent(const char* reason, const char*) { note(std::string("intent ") + reason); }
-static void radioCompanionBeforeRestart() { note("companion-silence"); }
+static void (*gCompanionSilence)() = nullptr;  // set: run the real HAL silence too
+static void radioCompanionBeforeRestart() {
+  note("companion-silence");
+  if (gCompanionSilence) gCompanionSilence();
+}
 static uint32_t gFsLockHoldMs = 0;  // how long another task keeps the filesystem lock
 static bool fsLockForRestart(uint32_t timeoutMs) {
   note("fslock " + std::to_string(timeoutMs));
@@ -99,13 +111,39 @@ static esp_err_t esp_unregister_shutdown_handler(shutdown_handler_t h) {
                                                                    : "unregister other");
   return ESP_OK;
 }
+// The C6 EN pad: gpio_set_level writes the output register, and the pad
+// follows it unless gpio_hold_en latched it (ESP-IDF pad hold semantics).
+static uint32_t gEnOut = 1, gEnPad = 1;
+static bool gEnPadHeld = false;
+static void (*gBeforeHoldDis)() = nullptr;  // one-shot: another task runs first
 static esp_err_t gpio_hold_dis(gpio_num_t pin) {
+  if (gBeforeHoldDis) {
+    void (*hook)() = gBeforeHoldDis;
+    gBeforeHoldDis = nullptr;
+    hook();
+  }
   note("hold_dis " + std::to_string(pin));
+  gEnPadHeld = false;
+  gEnPad = gEnOut;
+  return ESP_OK;
+}
+static esp_err_t gpio_hold_en(gpio_num_t pin) {
+  note("hold_en " + std::to_string(pin));
+  gEnPadHeld = true;
   return ESP_OK;
 }
 static esp_err_t gpio_set_level(gpio_num_t pin, uint32_t level) {
   note("level " + std::to_string(pin) + "=" + std::to_string(level));
+  gEnOut = level;
+  if (!gEnPadHeld) gEnPad = level;
   return ESP_OK;
+}
+// Hosted's transport_gpio_reset (sdio_drv.c), from an op that was already
+// inside hostedInitWiFi when the restart began: EN active, inactive, active.
+static void hostedResetPulse() {
+  gpio_set_level(9, 1);
+  gpio_set_level(9, 0);
+  gpio_set_level(9, 1);
 }
 static esp_err_t gpio_set_direction(gpio_num_t pin, int mode) {
   note("dir " + std::to_string(pin) + (mode == GPIO_MODE_OUTPUT ? " out" : " other"));
@@ -147,12 +185,14 @@ int& sLock = gLock;
 bool sTransportUp = false;
 bool sTransportLost = false;
 bool sHeld = false;
+bool sRestartLatched = false;
 bool sUpdateOnly = false;
 bool sHostedLinkUp = false;
 uint8_t sSessionBleLinks = 0;
 Identity sIdentity = {};
 uint32_t nowMs() { return gNow; }
 bool hostedIsInitialized() { return gHostedInitialized; }
+esp_err_t prepareBoard() { return ESP_OK; }
 bool hostedInitWiFi() {
   note("hostedInitWiFi");
   if (!gHostedInitialized) gNow += gInitReturnsAfterMs;
@@ -217,6 +257,12 @@ static void reset_world() {
   hal::sTransportUp = false;
   hal::sHostedLinkUp = false;
   hal::sHeld = false;
+  hal::sRestartLatched = false;
+  gEnOut = gEnPad = 1;  // the C6 is running
+  gEnPadHeld = false;
+  gCompanionSilence = nullptr;
+  gDuringDelay = nullptr;
+  gBeforeHoldDis = nullptr;
 }
 
 static void reboot_quiesces_sdmmc_after_the_flush_and_before_the_restart() {
@@ -270,9 +316,64 @@ static void hal_silence_unregisters_the_wifi_stop_rpc_and_holds_the_c6() {
   hal::sTransportUp = true;
   hal::sHostedLinkUp = true;
   hal::radioHalSilenceForRestart();
-  const std::vector<std::string> want = {"unregister esp_wifi_stop", "hold_dis 9", "level 9=0", "dir 9 out"};
+  const std::vector<std::string> want = {"unregister esp_wifi_stop", "hold_dis 9", "level 9=0", "dir 9 out",
+                                         "hold_en 9"};
   CHECK(gEvents == want);
-  CHECK(hal::sHeld && !hal::sTransportUp && !hal::sHostedLinkUp);
+  CHECK(hal::sHeld && !hal::sTransportUp && !hal::sHostedLinkUp && hal::sRestartLatched);
+  CHECK(gEnPad == 0 && gEnPadHeld);
+}
+
+// An op already running in the companion worker (Start, Recover, c6restart)
+// is inside hostedInitWiFi when rebootDevice runs. During the drain it pulses
+// EN (Hosted's transport_gpio_reset) and then releases the hold the way a
+// feature start does. Neither may raise EN before the restart.
+static void an_op_in_flight_during_the_drain_cannot_release_the_c6() {
+  reset_world();
+  gCompanionSilence = [] { hal::radioHalSilenceForRestart(); };
+  static bool releaseRefused = false;
+  static bool padLowThroughout = true;
+  releaseRefused = false;
+  padLowThroughout = true;
+  gDuringDelay = [] {
+    if (!hal::sRestartLatched) return;  // the flush delay, before the silence
+    hostedResetPulse();
+    padLowThroughout = padLowThroughout && gEnPad == 0;
+    releaseRefused = hal::radioHalHold(false) == ESP_ERR_INVALID_STATE;
+    padLowThroughout = padLowThroughout && gEnPad == 0;
+  };
+  bool restarted = false;
+  try {
+    utils::rebootDevice("command", "commanded restart", 1000);
+  } catch (const RestartSignal&) {
+    restarted = true;
+  }
+  CHECK(restarted);
+  CHECK(releaseRefused);
+  CHECK(padLowThroughout);
+  CHECK(gEnPad == 0 && gEnPadHeld);  // EN is low and latched at the restart
+  CHECK(gEvents.back() == "restart");
+}
+
+// A feature start checked the latch just before the silence set it and wrote
+// EN after the silence latched the pad: the release puts the line back.
+static void a_release_racing_the_silence_leaves_en_low() {
+  reset_world();
+  hal::sHeld = true;  // the companion was held; a feature start releases it
+  gEnOut = gEnPad = 0;
+  gBeforeHoldDis = [] { hal::radioHalSilenceForRestart(); };
+  CHECK(hal::radioHalHold(false) == ESP_ERR_INVALID_STATE);
+  CHECK(gEnPad == 0 && gEnPadHeld);
+  CHECK(hal::sHeld);
+}
+
+static void a_hold_after_the_silence_changes_nothing() {
+  reset_world();
+  hal::radioHalSilenceForRestart();
+  gEvents.clear();
+  CHECK(hal::radioHalHold(true) == ESP_OK);
+  CHECK(hal::radioHalHold(false) == ESP_ERR_INVALID_STATE);
+  CHECK(gEvents.empty());  // no pin write at all
+  CHECK(gEnPad == 0 && gEnPadHeld);
 }
 
 static void companion_silence_stops_new_work_then_silences_the_hal() {
@@ -330,6 +431,9 @@ int main() {
   reboot_with_a_busy_filesystem_still_restarts_without_extra_wait();
   factory_reset_restart_quiesces_too();
   hal_silence_unregisters_the_wifi_stop_rpc_and_holds_the_c6();
+  an_op_in_flight_during_the_drain_cannot_release_the_c6();
+  a_release_racing_the_silence_leaves_en_low();
+  a_hold_after_the_silence_changes_nothing();
   companion_silence_stops_new_work_then_silences_the_hal();
   a_retry_waits_for_the_slave_when_hosted_gives_up_at_once();
   a_stale_link_flag_from_the_last_session_is_not_trusted();

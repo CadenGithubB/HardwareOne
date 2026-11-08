@@ -329,7 +329,9 @@ class CompanionMonitor {
 // few hundred ms later (bench log 2026-11-08). Hosted's rx task still finishes
 // the handshake and posts TRANSPORT_UP, so the owner waits for that itself,
 // inside the same budget Hosted would have used: a start whose Hosted wait
-// already spent the budget does not wait twice.
+// already spent the budget does not wait twice. It helps only a healthy SDMMC
+// data path; a wedged one (every data transfer timing out) still fails, after
+// the full budget.
 //
 // linkUp(): bool; now(): uint32_t ms (wraps); sleep(uint32_t ms): void.
 // Returns linkUp() at the end.

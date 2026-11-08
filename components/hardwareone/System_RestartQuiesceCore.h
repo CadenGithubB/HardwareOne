@@ -22,6 +22,16 @@
 // Then the caller restarts. Every step is bounded; a refused or slow step does
 // not stop the restart.
 //
+// What this does not guarantee: an idle SDMMC host at the reset. Hosted stays
+// initialised (its teardown is the worse risk), so its SDIO tasks keep running
+// against the held C6 through the drain and into esp_restart(): a TX packet
+// (the HTTP reply to `reboot`, a TCP retransmit, BLE HCI, an RPC poll) still
+// arms the IDMAC for a CMD53, gets a response timeout and stops the DMA, and
+// the read task may wake on DAT1. With the C6 held no data moves and each such
+// transaction lasts microseconds, and esp_restart_noos() stalls the other core
+// before the SDMMC reset, so the exposure is small, not zero. Bench check:
+// many `reboot`s under heavy HTTP traffic.
+//
 // Dependency-free on purpose (no ESP-IDF or Arduino), so the host test drives
 // it with a fake clock (test_restart_quiesce_core.cpp).
 #pragma once

@@ -152,9 +152,10 @@ bool radioHalHeld();
 // Hold through host deep sleep: the enable line stays low until the next boot.
 void radioHalPrepareForDeepSleep();
 // Right before an intentional restart (rebootDevice): no SDIO RPC in
-// esp_restart()'s shutdown handlers and the C6 held in reset, so the SDMMC
-// host is idle when the restart resets it. Never returns the link; the caller
-// restarts. See System_RestartQuiesceCore.h.
+// esp_restart()'s shutdown handlers and the C6 latched in reset (gpio_hold_en),
+// so it stops sending before the restart resets the SDMMC host. One-way: from
+// then on radioHalHold(false), the transport starts and radioHalStopTransport
+// refuse. The caller restarts. See System_RestartQuiesceCore.h.
 void radioHalSilenceForRestart();
 // Mirror the companion's UART console into the P4 log (tag "C6>"). Started by
 // radioHalPrepare(); the only view of the C6's own boot log and crashes while

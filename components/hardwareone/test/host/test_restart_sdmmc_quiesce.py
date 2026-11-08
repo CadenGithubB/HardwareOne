@@ -13,11 +13,13 @@ after a failure.
 The harness compiles the shipping definitions against recording fakes:
 rebootDevice, quiesceSdmmcForRestart and factoryreset_doRestart
 (System_Utils.cpp), radioHalSilenceForRestart, hostedLinkUp and startOnce
-(HAL_Radio.cpp), radioCompanionBeforeRestart and submitOp
+(HAL_Radio.cpp) with radioHalHold and its latch helpers, radioCompanionBeforeRestart and submitOp
 (System_RadioCompanion.cpp), with the real System_RestartQuiesceCore.h and
 Radio_CompanionCore.h. A restart must silence the C6 (unregister the RPC
-handler, hold EN low), take the filesystem lock and drain for the SDMMC
-timeout, after the flush delay and before ESP.restart(); a start whose Hosted
+handler, latch EN low with gpio_hold_en), take the filesystem lock and drain
+for the SDMMC timeout, after the flush delay and before ESP.restart(); an op
+already running (Hosted's reset pulse, a hold release, also one racing the
+silence) must not raise EN again before the restart; a start whose Hosted
 wait gave up must still wait for TRANSPORT_UP inside Hosted's budget. Source
 checks cover the companion gates the harness does not compile. --source-dir
 points the suite at another copy of the component (the pre-fix tree fails).
@@ -80,7 +82,12 @@ def main() -> None:
             one(hal, "bool hostedLinkUp()", "HAL_Radio.cpp"),
             one(hal, "esp_err_t startOnce(bool allowLegacyUpdate)", "HAL_Radio.cpp"),
         ]),
-        "/*@SILENCE@*/": one(hal, "void radioHalSilenceForRestart()", "HAL_Radio.cpp"),
+        "/*@SILENCE@*/": "\n\n".join([
+            one(hal, "static bool restartLatched()", "HAL_Radio.cpp"),
+            one(hal, "static void latchC6EnableLow()", "HAL_Radio.cpp"),
+            one(hal, "esp_err_t radioHalHold(bool hold)", "HAL_Radio.cpp"),
+            one(hal, "void radioHalSilenceForRestart()", "HAL_Radio.cpp"),
+        ]),
         "/*@COMPANION@*/": "\n\n".join([
             one(companion, "bool submitOp(Op op, ExecReq::DeferredFn fn, void* arg)", "System_RadioCompanion.cpp"),
             one(companion, "void radioCompanionBeforeRestart()", "System_RadioCompanion.cpp"),
@@ -97,6 +104,14 @@ def main() -> None:
     gate = blocks_radio.find("sRestarting.load()")
     require(0 <= gate < blocks_radio.find("monitorState()"),
             "radioCompanionBlocksRadio refuses radio features (and never releases the hold) while restarting")
+    # Once the silence latched, the HAL starts no transport and tears none down
+    # (an op already running in the companion worker may still call them).
+    hal_plain = strip_comments(hal)
+    for marker, first in (("static esp_err_t startTransport(bool allowLegacyUpdate)", "prepareBoard()"),
+                          ("void radioHalStopTransport()", "hostedIsInitialized()")):
+        body = extract_block(hal_plain, marker)
+        gate = body.find("if (restartLatched()) return")
+        require(0 <= gate < body.find(first), f"{marker} refuses once the restart latched the C6")
     # The restart path does not tear Hosted down under live users.
     silence = strip_comments(blocks["/*@SILENCE@*/"])
     for forbidden in ("hostedDeinit", "esp_hosted_deinit", "radioHalStopTransport"):
