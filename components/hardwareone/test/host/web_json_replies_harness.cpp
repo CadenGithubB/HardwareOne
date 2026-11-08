@@ -89,8 +89,9 @@ inline esp_err_t sendJsonResponse(httpd_req_t* req, const char* body, long len =
 struct AuthContext { String user; };
 AuthContext makeWebAuthCtx(httpd_req_t*) { AuthContext ctx; ctx.user = "admin"; return ctx; }
 namespace VFS {
-namespace Scopes { constexpr const char* SYSTEM_STATE = "/system"; }
-static AuthContext systemAuth(const char*, const char*) { AuthContext ctx; ctx.user = "system"; return ctx; }
+// Unused once the export reads through readAutomationsJson; kept for older trees.
+namespace Scopes { [[maybe_unused]] constexpr const char* SYSTEM_STATE = "/system"; }
+[[maybe_unused]] static AuthContext systemAuth(const char*, const char*) { AuthContext ctx; ctx.user = "system"; return ctx; }
 }
 bool tgRequireAuth(const AuthContext&) { return true; }
 bool webGuestAccessAllowed(httpd_req_t*, const AuthContext&) { return true; }
@@ -106,6 +107,16 @@ esp_err_t sendJsonError(httpd_req_t* req, const String& message);
 static std::string gAutomations;
 const char* AUTOMATIONS_JSON_FILE = "/system/automations.json";
 bool readText(const char*, String& out, const AuthContext&) { out = gAutomations.c_str(); return true; }
+// readAutomationsJson double: gAutomationsNewer > 0 is a file from newer
+// firmware, refused as System_Automation.cpp refuses it.
+constexpr uint32_t kAutomationsFileVersion = 2;
+static uint32_t gAutomationsNewer = 0;
+bool readAutomationsJson(String& out, uint32_t* newerVersion) {
+  *newerVersion = gAutomationsNewer;
+  if (gAutomationsNewer) { out = ""; return false; }
+  out = gAutomations.c_str();
+  return true;
+}
 bool extractArrayByKey(const String& src, const char* key, String& outArray) {
   JsonDocument doc;
   if (deserializeJson(doc, src.c_str())) return false;
@@ -223,6 +234,19 @@ static void caseExport() {
   check(handleAutomationsExport(&bulk) == ESP_OK && bulk.sends == 1, "bulk export sends");
   check(bulk.sentHeaders["Content-Disposition"].rfind("attachment; filename=\"automations-backup-", 0) == 0,
         "bulk export keeps its dated filename");
+  // A file from newer firmware is not exported: a 409 naming its format, and
+  // no attachment header, so the browser does not save the error as a backup.
+  gAutomationsNewer = 3;
+  for (const char* query : {"id=7", ""}) {
+    httpd_req_t refused;
+    refused.query = query;
+    check(handleAutomationsExport(&refused) == ESP_OK && refused.sends == 1, "refused export sends once");
+    check(refused.status == "409 Conflict", "refused export is a 409");
+    check(refused.body.find("format 3, newer than this firmware reads (2)") != std::string::npos,
+          "refused export names both formats");
+    check(refused.sentHeaders.count("Content-Disposition") == 0, "refused export is not an attachment");
+  }
+  gAutomationsNewer = 0;
 }
 
 static void caseIcon() {

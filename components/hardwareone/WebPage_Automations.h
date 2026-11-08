@@ -863,6 +863,12 @@ setInterval(tickNextRunCells, 1000);
 function renderAutos(json) {
   try {
     let data = (typeof json === 'string') ? JSON.parse(json) : json;
+    // A failed read (for example a file from newer firmware) is not an empty list.
+    if (data && data.success === false) {
+      hw.$('autos').textContent = data.error || 'Error loading automations';
+      gLastAutos = [];
+      return;
+    }
     let autos = [];
     if (data && data.automations && Array.isArray(data.automations)) autos = data.automations;
     // Normalize triggers[] → trigger + runAtBoot so the rest of the UI works.

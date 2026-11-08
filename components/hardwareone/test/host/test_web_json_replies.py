@@ -105,6 +105,8 @@ def production() -> str:
     pieces += optional(utils_cpp, "esp_err_t sendJsonError(")
     pieces.append(required(filesystem, "String quotePath("))
     pieces += optional(server, "static void automationExportDisposition(")
+    pieces += optional(server, "static void automationsWebReadError(")
+    pieces += optional(server, "static esp_err_t sendAutomationsExportReadError(")
     pieces.append(required(server, "esp_err_t handleAutomationsExport("))
     pieces.append(required(server, "esp_err_t handleIconGet("))
     pieces.append(required(server, "esp_err_t handleFilesCreate("))

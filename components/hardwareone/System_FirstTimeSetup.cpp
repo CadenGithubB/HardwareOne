@@ -67,6 +67,7 @@ extern uint32_t gBootCounter;
 extern String hashUserPassword(const String& plaintext);
 #if ENABLE_AUTOMATION
 extern bool writeAutomationsJsonAtomic(const String& json);
+extern String automationsEmptyStoreJson();
 #endif
 extern void resolvePendingUserCreationTimes();
 
@@ -1088,7 +1089,7 @@ void firstTimeSetupIfNeeded() {
   // Create automations.json (empty) on first-time setup
  #if ENABLE_AUTOMATION
   if (!VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "setup.automations.init"))) {
-    String a = "{\n  \"version\": 2,\n  \"automations\": []\n}\n";
+    String a = automationsEmptyStoreJson();
     if (!writeAutomationsJsonAtomic(a)) {
       broadcastOutput("ERROR: Failed to write automations.json");
     } else {

@@ -129,6 +129,7 @@ static void replaceStore(const String& json) {
   std::lock_guard<std::mutex> lock(storeMutex); storeJson = json; storeExists = true;
 }
 void notifyAutomationScheduler();
+bool writeAutomationsJsonAtomic(const String& json);  // System_Automation.h
 bool startAutomationScheduler();
 void stopAutomationScheduler();
 bool automationSchedulerRunning();
@@ -549,11 +550,82 @@ static void summaries() {
   CHECK(!automationFindSummary(1, &one));
 }
 
+// automations.json format version. A newer file is refused: nothing in it is
+// cached or listed, the store is never written (not by the empty-store seed,
+// not by a writer handed a newer document) and its text stays as it was. No
+// "version" (older files), version 1 and a non-numeric version load as today.
+static void fileFormatVersion() {
+  static const char* newerRules =
+      R"({"version":3,"automations":[{"id":1,"enabled":true,"triggers":[{"type":"interval","nextAt":50}]}]})";
+  reset(newerRules);
+  CHECK(startAutomationScheduler());
+  automationTick();
+  CHECK(ticks == 1 && gAutomationsCacheValid && gAutomationsCacheCount == 0);
+  CHECK(sAutomationsRefusedVersion.load() == 3);
+  for (int i = 0; i < 20; ++i) automationTick();  // a loaded due rule would tick every pass
+  CHECK(ticks == 1);
+  String json = "untouched";
+  CHECK(!readAutomationsJson(json) && json.length() == 0);
+  AutomationSummary list[4]{};
+  size_t count = 7;
+  CHECK(!automationCopySummaries(list, 4, &count) && count == 0);
+  CHECK(!writeAutomationsJsonAtomic(R"({"version":3,"automations":[]})"));
+  CHECK(!writeAutomationsJsonAtomic(R"({"automations":[],"version":4.5})"));
+  CHECK(ensureAutomationsFile());
+  // The add command's load: a refused file is never replaced by the seed.
+  json = "untouched";
+  CHECK(!loadAutomationsStoreForEdit(json, true) && json.length() == 0);
+  CHECK(!loadAutomationsStoreForEdit(json, false) && json.length() == 0);
+  uint32_t newer = 0;
+  CHECK(!readAutomationsJson(json, &newer) && newer == 3);
+  CHECK(writes == 0 && storeJson == newerRules);
+  for (const char* future : {R"({"version":2.5,"automations":[]})",
+                             R"({"version":1e12,"automations":[]})"}) {
+    replaceStore(future);
+    CHECK(!readAutomationsJson(json) && sAutomationsRefusedVersion.load() > kAutomationsFileVersion);
+  }
+
+  static const char* const loads[] = {
+      R"({"automations":[{"id":1,"enabled":true,"triggers":[{"type":"interval","nextAt":101}]}]})",
+      R"({"version":1,"automations":[{"id":1,"enabled":true,"triggers":[{"type":"interval","nextAt":101}]}]})",
+      R"({"version":"3","automations":[{"id":1,"enabled":true,"triggers":[{"type":"interval","nextAt":101}]}]})",
+      futureRules,
+  };
+  for (const char* rules : loads) {
+    replaceStore(rules);
+    notifyAutomationScheduler();
+    const unsigned before = ticks;
+    automationTick();
+    CHECK(ticks == before + 1 && gAutomationsCacheCount == 1 && gAutomationsCache[0].nextAt == 101);
+    CHECK(sAutomationsRefusedVersion.load() == 0);
+    CHECK(readAutomationsJson(json) && json == rules);
+    CHECK(automationCopySummaries(list, 4, &count) && count == 1);
+  }
+  CHECK(writeAutomationsJsonAtomic(emptyRules) && storeJson == emptyRules);
+  uint32_t newer2 = 7;
+  CHECK(readAutomationsJson(json, &newer2) && newer2 == 0 && json == emptyRules);
+
+  // No file: the add command's load seeds the empty store, and writes it
+  // only when asked (validate-only adds write nothing). A current file is
+  // loaded as it is.
+  reset(nullptr);
+  CHECK(loadAutomationsStoreForEdit(json, false) && json == automationsEmptyStoreJson());
+  CHECK(writes == 0 && !storeExists);
+  CHECK(!readAutomationsJson(json, &newer2) && newer2 == 0);
+  CHECK(loadAutomationsStoreForEdit(json, true) && json == automationsEmptyStoreJson());
+  CHECK(writes == 1 && storeJson == automationsEmptyStoreJson());
+  reset(futureRules);
+  CHECK(loadAutomationsStoreForEdit(json, true) && json == futureRules && writes == 0);
+  CHECK(automationsEmptyStoreJson() == "{\n  \"version\": 2,\n  \"automations\": []\n}\n");
+  stopAutomationScheduler();
+}
+
 int main() {
   eventDrainFromStart();
   summaries();
   lifecycle();
   permissionRevoked();
+  fileFormatVersion();
   timing();
   invalidationAndOverlap();
   concurrentRequests();

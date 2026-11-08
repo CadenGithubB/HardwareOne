@@ -59,6 +59,47 @@ def function_body(source: str, signature: str) -> str:
     raise AssertionError(f"unterminated function: {signature}")
 
 
+def code_only(source: str) -> str:
+    """The source with C/C++ comments removed (string literals kept)."""
+    out = []
+    pos = 0
+    state = "code"
+    while pos < len(source):
+        current = source[pos]
+        following = source[pos + 1] if pos + 1 < len(source) else ""
+        if state == "line_comment":
+            if current == "\n":
+                state = "code"
+                out.append(current)
+        elif state == "block_comment":
+            if current == "*" and following == "/":
+                state = "code"
+                pos += 1
+        elif state in ("string", "character"):
+            out.append(current)
+            if current == "\\":
+                out.append(following)
+                pos += 1
+            elif (state == "string" and current == '"') or (
+                state == "character" and current == "'"
+            ):
+                state = "code"
+        elif current == "/" and following == "/":
+            state = "line_comment"
+            pos += 1
+        elif current == "/" and following == "*":
+            state = "block_comment"
+            pos += 1
+        else:
+            if current == '"':
+                state = "string"
+            elif current == "'":
+                state = "character"
+            out.append(current)
+        pos += 1
+    return "".join(out)
+
+
 automation = (COMPONENT / "System_Automation.cpp").read_text(encoding="utf-8")
 
 # Missing or malformed storage is a coherent empty scheduler state, not an
@@ -71,7 +112,7 @@ assert "gAutomationsCacheValid = true;" in empty
 
 rebuild = function_body(automation, "static void rebuildAutomationsCache()")
 read_failure = function_body(
-    rebuild, "if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, \"automation.state\")))"
+    rebuild, "if (!readAutomationsJson(json))"
 )
 parse_failure = function_body(rebuild, "if (deserializeJson(doc, json))")
 assert "markAutomationsCacheEmptyValid();" in read_failure
@@ -83,7 +124,7 @@ assert "markAutomationsCacheEmptyValid();" in parse_failure
 tick = function_body(automation, "void schedulerTickMinute()")
 assert "gAutomationEventsPending.exchange(false);" in tick
 tick_read_failure = function_body(
-    tick, "if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, \"automation.state\")))"
+    tick, "if (!readAutomationsJson(json))"
 )
 assert "markAutomationsCacheEmptyValid();" in tick_read_failure
 assert tick_read_failure.index("markAutomationsCacheEmptyValid();") < (
@@ -114,8 +155,53 @@ ensure_file = function_body(automation, "static bool ensureAutomationsFile()")
 exists = ensure_file.index("VFS::existsGuarded(")
 write = ensure_file.index("writeAutomationsJsonAtomic(empty)")
 assert exists < write
-assert '"version\\\": 2' in ensure_file
+assert "const String empty = automationsEmptyStoreJson();" in ensure_file
 assert "return true;" in ensure_file[:write]
+
+# automations.json format version: one named constant, checked on every read.
+# The owner's only raw read is readAutomationsFile (behind readAutomationsJson);
+# the add command refuses a newer file before it would seed an empty store;
+# the file-system sanitize passes read through the same check; the writer
+# refuses a newer document; no writer spells the version as a literal.
+assert "constexpr uint32_t kAutomationsFileVersion = 2;" in header
+assert automation.count("readText(AUTOMATIONS_JSON_FILE") == 1
+reader = function_body(automation, "static AutomationsRead readAutomationsFile(String& json, uint32_t* newerVersion = nullptr)")
+assert "readText(AUTOMATIONS_JSON_FILE" in reader and "automationsNewerFileVersion(json)" in reader
+writer = function_body(automation, "bool writeAutomationsJsonAtomic(const String& json)")
+assert writer.index("automationsNewerFileVersion(json)") < writer.index("writeTextAtomic(")
+# The add command loads through loadAutomationsStoreForEdit (behavior in the
+# scheduler harness) and stops when it refuses: its first statement after the
+# load is that refusal, which returns. It never seeds or reads on its own.
+add = code_only(function_body(automation, "const char* cmd_automation_add(const String& argsInput)"))
+load_guard = "if (!loadAutomationsStoreForEdit(json, !validateOnly))"
+assert add.count(load_guard) == 1 and add.count("loadAutomationsStoreForEdit(") == 1
+refusal = " ".join(function_body(add, load_guard)[1:-1].split())
+assert refusal == 'broadcastAutomationsReadError(); return "ERROR";', refusal
+for forbidden in ("readText(", "readAutomationsFile(", "readAutomationsJson(", "automationsEmptyStoreJson()"):
+    assert forbidden not in add, f"cmd_automation_add must load only through loadAutomationsStoreForEdit ({forbidden})"
+edit_load = code_only(function_body(automation, "static bool loadAutomationsStoreForEdit(String& json, bool persistSeed)"))
+assert edit_load.index("if (read == AutomationsRead::Refused) return false;") < edit_load.index(
+    "automationsEmptyStoreJson()")
+# The web Automations page and its exports read through the same check and
+# name a refused file's format instead of listing it.
+web = code_only((COMPONENT / "WebServer_Server.cpp").read_text(encoding="utf-8"))
+assert "readText(AUTOMATIONS_JSON_FILE" not in web, "web automations reads must go through readAutomationsJson"
+for handler, report in (("esp_err_t handleAutomationsGet(httpd_req_t* req)", "automationsWebReadError("),
+                        ("esp_err_t handleAutomationsExport(httpd_req_t* req)",
+                         "return sendAutomationsExportReadError(req, newerVersion);")):
+    body = function_body(web, handler)
+    assert "readAutomationsJson(" in body and report in body, handler
+export = function_body(web, "esp_err_t handleAutomationsExport(httpd_req_t* req)")
+assert export.count("readAutomationsJson(json, &newerVersion)") == 2
+assert export.count("return sendAutomationsExportReadError(req, newerVersion);") == 2
+get_handler = function_body(web, "esp_err_t handleAutomationsGet(httpd_req_t* req)")
+assert get_handler.index("readAutomationsJson(") < get_handler.index("sanitizeAutomationsJson(body)")
+filesystem = (COMPONENT / "System_Filesystem.cpp").read_text(encoding="utf-8")
+assert "readText(AUTOMATIONS_JSON_FILE" not in filesystem
+assert filesystem.count("readAutomationsJson(json)") == 2
+for source in COMPONENT.glob("*.cpp"):
+    text = source.read_text(encoding="utf-8", errors="replace")
+    assert '\\"version\\": 2' not in text, f"{source.name} writes the automations version as a literal"
 
 start = function_body(automation, "bool startAutomationScheduler()")
 assert start.index("ensureAutomationsFile()") < start.index(

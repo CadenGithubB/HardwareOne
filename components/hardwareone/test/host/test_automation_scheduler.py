@@ -58,9 +58,16 @@ def owner_summary(component: Path) -> str:
 
 def generated(component: Path) -> str:
     owner = (component / "System_Automation.cpp").read_text()
-    start = owner.index("// In-RAM cache of per-automation scheduling metadata")
+    header = (component / "System_Automation.h").read_text()
+    # The file-format check (a tree without one keeps the old start) and the
+    # cache owner. The format constant comes from its header line.
+    format_marker = "// automations.json format version\n"
+    start = owner.find(format_marker)
+    if start < 0:
+        start = owner.index("// In-RAM cache of per-automation scheduling metadata")
     end = owner.index("// Update the nextAt field", start)
-    cache = owner[start:end]
+    constant = re.search(r"^constexpr uint32_t kAutomationsFileVersion = \d+;$", header, re.M)
+    cache = (constant.group(0) + "\n" if constant else "") + owner[start:end]
     # Firmware builds verify the ESP ABI budget. LP64 host long/time_t make
     # the same fields wider; that architecture assertion is not host behavior.
     cache, removed = re.subn(
