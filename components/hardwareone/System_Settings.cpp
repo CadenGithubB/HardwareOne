@@ -1514,6 +1514,34 @@ static bool writeSettingsSnapshot(const JsonDocument& doc,
   return false;
 }
 
+// G-38: a settings or per-user credential file that no longer parses is moved
+// aside, never deleted and never left in place. Left in place it froze the
+// device: every settings save was refused (rightly, a rebuild from RAM would
+// flatten it), so factoryreset could not persist its pipe-secret clear and
+// stopped, and an unreadable user_settings/<id>.json failed every login of that
+// account with no event. Once moved, the path is absent, which every loader
+// already treats as the bootstrap case, and the damaged bytes stay readable in
+// the file manager. The newest copy is <file>.corrupt-1; at most
+// kCorruptQuarantineKeep are kept so a file that keeps failing cannot fill flash.
+// Callers hold the filesystem lock and never quarantine a NoMemory parse (the
+// file is intact; this boot is short of heap).
+static constexpr unsigned kCorruptQuarantineKeep = 3;
+static bool quarantineCorruptFile(const String& path, const AuthContext& auth, String& movedTo) {
+  auto slot = [&path](unsigned n) {
+    char name[96];
+    snprintf(name, sizeof(name), "%s.corrupt-%u", path.c_str(), n);
+    return String(name);
+  };
+  const String oldest = slot(kCorruptQuarantineKeep);
+  if (VFS::existsGuarded(oldest, auth)) (void)VFS::removeGuarded(oldest, auth);
+  for (unsigned n = kCorruptQuarantineKeep - 1; n > 0; --n) {
+    const String from = slot(n);
+    if (VFS::existsGuarded(from, auth)) (void)VFS::renameGuarded(from, slot(n + 1), auth);
+  }
+  movedTo = slot(1);
+  return VFS::renameGuarded(path, movedTo, auth);
+}
+
 // Set when readSettingsJson() found an on-disk firmwareVersion that differs
 // from the running build. Cleared when settingsRestampFirmwareVersion()
 // succeeds, or when a later complete writeSettingsJson() stamps the running
@@ -1581,7 +1609,29 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
     if (existingFile) {
       DeserializationError err = deserializeJson(doc, existingFile);
       existingFile.close();
-      if (err) {
+      // G-38: a file damaged after this boot loaded it is quarantined, and the
+      // save continues as for an absent file. RAM is authoritative here (the
+      // load gate above passed), and the old bytes, including any orphaned
+      // sections, survive in the quarantine copy rather than being flattened.
+      // Without this every later save, factoryreset's included, was refused
+      // until a reboot. NoMemory (file intact) and a failed rename still refuse.
+      bool quarantined = false;
+      if (err && err != DeserializationError::NoMemory) {
+        String movedTo;
+        quarantined = quarantineCorruptFile(
+            SETTINGS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.write"), movedTo);
+        if (quarantined) {
+          doc.clear();
+          ERROR_STORAGEF("on-disk settings.json is unparseable (%s) - quarantined to %s",
+                         err.c_str(), movedTo.c_str());
+          logSystemEvent("SETTINGS",
+                         "on-disk settings.json unparseable (%s) - quarantined to %s; "
+                         "saving the loaded settings", err.c_str(), movedTo.c_str());
+          systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, SETTINGS_JSON_FILE,
+                          "unparseable at save - quarantined");
+        }
+      }
+      if (err && !quarantined) {
         // ABORT. This used to be `doc.clear(); // Start fresh if parse failed`
         // and then fall through to buildSettingsJsonDoc(), which is how an
         // unreadable settings.json got silently replaced by whatever RAM
@@ -1598,6 +1648,8 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
         //
         // Refusing is strictly better. A file we cannot parse is a file whose
         // contents we cannot preserve, so replacing it can only lose data.
+        // (G-38: reached now only when the quarantine above could not move the
+        // file aside, or the parse ran out of memory.)
         // ERROR_ rather than WARN_ so this reaches errors.log, which is fed by
         // the "[ERROR]" prefix in the log_out task.
         ERROR_STORAGEF("save REFUSED: on-disk settings.json is unparseable (%s) "
@@ -1610,7 +1662,7 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
         fsUnlock();
         pollResume();
         return false;
-      } else {
+      } else if (!quarantined) {
         INFO_STORAGEF("Loaded existing settings for merge (preserving orphaned sections)");
       }
     } else {
@@ -1941,6 +1993,31 @@ bool readSettingsJson() {
     ERROR_STORAGEF("JSON parse error: %s", error.c_str());
     if (error == DeserializationError::NoMemory) {
       ERROR_STORAGEF("JSON document too small (need more than 5120 bytes)");
+    } else {
+      // G-38: damaged bytes are quarantined so this boot runs on defaults
+      // exactly as a fresh device does (nothing has been read into RAM yet).
+      // Left in place, the save gate kept the device settings-read-only and
+      // factoryreset stopped at its pipe-secret persist, with no way out
+      // short of a cable erase. The caller writes the defaults.
+      String movedTo;
+      bool moved;
+      {
+        FsLockGuard guard("settings.quarantine");
+        moved = quarantineCorruptFile(
+            SETTINGS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.quarantine"), movedTo);
+      }
+      if (moved) {
+        settingsMarkLoadedOk();  // the path is absent now: RAM is the truth, as on a fresh device
+        logSystemEvent("SETTINGS", "settings.json unparseable (%s) - quarantined to %s; "
+                       "running on defaults", error.c_str(), movedTo.c_str());
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, SETTINGS_JSON_FILE,
+                        "unparseable at boot - quarantined, defaults loaded");
+      } else {
+        logSystemEvent("SETTINGS", "settings.json unparseable (%s) - quarantine rename FAILED; "
+                       "file left in place", error.c_str());
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, SETTINGS_JSON_FILE,
+                        "unparseable at boot - quarantine failed");
+      }
     }
     pollResume();
     return false;
@@ -4046,6 +4123,31 @@ String getUserSettingsPath(uint32_t userId) {
   return String(pathBuf);
 }
 
+// G-38: an unreadable per-user file used to fail that account's every login
+// (isValidUser) and every password reset (the transaction refuses a failed
+// load) with no event, so the owner saw only "wrong password". Quarantined, the
+// path is absent: this load still fails, the event says why, and the next
+// password set (userresetpassword, or the recovery in docs/COMPATIBILITY.md
+// for the owner) writes a fresh file. Caller holds the filesystem lock.
+static void quarantineUserSettingsFile(uint32_t userId, const String& path, const char* why) {
+  String movedTo;
+  const bool moved = quarantineCorruptFile(
+      path, VFS::systemAuth(VFS::Scopes::USERS, "user_settings.quarantine"), movedTo);
+  ERROR_STORAGEF("[user] user_settings/%lu.json unreadable (%s)%s", (unsigned long)userId, why,
+                 moved ? " - quarantined" : " - quarantine rename FAILED");
+  if (moved) {
+    logSystemEvent("USERS", "user_settings/%lu.json unreadable (%s) - quarantined to %s; "
+                   "this account cannot log in until its password is set again",
+                   (unsigned long)userId, why, movedTo.c_str());
+  } else {
+    logSystemEvent("USERS", "user_settings/%lu.json unreadable (%s) - quarantine rename FAILED",
+                   (unsigned long)userId, why);
+  }
+  systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, path.c_str(),
+                  moved ? "unreadable credentials - quarantined; set the password again"
+                        : "unreadable credentials - quarantine failed");
+}
+
 bool loadUserSettings(uint32_t userId, JsonDocument& doc) {
   doc.clear();
   if (!filesystemReady) return false;
@@ -4072,16 +4174,20 @@ bool loadUserSettings(uint32_t userId, JsonDocument& doc) {
     f.close();
     if (err) {
       doc.clear();
+      // NoMemory: the file is intact, only this attempt ran short of heap.
+      if (err != DeserializationError::NoMemory) quarantineUserSettingsFile(userId, path, err.c_str());
       return false;
     }
-  }
 
-  // A present settings file must be an object. JSON null/arrays/scalars are
-  // parseable but structurally corrupt; never flatten them into a new object
-  // and save a credential or preference patch over the original bytes.
-  if (!doc.is<JsonObject>()) {
-    doc.clear();
-    return false;
+    // A present settings file must be an object. JSON null/arrays/scalars are
+    // parseable but structurally corrupt; never flatten them into a new object
+    // and save a credential or preference patch over the original bytes.
+    // Checked under the lock so the quarantine moves the bytes just parsed.
+    if (!doc.is<JsonObject>()) {
+      doc.clear();
+      quarantineUserSettingsFile(userId, path, "not an object");
+      return false;
+    }
   }
   return true;
 }
