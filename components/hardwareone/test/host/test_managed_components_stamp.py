@@ -30,7 +30,11 @@ import unittest
 REPO = Path(__file__).resolve().parents[4]
 HELPER = REPO / "cmake" / "HW1ManagedComponents.cmake"
 LOCK_HELPER = REPO / "tools" / "checkout_build_lock.sh"
-CMAKE = shutil.which("cmake")
+# CTest passes its own cmake (HW1_CMAKE), which need not be on PATH; a set but
+# missing HW1_CMAKE fails the run instead of skipping the stamp tests.
+CMAKE = os.environ.get("HW1_CMAKE") or shutil.which("cmake")
+if os.environ.get("HW1_CMAKE") and not os.access(CMAKE, os.X_OK):
+    raise SystemExit(f"HW1_CMAKE={CMAKE} is not an executable cmake")
 OLD = 1_000_000_000  # an mtime long before any write in this test
 
 
@@ -140,6 +144,32 @@ class RootWiring(unittest.TestCase):
         self.assertLess(lock_set, pre)
         self.assertLess(pre, project)
         self.assertLess(project, post)
+
+    def test_tracked_p4_lock_is_a_configure_input(self):
+        # The P4 build solves against a copy in its build directory; a change
+        # to the tracked lock alone must still reconfigure (re-seed, resync).
+        text = (REPO / "CMakeLists.txt").read_text()
+        self.assertIn('set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS '
+                      '"${_hw1_tracked_lock}")', text)
+
+    def test_monitor_skips_the_lock_only_when_it_cannot_configure(self):
+        # idf.py monitor configures when project_description.json is missing,
+        # and --config always reconfigures first.
+        text = (REPO / "tools" / "build_board.sh").read_text()
+        self.assertIn('-z "$CONFIG_NAME" && -f "$REPO/build-$BOARD/project_description.json"', text)
+
+    def test_updater_locks_agree_across_targets(self):
+        # updater/managed_components has no stamp: that is only safe while
+        # every updater lock pins the same components.
+        def pins(path):
+            return [l for l in path.read_text().splitlines()
+                    if not l.startswith("target:")]
+        locks = sorted((REPO / "updater").glob("dependencies.lock.*"))
+        self.assertGreaterEqual(len(locks), 2)
+        for lock in locks[1:]:
+            self.assertEqual(pins(lock), pins(locks[0]),
+                             f"{lock.name} pins differ from {locks[0].name}; "
+                             "stamp updater/managed_components like the root project")
 
     def test_stamp_and_locks_are_ignored(self):
         text = (REPO / "CMakeLists.txt").read_text()

@@ -4,10 +4,11 @@
 # updater/managed_components), which the component manager rewrites to the
 # lock of whichever target configures. Builds of different targets one after
 # another are fine (cmake/HW1ManagedComponents.cmake makes the next build
-# resync), and builds of the same target may run together (they use the same
-# lock, and the sync itself is serialized by a CMake file lock). Two builds of
-# different targets at once would change each other's sources mid-compile, so
-# the second is refused instead.
+# resync; the updater locks pin the same versions for every target, so its
+# directory never changes), and builds of the same target may run together
+# (they use the same lock, and the sync itself is serialized by a CMake file
+# lock). Two builds of different targets at once would change each other's
+# sources mid-compile, so the second is refused instead.
 #
 # Implementation: a shared flock(2) on <repo>/.hw1-build/checkout.lock held
 # through file descriptor 9 of the calling script, joined only by builds of the

@@ -808,6 +808,10 @@ elseif(IDF_TARGET STREQUAL "esp32p4")
         configure_file("${_hw1_tracked_lock}" "${_hw1_dependencies_lock}" COPYONLY)
         file(WRITE "${_hw1_lock_seed}" "${_hw1_tracked_lock_sha}")
     endif()
+    # configure_file lists the tracked lock as an input only in a configure
+    # that re-seeds, and the stamp follows the copy, so list it here too: a pull
+    # that changes only the P4 pins must re-seed and resync on the next build.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_hw1_tracked_lock}")
 else()
     set(_hw1_dependencies_lock
         "${CMAKE_CURRENT_SOURCE_DIR}/dependencies.lock.${IDF_TARGET}")

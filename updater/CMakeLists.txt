@@ -383,6 +383,12 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # in a tracked file, and a slow re-solve on every board switch. IDF supports a
 # per-target path for exactly this case -- see
 # tools/test_build_system/test_component_manager.py::test_dependency_lock.
+#
+# updater/managed_components is shared by every updater build directory, but
+# unlike the root project it has no cmake/HW1ManagedComponents.cmake stamp:
+# every per-target updater lock pins the same components (littlefs 1.20.4), so
+# a sync never changes them. Host test managed_components_stamp enforces that;
+# add the stamp here before letting the pins differ by target.
 idf_build_set_property(DEPENDENCIES_LOCK
     "${CMAKE_CURRENT_LIST_DIR}/dependencies.lock.${IDF_TARGET}")
 

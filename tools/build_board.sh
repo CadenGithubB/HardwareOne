@@ -29,9 +29,9 @@
 # the same time; starting a build of another target while one runs is refused
 # (tools/checkout_build_lock.sh) with an error naming the running build, since
 # its sync would change sources under that compile. Use a separate git
-# worktree to build two targets in parallel. A `monitor`-only invocation takes
-# no lock, so flash and monitor as two commands to keep building other targets
-# next to a long monitor session.
+# worktree to build two targets in parallel. A `monitor`-only invocation of an
+# already configured build directory takes no lock, so flash and monitor as two
+# commands to keep building other targets next to a long monitor session.
 
 set -euo pipefail
 
@@ -87,7 +87,10 @@ if [[ -z "$TARGET" ]]; then
 fi
 
 # One target at a time per checkout (see the header). A serial monitor alone
-# neither configures nor compiles, so it may run next to any build.
+# compiles nothing, and in a configured build directory it does not configure
+# either, so it may run next to any build. idf.py monitor does configure (and
+# sync managed_components) when project_description.json is missing, and
+# --config always reconfigures first, so those still take the lock.
 monitor_only=0
 if [[ $# -gt 0 ]]; then
   monitor_only=1
@@ -105,6 +108,7 @@ if [[ $# -gt 0 ]]; then
     fi
   done
   [[ $saw_monitor -eq 1 ]] || monitor_only=0
+  [[ -z "$CONFIG_NAME" && -f "$REPO/build-$BOARD/project_description.json" ]] || monitor_only=0
 fi
 if [[ $monitor_only -eq 0 ]]; then
   . "$REPO/tools/checkout_build_lock.sh"
