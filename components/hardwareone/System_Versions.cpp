@@ -22,6 +22,12 @@
 #include "System_ESPNow_Identity.h"
 #include "System_ESPNow_Wire.h"
 #endif
+#if ENABLE_AUTOMATION
+#include "System_Automation.h"  // kAutomationsFileVersion
+#endif
+#if ENABLE_MIGRATION_TOOL
+#include "WebServer_MigrationTool.h"  // kBackupFormatVersion
+#endif
 #if ENABLE_BLUETOOTH
 #include "System_BleSecureChannel.h"
 #endif
@@ -80,6 +86,15 @@ void versionsCollect(hw1versions::List& out) {
   out.add("espnow_identity_file", "ESP-NOW identity file", "%u",
           (unsigned)espnowIdentityFileVersion());
   out.add("espnow_peer_file", "ESP-NOW peer files", "%u", (unsigned)peerIdentityFileVersion());
+#endif
+
+#if ENABLE_AUTOMATION
+  // The automations.json format this firmware writes and the newest it loads.
+  out.add("automations_file", "Automations file", "%u", (unsigned)kAutomationsFileVersion);
+#endif
+#if ENABLE_MIGRATION_TOOL
+  // The HWBACKUP bundle format: what the export writes, the newest restore takes.
+  out.add("backup_format", "Backup bundle format", "%u", (unsigned)kBackupFormatVersion);
 #endif
 
 #if ENABLE_BLUETOOTH

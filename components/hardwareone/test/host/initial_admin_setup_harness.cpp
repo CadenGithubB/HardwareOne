@@ -176,6 +176,7 @@ static bool removeGuarded(const char* path, int) {
   ++markerRemovals; operations.emplace_back("marker.remove"); markerPresent = false; return true;
 }
 }
+static String automationsEmptyStoreJson() { return String("{\"version\":2,\"automations\":[]}"); }
 static bool writeAutomationsJsonAtomic(const String&) {
   ++automationCalls; operations.emplace_back("automations.save"); check(usersJson.length() > 0); return true;
 }

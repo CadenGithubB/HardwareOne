@@ -283,7 +283,7 @@ bool initFilesystem() {
   setDebugFlag(DEBUG_AUTO_SCHEDULER);
   if (gSettings.automationEnabled && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "fs.init.automations_check"))) {
     String json;
-    if (readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "fs.init.automations_check"))) {
+    if (readAutomationsJson(json)) {
       bool modified = false;
 
       // First: sanitize duplicate IDs
@@ -590,7 +590,7 @@ void runFileWritePostSaveHooks(const String& path) {
 #if ENABLE_AUTOMATION
   if (path == AUTOMATIONS_JSON_FILE) {
     String json;
-    if (readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "fs.post_save.automations")) && sanitizeAutomationsJson(json)) {
+    if (readAutomationsJson(json) && sanitizeAutomationsJson(json)) {
       writeAutomationsJsonAtomic(json);  // best-effort atomic writeback
     }
     // The caller has already saved the file. Refresh even when sanitation

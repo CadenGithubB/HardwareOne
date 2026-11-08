@@ -24,7 +24,9 @@ cross-device upload carries an added "force" key and cannot match the file);
 that discarding frees the staged buffer while the confirm flag is still set;
 and, in source, that first-time setup shows the summary before its default-No
 prompt and that the restore server is stopped before its staged buffer is
-discarded.
+discarded. The bundle's formatVersion: missing is format 1, a newer or
+non-whole-number one is refused, and /api/restore refuses it after the magic
+check and before the fingerprint check or staging.
 """
 from __future__ import annotations
 
@@ -62,7 +64,7 @@ def unique_block(source: str, marker: str) -> str:
     return extract_block(source, marker)
 
 
-def production(migration: str, mutex: str, mutex_header: str, utils: str) -> dict:
+def production(migration: str, header: str, mutex: str, mutex_header: str, utils: str) -> dict:
     guard = extract_block(mutex_header, "struct FsLockGuard") + ";\n"
     guard += "\n".join(extract_block(mutex, marker) for marker in (
         "FsLockGuard::FsLockGuard(const char* owner)",
@@ -74,6 +76,9 @@ def production(migration: str, mutex: str, mutex_header: str, utils: str) -> dic
     constants = re.findall(r'^static const char\* [A-Z_]+\s*=\s*"[^"]*";', migration, re.M)
     require(len(constants) == 8, "the eight migration path constants")
     constants += re.findall(r"^static constexpr size_t k\w+ = [^;]+;", migration, re.M)
+    constants += re.findall(r"^constexpr uint32_t kBackupFormatVersion = \d+;", header, re.M)
+    require(len(constants) >= 9 and constants[-1].startswith("constexpr uint32_t kBackupFormatVersion"),
+            "the backup format constant from WebServer_MigrationTool.h")
 
     require(migration.count(RESTORE_START) == 1 and migration.count(RESTORE_END) == 1, "one restore section")
     start = migration.index(RESTORE_START)
@@ -108,6 +113,21 @@ def source_contract(migration: str) -> None:
     writer = unique_block(migration, "static bool writeRestoreFilesFromDoc(")
     require("filesWritten > 0 ||" not in writer, "a partial restore must not report success")
     require("stageMigrationRestore(buf," in restore, "handleRestore must stage through stageMigrationRestore")
+    # The export writes the named format; the restore checks it after the
+    # magic and refuses (freeing the body, staging nothing) before the
+    # fingerprint check or staging.
+    require('doc["formatVersion"] = kBackupFormatVersion;' in backup,
+            "handleBackup must write the named backup format")
+    require(re.search(r'formatVersion"\]\s*=\s*\d', migration) is None,
+            "no bundle formatVersion literal")
+    check = restore.find("checkBackupFormat(doc.as<JsonVariantConst>(), &bundleFormat)")
+    require(restore.find('strcmp(magic, "HWBACKUP")') < check, "the format is checked after the magic")
+    require(0 < check < restore.find("bool compatible = true;") < restore.find("stageMigrationRestore(buf,"),
+            "the format is checked before the fingerprint check and staging")
+    refusal = restore[check:restore.find("bool compatible = true;")]
+    require("if (format != BackupFormatCheck::Supported)" in refusal and "free(buf);" in refusal
+            and "return ESP_OK;" in refusal and "stageMigrationRestore" not in refusal,
+            "a refused format frees the body and returns before staging")
     stop = unique_block(migration, "void stopRestoreOnlyHttpServer()")
     discard = stop.find("discardStagedMigrationRestore();")
     require(discard > stop.rfind("httpd_stop(server);") > 0,
@@ -136,7 +156,8 @@ def main() -> None:
     require(bool(args.cxx), "a host C++17 compiler is required")
     migration = (COMPONENT / "WebServer_MigrationTool.cpp").read_text()
     harness = (HERE / "migration_restore_harness.cpp").read_text()
-    replacements = production(migration, (COMPONENT / "System_Mutex.cpp").read_text(),
+    replacements = production(migration, (COMPONENT / "WebServer_MigrationTool.h").read_text(),
+                              (COMPONENT / "System_Mutex.cpp").read_text(),
                               (COMPONENT / "System_Mutex.h").read_text(),
                               (COMPONENT / "System_Utils.cpp").read_text())
     for marker, replacement in replacements.items():

@@ -33,7 +33,8 @@ everything user-visible since the v0.99.99 tag (55 commits).
   part must match: recovery updater and OTA layout, the ESP-NOW format (shown as `ESPNOW V1 (1.0)`)
   and the radio's ESP-NOW stack, BLE console channel, phone link and pipe, CM5 control protocol, the
   C6 companion's reported and expected versions, the local STT model, the ESP-NOW identity and peer
-  file versions and the ESP-IDF and Arduino core. `status json` carries the same keys as `versions`, and `BUILD_INFO.md`
+  file versions, the automations file and backup bundle formats (`automations_file`, `backup_format`)
+  and the ESP-IDF and Arduino core. `status json` carries the same keys as `versions`, and `BUILD_INFO.md`
   gains a Versions table with the build-time half.
 - Crash record captures the faulting task, stack-guard bounds and a RISC-V stack scan.
 - Build and release tooling: `tools/vendor_arduino.sh` (a fresh clone vendors and patches arduino-esp32
@@ -59,6 +60,12 @@ everything user-visible since the v0.99.99 tag (55 commits).
   manual `ring scan`).
 - Licence statement: README and the User Guide say PolyForm Noncommercial 1.0.0 (the User Guide had said
   MIT) and point at `NOTICE.md`.
+- `automations.json` format version 2 is now checked on every read. A file from newer firmware (a
+  higher `"version"`) is not loaded or run and is left unchanged; the console says so once and
+  `automation` commands name the version. A file with no version, or version 1, loads as before.
+- Import from Backup refuses a bundle whose `formatVersion` is newer than 1 (or not a whole number)
+  before staging anything, with a console line and a `400` reply that names both versions. A bundle
+  without `formatVersion` is treated as format 1.
 
 ### Fixed
 - Two crashes: the QuickNote worker's stack and Arduino's unlocked `NetworkEvents`.

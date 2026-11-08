@@ -67,6 +67,11 @@ static bool readText(const char* path, String& out, const AuthContext&) {
   out = String(gFile);
   return true;
 }
+// The owner's checked read; the format-version refusal is covered by
+// automation_scheduler, so this boundary reads the file directly.
+static bool readAutomationsJson(String& out) {
+  return readText(AUTOMATIONS_JSON_FILE, out, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"));
+}
 
 static time_t testTime(time_t*) { return 0; }  // clock invalid: no nextAt rewrite
 #define time testTime

@@ -409,7 +409,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   PSRAM_JSON_DOC(doc);
 
   doc["magic"] = "HWBACKUP";
-  doc["formatVersion"] = 1;
+  doc["formatVersion"] = kBackupFormatVersion;
 
   // Timestamp
   char ts[32];
@@ -536,6 +536,29 @@ struct StagedRestoreSummary {
   bool hasForceKey;    // the body carries "force", which /api/backup never writes
 };
 static StagedRestoreSummary sStagedSummary = {};
+
+// The bundle's "formatVersion" against kBackupFormatVersion. No field is
+// format 1 (bundles exported before restore checked it); a whole number up to
+// this firmware's is supported; a newer one, or a value that is not a whole
+// number, is refused before anything is staged. *version gets the bundle's
+// format (0 when it is not a whole number).
+enum class BackupFormatCheck : uint8_t { Supported, Newer, Invalid };
+static BackupFormatCheck checkBackupFormat(JsonVariantConst bundle, uint32_t* version) {
+  JsonVariantConst field = bundle["formatVersion"];
+  uint32_t found = 1;
+  BackupFormatCheck result = BackupFormatCheck::Supported;
+  if (!field.isNull()) {
+    if (!field.is<uint32_t>()) {
+      found = 0;
+      result = BackupFormatCheck::Invalid;
+    } else {
+      found = field.as<uint32_t>();
+      if (found > kBackupFormatVersion) result = BackupFormatCheck::Newer;
+    }
+  }
+  if (version) *version = found;
+  return result;
+}
 
 bool migrationRestoreAwaitingConfirm() {
   return sRestoreAwaitingConfirm;
@@ -950,6 +973,33 @@ static esp_err_t handleRestore(httpd_req_t* req) {
     httpd_resp_set_status(req, "400 Bad Request");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"error\":\"Not a valid HWBACKUP file\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  // A newer bundle format is refused before anything is staged.
+  uint32_t bundleFormat = 0;
+  const BackupFormatCheck format = checkBackupFormat(doc.as<JsonVariantConst>(), &bundleFormat);
+  if (format != BackupFormatCheck::Supported) {
+    free(buf);
+    char reply[256];
+    if (format == BackupFormatCheck::Newer) {
+      BROADCAST_PRINTF("Backup refused: format %lu is newer than this firmware reads (%lu). "
+                       "Nothing was staged. Update the firmware, then import again.",
+                       (unsigned long)bundleFormat, (unsigned long)kBackupFormatVersion);
+      snprintf(reply, sizeof(reply),
+               "{\"error\":\"Backup format too new\",\"formatVersion\":%lu,\"supported\":%lu,"
+               "\"message\":\"This backup was made by newer firmware. Update this device's "
+               "firmware, then import again.\"}",
+               (unsigned long)bundleFormat, (unsigned long)kBackupFormatVersion);
+    } else {
+      broadcastOutput("Backup refused: its formatVersion is not a whole number. Nothing was staged.");
+      snprintf(reply, sizeof(reply),
+               "{\"error\":\"Invalid backup formatVersion\",\"supported\":%lu}",
+               (unsigned long)kBackupFormatVersion);
+    }
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, reply, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
 

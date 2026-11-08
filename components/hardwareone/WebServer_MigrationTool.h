@@ -5,7 +5,14 @@
 
 #if ENABLE_MIGRATION_TOOL
 
+#include <stdint.h>
+
 #include <esp_http_server.h>
+
+// HWBACKUP bundle format, the bundle's "formatVersion". /api/restore refuses
+// a newer one before staging anything; a bundle without the field is format
+// 1 (older exports). `versions` reports it as backup_format.
+constexpr uint32_t kBackupFormatVersion = 1;
 
 class String;
 

@@ -71,7 +71,7 @@ assert "gAutomationsCacheValid = true;" in empty
 
 rebuild = function_body(automation, "static void rebuildAutomationsCache()")
 read_failure = function_body(
-    rebuild, "if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, \"automation.state\")))"
+    rebuild, "if (!readAutomationsJson(json))"
 )
 parse_failure = function_body(rebuild, "if (deserializeJson(doc, json))")
 assert "markAutomationsCacheEmptyValid();" in read_failure
@@ -83,7 +83,7 @@ assert "markAutomationsCacheEmptyValid();" in parse_failure
 tick = function_body(automation, "void schedulerTickMinute()")
 assert "gAutomationEventsPending.exchange(false);" in tick
 tick_read_failure = function_body(
-    tick, "if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, \"automation.state\")))"
+    tick, "if (!readAutomationsJson(json))"
 )
 assert "markAutomationsCacheEmptyValid();" in tick_read_failure
 assert tick_read_failure.index("markAutomationsCacheEmptyValid();") < (
@@ -114,8 +114,30 @@ ensure_file = function_body(automation, "static bool ensureAutomationsFile()")
 exists = ensure_file.index("VFS::existsGuarded(")
 write = ensure_file.index("writeAutomationsJsonAtomic(empty)")
 assert exists < write
-assert '"version\\\": 2' in ensure_file
+assert "const String empty = automationsEmptyStoreJson();" in ensure_file
 assert "return true;" in ensure_file[:write]
+
+# automations.json format version: one named constant, checked on every read.
+# The owner's only raw read is readAutomationsFile (behind readAutomationsJson);
+# the add command refuses a newer file before it would seed an empty store;
+# the file-system sanitize passes read through the same check; the writer
+# refuses a newer document; no writer spells the version as a literal.
+assert "constexpr uint32_t kAutomationsFileVersion = 2;" in header
+assert automation.count("readText(AUTOMATIONS_JSON_FILE") == 1
+reader = function_body(automation, "static AutomationsRead readAutomationsFile(String& json)")
+assert "readText(AUTOMATIONS_JSON_FILE" in reader and "automationsNewerFileVersion(json)" in reader
+writer = function_body(automation, "bool writeAutomationsJsonAtomic(const String& json)")
+assert writer.index("automationsNewerFileVersion(json)") < writer.index("writeTextAtomic(")
+add = function_body(automation, "const char* cmd_automation_add(const String& argsInput)")
+refused = add.index("if (read == AutomationsRead::Refused)")
+assert refused < add.index("automationsEmptyStoreJson()") < add.index("writeAutomationsJsonAtomic(json)")
+assert "readText(" not in add
+filesystem = (COMPONENT / "System_Filesystem.cpp").read_text(encoding="utf-8")
+assert "readText(AUTOMATIONS_JSON_FILE" not in filesystem
+assert filesystem.count("readAutomationsJson(json)") == 2
+for source in COMPONENT.glob("*.cpp"):
+    text = source.read_text(encoding="utf-8", errors="replace")
+    assert '\\"version\\": 2' not in text, f"{source.name} writes the automations version as a literal"
 
 start = function_body(automation, "bool startAutomationScheduler()")
 assert start.index("ensureAutomationsFile()") < start.index(

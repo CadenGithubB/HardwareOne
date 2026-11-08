@@ -19,17 +19,25 @@ keeps. Readiness item P0-7; keep this file in step with CHANGELOG `[Unreleased]`
 `versions` on the device lists these, as this image carries them, in one place: the firmware, the
 recovery updater and OTA layout, the ESP-NOW format and stack, the BLE console channel, the phone
 link and pipe, the CM5 control protocol, the C6 companion's reported and expected versions, the
-local STT model, the ESP-NOW identity and peer file versions and the ESP-IDF and Arduino core it
-was built with (`versions json` for tools; `BUILD_INFO.md` in a build directory has the build-time
-half).
+local STT model, the ESP-NOW identity and peer file versions, the automations file and backup
+bundle formats and the ESP-IDF and Arduino core it was built with (`versions json` for tools;
+`BUILD_INFO.md` in a build directory has the build-time half).
 
 ## Persisted data and what an upgrade keeps
 
 - `settings.json` carries no format version; it records the `firmwareVersion` that last wrote it.
   Unknown keys are kept; a missing key takes its default.
-- `automations.json` carries `"version": 2` and the web migration backup bundle (`HWBACKUP`)
-  carries `"formatVersion": 1`. Both are written as literals (not named constants) that nothing in
-  the firmware checks on read, so `versions` does not report them.
+- `automations.json` carries `"version": 2` (`kAutomationsFileVersion`, `versions` key
+  `automations_file`). Every read checks it. A file with no `"version"` or with version 1 loads as
+  before: the reader has never treated the versions differently (an entry from the old flat or
+  `schedule` layout, without a `triggers` array, still has no trigger and does not fire). A higher
+  version is from newer
+  firmware: its automations are not loaded or run, and the file is left unchanged (nothing is written
+  back from it), so that firmware finds it as it left it. The console says so once.
+- The web migration backup bundle (`HWBACKUP`) carries `"formatVersion": 1` (`kBackupFormatVersion`,
+  `versions` key `backup_format`). Import from Backup refuses a higher or non-whole-number
+  `formatVersion` before staging anything (`400`, `"error":"Backup format too new"` with
+  `formatVersion` and `supported`). A bundle without the field is format 1.
 - **Within 1.x**: settings, user accounts, saved Wi-Fi networks and automations are kept across an
   app update (OTA or cable app-only write). A renamed setting or event name gets an alias, or the
   change is listed under "Changed" in CHANGELOG with the migration step.

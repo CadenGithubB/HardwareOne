@@ -176,7 +176,8 @@ static constexpr CommandModule gCommandModules[] = {
     "reboot, ramflush, factoryreset, broadcast, lightsleep, deepsleep) require admin.", commands,             &commandsCount, 0, nullptr },
   { "versions",   "Firmware and compatibility versions", "versions lists, one line each, the firmware version and the "
     "versions a separately built part must agree with: the recovery updater, OTA layout, manifest format and data schema "
-    "(OTA layouts); the ESP-NOW format, the radio's ESP-NOW stack and the ESP-NOW identity files; the BLE console "
+    "(OTA layouts); the ESP-NOW format, the radio's ESP-NOW stack and the ESP-NOW identity files; the automations "
+    "file and backup bundle formats; the BLE console "
     "channel and the phone link, pipe channel and console records (phone-pipe builds); the CM5 control protocol; the "
     "C6 companion's ESP-Hosted and bridge versions with the ones this image expects (P4); the local STT model; and the "
     "ESP-IDF and Arduino core it was built with. An item is shown only where the build includes that part. versions "

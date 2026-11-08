@@ -362,6 +362,35 @@ static void caseDiscardFreesBeforeClearing() {
   watchedBuffer = nullptr;
 }
 
+// The bundle's formatVersion: no field is format 1 (older exports), a whole
+// number up to kBackupFormatVersion is supported, a newer one or anything
+// that is not a whole number is refused (handleRestore then stages nothing).
+static void caseBackupFormatVersion() {
+  check(kBackupFormatVersion == 1);
+  struct Want { const char* json; BackupFormatCheck result; uint32_t version; };
+  const Want wants[] = {
+      {"{\"magic\":\"HWBACKUP\",\"files\":{}}", BackupFormatCheck::Supported, 1},
+      {"{\"magic\":\"HWBACKUP\",\"formatVersion\":1}", BackupFormatCheck::Supported, 1},
+      {"{\"magic\":\"HWBACKUP\",\"formatVersion\":0}", BackupFormatCheck::Supported, 0},
+      {"{\"magic\":\"HWBACKUP\",\"formatVersion\":2}", BackupFormatCheck::Newer, 2},
+      {"{\"magic\":\"HWBACKUP\",\"formatVersion\":4000000000}", BackupFormatCheck::Newer, 4000000000u},
+      {"{\"magic\":\"HWBACKUP\",\"formatVersion\":\"1\"}", BackupFormatCheck::Invalid, 0},
+      {"{\"magic\":\"HWBACKUP\",\"formatVersion\":1.5}", BackupFormatCheck::Invalid, 0},
+      {"{\"magic\":\"HWBACKUP\",\"formatVersion\":-1}", BackupFormatCheck::Invalid, 0},
+      {"{\"magic\":\"HWBACKUP\",\"formatVersion\":null}", BackupFormatCheck::Supported, 1},
+  };
+  for (const Want& want : wants) {
+    JsonDocument doc;
+    check(!deserializeJson(doc, want.json));
+    uint32_t version = 99;
+    check(checkBackupFormat(doc.as<JsonVariantConst>(), &version) == want.result);
+    check(version == want.version);
+  }
+  JsonDocument doc;
+  check(!deserializeJson(doc, bundle()));
+  check(checkBackupFormat(doc.as<JsonVariantConst>(), nullptr) == BackupFormatCheck::Supported);
+}
+
 int main(int argc, char** argv) {
   const std::string only = argc > 1 ? argv[1] : "";
   struct Case { const char* name; void (*run)(); };
@@ -378,6 +407,7 @@ int main(int argc, char** argv) {
       {"no-fingerprint-unverified", caseNoFingerprintUnverified},
       {"check-advice", caseCheckAdvice},
       {"discard-frees-before-clearing", caseDiscardFreesBeforeClearing},
+      {"backup-format-version", caseBackupFormatVersion},
   };
   bool ran = false;
   for (const Case& c : cases) {

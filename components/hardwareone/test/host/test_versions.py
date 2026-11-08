@@ -7,9 +7,10 @@ sources (the dependency-free headers directly; the rest from their source
 lines), runtime reads are fixtures. Each selection is its own compile, so a
 boundary that is compiled out must leave no item (no updater line without the
 OTA layout, no companion or STT line off the P4, no phone lines without the
-pipe). Checked: the exact key list per selection, the text form (one aligned
-line per labelled item, JSON-only items not printed), the JSON form (schema 1,
-string values, stable keys) and that tools/gen_build_info.py's BUILD_INFO.md
+pipe, no automations or backup format line without that feature). Checked: the
+exact key list per selection, the text form (one aligned line per labelled
+item, JSON-only items not printed), the JSON form (schema 1, string values,
+stable keys) and that tools/gen_build_info.py's BUILD_INFO.md
 Versions table uses the same keys and values for the source-known items.
 """
 import argparse
@@ -31,7 +32,8 @@ JSON_INCLUDE = COMPONENT.parent / "hardwareone_libs" / "ArduinoJson" / "src"
 # this so the largest build keeps headroom.
 VERSIONS_OBJECT_BUDGET = 1024
 
-GATES = ("HW1_OTA_LAYOUT", "ENABLE_ESPNOW", "ENABLE_BLUETOOTH", "ENABLE_BLE_PHONE_PIPE",
+GATES = ("HW1_OTA_LAYOUT", "ENABLE_ESPNOW", "ENABLE_AUTOMATION", "ENABLE_MIGRATION_TOOL",
+         "ENABLE_BLUETOOTH", "ENABLE_BLE_PHONE_PIPE",
          "ENABLE_RASPBERRY_PI_HOST_POWER", "ENABLE_RASPBERRY_PI_HOST_FAN",
          "HW1_RADIO_COMPANION", "ENABLE_LOCAL_STT")
 FIXTURES = ("ENABLE_STT_MODEL_15X5_GEN2", "FIXTURE_UPDATER_PRESENT", "FIXTURE_ESPNOW_STACK",
@@ -39,6 +41,7 @@ FIXTURES = ("ENABLE_STT_MODEL_15X5_GEN2", "FIXTURE_UPDATER_PRESENT", "FIXTURE_ES
 
 OTA = ["ota_layout", "updater", "ota_manifest_format", "ota_data_schema"]
 ESPNOW = ["espnow", "espnow_wire", "espnow_stack", "espnow_identity_file", "espnow_peer_file"]
+FILES = ["automations_file", "backup_format"]
 PHONE = ["phone_link", "phone_pipe_channel", "phone_console_records"]
 C6 = ["c6_hosted", "c6_hosted_qualified", "c6_bridge_wire", "c6_bridge_wire_expected"]
 TAIL = ["idf", "arduino"]
@@ -50,17 +53,23 @@ PROFILES = {
             ["firmware"] + OTA + TAIL, {"updater": "1.1.0+fixture"}),
     "ota_no_updater": ({"HW1_OTA_LAYOUT": 1}, ["firmware"] + OTA + TAIL, {"updater": "unavailable"}),
     "s3_mesh": ({"HW1_OTA_LAYOUT": 1, "FIXTURE_UPDATER_PRESENT": 1, "ENABLE_ESPNOW": 1,
-                 "FIXTURE_ESPNOW_STACK": 2, "ENABLE_BLUETOOTH": 1,
-                 "ENABLE_RASPBERRY_PI_HOST_FAN": 1},
-                ["firmware"] + OTA + ESPNOW + ["ble_console_channel", "cm5_control"] + TAIL,
-                {"espnow": "ESPNOW V1 (1.0)", "espnow_stack": "v2"}),
+                 "FIXTURE_ESPNOW_STACK": 2, "ENABLE_AUTOMATION": 1, "ENABLE_MIGRATION_TOOL": 1,
+                 "ENABLE_BLUETOOTH": 1, "ENABLE_RASPBERRY_PI_HOST_FAN": 1},
+                ["firmware"] + OTA + ESPNOW + FILES + ["ble_console_channel", "cm5_control"] + TAIL,
+                {"espnow": "ESPNOW V1 (1.0)", "espnow_stack": "v2", "automations_file": "2",
+                 "backup_format": "1"}),
+    # Each persisted-file item is gated by its own feature alone.
+    "automation_only": ({"ENABLE_AUTOMATION": 1}, ["firmware", "automations_file"] + TAIL,
+                        {"automations_file": "2"}),
+    "migration_only": ({"ENABLE_MIGRATION_TOOL": 1}, ["firmware", "backup_format"] + TAIL,
+                       {"backup_format": "1"}),
     "espnow_not_started": ({"ENABLE_ESPNOW": 1}, ["firmware"] + ESPNOW + TAIL,
                            {"espnow_stack": "unknown"}),
-    "p4": ({"ENABLE_ESPNOW": 1, "FIXTURE_ESPNOW_STACK": 2, "ENABLE_BLUETOOTH": 1,
-            "ENABLE_BLE_PHONE_PIPE": 1,
+    "p4": ({"ENABLE_ESPNOW": 1, "FIXTURE_ESPNOW_STACK": 2, "ENABLE_AUTOMATION": 1,
+            "ENABLE_MIGRATION_TOOL": 1, "ENABLE_BLUETOOTH": 1, "ENABLE_BLE_PHONE_PIPE": 1,
             "HW1_RADIO_COMPANION": 1, "FIXTURE_COMPANION_KNOWN": 1, "ENABLE_LOCAL_STT": 1,
             "ENABLE_STT_MODEL_15X5_GEN2": 1, "ENABLE_RASPBERRY_PI_HOST_POWER": 1},
-           ["firmware"] + ESPNOW + ["ble_console_channel"] + PHONE + ["cm5_control"] + C6 +
+           ["firmware"] + ESPNOW + FILES + ["ble_console_channel"] + PHONE + ["cm5_control"] + C6 +
            ["stt_model"] + TAIL,
            {"espnow_stack": "v2", "c6_hosted": "v2.12.13", "c6_bridge_wire": "1"}),
     # The companion answered at transport start, ESP-NOW has not started: the
@@ -108,6 +117,12 @@ def constants():
         "kFixturePipeLabel": ("const char*", '"%s"' % find(r'kPipeLabel\[\]\s*=\s*"([^"]+)"',
                                                            COMPONENT / "BLE_PhoneSecureChannel.h")),
     }
+    for name, header in (("kAutomationsFileVersion", "System_Automation.h"),
+                         ("kBackupFormatVersion", "WebServer_MigrationTool.h")):
+        line = re.findall(rf"^constexpr uint32_t {name} = \d+;$", (COMPONENT / header).read_text(), re.M)
+        if len(line) != 1:
+            raise SystemExit(f"{header}: expected one {name} line, found {len(line)}")
+        lines.append("inline " + line[0])  # inline: unused in selections without the feature
     radio = (COMPONENT / "HAL_Radio.h").read_text()
     types = [extract_block(radio, marker) + ";" for marker in
              ("enum class RadioBridgeState : uint8_t", "struct RadioCompanionIdentity")]

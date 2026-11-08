@@ -494,6 +494,12 @@ def source_versions(enabled, firmware="", argv=None, companion=False):
         add("espnow_identity_file", "ESP-NOW identity file",
             _match(r"\bkIdentityFileVersion = (\d+);", identity))
         add("espnow_peer_file", "ESP-NOW peer files", _match(r"\bkPeerFileVersion = (\d+);", identity))
+    if enabled("ENABLE_AUTOMATION"):
+        add("automations_file", "Automations file",
+            _match(r"^constexpr uint32_t kAutomationsFileVersion = (\d+);", hw + "System_Automation.h"))
+    if enabled("ENABLE_MIGRATION_TOOL"):
+        add("backup_format", "Backup bundle format",
+            _match(r"^constexpr uint32_t kBackupFormatVersion = (\d+);", hw + "WebServer_MigrationTool.h"))
     if enabled("ENABLE_BLUETOOTH"):
         add("ble_console_channel", "BLE console channel",
             _match(r'SC_INFO\[\]\s*=\s*"([^"]+)"', hw + "System_BleSecureChannel.cpp"))

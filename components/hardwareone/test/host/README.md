@@ -725,9 +725,13 @@ warning, a map that would push the bundle past the 512 KB the restore accepts.
 It also checks the confirm prompt's provenance summary (claims sanitised; a
 bundle without a fingerprint shown as unverified, never as this device), the
 size/SHA-256 advice for unforced and forced uploads, and that discard frees the
-staged buffer before clearing the pending flag.
+staged buffer before clearing the pending flag. `checkBackupFormat` treats a
+bundle without `formatVersion` as format 1 and refuses a newer or
+non-whole-number one.
 A source check requires `/api/backup` to refuse an overflowed or oversized
-bundle with the limit `/api/restore` uses. Not covered: the HTTP handlers
+bundle with the limit `/api/restore` uses, to write `kBackupFormatVersion`, and
+`/api/restore` to refuse a bad format after the magic check and before the
+fingerprint check and staging. Not covered: the HTTP handlers
 themselves, the device AES helpers, a rename failing part-way through
 promotion, and binary map content. Run with
 `ctest --test-dir build -R '^migration_restore$' --output-on-failure`.
@@ -1960,11 +1964,15 @@ stopping during a read cannot restore a freed cache. Failed file writes leave
 the cached schedule intact. Threaded polling, notifications, event posts and
 start/stop exercise cache lifetime under ThreadSanitizer. Permission revoked by
 another writer stops the scheduler on its next tick; a later grant stays idle
-until the owner starts it. The actual disabled
+until the owner starts it. A newer automations.json format (`"version"` above
+`kAutomationsFileVersion`) is refused: nothing is cached or listed, the store is
+never written and keeps its text; no version, version 1 and a non-numeric
+version load as before. The actual disabled
 public header is compiled independently. `automation_scheduler_contract`
 retains the main-loop integration and full-tick early-exit/source guards, plus
 the quiet in-pass reschedule writes, the unconditional main-loop tick and the
-owner transition shared with `features automation`.
+owner transition shared with `features automation`, and that every owner read
+goes through the format check and no writer spells the version as a literal.
 
 ```sh
 python3 components/hardwareone/test/host/test_automation_scheduler.py --sanitize
