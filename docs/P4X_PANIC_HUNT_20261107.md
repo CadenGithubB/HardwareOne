@@ -164,6 +164,21 @@ ToF events, event-catalog fixture counts). They were not re-run on a tree withou
   400 MHz so captions are unaffected, but idle PSRAM-heavy work (web UI, logs) is slower at 100/200 MHz.
 - Other boards: the fix is compiled for every ESP32-P4 build with PSRAM (Waveshare P4 too); only the
   P4X-EYE was tested.
+- ESP32-S3 (G-48, S3 half, 2026-11-08): the S3 needs the sync too, for a different reason. Its MSPI core
+  clock follows the CPU clock source (IDF 5.5.5 `hal/esp32s3/include/hal/mspi_ll.h:52`
+  `MSPI_TIMING_LL_FLASH_CPU_CLK_SRC_BINDED`), and UltraSaver's 40 MHz idle clock runs from XTAL, so after
+  Arduino's switch the MSPI would run from XTAL with the RX delays boot tuning chose for the PLL clock.
+  Tuning is on for Octal PSRAM at 80 MHz (DDR, `MSPI_TIMING_PSRAM_NEEDS_TUNING` = clock > 40,
+  `port/esp32s3/mspi_timing_tuning_configs.h:81`), which is the XIAO S3 default; the Quad-PSRAM FeatherS3
+  boards with 80 MHz STR flash/PSRAM have no tuning, so for them the sync only lowers the MSPI clock.
+  `clk_utils.c:35/57` moves the MSPI to its untuned low-speed mode before a switch onto XTAL and back after
+  a switch onto PLL; IDF calls it from `esp_pm` (`pm_impl.c:708/726`), sleep (`sleep_modes.c:1030`) and the
+  boot o-code calibration (`port/esp32s3/rtc_init.c:275/324`). On S3 builds `powerSetCpuFrequencyMhz` now
+  brackets Arduino's `setCpuFrequencyMhz` with those two calls (`s3SetCpuFrequencyMhz`, each under
+  `portENTER_CRITICAL_SAFE` because the sync freezes the external-memory cache; the after-sync uses the
+  clock actually running). No other-core stall: `esp_pm` does none on the S3, and the untuned low-speed mode
+  is valid on both clock sources. Host-tested (`power_cpu_frequency`, s3 profile); not run on an S3 board
+  (the bench check G-48 asks for, >= 30 min UltraSaver idle with a PSRAM write/verify loop, is still open).
 - Separate issues seen on the way, not fixed: STT starts that fail with `warm-up failed: Cancelled`
   (4 of 40 fast cycles, also once in a long session); the IDLE0 task-watchdog warnings at boot.
 - The console coredump path works (validated with `memdiag wptest`), but the real crash's coredump was cut off
