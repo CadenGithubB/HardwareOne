@@ -466,7 +466,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## matrix
 
-> matrix test draws an orientation pattern. matrix text HI, matrix pixel 3 2 on, matrix clear/fill and matrix on/off control the display. matrix brightness <0-15> and matrix rotation <0-3> persist; matrix blink <0-3> selects off/2Hz/1Hz/0.5Hz. matrixbus <0|1> and matrixaddress <0x70-0x77> require reboot. matrix size 8x8 uses one square; matrix panel <0|1> selects the physical square. matrix size 16x8 restores both. Use an unused non-0x70 address when sharing a bus with a PCA9685. Static text clips at the display edge.
+> matrix test draws an orientation pattern. matrix text HI, matrix pixel 3 2 on, matrix clear/fill and matrix on/off control the display. matrix brightness <0-15> and matrix rotation <0-3> persist; matrix blink <0-3> selects off/2Hz/1Hz/0.5Hz. matrixbus <0|1> and matrixaddress <0x70-0x77> require reboot. matrix size 8x8 uses one square; matrix panel <0|1> selects the physical square. matrix size 16x8 restores both. matrixbrightness/matrixrotation/matrixsquare/matrixpanel save without applying (used by the settings editors). Use an unused non-0x70 address when sharing a bus with a PCA9685. Static text clips at the display edge.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -1267,6 +1267,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `otastatus` |  | Show signed recovery OTA state. (add 'json')<br/>`Usage: otastatus [json]` |
 | `otaupdate` | A | Revalidate staged firmware and reboot into recovery apply.<br/>`Usage: otaupdate confirm [force-power]` |
 | `otawrite` | A | Stage exact OTA members over encrypted Bluetooth.<br/>`Usage: otawrite begin <candidate\|manifest> <size> <sha256> \| status \| finish \| abort` |
+
+_`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the first branch. Other build configurations register a different version of these rows (for example stubs)._
 
 ## setpattern
 

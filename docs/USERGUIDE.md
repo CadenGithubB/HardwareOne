@@ -603,12 +603,13 @@ else is being reached through the device named in the **VIA** column. Turn
 (a battery-tight node, say) — it will still send and receive over multi-hop
 itself. Set `espnowmeshttl 1` to opt a device out of multi-hop entirely.
 
-Two things stay deliberately single-hop: **pairing** (the discover, request and
-accept exchange in the steps above), so you can only pair with something you are
-physically near, and **file transfers**, which are too large to relay. Once two
-devices share the mesh passphrase, their key exchange and encrypted session setup
-do travel through relays, so a paired peer that moves out of range stays
-reachable. Messages and remote commands relay fine, but a relayed message is
+Two things stay deliberately single-hop: **discovery and pairing requests** (the
+discover, request and accept exchange in the steps above), so discovery only finds
+devices in radio range, and **file transfers**, which are too large to relay. Key
+exchange and encrypted session setup do travel through relays, so a paired peer
+that moves out of range stays reachable, and pairing by MAC
+(`espnowpairsecure <mac> <name>`) with a device that shares the mesh passphrase
+completes through relays too. The passphrase, not distance, controls who can join. Messages and remote commands relay fine, but a relayed message is
 capped at ~130 characters per piece.
 
 ### Bonding (Master/Worker)

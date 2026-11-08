@@ -345,6 +345,7 @@ static constexpr CommandModule gCommandModules[] = {
     "matrix clear/fill and matrix on/off control the display. matrix brightness <0-15> and matrix rotation <0-3> persist; "
     "matrix blink <0-3> selects off/2Hz/1Hz/0.5Hz. matrixbus <0|1> and matrixaddress <0x70-0x77> require reboot. "
     "matrix size 8x8 uses one square; matrix panel <0|1> selects the physical square. matrix size 16x8 restores both. "
+    "matrixbrightness/matrixrotation/matrixsquare/matrixpanel save without applying (used by the settings editors). "
     "Use an unused non-0x70 address when sharing a bus with a PCA9685. Static text clips at the display edge.",
     matrixCommands, &matrixCommandsCount, 0, nullptr },
 #endif

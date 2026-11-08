@@ -20,7 +20,9 @@ A CommandEntry array defined more than once in one file, in mutually
 exclusive branches of the same #if/#elif/#else chain (System_OTA.cpp's
 otaCommands[] under `#if HW1_OTA_LAYOUT` / `#else`), is one table: only one
 branch is ever compiled. The first branch is read, as for gCommandModules[];
-the alternatives are neither counted nor reported as duplicates.
+the alternatives are neither counted nor reported as duplicates, but
+`audit` fails if an alternative has a command name the first branch lacks,
+and `reference` notes under the module that the table has alternatives.
 
 Both commands read components/hardwareone/*.cpp and *.h. Neither writes to
 source files; `reference` only writes docs/COMMAND_REFERENCE.md.
@@ -173,6 +175,19 @@ NAME_RE = re.compile(
 SUPER_RE = re.compile(r"requiresSuperAdmin\s*=\s*\*/\s*true")
 
 
+DIRECTIVE_RE = re.compile(r"\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b")
+
+
+def directive(line: str) -> str:
+    """'if', 'elif', 'else' or 'endif' for a conditional directive line
+    (any spacing after '#'; #ifdef/#ifndef count as 'if'), else ''."""
+    m = DIRECTIVE_RE.match(line)
+    if not m:
+        return ""
+    kw = m.group(1)
+    return "if" if kw.startswith("if") else kw
+
+
 def preprocessor_paths(text: str) -> list[tuple]:
     """Per line, the #if nesting it sits in: a tuple of (chain id, branch index).
 
@@ -182,14 +197,14 @@ def preprocessor_paths(text: str) -> list[tuple]:
     """
     paths, stack, next_id = [], [], 0
     for line in text.splitlines():
-        directive = line.lstrip()
-        if directive.startswith("#if"):
+        kw = directive(line)
+        if kw == "if":
             stack.append((next_id, 0))
             next_id += 1
-        elif directive.startswith(("#else", "#elif")) and stack:
+        elif kw in ("else", "elif") and stack:
             chain, branch = stack[-1]
             stack[-1] = (chain, branch + 1)
-        elif directive.startswith("#endif") and stack:
+        elif kw == "endif" and stack:
             stack.pop()
         paths.append(tuple(stack))
     return paths
@@ -208,11 +223,12 @@ def mutually_exclusive(a: tuple, b: tuple) -> bool:
 def parse_commands_and_alternates(include_stubs: bool = False):
     """(array name -> command dicts, alternative-branch definitions skipped).
 
-    The second value lists (file, array, line) for each later definition of an
-    array that is mutually exclusive with one already read from the same file.
+    The second value lists (file, array, line, row names) for each later
+    definition of an array that is mutually exclusive with one already read
+    from the same file. Its rows are not added to the first value.
     """
     by_array: dict[str, list[dict]] = collections.defaultdict(list)
-    alternates: list[tuple[str, str, int]] = []
+    alternates: list[tuple[str, str, int, list[str]]] = []
     for path in sources():
         if not include_stubs and path.name == STUB_FILE:
             continue
@@ -225,12 +241,14 @@ def parse_commands_and_alternates(include_stubs: bool = False):
                 paths = preprocessor_paths(src)
             line = src.count("\n", 0, m.start())
             here = paths[line] if line < len(paths) else ()
-            if any(mutually_exclusive(here, p) for p in kept[array]):
-                alternates.append((path.name, array, line + 1))
-                continue
-            kept[array].append(here)
             start = m.end() - 1
             body = src[start:match_brace(src, start)]
+            if any(mutually_exclusive(here, p) for p in kept[array]):
+                alt_names = [nm.group(1) for nm in
+                             (NAME_RE.match(i) for i in iter_initializers(body)) if nm]
+                alternates.append((path.name, array, line + 1, alt_names))
+                continue
+            kept[array].append(here)
             for item in iter_initializers(body):
                 nm = NAME_RE.match(item)
                 if not nm:
@@ -268,12 +286,12 @@ def first_branches(text: str) -> str:
     """
     out, skipping = [], []
     for line in text.splitlines(keepends=True):
-        directive = line.lstrip()
-        if directive.startswith("#if"):
+        kw = directive(line)
+        if kw == "if":
             skipping.append(False)
-        elif directive.startswith(("#else", "#elif")) and skipping:
+        elif kw in ("else", "elif") and skipping:
             skipping[-1] = True
-        elif directive.startswith("#endif") and skipping:
+        elif kw == "endif" and skipping:
             skipping.pop()
         elif not any(skipping):
             out.append(line)
@@ -311,7 +329,9 @@ def parse_modules() -> list[dict]:
 
 def render_reference() -> tuple[str, int, int]:
     """(reference text, unique command count, module count)."""
-    by_array = parse_commands()
+    by_array, alternates = parse_commands_and_alternates()
+    # Only alternatives that register rows: an empty "feature off" stub needs no note.
+    alt_arrays = {array: fname for fname, array, _, alt in alternates if alt}
     modules = parse_modules()
     total = sum(len(v) for v in by_array.values())
     unique = {c["name"] for v in by_array.values() for c in v}
@@ -367,6 +387,12 @@ def render_reference() -> tuple[str, int, int]:
                 desc = f"{desc}<br/>`{u}`"
             add(f"| `{c['name']}` | {flag} | {desc} |")
         add("")
+        if m["array"] in alt_arrays:
+            add(f"_`{m['array']}` has `#if` alternatives in "
+                f"`{alt_arrays[m['array']]}`; this table is the first branch. "
+                f"Other build configurations register a different version of "
+                f"these rows (for example stubs)._")
+            add("")
 
     orphans = {a: v for a, v in by_array.items() if a not in seen_arrays}
     if orphans:
@@ -458,9 +484,25 @@ def cmd_audit(args) -> int:
     # -- #if/#else alternatives (information, not a problem) ---------------
     print(f"== tables in mutually exclusive #if branches "
           f"({len(alternates)} alternative definition(s), first branch read) ==")
-    for fname, array, line in alternates:
+    for fname, array, line, _ in alternates:
         print(f"  {array} ({fname}:{line})")
     if not alternates:
+        print("  (none)")
+    print()
+
+    # -- commands that exist only in an alternative branch ----------------
+    # Those rows are neither documented nor duplicate-checked, so flag them.
+    read_names = collections.defaultdict(set)
+    for a, v in by_array.items():
+        read_names[a].update(c["name"].lower() for c in v)
+    only_alt = [(fname, array, line, n) for fname, array, line, alt in alternates
+                for n in alt if n.lower() not in read_names[array]]
+    print(f"== commands only in an alternative #if branch ({len(only_alt)}) ==")
+    for fname, array, line, n in only_alt:
+        problems += 1
+        print(f"  {n}  {array} ({fname}:{line}) — not in the branch the "
+              f"reference documents")
+    if not only_alt:
         print("  (none)")
     print()
 
