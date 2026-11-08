@@ -84,12 +84,19 @@ libraries have been fixed for. If you don't have it installed:
 - [ESP-IDF v5.5.5 install guide](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32/get-started/index.html)
 - In your esp-idf checkout: `git checkout v5.5.5 && git submodule update --init --recursive && ./install.sh && . ./export.sh`
 
-### 1. Clone the repo
+### 1. Clone the repo and vendor the Arduino component
 
 ```bash
 git clone https://github.com/CadenGithubB/HardwareOne.git
 cd HardwareOne
+. "$IDF_PATH/export.sh"      # ESP-IDF 5.5.5
+tools/vendor_arduino.sh      # clones arduino-esp32 3.3.5 into components/arduino and applies the local patches
 ```
+
+`components/arduino` is git-ignored, so a fresh clone has none of it; the script
+vendors it once and `tools/build_board.sh` refuses to build if a patch is missing
+(`tools/vendor_arduino.sh --check` verifies, `--force` re-vendors). ESP32-P4 boards
+additionally need `tools/p4/prepare_sdk.sh` (see above).
 
 ### 2. Configure your build (optional)
 

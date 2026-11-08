@@ -201,6 +201,9 @@ Hardware One uses **ESP-IDF** (not Arduino IDE). The quickest way to get going:
 git clone https://github.com/CadenGithubB/HardwareOne.git
 cd HardwareOne
 
+# Vendor the patched Arduino component (once per clone; needs ESP-IDF 5.5.5 exported)
+tools/vendor_arduino.sh
+
 # Build and flash (replace PORT with your device's serial port)
 idf.py -p PORT flash monitor
 
@@ -226,7 +229,7 @@ features) from `components/hardwareone/System_BuildConfig.h`. Checked-in
 deployment builds apply their own feature overlay and OTA/partition contract,
 so the same release can be reproduced without editing that shared header.
 
-If your build enables the G2 glasses / R1 ring Bluetooth support, first apply the small local patches to the managed Arduino BLE component: see [docs/arduino-local-patches/](docs/arduino-local-patches/) (patch file, verify script, and instructions). Building those features against a stock copy of the library fails to link.
+`components/arduino` is not in the repository: `tools/vendor_arduino.sh` clones arduino-esp32 3.3.5 and applies HardwareOne's local patches (BLE, ESP-Hosted, panic path, OTA removal); every build script verifies them first. Details: [docs/arduino-local-patches/README.md](docs/arduino-local-patches/README.md).
 
 ---
 

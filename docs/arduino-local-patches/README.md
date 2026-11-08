@@ -36,8 +36,11 @@ All marked with `[hardwareone local patch YYYY-MM-DD]` comments:
 `arduino-local-patches.patch` is the full `git -C components/arduino diff`
 snapshot of all of the above.
 
-**Not covered:** the untracked `components/arduino/variants/XIAO_ESP32S3_SENSE/`
-directory (board variant) — `git diff` cannot capture untracked files.
+**Vendoring from scratch:** `tools/vendor_arduino.sh` clones upstream 3.3.5
+(`11bc7ac1a`) into `components/arduino` as a nested git checkout, applies every
+patch below in order and runs the verifier; `--check` verifies an existing copy,
+`--force` re-vendors over one. No board uses an untracked variant directory
+(each `boards/*.defaults` names an upstream `CONFIG_ARDUINO_VARIANT`).
 
 ## Verify (run any time, especially after anything touched components/arduino)
 

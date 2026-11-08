@@ -64,6 +64,21 @@ command -v idf.py >/dev/null 2>&1 || {
   echo "error: idf.py not on PATH; source the ESP-IDF export script first" >&2
   exit 1
 }
+# The vendored Arduino component must be present and carry every local patch (a
+# missing patch compiles fine and fails on hardware), and a release build must
+# come from a committed tree so BUILD_INFO's commit describes what was built.
+if [[ ! -d "$REPO/components/arduino" ]]; then
+  echo "error: components/arduino is missing; run tools/vendor_arduino.sh first" >&2
+  exit 1
+fi
+bash "$REPO/docs/arduino-local-patches/verify_patches.sh" >/dev/null || {
+  echo "error: components/arduino is missing local patches; run tools/vendor_arduino.sh --check" >&2
+  exit 1
+}
+if [[ -z "${HW1_ALLOW_DIRTY:-}" ]] && [[ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]]; then
+  echo "error: the tree has uncommitted changes; commit them or set HW1_ALLOW_DIRTY=1 for a local trial build" >&2
+  exit 1
+fi
 
 OUTPUT_ROOT="$REPO/build/deployments/$DEPLOYMENT/$BOARD"
 UPDATER_BUILD="$OUTPUT_ROOT/updater"
