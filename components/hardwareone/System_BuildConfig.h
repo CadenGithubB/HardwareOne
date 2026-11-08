@@ -418,8 +418,8 @@
 //   symmetric: the on-device engine has no special status beyond being local.
 //
 //     ENABLE_LLM_SOURCE_ONBOARD  tiny transformer inference on this chip
-//                                (Llama + GPT-2, FP32/INT8). Requires ESP32-S3
-//                                + PSRAM; 1-4 MB PSRAM at runtime, and it is by
+//                                (Llama + GPT-2, FP32/INT8). Requires PSRAM
+//                                (any chip); 1-4 MB PSRAM at runtime, and it is by
 //                                far the largest part of the feature's flash.
 //     ENABLE_LLM_SOURCE_CM5      the CM5 / Pi 5 co-processor, reached over the
 //                                authenticated UART host link. Costs almost no
@@ -1024,8 +1024,9 @@
   #define ENABLE_BONDED_MODE 0
 #endif
 
-// Note: ENABLE_LLM_SOURCE_ONBOARD requires ESP32-S3 with PSRAM.
-// CMakeLists.txt handles excluding LLM source files on non-S3 targets.
+// Note: ENABLE_LLM_SOURCE_ONBOARD needs PSRAM. CMake gates its source files on
+// this flag alone (no target or PSRAM check); a build without PSRAM must set it
+// to 0 in its feature header or saved configuration.
 
 // =============================================================================
 // MEMORY SAVINGS REFERENCE

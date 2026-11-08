@@ -56,7 +56,7 @@ Feature flags are declared, with their defaults, in `components/hardwareone/Syst
 | `ENABLE_EDGE_IMPULSE` | Set to `1` to build Edge Impulse ML inference |
 | `ENABLE_BONDED_MODE` | Set to `1` to build Bonded Microcontrollers - two devices share command registries and the controller shows a Remote tab with the paired device's features |
 | `ENABLE_LLM_BACKEND` | Master switch for the LLM feature (web LLM page, OLED LLM mode, `llm*` commands, lens viewer). Set to `1` *and* turn on at least one source below; a build error tells you if you forget. |
-| `ENABLE_LLM_SOURCE_ONBOARD` | Set to `1` to build the tiny transformer that runs on this chip (ESP32-S3 + PSRAM only). Requires a model file on LittleFS or SD card. |
+| `ENABLE_LLM_SOURCE_ONBOARD` | Set to `1` to build the tiny transformer that runs on this chip (needs PSRAM). Requires a model file on LittleFS or SD card. |
 | `ENABLE_LLM_SOURCE_CM5` | Set to `1` to answer from the Raspberry Pi co-processor over the UART link. Requires a board with a `UART_LINK_PORT` (all supported boards). |
 | `ENABLE_LLM_SOURCE_HTTP` | Set to `1` to answer from an OpenClaw server at a configured HTTP(S) endpoint. Requires WiFi; no local model. |
 | `ENABLE_LOCAL_STT` | On-device speech-to-text on the ESP32-P4 boards (the engine is compiled only for that target). Needs a model file on the device at run time; `ENABLE_STT_MODEL_15X5_GEN2` selects the published 15×5 model on the microSD card. Where the file comes from and how to install it: [README, Local speech-to-text model](../README.md#local-speech-to-text-model-esp32-p4) |
@@ -455,6 +455,14 @@ lost:
   erase only the filesystem (`littlefs-flash`, `encrypted-littlefs-flash` on
   `feathers3_fe`); a full erase also removes the recovery updater (see Update
   and recovery below).
+
+**Handing a device over:** what `factoryreset` keeps includes the saved WiFi
+networks, the MQTT and LLM endpoint credentials, Bluetooth bonds other than the
+phone pipe, and the ESP-NOW identity and keys, so it does not prepare a device
+for a new owner. Before giving one away, erase the whole flash over the cable
+(`tools/build_board.sh <board> -p PORT erase-flash`) and flash it again. On a
+recovery-OTA layout this also removes the recovery updater; provision it again
+with [OTA_DEVICE_SETUP.md](OTA_DEVICE_SETUP.md).
 
 First-time setup refuses reserved owner names (`system`, `AuthBypass`, the
 bond admin) and passwords shorter than six characters, so a new device cannot
@@ -900,7 +908,7 @@ g2evenai status|capabilities        - native "Hey Even" exchange and host-gate s
 
 ## LLM
 
-Requires `ENABLE_LLM_BACKEND=1` plus at least one answer source: `ENABLE_LLM_SOURCE_ONBOARD` (a tiny transformer running on this chip - ESP32-S3 with PSRAM only) and/or `ENABLE_LLM_SOURCE_CM5` (answers from the [Raspberry Pi co-processor](#raspberry-pi-co-processor-cm5) over the UART link). Every surface - web page, OLED mode, lens viewer, `llm*` commands - talks to whichever source holds the current model; models are addressed by `<source>:<name>` ids such as `onboard:model.bin` or `cm5:Qwen3-1.7B-Q4_0.gguf` (a bare filename still resolves).
+Requires `ENABLE_LLM_BACKEND=1` plus at least one answer source: `ENABLE_LLM_SOURCE_ONBOARD` (a tiny transformer running on this chip; needs PSRAM) and/or `ENABLE_LLM_SOURCE_CM5` (answers from the [Raspberry Pi co-processor](#raspberry-pi-co-processor-cm5) over the UART link). Every surface - web page, OLED mode, lens viewer, `llm*` commands - talks to whichever source holds the current model; models are addressed by `<source>:<name>` ids such as `onboard:model.bin` or `cm5:Qwen3-1.7B-Q4_0.gguf` (a bare filename still resolves).
 
 ### Model files (on-board source)
 
@@ -1076,6 +1084,14 @@ httpstatus                      - Show web server status and IP
 certinfo                        - Show HTTPS certificate details
 certgen [rsa]                   - Generate self-signed certificate (default: ECDSA P-256)
 ```
+
+Auto-reconnect (`wifiautoreconnect`) retries only the network that dropped. The
+hunt across all saved networks runs at boot, on `openwifi` and when the radio is
+switched back on, so after you carry the device to another saved network, run
+`openwifi`. To do that automatically, add an interval automation:
+`automation add name=wifihunt type=interval intervalms=300000 commands="IF WIFI=NONE THEN openwifi" enabled=1`.
+It also reopens WiFi after `closewifi`, so disable it while you want WiFi off.
+See [KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
 </details>
 
 <details>

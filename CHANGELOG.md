@@ -98,6 +98,13 @@ everything user-visible since the v0.99.99 tag (55 commits).
   tree; the Arduino patch README names every patch in replay order and the stale variant note is gone;
   QUICKSTART and README make vendoring step 1; two P4X-EYE Bluetooth reliability investigations and the
   cross-board integration results recorded.
+- The 0.99.98.4 known issue (P4X-EYE USB serial console stops answering in phone-client mode) is
+  closed as a mode, not as a fix. 0.99.98.5 folded phone-client mode into client mode: `blemode` keeps
+  `client` and `server` only and the phone pipe still runs, as a device on the shared client stack.
+  The hang was not seen on the 2026-10-21 bench runs (the P4X-EYE driven over serial with the
+  glasses, ring and phone linked) or the 2026-10-24 check (all four companion BLE links over
+  serial), but those records do not say whether the HTTP server was up or how long the console was
+  watched. The cause was never found.
 
 ## [0.99.99] - 2026-10-28
 
@@ -568,7 +575,8 @@ in phone-client mode (see Known issue).
 Known issue: on the P4X-EYE in phone-client mode, the USB serial console stops
 responding a few seconds after the HTTP server starts. A watchdog then resets
 the board about ten minutes later. The scheduler keeps running during the
-silence. Under investigation.
+silence. Under investigation. (Closed in 0.99.98.5, which folded phone-client mode into client
+mode; not reproduced since, cause not found; see [Unreleased] > Docs.)
 
 Verification: the `p4-phone-only` P4 build passes, and the phone pipe, GATT,
 identity, runtime, forget and BLE coordinator host tests pass. The image was

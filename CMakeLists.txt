@@ -253,17 +253,20 @@ hw1_sdkconfig_policy_files("${CMAKE_CURRENT_SOURCE_DIR}" "${_hw_board}"
 
 # --- 3. Partition table selection ---
 #
-# Two axes: SR vs no_sr (from #define ENABLE_ESP_SR in System_BuildConfig.h)
-# and flash size (from the active board file, defaulted to 8mb for ESP32
-# boards and as a fallback). The four combinations are:
-#   partitions/ holds the authoritative source tables selected per build:
-#   partitions_no_sr_8mb.csv    factory 4948K + littlefs 3180K
-#   partitions_no_sr_16mb.csv   factory 4948K + littlefs 11628K  (FeatherS3[D])
-#   partitions_sr_8mb.csv       factory 4992K + model 3008K + littlefs 128K
-#   partitions_sr_16mb.csv      factory 4992K + model 3008K + littlefs 8320K
-#
-# When ENABLE_ESP_SR is enabled, we need a "model" SPIFFS partition for
-# WakeNet/MultiNet; when disabled, that space is reclaimed for LittleFS.
+# The CSVs under partitions/ are the only source of partition offsets and
+# sizes; read them there rather than copying numbers into this comment.
+# The picker further down (after the OTA registry) chooses, in order:
+#   1. a deployment's own table (HW1_DEPLOYMENT_PARTITION_FILE), else
+#   2. partitions_ota_<sr>_<flash>.csv when the recovery-OTA layout is on, else
+#   3. partitions_<sr>_<flash>_<board>.csv if that file exists
+#      (today: p4x_eye, waveshare_p4_touch_lcd_5), else
+#   4. partitions_<sr>_<flash>.csv.
+# <sr> is "sr" only when ENABLE_ESP_SR is 1 and HW1_SR_MODELS_IN_FILESYSTEM is
+# not 1, as first defined in the saved-configuration, deployment or board
+# feature header or else System_BuildConfig.h (first definition wins); that
+# layout adds a "model" SPIFFS partition for WakeNet/MultiNet. Otherwise it is
+# "no_sr" and the space goes to LittleFS.
+# <flash> comes from the active board file (8mb by default and as a fallback).
 set(_ota_layout FALSE)
 if(HW1_DEPLOYMENT_ACTIVE AND HW1_DEPLOYMENT_OTA_LAYOUT)
     set(_ota_layout TRUE)

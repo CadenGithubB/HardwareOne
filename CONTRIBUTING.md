@@ -37,9 +37,11 @@ files owns their lifecycle; do not leave the user to identify disposable files.
   and prepare an exact cleanup list first. Preserve unique work and other
   agents' active files. Never infer that everything ignored by Git is disposable.
 
-## The 0.99.97.x cleanup series
+## Structural cleanups (history: the 0.99.97.x series)
 
-The focus of `0.99.97.x` is long-term readability, editability and consistent
+This section began as the brief for the finished `0.99.97.x` cleanup series; its
+guidance still applies to any structural change. The focus of that series was
+long-term readability, editability and consistent
 module design. Each milestone should make an existing feature easier to find,
 understand and change. Useful outcomes include one owner for shared behavior,
 fewer dependencies between unrelated systems, simpler control flow, clearer
@@ -58,8 +60,8 @@ practical so reviewers can follow both. Use the verification guidance below.
 
 Complete and record each milestone before expanding its scope. Judge progress
 by how easily someone can trace and edit a feature, rather than lines removed
-or files split. Memory slimming and SD qualification remain deferred until
-explicitly resumed.
+or files split. (During `0.99.97.x`, memory slimming and SD qualification were
+deferred; memory slimming resumed in 0.99.98.5.)
 
 ## Give each decision one owner
 
