@@ -77,9 +77,13 @@ static bool littlefsPartitionIsBlank(const esp_partition_t* part) {
 // Keep the legacy boot sweep limited to these direct-child directories.
 // Staged headers stay reserved for their writers after failure; capped logs,
 // R1 history and other capture stores retain their own recovery policies.
+// /system/espnow (identity.tmp, devices.json.tmp, *.restore.tmp) and
+// /system/certs (*.crt.tmp / *.key.tmp, *.restore.tmp) hold only staging
+// temps that no reader ever recovers from.
 static void cleanupBootTemporaryFiles() {
   const char* cleanupDirs[] = {
-      "/", "/system", "/system/users", "/system/users/user_settings", "/maps"
+      "/", "/system", "/system/users", "/system/users/user_settings",
+      "/system/espnow", "/system/certs", "/maps"
 #if ENABLE_LLM_SOURCE_ONBOARD
       , "/system/llm"
 #endif
