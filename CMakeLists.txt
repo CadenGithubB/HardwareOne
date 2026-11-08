@@ -262,8 +262,10 @@ hw1_sdkconfig_policy_files("${CMAKE_CURRENT_SOURCE_DIR}" "${_hw_board}"
 #      (today: p4x_eye, waveshare_p4_touch_lcd_5), else
 #   4. partitions_<sr>_<flash>.csv.
 # <sr> is "sr" only when ENABLE_ESP_SR is 1 and HW1_SR_MODELS_IN_FILESYSTEM is
-# not 1 in System_BuildConfig.h; that layout adds a "model" SPIFFS partition
-# for WakeNet/MultiNet. Otherwise it is "no_sr" and the space goes to LittleFS.
+# not 1, as first defined in the saved-configuration, deployment or board
+# feature header or else System_BuildConfig.h (first definition wins); that
+# layout adds a "model" SPIFFS partition for WakeNet/MultiNet. Otherwise it is
+# "no_sr" and the space goes to LittleFS.
 # <flash> comes from the active board file (8mb by default and as a fallback).
 set(_ota_layout FALSE)
 if(HW1_DEPLOYMENT_ACTIVE AND HW1_DEPLOYMENT_OTA_LAYOUT)

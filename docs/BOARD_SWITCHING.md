@@ -127,7 +127,7 @@ them goes through the wrapper.
 |-------|------|-----------------|-------|
 | Adafruit QT Py ESP32 Pico | ESP32 | `adafruit_qtpy_esp32` | Built-in NeoPixel, Stemma QT |
 | Adafruit Feather ESP32 V2 | ESP32 | `adafruit_feather_esp32_v2` | Battery monitoring, built-in NeoPixel |
-| Seeed XIAO ESP32S3 | ESP32-S3 | `XIAO_ESP32S3` | Base board |
+| Seeed XIAO ESP32S3 (base, no Sense) | ESP32-S3 | `XIAO_ESP32S3` | **Not supported**: every ESP32-S3 build is a Sense build - see [KNOWN_ISSUES.md](../KNOWN_ISSUES.md) |
 | Seeed XIAO ESP32S3 Sense | ESP32-S3 | `XIAO_ESP32S3` + `XIAO_ESP32S3_SENSE_ENABLED` | Camera, mic, SD slot |
 | Unexpected Maker FeatherS3[D] | ESP32-S3 | `um_feathers3` | 2× STEMMA QT, MAX17048G fuel gauge, **Quad** PSRAM |
 | Espressif ESP32-P4X-EYE | ESP32-P4 | `esp32p4` + `boards/p4x_eye.features.h` | LCD, wheel + 3 buttons, MIPI camera, PDM mic, battery; Wi-Fi/BLE via onboard C6 - see [P4X_EYE_PERIPHERALS.md](P4X_EYE_PERIPHERALS.md) |
@@ -264,18 +264,12 @@ change them with `tools/build_board.sh <board> menuconfig`.
 | **Flash Mode** | Serial flasher config → Flash mode | `DIO` |
 | **Bluetooth** | Component config → Bluetooth | `Bluedroid`, controller BLE-only (`CONFIG_BTDM_CTRL_MODE_BLE_ONLY`) |
 
-### Seeed XIAO ESP32S3 — Base (ESP32-S3)
+### Seeed XIAO ESP32S3 - Base (not supported)
 
-| Category | Setting | Value |
-|----------|---------|-------|
-| **Target** | `# HW_TARGET:` in the board file | `esp32s3` |
-| **Arduino** | Arduino board | `XIAO_ESP32S3` |
-| **PSRAM Mode** | ESP PSRAM → SPI RAM config → Mode | `Octal` |
-| **PSRAM Speed** | ESP PSRAM → SPI RAM config → Speed | `80 MHz` |
-| **Flash Size** | Serial flasher config → Flash size | `8 MB` |
-| **Flash Mode** | Serial flasher config → Flash mode | `QIO` |
-| **Bluetooth** | Component config → Bluetooth | `Bluedroid` (BLE 5.0 only) |
-| **USB Mode** | Component config → USB-OTG | Enable for native USB |
+There is no base-XIAO build: every ESP32-S3 build defines
+`XIAO_ESP32S3_SENSE_ENABLED`, so a base XIAO gets the Sense build, whose
+camera, microphone and SD card expect the Sense expansion board. See
+[KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
 
 ### Seeed XIAO ESP32S3 Sense (ESP32-S3)
 
@@ -289,7 +283,7 @@ change them with `tools/build_board.sh <board> menuconfig`.
 | **Flash Mode** | Serial flasher config → Flash mode | `QIO` |
 | **Bluetooth** | Component config → Bluetooth | `Bluedroid` (BLE 5.0 only) |
 | **USB Mode** | Component config → USB-OTG | Enable for native USB |
-| **Sense Define** | `System_BuildConfig.h` | `XIAO_ESP32S3_SENSE_ENABLED 1` (default) |
+| **Sense Define** | `CMakeLists.txt` (every ESP32-S3 target) and `System_BuildConfig.h` | `XIAO_ESP32S3_SENSE_ENABLED 1`, always set |
 
 ### Unexpected Maker FeatherS3[D] (ESP32-S3)
 
@@ -310,7 +304,7 @@ change them with `tools/build_board.sh <board> menuconfig`.
 
 ## Key Hardware Differences
 
-| Feature | QT Py ESP32 | XIAO ESP32S3 | XIAO ESP32S3 Sense |
+| Feature | QT Py ESP32 | XIAO ESP32S3 (base, not supported) | XIAO ESP32S3 Sense |
 |---------|-------------|--------------|--------------------|
 | **Chip** | ESP32 LX6 | ESP32-S3 LX7 | ESP32-S3 LX7 |
 | **Flash** | 8 MB | 8 MB | 8 MB |
@@ -352,7 +346,7 @@ change them with `tools/build_board.sh <board> menuconfig`.
 ## Board-Specific Features
 
 ### XIAO ESP32S3 Sense
-When `XIAO_ESP32S3_SENSE_ENABLED` is 1 (the default in `System_BuildConfig.h`):
+`XIAO_ESP32S3_SENSE_ENABLED` is 1 on every ESP32-S3 build, so the XIAO build configures:
 - **Camera**: OV2640 on expansion board (I2C on GPIO39/40)
 - **PDM Microphone**: CLK=GPIO42, DATA=GPIO41
 - **SD Card**: CS=GPIO21, SCK=GPIO7, MISO=GPIO8, MOSI=GPIO9
@@ -420,9 +414,9 @@ Verify `CONFIG_ARDUINO_VARIANT` in `build-<board>/sdkconfig` matches your board 
 The image was built with Octal PSRAM. Build it with `tools/build_board.sh feathers3`, which layers `CONFIG_SPIRAM_MODE_QUAD=y` from `boards/feathers3.defaults` and restores it on every configure.
 
 ### SD card not appearing on Sense
-Ensure `XIAO_ESP32S3_SENSE_ENABLED` is 1 (the default) so the SD pins are configured correctly.
+Check that the image was built with `tools/build_board.sh xiao_s3`; ESP32-S3 builds always set `XIAO_ESP32S3_SENSE_ENABLED`, which configures the SD pins.
 
-### Battery monitor shows no data on base XIAO
+### Battery monitor shows no data on the XIAO
 Expected — the XIAO ESP32-S3 boards have no battery ADC in this firmware.
 
 ---

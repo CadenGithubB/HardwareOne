@@ -52,7 +52,16 @@ Every step below must pass on the exact commit you intend to tag, from a clean t
 2. Bump the version in ALL four files above so they agree.
 3. Add `## [X.Y.Z] - <date>` to the top of `CHANGELOG.md`. Get the date from `date +%F` - do not guess it.
 4. Commit the change as ONE `vX.Y.Z: <plain summary>` commit that carries the code + the version bump (all four files) + the CHANGELOG entry. The version-prefixed commit IS the release - there is no separate content vs `chore(release)` split.
-5. Tag and push - push the tag EXPLICITLY, in two commands:
+5. Check the build records before tagging. The release commit from step 4 is the commit the gate
+   must pass on. For every build directory you archive or hand out, read its `BUILD_INFO.md`:
+   the **Source:** line must show `git rev-parse --short HEAD` and "(clean tree)". If a build ran
+   before this commit (for example a gate build made before the version bump), rebuild it here on
+   the clean tree with `tools/build_board.sh <board>`, `tools/build_board.sh <board> --config <name>`
+   (or `python3 tools/build_config.py build <name>`) for a `build-config-<name>/` directory, or
+   `tools/build_deployment.sh` for a deployment row; the build rewrites `BUILD_INFO.md`
+   (`tools/gen_build_info.py`). Do not run `gen_build_info.py` alone on an old build: it reads the
+   current HEAD, not the commit the image was built from.
+6. Tag and push - push the tag EXPLICITLY, in two commands:
    ```
    git tag vX.Y.Z
    git push origin main
@@ -63,13 +72,6 @@ Every step below must pass on the exact commit you intend to tag, from a clean t
    leaves the release untagged on the remote - that is how v0.99.6 and v0.99.91.1 ended up with
    commits but no tags. Verify with `git ls-remote --tags origin | grep vX.Y.Z` before step 7,
    because `gh release create` needs the tag to exist on the remote.
-6. Regenerate BUILD_INFO from the tag commit. The gate builds ran before the version-bump commit,
-   so those images and their `BUILD_INFO.md` come from the commit before it. For every build
-   directory you archive or hand out, check out the tag on a clean tree and rebuild it with
-   `tools/build_board.sh <board>` (or `tools/build_deployment.sh` for a deployment row); the build
-   rewrites `BUILD_INFO.md` (`tools/gen_build_info.py`). Its **Source:** line must show
-   `git rev-parse --short vX.Y.Z` and "(clean tree)". Do not run `gen_build_info.py` alone on an
-   old build: it reads the current HEAD, not the commit the image was built from.
 7. OPTIONAL - create a GitHub Release (notes mirror the CHANGELOG section). Write notes to a file and use
    `--notes-file` (NOT `--notes`) so backticks/quotes/apostrophes are not mangled by the shell:
    ```
