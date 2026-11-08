@@ -298,9 +298,35 @@ bool parseDayFromName(const char* name, uint32_t& dayStart) {
   return dayStart != 0;
 }
 
+// Newest stored day start, or 0 when the directory holds no day file.
+uint32_t newestStoredDay(const AuthContext& auth) {
+  uint32_t newest = 0;
+  File dir = VFS::openGuarded(kHistoryDir, "r", auth);
+  if (!dir || !dir.isDirectory()) { if (dir) dir.close(); return 0; }
+  File entry = dir.openNextFile();
+  while (entry) {
+    String path = entry.name();
+    const bool regular = !entry.isDirectory() && path.endsWith(".r1h");
+    entry.close();
+    uint32_t day = 0;
+    if (regular && parseDayFromName(path.c_str(), day) && day > newest) newest = day;
+    entry = dir.openNextFile();
+  }
+  dir.close();
+  return newest;
+}
+
 void enforceRetention(const AuthContext& auth) {
-  const time_t now = time(nullptr);
+  time_t now = time(nullptr);
   const bool haveClock = now >= 1609459200;
+  // SNTP is unauthenticated, so the wall clock can jump far ahead. Age is
+  // measured from min(now, newest stored day + 1 day): a forward jump can then
+  // never delete the newest RETENTION_DAYS of stored history.
+  if (haveClock) {
+    const uint32_t newest = newestStoredDay(auth);
+    if (newest != 0 && static_cast<time_t>(newest) + 86400 < now)
+      now = static_cast<time_t>(newest) + 86400;
+  }
   const uint32_t cutoff = haveClock && now > static_cast<time_t>(R1_HEALTH_HISTORY_RETENTION_DAYS) * 86400
       ? static_cast<uint32_t>(now - static_cast<time_t>(R1_HEALTH_HISTORY_RETENTION_DAYS) * 86400)
       : 0;
