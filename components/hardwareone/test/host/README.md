@@ -3389,6 +3389,30 @@ ctest --test-dir /tmp/hw1-hardwareone-host \
 
 These checks do not open a browser or exchange real ESP-NOW frames.
 
+## Untrusted names on web pages
+
+`web_untrusted_names` (readiness G-50/G-51) covers the HTML sinks for file names
+and beacon SSIDs. Static source contracts run first: the shared file explorers in
+`WebServer_Utils.h` (`window.FileBrowser`, `createFileExplorer`,
+`window.BondFs.renderExplorer`) must escape names, path segments, peer labels and
+status text, and must pass paths to inline `onclick` handlers through
+`FileBrowser.jsArg` rather than between quotes; the `WebPage_Settings.h` Wi-Fi scan
+must escape the SSID; the Maps details panel must escape the map file name. Then
+both file-browser `<script>` blocks and the Settings scan script run unmodified on
+whatever engine `tools/webui/js_engine.py` finds, against a fake `hw`/DOM: names
+and SSIDs holding `<img src=x onerror=...>`, quotes and backticks must render as
+literal text, each `onclick` (entity-decoded, as a browser does) must hand the
+original path to its function, and clean names render unchanged. Without an
+engine the suite exits 77 after the contracts (skipped). `--contract-only` and
+`--source-dir <component-directory>` work as in `espnow_page_render`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^web_untrusted_names$' --output-on-failure
+```
+
+This does not open a real browser; a user-role upload of a hostile name and a
+hotspot named `<b>x</b>` remain the on-device checks.
+
 ## ESP-NOW dispatch policy
 
 `espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. Once the device has a mesh passphrase, SENSOR_STATUS, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. Every zero-flag row is on an explicit allow-list (handshakes, HEARTBEAT, TOPO_*, USER_SYNC); this is a subset check, so later items may only shrink the list. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.

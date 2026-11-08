@@ -504,6 +504,15 @@ add_test(
 # Exit 77 = source contracts passed but no JavaScript engine was found (reported as skipped).
 set_tests_properties(espnow_page_render PROPERTIES SKIP_RETURN_CODE 77)
 
+# Untrusted file names and beacon SSIDs on the shared web explorers and the
+# Settings Wi-Fi scan (readiness G-50/G-51; README "Untrusted names on web pages").
+add_test(
+  NAME web_untrusted_names
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_untrusted_names.py)
+# Exit 77 = source contracts passed but no JavaScript engine was found (reported as skipped).
+set_tests_properties(web_untrusted_names PROPERTIES SKIP_RETURN_CODE 77)
+
 # ESP-NOW session handshake freshness (README "ESP-NOW session handshake freshness"):
 # production SESSION_OPEN/CONFIRM/REKEY handlers and initiators between two modelled
 # devices; re-delivered handshake frames must not re-key or reset a live session.
