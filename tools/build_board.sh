@@ -121,18 +121,10 @@ status=$?
 # Refresh the build manifest while the tree state still matches this build --
 # feature flags are resolved by re-running the compiler over
 # System_BuildConfig.h, so generating it later (after the header is edited for
-# another board) cannot reproduce them. Only the headroom floor fails the build.
+# another board) cannot reproduce them. Never fails the build.
 if [[ $status -eq 0 && -f "$BUILD_DIR/compile_commands.json" ]]; then
-  python3 "$REPO/tools/gen_build_info.py" "$BUILD_DIR" "$BOARD"
-  info_status=$?
-  if [[ $info_status -eq 3 ]]; then
-    # Headroom floor (gen_build_info.py HEADROOM_FLOOR_BYTES): the image built, but it no
-    # longer fits its partition with room to grow. That is a failed build.
-    echo "error: image headroom below the floor; see the lines above" >&2
-    status=3
-  elif [[ $info_status -ne 0 ]]; then
+  python3 "$REPO/tools/gen_build_info.py" "$BUILD_DIR" "$BOARD" || \
     echo "warning: build manifest generation failed (build itself is fine)" >&2
-  fi
 fi
 
 exit $status

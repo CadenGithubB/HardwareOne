@@ -25,8 +25,8 @@ everything user-visible since the v0.99.99 tag (55 commits).
 - `status` labels USB and the later reset reasons instead of "Unknown".
 - Crash record captures the faulting task, stack-guard bounds and a RISC-V stack scan.
 - Build and release tooling: `tools/vendor_arduino.sh` (a fresh clone vendors and patches arduino-esp32
-  3.3.5 in one step), a 64 KB image headroom floor that fails the build, the OTA protocol host suite
-  under the main ctest gate, and the pre-tag gate in `RELEASING.md`.
+  3.3.5 in one step), the OTA protocol host suite under the main ctest gate, and the pre-tag gate in
+  `RELEASING.md`.
 - `NOTICE.md` listing bundled third-party code and licences; `docs/COMPATIBILITY.md` (peer versions and
   the 1.x upgrade promise); the 1.0 release-readiness assessment tracked in `docs/`.
 - Heap-poisoning diagnostic build profile for memory-corruption hunts (bench use).

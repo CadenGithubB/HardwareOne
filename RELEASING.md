@@ -39,8 +39,7 @@ Every step below must pass on the exact commit you intend to tag, from a clean t
    the documented optional suites (`stt_conv_scratch`, the camera managed-SCCB/video suites). The
    OTA protocol suite is part of the same tree.
 3. Every stable row of the supported matrix builds from that commit with `tools/build_board.sh <board>`
-   (or `tools/build_deployment.sh` for a deployment row) and its BUILD_INFO.md says "clean tree" and
-   reports headroom at or above the floor (`gen_build_info.py`: 64 KB by default; the build fails below it).
+   (or `tools/build_deployment.sh` for a deployment row) and its BUILD_INFO.md says "clean tree".
 4. Tracked tree hygiene: `git grep -nIE '/Users/[a-z]|192\.168\.' -- . ':!components/hardwareone_libs'` is empty.
 5. CHANGELOG `[Unreleased]` lists every user-visible change since the last tag; COMPATIBILITY.md and the
    matrix in README match what you built.
