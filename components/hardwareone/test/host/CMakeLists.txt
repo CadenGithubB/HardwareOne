@@ -91,6 +91,14 @@ target_compile_options(memutil_no_psram_tests PRIVATE
 
 # The production tracker wraps this dependency-light registry with FreeRTOS
 # synchronization. Exercise the actual hash/aggregate/top-K state machine.
+# heap_low system event policy (G-71): one post per low episode, 60 s cooldown,
+# re-arm past the margin.
+add_executable(heap_low_core_tests test_heap_low_core.cpp)
+set_target_properties(heap_low_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(heap_low_core_tests PRIVATE ../..)
+target_compile_options(heap_low_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 add_executable(memtracker_core_tests test_memtracker_core.cpp)
 set_target_properties(memtracker_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
@@ -1123,6 +1131,7 @@ add_test(NAME mqtt_lifecycle_gate_tests COMMAND mqtt_lifecycle_gate_tests)
 add_test(NAME memutil_tests COMMAND memutil_tests)
 add_test(NAME memutil_no_psram COMMAND memutil_no_psram_tests)
 add_test(NAME memtracker_core_tests COMMAND memtracker_core_tests)
+add_test(NAME heap_low_core_tests COMMAND heap_low_core_tests)
 add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
 add_test(NAME map_viewport_core_tests COMMAND map_viewport_core_tests)
 add_test(NAME g2_health_graph_core_tests COMMAND g2_health_graph_core_tests)
@@ -1720,6 +1729,20 @@ add_test(
   NAME automation_log
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_automation_log.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Boot automations (G-71): a false global condition frees the command copies the
+# pass made while parsing; every strdup in the production pass is counted.
+add_test(
+  NAME boot_automation_leak
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_boot_automation_leak.py
+          ${SETUP_MQTT_TEST_ARGS})
+# G2 heap objects (G-71): every `= new T` in G2_Glasses.cpp is nothrow, and the
+# Health/Map/BMP launchers refuse instead of aborting when the heap is out.
+add_test(
+  NAME g2_nothrow_alloc
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_nothrow_alloc.py
           ${SETUP_MQTT_TEST_ARGS})
 add_test(
   NAME session_snapshot

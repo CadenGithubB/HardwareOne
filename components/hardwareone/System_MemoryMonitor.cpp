@@ -6,6 +6,8 @@
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
 #include "System_MemoryMonitor.h"
+#include "System_HeapLowCore.h"  // heap_low event policy (host-tested)
+#include "System_Events.h"       // systemEventPost(SYSEVT_HEAP_LOW)
 #include "System_MemTracker.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
@@ -252,7 +254,8 @@ static size_t gLowestHeapSeen = UINT32_MAX;
 //   after openble (server mode) ....... 33,435 B
 //   after the G2 client start ......... 26,495 B   (then `g2init`; now openble + openg2)
 //   G2 connected, hijack page open .... 21,299 B  <- still warns at 25 KB, intended
-static const size_t HEAP_WARNING_THRESHOLD = 25600;  // 25KB warning threshold
+static const size_t HEAP_WARNING_THRESHOLD = heap_low_core::kFreeBytes;  // 25KB warning threshold
+static_assert(heap_low_core::kFreeBytes == 25600, "heap_low and [HEAP_PRESSURE] share the 25 KB line");
 
 void sampleMemoryState(bool forceFullScan) {
   // ── Internal heap (NOT combined — PSRAM is reported separately below) ──
@@ -563,6 +566,24 @@ void periodicMemorySample() {
           BROADCAST_PRINTF("[HEAP_PRESSURE] WARNING: DRAM free %u B (threshold=%u, min_ever=%u)",
                            (unsigned)dramFree, (unsigned)HEAP_WARNING_THRESHOLD, (unsigned)gLowestHeapSeen);
         }
+      }
+      // heap_low system event: the same pressure as a record automations and
+      // events.log can see. The largest-block query walks the heap, so it runs
+      // at most every 10 s; the free total is re-read every second. One event
+      // per low episode (latched, 60 s cooldown) — see System_HeapLowCore.h.
+      static heap_low_core::Watch heapLowWatch;
+      static size_t largestFree = SIZE_MAX;
+      static unsigned long lastLargestMs = 0;
+      if (largestFree == SIZE_MAX || (nowMs - lastLargestMs) >= 10000UL) {
+        lastLargestMs = nowMs;
+        largestFree = hw1InternalLargestBlock();
+      }
+      if (heap_low_core::update(heapLowWatch, dramFree, largestFree, (uint32_t)nowMs)) {
+        char subject[16];
+        char detail[32];
+        snprintf(subject, sizeof(subject), "%u", (unsigned)dramFree);
+        snprintf(detail, sizeof(detail), "largest %u", (unsigned)largestFree);
+        systemEventPost(SYSEVT_HEAP_LOW, subject, detail);
       }
     }
   }

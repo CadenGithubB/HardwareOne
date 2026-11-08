@@ -62,6 +62,10 @@ everything user-visible since the v0.99.99 tag (55 commits).
   display's pairing screen shows the request's state. Not yet tested on hardware (host model only).
 - Host suite: nine harnesses re-pinned after the Waveshare merge; the event-catalog structure test walks
   what git would commit; the continuous-STT suites run serially under ctest.
+- Boot automations whose condition is false no longer leak their command strings on every boot.
+- Glasses pages and connects refuse when memory is short instead of rebooting the device.
+- New `heap_low` event when internal RAM runs low, so automations and `events.log` can react
+  (previously a console warning only).
 
 ### Docs
 - Private network names, addresses and account paths replaced with placeholders throughout the tracked
