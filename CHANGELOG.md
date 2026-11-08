@@ -10,6 +10,60 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 
 ## [Unreleased]
 
+The version stays 0.99.99 until the 1.0 gate in `RELEASING.md` is met; this section collects
+everything user-visible since the v0.99.99 tag (55 commits).
+
+### Added
+- Waveshare ESP32-P4 Touch LCD 5 board (`waveshare_p4_touch_lcd_5`, experimental): DSI display with
+  GT911 single-touch navigation, landscape UI with right-side touch controls, onboard speaker, battery
+  voltage sensing, SDMMC card slot, OV5647 camera through the shared CSI backend, ES7210 onboard
+  microphone through the audio HAL, local transcription, glasses and phone links with display-side
+  error messages, and a legacy-C6 upgrade path (`c6update`).
+- Shared monochrome camera viewer on the local display (P4X-EYE and Waveshare).
+- System log bounded and rotated: the debug-capture log rotates to `<path>.1` at 8 MB; size limit and
+  rotation count are settings, as for the sensor logger.
+- `status` labels USB and the later reset reasons instead of "Unknown".
+- Crash record captures the faulting task, stack-guard bounds and a RISC-V stack scan.
+- Build and release tooling: `tools/vendor_arduino.sh` (a fresh clone vendors and patches arduino-esp32
+  3.3.5 in one step), a 64 KB image headroom floor that fails the build, the OTA protocol host suite
+  under the main ctest gate, and the pre-tag gate in `RELEASING.md`.
+- `NOTICE.md` listing bundled third-party code and licences; `docs/COMPATIBILITY.md` (peer versions and
+  the 1.x upgrade promise); the 1.0 release-readiness assessment tracked in `docs/`.
+- Heap-poisoning diagnostic build profile for memory-corruption hunts (bench use).
+
+### Changed
+- `g2_worn` event renamed `g2_plugin_alive`; the old name resolves as an alias so saved automations and
+  notification rules keep firing.
+- The C6 console-mirror command is `c6console` again (`c6_console` remains as an alias).
+- Legacy companion compatibility is limited to explicit firmware updates (`c6update`).
+- Glasses keep the saved mate when AUTO rediscovers one admitted arm.
+- First-time setup refuses reserved owner names (`system`, `AuthBypass`, the bond admin) and passwords
+  shorter than 6 characters.
+- Bare `Usage:` replies and "Unknown feature." count as failed commands (no `OK:` stamp, non-success
+  to the web client).
+- BLE setup worker: the stuck-job report threshold is 360 s, above the longest legitimate run (a 300 s
+  manual `ring scan`).
+- Licence statement: README and the User Guide say PolyForm Noncommercial 1.0.0 (the User Guide had said
+  MIT) and point at `NOTICE.md`.
+
+### Fixed
+- Two crashes: the QuickNote worker's stack and Arduino's unlocked `NetworkEvents`.
+- BLE setup worker retires a client after an OPEN timeout and bounds a stuck job.
+- Phone pipe isolates CLOSE and DISCONNECT by peer address and keeps the first cause of a lost session.
+- Ring: setup handles stay valid through a disconnect, discovery fails fast, the HCI reason is recorded.
+- Arduino BLE client (local patch 2026-11-06): records the disconnect reason and releases connect
+  semaphores on timeout.
+- Waveshare: DSI scanout protected from CPU downclocking, DSI refresh interrupts kept active during
+  flash writes, backlight dark until the wake frame settles, steady login popup, touch latency.
+- Host suite: nine harnesses re-pinned after the Waveshare merge; the event-catalog structure test walks
+  what git would commit; the continuous-STT suites run serially under ctest.
+
+### Docs
+- Private network names, addresses and account paths replaced with placeholders throughout the tracked
+  tree; the Arduino patch README names every patch in replay order and the stale variant note is gone;
+  QUICKSTART and README make vendoring step 1; two P4X-EYE Bluetooth reliability investigations and the
+  cross-board integration results recorded.
+
 ## [0.99.99] - 2026-10-28
 
 This release confines the firmware's own file access, cuts the fixed cost of every command, and changes the default power mode. Every file the firmware opens for itself is now limited to one folder and the unguarded file API is gone; a backup restore writes only the files a backup contains. Commands stop re-reading the user list for each permission check and file opens stop creating every parent folder first, which takes a plain `uptime` on the P4X-EYE from 107-280 ms to 61-66 ms. Adaptive replaces PowerSaver as the default power mode and every mode raises the clock for transcription, the camera and recording. I2C sensors report when they stop responding and when they come back, the R1 ring reconnects after a failed connect instead of blocking every Bluetooth connect until reboot, and the display's LLM Chat, WiFi, Web and Bluetooth screens match the glasses.

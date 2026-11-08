@@ -239,6 +239,8 @@ so the same release can be reproduced without editing that shared header.
 
 > ## Every command, generated from source: [Command Reference](docs/COMMAND_REFERENCE.md)
 
+> ## What a version expects from its peers and what an upgrade keeps: [Compatibility](docs/COMPATIBILITY.md)
+
 ## License
 
 PolyForm Noncommercial 1.0.0: free for any noncommercial use. See [LICENSE.md](LICENSE.md); bundled third-party code is listed in [NOTICE.md](NOTICE.md).
