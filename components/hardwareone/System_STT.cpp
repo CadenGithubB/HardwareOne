@@ -2339,7 +2339,7 @@ static void sttContinuousWorker(void*) {
         // boot (includes this phrase's inference arena and LM workspace).
         // int_free/int_min: internal RAM now and its low-water mark since
         // boot, so anything eroding the runtime's per-call internal floor (or
-        // BLE's and the 6 KB g2_owner stack's headroom) shows on every
+        // BLE's and the 8 KB g2_owner stack's headroom) shows on every
         // phrase.
         ESP_LOGI("STT", "TL seg=%lu a0=%lu a1=%lu q=%lu s=%lu m=%lu f=%lu n=%lu d=%lu sv0=%lu sv1=%lu e=%lu ok=%d lm=%d psram_min=%u"
                  " int_free=%u int_min=%u",

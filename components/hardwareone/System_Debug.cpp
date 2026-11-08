@@ -791,7 +791,7 @@ void initDebugSystem() {
     BaseType_t result = xTaskCreatePinnedToCore(
       debugOutputTask,
       "log_out",
-      DEBUG_OUT_STACK_WORDS,  // ~14KB stack — see System_TaskUtils.h for sizing rationale
+      DEBUG_OUT_STACK_WORDS,  // 6 KB, internal RAM — see System_TaskUtils.h for sizing rationale
       nullptr,
       TASK_PRIORITY_LOW,
       &gDebugOutputTaskHandle,

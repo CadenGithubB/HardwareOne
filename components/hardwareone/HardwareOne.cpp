@@ -1958,7 +1958,7 @@ void hardwareone_setup() {
         ERROR_SYSTEMF("FATAL: Failed to create command exec queue");
         while (1) delay(1000);
       }
-    const uint32_t cmdExecStackWords = CMD_EXEC_STACK_WORDS;  // BYTES (8192 = 8 KB; the old "≈24 KB" was the 4x myth) - automation run + debug vsnprintf frames need deep stack
+    const uint32_t cmdExecStackWords = CMD_EXEC_STACK_WORDS;  // BYTES (10240 = 10 KB, internal RAM; see System_TaskUtils.h) - automation run + debug vsnprintf frames need deep stack
     // Pin to core 0 (PRO_CPU), alongside the BLE host (BTC_TASK) and web server.
     // The on-device LLM task (llm_gen) is pinned to core 1 at a higher priority; if
     // cmd_exec is left unpinned it can sit on core 1 and be preempted by a 15 s
