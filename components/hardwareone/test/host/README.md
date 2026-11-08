@@ -5410,3 +5410,29 @@ not physical display qualification.
 controlled RPC results: normal boot remains strict, legacy OTA requires a remote
 reply, update-only sessions are unavailable to radio users, and failed chunks
 stop the transfer. These tests do not qualify physical I2C, DSI, audio or radio.
+
+## P4 SDK bootstrap
+
+`tools/p4/test_prepare_sdk.py` (CTest `p4_prepare_sdk`, readiness G-26) runs a
+copy of `tools/p4` in a temporary fake checkout. On an empty cache both pinned
+registry packages are reported missing; `fetch_p4_packages.py` writes a
+throwaway project pinned to exactly `espressif/esp-dl ==3.3.12` and
+`espressif/esp_hosted ==2.12.13` and runs `idf.py ... -DIDF_TARGET=esp32p4
+update-dependencies` (a stand-in registry, nothing is downloaded), after which
+the prepare scripts find the fetched trees without `--source`; staged or local
+packages fetch nothing; a registry failure names the offline `--source`
+remedy; a fetched tree off the pinned digest is refused. `check_idf_pie.py` is
+fed the before and after `portasm.S` text of the tracked b25cb29 patch:
+present, missing (with the `git apply` command), partial (q3 save without
+restore) and unknown (no RISC-V port). `prepare_sdk.sh --check` runs all four
+override checks instead of stopping at the first and always prints the PIE
+state. A configure failure after `update-dependencies` has downloaded both
+packages is not a registry failure when the trees match their pinned digests.
+
+`test_gen_build_info_idf.py` (CTest `gen_build_info_idf`) runs
+`tools/gen_build_info.py` on fake build directories: BUILD_INFO.md names the
+ESP-IDF tag and commit, lists the tracked IDF paths that differ from it (a
+locally patched 5.5.5 shows `portasm.S`), adds the PIE-fix state line for
+esp32p4 only, and reports an IDF that is not itself a git checkout as unknown
+rather than the HEAD of a repository it happens to sit in. An IDF under the
+home directory is shown as `~/...`.
