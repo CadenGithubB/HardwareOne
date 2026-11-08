@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1011 commands across 57 modules (1011 registry entries).
+1016 commands across 57 modules (1016 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -68,7 +68,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`even_g2`](#even-g2) — 56 commands
 - [`ring`](#ring) — 12 commands
 - [`llm`](#llm) — 36 commands
-- [`settingsedit`](#settingsedit) — 65 commands
+- [`settingsedit`](#settingsedit) — 70 commands
 
 ---
 
@@ -799,7 +799,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `stt` |  | Local continuous or bounded speech-to-text with private session-owned results.<br/>`Usage: stt start \| record [1..20 seconds] \| status [id] \| stop\|cancel\|result\|next\|draft <id> \| ack <id> <sequence>` |
-| `sttdetector` |  | Show the mic-path (PDM gain, high-pass) and speech-detector (floors, percentile) tuning in effect.<br/>`Usage: sttdetector (set with pdmamplify, pdmhpf, sttspeechfloor, sttsilencefloor, sttnoisepercentile, sttdecisionpre)` |
+| `sttdetector` |  | Show the mic-path (PDM gain, high-pass) and speech-detector (floors, percentile) tuning in effect.<br/>`Usage: sttdetector (onboard: sttautogain, pdmamplify, pdmhpf, sttspeechfloor, sttsilencefloor, sttnoisepercentile, sttdecisionpre; glasses: sttg2speechfloor, sttg2silencefloor, sttg2noisepercentile, sttg2decisionpre)` |
 | `sttperf` |  | STT pacing/profiling per segment (timings and CPU only, never text).<br/>`Usage: sttperf [show\|clear\|log on\|off\|stages [all\|clear]]` |
 | `sttraw` | A | Save the raw microphone input of continuous STT sessions to /sd/STT Raw for bench replay.<br/>`Usage: sttraw [status\|on\|off] (on arms the next continuous session; not kept across reboot)` |
 | `sttvocab` |  | Speech vocabulary: names and terms with their display spelling (STT Models/user_vocab.tsv).<br/>`Usage: sttvocab [list] \| add DISPLAY[\|spoken] \| remove <spoken> \| reload (edits need an administrator)` |
@@ -1471,8 +1471,13 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 | `srautostart` | A | Set ESP-SR auto-start flag<br/>`Usage: srautostart <0\|1>` |
 | `srenabled` | A | Enable/disable the speech-recognition subsystem<br/>`Usage: srenabled <0\|1>` |
 | `srmodelsource` | A | Set ESP-SR model source<br/>`Usage: srmodelsource <value>` |
-| `sttdecisionpre` | A | Continuous-STT onset judge on pre-emphasised audio (coefficient x0.01; 0 = off, 97 = bench value); applies to the next session.<br/>`Usage: sttdecisionpre [0-99]` |
-| `sttnoisepercentile` | A | Continuous-STT noise-window percentile used as the room level; applies to the next session.<br/>`Usage: sttnoisepercentile [0-100]` |
+| `sttautogain` | A | STT picks its own onboard-mic gain (changed only when several sessions agree) and a 120 Hz high-pass; 0 = use pdmamplify/pdmhpf. Applies to the next session.<br/>`Usage: sttautogain [0\|1]` |
+| `sttdecisionpre` | A | Continuous-STT onset judge on pre-emphasised audio (coefficient x0.01; 0 = loudness only, 97 = default); applies to the next session.<br/>`Usage: sttdecisionpre [0-99]` |
+| `sttg2decisionpre` | A | G2 glasses-mic profile: onset judge on pre-emphasised audio (x0.01; 0 = loudness only); applies to the next session.<br/>`Usage: sttg2decisionpre [0-99]` |
+| `sttg2noisepercentile` | A | G2 glasses-mic profile: noise-window percentile used as the room level; applies to the next session.<br/>`Usage: sttg2noisepercentile [0-50]` |
+| `sttg2silencefloor` | A | G2 glasses-mic profile: silence floor in frame-RMS counts; applies to the next session.<br/>`Usage: sttg2silencefloor [1-32767]` |
+| `sttg2speechfloor` | A | G2 glasses-mic profile: speech onset floor in frame-RMS counts; applies to the next session.<br/>`Usage: sttg2speechfloor [1-32767]` |
+| `sttnoisepercentile` | A | Continuous-STT noise-window percentile used as the room level; applies to the next session.<br/>`Usage: sttnoisepercentile [0-50]` |
 | `sttsavetranscripts` | A | Save recognized text; changes apply to the next STT session.<br/>`Usage: sttsavetranscripts [0\|1]` |
 | `sttsilencefloor` | A | Continuous-STT silence floor in frame-RMS counts; applies to the next session.<br/>`Usage: sttsilencefloor [1-32767]` |
 | `sttspeechfloor` | A | Continuous-STT speech onset floor in frame-RMS counts; applies to the next session.<br/>`Usage: sttspeechfloor [1-32767]` |
