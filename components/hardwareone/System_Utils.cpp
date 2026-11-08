@@ -4679,8 +4679,13 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
         modeInstanceAfterHandler != modeInstanceBeforeHandler &&
         cliModeCurrentCommandOwns();
     if (!handlerEnteredMode) {
+      // A bare usage line is a refused command, not a result: the handler got
+      // arguments it could not use. Same for a feature the build does not have.
+      // Without this they were stamped "OK:" and reached the web client as 200.
       registrySuccess = (strncmp(out, "Error", 5) != 0) &&
-                        (strncmp(out, "ERROR", 5) != 0);
+                        (strncmp(out, "ERROR", 5) != 0) &&
+                        (strncmp(out, "Usage:", 6) != 0) &&
+                        (strcmp(out, "Unknown feature.") != 0);
       logCommandExecutionPrepared(ctx, cmd, safeCommandForTrace,
                                   registrySuccess, out);
       stampOkStatus(out, outSize, registrySuccess);  // stamp AFTER audit so the log keeps the raw result

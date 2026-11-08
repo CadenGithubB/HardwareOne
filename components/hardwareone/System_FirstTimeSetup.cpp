@@ -12,6 +12,7 @@
 #include <LittleFS.h>
 #include "WebServer_Handle.h"
 #include "System_Utils.h"   // rebootDevice()
+#include "System_User.h"    // isReservedUsername, isValidPublicUsername, kPublicPasswordMinLen
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 
 #include "OLED_Display.h"
@@ -279,6 +280,24 @@ static bool serialWifiSelectionForRestore(String& outSSID) {
 static bool createInitialAdminUser(const String& username, const String& plaintextPassword, bool useDarkTheme) {
   if (username.length() == 0 || plaintextPassword.length() == 0) {
     broadcastOutput("ERROR: Admin username and password cannot be blank");
+    return false;
+  }
+  // The first admin is created outside the public account path, so apply the
+  // same rules here: a reserved sentinel name (system, AuthBypass, the bond
+  // admin) would lock the device out of every login, and a short password is
+  // refused everywhere else. Readiness P1-3 (G-52).
+  String nameError;
+  if (isReservedUsername(username) || !isValidPublicUsername(username, &nameError)) {
+    char msg[160];
+    snprintf(msg, sizeof(msg), "ERROR: Admin username not allowed%s%s",
+             nameError.length() ? ": " : " (reserved name)", nameError.length() ? nameError.c_str() : "");
+    broadcastOutput(msg);
+    return false;
+  }
+  if (plaintextPassword.length() < kPublicPasswordMinLen) {
+    char msg[96];
+    snprintf(msg, sizeof(msg), "ERROR: Admin password must be at least %u characters", (unsigned)kPublicPasswordMinLen);
+    broadcastOutput(msg);
     return false;
   }
   String hashedPassword = hashUserPassword(plaintextPassword);

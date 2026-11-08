@@ -65,6 +65,16 @@ static String hashUserPassword(const String& plaintext) {
   return hashOk ? "fixture-password-hash" : "";
 }
 static void broadcastOutput(const String& message) { output.emplace_back(message.c_str()); }
+// Public account rules the first admin must also meet (System_User.h).
+static constexpr size_t kPublicPasswordMinLen = 6;
+static bool isReservedUsername(const String& username) {
+  String u = username; u.trim();
+  return u.equalsIgnoreCase("system") || u.equalsIgnoreCase("AuthBypass") || u.equalsIgnoreCase("bond-admin");
+}
+static bool isValidPublicUsername(const String& username, String* errorOut = nullptr) {
+  if (isReservedUsername(username)) { if (errorOut) *errorOut = "reserved name"; return false; }
+  return username.length() > 0;
+}
 static bool saveUserSettings(uint32_t id, const JsonDocument& doc) {
   ++credentialCalls; operations.emplace_back("credential.save");
   check(id == 1 && usersJson.length() == 0);
@@ -233,6 +243,10 @@ static void helperCases() {
   reset(); check(!createInitialAdminUser("", "fixture-secret", false));
   check(hashCalls == 0); rejectedBeforePublication();
   reset(); check(!createInitialAdminUser("fixture-owner", "", false));
+  // Reserved sentinel names and short passwords are refused before anything is stored (P1-3).
+  reset(); check(!createInitialAdminUser("system", "fixture-secret", false)); rejectedBeforePublication();
+  reset(); check(!createInitialAdminUser("AuthBypass", "fixture-secret", false)); rejectedBeforePublication();
+  reset(); check(!createInitialAdminUser("fixture-owner", "short", false)); rejectedBeforePublication();
   check(hashCalls == 0); rejectedBeforePublication();
   reset(); hashOk = false; check(!createInitialAdminUser("fixture-owner", "fixture-secret", false));
   check(hashCalls == 1); rejectedBeforePublication();
