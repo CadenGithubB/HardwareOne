@@ -362,6 +362,8 @@ class ManifestNaming(unittest.TestCase):
     def test_ordinary_build_manifest_has_no_soak_marks(self):
         text = self.manifest(self.root / "build-feathers3", "feathers3")
         self.assertIn("tools/build_board.sh feathers3\n", text)
+        # The Source line quotes the commit subject, which may name a soak branch.
+        text = "\n".join(l for l in text.splitlines() if not l.startswith("**Source:**"))
         self.assertNotIn("wdt-soak", text)
         self.assertNotIn("Watchdog soak build", text)
 
@@ -376,6 +378,8 @@ class WrapperWiring(unittest.TestCase):
         self.repo = root / "repo"
         (self.repo / "tools").mkdir(parents=True)
         shutil.copy(REPO / "tools/build_board.sh", self.repo / "tools/build_board.sh")
+        # build_board.sh sources the checkout build lock helper.
+        shutil.copy(REPO / "tools/checkout_build_lock.sh", self.repo / "tools/checkout_build_lock.sh")
         shutil.copytree(REPO / "boards", self.repo / "boards")
         (self.repo / "components/arduino").mkdir(parents=True)
         patches = self.repo / "docs/arduino-local-patches"
@@ -397,6 +401,9 @@ class WrapperWiring(unittest.TestCase):
     def run_wrapper(self, *args):
         env = dict(os.environ, PATH=f"{self.bin}:{os.environ.get('PATH', '')}")
         env.pop("HW1_WDT_SOAK", None)
+        # The checkout build lock has its own test (managed_components_stamp); mark it held
+        # so the stand-in python3 here is not asked to take it.
+        env["HW1_CHECKOUT_BUILD_LOCK"] = str(self.repo / ".hw1-build/checkout.lock")
         result = subprocess.run(["bash", str(self.repo / "tools/build_board.sh"), *args],
                                 capture_output=True, text=True, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
