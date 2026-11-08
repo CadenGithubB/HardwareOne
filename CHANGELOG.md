@@ -61,8 +61,11 @@ everything user-visible since the v0.99.99 tag (55 commits).
   that already paired the requester answers Accept. The timeout names the repair command and the
   display's pairing screen shows the request's state. Not yet tested on hardware (host model only).
 - First-time setup "Import from Backup": the confirm prompt now shows the staged bundle's claimed
-  hostname and board, the bytes received, the first 8 hex of their SHA-256 and whether it came from
-  this device (serial line and OLED prompt), still defaulting to No. Discarding a staged bundle frees
+  hostname and board, the bytes received, the first 8 hex of their SHA-256 and whether its fingerprint
+  matched this device, did not, or was missing (shown as unverified, never as this device; such a bundle
+  is still restored with credentials, as before), on the serial line and the OLED prompt, still
+  defaulting to No. The serial line also says what to compare the size and hash with; for a forced
+  cross-device upload, whose body adds a `force` flag, it says they will not match the file. Discarding a staged bundle frees
   it before clearing the pending flag, and stopping the restore server discards only after the server
   has stopped. Host suite `migration_restore` covers both; not yet tested on hardware.
 - Host suite: nine harnesses re-pinned after the Waveshare merge; the event-catalog structure test walks

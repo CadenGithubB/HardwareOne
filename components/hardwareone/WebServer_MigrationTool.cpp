@@ -521,14 +521,19 @@ static volatile bool sRestoreAwaitingConfirm = false;
 
 // What the operator is shown before accepting a staged bundle. Hostname and
 // board are the bundle's own claims (anyone on the LAN can write them); the
-// size and SHA-256 prefix describe the bytes this device actually received,
-// and "this device" means the bundle's device fingerprint matched this board.
+// size and SHA-256 prefix describe the bytes this device actually received.
+// The source is "this device" only when the bundle carries a fingerprint and
+// it matched this board; a bundle without one is shown as unverified (it is
+// still restored with credentials, as before).
+enum class StagedRestoreSource : uint8_t { ThisDevice, OtherDevice, NoFingerprint };
 struct StagedRestoreSummary {
   char host[33];
   char board[33];
   char sha8[9];
   size_t bytes;
-  bool sameDevice;
+  StagedRestoreSource source;
+  bool compatible;     // credential fields are restored
+  bool hasForceKey;    // the body carries "force", which /api/backup never writes
 };
 static StagedRestoreSummary sStagedSummary = {};
 
@@ -537,8 +542,9 @@ bool migrationRestoreAwaitingConfirm() {
 }
 
 void discardStagedMigrationRestore() {
-  // Free and clear everything before the flag. /api/restore refuses while the
-  // flag is set, so whoever sees it clear never finds a live staged buffer.
+  // Free and clear everything before the flag, in program order. /api/restore
+  // refuses while the flag is set. The flag is a plain volatile, so this is not
+  // a cross-core memory-ordering guarantee.
   char* buf = sStagedRestoreBuf;
   sStagedRestoreBuf = nullptr;
   sStagedRestoreLen = 0;
@@ -559,10 +565,12 @@ static void copyBundleClaim(char* out, size_t cap, const char* in) {
   if (n == 0) snprintf(out, cap, "unknown");
 }
 
-// Takes ownership of buf. The flag is set last, so a reader that sees it set
-// also sees the buffer and its summary.
-static void stageMigrationRestore(char* buf, size_t len, bool compatible, JsonVariantConst device) {
+// Takes ownership of buf. compatible is handleRestore's fingerprint verdict;
+// bundle is the parsed body. The flag is set last in program order (a plain
+// volatile store, not a release barrier).
+static void stageMigrationRestore(char* buf, size_t len, bool compatible, JsonVariantConst bundle) {
   discardStagedMigrationRestore();  // clear any stale state
+  JsonVariantConst device = bundle["device"];
   StagedRestoreSummary summary = {};
   copyBundleClaim(summary.host, sizeof(summary.host), device["hostname"].as<const char*>());
   copyBundleClaim(summary.board, sizeof(summary.board), device["board"].as<const char*>());
@@ -574,7 +582,12 @@ static void stageMigrationRestore(char* buf, size_t len, bool compatible, JsonVa
     snprintf(summary.sha8, sizeof(summary.sha8), "--------");
   }
   summary.bytes = len;
-  summary.sameDevice = compatible;
+  const char* fingerprint = device["fingerprint"].as<const char*>();
+  summary.source = (!fingerprint || !*fingerprint) ? StagedRestoreSource::NoFingerprint
+                   : compatible                    ? StagedRestoreSource::ThisDevice
+                                                   : StagedRestoreSource::OtherDevice;
+  summary.compatible = compatible;
+  summary.hasForceKey = !bundle["force"].isNull();
   sStagedSummary = summary;
   sStagedRestoreBuf = buf;
   sStagedRestoreLen = len;
@@ -582,22 +595,47 @@ static void stageMigrationRestore(char* buf, size_t len, bool compatible, JsonVa
   sRestoreAwaitingConfirm = true;
 }
 
+static const char* stagedSourceText(const StagedRestoreSummary& s) {
+  switch (s.source) {
+    case StagedRestoreSource::ThisDevice: return "this device";
+    case StagedRestoreSource::OtherDevice: return "other device (credentials skipped)";
+    case StagedRestoreSource::NoFingerprint: break;
+  }
+  return s.compatible ? "no fingerprint (unverified, credentials restored)"
+                      : "no fingerprint (unverified, credentials skipped)";
+}
+
 String migrationStagedSummary() {
   if (!sRestoreAwaitingConfirm) return String("");
   const StagedRestoreSummary& s = sStagedSummary;
-  char line[160];
+  char line[192];
   snprintf(line, sizeof(line), "from %s [%s], %u bytes, sha256 %s..., %s", s.host, s.board,
-           (unsigned)s.bytes, s.sha8, s.sameDevice ? "this device" : "other device (credentials skipped)");
+           (unsigned)s.bytes, s.sha8, stagedSourceText(s));
   return String(line);
+}
+
+String migrationStagedCheckAdvice() {
+  if (!sRestoreAwaitingConfirm) return String("");
+  if (sStagedSummary.hasForceKey) {
+    // A forced (cross-device) upload is the backup file with "force" added, so
+    // its bytes can never match the file on disk.
+    return String("Size and SHA-256 cover the upload, which added a force flag, so they "
+                  "will not match your file. Check the source and board.");
+  }
+  return String("Check the source and board. If the file was sent unchanged, size and "
+                "SHA-256 match `wc -c` and `shasum -a 256` of it.");
 }
 
 String migrationStagedOledPrompt() {
   if (!sRestoreAwaitingConfirm) return String("");
   const StagedRestoreSummary& s = sStagedSummary;
+  const char* source = s.source == StagedRestoreSource::ThisDevice    ? "this dev"
+                       : s.source == StagedRestoreSource::OtherDevice ? "other dev"
+                                                                      : "unverified";
   // getOLEDYesNoPrompt shows three 21-character lines above Yes/No.
   char text[72];
   snprintf(text, sizeof(text), "Apply %.14s?\n%uB sha %s\n%s, reboots", s.host, (unsigned)s.bytes, s.sha8,
-           s.sameDevice ? "this dev" : "other dev");
+           source);
   return String(text);
 }
 
@@ -940,8 +978,7 @@ static esp_err_t handleRestore(httpd_req_t* req) {
   }
 
   // Stage for on-device confirm (OLED / serial). Do not touch flash yet.
-  JsonVariantConst bundleDevice = doc["device"];
-  stageMigrationRestore(buf, (size_t)totalReceived, compatible, bundleDevice);
+  stageMigrationRestore(buf, (size_t)totalReceived, compatible, doc.as<JsonVariantConst>());
 
   broadcastOutput("");
   broadcastOutput("========================================");

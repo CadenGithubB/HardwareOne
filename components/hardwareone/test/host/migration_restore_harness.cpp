@@ -128,16 +128,21 @@ static void stage(const std::string& json, bool compatible) {
   std::memcpy(buf, json.data(), json.size());
   JsonDocument doc;
   check(!deserializeJson(doc, json));
-  JsonVariantConst device = doc["device"];
-  stageMigrationRestore(buf, json.size(), compatible, device);
+  stageMigrationRestore(buf, json.size(), compatible, doc.as<JsonVariantConst>());
 }
 
-static std::string bundleFrom(const std::string& hostname, const char* board) {
+// extra is inserted before "files", e.g. "\"force\":true,".
+static std::string bundleFrom(const std::string& hostname, const char* board, const char* fingerprint = "fp",
+                              const char* extra = "") {
   std::string json = bundle();
   json.replace(json.find("\"files\":{"), 0,
-               "\"device\":{\"hostname\":\"" + hostname + "\",\"board\":\"" + board +
-               "\",\"fingerprint\":\"fp\"},");
+               std::string(extra) + "\"device\":{\"hostname\":\"" + hostname + "\",\"board\":\"" + board +
+               "\",\"fingerprint\":\"" + fingerprint + "\"},");
   return json;
+}
+
+static bool contains(const String& text, const std::string& part) {
+  return std::string(text.c_str()).find(part) != std::string::npos;
 }
 
 static std::vector<std::string> lines(const std::string& text) {
@@ -303,7 +308,38 @@ static void caseHostileClaims() {
   for (const std::string& line : lines(migrationStagedOledPrompt().c_str())) check(line.size() <= 21);
   stage(bundle(), true);                           // no device block at all
   check(std::string(migrationStagedSummary().c_str()).find("from unknown [unknown]") == 0);
+  check(!contains(migrationStagedSummary(), "this device"));
   discardStagedMigrationRestore();
+}
+
+// "this device" needs a fingerprint that matched. A bundle with no fingerprint
+// (handleRestore then leaves compatible true) is shown as unverified instead.
+static void caseNoFingerprintUnverified() {
+  resetDevice();
+  for (const std::string& json : {bundle(), bundleFrom("kitchen-hw1", "XIAO_ESP32S3", "")}) {
+    stage(json, true);
+    check(!contains(migrationStagedSummary(), "this device"));
+    check(contains(migrationStagedSummary(), ", no fingerprint (unverified, credentials restored)"));
+    check(contains(migrationStagedOledPrompt(), "\nunverified, reboots"));
+    for (const std::string& line : lines(migrationStagedOledPrompt().c_str())) check(line.size() <= 21);
+  }
+  discardStagedMigrationRestore();
+}
+
+// What the operator is told to compare: an unforced body may be the file as
+// exported; a forced cross-device body has "force" added and cannot match it.
+static void caseCheckAdvice() {
+  resetDevice();
+  check(migrationStagedCheckAdvice().length() == 0);
+  stage(bundleFrom("kitchen-hw1", "XIAO_ESP32S3"), true);
+  check(contains(migrationStagedCheckAdvice(), "shasum -a 256"));
+  check(!contains(migrationStagedCheckAdvice(), "will not match"));
+  stage(bundleFrom("other-hw1", "FeatherS3", "other-fp", "\"force\":true,"), false);
+  check(contains(migrationStagedSummary(), "other device (credentials skipped)"));
+  check(contains(migrationStagedCheckAdvice(), "will not match your file"));
+  check(!contains(migrationStagedCheckAdvice(), "shasum"));
+  discardStagedMigrationRestore();
+  check(migrationStagedCheckAdvice().length() == 0);
 }
 
 // Discard releases the buffer while the confirm flag is still set, so a
@@ -339,6 +375,8 @@ int main(int argc, char** argv) {
       {"map-file-restored", caseMapFileRestored},
       {"staged-summary", caseStagedSummary},
       {"hostile-claims", caseHostileClaims},
+      {"no-fingerprint-unverified", caseNoFingerprintUnverified},
+      {"check-advice", caseCheckAdvice},
       {"discard-frees-before-clearing", caseDiscardFreesBeforeClearing},
   };
   bool ran = false;

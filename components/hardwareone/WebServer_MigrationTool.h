@@ -55,10 +55,17 @@ void discardStagedMigrationRestore();
 
 // Provenance of the staged backup, for the confirm prompt; empty when nothing
 // is staged. One serial line: "from <hostname> [<board>], <n> bytes,
-// sha256 <first 8 hex>..., this device|other device (credentials skipped)".
+// sha256 <first 8 hex>..., <source>", where <source> is "this device" (the
+// bundle's fingerprint matched this board), "other device (credentials
+// skipped)" or "no fingerprint (unverified, ...)" when the bundle carries none.
 // Hostname and board are the bundle's claims; size and SHA-256 are of the
 // bytes received.
 String migrationStagedSummary();
+
+// One serial line telling the operator what to compare the size and SHA-256
+// with. A body carrying "force" (a cross-device upload) is not the exported
+// file, so it says they will not match.
+String migrationStagedCheckAdvice();
 
 // The same, as three 21-character lines for getOLEDYesNoPrompt.
 String migrationStagedOledPrompt();

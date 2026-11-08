@@ -17,7 +17,10 @@ bundle and shares its limit with /api/restore.
 
 It also checks the staged bundle's provenance summary (claimed hostname and
 board, bytes received, SHA-256 prefix, same or other device) on serial and in
-the three-line OLED prompt, with terminal escapes in the claims neutralised;
+the three-line OLED prompt, with terminal escapes in the claims neutralised
+and a bundle without a fingerprint shown as unverified, never "this device";
+what the operator is told to compare the size and SHA-256 with (a forced
+cross-device upload carries an added "force" key and cannot match the file);
 that discarding frees the staged buffer while the confirm flag is still set;
 and, in source, that first-time setup shows the summary before its default-No
 prompt and that the restore server is stopped before its staged buffer is
@@ -117,9 +120,11 @@ def setup_contract(setup: str) -> None:
     require(setup.count(marker) == 1, "one staged-restore confirm in first-time setup")
     confirm = extract_block(setup[setup.index(marker):], marker)
     summary = confirm.find('broadcastOutput("Backup staged " + migrationStagedSummary());')
+    advice = confirm.find("broadcastOutput(migrationStagedCheckAdvice());")
     prompt = confirm.find("getOLEDYesNoPrompt(migrationStagedOledPrompt().c_str(), false)")
     serial = confirm.find("waitForSerialInputBlocking()")
     require(0 <= summary < prompt and summary < serial, "provenance is shown before either confirm")
+    require(summary < advice < prompt and advice < serial, "the check advice is shown before either confirm")
 
 
 def main() -> None:

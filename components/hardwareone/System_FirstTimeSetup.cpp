@@ -799,7 +799,7 @@ void firstTimeSetupIfNeeded() {
           // Provenance first, so a bundle raced in by someone else on the LAN
           // is visible before the operator accepts it.
           broadcastOutput("Backup staged " + migrationStagedSummary());
-          broadcastOutput("Check the source, size and SHA-256 match your backup file.");
+          broadcastOutput(migrationStagedCheckAdvice());
           broadcastOutput("Confirm to write files and reboot.");
 #if ENABLE_OLED_DISPLAY
           // Default No — LAN upload alone must not apply. Serial y/n also works

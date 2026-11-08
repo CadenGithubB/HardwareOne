@@ -550,6 +550,7 @@ imports it onto another device. Requires WiFi and the HTTP server
 
 - **Export** - `/api/backup` from the web UI.
 - **Import** - `/api/restore`, or choose **Import from Backup** at first boot. In the first-boot flow the device brings up WiFi, prints its IP, and waits for you to send the `.hwbackup` from another device's migration tool; you then confirm on the OLED or serial.
+  Before the Yes/No prompt (default No) the device shows the bundle's claimed hostname and board, the bytes it received, the first 8 hex of their SHA-256, and whether the bundle's fingerprint matched this board ("this device"), did not ("other device", credentials skipped), or was missing ("no fingerprint (unverified)", credentials still restored). Compare with your file: `wc -c <file>.hwbackup` and the first 8 hex of `shasum -a 256 <file>.hwbackup`. They match only if the file was sent unchanged; a forced cross-device upload has a `force` flag added, so the device says they will not match and you check the source and board instead.
 
 This is the fastest way to stand up a replacement board with an existing
 device's settings, and the reason a factory reset is not a catastrophe if you
