@@ -304,6 +304,10 @@ so the same release can be reproduced without editing that shared header.
 
 > ## What a version expects from its peers and what an upgrade keeps: [Compatibility](docs/COMPATIBILITY.md)
 
+> ## Open problems and their workarounds: [Known Issues](KNOWN_ISSUES.md)
+
+> ## Reporting a vulnerability privately, and the known security limits: [Security Policy](SECURITY.md)
+
 ## License
 
 PolyForm Noncommercial 1.0.0: free for any noncommercial use. See [LICENSE.md](LICENSE.md); bundled third-party code is listed in [NOTICE.md](NOTICE.md).

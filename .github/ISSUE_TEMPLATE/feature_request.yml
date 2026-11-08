@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest a new feature or a change to an existing one.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe what you are trying to do and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+      description: The behaviour or command you have in mind. Name the interface if it matters (CLI, web UI, OLED, BLE, ESP-NOW mesh, G2 glasses).
+    validations:
+      required: true
+  - type: input
+    id: board
+    attributes:
+      label: Board or deployment profile
+      description: Which board(s) this is for, e.g. feathers3, xiao_s3, feather_esp32_v2, p4x_eye. Leave empty if it applies to all.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Hardware involved, links, sketches. Remove passwords, Wi-Fi passphrases and keys.
