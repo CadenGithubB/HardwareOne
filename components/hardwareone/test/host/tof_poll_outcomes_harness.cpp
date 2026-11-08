@@ -83,7 +83,8 @@ static TofCache sTofCache;
 static SemaphoreHandle_t sTofCacheMutex = nullptr;
 static constexpr uint8_t I2C_ADDR_TOF = 0x29;
 static constexpr unsigned TOF_STACK_WORDS = 3072;
-static constexpr int DEBUG_PERFORMANCE = 1, SYSEVT_SENSOR_FAULT = 1, SYSEVT_TOF_OBJECT_DETECTED = 2;
+static constexpr int DEBUG_PERFORMANCE = 1, SYSEVT_SENSOR_FAULT = 1, SYSEVT_TOF_OBJECT_DETECTED = 2,
+  SYSEVT_SENSOR_UNRESPONSIVE = 3, SYSEVT_SENSOR_RECOVERED = 4;
 static std::vector<std::string> events;
 static bool isDebugFlagSet(int) { return false; }
 static UBaseType_t uxTaskGetStackHighWaterMark(void*) { return TOF_STACK_WORDS; }
@@ -96,7 +97,9 @@ static void systemEventPost(int event, const char*, const char*) {
 #if !TEST_BASELINE
   assertBusesReleased();
 #endif
-  events.push_back(event == SYSEVT_SENSOR_FAULT ? "fault" : "object");
+  events.push_back(event == SYSEVT_SENSOR_FAULT ? "fault"
+                   : event == SYSEVT_SENSOR_UNRESPONSIVE ? "unresponsive"
+                   : event == SYSEVT_SENSOR_RECOVERED ? "recovered" : "object");
 }
 
 using VL53L4CX_Error = int;
@@ -302,8 +305,11 @@ int main() {
       assert(f.checkpoint.consecutiveErrors == 5 && f.checkpoint.totalErrors == 5);
       assert(f.checkpoint.nackCount == 5 && f.checkpoint.degraded && recoveries == 1);
       assert(f.published.tofSeq == 7 && f.published.tofLastUpdate == 456);
-      if (stopDuringWait) assert(f.checkpointEvents.empty());
-      else assert(f.checkpointEvents == std::vector<std::string>({"status", "log", "fault"}));
+      // The device answered before this outage, so the manager's degrade edge
+      // posts sensor_unresponsive (one per outage; announceUnresponsive) even
+      // when the task is stopping; the task's own fault report is skipped then.
+      if (stopDuringWait) assert(f.checkpointEvents == std::vector<std::string>({"unresponsive"}));
+      else assert(f.checkpointEvents == std::vector<std::string>({"unresponsive", "status", "log", "fault"}));
     }
 #endif
   }

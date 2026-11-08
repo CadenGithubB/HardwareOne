@@ -70,10 +70,13 @@ class PeripheralConfig(unittest.TestCase):
             'ENABLE_GT911_TOUCH == 1', 'ENABLE_OLED_INPUT == 1',
             'ENABLE_SD_CARD == 1', 'SD_MMC_SLOT == 0',
             'SD_MMC_POWER_PIN == 45', 'SD_MMC_DETECT_PIN == -1',
-            'ENABLE_CAMERA_SENSOR == 0',
-            'ENABLE_MICROPHONE_SENSOR == 0', 'ENABLE_BATTERY_MONITOR == 1',
+            # Camera (OV5647, fc4a0cdf/77fcbdcf), onboard ES7210 microphone
+            # (131f4c0e) and local transcription (d2a6e64e) are the profile's
+            # own hardware-accepted choices, not inherited P4X-EYE peripherals.
+            'ENABLE_CAMERA_SENSOR == 1',
+            'ENABLE_MICROPHONE_SENSOR == 1', 'ENABLE_BATTERY_MONITOR == 1',
             'BATTERY_ADC_PIN == 20', 'BATTERY_ADC_DIVIDER == 3.0f',
-            'ENABLE_LOCAL_STT == 0', 'ENABLE_WIFI == 1', 'ENABLE_SPEAKER == 1',
+            'ENABLE_LOCAL_STT == 1', 'ENABLE_WIFI == 1', 'ENABLE_SPEAKER == 1',
             'I2C_SDA_PIN_DEFAULT == 7', 'I2C_SCL_PIN_DEFAULT == 8'],
             board_profile=repo / 'boards/waveshare_p4_touch_lcd_5.features.h')
 
@@ -82,7 +85,8 @@ class PeripheralConfig(unittest.TestCase):
         flags = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())['features']
         board = repo / 'boards/waveshare_p4_touch_lcd_5.features.h'
         self.check_profile(dict(flags, INPUT_DEVICE_TYPE=0, DISPLAY_TYPE=0,
-                                ENABLE_SPEAKER=0, ENABLE_SDMMC_CARD=0, ENABLE_BATTERY_MONITOR=0),
+                                ENABLE_SPEAKER=0, ENABLE_SDMMC_CARD=0, ENABLE_BATTERY_MONITOR=0,
+                                ENABLE_LOCAL_STT=0, ENABLE_STT_MODEL_15X5_GEN2=0),
                            ['ENABLE_GT911_TOUCH == 0', 'ENABLE_OLED_DISPLAY == 0',
                             'ENABLE_SPEAKER == 0', 'ENABLE_SD_CARD == 0',
                             'ENABLE_BATTERY_MONITOR == 0'], board_profile=board)
@@ -117,9 +121,15 @@ class PeripheralConfig(unittest.TestCase):
     def test_waveshare_sd_can_be_disabled(self):
         repo = SOURCE.parents[1]
         flags = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())['features']
-        self.check_profile(dict(flags, ENABLE_SDMMC_CARD=0),
+        board = repo / 'boards/waveshare_p4_touch_lcd_5.features.h'
+        # The profile's local transcription model lives on the card, so turning
+        # the card off must also turn transcription off; the guard refuses the mix.
+        no_stt = dict(ENABLE_LOCAL_STT=0, ENABLE_STT_MODEL_15X5_GEN2=0)
+        self.check_profile(dict(flags, ENABLE_SDMMC_CARD=0, **no_stt),
                            ['ENABLE_SD_CARD == 0', 'ENABLE_GT911_TOUCH == 1'],
-                           board_profile=repo / 'boards/waveshare_p4_touch_lcd_5.features.h')
+                           board_profile=board)
+        self.check_profile(dict(flags, ENABLE_SDMMC_CARD=0), [], succeeds=False,
+                           board_profile=board)
 
     def test_p4_board_sd_saved_selection(self):
         board = SOURCE.parents[1] / 'boards/p4x_eye.features.h'

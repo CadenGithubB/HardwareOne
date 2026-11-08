@@ -1775,6 +1775,10 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_stt_continuous.py --full-phrase
           ${STT_CONTINUOUS_TEST_ARGS})
+# Both variants drive real threads against 10 s waits under the sanitizer. With
+# other suites running alongside (ctest -j6, 2026-11-06), about one run in six
+# timed out at a different wait each time, so they run alone rather than flake.
+set_tests_properties(stt_continuous stt_continuous_full_phrase PROPERTIES RUN_SERIAL TRUE)
 
 # STT result privacy and the targeted BLE command result (README "STT result privacy
 # and the targeted BLE reply"): the private-STT rule, and since D1 the BLE reply is

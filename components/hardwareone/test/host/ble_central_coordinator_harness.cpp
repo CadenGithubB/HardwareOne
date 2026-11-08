@@ -24,7 +24,7 @@ int main(){
    if(!reservation)return false;
    ++creates;reservation.retain(client);++connects;return true;
  };
- int left,right,ring,phone;
+ int left=0,right=0,ring=0,phone=0; // distinct client identities; only their addresses matter
  // Pipe absent/runtime off: legacy three-link glasses + ring admission works.
  assert(!bleCentralRingShouldYield());
  assert(attempt(BleCentralLink::Left,&left));

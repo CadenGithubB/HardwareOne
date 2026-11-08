@@ -304,6 +304,9 @@ static void oledApplyPendingSessionBoundary() {
     gCurrentTask = saved;
   }
 }
+// oledUpdate prepares the shared camera viewer each pass (OLED_Mode_Camera.cpp);
+// the viewer has its own coverage, so the owner-request cases only need the call.
+static void prepareCameraPreviewData() {}
 
 // INSERT_TRANSITION
 
