@@ -251,6 +251,20 @@ hw1_sdkconfig_policy_files("${CMAKE_CURRENT_SOURCE_DIR}" "${_hw_board}"
     "${HW1_FEATURE_CONFIG_FILE}" "${HW1_SDK_CONFIG_FILE}"
     "${HW1_DEPLOYMENT_SDKCONFIG_FILE}" _sdk_policy_files)
 
+# Opt-in task-watchdog soak (readiness P1-7). OFF for every ordinary build.
+# When ON, config/sdkconfig.wdt_soak.defaults is layered last (panic, longer
+# timeout) and the app gets HW1_WDT_SOAK=1 (main loop subscribed). Kconfig
+# values stick in a build directory's sdkconfig, so the soak must never share
+# one with an ordinary build: tools/build_board.sh --wdt-soak uses a directory
+# ending in -wdt-soak, and anything else is refused here.
+option(HW1_WDT_SOAK "Task-watchdog soak build: panic on a trip, main loop subscribed" OFF)
+set(HW1_WDT_SOAK_DEFAULTS "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig.wdt_soak.defaults")
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/HW1WdtSoak.cmake")
+if(HW1_WDT_SOAK)
+    hw1_wdt_soak_check_build_dir("${CMAKE_BINARY_DIR}" "${_sdkconfig}" "${HW1_WDT_SOAK_DEFAULTS}")
+    message(STATUS "Task-watchdog SOAK build: ${HW1_WDT_SOAK_DEFAULTS}")
+endif()
+
 # --- 3. Partition table selection ---
 #
 # The CSVs under partitions/ are the only source of partition offsets and
@@ -683,6 +697,12 @@ if(_board_file)
         list(APPEND SDKCONFIG_DEFAULTS "${_ota_key_defaults}")
     endif()
 
+    # The watchdog soak overlay goes last so it wins over the OTA layout's
+    # 5 s panic and over any preset.
+    if(HW1_WDT_SOAK)
+        list(APPEND SDKCONFIG_DEFAULTS "${HW1_WDT_SOAK_DEFAULTS}")
+    endif()
+
     # Same dependency gap for the defaults files themselves. IDF registers the
     # SAVED sdkconfig as a configure dependency (tools/cmake/kconfig.cmake) but
     # never the SDKCONFIG_DEFAULTS inputs, so editing sdkconfig.defaults or the
@@ -712,6 +732,9 @@ if(_board_file)
             list(APPEND _sdk_reconcile_files "${_board_ota_file}")
         endif()
         list(APPEND _sdk_reconcile_files ${_sdk_policy_files})
+        if(HW1_WDT_SOAK)
+            list(APPEND _sdk_reconcile_files "${HW1_WDT_SOAK_DEFAULTS}")
+        endif()
         hw1_reconcile_sdkconfig("${_sdkconfig}" ${_sdk_reconcile_files})
     endif()
 endif()
@@ -853,6 +876,15 @@ endif()
 if(HW1_FEATURE_CONFIG_FILE)
     target_compile_definitions(${_hw1_app_component} PRIVATE
         HW1_FEATURE_CONFIG_HEADER="${HW1_FEATURE_CONFIG_FILE}")
+endif()
+if(HW1_WDT_SOAK)
+    # A stale sdkconfig must not give a soak app with a print-only watchdog.
+    hw1_wdt_soak_check_resolved("${HW1_WDT_SOAK_DEFAULTS}"
+        "${CONFIG_ESP_TASK_WDT_PANIC}" "${CONFIG_ESP_TASK_WDT_TIMEOUT_S}")
+    # main/ subscribes and feeds the loop; hardwareone feeds inside long waits.
+    idf_component_get_property(_hw1_main_component main COMPONENT_LIB)
+    target_compile_definitions(${_hw1_app_component} PRIVATE HW1_WDT_SOAK=1)
+    target_compile_definitions(${_hw1_main_component} PRIVATE HW1_WDT_SOAK=1)
 endif()
 if(HW1_DEPLOYMENT_ACTIVE)
     target_compile_definitions(${_hw1_app_component} PRIVATE

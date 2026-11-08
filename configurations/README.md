@@ -24,6 +24,14 @@ python3 tools/build_config.py build qtpy-logging-test
 python3 tools/build_config.py build qtpy-maps-test
 ```
 
+Add `--wdt-soak` to `tools/build_board.sh` (for example
+`tools/build_board.sh xiao_s3 --config xiao-no-bluetooth --wdt-soak`, or
+`python3 tools/build_config.py build p4-openclaw --wdt-soak`) for the task-watchdog
+soak image: the watchdog panics after 20 s and the main loop is subscribed
+(`config/sdkconfig.wdt_soak.defaults`). It builds in `build-config-<name>-wdt-soak/`
+(or `build-<board>-wdt-soak/`), so ordinary builds never pick it up. Bench use only.
+For the same reason, configuration names may not end in `-wdt-soak`.
+
 Source the ESP-IDF environment first, as for `tools/build_board.sh`. These
 commands use the ordinary board build path. Outputs, SDK configuration, and
 generated feature inputs live separately in `build-config-<name>/`.

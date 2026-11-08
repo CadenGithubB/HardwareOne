@@ -51,6 +51,7 @@ bool isEspNowInitialized() { return false; }
 #include "System_User.h"
 #include "System_UartLink.h"
 #include "System_AuthIdentity.h"  // ExecIdentityGuard (executeCommand + submitAndExecuteSync)
+#include "System_TaskWdt.h"       // taskWdtAwareSemaphoreTake (soak builds feed the main loop)
 #include "System_BootState.h"     // bootStateGetBootCount / bootStateResetBootCount (NVS boot counter)
 #include "System_CrashRecord.h"   // crashRecord* — RTC post-mortem record for `crashlog`
 #include "System_OTASafety.h"     // pending trial images must finish probation before power-off
@@ -4892,7 +4893,11 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
   // long-running synchronous command. Caller and executor retain independent
   // references, so either side may win at the exact timeout boundary without
   // orphaning or prematurely freeing the request/semaphore.
-  const BaseType_t syncTaken = xSemaphoreTake(r->done, pdMS_TO_TICKS(60000));
+  // The main loop waits here for serial, UART-link and OLED commands (bench
+  // logs show 5-10 s for `openwifi`). In a watchdog soak build the main task
+  // is subscribed, so this bounded wait feeds it each second; elsewhere it is
+  // a plain xSemaphoreTake (System_TaskWdt.h).
+  const BaseType_t syncTaken = taskWdtAwareSemaphoreTake(r->done, 60000);
 
 #if ENABLE_HTTP_SERVER
   if (waiterIsHttpd) gWebCmdWaiters.fetch_sub(1, std::memory_order_acq_rel);

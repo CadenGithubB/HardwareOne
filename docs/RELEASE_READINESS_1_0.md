@@ -290,7 +290,7 @@ The P1 items are bounded, but there are many. Do the "before RC" set; the rest c
 
 | Item | Groups | Problem | Bounded change |
 |---|---|---|---|
-| P1-7 | G-11 [defect] | Task watchdog panic is set only in `config/sdkconfig.ota.defaults`; no `esp_task_wdt_add` in the app; a hung task prints forever. Lowered from P0 because enabling panic needs a soak first (known idle-starvation paths). | Enable panic plus subscribe the main loop, in the RC soak build first; keep it if the soak shows no false trips. |
+| P1-7 | G-11 [defect] | Task watchdog panic is set only in `config/sdkconfig.ota.defaults`; no `esp_task_wdt_add` in the app; a hung task prints forever. Lowered from P0 because enabling panic needs a soak first (known idle-starvation paths). | Enable panic plus subscribe the main loop, in the RC soak build first; keep it if the soak shows no false trips. Soak build in place (2026-11-08): `tools/build_board.sh <board> [--config <name>] --wdt-soak`, 20 s panic, main loop subscribed; ordinary builds unchanged. See the soak note in Section 6. |
 | P1-8 | G-45, G-48 [risk] | Resident stacks run with under 700 B free (`g2_owner` 312 to 688 of 6,144 B, `log_out` about 530 B and now runs rotation, `cmd_exec` 700 B); S3/classic have canary-only detection. No MSPI speed-mode sync around CPU clock changes: P4X 100/200 MHz and Waveshare 100 MHz sit below their PSRAM clocks, S3 UltraSaver runs at 40 MHz on the crystal. Separately, a 2026-11-06 P4X PSRAM "CORRUPT HEAP" (`2026-11-04-p4x-fix-progress.md:855`) is unattributed and did not reproduce under heap poisoning; the missing sync is one untested hypothesis. | Raise the three stacks to at least 1.5 KB free, measured in the soak. For clocks: either follow IDF's `clk_utils` sync rule or clamp P4 policies to at least the PSRAM clock until it is in; re-run the heap-poisoning profile under the clamped policy. |
 | P1-9 | G-32, G-34 [defect/gap] | ESP-NOW PAIR_REQUEST/ACCEPT are single-shot and unacknowledged; a lost ACCEPT leaves a half pair and the timeout message and OLED flow do not offer the repair. No peer has a walk-away-and-return record; the phone scans every 30 s forever. | Retry ACCEPT and make the initiator accept a duplicate; print the `espnowpairsecure` repair hint. Walk test per stable peer in the RC bench session; phone scan backoff. |
 | P1-10 | G-41, G-42, G-43, G-47 [gap] | No power-cut test of any atomic save; no structured soak for any S3 or classic profile; BLE open/close drift measured only on P4X (whose controller is the C6); no current, runtime or battery figure for any board. | Run inside the RC (Section 6). For battery, word the README as "runs from a battery; endurance not measured" unless measured. |
@@ -393,6 +393,23 @@ Each stage has a stopping condition. Do not start a stage until the one before i
      Pass criteria: no reboot or watchdog trip; no growth in `memreport` minimum free or
      largest block after the first hour beyond 5%; every stack at least 512 B free (1.5 KB
      for the three raised in P1-8); all links connected at the end.
+   - Watchdog soak image (P1-7): build each stable row with `--wdt-soak`, for example
+     `tools/build_board.sh feathers3 --wdt-soak`, `... feather_esp32_v2 --wdt-soak`,
+     `... qtpy_esp32 --wdt-soak`, `... xiao_s3 --config xiao-no-bluetooth --wdt-soak` and
+     `... p4x_eye --config p4-openclaw --wdt-soak`. Output lands in `build-<board>-wdt-soak/` or
+     `build-config-<name>-wdt-soak/`; `BUILD_INFO.md` shows "Task watchdog panics: on" and the
+     20 s timeout, and the boot log says the main loop is subscribed. Any `task_wdt` panic is a
+     fail; record the task and backtrace. Watch for the paths not fixed in code: the P4X main
+     loop's 7-11 s LittleFS stall on its first pass after setup and after a Wi-Fi join (IDLE0
+     starved; 20 s is meant to clear it), long CPU-bound work on `cmd_exec` (core 0) or on core 1
+     (IDLE checks), the BLE stack recycle on the main loop, and `lightsleep`. Two waits are on
+     the subscribed main loop itself and are not fed on purpose, because a long one may be a real
+     hang: serial `login` runs PBKDF2 inline while it holds the filesystem lock
+     (`HardwareOne.cpp:2984`, `System_User.cpp:2024`), and main-loop ticks such as
+     `timeAnchorsTick` wait for that lock with no timeout (`System_Mutex.cpp:76`). Any other
+     task that holds the filesystem lock for over 20 s (an SD format, for example) now trips
+     the main loop. Serial, UART-link and OLED commands that wait up to 60 s for `cmd_exec`
+     (`openwifi` up to about 160 s) feed the watchdog while they wait. Promote panic to the release only if every row passes.
    - 20 BLE open/close cycles on FeatherS3 and Feather V2 with no per-cycle drift (G-43).
    - Walk-away-and-return for each BLE peer offered on a stable row (G-34) and `ring scan 300` (P1-1).
    - Five power cuts during settings saves, and one during an SD write (G-41).
