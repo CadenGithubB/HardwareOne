@@ -1,0 +1,79 @@
+name: Bug report
+description: Something does not work as documented. For security problems, use the private report instead (see SECURITY.md).
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, check [KNOWN_ISSUES.md](https://github.com/CadenGithubB/HardwareOne/blob/main/KNOWN_ISSUES.md).
+
+        **Redact secrets before you paste anything.** A serial-monitor capture can record every
+        keystroke typed at a prompt (the `[Tx]` lines), including Wi-Fi passphrases and passwords
+        entered during setup or login. Replace usernames, passwords, Wi-Fi names and passphrases, `blesecret` passphrases,
+        API keys, tokens and IP addresses you do not want public with `<redacted>`.
+  - type: input
+    id: version
+    attributes:
+      label: Firmware version
+      description: The first line printed by `status` (for example `HardwareOne vX.Y.Z (<board>)`).
+    validations:
+      required: true
+  - type: input
+    id: board
+    attributes:
+      label: Board and build profile
+      description: Board name as passed to tools/build_board.sh (or the deployment, e.g. `handheld p4x_eye`), and the saved configuration if you used one.
+    validations:
+      required: true
+  - type: textarea
+    id: build_info
+    attributes:
+      label: Build configuration (BUILD_INFO.md)
+      description: Paste the BUILD_INFO.md from your build directory (`build-<board>/BUILD_INFO.md`, or the one shipped with a release). It records the commit, whether the tree was clean, and the feature flags.
+      render: markdown
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands or UI actions, in order, starting from boot.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+    validations:
+      required: true
+  - type: textarea
+    id: crashlog
+    attributes:
+      label: Crash record (`crashlog json`)
+      description: Required if the device rebooted or crashed. Run `crashlog json` after it comes back up; `bootcount json` also helps.
+      render: json
+  - type: textarea
+    id: memreport
+    attributes:
+      label: Memory report (`memreport json`)
+      description: Useful for crashes, hangs and slowdowns. Run it as close to the failure as you can.
+      render: json
+  - type: textarea
+    id: c6status
+    attributes:
+      label: ESP32-C6 companion status (`c6status json`, ESP32-P4 boards only)
+      description: On the P4X-EYE and Waveshare P4, Wi-Fi, Bluetooth and ESP-NOW run on the C6. Include this for any radio problem.
+      render: json
+  - type: textarea
+    id: serial_log
+    attributes:
+      label: Serial log (secrets redacted)
+      description: The USB serial output from boot through the failure. Redact it first (see the note at the top).
+      render: text
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Connected peripherals, peers (G2 glasses, R1 ring, phone app, other mesh nodes), network setup, how often it happens.
