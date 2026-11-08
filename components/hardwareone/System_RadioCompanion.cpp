@@ -1230,7 +1230,10 @@ const CommandEntry companionCommands[] = {
   { "c6update",      "Flash companion firmware from a file over SDIO: c6update \"<path>\".", true, cmd_c6update,
     "Usage: c6update \"/sd/firmware/network_adapter.bin\"\nThe file must be an ESP32-C6 image built by tools/p4/companion (it is checked for the ESP-NOW bridge marker before anything is sent).", true },
   { "c6confirm",     "Confirm the companion's running image so it cannot roll back.", true, cmd_c6confirm },
-  { "c6_console",     "Mirror the C6's own console into the P4 log: c6_console [on|off].", true, cmd_c6console },
+  { "c6console",     "Mirror the C6's own console into the P4 log: c6console [on|off].", true, cmd_c6console },
+  // 64713c0d renamed the task and, by accident, the user command; the documented name is
+  // c6console. The underscore form stays as an alias for anything that learned it.
+  { "c6_console",    "Alias of c6console.", true, cmd_c6console },
   { "c6autorecover", "Auto-recover the companion after an outage: c6autorecover [on|off] (persists).", true, cmd_c6autorecover },
   { "c6autohold",    "Hold the companion in reset while no radio feature runs: c6autohold [on|off] (persists).", true, cmd_c6autohold },
   { "c6heartbeat",   "Companion heartbeat interval in seconds, 0 disables the watchdog: c6heartbeat <0..60> (persists).", true, cmd_c6heartbeat },
