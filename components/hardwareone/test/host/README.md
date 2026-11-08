@@ -3397,10 +3397,15 @@ and beacon SSIDs. Static source contracts run first: the shared file explorers i
 `window.BondFs.renderExplorer`) must escape names, path segments, peer labels and
 status text, and must pass paths to inline `onclick` handlers through
 `FileBrowser.jsArg` rather than between quotes; the `WebPage_Settings.h` Wi-Fi scan
-must escape the SSID; the Maps details panel must escape the map file name. Then
+must escape the SSID; the Maps details panel must escape the map file name;
+`escHtml` must escape `&` as well (an entity such as `&quot;` in a name would
+otherwise decode into a quote inside `onclick`); the ESP-NOW remote browser
+(`web_assets/espnow-core.js` `browseRemoteFiles`, which navigates by the peer's
+folder names) must not concatenate the raw path or CLI reply into `innerHTML`. Then
 both file-browser `<script>` blocks and the Settings scan script run unmodified on
 whatever engine `tools/webui/js_engine.py` finds, against a fake `hw`/DOM: names
-and SSIDs holding `<img src=x onerror=...>`, quotes and backticks must render as
+and SSIDs holding `<img src=x onerror=...>`, quotes, backticks and entity
+spellings of a quote (`&quot;`, `&#34;`, `&#x22;`) must render as
 literal text, each `onclick` (entity-decoded, as a browser does) must hand the
 original path to its function, and clean names render unchanged. Without an
 engine the suite exits 77 after the contracts (skipped). `--contract-only` and

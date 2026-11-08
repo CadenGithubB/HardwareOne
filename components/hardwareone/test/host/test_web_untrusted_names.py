@@ -5,7 +5,9 @@ G-50: any authenticated user can upload under '/', and a bonded peer supplies it
 own FS_LIST reply, so file names and paths reaching the shared explorers
 (WebServer_Utils.h getFileBrowserScript: window.FileBrowser, createFileExplorer,
 window.BondFs.renderExplorer; used by the Files, CLI, Logging, Maps, ESP-NOW and
-Bond pages) are untrusted. G-51: the admin Settings Wi-Fi scan shows beacon SSIDs
+Bond pages) are untrusted. The ESP-NOW remote browser (web_assets/espnow-core.js
+browseRemoteFiles) feeds a peer's listing to BondFs and navigates by the peer's
+folder names, so its own crumb and error sinks are untrusted too. G-51: the admin Settings Wi-Fi scan shows beacon SSIDs
 from anyone in radio range.
 
 Static source contracts run first and need no engine: the renderers must escape
@@ -32,6 +34,7 @@ REPO_ROOT = HERE.parents[3]
 UTILS = 'WebServer_Utils.h'
 SETTINGS = 'WebPage_Settings.h'
 MAPS = 'WebPage_Maps.h'
+ESPNOW_CORE = 'web_assets/espnow-core.js'
 SCAN_MARKER = 'window.scanNetworks = function'
 SKIP_RETURN_CODE = 77  # CTest SKIP_RETURN_CODE for the registered test
 
@@ -65,13 +68,17 @@ def scan_chunk(settings):
     return chunk
 
 
-def contract_failures(utils, settings, maps):
+def contract_failures(utils, settings, maps, espnow):
     failures = []
     fb = region(utils, 'window.FileBrowser = {', 'window.createFileExplorer = function',
                 'FileBrowser helpers', failures)
     for helper in ('escHtml: function', 'jsArg: function'):
         if fb and fb.count(helper) != 1:
             failures.append(f'window.FileBrowser does not define {helper!r} once')
+    # '&' first: without it an entity in a name (&quot;) survives escHtml and the
+    # browser decodes it inside onclick="..." into a quote that ends the JS string.
+    if fb and """.replace(/[&<>"'`]/g,""" not in fb:
+        failures.append("escHtml does not escape all of & < > \" ' `")
     row = region(fb, 'rowHtml: function', '\n    }', 'rowHtml', failures) if fb else ''
     if row and "'<span>' + o.name + '</span>" in row:
         failures.append('rowHtml inserts o.name raw')
@@ -98,6 +105,12 @@ def contract_failures(utils, settings, maps):
         failures.append('Wi-Fi scan does not escape the SSID')
     if '${currentMap.filename}' in maps:
         failures.append('Maps details panel inserts the map file name raw')
+    remote = region(espnow, 'window.browseRemoteFiles = function', 'window.parseRemoteFileListing = function',
+                    'ESP-NOW browseRemoteFiles', failures)
+    for line in remote.splitlines():
+        if 'innerHTML' in line and re.search(r"\+ (browsePath|text) \+", line):
+            failures.append('browseRemoteFiles concatenates a raw path or CLI reply into innerHTML: '
+                            + line.strip()[:120])
     return failures
 
 
@@ -141,7 +154,7 @@ def main():
         return (overlay if overlay and overlay.exists() else a.component / name).read_text(encoding='utf-8')
 
     utils, settings, maps = read(UTILS), read(SETTINGS), read(MAPS)
-    failures = contract_failures(utils, settings, maps)
+    failures = contract_failures(utils, settings, maps, read(ESPNOW_CORE))
     for failure in failures:
         print('FAIL contract:', failure, flush=True)
     if not failures:

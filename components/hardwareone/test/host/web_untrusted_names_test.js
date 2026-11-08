@@ -82,10 +82,19 @@ function load(path, label, names, values) {
   check(consoleErrors.length === before, 'load ' + label + ' without errors', consoleErrors.slice(before).join(' | '));
 }
 
+// One pass, the way a browser decodes an attribute value: decimal and hex
+// character references, the common named ones, and the legacy semicolon-less
+// &quot &amp &lt &gt when no letter, digit or '=' follows. A payload spelled
+// as an entity (&quot; &#34; &#x22;) must not be under-decoded here.
+var NAMED = { quot: '"', amp: '&', lt: '<', gt: '>', apos: "'", nbsp: '\u00a0' };
 function decodeEntities(s) {
-  return s.replace(/&(#39|#96|quot|lt|gt|amp);/g, function (_, name) {
-    return { '#39': "'", '#96': '`', quot: '"', lt: '<', gt: '>', amp: '&' }[name];
-  });
+  return s.replace(/&(?:#(\d+);?|#[xX]([0-9a-fA-F]+);?|([a-zA-Z]+);|(quot|amp|lt|gt)(?![A-Za-z0-9=]))/g,
+    function (all, dec, hex, named, legacy) {
+      if (dec) return String.fromCodePoint(parseInt(dec, 10));
+      if (hex) return String.fromCodePoint(parseInt(hex, 16));
+      var k = named || legacy;
+      return Object.prototype.hasOwnProperty.call(NAMED, k) ? NAMED[k] : all;
+    });
 }
 
 // Resolves after `cond()` holds or after `hops` microtask turns.
@@ -132,11 +141,18 @@ var IMG = '<img src=x onerror=alert(1)>.txt';
 var QUOTE = "a'b`c');alert(2);//.log";
 var DQ = 'd"q.txt';
 var DIR = 'dir<svg onload=alert(3)>';
+// Entity spellings of a quote, built only from characters normalizeFsPath
+// accepts. escHtml must turn the '&' into &amp; or the browser decodes the
+// entity inside onclick="..." into a quote that ends the JS string.
+var AMP = '&quot;);alert(5);//.txt';
+var AMPDIR = '&#x22;);alert(12);(&#34;d';
 var files = [
   { name: IMG, type: 'file', size: '10 bytes', perms: 0x0F },
   { name: QUOTE, type: 'file', size: '11 bytes', perms: 0x0F },
   { name: DQ, type: 'file', size: '12 bytes', perms: 0x0F },
   { name: DIR, type: 'folder', size: '1 items', perms: 0x0F },
+  { name: AMP, type: 'file', size: '14 bytes', perms: 0x0F },
+  { name: AMPDIR, type: 'folder', size: '1 items', perms: 0x0F },
   { name: 'clean.txt', type: 'file', size: '13 bytes', perms: 0x0F }
 ];
 listings['/'] = { success: true, files: files };
@@ -164,6 +180,8 @@ settle(function () { return listed(listEl) && listed(errEl); }, 50).then(functio
   check(rootHtml.indexOf('dir&lt;svg onload=alert(3)&gt;') >= 0, 'F1 folder name is shown as literal text');
   check(rootHtml.indexOf('a&#39;b&#96;c&#39;);alert(2);//.log') >= 0, 'F1 quotes and backticks are escaped in the name');
   check(rootHtml.indexOf('<span>clean.txt</span>') >= 0, 'F1 clean name renders unchanged');
+  check(rootHtml.indexOf('&amp;quot;);alert(5);//.txt') >= 0 && rootHtml.indexOf('&amp;#x22;);alert(12);(&amp;#34;d') >= 0,
+        'F1 entity spellings in names are shown as literal text');
   var e = errEl.innerHTML;
   check(e.indexOf('<img src=x') < 0 && e.indexOf('&lt;img src=x onerror=alert(4)&gt;') >= 0,
         'F1 listing error is shown as literal text', e);
@@ -190,7 +208,9 @@ settle(function () { return listed(listEl) && listed(errEl); }, 50).then(functio
     ['Select', '/' + IMG], ['Download', '/' + IMG], ['Edit', '/' + IMG], ['Rename', '/' + IMG],
     ['Select', '/' + QUOTE], ['Download', '/' + QUOTE], ['Delete', '/' + QUOTE, false],
     ['Select', '/' + DQ], ['Rename', '/' + DQ],
-    ['Delete', '/' + DIR, true], ['Select', sub + IMG], ['Download', sub + QUOTE], ['Select', '/clean.txt']
+    ['Delete', '/' + DIR, true], ['Select', sub + IMG], ['Download', sub + QUOTE], ['Select', '/clean.txt'],
+    ['Select', '/' + AMP], ['Download', '/' + AMP], ['Edit', '/' + AMP], ['Rename', '/' + AMP],
+    ['Navigate', '/' + AMPDIR], ['Delete', '/' + AMPDIR, true], ['Select', sub + AMP]
   ];
   var missing = want.filter(function (w) { return !called(w[0], w[1], w[2]); });
   check(missing.length === 0, 'F3 handlers receive the original paths', JSON.stringify(missing) + ' got ' + JSON.stringify(calls.slice(0, 6)));
@@ -202,11 +222,13 @@ settle(function () { return listed(listEl) && listed(errEl); }, 50).then(functio
    * peer's FS_LIST reply and label are peer-controlled. */
   var navs = [];
   var views = [];
-  var bpath = '/p<i>x';
+  var bpath = '/p<i>x&#34;);alert(11);(&#34;';
   win.BondFs.renderExplorer('bx', bpath, [
     { name: '<img src=x onerror=alert(6)>', isDir: false, size: 5 },
     { name: "q'`\"<b>x", isDir: true, size: 0 },
-    { name: 'clean.log', isDir: false, size: 7 }
+    { name: 'clean.log', isDir: false, size: 7 },
+    { name: '&quot;);alert(10);(&quot;', isDir: false, size: 8 },
+    { name: '&#34;);alert(13);(&#34;', isDir: true, size: 0 }
   ], {
     peerLabel: '<b>peer</b>',
     onNavigate: function (p) { navs.push(p); },
@@ -218,13 +240,17 @@ settle(function () { return listed(listEl) && listed(errEl); }, 50).then(functio
   check(b.indexOf('&lt;b&gt;peer&lt;/b&gt;') >= 0, 'B1 peer label is shown as literal text');
   check(b.indexOf('Path: /p&lt;i&gt;x') >= 0, 'B1 status-bar path is shown as literal text');
   check(b.indexOf('<span>clean.log</span>') >= 0, 'B1 clean peer name renders unchanged');
+  check(b.indexOf('&amp;quot;);alert(10);(&amp;quot;') >= 0 && b.indexOf('/p&lt;i&gt;x&amp;#34;);alert(11);') >= 0,
+        'B1 entity spellings in peer names and path are shown as literal text');
   var berrors = runHandlers(b);
   check(berrors.length === 0, 'B2 every bonded explorer onclick parses and runs', berrors.join(' | '));
   check(alerts.length === 0, 'B2 no injected script ran', alerts.join(' | '));
   function has(list, v) { return list.indexOf(v) >= 0; }
-  check(has(navs, '/') && has(navs, bpath) && has(navs, bpath + "/q'`\"<b>x"),
+  check(has(navs, '/') && has(navs, bpath) && has(navs, bpath + "/q'`\"<b>x") &&
+        has(navs, bpath + '/&#34;);alert(13);(&#34;'),
         'B2 navigation handlers receive the original paths', JSON.stringify(navs));
-  check(has(views, bpath + '/<img src=x onerror=alert(6)>') && has(views, bpath + '/clean.log'),
+  check(has(views, bpath + '/<img src=x onerror=alert(6)>') && has(views, bpath + '/clean.log') &&
+        has(views, bpath + '/&quot;);alert(10);(&quot;'),
         'B2 file actions receive the original paths', JSON.stringify(views));
   win.BondFs.renderExplorer('by', '/', [], { status: 'Error: <img src=x onerror=alert(7)>' });
   var bs = el('by').innerHTML;
