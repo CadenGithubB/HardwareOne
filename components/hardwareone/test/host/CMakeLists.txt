@@ -89,8 +89,6 @@ target_include_directories(memutil_no_psram_tests PRIVATE
 target_compile_options(memutil_no_psram_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
-# The production tracker wraps this dependency-light registry with FreeRTOS
-# synchronization. Exercise the actual hash/aggregate/top-K state machine.
 # heap_low system event policy (G-71): one post per low episode, 60 s cooldown,
 # re-arm past the margin.
 add_executable(heap_low_core_tests test_heap_low_core.cpp)
@@ -99,6 +97,8 @@ set_target_properties(heap_low_core_tests PROPERTIES
 target_include_directories(heap_low_core_tests PRIVATE ../..)
 target_compile_options(heap_low_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# The production tracker wraps this dependency-light registry with FreeRTOS
+# synchronization. Exercise the actual hash/aggregate/top-K state machine.
 add_executable(memtracker_core_tests test_memtracker_core.cpp)
 set_target_properties(memtracker_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

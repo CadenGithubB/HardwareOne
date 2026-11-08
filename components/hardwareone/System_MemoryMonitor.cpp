@@ -547,10 +547,12 @@ const char* cmd_memsample(const String& argsInput) {
 void periodicMemorySample() {
   // ── Tier 1 (always-on): cheap DRAM-pressure watch ────────────────────────
   // Runs regardless of DEBUG_MEMORY so a shipping device still warns *before*
-  // it OOMs. Just an O(num_heaps) free-size query + a compare (no
-  // largest-free-block walk — that stays in the verbose path below). Checked
-  // at most once per second; the WARN line is rate-limited to one per 10 s so
-  // it can never flood the output. Also keeps gLowestHeapSeen current between
+  // it OOMs. An O(num_heaps) free-size query + a compare, checked at most once
+  // per second; the WARN line is rate-limited to one per 10 s so it can never
+  // flood the output. The heap_low event below also needs the internal
+  // largest free block: that query walks every internal heap block under the
+  // heap lock, so it runs here at most once every 10 s (the reported largest
+  // value can lag by up to 10 s). Also keeps gLowestHeapSeen current between
   // verbose samples.
   {
     static unsigned long lastPressureCheckMs = 0;
