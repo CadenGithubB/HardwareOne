@@ -144,8 +144,8 @@ The wrapper reads the chip target from the board file's `# HW_TARGET:` marker an
 > pass one as a board name - the selectable boards are the files with no `.ota`
 > in the middle.
 
-Different board builds may run at the same time. Each build directory points
-directly at its selected checked-in partition table.
+Boards of different chip targets can be built one after another in one checkout with no extra step: the next build notices that another target's lock last populated the shared `managed_components/` and reconfigures to resync it, while a rebuild of the same target stays incremental; builds of the same target may run at the same time, but a build of another target is refused while one runs (use a separate git worktree for that).
+Each build directory points directly at its selected checked-in partition table.
 
 Each successful build also writes `build-<board>/BUILD_INFO.md`: a manifest of what that image actually contains - every feature flag as the compiler resolved it, chip / PSRAM / flash settings, image size and partition headroom, and the git commit it came from.
 

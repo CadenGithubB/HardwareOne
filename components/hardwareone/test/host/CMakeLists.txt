@@ -1030,6 +1030,10 @@ add_test(NAME sdkconfig_policy
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_sdkconfig_policy.py)
 add_test(NAME bare_idf_guard
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_bare_idf_guard.py)
+# Sequential cross-target builds of one checkout resync the shared
+# managed_components/ (a P4 build used to break the next incremental S3 build).
+add_test(NAME managed_components_stamp
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_managed_components_stamp.py)
 # The recovery-OTA pair audit builds the partition table and blank otadata it
 # reads, so the first ota0-flash in a fresh build directory works (readiness G-65).
 add_test(NAME ota_pair_audit_depends

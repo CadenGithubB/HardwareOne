@@ -4,6 +4,9 @@ build/
 # each with its own sdkconfig — see docs/BOARD_SWITCHING.md.
 build-*/
 managed_components/
+# Which lock last populated managed_components/ (cmake/HW1ManagedComponents.cmake)
+# and the one-target-per-checkout build lock (tools/checkout_build_lock.sh).
+/.hw1-build/
 
 # Local scratch: third-party APKs, slide drafts, and other working material
 # that must never be published from this repo.

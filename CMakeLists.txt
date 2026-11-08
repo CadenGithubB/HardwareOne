@@ -813,6 +813,15 @@ else()
         "${CMAKE_CURRENT_SOURCE_DIR}/dependencies.lock.${IDF_TARGET}")
 endif()
 idf_build_set_property(DEPENDENCIES_LOCK "${_hw1_dependencies_lock}")
+# Every build directory shares managed_components/, synced to this lock inside
+# project(). Record the lock around the sync so the build directories of other
+# targets reconfigure (and resync) on their next build, and list the stamp as a
+# configure dependency so this one does after theirs.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/HW1ManagedComponents.cmake")
+set(_hw1_managed_components_stamp
+    "${CMAKE_CURRENT_SOURCE_DIR}/.hw1-build/managed_components.stamp")
+hw1_managed_components_stamp("${_hw1_dependencies_lock}"
+    "${_hw1_managed_components_stamp}" PRE_SYNC)
 
 if(_ota_layout)
     set(PROJECT_VER "0.99.99+${_ota_version_suffix}")
@@ -820,6 +829,8 @@ else()
     set(PROJECT_VER "0.99.99")
 endif()
 project(hardwareone-idf)
+hw1_managed_components_stamp("${_hw1_dependencies_lock}"
+    "${_hw1_managed_components_stamp}" POST_SYNC)
 
 # ESP-IDF creates component targets while project() runs. Directory-level
 # add_compile_definitions() calls made below therefore do not retroactively
