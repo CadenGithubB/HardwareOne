@@ -713,6 +713,11 @@ static std::atomic<uint32_t>
     gAutomationEventKindMask[AUTOMATION_EVENT_MASK_WORDS]{};
 // Set when a subscribed event was posted; cleared when the tick drains.
 static std::atomic_bool gAutomationEventsPending{false};
+// Newest bus event seq when the scheduler last started (UINT32_MAX: never).
+// The first event drain starts here, not at its own "now" (G-73): setup starts
+// the scheduler, but its first drain runs in loop(), so events posted in
+// between (battery_low from a low cell at boot) were skipped unmatched.
+static std::atomic<uint32_t> gAutomationEventStartSeq{UINT32_MAX};
 
 // Publish a coherent, valid empty view when the backing file is absent or
 // malformed.  A merely-invalid cache makes automationsAnyDue() request another
@@ -4197,6 +4202,9 @@ static void schedulerTickMinute() {
   }
   int evCount = 0;  // no buffer => nothing drained; the clock scan below still runs
   if (sEventBuf) {
+    // First drain: resume from the scheduler start (G-73). If no start was
+    // recorded the sentinel stays and fetch begins "from now".
+    if (sEventCursor == UINT32_MAX) sEventCursor = gAutomationEventStartSeq.load();
     uint32_t skippedBefore = sEventRingSkipped;
     evCount = systemEventFetchSince(&sEventCursor, sEventBuf, SYSEVT_RING_SIZE,
                                     &sEventRingSkipped);
@@ -4222,7 +4230,9 @@ static void schedulerTickMinute() {
     // Heap too tight to drain: event triggers sit this tick out rather than
     // deref a null buffer. The cursor is still UINT32_MAX (this branch can only
     // be reached before the first successful alloc), so a later tick that does
-    // get memory starts "from now" and reports no bogus skip gap. Clearing
+    // get memory starts from the scheduler start; the 60 s discard drops what
+    // went stale meanwhile, and a skip gap means the ring really overwrote
+    // events this consumer never read. Clearing
     // gAutomationEventsPending above means we wait for the next posted event or the
     // 60 s safety tick to retry, instead of re-reading and re-parsing
     // automations.json every 250 ms while the heap is already exhausted.
@@ -4653,6 +4663,9 @@ bool startAutomationScheduler() {
   // CLI/web store, including devices first provisioned by a profile that had
   // the feature compiled out.
   if (!ensureAutomationsFile()) return false;
+  // Events posted from here on are matched by the first drain (G-73). Later
+  // starts store it too, but only a drain that has not run yet reads it.
+  gAutomationEventStartSeq = systemEventLatestSeq();
   {
     AutomationStateGuard guard;
     if (!ensureAutomationsCache()) return false;

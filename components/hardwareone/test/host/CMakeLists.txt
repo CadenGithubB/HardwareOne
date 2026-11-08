@@ -1217,6 +1217,11 @@ add_test(
   NAME mqtt_lifecycle_contract
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_lifecycle_contract.py)
+# No MQTT log call prints an inbound payload or a password (G-77).
+add_test(
+  NAME mqtt_log_privacy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_log_privacy.py)
 set(SETUP_MQTT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND SETUP_MQTT_TEST_ARGS --sanitize)
