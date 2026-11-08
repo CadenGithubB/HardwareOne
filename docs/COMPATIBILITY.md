@@ -25,7 +25,10 @@ keeps. Readiness item P0-7; keep this file in step with CHANGELOG `[Unreleased]`
     rules that still say `g2_worn` resolve to the new kind (alias in `systemEventKindFromName`).
   - `c6_console` (command) is an alias of `c6console`.
 - **1.0.0 is a full-erase install** for boards coming from 0.99.x: `idf.py erase-flash` first, then
-  the first-time setup. Settings from 0.99.x are not promised to carry over.
+  the first-time setup. Settings from 0.99.x are not promised to carry over. On a recovery OTA
+  layout (`HW_OTA_LAYOUT=1`) the erase also removes the recovery updater and the recovery
+  credential, so the install after it is steps 3-4 of `docs/OTA_DEVICE_SETUP.md`: `migration-flash`
+  (`encrypted-migration-flash` on `feathers3_fe`), then `setpin` or `otapin`.
 - OTA layout ids (`hw1-f3-ota-v1`, `hw1-f3fe-ota-v1`, …) and the OTA manifest format are frozen
   within 1.x; a new layout gets a new id rather than a changed meaning.
 

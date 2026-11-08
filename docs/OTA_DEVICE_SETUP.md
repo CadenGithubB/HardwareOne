@@ -273,7 +273,8 @@ The capability that used to live in firmware is now a cable target:
 ESPPORT="$HW1_PORT" idf.py -B "$HW1_MAIN_BUILD" littlefs-flash
 ```
 
-That writes the same blank image over `littlefs` and touches nothing else.
+On `feathers3_fe` use `encrypted-littlefs-flash`; the plain target is refused
+there. Either writes the same blank image over `littlefs` and touches nothing else.
 Do not use `idf.py erase-flash` for this: on an OTA device it also erases the
 recovery updater (see "`idf.py erase-flash` wipes the recovery updater" below).
 
@@ -310,7 +311,8 @@ credential) and `littlefs`.
 
 Do not run it on a provisioned OTA device. Use the targeted cable writes:
 
-- To wipe only the filesystem, use `littlefs-flash` (see above).
+- To wipe only the filesystem, use `littlefs-flash` (`encrypted-littlefs-flash`
+  on `feathers3_fe`; see above).
 - To replace only the recovery updater, use `factory-flash`
   (`encrypted-factory-flash` on `feathers3_fe`).
 
@@ -337,6 +339,10 @@ build with a destructive `formatfs confirm` console command compiled in, a
 manual Kconfig flip in each direction, and a second migration flash to remove
 it. Flashing a host-built blank filesystem removed all of that, and with it the
 window in which a device carried firmware able to erase its own storage.
+
+External clients such as the Android companion must size a candidate image
+from `slotSize` in `otastatus json` and must not hard-code a slot size (the old
+0x5A0000 is larger than the 8 MB layout's 0x500000 `ota_0`).
 
 This remains a BUILD and CABLE-time decision. It cannot become a switch in the
 on-device setup wizard: the partition table is flashed before any application

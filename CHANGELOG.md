@@ -65,7 +65,9 @@ everything user-visible since the v0.99.99 tag (55 commits).
 - Recovery OTA: the first `ota0-flash` in a fresh build directory no longer fails with
   `FileNotFoundError`; the pair audit now builds the partition table and blank otadata it reads.
   `OTA_DEVICE_SETUP.md` states that `idf.py erase-flash` is not refused and wipes the recovery
-  updater, and gives the re-provisioning steps. Host suite `ota_pair_audit_depends`.
+  updater, and gives the re-provisioning steps; the same warning is in `KNOWN_ISSUES.md`, and
+  COMPATIBILITY and the user guide name the OTA re-provisioning steps after the 1.0 full erase.
+  Host suite `ota_pair_audit_depends`.
 
 ### Docs
 - Private network names, addresses and account paths replaced with placeholders throughout the tracked
