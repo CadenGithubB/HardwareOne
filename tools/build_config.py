@@ -29,6 +29,10 @@ NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 def checked_name(name):
     if not NAME.fullmatch(name):
         raise ValueError("names must contain only lowercase letters, digits, '-' or '_'")
+    if name.endswith("-wdt-soak"):
+        # build_board.sh --wdt-soak adds this suffix to the build directory; a
+        # name ending in it would share that directory and inherit the soak.
+        raise ValueError("names must not end in '-wdt-soak' (reserved for watchdog soak builds)")
     return name
 
 

@@ -30,6 +30,7 @@ Add `--wdt-soak` to `tools/build_board.sh` (for example
 soak image: the watchdog panics after 20 s and the main loop is subscribed
 (`config/sdkconfig.wdt_soak.defaults`). It builds in `build-config-<name>-wdt-soak/`
 (or `build-<board>-wdt-soak/`), so ordinary builds never pick it up. Bench use only.
+For the same reason, configuration names may not end in `-wdt-soak`.
 
 Source the ESP-IDF environment first, as for `tools/build_board.sh`. These
 commands use the ordinary board build path. Outputs, SDK configuration, and

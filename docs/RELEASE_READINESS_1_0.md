@@ -402,9 +402,14 @@ Each stage has a stopping condition. Do not start a stage until the one before i
      fail; record the task and backtrace. Watch for the paths not fixed in code: the P4X main
      loop's 7-11 s LittleFS stall on its first pass after setup and after a Wi-Fi join (IDLE0
      starved; 20 s is meant to clear it), long CPU-bound work on `cmd_exec` (core 0) or on core 1
-     (IDLE checks), the BLE stack recycle on the main loop, and `lightsleep`. Serial, UART-link
-     and OLED commands that wait up to 60 s for `cmd_exec` (`openwifi` up to about 160 s) feed
-     the watchdog while they wait. Promote panic to the release only if every row passes.
+     (IDLE checks), the BLE stack recycle on the main loop, and `lightsleep`. Two waits are on
+     the subscribed main loop itself and are not fed on purpose, because a long one may be a real
+     hang: serial `login` runs PBKDF2 inline while it holds the filesystem lock
+     (`HardwareOne.cpp:2984`, `System_User.cpp:2024`), and main-loop ticks such as
+     `timeAnchorsTick` wait for that lock with no timeout (`System_Mutex.cpp:76`). Any other
+     task that holds the filesystem lock for over 20 s (an SD format, for example) now trips
+     the main loop. Serial, UART-link and OLED commands that wait up to 60 s for `cmd_exec`
+     (`openwifi` up to about 160 s) feed the watchdog while they wait. Promote panic to the release only if every row passes.
    - 20 BLE open/close cycles on FeatherS3 and Feather V2 with no per-cycle drift (G-43).
    - Walk-away-and-return for each BLE peer offered on a stable row (G-34) and `ring scan 300` (P1-1).
    - Five power cuts during settings saves, and one during an SD write (G-41).

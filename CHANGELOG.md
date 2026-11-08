@@ -44,7 +44,8 @@ everything user-visible since the v0.99.99 tag (55 commits).
 - Heap-poisoning diagnostic build profile for memory-corruption hunts (bench use).
 - Task-watchdog soak build (bench use, readiness P1-7): `tools/build_board.sh <board> [--config <name>]
   --wdt-soak` builds in its own `-wdt-soak` directory with a 20 s watchdog that panics, and subscribes
-  the main loop. Ordinary builds are unchanged. `BUILD_INFO.md` now shows the watchdog panic and timeout.
+  the main loop. Ordinary builds are unchanged. `BUILD_INFO.md` now shows the watchdog panic and timeout,
+  and a soak build's manifest gives the `--wdt-soak` command. Configuration names may not end in `-wdt-soak`.
 - New `heap_low` event when internal RAM runs low, so automations and `events.log` can react
   (previously a console warning only).
 

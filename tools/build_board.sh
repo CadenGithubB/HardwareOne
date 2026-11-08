@@ -63,6 +63,12 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+if [[ "$CONFIG_NAME" == *-wdt-soak ]]; then
+  # The soak build of "<name>" uses build-config-<name>-wdt-soak/; a saved
+  # configuration with that suffix would share it and inherit the soak.
+  echo "error: configuration names ending in -wdt-soak are reserved; use --wdt-soak" >&2
+  exit 1
+fi
 # build_config.py names the saved configuration's directory from this.
 export HW1_WDT_SOAK="$WDT_SOAK"
 if [[ -n "$CONFIG_NAME" ]]; then

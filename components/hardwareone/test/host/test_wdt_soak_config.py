@@ -22,6 +22,7 @@ from unittest.mock import patch
 REPO = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO / "tools"))
 import build_config  # noqa: E402
+import gen_build_info  # noqa: E402
 
 SOAK = REPO / "config/sdkconfig.wdt_soak.defaults"
 OTA = REPO / "config/sdkconfig.ota.defaults"
@@ -108,6 +109,9 @@ def if_blocks(text):
             continue
         if re.match(r"^endif\s*\(", code):
             stack.pop()
+        elif re.match(r"^(?:else|elseif)\s*\(", code):
+            # Lines after else()/elseif() run when the if() was false.
+            stack[-1] = "!" + stack[-1]
         out.append(list(stack))
         m = re.match(r"^if\s*\((.*)", code)
         if m:
@@ -128,7 +132,10 @@ def cpp_blocks(text):
         out.append(list(stack))
         m = re.match(r"^#\s*(if|ifdef|ifndef)\s+(.*)", code)
         if m:
-            stack.append(m.group(2).strip())
+            # The header always defines HW1_WDT_SOAK (0 when off), so only a
+            # value test (#if) selects soak builds; #ifdef would be always true.
+            kind, cond = m.group(1), m.group(2).strip()
+            stack.append(cond if kind == "if" else f"{kind} {cond}")
     return lines, out
 
 
@@ -141,17 +148,127 @@ class CmakeWiring(unittest.TestCase):
         self.assertRegex("\n".join(self.lines), r'option\(HW1_WDT_SOAK "[^"]*" OFF\)')
 
     def test_overlay_and_definitions_only_under_the_switch(self):
-        uses = 0
+        uses = []
         for line, conds in zip(self.lines, self.conds):
             code = line.split("#", 1)[0]
-            if ("HW1_WDT_SOAK_DEFAULTS" in code and "APPEND" in code) or "HW1_WDT_SOAK=1" in code:
-                uses += 1
+            if (("HW1_WDT_SOAK_DEFAULTS" in code and "APPEND" in code) or "HW1_WDT_SOAK=1" in code
+                    or "hw1_wdt_soak_check_" in code):
+                uses.append(code.strip())
                 self.assertIn("HW1_WDT_SOAK", conds, line)
-        self.assertEqual(uses, 4)  # defaults, reconcile, hardwareone, main
+                self.assertNotIn("!HW1_WDT_SOAK", conds, line)
+        # defaults, reconcile, the two guards, hardwareone and main.
+        self.assertEqual(len(uses), 6, uses)
 
-    def test_soak_requires_its_own_build_directory(self):
+    def test_both_components_get_the_definition(self):
+        text = "\n".join(l.split("#", 1)[0] for l in self.lines)
+        self.assertEqual(text.count(
+            "idf_component_get_property(_hw1_app_component hardwareone COMPONENT_LIB)"), 1)
+        self.assertEqual(text.count(
+            "idf_component_get_property(_hw1_main_component main COMPONENT_LIB)"), 1)
+        for target in ("${_hw1_app_component}", "${_hw1_main_component}"):
+            self.assertEqual(text.count(
+                f"target_compile_definitions({target} PRIVATE HW1_WDT_SOAK=1)"), 1, target)
+
+    def test_guards_are_called_with_the_real_inputs(self):
         text = "\n".join(self.lines)
-        self.assertIn('MATCHES "-wdt-soak$"', text)
+        self.assertIn('include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/HW1WdtSoak.cmake")', text)
+        self.assertIn('hw1_wdt_soak_check_build_dir("${CMAKE_BINARY_DIR}" "${_sdkconfig}" '
+                      '"${HW1_WDT_SOAK_DEFAULTS}")', text)
+        self.assertRegex(text, r'hw1_wdt_soak_check_resolved\("\$\{HW1_WDT_SOAK_DEFAULTS\}"\s+'
+                         r'"\$\{CONFIG_ESP_TASK_WDT_PANIC\}" "\$\{CONFIG_ESP_TASK_WDT_TIMEOUT_S\}"\)')
+        # The build-directory guard runs before any defaults are layered, and the
+        # resolved check after project() and before the app gets HW1_WDT_SOAK=1.
+        dir_guard = text.index("hw1_wdt_soak_check_build_dir(")
+        resolved = text.index("hw1_wdt_soak_check_resolved(")
+        self.assertLess(dir_guard, text.index("set(SDKCONFIG_DEFAULTS"))
+        self.assertLess(text.index("include($ENV{IDF_PATH}/tools/cmake/project.cmake)"), resolved)
+        self.assertLess(resolved, text.index("PRIVATE HW1_WDT_SOAK=1)"))
+
+    def test_overlay_is_layered_last(self):
+        code = [l.split("#", 1)[0].strip() for l in self.lines]
+        touches = [i for i, l in enumerate(code)
+                   if re.match(r"^(?:set\(|list\((?:APPEND|PREPEND|INSERT|REMOVE_\w+) )SDKCONFIG_DEFAULTS\b", l)]
+        soak = [i for i in touches if "HW1_WDT_SOAK_DEFAULTS" in code[i]]
+        self.assertEqual(len(soak), 1)
+        self.assertGreater(len(touches), 3)
+        self.assertEqual(touches[-1], soak[0], "nothing may layer after the soak overlay")
+        recon = [i for i, l in enumerate(code) if "_sdk_reconcile_files" in l]
+        call = [i for i in recon if code[i].startswith("hw1_reconcile_sdkconfig(")]
+        self.assertEqual(len(call), 1)
+        before = [i for i in recon if i < call[0] and "APPEND" in code[i]]
+        self.assertIn("HW1_WDT_SOAK_DEFAULTS", code[before[-1]])
+
+
+@unittest.skipUnless(shutil.which("cmake"), "cmake is required")
+class CmakeGuards(unittest.TestCase):
+    """Run the real guards in cmake/HW1WdtSoak.cmake with cmake -P."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.soak_dir = self.root / "build-feathers3-wdt-soak"
+        self.soak_dir.mkdir()
+
+    def run_cmake(self, call):
+        script = self.root / "check.cmake"
+        script.write_text('cmake_minimum_required(VERSION 3.16)\n'
+                          f'include("{REPO / "cmake/HW1WdtSoak.cmake"}")\n{call}\n')
+        result = subprocess.run([shutil.which("cmake"), "-P", str(script)],
+                                capture_output=True, text=True)
+        return result.returncode, result.stdout + result.stderr
+
+    def check_dir(self, binary_dir, sdkconfig, defaults=SOAK):
+        return self.run_cmake(f'hw1_wdt_soak_check_build_dir("{binary_dir}" "{sdkconfig}" "{defaults}")')
+
+    def check_resolved(self, panic, timeout, defaults=SOAK):
+        return self.run_cmake(f'hw1_wdt_soak_check_resolved("{defaults}" "{panic}" "{timeout}")')
+
+    def test_soak_directory_with_its_own_sdkconfig_passes(self):
+        code, out = self.check_dir(self.soak_dir, self.soak_dir / "sdkconfig")
+        self.assertEqual(code, 0, out)
+
+    def test_ordinary_directory_is_refused(self):
+        plain = self.root / "build-feathers3"
+        plain.mkdir()
+        code, out = self.check_dir(plain, plain / "sdkconfig")
+        self.assertNotEqual(code, 0)
+        self.assertIn("name ending in -wdt-soak", out)
+        code, out = self.check_dir(self.root / "build-wdt-soak-feathers3",
+                                   self.root / "build-wdt-soak-feathers3/sdkconfig")
+        self.assertNotEqual(code, 0, out)
+
+    def test_shared_sdkconfig_is_refused(self):
+        code, out = self.check_dir(self.soak_dir, REPO / "config/sdkconfig")
+        self.assertNotEqual(code, 0)
+        self.assertIn("SDKCONFIG inside its build directory", out)
+        nested = self.soak_dir / "config"
+        nested.mkdir()
+        code, out = self.check_dir(self.soak_dir, nested / "sdkconfig")
+        self.assertNotEqual(code, 0, out)
+
+    def test_missing_overlay_is_refused(self):
+        code, out = self.check_dir(self.soak_dir, self.soak_dir / "sdkconfig",
+                                   defaults=self.root / "missing.defaults")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Missing watchdog soak overlay", out)
+
+    def test_resolved_values_must_match_the_overlay(self):
+        timeout = wdt_settings(SOAK)["CONFIG_ESP_TASK_WDT_TIMEOUT_S"]
+        code, out = self.check_resolved("y", timeout)
+        self.assertEqual(code, 0, out)
+        for panic, value in (("", timeout), ("n", timeout), ("y", "5"), ("y", "")):
+            with self.subTest(panic=panic, timeout=value):
+                code, out = self.check_resolved(panic, value)
+                self.assertNotEqual(code, 0, out)
+                self.assertIn("Watchdog soak build resolved", out)
+
+    def test_overlay_without_a_timeout_is_refused(self):
+        bare = self.root / "bare.defaults"
+        bare.write_text("CONFIG_ESP_TASK_WDT_PANIC=y\n")
+        code, out = self.check_resolved("y", "20", defaults=bare)
+        self.assertNotEqual(code, 0)
+        self.assertIn("sets no timeout", out)
 
 
 class AppWiring(unittest.TestCase):
@@ -162,11 +279,91 @@ class AppWiring(unittest.TestCase):
             if "taskWdtSubscribeCurrent()" in line or "taskWdtFeed()" in line:
                 found += 1
                 self.assertIn("HW1_WDT_SOAK", stack, line)
+                self.assertNotIn("!HW1_WDT_SOAK", stack, line)
         self.assertEqual(found, 2)
+
+    def test_main_subscribes_after_setup_and_feeds_each_pass(self):
+        lines = [l.split("//", 1)[0].strip()
+                 for l in (REPO / "main/hardwareone-idf.cpp").read_text().splitlines()]
+        start = [i for i, l in enumerate(lines) if l.startswith('extern "C" void app_main(')]
+        self.assertEqual(len(start), 1)
+        def index(text):
+            hits = [i for i, l in enumerate(lines) if i > start[0] and text in l and
+                    (l == text or not text.endswith(";"))]
+            self.assertEqual(len(hits), 1, text)
+            return hits[0]
+        setup, subscribe = index("setup();"), index("taskWdtSubscribeCurrent()")
+        loop_start, call, feed = index("while (true)"), index("loop();"), index("taskWdtFeed()")
+        self.assertLess(setup, subscribe, "setup() must not run subscribed")
+        self.assertLess(subscribe, loop_start)
+        self.assertLess(loop_start, call)
+        self.assertLess(call, feed)
+
+    def test_command_wait_feeds_a_subscribed_caller(self):
+        # Serial, UART-link and OLED commands all wait here on the main loop.
+        text = (REPO / "components/hardwareone/System_Utils.cpp").read_text()
+        body = text[text.index("bool submitAndExecuteSync("):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn('#include "System_TaskWdt.h"', text)
+        self.assertEqual(body.count("taskWdtAwareSemaphoreTake(r->done, 60000)"), 1)
+        self.assertNotIn("xSemaphoreTake(r->done", body)
 
     def test_header_defaults_off(self):
         text = (REPO / "components/hardwareone/System_TaskWdt.h").read_text()
         self.assertIn("#ifndef HW1_WDT_SOAK\n#define HW1_WDT_SOAK 0\n#endif", text)
+
+
+class ReservedSuffix(unittest.TestCase):
+    def test_configuration_names_may_not_end_in_the_soak_suffix(self):
+        build_config.checked_name("foo-wdt")
+        with self.assertRaises(ValueError):
+            build_config.checked_name("foo-wdt-soak")
+
+
+class ManifestNaming(unittest.TestCase):
+    """BUILD_INFO.md names a soak build by its real configuration and command."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def manifest(self, directory, board, configuration_header=None):
+        directory.mkdir()
+        (directory / "sdkconfig").write_text('CONFIG_IDF_TARGET="esp32s3"\n'
+                                             "CONFIG_ESP_TASK_WDT_PANIC=y\n"
+                                             "CONFIG_ESP_TASK_WDT_TIMEOUT_S=20\n")
+        macros = None
+        if configuration_header:
+            (directory / "configuration.json").write_text('{"board": "%s", "features": {}}' % board)
+            macros = {"configuration_header": str(directory / "features.h"), "value": {},
+                      "bool": {}, "names": []}
+        with patch.object(sys, "argv", ["gen_build_info.py", str(directory), board]), \
+                patch.object(gen_build_info, "resolve_macros",
+                             return_value=(macros, None if macros else "not configured")), \
+                patch("builtins.print"):
+            gen_build_info.main()
+        return (directory / "BUILD_INFO.md").read_text()
+
+    def test_board_soak_reproduces_with_the_switch(self):
+        text = self.manifest(self.root / "build-feathers3-wdt-soak", "feathers3")
+        self.assertIn("tools/build_board.sh feathers3 --wdt-soak\n", text)
+        self.assertIn("Watchdog soak build", text)
+
+    def test_configuration_soak_names_the_real_configuration(self):
+        text = self.manifest(self.root / "build-config-xiao-no-bluetooth-wdt-soak", "xiao_s3",
+                             configuration_header=True)
+        self.assertIn("# Build manifest — `xiao-no-bluetooth`", text)
+        self.assertIn("python3 tools/build_config.py build xiao-no-bluetooth --wdt-soak\n", text)
+        self.assertIn("configurations/xiao-no-bluetooth.json", text)
+        self.assertNotIn("build xiao-no-bluetooth-wdt-soak", text)
+        self.assertNotIn("configurations/xiao-no-bluetooth-wdt-soak", text)
+
+    def test_ordinary_build_manifest_has_no_soak_marks(self):
+        text = self.manifest(self.root / "build-feathers3", "feathers3")
+        self.assertIn("tools/build_board.sh feathers3\n", text)
+        self.assertNotIn("wdt-soak", text)
+        self.assertNotIn("Watchdog soak build", text)
 
 
 class WrapperWiring(unittest.TestCase):
@@ -240,6 +437,16 @@ class WrapperWiring(unittest.TestCase):
         calls = self.run_wrapper("xiao_s3", "--config", "xiao-no-bluetooth", "size")
         self.assertTrue(all("HW1_WDT_SOAK=0" in c for c in calls), calls)
         self.assertNotIn("wdt-soak", "\n".join(calls))
+
+
+    def test_reserved_configuration_name_is_refused(self):
+        env = dict(os.environ, PATH=f"{self.bin}:{os.environ.get('PATH', '')}")
+        result = subprocess.run(["bash", str(self.repo / "tools/build_board.sh"), "xiao_s3",
+                                 "--config", "xiao-no-bluetooth-wdt-soak"],
+                                capture_output=True, text=True, env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("reserved", result.stderr)
+        self.assertFalse(self.log.exists() and self.log.read_text().strip())
 
 
 class BuildConfigDirectory(unittest.TestCase):

@@ -40,6 +40,8 @@ SECTIONS = [
 ]
 
 # sdkconfig keys that describe the chip/build environment.
+WDT_SOAK_SUFFIX = "-wdt-soak"
+
 SDKCONFIG_KEYS = [
     ("CONFIG_IDF_TARGET", "Chip target"),
     ("CONFIG_ARDUINO_VARIANT", "Arduino variant"),
@@ -545,9 +547,13 @@ def main():
     if not os.path.isdir(build_dir):
         die("no such build dir: %s" % build_dir)
     board = sys.argv[2] if len(sys.argv) > 2 else (
-        os.path.basename(build_dir).replace("build-", "") or "(default)")
+        os.path.basename(build_dir).replace("build-", "").removesuffix(WDT_SOAK_SUFFIX)
+        or "(default)")
     deployment = sys.argv[3] if len(sys.argv) > 3 else ""
 
+    # tools/build_board.sh --wdt-soak builds in a directory ending in this
+    # suffix (configuration names may not end in it; see build_config.py).
+    wdt_soak = os.path.basename(build_dir).endswith(WDT_SOAK_SUFFIX)
     art = artifact_info(build_dir)
     art_abs = os.path.join(REPO, art["bin_path"]) if art.get("bin_path") else None
     macros, macro_err = resolve_macros(build_dir, art_abs)
@@ -559,6 +565,8 @@ def main():
             with open(snapshot) as source:
                 configuration = json.load(source)
             configuration_name = os.path.basename(build_dir).removeprefix("build-config-")
+            if wdt_soak:
+                configuration_name = configuration_name.removesuffix(WDT_SOAK_SUFFIX)
     cfg, cfg_path = read_sdkconfig(build_dir)
     commit, desc, n_dirty = git_provenance()
     idf = idf_provenance(build_idf_path(build_dir), cfg.get("CONFIG_IDF_TARGET", ""))
@@ -579,6 +587,8 @@ def main():
         A("**Board:** `HW_BOARD=%s`  " % board)
     if deployment:
         A("**Deployment:** `%s`  " % deployment)
+    if wdt_soak:
+        A("**Watchdog soak build:** task watchdog panics, main loop subscribed  ")
     if configuration_name:
         A("**Saved configuration:** `configurations/%s.json`  " % configuration_name)
     A("**Chip:** %s  " % cfg.get("CONFIG_IDF_TARGET", "?"))
@@ -725,11 +735,12 @@ def main():
         A("only what can be proven about the image above.")
         A("")
 
+    soak_flag = " --wdt-soak" if wdt_soak else ""
     A("## Reproduce this build")
     A("")
     A("```bash")
     if configuration_name:
-        A("python3 tools/build_config.py build %s" % configuration_name)
+        A("python3 tools/build_config.py build %s%s" % (configuration_name, soak_flag))
     elif deployment:
         family, deployment_board = deployment.split("/", 1)
         if deployment_is_ota(deployment):
@@ -739,7 +750,7 @@ def main():
             A("tools/build_deployment.sh %s %s   # factory-only: no signing key"
               % (family, deployment_board))
     else:
-        A("tools/build_board.sh %s" % board)
+        A("tools/build_board.sh %s%s" % (board, soak_flag))
     A("```")
     A("")
     if configuration_name:
