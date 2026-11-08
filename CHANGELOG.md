@@ -77,6 +77,15 @@ everything user-visible since the v0.99.99 tag (55 commits).
   2026-11-08). The companion now restarts a server that was running once Wi-Fi is back: at once, or,
   when the link or a stop deferred past an open web request comes later, from the main loop within
   60 s. A plain `radiopower off`/`on` still leaves the web server off. Not yet tested on hardware.
+- ESP32-P4: a CPU clock change could hang both cores until the interrupt watchdog reset the chip
+  (`rst:0x7 (HP_SYS_HP_WDT_RESET)`, `reset=other_wdt`, no panic output). Bench 2026-11-08: 2 of 3
+  `stt start` attempts at the 100 MHz idle clock that failed at once (raise to 400 MHz, then straight
+  back). The clock switch added on 2026-11-07 freezes the external-memory cache with the other core
+  stalled, but the compiler had inlined it into flash code, so the frozen window itself was fetched
+  from flash; on the P4 a cache miss there never completes. The switch is now a separate internal-RAM
+  function, reads its configuration from internal RAM, and refuses (the power policy retries) on a
+  task whose stack is not in internal RAM. Any clock change was exposed (power mode, `cpufreq`, the
+  STT and display boosts). Not yet tested on hardware.
 - Two crashes: the QuickNote worker's stack and Arduino's unlocked `NetworkEvents`.
 - BLE setup worker retires a client after an OPEN timeout and bounds a stuck job.
 - Phone pipe isolates CLOSE and DISCONNECT by peer address and keeps the first cause of a lost session.
