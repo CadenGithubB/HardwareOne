@@ -26,6 +26,12 @@ import tempfile
 from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# An image that no longer fits its partition with room to grow must fail loudly, not
+# surface later as a flash that will not take the next fix. Releases set the floor in
+# RELEASING.md; a trial build can lower it with HW1_HEADROOM_FLOOR_BYTES=0.
+HEADROOM_FLOOR_BYTES = int(os.environ.get("HW1_HEADROOM_FLOOR_BYTES", str(64 * 1024)))
+headroom_failure = []
+
 
 # Macro families worth reporting, in display order. (prefix/exact, section)
 SECTIONS = [
@@ -430,6 +436,9 @@ def main():
         if art.get("app_part_bytes"):
             free = art["app_part_bytes"] - art["bin_bytes"]
             pct = 100.0 * free / art["app_part_bytes"]
+            if free < HEADROOM_FLOOR_BYTES:
+                headroom_failure.append("%s: %s free in the app partition, below the %s floor"
+                                        % (art.get("bin_path", "image"), fmt_kb(free), fmt_kb(HEADROOM_FLOOR_BYTES)))
             A("| App partition (`%s`) | %s |" % (art.get("app_part_name", "app"),
                                                  fmt_kb(art["app_part_bytes"])))
             A("| Free headroom | %s (%.1f%%) |" % (fmt_kb(free), pct))
@@ -544,6 +553,12 @@ def main():
     with open(out_path, "w") as f:
         f.write("\n".join(L) + "\n")
     print("gen_build_info: wrote %s" % os.path.relpath(out_path, REPO))
+    if headroom_failure:
+        for line in headroom_failure:
+            print("gen_build_info: error: " + line, file=sys.stderr)
+        print("gen_build_info: the image is too close to its partition size; trim features or raise the "
+              "partition. HW1_HEADROOM_FLOOR_BYTES overrides the floor for a trial build.", file=sys.stderr)
+        sys.exit(3)
     if art.get("bin_bytes") and art.get("app_part_bytes"):
         print("Image: %s; app partition: %s; headroom: %s" % (
             fmt_kb(art["bin_bytes"]), fmt_kb(art["app_part_bytes"]),

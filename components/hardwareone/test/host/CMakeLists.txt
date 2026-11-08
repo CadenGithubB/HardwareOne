@@ -2216,3 +2216,8 @@ set_tests_properties(camera_video_buffers PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME camera_oled_preview
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_camera.py
           ${CAMERA_SCCB_TEST_ARGS})
+
+# The OTA protocol component keeps its own stand-alone host suite (journal and phase
+# policy, fake slot store); registering it here puts it under the same ctest gate
+# instead of a separate build nobody runs (readiness P0-4, G-19).
+add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../../hw1_ota_protocol/test/host" hw1_ota_protocol_host)

@@ -25,6 +25,26 @@ PATCH = fixes/docs. MINOR = backward-compatible features. Breaking changes bump 
 An optional fourth number marks a point release on top of X.Y.Z (e.g. `0.99.94.1`); the OTA
 protocol, recovery updater and `tools/ota/semver.py` accept it and order it between X.Y.Z and the next patch.
 
+## Gate: before any tag
+
+Every step below must pass on the exact commit you intend to tag, from a clean tree
+(`git status --porcelain` empty). They are the "done when" lines of the 1.0 readiness plan
+(`docs/RELEASE_READINESS_1_0.md`).
+
+1. Arduino component vendored and patched: `tools/vendor_arduino.sh --check` prints OK
+   (a fresh clone: `tools/vendor_arduino.sh`, then ESP32-P4 rows also `tools/p4/prepare_sdk.sh`).
+2. Host suite green, serially and in parallel, with Node.js installed so the browser suites run:
+   `cmake -S components/hardwareone/test/host -B /tmp/hw1-host && cmake --build /tmp/hw1-host -j6 &&
+   ctest --test-dir /tmp/hw1-host && ctest --test-dir /tmp/hw1-host -j6` — 0 failures; "Not Run" only for
+   the documented optional suites (`stt_conv_scratch`, the camera managed-SCCB/video suites). The
+   OTA protocol suite is part of the same tree.
+3. Every stable row of the supported matrix builds from that commit with `tools/build_board.sh <board>`
+   (or `tools/build_deployment.sh` for a deployment row) and its BUILD_INFO.md says "clean tree" and
+   reports headroom at or above the floor (`gen_build_info.py`: 64 KB by default; the build fails below it).
+4. Tracked tree hygiene: `git grep -nIE '/Users/[a-z]|192\.168\.' -- . ':!components/hardwareone_libs'` is empty.
+5. CHANGELOG `[Unreleased]` lists every user-visible change since the last tag; COMPATIBILITY.md and the
+   matrix in README match what you built.
+
 ## Cut a release
 1. Draft notes from `git log <last-tag>..HEAD --oneline`, grouped into Added / Changed / Fixed / Security / Docs.
 2. Bump the version in ALL four files above so they agree.
