@@ -805,8 +805,14 @@ static const char* cameraPowerAsyncCommand(bool start) {
                : "Error: camera stop not queued (camera power worker unavailable)";
 }
 
+// No thread_local in firmware code: on the P4 the FreeRTOS port reserves the
+// whole TLS image at the top of every task's stack, IDF's fixed-size ones
+// included. These two buffers (576 bytes) left Bluedroid's 2.5 KB hciT about
+// 1.95 KB, and it overflowed by 4 bytes printing a log (bench 2026-11-08).
 static const char* cameraCommandFailure(const char* fallback) {
-  static thread_local char result[192];
+  // Same contract as the other command results here: consumed by the
+  // command executor before the next camera command.
+  EXT_RAM_BSS_ATTR static char result[192];
   snprintf(result,sizeof(result),"Error: %s",fallback);
   if(lockCameraMutex(0)) {
     const auto state=cameraBackend().info();
@@ -1418,21 +1424,55 @@ const CommandEntry cameraCommands[] = {
 template<CameraControl Control> static bool cameraSettingAvailable() {
   return cameraSupportsControl(Control);
 }
+// The options text depends only on the resolution set the active backend
+// reports, which changes only with the sensor. Each distinct set is built once
+// into its own buffer that is never freed, so the pointer stays valid for a
+// settings reader on any task (G2, OLED, web) without per-task storage.
 static const char* cameraResolutionOptions() {
-  // Every caller consumes/copies the string synchronously on its own task.
-  static thread_local char options[384];
-  size_t used=0;options[0]=0;
-  const auto caps=getCameraCapabilities();
-  for(unsigned i=0;i<unsigned(CameraFrameSize::Count);++i) {
-    if(!(caps.resolutions & cameraResolutionBit(CameraFrameSize(i))))continue;
-    const auto* size=cameraFrameSizeInfo(CameraFrameSize(i));
-    if(!size)continue;
-    const int count=snprintf(options+used,sizeof(options)-used,"%s%u|%ux%u (%s)",
-        used?",":"",i,size->width,size->height,size->name);
-    if(count<0 || size_t(count)>=sizeof(options)-used){options[used]=0;break;}
-    used+=count;
+  constexpr size_t kOptionsSize = 384;
+  struct CachedOptions { uint32_t resolutions; const char* text; };
+  static CachedOptions sCached[4];  // sets seen this boot; a board has one or two sensors
+  static portMUX_TYPE sCachedLock = portMUX_INITIALIZER_UNLOCKED;
+  const uint32_t resolutions = getCameraCapabilities().resolutions;
+  if (!resolutions) return "";
+  const auto lookup = [&]() -> const char* {
+    for (const auto& entry : sCached)
+      if (entry.text && entry.resolutions == resolutions) return entry.text;
+    return nullptr;
+  };
+  portENTER_CRITICAL(&sCachedLock);
+  const char* found = lookup();
+  portEXIT_CRITICAL(&sCachedLock);
+  if (found) return found;
+
+  char* options = static_cast<char*>(ps_alloc(kOptionsSize, AllocPref::PreferPSRAM, "camera.res.options"));
+  if (!options) return "";
+  size_t used = 0;
+  options[0] = 0;
+  for (unsigned i = 0; i < unsigned(CameraFrameSize::Count); ++i) {
+    if (!(resolutions & cameraResolutionBit(CameraFrameSize(i)))) continue;
+    const auto* size = cameraFrameSizeInfo(CameraFrameSize(i));
+    if (!size) continue;
+    const int count = snprintf(options + used, kOptionsSize - used, "%s%u|%ux%u (%s)",
+                               used ? "," : "", i, size->width, size->height, size->name);
+    if (count < 0 || size_t(count) >= kOptionsSize - used) { options[used] = 0; break; }
+    used += count;
   }
-  return options;
+  bool stored = false;
+  portENTER_CRITICAL(&sCachedLock);
+  found = lookup();  // another task built the same set meanwhile
+  if (!found) {
+    for (auto& entry : sCached) {
+      if (entry.text) continue;
+      entry = {resolutions, options};
+      found = options;
+      stored = true;
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&sCachedLock);
+  if (!stored) ps_free(options);
+  return found ? found : "";  // table full: a fifth sensor this boot gets no list
 }
 
 static const SettingEntry cameraSettingEntries[] = {

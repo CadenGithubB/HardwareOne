@@ -80,6 +80,12 @@ everything user-visible since the v0.99.99 tag (55 commits).
   2026-11-08). The companion now restarts a server that was running once Wi-Fi is back: at once, or,
   when the link or a stop deferred past an open web request comes later, from the main loop within
   60 s. A plain `radiopower off`/`on` still leaves the web server off. Not yet tested on hardware.
+- ESP32-P4: every task, including ESP-IDF's fixed-size ones, lost 576 bytes of stack to two camera
+  `thread_local` buffers (added 2026-11-02): the P4's FreeRTOS port reserves thread-local storage on
+  each task's stack, which left Bluedroid's 2.5 KB `hciT` about 1.95 KB, and it overflowed by 4 bytes
+  printing a log line (bench 2026-11-08). The camera error text now uses a static buffer like the
+  other camera commands, and the resolution list is built once per sensor into its own buffer. A host
+  test rejects `thread_local` in HardwareOne code. Not yet tested on hardware.
 - ESP32-P4: a CPU clock change could hang both cores until the interrupt watchdog reset the chip
   (`rst:0x7 (HP_SYS_HP_WDT_RESET)`, `reset=other_wdt`, no panic output). Bench 2026-11-08: 2 of 3
   `stt start` attempts at the 100 MHz idle clock that failed at once (raise to 400 MHz, then straight

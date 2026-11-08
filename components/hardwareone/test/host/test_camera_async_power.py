@@ -35,6 +35,7 @@ HARNESS = r'''
 #include <cstring>
 #include <string>
 
+#define EXT_RAM_BSS_ATTR
 static int checks = 0;
 #define CHECK(condition) do { ++checks; if (!(condition)) { \
   std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #condition); std::exit(1); } } while (0)

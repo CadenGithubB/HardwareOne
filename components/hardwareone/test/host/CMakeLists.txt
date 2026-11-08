@@ -518,6 +518,13 @@ foreach(test_name IN ITEMS camera_core camera_dvp camera_p4 camera_i2c_reservati
             ${CAMERA_TEST_ARGS})
 endforeach()
 
+# No thread_local in HardwareOne firmware code: the P4 port reserves the TLS
+# image on every task stack (Bluedroid's hciT overflowed, bench 2026-11-08),
+# and the camera options cache that replaced the camera's TLS buffers.
+add_test(
+  NAME no_task_tls
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_no_task_tls.py ${CAMERA_TEST_ARGS})
+
 # ESP-NOW peer metadata: the metadata text policy, receive path and CLI setters
 # (C++), and the shipping ESP-NOW page renderers on a host JavaScript engine
 # (README "ESP-NOW peer metadata text and page rendering").
