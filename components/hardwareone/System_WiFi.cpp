@@ -2625,29 +2625,42 @@ const char* cmd_certgen(const String& argsInput) {
     // /system is created at boot (fs.init.mkdirs); only ensure the certs dir.
     if (!VFS::existsGuarded("/system/certs", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"))) VFS::mkdirGuarded("/system/certs", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"));
 
-    // Each file goes through a checked temp + rename (writeTextAtomic), so a
-    // full filesystem or a short write leaves the previous file in place
-    // instead of a truncated PEM. The key is written first: if the cert then
-    // fails, the old cert no longer matches and HTTPS falls back to HTTP
-    // until certgen succeeds, which the error below asks for.
+    // Stage both files as checked temps (writeText verifies the byte count and
+    // size) before replacing either, so a full filesystem or a short write
+    // leaves the previous key and certificate in place as a matching pair.
+    // Only a failed second rename can leave a new key beside the old
+    // certificate. HTTPS start checks only that both files are non-empty and
+    // httpd_ssl_start does not check that they match, so in that case the
+    // server still starts on 443 and every TLS handshake fails (no HTTP
+    // fallback) until certgen succeeds or httpsEnabled is set to 0.
     const AuthContext certAuth = VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen");
+    const String keyPath = "/system/certs/https_server.key";
+    const String certPath = "/system/certs/https_server.crt";
+    const String keyTmp = "/system/certs/https_server.key.tmp";
+    const String certTmp = "/system/certs/https_server.crt.tmp";
     const size_t keyLen = strnlen((const char*)keyPem, 4096);
     const size_t certLen = strnlen((const char*)certPem, 4096);
     String keyText;
-    bool keySaved = keyText.concat((const char*)keyPem, (unsigned int)keyLen) &&
-                    writeTextAtomic("/system/certs/https_server.key", keyText, certAuth);
+    String certText;
+    const bool staged = keyText.concat((const char*)keyPem, (unsigned int)keyLen) &&
+                        certText.concat((const char*)certPem, (unsigned int)certLen) &&
+                        writeText(keyTmp.c_str(), keyText, certAuth) &&
+                        writeText(certTmp.c_str(), certText, certAuth);
     // The String holds the private key in plain text; wipe it before it is freed.
     if (keyText.length()) mbedtls_platform_zeroize(keyText.begin(), keyText.length());
-    if (!keySaved) {
-      snprintf(gDebugBuffer, 1024, "Error: Cannot write key file (filesystem full?); previous key and certificate kept");
+    if (!staged || !VFS::renameGuarded(keyTmp, keyPath, certAuth)) {
+      VFS::removeGuarded(keyTmp, certAuth);
+      VFS::removeGuarded(certTmp, certAuth);
+      snprintf(gDebugBuffer, 1024,
+               "Error: Cannot save the new key and certificate (filesystem full?); previous key and certificate kept");
       goto cleanup;
     }
-    String certText;
-    if (!certText.concat((const char*)certPem, (unsigned int)certLen) ||
-        !writeTextAtomic("/system/certs/https_server.crt", certText, certAuth)) {
+    if (!VFS::renameGuarded(certTmp, certPath, certAuth)) {
+      VFS::removeGuarded(certTmp, certAuth);
       snprintf(gDebugBuffer, 1024,
-               "Error: Key saved but the certificate could not be written (filesystem full?). "
-               "HTTPS will not start until certgen succeeds.");
+               "Error: New key saved but the certificate could not be moved into place, so they no longer match. "
+               "With httpsEnabled 1, HTTPS connections will fail after a reboot until certgen succeeds "
+               "(or set httpsEnabled 0).");
       goto cleanup;
     }
   }
@@ -2664,6 +2677,8 @@ const char* cmd_certgen(const String& argsInput) {
 
 cleanup:
   heap_caps_free(certPem);
+  // keyPem holds the private key in plain text; wipe it before it is freed.
+  if (keyPem) mbedtls_platform_zeroize(keyPem, 4096);
   heap_caps_free(keyPem);
   mbedtls_x509write_crt_free(crt);
   mbedtls_pk_free(key);

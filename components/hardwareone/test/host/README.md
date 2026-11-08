@@ -4424,10 +4424,14 @@ writes) and leave the previous `identity.json` byte for byte; a write that exact
 succeeds. `--source-dir <dir>` reads `System_ESPNow_Identity.cpp`/`.h` from another tree:
 the pre-fix writers (only `written == 0` rejected) fail 22 checks.
 
-`https_cert_writes` is a source contract on `cmd_certgen`: no File is opened with "w",
-the key and then the certificate go through `writeTextAtomic` with each result checked
-(the helper's own short-write cases are in `checked_text_writes`), and the `String` copy
-of the key PEM is wiped. `--source-dir` runs it on another tree; the pre-fix code fails.
+`https_cert_writes` is a source contract on `cmd_certgen`: no File is opened with "w";
+both PEMs are staged as `.tmp` siblings through `writeText` in one checked condition
+before either is renamed into place (the helper's own short-write cases are in
+`checked_text_writes`), and a staging failure removes both temps. HTTPS start does not
+check that key and certificate match, so this keeps a short write from leaving a
+mismatched pair. No message claims an HTTP fallback, and the `String` copy and PSRAM
+buffer of the key PEM are wiped. `--source-dir` runs it on another tree; the pre-fix
+code fails.
 
 ```sh
 python3 components/hardwareone/test/host/test_espnow_identity_writes.py --sanitize

@@ -993,7 +993,7 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_identity_writes.py
           ${ESPNOW_BOND_JSON_TEST_ARGS})
-# certgen saves the HTTPS key and certificate through checked writeTextAtomic.
+# certgen stages the HTTPS key and certificate as checked temps before renaming either.
 add_test(
   NAME https_cert_writes
   COMMAND ${Python3_EXECUTABLE}
