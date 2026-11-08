@@ -191,6 +191,21 @@ The buttons share the input lifecycle and task; disabling the input controller
 also disables them. Explicitly enabling them requires both the EYE board and
 the GPIO encoder input selection.
 
+Local speech-to-text needs a model file that is not part of the image. This
+board profile keeps microSD off and expects the 5×5 model at
+`/STT Models/quartznet5x5.p4.stt` on the internal filesystem; that file is not
+published, so on this build local transcription reports the model as missing.
+The saved P4 configurations (`configurations/p4-*.json`) enable the microSD
+card and select the 15×5 gen2 model at
+`/sd/STT Models/quartznet15x5-gen2-25397.p4.stt`, published as
+[`model-gen2-25397`](https://github.com/CadenGithubB/ESP32_Onboard_Speech_To_Text/releases/tag/model-gen2-25397)
+(`quartznet15x5-gen2-25397.p4.stt`, 20,112,224 bytes, SHA-256
+`dccef3a8cead069d97d780e0d08ddfc65d9f0870c0af4673b29327f00158f048`).
+Speaker labels (on in this profile) read `/sd/STT Models/speaker.spk`, which is
+not published; transcription works without it. Installation steps are in the
+README's [Local speech-to-text model](../README.md#local-speech-to-text-model-esp32-p4)
+section.
+
 
 ## User interface and storage
 

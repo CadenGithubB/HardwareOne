@@ -63,5 +63,5 @@ Never use `idf.py flash` on an OTA-layout board - it writes the application to
 
 1. Restore your backed-up files.
 2. Confirm the recovery updater is reachable before relying on OTA.
-3. `ota status` should report layout `hw1-pa-xiao-ota-v1` and a version ending
+3. `otastatus` should report layout `hw1-pa-xiao-ota-v1` and a version ending
    in `+xiaopa1`. Anything else means the wrong artifacts were flashed.

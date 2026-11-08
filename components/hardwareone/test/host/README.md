@@ -1109,6 +1109,36 @@ runtime replies and the hand-written `docs/USERGUIDE.md`. Run with
 `ctest --test-dir build -R '^retired_feature_text$' --output-on-failure` (or
 `python3 test_retired_feature_text.py`).
 
+## Public doc commands
+
+`public_docs_commands` reads `docs/USERGUIDE.md`, `docs/QUICKSTART.md` and the
+real sources (no compile). Every command line in a USERGUIDE code block must
+resolve against the `CommandEntry` registry (`tools/command_registry.py`
+`parse_commands()`, the tables `docs/COMMAND_REFERENCE.md` is generated from)
+with the firmware's case-insensitive, whole-word, longest-prefix rule from
+`System_CommandLookupCore.h`; `(admin)` / `(super admin)` annotations must match
+the registry; every flag in the USERGUIDE debug-flag table and every command in
+QUICKSTART's Step 4 must be registered; and the QUICKSTART first-boot wizard
+table must list `getWizardPageTitle` titles in `kPageOrder` order
+(`System_SetupWizard.cpp`). Indented continuation lines, `--- section ---`
+separators, `(note)` lines, automation `IF`/`NAME:`/`SCHEDULE:` syntax,
+`debug<flagname>` placeholders and the UART-only `dictate` line are skipped. Not
+covered: command names in prose elsewhere and argument syntax. Run with
+`ctest --test-dir build -R '^public_docs_commands$' --output-on-failure` (or
+`python3 test_public_docs_commands.py`).
+
+## Bare idf.py guard
+
+`bare_idf_guard` runs `cmake/HW1BoardGuard.cmake` with `cmake -P` (no ESP-IDF).
+With no `HW_BOARD` and no deployment, configure must stop with a message naming
+`tools/build_board.sh` when the sdkconfig is the tracked `config/sdkconfig`
+(left byte-for-byte unchanged) or was saved for another Arduino variant or flash
+size than the defaulted board; a fresh or matching sdkconfig and any explicit
+board pass. It also checks that the root `CMakeLists.txt` calls the guard before
+its first write to the sdkconfig. Run with
+`ctest --test-dir build -R '^bare_idf_guard$' --output-on-failure` (or
+`python3 test_bare_idf_guard.py`).
+
 ## Dead auth helpers removed
 
 `dead_auth_helpers_removed` is a source check over the firmware sources

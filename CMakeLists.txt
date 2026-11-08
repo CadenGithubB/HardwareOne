@@ -38,7 +38,8 @@ endif()
 # The saved config lives in config/, not at the project root. IDF would otherwise
 # default SDKCONFIG to ${project_dir}/sdkconfig, so claim it here BEFORE
 # project.cmake runs. tools/build_board.sh still overrides this per board with
-# -DSDKCONFIG=build-<board>/sdkconfig; this default only serves a bare idf.py.
+# -DSDKCONFIG=build-<board>/sdkconfig; this default only serves a bare idf.py,
+# and hw1_check_board_selection (after step 2) refuses it unless HW_BOARD is set.
 set(_sdkconfig "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig")
 if(NOT DEFINED SDKCONFIG OR "${SDKCONFIG}" STREQUAL "")
     set(SDKCONFIG "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig" CACHE FILEPATH
@@ -187,6 +188,17 @@ else()
     message(STATUS "Target=${_inferred_target}: no boards/ mapping → layering skipped; "
                    "using CONFIG_ARDUINO_VARIANT from sdkconfig.defaults.${_inferred_target}")
 endif()
+
+# A defaulted board must not be combined with the tracked config/sdkconfig or a
+# sdkconfig saved for another board. Runs before anything below writes the
+# sdkconfig (the partition-path and reconcile steps in section 4).
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/HW1BoardGuard.cmake")
+set(_hw_board_explicit FALSE)
+if((DEFINED ENV{HW_BOARD} AND NOT "$ENV{HW_BOARD}" STREQUAL "") OR HW1_DEPLOYMENT_ACTIVE)
+    set(_hw_board_explicit TRUE)
+endif()
+hw1_check_board_selection("${CMAKE_CURRENT_SOURCE_DIR}" "${_sdkconfig}"
+    ${_hw_board_explicit} "${_hw_board}" "${_board_file}")
 
 # Optional board feature profile: boards/<board>.features.h. A board whose
 # application features differ from the shared editable defaults (the P4X-EYE

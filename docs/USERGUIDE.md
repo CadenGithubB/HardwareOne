@@ -26,7 +26,7 @@ This is the full reference for Hardware One. It covers every subsystem, all CLI 
 
 ## Build Configuration
 
-All feature flags live in one file: `components/hardwareone/System_BuildConfig.h`. That header is *your* configuration surface - edit it before building to enable or disable any subsystem. No other files need to change.
+Feature flags are declared, with their defaults, in `components/hardwareone/System_BuildConfig.h`. That header is *your* configuration surface for an ordinary board build - edit it before building to enable or disable any subsystem. Three other layers can override it: a board's own `boards/<board>.features.h` (the XIAO and the P4 boards have one), a deployment's `deployments/<name>/.../features.h`, and a saved configuration in `configurations/*.json` built with `tools/build_config.py build <name>`, which changes flags without editing the header (see [configurations/README.md](../configurations/README.md) and the ownership table in [CONTRIBUTING.md](../CONTRIBUTING.md)).
 
 > **The values committed in that header are incidental, not a contract.** They are
 > whatever the last working tree happened to be built with, and they change from
@@ -39,8 +39,8 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `I2C_FEATURE_LEVEL` | How much of the I2C stack is compiled: `0`=disabled, `1`=OLED only, `2`=OLED+gamepad, `3`=all sensors, `4`=custom selection via the `CUSTOM_ENABLE_*` flags below |
 | `NETWORK_FEATURE_LEVEL` | How much of the network stack is compiled: `0`=disabled, `1`=WiFi only, `2`=WiFi+HTTP, `3`=WiFi+HTTP+ESP-NOW, `4`=custom |
 | `WEB_FEATURE_LEVEL` | How much of the web UI is compiled: `0`=disabled, `1`=core UI, `2`=standard modules, `3`=all modules, `4`=custom |
-| `DISPLAY_TYPE` | Which panel driver is compiled: `0`=none, `1`=SSD1306 OLED, `2`=ST7789 TFT, `3`=ILI9341 TFT. SSD1306 is the tested path; the TFT branches exist in `HAL_Display.cpp` but ILI9341 is a placeholder and the `OLED_Mode_*` UI is SSD1306-shaped |
-| `INPUT_DEVICE_TYPE` | Which physical input controller is compiled, mutually exclusive: `0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder |
+| `DISPLAY_TYPE` | Which panel driver is compiled: `0`=none, `1`=SSD1306 OLED, `2`=generic ST7789 TFT, `3`=generic ILI9341 TFT, `4`=ST7789 240×240 LCD of the ESP32-P4X-EYE, `5`=HX8394 720×1280 DSI panel of the Waveshare ESP32-P4 Touch LCD 5. `4` and `5` are set by those boards' feature files. SSD1306 is the tested path for the other boards; `2` and `3` are example branches without board wiring, and a saved configuration that selects them is refused at compile time |
+| `INPUT_DEVICE_TYPE` | Which physical input controller is compiled, mutually exclusive: `0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder, `3`=GPIO wheel and buttons (ESP32-P4X-EYE), `4`=GT911 touch panel (Waveshare ESP32-P4 Touch LCD 5). `3` and `4` are set by those boards' feature files |
 | `ENABLE_HTTPS` | Set to `1` for TLS on the web server; certs in `/system/certs/`. Runtime toggle: `httpsEnabled` |
 | `ENABLE_MAPS` | Set to `1` to build offline maps and waypoints |
 | `ENABLE_GAMES` | Set to `1` with `ENABLE_WEB_GAME_DARKROOM=1` to build A Dark Room and its browser launcher |
@@ -51,13 +51,15 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `ENABLE_MQTT` | Set to `1` to build the Home Assistant MQTT integration |
 | `ENABLE_AUTOMATION` | Set to `1` to build scheduled tasks and conditional commands |
 | `ENABLE_CAMERA_SENSOR` | Set to `1` to build the shared camera system and the board's DVP or CSI backend |
-| `ENABLE_MICROPHONE_SENSOR` | Set to `1` to build the PDM microphone via I2S |
+| `ENABLE_MICROPHONE_SENSOR` | Set to `1` to build the board's microphone: PDM over I2S on the XIAO ESP32-S3 Sense and the ESP32-P4X-EYE, the ES7210 codec on the Waveshare ESP32-P4 Touch LCD 5 |
 | `ENABLE_BATTERY_MONITOR` | Enable the board's ADC or fuel-gauge battery backend |
 | `ENABLE_EDGE_IMPULSE` | Set to `1` to build Edge Impulse ML inference |
 | `ENABLE_BONDED_MODE` | Set to `1` to build Bonded Microcontrollers - two devices share command registries and the controller shows a Remote tab with the paired device's features |
 | `ENABLE_LLM_BACKEND` | Master switch for the LLM feature (web LLM page, OLED LLM mode, `llm*` commands, lens viewer). Set to `1` *and* turn on at least one source below; a build error tells you if you forget. |
 | `ENABLE_LLM_SOURCE_ONBOARD` | Set to `1` to build the tiny transformer that runs on this chip (ESP32-S3 + PSRAM only). Requires a model file on LittleFS or SD card. |
 | `ENABLE_LLM_SOURCE_CM5` | Set to `1` to answer from the Raspberry Pi co-processor over the UART link. Requires a board with a `UART_LINK_PORT` (all supported boards). |
+| `ENABLE_LLM_SOURCE_HTTP` | Set to `1` to answer from an OpenClaw server at a configured HTTP(S) endpoint. Requires WiFi; no local model. |
+| `ENABLE_LOCAL_STT` | On-device speech-to-text on the ESP32-P4 boards (the engine is compiled only for that target). Needs a model file on the device at run time; `ENABLE_STT_MODEL_15X5_GEN2` selects the published 15×5 model on the microSD card. Where the file comes from and how to install it: [README, Local speech-to-text model](../README.md#local-speech-to-text-model-esp32-p4) |
 | `ENABLE_RASPBERRY_PI_HOST_POWER` | Set to `1` to build `cm5 power` - profile, reboot, halt, suspend, timed sleep of the Pi with confirmed request/ACK |
 | `ENABLE_RASPBERRY_PI_HOST_FAN` | Set to `1` to build `cm5 fan` - quiet/auto/max with temperature, PWM, RPM and health readback |
 
@@ -87,16 +89,17 @@ See [BOARD_SWITCHING.md](BOARD_SWITCHING.md) for full menuconfig tables.
 
 ### Per chip family
 
-Set by `sdkconfig.defaults.<target>`, selected automatically by `set-target`:
+Set by `config/sdkconfig.defaults.<target>`; `tools/build_board.sh` picks the
+target from the board file's `# HW_TARGET:` line:
 
-| | ESP32 (QT Py, Feather V2) | ESP32-S3 (XIAO, FeatherS3) |
-| - | ------------------------- | -------------------------- |
-| PSRAM speed | 40 MHz | 80 MHz |
-| Flash mode | `DIO` | `QIO` |
-| Bluetooth | Classic BT + BLE 4.2 | BLE 5.0 only |
-| Camera/Mic | No | Yes (S3 only) |
-| USB | UART bridge (`usbserial`) | Native USB (`usbmodem`) |
-| `set-target` | `esp32` | `esp32s3` |
+| | ESP32 (QT Py, Feather V2) | ESP32-S3 (XIAO, FeatherS3) | ESP32-P4 (P4X-EYE, Waveshare) |
+| - | ------------------------- | -------------------------- | ----------------------------- |
+| PSRAM | 40 MHz | 80 MHz | hex mode |
+| Flash mode | `DIO` | `QIO` | `DIO` |
+| Radio / Bluetooth | Classic BT + BLE 4.2 | BLE 5.0 only | none on chip: Wi-Fi, BLE and ESP-NOW through the onboard ESP32-C6 (ESP-Hosted) |
+| Camera/Mic | No | XIAO Sense | Yes (board-dependent, see below) |
+| USB console | UART bridge (`usbserial`) | Native USB (`usbmodem`) | P4X-EYE native USB; Waveshare UART bridge |
+| Target | `esp32` | `esp32s3` | `esp32p4` (needs `tools/p4/prepare_sdk.sh` once) |
 
 ### Per board
 
@@ -110,14 +113,19 @@ board properties, not chip-family properties:
 | Seeed XIAO ESP32-S3 | `xiao_s3` | `XIAO_ESP32S3` | **Octal** | 8 MB |
 | Adafruit QT Py ESP32 | `qtpy_esp32` | `adafruit_qtpy_esp32` | **Quad** | 8 MB |
 | Adafruit Feather ESP32 V2 | `feather_esp32_v2` | `adafruit_feather_esp32_v2` | **Quad** | 8 MB |
+| FeatherS3, flash-encrypted (experimental; first boot burns eFuses) | `feathers3_fe` | `um_feathers3` | **Quad** | 16 MB |
+| Espressif ESP32-P4X-EYE | `p4x_eye` | `esp32p4` | **Hex** (family file) | 16 MB |
+| Waveshare ESP32-P4 Touch LCD 5 (experimental) | `waveshare_p4_touch_lcd_5` | `esp32p4` | **Hex** (family file) | 32 MB |
 
-> **Do not infer PSRAM mode from the chip family.** The two ESP32-S3 boards above
+> **Do not infer PSRAM mode from the chip family.** The ESP32-S3 boards above
 > disagree - the XIAO is octal, the FeatherS3 is quad. A wrong mode is a *silent*
 > failure: the device boots and reports 0 KB PSRAM, and the first thing you notice
 > is the LLM, large web responses, or ESP-NOW buffers OOMing at runtime.
 
-When switching between chip families: `idf.py fullclean`, then
-`idf.py set-target <chip>`.
+Build every board with `tools/build_board.sh <board>`: each board gets its own
+`build-<board>/` directory and sdkconfig, so switching boards or chip families
+needs no `fullclean` or `set-target`. A bare `idf.py` in the repository root is
+not a supported build path (see the [Quick Start](QUICKSTART.md#3-set-your-target-board-and-flash)).
 
 ---
 
@@ -155,7 +163,7 @@ Authentication is required; `/login` and `/register` are the unauthenticated ent
 
 ## OLED Interface
 
-The OLED displays a menu system navigated with the input device - Seesaw gamepad or ANO rotary encoder, whichever `INPUT_DEVICE_TYPE` selects. On first boot the setup wizard runs here as well as on serial (see the [Quick Start](QUICKSTART.md#first-time-use)). After that it lands on the main menu.
+The OLED (or the P4 board's LCD) displays a menu system navigated with the input device that `INPUT_DEVICE_TYPE` selects - Seesaw gamepad or ANO rotary encoder, or the P4X-EYE wheel or Waveshare touch panel. On first boot the setup wizard runs here as well as on serial (see the [Quick Start](QUICKSTART.md#first-time-use)). After that it lands on the main menu.
 
 The main menu is six categories. Rows inside each are compile-gated, so a build without (say) ESP-NOW or an LLM simply shows fewer entries. The G2 lens mirrors this layout - see [G2 Lens Interface](#g2-lens-interface).
 
@@ -225,8 +233,10 @@ Trends, Heart Rate, HRV, SpO2, Temperature, Battery, Poll Now, Health Logging.
 - **Poll Now** - one composite refresh: a full daily sweep plus a correlated device-status read, under a 75-second ceiling. The status line walks `Refreshing...` -> `Refreshed`, or reports `Refresh incomplete` / `Refresh failed` / `Refresh unsupported`, so "Refreshed" means the sweep finished rather than "the requests were sent". Simply *opening* the page no longer fires a poll burst - it reads the freshness-throttled history lane instead.
 - **Health Logging** - toggles local R1 logging (`healthlogging on` / `healthlogging off`). While on, the ring is mined every `healthLoggingPollIntervalSec` seconds (default 900 = 15 min). Opening the page or **Poll Now** also logs a sample when R1 logging is active.
 
-On-demand refresh is a per-firmware capability. Only R1 firmware **2.2.9.0003**
-is admitted for it; on any other profile the row reads `Poll unsupported` (or
+On-demand refresh is a per-firmware capability. HardwareOne recognises four R1
+firmware profiles (**2.2.7.0005**, **2.2.9.0003**, **2.3.2.0007** and
+**2.3.2.0008**); on-demand refresh is admitted on 2.2.9.0003, 2.3.2.0007 and
+2.3.2.0008. On 2.2.7.0005 or an unrecognised firmware the row reads `Poll unsupported` (or
 `Passive only` on the metric readouts) and no command is sent, instead of arming
 a request whose only outcome is a timeout. The same gate applies on the web page
 (**Poll Now** renders disabled as `Poll unavailable` / `Poll unsupported`) and on
@@ -415,8 +425,7 @@ may become available between commands without changing their meaning.
 
 ```
 serialrequireauth <0|1>         - Require login on the serial console
-displayrequireauth <0|1>        - Require login on the display
-oledrequireauth <0|1>           - Require login for the OLED menu
+displayrequireauth <0|1>        - Require login on the local display, OLED menu included (super admin)
 blerequireauth [on|off]         - Require login for BLE access
 
 sessionidleserial <0-1440>      - Serial idle-logout, minutes (0 = never)
@@ -432,15 +441,15 @@ Sessions and bans are managed with `sessionlist`, `sessionrevoke`, `ban` /
 
 `factoryreset` deletes every account, the pending account requests and each
 user's own settings, then reboots into the setup wizard; device settings and
-files stay. It is an administrator command that must be run from a logged-in
-admin session, so it is **not** a way back in once the admin credentials are
+files stay. It is a super-admin command that must be run from a logged-in
+super-admin session, so it is **not** a way back in once the admin credentials are
 lost:
 
 - With a second administrator account: that admin signs in and runs
   `userresetpassword <user> <pass>` (the user chooses a new password at the next
-  login), or `factoryreset` to start over.
+  login), or, if that account is a super admin, `factoryreset` to start over.
 - With a single admin account and no other way in: erase the device over the
-  cable (`idf.py -p PORT erase-flash`, or erase just the LittleFS region) and
+  cable (`tools/build_board.sh <board> -p PORT erase-flash`, or erase just the LittleFS region) and
   flash again. This removes settings and captured data as well; keep backups
   (`backup` / Backup & Restore below) if they matter.
 
@@ -601,7 +610,7 @@ espnowdeviceinfo                - Show all local metadata
 Called with no argument, each of these prints the current value.
 
 ### File Transfer
-Files can be transferred between paired devices via the web UI or CLI (`espnow sendfile`). Used for syncing automations, settings, and manifests.
+Files can be transferred between paired devices via the web UI or CLI (`espnowsendfile <name_or_mac> "<filepath>"`). Used for syncing automations, settings, and manifests.
 
 ---
 
@@ -648,7 +657,7 @@ setting, regardless of which setting it was.
 | Kind | Fires when | subject / detail |
 |---|---|---|
 | `peer_online` / `peer_offline` | mesh peer heartbeat appears / times out (30s) | peer name / MAC |
-| `peer_paired` | pairing-mode auto-pair completes | peer name / MAC |
+| `peer_paired` | a peer is saved as paired (`espnowpair`, `espnowpairsecure`, or an accepted `espnowpairrequest`); pairing mode only discovers, it no longer auto-pairs | peer name / MAC |
 | `text_rx` | ESP-NOW text message received | sender / text preview |
 | `file_rx` | ESP-NOW file received | sender / filename |
 | `bond_online` / `bond_offline` | bonded peer session up / heartbeat timeout | peer name / MAC |
@@ -786,16 +795,18 @@ events                       - Show recent system events (for event triggers)
 
 Requires `ENABLE_MQTT=1`. Connects to a broker (e.g., Home Assistant Mosquitto) and publishes sensor data and device state.
 
-Configure via the **MQTT** tab in the web UI, or via CLI:
+Configure via the **MQTT** tab in the web UI, or via CLI (single words; there is
+no `mqtt` command with subcommands - the full list is in the
+[mqtt command section](#command-reference) below):
 ```
-mqtt broker <host>           - Set broker host/IP
-mqtt port <port>             - Set broker port (default 1883)
-mqtt user <username>         - Set MQTT username
-mqtt pass <password>         - Set MQTT password
-mqtt topic <prefix>          - Set topic prefix
-mqtt connect                 - Connect to broker
-mqtt disconnect              - Disconnect
-mqtt status                  - Show connection status
+mqttHost [hostname]          - Set broker host/IP
+mqttPort [port]              - Set broker port (default 1883)
+mqttUser [user|clear]        - Set MQTT username
+mqttPassword [pass|clear]    - Set MQTT password
+mqttBaseTopic [topic|auto]   - Set topic prefix
+openmqtt                     - Connect to broker
+closemqtt                    - Disconnect
+mqttstatus                   - Show connection status
 ```
 
 ---
@@ -966,7 +977,7 @@ Available debug modules (type `help debug` on device for full list):
 | `debugthermal` | Thermal sensor frames and events |
 | `debugtof` | Time-of-flight ranging |
 | `debugapds` | APDS gesture/proximity/colour |
-| `debuggamepad` | Gamepad button/axis events |
+| `debuginput` | Input device events (gamepad, encoder, wheel, touch) |
 | `debugpresence` | Presence sensor activity |
 | `debugstorage` | Filesystem read/write |
 | `debugcli` | Command execution flow |
@@ -1017,7 +1028,7 @@ time                            - Show current time (uptime + NTP if synced)
 timeset <YYYY-MM-DD HH:MM:SS>   - Set time manually (or unix timestamp)
 reboot                          - Restart the device
 ramflush                        - Reboot to reclaim RAM, restoring the features running right now
-factoryreset                    - Wipe user accounts and reboot into the setup wizard (admin)
+factoryreset                    - Wipe user accounts and reboot into the setup wizard (super admin)
 deepsleep                       - Power off via deep sleep (no wake source - reset button to wake)
 bootcount [reset|json]          - Boot count (NVS), crash count, last reset reason
 clear                           - Clear CLI history
@@ -1162,7 +1173,7 @@ mqttPublishPresence [0|1]       - Publish presence/motion
 mqttPublishGPS [0|1]            - Publish GPS location
 mqttPublishAPDS [0|1]           - Publish APDS color/proximity
 mqttPublishRTC [0|1]            - Publish RTC time
-mqttPublishGamepad [0|1]        - Publish gamepad state
+mqttPublishInput [0|1]          - Publish input device state
 mqttSubscribeTopics [topics]    - Set external subscription topics
 mqttExternalSensors             - List external sensor data received via MQTT
 ```
@@ -1234,7 +1245,6 @@ oledupdateinterval <ms>         - Display update interval (10-1000ms)
 oledbootmode <logo|status|thermal|off>   - Mode shown at boot
 oleddefaultmode <status|thermal|off>     - Mode after boot animation
 oledbootduration <ms>           - Boot animation duration (500-10000ms)
-oledrequireauth <0|1>           - Require login to use OLED menu
 oledenabled <0|1>               - Enable/disable OLED
 oledthermalscale <1.0-10.0>     - Thermal image scale on OLED
 oledthermalcolormode <3level|grayscale|binary>  - Thermal color mode on OLED
@@ -1553,10 +1563,6 @@ cameraeffect <0-6>              - Special effect
 camerasharpness <-2..2>         - Sharpness
 cameradenoise <0-8>             - Denoise level
 cameraautostart <on|off>        - Auto-start on boot
-cameraautocapture <on|off>      - Auto-capture on schedule
-cameraautocaptureinterval <sec> - Auto-capture interval
-camerasendaftercapture <on|off> - Send image via ESP-NOW after capture
-cameratargetdevice <name>       - Target device for post-capture send
 camerastoragelocation <0-2>     - Storage destination (LittleFS/SD/both)
 cameracapturefolder <path>      - Folder for captured images
 cameramaxstoredimages <0-1000>  - Max images to keep
@@ -1876,8 +1882,10 @@ servocalibrate <channel>        - Enter calibration mode for a channel
 <summary><strong>input - Gamepad / ANO encoder</strong></summary>
 
 The physical input controller is chosen at build time with `INPUT_DEVICE_TYPE`
-(`0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder). The two are mutually
-exclusive - both hang off STEMMA QT and would collide. Start/stop and
+(`0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder; the P4 boards set `3`,
+the P4X-EYE wheel and buttons, and `4`, the Waveshare GT911 touch panel, in
+their own feature files). The gamepad and the encoder are mutually exclusive -
+both hang off STEMMA QT and would collide. Start/stop and
 auto-start are device-agnostic; only the read and tuning commands are
 driver-specific.
 
@@ -1923,7 +1931,7 @@ Three independent modes: color/RGB (`apdscolor`), proximity (`apdsproximity`), g
 NMEA output parsed for lat/lon/speed/heading. Track logging to LittleFS. Offline map viewer in web UI.
 
 ### FM Radio (RDA5807)
-Tune, seek up/down, set volume, mute. `fmradio tune <MHz>` - e.g., `fmradio tune 101.5`.
+Tune, seek up/down, set volume, mute. `fmradiotune <frequency>` - e.g., `fmradiotune 101.5`.
 
 ### Even Realities G2 Glasses
 BLE client for Even G2 temples (`openg2` / hijack menus / Apps -> Health). Requires

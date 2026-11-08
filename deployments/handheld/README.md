@@ -30,6 +30,13 @@ tools/build_deployment.sh handheld p4x_eye   # -> build/deployments/handheld/p4x
 ```
 
 Installation and the data-preserving reflash procedure are in
-[`boards/p4x_eye/MIGRATION.md`](boards/p4x_eye/MIGRATION.md). The ESP32-C6
+[`boards/p4x_eye/MIGRATION.md`](boards/p4x_eye/MIGRATION.md). Local
+speech-to-text in this deployment needs a model file that is not part of the
+image: it expects the 5×5 model at `/STT Models/quartznet5x5.p4.stt` on the
+internal filesystem (microSD stays off), and that file is not published, so
+local transcription reports the model as missing. The published 15×5 gen2
+model is used by the saved P4 configurations instead; see the README's
+[Local speech-to-text model](../../README.md#local-speech-to-text-model-esp32-p4)
+section for its URL and SHA-256. The ESP32-C6
 companion firmware this image expects is built and flashed with
 [`tools/p4/companion`](../../tools/p4/companion/README.md).
