@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -39,6 +40,8 @@ SECTIONS = [
 ]
 
 # sdkconfig keys that describe the chip/build environment.
+WDT_SOAK_SUFFIX = "-wdt-soak"
+
 SDKCONFIG_KEYS = [
     ("CONFIG_IDF_TARGET", "Chip target"),
     ("CONFIG_ARDUINO_VARIANT", "Arduino variant"),
@@ -53,6 +56,8 @@ SDKCONFIG_KEYS = [
     ("CONFIG_COMPILER_OPTIMIZATION_PERF", "Optimize for performance"),
     ("CONFIG_SECURE_FLASH_ENC_ENABLED", "Flash encryption"),
     ("CONFIG_PARTITION_TABLE_CUSTOM_FILENAME", "Partition table"),
+    ("CONFIG_ESP_TASK_WDT_PANIC", "Task watchdog panics"),
+    ("CONFIG_ESP_TASK_WDT_TIMEOUT_S", "Task watchdog timeout (s)"),
 ]
 
 
@@ -268,6 +273,61 @@ def git_provenance():
     return commit, desc, n_dirty
 
 
+def build_idf_path(build_dir):
+    """The ESP-IDF tree this build was configured with (project_description.json, else IDF_PATH)."""
+    pj = os.path.join(build_dir, "project_description.json")
+    try:
+        with open(pj) as source:
+            recorded = json.load(source).get("idf_path") or ""
+    except Exception:
+        recorded = ""
+    return recorded or os.environ.get("IDF_PATH", "")
+
+
+def idf_provenance(idf_path, target=""):
+    """Commit and local edits of the ESP-IDF tree; on esp32p4 also the PIE-fix state.
+
+    Returns a dict with path, commit, describe, modified (tracked paths that
+    differ from that commit, submodules included), error and pie. A tree that
+    is not itself a git checkout (a release archive, or a directory that only
+    sits inside some other repository) reports error instead of a commit.
+    """
+    info = {"path": idf_path, "commit": "", "describe": "", "modified": [], "error": "", "pie": ""}
+    if not idf_path or not os.path.isdir(idf_path):
+        info["error"] = "IDF_PATH not set or not a directory"
+        return info
+
+    def git(*args):
+        try:
+            p = subprocess.run(("git", "-C", idf_path) + args, capture_output=True,
+                               text=True, timeout=120)
+        except Exception:
+            return None
+        return p.stdout if p.returncode == 0 else None
+
+    top = git("rev-parse", "--show-toplevel")
+    if top is None or os.path.realpath(top.strip()) != os.path.realpath(idf_path):
+        info["error"] = "not a git checkout; commit and local edits unknown"
+    else:
+        info["commit"] = (git("rev-parse", "HEAD") or "").strip()
+        info["describe"] = (git("describe", "--tags", "--always") or "").strip()
+        status = git("status", "--porcelain", "--untracked-files=no")
+        if status is None or not info["commit"]:
+            info["error"] = "git could not read the tree state"
+        else:
+            info["modified"] = [line[3:] for line in status.splitlines() if line.strip()]
+    if target == "esp32p4":
+        try:
+            sys.path.insert(0, os.path.join(REPO, "tools", "p4"))
+            import check_idf_pie
+            info["pie"] = check_idf_pie.pie_state(Path(idf_path))[1]
+        except Exception as e:
+            info["pie"] = "PIE-fix state not checked: %s" % e
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools", "p4"))
+    return info
+
+
 def artifact_info(build_dir):
     out = {}
     proj = None
@@ -367,6 +427,121 @@ def deployment_is_ota(selector):
     return True
 
 
+# ---------------------------------------------------------------------------
+# Versions: the build-time half of the device's `versions` command
+# (components/hardwareone/System_Versions.cpp). Same keys; values read from
+# the same source constants, except `updater_built` (the updater this tree
+# builds; the device's `updater` is the one in its factory slot). Values only
+# the running device knows (that updater, the radio's ESP-NOW stack, the C6's
+# reported Hosted and bridge versions) are left to `versions` on the device.
+# ---------------------------------------------------------------------------
+
+def _source(rel):
+    with open(os.path.join(REPO, rel), errors="replace") as source:
+        return source.read()
+
+
+def _match(pattern, rel):
+    m = re.search(pattern, _source(rel), re.M)
+    if not m:
+        raise ValueError("%s: no match for %s" % (rel, pattern))
+    return m.group(1)
+
+
+def _define(name, rel):
+    return _match(r"^\s*#\s*define\s+%s\s+([^\s/]+(?:\s*[-+*]\s*[^\s/]+)*)" % name, rel)
+
+
+def _int_expr(text):
+    """Evaluate a plain integer #define value such as `(250 - 32)` or `1u`."""
+    text = re.sub(r"(?<=\d)[uUlL]+\b", "", text)
+    if not re.fullmatch(r"[\d\s()+\-*]+", text):
+        raise ValueError("not a plain integer expression: %r" % text)
+    return int(eval(text, {"__builtins__": {}}))
+
+
+def define_from_argv(argv, name):
+    """The value of -D<name>=... in a compile command, C string quotes removed."""
+    prefix = "-D%s=" % name
+    for token in argv or []:
+        if token.startswith(prefix):
+            return token[len(prefix):].strip().strip("\\").strip('"').strip("\\")
+    return None
+
+
+def source_versions(enabled, firmware="", argv=None, companion=False):
+    """[(key, label, value)] for the items `versions` reports, as far as the
+    source tree knows them. `enabled(name)` answers a resolved ENABLE_* flag
+    or HW1_OTA_LAYOUT; `argv` is the hardwareone compile command."""
+    hw = "components/hardwareone/"
+    rows = []
+    add = lambda key, label, value: rows.append((key, label, str(value)))
+    add("firmware", "Firmware", firmware or "?")
+    if enabled("HW1_OTA_LAYOUT"):
+        add("ota_layout", "OTA layout", define_from_argv(argv, "HW1_OTA_LAYOUT_ID") or "?")
+        semver = _match(r'^set\(HW1_UPDATER_SEMVER "([^"]+)"\)', "updater/CMakeLists.txt")
+        suffix = define_from_argv(argv, "HW1_OTA_VERSION_SUFFIX") or ""
+        # Not the device's `updater` (the image in its factory slot): the
+        # updater this tree builds, under its own key so the two never merge.
+        add("updater_built", "Recovery updater built by this tree", semver + suffix)
+        add("ota_manifest_format", "OTA manifest format", _int_expr(_define(
+            "HW1_OTA_MANIFEST_FORMAT_VERSION", "components/hw1_ota_protocol/include/hw1_ota_protocol.h")))
+        add("ota_data_schema", "OTA data schema",
+            _match(r"^constexpr uint32_t kDataSchemaV1 = (\d+);", hw + "System_OTA.cpp"))
+    if enabled("ENABLE_ESPNOW"):
+        wire = hw + "System_ESPNow_Wire.h"
+        frame = _int_expr(_define("ESPNOW_V4_HEADER_LEN", wire)) + _int_expr(_define("ESPNOW_V4_MAX_PAYLOAD", wire))
+        wire_byte = _int_expr(_define("ESPNOW_V4_VERSION", wire))
+        add("espnow", "ESP-NOW", "mesh v%d on ESP-NOW v%d frames" % (wire_byte, 1 if frame <= 250 else 2))
+        add("espnow_wire", "ESP-NOW wire byte", wire_byte)
+        identity = hw + "System_ESPNow_Identity.cpp"
+        add("espnow_identity_file", "ESP-NOW identity file",
+            _match(r"\bkIdentityFileVersion = (\d+);", identity))
+        add("espnow_peer_file", "ESP-NOW peer files", _match(r"\bkPeerFileVersion = (\d+);", identity))
+    if enabled("ENABLE_AUTOMATION"):
+        add("automations_file", "Automations file",
+            _match(r"^constexpr uint32_t kAutomationsFileVersion = (\d+);", hw + "System_Automation.h"))
+    if enabled("ENABLE_MIGRATION_TOOL"):
+        add("backup_format", "Backup bundle format",
+            _match(r"^constexpr uint32_t kBackupFormatVersion = (\d+);", hw + "WebServer_MigrationTool.h"))
+    if enabled("ENABLE_BLUETOOTH"):
+        add("ble_console_channel", "BLE console channel",
+            _match(r'SC_INFO\[\]\s*=\s*"([^"]+)"', hw + "System_BleSecureChannel.cpp"))
+    if enabled("ENABLE_BLUETOOTH") and enabled("ENABLE_BLE_PHONE_PIPE"):
+        add("phone_link", "Phone link", "v" + _match(r"\bkVersion = (\d+)", hw + "BLE_PhonePipeCore.h"))
+        add("phone_pipe_channel", "Phone pipe channel",
+            _match(r'kPipeLabel\[\]\s*=\s*"([^"]+)"', hw + "BLE_PhoneSecureChannel.h"))
+        add("phone_console_records", "Phone console records",
+            "v" + _match(r"\bkInfoVersion = (\d+);", hw + "BLE_PhonePipeConsoleCore.h"))
+    if enabled("ENABLE_RASPBERRY_PI_HOST_POWER") or enabled("ENABLE_RASPBERRY_PI_HOST_FAN"):
+        add("cm5_control", "CM5 control protocol",
+            "v" + _match(r'kProtocolVersion = "(\d+)";', hw + "System_Cm5HostControl.cpp"))
+    if companion:
+        hosted = "components/esp_now_hosted/include/"
+        add("c6_hosted_qualified", "C6 ESP-Hosted expected",
+            _match(r'^#define HW1_C6_HOSTED_TAG "([^"]+)"', hosted + "esp_now_hosted_companion.h"))
+        add("c6_bridge_wire_expected", "C6 bridge wire expected",
+            _int_expr(_define("ESP_NOW_HOSTED_WIRE_VERSION", hosted + "esp_now_hosted_rpc.h")))
+    if enabled("ENABLE_LOCAL_STT"):
+        gen2 = enabled("ENABLE_STT_MODEL_15X5_GEN2")
+        selection = _source(hw + "stt/stt_model_selection.h")
+        paths = re.findall(r'#define HW1_STT_MODEL_PATH "([^"]+)"', selection)
+        if len(paths) != 2:  # the 15x5-gen2 branch's default, then the 5x5 one
+            raise ValueError("stt_model_selection.h: expected two default model paths")
+        path = define_from_argv(argv, "HW1_STT_MODEL_PATH") or paths[0 if gen2 else 1]
+        ident = hw + ("stt/stt_model_identity_15x5_gen2.h" if gen2 else "stt/stt_model_identity.h")
+        sha = re.findall(r"0x([0-9a-fA-F]{2})", _match(r"kRawSha\[32\] = \{([^}]*)\}", ident))[:4]
+        add("stt_model", "Local STT model", "%s sha %s" % (path.rsplit("/", 1)[-1], "".join(sha).lower()))
+    add("idf", "ESP-IDF", define_from_argv(argv, "IDF_VER") or "?")
+    arduino = "components/arduino/cores/esp32/esp_arduino_version.h"
+    try:
+        add("arduino", "Arduino core", ".".join(_define("ESP_ARDUINO_VERSION_%s" % part, arduino)
+                                                 for part in ("MAJOR", "MINOR", "PATCH")))
+    except (OSError, ValueError):
+        add("arduino", "Arduino core", "?")
+    return rows
+
+
 def fmt_kb(n):
     return "%s bytes (%.1f KB)" % ("{:,}".format(n), n / 1024.0)
 
@@ -378,9 +553,13 @@ def main():
     if not os.path.isdir(build_dir):
         die("no such build dir: %s" % build_dir)
     board = sys.argv[2] if len(sys.argv) > 2 else (
-        os.path.basename(build_dir).replace("build-", "") or "(default)")
+        os.path.basename(build_dir).replace("build-", "").removesuffix(WDT_SOAK_SUFFIX)
+        or "(default)")
     deployment = sys.argv[3] if len(sys.argv) > 3 else ""
 
+    # tools/build_board.sh --wdt-soak builds in a directory ending in this
+    # suffix (configuration names may not end in it; see build_config.py).
+    wdt_soak = os.path.basename(build_dir).endswith(WDT_SOAK_SUFFIX)
     art = artifact_info(build_dir)
     art_abs = os.path.join(REPO, art["bin_path"]) if art.get("bin_path") else None
     macros, macro_err = resolve_macros(build_dir, art_abs)
@@ -392,8 +571,11 @@ def main():
             with open(snapshot) as source:
                 configuration = json.load(source)
             configuration_name = os.path.basename(build_dir).removeprefix("build-config-")
+            if wdt_soak:
+                configuration_name = configuration_name.removesuffix(WDT_SOAK_SUFFIX)
     cfg, cfg_path = read_sdkconfig(build_dir)
     commit, desc, n_dirty = git_provenance()
+    idf = idf_provenance(build_idf_path(build_dir), cfg.get("CONFIG_IDF_TARGET", ""))
     now = datetime.now(timezone.utc).astimezone()
 
     L = []
@@ -411,14 +593,39 @@ def main():
         A("**Board:** `HW_BOARD=%s`  " % board)
     if deployment:
         A("**Deployment:** `%s`  " % deployment)
+    if wdt_soak:
+        A("**Watchdog soak build:** task watchdog panics, main loop subscribed  ")
     if configuration_name:
         A("**Saved configuration:** `configurations/%s.json`  " % configuration_name)
     A("**Chip:** %s  " % cfg.get("CONFIG_IDF_TARGET", "?"))
     A("**Built:** %s  " % now.strftime("%Y-%m-%d %H:%M:%S %Z"))
     if commit:
         dirty_note = " + %d uncommitted file(s)" % n_dirty if n_dirty else " (clean tree)"
-        A("**Source:** `%s`%s — %s" % (commit, dirty_note, desc))
+        A("**Source:** `%s`%s — %s  " % (commit, dirty_note, desc))
+    # The manifest may ship with an image: show the IDF path relative to ~, not the user's home.
+    home = os.path.expanduser("~")
+    if home not in ("", "~", os.sep):
+        for key in ("path", "pie"):
+            idf[key] = idf[key].replace(home + os.sep, "~" + os.sep)
+    if idf["commit"]:
+        idf_note = (" + %d locally modified path(s)" % len(idf["modified"])
+                    if idf["modified"] else " (clean tree)")
+        A("**ESP-IDF:** `%s` (`%s`)%s — `%s`  " % (idf["describe"] or "?", idf["commit"], idf_note,
+                                                   idf["path"]))
+    else:
+        A("**ESP-IDF:** %s — `%s`  " % (idf["error"], idf["path"] or "?"))
     A("")
+    if idf["modified"]:
+        A("ESP-IDF paths that differ from its commit:")
+        A("")
+        for path in idf["modified"][:20]:
+            A("- `%s`" % path)
+        if len(idf["modified"]) > 20:
+            A("- _... and %d more_" % (len(idf["modified"]) - 20))
+        A("")
+    if idf["pie"]:
+        A("_%s_" % idf["pie"])
+        A("")
 
     if art.get("bin_bytes"):
         A("## Artifact")
@@ -436,6 +643,32 @@ def main():
         if art.get("version"):
             A("| Project version | `%s` |" % art["version"])
         A("")
+
+    A("## Versions")
+    A("")
+    A("What this image must agree with, from the source constants (`versions` on the")
+    A("device shows the same keys, plus what only the device can read: the updater in")
+    A("its factory slot, the radio's ESP-NOW stack, the C6's reported versions).")
+    A("`updater_built` is the updater this tree builds, not the one a device carries.")
+    A("")
+    if macros:
+        flags = macros["bool"]
+        layout = macros["value"].get("HW1_OTA_LAYOUT", "0")
+        enabled = lambda name: (layout == "1") if name == "HW1_OTA_LAYOUT" else flags.get(name) == "1"
+        try:
+            rows = source_versions(enabled, art.get("version", ""), compiler_cmd_for_buildconfig(build_dir)[0],
+                                   companion=cfg.get("CONFIG_ESP_WIFI_REMOTE_ENABLED") == "y")
+        except (OSError, ValueError) as e:
+            rows = None
+            A("> **Not recorded.** %s" % e)
+        if rows:
+            A("| Item | Key | Value |")
+            A("|---|---|---|")
+            for key, label, value in rows:
+                A("| %s | `%s` | `%s` |" % (label, key, value))
+    else:
+        A("> **Not recorded:** the feature flags are unknown (see below), so which items apply is too.")
+    A("")
 
     if configuration:
         A("## Saved feature choices")
@@ -508,11 +741,12 @@ def main():
         A("only what can be proven about the image above.")
         A("")
 
+    soak_flag = " --wdt-soak" if wdt_soak else ""
     A("## Reproduce this build")
     A("")
     A("```bash")
     if configuration_name:
-        A("python3 tools/build_config.py build %s" % configuration_name)
+        A("python3 tools/build_config.py build %s%s" % (configuration_name, soak_flag))
     elif deployment:
         family, deployment_board = deployment.split("/", 1)
         if deployment_is_ota(deployment):
@@ -522,7 +756,7 @@ def main():
             A("tools/build_deployment.sh %s %s   # factory-only: no signing key"
               % (family, deployment_board))
     else:
-        A("tools/build_board.sh %s" % board)
+        A("tools/build_board.sh %s%s" % (board, soak_flag))
     A("```")
     A("")
     if configuration_name:

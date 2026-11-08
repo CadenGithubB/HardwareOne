@@ -49,6 +49,17 @@ static unsigned assertFailures = 0;
 #define configASSERT(value) do { if (!(value)) ++assertFailures; } while (0)
 #define ENABLE_CAMERA_SENSOR 0
 
+// On classic ESP32 the "g2client" row also requires 22 KB
+// left after the runtime's own cost (20 KB, plus 2 KB since the 2026-11-08 raise of
+// the later g2_owner stack from 6 to 8 KB) and a 26 KB largest block (pinned here,
+// so a drifted production value fails). Other targets keep the plain row.
+#if CONFIG_IDF_TARGET_ESP32
+constexpr size_t kClassicLeftAfter = 20480 + 2048, kClassicLargest = 10240 + 16384;
+#else
+constexpr size_t kClassicLeftAfter = 0, kClassicLargest = 0;
+#endif
+static size_t g2AdmissionFloor() { return gMemoryRequirements[0].minHeapBytes + kClassicLeftAfter; }
+
 // Worker bits. The ring worker is no longer part of the glasses lifecycle.
 enum : unsigned { kPageWorker = 1, kTapWorker = 2, kSessionWorker = 8 };
 constexpr unsigned kAllWorkers = kPageWorker | kTapWorker | kSessionWorker;
@@ -60,7 +71,8 @@ struct Boundaries {
   bool lensReady = true, tapReady = true, sessionReady = true;
   bool sessionStops = true, uiQuiesces = true, disconnect = true, notesRelease = true;
   bool setupIdle = true, scanIdle = true, leftReset = true, rightReset = true, uiRelease = true;
-  size_t heap = gMemoryRequirements[0].minHeapBytes;  // internal free bytes at admission
+  size_t heap = g2AdmissionFloor();                  // internal free bytes at admission
+  size_t largest = SIZE_MAX;                         // largest internal block at admission
   const char* refusal = "";                          // bleStackLastRefusal()
   // A producer (a timer, the main loop, ESP-NOW, a ring gesture) runs once
   // when the lifecycle reaches the boundary named here; see reach().
@@ -195,6 +207,11 @@ static size_t hw1InternalFreeBytes() {
   check(!boundary.stopped, "the runtime budget is sampled with the shared stack up");
   ++boundary.memorySamples; reach("memory");
   return boundary.heap;
+}
+static size_t hw1InternalLargestBlock() {
+  check(held.empty(), "largest-block sampling outside critical sections");
+  check(!boundary.stopped, "the largest block is sampled with the shared stack up");
+  return boundary.largest;
 }
 static struct ESPClass { size_t getFreePsram() const { return SIZE_MAX; } } ESP;
 static bool g2ScanCallbackResetAfterHostInit() {
@@ -509,9 +526,54 @@ static void transitions() {
   defaults();
 }
 
+// The figures measured on feather_esp32_v2 (System_MemoryMonitor.cpp),
+// before the 2026-11-08 raise added 4 KB of resident stacks; current builds sit about 4 KB lower,
+// which moves none of the decisions below.
+// WiFi+HTTP leaves ~95.8 KB before the stack; the stack costs the 43,272 B BLE
+// core plus the 5,120 B setup worker, so the runtime gate sees 49,707 B -- the
+// start the plain 40,960 B row admitted and that landed near 9 KB.
+static void classicAdmission() {
+  constexpr size_t wifiHttpTotal = 98099, stackCost = 43272 + 5120;
+  constexpr size_t wifiHttpAtGate = wifiHttpTotal - stackCost;
+  constexpr size_t coldAtGate = 104843 - 5120;  // healthy cold boot, no WiFi
+  struct Case { const char* name; size_t heap, largest; bool classic, other; };
+  const Case cases[] = {
+    {"wifi+http, healthy largest block", wifiHttpAtGate, 40960, false, true},
+    {"old 95.8 KB total, fragmented", wifiHttpTotal, 12288, false, true},
+    {"ample total, largest block one byte short", coldAtGate, 10240 + 16384 - 1, false, true},
+    {"ample total, largest block at the floor", coldAtGate, 10240 + 16384, true, true},
+    {"healthy cold boot", coldAtGate, 61440, true, true},
+  };
+  for (const Case& c : cases) {
+    defaults(); boundary.heap = c.heap; boundary.largest = c.largest;
+#if CONFIG_IDF_TARGET_ESP32
+    const bool expected = c.classic;
+#else
+    const bool expected = c.other;
+#endif
+    const bool admitted = initG2Client();
+    if (admitted != expected) std::cerr << "classic admission case: " << c.name << '\n';
+    check(admitted == expected, "classic G2 admission obeys the post-admission term");
+    check(boundary.memorySamples == 1 && boundary.stackUps == 1 && !boundary.stopped,
+          "the classic term samples free memory once, on the running stack");
+    if (admitted) {
+      expectAdmittedOrder(); check(deinitG2Client(), "admitted classic case stops");
+    } else {
+      expectOff(); expectNoNewClientResources();
+      check(std::any_of(boundary.broadcasts.begin(), boundary.broadcasts.end(), [](const std::string& line) {
+              return line.rfind("[G2] Client start refused: Insufficient heap: ", 0) == 0;
+            }), "the classic refusal keeps the 'Insufficient heap' reason");
+    }
+    expectReleased();
+  }
+  defaults();
+  std::cerr << "G2 classic admission: " << (sizeof(cases) / sizeof(cases[0]))
+            << " cases passed (classic=" << (kClassicLeftAfter != 0) << ")\n";
+}
+
 static void memoryAdmission() {
-  const size_t minimum = gMemoryRequirements[0].minHeapBytes;
-  check(minimum > 0 && gMemoryRequirements[0].minPsramBytes == 0,
+  const size_t minimum = g2AdmissionFloor();
+  check(gMemoryRequirements[0].minHeapBytes > 0 && gMemoryRequirements[0].minPsramBytes == 0,
         "G2 keeps its production internal-memory requirement");
   const auto heapAt = [minimum](int offset) {
     return static_cast<size_t>(static_cast<int64_t>(minimum) + offset);
@@ -788,6 +850,7 @@ int main() {
   check(producerCreates() == 0, "a fresh boot keeps the creation gate closed");
   transitions();
   memoryAdmission();
+  classicAdmission();
   workerCreationGate();
   workerAdmission();
   publicationAndConcurrency();

@@ -15,7 +15,7 @@ All marked with `[hardwareone local patch YYYY-MM-DD]` comments:
 | File | Markers | What |
 |---|---|---|
 | `libraries/BLE/src/BLECharacteristic.cpp` / `.h` | 2 / 1 | Per-characteristic prepared-write opt-out. HardwareOne disables ATT long writes on the executable command characteristic so the library's shared, allocation-fallible accumulator cannot commit a truncated prefix, replay an old value, or mix connections. Ordinary bounded writes remain unchanged. |
-| `libraries/BLE/src/BLEClient.cpp` | 13 | Raise-only local-MTU guard in `setMTU` (the per-link MTU fix — without it, ring-first glasses discovery fails with `pkt size: 102, PDU size: 64`); `m_conn_id`/`m_mtu` reset on disconnect and failed open; REG_EVT app_id filter (stops a parked client capturing another client's registration); bounded REG/OPEN/SEARCH waits; semaphore-leak fixes; stale-rc-on-timeout fix; structured connect-stage telemetry; acknowledged GATTC unregister that retains routing until completion; **`~BLEClient()` clears the static `BLEDevice::m_pClient` alias if it points at this client — stops the double-free that rebooted the device on the `openble`↔G2-client role flip (multi-client alias never nulled by the library)** |
+| `libraries/BLE/src/BLEClient.cpp` | 13 (17 with the later dated patches and the phone-pipe patch) | Raise-only local-MTU guard in `setMTU` (the per-link MTU fix — without it, ring-first glasses discovery fails with `pkt size: 102, PDU size: 64`); `m_conn_id`/`m_mtu` reset on disconnect and failed open; REG_EVT app_id filter (stops a parked client capturing another client's registration); bounded REG/OPEN/SEARCH waits; semaphore-leak fixes; stale-rc-on-timeout fix; structured connect-stage telemetry; acknowledged GATTC unregister that retains routing until completion; **`~BLEClient()` clears the static `BLEDevice::m_pClient` alias if it points at this client — stops the double-free that rebooted the device on the `openble`↔G2-client role flip (multi-client alias never nulled by the library)** |
 | `libraries/BLE/src/BLEDevice.cpp` | 2 | Sync `m_localMTU` cache to Bluedroid's real boot value (517) at init; checked, phase-ordered host/controller teardown that reports incomplete retirement and quarantines an unsafe client instead of deleting through callbacks |
 | `libraries/BLE/src/BLERemoteCharacteristic.cpp` | 7 | Semaphore-leak + bounded-wait + failure-delivery fixes, including a bounded write overload and a 30-second bound for the legacy write API; **`retrieveDescriptors()` stack-smash fix — upstream passed `count = 10` as the in/out capacity for a SINGLE-element stack `esp_gattc_descr_elem_t result`, letting `esp_ble_gattc_get_all_descr()` write ~180 B past it on any characteristic with more than one descriptor. The loop consumes one element per call and does `offset++`, so the correct capacity is 1. Reached on EVERY G2/R1 connect via the constructor.** |
 | `libraries/BLE/src/BLERemoteDescriptor.cpp` | 4 | Same family |
@@ -28,16 +28,18 @@ All marked with `[hardwareone local patch YYYY-MM-DD]` comments:
 | URL-pull OTA removed (2026-08-30, unmarked) | - | Deletes `libraries/ESP_HostedOTA/`, `libraries/HTTPUpdate/` and `libraries/Update/src/HttpsOTAUpdate.cpp/.h`, drops them from `CMakeLists.txt`, and removes `hostedGetUpdateURL()` and its `Update URL:` log line from `cores/esp32/esp32-hal-hosted.c/.h`. This is a policy decision, not a size saving: no firmware path may download an image from a URL compiled into the binary. `ESP_HostedOTA` fetched co-processor firmware from `https://espressif.github.io/arduino-esp32/hosted/<target>-vX.Y.Z.bin`. Nothing called any of it and the linker already dropped it, so the image does not change. HardwareOne's own update paths (staged BLE OTA, the recovery updater, `c6update`) never used it. `ArduinoOTA` (push, not URL-pull) and `HTTPUpdateServer` (not in the build list) were deliberately left. Deletions carry no markers; `verify_patches.sh` checks they stay absent. Recorded in `arduino-local-patches-2026-08-30-url-ota-removal.patch`. |
 | Companion transport lost (2026-10-02) | 8 | `cores/esp32/esp32-hal-hosted.c/.h`: `hostedSetTransportLost`/`hostedTransportLost`; a successful `hostedInit` clears the flag and `hostedDeinitBLE` skips the controller RPCs while it is set. `cores/esp32/esp32-hal-bt.c`: controller disable/deinit report the controller as lost (`ESP_ERR_INVALID_STATE`) instead of pretending it acknowledged, so the BLE lifecycle records an incomplete retirement and refuses to reopen BLE until a reboot. `libraries/WiFi/src/WiFiGeneric.cpp`: `wifiLowLevelDeinit` and `espWiFiStop` forgive remote failures while lost. Lets `System_RadioCompanion` tear Wi-Fi down on a dead C6 without waiting out RPC timeouts (a live C6 is always stopped cleanly); recorded in `arduino-local-patches-2026-10-02-companion.patch`. |
 | Panic path without flash (2026-10-15) | 2 | `cores/esp32/esp32-hal-misc.c`: with `CONFIG_ESP_PANIC_HANDLER_IRAM` (set for every ESP32-P4 in `config/sdkconfig.defaults.esp32p4`), `__wrap_esp_panic_handler` and `handle_custom_backtrace` are placed in IRAM, and the custom panic handler runs only on the first entry. A fault while flash is unreadable (mid erase/program, or a cache error) previously re-faulted on every fetch of the flash-resident wrap, so the IDF handler never printed or restarted and only the HP watchdog recovered the P4 about ten minutes later. Recorded in `arduino-local-patches-2026-10-15-panic-iram.patch`. |
-
-| Bluetooth library heap (2026-10-22, memory audit tranche C) | 5 + 1 | `libraries/BLE/src/RTOS.h`, `FreeRTOS.cpp`: `FreeRTOS::Semaphore` is 8 bytes (atomic handle + value), down from 48; the debug name/owner Strings and the dead pthread branch are gone, the API takes `const char*` literals, and the kernel object is made on the first take/wait (a give before any take is a no-op, exactly a give on the constructor's available binary semaphore). `BLERemoteService.h`, `BLEAdvertising.h`: the never-waited `m_semaphoreGetCharEvt` and `m_semaphoreSetAdv` removed. `BLEScan.cpp`: `take("start")` literal. `BLEDevice.cpp` (the phone pipe's seam, so it lives in `tools/ble-phone-pipe/arduino.patch`): the 4 KB app-id bitmap is a 64-entry table. Recorded in `arduino-local-patches-2026-10-22-ble-memory.patch`; applies after the three dated patches below. |
+| Bluetooth library heap (2026-10-22, memory audit tranche C) | 5 + 1 | `libraries/BLE/src/RTOS.h`, `FreeRTOS.cpp`: `FreeRTOS::Semaphore` is 8 bytes (atomic handle + value), down from 48; the debug name/owner Strings and the dead pthread branch are gone, the API takes `const char*` literals, and the kernel object is made on the first take/wait (a give before any take is a no-op, exactly a give on the constructor's available binary semaphore). `BLERemoteService.h`, `BLEAdvertising.h`: the never-waited `m_semaphoreGetCharEvt` and `m_semaphoreSetAdv` removed. `BLEScan.cpp`: `take("start")` literal. `BLEDevice.cpp` (the phone pipe's seam, so it lives in `tools/ble-phone-pipe/arduino.patch`): the 4 KB app-id bitmap is a 64-entry table. Recorded in `arduino-local-patches-2026-10-22-ble-memory.patch`; applies after the three dated patches above (2026-08-30, 2026-10-02, 2026-10-15). |
 | Service discovery never waits forever (2026-10-25) | 1 | `libraries/BLE/src/BLEClient.cpp` `getServices()`: returns at once for a disconnected client, and claims the search-complete semaphore without waiting, before the request, instead of an unbounded `take()` after it. A search that timed out leaves that semaphore taken, and a link that is already gone never gives it back, so the next discovery on that client (here the R1 ring's debug listing after "ring service not found") blocked forever and held the shared BLE-connect worker until reboot. Taking it first also stops a fast `SEARCH_CMPL_EVT` being consumed by the take. Host suite `ble_service_search` runs the shipped function. Recorded in `arduino-local-patches-2026-10-25-ble-search-wait.patch`; applies after the 2026-10-22 patch. |
 | Connect semaphores released on timeout (2026-11-06) | 2 | `libraries/BLE/src/BLEClient.cpp` `connect()`: a timed-out REG_EVT or OPEN_EVT wait gives the binary semaphore back, so a reused client's next `connect()` does not block forever in `take()` (the 2026-11-05 four-hour BLE setup-worker stall after a ring open-timeout). `arduino-local-patches-2026-11-06-ble-connect-semaphores.patch`; host test `test_ble_client_connect_semaphores.py`. |
 
 `arduino-local-patches.patch` is the full `git -C components/arduino diff`
 snapshot of all of the above.
 
-**Not covered:** the untracked `components/arduino/variants/XIAO_ESP32S3_SENSE/`
-directory (board variant) — `git diff` cannot capture untracked files.
+**Vendoring from scratch:** `tools/vendor_arduino.sh` clones upstream 3.3.5
+(`11bc7ac1a`) into `components/arduino` as a nested git checkout, applies every
+patch below in order and runs the verifier; `--check` verifies an existing copy,
+`--force` re-vendors over one. No board uses an untracked variant directory
+(each `boards/*.defaults` names an upstream `CONFIG_ARDUINO_VARIANT`).
 
 ## Verify (run any time, especially after anything touched components/arduino)
 
@@ -59,6 +61,7 @@ git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-p
 git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-10-15-panic-iram.patch
 git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-10-22-ble-memory.patch
 git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-10-25-ble-search-wait.patch
+git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-11-06-ble-connect-semaphores.patch
 git -C components/arduino apply ../../tools/ble-phone-pipe/arduino.patch
 ```
 
@@ -70,9 +73,15 @@ diff` for this). `arduino-local-patches-2026-08-30-url-ota-removal.patch` was
 recorded on 2026-10-15, after a worktree build showed the snapshot did not
 carry it. It is a `git diff` against a clean clone with only the snapshot
 applied, and it also applies after the companion patch. Clean clone plus all
-three patches reproduces the main checkout's tree on 2026-10-15. The only
-exceptions were the untracked variant below and in-progress edits to
-`BLEDevice` and `BLESecurity` from another branch.
+three patches reproduced the main checkout's tree on 2026-10-15. The only
+exceptions then were an untracked board variant directory (since removed; no
+board uses one now) and in-progress edits to `BLEDevice` and `BLESecurity`
+from another branch.
+
+On 2026-11-06 an upstream 3.3.5 clone (`11bc7ac1a`) plus every command in the
+block above, in that order, reproduced the vendored tree of commit `95dc3f34`
+file for file (`diff -rq`, ignoring `.git`), and `verify_patches.sh` passed on
+the result.
 
 (The `../../` matters: `git -C` resolves relative paths against
 `components/arduino`, not your shell's cwd.)
@@ -90,8 +99,7 @@ and bump the marker counts in `verify_patches.sh`.
 
 ## Honest limitation
 
-This `docs/` directory is itself untracked (project convention), so it also
-does not survive `git clean -dfx`. For real durability, either commit the
-patches inside the nested `components/arduino` repo, commit this directory in
-the main repo, or keep a copy outside the tree. That decision is deliberately
-left to the repo owner.
+This directory and `tools/ble-phone-pipe/arduino.patch` are tracked in the
+main repo, so the patches survive `git clean -dfx` and a fresh clone. The
+patched component itself does not: `components/arduino/` stays git-ignored and
+must be vendored and patched with the sequence above before the first build.

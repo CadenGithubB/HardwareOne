@@ -31,6 +31,8 @@ static bool failHeaderOpen = false, failReplace = false, failRemove = false, hea
 static size_t headerSizeOffset = 0;
 static int appendOpens = 0, failAppendOpenCall = 0;
 static bool overflow = false, sealFailure = false, allocFailure = false, clockSynced = false;
+static bool reserveRefused = false;  // resolveLogPath answers Refused
+static unsigned reserveDrops = 0;
 static unsigned long nowMs = 10000;
 static time_t fixedEpoch = 1800000000;
 static unsigned long millis() { return nowMs; }
@@ -102,6 +104,14 @@ static Context systemAuth(const char* scope, const char* tag) { (void)scope; ret
 static bool resolveOverflowPath(const char* path, size_t need, char* output, size_t capacity) {
   io("resolve:" + std::to_string(need)); snprintf(output, capacity, "%s%s", overflow ? "/sd" : "", path); return overflow;
 }
+enum class LogTier : uint8_t { Primary, Overflow, Refused };
+static LogTier resolveLogPath(const char* path, size_t need, char* output, size_t capacity) {
+  io("resolve:" + std::to_string(need));
+  if (reserveRefused) { snprintf(output, capacity, "%s", path); return LogTier::Refused; }
+  snprintf(output, capacity, "%s%s", overflow ? "/sd" : "", path);
+  return overflow ? LogTier::Overflow : LogTier::Primary;
+}
+static void noteLogReserveDrop() { ++reserveDrops; }
 static File openGuarded(const String& path, const char* mode, const Context& ctx, bool create = false) {
   io("open:" + text(path) + ":" + mode + ":" + ctx.tag);
   check(ctx.tag.rfind("senlog.", 0) == 0 || ctx.tag == "batlog", "trusted owner context retained");
@@ -186,7 +196,7 @@ static void reset(bool onSd = false) {
   released(); ++cases; disk.clear(); operations.clear(); messages.clear(); writeCalls = failWrite = reads = 0; shortCount = 0;
   failAppendOpen = failReadOpen = reportWriteError = sealFailure = allocFailure = clockSynced = false;
   failHeaderOpen = failReplace = failRemove = headerFlushError = false;
-  headerSizeOffset = 0; appendOpens = failAppendOpenCall = 0;
+  headerSizeOffset = 0; appendOpens = failAppendOpenCall = 0; reserveRefused = false; reserveDrops = 0;
   overflow = onSd; nowMs = 10000; gSensorLogFormat = SENSOR_LOG_TEXT; gSensorLogMask = LOG_TOF;
   gSensorLogPathMode = SensorLogPathMode::MANUAL; gSensorLogPath = "/sensor.log";
   gSensorLogSealed = false; gSealBuf = nullptr; gApproxSizeBytes = 0; gSensorLogMaxSize = 100000;
@@ -459,8 +469,35 @@ static void helperCases() {
   check(f.getWriteError(), "borrowed file's error is not cleared"); f.close(); fsUnlock(); released();
 }
 #endif
+#if !BASELINE
+// With the overflow latch set, no writable card and LittleFS below the
+// 100 KB floor, a sensor row must not be appended to flash (it would spend the
+// reserve settings saves depend on); it is dropped and counted, and the
+// session writes again once the resolution clears.
+static void reserveRefusedCases() {
+  for (auto format : {SENSOR_LOG_TEXT, SENSOR_LOG_CSV}) {
+    reset(); gSensorLogFormat = format; disk[sensorPath()] = "prefix\n"; gApproxSizeBytes = 7;
+    reserveRefused = true;
+    sensorAppend("body"); released();
+    check(disk.at(sensorPath()) == "prefix\n" && log_writes == 0 && reserveDrops == 1,
+          "Refused resolution drops the row and leaves the file untouched");
+    check(std::none_of(operations.begin(), operations.end(), [](const std::string& op) { return op.rfind("open:", 0) == 0; }),
+          "Refused resolution opens nothing");
+    check(gApproxSizeBytes == 7 && log_open_fail == 0, "a refused row is neither a write nor an open failure");
+    reserveRefused = false; sensorAppend("body"); released();
+    check(disk.at(sensorPath()) == "prefix\nbody\n" && log_writes == 1 && reserveDrops == 1,
+          "writing resumes once the resolution clears");
+  }
+  reset(); gSensorLogFormat = SENSOR_LOG_CSV; reserveRefused = true; sensorAppend("body"); released();
+  check(disk.empty() && reserveDrops == 1, "a refused fresh CSV session creates no file or header");
+}
+#endif
+
 int main() {
   tzset();
+#if !BASELINE
+  reserveRefusedCases();
+#endif
   for (bool onSd : {false, true}) { sensorNormal(onSd); sensorFailures(onSd); }
   batteryNormal(); batteryFailures(); batteryCadence(); headerCases();
 #if !LEGACY_ROWS

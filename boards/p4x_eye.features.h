@@ -95,12 +95,19 @@
 // ESP-SR models load from LittleFS, keeping the no_sr partition layout.
 #undef HW1_SR_MODELS_IN_FILESYSTEM
 #define HW1_SR_MODELS_IN_FILESYSTEM 1
-// Fully local transcription on the P4 (no Pi/UART, Wi-Fi or cloud).
+// Fully local transcription on the P4 (no Pi/UART, Wi-Fi or cloud) runs the
+// published 15x5 gen2 model from "/sd/STT Models/", so it needs the microSD
+// card and is off here with the card. A saved configuration enables it with
+// ENABLE_SDMMC_CARD=1 and ENABLE_LOCAL_STT=1 (the 15x5 model follows; the build
+// refuses local STT without the card). CMake reads these as literal text.
 #undef ENABLE_LOCAL_STT
-#define ENABLE_LOCAL_STT 1
+#define ENABLE_LOCAL_STT 0
+#undef ENABLE_STT_MODEL_15X5_GEN2
+#define ENABLE_STT_MODEL_15X5_GEN2 ENABLE_LOCAL_STT
 // Session speaker labels: saved transcript lines become "[Person N] text" when
 // "/sd/STT Models/speaker.spk" is on the card (without it nothing changes).
-// Labelling runs in a background task; captions never wait for it.
+// Labelling runs in a background task; captions never wait for it. Applies
+// only with local STT (System_BuildConfig.h turns it off otherwise).
 #undef ENABLE_STT_SPEAKER_LABELS
 #define ENABLE_STT_SPEAKER_LABELS 1
 // Private spoken notes (ring hold on a HW1 lens page, Notes page, `note` CLI),

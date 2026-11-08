@@ -6,6 +6,8 @@
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
 #include "System_MemoryMonitor.h"
+#include "System_HeapLowCore.h"  // heap_low event policy (host-tested)
+#include "System_Events.h"       // systemEventPost(SYSEVT_HEAP_LOW)
 #include "System_MemTracker.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
@@ -93,10 +95,12 @@ static const MemoryRequirement gMemoryRequirements[] = {
   // 2,892 of TCBs/queues -- all MALLOC_CAP_INTERNAL|8BIT and unable to fall back
   // to PSRAM. The BLE-core figure independently matches openble's 42,944 (3 runs).
   //
-  // 86016 = 80,980 + ~5 KB. NOTE this is deliberately a tight floor: it still
-  // admits the G2 client start on a WiFi+HTTP device (~95.8 KB free), which lands near 9 KB and
-  // has been observed to fail afterwards at openg2. Raising this toward ~102,400
-  // would refuse that combination outright.
+  // 86016 = 80,980 + ~5 KB. NOTE this is deliberately a tight floor: on its own
+  // it admits the G2 client start on a WiFi+HTTP device (~95.8 KB free; about
+  // 4 KB less since the cmd_exec and log_out stacks grew), which
+  // lands near 9 KB and has been observed to fail afterwards at openg2. On
+  // classic ESP32 the "g2client" row therefore carries a post-admission term
+  // in checkMemoryAvailable() that refuses that combination.
   // Split 2026-10-21 with the shared central stack (BLE_CentralStack.cpp):
   // "blestack" is the host + controller link + setup worker, checked by
   // bleStackUp() before the host comes up (BLE core 43,272 measured above +
@@ -172,6 +176,49 @@ bool checkMemoryAvailable(const char* component, String* outReason) {
     return false;
   }
   
+#if CONFIG_IDF_TARGET_ESP32
+  // On classic ESP32 (~2 MB boards, no internal RAM to spare)
+  // the total-free row alone admitted G2 with WiFi+HTTP up at ~49 KB free past
+  // the stack, which lands near 9 KB once the runtime's ~40 KB is paid -- and
+  // CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL keeps every <=16 KB allocation
+  // internal, so that is effectively exhausted. Admit only if (a) free minus
+  // the row's own cost leaves leftAfterBytes, and (b) the largest block can
+  // take one 10 KB worker stack and still leave a 16 KB block. S3/P4 have the
+  // RAM and keep the plain row.
+  // leftAfterBytes was 20 KB when g2_owner (G2_CONTROL_STACK_BYTES, created
+  // later, on the first glasses connect) had a 6 KB stack. That stack is
+  // 8 KB since 2026-11-08, so the term grew by the same 2 KB: a start admitted
+  // at the floor still ends with the same free RAM once g2_owner is up.
+  static const struct {
+    const char* component;
+    size_t leftAfterBytes;   // free internal RAM required after the start
+    size_t minLargestBlock;  // contiguous internal block required at admission
+  } kClassicHeadroom[] = {
+    { "g2client", 20480 + 2048, 10240 + 16384 },  // +2 KB: g2_owner 6 -> 8 KB
+  };
+  for (const auto& term : kClassicHeadroom) {
+    if (strcmp(term.component, req->component) != 0) continue;
+    const size_t largest = hw1InternalLargestBlock();
+    const size_t need = req->minHeapBytes + term.leftAfterBytes;
+    if (freeHeap < need || largest < term.minLargestBlock) {
+      if (outReason) {
+        char buf[96];
+        if (freeHeap < need) {
+          snprintf(buf, sizeof(buf), "Insufficient heap: need %uKB (%uKB left after start), have %uKB",
+                   (unsigned)(need / 1024), (unsigned)(term.leftAfterBytes / 1024),
+                   (unsigned)(freeHeap / 1024));
+        } else {
+          snprintf(buf, sizeof(buf), "Insufficient heap: largest block %uKB, need %uKB",
+                   (unsigned)(largest / 1024), (unsigned)(term.minLargestBlock / 1024));
+        }
+        outReason->reserve(sizeof(buf));
+        *outReason = buf;
+      }
+      return false;
+    }
+  }
+#endif
+
   // Check PSRAM requirement (if any)
   if (req->minPsramBytes > 0 && freePsram < req->minPsramBytes) {
     if (outReason) {
@@ -207,12 +254,15 @@ static size_t gLowestHeapSeen = UINT32_MAX;
 // in System_MemUtil.h). Once the samplers became honest, 40960 sat ABOVE normal
 // operating level and warned every 10 s for as long as the G2 glasses were
 // connected, which trains the reader to ignore it.
-// Measured on feather_esp32_v2 (honest INTERNAL|8BIT figures):
+// Measured on feather_esp32_v2 (honest INTERNAL|8BIT figures, before the 2026-11-08
+// stack raise grew the cmd_exec and log_out stacks by 4 KB and g2_owner by 2 KB; expect
+// each line to be that much lower on current builds):
 //   boot, WiFi + HTTP, no BLE ......... 95,927 B
 //   after openble (server mode) ....... 33,435 B
 //   after the G2 client start ......... 26,495 B   (then `g2init`; now openble + openg2)
 //   G2 connected, hijack page open .... 21,299 B  <- still warns at 25 KB, intended
-static const size_t HEAP_WARNING_THRESHOLD = 25600;  // 25KB warning threshold
+static const size_t HEAP_WARNING_THRESHOLD = heap_low_core::kFreeBytes;  // 25KB warning threshold
+static_assert(heap_low_core::kFreeBytes == 25600, "heap_low and [HEAP_PRESSURE] share the 25 KB line");
 
 void sampleMemoryState(bool forceFullScan) {
   // ── Internal heap (NOT combined — PSRAM is reported separately below) ──
@@ -504,10 +554,12 @@ const char* cmd_memsample(const String& argsInput) {
 void periodicMemorySample() {
   // ── Tier 1 (always-on): cheap DRAM-pressure watch ────────────────────────
   // Runs regardless of DEBUG_MEMORY so a shipping device still warns *before*
-  // it OOMs. Just an O(num_heaps) free-size query + a compare (no
-  // largest-free-block walk — that stays in the verbose path below). Checked
-  // at most once per second; the WARN line is rate-limited to one per 10 s so
-  // it can never flood the output. Also keeps gLowestHeapSeen current between
+  // it OOMs. An O(num_heaps) free-size query + a compare, checked at most once
+  // per second; the WARN line is rate-limited to one per 10 s so it can never
+  // flood the output. The heap_low event below also needs the internal
+  // largest free block: that query walks every internal heap block under the
+  // heap lock, so it runs here at most once every 10 s (the reported largest
+  // value can lag by up to 10 s). Also keeps gLowestHeapSeen current between
   // verbose samples.
   {
     static unsigned long lastPressureCheckMs = 0;
@@ -523,6 +575,24 @@ void periodicMemorySample() {
           BROADCAST_PRINTF("[HEAP_PRESSURE] WARNING: DRAM free %u B (threshold=%u, min_ever=%u)",
                            (unsigned)dramFree, (unsigned)HEAP_WARNING_THRESHOLD, (unsigned)gLowestHeapSeen);
         }
+      }
+      // heap_low system event: the same pressure as a record automations and
+      // events.log can see. The largest-block query walks the heap, so it runs
+      // at most every 10 s; the free total is re-read every second. One event
+      // per low episode (latched, 60 s cooldown) — see System_HeapLowCore.h.
+      static heap_low_core::Watch heapLowWatch;
+      static size_t largestFree = SIZE_MAX;
+      static unsigned long lastLargestMs = 0;
+      if (largestFree == SIZE_MAX || (nowMs - lastLargestMs) >= 10000UL) {
+        lastLargestMs = nowMs;
+        largestFree = hw1InternalLargestBlock();
+      }
+      if (heap_low_core::update(heapLowWatch, dramFree, largestFree, (uint32_t)nowMs)) {
+        char subject[16];
+        char detail[32];
+        snprintf(subject, sizeof(subject), "%u", (unsigned)dramFree);
+        snprintf(detail, sizeof(detail), "largest %u", (unsigned)largestFree);
+        systemEventPost(SYSEVT_HEAP_LOW, subject, detail);
       }
     }
   }

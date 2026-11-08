@@ -51,10 +51,12 @@ bool isEspNowInitialized() { return false; }
 #include "System_User.h"
 #include "System_UartLink.h"
 #include "System_AuthIdentity.h"  // ExecIdentityGuard (executeCommand + submitAndExecuteSync)
+#include "System_TaskWdt.h"       // taskWdtAwareSemaphoreTake (soak builds feed the main loop)
 #include "System_BootState.h"     // bootStateGetBootCount / bootStateResetBootCount (NVS boot counter)
 #include "System_CrashRecord.h"   // crashRecord* — RTC post-mortem record for `crashlog`
 #include "System_OTASafety.h"     // pending trial images must finish probation before power-off
 #include "System_SelfDevice.h"   // SelfDevice:: — local identity/heap/uptime/firmware (Stage 1 consolidation)
+#include "System_Versions.h"     // versionsAddJson — the "versions" object of status json
 #include "System_Clock.h"        // Clock:: — epoch/sync/tz/format helpers (Stage 2)
 #include "System_Command.h"
 #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
@@ -1935,7 +1937,7 @@ const char* cmd_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   uint32_t reason = gSettings.lastResetReason;
-  const char* reasonLabel = (reason < 11) ? kResetReasonLabels[reason] : "Unknown";
+  const char* reasonLabel = resetReasonLabel(reason);  // same table bound as crashlog/JSON
   size_t psTot = ESP.getPsramSize();
 
   // ---- Structured path: delegate to the shared buildSystemInfoJson() (the
@@ -1944,10 +1946,15 @@ const char* cmd_status(const String& argsInput) {
   //      (which would land in DRAM) — keeps the small-buffer / DRAM discipline.
   if (argWantsJson(argsInput)) {
     // A P4 build (C6 companion, LLM, the Bluetooth link words) reaches about
-    // 2 KB; a document that does not fit is refused, never cut into bad JSON.
-    static constexpr size_t kStatusJsonCap = 3072;
+    // 2 KB before the versions object (about 0.5 KB there, held within 1 KB by
+    // test_versions.py); a document that does not fit is refused, never cut
+    // into bad JSON. The command reply limit is the cap.
+    static constexpr size_t kStatusJsonCap = CMD_RESULT_MAX;
     PSRAM_JSON_DOC(doc);
     buildSystemInfoJson(doc, /*includeDeviceList=*/false);
+    // `versions json`'s keys. Here rather than in buildSystemInfoJson, whose
+    // periodic web/SSE telemetry has no use for them.
+    versionsAddJson(doc["versions"].to<JsonObject>());
     if (doc.overflowed()) return "{\"error\":\"oom\"}";
     if (measureJson(doc) >= kStatusJsonCap) return "{\"error\":\"status too large\"}";
     static char* statusJsonBuf = nullptr;
@@ -2351,6 +2358,7 @@ const char* cmd_reboot(const String& originalCmd) {
 #include "System_AuthIdentity.h"
 #include "System_User.h"   // USERS_JSON_FILE
 #include "System_VFS.h"
+#include "System_MemDiag.h"
 
 extern const char* USERS_JSON_FILE;  // defined in System_User.cpp
 
@@ -2740,8 +2748,19 @@ const char* cmd_crashlog(const String& argsInput) {
   return "OK";
 }
 
+#if HW1_BENCH_MEMDIAG
+static const char* cmd_memdiag(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return memDiagCommand(args.c_str());
+}
+#endif
+
 extern const CommandEntry commands[] = {
   // ---- Core / General ----
+#if HW1_BENCH_MEMDIAG
+  { "memdiag", "Bench memory diagnostics: [status|check|arm|disarm|dump|noabort]", true, cmd_memdiag,
+    "Usage: memdiag [status|check|arm|disarm|dump|noabort]" },
+#endif
   { "status", "Show system status (WiFi, FS, memory). (add 'json' for JSON output)", false, cmd_status },
   { "crashlog", "Show the last recorded crash (panic text, core/PC, boot phase, repeat count). (add 'json')", false, cmd_crashlog,
     "Usage: crashlog [json]" },
@@ -4679,8 +4698,13 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
         modeInstanceAfterHandler != modeInstanceBeforeHandler &&
         cliModeCurrentCommandOwns();
     if (!handlerEnteredMode) {
+      // A bare usage line is a refused command, not a result: the handler got
+      // arguments it could not use. Same for a feature the build does not have.
+      // Without this they were stamped "OK:" and reached the web client as 200.
       registrySuccess = (strncmp(out, "Error", 5) != 0) &&
-                        (strncmp(out, "ERROR", 5) != 0);
+                        (strncmp(out, "ERROR", 5) != 0) &&
+                        (strncmp(out, "Usage:", 6) != 0) &&
+                        (strcmp(out, "Unknown feature.") != 0);
       logCommandExecutionPrepared(ctx, cmd, safeCommandForTrace,
                                   registrySuccess, out);
       stampOkStatus(out, outSize, registrySuccess);  // stamp AFTER audit so the log keeps the raw result
@@ -4869,7 +4893,11 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
   // long-running synchronous command. Caller and executor retain independent
   // references, so either side may win at the exact timeout boundary without
   // orphaning or prematurely freeing the request/semaphore.
-  const BaseType_t syncTaken = xSemaphoreTake(r->done, pdMS_TO_TICKS(60000));
+  // The main loop waits here for serial, UART-link and OLED commands (bench
+  // logs show 5-10 s for `openwifi`). In a watchdog soak build the main task
+  // is subscribed, so this bounded wait feeds it each second; elsewhere it is
+  // a plain xSemaphoreTake (System_TaskWdt.h).
+  const BaseType_t syncTaken = taskWdtAwareSemaphoreTake(r->done, 60000);
 
 #if ENABLE_HTTP_SERVER
   if (waiterIsHttpd) gWebCmdWaiters.fetch_sub(1, std::memory_order_acq_rel);

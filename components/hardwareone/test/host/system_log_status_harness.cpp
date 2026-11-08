@@ -21,8 +21,19 @@ volatile uint32_t gOutputFlags = 0;
 String gSystemLogPath = "";
 bool gSystemLogRunning = false;
 unsigned long gSystemLogLastWrite = 0;
+uint32_t gSystemLogRotations = 0;  // production: static in System_Debug.cpp, shown by the ACTIVE status
+uint32_t gSystemLogReserveSkips = 0;  // production: static, counted by the writer
+// The writer's reserve check reads the VFS free-space cache and floor.
+static size_t littleFsFree = 1024 * 1024;
+namespace VFS {
+enum StorageType { INTERNAL = 0, SDCARD = 1 };
+static StorageType getStorageType(const String& path) { return std::strncmp(path.c_str(), "/sd/", 4) == 0 ? SDCARD : INTERNAL; }
+static size_t getCachedLittleFsFree() { return littleFsFree; }
+static size_t logReserveBytes() { return 100 * 1024; }
+}
 DebugFlagMask gDebugFlags;
-struct HostSettings { bool systemLogAutoStart = false; String systemLogFlags; } gSettings;
+struct HostSettings { bool systemLogAutoStart = false; String systemLogFlags;
+                      int systemLogMaxSize = 1048576; int systemLogMaxRotations = 3; } gSettings;
 
 bool parseSystemLogFlags(const String& flagsStr, DebugFlagMask& out);
 void formatSystemLogFlags(DebugFlagMask mask, char* out, size_t outSize);
@@ -65,9 +76,31 @@ int main() {
   nowMs = 63500;
   char routes[8];
   std::snprintf(routes, sizeof(routes), "0x%02X", static_cast<unsigned>(MSG_ROUTE_SERIAL | MSG_ROUTE_FILE));
+  const std::string cap = "\n  Rotation: at 1024 KB, keep 3 old file(s); rotated 0 time(s) this boot";
   const std::string active = std::string("System logging ACTIVE\n  File: /logging_captures/system/debug.log\n"
-                                         "  Last write: 62s ago\n  Output flags: ") + routes + "\n  Auto-start: ON";
+                                         "  Last write: 62s ago\n  Output flags: ") + routes + "\n  Auto-start: ON" + cap;
   for (size_t size : {kCliStatus, kWebStatus}) CHECK(status(size) == active);
+  gSystemLogRotations = 3;  // the writer's rotation count reaches the status line
+  CHECK(status(kCliStatus).find("rotated 3 time(s) this boot") != std::string::npos);
+  gSystemLogRotations = 0;
+  gSettings.systemLogMaxSize = 20480; gSettings.systemLogMaxRotations = 0;  // settings drive the line
+  CHECK(status(kCliStatus).find("Rotation: at 20 KB, keep 0 old file(s)") != std::string::npos);
+  gSettings.systemLogMaxSize = 99; gSettings.systemLogMaxRotations = 42;    // out of range reads as default
+  CHECK(status(kCliStatus).find("Rotation: at 1024 KB, keep 3 old file(s)") != std::string::npos);
+  gSettings.systemLogMaxSize = 1048576; gSettings.systemLogMaxRotations = 3;
+
+  // On LittleFS the writer skips lines below the reserve the overflow
+  // latch keeps for settings saves; a log on SD is not held to it. Skips
+  // reach the status line only once there are any.
+  littleFsFree = 100 * 1024;
+  CHECK(!systemLogBlockedByReserve(gSystemLogPath));
+  littleFsFree = 100 * 1024 - 1;
+  CHECK(systemLogBlockedByReserve(gSystemLogPath));
+  CHECK(!systemLogBlockedByReserve(String("/sd/logging_captures/system/debug.log")));
+  littleFsFree = 1024 * 1024;
+  gSystemLogReserveSkips = 7;
+  CHECK(status(kCliStatus) == active + "\n  Skipped: 7 line(s) while flash was below its 100 KB reserve");
+  gSystemLogReserveSkips = 0;
 
   gOutputFlags = MSG_ROUTE_SERIAL;
   gSettings.systemLogAutoStart = false;

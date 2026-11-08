@@ -49,6 +49,15 @@ struct SegmenterConfig {
     // short reply is not held back by the minimum length. 0 keeps the strict
     // minimum length.
     size_t short_close_silence_samples=0;
+    // Opt-in decision signal (adaptive mode): judge each frame on a pre-emphasised
+    // copy of the audio, y[n] = x[n] - (c/100) x[n-1] with c = decision_pre_emphasis,
+    // scaled during the calibration window so its ambient level matches the raw
+    // ambient level (the fixed floors keep their raw-RMS meaning). Speech tilts
+    // toward high frequencies and room hum toward low, so quiet speech 3-4 dB above
+    // the room clears the 2 x noise onset rule (bench 2026-11-07: +14..20 WER points
+    // at 1 ft, unchanged up close). Raw samples are still what is cut and delivered;
+    // only the level fed to the onset/silence logic changes. 0 = full-band RMS.
+    uint8_t decision_pre_emphasis=0;
 };
 enum class SegmentEnd : uint8_t { Pause, HardLimit, SessionEnd };
 enum class SegmentStatus : uint8_t { Ok, Ready, Finished, InvalidArgument, NotInitialized, CounterOverflow };
@@ -88,6 +97,7 @@ public:
         cut_=carry_voice_=0;
         voiced_run_=0;voiced_end_abs_=0;
         frame_count_=0;frame_sum_=0;frame_square_=0;
+        dframe_sum_=0;dframe_square_=0;pre_prev_=0;cal_raw_sum_=cal_dec_sum_=0;decision_gain_q8_=256;
         active_=continuation_=ready_=finishing_=finished_=false;segment_={};
         calibrated_=!config_.adaptive;heard_speech_=false;calibration_seen_=0;
         noise_head_=noise_count_=0;current_rms_=noise_rms_=peak_rms_=0;
@@ -160,6 +170,11 @@ public:
             }
             ++seen_;++frame_count_;frame_sum_+=sample;
             frame_square_+=static_cast<uint64_t>(static_cast<int64_t>(sample)*sample);
+            if(config_.decision_pre_emphasis) {
+                const int32_t d=static_cast<int32_t>(sample)-(pre_prev_*static_cast<int32_t>(config_.decision_pre_emphasis))/100;
+                pre_prev_=sample;
+                dframe_sum_+=d;dframe_square_+=static_cast<uint64_t>(static_cast<int64_t>(d)*d);
+            }
             if(frame_count_==kSegmentAnalysisSamples) {
                 evaluate_frame(false);clear_frame();
                 if(ready_)return {consumed,SegmentStatus::Ready};
@@ -226,7 +241,7 @@ private:
                 && c.calibration_samples<=kSegmentNoiseWindowFrames*kSegmentAnalysisSamples && aligned(c.calibration_samples)
                 && c.adaptive_speech_floor>0 && c.adaptive_speech_floor<=32767
                 && c.adaptive_silence_floor>0 && c.adaptive_silence_floor<=c.adaptive_speech_floor))
-            && c.noise_percentile<=50 && aligned(c.silence_blip_samples)
+            && c.noise_percentile<=50 && c.decision_pre_emphasis<=99 && aligned(c.silence_blip_samples)
             && c.silence_blip_samples<c.end_silence_samples
             && aligned(c.hard_cut_search_samples) && c.hard_cut_search_samples<=c.max_segment_samples/2
             && (!c.hard_cut_search_samples || !c.forced_overlap_samples)
@@ -250,13 +265,34 @@ private:
         head_=history_=voice_=silence_=0;loud_run_=0;active_=true;continuation_=false;
     }
     bool eligible() const { return voice_>0 && (continuation_ || voice_>=config_.min_voice_samples); }
-    void clear_frame() { frame_count_=0;frame_sum_=0;frame_square_=0; }
+    void clear_frame() { frame_count_=0;frame_sum_=0;frame_square_=0;dframe_sum_=0;dframe_square_=0; }
+    // Pre-emphasised frame RMS in raw ambient units (see decision_pre_emphasis).
+    // current_rms_ must already hold this frame's raw RMS. During calibration
+    // (ambient only) the raw/decision level ratio is learned as the scale, so a
+    // bass-heavy room (ratio > 1) and a hissy one (ratio < 1) both land where the
+    // floors expect; the scale is frozen once calibrated.
+    uint16_t decision_level(uint64_t n) {
+        const uint64_t centered=dframe_square_*n-static_cast<uint64_t>(dframe_sum_*dframe_sum_);
+        const uint32_t rms_d=integer_sqrt(static_cast<uint32_t>(centered/(n*n)));
+        if(!calibrated_) {
+            cal_raw_sum_+=current_rms_;cal_dec_sum_+=rms_d;
+            if(cal_dec_sum_) {
+                uint64_t g=(cal_raw_sum_*256+cal_dec_sum_/2)/cal_dec_sum_;
+                if(g<32)g=32;             // x1/8: a hissy room makes the decision signal louder
+                if(g>64*256)g=64*256;     // x64: a very bass-heavy room makes it much quieter
+                decision_gain_q8_=static_cast<uint32_t>(g);
+            }
+        }
+        const uint64_t scaled=(static_cast<uint64_t>(rms_d)*decision_gain_q8_)>>8;
+        return scaled>65535?65535:static_cast<uint16_t>(scaled);
+    }
     void evaluate_frame(bool finalizing) {
         const uint64_t n=frame_count_;
         const uint64_t centered=frame_square_*n-static_cast<uint64_t>(frame_sum_*frame_sum_);
         // Integer floor(sqrt(variance)) is reproducible across hosts and chips;
         // the fixed-mode comparison below retains its original exact arithmetic.
         current_rms_=integer_sqrt(static_cast<uint32_t>(centered/(n*n)));
+        if(config_.adaptive && config_.decision_pre_emphasis)current_rms_=decision_level(n);
         bool voiced=false, silent=false;
         if(config_.adaptive) {
             const int32_t floor_before=noise_count_?noise_rms_:-1;
@@ -447,6 +483,11 @@ private:
     uint64_t voiced_end_abs_=0;    // end of the last run longer than the blip limit
     int64_t frame_sum_=0;
     uint64_t frame_square_=0;
+    int64_t dframe_sum_=0;         // decision-signal accumulators (decision_pre_emphasis)
+    uint64_t dframe_square_=0;
+    int32_t pre_prev_=0;
+    uint64_t cal_raw_sum_=0,cal_dec_sum_=0;
+    uint32_t decision_gain_q8_=256;
     uint16_t frame_count_=0;
     uint16_t noise_window_[kSegmentNoiseWindowFrames]{};
     size_t noise_head_=0,noise_count_=0,calibration_seen_=0;

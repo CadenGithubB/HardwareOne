@@ -32,6 +32,7 @@
 #include "Bluetooth.h"         // explicit BLE role/transition ownership
 #include "BLE_CentralTx.h"     // controller-level TX gate (shared with G2)
 #include "G2_Glasses.h"        // g2SetAllTemplesConnPriority, g2WaitForBothConnected
+#include "G2_HealthPush.h"     // `ring panel` rows: stock Health panel feed
 #if ENABLE_MICROPHONE
 #include "HAL_Audio.h"         // audioGetSource/audioCaptureOwnedBy — audio arbitration
 #include "System_Microphone.h" // micRecordingBusy — real recording lifecycle
@@ -7398,7 +7399,7 @@ static const char* cmd_ringcontrolrefresh(const String& /*args*/) {
 }
 
 static const char* cmd_ring(const String& /*args*/) {
-  return "Error: invalid arguments — Usage: ring <status|scan|connect|disconnect|health|poll|history|query|control>";
+  return "Error: invalid arguments — Usage: ring <status|scan|connect|disconnect|health|poll|history|query|control|panel>";
 }
 
 // One row per verb, so each keeps its own tier; longest prefix picks a verb
@@ -7422,14 +7423,27 @@ extern const CommandEntry g2RingCommands[] = {
   { "ring control refresh", "Read the ring's low-power state back.",   false, cmd_ringcontrolrefresh },
   { "ring control",    "Set the ring's health collection or low power.", true, cmd_ringcontrol,
     "Usage: ring control <collection|lowpower> <preserve|on|off>  (saved, applied asynchronously; ring health shows desired/observed)" },
+#if ENABLE_R1_HEALTH
+  // Stock G2 Health panel feed (G2_HealthPush): the Even app's sid 0x0E
+  // snapshot to the right temple. Writes are admin; status/preview are not.
+  { "ring panel status", "Glasses Health panel feed: state, current values, last send and echo.", false, cmd_ringpanelstatus },
+  { "ring panel preview", "Show the snapshot and its bytes without sending.", false, cmd_ringpanelpreview,
+    "Usage: ring panel preview [test]" },
+  { "ring panel send", "Send one snapshot to the glasses' Health panel now.", true, cmd_ringpanelsend,
+    "Usage: ring panel send [test]  (test = fixed values 1234 steps, 210 kcal, sleep score 80 / 7h30m, 72 bpm, 98%)" },
+  { "ring panel feed", "Feed the glasses' Health panel from the ring (saved; off by default).", true, cmd_ringpanelfeed,
+    "Usage: ring panel feed [on|off]" },
+  { "ring panel on",   "Same as ring panel feed on (saved).", true, cmd_ringpanelon },
+  { "ring panel off",  "Same as ring panel feed off (saved).", true, cmd_ringpaneloff },
+  { "ring panel history", "How often the feed refreshes ring history (steps, kcal, sleep).", true, cmd_ringpanelhistory,
+    "Usage: ring panel history [minutes 10-1440]  (default 30)" },
+#endif
   { "ring",            "Even R1 ring.",                                false, cmd_ring,
-    "Usage: ring <status|scan|connect|disconnect|health|poll|history|query|control>" },
-  // Ring data is not pushed into the G2's built-in health UI: the temple
-  // ignores host-sent sid=0x90 RingDataPackage frames, and a temple-side
-  // RING_CONNECT_INFO bridge fails (connRet=8) because the R1 accepts one
-  // central at a time. The `ringtoglasses` / `ringbridge` experiment that
-  // showed this is in history at f4cc542 (G2_Ring.cpp); its write-up is
-  // R1_RING_PROTOCOL.md section 13 as last tracked at c9b070c^.
+    "Usage: ring <status|scan|connect|disconnect|health|poll|history|query|control|panel>" },
+  // The glasses' built-in Health panel is fed by the phone, not the ring: the
+  // Even app pushes a sid 0x0E HealthDataPackage to the right temple, which
+  // `ring panel` reproduces. The earlier sid 0x90 RingDataPackage push and
+  // RING_CONNECT_INFO bridge (history f4cc542) targeted the wrong path.
 };
 extern const size_t g2RingCommandsCount =
     sizeof(g2RingCommands) / sizeof(g2RingCommands[0]);

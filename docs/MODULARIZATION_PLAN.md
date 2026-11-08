@@ -10,7 +10,7 @@ series, focused on long-term readability and editability. `0.99.97.1` was the
 first checkpoint; `0.99.97.2` covers shared setup menu organization, and
 `0.99.97.3` covers runtime helper ownership and checked persistence through
 shared per-user JSON settings saves. Subsequent milestones follow
-the [cleanup-series guidance](../CONTRIBUTING.md#the-09997x-cleanup-series), with
+the [cleanup-series guidance](../CONTRIBUTING.md#structural-cleanups-history-the-09997x-series), with
 a bounded scope and an explicit completion condition for each change.
 
 **Latest code milestone: shared checked JSON settings saves.**

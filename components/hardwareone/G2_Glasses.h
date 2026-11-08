@@ -125,8 +125,10 @@ struct G2TextPageChrome {
 #define G2_SVC_AUTH_DATA_LO   0x20
 #define G2_SVC_TELEPROMPTER_HI 0x06
 #define G2_SVC_TELEPROMPTER_LO 0x20
-#define G2_SVC_DISPLAY_CFG_HI 0x0E
-#define G2_SVC_DISPLAY_CFG_LO 0x20
+// sid 0x0E is UI_HEALTH_APP_ID (HealthDataPackage), not display config; the
+// Health panel feed is G2_HealthPush. Kept as the historical HI/LO pair.
+#define G2_SVC_HEALTH_HI      0x0E
+#define G2_SVC_HEALTH_LO      0x20
 #define G2_SVC_SYNC_HI        0x80
 #define G2_SVC_SYNC_LO        0x00
 

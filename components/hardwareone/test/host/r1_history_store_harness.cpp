@@ -560,6 +560,68 @@ static void modelCorruptDayDuringSweep() {
         "finishing that sweep keeps the load error on screen");
   nextDayIsStored(day, corrupt);
 }
+// Unauthenticated SNTP can step the clock years ahead, and the ring then
+// dates new days years ahead too. Age pruning spares the newest RETENTION_DAYS
+// distinct stored days, so a jump keeps them and each far-future day stored
+// displaces at most one real day; a normal day roll still prunes by the clock.
+static size_t storedDays(const R1HealthHistoryDay& base, int newestBack, int oldestBack) {
+  size_t present = 0;
+  for (int back = newestBack; back <= oldestBack; ++back) {
+    auto day = base; day.dayStart = base.dayStart - static_cast<uint32_t>(back) * 86400;
+    present += disk.count(primary(day));
+  }
+  return present;
+}
+static void retentionCases() {
+  const time_t savedEpoch = fixedEpoch;
+  const auto auth = VFS::systemAuth(VFS::Scopes::CAPTURES, "R1 history retention test");
+  const time_t tenYears = static_cast<time_t>(3652) * 86400;
+
+  // Forward jump: 40 stored days, the newest is today; the clock moves 10 years on.
+  reset(); auto today = fixture(); save(today, 1); good(today, 1);
+  for (int back = 1; back < 40; ++back) {
+    auto older = today; older.dayStart -= static_cast<uint32_t>(back) * 86400; disk[primary(older)] = "older day";
+  }
+  fixedEpoch = savedEpoch + tenYears;
+  { StoreIoLock io; enforceRetention(auth); } released();
+  expect(storedDays(today, 0, 29) == 30, "a 10-year clock jump keeps the newest 30 stored days");
+  expect(storedDays(today, 30, 39) == 0, "days older than 30 days before the newest are still pruned after the jump");
+  // A commit at the jumped clock (same day, changed content) keeps them too.
+  auto changed = today; changed.heartRate.latestValue = 73; save(changed, 2); good(changed, 2);
+  expect(storedDays(today, 0, 29) == 30, "a commit after a 10-year clock jump keeps the newest 30 stored days");
+
+  // The ring adopts the jumped clock: new days dated 10 years ahead are committed.
+  fixedEpoch = savedEpoch; reset(); today = fixture();
+  for (int back = 0; back < 40; ++back) {
+    auto older = today; older.dayStart -= static_cast<uint32_t>(back) * 86400; disk[primary(older)] = "older day";
+  }
+  fixedEpoch = savedEpoch + tenYears; auto future = fixture(); save(future, 1); good(future, 1);
+  expect(disk.count(primary(future)) == 1 && storedDays(today, 0, 28) == 29,
+         "a ring day dated 10 years ahead displaces only the oldest kept real day");
+  expect(storedDays(today, 29, 39) == 0, "real days beyond the newest 30 stored days are pruned");
+  fixedEpoch += 86400; auto nextFuture = fixture(); save(nextFuture, 2); good(nextFuture, 2);
+  expect(storedDays(today, 0, 27) == 28, "a second far-future day displaces one more real day, not the history");
+
+  // Fewer than 30 stored days are kept even when older than 30 days by the clock.
+  fixedEpoch = savedEpoch; reset(); today = fixture();
+  for (int back = 60; back < 65; ++back) {
+    auto older = today; older.dayStart -= static_cast<uint32_t>(back) * 86400; disk[primary(older)] = "older day";
+  }
+  { StoreIoLock io; enforceRetention(auth); } released();
+  expect(storedDays(today, 60, 64) == 5, "the last stored days stay when the ring stops syncing");
+
+  // Normal day roll: tomorrow's data is stored an hour into tomorrow.
+  fixedEpoch = savedEpoch; reset(); today = fixture();
+  for (int back = 0; back < 36; ++back) {
+    auto older = today; older.dayStart -= static_cast<uint32_t>(back) * 86400; disk[primary(older)] = "older day";
+  }
+  fixedEpoch = savedEpoch + 86400; auto tomorrow = fixture();
+  fixedEpoch += 3600; save(tomorrow, 1); good(tomorrow, 1);
+  expect(disk.count(primary(tomorrow)) == 1 && storedDays(today, 0, 28) == 29,
+         "a normal day roll keeps the last 30 days by the real clock");
+  expect(storedDays(today, 29, 35) == 0, "a normal day roll still prunes days older than 30 days");
+  fixedEpoch = savedEpoch;
+}
 #endif
 int main() {
   // Exercise actual boot-time recovery before the function-static initialization.
@@ -574,7 +636,7 @@ int main() {
 #if !BASELINE
   sleepCases();
   storeLoadExistence(); modelOpenFailure(); modelCorruptDay(); modelCorruptDayDuringSweep();
-  modelBacklogLatest();
+  modelBacklogLatest(); retentionCases();
 #endif
   if (!BASELINE) {
     check(unguardedIo > 0, "store data writes still run under the shared filesystem guard");

@@ -17,7 +17,8 @@
 // The profile is the "Standard Handheld" product on this board:
 //   * display, wheel and buttons, MIPI camera, PDM microphone, battery
 //   * Wi-Fi/web, BLE with G2 glasses and R1 ring, ESP-NOW mesh through the
-//     onboard ESP32-C6 (ESP-Hosted), ESP-SR wake word, fully local STT
+//     onboard ESP32-C6 (ESP-Hosted), ESP-SR wake word; fully local STT
+//     once microSD is enabled (it runs the 15x5 model from the card)
 //   * excluded: I2C, HTTPS, MQTT, bonded mode, automations, Pi UART link,
 //     games, maps, on-device LLM, Edge Impulse, and the microSD card until it
 //     is qualified with a card fitted
@@ -111,9 +112,15 @@
 // ESP-SR models load from LittleFS, keeping the no_sr partition layout.
 #undef HW1_SR_MODELS_IN_FILESYSTEM
 #define HW1_SR_MODELS_IN_FILESYSTEM 1
-// Fully local transcription on the P4 (no Pi/UART, Wi-Fi or cloud).
+// Fully local transcription on the P4 (no Pi/UART, Wi-Fi or cloud) runs the
+// published 15x5 gen2 model from the microSD card, so it follows the card
+// selection: off while microSD is off. Set ENABLE_SDMMC_CARD,
+// ENABLE_SD_CARD and ENABLE_LOCAL_STT to 1 to enable it with the 15x5 model
+// (the build refuses local STT without the card).
 #undef ENABLE_LOCAL_STT
-#define ENABLE_LOCAL_STT 1
+#define ENABLE_LOCAL_STT 0
+#undef ENABLE_STT_MODEL_15X5_GEN2
+#define ENABLE_STT_MODEL_15X5_GEN2 ENABLE_LOCAL_STT
 
 // --- Not used on this board --------------------------------------------------
 #undef ENABLE_EDGE_IMPULSE

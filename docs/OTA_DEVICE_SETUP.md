@@ -273,7 +273,10 @@ The capability that used to live in firmware is now a cable target:
 ESPPORT="$HW1_PORT" idf.py -B "$HW1_MAIN_BUILD" littlefs-flash
 ```
 
-That writes the same blank image over `littlefs` and touches nothing else.
+On `feathers3_fe` use `encrypted-littlefs-flash`; the plain target is refused
+there. Either writes the same blank image over `littlefs` and touches nothing else.
+Do not use `idf.py erase-flash` for this: on an OTA device it also erases the
+recovery updater (see "`idf.py erase-flash` wipes the recovery updater" below).
 
 ## Verifying the result
 
@@ -287,22 +290,48 @@ Run it with the ESP-IDF Python - the system Python lacks `espsecure` and the
 audit fails with a confusing signature error.
 
 On the device, `otastatus` should show the running partition as `ota_0`, a
-coherent journal, and `recoveryCredentialConfigured` true.
+coherent journal, and `recoveryCredentialConfigured` true. Its "Factory
+updater" line (`factoryUpdaterVersion` in `otastatus json`) names the recovery
+updater in the factory slot, for example `1.1.0+<suffix>`; a manifest whose
+`minUpdaterVersion` is newer than that is refused.
 
 ## Known rough edges
 
-**The pair audit has missing build dependencies.** `hw1-ota-pair-audit` reads
-`partition_table/partition-table.bin` and `ota_data_initial.bin` but does not
-depend on the targets that produce them, so on a fresh build directory the
-first `ota0-flash` fails twice with bare `FileNotFoundError` text. Workaround:
-run a full `idf.py -B <dir> build` once before the first flash.
+Checked 2026-11-08 by reading ESP-IDF 5.5.5's idf.py and the target graph of a
+configured OTA build. Not run on a device.
 
-**`idf.py erase-flash` is not gated.** The build refuses stock flash targets on
-this layout, but ESP-IDF routes the `erase-flash` action straight to esptool
-without building the guarded CMake target, so it succeeds and destroys the
-recovery updater, NVS and the filesystem. Treat it as a full re-migration.
+**`idf.py erase-flash` wipes the recovery updater.** On this layout the build
+refuses the stock flash and erase CMake targets (`flash`, `app-flash`,
+`bootloader-flash`, `partition-table-flash`, `erase-otadata`, the
+`erase_flash` CMake target and the rest). `idf.py flash` and
+`idf.py erase-otadata` run through those targets, so they stop with
+"Refusing stock ESP-IDF flash/erase target". `idf.py erase-flash` (and its
+old spelling `erase_flash`) is different: idf.py runs esptool's `erase_flash`
+itself and never builds a CMake target, so the refusal does not run. The
+command succeeds and erases the whole chip: bootloader, partition table, the
+`factory` recovery updater, `ota_0`, `otadata`, NVS (which holds the recovery
+credential) and `littlefs`.
 
-**Tags are lightweight here**, so `git push --follow-tags` does not push them.
+Do not run it on a provisioned OTA device. Use the targeted cable writes:
+
+- To wipe only the filesystem, use `littlefs-flash` (`encrypted-littlefs-flash`
+  on `feathers3_fe`; see above).
+- To replace only the recovery updater, use `factory-flash`
+  (`encrypted-factory-flash` on `feathers3_fe`).
+
+If the chip was erased anyway, by `idf.py erase-flash` or by a full-erase
+install ([COMPATIBILITY.md](COMPATIBILITY.md)), it is now a blank chip.
+Nothing boots until it is provisioned again from
+[step 3](#3-run-the-guarded-migration-flash). `migration-flash` writes the
+bootloader, the partition table, the `factory` updater, `ota_0`, a blank
+`otadata` and a blank `littlefs`. Use `encrypted-migration-flash` on
+`feathers3_fe`. The existing paired build directories are fine if nothing has
+changed since they were built. Then repeat
+[step 4](#4-set-the-recovery-credential-and-finish-setup). The erase removed
+NVS, so `setpin` (or `otapin`) is needed again, and so is first-time setup.
+
+**Tags are mostly lightweight here** (2026-11-08: 51 of the 57 tags, including
+`v0.99.98.4` and `v0.99.99`), so `git push --follow-tags` does not push them.
 Push release tags by name.
 
 ## Notes
@@ -313,6 +342,10 @@ build with a destructive `formatfs confirm` console command compiled in, a
 manual Kconfig flip in each direction, and a second migration flash to remove
 it. Flashing a host-built blank filesystem removed all of that, and with it the
 window in which a device carried firmware able to erase its own storage.
+
+External clients such as the Android companion must size a candidate image
+from `slotSize` in `otastatus json` and must not hard-code a slot size (the old
+0x5A0000 is larger than the 8 MB layout's 0x500000 `ota_0`).
 
 This remains a BUILD and CABLE-time decision. It cannot become a switch in the
 on-device setup wizard: the partition table is flashed before any application

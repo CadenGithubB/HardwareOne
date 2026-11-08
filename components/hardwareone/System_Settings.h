@@ -324,6 +324,8 @@ struct Settings {
       sensorLogAutoStart(false),
       healthLoggingEnabled(false),
       healthLoggingPollIntervalSec(900),  // 15 min — local R1 vitals logging cadence
+      g2HealthPanelFeed(false),           // G2 Health panel feed off until the user turns it on
+      g2HealthPanelHistoryMin(30),        // ring history refresh while the feed runs
       ringHealthCollectionDesired(0),     // Preserve: do not change the ring at first boot
       ringLowPowerDesired(0),             // Preserve: do not change the ring at first boot
       captureEncryptMode(1),            // seal LOG_R1 capture sessions at rest by default
@@ -338,12 +340,25 @@ struct Settings {
       systemLogPath(""),
       systemLogCategoryTags(true),
       systemLogFlags(""),
+      systemLogMaxSize(1048576),
+      systemLogMaxRotations(3),
       cameraAutoStart(false),  // Camera does NOT auto-start by default
       micAutoStart(false),  // Microphone does NOT auto-start by default
       llmAutoStart(false),  // On-device LLM does NOT auto-load a model by default
       microphoneSampleRate(16000),
       microphoneGain(70),
       microphoneBitDepth(16),
+      pdmAmplify(1),
+      pdmHpfHz(36),
+      sttSpeechFloor(45),
+      sttSilenceFloor(16),
+      sttNoisePercentile(25),
+      sttDecisionPre(97),
+      sttAutoGain(true),
+      sttG2SpeechFloor(45),
+      sttG2SilenceFloor(16),
+      sttG2NoisePercentile(25),
+      sttG2DecisionPre(97),
       micSource("auto"),  // Mic source preference: "auto" | "pdm" | "g2" (resolved at capture time)
       sttSaveTranscripts(false),
       noteMaxSec(HW1_NOTE_MAX_SEC_DEFAULT),
@@ -484,8 +499,8 @@ struct Settings {
   // The one persisted output lane: quiet the UART. The other gOutputFlags
   // lanes are runtime state (WEB tracks the HTTP server lifecycle, FILE
   // follows `log start`/`log stop`, BLE/G2 are opt-in per session via
-  // outble/outg2). outWeb/outDisplay/outG2 persisted lanes were removed
-  // pre-1.0: delivery never honored them — see the System_Debug.h charter.
+  // outble/outg2). outWeb/outDisplay/outG2 persisted lanes were
+  // removed: delivery never honored them — see the System_Debug.h charter.
   bool outSerial;
   // Notification presentation (System_Notifications): per-sink master
   // switches. Per-kind device levels live in /system/notifications.json and
@@ -991,6 +1006,11 @@ struct Settings {
   bool sensorLogAutoStart;      // Auto-start sensor logging after boot with last-used parameters
   bool healthLoggingEnabled;      // HardwareOne local logger: keep LOG_R1 on and resume at boot
   int  healthLoggingPollIntervalSec; // How often the local logger mines R1 vitals (default 900 = 15 min)
+  // Stock G2 Health panel feed (G2_HealthPush): push R1 data to the glasses'
+  // own Health tile, and how often to refresh ring history (steps, kcal,
+  // sleep) while it runs and the right temple is connected.
+  bool g2HealthPanelFeed;
+  int  g2HealthPanelHistoryMin;
   // Persisted policy, not observed ring state. Values are the G2_Ring.h
   // G2RingDesiredState wire-control contract: 0=Preserve, 1=Off, 2=On.
   // These remain plain int fields because SETTING_INT writes through int*.
@@ -1009,6 +1029,8 @@ struct Settings {
   String systemLogPath;         // Log file path (empty = auto-generate with timestamp)
   bool systemLogCategoryTags;   // Prefix log lines with [CATEGORY] tags
   String systemLogFlags;        // Last-used debug flag mask for system log (empty = leave gDebugFlags)
+  int systemLogMaxSize;         // System log file size before rotation (bytes; default: 1048576)
+  int systemLogMaxRotations;    // Old rotated system logs to keep (0-9; default: 3), as the sensor logger
   bool cameraAutoStart;         // Auto-start ESP32-S3 camera after boot
   bool micAutoStart;     // Auto-start ESP32-S3 PDM microphone after boot
   // NOTE: kept OUTSIDE the #if ENABLE_LLM_BACKEND block below so the always-
@@ -1018,6 +1040,25 @@ struct Settings {
   int microphoneSampleRate;     // Sample rate in Hz (8000, 16000, 22050, 44100, 48000) — PDM only
   int microphoneGain;           // Software gain 0-100% (default 90)
   int microphoneBitDepth;       // Bit depth (cosmetic; HAL/WAV are always 16-bit int)
+  // Onboard PDM mic path (applied when the PDM channel starts): the PDM->PCM
+  // hardware multiplier (1..15; IDF default 1) and the hardware high-pass
+  // cut-off in Hz (23..185, 0 = filter off; 36 stands for IDF's 35.5 default).
+  int pdmAmplify;
+  int pdmHpfHz;
+  // Continuous STT speech detector (stt/stt_continuous_config.h): onset floor
+  // and silence floor in frame-RMS counts, and the noise-window percentile
+  // tracked as the room level. Read at each session start.
+  int sttSpeechFloor;
+  int sttSilenceFloor;
+  int sttNoisePercentile;
+  int sttDecisionPre;           // pre-emphasis onset judge coefficient x100 (0 = loudness only; default 97)
+  bool sttAutoGain;             // STT picks its own onboard-mic gain (agreed over sessions) and a 120 Hz high-pass
+  // The same detector levels for sessions on the G2 glasses mic (LC3 over BLE, after the glasses' own
+  // AGC), tuned separately from the onboard mic (the four stt* fields above).
+  int sttG2SpeechFloor;
+  int sttG2SilenceFloor;
+  int sttG2NoisePercentile;
+  int sttG2DecisionPre;
   String micSource;             // Preferred mic source: "auto" | "pdm" | "g2" (resolved lazily against availability)
   bool sttSaveTranscripts;      // Save recognized text; latched when a local or Pi dictation session starts
   // QuickNote (System_QuickNote.cpp), read when a note starts / each pass:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import subprocess
 
 
 HERE = Path(__file__).resolve().parent
@@ -85,6 +86,22 @@ def exclude_directory(name: str) -> bool:
 
 
 def iter_first_party_sources() -> tuple[Path, ...]:
+    # Prefer what git would commit (tracked plus new, not ignored): ignored
+    # local workspaces such as work/ or build caches hold copies and third-party
+    # trees, some not UTF-8. A tree without git falls back to the directory walk.
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(REPOSITORY_ROOT), "ls-files", "-z", "--cached",
+             "--others", "--exclude-standard"],
+            check=True, capture_output=True).stdout.decode("utf-8").split("\0")
+    except (OSError, subprocess.CalledProcessError):
+        listed = None
+    if listed is not None:
+        return tuple(
+            REPOSITORY_ROOT / name for name in sorted(listed)
+            if name and Path(name).suffix in SOURCE_SUFFIXES
+            and not any(exclude_directory(part) for part in Path(name).parts[:-1])
+            and (REPOSITORY_ROOT / name).is_file())
     sources: list[Path] = []
     for directory, child_directories, filenames in os.walk(REPOSITORY_ROOT):
         child_directories[:] = sorted(
@@ -166,8 +183,8 @@ assert not re.search(r"^\s*#ifndef\s+SYSTEM_EVENTCATALOGROWS", rows, re.M)
 assert "define exactly one System Event catalog row macro" in rows
 assert len(FAMILY_ROW_RE.findall(rows)) == 13
 kind_names = KIND_ROW_RE.findall(rows)
-assert len(kind_names) == 174
-assert len(set(kind_names)) == 174
+assert len(kind_names) == 175
+assert len(set(kind_names)) == 175
 assert not ({"boot", "none", "set", "patch", "all", "list"} & set(kind_names))
 
 literal_row_owners: list[Path] = []

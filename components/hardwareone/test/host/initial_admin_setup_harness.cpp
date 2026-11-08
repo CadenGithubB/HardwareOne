@@ -53,6 +53,13 @@ static FirstTimeSetupState gFirstTimeSetupState;
 static SetupProgressStage gSetupProgressStage;
 static const char* USERS_JSON_FILE = "/system/users/users.json";
 static const char* AUTOMATIONS_JSON_FILE = "/system/automations.json";
+// Owner recovery: the credential-setup marker and user 1's file.
+static const char* PENDING_CRED_SETUP_FILE = "/system/.pending_credential_setup";
+static const std::string kOwnerFile = "/system/users/user_settings/1.json";
+static const char* kRoster = R"({"nextId":3,"users":[{"id":1,"username":"fixture-owner","role":"superadmin"},{"id":2,"username":"fixture-guest","role":"user"}]})";
+static bool markerPresent, markerWriteOk, ownerFileCorrupt;
+static unsigned ownerLoads, markerWrites, markerRemovals, identityBumps;
+static std::vector<std::string> events;
 static struct { bool oledEnabled, inputAutoStart; } gSettings;
 
 void webBatchTestStringAppend() {}
@@ -65,17 +72,47 @@ static String hashUserPassword(const String& plaintext) {
   return hashOk ? "fixture-password-hash" : "";
 }
 static void broadcastOutput(const String& message) { output.emplace_back(message.c_str()); }
+// Public account rules the first admin must also meet (System_User.h).
+static constexpr size_t kPublicPasswordMinLen = 6;
+static bool isReservedUsername(const String& username) {
+  String u = username; u.trim();
+  return u.equalsIgnoreCase("system") || u.equalsIgnoreCase("AuthBypass") || u.equalsIgnoreCase("bond-admin");
+}
+static bool isValidPublicUsername(const String& username, String* errorOut = nullptr) {
+  if (isReservedUsername(username)) { if (errorOut) *errorOut = "reserved name"; return false; }
+  return username.length() > 0;
+}
 static bool saveUserSettings(uint32_t id, const JsonDocument& doc) {
   ++credentialCalls; operations.emplace_back("credential.save");
-  check(id == 1 && usersJson.length() == 0);
+  // Initial creation runs before users.json; owner recovery after it.
+  check(id == 1 && (usersJson.length() == 0 || usersJson == kRoster));
   // The separately tested saveUserSettings owner refuses overflowed documents.
   credentialOverflow = doc.overflowed();
   if (!credentialOk || credentialOverflow) return false;
   serializeJson(doc, credentialJson);
   return true;
 }
-static void bumpIdentityGeneration(const char*) {}
+static void bumpIdentityGeneration(const char*) { ++identityBumps; }
+static void logSystemEvent(const char*, const char* format, ...) { events.emplace_back(format); }
+static String getUserSettingsPath(uint32_t id) {
+  return String("/system/users/user_settings/") + String(std::to_string(id).c_str()) + String(".json");
+}
+static bool armOwnerCredentialSetup();
+// The per-user loader's quarantine contract (settings_file_writes checks the real
+// one): an unreadable owner file is moved aside and the marker armed.
+static bool loadUserSettings(uint32_t id, JsonDocument& doc) {
+  ++ownerLoads; check(id == 1); doc.clear();
+  if (ownerFileCorrupt) { ownerFileCorrupt = false; credentialJson = ""; (void)armOwnerCredentialSetup(); return false; }
+  if (credentialJson.length() == 0) { doc.to<JsonObject>(); return true; }
+  return !deserializeJson(doc, credentialJson);
+}
 static bool writeTextAtomic(const char* path, const String& text, int) {
+  if (std::string(path) == PENDING_CRED_SETUP_FILE) {
+    ++markerWrites; operations.emplace_back("marker.save");
+    check(text == "1");
+    if (markerWriteOk) markerPresent = true;
+    return markerWriteOk;
+  }
   ++indexCalls; operations.emplace_back("index.save");
   check(std::string(path) == USERS_JSON_FILE);
   check(credentialJson.length() > 0 && credentialCalls > 0);
@@ -127,10 +164,19 @@ template <class P> inline const char* sttModelScopeFor(const P& p) { return fake
 // end tier pickers
 static int systemAuth(const char*, const char*) { return 0; }
 static bool existsGuarded(const char* path, int) {
-  check(std::string(path) == AUTOMATIONS_JSON_FILE);
+  const std::string name(path);
+  if (name == PENDING_CRED_SETUP_FILE) return markerPresent;
+  if (name == USERS_JSON_FILE) return usersJson.length() > 0;
+  if (name == kOwnerFile) return credentialJson.length() > 0;
+  check(name == AUTOMATIONS_JSON_FILE);
   return automationExists;
 }
+static bool removeGuarded(const char* path, int) {
+  check(std::string(path) == PENDING_CRED_SETUP_FILE);
+  ++markerRemovals; operations.emplace_back("marker.remove"); markerPresent = false; return true;
 }
+}
+static String automationsEmptyStoreJson() { return String("{\"version\":2,\"automations\":[]}"); }
 static bool writeAutomationsJsonAtomic(const String&) {
   ++automationCalls; operations.emplace_back("automations.save"); check(usersJson.length() > 0); return true;
 }
@@ -157,6 +203,7 @@ static String getOLEDTextInput(const char*, bool, const char*, int, bool* cancel
 }
 
 // INSERT_OWNER_AND_RESTORE
+// INSERT_DETECT
 
 static void normalCommitTail(const String& u, const String& p, bool useDarkTheme,
                              bool wifiConfigured = false, bool i2cDisabledByUser = false,
@@ -183,6 +230,8 @@ static void reset() {
   allocationFailureAt = -1; allocationCalls = 0; allocationFailed = false;
   setupTestReserveFails = false; setupTestAppendsBeforeFailure = -1;
   repairAfterFirstAttempt = false;
+  markerPresent = ownerFileCorrupt = false; markerWriteOk = true;
+  ownerLoads = markerWrites = markerRemovals = identityBumps = 0; events.clear();
 }
 static void noSecrets() {
   for (const auto& message : output) {
@@ -233,6 +282,10 @@ static void helperCases() {
   reset(); check(!createInitialAdminUser("", "fixture-secret", false));
   check(hashCalls == 0); rejectedBeforePublication();
   reset(); check(!createInitialAdminUser("fixture-owner", "", false));
+  // Reserved sentinel names and short passwords are refused before anything is stored.
+  reset(); check(!createInitialAdminUser("system", "fixture-secret", false)); rejectedBeforePublication();
+  reset(); check(!createInitialAdminUser("AuthBypass", "fixture-secret", false)); rejectedBeforePublication();
+  reset(); check(!createInitialAdminUser("fixture-owner", "short", false)); rejectedBeforePublication();
   check(hashCalls == 0); rejectedBeforePublication();
   reset(); hashOk = false; check(!createInitialAdminUser("fixture-owner", "fixture-secret", false));
   check(hashCalls == 1); rejectedBeforePublication();
@@ -318,8 +371,85 @@ static void restoreCallerCases() {
 #endif
 }
 #endif
+// A provisioned device (users.json present) whose owner credential file
+// is unreadable. Boot detection quarantines it through the loader, which arms
+// the marker; setup then reaches runPostRestoreCredentialSetup's owner branch,
+// which writes only user 1's credential. users.json is never rewritten.
+static void provisioned() {
+  reset(); usersJson = kRoster; credentialJson = R"({"theme":"dark","password":"old-hash"})";
+  gFirstTimeSetupState = SETUP_NOT_NEEDED;
+}
+static void ownerRecoveredOnly() {
+  check(usersJson == kRoster && indexCalls == 0 && rebootCalls == 0);
+  check(automationCalls == 0 && settingsWriteCalls == 0 && runtimeApplyCalls == 0 && wifiCalls == 0);
+  noSecrets();
+}
+static void ownerRecoveryCases() {
+  // A readable owner file: detection parses it and changes nothing.
+  provisioned(); detectFirstTimeSetupState();
+  check(gFirstTimeSetupState == SETUP_NOT_NEEDED && ownerLoads == 1 && markerWrites == 0 && !markerPresent);
+  // A stale marker beside a readable owner file is dropped, never prompted over.
+  provisioned(); markerPresent = true; detectFirstTimeSetupState();
+  check(gFirstTimeSetupState == SETUP_NOT_NEEDED && !markerPresent && markerRemovals == 1);
+  check(!runPendingCredentialSetup());
+  // An unprovisioned device is first-time setup; the owner file is not probed.
+  reset(); gFirstTimeSetupState = SETUP_NOT_NEEDED; detectFirstTimeSetupState();
+  check(gFirstTimeSetupState == SETUP_REQUIRED && ownerLoads == 0);
+
+  for (bool display : {false, true}) {
+    // Corrupt owner file -> quarantined -> marker armed -> setup required.
+    provisioned(); gOledRunning = oledConnected = display; ownerFileCorrupt = true;
+    detectFirstTimeSetupState();
+    check(ownerLoads == 1 && markerWrites == 1 && markerPresent && credentialJson.length() == 0);
+    check(gFirstTimeSetupState == SETUP_REQUIRED && usersJson == kRoster);
+    // Setup reaches runPostRestoreCredentialSetup and re-credentials user 1.
+    inputs = {"short", "fixture-secret"};
+    check(runPendingCredentialSetup());
+    JsonDocument record;
+    check(!deserializeJson(record, credentialJson));
+    check(record.size() == 2 && record["password"].as<String>() == "fixture-password-hash" &&
+          record["theme"].as<String>() == "light");
+    check(hashCalls == 1 && credentialCalls == 1 && identityBumps == 1 && !markerPresent);
+    check(gFirstTimeSetupState == SETUP_NOT_NEEDED && gSetupProgressStage == SETUP_FINISHED);
+    check(!gFirstTimeSetupPerformed && !events.empty());
+    bool refusedShort = false;
+    for (const auto& line : output) refusedShort = refusedShort || line.find("at least 6 characters") != std::string::npos;
+    check(refusedShort);
+    ownerRecoveredOnly();
+    // The next boot finds a readable owner file and no marker.
+    gFirstTimeSetupState = SETUP_NOT_NEEDED; detectFirstTimeSetupState();
+    check(gFirstTimeSetupState == SETUP_NOT_NEEDED);
+
+    // A failed save keeps the marker for the next boot and never opens the
+    // full menu, which would write a new users.json over the roster.
+    provisioned(); gOledRunning = oledConnected = display; ownerFileCorrupt = true;
+    detectFirstTimeSetupState(); credentialOk = false; inputs = {"fixture-secret"};
+    check(runPendingCredentialSetup());
+    check(markerPresent && credentialJson.length() == 0 && gFirstTimeSetupState == SETUP_NOT_NEEDED);
+    ownerRecoveredOnly();
+    gFirstTimeSetupState = SETUP_NOT_NEEDED; detectFirstTimeSetupState();
+    check(gFirstTimeSetupState == SETUP_REQUIRED);
+  }
+  // The marker write itself failing leaves the device as it was (logged by the loader).
+  provisioned(); ownerFileCorrupt = true; markerWriteOk = false; detectFirstTimeSetupState();
+  check(markerWrites == 1 && !markerPresent && gFirstTimeSetupState == SETUP_NOT_NEEDED);
+#if ENABLE_OLED_DISPLAY
+  provisioned(); gOledRunning = oledConnected = true; ownerFileCorrupt = true;
+  detectFirstTimeSetupState(); cancelInput = 0; inputs = {"fixture-secret"};
+  check(runPendingCredentialSetup());
+  check(hashCalls == 0 && markerPresent && credentialJson.length() == 0); ownerRecoveredOnly();
+#endif
+  // A restore marker (users.json absent) still means the restore flow.
+  reset(); markerPresent = true; inputs = {"fixture-owner", "fixture-secret"};
+#if ENABLE_MIGRATION_TOOL
+  try { (void)runPendingCredentialSetup(); } catch (const Reboot&) {}
+  check(!markerPresent && markerRemovals == 1 && rebootCalls == 1); recordAndOrder(false);
+#else
+  check(!runPendingCredentialSetup() && markerPresent && credentialCalls == 0);
+#endif
+}
 int main() {
-  helperCases(); normalCallerCases();
+  helperCases(); normalCallerCases(); ownerRecoveryCases();
 #if ENABLE_MIGRATION_TOOL
   restoreCallerCases();
 #endif

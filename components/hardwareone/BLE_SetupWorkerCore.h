@@ -173,10 +173,14 @@ class Core {
 // cancelled from outside on FreeRTOS, so another context watches its age:
 // past reportMs it is reported once and the stack is faulted (no new BLE
 // work); past escalateMs the device restarts with the reason recorded. The
-// longest legitimate run is a glasses pair (two 35 s connects plus bounded
-// discovery, about 135 s); the phone turn has its own 75 s ceiling.
+// longest legitimate runs are a glasses pair (two 35 s connects plus bounded
+// discovery, about 135 s) and a manual `ring scan`, which the public command
+// allows up to 300 s (G2_Ring.cpp caps timeoutSec at 300 and its connect gate
+// budgets 360 s for it); the phone turn has its own 75 s ceiling. The report
+// threshold must sit above the longest legitimate run, or a full-length ring
+// scan is reported as a stuck job and faults the stack.
 enum class Overrun : uint8_t { None, Report, Escalate };
-struct OverrunPolicy { uint32_t reportMs = 240000; uint32_t escalateMs = 600000; };
+struct OverrunPolicy { uint32_t reportMs = 360000; uint32_t escalateMs = 600000; };
 inline Overrun overrunDecide(uint32_t runningMs, bool reported, const OverrunPolicy& p) {
   if (runningMs >= p.escalateMs) return Overrun::Escalate;
   if (runningMs >= p.reportMs && !reported) return Overrun::Report;

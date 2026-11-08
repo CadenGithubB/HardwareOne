@@ -6,7 +6,7 @@
   <img alt="Hardware One logo" src="assets/logo-black.svg" width="140">
 </picture>
 
-# Hardware One v0.99.99
+# Hardware One v0.99.99.1
 
 **Hardware One is a modular ESP32 firmware that works like a distributed operating system for cheap microcontrollers.**
 
@@ -91,26 +91,26 @@ by its attached hardware, implemented backends and available resources. Use
 | ESP-NOW V3 (peer discovery, pairing, bonding) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
 | ESP-NOW metadata sync & file transfer | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
 | MQTT (Home Assistant integration) | ❌ | ✅ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
-| Automations (scheduled & conditional commands) | ✅ | ✅ | ✅ | ⚙️&nbsp;+&nbsp;✅ |
+| Automations (scheduled & conditional commands) | ✅ | ✅ | ⚙️ (board builds; compiled out of the checked-in P4 handheld deployment) | ⚙️&nbsp;+&nbsp;✅ |
 | Seesaw gamepad input | ❌ | ❌ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
 | ANO rotary encoder input (alternative to the gamepad) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | OLED display for onboard visuals | ❌ | ⚙️ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
 | BNO055 IMU (9-DoF orientation) | ❌ | ⚙️ | ⚙️ | ✅&nbsp;+&nbsp;⚙️ |
 | VL53L4CX Time-of-Flight distance sensor | ❌ | ⚙️ | ⚙️ | ✅&nbsp;+&nbsp;⚙️ |
-| MLX90640 / AMG8833 thermal camera | ❌ | ⚙️ | ⚙️ | ✅&nbsp;+&nbsp;⚙️ |
+| MLX90640 thermal camera | ❌ | ⚙️ | ⚙️ | ✅&nbsp;+&nbsp;⚙️ |
 | APDS9960 gesture / proximity / RGB sensor | ❌ | ⚙️ | ⚙️ | ✅&nbsp;+&nbsp;⚙️ |
 | PA1010D GPS + offline maps | ❌ | ⚙️ | ⚙️ | ✅&nbsp;+&nbsp;⚙️ |
 | DS3231 RTC (hardware clock) | ❌ | ⚙️ | ⚙️ | ✅&nbsp;+&nbsp;⚙️ |
 | STHS34PF80 IR presence / motion | ❌ | ⚙️ | ⚙️ | ✅&nbsp;+&nbsp;⚙️ |
 | DVP camera (OV2640 / OV5640) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;✅ |
 | PDM microphone (I2S audio capture) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;✅ |
-| TEA5767 FM Radio receiver | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| RDA5807M FM radio receiver | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | ESP-SR voice commands (wake word + command recognition) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;✅ |
 | BLE server + Even Realities G2 glasses client | ✅ server / ❌ G2 | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | R1 smart ring - health vitals, graphs, health logging | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Offline maps + waypoints | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | A Dark Room browser game | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
-| LLM assistant (tiny on-device model on ESP32-S3 + PSRAM, and/or answered by the Pi co-processor) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| LLM assistant (tiny on-device model, needs PSRAM, and/or answered by the Pi co-processor) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Raspberry Pi co-processor over UART (LLM, speech-to-text, dictation, power/fan control, clock) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Edge Impulse ML inference | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Battery monitoring (LiPo voltage via ADC) | ✅ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
@@ -129,14 +129,34 @@ Each device in your setup runs one board. Multiple boards can coexist on the sam
 | Board | Flash / PSRAM | Camera | PDM Mic | Battery monitor | Notes |
 | ----- | :-----------: | :----: | :-----: | :-------------: | ----- |
 | Seeed XIAO ESP32-S3 (+ Sense) | 8 / 8 MB | ✅ | ✅ | ❌ | Camera, mic & microSD come on the Sense expansion. Primary dev target |
-| Unexpected Maker FeatherS3 | 16 / 8 MB | ❌ | ❌ | ✅ | Quad PSRAM; dual STEMMA QT (second I2C bus); onboard RGB LED; MAX17048 fuel gauge |
+| Unexpected Maker FeatherS3 | 16 / 8 MB | ❌ | ❌ | ✅ | Quad PSRAM; dual STEMMA QT (second I2C bus); onboard RGB LED; MAX17048 fuel gauge. Also built as `feathers3_fe` (flash encryption; experimental, first boot burns eFuses) |
 | Adafruit Feather ESP32 V2 | 8 / 2 MB | ❌ | ❌ | ✅ (GPIO35) | Onboard NeoPixel + battery monitoring |
 | Adafruit QT Py ESP32 | 8 / 2 MB | ❌ | ❌ | ❌ | ESP32-PICO; STEMMA QT onboard; compact |
-| Espressif ESP32-P4X-EYE | 16 / 32 MB | ✅ (MIPI) | ✅ | ✅ (voltage) | 240×240 LCD, wheel + 3 buttons; radio via onboard ESP32-C6; local speech-to-text. [Notes](docs/P4X_EYE_PERIPHERALS.md), [enclosure](physical_enclosures/p4x_eye/README.md) |
+| Espressif ESP32-P4X-EYE | 16 / 32 MB | ✅ (MIPI) | ✅ | ✅ (voltage) | 240×240 LCD, wheel + 3 buttons; radio via onboard ESP32-C6; local speech-to-text (needs a separately installed model file: the saved P4 configurations read the published model from microSD; the plain board build keeps microSD off and expects an unpublished model, see [Local speech-to-text model](#local-speech-to-text-model-esp32-p4)). [Notes](docs/P4X_EYE_PERIPHERALS.md), [enclosure](physical_enclosures/p4x_eye/README.md) |
+| Waveshare ESP32-P4 Touch LCD 5 | 32 / 32 MB | ✅ (MIPI, saved profile) | ✅ (ES7210) | ✅ (ADC) | Experimental. 5-inch 720×1280 HX8394 DSI panel with GT911 touch; radio via onboard ESP32-C6; ES8311 speaker output (driver-tested only). [Notes](docs/WAVESHARE_P4_SUPPORT.md) |
 
 > A **generic ESP32** fallback build also exists for unlisted boards - it compiles, but verify the I2C pins match your hardware.
 
-> The opt-in **recovery OTA layout** (`HW_OTA_LAYOUT=1`) is available for the FeatherS3, the Feather ESP32 V2 and the QT Py ESP32. The XIAO ESP32-S3 has no OTA layout yet, so it updates over the cable.
+### Support matrix
+
+What each row promises, how it updates, and the last dated hardware record behind it. "Stable" rows
+build from a clean clone at every release and are checked on hardware before a tag (`RELEASING.md`,
+gate); "experimental" rows build and have been run, but are not held to the release checks.
+
+| Board | Build | Tier | Update path | Last dated hardware record |
+|---|---|---|---|---|
+| Unexpected Maker FeatherS3 | `tools/build_board.sh feathers3`; release: `tools/build_deployment.sh headless feathers3` | stable | recovery OTA layout `hw1-f3-ota-v1` (signed, BLE or SoftAP) and cable | OTA end to end 2026-08-05 (v0.99.8); BLE/G2/R1 2026-07-30; needs re-qualification on the release image |
+| Adafruit Feather ESP32 V2 | `feather_esp32_v2`; release: `tools/build_deployment.sh headless feather_esp32_v2` | stable | recovery OTA layout `hw1-fv2-ota-v1` and cable | OTA recovery path, setup, Wi-Fi, web 2026-08-25; BLE/G2 2026-08-19 |
+| Seeed XIAO ESP32-S3 (+ Sense) | `xiao_s3 --config xiao-no-bluetooth` (Bluetooth off; the bare board build with Bluetooth does not fit its factory partition); release: `tools/build_deployment.sh pocket_assistant xiao_s3` (Bluetooth on, its own partition table) | stable (cable); OTA layout experimental until a dated record exists | cable; `pocket_assistant` OTA layout without a hardware record yet | 0.99.97.4 boot + serial check 2026-10-12 |
+| Adafruit QT Py ESP32 | `qtpy_esp32` | stable (cable) | cable; OTA layout experimental (no record) | 0.99.97.4 boot + serial check 2026-10-12 |
+| Espressif ESP32-P4X-EYE | `p4x_eye` (needs `tools/p4/prepare_sdk.sh`); release: `tools/build_deployment.sh handheld p4x_eye` | stable, cable-only | cable (app-only write; no OTA layout) | multi-hour STT bench runs and BLE investigations 2026-11-07/08 (`docs/P4X_PANIC_HUNT_20261107.md`) |
+| FeatherS3 flash-encrypted (`feathers3_fe`) | `feathers3_fe` | experimental | `hw1-f3fe-ota-v1` | flash-encryption trial 2026-07-30 |
+| Waveshare ESP32-P4 Touch LCD 5 | `waveshare_p4_touch_lcd_5` (needs `prepare_sdk.sh`) | experimental | cable | bring-up acceptance records 2026-10/11 (`docs/WAVESHARE_P4_*.md`) |
+| generic ESP32 | default target | experimental | cable | none |
+
+Automations are compiled out of the P4 handheld deployment contract (`deployments/handheld`); the
+`p4x_eye` board build keeps them. Peers and what an update keeps: [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md);
+open problems: [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ### Peripherals - Stemma QT / I2C
 
@@ -150,12 +170,11 @@ These connect via Stemma QT (or standard I2C) and work the same on any supported
 | BNO055 9-DoF IMU | [ID: 4646](https://www.adafruit.com/product/4646) |
 | VL53L4CX Time-of-Flight sensor | [ID: 5425](https://www.adafruit.com/product/5425) |
 | MLX90640 32×24 Thermal Camera | [ID: 4407](https://www.adafruit.com/product/4407) |
-| Adafruit AMG8833 8×8 Thermal Camera | [ID: 3538](https://www.adafruit.com/product/3538) |
 | APDS9960 Gesture / Light sensor | [ID: 3595](https://www.adafruit.com/product/3595) |
 | PA1010D GPS module | [ID: 4415](https://www.adafruit.com/product/4415) |
 | DS3231 RTC | [ID: 5188](https://www.adafruit.com/product/5188) |
 | STHS34PF80 IR presence sensor | [ID: 6426](https://www.adafruit.com/product/6426) |
-| TEA5767 FM Radio module | [ID: 1712](https://www.adafruit.com/product/1712) |
+| RDA5807M FM radio board (e.g. ScoutMakes FM Radio Board, I2C `0x11`) | — |
 | PCA9685 servo driver | [ID: 815](https://www.adafruit.com/product/815) |
 | Stemma QT hub (for chaining) | [ID: 5625](https://www.adafruit.com/product/5625) |
 
@@ -163,10 +182,44 @@ These connect via Stemma QT (or standard I2C) and work the same on any supported
 
 | Peripheral | Compatible boards |
 | ---------- | ----------------- |
-| DVP camera (OV2640 / OV5640) | XIAO ESP32-S3, QT PY ESP32-S3 |
-| PDM microphone (I2S) | XIAO ESP32-S3, QT PY ESP32-S3 |
+| DVP camera (OV2640 / OV5640) | XIAO ESP32-S3 Sense |
+| MIPI-CSI camera | ESP32-P4X-EYE (onboard); Waveshare ESP32-P4 Touch LCD 5 (OV5647, enabled by the `waveshare-p4-bringup` saved profile) |
+| PDM microphone | XIAO ESP32-S3 Sense, ESP32-P4X-EYE |
+| ES7210 codec microphone | Waveshare ESP32-P4 Touch LCD 5 (onboard) |
 | LiPo battery + BMS | Any board with a JST connector |
 | Raspberry Pi CM5 / Pi 5 co-processor (UART) | Any board - each board block defines a link UART; live audio streaming needs the ESP32-S3 boards (≥ 921,600 baud) |
+
+
+### Local speech-to-text model (ESP32-P4)
+
+Local speech-to-text on the P4 boards reads its acoustic model from a file at
+run time; the file is not part of the firmware image or of this repository.
+
+- **Saved P4 configurations** (`p4-glasses-test`, `p4-phone-pipe`, `p4-openclaw`
+  and the other `p4-*` profiles in `configurations/`, plus `waveshare-p4-bringup`)
+  set `ENABLE_STT_MODEL_15X5_GEN2` and load
+  `/sd/STT Models/quartznet15x5-gen2-25397.p4.stt` from the microSD card. That
+  file is published as a release asset of the public speech-to-text repository:
+  [`model-gen2-25397`](https://github.com/CadenGithubB/ESP32_Onboard_Speech_To_Text/releases/tag/model-gen2-25397)
+  → `quartznet15x5-gen2-25397.p4.stt`, 20,112,224 bytes, SHA-256
+  `dccef3a8cead069d97d780e0d08ddfc65d9f0870c0af4673b29327f00158f048`
+  (`SHA256SUMS.txt` in the same release lists it).
+- **To install it**, download the file, check it with
+  `shasum -a 256 quartznet15x5-gen2-25397.p4.stt`, and copy it onto the FAT32
+  microSD card into a top-level folder named exactly `STT Models`, keeping the
+  file name. The firmware refuses a file of the wrong size and checks the
+  model's embedded checksum before using it. The release's `meeting.lm` is
+  optional: copied into the same folder it is used as the language model;
+  without it decoding is greedy.
+- **The plain `p4x_eye` board build and the `handheld` deployment** keep
+  microSD off, so they build without local transcription. Local STT on an
+  ESP32-P4 always runs this 15×5 model from the card: enable it with
+  `ENABLE_SDMMC_CARD=1` and `ENABLE_LOCAL_STT=1` (in the handheld deployment
+  also `ENABLE_SD_CARD=1`); the model choice follows, and the build refuses
+  local STT without the card.
+- **Speaker labels** (on by default on `p4x_eye`) also read
+  `/sd/STT Models/speaker.spk`, which is not published either. Without it,
+  transcription still works and transcripts carry no speaker labels.
 
 ---
 
@@ -201,14 +254,28 @@ Hardware One uses **ESP-IDF** (not Arduino IDE). The quickest way to get going:
 git clone https://github.com/CadenGithubB/HardwareOne.git
 cd HardwareOne
 
-# Build and flash (replace PORT with your device's serial port)
-idf.py -p PORT flash monitor
+# Vendor the patched Arduino component (once per clone; needs ESP-IDF 5.5.5 exported)
+tools/vendor_arduino.sh
 
-# Or build one specific board (see boards/ for the list)
-tools/build_board.sh xiao_s3 -p PORT flash monitor
+# Build and flash one board (replace PORT with your device's serial port;
+# run tools/build_board.sh with no arguments to list the boards)
+tools/build_board.sh feathers3 -p PORT flash monitor
+
+# A saved feature configuration (see configurations/): the XIAO ESP32-S3 without Bluetooth
+tools/build_board.sh xiao_s3 --config xiao-no-bluetooth -p PORT flash monitor
 ```
 
 `tools/build_board.sh <board> [idf.py args...]` gives each board its own `build-<board>/` directory and its own sdkconfig, so switching boards never needs an `idf.py fullclean`.
+
+Always build through `tools/build_board.sh` (or `tools/build_config.py build` /
+`tools/build_deployment.sh`, which also pass a board and a per-build sdkconfig).
+A bare `idf.py` in the repository root is not a supported build: it reads the
+tracked `config/sdkconfig`, which is set up for the XIAO ESP32-S3 (8 MB flash,
+octal PSRAM), while with no `HW_BOARD` the root `CMakeLists.txt` picks the
+default board for the chip (`feathers3` for esp32s3, `qtpy_esp32` for esp32) and
+that board's partition table. The two do not fit together (for esp32s3, a 16 MB
+table in an 8 MB flash setting), so configure stops before touching the tracked
+`config/sdkconfig`, with a message naming `tools/build_board.sh`.
 
 Checked-in deployment profiles add a second, independent axis on top of the
 physical board. For example, paired Headless Node updater/main releases are:
@@ -226,7 +293,7 @@ features) from `components/hardwareone/System_BuildConfig.h`. Checked-in
 deployment builds apply their own feature overlay and OTA/partition contract,
 so the same release can be reproduced without editing that shared header.
 
-If your build enables the G2 glasses / R1 ring Bluetooth support, first apply the small local patches to the managed Arduino BLE component: see [docs/arduino-local-patches/](docs/arduino-local-patches/) (patch file, verify script, and instructions). Building those features against a stock copy of the library fails to link.
+`components/arduino` is not in the repository: `tools/vendor_arduino.sh` clones arduino-esp32 3.3.5 and applies HardwareOne's local patches (BLE, ESP-Hosted, panic path, OTA removal); every build script verifies them first. Details: [docs/arduino-local-patches/README.md](docs/arduino-local-patches/README.md).
 
 ---
 
@@ -235,3 +302,13 @@ If your build enables the G2 glasses / R1 ring Bluetooth support, first apply th
 > ## Full reference, commands, and configuration: [User Guide](docs/USERGUIDE.md)
 
 > ## Every command, generated from source: [Command Reference](docs/COMMAND_REFERENCE.md)
+
+> ## What a version expects from its peers and what an upgrade keeps: [Compatibility](docs/COMPATIBILITY.md)
+
+> ## Open problems and their workarounds: [Known Issues](KNOWN_ISSUES.md)
+
+> ## Reporting a vulnerability privately, and the known security limits: [Security Policy](SECURITY.md)
+
+## License
+
+PolyForm Noncommercial 1.0.0: free for any noncommercial use. See [LICENSE.md](LICENSE.md); bundled third-party code is listed in [NOTICE.md](NOTICE.md).

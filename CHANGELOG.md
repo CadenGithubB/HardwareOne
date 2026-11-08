@@ -10,6 +10,167 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 
 ## [Unreleased]
 
+## [0.99.99.1] - 2026-11-08
+
+Everything user-visible since v0.99.99.
+
+### Added
+- G2 Health panel feed: the glasses' stock Health panel can show the R1 ring's steps, calories,
+  heart rate, SpO2 and sleep score, pushed by the device (`ring panel status|preview|send`,
+  `ring panel feed on|off`, off by default; `ring panel history <minutes>`). See `docs/G2_HEALTH_PANEL.md`.
+- STT raw recorder (`sttraw on|off|status`, admin, off by default): the next continuous session saves
+  exactly what the speech detector receives to `/sd/STT Raw/`, and `stt_raw_replay` replays it on a host.
+- Microphone and speech-detector tuning, applied at the next session: `pdmamplify` (PDM gain 1-15),
+  `pdmhpf` (hardware high-pass), `sttspeechfloor`, `sttsilencefloor`, `sttnoisepercentile` (0-50),
+  `sttdecisionpre` (pre-emphasis onset judge), separate `sttg2*` values for the G2 glasses' mic, and
+  `sttdetector` to show what is in effect.
+- Waveshare ESP32-P4 Touch LCD 5 board (`waveshare_p4_touch_lcd_5`, experimental): DSI display with
+  GT911 single-touch navigation, landscape UI with right-side touch controls, onboard speaker, battery
+  voltage sensing, SDMMC card slot, OV5647 camera through the shared CSI backend, ES7210 onboard
+  microphone through the audio HAL, local transcription, glasses and phone links with display-side
+  error messages, and a legacy-C6 upgrade path (`c6update`).
+- Shared monochrome camera viewer on the local display (P4X-EYE and Waveshare).
+- System log bounded and rotated: the debug-capture log rotates to `<path>.1` at 8 MB; size limit and
+  rotation count are settings, as for the sensor logger.
+- `status` labels USB and the later reset reasons instead of "Unknown".
+- `otastatus` names the recovery updater in the factory slot ("Factory updater" line,
+  `factoryUpdaterVersion` in `otastatus json`). The updater now has its own version (1.1.0, was a fixed
+  1.0.0 on every build), so a release can require a newer one through the signed manifest's
+  `minUpdaterVersion` (`HW1_MIN_UPDATER_VERSION` in `tools/build_deployment.sh`, which refuses a floor
+  newer than the updater it builds); the manifest format is unchanged. Updaters built before this report
+  `1.0.0+<suffix>` and cannot be told apart.
+- `versions` (and `versions json`) lists the firmware version and every version a separately built
+  part must match: recovery updater and OTA layout, the ESP-NOW format (shown as
+  `mesh v4 on ESP-NOW v1 frames`) and the radio's ESP-NOW stack, BLE console channel, phone link and
+  pipe, CM5 control protocol, the C6 companion's reported and expected versions, the local STT model,
+  the ESP-NOW identity and peer file versions, the automations file and backup bundle formats
+  (`automations_file`, `backup_format`) and the ESP-IDF and Arduino core. `status json` carries the
+  same keys as `versions`, and `BUILD_INFO.md` gains a Versions table with the build-time half.
+- Crash record captures the faulting task, stack-guard bounds and a RISC-V stack scan.
+- Build and release tooling: `tools/vendor_arduino.sh` (a fresh clone vendors and patches arduino-esp32
+  3.3.5 in one step), the OTA protocol host suite under the main ctest gate, and the pre-tag gate in
+  `RELEASING.md`.
+- `NOTICE.md` listing bundled third-party code and licences; `docs/COMPATIBILITY.md` (peer versions and
+  what an update keeps).
+- Heap-poisoning diagnostic build profile for memory-corruption hunts (bench use).
+- Task-watchdog soak build (bench use): `tools/build_board.sh <board> [--config <name>] --wdt-soak`
+  builds in its own `-wdt-soak` directory with a 20 s watchdog that panics, and subscribes the main
+  loop; the commands and watch list are in `RELEASING.md`, "Soak builds". Ordinary builds are
+  unchanged. `BUILD_INFO.md` now shows the watchdog panic and timeout, and a soak build's manifest
+  gives the `--wdt-soak` command. Configuration names may not end in `-wdt-soak`.
+- New `heap_low` event when internal RAM runs low, so automations and `events.log` can react
+  (previously a console warning only).
+
+### Changed
+- Local speech-to-text on the P4 is automatic: the pre-emphasis onset judge is on by default
+  (`sttdecisionpre 97`), and with `sttautogain 1` (default) STT opens the onboard mic with a 120 Hz
+  high-pass and a gain that changes only when three speech sessions agree. On the bench P4X-EYE at
+  about 1 ft, device captions went from 71% to 43-47% word errors and quiet speech is no longer missed.
+- ESP32-P4 local STT always runs the published 15x5 model from the microSD card. The plain `p4x_eye`
+  board and the handheld deployment build with local STT off unless the card is enabled.
+- `g2_worn` event renamed `g2_plugin_alive`; the old name resolves as an alias so saved automations and
+  notification rules keep firing.
+- The C6 console-mirror command is `c6console` again (`c6_console` remains as an alias).
+- Legacy companion compatibility is limited to explicit firmware updates (`c6update`).
+- Glasses keep the saved mate when AUTO rediscovers one admitted arm.
+- First-time setup refuses reserved owner names (`system`, `AuthBypass`, the bond admin) and passwords
+  shorter than 6 characters.
+- Bare `Usage:` replies and "Unknown feature." count as failed commands (no `OK:` stamp, non-success
+  to the web client).
+- BLE setup worker: the stuck-job report threshold is 360 s, above the longest legitimate run (a 300 s
+  manual `ring scan`).
+- Licence statement: README and the User Guide say PolyForm Noncommercial 1.0.0 (the User Guide had said
+  MIT) and point at `NOTICE.md`.
+- `automations.json` format version 2 is now checked on every read. A file from newer firmware (a
+  higher `"version"`) is not loaded or run and is left unchanged; the console says so once, and
+  `automation` commands, the web Automations page and its exports name the version instead of
+  listing the file. A file with no version, or version 1, loads as before.
+- Import from Backup refuses a bundle whose `formatVersion` is newer than 1 (or not a whole number)
+  before staging anything, with a console line and a `400` reply that names both versions. A bundle
+  without `formatVersion` is treated as format 1.
+
+### Fixed
+- ESP32-P4: occasional reboots (heap corruption or a VFS load fault) around speech sessions. The CPU
+  clock switch now runs with the PSRAM speed-mode sync and memory quiesced.
+- Local STT sessions no longer fail to start with `warm-up failed: Cancelled`.
+- Saved `pdmamplify` and `pdmhpf` values now apply to STT after a reboot.
+- Two crashes: the QuickNote worker's stack and Arduino's unlocked `NetworkEvents`.
+- Three resident task stacks raised, as they ran with 312 to 700 B free: the command executor
+  (`cmd_exec`) 8 to 10 KB, the log writer (`log_out`) 4 to 6 KB, the glasses owner (`g2_owner`) 6 to
+  8 KB. All stay in internal RAM. This costs 4 KB of internal RAM on every board, and 2 KB more while
+  glasses are connected; on the classic ESP32 boards (Feather ESP32 V2, QT Py ESP32) free internal
+  RAM at boot is about 4 KB lower. On those boards the glasses start now needs 2 KB more free RAM,
+  so free RAM after the glasses connect stays where it was.
+- BLE setup worker retires a client after an OPEN timeout and bounds a stuck job.
+- Phone pipe isolates CLOSE and DISCONNECT by peer address and keeps the first cause of a lost session.
+- Ring: setup handles stay valid through a disconnect, discovery fails fast, the HCI reason is recorded.
+- Arduino BLE client (local patch 2026-11-06): records the disconnect reason and releases connect
+  semaphores on timeout.
+- Waveshare: DSI scanout protected from CPU downclocking, DSI refresh interrupts kept active during
+  flash writes, backlight dark until the wake frame settles, steady login popup, touch latency.
+- ESP-NOW discover-then-accept pairing no longer ends half-paired when a control frame is lost: the
+  request repeats every 1.5 s until answered (45 s limit), a repeated request gets the same answer
+  without a second prompt (also after the discovery window closed under an open prompt), and a device
+  that already paired the requester answers Accept. The timeout names the repair command and the
+  display's pairing screen shows the request's state. Not yet tested on hardware (host model only).
+- A short write on a nearly full filesystem no longer replaces the ESP-NOW identity (or a peer's
+  identity file) with a truncated copy, which took the mesh offline until a bond-wiping
+  `espnowregenidentity`; the old file is kept. `certgen` stages both the HTTPS key and certificate as
+  checked temps before replacing either, so a failed save keeps the old matching pair and is reported
+  instead of truncating them. Boot cleanup also removes
+  leftover temps in `/system/espnow` and `/system/certs`. Host tests only.
+- First-time setup "Import from Backup": the confirm prompt now shows the staged bundle's claimed
+  hostname and board, the bytes received, the first 8 hex of their SHA-256 and whether its fingerprint
+  matched this device, did not, or was missing (shown as unverified, never as this device; such a bundle
+  is still restored with credentials, as before), on the serial line and the OLED prompt, still
+  defaulting to No. The serial line also says what to compare the size and hash with; for a forced
+  cross-device upload, whose body adds a `force` flag, it says they will not match the file. Discarding a staged bundle frees
+  it before clearing the pending flag, and stopping the restore server discards only after the server
+  has stopped. Host suite `migration_restore` covers both; not yet tested on hardware.
+- Host suite: nine harnesses re-pinned after the Waveshare merge; the event-catalog structure test walks
+  what git would commit; the continuous-STT suites run serially under ctest.
+- Recovery OTA: the first `ota0-flash` in a fresh build directory no longer fails with
+  `FileNotFoundError`; the pair audit now builds the partition table and blank otadata it reads.
+  `OTA_DEVICE_SETUP.md` states that `idf.py erase-flash` is not refused and wipes the recovery
+  updater, and gives the re-provisioning steps; the same warning is in `KNOWN_ISSUES.md`, and
+  COMPATIBILITY and the user guide name the OTA re-provisioning steps after a full erase.
+  Host suite `ota_pair_audit_depends`.
+- Boot automations whose condition is false no longer leak their command strings on every boot.
+- Glasses pages and connects refuse when memory is short instead of rebooting the device.
+- The HT16K33 matrix brightness, rotation, square and panel settings can be saved from the web and
+  display settings editors: their rows named `matrixbrightness`, `matrixrotation`, `matrixsquare` and
+  `matrixpanel`, and no such commands existed. The four admin commands now save the value; the matrix
+  picks it up on the next `matrix` command, as before (`matrix brightness|rotation|size|panel` still
+  apply at once).
+- `help llm` gives the model search order the code uses: internal `/system/llm` first, then `/sd/llm`.
+- `tools/command_registry.py audit` exits 0 on a clean tree: the two `otaCommands[]` tables in opposite
+  `#if HW1_OTA_LAYOUT` branches count as one table instead of nine duplicate commands. New
+  `reference --check` fails when `docs/COMMAND_REFERENCE.md` is out of date; host suite
+  `command_registry_gate` runs both, and the RELEASING gate names it.
+
+### Docs
+- `docs/COMMAND_REFERENCE.md` regenerated: it lacked `memdiag`, the four matrix setters and the
+  microphone/STT tuning commands added since the last regeneration, and listed the OTA commands twice.
+- The user guide's multi-hop section states one rule for pairing: the discover/request/accept exchange
+  is single-hop (the code never relays `PAIR_*` frames), while key exchange and encrypted session setup
+  between devices that share the mesh passphrase do travel through relays. It no longer also claims
+  relays carry the initial pairing handshake.
+- `KNOWN_ISSUES.md` lists that `openwifi` holds the shared command executor while it connects: up to
+  about 150 s for the best-network hunt (the web "save and connect" button) and up to about 160 s for
+  `--index`/`--saved-id` (three 35 s attempts, then the rejoin of the previous network), with the web
+  caller timing out at 60 s. Deferred.
+- Private network names, addresses and account paths replaced with placeholders throughout the tracked
+  tree; the Arduino patch README names every patch in replay order and the stale variant note is gone;
+  QUICKSTART and README make vendoring step 1; two P4X-EYE Bluetooth reliability investigations and the
+  cross-board integration results recorded.
+- The 0.99.98.4 known issue (P4X-EYE USB serial console stops answering in phone-client mode) is
+  closed as a mode, not as a fix. 0.99.98.5 folded phone-client mode into client mode: `blemode` keeps
+  `client` and `server` only and the phone pipe still runs, as a device on the shared client stack.
+  The hang was not seen on the 2026-10-21 bench runs (the P4X-EYE driven over serial with the
+  glasses, ring and phone linked) or the 2026-10-24 check (all four companion BLE links over
+  serial), but those records do not say whether the HTTP server was up or how long the console was
+  watched. The cause was never found.
+
 ## [0.99.99] - 2026-10-28
 
 This release confines the firmware's own file access, cuts the fixed cost of every command, and changes the default power mode. Every file the firmware opens for itself is now limited to one folder and the unguarded file API is gone; a backup restore writes only the files a backup contains. Commands stop re-reading the user list for each permission check and file opens stop creating every parent folder first, which takes a plain `uptime` on the P4X-EYE from 107-280 ms to 61-66 ms. Adaptive replaces PowerSaver as the default power mode and every mode raises the clock for transcription, the camera and recording. I2C sensors report when they stop responding and when they come back, the R1 ring reconnects after a failed connect instead of blocking every Bluetooth connect until reboot, and the display's LLM Chat, WiFi, Web and Bluetooth screens match the glasses.
@@ -479,7 +640,8 @@ in phone-client mode (see Known issue).
 Known issue: on the P4X-EYE in phone-client mode, the USB serial console stops
 responding a few seconds after the HTTP server starts. A watchdog then resets
 the board about ten minutes later. The scheduler keeps running during the
-silence. Under investigation.
+silence. Under investigation. (Closed in 0.99.98.5, which folded phone-client mode into client
+mode; not reproduced since, cause not found; see [Unreleased] > Docs.)
 
 Verification: the `p4-phone-only` P4 build passes, and the phone pipe, GATT,
 identity, runtime, forget and BLE coordinator host tests pass. The image was
@@ -681,7 +843,9 @@ these fixes created are listed in `docs/MODULARIZATION_PLAN.md`.
 - OTA: the recovery updater no longer carries a failed update's downgrade or
   forced-power permission into a later upload. This takes an updater from
   this release in the factory slot; application images alone do not change
-  it.
+  it. Updaters up to 0.99.99 all report `1.0.0+<suffix>`, so a device cannot
+  show whether its factory updater has this fix; a factory updater reporting
+  1.1.0 or later in `otastatus` ("Factory updater" line) has it.
 
 ### Changed
 - P4 STT retains model state for a session, computes frontend features during

@@ -58,9 +58,16 @@ def owner_summary(component: Path) -> str:
 
 def generated(component: Path) -> str:
     owner = (component / "System_Automation.cpp").read_text()
-    start = owner.index("// In-RAM cache of per-automation scheduling metadata")
+    header = (component / "System_Automation.h").read_text()
+    # The file-format check (a tree without one keeps the old start) and the
+    # cache owner. The format constant comes from its header line.
+    format_marker = "// automations.json format version\n"
+    start = owner.find(format_marker)
+    if start < 0:
+        start = owner.index("// In-RAM cache of per-automation scheduling metadata")
     end = owner.index("// Update the nextAt field", start)
-    cache = owner[start:end]
+    constant = re.search(r"^constexpr uint32_t kAutomationsFileVersion = \d+;$", header, re.M)
+    cache = (constant.group(0) + "\n" if constant else "") + owner[start:end]
     # Firmware builds verify the ESP ABI budget. LP64 host long/time_t make
     # the same fields wider; that architecture assertion is not host behavior.
     cache, removed = re.subn(
@@ -73,14 +80,20 @@ def generated(component: Path) -> str:
         "void stopAutomationScheduler()", "bool automationSchedulerRunning()",
         "void automationTick()"))
     tick = extract_block(owner, "static void schedulerTickMinute()")
-    drain = next(line for line in tick.splitlines()
-                 if "gAutomationEventsPending.exchange(false);" in line)
+    begin = tick.index("  static uint32_t sEventCursor")
+    drain = tick[begin:tick.index("  // Without synced time only event fires", begin)]
+    require("gAutomationEventsPending.exchange(false);" in drain,
+            "event drain extraction holds the pending-flag exchange")
+    events = (component / "System_Events.cpp").read_text()
+    ring = "\n".join(extract_block(events, signature) for signature in (
+        "uint32_t systemEventLatestSeq()", "int systemEventFetchSince("))
     summary = owner_summary(component)
     require(bool(summary), "System_Automation.cpp has no owner automation summary "
             "(automationCopySummaries); pages still parse automations.json themselves")
     harness = (HERE / "automation_scheduler_harness.cpp").read_text()
     for marker, replacement in {"// INSERT_CACHE_OWNER": cache,
                                 "// INSERT_SCHEDULER_API": functions,
+                                "// INSERT_EVENT_RING": ring,
                                 "// INSERT_PENDING_EVENT_DRAIN": drain,
                                 "// INSERT_TRIGGER_SUMMARY": summary}.items():
         require(harness.count(marker) == 1, f"exactly one insertion marker: {marker}")

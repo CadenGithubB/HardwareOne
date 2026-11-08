@@ -29,6 +29,10 @@ NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 def checked_name(name):
     if not NAME.fullmatch(name):
         raise ValueError("names must contain only lowercase letters, digits, '-' or '_'")
+    if name.endswith("-wdt-soak"):
+        # build_board.sh --wdt-soak adds this suffix to the build directory; a
+        # name ending in it would share that directory and inherit the soak.
+        raise ValueError("names must not end in '-wdt-soak' (reserved for watchdog soak builds)")
     return name
 
 
@@ -37,7 +41,10 @@ def config_path(name):
 
 
 def build_dir(name):
-    return REPO / ("build-config-" + checked_name(name))
+    # tools/build_board.sh --wdt-soak exports HW1_WDT_SOAK=1 so the watchdog
+    # soak image keeps its own directory (its sdkconfig values stick).
+    suffix = "-wdt-soak" if os.environ.get("HW1_WDT_SOAK") == "1" else ""
+    return REPO / ("build-config-" + checked_name(name) + suffix)
 
 
 def editable_choices():

@@ -234,4 +234,6 @@ HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_STT_STARTED,         "stt_started", SYSEVT_FAM
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_STT_STOPPED,         "stt_stopped", SYSEVT_FAM_MEDIA)          /* that run ended  subject=done|cancelled|failed */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_STT_SEGMENT,         "stt_segment", SYSEVT_FAM_MEDIA)          /* a speech segment closed and went to the recogniser  subject=segment number detail=<s> s voice */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_STT_SPEAKER,         "stt_speaker", SYSEVT_FAM_MEDIA)          /* a segment was attributed to a speaker  subject=speaker number detail=segment */
+  /* --- Device internal heap (event-only: automations, `events`, events.log) --- */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_HEAP_LOW,            "heap_low", SYSEVT_FAM_SYSTEM)            /* internal heap free < 25 KB or largest block < 16 KB; once per episode, 60 s cooldown  subject=free bytes detail="largest <bytes>" */
 #endif

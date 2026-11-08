@@ -1,0 +1,78 @@
+# Native host test suite (components/hardwareone/test/host, which also pulls in
+# components/hw1_ota_protocol/test/host).
+#
+# The default suite needs no ESP-IDF tree: the suites that compile SDK sources
+# (esp_hosted_mempool, the phone crypto/SDK suites, llm_phone_tls) are only
+# registered when HW1_ESP_HOSTED_TEST_IDF / HW1_PHONE_TEST_IDF /
+# HW1_PHONE_TEST_SDKCONFIG are passed, and the camera/STT suites that need a
+# prepared P4 SDK exit 77 and are reported as skipped. Several suites do read
+# the vendored arduino-esp32 core (components/arduino, git-ignored), so the job
+# vendors it with tools/vendor_arduino.sh exactly as a fresh clone would.
+#
+# The suite is developed on macOS with Apple clang; Linux is a second platform.
+name: Host tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: host-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # Many harness runners default to clang++; use clang for the CMake
+      # targets too so both halves of the suite see the same compiler.
+      CC: clang
+      CXX: clang++
+      # LeakSanitizer is on by default on Linux but not on macOS, where the
+      # suite is maintained; keep the two platforms checking the same things.
+      ASAN_OPTIONS: detect_leaks=0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Node runs the browser suites and the OpenClaw terminal tests; without
+      # it they are registered but reported as not run.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install CMake and clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake make clang
+          cmake --version
+          clang++ --version
+
+      # ASan in some clang releases crashes at start-up under the runner
+      # kernel's high-entropy ASLR; this is the usual workaround on the
+      # disposable runner VM.
+      - name: Reduce ASLR entropy for ASan
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Vendor arduino-esp32 3.3.5 with the local patches
+        run: tools/vendor_arduino.sh
+
+      - name: Configure
+        run: >
+          cmake -S components/hardwareone/test/host -B build-host
+          -DHW1_NODE_EXECUTABLE="$(command -v node)"
+
+      - name: Build
+        run: cmake --build build-host -j "$(nproc)"
+
+      - name: Test
+        run: ctest --test-dir build-host --output-on-failure -j "$(nproc)" --timeout 900

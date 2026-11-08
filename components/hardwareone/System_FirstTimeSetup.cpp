@@ -12,6 +12,7 @@
 #include <LittleFS.h>
 #include "WebServer_Handle.h"
 #include "System_Utils.h"   // rebootDevice()
+#include "System_User.h"    // isReservedUsername, isValidPublicUsername, kPublicPasswordMinLen
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 
 #include "OLED_Display.h"
@@ -66,6 +67,7 @@ extern uint32_t gBootCounter;
 extern String hashUserPassword(const String& plaintext);
 #if ENABLE_AUTOMATION
 extern bool writeAutomationsJsonAtomic(const String& json);
+extern String automationsEmptyStoreJson();
 #endif
 extern void resolvePendingUserCreationTimes();
 
@@ -115,11 +117,17 @@ bool parseSetupModeInput(const String& input, SetupMode& mode) {
   return false;
 }
 
+static bool ownerCredentialSetupPending();  // defined beside the owner flow
+
 void detectFirstTimeSetupState() {
   // Use USERS_JSON_FILE as the determinant - this is the actual indicator
   // that first-time setup has been completed. Settings can exist without users.
   bool usersExist = VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth(VFS::Scopes::USERS, "setup.detect"));
   gFirstTimeSetupState = usersExist ? SETUP_NOT_NEEDED : SETUP_REQUIRED;
+  // A provisioned device whose owner credential was quarantined runs
+  // the credential-only setup, so the owner is never left without a login.
+  const bool ownerRecovery = usersExist && ownerCredentialSetupPending();
+  if (ownerRecovery) gFirstTimeSetupState = SETUP_REQUIRED;
 
   DEBUG_SYSTEMF("[SETUP_STATE] Early detection: %s (users file exists: %s)",
                 gFirstTimeSetupState == SETUP_NOT_NEEDED ? "NOT_NEEDED" : "REQUIRED",
@@ -127,6 +135,15 @@ void detectFirstTimeSetupState() {
 
   // SETUP_REQUIRED is only ever established here (direct assignment above,
   // not via the setter), so the durable event is emitted here too.
+  if (ownerRecovery) {
+    logSystemEvent("SETUP", "owner credential setup required (user_settings/1.json was quarantined)");
+    broadcastOutput("");
+    broadcastOutput("=== OWNER LOGIN NEEDS A NEW PASSWORD ===");
+    broadcastOutput("The owner's login file was unreadable and was moved aside.");
+    broadcastOutput("========================================");
+    broadcastOutput("");
+    return;
+  }
   if (gFirstTimeSetupState == SETUP_REQUIRED) {
     logSystemEvent("SETUP", "first-time setup required (users.json absent)");
   }
@@ -281,6 +298,24 @@ static bool createInitialAdminUser(const String& username, const String& plainte
     broadcastOutput("ERROR: Admin username and password cannot be blank");
     return false;
   }
+  // The first admin is created outside the public account path, so apply the
+  // same rules here: a reserved sentinel name (system, AuthBypass, the bond
+  // admin) would lock the device out of every login, and a short password is
+  // refused everywhere else.
+  String nameError;
+  if (isReservedUsername(username) || !isValidPublicUsername(username, &nameError)) {
+    char msg[160];
+    snprintf(msg, sizeof(msg), "ERROR: Admin username not allowed%s%s",
+             nameError.length() ? ": " : " (reserved name)", nameError.length() ? nameError.c_str() : "");
+    broadcastOutput(msg);
+    return false;
+  }
+  if (plaintextPassword.length() < kPublicPasswordMinLen) {
+    char msg[96];
+    snprintf(msg, sizeof(msg), "ERROR: Admin password must be at least %u characters", (unsigned)kPublicPasswordMinLen);
+    broadcastOutput(msg);
+    return false;
+  }
   String hashedPassword = hashUserPassword(plaintextPassword);
   if (hashedPassword.length() == 0) {
     broadcastOutput("ERROR: Failed to prepare admin password");
@@ -357,13 +392,115 @@ static bool createInitialAdminUser(const String& username, const String& plainte
   return true;
 }
 
-#if ENABLE_MIGRATION_TOOL
+// The owner (user 1) is the one account no other login can repair:
+// roleMutation and deleteMutation in System_User.cpp refuse to touch it, and
+// userresetpassword and factoryreset need an admin login. So when its
+// credential file is quarantined as unreadable, the loader arms this marker
+// and the next boot asks for a new owner password instead of leaving a cable
+// erase as the only way back. Any other account is reset by the owner.
+bool armOwnerCredentialSetup() {
+  return writeTextAtomic(PENDING_CRED_SETUP_FILE, "1",
+                         VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "setup.owner_cred_marker"));
+}
+
+// Called from detectFirstTimeSetupState() on a provisioned device. Parses the
+// owner's file first, so a damaged one is quarantined (and the marker armed)
+// at boot rather than at the first failed login. The marker counts only while
+// user 1 has no credential file: never prompt over one that exists.
+static bool ownerCredentialSetupPending() {
+  {
+    PSRAM_JSON_DOC(probe);
+    (void)loadUserSettings(1, probe);
+  }
+  const auto markerAuth = VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "setup.owner_cred_marker");
+  if (!VFS::existsGuarded(PENDING_CRED_SETUP_FILE, markerAuth)) return false;
+  if (VFS::existsGuarded(getUserSettingsPath(1).c_str(),
+                         VFS::systemAuth(VFS::Scopes::USERS, "setup.owner_cred_check"))) {
+    VFS::removeGuarded(PENDING_CRED_SETUP_FILE, markerAuth);  // stale: the owner has a login file again
+    return false;
+  }
+  return true;
+}
+
+// Owner recovery: users.json and every other file stay as they are; only
+// user_settings/1.json is written, with a new password and the default theme
+// (the quarantined copy holds the old preferences). Returns false on cancel or
+// a failed save; the marker then stays and the next boot asks again.
+static bool setOwnerCredentialAgain() {
+  setFirstTimeSetupState(SETUP_IN_PROGRESS);
+
+  broadcastOutput("");
+  broadcastOutput("========================================");
+  broadcastOutput("  OWNER LOGIN UNREADABLE - NEW PASSWORD");
+  broadcastOutput("========================================");
+  broadcastOutput("The owner account's login file could not be read and was moved aside.");
+  broadcastOutput("Set a new owner password. Other accounts and settings are unchanged.");
+  broadcastOutput("");
+#if ENABLE_OLED_DISPLAY
+  if (gOledRunning && oledConnected) {
+    showOLEDMessage("Owner login lost\n\nSet a new\nowner password", false);
+  }
+#endif
+
+  setSetupProgressStage(SETUP_PROMPT_PASSWORD);
+  String hashedPassword;
+  while (hashedPassword.length() == 0) {
+    String p = "";
+#if ENABLE_OLED_DISPLAY
+    if (gOledRunning && oledConnected) {
+      bool cancelled = false;
+      p = getOLEDTextInput("Owner Password:", true, "", 32, &cancelled, false);
+      if (cancelled) return false;
+    } else {
+#endif
+      broadcastOutput("Enter new owner password: ");
+      p = waitForSerialInputBlocking();
+#if ENABLE_OLED_DISPLAY
+    }
+#endif
+    p.trim();
+    if (p.length() < kPublicPasswordMinLen) {
+      char msg[96];
+      snprintf(msg, sizeof(msg), "ERROR: Owner password must be at least %u characters", (unsigned)kPublicPasswordMinLen);
+      broadcastOutput(msg);
+      continue;
+    }
+    hashedPassword = hashUserPassword(p);
+    if (hashedPassword.length() == 0) {
+      broadcastOutput("ERROR: Failed to prepare owner password");
+      return false;
+    }
+  }
+
+  {
+    PSRAM_JSON_DOC(record);
+    record["theme"] = "light";
+    record["password"] = hashedPassword;
+    if (record.overflowed() || !saveUserSettings(1, record)) {
+      broadcastOutput("ERROR: Failed to save the owner password");
+      return false;
+    }
+  }
+  // A leftover marker is harmless: ownerCredentialSetupPending drops it once
+  // the owner has a credential file.
+  VFS::removeGuarded(PENDING_CRED_SETUP_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "setup.owner_cred_marker"));
+  bumpIdentityGeneration("user.owner_credential");
+  logSystemEvent("SETUP", "owner password set again after its credential file was quarantined");
+  setSetupProgressStage(SETUP_FINISHED);
+  setFirstTimeSetupState(SETUP_NOT_NEEDED);
+  broadcastOutput("Owner password set. Log in with it.");
+  return true;
+}
+
 // Streamlined post-restore login setup. Runs when a cross-device (partial) restore
 // left settings in place but no user credentials. Collects just username + password,
 // creates the admin, and reboots into the (now fully configured) device. Returns
 // false if the user backed out or creation failed, so the caller falls back to the
-// normal setup menu.
-static bool runPostRestoreCredentialSetup() {
+// normal setup menu. With ownerRecovery (users.json exists, the owner's
+// credential was quarantined) it re-credentials the existing owner instead.
+static bool runPostRestoreCredentialSetup(bool ownerRecovery = false) {
+  if (ownerRecovery) return setOwnerCredentialAgain();
+#if ENABLE_MIGRATION_TOOL
   setFirstTimeSetupState(SETUP_IN_PROGRESS);
 
   broadcastOutput("");
@@ -427,8 +564,38 @@ static bool runPostRestoreCredentialSetup() {
   gFirstTimeSetupPerformed = true;  // suppress stale-cookie notice; WiFi connects next boot
   rebootWithMessage("Login created. Rebooting with your restored settings...");
   return true;  // unreached (rebootWithMessage restarts)
-}
+#else
+  return false;
 #endif  // ENABLE_MIGRATION_TOOL
+}
+
+// The credential-setup marker's two meanings. Returns true when setup is done
+// for this boot and the caller must not show the full menu.
+static bool runPendingCredentialSetup() {
+  const auto markerAuth = VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "setup.restore.cred_marker");
+  if (!VFS::existsGuarded(PENDING_CRED_SETUP_FILE, markerAuth)) return false;
+  // With users.json present the marker is owner recovery. The full menu
+  // never runs then: it would write a new users.json over the existing roster.
+  if (VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth(VFS::Scopes::USERS, "setup.detect"))) {
+    if (!runPostRestoreCredentialSetup(/*ownerRecovery=*/true)) {
+      broadcastOutput("Owner password not set. The next boot asks again.");
+      setFirstTimeSetupState(SETUP_NOT_NEEDED);
+    }
+    return true;
+  }
+#if ENABLE_MIGRATION_TOOL
+  // A cross-device (partial) restore writes settings but intentionally skips user
+  // credentials, leaving users.json absent. Instead of the full Basic/Advanced/Import
+  // menu, guide the user through creating just their admin login.
+  // Clear the marker first so a power-cycle mid-flow falls back to the normal menu
+  // (prevents a boot loop).
+  VFS::removeGuarded(PENDING_CRED_SETUP_FILE, markerAuth);
+  return runPostRestoreCredentialSetup();  // true is unreached (success reboots)
+  // Backed out / failed -> the caller continues to the normal setup menu.
+#else
+  return false;
+#endif
+}
 
 void firstTimeSetupIfNeeded() {
   // Check current state instead of filesystem
@@ -436,20 +603,7 @@ void firstTimeSetupIfNeeded() {
     return;  // Already configured
   }
 
-#if ENABLE_MIGRATION_TOOL
-  // A cross-device (partial) restore writes settings but intentionally skips user
-  // credentials, leaving users.json absent. Instead of the full Basic/Advanced/Import
-  // menu, guide the user through creating just their admin login.
-  if (VFS::existsGuarded(PENDING_CRED_SETUP_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "setup.restore.cred_marker"))) {
-    // Clear the marker first so a power-cycle mid-flow falls back to the normal menu
-    // (prevents a boot loop).
-    VFS::removeGuarded(PENDING_CRED_SETUP_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "setup.restore.cred_marker"));
-    if (runPostRestoreCredentialSetup()) {
-      return;  // unreached (success path reboots)
-    }
-    // Backed out / failed -> continue to the normal setup menu below.
-  }
-#endif
+  if (runPendingCredentialSetup()) return;
 
   // Outer restart loop — re-entered if user presses B / types 'back' during restore wait
   while (true) {
@@ -643,11 +797,15 @@ void firstTimeSetupIfNeeded() {
       while (!gRestoreComplete && !goBack) {
         if (migrationRestoreAwaitingConfirm()) {
           broadcastOutput("");
-          broadcastOutput("Backup staged. Confirm to write files and reboot.");
+          // Provenance first, so a bundle raced in by someone else on the LAN
+          // is visible before the operator accepts it.
+          broadcastOutput("Backup staged " + migrationStagedSummary());
+          broadcastOutput(migrationStagedCheckAdvice());
+          broadcastOutput("Confirm to write files and reboot.");
 #if ENABLE_OLED_DISPLAY
           // Default No — LAN upload alone must not apply. Serial y/n also works
           // inside getOLEDYesNoPrompt (OLED path listens to serial too).
-          bool confirmed = getOLEDYesNoPrompt("Apply backup?\nWrites files\n& reboots", false);
+          bool confirmed = getOLEDYesNoPrompt(migrationStagedOledPrompt().c_str(), false);
 #else
           broadcastOutput("Type 'yes' to apply, or 'no' to discard: ");
           String line = waitForSerialInputBlocking();
@@ -931,7 +1089,7 @@ void firstTimeSetupIfNeeded() {
   // Create automations.json (empty) on first-time setup
  #if ENABLE_AUTOMATION
   if (!VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "setup.automations.init"))) {
-    String a = "{\n  \"version\": 2,\n  \"automations\": []\n}\n";
+    String a = automationsEmptyStoreJson();
     if (!writeAutomationsJsonAtomic(a)) {
       broadcastOutput("ERROR: Failed to write automations.json");
     } else {

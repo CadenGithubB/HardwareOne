@@ -1352,6 +1352,16 @@ bool espnowGetPairCandidate(int idx, char* name, size_t nameCap, uint8_t mac[6],
 // Pending accept/reject; optional `mac` (6 bytes) + `atMs` identify the request.
 bool espnowGetIncomingPairRequest(char* name, size_t nameCap,
                                   uint8_t* mac = nullptr, uint32_t* atMs = nullptr);
+// The last outgoing pair request: waiting, or its result for 30 s after it
+// ends; `name` (optional) gets the peer's name. Mirrors espnowpair::Outcome.
+enum EspNowPairOutcome : uint8_t {
+  ESPNOW_PAIR_OUT_NONE = 0,
+  ESPNOW_PAIR_OUT_WAITING,
+  ESPNOW_PAIR_OUT_PAIRED,
+  ESPNOW_PAIR_OUT_DECLINED,
+  ESPNOW_PAIR_OUT_TIMED_OUT,
+};
+EspNowPairOutcome espnowGetPairRequestOutcome(char* name, size_t nameCap);
 bool startEspNowTask();        // Start ESP-NOW heartbeat task
 // Cooperatively stop and join the heartbeat/RX task. On timeout the task and
 // its resources remain intact so closeespnow can retry safely.
@@ -1371,6 +1381,11 @@ bool espnowShutdownPending();
 // (deinitEspNow clears `initialized` before its bounded waits). Use this, not
 // isEspNowInitialized(), wherever the radio could be taken from under ESP-NOW.
 bool espnowOwnsRadio();
+
+// Espressif's ESP-NOW version (1 or 2, esp_now_get_version) as read at the last
+// successful init; 0 before that. On a P4 it is the companion's, read through
+// the bridge at that init.
+uint32_t espnowStackVersion();
 
 // Centralized driver-peer deletion boundary for UI/first-party callers. It
 // rejects while ESP-NOW is stopped/closing and is included in close quiescence.

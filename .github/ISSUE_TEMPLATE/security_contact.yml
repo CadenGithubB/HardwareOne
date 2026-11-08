@@ -1,0 +1,19 @@
+name: Request a private security contact
+description: Use only if the private "Report a vulnerability" button is not available. Do not describe the problem here.
+title: "Request for a private security contact"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not put any details of the vulnerability in this issue.** It is public.
+
+        Submitting this form asks the maintainer to arrange a private channel with you
+        (see [SECURITY.md](https://github.com/CadenGithubB/HardwareOne/blob/main/SECURITY.md)).
+        Every field is optional.
+  - type: input
+    id: area
+    attributes:
+      label: Affected area (optional)
+      description: At most a broad area such as "web UI", "BLE" or "OTA". No details.
+    validations:
+      required: false

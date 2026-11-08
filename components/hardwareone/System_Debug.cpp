@@ -123,6 +123,73 @@ static uint16_t gSystemLogUnflushedCount = 0;
 static const uint16_t LOG_FLUSH_MESSAGE_COUNT = 20;      // Flush every 20 messages
 static const uint32_t LOG_FLUSH_INTERVAL_MS = 5000;      // Or every 5 seconds
 
+// Size bound for that file, held to the sensor logger's standard: a size
+// limit and a count of old generations, both settings (`log maxsize`,
+// `log rotations`). Until 2026-11-06 it grew without limit (3.5 MB in ten
+// hours with ring and glasses debug on). At the limit the file becomes
+// <path>.1 behind the shifted older generations, and a fresh file continues:
+// renames only, under the lock the writer already holds, no copy.
+static uint32_t gSystemLogRotations = 0;
+static uint32_t gSystemLogRotateRetryAtMs = 0;  // set after a failed rotation; 0 = no backoff
+static uint32_t gSystemLogReserveSkips = 0;     // lines not written: LittleFS below the reserve
+
+// The system log never moves to the SD mirror (its path is the user's
+// choice), and its default budget (1 MB x 4 generations) exceeds the LittleFS
+// partition of the 8 MB layouts. On LittleFS it must not eat the reserve the
+// overflow latch keeps for settings and state saves, so lines are skipped and
+// counted while flash is below it. The free figure is the VFS cache the capped
+// logs already refresh, so most lines cost no traverse.
+static bool systemLogBlockedByReserve(const String& path) {
+  if (VFS::getStorageType(path) == VFS::SDCARD) return false;
+  return VFS::getCachedLittleFsFree() < VFS::logReserveBytes();
+}
+
+// The sensor logger's bounds; an out-of-range setting reads as the default.
+static size_t systemLogMaxSizeBytes() {
+  const int v = gSettings.systemLogMaxSize;
+  return (v >= 10240 && v <= 10485760) ? (size_t)v : 1048576u;
+}
+static int systemLogMaxRotations() {
+  const int v = gSettings.systemLogMaxRotations;
+  return (v >= 0 && v <= 9) ? v : 3;
+}
+
+// Caller holds the FS lock with gSystemLogFile open. Closes the file, shifts
+// the kept generations (.i -> .i+1, oldest removed first: FAT refuses to
+// rename over an existing file), moves the file to .1 — or removes it when
+// no generation is kept — and leaves the handle closed: the next line reopens
+// the path for append exactly as a run's first write does. No log line from
+// here — this runs inside the log writer itself.
+static void systemLogRotateLocked() {
+  gSystemLogFile.flush();
+  gSystemLogFile.close();
+  gSystemLogUnflushedCount = 0;
+  const AuthContext ctx =
+      VFS::systemAuth(VFS::captureScopeFor(gSystemLogPath), "debug.system_log_rotate");
+  const int keep = systemLogMaxRotations();
+  bool ok;
+  if (keep > 0) {
+    const String oldest = gSystemLogPath + "." + String(keep);
+    if (VFS::existsGuarded(oldest, ctx)) VFS::removeGuarded(oldest, ctx);
+    for (int i = keep - 1; i >= 1; --i) {
+      const String from = gSystemLogPath + "." + String(i);
+      if (VFS::existsGuarded(from, ctx)) {
+        VFS::renameGuarded(from, gSystemLogPath + "." + String(i + 1), ctx);
+      }
+    }
+    ok = VFS::renameGuarded(gSystemLogPath, gSystemLogPath + ".1", ctx);
+  } else {
+    ok = VFS::removeGuarded(gSystemLogPath, ctx);  // start over, keep nothing
+  }
+  if (ok) {
+    ++gSystemLogRotations;
+    gSystemLogRotateRetryAtMs = 0;
+  } else {
+    // The file keeps growing past the limit; retry in a minute, not per line.
+    gSystemLogRotateRetryAtMs = millis() + 60000u;
+  }
+}
+
 // BLE broadcast output buffer (accumulates messages for periodic send to authenticated BLE clients)
 #if ENABLE_BLUETOOTH
 static String gBLEOutputBuffer;
@@ -332,7 +399,9 @@ void debugOutputTask(void* parameter) {
             gSystemLogUnflushedCount = 0;
           }
         }
-        if (gSystemLogFile) {
+        if (gSystemLogFile && systemLogBlockedByReserve(gSystemLogPath)) {
+          ++gSystemLogReserveSkips;  // shown by `log status`
+        } else if (gSystemLogFile) {
           if (gSystemLogCategoryTags && msg->category != 0) {
             const char* cat = getDebugCategoryName(msg->category);
             gSystemLogFile.printf("[%lu] [%s] %s\n", msg->timestamp, cat, msg->text);
@@ -348,6 +417,12 @@ void debugOutputTask(void* parameter) {
             gSystemLogFile.flush();
             gSystemLogLastFlush = millis();
             gSystemLogUnflushedCount = 0;
+          }
+          // Append mode: position() is the file size, buffered bytes included.
+          if (gSystemLogFile.position() >= systemLogMaxSizeBytes() &&
+              (gSystemLogRotateRetryAtMs == 0 ||
+               (int32_t)(millis() - gSystemLogRotateRetryAtMs) >= 0)) {
+            systemLogRotateLocked();
           }
         }
         fsUnlock();
@@ -716,7 +791,7 @@ void initDebugSystem() {
     BaseType_t result = xTaskCreatePinnedToCore(
       debugOutputTask,
       "log_out",
-      DEBUG_OUT_STACK_WORDS,  // ~14KB stack — see System_TaskUtils.h for sizing rationale
+      DEBUG_OUT_STACK_WORDS,  // 6 KB, internal RAM — see System_TaskUtils.h for sizing rationale
       nullptr,
       TASK_PRIORITY_LOW,
       &gDebugOutputTaskHandle,
@@ -1823,9 +1898,18 @@ void formatSystemLogStatus(char* out, size_t outSize) {
              "  File: %s\n"
              "  Last write: %lus ago\n"
              "  Output flags: 0x%02X\n"
-             "  Auto-start: %s",
+             "  Auto-start: %s\n"
+             "  Rotation: at %u KB, keep %d old file(s); rotated %lu time(s) this boot",
              gSystemLogPath.c_str(), ageSeconds, (unsigned)gOutputFlags,
-             gSettings.systemLogAutoStart ? "ON" : "OFF");
+             gSettings.systemLogAutoStart ? "ON" : "OFF",
+             (unsigned)(systemLogMaxSizeBytes() / 1024u), systemLogMaxRotations(),
+             (unsigned long)gSystemLogRotations);
+    if (gSystemLogReserveSkips > 0) {
+      const size_t used = strnlen(out, outSize);
+      snprintf(out + used, outSize - used,
+               "\n  Skipped: %lu line(s) while flash was below its %u KB reserve",
+               (unsigned long)gSystemLogReserveSkips, (unsigned)(VFS::logReserveBytes() / 1024u));
+    }
   } else if (gSystemLogRunning) {
     snprintf(out, outSize,
              "System logging CONFIGURED but MSG_ROUTE_FILE flag not set\n"
@@ -1853,6 +1937,7 @@ const char* cmd_log(const String& argsInput) {
            "    tags: Enable category tags (default: 1)\n"
            "  stop: Stop system logging\n"
            "  status: Show current logging status\n"
+           "  maxsize <bytes> | rotations <0-9>: Rotate the file at this size, keeping that many old files\n"
            "  autostart: Toggle auto-start system logging on boot\n"
            "Examples:\n"
            "  log start\n"
@@ -2059,7 +2144,38 @@ const char* cmd_log(const String& argsInput) {
     return gDebugBuffer;
   }
   
-  return "Error: Unknown subcommand. Use: start, stop, status, or autostart";
+  // Size limit and kept generations: the sensor logger's `sensorlog maxsize`
+  // and `sensorlog rotations`, with the same bounds, applied by the writer.
+  if (subCmd == "maxsize") {
+    if (!ca.has(1)) {
+      snprintf(gDebugBuffer, 1024, "Current max size: %u bytes\nUsage: log maxsize <bytes> (10240-10485760)",
+               (unsigned)systemLogMaxSizeBytes());
+      return gDebugBuffer;
+    }
+    const long newSize = ca.argInt(1, 0);
+    if (newSize < 10240) return "Error: Max size must be at least 10240 bytes (10KB)";
+    if (newSize > 10485760) return "Error: Max size cannot exceed 10485760 bytes (10MB)";
+    setSetting(gSettings.systemLogMaxSize, (int)newSize);
+    snprintf(gDebugBuffer, 1024, "System log rotates at %ld bytes", newSize);
+    return gDebugBuffer;
+  }
+  if (subCmd == "rotations") {
+    if (!ca.has(1)) {
+      snprintf(gDebugBuffer, 1024, "Current rotations: %d\nUsage: log rotations <count> (0-9)\n"
+                                   "Set to 0 to start over at the limit and keep no old log",
+               systemLogMaxRotations());
+      return gDebugBuffer;
+    }
+    const int count = ca.argInt(1, -1);
+    if (count < 0 || count > 9) return "Error: Rotation count must be 0-9";
+    setSetting(gSettings.systemLogMaxRotations, count);
+    if (count == 0) return "Rotation disabled - the log starts over at the size limit";
+    snprintf(gDebugBuffer, 1024, "Will keep up to %d old log file%s (.1, .2, etc.)",
+             count, count > 1 ? "s" : "");
+    return gDebugBuffer;
+  }
+
+  return "Error: Unknown subcommand. Use: start, stop, status, autostart, maxsize or rotations";
 }
 
 // Low-level stack/heap trace toggle (bypasses debug queue, writes directly
@@ -2274,7 +2390,7 @@ const CommandEntry debugCommands[] = {
   { "debugfmradio", "Debug FM Radio operations.", true, cmd_debugfmradio, "Usage: debugfmradio <0|1> [temp|runtime]" },
   { "memorysampleintervalsec", "Set memory sampling interval in seconds (0=disabled).", true, cmd_memorysampleintervalsec, "Usage: memorysampleintervalsec <0-300>" },
   { "loglevel", "Set log level (error|warn|info|debug).", true, cmd_loglevel, "Usage: loglevel <error|warn|info|debug>" },
-  { "log", "System-wide logging to file.", true, cmd_log, "Usage: log <start|stop|status|autostart>\n  start [\"filepath\"] [flags=0x...] [tags=0|1]: Begin system logging\n    filepath: Log file path, quoted (auto-generated if omitted)\n    flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h)\n    tags: Prefix lines with category tags (0|1, default 1)\n  stop / status: Stop logging / show logging status\n  autostart [on|off]: Toggle logging auto-start on boot (bare = toggle)" },
+  { "log", "System-wide logging to file.", true, cmd_log, "Usage: log <start|stop|status|autostart>\n  start [\"filepath\"] [flags=0x...] [tags=0|1]: Begin system logging\n    filepath: Log file path, quoted (auto-generated if omitted)\n    flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h)\n    tags: Prefix lines with category tags (0|1, default 1)\n  stop / status: Stop logging / show logging status\n  maxsize <bytes> / rotations <0-9>: Rotate the file at this size, keeping that many old files (.1, .2, ...)\n  autostart [on|off]: Toggle logging auto-start on boot (bare = toggle)" },
   { "webconsole", "Enable/disable browser-side debug console output in the web UI.", true, cmd_webconsole, "Usage: webconsole <0|1>" },
 };
 
@@ -2715,6 +2831,8 @@ static const SettingEntry systemLogSettingEntries[] = {
   { "systemLogAutoStart",    SETTING_BOOL,   &gSettings.systemLogAutoStart,    0, 0, nullptr, 0, 1, "Auto-start logging after boot", nullptr, false, nullptr, "log autostart" },
   { "systemLogPath", SETTING_STRING, &gSettings.systemLogPath, 0, 0, "", 0, 0, "Log file path (empty = auto-generate)", nullptr, false, nullptr, nullptr },
   { "systemLogCategoryTags", SETTING_BOOL, &gSettings.systemLogCategoryTags, 1, 0, nullptr, 0, 1, "Include category tags", nullptr, false, nullptr, "logcategorytags" },
+  { "systemLogMaxSize", SETTING_INT, &gSettings.systemLogMaxSize, 1048576, 0, nullptr, 10240, 10485760, "Max file size (bytes)", nullptr, false, nullptr, "log maxsize" },
+  { "systemLogMaxRotations", SETTING_INT, &gSettings.systemLogMaxRotations, 3, 0, nullptr, 0, 9, "Rotations (old logs to keep)", nullptr, false, nullptr, "log rotations" },
   { "systemLogFlags", SETTING_STRING, &gSettings.systemLogFlags, 0, 0, "", 0, 0, "Debug message categories",
     kSystemLogFlagsOptions.s, false, nullptr, "systemlogflags" },
   { "eventLog", SETTING_BOOL, &gSettings.eventLogEnabled, 1, 0, nullptr, 0, 1, "Structured event history (events.log)", nullptr, false, nullptr, "eventlog" },

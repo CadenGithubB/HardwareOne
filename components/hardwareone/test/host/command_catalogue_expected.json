@@ -3,6 +3,7 @@
   "rows": [
     "cli|cliCommands|2|-",
     "system|commands|0|-",
+    "versions|versionsCommands|0|-",
     "wifi|wifiCommands|0|-",
     "espnow|espNowCommands|0|-",
     "c6|companionCommands|0|radio",
@@ -61,7 +62,7 @@
   "profiles": {
     "minimal": {
       "enabled": [],
-      "modules": "cli system filesystem oled debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
+      "modules": "cli system versions filesystem oled debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
     },
     "network": {
       "enabled": [
@@ -71,7 +72,7 @@
         "ENABLE_BLUETOOTH",
         "HW1_RADIO_COMPANION"
       ],
-      "modules": "cli system wifi espnow c6 mqtt bluetooth phone relay filesystem oled debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
+      "modules": "cli system versions wifi espnow c6 mqtt bluetooth phone relay filesystem oled debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
     },
     "gamepad_peripherals": {
       "enabled": [
@@ -92,7 +93,7 @@
         "ENABLE_BATTERY_MONITOR",
         "ENABLE_OLED_DISPLAY"
       ],
-      "modules": "cli system filesystem sd oled neopixel led matrix servo thermal tof imu gamepad apds gps fmradio rtc presence i2c battery debug settings sensorlog users features power liveaudio cm5 ota setpattern settingsedit"
+      "modules": "cli system versions filesystem sd oled neopixel led matrix servo thermal tof imu gamepad apds gps fmradio rtc presence i2c battery debug settings sensorlog users features power liveaudio cm5 ota setpattern settingsedit"
     },
     "ano_input": {
       "enabled": [
@@ -101,7 +102,7 @@
         "ENABLE_ANO_ENCODER",
         "ENABLE_OLED_DISPLAY"
       ],
-      "modules": "cli system filesystem oled input anoencoder i2c debug settings sensorlog users features power liveaudio cm5 ota setpattern settingsedit"
+      "modules": "cli system versions filesystem oled input anoencoder i2c debug settings sensorlog users features power liveaudio cm5 ota setpattern settingsedit"
     },
     "applications": {
       "enabled": [
@@ -117,13 +118,13 @@
         "ENABLE_MAPS",
         "ENABLE_LLM_BACKEND"
       ],
-      "modules": "cli system filesystem oled camera microphone edgeimpulse transcription note stt espsr automation debug settings sensorlog health users features image map mapsettings power liveaudio cm5 ota llm settingsedit"
+      "modules": "cli system versions filesystem oled camera microphone edgeimpulse transcription note stt espsr automation debug settings sensorlog health users features image map mapsettings power liveaudio cm5 ota llm settingsedit"
     },
     "glasses_without_bluetooth": {
       "enabled": [
         "ENABLE_G2_GLASSES"
       ],
-      "modules": "cli system filesystem oled debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
+      "modules": "cli system versions filesystem oled debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
     },
     "combined": {
       "enabled": [
@@ -163,13 +164,13 @@
         "ENABLE_WIFI",
         "HW1_RADIO_COMPANION"
       ],
-      "modules": "cli system wifi espnow c6 mqtt bluetooth phone relay filesystem sd oled neopixel led matrix servo thermal tof imu input gamepad apds gps fmradio rtc presence camera microphone edgeimpulse transcription note stt espsr i2c automation battery debug settings sensorlog health users features image map mapsettings power liveaudio cm5 ota setpattern even_g2 ring llm settingsedit"
+      "modules": "cli system versions wifi espnow c6 mqtt bluetooth phone relay filesystem sd oled neopixel led matrix servo thermal tof imu input gamepad apds gps fmradio rtc presence camera microphone edgeimpulse transcription note stt espsr i2c automation battery debug settings sensorlog health users features image map mapsettings power liveaudio cm5 ota setpattern even_g2 ring llm settingsedit"
     },
     "speaker": {
       "enabled": [
         "ENABLE_SPEAKER"
       ],
-      "modules": "cli system filesystem oled speaker debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
+      "modules": "cli system versions filesystem oled speaker debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
     }
   }
 }

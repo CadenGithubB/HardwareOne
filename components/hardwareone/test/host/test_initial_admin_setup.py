@@ -58,11 +58,14 @@ def generate() -> str:
     tail = normal[tail_start:tail_end]
     require(tail.count("createInitialAdminUser(") == 1, "normal commit tail must call shared owner")
     require("PSRAM_JSON_DOC(doc)" not in tail, "duplicate initial-admin JSON remains")
+    detect = extract_block(source, "void detectFirstTimeSetupState()")
+    require("ownerCredentialSetupPending()" in detect, "boot detection must check the owner credential")
     types = "\n".join(extract_block(header, marker) + ";" for marker in
                        ("enum FirstTimeSetupState", "enum SetupProgressStage", "enum SetupMode "))
     harness = (HERE / "initial_admin_setup_harness.cpp").read_text()
     for marker, replacement in (("// INSERT_TYPES", types),
                                 ("// INSERT_OWNER_AND_RESTORE", owner_and_restore),
+                                ("// INSERT_DETECT", detect),
                                 ("// INSERT_NORMAL_COMMIT_TAIL", tail)):
         require(harness.count(marker) == 1, f"expected exactly one marker {marker}")
         harness = harness.replace(marker, replacement)

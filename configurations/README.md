@@ -7,6 +7,13 @@ python3 tools/build_config.py build xiao-default
 python3 tools/build_config.py build xiao-openclaw
 python3 tools/build_config.py build p4-openclaw
 python3 tools/build_config.py build p4-full-debug
+python3 tools/build_config.py build p4-glasses-test
+python3 tools/build_config.py build p4-phone-pipe
+python3 tools/build_config.py build p4-phone-only
+python3 tools/build_config.py build p4-phone-no-camera-test
+python3 tools/build_config.py build p4-phone-pipe-camera-off-test
+python3 tools/build_config.py build p4-phone-pipe-heapdiag
+python3 tools/build_config.py build waveshare-p4-bringup
 python3 tools/build_config.py build xiao-mqtt
 python3 tools/build_config.py build xiao-display
 python3 tools/build_config.py build xiao-no-bluetooth
@@ -17,6 +24,14 @@ python3 tools/build_config.py build qtpy-logging-test
 python3 tools/build_config.py build qtpy-maps-test
 ```
 
+Add `--wdt-soak` to `tools/build_board.sh` (for example
+`tools/build_board.sh xiao_s3 --config xiao-no-bluetooth --wdt-soak`, or
+`python3 tools/build_config.py build p4-openclaw --wdt-soak`) for the task-watchdog
+soak image: the watchdog panics after 20 s and the main loop is subscribed
+(`config/sdkconfig.wdt_soak.defaults`). It builds in `build-config-<name>-wdt-soak/`
+(or `build-<board>-wdt-soak/`), so ordinary builds never pick it up. Bench use only.
+For the same reason, configuration names may not end in `-wdt-soak`.
+
 Source the ESP-IDF environment first, as for `tools/build_board.sh`. These
 commands use the ordinary board build path. Outputs, SDK configuration, and
 generated feature inputs live separately in `build-config-<name>/`.
@@ -25,8 +40,8 @@ compiler-resolved feature flags, image size, and remaining app-partition space.
 These commands build only; they do not flash a device.
 
 `xiao-default` uses the ordinary XIAO selection with MQTT and Bluetooth off.
-Bluetooth is disabled in both the application and SDK for the 0.99.99 release
-to leave app-partition space. This is a saved-profile choice; board and shared
+Bluetooth is disabled in both the application and SDK to leave app-partition
+space. This is a saved-profile choice; board and shared
 defaults remain available to other profiles. `xiao-mqtt`
 enables MQTT, Wi-Fi, and the MQTT settings page, and disables offline maps to
 fit the existing app partition. Both use the existing Sense assembly selection
@@ -38,7 +53,9 @@ adds the LLM feature and HTTP source. It keeps local STT, the pinned 15x5 gen2
 model, speaker labels and SDMMC enabled, with ESP-SR and onboard/CM5 LLM sources
 off. Like every P4 speech profile, both opt into `CONFIG_HEAP_USE_HOOKS` for the
 speech pipeline's internal-memory accounting (added to `p4-glasses-test` on
-2026-10-18; that profile has not been reflashed or requalified since). Runtime relay credentials and the public CA are configured on the device.
+2026-10-18; 0.99.98.5 built that profile and flashed it to the bench P4X-EYE,
+which booted to a complete setup, but its glasses qualification is still
+pending; see CHANGELOG.md). Runtime relay credentials and the public CA are configured on the device.
 Use the existing Stop → wait for transcription → review → Send interaction.
 The combined voice-to-agent path still needs hardware qualification.
 
@@ -208,8 +225,9 @@ an edit to apply it. The named configuration keeps its board; choose a new name
 when switching boards. You can also edit the JSON directly.
 
 `features` accepts editable numeric
-feature inputs. Optional `sdkconfig` accepts boolean choices listed in
-`presets/sdkconfig.defaults` (currently `CONFIG_BT_ENABLED`). Unknown names,
+feature inputs. Optional `sdkconfig` accepts the boolean choices listed in
+`presets/sdkconfig.defaults`; every `CONFIG_*=y|n` line in that file is one
+(`tools/build_config.py` and `cmake/HW1Sdkconfig.cmake` read the list from it). Unknown names,
 derived flags, pin definitions, hardware geometry and security settings are
 rejected. For example:
 

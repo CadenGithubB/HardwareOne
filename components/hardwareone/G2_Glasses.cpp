@@ -16,7 +16,7 @@
 #include <stdarg.h>
 #include <atomic>
 #include <algorithm>
-#include <new>          // std::nothrow — for LensUiJob allocation in pageSwapEnqueue
+#include <new>          // std::nothrow — every heap object here refuses on OOM, never aborts
 
 #include <BLEDevice.h>
 #include <BLEClient.h>
@@ -76,6 +76,8 @@ extern "C" {
 #include "G2_RepairCore.h"       // the one-temple repair schedule
 #include "BLE_PhonePipe.h"     // controller-level TX gate (G2 L/R + R1)
 #include "G2_Ring.h"  // g2RingInit (eager registration in initG2Client)
+#include "G2_HealthPush.h"      // stock Health panel feed (sid 0x0E)
+#include "G2_HealthPushCore.h"  // its whitelist, re-checked at the wire
 #include "G2_Page_Common.h"    // TextPager + paging ops (g2TextPagerRender)
 #include "G2_Page_Sensors.h"   // g2ShowSensorList() (per-page module)
 #include "G2_Page_Network.h"   // g2ShowNetworkMenu / g2NetworkHandleTap
@@ -5585,6 +5587,11 @@ static void g2DispatchCompleteEnvelope(G2Temple& t, const G2EnvelopeView& env,
             t.side, env.seq, env.fragIdx, env.totalFrags,
             env.sid, env.flag, (unsigned)env.payloadLen);
   g2statsRecordRx(env.sid, env.flag, env.payload, env.payloadLen);
+#if ENABLE_R1_HEALTH
+  // Echo of a Health panel snapshot (the glasses re-encode what they stored).
+  if (env.sid == hw1_g2_health_push::kSid && t.side == 'R')
+    g2HealthPushOnRx(generation, env.payload, env.payloadLen);
+#endif
   handleEnvelope(t, env, generation, lifecycleEpoch, presentationEpoch);
 }
 
@@ -12968,6 +12975,26 @@ bool g2NativeNotesWireSend(const G2NoteContext& context,const uint8_t* pb,size_t
 }
 #endif
 
+#if ENABLE_R1_HEALTH
+// Stock Health panel feed boundary (G2_HealthPush). The right temple is the
+// one the Even app writes and the only one that refreshes the panel.
+bool g2HealthRightLink(uint32_t* generation, bool* busy) {
+  const G2LinkSnapshot link = g2LinkSnapshot();
+  if (generation) *generation = link.rightReady ? link.rightGeneration : 0;
+  if (busy) {
+    *busy = g2NativeVoiceActive() || quickNoteActive();
+  }
+  return link.rightReady && link.rightGeneration != 0;
+}
+
+bool g2HealthWireSend(uint32_t generation, const uint8_t* pb, size_t len) {
+  // Last gate before the radio: only the exact whitelisted snapshot shape.
+  if (!generation || !hw1_g2_health_push::validateSnapshotPb(pb, len)) return false;
+  return sendPbFragmented(gR, allocSeq(), hw1_g2_health_push::kSid, G2_FLAG_REQUEST,
+                          pb, len, generation);
+}
+#endif
+
 // Exact manual-terminal wire ordering.  Active is published last and cleared
 // with an exact CAS; a late worker can therefore never retire a newer token.
 // Allocation/queue failures retry without releasing ordering. If the worker
@@ -13282,14 +13309,18 @@ static bool g2RendererLivenessSelfTest() {
 //
 //   Fix: the timer callback does nothing but give a binary semaphore. A
 //   dedicated `g2_hb_worker` task waits on the semaphore, does the
-//   heartbeat TX with its own ~4 KB stack (isolated from system timers),
-//   and loops. Same 5 s cadence, same logic, safer stack.
+//   heartbeat TX on its own stack (isolated from system timers; today the
+//   g2_owner task, G2_CONTROL_STACK_BYTES), and loops. Same 5 s cadence,
+//   same logic, safer stack.
 
 static SemaphoreHandle_t gBeatSem        = nullptr;
 static TaskHandle_t      gBeatTaskHandle = nullptr;
 static volatile bool     gBeatTaskStop   = false;
 static volatile bool     gBeatPending    = false;
-static constexpr uint32_t G2_CONTROL_STACK_BYTES = 6144;
+// 8 KB (was 6 KB): the P4X soaks of 2026-11-04/05 left 312 B free of 6 KB.
+// Internal RAM, not PSRAM; sizing and placement are in the resident-stacks
+// block of System_TaskUtils.h. host test: test_resident_stack_floor.py.
+static constexpr uint32_t G2_CONTROL_STACK_BYTES = 8192;
 static uint8_t            gControlStartBlocks = 0;
 
 static bool g2ManualConnectAdmissionOpen() {
@@ -16225,7 +16256,7 @@ static void g2ConversateLocalArm() {
 
 // The local session ended: log why and, if Conversate is still open and the
 // wearer did not close it, start again. Kept out of g2ConversateLocalTick and
-// off the stack: g2_owner has ~6 KB and the tick already holds a chunk
+// off the stack: g2_owner has 8 KB and the tick already holds a chunk
 // and a draft (a stack frame here overflowed it, 2026-10-01).
 static __attribute__((noinline)) void g2ConversateLocalEnded() {
   static STTSnapshot end;
@@ -17867,6 +17898,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
 
     g2NativeTerminalTick();  // all queued EXIT/ACK/voice transitions win before TX
     g2NativeNotesTick();
+    g2HealthPushTick();      // stock Health panel feed; pauses for the sessions above
 
     // Process native EXIT/ACK first, then renew only a still-live lease.
     g2ConversateTick();
@@ -18700,6 +18732,19 @@ static bool connectTemple(G2Temple& t, hw1coex::Purpose purpose) {
     return false;
   }
   if (!t.client) {
+    // One heap callbacks object per temple, reused across recreate cycles:
+    // ~BLEClient never frees the pointer, so a fresh `new` per cycle leaked.
+    // &t is stable (gL/gR are globals), so binding it once is safe. Allocated
+    // before the client so an out-of-memory refuses the connect instead of
+    // aborting, and never leaves a client without its disconnect callbacks.
+    static TempleClientCallbacks* cbL = nullptr;
+    static TempleClientCallbacks* cbR = nullptr;
+    TempleClientCallbacks*& cb = (t.side == 'L') ? cbL : cbR;
+    if (!cb) cb = new (std::nothrow) TempleClientCallbacks(&t);
+    if (!cb) {
+      DEBUG_G2F("[G2-%c] No memory for client callbacks; refusing connect", t.side);
+      return false;
+    }
     t.clientStale = false;
     DEBUG_G2F("[G2-%c] Creating new BLEClient", t.side);
     t.client = BLEDevice::createClient();
@@ -18707,13 +18752,6 @@ static bool connectTemple(G2Temple& t, hw1coex::Purpose purpose) {
       DEBUG_G2F("[G2-%c] BLEDevice::createClient() returned null", t.side);
       return false;
     }
-    // One heap callbacks object per temple, reused across recreate cycles:
-    // ~BLEClient never frees the pointer, so a fresh `new` per cycle leaked.
-    // &t is stable (gL/gR are globals), so binding it once is safe.
-    static TempleClientCallbacks* cbL = nullptr;
-    static TempleClientCallbacks* cbR = nullptr;
-    TempleClientCallbacks*& cb = (t.side == 'L') ? cbL : cbR;
-    if (!cb) cb = new TempleClientCallbacks(&t);
     t.client->setClientCallbacks(cb);
   }
   // Pause sensor polling for the whole connect + GATT-discovery window. This is
@@ -26805,7 +26843,7 @@ static bool g2SessionSubmit(void (*run)(void*), void* payload,
   gLivePageStopFlag = false;
   gLiveTextStopFlag = false;
 
-  auto* job = new G2SessionJob;
+  auto* job = new (std::nothrow) G2SessionJob;
   if (!job) {
     g2SessionSubmitDone();
     return false;
@@ -29947,7 +29985,7 @@ static const char* cmd_g2micrec(const String& argsInput) {
       return "Error: G2 mic rec: already recording — run g2micrec stop first";
     }
     FsLockGuard fsGuard("g2.mic_raw.open");
-    File* f = new File(VFS::openGuarded(path, "w", currentAuthContext(), true));
+    File* f = new (std::nothrow) File(VFS::openGuarded(path, "w", currentAuthContext(), true));
     if (!f || !*f) {
       delete f;
       xSemaphoreGive(gMicRecDrainMutex);
@@ -30110,7 +30148,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
       path = String("/sd/") + path;
     }
     FsLockGuard fsGuard("g2.mic_wav.open");
-    File* f = new File(VFS::openGuarded(path, "w", currentAuthContext(), true));
+    File* f = new (std::nothrow) File(VFS::openGuarded(path, "w", currentAuthContext(), true));
     if (!f || !*f) {
       delete f;
       free(mem);
@@ -33641,7 +33679,7 @@ bool g2ShowBmpFile(const char* path, void (*onDone)()) {
               (unsigned)ESP.getFreeHeap());
     return false;
   }
-  auto* a = new BmpViewerArgs;
+  auto* a = new (std::nothrow) BmpViewerArgs;
   if (!a) return false;
   a->path   = strdup(path);
   a->onDone = onDone;
@@ -35877,7 +35915,7 @@ bool g2ShowKeyboardChunkTest(bool (*onDone)()) {
     return false;
   }
 
-  auto* a = new KbdAbArgs;
+  auto* a = new (std::nothrow) KbdAbArgs;
   if (!a) {
     __atomic_store_n(&gKbdAbStarting, false, __ATOMIC_RELEASE);
     return false;
@@ -36559,7 +36597,7 @@ static bool g2ShowMapPage(void (*onDone)()) {
               (unsigned)(kNeeded / 1024), (unsigned)(kLargest / 1024));
     return false;
   }
-  auto* a = new MapPageArgs;
+  auto* a = new (std::nothrow) MapPageArgs;
   if (!a) return false;
   a->onDone = onDone;
   if (!g2SessionSubmit(g2MapPageWorker, a, g2MapPageDrop, "map_page",
@@ -37070,7 +37108,7 @@ static void g2HealthPageDrop(void* p) { delete (HealthPageArgs*)p; }
 
 static bool g2ShowHealthPage(void (*onDone)()) {
   // Session worker aborts any prior job (incl. Health) before running.
-  auto* a = new HealthPageArgs;
+  auto* a = new (std::nothrow) HealthPageArgs;
   if (!a) return false;
   a->onDone = onDone;
   a->gen = ++gHealthPageGen;
@@ -37748,7 +37786,7 @@ bool g2ShowCameraViewer(void (*onDone)()) {
               (unsigned)ESP.getFreeHeap());
     return false;
   }
-  auto* a = new CameraViewerArgs;
+  auto* a = new (std::nothrow) CameraViewerArgs;
   if (!a) return false;
   a->onDone = onDone;
   if (!g2SessionSubmit(g2CameraViewerWorker, a, g2CameraViewerDrop, "cam_view",
@@ -38217,7 +38255,7 @@ bool g2ShowCameraStream(void (*onDone)()) {
               (unsigned)ESP.getFreeHeap());
     return false;
   }
-  auto* a = new CameraStreamArgs;
+  auto* a = new (std::nothrow) CameraStreamArgs;
   if (!a) return false;
   a->onDone = onDone;
   if (!g2SessionSubmit(g2CameraStreamWorker, a, g2CameraStreamDrop, "cam_stream",
@@ -38541,7 +38579,7 @@ bool g2ShowBmpFileFullScreen(const char* path, void (*onDone)()) {
               (unsigned)ESP.getFreeHeap());
     return false;
   }
-  auto* a = new BmpFullViewerArgs;
+  auto* a = new (std::nothrow) BmpFullViewerArgs;
   if (!a) return false;
   a->path   = strdup(path);
   a->onDone = onDone;
@@ -38761,7 +38799,7 @@ bool g2ShowJpgFile(const char* path, void (*onDone)()) {
               (unsigned)ESP.getFreeHeap());
     return false;
   }
-  auto* a = new JpgViewerArgs;
+  auto* a = new (std::nothrow) JpgViewerArgs;
   if (!a) return false;
   a->path   = strdup(path);
   a->onDone = onDone;
@@ -38883,7 +38921,7 @@ bool g2ShowJpgFileFullScreen(const char* path, void (*onDone)()) {
               (unsigned)ESP.getFreeHeap());
     return false;
   }
-  auto* a = new JpgFullViewerArgs;
+  auto* a = new (std::nothrow) JpgFullViewerArgs;
   if (!a) return false;
   a->path   = strdup(path);
   a->onDone = onDone;

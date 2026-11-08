@@ -1,4 +1,5 @@
 #include "System_STT.h"
+#include "System_MemDiag.h"
 #ifdef ESP_PLATFORM
 #include "System_Events.h"  // systemEventPost: typed system-event ring (host builds have no ring)
 #endif
@@ -19,8 +20,11 @@
 #include "System_Microphone.h"
 #include "System_Settings.h"
 #include "System_STTVocabulary.h"
+#include "System_STTRawCapture.h"
 #include "System_TaskUtils.h"
 #include "stt/stt_segmenter.h"
+#include "stt/stt_continuous_config.h"
+#include "stt/stt_auto_gain.h"
 #include "stt/quartznet_frontend.h"
 #include <ArduinoJson.h>
 #include <esp_random.h>
@@ -254,6 +258,63 @@ static void sttG2CaptureEnd() {
   g2MicReleaseCaptureContainer();
 }
 
+// ---- Onboard mic tuning for STT sessions --------------------------------------
+// The PDM channel is opened per capture, so STT sets its own tuning just before
+// it claims the mic; other consumers (wake word, recordings) keep the saved mic
+// settings. With sttautogain on (default) the gain comes from the last few
+// sessions' levels (stt/stt_auto_gain.h: it changes only when several agree)
+// and the high-pass is 120 Hz, which removed a third of the bench room's power
+// with no loss on speech. Off: STT uses the saved pdmamplify / pdmhpf, like
+// every other consumer.
+constexpr uint16_t kSttAutoHpfHz = 120;
+#if defined(MIC_BACKEND_ES7210) && MIC_BACKEND_ES7210
+[[maybe_unused]] constexpr bool kSttPdmTunable = false;  // ES7210 codec: no PDM channel to tune
+#else
+[[maybe_unused]] constexpr bool kSttPdmTunable = true;
+#endif
+static hw1::stt::AutoGainHistory gSttAutoGain;  // gSTTMux
+static uint8_t sttApplyMicTuning() {
+#if defined(MIC_BACKEND_ES7210) && MIC_BACKEND_ES7210
+  return 0;  // ES7210 codec boards: no PDM channel to tune, so no automatic gain
+#else
+  uint8_t amp;
+  uint16_t hpf;
+  if (gSettings.sttAutoGain) {
+    portENTER_CRITICAL(&gSTTMux);
+    amp = gSttAutoGain.gain();
+    portEXIT_CRITICAL(&gSTTMux);
+    hpf = kSttAutoHpfHz;
+  } else {
+    amp = static_cast<uint8_t>(gSettings.pdmAmplify);
+    hpf = static_cast<uint16_t>(gSettings.pdmHpfHz);
+  }
+  audioSetPdmTuning(amp, hpf);
+  uint8_t applied = 1;
+  audioGetPdmTuning(&applied, nullptr);
+  return applied;
+#endif
+}
+
+// ---- Per-mic speech-detector profiles ----------------------------------------
+// The onboard mic (raw PDM, or the board's codec) and the G2 glasses mic (LC3
+// over BLE after the glasses' own AGC) reach the detector very differently, so
+// each has its own levels: sttspeechfloor / sttsilencefloor / sttnoisepercentile
+// / sttdecisionpre for the onboard mic, the sttg2* four for the glasses.
+struct SttDetectorProfile {
+  bool glasses = false;
+  int speechFloor = 45, silenceFloor = 16, noisePercentile = 25, decisionPre = 0;
+};
+static SttDetectorProfile sttDetectorProfileFor(bool glasses) {
+  SttDetectorProfile p;
+  p.glasses = glasses;
+  p.speechFloor = glasses ? gSettings.sttG2SpeechFloor : gSettings.sttSpeechFloor;
+  p.silenceFloor = glasses ? gSettings.sttG2SilenceFloor : gSettings.sttSilenceFloor;
+  p.noisePercentile = glasses ? gSettings.sttG2NoisePercentile : gSettings.sttNoisePercentile;
+  p.decisionPre = glasses ? gSettings.sttG2DecisionPre : gSettings.sttDecisionPre;
+  return p;
+}
+static SttDetectorProfile gSttActiveProfile;  // gSTTMux: the profile of the running (or last) session
+
 // ---- Keep-warm (sttKeepWarm) -------------------------------------------------
 // Between runs the verified model may stay parked in gWarmSession while a
 // caller holds it warm. A session carries only the pinned, SHA-verified
@@ -449,6 +510,7 @@ static void sttWorker(void*) {
       break;
     }
     if (sttCancelled(&token)) break;
+    (void)sttApplyMicTuning();  // STT's own mic tuning, used when the channel starts
     selected = audioSetSource(source);
     if (!selected || !audioCaptureStart("stt", STT_SAMPLE_RATE)) {
       sttError(error, sizeof(error), "Could not claim microphone; close SR/mic first");
@@ -1254,6 +1316,7 @@ static void sttCaptureWorker(void* context) {
   const AudioSource previous = audioGetSource();
   AudioSource source = AUDIO_SRC_NONE;
   bool selected = false, claimed = false, g2Held = false;
+  uint8_t sessionGain = 0;  // onboard mic gain this session opened with (0: not the onboard mic)
   int16_t block[kStreamReadSamples];
   do {
     if (sttStreamCancelled(&run)) break;
@@ -1271,6 +1334,7 @@ static void sttCaptureWorker(void* context) {
       if (run.requested != AUDIO_SRC_NONE && !audioSourceAvailable(run.requested)) {
         sttStreamFail(run, "Selected microphone is unavailable"); break;
       }
+      sessionGain = sttApplyMicTuning();  // STT's own mic tuning, used when the channel starts
       selected = audioSetSource(run.requested);
       if (!selected || !audioCaptureStart("stt", STT_SAMPLE_RATE)) {
         sttStreamFail(run, "Could not claim microphone; close SR/mic first"); break;
@@ -1282,6 +1346,16 @@ static void sttCaptureWorker(void* context) {
       sttStreamFail(run, "Selected microphone changed during startup"); break;
     }
     if (source == AUDIO_SRC_G2_LEFT && !run.nativeGeneration) g2Held = sttG2CaptureBegin();
+#ifdef ESP_PLATFORM
+    {
+      portENTER_CRITICAL(&gSTTMux);
+      const bool profiledGlasses = gSttActiveProfile.glasses;
+      portEXIT_CRITICAL(&gSTTMux);
+      if (profiledGlasses != (source == AUDIO_SRC_G2_LEFT))
+        ESP_LOGW("STT", "TL detector_profile_mismatch profile=%s source=%u", profiledGlasses ? "g2" : "onboard",
+                 unsigned(source));
+    }
+#endif
     audioTrimBufferedPcm("stt", 0);
     uint32_t initialOverruns = 0;
     if (!audioCaptureOverruns("stt", &initialOverruns)) {
@@ -1302,8 +1376,32 @@ static void sttCaptureWorker(void* context) {
     gSTT.captureStartedMs = millis();
     gSTT.captureSource = static_cast<uint8_t>(source);
     portEXIT_CRITICAL(&gSTTMux);
+#ifdef ESP_PLATFORM
+    // Bench tap (`sttraw on`, admin): saves exactly what the segmenter is fed
+    // below. Off unless armed; a failure here never affects the session.
+    sttRawCaptureSessionBegin(static_cast<uint8_t>(source), STT_SAMPLE_RATE);
+#endif
+    // The session's audio starts at its first read below. Work since the zero
+    // baseline above (the bench recorder's SD open, contended by the model
+    // read) can hold this task past the PDM DMA ring (4 x 1024 frames, 256 ms):
+    // the driver then drops its oldest block before any of it was the
+    // session's. Count from here, so only loss inside the session fails it
+    // (bench 2026-11-08: 1 of 20 fast starts failed that way with sttraw on).
+    {
+      uint32_t beforeFirstRead = 0;
+      if (!audioCaptureOverruns("stt", &beforeFirstRead)) {
+        sttStreamFail(run, "Continuous capture integrity monitoring unavailable"); break;
+      }
+#ifdef ESP_PLATFORM
+      if (beforeFirstRead != initialOverruns)
+        ESP_LOGW("STT", "TL capture_preroll_overrun n=%lu (before the first read; not session loss)",
+                 (unsigned long)(beforeFirstRead - initialOverruns));
+#endif
+      initialOverruns = beforeFirstRead;
+    }
     uint32_t lastAudioMs = millis();
     const uint32_t captureStartMs = lastAudioMs;
+    hw1::stt::AutoGainMeter gainMeter;  // what this session received (onboard mic only)
     bool utteranceEnded = false;
     bool wasPaused = false;
     size_t pauseSilence = 0;  // zero samples still to feed after a pause edge
@@ -1363,6 +1461,10 @@ static void sttCaptureWorker(void* context) {
       }
       if (count) {
         lastAudioMs = millis();
+#ifdef ESP_PLATFORM
+        sttRawCapturePush(block, count);  // copy only; never blocks
+#endif
+        if (source == AUDIO_SRC_LOCAL_PDM) gainMeter.push(block, count);
         int64_t sum = 0;
         uint64_t square = 0;
         for (size_t i = 0; i < count; ++i) {
@@ -1476,6 +1578,24 @@ static void sttCaptureWorker(void* context) {
         lastAudioMs = millis();
       }
     }
+    // The session's levels go into the automatic-gain history (a change needs
+    // several sessions to agree; see stt/stt_auto_gain.h).
+    if (source == AUDIO_SRC_LOCAL_PDM && sessionGain && gSettings.sttAutoGain) {
+      const auto& g = gainMeter.stats();
+      portENTER_CRITICAL(&gSTTMux);
+      const bool heard = gSTT.snapshot.segmentsCaptured > 0;
+      const uint8_t wanted = heard ? hw1::stt::wantedAutoGain(sessionGain, g) : 0;
+      const uint8_t next = gSttAutoGain.record(sessionGain, g, heard);
+      const size_t kept = gSttAutoGain.size();
+      portEXIT_CRITICAL(&gSTTMux);
+#ifdef ESP_PLATFORM
+      ESP_LOGI("STT", "TL autogain used=%u wanted=%u next=%u history=%u loud3=%u clipped=%lu samples=%llu",
+               unsigned(sessionGain), unsigned(wanted), unsigned(next), unsigned(kept), unsigned(g.loud[2]),
+               (unsigned long)g.clipped, (unsigned long long)g.samples);
+#else
+      (void)wanted; (void)next; (void)kept;
+#endif
+    }
     // A normal stop seals and drains the final voiced tail. Cancel/error never
     // turns abandoned partial audio into a new inference request.
     if (!sttStreamCancelled(&run)) {
@@ -1516,6 +1636,9 @@ static void sttCaptureWorker(void* context) {
   if (g2Held) sttG2CaptureEnd();
   if (selected && !audioCaptureBusy())
     audioSetSource(audioSourceAvailable(previous) ? previous : AUDIO_SRC_NONE);
+#ifdef ESP_PLATFORM
+  sttRawCaptureSessionEnd();  // after the final phrase is queued; waits for the file
+#endif
   sttWipe(block, sizeof(block));
   // Publish join last: the parent may now free run.working and its own stack.
   portENTER_CRITICAL(&gSTTMux);
@@ -1845,35 +1968,21 @@ static void sttContinuousWorker(void*) {
     // Draft buffer is optional: without PSRAM for it, live mode just stays off.
     run.draftPcm = static_cast<int16_t*>(ps_alloc(kStreamSamples * sizeof(int16_t), AllocPref::RequirePSRAM, "stt.draft"));
     if (sttStreamCancelled(&run)) break;
-    hw1::stt::SegmenterConfig segmentConfig;
-    segmentConfig.adaptive = true;
-    // Close a phrase after >=4 s (was the 8 s default) plus the usual 600 ms
-    // pause, so text is finalised while the speaker is still talking and a
-    // Stop leaves only a short tail. The 15x5 transcribes at ~0.45x real time,
-    // so 4 s phrases keep up; less context at each cut is the trade-off.
-    segmentConfig.min_segment_samples = 4 * STT_SAMPLE_RATE;
-    segmentConfig.max_segment_samples = kStreamSamples;  // the 10 s phrase cap
-#if HW1_STT_SHORT_CLOSE
-    // Below 4 s a phrase closes after 1 s of silence instead of waiting for
-    // the 4 s floor (a short reply gets its caption); at 4 s or more the
-    // 600 ms end wait is unchanged.
-    segmentConfig.short_close_silence_samples = STT_SAMPLE_RATE;
-#endif
-    // The G2 glasses mic's quiet level jitters (~21..60+ RMS per 10 ms frame,
-    // measured 2026-09-30), so the window minimum underestimated the room and
-    // stray blips kept restarting the 600 ms pause: phrases ran to the 20 s
-    // limit and noise opened new ones. Track the lower quartile instead, and
-    // let up to 30 ms of louder frames pass without restarting the pause.
-    segmentConfig.noise_percentile = 25;
-    segmentConfig.silence_blip_samples = 3 * hw1::stt::kSegmentAnalysisSamples;
-    // A phrase that reaches the length limit is cut at the quietest point of
-    // its last 2 s (usually between words), not mid-word at the exact limit.
-    segmentConfig.hard_cut_search_samples = 2 * STT_SAMPLE_RATE;
-    if (run.singleUtterance) {
-      segmentConfig.min_segment_samples = segmentConfig.min_voice_samples;
-      segmentConfig.end_silence_samples = STT_SAMPLE_RATE * 3 / 2;
-      segmentConfig.short_close_silence_samples = 0;
-    }
+    // Detector profile for the mic this session will use, resolved as the
+    // capture worker resolves it: the native glasses stream or an explicit
+    // request, otherwise the onboard mic first (the HAL's auto order).
+    const bool onGlasses = run.nativeGeneration != 0 || run.requested == AUDIO_SRC_G2_LEFT ||
+        (run.requested == AUDIO_SRC_NONE && !audioSourceAvailable(AUDIO_SRC_LOCAL_PDM) &&
+         audioSourceAvailable(AUDIO_SRC_G2_LEFT));
+    const SttDetectorProfile profile = sttDetectorProfileFor(onGlasses);
+    portENTER_CRITICAL(&gSTTMux);
+    gSttActiveProfile = profile;
+    portEXIT_CRITICAL(&gSTTMux);
+    // Settings shared with host replay (stt/stt_continuous_config.h).
+    const hw1::stt::SegmenterConfig segmentConfig = hw1::stt::continuousSegmenterConfig(
+        STT_SAMPLE_RATE, kStreamSamples, HW1_STT_SHORT_CLOSE != 0, run.singleUtterance,
+        static_cast<uint16_t>(profile.speechFloor), static_cast<uint16_t>(profile.silenceFloor),
+        static_cast<uint8_t>(profile.noisePercentile), static_cast<uint8_t>(profile.decisionPre));
     if (!run.segmenter.reset(run.working, kStreamSamples, segmentConfig)) {
       sttStreamFail(run, "Invalid continuous segmentation settings"); break;
     }
@@ -2349,7 +2458,7 @@ static void sttContinuousWorker(void*) {
         // boot (includes this phrase's inference arena and LM workspace).
         // int_free/int_min: internal RAM now and its low-water mark since
         // boot, so anything eroding the runtime's per-call internal floor (or
-        // BLE's and the 6 KB g2_owner stack's headroom) shows on every
+        // BLE's and the 8 KB g2_owner stack's headroom) shows on every
         // phrase.
         ESP_LOGI("STT", "TL seg=%lu a0=%lu a1=%lu q=%lu s=%lu m=%lu f=%lu n=%lu d=%lu sv0=%lu sv1=%lu e=%lu ok=%d lm=%d psram_min=%u"
                  " int_free=%u int_min=%u",
@@ -2462,15 +2571,27 @@ static void sttContinuousWorker(void*) {
              (unsigned long)run.feRowsComputed, (unsigned long)run.feOverruns, (unsigned long)run.feFinals,
              (unsigned long)run.feCachedFinals, (unsigned long)run.feCachedRows, (unsigned long)run.feDraftRows);
 #endif
+#if HW1_BENCH_MEMDIAG
+  memDiagCheckpoint("stt-pre-feature-stop");
+#endif
   sttFeatureStop(run);  // the capture task has joined; nothing feeds the ring
 #endif
 #if HW1_STT_SPEAKER_LABELS
+#if HW1_BENCH_MEMDIAG
+  memDiagCheckpoint("stt-pre-speaker-end");
+#endif
   sttSpeakerEnd(&backendSession);  // stop background labelling and free the speaker model before the session goes
 #endif
   // FreeRTOS self-delete does not unwind C++ locals. Close the backend (or
   // park it for the next run while a hold lasts) before publishing
   // workerActive=false, after every inference/capture user joined.
+#if HW1_BENCH_MEMDIAG
+  memDiagCheckpoint("stt-pre-warm-park");
+#endif
   sttWarmPark(backendSession);
+#if HW1_BENCH_MEMDIAG
+  memDiagCheckpoint("stt-post-warm-park");
+#endif
 #if HW1_STT_SPECULATIVE_FINAL
   sttWipe(gSpecText, sizeof(gSpecText));  // a held, never-promoted result
 #endif
@@ -2479,6 +2600,9 @@ static void sttContinuousWorker(void*) {
   for (auto& slot : run.slots) {
     if (slot.pcm) { sttWipe(slot.pcm, kStreamSamples * sizeof(int16_t)); free(slot.pcm); }
   }
+#if HW1_BENCH_MEMDIAG
+  memDiagCheckpoint("stt-post-pcm-free");
+#endif
   sttStreamTick(run);
   const bool cancelled = sttCancelled(&run.token);
   // Saving has a completion boundary here. Later cancellation can retire the
@@ -2657,6 +2781,16 @@ bool sttAnySessionActive() {
   const bool active = gSTT.snapshot.workerActive;
   portEXIT_CRITICAL(&gSTTMux);
   return active;
+}
+
+void sttDetectorProfileInUse(int* speechFloor, int* silenceFloor, int* noisePercentile, int* decisionPre) {
+  portENTER_CRITICAL(&gSTTMux);
+  const SttDetectorProfile p = gSttActiveProfile;
+  portEXIT_CRITICAL(&gSTTMux);
+  if (speechFloor) *speechFloor = p.speechFloor;
+  if (silenceFloor) *silenceFloor = p.silenceFloor;
+  if (noisePercentile) *noisePercentile = p.noisePercentile;
+  if (decisionPre) *decisionPre = p.decisionPre;
 }
 
 void sttKeepWarm(uint32_t holdMs, bool load) {
@@ -3035,6 +3169,23 @@ static const char* cmd_stt(const String& argsInput) {
     doc["source"] = snap.audioSource == AUDIO_SRC_LOCAL_PDM ? "pdm"
                      : snap.audioSource == AUDIO_SRC_G2_LEFT ? "g2" : "none";
     doc["processing"] = "raw-hal; model frontend only; saved micgain not applied";
+    {
+      uint8_t amp = 1; uint16_t hpf = 36;
+      audioGetPdmTuning(&amp, &hpf);
+      doc["pdmAmplify"] = amp;
+      doc["pdmHpfHz"] = hpf;
+      {
+        portENTER_CRITICAL(&gSTTMux);
+        const SttDetectorProfile p = gSttActiveProfile;
+        portEXIT_CRITICAL(&gSTTMux);
+        doc["detectorProfile"] = p.glasses ? "g2" : "onboard";
+        doc["speechFloor"] = p.speechFloor;
+        doc["silenceFloor"] = p.silenceFloor;
+        doc["noisePercentile"] = p.noisePercentile;
+        doc["decisionPre"] = p.decisionPre;
+      }
+      doc["autoGain"] = gSettings.sttAutoGain && kSttPdmTunable;
+    }
     doc["level"] = snap.level;
     doc["rms"] = snap.rms;
     doc["noiseRms"] = snap.noiseRms;
@@ -3201,9 +3352,59 @@ static const char* cmd_sttvocab(const String& argsInput) {
   return reply.c_str();
 }
 
+// Raw STT input recorder (System_STTRawCapture): admin only, because it saves
+// room audio to the card unencrypted. Arming is never persisted.
+// Mic-path and speech-detector tuning in effect (PDM knobs from HAL_Audio, detector
+// knobs from the "stt" settings group; a running session keeps the values it started with).
+static const char* cmd_sttdetector(const String&) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char out[384];
+  // What the next STT session opens the mic with: the automatic gain and STT's
+  // 120 Hz high-pass, or the saved pdmamplify / pdmhpf when sttautogain is off.
+  unsigned amp = static_cast<unsigned>(gSettings.pdmAmplify), hpf = static_cast<unsigned>(gSettings.pdmHpfHz);
+  unsigned kept = 0;
+  const bool autoGain = gSettings.sttAutoGain && kSttPdmTunable;
+  if (autoGain) {
+    portENTER_CRITICAL(&gSTTMux);
+    amp = gSttAutoGain.gain();
+    kept = static_cast<unsigned>(gSttAutoGain.size());
+    portEXIT_CRITICAL(&gSTTMux);
+    hpf = kSttAutoHpfHz;
+  }
+  snprintf(out, sizeof(out),
+           "{\"autoGain\":%s,\"pdmAmplify\":%u,\"pdmHpfHz\":%u,\"gainHistory\":%u,\"speechFloor\":%d,\"silenceFloor\":%d,"
+           "\"noisePercentile\":%d,\"decisionPre\":%d,\"g2\":{\"speechFloor\":%d,\"silenceFloor\":%d,"
+           "\"noisePercentile\":%d,\"decisionPre\":%d}}",
+           autoGain ? "true" : "false", amp, hpf, kept, gSettings.sttSpeechFloor, gSettings.sttSilenceFloor,
+           gSettings.sttNoisePercentile, gSettings.sttDecisionPre, gSettings.sttG2SpeechFloor, gSettings.sttG2SilenceFloor,
+           gSettings.sttG2NoisePercentile, gSettings.sttG2DecisionPre);
+  return out;
+}
+
+static const char* cmd_sttraw(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char out[256];
+  CommandArgs args(argsInput);
+  const String op = args.count() ? args.arg(0) : "status";
+  if (args.count() > 1 || (op != "status" && op != "on" && op != "off"))
+    return "Error: Usage: sttraw [status|on|off]";
+  if (op == "on" || op == "off") {
+    char reason[64];
+    if (!sttRawCaptureArm(op == "on", reason, sizeof(reason))) {
+      snprintf(out, sizeof(out), "Error: %s. Insert or remount an SD card and retry.", reason);
+      return out;
+    }
+  }
+  return sttRawCaptureStatus(out, sizeof(out));
+}
+
 const CommandEntry sttCommands[] = {
   {"sttperf", "STT pacing/profiling per segment (timings and CPU only, never text).", false, cmd_sttperf,
    "Usage: sttperf [show|clear|log on|off|stages [all|clear]]"},
+  {"sttdetector", "Show the mic-path (PDM gain, high-pass) and speech-detector (floors, percentile) tuning in effect.", false, cmd_sttdetector,
+   "Usage: sttdetector  (onboard: sttautogain, pdmamplify, pdmhpf, sttspeechfloor, sttsilencefloor, sttnoisepercentile, sttdecisionpre; glasses: sttg2speechfloor, sttg2silencefloor, sttg2noisepercentile, sttg2decisionpre)"},
+  {"sttraw", "Save the raw microphone input of continuous STT sessions to /sd/STT Raw for bench replay.", true, cmd_sttraw,
+   "Usage: sttraw [status|on|off]  (on arms the next continuous session; not kept across reboot)"},
   {"sttvocab", "Speech vocabulary: names and terms with their display spelling (STT Models/user_vocab.tsv).", false, cmd_sttvocab,
    "Usage: sttvocab [list] | add DISPLAY[|spoken] | remove <spoken> | reload  (edits need an administrator)"},
   {"stt", "Local continuous or bounded speech-to-text with private session-owned results.", false, cmd_stt,

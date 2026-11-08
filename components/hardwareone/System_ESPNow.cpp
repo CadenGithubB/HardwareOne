@@ -48,6 +48,7 @@
 #include "System_ESPNow_MeshKeys.h"  // Phase 3.1: per-mesh PBKDF2 hash + bootstrap/group key cache
 #include "System_ESPNow_Sessions.h"  // Phase 3.4: per-peer-per-mesh session state
 #include "System_ESPNow_Deadline.h"  // wrap-safe pre-warm cooldown
+#include "System_ESPNow_PairCore.h"  // discover-then-confirm request/answer state + retransmit
 #include "System_ESPNow_Sensors.h"
 #include "System_ESPNow_Tx.h"        // Single-sender TX dispatcher (Phase 1)
 #include "System_MemUtil.h"          // ps_alloc — heap copy of payload for async send
@@ -217,6 +218,11 @@ static bool gEspNowRuntimeEnabled = false;
 static std::atomic<bool> gEspNowDeinitInProgress{false};
 static uint32_t gEspNowRuntimeOpsInFlight = 0;
 static bool gEspNowRadioDeinitialized = false;  // cmd_exec lifecycle only
+// Espressif's ESP-NOW version (esp_now_get_version) read at the last successful
+// init, for `versions`; 0 until then. On a P4 the call is one bridge RPC to the
+// companion; its identity cache (radioHalIdentity) is read before ESP-NOW starts
+// and so cannot carry this number.
+static std::atomic<uint32_t> gEspNowStackVersion{0};
 
 class EspNowRuntimeOpGuard {
  public:
@@ -5873,11 +5879,16 @@ static void sendPairBeacon() {
 // on-screen prompt). On accept BOTH sides run cmd_espnow_pairsecure (which
 // writes each device's own authorization registry + drives KEY_EX), so the
 // human Accept is the consent that authorizes the second-side registry write.
-static const uint32_t PAIR_REQUEST_TTL_MS = 45000;  // pending request lifetime
-
-struct PendingPairReq { bool active; uint8_t mac[6]; char name[24]; uint32_t atMs; };
-static PendingPairReq gPendingPairIn  = {};   // on the target: an incoming request awaiting accept/reject
-static PendingPairReq gPendingPairOut = {};   // on the initiator: our outgoing request awaiting their answer
+// The frames are unacknowledged broadcasts, so System_ESPNow_PairCore.h owns
+// the request/answer state and its bounded retransmit (the REQUEST repeats
+// until answered within the 45 s TTL; a repeated REQUEST is re-answered, and a
+// requester already in our registry is answered ACCEPT, which repairs the half
+// pair a lost ACCEPT used to leave). gPair is touched from espnow_task (RX
+// handlers + the heartbeat sweep), cmd_exec (the commands) and the UI
+// accessors, so every call holds gPairLock; frames are sent and lines printed
+// after it is released.
+static espnowpair::State gPair = {};
+static portMUX_TYPE gPairLock = portMUX_INITIALIZER_UNLOCKED;
 
 // Send a pairing control frame (REQUEST/ACCEPT/REJECT) addressed to `dst`. Sent
 // as a BROADCAST_AUTH FF broadcast (NOT unicast): the two devices aren't ESP-NOW
@@ -5926,45 +5937,71 @@ static void runDeferredPairComplete(void* arg) {
 }
 
 // RX: incoming pair request (on the target). Gated REQ_AUTHENTICATED (same-mesh
-// HMAC) by the table; here we additionally require OUR discovery window to be
-// open (user decision: no unsolicited accept prompts). Records a single pending
-// request; a newer request replaces an older un-answered one.
+// HMAC) by the table; a new request also needs OUR discovery window open (user
+// decision: no unsolicited accept prompts). Records a single pending request; a
+// newer request replaces an older un-answered one, and a repeat of the pending
+// one is the same request (no new prompt). A repeat of a request the user
+// already answered gets that answer again, and a requester already in our
+// registry gets ACCEPT (its copy of our ACCEPT was lost) — see PairCore.
 static void v4h_pair_request(const V4RxCtx& ctx) {
   uint8_t mac[6];
   char name[24];
   if (!pairCtrlForUs(ctx, mac, name, sizeof(name))) return;   // not addressed to us / malformed
-  if (pairModeIsPaired(mac)) { sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REJECT); return; }  // already paired
-  if (!espnowPairModeActive()) {
-    sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REJECT);   // not in discovery → tell initiator to stop waiting
-    return;
+  const bool paired = pairModeIsPaired(mac);
+  const bool windowOpen = espnowPairModeActive();
+  portENTER_CRITICAL(&gPairLock);
+  const espnowpair::Reply reply = espnowpair::onRequest(gPair, mac, name, (uint32_t)millis(), paired, windowOpen);
+  portEXIT_CRITICAL(&gPairLock);
+  switch (reply) {
+    case espnowpair::Reply::Accept: sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_ACCEPT); return;
+    case espnowpair::Reply::Reject: sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REJECT); return;  // not in discovery / declined
+    case espnowpair::Reply::None:   return;   // the pending request, repeated
+    case espnowpair::Reply::Prompt: break;
   }
-  gPendingPairIn.active = true;
-  memcpy(gPendingPairIn.mac, mac, 6);
-  strncpy(gPendingPairIn.name, name, sizeof(gPendingPairIn.name) - 1);
-  gPendingPairIn.name[sizeof(gPendingPairIn.name) - 1] = '\0';
-  gPendingPairIn.atMs = (uint32_t)millis();
   char macStr[18];
   formatMacAddressBuf(mac, macStr, sizeof(macStr));
   BROADCAST_PRINTF("[PAIR] '%s' (%s) wants to pair — run 'espnowaccept' or 'espnowreject'.",
-                   gPendingPairIn.name, macStr);
-  // Stage 3/4 will fire an on-screen accept prompt here (SYSEVT_PEER_PAIR_REQUEST).
+                   name, macStr);
+  // The OLED polls espnowGetIncomingPairRequest() and opens its accept prompt.
 }
 
-// RX: the target accepted (on the initiator). Only honored if it matches OUR
-// outstanding outgoing request. We then run pairsecure to write our own registry.
+// Initiator: the target answered our request (ACCEPT/REJECT frame). Only an
+// answer matching OUR outstanding request counts, once; on accept we run
+// pairsecure to write our own registry. The job is allocated before the
+// request is consumed so an allocation failure leaves it pending for the
+// target's next copy.
+static void pairAnswerReceived(const uint8_t mac[6], espnowpair::Answer answer) {
+  portENTER_CRITICAL(&gPairLock);
+  const bool waiting = gPair.out.active && macEqual6(gPair.out.mac, mac);
+  portEXIT_CRITICAL(&gPairLock);
+  if (!waiting) return;   // repeats end here, before any allocation
+  PairCompleteJob* w = nullptr;
+  if (answer == espnowpair::Answer::Accept) {
+    w = (PairCompleteJob*)ps_alloc(sizeof(PairCompleteJob), AllocPref::PreferPSRAM, "espnow.paircomplete");
+    if (!w) return;
+  }
+  espnowpair::Request ended = {};
+  portENTER_CRITICAL(&gPairLock);
+  const bool ours = espnowpair::onAnswer(gPair, mac, answer, (uint32_t)millis(), &ended);
+  portEXIT_CRITICAL(&gPairLock);
+  if (!ours) { free(w); return; }   // repeat, or not our request
+  if (!w) {
+    BROADCAST_PRINTF("[PAIR] '%s' declined the pair request (or isn't in discovery mode).", ended.name);
+    return;
+  }
+  memcpy(w->mac, mac, 6);
+  strncpy(w->name, ended.name, sizeof(w->name) - 1);
+  w->name[sizeof(w->name) - 1] = '\0';
+  BROADCAST_PRINTF("[PAIR] '%s' accepted — completing pairing.", w->name);
+  if (!submitDeferredToCmdExec(runDeferredPairComplete, w)) free(w);
+}
+
+// RX: the target accepted (on the initiator).
 static void v4h_pair_accept(const V4RxCtx& ctx) {
   uint8_t mac[6];
   char name[24];
   if (!pairCtrlForUs(ctx, mac, name, sizeof(name))) return;
-  if (!gPendingPairOut.active || !macEqual6(gPendingPairOut.mac, mac)) return;
-  PairCompleteJob* w = (PairCompleteJob*)ps_alloc(sizeof(PairCompleteJob), AllocPref::PreferPSRAM, "espnow.paircomplete");
-  if (!w) return;
-  memcpy(w->mac, mac, 6);
-  strncpy(w->name, gPendingPairOut.name, sizeof(w->name) - 1);
-  w->name[sizeof(w->name) - 1] = '\0';
-  gPendingPairOut.active = false;
-  BROADCAST_PRINTF("[PAIR] '%s' accepted — completing pairing.", w->name);
-  if (!submitDeferredToCmdExec(runDeferredPairComplete, w)) free(w);
+  pairAnswerReceived(mac, espnowpair::Answer::Accept);
 }
 
 // RX: the target rejected / isn't in discovery mode (on the initiator).
@@ -5972,10 +6009,7 @@ static void v4h_pair_reject(const V4RxCtx& ctx) {
   uint8_t mac[6];
   char name[24];
   if (!pairCtrlForUs(ctx, mac, name, sizeof(name))) return;
-  if (!gPendingPairOut.active || !macEqual6(gPendingPairOut.mac, mac)) return;
-  BROADCAST_PRINTF("[PAIR] '%s' declined the pair request (or isn't in discovery mode).",
-                   gPendingPairOut.name);
-  gPendingPairOut.active = false;
+  pairAnswerReceived(mac, espnowpair::Answer::Reject);
 }
 
 // -------- Public read accessors for the discover-then-confirm UI (OLED/G2/web) --------
@@ -5996,15 +6030,31 @@ bool espnowGetPairCandidate(int idx, char* name, size_t nameCap, uint8_t mac[6],
 }
 // True + fills `name` if there is an incoming pair request awaiting accept/reject.
 // `mac` and `atMs` (each optional) identify that request: the sender and its
-// arrival time, which a re-sent request restarts, so a UI can tell a request it
-// already answered from a new one.
+// arrival time (kept across the initiator's retransmits; a request made again
+// after this one ended restarts it), so a UI can tell a request it already
+// answered from a new one.
 bool espnowGetIncomingPairRequest(char* name, size_t nameCap, uint8_t* mac, uint32_t* atMs) {
-  if (!gPendingPairIn.active) return false;
-  if (name && nameCap) { strncpy(name, gPendingPairIn.name, nameCap - 1); name[nameCap - 1] = '\0'; }
-  if (mac) memcpy(mac, gPendingPairIn.mac, 6);
-  if (atMs) *atMs = gPendingPairIn.atMs;
+  portENTER_CRITICAL(&gPairLock);
+  const espnowpair::Request in = gPair.in;
+  portEXIT_CRITICAL(&gPairLock);
+  if (!in.active) return false;
+  if (name && nameCap) { strncpy(name, in.name, nameCap - 1); name[nameCap - 1] = '\0'; }
+  if (mac) memcpy(mac, in.mac, 6);
+  if (atMs) *atMs = in.atMs;
   return true;
 }
+// The last outgoing pair request (waiting, or its result for 30 s), for the UI.
+EspNowPairOutcome espnowGetPairRequestOutcome(char* name, size_t nameCap) {
+  portENTER_CRITICAL(&gPairLock);
+  const espnowpair::State snapshot = gPair;
+  portEXIT_CRITICAL(&gPairLock);
+  return (EspNowPairOutcome)espnowpair::outcome(snapshot, (uint32_t)millis(), name, nameCap);
+}
+static_assert((int)ESPNOW_PAIR_OUT_WAITING == (int)espnowpair::Outcome::Waiting &&
+              (int)ESPNOW_PAIR_OUT_PAIRED == (int)espnowpair::Outcome::Paired &&
+              (int)ESPNOW_PAIR_OUT_DECLINED == (int)espnowpair::Outcome::Declined &&
+              (int)ESPNOW_PAIR_OUT_TIMED_OUT == (int)espnowpair::Outcome::TimedOut,
+              "EspNowPairOutcome mirrors espnowpair::Outcome");
 
 static const V4OpcodeEntry kV4HandlerTable[] = {
   // Phase 3.3: KEY_EX handshake. NOT REQ_PAIRED — these *establish* pairing.
@@ -10269,14 +10319,27 @@ void processMeshHeartbeats() {
     if (gEspNow) gEspNow->unpairedDeviceCount = 0;  // clear window-scoped candidates
   }
 
-  // 2c. Expire stale confirm-pairing requests so a never-answered request
-  // doesn't wedge the initiator's "waiting" state or a stale accept prompt.
-  if (gPendingPairIn.active && (uint32_t)(now - gPendingPairIn.atMs) > PAIR_REQUEST_TTL_MS) {
-    gPendingPairIn.active = false;
-  }
-  if (gPendingPairOut.active && (uint32_t)(now - gPendingPairOut.atMs) > PAIR_REQUEST_TTL_MS) {
-    BROADCAST_PRINTF("[PAIR] request to '%s' timed out (no response).", gPendingPairOut.name);
-    gPendingPairOut.active = false;
+  // 2c. Confirm-pairing control: re-send our unanswered REQUEST and the
+  // target's last answer (bounded, see PairCore), and expire stale requests so a
+  // never-answered one doesn't wedge the initiator's "waiting" state or leave a
+  // stale accept prompt. The timeout names both ways to finish the pair.
+  {
+    portENTER_CRITICAL(&gPairLock);
+    const espnowpair::Tick t = espnowpair::tick(gPair, now);
+    portEXIT_CRITICAL(&gPairLock);
+    if (t.resendRequest) sendPairCtrl(t.requestMac, ESPNOW_V4_TYPE_PAIR_REQUEST);
+    if (t.resendAnswer) {
+      sendPairCtrl(t.answerMac, t.answer == espnowpair::Answer::Accept ? ESPNOW_V4_TYPE_PAIR_ACCEPT
+                                                                       : ESPNOW_V4_TYPE_PAIR_REJECT);
+    }
+    if (t.outTimedOut) {
+      char macStr[18];
+      formatMacAddressBuf(t.timedOut.mac, macStr, sizeof(macStr));
+      BROADCAST_PRINTF("[PAIR] request to '%s' timed out (no answer). Open discovery on both and run "
+                       "'espnowpairrequest %s' again; if '%s' already lists this device as paired, "
+                       "'espnowpairsecure %s %s' here finishes the pair.",
+                       t.timedOut.name, macStr, t.timedOut.name, macStr, t.timedOut.name);
+    }
   }
 
   if (now - gLastHeartbeatSentMs >= HB_INTERVAL_MS) {
@@ -11600,6 +11663,11 @@ static bool initEspNow() {
     logSystemEvent("ESPNOW", "init FAILED — mesh unavailable: %s (heap=%uB)", reason, (unsigned)heapNow);
     return false;
   }
+  {
+    uint32_t stackVersion = 0;
+    gEspNowStackVersion.store(esp_now_get_version(&stackVersion) == ESP_OK ? stackVersion : 0,
+                              std::memory_order_relaxed);
+  }
   gEspNowRadioDeinitialized = false;
   radioGuard.release();
 
@@ -12133,6 +12201,10 @@ bool espnowShutdownPending() {
 // it clears `initialized`, so a reader mid-close never sees both false.
 bool espnowOwnsRadio() {
   return isEspNowInitialized() || espnowShutdownPending();
+}
+
+uint32_t espnowStackVersion() {
+  return gEspNowStackVersion.load(std::memory_order_relaxed);
 }
 
 // ESP-NOW deinit command
@@ -18016,12 +18088,12 @@ const char* cmd_espnow_pairrequest(const String& argsInput) {
   }
   if (name[0] == '\0') snprintf(name, sizeof(name), "peer_%02X%02X%02X", mac[3], mac[4], mac[5]);
 
+  // Pending first, so an answer to this first copy finds it; the heartbeat
+  // sweep re-sends it until answered (PairCore).
+  portENTER_CRITICAL(&gPairLock);
+  espnowpair::startRequest(gPair, mac, name, now);
+  portEXIT_CRITICAL(&gPairLock);
   sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REQUEST);
-  gPendingPairOut.active = true;
-  memcpy(gPendingPairOut.mac, mac, 6);
-  strncpy(gPendingPairOut.name, name, sizeof(gPendingPairOut.name) - 1);
-  gPendingPairOut.name[sizeof(gPendingPairOut.name) - 1] = '\0';
-  gPendingPairOut.atMs = now;
 
   if (!ensureDebugBuffer()) return "Error";
   snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
@@ -18030,13 +18102,31 @@ const char* cmd_espnow_pairrequest(const String& argsInput) {
 }
 
 // Shared arg-match for accept/reject against the single pending incoming request.
-static bool pendingInMatchesArg(const String& argsInput) {
+static bool pendingInMatchesArg(const String& argsInput, const espnowpair::Request& in) {
   CommandArgs a(argsInput);
   if (a.count() == 0) return true;  // no arg → the sole pending request
   String t = a.arg(0);
   uint8_t m[6];
-  if (parseMacAddress(t, m)) return macEqual6(m, gPendingPairIn.mac);
-  return t.equalsIgnoreCase(gPendingPairIn.name);
+  if (parseMacAddress(t, m)) return macEqual6(m, in.mac);
+  return t.equalsIgnoreCase(in.name);
+}
+
+// Take the pending incoming request as answered (accept/reject). Returns the
+// command's error text, or nullptr with `taken` filled. The answer is
+// remembered, so a repeat of the request gets it again (PairCore).
+static const char* takePendingIn(const String& argsInput, espnowpair::Answer answer,
+                                 const char* noneText, espnowpair::Request& taken) {
+  portENTER_CRITICAL(&gPairLock);
+  const espnowpair::Request in = gPair.in;
+  portEXIT_CRITICAL(&gPairLock);
+  if (!in.active) return noneText;
+  if (!pendingInMatchesArg(argsInput, in)) return "Error: that name/MAC doesn't match the pending request.";
+  portENTER_CRITICAL(&gPairLock);
+  // Answer the request that was matched, not a newer one that replaced it meanwhile.
+  const bool same = gPair.in.active && gPair.in.atMs == in.atMs && macEqual6(gPair.in.mac, in.mac);
+  const bool took = same && espnowpair::answerIncoming(gPair, answer, (uint32_t)millis(), &taken);
+  portEXIT_CRITICAL(&gPairLock);
+  return took ? nullptr : "Error: the pending request changed; check 'espnowpairmode status'.";
 }
 
 // Target: accept the pending incoming request. Tells the initiator, then pairs
@@ -18044,19 +18134,17 @@ static bool pendingInMatchesArg(const String& argsInput) {
 const char* cmd_espnow_accept(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized.";
-  if (!gPendingPairIn.active) return "No pending pair request. (Open discovery with 'espnowpairmode' on both.)";
-  if (!pendingInMatchesArg(argsInput)) return "Error: that name/MAC doesn't match the pending request.";
+  espnowpair::Request req = {};
+  const char* err = takePendingIn(argsInput, espnowpair::Answer::Accept,
+                                  "No pending pair request. (Open discovery with 'espnowpairmode' on both.)", req);
+  if (err) return err;
 
-  uint8_t mac[6]; memcpy(mac, gPendingPairIn.mac, 6);
-  char name[24]; strncpy(name, gPendingPairIn.name, sizeof(name) - 1); name[sizeof(name) - 1] = '\0';
-  gPendingPairIn.active = false;
-
-  sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_ACCEPT);
-  char macStr[18]; formatMacAddressBuf(mac, macStr, sizeof(macStr));
-  String pairArgs = String(macStr) + " " + name;
+  sendPairCtrl(req.mac, ESPNOW_V4_TYPE_PAIR_ACCEPT);   // re-sent by the heartbeat sweep (PairCore)
+  char macStr[18]; formatMacAddressBuf(req.mac, macStr, sizeof(macStr));
+  String pairArgs = String(macStr) + " " + req.name;
   String resCopy = cmd_espnow_pairsecure(pairArgs);  // copy: pairsecure may reuse the debug buffer
   if (!ensureDebugBuffer()) return "Error";
-  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "Accepted '%s'. %s", name, resCopy.c_str());
+  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "Accepted '%s'. %s", req.name, resCopy.c_str());
   return getDebugBuffer();
 }
 
@@ -18064,16 +18152,13 @@ const char* cmd_espnow_accept(const String& argsInput) {
 const char* cmd_espnow_reject(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized.";
-  if (!gPendingPairIn.active) return "No pending pair request.";
-  if (!pendingInMatchesArg(argsInput)) return "Error: that name/MAC doesn't match the pending request.";
-
-  uint8_t mac[6]; memcpy(mac, gPendingPairIn.mac, 6);
-  char name[24]; strncpy(name, gPendingPairIn.name, sizeof(name) - 1); name[sizeof(name) - 1] = '\0';
-  gPendingPairIn.active = false;
-  sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REJECT);
+  espnowpair::Request req = {};
+  const char* err = takePendingIn(argsInput, espnowpair::Answer::Reject, "No pending pair request.", req);
+  if (err) return err;
+  sendPairCtrl(req.mac, ESPNOW_V4_TYPE_PAIR_REJECT);
 
   if (!ensureDebugBuffer()) return "Error";
-  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "Rejected pair request from '%s'.", name);
+  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "Rejected pair request from '%s'.", req.name);
   return getDebugBuffer();
 }
 
@@ -18103,13 +18188,16 @@ const char* cmd_espnow_pairmode(const String& argsInput) {
       n = snprintf(p, GLOBAL_DEBUG_BUFFER_SIZE,
                    "Discovery off. Radio channel: %u.", (unsigned)gEspNow->channel);
     }
-    if (gPendingPairIn.active) {
+    portENTER_CRITICAL(&gPairLock);
+    const espnowpair::Request in = gPair.in, out = gPair.out;
+    portEXIT_CRITICAL(&gPairLock);
+    if (in.active) {
       n += snprintf(p + n, GLOBAL_DEBUG_BUFFER_SIZE - n,
-                    "\nIncoming request from '%s' — 'espnowaccept' or 'espnowreject'.", gPendingPairIn.name);
+                    "\nIncoming request from '%s' — 'espnowaccept' or 'espnowreject'.", in.name);
     }
-    if (gPendingPairOut.active) {
+    if (out.active) {
       n += snprintf(p + n, GLOBAL_DEBUG_BUFFER_SIZE - n,
-                    "\nWaiting on '%s' to accept our request.", gPendingPairOut.name);
+                    "\nWaiting on '%s' to accept our request.", out.name);
     }
     return p;
   }

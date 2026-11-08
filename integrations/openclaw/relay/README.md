@@ -39,7 +39,7 @@ Requires Python 3.9+ and OpenSSL/LibreSSL; no Python packages are installed.
 Copy this directory to the Studio, then run from that directory:
 
 ```sh
-python3 setup_relay.py --bind 192.168.21.143
+python3 setup_relay.py --bind 192.168.1.143
 ```
 
 Enter the existing OpenClaw gateway token at the masked prompt. Alternatively,
@@ -98,7 +98,7 @@ printf 'header = "Authorization: Bearer %s"\n' "$(cat "$relay_dir/device-token.t
     --cacert "$relay_dir/ca-cert.pem" \
     --header 'Content-Type: application/json' \
     --data '{"model":"openclaw/main","user":"hw1:00000000000000000000000000000001","stream":true,"messages":[{"role":"user","content":"Reply exactly: HW1 relay ready. Do not use any tools."}]}' \
-    https://192.168.21.143:18790/v1/chat/completions
+    https://192.168.1.143:18790/v1/chat/completions
 ```
 
 Expect SSE text deltas followed by `data: [DONE]`. Repeating this smoke test uses
@@ -112,7 +112,7 @@ Once the compatible HTTP-enabled firmware has been built and flashed:
 
 | Setting | Value |
 | --- | --- |
-| `llmhttpurl` | `https://192.168.21.143:18790/v1` |
+| `llmhttpurl` | `https://192.168.1.143:18790/v1` |
 | `llmhttpmodel` | `openclaw/main` |
 | `llmhttptoken` | Contents of the private **device-token.txt**, entered privately |
 | `llmhttpca` | Public **ca-cert.pem**, with literal `\n` escapes when using the CLI |

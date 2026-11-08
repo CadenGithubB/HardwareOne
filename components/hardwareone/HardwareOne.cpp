@@ -391,6 +391,7 @@ volatile unsigned long gWebMirrorSeq = 0;
 #include "System_RamFlush.h"
 #include "System_Settings.h"
 #include "System_Power.h"  // Shared CPU transitions, power-save policy and cooldown
+#include "System_MemDiag.h"
 Settings gSettings;
 
 String gSerialCLI = "";
@@ -1619,7 +1620,9 @@ void hardwareone_setup() {
     } else if (reason == ESP_RST_TASK_WDT || reason == ESP_RST_INT_WDT ||
                reason == ESP_RST_PANIC   || reason == ESP_RST_BROWNOUT) {
       // Keep ESP_RST_TASK_WDT. OTA-layout builds set CONFIG_ESP_TASK_WDT_PANIC
-      // (config/sdkconfig.ota.defaults), so there a TWDT trip panics and reboots
+      // (config/sdkconfig.ota.defaults), and so does the opt-in watchdog soak
+      // build (config/sdkconfig.wdt_soak.defaults, main loop subscribed), so
+      // there a TWDT trip panics and reboots
       // with this reason. The other layouts leave it unset (a trip only prints
       // and keeps running), but the TWDT hardware still arms STAGE1 =
       // RESET_SYSTEM at 2x the timeout. That stage is dodged only because the
@@ -1735,8 +1738,21 @@ void hardwareone_setup() {
       // re-fires on every boot after an update rather than once.
       (void)settingsRestampFirmwareVersion();
     } else {
-      // Parse/open failure: the file is left on disk; RAM runs on defaults.
-      logSystemEvent("SETTINGS", "settings.json load FAILED — running on defaults (file left on disk)");
+      bool quarantined;
+      {
+        FsLockGuard guard("settings.exists");
+        quarantined = !VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "hwone.settings_load_check"));
+      }
+      if (quarantined) {
+        // readSettingsJson moved an unparseable file aside (it logged and
+        // posted the event) and RAM holds defaults, as on a fresh device, so
+        // persist them now. Settings saves and factoryreset work from here.
+        writeSettingsJson();
+      } else {
+        // Open failure, out of memory, or a quarantine that could not rename:
+        // the file is left on disk; RAM runs on defaults.
+        logSystemEvent("SETTINGS", "settings.json load FAILED — running on defaults (file left on disk)");
+      }
     }
   } else if (filesystemReady) {
     Serial.println("[Settings] No file found, writing defaults");
@@ -1944,7 +1960,7 @@ void hardwareone_setup() {
         ERROR_SYSTEMF("FATAL: Failed to create command exec queue");
         while (1) delay(1000);
       }
-    const uint32_t cmdExecStackWords = CMD_EXEC_STACK_WORDS;  // BYTES (8192 = 8 KB; the old "≈24 KB" was the 4x myth) - automation run + debug vsnprintf frames need deep stack
+    const uint32_t cmdExecStackWords = CMD_EXEC_STACK_WORDS;  // BYTES (10240 = 10 KB, internal RAM; see System_TaskUtils.h) - automation run + debug vsnprintf frames need deep stack
     // Pin to core 0 (PRO_CPU), alongside the BLE host (BTC_TASK) and web server.
     // The on-device LLM task (llm_gen) is pinned to core 1 at a higher priority; if
     // cmd_exec is left unpinned it can sit on core 1 and be preempted by a 15 s
@@ -2534,6 +2550,7 @@ void hardwareone_setup() {
   printCommandModuleSummary();
   printSettingsModuleSummary();
   printMemoryReport();
+  memDiagBootInit();  // bench builds only (HW1_BENCH_MEMDIAG)
   // Gated at the call site: both helpers read their own autostart flag internally,
   // so the overlay has to decide here rather than inside them.
   if (gSettings.sensorLogEnabled && ramFlushResolve(RF_SENSORLOG, gSettings.sensorLogAutoStart)) sensorLogAutoStart();

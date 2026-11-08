@@ -119,6 +119,36 @@ static bool validateOnly = false;
 #define ERROR_SYSTEMF(...) ((void)0)
 #define SYSEVT_POWER_MODE_CHANGED 1
 
+#if HW1_SYNC_S3_MSPI_WITH_XTAL_CLOCK
+#include <freertos/FreeRTOS.h>   // the runner's portMUX_TYPE mock
+// S3: the IDF clock HAL. S3 clocks of 40 MHz and below divide XTAL (40);
+// 80/160/240 come from the 480 MHz PLL. mspiLow models the untuned low-speed
+// MSPI mode the last sync left; a switch onto XTAL must find it set.
+struct rtc_cpu_freq_config_t { uint32_t source_freq_mhz = 0, freq_mhz = 0; };
+static bool mspiLow = false, interruptsOff = false;
+static std::vector<std::string> mspiTrace;
+static bool rtc_clk_cpu_freq_mhz_to_config(uint32_t mhz, rtc_cpu_freq_config_t* out) {
+  if (mhz == 0 || (mhz > 40 && mhz != 80 && mhz != 160 && mhz != 240)) return false;
+  *out = {mhz > 40 ? 480u : 40u, mhz};
+  return true;
+}
+static void rtc_clk_cpu_freq_get_config(rtc_cpu_freq_config_t* out) {
+  *out = {current > 40 ? 480u : 40u, current};
+}
+static void esp_clk_utils_mspi_speed_mode_sync_before_cpu_freq_switching(uint32_t src, uint32_t freq) {
+  assert(interruptsOff);
+  mspiTrace.push_back("before:" + std::to_string(src) + "/" + std::to_string(freq));
+  if (src <= 40) mspiLow = true;    // clk_utils.c: XTAL source -> low-speed mode
+}
+static void esp_clk_utils_mspi_speed_mode_sync_after_cpu_freq_switching(uint32_t src, uint32_t freq) {
+  assert(interruptsOff);
+  mspiTrace.push_back("after:" + std::to_string(src) + "/" + std::to_string(freq));
+  if (src > 40) mspiLow = false;    // clk_utils.c: PLL source -> high-speed mode
+}
+#define portENTER_CRITICAL_SAFE(mux) (assert(!interruptsOff), (void)(mux), interruptsOff = true)
+#define portEXIT_CRITICAL_SAFE(mux) (assert(interruptsOff), (void)(mux), interruptsOff = false)
+#endif
+
 // INSERT_PRODUCTION
 
 static bool setCpuFrequencyMhz(uint32_t mhz) {
@@ -130,12 +160,20 @@ static bool setCpuFrequencyMhz(uint32_t mhz) {
   }
 #endif
   ++halCalls; trace.push_back("hal:" + std::to_string(mhz));
+#if HW1_SYNC_S3_MSPI_WITH_XTAL_CLOCK
+  // Arduino's switch runs with interrupts on (APB callbacks). Landing on XTAL
+  // with the PLL-tuned MSPI is the hazard.
+  assert(!interruptsOff);
+  mspiTrace.push_back("hal:" + std::to_string(mhz));
+  if (mhz <= 40 && halResult != HalResult::Refuse) assert(mspiLow);
+#endif
   if (halCallback) halCallback();
   if (halResult == HalResult::Refuse) return false;
   if (halResult == HalResult::AcceptWithoutChange) return true;
   current = halResult == HalResult::Mismatch ? mhz - 1 : mhz;
   return halResult != HalResult::MutateThenRefuse;
 }
+
 
 static void reset() {
   assert(sCpuFrequencyMutex && sCpuFrequencyMutex->holder == 0);
@@ -338,12 +376,48 @@ static void consumerOutcomes() {
   assert(std::string(cmd_cpufreq(String(std::to_string(current)))) == "[System] CPU frequency updated");
   assert(!halCalls && battery.size() == 1 && output.size() == 1); released();
 }
+#if HW1_SYNC_S3_MSPI_WITH_XTAL_CLOCK
+// S3: every switch is bracketed by the MSPI speed-mode sync, a drop to
+// UltraSaver's 40 MHz XTAL clock enters low-speed mode before the switch, and
+// the after-sync follows the clock actually running.
+static void s3MspiOutcomes() {
+  using Steps = std::vector<std::string>;
+  reset(); mspiLow = false; mspiTrace.clear(); current = POWER_INTERACTIVE_FLOOR_MHZ;
+  assert(powerSetCpuFrequencyMhz(POWER_CPU_ULTRA_IDLE_MHZ));
+  assert(current == 40 && mspiLow && !interruptsOff);
+  assert(mspiTrace == Steps({"before:40/40", "hal:40", "after:40/40"}));
+  released();
+
+  reset(); mspiLow = true; mspiTrace.clear(); current = 40;
+  assert(powerSetCpuFrequencyMhz(POWER_CPU_PERFORMANCE_MHZ));
+  assert(current == POWER_CPU_PERFORMANCE_MHZ && !mspiLow);
+  assert(mspiTrace == Steps({"before:480/240", "hal:240", "after:480/240"}));
+  released();
+
+  // A refused drop must not leave the PLL clock in the untuned low-speed mode.
+  reset(); mspiLow = false; mspiTrace.clear(); current = POWER_INTERACTIVE_FLOOR_MHZ;
+  halResult = HalResult::Refuse;
+  assert(!powerSetCpuFrequencyMhz(40));
+  assert(current == POWER_INTERACTIVE_FLOOR_MHZ && !mspiLow);
+  assert(mspiTrace == Steps({"before:40/40", "hal:40", "after:480/80"}));
+  released();
+
+  // A clock the HAL cannot express goes straight to Arduino's refusal.
+  reset(); mspiTrace.clear(); halResult = HalResult::Refuse;
+  assert(!powerSetCpuFrequencyMhz(0)); assert(halCalls == 1);
+  assert(mspiTrace == Steps({"hal:0"}));
+  released();
+}
+#endif
 int main() {
   basicOutcomes();
 #if ENABLE_I2C_SYSTEM
   busOutcomes();
 #endif
   consumerOutcomes();
+#if HW1_SYNC_S3_MSPI_WITH_XTAL_CLOCK
+  s3MspiOutcomes();
+#endif
   reset(); displayClockRequired = true;
   bool changed = true;
   assert(!powerSetCpuFrequencyMhz(POWER_CPU_BALANCED_MHZ, &changed));

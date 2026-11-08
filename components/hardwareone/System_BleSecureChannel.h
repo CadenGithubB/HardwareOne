@@ -119,5 +119,9 @@ bool bleScBind(uint16_t connId, TransportSessionEpoch epoch, BleScBinding* out);
 bool bleScSendEncryptedBound(const BleScBinding& binding, const char* plaintext, size_t len,
                              bool blocking, bool binaryFrame = false);
 
+// The console channel's key-schedule label ("HW1-SC-v1"), for `versions`: the
+// phone app derives the same keys only with the same label.
+const char* bleScProtocolLabel();
+
 #endif // ENABLE_BLUETOOTH
 #endif // SYSTEM_BLE_SECURE_CHANNEL_H

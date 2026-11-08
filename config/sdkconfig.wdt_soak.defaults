@@ -1,0 +1,23 @@
+# HardwareOne task-watchdog soak overlay.
+#
+# Opt-in only. Layered last, after every board, layout and policy file, when a
+# build is configured with HW1_WDT_SOAK=ON; tools/build_board.sh --wdt-soak does
+# that in its own build directory (build-<board>-wdt-soak/ or
+# build-config-<name>-wdt-soak/). Ordinary builds never read this file.
+#
+# The same switch defines HW1_WDT_SOAK=1 for the app, which then subscribes the
+# main loop task to the watchdog and feeds it once per loop pass
+# (System_TaskWdt.h). The idle-task checks on both cores stay on.
+#
+# Timeout: 20 s. The longest stall seen on any bench log is the P4X-EYE main
+# loop holding core 0 for 10.8 s inside LittleFS on its first loop pass after
+# setup (KNOWN_ISSUES "LOOPHEALTH IO stall"). Feeding the main task cannot help
+# there, because it is IDLE0 that starves, so the timeout has to clear it:
+# 20 s is about twice the worst case and still catches a real hang quickly.
+# The hardware reset stage fires at twice this, 40 s.
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=20
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y

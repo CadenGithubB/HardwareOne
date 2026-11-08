@@ -2,6 +2,8 @@
 
 Date: 2026-10-30. Source of the live figures: `taskstats json` on the P4X-EYE bench device (boot #29, glasses + ring + phone connected, idle). Stack figures are bytes. Creation sites are in `components/hardwareone/` unless noted.
 
+Note (2026-11-08): the figures below are from before three stacks were raised. `cmd_exec` is now 10240, `log_out` 6144 and `g2_owner` 8192. The free figures here are the old ones.
+
 ## 1. The 33 live tasks
 
 ### Ours (14 resident)

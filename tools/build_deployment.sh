@@ -64,6 +64,21 @@ command -v idf.py >/dev/null 2>&1 || {
   echo "error: idf.py not on PATH; source the ESP-IDF export script first" >&2
   exit 1
 }
+# The vendored Arduino component must be present and carry every local patch (a
+# missing patch compiles fine and fails on hardware), and a release build must
+# come from a committed tree so BUILD_INFO's commit describes what was built.
+if [[ ! -d "$REPO/components/arduino" ]]; then
+  echo "error: components/arduino is missing; run tools/vendor_arduino.sh first" >&2
+  exit 1
+fi
+bash "$REPO/docs/arduino-local-patches/verify_patches.sh" >/dev/null || {
+  echo "error: components/arduino is missing local patches; run tools/vendor_arduino.sh --check" >&2
+  exit 1
+}
+if [[ -z "${HW1_ALLOW_DIRTY:-}" ]] && [[ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]]; then
+  echo "error: the tree has uncommitted changes; commit them or set HW1_ALLOW_DIRTY=1 for a local trial build" >&2
+  exit 1
+fi
 
 OUTPUT_ROOT="$REPO/build/deployments/$DEPLOYMENT/$BOARD"
 UPDATER_BUILD="$OUTPUT_ROOT/updater"
@@ -73,6 +88,12 @@ LOCK_DIR="$OUTPUT_ROOT/.build.lock"
 STAGING_RELEASE=""
 PREVIOUS_RELEASE=""
 PUBLISHED_RELEASE=0
+
+# Builds of one checkout share managed_components/ (and the updater's), synced
+# to the configuring target's lock: refuse while a build of another target runs
+# in this checkout (builds of the same target may share it).
+. "$REPO/tools/checkout_build_lock.sh"
+hw1_take_checkout_build_lock "$REPO" "$TARGET" "tools/build_deployment.sh $SELECTOR"
 
 mkdir -p "$OUTPUT_ROOT"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
@@ -134,7 +155,8 @@ if [[ "$OTA_LAYOUT" == "1" ]]; then
   echo "==> Auditing paired artifacts"
   python3 "$REPO/tools/ota/check_ota_builds.py" \
     --board "$BOARD" --deployment "$SELECTOR" \
-    --main-build "$MAIN_BUILD" --updater-build "$UPDATER_BUILD"
+    --main-build "$MAIN_BUILD" --updater-build "$UPDATER_BUILD" \
+    ${HW1_MIN_UPDATER_VERSION:+--min-updater "$HW1_MIN_UPDATER_VERSION"}
 else
   echo "==> Building $SELECTOR main image (factory-only deployment)"
   env IDF_TARGET="$TARGET" HW_BOARD="$BOARD" HW_DEPLOYMENT="$SELECTOR" \
@@ -162,9 +184,16 @@ if [[ "$OTA_LAYOUT" == "1" ]]; then
   BUNDLE="$STAGING_RELEASE/HardwareOne-$DEPLOYMENT-$BOARD.hw1ota"
 
   echo "==> Creating signed manifest and offline bundle"
+  # HW1_MIN_UPDATER_VERSION: set it when this release depends on a recovery
+  # updater change (see RELEASING.md); devices whose factory updater is older
+  # refuse the update. Unset keeps make_manifest.py's 1.0.0 floor.
+  if [[ -n "${HW1_MIN_UPDATER_VERSION:-}" ]]; then
+    echo "==> Manifest requires factory updater >= $HW1_MIN_UPDATER_VERSION"
+  fi
   python3 "$REPO/tools/ota/make_manifest.py" create \
     --board "$BOARD" --deployment "$SELECTOR" \
     --image "$MAIN_BIN" --key "$SIGNING_KEY" \
+    ${HW1_MIN_UPDATER_VERSION:+--min-updater "$HW1_MIN_UPDATER_VERSION"} \
     --output "$MANIFEST"
   python3 "$REPO/tools/ota/make_bundle.py" create \
     --image "$MAIN_BIN" --manifest "$MANIFEST" \

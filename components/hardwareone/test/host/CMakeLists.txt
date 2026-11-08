@@ -24,6 +24,15 @@ set_target_properties(dictation_policy_tests PROPERTIES
 target_compile_options(dictation_policy_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# STT raw-input recorder ring (stt/stt_raw_ring.h, used by
+# System_STTRawCapture): SPSC order, whole-block drops and gap records.
+add_executable(stt_raw_ring_tests test_stt_raw_ring.cpp)
+set_target_properties(stt_raw_ring_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(stt_raw_ring_tests PRIVATE ../..)
+target_link_libraries(stt_raw_ring_tests PRIVATE Threads::Threads)
+target_compile_options(stt_raw_ring_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # Long-press (hold) press/release pairing and route policy used by
 # G2_Glasses.cpp. Production dependency-free header; the firmware owns the
 # portMUX and the clock.
@@ -80,6 +89,14 @@ target_include_directories(memutil_no_psram_tests PRIVATE
 target_compile_options(memutil_no_psram_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# heap_low system event policy: one post per low episode, 60 s cooldown,
+# re-arm past the margin.
+add_executable(heap_low_core_tests test_heap_low_core.cpp)
+set_target_properties(heap_low_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(heap_low_core_tests PRIVATE ../..)
+target_compile_options(heap_low_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # The production tracker wraps this dependency-light registry with FreeRTOS
 # synchronization. Exercise the actual hash/aggregate/top-K state machine.
 add_executable(memtracker_core_tests test_memtracker_core.cpp)
@@ -87,6 +104,21 @@ set_target_properties(memtracker_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_include_directories(memtracker_core_tests PRIVATE ../..)
 target_compile_options(memtracker_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
+# ESP-NOW discover-then-confirm pairing (System_ESPNow_PairCore.h, the
+# production dependency-free header): two modelled devices over a lossy
+# broadcast channel. Bounded REQUEST retransmit, re-answered repeats, the
+# half-pair repair after a lost ACCEPT, a window closing under an open prompt,
+# timeouts, plus a source contract on the System_ESPNow.cpp / OLED call sites
+# (and the absence of a KEY_EX_HELLO-as-accept hook).
+add_executable(espnow_pair_core_tests test_espnow_pair_core.cpp)
+set_target_properties(espnow_pair_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_pair_core_tests PRIVATE ../..)
+target_compile_definitions(espnow_pair_core_tests PRIVATE
+  HW1_COMPONENT_DIR="${CMAKE_CURRENT_LIST_DIR}/../..")
+target_compile_options(espnow_pair_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
 # Projection and pan math shared by MapCore::renderMap and the G2 map page.
@@ -105,6 +137,14 @@ add_executable(g2_health_graph_core_tests test_g2_health_graph_core.cpp)
 set_target_properties(g2_health_graph_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_compile_options(g2_health_graph_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
+# Stock G2 Health panel feed (sid 0x0E): app-identical encoding, clamps,
+# strict pre-TX whitelist validator and push policy.
+add_executable(g2_health_push_core_tests test_g2_health_push_core.cpp)
+set_target_properties(g2_health_push_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(g2_health_push_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
 # Bounds-safe bit operations shared by the notification policy and OLED. The
@@ -249,11 +289,21 @@ target_include_directories(stt_lm_tool PRIVATE ../..)
 target_compile_options(stt_lm_tool PRIVATE
   -O2 -Wall -Wextra -Werror -pedantic)
 
+# Replay an `sttraw` recording through the production segmenter and its
+# continuous settings (stt/stt_continuous_config.h); see tools/stt_raw/README.md.
+add_executable(stt_raw_replay stt_raw_replay.cpp)
+set_target_properties(stt_raw_replay PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(stt_raw_replay PRIVATE ../..)
+target_compile_options(stt_raw_replay PRIVATE -O2 -Wall -Wextra -Werror -pedantic)
+
 # Sanitizers are the point of test 1: the walk-back reads backwards through the
 # buffer, and an earlier draft ran off the front. Without ASan that is invisible.
 option(HW1_SANITIZE "Build the host tests with ASan/UBSan" ON)
 if(HW1_SANITIZE)
   target_compile_options(llm_utf8_tests PRIVATE -fsanitize=address,undefined -g)
+  target_compile_options(stt_raw_ring_tests PRIVATE -fsanitize=address,undefined -g)
+  target_link_options(stt_raw_ring_tests PRIVATE -fsanitize=address,undefined)
   target_link_options(llm_utf8_tests PRIVATE -fsanitize=address,undefined)
   target_compile_options(dictation_policy_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -283,6 +333,10 @@ if(HW1_SANITIZE)
     -fsanitize=address,undefined -g)
   target_link_options(memtracker_core_tests PRIVATE
     -fsanitize=address,undefined)
+  target_compile_options(espnow_pair_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(espnow_pair_core_tests PRIVATE
+    -fsanitize=address,undefined)
   target_compile_options(map_viewport_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(map_viewport_core_tests PRIVATE
@@ -290,6 +344,10 @@ if(HW1_SANITIZE)
   target_compile_options(g2_health_graph_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(g2_health_graph_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(g2_health_push_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(g2_health_push_core_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(event_kind_mask_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -484,6 +542,15 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_page_render.py)
 # Exit 77 = source contracts passed but no JavaScript engine was found (reported as skipped).
 set_tests_properties(espnow_page_render PROPERTIES SKIP_RETURN_CODE 77)
+
+# Untrusted file names and beacon SSIDs on the shared web explorers and the
+# Settings Wi-Fi scan (README "Untrusted names on web pages").
+add_test(
+  NAME web_untrusted_names
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_untrusted_names.py)
+# Exit 77 = source contracts passed but no JavaScript engine was found (reported as skipped).
+set_tests_properties(web_untrusted_names PROPERTIES SKIP_RETURN_CODE 77)
 
 # ESP-NOW session handshake freshness (README "ESP-NOW session handshake freshness"):
 # production SESSION_OPEN/CONFIRM/REKEY handlers and initiators between two modelled
@@ -939,6 +1006,26 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_bond_json.py
           ${ESPNOW_BOND_JSON_TEST_ARGS})
+# Both ESP-NOW identity writers refuse a short write (nearly full LittleFS)
+# instead of promoting a truncated identity.json; vendored ArduinoJson.
+add_test(
+  NAME espnow_identity_writes
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_identity_writes.py
+          ${ESPNOW_BOND_JSON_TEST_ARGS})
+# `versions`: the production collector per feature selection (an item whose
+# boundary is compiled out is absent), its text/JSON forms and the matching
+# BUILD_INFO.md Versions rows from tools/gen_build_info.py.
+add_test(
+  NAME versions
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_versions.py
+          ${ESPNOW_BOND_JSON_TEST_ARGS})
+# certgen stages the HTTPS key and certificate as checked temps before renaming either.
+add_test(
+  NAME https_cert_writes
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_https_cert_writes.py)
 add_test(NAME p4eye_display_pixels COMMAND p4eye_display_pixels_tests)
 add_test(NAME p4eye_display_lifecycle COMMAND p4eye_display_lifecycle_tests)
 add_test(NAME rotary_core
@@ -961,6 +1048,35 @@ add_test(NAME xiao_peripheral_config
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_xiao_peripheral_config.py)
 add_test(NAME sdkconfig_policy
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_sdkconfig_policy.py)
+# Task-watchdog soak: ordinary configurations gain no panic,
+# the soak overlay and its wrapper wiring stay opt-in, and the real
+# System_TaskWdt.h helpers keep the 60 s command wait while feeding a
+# subscribed main loop. Built with and without HW1_WDT_SOAK.
+add_test(NAME wdt_soak_config
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_wdt_soak_config.py)
+foreach(_wdt_variant IN ITEMS soak default)
+  add_executable(task_wdt_${_wdt_variant}_tests test_task_wdt_soak.cpp)
+  set_target_properties(task_wdt_${_wdt_variant}_tests PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+  target_include_directories(task_wdt_${_wdt_variant}_tests PRIVATE task_wdt_stubs ../..)
+  target_compile_options(task_wdt_${_wdt_variant}_tests PRIVATE
+    -Wall -Wextra -Werror -pedantic)
+  add_test(NAME task_wdt_${_wdt_variant} COMMAND task_wdt_${_wdt_variant}_tests)
+endforeach()
+target_compile_definitions(task_wdt_soak_tests PRIVATE HW1_WDT_SOAK=1)
+add_test(NAME bare_idf_guard
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_bare_idf_guard.py)
+# Sequential cross-target builds of one checkout resync the shared
+# managed_components/ (a P4 build used to break the next incremental S3 build).
+add_test(NAME managed_components_stamp
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_managed_components_stamp.py)
+# The cmake running CTest need not be on PATH; without it the stamp tests skip.
+set_tests_properties(managed_components_stamp PROPERTIES
+  ENVIRONMENT "HW1_CMAKE=${CMAKE_COMMAND}")
+# The recovery-OTA pair audit builds the partition table and blank otadata it
+# reads, so the first ota0-flash in a fresh build directory works.
+add_test(NAME ota_pair_audit_depends
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_ota_pair_audit_depends.py)
 add_test(NAME command_header_boundary
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_command_header_boundary.py
     --cxx ${CMAKE_CXX_COMPILER})
@@ -1068,13 +1184,17 @@ add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
 add_test(NAME g2_hold_gesture_tests COMMAND g2_hold_gesture_tests)
+add_test(NAME stt_raw_ring_tests COMMAND stt_raw_ring_tests)
 add_test(NAME quicknote_policy_tests COMMAND quicknote_policy_tests)
 add_test(NAME mqtt_lifecycle_gate_tests COMMAND mqtt_lifecycle_gate_tests)
 add_test(NAME memutil_tests COMMAND memutil_tests)
 add_test(NAME memutil_no_psram COMMAND memutil_no_psram_tests)
 add_test(NAME memtracker_core_tests COMMAND memtracker_core_tests)
+add_test(NAME heap_low_core_tests COMMAND heap_low_core_tests)
+add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
 add_test(NAME map_viewport_core_tests COMMAND map_viewport_core_tests)
 add_test(NAME g2_health_graph_core_tests COMMAND g2_health_graph_core_tests)
+add_test(NAME g2_health_push_core_tests COMMAND g2_health_push_core_tests)
 add_test(NAME event_kind_mask_tests COMMAND event_kind_mask_tests)
 add_test(NAME command_limit_tests COMMAND command_limit_tests)
 add_test(NAME command_lookup_core_tests COMMAND command_lookup_core_tests)
@@ -1188,6 +1308,11 @@ add_test(
   NAME mqtt_lifecycle_contract
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_lifecycle_contract.py)
+# No MQTT log call prints an inbound payload or a password.
+add_test(
+  NAME mqtt_log_privacy
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_log_privacy.py)
 set(SETUP_MQTT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND SETUP_MQTT_TEST_ARGS --sanitize)
@@ -1389,7 +1514,7 @@ foreach(test_name IN ITEMS fileread_psram g2_files_psram filesystem_psram_listin
                            filemanager_directory espnow_directory checked_text_writes
                            upload_lifecycle storage_stats espnow_fs_transcript_privacy
                            image_storage image_writes capture_stitching capped_log_writes
-                           log_row_writes r1_history_store mic_wav_completion boot_temp_cleanup)
+                           log_row_writes log_overflow_latch r1_history_store mic_wav_completion boot_temp_cleanup)
   add_test(
     NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE}
@@ -1665,6 +1790,20 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_automation_log.py
           ${SETUP_MQTT_TEST_ARGS})
+# Boot automations: a false global condition frees the command copies the
+# pass made while parsing; every strdup in the production pass is counted.
+add_test(
+  NAME boot_automation_leak
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_boot_automation_leak.py
+          ${SETUP_MQTT_TEST_ARGS})
+# G2 heap objects: every `= new T` in G2_Glasses.cpp is nothrow, and the
+# Health/Map/BMP launchers refuse instead of aborting when the heap is out.
+add_test(
+  NAME g2_nothrow_alloc
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_nothrow_alloc.py
+          ${SETUP_MQTT_TEST_ARGS})
 add_test(
   NAME session_snapshot
   COMMAND ${Python3_EXECUTABLE}
@@ -1675,6 +1814,12 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_task_reporting.py
           ${SETUP_MQTT_TEST_ARGS})
+# cmd_exec, log_out and g2_owner keep >= 1.5 KB free over their
+# worst recorded use, on internal stacks, with the reporters on the same constants.
+add_test(
+  NAME resident_stack_floor
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_resident_stack_floor.py)
 # The .3 sharing milestones: log-level owner and its CLI/boot callers, the
 # system-log status/flag formatters, and the shared command-origin prefix.
 foreach(test_name IN ITEMS log_level_application system_log_status command_feed)
@@ -1775,6 +1920,22 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_stt_continuous.py --full-phrase
           ${STT_CONTINUOUS_TEST_ARGS})
+# Both variants drive real threads against 10 s waits under the sanitizer. With
+# other suites running alongside (ctest -j6, 2026-11-06), about one run in six
+# timed out at a different wait each time, so they run alone rather than flake.
+set_tests_properties(stt_continuous stt_continuous_full_phrase PROPERTIES RUN_SERIAL TRUE)
+
+# `sttraw` host replay (stt_raw_replay.cpp): production floors and continuous
+# settings, chunk-size independence, floor overrides, cuts and the sidecar checks.
+set(STT_RAW_REPLAY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND STT_RAW_REPLAY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME stt_raw_replay
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_raw_replay.py
+          ${STT_RAW_REPLAY_TEST_ARGS})
 
 # STT result privacy and the targeted BLE command result (README "STT result privacy
 # and the targeted BLE reply"): the private-STT rule, and since D1 the BLE reply is
@@ -1828,9 +1989,11 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_ble_retired_code.py
           ${BLE_RETIRED_CODE_TEST_ARGS})
 
-# Module overview text (README "Module overview text") and repository tool pins
-# (README "Repository tool pins"). Source text and Python only; nothing is compiled.
-foreach(test_name IN ITEMS module_overview_text tool_pins)
+# Module overview text (README "Module overview text"), repository tool pins
+# (README "Repository tool pins") and the command-registry drift gate (README
+# "Command-registry drift gate": `command_registry.py audit` and
+# `reference --check` both exit 0). Source text and Python only; nothing is compiled.
+foreach(test_name IN ITEMS module_overview_text tool_pins command_registry_gate)
   add_test(
     NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE}
@@ -1901,6 +2064,14 @@ foreach(test_name IN ITEMS battery_log_clear retired_feature_text)
             ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
             ${SETUP_MQTT_TEST_ARGS})
 endforeach()
+# Commands named in USERGUIDE code blocks, its debug-flag table and QUICKSTART
+# Step 4 resolve against the CommandEntry registry with the firmware's lookup
+# rule; privilege annotations match it; the QUICKSTART wizard table follows
+# kPageOrder and getWizardPageTitle. Reads sources only.
+add_test(
+  NAME public_docs_commands
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_public_docs_commands.py)
 # Code that runs beside the command executor: a validate pass on cmd_exec
 # drops only its own broadcasts, and the shared password helper answers in the
 # caller's buffer instead of the shared debug buffer.
@@ -2036,7 +2207,9 @@ add_test(
           ${SETUP_MQTT_TEST_ARGS})
 # IP ban list: checked saves that keep the previous file and the RAM ban, a
 # locked httpd lookup, whole-or-error JSON listing. Migration restore: all
-# files staged before any is replaced; backups stay within the restore limit.
+# files staged before any is replaced; backups stay within the restore limit;
+# the confirm prompt shows the staged bundle's provenance and discard frees the
+# buffer before clearing the pending flag.
 # Camera web: one frame per request, no stream loop on the httpd task.
 foreach(test_name IN ITEMS ip_ban_store migration_restore camera_web_frame_only)
   add_test(
@@ -2158,6 +2331,13 @@ add_test(NAME stt_conv_scratch COMMAND ${Python3_EXECUTABLE}
 set_tests_properties(stt_conv_scratch PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME p4_ram_monitor COMMAND ${Python3_EXECUTABLE}
   ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_ram_monitor.py)
+# P4 SDK bootstrap: registry fetch on a fresh machine and the IDF PIE-fix report
+# in prepare_sdk.sh --check, on fake trees.
+add_test(NAME p4_prepare_sdk COMMAND ${Python3_EXECUTABLE} -B
+  ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_prepare_sdk.py)
+# BUILD_INFO.md names the ESP-IDF commit, its local edits and (esp32p4) the PIE-fix state.
+add_test(NAME gen_build_info_idf COMMAND ${Python3_EXECUTABLE} -B
+  ${CMAKE_CURRENT_LIST_DIR}/test_gen_build_info_idf.py)
 
 add_test(NAME stt_internal_memory COMMAND ${Python3_EXECUTABLE}
   ${CMAKE_CURRENT_LIST_DIR}/test_stt_internal_memory.py ${PHONE_TEST_ARGS})
@@ -2212,3 +2392,8 @@ set_tests_properties(camera_video_buffers PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME camera_oled_preview
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_camera.py
           ${CAMERA_SCCB_TEST_ARGS})
+
+# The OTA protocol component keeps its own stand-alone host suite (journal and phase
+# policy, fake slot store); registering it here puts it under the same ctest gate
+# instead of a separate build nobody runs.
+add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../../hw1_ota_protocol/test/host" hw1_ota_protocol_host)

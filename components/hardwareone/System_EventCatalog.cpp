@@ -1,5 +1,6 @@
 // System_EventCatalog.cpp - immutable System Event metadata and typed provider.
 #include "System_EventCatalog.h"
+#include <cstring>
 
 #include "System_EventCatalogCore.h"
 
@@ -231,6 +232,11 @@ const char* systemEventKindName(uint8_t kind) {
 }
 
 int systemEventKindFromName(const char* name) {
+  // Compatibility alias: saved automations and notification rules written before
+  // 64713c0d still say "g2_worn"; the event is "g2_plugin_alive" now. Resolve the
+  // old name so those rules keep firing (docs/COMPATIBILITY.md: a renamed
+  // event keeps an alias).
+  if (name && strcmp(name, "g2_worn") == 0) name = "g2_plugin_alive";
   SystemEventCatalogKindInfo resolved{};
   return systemEventCatalogFindKind(name, &resolved)
              ? static_cast<int>(resolved.id)

@@ -1,4 +1,4 @@
-# Hardware One v0.99.99 - User Guide
+# Hardware One v0.99.99.1 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -26,7 +26,7 @@ This is the full reference for Hardware One. It covers every subsystem, all CLI 
 
 ## Build Configuration
 
-All feature flags live in one file: `components/hardwareone/System_BuildConfig.h`. That header is *your* configuration surface - edit it before building to enable or disable any subsystem. No other files need to change.
+Feature flags are declared, with their defaults, in `components/hardwareone/System_BuildConfig.h`. That header is *your* configuration surface for an ordinary board build - edit it before building to enable or disable any subsystem. Three other layers can override it: a board's own `boards/<board>.features.h` (the XIAO and the P4 boards have one), a deployment's `deployments/<name>/.../features.h`, and a saved configuration in `configurations/*.json` built with `tools/build_config.py build <name>`, which changes flags without editing the header (see [configurations/README.md](../configurations/README.md) and the ownership table in [CONTRIBUTING.md](../CONTRIBUTING.md)).
 
 > **The values committed in that header are incidental, not a contract.** They are
 > whatever the last working tree happened to be built with, and they change from
@@ -39,8 +39,8 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `I2C_FEATURE_LEVEL` | How much of the I2C stack is compiled: `0`=disabled, `1`=OLED only, `2`=OLED+gamepad, `3`=all sensors, `4`=custom selection via the `CUSTOM_ENABLE_*` flags below |
 | `NETWORK_FEATURE_LEVEL` | How much of the network stack is compiled: `0`=disabled, `1`=WiFi only, `2`=WiFi+HTTP, `3`=WiFi+HTTP+ESP-NOW, `4`=custom |
 | `WEB_FEATURE_LEVEL` | How much of the web UI is compiled: `0`=disabled, `1`=core UI, `2`=standard modules, `3`=all modules, `4`=custom |
-| `DISPLAY_TYPE` | Which panel driver is compiled: `0`=none, `1`=SSD1306 OLED, `2`=ST7789 TFT, `3`=ILI9341 TFT. SSD1306 is the tested path; the TFT branches exist in `HAL_Display.cpp` but ILI9341 is a placeholder and the `OLED_Mode_*` UI is SSD1306-shaped |
-| `INPUT_DEVICE_TYPE` | Which physical input controller is compiled, mutually exclusive: `0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder |
+| `DISPLAY_TYPE` | Which panel driver is compiled: `0`=none, `1`=SSD1306 OLED, `2`=generic ST7789 TFT, `3`=generic ILI9341 TFT, `4`=ST7789 240×240 LCD of the ESP32-P4X-EYE, `5`=HX8394 720×1280 DSI panel of the Waveshare ESP32-P4 Touch LCD 5. `4` and `5` are set by those boards' feature files. SSD1306 is the tested path for the other boards; `2` and `3` are example branches without board wiring, and a saved configuration that selects them is refused at compile time |
+| `INPUT_DEVICE_TYPE` | Which physical input controller is compiled, mutually exclusive: `0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder, `3`=GPIO wheel and buttons (ESP32-P4X-EYE), `4`=GT911 touch panel (Waveshare ESP32-P4 Touch LCD 5). `3` and `4` are set by those boards' feature files |
 | `ENABLE_HTTPS` | Set to `1` for TLS on the web server; certs in `/system/certs/`. Runtime toggle: `httpsEnabled` |
 | `ENABLE_MAPS` | Set to `1` to build offline maps and waypoints |
 | `ENABLE_GAMES` | Set to `1` with `ENABLE_WEB_GAME_DARKROOM=1` to build A Dark Room and its browser launcher |
@@ -51,13 +51,15 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `ENABLE_MQTT` | Set to `1` to build the Home Assistant MQTT integration |
 | `ENABLE_AUTOMATION` | Set to `1` to build scheduled tasks and conditional commands |
 | `ENABLE_CAMERA_SENSOR` | Set to `1` to build the shared camera system and the board's DVP or CSI backend |
-| `ENABLE_MICROPHONE_SENSOR` | Set to `1` to build the PDM microphone via I2S |
+| `ENABLE_MICROPHONE_SENSOR` | Set to `1` to build the board's microphone: PDM over I2S on the XIAO ESP32-S3 Sense and the ESP32-P4X-EYE, the ES7210 codec on the Waveshare ESP32-P4 Touch LCD 5 |
 | `ENABLE_BATTERY_MONITOR` | Enable the board's ADC or fuel-gauge battery backend |
 | `ENABLE_EDGE_IMPULSE` | Set to `1` to build Edge Impulse ML inference |
 | `ENABLE_BONDED_MODE` | Set to `1` to build Bonded Microcontrollers - two devices share command registries and the controller shows a Remote tab with the paired device's features |
 | `ENABLE_LLM_BACKEND` | Master switch for the LLM feature (web LLM page, OLED LLM mode, `llm*` commands, lens viewer). Set to `1` *and* turn on at least one source below; a build error tells you if you forget. |
-| `ENABLE_LLM_SOURCE_ONBOARD` | Set to `1` to build the tiny transformer that runs on this chip (ESP32-S3 + PSRAM only). Requires a model file on LittleFS or SD card. |
+| `ENABLE_LLM_SOURCE_ONBOARD` | Set to `1` to build the tiny transformer that runs on this chip (needs PSRAM). Requires a model file on LittleFS or SD card. |
 | `ENABLE_LLM_SOURCE_CM5` | Set to `1` to answer from the Raspberry Pi co-processor over the UART link. Requires a board with a `UART_LINK_PORT` (all supported boards). |
+| `ENABLE_LLM_SOURCE_HTTP` | Set to `1` to answer from an OpenClaw server at a configured HTTP(S) endpoint. Requires WiFi; no local model. |
+| `ENABLE_LOCAL_STT` | On-device speech-to-text on the ESP32-P4 boards (the engine is compiled only for that target). Needs a model file on the device at run time; `ENABLE_STT_MODEL_15X5_GEN2` selects the published 15×5 model on the microSD card. Where the file comes from and how to install it: [README, Local speech-to-text model](../README.md#local-speech-to-text-model-esp32-p4) |
 | `ENABLE_RASPBERRY_PI_HOST_POWER` | Set to `1` to build `cm5 power` - profile, reboot, halt, suspend, timed sleep of the Pi with confirmed request/ACK |
 | `ENABLE_RASPBERRY_PI_HOST_FAN` | Set to `1` to build `cm5 fan` - quiet/auto/max with temperature, PWM, RPM and health readback |
 
@@ -87,16 +89,17 @@ See [BOARD_SWITCHING.md](BOARD_SWITCHING.md) for full menuconfig tables.
 
 ### Per chip family
 
-Set by `sdkconfig.defaults.<target>`, selected automatically by `set-target`:
+Set by `config/sdkconfig.defaults.<target>`; `tools/build_board.sh` picks the
+target from the board file's `# HW_TARGET:` line:
 
-| | ESP32 (QT Py, Feather V2) | ESP32-S3 (XIAO, FeatherS3) |
-| - | ------------------------- | -------------------------- |
-| PSRAM speed | 40 MHz | 80 MHz |
-| Flash mode | `DIO` | `QIO` |
-| Bluetooth | Classic BT + BLE 4.2 | BLE 5.0 only |
-| Camera/Mic | No | Yes (S3 only) |
-| USB | UART bridge (`usbserial`) | Native USB (`usbmodem`) |
-| `set-target` | `esp32` | `esp32s3` |
+| | ESP32 (QT Py, Feather V2) | ESP32-S3 (XIAO, FeatherS3) | ESP32-P4 (P4X-EYE, Waveshare) |
+| - | ------------------------- | -------------------------- | ----------------------------- |
+| PSRAM | 40 MHz | 80 MHz | hex mode |
+| Flash mode | `DIO` | `QIO` | `DIO` |
+| Radio / Bluetooth | Classic BT + BLE 4.2 | BLE 5.0 only | none on chip: Wi-Fi, BLE and ESP-NOW through the onboard ESP32-C6 (ESP-Hosted) |
+| Camera/Mic | No | XIAO Sense | Yes (board-dependent, see below) |
+| USB console | UART bridge (`usbserial`) | Native USB (`usbmodem`) | P4X-EYE native USB; Waveshare UART bridge |
+| Target | `esp32` | `esp32s3` | `esp32p4` (needs `tools/p4/prepare_sdk.sh` once) |
 
 ### Per board
 
@@ -110,14 +113,19 @@ board properties, not chip-family properties:
 | Seeed XIAO ESP32-S3 | `xiao_s3` | `XIAO_ESP32S3` | **Octal** | 8 MB |
 | Adafruit QT Py ESP32 | `qtpy_esp32` | `adafruit_qtpy_esp32` | **Quad** | 8 MB |
 | Adafruit Feather ESP32 V2 | `feather_esp32_v2` | `adafruit_feather_esp32_v2` | **Quad** | 8 MB |
+| FeatherS3, flash-encrypted (experimental; first boot burns eFuses) | `feathers3_fe` | `um_feathers3` | **Quad** | 16 MB |
+| Espressif ESP32-P4X-EYE | `p4x_eye` | `esp32p4` | **Hex** (family file) | 16 MB |
+| Waveshare ESP32-P4 Touch LCD 5 (experimental) | `waveshare_p4_touch_lcd_5` | `esp32p4` | **Hex** (family file) | 32 MB |
 
-> **Do not infer PSRAM mode from the chip family.** The two ESP32-S3 boards above
+> **Do not infer PSRAM mode from the chip family.** The ESP32-S3 boards above
 > disagree - the XIAO is octal, the FeatherS3 is quad. A wrong mode is a *silent*
 > failure: the device boots and reports 0 KB PSRAM, and the first thing you notice
 > is the LLM, large web responses, or ESP-NOW buffers OOMing at runtime.
 
-When switching between chip families: `idf.py fullclean`, then
-`idf.py set-target <chip>`.
+Build every board with `tools/build_board.sh <board>`: each board gets its own
+`build-<board>/` directory and sdkconfig, so switching boards or chip families
+needs no `fullclean` or `set-target`. A bare `idf.py` in the repository root is
+not a supported build path (see the [Quick Start](QUICKSTART.md#3-set-your-target-board-and-flash)).
 
 ---
 
@@ -155,7 +163,7 @@ Authentication is required; `/login` and `/register` are the unauthenticated ent
 
 ## OLED Interface
 
-The OLED displays a menu system navigated with the input device - Seesaw gamepad or ANO rotary encoder, whichever `INPUT_DEVICE_TYPE` selects. On first boot the setup wizard runs here as well as on serial (see the [Quick Start](QUICKSTART.md#first-time-use)). After that it lands on the main menu.
+The OLED (or the P4 board's LCD) displays a menu system navigated with the input device that `INPUT_DEVICE_TYPE` selects - Seesaw gamepad or ANO rotary encoder, or the P4X-EYE wheel or Waveshare touch panel. On first boot the setup wizard runs here as well as on serial (see the [Quick Start](QUICKSTART.md#first-time-use)). After that it lands on the main menu.
 
 The main menu is six categories. Rows inside each are compile-gated, so a build without (say) ESP-NOW or an LLM simply shows fewer entries. The G2 lens mirrors this layout - see [G2 Lens Interface](#g2-lens-interface).
 
@@ -225,8 +233,10 @@ Trends, Heart Rate, HRV, SpO2, Temperature, Battery, Poll Now, Health Logging.
 - **Poll Now** - one composite refresh: a full daily sweep plus a correlated device-status read, under a 75-second ceiling. The status line walks `Refreshing...` -> `Refreshed`, or reports `Refresh incomplete` / `Refresh failed` / `Refresh unsupported`, so "Refreshed" means the sweep finished rather than "the requests were sent". Simply *opening* the page no longer fires a poll burst - it reads the freshness-throttled history lane instead.
 - **Health Logging** - toggles local R1 logging (`healthlogging on` / `healthlogging off`). While on, the ring is mined every `healthLoggingPollIntervalSec` seconds (default 900 = 15 min). Opening the page or **Poll Now** also logs a sample when R1 logging is active.
 
-On-demand refresh is a per-firmware capability. Only R1 firmware **2.2.9.0003**
-is admitted for it; on any other profile the row reads `Poll unsupported` (or
+On-demand refresh is a per-firmware capability. HardwareOne recognises four R1
+firmware profiles (**2.2.7.0005**, **2.2.9.0003**, **2.3.2.0007** and
+**2.3.2.0008**); on-demand refresh is admitted on 2.2.9.0003, 2.3.2.0007 and
+2.3.2.0008. On 2.2.7.0005 or an unrecognised firmware the row reads `Poll unsupported` (or
 `Passive only` on the metric readouts) and no command is sent, instead of arming
 a request whose only outcome is a timeout. The same gate applies on the web page
 (**Poll Now** renders disabled as `Poll unavailable` / `Poll unsupported`) and on
@@ -415,8 +425,7 @@ may become available between commands without changing their meaning.
 
 ```
 serialrequireauth <0|1>         - Require login on the serial console
-displayrequireauth <0|1>        - Require login on the display
-oledrequireauth <0|1>           - Require login for the OLED menu
+displayrequireauth <0|1>        - Require login on the local display, OLED menu included (super admin)
 blerequireauth [on|off]         - Require login for BLE access
 
 sessionidleserial <0-1440>      - Serial idle-logout, minutes (0 = never)
@@ -430,9 +439,60 @@ Sessions and bans are managed with `sessionlist`, `sessionrevoke`, `ban` /
 
 ### Account recovery
 
-`factoryreset` wipes user accounts and reboots into the setup wizard. It is the
-intended way back in if you lose admin credentials - device settings and files
-are not the target of the wipe, accounts are.
+`factoryreset` deletes every account, the pending account requests and each
+user's own settings, then reboots into the setup wizard; device settings and
+files stay. It is a super-admin command that must be run from a logged-in
+super-admin session, so it is **not** a way back in once the admin credentials are
+lost:
+
+- With a second administrator account: that admin signs in and runs
+  `userresetpassword <user> <pass>` (the user chooses a new password at the next
+  login), or, if that account is a super admin, `factoryreset` to start over.
+- With a single admin account and no other way in: erase the device over the
+  cable (`tools/build_board.sh <board> -p PORT erase-flash`, or erase just the LittleFS region) and
+  flash again. This removes settings and captured data as well; keep backups
+  (`backup` / Backup & Restore below) if they matter. On a recovery OTA layout
+  erase only the filesystem (`littlefs-flash`, `encrypted-littlefs-flash` on
+  `feathers3_fe`); a full erase also removes the recovery updater (see Update
+  and recovery below).
+
+**Handing a device over:** what `factoryreset` keeps includes the saved WiFi
+networks, the MQTT and LLM endpoint credentials, Bluetooth bonds other than the
+phone pipe, and the ESP-NOW identity and keys, so it does not prepare a device
+for a new owner. Before giving one away, erase the whole flash over the cable
+(`tools/build_board.sh <board> -p PORT erase-flash`) and flash it again. On a
+recovery-OTA layout this also removes the recovery updater; provision it again
+with [OTA_DEVICE_SETUP.md](OTA_DEVICE_SETUP.md).
+
+First-time setup refuses reserved owner names (`system`, `AuthBypass`, the
+bond admin) and passwords shorter than six characters, so a new device cannot
+be set up into a lockout. Compatibility and what an update keeps:
+[COMPATIBILITY.md](COMPATIBILITY.md).
+
+### Update and recovery
+
+- **Which versions a board runs**: `versions` lists the firmware version and
+  everything it must match - the recovery updater, the ESP-NOW format, the phone
+  link, the C6 companion, the STT model and the SDK it was built with
+  ([COMPATIBILITY.md](COMPATIBILITY.md)); `versions json` gives the same for tools.
+- **Cable update** works on every board: build (or download) the image for your
+  board and flash the app over USB. On ESP32-P4 boards the app is written alone
+  (`esptool write_flash 0x10000 <app>.bin`); the filesystem and your data stay.
+- **Recovery OTA layout** (`HW_OTA_LAYOUT=1`, FeatherS3, Feather ESP32 V2, QT Py
+  ESP32; the XIAO ESP32-S3 through the `pocket_assistant` deployment): a signed
+  update is staged over Bluetooth or the recovery access point, applied on
+  probation and confirmed with `otaack`; `otastatus` shows the state. Setting it
+  up is a one-time, destructive migration described in
+  [OTA_DEVICE_SETUP.md](OTA_DEVICE_SETUP.md). A layout counts as supported only
+  when the support matrix in the README lists a dated PASS for it on a current
+  image; until then it is experimental and the cable path is the supported one.
+- **Updates and full erases**: an app update keeps settings, accounts, networks
+  and automations ([COMPATIBILITY.md](COMPATIBILITY.md)). A full-erase install
+  (`erase-flash`, then flash, then the setup wizard) removes them. On a
+  recovery OTA layout the erase also removes the recovery updater and the
+  recovery credential, and the plain `flash` is refused there: install with
+  `migration-flash` (`encrypted-migration-flash` on `feathers3_fe`) and then
+  `setpin`, steps 3-4 of [OTA_DEVICE_SETUP.md](OTA_DEVICE_SETUP.md).
 
 ---
 
@@ -509,6 +569,8 @@ imports it onto another device. Requires WiFi and the HTTP server
 
 - **Export** - `/api/backup` from the web UI.
 - **Import** - `/api/restore`, or choose **Import from Backup** at first boot. In the first-boot flow the device brings up WiFi, prints its IP, and waits for you to send the `.hwbackup` from another device's migration tool; you then confirm on the OLED or serial.
+  Before the Yes/No prompt (default No) the device shows the bundle's claimed hostname and board, the bytes it received, the first 8 hex of their SHA-256, and whether the bundle's fingerprint matched this board ("this device"), did not ("other device", credentials skipped), or was missing ("no fingerprint (unverified)", credentials still restored). Compare with your file: `wc -c <file>.hwbackup` and the first 8 hex of `shasum -a 256 <file>.hwbackup`. They match only if the file was sent unchanged; a forced cross-device upload has a `force` flag added, so the device says they will not match and you check the source and board instead.
+  A bundle exported by newer firmware (`formatVersion` above 1) is refused before anything is staged; update this device's firmware first. A bundle without `formatVersion` is read as format 1. `versions` shows the format this firmware writes (`Backup bundle format`).
 
 This is the fastest way to stand up a replacement board with an existing
 device's settings, and the reason a factory reset is not a catastrophe if you
@@ -529,10 +591,9 @@ ESP-NOW V3 is Hardware One's inter-device wireless protocol. Devices pair with a
 ### Multi-hop (reaching devices out of radio range)
 Devices relay for each other, so the mesh reaches further than any single radio.
 If A can hear B and B can hear C, then A and C can talk even though they cannot
-hear each other — including the initial pairing handshake. Nothing to configure:
-each device learns the routes automatically from its neighbours (allow about a
-minute after boot), and traffic goes back to the direct link the moment two
-devices can hear each other again.
+hear each other. Nothing to configure: each device learns the routes
+automatically from its neighbours (allow about a minute after boot), and traffic
+goes back to the direct link the moment two devices can hear each other again.
 
 ```
 espnowmeshroutes                - Who this device can reach, and via whom
@@ -547,9 +608,13 @@ else is being reached through the device named in the **VIA** column. Turn
 (a battery-tight node, say) — it will still send and receive over multi-hop
 itself. Set `espnowmeshttl 1` to opt a device out of multi-hop entirely.
 
-Two things stay deliberately single-hop: **pairing**, so you can only pair with
-something you are physically near, and **file transfers**, which are too large
-to relay. Messages and remote commands relay fine, but a relayed message is
+Two things stay deliberately single-hop: **discovery and pairing requests** (the
+discover, request and accept exchange in the steps above), so discovery only finds
+devices in radio range, and **file transfers**, which are too large to relay. Key
+exchange and encrypted session setup do travel through relays, so a paired peer
+that moves out of range stays reachable, and pairing by MAC
+(`espnowpairsecure <mac> <name>`) with a device that shares the mesh passphrase
+completes through relays too. The passphrase, not distance, controls who can join. Messages and remote commands relay fine, but a relayed message is
 capped at ~130 characters per piece.
 
 ### Bonding (Master/Worker)
@@ -569,7 +634,7 @@ espnowdeviceinfo                - Show all local metadata
 Called with no argument, each of these prints the current value.
 
 ### File Transfer
-Files can be transferred between paired devices via the web UI or CLI (`espnow sendfile`). Used for syncing automations, settings, and manifests.
+Files can be transferred between paired devices via the web UI or CLI (`espnowsendfile <name_or_mac> "<filepath>"`). Used for syncing automations, settings, and manifests.
 
 ---
 
@@ -616,7 +681,7 @@ setting, regardless of which setting it was.
 | Kind | Fires when | subject / detail |
 |---|---|---|
 | `peer_online` / `peer_offline` | mesh peer heartbeat appears / times out (30s) | peer name / MAC |
-| `peer_paired` | pairing-mode auto-pair completes | peer name / MAC |
+| `peer_paired` | a peer is saved as paired (`espnowpair`, `espnowpairsecure`, or an accepted `espnowpairrequest`); pairing mode only discovers, it no longer auto-pairs | peer name / MAC |
 | `text_rx` | ESP-NOW text message received | sender / text preview |
 | `file_rx` | ESP-NOW file received | sender / filename |
 | `bond_online` / `bond_offline` | bonded peer session up / heartbeat timeout | peer name / MAC |
@@ -643,6 +708,7 @@ setting, regardless of which setting it was.
 | `sd_mounted` / `sd_unmounted` | SD card mounted / unmounted | free MB / - |
 | `sd_write_failed` | SD went unwritable (once per episode) | hint |
 | `fs_low_space` | flash below the log reserve (once per boot) | free bytes |
+| `heap_low` | internal RAM free under 25 KB or its largest block under 16 KB (once per low spell, at most once a minute) | free bytes / `largest <bytes>` |
 | `setting_changed` | a setting was saved | key / value |
 | `settings_save_failed` | settings.json write failed | stage / file |
 | `sensor_started` / `sensor_stopped` | sensor came up / stopped (includes Camera) | sensor name |
@@ -754,16 +820,18 @@ events                       - Show recent system events (for event triggers)
 
 Requires `ENABLE_MQTT=1`. Connects to a broker (e.g., Home Assistant Mosquitto) and publishes sensor data and device state.
 
-Configure via the **MQTT** tab in the web UI, or via CLI:
+Configure via the **MQTT** tab in the web UI, or via CLI (single words; there is
+no `mqtt` command with subcommands - the full list is in the
+[mqtt command section](#command-reference) below):
 ```
-mqtt broker <host>           - Set broker host/IP
-mqtt port <port>             - Set broker port (default 1883)
-mqtt user <username>         - Set MQTT username
-mqtt pass <password>         - Set MQTT password
-mqtt topic <prefix>          - Set topic prefix
-mqtt connect                 - Connect to broker
-mqtt disconnect              - Disconnect
-mqtt status                  - Show connection status
+mqttHost [hostname]          - Set broker host/IP
+mqttPort [port]              - Set broker port (default 1883)
+mqttUser [user|clear]        - Set MQTT username
+mqttPassword [pass|clear]    - Set MQTT password
+mqttBaseTopic [topic|auto]   - Set topic prefix
+openmqtt                     - Connect to broker
+closemqtt                    - Disconnect
+mqttstatus                   - Show connection status
 ```
 
 ---
@@ -848,7 +916,7 @@ g2evenai status|capabilities        - native "Hey Even" exchange and host-gate s
 
 ## LLM
 
-Requires `ENABLE_LLM_BACKEND=1` plus at least one answer source: `ENABLE_LLM_SOURCE_ONBOARD` (a tiny transformer running on this chip - ESP32-S3 with PSRAM only) and/or `ENABLE_LLM_SOURCE_CM5` (answers from the [Raspberry Pi co-processor](#raspberry-pi-co-processor-cm5) over the UART link). Every surface - web page, OLED mode, lens viewer, `llm*` commands - talks to whichever source holds the current model; models are addressed by `<source>:<name>` ids such as `onboard:model.bin` or `cm5:Qwen3-1.7B-Q4_0.gguf` (a bare filename still resolves).
+Requires `ENABLE_LLM_BACKEND=1` plus at least one answer source: `ENABLE_LLM_SOURCE_ONBOARD` (a tiny transformer running on this chip; needs PSRAM) and/or `ENABLE_LLM_SOURCE_CM5` (answers from the [Raspberry Pi co-processor](#raspberry-pi-co-processor-cm5) over the UART link). Every surface - web page, OLED mode, lens viewer, `llm*` commands - talks to whichever source holds the current model; models are addressed by `<source>:<name>` ids such as `onboard:model.bin` or `cm5:Qwen3-1.7B-Q4_0.gguf` (a bare filename still resolves).
 
 ### Model files (on-board source)
 
@@ -934,7 +1002,7 @@ Available debug modules (type `help debug` on device for full list):
 | `debugthermal` | Thermal sensor frames and events |
 | `debugtof` | Time-of-flight ranging |
 | `debugapds` | APDS gesture/proximity/colour |
-| `debuggamepad` | Gamepad button/axis events |
+| `debuginput` | Input device events (gamepad, encoder, wheel, touch) |
 | `debugpresence` | Presence sensor activity |
 | `debugstorage` | Filesystem read/write |
 | `debugcli` | Command execution flow |
@@ -980,12 +1048,13 @@ Two things about lookup that explain most surprises:
 
 ```
 status                          - Show system status (WiFi, FS, memory)
+versions                        - Firmware version and every version a separate part must match
 uptime                          - Show device uptime
 time                            - Show current time (uptime + NTP if synced)
 timeset <YYYY-MM-DD HH:MM:SS>   - Set time manually (or unix timestamp)
 reboot                          - Restart the device
 ramflush                        - Reboot to reclaim RAM, restoring the features running right now
-factoryreset                    - Wipe user accounts and reboot into the setup wizard (admin)
+factoryreset                    - Wipe user accounts and reboot into the setup wizard (super admin)
 deepsleep                       - Power off via deep sleep (no wake source - reset button to wake)
 bootcount [reset|json]          - Boot count (NVS), crash count, last reset reason
 clear                           - Clear CLI history
@@ -1024,6 +1093,14 @@ httpstatus                      - Show web server status and IP
 certinfo                        - Show HTTPS certificate details
 certgen [rsa]                   - Generate self-signed certificate (default: ECDSA P-256)
 ```
+
+Auto-reconnect (`wifiautoreconnect`) retries only the network that dropped. The
+hunt across all saved networks runs at boot, on `openwifi` and when the radio is
+switched back on, so after you carry the device to another saved network, run
+`openwifi`. To do that automatically, add an interval automation:
+`automation add name=wifihunt type=interval intervalms=300000 commands="IF WIFI=NONE THEN openwifi" enabled=1`.
+It also reopens WiFi after `closewifi`, so disable it while you want WiFi off.
+See [KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
 </details>
 
 <details>
@@ -1130,7 +1207,7 @@ mqttPublishPresence [0|1]       - Publish presence/motion
 mqttPublishGPS [0|1]            - Publish GPS location
 mqttPublishAPDS [0|1]           - Publish APDS color/proximity
 mqttPublishRTC [0|1]            - Publish RTC time
-mqttPublishGamepad [0|1]        - Publish gamepad state
+mqttPublishInput [0|1]          - Publish input device state
 mqttSubscribeTopics [topics]    - Set external subscription topics
 mqttExternalSensors             - List external sensor data received via MQTT
 ```
@@ -1202,7 +1279,6 @@ oledupdateinterval <ms>         - Display update interval (10-1000ms)
 oledbootmode <logo|status|thermal|off>   - Mode shown at boot
 oleddefaultmode <status|thermal|off>     - Mode after boot animation
 oledbootduration <ms>           - Boot animation duration (500-10000ms)
-oledrequireauth <0|1>           - Require login to use OLED menu
 oledenabled <0|1>               - Enable/disable OLED
 oledthermalscale <1.0-10.0>     - Thermal image scale on OLED
 oledthermalcolormode <3level|grayscale|binary>  - Thermal color mode on OLED
@@ -1521,10 +1597,6 @@ cameraeffect <0-6>              - Special effect
 camerasharpness <-2..2>         - Sharpness
 cameradenoise <0-8>             - Denoise level
 cameraautostart <on|off>        - Auto-start on boot
-cameraautocapture <on|off>      - Auto-capture on schedule
-cameraautocaptureinterval <sec> - Auto-capture interval
-camerasendaftercapture <on|off> - Send image via ESP-NOW after capture
-cameratargetdevice <name>       - Target device for post-capture send
 camerastoragelocation <0-2>     - Storage destination (LittleFS/SD/both)
 cameracapturefolder <path>      - Folder for captured images
 cameramaxstoredimages <0-1000>  - Max images to keep
@@ -1650,6 +1722,11 @@ vitals also on OLED **R1 Health** and Web **`/r1-health`**.
 Ring/Health CLI: `openring`, `closering`, `ring status`, `ring query hr|temp|wear`,
 `ring health [json]`, `ring poll`, `healthlogging status|interval`. A Bluetooth App can call the
 same commands over GATT (no dedicated phone UI yet).
+The glasses' own **Health** tile (stock firmware) can show the same R1 data without the Even app:
+`ring panel feed on` (admin, saved, off by default) pushes steps, active kcal, sleep score and
+duration, heart rate and SpO2 to the right temple on connect and when values change (at most once a
+minute), and keeps the ring data fresh while it runs (`ring panel history <min>`, default 30).
+`ring panel status` shows what was sent. Details: [G2_HEALTH_PANEL.md](G2_HEALTH_PANEL.md).
 3-pane list+text+image experiments: Tests -> Image -> Com2 (LZ4 multi) -> Q30*.
 </details>
 
@@ -1844,8 +1921,10 @@ servocalibrate <channel>        - Enter calibration mode for a channel
 <summary><strong>input - Gamepad / ANO encoder</strong></summary>
 
 The physical input controller is chosen at build time with `INPUT_DEVICE_TYPE`
-(`0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder). The two are mutually
-exclusive - both hang off STEMMA QT and would collide. Start/stop and
+(`0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder; the P4 boards set `3`,
+the P4X-EYE wheel and buttons, and `4`, the Waveshare GT911 touch panel, in
+their own feature files). The gamepad and the encoder are mutually exclusive -
+both hang off STEMMA QT and would collide. Start/stop and
 auto-start are device-agnostic; only the read and tuning commands are
 driver-specific.
 
@@ -1891,7 +1970,7 @@ Three independent modes: color/RGB (`apdscolor`), proximity (`apdsproximity`), g
 NMEA output parsed for lat/lon/speed/heading. Track logging to LittleFS. Offline map viewer in web UI.
 
 ### FM Radio (RDA5807)
-Tune, seek up/down, set volume, mute. `fmradio tune <MHz>` - e.g., `fmradio tune 101.5`.
+Tune, seek up/down, set volume, mute. `fmradiotune <frequency>` - e.g., `fmradiotune 101.5`.
 
 ### Even Realities G2 Glasses
 BLE client for Even G2 temples (`openg2` / hijack menus / Apps -> Health). Requires
@@ -1904,7 +1983,9 @@ temple hold on a HardwareOne page is an input of its own; QuickNote uses it
 
 ## License
 
-MIT License
+HardwareOne is licensed under the PolyForm Noncommercial License 1.0.0: you may use,
+change and share it for any noncommercial purpose. See [LICENSE.md](../LICENSE.md).
+Bundled third-party code keeps its own licence; see [NOTICE.md](../NOTICE.md).
 
 ---
 

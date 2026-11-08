@@ -722,8 +722,18 @@ successful restore moves `users.json` into place last; that a failed
 cross-device credential-setup marker fails the restore; and that the backup
 walk keeps nested paths longer than 128 bytes whole and leaves out, with a
 warning, a map that would push the bundle past the 512 KB the restore accepts.
+It also checks the confirm prompt's provenance summary (claims sanitised; a
+bundle without a fingerprint shown as unverified, never as this device), the
+size/SHA-256 advice for unforced and forced uploads, and that discard frees the
+staged buffer before clearing the pending flag. `checkBackupFormat` treats a
+bundle without `formatVersion` as format 1 and refuses a newer or
+non-whole-number one.
 A source check requires `/api/backup` to refuse an overflowed or oversized
-bundle with the limit `/api/restore` uses. Not covered: the HTTP handlers
+bundle with the limit `/api/restore` uses, to write `kBackupFormatVersion`, and
+`/api/restore` to refuse a bad format after the magic check and before the
+fingerprint check and staging. With comments removed, the refusal follows the
+check directly, frees the body first and returns, and nothing else branches on
+the check. Not covered: the HTTP handlers
 themselves, the device AES helpers, a rename failing part-way through
 promotion, and binary map content. Run with
 `ctest --test-dir build -R '^migration_restore$' --output-on-failure`.
@@ -1019,7 +1029,9 @@ builder) against a fake httpd that keeps header pointers and reads them at
 `httpd_resp_send`, with real ArduinoJson. Under `--sanitize` a header value
 that dies before the send is an ASan error (the `?id=` export disposition, the
 icon `X-Icon-Size`); the export filename keeps only `[A-Za-z0-9._-]`, at most
-48 characters. The runner parses every printed payload with Python's strict
+48 characters. An automations.json from newer firmware is not exported (single
+or bulk): a `409` naming both formats, with no attachment header. The runner
+parses every printed payload with Python's strict
 `json` module: recordings named with a backslash, comma, colon, quote or
 control character; `files/create` errors with quotes, a backslash, a newline
 and a control character (folder and file branches); a 150-character name that
@@ -1108,6 +1120,36 @@ current camera, power and edgeimpulse descriptions. Not covered: the commands'
 runtime replies and the hand-written `docs/USERGUIDE.md`. Run with
 `ctest --test-dir build -R '^retired_feature_text$' --output-on-failure` (or
 `python3 test_retired_feature_text.py`).
+
+## Public doc commands
+
+`public_docs_commands` reads `docs/USERGUIDE.md`, `docs/QUICKSTART.md` and the
+real sources (no compile). Every command line in a USERGUIDE code block must
+resolve against the `CommandEntry` registry (`tools/command_registry.py`
+`parse_commands()`, the tables `docs/COMMAND_REFERENCE.md` is generated from)
+with the firmware's case-insensitive, whole-word, longest-prefix rule from
+`System_CommandLookupCore.h`; `(admin)` / `(super admin)` annotations must match
+the registry; every flag in the USERGUIDE debug-flag table and every command in
+QUICKSTART's Step 4 must be registered; and the QUICKSTART first-boot wizard
+table must list `getWizardPageTitle` titles in `kPageOrder` order
+(`System_SetupWizard.cpp`). Indented continuation lines, `--- section ---`
+separators, `(note)` lines, automation `IF`/`NAME:`/`SCHEDULE:` syntax,
+`debug<flagname>` placeholders and the UART-only `dictate` line are skipped. Not
+covered: command names in prose elsewhere and argument syntax. Run with
+`ctest --test-dir build -R '^public_docs_commands$' --output-on-failure` (or
+`python3 test_public_docs_commands.py`).
+
+## Bare idf.py guard
+
+`bare_idf_guard` runs `cmake/HW1BoardGuard.cmake` with `cmake -P` (no ESP-IDF).
+With no `HW_BOARD` and no deployment, configure must stop with a message naming
+`tools/build_board.sh` when the sdkconfig is the tracked `config/sdkconfig`
+(left byte-for-byte unchanged) or was saved for another Arduino variant or flash
+size than the defaulted board; a fresh or matching sdkconfig and any explicit
+board pass. It also checks that the root `CMakeLists.txt` calls the guard before
+its first write to the sdkconfig. Run with
+`ctest --test-dir build -R '^bare_idf_guard$' --output-on-failure` (or
+`python3 test_bare_idf_guard.py`).
 
 ## Dead auth helpers removed
 
@@ -1457,6 +1499,29 @@ three overviews against their command rows:
 `--source-dir <dir>` points the suite at another copy of the component, and
 that repository's tool is used. The pre-fix tree fails all three overviews.
 
+## Command-registry drift gate
+
+```sh
+python3 components/hardwareone/test/host/test_command_registry_gate.py
+```
+
+`command_registry_gate` runs the two release gates of
+`tools/command_registry.py` and fails if either exits non-zero:
+
+- `audit`: no duplicate command names, no unregistered or dangling
+  `CommandEntry` arrays, no command string in code that resolves to nothing,
+  and every `SettingEntry` cmdKey binds to a command. A table defined in
+  mutually exclusive `#if`/`#else` branches of one file (the two
+  `otaCommands[]` in `System_OTA.cpp`) counts once; the first branch is read.
+- `reference --check`: `docs/COMMAND_REFERENCE.md` is byte-identical to a
+  fresh render, so a registry or module-description change must be followed by
+  `python3 tools/command_registry.py reference`.
+
+On failure the gate's own report (the audit sections, or the drift summary
+with the missing and stale command rows) is printed. `--repo <dir>` runs
+another checkout's tool against its own sources; the pre-fix tree fails both
+gates (13 audit problems; no `--check`).
+
 ## Repository tool pins
 
 ```sh
@@ -1737,12 +1802,31 @@ the `-DHW1_STT_TRIM_SILENCE=0` opt-out and checks that full phrases are kept.
 `--speakers` adds the speaker-label path; `--trim-silence` is an alias of the
 default.
 
+## STT raw-input recorder and replay
+
+These cover the `sttraw` bench tap (System_STTRawCapture; see
+`tools/stt_raw/README.md`).
+- `stt_raw_ring_tests` runs the production `stt/stt_raw_ring.h`. It checks SPSC order across
+  wrap-around, whole-block drops recorded as coalesced gaps in session samples, the gap-list
+  cap, and invalid capacities. It also runs a two-thread producer/consumer check; run it under
+  ThreadSanitizer by hand with `-fsanitize=thread`.
+- `stt_raw_replay` builds the replay CLI and checks it on synthetic noise with one
+  ordinary-level and one quiet phrase:
+  - the production floors and continuous settings come from `stt/stt_continuous_config.h`;
+  - segments are the same at any push chunk size;
+  - lowering both floors admits the quiet phrase;
+  - `--cut-dir` output is byte-exact;
+  - the sidecar rate and drop count are checked.
+The firmware tap itself (file writes, drain task) is not host-tested; the
+broker calls it only under `ESP_PLATFORM`.
+
 ## Boot temporary-file cleanup
 
 `boot_temp_cleanup` executes the production startup sweep, `VFS::DirectoryReader`
 and `FsLockGuard` with real Arduino `String`. Controlled file, semaphore and log
 boundaries cover rooted/leaf backend names, child close before removal, exact
-directory scope, LLM enabled/disabled, nested caller lock ownership, failed opens
+directory scope (`/`, `/system`, `/system/users`, `user_settings`, `/system/espnow`,
+`/system/certs`, `/maps`, and `/system/llm` when built), LLM enabled/disabled, nested caller lock ownership, failed opens
 and removals, and accurate success/failure diagnostics. Directories, virtual
 entries, `.header.tmp`, backups and out-of-scope children must survive the sweep.
 It also checks the shared `VFS::isStagingName` predicate the track pickers use
@@ -1884,11 +1968,21 @@ stopping during a read cannot restore a freed cache. Failed file writes leave
 the cached schedule intact. Threaded polling, notifications, event posts and
 start/stop exercise cache lifetime under ThreadSanitizer. Permission revoked by
 another writer stops the scheduler on its next tick; a later grant stays idle
-until the owner starts it. The actual disabled
+until the owner starts it. A newer automations.json format (`"version"` above
+`kAutomationsFileVersion`) is refused: nothing is cached or listed, the store is
+never written and keeps its text, and the add command's load
+(`loadAutomationsStoreForEdit`) refuses without seeding an empty store over it;
+no version, version 1 and a non-numeric version load as before, and a missing
+file is seeded (written only when not validating). The actual disabled
 public header is compiled independently. `automation_scheduler_contract`
 retains the main-loop integration and full-tick early-exit/source guards, plus
 the quiet in-pass reschedule writes, the unconditional main-loop tick and the
-owner transition shared with `features automation`.
+owner transition shared with `features automation`, and that every owner read
+goes through the format check and no writer spells the version as a literal.
+With comments removed, the add command loads only through
+`loadAutomationsStoreForEdit` and returns on its refusal, and the web
+Automations page and both exports read through `readAutomationsJson` and name
+a refused format.
 
 ```sh
 python3 components/hardwareone/test/host/test_automation_scheduler.py --sanitize
@@ -3237,6 +3331,20 @@ accounting, fallback/failure counters, deterministic top-K snapshots,
 full-table handling without out-of-bounds writes, updates to existing tags at
 capacity, reset epochs, and counters beyond 4 GiB.
 
+`espnow_pair_core_tests` compiles `System_ESPNow_PairCore.h` (the
+discover-then-confirm pairing state) as is and runs two modelled devices over a
+lossy broadcast channel, with glue that mirrors `System_ESPNow.cpp`. Cases: the
+happy path, a lost first PAIR_REQUEST, a lost PAIR_ACCEPT (recovered by the
+re-sent REQUEST or by the unsolicited ACCEPT copies), the initiator timing out
+with the target paired and the later re-request repairing that half pair, a
+duplicate REQUEST while pending (one prompt, same identity) and after an answer
+(same answer), the discovery window closing while the prompt is open (no
+REJECT, a late accept pairs both sides), an unrelated KEY_EX_HELLO while
+waiting (not an accept), a lost REJECT, a plain timeout on both sides, a closed
+discovery window, an initiator that sends once (older firmware), and the
+millis() wrap. A source contract pins the handler, sweep, command and OLED call
+sites and that no KEY_EX_HELLO hook answers a pair request.
+
 `raw_allocation_inventory` runs the comment/string-aware scanner over the main
 `components/hardwareone` application. The pre-migration boundary is 12 direct
 `malloc` calls plus five existing `calloc` calls. `System_MemUtil` itself,
@@ -3370,6 +3478,35 @@ ctest --test-dir /tmp/hw1-hardwareone-host \
 ```
 
 These checks do not open a browser or exchange real ESP-NOW frames.
+
+## Untrusted names on web pages
+
+`web_untrusted_names` covers the HTML sinks for file names
+and beacon SSIDs. Static source contracts run first: the shared file explorers in
+`WebServer_Utils.h` (`window.FileBrowser`, `createFileExplorer`,
+`window.BondFs.renderExplorer`) must escape names, path segments, peer labels and
+status text, and must pass paths to inline `onclick` handlers through
+`FileBrowser.jsArg` rather than between quotes; the `WebPage_Settings.h` Wi-Fi scan
+must escape the SSID; the Maps details panel must escape the map file name;
+`escHtml` must escape `&` as well (an entity such as `&quot;` in a name would
+otherwise decode into a quote inside `onclick`); the ESP-NOW remote browser
+(`web_assets/espnow-core.js` `browseRemoteFiles`, which navigates by the peer's
+folder names) must not concatenate the raw path or CLI reply into `innerHTML`. Then
+both file-browser `<script>` blocks and the Settings scan script run unmodified on
+whatever engine `tools/webui/js_engine.py` finds, against a fake `hw`/DOM: names
+and SSIDs holding `<img src=x onerror=...>`, quotes, backticks and entity
+spellings of a quote (`&quot;`, `&#34;`, `&#x22;`) must render as
+literal text, each `onclick` (entity-decoded, as a browser does) must hand the
+original path to its function, and clean names render unchanged. Without an
+engine the suite exits 77 after the contracts (skipped). `--contract-only` and
+`--source-dir <component-directory>` work as in `espnow_page_render`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^web_untrusted_names$' --output-on-failure
+```
+
+This does not open a real browser; a user-role upload of a hostile name and a
+hotspot named `<b>x</b>` remain the on-device checks.
 
 ## ESP-NOW dispatch policy
 
@@ -4319,6 +4456,32 @@ console printer of a manifest dump, runs against a modeled 64-line output queue 
 drops when full and must deliver every line. `--component`/`--source-dir`
 point it at another tree; ASan/UBSan follow `--sanitize`. The radio transfer, the
 senders' `sendFileToMac` and the web response are not run.
+
+## ESP-NOW identity and HTTPS certificate writes
+
+`espnow_identity_writes` compiles the production `writeIdentityFile` (this device's
+encrypted Ed25519 identity) and `writePeerIdentityFile` with their directory and path
+helpers and the shared `writeJsonFileComplete`, the vendored ArduinoJson and an
+in-memory filesystem whose free space can run out mid-write. A write one byte short,
+half a file, a full partition, a backend that stores less than `write()` reports, and a
+failed rename must each return false, remove the temp, never reach the rename (short
+writes) and leave the previous `identity.json` byte for byte; a write that exactly fits
+succeeds. `--source-dir <dir>` reads `System_ESPNow_Identity.cpp`/`.h` from another tree:
+the pre-fix writers (only `written == 0` rejected) fail 22 checks.
+
+`https_cert_writes` is a source contract on `cmd_certgen`: no File is opened with "w";
+both PEMs are staged as `.tmp` siblings through `writeText` in one checked condition
+before either is renamed into place (the helper's own short-write cases are in
+`checked_text_writes`), and a staging failure removes both temps. HTTPS start does not
+check that key and certificate match, so this keeps a short write from leaving a
+mismatched pair. No message claims an HTTP fallback, and the `String` copy and PSRAM
+buffer of the key PEM are wiped. `--source-dir` runs it on another tree; the pre-fix
+code fails.
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_identity_writes.py --sanitize
+python3 components/hardwareone/test/host/test_https_cert_writes.py
+```
 
 ## Camera lifecycle and backends
 
@@ -5319,3 +5482,29 @@ not physical display qualification.
 controlled RPC results: normal boot remains strict, legacy OTA requires a remote
 reply, update-only sessions are unavailable to radio users, and failed chunks
 stop the transfer. These tests do not qualify physical I2C, DSI, audio or radio.
+
+## P4 SDK bootstrap
+
+`tools/p4/test_prepare_sdk.py` (CTest `p4_prepare_sdk`) runs a
+copy of `tools/p4` in a temporary fake checkout. On an empty cache both pinned
+registry packages are reported missing; `fetch_p4_packages.py` writes a
+throwaway project pinned to exactly `espressif/esp-dl ==3.3.12` and
+`espressif/esp_hosted ==2.12.13` and runs `idf.py ... -DIDF_TARGET=esp32p4
+update-dependencies` (a stand-in registry, nothing is downloaded), after which
+the prepare scripts find the fetched trees without `--source`; staged or local
+packages fetch nothing; a registry failure names the offline `--source`
+remedy; a fetched tree off the pinned digest is refused. `check_idf_pie.py` is
+fed the before and after `portasm.S` text of the tracked b25cb29 patch:
+present, missing (with the `git apply` command), partial (q3 save without
+restore) and unknown (no RISC-V port). `prepare_sdk.sh --check` runs all four
+override checks instead of stopping at the first and always prints the PIE
+state. A configure failure after `update-dependencies` has downloaded both
+packages is not a registry failure when the trees match their pinned digests.
+
+`test_gen_build_info_idf.py` (CTest `gen_build_info_idf`) runs
+`tools/gen_build_info.py` on fake build directories: BUILD_INFO.md names the
+ESP-IDF tag and commit, lists the tracked IDF paths that differ from it (a
+locally patched 5.5.5 shows `portasm.S`), adds the PIE-fix state line for
+esp32p4 only, and reports an IDF that is not itself a git checkout as unknown
+rather than the HEAD of a repository it happens to sit in. An IDF under the
+home directory is shown as `~/...`.

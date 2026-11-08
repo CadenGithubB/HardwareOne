@@ -13,7 +13,7 @@ The findings below describe the original extension points in `154ad982`
 `codex/openclaw-integration-plan` branch is no longer the active source.
 
 The user's OpenClaw host is on a separate VLAN from the Mac mini. Keep the
-VLANs isolated. Device tests use password-protected `TestESPNetwork` on the
+VLANs isolated. Device tests use password-protected `<your-network>` on the
 OpenClaw host's VLAN and USB from the Mac mini. Do not add routing, forwarding
 or a network bridge.
 

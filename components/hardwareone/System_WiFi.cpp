@@ -50,11 +50,13 @@
 #include <time.h>
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/pk.h"
+#include "mbedtls/platform_util.h"  // mbedtls_platform_zeroize — key PEM copy
 #include "mbedtls/rsa.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/ecp.h"
 #endif
+#include "System_MemDiag.h"
 
 // External dependencies from main .ino
 extern bool wifiConnected;
@@ -1399,6 +1401,7 @@ const char* cmd_radiopower(const String& originalCmd) {
       return wifiStartFailure(!(gRadioForcedOff && gRadioPrevEspNow),
           "Error: Radio could not start. Retry or check Radio Status.");
     }
+    memDiagCheckpoint("radiopower-on");
     return "Radio on (runtime only).";
   }
   // Stop a boot connect still hunting in the background before deciding the
@@ -2622,21 +2625,44 @@ const char* cmd_certgen(const String& argsInput) {
     // /system is created at boot (fs.init.mkdirs); only ensure the certs dir.
     if (!VFS::existsGuarded("/system/certs", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"))) VFS::mkdirGuarded("/system/certs", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"));
 
-    File cf = VFS::openGuarded("/system/certs/https_server.crt", "w", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"));
-    if (!cf) {
-      snprintf(gDebugBuffer, 1024, "Error: Cannot create certificate file");
+    // Stage both files as checked temps (writeText verifies the byte count and
+    // size) before replacing either, so a full filesystem or a short write
+    // leaves the previous key and certificate in place as a matching pair.
+    // Only a failed second rename can leave a new key beside the old
+    // certificate. HTTPS start checks only that both files are non-empty and
+    // httpd_ssl_start does not check that they match, so in that case the
+    // server still starts on 443 and every TLS handshake fails (no HTTP
+    // fallback) until certgen succeeds or httpsEnabled is set to 0.
+    const AuthContext certAuth = VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen");
+    const String keyPath = "/system/certs/https_server.key";
+    const String certPath = "/system/certs/https_server.crt";
+    const String keyTmp = "/system/certs/https_server.key.tmp";
+    const String certTmp = "/system/certs/https_server.crt.tmp";
+    const size_t keyLen = strnlen((const char*)keyPem, 4096);
+    const size_t certLen = strnlen((const char*)certPem, 4096);
+    String keyText;
+    String certText;
+    const bool staged = keyText.concat((const char*)keyPem, (unsigned int)keyLen) &&
+                        certText.concat((const char*)certPem, (unsigned int)certLen) &&
+                        writeText(keyTmp.c_str(), keyText, certAuth) &&
+                        writeText(certTmp.c_str(), certText, certAuth);
+    // The String holds the private key in plain text; wipe it before it is freed.
+    if (keyText.length()) mbedtls_platform_zeroize(keyText.begin(), keyText.length());
+    if (!staged || !VFS::renameGuarded(keyTmp, keyPath, certAuth)) {
+      VFS::removeGuarded(keyTmp, certAuth);
+      VFS::removeGuarded(certTmp, certAuth);
+      snprintf(gDebugBuffer, 1024,
+               "Error: Cannot save the new key and certificate (filesystem full?); previous key and certificate kept");
       goto cleanup;
     }
-    cf.print((const char*)certPem);
-    cf.close();
-
-    File kf = VFS::openGuarded("/system/certs/https_server.key", "w", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"));
-    if (!kf) {
-      snprintf(gDebugBuffer, 1024, "Error: Cannot create key file");
+    if (!VFS::renameGuarded(certTmp, certPath, certAuth)) {
+      VFS::removeGuarded(certTmp, certAuth);
+      snprintf(gDebugBuffer, 1024,
+               "Error: New key saved but the certificate could not be moved into place, so they no longer match. "
+               "With httpsEnabled 1, HTTPS connections will fail after a reboot until certgen succeeds "
+               "(or set httpsEnabled 0).");
       goto cleanup;
     }
-    kf.print((const char*)keyPem);
-    kf.close();
   }
 
   snprintf(gDebugBuffer, 1024,
@@ -2651,6 +2677,8 @@ const char* cmd_certgen(const String& argsInput) {
 
 cleanup:
   heap_caps_free(certPem);
+  // keyPem holds the private key in plain text; wipe it before it is freed.
+  if (keyPem) mbedtls_platform_zeroize(keyPem, 4096);
   heap_caps_free(keyPem);
   mbedtls_x509write_crt_free(crt);
   mbedtls_pk_free(key);

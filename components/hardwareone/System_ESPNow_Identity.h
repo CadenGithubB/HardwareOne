@@ -169,6 +169,11 @@ const PeerIdentity* peerIdentityAt(uint8_t i);
 // silently leave this table at 16.
 uint8_t peerIdentitySlotCount();
 
+// The "version" each file kind is written with and read back as, for
+// `versions`: this device's identity.json and the per-peer identity files.
+uint8_t espnowIdentityFileVersion();
+uint8_t peerIdentityFileVersion();
+
 #endif  // ENABLE_ESPNOW
 
 #endif  // SYSTEM_ESPNOW_IDENTITY_H

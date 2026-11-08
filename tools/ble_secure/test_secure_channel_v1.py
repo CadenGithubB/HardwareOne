@@ -422,7 +422,7 @@ class CompanionBoundaryTests(unittest.TestCase):
         summary = validate_live_catalog(compact)
         self.assertEqual(
             (summary.family_count, summary.kind_count, summary.byte_count),
-            (13, 165, 3149),
+            (13, 175, 3318),
         )
         self.assertEqual(classify_catalog_reply(compact), summary)
 
@@ -572,7 +572,7 @@ class CompanionUnsolicitedFlowTests(VectorFixture, unittest.IsolatedAsyncioTestC
         )
         self.assertEqual(
             (summary.family_count, summary.kind_count, summary.byte_count),
-            (13, 165, 3149),
+            (13, 175, 3318),
         )
         self.assertEqual(catalog_pump.frames, [])
         client.assert_complete(generation)

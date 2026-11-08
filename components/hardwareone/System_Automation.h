@@ -7,6 +7,12 @@
 #include "System_BuildConfig.h"
 #include "System_CommandRegistry.h"
 
+// automations.json format version, the file's top-level "version". A file with
+// no "version" (older files) or this version or an older one loads as before;
+// a newer one is refused and left unchanged (readAutomationsJson). `versions`
+// reports it as automations_file.
+constexpr uint32_t kAutomationsFileVersion = 2;
+
 #if ENABLE_AUTOMATION
 
 // Automation command registry
@@ -58,7 +64,18 @@ bool sanitizeAutomationsJson(String& jsonRef);
 // before it crosses a CLI/HTTP/log boundary. Returns an empty String on parse
 // failure so callers fail closed instead of echoing malformed raw storage.
 String redactAutomationsJsonForResponse(const String& json);
+// Reads automations.json. False when it is missing, unreadable or written by
+// newer firmware (a "version" above kAutomationsFileVersion): such a file is
+// not loaded, so nothing is changed and written back from it. The writer also
+// refuses any document with a newer version.
+bool readAutomationsJson(String& json);
+// The same read; *newerVersion is the refused file's format, or 0 when the
+// read did not refuse one (missing, unreadable or loaded). For callers that
+// report why, such as the web Automations page.
+bool readAutomationsJson(String& json, uint32_t* newerVersion);
 bool writeAutomationsJsonAtomic(const String& json);
+// An empty store in the current format (the first-time setup seed).
+String automationsEmptyStoreJson();
 bool updateAutomationNextAt(long automationId, time_t newNextAt);
 // Write a specific trigger's nextAt (by zero-based index in the triggers array).
 bool updateAutomationTriggerNextAt(long automationId, int triggerIdx, time_t newNextAt);

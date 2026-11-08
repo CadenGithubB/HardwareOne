@@ -94,7 +94,9 @@ def generated(component: Path) -> str:
         extract_block(link_header, "struct BleLinkStatus") + ";",
         extract_block(owner, "struct BleScDeferred") + ";",
         extract_block(settings, "enum SettingType") + ";",
-        extract_block(settings, "struct SettingEntry {") + ";",
+        # Locate the definition (not the forward declaration), then extract from
+        # its own opening brace; the struct carries inline member functions.
+        extract_block(settings[settings.index("struct SettingEntry {"):], "struct SettingEntry") + ";",
     ]
 
     # The console's state, before the host boundaries (the GATT send double

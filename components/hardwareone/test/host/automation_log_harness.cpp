@@ -147,7 +147,8 @@ static std::map<std::string, std::shared_ptr<Node>> files;
 static std::set<std::string> directories, deniedUsers;
 static std::vector<Access> accesses;
 static std::vector<Written> written;
-static bool overflow = false;
+static bool overflow = false, reserveRefused = false;  // reserveRefused: the Refused tier
+static unsigned reserveDrops = 0;
 static unsigned opens = 0, closes = 0;
 static void io() { CHECK(isFsLockedByCurrentTask() && stateLockDepth == 0); }
 static bool permitted(const AuthContext& ctx) { return !deniedUsers.count(ctx.user.c_str()); }
@@ -193,12 +194,16 @@ class File {
   std::string user_;
 };
 namespace VFS {
-bool resolveOverflowPath(const char* source, size_t bytes, char* out, size_t capacity) {
+enum class LogTier : uint8_t { Primary, Overflow, Refused };
+LogTier resolveLogPath(const char* source, size_t bytes, char* out, size_t capacity) {
   io(); CHECK(bytes > 512);
-  const std::string path = (overflow ? "/sd" : "") + std::string(source);
+  const bool sd = overflow && !reserveRefused;
+  const std::string path = (sd ? "/sd" : "") + std::string(source);
   CHECK(capacity > path.size());
-  std::snprintf(out, capacity, "%s", path.c_str()); return overflow;
+  std::snprintf(out, capacity, "%s", path.c_str());
+  return reserveRefused ? LogTier::Refused : sd ? LogTier::Overflow : LogTier::Primary;
 }
+void noteLogReserveDrop() { ++reserveDrops; }
 bool existsGuarded(const String& path, const AuthContext& ctx) {
   record("exists", path, ctx); return permitted(ctx) && directories.count(path.c_str());
 }
@@ -235,7 +240,7 @@ static void reset() {
   deniedUsers.clear(); failNextReserve = failNextConcat = failNextAllocation = false; failCopyValue = nullptr;
   if (automationLogActive()) command("stop");
   balanced(); files.clear(); accesses.clear(); written.clear(); directories.clear();
-  opens = closes = 0; overflow = false; withTimestamp = true; caller = identity("alice");
+  opens = closes = 0; overflow = reserveRefused = false; reserveDrops = 0; withTimestamp = true; caller = identity("alice");
 }
 static void start(const char* path = "/logs/alice.log") {
   const std::string result = command((std::string("start ") + path).c_str());
@@ -308,6 +313,20 @@ static void failures() {
   CHECK(command("status") == "Automation logging ACTIVE: /logs/alice.log");
   CHECK(written.size() == 1);
   gFsMutex = &fsStorage; balanced();
+}
+// LittleFS below the 100 KB floor with no card to overflow to. The
+// entry must not be appended to flash (it would spend the reserve that
+// automations.json and settings saves depend on); it is dropped and counted.
+static void reserveRefusal() {
+  reset(); start(); reserveRefused = true;
+  const size_t before = written.size();
+  CHECK(!appendAutoLogEntry("EVENT", "low space"));
+  CHECK(written.size() == before && reserveDrops == 1 && files.at("/logs/alice.log")->bytes.find("low space") == std::string::npos);
+  CHECK(command("start /logs/other.log").rfind("Error:", 0) == 0);
+  CHECK(command("status") == "Automation logging ACTIVE: /logs/alice.log" && !files.count("/logs/other.log"));
+  reserveRefused = false;
+  CHECK(appendAutoLogEntry("EVENT", "space back") && written.back().path == "/logs/alice.log");
+  balanced();
 }
 static void routingAndAllocation() {
   reset(); overflow = true; withTimestamp = false;
@@ -454,7 +473,7 @@ static void concurrency() {
   if (automationLogActive()) command("stop"); balanced();
 }
 int main() {
-  basicLifecycle(); failures(); replacement(); routingAndAllocation(); executorHooks(); concurrency();
+  basicLifecycle(); failures(); reserveRefusal(); replacement(); routingAndAllocation(); executorHooks(); concurrency();
   reset();
   std::printf("automation logging: %u checks passed (owner, permissions, checked writes, hooks and concurrency)\n", checks.load());
 }

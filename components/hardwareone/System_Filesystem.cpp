@@ -77,9 +77,13 @@ static bool littlefsPartitionIsBlank(const esp_partition_t* part) {
 // Keep the legacy boot sweep limited to these direct-child directories.
 // Staged headers stay reserved for their writers after failure; capped logs,
 // R1 history and other capture stores retain their own recovery policies.
+// /system/espnow (identity.tmp, devices.json.tmp, *.restore.tmp) and
+// /system/certs (*.crt.tmp / *.key.tmp, *.restore.tmp) hold only staging
+// temps that no reader ever recovers from.
 static void cleanupBootTemporaryFiles() {
   const char* cleanupDirs[] = {
-      "/", "/system", "/system/users", "/system/users/user_settings", "/maps"
+      "/", "/system", "/system/users", "/system/users/user_settings",
+      "/system/espnow", "/system/certs", "/maps"
 #if ENABLE_LLM_SOURCE_ONBOARD
       , "/system/llm"
 #endif
@@ -279,7 +283,7 @@ bool initFilesystem() {
   setDebugFlag(DEBUG_AUTO_SCHEDULER);
   if (gSettings.automationEnabled && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "fs.init.automations_check"))) {
     String json;
-    if (readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "fs.init.automations_check"))) {
+    if (readAutomationsJson(json)) {
       bool modified = false;
 
       // First: sanitize duplicate IDs
@@ -586,7 +590,7 @@ void runFileWritePostSaveHooks(const String& path) {
 #if ENABLE_AUTOMATION
   if (path == AUTOMATIONS_JSON_FILE) {
     String json;
-    if (readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "fs.post_save.automations")) && sanitizeAutomationsJson(json)) {
+    if (readAutomationsJson(json) && sanitizeAutomationsJson(json)) {
       writeAutomationsJsonAtomic(json);  // best-effort atomic writeback
     }
     // The caller has already saved the file. Refresh even when sanitation
@@ -2267,11 +2271,78 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
 // A detected short append, or a reopened size that differs from what the
 // append handle reported, returns false before any rotation: rotation only
 // promotes a verified copy, and that copy needs about 85% of the cap in free
-// space. On a LittleFS that is already full with no SD overflow a capped log
-// therefore stays pinned at its cap until space is freed elsewhere. The
-// pre-0.99.97.3 writer rotated anyway and could replace the log with a partial
-// copy; that lossy reclaim is deliberately gone, and nothing trims logs on low
-// space in its place.
+// space. The pre-0.99.97.3 writer rotated anyway and could replace the log
+// with a partial copy; that lossy reclaim is deliberately gone.
+//
+// What replaced it left the cap unenforced. A copy that could not be
+// written (no space for ~85% of the cap, no copy buffer) returned false with
+// the line already appended, so every later line grew the file past its cap
+// and repeated the failing copy under the FS lock until flash was full. Such a
+// failure now restarts the log instead: a one-line marker naming how much was
+// dropped, then the new line. The file stays within cap + one line and the
+// next copy is a cap's worth of lines away. Failures on the READ side of the
+// copy (open, seek, size or scan mismatch) still keep the original untouched:
+// they say the file is not what the append saw, not that space ran out.
+//
+// The append itself honours the overflow latch: a Refused resolution (LittleFS
+// below the reserve, no writable card) drops the line and counts it, and a
+// failed append on the SD mirror reports the card unwritable (with a backoff
+// so it is not re-probed at once) and retries once on the tier the latch then
+// resolves to.
+
+// One append of `line` to `dest`; true when the file holds the whole line.
+// `sz` is the post-write size and `written` the bytes the handle accepted.
+//
+// Capture the post-write size from the handle we already hold. In append mode
+// ftell() (File::position) is the offset after the write, i.e. the new file
+// size, and it costs nothing — it reads the FILE* and accounts for buffered
+// bytes, so no flush and no stat. This used to be a SECOND VFS::open of the
+// same 3-level path purely to call size(), on EVERY logged line, on all 20
+// callers — a whole extra LittleFS open (~20 ms measured) for a number the
+// append handle already knew. The read handle in appendLineWithCap is opened
+// only when a rotation is actually due.
+static bool appendCappedLineOnce(const char* dest, const String& line, const AuthContext& ctx,
+                                 size_t& sz, size_t& written) {
+  sz = 0;
+  written = 0;
+  File a = VFS::openGuarded(String(dest), "a", ctx, true);
+  if (!a) { STACK_TRACEF("appendLineWithCap.open_a_failed"); return false; }
+  STACK_TRACEF("appendLineWithCap.opened_for_append");
+  written = a.println(line);
+  const bool appended = written == line.length() + 2 && !a.getWriteError();  // CRLF
+  STACK_TRACEF("appendLineWithCap.println_done");
+  sz = a.position();
+  a.close();
+  STACK_TRACEF("appendLineWithCap.close_a_done sz=%u", (unsigned)sz);
+  // Tell the VFS free-space cache how much data we just added (approximate —
+  // LittleFS overhead isn't counted). Lets the overflow decision refresh on
+  // the next check if enough cumulative writes have happened, instead of
+  // trusting a stale 2s-old reading through a large write burst.
+  VFS::noteLittleFsBytesWritten(written);
+  return appended;
+}
+
+// The rotation copy could not be written, so hold the cap by starting
+// the log over. Removing first releases the old blocks before anything new is
+// written; the marker and the line are small enough for LittleFS to inline.
+static bool restartCappedLog(const char* dest, const String& line, size_t droppedBytes,
+                             const AuthContext& ctx) {
+  if (!VFS::removeGuarded(String(dest), ctx)) { STACK_TRACEF("appendLineWithCap.restart_remove_failed"); return false; }
+  File t = VFS::openGuarded(String(dest), "w", ctx, true);
+  if (!t) { STACK_TRACEF("appendLineWithCap.restart_open_failed"); return false; }
+  char marker[80];
+  snprintf(marker, sizeof(marker), "[LOG] rotation blocked (low space): %u older bytes dropped",
+           (unsigned)droppedBytes);
+  size_t n = t.println(marker);
+  n += t.println(line);
+  const bool ok = n == strlen(marker) + line.length() + 4 && !t.getWriteError();
+  t.close();
+  VFS::noteLittleFsBytesWritten(n);
+  Serial.printf("[FS] %s: rotation copy failed; log restarted to hold its cap\n", dest);
+  STACK_TRACEF("appendLineWithCap.restarted ok=%d", ok ? 1 : 0);
+  return ok;
+}
+
 bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   STACK_TRACEF("appendLineWithCap.enter path=%s line_len=%u cap=%u",
                path ? path : "(null)", (unsigned)line.length(), (unsigned)capBytes);
@@ -2280,43 +2351,39 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
 
   // Resolve destination (LittleFS primary, or /sd overflow mirror if flash full).
   char dest[128];
-  VFS::resolveOverflowPath(path, line.length() + 512, dest, sizeof(dest));
+  if (VFS::resolveLogPath(path, line.length() + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
+    // LittleFS is below the reserve and no card takes the overflow.
+    VFS::noteLogReserveDrop();
+    STACK_TRACEF("appendLineWithCap.reserve_refused");
+    return false;
+  }
   STACK_TRACEF("appendLineWithCap.resolved dest=%s", dest);
   // trusted: the capped-log writer, confined to the sys_logs tree of the tier
   // the overflow latch resolved. Every caller's path lives there; one that
   // does not is refused by the scope and shows up as a [PERM] line.
-  const AuthContext ctx = VFS::systemAuth(VFS::sysLogScopeFor(String(dest)), "log.append");
+  AuthContext ctx = VFS::systemAuth(VFS::sysLogScopeFor(String(dest)), "log.append");
 
   // 1. Append the new line — fast path, same as before.
-  //
-  // Capture the post-write size from the handle we already hold. In append
-  // mode ftell() (File::position) is the offset after the write, i.e. the new
-  // file size, and it costs nothing — it reads the FILE* and accounts for
-  // buffered bytes, so no flush and no stat. This used to be a SECOND
-  // VFS::open of the same 3-level path purely to call size(), on EVERY logged
-  // line, on all 20 callers — a whole extra LittleFS open (~20 ms measured)
-  // for a number the append handle already knew. The read handle below is now
-  // opened only when a rotation is actually due.
   size_t sz = 0;
   size_t written = 0;
-  bool appended = false;
-  {
-    File a = VFS::openGuarded(String(dest), "a", ctx, true);
-    if (!a) { STACK_TRACEF("appendLineWithCap.open_a_failed"); return false; }
-    STACK_TRACEF("appendLineWithCap.opened_for_append");
-    written = a.println(line);
-    appended = written == line.length() + 2 && !a.getWriteError();  // CRLF
-    STACK_TRACEF("appendLineWithCap.println_done");
-    sz = a.position();
-    a.close();
-    STACK_TRACEF("appendLineWithCap.close_a_done sz=%u", (unsigned)sz);
+  bool appended = appendCappedLineOnce(dest, line, ctx, sz, written);
+  if (!appended && VFS::getStorageType(String(dest)) == VFS::SDCARD &&
+      VFS::getStorageType(String(path)) != VFS::SDCARD) {
+    // The latch sent this line to a card that no longer takes writes
+    // (yanked SPI or detect-less SDMMC card, or a log tree the card's write
+    // probe does not exercise). Report it so the overflow path stops choosing
+    // the card for a while — not re-probing it on the retry below — then
+    // retry once wherever the latch resolves now: flash while free space is
+    // above the floor, otherwise a counted drop.
+    VFS::noteLogOverflowSdFailure("log.append");
+    if (VFS::resolveLogPath(path, line.length() + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
+      VFS::noteLogReserveDrop();
+      STACK_TRACEF("appendLineWithCap.sd_failed_reserve_refused");
+      return false;
+    }
+    ctx = VFS::systemAuth(VFS::sysLogScopeFor(String(dest)), "log.append");
+    appended = appendCappedLineOnce(dest, line, ctx, sz, written);
   }
-
-  // Tell the VFS free-space cache how much data we just added (approximate —
-  // LittleFS overhead isn't counted). Lets the overflow decision refresh on
-  // the next check if enough cumulative writes have happened, instead of
-  // trusting a stale 2s-old reading through a large write burst.
-  VFS::noteLittleFsBytesWritten(written);
   if (!appended) { STACK_TRACEF("appendLineWithCap.short_append"); return false; }
 
   // 2. Check size. Rotate only if we've exceeded the cap. The size came
@@ -2370,19 +2437,28 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   static const size_t ROTATE_BUF_SIZE = 1024;
   if (!sRotateBuf) {
     sRotateBuf = (uint8_t*)ps_alloc(ROTATE_BUF_SIZE, AllocPref::PreferPSRAM, "logrot.buf");
-    if (!sRotateBuf) { r.close(); STACK_TRACEF("appendLineWithCap.rotatebuf_alloc_failed"); return false; }
+    if (!sRotateBuf) {
+      r.close();
+      STACK_TRACEF("appendLineWithCap.rotatebuf_alloc_failed");
+      return restartCappedLog(dest, line, sz - line.length() - 2, ctx);  // Hold the cap
+    }
   }
 
   File w = VFS::openGuarded(String(tmpPath), "w", ctx, true);
-  if (!w) { r.close(); STACK_TRACEF("appendLineWithCap.open_tmp_failed"); return false; }
+  if (!w) {
+    r.close();
+    STACK_TRACEF("appendLineWithCap.open_tmp_failed");
+    return restartCappedLog(dest, line, sz - line.length() - 2, ctx);  // Hold the cap
+  }
   STACK_TRACEF("appendLineWithCap.tmp_opened copying...");
 
   size_t copied = 0;
+  bool readShort = false;
   while (copied < tailBytes) {
     const size_t remaining = tailBytes - copied;
     const size_t chunk = remaining < ROTATE_BUF_SIZE ? remaining : ROTATE_BUF_SIZE;
     int n = r.readBytes((char*)sRotateBuf, chunk);
-    if (n <= 0) break;
+    if (n <= 0) { readShort = true; break; }
     if (w.write(sRotateBuf, (size_t)n) != (size_t)n) break;
     copied += (size_t)n;
   }
@@ -2395,7 +2471,9 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   if (!complete) {
     VFS::removeGuarded(String(tmpPath), ctx);
     STACK_TRACEF("appendLineWithCap.incomplete_copy");
-    return false;
+    // A copy the original could not feed keeps the original; a copy
+    // that could not be WRITTEN (the low-space case) restarts the log.
+    return readShort ? false : restartCappedLog(dest, line, sz - line.length() - 2, ctx);
   }
 
   // 6. LittleFS can replace the original directly, preserving it on rename

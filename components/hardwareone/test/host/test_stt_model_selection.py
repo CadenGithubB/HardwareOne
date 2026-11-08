@@ -114,8 +114,11 @@ def main():
 
         run('portable-default', 0)
         run('board-default', 0, {})
+        run('board-card', 0, {'ENABLE_SDMMC_CARD': 1})
+        run('board-card-stt', 1, {'ENABLE_SDMMC_CARD': 1, 'ENABLE_LOCAL_STT': 1})
         run('saved-gen2', 1, saved['features'])
-        run('saved-disabled', 0, {**saved['features'], 'ENABLE_STT_MODEL_15X5_GEN2': 0})
+        run('saved-disabled', 0, {**saved['features'], 'ENABLE_STT_MODEL_15X5_GEN2': 0},
+            error='Local STT on ESP32-P4 runs the 15x5 gen2 model from the microSD card')
         run('legacy-path', 1, saved['features'], legacy_path='/sd/STT Models/test-gen2.stt')
         dependency = 'ENABLE_STT_MODEL_15X5_GEN2 requires ENABLE_LOCAL_STT, ESP32-P4 and ENABLE_SD_CARD.'
         run('no-card', 1, {**saved['features'], 'ENABLE_SDMMC_CARD': 0}, error=dependency)

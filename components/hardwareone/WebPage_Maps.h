@@ -686,16 +686,18 @@ async function loadMap(path) {
             <strong style="color:#aaa">${c.toLocaleString()}</strong>
           </span>`).join('');
 
+      // The file name (and the region name stored inside the uploaded
+      // file) are user-controlled, so they are escaped before innerHTML.
       hw.$('map-details').innerHTML = `
         <div style="font-size:0.8rem;color:#888;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-          <strong style="color:var(--panel-fg)">${currentMap.filename}</strong>
+          <strong style="color:var(--panel-fg)">${escapeHtml(currentMap.filename)}</strong>
           <span style="color:#555">|</span>
           <span>v${currentMap.version}</span>
           <span style="color:#555">|</span>
           <span>${currentMap.tileGridSize}×${currentMap.tileGridSize} tiles</span>
         </div>
 
-        ${currentMap.regionName ? `<div style="font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:10px">${currentMap.regionName}</div>` : ''}
+        ${currentMap.regionName ? `<div style="font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:10px">${escapeHtml(currentMap.regionName)}</div>` : ''}
 
         <div style="display:flex;gap:12px;margin-bottom:10px;font-size:0.82rem">
           <div><span style="color:#888">Features</span> <strong style="color:var(--panel-fg)">${currentMap.features.length.toLocaleString()}</strong></div>

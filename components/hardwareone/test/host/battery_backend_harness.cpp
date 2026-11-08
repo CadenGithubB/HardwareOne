@@ -240,8 +240,86 @@ static void testNotifications() {
   assert(events.size()==2 && events[1]==SYSEVT_BATTERY_FULL);
 }
 
+static int countEvents(int event) {
+  int n=0;
+  for (int e: events) n+=e==event;
+  return n;
+}
+
+// LOW/CRITICAL are edges against the last valid classification. An
+// UNKNOWN sample (boot snapshot, read error, 30 s expiry) must neither hide
+// the crossing nor re-arm it.
+static void testLowCriticalAfterUnknown() {
+  // Fresh boot straight into LOW: initBattery publishes a default (UNKNOWN)
+  // snapshot, so the first real sample has prev UNKNOWN.
+  sLastKnownStatus=BATTERY_UNKNOWN; events.clear();
+  BatteryState previous, next;
+  BatteryPolicy::applyAdcVoltage(next,3.5f,1750,100);
+  assert(next.status==BATTERY_LOW);
+  notifyTransitions(previous,next);
+  assert(countEvents(SYSEVT_BATTERY_LOW)==1 && countEvents(SYSEVT_BATTERY_CRITICAL)==0);
+  previous=next; notifyTransitions(previous,next);
+  // A read error and a stale expiry between two LOW samples are not a new crossing.
+  previous=next; BatteryPolicy::invalidateSample(next,ESP_FAIL,200);
+  notifyTransitions(previous,next);
+  previous=next; BatteryPolicy::applyAdcVoltage(next,3.5f,1750,300);
+  notifyTransitions(previous,next);
+  previous=next; BatteryPolicy::expireSample(next,300+BatteryPolicy::kStaleAfterMs+1);
+  assert(next.status==BATTERY_UNKNOWN);
+  notifyTransitions(previous,next);
+  previous=next; BatteryPolicy::applyAdcVoltage(next,3.5f,1750,40000);
+  notifyTransitions(previous,next);
+  assert(countEvents(SYSEVT_BATTERY_LOW)==1);
+  // Recovering above LOW re-arms it.
+  previous=next; BatteryPolicy::applyAdcVoltage(next,3.7f,1850,40100);
+  notifyTransitions(previous,next);
+  previous=next; BatteryPolicy::applyAdcVoltage(next,3.5f,1750,40200);
+  notifyTransitions(previous,next);
+  assert(countEvents(SYSEVT_BATTERY_LOW)==2 && countEvents(SYSEVT_BATTERY_CRITICAL)==0);
+
+  // Fresh boot straight into CRITICAL posts CRITICAL once; EMPTY is the same band.
+  sLastKnownStatus=BATTERY_UNKNOWN; events.clear();
+  previous=BatteryState(); next=BatteryState();
+  BatteryPolicy::applyAdcVoltage(next,3.35f,1675,100);
+  assert(next.status==BATTERY_CRITICAL);
+  notifyTransitions(previous,next);
+  previous=next; BatteryPolicy::invalidateSample(next,ESP_FAIL,200);
+  notifyTransitions(previous,next);
+  previous=next; BatteryPolicy::applyAdcVoltage(next,3.1f,1550,300);
+  assert(next.status==BATTERY_EMPTY);
+  notifyTransitions(previous,next);
+  assert(countEvents(SYSEVT_BATTERY_CRITICAL)==1 && countEvents(SYSEVT_BATTERY_LOW)==0);
+
+  // Valid MEDIUM, then a read outage that spans the drop to CRITICAL.
+  sLastKnownStatus=BATTERY_UNKNOWN; events.clear();
+  previous=BatteryState(); next=BatteryState();
+  BatteryPolicy::applyAdcVoltage(next,3.7f,1850,100);
+  notifyTransitions(previous,next);
+  assert(events.empty());
+  previous=next; BatteryPolicy::invalidateSample(next,ESP_FAIL,200);
+  notifyTransitions(previous,next);
+  previous=next; BatteryPolicy::applyAdcVoltage(next,3.35f,1675,300);
+  notifyTransitions(previous,next);
+  previous=next; notifyTransitions(previous,next);
+  assert(countEvents(SYSEVT_BATTERY_CRITICAL)==1 && countEvents(SYSEVT_BATTERY_LOW)==0);
+
+  // Valid MEDIUM, then a stale expiry that spans the drop to LOW.
+  sLastKnownStatus=BATTERY_UNKNOWN; events.clear();
+  previous=BatteryState(); next=BatteryState();
+  BatteryPolicy::applyAdcVoltage(next,3.7f,1850,100);
+  notifyTransitions(previous,next);
+  previous=next; BatteryPolicy::expireSample(next,100+BatteryPolicy::kStaleAfterMs+1);
+  notifyTransitions(previous,next);
+  previous=next; BatteryPolicy::applyAdcVoltage(next,3.5f,1750,40000);
+  notifyTransitions(previous,next);
+  assert(countEvents(SYSEVT_BATTERY_LOW)==1 && countEvents(SYSEVT_BATTERY_CRITICAL)==0);
+}
+
 int main() {
   (void)kHasVbusSense;
+#if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
+  rawCode=(int)(3500.0f/(BATTERY_ADC_DIVIDER)); // Boot on a low cell
+#endif
   initBattery();
 #if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
   auto s=getBatterySnapshot();
@@ -253,6 +331,16 @@ int main() {
   assert(configuredAttenuation==BATTERY_ADC_ATTEN && createCount==1);
   initBattery();
   assert(createCount==1); // Calling init twice does not reserve another unit.
+  // The setup-phase sample neither posts nor latches LOW, so the edge
+  // is posted by the first loop sample, which runs ahead of that pass's
+  // automation and notification drains (whose staleness gate is 10 s).
+  assert(s.status==BATTERY_LOW && events.empty());
+  clockMs=600; updateBattery();
+  assert(getBatterySnapshot().status==BATTERY_LOW && countEvents(SYSEVT_BATTERY_LOW)==1);
+  clockMs=700; updateBattery();
+  assert(countEvents(SYSEVT_BATTERY_LOW)==1 && countEvents(SYSEVT_BATTERY_CRITICAL)==0);
+  rawCode=1000; events.clear();
+  s=getBatterySnapshot();
   const auto successfulAt=s.lastReadMs;
   clockMs=1000; readCount=0; readFailAt=8;
   updateBattery(); checkUnknown();
@@ -306,6 +394,17 @@ int main() {
   { std::lock_guard<std::mutex> lock(blockMutex); releaseRead=true; blockCv.notify_all(); }
   update.get(); (void)calibration.get();
   assert(getBatterySnapshot().voltageValid && unitLive && calibrationLive);
+  // The same through the production update path: the read failure publishes an
+  // UNKNOWN snapshot between the MEDIUM and CRITICAL samples.
+  events.clear();
+  rawCode=(int)(3700.0f/(BATTERY_ADC_DIVIDER)); clockMs=6000; updateBattery();
+  assert(getBatterySnapshot().status==BATTERY_MEDIUM);
+  readCount=0; readFailAt=1; clockMs=7000; updateBattery(); checkUnknown();
+  readFailAt=0; rawCode=(int)(3350.0f/(BATTERY_ADC_DIVIDER)); clockMs=8000; updateBattery();
+  assert(getBatterySnapshot().status==BATTERY_CRITICAL);
+  clockMs=9000; updateBattery();
+  assert(countEvents(SYSEVT_BATTERY_CRITICAL)==1 && countEvents(SYSEVT_BATTERY_LOW)==0);
+  rawCode=1000;
   assert(adcBackendDeinit()==ESP_OK);
   assert(!unitLive && !calibrationLive && createCount==deleteCount);
 #elif ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_FUEL_GAUGE
@@ -338,6 +437,7 @@ int main() {
 #endif
 #if ENABLE_BATTERY_MONITOR
   testNotifications();
+  testLowCriticalAfterUnknown();
 #endif
   testJsonValidity();
   std::cout << "Battery backend: ADC=" << BATTERY_BACKEND_ADC

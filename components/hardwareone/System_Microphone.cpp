@@ -105,6 +105,7 @@ int micSampleRate = DEFAULT_SAMPLE_RATE;
 int micBitDepth = DEFAULT_BIT_DEPTH;
 int micChannels = DEFAULT_CHANNELS;
 int micGain = 50;  // Software gain 0-100%
+static void applyPdmTuningFromSettings();  // PDM gain / high-pass knobs -> HAL (defined with the knob commands)
 
 // Recording state
 static TaskHandle_t recordingTaskHandle = nullptr;
@@ -2000,6 +2001,7 @@ bool initMicrophone(AudioSource preferred) {
   if (gSettings.microphoneBitDepth == 16 || gSettings.microphoneBitDepth == 32) {
     micBitDepth = gSettings.microphoneBitDepth;
   }
+  applyPdmTuningFromSettings();  // PDM gain / high-pass knobs (defaults = IDF defaults)
 
   WARN_SYSTEMF("[MIC_INIT] Audio settings: sampleRate=%d, bitDepth=%d, channels=%d, gain=%d%%",
                micSampleRate, micBitDepth, micChannels, micGain);
@@ -2918,6 +2920,45 @@ const char* cmd_micgain(const String& argsInput) {
   return gMicCmdBuffer;
 }
 
+// Tuning knobs for the onboard PDM path: persisted settings, pushed to the HAL
+// right away and in effect when the PDM channel next starts.
+static void applyPdmTuningFromSettings() {
+  audioSetPdmTuning(static_cast<uint8_t>(gSettings.pdmAmplify), static_cast<uint16_t>(gSettings.pdmHpfHz));
+}
+
+static const char* setIntKnob(const String& argsInput, int& field, int minVal, int maxVal, const char* name,
+                              const char* unit, void (*after)()) {
+  String arg = argsInput;
+  arg.trim();
+  if (arg.length() == 0) {
+    snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "%s: %d%s", name, field, unit);
+    return gMicCmdBuffer;
+  }
+  int v = arg.toInt();
+  if (v < minVal || v > maxVal || (v == 0 && arg != "0")) {
+    snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Error: %s must be %d-%d", name, minVal, maxVal);
+    return gMicCmdBuffer;
+  }
+  setSetting(field, v);
+  if (after) after();
+  snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "%s set to %d%s (saved)", name, field, unit);
+  return gMicCmdBuffer;
+}
+
+const char* cmd_pdmamplify(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return setIntKnob(a, gSettings.pdmAmplify, 1, 15, "PDM amplify", "x", applyPdmTuningFromSettings);
+}
+
+const char* cmd_pdmhpf(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = a;
+  arg.trim();
+  int v = arg.toInt();
+  if (arg.length() && v != 0 && (v < 23 || v > 185)) return "Error: PDM high-pass must be 0 (off) or 23-185 Hz";
+  return setIntKnob(a, gSettings.pdmHpfHz, 0, 185, "PDM high-pass", " Hz", applyPdmTuningFromSettings);
+}
+
 const char* cmd_micbitdepth(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
@@ -3145,6 +3186,8 @@ const CommandEntry micCommands[] = {
   { "micsamplerate", "Get/set sample rate.", false, cmd_micsamplerate, "Usage: micsamplerate [8000-48000]" },
   { "micgain", "Get/set microphone gain.", false, cmd_micgain, "Usage: micgain [0-100]" },
   { "micbitdepth", "Get/set bit depth.", false, cmd_micbitdepth, "Usage: micbitdepth [16|32]" },
+  { "pdmamplify", "Get/set the onboard PDM hardware gain multiplier (applies at the next capture start).", true, cmd_pdmamplify, "Usage: pdmamplify [1-15]" },
+  { "pdmhpf", "Get/set the onboard PDM high-pass cut-off in Hz, 0 = off (applies at the next capture start).", true, cmd_pdmhpf, "Usage: pdmhpf [0|23-185]" },
   { "micsource", "Get/set mic source: onboard microphone or G2 glasses.", false, cmd_micsource, "Usage: micsource [auto|onboard|pdm|g2]" },
 
   // Auto-start
@@ -3167,6 +3210,10 @@ static const SettingEntry micSettingEntries[] = {
   // Only 16 and 32 are accepted (cmd_micbitdepth); the 16..32 min/max would
   // otherwise render as a number box offering values the command rejects.
   { "microphoneBitDepth", SETTING_INT, &gSettings.microphoneBitDepth, 16, 0, nullptr, 16, 32, "Bit depth (cosmetic; WAV is always 16-bit)", "16|16-bit,32|32-bit", false, nullptr, "micbitdepth" },
+  // Onboard PDM path tuning (HAL_Audio audioSetPdmTuning); applied at the next capture
+  // start, no reboot needed. The speech-detector knobs live in the "stt" settings group.
+  { "pdmAmplify", SETTING_INT, &gSettings.pdmAmplify, 1, 0, nullptr, 1, 15, "PDM hardware gain (x1..x15)", nullptr, false, nullptr, "pdmamplify" },
+  { "pdmHpfHz", SETTING_INT, &gSettings.pdmHpfHz, 36, 0, nullptr, 0, 185, "PDM high-pass cut-off (Hz, 0 = off)", nullptr, false, nullptr, "pdmhpf" },
 };
 
 // Module "connected" = a mic source is actually available (onboard PDM present

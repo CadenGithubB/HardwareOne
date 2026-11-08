@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-995 commands across 56 modules (1004 registry entries).
+1023 commands across 57 modules (1023 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -13,21 +13,22 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 ## Modules
 
 - [`cli`](#cli) — 4 commands
-- [`system`](#system) — 25 commands
+- [`system`](#system) — 26 commands
+- [`versions`](#versions) — 1 commands
 - [`wifi`](#wifi) — 21 commands
 - [`espnow`](#espnow) — 119 commands
-- [`c6`](#c6) — 9 commands
+- [`c6`](#c6) — 10 commands
 - [`mqtt`](#mqtt) — 27 commands
 - [`bluetooth`](#bluetooth) — 23 commands
 - [`phone`](#phone) — 10 commands
 - [`relay`](#relay) — 2 commands
 - [`filesystem`](#filesystem) — 10 commands
 - [`sd`](#sd) — 5 commands
-- [`oled`](#oled) — 20 commands
+- [`oled`](#oled) — 21 commands
 - [`speaker`](#speaker) — 1 commands
 - [`neopixel`](#neopixel) — 3 commands
 - [`led`](#led) — 6 commands
-- [`matrix`](#matrix) — 3 commands
+- [`matrix`](#matrix) — 7 commands
 - [`servo`](#servo) — 6 commands
 - [`thermal`](#thermal) — 23 commands
 - [`tof`](#tof) — 10 commands
@@ -41,11 +42,11 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`rtc`](#rtc) — 7 commands
 - [`presence`](#presence) — 6 commands
 - [`camera`](#camera) — 45 commands
-- [`microphone`](#microphone) — 15 commands
+- [`microphone`](#microphone) — 17 commands
 - [`edgeimpulse`](#edgeimpulse) — 16 commands
 - [`transcription`](#transcription) — 2 commands
 - [`note`](#note) — 1 commands
-- [`stt`](#stt) — 3 commands
+- [`stt`](#stt) — 5 commands
 - [`espsr`](#espsr) — 45 commands
 - [`i2c`](#i2c) — 24 commands
 - [`automation`](#automation) — 8 commands
@@ -62,12 +63,12 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`power`](#power) — 4 commands
 - [`liveaudio`](#liveaudio) — 1 commands
 - [`cm5`](#cm5) — 15 commands
-- [`ota`](#ota) — 18 commands
+- [`ota`](#ota) — 9 commands
 - [`setpattern`](#setpattern) — 1 commands
 - [`even_g2`](#even-g2) — 56 commands
-- [`ring`](#ring) — 12 commands
+- [`ring`](#ring) — 19 commands
 - [`llm`](#llm) — 36 commands
-- [`settingsedit`](#settingsedit) — 61 commands
+- [`settingsedit`](#settingsedit) — 70 commands
 
 ---
 
@@ -97,6 +98,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `factoryreset` | S | Wipe user accounts and their data and reboot to re-run setup wizard.<br/>`Usage: factoryreset (no args, confirmation required) Deletes /system/users/users.json, pending account requests, every user's settings file and every account's transcripts and notes (/stt/u*, /sd/stt/u*), so the first-time setup wizard runs on next boot. WiFi credentials and other settings are preserved.` |
 | `fsusage` |  | Show filesystem usage. (add 'json' for JSON output) |
 | `lightsleep` | A | Enter ESP32 light sleep: lightsleep [seconds] (default 20s).<br/>`Usage: lightsleep [seconds] (1..3600, default 20)` |
+| `memdiag` | A | Bench memory diagnostics: [status\|check\|arm\|disarm\|dump\|noabort]<br/>`Usage: memdiag [status\|check\|arm\|disarm\|dump\|noabort]` |
 | `memreport` |  | Comprehensive memory report (Task Manager style). (add 'json' for JSON output) |
 | `memsample` |  | Memory snapshot with component requirements. Use 'memsample track [on\|off\|reset\|status]' for allocation tracking.<br/>`Usage: memsample [track <on\|off\|reset\|status>]` |
 | `perftop` |  | Live performance snapshot: loop laps/s, period, per-section timing, worst stalls + live task CPU%. (add 'json' for loop + per-task CPU% JSON) |
@@ -113,6 +115,14 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `uptime` |  | Show device uptime. (add 'json' for JSON output) |
 | `voltage` |  | Estimate power draw from active subsystems (not a real voltage measurement; use batterystatus for measured volts). (add 'json' for JSON output) |
 | `wait` |  | Delay execution for N milliseconds: wait <ms>.<br/>`Usage: wait <ms> (1..60000)` |
+
+## versions
+
+> versions lists, one line each, the firmware version and the versions a separately built part must agree with: the recovery updater, OTA layout, manifest format and data schema (OTA layouts); the ESP-NOW format, the radio's ESP-NOW stack and the ESP-NOW identity files; the automations file and backup bundle formats; the BLE console channel and the phone link, pipe channel and console records (phone-pipe builds); the CM5 control protocol; the C6 companion's ESP-Hosted and bridge versions with the ones this image expects (P4); the local STT model; and the ESP-IDF and Arduino core it was built with. An item is shown only where the build includes that part. versions json returns the same as one object with stable keys, also carried as the versions object of status json.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `versions` |  | Show the firmware version and every version a separately built part must match. (add 'json')<br/>`Usage: versions [json]` |
 
 ## wifi
 
@@ -274,10 +284,11 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `c6_console` | A | Mirror the C6's own console into the P4 log: c6_console [on\|off]. |
+| `c6_console` | A | Alias of c6console. |
 | `c6autohold` | A | Hold the companion in reset while no radio feature runs: c6autohold [on\|off] (persists). |
 | `c6autorecover` | A | Auto-recover the companion after an outage: c6autorecover [on\|off] (persists). |
 | `c6confirm` | A | Confirm the companion's running image so it cannot roll back. |
+| `c6console` | A | Mirror the C6's own console into the P4 log: c6console [on\|off]. |
 | `c6heartbeat` | A | Companion heartbeat interval in seconds, 0 disables the watchdog: c6heartbeat <0..60> (persists). |
 | `c6hold` | A | Hold the C6 in reset (radio fully off) or release it: c6hold [on\|off].<br/>`Usage: c6hold [on\|off] on - stop Wi-Fi, Bluetooth and ESP-NOW and hold the companion in reset off - release it and restore what was running` |
 | `c6restart` | A | Restart the C6 companion in place (radio features stop and come back). |
@@ -414,12 +425,13 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `oledbootduration` |  | Boot animation duration (ms): <500-10000><br/>`Usage: oledbootduration <500..10000>` |
 | `oledbootmode` |  | OLED boot mode: <logo\|status\|sensors\|thermal\|network\|mesh\|off><br/>`Usage: oledbootmode <logo\|status\|sensors\|thermal\|network\|mesh\|off>` |
 | `oledbrightness` |  | Display brightness: <0-255><br/>`Usage: oledbrightness <0..255>` |
+| `oledcameraread` |  | Read the local camera preview state (JSON) |
 | `oledclear` |  | Clear OLED display. |
 | `oleddefaultmode` |  | OLED default mode: <logo\|status\|sensors\|thermal\|network\|mesh\|off><br/>`Usage: oleddefaultmode <logo\|status\|sensors\|thermal\|network\|mesh\|off>` |
 | `oledenabled` |  | Enable/disable OLED: <0\|1><br/>`Usage: oledenabled <0\|1>` |
 | `oledflip` |  | Flip display 180°: [on\|off\|toggle]<br/>`Usage: oledflip [on\|off\|toggle]` |
 | `oledlandscape` |  | Landscape UI with right-side controls: [0\|1]<br/>`Usage: oledlandscape [0\|1]` |
-| `oledmode` |  | Set display mode: <mode><br/>`Usage: oledmode <menu\|status\|sensordata\|sensorlist\|thermal\|network\|mesh\|gps\|text\|logo\|anim\|imuactions\|fmradio\|files\|logging\|automations\|espnow\|memory\|off> Example: oledmode memory Example: oledmode off` |
+| `oledmode` |  | Set display mode: <mode><br/>`Usage: oledmode <menu\|status\|sensordata\|sensorlist\|thermal\|camera\|network\|mesh\|gps\|text\|logo\|anim\|imuactions\|fmradio\|files\|logging\|automations\|espnow\|memory\|off> Example: oledmode memory Example: oledmode off` |
 | `oledread` |  | Read OLED display status. (add 'json' for JSON output) |
 | `oledstart` |  | Start OLED display. |
 | `oledstatus` |  | Show OLED status. (add 'json' for JSON output) |
@@ -463,13 +475,17 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## matrix
 
-> matrix test draws an orientation pattern. matrix text HI, matrix pixel 3 2 on, matrix clear/fill and matrix on/off control the display. matrix brightness <0-15> and matrix rotation <0-3> persist; matrix blink <0-3> selects off/2Hz/1Hz/0.5Hz. matrixbus <0|1> and matrixaddress <0x70-0x77> require reboot. matrix size 8x8 uses one square; matrix panel <0|1> selects the physical square. matrix size 16x8 restores both. Use an unused non-0x70 address when sharing a bus with a PCA9685. Static text clips at the display edge.
+> matrix test draws an orientation pattern. matrix text HI, matrix pixel 3 2 on, matrix clear/fill and matrix on/off control the display. matrix brightness <0-15> and matrix rotation <0-3> persist; matrix blink <0-3> selects off/2Hz/1Hz/0.5Hz. matrixbus <0|1> and matrixaddress <0x70-0x77> require reboot. matrix size 8x8 uses one square; matrix panel <0|1> selects the physical square. matrix size 16x8 restores both. matrixbrightness/matrixrotation/matrixsquare/matrixpanel save without applying (used by the settings editors). Use an unused non-0x70 address when sharing a bus with a PCA9685. Static text clips at the display edge.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `matrix` |  | HT16K33 LED matrix: status, clear, fill, on/off, pixel, text, brightness, rotation, blink, test |
 | `matrixaddress` | A | Select matrix address (reboot required)<br/>`Usage: matrixaddress <0x70..0x77>` |
+| `matrixbrightness` | A | Save matrix brightness (applied on next matrix command)<br/>`Usage: matrixbrightness <0-15>` |
 | `matrixbus` | A | Select matrix I2C bus (reboot required)<br/>`Usage: matrixbus <0\|1>` |
+| `matrixpanel` | A | Save which 8x8 square is used (applied on next matrix command)<br/>`Usage: matrixpanel <0\|1>` |
+| `matrixrotation` | A | Save matrix rotation (applied on next matrix command)<br/>`Usage: matrixrotation <0-3>` |
+| `matrixsquare` | A | Save single 8x8 square mode (applied on next matrix command)<br/>`Usage: matrixsquare <0\|1>` |
 
 ## servo
 
@@ -729,9 +745,11 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `micread` |  | Read microphone sensor status.<br/>`Usage: micread [json]` |
 | `micrecord` |  | Start/stop recording to WAV file (bare = show recording status).<br/>`Usage: micrecord [start [vad <200..10000>] [trim] \| stop \| 1 \| 0] micrecord startid <16hex> [vad <200..10000>] [trim] micrecord statusid <16hex> micrecord stopid <16hex> [discard]` |
 | `micsamplerate` |  | Get/set sample rate.<br/>`Usage: micsamplerate [8000-48000]` |
-| `micsource` |  | Get/set mic source: onboard PDM or G2 glasses.<br/>`Usage: micsource [auto\|pdm\|g2]` |
+| `micsource` |  | Get/set mic source: onboard microphone or G2 glasses.<br/>`Usage: micsource [auto\|onboard\|pdm\|g2]` |
 | `micviz` |  | Real-time audio level visualizer.<br/>`Usage: micviz (press any key to stop)` |
 | `openmic` |  | Start microphone sensor. |
+| `pdmamplify` | A | Get/set the onboard PDM hardware gain multiplier (applies at the next capture start).<br/>`Usage: pdmamplify [1-15]` |
+| `pdmhpf` | A | Get/set the onboard PDM high-pass cut-off in Hz, 0 = off (applies at the next capture start).<br/>`Usage: pdmhpf [0\|23-185]` |
 | `voicefetch` |  | Stream a recording to the UART host as binary frames (CM5 bulk pull).<br/>`Usage: voicefetch "<path>" - path must be under /recordings or /sd/recordings. Sends META+AUDIO frames on the UART link, then replies with byte/frame totals and crc16.` |
 
 ## edgeimpulse
@@ -781,7 +799,9 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `stt` |  | Local continuous or bounded speech-to-text with private session-owned results.<br/>`Usage: stt start \| record [1..20 seconds] \| status [id] \| stop\|cancel\|result\|next\|draft <id> \| ack <id> <sequence>` |
+| `sttdetector` |  | Show the mic-path (PDM gain, high-pass) and speech-detector (floors, percentile) tuning in effect.<br/>`Usage: sttdetector (onboard: sttautogain, pdmamplify, pdmhpf, sttspeechfloor, sttsilencefloor, sttnoisepercentile, sttdecisionpre; glasses: sttg2speechfloor, sttg2silencefloor, sttg2noisepercentile, sttg2decisionpre)` |
 | `sttperf` |  | STT pacing/profiling per segment (timings and CPU only, never text).<br/>`Usage: sttperf [show\|clear\|log on\|off\|stages [all\|clear]]` |
+| `sttraw` | A | Save the raw microphone input of continuous STT sessions to /sd/STT Raw for bench replay.<br/>`Usage: sttraw [status\|on\|off] (on arms the next continuous session; not kept across reboot)` |
 | `sttvocab` |  | Speech vocabulary: names and terms with their display spelling (STT Models/user_vocab.tsv).<br/>`Usage: sttvocab [list] \| add DISPLAY[\|spoken] \| remove <spoken> \| reload (edits need an administrator)` |
 
 ## espsr
@@ -1070,7 +1090,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `debugwificonnection` | A | Debug WiFi connection.<br/>`Usage: debugwificonnection <0\|1> [temp\|runtime]` |
 | `debugwifidriver` | A | Debug WiFi driver.<br/>`Usage: debugwifidriver <0\|1> [temp\|runtime]` |
 | `debugwifiscanning` | A | Debug WiFi scanning.<br/>`Usage: debugwifiscanning <0\|1> [temp\|runtime]` |
-| `log` | A | System-wide logging to file.<br/>`Usage: log <start\|stop\|status\|autostart> start ["filepath"] [flags=0x...] [tags=0\|1]: Begin system logging filepath: Log file path, quoted (auto-generated if omitted) flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h) tags: Prefix lines with category tags (0\|1, default 1) stop / status: Stop logging / show logging status autostart [on\|off]: Toggle logging auto-start on boot (bare = toggle)` |
+| `log` | A | System-wide logging to file.<br/>`Usage: log <start\|stop\|status\|autostart> start ["filepath"] [flags=0x...] [tags=0\|1]: Begin system logging filepath: Log file path, quoted (auto-generated if omitted) flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h) tags: Prefix lines with category tags (0\|1, default 1) stop / status: Stop logging / show logging status maxsize <bytes> / rotations <0-9>: Rotate the file at this size, keeping that many old files (.1, .2, ...) autostart [on\|off]: Toggle logging auto-start on boot (bare = toggle)` |
 | `loglevel` | A | Set log level (error\|warn\|info\|debug).<br/>`Usage: loglevel <error\|warn\|info\|debug>` |
 | `loglink` | A | Route ESP-IDF logs through the unified output queue (stops UART interleave).<br/>`Usage: loglink [<0\|1\|on\|off>] (bare = show status)` |
 | `memorysampleintervalsec` | A | Set memory sampling interval in seconds (0=disabled).<br/>`Usage: memorysampleintervalsec <0-300>` |
@@ -1248,23 +1268,16 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `otaack` | A | Acknowledge the durable OTA result after reviewing it.<br/>`Usage: otaack <result-sequence> confirm` |
-| `otaack` | A | Unavailable without the opt-in OTA layout. |
 | `otacancel` | A | Cancel a staged request before recovery boot is armed.<br/>`Usage: otacancel confirm` |
-| `otacancel` | A | Unavailable without the opt-in OTA layout. |
 | `otapin` | A | Set the persistent recovery WPA2/HTTP credential (serial console only).<br/>`Usage: otapin <12..63 printable characters> \| otapin clear confirm` |
-| `otapin` | A | Unavailable without the opt-in OTA layout. |
 | `otarecovery` | A | Reboot into authenticated recovery for direct upload.<br/>`Usage: otarecovery confirm [allow-downgrade]` |
-| `otarecovery` | A | Unavailable without the opt-in OTA layout. |
 | `otaresetjournal` | A | Serial-only repair of the two OTA transaction keys.<br/>`Usage: otaresetjournal confirm` |
-| `otaresetjournal` | A | Unavailable without the opt-in OTA layout. |
 | `otastage` | A | Validate and journal uploaded candidate.part + manifest.part.<br/>`Usage: otastage confirm [allow-downgrade]` |
-| `otastage` | A | Unavailable without the opt-in OTA layout. |
 | `otastatus` |  | Show signed recovery OTA state. (add 'json')<br/>`Usage: otastatus [json]` |
-| `otastatus` |  | Explain OTA availability for this build.<br/>`Usage: otastatus` |
 | `otaupdate` | A | Revalidate staged firmware and reboot into recovery apply.<br/>`Usage: otaupdate confirm [force-power]` |
-| `otaupdate` | A | Unavailable without the opt-in OTA layout. |
 | `otawrite` | A | Stage exact OTA members over encrypted Bluetooth.<br/>`Usage: otawrite begin <candidate\|manifest> <size> <sha256> \| status \| finish \| abort` |
-| `otawrite` | A | Unavailable without the opt-in OTA layout. |
+
+_`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the first branch. Other build configurations register a different version of these rows (for example stubs)._
 
 ## setpattern
 
@@ -1339,18 +1352,25 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## ring
 
-> The Even R1 smart ring over BLE, through a serialized, profile-gated transaction owner. ring scan [seconds] finds it and ring connect [mac|reconnect] connects (scanning first without a MAC); ring status [json] and ring disconnect show and end the link. ring health [json] reads vitals, ring controls and typed history; ring poll refreshes the vitals and ring history the history (ring history force, admin, skips the freshness window). ring query requests one reading; its raw form is admin-only, confirms every SET and refuses user-profile writes. ring control <collection|lowpower> <preserve|on|off> (admin) saves a desired state applied asynchronously, which the OLED and web Health controls also use; ring control refresh reads low power back. Bridging ring data onto the G2 glasses proved a dead end and was removed.
+> The Even R1 smart ring over BLE, through a serialized, profile-gated transaction owner. ring scan [seconds] finds it and ring connect [mac|reconnect] connects (scanning first without a MAC); ring status [json] and ring disconnect show and end the link. ring health [json] reads vitals, ring controls and typed history; ring poll refreshes the vitals and ring history the history (ring history force, admin, skips the freshness window). ring query requests one reading; its raw form is admin-only, confirms every SET and refuses user-profile writes. ring control <collection|lowpower> <preserve|on|off> (admin) saves a desired state applied asynchronously, which the OLED and web Health controls also use; ring control refresh reads low power back. The G2's own Health panel is fed the way the Even app feeds it: ring panel status and ring panel preview [test] show the snapshot and its bytes; ring panel send [test] (admin) sends one; ring panel feed [on|off] (admin; ring panel on and ring panel off are shorthands) feeds it automatically, saved and off by default, refreshing ring history every ring panel history [minutes] (admin, default 30).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `closering` | A | Close the R1 ring: drop its link and release its owner task (glasses, phone and Bluetooth stay up). |
 | `openring` | A | Open the R1 ring on the Bluetooth client stack and connect (scan, the saved address, reconnect, or a MAC).<br/>`Usage: openring [saved\|reconnect\|<mac>] (none = scan then connect; saved = the saved address; reconnect = drop, settle, connect)` |
-| `ring` |  | Even R1 ring.<br/>`Usage: ring <status\|scan\|connect\|disconnect\|health\|poll\|history\|query\|control>` |
+| `ring` |  | Even R1 ring.<br/>`Usage: ring <status\|scan\|connect\|disconnect\|health\|poll\|history\|query\|control\|panel>` |
 | `ring control` | A | Set the ring's health collection or low power.<br/>`Usage: ring control <collection\|lowpower> <preserve\|on\|off> (saved, applied asynchronously; ring health shows desired/observed)` |
 | `ring control refresh` |  | Read the ring's low-power state back. |
 | `ring health` |  | R1 vitals, ring controls and typed history. (add 'json' for JSON output) |
 | `ring history` |  | Refresh R1 typed history. |
 | `ring history force` | A | Refresh R1 typed history past the freshness window. |
+| `ring panel feed` | A | Feed the glasses' Health panel from the ring (saved; off by default).<br/>`Usage: ring panel feed [on\|off]` |
+| `ring panel history` | A | How often the feed refreshes ring history (steps, kcal, sleep).<br/>`Usage: ring panel history [minutes 10-1440] (default 30)` |
+| `ring panel off` | A | Same as ring panel feed off (saved). |
+| `ring panel on` | A | Same as ring panel feed on (saved). |
+| `ring panel preview` |  | Show the snapshot and its bytes without sending.<br/>`Usage: ring panel preview [test]` |
+| `ring panel send` | A | Send one snapshot to the glasses' Health panel now.<br/>`Usage: ring panel send [test] (test = fixed values 1234 steps, 210 kcal, sleep score 80 / 7h30m, 72 bpm, 98%)` |
+| `ring panel status` |  | Glasses Health panel feed: state, current values, last send and echo. |
 | `ring poll` |  | Refresh R1 vitals now. |
 | `ring query` |  | Queue one R1 query.<br/>`Usage: ring query <wear\|hr\|hrv\|spo2\|temp\|activity\|sleep> [daily\|point\|measure] ring query raw <module> <cmd> <subCmd> [hex_payload] [status=NN] (admin; a SET asks to confirm) status: bit0 type (0 notify, 1 ack), bit1 method (0 get, 1 set), bits2-3 ack (0 ok, 1 err, 2 refuse, 3 notSup)` |
 | `ring scan` |  | Scan for the R1 ring.<br/>`Usage: ring scan [seconds] (1..300, default 30)` |
@@ -1358,7 +1378,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## llm
 
-> On-device large language model that runs a quantized model file entirely on the device (model weights held in PSRAM). A model must be loaded before generation: llmload [file.bin] loads one (bare filenames are looked up on the SD card under /sd/llm then internal /system/llm), llmmodels lists available files, llmunload frees the PSRAM, llmstatus shows engine state, and llmautostart 0|1 / llmdefaultmodel control boot-time loading. Two generate forms: bare 'llmgenerate <prompt>' BLOCKS and prints the whole reply, while 'llmgenerate json ...' starts async and returns a session id immediately — then poll llmresult json <offset> repeatedly (each call returns new text, the running total length, and a done flag) until done flips true; llmstop aborts an in-progress generation. The engine keeps a multi-turn conversation: llmclear resets it, llmretry regenerates the last reply (async), and llmturns json <index> reads back one turn at a time. The llm* setters (temperature, topp, minp, maxtokens, sentencelimit, hardcap, reppenalty/repwindow, maxcontext, kvprec, norepeatngram, confthreshold, contentboost) are admin-only sampler and KV-cache defaults that persist to flash; kvprec and maxcontext only take effect on the next model load.
+> On-device large language model that runs a quantized model file entirely on the device (model weights held in PSRAM). A model must be loaded before generation: llmload [file.bin] loads one (bare filenames are looked up in internal /system/llm first, then on the SD card under /sd/llm), llmmodels lists available files, llmunload frees the PSRAM, llmstatus shows engine state, and llmautostart 0|1 / llmdefaultmodel control boot-time loading. Two generate forms: bare 'llmgenerate <prompt>' BLOCKS and prints the whole reply, while 'llmgenerate json ...' starts async and returns a session id immediately — then poll llmresult json <offset> repeatedly (each call returns new text, the running total length, and a done flag) until done flips true; llmstop aborts an in-progress generation. The engine keeps a multi-turn conversation: llmclear resets it, llmretry regenerates the last reply (async), and llmturns json <index> reads back one turn at a time. The llm* setters (temperature, topp, minp, maxtokens, sentencelimit, hardcap, reppenalty/repwindow, maxcontext, kvprec, norepeatngram, confthreshold, contentboost) are admin-only sampler and KV-cache defaults that persist to flash; kvprec and maxcontext only take effect on the next model load.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -1458,7 +1478,16 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `srautostart` | A | Set ESP-SR auto-start flag<br/>`Usage: srautostart <0\|1>` |
 | `srenabled` | A | Enable/disable the speech-recognition subsystem<br/>`Usage: srenabled <0\|1>` |
 | `srmodelsource` | A | Set ESP-SR model source<br/>`Usage: srmodelsource <value>` |
+| `sttautogain` | A | STT picks its own onboard-mic gain (changed only when several sessions agree) and a 120 Hz high-pass; 0 = use pdmamplify/pdmhpf. Applies to the next session.<br/>`Usage: sttautogain [0\|1]` |
+| `sttdecisionpre` | A | Continuous-STT onset judge on pre-emphasised audio (coefficient x0.01; 0 = loudness only, 97 = default); applies to the next session.<br/>`Usage: sttdecisionpre [0-99]` |
+| `sttg2decisionpre` | A | G2 glasses-mic profile: onset judge on pre-emphasised audio (x0.01; 0 = loudness only); applies to the next session.<br/>`Usage: sttg2decisionpre [0-99]` |
+| `sttg2noisepercentile` | A | G2 glasses-mic profile: noise-window percentile used as the room level; applies to the next session.<br/>`Usage: sttg2noisepercentile [0-50]` |
+| `sttg2silencefloor` | A | G2 glasses-mic profile: silence floor in frame-RMS counts; applies to the next session.<br/>`Usage: sttg2silencefloor [1-32767]` |
+| `sttg2speechfloor` | A | G2 glasses-mic profile: speech onset floor in frame-RMS counts; applies to the next session.<br/>`Usage: sttg2speechfloor [1-32767]` |
+| `sttnoisepercentile` | A | Continuous-STT noise-window percentile used as the room level; applies to the next session.<br/>`Usage: sttnoisepercentile [0-50]` |
 | `sttsavetranscripts` | A | Save recognized text; changes apply to the next STT session.<br/>`Usage: sttsavetranscripts [0\|1]` |
+| `sttsilencefloor` | A | Continuous-STT silence floor in frame-RMS counts; applies to the next session.<br/>`Usage: sttsilencefloor [1-32767]` |
+| `sttspeechfloor` | A | Continuous-STT speech onset floor in frame-RMS counts; applies to the next session.<br/>`Usage: sttspeechfloor [1-32767]` |
 | `systemlogenabled` | A | Enable/disable system logging entirely: <0\|1><br/>`Usage: systemlogenabled <0\|1>` |
 | `systemlogflags` | A | Set system-log debug category mask (hex)<br/>`Usage: systemlogflags <0x...>` |
 | `thermalenabled` | A | Enable/disable the thermal camera subsystem<br/>`Usage: thermalenabled <0\|1>` |

@@ -2,8 +2,9 @@
 """Execute the shipping settings writers with real ArduinoJson and file faults.
 
 The shared snapshot helper, main/debug/restamp and per-user entry points,
-load/mutate/save transactions, writer mutex and filesystem guard are extracted
-without rewriting their bodies. File/VFS/stat, the live-settings document builder,
+load/mutate/save transactions, the boot loader and the parse-failure quarantine,
+writer mutex and filesystem guard are extracted without rewriting their
+bodies. File/VFS/stat, the live-settings document builder,
 RTOS and cache invalidation are observed boundaries. --baseline replays targeted
 regressions against saved code. --case user-parity prints synthetic JSON hashes
 for byte comparisons; --case user also characterizes the legacy save failures.
@@ -42,12 +43,21 @@ def generate(source: str) -> str:
         helper = (extract_block(source, "struct JsonSnapshotWriteResult") + ";\n" +
                   extract_block(source, "static JsonSnapshotWriteResult writeJsonSnapshot(") +
                   "\n" + helper)
+    # Quarantine helpers (absent from older trees, which --baseline and a
+    # fail-without-fix replay compile unchanged).
+    quarantine = ""
+    if "static bool quarantineCorruptFile(" in source:
+        start_q = source.index("static constexpr unsigned kCorruptQuarantineKeep")
+        body = extract_block(source, "static bool quarantineCorruptFile(")
+        quarantine = source[start_q:source.index("static bool quarantineCorruptFile(")] + body
     user_markers = [
         "String getUserSettingsPath(", "bool loadUserSettings(",
         "struct UserPrefsInvalidateOnExit", "bool saveUserSettings(",
         "UserSettingsTxnStatus runUserSettingsTransaction(",
         "struct UserSettingsMergeContext", "bool mergeUserSettingsMutation(",
         "bool mergeAndSaveUserSettings("]
+    if "static void quarantineUserSettingsFile(" in source:
+        user_markers.insert(1, "static void quarantineUserSettingsFile(")
     # The merge's editable-key list (absent from older trees).
     if "const char* userSettingsPatchRefusedKey(" in source:
         user_markers.insert(-1, "const char* userSettingsPatchRefusedKey(")
@@ -57,6 +67,7 @@ def generate(source: str) -> str:
         declaration = extract_block(source, marker)
         user_functions = user_functions.replace(declaration, declaration + ";")
     definitions = [extract_block(source, marker) for marker in (
+        "void settingsMarkLoadedOk()", "bool readSettingsJson()",
         "static bool writeSettingsJsonImpl(", "bool writeSettingsJson(", "bool writeSettingsJsonForFactoryReset(", "static void buildDebugJsonDoc(",
         "bool writeDebugJson(", "bool settingsFirmwareVersionRestampPending(",
         "bool settingsRestampFirmwareVersion(")]
@@ -64,7 +75,7 @@ def generate(source: str) -> str:
     for marker, text in {
         "// INSERT_FS_GUARD": guard,
         "// INSERT_WRITER_GUARD": source[start:end],
-        "// INSERT_SNAPSHOT": helper,
+        "// INSERT_SNAPSHOT": helper + "\n" + quarantine,
         "// INSERT_WRITERS": "\n\n".join(definitions),
         "// INSERT_USER_WRITERS": user_functions,
     }.items():

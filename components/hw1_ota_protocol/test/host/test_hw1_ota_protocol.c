@@ -146,6 +146,66 @@ static void test_manifest_auth_and_policy(void)
           HW1_OTA_ERR_CORRUPT);
 }
 
+/* A signed minUpdaterVersion refuses a factory updater older than it and
+ * accepts an equal or newer one (the updater's +suffix is build metadata). */
+static void test_min_updater_gating(void)
+{
+    const uint8_t marker = 0xa5;
+    hw1_ota_manifest_t source = make_manifest();
+    hw1_ota_verified_manifest_t verified;
+    uint8_t payload[HW1_OTA_MANIFEST_PAYLOAD_WIRE_SIZE];
+    uint8_t signature[HW1_OTA_RSA3072_SIGNATURE_SIZE];
+    hw1_ota_target_policy_t policy = {
+        .board_id = HW1_OTA_BOARD_ID_FEATHERS3,
+        .layout_id = HW1_OTA_LAYOUT_ID_FEATHERS3_OTA_V1,
+        .project_name = "hardwareone-idf",
+        .required_version_suffix = HW1_OTA_VERSION_SUFFIX_FEATHERS3_PLAIN,
+        .current_updater_version = NULL,
+        .maximum_image_size = 0x00595000u,
+        .minimum_data_schema = 2,
+        .maximum_data_schema = 4,
+    };
+    static const char *const refused[] = {
+        "1.0.0+f3o1", "1.0.9+f3o1", "1.1.0-rc.1+f3o1", "0.99.99+f3o1",
+    };
+    static const char *const accepted[] = {
+        "1.1.0+f3o1", "1.1.0", "1.1.1+f3o1", "1.2.0+f3o1", "2.0.0+f3o1",
+    };
+    uint32_t mismatches;
+    size_t i;
+
+    strcpy(source.min_updater_version, "1.1.0");
+    memset(signature, 0, sizeof(signature));
+    signature[0] = marker;
+    CHECK(hw1_ota_manifest_encode(&source, payload) == HW1_OTA_OK);
+    CHECK(hw1_ota_manifest_verify(payload, sizeof(payload), signature, sizeof(signature),
+                                  accepting_verifier, (void *)&marker, &verified) == HW1_OTA_OK);
+    CHECK(strcmp(verified.manifest.min_updater_version, "1.1.0") == 0);
+
+    for (i = 0; i < sizeof(refused) / sizeof(refused[0]); ++i) {
+        policy.current_updater_version = refused[i];
+        mismatches = 0;
+        CHECK(hw1_ota_manifest_validate(&verified, &policy, source.image_size,
+                                        source.image_sha256, &mismatches) ==
+              HW1_OTA_ERR_INCOMPATIBLE);
+        CHECK(mismatches == HW1_OTA_MANIFEST_MISMATCH_UPDATER_VERSION);
+    }
+    for (i = 0; i < sizeof(accepted) / sizeof(accepted[0]); ++i) {
+        policy.current_updater_version = accepted[i];
+        mismatches = UINT32_MAX;
+        CHECK(hw1_ota_manifest_validate(&verified, &policy, source.image_size,
+                                        source.image_sha256, &mismatches) == HW1_OTA_OK);
+        CHECK(mismatches == 0);
+    }
+
+    /* An unparsable updater version never satisfies the floor. */
+    policy.current_updater_version = "1.1";
+    CHECK(hw1_ota_manifest_validate(&verified, &policy, source.image_size,
+                                    source.image_sha256, &mismatches) ==
+          HW1_OTA_ERR_INCOMPATIBLE);
+    CHECK((mismatches & HW1_OTA_MANIFEST_MISMATCH_UPDATER_VERSION) != 0);
+}
+
 static void test_semver(void)
 {
     bool valid = false;
@@ -521,6 +581,7 @@ int main(void)
     test_crc_and_sequence();
     test_manifest_auth_and_policy();
     test_semver();
+    test_min_updater_gating();
     test_record_round_trip_and_transitions();
     test_failure_and_cancel_rules();
     test_phase_predicates();

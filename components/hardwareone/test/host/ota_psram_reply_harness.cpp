@@ -106,9 +106,25 @@ struct hw1_ota_record_t {
 };
 struct hw1_ota_nvs_info_t {};
 struct esp_partition_t { const char* label = "ota_0"; };
-struct esp_app_desc_t { const char* version = "1.0.0+test"; };
+struct esp_app_desc_t { char project_name[32]; char version[32]; };
 using esp_ota_img_states_t = int;
 static constexpr int ESP_OTA_IMG_UNDEFINED = 0;
+// Factory-slot descriptor seen by the production readFactoryUpdaterVersion().
+enum { ESP_PARTITION_TYPE_APP = 0 };
+enum { ESP_PARTITION_SUBTYPE_APP_FACTORY = 0 };
+static bool factoryPresent = true, factoryDescriptorOk = true;
+static esp_app_desc_t factoryDesc{"hw1-updater", "1.1.0+test"};
+static const esp_partition_t* esp_partition_find_first(int type, int subtype, const char* label) {
+  check(type == ESP_PARTITION_TYPE_APP && subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY &&
+        std::string(label) == "factory", "status reads the factory app slot");
+  static esp_partition_t factory{"factory"};
+  return factoryPresent ? &factory : nullptr;
+}
+static int esp_ota_get_partition_description(const esp_partition_t*, esp_app_desc_t* desc) {
+  if (!factoryDescriptorOk) return 1;
+  *desc = factoryDesc;
+  return 0;
+}
 static unsigned loadCalls = 0;
 static bool journalOk = true;
 static bool loadRecord(hw1_ota_record_t&, hw1_ota_nvs_info_t*, bool repair,
@@ -120,7 +136,10 @@ static bool loadRecord(hw1_ota_record_t&, hw1_ota_nvs_info_t*, bool repair,
 }
 static const esp_partition_t* esp_ota_get_running_partition() { static esp_partition_t part; return &part; }
 static int esp_ota_get_state_partition(const esp_partition_t*, esp_ota_img_states_t* state) { *state = 2; return 0; }
-static const esp_app_desc_t* esp_app_get_description() { static esp_app_desc_t desc; return &desc; }
+static const esp_app_desc_t* esp_app_get_description() {
+  static esp_app_desc_t desc{"hardwareone-idf", "0.99.99+test"};
+  return &desc;
+}
 static uint32_t otaSlotSize() { return 0x480000; }
 static bool credentialConfigured() { return true; }
 static const char* phaseName(int) { return "requested"; }
@@ -185,6 +204,26 @@ static JsonDocument decoded(const char* text) {
   check(!deserializeJson(doc, text), "OTA response is complete valid JSON");
   return doc;
 }
+static void testFactoryUpdaterUnavailable() {
+  // Every way the descriptor read can fail reports "unavailable", never a
+  // stale or partial version.
+  const esp_app_desc_t saved = factoryDesc;
+  for (int failure = 0; failure < 4; ++failure) {
+    factoryPresent = failure != 0;
+    factoryDescriptorOk = failure != 1;
+    if (failure == 2) std::snprintf(factoryDesc.project_name, sizeof(factoryDesc.project_name), "hardwareone-idf");
+    if (failure == 3) std::memset(factoryDesc.version, 'x', sizeof(factoryDesc.version));
+    auto doc = decoded(cmdOtaStatus("json"));
+    check(doc["factoryUpdaterVersion"] == "unavailable",
+          "missing/unreadable/foreign/unterminated factory descriptor reports unavailable");
+    check(std::string(cmdOtaStatus("")).find("\nFactory updater: unavailable\n") != std::string::npos,
+          "status text reports an unreadable factory updater as unavailable");
+    factoryDesc = saved;
+  }
+  factoryPresent = factoryDescriptorOk = true;
+  check(decoded(cmdOtaStatus("json"))["factoryUpdaterVersion"] == "1.1.0+test",
+        "factory updater version returns once the slot reads again");
+}
 static void testStatus() {
   check(bufferAttempts == 0 && buffers.empty(), "reply memory starts unallocated");
   check(std::string(cmdOtaStatus("invalid")).find("Usage:") != std::string::npos && bufferAttempts == 0,
@@ -199,12 +238,17 @@ static void testStatus() {
   check(doc["available"] == true && doc["slotSize"] == 0x480000 && doc["board"] == HW1_OTA_BOARD_ID,
         "status JSON content remains intact");
   check(doc["lastProbationAbortDetail"] == "test probation detail", "status trailing fields survive capacity handling");
+  check(doc["factoryUpdaterVersion"] == "1.1.0+test" && doc["runningVersion"] == "0.99.99+test",
+        "status JSON reports the factory updater's own version beside the running app");
   const unsigned attempts = bufferAttempts;
   const char* text = cmdOtaStatus("");
   check(text == json && bufferAttempts == attempts, "status text/JSON reuse persistent buffer");
   check(std::strlen(text) > 128 && std::string(text).find("Last result:") != std::string::npos,
         "status text uses real capacity rather than sizeof pointer");
   expectCapacity(text, 1536);
+  check(std::string(text).find("\nFactory updater: 1.1.0+test\n") != std::string::npos,
+        "status text names the factory updater version");
+  testFactoryUpdaterUnavailable();
   journalOk = false;
   auto unavailable = decoded(cmdOtaStatus("json"));
   check(unavailable["journalOk"] == false && unavailable["journalError"] == "test journal unavailable",

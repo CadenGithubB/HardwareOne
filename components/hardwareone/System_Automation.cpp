@@ -364,12 +364,19 @@ bool writeAutomationLogEntry(const AutomationLogSession& session,
       !line.concat(" | ") || !line.concat(message.c_str()) || !line.concat("\n")) return false;
 
   // Overflow may add "/sd/". Keep the complete path rather than silently
-  // truncating it into a different destination. False means primary storage.
+  // truncating it into a different destination.
   const size_t pathSize = session.filename.length() + 5;
   std::unique_ptr<char, decltype(&free)> dest(
       static_cast<char*>(ps_alloc(pathSize, AllocPref::PreferPSRAM, "automation.log.path")), &free);
   if (!dest) return false;
-  VFS::resolveOverflowPath(session.filename.c_str(), line.length() + 512, dest.get(), pathSize);
+  if (VFS::resolveLogPath(session.filename.c_str(), line.length() + 512, dest.get(), pathSize) ==
+      VFS::LogTier::Refused) {
+    // LittleFS is below the 100 KB floor and no card takes the
+    // overflow; the entry would spend the reserve automations.json and
+    // settings saves depend on. Dropped and counted like a capped log line.
+    VFS::noteLogReserveDrop();
+    return false;
+  }
   String destStr(dest.get());
   if (destStr.length() != strlen(dest.get())) return false;
   const int lastSlash = destStr.lastIndexOf('/');
@@ -652,6 +659,92 @@ bool sanitizeAutomationsJson(String& jsonRef) {
 }
 
 // ============================================================================
+// automations.json format version
+// ============================================================================
+// Every read checks the top-level "version" against kAutomationsFileVersion.
+// No "version" (older files) or a version up to this one loads as before: the
+// reader has never branched on the number, and version 1 files share the
+// "automations" array (an entry without a "triggers" array has never fired).
+// A newer version is refused: nothing in it is loaded or run, and nothing is
+// changed and written back from it, so the newer firmware finds its file as
+// it left it. A malformed file or a non-numeric version is left to the
+// callers' own parse checks, as before.
+
+// The file's version when it is newer than this firmware reads, else 0.
+static uint32_t automationsNewerFileVersion(const String& json) {
+  PSRAM_JSON_DOC(filter);
+  filter["version"] = true;
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, json, DeserializationOption::Filter(filter))) return 0;
+  JsonVariantConst version = doc["version"];
+  if (!version.is<double>()) return 0;
+  const double n = version.as<double>();
+  if (!(n > (double)kAutomationsFileVersion)) return 0;
+  return n < 4.0e9 && (uint32_t)n > kAutomationsFileVersion ? (uint32_t)n
+                                                            : kAutomationsFileVersion + 1;
+}
+
+// The newer version the last read refused (0: the last read was not refused).
+// Commands name it in their error. The console line is printed once, again
+// only after a read finds another version.
+static std::atomic<uint32_t> sAutomationsRefusedVersion{0};
+
+enum class AutomationsRead : uint8_t { Ok, Missing, Refused };
+
+static AutomationsRead readAutomationsFile(String& json, uint32_t* newerVersion = nullptr) {
+  if (newerVersion) *newerVersion = 0;
+  if (!readText(AUTOMATIONS_JSON_FILE, json,
+                VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
+    sAutomationsRefusedVersion = 0;
+    return AutomationsRead::Missing;
+  }
+  const uint32_t newer = automationsNewerFileVersion(json);
+  const uint32_t before = sAutomationsRefusedVersion.exchange(newer);
+  if (newerVersion) *newerVersion = newer;
+  if (!newer) return AutomationsRead::Ok;
+  if (before != newer) {
+    ERROR_SYSTEMF("[automations] %s is format %lu, newer than this firmware reads (%lu): "
+                  "automations not loaded, file left unchanged",
+                  AUTOMATIONS_JSON_FILE, (unsigned long)newer,
+                  (unsigned long)kAutomationsFileVersion);
+  }
+  json = "";
+  return AutomationsRead::Refused;
+}
+
+bool readAutomationsJson(String& json) {
+  return readAutomationsFile(json) == AutomationsRead::Ok;
+}
+
+bool readAutomationsJson(String& json, uint32_t* newerVersion) {
+  return readAutomationsFile(json, newerVersion) == AutomationsRead::Ok;
+}
+
+String automationsEmptyStoreJson() {
+  char text[64];
+  snprintf(text, sizeof(text), "{\n  \"version\": %lu,\n  \"automations\": []\n}\n",
+           (unsigned long)kAutomationsFileVersion);
+  return String(text);
+}
+
+// Loads the store for an edit. No file: the empty store, written unless
+// persistSeed is false. False when the file was refused: the caller must stop,
+// and nothing was seeded or written (the empty store never replaces a newer
+// file).
+static bool loadAutomationsStoreForEdit(String& json, bool persistSeed) {
+  const AutomationsRead read = readAutomationsFile(json);
+  if (read == AutomationsRead::Refused) return false;
+  if (read == AutomationsRead::Missing || json.length() == 0) {
+    json = automationsEmptyStoreJson();
+    if (persistSeed) {
+      writeAutomationsJsonAtomic(json);
+      DEBUGF(DEBUG_AUTOMATIONS, "[autos add] created default automations.json");
+    }
+  }
+  return true;
+}
+
+// ============================================================================
 // In-RAM cache of per-automation scheduling metadata
 // ============================================================================
 // The scheduler runs every main-loop iteration. Without a cache it would have
@@ -706,6 +799,11 @@ static std::atomic<uint32_t>
     gAutomationEventKindMask[AUTOMATION_EVENT_MASK_WORDS]{};
 // Set when a subscribed event was posted; cleared when the tick drains.
 static std::atomic_bool gAutomationEventsPending{false};
+// Newest bus event seq when the scheduler last started (UINT32_MAX: never).
+// The first event drain starts here, not at its own "now": setup starts
+// the scheduler, but its first drain runs in loop(), so events posted in
+// between (battery_low from a low cell at boot) were skipped unmatched.
+static std::atomic<uint32_t> gAutomationEventStartSeq{UINT32_MAX};
 
 // Publish a coherent, valid empty view when the backing file is absent or
 // malformed.  A merely-invalid cache makes automationsAnyDue() request another
@@ -766,7 +864,7 @@ static void releaseAutomationsCache() {
 // full tick so post-fire nextAt updates are captured on the same pass.
 static void rebuildAutomationsCache() {
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
+  if (!readAutomationsJson(json)) {
     markAutomationsCacheEmptyValid();
     return;
   }
@@ -895,6 +993,11 @@ static bool automationsAnyDue(time_t now) {
 // Notify only after a successful save. The next owner tick refreshes the cache;
 // a failed replacement leaves both the previous file and schedule intact.
 bool writeAutomationsJsonAtomic(const String& json) {
+  if (automationsNewerFileVersion(json)) {
+    ERROR_SYSTEMF("[automations] Refused to write %s with a format newer than %lu",
+                  AUTOMATIONS_JSON_FILE, (unsigned long)kAutomationsFileVersion);
+    return false;
+  }
   if (!writeTextAtomic(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return false;
   notifyAutomationScheduler();
   return true;
@@ -910,7 +1013,7 @@ static bool ensureAutomationsFile() {
     return true;
   }
 
-  const String empty = "{\n  \"version\": 2,\n  \"automations\": []\n}\n";
+  const String empty = automationsEmptyStoreJson();
   if (!writeAutomationsJsonAtomic(empty)) {
     ERROR_SYSTEMF("[automations] Failed to create %s", AUTOMATIONS_JSON_FILE);
     return false;
@@ -926,7 +1029,7 @@ static bool ensureAutomationsFile() {
 // Phase 1B will remove the alias and force an explicit trigger index.
 bool updateAutomationTriggerNextAt(long automationId, int triggerIdx, time_t newNextAt) {
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return false;
+  if (!readAutomationsJson(json)) return false;
 
   PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, json);
@@ -980,6 +1083,18 @@ bool updateAutomationNextAt(long automationId, time_t newNextAt) {
   return updateAutomationTriggerNextAt(automationId, -1, newNextAt);
 }
 
+// A command's read error: names the newer format when the file was refused.
+static void broadcastAutomationsReadError() {
+  const uint32_t newer = sAutomationsRefusedVersion.load();
+  if (!newer) {
+    broadcastOutput("Error: failed to read automations.json");
+    return;
+  }
+  BROADCAST_PRINTF("Error: automations.json is format %lu, newer than this firmware reads (%lu). "
+                   "Not loaded and left unchanged; update the firmware to use it.",
+                   (unsigned long)newer, (unsigned long)kAutomationsFileVersion);
+}
+
 // Run automations on boot
 void runAutomationsOnBoot() {
   static bool s_ran = false;
@@ -992,7 +1107,7 @@ void runAutomationsOnBoot() {
 
   // Read automations.json
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
+  if (!readAutomationsJson(json)) {
     DEBUGF(DEBUG_AUTOMATIONS, "[automations] No automations file found");
     return;
   }
@@ -1172,6 +1287,11 @@ void runAutomationsOnBoot() {
                    id, autoName.c_str(), condition.c_str());
           appendAutoLogEntry("AUTO_SKIP", skipMsg);
         }
+        // The command copies were made before the condition was known; a
+        // skipped automation releases them here (they used to leak each boot).
+        for (int ci = 0; ci < cmdsCount; ++ci) {
+          free(cmdsList[ci]);
+        }
         pos = objEnd + 1;
         continue;
       }
@@ -1268,8 +1388,8 @@ void runAutomationCommandUnified(const String& argsInput) {
 const char* cmd_automation_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
-    broadcastOutput("Error: failed to read automations.json");
+  if (!readAutomationsJson(json)) {
+    broadcastAutomationsReadError();
     return "ERROR";
   }
   const String safeJson = redactAutomationsJsonForResponse(json);
@@ -1447,13 +1567,9 @@ const char* cmd_automation_add(const String& argsInput) {
   bool runAtBoot = (runAtBootStr.equalsIgnoreCase("1") || runAtBootStr.equalsIgnoreCase("true") || runAtBootStr.equalsIgnoreCase("yes"));
   
   String json;
-  bool hadFile = readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"));
-  if (!hadFile || json.length() == 0) {
-    json = String("{\n  \"version\": 2,\n  \"automations\": []\n}\n");
-    if (!validateOnly) {
-      writeAutomationsJsonAtomic(json);
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos add] created default automations.json");
-    }
+  if (!loadAutomationsStoreForEdit(json, !validateOnly)) {
+    broadcastAutomationsReadError();
+    return "ERROR";
   }
   
   // If a specific id= was provided and that entry already exists, remove it first
@@ -1748,8 +1864,8 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
   }
   
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
-    broadcastOutput("Error: failed to read automations.json");
+  if (!readAutomationsJson(json)) {
+    broadcastAutomationsReadError();
     return "ERROR";
   }
   
@@ -1825,8 +1941,8 @@ const char* cmd_automation_delete(const String& argsInput) {
   }
   
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
-    BROADCAST_PRINTF("Error: failed to read automations.json");
+  if (!readAutomationsJson(json)) {
+    broadcastAutomationsReadError();
     return "ERROR";
   }
 
@@ -1936,8 +2052,8 @@ const char* cmd_automation_run(const String& argsInput) {
   }
   
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
-    broadcastOutput("Error: failed to read automations.json");
+  if (!readAutomationsJson(json)) {
+    broadcastAutomationsReadError();
     return "ERROR";
   }
   
@@ -2187,8 +2303,8 @@ const char* cmd_automation_trigger(const String& argsInput) {
   }
 
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
-    broadcastOutput("Error: failed to read automations.json");
+  if (!readAutomationsJson(json)) {
+    broadcastAutomationsReadError();
     return "ERROR";
   }
 
@@ -2323,7 +2439,11 @@ const char* cmd_automation(const String& argsInput) {
     return cmd_automation_delete(subArgs);
   } else if (subCmd == "sanitize") {
     String json;
-    if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return "Error: failed to read automations.json";
+    if (!readAutomationsJson(json)) {
+      if (!sAutomationsRefusedVersion.load()) return "Error: failed to read automations.json";
+      broadcastAutomationsReadError();
+      return "ERROR";
+    }
     if (sanitizeAutomationsJson(json)) {
       if (!writeAutomationsJsonAtomic(json)) return "Error: failed to write automations.json";
       DEBUGF(DEBUG_AUTOMATIONS, "[autos] CLI sanitize: fixed duplicate IDs; scheduler refresh queued");
@@ -2685,7 +2805,7 @@ static void fillAutomationSummary(JsonObjectConst a, AutomationSummary& out) {
 bool automationCopySummaries(AutomationSummary* out, size_t maxCount, size_t* count) {
   if (count) *count = 0;
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return false;
+  if (!readAutomationsJson(json)) return false;
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json)) return false;
   JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
@@ -2701,7 +2821,7 @@ bool automationCopySummaries(AutomationSummary* out, size_t maxCount, size_t* co
 bool automationFindSummary(long id, AutomationSummary* out) {
   if (!out) return false;
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return false;
+  if (!readAutomationsJson(json)) return false;
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json)) return false;
   JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
@@ -2865,7 +2985,7 @@ static void rescheduleAfterFire(long id, const char* automationJson, time_t fire
 
   // Rewrite the triggers array in the file.
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return;
+  if (!readAutomationsJson(json)) return;
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json)) return;
   JsonArray autos = doc["automations"].as<JsonArray>();
@@ -2913,7 +3033,7 @@ static int automationRecomputeAllClockTriggers(time_t now, int* outSkipped) {
   if (outSkipped) *outSkipped = 0;
 
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return -1;
+  if (!readAutomationsJson(json)) return -1;
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json)) return -1;
   JsonArray autos = doc["automations"].as<JsonArray>();
@@ -4190,6 +4310,9 @@ static void schedulerTickMinute() {
   }
   int evCount = 0;  // no buffer => nothing drained; the clock scan below still runs
   if (sEventBuf) {
+    // First drain: resume from the scheduler start. If no start was
+    // recorded the sentinel stays and fetch begins "from now".
+    if (sEventCursor == UINT32_MAX) sEventCursor = gAutomationEventStartSeq.load();
     uint32_t skippedBefore = sEventRingSkipped;
     evCount = systemEventFetchSince(&sEventCursor, sEventBuf, SYSEVT_RING_SIZE,
                                     &sEventRingSkipped);
@@ -4215,7 +4338,9 @@ static void schedulerTickMinute() {
     // Heap too tight to drain: event triggers sit this tick out rather than
     // deref a null buffer. The cursor is still UINT32_MAX (this branch can only
     // be reached before the first successful alloc), so a later tick that does
-    // get memory starts "from now" and reports no bogus skip gap. Clearing
+    // get memory starts from the scheduler start; the 60 s discard drops what
+    // went stale meanwhile, and a skip gap means the ring really overwrote
+    // events this consumer never read. Clearing
     // gAutomationEventsPending above means we wait for the next posted event or the
     // 60 s safety tick to retry, instead of re-reading and re-parsing
     // automations.json every 250 ms while the heap is already exhausted.
@@ -4230,7 +4355,7 @@ static void schedulerTickMinute() {
 
   // Load automations.json
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
+  if (!readAutomationsJson(json)) {
     // Missing is a valid empty deployment state (notably when upgrading a
     // profile that previously compiled Automations out).  Publish that state
     // so the fast due check remains I/O-free until the 60-second safety tick
@@ -4584,7 +4709,7 @@ static void schedulerTickMinute() {
     unsigned long nowMs = millis();
     if (nowMs - s_lastAutoSanitizeMs > 5000UL) {
       String fix;
-      if (readText(AUTOMATIONS_JSON_FILE, fix, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
+      if (readAutomationsJson(fix)) {
         if (sanitizeAutomationsJson(fix)) {
           if (writeAutomationsJsonAtomic(fix)) {
             DEBUGF(DEBUG_AUTOMATIONS, "[autos] Runtime sanitize applied after duplicate detection; scheduler refresh queued");
@@ -4646,6 +4771,9 @@ bool startAutomationScheduler() {
   // CLI/web store, including devices first provisioned by a profile that had
   // the feature compiled out.
   if (!ensureAutomationsFile()) return false;
+  // Events posted from here on are matched by the first drain. Later
+  // starts store it too, but only a drain that has not run yet reads it.
+  gAutomationEventStartSeq = systemEventLatestSeq();
   {
     AutomationStateGuard guard;
     if (!ensureAutomationsCache()) return false;

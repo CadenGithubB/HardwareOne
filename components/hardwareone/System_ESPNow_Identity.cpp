@@ -56,6 +56,43 @@ bool hexToBytes(const char* in, size_t inLen, uint8_t* out, size_t outLen) {
   return true;
 }
 
+// Stream `doc` into the sibling `tmp` and promote it over `dest` only when
+// the file holds every byte measureJson() promised. On a nearly full LittleFS
+// serializeJson stops short but still returns a positive count; promoting that
+// would leave a truncated identity which boot refuses to load, and only a
+// bond-wiping regeneration repairs it. On any failure the temp is removed and
+// the previous file is left exactly as it was. Caller holds the filesystem lock.
+bool writeJsonFileComplete(const JsonDocument& doc, const char* tmp, const char* dest,
+                           const char* owner) {
+  const auto auth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, owner);
+  const size_t expected = doc.overflowed() ? 0 : measureJson(doc);
+  if (expected == 0) {
+    ERROR_ESPNOWF("%s: document could not be serialized; %s kept", owner, dest);
+    return false;
+  }
+  File f = VFS::openGuarded(tmp, "w", auth, true);
+  if (!f) {
+    ERROR_ESPNOWF("%s: cannot open %s", owner, tmp);
+    return false;
+  }
+  const size_t written = serializeJson(doc, f);
+  f.flush();
+  const size_t stored = f.size();
+  f.close();
+  if (written != expected || stored != expected) {
+    ERROR_ESPNOWF("%s: incomplete write to %s (%u/%u bytes, %u stored); %s kept",
+                  owner, tmp, (unsigned)written, (unsigned)expected, (unsigned)stored, dest);
+    VFS::removeGuarded(tmp, auth);
+    return false;
+  }
+  if (!VFS::renameGuarded(tmp, dest, auth)) {
+    ERROR_ESPNOWF("%s: rename %s -> %s failed", owner, tmp, dest);
+    VFS::removeGuarded(tmp, auth);
+    return false;
+  }
+  return true;
+}
+
 bool ensureIdentityDirs() {
   auto auth = VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.identity.mkdir");
   if (!VFS::existsGuarded("/system", auth)) {
@@ -100,30 +137,7 @@ bool writeIdentityFile(const EspNowIdentity& id) {
   doc["regenCount"]                    = id.regenCount;
 
   FsLockGuard fsGuard("espnow.identity.write");
-
-  File f = VFS::openGuarded(kIdentityTempPath, "w",
-                            VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.identity.write"), true);
-  if (!f) {
-    ERROR_ESPNOWF("identity write: cannot open %s", kIdentityTempPath);
-    return false;
-  }
-  size_t written = serializeJson(doc, f);
-  f.flush();
-  f.close();
-  if (written == 0) {
-    ERROR_ESPNOWF("identity write: serializeJson produced 0 bytes");
-    VFS::removeGuarded(kIdentityTempPath, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.identity.write"));
-    return false;
-  }
-
-  if (!VFS::renameGuarded(kIdentityTempPath, kIdentityPath,
-                          VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.identity.write"))) {
-    ERROR_ESPNOWF("identity write: rename %s -> %s failed",
-                  kIdentityTempPath, kIdentityPath);
-    VFS::removeGuarded(kIdentityTempPath, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.identity.write"));
-    return false;
-  }
-  return true;
+  return writeJsonFileComplete(doc, kIdentityTempPath, kIdentityPath, "espnow.identity.write");
 }
 
 // Read on success returns true; out is populated. On absence returns false
@@ -394,24 +408,7 @@ bool writePeerIdentityFile(const PeerIdentity& p) {
   doc["subscribedEvents"]         = p.subscribedEvents;  // Phase 5
 
   FsLockGuard fsGuard("espnow.peer_identity_write");
-  File f = VFS::openGuarded(tmp, "w",
-                            VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_write"), true);
-  if (!f) {
-    ERROR_ESPNOWF("peer identity write: open %s failed", tmp);
-    return false;
-  }
-  size_t written = serializeJson(doc, f);
-  f.flush();
-  f.close();
-  if (written == 0) {
-    VFS::removeGuarded(tmp, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_write"));
-    return false;
-  }
-  if (!VFS::renameGuarded(tmp, path, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_write"))) {
-    VFS::removeGuarded(tmp, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_write"));
-    return false;
-  }
-  return true;
+  return writeJsonFileComplete(doc, tmp, path, "espnow.peer_identity_write");
 }
 
 bool readPeerIdentityFile(const char* path, PeerIdentity& out) {
@@ -625,5 +622,9 @@ const PeerIdentity* peerIdentityAt(uint8_t i) {
 uint8_t peerIdentitySlotCount() {
   return kPeerSlots;
 }
+
+uint8_t espnowIdentityFileVersion() { return kIdentityFileVersion; }
+
+uint8_t peerIdentityFileVersion() { return kPeerFileVersion; }
 
 #endif  // ENABLE_ESPNOW

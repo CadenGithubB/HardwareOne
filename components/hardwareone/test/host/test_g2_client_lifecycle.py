@@ -323,19 +323,25 @@ def main() -> None:
         work = Path(directory)
         source = generated(args.component)
 
-        def run(name: str, pipe: int) -> str:
+        def run(name: str, pipe: int, classic: bool = False) -> str:
             path = work / (name + ".cpp")
             path.write_text(source)
-            subprocess.run([args.cxx, *flags, f"-DENABLE_BLE_PHONE_PIPE={pipe}", str(path),
+            target = ["-DCONFIG_IDF_TARGET_ESP32=1"] if classic else []
+            subprocess.run([args.cxx, *flags, *target, f"-DENABLE_BLE_PHONE_PIPE={pipe}", str(path),
                             "-o", str(work / name)], check=True, timeout=120)
             return subprocess.check_output([str(work / name)], text=True, timeout=120)
 
         require(run("current-no-pipe", 0) == run("current", 1),
                 "lifecycle outcomes differ between pipe and no-pipe builds")
+        # Classic ESP32 adds a post-admission term to the
+        # "g2client" row; the same scenarios run against it.
+        require(run("classic-no-pipe", 0, classic=True) == run("classic", 1, classic=True),
+                "classic lifecycle outcomes differ between pipe and no-pipe builds")
     print("G2 lifecycle order: stack first, runtime gate before temples and workers, session "
           "worker last; the stop closes the runtime only; no host, pipe, ring or console call")
     print("G2 memory admission: production threshold on the running stack, restart, kept-worker "
-          "reuse and refusal precedence passed")
+          "reuse and refusal precedence passed; classic ESP32 refuses the WiFi+HTTP and "
+          "fragmented starts and admits the healthy one")
     print("G2 lifecycle: production transitions, worker-creation gate, guarded publication and "
           "concurrent readers passed")
 

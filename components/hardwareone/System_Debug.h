@@ -20,7 +20,7 @@
 //   OLED — the OLED console screen is its own opt-in (the user must open
 //          it), so command output is always routed there (broadcastOutput
 //          force-adds OLED|G2 to command routes).
-// Persisted web/display/g2 lane settings were removed pre-1.0 once an audit
+// Persisted web/display/g2 lane settings were removed once an audit
 // showed delivery had never honored them.
 #define MSG_ROUTE_SERIAL  0x01
 #define MSG_ROUTE_WEB     0x02

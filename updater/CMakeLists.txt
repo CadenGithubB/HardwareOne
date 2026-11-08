@@ -107,7 +107,18 @@ if(HW1_DEPLOYMENT_ACTIVE)
     set(_layout_id "${HW1_DEPLOYMENT_LAYOUT_ID}")
     set(_version_suffix "${HW1_DEPLOYMENT_VERSION_SUFFIX}")
 endif()
-set(_project_version "1.0.0+${_version_suffix}")
+# The updater's own version, independent of the main firmware's PROJECT_VER.
+# A device reports it as factoryUpdaterVersion in `otastatus json`, and a
+# signed manifest's minUpdaterVersion is compared against it, so bump it
+# whenever a change under updater/ (or the hw1_ota_protocol code the updater
+# links) alters recovery behaviour. See RELEASING.md. Core X.Y.Z only; the
+# board's +suffix is appended below.
+set(HW1_UPDATER_SEMVER "1.1.0")
+if(NOT HW1_UPDATER_SEMVER MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
+    message(FATAL_ERROR
+        "HW1_UPDATER_SEMVER '${HW1_UPDATER_SEMVER}' must be a plain X.Y.Z")
+endif()
+set(_project_version "${HW1_UPDATER_SEMVER}+${_version_suffix}")
 
 # Never let a configured updater build directory change recovery identity.
 # Board-only and deployment layouts can target the same physical board while
@@ -372,6 +383,12 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # in a tracked file, and a slow re-solve on every board switch. IDF supports a
 # per-target path for exactly this case -- see
 # tools/test_build_system/test_component_manager.py::test_dependency_lock.
+#
+# updater/managed_components is shared by every updater build directory, but
+# unlike the root project it has no cmake/HW1ManagedComponents.cmake stamp:
+# every per-target updater lock pins the same components (littlefs 1.20.4), so
+# a sync never changes them. Host test managed_components_stamp enforces that;
+# add the stamp here before letting the pins differ by target.
 idf_build_set_property(DEPENDENCIES_LOCK
     "${CMAKE_CURRENT_LIST_DIR}/dependencies.lock.${IDF_TARGET}")
 

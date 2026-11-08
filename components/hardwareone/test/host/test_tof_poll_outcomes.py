@@ -40,7 +40,11 @@ def generate(component: Path) -> str:
         "bool I2CDeviceManager::clockStackPush(", "void I2CDeviceManager::clockStackPop(",
         "uint32_t I2CDeviceManager::clockStackTopOrDefault(", "void I2CDeviceManager::setBusClock(",
         "void I2CDeviceManager::updateMetrics(", "void I2CDeviceManager::updateHistogram(",
-        "I2CErrorType classifyI2CError(", "void I2CDevice::recordSuccess(",
+        "I2CErrorType classifyI2CError(",
+        # Outage/recovery events (v0.99.99); a pre-change --baseline lacks them.
+        *[marker for marker in ("static void postDeviceHealthEvent(",
+                                "static void announceUnresponsive(") if marker in manager],
+        "void I2CDevice::recordSuccess(",
         "void I2CDevice::recordError(", "bool I2CDevice::isDegraded(")]
     definitions += [extract_block(helpers, marker) for marker in (
         "template<typename Func>\nauto i2cDeviceTransaction(uint8_t bus",

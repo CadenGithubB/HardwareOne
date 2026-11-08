@@ -4,6 +4,7 @@
 #include <Adafruit_LEDBackpack.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
 #include "System_Command.h"
 #include "System_Utils.h"  // validate-only command guard
 #include "System_I2C.h"
@@ -213,6 +214,38 @@ const char* cmdMatrixAddress(const String& args) {
   setSetting(gSettings.matrixAddress, address);
   return "[Matrix] Address saved; match the solder jumpers and reboot";
 }
+
+// Persist-only setters for the settings editors (web/OLED/remote), which save a
+// field by running its cmdKey. Each resolves its own row by cmdKey and writes
+// through handleSettingCommand (range check + setSetting); the display picks the
+// new value up on the next `matrix` command, as the row labels say. `matrix
+// brightness|rotation|size|panel` remain the live-apply forms.
+const char* matrixSettingCommand(const char* cmdKey, const String& args) {
+  for (const SettingEntry& entry : settings) {
+    if (entry.cmdKey && strcmp(entry.cmdKey, cmdKey) == 0) return handleSettingCommand(&entry, args);
+  }
+  return "Error: setting not found for this command";
+}
+
+const char* cmdMatrixBrightness(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return matrixSettingCommand("matrixbrightness", args);
+}
+
+const char* cmdMatrixRotation(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return matrixSettingCommand("matrixrotation", args);
+}
+
+const char* cmdMatrixSquare(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return matrixSettingCommand("matrixsquare", args);
+}
+
+const char* cmdMatrixPanel(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return matrixSettingCommand("matrixpanel", args);
+}
 } // namespace
 
 uint8_t matrixDeviceAddress() {
@@ -235,6 +268,10 @@ const CommandEntry matrixCommands[] = {
   { "matrix", "HT16K33 LED matrix: status, clear, fill, on/off, pixel, text, brightness, rotation, blink, test", false, cmdMatrix },
   { "matrixbus", "Select matrix I2C bus (reboot required)", true, cmdMatrixBus, "Usage: matrixbus <0|1>" },
   { "matrixaddress", "Select matrix address (reboot required)", true, cmdMatrixAddress, "Usage: matrixaddress <0x70..0x77>" },
+  { "matrixbrightness", "Save matrix brightness (applied on next matrix command)", true, cmdMatrixBrightness, "Usage: matrixbrightness <0-15>" },
+  { "matrixrotation", "Save matrix rotation (applied on next matrix command)", true, cmdMatrixRotation, "Usage: matrixrotation <0-3>" },
+  { "matrixsquare", "Save single 8x8 square mode (applied on next matrix command)", true, cmdMatrixSquare, "Usage: matrixsquare <0|1>" },
+  { "matrixpanel", "Save which 8x8 square is used (applied on next matrix command)", true, cmdMatrixPanel, "Usage: matrixpanel <0|1>" },
 };
 const size_t matrixCommandsCount = sizeof(matrixCommands) / sizeof(matrixCommands[0]);
 #endif

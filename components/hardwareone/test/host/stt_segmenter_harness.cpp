@@ -1,4 +1,6 @@
 #include "stt_segmenter.h"
+#include "stt_continuous_config.h"
+#include "stt_auto_gain.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
@@ -410,5 +412,48 @@ int main() {
     std::vector<int16_t> full_scale(3200);for(size_t i=0;i<full_scale.size();++i)full_scale[i]=i%2?32767:-32768;
     assert(run(full_scale,{61},extreme).size()==1);
     adaptive_tests();
+    // Device settings reach the segmenter through continuousSegmenterConfig; any value the
+    // settings accept must give a config the segmenter takes (a rejected config fails
+    // every continuous STT session).
+    for(unsigned pct:{0u,25u,50u,51u,100u,255u}) for(unsigned pre:{0u,97u,99u,200u}) {
+        const auto c=continuousSegmenterConfig(16000,10*16000,true,false,45,16,uint8_t(pct),uint8_t(pre));
+        Segmenter s;assert(s.reset(work.data(),work.size(),c));
+        assert(c.noise_percentile==std::min(pct,50u)&&c.decision_pre_emphasis==std::min(pre,99u));
+    }
+    for(unsigned sp:{1u,16u,45u,32767u}) for(unsigned si:{1u,16u,45u,32767u}) {
+        const auto c=continuousSegmenterConfig(16000,10*16000,true,false,uint16_t(sp),uint16_t(si),25,0);
+        Segmenter s;assert(s.reset(work.data(),work.size(),c));
+    }
+    // Automatic STT mic gain: a change needs the last three speech sessions to agree.
+    {
+        const auto session=[](int16_t amplitude,size_t seconds,size_t clipped=0) {
+            AutoGainMeter m;std::vector<int16_t> pcm(seconds*16000);
+            for(size_t i=0;i<pcm.size();++i)pcm[i]=static_cast<int16_t>(i%2?amplitude:-amplitude);
+            for(size_t i=0;i<clipped&&i<pcm.size();++i)pcm[i*7%pcm.size()]=32767;
+            m.push(pcm.data(),pcm.size());return m.stats();
+        };
+        const auto quiet=session(100,5), loud=session(4096*4,5), clip=session(1000,5,2000), brief=session(100,1);
+        assert(wantedAutoGain(8,quiet)==kAutoGainMax&&wantedAutoGain(8,loud)==2&&wantedAutoGain(8,clip)==4);
+        assert(wantedAutoGain(8,brief)==0);
+        AutoGainHistory h;assert(h.gain()==kAutoGainStart);
+        // One or two loud sessions never move it; a quiet one in between resets the agreement.
+        assert(h.record(8,loud,true)==8&&h.record(8,loud,true)==8&&h.record(8,quiet,true)==8);
+        assert(h.record(8,loud,true)==8);                  // newest three: loud, quiet, loud
+        assert(h.record(8,session(100,1),true)==8);        // too short: not recorded
+        assert(h.record(8,loud,false)==8);                 // no speech: not recorded
+        assert(h.record(8,loud,true)==8);                  // newest three: loud, loud, quiet
+        assert(h.record(8,loud,true)==4);                  // three loud in a row: down, at most half
+        assert(h.size()==0&&h.record(4,loud,true)==4&&h.record(4,loud,true)==4&&h.record(4,loud,true)==2);
+        // Going back up also needs three agreeing sessions and at most doubles.
+        AutoGainHistory up;for(int k=0;k<3;++k)assert(up.record(8,loud,true)==(k<2?8:4));
+        assert(up.record(4,quiet,true)==4&&up.record(4,quiet,true)==4&&up.record(4,quiet,true)==8);
+        // Clipping counts as a wish for half the gain; mixed wishes keep it.
+        AutoGainHistory c;assert(c.record(8,clip,true)==8&&c.record(8,quiet,true)==8&&c.record(8,clip,true)==8);
+        // The meter's third-loudest frame ignores a single knock.
+        // At the target the wish is the gain in use (no creep); bench close position: x5 measured 4130.
+        assert(wantedAutoGain(5,session(4130,5))==5&&wantedAutoGain(8,session(6400,5))==5);
+        AutoGainMeter knock;std::vector<int16_t> pcm(5*16000,50);for(size_t i=0;i<160;++i)pcm[i]=20000;
+        knock.push(pcm.data(),pcm.size());assert(knock.stats().loud[0]>=19000&&knock.stats().loud[2]<=60);
+    }
     puts("PASS: deterministic chunking, pre-roll,8s pause floor,20s cuts, exact raw delivery, overlap, silence/DC, short-tail finish, reset and ready ownership");
 }

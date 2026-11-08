@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Test actual OTA reply macros/representative handlers with real ArduinoJson.
 
-Extracts both production memory macros, cmdOtaStatus, cmdOtaResetJournal, and
-bleUploadJson. Other OTA commands have capacity/ordering source guards, not a
-test-local OTA state machine. Hardware/NVS/status data and allocation backends
-are mocks; real PreferPSRAM fallback policy is covered by MemUtil host tests.
+Extracts both production memory macros, cmdOtaStatus (with its factory-updater
+descriptor reader), cmdOtaResetJournal, and bleUploadJson. Other OTA commands
+have capacity/ordering source guards, not a test-local OTA state machine.
+Hardware/NVS/status data and allocation backends are mocks; real PreferPSRAM
+fallback policy is covered by MemUtil host tests.
 """
 from __future__ import annotations
 
@@ -93,7 +94,15 @@ def main() -> None:
         require(definition.index("doc.overflowed()") < definition.index("serializeJson("),
                 "response JSON OOM must be reported before serialization")
     macros = "\n\n".join(macro_definition(memory, name) for name in ("PSRAM_STATIC_BUF", "PSRAM_JSON_DOC"))
-    declarations = "\n\n".join((handlers["cmdOtaStatus"], handlers["cmdOtaResetJournal"], ble))
+    # otastatus reports the factory updater's version through the production
+    # descriptor reader; extract it (and its field helper) rather than a stub.
+    factory_reader = extract_block(source, "bool readFactoryUpdaterVersion(")
+    require("esp_image_verify" not in factory_reader,
+            "otastatus factory-updater read must not hash the whole image")
+    require('doc["factoryUpdaterVersion"] = factoryUpdaterVersion;' in handlers["cmdOtaStatus"],
+            "otastatus json must report factoryUpdaterVersion")
+    declarations = "\n\n".join((extract_block(source, "bool fieldToString("), factory_reader,
+                                 handlers["cmdOtaStatus"], handlers["cmdOtaResetJournal"], ble))
     harness = (HERE / "ota_psram_reply_harness.cpp").read_text()
     for marker, definition in {
         "// INSERT_PRODUCTION_MEMORY_MACROS_HERE": macros,

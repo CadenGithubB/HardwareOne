@@ -44,8 +44,11 @@ defaults + `boards/<board>.defaults`, followed by the optional SDK policy in
   `idf.py build` reconfigure on esp32s3 could combine `flash=16mb` with an
   8 MB board's saved configuration.
 - Build directories and partition inputs are independent. Dependency installation
-  still shares `managed_components/`: finish component resolution before running
-  builds concurrently, and serialize configuration when changing chip targets.
+  still shares `managed_components/`, synced to the configuring target's lock;
+  `cmake/HW1ManagedComponents.cmake` makes the next build of another target
+  reconfigure and resync it on its own, and serializes the syncs. Builds of one
+  target may run concurrently; the wrappers refuse a build of another target
+  while one runs (`tools/checkout_build_lock.sh`).
 - Local sdkconfig experiments (`menuconfig`) apply per board dir, since each
   dir owns its sdkconfig.
 - Each successful build writes **`build-<board>/BUILD_INFO.md`** — a manifest
@@ -113,9 +116,13 @@ The coverage tools (`tools/build_coverage.sh`, `tools/build_memory_coverage.sh`,
 the board's `boards/<board>.features.h` for any flag it defines, since that
 profile outranks the shared header.
 
-The classic single-`build/` flow below still works and remains what
-`./build/` + bare `idf.py` uses; the sections are kept for reference and for
-one-off menuconfig work.
+A bare `idf.py` in the repository root (no `HW_BOARD`, shared `./build/`) is
+not a supported build. It would use the tracked `config/sdkconfig` (a XIAO,
+8 MB configuration) with the per-target default board (FeatherS3, 16 MB table)
+and rewrite that tracked file, so configure stops with a message pointing at
+`tools/build_board.sh`. The board files, `HW_BOARD` rules and menuconfig tables
+below are reference for what `tools/build_board.sh` selects; every command in
+them goes through the wrapper.
 
 ## Supported Boards
 
@@ -123,7 +130,7 @@ one-off menuconfig work.
 |-------|------|-----------------|-------|
 | Adafruit QT Py ESP32 Pico | ESP32 | `adafruit_qtpy_esp32` | Built-in NeoPixel, Stemma QT |
 | Adafruit Feather ESP32 V2 | ESP32 | `adafruit_feather_esp32_v2` | Battery monitoring, built-in NeoPixel |
-| Seeed XIAO ESP32S3 | ESP32-S3 | `XIAO_ESP32S3` | Base board |
+| Seeed XIAO ESP32S3 (base, no Sense) | ESP32-S3 | `XIAO_ESP32S3` | **Not supported**: every ESP32-S3 build is a Sense build - see [KNOWN_ISSUES.md](../KNOWN_ISSUES.md) |
 | Seeed XIAO ESP32S3 Sense | ESP32-S3 | `XIAO_ESP32S3` + `XIAO_ESP32S3_SENSE_ENABLED` | Camera, mic, SD slot |
 | Unexpected Maker FeatherS3[D] | ESP32-S3 | `um_feathers3` | 2× STEMMA QT, MAX17048G fuel gauge, **Quad** PSRAM |
 | Espressif ESP32-P4X-EYE | ESP32-P4 | `esp32p4` + `boards/p4x_eye.features.h` | LCD, wheel + 3 buttons, MIPI camera, PDM mic, battery; Wi-Fi/BLE via onboard C6 - see [P4X_EYE_PERIPHERALS.md](P4X_EYE_PERIPHERALS.md) |
@@ -133,24 +140,19 @@ one-off menuconfig work.
 
 ## Switching Between Different Chip Families (ESP32 ↔ ESP32-S3)
 
-When switching between **ESP32** and **ESP32-S3** (different architectures), you **must** do a full clean first. The build cache is not compatible between chip families.
+The build cache is not compatible between chip families, so each board builds
+in its own directory. `tools/build_board.sh` reads the chip from the board
+file's `# HW_TARGET:` marker; no `fullclean` or `set-target` is needed:
 
 ```bash
-# 1. Full clean (required when changing chip type)
-idf.py fullclean
-
-# 2. Set the target chip
-idf.py set-target esp32      # For ESP32-based boards (QT Py, Feather V2)
-idf.py set-target esp32s3    # For ESP32-S3 boards (XIAO S3, FeatherS3)
-
-# 3. Pick the board with HW_BOARD (defaults: esp32→qtpy_esp32, esp32s3→feathers3)
-HW_BOARD=feather_esp32_v2 idf.py build
+tools/build_board.sh feather_esp32_v2   # ESP32    → build-feather_esp32_v2/
+tools/build_board.sh xiao_s3            # ESP32-S3 → build-xiao_s3/
 ```
 
-The `HW_BOARD` env var (see the section below) is the canonical way to select
-a board on **both** chip families — it layers the right variant, PSRAM mode/CS,
-and flash size for you. `menuconfig → Component config → Arduino → Board` still
-works for one-off overrides but is reverted by the next `fullclean`.
+The wrapper always sets the `HW_BOARD` env var (see the section below), which
+layers the right variant, PSRAM mode/CS and flash size on **both** chip
+families. `tools/build_board.sh <board> menuconfig` still works for one-off
+overrides; they apply to `build-<board>/sdkconfig` only.
 
 ---
 
@@ -184,34 +186,32 @@ contract before adding a new XIAO/Sense sensor.
 matching board file on top of the chip-family defaults (`sdkconfig.defaults.<target>`,
 which holds only the settings common to all boards of that chip). Each board
 file carries a `# HW_TARGET: <chip>` marker; the build **validates** it against
-the active target and fails with a `set-target` hint on mismatch — so you can't
-accidentally bake an S3 PSRAM mode onto an ESP32 image.
+the active target and fails on mismatch — so you can't accidentally bake an S3
+PSRAM mode onto an ESP32 image. `tools/build_board.sh` sets the target from
+that marker, so the two always agree.
 
-When `HW_BOARD` is unset, it defaults per target: `feathers3` for esp32s3,
-`qtpy_esp32` for esp32 — so existing builds keep working unchanged. `HW_BOARD`
-only *layers* board settings; it does not switch chips, so set the target with
-`idf.py set-target` first.
+When `HW_BOARD` is unset, the board defaults per target: `feathers3` for
+esp32s3, `qtpy_esp32` for esp32. Configure then stops (naming
+`tools/build_board.sh`) if the sdkconfig in use is the tracked
+`config/sdkconfig`, or was saved for a different Arduino variant or flash size
+than that default board — the combination that used to produce a XIAO
+configuration with the FeatherS3 16 MB partition table.
 
 ### Switching boards
 
 ```bash
-# Build for FeatherS3[D]
-HW_BOARD=feathers3 idf.py fullclean
-HW_BOARD=feathers3 idf.py build
-HW_BOARD=feathers3 idf.py -p /dev/cu.usbmodem* flash monitor
+tools/build_board.sh feathers3                      # → build-feathers3/
+tools/build_board.sh feathers3 -p PORT flash monitor
+tools/build_board.sh xiao_s3                        # → build-xiao_s3/, untouched by the FeatherS3 build
 
-# Back to XIAO ESP32-S3
-HW_BOARD=xiao_s3 idf.py fullclean
-HW_BOARD=xiao_s3 idf.py build
-
-# Confirm which board the build picked up
-HW_BOARD=feathers3 idf.py reconfigure 2>&1 | grep HW_BOARD
-# → -- HW_BOARD=feathers3 → layering .../boards/feathers3.defaults
+# Confirm which board a build directory uses
+tools/build_board.sh feathers3 reconfigure 2>&1 | grep HW_BOARD
+# → -- HW_BOARD=feathers3 (target=esp32s3, flash=16mb) → layering .../boards/feathers3.defaults
 ```
 
-`fullclean` is required between boards because PSRAM mode (Octal vs Quad) lives
-in the bootloader, not just the app — without it you get a board that boots but
-reports 0 KB PSRAM.
+PSRAM mode (Octal vs Quad) lives in the bootloader, not just the app; because
+each board keeps its own build directory and bootloader, no `fullclean` is
+needed between boards.
 
 ### Adding a new board
 
@@ -222,7 +222,7 @@ reports 0 KB PSRAM.
    typically `CONFIG_ARDUINO_VARIANT`, `CONFIG_SPIRAM_MODE_*`, the flash size,
    and (on ESP32 PICO parts) `CONFIG_PICO_PSRAM_CS_IO`. Start the file with a
    `# HW_TARGET: <chip>` marker so the build can validate it against the target.
-3. Build with `HW_BOARD=<short_name>` (after `idf.py set-target <chip>`).
+3. Build with `tools/build_board.sh <short_name>`.
 4. Optional: if the board's application features differ from the shared
    editable defaults (a board with no I2C display, a different radio, ...), add
    `boards/<short_name>.features.h` with `#undef`/`#define` pairs, one literal
@@ -240,65 +240,45 @@ reports 0 KB PSRAM.
 ### Alternative: menuconfig (one-off changes)
 
 ```bash
-idf.py menuconfig
-# → Component config → Arduino → Board
-# Select your variant, save and exit, then build
+tools/build_board.sh <board> menuconfig
 ```
 
-This overrides the board-file setting for the current `sdkconfig` only — useful
-for one-off experiments, but the next `fullclean` reverts to whatever
-`HW_BOARD` picks.
+Changes apply to `build-<board>/sdkconfig` only. Settings the board file
+defines (Arduino variant, PSRAM mode, flash size) are restored from it on the
+next configure; other menuconfig tuning stays.
 
 ---
 
 ## Complete Menuconfig Settings
 
+Reference: what each board file and the chip-family defaults select. View or
+change them with `tools/build_board.sh <board> menuconfig`.
+
 ### Adafruit QT Py ESP32 Pico (ESP32)
 
 | Category | Setting | Value |
 |----------|---------|-------|
-| **Target** | `idf.py set-target` | `esp32` |
+| **Target** | `# HW_TARGET:` in the board file | `esp32` |
 | **Arduino** | Arduino board | `adafruit_qtpy_esp32` |
 | **PSRAM Mode** | ESP PSRAM → SPI RAM config → Mode | `Quad` |
 | **PSRAM Speed** | ESP PSRAM → SPI RAM config → Speed | `40 MHz` |
 | **PSRAM CS Pin** | PSRAM clock and cs IO for ESP32-PICO-D4 → CS IO | `10` |
 | **Flash Size** | Serial flasher config → Flash size | `8 MB` |
 | **Flash Mode** | Serial flasher config → Flash mode | `DIO` |
-| **Bluetooth** | Component config → Bluetooth | `Bluedroid` (Classic + BLE 4.2) |
+| **Bluetooth** | Component config → Bluetooth | `Bluedroid`, controller BLE-only (`CONFIG_BTDM_CTRL_MODE_BLE_ONLY`) |
 
-### Seeed XIAO ESP32S3 — Base (ESP32-S3)
+### Seeed XIAO ESP32S3 - Base (not supported)
 
-| Category | Setting | Value |
-|----------|---------|-------|
-| **Target** | `idf.py set-target` | `esp32s3` |
-| **Arduino** | Arduino board | `XIAO_ESP32S3` |
-| **PSRAM Mode** | ESP PSRAM → SPI RAM config → Mode | `Octal` |
-| **PSRAM Speed** | ESP PSRAM → SPI RAM config → Speed | `80 MHz` |
-| **Flash Size** | Serial flasher config → Flash size | `8 MB` |
-| **Flash Mode** | Serial flasher config → Flash mode | `QIO` |
-| **Bluetooth** | Component config → Bluetooth | `Bluedroid` (BLE 5.0 only) |
-| **USB Mode** | Component config → USB-OTG | Enable for native USB |
-
-### Seeed XIAO ESP32S3 Plus (ESP32-S3)
-
-| Category | Setting | Value |
-|----------|---------|-------|
-| **Target** | `idf.py set-target` | `esp32s3` |
-| **Arduino** | Arduino board | `XIAO_ESP32S3_Plus` |
-| **PSRAM Mode** | ESP PSRAM → SPI RAM config → Mode | `Octal` |
-| **PSRAM Speed** | ESP PSRAM → SPI RAM config → Speed | `80 MHz` |
-| **Flash Size** | Serial flasher config → Flash size | `16 MB` ← differs from base |
-| **Flash Mode** | Serial flasher config → Flash mode | `QIO` |
-| **Bluetooth** | Component config → Bluetooth | `Bluedroid` (BLE 5.0 only) |
-| **USB Mode** | Component config → USB-OTG | Enable for native USB |
-
-> **Flash size:** The Plus has 16 MB. If you flash it with 8 MB configured the upper flash will be unused and logs may show a mismatch warning.
+There is no base-XIAO build: every ESP32-S3 build defines
+`XIAO_ESP32S3_SENSE_ENABLED`, so a base XIAO gets the Sense build, whose
+camera, microphone and SD card expect the Sense expansion board. See
+[KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
 
 ### Seeed XIAO ESP32S3 Sense (ESP32-S3)
 
 | Category | Setting | Value |
 |----------|---------|-------|
-| **Target** | `idf.py set-target` | `esp32s3` |
+| **Target** | `# HW_TARGET:` in the board file | `esp32s3` |
 | **Arduino** | Arduino board | `XIAO_ESP32S3` |
 | **PSRAM Mode** | ESP PSRAM → SPI RAM config → Mode | `Octal` |
 | **PSRAM Speed** | ESP PSRAM → SPI RAM config → Speed | `80 MHz` |
@@ -306,50 +286,48 @@ for one-off experiments, but the next `fullclean` reverts to whatever
 | **Flash Mode** | Serial flasher config → Flash mode | `QIO` |
 | **Bluetooth** | Component config → Bluetooth | `Bluedroid` (BLE 5.0 only) |
 | **USB Mode** | Component config → USB-OTG | Enable for native USB |
-| **Sense Define** | Compiler options → Extra C/C++ flags | `-DXIAO_ESP32S3_SENSE_ENABLED` |
+| **Sense Define** | `CMakeLists.txt` (every ESP32-S3 target) and `System_BuildConfig.h` | `XIAO_ESP32S3_SENSE_ENABLED 1`, always set |
 
 ### Unexpected Maker FeatherS3[D] (ESP32-S3)
 
 | Category | Setting | Value |
 |----------|---------|-------|
-| **Target** | `idf.py set-target` | `esp32s3` |
+| **Target** | `# HW_TARGET:` in the board file | `esp32s3` |
 | **Arduino** | Arduino board | `um_feathers3` |
 | **PSRAM Mode** | ESP PSRAM → SPI RAM config → Mode | **`Quad`** ← differs from XIAO |
 | **PSRAM Speed** | ESP PSRAM → SPI RAM config → Speed | `80 MHz` |
-| **Flash Size** | Serial flasher config → Flash size | `8 MB` |
+| **Flash Size** | Serial flasher config → Flash size | `16 MB` |
 | **Flash Mode** | Serial flasher config → Flash mode | `QIO` |
 | **Bluetooth** | Component config → Bluetooth | `Bluedroid` (BLE 5.0 only) |
 | **USB Mode** | Component config → USB-OTG | Enable for native USB |
 
-> **PSRAM mode is the gotcha:** FeatherS3 uses Quad PSRAM, all the XIAO S3 variants use Octal. After switching `CONFIG_ARDUINO_VARIANT` to `um_feathers3`, flip `CONFIG_SPIRAM_MODE_OCT=y` to `CONFIG_SPIRAM_MODE_QUAD=y` in `sdkconfig.defaults.esp32s3`, then `idf.py fullclean && idf.py build`. Wrong mode = board boots but reports 0 KB PSRAM.
+> **PSRAM mode is the gotcha:** FeatherS3 uses Quad PSRAM, the XIAO S3 boards use Octal. `boards/feathers3.defaults` and `boards/xiao_s3.defaults` set the mode, and each board builds in its own directory with its own bootloader, so `tools/build_board.sh` keeps them apart. Wrong mode = board boots but reports 0 KB PSRAM.
 
 ---
 
 ## Key Hardware Differences
 
-| Feature | QT Py ESP32 | XIAO ESP32S3 | XIAO ESP32S3 Plus | XIAO ESP32S3 Sense |
-|---------|-------------|--------------|-------------------|--------------------|
-| **Chip** | ESP32 LX6 | ESP32-S3 LX7 | ESP32-S3 LX7 | ESP32-S3 LX7 |
-| **Flash** | 8 MB | 8 MB | **16 MB** | 8 MB |
-| **PSRAM** | Quad 40 MHz | Octal 80 MHz | Octal 80 MHz | Octal 80 MHz |
-| **Bluetooth** | Classic + BLE 4.2 | BLE 5.0 only | BLE 5.0 only | BLE 5.0 only |
-| **USB** | CP2102 UART | Native USB | Native USB | Native USB |
-| **Battery ADC** | None | None | **GPIO10** | None |
-| **NeoPixel** | GPIO5 | None | None | None |
-| **User LED** | None | GPIO21 | GPIO21 | None (SD conflict) |
-| **Camera** | None | None | None | OV2640 |
-| **Microphone** | None | None | None | PDM digital |
-| **SD Card** | None | None | None | MicroSD |
-| **Extra UART** | — | — | TX=GPIO42, RX=GPIO41 | — |
-| **Extra SPI** | — | — | MOSI=11, MISO=12, SCK=13 | — |
-| **I2C (SDA/SCL)** | GPIO22/19 | GPIO5/6 | GPIO5/6 | GPIO5/6 |
+| Feature | QT Py ESP32 | XIAO ESP32S3 (base, not supported) | XIAO ESP32S3 Sense |
+|---------|-------------|--------------|--------------------|
+| **Chip** | ESP32 LX6 | ESP32-S3 LX7 | ESP32-S3 LX7 |
+| **Flash** | 8 MB | 8 MB | 8 MB |
+| **PSRAM** | Quad 40 MHz | Octal 80 MHz | Octal 80 MHz |
+| **Bluetooth** | BLE 4.2 (controller BLE-only) | BLE 5.0 only | BLE 5.0 only |
+| **USB** | CP2102 UART | Native USB | Native USB |
+| **Battery ADC** | None | None | None |
+| **NeoPixel** | GPIO5 | None | None |
+| **User LED** | None | GPIO21 | None (SD conflict) |
+| **Camera** | None | None | OV2640 |
+| **Microphone** | None | None | PDM digital |
+| **SD Card** | None | None | MicroSD |
+| **I2C (SDA/SCL)** | GPIO22/19 | GPIO5/6 | GPIO5/6 |
 
 ---
 
 ## Critical Differences When Switching Chip Families
 
 ### Bluetooth Stack
-- **ESP32**: Supports both Bluetooth Classic and BLE 4.2
+- **ESP32**: the chip supports Bluetooth Classic and BLE 4.2; this firmware configures the controller BLE-only
 - **ESP32-S3**: **BLE 5.0 only** — no Bluetooth Classic support
 
 ### PSRAM Configuration
@@ -370,15 +348,8 @@ for one-off experiments, but the next `fullclean` reverts to whatever
 
 ## Board-Specific Features
 
-### XIAO ESP32S3 Plus
-When `CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3_Plus"` is set:
-- **Flash**: 16 MB — set `CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y` in sdkconfig
-- **Battery monitoring**: ADC on GPIO10 (`BATTERY_ADC_PIN=10`), enabled automatically
-- **Extra UART**: TX=GPIO42, RX=GPIO41
-- **Extra SPI**: MOSI=GPIO11, MISO=GPIO12, SCK=GPIO13
-
 ### XIAO ESP32S3 Sense
-When `XIAO_ESP32S3_SENSE_ENABLED` is defined:
+`XIAO_ESP32S3_SENSE_ENABLED` is 1 on every ESP32-S3 build, so the XIAO build configures:
 - **Camera**: OV2640 on expansion board (I2C on GPIO39/40)
 - **PDM Microphone**: CLK=GPIO42, DATA=GPIO41
 - **SD Card**: CS=GPIO21, SCK=GPIO7, MISO=GPIO8, MOSI=GPIO9
@@ -410,71 +381,60 @@ ADC battery divider and keeps I2C entirely disabled.
 
 ```
 sdkconfig.defaults              # Common config (IRAM, stack sizes, log level)
-sdkconfig.defaults.esp32        # ESP32-family (Quad PSRAM, DIO flash, Classic BT, variant=qtpy_esp32)
+sdkconfig.defaults.esp32        # ESP32-family commons (PSRAM presence/speed, DIO flash, BLE-only controller)
 sdkconfig.defaults.esp32s3      # ESP32-S3-family commons (PSRAM presence/speed, QIO flash, BLE only)
-boards/xiao_s3.defaults         # XIAO ESP32-S3: variant + Octal PSRAM mode  (default if HW_BOARD unset)
-boards/feathers3.defaults       # FeatherS3[D]: variant + Quad PSRAM mode    (activate with HW_BOARD=feathers3)
+boards/xiao_s3.defaults         # XIAO ESP32-S3: variant + Octal PSRAM mode, 8 MB flash
+boards/feathers3.defaults       # FeatherS3[D]: variant + Quad PSRAM mode, 16 MB flash (default board on esp32s3 if HW_BOARD unset)
+boards/qtpy_esp32.defaults      # QT Py ESP32: variant + PSRAM CS, 8 MB flash  (default board on esp32 if HW_BOARD unset)
 sdkconfig.defaults.esp32p4      # ESP32-P4-family commons (400 MHz, hex PSRAM, Hosted Wi-Fi/BLE, camera pipeline)
 boards/p4x_eye.defaults         # P4X-EYE: C6 SDIO wiring, 16 MB flash, OV2710/SC2336 camera
 boards/p4x_eye.features.h       # P4X-EYE application feature profile (not an sdkconfig file)
 ```
 
-ESP-IDF loads them in order — later files override earlier. For S3 builds the
-chain is: `sdkconfig.defaults` → `sdkconfig.defaults.esp32s3` → `boards/<HW_BOARD>.defaults`
-(layered by the `HW_BOARD` hook in `CMakeLists.txt`). For ESP32 builds the
-chain stops at `sdkconfig.defaults.esp32` and the board file is skipped.
+The `sdkconfig.defaults*` files live in `config/`. ESP-IDF loads them in
+order — later files override earlier. The chain is: `sdkconfig.defaults` →
+`sdkconfig.defaults.<target>` → `boards/<HW_BOARD>.defaults` (layered by the
+`HW_BOARD` hook in `CMakeLists.txt` on every target that has a board file),
+then the partition selection and the optional SDK policy in `presets/`.
 
 ---
 
 ## Troubleshooting
 
-### "Wrong chip type" error
-Run `idf.py fullclean && idf.py set-target <target>` — required any time you switch between ESP32 and ESP32-S3.
+### Configure stops with "A bare idf.py configure (no HW_BOARD) ..."
+You ran `idf.py` in the repository root without naming a board. Build with
+`tools/build_board.sh <board>` instead.
+
+### "HW_BOARD=... targets '...', but the active chip is '...'"
+The board file's `# HW_TARGET:` marker disagrees with the target being
+configured. `tools/build_board.sh` sets the target from that marker; use it
+rather than `idf.py set-target`.
 
 ### Board not detected / wrong pin mapping
-Verify `CONFIG_ARDUINO_VARIANT` in `sdkconfig` matches your board exactly (case-sensitive). The valid values are: `adafruit_qtpy_esp32`, `adafruit_feather_esp32_v2`, `XIAO_ESP32S3`, `XIAO_ESP32S3_Plus`, `um_feathers3`.
+Verify `CONFIG_ARDUINO_VARIANT` in `build-<board>/sdkconfig` matches your board exactly (case-sensitive). The valid values are: `adafruit_qtpy_esp32`, `adafruit_feather_esp32_v2`, `XIAO_ESP32S3`, `um_feathers3`, `esp32p4`.
 
 ### FeatherS3 reports 0 KB PSRAM
-You forgot to flip PSRAM mode after switching from XIAO. Edit `sdkconfig.defaults.esp32s3`, change `CONFIG_SPIRAM_MODE_OCT=y` to `CONFIG_SPIRAM_MODE_QUAD=y`, then `idf.py fullclean && idf.py build`.
+The image was built with Octal PSRAM. Build it with `tools/build_board.sh feathers3`, which layers `CONFIG_SPIRAM_MODE_QUAD=y` from `boards/feathers3.defaults` and restores it on every configure.
 
 ### SD card not appearing on Sense
-Ensure `XIAO_ESP32S3_SENSE_ENABLED` is defined so the SD pins are configured correctly.
+Check that the image was built with `tools/build_board.sh xiao_s3`; ESP32-S3 builds always set `XIAO_ESP32S3_SENSE_ENABLED`, which configures the SD pins.
 
-### Battery monitor shows no data on base XIAO
-Expected — the base XIAO has no battery ADC. Use the Plus if you need battery monitoring.
-
-### Flash size mismatch warning on Plus
-Set `CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y` in sdkconfig or via menuconfig (Serial flasher config → Flash size → 16 MB).
+### Battery monitor shows no data on the XIAO
+Expected — the XIAO ESP32-S3 boards have no battery ADC in this firmware.
 
 ---
 
 ## Quick Reference
 
 ```bash
-# Switch between ESP32-S3 boards via HW_BOARD (fullclean required — PSRAM mode
-# changes affect the bootloader, which has to be rebuilt).
-HW_BOARD=feathers3 idf.py fullclean
-HW_BOARD=feathers3 idf.py build
-HW_BOARD=feathers3 idf.py -p /dev/cu.usbmodem* flash monitor
+# Each board builds in build-<board>/ with its own sdkconfig and bootloader:
+# no fullclean or set-target when switching boards or chip families.
+tools/build_board.sh feathers3                         # ESP32-S3, 16 MB
+tools/build_board.sh feathers3 -p /dev/cu.usbmodem* flash monitor
+tools/build_board.sh xiao_s3 -p /dev/cu.usbmodem* flash monitor
+tools/build_board.sh qtpy_esp32 -p /dev/cu.usbserial* flash monitor   # ESP32
+tools/build_board.sh p4x_eye                           # run tools/p4/prepare_sdk.sh once first
 
-# Back to XIAO (HW_BOARD optional — xiao_s3 is the default)
-idf.py fullclean && idf.py build
-idf.py -p /dev/cu.usbmodem* flash monitor
-
-# Within the XIAO family (base ↔ Plus ↔ Sense): edit boards/xiao_s3.defaults to
-# change CONFIG_ARDUINO_VARIANT, then `idf.py build`. PSRAM mode doesn't change
-# so fullclean isn't strictly required, but flash size differs on the Plus
-# (16 MB) — see Plus section below.
-
-# Switch from ESP32 to ESP32-S3 (different chip family — fullclean required)
-idf.py fullclean
-idf.py set-target esp32s3
-idf.py build
-idf.py -p /dev/cu.usbmodem* flash monitor
-
-# Switch from ESP32-S3 to ESP32 (different chip family — fullclean required)
-idf.py fullclean
-idf.py set-target esp32
-idf.py build
-idf.py -p /dev/cu.usbserial* flash monitor
+# One-off SDK changes for one board
+tools/build_board.sh xiao_s3 menuconfig
 ```

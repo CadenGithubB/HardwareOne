@@ -29,8 +29,35 @@
 // annotation on each constant has been corrected; the narratives have not.
 // ============================================================================
 
-constexpr uint32_t CMD_EXEC_STACK_WORDS = 8192;     // 8 KB (was annotated ~32KB — 4x wrong). Automation add validates commands via findCommand.
-constexpr uint32_t BOOT_NET_STACK_WORDS = CMD_EXEC_STACK_WORDS;  // 8 KB, one boot only: runs the connect + NTP path `openwifi` runs on cmd_exec.
+// ----------------------------------------------------------------------------
+// Resident stacks, raised 2026-11-08. The P4X soaks of 2026-11-04/05
+// recorded the worst free stack at: cmd_exec 700 B of 8,192; log_out 524 B of
+// 4,096; g2_owner 312 B of 6,144 (G2_CONTROL_STACK_BYTES, G2_Glasses.cpp). Each
+// size below is (worst recorded use) + 1.5 KB floor + a margin:
+//   cmd_exec 7,492 used -> 10,240: 2,748 B free at that peak (floor + 1.2 KB).
+//   log_out  3,572 used ->  6,144: 2,572 B free (floor + 1.0 KB, kept for the
+//            system-log rotation, which hardware has not exercised yet).
+//   g2_owner 5,832 used ->  8,192: 2,360 B free (floor + 0.8 KB).
+// The margins also cover Xtensa (S3 and classic ESP32): all three peaks were
+// measured on the P4's RISC-V core; windowed-ABI frames are usually larger.
+//
+// All three stacks stay in INTERNAL RAM on every board. xTaskCreate*() takes
+// the stack from MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT (heap_idf.c), and a PSRAM
+// stack (xTaskCreateWithCaps) is not safe here: each task can reach a flash
+// operation (log_out: system/error log appends and rotation on LittleFS;
+// cmd_exec: settings saves, file commands, OTA writes; g2_owner: the g2micrec
+// drain writes through the VFS, which is LittleFS for a path outside /sd). A
+// flash operation disables the cache and asserts the caller's stack is in DRAM
+// (spi_flash cache_utils.c). No board profile sets flash auto-suspend.
+// Cost: +2 KB internal RAM each, the same on every board family (the sizes are
+// not per-board). cmd_exec and log_out are resident on every build (+4 KB);
+// g2_owner exists only on Bluetooth builds, from the first glasses connect
+// until an explicit close (+2 KB more, and its start gate asks 2 KB more).
+// host test: test_resident_stack_floor.py pins these floors and the reporters.
+// ----------------------------------------------------------------------------
+constexpr uint32_t CMD_EXEC_STACK_WORDS = 10240;    // 10 KB (was 8 KB; see the resident-stacks block above). Automation add validates commands via findCommand.
+constexpr uint32_t BOOT_NET_STACK_WORDS = 8192;     // 8 KB, one boot only: runs the connect + NTP path `openwifi` runs on cmd_exec.
+                                                     // Kept at the old cmd_exec size: it is transient and was not one of the tight stacks.
 constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 4096;     // 4 KB (was annotated 16KB — 4x wrong). History below cites 4x-inflated HWMs:
                                                      // runtime task-stack reports flagged
                                                      // sensor_queue CRITICAL at ~79%
@@ -67,7 +94,8 @@ constexpr uint32_t TOF_STACK_WORDS = 4096;     // 4 KB. QT Py ESP32: normal poll
                                            // 3 KB left 604 B and overflowed during I2C error logging.
 constexpr uint32_t FMRADIO_STACK_WORDS = 4608;     // 4.5 KB (was ~18KB)
 constexpr uint32_t INPUT_STACK_WORDS = 3584;     // 3.5 KB (was ~14KB)
-constexpr uint32_t DEBUG_OUT_STACK_WORDS = 4096;     // 4 KB (was annotated 16KB — 4x wrong). ⚠ HW-OBSERVED 81% USED (~764 B free):
+constexpr uint32_t DEBUG_OUT_STACK_WORDS = 6144;     // 6 KB (was 4 KB; see the resident-stacks block above: 524 B free of 4 KB on P4X 2026-11-05).
+                                                     // History: an earlier 4 KB build showed 81% USED (~764 B free):
                                                      // The earlier 3 KB "floor" (HWM ~2.3 KB → ~0.7 KB
                                                      // headroom) was NOT enough: an [ERROR] logged
                                                      // during boot (NTP-sync timeout) sent the task
@@ -75,9 +103,9 @@ constexpr uint32_t DEBUG_OUT_STACK_WORDS = 4096;     // 4 KB (was annotated 16KB
                                                      // whose deep write path + the timestamp String
                                                      // exceeded the headroom and overflowed. The HWM
                                                      // is driven entirely by log_out doing inline
-                                                     // FILE I/O (system-log + error-log writes); see
-                                                     // the drain loop. Do NOT trim below this 4 KB
-                                                     // unless those file writes are moved off this task.
+                                                     // FILE I/O (system-log + error-log writes and now
+                                                     // rotation); see the drain loop. Do NOT trim below
+                                                     // 6 KB unless those file writes move off this task.
 constexpr uint32_t APDS_STACK_WORDS = 3072;     // 3 KB (was ~12KB)
 constexpr uint32_t GPS_STACK_WORDS = 3072;     // 3 KB (was ~12KB)
 constexpr uint32_t PRESENCE_STACK_WORDS = 3072;     // 3 KB (was ~12KB)

@@ -1196,9 +1196,11 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       if (gSettings.mqttSubscribeExternal && event->topic_len > 0) {
         updateExternalSensor(event->topic, event->topic_len, event->data, event->data_len);
       }
-      DEBUG_MQTT_PUBSUBF("Received: topic=%.*s data=%.*s",
-                    event->topic_len, event->topic,
-                    event->data_len, event->data);
+      // Topic and size only: the command topic's payload is the
+      // {user,pass,cmd} envelope, and a wildcard subscription can deliver
+      // it here too, so no inbound payload text reaches a log sink.
+      DEBUG_MQTT_PUBSUBF("Received: topic=%.*s data=%d bytes",
+                    event->topic_len, event->topic, event->data_len);
       break;
       
     default:

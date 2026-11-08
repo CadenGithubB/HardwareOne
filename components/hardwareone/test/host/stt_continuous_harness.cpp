@@ -83,7 +83,16 @@ bool isESPSRRunning() { return srRunning; }
 bool gMicRunning = false;
 static bool recordingBusy = false;
 bool micRecordingBusy() { return recordingBusy; }
-struct { String micSource = "auto"; int microphoneGain = 70; int microphoneSampleRate = 48000; } gSettings;
+struct { String micSource = "auto"; int microphoneGain = 70; int microphoneSampleRate = 48000;
+         int sttSpeechFloor = 45; int sttSilenceFloor = 16; int sttNoisePercentile = 25; int sttDecisionPre = 0;
+         int pdmAmplify = 1; int pdmHpfHz = 36; bool sttAutoGain = true;
+         int sttG2SpeechFloor = 45; int sttG2SilenceFloor = 16; int sttG2NoisePercentile = 25; int sttG2DecisionPre = 0; } gSettings;
+// PDM tuning the HAL would use at the next channel start, and what the last start used.
+static std::atomic<unsigned> pdmAmplifySet{1}, pdmHpfSet{36}, pdmAmplifyAtStart{0}, pdmHpfAtStart{0};
+void audioSetPdmTuning(uint8_t amplify, uint16_t hpfHz) { pdmAmplifySet = amplify; pdmHpfSet = hpfHz; }
+void audioGetPdmTuning(uint8_t* amplify, uint16_t* hpfHz) {
+  if (amplify) *amplify = uint8_t(pdmAmplifySet.load()); if (hpfHz) *hpfHz = uint16_t(pdmHpfSet.load());
+}
 static std::mutex halMutex;
 static AudioSource audioSource = AUDIO_SRC_LOCAL_PDM;
 static std::string halOwner;
@@ -146,6 +155,7 @@ bool audioCaptureStart(const char* owner, uint32_t rate) {
   assert(rate == 16000);
   if (startFails || !halOwner.empty()) return false;
   halOwner = owner; halActive = true; ++starts;
+  pdmAmplifyAtStart = pdmAmplifySet.load(); pdmHpfAtStart = pdmHpfSet.load();
   if (audioSource == AUDIO_SRC_NONE || fallbackOnStart) audioSource = AUDIO_SRC_LOCAL_PDM;
   return true;
 }
@@ -1115,6 +1125,58 @@ static void testNativeFaultTolerance() {
 }
 // A caller's per-session source (dictation's preferredSource) replaces the
 // micsource setting for that session only, and is strict like the setting.
+// Saved mic-path tuning reaches the HAL before STT opens the channel: STT never
+// runs initMicrophone(), so after a reboot nothing else would push it.
+static void testSavedPdmTuningApplied() {
+  reset();
+  audioSetPdmTuning(1, 36);  // what the HAL holds after boot
+  gSettings.sttAutoGain = false;  // STT then uses the saved mic settings like any consumer
+  gSettings.pdmAmplify = 8; gSettings.pdmHpfHz = 120;
+  allowedSamples = deliveredSamples = 0; readCounter = 0;
+  STTToken token = 0; char error[96] = {};
+  assert(sttBeginContinuous(owner, &token, error, sizeof(error), nullptr, AUDIO_SRC_NONE) && token && !error[0]);
+  started(token);
+  assert(pdmAmplifyAtStart == 8 && pdmHpfAtStart == 120);
+  assert(sttRequestFinish(owner, token)); complete(token); assert(snapshot(token).state == STTState::Done);
+  gSettings.pdmAmplify = 1; gSettings.pdmHpfHz = 36; gSettings.sttAutoGain = true;
+}
+
+// Automatic mode (default): STT opens the onboard mic with its own gain and the
+// 120 Hz high-pass whatever the saved mic settings say, and leaves them alone.
+static void testAutoGainTuningApplied() {
+  reset();
+  audioSetPdmTuning(1, 36);
+  gSettings.pdmAmplify = 3; gSettings.pdmHpfHz = 50;
+  allowedSamples = deliveredSamples = 0; readCounter = 0;
+  STTToken token = 0; char error[96] = {};
+  assert(sttBeginContinuous(owner, &token, error, sizeof(error), nullptr, AUDIO_SRC_NONE) && token && !error[0]);
+  started(token);
+  assert(pdmAmplifyAtStart == hw1::stt::kAutoGainStart && pdmHpfAtStart == 120);
+  feed(token, 16000); assert(sttRequestFinish(owner, token)); complete(token);
+  assert(snapshot(token).state == STTState::Done);
+  assert(gSettings.pdmAmplify == 3 && gSettings.pdmHpfHz == 50);  // saved settings untouched
+  gSettings.pdmAmplify = 1; gSettings.pdmHpfHz = 36;
+}
+
+// Each mic has its own detector profile, chosen for the mic the session uses.
+static void testDetectorProfilePerMic() {
+  const auto run = [](AudioSource requested) {
+    reset(); allowedSamples = deliveredSamples = 0; readCounter = 0;
+    STTToken token = 0; char error[96] = {};
+    assert(sttBeginContinuous(owner, &token, error, sizeof(error), nullptr, requested) && token && !error[0]);
+    started(token);
+    int sp = 0, si = 0, pc = 0, pre = -1;
+    sttDetectorProfileInUse(&sp, &si, &pc, &pre);
+    feed(token, 16000); assert(sttRequestFinish(owner, token)); complete(token);
+    return std::array<int, 4>{sp, si, pc, pre};
+  };
+  gSettings.sttSpeechFloor = 40; gSettings.sttDecisionPre = 97;
+  gSettings.sttG2SpeechFloor = 60; gSettings.sttG2DecisionPre = 11;
+  assert((run(AUDIO_SRC_NONE) == std::array<int, 4>{40, 16, 25, 97}));       // auto: the onboard mic
+  assert((run(AUDIO_SRC_G2_LEFT) == std::array<int, 4>{60, 16, 25, 11}));    // the glasses' own profile
+  gSettings.sttSpeechFloor = 45; gSettings.sttDecisionPre = 0; gSettings.sttG2SpeechFloor = 45; gSettings.sttG2DecisionPre = 0;
+}
+
 static void testRequestedSource() {
   const auto beginWith = [](AudioSource requested) {
     allowedSamples = deliveredSamples = 0; readCounter = 0;
@@ -2510,6 +2572,9 @@ int main() {
   testNativeFaultTolerance(); puts("PASS Conversate sessions survive glasses audio loss, stalls and a full queue");
   testWideCountersAndRetention(); puts("PASS 64-bit time/positions and result expiry");
   testTranscriptSaving(); puts("PASS transcript admission latch, ACK-independent saving, save failure, cancel and finalization");
+  testSavedPdmTuningApplied(); puts("PASS saved PDM gain and high-pass are applied before STT opens the mic");
+  testAutoGainTuningApplied(); puts("PASS automatic mode opens the mic with STT's own gain and 120 Hz high-pass");
+  testDetectorProfilePerMic(); puts("PASS each mic uses its own detector profile (onboard vs G2)");
   testRequestedSource(); puts("PASS per-session requested source overrides the setting and fails strictly");
   testKeepWarm(); puts("PASS keep-warm: park/adopt across runs, hold expiry and millis wrap, low-PSRAM release, warm load (awaited past 20 s) and its back-off");
 #if HW1_STT_TRIM_SILENCE

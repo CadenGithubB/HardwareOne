@@ -1146,3 +1146,77 @@ retired-client path stayed silent, as they should with the known cause fixed.
 Ring drops track the ring moving, not time. Nothing committed; board left on
 `setup-worker-recovery-candidate` (ELF `f822cb24…`); console session closed,
 port free.
+
+## Log hygiene — 2026-11-06 13:40 UTC
+
+Device state, over the console (persistent settings, no reboot): the 34 debug
+flags left on by the investigation (BT, G2, RING, SR, MIC groups and their
+children) are off and the log level is back to `info`. A parent flag command
+(`debugring 0`) clears only its own bit, so every child was cleared by name.
+Six LLM flags remain set but inert: this build has no on-device LLM, so it has
+neither the `debugllm*` commands nor any code that reads those bits. The SD
+system log had reached 3.5 MB in ten hours at the debug level; the serial
+stream carries only command echoes now. The hourly interval automation `abc`
+(runs `status`) is still on the device, left for the user to decide.
+
+Firmware: the debug-capture system log had no size bound. The writer now
+rotates the file to `<path>.1` at `LOG_SYSTEM_CAP_BYTES` (8 MB), replacing the
+previous generation with one rename under the lock it already holds, and
+backs off a minute after a failed rename instead of retrying per line.
+`log status` shows the cap and the rotation count; the `log` help names the
+behavior. `status` printed "Last Reset: Unknown" for any reason past 10 (USB,
+JTAG and later) because of a hard-coded table bound; it now uses the shared
+reset-reason table. Host suites system_log_status, log_level_application and
+phone_status pass under sanitizers; `p4-phone-pipe` builds (6,144,032 B image,
+1.25 MB headroom). Not deployed yet; the board still runs
+`setup-worker-recovery-candidate`.
+
+Observed but left alone: `g2_plugin_silent`/`g2_plugin_alive` flip around
+every lens page by design (they are the wear proxy that automations use), and
+console commands stall the main loop by about 0.7 s each (`LOOPHEALTH` INPUT).
+
+### Log hygiene, second pass — 2026-11-06 14:30 UTC
+
+`log-hygiene-candidate` (ELF `26e50948…`) was app-only flashed at 13:58 UTC
+and booted clean (`status` now says "Last Reset: USB"; `log status` shows the
+rotation line). The boot also showed why the debug flags kept coming back:
+system-log autostart re-applies the mask saved by the last `log start
+flags=…` (`systemLogApplyPersistedFlags`) on every boot, after the per-flag
+settings have loaded, so `debugring 0` and friends were undone each boot by
+the mask Codex had started the capture with. Fix on the device: `log stop`,
+then `log start "<same path>" flags=0x0`, which saves an empty mask. A reboot
+afterwards came up with zero flags set, log level info, phone link ready. The
+design conflict itself (two persistent owners of the debug mask) is still
+open; the per-flag commands could update the saved mask, or autostart could
+stop re-applying it.
+
+The size bound was then held to the sensor logger's standard at the user's
+request: instead of a fixed 8 MB constant, `systemLogMaxSize` (10 KB–10 MB,
+default 1 MB) and `systemLogMaxRotations` (0–9, default 3) are settings with
+`log maxsize <bytes>` and `log rotations <n>`, and the writer shifts the kept
+generations (.1 → .2 …, oldest removed first because FAT refuses to rename
+over a file) exactly as `sensorlog` does; 0 rotations starts the file over.
+`log status` reports the limit, the kept count and the rotations so far.
+Host suites system_log_status (now also checks the settings and the
+out-of-range fallback), systemlog_config_ui and log_level_application pass.
+`tools/settings_registry.py` does not run on this Mac's Python 3.9 (an
+f-string with a backslash) and docs/SETTINGS_MATRIX.md is not tracked, so no
+settings doc was regenerated; the command reference was.
+
+### Rotation candidate deployed — 2026-11-06 14:41 UTC
+
+`log-rotation-candidate` (ELF `dfc6640b…`, commit a33742bc) was app-only
+flashed with the MAC, rollback-hash and partition checks and the flash digest
+verified (`log-rotation.json`). First boot: no crash record, zero debug flags,
+log level info, `status` says "Last Reset: USB", `log status` reports
+"Rotation: at 1024 KB, keep 3 old file(s); rotated 0 time(s) this boot", and
+`log maxsize` / `log rotations` answer with the defaults. Phone link ready and
+companion online at 48 s; glasses and ring were still reconnecting, as on
+every boot so far. Board images: this candidate on flash; `log-hygiene`,
+`setup-worker-recovery`, `quicknote-stack-netevents-mutex`, `heapdiag` and the
+original application retained for rollback.
+
+Seen once at boot during the first scan and left alone: an error-level
+library line, `BLEAdvertisedDevice.cpp:437 parseAdvertisement(): Failed to
+allocate 0 bytes for payload` — the Arduino BLE scanner treats a zero-length
+payload allocation as a failure. Harmless; a hygiene item for the error log.

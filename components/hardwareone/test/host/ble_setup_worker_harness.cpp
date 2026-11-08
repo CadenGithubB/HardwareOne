@@ -511,11 +511,12 @@ static void runningAge() {
   CHECK(core.finishRun(Client::G2, t2));
   core.finished(Client::G2);
   const OverrunPolicy policy{};
-  CHECK(policy.reportMs == 240000 && policy.escalateMs == 600000);
+  CHECK(policy.reportMs == 360000 && policy.escalateMs == 600000);  // above the 300 s public ring scan
   CHECK(overrunDecide(0, false, policy) == Overrun::None);
-  CHECK(overrunDecide(239999, false, policy) == Overrun::None);
-  CHECK(overrunDecide(240000, false, policy) == Overrun::Report);   // once past the line
-  CHECK(overrunDecide(240000, true, policy) == Overrun::None);      // not twice
+  CHECK(overrunDecide(300000, false, policy) == Overrun::None);   // a full 300 s ring scan is legitimate
+  CHECK(overrunDecide(359999, false, policy) == Overrun::None);
+  CHECK(overrunDecide(360000, false, policy) == Overrun::Report);   // once past the line
+  CHECK(overrunDecide(360000, true, policy) == Overrun::None);      // not twice
   CHECK(overrunDecide(599999, true, policy) == Overrun::None);
   CHECK(overrunDecide(600000, true, policy) == Overrun::Escalate);
   CHECK(overrunDecide(600000, false, policy) == Overrun::Escalate); // escalation needs no prior report

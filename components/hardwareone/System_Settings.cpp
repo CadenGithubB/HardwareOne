@@ -34,6 +34,7 @@
 #include "System_Power.h"    // applyPowerMode — the saved mode is re-applied in applySettings
 #include "System_UartLink.h"       // uartLinkStart/Stop/StatusLine — cmd_uartlink live apply
 #include "System_User.h"           // rotate transport generations on auth-policy changes
+#include "System_FirstTimeSetup.h"  // armOwnerCredentialSetup - owner credential recovery
 #include <LittleFS.h>
 #include "System_VFS.h"      // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include <esp_system.h>
@@ -1514,6 +1515,34 @@ static bool writeSettingsSnapshot(const JsonDocument& doc,
   return false;
 }
 
+// A settings or per-user credential file that no longer parses is moved
+// aside, never deleted and never left in place. Left in place it froze the
+// device: every settings save was refused (rightly, a rebuild from RAM would
+// flatten it), so factoryreset could not persist its pipe-secret clear and
+// stopped, and an unreadable user_settings/<id>.json failed every login of that
+// account with no event. Once moved, the path is absent, which every loader
+// already treats as the bootstrap case, and the damaged bytes stay readable in
+// the file manager. The newest copy is <file>.corrupt-1; at most
+// kCorruptQuarantineKeep are kept so a file that keeps failing cannot fill flash.
+// Callers hold the filesystem lock and never quarantine a NoMemory parse (the
+// file is intact; this boot is short of heap).
+static constexpr unsigned kCorruptQuarantineKeep = 3;
+static bool quarantineCorruptFile(const String& path, const AuthContext& auth, String& movedTo) {
+  auto slot = [&path](unsigned n) {
+    char name[96];
+    snprintf(name, sizeof(name), "%s.corrupt-%u", path.c_str(), n);
+    return String(name);
+  };
+  const String oldest = slot(kCorruptQuarantineKeep);
+  if (VFS::existsGuarded(oldest, auth)) (void)VFS::removeGuarded(oldest, auth);
+  for (unsigned n = kCorruptQuarantineKeep - 1; n > 0; --n) {
+    const String from = slot(n);
+    if (VFS::existsGuarded(from, auth)) (void)VFS::renameGuarded(from, slot(n + 1), auth);
+  }
+  movedTo = slot(1);
+  return VFS::renameGuarded(path, movedTo, auth);
+}
+
 // Set when readSettingsJson() found an on-disk firmwareVersion that differs
 // from the running build. Cleared when settingsRestampFirmwareVersion()
 // succeeds, or when a later complete writeSettingsJson() stamps the running
@@ -1581,7 +1610,29 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
     if (existingFile) {
       DeserializationError err = deserializeJson(doc, existingFile);
       existingFile.close();
-      if (err) {
+      // A file damaged after this boot loaded it is quarantined, and the
+      // save continues as for an absent file. RAM is authoritative here (the
+      // load gate above passed), and the old bytes, including any orphaned
+      // sections, survive in the quarantine copy rather than being flattened.
+      // Without this every later save, factoryreset's included, was refused
+      // until a reboot. NoMemory (file intact) and a failed rename still refuse.
+      bool quarantined = false;
+      if (err && err != DeserializationError::NoMemory) {
+        String movedTo;
+        quarantined = quarantineCorruptFile(
+            SETTINGS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.write"), movedTo);
+        if (quarantined) {
+          doc.clear();
+          ERROR_STORAGEF("on-disk settings.json is unparseable (%s) - quarantined to %s",
+                         err.c_str(), movedTo.c_str());
+          logSystemEvent("SETTINGS",
+                         "on-disk settings.json unparseable (%s) - quarantined to %s; "
+                         "saving the loaded settings", err.c_str(), movedTo.c_str());
+          systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, SETTINGS_JSON_FILE,
+                          "unparseable at save - quarantined");
+        }
+      }
+      if (err && !quarantined) {
         // ABORT. This used to be `doc.clear(); // Start fresh if parse failed`
         // and then fall through to buildSettingsJsonDoc(), which is how an
         // unreadable settings.json got silently replaced by whatever RAM
@@ -1598,6 +1649,8 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
         //
         // Refusing is strictly better. A file we cannot parse is a file whose
         // contents we cannot preserve, so replacing it can only lose data.
+        // (Reached now only when the quarantine above could not move the
+        // file aside, or the parse ran out of memory.)
         // ERROR_ rather than WARN_ so this reaches errors.log, which is fed by
         // the "[ERROR]" prefix in the log_out task.
         ERROR_STORAGEF("save REFUSED: on-disk settings.json is unparseable (%s) "
@@ -1610,7 +1663,7 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
         fsUnlock();
         pollResume();
         return false;
-      } else {
+      } else if (!quarantined) {
         INFO_STORAGEF("Loaded existing settings for merge (preserving orphaned sections)");
       }
     } else {
@@ -1941,6 +1994,31 @@ bool readSettingsJson() {
     ERROR_STORAGEF("JSON parse error: %s", error.c_str());
     if (error == DeserializationError::NoMemory) {
       ERROR_STORAGEF("JSON document too small (need more than 5120 bytes)");
+    } else {
+      // Damaged bytes are quarantined so this boot runs on defaults
+      // exactly as a fresh device does (nothing has been read into RAM yet).
+      // Left in place, the save gate kept the device settings-read-only and
+      // factoryreset stopped at its pipe-secret persist, with no way out
+      // short of a cable erase. The caller writes the defaults.
+      String movedTo;
+      bool moved;
+      {
+        FsLockGuard guard("settings.quarantine");
+        moved = quarantineCorruptFile(
+            SETTINGS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.quarantine"), movedTo);
+      }
+      if (moved) {
+        settingsMarkLoadedOk();  // the path is absent now: RAM is the truth, as on a fresh device
+        logSystemEvent("SETTINGS", "settings.json unparseable (%s) - quarantined to %s; "
+                       "running on defaults", error.c_str(), movedTo.c_str());
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, SETTINGS_JSON_FILE,
+                        "unparseable at boot - quarantined, defaults loaded");
+      } else {
+        logSystemEvent("SETTINGS", "settings.json unparseable (%s) - quarantine rename FAILED; "
+                       "file left in place", error.c_str());
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, SETTINGS_JSON_FILE,
+                        "unparseable at boot - quarantine failed");
+      }
     }
     pollResume();
     return false;
@@ -2539,7 +2617,7 @@ static const SettingsModule debugSettingsModule = {
 static const SettingEntry outputSettingEntries[] = {
   // --- channels: the one persisted output lane ---
   // The group used to hold web/display/g2 rows too (plus webConsole, evicted
-  // earlier for the same reason). All three were removed pre-1.0: delivery
+  // earlier for the same reason). All three were removed: delivery
   // never honored the web/display bits, and the g2 row's command (outg2)
   // never persisted, so the toggles were decorative. The surviving runtime
   // lanes are session/lifecycle-managed — see the System_Debug.h charter.
@@ -2659,6 +2737,22 @@ static const SettingsModule outputSettingsModule = {
 #if ENABLE_DICTATION || ENABLE_LOCAL_STT
 static const SettingEntry sttSettingEntries[] = {
   { "sttsavetranscripts", SETTING_BOOL, &gSettings.sttSaveTranscripts, 0, 0, nullptr, 0, 1, "Save STT transcripts", nullptr, false, nullptr, "sttsavetranscripts" },
+  // Continuous speech detector (stt/stt_continuous_config.h), read at each session
+  // start: onset and silence floors in frame-RMS counts, and the noise-window
+  // percentile tracked as the room level. Bench knobs; defaults = shipped values.
+  { "sttspeechfloor", SETTING_INT, &gSettings.sttSpeechFloor, 45, 0, nullptr, 1, 32767, "Speech onset floor (frame RMS)", nullptr, false, nullptr, "sttspeechfloor" },
+  { "sttsilencefloor", SETTING_INT, &gSettings.sttSilenceFloor, 16, 0, nullptr, 1, 32767, "Silence floor (frame RMS)", nullptr, false, nullptr, "sttsilencefloor" },
+  { "sttnoisepercentile", SETTING_INT, &gSettings.sttNoisePercentile, 25, 0, nullptr, 0, 50, "Room-level percentile", nullptr, false, nullptr, "sttnoisepercentile" },
+  { "sttdecisionpre", SETTING_INT, &gSettings.sttDecisionPre, 97, 0, nullptr, 0, 99, "Pre-emphasis onset judge (x0.01, 0 = loudness only)", nullptr, false, nullptr, "sttdecisionpre" },
+  // Automatic onboard-mic tuning for STT sessions (System_STT sttApplyMicTuning):
+  // gain from the last sessions' levels, changed only when several agree, and a
+  // 120 Hz high-pass. 0 = STT uses the saved pdmamplify / pdmhpf.
+  { "sttautogain", SETTING_BOOL, &gSettings.sttAutoGain, 1, 0, nullptr, 0, 1, "Automatic mic gain for STT", nullptr, false, nullptr, "sttautogain" },
+  // G2 glasses-mic profile: the same four detector levels, used when a session runs on the glasses.
+  { "sttg2speechfloor", SETTING_INT, &gSettings.sttG2SpeechFloor, 45, 0, nullptr, 1, 32767, "G2 mic: speech onset floor (frame RMS)", nullptr, false, nullptr, "sttg2speechfloor" },
+  { "sttg2silencefloor", SETTING_INT, &gSettings.sttG2SilenceFloor, 16, 0, nullptr, 1, 32767, "G2 mic: silence floor (frame RMS)", nullptr, false, nullptr, "sttg2silencefloor" },
+  { "sttg2noisepercentile", SETTING_INT, &gSettings.sttG2NoisePercentile, 25, 0, nullptr, 0, 50, "G2 mic: room-level percentile", nullptr, false, nullptr, "sttg2noisepercentile" },
+  { "sttg2decisionpre", SETTING_INT, &gSettings.sttG2DecisionPre, 97, 0, nullptr, 0, 99, "G2 mic: pre-emphasis onset judge (x0.01, 0 = loudness only)", nullptr, false, nullptr, "sttg2decisionpre" },
 };
 
 static const SettingsModule sttSettingsModule = {
@@ -3620,6 +3714,15 @@ SETTING_EDITOR_CMD(cmd_set_srautostart,         "srautostart")
 SETTING_EDITOR_CMD(cmd_set_srmodelsource,       "srmodelsource")
 #if ENABLE_DICTATION || ENABLE_LOCAL_STT
 SETTING_EDITOR_CMD(cmd_set_sttsavetranscripts,   "sttsavetranscripts")
+SETTING_EDITOR_CMD(cmd_set_sttspeechfloor,       "sttspeechfloor")
+SETTING_EDITOR_CMD(cmd_set_sttsilencefloor,      "sttsilencefloor")
+SETTING_EDITOR_CMD(cmd_set_sttnoisepercentile,   "sttnoisepercentile")
+SETTING_EDITOR_CMD(cmd_set_sttdecisionpre,       "sttdecisionpre")
+SETTING_EDITOR_CMD(cmd_set_sttautogain,          "sttautogain")
+SETTING_EDITOR_CMD(cmd_set_sttg2speechfloor,     "sttg2speechfloor")
+SETTING_EDITOR_CMD(cmd_set_sttg2silencefloor,    "sttg2silencefloor")
+SETTING_EDITOR_CMD(cmd_set_sttg2noisepercentile, "sttg2noisepercentile")
+SETTING_EDITOR_CMD(cmd_set_sttg2decisionpre,     "sttg2decisionpre")
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 SETTING_EDITOR_CMD(cmd_set_g2holdaction,         "g2holdaction")
@@ -3704,6 +3807,15 @@ const CommandEntry settingEditorCommands[] = {
   { "srmodelsource",       "Set ESP-SR model source",                    true, cmd_set_srmodelsource,       "Usage: srmodelsource <value>" },
 #if ENABLE_DICTATION || ENABLE_LOCAL_STT
   { "sttsavetranscripts", "Save recognized text; changes apply to the next STT session.", true, cmd_set_sttsavetranscripts, "Usage: sttsavetranscripts [0|1]" },
+  { "sttspeechfloor", "Continuous-STT speech onset floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttspeechfloor, "Usage: sttspeechfloor [1-32767]" },
+  { "sttsilencefloor", "Continuous-STT silence floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttsilencefloor, "Usage: sttsilencefloor [1-32767]" },
+  { "sttnoisepercentile", "Continuous-STT noise-window percentile used as the room level; applies to the next session.", true, cmd_set_sttnoisepercentile, "Usage: sttnoisepercentile [0-50]" },
+  { "sttdecisionpre", "Continuous-STT onset judge on pre-emphasised audio (coefficient x0.01; 0 = loudness only, 97 = default); applies to the next session.", true, cmd_set_sttdecisionpre, "Usage: sttdecisionpre [0-99]" },
+  { "sttg2speechfloor", "G2 glasses-mic profile: speech onset floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttg2speechfloor, "Usage: sttg2speechfloor [1-32767]" },
+  { "sttg2silencefloor", "G2 glasses-mic profile: silence floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttg2silencefloor, "Usage: sttg2silencefloor [1-32767]" },
+  { "sttg2noisepercentile", "G2 glasses-mic profile: noise-window percentile used as the room level; applies to the next session.", true, cmd_set_sttg2noisepercentile, "Usage: sttg2noisepercentile [0-50]" },
+  { "sttg2decisionpre", "G2 glasses-mic profile: onset judge on pre-emphasised audio (x0.01; 0 = loudness only); applies to the next session.", true, cmd_set_sttg2decisionpre, "Usage: sttg2decisionpre [0-99]" },
+  { "sttautogain", "STT picks its own onboard-mic gain (changed only when several sessions agree) and a 120 Hz high-pass; 0 = use pdmamplify/pdmhpf. Applies to the next session.", true, cmd_set_sttautogain, "Usage: sttautogain [0|1]" },
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   { "g2holdaction",     "Set what a ring/temple hold on a HW1 lens page does", true, cmd_set_g2holdaction,
@@ -4031,6 +4143,39 @@ String getUserSettingsPath(uint32_t userId) {
   return String(pathBuf);
 }
 
+// An unreadable per-user file used to fail that account's every login
+// (isValidUser) and every password reset (the transaction refuses a failed
+// load) with no event, so the owner saw only "wrong password". Quarantined, the
+// path is absent: this load still fails, the event says why, and the next
+// password set writes a fresh file. For any other account that is the owner's
+// userresetpassword. Nobody can reset the owner (user 1), so its quarantine
+// arms the credential-setup marker and the next boot asks for a new owner
+// password (System_FirstTimeSetup). Caller holds the filesystem lock.
+static void quarantineUserSettingsFile(uint32_t userId, const String& path, const char* why) {
+  String movedTo;
+  const bool moved = quarantineCorruptFile(
+      path, VFS::systemAuth(VFS::Scopes::USERS, "user_settings.quarantine"), movedTo);
+  ERROR_STORAGEF("[user] user_settings/%lu.json unreadable (%s)%s", (unsigned long)userId, why,
+                 moved ? " - quarantined" : " - quarantine rename FAILED");
+  if (moved && userId == 1) {
+    const bool armed = armOwnerCredentialSetup();
+    logSystemEvent("USERS", "user_settings/1.json (owner) unreadable (%s) - quarantined to %s; %s",
+                   why, movedTo.c_str(),
+                   armed ? "the next boot asks for a new owner password"
+                         : "setup marker write FAILED, owner cannot log in");
+  } else if (moved) {
+    logSystemEvent("USERS", "user_settings/%lu.json unreadable (%s) - quarantined to %s; "
+                   "this account cannot log in until its password is set again",
+                   (unsigned long)userId, why, movedTo.c_str());
+  } else {
+    logSystemEvent("USERS", "user_settings/%lu.json unreadable (%s) - quarantine rename FAILED",
+                   (unsigned long)userId, why);
+  }
+  systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, path.c_str(),
+                  moved ? "unreadable credentials - quarantined; set the password again"
+                        : "unreadable credentials - quarantine failed");
+}
+
 bool loadUserSettings(uint32_t userId, JsonDocument& doc) {
   doc.clear();
   if (!filesystemReady) return false;
@@ -4057,16 +4202,20 @@ bool loadUserSettings(uint32_t userId, JsonDocument& doc) {
     f.close();
     if (err) {
       doc.clear();
+      // NoMemory: the file is intact, only this attempt ran short of heap.
+      if (err != DeserializationError::NoMemory) quarantineUserSettingsFile(userId, path, err.c_str());
       return false;
     }
-  }
 
-  // A present settings file must be an object. JSON null/arrays/scalars are
-  // parseable but structurally corrupt; never flatten them into a new object
-  // and save a credential or preference patch over the original bytes.
-  if (!doc.is<JsonObject>()) {
-    doc.clear();
-    return false;
+    // A present settings file must be an object. JSON null/arrays/scalars are
+    // parseable but structurally corrupt; never flatten them into a new object
+    // and save a credential or preference patch over the original bytes.
+    // Checked under the lock so the quarantine moves the bytes just parsed.
+    if (!doc.is<JsonObject>()) {
+      doc.clear();
+      quarantineUserSettingsFile(userId, path, "not an object");
+      return false;
+    }
   }
   return true;
 }

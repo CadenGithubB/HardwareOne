@@ -5,7 +5,16 @@
 
 #if ENABLE_MIGRATION_TOOL
 
+#include <stdint.h>
+
 #include <esp_http_server.h>
+
+// HWBACKUP bundle format, the bundle's "formatVersion". /api/restore refuses
+// a newer one before staging anything; a bundle without the field is format
+// 1 (older exports). `versions` reports it as backup_format.
+constexpr uint32_t kBackupFormatVersion = 1;
+
+class String;
 
 // Migration tool endpoints — two sub-features with independent gates:
 //
@@ -50,6 +59,23 @@ bool applyStagedMigrationRestore();
 
 // Discard a staged backup without writing (user cancelled on OLED/serial).
 void discardStagedMigrationRestore();
+
+// Provenance of the staged backup, for the confirm prompt; empty when nothing
+// is staged. One serial line: "from <hostname> [<board>], <n> bytes,
+// sha256 <first 8 hex>..., <source>", where <source> is "this device" (the
+// bundle's fingerprint matched this board), "other device (credentials
+// skipped)" or "no fingerprint (unverified, ...)" when the bundle carries none.
+// Hostname and board are the bundle's claims; size and SHA-256 are of the
+// bytes received.
+String migrationStagedSummary();
+
+// One serial line telling the operator what to compare the size and SHA-256
+// with. A body carrying "force" (a cross-device upload) is not the exported
+// file, so it says they will not match.
+String migrationStagedCheckAdvice();
+
+// The same, as three 21-character lines for getOLEDYesNoPrompt.
+String migrationStagedOledPrompt();
 
 #endif // ENABLE_MIGRATION_TOOL
 

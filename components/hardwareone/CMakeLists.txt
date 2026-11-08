@@ -168,6 +168,7 @@ set(hardwareone_srcs
         System_BleSecureChannel.cpp
         G2_Glasses.cpp
         G2_NativeNotes.cpp
+        G2_HealthPush.cpp
         G2_Ring.cpp
         BLE_CentralTx.cpp
         BLE_CentralCoordinator.cpp
@@ -245,6 +246,7 @@ set(hardwareone_srcs
         System_MemUtil.cpp
         System_MemTracker.cpp
         System_MemoryMonitor.cpp
+        System_MemDiag.cpp
         System_SensorLogging.cpp
         System_CaptureCrypto.cpp
         System_SensorStubs.cpp
@@ -256,6 +258,7 @@ set(hardwareone_srcs
         System_BootState.cpp
         System_TimeAnchors.cpp
         System_Utils.cpp
+        System_Versions.cpp
         System_TaskUtils.cpp
         System_User.cpp
         System_UartLink.cpp
@@ -608,7 +611,7 @@ endif()
 if(HW_CFG_ENABLE_LOCAL_STT GREATER 0)
     # The user vocabulary and display formatter (stt/stt_transcript.cpp,
     # System_STTVocabulary.cpp) belong to the local backend on every target.
-    list(APPEND hardwareone_srcs System_STT.cpp System_STTLocal.cpp System_STTVocabulary.cpp stt/stt_transcript.cpp)
+    list(APPEND hardwareone_srcs System_STT.cpp System_STTLocal.cpp System_STTVocabulary.cpp System_STTRawCapture.cpp stt/stt_transcript.cpp)
     if(IDF_TARGET STREQUAL "esp32p4")
         # stt_lm.cpp is inert unless System_STTLocal.cpp uses it (ENABLE_STT_LM).
         list(APPEND hardwareone_srcs stt/quartznet_runtime.cpp stt/quartznet_frontend.cpp stt/stt_lm.cpp stt/stt_internal_memory.cpp)
@@ -670,6 +673,12 @@ idf_component_register(
         esp32_camera_psram.lf
         p4_camera_iram.lf
 )
+
+# Bench-only memory-corruption diagnostics (System_MemDiag.h): set HW1_BENCH_MEMDIAG=1
+# in the environment of tools/build_board.sh. Never set for release builds.
+if(DEFINED ENV{HW1_BENCH_MEMDIAG})
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE HW1_BENCH_MEMDIAG=$ENV{HW1_BENCH_MEMDIAG})
+endif()
 
 # IDF evaluates component requirements in script mode before registration.
 # Source properties are only legal after idf_component_register returns.

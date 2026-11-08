@@ -245,8 +245,13 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
  * @param line Line to append
  * @param capBytes Maximum file size in bytes
  * @return false on a detected append or rotation failure. A short append also
- *         skips rotation: a full LittleFS without SD overflow keeps the log at
- *         its cap rather than replacing it with a partial copy.
+ *         skips rotation. A rotation whose copy cannot be written (low space,
+ *         no copy buffer) restarts the log with a one-line drop marker and the
+ *         new line, so the file never passes its cap by more than one line.
+ *         With the overflow latch set, no writable card and LittleFS
+ *         below the 100 KB floor the line is refused (counted by
+ *         VFS::logReserveDrops) to keep the reserve; a failed append on the SD mirror marks the card unwritable
+ *         and retries once on the re-resolved tier.
  */
 bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 

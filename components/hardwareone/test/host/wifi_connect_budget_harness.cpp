@@ -267,7 +267,6 @@ void debugSink(const char*, ...) {}
 #define WARN_WIFIF(...) debugSink(__VA_ARGS__)
 #define ERROR_WIFIF(...) debugSink(__VA_ARGS__)
 void logSystemEvent(const char*, const char*, ...) {}
-static constexpr uint8_t SYSEVT_WIFI_CONNECTED = 1;
 static constexpr uint8_t SYSEVT_WIFI_CONNECT_FAILED = 2;
 static int gConnectFailedEvents = 0;
 void systemEventPost(uint8_t kind, const char* = nullptr, const char* = nullptr) {

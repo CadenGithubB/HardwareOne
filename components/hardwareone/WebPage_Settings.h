@@ -2743,7 +2743,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           html += '<div style="color:var(--panel-fg);font-size:0.85rem;margin-top:4px">' + hiddenCount + ' hidden network' + (hiddenCount > 1 ? 's' : '') + ' detected</div>';
         }
         if (scanError) {
-          html += '<div style="color:#dc3545">Scan ' + scanError + '; retry shortly.</div>';
+          html += '<div style="color:#dc3545">Scan ' + escapeUserHtml(scanError) + '; retry shortly.</div>';
         } else if (visible.length === 0) {
           html += '<div style="color:var(--panel-fg)">No networks found.</div>';
         } else {
@@ -2758,10 +2758,14 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
             var badgeTxt = isCur ? '(Connected)' : (saved ? '(Saved)' : '');
             var badgeColor = isCur ? '#007bff' : (saved ? '#28a745' : 'var(--muted)');
             var badge = badgeTxt ? '<span style="color:' + badgeColor + ';font-weight:bold;margin-left:6px">' + badgeTxt + '</span>' : '';
+            // Beacon SSIDs come from anyone in radio range, so
+            // the visible name is HTML-escaped; data-ssid keeps its URI
+            // encoding and selectSsid() still receives the raw SSID.
+            var ssidHtml = escapeUserHtml(ssid);
             var esc = encodeURIComponent(ssid);
             var needsPass = (ap.auth && ap.auth !== '0') ? 'true' : 'false';
             var btnCls = isCur ? ' vis-hidden' : '';
-            html += '<div style="background:var(--panel-bg);color:var(--panel-fg);border:1px solid ' + border + ';border-radius:6px;padding:0.5rem;display:flex;align-items:center;justify-content:space-between">' + '<div><div style="font-weight:bold">' + ssid + ' ' + badge + '</div><div style="color:var(--panel-fg);font-size:0.85rem">RSSI ' + rssi + ' | CH ' + ch + '</div></div>' + '<button class="btn' + btnCls + '" data-ssid="' + esc + '" data-locked="' + needsPass + '" onclick="selectSsid(decodeURIComponent(this.dataset.ssid), this.dataset.locked===\'true\')">Select</button>' + '</div>';
+            html += '<div style="background:var(--panel-bg);color:var(--panel-fg);border:1px solid ' + border + ';border-radius:6px;padding:0.5rem;display:flex;align-items:center;justify-content:space-between">' + '<div><div style="font-weight:bold">' + ssidHtml + ' ' + badge + '</div><div style="color:var(--panel-fg);font-size:0.85rem">RSSI ' + rssi + ' | CH ' + ch + '</div></div>' + '<button class="btn' + btnCls + '" data-ssid="' + esc + '" data-locked="' + needsPass + '" onclick="selectSsid(decodeURIComponent(this.dataset.ssid), this.dataset.locked===\'true\')">Select</button>' + '</div>';
           });
           html += '</div>';
         }
@@ -3033,7 +3037,9 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     };
     /* Escape usernames before innerHTML — legacy pending_users.json entries
        may predate the public allowlist. data-* attrs still get the raw value
-       via dataset after the browser parses the attribute. */
+       via dataset after the browser parses the attribute. Also escapes scanned
+       SSIDs; the declaration is hoisted within this block, so
+       scanNetworks above can call it. */
     function escapeUserHtml(s) {
       return String(s == null ? '' : s)
         .replace(/&/g, '&amp;')

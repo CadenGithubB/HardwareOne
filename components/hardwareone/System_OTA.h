@@ -42,6 +42,15 @@ bool otaBleHandleEncryptedFrame(uint16_t connId, const uint8_t* frame, size_t si
 // Cheap main-loop cleanup for abandoned/disconnected BLE upload sessions.
 void otaBleUploadHousekeeping();
 
+#if HW1_OTA_LAYOUT
+// Version identity for `versions`. The factory recovery updater's app version
+// (the same cheap descriptor read `otastatus` uses; false and "" when the
+// factory slot holds no hw1-updater image), and the retained-data schema this
+// firmware declares to the updater in a staged request.
+bool otaFactoryUpdaterVersion(char* output, size_t outputSize);
+uint32_t otaDataSchemaVersion();
+#endif
+
 // True while a BLE bulk upload is mid-transfer on this exact connection.
 //
 // The idle-logout sweep uses it to leave that session alone. A 4 MB staging

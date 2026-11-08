@@ -38,7 +38,8 @@ endif()
 # The saved config lives in config/, not at the project root. IDF would otherwise
 # default SDKCONFIG to ${project_dir}/sdkconfig, so claim it here BEFORE
 # project.cmake runs. tools/build_board.sh still overrides this per board with
-# -DSDKCONFIG=build-<board>/sdkconfig; this default only serves a bare idf.py.
+# -DSDKCONFIG=build-<board>/sdkconfig; this default only serves a bare idf.py,
+# and hw1_check_board_selection (after step 2) refuses it unless HW_BOARD is set.
 set(_sdkconfig "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig")
 if(NOT DEFINED SDKCONFIG OR "${SDKCONFIG}" STREQUAL "")
     set(SDKCONFIG "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig" CACHE FILEPATH
@@ -188,6 +189,17 @@ else()
                    "using CONFIG_ARDUINO_VARIANT from sdkconfig.defaults.${_inferred_target}")
 endif()
 
+# A defaulted board must not be combined with the tracked config/sdkconfig or a
+# sdkconfig saved for another board. Runs before anything below writes the
+# sdkconfig (the partition-path and reconcile steps in section 4).
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/HW1BoardGuard.cmake")
+set(_hw_board_explicit FALSE)
+if((DEFINED ENV{HW_BOARD} AND NOT "$ENV{HW_BOARD}" STREQUAL "") OR HW1_DEPLOYMENT_ACTIVE)
+    set(_hw_board_explicit TRUE)
+endif()
+hw1_check_board_selection("${CMAKE_CURRENT_SOURCE_DIR}" "${_sdkconfig}"
+    ${_hw_board_explicit} "${_hw_board}" "${_board_file}")
+
 # Optional board feature profile: boards/<board>.features.h. A board whose
 # application features differ from the shared editable defaults (the P4X-EYE
 # has no I2C display, a different radio and its own peripherals) states them
@@ -239,19 +251,36 @@ hw1_sdkconfig_policy_files("${CMAKE_CURRENT_SOURCE_DIR}" "${_hw_board}"
     "${HW1_FEATURE_CONFIG_FILE}" "${HW1_SDK_CONFIG_FILE}"
     "${HW1_DEPLOYMENT_SDKCONFIG_FILE}" _sdk_policy_files)
 
+# Opt-in task-watchdog soak. OFF for every ordinary build.
+# When ON, config/sdkconfig.wdt_soak.defaults is layered last (panic, longer
+# timeout) and the app gets HW1_WDT_SOAK=1 (main loop subscribed). Kconfig
+# values stick in a build directory's sdkconfig, so the soak must never share
+# one with an ordinary build: tools/build_board.sh --wdt-soak uses a directory
+# ending in -wdt-soak, and anything else is refused here.
+option(HW1_WDT_SOAK "Task-watchdog soak build: panic on a trip, main loop subscribed" OFF)
+set(HW1_WDT_SOAK_DEFAULTS "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig.wdt_soak.defaults")
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/HW1WdtSoak.cmake")
+if(HW1_WDT_SOAK)
+    hw1_wdt_soak_check_build_dir("${CMAKE_BINARY_DIR}" "${_sdkconfig}" "${HW1_WDT_SOAK_DEFAULTS}")
+    message(STATUS "Task-watchdog SOAK build: ${HW1_WDT_SOAK_DEFAULTS}")
+endif()
+
 # --- 3. Partition table selection ---
 #
-# Two axes: SR vs no_sr (from #define ENABLE_ESP_SR in System_BuildConfig.h)
-# and flash size (from the active board file, defaulted to 8mb for ESP32
-# boards and as a fallback). The four combinations are:
-#   partitions/ holds the authoritative source tables selected per build:
-#   partitions_no_sr_8mb.csv    factory 4948K + littlefs 3180K
-#   partitions_no_sr_16mb.csv   factory 4948K + littlefs 11628K  (FeatherS3[D])
-#   partitions_sr_8mb.csv       factory 4992K + model 3008K + littlefs 128K
-#   partitions_sr_16mb.csv      factory 4992K + model 3008K + littlefs 8320K
-#
-# When ENABLE_ESP_SR is enabled, we need a "model" SPIFFS partition for
-# WakeNet/MultiNet; when disabled, that space is reclaimed for LittleFS.
+# The CSVs under partitions/ are the only source of partition offsets and
+# sizes; read them there rather than copying numbers into this comment.
+# The picker further down (after the OTA registry) chooses, in order:
+#   1. a deployment's own table (HW1_DEPLOYMENT_PARTITION_FILE), else
+#   2. partitions_ota_<sr>_<flash>.csv when the recovery-OTA layout is on, else
+#   3. partitions_<sr>_<flash>_<board>.csv if that file exists
+#      (today: p4x_eye, waveshare_p4_touch_lcd_5), else
+#   4. partitions_<sr>_<flash>.csv.
+# <sr> is "sr" only when ENABLE_ESP_SR is 1 and HW1_SR_MODELS_IN_FILESYSTEM is
+# not 1, as first defined in the saved-configuration, deployment or board
+# feature header or else System_BuildConfig.h (first definition wins); that
+# layout adds a "model" SPIFFS partition for WakeNet/MultiNet. Otherwise it is
+# "no_sr" and the space goes to LittleFS.
+# <flash> comes from the active board file (8mb by default and as a fallback).
 set(_ota_layout FALSE)
 if(HW1_DEPLOYMENT_ACTIVE AND HW1_DEPLOYMENT_OTA_LAYOUT)
     set(_ota_layout TRUE)
@@ -668,6 +697,12 @@ if(_board_file)
         list(APPEND SDKCONFIG_DEFAULTS "${_ota_key_defaults}")
     endif()
 
+    # The watchdog soak overlay goes last so it wins over the OTA layout's
+    # 5 s panic and over any preset.
+    if(HW1_WDT_SOAK)
+        list(APPEND SDKCONFIG_DEFAULTS "${HW1_WDT_SOAK_DEFAULTS}")
+    endif()
+
     # Same dependency gap for the defaults files themselves. IDF registers the
     # SAVED sdkconfig as a configure dependency (tools/cmake/kconfig.cmake) but
     # never the SDKCONFIG_DEFAULTS inputs, so editing sdkconfig.defaults or the
@@ -697,6 +732,9 @@ if(_board_file)
             list(APPEND _sdk_reconcile_files "${_board_ota_file}")
         endif()
         list(APPEND _sdk_reconcile_files ${_sdk_policy_files})
+        if(HW1_WDT_SOAK)
+            list(APPEND _sdk_reconcile_files "${HW1_WDT_SOAK_DEFAULTS}")
+        endif()
         hw1_reconcile_sdkconfig("${_sdkconfig}" ${_sdk_reconcile_files})
     endif()
 endif()
@@ -793,18 +831,33 @@ elseif(IDF_TARGET STREQUAL "esp32p4")
         configure_file("${_hw1_tracked_lock}" "${_hw1_dependencies_lock}" COPYONLY)
         file(WRITE "${_hw1_lock_seed}" "${_hw1_tracked_lock_sha}")
     endif()
+    # configure_file lists the tracked lock as an input only in a configure
+    # that re-seeds, and the stamp follows the copy, so list it here too: a pull
+    # that changes only the P4 pins must re-seed and resync on the next build.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_hw1_tracked_lock}")
 else()
     set(_hw1_dependencies_lock
         "${CMAKE_CURRENT_SOURCE_DIR}/dependencies.lock.${IDF_TARGET}")
 endif()
 idf_build_set_property(DEPENDENCIES_LOCK "${_hw1_dependencies_lock}")
+# Every build directory shares managed_components/, synced to this lock inside
+# project(). Record the lock around the sync so the build directories of other
+# targets reconfigure (and resync) on their next build, and list the stamp as a
+# configure dependency so this one does after theirs.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/HW1ManagedComponents.cmake")
+set(_hw1_managed_components_stamp
+    "${CMAKE_CURRENT_SOURCE_DIR}/.hw1-build/managed_components.stamp")
+hw1_managed_components_stamp("${_hw1_dependencies_lock}"
+    "${_hw1_managed_components_stamp}" PRE_SYNC)
 
 if(_ota_layout)
-    set(PROJECT_VER "0.99.99+${_ota_version_suffix}")
+    set(PROJECT_VER "0.99.99.1+${_ota_version_suffix}")
 else()
-    set(PROJECT_VER "0.99.99")
+    set(PROJECT_VER "0.99.99.1")
 endif()
 project(hardwareone-idf)
+hw1_managed_components_stamp("${_hw1_dependencies_lock}"
+    "${_hw1_managed_components_stamp}" POST_SYNC)
 
 # ESP-IDF creates component targets while project() runs. Directory-level
 # add_compile_definitions() calls made below therefore do not retroactively
@@ -823,6 +876,15 @@ endif()
 if(HW1_FEATURE_CONFIG_FILE)
     target_compile_definitions(${_hw1_app_component} PRIVATE
         HW1_FEATURE_CONFIG_HEADER="${HW1_FEATURE_CONFIG_FILE}")
+endif()
+if(HW1_WDT_SOAK)
+    # A stale sdkconfig must not give a soak app with a print-only watchdog.
+    hw1_wdt_soak_check_resolved("${HW1_WDT_SOAK_DEFAULTS}"
+        "${CONFIG_ESP_TASK_WDT_PANIC}" "${CONFIG_ESP_TASK_WDT_TIMEOUT_S}")
+    # main/ subscribes and feeds the loop; hardwareone feeds inside long waits.
+    idf_component_get_property(_hw1_main_component main COMPONENT_LIB)
+    target_compile_definitions(${_hw1_app_component} PRIVATE HW1_WDT_SOAK=1)
+    target_compile_definitions(${_hw1_main_component} PRIVATE HW1_WDT_SOAK=1)
 endif()
 if(HW1_DEPLOYMENT_ACTIVE)
     target_compile_definitions(${_hw1_app_component} PRIVATE
@@ -1079,6 +1141,17 @@ if(_ota_layout)
             list(APPEND _ota_pair_deployment_args
                 --deployment "${_hw_deployment}")
         endif()
+        # The audit also reads partition_table/partition-table.bin and
+        # ota_data_initial.bin from the main build. gen_project_binary makes
+        # neither, so in a fresh build directory the first ota0-flash failed
+        # with FileNotFoundError until a full build had run.
+        foreach(_ota_pair_input IN ITEMS partition_table_bin blank_ota_data)
+            if(NOT TARGET ${_ota_pair_input})
+                message(FATAL_ERROR
+                    "Recovery OTA pair audit needs the ESP-IDF target "
+                    "${_ota_pair_input}, which this configure did not define")
+            endif()
+        endforeach()
         add_custom_target(hw1-ota-pair-audit
             COMMAND "${_ota_python}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/ota/check_ota_builds.py"
@@ -1086,7 +1159,11 @@ if(_ota_layout)
                 ${_ota_pair_deployment_args}
                 --main-build "${_ota_build_dir}"
                 --updater-build "${_ota_updater_build}"
-            DEPENDS gen_project_binary "${_ota_updater_bin}"
+            DEPENDS
+                gen_project_binary
+                partition_table_bin
+                blank_ota_data
+                "${_ota_updater_bin}"
             USES_TERMINAL
             VERBATIM)
         set(_ota_pair_gate hw1-ota-pair-audit)

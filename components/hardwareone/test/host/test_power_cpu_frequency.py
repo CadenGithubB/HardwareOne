@@ -19,11 +19,12 @@ from test_web_batch_handlers import extract_block, require
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
-# System_Power.h only tells the ESP32-P4 apart from every other target, so the
-# S3 compiles the same code as the classic ESP32; a separate S3 profile would
-# only repeat the esp32 runs.
+# System_Power.h only tells the ESP32-P4 apart from every other target. The S3
+# profile adds the MSPI speed-mode sync System_Power.cpp brackets Arduino's
+# switch with on S3 builds (UltraSaver's 40 MHz runs from XTAL).
 PROFILES = (
     ("esp32", []),
+    ("s3", ["-DCONFIG_IDF_TARGET_ESP32S3=1", "-DHW1_SYNC_S3_MSPI_WITH_XTAL_CLOCK=1"]),
     ("p4", ["-DCONFIG_IDF_TARGET_ESP32P4=1"]),
     ("p4-old", ["-DCONFIG_IDF_TARGET_ESP32P4=1", "-DCONFIG_ESP32P4_SELECTS_REV_LESS_V3=1"]),
 )
@@ -65,10 +66,21 @@ def generate() -> str:
     steps = re.findall(r"^\s*applyPowerMode\([^;]*\);", apply_settings, re.M)
     require(len(steps) == 1, "applySettings must re-apply the saved power mode once")
     step = "static void applySettingsPowerStep() {\n" + steps[0] + "\n}\n"
+    # S3 builds select the synced switch, and the owner uses it.
+    require(re.search(r"#elif CONFIG_IDF_TARGET_ESP32S3 && !CONFIG_APP_BUILD_TYPE_PURE_RAM_APP\n"
+                      r'#include "soc/rtc.h"\n#include "esp_private/esp_clk_utils.h"\n'
+                      r"#define HW1_SYNC_S3_MSPI_WITH_XTAL_CLOCK 1\n#endif", power),
+            "S3 builds must select the MSPI-synced clock switch")
+    s3_switch = ""
+    if "static bool s3SetCpuFrequencyMhz(" in power:
+        s3_switch = ("#if HW1_SYNC_S3_MSPI_WITH_XTAL_CLOCK\n" +
+                     power[power.index("static portMUX_TYPE sS3ClockSwitchMux"):
+                           power.index("static bool s3SetCpuFrequencyMhz(")] +
+                     extract_block(power, "static bool s3SetCpuFrequencyMhz(") + "\n#endif\n")
     keeps = int("bool applyPowerMode(uint8_t mode, bool setDisplayBrightness" in header)
     harness = (HERE / "power_cpu_frequency_harness.cpp").read_text()
     return (f"#define POWER_MODE_HAS_BRIGHTNESS_OPTION {keeps}\n" +
-            harness.replace("// INSERT_PRODUCTION", owner + "\n" + command + "\n" + step))
+            harness.replace("// INSERT_PRODUCTION", s3_switch + owner + "\n" + command + "\n" + step))
 
 
 def main() -> None:

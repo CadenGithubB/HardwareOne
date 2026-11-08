@@ -289,11 +289,31 @@ inline const char* getFileBrowserScript() {
       return bytes + ' B';
     },
 
+    // File names, path segments, peer labels and listing
+    // errors are untrusted here (any user may upload under '/', a bonded peer
+    // supplies its own FS_LIST reply), and both renderers below build HTML
+    // strings for innerHTML. escHtml makes such text literal in element text
+    // and in quoted attributes.
+    escHtml: function(s) {
+      return String(s == null ? '' : s).replace(/[&<>"'`]/g, function(c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;' }[c];
+      });
+    },
+
+    // A path as one JS string argument for an inline onclick="..." handler.
+    // JSON quoting keeps a quote in the name from ending the JS string,
+    // and escHtml keeps the attribute closed; the browser decodes the entities
+    // before the handler runs, so the handler receives the original path.
+    jsArg: function(s) {
+      return window.FileBrowser.escHtml(JSON.stringify(String(s == null ? '' : s)));
+    },
+
     // Build the breadcrumb inner HTML ("[Root] / system / users") for either
     // renderer. The caller decides which container wraps it. `navigateExpr`
-    // is a function(targetPath) → JS expression string (e.g. for the local
-    // explorer that's `fnId + "Navigate('" + p + "')"`; for BondFs it's
-    // `"window['" + navName + "']('" + p + "')"`). opts.lockToPath, when set,
+    // is a function(targetPath) → JS expression string that must pass the
+    // path through FileBrowser.jsArg (e.g. for the local explorer that's
+    // `fnId + "Navigate(" + jsArg(p) + ")"`; for BondFs it's
+    // `"window['" + navName + "'](" + jsArg(p) + ")"`). opts.lockToPath, when set,
     // pins the displayed root to a sub-folder and disables navigation above it
     // (used by file-pickers that lock to /system/automations etc.).
     breadcrumbHtml: function(currentPath, navigateExpr, opts) {
@@ -303,7 +323,7 @@ inline const char* getFileBrowserScript() {
       if (opts.lockToPath) {
         var lockedParts = opts.lockToPath.split('/').filter(function(p){ return p.length > 0; });
         var displayRoot = lockedParts.length > 0 ? lockedParts[lockedParts.length - 1] : 'Root';
-        html = '<span style="color:var(--muted);">[' + displayRoot + ']</span>';
+        html = '<span style="color:var(--muted);">[' + window.FileBrowser.escHtml(displayRoot) + ']</span>';
       } else {
         html = '<span style="cursor:pointer;color:var(--link);" onclick="' + navigateExpr('/') + '">[Root]</span>';
       }
@@ -315,7 +335,7 @@ inline const char* getFileBrowserScript() {
         if (idx < skipCount) return;
         path += '/' + part;
         html += ' <span style="color:var(--muted);">/</span> ';
-        html += '<span style="cursor:pointer;color:var(--link);" onclick="' + navigateExpr(path) + '">' + part + '</span>';
+        html += '<span style="cursor:pointer;color:var(--link);" onclick="' + navigateExpr(path) + '">' + window.FileBrowser.escHtml(part) + '</span>';
       });
       return html;
     },
@@ -340,7 +360,7 @@ inline const char* getFileBrowserScript() {
       h += '<div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:' + bg + ';"' + hover + '>';
       h += '<span style="flex:1;color:var(--panel-fg);font-size:0.95em;cursor:' + cursor + ';display:flex;align-items:center;gap:8px;"';
       if (o.clickExpr) h += ' onclick="' + o.clickExpr + '"';
-      h += '>' + this.renderIcon(o.iconName, o.iconFallback) + '<span>' + o.name + '</span></span>';
+      h += '>' + this.renderIcon(o.iconName, o.iconFallback) + '<span>' + this.escHtml(o.name) + '</span></span>';
       h += '<span style="color:var(--muted);font-size:0.85em;margin-left:12px;min-width:80px;text-align:right;">' + (o.sizeInfo || '') + '</span>';
       if (o.actionsHtml) h += o.actionsHtml;
       h += '</div>';
@@ -392,7 +412,7 @@ inline const char* getFileBrowserScript() {
     
     function renderBreadcrumb() {
       breadcrumbDiv.innerHTML = window.FileBrowser.breadcrumbHtml(currentPath,
-        function(p) { return explorerFnId + "Navigate('" + p + "')"; },
+        function(p) { return explorerFnId + 'Navigate(' + window.FileBrowser.jsArg(p) + ')'; },
         { lockToPath: lockToPath });
     }
     
@@ -427,7 +447,7 @@ inline const char* getFileBrowserScript() {
             } else if (data.error) {
               msg = '' + data.error;
             }
-            listDiv.innerHTML = '<div style="padding:20px;text-align:center;color:' + color + ';">' + msg + '</div>';
+            listDiv.innerHTML = '<div style="padding:20px;text-align:center;color:' + color + ';">' + window.FileBrowser.escHtml(msg) + '</div>';
             if (config.onNavigate) config.onNavigate(currentPath, 0);
             return;
           }
@@ -456,6 +476,9 @@ inline const char* getFileBrowserScript() {
           files.forEach(function(file) {
             var isFolder = file.type === 'folder';
             var itemPath = (currentPath === '/' ? '/' : currentPath + '/') + file.name;
+            // Every inline handler below gets the path via jsArg, never
+            // spliced raw between quotes.
+            var pathArg = window.FileBrowser.jsArg(itemPath);
             var sizeInfo = window.FileBrowser.formatSize(file.size || '', isFolder);
             
             // Determine interaction based on mode
@@ -465,23 +488,23 @@ inline const char* getFileBrowserScript() {
             if (mode === 'select') {
               // Select mode: folders navigate, files select (if selectFilesOnly is true)
               if (isFolder) {
-                clickAction = explorerFnId + 'Navigate(\'' + itemPath + '\')';
+                clickAction = explorerFnId + 'Navigate(' + pathArg + ')';
               } else {
-                clickAction = explorerFnId + 'Select(\'' + itemPath + '\')';
+                clickAction = explorerFnId + 'Select(' + pathArg + ')';
               }
             } else if (mode === 'view') {
               // View mode: folders navigate, files do nothing (view-only)
               if (isFolder) {
-                clickAction = explorerFnId + 'Navigate(\'' + itemPath + '\')';
+                clickAction = explorerFnId + 'Navigate(' + pathArg + ')';
               } else {
                 canInteract = false;
               }
             } else {
               // Full mode: folders navigate, files select
               if (isFolder) {
-                clickAction = explorerFnId + 'Navigate(\'' + itemPath + '\')';
+                clickAction = explorerFnId + 'Navigate(' + pathArg + ')';
               } else {
-                clickAction = explorerFnId + 'Select(\'' + itemPath + '\')';
+                clickAction = explorerFnId + 'Select(' + pathArg + ')';
               }
             }
             
@@ -497,16 +520,16 @@ inline const char* getFileBrowserScript() {
               var hasRename = (perms & 0x08) !== 0;
               var btns = '';
               if (!isFolder && hasRead) {
-                btns += '<button class="btn btn-small" onclick="' + explorerFnId + 'Download(\'' + itemPath + '\');event.stopPropagation();" style="padding:4px 6px;" title="Download file">' + window.FileBrowser.renderActionIcon('download', 'DL') + '</button>';
+                btns += '<button class="btn btn-small" onclick="' + explorerFnId + 'Download(' + pathArg + ');event.stopPropagation();" style="padding:4px 6px;" title="Download file">' + window.FileBrowser.renderActionIcon('download', 'DL') + '</button>';
               }
               if (!isFolder && config.onEdit && hasWrite) {
-                btns += '<button class="btn btn-small" onclick="' + explorerFnId + 'Edit(\'' + itemPath + '\');event.stopPropagation();" style="padding:4px 6px;" title="Edit file">' + window.FileBrowser.renderActionIcon('edit', 'Edit') + '</button>';
+                btns += '<button class="btn btn-small" onclick="' + explorerFnId + 'Edit(' + pathArg + ');event.stopPropagation();" style="padding:4px 6px;" title="Edit file">' + window.FileBrowser.renderActionIcon('edit', 'Edit') + '</button>';
               }
               if (hasRename) {
-                btns += '<button class="btn btn-small" onclick="' + explorerFnId + 'Rename(\'' + itemPath + '\');event.stopPropagation();" style="padding:4px 8px;font-size:0.8em;" title="Rename">Rename</button>';
+                btns += '<button class="btn btn-small" onclick="' + explorerFnId + 'Rename(' + pathArg + ');event.stopPropagation();" style="padding:4px 8px;font-size:0.8em;" title="Rename">Rename</button>';
               }
               if (hasDelete) {
-                btns += '<button class="btn btn-small" onclick="' + explorerFnId + 'Delete(\'' + itemPath + '\',' + (isFolder ? 'true' : 'false') + ');event.stopPropagation();" style="padding:4px 6px;" title="Delete">' + window.FileBrowser.renderActionIcon('trash', 'Del') + '</button>';
+                btns += '<button class="btn btn-small" onclick="' + explorerFnId + 'Delete(' + pathArg + ',' + (isFolder ? 'true' : 'false') + ');event.stopPropagation();" style="padding:4px 6px;" title="Delete">' + window.FileBrowser.renderActionIcon('trash', 'Del') + '</button>';
               }
               if (btns) actionsHtml = '<span style="display:inline-flex;gap:2px;margin-left:8px;align-items:center;">' + btns + '</span>';
             }
@@ -533,7 +556,7 @@ inline const char* getFileBrowserScript() {
         })
         .catch(function(e) {
           console.error('[FileExplorer] Failed to load directory:', e);
-          listDiv.innerHTML = '<div style="padding:20px;text-align:center;color:var(--danger);">Error: ' + e.message + '</div>';
+          listDiv.innerHTML = '<div style="padding:20px;text-align:center;color:var(--danger);">Error: ' + window.FileBrowser.escHtml(e.message) + '</div>';
         });
     }
     
@@ -981,7 +1004,11 @@ window.BondFs = (function(){
   var st = { ok:false, peerMac:'', peerName:'', localMac:'', seq:0 };
   function token(mac){ return (mac||'').replace(/:/g,'').toUpperCase(); }
   function join(base,name){ if(base==='/'||base===''){return '/'+name;} return (base.charAt(base.length-1)==='/'?base:base+'/')+name; }
-  function esc(s){ return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+  // Names, paths, the peer label and status text here are peer- or
+  // user-supplied; escape them with the shared FileBrowser helpers (the old
+  // esc() only JS-escaped quotes, which does nothing inside HTML).
+  function escHtml(s){ return window.FileBrowser.escHtml(s); }
+  function jsArg(s){ return window.FileBrowser.jsArg(s); }
   // The CLI-text parseListing() that used to translate `files /path` output
   // into entry objects has been removed. All peer-FS operations now go
   // through structured opcodes (FS_LIST / FS_STAT / FS_GET).
@@ -1136,26 +1163,26 @@ window.BondFs = (function(){
     if(path!=='/'){
       var trimmed=path.replace(/\/+$/,''); var idx=trimmed.lastIndexOf('/');
       var parent=idx<=0?'/':trimmed.substring(0,idx);
-      h+='<button class="btn" onclick="window[\''+navName+'\'](\''+esc(parent)+'\')">← Back</button>';
+      h+='<button class="btn" onclick="window[\''+navName+'\']('+jsArg(parent)+')">← Back</button>';
     }
-    h+='<button class="btn" onclick="window[\''+navName+'\'](\''+esc(path)+'\')">Refresh</button>';
-    h+='<span style="margin-left:auto;font-size:0.85em;color:var(--muted);">'+peerLabel+'</span>';
+    h+='<button class="btn" onclick="window[\''+navName+'\']('+jsArg(path)+')">Refresh</button>';
+    h+='<span style="margin-left:auto;font-size:0.85em;color:var(--muted);">'+escHtml(peerLabel)+'</span>';
     h+='</div>';
 
     // Breadcrumb (shared with createFileExplorer via FileBrowser.breadcrumbHtml)
     h+='<div style="padding:8px;background:var(--crumb-bg);border-bottom:1px solid var(--border);font-size:0.9em;color:var(--panel-fg);">';
-    h+=window.FileBrowser.breadcrumbHtml(path, function(p){ return "window['"+navName+"']('"+esc(p)+"')"; });
+    h+=window.FileBrowser.breadcrumbHtml(path, function(p){ return "window['"+navName+"']("+jsArg(p)+")"; });
     h+='</div>';
 
     // List
     h+='<div style="overflow-y:auto;">';
     if(!entries||entries.length===0){
       var emptyMsg=opts.status||'No files found';
-      h+='<div style="padding:20px;text-align:center;color:var(--muted);">'+emptyMsg+'</div>';
+      h+='<div style="padding:20px;text-align:center;color:var(--muted);">'+escHtml(emptyMsg)+'</div>';
     } else {
       h+='<div style="padding:4px;">';
       for(var e=0;e<entries.length;e++){
-        var en=entries[e]; var full=esc(join(path,en.name));
+        var en=entries[e]; var fullArg=jsArg(join(path,en.name));
         // Build per-file action buttons (only for files) from fileActions[].
         // Each entry may carry an optional `title` for the tooltip — falls
         // back to the visible label when omitted.
@@ -1166,7 +1193,7 @@ window.BondFs = (function(){
             var btns='';
             for(var a=0;a<acts.length;a++){
               var ttl=acts[a].title || acts[a].label;
-              btns+='<button class="btn btn-small" onclick="window[\''+actName+'\']['+a+'].fn(\''+full+'\');event.stopPropagation();" style="padding:4px 8px;font-size:0.8em;" title="'+ttl+'">'+acts[a].label+'</button>';
+              btns+='<button class="btn btn-small" onclick="window[\''+actName+'\']['+a+'].fn('+fullArg+');event.stopPropagation();" style="padding:4px 8px;font-size:0.8em;" title="'+escHtml(ttl)+'">'+escHtml(acts[a].label)+'</button>';
             }
             if(btns) actionsHtml='<span style="display:inline-flex;gap:2px;margin-left:8px;align-items:center;">'+btns+'</span>';
           }
@@ -1176,11 +1203,11 @@ window.BondFs = (function(){
         // doesn't also fire View. Folders keep navigate-into-dir click.
         var rowClick = '';
         if (en.isDir) {
-          rowClick = "window['"+navName+"']('"+full+"')";
+          rowClick = "window['"+navName+"']("+fullArg+")";
         } else {
           var rcActs = window[actName];
           if (rcActs && rcActs.length) {
-            rowClick = "window['"+actName+"'][0].fn('"+full+"')";
+            rowClick = "window['"+actName+"'][0].fn("+fullArg+")";
           }
         }
         h+=window.FileBrowser.rowHtml({
@@ -1202,7 +1229,7 @@ window.BondFs = (function(){
     h+='</div>';
 
     // Status bar at bottom — Path: ... (matches createFileManager)
-    h+='<div style="padding:6px 8px;background:var(--crumb-bg);border-top:1px solid var(--border);font-size:0.85em;color:var(--muted);min-height:24px;">Path: '+path+'</div>';
+    h+='<div style="padding:6px 8px;background:var(--crumb-bg);border-top:1px solid var(--border);font-size:0.85em;color:var(--muted);min-height:24px;">Path: '+escHtml(path)+'</div>';
 
     h+='</div>';
     c.innerHTML=h;
@@ -1211,7 +1238,7 @@ window.BondFs = (function(){
   // opcodes (FS_LIST/FS_STAT/FS_GET). stat() was added in the same pass to
   // replace the fsusage CLI scrape — exposed here so the Files page can call
   // it from updateBondedStorageStats().
-  return { state:st, token:token, join:join, esc:esc, checkAvailable:checkAvailable, exec:exec, list:list, stat:stat, pull:pull, renderExplorer:renderExplorer };
+  return { state:st, token:token, join:join, checkAvailable:checkAvailable, exec:exec, list:list, stat:stat, pull:pull, renderExplorer:renderExplorer };
 })();
 console.log('[BondFs] shared helper loaded');
 </script>

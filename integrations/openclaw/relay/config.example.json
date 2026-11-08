@@ -1,5 +1,5 @@
 {
-  "bind_host": "192.168.21.143",
+  "bind_host": "192.168.1.143",
   "bind_port": 18790,
   "device_identity": "xiao-studio",
   "tls_cert_file": "/ABSOLUTE/PRIVATE/RUNTIME/PATH/relay-cert.pem",

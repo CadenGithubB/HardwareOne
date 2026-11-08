@@ -347,8 +347,9 @@
 #define ENABLE_LOCAL_STT        0
 #endif
 
-// Select the pinned 15x5 gen2 acoustic model on SD instead of the default
-// 5x5 model in LittleFS. The model path and generated identity change together.
+// Select the pinned 15x5 gen2 acoustic model on SD instead of the 5x5 model in
+// LittleFS. The model path and generated identity change together. On ESP32-P4
+// local STT requires it (and so the microSD card): the 5x5 file is not published.
 #ifndef ENABLE_STT_MODEL_15X5_GEN2
 #define ENABLE_STT_MODEL_15X5_GEN2 0
 #endif
@@ -418,8 +419,8 @@
 //   symmetric: the on-device engine has no special status beyond being local.
 //
 //     ENABLE_LLM_SOURCE_ONBOARD  tiny transformer inference on this chip
-//                                (Llama + GPT-2, FP32/INT8). Requires ESP32-S3
-//                                + PSRAM; 1-4 MB PSRAM at runtime, and it is by
+//                                (Llama + GPT-2, FP32/INT8). Requires PSRAM
+//                                (any chip); 1-4 MB PSRAM at runtime, and it is by
 //                                far the largest part of the feature's flash.
 //     ENABLE_LLM_SOURCE_CM5      the CM5 / Pi 5 co-processor, reached over the
 //                                authenticated UART host link. Costs almost no
@@ -1024,8 +1025,9 @@
   #define ENABLE_BONDED_MODE 0
 #endif
 
-// Note: ENABLE_LLM_SOURCE_ONBOARD requires ESP32-S3 with PSRAM.
-// CMakeLists.txt handles excluding LLM source files on non-S3 targets.
+// Note: ENABLE_LLM_SOURCE_ONBOARD needs PSRAM. CMake gates its source files on
+// this flag alone (no target or PSRAM check); a build without PSRAM must set it
+// to 0 in its feature header or saved configuration.
 
 // =============================================================================
 // MEMORY SAVINGS REFERENCE
@@ -1453,6 +1455,12 @@
 #if ENABLE_STT_MODEL_15X5_GEN2 && (!ENABLE_LOCAL_STT || !defined(CONFIG_IDF_TARGET_ESP32P4) || !ENABLE_SD_CARD)
   #error "ENABLE_STT_MODEL_15X5_GEN2 requires ENABLE_LOCAL_STT, ESP32-P4 and ENABLE_SD_CARD."
 #endif
+// Local STT on an ESP32-P4 runs the published 15x5 gen2 model from the microSD
+// card; the 5x5 LittleFS model has no published file. So enabling local STT on
+// a P4 needs the card (the check above) and this model.
+#if ENABLE_LOCAL_STT && defined(CONFIG_IDF_TARGET_ESP32P4) && !ENABLE_STT_MODEL_15X5_GEN2
+  #error "Local STT on ESP32-P4 runs the 15x5 gen2 model from the microSD card: set ENABLE_SDMMC_CARD 1 and ENABLE_STT_MODEL_15X5_GEN2 1, or ENABLE_LOCAL_STT 0."
+#endif
 
 // =============================================================================
 // BATTERY MONITOR — derived enable + backend sanity
@@ -1710,8 +1718,12 @@
 #ifndef ENABLE_STT_SPEAKER_LABELS
   #define ENABLE_STT_SPEAKER_LABELS 0
 #endif
+// Labels only apply to local STT: a profile that enables them (P4X-EYE) has
+// them off whenever its local STT is off. CMake compiles the speaker code only
+// inside its local-STT block, so source selection agrees.
 #if ENABLE_STT_SPEAKER_LABELS && !ENABLE_LOCAL_STT
-  #error "ENABLE_STT_SPEAKER_LABELS labels the local STT backend's phrases. Set ENABLE_LOCAL_STT 1 or ENABLE_STT_SPEAKER_LABELS 0."
+  #undef ENABLE_STT_SPEAKER_LABELS
+  #define ENABLE_STT_SPEAKER_LABELS 0
 #endif
 
 // =============================================================================

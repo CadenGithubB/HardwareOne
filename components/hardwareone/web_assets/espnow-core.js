@@ -947,7 +947,9 @@
       hw.postFormText('/api/cli', { cmd: cmd })
       .then(function(text) {
         if (!text.includes('Remote command sent')) {
-          container.innerHTML = '<pre style="margin:0;white-space:pre-wrap;font-size:0.85em">' + text + '</pre>';
+          // The CLI reply can echo the requested path, which
+          // comes from a peer folder name; keep it literal.
+          container.innerHTML = '<pre style="margin:0;white-space:pre-wrap;font-size:0.85em">' + window.espnowEscapeHtml(text) + '</pre>';
           hw.setText(statusDiv, text);
           return;
         }
@@ -973,7 +975,9 @@
           pollCount++;
           if (pollCount > maxPolls) {
             clearInterval(pollInterval);
-            container.innerHTML = '<div class="remote-explorer"><div class="remote-explorer-crumb">' + browsePath + '</div><div class="remote-entry remote-entry-empty" style="display:flex">Timed out waiting for response</div></div>';
+            // browsePath is built from a peer-supplied folder
+            // name (BondFs onNavigate below), and the peer controls the timeout.
+            container.innerHTML = '<div class="remote-explorer"><div class="remote-explorer-crumb">' + window.espnowEscapeHtml(browsePath) + '</div><div class="remote-entry remote-entry-empty" style="display:flex">Timed out waiting for response</div></div>';
             hw.setText(statusDiv, 'Timed out');
             return;
           }

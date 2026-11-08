@@ -44,7 +44,7 @@ def main():
     assert one_shot.index('sttWarmYield(sttCancelled, &token);') < one_shot.index('ok = sttLocalTranscribe(')
     assert 'stats, error, sizeof(error));' in one_shot and 'sttWarmPark' not in one_shot
     interface = '\n'.join(no_includes((SOURCE / name).read_text()) for name in
-                          ('System_STTMetadata.h', 'System_Transcript.h', 'System_STTLocal.h', 'System_STT.h', 'Audio_VadPolicy.h', 'stt/stt_segmenter.h',
+                          ('System_STTMetadata.h', 'System_Transcript.h', 'System_STTLocal.h', 'System_STT.h', 'Audio_VadPolicy.h', 'stt/stt_segmenter.h', 'stt/stt_continuous_config.h', 'stt/stt_auto_gain.h',
                            'stt/quartznet_frontend.h'))
     # The real frontend, so capture-time feature rows can be checked bit for bit.
     frontend = no_includes((SOURCE / 'stt/quartznet_constants.h').read_text()) + no_includes((SOURCE / 'stt/quartznet_frontend.cpp').read_text())

@@ -3570,6 +3570,20 @@ esp_err_t handleAutomationsPage(httpd_req_t* req) {
   return ESP_OK;
 }
 
+// The text for a failed automations.json read. A file from newer firmware
+// (refused by readAutomationsJson) names its format; nothing in it is listed
+// or exported, and it is left unchanged.
+static void automationsWebReadError(char* out, size_t outSize, uint32_t newerVersion) {
+  if (newerVersion) {
+    snprintf(out, outSize,
+             "automations.json is format %lu, newer than this firmware reads (%lu). "
+             "Not loaded and left unchanged; update the firmware to use it.",
+             (unsigned long)newerVersion, (unsigned long)kAutomationsFileVersion);
+  } else {
+    snprintf(out, outSize, "Failed to read automations.json");
+  }
+}
+
 // GET /api/automations: automations.json plus `systemEnabled` (folded in so
 // the page no longer needs CLI `automation system status` on load).
 esp_err_t handleAutomationsGet(httpd_req_t* req) {
@@ -3577,10 +3591,22 @@ esp_err_t handleAutomationsGet(httpd_req_t* req) {
 
   httpd_resp_set_type(req, "application/json");
   String body;
-  if (!readText(AUTOMATIONS_JSON_FILE, body, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "web.automations"))) {
-    httpd_resp_send(req,
-      "{\"success\":false,\"systemEnabled\":false,\"error\":\"Failed to read automations.json\"}",
-      HTTPD_RESP_USE_STRLEN);
+  uint32_t newerVersion = 0;
+  if (!readAutomationsJson(body, &newerVersion)) {
+    char error[192];
+    automationsWebReadError(error, sizeof(error), newerVersion);
+    char reply[320];
+    if (newerVersion) {
+      snprintf(reply, sizeof(reply),
+               "{\"success\":false,\"systemEnabled\":%s,\"formatVersion\":%lu,\"supported\":%lu,"
+               "\"error\":\"%s\"}",
+               gSettings.automationEnabled ? "true" : "false", (unsigned long)newerVersion,
+               (unsigned long)kAutomationsFileVersion, error);
+    } else {
+      snprintf(reply, sizeof(reply), "{\"success\":false,\"systemEnabled\":false,\"error\":\"%s\"}",
+               error);
+    }
+    httpd_resp_send(req, reply, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
   // Sanitize duplicate IDs if any and persist back
@@ -5010,6 +5036,21 @@ static void automationExportDisposition(const String& name, char* out, size_t ou
   snprintf(out, outSize, "attachment; filename=\"%s.json\"", n ? safe : "automation");
 }
 
+// An export whose read failed. A refused newer file is a 409 naming its
+// format, so the browser does not save the error as a backup.
+static esp_err_t sendAutomationsExportReadError(httpd_req_t* req, uint32_t newerVersion) {
+  if (!newerVersion) {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to read automations");
+    return ESP_OK;
+  }
+  char error[192];
+  automationsWebReadError(error, sizeof(error), newerVersion);
+  httpd_resp_set_status(req, "409 Conflict");
+  httpd_resp_set_type(req, "text/plain");
+  httpd_resp_send(req, error, HTTPD_RESP_USE_STRLEN);
+  return ESP_OK;
+}
+
 esp_err_t handleAutomationsExport(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
@@ -5020,9 +5061,9 @@ esp_err_t handleAutomationsExport(httpd_req_t* req) {
     if (httpd_query_key_value(query, "id", idParam, sizeof(idParam)) == ESP_OK) {
       // Export single automation
       String json;
-      if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "web.automations"))) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to read automations");
-        return ESP_OK;
+      uint32_t newerVersion = 0;
+      if (!readAutomationsJson(json, &newerVersion)) {
+        return sendAutomationsExportReadError(req, newerVersion);
       }
 
       // Find specific automation using string parsing
@@ -5081,9 +5122,9 @@ esp_err_t handleAutomationsExport(httpd_req_t* req) {
 
   // Export all automations (bulk export)
   String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "web.automations"))) {
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to read automations");
-    return ESP_OK;
+  uint32_t newerVersion = 0;
+  if (!readAutomationsJson(json, &newerVersion)) {
+    return sendAutomationsExportReadError(req, newerVersion);
   }
 
   // Generate timestamp for filename

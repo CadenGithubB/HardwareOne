@@ -27,7 +27,7 @@ Use `configurations/waveshare-p4-bringup.json` with board
 `waveshare_p4_touch_lcd_5`. Build through the saved-profile tool:
 
 ```sh
-source /Users/cadbecaimacmini/esp/esp-idf/export.sh
+source ~/esp/esp-idf/export.sh
 python3 tools/build_config.py build waveshare-p4-bringup
 ```
 
@@ -650,9 +650,9 @@ JavaScript behavior test passed; the existing EYE baseline at the same shared
 source checkpoint remains unchanged.
 
 Application-only flash matched MAC/partition layout and verified the image
-hash. Existing saved Wi-Fi connected to `TestESPNetwork` at `192.168.21.75`;
+hash. Existing saved Wi-Fi connected to `<your-network>` at `192.168.1.75`;
 HTTP started automatically on port 80. The Sensors page is
-`http://192.168.21.75/sensors` (address may change with DHCP). The user verified
+`http://192.168.1.75/sensors` (address may change with DHCP). The user verified
 the web interface, camera capture and recording from a computer on that network.
 This Mac was on a different subnet and could not independently reach that IP;
 its failed browser/TCP attempts are not camera/server failures.
@@ -698,7 +698,7 @@ passed while preview was live. A two-second onboard-mic/local-STT job completed
 advancing. Leaving Camera cleared the bitmap and retired the worker; the
 camera remained available for capture. Reentry started a fresh live preview.
 
-HTTP still starts automatically on port 80 at `192.168.21.75`, touch remains
+HTTP still starts automatically on port 80 at `192.168.1.75`, touch remains
 connected, and C6 stays online with zero bridge timeouts/transport errors.
 Saved landscape, resolution and mirror/flip settings remain intact. The current
 user-selected quality 0 and FPS 20 are preserved; preview does not rewrite them.

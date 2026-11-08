@@ -36,6 +36,8 @@ check_markers libraries/BLE/src/BLECharacteristic.h 1
 # 14 since 2026-10-25: getServices() never waits before its request and skips a
 # disconnected client (R1 ring wedge). Recorded in
 # arduino-local-patches-2026-10-25-ble-search-wait.patch.
+# 16 since 2026-11-06: connect() gives back a timed-out REG/OPEN semaphore.
+# Recorded in arduino-local-patches-2026-11-06-ble-connect-semaphores.patch.
 check_markers libraries/BLE/src/BLEClient.cpp 16
 check_markers libraries/BLE/src/BLEDevice.cpp 3
 check_markers libraries/BLE/src/BLERemoteCharacteristic.cpp 7
@@ -130,6 +132,8 @@ if [ "$fail" -ne 0 ]; then
   echo "  arduino-local-patches-2026-10-15-panic-iram.patch"
   echo "  arduino-local-patches-2026-10-22-ble-memory.patch"
   echo "  arduino-local-patches-2026-10-25-ble-search-wait.patch"
+  echo "  arduino-local-patches-2026-11-06-ble-connect-semaphores.patch"
+  echo "and last the phone-pipe seam patch: tools/ble-phone-pipe/arduino.patch"
   exit 1
 fi
 echo "All arduino local patches present."

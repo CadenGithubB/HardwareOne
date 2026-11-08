@@ -72,6 +72,12 @@ extern volatile bool gRestoreComplete;
 // streamlined credential-only flow instead of the full Basic/Advanced/Import menu.
 extern const char* PENDING_CRED_SETUP_FILE;
 
+// The same marker, written while users.json exists, means the owner's
+// (user 1's) credential file was quarantined as unreadable. The next boot then
+// asks for a new owner password and writes only that file. Called by the
+// per-user settings loader once its quarantine rename has succeeded.
+bool armOwnerCredentialSetup();
+
 // ============================================================================
 // State Management Functions
 // ============================================================================

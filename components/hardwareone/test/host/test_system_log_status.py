@@ -48,6 +48,9 @@ def generate() -> str:
         "void formatSystemLogFlags(DebugFlagMask mask, char* out, size_t outSize)",
         "String formatSystemLogFlags(DebugFlagMask mask)",
         "bool systemLogApplyPersistedFlags()",
+        "static size_t systemLogMaxSizeBytes()",
+        "static int systemLogMaxRotations()",
+        "static bool systemLogBlockedByReserve(const String& path)",
         "void formatSystemLogStatus(char* out, size_t outSize)"))
     harness = (HERE / "system_log_status_harness.cpp").read_text()
     for marker, value in (("// INSERT_TYPES", types), ("// INSERT_PRODUCTION", production)):

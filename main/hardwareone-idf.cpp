@@ -13,6 +13,7 @@
 #include "../components/hardwareone/System_AuthIdentity.h"
 #include "../components/hardwareone/System_OTASafety.h"
 #include "../components/hardwareone/System_RadioCompanion.h"
+#include "../components/hardwareone/System_TaskWdt.h"
 
 // Real HardwareOne Arduino-style entry points are implemented in
 // components/hardwareone/HardwareOne.cpp
@@ -139,9 +140,24 @@ extern "C" void app_main(void)
     setup();
     radioCompanionLogBootSummary();
 
+#if HW1_WDT_SOAK
+    // Watchdog soak build only: subscribe the main loop now
+    // that setup is done, and feed it once per pass below. A trip panics.
+    // Ordinary builds leave the main task unsubscribed.
+    if (taskWdtSubscribeCurrent()) {
+        ESP_LOGW("boot", "watchdog soak build: main loop subscribed, a %d s stall panics",
+                 (int)CONFIG_ESP_TASK_WDT_TIMEOUT_S);
+    } else {
+        ESP_LOGE("boot", "watchdog soak build: could not subscribe the main loop");
+    }
+#endif
+
     // Run user loop forever with a small delay
     while (true) {
         loop();
+#if HW1_WDT_SOAK
+        taskWdtFeed();
+#endif
         vTaskDelay(pdMS_TO_TICKS(10));  // 10 ms; adjust as needed
     }
 }

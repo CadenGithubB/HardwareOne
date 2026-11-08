@@ -174,8 +174,8 @@ void getCategoryItems(int categoryId, const OLEDMenuItem** outItems, int* outCou
 // oledMenuCategorySelected / oledMenuCategoryItemIndex); sMainScroll is a
 // per-frame VIEW rebuilt from them, so those consumers keep working unchanged.
 //
-// (The old launcher's dynamic "remote submenu" path was dead and was removed
-// pre-1.0; the live launcher is just these two levels.)
+// (The old launcher's dynamic "remote submenu" path was dead and was removed;
+// the live launcher is just these two levels.)
 
 EXT_RAM_BSS_ATTR static OLEDScrollState sMainScroll;
 static bool sMainScrollInit = false;

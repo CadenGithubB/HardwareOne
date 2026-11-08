@@ -33,6 +33,7 @@
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include <esp_app_desc.h>
+#include <mbedtls/sha256.h>
 #include <vector>
 
 #include "System_Debug.h"
@@ -408,7 +409,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   PSRAM_JSON_DOC(doc);
 
   doc["magic"] = "HWBACKUP";
-  doc["formatVersion"] = 1;
+  doc["formatVersion"] = kBackupFormatVersion;
 
   // Timestamp
   char ts[32];
@@ -518,18 +519,147 @@ static size_t sStagedRestoreLen = 0;
 static bool sStagedRestoreCompatible = true;
 static volatile bool sRestoreAwaitingConfirm = false;
 
+// What the operator is shown before accepting a staged bundle. Hostname and
+// board are the bundle's own claims (anyone on the LAN can write them); the
+// size and SHA-256 prefix describe the bytes this device actually received.
+// The source is "this device" only when the bundle carries a fingerprint and
+// it matched this board; a bundle without one is shown as unverified (it is
+// still restored with credentials, as before).
+enum class StagedRestoreSource : uint8_t { ThisDevice, OtherDevice, NoFingerprint };
+struct StagedRestoreSummary {
+  char host[33];
+  char board[33];
+  char sha8[9];
+  size_t bytes;
+  StagedRestoreSource source;
+  bool compatible;     // credential fields are restored
+  bool hasForceKey;    // the body carries "force", which /api/backup never writes
+};
+static StagedRestoreSummary sStagedSummary = {};
+
+// The bundle's "formatVersion" against kBackupFormatVersion. No field is
+// format 1 (bundles exported before restore checked it); a whole number up to
+// this firmware's is supported; a newer one, or a value that is not a whole
+// number, is refused before anything is staged. *version gets the bundle's
+// format (0 when it is not a whole number).
+enum class BackupFormatCheck : uint8_t { Supported, Newer, Invalid };
+static BackupFormatCheck checkBackupFormat(JsonVariantConst bundle, uint32_t* version) {
+  JsonVariantConst field = bundle["formatVersion"];
+  uint32_t found = 1;
+  BackupFormatCheck result = BackupFormatCheck::Supported;
+  if (!field.isNull()) {
+    if (!field.is<uint32_t>()) {
+      found = 0;
+      result = BackupFormatCheck::Invalid;
+    } else {
+      found = field.as<uint32_t>();
+      if (found > kBackupFormatVersion) result = BackupFormatCheck::Newer;
+    }
+  }
+  if (version) *version = found;
+  return result;
+}
+
 bool migrationRestoreAwaitingConfirm() {
   return sRestoreAwaitingConfirm;
 }
 
 void discardStagedMigrationRestore() {
-  sRestoreAwaitingConfirm = false;
-  if (sStagedRestoreBuf) {
-    free(sStagedRestoreBuf);
-    sStagedRestoreBuf = nullptr;
-  }
+  // Free and clear everything before the flag, in program order. /api/restore
+  // refuses while the flag is set. The flag is a plain volatile, so this is not
+  // a cross-core memory-ordering guarantee.
+  char* buf = sStagedRestoreBuf;
+  sStagedRestoreBuf = nullptr;
   sStagedRestoreLen = 0;
   sStagedRestoreCompatible = true;
+  sStagedSummary = StagedRestoreSummary{};
+  if (buf) free(buf);
+  sRestoreAwaitingConfirm = false;
+}
+
+// Printable ASCII only (the claims are shown on a serial terminal), truncated.
+static void copyBundleClaim(char* out, size_t cap, const char* in) {
+  size_t n = 0;
+  for (; in && *in && n + 1 < cap; ++in) {
+    const unsigned char c = (unsigned char)*in;
+    out[n++] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+  }
+  out[n] = '\0';
+  if (n == 0) snprintf(out, cap, "unknown");
+}
+
+// Takes ownership of buf. compatible is handleRestore's fingerprint verdict;
+// bundle is the parsed body. The flag is set last in program order (a plain
+// volatile store, not a release barrier).
+static void stageMigrationRestore(char* buf, size_t len, bool compatible, JsonVariantConst bundle) {
+  discardStagedMigrationRestore();  // clear any stale state
+  JsonVariantConst device = bundle["device"];
+  StagedRestoreSummary summary = {};
+  copyBundleClaim(summary.host, sizeof(summary.host), device["hostname"].as<const char*>());
+  copyBundleClaim(summary.board, sizeof(summary.board), device["board"].as<const char*>());
+  unsigned char digest[32] = {};
+  if (mbedtls_sha256((const unsigned char*)buf, len, digest, 0) == 0) {
+    snprintf(summary.sha8, sizeof(summary.sha8), "%02x%02x%02x%02x",
+             digest[0], digest[1], digest[2], digest[3]);
+  } else {
+    snprintf(summary.sha8, sizeof(summary.sha8), "--------");
+  }
+  summary.bytes = len;
+  const char* fingerprint = device["fingerprint"].as<const char*>();
+  summary.source = (!fingerprint || !*fingerprint) ? StagedRestoreSource::NoFingerprint
+                   : compatible                    ? StagedRestoreSource::ThisDevice
+                                                   : StagedRestoreSource::OtherDevice;
+  summary.compatible = compatible;
+  summary.hasForceKey = !bundle["force"].isNull();
+  sStagedSummary = summary;
+  sStagedRestoreBuf = buf;
+  sStagedRestoreLen = len;
+  sStagedRestoreCompatible = compatible;
+  sRestoreAwaitingConfirm = true;
+}
+
+static const char* stagedSourceText(const StagedRestoreSummary& s) {
+  switch (s.source) {
+    case StagedRestoreSource::ThisDevice: return "this device";
+    case StagedRestoreSource::OtherDevice: return "other device (credentials skipped)";
+    case StagedRestoreSource::NoFingerprint: break;
+  }
+  return s.compatible ? "no fingerprint (unverified, credentials restored)"
+                      : "no fingerprint (unverified, credentials skipped)";
+}
+
+String migrationStagedSummary() {
+  if (!sRestoreAwaitingConfirm) return String("");
+  const StagedRestoreSummary& s = sStagedSummary;
+  char line[192];
+  snprintf(line, sizeof(line), "from %s [%s], %u bytes, sha256 %s..., %s", s.host, s.board,
+           (unsigned)s.bytes, s.sha8, stagedSourceText(s));
+  return String(line);
+}
+
+String migrationStagedCheckAdvice() {
+  if (!sRestoreAwaitingConfirm) return String("");
+  if (sStagedSummary.hasForceKey) {
+    // A forced (cross-device) upload is the backup file with "force" added, so
+    // its bytes can never match the file on disk.
+    return String("Size and SHA-256 cover the upload, which added a force flag, so they "
+                  "will not match your file. Check the source and board.");
+  }
+  return String("Check the source and board. If the file was sent unchanged, size and "
+                "SHA-256 match `wc -c` and `shasum -a 256` of it.");
+}
+
+String migrationStagedOledPrompt() {
+  if (!sRestoreAwaitingConfirm) return String("");
+  const StagedRestoreSummary& s = sStagedSummary;
+  const char* source = s.source == StagedRestoreSource::ThisDevice    ? "this dev"
+                       : s.source == StagedRestoreSource::OtherDevice ? "other dev"
+                                                                      : "unverified";
+  // getOLEDYesNoPrompt shows three 21-character lines above Yes/No.
+  char text[72];
+  snprintf(text, sizeof(text), "Apply %.14s?\n%uB sha %s\n%s, reboots", s.host, (unsigned)s.bytes, s.sha8,
+           source);
+  return String(text);
 }
 
 static String restoreStagingPath(const String& dest) {
@@ -846,6 +976,33 @@ static esp_err_t handleRestore(httpd_req_t* req) {
     return ESP_OK;
   }
 
+  // A newer bundle format is refused before anything is staged.
+  uint32_t bundleFormat = 0;
+  const BackupFormatCheck format = checkBackupFormat(doc.as<JsonVariantConst>(), &bundleFormat);
+  if (format != BackupFormatCheck::Supported) {
+    free(buf);
+    char reply[256];
+    if (format == BackupFormatCheck::Newer) {
+      BROADCAST_PRINTF("Backup refused: format %lu is newer than this firmware reads (%lu). "
+                       "Nothing was staged. Update the firmware, then import again.",
+                       (unsigned long)bundleFormat, (unsigned long)kBackupFormatVersion);
+      snprintf(reply, sizeof(reply),
+               "{\"error\":\"Backup format too new\",\"formatVersion\":%lu,\"supported\":%lu,"
+               "\"message\":\"This backup was made by newer firmware. Update this device's "
+               "firmware, then import again.\"}",
+               (unsigned long)bundleFormat, (unsigned long)kBackupFormatVersion);
+    } else {
+      broadcastOutput("Backup refused: its formatVersion is not a whole number. Nothing was staged.");
+      snprintf(reply, sizeof(reply),
+               "{\"error\":\"Invalid backup formatVersion\",\"supported\":%lu}",
+               (unsigned long)kBackupFormatVersion);
+    }
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, reply, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
   bool compatible = true;
   const char* backupFingerprint = doc["device"]["fingerprint"];
   if (backupFingerprint && strlen(backupFingerprint) > 0) {
@@ -871,11 +1028,7 @@ static esp_err_t handleRestore(httpd_req_t* req) {
   }
 
   // Stage for on-device confirm (OLED / serial). Do not touch flash yet.
-  discardStagedMigrationRestore();  // clear any stale state
-  sStagedRestoreBuf = buf;
-  sStagedRestoreLen = (size_t)totalReceived;
-  sStagedRestoreCompatible = compatible;
-  sRestoreAwaitingConfirm = true;
+  stageMigrationRestore(buf, (size_t)totalReceived, compatible, doc.as<JsonVariantConst>());
 
   broadcastOutput("");
   broadcastOutput("========================================");
@@ -1151,7 +1304,6 @@ restore_register:
 }
 
 void stopRestoreOnlyHttpServer() {
-  discardStagedMigrationRestore();
   // `if (server)` is an is-anything-running test, not an ownership test — see
   // the note above startRestoreOnlyHttpServer(). Correct only while first-time
   // setup blocks boot, which guarantees the only server that can be running
@@ -1169,6 +1321,9 @@ void stopRestoreOnlyHttpServer() {
     }
     server = NULL;
   }
+  // After the stop returns no /api/restore handler is still running, so none
+  // can stage a buffer behind this discard.
+  discardStagedMigrationRestore();
 }
 
 #endif // ENABLE_MIGRATION_TOOL

@@ -128,6 +128,8 @@ extern const CommandEntry cm5PresenceCommands[];
 extern const size_t cm5PresenceCommandsCount;
 extern const CommandEntry otaCommands[];
 extern const size_t otaCommandsCount;
+extern const CommandEntry versionsCommands[];
+extern const size_t versionsCommandsCount;
 extern const CommandEntry setPatternCommands[];
 extern const size_t setPatternCommandsCount;
 extern const CommandEntry g2Commands[];
@@ -172,6 +174,15 @@ static constexpr CommandModule gCommandModules[] = {
     "the first-boot setup wizard re-runs on next reboot while deliberately preserving "
     "WiFi credentials and other settings. Most mutating commands (timeset, cpufreq, "
     "reboot, ramflush, factoryreset, broadcast, lightsleep, deepsleep) require admin.", commands,             &commandsCount, 0, nullptr },
+  { "versions",   "Firmware and compatibility versions", "versions lists, one line each, the firmware version and the "
+    "versions a separately built part must agree with: the recovery updater, OTA layout, manifest format and data schema "
+    "(OTA layouts); the ESP-NOW format, the radio's ESP-NOW stack and the ESP-NOW identity files; the automations "
+    "file and backup bundle formats; the BLE console "
+    "channel and the phone link, pipe channel and console records (phone-pipe builds); the CM5 control protocol; the "
+    "C6 companion's ESP-Hosted and bridge versions with the ones this image expects (P4); the local STT model; and the "
+    "ESP-IDF and Arduino core it was built with. An item is shown only where the build includes that part. versions "
+    "json returns the same as one object with stable keys, also carried as the versions object of status json.",
+    versionsCommands, &versionsCommandsCount, 0, nullptr },
 #if ENABLE_WIFI
   { "wifi",       "Network management (connect, scan, add/remove networks)", "The WiFi subsystem manages station-mode network connections plus the network "
     "services that ride on top of them: NTP time sync and the on-device HTTP/HTTPS "
@@ -345,6 +356,7 @@ static constexpr CommandModule gCommandModules[] = {
     "matrix clear/fill and matrix on/off control the display. matrix brightness <0-15> and matrix rotation <0-3> persist; "
     "matrix blink <0-3> selects off/2Hz/1Hz/0.5Hz. matrixbus <0|1> and matrixaddress <0x70-0x77> require reboot. "
     "matrix size 8x8 uses one square; matrix panel <0|1> selects the physical square. matrix size 16x8 restores both. "
+    "matrixbrightness/matrixrotation/matrixsquare/matrixpanel save without applying (used by the settings editors). "
     "Use an unused non-0x70 address when sharing a bus with a PCA9685. Static text clips at the display edge.",
     matrixCommands, &matrixCommandsCount, 0, nullptr },
 #endif
@@ -850,14 +862,17 @@ static constexpr CommandModule gCommandModules[] = {
     "ring query requests one reading; its raw form is admin-only, confirms every SET and refuses "
     "user-profile writes. ring control <collection|lowpower> <preserve|on|off> (admin) saves a desired "
     "state applied asynchronously, which the OLED and web Health controls also use; ring control "
-    "refresh reads low power back. Bridging ring data onto the G2 glasses proved a dead end and was "
-    "removed.", g2RingCommands, &g2RingCommandsCount, 0, nullptr },
+    "refresh reads low power back. The G2's own Health panel is fed the way the Even app feeds it: "
+    "ring panel status and ring panel preview [test] show the snapshot and its bytes; ring panel send "
+    "[test] (admin) sends one; ring panel feed [on|off] (admin; ring panel on and ring panel off are "
+    "shorthands) feeds it automatically, saved and off by default, refreshing ring history every "
+    "ring panel history [minutes] (admin, default 30).", g2RingCommands, &g2RingCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_LLM_BACKEND
   { "llm",        "On-device LLM text generation", "On-device large language model that runs a quantized model file entirely on the "
     "device (model weights held in PSRAM). A model must be loaded before generation: "
-    "llmload [file.bin] loads one (bare filenames are looked up on the SD card under "
-    "/sd/llm then internal /system/llm), llmmodels lists available files, llmunload "
+    "llmload [file.bin] loads one (bare filenames are looked up in internal /system/llm "
+    "first, then on the SD card under /sd/llm), llmmodels lists available files, llmunload "
     "frees the PSRAM, llmstatus shows engine state, and llmautostart 0|1 / "
     "llmdefaultmodel control boot-time loading. Two generate forms: bare 'llmgenerate "
     "<prompt>' BLOCKS and prints the whole reply, while 'llmgenerate json ...' starts "

@@ -231,7 +231,20 @@ static esp_err_t fuelGaugeBackendSample(BatteryState& state) {
 }
 #endif
 
-static void notifyTransitions(const BatteryState& prev, const BatteryState& state) {
+// Last valid classification, kept across UNKNOWN samples. The LOW and
+// CRITICAL edges compare against it rather than prev.status: the boot snapshot
+// and every read error or 30 s expiry publish UNKNOWN, and gating on that hid
+// the crossing for good (boot on a low cell, or an outage spanning the drop).
+// UNKNOWN here means no valid sample yet, so the first LOW sample posts once.
+static BatteryStatus sLastKnownStatus = BATTERY_UNKNOWN;
+
+// announceLevel=false is the ADC sample inside initBattery() (setup phase 4).
+// Its LOW/CRITICAL edge is neither posted nor latched there: setup runs on for
+// seconds afterwards, so the notification sinks' 10 s staleness gate could
+// drop it before the first main-loop drain. The first loop sample posts it
+// instead, ahead of that pass's automation and notification drains.
+static void notifyTransitions(const BatteryState& prev, const BatteryState& state,
+                              bool announceLevel = true) {
   if (prev.usbKnown && state.usbKnown && prev.usbPresent != state.usbPresent)
     systemEventPost(state.usbPresent ? SYSEVT_USB_ON : SYSEVT_USB_OFF);
   char pct[12];
@@ -240,13 +253,15 @@ static void notifyTransitions(const BatteryState& prev, const BatteryState& stat
   else snprintf(pct, sizeof(pct), "unknown");
   if (prev.chargingKnown && state.chargingKnown && prev.isCharging != state.isCharging)
     systemEventPost(state.isCharging ? SYSEVT_CHARGING_STARTED : SYSEVT_CHARGING_STOPPED, pct);
-  if (prev.status != BATTERY_UNKNOWN && state.percentageValid) {
-    if (state.status == BATTERY_LOW && prev.status != BATTERY_LOW)
+  const BatteryStatus known = sLastKnownStatus;
+  if (announceLevel && state.percentageValid) {
+    if (state.status == BATTERY_LOW && known != BATTERY_LOW)
       systemEventPost(SYSEVT_BATTERY_LOW, pct);
     if ((state.status == BATTERY_CRITICAL || state.status == BATTERY_EMPTY) &&
-        prev.status != BATTERY_CRITICAL && prev.status != BATTERY_EMPTY)
+        known != BATTERY_CRITICAL && known != BATTERY_EMPTY)
       systemEventPost(SYSEVT_BATTERY_CRITICAL, pct);
   }
+  if (announceLevel && state.status != BATTERY_UNKNOWN) sLastKnownStatus = state.status;
   // Preserve the full-charge latch across short read errors and SOC jitter.
   // Lifecycle mutex serializes this edge detector with recalibration too.
   static bool wasFull = false;
@@ -262,7 +277,7 @@ static void notifyTransitions(const BatteryState& prev, const BatteryState& stat
 
 // Caller holds sBackendMutex. Readers see the previous complete snapshot while
 // hardware I/O is in progress, then atomically see either success or failure.
-static void updateBatteryLocked() {
+static void updateBatteryLocked(bool announceLevel = true) {
   BatteryState state = storedSnapshot();
   const BatteryState previous = getBatterySnapshot();
   state.lastAttemptMs = millis();
@@ -276,7 +291,7 @@ static void updateBatteryLocked() {
   if (err != ESP_OK) BatteryPolicy::invalidateSample(state, err, millis());
   state.status = BatteryPolicy::classify(state);
   publishSnapshot(state);
-  notifyTransitions(previous, state);
+  notifyTransitions(previous, state, announceLevel);
 }
 
 void initBattery() {
@@ -292,7 +307,7 @@ void initBattery() {
   vbusSenseInit();
 #if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
   adcBackendInit();
-  updateBatteryLocked();
+  updateBatteryLocked(/*announceLevel=*/false);
 #elif ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_FUEL_GAUGE
   // I2C initializes after initBattery(); first loop tick performs the probe.
   INFO_SYSTEMF("Battery: MAX17048 probe deferred until first battery tick");

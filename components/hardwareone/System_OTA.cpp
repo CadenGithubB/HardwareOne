@@ -459,6 +459,27 @@ bool verifyFactoryUpdater(const esp_partition_t** partitionOut,
   return true;
 }
 
+// Diagnostic read of the factory slot's app descriptor for `otastatus`. It
+// skips verifyFactoryUpdater()'s whole-image hash so a status poll stays
+// cheap; an update still runs the full check before it relies on the version.
+bool readFactoryUpdaterVersion(char* output, size_t outputSize) {
+  if (!output || outputSize == 0) return false;
+  output[0] = '\0';
+  const esp_partition_t* factory = esp_partition_find_first(
+      ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, "factory");
+  esp_app_desc_t desc{};
+  char project[sizeof(desc.project_name) + 1]{};
+  if (!factory || esp_ota_get_partition_description(factory, &desc) != ESP_OK ||
+      !fieldToString(desc.project_name, sizeof(desc.project_name), project,
+                     sizeof(project)) ||
+      strcmp(project, "hw1-updater") != 0 ||
+      !fieldToString(desc.version, sizeof(desc.version), output, outputSize)) {
+    output[0] = '\0';
+    return false;
+  }
+  return true;
+}
+
 bool decodeBase64Exact(const char* encoded, size_t encodedLength,
                        uint8_t* output, size_t outputSize) {
   if (!encoded || !output) return false;
@@ -1389,6 +1410,12 @@ const char* cmdOtaStatus(const String& argsInput) {
   if (running) (void)esp_ota_get_state_partition(running, &imageState);
   const esp_app_desc_t* runningDesc = esp_app_get_description();
   const char* runningVersion = runningDesc ? runningDesc->version : "unknown";
+  // Which recovery updater build sits in the factory slot; a manifest's
+  // minUpdaterVersion is compared against this value.
+  char factoryUpdater[33]{};
+  const char* factoryUpdaterVersion =
+      readFactoryUpdaterVersion(factoryUpdater, sizeof(factoryUpdater))
+          ? factoryUpdater : "unavailable";
   const AuthContext auth = VFS::systemAuth(VFS::Scopes::OTA, "hwone.ota_status");
   bool candidate = false;
   bool manifest = false;
@@ -1413,6 +1440,7 @@ const char* cmdOtaStatus(const String& argsInput) {
     // Lets a client preview the updater's downgrade rule before paying for a
     // multi-minute transfer the device would refuse on arrival.
     doc["runningVersion"] = runningVersion;
+    doc["factoryUpdaterVersion"] = factoryUpdaterVersion;
     doc["runningPartition"] = running ? running->label : "unknown";
     doc["runningImageState"] = static_cast<int>(imageState);
     doc["journalOk"] = journalOk;
@@ -1449,12 +1477,13 @@ const char* cmdOtaStatus(const String& argsInput) {
            "OTA: native ESP-IDF recovery updater\n"
            "Board/layout: %s / %s (ota_0 slot %" PRIu32 " bytes)\n"
            "Running: %s v%s (image state %d)\n"
+           "Factory updater: %s\n"
            "Journal: %s, seq=%" PRIu32 ", phase=%s, operation=%" PRIu64 "\n"
            "Staged pair: %s; recovery credential: %s\n"
            "Last result: %s seq=%" PRIu32 " %s%s%s",
            HW1_OTA_BOARD_ID, HW1_OTA_LAYOUT_ID, otaSlotSize(),
            running ? running->label : "unknown", runningVersion,
-           static_cast<int>(imageState),
+           static_cast<int>(imageState), factoryUpdaterVersion,
            journalOk ? "OK" : journalReason, record.sequence,
            journalOk ? phaseName(record.phase) : "unavailable", record.operation_id,
            (candidate && manifest) ? "yes" : "no",
@@ -1860,6 +1889,14 @@ void otaBleUploadHousekeeping() {
   housekeepBleUpload();
 #endif
 }
+
+#if HW1_OTA_LAYOUT
+bool otaFactoryUpdaterVersion(char* output, size_t outputSize) {
+  return readFactoryUpdaterVersion(output, outputSize);
+}
+
+uint32_t otaDataSchemaVersion() { return kDataSchemaV1; }
+#endif
 
 #if HW1_OTA_LAYOUT
 // The escape keys on software faults only. A brownout keeps RTC memory and

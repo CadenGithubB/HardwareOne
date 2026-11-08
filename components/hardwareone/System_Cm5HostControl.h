@@ -37,6 +37,9 @@ enum class Cm5HostCallbackIntrinsicResult : uint8_t {
 Cm5HostCallbackIntrinsicResult cm5HostControlHandleCallbackIntrinsic(
     const char* line, uint32_t namedSessionEpoch, bool sessionMayControl,
     char* reply, size_t replySize);
+// The protocol version these EVT tokens carry ("1"), for `versions`: the CM5
+// daemon parses only the version it was built for.
+const char* cm5HostControlProtocolVersion();
 #else
 inline Cm5HostCallbackIntrinsicResult cm5HostControlHandleCallbackIntrinsic(
     const char*, uint32_t, bool, char*, size_t) {

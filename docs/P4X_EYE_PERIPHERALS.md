@@ -25,7 +25,8 @@ tools/build_board.sh p4x_eye flash monitor
 `esp_driver_jpeg` gets an allocation/interrupt-unwind fix that enables the
 hardware JPEG decoder. It also stages ESP-DL 3.3.12 (the version
 `dependencies.lock.esp32p4` pins, read from `managed_components/` or the IDF
-component manager cache and checked against a pinned digest) with
+component manager cache, or on a fresh machine fetched from the ESP Component
+Registry by `tools/p4/fetch_p4_packages.py`, and checked against a pinned digest) with
 `tools/p4/esp-dl-3.3.12-hw1.patch`: pointwise-convolution tiles and
 single-column depthwise blocks sized for the P4's shared 64 KB L1 data cache,
 a channel-half dual-core split for those depthwise layers, convolution
@@ -35,7 +36,8 @@ metadata that the local STT runtime points at PSRAM, and output-channel blocks
 for the speaker-label model's 16-bit 3x3 layers. Speaker labels
 (`ENABLE_STT_SPEAKER_LABELS`, on for this board) also need ESP-IDF's PIE
 context-switch fix, which 5.5.5 lacks: apply
-`tools/p4/idf-patches/` to the IDF (the build stops until it is there). P4 builds
+`tools/p4/idf-patches/` to the IDF (the build stops until it is there;
+`tools/p4/prepare_sdk.sh --check` reports whether it is applied). P4 builds
 solve dependencies against a copy of `dependencies.lock.esp32p4` in their build
 directory, because the component manager records the local ESP-DL by its
 absolute path. A P4 build stops with that command if any override is missing.
@@ -109,7 +111,7 @@ in P4 images; every other board compiles it to nothing.
   the P4 does that by itself after the radio has been idle for 30 s, and
   releases the companion when a feature asks for the radio.
 - **Console mirror.** The C6's own UART console reaches the P4 on GPIO36 and
-  is mirrored into the P4 log as `C6>` lines (`c6_console [on|off]`, on by
+  is mirrored into the P4 log as `C6>` lines (`c6console [on|off]`, on by
   default). It is the only view of the companion's boot messages and crash
   backtraces while HardwareOne is running; it found the first hardware bug of
   this subsystem within minutes.
@@ -190,6 +192,21 @@ Set it to 0 to retain the wheel without claiming the three extra button pins.
 The buttons share the input lifecycle and task; disabling the input controller
 also disables them. Explicitly enabling them requires both the EYE board and
 the GPIO encoder input selection.
+
+Local speech-to-text needs a model file that is not part of the image, and on
+this board it always runs from the microSD card. This board profile (card
+off) builds without local STT; `ENABLE_SDMMC_CARD=1` with `ENABLE_LOCAL_STT=1`
+enables it, the 15×5 model and speaker labels follow, and the build refuses
+local STT without the card. The saved P4 configurations
+(`configurations/p4-*.json`) enable both and so the 15×5 gen2 model at
+`/sd/STT Models/quartznet15x5-gen2-25397.p4.stt`, published as
+[`model-gen2-25397`](https://github.com/CadenGithubB/ESP32_Onboard_Speech_To_Text/releases/tag/model-gen2-25397)
+(`quartznet15x5-gen2-25397.p4.stt`, 20,112,224 bytes, SHA-256
+`dccef3a8cead069d97d780e0d08ddfc65d9f0870c0af4673b29327f00158f048`).
+Speaker labels (on in this profile) read `/sd/STT Models/speaker.spk`, which is
+not published; transcription works without it. Installation steps are in the
+README's [Local speech-to-text model](../README.md#local-speech-to-text-model-esp32-p4)
+section.
 
 
 ## User interface and storage
