@@ -1109,6 +1109,24 @@ runtime replies and the hand-written `docs/USERGUIDE.md`. Run with
 `ctest --test-dir build -R '^retired_feature_text$' --output-on-failure` (or
 `python3 test_retired_feature_text.py`).
 
+## Public doc commands
+
+`public_docs_commands` reads `docs/USERGUIDE.md`, `docs/QUICKSTART.md` and the
+real sources (no compile). Every command line in a USERGUIDE code block must
+resolve against the `CommandEntry` registry (`tools/command_registry.py`
+`parse_commands()`, the tables `docs/COMMAND_REFERENCE.md` is generated from)
+with the firmware's case-insensitive, whole-word, longest-prefix rule from
+`System_CommandLookupCore.h`; `(admin)` / `(super admin)` annotations must match
+the registry; every flag in the USERGUIDE debug-flag table and every command in
+QUICKSTART's Step 4 must be registered; and the QUICKSTART first-boot wizard
+table must list `getWizardPageTitle` titles in `kPageOrder` order
+(`System_SetupWizard.cpp`). Indented continuation lines, `--- section ---`
+separators, `(note)` lines, automation `IF`/`NAME:`/`SCHEDULE:` syntax,
+`debug<flagname>` placeholders and the UART-only `dictate` line are skipped. Not
+covered: command names in prose elsewhere and argument syntax. Run with
+`ctest --test-dir build -R '^public_docs_commands$' --output-on-failure` (or
+`python3 test_public_docs_commands.py`).
+
 ## Dead auth helpers removed
 
 `dead_auth_helpers_removed` is a source check over the firmware sources

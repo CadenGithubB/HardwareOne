@@ -1951,6 +1951,14 @@ foreach(test_name IN ITEMS battery_log_clear retired_feature_text)
             ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
             ${SETUP_MQTT_TEST_ARGS})
 endforeach()
+# Commands named in USERGUIDE code blocks, its debug-flag table and QUICKSTART
+# Step 4 resolve against the CommandEntry registry with the firmware's lookup
+# rule; privilege annotations match it; the QUICKSTART wizard table follows
+# kPageOrder and getWizardPageTitle. Reads sources only.
+add_test(
+  NAME public_docs_commands
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_public_docs_commands.py)
 # Code that runs beside the command executor: a validate pass on cmd_exec
 # drops only its own broadcasts, and the shared password helper answers in the
 # caller's buffer instead of the shared debug buffer.
