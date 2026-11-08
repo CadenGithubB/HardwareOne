@@ -691,7 +691,8 @@ static std::atomic<uint32_t> sAutomationsRefusedVersion{0};
 
 enum class AutomationsRead : uint8_t { Ok, Missing, Refused };
 
-static AutomationsRead readAutomationsFile(String& json) {
+static AutomationsRead readAutomationsFile(String& json, uint32_t* newerVersion = nullptr) {
+  if (newerVersion) *newerVersion = 0;
   if (!readText(AUTOMATIONS_JSON_FILE, json,
                 VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
     sAutomationsRefusedVersion = 0;
@@ -699,6 +700,7 @@ static AutomationsRead readAutomationsFile(String& json) {
   }
   const uint32_t newer = automationsNewerFileVersion(json);
   const uint32_t before = sAutomationsRefusedVersion.exchange(newer);
+  if (newerVersion) *newerVersion = newer;
   if (!newer) return AutomationsRead::Ok;
   if (before != newer) {
     ERROR_SYSTEMF("[automations] %s is format %lu, newer than this firmware reads (%lu): "
@@ -714,11 +716,32 @@ bool readAutomationsJson(String& json) {
   return readAutomationsFile(json) == AutomationsRead::Ok;
 }
 
+bool readAutomationsJson(String& json, uint32_t* newerVersion) {
+  return readAutomationsFile(json, newerVersion) == AutomationsRead::Ok;
+}
+
 String automationsEmptyStoreJson() {
   char text[64];
   snprintf(text, sizeof(text), "{\n  \"version\": %lu,\n  \"automations\": []\n}\n",
            (unsigned long)kAutomationsFileVersion);
   return String(text);
+}
+
+// Loads the store for an edit. No file: the empty store, written unless
+// persistSeed is false. False when the file was refused: the caller must stop,
+// and nothing was seeded or written (the empty store never replaces a newer
+// file).
+static bool loadAutomationsStoreForEdit(String& json, bool persistSeed) {
+  const AutomationsRead read = readAutomationsFile(json);
+  if (read == AutomationsRead::Refused) return false;
+  if (read == AutomationsRead::Missing || json.length() == 0) {
+    json = automationsEmptyStoreJson();
+    if (persistSeed) {
+      writeAutomationsJsonAtomic(json);
+      DEBUGF(DEBUG_AUTOMATIONS, "[autos add] created default automations.json");
+    }
+  }
+  return true;
 }
 
 // ============================================================================
@@ -1544,17 +1567,9 @@ const char* cmd_automation_add(const String& argsInput) {
   bool runAtBoot = (runAtBootStr.equalsIgnoreCase("1") || runAtBootStr.equalsIgnoreCase("true") || runAtBootStr.equalsIgnoreCase("yes"));
   
   String json;
-  const AutomationsRead read = readAutomationsFile(json);
-  if (read == AutomationsRead::Refused) {
+  if (!loadAutomationsStoreForEdit(json, !validateOnly)) {
     broadcastAutomationsReadError();
     return "ERROR";
-  }
-  if (read == AutomationsRead::Missing || json.length() == 0) {
-    json = automationsEmptyStoreJson();
-    if (!validateOnly) {
-      writeAutomationsJsonAtomic(json);
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos add] created default automations.json");
-    }
   }
   
   // If a specific id= was provided and that entry already exists, remove it first

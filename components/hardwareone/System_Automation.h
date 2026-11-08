@@ -69,6 +69,10 @@ String redactAutomationsJsonForResponse(const String& json);
 // not loaded, so nothing is changed and written back from it. The writer also
 // refuses any document with a newer version.
 bool readAutomationsJson(String& json);
+// The same read; *newerVersion is the refused file's format, or 0 when the
+// read did not refuse one (missing, unreadable or loaded). For callers that
+// report why, such as the web Automations page.
+bool readAutomationsJson(String& json, uint32_t* newerVersion);
 bool writeAutomationsJsonAtomic(const String& json);
 // An empty store in the current format (the first-time setup seed).
 String automationsEmptyStoreJson();

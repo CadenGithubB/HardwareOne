@@ -59,6 +59,38 @@ def string_double() -> str:
     return stub.replace(anchor, extra + anchor)
 
 
+def code_only(source: str) -> str:
+    """The source with C/C++ comments removed (string literals kept)."""
+    out, pos, state = [], 0, "code"
+    while pos < len(source):
+        char, following = source[pos], source[pos + 1 : pos + 2]
+        if state == "line":
+            if char == "\n":
+                state = "code"
+                out.append(char)
+        elif state == "comment":
+            if char == "*" and following == "/":
+                state = "code"
+                pos += 1
+        elif state in ("string", "character"):
+            out.append(char)
+            if char == "\\":
+                out.append(following)
+                pos += 1
+            elif char == ('"' if state == "string" else "'"):
+                state = "code"
+        elif char == "/" and following == "/":
+            state, pos = "line", pos + 1
+        elif char == "/" and following == "*":
+            state, pos = "comment", pos + 1
+        else:
+            if char in ('"', "'"):
+                state = "string" if char == '"' else "character"
+            out.append(char)
+        pos += 1
+    return "".join(out)
+
+
 def unique_block(source: str, marker: str) -> str:
     require(source.count(marker) == 1, f"marker is not unique: {marker}")
     return extract_block(source, marker)
@@ -124,10 +156,22 @@ def source_contract(migration: str) -> None:
     require(restore.find('strcmp(magic, "HWBACKUP")') < check, "the format is checked after the magic")
     require(0 < check < restore.find("bool compatible = true;") < restore.find("stageMigrationRestore(buf,"),
             "the format is checked before the fingerprint check and staging")
-    refusal = restore[check:restore.find("bool compatible = true;")]
-    require("if (format != BackupFormatCheck::Supported)" in refusal and "free(buf);" in refusal
-            and "return ESP_OK;" in refusal and "stageMigrationRestore" not in refusal,
-            "a refused format frees the body and returns before staging")
+    # The refusal, comments removed: it follows the check directly, its first
+    # statement frees the body and its last returns. Nothing else in the
+    # handler branches on the check (handleRestore is not compiled here).
+    code = code_only(restore)
+    call = "const BackupFormatCheck format = checkBackupFormat(doc.as<JsonVariantConst>(), &bundleFormat);"
+    guard = "if (format != BackupFormatCheck::Supported) {"
+    require(code.count(call) == 1 and code.count("checkBackupFormat(") == 1, "one format check")
+    require(code[code.index(call) + len(call):].lstrip().startswith(guard),
+            "the refusal directly follows the format check")
+    require(code.count("BackupFormatCheck::") == 2 and "goto " not in code,
+            "only the refusal (and its Newer message) branch on the format")
+    refusal = extract_block(code, guard[:-2])
+    body = refusal[refusal.index("{") + 1 : -1].strip()
+    require(body.startswith("free(buf);") and body.endswith("return ESP_OK;")
+            and "stageMigrationRestore" not in refusal,
+            "a refused format frees the body first and returns before staging")
     stop = unique_block(migration, "void stopRestoreOnlyHttpServer()")
     discard = stop.find("discardStagedMigrationRestore();")
     require(discard > stop.rfind("httpd_stop(server);") > 0,

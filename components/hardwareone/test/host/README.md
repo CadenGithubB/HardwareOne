@@ -731,7 +731,9 @@ non-whole-number one.
 A source check requires `/api/backup` to refuse an overflowed or oversized
 bundle with the limit `/api/restore` uses, to write `kBackupFormatVersion`, and
 `/api/restore` to refuse a bad format after the magic check and before the
-fingerprint check and staging. Not covered: the HTTP handlers
+fingerprint check and staging. With comments removed, the refusal follows the
+check directly, frees the body first and returns, and nothing else branches on
+the check. Not covered: the HTTP handlers
 themselves, the device AES helpers, a rename failing part-way through
 promotion, and binary map content. Run with
 `ctest --test-dir build -R '^migration_restore$' --output-on-failure`.
@@ -1027,7 +1029,9 @@ builder) against a fake httpd that keeps header pointers and reads them at
 `httpd_resp_send`, with real ArduinoJson. Under `--sanitize` a header value
 that dies before the send is an ASan error (the `?id=` export disposition, the
 icon `X-Icon-Size`); the export filename keeps only `[A-Za-z0-9._-]`, at most
-48 characters. The runner parses every printed payload with Python's strict
+48 characters. An automations.json from newer firmware is not exported (single
+or bulk): a `409` naming both formats, with no attachment header. The runner
+parses every printed payload with Python's strict
 `json` module: recordings named with a backslash, comma, colon, quote or
 control character; `files/create` errors with quotes, a backslash, a newline
 and a control character (folder and file branches); a 150-character name that
@@ -1966,13 +1970,19 @@ start/stop exercise cache lifetime under ThreadSanitizer. Permission revoked by
 another writer stops the scheduler on its next tick; a later grant stays idle
 until the owner starts it. A newer automations.json format (`"version"` above
 `kAutomationsFileVersion`) is refused: nothing is cached or listed, the store is
-never written and keeps its text; no version, version 1 and a non-numeric
-version load as before. The actual disabled
+never written and keeps its text, and the add command's load
+(`loadAutomationsStoreForEdit`) refuses without seeding an empty store over it;
+no version, version 1 and a non-numeric version load as before, and a missing
+file is seeded (written only when not validating). The actual disabled
 public header is compiled independently. `automation_scheduler_contract`
 retains the main-loop integration and full-tick early-exit/source guards, plus
 the quiet in-pass reschedule writes, the unconditional main-loop tick and the
 owner transition shared with `features automation`, and that every owner read
 goes through the format check and no writer spells the version as a literal.
+With comments removed, the add command loads only through
+`loadAutomationsStoreForEdit` and returns on its refusal, and the web
+Automations page and both exports read through `readAutomationsJson` and name
+a refused format.
 
 ```sh
 python3 components/hardwareone/test/host/test_automation_scheduler.py --sanitize

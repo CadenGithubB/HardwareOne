@@ -59,6 +59,47 @@ def function_body(source: str, signature: str) -> str:
     raise AssertionError(f"unterminated function: {signature}")
 
 
+def code_only(source: str) -> str:
+    """The source with C/C++ comments removed (string literals kept)."""
+    out = []
+    pos = 0
+    state = "code"
+    while pos < len(source):
+        current = source[pos]
+        following = source[pos + 1] if pos + 1 < len(source) else ""
+        if state == "line_comment":
+            if current == "\n":
+                state = "code"
+                out.append(current)
+        elif state == "block_comment":
+            if current == "*" and following == "/":
+                state = "code"
+                pos += 1
+        elif state in ("string", "character"):
+            out.append(current)
+            if current == "\\":
+                out.append(following)
+                pos += 1
+            elif (state == "string" and current == '"') or (
+                state == "character" and current == "'"
+            ):
+                state = "code"
+        elif current == "/" and following == "/":
+            state = "line_comment"
+            pos += 1
+        elif current == "/" and following == "*":
+            state = "block_comment"
+            pos += 1
+        else:
+            if current == '"':
+                state = "string"
+            elif current == "'":
+                state = "character"
+            out.append(current)
+        pos += 1
+    return "".join(out)
+
+
 automation = (COMPONENT / "System_Automation.cpp").read_text(encoding="utf-8")
 
 # Missing or malformed storage is a coherent empty scheduler state, not an
@@ -124,14 +165,37 @@ assert "return true;" in ensure_file[:write]
 # refuses a newer document; no writer spells the version as a literal.
 assert "constexpr uint32_t kAutomationsFileVersion = 2;" in header
 assert automation.count("readText(AUTOMATIONS_JSON_FILE") == 1
-reader = function_body(automation, "static AutomationsRead readAutomationsFile(String& json)")
+reader = function_body(automation, "static AutomationsRead readAutomationsFile(String& json, uint32_t* newerVersion = nullptr)")
 assert "readText(AUTOMATIONS_JSON_FILE" in reader and "automationsNewerFileVersion(json)" in reader
 writer = function_body(automation, "bool writeAutomationsJsonAtomic(const String& json)")
 assert writer.index("automationsNewerFileVersion(json)") < writer.index("writeTextAtomic(")
-add = function_body(automation, "const char* cmd_automation_add(const String& argsInput)")
-refused = add.index("if (read == AutomationsRead::Refused)")
-assert refused < add.index("automationsEmptyStoreJson()") < add.index("writeAutomationsJsonAtomic(json)")
-assert "readText(" not in add
+# The add command loads through loadAutomationsStoreForEdit (behavior in the
+# scheduler harness) and stops when it refuses: its first statement after the
+# load is that refusal, which returns. It never seeds or reads on its own.
+add = code_only(function_body(automation, "const char* cmd_automation_add(const String& argsInput)"))
+load_guard = "if (!loadAutomationsStoreForEdit(json, !validateOnly))"
+assert add.count(load_guard) == 1 and add.count("loadAutomationsStoreForEdit(") == 1
+refusal = " ".join(function_body(add, load_guard)[1:-1].split())
+assert refusal == 'broadcastAutomationsReadError(); return "ERROR";', refusal
+for forbidden in ("readText(", "readAutomationsFile(", "readAutomationsJson(", "automationsEmptyStoreJson()"):
+    assert forbidden not in add, f"cmd_automation_add must load only through loadAutomationsStoreForEdit ({forbidden})"
+edit_load = code_only(function_body(automation, "static bool loadAutomationsStoreForEdit(String& json, bool persistSeed)"))
+assert edit_load.index("if (read == AutomationsRead::Refused) return false;") < edit_load.index(
+    "automationsEmptyStoreJson()")
+# The web Automations page and its exports read through the same check and
+# name a refused file's format instead of listing it.
+web = code_only((COMPONENT / "WebServer_Server.cpp").read_text(encoding="utf-8"))
+assert "readText(AUTOMATIONS_JSON_FILE" not in web, "web automations reads must go through readAutomationsJson"
+for handler, report in (("esp_err_t handleAutomationsGet(httpd_req_t* req)", "automationsWebReadError("),
+                        ("esp_err_t handleAutomationsExport(httpd_req_t* req)",
+                         "return sendAutomationsExportReadError(req, newerVersion);")):
+    body = function_body(web, handler)
+    assert "readAutomationsJson(" in body and report in body, handler
+export = function_body(web, "esp_err_t handleAutomationsExport(httpd_req_t* req)")
+assert export.count("readAutomationsJson(json, &newerVersion)") == 2
+assert export.count("return sendAutomationsExportReadError(req, newerVersion);") == 2
+get_handler = function_body(web, "esp_err_t handleAutomationsGet(httpd_req_t* req)")
+assert get_handler.index("readAutomationsJson(") < get_handler.index("sanitizeAutomationsJson(body)")
 filesystem = (COMPONENT / "System_Filesystem.cpp").read_text(encoding="utf-8")
 assert "readText(AUTOMATIONS_JSON_FILE" not in filesystem
 assert filesystem.count("readAutomationsJson(json)") == 2

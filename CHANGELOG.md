@@ -61,8 +61,9 @@ everything user-visible since the v0.99.99 tag (55 commits).
 - Licence statement: README and the User Guide say PolyForm Noncommercial 1.0.0 (the User Guide had said
   MIT) and point at `NOTICE.md`.
 - `automations.json` format version 2 is now checked on every read. A file from newer firmware (a
-  higher `"version"`) is not loaded or run and is left unchanged; the console says so once and
-  `automation` commands name the version. A file with no version, or version 1, loads as before.
+  higher `"version"`) is not loaded or run and is left unchanged; the console says so once, and
+  `automation` commands, the web Automations page and its exports name the version instead of
+  listing the file. A file with no version, or version 1, loads as before.
 - Import from Backup refuses a bundle whose `formatVersion` is newer than 1 (or not a whole number)
   before staging anything, with a console line and a `400` reply that names both versions. A bundle
   without `formatVersion` is treated as format 1.

@@ -33,7 +33,9 @@ bundle formats and the ESP-IDF and Arduino core it was built with (`versions jso
   `schedule` layout, without a `triggers` array, still has no trigger and does not fire). A higher
   version is from newer
   firmware: its automations are not loaded or run, and the file is left unchanged (nothing is written
-  back from it), so that firmware finds it as it left it. The console says so once.
+  back from it), so that firmware finds it as it left it. The console says so once. `automation`
+  commands, the web Automations page (`GET /api/automations`: `success` false with
+  `formatVersion` and `supported`) and its exports (`409`) name the version instead of listing it.
 - The web migration backup bundle (`HWBACKUP`) carries `"formatVersion": 1` (`kBackupFormatVersion`,
   `versions` key `backup_format`). Import from Backup refuses a higher or non-whole-number
   `formatVersion` before staging anything (`400`, `"error":"Backup format too new"` with

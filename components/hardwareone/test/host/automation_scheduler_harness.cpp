@@ -129,6 +129,7 @@ static void replaceStore(const String& json) {
   std::lock_guard<std::mutex> lock(storeMutex); storeJson = json; storeExists = true;
 }
 void notifyAutomationScheduler();
+bool writeAutomationsJsonAtomic(const String& json);  // System_Automation.h
 bool startAutomationScheduler();
 void stopAutomationScheduler();
 bool automationSchedulerRunning();
@@ -571,6 +572,12 @@ static void fileFormatVersion() {
   CHECK(!writeAutomationsJsonAtomic(R"({"version":3,"automations":[]})"));
   CHECK(!writeAutomationsJsonAtomic(R"({"automations":[],"version":4.5})"));
   CHECK(ensureAutomationsFile());
+  // The add command's load: a refused file is never replaced by the seed.
+  json = "untouched";
+  CHECK(!loadAutomationsStoreForEdit(json, true) && json.length() == 0);
+  CHECK(!loadAutomationsStoreForEdit(json, false) && json.length() == 0);
+  uint32_t newer = 0;
+  CHECK(!readAutomationsJson(json, &newer) && newer == 3);
   CHECK(writes == 0 && storeJson == newerRules);
   for (const char* future : {R"({"version":2.5,"automations":[]})",
                              R"({"version":1e12,"automations":[]})"}) {
@@ -595,6 +602,20 @@ static void fileFormatVersion() {
     CHECK(automationCopySummaries(list, 4, &count) && count == 1);
   }
   CHECK(writeAutomationsJsonAtomic(emptyRules) && storeJson == emptyRules);
+  uint32_t newer2 = 7;
+  CHECK(readAutomationsJson(json, &newer2) && newer2 == 0 && json == emptyRules);
+
+  // No file: the add command's load seeds the empty store, and writes it
+  // only when asked (validate-only adds write nothing). A current file is
+  // loaded as it is.
+  reset(nullptr);
+  CHECK(loadAutomationsStoreForEdit(json, false) && json == automationsEmptyStoreJson());
+  CHECK(writes == 0 && !storeExists);
+  CHECK(!readAutomationsJson(json, &newer2) && newer2 == 0);
+  CHECK(loadAutomationsStoreForEdit(json, true) && json == automationsEmptyStoreJson());
+  CHECK(writes == 1 && storeJson == automationsEmptyStoreJson());
+  reset(futureRules);
+  CHECK(loadAutomationsStoreForEdit(json, true) && json == futureRules && writes == 0);
   CHECK(automationsEmptyStoreJson() == "{\n  \"version\": 2,\n  \"automations\": []\n}\n");
   stopAutomationScheduler();
 }
