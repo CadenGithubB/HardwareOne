@@ -211,11 +211,12 @@ run time; the file is not part of the firmware image or of this repository.
   model's embedded checksum before using it. The release's `meeting.lm` is
   optional: copied into the same folder it is used as the language model;
   without it decoding is greedy.
-- **The plain `p4x_eye` board build and the `handheld` deployment** do not
-  select that model: they keep microSD off and expect the older 5×5 model at
-  `/STT Models/quartznet5x5.p4.stt` on the internal filesystem, and that file is
-  not published. On those builds local transcription reports that the model is
-  missing; build a saved P4 configuration to use the published model.
+- **The plain `p4x_eye` board build and the `handheld` deployment** keep
+  microSD off, so they build without local transcription. Local STT on an
+  ESP32-P4 always runs this 15×5 model from the card: enable it with
+  `ENABLE_SDMMC_CARD=1` and `ENABLE_LOCAL_STT=1` (in the handheld deployment
+  also `ENABLE_SD_CARD=1`); the model choice follows, and the build refuses
+  local STT without the card.
 - **Speaker labels** (on by default on `p4x_eye`) also read
   `/sd/STT Models/speaker.spk`, which is not published either. Without it,
   transcription still works and transcripts carry no speaker labels.

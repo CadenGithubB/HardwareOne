@@ -1212,6 +1212,8 @@ One skeptic per group re-opened the cited code at 95dc3f34 (read-only) and tried
 
 **Hardware needed.** After publishing: download the asset on a clean machine, copy to the SD path on one P4, confirm the readiness check passes and one transcription runs.
 
+**Status 2026-11-08 (claude/stt-1.0).** The 15x5 gen2 model is published (README "Local speech-to-text model": URL and SHA-256). The unpublished 5x5 path is no longer selectable on a P4: `System_BuildConfig.h` refuses `ENABLE_LOCAL_STT` on ESP32-P4 without `ENABLE_STT_MODEL_15X5_GEN2`, which already requires the card; the plain `p4x_eye` profile and the handheld deployment (card off) build without local STT, and every saved P4 configuration sets `ENABLE_SDMMC_CARD` and `ENABLE_LOCAL_STT` (the model choice follows local STT; speaker labels are off without it). Host tests: `test_optional_peripheral_config.py`, `test_stt_model_selection.py`. Still open: `speaker.spk` has no published file (labels are skipped without it), and the on-device "download and install on a clean machine" check.
+
 
 ## G-61 (P1, confirmed): Docs claim boards/xiao_s3.defaults turns Bluetooth off; presets turn Bluedroid on for every board
 

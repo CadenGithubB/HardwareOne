@@ -31,11 +31,12 @@ tools/build_deployment.sh handheld p4x_eye   # -> build/deployments/handheld/p4x
 
 Installation and the data-preserving reflash procedure are in
 [`boards/p4x_eye/MIGRATION.md`](boards/p4x_eye/MIGRATION.md). Local
-speech-to-text in this deployment needs a model file that is not part of the
-image: it expects the 5×5 model at `/STT Models/quartznet5x5.p4.stt` on the
-internal filesystem (microSD stays off), and that file is not published, so
-local transcription reports the model as missing. The published 15×5 gen2
-model is used by the saved P4 configurations instead; see the README's
+speech-to-text is off in this deployment: on the P4 it runs the published 15×5
+gen2 model from the microSD card, and microSD stays off here until it is
+qualified. Setting `ENABLE_SDMMC_CARD`, `ENABLE_SD_CARD` and
+`ENABLE_LOCAL_STT` to 1 in `boards/p4x_eye/features.h` enables it with the
+15×5 model; see the
+README's
 [Local speech-to-text model](../../README.md#local-speech-to-text-model-esp32-p4)
 section for its URL and SHA-256. The ESP32-C6
 companion firmware this image expects is built and flashed with

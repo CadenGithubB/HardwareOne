@@ -137,12 +137,38 @@ class PeripheralConfig(unittest.TestCase):
             with self.subTest(sdmmc=selected):
                 flags = {} if selected is None else {'ENABLE_SDMMC_CARD': selected}
                 expected = 0 if selected is None else selected
+                # Local STT runs the 15x5 model from the card; a saved
+                # configuration turns it on explicitly, the card alone does not.
                 self.check_profile(flags, [
                     f'ENABLE_SDMMC_CARD == {expected}',
                     f'ENABLE_SD_CARD == {expected}',
+                    'ENABLE_LOCAL_STT == 0', 'ENABLE_STT_MODEL_15X5_GEN2 == 0',
+                    'ENABLE_STT_SPEAKER_LABELS == 0',
                     'SD_MMC_SLOT == 0',
                     'SD_MMC_CLK_PIN == 43', 'SD_MMC_CMD_PIN == 44'],
                     board_profile=board)
+
+    def test_p4_local_stt_requires_card_and_15x5(self):
+        board = SOURCE.parents[1] / 'boards/p4x_eye.features.h'
+        # The 5x5 LittleFS model is not published: local STT on a P4 must run
+        # the 15x5 model, which lives on the card.
+        self.check_profile({'ENABLE_SDMMC_CARD': 1, 'ENABLE_LOCAL_STT': 1},
+                           ['ENABLE_LOCAL_STT == 1', 'ENABLE_STT_MODEL_15X5_GEN2 == 1',
+                            'ENABLE_STT_SPEAKER_LABELS == 1', 'ENABLE_SD_CARD == 1'], board_profile=board)
+        self.check_profile({'ENABLE_SDMMC_CARD': 0, 'ENABLE_LOCAL_STT': 1}, [], succeeds=False,
+                           board_profile=board)
+        self.check_profile({'ENABLE_SDMMC_CARD': 1, 'ENABLE_LOCAL_STT': 1, 'ENABLE_STT_MODEL_15X5_GEN2': 0},
+                           [], succeeds=False, board_profile=board)
+
+    def test_handheld_local_stt_follows_card(self):
+        handheld = SOURCE.parents[1] / 'deployments/handheld/boards/p4x_eye/features.h'
+        include = {'HW1_HANDHELD_INCLUDED': f'1\n#include "{handheld}"'}
+        self.check_profile(include, ['ENABLE_SD_CARD == 0', 'ENABLE_LOCAL_STT == 0',
+                                     'ENABLE_STT_MODEL_15X5_GEN2 == 0'])
+        self.check_profile(dict(include, ENABLE_LOCAL_STT=1), [], succeeds=False)
+        self.check_profile(dict(include, ENABLE_SDMMC_CARD=1, ENABLE_SD_CARD=1, ENABLE_LOCAL_STT=1),
+                           ['ENABLE_SD_CARD == 1', 'ENABLE_LOCAL_STT == 1',
+                            'ENABLE_STT_MODEL_15X5_GEN2 == 1'])
 
     def test_p4_openclaw_preserves_local_speech_profile(self):
         repo = SOURCE.parents[1]
