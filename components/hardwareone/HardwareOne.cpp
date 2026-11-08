@@ -1620,7 +1620,9 @@ void hardwareone_setup() {
     } else if (reason == ESP_RST_TASK_WDT || reason == ESP_RST_INT_WDT ||
                reason == ESP_RST_PANIC   || reason == ESP_RST_BROWNOUT) {
       // Keep ESP_RST_TASK_WDT. OTA-layout builds set CONFIG_ESP_TASK_WDT_PANIC
-      // (config/sdkconfig.ota.defaults), so there a TWDT trip panics and reboots
+      // (config/sdkconfig.ota.defaults), and so does the opt-in watchdog soak
+      // build (config/sdkconfig.wdt_soak.defaults, main loop subscribed), so
+      // there a TWDT trip panics and reboots
       // with this reason. The other layouts leave it unset (a trip only prints
       // and keeps running), but the TWDT hardware still arms STAGE1 =
       // RESET_SYSTEM at 2x the timeout. That stage is dodged only because the

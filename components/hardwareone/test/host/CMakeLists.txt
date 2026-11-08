@@ -1036,6 +1036,22 @@ add_test(NAME xiao_peripheral_config
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_xiao_peripheral_config.py)
 add_test(NAME sdkconfig_policy
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_sdkconfig_policy.py)
+# Task-watchdog soak (readiness P1-7): ordinary configurations gain no panic,
+# the soak overlay and its wrapper wiring stay opt-in, and the real
+# System_TaskWdt.h helpers keep the 60 s command wait while feeding a
+# subscribed main loop. Built with and without HW1_WDT_SOAK.
+add_test(NAME wdt_soak_config
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_wdt_soak_config.py)
+foreach(_wdt_variant IN ITEMS soak default)
+  add_executable(task_wdt_${_wdt_variant}_tests test_task_wdt_soak.cpp)
+  set_target_properties(task_wdt_${_wdt_variant}_tests PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+  target_include_directories(task_wdt_${_wdt_variant}_tests PRIVATE task_wdt_stubs ../..)
+  target_compile_options(task_wdt_${_wdt_variant}_tests PRIVATE
+    -Wall -Wextra -Werror -pedantic)
+  add_test(NAME task_wdt_${_wdt_variant} COMMAND task_wdt_${_wdt_variant}_tests)
+endforeach()
+target_compile_definitions(task_wdt_soak_tests PRIVATE HW1_WDT_SOAK=1)
 add_test(NAME bare_idf_guard
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_bare_idf_guard.py)
 # The recovery-OTA pair audit builds the partition table and blank otadata it

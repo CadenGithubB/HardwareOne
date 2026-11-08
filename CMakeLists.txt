@@ -251,6 +251,38 @@ hw1_sdkconfig_policy_files("${CMAKE_CURRENT_SOURCE_DIR}" "${_hw_board}"
     "${HW1_FEATURE_CONFIG_FILE}" "${HW1_SDK_CONFIG_FILE}"
     "${HW1_DEPLOYMENT_SDKCONFIG_FILE}" _sdk_policy_files)
 
+# Opt-in task-watchdog soak (readiness P1-7). OFF for every ordinary build.
+# When ON, config/sdkconfig.wdt_soak.defaults is layered last (panic, longer
+# timeout) and the app gets HW1_WDT_SOAK=1 (main loop subscribed). Kconfig
+# values stick in a build directory's sdkconfig, so the soak must never share
+# one with an ordinary build: tools/build_board.sh --wdt-soak uses a directory
+# ending in -wdt-soak, and anything else is refused here.
+option(HW1_WDT_SOAK "Task-watchdog soak build: panic on a trip, main loop subscribed" OFF)
+set(HW1_WDT_SOAK_DEFAULTS "${CMAKE_CURRENT_SOURCE_DIR}/config/sdkconfig.wdt_soak.defaults")
+if(HW1_WDT_SOAK)
+    get_filename_component(_hw1_build_dir_name "${CMAKE_BINARY_DIR}" NAME)
+    if(NOT _hw1_build_dir_name MATCHES "-wdt-soak$")
+        message(FATAL_ERROR
+            "HW1_WDT_SOAK needs its own build directory (name ending in -wdt-soak) "
+            "so an ordinary build never inherits the watchdog panic. Use "
+            "tools/build_board.sh <board> [--config <name>] --wdt-soak.")
+    endif()
+    # The shared config/sdkconfig (or config/sdkconfig.ota) would keep the
+    # panic after the soak; only a build-local sdkconfig is allowed.
+    get_filename_component(_hw1_soak_sdk_dir "${_sdkconfig}" DIRECTORY)
+    get_filename_component(_hw1_soak_sdk_dir "${_hw1_soak_sdk_dir}" REALPATH)
+    get_filename_component(_hw1_soak_bin_dir "${CMAKE_BINARY_DIR}" REALPATH)
+    if(NOT _hw1_soak_sdk_dir STREQUAL _hw1_soak_bin_dir)
+        message(FATAL_ERROR
+            "HW1_WDT_SOAK needs SDKCONFIG inside its build directory, not ${_sdkconfig}. "
+            "Use tools/build_board.sh <board> [--config <name>] --wdt-soak.")
+    endif()
+    if(NOT EXISTS "${HW1_WDT_SOAK_DEFAULTS}")
+        message(FATAL_ERROR "Missing watchdog soak overlay: ${HW1_WDT_SOAK_DEFAULTS}")
+    endif()
+    message(STATUS "Task-watchdog SOAK build: ${HW1_WDT_SOAK_DEFAULTS}")
+endif()
+
 # --- 3. Partition table selection ---
 #
 # The CSVs under partitions/ are the only source of partition offsets and
@@ -683,6 +715,12 @@ if(_board_file)
         list(APPEND SDKCONFIG_DEFAULTS "${_ota_key_defaults}")
     endif()
 
+    # The watchdog soak overlay goes last so it wins over the OTA layout's
+    # 5 s panic and over any preset.
+    if(HW1_WDT_SOAK)
+        list(APPEND SDKCONFIG_DEFAULTS "${HW1_WDT_SOAK_DEFAULTS}")
+    endif()
+
     # Same dependency gap for the defaults files themselves. IDF registers the
     # SAVED sdkconfig as a configure dependency (tools/cmake/kconfig.cmake) but
     # never the SDKCONFIG_DEFAULTS inputs, so editing sdkconfig.defaults or the
@@ -712,6 +750,9 @@ if(_board_file)
             list(APPEND _sdk_reconcile_files "${_board_ota_file}")
         endif()
         list(APPEND _sdk_reconcile_files ${_sdk_policy_files})
+        if(HW1_WDT_SOAK)
+            list(APPEND _sdk_reconcile_files "${HW1_WDT_SOAK_DEFAULTS}")
+        endif()
         hw1_reconcile_sdkconfig("${_sdkconfig}" ${_sdk_reconcile_files})
     endif()
 endif()
@@ -838,6 +879,24 @@ endif()
 if(HW1_FEATURE_CONFIG_FILE)
     target_compile_definitions(${_hw1_app_component} PRIVATE
         HW1_FEATURE_CONFIG_HEADER="${HW1_FEATURE_CONFIG_FILE}")
+endif()
+if(HW1_WDT_SOAK)
+    # A stale sdkconfig must not produce an app that subscribes the loop while
+    # the watchdog only prints, or a timeout other than the overlay's.
+    file(STRINGS "${HW1_WDT_SOAK_DEFAULTS}" _hw1_soak_timeout_line
+        REGEX "^CONFIG_ESP_TASK_WDT_TIMEOUT_S=[0-9]+$")
+    string(REGEX REPLACE "^.*=" "" _hw1_soak_timeout "${_hw1_soak_timeout_line}")
+    if(NOT CONFIG_ESP_TASK_WDT_PANIC OR
+       NOT "${CONFIG_ESP_TASK_WDT_TIMEOUT_S}" STREQUAL "${_hw1_soak_timeout}")
+        message(FATAL_ERROR
+            "Watchdog soak build resolved PANIC='${CONFIG_ESP_TASK_WDT_PANIC}', "
+            "TIMEOUT_S='${CONFIG_ESP_TASK_WDT_TIMEOUT_S}' (overlay asks for y, "
+            "${_hw1_soak_timeout}); run reconfigure in this -wdt-soak directory")
+    endif()
+    # main/ subscribes and feeds the loop; hardwareone feeds inside long waits.
+    idf_component_get_property(_hw1_main_component main COMPONENT_LIB)
+    target_compile_definitions(${_hw1_app_component} PRIVATE HW1_WDT_SOAK=1)
+    target_compile_definitions(${_hw1_main_component} PRIVATE HW1_WDT_SOAK=1)
 endif()
 if(HW1_DEPLOYMENT_ACTIVE)
     target_compile_definitions(${_hw1_app_component} PRIVATE

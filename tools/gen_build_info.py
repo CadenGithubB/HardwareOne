@@ -54,6 +54,8 @@ SDKCONFIG_KEYS = [
     ("CONFIG_COMPILER_OPTIMIZATION_PERF", "Optimize for performance"),
     ("CONFIG_SECURE_FLASH_ENC_ENABLED", "Flash encryption"),
     ("CONFIG_PARTITION_TABLE_CUSTOM_FILENAME", "Partition table"),
+    ("CONFIG_ESP_TASK_WDT_PANIC", "Task watchdog panics"),
+    ("CONFIG_ESP_TASK_WDT_TIMEOUT_S", "Task watchdog timeout (s)"),
 ]
 
 

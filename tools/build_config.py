@@ -37,7 +37,10 @@ def config_path(name):
 
 
 def build_dir(name):
-    return REPO / ("build-config-" + checked_name(name))
+    # tools/build_board.sh --wdt-soak exports HW1_WDT_SOAK=1 so the watchdog
+    # soak image keeps its own directory (its sdkconfig values stick).
+    suffix = "-wdt-soak" if os.environ.get("HW1_WDT_SOAK") == "1" else ""
+    return REPO / ("build-config-" + checked_name(name) + suffix)
 
 
 def editable_choices():
