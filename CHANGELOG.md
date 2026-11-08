@@ -23,6 +23,11 @@ everything user-visible since the v0.99.99 tag (55 commits).
 - System log bounded and rotated: the debug-capture log rotates to `<path>.1` at 8 MB; size limit and
   rotation count are settings, as for the sensor logger.
 - `status` labels USB and the later reset reasons instead of "Unknown".
+- `otastatus` names the recovery updater in the factory slot ("Factory updater" line,
+  `factoryUpdaterVersion` in `otastatus json`). The updater now has its own version (1.1.0, was a fixed
+  1.0.0 on every build), so a release can require a newer one through the signed manifest's
+  `minUpdaterVersion` (`HW1_MIN_UPDATER_VERSION` in `tools/build_deployment.sh`); the manifest format is
+  unchanged.
 - Crash record captures the faulting task, stack-guard bounds and a RISC-V stack scan.
 - Build and release tooling: `tools/vendor_arduino.sh` (a fresh clone vendors and patches arduino-esp32
   3.3.5 in one step), the OTA protocol host suite under the main ctest gate, and the pre-tag gate in

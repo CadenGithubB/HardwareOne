@@ -177,9 +177,16 @@ if [[ "$OTA_LAYOUT" == "1" ]]; then
   BUNDLE="$STAGING_RELEASE/HardwareOne-$DEPLOYMENT-$BOARD.hw1ota"
 
   echo "==> Creating signed manifest and offline bundle"
+  # HW1_MIN_UPDATER_VERSION: set it when this release depends on a recovery
+  # updater change (see RELEASING.md); devices whose factory updater is older
+  # refuse the update. Unset keeps make_manifest.py's 1.0.0 floor.
+  if [[ -n "${HW1_MIN_UPDATER_VERSION:-}" ]]; then
+    echo "==> Manifest requires factory updater >= $HW1_MIN_UPDATER_VERSION"
+  fi
   python3 "$REPO/tools/ota/make_manifest.py" create \
     --board "$BOARD" --deployment "$SELECTOR" \
     --image "$MAIN_BIN" --key "$SIGNING_KEY" \
+    ${HW1_MIN_UPDATER_VERSION:+--min-updater "$HW1_MIN_UPDATER_VERSION"} \
     --output "$MANIFEST"
   python3 "$REPO/tools/ota/make_bundle.py" create \
     --image "$MAIN_BIN" --manifest "$MANIFEST" \

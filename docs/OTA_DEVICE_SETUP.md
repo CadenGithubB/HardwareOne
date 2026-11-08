@@ -287,7 +287,10 @@ Run it with the ESP-IDF Python - the system Python lacks `espsecure` and the
 audit fails with a confusing signature error.
 
 On the device, `otastatus` should show the running partition as `ota_0`, a
-coherent journal, and `recoveryCredentialConfigured` true.
+coherent journal, and `recoveryCredentialConfigured` true. Its "Factory
+updater" line (`factoryUpdaterVersion` in `otastatus json`) names the recovery
+updater in the factory slot, for example `1.1.0+<suffix>`; a manifest whose
+`minUpdaterVersion` is newer than that is refused.
 
 ## Known rough edges
 

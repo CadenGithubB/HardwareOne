@@ -107,7 +107,18 @@ if(HW1_DEPLOYMENT_ACTIVE)
     set(_layout_id "${HW1_DEPLOYMENT_LAYOUT_ID}")
     set(_version_suffix "${HW1_DEPLOYMENT_VERSION_SUFFIX}")
 endif()
-set(_project_version "1.0.0+${_version_suffix}")
+# The updater's own version, independent of the main firmware's PROJECT_VER.
+# A device reports it as factoryUpdaterVersion in `otastatus json`, and a
+# signed manifest's minUpdaterVersion is compared against it, so bump it
+# whenever a change under updater/ (or the hw1_ota_protocol code the updater
+# links) alters recovery behaviour. See RELEASING.md. Core X.Y.Z only; the
+# board's +suffix is appended below.
+set(HW1_UPDATER_SEMVER "1.1.0")
+if(NOT HW1_UPDATER_SEMVER MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
+    message(FATAL_ERROR
+        "HW1_UPDATER_SEMVER '${HW1_UPDATER_SEMVER}' must be a plain X.Y.Z")
+endif()
+set(_project_version "${HW1_UPDATER_SEMVER}+${_version_suffix}")
 
 # Never let a configured updater build directory change recovery identity.
 # Board-only and deployment layouts can target the same physical board while

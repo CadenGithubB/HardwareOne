@@ -20,6 +20,17 @@ mechanism; do NOT use Conventional Commit type()/scope prefixes.
 - `docs/USERGUIDE.md` -> title line
 - `docs/QUICKSTART.md` -> title line
 
+## Recovery updater version
+The factory recovery updater has its own version, `HW1_UPDATER_SEMVER` in `updater/CMakeLists.txt`
+(plain X.Y.Z; each board appends its `+suffix`). Devices report it as `factoryUpdaterVersion` in
+`otastatus json`. Bump it in the same commit as any change under `updater/`, or to the
+`hw1_ota_protocol` code the updater links, that changes recovery behaviour. If a release needs an
+updater change to be safe, build it with `HW1_MIN_UPDATER_VERSION=<that version>
+tools/build_deployment.sh ...`: the signed manifest then carries that `minUpdaterVersion`, and
+devices with an older factory updater refuse the update until the updater is reflashed. Never set it
+above the `HW1_UPDATER_SEMVER` shipped in the same release. Unset keeps the `1.0.0` floor that
+every updater meets.
+
 ## SemVer (pre-1.0)
 PATCH = fixes/docs. MINOR = backward-compatible features. Breaking changes bump MINOR (pre-1.0).
 An optional fourth number marks a point release on top of X.Y.Z (e.g. `0.99.94.1`); the OTA
