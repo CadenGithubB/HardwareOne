@@ -37,7 +37,7 @@ constexpr size_t kPhraseSamples = 10 * kRate;  // System_STT kStreamSamples
   std::fprintf(stderr, "stt_raw_replay: %s\n", why);
   std::fprintf(stderr,
                "usage: stt_raw_replay raw.pcm [--sidecar raw.json] [--speech-floor N] [--silence-floor N]\n"
-               "       [--noise-percentile N] [--blip-ms N] [--no-short-close] [--single] [--chunk N]\n"
+               "       [--noise-percentile N] [--blip-ms N] [--decision-pre N] [--no-short-close] [--single] [--chunk N]\n"
                "       [--trace frames.csv] [--cut-dir DIR]\n");
   std::exit(2);
 }
@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
   const char* sidecarPath = nullptr;
   const char* tracePath = nullptr;
   const char* cutDir = nullptr;
-  long speechFloor = -1, silenceFloor = -1, percentile = -1, blipMs = -1;
+  long speechFloor = -1, silenceFloor = -1, percentile = -1, blipMs = -1, decisionPre = -1;
   bool shortClose = true, single = false;
   size_t chunk = 1024;  // the capture task's read size
   for (int i = 2; i < argc; ++i) {
@@ -87,6 +87,7 @@ int main(int argc, char** argv) {
     else if (a == "--silence-floor") silenceFloor = number(value(), 1, 32767, "--silence-floor");
     else if (a == "--noise-percentile") percentile = number(value(), 0, 50, "--noise-percentile");
     else if (a == "--blip-ms") blipMs = number(value(), 0, 1000, "--blip-ms");
+    else if (a == "--decision-pre") decisionPre = number(value(), 0, 99, "--decision-pre");
     else if (a == "--no-short-close") shortClose = false;
     else if (a == "--single") single = true;
     else if (a == "--chunk") chunk = size_t(number(value(), 1, 1 << 20, "--chunk"));
@@ -119,6 +120,7 @@ int main(int argc, char** argv) {
   if (silenceFloor > 0) config.adaptive_silence_floor = uint16_t(silenceFloor);
   if (percentile >= 0) config.noise_percentile = uint8_t(percentile);
   if (blipMs >= 0) config.silence_blip_samples = size_t(blipMs) * kRate / 1000;
+  if (decisionPre >= 0) config.decision_pre_emphasis = uint8_t(decisionPre);
   std::vector<int16_t> work(config.max_segment_samples);
   Segmenter seg;
   if (!seg.reset(work.data(), work.size(), config)) usage("invalid segmenter settings (silence floor must be <= speech floor)");

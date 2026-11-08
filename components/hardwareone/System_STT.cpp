@@ -1861,7 +1861,9 @@ static void sttContinuousWorker(void*) {
     if (sttStreamCancelled(&run)) break;
     // Settings shared with host replay (stt/stt_continuous_config.h).
     const hw1::stt::SegmenterConfig segmentConfig = hw1::stt::continuousSegmenterConfig(
-        STT_SAMPLE_RATE, kStreamSamples, HW1_STT_SHORT_CLOSE != 0, run.singleUtterance);
+        STT_SAMPLE_RATE, kStreamSamples, HW1_STT_SHORT_CLOSE != 0, run.singleUtterance,
+        static_cast<uint16_t>(gSettings.sttSpeechFloor), static_cast<uint16_t>(gSettings.sttSilenceFloor),
+        static_cast<uint8_t>(gSettings.sttNoisePercentile), static_cast<uint8_t>(gSettings.sttDecisionPre));
     if (!run.segmenter.reset(run.working, kStreamSamples, segmentConfig)) {
       sttStreamFail(run, "Invalid continuous segmentation settings"); break;
     }
@@ -3038,6 +3040,16 @@ static const char* cmd_stt(const String& argsInput) {
     doc["source"] = snap.audioSource == AUDIO_SRC_LOCAL_PDM ? "pdm"
                      : snap.audioSource == AUDIO_SRC_G2_LEFT ? "g2" : "none";
     doc["processing"] = "raw-hal; model frontend only; saved micgain not applied";
+    {
+      uint8_t amp = 1; uint16_t hpf = 36;
+      audioGetPdmTuning(&amp, &hpf);
+      doc["pdmAmplify"] = amp;
+      doc["pdmHpfHz"] = hpf;
+      doc["speechFloor"] = gSettings.sttSpeechFloor;
+      doc["silenceFloor"] = gSettings.sttSilenceFloor;
+      doc["noisePercentile"] = gSettings.sttNoisePercentile;
+      doc["decisionPre"] = gSettings.sttDecisionPre;
+    }
     doc["level"] = snap.level;
     doc["rms"] = snap.rms;
     doc["noiseRms"] = snap.noiseRms;
@@ -3206,6 +3218,20 @@ static const char* cmd_sttvocab(const String& argsInput) {
 
 // Raw STT input recorder (System_STTRawCapture): admin only, because it saves
 // room audio to the card unencrypted. Arming is never persisted.
+// Mic-path and speech-detector tuning in effect (PDM knobs from HAL_Audio, detector
+// knobs from the "stt" settings group; a running session keeps the values it started with).
+static const char* cmd_sttdetector(const String&) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char out[200];
+  uint8_t amp = 1; uint16_t hpf = 36;
+  audioGetPdmTuning(&amp, &hpf);
+  snprintf(out, sizeof(out),
+           "{\"pdmAmplify\":%u,\"pdmHpfHz\":%u,\"speechFloor\":%d,\"silenceFloor\":%d,\"noisePercentile\":%d,\"decisionPre\":%d}",
+           (unsigned)amp, (unsigned)hpf, gSettings.sttSpeechFloor, gSettings.sttSilenceFloor, gSettings.sttNoisePercentile,
+           gSettings.sttDecisionPre);
+  return out;
+}
+
 static const char* cmd_sttraw(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   static char out[256];
@@ -3226,6 +3252,8 @@ static const char* cmd_sttraw(const String& argsInput) {
 const CommandEntry sttCommands[] = {
   {"sttperf", "STT pacing/profiling per segment (timings and CPU only, never text).", false, cmd_sttperf,
    "Usage: sttperf [show|clear|log on|off|stages [all|clear]]"},
+  {"sttdetector", "Show the mic-path (PDM gain, high-pass) and speech-detector (floors, percentile) tuning in effect.", false, cmd_sttdetector,
+   "Usage: sttdetector  (set with pdmamplify, pdmhpf, sttspeechfloor, sttsilencefloor, sttnoisepercentile, sttdecisionpre)"},
   {"sttraw", "Save the raw microphone input of continuous STT sessions to /sd/STT Raw for bench replay.", true, cmd_sttraw,
    "Usage: sttraw [status|on|off]  (on arms the next continuous session; not kept across reboot)"},
   {"sttvocab", "Speech vocabulary: names and terms with their display spelling (STT Models/user_vocab.tsv).", false, cmd_sttvocab,

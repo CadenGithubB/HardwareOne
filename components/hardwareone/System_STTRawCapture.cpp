@@ -2,8 +2,10 @@
 #include "System_BuildConfig.h"
 #if ENABLE_LOCAL_STT
 
+#include "HAL_Audio.h"
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
+#include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "System_VFS.h"
 #include "stt/stt_raw_ring.h"
@@ -121,12 +123,18 @@ bool writeSidecar(const char* pcmPath, uint32_t endedMs, bool drained) {
   if (!text) return false;
   const auto& ring = gRaw.ring;
   const esp_app_desc_t* app = esp_app_get_description();
+  uint8_t pdmAmplify = 1; uint16_t pdmHpfHz = 36;
+  audioGetPdmTuning(&pdmAmplify, &pdmHpfHz);
   int n = snprintf(text, kCap,
       "{\"format\":\"s16le\",\"channels\":1,\"rate\":%" PRIu32 ",\"source\":%u,"
+      "\"pdm_amplify\":%u,\"pdm_hpf_hz\":%u,\"speech_floor\":%d,\"silence_floor\":%d,\"noise_percentile\":%d,\"decision_pre\":%d,"
       "\"firmware\":\"%s\",\"started_uptime_ms\":%" PRIu32 ",\"ended_uptime_ms\":%" PRIu32 ","
       "\"samples_seen\":%" PRIu64 ",\"samples_written\":%" PRIu64 ",\"samples_dropped\":%" PRIu64 ","
       "\"write_error\":%s,\"drain_complete\":%s,\"gaps_lost\":%" PRIu32 ",\"gaps\":[",
-      gRaw.sampleRate, unsigned(gRaw.source), app ? app->version : "?", gRaw.startedMs, endedMs,
+      gRaw.sampleRate, unsigned(gRaw.source),
+      unsigned(pdmAmplify), unsigned(pdmHpfHz), gSettings.sttSpeechFloor, gSettings.sttSilenceFloor,
+      gSettings.sttNoisePercentile, gSettings.sttDecisionPre,
+      app ? app->version : "?", gRaw.startedMs, endedMs,
       ring.seen(), gRaw.written.load(), ring.dropped(),
       gRaw.writeFailed.load() ? "true" : "false", drained ? "true" : "false", ring.gapsLost());
   for (size_t i = 0; i < ring.gapCount() && n > 0 && size_t(n) < kCap; ++i)

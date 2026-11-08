@@ -9,10 +9,23 @@ namespace hw1::stt {
 // rate: PCM sample rate. maxSamples: the phrase cap. shortClose: the
 // HW1_STT_SHORT_CLOSE build choice. singleUtterance: a bounded question
 // (stops after the first phrase) instead of continuous listening.
+// speechFloor / silenceFloor / noisePercentile: the detector's tunable levels
+// (device settings sttSpeechFloor, sttSilenceFloor, sttNoisePercentile); the
+// defaults are the shipped values, so callers that pass nothing are unchanged.
 inline SegmenterConfig continuousSegmenterConfig(size_t rate, size_t maxSamples,
-                                                 bool shortClose, bool singleUtterance) {
+                                                 bool shortClose, bool singleUtterance,
+                                                 uint16_t speechFloor = 45, uint16_t silenceFloor = 16,
+                                                 uint8_t noisePercentile = 25, uint8_t decisionPreEmphasis = 0) {
   SegmenterConfig config;
   config.adaptive = true;
+  if (speechFloor == 0) speechFloor = 1;
+  if (silenceFloor == 0) silenceFloor = 1;
+  if (silenceFloor > speechFloor) silenceFloor = speechFloor;  // the segmenter rejects silence > speech
+  if (noisePercentile > 100) noisePercentile = 100;
+  config.adaptive_speech_floor = speechFloor;
+  config.adaptive_silence_floor = silenceFloor;
+  // Pre-emphasis onset judge (device setting sttdecisionpre, 0 = off; 97 = the bench value).
+  config.decision_pre_emphasis = decisionPreEmphasis > 99 ? 99 : decisionPreEmphasis;
   // Close a phrase after >=4 s (was the 8 s default) plus the usual 600 ms
   // pause, so text is finalised while the speaker is still talking and a
   // Stop leaves only a short tail. The 15x5 transcribes at ~0.45x real time,
@@ -29,7 +42,7 @@ inline SegmenterConfig continuousSegmenterConfig(size_t rate, size_t maxSamples,
   // limit and noise opened new ones. Track the lower quartile instead, and
   // let up to 30 ms of louder frames pass without restarting the pause.
   // Both apply to every source, the onboard PDM mic included.
-  config.noise_percentile = 25;
+  config.noise_percentile = noisePercentile;
   config.silence_blip_samples = 3 * kSegmentAnalysisSamples;
   // A phrase that reaches the length limit is cut at the quietest point of
   // its last 2 s (usually between words), not mid-word at the exact limit.

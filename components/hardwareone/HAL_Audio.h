@@ -76,6 +76,13 @@ bool        audioSetSource(AudioSource src);
 // none is available. `sampleRate` applies to the PDM source (pass 0 for the
 // 16 kHz default); the G2 source is always 16 kHz.
 bool        audioCaptureStart(const char* owner, uint32_t sampleRate = 0);
+// Onboard PDM mic tuning, applied the next time the PDM channel starts (the
+// channel is created per capture, so a running capture keeps its values).
+// amplify: PDM->PCM hardware multiplier 1..15 (1 = IDF default). hpfHz: the
+// hardware high-pass cut-off, 23..185 Hz, 0 = filter off (36 = IDF's 35.5 Hz).
+// Out-of-range values are clamped. No effect on the G2 source.
+void        audioSetPdmTuning(uint8_t amplify, uint16_t hpfHz);
+void        audioGetPdmTuning(uint8_t* amplify, uint16_t* hpfHz);
 // Native Conversate/EvenAI controls the physical microphone through its own UI.
 // Claim only its LEFT decoder/ring, never E0 AudioCtrl or a fallback PDM mic.
 // The owner must keep the native session alive and stop this claim afterwards.

@@ -75,6 +75,11 @@ static bool ensureAudioStateMutex() {
   return ready;
 }
 
+// PDM slot tuning (audioSetPdmTuning); defaults = the IDF slot defaults; kept outside the
+// backend #if so the setters exist on every board (no effect without the PDM backend).
+static uint8_t  gPdmAmplify = 1;
+static uint16_t gPdmHpfHz   = 36;   // 36 stands for IDF's 35.5 Hz default
+
 // ── PDM backend; ES7210 supplies the same onboard source on its boards. ─────
 #if ENABLE_MICROPHONE_SENSOR && !MIC_BACKEND_ES7210
 static i2s_chan_handle_t gPdmRx = nullptr;
@@ -122,6 +127,12 @@ static bool pdmStartLocked(uint32_t rate) {
 #endif
 #if !defined(I2S_PDM_RX_SLOT_PCM_FMT_DEFAULT_CONFIG) && defined(I2S_PDM_DATA_FMT_PCM)
   slot_cfg.data_fmt = I2S_PDM_DATA_FMT_PCM;
+#endif
+#if defined(SOC_I2S_SUPPORTS_PDM_RX_HP_FILTER) && SOC_I2S_SUPPORTS_PDM_RX_HP_FILTER
+  // Bench tuning (audioSetPdmTuning): hardware multiplier and high-pass.
+  slot_cfg.amplify_num = gPdmAmplify;
+  slot_cfg.hp_en = gPdmHpfHz > 0;
+  if (gPdmHpfHz > 0) slot_cfg.hp_cut_off_freq_hz = (gPdmHpfHz == 36) ? 35.5f : (float)gPdmHpfHz;
 #endif
 
   i2s_pdm_rx_config_t pdm_cfg = {
@@ -201,8 +212,8 @@ static bool pdmStartLocked(uint32_t rate) {
     gPdmRx = nullptr;
     return false;
   }
-  INFO_SYSTEMF("[HAL_AUDIO] PDM mic started: %u Hz, CLK=%d DATA=%d", (unsigned)rate,
-               (int)MIC_CLK_PIN, (int)MIC_DATA_PIN);
+  INFO_SYSTEMF("[HAL_AUDIO] PDM mic started: %u Hz, CLK=%d DATA=%d, amplify=x%u, hpf=%u Hz", (unsigned)rate,
+               (int)MIC_CLK_PIN, (int)MIC_DATA_PIN, (unsigned)gPdmAmplify, (unsigned)gPdmHpfHz);
   return true;
 }
 
@@ -215,6 +226,20 @@ static void pdmStopLocked() {
   }
 }
 #endif // ENABLE_MICROPHONE_SENSOR
+
+void audioSetPdmTuning(uint8_t amplify, uint16_t hpfHz) {
+  if (amplify < 1) amplify = 1;
+  if (amplify > 15) amplify = 15;
+  if (hpfHz > 0 && hpfHz < 23) hpfHz = 23;
+  if (hpfHz > 185) hpfHz = 185;
+  gPdmAmplify = amplify;
+  gPdmHpfHz = hpfHz;
+}
+
+void audioGetPdmTuning(uint8_t* amplify, uint16_t* hpfHz) {
+  if (amplify) *amplify = gPdmAmplify;
+  if (hpfHz) *hpfHz = gPdmHpfHz;
+}
 
 // No HAL mutex is held while the G2 backend takes its PCM mutex.
 static uint32_t sourceOverruns(AudioSource source) {
