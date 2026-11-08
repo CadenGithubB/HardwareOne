@@ -168,6 +168,9 @@ struct AuthContext { const char* owner; };
 static bool isQuarantineCopy(const char* path) {
   return std::strstr(path, ".corrupt-") != nullptr;
 }
+// Fails only the renames whose destination contains this text (G-38: the
+// quarantine move), leaving the writers' own promotions working.
+static std::string failRenameInto;
 static bool isSettingsTemporary(const char* path) {
   const String value(path);
   return value == "/system/settings.tmp" || value == "/system/debug.tmp" ||
@@ -241,6 +244,7 @@ static bool renameGuarded(const char* from, const char* to, AuthContext auth) {
   check(ownsFs && activeFiles == 0, "promotion outside lock or before close");
   authOwners.emplace_back(auth.owner); ++renameCalls;
   if (fault == Fault::Rename || fault == Fault::RenameShort) return false;
+  if (!failRenameInto.empty() && std::strstr(to, failRenameInto.c_str())) return false;
   if (!files.count(from)) return false;
   files[to] = files.at(from); files.erase(from); return true;
 }
@@ -368,6 +372,17 @@ static void notifUserPrefsInvalidate() {
   check(writerDepth == 0 && activeFiles == 0, "invalidation follows file close without taking the main writer lock");
   ++invalidations; invalidationLocks.push_back(ownsFs);
 }
+// G-38: System_FirstTimeSetup writes the owner credential-setup marker; it is
+// a boundary here (initial_admin_setup checks the file and the flow it starts).
+static const char* kOwnerSetupMarker = "/system/.pending_credential_setup";
+static unsigned ownerSetupArms = 0;
+static bool ownerSetupArmSucceeds = true;
+static bool armOwnerCredentialSetup() {
+  check(ownsFs, "owner setup marker armed outside the loader's lock");
+  ++ownerSetupArms;
+  if (ownerSetupArmSucceeds) files[kOwnerSetupMarker] = std::make_shared<Node>(Node{"1", false});
+  return ownerSetupArmSucceeds;
+}
 // Keep the source body intact while supplying its POSIX stat boundary.
 #define stat SettingsTestStat
 static int SettingsTestStat(const char* path, struct SettingsTestStat* value) {
@@ -393,7 +408,7 @@ static void reset() {
   pauses = resumes = lockTakes = lockGives = 0;
   writerLockAttempts = diagnosticCalls = 0;
   statCalls = invalidations = mutations = 0; statFailure = 0; invalidationLocks.clear();
-  sectionReads = 0;
+  sectionReads = 0; failRenameInto.clear(); ownerSetupArms = 0; ownerSetupArmSucceeds = true;
   interleave = restampRead = resumeRestamp = writerBlocked = mainDone = false;
 }
 static void balanced() {
@@ -601,6 +616,33 @@ static void corruptSettingsQuarantine() {
         "a readable settings.json did not load normally");
   check(writeSettingsJson(), "save after a good load failed");
   balanced();
+
+  // A quarantine that cannot move the file keeps the 2026-08-07 guard: the
+  // damaged bytes stay where they are and nothing is written over them.
+  for (const std::string& text : {std::string{"{\"truncated\":"}, std::string{"\xff\xfe garbage"}}) {
+    for (bool factory : {false, true}) {
+      reset(); store(SETTINGS_JSON_FILE, text); failRenameInto = ".corrupt-";
+      check(!(factory ? writeSettingsJsonForFactoryReset() : writeSettingsJson()),
+            "save went ahead after the quarantine rename failed");
+      check(files.at(SETTINGS_JSON_FILE)->bytes == text && writeOpens == 0 && !files.count(kQuarantine1),
+            "a failed quarantine let the save replace the unreadable file");
+      check(events.size() == 1 && events[0].kind == SYSEVT_SETTINGS_SAVE_FAILED &&
+            events[0].reason == "merge_read_failed", "failed save-time quarantine posted no merge_read_failed event");
+      balanced();
+    }
+    reset(); gSettingsLoadedOk = false; store(SETTINGS_JSON_FILE, text); failRenameInto = ".corrupt-";
+    check(!bootLoad() && !gSettingsLoadedOk, "boot load opened the save gate after a failed quarantine");
+    check(files.at(SETTINGS_JSON_FILE)->bytes == text && !files.count(kQuarantine1) && sectionReads == 0,
+          "a failed boot quarantine moved or read the file");
+    check(events.size() == 1 && events[0].kind == SYSEVT_CONFIG_FILE_CORRUPT &&
+          events[0].detail.find("quarantine failed") != std::string::npos,
+          "failed boot quarantine posted no config_file_corrupt event");
+    events.clear();
+    check(!writeSettingsJson() && files.at(SETTINGS_JSON_FILE)->bytes == text && writeOpens == 0,
+          "save after a failed boot quarantine overwrote the file");
+    check(events.size() == 1 && events[0].reason == "load_failed", "save was not refused at the load gate");
+    balanced();
+  }
 }
 static void mergeOpenFailure() {
   reset(); readOpenFails = true; retryMask = 0; retains = 0;
@@ -860,6 +902,7 @@ static void corruptUserSettingsQuarantine() {
     check(writeOpens == 0 && invalidations == 0, "a failed load wrote or invalidated anything");
     check(writerLockAttempts == 0 && files.at(SETTINGS_JSON_FILE)->bytes == oldMain,
           "per-user quarantine touched the main settings writer");
+    check(ownerSetupArms == 0 && !files.count(kOwnerSetupMarker), "a non-owner quarantine armed owner setup");
     // The recovery path (a password set runs this transaction) now commits.
     check(runUserSettingsTransaction(fixtureUser, changeTheme, nullptr) == UserSettingsTxnStatus::Committed,
           "password-set transaction still refused after the quarantine");
@@ -881,6 +924,56 @@ static void corruptUserSettingsQuarantine() {
     jsonAllocator.fail = false;
     check(!loaded && files.at(fixturePath)->bytes == oldUser && !files.count(quarantine) && events.empty(),
           "an intact per-user file was quarantined on an out-of-memory parse"); }
+  balanced();
+
+  // A failed quarantine rename leaves the file in place and arms nothing.
+  for (uint32_t id : {fixtureUser, uint32_t{1}}) {
+    reset(); writerAvailable = false;
+    const std::string path = getUserSettingsPath(id).c_str();
+    store(path.c_str(), "{invalid"); failRenameInto = ".corrupt-";
+    PSRAM_JSON_DOC(doc);
+    check(!loadUserSettings(id, doc) && files.at(path)->bytes == "{invalid" &&
+          !files.count(path + ".corrupt-1"), "failed per-user quarantine moved the file");
+    check(events.size() == 1 && events[0].detail.find("quarantine failed") != std::string::npos,
+          "failed per-user quarantine posted no event");
+    check(ownerSetupArms == 0 && !files.count(kOwnerSetupMarker), "owner setup armed without a quarantine");
+    balanced();
+  }
+
+  // G-38 owner: nobody can reset user 1, so its quarantine arms the
+  // credential-setup marker. Every other file stays byte-identical.
+  const std::string ownerPath = "/system/users/user_settings/1.json";
+  for (bool armOk : {true, false}) {
+    for (const std::string& text : {std::string{"{\"password\":"}, std::string{"[]"}}) {
+      reset(); writerAvailable = false; ownerSetupArmSucceeds = armOk;
+      store(ownerPath.c_str(), text); store(fixturePath, oldUser);
+      std::map<std::string, std::string> before;
+      for (const auto& entry : files) before[entry.first] = entry.second->bytes;
+      PSRAM_JSON_DOC(doc);
+      check(!loadUserSettings(1, doc), "corrupt owner file loaded");
+      check(!files.count(ownerPath) && files.at(ownerPath + ".corrupt-1")->bytes == text,
+            "corrupt owner file was not quarantined byte-for-byte");
+      check(ownerSetupArms == 1 && files.count(kOwnerSetupMarker) == (armOk ? 1u : 0u),
+            "owner quarantine did not arm the credential-setup marker");
+      for (const auto& entry : before)
+        if (entry.first != ownerPath)
+          check(files.count(entry.first) && files.at(entry.first)->bytes == entry.second,
+                "owner quarantine changed another file");
+      check(files.size() == before.size() + (armOk ? 1u : 0u), "owner quarantine created an unexpected file");
+      bool told = false;
+      for (const auto& log : logs)
+        told = told || log.find(armOk ? "next boot asks for a new owner password" : "marker write FAILED") != std::string::npos;
+      check(told && corruptEventFor(ownerPath.c_str()), "owner quarantine was not logged");
+      balanced();
+    }
+  }
+  // Out of memory on the owner file: intact, nothing armed.
+  reset(); writerAvailable = false; store(ownerPath.c_str(), oldUser);
+  { PSRAM_JSON_DOC(doc); jsonAllocator.fail = true;
+    const bool loaded = loadUserSettings(1, doc);
+    jsonAllocator.fail = false;
+    check(!loaded && files.at(ownerPath)->bytes == oldUser && ownerSetupArms == 0,
+          "an intact owner file was quarantined or armed setup on an out-of-memory parse"); }
   balanced();
 }
 

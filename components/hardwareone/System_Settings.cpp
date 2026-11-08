@@ -34,6 +34,7 @@
 #include "System_Power.h"    // applyPowerMode — the saved mode is re-applied in applySettings
 #include "System_UartLink.h"       // uartLinkStart/Stop/StatusLine — cmd_uartlink live apply
 #include "System_User.h"           // rotate transport generations on auth-policy changes
+#include "System_FirstTimeSetup.h"  // armOwnerCredentialSetup - owner credential recovery (G-38)
 #include <LittleFS.h>
 #include "System_VFS.h"      // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include <esp_system.h>
@@ -4127,15 +4128,23 @@ String getUserSettingsPath(uint32_t userId) {
 // (isValidUser) and every password reset (the transaction refuses a failed
 // load) with no event, so the owner saw only "wrong password". Quarantined, the
 // path is absent: this load still fails, the event says why, and the next
-// password set (userresetpassword, or the recovery in docs/COMPATIBILITY.md
-// for the owner) writes a fresh file. Caller holds the filesystem lock.
+// password set writes a fresh file. For any other account that is the owner's
+// userresetpassword. Nobody can reset the owner (user 1), so its quarantine
+// arms the credential-setup marker and the next boot asks for a new owner
+// password (System_FirstTimeSetup). Caller holds the filesystem lock.
 static void quarantineUserSettingsFile(uint32_t userId, const String& path, const char* why) {
   String movedTo;
   const bool moved = quarantineCorruptFile(
       path, VFS::systemAuth(VFS::Scopes::USERS, "user_settings.quarantine"), movedTo);
   ERROR_STORAGEF("[user] user_settings/%lu.json unreadable (%s)%s", (unsigned long)userId, why,
                  moved ? " - quarantined" : " - quarantine rename FAILED");
-  if (moved) {
+  if (moved && userId == 1) {
+    const bool armed = armOwnerCredentialSetup();
+    logSystemEvent("USERS", "user_settings/1.json (owner) unreadable (%s) - quarantined to %s; %s",
+                   why, movedTo.c_str(),
+                   armed ? "the next boot asks for a new owner password"
+                         : "setup marker write FAILED, owner cannot log in");
+  } else if (moved) {
     logSystemEvent("USERS", "user_settings/%lu.json unreadable (%s) - quarantined to %s; "
                    "this account cannot log in until its password is set again",
                    (unsigned long)userId, why, movedTo.c_str());
