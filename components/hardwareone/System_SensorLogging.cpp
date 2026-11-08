@@ -1050,12 +1050,25 @@ void sensorLogTick() {
 
       // Route to LittleFS primary, or /sd overflow mirror if flash is full.
       // The active path for this write cycle is resolved per-write so a hot
-      // card plug-in can start working immediately, but the overflow latch
-      // itself is one-way per reboot (see VFS::resolveOverflowPath).
+      // card plug-in can start working immediately; the overflow latch holds
+      // until free space recovers past its re-arm level (see
+      // VFS::resolveLogPath).
       char activePath[128];
-      bool onSd = VFS::resolveOverflowPath(gSensorLogPath.c_str(),
-                                           (size_t)gSensorLogMaxSize,
-                                           activePath, sizeof(activePath));
+      const VFS::LogTier tier = VFS::resolveLogPath(gSensorLogPath.c_str(),
+                                                    (size_t)gSensorLogMaxSize,
+                                                    activePath, sizeof(activePath));
+      if (tier == VFS::LogTier::Refused) {
+        // G-39: LittleFS is below the 100 KB floor and no card takes the
+        // overflow. Appending would spend the reserve settings and user
+        // saves depend on, so the row is dropped and counted; the session
+        // keeps running and resumes writing once space or a card returns.
+        VFS::noteLogReserveDrop();
+        if (isDebugFlagSet(DEBUG_LOGGER)) {
+          DEBUG_LOGGERF("logger: LittleFS below reserve, no SD — row dropped");
+        }
+        return;
+      }
+      const bool onSd = tier == VFS::LogTier::Overflow;
       File f = openSensorLogForAppend(String(activePath));
       if (f) {
         size_t len = strlen(line);

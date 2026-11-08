@@ -2282,8 +2282,9 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
 //
 // The append itself honours the overflow latch: a Refused resolution (LittleFS
 // below the reserve, no writable card) drops the line and counts it, and a
-// failed append on the SD mirror reports the card unwritable and retries once
-// on the tier the latch then resolves to.
+// failed append on the SD mirror reports the card unwritable (with a backoff
+// so it is not re-probed at once) and retries once on the tier the latch then
+// resolves to.
 
 // One append of `line` to `dest`; true when the file holds the whole line.
 // `sz` is the post-write size and `written` the bytes the handle accepted.
@@ -2365,10 +2366,12 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   if (!appended && VFS::getStorageType(String(dest)) == VFS::SDCARD &&
       VFS::getStorageType(String(path)) != VFS::SDCARD) {
     // G-39: the latch sent this line to a card that no longer takes writes
-    // (yanked SPI or detect-less SDMMC card). Report it so the overflow path
-    // stops choosing the card, then retry once wherever the latch resolves
-    // now — flash if space returned, otherwise a counted drop.
-    VFS::noteSDWriteFailure("log.append");
+    // (yanked SPI or detect-less SDMMC card, or a log tree the card's write
+    // probe does not exercise). Report it so the overflow path stops choosing
+    // the card for a while — not re-probing it on the retry below — then
+    // retry once wherever the latch resolves now: flash while free space is
+    // above the floor, otherwise a counted drop.
+    VFS::noteLogOverflowSdFailure("log.append");
     if (VFS::resolveLogPath(path, line.length() + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
       VFS::noteLogReserveDrop();
       STACK_TRACEF("appendLineWithCap.sd_failed_reserve_refused");

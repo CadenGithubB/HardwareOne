@@ -38,8 +38,9 @@
 // Callers that need a stable tier must resolve once per session and store the
 // result. Since G-39 the latch also re-arms once LittleFS free space is back
 // a reserve's width above the level that tripped it, and resolveLogPath
-// reports a latched resolution with no usable card as Refused so a capped log
-// does not eat the reserve it exists to protect.
+// reports a latched resolution with no usable card as Refused once LittleFS
+// free is below the global floor, so a log does not eat the reserve it exists
+// to protect.
 //
 // Convention for callers:
 //   - State files (settings, users, automations, mesh config, etc.)
@@ -458,9 +459,10 @@ inline bool pathInCaptureTree(const String& path) {
 // ============================================================================
 
 /** Where an overflow-aware write should go. Refused: the overflow latch is
- *  set (LittleFS below the reserve) and no writable card can take the data;
- *  outPath still names the primary path (for readers and recovery), but a
- *  writer that honours the reserve must not append there (G-39). */
+ *  set, no writable card can take the data and LittleFS free is below the
+ *  global floor (logReserveBytes); outPath still names the primary path (for
+ *  readers and recovery), but a writer must not append there (G-39). A
+ *  latched resolution with no card above the floor is Primary. */
 enum class LogTier : uint8_t { Primary, Overflow, Refused };
 
 /** Map a primary LittleFS log path to itself, OR to its /sd mirror once
@@ -497,6 +499,12 @@ size_t logReserveBytes();
  *  Refused, and read the count for this boot. */
 void noteLogReserveDrop();
 uint32_t logReserveDrops();
+
+/** A log append on the SD overflow mirror failed: report the card unwritable
+ *  (noteSDWriteFailure) and keep the overflow path off the card for a minute
+ *  even if its write probe still passes, so a damaged log tree on a card that
+ *  probes fine is not retried, and re-announced, on every line (G-39). */
+void noteLogOverflowSdFailure(const char* hint);
 
 /** True if the overflow latch is set. NOTE: this reports the latched
  *  DECISION, not the tier actually in use — resolveLogPath still falls back

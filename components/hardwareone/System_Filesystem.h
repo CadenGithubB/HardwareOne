@@ -248,9 +248,9 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
  *         skips rotation. A rotation whose copy cannot be written (low space,
  *         no copy buffer) restarts the log with a one-line drop marker and the
  *         new line, so the file never passes its cap by more than one line
- *         (G-39). With the overflow latch set and no writable card the line is
- *         refused (counted by VFS::logReserveDrops) to keep the LittleFS
- *         reserve; a failed append on the SD mirror marks the card unwritable
+ *         (G-39). With the overflow latch set, no writable card and LittleFS
+ *         below the 100 KB floor the line is refused (counted by
+ *         VFS::logReserveDrops) to keep the reserve; a failed append on the SD mirror marks the card unwritable
  *         and retries once on the re-resolved tier.
  */
 bool appendLineWithCap(const char* path, const String& line, size_t capBytes);

@@ -19,7 +19,7 @@ static int checks = 0;
 static unsigned long nowMs = 1000;
 static unsigned long millis() { return nowMs; }
 static size_t lfsTotal = 2 * 1024 * 1024, lfsUsed = 0;
-static int traverses = 0, writableProbes = 0, lowSpacePosts = 0, warnings = 0;
+static int traverses = 0, writableProbes = 0, lowSpacePosts = 0, warnings = 0, sdFailureNotes = 0;
 static bool sdMounted = false, sdWritableNow = false;
 static std::vector<std::string> eventLines;
 static constexpr const char* kLittleFsPartitionLabel = "littlefs";
@@ -40,6 +40,7 @@ namespace VFS {
 enum class LogTier : uint8_t { Primary, Overflow, Refused };
 static bool isSDAvailable() { return sdMounted; }
 static bool isSDWritable() { ++writableProbes; return sdMounted && sdWritableNow; }
+static void noteSDWriteFailure(const char*) { ++sdFailureNotes; }
 // INSERT_PRODUCTION
 }  // namespace VFS
 
@@ -70,7 +71,7 @@ int main() {
   CHECK(resolve(out) == LogTier::Refused && out == "/system/sys_logs/events.log");
   CHECK(VFS::isLogOverflowActive());
   CHECK(lowSpacePosts == 1 && warnings == 1 && eventLines.size() == 1);
-  CHECK(eventLines.back().find("dropped until space returns") != std::string::npos);
+  CHECK(eventLines.back().find("then are dropped") != std::string::npos);
   char dest[128];
   CHECK(!VFS::resolveOverflowPath("/system/sys_logs/events.log", 0, dest, sizeof(dest)));
   // An explicit /sd path never touches the reserve and is not refused.
@@ -97,15 +98,19 @@ int main() {
   CHECK(resolve(out) == LogTier::Overflow);  // card back: overflow resumes
 
   // Hysteresis: free back above the trip level but not a reserve's width
-  // above it keeps the latch.
-  sdMounted = sdWritableNow = false;
+  // above it keeps the latch, so logs stay on the card.
   setFree(150 * 1024); advance(30000);
-  CHECK(resolve(out) == LogTier::Refused && VFS::isLogOverflowActive());
+  CHECK(resolve(out) == LogTier::Overflow && VFS::isLogOverflowActive());
+  // Latched, card gone, but free space above the 100 KB floor: the line still
+  // lands on flash. Refusing here would drop audit and event lines with the
+  // reserve intact.
+  sdMounted = sdWritableNow = false;
+  CHECK(resolve(out) == LogTier::Primary && out == "/system/sys_logs/events.log" && VFS::isLogOverflowActive());
 
-  // Re-arm: free space returned past trip level + reserve. Logs go back to
-  // flash; before G-39 the latch held until reboot.
+  // Re-arm: free space returned past trip level + reserve. The latch clears;
+  // before G-39 it held until reboot.
   setFree(220 * 1024); advance(5000);
-  CHECK(resolve(out) == LogTier::Refused);  // re-arm check runs at most every 30 s
+  CHECK(resolve(out) == LogTier::Primary && VFS::isLogOverflowActive());  // re-arm check runs at most every 30 s
   advance(30000);
   const int traversesBefore = traverses;
   CHECK(resolve(out) == LogTier::Primary && out == "/system/sys_logs/events.log");
@@ -118,15 +123,43 @@ int main() {
   CHECK(resolve(out) == LogTier::Refused && VFS::isLogOverflowActive());
   CHECK(lowSpacePosts == 1 && warnings == 1 && eventLines.size() == 3);
 
-  // The trip level is the caller's larger reserve; re-arm sits above it.
+  // A caller with a large margin (the sensor log asks for its whole rotation
+  // size) trips the latch far above the floor. Refusal is decided against the
+  // 100 KB floor, not that margin: with no card the capped logs keep writing
+  // to flash, and only the floor itself refuses them.
   setFree(800 * 1024); advance(30000);
-  CHECK(resolve(out) == LogTier::Primary);
+  CHECK(resolve(out) == LogTier::Primary && !VFS::isLogOverflowActive());
   setFree(400 * 1024); advance(20000);
-  CHECK(resolve(out, "/logging_captures/a.csv", 512 * 1024) == LogTier::Refused);
+  CHECK(resolve(out, "/logging_captures/a.csv", 512 * 1024) == LogTier::Primary && VFS::isLogOverflowActive());
+  CHECK(resolve(out) == LogTier::Primary && out == "/system/sys_logs/events.log");
   setFree(580 * 1024); advance(30000);
-  CHECK(resolve(out) == LogTier::Refused);  // 580 KB < 512 KB + 100 KB
+  CHECK(resolve(out) == LogTier::Primary && VFS::isLogOverflowActive());  // 580 KB < 512 KB + 100 KB: still latched
+  setFree(90 * 1024); advance(6000);
+  CHECK(resolve(out) == LogTier::Refused);  // the floor itself
+  CHECK(resolve(out, "/logging_captures/a.csv", 512 * 1024) == LogTier::Refused);
   setFree(700 * 1024); advance(30000);
-  CHECK(resolve(out) == LogTier::Primary);
+  CHECK(resolve(out) == LogTier::Primary && !VFS::isLogOverflowActive());
+
+  // A log append failed on a card whose write probe still passes (damaged log
+  // tree, read-only file). The overflow path must keep off the card for a
+  // while rather than probe it again on the next line: each re-probe flipped
+  // the card writable, the next append failed again and the pair of SD
+  // events went round the events log.
+  sdMounted = sdWritableNow = true;
+  setFree(50 * 1024); advance(20000);
+  CHECK(resolve(out) == LogTier::Overflow && VFS::isLogOverflowActive());
+  VFS::noteLogOverflowSdFailure("log.append");
+  CHECK(sdFailureNotes == 1);
+  const int probesAtFailure = writableProbes;
+  CHECK(resolve(out) == LogTier::Refused);  // below the floor: a counted drop, not the card
+  for (int i = 0; i < 50; ++i) CHECK(resolve(out) != LogTier::Overflow);
+  CHECK(writableProbes == probesAtFailure);
+  setFree(150 * 1024); advance(3000);
+  CHECK(resolve(out) == LogTier::Primary && out == "/system/sys_logs/events.log");  // above the floor: flash
+  advance(10000);
+  CHECK(resolve(out) == LogTier::Primary && writableProbes == probesAtFailure);  // longer than a failed probe's backoff
+  advance(50000);
+  CHECK(resolve(out) == LogTier::Overflow && writableProbes == probesAtFailure + 1);
 
   VFS::noteLogReserveDrop(); VFS::noteLogReserveDrop();
   CHECK(VFS::logReserveDrops() == 2);

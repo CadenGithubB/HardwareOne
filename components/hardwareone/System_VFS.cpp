@@ -801,8 +801,11 @@ void invalidateStatsSnapshot(StorageType type) {
 // latch keeps a log stream on one tier while space is short; since G-39 it
 // re-arms once free space is back a reserve's width above the level that
 // tripped it (the hysteresis keeps a log from flapping between tiers), and a
-// latched resolution with no writable card is Refused rather than quietly
-// handed back the flash path it was latched off.
+// latched resolution with no writable card is Refused once LittleFS free is
+// below the global floor, rather than handed the flash path to spend the
+// reserve on. Above the floor such a resolution stays on flash: the latch may
+// have been tripped by one caller's larger margin (the sensor log asks for its
+// whole rotation size), and that must not silence every other log.
 
 // Global floor: LittleFS free bytes below which any caller's request tips the
 // overflow latch. This headroom is preserved for NON-log writes (settings
@@ -828,6 +831,18 @@ static constexpr uint32_t LOG_OVERFLOW_REARM_CHECK_MS = 30000;
 // logged line, so after a failed answer the overflow path waits this long
 // before asking again.
 static constexpr uint32_t LOG_OVERFLOW_SD_REPROBE_MS = 10000;
+
+// A log append that failed on the card while its write probe still passes (a
+// directory damaged by a mid-write yank, a read-only file, a sys_logs subtree
+// that cannot be created) would otherwise be re-probed on the very next line:
+// the probe succeeds, the append fails again, and each round posts an
+// SD_WRITE_FAILED/RECOVERED pair whose own events.log line takes the same
+// failing route. After such a failure the overflow path keeps off the card
+// for this long instead (G-39).
+static constexpr uint32_t LOG_OVERFLOW_SD_APPEND_FAIL_MS = 60000;
+static bool           gLogOverflowSdFailed     = false;
+static unsigned long  gLogOverflowSdFailedAtMs = 0;
+static uint32_t       gLogOverflowSdBackoffMs  = LOG_OVERFLOW_SD_REPROBE_MS;
 static unsigned long  gLogFreeCheckLastMs  = 0;
 static size_t         gLogFreeCheckCached  = SIZE_MAX;
 
@@ -910,13 +925,21 @@ uint32_t logReserveDrops() { return gLogReserveDrops; }
 // mounted. isSDAvailable() alone kept routing to a yanked SPI or detect-less
 // SDMMC card until reboot, so every log line failed on /sd.
 static bool overflowSdWritable() {
-  static bool          sFailed = false;
-  static unsigned long sFailedAtMs = 0;
-  if (sFailed && (millis() - sFailedAtMs) < LOG_OVERFLOW_SD_REPROBE_MS) return false;
+  if (gLogOverflowSdFailed && (millis() - gLogOverflowSdFailedAtMs) < gLogOverflowSdBackoffMs) return false;
   const bool ok = isSDWritable();
-  sFailed = !ok;
-  if (!ok) sFailedAtMs = millis();
+  gLogOverflowSdFailed = !ok;
+  if (!ok) {
+    gLogOverflowSdFailedAtMs = millis();
+    gLogOverflowSdBackoffMs = LOG_OVERFLOW_SD_REPROBE_MS;
+  }
   return ok;
+}
+
+void noteLogOverflowSdFailure(const char* hint) {
+  gLogOverflowSdFailed = true;
+  gLogOverflowSdFailedAtMs = millis();
+  gLogOverflowSdBackoffMs = LOG_OVERFLOW_SD_APPEND_FAIL_MS;
+  noteSDWriteFailure(hint);
 }
 
 LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
@@ -934,13 +957,18 @@ LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
   if (!gLogOverflowActive) {
     if (refreshLittleFsFreeCached() < want) {
       gLogOverflowActive = true;
+      // Re-arm sits a reserve above the level that tripped, not above the
+      // floor: a sensor log with a 250 KB margin would otherwise re-trip on
+      // its next row after every 30 s re-arm, flapping logs between tiers with
+      // an [EVENT] line each way. Refusal is decided against the floor below,
+      // so this level only picks the tier, it never silences a log.
       gLogOverflowRearmFree = want + LOG_OVERFLOW_DEFAULT_RESERVE;
       gLogOverflowRearmCheckMs = millis();
       const bool sd = isSDAvailable();
       logSystemEvent("FS", "LittleFS free below reserve (%u < %u bytes) — log writes latched to SD overflow (SD mounted: %s%s)",
                      (unsigned)gLogFreeCheckCached, (unsigned)want,
                      sd ? "yes" : "no",
-                     sd ? "" : "; capped logs are dropped until space returns");
+                     sd ? "" : "; logs stay on flash down to the floor, then are dropped");
       if (!gLogOverflowWarned) {
         gLogOverflowWarned = true;
         WARN_SYSTEMF("[LOG] LittleFS low on free space (%u < %u bytes); new log writes will route to SD overflow",
@@ -970,12 +998,19 @@ LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
   const bool primaryOnSd = strncmp(primaryPath, "/sd/", 4) == 0 || strcmp(primaryPath, "/sd") == 0;
 
   // Overflow active but no card takes writes: name the primary path for
-  // readers and recovery, and tell writers it is refused — appending there
-  // would spend the reserve this latch exists to keep (G-39). A path that is
-  // already on SD does not touch the reserve and is not refused.
+  // readers and recovery. Below the global floor tell writers it is refused —
+  // appending there would spend the reserve this latch exists to keep (G-39).
+  // The floor, not the `want` that tripped the latch, decides: a sensor log
+  // with a 250 KB-10 MB margin trips it far above the floor, and the audit,
+  // login and event logs must keep landing on flash until the floor itself is
+  // reached. Only this card-less branch reads free space while latched, at the
+  // same 2 s cadence an unlatched caller pays. A path already on SD does not
+  // touch the reserve and is not refused.
   if (!overflowSdWritable()) {
     snprintf(outPath, outPathLen, "%s", primaryPath);
-    return primaryOnSd ? LogTier::Primary : LogTier::Refused;
+    if (primaryOnSd) return LogTier::Primary;
+    return refreshLittleFsFreeCached() < LOG_OVERFLOW_DEFAULT_RESERVE ? LogTier::Refused
+                                                                      : LogTier::Primary;
   }
 
   // Defensive: if the caller already passed a /sd path, leave it alone.

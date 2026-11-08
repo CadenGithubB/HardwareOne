@@ -137,7 +137,7 @@ static LogTier resolveLogPath(const char* path, size_t need, char* dest, size_t 
   if (toSd) return LogTier::Overflow;
   return overflow && flashBelowReserve ? LogTier::Refused : LogTier::Primary;
 }
-static void noteSDWriteFailure(const char*) { io("sd_failed"); ++sdFailures; sdWritable = false; }
+static void noteLogOverflowSdFailure(const char*) { io("sd_failed"); ++sdFailures; sdWritable = false; }
 static void noteLogReserveDrop() { ++reserveDrops; }
 static File open(const String& path, const char* mode, bool create = false) {
   io(std::string("open:") + mode); const auto name = text(path);
@@ -370,7 +370,7 @@ static void reserveAndSdLatch() {
   check(!append(), "SD append failure below the reserve is a counted drop");
   check(sdFailures == 1 && reserveDrops == 1 && !disk.count("/logs/events.log"), "flash reserve kept after the card failed");
   reset(true); sdWritable = false; flashBelowReserve = false; failSdAppendOpen = true;
-  check(append() && disk.at("/logs/events.log") == "new\r\n" && sdFailures == 0, "re-armed latch writes to flash without touching the card");
+  check(append() && disk.at("/logs/events.log") == "new\r\n" && sdFailures == 0, "latched with no card above the floor writes to flash without touching the card");
   reset(false); failAppendOpen = true;
   check(!append() && sdFailures == 0 && reserveDrops == 0, "a flash append failure never reports the card");
 }

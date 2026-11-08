@@ -364,12 +364,19 @@ bool writeAutomationLogEntry(const AutomationLogSession& session,
       !line.concat(" | ") || !line.concat(message.c_str()) || !line.concat("\n")) return false;
 
   // Overflow may add "/sd/". Keep the complete path rather than silently
-  // truncating it into a different destination. False means primary storage.
+  // truncating it into a different destination.
   const size_t pathSize = session.filename.length() + 5;
   std::unique_ptr<char, decltype(&free)> dest(
       static_cast<char*>(ps_alloc(pathSize, AllocPref::PreferPSRAM, "automation.log.path")), &free);
   if (!dest) return false;
-  VFS::resolveOverflowPath(session.filename.c_str(), line.length() + 512, dest.get(), pathSize);
+  if (VFS::resolveLogPath(session.filename.c_str(), line.length() + 512, dest.get(), pathSize) ==
+      VFS::LogTier::Refused) {
+    // G-39: LittleFS is below the 100 KB floor and no card takes the
+    // overflow; the entry would spend the reserve automations.json and
+    // settings saves depend on. Dropped and counted like a capped log line.
+    VFS::noteLogReserveDrop();
+    return false;
+  }
   String destStr(dest.get());
   if (destStr.length() != strlen(dest.get())) return false;
   const int lastSlash = destStr.lastIndexOf('/');
