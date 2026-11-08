@@ -1001,6 +1001,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_identity_writes.py
           ${ESPNOW_BOND_JSON_TEST_ARGS})
+# `versions`: the production collector per feature selection (an item whose
+# boundary is compiled out is absent), its text/JSON forms and the matching
+# BUILD_INFO.md Versions rows from tools/gen_build_info.py.
+add_test(
+  NAME versions
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_versions.py
+          ${ESPNOW_BOND_JSON_TEST_ARGS})
 # certgen stages the HTTPS key and certificate as checked temps before renaming either.
 add_test(
   NAME https_cert_writes

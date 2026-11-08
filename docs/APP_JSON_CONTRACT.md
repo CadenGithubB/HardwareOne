@@ -80,6 +80,8 @@ peer-metadata commands date from v0.95.10. Changes after v0.99.98.5 are recorded
    `connectivity.bluetooth` gains it in compact form; the `console` word puts the
    pipe's console stream first; `blemode` accepts `glasses`
    (see sec. 11.9).
+11. **Versions** - `versions json` is new, and `status json` gains the same keys
+   as its `versions` object (see sec. 4).
 
 ---
 
@@ -118,6 +120,7 @@ Note: read the global on/off via `automation system status json`, not from
 | `i2cmetrics` | `{"schema":1,"uptimeSec","totalTransactions","mutexTimeouts","busContentions","totalBytes"}` |
 | `blepeers` | `{"schema":1,"peers":[{"name","displayName","connectable","connected","autoReconnect","mac1","mac2"?,"pairedBy"}],"count"}` |
 | `banlist` | `{"schema":1,"bans":[{"ip","reason"}],"count"}` (stub: `available:false`). IP bans are web-only. |
+| `versions` | `{"schema":1,"firmware",...,"idf","arduino"}`: every value a string, keys in this order and present only where the build compiles that part. `firmware`; OTA layouts: `ota_layout`, `updater` (`unavailable` without a factory updater), `ota_manifest_format`, `ota_data_schema`; ESP-NOW: `espnow` (`ESPNOW V1 (1.0)`), `espnow_wire` (the frame version byte, JSON only), `espnow_stack` (`v1`/`v2`, `unknown` until ESP-NOW has started), `espnow_identity_file`, `espnow_peer_file`; Bluetooth: `ble_console_channel`; phone pipe: `phone_link`, `phone_pipe_channel`, `phone_console_records`; CM5 host control: `cm5_control`; C6 companion: `c6_hosted`, `c6_hosted_qualified`, `c6_bridge_wire`, `c6_bridge_wire_expected` (reported values `unknown` until the companion answers); local STT: `stt_model`; then `idf`, `arduino`. `status json` carries the same keys, without `schema`, as `versions`. Errors: `{"error":"oom"}`, `{"error":"versions too large"}` |
 
 ---
 

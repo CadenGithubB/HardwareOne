@@ -1891,6 +1891,14 @@ void otaBleUploadHousekeeping() {
 }
 
 #if HW1_OTA_LAYOUT
+bool otaFactoryUpdaterVersion(char* output, size_t outputSize) {
+  return readFactoryUpdaterVersion(output, outputSize);
+}
+
+uint32_t otaDataSchemaVersion() { return kDataSchemaV1; }
+#endif
+
+#if HW1_OTA_LAYOUT
 // The escape keys on software faults only. A brownout keeps RTC memory and
 // says nothing about the image, so a sagging battery would otherwise walk the
 // counter to the threshold and park a healthy build in the updater, where

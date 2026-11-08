@@ -128,6 +128,8 @@ extern const CommandEntry cm5PresenceCommands[];
 extern const size_t cm5PresenceCommandsCount;
 extern const CommandEntry otaCommands[];
 extern const size_t otaCommandsCount;
+extern const CommandEntry versionsCommands[];
+extern const size_t versionsCommandsCount;
 extern const CommandEntry setPatternCommands[];
 extern const size_t setPatternCommandsCount;
 extern const CommandEntry g2Commands[];
@@ -172,6 +174,14 @@ static constexpr CommandModule gCommandModules[] = {
     "the first-boot setup wizard re-runs on next reboot while deliberately preserving "
     "WiFi credentials and other settings. Most mutating commands (timeset, cpufreq, "
     "reboot, ramflush, factoryreset, broadcast, lightsleep, deepsleep) require admin.", commands,             &commandsCount, 0, nullptr },
+  { "versions",   "Firmware and compatibility versions", "versions lists, one line each, the firmware version and the "
+    "versions a separately built part must agree with: the recovery updater, OTA layout, manifest format and data schema "
+    "(OTA layouts); the ESP-NOW format, the radio's ESP-NOW stack and the ESP-NOW identity files; the BLE console "
+    "channel and the phone link, pipe channel and console records (phone-pipe builds); the CM5 control protocol; the "
+    "C6 companion's ESP-Hosted and bridge versions with the ones this image expects (P4); the local STT model; and the "
+    "ESP-IDF and Arduino core it was built with. An item is shown only where the build includes that part. versions "
+    "json returns the same as one object with stable keys, also carried as the versions object of status json.",
+    versionsCommands, &versionsCommandsCount, 0, nullptr },
 #if ENABLE_WIFI
   { "wifi",       "Network management (connect, scan, add/remove networks)", "The WiFi subsystem manages station-mode network connections plus the network "
     "services that ride on top of them: NTP time sync and the on-device HTTP/HTTPS "

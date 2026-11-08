@@ -1382,6 +1382,11 @@ bool espnowShutdownPending();
 // isEspNowInitialized(), wherever the radio could be taken from under ESP-NOW.
 bool espnowOwnsRadio();
 
+// Espressif's ESP-NOW version (1 or 2, esp_now_get_version) as read at the last
+// successful init; 0 before that. On a P4 it is the companion's, read through
+// the bridge at that init.
+uint32_t espnowStackVersion();
+
 // Centralized driver-peer deletion boundary for UI/first-party callers. It
 // rejects while ESP-NOW is stopped/closing and is included in close quiescence.
 bool espnowDeletePeerRuntime(const uint8_t mac[6]);

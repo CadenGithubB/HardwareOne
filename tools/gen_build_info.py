@@ -423,6 +423,115 @@ def deployment_is_ota(selector):
     return True
 
 
+# ---------------------------------------------------------------------------
+# Versions: the build-time half of the device's `versions` command
+# (components/hardwareone/System_Versions.cpp). Same keys; values read from
+# the same source constants, except `updater_built` (the updater this tree
+# builds; the device's `updater` is the one in its factory slot). Values only
+# the running device knows (that updater, the radio's ESP-NOW stack, the C6's
+# reported Hosted and bridge versions) are left to `versions` on the device.
+# ---------------------------------------------------------------------------
+
+def _source(rel):
+    with open(os.path.join(REPO, rel), errors="replace") as source:
+        return source.read()
+
+
+def _match(pattern, rel):
+    m = re.search(pattern, _source(rel), re.M)
+    if not m:
+        raise ValueError("%s: no match for %s" % (rel, pattern))
+    return m.group(1)
+
+
+def _define(name, rel):
+    return _match(r"^\s*#\s*define\s+%s\s+([^\s/]+(?:\s*[-+*]\s*[^\s/]+)*)" % name, rel)
+
+
+def _int_expr(text):
+    """Evaluate a plain integer #define value such as `(250 - 32)` or `1u`."""
+    text = re.sub(r"(?<=\d)[uUlL]+\b", "", text)
+    if not re.fullmatch(r"[\d\s()+\-*]+", text):
+        raise ValueError("not a plain integer expression: %r" % text)
+    return int(eval(text, {"__builtins__": {}}))
+
+
+def define_from_argv(argv, name):
+    """The value of -D<name>=... in a compile command, C string quotes removed."""
+    prefix = "-D%s=" % name
+    for token in argv or []:
+        if token.startswith(prefix):
+            return token[len(prefix):].strip().strip("\\").strip('"').strip("\\")
+    return None
+
+
+def source_versions(enabled, firmware="", argv=None, companion=False):
+    """[(key, label, value)] for the items `versions` reports, as far as the
+    source tree knows them. `enabled(name)` answers a resolved ENABLE_* flag
+    or HW1_OTA_LAYOUT; `argv` is the hardwareone compile command."""
+    hw = "components/hardwareone/"
+    rows = []
+    add = lambda key, label, value: rows.append((key, label, str(value)))
+    add("firmware", "Firmware", firmware or "?")
+    if enabled("HW1_OTA_LAYOUT"):
+        add("ota_layout", "OTA layout", define_from_argv(argv, "HW1_OTA_LAYOUT_ID") or "?")
+        semver = _match(r'^set\(HW1_UPDATER_SEMVER "([^"]+)"\)', "updater/CMakeLists.txt")
+        suffix = define_from_argv(argv, "HW1_OTA_VERSION_SUFFIX") or ""
+        # Not the device's `updater` (the image in its factory slot): the
+        # updater this tree builds, under its own key so the two never merge.
+        add("updater_built", "Recovery updater built by this tree", semver + suffix)
+        add("ota_manifest_format", "OTA manifest format", _int_expr(_define(
+            "HW1_OTA_MANIFEST_FORMAT_VERSION", "components/hw1_ota_protocol/include/hw1_ota_protocol.h")))
+        add("ota_data_schema", "OTA data schema",
+            _match(r"^constexpr uint32_t kDataSchemaV1 = (\d+);", hw + "System_OTA.cpp"))
+    if enabled("ENABLE_ESPNOW"):
+        wire = hw + "System_ESPNow_Wire.h"
+        frame = _int_expr(_define("ESPNOW_V4_HEADER_LEN", wire)) + _int_expr(_define("ESPNOW_V4_MAX_PAYLOAD", wire))
+        release = _match(r'^#define\s+HW1_ESPNOW_RELEASE\s+"([^"]+)"', wire)
+        add("espnow", "ESP-NOW", "ESPNOW V%d (%s)" % (1 if frame <= 250 else 2, release))
+        add("espnow_wire", "ESP-NOW wire byte", _int_expr(_define("ESPNOW_V4_VERSION", wire)))
+        identity = hw + "System_ESPNow_Identity.cpp"
+        add("espnow_identity_file", "ESP-NOW identity file",
+            _match(r"\bkIdentityFileVersion = (\d+);", identity))
+        add("espnow_peer_file", "ESP-NOW peer files", _match(r"\bkPeerFileVersion = (\d+);", identity))
+    if enabled("ENABLE_BLUETOOTH"):
+        add("ble_console_channel", "BLE console channel",
+            _match(r'SC_INFO\[\]\s*=\s*"([^"]+)"', hw + "System_BleSecureChannel.cpp"))
+    if enabled("ENABLE_BLUETOOTH") and enabled("ENABLE_BLE_PHONE_PIPE"):
+        add("phone_link", "Phone link", "v" + _match(r"\bkVersion = (\d+)", hw + "BLE_PhonePipeCore.h"))
+        add("phone_pipe_channel", "Phone pipe channel",
+            _match(r'kPipeLabel\[\]\s*=\s*"([^"]+)"', hw + "BLE_PhoneSecureChannel.h"))
+        add("phone_console_records", "Phone console records",
+            "v" + _match(r"\bkInfoVersion = (\d+);", hw + "BLE_PhonePipeConsoleCore.h"))
+    if enabled("ENABLE_RASPBERRY_PI_HOST_POWER") or enabled("ENABLE_RASPBERRY_PI_HOST_FAN"):
+        add("cm5_control", "CM5 control protocol",
+            "v" + _match(r'kProtocolVersion = "(\d+)";', hw + "System_Cm5HostControl.cpp"))
+    if companion:
+        hosted = "components/esp_now_hosted/include/"
+        add("c6_hosted_qualified", "C6 ESP-Hosted expected",
+            _match(r'^#define HW1_C6_HOSTED_TAG "([^"]+)"', hosted + "esp_now_hosted_companion.h"))
+        add("c6_bridge_wire_expected", "C6 bridge wire expected",
+            _int_expr(_define("ESP_NOW_HOSTED_WIRE_VERSION", hosted + "esp_now_hosted_rpc.h")))
+    if enabled("ENABLE_LOCAL_STT"):
+        gen2 = enabled("ENABLE_STT_MODEL_15X5_GEN2")
+        selection = _source(hw + "stt/stt_model_selection.h")
+        paths = re.findall(r'#define HW1_STT_MODEL_PATH "([^"]+)"', selection)
+        if len(paths) != 2:  # the 15x5-gen2 branch's default, then the 5x5 one
+            raise ValueError("stt_model_selection.h: expected two default model paths")
+        path = define_from_argv(argv, "HW1_STT_MODEL_PATH") or paths[0 if gen2 else 1]
+        ident = hw + ("stt/stt_model_identity_15x5_gen2.h" if gen2 else "stt/stt_model_identity.h")
+        sha = re.findall(r"0x([0-9a-fA-F]{2})", _match(r"kRawSha\[32\] = \{([^}]*)\}", ident))[:4]
+        add("stt_model", "Local STT model", "%s sha %s" % (path.rsplit("/", 1)[-1], "".join(sha).lower()))
+    add("idf", "ESP-IDF", define_from_argv(argv, "IDF_VER") or "?")
+    arduino = "components/arduino/cores/esp32/esp_arduino_version.h"
+    try:
+        add("arduino", "Arduino core", ".".join(_define("ESP_ARDUINO_VERSION_%s" % part, arduino)
+                                                 for part in ("MAJOR", "MINOR", "PATCH")))
+    except (OSError, ValueError):
+        add("arduino", "Arduino core", "?")
+    return rows
+
+
 def fmt_kb(n):
     return "%s bytes (%.1f KB)" % ("{:,}".format(n), n / 1024.0)
 
@@ -516,6 +625,32 @@ def main():
         if art.get("version"):
             A("| Project version | `%s` |" % art["version"])
         A("")
+
+    A("## Versions")
+    A("")
+    A("What this image must agree with, from the source constants (`versions` on the")
+    A("device shows the same keys, plus what only the device can read: the updater in")
+    A("its factory slot, the radio's ESP-NOW stack, the C6's reported versions).")
+    A("`updater_built` is the updater this tree builds, not the one a device carries.")
+    A("")
+    if macros:
+        flags = macros["bool"]
+        layout = macros["value"].get("HW1_OTA_LAYOUT", "0")
+        enabled = lambda name: (layout == "1") if name == "HW1_OTA_LAYOUT" else flags.get(name) == "1"
+        try:
+            rows = source_versions(enabled, art.get("version", ""), compiler_cmd_for_buildconfig(build_dir)[0],
+                                   companion=cfg.get("CONFIG_ESP_WIFI_REMOTE_ENABLED") == "y")
+        except (OSError, ValueError) as e:
+            rows = None
+            A("> **Not recorded.** %s" % e)
+        if rows:
+            A("| Item | Key | Value |")
+            A("|---|---|---|")
+            for key, label, value in rows:
+                A("| %s | `%s` | `%s` |" % (label, key, value))
+    else:
+        A("> **Not recorded:** the feature flags are unknown (see below), so which items apply is too.")
+    A("")
 
     if configuration:
         A("## Saved feature choices")

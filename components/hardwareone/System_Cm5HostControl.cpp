@@ -1637,4 +1637,6 @@ Cm5HostCallbackIntrinsicResult cm5HostControlHandleCallbackIntrinsic(
   return Cm5HostCallbackIntrinsicResult::Handled;
 }
 
+const char* cm5HostControlProtocolVersion() { return kProtocolVersion; }
+
 #endif  // ENABLE_RASPBERRY_PI_HOST_POWER || ENABLE_RASPBERRY_PI_HOST_FAN

@@ -55,6 +55,7 @@ bool isEspNowInitialized() { return false; }
 #include "System_CrashRecord.h"   // crashRecord* — RTC post-mortem record for `crashlog`
 #include "System_OTASafety.h"     // pending trial images must finish probation before power-off
 #include "System_SelfDevice.h"   // SelfDevice:: — local identity/heap/uptime/firmware (Stage 1 consolidation)
+#include "System_Versions.h"     // versionsAddJson — the "versions" object of status json
 #include "System_Clock.h"        // Clock:: — epoch/sync/tz/format helpers (Stage 2)
 #include "System_Command.h"
 #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
@@ -1944,10 +1945,15 @@ const char* cmd_status(const String& argsInput) {
   //      (which would land in DRAM) — keeps the small-buffer / DRAM discipline.
   if (argWantsJson(argsInput)) {
     // A P4 build (C6 companion, LLM, the Bluetooth link words) reaches about
-    // 2 KB; a document that does not fit is refused, never cut into bad JSON.
-    static constexpr size_t kStatusJsonCap = 3072;
+    // 2 KB before the versions object (about 0.5 KB there, held within 1 KB by
+    // test_versions.py); a document that does not fit is refused, never cut
+    // into bad JSON. The command reply limit is the cap.
+    static constexpr size_t kStatusJsonCap = CMD_RESULT_MAX;
     PSRAM_JSON_DOC(doc);
     buildSystemInfoJson(doc, /*includeDeviceList=*/false);
+    // `versions json`'s keys. Here rather than in buildSystemInfoJson, whose
+    // periodic web/SSE telemetry has no use for them.
+    versionsAddJson(doc["versions"].to<JsonObject>());
     if (doc.overflowed()) return "{\"error\":\"oom\"}";
     if (measureJson(doc) >= kStatusJsonCap) return "{\"error\":\"status too large\"}";
     static char* statusJsonBuf = nullptr;

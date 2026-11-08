@@ -257,6 +257,7 @@ set(hardwareone_srcs
         System_BootState.cpp
         System_TimeAnchors.cpp
         System_Utils.cpp
+        System_Versions.cpp
         System_TaskUtils.cpp
         System_User.cpp
         System_UartLink.cpp
