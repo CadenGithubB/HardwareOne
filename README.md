@@ -235,3 +235,7 @@ If your build enables the G2 glasses / R1 ring Bluetooth support, first apply th
 > ## Full reference, commands, and configuration: [User Guide](docs/USERGUIDE.md)
 
 > ## Every command, generated from source: [Command Reference](docs/COMMAND_REFERENCE.md)
+
+## License
+
+PolyForm Noncommercial 1.0.0: free for any noncommercial use. See [LICENSE.md](LICENSE.md); bundled third-party code is listed in [NOTICE.md](NOTICE.md).

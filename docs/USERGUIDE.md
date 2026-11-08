@@ -1904,7 +1904,9 @@ temple hold on a HardwareOne page is an input of its own; QuickNote uses it
 
 ## License
 
-MIT License
+HardwareOne is licensed under the PolyForm Noncommercial License 1.0.0: you may use,
+change and share it for any noncommercial purpose. See [LICENSE.md](../LICENSE.md).
+Bundled third-party code keeps its own licence; see [NOTICE.md](../NOTICE.md).
 
 ---
 
