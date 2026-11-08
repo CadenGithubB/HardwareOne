@@ -22,6 +22,15 @@ String gSystemLogPath = "";
 bool gSystemLogRunning = false;
 unsigned long gSystemLogLastWrite = 0;
 uint32_t gSystemLogRotations = 0;  // production: static in System_Debug.cpp, shown by the ACTIVE status
+uint32_t gSystemLogReserveSkips = 0;  // production: static, counted by the writer (G-39)
+// The writer's reserve check reads the VFS free-space cache and floor.
+static size_t littleFsFree = 1024 * 1024;
+namespace VFS {
+enum StorageType { INTERNAL = 0, SDCARD = 1 };
+static StorageType getStorageType(const String& path) { return std::strncmp(path.c_str(), "/sd/", 4) == 0 ? SDCARD : INTERNAL; }
+static size_t getCachedLittleFsFree() { return littleFsFree; }
+static size_t logReserveBytes() { return 100 * 1024; }
+}
 DebugFlagMask gDebugFlags;
 struct HostSettings { bool systemLogAutoStart = false; String systemLogFlags;
                       int systemLogMaxSize = 1048576; int systemLogMaxRotations = 3; } gSettings;
@@ -79,6 +88,19 @@ int main() {
   gSettings.systemLogMaxSize = 99; gSettings.systemLogMaxRotations = 42;    // out of range reads as default
   CHECK(status(kCliStatus).find("Rotation: at 1024 KB, keep 3 old file(s)") != std::string::npos);
   gSettings.systemLogMaxSize = 1048576; gSettings.systemLogMaxRotations = 3;
+
+  // G-39: on LittleFS the writer skips lines below the reserve the overflow
+  // latch keeps for settings saves; a log on SD is not held to it. Skips
+  // reach the status line only once there are any.
+  littleFsFree = 100 * 1024;
+  CHECK(!systemLogBlockedByReserve(gSystemLogPath));
+  littleFsFree = 100 * 1024 - 1;
+  CHECK(systemLogBlockedByReserve(gSystemLogPath));
+  CHECK(!systemLogBlockedByReserve(String("/sd/logging_captures/system/debug.log")));
+  littleFsFree = 1024 * 1024;
+  gSystemLogReserveSkips = 7;
+  CHECK(status(kCliStatus) == active + "\n  Skipped: 7 line(s) while flash was below its 100 KB reserve");
+  gSystemLogReserveSkips = 0;
 
   gOutputFlags = MSG_ROUTE_SERIAL;
   gSettings.systemLogAutoStart = false;

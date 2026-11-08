@@ -25,7 +25,9 @@ CORE = COMPONENT.parent / "arduino/cores/esp32"
 def generate(overlay: Path | None) -> str:
     source = (overlay or COMPONENT) / "System_Filesystem.cpp"
     production = source.read_text()
-    markers = ["bool appendLineWithCap("]
+    markers = [marker for marker in ("static bool appendCappedLineOnce(", "static bool restartCappedLog(")
+               if marker in production]
+    markers.append("bool appendLineWithCap(")
     if "static void recoverLogOrphanAt(" in production:
         markers.append("static void recoverLogOrphanAt(")
     markers.append("void cleanupLogOrphan(")
