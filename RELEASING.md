@@ -28,7 +28,8 @@ The factory recovery updater has its own version, `HW1_UPDATER_SEMVER` in `updat
 updater change to be safe, build it with `HW1_MIN_UPDATER_VERSION=<that version>
 tools/build_deployment.sh ...`: the signed manifest then carries that `minUpdaterVersion`, and
 devices with an older factory updater refuse the update until the updater is reflashed. Never set it
-above the `HW1_UPDATER_SEMVER` shipped in the same release. Unset keeps the `1.0.0` floor that
+above the `HW1_UPDATER_SEMVER` shipped in the same release; the paired-artifact audit
+(`check_ota_builds.py --min-updater`) fails the build if it is. Unset keeps the `1.0.0` floor that
 every updater meets.
 
 ## SemVer (pre-1.0)

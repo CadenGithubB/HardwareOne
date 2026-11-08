@@ -84,3 +84,48 @@ def require(value: object, field: str = "version") -> str:
             "major.minor.patch[.revision] with optional -prerelease and +build metadata"
         )
     return value
+
+
+def _split(value: str) -> tuple[tuple[int, int, int, int], str]:
+    core_and_pre = value.partition("+")[0]
+    core, _, prerelease = core_and_pre.partition("-")
+    numbers = [int(number) for number in core.split(".")]
+    if len(numbers) == 3:
+        numbers.append(0)
+    return (numbers[0], numbers[1], numbers[2], numbers[3]), prerelease
+
+
+def _compare_identifier(left: str, right: str) -> int:
+    left_numeric = left.isdigit()
+    right_numeric = right.isdigit()
+    if left_numeric != right_numeric:
+        return -1 if left_numeric else 1
+    if left_numeric:
+        return (int(left) > int(right)) - (int(left) < int(right))
+    return (left > right) - (left < right)
+
+
+def compare(left: str, right: str) -> int:
+    """Order two versions as hw1_ota_semver_compare() does on the device.
+
+    Returns -1, 0 or 1. A missing revision counts as 0 and +build metadata is
+    ignored, so 1.1.0+fv2ho1 equals 1.1.0. Raises ValueError on invalid input.
+    """
+
+    require(left, "left version")
+    require(right, "right version")
+    left_core, left_pre = _split(left)
+    right_core, right_pre = _split(right)
+    if left_core != right_core:
+        return -1 if left_core < right_core else 1
+    if not left_pre or not right_pre:
+        if left_pre == right_pre:
+            return 0
+        return 1 if not left_pre else -1
+    left_ids = left_pre.split(".")
+    right_ids = right_pre.split(".")
+    for left_id, right_id in zip(left_ids, right_ids):
+        compared = _compare_identifier(left_id, right_id)
+        if compared:
+            return compared
+    return (len(left_ids) > len(right_ids)) - (len(left_ids) < len(right_ids))

@@ -9,7 +9,7 @@ import pathlib
 import re
 import unittest
 
-from tools.ota import make_manifest, semver
+from tools.ota import check_ota_builds, make_manifest, semver
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
 UPDATER_CMAKE = REPO / "updater" / "CMakeLists.txt"
@@ -64,6 +64,60 @@ class UpdaterVersionTests(unittest.TestCase):
             '${HW1_MIN_UPDATER_VERSION:+--min-updater "$HW1_MIN_UPDATER_VERSION"}',
             script,
         )
+
+    def test_release_build_audits_the_floor_before_signing(self) -> None:
+        script = BUILD_DEPLOYMENT.read_text()
+        audit = script.index('"$REPO/tools/ota/check_ota_builds.py"')
+        sign = script.index('"$REPO/tools/ota/make_manifest.py" create')
+        floor = '${HW1_MIN_UPDATER_VERSION:+--min-updater "$HW1_MIN_UPDATER_VERSION"}'
+        self.assertIn(floor, script[audit:sign])
+
+
+class MinimumUpdaterAuditTests(unittest.TestCase):
+    def errors(self, updater: str, floor: str | None) -> list[str]:
+        audit = check_ota_builds.Audit()
+        check_ota_builds.check_min_updater(audit, updater, floor)
+        return audit.errors
+
+    def test_floor_above_the_paired_updater_fails(self) -> None:
+        built = f"{updater_semver()}+fv2ho1"
+        major, minor, patch = core(updater_semver())
+        for floor in (f"{major}.{minor + 1}.0", f"{major}.{minor}.{patch}.1",
+                      f"{major + 1}.0.0-rc.1"):
+            with self.subTest(floor=floor):
+                self.assertTrue(self.errors(built, floor))
+
+    def test_floor_at_or_below_the_paired_updater_passes(self) -> None:
+        built = f"{updater_semver()}+fv2ho1"
+        for floor in (None, "1.0.0", updater_semver(), f"{updater_semver()}+fv2ho1",
+                      f"{updater_semver()}-rc.1"):
+            with self.subTest(floor=floor):
+                self.assertEqual(self.errors(built, floor), [])
+
+    def test_invalid_floor_fails(self) -> None:
+        self.assertTrue(self.errors("1.1.0+fv2ho1", "1.1"))
+
+
+class SemverCompareTests(unittest.TestCase):
+    def test_matches_firmware_ordering(self) -> None:
+        ordered = (
+            "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta",
+            "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0", "1.0.0.1",
+            "1.0.1", "1.1.0", "1.10.0", "2.0.0",
+        )
+        for index, lower in enumerate(ordered):
+            for higher in ordered[index + 1:]:
+                with self.subTest(lower=lower, higher=higher):
+                    self.assertEqual(semver.compare(lower, higher), -1)
+                    self.assertEqual(semver.compare(higher, lower), 1)
+
+    def test_build_metadata_and_zero_revision_are_equal(self) -> None:
+        self.assertEqual(semver.compare("1.1.0+fv2ho1", "1.1.0"), 0)
+        self.assertEqual(semver.compare("1.1.0.0", "1.1.0+x"), 0)
+
+    def test_invalid_input_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            semver.compare("1.1", "1.1.0")
 
 
 if __name__ == "__main__":

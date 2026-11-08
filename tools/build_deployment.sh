@@ -149,7 +149,8 @@ if [[ "$OTA_LAYOUT" == "1" ]]; then
   echo "==> Auditing paired artifacts"
   python3 "$REPO/tools/ota/check_ota_builds.py" \
     --board "$BOARD" --deployment "$SELECTOR" \
-    --main-build "$MAIN_BUILD" --updater-build "$UPDATER_BUILD"
+    --main-build "$MAIN_BUILD" --updater-build "$UPDATER_BUILD" \
+    ${HW1_MIN_UPDATER_VERSION:+--min-updater "$HW1_MIN_UPDATER_VERSION"}
 else
   echo "==> Building $SELECTOR main image (factory-only deployment)"
   env IDF_TARGET="$TARGET" HW_BOARD="$BOARD" HW_DEPLOYMENT="$SELECTOR" \
