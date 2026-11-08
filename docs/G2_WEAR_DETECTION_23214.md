@@ -43,7 +43,7 @@ This explains why requiring literal `08 00` or a presence bit would reject
 a valid OFF result. Static evidence ends at 2.3.0.24; it does not replace
 physical qualification of the connected 2.3.2.14 pair.
 
-Primary archive: `/Users/cadbecaimacmini/Documents/ChatGPT/Even Realities Software Archive/`.
+Primary archive: `~/Documents/ChatGPT/Even Realities Software Archive/`.
 
 - `firmware/g2/g2-2.3.0.24-1dbdf37b03a1169c384945e94d671371.bin`:
   SHA-256 `187ccf2bcc5c17a212106e8a376745511e8289c4232b634a7ea94b9bf25a0979`.
@@ -126,4 +126,4 @@ ON write and survival through a glasses power cycle were not exercised.
 
 Private capture: `/private/tmp/hw1-wear-validate-1791749709028093000/`.
 Durable private copies use prefix `wear-detection-23214-` in
-`/Users/cadbecaimacmini/Documents/Codex/Scratch/hardwareone-p4-backup-20261011/`.
+`~/Documents/Codex/Scratch/hardwareone-p4-backup-20261011/`.

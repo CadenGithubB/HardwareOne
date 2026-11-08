@@ -32,7 +32,7 @@ share tokens, passwords, or full configuration dumps. These are read-only
 commands; they do not enable an endpoint or connect the VLANs. The Studio and
 XIAO use the same test VLAN; the Mac mini remains outside it and uses USB for
 device access. This work does not bridge the VLANs.
-The user selected the password-protected `TestESPNetwork` for the XIAO. Enter its
+The user selected the password-protected `<your-network>` for the XIAO. Enter its
 password directly on the device during setup; do not store it here. The user
 confirmed that this network is on the OpenClaw host's VLAN, so a device on it
 can test the direct path without bridging VLANs.
@@ -46,7 +46,7 @@ binding, authentication, and sandbox configuration remain unchanged. Available a
 with Ollama configured behind the agents. The user selected `main` (Mingus), so
 the device target is `openclaw/main`. Follow-up inspection confirmed gateway
 authentication mode `token`, a valid but unset Control UI allowed-origins setting,
-and IPv4 `192.168.21.143` on `en0` (no IPv6 network state). Effective sandbox/tool
+and IPv4 `192.168.1.143` on `en0` (no IPv6 network state). Effective sandbox/tool
 policy was inspected below. The selected relay keeps this listener unchanged;
 follow the [relay setup](../integrations/openclaw/relay/README.md) for the local
 chat endpoint and separate HTTPS listener.
@@ -124,7 +124,7 @@ that result is not a guarantee for a different caller/session. Preserve the
 existing sandbox, mounts, and tool policy.
 
 The user requested a device account named `cm5` and the XIAO's IP after it joins
-`TestESPNetwork`, for updating the existing tool environment on the Studio.
+`<your-network>`, for updating the existing tool environment on the Studio.
 The account password is not recorded here. After the user supplied administrator
 access, USB status verified `/dev/cu.usbmodem11201` as a Seeed XIAO ESP32S3 Sense,
 firmware `0.99.97.4`, MAC `02:48:57:31:00:D0`. The `cm5` account was created with
@@ -133,9 +133,9 @@ the account listing confirmed it. The administrator serial session was retained.
 The user entered the Wi-Fi password in a masked Mac mini prompt. It was passed
 in memory over USB and saved on the device, without writing the password to this
 Mac or printing it in tool output. USB status then confirmed connection to
-`TestESPNetwork` at `192.168.21.24`. The existing device HTTP server was started
+`<your-network>` at `192.168.1.24`. The existing device HTTP server was started
 and reported running on port `80`, so the current device base URL is
-`http://192.168.21.24`. The previous saved network was retained. Wi-Fi is enabled
+`http://192.168.1.24`. The previous saved network was retained. Wi-Fi is enabled
 but `wifiAutoStart` remains `false`; reconnect after a device reboot. At this
 initial provisioning stage, no firmware had been flashed and Gateway settings
 were unchanged. Subsequent app-only updates and endpoint activation are recorded
@@ -152,7 +152,7 @@ stores devices in `${HW1_DEVICES_FILE:-$HOME/.openclaw/hardwareone.devices.json}
 it is a JSON device registry, not the optional helper's `HW1_*` configuration.
 Neither its contents nor the new credentials have been read from the Studio.
 A Studio-side authenticated read can use
-`curl --user openclaw http://192.168.21.24/api/system`, which prompts for the
+`curl --user openclaw http://192.168.1.24/api/system`, which prompts for the
 password. A successful `/api/ping` alone does not verify authentication.
 Then test the existing `hardwareone_devices` tool from Mingus's sandbox. These
 checks validate agent-to-device access; the new ESP-to-OpenClaw chat firmware
@@ -166,7 +166,7 @@ was not counted as a live read. Preserve this working integration and sandbox.
 
 For device-to-agent chat, the user selected a restricted HTTPS relay on the
 Studio, with a separate device credential and the gateway kept on loopback.
-The user has started the foreground relay at `https://192.168.21.143:18790/v1`,
+The user has started the foreground relay at `https://192.168.1.143:18790/v1`,
 fixed to `main`, and enabled Gateway Chat Completions through hot reload. The
 relay is running as a foreground process; a persistent service installation has
 not been verified. Its real device token was entered through a masked prompt,
@@ -355,7 +355,7 @@ obsolete. Recheck partition fit before adding features to this narrow headroom.
   before the console returned; the subsequent boot was healthy. All five stored
   secrets decrypted successfully. With user `a` logged in, cold-start `llmclear`
   returned `ok:true` before any generation request.
-- Latest XIAO checks: `TestESPNetwork`, `192.168.21.24`, HTTP port `80`, correct
+- Latest XIAO checks: `<your-network>`, `192.168.1.24`, HTTP port `80`, correct
   time, preserved masked token and public CA, zero crashes, about 52 KB free
   heap and 6,672 KB free PSRAM. Clock verified at `2026-10-13T01:36:30Z`;
   Wi-Fi autostart remains off.
@@ -395,7 +395,7 @@ obsolete. Recheck partition fit before adding features to this narrow headroom.
   continuity, New chat, and reported session-policy acceptance.
 
 The pre-test app-only rollback image is in the primary checkout at
-`/Users/cadbecaimacmini/Documents/Codex/Projects/hardwareone/work/openclaw-usb-backup/20261013T011617Z/factory-before.bin`,
+`~/Documents/Codex/Projects/hardwareone/work/openclaw-usb-backup/20261013T011617Z/factory-before.bin`,
 5,984,256 bytes, SHA-256
 `d1b623c177ce367cc09405df4a0dd9586f167859889f066c4fa400899790fe9f`.
 Both updates preserve the existing bootloader, partition table, NVS, LittleFS,
@@ -407,7 +407,7 @@ intended update path. Confirm `/dev/cu.usbmodem11201` and target MAC
 `02:48:57:31:00:D0` before further device access. Credentials remain private.
 
 Before porting HTTP support to the P4, preserve the actual active STT working
-tree at `/Users/cadbecaimacmini/Documents/ChatGPT/HardwareOne-stt-speedups`:
+tree at `~/Documents/ChatGPT/HardwareOne-stt-speedups`:
 branch `stt-speedups`, HEAD `2e56063`, 34 modified tracked files plus untracked
 STT work, profile `p4-glasses-test`, model `quartznet15x5gen2`. Do not substitute a
 clean `f4cc542c` baseline for that work. P4 USB `/dev/cu.usbmodem2201` remains

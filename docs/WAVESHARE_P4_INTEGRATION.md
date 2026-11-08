@@ -15,7 +15,7 @@ flashed during this integration. A physical smoke test remains before merging.
 - Explicit legacy companion update policy: `ab387b02`.
 
 The isolated checkout is
-`/Users/cadbecaimacmini/.codex/worktrees/waveshare-integration/hardwareone`.
+`~/.codex/worktrees/waveshare-integration/hardwareone`.
 It protects the original checkout's unrelated STT, G2 and OpenClaw edits.
 Firmware was built from the integration working tree subsequently recorded in
 these commits; its reports therefore show the merge HEAD plus local changes.
@@ -96,7 +96,7 @@ The suite is not fully green; these failures were not hidden or disabled.
 Use the saved-profile wrapper so automatic CMake reruns preserve board identity:
 
 ```sh
-source /Users/cadbecaimacmini/esp/esp-idf/export.sh
+source ~/esp/esp-idf/export.sh
 IDF_PY_BUILD_JOBS=4 python3 tools/build_config.py build waveshare-p4-bringup build
 python3 tools/build_config.py check waveshare-p4-bringup
 ```
