@@ -244,6 +244,11 @@ struct EspNowTxGuard {
 // Manual lock/unlock for cases where RAII isn't suitable
 void fsLock(const char* owner = nullptr);
 void fsUnlock();
+// Restart only (rebootDevice): take the filesystem lock for good, waiting at
+// most timeoutMs for the operation that holds it, so no SD (SDMMC) transfer
+// starts or is running when esp_restart() resets the host. Never released.
+// True when this task holds it.
+bool fsLockForRestart(uint32_t timeoutMs);
 
 // Check if current task holds a mutex (for debugging/assertions)
 bool isFsLockedByCurrentTask();

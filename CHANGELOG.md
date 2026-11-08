@@ -47,6 +47,12 @@ everything user-visible since the v0.99.99 tag (55 commits).
   MIT) and point at `NOTICE.md`.
 
 ### Fixed
+- P4X-EYE: after a `reboot` (or OTA, ramflush, setup or factory-reset restart) the C6 link could stay
+  down, with no Wi-Fi or web page and no SD card, until a USB reset. The P4's software restart resets
+  the SDMMC host without idling its DMA and was taken with the C6 link streaming. An intentional
+  restart now holds the C6 in reset, drops the Wi-Fi stop RPC, takes the filesystem lock and waits for
+  a cut-off transfer to time out first. A companion retry also waits for the C6 again instead of
+  failing in the same millisecond once ESP-Hosted's retry counter is spent. Not yet tested on hardware.
 - Two crashes: the QuickNote worker's stack and Arduino's unlocked `NetworkEvents`.
 - BLE setup worker retires a client after an OPEN timeout and bounds a stuck job.
 - Phone pipe isolates CLOSE and DISCONNECT by peer address and keeps the first cause of a lost session.

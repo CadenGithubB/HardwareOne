@@ -192,7 +192,73 @@ static void unexpected_reset_recovers_and_update_suppresses() {
   assert(m.state() == CompanionState::Offline && m.stats().retryPending);
 }
 
+// A fake slave link for waitForTransportUp: up from `upAt` on (0 = never).
+struct FakeLink {
+  uint32_t now = 0;
+  uint32_t upAt = 0;
+  uint32_t slept = 0;
+  int sleeps = 0;
+  bool wait(uint32_t startedAt, uint32_t budgetMs, uint32_t pollMs) {
+    return hw1::radio::waitForTransportUp(
+        startedAt, budgetMs, pollMs, [this] { return upAt != 0 && now >= upAt; }, [this] { return now; },
+        [this](uint32_t ms) {
+          now += ms;
+          slept += ms;
+          sleeps++;
+        });
+  }
+};
+
+static void a_start_waits_for_the_slave_after_hosted_gives_up_at_once() {
+  // Bench 2026-11-08: Hosted's spent retry counter made the start give up in
+  // the same millisecond as "Waiting for esp_hosted slave to be ready"; the
+  // C6 opened its data path a few hundred ms later.
+  FakeLink l;
+  l.now = 47211 + 5;  // hostedInitWiFi() returned 5 ms after the start
+  l.upAt = 47211 + 420;
+  assert(l.wait(47211, 20000, 50));
+  assert(l.now >= l.upAt && l.now < l.upAt + 50);
+  assert(l.slept < 500);
+}
+
+static void a_slave_that_never_answers_waits_only_the_budget() {
+  FakeLink l;
+  l.now = 1000 + 5;
+  assert(!l.wait(1000, 20000, 50));
+  assert(l.now == 1000 + 20000);  // not a poll interval past it
+}
+
+static void hosted_already_spent_the_budget_so_no_second_wait() {
+  // Hosted waited its full 100 x 200 ms itself and failed: no extra 20 s.
+  FakeLink l;
+  l.now = 3000 + 20000;
+  assert(!l.wait(3000, 20000, 50));
+  assert(l.sleeps == 0);
+}
+
+static void an_up_link_does_not_wait() {
+  FakeLink l;
+  l.now = 10;
+  l.upAt = 1;
+  assert(l.wait(0, 20000, 50));
+  assert(l.sleeps == 0);
+}
+
+static void the_wait_survives_a_clock_wrap() {
+  FakeLink l;
+  const uint32_t startedAt = 0xFFFFFF00u;
+  l.now = startedAt + 10;
+  l.upAt = 0;  // never: must still stop at the budget across the wrap
+  assert(!l.wait(startedAt, 1000, 50));
+  assert(l.now - startedAt == 1000);
+}
+
 int main() {
+  a_start_waits_for_the_slave_after_hosted_gives_up_at_once();
+  a_slave_that_never_answers_waits_only_the_budget();
+  hosted_already_spent_the_budget_so_no_second_wait();
+  an_up_link_does_not_wait();
+  the_wait_survives_a_clock_wrap();
   heartbeats_keep_online_and_silence_recovers();
   manual_mode_waits_for_the_operator();
   boot_failure_retries_with_backoff();

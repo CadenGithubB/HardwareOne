@@ -321,6 +321,31 @@ class CompanionMonitor {
   uint8_t recoveryIndex_ = 0;
 };
 
+// ---- transport start: wait for the slave ----------------------------------
+// ESP-Hosted 2.12.13 counts its "waiting for the slave to be ready" polls in a
+// static (transport_drv_reconfigure, 100 x 200 ms) that is reset only on
+// success. Two failed starts in one boot use it up, and every later start then
+// gives up in the same millisecond, although the freshly reset C6 is ready a
+// few hundred ms later (bench log 2026-11-08). Hosted's rx task still finishes
+// the handshake and posts TRANSPORT_UP, so the owner waits for that itself,
+// inside the same budget Hosted would have used: a start whose Hosted wait
+// already spent the budget does not wait twice.
+//
+// linkUp(): bool; now(): uint32_t ms (wraps); sleep(uint32_t ms): void.
+// Returns linkUp() at the end.
+template <typename LinkUp, typename Now, typename Sleep>
+bool waitForTransportUp(uint32_t startedAt, uint32_t budgetMs, uint32_t pollMs, LinkUp linkUp, Now now,
+                        Sleep sleep) {
+  if (pollMs == 0) pollMs = 1;
+  while (!linkUp()) {
+    const uint32_t elapsed = now() - startedAt;  // unsigned: survives a clock wrap
+    if (elapsed >= budgetMs) return linkUp();
+    const uint32_t left = budgetMs - elapsed;
+    sleep(left < pollMs ? left : pollMs);
+  }
+  return true;
+}
+
 inline const char* companionStateName(CompanionState state) {
   switch (state) {
     case CompanionState::Offline: return "offline";

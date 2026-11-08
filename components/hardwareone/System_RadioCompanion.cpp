@@ -76,6 +76,7 @@ RadioHalEventData sEvents[kEventRing];       // guarded by sLock
 uint8_t sEvHead = 0, sEvTail = 0;
 uint32_t sEventsDropped = 0;
 std::atomic<bool> sOpInFlight{false};
+std::atomic<bool> sRestarting{false};  // radioCompanionBeforeRestart ran: start nothing new
 std::atomic<uint8_t> sOp{static_cast<uint8_t>(Op::None)};
 bool sBootInitDone = false;
 bool sEverOnline = false;
@@ -647,6 +648,7 @@ void updateProc(void* arg) {
 }
 
 bool submitOp(Op op, ExecReq::DeferredFn fn, void* arg) {
+  if (sRestarting.load()) return false;  // the P4 restarts; the companion stays held
   bool expected = false;
   if (!sOpInFlight.compare_exchange_strong(expected, true)) return false;
   sOp.store(static_cast<uint8_t>(op));
@@ -1143,7 +1145,7 @@ void radioCompanionLogBootSummary() {
 }
 
 void radioCompanionTick() {
-  if (!sBootInitDone) return;
+  if (!sBootInitDone || sRestarting.load()) return;
   const uint32_t now = millis();
   RadioHalEventData event;
   while (popEvent(event)) handleEvent(event, now);
@@ -1159,6 +1161,10 @@ bool radioCompanionOnline() { return monitorState() == CompanionState::Online &&
 
 bool radioCompanionBlocksRadio(const char** reason) {
   if (reason) *reason = nullptr;
+  if (sRestarting.load()) {
+    if (reason) *reason = "the device is restarting";
+    return true;
+  }
   if (!sBootInitDone) return false;  // before boot init, the HAL state alone decides
   const CompanionState state = monitorState();
   switch (state) {
@@ -1218,6 +1224,17 @@ void radioCompanionBeforeDeepSleep() {
   stopUsers(users);
   radioHalStopTransport();
   radioHalPrepareForDeepSleep();
+}
+
+void radioCompanionBeforeRestart() {
+  // The P4 restarts next (rebootDevice). Unlike deep sleep, the users are not
+  // stopped: their owners can block for seconds or refuse (the reboot may be
+  // escaping a stuck BLE worker or a dead companion), and a restart must not
+  // depend on them. What matters is that the SDMMC host is idle when
+  // esp_restart() resets it, so the companion is silenced at the source and
+  // nothing here starts it again. Blocks no longer than a few GPIO writes.
+  sRestarting.store(true);
+  radioHalSilenceForRestart();
 }
 
 void radioCompanionJson(JsonObject out) { fillStatus(out, false); }

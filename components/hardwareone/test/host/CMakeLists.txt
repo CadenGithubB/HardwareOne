@@ -444,10 +444,24 @@ if(HW1_SANITIZE)
   target_link_options(radio_companion_core_tests PRIVATE -fsanitize=address,undefined)
 endif()
 
+# What an intentional restart does to the P4's SDMMC host first
+# (System_RestartQuiesceCore.h): silence the C6, take the filesystem lock,
+# drain for the SDMMC timeout, every step bounded.
+add_executable(restart_quiesce_core_tests test_restart_quiesce_core.cpp)
+set_target_properties(restart_quiesce_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(restart_quiesce_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+if(HW1_SANITIZE)
+  target_compile_options(restart_quiesce_core_tests PRIVATE -fsanitize=address,undefined -g)
+  target_link_options(restart_quiesce_core_tests PRIVATE -fsanitize=address,undefined)
+endif()
+
 enable_testing()
 
 add_test(NAME esp_now_hosted_protocol COMMAND esp_now_hosted_protocol_tests)
 add_test(NAME radio_companion_core COMMAND radio_companion_core_tests)
+add_test(NAME restart_quiesce_core COMMAND restart_quiesce_core_tests)
 # The real HAL_Bluetooth.cpp under native and Hosted (P4 + C6) controller
 # substitutes, with the app console's teardown hooks around every stop; see
 # test_hal_bluetooth.py for what it does and does not prove.
@@ -2164,6 +2178,14 @@ add_test(
   NAME time_anchor_persistence
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_time_anchor_persistence.py
+          ${SETUP_MQTT_TEST_ARGS})
+# rebootDevice() and the factory-reset restart idle the SDMMC host first (C6
+# silenced, filesystem lock, drain), and a companion start waits for the slave
+# after Hosted's spent retry counter gives up at once (bench 2026-11-08).
+add_test(
+  NAME restart_sdmmc_quiesce
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_restart_sdmmc_quiesce.py
           ${SETUP_MQTT_TEST_ARGS})
 # The C6 companion's reboot escalation restarts through rebootDevice().
 add_test(

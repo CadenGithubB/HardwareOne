@@ -46,6 +46,10 @@ bool radioCompanionBlocksRadio(const char** reason);
 void radioCompanionBeforeLightSleep();
 void radioCompanionAfterLightSleep();
 void radioCompanionBeforeDeepSleep();
+// Restart hook (rebootDevice, factory reset): stop starting companion work and
+// silence the C6 so no SDIO DMA runs into the restart. Never undone; the
+// caller restarts.
+void radioCompanionBeforeRestart();
 
 // Status for /api/system and the dashboard.
 void radioCompanionJson(JsonObject out);
@@ -67,6 +71,7 @@ inline bool radioCompanionBlocksRadio(const char** reason) {
 inline void radioCompanionBeforeLightSleep() {}
 inline void radioCompanionAfterLightSleep() {}
 inline void radioCompanionBeforeDeepSleep() {}
+inline void radioCompanionBeforeRestart() {}
 
 #endif  // HW1_RADIO_COMPANION
 #endif  // SYSTEM_RADIO_COMPANION_H

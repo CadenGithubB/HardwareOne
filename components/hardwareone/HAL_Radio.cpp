@@ -17,6 +17,7 @@
 #include "esp_hosted_misc_types.h"
 #include "esp_hosted_ota.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_now_hosted_companion.h"
 #include "esp_now_hosted_host.h"
 #include "esp_now_hosted_rpc.h"
@@ -25,6 +26,7 @@
 #include "esp32-hal-hosted.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "Radio_CompanionCore.h"
 
 namespace {
 
@@ -81,11 +83,17 @@ void consoleTask(void*) {
 #endif
 
 constexpr int kBootAttempts = 2;  // each attempt resets the C6 and waits up to ~20 s
+// Hosted's own slave-ready wait (MAX_RETRY_TRANSPORT_ACTIVE 100 x 200 ms). A
+// start waits for TRANSPORT_UP inside this budget even when Hosted's spent
+// retry counter made it give up at once (hw1::radio::waitForTransportUp).
+constexpr uint32_t kSlaveReadyBudgetMs = 20000;
+constexpr uint32_t kSlaveReadyPollMs = 50;
 
 bool sBoardPrepared = false;
 bool sPrepared = false;        // radioHalPrepare() ran and the transport came up at least once
 bool sUpdateOnly = false;     // Explicit legacy OTA session; unavailable to radio users.
 bool sTransportUp = false;     // last TRANSPORT_UP without a DOWN/FAILURE since
+bool sHostedLinkUp = false;    // Hosted posted TRANSPORT_UP in this session (cleared before each start)
 bool sTransportLost = false;
 bool sHeld = false;
 bool sEventsRegistered = false;
@@ -164,6 +172,7 @@ void hostedEventHandler(void*, esp_event_base_t base, int32_t id, void* data) {
     case ESP_HOSTED_EVENT_TRANSPORT_UP:
       portENTER_CRITICAL(&sLock);
       sTransportUp = true;
+      sHostedLinkUp = true;
       portEXIT_CRITICAL(&sLock);
       deliver(RadioHalEvent::TransportUp, 0);
       break;
@@ -171,6 +180,7 @@ void hostedEventHandler(void*, esp_event_base_t base, int32_t id, void* data) {
       portENTER_CRITICAL(&sLock);
       sTransportUp = false;
       sSessionBleLinks = 0;
+      sHostedLinkUp = false;
       portEXIT_CRITICAL(&sLock);
       deliver(RadioHalEvent::TransportDown, 0);
       break;
@@ -178,6 +188,7 @@ void hostedEventHandler(void*, esp_event_base_t base, int32_t id, void* data) {
       portENTER_CRITICAL(&sLock);
       sTransportUp = false;
       sSessionBleLinks = 0;
+      sHostedLinkUp = false;
       portEXIT_CRITICAL(&sLock);
       deliver(RadioHalEvent::TransportFailure, 0);
       break;
@@ -252,13 +263,38 @@ esp_err_t applyMonitoring() {
   return first;
 }
 
+bool hostedLinkUp() {
+  portENTER_CRITICAL(&sLock);
+  const bool up = sHostedLinkUp;
+  portEXIT_CRITICAL(&sLock);
+  return up;
+}
+
 // One Hosted bring-up attempt: Arduino's helper resets the companion, waits
 // for the SDIO link and records its lifecycle state. The version query is the
 // first RPC and proves the link end to end.
 esp_err_t startOnce(bool allowLegacyUpdate) {
+  const uint32_t startedAt = nowMs();
+  // A fresh Hosted session announces itself with TRANSPORT_UP. An already
+  // initialized one (another claim kept it) has nothing new to announce.
+  const bool freshSession = !hostedIsInitialized();
+  if (freshSession) {
+    portENTER_CRITICAL(&sLock);
+    sHostedLinkUp = false;
+    portEXIT_CRITICAL(&sLock);
+  }
   if (!hostedInitWiFi()) {
     ESP_LOGE(kTag, "Hosted transport initialization failed");
     return ESP_FAIL;
+  }
+  // hostedInitWiFi() returns as soon as Hosted's reconfigure gives up, which
+  // after two failed starts in one boot is at once (its retry counter is never
+  // reset on failure). Wait for the slave ourselves, in Hosted's own budget.
+  if (freshSession &&
+      !hw1::radio::waitForTransportUp(
+          startedAt, kSlaveReadyBudgetMs, kSlaveReadyPollMs, [] { return hostedLinkUp(); },
+          [] { return nowMs(); }, [](uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms) ? pdMS_TO_TICKS(ms) : 1); })) {
+    ESP_LOGW(kTag, "C6 transport not up %" PRIu32 " ms after the start", nowMs() - startedAt);
   }
   esp_hosted_coprocessor_fwver_t version = {};
   const esp_err_t err = esp_hosted_get_coprocessor_fwversion(&version);
@@ -611,6 +647,29 @@ void radioHalPrepareForDeepSleep() {
 #if !SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP
   gpio_deep_sleep_hold_en();
 #endif
+}
+
+void radioHalSilenceForRestart() {
+  // The caller restarts the P4 next (rebootDevice). esp_restart() would run
+  // esp_wifi_remote's esp_wifi_stop shutdown handler, an RPC over SDIO taken
+  // in the last milliseconds before the SDMMC reset; Hosted's own restart
+  // helper (hosted_restart_host) unregisters it for the same reason.
+  esp_unregister_shutdown_handler(reinterpret_cast<shutdown_handler_t>(&esp_wifi_stop));
+  // Hold the C6 in reset so it stops sending: no new rx data or interrupts,
+  // and a transfer it was in the middle of ends on the SDMMC timeout instead
+  // of streaming into the reset. Hosted stays initialised on purpose: its
+  // teardown deletes tasks that may be inside an SDMMC transaction, and its
+  // users are still running. EN stays low through the CPU reset; Hosted's
+  // reset pulse at the next boot releases it, as after deep sleep.
+  gpio_hold_dis(board::kC6Enable);
+  gpio_set_level(board::kC6Enable, 0);
+  gpio_set_direction(board::kC6Enable, GPIO_MODE_OUTPUT);
+  portENTER_CRITICAL(&sLock);
+  sHeld = true;
+  sTransportUp = false;
+  sSessionBleLinks = 0;
+  sHostedLinkUp = false;
+  portEXIT_CRITICAL(&sLock);
 }
 
 esp_err_t radioHalUpdateBegin() {
