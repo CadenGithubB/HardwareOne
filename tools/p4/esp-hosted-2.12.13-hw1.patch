@@ -11,7 +11,7 @@
  	PRIV_INCLUDE_DIRS ${priv_include})
 --- a/host/drivers/transport/sdio/sdio_drv.c
 +++ b/host/drivers/transport/sdio/sdio_drv.c
-@@ -1573,7 +1573,7 @@
+@@ -1573,14 +1573,16 @@
  	interface_buffer_handle_t buf_handle = {0};
  	void (*free_func)(void* ptr) = NULL;
  	uint8_t pkt_prio = PRIO_Q_OTHERS;
@@ -20,6 +20,17 @@
  
  	if (free_buf_func)
  		free_func = free_buf_func;
+ 
+ 	if (!payload_buf || !payload_len || (payload_len > MAX_PAYLOAD_SIZE) || !transport_up) {
+-		ESP_LOGE(TAG, "tx fail: NULL buff, invalid len (%u) or len > max len (%u), transport_up(%u))",
+-				payload_len, MAX_PAYLOAD_SIZE, transport_up);
++		/* HardwareOne: no log after the restart fence (transport_drv.c) */
++		if (!esp_hosted_hw1_tx_drop_if_fenced())
++			ESP_LOGE(TAG, "tx fail: NULL buff, invalid len (%u) or len > max len (%u), transport_up(%u))",
++					payload_len, MAX_PAYLOAD_SIZE, transport_up);
+ 		H_FREE_PTR_WITH_FUNC(free_func, buffer_to_free);
+ 		return ESP_FAIL;
+ 	}
 --- a/host/drivers/transport/transport_drv.c
 +++ b/host/drivers/transport/transport_drv.c
 @@ -26,6 +26,8 @@
@@ -31,7 +42,7 @@
  
  #include "esp_hosted_cli.h"
  #include "rpc_wrap.h"
-@@ -81,6 +83,25 @@
+@@ -81,6 +83,49 @@
  	return (transport_state >= TRANSPORT_TX_ACTIVE);
  }
  
@@ -41,8 +52,14 @@
 + * left alone, so transport_drv_reconfigure() (Wi-Fi init, BLE open) still sees
 + * an up transport and starts no slave reset or card init. Only a CPU reset
 + * clears it.
++ *
++ * A refusal at the fence is counted, never logged: the producer's own task
++ * pays for the log, and Bluedroid's hciT (2.5 KB stack) overflowed in vfprintf
++ * printing esp_hosted_tx's "tx fail" line for each HCI packet its live links
++ * sent during the restart (bench 2026-11-08, 3 of 15 reboots).
 + */
 +static volatile uint8_t hw1_tx_fenced = 0;
++static uint32_t hw1_tx_fence_drops = 0;
 +
 +void esp_hosted_hw1_fence_tx(void)
 +{
@@ -54,10 +71,28 @@
 +	return is_transport_tx_ready() && !hw1_tx_fenced;
 +}
 +
++uint8_t esp_hosted_hw1_tx_fenced(void)
++{
++	return hw1_tx_fenced;
++}
++
++uint8_t esp_hosted_hw1_tx_drop_if_fenced(void)
++{
++	if (!hw1_tx_fenced)
++		return 0;
++	__atomic_fetch_add(&hw1_tx_fence_drops, 1, __ATOMIC_RELAXED);
++	return 1;
++}
++
++uint32_t esp_hosted_hw1_tx_fence_drops(void)
++{
++	return __atomic_load_n(&hw1_tx_fence_drops, __ATOMIC_RELAXED);
++}
++
  static void transport_driver_event_handler(uint8_t event)
  {
  	switch(event)
-@@ -283,11 +304,32 @@
+@@ -283,11 +328,32 @@
  static hosted_mempool_t * transport_drv_common_mempool_create(void)
  {
  	if (!mempool_common) {
@@ -91,42 +126,80 @@
  			.alignment_in_bytes = HOSTED_MEM_ALIGNMENT_64,
  			.malloc = transport_util_malloc,
  			.calloc = transport_util_calloc,
-@@ -344,7 +386,7 @@
+@@ -344,8 +410,9 @@
  		return ESP_OK;
  
  	/* Transport state check */
 -	if (!is_transport_tx_ready() || !chan_arr[ESP_STA_IF]) {
+-		ESP_LOGE(TAG, "Transport TX not ready or STA channel is not available, drop pkt");
 +	if (!esp_hosted_hw1_tx_open() || !chan_arr[ESP_STA_IF]) {
- 		ESP_LOGE(TAG, "Transport TX not ready or STA channel is not available, drop pkt");
++		if (!esp_hosted_hw1_tx_drop_if_fenced())
++			ESP_LOGE(TAG, "Transport TX not ready or STA channel is not available, drop pkt");
  #if defined(ESP_ERR_ESP_NETIF_TX_FAILED)
  		return ESP_ERR_ESP_NETIF_TX_FAILED;
-@@ -391,7 +433,7 @@
+ #else
+@@ -391,8 +458,9 @@
  		return ESP_OK;
  
  	/* Transport state check */
 -	if (!is_transport_tx_ready() || !chan_arr[ESP_AP_IF]) {
+-		ESP_LOGE(TAG, "Transport TX not ready or AP channel is not available, drop pkt");
 +	if (!esp_hosted_hw1_tx_open() || !chan_arr[ESP_AP_IF]) {
- 		ESP_LOGE(TAG, "Transport TX not ready or AP channel is not available, drop pkt");
++		if (!esp_hosted_hw1_tx_drop_if_fenced())
++			ESP_LOGE(TAG, "Transport TX not ready or AP channel is not available, drop pkt");
  
  #if defined(ESP_ERR_ESP_NETIF_TX_FAILED)
-@@ -422,7 +464,7 @@
+ 		return ESP_ERR_ESP_NETIF_TX_FAILED;
+@@ -422,9 +490,10 @@
  {
  	/* TODO */
  	/* Transport state check */
 -	if (!is_transport_tx_ready() || !chan_arr[ESP_SERIAL_IF]) {
 +	if (!esp_hosted_hw1_tx_open() || !chan_arr[ESP_SERIAL_IF]) {
  
- 		ESP_LOGE(TAG, "Transport TX not ready or serial channel is not available, drop pkt");
+-		ESP_LOGE(TAG, "Transport TX not ready or serial channel is not available, drop pkt");
++		if (!esp_hosted_hw1_tx_drop_if_fenced())
++			ESP_LOGE(TAG, "Transport TX not ready or serial channel is not available, drop pkt");
  
+ #if defined(ESP_ERR_ESP_NETIF_TX_FAILED)
+ 		return ESP_ERR_ESP_NETIF_TX_FAILED;
 --- a/host/drivers/transport/transport_drv.h
 +++ b/host/drivers/transport/transport_drv.h
-@@ -147,6 +147,9 @@
+@@ -147,6 +147,13 @@
  
  uint8_t is_transport_rx_ready(void);
  uint8_t is_transport_tx_ready(void);
 +/* HardwareOne restart TX fence (transport_drv.c) */
 +void esp_hosted_hw1_fence_tx(void);
 +uint8_t esp_hosted_hw1_tx_open(void);
++uint8_t esp_hosted_hw1_tx_fenced(void);
++/* 1 (and counted) once the fence is set: the caller drops without a log */
++uint8_t esp_hosted_hw1_tx_drop_if_fenced(void);
++uint32_t esp_hosted_hw1_tx_fence_drops(void);
  
  #define H_BUFF_NO_ZEROCOPY 0
  #define H_BUFF_ZEROCOPY 1
+--- a/host/drivers/bt/vhci_drv.c
++++ b/host/drivers/bt/vhci_drv.c
+@@ -281,6 +281,11 @@
+ {
+ 	int res;
+ 	uint8_t * ptr = NULL;
++
++	/* HardwareOne: after the restart fence (transport_drv.c) drop the packet
++	 * on Bluedroid's small hciT stack without an allocation or a log. */
++	if (esp_hosted_hw1_tx_drop_if_fenced())
++		return;
+ 
+ 	ptr = g_h.funcs->_h_malloc_align(len, HOSTED_MEM_ALIGNMENT_64);
+ 	if (!ptr) {
+@@ -291,7 +296,8 @@
+ 
+ 	res = esp_hosted_tx(ESP_HCI_IF, 0, ptr, len, H_BUFF_NO_ZEROCOPY, ptr, H_DEFLT_FREE_FUNC, 0);
+ 
+-	if (res) {
++	/* esp_hosted_tx drops silently once the fence is set; it is one-way */
++	if (res && !esp_hosted_hw1_tx_fenced()) {
+ 		ESP_LOGE(TAG, "%s: Tx failed", __func__);
+ 	}
+ }

@@ -1524,6 +1524,19 @@ if(HW1_ESP_HOSTED_TEST_IDF)
 else()
   message(STATUS "Hosted DMA regression needs HW1_ESP_HOSTED_TEST_IDF pointing to ESP-IDF 5.5.5 sources")
 endif()
+# A refusal at the restart TX fence is silent on the producer's task (bench
+# 2026-11-08: hciT stack overflow in the "tx fail" log). Needs the pristine
+# Hosted 2.12.13 package (component-manager cache or managed_components); 77
+# (skipped) without it.
+set(ESP_HOSTED_FENCE_TEST_ARGS --cc ${CMAKE_C_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESP_HOSTED_FENCE_TEST_ARGS --sanitize)
+endif()
+add_test(NAME esp_hosted_tx_fence
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_esp_hosted_tx_fence.py
+          ${ESP_HOSTED_FENCE_TEST_ARGS})
+set_tests_properties(esp_hosted_tx_fence PROPERTIES SKIP_RETURN_CODE 77)
 foreach(terminal_suite g2_terminal_protocol g2_native_terminal)
   add_test(NAME ${terminal_suite}
     COMMAND ${Python3_EXECUTABLE}

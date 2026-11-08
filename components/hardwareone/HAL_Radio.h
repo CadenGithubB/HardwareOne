@@ -160,6 +160,9 @@ void radioHalPrepareForDeepSleep();
 // radioHalStopTransport refuse. The caller restarts. See
 // System_RestartQuiesceCore.h.
 void radioHalSilenceForRestart();
+// Packets the producers dropped at that fence (silently, no log on their
+// task); reported with "SDMMC quiesced".
+uint32_t radioHalRestartTxDrops();
 // Mirror the companion's UART console into the P4 log (tag "C6>"). Started by
 // radioHalPrepare(); the only view of the C6's own boot log and crashes while
 // HardwareOne is running.

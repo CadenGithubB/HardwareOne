@@ -57,8 +57,11 @@ everything user-visible since the v0.99.99 tag (55 commits).
   what was already queued, so packets the radio users keep producing during the drain are refused
   instead of timing out against the held C6 (bench 2026-11-08: `sdmmc_send_cmd returned 0x107` and
   `Unrecoverable host sdio state` in 7 of 15 reboots). Hosted's transport state stays up, so a Wi-Fi
-  or BLE init in that window does not reset the C6 or rerun SDIO card init. A restart takes 100 ms
-  longer and may log Hosted's `tx fail`/`drop pkt` lines in the drain. The Hosted override must be
+  or BLE init in that window does not reset the C6 or rerun SDIO card init. A packet refused at the
+  fence is dropped without a log and counted in the `SDMMC quiesced` line (`N TX dropped at the
+  fence`): the log ran on the sending task, and with G2 or R1 connected Bluedroid's `hciT` task
+  overflowed its 2.5 KB stack printing Hosted's `tx fail` line (bench 2026-11-08, stack protection
+  fault in 3 of 15 reboots). A restart takes 100 ms longer. The Hosted override must be
   re-staged (`tools/p4/prepare_sdk.sh` after removing `.sdk-overrides/esp32p4/espressif__esp_hosted`).
   Separately, a companion retry
   now waits for the C6 instead of failing in the same millisecond once ESP-Hosted's retry counter is

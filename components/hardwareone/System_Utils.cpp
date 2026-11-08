@@ -2307,9 +2307,14 @@ static void quiesceSdmmcForRestart() {
       [] { return static_cast<uint32_t>(millis()); },
       [](uint32_t ms) { delay(ms); },
       policy);
-  ESP_LOGI("REBOOT", "SDMMC quiesced: %sstorage %s, %lu ms drain",
-           HW1_RADIO_COMPANION ? "C6 held, " : "", result.storageLocked ? "locked" : "lock timed out",
-           static_cast<unsigned long>(result.drainedMs));
+#if HW1_RADIO_COMPANION
+  ESP_LOGI("REBOOT", "SDMMC quiesced: C6 held, %lu TX dropped at the fence, storage %s, %lu ms drain",
+           static_cast<unsigned long>(radioHalRestartTxDrops()),
+           result.storageLocked ? "locked" : "lock timed out", static_cast<unsigned long>(result.drainedMs));
+#else
+  ESP_LOGI("REBOOT", "SDMMC quiesced: storage %s, %lu ms drain",
+           result.storageLocked ? "locked" : "lock timed out", static_cast<unsigned long>(result.drainedMs));
+#endif
 #endif
 }
 

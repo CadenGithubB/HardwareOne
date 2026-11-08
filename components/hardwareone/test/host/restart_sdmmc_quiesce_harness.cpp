@@ -148,6 +148,10 @@ static void radioCompanionBeforeRestart() {
   note("companion-silence");
   if (gCompanionSilence) gCompanionSilence();
 }
+// Packets the fake producers dropped at the fence (hostedTx); the quiesce line
+// reports the count (Hosted patch: esp_hosted_hw1_tx_fence_drops).
+static uint32_t gFenceDrops = 0;
+static uint32_t radioHalRestartTxDrops() { return gFenceDrops; }
 namespace utils {
 /*@UTILS@*/
 }  // namespace utils
@@ -247,6 +251,7 @@ extern "C" void set_transport_state(uint8_t state) {
 static void queueTx(const std::string& what) { gTxQueue.push_back(what); }
 static void hostedTx(const std::string& what) {  // a producer (lwIP, HCI, RPC)
   if (!is_transport_tx_ready() || gTxFenced) {
+    if (gTxFenced) ++gFenceDrops;
     note("tx refused " + what);
     return;
   }
@@ -612,6 +617,7 @@ static void reset_world() {
   gBeforeHoldDis = nullptr;
   gHostedTransportState = 0;  // Hosted not initialised
   gTxFenced = false;
+  gFenceDrops = 0;
   gTxQueue.clear();
   gDuringTaskDelay = nullptr;
   gBeforeTxGate = nullptr;

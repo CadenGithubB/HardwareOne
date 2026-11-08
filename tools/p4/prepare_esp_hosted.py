@@ -3,7 +3,8 @@
 
 Wi-Fi's common TX pool must align every block, not only the allocation base.
 The tracked patch derives its stride from ESP-IDF 5.5.5's allocator hook. It
-also adds a one-way TX fence for an intentional restart (esp_hosted_hw1_fence_tx).
+also adds a one-way TX fence for an intentional restart (esp_hosted_hw1_fence_tx)
+whose refusals are counted, not logged on the producer's task.
 Source, patch and prepared tree hashes are checked; an existing destination
 is verified, never overwritten. See esp-hosted-2.12.13-hw1.md.
 """
@@ -25,8 +26,8 @@ VERSION = "2.12.13"
 COMPONENT_HASH = "f1792f36ef9a637adf2faa2662f3c4500b07f3d2ba65c25f3ed4824490ba59f9"
 SOURCE_TREE_SHA256 = "708e07b09d8c49cfb4c52068ba20b461f8885f2eaa8e47753fd82f82c8e64824"
 PATCH = ROOT / "esp-hosted-2.12.13-hw1.patch"
-PATCH_SHA256 = "b36cc1fc604e12dd3b473b3b9cebce726c304668357b61739976d4c44fafaa35"
-PATCHED_TREE_SHA256 = "dc83150ee5f979a94e3e5ed5bdcde761fe600eca0182e3b0ba022747eb4aabb3"
+PATCH_SHA256 = "95eac0c28d42c7c52626e7ebcef4758bf3f76eaef784f3352b316c77e2d7792c"
+PATCHED_TREE_SHA256 = "445a64d14252a654fb0271f5104821d8705c104db3380fe3c050df972637c955"
 MANIFEST = "hw1-esp-hosted-override.json"
 # Present only in component-manager copies; not part of the package itself.
 IGNORED = {".component_hash", MANIFEST}

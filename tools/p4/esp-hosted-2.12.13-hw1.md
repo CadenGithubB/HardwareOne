@@ -74,9 +74,27 @@ fence) replaces `is_transport_tx_ready()` in the STA, AP and serial wrappers
 and in the SDIO `esp_hosted_tx`. Every producer reaches the queue through
 those: lwIP through the STA/AP wrappers, serial RPC, BLE VHCI and the
 private-interface path through `esp_hosted_tx`. A refused packet is freed and
-reported the way a packet on a down transport already is. Only a CPU reset
+returns the error a packet on a down transport already gets. Only a CPU reset
 clears the flag. The other transports' `esp_hosted_tx` (SPI, SPI-HD, UART)
 are not changed; the P4 uses SDIO.
+
+A refusal at the fence is not logged. Hosted's refusal logs (`tx fail ...
+transport_up(0)` in `esp_hosted_tx`, `Tx failed` in the Bluedroid VHCI send,
+`drop pkt` in the wrappers) run on the producer's own task. With G2 or R1
+connected, Bluedroid's `hciT` task (a fixed 2.5 KB stack, about 1.95 KB usable
+after the P4's coprocessor and TLS reservations) kept sending HCI packets after
+the fence, and vfprintf for the `tx fail` line overflowed it: a stack
+protection fault in 3 of 15 reboots (bench 2026-11-08, image f9d931bb).
+`esp_hosted_hw1_tx_drop_if_fenced()` returns 1 once the fence is set and
+counts the drop; each of those log sites now logs only when it returns 0, so a
+refusal for any other reason (transport down, bad length, missing channel)
+still logs as upstream. `hosted_hci_bluedroid_send` checks it before its
+allocation and drops the packet on hciT without a heap call or a log, and its
+`Tx failed` line is skipped when the fence closed during the call
+(`esp_hosted_hw1_tx_fenced()`, one-way). HardwareOne prints the count,
+`esp_hosted_hw1_tx_fence_drops()`, in its `SDMMC quiesced` line. The NimBLE
+VHCI paths log nothing on a refused send and are unchanged (the P4 build uses
+Bluedroid).
 
 `transport_state` is deliberately not changed. Lowering it with Hosted's own
 `set_transport_state(TRANSPORT_RX_ACTIVE)` would also refuse TX, but
@@ -109,6 +127,15 @@ I/O. The original 128-byte SPIRAM case rejects 12 of 25 blocks; the patched
 case accepts all 25. It covers 64/128/256-byte cache requirements, internal
 fallback, SPIRAM preference on/off, uncached memory and an increased encryption
 alignment. ASan/UBSan failures abort the test.
+
+`tools/p4/test_esp_hosted_tx_fence.py` applies the patch to the pristine
+package and compiles the fence, the STA/AP/serial wrappers, the SDIO
+`esp_hosted_tx` and `hosted_hci_bluedroid_send` unchanged against fakes of the
+OS abstraction, queue and log: with TX open every producer queues, a down
+transport keeps Hosted's logs, and after the fence (also one that closes
+inside a VHCI send) nothing logs, the VHCI send allocates nothing and every
+buffer is freed. `--patch` runs it on another patch (f9d931bb's fails). It
+exits 77 without a pristine package.
 
 For device qualification, build the affected saved profile and its baseline,
 check their resolved component paths reference the override, then capture a

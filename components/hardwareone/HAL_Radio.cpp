@@ -35,9 +35,12 @@
 // esp_hosted_tx or the STA/AP/serial wrappers in front of it (lwIP, RPC, BLE
 // HCI), and each refuses a new packet once it is set. radioHalSilenceForRestart
 // sets it before it holds the C6. Hosted's transport_state is left alone on
-// purpose (see there).
+// purpose (see there). A refusal at the fence is silent and only counted
+// (esp_hosted_hw1_tx_fence_drops): the log ran on the producer's task, and
+// Bluedroid's hciT overflowed its stack printing it (bench 2026-11-08).
 extern "C" uint8_t is_transport_tx_ready(void);
 extern "C" void esp_hosted_hw1_fence_tx(void);
+extern "C" uint32_t esp_hosted_hw1_tx_fence_drops(void);
 
 namespace {
 
@@ -733,7 +736,9 @@ void radioHalSilenceForRestart() {
   // answer: "sdmmc_send_cmd returned 0x107", "Failed to send data",
   // "Unrecoverable host sdio state" during the drain (bench 2026-11-08, 7 of
   // 15 reboots). With the fence set every new packet is refused and freed by
-  // its producer; the short wait lets the write task send what was already
+  // its producer, without a log on that task (Bluedroid's hciT overflowed its
+  // stack printing one; radioHalRestartTxDrops counts them instead); the
+  // short wait lets the write task send what was already
   // queued to a C6 that still acknowledges it. Receive is left alone. The
   // fence is one-way (a slave INIT from a Start op cannot reopen it), and it
   // leaves Hosted's transport_state at TX_ACTIVE: lowering that state would
@@ -759,6 +764,8 @@ void radioHalSilenceForRestart() {
   // deep sleep.
   latchC6EnableLow();
 }
+
+uint32_t radioHalRestartTxDrops() { return esp_hosted_hw1_tx_fence_drops(); }
 
 esp_err_t radioHalUpdateBegin() {
   if (!updateTransportUp()) return ESP_ERR_INVALID_STATE;
