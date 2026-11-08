@@ -426,9 +426,10 @@ def deployment_is_ota(selector):
 # ---------------------------------------------------------------------------
 # Versions: the build-time half of the device's `versions` command
 # (components/hardwareone/System_Versions.cpp). Same keys; values read from
-# the same source constants. Values only the running device knows (the updater
-# in its factory slot, the radio's ESP-NOW stack, the C6's reported Hosted and
-# bridge versions) are left to `versions` on the device.
+# the same source constants, except `updater_built` (the updater this tree
+# builds; the device's `updater` is the one in its factory slot). Values only
+# the running device knows (that updater, the radio's ESP-NOW stack, the C6's
+# reported Hosted and bridge versions) are left to `versions` on the device.
 # ---------------------------------------------------------------------------
 
 def _source(rel):
@@ -476,7 +477,9 @@ def source_versions(enabled, firmware="", argv=None, companion=False):
         add("ota_layout", "OTA layout", define_from_argv(argv, "HW1_OTA_LAYOUT_ID") or "?")
         semver = _match(r'^set\(HW1_UPDATER_SEMVER "([^"]+)"\)', "updater/CMakeLists.txt")
         suffix = define_from_argv(argv, "HW1_OTA_VERSION_SUFFIX") or ""
-        add("updater", "Recovery updater (this tree)", semver + suffix)
+        # Not the device's `updater` (the image in its factory slot): the
+        # updater this tree builds, under its own key so the two never merge.
+        add("updater_built", "Recovery updater built by this tree", semver + suffix)
         add("ota_manifest_format", "OTA manifest format", _int_expr(_define(
             "HW1_OTA_MANIFEST_FORMAT_VERSION", "components/hw1_ota_protocol/include/hw1_ota_protocol.h")))
         add("ota_data_schema", "OTA data schema",
@@ -628,6 +631,7 @@ def main():
     A("What this image must agree with, from the source constants (`versions` on the")
     A("device shows the same keys, plus what only the device can read: the updater in")
     A("its factory slot, the radio's ESP-NOW stack, the C6's reported versions).")
+    A("`updater_built` is the updater this tree builds, not the one a device carries.")
     A("")
     if macros:
         flags = macros["bool"]

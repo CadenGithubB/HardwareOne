@@ -1945,9 +1945,9 @@ const char* cmd_status(const String& argsInput) {
   //      (which would land in DRAM) — keeps the small-buffer / DRAM discipline.
   if (argWantsJson(argsInput)) {
     // A P4 build (C6 companion, LLM, the Bluetooth link words) reaches about
-    // 2 KB before the versions object (about 0.8 KB there); a document that
-    // does not fit is refused, never cut into bad JSON. The command reply
-    // limit is the cap.
+    // 2 KB before the versions object (about 0.5 KB there, held within 1 KB by
+    // test_versions.py); a document that does not fit is refused, never cut
+    // into bad JSON. The command reply limit is the cap.
     static constexpr size_t kStatusJsonCap = CMD_RESULT_MAX;
     PSRAM_JSON_DOC(doc);
     buildSystemInfoJson(doc, /*includeDeviceList=*/false);

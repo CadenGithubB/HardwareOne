@@ -219,8 +219,9 @@ static std::atomic<bool> gEspNowDeinitInProgress{false};
 static uint32_t gEspNowRuntimeOpsInFlight = 0;
 static bool gEspNowRadioDeinitialized = false;  // cmd_exec lifecycle only
 // Espressif's ESP-NOW version (esp_now_get_version) read at the last successful
-// native init, for `versions`; 0 until then. A P4 does not ask: its companion
-// reports the same number in the bridge info, so init gains no extra RPC.
+// init, for `versions`; 0 until then. On a P4 the call is one bridge RPC to the
+// companion; its identity cache (radioHalIdentity) is read before ESP-NOW starts
+// and so cannot carry this number.
 static std::atomic<uint32_t> gEspNowStackVersion{0};
 
 class EspNowRuntimeOpGuard {
@@ -11662,13 +11663,11 @@ static bool initEspNow() {
     logSystemEvent("ESPNOW", "init FAILED — mesh unavailable: %s (heap=%uB)", reason, (unsigned)heapNow);
     return false;
   }
-#if !(defined(CONFIG_ESP_WIFI_REMOTE_ENABLED) && CONFIG_ESP_WIFI_REMOTE_ENABLED)
   {
     uint32_t stackVersion = 0;
     gEspNowStackVersion.store(esp_now_get_version(&stackVersion) == ESP_OK ? stackVersion : 0,
                               std::memory_order_relaxed);
   }
-#endif
   gEspNowRadioDeinitialized = false;
   radioGuard.release();
 

@@ -35,6 +35,8 @@
 // number for the format. Display only: peers still check ESPNOW_V4_VERSION,
 // the byte on the wire, which this does not change.
 #define HW1_ESPNOW_RELEASE     "1.0"
+static_assert(ESPNOW_V4_VERSION == 4,
+              "wire format changed: bump HW1_ESPNOW_RELEASE and docs/COMPATIBILITY.md");
 
 // Phase 3.5 — when a frame is wrapped in SESSION_FRAME, 16 of the 218 payload
 // bytes are consumed by the Poly1305 AEAD tag (cipher || tag layout on wire).

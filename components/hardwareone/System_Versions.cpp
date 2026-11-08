@@ -71,12 +71,9 @@ void versionsCollect(hw1versions::List& out) {
           HW1_ESPNOW_RELEASE);
   out.add("espnow_wire", nullptr, "%u", (unsigned)ESPNOW_V4_VERSION);
   {
-#if HW1_RADIO_COMPANION
-    const RadioCompanionIdentity& id = radioHalIdentity();
-    const uint32_t stack = id.infoKnown ? id.nativeEspNowVersion : 0;
-#else
+    // Read at ESP-NOW init on every board (through the bridge on a P4): the
+    // companion identity cache predates ESP-NOW and does not carry it.
     const uint32_t stack = espnowStackVersion();
-#endif
     if (stack) out.add("espnow_stack", "ESP-NOW radio stack", "v%u", (unsigned)stack);
     else out.add("espnow_stack", "ESP-NOW radio stack", "unknown");
   }

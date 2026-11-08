@@ -32,8 +32,8 @@ everything user-visible since the v0.99.99 tag (55 commits).
 - `versions` (and `versions json`) lists the firmware version and every version a separately built
   part must match: recovery updater and OTA layout, the ESP-NOW format (shown as `ESPNOW V1 (1.0)`)
   and the radio's ESP-NOW stack, BLE console channel, phone link and pipe, CM5 control protocol, the
-  C6 companion's reported and expected versions, the local STT model, retained-file versions and
-  the ESP-IDF and Arduino core. `status json` carries the same keys as `versions`, and `BUILD_INFO.md`
+  C6 companion's reported and expected versions, the local STT model, the ESP-NOW identity and peer
+  file versions and the ESP-IDF and Arduino core. `status json` carries the same keys as `versions`, and `BUILD_INFO.md`
   gains a Versions table with the build-time half.
 - Crash record captures the faulting task, stack-guard bounds and a RISC-V stack scan.
 - Build and release tooling: `tools/vendor_arduino.sh` (a fresh clone vendors and patches arduino-esp32

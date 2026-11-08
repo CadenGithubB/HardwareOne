@@ -19,13 +19,17 @@ keeps. Readiness item P0-7; keep this file in step with CHANGELOG `[Unreleased]`
 `versions` on the device lists these, as this image carries them, in one place: the firmware, the
 recovery updater and OTA layout, the ESP-NOW format and stack, the BLE console channel, the phone
 link and pipe, the CM5 control protocol, the C6 companion's reported and expected versions, the
-local STT model, the retained-file versions and the ESP-IDF and Arduino core it was built with
-(`versions json` for tools; `BUILD_INFO.md` in a build directory has the build-time half).
+local STT model, the ESP-NOW identity and peer file versions and the ESP-IDF and Arduino core it
+was built with (`versions json` for tools; `BUILD_INFO.md` in a build directory has the build-time
+half).
 
 ## Persisted data and what an upgrade keeps
 
 - `settings.json` carries no format version; it records the `firmwareVersion` that last wrote it.
   Unknown keys are kept; a missing key takes its default.
+- `automations.json` carries `"version": 2` and the web migration backup bundle (`HWBACKUP`)
+  carries `"formatVersion": 1`. Both are written as literals (not named constants) that nothing in
+  the firmware checks on read, so `versions` does not report them.
 - **Within 1.x**: settings, user accounts, saved Wi-Fi networks and automations are kept across an
   app update (OTA or cable app-only write). A renamed setting or event name gets an alias, or the
   change is listed under "Changed" in CHANGELOG with the migration step.

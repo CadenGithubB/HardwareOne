@@ -6,10 +6,16 @@
 // compiled out is proven absent, not just empty.
 //
 //   versions_harness text|json   the collected report, as the command prints it
+//   versions_harness addjson     `status json`'s "versions" object (versionsAddJson)
 //   versions_harness selftest    formatter edge cases
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <new>
+#include <string>
+
+#include <ArduinoJson.h>
 
 #include "System_VersionsCore.h"
 
@@ -65,8 +71,17 @@ const RadioCompanionIdentity& radioHalIdentity() {
   return id;
 }
 
+// The list's allocator: plain heap, so the sanitizer sees versionsAddJson free
+// the list after copying its strings into the document.
+enum class AllocPolicy { PreferPSRAM };
+void* ps_alloc(size_t size, AllocPolicy, const char*) { return std::malloc(size); }
+void ps_free(void* memory) { std::free(memory); }
+
 // ---- Production collector ------------------------------------------------------
 // INSERT_COLLECT
+
+// ---- Production `status json` versions object ----------------------------------
+// INSERT_ADDJSON
 
 static int failures = 0;
 #define CHECK(cond, what) do { if (!(cond)) { std::fprintf(stderr, "FAIL: %s\n", what); ++failures; } } while (0)
@@ -111,6 +126,15 @@ static int selftest() {
 int main(int argc, char** argv) {
   if (argc != 2) return 2;
   if (std::strcmp(argv[1], "selftest") == 0) return selftest();
+  if (std::strcmp(argv[1], "addjson") == 0) {
+    JsonDocument doc;
+    versionsAddJson(doc["versions"].to<JsonObject>());
+    if (doc.overflowed()) { std::fputs("document overflowed\n", stderr); return 1; }
+    std::string out;
+    serializeJson(doc, out);
+    std::puts(out.c_str());
+    return 0;
+  }
   static hw1versions::List list;
   versionsCollect(list);
   if (list.overflowed) { std::fputs("list overflowed\n", stderr); return 1; }

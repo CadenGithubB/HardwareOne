@@ -25,6 +25,11 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 REPO = COMPONENT.parents[1]
+JSON_INCLUDE = COMPONENT.parent / "hardwareone_libs" / "ArduinoJson" / "src"
+# `status json` is about 2 KB on a P4 before its "versions" object; the
+# document is refused whole at CMD_RESULT_MAX (4096). Keep the object within
+# this so the largest build keeps headroom.
+VERSIONS_OBJECT_BUDGET = 1024
 
 GATES = ("HW1_OTA_LAYOUT", "ENABLE_ESPNOW", "ENABLE_BLUETOOTH", "ENABLE_BLE_PHONE_PIPE",
          "ENABLE_RASPBERRY_PI_HOST_POWER", "ENABLE_RASPBERRY_PI_HOST_FAN",
@@ -51,12 +56,19 @@ PROFILES = {
                 {"espnow": "ESPNOW V1 (1.0)", "espnow_stack": "v2"}),
     "espnow_not_started": ({"ENABLE_ESPNOW": 1}, ["firmware"] + ESPNOW + TAIL,
                            {"espnow_stack": "unknown"}),
-    "p4": ({"ENABLE_ESPNOW": 1, "ENABLE_BLUETOOTH": 1, "ENABLE_BLE_PHONE_PIPE": 1,
+    "p4": ({"ENABLE_ESPNOW": 1, "FIXTURE_ESPNOW_STACK": 2, "ENABLE_BLUETOOTH": 1,
+            "ENABLE_BLE_PHONE_PIPE": 1,
             "HW1_RADIO_COMPANION": 1, "FIXTURE_COMPANION_KNOWN": 1, "ENABLE_LOCAL_STT": 1,
             "ENABLE_STT_MODEL_15X5_GEN2": 1, "ENABLE_RASPBERRY_PI_HOST_POWER": 1},
            ["firmware"] + ESPNOW + ["ble_console_channel"] + PHONE + ["cm5_control"] + C6 +
            ["stt_model"] + TAIL,
            {"espnow_stack": "v2", "c6_hosted": "v2.12.13", "c6_bridge_wire": "1"}),
+    # The companion answered at transport start, ESP-NOW has not started: the
+    # stack is read at ESP-NOW init, never from the companion's identity cache.
+    "p4_espnow_not_started": ({"ENABLE_ESPNOW": 1, "HW1_RADIO_COMPANION": 1,
+                               "FIXTURE_COMPANION_KNOWN": 1},
+                              ["firmware"] + ESPNOW + C6 + TAIL,
+                              {"espnow_stack": "unknown", "c6_hosted": "v2.12.13"}),
     "p4_companion_down": ({"ENABLE_ESPNOW": 1, "HW1_RADIO_COMPANION": 1, "ENABLE_LOCAL_STT": 1},
                           ["firmware"] + ESPNOW + C6 + ["stt_model"] + TAIL,
                           {"espnow_stack": "unknown", "c6_hosted": "unknown",
@@ -118,10 +130,48 @@ def collector():
     return body
 
 
+def add_json():
+    """versionsAddJson and the list allocation it uses, as shipped."""
+    sys.path.insert(0, str(HERE))
+    from test_web_batch_handlers import extract_block
+    source = (COMPONENT / "System_Versions.cpp").read_text()
+    return "\n\n".join(extract_block(source, marker) for marker in (
+        "hw1versions::List* newList()", "void freeList(hw1versions::List* list)",
+        "void versionsAddJson(JsonObject out)"))
+
+
+def check_status_json(component, failures):
+    """`status json` adds the object after the system info and caps the whole
+    document at the command reply limit (the size guard itself is checked by
+    test_phone_status.py)."""
+    sys.path.insert(0, str(HERE))
+    from test_web_batch_handlers import extract_block
+    body = extract_block((component / "System_Utils.cpp").read_text(), "const char* cmd_status(")
+    path = body[body.index("if (argWantsJson(argsInput))"):]
+    if "static constexpr size_t kStatusJsonCap = CMD_RESULT_MAX;" not in path:
+        failures.append("status json: kStatusJsonCap is not CMD_RESULT_MAX")
+    add = path.find('versionsAddJson(doc["versions"].to<JsonObject>());')
+    if not (path.index("buildSystemInfoJson(doc") < add < path.index("measureJson(doc) >= kStatusJsonCap")):
+        failures.append("status json: the versions object is not added before the size guard")
+
+
+def check_add_json(name, exe, doc, failures):
+    """The "versions" object: the same keys and values as `versions json`, in order."""
+    text = run(exe, "addjson")
+    obj = json.loads(text).get("versions")
+    want = {k: v for k, v in doc.items() if k != "schema"}
+    if not isinstance(obj, dict) or list(obj.items()) != list(want.items()):
+        failures.append(f"{name}: status json versions {obj!r} != versions json {want!r}")
+    size = len(json.dumps({"versions": obj}, separators=(",", ":"))) if isinstance(obj, dict) else 0
+    if size > VERSIONS_OBJECT_BUDGET:
+        failures.append(f"{name}: status json versions object is {size} bytes, budget {VERSIONS_OBJECT_BUDGET}")
+    return size
+
+
 def build(cxx, sanitize, work, name, definitions, harness):
     exe = work / f"versions_{name}"
     cmd = [cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-           "-I", str(COMPONENT), "-I", str(COMPONENT.parent / "esp_now_hosted" / "include"),
+           "-I", str(COMPONENT), "-I", str(JSON_INCLUDE), "-I", str(COMPONENT.parent / "esp_now_hosted" / "include"),
            "-I", str(COMPONENT.parent / "hw1_ota_protocol" / "include")]
     for macro in GATES + FIXTURES:
         cmd.append(f"-D{macro}={int(definitions.get(macro, 0))}")
@@ -177,9 +227,16 @@ def check_build_info(doc, failures):
     argv = ['-DHW1_OTA_LAYOUT_ID="fixture-layout"', '-DIDF_VER=\\"v5.5.5-fixture\\"']
     rows = gen_build_info.source_versions(
         lambda flag: True, "1.0.0-fixture", argv, companion=True)
-    runtime = {"firmware", "updater", "arduino"}  # fixtures on the device side
+    runtime = {"firmware", "arduino"}  # fixtures on the device side
+    build_only = {"updater_built"}  # the tree's updater; the device reports its own as `updater`
+    keys = [key for key, _label, _value in rows]
+    if "updater_built" not in keys or "updater" in keys:
+        failures.append(f"BUILD_INFO: the tree's updater must be `updater_built`, never `updater`: {keys}")
     for key, _label, value in rows:
-        if key not in doc:
+        if key in build_only:
+            if key in doc:
+                failures.append(f"BUILD_INFO key {key!r} is also a device key")
+        elif key not in doc:
             failures.append(f"BUILD_INFO key {key!r} is not a device key")
         elif key not in runtime and doc[key] != value:
             failures.append(f"BUILD_INFO {key} = {value!r}, device {doc[key]!r}")
@@ -193,7 +250,8 @@ def main():
     if not args.cxx:
         parser.error("a host C++17 compiler is required")
     harness_text = (HERE / "versions_harness.cpp").read_text()
-    for tag, text in (("// INSERT_CONSTANTS", constants()), ("// INSERT_COLLECT", collector())):
+    for tag, text in (("// INSERT_CONSTANTS", constants()), ("// INSERT_COLLECT", collector()),
+                      ("// INSERT_ADDJSON", add_json())):
         if harness_text.count(tag) != 1:
             raise SystemExit(f"harness: {tag} must appear once")
         harness_text = harness_text.replace(tag, text)
@@ -206,16 +264,20 @@ def main():
         if subprocess.run([str(exe), "selftest"], timeout=60).returncode:
             failures.append("formatter selftest")
         docs = {}
+        sizes = {}
         for name, (definitions, keys, spot) in PROFILES.items():
             exe = build(args.cxx, args.sanitize, work, name, definitions, harness)
             docs[name] = check_profile(name, exe, keys, spot, failures)
+            sizes[name] = check_add_json(name, exe, docs[name], failures)
         merged = dict(docs["p4"])
         merged.update({k: v for k, v in docs["s3_mesh"].items() if k not in merged})
         check_build_info(merged, failures)
+        check_status_json(COMPONENT, failures)
     if failures:
         print("versions: FAILED\n  " + "\n  ".join(failures), file=sys.stderr)
         return 1
-    print(f"versions: OK ({len(PROFILES)} feature selections + formatter selftest)")
+    print(f"versions: OK ({len(PROFILES)} feature selections + formatter selftest; "
+          f"status json versions object at most {max(sizes.values())} bytes)")
     return 0
 
 
