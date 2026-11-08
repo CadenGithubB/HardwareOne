@@ -62,6 +62,10 @@ everything user-visible since the v0.99.99 tag (55 commits).
   display's pairing screen shows the request's state. Not yet tested on hardware (host model only).
 - Host suite: nine harnesses re-pinned after the Waveshare merge; the event-catalog structure test walks
   what git would commit; the continuous-STT suites run serially under ctest.
+- Recovery OTA: the first `ota0-flash` in a fresh build directory no longer fails with
+  `FileNotFoundError`; the pair audit now builds the partition table and blank otadata it reads.
+  `OTA_DEVICE_SETUP.md` states that `idf.py erase-flash` is not refused and wipes the recovery
+  updater, and gives the re-provisioning steps. Host suite `ota_pair_audit_depends`.
 
 ### Docs
 - Private network names, addresses and account paths replaced with placeholders throughout the tracked

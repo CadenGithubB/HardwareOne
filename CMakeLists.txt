@@ -1091,6 +1091,17 @@ if(_ota_layout)
             list(APPEND _ota_pair_deployment_args
                 --deployment "${_hw_deployment}")
         endif()
+        # The audit also reads partition_table/partition-table.bin and
+        # ota_data_initial.bin from the main build. gen_project_binary makes
+        # neither, so in a fresh build directory the first ota0-flash failed
+        # with FileNotFoundError until a full build had run (readiness G-65).
+        foreach(_ota_pair_input IN ITEMS partition_table_bin blank_ota_data)
+            if(NOT TARGET ${_ota_pair_input})
+                message(FATAL_ERROR
+                    "Recovery OTA pair audit needs the ESP-IDF target "
+                    "${_ota_pair_input}, which this configure did not define")
+            endif()
+        endforeach()
         add_custom_target(hw1-ota-pair-audit
             COMMAND "${_ota_python}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/ota/check_ota_builds.py"
@@ -1098,7 +1109,11 @@ if(_ota_layout)
                 ${_ota_pair_deployment_args}
                 --main-build "${_ota_build_dir}"
                 --updater-build "${_ota_updater_build}"
-            DEPENDS gen_project_binary "${_ota_updater_bin}"
+            DEPENDS
+                gen_project_binary
+                partition_table_bin
+                blank_ota_data
+                "${_ota_updater_bin}"
             USES_TERMINAL
             VERBATIM)
         set(_ota_pair_gate hw1-ota-pair-audit)

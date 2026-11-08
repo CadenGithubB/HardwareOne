@@ -1010,6 +1010,10 @@ add_test(NAME sdkconfig_policy
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_sdkconfig_policy.py)
 add_test(NAME bare_idf_guard
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_bare_idf_guard.py)
+# The recovery-OTA pair audit builds the partition table and blank otadata it
+# reads, so the first ota0-flash in a fresh build directory works (readiness G-65).
+add_test(NAME ota_pair_audit_depends
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_ota_pair_audit_depends.py)
 add_test(NAME command_header_boundary
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_command_header_boundary.py
     --cxx ${CMAKE_CXX_COMPILER})
