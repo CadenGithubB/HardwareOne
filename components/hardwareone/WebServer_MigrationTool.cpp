@@ -33,6 +33,7 @@
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include <esp_app_desc.h>
+#include <mbedtls/sha256.h>
 #include <vector>
 
 #include "System_Debug.h"
@@ -518,18 +519,86 @@ static size_t sStagedRestoreLen = 0;
 static bool sStagedRestoreCompatible = true;
 static volatile bool sRestoreAwaitingConfirm = false;
 
+// What the operator is shown before accepting a staged bundle. Hostname and
+// board are the bundle's own claims (anyone on the LAN can write them); the
+// size and SHA-256 prefix describe the bytes this device actually received,
+// and "this device" means the bundle's device fingerprint matched this board.
+struct StagedRestoreSummary {
+  char host[33];
+  char board[33];
+  char sha8[9];
+  size_t bytes;
+  bool sameDevice;
+};
+static StagedRestoreSummary sStagedSummary = {};
+
 bool migrationRestoreAwaitingConfirm() {
   return sRestoreAwaitingConfirm;
 }
 
 void discardStagedMigrationRestore() {
-  sRestoreAwaitingConfirm = false;
-  if (sStagedRestoreBuf) {
-    free(sStagedRestoreBuf);
-    sStagedRestoreBuf = nullptr;
-  }
+  // Free and clear everything before the flag. /api/restore refuses while the
+  // flag is set, so whoever sees it clear never finds a live staged buffer.
+  char* buf = sStagedRestoreBuf;
+  sStagedRestoreBuf = nullptr;
   sStagedRestoreLen = 0;
   sStagedRestoreCompatible = true;
+  sStagedSummary = StagedRestoreSummary{};
+  if (buf) free(buf);
+  sRestoreAwaitingConfirm = false;
+}
+
+// Printable ASCII only (the claims are shown on a serial terminal), truncated.
+static void copyBundleClaim(char* out, size_t cap, const char* in) {
+  size_t n = 0;
+  for (; in && *in && n + 1 < cap; ++in) {
+    const unsigned char c = (unsigned char)*in;
+    out[n++] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+  }
+  out[n] = '\0';
+  if (n == 0) snprintf(out, cap, "unknown");
+}
+
+// Takes ownership of buf. The flag is set last, so a reader that sees it set
+// also sees the buffer and its summary.
+static void stageMigrationRestore(char* buf, size_t len, bool compatible, JsonVariantConst device) {
+  discardStagedMigrationRestore();  // clear any stale state
+  StagedRestoreSummary summary = {};
+  copyBundleClaim(summary.host, sizeof(summary.host), device["hostname"].as<const char*>());
+  copyBundleClaim(summary.board, sizeof(summary.board), device["board"].as<const char*>());
+  unsigned char digest[32] = {};
+  if (mbedtls_sha256((const unsigned char*)buf, len, digest, 0) == 0) {
+    snprintf(summary.sha8, sizeof(summary.sha8), "%02x%02x%02x%02x",
+             digest[0], digest[1], digest[2], digest[3]);
+  } else {
+    snprintf(summary.sha8, sizeof(summary.sha8), "--------");
+  }
+  summary.bytes = len;
+  summary.sameDevice = compatible;
+  sStagedSummary = summary;
+  sStagedRestoreBuf = buf;
+  sStagedRestoreLen = len;
+  sStagedRestoreCompatible = compatible;
+  sRestoreAwaitingConfirm = true;
+}
+
+String migrationStagedSummary() {
+  if (!sRestoreAwaitingConfirm) return String("");
+  const StagedRestoreSummary& s = sStagedSummary;
+  char line[160];
+  snprintf(line, sizeof(line), "from %s [%s], %u bytes, sha256 %s..., %s", s.host, s.board,
+           (unsigned)s.bytes, s.sha8, s.sameDevice ? "this device" : "other device (credentials skipped)");
+  return String(line);
+}
+
+String migrationStagedOledPrompt() {
+  if (!sRestoreAwaitingConfirm) return String("");
+  const StagedRestoreSummary& s = sStagedSummary;
+  // getOLEDYesNoPrompt shows three 21-character lines above Yes/No.
+  char text[72];
+  snprintf(text, sizeof(text), "Apply %.14s?\n%uB sha %s\n%s, reboots", s.host, (unsigned)s.bytes, s.sha8,
+           s.sameDevice ? "this dev" : "other dev");
+  return String(text);
 }
 
 static String restoreStagingPath(const String& dest) {
@@ -871,11 +940,8 @@ static esp_err_t handleRestore(httpd_req_t* req) {
   }
 
   // Stage for on-device confirm (OLED / serial). Do not touch flash yet.
-  discardStagedMigrationRestore();  // clear any stale state
-  sStagedRestoreBuf = buf;
-  sStagedRestoreLen = (size_t)totalReceived;
-  sStagedRestoreCompatible = compatible;
-  sRestoreAwaitingConfirm = true;
+  JsonVariantConst bundleDevice = doc["device"];
+  stageMigrationRestore(buf, (size_t)totalReceived, compatible, bundleDevice);
 
   broadcastOutput("");
   broadcastOutput("========================================");
@@ -1151,7 +1217,6 @@ restore_register:
 }
 
 void stopRestoreOnlyHttpServer() {
-  discardStagedMigrationRestore();
   // `if (server)` is an is-anything-running test, not an ownership test — see
   // the note above startRestoreOnlyHttpServer(). Correct only while first-time
   // setup blocks boot, which guarantees the only server that can be running
@@ -1169,6 +1234,9 @@ void stopRestoreOnlyHttpServer() {
     }
     server = NULL;
   }
+  // After the stop returns no /api/restore handler is still running, so none
+  // can stage a buffer behind this discard.
+  discardStagedMigrationRestore();
 }
 
 #endif // ENABLE_MIGRATION_TOOL

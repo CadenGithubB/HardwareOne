@@ -60,6 +60,11 @@ everything user-visible since the v0.99.99 tag (55 commits).
   without a second prompt (also after the discovery window closed under an open prompt), and a device
   that already paired the requester answers Accept. The timeout names the repair command and the
   display's pairing screen shows the request's state. Not yet tested on hardware (host model only).
+- First-time setup "Import from Backup": the confirm prompt now shows the staged bundle's claimed
+  hostname and board, the bytes received, the first 8 hex of their SHA-256 and whether it came from
+  this device (serial line and OLED prompt), still defaulting to No. Discarding a staged bundle frees
+  it before clearing the pending flag, and stopping the restore server discards only after the server
+  has stopped. Host suite `migration_restore` covers both; not yet tested on hardware.
 - Host suite: nine harnesses re-pinned after the Waveshare merge; the event-catalog structure test walks
   what git would commit; the continuous-STT suites run serially under ctest.
 

@@ -2116,7 +2116,9 @@ add_test(
           ${SETUP_MQTT_TEST_ARGS})
 # IP ban list: checked saves that keep the previous file and the RAM ban, a
 # locked httpd lookup, whole-or-error JSON listing. Migration restore: all
-# files staged before any is replaced; backups stay within the restore limit.
+# files staged before any is replaced; backups stay within the restore limit;
+# the confirm prompt shows the staged bundle's provenance and discard frees the
+# buffer before clearing the pending flag.
 # Camera web: one frame per request, no stream loop on the httpd task.
 foreach(test_name IN ITEMS ip_ban_store migration_restore camera_web_frame_only)
   add_test(

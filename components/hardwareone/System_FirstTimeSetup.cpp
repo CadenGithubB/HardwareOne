@@ -796,11 +796,15 @@ void firstTimeSetupIfNeeded() {
       while (!gRestoreComplete && !goBack) {
         if (migrationRestoreAwaitingConfirm()) {
           broadcastOutput("");
-          broadcastOutput("Backup staged. Confirm to write files and reboot.");
+          // Provenance first, so a bundle raced in by someone else on the LAN
+          // is visible before the operator accepts it.
+          broadcastOutput("Backup staged " + migrationStagedSummary());
+          broadcastOutput("Check the source, size and SHA-256 match your backup file.");
+          broadcastOutput("Confirm to write files and reboot.");
 #if ENABLE_OLED_DISPLAY
           // Default No — LAN upload alone must not apply. Serial y/n also works
           // inside getOLEDYesNoPrompt (OLED path listens to serial too).
-          bool confirmed = getOLEDYesNoPrompt("Apply backup?\nWrites files\n& reboots", false);
+          bool confirmed = getOLEDYesNoPrompt(migrationStagedOledPrompt().c_str(), false);
 #else
           broadcastOutput("Type 'yes' to apply, or 'no' to discard: ");
           String line = waitForSerialInputBlocking();
