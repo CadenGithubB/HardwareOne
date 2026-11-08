@@ -21,7 +21,7 @@ inline SegmenterConfig continuousSegmenterConfig(size_t rate, size_t maxSamples,
   if (speechFloor == 0) speechFloor = 1;
   if (silenceFloor == 0) silenceFloor = 1;
   if (silenceFloor > speechFloor) silenceFloor = speechFloor;  // the segmenter rejects silence > speech
-  if (noisePercentile > 100) noisePercentile = 100;
+  if (noisePercentile > 50) noisePercentile = 50;     // the segmenter rejects a percentile above the median
   config.adaptive_speech_floor = speechFloor;
   config.adaptive_silence_floor = silenceFloor;
   // Pre-emphasis onset judge (device setting sttdecisionpre, 0 = off; 97 = the bench value).

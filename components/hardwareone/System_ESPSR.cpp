@@ -2101,6 +2101,8 @@ static bool initI2SMicrophone() {
   } else {
     audioSetSource(AUDIO_SRC_NONE);  // auto/unavailable preference: resolve afresh
   }
+  // Saved PDM gain / high-pass, applied when the channel starts.
+  audioSetPdmTuning(static_cast<uint8_t>(gSettings.pdmAmplify), static_cast<uint16_t>(gSettings.pdmHpfHz));
   return audioCaptureStart("sr", I2S_SR_SAMPLE_RATE);
 #else
   return false;   // no mic subsystem compiled in this build

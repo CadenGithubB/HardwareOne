@@ -141,6 +141,8 @@ bool sttAnySessionActive();
 // load or a low-PSRAM release). Only weights and the system LM are ever kept:
 // never audio, text or any session's state. Any task; never blocks.
 void sttKeepWarm(uint32_t holdMs, bool load);
+// Detector levels of the running (or last) continuous session: its mic's profile.
+void sttDetectorProfileInUse(int* speechFloor, int* silenceFloor, int* noisePercentile, int* decisionPre);
 // Main loop: ends a hold once it has passed (resident model or not) and frees
 // the resident model then, or at once when free PSRAM drops below a floor
 // that other features need. Self-throttled.

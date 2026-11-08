@@ -2742,8 +2742,17 @@ static const SettingEntry sttSettingEntries[] = {
   // percentile tracked as the room level. Bench knobs; defaults = shipped values.
   { "sttspeechfloor", SETTING_INT, &gSettings.sttSpeechFloor, 45, 0, nullptr, 1, 32767, "Speech onset floor (frame RMS)", nullptr, false, nullptr, "sttspeechfloor" },
   { "sttsilencefloor", SETTING_INT, &gSettings.sttSilenceFloor, 16, 0, nullptr, 1, 32767, "Silence floor (frame RMS)", nullptr, false, nullptr, "sttsilencefloor" },
-  { "sttnoisepercentile", SETTING_INT, &gSettings.sttNoisePercentile, 25, 0, nullptr, 0, 100, "Room-level percentile", nullptr, false, nullptr, "sttnoisepercentile" },
-  { "sttdecisionpre", SETTING_INT, &gSettings.sttDecisionPre, 0, 0, nullptr, 0, 99, "Pre-emphasis onset judge (x0.01, 0 = off)", nullptr, false, nullptr, "sttdecisionpre" },
+  { "sttnoisepercentile", SETTING_INT, &gSettings.sttNoisePercentile, 25, 0, nullptr, 0, 50, "Room-level percentile", nullptr, false, nullptr, "sttnoisepercentile" },
+  { "sttdecisionpre", SETTING_INT, &gSettings.sttDecisionPre, 97, 0, nullptr, 0, 99, "Pre-emphasis onset judge (x0.01, 0 = loudness only)", nullptr, false, nullptr, "sttdecisionpre" },
+  // Automatic onboard-mic tuning for STT sessions (System_STT sttApplyMicTuning):
+  // gain from the last sessions' levels, changed only when several agree, and a
+  // 120 Hz high-pass. 0 = STT uses the saved pdmamplify / pdmhpf.
+  { "sttautogain", SETTING_BOOL, &gSettings.sttAutoGain, 1, 0, nullptr, 0, 1, "Automatic mic gain for STT", nullptr, false, nullptr, "sttautogain" },
+  // G2 glasses-mic profile: the same four detector levels, used when a session runs on the glasses.
+  { "sttg2speechfloor", SETTING_INT, &gSettings.sttG2SpeechFloor, 45, 0, nullptr, 1, 32767, "G2 mic: speech onset floor (frame RMS)", nullptr, false, nullptr, "sttg2speechfloor" },
+  { "sttg2silencefloor", SETTING_INT, &gSettings.sttG2SilenceFloor, 16, 0, nullptr, 1, 32767, "G2 mic: silence floor (frame RMS)", nullptr, false, nullptr, "sttg2silencefloor" },
+  { "sttg2noisepercentile", SETTING_INT, &gSettings.sttG2NoisePercentile, 25, 0, nullptr, 0, 50, "G2 mic: room-level percentile", nullptr, false, nullptr, "sttg2noisepercentile" },
+  { "sttg2decisionpre", SETTING_INT, &gSettings.sttG2DecisionPre, 97, 0, nullptr, 0, 99, "G2 mic: pre-emphasis onset judge (x0.01, 0 = loudness only)", nullptr, false, nullptr, "sttg2decisionpre" },
 };
 
 static const SettingsModule sttSettingsModule = {
@@ -3709,6 +3718,11 @@ SETTING_EDITOR_CMD(cmd_set_sttspeechfloor,       "sttspeechfloor")
 SETTING_EDITOR_CMD(cmd_set_sttsilencefloor,      "sttsilencefloor")
 SETTING_EDITOR_CMD(cmd_set_sttnoisepercentile,   "sttnoisepercentile")
 SETTING_EDITOR_CMD(cmd_set_sttdecisionpre,       "sttdecisionpre")
+SETTING_EDITOR_CMD(cmd_set_sttautogain,          "sttautogain")
+SETTING_EDITOR_CMD(cmd_set_sttg2speechfloor,     "sttg2speechfloor")
+SETTING_EDITOR_CMD(cmd_set_sttg2silencefloor,    "sttg2silencefloor")
+SETTING_EDITOR_CMD(cmd_set_sttg2noisepercentile, "sttg2noisepercentile")
+SETTING_EDITOR_CMD(cmd_set_sttg2decisionpre,     "sttg2decisionpre")
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 SETTING_EDITOR_CMD(cmd_set_g2holdaction,         "g2holdaction")
@@ -3795,8 +3809,13 @@ const CommandEntry settingEditorCommands[] = {
   { "sttsavetranscripts", "Save recognized text; changes apply to the next STT session.", true, cmd_set_sttsavetranscripts, "Usage: sttsavetranscripts [0|1]" },
   { "sttspeechfloor", "Continuous-STT speech onset floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttspeechfloor, "Usage: sttspeechfloor [1-32767]" },
   { "sttsilencefloor", "Continuous-STT silence floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttsilencefloor, "Usage: sttsilencefloor [1-32767]" },
-  { "sttnoisepercentile", "Continuous-STT noise-window percentile used as the room level; applies to the next session.", true, cmd_set_sttnoisepercentile, "Usage: sttnoisepercentile [0-100]" },
-  { "sttdecisionpre", "Continuous-STT onset judge on pre-emphasised audio (coefficient x0.01; 0 = off, 97 = bench value); applies to the next session.", true, cmd_set_sttdecisionpre, "Usage: sttdecisionpre [0-99]" },
+  { "sttnoisepercentile", "Continuous-STT noise-window percentile used as the room level; applies to the next session.", true, cmd_set_sttnoisepercentile, "Usage: sttnoisepercentile [0-50]" },
+  { "sttdecisionpre", "Continuous-STT onset judge on pre-emphasised audio (coefficient x0.01; 0 = loudness only, 97 = default); applies to the next session.", true, cmd_set_sttdecisionpre, "Usage: sttdecisionpre [0-99]" },
+  { "sttg2speechfloor", "G2 glasses-mic profile: speech onset floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttg2speechfloor, "Usage: sttg2speechfloor [1-32767]" },
+  { "sttg2silencefloor", "G2 glasses-mic profile: silence floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttg2silencefloor, "Usage: sttg2silencefloor [1-32767]" },
+  { "sttg2noisepercentile", "G2 glasses-mic profile: noise-window percentile used as the room level; applies to the next session.", true, cmd_set_sttg2noisepercentile, "Usage: sttg2noisepercentile [0-50]" },
+  { "sttg2decisionpre", "G2 glasses-mic profile: onset judge on pre-emphasised audio (x0.01; 0 = loudness only); applies to the next session.", true, cmd_set_sttg2decisionpre, "Usage: sttg2decisionpre [0-99]" },
+  { "sttautogain", "STT picks its own onboard-mic gain (changed only when several sessions agree) and a 120 Hz high-pass; 0 = use pdmamplify/pdmhpf. Applies to the next session.", true, cmd_set_sttautogain, "Usage: sttautogain [0|1]" },
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   { "g2holdaction",     "Set what a ring/temple hold on a HW1 lens page does", true, cmd_set_g2holdaction,

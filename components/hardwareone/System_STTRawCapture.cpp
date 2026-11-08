@@ -6,6 +6,7 @@
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
+#include "System_STT.h"
 #include "System_TaskUtils.h"
 #include "System_VFS.h"
 #include "stt/stt_raw_ring.h"
@@ -53,6 +54,10 @@ struct RawState {
   uint32_t startedMs = 0;
   uint32_t sampleRate = 16000;
   uint8_t source = 0;
+  // Mic-path and detector tuning in effect when the session began (sidecar).
+  uint8_t pdmAmplify = 1;
+  uint16_t pdmHpfHz = 36;
+  int speechFloor = 45, silenceFloor = 16, noisePercentile = 25, decisionPre = 0;
 };
 
 RawState gRaw;
@@ -123,8 +128,6 @@ bool writeSidecar(const char* pcmPath, uint32_t endedMs, bool drained) {
   if (!text) return false;
   const auto& ring = gRaw.ring;
   const esp_app_desc_t* app = esp_app_get_description();
-  uint8_t pdmAmplify = 1; uint16_t pdmHpfHz = 36;
-  audioGetPdmTuning(&pdmAmplify, &pdmHpfHz);
   int n = snprintf(text, kCap,
       "{\"format\":\"s16le\",\"channels\":1,\"rate\":%" PRIu32 ",\"source\":%u,"
       "\"pdm_amplify\":%u,\"pdm_hpf_hz\":%u,\"speech_floor\":%d,\"silence_floor\":%d,\"noise_percentile\":%d,\"decision_pre\":%d,"
@@ -132,8 +135,8 @@ bool writeSidecar(const char* pcmPath, uint32_t endedMs, bool drained) {
       "\"samples_seen\":%" PRIu64 ",\"samples_written\":%" PRIu64 ",\"samples_dropped\":%" PRIu64 ","
       "\"write_error\":%s,\"drain_complete\":%s,\"gaps_lost\":%" PRIu32 ",\"gaps\":[",
       gRaw.sampleRate, unsigned(gRaw.source),
-      unsigned(pdmAmplify), unsigned(pdmHpfHz), gSettings.sttSpeechFloor, gSettings.sttSilenceFloor,
-      gSettings.sttNoisePercentile, gSettings.sttDecisionPre,
+      unsigned(gRaw.pdmAmplify), unsigned(gRaw.pdmHpfHz), gRaw.speechFloor, gRaw.silenceFloor,
+      gRaw.noisePercentile, gRaw.decisionPre,
       app ? app->version : "?", gRaw.startedMs, endedMs,
       ring.seen(), gRaw.written.load(), ring.dropped(),
       gRaw.writeFailed.load() ? "true" : "false", drained ? "true" : "false", ring.gapsLost());
@@ -224,6 +227,8 @@ void sttRawCaptureSessionBegin(uint8_t audioSource, uint32_t sampleRate) {
   gRaw.startedMs = millis();
   gRaw.sampleRate = sampleRate;
   gRaw.source = audioSource;
+  audioGetPdmTuning(&gRaw.pdmAmplify, &gRaw.pdmHpfHz);
+  sttDetectorProfileInUse(&gRaw.speechFloor, &gRaw.silenceFloor, &gRaw.noisePercentile, &gRaw.decisionPre);
   memcpy(gRaw.path, path, sizeof(path));
   portEXIT_CRITICAL(&gMux);
   taskStackRecord("stt_rawsave", kDrainStackBytes);

@@ -244,3 +244,169 @@ _Pending._
   lost to the 401, later runs keep them.
 - Segmenter timing knobs (end silence, min phrase, blip tolerance) and the hard-coded 2x onset multiplier
   were not varied.
+
+## 6. Device arms at 1 ft on `claude/stt-1.0` (2026-11-08)
+
+Build `fe09e51e` (road-to-1.0 `a37fc293`, which carries the P4 clock-switch fix, plus the stt-1.0 fixes
+below), profile `p4-openclaw`, test P4X-EYE about 1 ft from the Mac mini speaker, volume 70, debug logging
+(`sttperf log on`) and a passive serial log in every arm. Each arm sets all knobs, so arms do not inherit
+from each other. The kept app slot (g2-health-push) was restored and hash-verified after each run. Scoring
+uses the stt-1.0 replay build and one host decoder (int8 QuartzNet gen2-25397 + meeting.lm). Every arm's
+replay reproduces the device's own `TL boundary` lines exactly (40/40, 76/76, 93/93, 75/75, 43/43).
+Scorer change: a segment that overlaps a speech clip by at least 0.3 s is that clip's caption, even when
+it opened early in a preceding silence (one such phrase had been counted as a false caption).
+
+**ab1, 5 interleaved arms, 06:40-07:43.** All WER %, quiet read speech clips with no caption out of 8.
+Each recording is scored with both detectors; `*` marks the detector the device ran.
+
+| recording (device settings) | room P50 (counts per gain) | loudness judge | pre-emphasis judge 97 | quiet missed (loudness / judge) |
+|---|---|---|---|---|
+| base (x1, HPF 35.5) | 15.3 | *74.9 | 54.0 | 8 / 0 |
+| judge97 (x1, HPF 35.5) | 13.9 | 75.1 | *56.6 | 8 / 1 |
+| combo (x8, HPF 120) | 10.9 | 71.5 | *54.7 | 6 / 0 |
+| x8h120 (x8, HPF 120) | 9.5 | *57.6 | 44.5 | 2 / 0 |
+| base2 (x1, HPF 35.5) | 11.5 | *72.3 | 47.5 | 7 / 1 |
+
+Clean-source ceiling, same decoder: ls-test 5.5, ls-quiet 3.4, syn-ord 6.3, syn-quiet 8.8, ami-one 42.9,
+ami-two 80.6. False captions on noise, silence and between clips: 0 in all ten cells. Segments per minute:
+3.8-4.1 (loudness, x1), 6.4-7.1 (loudness, x8 + HPF 120), 6.9-8.8 (judge).
+
+- The judge is better on every recording, by 13-25 points, and recovers the quiet speech (missed 6-8 of 8
+  -> 0-1 of 8). Loud read speech is unchanged or better (17.5 -> 16.9, 13.7 -> 14.2, 16.9 -> 12.6).
+- x8 + HPF 120 helps too: the best cell is x8 + HPF 120 + judge (44.5). The two x8 + HPF 120 recordings
+  differ by 14 points under the same detector (71.5 vs 57.6), with the room 1.2 dB apart: at 1 ft the
+  onset rule sits on a knife edge, so single-recording differences under ~10 points are not reliable.
+  Compare detectors within a recording, as in the table.
+- The room fell from 15.3 to 11.5 counts during the run (Mac load; not controlled).
+
+**nb1 bright noise, 3 arms, 07:53-08:21** (new playlist `tools/sttraw_ab/make_noise_playlist.py` in the STT
+repo: white hiss at -40/-32 dBFS, pink -36, the six brightest DEMAND test environments and the four brightest
+MUSAN noise clips at -36 dBFS, 10 s each; LibriSpeech over hiss and over cafeteria babble; three silences).
+
+| recording | loudness judge WER (speech in noise) | judge 97 | false caption segments / words on 190 s of noise |
+|---|---|---|---|
+| base (x1) | *28.4 | 28.0 | loudness 1 / 3, judge 3 / 11 |
+| judge97 (x1) | 28.4 | *29.9 | loudness 1 / 3, judge 4 / 7 |
+| combo (x8, HPF 120) | 31.5 | *29.6 | loudness 2 / 4, judge 2 / 7 |
+
+- No caption on white or pink hiss, on any MUSAN clip, or on station, river and park noise with either
+  detector. The bright-noise concern for the judge did not appear.
+- Nearly every false caption, with both detectors, is on DEMAND `OMEETING` (a recorded meeting room with
+  people talking); the judge adds fragments there and one syllable each on cafeteria and restaurant noise.
+  That is the expected cost: more sensitivity to bystanders.
+
+**ab1 at Mac volume 85, 3 arms, 08:24-09:05** (the user found 70 quiet; roughly a talker at normal level, 1 ft).
+
+| recording (device settings) | loudness judge | judge 97 | quiet missed (loudness / judge) |
+|---|---|---|---|
+| base (x1, HPF 35.5) | *56.6 | 37.6 | 3 / 0 |
+| judge97 (x1, HPF 35.5) | 54.9 | *36.7 | 3 / 0 |
+| combo (x8, HPF 120) | 42.4 | *38.5 | 0 / 0 |
+
+Read speech 9.3-13.7 (ceiling 5.5), ami-one 70-74 (ceiling 42.9). Replays match the device exactly; one
+one-word false caption on a noise clip (judge, base recording). At this level the judge is worth ~18 points
+at x1 and x8 + HPF 120 adds little once the judge is on.
+
+**Session stability.** Eleven 7.5-10.5 min continuous sessions on this build (ab1 x5, nb1 x3, ab1 at volume
+85 x3): no panic, no dropped samples, no audio overrun, every session `done`. This covers the long-session
+check left open in KNOWN_ISSUES for the clock fix.
+
+**Saved tuning across a restart.** `pdmamplify 8`, `pdmhpf 120`, then a USB chip reset: the next session's
+sidecar records x8 / 120 Hz (before the fix STT ran x1 / 35.5 Hz after any reboot, because only
+`initMicrophone()` pushed the saved values to the HAL). `sttdetector` showed 1/36 after the restart because it
+read the HAL; it now reports the saved settings.
+
+**Warm-up "Cancelled" (KNOWN_ISSUES).** 20 fast start/stop cycles with the raw recorder armed: 19 done, 1
+failed with `Microphone audio loss detected; session stopped` half a second after the start (this is what
+logs `warm-up failed: Cancelled`). Raw file 0.0 s: the overrun happened after the zero baseline and before the
+first read, while the bench recorder opened its SD file and the model file was read from the same card. The
+PDM DMA ring is 256 ms and buffered-PCM trim is a no-op for PDM, so the strict loss rule failed the session for
+audio that was never the session's. All failures seen so far (4/40 on 2026-11-07, 1/20 today) had `sttraw`
+armed. Fix: the integrity baseline is re-taken just before the first read (`TL capture_preroll_overrun`
+logs any pre-read drop); loss inside the session still fails it. Device verification: see below.
+
+**Software reboot loses the C6 link** (not STT; handed to the release session as `claude/fix-c6-reboot`).
+After `reboot` the P4 resets the C6 by GPIO9, the C6 shows only its ROM banner, and every SDIO command times
+out (0x107); each 60 s companion retry then logs `Card init success` followed at once by `Failed to get
+ESP_Hosted slave transport up`. HTTP stayed down for 6 minutes; a USB chip reset recovered it in 16 s.
+
+## 7. Automatic mode: the 1.0 defaults (2026-11-08)
+
+The user's requirement: the mic path should adjust itself, not depend on knobs, and the gain must not jump on
+one session. What the stt-1.0 line ships:
+
+- **Detector:** `sttdecisionpre` defaults to 97 (the pre-emphasis onset judge). It calibrates itself from
+  the room in each session's first 500 ms and tracks the room afterwards; `0` restores the loudness-only rule.
+- **Mic for STT sessions (`sttautogain`, default on):** STT opens the onboard PDM channel with its own tuning
+  (the channel is created per capture, so wake word and recordings keep the saved `pdmamplify` / `pdmhpf`):
+  - high-pass 120 Hz;
+  - gain from `stt/stt_auto_gain.h`, starting at x8 (the highest gain qualified on the bench);
+  - every session that heard speech and lasted 2 s or more records the gain it would have wanted: the gain
+    that puts its third-loudest 10 ms frame near -18 dBFS (rounded to the nearest step), or half the gain if
+    more than 1 in 20,000 samples clipped;
+  - the gain changes only when the last 3 recorded sessions all want a change in the same direction, then
+    moves to the most cautious of their wishes, at most x2 or x0.5, and the record starts over;
+  - the record lives in RAM: a reboot starts again at x8 with an empty record.
+  - `sttautogain 0` makes STT use `pdmamplify` / `pdmhpf` like every other consumer.
+- `sttdetector` and `stt status` report what the next session will use (`autoGain`, gain, high-pass, record
+  size); each session logs `TL autogain used= wanted= next= history= loud3= clipped=`.
+
+**Automatic vs today, ab1 at 1 ft, volume 70, interleaved (build 6ff54758, 09:48-10:39).**
+
+| arm | mic | all WER | quiet read speech missed | loud read speech | segments/min | false captions |
+|---|---|---|---|---|---|---|
+| old (`sttautogain 0`, `sttdecisionpre 0`) | x1, 35.5 Hz | 72.0 | 8/8 | 16.9 | 4.1 | 0 |
+| automatic | x8, 120 Hz | 44.3 | 0/8 | 14.2 | 7.7 | 0 |
+| old | x1, 35.5 Hz | 72.2 | 8/8 | 15.8 | 4.4 | 0 |
+| automatic | x8, 120 Hz | 48.0 | 0/8 | 14.8 | 7.9 | 0 |
+
+Replays reproduce the device boundaries exactly (43/43, 82/82, 46/46, 83/83). Both automatic sessions logged
+`used=8 wanted=8` (loud3 1468 / 1449: still 9 dB under the target, so x8 stays the cap).
+
+**Coming down by itself: board resting against the Mac mini, volume 85, five consecutive 4-minute automatic
+sessions in one boot.**
+
+| session | used | wanted | next | loud3 |
+|---|---|---|---|---|
+| 1 | x8 | x5 | x8 (1 of 3) | 6396 |
+| 2 | x8 | x5 | x8 (2 of 3) | 6434 |
+| 3 | x8 | x5 | **x5** (agreed; record cleared) | 6483 |
+| 4 | x5 | x4 | x5 (1 of 3) | 4130 |
+| 5 | x5 | x4 | x5 (2 of 3) | 4109 |
+
+Scores (judge on in all, first 240 s of ab1): x8 sessions 21.7 / 19.8 / 24.1, x5 sessions 20.4 / 24.4, and a
+fixed-x1 control 22.0; loud read speech 0% in every arm, no clip uncaptioned. Coming down cost nothing. (Each
+arm shows one 10-word "unassigned" segment: the clip that playback cut at 240 s, which the scorer excludes.)
+
+No clipping in any session. At x5 the loud speech sat at the target (4130 vs 4096) but the wish rounded
+down to x4, which would have crept one step further; the wish now rounds to the nearest step (x5 at 4130),
+host-tested, not yet re-run on the device.
+
+## 8. G2 glasses mic and per-mic detector profiles (2026-11-08)
+
+The detector is source-agnostic, so the judge default applied to the G2 glasses mic untested. Measured the
+same way (build e12ec586, `micsource g2`, `sttraw` records the G2 PCM the segmenter is fed; both detectors
+replayed on each recording). The G2 stream is LC3 over BLE after the glasses' own AGC and drops ~0.5-0.6% of
+its samples over 10 minutes, so the scorer's waveform alignment failed (2 of 18 windows); `score.py --align
+envelope` (piecewise, on the 10 ms loudness envelope, re-anchored every 15 s) kept 37/37, 22/23 and 19/19
+windows.
+
+| glasses position | playlist | loudness judge | judge 97 | quiet read + synthetic missed (loudness / judge) | false captions (loudness / judge) |
+|---|---|---|---|---|---|
+| beside the Mac mini | ab1 | 30.3 | 30.7 | 0 / 0 of 16 | 0 / 1 word |
+| 1 ft | ab1 | 72.2 | 69.0 | 13 / 5 of 16 | 0 / 1 word |
+| 1 ft | nb1 | 36.8 (speech in noise) | 38.0 | - | 1 seg 3 words / 1 seg 1 word |
+
+Close up the glasses are near the clean ceiling (read speech 7.1 vs 5.5). At 1 ft from a speaker they are no
+better than the P4 mic: the G2 mic is made for the wearer's mouth, so this is a pessimistic case. The judge
+is neutral close and in noise and helps at a distance, so it is the G2 default too.
+
+**Per-mic profiles.** Each mic now has its own detector levels, chosen at session start for the mic the
+session will use (native glasses stream or explicit request; otherwise the onboard mic first, the HAL's auto
+order; a mismatch is logged as `TL detector_profile_mismatch`):
+- onboard mic: `sttspeechfloor` 45, `sttsilencefloor` 16, `sttnoisepercentile` 25, `sttdecisionpre` 97,
+  plus `sttautogain` (PDM boards only; ES7210 codec boards keep their codec gain);
+- G2 glasses: `sttg2speechfloor` 45, `sttg2silencefloor` 16, `sttg2noisepercentile` 25, `sttg2decisionpre` 97.
+
+`stt status` reports `detectorProfile` and the levels in use, `sttdetector` both profiles, and the raw
+sidecar the profile the session ran with.

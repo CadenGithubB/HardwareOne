@@ -351,7 +351,12 @@ struct Settings {
       sttSpeechFloor(45),
       sttSilenceFloor(16),
       sttNoisePercentile(25),
-      sttDecisionPre(0),
+      sttDecisionPre(97),
+      sttAutoGain(true),
+      sttG2SpeechFloor(45),
+      sttG2SilenceFloor(16),
+      sttG2NoisePercentile(25),
+      sttG2DecisionPre(97),
       micSource("auto"),  // Mic source preference: "auto" | "pdm" | "g2" (resolved at capture time)
       sttSaveTranscripts(false),
       noteMaxSec(HW1_NOTE_MAX_SEC_DEFAULT),
@@ -1039,7 +1044,14 @@ struct Settings {
   int sttSpeechFloor;
   int sttSilenceFloor;
   int sttNoisePercentile;
-  int sttDecisionPre;           // pre-emphasis onset judge coefficient x100 (0 = off, 97 = bench value)
+  int sttDecisionPre;           // pre-emphasis onset judge coefficient x100 (0 = loudness only; default 97)
+  bool sttAutoGain;             // STT picks its own onboard-mic gain (agreed over sessions) and a 120 Hz high-pass
+  // The same detector levels for sessions on the G2 glasses mic (LC3 over BLE, after the glasses' own
+  // AGC), tuned separately from the onboard mic (the four stt* fields above).
+  int sttG2SpeechFloor;
+  int sttG2SilenceFloor;
+  int sttG2NoisePercentile;
+  int sttG2DecisionPre;
   String micSource;             // Preferred mic source: "auto" | "pdm" | "g2" (resolved lazily against availability)
   bool sttSaveTranscripts;      // Save recognized text; latched when a local or Pi dictation session starts
   // QuickNote (System_QuickNote.cpp), read when a note starts / each pass:
