@@ -93,10 +93,11 @@ static const MemoryRequirement gMemoryRequirements[] = {
   // 2,892 of TCBs/queues -- all MALLOC_CAP_INTERNAL|8BIT and unable to fall back
   // to PSRAM. The BLE-core figure independently matches openble's 42,944 (3 runs).
   //
-  // 86016 = 80,980 + ~5 KB. NOTE this is deliberately a tight floor: it still
-  // admits the G2 client start on a WiFi+HTTP device (~95.8 KB free), which lands near 9 KB and
-  // has been observed to fail afterwards at openg2. Raising this toward ~102,400
-  // would refuse that combination outright.
+  // 86016 = 80,980 + ~5 KB. NOTE this is deliberately a tight floor: on its own
+  // it admits the G2 client start on a WiFi+HTTP device (~95.8 KB free), which
+  // lands near 9 KB and has been observed to fail afterwards at openg2. On
+  // classic ESP32 the "g2client" row therefore carries a post-admission term
+  // in checkMemoryAvailable() (readiness G-44) that refuses that combination.
   // Split 2026-10-21 with the shared central stack (BLE_CentralStack.cpp):
   // "blestack" is the host + controller link + setup worker, checked by
   // bleStackUp() before the host comes up (BLE core 43,272 measured above +
@@ -172,6 +173,45 @@ bool checkMemoryAvailable(const char* component, String* outReason) {
     return false;
   }
   
+#if CONFIG_IDF_TARGET_ESP32
+  // Readiness G-44: on classic ESP32 (~2 MB boards, no internal RAM to spare)
+  // the total-free row alone admitted G2 with WiFi+HTTP up at ~49 KB free past
+  // the stack, which lands near 9 KB once the runtime's ~40 KB is paid -- and
+  // CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL keeps every <=16 KB allocation
+  // internal, so that is effectively exhausted. Admit only if (a) free minus
+  // the row's own cost leaves leftAfterBytes, and (b) the largest block can
+  // take one 10 KB worker stack and still leave a 16 KB block. S3/P4 have the
+  // RAM and keep the plain row.
+  static const struct {
+    const char* component;
+    size_t leftAfterBytes;   // free internal RAM required after the start
+    size_t minLargestBlock;  // contiguous internal block required at admission
+  } kClassicHeadroom[] = {
+    { "g2client", 20480, 10240 + 16384 },
+  };
+  for (const auto& term : kClassicHeadroom) {
+    if (strcmp(term.component, req->component) != 0) continue;
+    const size_t largest = hw1InternalLargestBlock();
+    const size_t need = req->minHeapBytes + term.leftAfterBytes;
+    if (freeHeap < need || largest < term.minLargestBlock) {
+      if (outReason) {
+        char buf[96];
+        if (freeHeap < need) {
+          snprintf(buf, sizeof(buf), "Insufficient heap: need %uKB (%uKB left after start), have %uKB",
+                   (unsigned)(need / 1024), (unsigned)(term.leftAfterBytes / 1024),
+                   (unsigned)(freeHeap / 1024));
+        } else {
+          snprintf(buf, sizeof(buf), "Insufficient heap: largest block %uKB, need %uKB",
+                   (unsigned)(largest / 1024), (unsigned)(term.minLargestBlock / 1024));
+        }
+        outReason->reserve(sizeof(buf));
+        *outReason = buf;
+      }
+      return false;
+    }
+  }
+#endif
+
   // Check PSRAM requirement (if any)
   if (req->minPsramBytes > 0 && freePsram < req->minPsramBytes) {
     if (outReason) {
