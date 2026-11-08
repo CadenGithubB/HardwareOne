@@ -106,11 +106,11 @@ class FreshMachineFetch(unittest.TestCase):
             sys.modules.pop(name, None)
         self.tmp.cleanup()
 
-    def registry(self, returncode=0, corrupt=False):
+    def registry(self, returncode=0, corrupt=False, downloaded=None):
         def run(command):
             self.calls.append(command)
             work = Path(command[command.index("-C") + 1])
-            if returncode == 0:
+            if (returncode == 0) if downloaded is None else downloaded:
                 for package in self.packages:
                     tree = fake_package(work / "managed_components" / package.NAME, package.NAME)
                     if corrupt:
@@ -164,6 +164,19 @@ class FreshMachineFetch(unittest.TestCase):
         for expected in ("exited 2", "components.espressif.com", "rerun tools/p4/prepare_sdk.sh",
                          "tools/p4/prepare_esp_dl.py --source", "tools/p4/prepare_esp_hosted.py --source"):
             self.assertIn(expected, message)
+
+    def test_configure_failure_after_a_verified_download_is_not_a_registry_failure(self):
+        # update-dependencies downloads, then reconfigures the throwaway project;
+        # if only that configure fails, the verified packages are still used.
+        sources = self.fetch.fetch(self.fetch.needed(), self.co.idf,
+                                   run=self.registry(returncode=1, downloaded=True))
+        self.assertEqual([source.name for source in sources], [p.NAME for p in self.packages])
+        self.assertEqual(self.fetch.needed(), [])
+
+    def test_configure_failure_with_a_bad_download_still_fails(self):
+        with self.assertRaisesRegex(ValueError, "exited 1"):
+            self.fetch.fetch(self.fetch.needed(), self.co.idf,
+                             run=self.registry(returncode=1, downloaded=True, corrupt=True))
 
     def test_fetched_tree_must_match_the_pinned_digest(self):
         with self.assertRaisesRegex(ValueError, "does not match the pinned source digest"):

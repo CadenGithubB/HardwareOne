@@ -5382,4 +5382,13 @@ fed the before and after `portasm.S` text of the tracked b25cb29 patch:
 present, missing (with the `git apply` command), partial (q3 save without
 restore) and unknown (no RISC-V port). `prepare_sdk.sh --check` runs all four
 override checks instead of stopping at the first and always prints the PIE
-state.
+state. A configure failure after `update-dependencies` has downloaded both
+packages is not a registry failure when the trees match their pinned digests.
+
+`test_gen_build_info_idf.py` (CTest `gen_build_info_idf`) runs
+`tools/gen_build_info.py` on fake build directories: BUILD_INFO.md names the
+ESP-IDF tag and commit, lists the tracked IDF paths that differ from it (a
+locally patched 5.5.5 shows `portasm.S`), adds the PIE-fix state line for
+esp32p4 only, and reports an IDF that is not itself a git checkout as unknown
+rather than the HEAD of a repository it happens to sit in. An IDF under the
+home directory is shown as `~/...`.

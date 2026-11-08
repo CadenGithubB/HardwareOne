@@ -2212,6 +2212,9 @@ add_test(NAME p4_ram_monitor COMMAND ${Python3_EXECUTABLE}
 # in prepare_sdk.sh --check, on fake trees (readiness G-26).
 add_test(NAME p4_prepare_sdk COMMAND ${Python3_EXECUTABLE} -B
   ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_prepare_sdk.py)
+# BUILD_INFO.md names the ESP-IDF commit, its local edits and (esp32p4) the PIE-fix state (G-26).
+add_test(NAME gen_build_info_idf COMMAND ${Python3_EXECUTABLE} -B
+  ${CMAKE_CURRENT_LIST_DIR}/test_gen_build_info_idf.py)
 
 add_test(NAME stt_internal_memory COMMAND ${Python3_EXECUTABLE}
   ${CMAKE_CURRENT_LIST_DIR}/test_stt_internal_memory.py ${PHONE_TEST_ARGS})

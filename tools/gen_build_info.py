@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -268,6 +269,61 @@ def git_provenance():
     return commit, desc, n_dirty
 
 
+def build_idf_path(build_dir):
+    """The ESP-IDF tree this build was configured with (project_description.json, else IDF_PATH)."""
+    pj = os.path.join(build_dir, "project_description.json")
+    try:
+        with open(pj) as source:
+            recorded = json.load(source).get("idf_path") or ""
+    except Exception:
+        recorded = ""
+    return recorded or os.environ.get("IDF_PATH", "")
+
+
+def idf_provenance(idf_path, target=""):
+    """Commit and local edits of the ESP-IDF tree; on esp32p4 also the PIE-fix state.
+
+    Returns a dict with path, commit, describe, modified (tracked paths that
+    differ from that commit, submodules included), error and pie. A tree that
+    is not itself a git checkout (a release archive, or a directory that only
+    sits inside some other repository) reports error instead of a commit.
+    """
+    info = {"path": idf_path, "commit": "", "describe": "", "modified": [], "error": "", "pie": ""}
+    if not idf_path or not os.path.isdir(idf_path):
+        info["error"] = "IDF_PATH not set or not a directory"
+        return info
+
+    def git(*args):
+        try:
+            p = subprocess.run(("git", "-C", idf_path) + args, capture_output=True,
+                               text=True, timeout=120)
+        except Exception:
+            return None
+        return p.stdout if p.returncode == 0 else None
+
+    top = git("rev-parse", "--show-toplevel")
+    if top is None or os.path.realpath(top.strip()) != os.path.realpath(idf_path):
+        info["error"] = "not a git checkout; commit and local edits unknown"
+    else:
+        info["commit"] = (git("rev-parse", "HEAD") or "").strip()
+        info["describe"] = (git("describe", "--tags", "--always") or "").strip()
+        status = git("status", "--porcelain", "--untracked-files=no")
+        if status is None or not info["commit"]:
+            info["error"] = "git could not read the tree state"
+        else:
+            info["modified"] = [line[3:] for line in status.splitlines() if line.strip()]
+    if target == "esp32p4":
+        try:
+            sys.path.insert(0, os.path.join(REPO, "tools", "p4"))
+            import check_idf_pie
+            info["pie"] = check_idf_pie.pie_state(Path(idf_path))[1]
+        except Exception as e:
+            info["pie"] = "PIE-fix state not checked: %s" % e
+        finally:
+            sys.path.remove(os.path.join(REPO, "tools", "p4"))
+    return info
+
+
 def artifact_info(build_dir):
     out = {}
     proj = None
@@ -394,6 +450,7 @@ def main():
             configuration_name = os.path.basename(build_dir).removeprefix("build-config-")
     cfg, cfg_path = read_sdkconfig(build_dir)
     commit, desc, n_dirty = git_provenance()
+    idf = idf_provenance(build_idf_path(build_dir), cfg.get("CONFIG_IDF_TARGET", ""))
     now = datetime.now(timezone.utc).astimezone()
 
     L = []
@@ -417,8 +474,31 @@ def main():
     A("**Built:** %s  " % now.strftime("%Y-%m-%d %H:%M:%S %Z"))
     if commit:
         dirty_note = " + %d uncommitted file(s)" % n_dirty if n_dirty else " (clean tree)"
-        A("**Source:** `%s`%s — %s" % (commit, dirty_note, desc))
+        A("**Source:** `%s`%s — %s  " % (commit, dirty_note, desc))
+    # The manifest may ship with an image: show the IDF path relative to ~, not the user's home.
+    home = os.path.expanduser("~")
+    if home not in ("", "~", os.sep):
+        for key in ("path", "pie"):
+            idf[key] = idf[key].replace(home + os.sep, "~" + os.sep)
+    if idf["commit"]:
+        idf_note = (" + %d locally modified path(s)" % len(idf["modified"])
+                    if idf["modified"] else " (clean tree)")
+        A("**ESP-IDF:** `%s` (`%s`)%s — `%s`  " % (idf["describe"] or "?", idf["commit"], idf_note,
+                                                   idf["path"]))
+    else:
+        A("**ESP-IDF:** %s — `%s`  " % (idf["error"], idf["path"] or "?"))
     A("")
+    if idf["modified"]:
+        A("ESP-IDF paths that differ from its commit:")
+        A("")
+        for path in idf["modified"][:20]:
+            A("- `%s`" % path)
+        if len(idf["modified"]) > 20:
+            A("- _... and %d more_" % (len(idf["modified"]) - 20))
+        A("")
+    if idf["pie"]:
+        A("_%s_" % idf["pie"])
+        A("")
 
     if art.get("bin_bytes"):
         A("## Artifact")

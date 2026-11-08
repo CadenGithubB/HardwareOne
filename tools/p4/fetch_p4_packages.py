@@ -98,19 +98,28 @@ def fetch(packages, idf: Path, work: Path = FETCH_DIR, run=subprocess.run) -> li
     names = ", ".join(f"{registry_name(p)} {p.VERSION}" for p in packages)
     print(f"Fetching {names} from the ESP Component Registry into {work}", flush=True)
     result = run(fetch_command(work, idf))
-    if result.returncode:
-        raise ValueError(f"idf.py update-dependencies in {work} exited {result.returncode} (output above). "
-                         + manual_remedy(packages))
-    sources = []
+    sources, problems = [], []
     for package in packages:
         fetched = work / "managed_components" / package.NAME
         if not (fetched / "idf_component.yml").is_file():
-            raise ValueError(f"the component manager left no {fetched}. " + manual_remedy([package]))
-        if package.tree_digest(fetched) != package.SOURCE_TREE_SHA256:
-            raise ValueError(f"fetched {registry_name(package)} {package.VERSION} in {fetched} does not "
-                             "match the pinned source digest; remove it and rerun, or "
-                             + manual_remedy([package]))
-        sources.append(fetched)
+            problems.append(f"the component manager left no {fetched}. " + manual_remedy([package]))
+        elif package.tree_digest(fetched) != package.SOURCE_TREE_SHA256:
+            problems.append(f"fetched {registry_name(package)} {package.VERSION} in {fetched} does not "
+                            "match the pinned source digest; remove it and rerun, or "
+                            + manual_remedy([package]))
+        else:
+            sources.append(fetched)
+    if result.returncode and problems:
+        raise ValueError(f"idf.py update-dependencies in {work} exited {result.returncode} (output above). "
+                         + manual_remedy(packages))
+    if problems:
+        raise ValueError(problems[0])
+    if result.returncode:
+        # update-dependencies downloads first, then reconfigures the throwaway
+        # project; a failure in that configure step does not affect the packages,
+        # which have just been verified against their pinned digests.
+        print(f"fetch_p4_packages: idf.py exited {result.returncode} after the download; the fetched "
+              "packages match their pinned digests, so they are used", file=sys.stderr, flush=True)
     return sources
 
 
