@@ -152,8 +152,9 @@ bool radioHalHeld();
 // Hold through host deep sleep: the enable line stays low until the next boot.
 void radioHalPrepareForDeepSleep();
 // Right before an intentional restart (rebootDevice): no SDIO RPC in
-// esp_restart()'s shutdown handlers, Hosted TX closed at its own gate and
-// flushed (about 100 ms) while the C6 still runs, then the C6 latched in reset
+// esp_restart()'s shutdown handlers, Hosted TX closed at HardwareOne's fence
+// in the Hosted patch and flushed (about 100 ms, only while the link was up)
+// while the C6 still runs, then the C6 latched in reset
 // (gpio_hold_en), so neither side sends before the restart resets the SDMMC
 // host. One-way: from then on radioHalHold(false), the transport starts and
 // radioHalStopTransport refuse. The caller restarts. See

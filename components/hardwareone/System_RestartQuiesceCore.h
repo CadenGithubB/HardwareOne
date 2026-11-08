@@ -13,7 +13,9 @@
 // So before restarting, the owner stops the SDMMC users at their source:
 //   1. silenceRadio(): no SDIO RPC inside esp_restart() (the wifi_remote
 //      esp_wifi_stop shutdown handler is unregistered, as Hosted's own restart
-//      helper does), Hosted's TX gate is closed and what was already queued is
+//      helper does), Hosted's TX is closed at a one-way fence (the Hosted
+//      patch; its transport state stays up, so a Wi-Fi or BLE init in the
+//      window starts no C6 reset or card init) and what was already queued is
 //      sent while the C6 still answers, and then the C6 is held in reset, so
 //      it stops sending.
 //   2. lockStorage(timeout): the filesystem lock is taken and never given
@@ -26,14 +28,14 @@
 //
 // What this does not guarantee: an idle SDMMC host at the reset. Hosted stays
 // initialised (its teardown is the worse risk), so its SDIO tasks keep running
-// through the drain and into esp_restart(). TX is closed at Hosted's gate
+// through the drain and into esp_restart(). TX is closed at the fence
 // before the hold, so the packets the users keep producing (the HTTP reply to
 // `reboot`, a TCP retransmit, BLE HCI, an RPC poll) are refused instead of
 // becoming CMD53s against the held C6, which is what the bench saw before
 // (0x107, "Unrecoverable host sdio state", 7 of 15 reboots on 2026-11-08). A
-// packet the write task had already taken when the gate closed and could not
-// finish within the flush still times out once, and the read task may wake
-// on DAT1. With the C6 held no data moves and each such transaction lasts
+// packet the write task had already taken when the fence closed and could
+// not finish within the flush (a slave out of RX buffers) still times out
+// once, and the read task may wake on DAT1. With the C6 held no data moves and each such transaction lasts
 // microseconds, and esp_restart_noos() stalls the other core before the SDMMC
 // reset, so the exposure is small, not zero. Bench check: many `reboot`s
 // under heavy HTTP traffic, counting 0x107 lines in the drain.

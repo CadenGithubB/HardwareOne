@@ -53,11 +53,14 @@ everything user-visible since the v0.99.99 tag (55 commits).
   restart now holds the C6 in reset, drops the Wi-Fi stop RPC, takes the filesystem lock and waits for
   a cut-off transfer to time out first; the C6 enable line is latched low (pad hold) so a companion
   start that was already running cannot release it before the restart. Before the hold it closes
-  ESP-Hosted's TX gate and gives the write task 100 ms to send what was already queued, so packets the
-  radio users keep producing during the drain are refused instead of timing out against the held C6
-  (bench 2026-11-08: `sdmmc_send_cmd returned 0x107` and `Unrecoverable host sdio state` in 7 of 15
-  reboots); a restart takes 100 ms longer and may log Hosted's `tx fail`/`drop pkt` lines in the
-  drain. Separately, a companion retry
+  ESP-Hosted's TX at a one-way fence added to the Hosted patch and gives the write task 100 ms to send
+  what was already queued, so packets the radio users keep producing during the drain are refused
+  instead of timing out against the held C6 (bench 2026-11-08: `sdmmc_send_cmd returned 0x107` and
+  `Unrecoverable host sdio state` in 7 of 15 reboots). Hosted's transport state stays up, so a Wi-Fi
+  or BLE init in that window does not reset the C6 or rerun SDIO card init. A restart takes 100 ms
+  longer and may log Hosted's `tx fail`/`drop pkt` lines in the drain. The Hosted override must be
+  re-staged (`tools/p4/prepare_sdk.sh` after removing `.sdk-overrides/esp32p4/espressif__esp_hosted`).
+  Separately, a companion retry
   now waits for the C6 instead of failing in the same millisecond once ESP-Hosted's retry counter is
   spent; that helps a healthy link after earlier failed starts, does not recover a wedged SDMMC host,
   and makes a retry on a dead companion last up to 20 s. The boot's second C6 attempt reused the

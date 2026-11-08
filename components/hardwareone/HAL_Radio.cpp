@@ -28,14 +28,16 @@
 #include "freertos/task.h"
 #include "Radio_CompanionCore.h"
 
-// ESP-Hosted 2.12.13's own TX gate (host/drivers/transport/transport_drv.{h,c};
-// external linkage, but not in the component's public include dirs). Every
-// producer goes through esp_hosted_tx or the STA/AP/serial wrappers in front
-// of it (lwIP, RPC, BLE HCI), and each refuses a new packet unless the state
-// is TRANSPORT_TX_ACTIVE. radioHalSilenceForRestart lowers it before it holds
-// the C6.
+// ESP-Hosted 2.12.13 host/drivers/transport/transport_drv.{h,c} (external
+// linkage, but not in the component's public include dirs).
+// esp_hosted_hw1_fence_tx is HardwareOne's one-way restart TX fence
+// (tools/p4/esp-hosted-2.12.13-hw1.patch): every producer goes through
+// esp_hosted_tx or the STA/AP/serial wrappers in front of it (lwIP, RPC, BLE
+// HCI), and each refuses a new packet once it is set. radioHalSilenceForRestart
+// sets it before it holds the C6. Hosted's transport_state is left alone on
+// purpose (see there).
 extern "C" uint8_t is_transport_tx_ready(void);
-extern "C" void set_transport_state(uint8_t state);
+extern "C" void esp_hosted_hw1_fence_tx(void);
 
 namespace {
 
@@ -97,12 +99,13 @@ constexpr int kBootAttempts = 2;  // each attempt resets the C6 and waits up to 
 // retry counter made it give up at once (hw1::radio::waitForTransportUp).
 constexpr uint32_t kSlaveReadyBudgetMs = 20000;
 constexpr uint32_t kSlaveReadyPollMs = 50;
-// transport_drv.h TRANSPORT_RX_ACTIVE: receive stays up, TX is refused.
-constexpr uint8_t kHostedTransportRxOnly = 1;
-// After the TX gate closes, Hosted's write task still empties its queue (the
+// After the TX fence closes, Hosted's write task still empties its queue (the
 // packets producers had already queued) while the C6 runs and acknowledges
-// them. Its priority-23 task needs a few ms for a full queue at 20 MHz 4-bit;
-// the margin covers a slave briefly out of RX buffers.
+// them. A full queue is 3 priority queues x 20 packets (SDIO TX queue size) of
+// at most 1536 bytes, about 0.15 ms each at 20 MHz 4-bit: about 10 ms, and
+// 60 ms even at 1 ms a packet. The margin covers a slave briefly out of RX
+// buffers; one that stays out makes the write task drop the packet after its
+// buffer polls (up to about 0.5 s), which a fixed wait cannot cover.
 constexpr uint32_t kHostedTxFlushMs = 100;
 
 bool sBoardPrepared = false;
@@ -724,21 +727,22 @@ void radioHalSilenceForRestart() {
   sSessionBleLinks = 0;
   sHostedLinkUp = false;
   portEXIT_CRITICAL(&sLock);
-  // Then stop Hosted TX at its own gate while the C6 still runs. The users
-  // keep running (lwIP's reply to `reboot`, TCP ACKs, BLE HCI, RPC polls), and
-  // each packet they queued after the C6 went into reset became a CMD53 with
-  // no answer: "sdmmc_send_cmd returned 0x107", "Failed to send data",
+  // Then stop Hosted TX at the fence while the C6 still runs. The users keep
+  // running (lwIP's reply to `reboot`, TCP ACKs, BLE HCI, RPC polls), and each
+  // packet they queued after the C6 went into reset became a CMD53 with no
+  // answer: "sdmmc_send_cmd returned 0x107", "Failed to send data",
   // "Unrecoverable host sdio state" during the drain (bench 2026-11-08, 7 of
-  // 15 reboots). With the gate closed every new packet is refused and freed
-  // by its producer; the short wait lets the write task send what was already
-  // queued to a C6 that still acknowledges it. Receive is left alone. Only
-  // the slave's INIT event reopens the gate, and the C6 sends it only as it
-  // boots (a Start op already resetting the C6 could reopen it, which brings
-  // back no more than the old exposure).
-  if (is_transport_tx_ready()) {
-    set_transport_state(kHostedTransportRxOnly);
-    vTaskDelay(pdMS_TO_TICKS(kHostedTxFlushMs));
-  }
+  // 15 reboots). With the fence set every new packet is refused and freed by
+  // its producer; the short wait lets the write task send what was already
+  // queued to a C6 that still acknowledges it. Receive is left alone. The
+  // fence is one-way (a slave INIT from a Start op cannot reopen it), and it
+  // leaves Hosted's transport_state at TX_ACTIVE: lowering that state would
+  // make any transport_drv_reconfigure() in the window (a Wi-Fi init, a BLE
+  // open) pulse the C6's reset and run SDIO card init on slot 1. Without a
+  // live link there is nothing queued to flush.
+  const bool txWasOpen = is_transport_tx_ready();
+  esp_hosted_hw1_fence_tx();
+  if (txWasOpen) vTaskDelay(pdMS_TO_TICKS(kHostedTxFlushMs));
   // Hold the C6 in reset so it stops sending: no new rx data or interrupts,
   // and a transfer it was in the middle of ends on the SDMMC timeout instead
   // of streaming into the reset. Hosted stays initialised on purpose: its

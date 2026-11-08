@@ -31,9 +31,15 @@ the harness does not compile (startTransport).
 Bench 2026-11-08, second run: 7 of 15 reboots still logged "sdmmc_send_cmd
 returned 0x107" and "Unrecoverable host sdio state" in the drain, packets the
 radio users queued after EN went low; and after `c6restart` the web server
-never came back (Wi-Fi and BLE did). The silence must close Hosted's TX gate
-(set_transport_state RX_ACTIVE) and let the write task flush before it latches
-EN, so no CMD53 meets the held C6. The real snapshotUsers, stopUsers,
+never came back (Wi-Fi and BLE did). The silence must close Hosted's TX at
+HardwareOne's one-way fence (esp_hosted_hw1_fence_tx, tools/p4's Hosted patch)
+and let the write task flush a full queue before it latches EN, so no CMD53
+meets the held C6. It must leave Hosted's transport state up: below TX_ACTIVE,
+a Wi-Fi init or BLE open in the window would reset the C6 and rerun SDIO card
+init (review 2026-11-08). An op inside the flush is refused like one in the
+drain. Source checks cover the Hosted patch (every producer path goes through
+the fence, transport_drv_reconfigure still keys on the state) and updateProc's
+HTTP hand-over, which the harness does not compile. The real snapshotUsers, stopUsers,
 restoreUsers, recoverProc, holdProc and releaseProc and the HTTP restore run
 over a fake network whose `radiopower off` stops the server and whose
 `radiopower on` does not start it: after a c6restart or c6hold off the server
@@ -79,6 +85,8 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("clang++") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--source-dir", "--component", dest="source_dir", type=Path, default=COMPONENT)
+    parser.add_argument("--hosted-patch", type=Path, help="default: tools/p4/esp-hosted-2.12.13-hw1.patch "
+                        "two levels above --source-dir")
     args = parser.parse_args()
     src = args.source_dir
 
@@ -112,7 +120,6 @@ def main() -> None:
             one(hal, "esp_err_t startOnce(bool allowLegacyUpdate)", "HAL_Radio.cpp"),
         ]),
         "/*@SILENCE@*/": "\n\n".join([
-            constant(hal, "kHostedTransportRxOnly"),
             constant(hal, "kHostedTxFlushMs"),
             one(hal, "static bool restartLatched()", "HAL_Radio.cpp"),
             one(hal, "static void latchC6EnableLow()", "HAL_Radio.cpp"),
@@ -155,8 +162,36 @@ def main() -> None:
     require(0 <= gate < body.find("prepareBoard()"), "startTransport refuses once the restart latched the C6")
     # The restart path does not tear Hosted down under live users.
     silence = strip_comments(blocks["/*@SILENCE@*/"])
-    for forbidden in ("hostedDeinit", "esp_hosted_deinit", "radioHalStopTransport"):
+    for forbidden in ("hostedDeinit", "esp_hosted_deinit", "radioHalStopTransport", "set_transport_state"):
         require(forbidden not in silence, f"radioHalSilenceForRestart must not call {forbidden}")
+    # The companion update's second reset hands the web server state on, as
+    # recoverProc's does (updateProc needs the file system and OTA, so the
+    # harness does not run it).
+    update = extract_block(strip_comments(companion), "void updateProc(void* arg)")
+    second = update.find("stopUsers(rest);")
+    require(second >= 0 and update.find("users.http = rest.http;", second) > second
+            and update.find("restoreUsers(users);", second) > update.find("users.http = rest.http;", second),
+            "updateProc carries rest.http from its second stopUsers into restoreUsers")
+    # The Hosted patch (tools/p4/esp-hosted-2.12.13-hw1.patch, the tree the P4
+    # build uses): the fence gates every producer and leaves the state alone.
+    patch = args.hosted_patch or src.parent.parent / "tools" / "p4" / "esp-hosted-2.12.13-hw1.patch"
+    require(patch.is_file(), f"Hosted patch at {patch} (pass --hosted-patch)")
+    added = [l[1:].strip() for l in patch.read_text().splitlines() if l.startswith("+") and not l.startswith("+++")]
+    removed = [l[1:].strip() for l in patch.read_text().splitlines() if l.startswith("-") and not l.startswith("---")]
+    require("void esp_hosted_hw1_fence_tx(void)" in added and "hw1_tx_fenced = 1;" in added,
+            "the patch defines the one-way fence")
+    require("return is_transport_tx_ready() && !hw1_tx_fenced;" in added, "esp_hosted_hw1_tx_open adds the fence")
+    require("uint8_t transport_up = esp_hosted_hw1_tx_open();" in added
+            and "uint8_t transport_up = is_transport_tx_ready();" in removed,
+            "SDIO esp_hosted_tx (VHCI, serial RPC, private path) checks the fence")
+    for iface in ("STA", "AP", "SERIAL"):
+        require(f"if (!esp_hosted_hw1_tx_open() || !chan_arr[ESP_{iface}_IF]) {{" in added,
+                f"the {iface} wrapper checks the fence")
+    fence_lines = " ".join(added)
+    require("transport_state =" not in fence_lines and "set_transport_state" not in fence_lines,
+            "the patch does not change Hosted's transport state")
+    others = [l for l in removed if "is_transport_tx_ready()" in l and "transport_up" not in l and "chan_arr" not in l]
+    require(not others, "transport_drv_reconfigure still keys its slave bring-up on the transport state")
 
     harness = (HERE / "restart_sdmmc_quiesce_harness.cpp").read_text()
     for token, code in blocks.items():

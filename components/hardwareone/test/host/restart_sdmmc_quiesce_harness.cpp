@@ -5,9 +5,8 @@
 //   @UTILS@      quiesceSdmmcForRestart, rebootDevice, factoryreset_doRestart (System_Utils.cpp)
 //   @EVENTS@     deliver, hostedEventHandler, registerEvents (HAL_Radio.cpp)
 //   @START@      hostedLinkUp, startOnce and their constants (HAL_Radio.cpp)
-//   @SILENCE@    kHostedTransportRxOnly, kHostedTxFlushMs, restartLatched,
-//                latchC6EnableLow, radioHalHold, radioHalSilenceForRestart
-//                (HAL_Radio.cpp)
+//   @SILENCE@    kHostedTxFlushMs, restartLatched, latchC6EnableLow,
+//                radioHalHold, radioHalSilenceForRestart (HAL_Radio.cpp)
 //   @PREPARE@    radioHalStopTransport, radioHalPrepare (HAL_Radio.cpp)
 //   @USERS_TYPE@ struct RadioUsers (System_RadioCompanion.cpp)
 //   @USERS@      kHttpRestoreWindowMs, snapshotUsers, stopUsers, the HTTP
@@ -20,8 +19,11 @@
 // ESP-IDF, Arduino, FreeRTOS and Hosted boundaries are fakes: they record what
 // was called, in order, on a fake millisecond clock. ESP.restart() unwinds.
 // A fake TRANSPORT_UP goes through the real hostedEventHandler. Hosted's TX
-// path is a gate plus a queue: the write task sends what is queued whenever
-// time passes, and a CMD53 to a C6 whose EN pad is low times out (0x107). The
+// path is the transport state, HardwareOne's fence (the Hosted patch) and a
+// queue: the write task sends one queued packet per millisecond as time
+// passes, and a CMD53 to a C6 whose EN pad is low times out (0x107). Hosted's
+// transport_drv_reconfigure (Wi-Fi init, BLE open) brings the slave up again
+// (reset pulse, card init) whenever the state is below TX_ACTIVE. The
 // companion's radio users (Wi-Fi, HTTP, ESP-NOW, BLE) are a small fake network
 // whose `radiopower off`/`on` do what System_WiFi.cpp's do to the web server.
 #include <atomic>
@@ -201,33 +203,66 @@ static esp_err_t gpio_set_direction(gpio_num_t pin, int mode) {
   note("dir " + std::to_string(pin) + (mode == GPIO_MODE_OUTPUT ? " out" : " other"));
   return ESP_OK;
 }
-static void vTaskDelay(uint32_t ticks) { advance(ticks); }
+static void (*gDuringTaskDelay)() = nullptr;  // work another task does in a vTaskDelay
+static void vTaskDelay(uint32_t ticks) {
+  if (gDuringTaskDelay) gDuringTaskDelay();
+  advance(ticks);
+}
 
-// ESP-Hosted's TX gate (transport_drv.c) and to_slave queue (sdio_drv.c).
-// esp_hosted_tx refuses a packet unless the state is TX_ACTIVE (2); the write
-// task (advance) sends whatever was queued.
+// ESP-Hosted's transport state and HardwareOne's TX fence (transport_drv.c, the
+// Hosted patch) and its to_slave queues (sdio_drv.c). esp_hosted_tx and the
+// STA/AP/serial wrappers refuse a packet unless esp_hosted_hw1_tx_open(): the
+// state is TX_ACTIVE (2) and the fence is not set. The write task (advance)
+// sends one queued packet per kFakeTxPacketMs.
 static uint8_t gHostedTransportState = 0;
+static bool gTxFenced = false;
 static std::vector<std::string> gTxQueue;
 static void (*gBeforeTxGate)() = nullptr;  // one-shot: a producer already past the check
 static uint32_t gTxGateAt = 0;
-extern "C" uint8_t is_transport_tx_ready(void) { return gHostedTransportState >= 2; }
-extern "C" void set_transport_state(uint8_t state) {
+// A full queue: MAX_PRIORITY_QUEUES (3) x the SDIO TX queue size (20).
+constexpr int kHostedTxQueueDepth = 3 * 20;
+// Per packet: at most 1536 bytes, about 0.15 ms at 20 MHz 4-bit; 1 ms is the
+// harness's generous bound for a slave that has RX buffers.
+constexpr uint32_t kFakeTxPacketMs = 1;
+static void closeTxGate(const std::string& how) {
   if (gBeforeTxGate) {
     void (*hook)() = gBeforeTxGate;
     gBeforeTxGate = nullptr;
     hook();
   }
-  note("hosted-tx state " + std::to_string(state));
-  gHostedTransportState = state;
+  note(how);
   gTxGateAt = gNow;
+}
+extern "C" uint8_t is_transport_tx_ready(void) { return gHostedTransportState >= 2; }
+extern "C" void esp_hosted_hw1_fence_tx(void) {
+  closeTxGate("hosted-tx fence");
+  gTxFenced = true;
+}
+// Hosted's own state setter, which the silence must not use (it reopens the
+// slave bring-up in transport_drv_reconfigure); kept so that variant compiles.
+extern "C" void set_transport_state(uint8_t state) {
+  closeTxGate("hosted-tx state " + std::to_string(state));
+  gHostedTransportState = state;
 }
 static void queueTx(const std::string& what) { gTxQueue.push_back(what); }
 static void hostedTx(const std::string& what) {  // a producer (lwIP, HCI, RPC)
-  if (!is_transport_tx_ready()) {
+  if (!is_transport_tx_ready() || gTxFenced) {
     note("tx refused " + what);
     return;
   }
   queueTx(what);
+}
+// transport_drv_reconfigure (transport_drv.c): esp_wifi_remote_init and the
+// BLE VHCI open call it. Below TX_ACTIVE it runs ensure_slave_bus_ready: a C6
+// reset pulse (transport_gpio_reset) and SDIO card init on slot 1.
+static void hostedReconfigure(const char* who) {
+  if (is_transport_tx_ready()) {
+    note(std::string("reconfigure ") + who + ": already up");
+    return;
+  }
+  note(std::string("reconfigure ") + who + ": slave reset + card init");
+  gpio_set_level(9, 0);
+  gpio_set_level(9, 1);
 }
 
 // Hosted 2.12.13: a fresh hostedInitWiFi() resets the C6 and returns when
@@ -367,10 +402,16 @@ esp_err_t radioHalStartTransport() {
 }  // namespace hal
 
 static void advance(uint32_t ms) {
-  // Hosted's write task runs as soon as time passes: each queued packet is a
-  // CMD53, answered by a running C6 and timed out (0x107) by a held one.
-  for (const auto& packet : gTxQueue) note((gEnPad ? "tx sent " : "tx 0x107 ") + packet);
-  gTxQueue.clear();
+  // Hosted's write task runs as time passes, one packet per kFakeTxPacketMs:
+  // each queued packet is a CMD53, answered by a running C6 and timed out
+  // (0x107) by a held one.
+  size_t sent = 0;
+  while (sent < gTxQueue.size() && ms >= kFakeTxPacketMs) {
+    note((gEnPad ? "tx sent " : "tx 0x107 ") + gTxQueue[sent++]);
+    gNow += kFakeTxPacketMs;
+    ms -= kFakeTxPacketMs;
+  }
+  gTxQueue.erase(gTxQueue.begin(), gTxQueue.begin() + static_cast<long>(sent));
   gNow += ms;
   if (gUpAt && gNow >= gUpAt && !gUpPosted) {
     gUpPosted = true;
@@ -570,7 +611,9 @@ static void reset_world() {
   gDuringDelay = nullptr;
   gBeforeHoldDis = nullptr;
   gHostedTransportState = 0;  // Hosted not initialised
+  gTxFenced = false;
   gTxQueue.clear();
+  gDuringTaskDelay = nullptr;
   gBeforeTxGate = nullptr;
   gTxGateAt = gEnLowAt = 0;
   comp::sMonitor = comp::CompanionMonitor();
@@ -653,10 +696,12 @@ static void hal_silence_unregisters_the_wifi_stop_rpc_and_holds_the_c6() {
   reset_world();
   hal::sTransportUp = true;
   hal::sHostedLinkUp = true;
-  hal::radioHalSilenceForRestart();
-  const std::vector<std::string> want = {"unregister esp_wifi_stop", "hold_dis 9", "level 9=0", "dir 9 out",
-                                         "hold_en 9"};
+  const uint32_t start = gNow;
+  hal::radioHalSilenceForRestart();  // Hosted's TX was not up: nothing queued, no flush
+  const std::vector<std::string> want = {"unregister esp_wifi_stop", "hosted-tx fence", "hold_dis 9", "level 9=0",
+                                         "dir 9 out", "hold_en 9"};
   CHECK(gEvents == want);
+  CHECK(gNow == start);
   CHECK(hal::sHeld && !hal::sTransportUp && !hal::sHostedLinkUp && hal::sRestartLatched);
   CHECK(gEnPad == 0 && gEnPadHeld);
 }
@@ -924,13 +969,17 @@ static void a_dead_c6_at_boot_gets_two_real_attempts() {
 // quiesced", Hosted's write task sent small packets (BLE HCI, RPC) to the
 // held C6: "sdmmc_send_cmd returned 0x107", "Failed to send data", then
 // "Unrecoverable host sdio state". The users keep producing through the
-// drain; a producer that passed the gate check just before it closed still
-// queues its packet. TX must be closed and that packet sent while EN is high.
+// drain; producers that passed the gate check just before it closed still
+// queue their packets, here a full Hosted queue. TX must be closed and those
+// packets sent while EN is high.
 static void reboot_stops_hosted_tx_before_the_en_latch() {
   reset_world();
   gHostedTransportState = 2;  // TRANSPORT_TX_ACTIVE: a live link
   gCompanionSilence = [] { hal::radioHalSilenceForRestart(); };
-  gBeforeTxGate = [] { queueTx("hci-racing-the-gate"); };
+  gBeforeTxGate = [] {
+    for (int i = 1; i < kHostedTxQueueDepth; i++) queueTx("burst-" + std::to_string(i));
+    queueTx("hci-racing-the-gate");
+  };
   gDuringDelay = [] { hostedTx(hal::sRestartLatched ? "tcp-ack-in-drain" : "http-reply"); };
   bool restarted = false;
   try {
@@ -942,11 +991,12 @@ static void reboot_stops_hosted_tx_before_the_en_latch() {
   CHECK(!sawEvent("tx 0x107"));  // no CMD53 against the held C6
   CHECK(sawEvent("tx sent http-reply"));
   CHECK(sawEvent("tx refused tcp-ack-in-drain"));
-  const size_t gate = eventIndex("hosted-tx state 1");  // TRANSPORT_RX_ACTIVE
-  const size_t raced = eventIndex("tx sent hci-racing-the-gate");
+  const size_t gate = eventIndex("hosted-tx fence");
+  const size_t raced = eventIndex("tx sent hci-racing-the-gate");  // the last of the full queue
   const size_t latch = eventIndex("level 9=0");
   CHECK(gate < raced && raced < latch && latch < gEvents.size());
   CHECK(gEnLowAt - gTxGateAt >= hal::kHostedTxFlushMs);
+  CHECK(gHostedTransportState == 2);  // the state stays up: no slave bring-up in the window
   CHECK(gEnPad == 0 && gEnPadHeld);
   CHECK(gEvents.back() == "restart");
 }
@@ -959,11 +1009,63 @@ static void hal_silence_closes_hosted_tx_then_holds_the_c6() {
   hal::sTransportUp = true;
   const uint32_t start = gNow;
   hal::radioHalSilenceForRestart();
-  const std::vector<std::string> want = {"unregister esp_wifi_stop", "hosted-tx state 1", "hold_dis 9", "level 9=0",
+  const std::vector<std::string> want = {"unregister esp_wifi_stop", "hosted-tx fence", "hold_dis 9", "level 9=0",
                                          "dir 9 out", "hold_en 9"};
   CHECK(gEvents == want);
   CHECK(gNow - start == hal::kHostedTxFlushMs);
-  CHECK(!is_transport_tx_ready() && hal::sRestartLatched && gEnPad == 0);
+  CHECK(gTxFenced && is_transport_tx_ready() && hal::sRestartLatched && gEnPad == 0);
+}
+
+// Review 2026-11-08: lowering Hosted's transport state to close TX would turn
+// a Wi-Fi init (esp_wifi_remote_init, System_WiFi.cpp's IDLE repair) or a BLE
+// open that is already past the radio gate into a slave bring-up: a reset
+// pulse on the live C6 during the flush, then SDIO card init on slot 1 in the
+// drain. With the fence they find the transport up and touch nothing.
+static void a_wifi_or_ble_init_in_the_window_starts_no_c6_bring_up() {
+  reset_world();
+  gHostedTransportState = 2;
+  gCompanionSilence = [] { hal::radioHalSilenceForRestart(); };
+  gDuringTaskDelay = [] { hostedReconfigure("wifi-init"); };    // during the flush
+  gDuringDelay = [] {
+    if (hal::sRestartLatched) hostedReconfigure("ble-open");  // during the drain
+  };
+  bool restarted = false;
+  try {
+    utils::rebootDevice("command", "commanded restart", 1000);
+  } catch (const RestartSignal&) {
+    restarted = true;
+  }
+  CHECK(restarted);
+  CHECK(sawEvent("reconfigure wifi-init: already up"));
+  CHECK(sawEvent("reconfigure ble-open: already up"));
+  CHECK(!sawEvent("reconfigure wifi-init: slave reset") && !sawEvent("reconfigure ble-open: slave reset"));
+  // EN went low once, at the latch, and stayed there.
+  size_t lows = 0;
+  for (const auto& e : gEvents) lows += e == "level 9=0";
+  CHECK(lows == 1 && gEnPad == 0 && gEnPadHeld);
+}
+
+// The latch flags come before the flush: an op already running in the
+// companion worker that tries to tear Hosted down, or to hold or release the
+// C6, inside the 100 ms flush is refused like one in the drain.
+static void an_op_inside_the_flush_is_refused() {
+  reset_world();
+  gHostedTransportState = 2;
+  gHostedInitialized = true;
+  static esp_err_t releaseRc = ESP_OK;
+  releaseRc = ESP_OK;
+  gDuringTaskDelay = [] {
+    hal::radioHalStopTransport();             // recoverProc / holdProc
+    CHECK(hal::radioHalHold(true) == ESP_OK);  // holdProc: no pin write before the flush ends
+    releaseRc = hal::radioHalHold(false);      // a feature start
+  };
+  hal::radioHalSilenceForRestart();
+  CHECK(gHostedInitialized && !sawEvent("hosted-deinit"));
+  CHECK(releaseRc == ESP_ERR_INVALID_STATE);
+  // The only EN write is the latch after the flush.
+  CHECK(eventIndex("level 9=0") > eventIndex("hosted-tx fence"));
+  CHECK(gEnLowAt - gTxGateAt >= hal::kHostedTxFlushMs);
+  CHECK(gEnPad == 0 && gEnPadHeld);
 }
 
 // ---- in-place companion resets and the web server --------------------------
@@ -1091,12 +1193,14 @@ int main() {
   a_dead_c6_at_boot_gets_two_real_attempts();
   reboot_stops_hosted_tx_before_the_en_latch();
   hal_silence_closes_hosted_tx_then_holds_the_c6();
+  a_wifi_or_ble_init_in_the_window_starts_no_c6_bring_up();
+  an_op_inside_the_flush_is_refused();
   c6restart_brings_the_web_server_back();
   a_reset_with_the_web_server_off_leaves_it_off();
   c6hold_off_brings_the_web_server_back();
   a_deferred_stop_is_followed_by_a_restart();
   a_late_link_still_gets_the_web_server();
   a_pending_restart_survives_another_reset();
-  std::puts("restart SDMMC quiesce, Hosted TX gate, companion start wait and HTTP restore: all scenarios passed");
+  std::puts("restart SDMMC quiesce, Hosted TX fence, companion start wait and HTTP restore: all scenarios passed");
   return 0;
 }

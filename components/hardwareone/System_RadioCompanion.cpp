@@ -1323,7 +1323,8 @@ void radioCompanionBeforeRestart() {
   // escaping a stuck BLE worker or a dead companion), and a restart must not
   // depend on them. What matters is that the SDMMC host is idle when
   // esp_restart() resets it, so the companion is silenced at the source and
-  // nothing here starts it again. Blocks no longer than a few GPIO writes.
+  // nothing here starts it again. Blocks for Hosted's TX flush (about 100 ms,
+  // only while the link was up) and a few GPIO writes.
   sRestarting.store(true);
   radioHalSilenceForRestart();
 }

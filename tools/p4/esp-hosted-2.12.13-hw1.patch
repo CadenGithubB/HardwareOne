@@ -9,6 +9,17 @@
  	REQUIRES ${driver_requires}
  	INCLUDE_DIRS ${pub_include}
  	PRIV_INCLUDE_DIRS ${priv_include})
+--- a/host/drivers/transport/sdio/sdio_drv.c
++++ b/host/drivers/transport/sdio/sdio_drv.c
+@@ -1573,7 +1573,7 @@
+ 	interface_buffer_handle_t buf_handle = {0};
+ 	void (*free_func)(void* ptr) = NULL;
+ 	uint8_t pkt_prio = PRIO_Q_OTHERS;
+-	uint8_t transport_up = is_transport_tx_ready();
++	uint8_t transport_up = esp_hosted_hw1_tx_open();
+ 
+ 	if (free_buf_func)
+ 		free_func = free_buf_func;
 --- a/host/drivers/transport/transport_drv.c
 +++ b/host/drivers/transport/transport_drv.c
 @@ -26,6 +26,8 @@
@@ -20,7 +31,33 @@
  
  #include "esp_hosted_cli.h"
  #include "rpc_wrap.h"
-@@ -283,11 +285,32 @@
+@@ -81,6 +83,25 @@
+ 	return (transport_state >= TRANSPORT_TX_ACTIVE);
+ }
+ 
++/* HardwareOne: a one-way TX fence for an intentional host restart. Once it is
++ * set, esp_hosted_tx and the STA/AP/serial wrappers refuse every new packet,
++ * and the write task only sends what was already queued. transport_state is
++ * left alone, so transport_drv_reconfigure() (Wi-Fi init, BLE open) still sees
++ * an up transport and starts no slave reset or card init. Only a CPU reset
++ * clears it.
++ */
++static volatile uint8_t hw1_tx_fenced = 0;
++
++void esp_hosted_hw1_fence_tx(void)
++{
++	hw1_tx_fenced = 1;
++}
++
++uint8_t esp_hosted_hw1_tx_open(void)
++{
++	return is_transport_tx_ready() && !hw1_tx_fenced;
++}
++
+ static void transport_driver_event_handler(uint8_t event)
+ {
+ 	switch(event)
+@@ -283,11 +304,32 @@
  static hosted_mempool_t * transport_drv_common_mempool_create(void)
  {
  	if (!mempool_common) {
@@ -54,3 +91,42 @@
  			.alignment_in_bytes = HOSTED_MEM_ALIGNMENT_64,
  			.malloc = transport_util_malloc,
  			.calloc = transport_util_calloc,
+@@ -344,7 +386,7 @@
+ 		return ESP_OK;
+ 
+ 	/* Transport state check */
+-	if (!is_transport_tx_ready() || !chan_arr[ESP_STA_IF]) {
++	if (!esp_hosted_hw1_tx_open() || !chan_arr[ESP_STA_IF]) {
+ 		ESP_LOGE(TAG, "Transport TX not ready or STA channel is not available, drop pkt");
+ #if defined(ESP_ERR_ESP_NETIF_TX_FAILED)
+ 		return ESP_ERR_ESP_NETIF_TX_FAILED;
+@@ -391,7 +433,7 @@
+ 		return ESP_OK;
+ 
+ 	/* Transport state check */
+-	if (!is_transport_tx_ready() || !chan_arr[ESP_AP_IF]) {
++	if (!esp_hosted_hw1_tx_open() || !chan_arr[ESP_AP_IF]) {
+ 		ESP_LOGE(TAG, "Transport TX not ready or AP channel is not available, drop pkt");
+ 
+ #if defined(ESP_ERR_ESP_NETIF_TX_FAILED)
+@@ -422,7 +464,7 @@
+ {
+ 	/* TODO */
+ 	/* Transport state check */
+-	if (!is_transport_tx_ready() || !chan_arr[ESP_SERIAL_IF]) {
++	if (!esp_hosted_hw1_tx_open() || !chan_arr[ESP_SERIAL_IF]) {
+ 
+ 		ESP_LOGE(TAG, "Transport TX not ready or serial channel is not available, drop pkt");
+ 
+--- a/host/drivers/transport/transport_drv.h
++++ b/host/drivers/transport/transport_drv.h
+@@ -147,6 +147,9 @@
+ 
+ uint8_t is_transport_rx_ready(void);
+ uint8_t is_transport_tx_ready(void);
++/* HardwareOne restart TX fence (transport_drv.c) */
++void esp_hosted_hw1_fence_tx(void);
++uint8_t esp_hosted_hw1_tx_open(void);
+ 
+ #define H_BUFF_NO_ZEROCOPY 0
+ #define H_BUFF_ZEROCOPY 1

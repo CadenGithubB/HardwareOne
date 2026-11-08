@@ -1,4 +1,4 @@
-# ESP-Hosted shared TX pool alignment
+# ESP-Hosted 2.12.13 patch: shared TX pool alignment and restart TX fence
 
 `prepare_esp_hosted.py` stages the pinned registry package plus
 `esp-hosted-2.12.13-hw1.patch` in
@@ -56,6 +56,36 @@ Turning off `CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM` is a valid temporary
 diagnostic: 1600 divides evenly by the current internal 64-byte cache line.
 It moves roughly 85.6 KiB of the two pools into internal RAM before other DMA
 allocations, so the retained fix preserves the existing SPIRAM policy.
+
+## Restart TX fence
+
+Before an intentional P4 restart, HardwareOne latches the C6's EN pad low so
+the companion stops sending while the SDMMC host drains
+(`radioHalSilenceForRestart`, HAL_Radio.cpp). The radio users keep running
+through that drain, and each packet they queued after EN went low became a
+CMD53 the held C6 never answered: "sdmmc_send_cmd returned 0x107", "Failed to
+send data", "Unrecoverable host sdio state" (bench 2026-11-08, 7 of 15
+reboots). Before the hold, HardwareOne closes TX and lets the write task send
+what was already queued while the C6 still answers.
+
+The patch adds that gate to `transport_drv.c`. `esp_hosted_hw1_fence_tx()` sets
+a one-way flag, and `esp_hosted_hw1_tx_open()` (the TX-ready state and no
+fence) replaces `is_transport_tx_ready()` in the STA, AP and serial wrappers
+and in the SDIO `esp_hosted_tx`. Every producer reaches the queue through
+those: lwIP through the STA/AP wrappers, serial RPC, BLE VHCI and the
+private-interface path through `esp_hosted_tx`. A refused packet is freed and
+reported the way a packet on a down transport already is. Only a CPU reset
+clears the flag. The other transports' `esp_hosted_tx` (SPI, SPI-HD, UART)
+are not changed; the P4 uses SDIO.
+
+`transport_state` is deliberately not changed. Lowering it with Hosted's own
+`set_transport_state(TRANSPORT_RX_ACTIVE)` would also refuse TX, but
+`transport_drv_reconfigure()` treats any state below TX_ACTIVE as a slave to
+bring up. A Wi-Fi init (`esp_wifi_remote_init`) or BLE open (`vhci_drv.c`)
+during the flush or the drain would then pulse the C6's reset and run SDIO
+card init on slot 1, the bus activity the restart quiesce keeps away. With the
+fence the state stays TX_ACTIVE and those calls return "Transport is already
+up", as before.
 
 ## Verification
 
