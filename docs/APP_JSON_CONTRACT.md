@@ -1,9 +1,10 @@
 # HardwareOne - App JSON Command Contract
 
-Audience: the Android app AI. This documents the JSON command surface added across
-this work session, plus the conventions for consuming it. Everything below is on
-the device after the pending flash (it will ride the next version bump on commit;
-the peer-metadata items shipped earlier in v0.95.10).
+Audience: the Android app AI. This documents the device's JSON command surface and
+the conventions for consuming it, as of firmware v0.99.98.5 (last revised with that
+release, 2026-10-25). Dated notes in the text mark when a field was added; the
+peer-metadata commands date from v0.95.10. Changes after v0.99.98.5 are recorded in
+`CHANGELOG.md`, not here.
 
 ---
 

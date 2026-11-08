@@ -61,14 +61,21 @@ Every step below must pass on the exact commit you intend to tag, from a clean t
    Do NOT rely on `--follow-tags`: it pushes annotated tags only, and every tag in this repo is
    lightweight (`git tag vX.Y.Z` with no `-a`/`-m`). Using it silently pushes the commit and
    leaves the release untagged on the remote - that is how v0.99.6 and v0.99.91.1 ended up with
-   commits but no tags. Verify with `git ls-remote --tags origin | grep vX.Y.Z` before step 6,
+   commits but no tags. Verify with `git ls-remote --tags origin | grep vX.Y.Z` before step 7,
    because `gh release create` needs the tag to exist on the remote.
-6. OPTIONAL - create a GitHub Release (notes mirror the CHANGELOG section). Write notes to a file and use
+6. Regenerate BUILD_INFO from the tag commit. The gate builds ran before the version-bump commit,
+   so those images and their `BUILD_INFO.md` come from the commit before it. For every build
+   directory you archive or hand out, check out the tag on a clean tree and rebuild it with
+   `tools/build_board.sh <board>` (or `tools/build_deployment.sh` for a deployment row); the build
+   rewrites `BUILD_INFO.md` (`tools/gen_build_info.py`). Its **Source:** line must show
+   `git rev-parse --short vX.Y.Z` and "(clean tree)". Do not run `gen_build_info.py` alone on an
+   old build: it reads the current HEAD, not the commit the image was built from.
+7. OPTIONAL - create a GitHub Release (notes mirror the CHANGELOG section). Write notes to a file and use
    `--notes-file` (NOT `--notes`) so backticks/quotes/apostrophes are not mangled by the shell:
    ```
    gh release create vX.Y.Z --title "vX.Y.Z - <theme>" --notes-file <file>
    ```
-7. Verify: `gh release view vX.Y.Z --json tagName,url`; confirm `git status` is clean and local == origin; report the URL.
+8. Verify: `gh release view vX.Y.Z --json tagName,url`; confirm `git status` is clean and local == origin; report the URL.
 
 ## This repo's specifics
 - Multi-board firmware: do NOT attach board binaries to releases. A single `.bin` is board-specific
@@ -78,7 +85,7 @@ Every step below must pass on the exact commit you intend to tag, from a clean t
 - Never `git add` build artifacts (`build/`, `*.bin`, `sdkconfig.<board>`) - they are gitignored; do not attach them.
 - Release notes are world-readable if this repo ever goes public: keep them user-facing - no secrets,
   credentials, internal paths, or private hostnames.
-- Most tags have no GitHub Release and that is fine. As of 2026-08 there are 50 tags and
-  24 Releases. A missing Release is NOT a backlog item and needs no backfill - check the
-  CHANGELOG entry instead, which always exists. Step 6 is optional by design.
+- Most tags have no GitHub Release and that is fine. A missing Release is NOT a backlog item and
+  needs no backfill - check the CHANGELOG entry instead, which always exists. Step 7 is optional
+  by design.
 - ASCII only in docs (this repo strips em-dashes): use `-` and `->`, not unicode dashes.

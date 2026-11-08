@@ -453,6 +453,14 @@ lost:
   flash again. This removes settings and captured data as well; keep backups
   (`backup` / Backup & Restore below) if they matter.
 
+**Handing a device over:** what `factoryreset` keeps includes the saved WiFi
+networks, the MQTT and LLM endpoint credentials, Bluetooth bonds other than the
+phone pipe, and the ESP-NOW identity and keys, so it does not prepare a device
+for a new owner. Before giving one away, erase the whole flash over the cable
+(`tools/build_board.sh <board> -p PORT erase-flash`) and flash it again. On a
+recovery-OTA layout this also removes the recovery updater; provision it again
+with [OTA_DEVICE_SETUP.md](OTA_DEVICE_SETUP.md).
+
 First-time setup refuses reserved owner names (`system`, `AuthBypass`, the
 bond admin) and passwords shorter than six characters, so a new device cannot
 be set up into a lockout. Compatibility and upgrade promises:
@@ -1067,6 +1075,14 @@ httpstatus                      - Show web server status and IP
 certinfo                        - Show HTTPS certificate details
 certgen [rsa]                   - Generate self-signed certificate (default: ECDSA P-256)
 ```
+
+Auto-reconnect (`wifiautoreconnect`) retries only the network that dropped. The
+hunt across all saved networks runs at boot, on `openwifi` and when the radio is
+switched back on, so after you carry the device to another saved network, run
+`openwifi`. To do that automatically, add an interval automation:
+`automation add name=wifihunt type=interval intervalms=300000 commands="IF WIFI=NONE THEN openwifi" enabled=1`.
+It also reopens WiFi after `closewifi`, so disable it while you want WiFi off.
+See [KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
 </details>
 
 <details>
