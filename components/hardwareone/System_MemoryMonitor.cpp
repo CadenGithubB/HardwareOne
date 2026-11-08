@@ -96,7 +96,8 @@ static const MemoryRequirement gMemoryRequirements[] = {
   // to PSRAM. The BLE-core figure independently matches openble's 42,944 (3 runs).
   //
   // 86016 = 80,980 + ~5 KB. NOTE this is deliberately a tight floor: on its own
-  // it admits the G2 client start on a WiFi+HTTP device (~95.8 KB free), which
+  // it admits the G2 client start on a WiFi+HTTP device (~95.8 KB free; about
+  // 4 KB less since P1-8 grew the cmd_exec and log_out stacks), which
   // lands near 9 KB and has been observed to fail afterwards at openg2. On
   // classic ESP32 the "g2client" row therefore carries a post-admission term
   // in checkMemoryAvailable() (readiness G-44) that refuses that combination.
@@ -184,12 +185,16 @@ bool checkMemoryAvailable(const char* component, String* outReason) {
   // the row's own cost leaves leftAfterBytes, and (b) the largest block can
   // take one 10 KB worker stack and still leave a 16 KB block. S3/P4 have the
   // RAM and keep the plain row.
+  // leftAfterBytes was 20 KB when g2_owner (G2_CONTROL_STACK_BYTES, created
+  // later, on the first glasses connect) had a 6 KB stack. P1-8 raised that
+  // stack to 8 KB, so the term grew by the same 2 KB: a start admitted at the
+  // floor still ends with the same free RAM once g2_owner is up.
   static const struct {
     const char* component;
     size_t leftAfterBytes;   // free internal RAM required after the start
     size_t minLargestBlock;  // contiguous internal block required at admission
   } kClassicHeadroom[] = {
-    { "g2client", 20480, 10240 + 16384 },
+    { "g2client", 20480 + 2048, 10240 + 16384 },  // +2 KB: g2_owner 6 -> 8 KB (P1-8)
   };
   for (const auto& term : kClassicHeadroom) {
     if (strcmp(term.component, req->component) != 0) continue;
@@ -249,7 +254,9 @@ static size_t gLowestHeapSeen = UINT32_MAX;
 // in System_MemUtil.h). Once the samplers became honest, 40960 sat ABOVE normal
 // operating level and warned every 10 s for as long as the G2 glasses were
 // connected, which trains the reader to ignore it.
-// Measured on feather_esp32_v2 (honest INTERNAL|8BIT figures):
+// Measured on feather_esp32_v2 (honest INTERNAL|8BIT figures, before P1-8
+// grew the cmd_exec and log_out stacks by 4 KB and g2_owner by 2 KB; expect
+// each line to be that much lower on current builds):
 //   boot, WiFi + HTTP, no BLE ......... 95,927 B
 //   after openble (server mode) ....... 33,435 B
 //   after the G2 client start ......... 26,495 B   (then `g2init`; now openble + openg2)

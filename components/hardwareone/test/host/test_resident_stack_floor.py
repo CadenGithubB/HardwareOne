@@ -5,8 +5,9 @@ cmd_exec, log_out and g2_owner ran with 312 to 700 B free on the P4X soaks of
 2026-11-04/05. Their sizes now leave at least 1.5 KB plus a margin over the
 worst recorded use. This test fails if a size shrinks below that floor, if a
 creation site or a stack reporter stops using the shared constant, or if one of
-the stacks moves to a caps-based (PSRAM-capable) create: all three can reach a
-flash operation, which needs an internal stack.
+the stacks moves to a caps-based (PSRAM-capable) create or gains a second,
+board-specific create: all three can reach a flash operation, which needs an
+internal stack.
 """
 from pathlib import Path
 import re
@@ -62,36 +63,83 @@ for task, (old_size, worst_free) in RECORDED.items():
     check(left >= FLOOR_FREE + MARGIN,
           f'{task}: {left} B free at the recorded peak; need {FLOOR_FREE} + {MARGIN} B')
 
-# No per-board variation: the constants are plain literals outside any #if.
-for name, text in (('CMD_EXEC_STACK_WORDS', header), ('DEBUG_OUT_STACK_WORDS', header),
-                   ('G2_CONTROL_STACK_BYTES', g2)):
-    check(len(re.findall(r'\b' + name + r'\s*=', text)) == 1, f'{name} is assigned more than once')
+# Every firmware source in the component (tests and third-party code excluded),
+# so a second definition, a macro override or a second create anywhere is seen.
+SKIP = {'test', 'third_party'}
+SOURCES = {
+    p.relative_to(COMPONENT).as_posix(): p.read_text(errors='replace')
+    for p in sorted(COMPONENT.rglob('*'))
+    if p.is_file() and p.suffix in ('.c', '.cpp', '.h', '.inc')
+    and not SKIP.intersection(p.relative_to(COMPONENT).parts)
+}
+
+# No per-board variation: each constant has exactly one literal definition in
+# the whole component and is never redefined or #undef'd by a macro, and the
+# cmd_exec creation variable is assigned once.
+for name, home in (('CMD_EXEC_STACK_WORDS', 'System_TaskUtils.h'),
+                   ('DEBUG_OUT_STACK_WORDS', 'System_TaskUtils.h'),
+                   ('G2_CONTROL_STACK_BYTES', 'G2_Glasses.cpp')):
+    defs = [f for f, text in SOURCES.items() for _ in re.findall(r'\b' + name + r'\s*=', text)]
+    check(defs == [home], f'{name}: expected one definition in {home}, found {defs}')
+    for f, text in SOURCES.items():
+        check(not re.search(r'#\s*(define|undef)\s+' + name + r'\b', text),
+              f'{f}: {name} is overridden by a macro; the size must not vary per board')
+assigns = [f for f, text in SOURCES.items() for _ in re.findall(r'\bcmdExecStackWords\s*=', text)]
+check(assigns == ['HardwareOne.cpp'], f'cmdExecStackWords assigned in {assigns}; expected once')
 
 # Creation sites pass the constant through plain internal-RAM creates, and the
 # size registry (taskstats json "stackSize") gets the same value.
 check(re.search(r'const uint32_t cmdExecStackWords = CMD_EXEC_STACK_WORDS;', main),
       'cmd_exec: creation size is not CMD_EXEC_STACK_WORDS')
-check(re.search(r'xTaskCreateLogged\(commandExecTask, "cmd_exec", cmdExecStackWords,', main),
-      'cmd_exec: not created through xTaskCreateLogged with cmdExecStackWords')
 check('constexpr uint32_t stackBytes = CMD_EXEC_STACK_WORDS;' in main,
       'cmd_exec: its own periodic stack check does not use CMD_EXEC_STACK_WORDS')
-
-check('taskStackRecord("log_out", DEBUG_OUT_STACK_WORDS);' in debug,
-      'log_out: size registry entry does not use DEBUG_OUT_STACK_WORDS')
-check(re.search(r'xTaskCreatePinnedToCore\(\s*debugOutputTask,\s*"log_out",\s*DEBUG_OUT_STACK_WORDS,', debug),
-      'log_out: not created with xTaskCreatePinnedToCore and DEBUG_OUT_STACK_WORDS')
-
-check(re.search(r'xTaskCreateLogged\(heartbeatWorkerTask, "g2_owner",\s*/\*stack bytes\*/ G2_CONTROL_STACK_BYTES,', g2),
-      'g2_owner: not created through xTaskCreateLogged with G2_CONTROL_STACK_BYTES')
 check('const uint32_t needApprox = G2_CONTROL_STACK_BYTES + 1200u;' in g2,
       'g2_owner: start gate does not follow G2_CONTROL_STACK_BYTES')
 check('? G2_CONTROL_STACK_BYTES - freeNow : 0;' in g2,
       'g2_owner: stack-peak probe does not use G2_CONTROL_STACK_BYTES')
 
-for text, where in ((main, 'HardwareOne.cpp'), (debug, 'System_Debug.cpp'), (g2, 'G2_Glasses.cpp')):
+# Each task name may appear only at its known places, each exactly once: the
+# one plain create with the shared constant, its size-registry entry and the
+# known-task table rows. Any other "name" literal -- a second create under a
+# board #if, a caps-based (PSRAM-stack) create, a record with another size --
+# fails here. All three tasks can reach a flash operation, which needs an
+# internal stack.
+ROW = r'\{\s*"cmd_exec",\s*\w+,\s*CMD_EXEC_STACK_WORDS\s*\}'
+ALLOWED = {
+    'cmd_exec': [
+        ('HardwareOne.cpp', r'xTaskCreateLogged\(commandExecTask, "cmd_exec", cmdExecStackWords,',
+         'created through xTaskCreateLogged with cmdExecStackWords'),
+        ('System_MemoryMonitor.cpp', ROW, 'known-task row uses CMD_EXEC_STACK_WORDS'),
+        ('System_TaskUtils.cpp', ROW, 'known-task row uses CMD_EXEC_STACK_WORDS'),
+    ],
+    'log_out': [
+        ('System_Debug.cpp', r'taskStackRecord\("log_out", DEBUG_OUT_STACK_WORDS\);',
+         'size registry entry uses DEBUG_OUT_STACK_WORDS'),
+        ('System_Debug.cpp', r'xTaskCreatePinnedToCore\(\s*debugOutputTask,\s*"log_out",\s*DEBUG_OUT_STACK_WORDS,',
+         'created with xTaskCreatePinnedToCore and DEBUG_OUT_STACK_WORDS'),
+    ],
+    'g2_owner': [
+        ('G2_Glasses.cpp', r'xTaskCreateLogged\(heartbeatWorkerTask, "g2_owner",\s*/\*stack bytes\*/ G2_CONTROL_STACK_BYTES,',
+         'created through xTaskCreateLogged with G2_CONTROL_STACK_BYTES'),
+    ],
+}
+for task, places in ALLOWED.items():
+    rest = dict(SOURCES)
+    for f, pattern, what in places:
+        n = len(re.findall(pattern, rest.get(f, '')))
+        check(n == 1, f'{task}: expected exactly one match in {f} ({what}), found {n}')
+        rest[f] = re.sub(pattern, '', rest.get(f, ''), count=1)
+    for f, text in rest.items():
+        check('"' + task + '"' not in text,
+              f'{f}: "{task}" appears outside its one create, size record and table rows '
+              '(a second or caps-based create?)')
+
+# Belt and braces: no caps or static create of the three, under any spelling
+# (xTaskCreateWithCaps, xTaskCreatePinnedToCoreWithCaps, xTaskCreateStatic...).
+for f, text in SOURCES.items():
     for task in ('cmd_exec', 'log_out', 'g2_owner'):
-        check(not re.search(r'xTaskCreate(WithCaps|Static|StaticPinnedToCore)\w*\([^;]*"' + task + '"', text),
-              f'{where}: {task} created with a caps/static helper; it needs an internal stack')
+        check(not re.search(r'xTaskCreate\w*(WithCaps|Static)\w*\s*\([^;]*"' + task + '"', text),
+              f'{f}: {task} created with a caps/static helper; it needs an internal stack')
 
 # xTaskCreateLogged records the size before it creates; taskstats json reads it.
 check(re.search(r'taskStackRecord\(pcName, usStackDepth\);\s*\n\s*\n\s*BaseType_t res = xTaskCreatePinnedToCore\(', taskutils),
@@ -118,6 +166,22 @@ for text, where in ((monitor, 'System_MemoryMonitor.cpp'), (taskutils, 'System_T
 m = re.search(r'\{ "g2", "G2 Glasses", FEATURE_CAT_DISPLAY, (\d+),', registry)
 check(m and int(m.group(1)) * 1024 >= sizes['g2_owner'] + 2048,
       'feature registry: G2 heap estimate is below the g2_owner stack + 2 KB')
+
+# Classic ESP32 G-44 term: g2_owner starts after the "g2client" admission, so
+# the term's "left after start" grows with that stack (20 KB at the old 6 KB).
+# The lifecycle harness pins the same figure.
+def classic_left_after(text, pattern, where):
+    m = re.search(pattern, text)
+    check(m, f'{where}: classic g2client "left after" term not found')
+    return sum(int(x) for x in re.findall(r'\d+', m.group(1))) if m else 0
+
+prod_left = classic_left_after(monitor, r'\{ "g2client", ([\d\s+]+), 10240 \+ 16384 \}', 'System_MemoryMonitor.cpp')
+harness = (HERE / 'g2_client_lifecycle_harness.cpp').read_text()
+pin_left = classic_left_after(harness, r'constexpr size_t kClassicLeftAfter = ([\d\s+]+), kClassicLargest = 10240 \+ 16384;',
+                              'g2_client_lifecycle_harness.cpp')
+check(prod_left >= 20480 + (sizes['g2_owner'] - 6144),
+      f'G-44 term leaves {prod_left} B after start; need 20480 + the g2_owner growth over 6144')
+check(prod_left == pin_left, f'G-44 term {prod_left} B differs from the harness pin {pin_left} B')
 
 if FAILURES:
     for f in FAILURES:
