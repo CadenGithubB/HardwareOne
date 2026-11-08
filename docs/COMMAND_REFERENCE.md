@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1016 commands across 57 modules (1016 registry entries).
+1023 commands across 57 modules (1023 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -66,7 +66,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`ota`](#ota) — 9 commands
 - [`setpattern`](#setpattern) — 1 commands
 - [`even_g2`](#even-g2) — 56 commands
-- [`ring`](#ring) — 12 commands
+- [`ring`](#ring) — 19 commands
 - [`llm`](#llm) — 36 commands
 - [`settingsedit`](#settingsedit) — 70 commands
 
@@ -1352,18 +1352,25 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 
 ## ring
 
-> The Even R1 smart ring over BLE, through a serialized, profile-gated transaction owner. ring scan [seconds] finds it and ring connect [mac|reconnect] connects (scanning first without a MAC); ring status [json] and ring disconnect show and end the link. ring health [json] reads vitals, ring controls and typed history; ring poll refreshes the vitals and ring history the history (ring history force, admin, skips the freshness window). ring query requests one reading; its raw form is admin-only, confirms every SET and refuses user-profile writes. ring control <collection|lowpower> <preserve|on|off> (admin) saves a desired state applied asynchronously, which the OLED and web Health controls also use; ring control refresh reads low power back. Bridging ring data onto the G2 glasses proved a dead end and was removed.
+> The Even R1 smart ring over BLE, through a serialized, profile-gated transaction owner. ring scan [seconds] finds it and ring connect [mac|reconnect] connects (scanning first without a MAC); ring status [json] and ring disconnect show and end the link. ring health [json] reads vitals, ring controls and typed history; ring poll refreshes the vitals and ring history the history (ring history force, admin, skips the freshness window). ring query requests one reading; its raw form is admin-only, confirms every SET and refuses user-profile writes. ring control <collection|lowpower> <preserve|on|off> (admin) saves a desired state applied asynchronously, which the OLED and web Health controls also use; ring control refresh reads low power back. The G2's own Health panel is fed the way the Even app feeds it: ring panel status and ring panel preview [test] show the snapshot and its bytes; ring panel send [test] (admin) sends one; ring panel feed [on|off] (admin; ring panel on and ring panel off are shorthands) feeds it automatically, saved and off by default, refreshing ring history every ring panel history [minutes] (admin, default 30).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `closering` | A | Close the R1 ring: drop its link and release its owner task (glasses, phone and Bluetooth stay up). |
 | `openring` | A | Open the R1 ring on the Bluetooth client stack and connect (scan, the saved address, reconnect, or a MAC).<br/>`Usage: openring [saved\|reconnect\|<mac>] (none = scan then connect; saved = the saved address; reconnect = drop, settle, connect)` |
-| `ring` |  | Even R1 ring.<br/>`Usage: ring <status\|scan\|connect\|disconnect\|health\|poll\|history\|query\|control>` |
+| `ring` |  | Even R1 ring.<br/>`Usage: ring <status\|scan\|connect\|disconnect\|health\|poll\|history\|query\|control\|panel>` |
 | `ring control` | A | Set the ring's health collection or low power.<br/>`Usage: ring control <collection\|lowpower> <preserve\|on\|off> (saved, applied asynchronously; ring health shows desired/observed)` |
 | `ring control refresh` |  | Read the ring's low-power state back. |
 | `ring health` |  | R1 vitals, ring controls and typed history. (add 'json' for JSON output) |
 | `ring history` |  | Refresh R1 typed history. |
 | `ring history force` | A | Refresh R1 typed history past the freshness window. |
+| `ring panel feed` | A | Feed the glasses' Health panel from the ring (saved; off by default).<br/>`Usage: ring panel feed [on\|off]` |
+| `ring panel history` | A | How often the feed refreshes ring history (steps, kcal, sleep).<br/>`Usage: ring panel history [minutes 10-1440] (default 30)` |
+| `ring panel off` | A | Same as ring panel feed off (saved). |
+| `ring panel on` | A | Same as ring panel feed on (saved). |
+| `ring panel preview` |  | Show the snapshot and its bytes without sending.<br/>`Usage: ring panel preview [test]` |
+| `ring panel send` | A | Send one snapshot to the glasses' Health panel now.<br/>`Usage: ring panel send [test] (test = fixed values 1234 steps, 210 kcal, sleep score 80 / 7h30m, 72 bpm, 98%)` |
+| `ring panel status` |  | Glasses Health panel feed: state, current values, last send and echo. |
 | `ring poll` |  | Refresh R1 vitals now. |
 | `ring query` |  | Queue one R1 query.<br/>`Usage: ring query <wear\|hr\|hrv\|spo2\|temp\|activity\|sleep> [daily\|point\|measure] ring query raw <module> <cmd> <subCmd> [hex_payload] [status=NN] (admin; a SET asks to confirm) status: bit0 type (0 notify, 1 ack), bit1 method (0 get, 1 set), bits2-3 ack (0 ok, 1 err, 2 refuse, 3 notSup)` |
 | `ring scan` |  | Scan for the R1 ring.<br/>`Usage: ring scan [seconds] (1..300, default 30)` |

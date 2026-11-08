@@ -251,6 +251,13 @@ static const char* cmd_closering(const String&) { return notExercised(); }
 static const char* cmd_ringquery(const String&) { return notExercised(); }
 static const char* cmd_ringhealth(const String&) { return notExercised(); }
 static const char* cmd_ringpoll(const String&) { return notExercised(); }
+static const char* cmd_ringpanelstatus(const String&) { return notExercised(); }
+static const char* cmd_ringpanelpreview(const String&) { return notExercised(); }
+static const char* cmd_ringpanelsend(const String&) { return notExercised(); }
+static const char* cmd_ringpanelon(const String&) { return notExercised(); }
+static const char* cmd_ringpaneloff(const String&) { return notExercised(); }
+static const char* cmd_ringpanelfeed(const String&) { return notExercised(); }
+static const char* cmd_ringpanelhistory(const String&) { return notExercised(); }
 static const char* cmd_healthlogging(const String&) { return notExercised(); }
 static const char* cmd_healthlogmerge(const String&) { return notExercised(); }
 

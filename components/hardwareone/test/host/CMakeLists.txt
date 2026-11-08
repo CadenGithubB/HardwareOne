@@ -139,6 +139,14 @@ set_target_properties(g2_health_graph_core_tests PROPERTIES
 target_compile_options(g2_health_graph_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# Stock G2 Health panel feed (sid 0x0E): app-identical encoding, clamps,
+# strict pre-TX whitelist validator and push policy.
+add_executable(g2_health_push_core_tests test_g2_health_push_core.cpp)
+set_target_properties(g2_health_push_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(g2_health_push_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # Bounds-safe bit operations shared by the notification policy and OLED. The
 # real production header derives capacity from each owning array reference.
 add_executable(event_kind_mask_tests test_event_kind_mask.cpp)
@@ -336,6 +344,10 @@ if(HW1_SANITIZE)
   target_compile_options(g2_health_graph_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(g2_health_graph_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(g2_health_push_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(g2_health_push_core_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(event_kind_mask_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -1182,6 +1194,7 @@ add_test(NAME heap_low_core_tests COMMAND heap_low_core_tests)
 add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
 add_test(NAME map_viewport_core_tests COMMAND map_viewport_core_tests)
 add_test(NAME g2_health_graph_core_tests COMMAND g2_health_graph_core_tests)
+add_test(NAME g2_health_push_core_tests COMMAND g2_health_push_core_tests)
 add_test(NAME event_kind_mask_tests COMMAND event_kind_mask_tests)
 add_test(NAME command_limit_tests COMMAND command_limit_tests)
 add_test(NAME command_lookup_core_tests COMMAND command_lookup_core_tests)

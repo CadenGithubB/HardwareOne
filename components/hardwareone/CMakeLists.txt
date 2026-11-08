@@ -168,6 +168,7 @@ set(hardwareone_srcs
         System_BleSecureChannel.cpp
         G2_Glasses.cpp
         G2_NativeNotes.cpp
+        G2_HealthPush.cpp
         G2_Ring.cpp
         BLE_CentralTx.cpp
         BLE_CentralCoordinator.cpp

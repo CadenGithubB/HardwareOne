@@ -76,6 +76,8 @@ extern "C" {
 #include "G2_RepairCore.h"       // the one-temple repair schedule
 #include "BLE_PhonePipe.h"     // controller-level TX gate (G2 L/R + R1)
 #include "G2_Ring.h"  // g2RingInit (eager registration in initG2Client)
+#include "G2_HealthPush.h"      // stock Health panel feed (sid 0x0E)
+#include "G2_HealthPushCore.h"  // its whitelist, re-checked at the wire
 #include "G2_Page_Common.h"    // TextPager + paging ops (g2TextPagerRender)
 #include "G2_Page_Sensors.h"   // g2ShowSensorList() (per-page module)
 #include "G2_Page_Network.h"   // g2ShowNetworkMenu / g2NetworkHandleTap
@@ -5585,6 +5587,11 @@ static void g2DispatchCompleteEnvelope(G2Temple& t, const G2EnvelopeView& env,
             t.side, env.seq, env.fragIdx, env.totalFrags,
             env.sid, env.flag, (unsigned)env.payloadLen);
   g2statsRecordRx(env.sid, env.flag, env.payload, env.payloadLen);
+#if ENABLE_R1_HEALTH
+  // Echo of a Health panel snapshot (the glasses re-encode what they stored).
+  if (env.sid == hw1_g2_health_push::kSid && t.side == 'R')
+    g2HealthPushOnRx(generation, env.payload, env.payloadLen);
+#endif
   handleEnvelope(t, env, generation, lifecycleEpoch, presentationEpoch);
 }
 
@@ -12968,6 +12975,26 @@ bool g2NativeNotesWireSend(const G2NoteContext& context,const uint8_t* pb,size_t
 }
 #endif
 
+#if ENABLE_R1_HEALTH
+// Stock Health panel feed boundary (G2_HealthPush). The right temple is the
+// one the Even app writes and the only one that refreshes the panel.
+bool g2HealthRightLink(uint32_t* generation, bool* busy) {
+  const G2LinkSnapshot link = g2LinkSnapshot();
+  if (generation) *generation = link.rightReady ? link.rightGeneration : 0;
+  if (busy) {
+    *busy = g2NativeVoiceActive() || quickNoteActive();
+  }
+  return link.rightReady && link.rightGeneration != 0;
+}
+
+bool g2HealthWireSend(uint32_t generation, const uint8_t* pb, size_t len) {
+  // Last gate before the radio: only the exact whitelisted snapshot shape.
+  if (!generation || !hw1_g2_health_push::validateSnapshotPb(pb, len)) return false;
+  return sendPbFragmented(gR, allocSeq(), hw1_g2_health_push::kSid, G2_FLAG_REQUEST,
+                          pb, len, generation);
+}
+#endif
+
 // Exact manual-terminal wire ordering.  Active is published last and cleared
 // with an exact CAS; a late worker can therefore never retire a newer token.
 // Allocation/queue failures retry without releasing ordering. If the worker
@@ -17871,6 +17898,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
 
     g2NativeTerminalTick();  // all queued EXIT/ACK/voice transitions win before TX
     g2NativeNotesTick();
+    g2HealthPushTick();      // stock Health panel feed; pauses for the sessions above
 
     // Process native EXIT/ACK first, then renew only a still-live lease.
     g2ConversateTick();

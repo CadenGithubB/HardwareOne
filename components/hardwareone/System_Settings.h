@@ -324,6 +324,8 @@ struct Settings {
       sensorLogAutoStart(false),
       healthLoggingEnabled(false),
       healthLoggingPollIntervalSec(900),  // 15 min — local R1 vitals logging cadence
+      g2HealthPanelFeed(false),           // G2 Health panel feed off until the user turns it on
+      g2HealthPanelHistoryMin(30),        // ring history refresh while the feed runs
       ringHealthCollectionDesired(0),     // Preserve: do not change the ring at first boot
       ringLowPowerDesired(0),             // Preserve: do not change the ring at first boot
       captureEncryptMode(1),            // seal LOG_R1 capture sessions at rest by default
@@ -1004,6 +1006,11 @@ struct Settings {
   bool sensorLogAutoStart;      // Auto-start sensor logging after boot with last-used parameters
   bool healthLoggingEnabled;      // HardwareOne local logger: keep LOG_R1 on and resume at boot
   int  healthLoggingPollIntervalSec; // How often the local logger mines R1 vitals (default 900 = 15 min)
+  // Stock G2 Health panel feed (G2_HealthPush): push R1 data to the glasses'
+  // own Health tile, and how often to refresh ring history (steps, kcal,
+  // sleep) while it runs and the right temple is connected.
+  bool g2HealthPanelFeed;
+  int  g2HealthPanelHistoryMin;
   // Persisted policy, not observed ring state. Values are the G2_Ring.h
   // G2RingDesiredState wire-control contract: 0=Preserve, 1=Off, 2=On.
   // These remain plain int fields because SETTING_INT writes through int*.

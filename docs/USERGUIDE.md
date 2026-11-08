@@ -1722,6 +1722,11 @@ vitals also on OLED **R1 Health** and Web **`/r1-health`**.
 Ring/Health CLI: `openring`, `closering`, `ring status`, `ring query hr|temp|wear`,
 `ring health [json]`, `ring poll`, `healthlogging status|interval`. A Bluetooth App can call the
 same commands over GATT (no dedicated phone UI yet).
+The glasses' own **Health** tile (stock firmware) can show the same R1 data without the Even app:
+`ring panel feed on` (admin, saved, off by default) pushes steps, active kcal, sleep score and
+duration, heart rate and SpO2 to the right temple on connect and when values change (at most once a
+minute), and keeps the ring data fresh while it runs (`ring panel history <min>`, default 30).
+`ring panel status` shows what was sent. Details: [G2_HEALTH_PANEL.md](G2_HEALTH_PANEL.md).
 3-pane list+text+image experiments: Tests -> Image -> Com2 (LZ4 multi) -> Q30*.
 </details>
 
