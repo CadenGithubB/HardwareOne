@@ -150,7 +150,8 @@ static void logSystemEvent(const char* tag, const char* pattern, ...) {
 // INSERT_CLEANUP
 
 static const std::vector<std::string> fixedDirs = {
-    "/", "/system", "/system/users", "/system/users/user_settings", "/maps"
+    "/", "/system", "/system/users", "/system/users/user_settings",
+    "/system/espnow", "/system/certs", "/maps"
 #if ENABLE_LLM_SOURCE_ONBOARD
     , "/system/llm"
 #endif
@@ -176,7 +177,8 @@ static void reset() {
   logs.clear(); systemLogs.clear(); takes = gives = unlockedTraversal = 0;
   explicitCloses = implicitCloses = metadataQueries = 0; virtualMounted = virtualTmp = false;
   add("/", true); add("/system", true); add("/system/users", true);
-  add("/system/users/user_settings", true); add("/maps", true); add("/system/llm", true);
+  add("/system/users/user_settings", true); add("/system/espnow", true); add("/system/certs", true);
+  add("/maps", true); add("/system/llm", true);
 }
 static bool exists(const std::string& path) { return nodes.count(path) && nodes.at(path)->alive; }
 static void finished(bool nested = false) {
@@ -242,7 +244,11 @@ static void policyAndPaths() {
   reset(); virtualMounted = virtualTmp = true;
   const std::vector<std::string> removedExpected = {
       "/first.tmp", "/second.tmp", "/system/config.tmp", "/system/leaf.tmp",
-      "/system/users/index.tmp", "/system/users/user_settings/42.json.tmp", "/maps/map.hwmap.tmp"
+      "/system/users/index.tmp", "/system/users/user_settings/42.json.tmp",
+      // Interrupted ESP-NOW identity / registry / restore and certificate saves.
+      "/system/espnow/identity.tmp", "/system/espnow/devices.json.tmp",
+      "/system/espnow/devices.json.restore.tmp", "/system/certs/https_server.key.tmp",
+      "/system/certs/https_server.crt.restore.tmp", "/maps/map.hwmap.tmp"
 #if ENABLE_LLM_SOURCE_ONBOARD
       , "/system/llm/model.tmp"
 #endif
@@ -258,12 +264,17 @@ static void policyAndPaths() {
   nodes.at("/system")->children.push_back(nodes.at("/system/nested/deeper.tmp"));
   add("/photos", true); add("/photos/photo.jpg.tmp"); add("/recordings", true); add("/recordings/audio.wav.tmp");
   add("/sd", true); add("/sd/keep.tmp");
+  add("/system/espnow/identity.json"); add("/system/certs/https_server.key");
+  add("/system/espnow/peers", true); add("/system/espnow/peers/AABBCCDDEEFF", true);
+  add("/system/espnow/peers/AABBCCDDEEFF/identity.json");
   cleanupBootTemporaryFiles(); finished();
   check(removed == removedExpected, "rooted and leaf backend paths map to exact VFS children");
   check(attempted == removedExpected, "non-files, virtuals, nested paths and reserved suffixes never reach removal");
   for (const auto& path : {"/system/header.header.tmp", "/system/upper.TMP", "/system/recovery.bak",
        "/system/ordinary.json", "/system/trailing.tmp.more", "/system/empty-name.tmp", "/system/folder.tmp",
-       "/system/folder.tmp/nested.tmp", "/system/nested/deeper.tmp", "/photos/photo.jpg.tmp", "/recordings/audio.wav.tmp", "/sd/keep.tmp"})
+       "/system/folder.tmp/nested.tmp", "/system/nested/deeper.tmp", "/photos/photo.jpg.tmp", "/recordings/audio.wav.tmp", "/sd/keep.tmp",
+       "/system/espnow/identity.json", "/system/certs/https_server.key",
+       "/system/espnow/peers/AABBCCDDEEFF/identity.json"})
     check(exists(path), std::string("preserved path: ") + path);
   check(exists("/system/llm/model.tmp") == !ENABLE_LLM_SOURCE_ONBOARD, "LLM cleanup follows compile-time feature");
   truthful(static_cast<unsigned>(removedExpected.size()));

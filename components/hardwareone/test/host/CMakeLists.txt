@@ -986,6 +986,18 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_bond_json.py
           ${ESPNOW_BOND_JSON_TEST_ARGS})
+# Both ESP-NOW identity writers refuse a short write (nearly full LittleFS)
+# instead of promoting a truncated identity.json; vendored ArduinoJson.
+add_test(
+  NAME espnow_identity_writes
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_identity_writes.py
+          ${ESPNOW_BOND_JSON_TEST_ARGS})
+# certgen saves the HTTPS key and certificate through checked writeTextAtomic.
+add_test(
+  NAME https_cert_writes
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_https_cert_writes.py)
 add_test(NAME p4eye_display_pixels COMMAND p4eye_display_pixels_tests)
 add_test(NAME p4eye_display_lifecycle COMMAND p4eye_display_lifecycle_tests)
 add_test(NAME rotary_core

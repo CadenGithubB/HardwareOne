@@ -50,6 +50,7 @@
 #include <time.h>
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/pk.h"
+#include "mbedtls/platform_util.h"  // mbedtls_platform_zeroize — key PEM copy
 #include "mbedtls/rsa.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
@@ -2624,21 +2625,31 @@ const char* cmd_certgen(const String& argsInput) {
     // /system is created at boot (fs.init.mkdirs); only ensure the certs dir.
     if (!VFS::existsGuarded("/system/certs", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"))) VFS::mkdirGuarded("/system/certs", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"));
 
-    File cf = VFS::openGuarded("/system/certs/https_server.crt", "w", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"));
-    if (!cf) {
-      snprintf(gDebugBuffer, 1024, "Error: Cannot create certificate file");
+    // Each file goes through a checked temp + rename (writeTextAtomic), so a
+    // full filesystem or a short write leaves the previous file in place
+    // instead of a truncated PEM. The key is written first: if the cert then
+    // fails, the old cert no longer matches and HTTPS falls back to HTTP
+    // until certgen succeeds, which the error below asks for.
+    const AuthContext certAuth = VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen");
+    const size_t keyLen = strnlen((const char*)keyPem, 4096);
+    const size_t certLen = strnlen((const char*)certPem, 4096);
+    String keyText;
+    bool keySaved = keyText.concat((const char*)keyPem, (unsigned int)keyLen) &&
+                    writeTextAtomic("/system/certs/https_server.key", keyText, certAuth);
+    // The String holds the private key in plain text; wipe it before it is freed.
+    if (keyText.length()) mbedtls_platform_zeroize(keyText.begin(), keyText.length());
+    if (!keySaved) {
+      snprintf(gDebugBuffer, 1024, "Error: Cannot write key file (filesystem full?); previous key and certificate kept");
       goto cleanup;
     }
-    cf.print((const char*)certPem);
-    cf.close();
-
-    File kf = VFS::openGuarded("/system/certs/https_server.key", "w", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"));
-    if (!kf) {
-      snprintf(gDebugBuffer, 1024, "Error: Cannot create key file");
+    String certText;
+    if (!certText.concat((const char*)certPem, (unsigned int)certLen) ||
+        !writeTextAtomic("/system/certs/https_server.crt", certText, certAuth)) {
+      snprintf(gDebugBuffer, 1024,
+               "Error: Key saved but the certificate could not be written (filesystem full?). "
+               "HTTPS will not start until certgen succeeds.");
       goto cleanup;
     }
-    kf.print((const char*)keyPem);
-    kf.close();
   }
 
   snprintf(gDebugBuffer, 1024,

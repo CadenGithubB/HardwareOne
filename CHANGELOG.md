@@ -60,6 +60,11 @@ everything user-visible since the v0.99.99 tag (55 commits).
   without a second prompt (also after the discovery window closed under an open prompt), and a device
   that already paired the requester answers Accept. The timeout names the repair command and the
   display's pairing screen shows the request's state. Not yet tested on hardware (host model only).
+- A short write on a nearly full filesystem no longer replaces the ESP-NOW identity (or a peer's
+  identity file) with a truncated copy, which took the mesh offline until a bond-wiping
+  `espnowregenidentity`; the old file is kept. `certgen` writes the HTTPS key and certificate through a
+  checked temp-and-rename and reports a failed save instead of truncating them. Boot cleanup also removes
+  leftover temps in `/system/espnow` and `/system/certs`. Host tests only.
 - Host suite: nine harnesses re-pinned after the Waveshare merge; the event-catalog structure test walks
   what git would commit; the continuous-STT suites run serially under ctest.
 

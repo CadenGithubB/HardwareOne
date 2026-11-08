@@ -1790,7 +1790,8 @@ broker calls it only under `ESP_PLATFORM`.
 `boot_temp_cleanup` executes the production startup sweep, `VFS::DirectoryReader`
 and `FsLockGuard` with real Arduino `String`. Controlled file, semaphore and log
 boundaries cover rooted/leaf backend names, child close before removal, exact
-directory scope, LLM enabled/disabled, nested caller lock ownership, failed opens
+directory scope (`/`, `/system`, `/system/users`, `user_settings`, `/system/espnow`,
+`/system/certs`, `/maps`, and `/system/llm` when built), LLM enabled/disabled, nested caller lock ownership, failed opens
 and removals, and accurate success/failure diagnostics. Directories, virtual
 entries, `.header.tmp`, backups and out-of-scope children must survive the sweep.
 It also checks the shared `VFS::isStagingName` predicate the track pickers use
@@ -4410,6 +4411,28 @@ console printer of a manifest dump, runs against a modeled 64-line output queue 
 drops when full and must deliver every line. `--component`/`--source-dir`
 point it at another tree; ASan/UBSan follow `--sanitize`. The radio transfer, the
 senders' `sendFileToMac` and the web response are not run.
+
+## ESP-NOW identity and HTTPS certificate writes
+
+`espnow_identity_writes` compiles the production `writeIdentityFile` (this device's
+encrypted Ed25519 identity) and `writePeerIdentityFile` with their directory and path
+helpers and the shared `writeJsonFileComplete`, the vendored ArduinoJson and an
+in-memory filesystem whose free space can run out mid-write. A write one byte short,
+half a file, a full partition, a backend that stores less than `write()` reports, and a
+failed rename must each return false, remove the temp, never reach the rename (short
+writes) and leave the previous `identity.json` byte for byte; a write that exactly fits
+succeeds. `--source-dir <dir>` reads `System_ESPNow_Identity.cpp`/`.h` from another tree:
+the pre-fix writers (only `written == 0` rejected) fail 22 checks.
+
+`https_cert_writes` is a source contract on `cmd_certgen`: no File is opened with "w",
+the key and then the certificate go through `writeTextAtomic` with each result checked
+(the helper's own short-write cases are in `checked_text_writes`), and the `String` copy
+of the key PEM is wiped. `--source-dir` runs it on another tree; the pre-fix code fails.
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_identity_writes.py --sanitize
+python3 components/hardwareone/test/host/test_https_cert_writes.py
+```
 
 ## Camera lifecycle and backends
 
