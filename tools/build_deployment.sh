@@ -89,6 +89,12 @@ STAGING_RELEASE=""
 PREVIOUS_RELEASE=""
 PUBLISHED_RELEASE=0
 
+# Builds of one checkout share managed_components/ (and the updater's), synced
+# to the configuring target's lock: refuse while a build of another target runs
+# in this checkout (builds of the same target may share it).
+. "$REPO/tools/checkout_build_lock.sh"
+hw1_take_checkout_build_lock "$REPO" "$TARGET" "tools/build_deployment.sh $SELECTOR"
+
 mkdir -p "$OUTPUT_ROOT"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   LOCK_HOLDER=""

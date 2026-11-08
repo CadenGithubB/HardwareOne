@@ -808,11 +808,24 @@ elseif(IDF_TARGET STREQUAL "esp32p4")
         configure_file("${_hw1_tracked_lock}" "${_hw1_dependencies_lock}" COPYONLY)
         file(WRITE "${_hw1_lock_seed}" "${_hw1_tracked_lock_sha}")
     endif()
+    # configure_file lists the tracked lock as an input only in a configure
+    # that re-seeds, and the stamp follows the copy, so list it here too: a pull
+    # that changes only the P4 pins must re-seed and resync on the next build.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_hw1_tracked_lock}")
 else()
     set(_hw1_dependencies_lock
         "${CMAKE_CURRENT_SOURCE_DIR}/dependencies.lock.${IDF_TARGET}")
 endif()
 idf_build_set_property(DEPENDENCIES_LOCK "${_hw1_dependencies_lock}")
+# Every build directory shares managed_components/, synced to this lock inside
+# project(). Record the lock around the sync so the build directories of other
+# targets reconfigure (and resync) on their next build, and list the stamp as a
+# configure dependency so this one does after theirs.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/HW1ManagedComponents.cmake")
+set(_hw1_managed_components_stamp
+    "${CMAKE_CURRENT_SOURCE_DIR}/.hw1-build/managed_components.stamp")
+hw1_managed_components_stamp("${_hw1_dependencies_lock}"
+    "${_hw1_managed_components_stamp}" PRE_SYNC)
 
 if(_ota_layout)
     set(PROJECT_VER "0.99.99+${_ota_version_suffix}")
@@ -820,6 +833,8 @@ else()
     set(PROJECT_VER "0.99.99")
 endif()
 project(hardwareone-idf)
+hw1_managed_components_stamp("${_hw1_dependencies_lock}"
+    "${_hw1_managed_components_stamp}" POST_SYNC)
 
 # ESP-IDF creates component targets while project() runs. Directory-level
 # add_compile_definitions() calls made below therefore do not retroactively

@@ -44,8 +44,11 @@ defaults + `boards/<board>.defaults`, followed by the optional SDK policy in
   `idf.py build` reconfigure on esp32s3 could combine `flash=16mb` with an
   8 MB board's saved configuration.
 - Build directories and partition inputs are independent. Dependency installation
-  still shares `managed_components/`: finish component resolution before running
-  builds concurrently, and serialize configuration when changing chip targets.
+  still shares `managed_components/`, synced to the configuring target's lock;
+  `cmake/HW1ManagedComponents.cmake` makes the next build of another target
+  reconfigure and resync it on its own, and serializes the syncs. Builds of one
+  target may run concurrently; the wrappers refuse a build of another target
+  while one runs (`tools/checkout_build_lock.sh`).
 - Local sdkconfig experiments (`menuconfig`) apply per board dir, since each
   dir owns its sdkconfig.
 - Each successful build writes **`build-<board>/BUILD_INFO.md`** — a manifest
