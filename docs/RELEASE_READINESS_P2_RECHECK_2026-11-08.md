@@ -2,7 +2,7 @@
 
 Tree: `/Volumes/hw1build/road-to-1.0`, branch `claude/road-to-1.0` at `57f8bbb3`. One skeptic re-checked each group against today's tree. G-73 is left out because it is already fixed.
 
-**Coverage gap:** the verdict input stopped partway through G-82 (its bounded fix is cut off). No verdicts arrived for **G-83..G-89**, so this report does not cover them. They need a separate pass.
+**Coverage:** G-62..G-82 below; G-83..G-89 were re-checked separately (addendum at the end).
 
 ## 1. Summary table
 
@@ -82,3 +82,104 @@ Also marked "fix before 1.0", but only maintainers see these (docs-only, cheap):
 ## 5. Defer
 
 - **G-82 (medium):** the 184 MB tree, about 52 unused library folders (some GPL), the enclosure STLs and review zips, and the G2/R1 RE tooling. The owner decides what to publish. Removing files shrinks the archive and checkout but not the full clone without a history rewrite. The bounded-fix text was cut off in the input.
+
+## Addendum: G-83..G-89 (2026-11-08)
+
+All seven findings were re-checked at 966ee3f1 (`claude/road-to-1.0`), one skeptic per group. Each one is still real. Two need fixing before 1.0, one needs a KNOWN_ISSUES line, and four can be closed for 1.0 and moved to the post-1.0 backlog.
+
+| ID | Title | Still real? | User impact | Fix size | Recommendation |
+|---|---|---|---|---|---|
+| G-83 | Two hand-synchronised known-task tables already disagree by one row | Yes. It is now committed, so the "uncommitted" tag is out of date. | Low, diagnostics only. `[MEMSAMPLE]` never shows `espnow_tx`. MemoryMonitor reads high-water marks live through captured handles, which TaskUtils deliberately avoids. | Small (about 60-100 lines in 2-3 files plus a host check) | Optional cleanup for 0.99.99.x or after 1.0. Do not hold the release. |
+| G-84 | Command handlers registered under two names (11 pairs, now 12) | Yes, with `c6console`/`c6_console` added. The "no-alias policy" framing is overstated, and the proposed direction is backwards. | Small and cosmetic. About 12 extra help and reference rows. Nothing behaves wrongly. | Small for labels only. Medium for real removal. | Downgrade to P3 or defer. Keep the `open<x>`/`close<x>`/`<x>read` convention and label the twins as aliases. Decide removal after 1.0 together with the app clients. |
+| G-85 | System_Utils catch-all header pulls WebServer_Server.h into about half the sources | Yes, slightly larger: 105 of 226 `.cpp` files, 5,290 lines. | Developers only. Long rebuilds, hidden dependencies, and the executor and auth gate are buried in a 5.3k-line utility file. | Medium for the full slice. Small for the include removal alone. | Defer past 1.0 (P2 optional). Remove the include first, then move the executor in a separate commit. |
+| G-86 | Compatibility shims: dead aliases and live APIs mislabelled legacy | Yes. The live APIs have gained callers. `getClientIP(String&)` has about 9 production callers, not 5. | None for end users. Source hygiene only. | Small (about 6 files, roughly 15 lines, mostly comments) | Optional hygiene: one commit if there is a spare slot, otherwise after 1.0. Do not migrate the `getClientIP(String&)` callers. |
+| G-87 | openwifi blocks the shared command executor | Yes, and worse than stated. Up to about 150 s for plain `openwifi` (the best-network hunt), 50 s for `--index` and `--saved-id`. | Moderate when WiFi is unreachable. All transports queue behind `cmd_exec`. The web caller ties up httpd and times out after 60 s while the hunt keeps running. | Medium | Defer the code fix past 1.0. Document the limitation for 1.0 and correct "~50 s" in the group text. |
+| G-88 | Command-registry drift gate unusable: audit always exits 1, no reference `--check`, and the reference has now drifted | Yes. The drift has now happened: `docs/COMMAND_REFERENCE.md` is missing 9 shipped commands. | Moderate for docs, low for runtime. `help llm` gives the wrong search order. Four HT16K33 matrix settings show as read-only in the settings editor. There is no working gate. | Small (about 1-2 hours) | Fix before 1.0 in one small commit. |
+| G-89 | USERGUIDE multi-hop section contradicts itself on pairing through relays | Yes. Only the line numbers have moved. | Low, docs only. A user may try to pair through a relay and the request never arrives. | Trivial (1-2 lines of docs) | Fix before 1.0 as part of the docs pass. |
+
+### Fix before 1.0
+
+- **G-88: command-registry gate and stale reference.**
+  - **Evidence:**
+    - `python3 tools/command_registry.py audit` exits 1 with 13 problems.
+      - 9 are false positives on `ota*`. They come from two `otaCommands[]` tables in opposite `#if HW1_OTA_LAYOUT`/`#else` branches (`System_OTA.cpp:2169` and `:2191`).
+      - 4 are real orphan cmdKeys: `matrixbrightness`, `matrixrotation`, `matrixsquare` and `matrixpanel` (`i2csensor_ht16k33.cpp:46-53`).
+    - There is no `--check` mode (`tools/command_registry.py:439-448`).
+    - The regenerated reference has 1006/1015 commands/entries; the tracked file says 997/1006. The missing commands are `memdiag`, `pdmamplify`, `pdmhpf`, `sttdetector`, `sttraw`, `sttdecisionpre`, `sttnoisepercentile`, `sttsilencefloor` and `sttspeechfloor` (from 89242716 and 44b085c1, not regenerated in c6d8dd21).
+    - The llm overview at `System_CommandRegistry.cpp:859-860` gives the search order backwards. The code checks `/system/llm` first, then `/sd/llm`.
+  - **Bounded fix:**
+    1. Add `reference --check` (render, compare with `docs/COMMAND_REFERENCE.md`, exit 1 on a difference). Make the audit treat `otaCommands` as mutually exclusive branches and stop counting the dead branch.
+    2. Add thin setter commands `matrixbrightness <0-15>`, `matrixrotation <0-3>`, `matrixsquare <0|1>` and `matrixpanel <0|1>` over the existing setSetting path.
+    3. Change the llm overview to "internal /system/llm then /sd/llm".
+    4. Regenerate `docs/COMMAND_REFERENCE.md`.
+    5. Add a host-suite test that runs `audit` and `reference --check`, and add both commands to RELEASING.md "Gate: before any tag".
+  - **Done when** `audit` exits 0, `reference --check` exits 0, and both run in the host suite.
+
+- **G-89: USERGUIDE pairing-through-relays contradiction.**
+  - **Evidence:**
+    - `docs/USERGUIDE.md:572-573` says relays carry "the initial pairing handshake". `:591-592` says pairing is single-hop.
+    - The code agrees with the second statement. `System_ESPNow.cpp:5324-5325` and `:5363` exclude `PAIR_*` from flooding and from `RELAY_DATA`, while KEY_EX and SESSION frames do relay. The `espnowmeshttl` help at `:13280` and `:18252` says "pairing [is] always single-hop".
+  - **Bounded fix:**
+    - Delete " — including the initial pairing handshake" at `:572-573`.
+    - After the single-hop sentence at `:591-594`, add: "Once two devices share the mesh passphrase, their key exchange and encrypted session setup do travel through relays, so a paired peer that moves out of range stays reachable."
+    - Optional: reword the "far-peer pairing" `static_assert` strings at `System_ESPNow_Wire.h:884-888` to "far-peer key exchange".
+
+### Add to KNOWN_ISSUES
+
+- **G-87: `openwifi` is synchronous and can stall other commands.**
+  - **Evidence:**
+    - Plain `openwifi` runs `connectToBestWiFiNetwork()` with `kWifiConnectHuntBudgetMs = 150000` (`System_WiFi.h:159`, `:190`). Each network gets 35 s with 2 s gaps, plus inline NTP on connect.
+    - `--index` and `--saved-id` take 35 s, plus a 15 s rollback (`System_WiFi.cpp:993-997`).
+    - The web "save and connect" button (`WebPage_Settings.h:2825`) goes through `submitAndExecuteSync` with a 60 s wait on the single httpd task.
+    - `G2_Page_Network.cpp:1245` and two host harnesses depend on the synchronous behaviour.
+  - **KNOWN_ISSUES line:** "`openwifi` runs on the shared command executor. If saved networks are out of range or the password is wrong, other commands from every transport wait up to about 150 s (best-network hunt) or 50 s (`--index`/`--saved-id`). The web page reports a timeout after 60 s while the connect attempt continues. Use `wifistatus` to watch progress."
+  - **Optional for 1.0:** add a cliHint to the `openwifi` help pointing to `wifistatus`.
+  - **Post-1.0 bounded fix:**
+    - Add an opt-in `openwifi async [--best|--index N|--saved-id id]`, modelled on `cameraAsyncForm`.
+    - It runs the same connect code in a one-shot task with `BOOT_NET_STACK_WORDS`, refuses while a connect is already running, and replies at once.
+    - Keep the synchronous default and switch only `WebPage_Settings.h:2825` to the async form.
+    - Done when the async form returns in under 100 ms, a host suite covers supersede/rollback, and bench runs on feathers3 and p4x_eye are recorded.
+
+### Close
+
+These four are closed for 1.0 and move to the post-1.0 backlog. Each is still real, but none is a release blocker.
+
+- **G-83: duplicate known-task tables.**
+  - **Evidence:**
+    - `System_TaskUtils.cpp:710-724` has 13 rows including `espnow_tx`. `System_MemoryMonitor.cpp:391-404` has 12 rows and no `espnow_tx`. Each has its own positional `taskAlive[]` array.
+    - MemoryMonitor calls `uxTaskGetStackHighWaterMark(handle)` live (`:432-434`), which TaskUtils avoids on purpose (`:733-740`).
+    - The `input_gamepad` comments and the System_Utils mention at `HAL_Input.h:61-63` are stale.
+  - **Backlog bounded fix:**
+    1. Add a single `collectKnownTaskRows()` provider in System_TaskUtils (a `KnownTaskRow` struct carrying name, handle, stack bytes, alive and snapshot fields).
+    2. Have MemoryMonitor use it and read high-water marks from the snapshot. Drop the `taskIdx == 1` special case.
+    3. Fix the comments.
+    4. Add a host check that the row names match `xTaskCreate*` names.
+
+- **G-84: command name pairs.**
+  - **Evidence:**
+    - 12 pairs, the latest being `c6console`/`c6_console` at `System_RadioCompanion.cpp:1233/1236`.
+    - `docs/APP_JSON_CONTRACT.md:103/105` documents `blestatus`/`wifistatus` with their aliases.
+    - Internal callers and the voice table use `srstart`, `srstop`, `closesr`, `blestatus`, `espnowstatus` and `wifistatus`.
+    - The convention is the `*read`/`open*` form (21 and 23 reference rows).
+  - **Backlog bounded fix:** a description-only pass that sets the non-canonical help text to "Alias of <canonical>.", then regenerates the reference and reruns the registry and overview tests. Correct the group's done-condition to "no duplicated `*read` rows".
+
+- **G-85: System_Utils catch-all header.**
+  - **Evidence:**
+    - `System_Utils.h:54-56` includes WebServer_Server.h under `ENABLE_HTTP_SERVER`. About 86 of the 105 including files get it only this way.
+    - The executor is still in `System_Utils.cpp:4066-~5000`.
+    - `MODULARIZATION_PLAN.md:579-583` records that a networking-disabled header probe fails because of this.
+  - **Backlog bounded fix:**
+    1. Remove the WebServer_Server.h include and add direct includes where the compiler reports missing declarations.
+    2. Check that feathers3 and p4x_eye link with HTTP both on and off.
+    3. Move the executor to `System_CommandExecutor.cpp` in a separate commit, then run the command_task_isolation, register_submit, command_executor_admission and command_resolution_contract host suites.
+
+- **G-86: compatibility-shim labels.**
+  - **Evidence:**
+    - `G2_SID_STATE_EVENT` (`System_G2_Protocol.h:118`) has no users. `formatMacAddrStr` has no callers, and `formatMacAddr` has one (`WebPage_Bond.cpp:982`).
+    - `SCREEN_*` (58/42 hits), `OLEDMenuItem` (42), `getClientIP(String&)` (about 9 production callers) and `SR_TASK_PRIORITY_LEVEL` are live APIs labelled legacy.
+  - **Backlog bounded fix:**
+    1. Delete `G2_SID_STATE_EVENT`.
+    2. Migrate the one `formatMacAddr` caller to `macToDisplay` and delete both aliases at `System_Utils.h:454-461`.
+    3. Reword the labels at `HAL_Display.h:226-229` and `:268`, `OLED_Display.h:181`, `WebServer_Utils.cpp:234`, `System_TaskUtils.h:135` and `System_Debug_Manager.h:54` as supported aliases or convenience forms.
+    4. Keep `ESPNOW_V4_FLAG_ENCRYPTED` as a reserved bit.
+    - Verify with a feathers3 build.
