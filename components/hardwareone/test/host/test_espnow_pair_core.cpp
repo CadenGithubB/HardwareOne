@@ -1,14 +1,16 @@
 // Discover-then-confirm ESP-NOW pairing (System_ESPNow_PairCore.h, compiled as
 // is) between two modelled devices over a lossy broadcast channel. The device
 // glue mirrors System_ESPNow.cpp: v4h_pair_request / pairAnswerReceived /
-// cmd_espnow_accept / cmd_espnow_reject / the heartbeat sweep (step 2c) and
-// the KEY_EX_HELLO hook; cmd_espnow_pairsecure is modelled as "add the peer to
-// the registry and send KEY_EX_HELLO". A source contract pins those call sites.
+// cmd_espnow_accept / cmd_espnow_reject / the heartbeat sweep (step 2c);
+// cmd_espnow_pairsecure is modelled as "add the peer to the registry and send
+// KEY_EX_HELLO". A KEY_EX_HELLO is not a pair answer (the target also sends one
+// for unrelated encrypted traffic). A source contract pins those call sites.
 //
-// Cases: happy path, lost first REQUEST, lost ACCEPT (with and without the
-// HELLO path), every answer lost until timeout then the half-pair repair,
-// duplicate REQUEST while pending and after an answer, lost REJECT, timeout,
-// an initiator that sends once (older firmware), and the millis() wrap.
+// Cases: happy path, lost first REQUEST, lost ACCEPT, every answer lost until
+// timeout then the half-pair repair, duplicate REQUEST while pending and after
+// an answer, the discovery window closing while the prompt is open, an
+// unrelated HELLO while waiting, lost REJECT, timeout, an initiator that sends
+// once (older firmware), and the millis() wrap.
 #include "System_ESPNow_PairCore.h"
 
 #include <cstdint>
@@ -44,7 +46,6 @@ struct Device {
   std::set<int> registry;    // devices[] (by device index)
   bool windowOpen = true;
   bool resends = true;       // false: an initiator that sends its REQUEST once
-  bool helloRepairs = true;  // false: ignore KEY_EX_HELLO as an answer
   int prompts = 0;           // accept prompts shown
   int completions = 0;       // PairCompleteJob runs (initiator)
   int timeouts = 0;
@@ -100,9 +101,7 @@ struct World {
       }
       case Kind::Accept: answerReceived(f.to, f.from, Answer::Accept); break;
       case Kind::Reject: answerReceived(f.to, f.from, Answer::Reject); break;
-      case Kind::Hello:
-        if (d.helloRepairs) answerReceived(f.to, f.from, Answer::Accept);   // espnowPairNoteKeyExHello
-        break;
+      case Kind::Hello: break;   // key exchange only: not a pair answer
     }
   }
   // The heartbeat sweep, step 2c.
@@ -177,12 +176,9 @@ static void lostFirstRequest() {
 
 // The target accepts, the first ACCEPT is lost. The initiator's next REQUEST
 // gets the remembered answer (and the unsolicited copy also covers it).
-static void lostAcceptRetransmit(bool helloLost) {
+static void lostAcceptRetransmit() {
   World w;
-  w.dev[0].helloRepairs = !helloLost;
-  w.drop = [helloLost](const Frame& f, int nth) {
-    return (f.kind == Kind::Accept && nth == 1) || (helloLost && f.kind == Kind::Hello && f.from == 1);
-  };
+  w.drop = [](const Frame& f, int nth) { return f.kind == Kind::Accept && nth == 1; };
   w.request(0, 1);
   w.run(500);
   CHECK(w.userAnswers(1, Answer::Accept));
@@ -195,15 +191,41 @@ static void lostAcceptRetransmit(bool helloLost) {
   CHECK(w.dev[1].prompts == 1);
 }
 
-// Every PAIR_ACCEPT frame is lost: the target's KEY_EX_HELLO completes the pair.
-static void everyAcceptLostHelloRepairs() {
+// The target's discovery window closes (expiry, 'espnowpairmode off', the
+// OLED's B button) while its accept prompt is open. The initiator's retransmits
+// are the same pending request: no REJECT, and the user's late accept pairs
+// both sides.
+static void windowClosesWhilePromptOpen() {
   World w;
-  w.drop = [](const Frame& f, int) { return f.kind == Kind::Accept; };
   w.request(0, 1);
-  w.run(500);
+  w.run(100);
+  CHECK(w.dev[1].prompts == 1);
+  w.dev[1].windowOpen = false;
+  w.run(kResendMs * 4);   // several retransmits land with the window closed
+  CHECK(w.sent[(int)Kind::Reject] == 0);
+  CHECK(w.dev[0].st.out.active && w.outcomeOf(0) == Outcome::Waiting);
+  CHECK(w.dev[1].st.in.active && w.dev[1].prompts == 1);
   CHECK(w.userAnswers(1, Answer::Accept));
-  w.run(200);
+  w.run(1000);
   CHECK(w.bothPaired() && w.dev[0].completions == 1);
+  CHECK(w.sent[(int)Kind::Reject] == 0);
+}
+
+// The target sends a KEY_EX_HELLO for unrelated traffic (an encrypted send to a
+// peer without identity, espnowkeyex, espnowprobe) while the initiator waits,
+// then its user rejects. The HELLO must not count as an accept.
+static void unrelatedHelloIsNotAnAccept() {
+  World w;
+  w.request(0, 1);
+  w.run(100);
+  w.send(Kind::Hello, 1, 0);
+  w.run(100);
+  CHECK(w.dev[0].st.out.active && w.dev[0].completions == 0);
+  CHECK(w.outcomeOf(0) == Outcome::Waiting && w.dev[0].registry.empty());
+  CHECK(w.userAnswers(1, Answer::Reject));
+  w.run(1000);
+  CHECK(w.outcomeOf(0) == Outcome::Declined);
+  CHECK(w.dev[0].registry.empty() && w.dev[1].registry.empty());
 }
 
 // Everything the target sends is lost for longer than the TTL: the initiator
@@ -321,7 +343,6 @@ static void windowClosedRejects() {
 static void singleShotInitiator() {
   World w;
   w.dev[0].resends = false;
-  w.dev[0].helloRepairs = false;   // older firmware has no HELLO hook either
   w.drop = [](const Frame& f, int nth) { return f.kind == Kind::Accept && nth == 1; };
   w.request(0, 1);
   w.run(50);
@@ -335,7 +356,6 @@ static void singleShotInitiator() {
 static void acrossMillisWrap() {
   World w(0xFFFFFFFFu - 2000u);
   w.drop = [](const Frame& f, int nth) { return f.kind == Kind::Accept && nth == 1; };
-  w.dev[0].helloRepairs = false;
   w.request(0, 1);
   w.run(1500);
   CHECK(w.userAnswers(1, Answer::Accept));
@@ -378,19 +398,20 @@ static void sourceContract() {
   // The sweep is in processMeshHeartbeats.
   const size_t hb = owner.find("void processMeshHeartbeats() {");
   CHECK(hb != std::string::npos && owner.find("espnowpair::tick(gPair, now)", hb) != std::string::npos);
-  CHECK(has(crypto, "espnowPairNoteKeyExHello(msg->senderMac);"));
+  // No KEY_EX_HELLO-as-accept hook: HELLO is also sent for unrelated traffic.
+  CHECK(!has(crypto, "espnowPairNoteKeyExHello") && !has(owner, "espnowPairNoteKeyExHello"));
   CHECK(has(oled, "espnowGetPairRequestOutcome(outName, sizeof(outName))"));
 }
 
 int main() {
   happyPath();
   lostFirstRequest();
-  lostAcceptRetransmit(/*helloLost=*/true);
-  lostAcceptRetransmit(/*helloLost=*/false);
-  everyAcceptLostHelloRepairs();
+  lostAcceptRetransmit();
   timeoutThenHalfPairRepair();
   duplicateRequestWhilePending();
   duplicateRequestAfterAnswer();
+  windowClosesWhilePromptOpen();
+  unrelatedHelloIsNotAnAccept();
   lostReject();
   timeoutNoAnswer();
   windowClosedRejects();

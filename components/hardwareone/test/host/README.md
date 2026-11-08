@@ -3259,13 +3259,15 @@ capacity, reset epochs, and counters beyond 4 GiB.
 discover-then-confirm pairing state) as is and runs two modelled devices over a
 lossy broadcast channel, with glue that mirrors `System_ESPNow.cpp`. Cases: the
 happy path, a lost first PAIR_REQUEST, a lost PAIR_ACCEPT (recovered by the
-re-sent REQUEST, by the unsolicited ACCEPT copies, or by the target's
-KEY_EX_HELLO), the initiator timing out with the target paired and the later
-re-request repairing that half pair, a duplicate REQUEST while pending (one
-prompt, same identity) and after an answer (same answer), a lost REJECT, a
-plain timeout on both sides, a closed discovery window, an initiator that sends
-once (older firmware), and the millis() wrap. A source contract pins the
-handler, sweep, command, KEY_EX_HELLO and OLED call sites.
+re-sent REQUEST or by the unsolicited ACCEPT copies), the initiator timing out
+with the target paired and the later re-request repairing that half pair, a
+duplicate REQUEST while pending (one prompt, same identity) and after an answer
+(same answer), the discovery window closing while the prompt is open (no
+REJECT, a late accept pairs both sides), an unrelated KEY_EX_HELLO while
+waiting (not an accept), a lost REJECT, a plain timeout on both sides, a closed
+discovery window, an initiator that sends once (older firmware), and the
+millis() wrap. A source contract pins the handler, sweep, command and OLED call
+sites and that no KEY_EX_HELLO hook answers a pair request.
 
 `raw_allocation_inventory` runs the comment/string-aware scanner over the main
 `components/hardwareone` application. The pre-migration boundary is 12 direct

@@ -5960,16 +5960,16 @@ static void v4h_pair_request(const V4RxCtx& ctx) {
   // The OLED polls espnowGetIncomingPairRequest() and opens its accept prompt.
 }
 
-// Initiator: the target answered our request (ACCEPT/REJECT frame, or its
-// KEY_EX_HELLO, which only follows an accept). Only an answer matching OUR
-// outstanding request counts, once; on accept we run pairsecure to write our
-// own registry. The job is allocated before the request is consumed so an
-// allocation failure leaves it pending for the target's next copy.
-static void pairAnswerReceived(const uint8_t mac[6], espnowpair::Answer answer, const char* via) {
+// Initiator: the target answered our request (ACCEPT/REJECT frame). Only an
+// answer matching OUR outstanding request counts, once; on accept we run
+// pairsecure to write our own registry. The job is allocated before the
+// request is consumed so an allocation failure leaves it pending for the
+// target's next copy.
+static void pairAnswerReceived(const uint8_t mac[6], espnowpair::Answer answer) {
   portENTER_CRITICAL(&gPairLock);
   const bool waiting = gPair.out.active && macEqual6(gPair.out.mac, mac);
   portEXIT_CRITICAL(&gPairLock);
-  if (!waiting) return;   // repeats and every other HELLO end here, before any allocation
+  if (!waiting) return;   // repeats end here, before any allocation
   PairCompleteJob* w = nullptr;
   if (answer == espnowpair::Answer::Accept) {
     w = (PairCompleteJob*)ps_alloc(sizeof(PairCompleteJob), AllocPref::PreferPSRAM, "espnow.paircomplete");
@@ -5987,7 +5987,7 @@ static void pairAnswerReceived(const uint8_t mac[6], espnowpair::Answer answer, 
   memcpy(w->mac, mac, 6);
   strncpy(w->name, ended.name, sizeof(w->name) - 1);
   w->name[sizeof(w->name) - 1] = '\0';
-  BROADCAST_PRINTF("[PAIR] '%s' accepted%s — completing pairing.", w->name, via);
+  BROADCAST_PRINTF("[PAIR] '%s' accepted — completing pairing.", w->name);
   if (!submitDeferredToCmdExec(runDeferredPairComplete, w)) free(w);
 }
 
@@ -5996,7 +5996,7 @@ static void v4h_pair_accept(const V4RxCtx& ctx) {
   uint8_t mac[6];
   char name[24];
   if (!pairCtrlForUs(ctx, mac, name, sizeof(name))) return;
-  pairAnswerReceived(mac, espnowpair::Answer::Accept, "");
+  pairAnswerReceived(mac, espnowpair::Answer::Accept);
 }
 
 // RX: the target rejected / isn't in discovery mode (on the initiator).
@@ -6004,16 +6004,7 @@ static void v4h_pair_reject(const V4RxCtx& ctx) {
   uint8_t mac[6];
   char name[24];
   if (!pairCtrlForUs(ctx, mac, name, sizeof(name))) return;
-  pairAnswerReceived(mac, espnowpair::Answer::Reject, "");
-}
-
-// KEY_EX_HELLO accepted from `mac` (System_ESPNow_Handlers_Crypto.cpp, on
-// espnow_task). The target runs pairsecure — and so sends HELLO — only after
-// its user accepted, so a HELLO from the peer our request is waiting on counts
-// as its ACCEPT even when every ACCEPT frame was lost.
-void espnowPairNoteKeyExHello(const uint8_t mac[6]) {
-  if (!mac) return;
-  pairAnswerReceived(mac, espnowpair::Answer::Accept, " (key exchange)");
+  pairAnswerReceived(mac, espnowpair::Answer::Reject);
 }
 
 // -------- Public read accessors for the discover-then-confirm UI (OLED/G2/web) --------

@@ -101,8 +101,9 @@ target_compile_options(memtracker_core_tests PRIVATE
 # ESP-NOW discover-then-confirm pairing (System_ESPNow_PairCore.h, the
 # production dependency-free header): two modelled devices over a lossy
 # broadcast channel. Bounded REQUEST retransmit, re-answered repeats, the
-# half-pair repair after a lost ACCEPT, timeouts, plus a source contract on the
-# System_ESPNow.cpp / KEY_EX_HELLO / OLED call sites.
+# half-pair repair after a lost ACCEPT, a window closing under an open prompt,
+# timeouts, plus a source contract on the System_ESPNow.cpp / OLED call sites
+# (and the absence of a KEY_EX_HELLO-as-accept hook).
 add_executable(espnow_pair_core_tests test_espnow_pair_core.cpp)
 set_target_properties(espnow_pair_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

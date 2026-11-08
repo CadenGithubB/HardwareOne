@@ -5,14 +5,17 @@
 // The control frames are unacknowledged FF broadcasts, so each side repeats
 // what it is waiting on:
 //   * The initiator re-sends its REQUEST every kResendMs until an answer
-//     (ACCEPT, REJECT, or the target's KEY_EX_HELLO, which only follows an
-//     accept) arrives or kRequestTtlMs passes. The answer is the REQUEST's
-//     acknowledgement; the next re-sent REQUEST is the answer's negative one.
+//     (ACCEPT or REJECT) arrives or kRequestTtlMs passes. A KEY_EX_HELLO is
+//     not an answer: the target also sends one for reasons unrelated to
+//     pairing (encrypted sends, espnowkeyex, espnowprobe, the retry sweep).
+//     The answer is the REQUEST's acknowledgement; the next re-sent REQUEST is
+//     the answer's negative one.
 //   * The target answers a repeated REQUEST without asking its user again: the
 //     same answer for kAnswerMemoryMs after the user gave it, then ACCEPT while
 //     the requester is already in the target's registry (the half pair a lost
 //     ACCEPT leaves: the target paired, the initiator did not). A repeat of a
-//     request still awaiting the user is the same request (no new prompt).
+//     request still awaiting the user is the same request (no new prompt, no
+//     answer), also after the discovery window closed.
 //   * The target also sends kAnswerResends unsolicited copies of an answer,
 //     kResendMs apart, for initiators that send their REQUEST only once.
 // The wire format is unchanged: a peer running older firmware still pairs
@@ -106,8 +109,11 @@ inline Reply onRequest(State& s, const uint8_t mac[6], const char* name, uint32_
     return s.answered.answer == Answer::Accept ? Reply::Accept : Reply::Reject;
   }
   if (alreadyPaired) return Reply::Accept;   // half pair: the requester lost our ACCEPT
+  // The same request, repeated: it stays pending until the user answers or the
+  // TTL ends, even if the discovery window closed after it arrived (a REJECT
+  // here would end the initiator's side while our prompt can still accept).
+  if (s.in.active && macIs(s.in.mac, mac)) return Reply::None;
   if (!windowOpen) return Reply::Reject;
-  if (s.in.active && macIs(s.in.mac, mac)) return Reply::None;   // the same request, repeated
   s.in.active = true;
   std::memcpy(s.in.mac, mac, 6);
   copyName(s.in.name, name);
@@ -132,9 +138,9 @@ inline bool answerIncoming(State& s, Answer a, uint32_t now, Request* taken) {
   return true;
 }
 
-// Initiator: an answer (ACCEPT, REJECT, or a KEY_EX_HELLO counted as ACCEPT)
-// arrived from `mac`. True when it answers our request: the request ends and,
-// for ACCEPT, the caller completes the pairing once. Repeats are ignored.
+// Initiator: an answer (ACCEPT or REJECT) arrived from `mac`. True when it
+// answers our request: the request ends and, for ACCEPT, the caller completes
+// the pairing once. Repeats are ignored.
 inline bool onAnswer(State& s, const uint8_t mac[6], Answer a, uint32_t now, Request* ended) {
   if (!s.out.active || !macIs(s.out.mac, mac) || a == Answer::None) return false;
   if (ended) *ended = s.out;
