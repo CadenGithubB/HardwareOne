@@ -131,6 +131,18 @@ static const uint32_t LOG_FLUSH_INTERVAL_MS = 5000;      // Or every 5 seconds
 // renames only, under the lock the writer already holds, no copy.
 static uint32_t gSystemLogRotations = 0;
 static uint32_t gSystemLogRotateRetryAtMs = 0;  // set after a failed rotation; 0 = no backoff
+static uint32_t gSystemLogReserveSkips = 0;     // lines not written: LittleFS below the reserve
+
+// G-39: the system log never moves to the SD mirror (its path is the user's
+// choice), and its default budget (1 MB x 4 generations) exceeds the LittleFS
+// partition of the 8 MB layouts. On LittleFS it must not eat the reserve the
+// overflow latch keeps for settings and state saves, so lines are skipped and
+// counted while flash is below it. The free figure is the VFS cache the capped
+// logs already refresh, so most lines cost no traverse.
+static bool systemLogBlockedByReserve(const String& path) {
+  if (VFS::getStorageType(path) == VFS::SDCARD) return false;
+  return VFS::getCachedLittleFsFree() < VFS::logReserveBytes();
+}
 
 // The sensor logger's bounds; an out-of-range setting reads as the default.
 static size_t systemLogMaxSizeBytes() {
@@ -387,7 +399,9 @@ void debugOutputTask(void* parameter) {
             gSystemLogUnflushedCount = 0;
           }
         }
-        if (gSystemLogFile) {
+        if (gSystemLogFile && systemLogBlockedByReserve(gSystemLogPath)) {
+          ++gSystemLogReserveSkips;  // shown by `log status`
+        } else if (gSystemLogFile) {
           if (gSystemLogCategoryTags && msg->category != 0) {
             const char* cat = getDebugCategoryName(msg->category);
             gSystemLogFile.printf("[%lu] [%s] %s\n", msg->timestamp, cat, msg->text);
@@ -1890,6 +1904,12 @@ void formatSystemLogStatus(char* out, size_t outSize) {
              gSettings.systemLogAutoStart ? "ON" : "OFF",
              (unsigned)(systemLogMaxSizeBytes() / 1024u), systemLogMaxRotations(),
              (unsigned long)gSystemLogRotations);
+    if (gSystemLogReserveSkips > 0) {
+      const size_t used = strnlen(out, outSize);
+      snprintf(out + used, outSize - used,
+               "\n  Skipped: %lu line(s) while flash was below its %u KB reserve",
+               (unsigned long)gSystemLogReserveSkips, (unsigned)(VFS::logReserveBytes() / 1024u));
+    }
   } else if (gSystemLogRunning) {
     snprintf(out, outSize,
              "System logging CONFIGURED but MSG_ROUTE_FILE flag not set\n"

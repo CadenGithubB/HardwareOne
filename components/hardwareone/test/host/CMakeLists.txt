@@ -1409,7 +1409,7 @@ foreach(test_name IN ITEMS fileread_psram g2_files_psram filesystem_psram_listin
                            filemanager_directory espnow_directory checked_text_writes
                            upload_lifecycle storage_stats espnow_fs_transcript_privacy
                            image_storage image_writes capture_stitching capped_log_writes
-                           log_row_writes r1_history_store mic_wav_completion boot_temp_cleanup)
+                           log_row_writes log_overflow_latch r1_history_store mic_wav_completion boot_temp_cleanup)
   add_test(
     NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE}

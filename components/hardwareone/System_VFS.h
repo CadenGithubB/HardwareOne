@@ -30,12 +30,16 @@
 // function rewrites primary paths like "/logging_captures/foo.csv" to their SD mirror
 // "/sd/logging_captures/foo.csv".
 //
-// What is latched until reboot is the DECISION to overflow, not the tier: once
-// the latch fires, every call still re-tests isSDAvailable() and falls back to
-// the primary path when SD is absent. So a card pulled (or re-inserted) mid-run
-// flips the active tier back and forth and one logical day CAN split across
-// tiers with nothing on disk marking the boundary. Callers that need a stable
-// tier must resolve once per session and store the result.
+// What is latched is the DECISION to overflow, not the tier: once the latch
+// fires, every call still re-tests isSDWritable() and falls back to the
+// primary path when the card cannot take writes. So a card pulled (or
+// re-inserted) mid-run flips the active tier back and forth and one logical
+// day CAN split across tiers with nothing on disk marking the boundary.
+// Callers that need a stable tier must resolve once per session and store the
+// result. Since G-39 the latch also re-arms once LittleFS free space is back
+// a reserve's width above the level that tripped it, and resolveLogPath
+// reports a latched resolution with no usable card as Refused so a capped log
+// does not eat the reserve it exists to protect.
 //
 // Convention for callers:
 //   - State files (settings, users, automations, mesh config, etc.)
@@ -453,9 +457,17 @@ inline bool pathInCaptureTree(const String& path) {
 // Overflow-aware path resolution (opt-in for append-only data)
 // ============================================================================
 
+/** Where an overflow-aware write should go. Refused: the overflow latch is
+ *  set (LittleFS below the reserve) and no writable card can take the data;
+ *  outPath still names the primary path (for readers and recovery), but a
+ *  writer that honours the reserve must not append there (G-39). */
+enum class LogTier : uint8_t { Primary, Overflow, Refused };
+
 /** Map a primary LittleFS log path to itself, OR to its /sd mirror once
- *  LittleFS free space drops below `reserveBytes`. Once the overflow latch
- *  fires, all subsequent resolutions return the SD mirror (until reboot).
+ *  LittleFS free space drops below `reserveBytes`. While the overflow latch is
+ *  set, resolutions return the SD mirror when the card is writable; the latch
+ *  re-arms (back to the primary path) once LittleFS free space recovers a
+ *  reserve's width above the level that tripped it.
  *
  *  Use for append-only bulk data that's safe to split across tiers: logs,
  *  captures, recordings. DO NOT use for state files like settings.json,
@@ -466,14 +478,29 @@ inline bool pathInCaptureTree(const String& path) {
  *                     The global floor (100 KB) is applied as a minimum.
  *  @param outPath Destination buffer for the resolved path
  *  @param outPathLen Size of `outPath`
- *  @return true if the resolved path is on SD (overflow active), false if LittleFS
+ *  @return the tier the resolved path is on, or Refused (see LogTier)
  */
+LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
+                       char* outPath, size_t outPathLen);
+
+/** resolveLogPath for callers that only need the tier: true if the resolved
+ *  path is on SD (overflow active), false if LittleFS (Refused included). */
 bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
                          char* outPath, size_t outPathLen);
 
-/** True if the overflow latch has fired this session. NOTE: this reports the
- *  latched DECISION, not the tier actually in use — resolveOverflowPath still
- *  falls back to the primary path whenever SD is unavailable. */
+/** The LittleFS free-space floor the overflow latch keeps for non-log writes
+ *  (settings, users, automations). Writers that never use the SD mirror (the
+ *  `log start` system log) check it directly. */
+size_t logReserveBytes();
+
+/** Count one log line a writer dropped because resolveLogPath returned
+ *  Refused, and read the count for this boot. */
+void noteLogReserveDrop();
+uint32_t logReserveDrops();
+
+/** True if the overflow latch is set. NOTE: this reports the latched
+ *  DECISION, not the tier actually in use — resolveLogPath still falls back
+ *  to the primary path (or Refused) whenever SD cannot take writes. */
 bool isLogOverflowActive();
 
 /** Cached LittleFS free bytes (refreshed at most every 2s). */
