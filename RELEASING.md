@@ -61,6 +61,30 @@ Every step below must pass on the exact commit you intend to tag, from a clean t
    `gh api repos/CadenGithubB/HardwareOne/private-vulnerability-reporting` returns `{"enabled":true}`.
    If not, the maintainer turns it on under Settings > Code security > Private vulnerability reporting.
 
+## The 1.0 cut: HardwareOne's own versions go to 1
+
+Decided 2026-11-08 and done only in the 1.0.0 release commit, never before. 1.0.0 is a full-erase
+install and every board and the phone app are rebuilt together, so no older peer has to be served.
+In that one commit:
+
+1. Firmware `1.0.0` in the four files above.
+2. Recovery updater: `HW1_UPDATER_SEMVER` in `updater/CMakeLists.txt` goes to `1.0.0`. The default
+   `minUpdaterVersion` floor stays `1.0.0`. Every board is re-flashed through the full erase, so no
+   device keeps a `1.1.0` updater.
+3. Phone link: v2 becomes v1 in the firmware and in the phone app in the same change, and the old v1
+   handling is deleted rather than relabelled. Update `APP_JSON_CONTRACT.md` section 11.9.
+4. ESP-NOW: HardwareOne's mesh format is named **ESPNOW V1 (1.0)** (`HW1_ESPNOW_RELEASE`). "V1" says it
+   runs on Espressif ESP-NOW v1 (250-byte frames); "1.0" is HardwareOne's own mesh format version. On
+   the wire `ESPNOW_V4_VERSION` in `System_ESPNow_Wire.h` goes from 4 to 1, the `static_assert` beside
+   it moves with it, and the V4 names and log text follow the rename plan (kept off the repo).
+5. `versions` on a built 1.0.0 image shows firmware 1.0.0, updater 1.0.0, phone link v1 and
+   ESPNOW V1 (1.0) with wire byte 1 in `versions json`.
+6. `docs/COMPATIBILITY.md` lists the new numbers.
+
+Already at 1, leave as they are: HW1-PIPE-v1, the CM5 control protocol, the OTA manifest format and
+the OTA layout ids. Not HardwareOne's to renumber: ESP-Hosted, ESP-IDF, arduino-esp32 and the speech
+model file names, which are checked at runtime.
+
 ## Cut a release
 1. Draft notes from `git log <last-tag>..HEAD --oneline`, grouped into Added / Changed / Fixed / Security / Docs.
 2. Bump the version in ALL four files above so they agree.
