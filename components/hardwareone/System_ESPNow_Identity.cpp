@@ -623,4 +623,8 @@ uint8_t peerIdentitySlotCount() {
   return kPeerSlots;
 }
 
+uint8_t espnowIdentityFileVersion() { return kIdentityFileVersion; }
+
+uint8_t peerIdentityFileVersion() { return kPeerFileVersion; }
+
 #endif  // ENABLE_ESPNOW

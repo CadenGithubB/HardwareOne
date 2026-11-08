@@ -14,10 +14,18 @@ keeps. Readiness item P0-7; keep this file in step with CHANGELOG `[Unreleased]`
 | Even R1 ring | advertised name `EVEN R1_XXXXXX` (six hex digits) | `classifyRingName` in `G2_Glasses.cpp`, mirrored in `G2_Ring.cpp` | Any other name is ignored by the ring scan. |
 | Arduino core | arduino-esp32 **3.3.5** (`11bc7ac1a`) plus the patches in `docs/arduino-local-patches/` | `tools/vendor_arduino.sh --check`, run by every build script | Not a runtime peer, but the build breaks silently without it (see `docs/arduino-local-patches/README.md`). |
 | ESP-IDF | **5.5.5** | `tools/p4/prepare_sdk.sh` (P4) and the build scripts | One IDF for every board. |
+| Other HardwareOne devices (ESP-NOW mesh) | **ESPNOW V1 (1.0)**: HardwareOne's mesh format within Espressif ESP-NOW v1's 250-byte frames (frame version byte 4) | every received frame's magic and version byte | Mesh devices must run releases with the same format; there is no negotiation. |
+
+`versions` on the device lists these, as this image carries them, in one place: the firmware, the
+recovery updater and OTA layout, the ESP-NOW format and stack, the BLE console channel, the phone
+link and pipe, the CM5 control protocol, the C6 companion's reported and expected versions, the
+local STT model, the retained-file versions and the ESP-IDF and Arduino core it was built with
+(`versions json` for tools; `BUILD_INFO.md` in a build directory has the build-time half).
 
 ## Persisted data and what an upgrade keeps
 
-- `settings.json` carries `schema: 1`. Unknown keys are kept; a missing key takes its default.
+- `settings.json` carries no format version; it records the `firmwareVersion` that last wrote it.
+  Unknown keys are kept; a missing key takes its default.
 - **Within 1.x**: settings, user accounts, saved Wi-Fi networks and automations are kept across an
   app update (OTA or cable app-only write). A renamed setting or event name gets an alias, or the
   change is listed under "Changed" in CHANGELOG with the migration step.

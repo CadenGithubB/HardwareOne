@@ -120,6 +120,8 @@ void bleScWarmPsk() { scDerivePsk(); }  // derive+cache now (call off BTC_TASK)
 
 void bleScInit() { if (!gScTxMutex) gScTxMutex = xSemaphoreCreateMutex(); }
 
+const char* bleScProtocolLabel() { return SC_INFO; }
+
 // ----- per-connection table helpers -----
 static ScConn* scFind(uint16_t connId) {
   for (int i = 0; i < BLE_MAX_CONNECTIONS; i++)

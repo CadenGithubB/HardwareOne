@@ -471,6 +471,10 @@ be set up into a lockout. Compatibility and upgrade promises:
 
 ### Update and recovery
 
+- **Which versions a board runs**: `versions` lists the firmware version and
+  everything it must match - the recovery updater, the ESP-NOW format, the phone
+  link, the C6 companion, the STT model and the SDK it was built with
+  ([COMPATIBILITY.md](COMPATIBILITY.md)); `versions json` gives the same for tools.
 - **Cable update** works on every board: build (or download) the image for your
   board and flash the app over USB. On ESP32-P4 boards the app is written alone
   (`esptool write_flash 0x10000 <app>.bin`); the filesystem and your data stay.
@@ -1043,6 +1047,7 @@ Two things about lookup that explain most surprises:
 
 ```
 status                          - Show system status (WiFi, FS, memory)
+versions                        - Firmware version and every version a separate part must match
 uptime                          - Show device uptime
 time                            - Show current time (uptime + NTP if synced)
 timeset <YYYY-MM-DD HH:MM:SS>   - Set time manually (or unix timestamp)
