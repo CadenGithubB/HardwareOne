@@ -12,6 +12,10 @@
 static constexpr uint32_t R1_HEALTH_HISTORY_SCHEMA_VERSION = 1;
 static constexpr size_t R1_HEALTH_HOURLY_SLOTS = 24;
 static constexpr size_t R1_HEALTH_ACTIVITY_SLOTS = 144;
+// A stored day is pruned by age only when it is older than RETENTION_DAYS by
+// the wall clock and is not one of the newest RETENTION_DAYS distinct stored
+// days, so the last 30 stored days stay even when the ring stops syncing.
+// MAX_FILES still bounds the total.
 static constexpr uint16_t R1_HEALTH_HISTORY_RETENTION_DAYS = 30;
 static constexpr uint16_t R1_HEALTH_HISTORY_MAX_FILES = 96;
 static constexpr size_t R1_HEALTH_HISTORY_MAX_FILE_BYTES = 65536;

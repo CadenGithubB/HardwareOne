@@ -298,9 +298,11 @@ bool parseDayFromName(const char* name, uint32_t& dayStart) {
   return dayStart != 0;
 }
 
-// Newest stored day start, or 0 when the directory holds no day file.
-uint32_t newestStoredDay(const AuthContext& auth) {
-  uint32_t newest = 0;
+// Start of the RETENTION_DAYS-th newest distinct stored day, or 0 when fewer
+// distinct days are stored. Days at or after it are never pruned by age.
+uint32_t retentionFloor(const AuthContext& auth) {
+  uint32_t newest[R1_HEALTH_HISTORY_RETENTION_DAYS];  // descending, distinct
+  uint16_t n = 0;
   File dir = VFS::openGuarded(kHistoryDir, "r", auth);
   if (!dir || !dir.isDirectory()) { if (dir) dir.close(); return 0; }
   File entry = dir.openNextFile();
@@ -309,24 +311,30 @@ uint32_t newestStoredDay(const AuthContext& auth) {
     const bool regular = !entry.isDirectory() && path.endsWith(".r1h");
     entry.close();
     uint32_t day = 0;
-    if (regular && parseDayFromName(path.c_str(), day) && day > newest) newest = day;
+    if (regular && parseDayFromName(path.c_str(), day)) {
+      uint16_t i = 0;
+      while (i < n && newest[i] > day) ++i;
+      if ((i == n || newest[i] != day) && i < R1_HEALTH_HISTORY_RETENTION_DAYS) {
+        if (n < R1_HEALTH_HISTORY_RETENTION_DAYS) ++n;
+        for (uint16_t j = n - 1; j > i; --j) newest[j] = newest[j - 1];
+        newest[i] = day;
+      }
+    }
     entry = dir.openNextFile();
   }
   dir.close();
-  return newest;
+  return n == R1_HEALTH_HISTORY_RETENTION_DAYS ? newest[n - 1] : 0;
 }
 
 void enforceRetention(const AuthContext& auth) {
-  time_t now = time(nullptr);
+  const time_t now = time(nullptr);
   const bool haveClock = now >= 1609459200;
-  // SNTP is unauthenticated, so the wall clock can jump far ahead. Age is
-  // measured from min(now, newest stored day + 1 day): a forward jump can then
-  // never delete the newest RETENTION_DAYS of stored history.
-  if (haveClock) {
-    const uint32_t newest = newestStoredDay(auth);
-    if (newest != 0 && static_cast<time_t>(newest) + 86400 < now)
-      now = static_cast<time_t>(newest) + 86400;
-  }
+  // SNTP is unauthenticated, and the ring adopts the device clock, so both the
+  // wall clock and new day starts can jump years ahead. Age pruning therefore
+  // also spares the newest RETENTION_DAYS distinct stored days: a clock jump
+  // alone deletes nothing among them, and each far-future day stored pushes
+  // out at most one older day instead of the whole history.
+  const uint32_t keepFrom = haveClock ? retentionFloor(auth) : 0;
   const uint32_t cutoff = haveClock && now > static_cast<time_t>(R1_HEALTH_HISTORY_RETENTION_DAYS) * 86400
       ? static_cast<uint32_t>(now - static_cast<time_t>(R1_HEALTH_HISTORY_RETENTION_DAYS) * 86400)
       : 0;
@@ -348,7 +356,7 @@ void enforceRetention(const AuthContext& auth) {
         if (!path.startsWith("/")) path = String(kHistoryDir) + "/" + path;
         uint32_t day = 0;
         if (parseDayFromName(path.c_str(), day)) {
-          if (cutoff != 0 && day < cutoff) {
+          if (cutoff != 0 && day < cutoff && day < keepFrom) {
             VFS::removeGuarded(path, auth);
           } else {
             ++count;
