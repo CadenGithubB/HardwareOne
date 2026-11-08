@@ -78,23 +78,40 @@ returns the error a packet on a down transport already gets. Only a CPU reset
 clears the flag. The other transports' `esp_hosted_tx` (SPI, SPI-HD, UART)
 are not changed; the P4 uses SDIO.
 
-A refusal at the fence is not logged. Hosted's refusal logs (`tx fail ...
-transport_up(0)` in `esp_hosted_tx`, `Tx failed` in the Bluedroid VHCI send,
-`drop pkt` in the wrappers) run on the producer's own task. With G2 or R1
-connected, Bluedroid's `hciT` task (a fixed 2.5 KB stack, about 1.95 KB usable
-after the P4's coprocessor and TLS reservations) kept sending HCI packets after
-the fence, and vfprintf for the `tx fail` line overflowed it: a stack
-protection fault in 3 of 15 reboots (bench 2026-11-08, image f9d931bb).
-`esp_hosted_hw1_tx_drop_if_fenced()` returns 1 once the fence is set and
-counts the drop; each of those log sites now logs only when it returns 0, so a
-refusal for any other reason (transport down, bad length, missing channel)
-still logs as upstream. `hosted_hci_bluedroid_send` checks it before its
-allocation and drops the packet on hciT without a heap call or a log, and its
-`Tx failed` line is skipped when the fence closed during the call
-(`esp_hosted_hw1_tx_fenced()`, one-way). HardwareOne prints the count,
-`esp_hosted_hw1_tx_fence_drops()`, in its `SDMMC quiesced` line. The NimBLE
-VHCI paths log nothing on a refused send and are unchanged (the P4 build uses
-Bluedroid).
+A refusal at the fence is not logged by Hosted's transport layer. Hosted's
+refusal logs (`tx fail ... transport_up(0)` in `esp_hosted_tx`, `Tx failed` in
+the Bluedroid VHCI send, `drop pkt` in the wrappers) run on the producer's own
+task. With G2 or R1 connected, Bluedroid's `hciT` task (a fixed 2.5 KB stack,
+about 1.95 KB usable after the P4's coprocessor and TLS reservations) kept
+sending HCI packets after the fence, and vfprintf for the `tx fail` line
+overflowed it: a stack protection fault in 3 of 15 reboots (bench 2026-11-08,
+image f9d931bb). `esp_hosted_hw1_tx_drop_if_fenced()` returns 1 once the fence
+is set and counts the drop; the wrapper log sites log only when it returns 0,
+so a refusal for any other reason (transport down, bad length, missing
+channel) still logs as upstream. HardwareOne prints the count,
+`esp_hosted_hw1_tx_fence_drops()`, in its `SDMMC quiesced` line.
+
+The serial RPC producer is quiet only at this layer: `transport_drv_serial_tx`
+refuses without a log, but its callers still print their own errors on the
+`rpc_tx` task for an RPC sent after the fence (`Failed to write data` in
+serial_drv.c, `Failed to write TX data` in serial_if.c, `Send RPC req[0x..]
+failed` in rpc_core.c). `rpc_tx` has a 5 KB stack, so those lines are not a
+stack risk; the patch leaves them as upstream.
+
+HCI packets get one more rule, because every one of them is sent from `hciT`.
+`esp_hosted_hw1_hci_drop_if_closed()` returns 1 at the fence (counted as a
+fence drop) and also whenever TX is not ready for any other reason, counted
+separately in `esp_hosted_hw1_hci_down_drops()`. That covers a C6 crash or
+watchdog recovery (the transport is marked lost before the BLE teardown), a
+companion reset or hold that leaves the Bluedroid host up, and a Hosted re-init
+window, which would otherwise print the same two lines on `hciT` per packet.
+`hosted_hci_bluedroid_send` checks it before its allocation and drops the
+packet without a heap call or a log; `esp_hosted_tx` uses it for `ESP_HCI_IF`
+so a transport that closes during the call is also silent; and the VHCI
+`Tx failed` line is printed only for a refusal with TX still open (a bad
+length). HardwareOne reports the HCI count in `c6status` and its JSON
+(`bridge_counters.hci_tx_down_drops`). The NimBLE VHCI paths log nothing on a
+refused send (the P4 build uses Bluedroid).
 
 `transport_state` is deliberately not changed. Lowering it with Hosted's own
 `set_transport_state(TRANSPORT_RX_ACTIVE)` would also refuse TX, but
@@ -131,10 +148,12 @@ alignment. ASan/UBSan failures abort the test.
 `tools/p4/test_esp_hosted_tx_fence.py` applies the patch to the pristine
 package and compiles the fence, the STA/AP/serial wrappers, the SDIO
 `esp_hosted_tx` and `hosted_hci_bluedroid_send` unchanged against fakes of the
-OS abstraction, queue and log: with TX open every producer queues, a down
-transport keeps Hosted's logs, and after the fence (also one that closes
-inside a VHCI send) nothing logs, the VHCI send allocates nothing and every
-buffer is freed. `--patch` runs it on another patch (f9d931bb's fails). It
+OS abstraction, queue and log: with TX open every producer queues; a down
+transport keeps Hosted's logs for every producer except HCI, which drops
+before its allocation and is counted as a down drop (also when TX closes
+inside a VHCI send); after the fence (also one that closes inside a VHCI
+send) nothing logs, the VHCI send allocates nothing and every buffer is
+freed. It does not compile the serial RPC callers above the wrapper. `--patch` runs it on another patch (f9d931bb's fails). It
 exits 77 without a pristine package.
 
 For device qualification, build the affected saved profile and its baseline,

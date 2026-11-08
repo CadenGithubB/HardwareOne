@@ -84,6 +84,9 @@ struct RadioCompanionIdentity {
 
 struct RadioBridgeStats {
   uint32_t malformed, stale, eventsDropped, timeouts, transportErrors;
+  // BLE HCI packets Hosted dropped (without a log) while its TX was closed
+  // outside a restart: C6 crash or recovery, companion reset or hold.
+  uint32_t hciTxDownDrops;
 };
 
 // Last memory report from the companion (monitor event or explicit query).

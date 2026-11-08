@@ -61,8 +61,11 @@ everything user-visible since the v0.99.99 tag (55 commits).
   fence is dropped without a log and counted in the `SDMMC quiesced` line (`N TX dropped at the
   fence`): the log ran on the sending task, and with G2 or R1 connected Bluedroid's `hciT` task
   overflowed its 2.5 KB stack printing Hosted's `tx fail` line (bench 2026-11-08, stack protection
-  fault in 3 of 15 reboots). A restart takes 100 ms longer. The Hosted override must be
-  re-staged (`tools/p4/prepare_sdk.sh` after removing `.sdk-overrides/esp32p4/espressif__esp_hosted`).
+  fault in 3 of 15 reboots). For the same reason a BLE HCI packet is now also dropped without a log
+  whenever the Hosted link is down for another reason with the BLE host still up (a C6 crash or
+  recovery, a companion reset or hold); `c6status` counts those drops. The serial RPC callers above
+  the fence still log a refused request on their 5 KB `rpc_tx` stack. A restart takes 100 ms longer.
+  The Hosted override must be re-staged (`tools/p4/prepare_sdk.sh` after removing `.sdk-overrides/esp32p4/espressif__esp_hosted`).
   Separately, a companion retry
   now waits for the C6 instead of failing in the same millisecond once ESP-Hosted's retry counter is
   spent; that helps a healthy link after earlier failed starts, does not recover a wedged SDMMC host,

@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""A refusal at HardwareOne's restart TX fence is silent on the producer's task.
+"""A refusal at HardwareOne's restart TX fence is silent in Hosted's transport layer.
 
 Bench 2026-11-08 (P4X-EYE, G2 and R1 connected): 3 of 15 reboots panicked in
 Bluedroid's hciT task (stack protection fault) after the restart closed
 Hosted TX at the fence. Every HCI packet hciT sent was refused in
-esp_hosted_tx, whose ESP_LOGE ran vfprintf on hciT's 2.5 KB stack.
+esp_hosted_tx, whose ESP_LOGE ran vfprintf on hciT's 2.5 KB stack. An HCI
+packet is also dropped without a log while TX is closed for any other reason
+(C6 crash or recovery, companion reset or hold with the Bluedroid host up).
+The serial RPC callers above transport_drv_serial_tx (serial_drv.c,
+serial_if.c, rpc_core.c, on the 5 KB rpc_tx stack) are not compiled here and
+still log a refused RPC.
 
 The runner applies the Hosted patch (default: the tracked
 esp-hosted-2.12.13-hw1.patch; --patch selects another, e.g. an older one that
@@ -96,6 +101,8 @@ def main() -> int:
                    str(unit), "-o", str(exe)]
         if "esp_hosted_hw1_tx_fence_drops" in names:
             command.insert(1, "-DHAVE_FENCE_DROPS=1")
+        if "esp_hosted_hw1_hci_down_drops" in names:
+            command.insert(1, "-DHAVE_HCI_DOWN_DROPS=1")
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer"]
         subprocess.run(command, check=True)
@@ -105,7 +112,10 @@ def main() -> int:
         # The drop count is what the restart reports in place of the logs.
         if "esp_hosted_hw1_tx_fence_drops" not in names:
             raise SystemExit("FAIL: the patch keeps no count of the packets dropped at the fence")
-    print("PASS: the restart TX fence drops silently on every producer; other refusals still log")
+        if "esp_hosted_hw1_hci_down_drops" not in names:
+            raise SystemExit("FAIL: the patch keeps no count of the HCI packets dropped while TX is closed")
+    print("PASS: the restart TX fence drops silently in the transport layer, HCI also while TX is closed; "
+          "other refusals still log")
     return 0
 
 

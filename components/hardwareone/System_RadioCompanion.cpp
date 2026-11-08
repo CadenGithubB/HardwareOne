@@ -941,6 +941,7 @@ void fillStatus(JsonObject out, bool full) {
   counters["events_dropped"] = bs.eventsDropped;
   counters["malformed"] = bs.malformed;
   counters["stale"] = bs.stale;
+  counters["hci_tx_down_drops"] = bs.hciTxDownDrops;
   JsonObject rec = out["recovery"].to<JsonObject>();
   rec["start_attempts"] = stats.startAttempts;
   rec["start_failures"] = stats.startFailures;
@@ -1030,8 +1031,9 @@ const char* cmd_c6status(const String& argsInput) {
                    radioHalResetReasonLabel(stats.lastResetReason));
   RadioBridgeStats bs;
   radioHalBridgeStats(bs);
-  BROADCAST_PRINTF("  Bridge counters: %" PRIu32 " timeouts, %" PRIu32 " transport errors, %" PRIu32 " dropped events",
-                   bs.timeouts, bs.transportErrors, bs.eventsDropped);
+  BROADCAST_PRINTF("  Bridge counters: %" PRIu32 " timeouts, %" PRIu32 " transport errors, %" PRIu32
+                   " dropped events, %" PRIu32 " BLE HCI packets dropped while the link was down",
+                   bs.timeouts, bs.transportErrors, bs.eventsDropped, bs.hciTxDownDrops);
   BROADCAST_PRINTF("  Recovery: %" PRIu32 " starts (%" PRIu32 " failed), %" PRIu32 " soft recoveries (%" PRIu32
                    " failed), %" PRIu32 " reboots requested; last outage: %s",
                    stats.startAttempts, stats.startFailures, stats.softRecoveries, stats.recoveriesFailed,

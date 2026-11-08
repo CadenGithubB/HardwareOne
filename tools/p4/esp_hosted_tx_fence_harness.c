@@ -14,7 +14,10 @@
  * refusal branch, whose ESP_LOGE ("tx fail ... transport_up(0)") ran vfprintf
  * on hciT's 2.5 KB stack, then hosted_hci_bluedroid_send logged "Tx failed".
  * A refusal at the fence must be silent on the producer's task (counted
- * instead); a refusal for any other reason keeps Hosted's own log.
+ * instead); a refusal for any other reason keeps Hosted's own log, except
+ * for an HCI packet while TX is closed: it is sent from the same hciT task
+ * (a C6 crash, companion reset or hold with the Bluedroid host still up), so
+ * it is dropped before its allocation and counted as a down drop.
  */
 #include <assert.h>
 #include <errno.h>
@@ -59,6 +62,7 @@ static void fake_log(const char *level, const char *tag, const char *fmt, ...)
 static int g_live;     /* buffers not yet freed */
 static int g_mallocs;  /* _h_malloc_align calls */
 static void (*g_on_malloc)(void);  /* one-shot: another task runs inside the call */
+static void transport_goes_down(void);
 static void *fake_malloc_align(size_t size, size_t align)
 {
 	(void)align;
@@ -135,6 +139,11 @@ int esp_hosted_tx(uint8_t iface_type, uint8_t iface_num, uint8_t *payload_buf, u
 
 /* --- scenarios -------------------------------------------------------------- */
 static uint8_t g_hci[31] = {0x02};
+static uint8_t g_hci_big[MAX_PAYLOAD_SIZE + 1] = {0x02};
+static void transport_goes_down(void) { g_transport_up = 0; }
+#ifndef HAVE_HCI_DOWN_DROPS
+static uint32_t esp_hosted_hw1_hci_down_drops(void) { return 0; }
+#endif
 
 static void drain(void)
 {
@@ -173,16 +182,31 @@ int main(void)
 	all_producers(ESP_OK);
 	assert(g_queued == 5 && g_mallocs == 2 && g_logs == 0);
 
-	begin("transport down, no fence: Hosted's own refusal logs stay", 0);
-	hosted_hci_bluedroid_send(g_hci, sizeof(g_hci));
-	assert(g_logs == 2 && strstr(g_last_log, "vhci_drv") && strstr(g_last_log, "Tx failed"));
-	g_logs = 0;
+	/* C6 crash/recovery, companion reset or hold with Bluedroid still up:
+	 * hciT keeps sending, and the two refusal logs would overflow it. */
+	begin("transport down, no fence: an HCI send drops before its allocation, no log", 0);
+	for (int i = 0; i < 20; ++i)
+		hosted_hci_bluedroid_send(g_hci, sizeof(g_hci));
+	assert(g_logs == 0 && g_mallocs == 0 && g_queued == 0);
+	assert(esp_hosted_hw1_hci_down_drops() == 20);
+	begin("transport down, no fence: the other producers keep Hosted's logs", 0);
 	all_producers(ESP_FAIL);
 	assert(g_logs == 4 && g_queued == 0);
+	begin("TX closes inside a VHCI send: dropped, freed, no log", 1);
+	g_on_malloc = transport_goes_down;
+	hosted_hci_bluedroid_send(g_hci, sizeof(g_hci));
+	assert(!g_on_malloc && g_queued == 0 && g_mallocs == 1);
+	assert(g_logs == 0);
+	assert(esp_hosted_hw1_hci_down_drops() == 21);
 	begin("TX open, invalid length: still logged", 1);
 	uint8_t *big = fake_malloc_align(8, 64);
 	assert(esp_hosted_tx(ESP_PRIV_IF, 0, big, MAX_PAYLOAD_SIZE + 1, H_BUFF_NO_ZEROCOPY, big, fake_free, 0) == ESP_FAIL);
 	assert(g_logs == 1 && strstr(g_last_log, "tx fail"));
+	begin("TX open, HCI packet too long: both Hosted logs stay", 1);
+	hosted_hci_bluedroid_send(g_hci_big, sizeof(g_hci_big));
+	assert(g_logs == 2 && strstr(g_last_log, "vhci_drv") && strstr(g_last_log, "Tx failed"));
+	assert(g_queued == 0);
+	assert(esp_hosted_hw1_hci_down_drops() == 21);
 #ifdef HAVE_FENCE_DROPS
 	assert(esp_hosted_hw1_tx_fence_drops() == 0);
 #endif
@@ -217,6 +241,8 @@ int main(void)
 	/* 1 inside the racing send, 50 VHCI sends, 4 producers twice, 1 more send */
 	assert(esp_hosted_hw1_tx_fence_drops() == 1 + 50 + 4 + 4 + 1);
 #endif
+	/* the fence's HCI drops are fence drops, not down drops */
+	assert(esp_hosted_hw1_hci_down_drops() == 21);
 	fprintf(stderr, "PASS\n");
 	return 0;
 }

@@ -37,10 +37,14 @@
 // sets it before it holds the C6. Hosted's transport_state is left alone on
 // purpose (see there). A refusal at the fence is silent and only counted
 // (esp_hosted_hw1_tx_fence_drops): the log ran on the producer's task, and
-// Bluedroid's hciT overflowed its stack printing it (bench 2026-11-08).
+// Bluedroid's hciT overflowed its stack printing it (bench 2026-11-08). An
+// HCI packet is also dropped without a log whenever TX is not ready (a C6
+// crash or recovery, a companion reset or hold with the Bluedroid host still
+// up), counted in esp_hosted_hw1_hci_down_drops and shown by c6status.
 extern "C" uint8_t is_transport_tx_ready(void);
 extern "C" void esp_hosted_hw1_fence_tx(void);
 extern "C" uint32_t esp_hosted_hw1_tx_fence_drops(void);
+extern "C" uint32_t esp_hosted_hw1_hci_down_drops(void);
 
 namespace {
 
@@ -528,6 +532,7 @@ void radioHalBridgeStats(RadioBridgeStats& out) {
   out.eventsDropped = stats.events_dropped;
   out.timeouts = stats.request_timeouts;
   out.transportErrors = stats.transport_errors;
+  out.hciTxDownDrops = esp_hosted_hw1_hci_down_drops();
 }
 
 esp_err_t radioHalQueryMemory(RadioCompanionMemory& out) {
