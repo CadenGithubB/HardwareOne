@@ -1785,6 +1785,12 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_task_reporting.py
           ${SETUP_MQTT_TEST_ARGS})
+# Readiness P1-8: cmd_exec, log_out and g2_owner keep >= 1.5 KB free over their
+# worst recorded use, on internal stacks, with the reporters on the same constants.
+add_test(
+  NAME resident_stack_floor
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_resident_stack_floor.py)
 # The .3 sharing milestones: log-level owner and its CLI/boot callers, the
 # system-log status/flag formatters, and the shared command-origin prefix.
 foreach(test_name IN ITEMS log_level_application system_log_status command_feed)

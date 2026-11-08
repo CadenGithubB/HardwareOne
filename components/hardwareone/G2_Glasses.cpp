@@ -13282,14 +13282,18 @@ static bool g2RendererLivenessSelfTest() {
 //
 //   Fix: the timer callback does nothing but give a binary semaphore. A
 //   dedicated `g2_hb_worker` task waits on the semaphore, does the
-//   heartbeat TX with its own ~4 KB stack (isolated from system timers),
-//   and loops. Same 5 s cadence, same logic, safer stack.
+//   heartbeat TX on its own stack (isolated from system timers; today the
+//   g2_owner task, G2_CONTROL_STACK_BYTES), and loops. Same 5 s cadence,
+//   same logic, safer stack.
 
 static SemaphoreHandle_t gBeatSem        = nullptr;
 static TaskHandle_t      gBeatTaskHandle = nullptr;
 static volatile bool     gBeatTaskStop   = false;
 static volatile bool     gBeatPending    = false;
-static constexpr uint32_t G2_CONTROL_STACK_BYTES = 6144;
+// 8 KB (was 6 KB): the P4X soaks of 2026-11-04/05 left 312 B free of 6 KB.
+// Internal RAM, not PSRAM; sizing and placement are in the P1-8 block of
+// System_TaskUtils.h. host test: test_resident_stack_floor.py.
+static constexpr uint32_t G2_CONTROL_STACK_BYTES = 8192;
 static uint8_t            gControlStartBlocks = 0;
 
 static bool g2ManualConnectAdmissionOpen() {
@@ -16225,7 +16229,7 @@ static void g2ConversateLocalArm() {
 
 // The local session ended: log why and, if Conversate is still open and the
 // wearer did not close it, start again. Kept out of g2ConversateLocalTick and
-// off the stack: g2_owner has ~6 KB and the tick already holds a chunk
+// off the stack: g2_owner has 8 KB and the tick already holds a chunk
 // and a draft (a stack frame here overflowed it, 2026-10-01).
 static __attribute__((noinline)) void g2ConversateLocalEnded() {
   static STTSnapshot end;

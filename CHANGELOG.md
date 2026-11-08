@@ -70,6 +70,12 @@ everything user-visible since the v0.99.99 tag (55 commits).
 
 ### Fixed
 - Two crashes: the QuickNote worker's stack and Arduino's unlocked `NetworkEvents`.
+- Three resident task stacks raised, as they ran with 312 to 700 B free: the command executor
+  (`cmd_exec`) 8 to 10 KB, the log writer (`log_out`) 4 to 6 KB, the glasses owner (`g2_owner`) 6 to
+  8 KB. All stay in internal RAM. This costs 4 KB of internal RAM on every board, and 2 KB more while
+  glasses are connected; on the classic ESP32 boards (Feather ESP32 V2, QT Py ESP32) free internal
+  RAM at boot is about 4 KB lower. On those boards the glasses start now needs 2 KB more free RAM,
+  so free RAM after the glasses connect stays where it was.
 - BLE setup worker retires a client after an OPEN timeout and bounds a stuck job.
 - Phone pipe isolates CLOSE and DISCONNECT by peer address and keeps the first cause of a lost session.
 - Ring: setup handles stay valid through a disconnect, discovery fails fast, the HCI reason is recorded.

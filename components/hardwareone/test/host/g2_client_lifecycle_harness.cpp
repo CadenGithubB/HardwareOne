@@ -49,11 +49,12 @@ static unsigned assertFailures = 0;
 #define configASSERT(value) do { if (!(value)) ++assertFailures; } while (0)
 #define ENABLE_CAMERA_SENSOR 0
 
-// Readiness G-44: on classic ESP32 the "g2client" row also requires 20 KB
-// left after the runtime's own cost and a 26 KB largest block (pinned here, so
-// a drifted production value fails). Other targets keep the plain row.
+// Readiness G-44: on classic ESP32 the "g2client" row also requires 22 KB
+// left after the runtime's own cost (20 KB, plus 2 KB since P1-8 grew the
+// later g2_owner stack from 6 to 8 KB) and a 26 KB largest block (pinned here,
+// so a drifted production value fails). Other targets keep the plain row.
 #if CONFIG_IDF_TARGET_ESP32
-constexpr size_t kClassicLeftAfter = 20480, kClassicLargest = 10240 + 16384;
+constexpr size_t kClassicLeftAfter = 20480 + 2048, kClassicLargest = 10240 + 16384;
 #else
 constexpr size_t kClassicLeftAfter = 0, kClassicLargest = 0;
 #endif
@@ -525,7 +526,9 @@ static void transitions() {
   defaults();
 }
 
-// Readiness G-44: the figures measured on feather_esp32_v2 (System_MemoryMonitor.cpp).
+// Readiness G-44: the figures measured on feather_esp32_v2 (System_MemoryMonitor.cpp),
+// before P1-8 added 4 KB of resident stacks; current builds sit about 4 KB lower,
+// which moves none of the decisions below.
 // WiFi+HTTP leaves ~95.8 KB before the stack; the stack costs the 43,272 B BLE
 // core plus the 5,120 B setup worker, so the runtime gate sees 49,707 B -- the
 // start the plain 40,960 B row admitted and that landed near 9 KB.
