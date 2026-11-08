@@ -49,7 +49,9 @@ Every step below must pass on the exact commit you intend to tag, from a clean t
    `cmake -S components/hardwareone/test/host -B /tmp/hw1-host && cmake --build /tmp/hw1-host -j6 &&
    ctest --test-dir /tmp/hw1-host && ctest --test-dir /tmp/hw1-host -j6` — 0 failures; "Not Run" only for
    the documented optional suites (`stt_conv_scratch`, the camera managed-SCCB/video suites). The
-   OTA protocol suite is part of the same tree.
+   OTA protocol suite is part of the same tree. It includes `command_registry_gate`, which runs
+   `python3 tools/command_registry.py audit` and `python3 tools/command_registry.py reference --check`;
+   both must exit 0 (if the reference drifted, regenerate it with `... reference` and commit it).
 3. Every stable row of the supported matrix builds from that commit with `tools/build_board.sh <board>`
    (or `tools/build_deployment.sh` for a deployment row) and its BUILD_INFO.md says "clean tree".
 4. Tracked tree hygiene: `git grep -nIE '/Users/[a-z]|192\.168\.' -- . ':!components/hardwareone_libs'` is empty.

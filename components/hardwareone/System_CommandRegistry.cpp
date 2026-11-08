@@ -856,8 +856,8 @@ static constexpr CommandModule gCommandModules[] = {
 #if ENABLE_LLM_BACKEND
   { "llm",        "On-device LLM text generation", "On-device large language model that runs a quantized model file entirely on the "
     "device (model weights held in PSRAM). A model must be loaded before generation: "
-    "llmload [file.bin] loads one (bare filenames are looked up on the SD card under "
-    "/sd/llm then internal /system/llm), llmmodels lists available files, llmunload "
+    "llmload [file.bin] loads one (bare filenames are looked up in internal /system/llm "
+    "first, then on the SD card under /sd/llm), llmmodels lists available files, llmunload "
     "frees the PSRAM, llmstatus shows engine state, and llmautostart 0|1 / "
     "llmdefaultmodel control boot-time loading. Two generate forms: bare 'llmgenerate "
     "<prompt>' BLOCKS and prints the whole reply, while 'llmgenerate json ...' starts "

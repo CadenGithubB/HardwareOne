@@ -4,6 +4,9 @@
 Subcommands:
   reference  Read the command registry from C++ source and write
              docs/COMMAND_REFERENCE.md (default if no subcommand given).
+             With --check, write nothing: render the reference, compare it
+             with the tracked docs/COMMAND_REFERENCE.md and exit 1 with a
+             diff summary if they differ.
   audit      Report registry drift without writing anything:
                - duplicate command names (two registry slots, first wins)
                - CommandEntry arrays never registered in gCommandModules[]
@@ -13,6 +16,12 @@ Subcommands:
              Exits non-zero if anything but the known-intentional
              voice-alias duplicates is found, so CI can gate on it.
 
+A CommandEntry array defined more than once in one file, in mutually
+exclusive branches of the same #if/#elif/#else chain (System_OTA.cpp's
+otaCommands[] under `#if HW1_OTA_LAYOUT` / `#else`), is one table: only one
+branch is ever compiled. The first branch is read, as for gCommandModules[];
+the alternatives are neither counted nor reported as duplicates.
+
 Both commands read components/hardwareone/*.cpp and *.h. Neither writes to
 source files; `reference` only writes docs/COMMAND_REFERENCE.md.
 
@@ -21,12 +30,14 @@ Companion to settings_registry.py, which does the same for SettingEntry.
 Usage:
     python3 tools/command_registry.py              # same as `reference`
     python3 tools/command_registry.py reference
+    python3 tools/command_registry.py reference --check
     python3 tools/command_registry.py audit
 """
 
 from __future__ import annotations
 import argparse
 import collections
+import difflib
 import re
 import sys
 from pathlib import Path
@@ -162,15 +173,62 @@ NAME_RE = re.compile(
 SUPER_RE = re.compile(r"requiresSuperAdmin\s*=\s*\*/\s*true")
 
 
-def parse_commands(include_stubs: bool = False) -> dict[str, list[dict]]:
-    """array name -> list of command dicts."""
+def preprocessor_paths(text: str) -> list[tuple]:
+    """Per line, the #if nesting it sits in: a tuple of (chain id, branch index).
+
+    Each #if/#ifdef/#ifndef opens a new chain with a unique id; #elif and #else
+    move to the chain's next branch; #endif closes it. Conditions are not
+    evaluated — only the shape matters here.
+    """
+    paths, stack, next_id = [], [], 0
+    for line in text.splitlines():
+        directive = line.lstrip()
+        if directive.startswith("#if"):
+            stack.append((next_id, 0))
+            next_id += 1
+        elif directive.startswith(("#else", "#elif")) and stack:
+            chain, branch = stack[-1]
+            stack[-1] = (chain, branch + 1)
+        elif directive.startswith("#endif") and stack:
+            stack.pop()
+        paths.append(tuple(stack))
+    return paths
+
+
+def mutually_exclusive(a: tuple, b: tuple) -> bool:
+    """True if two #if paths can never be compiled together: at the first
+    level where they differ, both sit in the same chain on different branches."""
+    for x, y in zip(a, b):
+        if x == y:
+            continue
+        return x[0] == y[0] and x[1] != y[1]
+    return False
+
+
+def parse_commands_and_alternates(include_stubs: bool = False):
+    """(array name -> command dicts, alternative-branch definitions skipped).
+
+    The second value lists (file, array, line) for each later definition of an
+    array that is mutually exclusive with one already read from the same file.
+    """
     by_array: dict[str, list[dict]] = collections.defaultdict(list)
+    alternates: list[tuple[str, str, int]] = []
     for path in sources():
         if not include_stubs and path.name == STUB_FILE:
             continue
         src = read(path)
+        paths = None
+        kept: dict[str, list[tuple]] = collections.defaultdict(list)
         for m in ARRAY_RE.finditer(src):
             array = m.group(1)
+            if paths is None:
+                paths = preprocessor_paths(src)
+            line = src.count("\n", 0, m.start())
+            here = paths[line] if line < len(paths) else ()
+            if any(mutually_exclusive(here, p) for p in kept[array]):
+                alternates.append((path.name, array, line + 1))
+                continue
+            kept[array].append(here)
             start = m.end() - 1
             body = src[start:match_brace(src, start)]
             for item in iter_initializers(body):
@@ -189,7 +247,12 @@ def parse_commands(include_stubs: bool = False) -> dict[str, list[dict]]:
                     file=path.name,
                     array=array,
                 ))
-    return by_array
+    return by_array, alternates
+
+
+def parse_commands(include_stubs: bool = False) -> dict[str, list[dict]]:
+    """array name -> list of command dicts (one branch of each #if/#else table)."""
+    return parse_commands_and_alternates(include_stubs)[0]
 
 
 MODULES_RE = re.compile(r"CommandModule\s+gCommandModules\s*\[\]\s*=\s*\{")
@@ -246,7 +309,8 @@ def parse_modules() -> list[dict]:
 # reference
 # ============================================================================
 
-def cmd_reference(args) -> int:
+def render_reference() -> tuple[str, int, int]:
+    """(reference text, unique command count, module count)."""
     by_array = parse_commands()
     modules = parse_modules()
     total = sum(len(v) for v in by_array.values())
@@ -317,10 +381,59 @@ def cmd_reference(args) -> int:
             add(f"- `{a}` ({len(v)} entries, {v[0]['file']})")
         add("")
 
+    return "\n".join(out) + "\n", len(unique), len(modules)
+
+
+ROW_NAME_RE = re.compile(r"^\| `([^`]+)` \|", re.M)
+
+
+def check_reference(text: str) -> int:
+    """Compare a rendered reference with the tracked file; 0 if identical."""
+    rel = OUT_REFERENCE.relative_to(REPO)
+    if not OUT_REFERENCE.exists():
+        print(f"DRIFT: {rel} does not exist; run "
+              f"`python3 tools/command_registry.py reference`")
+        return 1
+    tracked = OUT_REFERENCE.read_text(encoding="utf-8")
+    if tracked == text:
+        print(f"{rel} is current")
+        return 0
+    diff = list(difflib.unified_diff(tracked.splitlines(), text.splitlines(),
+                                     fromfile=f"{rel} (tracked)",
+                                     tofile=f"{rel} (from source)",
+                                     lineterm="", n=0))
+    added = sum(1 for d in diff if d.startswith("+") and not d.startswith("+++"))
+    removed = sum(1 for d in diff if d.startswith("-") and not d.startswith("---"))
+    old_rows = collections.Counter(ROW_NAME_RE.findall(tracked))
+    new_rows = collections.Counter(ROW_NAME_RE.findall(text))
+    missing = sorted((new_rows - old_rows).elements())
+    stale = sorted((old_rows - new_rows).elements())
+    print(f"DRIFT: {rel} differs from the registry in source "
+          f"({removed} line(s) out of date, {added} line(s) missing)")
+    if missing:
+        print(f"  command rows missing from the file ({len(missing)}): "
+              + ", ".join(missing))
+    if stale:
+        print(f"  command rows only in the file ({len(stale)}): "
+              + ", ".join(stale))
+    limit = 40
+    for d in diff[:limit]:
+        print(f"  {d[:200]}")
+    if len(diff) > limit:
+        print(f"  ... {len(diff) - limit} more diff line(s)")
+    print("Regenerate with `python3 tools/command_registry.py reference` "
+          "and commit the result.")
+    return 1
+
+
+def cmd_reference(args) -> int:
+    text, unique, modules = render_reference()
+    if getattr(args, "check", False):
+        return check_reference(text)
     OUT_REFERENCE.parent.mkdir(parents=True, exist_ok=True)
-    OUT_REFERENCE.write_text("\n".join(out) + "\n", encoding="utf-8")
+    OUT_REFERENCE.write_text(text, encoding="utf-8")
     print(f"wrote {OUT_REFERENCE.relative_to(REPO)} "
-          f"({len(unique)} commands, {len(modules)} modules)")
+          f"({unique} commands, {modules} modules)")
     return 0
 
 
@@ -336,11 +449,20 @@ SETTING_ARRAY_RE = re.compile(r"SettingEntry\s+\w+\s*\[\]\s*=\s*\{")
 
 
 def cmd_audit(args) -> int:
-    by_array = parse_commands()
+    by_array, alternates = parse_commands_and_alternates()
     modules = parse_modules()
     names = {c["name"].lower() for v in by_array.values() for c in v}
     module_names = {m["module"].lower() for m in modules}
     problems = 0
+
+    # -- #if/#else alternatives (information, not a problem) ---------------
+    print(f"== tables in mutually exclusive #if branches "
+          f"({len(alternates)} alternative definition(s), first branch read) ==")
+    for fname, array, line in alternates:
+        print(f"  {array} ({fname}:{line})")
+    if not alternates:
+        print("  (none)")
+    print()
 
     # -- duplicate registrations ------------------------------------------
     where = collections.defaultdict(list)
@@ -440,7 +562,9 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command")
-    sub.add_parser("reference", help="write docs/COMMAND_REFERENCE.md")
+    ref = sub.add_parser("reference", help="write docs/COMMAND_REFERENCE.md")
+    ref.add_argument("--check", action="store_true",
+                     help="write nothing; exit 1 if the tracked file is out of date")
     sub.add_parser("audit", help="report registry drift; non-zero exit on findings")
     args = p.parse_args()
     if args.command == "audit":
