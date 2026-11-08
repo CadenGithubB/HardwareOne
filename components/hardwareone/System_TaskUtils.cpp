@@ -232,7 +232,13 @@ bool taskHeapWalker(walker_heap_into_t heap_info, walker_block_info_t block, voi
       ctx->out[i].stackHeapSpan = span;
       ctx->out[i].stackBytes = block.used ? (uint32_t)block.size : 0;
     }
-    if (block.used && block.ptr == (const void*)ctx->snapshot[i].xHandle) {
+#if CONFIG_HEAP_POISONING_LIGHT || CONFIG_HEAP_POISONING_COMPREHENSIVE
+    // Bench memdiag builds: poisoning prepends poison_head_t (uint32_t canary, size_t size) to the user data.
+    const void* user = reinterpret_cast<const void*>(base + sizeof(uint32_t) + sizeof(size_t));
+#else
+    const void* user = block.ptr;
+#endif
+    if (block.used && user == (const void*)ctx->snapshot[i].xHandle) {
       ctx->out[i].tcbBytes = (uint32_t)block.size;
     }
   }

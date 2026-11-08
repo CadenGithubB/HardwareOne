@@ -1,4 +1,5 @@
 #include "System_STT.h"
+#include "System_MemDiag.h"
 #ifdef ESP_PLATFORM
 #include "System_Events.h"  // systemEventPost: typed system-event ring (host builds have no ring)
 #endif
@@ -2449,15 +2450,27 @@ static void sttContinuousWorker(void*) {
              (unsigned long)run.feRowsComputed, (unsigned long)run.feOverruns, (unsigned long)run.feFinals,
              (unsigned long)run.feCachedFinals, (unsigned long)run.feCachedRows, (unsigned long)run.feDraftRows);
 #endif
+#if HW1_BENCH_MEMDIAG
+  memDiagCheckpoint("stt-pre-feature-stop");
+#endif
   sttFeatureStop(run);  // the capture task has joined; nothing feeds the ring
 #endif
 #if HW1_STT_SPEAKER_LABELS
+#if HW1_BENCH_MEMDIAG
+  memDiagCheckpoint("stt-pre-speaker-end");
+#endif
   sttSpeakerEnd(&backendSession);  // stop background labelling and free the speaker model before the session goes
 #endif
   // FreeRTOS self-delete does not unwind C++ locals. Close the backend (or
   // park it for the next run while a hold lasts) before publishing
   // workerActive=false, after every inference/capture user joined.
+#if HW1_BENCH_MEMDIAG
+  memDiagCheckpoint("stt-pre-warm-park");
+#endif
   sttWarmPark(backendSession);
+#if HW1_BENCH_MEMDIAG
+  memDiagCheckpoint("stt-post-warm-park");
+#endif
 #if HW1_STT_SPECULATIVE_FINAL
   sttWipe(gSpecText, sizeof(gSpecText));  // a held, never-promoted result
 #endif
@@ -2466,6 +2479,9 @@ static void sttContinuousWorker(void*) {
   for (auto& slot : run.slots) {
     if (slot.pcm) { sttWipe(slot.pcm, kStreamSamples * sizeof(int16_t)); free(slot.pcm); }
   }
+#if HW1_BENCH_MEMDIAG
+  memDiagCheckpoint("stt-post-pcm-free");
+#endif
   sttStreamTick(run);
   const bool cancelled = sttCancelled(&run.token);
   // Saving has a completion boundary here. Later cancellation can retire the

@@ -245,6 +245,7 @@ set(hardwareone_srcs
         System_MemUtil.cpp
         System_MemTracker.cpp
         System_MemoryMonitor.cpp
+        System_MemDiag.cpp
         System_SensorLogging.cpp
         System_CaptureCrypto.cpp
         System_SensorStubs.cpp
@@ -670,6 +671,12 @@ idf_component_register(
         esp32_camera_psram.lf
         p4_camera_iram.lf
 )
+
+# Bench-only memory-corruption diagnostics (System_MemDiag.h): set HW1_BENCH_MEMDIAG=1
+# in the environment of tools/build_board.sh. Never set for release builds.
+if(DEFINED ENV{HW1_BENCH_MEMDIAG})
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE HW1_BENCH_MEMDIAG=$ENV{HW1_BENCH_MEMDIAG})
+endif()
 
 # IDF evaluates component requirements in script mode before registration.
 # Source properties are only legal after idf_component_register returns.
