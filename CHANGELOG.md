@@ -73,6 +73,15 @@ everything user-visible since the v0.99.99 tag (55 commits).
   without `formatVersion` is treated as format 1.
 
 ### Fixed
+- ESP32-P4: a CPU clock change could hang both cores until the interrupt watchdog reset the chip
+  (`rst:0x7 (HP_SYS_HP_WDT_RESET)`, `reset=other_wdt`, no panic output). Bench 2026-11-08: 2 of 3
+  `stt start` attempts at the 100 MHz idle clock that failed at once (raise to 400 MHz, then straight
+  back). The clock switch added on 2026-11-07 freezes the external-memory cache with the other core
+  stalled, but the compiler had inlined it into flash code, so the frozen window itself was fetched
+  from flash; on the P4 a cache miss there never completes. The switch is now a separate internal-RAM
+  function, reads its configuration from internal RAM, and refuses (the power policy retries) on a
+  task whose stack is not in internal RAM. Any clock change was exposed (power mode, `cpufreq`, the
+  STT and display boosts). Not yet tested on hardware.
 - Two crashes: the QuickNote worker's stack and Arduino's unlocked `NetworkEvents`.
 - Three resident task stacks raised, as they ran with 312 to 700 B free: the command executor
   (`cmd_exec`) 8 to 10 KB, the log writer (`log_out`) 4 to 6 KB, the glasses owner (`g2_owner`) 6 to

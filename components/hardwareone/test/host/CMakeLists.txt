@@ -1489,6 +1489,30 @@ foreach(test_name IN ITEMS power_cpu_frequency power_save_tick)
             ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
             ${POWER_CPU_TEST_ARGS})
 endforeach()
+# The P4 clock switch's frozen-cache window (bench 2026-11-08 rst:0x7): host
+# behaviour always; the IRAM placement check cross-compiles the production code
+# with ESP-IDF's riscv32-esp-elf-g++ (object files only) and is skipped (77)
+# without it or an IDF tree.
+add_test(
+  NAME power_p4_clock_switch
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_power_p4_clock_switch.py
+          ${POWER_CPU_TEST_ARGS})
+find_program(HW1_RISCV_CXX NAMES riscv32-esp-elf-g++)
+set(HW1_P4_CLOCK_TEST_IDF "$ENV{IDF_PATH}" CACHE PATH "ESP-IDF 5.5.5 tree for the P4 clock IRAM placement check")
+set(POWER_P4_IRAM_ARGS --placement)
+if(HW1_RISCV_CXX)
+  list(APPEND POWER_P4_IRAM_ARGS --cross-cxx ${HW1_RISCV_CXX})
+endif()
+if(HW1_P4_CLOCK_TEST_IDF)
+  list(APPEND POWER_P4_IRAM_ARGS --idf ${HW1_P4_CLOCK_TEST_IDF})
+endif()
+add_test(
+  NAME power_p4_clock_iram
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_power_p4_clock_switch.py
+          ${POWER_P4_IRAM_ARGS})
+set_tests_properties(power_p4_clock_iram PROPERTIES SKIP_RETURN_CODE 77)
 set(ICON_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND ICON_TEST_ARGS --sanitize)

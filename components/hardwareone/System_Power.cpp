@@ -31,7 +31,9 @@
 #if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_SPIRAM && !CONFIG_APP_BUILD_TYPE_PURE_RAM_APP
 #include "soc/rtc.h"
 #include "esp_attr.h"
+#include "esp_cpu.h"
 #include "esp_ipc_isr.h"
+#include "esp_memory_utils.h"
 #include "esp_private/esp_cache_private.h"
 #include "esp_private/esp_clk_utils.h"
 #define HW1_SYNC_MSPI_WITH_CPU_CLOCK 1
@@ -54,17 +56,41 @@
 // the other core stalled and the external-memory cache frozen, so no CPU
 // access to PSRAM is in flight across the intermediate states. The APB clock
 // is fixed on the P4 (Arduino's APB-change callbacks would see no change).
+//
+// From the freeze to the unfreeze nothing may come from flash or PSRAM: on the
+// P4 such an access with the cache frozen retries forever and blocks the L1
+// cache, so the core stops, with the other core stalled and this one's
+// interrupts masked (IDF mspi_timing_tuning.c). Bench 2026-11-08: `stt start`
+// at 100 MHz raised the clock and dropped it again at once; 2 of 3 times both
+// cores froze (Core0 at _vector_table, Core1 in esp_ipc_isr_waiting_for_finish_cmd)
+// and the interrupt watchdog reset the chip (rst:0x7). GCC had inlined this
+// static IRAM_ATTR function into powerSetCpuFrequencyMhz, which runs from
+// flash, so the window's own instructions were flash fetches. Hence:
+//  - NOINLINE_ATTR, so the whole window is this function's IRAM code (the
+//    callees are IDF's IRAM functions);
+//  - the configuration is copied to internal RAM before the window, so it reads
+//    nothing from the caller (a PSRAM stack or object);
+//  - the callees' frames go on this task's stack inside the window, so a task
+//    whose stack is not in internal RAM is refused, as IDF's
+//    esp_cache_freeze_caches_disable_interrupts asserts. The policy retries
+//    from the main loop, whose stack is internal.
 static portMUX_TYPE sP4ClockSwitchMux = portMUX_INITIALIZER_UNLOCKED;
-static IRAM_ATTR void p4SwitchCpuClock(const rtc_cpu_freq_config_t* target) {
+static DRAM_ATTR rtc_cpu_freq_config_t sP4ClockTarget;
+static IRAM_ATTR NOINLINE_ATTR bool p4SwitchCpuClock(const rtc_cpu_freq_config_t* target) {
+  if (!esp_ptr_in_dram(esp_cpu_get_sp())) return false;
+  sP4ClockTarget = *target;   // the caller's mutex serialises every use
   portENTER_CRITICAL_SAFE(&sP4ClockSwitchMux);
-  esp_clk_utils_mspi_speed_mode_sync_before_cpu_freq_switching(target->source_freq_mhz, target->freq_mhz);
+  esp_clk_utils_mspi_speed_mode_sync_before_cpu_freq_switching(sP4ClockTarget.source_freq_mhz,
+                                                               sP4ClockTarget.freq_mhz);
   esp_ipc_isr_stall_other_cpu();
   esp_cache_freeze_ext_mem_cache();
-  rtc_clk_cpu_freq_set_config_fast(target);
+  rtc_clk_cpu_freq_set_config_fast(&sP4ClockTarget);
   esp_cache_unfreeze_ext_mem_cache();
   esp_ipc_isr_release_other_cpu();
-  esp_clk_utils_mspi_speed_mode_sync_after_cpu_freq_switching(target->source_freq_mhz, target->freq_mhz);
+  esp_clk_utils_mspi_speed_mode_sync_after_cpu_freq_switching(sP4ClockTarget.source_freq_mhz,
+                                                              sP4ClockTarget.freq_mhz);
   portEXIT_CRITICAL_SAFE(&sP4ClockSwitchMux);
+  return true;
 }
 #endif
 
@@ -156,8 +182,9 @@ bool powerSetCpuFrequencyMhz(uint32_t mhz, bool* outClockChanged) {
       const uint32_t before = getCpuFrequencyMhz();
 #if HW1_SYNC_MSPI_WITH_CPU_CLOCK
       rtc_cpu_freq_config_t target = {};
-      const bool accepted = rtc_clk_cpu_freq_mhz_to_config(mhz, &target);
-      if (accepted) p4SwitchCpuClock(&target);   // see p4SwitchCpuClock: never Arduino's unsynchronised switch
+      // See p4SwitchCpuClock: never Arduino's unsynchronised switch. It refuses
+      // on a task whose stack is not in internal RAM.
+      const bool accepted = rtc_clk_cpu_freq_mhz_to_config(mhz, &target) && p4SwitchCpuClock(&target);
 #elif HW1_SYNC_S3_MSPI_WITH_XTAL_CLOCK
       const bool accepted = s3SetCpuFrequencyMhz(mhz);   // G-48: MSPI speed-mode sync around XTAL
 #else
