@@ -245,13 +245,12 @@ _Pending._
 - Segmenter timing knobs (end silence, min phrase, blip tolerance) and the hard-coded 2x onset multiplier
   were not varied.
 
-## 6. Device arms at 1 ft on `claude/stt-1.0` (2026-11-08)
+## 6. Device arms at 1 ft (2026-11-08)
 
-Build `fe09e51e` (road-to-1.0 `a37fc293`, which carries the P4 clock-switch fix, plus the stt-1.0 fixes
-below), profile `p4-openclaw`, test P4X-EYE about 1 ft from the Mac mini speaker, volume 70, debug logging
+Build `fe09e51e` (with the P4 clock-switch fix and the fixes below), profile `p4-openclaw`, test P4X-EYE about 1 ft from the Mac mini speaker, volume 70, debug logging
 (`sttperf log on`) and a passive serial log in every arm. Each arm sets all knobs, so arms do not inherit
 from each other. The kept app slot (g2-health-push) was restored and hash-verified after each run. Scoring
-uses the stt-1.0 replay build and one host decoder (int8 QuartzNet gen2-25397 + meeting.lm). Every arm's
+uses the replay build of the same source and one host decoder (int8 QuartzNet gen2-25397 + meeting.lm). Every arm's
 replay reproduces the device's own `TL boundary` lines exactly (40/40, 76/76, 93/93, 75/75, 43/43).
 Scorer change: a segment that overlaps a speech clip by at least 0.3 s is that clip's caption, even when
 it opened early in a preceding silence (one such phrase had been counted as a false caption).
@@ -330,10 +329,10 @@ After `reboot` the P4 resets the C6 by GPIO9, the C6 shows only its ROM banner, 
 out (0x107); each 60 s companion retry then logs `Card init success` followed at once by `Failed to get
 ESP_Hosted slave transport up`. HTTP stayed down for 6 minutes; a USB chip reset recovered it in 16 s.
 
-## 7. Automatic mode: the 1.0 defaults (2026-11-08)
+## 7. Automatic mode: the shipped defaults (2026-11-08)
 
 The user's requirement: the mic path should adjust itself, not depend on knobs, and the gain must not jump on
-one session. What the stt-1.0 line ships:
+one session. What ships:
 
 - **Detector:** `sttdecisionpre` defaults to 97 (the pre-emphasis onset judge). It calibrates itself from
   the room in each session's first 500 ms and tracks the room afterwards; `0` restores the loudness-only rule.
