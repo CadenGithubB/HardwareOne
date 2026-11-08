@@ -73,14 +73,20 @@ def generated(component: Path) -> str:
         "void stopAutomationScheduler()", "bool automationSchedulerRunning()",
         "void automationTick()"))
     tick = extract_block(owner, "static void schedulerTickMinute()")
-    drain = next(line for line in tick.splitlines()
-                 if "gAutomationEventsPending.exchange(false);" in line)
+    begin = tick.index("  static uint32_t sEventCursor")
+    drain = tick[begin:tick.index("  // Without synced time only event fires", begin)]
+    require("gAutomationEventsPending.exchange(false);" in drain,
+            "event drain extraction holds the pending-flag exchange")
+    events = (component / "System_Events.cpp").read_text()
+    ring = "\n".join(extract_block(events, signature) for signature in (
+        "uint32_t systemEventLatestSeq()", "int systemEventFetchSince("))
     summary = owner_summary(component)
     require(bool(summary), "System_Automation.cpp has no owner automation summary "
             "(automationCopySummaries); pages still parse automations.json themselves")
     harness = (HERE / "automation_scheduler_harness.cpp").read_text()
     for marker, replacement in {"// INSERT_CACHE_OWNER": cache,
                                 "// INSERT_SCHEDULER_API": functions,
+                                "// INSERT_EVENT_RING": ring,
                                 "// INSERT_PENDING_EVENT_DRAIN": drain,
                                 "// INSERT_TRIGGER_SUMMARY": summary}.items():
         require(harness.count(marker) == 1, f"exactly one insertion marker: {marker}")

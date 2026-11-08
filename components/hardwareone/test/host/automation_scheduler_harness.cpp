@@ -70,6 +70,32 @@ static const char* systemEventKindName(uint8_t kind) {
 }
 static constexpr size_t SYSEVT_DETAIL_LEN = 80;
 static const char* AUTOMATIONS_JSON_FILE = "/automations.json";
+#define DEBUG_AUTOMATIONSF(...) do {} while (false)
+
+// The event ring boundary: the record, ring and lock are stubs; the real
+// systemEventLatestSeq() and systemEventFetchSince() are inserted below.
+#define SYSEVT_RING_SIZE 48
+struct SystemEvent { uint32_t seq; uint32_t tsMs; uint8_t kind; };
+static SystemEvent gEventRing[SYSEVT_RING_SIZE];
+static uint32_t gEventNextSeq = 1;
+static std::mutex gEventMux;
+#define taskENTER_CRITICAL(mux) (mux)->lock()
+#define taskEXIT_CRITICAL(mux) (mux)->unlock()
+static uint32_t gEventRingSkipped = 0;
+// INSERT_EVENT_RING
+// Mirrors systemEventPost()'s ring write; the subscription nudge stays the
+// test's explicit automationOnSystemEvent() call.
+static uint32_t postEvent(uint8_t kind) {
+  std::lock_guard<std::mutex> lock(gEventMux);
+  SystemEvent ev{gEventNextSeq++, millis(), kind};
+  gEventRing[ev.seq % SYSEVT_RING_SIZE] = ev;
+  return ev.seq;
+}
+// Preallocated so the drain's lazy ps_calloc does not perturb the cache
+// allocation ledger or consume the tests' injected allocation failure.
+static SystemEvent* sEventBuf =
+    static_cast<SystemEvent*>(std::calloc(SYSEVT_RING_SIZE, sizeof(SystemEvent)));
+static std::vector<uint32_t> drainedSeqs;  // seqs the last drain matched against
 static std::mutex storeMutex;
 static String storeJson;
 static bool storeExists = false, readSucceeds = true, writeSucceeds = true;
@@ -116,8 +142,11 @@ static void schedulerTickMinute();
 static void schedulerTickMinute() {
   CHECK(stateLockDepth == 0);
   ++ticks;
-  // The real full tick's pending-event drain statement is inserted here.
+  // The real full tick's event drain (pending flag, cursor, fetch, 60 s
+  // discard) is inserted here.
   // INSERT_PENDING_EVENT_DRAIN
+  drainedSeqs.clear();
+  for (int i = 0; i < evCount; ++i) drainedSeqs.push_back(sEventBuf[i].seq);
   if (beforeTick) beforeTick();
   rebuildAutomationsCache();
 }
@@ -142,6 +171,32 @@ static void reset(const char* json = emptyRules) {
   readSucceeds = writeSucceeds = true;
   failAllocation = false;
   reads = writes = ticks = 0;
+}
+
+// G-73: setup starts the scheduler, then posts more events (battery_low from
+// the boot battery sample) before loop() runs the first drain. The first drain
+// sees those, but not events from before the start. Runs first: the drain's
+// cursor is a function static and only its first drain starts from the start.
+static void eventDrainFromStart() {
+  reset(eventRules);
+  postEvent(1);  // before the scheduler starts: not matched
+  CHECK(startAutomationScheduler());
+  clockMs += 5000;
+  const uint32_t bootLow = postEvent(1);
+  automationOnSystemEvent(1);
+  clockMs += 5000;
+  automationTick();
+  CHECK(ticks == 1 && drainedSeqs.size() == 1 && drainedSeqs[0] == bootLow);
+  clockMs += 250;
+  const uint32_t later = postEvent(1);
+  automationOnSystemEvent(1);
+  automationTick();
+  CHECK(ticks == 2 && drainedSeqs.size() == 1 && drainedSeqs[0] == later);
+  // A restart after the first drain keeps the cursor: nothing is replayed.
+  stopAutomationScheduler();
+  CHECK(startAutomationScheduler());
+  automationTick();
+  CHECK(ticks == 3 && drainedSeqs.empty());
 }
 
 static void lifecycle() {
@@ -495,6 +550,7 @@ static void summaries() {
 }
 
 int main() {
+  eventDrainFromStart();
   summaries();
   lifecycle();
   permissionRevoked();

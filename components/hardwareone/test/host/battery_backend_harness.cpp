@@ -317,6 +317,9 @@ static void testLowCriticalAfterUnknown() {
 
 int main() {
   (void)kHasVbusSense;
+#if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
+  rawCode=(int)(3500.0f/(BATTERY_ADC_DIVIDER)); // G-73: boot on a low cell
+#endif
   initBattery();
 #if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
   auto s=getBatterySnapshot();
@@ -328,6 +331,16 @@ int main() {
   assert(configuredAttenuation==BATTERY_ADC_ATTEN && createCount==1);
   initBattery();
   assert(createCount==1); // Calling init twice does not reserve another unit.
+  // G-73: the setup-phase sample neither posts nor latches LOW, so the edge
+  // is posted by the first loop sample, which runs ahead of that pass's
+  // automation and notification drains (whose staleness gate is 10 s).
+  assert(s.status==BATTERY_LOW && events.empty());
+  clockMs=600; updateBattery();
+  assert(getBatterySnapshot().status==BATTERY_LOW && countEvents(SYSEVT_BATTERY_LOW)==1);
+  clockMs=700; updateBattery();
+  assert(countEvents(SYSEVT_BATTERY_LOW)==1 && countEvents(SYSEVT_BATTERY_CRITICAL)==0);
+  rawCode=1000; events.clear();
+  s=getBatterySnapshot();
   const auto successfulAt=s.lastReadMs;
   clockMs=1000; readCount=0; readFailAt=8;
   updateBattery(); checkUnknown();
