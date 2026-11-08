@@ -106,6 +106,10 @@ everything user-visible since the v0.99.99 tag (55 commits).
 ### Docs
 - `docs/COMMAND_REFERENCE.md` regenerated: it lacked `memdiag`, the four matrix setters and the
   microphone/STT tuning commands added since the last regeneration, and listed the OTA commands twice.
+- The user guide's multi-hop section states one rule for pairing: the discover/request/accept exchange
+  is single-hop (the code never relays `PAIR_*` frames), while key exchange and encrypted session setup
+  between devices that share the mesh passphrase do travel through relays. It no longer also claims
+  relays carry the initial pairing handshake.
 - Private network names, addresses and account paths replaced with placeholders throughout the tracked
   tree; the Arduino patch README names every patch in replay order and the stale variant note is gone;
   QUICKSTART and README make vendoring step 1; two P4X-EYE Bluetooth reliability investigations and the
