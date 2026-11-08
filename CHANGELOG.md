@@ -55,6 +55,11 @@ everything user-visible since the v0.99.99 tag (55 commits).
   semaphores on timeout.
 - Waveshare: DSI scanout protected from CPU downclocking, DSI refresh interrupts kept active during
   flash writes, backlight dark until the wake frame settles, steady login popup, touch latency.
+- ESP-NOW discover-then-accept pairing no longer ends half-paired when a control frame is lost: the
+  request repeats every 1.5 s until answered (45 s limit), a repeated request gets the same answer
+  without a second prompt (also after the discovery window closed under an open prompt), and a device
+  that already paired the requester answers Accept. The timeout names the repair command and the
+  display's pairing screen shows the request's state. Not yet tested on hardware (host model only).
 - Host suite: nine harnesses re-pinned after the Waveshare merge; the event-catalog structure test walks
   what git would commit; the continuous-STT suites run serially under ctest.
 
