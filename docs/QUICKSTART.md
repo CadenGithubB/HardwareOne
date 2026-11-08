@@ -45,9 +45,13 @@ Needs no extra wiring - the glasses and ring are BLE peripherals. In
 `System_BuildConfig.h`, set `ENABLE_BLUETOOTH` to `1` to build the BLE stack,
 `ENABLE_G2_GLASSES` to `1` for the glasses client, and `ENABLE_R1_HEALTH` to `1`
 for ring vitals - R1 rides the G2 BLE client, so it needs the other two on as
-well. Pick a board that keeps the BT stack: `qtpy_esp32` and `xiao_s3` set
-`CONFIG_BT_ENABLED=n`, and the header's derived rules then force
-`ENABLE_BLUETOOTH` - and G2/R1 with it - back to `0` whatever you wrote. Then,
+well. Pick a build that keeps the BT stack: `qtpy_esp32` sets
+`CONFIG_BT_ENABLED=n`, and so do the saved XIAO configurations (`xiao-default`,
+`xiao-openclaw`); the header's derived rules then force `ENABLE_BLUETOOTH` - and
+G2/R1 with it - back to `0` whatever you wrote. On the XIAO ESP32-S3, glasses and
+ring support come with the `pocket_assistant` deployment
+(`tools/build_deployment.sh pocket_assistant xiao_s3`), which has Bluetooth on and
+the larger partition table it needs. Then,
 after Software Setup:
 
 1. `openg2` to connect the glasses. Tap a temple to open the on-lens menu.
@@ -188,14 +192,16 @@ Two layers of defaults are applied for you, and it helps to know which is which.
 | Board | Board file | PSRAM mode | Flash | Bluetooth |
 | ----- | ---------- | :--------: | :---: | :-------: |
 | Unexpected Maker FeatherS3 | `feathers3` | **Quad** | 16 MB | on |
-| Seeed XIAO ESP32-S3 | `xiao_s3` | **Octal** | 8 MB | **off** |
+| Seeed XIAO ESP32-S3 | `xiao_s3` | **Octal** | 8 MB | on in the board file, which no longer fits the factory partition; build `--config xiao-no-bluetooth` (off) or the `pocket_assistant` deployment (on) |
 | Adafruit QT Py ESP32 | `qtpy_esp32` | **Quad** | 8 MB | **off** |
 | Adafruit Feather ESP32 V2 | `feather_esp32_v2` | **Quad** | 8 MB | on |
 
-> **Two boards ship with the Bluedroid stack compiled out** (`CONFIG_BT_ENABLED=n`) to buy back
-> flash and RAM: `qtpy_esp32` (~14 KB IRAM / ~80 KB DRAM / ~70 KB flash on the memory-tight
-> classic ESP32) and `xiao_s3` (the image overflowed the factory partition with Bluetooth plus
-> the on-board LLM source). You do **not** hand-edit `System_BuildConfig.h` for this any more:
+> **Bluedroid is compiled out** (`CONFIG_BT_ENABLED=n`) to buy back flash and RAM on
+> `qtpy_esp32` (~14 KB IRAM / ~80 KB DRAM / ~70 KB flash on the memory-tight classic ESP32)
+> and in the saved XIAO configurations (`xiao-no-bluetooth`, `xiao-default`, `xiao-openclaw`). The bare `xiao_s3`
+> board file keeps Bluetooth on for the `pocket_assistant` deployment, so a plain
+> `tools/build_board.sh xiao_s3` overflows the 5.8 MB factory partition (by ~14 KB on
+> 2026-11-08); use `--config xiao-no-bluetooth` or the deployment. You do **not** hand-edit `System_BuildConfig.h` for this any more:
 > the header's derived rules see `CONFIG_BT_ENABLED` missing and force `ENABLE_BLUETOOTH` - and
 > its G2 / R1 dependents - to `0`, and `components/hardwareone/CMakeLists.txt` applies the same
 > downgrade to its source-list filter, so the `#if` gates and the file list cannot diverge.

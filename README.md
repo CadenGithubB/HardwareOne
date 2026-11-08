@@ -146,7 +146,7 @@ gate); "experimental" rows build and have been run, but are not held to the rele
 |---|---|---|---|---|
 | Unexpected Maker FeatherS3 | `tools/build_board.sh feathers3`; release: `tools/build_deployment.sh headless feathers3` | stable | recovery OTA layout `hw1-f3-ota-v1` (signed, BLE or SoftAP) and cable | OTA end to end 2026-08-05 (v0.99.8); BLE/G2/R1 2026-07-30; needs re-qualification on the release image |
 | Adafruit Feather ESP32 V2 | `feather_esp32_v2`; release: `tools/build_deployment.sh headless feather_esp32_v2` | stable | recovery OTA layout `hw1-fv2-ota-v1` and cable | OTA recovery path, setup, Wi-Fi, web 2026-08-25; BLE/G2 2026-08-19 |
-| Seeed XIAO ESP32-S3 (+ Sense) | `xiao_s3`; release: `tools/build_deployment.sh pocket_assistant xiao_s3` | stable (cable); OTA layout experimental until a dated record exists | cable; `pocket_assistant` OTA layout without a hardware record yet | 0.99.97.4 boot + serial check 2026-10-12 |
+| Seeed XIAO ESP32-S3 (+ Sense) | `xiao_s3 --config xiao-no-bluetooth` (Bluetooth off; the bare board build with Bluetooth does not fit its factory partition); release: `tools/build_deployment.sh pocket_assistant xiao_s3` (Bluetooth on, its own partition table) | stable (cable); OTA layout experimental until a dated record exists | cable; `pocket_assistant` OTA layout without a hardware record yet | 0.99.97.4 boot + serial check 2026-10-12 |
 | Adafruit QT Py ESP32 | `qtpy_esp32` | stable (cable) | cable; OTA layout experimental (no record) | 0.99.97.4 boot + serial check 2026-10-12 |
 | Espressif ESP32-P4X-EYE | `p4x_eye` (needs `tools/p4/prepare_sdk.sh`); release: `tools/build_deployment.sh handheld p4x_eye` | stable, cable-only | cable (app-only write; no OTA layout) | multi-hour STT bench runs and BLE investigations 2026-11-07/08 (`docs/P4X_PANIC_HUNT_20261107.md`) |
 | FeatherS3 flash-encrypted (`feathers3_fe`) | `feathers3_fe` | experimental | `hw1-f3fe-ota-v1` | flash-encryption trial 2026-07-30 |
@@ -227,7 +227,10 @@ tools/vendor_arduino.sh
 idf.py -p PORT flash monitor
 
 # Or build one specific board (see boards/ for the list)
-tools/build_board.sh xiao_s3 -p PORT flash monitor
+tools/build_board.sh feathers3 -p PORT flash monitor
+
+# A saved feature configuration (see configurations/): the XIAO ESP32-S3 without Bluetooth
+tools/build_board.sh xiao_s3 --config xiao-no-bluetooth -p PORT flash monitor
 ```
 
 `tools/build_board.sh <board> [idf.py args...]` gives each board its own `build-<board>/` directory and its own sdkconfig, so switching boards never needs an `idf.py fullclean`.
