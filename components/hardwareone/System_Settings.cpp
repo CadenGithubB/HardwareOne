@@ -2753,6 +2753,7 @@ static const SettingEntry sttSettingEntries[] = {
   { "sttg2silencefloor", SETTING_INT, &gSettings.sttG2SilenceFloor, 16, 0, nullptr, 1, 32767, "G2 mic: silence floor (frame RMS)", nullptr, false, nullptr, "sttg2silencefloor" },
   { "sttg2noisepercentile", SETTING_INT, &gSettings.sttG2NoisePercentile, 25, 0, nullptr, 0, 50, "G2 mic: room-level percentile", nullptr, false, nullptr, "sttg2noisepercentile" },
   { "sttg2decisionpre", SETTING_INT, &gSettings.sttG2DecisionPre, 97, 0, nullptr, 0, 99, "G2 mic: pre-emphasis onset judge (x0.01, 0 = loudness only)", nullptr, false, nullptr, "sttg2decisionpre" },
+  { "sttg2autogain", SETTING_BOOL, &gSettings.sttG2AutoGain, 1, 0, nullptr, 0, 1, "G2 mic: automatic PCM gain for STT", nullptr, false, nullptr, "sttg2autogain" },
 };
 
 static const SettingsModule sttSettingsModule = {
@@ -3723,6 +3724,7 @@ SETTING_EDITOR_CMD(cmd_set_sttg2speechfloor,     "sttg2speechfloor")
 SETTING_EDITOR_CMD(cmd_set_sttg2silencefloor,    "sttg2silencefloor")
 SETTING_EDITOR_CMD(cmd_set_sttg2noisepercentile, "sttg2noisepercentile")
 SETTING_EDITOR_CMD(cmd_set_sttg2decisionpre,     "sttg2decisionpre")
+SETTING_EDITOR_CMD(cmd_set_sttg2autogain,        "sttg2autogain")
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 SETTING_EDITOR_CMD(cmd_set_g2holdaction,         "g2holdaction")
@@ -3815,6 +3817,7 @@ const CommandEntry settingEditorCommands[] = {
   { "sttg2silencefloor", "G2 glasses-mic profile: silence floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttg2silencefloor, "Usage: sttg2silencefloor [1-32767]" },
   { "sttg2noisepercentile", "G2 glasses-mic profile: noise-window percentile used as the room level; applies to the next session.", true, cmd_set_sttg2noisepercentile, "Usage: sttg2noisepercentile [0-50]" },
   { "sttg2decisionpre", "G2 glasses-mic profile: onset judge on pre-emphasised audio (x0.01; 0 = loudness only); applies to the next session.", true, cmd_set_sttg2decisionpre, "Usage: sttg2decisionpre [0-99]" },
+  { "sttg2autogain", "G2 glasses-mic profile: STT multiplies the glasses audio (1..8). Starts at x1 and changes only when several sessions agree. Applies to the next session.", true, cmd_set_sttg2autogain, "Usage: sttg2autogain [0|1]" },
   { "sttautogain", "STT picks its own onboard-mic gain (changed only when several sessions agree) and a 120 Hz high-pass; 0 = use pdmamplify/pdmhpf. Applies to the next session.", true, cmd_set_sttautogain, "Usage: sttautogain [0|1]" },
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

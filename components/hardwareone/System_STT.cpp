@@ -273,6 +273,13 @@ constexpr uint16_t kSttAutoHpfHz = 120;
 [[maybe_unused]] constexpr bool kSttPdmTunable = true;
 #endif
 static hw1::stt::AutoGainHistory gSttAutoGain;  // gSTTMux
+// Glasses PCM is already past the glasses' volume control, so this starts at
+// x1 and multiplies samples in the capture loop. Same agreement rule.
+static hw1::stt::AutoGainHistory gSttG2AutoGain(hw1::stt::kAutoGainGlassesStart);  // gSTTMux
+// Software multiplier the phrase leveler is applying right now (1 when idle).
+// The slow history above is the gain for the next session; this one moves
+// during the sentence and is not kept. gSTTMux.
+static uint8_t gSttPhraseGain = 1;
 static uint8_t sttApplyMicTuning() {
 #if defined(MIC_BACKEND_ES7210) && MIC_BACKEND_ES7210
   return 0;  // ES7210 codec boards: no PDM channel to tune, so no automatic gain
@@ -535,6 +542,25 @@ static void sttWorker(void*) {
 
     const uint32_t captureStartedMs = millis();
     uint32_t lastAudioMs = captureStartedMs;
+    // stt record ends in this one-shot worker, not the continuous capture
+    // worker. The phrase leveler has to run here or a bounded recording never
+    // moves. It starts at x1 and steps at most x2 or x0.5 every tenth of a second
+    // (stt/stt_auto_gain.h). The harness leaves it off and checks raw samples.
+    hw1::stt::AutoGainMeter phraseMeter;
+    uint8_t phraseGain = 1;
+    uint16_t phraseLoud = 0;
+    uint8_t g2SessionGain = 0;
+    const bool phraseLevel = gSettings.sttPhraseLevel &&
+        ((source == AUDIO_SRC_LOCAL_PDM && gSettings.sttAutoGain) ||
+         (source == AUDIO_SRC_G2_LEFT && gSettings.sttG2AutoGain));
+    if (source == AUDIO_SRC_G2_LEFT && gSettings.sttG2AutoGain) {
+      portENTER_CRITICAL(&gSTTMux);
+      g2SessionGain = gSttG2AutoGain.gain();
+      portEXIT_CRITICAL(&gSTTMux);
+    }
+    portENTER_CRITICAL(&gSTTMux);
+    gSttPhraseGain = 1;
+    portEXIT_CRITICAL(&gSTTMux);
     while (samples < capacity && !sttCancelled(&token)) {
       bool finish;
       portENTER_CRITICAL(&gSTTMux);
@@ -553,8 +579,32 @@ static void sttWorker(void*) {
         break;
       }
       if (count) {
-        // Input contract is raw HAL PCM. No recorder pre-emphasis, software
-        // gain or DC state is applied here; the model frontend owns its DSP.
+        // The model hears this block. Glasses start from the agreed session
+        // gain; the phrase multiplier then steps on top for either mic.
+        int16_t* const block = pcm + samples;
+        if (g2SessionGain > 1) hw1::stt::applyAutoGain(block, count, g2SessionGain);
+        if (phraseLevel) {
+          if (phraseGain > 1) hw1::stt::applyAutoGain(block, count, phraseGain);
+          phraseMeter.push(block, count);
+          if (phraseMeter.stats().samples >= hw1::stt::kAutoGainStepSamples) {
+            const int floorSetting = source == AUDIO_SRC_G2_LEFT ? gSettings.sttG2SpeechFloor
+                                                                 : gSettings.sttSpeechFloor;
+            const uint16_t floor = floorSetting <= 0 ? 0
+                : floorSetting > 65535 ? 65535 : static_cast<uint16_t>(floorSetting);
+            phraseLoud = phraseMeter.stats().loud[2];
+            const uint8_t next = hw1::stt::stepAutoGain(phraseGain, phraseMeter.stats(), floor);
+            if (next != phraseGain) {
+              phraseGain = next;
+              portENTER_CRITICAL(&gSTTMux);
+              gSttPhraseGain = phraseGain;
+              portEXIT_CRITICAL(&gSTTMux);
+#ifdef ESP_PLATFORM
+              ESP_LOGI("STT", "TL phrasegain now=%u loud3=%u", unsigned(phraseGain), unsigned(phraseLoud));
+#endif
+            }
+            phraseMeter.reset();
+          }
+        }
         double sum = 0;
         for (size_t i = 0; i < count; ++i) {
           const double v = pcm[samples + i];
@@ -577,6 +627,11 @@ static void sttWorker(void*) {
         break;
       }
     }
+    (void)phraseLoud;
+#ifdef ESP_PLATFORM
+    if (phraseLevel)
+      ESP_LOGI("STT", "TL phrasegain final=%u loud3=%u", unsigned(phraseGain), unsigned(phraseLoud));
+#endif
     if (error[0] || sttCancelled(&token)) break;
     if (samples < STT_SAMPLE_RATE / 10) {
       sttError(error, sizeof(error), "Capture too short (minimum 100 ms)");
@@ -1317,6 +1372,7 @@ static void sttCaptureWorker(void* context) {
   AudioSource source = AUDIO_SRC_NONE;
   bool selected = false, claimed = false, g2Held = false;
   uint8_t sessionGain = 0;  // onboard mic gain this session opened with (0: not the onboard mic)
+  uint8_t g2SessionGain = 0;  // glasses software gain (0: not a glasses session, or sttg2autogain off)
   int16_t block[kStreamReadSamples];
   do {
     if (sttStreamCancelled(&run)) break;
@@ -1356,6 +1412,11 @@ static void sttCaptureWorker(void* context) {
                  unsigned(source));
     }
 #endif
+    if (source == AUDIO_SRC_G2_LEFT && gSettings.sttG2AutoGain) {
+      portENTER_CRITICAL(&gSTTMux);
+      g2SessionGain = gSttG2AutoGain.gain();
+      portEXIT_CRITICAL(&gSTTMux);
+    }
     audioTrimBufferedPcm("stt", 0);
     uint32_t initialOverruns = 0;
     if (!audioCaptureOverruns("stt", &initialOverruns)) {
@@ -1401,7 +1462,16 @@ static void sttCaptureWorker(void* context) {
     }
     uint32_t lastAudioMs = millis();
     const uint32_t captureStartMs = lastAudioMs;
-    hw1::stt::AutoGainMeter gainMeter;  // what this session received (onboard mic only)
+    hw1::stt::AutoGainMeter gainMeter;  // onboard PCM before the phrase multiplier
+    hw1::stt::AutoGainMeter g2Meter;    // glasses PCM at the gain chosen for this session
+    hw1::stt::AutoGainMeter phraseMeter;  // the last tenth of a second, after the phrase multiplier
+    uint8_t phraseGain = 1;  // extra software gain; glasses already applied g2SessionGain
+    const bool phraseLevel = gSettings.sttPhraseLevel &&
+        ((source == AUDIO_SRC_LOCAL_PDM && gSettings.sttAutoGain) ||
+         (source == AUDIO_SRC_G2_LEFT && gSettings.sttG2AutoGain));
+    portENTER_CRITICAL(&gSTTMux);
+    gSttPhraseGain = 1;
+    portEXIT_CRITICAL(&gSTTMux);
     bool utteranceEnded = false;
     bool wasPaused = false;
     size_t pauseSilence = 0;  // zero samples still to feed after a pause edge
@@ -1460,11 +1530,40 @@ static void sttCaptureWorker(void* context) {
         initialOverruns = overruns;
       }
       if (count) {
+        // Session meters stay at one gain for the whole session, so the slow
+        // history still describes the level the next session should open at.
+        // The phrase multiplier is applied after that and is what the
+        // segmenter and the model hear. It starts at x1 and steps at most
+        // x2 or x0.5 every tenth of a second (stt/stt_auto_gain.h).
+        if (g2SessionGain > 1) hw1::stt::applyAutoGain(block, count, g2SessionGain);
+        if (source == AUDIO_SRC_LOCAL_PDM) gainMeter.push(block, count);
+        else if (g2SessionGain) g2Meter.push(block, count);
+        if (phraseLevel) {
+          if (phraseGain > 1) hw1::stt::applyAutoGain(block, count, phraseGain);
+          phraseMeter.push(block, count);
+          if (phraseMeter.stats().samples >= hw1::stt::kAutoGainStepSamples) {
+            const int floorSetting = source == AUDIO_SRC_G2_LEFT ? gSettings.sttG2SpeechFloor
+                                                                 : gSettings.sttSpeechFloor;
+            const uint16_t floor = floorSetting <= 0 ? 0
+                : floorSetting > 65535 ? 65535 : static_cast<uint16_t>(floorSetting);
+            const uint8_t next = hw1::stt::stepAutoGain(phraseGain, phraseMeter.stats(), floor);
+            if (next != phraseGain) {
+              phraseGain = next;
+              portENTER_CRITICAL(&gSTTMux);
+              gSttPhraseGain = phraseGain;
+              portEXIT_CRITICAL(&gSTTMux);
+#ifdef ESP_PLATFORM
+              ESP_LOGI("STT", "TL phrasegain now=%u loud3=%u",
+                       unsigned(phraseGain), unsigned(phraseMeter.stats().loud[2]));
+#endif
+            }
+            phraseMeter.reset();
+          }
+        }
         lastAudioMs = millis();
 #ifdef ESP_PLATFORM
         sttRawCapturePush(block, count);  // copy only; never blocks
 #endif
-        if (source == AUDIO_SRC_LOCAL_PDM) gainMeter.push(block, count);
         int64_t sum = 0;
         uint64_t square = 0;
         for (size_t i = 0; i < count; ++i) {
@@ -1591,6 +1690,22 @@ static void sttCaptureWorker(void* context) {
 #ifdef ESP_PLATFORM
       ESP_LOGI("STT", "TL autogain used=%u wanted=%u next=%u history=%u loud3=%u clipped=%lu samples=%llu",
                unsigned(sessionGain), unsigned(wanted), unsigned(next), unsigned(kept), unsigned(g.loud[2]),
+               (unsigned long)g.clipped, (unsigned long long)g.samples);
+#else
+      (void)wanted; (void)next; (void)kept;
+#endif
+    }
+    if (source == AUDIO_SRC_G2_LEFT && g2SessionGain && gSettings.sttG2AutoGain) {
+      const auto& g = g2Meter.stats();
+      portENTER_CRITICAL(&gSTTMux);
+      const bool heard = gSTT.snapshot.segmentsCaptured > 0;
+      const uint8_t wanted = heard ? hw1::stt::wantedAutoGain(g2SessionGain, g) : 0;
+      const uint8_t next = gSttG2AutoGain.record(g2SessionGain, g, heard);
+      const size_t kept = gSttG2AutoGain.size();
+      portEXIT_CRITICAL(&gSTTMux);
+#ifdef ESP_PLATFORM
+      ESP_LOGI("STT", "TL g2autogain used=%u wanted=%u next=%u history=%u loud3=%u clipped=%lu samples=%llu",
+               unsigned(g2SessionGain), unsigned(wanted), unsigned(next), unsigned(kept), unsigned(g.loud[2]),
                (unsigned long)g.clipped, (unsigned long long)g.samples);
 #else
       (void)wanted; (void)next; (void)kept;
@@ -3185,6 +3300,15 @@ static const char* cmd_stt(const String& argsInput) {
         doc["decisionPre"] = p.decisionPre;
       }
       doc["autoGain"] = gSettings.sttAutoGain && kSttPdmTunable;
+      {
+        portENTER_CRITICAL(&gSTTMux);
+        const uint8_t g2Gain = gSttG2AutoGain.gain();
+        const uint8_t phraseGain = gSttPhraseGain;
+        portEXIT_CRITICAL(&gSTTMux);
+        doc["g2AutoGain"] = gSettings.sttG2AutoGain;
+        doc["g2Gain"] = g2Gain;
+        doc["phraseGain"] = phraseGain;
+      }
     }
     doc["level"] = snap.level;
     doc["rms"] = snap.rms;
@@ -3358,25 +3482,30 @@ static const char* cmd_sttvocab(const String& argsInput) {
 // knobs from the "stt" settings group; a running session keeps the values it started with).
 static const char* cmd_sttdetector(const String&) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char out[384];
+  static char out[512];
   // What the next STT session opens the mic with: the automatic gain and STT's
   // 120 Hz high-pass, or the saved pdmamplify / pdmhpf when sttautogain is off.
   unsigned amp = static_cast<unsigned>(gSettings.pdmAmplify), hpf = static_cast<unsigned>(gSettings.pdmHpfHz);
-  unsigned kept = 0;
+  unsigned kept = 0, g2Gain = 1, g2Kept = 0;
   const bool autoGain = gSettings.sttAutoGain && kSttPdmTunable;
+  portENTER_CRITICAL(&gSTTMux);
   if (autoGain) {
-    portENTER_CRITICAL(&gSTTMux);
     amp = gSttAutoGain.gain();
     kept = static_cast<unsigned>(gSttAutoGain.size());
-    portEXIT_CRITICAL(&gSTTMux);
-    hpf = kSttAutoHpfHz;
   }
+  g2Gain = gSttG2AutoGain.gain();
+  g2Kept = static_cast<unsigned>(gSttG2AutoGain.size());
+  const unsigned phraseGain = gSttPhraseGain;
+  portEXIT_CRITICAL(&gSTTMux);
+  if (autoGain) hpf = kSttAutoHpfHz;
   snprintf(out, sizeof(out),
            "{\"autoGain\":%s,\"pdmAmplify\":%u,\"pdmHpfHz\":%u,\"gainHistory\":%u,\"speechFloor\":%d,\"silenceFloor\":%d,"
-           "\"noisePercentile\":%d,\"decisionPre\":%d,\"g2\":{\"speechFloor\":%d,\"silenceFloor\":%d,"
-           "\"noisePercentile\":%d,\"decisionPre\":%d}}",
+           "\"noisePercentile\":%d,\"decisionPre\":%d,\"phraseGain\":%u,\"g2\":{\"autoGain\":%s,\"gain\":%u,\"gainHistory\":%u,"
+           "\"speechFloor\":%d,\"silenceFloor\":%d,\"noisePercentile\":%d,\"decisionPre\":%d}}",
            autoGain ? "true" : "false", amp, hpf, kept, gSettings.sttSpeechFloor, gSettings.sttSilenceFloor,
-           gSettings.sttNoisePercentile, gSettings.sttDecisionPre, gSettings.sttG2SpeechFloor, gSettings.sttG2SilenceFloor,
+           gSettings.sttNoisePercentile, gSettings.sttDecisionPre, phraseGain,
+           gSettings.sttG2AutoGain ? "true" : "false",
+           g2Gain, g2Kept, gSettings.sttG2SpeechFloor, gSettings.sttG2SilenceFloor,
            gSettings.sttG2NoisePercentile, gSettings.sttG2DecisionPre);
   return out;
 }
@@ -3402,7 +3531,7 @@ const CommandEntry sttCommands[] = {
   {"sttperf", "STT pacing/profiling per segment (timings and CPU only, never text).", false, cmd_sttperf,
    "Usage: sttperf [show|clear|log on|off|stages [all|clear]]"},
   {"sttdetector", "Show the mic-path (PDM gain, high-pass) and speech-detector (floors, percentile) tuning in effect.", false, cmd_sttdetector,
-   "Usage: sttdetector  (onboard: sttautogain, pdmamplify, pdmhpf, sttspeechfloor, sttsilencefloor, sttnoisepercentile, sttdecisionpre; glasses: sttg2speechfloor, sttg2silencefloor, sttg2noisepercentile, sttg2decisionpre)"},
+   "Usage: sttdetector  (onboard: sttautogain, pdmamplify, pdmhpf, sttspeechfloor, sttsilencefloor, sttnoisepercentile, sttdecisionpre; glasses: sttg2autogain, sttg2speechfloor, sttg2silencefloor, sttg2noisepercentile, sttg2decisionpre)"},
   {"sttraw", "Save the raw microphone input of continuous STT sessions to /sd/STT Raw for bench replay.", true, cmd_sttraw,
    "Usage: sttraw [status|on|off]  (on arms the next continuous session; not kept across reboot)"},
   {"sttvocab", "Speech vocabulary: names and terms with their display spelling (STT Models/user_vocab.tsv).", false, cmd_sttvocab,

@@ -86,7 +86,8 @@ bool micRecordingBusy() { return recordingBusy; }
 struct { String micSource = "auto"; int microphoneGain = 70; int microphoneSampleRate = 48000;
          int sttSpeechFloor = 45; int sttSilenceFloor = 16; int sttNoisePercentile = 25; int sttDecisionPre = 0;
          int pdmAmplify = 1; int pdmHpfHz = 36; bool sttAutoGain = true;
-         int sttG2SpeechFloor = 45; int sttG2SilenceFloor = 16; int sttG2NoisePercentile = 25; int sttG2DecisionPre = 0; } gSettings;
+         int sttG2SpeechFloor = 45; int sttG2SilenceFloor = 16; int sttG2NoisePercentile = 25; int sttG2DecisionPre = 0;
+         bool sttG2AutoGain = false; bool sttPhraseLevel = false; } gSettings;
 // PDM tuning the HAL would use at the next channel start, and what the last start used.
 static std::atomic<unsigned> pdmAmplifySet{1}, pdmHpfSet{36}, pdmAmplifyAtStart{0}, pdmHpfAtStart{0};
 void audioSetPdmTuning(uint8_t amplify, uint16_t hpfHz) { pdmAmplifySet = amplify; pdmHpfSet = hpfHz; }
@@ -711,6 +712,8 @@ static void reset() {
   failedTask.clear(); allocationAttempt = failAllocation = 0;
   srRunning = gMicRunning = recordingBusy = false;
   gSettings.micSource = "auto";
+  gSettings.sttG2AutoGain = false;
+  gSettings.sttPhraseLevel = false;
   audioSource = AUDIO_SRC_LOCAL_PDM; halOwner.clear(); halActive = false;
   sourceAvailable = integrityAvailable = g2Available = true; startFails = fallbackOnStart = false;
   stopHeld = stopRequested = invalidRead = readTimeout = false; halOverruns = 0;
@@ -1175,6 +1178,22 @@ static void testDetectorProfilePerMic() {
   assert((run(AUDIO_SRC_NONE) == std::array<int, 4>{40, 16, 25, 97}));       // auto: the onboard mic
   assert((run(AUDIO_SRC_G2_LEFT) == std::array<int, 4>{60, 16, 25, 11}));    // the glasses' own profile
   gSettings.sttSpeechFloor = 45; gSettings.sttDecisionPre = 0; gSettings.sttG2SpeechFloor = 45; gSettings.sttG2DecisionPre = 0;
+}
+
+// Glasses auto gain starts at x1, so the first session's samples stay the raw
+// stream. Later sessions can step it; that agreement is covered with the
+// history itself. The engine check rejects any sample that is not the raw one.
+static void testGlassesAutoGainFirstSessionIsRaw() {
+  reset();
+  gSettings.sttG2AutoGain = true;
+  allowedSamples = deliveredSamples = 0; readCounter = 0;
+  STTToken token = 0; char error[96] = {};
+  assert(sttBeginContinuous(owner, &token, error, sizeof(error), nullptr, AUDIO_SRC_G2_LEFT) && token && !error[0]);
+  started(token);
+  feed(token, 16000);
+  assert(sttRequestFinish(owner, token)); complete(token);
+  assert(snapshot(token).state == STTState::Done);
+  gSettings.sttG2AutoGain = false;
 }
 
 static void testRequestedSource() {
@@ -2575,6 +2594,7 @@ int main() {
   testSavedPdmTuningApplied(); puts("PASS saved PDM gain and high-pass are applied before STT opens the mic");
   testAutoGainTuningApplied(); puts("PASS automatic mode opens the mic with STT's own gain and 120 Hz high-pass");
   testDetectorProfilePerMic(); puts("PASS each mic uses its own detector profile (onboard vs G2)");
+  testGlassesAutoGainFirstSessionIsRaw(); puts("PASS glasses auto gain leaves the first session's samples raw");
   testRequestedSource(); puts("PASS per-session requested source overrides the setting and fails strictly");
   testKeepWarm(); puts("PASS keep-warm: park/adopt across runs, hold expiry and millis wrap, low-PSRAM release, warm load (awaited past 20 s) and its back-off");
 #if HW1_STT_TRIM_SILENCE

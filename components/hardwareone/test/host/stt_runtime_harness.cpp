@@ -55,12 +55,21 @@ bool isESPSRRunning() { return srRunning; }
 bool gMicRunning = false;
 static bool recordingBusy = false;
 bool micRecordingBusy() { return recordingBusy; }
-struct { String micSource = "auto"; int microphoneGain = 70; int microphoneSampleRate = 48000; } gSettings;
+struct { String micSource = "auto"; int microphoneGain = 70; int microphoneSampleRate = 48000;
+         int sttSpeechFloor = 45; int sttSilenceFloor = 16; int sttNoisePercentile = 25; int sttDecisionPre = 0;
+         int pdmAmplify = 1; int pdmHpfHz = 36; bool sttAutoGain = true;
+         int sttG2SpeechFloor = 45; int sttG2SilenceFloor = 16; int sttG2NoisePercentile = 25; int sttG2DecisionPre = 0;
+         bool sttG2AutoGain = false; bool sttPhraseLevel = false; } gSettings;
+void audioSetPdmTuning(uint8_t, uint16_t) {}
+void audioGetPdmTuning(uint8_t* amplify, uint16_t* hpf) {
+  if (amplify) *amplify = 8; if (hpf) *hpf = 120;
+}
 static AudioSource audioSource = AUDIO_SRC_LOCAL_PDM;
 static std::string halOwner;
 static bool sourceAvailable = true, startFails = false, active = false, fallbackOnStart = false;
 static size_t nextSample = 0;
 static size_t readLimit = 137; // Deliberately short reads.
+static bool phraseTone = false; // Constant ±500, so the one-shot leveler can be checked.
 static int starts = 0, stops = 0;
 static uint32_t captureRate = 0;
 static std::function<void()> readHook;
@@ -100,7 +109,11 @@ bool audioCaptureOverruns(const char* owner, uint32_t* out) {
 size_t audioReadPcm(int16_t* pcm, size_t requested, uint32_t timeout) {
   assert(halOwner == "stt" && timeout == 50);
   const size_t n = std::min(requested, readLimit);
-  for (size_t i = 0; i < n; ++i) pcm[i] = static_cast<int16_t>((nextSample++ % 101) - 50);
+  for (size_t i = 0; i < n; ++i) {
+    const size_t at = nextSample++;
+    pcm[i] = phraseTone ? static_cast<int16_t>(at % 2 ? 500 : -500)
+                        : static_cast<int16_t>((at % 101) - 50);
+  }
   nowMs += n ? (n + 15) / 16 : timeout;
   if (readHook) readHook();
   return n;
@@ -132,7 +145,19 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
   assert(!prefix);  // Capture-time features belong to continuous sessions only.
   assert(halOwner == "stt" && allocations.size() == 1);
   ++engineCalls; engineSamples = count;
-  for (size_t i = 0; i < count; ++i) assert(pcm[i] == static_cast<int16_t>((i % 101) - 50));
+  if (phraseTone) {
+    // 640-sample reads. Each check is 0.1 s (1600 samples). The read that
+    // crosses a check is still at the old gain. RMS 500 wants x8, so the
+    // steps are x1, x2, x4, x8: boundaries at 3, 6 and 9 reads (1920, 3840, 5760).
+    assert(readLimit == 640 && count == 16000);
+    for (size_t i = 0; i < count; ++i) {
+      const int amp = i < 1920 ? 500 : i < 3840 ? 1000 : i < 5760 ? 2000 : 4000;
+      const int16_t want = static_cast<int16_t>(i % 2 ? amp : -amp);
+      assert(pcm[i] == want);
+    }
+  } else {
+    for (size_t i = 0; i < count; ++i) assert(pcm[i] == static_cast<int16_t>((i % 101) - 50));
+  }
   control.progress(control.context, STTLocalPhase::Inference);
   if (engineHook) engineHook(control);
   stats.samples = count; stats.inferenceMs = 123;
@@ -195,6 +220,9 @@ static void reset() {
   engineHook = nullptr; readHook = nullptr; saveHook = finishHook = nullptr;
   savePreference = saveFailure = transcriptFinished = false; savedWords.clear(); savedOutcome.clear();
   gSettings.micSource = "auto";
+  gSettings.sttPhraseLevel = false;
+  phraseTone = false;
+  readLimit = 137;
 }
 static STTToken begin() {
   STTToken token = 0; char error[96];
@@ -328,5 +356,10 @@ int main() {
   reset(); savePreference = true; token = begin();
   finishHook = [&] { assert(sttRunActive(token)); assert(sttCancel(owner, token)); };
   run(); assert(snapshot(token).state == STTState::Cancelled && savedOutcome == "done" && savedWords.size() == 1);
+  // One-shot capture is what `stt record` uses. A quiet RMS-500 tone must
+  // climb x1, x2, x4, x8 across the first few tenths of a second.
+  reset(); gSettings.sttPhraseLevel = true; phraseTone = true; readLimit = 640;
+  token = begin(); run();
+  assert(snapshot(token).state == STTState::Done && engineSamples == 16000);
   puts("STT production broker: ownership, cancellation, short reads, limits, failures and cleanup passed");
 }
