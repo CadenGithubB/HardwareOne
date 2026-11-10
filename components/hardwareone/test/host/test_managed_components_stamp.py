@@ -20,6 +20,7 @@ another target is refused while one runs.
 
 from pathlib import Path
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -170,6 +171,20 @@ class RootWiring(unittest.TestCase):
             self.assertEqual(pins(lock), pins(locks[0]),
                              f"{lock.name} pins differ from {locks[0].name}; "
                              "stamp updater/managed_components like the root project")
+
+    def test_updater_locks_record_the_same_idf_as_the_main_project(self):
+        # The component manager rewrites a tracked lock whose IDF version is
+        # not the exported one. tools/build_deployment.sh then refuses the
+        # next deployment ("the tree has uncommitted changes"), as happened
+        # on 2026-11-10 with the updater locks left at 5.5.1.
+        def idf_version(path):
+            match = re.search(r"^  idf:\n    source:\n      type: idf\n    version: (\S+)$",
+                              path.read_text(), re.M)
+            self.assertIsNotNone(match, path.name)
+            return match.group(1)
+        expected = idf_version(REPO / "dependencies.lock.esp32")
+        for lock in sorted((REPO / "updater").glob("dependencies.lock*")):
+            self.assertEqual(idf_version(lock), expected, f"updater/{lock.name}")
 
     def test_stamp_and_locks_are_ignored(self):
         text = (REPO / "CMakeLists.txt").read_text()

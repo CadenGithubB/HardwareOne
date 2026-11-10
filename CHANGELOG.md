@@ -86,6 +86,10 @@ everything user-visible since the v0.99.99.1 tag.
   suite `tree_hygiene_gate`, which fails on an account home path or a `192.168.x` address outside a
   short list of allowed ranges. It found one home subnet quoted in the readiness appendix; replaced
   with a placeholder.
+- Deployment builds: the three `updater/dependencies.lock*` files still recorded ESP-IDF 5.5.1, so
+  building any OTA deployment under 5.5.5 rewrote a tracked file and `tools/build_deployment.sh`
+  refused the next one ("the tree has uncommitted changes"). They now record 5.5.5, and the host
+  suite `managed_components_stamp` checks that they match the main project's lock.
 - Host suite `esp_hosted_mempool` compiles on macOS again (fortified `memset` is turned off for the
   host build of the ESP-Hosted pool); `RELEASING.md` names the option that includes it in the gate.
 
