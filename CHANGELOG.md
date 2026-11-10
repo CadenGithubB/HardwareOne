@@ -14,6 +14,27 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Fixed
+- Seeed XIAO ESP32S3 without the Sense expansion can be built: `python3 tools/build_config.py build
+  xiao-base`. Every ESP32-S3 build used to define `XIAO_ESP32S3_SENSE_ENABLED`, so the base board
+  always got the Sense image. The flag is now set only in `System_BuildConfig.h` and its override
+  headers; the base image has no camera, microphone or SD card and drives the user LED on GPIO 21.
+  Setting the flag to 0 with the microphone still enabled stops the build with a message. The Sense
+  build is unchanged. Host-tested and built; not yet run on a base board (readiness G-63).
+- Wi-Fi: a device carried from one saved network to another stayed offline until `openwifi` or a
+  reboot, because a lost connection was retried only on the network that dropped. When a connection
+  is lost without a command asking for it and the device is still offline 60 s later, it now hunts
+  across all saved networks (two or more saved), and again after 60 s, 120 s and then every 300 s.
+  `wifidrop`, `closewifi` and `wifiautoreconnect 0` stop it; a boot that never connected is not
+  retried. Once a hunt has failed, a router that returns is rejoined at the next hunt rather than
+  within seconds. Host-tested; not yet tested on hardware (readiness G-66).
+- Recording: a recording cut by a power loss or reset was lost, since its WAV header was completed
+  only at stop and nothing was flushed meanwhile. A manual recording is now committed to storage
+  every 5 s and the next boot completes the header of an interrupted one, so at most about the last
+  5 s are lost. Host-tested; not yet tested on hardware (readiness G-69).
+- Automations: every fire of an interval trigger rewrote `/system/automations.json`. An interval
+  shorter than 15 minutes now keeps its next run in memory (up to 16 triggers) and fires without a
+  file write; after a restart it first fires one interval after the automations start. Host-tested;
+  not yet tested on hardware (readiness G-70).
 - ESP32-P4: every task, including ESP-IDF's fixed-size ones, lost 576 bytes of stack to two camera
   `thread_local` buffers (added 2026-11-02): the P4's FreeRTOS port reserves thread-local storage on
   each task's stack, which left Bluedroid's 2.5 KB `hciT` about 1.95 KB, and it overflowed by 4 bytes

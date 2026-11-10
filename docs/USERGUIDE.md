@@ -1094,13 +1094,13 @@ certinfo                        - Show HTTPS certificate details
 certgen [rsa]                   - Generate self-signed certificate (default: ECDSA P-256)
 ```
 
-Auto-reconnect (`wifiautoreconnect`) retries only the network that dropped. The
-hunt across all saved networks runs at boot, on `openwifi` and when the radio is
-switched back on, so after you carry the device to another saved network, run
-`openwifi`. To do that automatically, add an interval automation:
-`automation add name=wifihunt type=interval intervalms=300000 commands="IF WIFI=NONE THEN openwifi" enabled=1`.
-It also reopens WiFi after `closewifi`, so disable it while you want WiFi off.
-See [KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
+With auto-reconnect on (`wifiautoreconnect`, the default), a lost connection is
+first retried on the same network. If the device is still offline 60 seconds
+later and two or more networks are saved, it tries all saved networks, as
+`openwifi` does, and repeats that after 60 s, 120 s and then every 5 minutes
+until one answers. So a device carried to another saved network comes back online by
+itself. `wifidrop`, `closewifi` and `wifiautoreconnect 0` stop it. A device that
+found no network at boot is not retried: run `openwifi`.
 </details>
 
 <details>
