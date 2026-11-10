@@ -80,6 +80,11 @@ def production(user: str, header: str, settings: str, mutex: str, mutex_header: 
         "void fsUnlock()"))
     text_io = "\n\n".join(extract_block(utils, marker) for marker in ("bool readText(", "bool writeText(", "bool writeTextAtomic("))
     text_io += "\n\n" + unique_block(settings, "String getUserSettingsPath(")
+    # The quarantine helper the request intake calls for a damaged pending list.
+    keep_start = settings.index("static constexpr unsigned kCorruptQuarantineKeep")
+    keep_end = settings.index("bool keepPartialOriginal(const String& path, const AuthContext& auth, String& copiedTo) {")
+    require(keep_start < settings.index("bool quarantineCorruptFile(") < keep_end, "the quarantine helper precedes the partial copy")
+    text_io += "\n\n" + settings[keep_start:keep_end]
 
     types = "\n".join(re.findall(r"^static constexpr size_t kPublic\w+ = \d+;$", header, re.M))
     require(types.count("\n") == 2, "the three public account limits")

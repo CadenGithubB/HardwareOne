@@ -8,6 +8,7 @@
 #include "fake_vfs.h"
 #include <ArduinoJson.h>
 #include "System_PollPause.h"
+#include "System_ConfigLoad.h"
 
 #include <atomic>
 #include <cstdarg>
@@ -48,7 +49,7 @@ static void broadcastPrintf(const char* format, ...) {
 }
 #define BROADCAST_PRINTF(...) broadcastPrintf(__VA_ARGS__)
 static void broadcastOutput(const char* line) { output.emplace_back(line); }
-enum : int { SYSEVT_IP_BANNED = 1 };
+enum : int { SYSEVT_IP_BANNED = 1, SYSEVT_CONFIG_FILE_CORRUPT = 2 };
 static void systemEventPost(int, const char* subject, const char*) { events.emplace_back(subject ? subject : ""); }
 static unsigned long millis() { return 1234; }
 static void clearLoginAttempts(const char*) {}
@@ -297,6 +298,117 @@ static void caseCommandRepliesOnFailedSave() {
   check(!isIpBanned("10.9.9.9"));
 }
 
+// ---------------------------------------------------------------------------
+// Load gate: what the read found decides whether a save may replace the file.
+// ---------------------------------------------------------------------------
+static const std::string kCorrupt1 = kBanFile + ".corrupt-1";
+static const std::string kPartial1 = kBanFile + ".partial-1";
+
+// As a boot: no list loaded, nothing in memory.
+static fake_vfs::Fs& freshBoot(const std::string& fileBytes) {
+  auto& fs = resetStore(false);
+  {
+    IpBanLock lock;
+    std::memset(sIpBans, 0, sizeof(sIpBans));
+    sIpBansUnsaved = false;
+    sIpBansLoad = ConfigLoad::Status::NotLoaded;
+    sIpBansLoaded.store(false);
+  }
+  fs.put(kBanFile, fileBytes);
+  output.clear(); events.clear();
+  return fs;
+}
+
+static bool eventFor(const std::string& subject) {
+  for (const auto& event : events) if (event == subject) return true;
+  return false;
+}
+
+static void caseDamagedFileIsMovedAside() {
+  const std::string cut = kPrevious.substr(0, kPrevious.size() - 9);
+  auto& fs = freshBoot(cut);
+  loadIpBans();
+  check(!fs.exists(kBanFile));
+  check(fs.text(kCorrupt1) == cut);              // the damaged bytes are kept
+  check(sIpBansLoad == ConfigLoad::Status::AbsentOk);
+  check(eventFor(kBanFile) && anyOutputContains("moved to"));
+  check(!isIpBanned("10.1.1.1"));
+  check(banIp("10.2.2.2", "after"));             // the list is usable again
+  loadIpBans();
+  check(isIpBanned("10.2.2.2"));
+
+  // The move fails: the file stays as it is and no save replaces it.
+  auto& again = freshBoot(cut);
+  again.faults.rename.add(kBanFile);
+  loadIpBans();
+  check(again.text(kBanFile) == cut && !again.exists(kCorrupt1));
+  check(sIpBansLoad == ConfigLoad::Status::Truncated);
+  check(anyOutputContains("could not be moved aside"));
+  check(!banIp("10.2.2.2", "refused"));          // in force, not saved
+  check(isIpBanned("10.2.2.2"));
+  check(again.text(kBanFile) == cut && !again.exists(kBanTemp));
+}
+
+static void caseUnreadFileIsNeverReplaced() {
+  auto& fs = freshBoot(kPrevious);
+  fs.faults.open.add(kBanFile);
+  loadIpBans();
+  check(!sIpBansLoaded.load());                  // the next use retries
+  check(sIpBansLoad == ConfigLoad::Status::OpenFailed);
+  check(!fs.exists(kCorrupt1));                  // an intact file is never moved
+  check(!banIp("10.2.2.2", "meanwhile"));        // reported as not saved
+  check(isIpBanned("10.2.2.2"));
+  check(fs.text(kBanFile) == kPrevious);         // one ban never replaces the list
+  check(anyOutputContains("not saved"));
+
+  // The file reads again: its bans load and the one made meanwhile stays.
+  fs.faults.clear();
+  check(isIpBanned("10.1.1.1"));
+  check(isIpBanned("10.2.2.2"));
+  check(sIpBansLoad == ConfigLoad::Status::Ok && sIpBansUnsaved);
+  check(banIp("10.2.2.2", "meanwhile"));         // the retry saves both
+  loadIpBans();
+  check(isIpBanned("10.1.1.1") && isIpBanned("10.2.2.2"));
+
+  // No filesystem: nothing is installed and nothing is saved.
+  auto& unmounted = freshBoot(kPrevious);
+  filesystemReady = false;
+  loadIpBans();
+  check(!sIpBansLoaded.load() && sIpBansLoad == ConfigLoad::Status::NotMounted);
+  check(!banIp("10.3.3.3", nullptr));
+  filesystemReady = true;
+  check(unmounted.text(kBanFile) == kPrevious);
+  check(isIpBanned("10.1.1.1") && isIpBanned("10.3.3.3"));
+}
+
+static void casePartialFileIsKeptBeforeSave() {
+  // The second entry does not decrypt.
+  const std::string partial =
+      "{\"bans\":[{\"ip\":\"AES:1.1.1.01\",\"reason\":\"old\",\"bannedAt\":5},"
+      "{\"ip\":\"AES:\",\"reason\":\"lost\",\"bannedAt\":6}]}";
+  auto& fs = freshBoot(partial);
+  loadIpBans();
+  check(sIpBansLoad == ConfigLoad::Status::Partial);
+  check(isIpBanned("10.1.1.1"));
+  check(!fs.exists(kPartial1));                  // no copy until a save needs one
+
+  // The copy fails: the file is not replaced.
+  fs.faults.shortWriteAfter[kPartial1] = 10;
+  check(!banIp("10.2.2.2", "probe"));
+  check(fs.text(kBanFile) == partial && !fs.exists(kPartial1));
+  check(sIpBansLoad == ConfigLoad::Status::Partial);
+
+  fs.faults.clear();
+  check(banIp("10.2.2.2", "probe"));             // the retry copies, then saves
+  check(fs.text(kPartial1) == partial);
+  check(sIpBansLoad == ConfigLoad::Status::Ok);
+  JsonDocument saved;
+  check(!deserializeJson(saved, fs.text(kBanFile)));
+  check(saved["bans"].size() == 2);
+  check(banIp("10.4.4.4", nullptr));             // one copy, not one per save
+  check(!fs.exists(kBanFile + ".partial-2"));
+}
+
 int main(int argc, char** argv) {
   const std::string only = argc > 1 ? argv[1] : "";
   struct Case { const char* name; void (*run)(); };
@@ -309,6 +421,9 @@ int main(int argc, char** argv) {
       {"lookup-lock", caseLookupHoldsTheBanLock},
       {"kick-under-fence", caseKickUnderSessionFence},
       {"command-replies", caseCommandRepliesOnFailedSave},
+      {"damaged-file", caseDamagedFileIsMovedAside},
+      {"unread-file", caseUnreadFileIsNeverReplaced},
+      {"partial-file", casePartialFileIsKeptBeforeSave},
   };
   bool ran = false;
   for (const Case& c : cases) {

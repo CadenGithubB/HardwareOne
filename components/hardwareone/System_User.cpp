@@ -24,6 +24,7 @@
 #include "System_AuthIdentity.h"   // currentAuthContext (createdBy stamp, admin sync)
 #include "System_CLIConfirm.h"     // cliRequestConfirm — yes/no gate for destructive userdelete
 #include "System_Settings.h"
+#include "System_ConfigLoad.h"
 #include "System_UartLink.h"
 #include "Bluetooth.h"
 #include "BLE_Peers.h"            // synchronized G2 paired-owner authority
@@ -3110,18 +3111,33 @@ AccountRequestResult submitAccountRequest(const String& usernameInput, const Str
   // another task meanwhile is not overwritten by this stale copy.
   FsLockGuard guard("user.request");
   PSRAM_JSON_DOC(doc);
-  if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth(VFS::Scopes::USERS, "user.request"))) {
+  const AuthContext requestAuth = VFS::systemAuth(VFS::Scopes::USERS, "user.request");
+  if (VFS::existsGuarded(PENDING_USERS_FILE, requestAuth)) {
     String json;
-    if (!readText(PENDING_USERS_FILE, json, VFS::systemAuth(VFS::Scopes::USERS, "user.request"))) {
+    if (!readText(PENDING_USERS_FILE, json, requestAuth)) {
       DEBUG_CMD_FLOWF("[users] ERROR: Failed to read existing /system/pending_users.json");
       return AccountRequestResult::ReadFailed;
     }
-    if (json.length() >= 2 && json.startsWith("[")) {
-      if (deserializeJson(doc, json)) {
-        doc.clear();
-        doc.to<JsonArray>();
+    // The list on disk holds the only copy of each waiting request's password
+    // hash, so this request replaces it only when it was read whole. Out of
+    // memory: the file is fine, stop. Damaged bytes: moved aside (kept), and
+    // the list starts again; if the move fails the file is left as it is.
+    ConfigLoad::Status load = ConfigLoad::classifyParse(deserializeJson(doc, json));
+    if (load == ConfigLoad::Status::Ok && !doc.is<JsonArray>()) load = ConfigLoad::Status::Corrupt;
+    if (load == ConfigLoad::Status::NoMemory) return AccountRequestResult::ReadFailed;
+    if (load != ConfigLoad::Status::Ok) {
+      if (load != ConfigLoad::Status::EmptyFile) {  // an empty file has nothing to keep
+        String movedTo;
+        if (!quarantineCorruptFile(PENDING_USERS_FILE, requestAuth, movedTo)) {
+          ERROR_STORAGEF("pending_users.json is damaged (%s) and could not be moved aside; request refused",
+                         ConfigLoad::statusName(load));
+          return AccountRequestResult::ReadFailed;
+        }
+        BROADCAST_PRINTF("[users] %s was damaged (%s): moved to %s, the pending list starts empty",
+                         PENDING_USERS_FILE, ConfigLoad::statusName(load), movedTo.c_str());
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, PENDING_USERS_FILE, "unparseable - quarantined, pending list empty");
       }
-    } else {
+      doc.clear();
       doc.to<JsonArray>();
     }
   } else {
@@ -4687,18 +4703,40 @@ void writeBootAnchor() {
   // task's write of the same file.
   FsLockGuard fsGuard("user.bootAnchor");
 
-  // Load existing anchors. ABSENT is fine — start empty and create the file.
-  // CORRUPT is not: "start empty" collapses up to 16 anchors to one and
-  // permanently breaks timestamp resolution for every user still pending.
+  // Load existing anchors. ABSENT (by an explicit probe) is fine: start empty
+  // and create the file. A file that is there but did not read, or did not
+  // fit in memory, is intact: this anchor is skipped and the file left alone,
+  // because "start empty" would collapse up to 16 anchors to one and break
+  // timestamp resolution for every user still pending. Damaged bytes resolve
+  // nothing either way: the file is moved aside (kept) so anchors are written
+  // again; if the move fails it is left in place and this anchor is skipped.
   PSRAM_JSON_DOC(doc);
-  String existing;
-  if (readText(BOOT_ANCHORS_FILE, existing, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "user.bootAnchor")) && existing.length() > 0) {
-    DeserializationError error = deserializeJson(doc, existing);
-    if (error) {
-      ERROR_STORAGEF("[anchor] %s unreadable (%s) - anchor NOT written; file preserved",
-                     BOOT_ANCHORS_FILE, error.c_str());
-      systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, BOOT_ANCHORS_FILE, error.c_str());
+  const AuthContext anchorAuth = VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "user.bootAnchor");
+  if (VFS::existsGuarded(BOOT_ANCHORS_FILE, anchorAuth)) {
+    String existing;
+    if (!readText(BOOT_ANCHORS_FILE, existing, anchorAuth)) {
+      ERROR_STORAGEF("[anchor] %s could not be read - anchor NOT written; file preserved", BOOT_ANCHORS_FILE);
       return;
+    }
+    const ConfigLoad::Status load = ConfigLoad::classifyParse(deserializeJson(doc, existing));
+    if (load == ConfigLoad::Status::NoMemory) {
+      ERROR_STORAGEF("[anchor] no memory to parse %s - anchor NOT written; file preserved", BOOT_ANCHORS_FILE);
+      return;
+    }
+    if (load != ConfigLoad::Status::Ok) {
+      if (load != ConfigLoad::Status::EmptyFile) {  // an empty file has nothing to keep
+        String movedTo;
+        if (!quarantineCorruptFile(BOOT_ANCHORS_FILE, anchorAuth, movedTo)) {
+          ERROR_STORAGEF("[anchor] %s is damaged (%s) and could not be moved aside - anchor NOT written",
+                         BOOT_ANCHORS_FILE, ConfigLoad::statusName(load));
+          systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, BOOT_ANCHORS_FILE, "unparseable - quarantine failed");
+          return;
+        }
+        ERROR_STORAGEF("[anchor] %s was damaged (%s): moved to %s, anchors start again",
+                       BOOT_ANCHORS_FILE, ConfigLoad::statusName(load), movedTo.c_str());
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, BOOT_ANCHORS_FILE, "unparseable - quarantined, anchors start again");
+      }
+      doc.clear();
     }
   }
 
@@ -4851,13 +4889,18 @@ void loadAndIncrementBootSeq() {
       DeserializationError error = deserializeJson(doc, file);
       file.close();
 
-      if (error) {
+      const ConfigLoad::Status load = ConfigLoad::classifyParse(error);
+      if (load == ConfigLoad::Status::NoMemory) {
+        // The roster is intact; this boot had no memory to check it. Moving it
+        // aside would re-arm first-time setup over a working account store.
+        ERROR_SYSTEMF("BootSeqInit: no memory to check users.json; left in place");
+      } else if (error) {
         ERROR_SYSTEMF("BootSeqInit: Failed to parse users.json");
-        String bad = String(USERS_JSON_FILE) + ".bad";
-        VFS::removeGuarded(bad.c_str(), VFS::systemAuth(VFS::Scopes::USERS, "user.bootSeq"));
-        bool q = VFS::renameGuarded(USERS_JSON_FILE, bad.c_str(), VFS::systemAuth(VFS::Scopes::USERS, "user.bootSeq"));
-        logSystemEvent("USERS", "users.json corrupt at boot (%s) — %s; first-time setup will re-arm",
-                       error.c_str(), q ? "quarantined to users.json.bad" : "quarantine rename FAILED");
+        String movedTo;
+        const bool q = quarantineCorruptFile(USERS_JSON_FILE, VFS::systemAuth(VFS::Scopes::USERS, "user.bootSeq"), movedTo);
+        logSystemEvent("USERS", "users.json corrupt at boot (%s) — %s%s; first-time setup will re-arm",
+                       error.c_str(), q ? "quarantined to " : "quarantine rename FAILED",
+                       q ? movedTo.c_str() : "");
       } else {
         DEBUG_NTP_ANCHORF("BootSeqInit: users.json parsed OK");
         // Carry the roster's issued ids into the account-id mark, so a roster

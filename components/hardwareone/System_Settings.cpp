@@ -1527,10 +1527,12 @@ static bool writeSettingsSnapshot(const JsonDocument& doc,
 // Callers hold the filesystem lock and never quarantine a NoMemory parse (the
 // file is intact; this boot is short of heap).
 static constexpr unsigned kCorruptQuarantineKeep = 3;
-bool quarantineCorruptFile(const String& path, const AuthContext& auth, String& movedTo) {
-  auto slot = [&path](unsigned n) {
+// Makes room for a new kept copy <path>.<kind>-1: drops the oldest and shifts
+// the rest up one. Returns the freed name.
+static String rotateKeptCopies(const String& path, const char* kind, const AuthContext& auth) {
+  auto slot = [&path, kind](unsigned n) {
     char name[96];
-    snprintf(name, sizeof(name), "%s.corrupt-%u", path.c_str(), n);
+    snprintf(name, sizeof(name), "%s.%s-%u", path.c_str(), kind, n);
     return String(name);
   };
   const String oldest = slot(kCorruptQuarantineKeep);
@@ -1539,8 +1541,39 @@ bool quarantineCorruptFile(const String& path, const AuthContext& auth, String& 
     const String from = slot(n);
     if (VFS::existsGuarded(from, auth)) (void)VFS::renameGuarded(from, slot(n + 1), auth);
   }
-  movedTo = slot(1);
+  return slot(1);
+}
+
+bool quarantineCorruptFile(const String& path, const AuthContext& auth, String& movedTo) {
+  movedTo = rotateKeptCopies(path, "corrupt", auth);
   return VFS::renameGuarded(path, movedTo, auth);
+}
+
+// See System_Settings.h. The copy is checked against the source's size before
+// it counts; an incomplete one is removed.
+bool keepPartialOriginal(const String& path, const AuthContext& auth, String& copiedTo) {
+  copiedTo = rotateKeptCopies(path, "partial", auth);
+  File in = VFS::openGuarded(path, "r", auth);
+  if (!in) return false;
+  const size_t expected = in.size();
+  size_t copied = 0;
+  bool complete = false;
+  File out = VFS::openGuarded(copiedTo, "w", auth, true);
+  if (out) {
+    char chunk[256];
+    size_t n;
+    bool wrote = true;
+    while (wrote && (n = in.readBytes(chunk, sizeof(chunk))) > 0) {
+      wrote = out.write((const uint8_t*)chunk, n) == n;
+      copied += n;
+    }
+    out.flush();
+    complete = wrote && copied == expected && !out.getWriteError() && out.size() == expected;
+    out.close();
+  }
+  in.close();
+  if (!complete) (void)VFS::removeGuarded(copiedTo, auth);
+  return complete;
 }
 
 // Set when readSettingsJson() found an on-disk firmwareVersion that differs

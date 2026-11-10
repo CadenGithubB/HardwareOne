@@ -248,16 +248,19 @@ bool initFilesystem() {
           // next save writes defaults straight over what was still recoverable. That
           // silently defeats the debug.json / notifications / anchors gates. For
           // users.json it is unrecoverable account loss with no seeder.
-          // The .corrupt copy stays readable via the file manager for recovery.
-          String quarantine = String(path) + ".corrupt";
+          // The kept copy (<file>.corrupt-1, newest three kept) stays readable
+          // via the file manager for recovery.
+          String quarantine;
           ESP_LOGW("FS", "%s appears corrupt (not valid JSON), quarantining", path);
-          logSystemEvent("FS", "%s failed boot JSON check — renamed to %s", path,
-                         quarantine.c_str());
-          VFS::removeGuarded(quarantine.c_str(), sys);   // clear any older quarantine
-          if (!VFS::renameGuarded(path, quarantine, sys)) {
-            logSystemEvent("FS", "%s quarantine rename FAILED — file left in place", path);
+          const bool moved = quarantineCorruptFile(path, sys, quarantine);
+          if (moved) {
+            logSystemEvent("FS", "%s failed boot JSON check — renamed to %s", path, quarantine.c_str());
+          } else {
+            logSystemEvent("FS", "%s failed boot JSON check — quarantine rename FAILED, file left in place", path);
           }
-          systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, path, "failed boot JSON check - quarantined");
+          systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, path,
+                          moved ? "failed boot JSON check - quarantined"
+                                : "failed boot JSON check - quarantine failed");
         }
       }
     }

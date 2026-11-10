@@ -61,6 +61,8 @@ void rebootDevice(const char* reason, const char* auditDetail, uint32_t flushDel
 // VFS::systemAuth(<scope>, "<owner>.<reason>") with the narrowest scope that
 // holds the file and, for the atomic writer, its ".tmp" sibling.
 struct AuthContext;
+// False when the file does not open or could not be read whole (out is then
+// empty). False never means "no such file": probe with VFS::existsGuarded.
 bool readText(const char* path, String& out, const AuthContext& ctx);
 // Persistence helpers; the guarded VFS authorizes `ctx` on every open, rename
 // and remove. True means the expected bytes were written, no write error was

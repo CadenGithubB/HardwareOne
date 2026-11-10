@@ -167,6 +167,13 @@ static const char* kRemoved[] = {
     "/system/users/user_settings/1.json",
     "/system/users/user_settings/2.json",
     "/system/users/user_settings/3.json.tmp",
+    // Copies kept of a damaged or partly read roster or pending list.
+    "/system/users/users.json.corrupt-1",
+    "/system/users/users.json.corrupt-2",
+    "/system/users/users.json.partial-1",
+    "/system/users/users.json.bad",
+    "/system/users/users.json.corrupt",
+    "/system/users/pending_users.json.corrupt-1",
     "/stt/u1",
     "/stt/u1/2026-01-01-local.txt",
     "/stt/u2",
@@ -184,6 +191,7 @@ static const char* kSdRemoved[] = {
 static const char* kKept[] = {
     "/system/settings.json",
     "/system/users/ip_bans.json",
+    "/system/users/ip_bans.json.corrupt-1",
     "/system/users/user_settings",
     "/stt",
     "/stt/models/keep.bin",
@@ -203,6 +211,11 @@ static fake_vfs::Fs& populate() {
   fs.put("/system/users/users.json", "{\"nextId\":5,\"users\":[{\"id\":1,\"username\":\"owner\"}]}");
   fs.put(kPending, "[{\"username\":\"erin\",\"password\":\"hash:x\"}]");
   fs.put("/system/users/ip_bans.json", "[]");
+  fs.put("/system/users/ip_bans.json.corrupt-1", "[");
+  for (const char* kept : {"users.json.corrupt-1", "users.json.corrupt-2", "users.json.partial-1", "users.json.bad",
+                           "users.json.corrupt", "pending_users.json.corrupt-1"}) {
+    fs.put(std::string("/system/users/") + kept, "{\"password\":\"hash:old\"");
+  }
   fs.put("/system/users/user_settings/1.json", "{\"password\":\"hash:1\"}");
   fs.put("/system/users/user_settings/2.json", "{\"password\":\"hash:2\"}");
   fs.put("/system/users/user_settings/3.json.tmp", "{");
@@ -287,6 +300,7 @@ static void wipeRemovesAccountData() {
   check(firstCall("remove", kPending, start) < roster);
   check(lastCall("rmdir", "/stt/", start) < roster && lastCall("rmdir", "/sd/stt/", start) < roster);
   check(firstCall("remove", std::string(kSettingsDir) + "/", start) > roster);
+  check(firstCall("remove", "/system/users/users.json.", start) > roster);
   // Every filesystem call of the wipe ran under the filesystem lock and as system.
   for (size_t i = start; i < fs.log.size(); ++i) {
     check(fs.log[i].locked);
@@ -349,6 +363,14 @@ static void leftoverSettingsStillReboots() {
   bool logged = false;
   for (const std::string& line : logLines) logged = logged || line.find("user_settings/2.json") != std::string::npos;
   check(logged);
+
+  // A kept copy that cannot be removed is named too; the reset still commits.
+  populate();
+  fs.faults.remove.add("/system/users/users.json.corrupt-2");
+  reply = factoryreset_confirmed(nullptr);
+  check(startsWith(reply, "Factory reset complete") && std::strstr(reply, "kept copy") != nullptr);
+  check(!fs.exists(USERS_JSON_FILE) && fs.exists("/system/users/users.json.corrupt-2") && committed());
+  check(!fs.exists("/system/users/users.json.corrupt-1"));
 
   // A refused id record is logged; the wipe still completes.
   populate();

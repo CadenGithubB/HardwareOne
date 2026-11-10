@@ -689,14 +689,18 @@ static uint32_t automationsNewerFileVersion(const String& json) {
 // only after a read finds another version.
 static std::atomic<uint32_t> sAutomationsRefusedVersion{0};
 
-enum class AutomationsRead : uint8_t { Ok, Missing, Refused };
+// Missing: a probe found no file. Unreadable: the file is there and could not
+// be read (open failure, or no memory for its text); it is never taken for an
+// absent one, so nothing is seeded over it.
+enum class AutomationsRead : uint8_t { Ok, Missing, Unreadable, Refused };
 
 static AutomationsRead readAutomationsFile(String& json, uint32_t* newerVersion = nullptr) {
   if (newerVersion) *newerVersion = 0;
-  if (!readText(AUTOMATIONS_JSON_FILE, json,
-                VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
+  const auto auth = VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state");
+  if (!readText(AUTOMATIONS_JSON_FILE, json, auth)) {
     sAutomationsRefusedVersion = 0;
-    return AutomationsRead::Missing;
+    return VFS::existsGuarded(AUTOMATIONS_JSON_FILE, auth) ? AutomationsRead::Unreadable
+                                                           : AutomationsRead::Missing;
   }
   const uint32_t newer = automationsNewerFileVersion(json);
   const uint32_t before = sAutomationsRefusedVersion.exchange(newer);
@@ -728,12 +732,16 @@ String automationsEmptyStoreJson() {
 }
 
 // Loads the store for an edit. No file: the empty store, written unless
-// persistSeed is false. False when the file was refused: the caller must stop,
-// and nothing was seeded or written (the empty store never replaces a newer
-// file).
+// persistSeed is false. False when the file was refused or could not be read:
+// the caller must stop, and nothing was seeded or written (the empty store
+// never replaces a newer file, or one that is there but did not read).
 static bool loadAutomationsStoreForEdit(String& json, bool persistSeed) {
   const AutomationsRead read = readAutomationsFile(json);
   if (read == AutomationsRead::Refused) return false;
+  if (read == AutomationsRead::Unreadable) {
+    json = "";
+    return false;
+  }
   if (read == AutomationsRead::Missing || json.length() == 0) {
     json = automationsEmptyStoreJson();
     if (persistSeed) {

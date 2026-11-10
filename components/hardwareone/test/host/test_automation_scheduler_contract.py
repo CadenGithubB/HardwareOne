@@ -182,6 +182,10 @@ for forbidden in ("readText(", "readAutomationsFile(", "readAutomationsJson(", "
 edit_load = code_only(function_body(automation, "static bool loadAutomationsStoreForEdit(String& json, bool persistSeed)"))
 assert edit_load.index("if (read == AutomationsRead::Refused) return false;") < edit_load.index(
     "automationsEmptyStoreJson()")
+# A file that is there but could not be read is not a missing one: the reader
+# reports Missing only after a probe, and the edit load stops before the seed.
+assert "VFS::existsGuarded(AUTOMATIONS_JSON_FILE, auth) ? AutomationsRead::Unreadable" in " ".join(reader.split())
+assert edit_load.index("if (read == AutomationsRead::Unreadable)") < edit_load.index("automationsEmptyStoreJson()")
 # The web Automations page and its exports read through the same check and
 # name a refused file's format instead of listing it.
 web = code_only((COMPONENT / "WebServer_Server.cpp").read_text(encoding="utf-8"))

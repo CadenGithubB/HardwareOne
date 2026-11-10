@@ -83,6 +83,15 @@ def main():
     pieces.append(definition(source, normalize, 'System_ESPNow.cpp'))
     pieces += [definition(source, marker, 'System_ESPNow.cpp') for marker in FUNCTION_MARKERS]
 
+    # The registry saver consults the load status before it writes anything, and
+    # the loader records that status before its own migration save.
+    saver = source[source.index('static bool saveEspNowDevices() {'):]
+    gate = saver.find('if (!ConfigLoad::savable(sEspNowDevicesLoad))')
+    assert 0 <= gate < saver.index('ESPNOW_DEVICES_TEMP_FILE'), 'device registry save is not gated on the load status'
+    loader = source[source.index('static void loadEspNowDevices() {'):]
+    partial = loader.find('sEspNowDevicesLoad = ConfigLoad::Status::Partial;')
+    assert 0 <= partial < loader.index('if (migrationBackupNeeded)'), 'load status is set after the migration save'
+
     harness = (HERE / 'espnow_metadata_text_harness.cpp').read_text()
     for tag, value in (('// INSERT_TYPES', '\n\n'.join(types)),
                        ('// INSERT_PRODUCTION', '\n\n'.join(pieces))):

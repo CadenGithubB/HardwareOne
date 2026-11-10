@@ -14,6 +14,13 @@ a list too large for the reply buffer is an explicit error rather than a
 truncated document, and that the lookup takes the ban-table lock while no file
 I/O ever runs under it.
 
+It checks the load gate (System_ConfigLoad.h): a damaged ip_bans.json is moved
+aside and the list starts empty and savable; a file that was not read (open
+failure, a quarantine that failed) is never replaced, a ban made meanwhile
+stays in force and is merged when a later read succeeds; a file holding an
+entry that does not decrypt is copied aside before the first save replaces it,
+and is not replaced when that copy fails.
+
 It also checks that banning an address signs out its web sessions with the
 session table read under the session fence (a counting double), and runs the
 real `ban`/`unban` adapters (cmd_ban, cmd_unban from System_User.cpp, with the
@@ -52,13 +59,19 @@ def string_double() -> str:
     return stub.replace(anchor, extra + anchor)
 
 
-def production(server: str, header: str, mutex: str, mutex_header: str, utils: str) -> dict:
+def production(server: str, header: str, mutex: str, mutex_header: str, utils: str, settings: str) -> dict:
     guard = extract_block(mutex_header, "struct FsLockGuard") + ";\n"
     guard += "\n".join(extract_block(mutex, marker) for marker in (
         "FsLockGuard::FsLockGuard(const char* owner)",
         "FsLockGuard::FsLockGuard(const char* owner, TickType_t timeoutTicks)",
         "FsLockGuard::~FsLockGuard()"))
     text_io = "\n\n".join(extract_block(utils, marker) for marker in ("bool writeText(", "bool writeTextAtomic("))
+    # The kept-copy helpers the loader and saver call (System_Settings.cpp).
+    keep_start = settings.index("static constexpr unsigned kCorruptQuarantineKeep")
+    keep_last = "bool keepPartialOriginal(const String& path, const AuthContext& auth, String& copiedTo)"
+    require(settings.count(keep_last + " {") == 1, "one keepPartialOriginal definition")
+    keep_at = settings.index(keep_last + " {")
+    text_io += "\n\n" + settings[keep_start:keep_at] + extract_block(settings[keep_at:], keep_last)
 
     defines = re.findall(r"^#define (?:MAX_IP_BANS|IP_BANS_FILE)\s+.*$", header, re.M)
     require(len(defines) == 2, "MAX_IP_BANS and IP_BANS_FILE")
@@ -92,6 +105,9 @@ def source_contract(server: str) -> None:
     """Checked writer for the save, and the lock on the httpd-side lookup."""
     save = extract_block(server, "static bool saveIpBans()")
     require("writeTextAtomic(" in save, "saveIpBans must save through writeTextAtomic")
+    require("if (!ConfigLoad::savable(load))" in save, "saveIpBans must refuse a list that was not read")
+    require(save.index("ConfigLoad::savable(load)") < save.index("writeTextAtomic("),
+            "the load gate comes before the write")
     require('"w"' not in save, "saveIpBans must not truncate ip_bans.json in place")
     lookup = extract_block(server, "bool isIpBanned(const char* ip)")
     require("IpBanLock" in lookup, "isIpBanned must read the table under the ban lock")
@@ -112,7 +128,8 @@ def main() -> None:
     replacements = production(server, (COMPONENT / "WebServer_Server.h").read_text(),
                               (COMPONENT / "System_Mutex.cpp").read_text(),
                               (COMPONENT / "System_Mutex.h").read_text(),
-                              (COMPONENT / "System_Utils.cpp").read_text())
+                              (COMPONENT / "System_Utils.cpp").read_text(),
+                              (COMPONENT / "System_Settings.cpp").read_text())
     replacements["// INSERT_COMMANDS"] = commands((COMPONENT / "System_Command.h").read_text(),
                                                   (COMPONENT / "System_Command.cpp").read_text(),
                                                   (COMPONENT / "System_User.cpp").read_text())

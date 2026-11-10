@@ -504,9 +504,17 @@ bool readText(const char* path, String& out, const AuthContext& ctx) {
   if (!f) {
     return false;
   }
+  const size_t expected = f.size();
   out = f.readString();
   f.close();
 
+  // A String that could not grow stops short without an error. Passing that
+  // on as the file's text would make an intact file look cut off to the
+  // caller's parser, so a short read is a failed read.
+  if (out.length() != expected) {
+    out = "";
+    return false;
+  }
   return true;
 }
 
@@ -2165,6 +2173,7 @@ static void factoryreset_doRestart(void* /*arg*/) {
 // by account id, and the transcript and note views authorize by id alone.
 static constexpr const char* kFactoryResetPendingUsers = "/system/users/pending_users.json";
 static constexpr const char* kFactoryResetUserSettingsDir = "/system/users/user_settings";
+static constexpr const char* kFactoryResetUsersDir = "/system/users";
 static constexpr uint8_t kFactoryResetMaxDepth = 8;
 
 // "u<digits>": one account's folder under /stt or /sd/stt.
@@ -2174,6 +2183,15 @@ static bool factoryResetIsAccountFolder(const VFS::DirectoryEntry& entry) {
     if (entry.name[i] < '0' || entry.name[i] > '9') return false;
   }
   return true;
+}
+
+// A copy kept beside the roster or the pending list: a damaged file that was
+// moved aside (<file>.corrupt-N, and the older .corrupt and .bad names), the
+// original of a partly read one (.partial-N), or a leftover temporary. Each
+// can hold password hashes.
+static bool factoryResetIsKeptAccountCopy(const VFS::DirectoryEntry& entry) {
+  if (entry.isFolder) return false;
+  return entry.name.startsWith("users.json.") || entry.name.startsWith("pending_users.json.");
 }
 
 // Removes the entries of dir that select accepts (all of them when select is
@@ -2284,6 +2302,7 @@ static const char* factoryreset_confirmed(void* /*userData*/) {
   AuthContext sysCtx = VFS::systemAuth("factory.reset");
   bool sdSkipped = false;
   String settingsLeft;
+  String keptLeft;
   {
     // One lock over the whole wipe: no account is created or requested
     // between recording the ids and removing the roster.
@@ -2331,6 +2350,10 @@ static const char* factoryreset_confirmed(void* /*userData*/) {
     if (!factoryResetClearDirectory(kFactoryResetUserSettingsDir, nullptr, sysCtx, 0, settingsLeft)) {
       logSystemEvent("SETUP", "factory reset — could not remove %s", settingsLeft.c_str());
     }
+    // So do the copies kept of a damaged or partly read roster or pending list.
+    if (!factoryResetClearDirectory(kFactoryResetUsersDir, factoryResetIsKeptAccountCopy, sysCtx, 0, keptLeft)) {
+      logSystemEvent("SETUP", "factory reset — could not remove %s", keptLeft.c_str());
+    }
   }
 
   // Schedule the reboot for 1 second from now. This gives the confirm
@@ -2366,7 +2389,8 @@ static const char* factoryreset_confirmed(void* /*userData*/) {
            "Factory reset complete. Accounts, pending requests, user settings and account "
            "transcripts/notes deleted.%s%s Rebooting in 1 second to start setup wizard...",
            sdSkipped ? " SD card not mounted: its /sd/stt folders were kept." : "",
-           settingsLeft.length() ? " Some user settings files could not be removed." : "");
+           settingsLeft.length() ? " Some user settings files could not be removed."
+           : keptLeft.length() ? " A kept copy of a damaged account file could not be removed." : "");
   return respBuf;
 }
 

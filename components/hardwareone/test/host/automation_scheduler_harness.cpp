@@ -616,6 +616,15 @@ static void fileFormatVersion() {
   CHECK(writes == 1 && storeJson == automationsEmptyStoreJson());
   reset(futureRules);
   CHECK(loadAutomationsStoreForEdit(json, true) && json == futureRules && writes == 0);
+  // A file that is there but does not read is not an absent one: the load
+  // stops, and the empty store is neither returned nor written over it.
+  readSucceeds = false;
+  json = "untouched";
+  CHECK(!loadAutomationsStoreForEdit(json, true) && json.length() == 0);
+  CHECK(!loadAutomationsStoreForEdit(json, false) && json.length() == 0);
+  CHECK(writes == 0 && storeJson == futureRules);
+  readSucceeds = true;
+  CHECK(loadAutomationsStoreForEdit(json, true) && json == futureRules && writes == 0);
   CHECK(automationsEmptyStoreJson() == "{\n  \"version\": 2,\n  \"automations\": []\n}\n");
   stopAutomationScheduler();
 }

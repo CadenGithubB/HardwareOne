@@ -1301,6 +1301,12 @@ void settingsMarkLoadedOk();
 // never passes a file whose parse only ran out of memory.
 struct AuthContext;
 bool quarantineCorruptFile(const String& path, const AuthContext& auth, String& movedTo);
+// For a file whose load was ConfigLoad::Status::Partial (it parsed, but some
+// entries could not be read and are not in RAM): copies it to <path>.partial-1
+// (the newest three are kept) so the next save may replace it without losing
+// those entries for good. The caller holds the filesystem lock. False: there is
+// no complete copy and the caller must not save.
+bool keepPartialOriginal(const String& path, const AuthContext& auth, String& copiedTo);
 bool writeDebugJson();   // persist the debug module to DEBUG_JSON_FILE
 bool readDebugJson();    // load the debug module from DEBUG_JSON_FILE
 

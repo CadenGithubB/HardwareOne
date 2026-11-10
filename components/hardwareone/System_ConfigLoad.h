@@ -19,13 +19,20 @@
 // NoMemory (the file is FINE) rather than as a short String that looks like
 // IncompleteInput (the file is damaged). That difference decides whether the
 // operator is told to reboot or to quarantine — reading into a String first
-// collapses the two and would tell someone to throw away an intact file.
+// collapses the two and would tell someone to throw away an intact file. A
+// site that needs the text itself compares the length it read with the file
+// size first, and records a short read as NoMemory.
 //
 // HOW A SITE USES IT: keep one Status per file, set it at every exit of the
 // loader, and have the saver return early unless savable(status). A loader that
 // finds damaged() bytes moves the file aside (quarantineCorruptFile in
 // System_Settings) and records AbsentOk, so the device recovers as a fresh one
 // does; if the move fails the damaged status stays and saves keep refusing.
+//
+// Partial is not savable, although the file is intact: memory holds less than
+// the file does. Its saver first copies the file aside (keepPartialOriginal in
+// System_Settings), sets the status to Ok and then saves; if the copy fails the
+// save is refused.
 //
 // DEPENDENCY-FREE on purpose (only <stdint.h>): the host tests compile this
 // real header, and consumers can include it anywhere. classifyParse is a

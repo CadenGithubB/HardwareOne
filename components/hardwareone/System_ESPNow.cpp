@@ -53,6 +53,7 @@
 #include "System_MemoryMonitor.h"
 #include "System_Mutex.h"
 #include "System_SensorStubs.h"
+#include "System_ConfigLoad.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "System_UserSettings.h"
@@ -610,6 +611,10 @@ static const char* ESPNOW_DEVICES_MIGRATION_BACKUP_FILE =
     "/system/espnow/devices.pre-psram.json";
 static const char* ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE =
     "/system/espnow/devices.pre-psram.json.tmp";
+
+// What the last read of ESPNOW_DEVICES_FILE found. saveEspNowDevices() replaces
+// the file only when the registry in memory can stand for it.
+static ConfigLoad::Status sEspNowDevicesLoad = ConfigLoad::Status::NotLoaded;
 static constexpr size_t ESPNOW_PEER_ALIAS_MAX_BYTES = 31;
 
 // ============================================================================
@@ -772,12 +777,27 @@ bool macEqual6(const uint8_t a[6], const uint8_t b[6]) {
 }
 
 
-// Save named ESP-NOW devices (paired devices with names/keys) to filesystem
+// Save named ESP-NOW devices (paired devices with names/keys) to filesystem.
+// Refuses while the registry on disk has not been read (sEspNowDevicesLoad). A
+// file with entries the load could not take is copied aside first.
 static bool saveEspNowDevices() {
   if (!gEspNow) return false;
   if (!filesystemReady) return false;
 
   FsLockGuard fsGuard("espnow.devices.save");
+  if (sEspNowDevicesLoad == ConfigLoad::Status::Partial) {
+    String keptAs;
+    if (keepPartialOriginal(ESPNOW_DEVICES_FILE,
+                            VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_keep"), keptAs)) {
+      WARN_ESPNOWF("[ESP-NOW] Kept the previous %s as %s", ESPNOW_DEVICES_FILE, keptAs.c_str());
+      sEspNowDevicesLoad = ConfigLoad::Status::Ok;
+    }
+  }
+  if (!ConfigLoad::savable(sEspNowDevicesLoad)) {
+    ERROR_ESPNOWF("[ESP-NOW] Device registry not saved: %s was not read (%s); the file is left as it is",
+                  ESPNOW_DEVICES_FILE, ConfigLoad::statusName(sEspNowDevicesLoad));
+    return false;
+  }
   // Build the complete document before opening the destination. Besides making
   // quotes/backslashes in user metadata valid JSON, this avoids truncating a
   // previously-good registry if encryption or PSRAM allocation fails halfway
@@ -9332,31 +9352,67 @@ const char* checkEspNowFirstTimeSetup() {
   return "Error: No device name configured. Set one with: espnowsetname <name>";
 }
 
-// Load named ESP-NOW devices (paired devices with names/keys) from filesystem
+// Load named ESP-NOW devices (paired devices with names/keys) from filesystem.
+// What the read found goes to sEspNowDevicesLoad. A damaged file is moved aside
+// and the registry starts empty; a file that is there but was not read is left
+// alone, and saveEspNowDevices() refuses until a later load reads it.
 static void loadEspNowDevices() {
   if (!gEspNow) return;
-  if (!VFS::existsGuarded(ESPNOW_DEVICES_FILE, VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_load"))) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[ESP-NOW] No saved devices file at %s", ESPNOW_DEVICES_FILE);
+  // gEspNow outlives a radio restart. A registry already read is in memory, and
+  // reading it again would only report every entry as a duplicate.
+  if (ConfigLoad::savable(sEspNowDevicesLoad) || sEspNowDevicesLoad == ConfigLoad::Status::Partial) return;
+  if (!filesystemReady) {
+    sEspNowDevicesLoad = ConfigLoad::Status::NotMounted;
     return;
   }
-  File f = VFS::openGuarded(ESPNOW_DEVICES_FILE, "r", VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_load"));
-  if (!f) {
-    WARN_ESPNOWF("[ESP-NOW] Failed to open %s for reading", ESPNOW_DEVICES_FILE);
-    return;
-  }
-  String content = f.readString();
-  f.close();
-  if (content.isEmpty()) return;
-
+  const AuthContext loadAuth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_load");
+  String content;
   PSRAM_JSON_DOC(doc);
-  DeserializationError err = deserializeJson(doc, content);
-  if (err) {
-    WARN_ESPNOWF("[ESP-NOW] Failed to parse %s: %s", ESPNOW_DEVICES_FILE, err.c_str());
-    return;
+  {
+    FsLockGuard fsGuard("espnow.devices.load");
+    if (!VFS::existsGuarded(ESPNOW_DEVICES_FILE, loadAuth)) {
+      DEBUGF(DEBUG_ESPNOW_MESH, "[ESP-NOW] No saved devices file at %s", ESPNOW_DEVICES_FILE);
+      sEspNowDevicesLoad = ConfigLoad::Status::AbsentOk;
+      return;
+    }
+    File f = VFS::openGuarded(ESPNOW_DEVICES_FILE, "r", loadAuth);
+    if (!f) {
+      WARN_ESPNOWF("[ESP-NOW] Failed to open %s for reading", ESPNOW_DEVICES_FILE);
+      sEspNowDevicesLoad = ConfigLoad::Status::OpenFailed;
+      return;
+    }
+    const size_t expected = f.size();
+    content = f.readString();
+    f.close();
+    // A short read is a heap shortage, not a damaged file.
+    ConfigLoad::Status found = content.length() != expected
+                                   ? ConfigLoad::Status::NoMemory
+                                   : ConfigLoad::classifyParse(deserializeJson(doc, content));
+    if (found == ConfigLoad::Status::Ok && !doc.is<JsonObject>()) found = ConfigLoad::Status::Corrupt;
+    if (ConfigLoad::damaged(found)) {
+      String movedTo;
+      const char* foundName = ConfigLoad::statusName(found);
+      if (quarantineCorruptFile(ESPNOW_DEVICES_FILE, loadAuth, movedTo)) {
+        WARN_ESPNOWF("[ESP-NOW] %s is unreadable (%s): moved to %s, the device registry starts empty",
+                     ESPNOW_DEVICES_FILE, foundName, movedTo.c_str());
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, ESPNOW_DEVICES_FILE,
+                        "unparseable - quarantined, device registry empty");
+        found = ConfigLoad::Status::AbsentOk;
+      } else {
+        WARN_ESPNOWF("[ESP-NOW] %s is unreadable (%s) and could not be moved aside: pairings are not saved",
+                     ESPNOW_DEVICES_FILE, foundName);
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, ESPNOW_DEVICES_FILE, "unparseable - quarantine failed");
+      }
+    } else if (found == ConfigLoad::Status::NoMemory) {
+      WARN_ESPNOWF("[ESP-NOW] No memory to read %s; the file is left as it is and pairings are not saved",
+                   ESPNOW_DEVICES_FILE);
+    }
+    sEspNowDevicesLoad = found;
+    if (found != ConfigLoad::Status::Ok) return;
   }
 
+  // A file with no "devices" array holds no devices: the loop below adds none.
   JsonArray arr = doc["devices"].as<JsonArray>();
-  if (!arr) return;
 
   int count = 0;
   bool migrationBackupNeeded = false;
@@ -9476,6 +9532,13 @@ static void loadEspNowDevices() {
     count++;
   }
 
+  // Set before the migration save below, which goes through the same gate.
+  if (!registryFullyRepresented) {
+    sEspNowDevicesLoad = ConfigLoad::Status::Partial;
+    WARN_ESPNOWF("[ESP-NOW] %s holds entries this device could not take; the next save keeps a copy of it first",
+                 ESPNOW_DEVICES_FILE);
+  }
+
   if (migrationBackupNeeded) {
     bool backupReady = VFS::existsGuarded(
         ESPNOW_DEVICES_MIGRATION_BACKUP_FILE,
@@ -9508,6 +9571,10 @@ static void loadEspNowDevices() {
                      ESPNOW_DEVICES_MIGRATION_BACKUP_FILE);
       }
     }
+
+    // The file holds aliases that memory does not. With no backup of it, the
+    // next save keeps a copy first.
+    if (!backupReady) sEspNowDevicesLoad = ConfigLoad::Status::Partial;
 
     if (backupReady && registryFullyRepresented) {
       if (saveEspNowDevices()) {

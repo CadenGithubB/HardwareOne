@@ -36,6 +36,7 @@
 #include "System_Mutex.h"
 #include "System_PollPause.h"
 #include "System_Settings.h"
+#include "System_ConfigLoad.h"
 #include "System_SelfDevice.h"
 #include "System_Clock.h"
 #include "System_Filesystem.h"
@@ -1056,6 +1057,10 @@ void clearLoginAttempts(const char* ip) {
 
 EXT_RAM_BSS_ATTR static IpBanEntry sIpBans[MAX_IP_BANS];
 static std::atomic<bool> sIpBansLoaded{false};
+// What the last read of ip_bans.json found (System_ConfigLoad.h). saveIpBans
+// replaces the file only when this says the list in memory may stand for it.
+// Changed and read under IpBanLock.
+static ConfigLoad::Status sIpBansLoad = ConfigLoad::Status::NotLoaded;
 // True while the in-memory list holds a change ip_bans.json does not; a
 // repeated ban of an already banned IP retries the save.
 static bool sIpBansUnsaved = false;
@@ -1089,33 +1094,73 @@ void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg);
 // Reads ip_bans.json and installs it. With replace=false the list is
 // installed only if no list is loaded yet (first use on any task), so a lazy
 // load never overwrites a ban added in the meantime.
+//
+// What the read found goes to sIpBansLoad. A damaged file is moved aside and
+// the list starts empty. A file that is there but was not read (no filesystem,
+// open failed, out of memory) leaves the list unloaded, rather than install an
+// empty list that would lift every ban: the next use retries, and until a read
+// succeeds no save replaces the file.
 static void loadIpBansFromFile(bool replace) {
+  auto notRead = [](ConfigLoad::Status status) {
+    DEBUG_AUTHF("[ipban] load: %s not read (%s)", IP_BANS_FILE, ConfigLoad::statusName(status));
+    IpBanLock lock;
+    if (!sIpBansLoaded.load()) sIpBansLoad = status;
+  };
+  if (!filesystemReady) {
+    notRead(ConfigLoad::Status::NotMounted);
+    return;
+  }
   IpBanEntry* staged = allocIpBanTable();
   if (!staged) {
-    // Leave the list unloaded so the next use retries, rather than install
-    // an empty list that would lift every ban.
-    DEBUG_AUTHF("[ipban] load: out of memory");
+    notRead(ConfigLoad::Status::NoMemory);
     return;
   }
   int count = 0;
-  if (filesystemReady && VFS::existsGuarded(IP_BANS_FILE, VFS::systemAuth(VFS::Scopes::USERS, "ipbans.load"))) {
-    PSRAM_JSON_DOC(doc);
-    DeserializationError err = DeserializationError::InvalidInput;
-    {
-      FsLockGuard guard("ipbans.load");
-      File f = VFS::openGuarded(IP_BANS_FILE, "r", VFS::systemAuth(VFS::Scopes::USERS, "ipbans.load"));
-      if (f) {
-        err = deserializeJson(doc, f);
+  ConfigLoad::Status status = ConfigLoad::Status::AbsentOk;
+  PSRAM_JSON_DOC(doc);
+  {
+    const AuthContext auth = VFS::systemAuth(VFS::Scopes::USERS, "ipbans.load");
+    FsLockGuard guard("ipbans.load");
+    if (VFS::existsGuarded(IP_BANS_FILE, auth)) {
+      File f = VFS::openGuarded(IP_BANS_FILE, "r", auth);
+      if (!f) {
+        status = ConfigLoad::Status::OpenFailed;
+      } else {
+        status = ConfigLoad::classifyParse(deserializeJson(doc, f));
         f.close();
       }
+      if (ConfigLoad::damaged(status)) {
+        String movedTo;
+        const char* found = ConfigLoad::statusName(status);
+        if (quarantineCorruptFile(IP_BANS_FILE, auth, movedTo)) {
+          status = ConfigLoad::Status::AbsentOk;
+          BROADCAST_PRINTF("[auth] %s is unreadable (%s): moved to %s, the ban list starts empty",
+                           IP_BANS_FILE, found, movedTo.c_str());
+          systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, IP_BANS_FILE, "unparseable - quarantined, ban list empty");
+        } else {
+          BROADCAST_PRINTF("[auth] %s is unreadable (%s) and could not be moved aside: "
+                           "the ban list is empty and changes to it are not saved",
+                           IP_BANS_FILE, found);
+          systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, IP_BANS_FILE, "unparseable - quarantine failed");
+        }
+      }
     }
-    if (err) { DEBUG_AUTHF("[ipban] load error: %s", err.c_str()); }
+  }
+  if (status == ConfigLoad::Status::OpenFailed || status == ConfigLoad::Status::NoMemory) {
+    free(staged);
+    notRead(status);
+    return;
+  }
 
+  if (status == ConfigLoad::Status::Ok) {
     JsonArray bans = doc["bans"];
     for (JsonObject ban : bans) {
-      if (err || count >= MAX_IP_BANS) break;
       const char* ipRaw = ban["ip"] | "";
       if (ipRaw[0] == '\0') continue;
+      if (count >= MAX_IP_BANS) {
+        status = ConfigLoad::Status::Partial;  // more bans on file than the table holds
+        break;
+      }
 
       // Decrypt IP — all entries on disk are AES-encrypted
       String ipStr;
@@ -1123,6 +1168,7 @@ static void loadIpBansFromFile(bool replace) {
         ipStr = decryptString(String(ipRaw));
         if (ipStr.length() == 0) {
           DEBUG_AUTHF("[ipban] load: decryption failed for entry %d, skipping", count);
+          status = ConfigLoad::Status::Partial;
           continue;
         }
       } else {
@@ -1141,19 +1187,44 @@ static void loadIpBansFromFile(bool replace) {
   }
 
   bool installed = false;
+  int carried = 0;
   {
     IpBanLock lock;
     if (replace || !sIpBansLoaded.load()) {
+      if (!sIpBansLoaded.load()) {
+        // Bans made while no list could be read stay in force.
+        for (int i = 0; i < MAX_IP_BANS; i++) {
+          if (sIpBans[i].ip[0] == '\0') continue;
+          int freeSlot = -1;
+          bool known = false;
+          for (int j = 0; j < MAX_IP_BANS && !known; j++) {
+            if (staged[j].ip[0] == '\0') {
+              if (freeSlot < 0) freeSlot = j;
+            } else {
+              known = strcmp(staged[j].ip, sIpBans[i].ip) == 0;
+            }
+          }
+          if (known || freeSlot < 0) continue;
+          staged[freeSlot] = sIpBans[i];
+          carried++;
+        }
+      }
       memcpy(sIpBans, staged, sizeof(sIpBans));
-      sIpBansUnsaved = false;
+      sIpBansUnsaved = carried > 0;
+      sIpBansLoad = status;
       sIpBansLoaded.store(true);
       installed = true;
     }
   }
   free(staged);
   if (!installed) return;
-  DEBUG_AUTHF("[ipban] loaded %d ban(s)", count);
+  DEBUG_AUTHF("[ipban] loaded %d ban(s), %d kept from before the load (%s)", count, carried,
+              ConfigLoad::statusName(status));
   if (count > 0) { BROADCAST_PRINTF("[auth] loaded %d IP ban(s) from flash", count); }
+  if (status == ConfigLoad::Status::Partial) {
+    BROADCAST_PRINTF("[auth] %s holds bans this device could not read; "
+                     "the next change keeps a copy of it before saving", IP_BANS_FILE);
+  }
 }
 
 void loadIpBans() { loadIpBansFromFile(true); }
@@ -1163,15 +1234,39 @@ static void ensureIpBansLoaded() {
 }
 
 // Replaces ip_bans.json through the checked atomic writer. False means the
-// file was not replaced and still holds the previous list.
+// file was not replaced and still holds the previous list. Refused while the
+// list in memory cannot stand for the file (sIpBansLoad): the file was never
+// read this boot. After a load that skipped unreadable entries the file is
+// first copied aside (keepPartialOriginal).
 static bool saveIpBans() {
   if (!filesystemReady) return false;
 
   IpBanEntry* snapshot = allocIpBanTable();
   if (!snapshot) return false;
+  ConfigLoad::Status load;
   {
     IpBanLock lock;
     memcpy(snapshot, sIpBans, sizeof(sIpBans));
+    load = sIpBansLoad;
+  }
+  if (load == ConfigLoad::Status::Partial) {
+    // The file holds bans that are not in memory. Keep it before replacing it.
+    String keptAs;
+    bool kept;
+    {
+      FsLockGuard guard("ipbans.keep");
+      kept = keepPartialOriginal(IP_BANS_FILE, VFS::systemAuth(VFS::Scopes::USERS, "ipbans.keep"), keptAs);
+    }
+    if (kept) {
+      BROADCAST_PRINTF("[auth] kept the previous %s as %s", IP_BANS_FILE, keptAs.c_str());
+      IpBanLock lock;
+      sIpBansLoad = load = ConfigLoad::Status::Ok;
+    }
+  }
+  if (!ConfigLoad::savable(load)) {
+    free(snapshot);
+    DEBUG_AUTHF("[ipban] save refused: %s was not read (%s)", IP_BANS_FILE, ConfigLoad::statusName(load));
+    return false;
   }
 
   PSRAM_JSON_DOC(doc);

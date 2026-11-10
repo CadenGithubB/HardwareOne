@@ -10,6 +10,7 @@
 #include "fake_vfs.h"
 #include <ArduinoJson.h>
 #include "System_PollPause.h"
+#include "System_ConfigLoad.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -93,7 +94,7 @@ static void logSystemEvent(const char* category, const char* format, ...) {
 }
 enum : int {
   SYSEVT_USER_ADDED = 1, SYSEVT_USER_APPROVED, SYSEVT_USER_REJECTED, SYSEVT_USER_BANNED,
-  SYSEVT_USER_DELETED, SYSEVT_USER_REQUEST, SYSEVT_AUTH_DB_FAULT
+  SYSEVT_USER_DELETED, SYSEVT_USER_REQUEST, SYSEVT_AUTH_DB_FAULT, SYSEVT_CONFIG_FILE_CORRUPT
 };
 static void systemEventPost(int kind, const char* subject = nullptr, const char* detail = nullptr) {
   (void)detail;
@@ -722,6 +723,53 @@ static void denyAndRequest() {
   check(fs.liveHandles() == 0);
 }
 
+// A request replaces the pending list only when the list was read whole: the
+// file holds the only copy of each waiting request's password hash.
+static void requestNeverReplacesAnUnreadList() {
+  const std::string kept1 = std::string(PENDING_USERS_FILE) + ".corrupt-1";
+  const std::string kept2 = std::string(PENDING_USERS_FILE) + ".corrupt-2";
+
+  // The file is there and does not open: refused, nothing written.
+  auto& fs = resetStore();
+  putStandardRoster(fs);
+  putPending(fs, true);
+  const std::string intact = fs.text(PENDING_USERS_FILE);
+  fs.faults.open.add(PENDING_USERS_FILE);
+  check(submitAccountRequest("ivan", "ivan-secret1") == AccountRequestResult::ReadFailed);
+  fs.faults.clear();
+  check(fs.text(PENDING_USERS_FILE) == intact && !fs.exists(kept1));
+
+  // Damaged bytes (cut short, not JSON, not a list) are moved aside and kept;
+  // the list starts again with this request.
+  unsigned round = 0;
+  for (const char* damaged : {"[{\"username\":\"erin\",\"password\":\"ha", "not json at all", "{\"users\":[]}"}) {
+    fs.put(PENDING_USERS_FILE, damaged);
+    const std::string name = "ivan" + std::to_string(round++);
+    const size_t eventsBefore = events.size();
+    check(submitAccountRequest(name.c_str(), "ivan-secret1") == AccountRequestResult::Submitted);
+    check(fs.exists(kept1) && fs.text(kept1) == damaged);
+    check(pendingHas(name.c_str()));
+    check(events.size() > eventsBefore &&
+          events[eventsBefore] == std::to_string(SYSEVT_CONFIG_FILE_CORRUPT) + ":" + PENDING_USERS_FILE);
+  }
+  check(fs.exists(kept2) && fs.text(kept2) == "not json at all");
+
+  // The move fails: the damaged file stays as it is and the request is refused.
+  fs.put(PENDING_USERS_FILE, "{broken");
+  fs.faults.rename.add(PENDING_USERS_FILE);
+  check(submitAccountRequest("judy", "judy-secret1") == AccountRequestResult::ReadFailed);
+  fs.faults.clear();
+  check(fs.text(PENDING_USERS_FILE) == "{broken");
+
+  // An empty file has nothing to keep: the list starts with this request.
+  fs.put(PENDING_USERS_FILE, "");
+  const std::string newest = fs.text(kept1);
+  check(submitAccountRequest("judy", "judy-secret1") == AccountRequestResult::Submitted);
+  check(pendingHas("judy") && fs.text(kept1) == newest);
+  noPlaintextAnywhere();
+  check(fs.liveHandles() == 0);
+}
+
 static bool hookFired = false, hookDeferred = false;
 static void banAliceFromOtherTask() {
   String err;
@@ -792,6 +840,7 @@ static const Case kCases[] = {
   {"approveOrderAndFailures", approveOrderAndFailures},
   {"approveReportsPendingListFailure", approveReportsPendingListFailure},
   {"denyAndRequest", denyAndRequest},
+  {"requestNeverReplacesAnUnreadList", requestNeverReplacesAnUnreadList},
   {"banLandsInsideApprove", banLandsInsideApprove},
   {"allocationFailuresNeverTruncate", allocationFailuresNeverTruncate},
 };
