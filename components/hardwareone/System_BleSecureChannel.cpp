@@ -8,7 +8,6 @@
 #include "BLE_Types.h"          // BLE_MAX_CONNECTIONS
 
 #include <sodium.h>
-#include <mbedtls/md.h>      // yielding PBKDF2 over ESP32 HW-accelerated SHA-256
 #include <string.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>     // vTaskDelay — inter-fragment pacing

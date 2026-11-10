@@ -4,9 +4,6 @@
 #include "System_BuildConfig.h"
 #include "System_CommandLimits.h"
 #include "System_User.h"  // For isAdminUser declaration
-#if ENABLE_WIFI
-  #include <WiFi.h>
-#endif
 #if ENABLE_WEB_SENSORS
   #if ENABLE_IMU_SENSOR
     #include "i2csensor_bno055_web.h"

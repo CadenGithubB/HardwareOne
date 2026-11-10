@@ -57,17 +57,11 @@ static void oledApplyPendingOwnerRequests();
 
 #if ENABLE_OLED_DISPLAY
 
-#include <Adafruit_GFX.h>
-#include <esp_sleep.h>
-#if ENABLE_GPS_SENSOR
-#include <Adafruit_GPS.h>
-#endif
 #if ENABLE_WIFI
 #include <WiFi.h>
 #endif
 
 #include <ArduinoJson.h>
-#include <LittleFS.h>
 #include "System_VFS.h"
 #include "i2csensor_rda5807.h"
 
@@ -119,11 +113,6 @@ static void oledApplyPendingOwnerRequests();
 #if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"  // gGpsRunning, gGpsConnected
 #endif
-
-#if ENABLE_WIFI || ENABLE_ESPNOW
-#include <esp_wifi.h>
-#endif
-#include <LittleFS.h>
 
 // =============================================================================
 // Standardized Footer System Implementation
@@ -2891,10 +2880,6 @@ uint32_t OLEDConsoleBuffer::getTimestamp(int index) const {
 #include "Bluetooth.h"
 #endif
 
-#if ENABLE_HTTP_SERVER
-#include <esp_http_server.h>
-#endif
-
 // External state variables needed for context-aware footer hints
 extern String unavailableOLEDTitle;
 extern String unavailableOLEDReason;
@@ -3687,11 +3672,6 @@ void oledSetAlwaysDirty(bool always) {
   // For animations - just keep forcing renders
   if (always) oledMarkDirty();
 }
-
-#if ENABLE_WIFI || ENABLE_ESPNOW
-  #include <esp_wifi.h>
-#endif
-#include <LittleFS.h>
 
 // ============================================================================
 // OLED Display Functions

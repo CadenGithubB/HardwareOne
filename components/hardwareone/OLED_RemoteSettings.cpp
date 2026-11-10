@@ -3,7 +3,6 @@
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
 #include <ArduinoJson.h>
-#include <LittleFS.h>
 #include <cstring>
 #include <new>
 #include "System_VFS.h"

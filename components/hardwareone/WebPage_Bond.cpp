@@ -6,7 +6,6 @@
 #if ENABLE_WEB_BOND
 
 #include <Arduino.h>
-#include <LittleFS.h>
 #include <memory>
 
 #include "System_User.h"
@@ -15,7 +14,6 @@
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
 #include "System_ESPNow.h"
-#include <esp_wifi.h>             // esp_wifi_get_mac — local STA MAC for bonded file pulls
 #include "System_ESPNow_Sensors.h"
 #include "System_Settings.h"
 #include "System_Filesystem.h"

@@ -8,7 +8,7 @@
 
 #include "HAL_Input.h"
 #include <Arduino.h>
-#include <LittleFS.h>
+#include <FS.h>
 #include "System_VFS.h"
 #include "WebServer_Server.h"           // httpd types, JSON_RESPONSE_SIZE, gJsonResponseBuffer, makeWebAuthCtx
 #include "WebServer_Utils.h"            // WEB_AUTH_OR_RETURN, sendJsonResponse

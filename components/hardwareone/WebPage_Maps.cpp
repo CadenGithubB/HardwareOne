@@ -15,7 +15,7 @@
 #include <ArduinoJson.h>
 #include "System_MemUtil.h"
 #include "System_Utils.h"  // urlDecode
-#include <LittleFS.h>
+#include <FS.h>
 #include <cstring>
 #include <cstdio>
 

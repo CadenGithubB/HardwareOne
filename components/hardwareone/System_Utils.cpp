@@ -9,7 +9,6 @@
 #include <Arduino.h>
 #include <atomic>
 #include <ctype.h>
-#include <esp_app_desc.h>
 #include <esp_heap_caps.h>
 #if CONFIG_HEAP_TASK_TRACKING
 #include <esp_heap_task_info.h>   // heap_task_totals_t, heap_caps_get_per_task_info
@@ -36,7 +35,7 @@ bool isEspNowInitialized() { return false; }
 #if ENABLE_WIFI
   #include <WiFi.h>
 #endif
-#include <LittleFS.h>
+#include <FS.h>
 #if ENABLE_HTTP_SERVER
   #include <esp_http_server.h>
 #endif

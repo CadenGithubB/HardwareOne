@@ -7,7 +7,6 @@
 
 #include <esp_random.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <algorithm>
 
 #include "HAL_Audio.h"

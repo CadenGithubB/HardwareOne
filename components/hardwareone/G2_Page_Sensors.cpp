@@ -24,7 +24,6 @@
 #include "G2_HijackCmd.h"               // g2SubmitHijackCommand — Group A migration
 #include "G2_Page_Common.h"             // g2ShowListPageAndPublish
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <stdio.h>
 
 // -----------------------------------------------------------------------------

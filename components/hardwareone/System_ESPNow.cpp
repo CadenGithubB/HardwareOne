@@ -21,10 +21,6 @@
 #include <esp_flash.h>
 #include <esp_crc.h>                 // esp_crc32_le for bond settings hash
 #include <LittleFS.h>
-#include <Preferences.h>
-#include "mbedtls/aes.h"
-#include "mbedtls/base64.h"
-#include "mbedtls/md.h"
 #include "mbedtls/sha256.h"
 
 #include "OLED_Display.h"

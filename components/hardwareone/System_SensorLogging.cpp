@@ -23,7 +23,7 @@
 #include "System_VFS.h"
 #include "System_Mutex.h"         // FsLockGuard
 #include "System_AuthIdentity.h"  // currentAuthContext
-#include <LittleFS.h>
+#include <FS.h>
 #include "freertos/FreeRTOS.h"
 
 // Conditional sensor includes (same approach as main .ino)
@@ -45,7 +45,6 @@
 #endif
 #if ENABLE_GPS_SENSOR
   #include "i2csensor_pa1010d.h"
-  #include <Adafruit_GPS.h>
 #endif
 #if ENABLE_PRESENCE_SENSOR
   #include "i2csensor_sths34pf80.h"

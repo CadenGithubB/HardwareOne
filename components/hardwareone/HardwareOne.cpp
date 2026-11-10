@@ -1,6 +1,5 @@
 #include "Arduino.h"
 #include <atomic>
-#include <esp_app_desc.h>
 #include <esp_attr.h>
 #include <esp_system.h>
 // Forward declarations to satisfy Arduino's auto-generated prototypes
@@ -28,22 +27,16 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 
 #if ENABLE_WIFI
   #include <WiFi.h>
-  #include <HTTPClient.h>
-  #include <WiFiClientSecure.h>
 #endif
 // WiFi stub is provided by sensor_stubs_minimal.h when ENABLE_WIFI=0
 
 #if ENABLE_HTTP_SERVER
   #include <esp_http_server.h>
 #endif
-#include <LittleFS.h>
 #include "System_VFS.h"
 #include <time.h>
 #include <esp_timer.h>
-#include <esp_sleep.h>
 #include <freertos/semphr.h>
-#include "mbedtls/base64.h"
-#include <lwip/sockets.h>
 #include <ArduinoJson.h>
 #if ENABLE_HTTP_SERVER
   #include "WebServer_Utils.h"
@@ -146,16 +139,10 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_NeoPixel.h"
 #include "System_MemoryMonitor.h"
 #if ENABLE_WIFI
-  #include <lwip/netdb.h>
   #include <arpa/inet.h>
-  #include <esp_wifi.h>
-#endif
-#if ENABLE_ESPNOW
-  #include <esp_now.h>
 #endif
 #include <memory>
 #include <ctype.h>
-#include <Wire.h>
 #include <string.h>
 #include <vector>
 #include <functional>

@@ -9,7 +9,6 @@
 
 #include "System_PollPause.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 // Coarse mirror of (any pause active). Lives here so the whole primitive —
 // state + ops — is one translation unit. Zero-init, no constructor → no

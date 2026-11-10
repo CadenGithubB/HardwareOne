@@ -35,10 +35,9 @@
 #include "System_UartLink.h"       // uartLinkStart/Stop/StatusLine — cmd_uartlink live apply
 #include "System_User.h"           // rotate transport generations on auth-policy changes
 #include "System_FirstTimeSetup.h"  // armOwnerCredentialSetup - owner credential recovery (G-38)
-#include <LittleFS.h>
+#include <FS.h>
 #include "System_VFS.h"      // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include <esp_system.h>
-#include <esp_app_desc.h>
 #include "mbedtls/aes.h"
 #include "mbedtls/platform_util.h"
 #include "mbedtls/sha256.h"

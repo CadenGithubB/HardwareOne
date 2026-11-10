@@ -8,7 +8,6 @@
 #include <string.h>
 
 #include <esp_crc.h>          // esp_crc32_le — whole-file CRC + filename hash
-#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 

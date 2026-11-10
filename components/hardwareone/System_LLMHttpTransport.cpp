@@ -9,8 +9,6 @@
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_event.h>
-#include <esp_wifi.h>
-#include <esp_netif.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <lwip/dns.h>

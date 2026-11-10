@@ -11,7 +11,6 @@
 #include "esp_app_format.h"
 #include "esp_attr.h"
 #include "esp_log.h"
-#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 

@@ -6,7 +6,6 @@
  */
 
 #include <ArduinoJson.h>
-#include <LittleFS.h>
 #include <atomic>
 #include <Wire.h>
 #include <esp_log.h>   // esp_log_level_set — quiet probe NACKs during detect scan
@@ -41,32 +40,25 @@
 #include "System_Utils.h"
 
 #if ENABLE_APDS_SENSOR
-#include "Adafruit_APDS9960.h"
 #include "i2csensor_apds9960.h"
 #endif
 #if ENABLE_ANO_ENCODER
 #include "i2csensor_ano_encoder.h"
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-#include "Adafruit_seesaw.h"
 #include "i2csensor_seesaw.h"
 #endif
 #if ENABLE_GPS_SENSOR
-#include <Adafruit_GPS.h>
 #include "i2csensor_pa1010d.h"
 #endif
 #if ENABLE_IMU_SENSOR
-#include <Adafruit_BNO055.h>
-#include <Adafruit_Sensor.h>
 #include "i2csensor_bno055.h"
 #endif
 #if ENABLE_THERMAL_SENSOR
-#include <Adafruit_MLX90640.h>
 #include "i2csensor_mlx90640.h"
 #endif
 #if ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"
-#include "vl53l4cx_class.h"
 #endif
 #if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"

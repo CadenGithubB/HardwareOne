@@ -8,7 +8,6 @@
 #include <sys/time.h>
 
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <freertos/task.h>
 
 #include "G2_Glasses.h"

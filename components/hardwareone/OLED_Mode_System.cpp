@@ -12,7 +12,6 @@
 #include "System_Settings.h"
 #include "System_Battery.h"
 #include "System_Utils.h"
-#include <esp_heap_caps.h>
 // Must come before the first hw1Internal*() use (this file also includes it
 // further down, but that is after the System/memory render paths).
 #include "System_MemUtil.h"
@@ -20,10 +19,6 @@
 #if ENABLE_WIFI
 #include <WiFi.h>
 #include "System_WiFi.h"  // wifiRadioDisplayOn() — RADIO power axis
-#endif
-
-#if ENABLE_HTTP_SERVER
-#include <esp_http_server.h>
 #endif
 
 // External references

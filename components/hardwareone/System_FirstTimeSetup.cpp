@@ -9,7 +9,6 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <LittleFS.h>
 #include "WebServer_Handle.h"
 #include "System_Utils.h"   // rebootDevice()
 #include "System_User.h"    // isReservedUsername, isValidPublicUsername, kPublicPasswordMinLen

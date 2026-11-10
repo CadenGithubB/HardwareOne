@@ -10,7 +10,7 @@
 #include "System_Debug.h"
 #include "System_MemUtil.h"  // ps_calloc / AllocPref
 #include <Arduino.h>
-#include <LittleFS.h>
+#include <FS.h>
 #include <climits>
 #include <cstdint>
 #include <cstring>

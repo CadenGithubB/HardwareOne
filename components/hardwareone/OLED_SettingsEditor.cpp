@@ -1034,9 +1034,6 @@ REGISTER_OLED_MODE_MODULE(settingsOLEDModes, sizeof(settingsOLEDModes) / sizeof(
 #include <WiFi.h>
 #include "System_WiFi.h"  // wifiRadioDisplayOn — the Radio row
 #endif
-#if ENABLE_HTTP_SERVER
-#include <esp_http_server.h>
-#endif
 
 // ============================================================================
 // Quick Settings - Dynamic item registry based on compile flags

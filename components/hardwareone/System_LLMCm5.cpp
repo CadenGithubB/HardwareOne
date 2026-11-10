@@ -14,7 +14,6 @@
 
 #include <esp_attr.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 
 #include "System_Cm5Presence.h"
 #include "System_Debug.h"

@@ -45,7 +45,6 @@ static const char* VIDEO_FOLDER_SD = "/sd/VIDEOS";
 #include "System_Settings.h"
 #include "System_Debug.h"
 #include "System_Mutex.h"  // FsLockGuard — serialize SD with mic/sensorlog
-#include <SD.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>

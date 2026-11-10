@@ -6,7 +6,7 @@
 
 #if ENABLE_MAPS
 
-#include <LittleFS.h>
+#include <FS.h>
 #include <ArduinoJson.h>
 #include <cstring>
 #include <memory>
@@ -41,7 +41,6 @@
 #endif
 
 #if ENABLE_GPS_SENSOR
-#include <Adafruit_GPS.h>
 #include "i2csensor_pa1010d.h"
 #include "System_I2C_Manager.h"
 #endif

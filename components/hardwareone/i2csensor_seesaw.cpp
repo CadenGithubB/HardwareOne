@@ -9,7 +9,6 @@
 #if ENABLE_GAMEPAD_SENSOR
 
 #include <Adafruit_seesaw.h>
-#include <Adafruit_SSD1306.h>
 #include <Arduino.h>
 #include <Wire.h>
 #include <new>

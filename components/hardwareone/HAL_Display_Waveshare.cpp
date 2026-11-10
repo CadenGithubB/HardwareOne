@@ -4,7 +4,6 @@
 #include "System_MemUtil.h"
 #include "System_Power.h"
 #include "esp_cache.h"
-#include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
 #include "hal/mipi_dsi_ll.h"

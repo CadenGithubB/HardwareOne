@@ -37,7 +37,7 @@
 #include <memory>
 #include <utility>
 #include "freertos/semphr.h"
-#include <LittleFS.h>
+#include <FS.h>
 #include <ctype.h>
 #include <string.h>
 

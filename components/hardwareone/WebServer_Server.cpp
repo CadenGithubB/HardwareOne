@@ -5,7 +5,6 @@
  */
 
 #include "System_BuildConfig.h"
-#include <esp_app_desc.h>
 #include <esp_attr.h>
 
 #if ENABLE_HTTP_SERVER
@@ -13,7 +12,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <arpa/inet.h>
-#include <LittleFS.h>
+#include <FS.h>
 #include <mbedtls/base64.h>
 #include <mbedtls/platform_util.h>
 #include <ctype.h>
@@ -23,6 +22,9 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <time.h>
+#if ENABLE_WIFI
+#include <WiFi.h>   // WiFi.getHostname() in the migration info reply
+#endif
 
 #include "System_Automation.h"
 #include "System_Debug.h"

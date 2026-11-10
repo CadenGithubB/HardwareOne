@@ -14,7 +14,7 @@
 #include "System_TaskUtils.h"
 #include "HAL_JPEG.h"
 #include <ArduinoJson.h>
-#include <LittleFS.h>
+#include <FS.h>
 #include "System_VFS.h"
 #include "System_AuthIdentity.h"
 #include "System_Mutex.h"

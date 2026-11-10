@@ -96,7 +96,7 @@ static inline bool g2PairedUserClearIfMatches(const String& username) {
 }
 #include "OLED_Display.h"
 #include <atomic>
-#include <LittleFS.h>
+#include <FS.h>
 #include <ArduinoJson.h>
 #include "System_UserSettings.h"
 #include "System_MemUtil.h"

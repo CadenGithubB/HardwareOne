@@ -37,15 +37,11 @@
 #include <WiFiGeneric.h>
 #include <esp_err.h>
 #include <esp_wifi.h>
-#if ENABLE_HTTP_SERVER
-#include <esp_http_server.h>
-#endif
 #include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 #if ENABLE_HTTPS
-#include <LittleFS.h>
+#include <FS.h>
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include <time.h>
 #include "mbedtls/x509_crt.h"

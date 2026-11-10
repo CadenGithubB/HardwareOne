@@ -15,7 +15,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <LittleFS.h>
+#include <FS.h>
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include "System_Mutex.h"
 #include "System_AuthIdentity.h"

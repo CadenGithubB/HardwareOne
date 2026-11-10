@@ -16,7 +16,7 @@
 #include "System_VFS.h"
 #include "System_Mutex.h"
 #include <Arduino.h>
-#include <LittleFS.h>
+#include <FS.h>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>

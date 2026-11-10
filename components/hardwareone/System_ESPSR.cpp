@@ -30,7 +30,6 @@
 #include "System_AuthIdentity.h"  // currentAuthContext (voice arm captures caller identity)
 #include <ctype.h>
 #include <math.h>
-#include "esp_timer.h"
 #include <ArduinoJson.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>

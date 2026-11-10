@@ -37,7 +37,6 @@
 #endif
 
 #if ENABLE_HTTP_SERVER
-#include <esp_http_server.h>
 extern bool gServerIsHttps;
 #endif
 

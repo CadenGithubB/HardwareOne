@@ -18,7 +18,6 @@
 #include <cstddef>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "freertos/task.h"
 
 // ============================================================================
 // Transformer Weights — pointers into a single PSRAM block

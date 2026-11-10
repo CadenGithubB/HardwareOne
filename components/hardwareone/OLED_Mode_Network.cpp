@@ -846,7 +846,6 @@ void displayEspNow() {
 // the server ran, so there was no way to start it or set Auto Start from here.
 
 #if ENABLE_HTTP_SERVER
-#include <esp_http_server.h>
 #include "WebServer_Server.h"  // server, SessionEntry, MAX_SESSIONS, gSessions
 #endif
 

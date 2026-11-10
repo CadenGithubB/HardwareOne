@@ -3,7 +3,7 @@
  * For use with TFT/OLED displays and embedded UIs
  */
 
-#include <LittleFS.h>
+#include <FS.h>
 
 #include "System_FileManager.h"
 #include "System_PollPause.h"   // PollPauseGuard — quiesce sensor polling during file I/O

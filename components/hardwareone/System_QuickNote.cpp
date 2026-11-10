@@ -12,7 +12,6 @@
 #include <esp_heap_caps.h>  // heap_caps_check_integrity_all (diagnostic builds)
 #endif
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>

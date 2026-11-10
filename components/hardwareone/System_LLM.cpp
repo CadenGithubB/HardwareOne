@@ -59,7 +59,6 @@
 #include "System_LLMBackend.h"   // model registry — the one id -> source resolver
 
 #include <Arduino.h>
-#include <LittleFS.h>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
