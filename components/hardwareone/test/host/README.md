@@ -1553,6 +1553,24 @@ with the missing and stale command rows) is printed. `--repo <dir>` runs
 another checkout's tool against its own sources; the pre-fix tree fails both
 gates (13 audit problems; no `--check`).
 
+## Tracked-tree hygiene gate
+
+```sh
+python3 components/hardwareone/test/host/test_tree_hygiene_gate.py
+```
+
+`tree_hygiene_gate` is the release gate for private details in the tracked
+tree (RELEASING.md, gate step 4). It runs `git grep` over every tracked text
+file except `components/hardwareone_libs` and fails on an account home path
+(`/Users/<name>`) or a `192.168.x` address whose third octet is not in the
+test's `ALLOWED_SUBNETS` table (generic examples, the SoftAP defaults, the
+recovery updater's access point, test fixtures; each entry carries its
+reason). Each hit is printed as `file:line: match`.
+
+It does not look for a Wi-Fi network name or a password, because a tracked
+test cannot name them. `--repo <dir>` checks another checkout; the tree before
+this gate fails with one hit (a home subnet quoted in the readiness appendix).
+
 ## Repository tool pins
 
 ```sh

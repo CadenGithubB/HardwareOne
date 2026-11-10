@@ -2061,10 +2061,12 @@ add_test(
           ${BLE_RETIRED_CODE_TEST_ARGS})
 
 # Module overview text (README "Module overview text"), repository tool pins
-# (README "Repository tool pins") and the command-registry drift gate (README
+# (README "Repository tool pins"), the command-registry drift gate (README
 # "Command-registry drift gate": `command_registry.py audit` and
-# `reference --check` both exit 0). Source text and Python only; nothing is compiled.
-foreach(test_name IN ITEMS module_overview_text tool_pins command_registry_gate)
+# `reference --check` both exit 0) and the tracked-tree hygiene gate (README
+# "Tracked-tree hygiene gate": no home path, no private LAN address outside the
+# allowed ranges). Source text and Python only; nothing is compiled.
+foreach(test_name IN ITEMS module_overview_text tool_pins command_registry_gate tree_hygiene_gate)
   add_test(
     NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE}

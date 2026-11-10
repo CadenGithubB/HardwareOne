@@ -176,7 +176,7 @@ After the rotation in Section 0: replace the account home path (5 docs, 2 of the
 Waveshare docs), home LAN subnet (4 files) and home SSID (3 docs) at HEAD with placeholders,
 and decide on the history rewrite. Device MACs at HEAD are already placeholders (4ed1eaa5),
 so that part is refuted.
-*Done when:* `git grep -nIE '/Users/<account>|192\.168\.21\.|<home SSID>' -- . ':!components/hardwareone_libs'`
+*Done when:* `git grep -nIE '/Users/<account>|<home subnet>|<home SSID>' -- . ':!components/hardwareone_libs'`
 is empty (the exclusion skips upstream author paths in vendored Doxyfiles), the passphrase and password are rotated, and the history decision is written in RELEASING.md.
 
 **P0-2. Licence and notices.** G-05 [defect].
@@ -422,7 +422,7 @@ Each stage has a stopping condition. Do not start a stage until the one before i
 ## 7. Go/no-go checklist for the exact RC commit
 
 - [ ] Wi-Fi passphrase and admin password rotated; history decision recorded and carried out before rc.1 was tagged.
-- [ ] Tracked tree has no home paths, LAN addresses or SSIDs (`git grep` check from P0-1).
+- [ ] Tracked tree has no home paths, LAN addresses or SSIDs (host suite `tree_hygiene_gate`; SSIDs and passwords by reading the diff since the last tag).
 - [ ] NOTICE.md tracked; USERGUIDE licence line fixed; LGPL decision written.
 - [ ] `codex/main-sync` merged and pushed; no uncommitted 1.0 work on either Mac.
 - [ ] Clean clone + vendor script builds every stable matrix row; BUILD_INFO says "clean tree" at the RC commit; headroom at or above the floor. The P4X cable-only row builds from the documented P4 SDK preparation (P1-13 is required if that row stays "supported").
@@ -437,6 +437,23 @@ Each stage has a stopping condition. Do not start a stage until the one before i
 - [ ] STT model and `speaker.spk` attached to the release with sha256, if the P4X row ships local STT.
 - [ ] SHA256SUMS published for every attached binary and bundle.
 - [ ] The tag is an annotated tag on the exact commit that passed the bench (RELEASING.md lightweight-tag lesson).
+
+### Dry run of the gate without hardware (2026-11-10)
+
+Run on `3dedea20` plus the gate changes of the same day. This is a rehearsal, not the RC run:
+the RC commit repeats all of it.
+
+| Gate step | Result |
+|---|---|
+| `tools/vendor_arduino.sh --check` | OK |
+| Host suite, parallel and serial | 373 of 373 passed both ways, `tree_hygiene_gate` and `esp_hosted_mempool` included. Not run: 4 browser suites (no Node.js on this Mac); 2 camera suites skipped |
+| Tool tests (`tools/ota`, `tools/webui`, `tools/model`) | OK |
+| Clean clone, vendor script, build | `feather_esp32_v2` only: builds, BUILD_INFO says "clean tree", no tracked file changed by the build |
+| Tracked tree hygiene | passes after one home subnet in the appendix was replaced |
+
+Still open for the RC run: the browser suites, the clean-clone build of every stable row once the
+release matrix is decided, and every line above that needs a board (OTA PASS lines, QUICKSTART on
+a used board, account recovery, the 24 h soak).
 
 ---
 

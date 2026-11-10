@@ -52,9 +52,19 @@ Every step below must pass on the exact commit you intend to tag, from a clean t
    OTA protocol suite is part of the same tree. It includes `command_registry_gate`, which runs
    `python3 tools/command_registry.py audit` and `python3 tools/command_registry.py reference --check`;
    both must exit 0 (if the reference drifted, regenerate it with `... reference` and commit it).
+   On a machine with the ESP32-P4 SDK prepared, add `-DHW1_ESP_HOSTED_TEST_IDF=$IDF_PATH` to the
+   first `cmake` so the ESP-Hosted memory-pool regression (`esp_hosted_mempool`) runs too.
+   Outside ctest: the OTA tools (`python3 -m unittest discover -s tools/ota/tests`), the web UI
+   tools (`... -s tools/webui/tests`) and the model tools (`... -s tools/model/tests`) pass. The Mac
+   test phone (`tools/phone_link_peer`, needs Python 3.10 or newer) and `tools/ble_secure` (needs
+   PyNaCl) are bench tools, not part of the gate.
 3. Every stable row of the supported matrix builds from that commit with `tools/build_board.sh <board>`
    (or `tools/build_deployment.sh` for a deployment row) and its BUILD_INFO.md says "clean tree".
-4. Tracked tree hygiene: `git grep -nIE '/Users/[a-z]|192\.168\.' -- . ':!components/hardwareone_libs'` is empty.
+4. Tracked tree hygiene: the host suite's `tree_hygiene_gate` passes (alone:
+   `python3 components/hardwareone/test/host/test_tree_hygiene_gate.py`). It fails on an account home path
+   (`/Users/<name>`) or a `192.168.x` address outside the ranges the tree uses on purpose (generic examples,
+   the SoftAP defaults, test fixtures; the list and reasons are in the test). It cannot check for a Wi-Fi
+   network name or a password: read the diff since the last tag for those.
 5. CHANGELOG `[Unreleased]` lists every user-visible change since the last tag; COMPATIBILITY.md and the
    matrix in README match what you built.
 

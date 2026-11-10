@@ -80,6 +80,15 @@ everything user-visible since the v0.99.99.1 tag.
   task whose stack is not in internal RAM. Any clock change was exposed (power mode, `cpufreq`, the
   STT and display boosts). Not yet tested on hardware.
 
+### Docs
+- Release gate, tracked-tree hygiene: the `git grep` in `RELEASING.md` could never come back empty,
+  because the firmware and the tools use example and SoftAP addresses on purpose. It is now the host
+  suite `tree_hygiene_gate`, which fails on an account home path or a `192.168.x` address outside a
+  short list of allowed ranges. It found one home subnet quoted in the readiness appendix; replaced
+  with a placeholder.
+- Host suite `esp_hosted_mempool` compiles on macOS again (fortified `memset` is turned off for the
+  host build of the ESP-Hosted pool); `RELEASING.md` names the option that includes it in the gate.
+
 ## [0.99.99.1] - 2026-11-08
 
 Everything user-visible since v0.99.99.

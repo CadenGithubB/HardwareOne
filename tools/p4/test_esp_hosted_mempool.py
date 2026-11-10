@@ -129,7 +129,10 @@ def main() -> None:
             for fixed in (0, 1):
                 exe = work / f"pool-{prefer}-{fixed}"
                 package = patched if fixed else source
-                command = [args.cc, "-std=gnu11", "-g", "-O1", "-Wall", "-Wextra",
+                # _FORTIFY_SOURCE=0: at -O1 the macOS headers make memset() a macro, and
+                # the package calls its own `mempool->memset(...)` function pointer
+                # (mempool.c), which that macro rewrites into a member that does not exist.
+                command = [args.cc, "-std=gnu11", "-g", "-O1", "-D_FORTIFY_SOURCE=0", "-Wall", "-Wextra",
                            "-Wno-unused-variable", "-Wno-unused-parameter", "-Wno-missing-field-initializers",
                            "-Wno-missing-declarations", f"-DCONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM={prefer}",
                            f"-DTEST_FIXED={fixed}", "-I", str(stubs), "-I", str(work),

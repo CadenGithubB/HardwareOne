@@ -117,9 +117,9 @@ One skeptic per group re-opened the cited code at 95dc3f34 (read-only) and tried
 
 **Waveshare.** Adds identifiers: the two new Waveshare docs carry the operator's home path, SSID and LAN IP (WAVESHARE_P4_SUPPORT.md:30, 653, 655, 701; WAVESHARE_P4_INTEGRATION.md:18, 99).
 
-**Bounded fix.** Owner: rotate the Wi-Fi PSK and the admin password, then run a reviewed git-filter-repo purge of the capture file (all refs) and the audit docs from the v0.99.92 tree, re-create the tags and releases, force-push, and ask GitHub to GC. Repo: replace the home paths, LAN IPs and SSID in the 8 files above with placeholders (or move the session notes to the ignored area), set config.example.json bind_host to 0.0.0.0, drop the v0.99.92 pointer in OTA_DEVICE_SETUP.md, and add a grep step for '/Users/[a-z]', the 192.168.21. subnet and the SSID to RELEASING.md.
+**Bounded fix.** Owner: rotate the Wi-Fi PSK and the admin password, then run a reviewed git-filter-repo purge of the capture file (all refs) and the audit docs from the v0.99.92 tree, re-create the tags and releases, force-push, and ask GitHub to GC. Repo: replace the home paths, LAN IPs and SSID in the 8 files above with placeholders (or move the session notes to the ignored area), set config.example.json bind_host to 0.0.0.0, drop the v0.99.92 pointer in OTA_DEVICE_SETUP.md, and add a grep step for '/Users/[a-z]', the home subnet and the SSID to RELEASING.md.
 
-**Done when.** On a fresh clone: `git log --all -- components/hardwareone/nocaseseriallogsespnowtest.txt` prints nothing; `git cat-file -e a8014ca4` fails; `git ls-tree v0.99.92 -- docs/AUTH_SECURITY_REVIEW.md` prints nothing; `git grep -nIE '/Users/[a-z]|192\.168\.21\.|<private>' -- . ':!components/hardwareone_libs'` prints nothing; the owner has recorded the rotation date privately.
+**Done when.** On a fresh clone: `git log --all -- components/hardwareone/nocaseseriallogsespnowtest.txt` prints nothing; `git cat-file -e a8014ca4` fails; `git ls-tree v0.99.92 -- docs/AUTH_SECURITY_REVIEW.md` prints nothing; `git grep -nIE '/Users/[a-z]|<home subnet>|<private>' -- . ':!components/hardwareone_libs'` prints nothing; the owner has recorded the rotation date privately.
 
 
 ## G-05 (P0, confirmed): Licence statements conflict and third-party notices are missing
