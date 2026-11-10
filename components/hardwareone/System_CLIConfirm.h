@@ -97,7 +97,7 @@ typedef void (*CLIConfirmAcceptedCallback)(void* acceptedData);
 // surface an error to the user.
 //
 // `prompt`         - returned to the initiating caller through the addressed
-//                    command result. Keep it under ~150 chars; the confirm
+//                    command result. Keep it under 700 chars; the confirm
 //                    framework copies it into a fixed-size buffer.
 // `originatingCmd` - the command line that triggered this confirm prompt
 //                    (e.g. "filedelete /system/foo"). The confirm

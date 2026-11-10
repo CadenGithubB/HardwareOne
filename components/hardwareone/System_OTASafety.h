@@ -91,6 +91,12 @@ bool otaSafetyAllowsDestructiveStorageRecovery();
 // full-erase guard.
 bool otaSafetyPartitionIsBlank(const esp_partition_t* part);
 
+// Erases the whole NVS data partition for the handover wipe (`factoryreset
+// all`, System_FactoryWipe.cpp): the only full NVS erase the firmware performs,
+// and only at boot after an operator confirmed it. Every other full erase stays
+// blocked. ESP_ERR_INVALID_ARG for anything but an NVS data partition.
+esp_err_t otaSafetyEraseNvsForFactoryWipe(const esp_partition_t* part);
+
 // Milliseconds left before the supervisor's setup deadline fires, so a long
 // setup step (the boot Wi-Fi hunt) can size its own budget to finish inside the
 // window. UINT32_MAX when no setup deadline applies: the image is verified, or

@@ -94,6 +94,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_Command.h"
 #include "System_CrashRecord.h"
 #include "System_OTASafety.h"
+#include "System_FactoryWipe.h"  // factoryWipeRunIfArmed — `factoryreset all`, before the filesystem mounts
 #include "System_OTA.h"
 #include "System_RadioCompanion.h"  // ESP32-C6 companion: boot verdict, feature gating, loop tick
 #if ENABLE_HTTP_SERVER
@@ -1541,6 +1542,11 @@ void hardwareone_setup() {
     Serial.println("[MEM] Allocation tracker unavailable");
   }
 
+  // A confirmed `factoryreset all` erases the filesystem and NVS here, before
+  // anything mounts or reads them; the blank filesystem is then formatted by
+  // initFilesystem()'s first-boot path. Does nothing on every other boot.
+  factoryWipeRunIfArmed();
+
   // Filesystem FIRST to enable early allocation logging
   if (!initFilesystem()) {
     Serial.println("FATAL: Filesystem initialization failed");
@@ -1676,6 +1682,7 @@ void hardwareone_setup() {
                  (unsigned long)rtcLastResetReason,
                  rebootDetail[0] ? " | " : "", rebootDetail,
                  (unsigned long)rtcCrashCount, SelfDevice::firmwareVersion());
+  if (const char* wipeReport = factoryWipeBootReport()) logSystemEvent("SETUP", "%s", wipeReport);
 
   // Typed bus event for the intentional reboot — posted here on the next boot
   // because the in-RAM event ring can't survive the restart. Fires on any

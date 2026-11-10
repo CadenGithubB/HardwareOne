@@ -128,13 +128,42 @@ bool recordAccountIdHighWater(String& errorOut) {
   return idRecordOk;
 }
 
-// The confirm framework: captures the prompt.
+// `factoryreset all` (System_FactoryWipe.h): the request for the boot-time
+// wipe, the OTA probation gate and the transport the command arrived on.
+static bool wipeArmed = false, wipeArmOk = true, otaPending = false;
+static unsigned wipeArms = 0, wipeDisarms = 0;
+static size_t wipeArmAt = 0;
+static bool factoryWipeArm() {
+  ++wipeArms;
+  wipeArmAt = fake_vfs::fs().log.size();
+  if (wipeArmOk) wipeArmed = true;
+  return wipeArmOk;
+}
+static void factoryWipeDisarm() { ++wipeDisarms; wipeArmed = false; }
+static bool otaSafetyIsPendingVerification() { return otaPending; }
+enum CommandOrigin { ORIGIN_SERIAL, ORIGIN_WEB };
+struct CommandContext { CommandOrigin origin = ORIGIN_WEB; };
+static CommandContext commandContext;
+static bool haveCommandContext = true;
+static void* currentCommandContext() { return haveCommandContext ? &commandContext : nullptr; }
+// Both forms of the handover prompt compile across the two builds.
+#ifndef HW1_RADIO_COMPANION
+#define HW1_RADIO_COMPANION ENABLE_BLUETOOTH
+#endif
+
+// The confirm framework: captures the prompt, the audit command line and the
+// mode token handed to the callbacks.
 typedef const char* (*CLIConfirmCallback)(void* userData);
 typedef void (*CLIConfirmAcceptedCallback)(void* acceptedData);
-static std::string capturedPrompt;
-static bool cliRequestConfirm(const String& prompt, const String&, CLIConfirmCallback, CLIConfirmCallback,
-                              void*, CLIConfirmAcceptedCallback = nullptr, void* = nullptr) {
+static std::string capturedPrompt, capturedCommand;
+static void* capturedUserData = nullptr;
+static unsigned confirmRequests = 0;
+static bool cliRequestConfirm(const String& prompt, const String& command, CLIConfirmCallback, CLIConfirmCallback,
+                              void* userData, CLIConfirmAcceptedCallback = nullptr, void* = nullptr) {
+  ++confirmRequests;
   capturedPrompt = prompt.c_str();
+  capturedCommand = command.c_str();
+  capturedUserData = userData;
   return true;
 }
 static const char* cliConfirmPromptResponse() { return "prompt"; }
@@ -239,6 +268,9 @@ static fake_vfs::Fs& populate() {
   timersCreated = timersStarted = 0; timerDelayUs = 0; timerCallback = nullptr;
   rebootIntents = 0; events.clear(); logLines.clear();
   idRecords = 0; idRecordAt = 0; idRecordOk = true;
+  wipeArmed = false; wipeArmOk = true; otaPending = false; wipeArms = wipeDisarms = 0; wipeArmAt = 0;
+  commandContext.origin = ORIGIN_WEB; haveCommandContext = true;
+  capturedPrompt.clear(); capturedCommand.clear(); capturedUserData = nullptr; confirmRequests = 0;
   return fs;
 }
 
@@ -307,6 +339,9 @@ static void wipeRemovesAccountData() {
     if (fs.log[i].guarded) check(fs.log[i].authUser == "system");
   }
   check(fs.liveHandles() == 0);
+  // The plain reset never asks for the boot-time wipe.
+  check(wipeArms == 0 && wipeDisarms == 0 && !wipeArmed);
+  check(std::strstr(reply, "setup wizard") != nullptr && std::strstr(reply, "NVS") == nullptr);
 }
 
 static void sdNotMountedKeepsSdFolders() {
@@ -396,6 +431,93 @@ static void promptNamesWhatIsDeleted() {
   check(capturedPrompt.find("pending") != std::string::npos);
   check(capturedPrompt.find("settings") != std::string::npos);
   check(capturedPrompt.find("/stt/u*") != std::string::npos && capturedPrompt.find("/sd/stt/u*") != std::string::npos);
+  // The plain reset says what it keeps, names the full one, and passes no mode.
+  check(capturedPrompt.find("PRESERVED") != std::string::npos);
+  check(capturedPrompt.find("factoryreset all") != std::string::npos);
+  check(capturedPrompt.find("cannot be undone") != std::string::npos);
+  check(capturedCommand == "factoryreset" && capturedUserData == nullptr);
+  check(capturedPrompt.size() < CONFIRM_PROMPT_SIZE);  // shown whole by the confirm framework
+}
+
+// `factoryreset all`: asked only on the serial console and outside OTA
+// probation; the prompt lists what the boot-time wipe erases and what it
+// leaves, and fits the confirm framework's buffer.
+static void fullWipePromptAndGates() {
+  populate();
+  check(startsWith(cmd_factoryreset(String("everything")), "Usage: factoryreset [all]") && confirmRequests == 0);
+  check(startsWith(cmd_factoryreset(String("all now")), "Usage:") && confirmRequests == 0);
+  check(startsWith(cmd_factoryreset(String("all")), "Error: factoryreset all is available only on the physical serial"));
+  haveCommandContext = false;
+  check(startsWith(cmd_factoryreset(String("all")), "Error: factoryreset all is available only"));
+  haveCommandContext = true; commandContext.origin = ORIGIN_SERIAL; otaPending = true;
+  check(startsWith(cmd_factoryreset(String("all")), "Error: factoryreset all refused while the new firmware"));
+  check(confirmRequests == 0 && wipeArms == 0);
+
+  otaPending = false;
+  check(std::strcmp(cmd_factoryreset(String("  ALL ")), "prompt") == 0 && confirmRequests == 1);
+  check(capturedCommand == "factoryreset all" && capturedUserData != nullptr);
+  for (const char* named : {"users.json", "/stt/u*", "/sd/stt/u*", "filesystem", "NVS", "WiFi", "MQTT", "ESP-NOW",
+                            "Bluetooth bonds", "otapin", "Kept: firmware", "SD card", "resumes if power is lost",
+                            "cannot be undone"}) {
+    check(capturedPrompt.find(named) != std::string::npos);
+  }
+  check((capturedPrompt.find("radio companion") != std::string::npos) == (HW1_RADIO_COMPANION != 0));
+  check(capturedPrompt.find("PRESERVED") == std::string::npos);
+  check(capturedPrompt.size() < CONFIRM_PROMPT_SIZE);
+  check(wipeArms == 0);  // nothing is requested before the answer
+}
+
+// Confirmed: the wipe is requested before anything is removed and stays
+// requested once the accounts are gone.
+static void fullWipeRequestsBootErase() {
+  auto& fs = populate();
+  commandContext.origin = ORIGIN_SERIAL;
+  check(std::strcmp(cmd_factoryreset(String("all")), "prompt") == 0);
+  const size_t start = fs.log.size();
+  const char* reply = factoryreset_confirmed(capturedUserData);
+  check(startsWith(reply, "Factory reset complete"));
+  check(std::strstr(reply, "NVS") != nullptr && std::strstr(reply, "resumes if power is lost") != nullptr);
+  check(std::strlen(reply) < 319);  // not cut by the response buffer
+  check(wipeArms == 1 && wipeDisarms == 0 && wipeArmed && wipeArmAt == start);
+  check(!fs.exists(USERS_JSON_FILE) && committed() && rebootIntents == 1);
+  for (const char* path : kRemoved) check(!fs.exists(path));
+
+  // With the card out the longer reply still fits.
+  auto& again = populate();
+  again.sdAvailable() = false;
+  reply = factoryreset_confirmed(capturedUserData ? capturedUserData : &commandContext);
+  check(std::strstr(reply, "SD card not mounted") != nullptr && std::strlen(reply) < 319 && wipeArmed);
+}
+
+// A full reset that stops before the accounts are gone leaves no request
+// behind, and one that cannot store the request touches nothing.
+static void fullWipeRequestDroppedOnFailure() {
+  auto& fs = populate();
+  size_t start = fs.log.size();
+  wipeArmOk = false;
+  const char* reply = factoryreset_confirmed(&commandContext);
+  check(startsWith(reply, "Error: factory reset stopped; the full wipe could not be requested"));
+  check(fs.log.size() == start && notCommitted() && wipeArms == 1 && wipeDisarms == 0 && !wipeArmed);
+  check(gSettings.phonePipeSecret == "fixture-secret" && idRecords == 0);
+
+  populate(); otaPending = true;
+  reply = factoryreset_confirmed(&commandContext);
+  check(startsWith(reply, "Error: factoryreset all refused") && wipeArms == 0 && notCommitted());
+
+  populate(); micFinalizeOk = false;
+  reply = factoryreset_confirmed(&commandContext);
+  check(startsWith(reply, "Error: factory reset aborted") && wipeArms == 0 && notCommitted());
+
+  auto& third = populate(); pipeFailure = 3;
+  reply = factoryreset_confirmed(&commandContext);
+  check(startsWith(reply, "Error:") && third.exists(USERS_JSON_FILE) && notCommitted());
+  check(wipeArms == 1 && wipeDisarms == 1 && !wipeArmed);
+
+  auto& fourth = populate();
+  fourth.faults.remove.add(USERS_JSON_FILE);
+  reply = factoryreset_confirmed(&commandContext);
+  check(startsWith(reply, "Error: factory reset failed") && fourth.exists(USERS_JSON_FILE) && notCommitted());
+  check(wipeArms == 1 && wipeDisarms == 1 && !wipeArmed);
 }
 
 static void pipeClearFailurePreservesAccounts() {
@@ -432,6 +554,9 @@ static const Case kCases[] = {
   {"leftoverSettingsStillReboots", leftoverSettingsStillReboots},
   {"micDrainFailureTouchesNothing", micDrainFailureTouchesNothing},
   {"promptNamesWhatIsDeleted", promptNamesWhatIsDeleted},
+  {"fullWipePromptAndGates", fullWipePromptAndGates},
+  {"fullWipeRequestsBootErase", fullWipeRequestsBootErase},
+  {"fullWipeRequestDroppedOnFailure", fullWipeRequestDroppedOnFailure},
 };
 
 int main(int argc, char** argv) {

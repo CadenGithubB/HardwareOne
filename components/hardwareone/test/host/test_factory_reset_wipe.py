@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -82,6 +83,17 @@ def generate() -> str:
     return harness
 
 
+def confirm_prompt_size() -> int:
+    """The confirm framework's prompt buffer: a longer prompt is shown cut."""
+    confirm = (COMPONENT / "System_CLIConfirm.cpp").read_text()
+    sizes = re.findall(r"^  char prompt\[(\d+)\];$", confirm, re.M)
+    require(len(sizes) == 1, "one prompt buffer in System_CLIConfirm.cpp")
+    response = re.findall(r"^  char responseText\[(\d+)\];$", confirm, re.M)
+    require(len(response) == 1 and int(response[0]) >= int(sizes[0]) + 56,
+            "the confirm response holds the whole prompt and its yes/no line")
+    return int(sizes[0])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
@@ -101,6 +113,7 @@ def main() -> None:
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                             "-fno-omit-frame-pointer", "-g"]
+        command.append(f"-DCONFIRM_PROMPT_SIZE={confirm_prompt_size()}")
         for bluetooth in (0, 1):
             subprocess.run(command + [f"-DENABLE_BLUETOOTH={bluetooth}"], check=True, timeout=180)
             subprocess.run([str(binary)] + ([args.case] if args.case else []), check=True, timeout=60)

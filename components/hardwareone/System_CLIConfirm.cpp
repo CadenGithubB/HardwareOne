@@ -40,15 +40,16 @@ EXT_RAM_BSS_ATTR static struct {
   void* userData;
   char* responseOut;
   size_t responseOutSize;
-  // Stored prompt for re-display from onEnter. Sized large enough for
-  // "Confirm delete of /some/long/path? (cannot be undone)" with
-  // headroom. Truncated with snprintf if a caller passes more.
-  char prompt[192];
+  // Stored prompt for re-display from onEnter. Sized for the longest prompt
+  // in the firmware, the `factoryreset all` list of what is erased (the
+  // factory reset host test checks both factoryreset prompts against this
+  // size). Truncated with snprintf if a caller passes more.
+  char prompt[704];
   // Originating command line (e.g. "filedelete /system/foo") -- preserved
   // for the resolution audit so forensic logs show what was confirmed,
   // not just the bare "yes" / "no". Empty when the caller opted out.
   char originatingCmd[160];
-  char responseText[384];
+  char responseText[768];
   int requiredRoleRank;
 } sConfirm = { decltype(sConfirm)::None, nullptr, nullptr, nullptr, nullptr, 0,
                "", "", "", kRoleRankGuest };

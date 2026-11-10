@@ -13,6 +13,19 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this section collects
 everything user-visible since the v0.99.99.1 tag.
 
+### Added
+- `factoryreset all` prepares a device for a new owner. On the serial console, as a super admin, it
+  does the ordinary factory reset and then, at the next start and before anything is mounted, erases
+  the whole internal filesystem and NVS: saved WiFi networks, MQTT and LLM credentials, ESP-NOW
+  identity and keys, Bluetooth bonds, the `otapin` recovery credential, logs and every other stored
+  file. First-time setup runs afterwards. The erase takes up to a few minutes, resumes after a power
+  loss and gives up after three failed attempts with a SETUP event. Kept: firmware, the speech
+  model, the SD card apart from `/sd/stt/u*`, and on boards with a radio companion chip (P4) the
+  WiFi network that chip last joined. Refused over the web, Bluetooth and MQTT and while a new
+  firmware is in OTA health probation. Plain `factoryreset` is unchanged. Host-tested and compiled
+  for every board; not yet run on hardware (readiness G-80). The FeatherS3 image does not fit its
+  application partition with this change (see `KNOWN_ISSUES.md`, FeatherS3 build).
+
 ### Fixed
 - R1 ring: an NTP reply that moves an already set device clock by more than a day is no longer
   passed to the ring, whose stored health days are keyed off that clock. The ring keeps the earlier

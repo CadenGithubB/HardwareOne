@@ -870,6 +870,19 @@ System_User id record are doubles (the record itself is covered by
 not covered. Run with
 `ctest --test-dir build -R '^factory_reset_wipe$' --output-on-failure`.
 
+The same runner covers `factoryreset all`: it is offered only on the serial
+console and outside OTA health probation, its prompt names what is erased and
+fits the confirm buffer (the size is read from `System_CLIConfirm.cpp`), the
+boot-erase request is stored before anything is removed and is dropped again
+when the reset stops early. `factory_wipe_policy_tests` runs the pure boot-time
+sequence (`FactoryWipePolicy.h`) against a fake device: nothing happens without
+a request; the order is attempt record, filesystem, NVS entries, NVS partition;
+a power loss at any step resumes at the next start; a failed step keeps the
+request; a failed partition erase still completes when the entries were
+cleared; after three attempts the request is dropped and reported. The flash
+and NVS calls in `System_FactoryWipe.cpp` and the first-time setup that follows
+are not covered and have not been run on hardware.
+
 ## Ring clock confirmation
 
 `clock_confirm_policy_tests` runs `ClockConfirmPolicy.h`, the rule that decides

@@ -460,7 +460,18 @@ lost:
 **Handing a device over:** what `factoryreset` keeps includes the saved WiFi
 networks, the MQTT and LLM endpoint credentials, Bluetooth bonds other than the
 phone pipe, and the ESP-NOW identity and keys, so it does not prepare a device
-for a new owner. Before giving one away, erase the whole flash over the cable
+for a new owner. `factoryreset all` does: run it on the serial console as a
+super admin. It does the ordinary reset, restarts, erases the whole internal
+filesystem and NVS before anything is mounted (up to a few minutes; it resumes
+if power is lost) and then runs first-time setup. Firmware and the speech model
+stay. It does not wipe the SD card apart from `/sd/stt/u*`, so remove or wipe
+the card yourself, and on boards with a radio companion chip (P4) that chip
+keeps the WiFi network it last joined. The `otapin` recovery credential is
+erased with the rest; set it again on a recovery-OTA device you keep. The
+command is refused over the web, Bluetooth and MQTT and while a new firmware
+is in OTA health probation. It has not been run on hardware yet.
+
+The other way is to erase the whole flash over the cable
 (`tools/build_board.sh <board> -p PORT erase-flash`) and flash it again. On a
 recovery-OTA layout this also removes the recovery updater, so the command is
 refused there until `HW1_ALLOW_FULL_ERASE=1` is put in front of it; provision
@@ -1057,7 +1068,8 @@ time                            - Show current time (uptime + NTP if synced)
 timeset <YYYY-MM-DD HH:MM:SS>   - Set time manually (or unix timestamp)
 reboot                          - Restart the device
 ramflush                        - Reboot to reclaim RAM, restoring the features running right now
-factoryreset                    - Wipe user accounts and reboot into the setup wizard (super admin)
+factoryreset [all]              - Wipe user accounts and reboot into the setup wizard (super admin);
+                                  all: also erase every stored setting, credential and file (serial only)
 deepsleep                       - Power off via deep sleep (no wake source - reset button to wake)
 bootcount [reset|json]          - Boot count (NVS), crash count, last reset reason
 clear                           - Clear CLI history

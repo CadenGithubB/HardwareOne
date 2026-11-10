@@ -434,3 +434,18 @@ extern "C" esp_err_t __wrap_esp_partition_erase_range(
   }
   return __real_esp_partition_erase_range(partition, offset, size);
 }
+
+// The one deliberate full NVS erase: the handover wipe an operator confirmed
+// with `factoryreset all` on the serial console (System_FactoryWipe.cpp). It
+// goes past the wrapper above by name instead of slipping under its
+// whole-partition test with smaller ranges. The NVS key partition is refused:
+// the keys are not owner data and NVS could not come back up without them.
+esp_err_t otaSafetyEraseNvsForFactoryWipe(const esp_partition_t* part) {
+  if (!part || part->type != ESP_PARTITION_TYPE_DATA ||
+      part->subtype != ESP_PARTITION_SUBTYPE_DATA_NVS) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  ESP_EARLY_LOGW(kTag, "Erasing NVS partition '%s' for the confirmed factory wipe",
+                 part->label[0] ? part->label : "?");
+  return __real_esp_partition_erase_range(part, 0, part->size);
+}

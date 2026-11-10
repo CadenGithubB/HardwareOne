@@ -52,6 +52,7 @@ bool isEspNowInitialized() { return false; }
 #include "System_AuthIdentity.h"  // ExecIdentityGuard (executeCommand + submitAndExecuteSync)
 #include "System_TaskWdt.h"       // taskWdtAwareSemaphoreTake (soak builds feed the main loop)
 #include "System_BootState.h"     // bootStateGetBootCount / bootStateResetBootCount (NVS boot counter)
+#include "System_FactoryWipe.h"   // factoryWipeArm / factoryWipeDisarm (`factoryreset all`)
 #include "System_CrashRecord.h"   // crashRecord* — RTC post-mortem record for `crashlog`
 #include "System_OTASafety.h"     // pending trial images must finish probation before power-off
 #include "System_SelfDevice.h"   // SelfDevice:: — local identity/heap/uptime/firmware (Stage 1 consolidation)
@@ -2169,13 +2170,35 @@ static bool factoryResetClearDirectory(const String& dir, bool (*select)(const V
   }
 }
 
-static const char* factoryreset_confirmed(void* /*userData*/) {
+// Confirm userData for `factoryreset all`; plain `factoryreset` passes nullptr.
+static char sFactoryResetAllMode = 1;
+
+static const char* factoryreset_confirmed(void* userData) {
   EXT_RAM_BSS_ATTR static char respBuf[320];
+  const bool wipeAll = userData != nullptr;
 
   // Factory reset uses a deferred timer rather than rebootDevice(), so drain
   // the recorder before committing the destructive delete/scheduled restart.
   if (!finalizeMicRecordingForRestart("factory reset")) {
     return "Error: factory reset aborted — microphone recording did not finalize";
+  }
+
+  // `factoryreset all`: the filesystem and NVS are erased at the next boot,
+  // before the filesystem is mounted (System_FactoryWipe.cpp). The request is
+  // stored first, so a reset that cannot ask for the wipe changes nothing, and
+  // it is dropped again on every path that stops while the accounts exist.
+  struct WipeRequest {
+    bool pending = false;
+    ~WipeRequest() { if (pending) factoryWipeDisarm(); }
+  } wipe;
+  if (wipeAll) {
+    if (otaSafetyIsPendingVerification()) {
+      return "Error: factoryreset all refused while the new firmware is in OTA health probation";
+    }
+    if (!factoryWipeArm()) {
+      return "Error: factory reset stopped; the full wipe could not be requested. Nothing was changed.";
+    }
+    wipe.pending = true;
   }
 
   {
@@ -2262,6 +2285,7 @@ static const char* factoryreset_confirmed(void* /*userData*/) {
                USERS_JSON_FILE);
       return respBuf;
     }
+    wipe.pending = false;  // committed: the request stays for the next boot
 
     // users.json is gone, so no account references these credentials any
     // more; one left behind is overwritten whole when its id is next written.
@@ -2294,15 +2318,25 @@ static const char* factoryreset_confirmed(void* /*userData*/) {
   // Record the imminent restart: stash the reason for the next boot's SYSEVT_REBOOT
   // and write the durable REBOOT audit line. Deferred via the esp_timer above, so we
   // record-only here rather than using rebootDevice()'s inline restart.
-  recordRebootIntent("factory", "factory reset — rebooting to setup wizard");
+  recordRebootIntent("factory", wipeAll ? "factory reset — rebooting to erase all stored data"
+                                        : "factory reset — rebooting to setup wizard");
 
   // users.json is gone and the reboot is scheduled — the reset is committed.
   systemEventPost(SYSEVT_FACTORY_RESET, currentExecUser().c_str());
 
   logSystemEvent("SETUP", "factory reset — accounts, pending requests, user settings and account "
-                 "transcripts deleted%s; rebooting to setup wizard",
-                 sdSkipped ? " (SD card not mounted: /sd/stt kept)" : "");
+                 "transcripts deleted%s; rebooting to %s",
+                 sdSkipped ? " (SD card not mounted: /sd/stt kept)" : "",
+                 wipeAll ? "erase the filesystem and NVS" : "setup wizard");
 
+  if (wipeAll) {
+    snprintf(respBuf, sizeof(respBuf),
+             "Factory reset complete. Accounts and their data deleted.%s Rebooting in 1 second: the "
+             "filesystem and NVS are erased during the restart (up to a few minutes; it resumes if "
+             "power is lost), then the setup wizard starts.",
+             sdSkipped ? " SD card not mounted: its /sd/stt folders were kept." : "");
+    return respBuf;
+  }
   snprintf(respBuf, sizeof(respBuf),
            "Factory reset complete. Accounts, pending requests, user settings and account "
            "transcripts/notes deleted.%s%s Rebooting in 1 second to start setup wizard...",
@@ -2318,26 +2352,58 @@ static const char* factoryreset_cancelled(void* /*userData*/) {
 
 const char* cmd_factoryreset(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)argsInput;  // factoryreset takes no arguments
+  String mode = argsInput;
+  mode.trim();
+  const bool wipeAll = mode.equalsIgnoreCase("all");
+  if (mode.length() != 0 && !wipeAll) return "Usage: factoryreset [all]";
 
-  String prompt =
+  if (wipeAll) {
+    // The full wipe also removes the recovery credential, which only the
+    // serial console may change (otapin), and the alternative it replaces is
+    // an erase over the cable: it needs someone at the device.
+    const auto* context = static_cast<CommandContext*>(currentCommandContext());
+    if (!context || context->origin != ORIGIN_SERIAL) {
+      return "Error: factoryreset all is available only on the physical serial console";
+    }
+    if (otaSafetyIsPendingVerification()) {
+      return "Error: factoryreset all refused while the new firmware is in OTA health probation";
+    }
+  }
+
+  String prompt = wipeAll ?
+    "Confirm FULL FACTORY RESET (handover)? This will:\n"
+    "  - Delete all user accounts (/system/users/users.json), pending requests and user settings\n"
+    "  - Delete every account's transcripts and notes (/stt/u*, /sd/stt/u*)\n"
+    "  - Reboot and erase the whole internal filesystem and NVS: saved WiFi networks,\n"
+    "    MQTT/LLM credentials, ESP-NOW keys, Bluetooth bonds, the otapin recovery\n"
+    "    credential, logs and all other stored files\n"
+    "  - Run first-time setup afterwards\n"
+    "Kept: firmware, speech model, SD card apart from /sd/stt/u*"
+#if HW1_RADIO_COMPANION
+    ", the WiFi network\nthe radio companion chip last joined"
+#endif
+    ".\n"
+    "The erase takes up to a few minutes and resumes if power is lost.\n"
+    "This cannot be undone."
+    :
     "Confirm FACTORY RESET? This will:\n"
     "  - Delete all user accounts (/system/users/users.json)\n"
     "  - Delete pending account requests and every user's settings\n"
     "  - Delete every account's transcripts and notes (/stt/u*, /sd/stt/u*)\n"
     "  - Reboot the device\n"
     "  - First-time setup wizard runs on next boot\n"
-    "Settings (WiFi credentials, debug flags) are PRESERVED.\n"
+    "Settings (WiFi credentials, debug flags) are PRESERVED;\n"
+    "`factoryreset all` on the serial console erases those too.\n"
     "This cannot be undone.";
 
   // Originating cmd line for the resolution audit -- mirrors how
   // filedelete and userdelete pass theirs. The audit log will read:
   //   [CMD] asd@serial: factoryreset (confirm: yes) -> OK   Factory reset complete...
   //   [CMD] asd@serial: factoryreset (confirm: no)  -> OK   Cancelled. No changes made.
-  if (!cliRequestConfirm(prompt, "factoryreset",
+  if (!cliRequestConfirm(prompt, wipeAll ? "factoryreset all" : "factoryreset",
                          factoryreset_confirmed,
                          factoryreset_cancelled,
-                         nullptr)) {
+                         wipeAll ? &sFactoryResetAllMode : nullptr)) {
     return "Error: cannot request confirm (another interactive mode is active)";
   }
   return cliConfirmPromptResponse();
@@ -2532,13 +2598,16 @@ extern const CommandEntry commands[] = {
     "\n"
     "Restores for that one boot only — a normal reboot returns to configured\n"
     "autostart. Never changes your autostart settings." },
-  { "factoryreset", "Wipe user accounts and their data and reboot to re-run setup wizard.", true,
+  { "factoryreset", "Wipe user accounts and their data (all: every stored setting and file) and reboot to setup wizard.", true,
     cmd_factoryreset,
-    "Usage: factoryreset (no args, confirmation required)\n"
+    "Usage: factoryreset [all] (confirmation required)\n"
     "Deletes /system/users/users.json, pending account requests, every user's\n"
     "settings file and every account's transcripts and notes (/stt/u*, /sd/stt/u*),\n"
     "so the first-time setup wizard runs on next boot. WiFi credentials and\n"
-    "other settings are preserved.",
+    "other settings are preserved.\n"
+    "factoryreset all (serial console only): also erases the whole internal\n"
+    "filesystem and NVS during the restart: saved networks, credentials, keys,\n"
+    "Bluetooth bonds, the recovery credential and logs. For handing a device over.",
     /*requiresSuperAdmin=*/true },
   { "broadcast", "Send a message to all connected output interfaces.", true, cmd_broadcast,
     "Usage: broadcast <message>" },

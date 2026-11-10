@@ -24,6 +24,14 @@ set_target_properties(dictation_policy_tests PROPERTIES
 target_compile_options(dictation_policy_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# The order of the handover wipe (`factoryreset all`, FactoryWipePolicy.h):
+# filesystem before NVS, resume after power loss, bounded attempts.
+add_executable(factory_wipe_policy_tests test_factory_wipe_policy.cpp)
+set_target_properties(factory_wipe_policy_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(factory_wipe_policy_tests PRIVATE ../..)
+target_compile_options(factory_wipe_policy_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # The clock the R1 ring is given (ClockConfirmPolicy.h): an SNTP step that
 # moves an already-set clock by more than a day is held back from the ring.
 add_executable(clock_confirm_policy_tests test_clock_confirm_policy.cpp)
@@ -1217,6 +1225,7 @@ add_test(NAME sdmmc_lifecycle
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
+add_test(NAME factory_wipe_policy_tests COMMAND factory_wipe_policy_tests)
 add_test(NAME clock_confirm_policy_tests COMMAND clock_confirm_policy_tests)
 add_test(NAME config_load_tests COMMAND config_load_tests)
 add_test(NAME g2_hold_gesture_tests COMMAND g2_hold_gesture_tests)
