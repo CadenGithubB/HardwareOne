@@ -3024,7 +3024,7 @@ const char* cmd_sr_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!gSettings.srEnabled) {
-    return "ERROR: Speech recognition is disabled - run 'srenabled 1' first";
+    return "Error: Speech recognition is disabled - run 'srenabled 1' first";
   }
   bool ok = startESPSR();
   if (!ok) {

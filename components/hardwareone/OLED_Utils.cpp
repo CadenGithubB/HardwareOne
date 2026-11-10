@@ -513,7 +513,7 @@ static void ncToggleMute(const SystemEventCatalogKindInfo& kind) {
   String cmd = String("notifyusermute set ") + kind.name +
                (selectedWasMuted ? " off" : " on");
   char out[96];
-  if (!executeOLEDCommandWithResult(cmd, out, sizeof(out)) || strncmp(out, "Error", 5) == 0) {
+  if (!executeOLEDCommandWithResult(cmd, out, sizeof(out))) {
     oledToastShow("Save failed", 2000);
     return;
   }
@@ -527,7 +527,7 @@ static void ncCycleDeviceLevel(const SystemEventCatalogKindInfo& kind) {
   uint8_t next = (uint8_t)((notifDeviceKindLevel(kindId) + 1) % 3);  // all→admin→off→all
   String cmd = String("notifydevicekind ") + kind.name + " " + notifLevelToken(next);
   char out[96];
-  if (!executeOLEDCommandWithResult(cmd, out, sizeof(out)) || strncmp(out, "Error", 5) == 0) {
+  if (!executeOLEDCommandWithResult(cmd, out, sizeof(out))) {
     oledToastShow("Save failed", 2000);
   }
   // cmd_notifydevicekind updates the RAM masks before persisting, so the
@@ -4546,8 +4546,7 @@ const char* cmd_oled_enabled(const String& argsInput) {
       if (initOLEDDisplay()) {
         broadcastOutput("OLED display started");
       } else {
-        broadcastOutput("Failed to initialize OLED display. Check wiring.");
-        return "ERROR";
+        return "Error: Failed to initialize OLED display. Check wiring.";
       }
     } else {
       gOledRunning = true;
@@ -4737,8 +4736,7 @@ const char* cmd_oledstart(const String& argsInput) {
   if (initOLEDDisplay()) {
     return "OK";
   } else {
-    broadcastOutput("Failed to initialize OLED display. Check wiring.");
-    return "ERROR";
+    return "Error: Failed to initialize OLED display. Check wiring.";
   }
 }
 
@@ -4921,16 +4919,14 @@ const char* cmd_oledmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
-    broadcastOutput("OLED display not running. Use 'oledstart' first.");
-    return "ERROR";
+    return "Error: OLED display not running. Use 'oledstart' first.";
   }
 
   String mode = argsInput;
   mode.trim();
   
   if (mode.length() == 0) {
-    broadcastOutput("Usage: oledmode <menu|status|sensordata|sensorlist|thermal|camera|network|mesh|gps|text|logo|anim|imuactions|fmradio|files|logging|automations|espnow|memory|off>");
-    return "ERROR";
+    return "Usage: oledmode <menu|status|sensordata|sensorlist|thermal|camera|network|mesh|gps|text|logo|anim|imuactions|fmradio|files|logging|automations|espnow|memory|off>";
   }
 
   mode.toLowerCase();
@@ -4944,10 +4940,9 @@ const char* cmd_oledmode(const String& argsInput) {
   // Slug -> enum lookup (validates the slug in one place).
   OLEDMode target = modeFromSlug(mode);
   if ((int)target == -1) {
-    broadcastOutput("Invalid mode. Options: menu, status, sensordata, sensorlist, gamepad, "
-                    "thermal, network, gps, text, logo, anim, imuactions, fmradio, files, "
-                    "logging, automations, espnow, memory, off");
-    return "ERROR";
+    return "Error: Invalid mode. Options: menu, status, sensordata, sensorlist, gamepad, "
+           "thermal, network, gps, text, logo, anim, imuactions, fmradio, files, "
+           "logging, automations, espnow, memory, off";
   }
 
   // The owner task applies the transition (auth gating + debug log inside
@@ -4973,16 +4968,14 @@ const char* cmd_oledtext(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
-    broadcastOutput("OLED display not running. Use 'oledstart' first.");
-    return "ERROR";
+    return "Error: OLED display not running. Use 'oledstart' first.";
   }
 
   String text = argsInput;
   text.trim();
   
   if (text.length() == 0) {
-    broadcastOutput("Usage: oledtext \"Your text here\"");
-    return "ERROR";
+    return "Usage: oledtext \"Your text here\"";
   }
 
   if (text.startsWith("\"") && text.endsWith("\"")) {
@@ -4994,8 +4987,7 @@ const char* cmd_oledtext(const String& argsInput) {
   const size_t textLength = text.length();
   char* textCopy = (char*)ps_alloc(textLength + 1, AllocPolicy::PreferPSRAM, "oled.text");
   if (!textCopy) {
-    broadcastOutput("Error: out of memory for the OLED text");
-    return "ERROR";
+    return "Error: out of memory for the OLED text";
   }
   memcpy(textCopy, text.c_str(), textLength + 1);
   OledOwnerRequest request = {};
@@ -5017,8 +5009,7 @@ const char* cmd_oledclear(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
-    broadcastOutput("OLED display not running. Use 'oledstart' first.");
-    return "ERROR";
+    return "Error: OLED display not running. Use 'oledstart' first.";
   }
 
   // The owner blanks and pushes the framebuffer; nothing marks the page dirty,
@@ -5136,8 +5127,7 @@ const char* cmd_oledanim(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
-    broadcastOutput("OLED display not running. Use 'oledstart' first.");
-    return "ERROR";
+    return "Error: OLED display not running. Use 'oledstart' first.";
   }
 
   String arg = argsInput;
@@ -5162,8 +5152,7 @@ const char* cmd_oledanim(const String& argsInput) {
   if (arg.startsWith("fps ")) {
     int fps = arg.substring(4).toInt();
     if (fps < 1 || fps > 60) {
-      broadcastOutput("FPS must be between 1 and 60");
-      return "ERROR";
+      return "Error: FPS must be between 1 and 60";
     }
     animationFPS = fps;
     if (ensureDebugBuffer()) {
@@ -5194,8 +5183,7 @@ const char* cmd_oledanim(const String& argsInput) {
   }
 
   if (!found) {
-    broadcastOutput("Unknown animation. Use 'oledanim' to list available animations.");
-    return "ERROR";
+    return "Error: Unknown animation. Use 'oledanim' to list available animations.";
   }
 
   return "OK";

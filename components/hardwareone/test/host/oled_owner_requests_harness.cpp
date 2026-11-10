@@ -431,7 +431,8 @@ static void caseModeOff() {
 
   resetCase(OLED_SYSTEM_STATUS);
   onExec();
-  check(std::strcmp(cmd_oledmode("bogus"), "ERROR") == 0, "an unknown oledmode slug is refused");
+  check(std::strncmp(cmd_oledmode("bogus"), "Error: Invalid mode.", 20) == 0,
+        "an unknown oledmode slug is refused with the reason");
   ownerFrame();
   check(currentOLEDMode == OLED_SYSTEM_STATUS && gOnEnterCalls == 0,
         "a refused oledmode posts nothing");

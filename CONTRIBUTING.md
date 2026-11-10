@@ -138,6 +138,12 @@ attachment should report unavailable without breaking unrelated services.
   reason>. <next action>.` Report the observed refusal rather than a speculative
   list of causes or a bare `ERROR`/`Failed`. For example, an empty saved Wi-Fi
   list should say to add a network. Keep detailed driver diagnostics in the log.
+  The reason goes in the returned reply, not only in a live output line: most
+  displays show the reply alone. `commandReplyIsFailure()` in
+  `System_CommandReply.h` is the one place that decides from reply text whether
+  a command failed; the executor applies it, so a caller that has the
+  executor's result uses that result and compares no prefixes itself. The host
+  test `command_reply_contract` checks both sides.
   Display command actions use `oledRunCommand`/`oledRunCommandAsync` and the shared reply
   mapping so failures share an error icon, wrapping and an eight-second minimum
   toast. Toasts dismiss automatically and do not capture input. Do not replace a

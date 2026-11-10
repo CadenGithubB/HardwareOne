@@ -124,7 +124,7 @@ static void ownerCases(const std::string& scenario) {
       messages.clear();
       assert(!upsertWiFiNetwork(value.first, value.second, 1, false));
       assert(wifiNetworkCount() == 0 && persistCalls == 0);
-      assert(!messages.empty() && messages.back().startsWith("ERROR: WiFi name and password cannot contain"));
+      assert(!messages.empty() && messages.back().startsWith("Error: WiFi name and password cannot contain"));
     }
     // Spaces, punctuation and non-ASCII bytes are ordinary name bytes.
     assert(upsertWiFiNetwork(" Caf\xc3\xa9 & Co ", "p a\\ss", 1, false) && wifiNetworkCount() == 1);

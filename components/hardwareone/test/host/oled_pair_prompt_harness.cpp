@@ -88,7 +88,7 @@ static bool ownerRun(const std::string& line, std::string& reply) {
     const bool match = parseMac(arg, m) ? std::memcmp(m, pending.mac, 6) == 0 : arg == pending.name;
     if (!match) {
       reply = "Error: that name/MAC doesn't match the pending request.";
-      return true;
+      return false;   // the executor reports an "Error..." reply as a failed command
     }
   }
   pending.active = false;

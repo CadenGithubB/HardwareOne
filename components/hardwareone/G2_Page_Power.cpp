@@ -260,9 +260,7 @@ static void powerQueueResult(const G2CmdCookie& cookie, PowerLevel level,
 }
 
 static bool powerCommandFailed(bool ok, const char* result) {
-  return !ok || (result && (strncmp(result, "Error", 5) == 0 ||
-                            strncmp(result, "ERROR", 5) == 0 ||
-                            strstr(result, "refused")));
+  return !ok || (result && strstr(result, "refused"));
 }
 
 static void onPowerCmdDone(bool ok, const char* result,

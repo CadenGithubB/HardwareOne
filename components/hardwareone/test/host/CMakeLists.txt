@@ -2073,6 +2073,14 @@ foreach(test_name IN ITEMS module_overview_text tool_pins command_registry_gate 
             ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py)
 endforeach()
 
+# Reply contract: failures say why ("Error: <reason>") and one function decides
+# from reply text whether a command failed.
+add_test(
+  NAME command_reply_contract
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_command_reply_contract.py
+          --cxx ${CMAKE_CXX_COMPILER})
+
 # OLED display-session writer windows (README "OLED display-session writer windows"):
 # the frame commit and the command-result path validate under the display lifecycle
 # writer, release it, push or copy, then re-check without opening a session.

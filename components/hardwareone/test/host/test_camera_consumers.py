@@ -50,7 +50,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hw1-camera-consumers-') as tmp:
         unit, binary = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
         unit.write_text(unit_text)
-        command = [args.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic',
+        command = [args.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic', '-Wno-unused-parameter',
                    '-DHW_CAMERA_HAL_HOST_TEST=1', '-I', str(component),
                    str(unit), str(component / 'HAL_Camera.cpp'), '-o', str(binary)]
         if args.sanitize:

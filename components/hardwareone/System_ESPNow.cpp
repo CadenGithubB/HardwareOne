@@ -12021,7 +12021,7 @@ static void deferredEspNowInitFn(void* /*arg*/) {
 const char* cmd_espnow_init(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gSettings.espnowEnabled) {
-    return "ERROR: ESP-NOW is disabled - run 'espnowenabled 1' first";
+    return "Error: ESP-NOW is disabled - run 'espnowenabled 1' first";
   }
   if (gEspNow && gEspNow->initialized) {
     return "ESP-NOW already initialized";
@@ -13347,7 +13347,7 @@ const char* cmd_espnow_meshttl(const String& argsInput) {
   CommandArgs a(argsInput);
 
   if (a.count() == 0) {
-    if (!ensureDebugBuffer()) return "Error";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024,
              "Mesh TTL: %d hop%s\n"
              "Relay for others: %s\n"
@@ -13367,7 +13367,7 @@ const char* cmd_espnow_meshttl(const String& argsInput) {
 
   setSetting(gSettings.meshTTL, (uint8_t)ttl);
 
-  if (!ensureDebugBuffer()) return "Error";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   snprintf(getDebugBuffer(), 1024, "Mesh TTL set to %d%s", gSettings.meshTTL,
            ttl == 1 ? " — multi-hop disabled for this node's own sends" : "");
   return getDebugBuffer();
@@ -13465,7 +13465,7 @@ const char* cmd_espnow_channel(const String& argsInput) {
   bool joined = (WiFi.status() == WL_CONNECTED);
 
   if (a.count() == 0) {
-    if (!ensureDebugBuffer()) return "Error";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     char prefStr[16];
     if (gSettings.espnowChannel == 0) snprintf(prefStr, sizeof(prefStr), "auto");
     else snprintf(prefStr, sizeof(prefStr), "%u", (unsigned)gSettings.espnowChannel);
@@ -13514,7 +13514,7 @@ const char* cmd_espnow_channel(const String& argsInput) {
     }
     uint8_t hwCh = 0; wifi_second_chan_t sec2;
     if (esp_wifi_get_channel(&hwCh, &sec2) != ESP_OK) hwCh = 0;
-    if (!ensureDebugBuffer()) return "Error";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024,
              "Channel re-sync: radio now %u (expected %u, %s). %s",
              (unsigned)hwCh, (unsigned)want,
@@ -13544,7 +13544,7 @@ const char* cmd_espnow_channel(const String& argsInput) {
     radioCh = (int)gEspNow->channel;
   }
 
-  if (!ensureDebugBuffer()) return "Error";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   if (ch == 0) {
     snprintf(getDebugBuffer(), 1024,
              "ESP-NOW channel set to auto (radio now %d). "
@@ -14494,16 +14494,16 @@ const char* cmd_espnow_meshtopo(const String& argsInput) {
     esp_now_get_peer_num(&peerNum);
     int pairedCount = peerNum.total_num;
     
-    if (pairedCount > 0) {
-      broadcastOutput("No mesh peers discovered yet.");
-      BROADCAST_PRINTF("You have %d paired device(s), but they haven't sent heartbeats.", pairedCount);
-      broadcastOutput("Mesh peers are auto-discovered when devices send heartbeats.");
-      broadcastOutput("Ensure paired devices are powered on and in mesh mode.");
-    } else {
-      broadcastOutput("No mesh peers available.");
-      broadcastOutput("Pair devices using 'espnowpair' or 'espnowpairsecure' first.");
+    if (pairedCount == 0) {
+      return "Error: No mesh peers available. Pair devices using 'espnowpair' or "
+             "'espnowpairsecure' first.";
     }
-    return "ERROR";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+    snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+             "Error: No mesh peers discovered yet. %d paired device(s) have sent no heartbeat. "
+             "Check that they are powered on and in mesh mode.",
+             pairedCount);
+    return getDebugBuffer();
   }
   
   BROADCAST_PRINTF("[TOPO] Initiating topology discovery for %d peer(s)...", peerCount);
@@ -14542,7 +14542,7 @@ const char* cmd_espnow_timesync(const String& argsInput) {
 const char* cmd_espnow_timestatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!ensureDebugBuffer()) return "ERROR";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   
   if (gTimeIsSynced) {
     uint32_t epoch = (uint32_t)time(nullptr);
@@ -18157,7 +18157,7 @@ const char* cmd_espnow_pairrequest(const String& argsInput) {
   portEXIT_CRITICAL(&gPairLock);
   sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REQUEST);
 
-  if (!ensureDebugBuffer()) return "Error";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
            "Pair request sent to '%s'. Waiting for them to Accept (they need discovery open)...", name);
   return getDebugBuffer();
@@ -18205,7 +18205,7 @@ const char* cmd_espnow_accept(const String& argsInput) {
   char macStr[18]; formatMacAddressBuf(req.mac, macStr, sizeof(macStr));
   String pairArgs = String(macStr) + " " + req.name;
   String resCopy = cmd_espnow_pairsecure(pairArgs);  // copy: pairsecure may reuse the debug buffer
-  if (!ensureDebugBuffer()) return "Error";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "Accepted '%s'. %s", req.name, resCopy.c_str());
   return getDebugBuffer();
 }
@@ -18219,7 +18219,7 @@ const char* cmd_espnow_reject(const String& argsInput) {
   if (err) return err;
   sendPairCtrl(req.mac, ESPNOW_V4_TYPE_PAIR_REJECT);
 
-  if (!ensureDebugBuffer()) return "Error";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "Rejected pair request from '%s'.", req.name);
   return getDebugBuffer();
 }

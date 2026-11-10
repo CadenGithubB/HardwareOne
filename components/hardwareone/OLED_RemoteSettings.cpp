@@ -11,6 +11,7 @@
 #include "System_BondedPeer.h"
 #include "System_ESPNow.h"
 #include "System_Mutex.h"
+#include "System_CommandReply.h"
 #include "System_Utils.h"
 #include "System_MemUtil.h"
 #include "OLED_Utils.h"
@@ -429,7 +430,7 @@ bool applyRemoteSettingChange(const SettingEntry* entry, const String& value, St
   char out[128];
   out[0] = '\0';
   const String cmd = String("remote:") + entry->cmdKey + " " + trimmed;
-  if (!executeOLEDCommandWithResult(cmd, out, sizeof(out)) || strncmp(out, "Error", 5) == 0) {
+  if (!executeOLEDCommandWithResult(cmd, out, sizeof(out))) {
     errOut = out[0] ? String(out) : String("Send failed");
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] %s not sent: %s", entry->cmdKey, errOut.c_str());
     return false;
@@ -474,9 +475,9 @@ RemoteSettingsOutcome remoteSettingsPollOutcome(String& textOut) {
     if (r.reqId == gPending.reqId && BondedPeer::peerMacBytes(peer) && macEqual6(r.srcMac, peer)) {
       gPending.active = false;
       textOut = r.text;
-      // Same rule as the local string save: a reply that starts with "Error"
-      // is a failure even when the peer's executor reported success.
-      if (r.success && strncmp(r.text, "Error", 5) != 0) {
+      // The peer may run older firmware whose executor reported success for
+      // a refused command, so its reply text is judged here by the same rule.
+      if (r.success && !commandReplyIsFailure(r.text)) {
         remoteSlotStore(gPending.entry, gPending.value);
         return REMOTE_OUTCOME_APPLIED;
       }

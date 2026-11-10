@@ -265,8 +265,7 @@ static String wizQuote(const char* s) {
 }
 
 // Build and dispatch the automationadd command. enabled=1 (the parser defaults
-// to DISABLED). Result "OK" = success; "ERROR" = failure (detail broadcast to
-// the log/CLI viewer, not returned here).
+// to DISABLED). The executor's verdict decides; the reply holds the reason.
 static void wizCreate() {
   const char* wt = kWizTypes[sWizTypeIdx].wireType;
   String cmd = "automationadd name=";
@@ -291,7 +290,7 @@ static void wizCreate() {
 
   char out[64];
   bool ok = executeOLEDCommandWithResult(cmd, out, sizeof(out));
-  const bool failed = !ok || strncmp(out, "ERROR", 5) == 0 || strncmp(out, "Error", 5) == 0;
+  const bool failed = !ok;
   if (failed) {
     // Detail is in the log; keep the user on CONFIRM so A retries, B cancels.
     snprintf(sWizResultMsg, sizeof(sWizResultMsg), "Add failed");
@@ -797,7 +796,7 @@ static void autoRunSelected() {
   // without a dirty-window, froze on screen forever.
   char out[64];
   bool ok = executeOLEDCommandWithResult(String(cmd), out, sizeof(out));
-  bool failed = !ok || strncmp(out, "ERROR", 5) == 0 || strncmp(out, "Error", 5) == 0;
+  const bool failed = !ok;
 
   if (isAfterDelay) {
     autoShowToast(failed ? "Arm failed" : "Armed");

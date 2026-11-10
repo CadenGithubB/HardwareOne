@@ -134,7 +134,7 @@ int main() {
   assert(resolution.matchedLength == 0 && resolution.lineOffset == 0);
   assert(resolution.registryOrdinal == static_cast<size_t>(-1));
 }
-''', {"System_Command.h", "System_CommandRegistry.h",
+''', {"System_Command.h", "System_CommandRegistry.h", "System_CommandReply.h",
       "../arduino/cores/esp32/WString.h", "../arduino/cores/esp32/pgmspace.h"},
              string_header=True)
 

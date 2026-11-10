@@ -1146,8 +1146,7 @@ extern void discoverI2CDevices();
 #if ENABLE_AUTOMATION
 const char* cmd_downloadautomation(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  broadcastOutput("Download automation from GitHub not yet implemented");
-  return "ERROR";
+  return "Error: Downloading automations from GitHub is not implemented.";
 }
 const char* cmd_conditional(const String& argsInput) {
   return executeConditionalCommand(argsInput.c_str(), currentExecUser().c_str());

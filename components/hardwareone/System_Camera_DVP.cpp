@@ -781,7 +781,7 @@ const char* cmd_camera(const String& argsInput) {
 }
 
 static const char* const kCameraDisabledError =
-    "ERROR: Camera is disabled - run 'cameraenabled 1' first";
+    "Error: Camera is disabled - run 'cameraenabled 1' first";
 
 // `opencamera async` / `closecamera async`: the gated asynchronous power
 // change for UI adapters (the G2 Sensors page). It runs on cmd_exec under the

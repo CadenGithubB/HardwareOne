@@ -1927,8 +1927,7 @@ const char* cmd_sensorinfo(const String& argsInput) {
   args.trim();
 
   if (args.length() == 0) {
-    broadcastOutput("Usage: sensorinfo <sensor_name>\nExample: sensorinfo BNO055");
-    return "ERROR";
+    return "Usage: sensorinfo <sensor_name>\nExample: sensorinfo BNO055";
   }
 
   // Find sensor by name (case insensitive)
@@ -1948,21 +1947,11 @@ const char* cmd_sensorinfo(const String& argsInput) {
   }
 
   if (!foundSensor) {
-    BROADCAST_PRINTF("Sensor '%s' not found in database.", args.c_str());
-    broadcastOutput("");
-    broadcastOutput("Available sensors:");
-
-    for (size_t i = 0; i < i2cSensorsCount; i++) {
-      BROADCAST_PRINTF("  %s", i2cSensors[i].name);
-      if (i > 10) {
-        BROADCAST_PRINTF("  ... and %zu more", i2cSensorsCount - i - 1);
-        break;
-      }
-    }
-
-    broadcastOutput("");
-    broadcastOutput("Use 'sensors' to see the full list");
-    return "ERROR";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+    snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+             "Error: Sensor '%s' not found in database. Use 'sensors' to see the full list.",
+             args.c_str());
+    return getDebugBuffer();
   }
 
   broadcastOutput("Sensor Information:\n==================");

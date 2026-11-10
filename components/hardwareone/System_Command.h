@@ -2,6 +2,7 @@
 #define SYSTEM_COMMAND_H
 
 #include "System_CommandRegistry.h"
+#include "System_CommandReply.h"  // the reply contract every handler returns by
 #include <WString.h>
 
 // ============================================================================

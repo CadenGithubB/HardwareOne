@@ -52,10 +52,7 @@ static const char* healthNextDesiredToken(G2RingDesiredState current) {
 // ready) flashes [DENIED] in the header.
 static void healthRunCommand(const char* line) {
   char out[96];
-  if (executeOLEDCommandWithResult(line, out, sizeof(out)) &&
-      strncmp(out, "Error", 5) != 0) {
-    return;
-  }
+  if (executeOLEDCommandWithResult(line, out, sizeof(out))) return;
   sHealthDeniedUntilMs = millis() + 1500;
   oledMarkDirty();
 }

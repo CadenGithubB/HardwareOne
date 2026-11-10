@@ -116,7 +116,8 @@ def main() -> None:
     results = []
     with tempfile.TemporaryDirectory(prefix="hw1-sensorlog-settings-") as directory:
         source = Path(directory) / "test.cpp"
-        source.write_text(generated(args.baseline))
+        (Path(directory) / "System_CommandReply.h").write_text((COMPONENT / "System_CommandReply.h").read_text())
+        source.write_text('#include "System_CommandReply.h"\n' + generated(args.baseline))
         # Extend the shared String boundary only for numeric parsing.
         # Production source is never rewritten.
         arduino = (HERE / "web_batch_stubs" / "Arduino.h").read_text()

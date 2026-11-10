@@ -155,7 +155,7 @@ assert registered_names == ["help", "back", "exit", "clear"]
 # errors aligned with direct `help <module> p<N>` HTTP status behavior.
 assert re.search(
     r"cliModeDispatchInput\([^)]*\)\)\s*\{[\s\S]{0,300}"
-    r"strncmp\(out,\s*\"Error\"",
+    r"commandReplyIsFailure\(out\)",
     utils,
 )
 

@@ -8355,13 +8355,7 @@ static void onMicDetailRuntimeDone(bool ok, const char* result,
                                    const G2CmdCookie& cookie,
                                    void* userData) {
   const bool wantOn = ((uintptr_t)userData) != 0;
-  bool runtimeOk = ok;
-  if (result && (strncmp(result, "Error", 5) == 0 ||
-                 strncmp(result, "ERROR", 5) == 0)) {
-    runtimeOk = false;
-  }
-
-  if (runtimeOk) {
+  if (ok) {
     char line[32];
     snprintf(line, sizeof(line), "micautostart %s", wantOn ? "on" : "off");
     if (!g2SubmitHijackCommand(line, cookie, nullptr, nullptr)) {
@@ -8382,7 +8376,7 @@ static void onMicDetailRuntimeDone(bool ok, const char* result,
 // header) runs on cmd_exec, not here.
 static void onMicDetailRecordDone(bool ok, const char* result,
                                   const G2CmdCookie& cookie, void* /*userData*/) {
-  if (!ok || (result && strncmp(result, "Error", 5) == 0)) {
+  if (!ok) {
     DEBUG_G2F("[G2] MIC detail: record cmd result '%s'", result ? result : "");
   }
   (void)g2EnqueueRedraw(cookie, requestMicDetailRecreate, "MIC record");
@@ -8803,7 +8797,7 @@ static void g2RefreshLoggingMenu() {
 
 static void onLoggingCmdDone(bool ok, const char* result,
                              const G2CmdCookie& cookie, void* /*userData*/) {
-  if (!ok || (result && strncmp(result, "Error", 5) == 0)) {
+  if (!ok) {
     DEBUG_G2F("[G2] Logging: cmd result '%s'", result ? result : "");
   }
   (void)g2EnqueueRedraw(cookie, g2RefreshLoggingMenu, "Logging result");
@@ -9741,7 +9735,7 @@ static void llmMenuHomeTap(uint32_t idx) {
     case LlmHomeAction::Open:   g2ShowLlmPage(g2ShowLlmMenu); return;
     case LlmHomeAction::Terminal: {
       const char* result = g2NativeTerminalRequestOpen();
-      if (strncmp(result, "Error:", 6) == 0) llmMenuShowMsg(result);
+      if (commandReplyIsFailure(result)) llmMenuShowMsg(result);
       return;
     }
     case LlmHomeAction::Ask:

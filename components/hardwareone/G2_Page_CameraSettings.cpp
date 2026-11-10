@@ -154,7 +154,7 @@ static void redrawCurrentCameraSettings();
 // no-op rather than leaving an unpersisted optimistic value in RAM.
 static void onCameraSettingDone(bool ok, const char* result,
                                 const G2CmdCookie& cookie, void* /*userData*/) {
-  if (!ok || (result && strncmp(result, "Error", 5) == 0)) {
+  if (!ok) {
     DEBUG_G2F("[G2] Camera settings: command failed: %.80s",
               (result && result[0]) ? result : "no result");
   }

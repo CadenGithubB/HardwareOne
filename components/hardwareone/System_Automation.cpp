@@ -1254,16 +1254,17 @@ bool updateAutomationNextAt(long automationId, time_t newNextAt) {
   return updateAutomationTriggerNextAt(automationId, -1, newNextAt);
 }
 
-// A command's read error: names the newer format when the file was refused.
-static void broadcastAutomationsReadError() {
+// A command's reply to a read error: names the newer format when the file was
+// refused.
+static const char* automationsReadErrorReply() {
   const uint32_t newer = sAutomationsRefusedVersion.load();
-  if (!newer) {
-    broadcastOutput("Error: failed to read automations.json");
-    return;
-  }
-  BROADCAST_PRINTF("Error: automations.json is format %lu, newer than this firmware reads (%lu). "
-                   "Not loaded and left unchanged; update the firmware to use it.",
-                   (unsigned long)newer, (unsigned long)kAutomationsFileVersion);
+  if (!newer) return "Error: failed to read automations.json";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+           "Error: automations.json is format %lu, newer than this firmware reads (%lu). "
+           "Not loaded and left unchanged; update the firmware to use it.",
+           (unsigned long)newer, (unsigned long)kAutomationsFileVersion);
+  return getDebugBuffer();
 }
 
 // Run automations on boot
@@ -1560,13 +1561,11 @@ const char* cmd_automation_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String json;
   if (!readAutomationsJson(json)) {
-    broadcastAutomationsReadError();
-    return "ERROR";
+    return automationsReadErrorReply();
   }
   const String safeJson = redactAutomationsJsonForResponse(json);
   if (!safeJson.length()) {
-    broadcastOutput("Error: malformed automations.json");
-    return "ERROR";
+    return "Error: malformed automations.json";
   }
   broadcastOutput(safeJson);
   cliHint("to run one of these now, use 'automation run id=<id>'; to enable or disable one, use 'automation enable id=<id>' / 'automation disable id=<id>'");
@@ -1609,16 +1608,13 @@ const char* cmd_automation_add(const String& argsInput) {
          name.c_str(), typeNorm.c_str(), timeS.c_str(), days.c_str(), delayMs.c_str(), intervalMs.c_str(), enabled ? 1 : 0);
   
   if (name.length() == 0) {
-    broadcastOutput("Error: missing name");
-    return "ERROR";
+    return "Error: missing name";
   }
   if (typeNorm.length() == 0) {
-    broadcastOutput("Error: missing type (atTime|afterDelay|interval|event)");
-    return "ERROR";
+    return "Error: missing type (atTime|afterDelay|interval|event)";
   }
   if ((cmdStr.length() == 0 && cmdsList.length() == 0)) {
-    broadcastOutput("Error: missing commands (provide commands=<cmd1;cmd2;...> or command=<cmd>)");
-    return "ERROR";
+    return "Error: missing commands (provide commands=<cmd1;cmd2;...> or command=<cmd>)";
   }
   
   // Validate global condition expression if provided (bare expression, e.g. "ROOM=bedroom")
@@ -1654,8 +1650,7 @@ const char* cmd_automation_add(const String& argsInput) {
           // Validate as a conditional chain
           const char* validationError = validateConditionalChain(part.c_str());
           if (validationError && validationError[0] != '\0') {
-            broadcastOutput(validationError);
-            return "ERROR";
+            return validationError;  // an "Error: ..." literal
           }
         } else {
           // Validate this individual command exists in the registry.
@@ -1666,8 +1661,10 @@ const char* cmd_automation_add(const String& argsInput) {
           // findCommand() is a plain registry walk with no stack-heavy setup.
           if (!findCommand(part)) {
             const String safePart = redactAutomationCommandForAudit(part);
-            BROADCAST_PRINTF("Error: Unknown command '%s'", safePart.c_str());
-            return "ERROR";
+            if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+            snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "Error: Unknown command '%s'",
+                     safePart.c_str());
+            return getDebugBuffer();
           }
         }
       }
@@ -1687,22 +1684,18 @@ const char* cmd_automation_add(const String& argsInput) {
   if (typeNorm == "attime") {
     timeS.trim();
     if (timeS.length() == 0) {
-      broadcastOutput("Error: atTime requires time=HH:MM");
-      return "ERROR";
+      return "Error: atTime requires time=HH:MM";
     }
     if (!(timeS.length() == 5 && timeS[2] == ':' && isdigit(timeS[0]) && isdigit(timeS[1]) && isdigit(timeS[3]) && isdigit(timeS[4]))) {
-      broadcastOutput("Error: time must be HH:MM");
-      return "ERROR";
+      return "Error: time must be HH:MM";
     }
   } else if (typeNorm == "afterdelay") {
     if (!isNumeric(delayMs)) {
-      broadcastOutput("Error: afterDelay requires numeric delayms (milliseconds)");
-      return "ERROR";
+      return "Error: afterDelay requires numeric delayms (milliseconds)";
     }
   } else if (typeNorm == "interval") {
     if (!isNumeric(intervalMs)) {
-      broadcastOutput("Error: interval requires numeric intervalms (milliseconds)");
-      return "ERROR";
+      return "Error: interval requires numeric intervalms (milliseconds)";
     }
     // Reject sub-second (and 0) rather than clamping: the scheduler stores
     // nextAt in whole seconds, so anything under 1000 ms would reschedule to
@@ -1710,8 +1703,7 @@ const char* cmd_automation_add(const String& argsInput) {
     // real flash wear. 0 is a permanently-inert trigger. The web UI's delay
     // unit defaults to milliseconds, so this is easy to hit by accident.
     if (intervalMs.toInt() < 1000) {
-      broadcastOutput("Error: intervalms must be at least 1000 (1 second)");
-      return "ERROR";
+      return "Error: intervalms must be at least 1000 (1 second)";
     }
   } else if (typeNorm == "event") {
     eventOn.trim();
@@ -1721,26 +1713,24 @@ const char* cmd_automation_add(const String& argsInput) {
         err += " ";
         err += systemEventKindName((uint8_t)k);
       }
-      broadcastOutput(err.c_str());
-      return "ERROR";
+      if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+      snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "%s", err.c_str());
+      return getDebugBuffer();
     }
   } else {
-    broadcastOutput("Error: invalid type (expected atTime|afterDelay|interval|event)");
-    return "ERROR";
+    return "Error: invalid type (expected atTime|afterDelay|interval|event)";
   }
   
   // Validate boot delay if provided
   if (bootDelayMsStr.length() > 0 && !isNumeric(bootDelayMsStr)) {
-    broadcastOutput("Error: bootdelayms must be numeric (milliseconds)");
-    return "ERROR";
+    return "Error: bootdelayms must be numeric (milliseconds)";
   }
   
   bool runAtBoot = (runAtBootStr.equalsIgnoreCase("1") || runAtBootStr.equalsIgnoreCase("true") || runAtBootStr.equalsIgnoreCase("yes"));
   
   String json;
   if (!loadAutomationsStoreForEdit(json, !validateOnly)) {
-    broadcastAutomationsReadError();
-    return "ERROR";
+    return automationsReadErrorReply();
   }
   
   // If a specific id= was provided and that entry already exists, remove it first
@@ -1770,8 +1760,7 @@ const char* cmd_automation_add(const String& argsInput) {
           if (!currentExecIsAdmin() && existingCreatedBy != currentExecUser()) {
             DEBUGF(DEBUG_AUTOMATIONS, "[autos add/edit] AUTHORIZATION DENIED: non-admin '%s' cannot edit automation created by '%s'",
                    currentExecUser().c_str(), existingCreatedBy.c_str());
-            broadcastOutput("Error: You do not have permission to edit this automation. Only the creator or an admin can edit it.");
-            return "ERROR";
+            return "Error: You do not have permission to edit this automation. Only the creator or an admin can edit it.";
           }
           DEBUGF(DEBUG_AUTOMATIONS, "[autos add/edit] AUTHORIZATION OK for edit");
           String arrTmp = json.substring(aS + 1, aE); arrTmp.trim();
@@ -1814,8 +1803,7 @@ const char* cmd_automation_add(const String& argsInput) {
   }
   
   if (lastBracket < 0) {
-    broadcastOutput("Error: malformed automations.json");
-    return "ERROR";
+    return "Error: malformed automations.json";
   }
   
   String between = json.substring(bracket + 1, lastBracket);
@@ -2006,8 +1994,7 @@ const char* cmd_automation_add(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!writeAutomationsJsonAtomic(json)) {
-    broadcastOutput("Error: failed to write automations.json");
-    return "ERROR";
+    return "Error: failed to write automations.json";
   }
   
   DEBUGF(DEBUG_AUTOMATIONS, "[autos add] wrote automations.json (len=%d) id=%lu", json.length(), id);
@@ -2030,35 +2017,30 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
   CommandArgs a(argsInput);
   String idStr = a.value("id");
   if (idStr.length() == 0) {
-    BROADCAST_PRINTF("Usage: automation %s id=<id>", enable ? "enable" : "disable");
-    return "ERROR";
+    return enable ? "Usage: automation enable id=<id>" : "Usage: automation disable id=<id>";
   }
   
   String json;
   if (!readAutomationsJson(json)) {
-    broadcastAutomationsReadError();
-    return "ERROR";
+    return automationsReadErrorReply();
   }
   
   char needleBuf[32];
   snprintf(needleBuf, sizeof(needleBuf), "\"id\": %s", idStr.c_str());
   int idPos = json.indexOf(needleBuf);
   if (idPos < 0) {
-    broadcastOutput("Error: automation id not found");
-    return "ERROR";
+    return "Error: automation id not found";
   }
   
   // Authorization check: extract createdBy and verify user can modify this automation
   char createdByBuf[64];
   int objStart = json.lastIndexOf('{', idPos);
   if (objStart < 0) {
-    broadcastOutput("Error: malformed JSON");
-    return "ERROR";
+    return "Error: malformed JSON";
   }
   int objEnd = findJsonObjectEnd(json, objStart);
   if (objEnd < 0) {
-    broadcastOutput("Error: malformed JSON");
-    return "ERROR";
+    return "Error: malformed JSON";
   }
   String automationObj = json.substring(objStart, objEnd + 1);
   extractJsonString(automationObj.c_str(), "\"createdBy\"", createdByBuf, sizeof(createdByBuf));
@@ -2070,15 +2052,13 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
   if (!currentExecIsAdmin() && createdBy != currentExecUser()) {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos %s] AUTHORIZATION DENIED: non-admin '%s' cannot modify automation created by '%s'",
            enable ? "enable" : "disable", currentExecUser().c_str(), createdBy.c_str());
-    broadcastOutput("Error: You do not have permission to modify this automation. Only the creator or an admin can modify it.");
-    return "ERROR";
+    return "Error: You do not have permission to modify this automation. Only the creator or an admin can modify it.";
   }
   DEBUGF(DEBUG_AUTOMATIONS, "[autos %s] AUTHORIZATION OK", enable ? "enable" : "disable");
   
   int enabledPos = json.indexOf("\"enabled\":", idPos);
   if (enabledPos < 0) {
-    broadcastOutput("Error: malformed automation");
-    return "ERROR";
+    return "Error: malformed automation";
   }
   
   int valueStart = json.indexOf(':', enabledPos) + 1;
@@ -2086,15 +2066,13 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
   int valueEnd = json.indexOf(',', valueStart);
   if (valueEnd < 0) valueEnd = json.indexOf('}', valueStart);
   if (valueEnd < 0) {
-    broadcastOutput("Error: malformed JSON");
-    return "ERROR";
+    return "Error: malformed JSON";
   }
   
   json = json.substring(0, valueStart) + (enable ? "true" : "false") + json.substring(valueEnd);
   
   if (!writeAutomationsJsonAtomic(json)) {
-    broadcastOutput("Error: failed to write automations.json");
-    return "ERROR";
+    return "Error: failed to write automations.json";
   }
   
   BROADCAST_PRINTF("%s automation id=%s", enable ? "Enabled" : "Disabled", idStr.c_str());
@@ -2107,35 +2085,30 @@ const char* cmd_automation_delete(const String& argsInput) {
   CommandArgs a(argsInput);
   String idStr = a.value("id");
   if (idStr.length() == 0) {
-    broadcastOutput("Usage: automation delete id=<id>");
-    return "ERROR";
+    return "Usage: automation delete id=<id>";
   }
   
   String json;
   if (!readAutomationsJson(json)) {
-    broadcastAutomationsReadError();
-    return "ERROR";
+    return automationsReadErrorReply();
   }
 
   char needleBuf[32];
   snprintf(needleBuf, sizeof(needleBuf), "\"id\": %s", idStr.c_str());
   int idPos = json.indexOf(needleBuf);
   if (idPos < 0) {
-    BROADCAST_PRINTF("Error: automation id not found");
-    return "ERROR";
+    return "Error: automation id not found";
   }
 
   // Authorization check: extract createdBy and verify user can delete this automation
   char createdByBuf[64];
   int objStart = json.lastIndexOf('{', idPos);
   if (objStart < 0) {
-    BROADCAST_PRINTF("Error: malformed JSON");
-    return "ERROR";
+    return "Error: malformed JSON";
   }
   int objEnd = findJsonObjectEnd(json, objStart);
   if (objEnd < 0) {
-    BROADCAST_PRINTF("Error: malformed JSON");
-    return "ERROR";
+    return "Error: malformed JSON";
   }
   String automationObj = json.substring(objStart, objEnd + 1);
   extractJsonString(automationObj.c_str(), "\"createdBy\"", createdByBuf, sizeof(createdByBuf));
@@ -2151,21 +2124,18 @@ const char* cmd_automation_delete(const String& argsInput) {
   if (!currentExecIsAdmin() && createdBy != currentExecUser()) {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos delete] AUTHORIZATION DENIED: non-admin '%s' cannot delete automation created by '%s'",
            currentExecUser().c_str(), createdBy.c_str());
-    broadcastOutput("Error: You do not have permission to delete this automation. Only the creator or an admin can delete it.");
-    return "ERROR";
+    return "Error: You do not have permission to delete this automation. Only the creator or an admin can delete it.";
   }
   DEBUGF(DEBUG_AUTOMATIONS, "[autos delete] AUTHORIZATION OK");
   
   // Find array bounds
   int arrayStart = json.indexOf('[');
   if (arrayStart < 0) {
-    broadcastOutput("Error: malformed JSON - no array");
-    return "ERROR";
+    return "Error: malformed JSON - no array";
   }
   int arrayEnd = json.lastIndexOf(']');
   if (arrayEnd < 0) {
-    broadcastOutput("Error: malformed JSON - no array end");
-    return "ERROR";
+    return "Error: malformed JSON - no array end";
   }
   
   // Check if this is the only object in the array
@@ -2201,8 +2171,7 @@ const char* cmd_automation_delete(const String& argsInput) {
   }
   
   if (!writeAutomationsJsonAtomic(json)) {
-    broadcastOutput("Error: failed to write automations.json");
-    return "ERROR";
+    return "Error: failed to write automations.json";
   }
   
   // SYSTEM-EVENT: automation removed and the change persisted.
@@ -2218,28 +2187,24 @@ const char* cmd_automation_run(const String& argsInput) {
   CommandArgs a(argsInput);
   String idStr = a.value("id");
   if (idStr.length() == 0) {
-    broadcastOutput("Usage: automation run id=<id>");
-    return "ERROR";
+    return "Usage: automation run id=<id>";
   }
   
   String json;
   if (!readAutomationsJson(json)) {
-    broadcastAutomationsReadError();
-    return "ERROR";
+    return automationsReadErrorReply();
   }
   
   char needleBuf[32];
   snprintf(needleBuf, sizeof(needleBuf), "\"id\": %s", idStr.c_str());
   int idPos = json.indexOf(needleBuf);
   if (idPos < 0) {
-    broadcastOutput("Error: automation id not found");
-    return "ERROR";
+    return "Error: automation id not found";
   }
   
   int objStart = json.lastIndexOf('{', idPos);
   if (objStart < 0) {
-    broadcastOutput("Error: malformed automations.json (objStart)");
-    return "ERROR";
+    return "Error: malformed automations.json (objStart)";
   }
   
   int depth = 0, objEnd = -1;
@@ -2256,8 +2221,7 @@ const char* cmd_automation_run(const String& argsInput) {
   }
   
   if (objEnd < 0) {
-    broadcastOutput("Error: malformed automations.json (objEnd)");
-    return "ERROR";
+    return "Error: malformed automations.json (objEnd)";
   }
   
   String obj = json.substring(objStart, objEnd + 1);
@@ -2337,15 +2301,13 @@ const char* cmd_automation_run(const String& argsInput) {
   } else {
     int cpos = obj.indexOf("\"command\"");
     if (cpos < 0) {
-      broadcastOutput("Error: no command(s) found");
-      return "ERROR";
+      return "Error: no command(s) found";
     }
     int ccolon = obj.indexOf(':', cpos);
     int cq1 = obj.indexOf('"', ccolon + 1);
     int cq2 = obj.indexOf('"', cq1 + 1);
     if (cq1 < 0 || cq2 < 0) {
-      broadcastOutput("Error: bad command field");
-      return "ERROR";
+      return "Error: bad command field";
     }
     String cmd = obj.substring(cq1 + 1, cq2);
     cmd.trim();
@@ -2353,8 +2315,7 @@ const char* cmd_automation_run(const String& argsInput) {
   }
   
   if (cmdsCount == 0) {
-    broadcastOutput("Error: no commands to run");
-    return "ERROR";
+    return "Error: no commands to run";
   }
   
   // Check global condition expression (new schema: just the expression, e.g. "ROOM=bedroom")
@@ -2469,27 +2430,23 @@ const char* cmd_automation_trigger(const String& argsInput) {
   CommandArgs a(argsInput);
   String idStr = a.value("id");
   if (idStr.length() == 0) {
-    broadcastOutput("Usage: automation trigger id=<id>");
-    return "ERROR";
+    return "Usage: automation trigger id=<id>";
   }
 
   String json;
   if (!readAutomationsJson(json)) {
-    broadcastAutomationsReadError();
-    return "ERROR";
+    return automationsReadErrorReply();
   }
 
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, json);
   if (err) {
-    broadcastOutput("Error: automations.json parse error");
-    return "ERROR";
+    return "Error: automations.json parse error";
   }
 
   JsonArray automations = doc["automations"].as<JsonArray>();
   if (automations.isNull()) {
-    broadcastOutput("Error: automations.json missing automations array");
-    return "ERROR";
+    return "Error: automations.json missing automations array";
   }
 
   long id = idStr.toInt();
@@ -2498,15 +2455,13 @@ const char* cmd_automation_trigger(const String& argsInput) {
     if (obj["id"].as<long>() == id) { target = obj; break; }
   }
   if (target.isNull()) {
-    broadcastOutput("Error: automation id not found");
-    return "ERROR";
+    return "Error: automation id not found";
   }
 
   // Find the first manual trigger in the automation's triggers array.
   JsonArrayConst triggers = target["triggers"].as<JsonArrayConst>();
   if (triggers.isNull()) {
-    broadcastOutput("Error: automation has no triggers array");
-    return "ERROR";
+    return "Error: automation has no triggers array";
   }
   int manualIdx = -1;
   int manualDelayMs = 0;
@@ -2521,26 +2476,22 @@ const char* cmd_automation_trigger(const String& argsInput) {
     idx++;
   }
   if (manualIdx < 0) {
-    broadcastOutput("Error: automation has no manual trigger to arm");
-    return "ERROR";
+    return "Error: automation has no manual trigger to arm";
   }
   if (manualDelayMs <= 0) {
-    broadcastOutput("Error: manual trigger has no valid delayMs");
-    return "ERROR";
+    return "Error: manual trigger has no valid delayMs";
   }
 
   time_t now = time(nullptr);
   if (now <= 0) {
-    broadcastOutput("Error: system time not set");
-    return "ERROR";
+    return "Error: system time not set";
   }
   time_t nextAt = now + (manualDelayMs / 1000);
 
   int delayMs = manualDelayMs;  // alias for the log message below
 
   if (!updateAutomationTriggerNextAt(id, manualIdx, nextAt)) {
-    broadcastOutput("Error: failed to update nextAt");
-    return "ERROR";
+    return "Error: failed to update nextAt";
   }
 
   // Wake the scheduler so it re-reads the file and picks up the armed nextAt.
@@ -2611,9 +2562,7 @@ const char* cmd_automation(const String& argsInput) {
   } else if (subCmd == "sanitize") {
     String json;
     if (!readAutomationsJson(json)) {
-      if (!sAutomationsRefusedVersion.load()) return "Error: failed to read automations.json";
-      broadcastAutomationsReadError();
-      return "ERROR";
+      return automationsReadErrorReply();
     }
     if (sanitizeAutomationsJson(json)) {
       if (!writeAutomationsJsonAtomic(json)) return "Error: failed to write automations.json";
@@ -2644,8 +2593,7 @@ const char* cmd_automation(const String& argsInput) {
     return cmd_automation_trigger(subArgs);
   }
 
-  broadcastOutput("Unknown automation command. Use: list, add, enable, disable, delete, run, trigger, sanitize, recompute");
-  return "ERROR";
+  return "Error: Unknown automation command. Use: list, add, enable, disable, delete, run, trigger, sanitize, recompute";
 }
 
 // ============================================================================

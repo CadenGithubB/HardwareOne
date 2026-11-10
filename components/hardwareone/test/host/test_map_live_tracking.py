@@ -81,7 +81,8 @@ def main():
         parity = {}
         for label, source in ([('baseline', args.baseline)] if args.baseline else []) + [('current', None)]:
             unit = root / f"{label}.cpp"
-            unit.write_text(generated(source))
+            (root / "System_CommandReply.h").write_text((COMPONENT / "System_CommandReply.h").read_text())
+            unit.write_text('#include "System_CommandReply.h"\n' + generated(source))
             for gps in (0, 1):
                 exe = root / f"{label}-{gps}"
                 subprocess.run([args.cxx, *flags, f"-DENABLE_GPS_SENSOR={gps}",

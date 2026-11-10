@@ -499,10 +499,9 @@ static void oledEnabledCommand() {
     }
   }
   prepareOled("1", false, false, false); oledInitSucceeds = false;
-  check(cmd_oled_enabled("1") == std::string("ERROR"), "init failure reply changed");
-  check(effectOrder == Effects{"persist", "display init",
-                               "output: Failed to initialize OLED display. Check wiring."},
-        "init failure lost persist/report order");
+  check(cmd_oled_enabled("1") == std::string("Error: Failed to initialize OLED display. Check wiring."),
+        "init failure reply changed");
+  check(effectOrder == Effects{"persist", "display init"}, "init failure lost persist/report order");
   prepareOled("1", false, true, false);
   check(cmd_oled_enabled("1") == enabledReply && gOledRunning && currentOLEDMode == OLED_SYSTEM_STATUS,
         "connected panel did not resume in the default mode");

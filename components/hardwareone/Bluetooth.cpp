@@ -3466,7 +3466,7 @@ const char* getBLEStateString() {
 // server host up. `closeconsole` returns the saved role to client.
 static const char* cmd_openconsole(const String& argsInput) {
   if (!gSettings.bleEnabled) {
-    return "ERROR: Bluetooth is disabled - run 'bleenabled 1' first";
+    return "Error: Bluetooth is disabled - run 'bleenabled 1' first";
   }
   // Record server as the desired boot role before initBluetooth(); setSetting
   // persists it. A start that fails puts the saved role back below: the switch
@@ -3538,7 +3538,7 @@ static const char* cmd_closeconsole(const String& argsInput) {
 // `bleenabled 0` is `closeble` plus the persisted master switch.
 static const char* cmd_openble(const String& /*argsInput*/) {
   if (!gSettings.bleEnabled) {
-    return "ERROR: Bluetooth is disabled - run 'bleenabled 1' first";
+    return "Error: Bluetooth is disabled - run 'bleenabled 1' first";
   }
   if (isBleServerInitialized()) {
     return "Error: the app console server owns the Bluetooth host; run 'closeconsole' first";

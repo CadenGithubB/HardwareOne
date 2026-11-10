@@ -654,8 +654,7 @@ static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       case R1_ACT_CONNECT:  // async, self-scans; admin-gated on cmd_exec
         if (!g2RingIsConnected()) {
           char out[96];
-          if (!executeOLEDCommandWithResult("openring", out, sizeof(out)) ||
-              strncmp(out, "Error", 5) == 0) {
+          if (!executeOLEDCommandWithResult("openring", out, sizeof(out))) {
             oledToastShow(bleCentralRingShouldYield() ? "Ring paused: pipe on" : "Ring connect refused", 2000);
           }
         }

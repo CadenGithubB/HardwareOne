@@ -1658,8 +1658,7 @@ void g2HealthNoteLoggingCommandQueued(void) {
 
 void g2HealthNoteLoggingCommandResult(bool ok, const char* result) {
   sLoggingCmdPending = false;
-  const bool errorText = result && (strncmp(result, "Error", 5) == 0 || strncmp(result, "ERROR", 5) == 0);
-  if (ok && !errorText) { sLoggingUiMsg[0] = '\0'; return; }
+  if (ok) { sLoggingUiMsg[0] = '\0'; return; }
   snprintf(sLoggingUiMsg, sizeof(sLoggingUiMsg), "%s", (result && result[0]) ? result : "Logging failed");
   sLoggingUiMs = millis();
 }

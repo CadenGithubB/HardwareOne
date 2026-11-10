@@ -266,11 +266,14 @@ static void testPresetCompletion() {
   drainUi();
   CHECK(rowHas(0, "Back") && rowHas(2, "[X]"));
 
-  // Errors in the textual result stay errors even if command lookup returned
-  // true. Empty false replies still provide a useful refusal row.
-  for (const char* result : {"Error: denied", "ERROR: denied", "operation refused", ""}) {
+  // The executor's verdict decides. A reply that says "refused" is a refusal
+  // even with ok=true, and an empty false reply still gets a useful row.
+  struct { bool ok; const char* result; } failures[] = {
+      {false, "Error: denied"}, {false, "ERROR: denied"}, {true, "operation refused"}, {false, ""}};
+  for (const auto& failure : failures) {
+    const char* result = failure.result;
     command = submitPreset();
-    complete(command, result[0] != '\0', result);
+    complete(command, failure.ok, result);
     drainUi();
     CHECK(!rowHas(0, "Back"));
     CHECK(shownRows[0][3] != '\0');

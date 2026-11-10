@@ -3506,7 +3506,7 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
     httpd_resp_set_status(req, "401 Unauthorized");
   } else if (!ok && redactedOut.startsWith("Error: Admin access required")) {
     httpd_resp_set_status(req, "403 Forbidden");
-  } else if (!ok || redactedOut.startsWith("Empty command") || redactedOut.startsWith("Unknown command")) {
+  } else if (!ok || redactedOut.startsWith("Empty command")) {
     httpd_resp_set_status(req, "400 Bad Request");
   }
   httpd_resp_send(req, directOut.c_str(), HTTPD_RESP_USE_STRLEN);
@@ -5173,7 +5173,6 @@ class SettingsBatchRequestCleanup {
     const bool commandSucceeded =
         submitAndExecuteSync(finalizer, output, &completed);
     succeeded_ = completed && commandSucceeded &&
-                 !output.startsWith("Error:") &&
                  !output.startsWith("[ERROR]");
     if (!succeeded_) {
       // A submitted command may still complete after a synchronous timeout;
@@ -5604,7 +5603,7 @@ void startHttpServer() {
     esp_err_t httpStartErr = httpd_start(&server, &config);
     if (httpStartErr != ESP_OK) {
       logSystemEvent("HTTP", "web server FAILED to start: %s (err=%d)", esp_err_to_name(httpStartErr), (int)httpStartErr);
-      broadcastOutput("ERROR: Failed to start HTTP server");
+      broadcastOutput("Error: Failed to start HTTP server");
       return;
     }
     gServerIsHttps = false;

@@ -151,8 +151,7 @@ const char* cmd_imu(const String& argsInput) {
   }
 
   if (!gImuConnected || !gImuRunning) {
-    broadcastOutput("IMU sensor not connected or not started. Use 'openimu' first.");
-    return "ERROR";
+    return "Error: IMU sensor not connected or not started. Use 'openimu' first.";
   }
 
   // Read from sensor cache instead of accessing hardware directly
@@ -171,8 +170,7 @@ const char* cmd_imu(const String& argsInput) {
         broadcastOutput("IMU data not yet available");
       }
     } else {
-      broadcastOutput("Failed to access sensor cache");
-      return "ERROR";
+      return "Error: Failed to access sensor cache";
     }
   }
 
@@ -294,8 +292,7 @@ const char* cmd_imuactions(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!gImuRunning || !gImuConnected) {
-    broadcastOutput("Error: [IMU] Not enabled. Use 'openimu' first.");
-    return "ERROR";
+    return "Error: [IMU] Not enabled. Use 'openimu' first.";
   }
 
   // Update actions once to get current state

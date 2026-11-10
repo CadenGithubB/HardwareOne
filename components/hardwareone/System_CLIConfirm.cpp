@@ -8,6 +8,7 @@
 #include <esp_attr.h>            // EXT_RAM_BSS_ATTR
 #include "System_CLIMode.h"
 #include "System_CommandTypes.h"
+#include "System_CommandReply.h"   // commandReplyIsFailure
 #include "System_Debug.h"
 #include "System_Utils.h"          // broadcastOutput, logCommandExecution
 #include "System_AuthIdentity.h"   // currentAuthContext — audit attribution for the confirmer
@@ -139,8 +140,7 @@ static void confirm_onExit(void* /*userData*/) {
       // bare yes/no resolution.
       snprintf(auditCmd, sizeof(auditCmd), "(confirm: %s)", yes ? "yes" : "no");
     }
-    const bool actionSucceeded =
-      (strncmp(response, "Error", 5) != 0) && (strncmp(response, "ERROR", 5) != 0);
+    const bool actionSucceeded = !commandReplyIsFailure(response);
     logCommandExecution(currentAuthContext(), auditCmd, actionSucceeded, response);
   }
 

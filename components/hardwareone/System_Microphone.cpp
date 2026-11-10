@@ -2542,7 +2542,7 @@ const char* cmd_micstart(const String& argsInput) {
     }
   }
   if (!gSettings.micEnabled) {
-    return "ERROR: Microphone is disabled - run 'micenabled 1' first";
+    return "Error: Microphone is disabled - run 'micenabled 1' first";
   }
   if (initMicrophone()) {
     return "Microphone started successfully";

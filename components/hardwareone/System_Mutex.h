@@ -146,7 +146,7 @@ struct I2sMicLockGuard {
  *     SensorCacheGuard g(sImuCacheMutex, pdMS_TO_TICKS(5), "imu.publish");
  *     if (g.held) {
  *       // ... read/write sImuCache.* fields ...
- *       if (errorCondition) return "ERROR";  // dtor releases automatically
+ *       if (errorCondition) return "Error: <reason>";  // dtor releases automatically
  *     }
  *   }
  *

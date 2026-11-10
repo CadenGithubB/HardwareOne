@@ -1771,7 +1771,7 @@ const char* cmd_mqtthost(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
-    if (!ensureDebugBuffer()) return "Error";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024, "MQTT host: %s", 
              gSettings.mqttHost.length() > 0 ? gSettings.mqttHost.c_str() : "(not set)");
     return getDebugBuffer();
@@ -1788,7 +1788,7 @@ const char* cmd_mqttport(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
-    if (!ensureDebugBuffer()) return "Error";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024, "MQTT port: %d", gSettings.mqttPort);
     return getDebugBuffer();
   }
@@ -1810,7 +1810,7 @@ const char* cmd_mqtttlsmode(const String& argsInput) {
   
   // Show current mode if no argument
   if (arg.length() == 0) {
-    if (!ensureDebugBuffer()) return "Error";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     const char* modeStr = "None (unencrypted)";
     if (gSettings.mqttTLSMode == 1) modeStr = "TLS (encrypted, no verification)";
     else if (gSettings.mqttTLSMode == 2) modeStr = "TLS + Verify (encrypted + cert verification)";
@@ -1866,7 +1866,7 @@ const char* cmd_mqttcacertpath(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
-    if (!ensureDebugBuffer()) return "Error";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024, "MQTT CA cert path: %s",
              gSettings.mqttCACertPath.length() > 0 ? gSettings.mqttCACertPath.c_str() : "(not set)");
     return getDebugBuffer();
@@ -1883,13 +1883,13 @@ const char* cmd_mqttcacertpath(const String& argsInput) {
   // installed identity. If they can't read it, telling MQTT to use it is
   // also denied.
   if (!VFS::existsGuarded(arg, currentAuthContext())) {
-    if (!ensureDebugBuffer()) return "Error";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024, "Warning: File not found: %s (setting anyway)", arg.c_str());
     setSetting(gSettings.mqttCACertPath, arg);
     return getDebugBuffer();
   }
   setSetting(gSettings.mqttCACertPath, arg);
-  if (!ensureDebugBuffer()) return "Error";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   snprintf(getDebugBuffer(), 1024, "MQTT CA cert path set to: %s", arg.c_str());
   return getDebugBuffer();
 }
@@ -1900,7 +1900,7 @@ const char* cmd_mqttuser(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
-    if (!ensureDebugBuffer()) return "Error";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024, "MQTT user: %s", 
              gSettings.mqttUser.length() > 0 ? gSettings.mqttUser.c_str() : "(not set)");
     return getDebugBuffer();
@@ -1937,7 +1937,7 @@ const char* cmd_mqttbasetopic(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
-    if (!ensureDebugBuffer()) return "Error";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024, "MQTT base topic: %s", 
              gSettings.mqttBaseTopic.length() > 0 ? gSettings.mqttBaseTopic.c_str() : "(auto-generated)");
     return getDebugBuffer();
@@ -1958,7 +1958,7 @@ const char* cmd_mqttdiscoveryprefix(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
-    if (!ensureDebugBuffer()) return "Error";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024, "MQTT discovery prefix: %s", 
              gSettings.mqttDiscoveryPrefix.length() > 0 ? gSettings.mqttDiscoveryPrefix.c_str() : "homeassistant");
     return getDebugBuffer();
@@ -1975,7 +1975,7 @@ const char* cmd_mqttpublishinterval(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
-    if (!ensureDebugBuffer()) return "Error";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024, "MQTT publish interval: %d ms", gSettings.mqttPublishIntervalMs);
     return getDebugBuffer();
   }
@@ -2012,7 +2012,7 @@ const char* cmd_mqtttopics(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
-    if (!ensureDebugBuffer()) return "Error";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024, "MQTT subscribe topics: %s", 
              gSettings.mqttSubscribeTopics.length() > 0 ? gSettings.mqttSubscribeTopics.c_str() : "(none)");
     return getDebugBuffer();
@@ -2053,7 +2053,7 @@ const char* cmd_mqttexternalsensors(const String& argsInput) {
     return getDebugBuffer();
   }
 
-  if (!ensureDebugBuffer()) return "Error";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   char* buf = getDebugBuffer();
   int pos = 0;
 

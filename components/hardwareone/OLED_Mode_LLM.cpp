@@ -211,7 +211,7 @@ static void llmCommandDone(bool ok, const char* result, void* userData) {
   char reason[sizeof(sCmdReplyReason)] = {0};
   if (strstr(r, "Admin access")) {
     status = "admin required";
-  } else if (!ok || strncmp(r, "Error", 5) == 0 || strstr(r, "\"ok\":false")) {
+  } else if (!ok || strstr(r, "\"ok\":false")) {
     status = (op == LLM_CMD_LOAD) ? "load failed" : "unload failed";
     // The backend's reason (a remote host's message, a missing model) is the
     // reply's "error" string, which the firmware writes without quotes.

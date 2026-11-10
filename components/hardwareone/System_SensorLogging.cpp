@@ -1254,7 +1254,7 @@ const char* cmd_sensorlogmask(const String& args) {
   if (value.length() == 0) return handleSettingCommand(entry, args);
   if (const char* error = sensorLogSelectionChangeError()) return error;
   const char* result = handleSettingCommand(entry, args);
-  if (result && strncmp(result, "Error", 5) != 0) {
+  if (result && !commandReplyIsFailure(result)) {
     gSensorLogMask = (uint8_t)gSettings.sensorLogMask;
   }
   return result;
@@ -1268,7 +1268,7 @@ const char* cmd_sensorlogformat(const String& args) {
   value.trim();
   if (value.length() == 0) return handleSettingCommand(entry, args);
   const char* result = handleSettingCommand(entry, args);
-  if (result && strncmp(result, "Error", 5) != 0) {
+  if (result && !commandReplyIsFailure(result)) {
     sensorLogApplyFormat((SensorLogFormat)gSettings.sensorLogFormat);
   }
   return result;

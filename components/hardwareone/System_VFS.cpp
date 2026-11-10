@@ -1535,7 +1535,7 @@ static const char* cmd_sdmount(const String& argsInput) {
   EXT_RAM_BSS_ATTR static char buf[128];
   
 #if !ENABLE_SD_CARD
-  snprintf(buf, sizeof(buf), "ERROR: SD card support is disabled or unavailable on this board");
+  snprintf(buf, sizeof(buf), "Error: SD card support is disabled or unavailable on this board");
   return buf;
 #else
   if (VFS::isSDAvailable()) {
@@ -1543,7 +1543,7 @@ static const char* cmd_sdmount(const String& argsInput) {
     return buf;
   }
   if (const char* owner = VFS::sdInUseOwner()) {
-    snprintf(buf, sizeof(buf), "ERROR: SD card in use by %s; stop it first", owner);
+    snprintf(buf, sizeof(buf), "Error: SD card in use by %s; stop it first", owner);
     return buf;
   }
   
@@ -1556,7 +1556,7 @@ static const char* cmd_sdmount(const String& argsInput) {
       snprintf(buf, sizeof(buf), "SD card mounted successfully at /sd");
     }
   } else {
-    snprintf(buf, sizeof(buf), "ERROR: Failed to mount SD card. Check if card is inserted and formatted as FAT32.");
+    snprintf(buf, sizeof(buf), "Error: Failed to mount SD card. Check if card is inserted and formatted as FAT32.");
   }
   return buf;
 #endif
@@ -1566,18 +1566,18 @@ static const char* cmd_sdunmount(const String& argsInput) {
   EXT_RAM_BSS_ATTR static char buf[128];
   
 #if !ENABLE_SD_CARD
-  snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");
+  snprintf(buf, sizeof(buf), "Error: SD card not supported on this board");
   return buf;
 #else
   if (const char* owner = VFS::sdInUseOwner()) {
-    snprintf(buf, sizeof(buf), "ERROR: SD card in use by %s; stop it first", owner);
+    snprintf(buf, sizeof(buf), "Error: SD card in use by %s; stop it first", owner);
     return buf;
   }
   // Release a stale mount too (e.g. an accidentally removed SDMMC card).
   if (VFS::unmountSD()) {
     snprintf(buf, sizeof(buf), "SD card unmounted successfully");
   } else {
-    snprintf(buf, sizeof(buf), "ERROR: Failed to unmount SD card");
+    snprintf(buf, sizeof(buf), "Error: Failed to unmount SD card");
   }
   return buf;
 #endif
@@ -1587,7 +1587,7 @@ static const char* cmd_sdformat(const String& argsInput) {
   EXT_RAM_BSS_ATTR static char buf[256];
   
 #if !ENABLE_SD_CARD
-  snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");
+  snprintf(buf, sizeof(buf), "Error: SD card not supported on this board");
   return buf;
 #else
   // Check for confirmation flag
@@ -1600,7 +1600,7 @@ static const char* cmd_sdformat(const String& argsInput) {
     return buf;
   }
   if (const char* owner = VFS::sdInUseOwner()) {
-    snprintf(buf, sizeof(buf), "ERROR: SD card in use by %s; stop it first", owner);
+    snprintf(buf, sizeof(buf), "Error: SD card in use by %s; stop it first", owner);
     return buf;
   }
   
@@ -1612,7 +1612,7 @@ static const char* cmd_sdformat(const String& argsInput) {
     logSystemEvent("SD", "SD card formatted by '%s' — ALL card data erased", currentExecUser().c_str());
     systemEventPost(SYSEVT_STORAGE_FORMATTED, "sd", "FAT32 — all card data erased");
   } else {
-    snprintf(buf, sizeof(buf), "ERROR: Failed to format SD card. Ensure card is inserted properly.");
+    snprintf(buf, sizeof(buf), "Error: Failed to format SD card. Ensure card is inserted properly.");
   }
   return buf;
 #endif
@@ -1624,7 +1624,7 @@ static const char* cmd_sdinfo(const String& argsInput) {
 
 #if !ENABLE_SD_CARD
   if (wantJson) return "{\"schema\":1,\"supported\":false}";
-  snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");
+  snprintf(buf, sizeof(buf), "Error: SD card not supported on this board");
   return buf;
 #else
   if (!VFS::isSDAvailable()) {
@@ -1760,7 +1760,7 @@ static const char* cmd_sddiag(const String& argsInput) {
       VFS::isSDAvailable() ? "mounted" : "not mounted", SD.lastError());
   return buf;
 #elif !ENABLE_SD_CARD
-  snprintf(buf, buf_SIZE, "ERROR: SD card not supported on this board");
+  snprintf(buf, buf_SIZE, "Error: SD card not supported on this board");
   return buf;
 #else
   pos = appendf(buf, buf_SIZE, pos, "=== SD Card Diagnostics ===\n");

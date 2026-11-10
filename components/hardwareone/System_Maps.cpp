@@ -3190,7 +3190,7 @@ const char* GPSTrackManager::startLiveTracking() {
 
   const char* result = cmd_gpsstart("");
   if (!result) return "Error: GPS startup returned no result";
-  if (strncmp(result, "Error", 5) == 0) return result;
+  if (commandReplyIsFailure(result)) return result;
   const String gpsStatus(result);  // command replies share a borrowed buffer
 
   // A transient GPS-only TRACK capture at the literal path: the logger keeps
@@ -3199,7 +3199,7 @@ const char* GPSTrackManager::startLiveTracking() {
   // a dated session and enables boot auto-start.
   result = sensorLogStartLiveTrack("/logging_captures/tracks/live.csv", 1000);
   if (!result) return "Error: Sensor logger returned no result";
-  if (strncmp(result, "Error", 5) == 0) return result;
+  if (commandReplyIsFailure(result)) return result;
   if (strncmp(result, "SUCCESS:", 8) != 0) return "Error: Sensor logger did not confirm startup";
 
   const uint32_t sessionId = sensorLogCurrentSessionId();

@@ -628,7 +628,7 @@ void reportAllTaskStacks() {
       }
     }
     if (!taskArray || !taskMeasure) {
-      broadcastOutput("ERROR: Cannot allocate task array");
+      broadcastOutput("Error: Cannot allocate task array");
       return;
     }
     totalRuntime = 0;

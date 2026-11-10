@@ -121,7 +121,8 @@ def main() -> None:
         for gps in (True, False):
             source = Path(directory) / f"test-{int(gps)}.cpp"
             executable = source.with_suffix("")
-            source.write_text(generated(gps, args.baseline))
+            (Path(directory) / "System_CommandReply.h").write_text((COMPONENT / "System_CommandReply.h").read_text())
+            source.write_text('#include "System_CommandReply.h"\n' + generated(gps, args.baseline))
             subprocess.run([args.cxx, *flags, f"-DTEST_GPS={int(gps)}", "-I", directory,
                             str(source), "-o", str(executable)], check=True, timeout=120)
             results.append(subprocess.run([str(executable)], timeout=60).returncode)

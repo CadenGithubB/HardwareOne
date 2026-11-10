@@ -832,7 +832,7 @@ bool ensureDebugBuffer() {
     gDebugBuffer = (char*)ps_alloc(GLOBAL_DEBUG_BUFFER_SIZE, AllocPref::PreferPSRAM, "debug.buf");
     if (!gDebugBuffer) {
       if (gOutputFlags & MSG_ROUTE_SERIAL) {
-        Serial.println("ERROR: Failed to allocate debug buffer");
+        Serial.println("Error: Failed to allocate debug buffer");
       }
       return false;
     }

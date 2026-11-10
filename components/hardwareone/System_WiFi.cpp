@@ -1512,7 +1512,7 @@ const char* cmd_wifiscan(const String& argsInput) {
   
   // Ensure WiFi is initialized (lazy init) before scanning
   if (!ensureWiFiInitialized()) {
-    return "ERROR: Failed to initialize WiFi";
+    return "Error: Failed to initialize WiFi";
   }
   
   String args = argsInput;
@@ -1760,7 +1760,7 @@ static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
   // Validate credentials are not empty
   if (nw.ssid.length() == 0) {
     ERROR_WIFIF("SSID is empty!");
-    broadcastOutput("ERROR: SSID is empty");
+    broadcastOutput("Error: SSID is empty");
     return false;
   }
   if (nw.password.length() == 0) {
@@ -2340,17 +2340,17 @@ const char* cmd_httpstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!gSettings.httpEnabled) {
-    return "ERROR: HTTP server is disabled - run 'httpenabled 1' first";
+    return "Error: HTTP server is disabled - run 'httpenabled 1' first";
   }
 
   if (!WiFi.isConnected()) {
     cliHint("to connect, run 'openwifi'; check the result with 'wifistatus'");
-    return "ERROR: WiFi not connected. Connect to WiFi before starting HTTP server.";
+    return "Error: WiFi not connected. Connect to WiFi before starting HTTP server.";
   }
 
   if (server != NULL) {
     if (gServerIsHttps) {
-      return "ERROR: HTTPS server is already running. Stop it first with 'closehttp'.";
+      return "Error: HTTPS server is already running. Stop it first with 'closehttp'.";
     }
     return "HTTP server is already running";
   }
@@ -2362,7 +2362,7 @@ const char* cmd_httpstart(const String& argsInput) {
   if (server != NULL) {
     return gServerIsHttps ? "HTTPS server started" : "HTTP server started";
   }
-  return "ERROR: Failed to start HTTP server";
+  return "Error: Failed to start HTTP server";
 }
 
 const char* cmd_httpstop(const String& argsInput) {
@@ -3093,7 +3093,7 @@ void setupWiFi(uint32_t budgetMs, WifiConnectOrigin origin) {
 
   // Ensure WiFi is initialized before attempting connection
   if (!ensureWiFiInitialized()) {
-    broadcastOutput("ERROR: Failed to initialize WiFi");
+    broadcastOutput("Error: Failed to initialize WiFi");
     return;
   }
 

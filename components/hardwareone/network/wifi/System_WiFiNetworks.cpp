@@ -172,7 +172,7 @@ bool upsertWiFiNetwork(const String& ssid, const String& password, int priority,
   trimmed.trim();
   if (trimmed.length() == 0) {
     ERROR_WIFIF("Refusing to save WiFi network with a blank SSID");
-    broadcastOutput("ERROR: cannot save a WiFi network with a blank name");
+    broadcastOutput("Error: cannot save a WiFi network with a blank name");
     return false;
   }
   // Reject over-long credentials loudly rather than silently mangling them at
@@ -182,13 +182,13 @@ bool upsertWiFiNetwork(const String& ssid, const String& password, int priority,
   if (ssid.length() > 32) {
     ERROR_WIFIF("Refusing to save WiFi network: SSID is %u chars (max 32)",
                 (unsigned)ssid.length());
-    broadcastOutput("ERROR: WiFi name is too long (max 32 characters)");
+    broadcastOutput("Error: WiFi name is too long (max 32 characters)");
     return false;
   }
   if (password.length() > 64) {
     ERROR_WIFIF("Refusing to save WiFi network '%s': password is %u chars (max 64)",
                 ssid.c_str(), (unsigned)password.length());
-    broadcastOutput("ERROR: WiFi password is too long (max 64 characters)");
+    broadcastOutput("Error: WiFi password is too long (max 64 characters)");
     return false;
   }
   // A double-quote in either field cannot survive the quoted command line every
@@ -201,7 +201,7 @@ bool upsertWiFiNetwork(const String& ssid, const String& password, int priority,
   // shared interactive validation path.
   if (ssid.indexOf('"') >= 0 || password.indexOf('"') >= 0) {
     ERROR_WIFIF("Refusing to save WiFi network: SSID or password contains a double-quote");
-    broadcastOutput("ERROR: WiFi name and password cannot contain a double-quote");
+    broadcastOutput("Error: WiFi name and password cannot contain a double-quote");
     return false;
   }
   // Control characters (TAB, line breaks, escape bytes) are refused on the same
@@ -210,7 +210,7 @@ bool upsertWiFiNetwork(const String& ssid, const String& password, int priority,
   if (wifiNetworkFieldProblem(ssid.c_str()) != WifiFieldProblem::None ||
       wifiNetworkFieldProblem(password.c_str()) != WifiFieldProblem::None) {
     ERROR_WIFIF("Refusing to save WiFi network: SSID or password contains a control character");
-    broadcastOutput("ERROR: WiFi name and password cannot contain control characters");
+    broadcastOutput("Error: WiFi name and password cannot contain control characters");
     return false;
   }
 

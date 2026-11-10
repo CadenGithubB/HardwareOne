@@ -592,7 +592,7 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
   const bool success = ok && parsed && (doc["success"] | false) &&
       !(op == Op::Status && state.recoveringStart && !doc["exchange"].is<const char*>());
   if (op == Op::Save || op == Op::Mic) {
-    if (!ok || (result && strncmp(result, "Error", 5) == 0))
+    if (!ok)
       snprintf(state.message, sizeof(state.message), "Setting change denied or failed");
     if (state.queued == Op::None) state.queued = Op::Status;
   } else if (!success) {

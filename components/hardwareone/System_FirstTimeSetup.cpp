@@ -294,7 +294,7 @@ static bool serialWifiSelectionForRestore(String& outSSID) {
 // setup only when this operation succeeds.
 static bool createInitialAdminUser(const String& username, const String& plaintextPassword, bool useDarkTheme) {
   if (username.length() == 0 || plaintextPassword.length() == 0) {
-    broadcastOutput("ERROR: Admin username and password cannot be blank");
+    broadcastOutput("Error: Admin username and password cannot be blank");
     return false;
   }
   // The first admin is created outside the public account path, so apply the
@@ -304,20 +304,20 @@ static bool createInitialAdminUser(const String& username, const String& plainte
   String nameError;
   if (isReservedUsername(username) || !isValidPublicUsername(username, &nameError)) {
     char msg[160];
-    snprintf(msg, sizeof(msg), "ERROR: Admin username not allowed%s%s",
+    snprintf(msg, sizeof(msg), "Error: Admin username not allowed%s%s",
              nameError.length() ? ": " : " (reserved name)", nameError.length() ? nameError.c_str() : "");
     broadcastOutput(msg);
     return false;
   }
   if (plaintextPassword.length() < kPublicPasswordMinLen) {
     char msg[96];
-    snprintf(msg, sizeof(msg), "ERROR: Admin password must be at least %u characters", (unsigned)kPublicPasswordMinLen);
+    snprintf(msg, sizeof(msg), "Error: Admin password must be at least %u characters", (unsigned)kPublicPasswordMinLen);
     broadcastOutput(msg);
     return false;
   }
   String hashedPassword = hashUserPassword(plaintextPassword);
   if (hashedPassword.length() == 0) {
-    broadcastOutput("ERROR: Failed to prepare admin password");
+    broadcastOutput("Error: Failed to prepare admin password");
     return false;
   }
 
@@ -340,14 +340,14 @@ static bool createInitialAdminUser(const String& username, const String& plainte
   // Prepare the complete user index before any writes. A nonempty but truncated
   // JSON string must never become the file that marks setup complete.
   if (doc.overflowed()) {
-    broadcastOutput("ERROR: Failed to prepare initial user record");
+    broadcastOutput("Error: Failed to prepare initial user record");
     return false;
   }
   String json;
   const size_t expected = measureJson(doc);
   if (expected == 0 || !json.reserve(expected) ||
       serializeJson(doc, json) != expected || json.length() != expected) {
-    broadcastOutput("ERROR: Failed to serialize initial user record");
+    broadcastOutput("Error: Failed to serialize initial user record");
     return false;
   }
 
@@ -363,7 +363,7 @@ static bool createInitialAdminUser(const String& username, const String& plainte
     defaults["theme"] = useDarkTheme ? "dark" : "light";
     defaults["password"] = hashedPassword;
     if (!saveUserSettings(1, defaults)) {
-      broadcastOutput("ERROR: Failed to create user settings");
+      broadcastOutput("Error: Failed to create user settings");
       // Withhold users.json so the device stays SETUP_REQUIRED and the owner
       // gets another attempt, rather than committing an unusable account.
       return false;
@@ -373,7 +373,7 @@ static bool createInitialAdminUser(const String& username, const String& plainte
   // Atomic create (tmp + rename) — the commit token. A failed publication leaves
   // only an orphan credential file, which the next setup attempt can replace.
   if (!writeTextAtomic(USERS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::USERS, "setup.users_write"))) {
-    broadcastOutput("ERROR: Failed to write users.json");
+    broadcastOutput("Error: Failed to write users.json");
     return false;
   }
   broadcastOutput("Saved /system/users/users.json");
@@ -460,13 +460,13 @@ static bool setOwnerCredentialAgain() {
     p.trim();
     if (p.length() < kPublicPasswordMinLen) {
       char msg[96];
-      snprintf(msg, sizeof(msg), "ERROR: Owner password must be at least %u characters", (unsigned)kPublicPasswordMinLen);
+      snprintf(msg, sizeof(msg), "Error: Owner password must be at least %u characters", (unsigned)kPublicPasswordMinLen);
       broadcastOutput(msg);
       continue;
     }
     hashedPassword = hashUserPassword(p);
     if (hashedPassword.length() == 0) {
-      broadcastOutput("ERROR: Failed to prepare owner password");
+      broadcastOutput("Error: Failed to prepare owner password");
       return false;
     }
   }
@@ -476,7 +476,7 @@ static bool setOwnerCredentialAgain() {
     record["theme"] = "light";
     record["password"] = hashedPassword;
     if (record.overflowed() || !saveUserSettings(1, record)) {
-      broadcastOutput("ERROR: Failed to save the owner password");
+      broadcastOutput("Error: Failed to save the owner password");
       return false;
     }
   }
@@ -554,7 +554,7 @@ static bool runPostRestoreCredentialSetup(bool ownerRecovery = false) {
   }
 
   if (!createInitialAdminUser(u, p, /*useDarkTheme=*/false)) {
-    broadcastOutput("ERROR: Could not create admin user. Falling back to full setup.");
+    broadcastOutput("Error: Could not create admin user. Falling back to full setup.");
     return false;
   }
 
@@ -678,7 +678,7 @@ void firstTimeSetupIfNeeded() {
         break;
       }
 #else
-      broadcastOutput("ERROR: WiFi not enabled in this build; cannot import from backup.");
+      broadcastOutput("Error: WiFi not enabled in this build; cannot import from backup.");
       goBack = true;
       break;
 #endif
@@ -736,7 +736,7 @@ void firstTimeSetupIfNeeded() {
     setupWiFi(kWifiConnectHuntBudgetMs, WifiConnectOrigin::BOOT);
 
     if (WiFi.status() != WL_CONNECTED) {
-      broadcastOutput("ERROR: Failed to connect to WiFi. Cannot use Import from Backup.");
+      broadcastOutput("Error: Failed to connect to WiFi. Cannot use Import from Backup.");
       broadcastOutput("Falling back to Basic Setup.");
 #if ENABLE_OLED_DISPLAY
       showOLEDMessage("WiFi connect\nfailed!\n\nFalling back to\nBasic Setup", true);
@@ -893,7 +893,7 @@ void firstTimeSetupIfNeeded() {
       return;  // rebootWithMessage calls ESP.restart()
     }
 #else
-    broadcastOutput("ERROR: HTTP server or WiFi not enabled. Cannot use Import from Backup.");
+    broadcastOutput("Error: HTTP server or WiFi not enabled. Cannot use Import from Backup.");
     broadcastOutput("Falling back to Basic Setup.");
     setupMode = 0;
 #endif
@@ -1081,7 +1081,7 @@ void firstTimeSetupIfNeeded() {
   broadcastOutput("Saving configuration...");
   
   if (!createInitialAdminUser(u, p, useDarkTheme)) {
-    broadcastOutput("ERROR: Could not create admin user. Returning to setup menu.");
+    broadcastOutput("Error: Could not create admin user. Returning to setup menu.");
     continue;
   }
 
@@ -1090,7 +1090,7 @@ void firstTimeSetupIfNeeded() {
   if (!VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "setup.automations.init"))) {
     String a = automationsEmptyStoreJson();
     if (!writeAutomationsJsonAtomic(a)) {
-      broadcastOutput("ERROR: Failed to write automations.json");
+      broadcastOutput("Error: Failed to write automations.json");
     } else {
       broadcastOutput("Created /system/automations.json");
     }

@@ -926,7 +926,7 @@ const char* cmd_features(const String& argsInput) {
   
   const FeatureEntry* f = getFeatureById(featureId.c_str());
   if (!f) {
-    return "Unknown feature. Run 'features' to see list.";
+    return "Error: Unknown feature. Run 'features' to see list.";
   }
   
   if (!canToggleFeature(f)) {

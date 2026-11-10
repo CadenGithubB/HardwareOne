@@ -59,6 +59,7 @@ bool isEspNowInitialized() { return false; }
 #include "System_Versions.h"     // versionsAddJson — the "versions" object of status json
 #include "System_Clock.h"        // Clock:: — epoch/sync/tz/format helpers (Stage 2)
 #include "System_Command.h"
+#include "System_CommandReply.h"  // commandReplyIsFailure — the reply failure rule
 #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
 #include "System_MemoryMonitor.h"
 #include "System_Notifications.h"
@@ -1903,8 +1904,7 @@ const char* cmd_fsusage(const String& argsInput) {
   const bool wantJson = argWantsJson(argsInput);
   if (!filesystemReady) {
     if (wantJson) return "{\"schema\":1,\"ready\":false}";
-    broadcastOutput("Error: LittleFS not ready");
-    return "ERROR";
+    return "Error: LittleFS not ready";
   }
 
   uint64_t total = 0, used = 0, free = 0;
@@ -4013,8 +4013,10 @@ static bool authorizeRemoteCommand(const AuthContext& ctx, const String& line,
 //      clamped to ~255 B (longer is [CUT]). Live-streamed to every active sink
 //      (serial / web / BLE-per-connection / log / OLED / G2) and decorated with
 //      timestamps on the live path. This is the spine for people-facing output
-//      and progress. A command that streams here should return a short status
-//      string (e.g. "OK").
+//      and progress. A command that streams here and SUCCEEDS should return
+//      a short status string (e.g. "OK"). A command that FAILS returns the
+//      reason ("Error: <reason>. <next action>.") and does not also print it:
+//      most callers (display, glasses, MQTT, host link) see only the reply.
 //
 //   2. the return value (copied into `out`, <=4 KB) — the command's canonical
 //      RESULT as a single verbatim blob. No 255 B line clamp, no decoration.
@@ -4036,8 +4038,8 @@ static bool authorizeRemoteCommand(const AuthContext& ctx, const String& line,
 // Uniform status-token stamp — the "OK:" half of the OK:/Error: return contract
 // above. Applied to every SUCCESS result at the single executeCommand funnel, so
 // the leading status word reaches ALL interfaces (serial/web/BLE/OLED/MQTT/
-// ESP-NOW) at once. Failures already carry "Error"/"ERROR"; this gives success
-// the symmetric token. Exemptions keep machine-read tokens and structured
+// ESP-NOW) at once. Failures already carry "Error:" (System_CommandReply.h);
+// this gives success the symmetric token. Exemptions keep machine-read tokens and structured
 // payloads byte-exact.
 // ---------------------------------------------------------------------------
 
@@ -4425,8 +4427,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     // Consumption is distinct from command success. Keep the same Error:
     // contract used by registry handlers so transports can return a failure
     // status without forcing the interactive mode to exit.
-    return !(out && (strncmp(out, "Error", 5) == 0 ||
-                     strncmp(out, "ERROR", 5) == 0));
+    return !commandReplyIsFailure(out);
   }
 
   if (found) {
@@ -4479,13 +4480,11 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
         modeInstanceAfterHandler != modeInstanceBeforeHandler &&
         cliModeCurrentCommandOwns();
     if (!handlerEnteredMode) {
-      // A bare usage line is a refused command, not a result: the handler got
-      // arguments it could not use. Same for a feature the build does not have.
-      // Without this they were stamped "OK:" and reached the web client as 200.
-      registrySuccess = (strncmp(out, "Error", 5) != 0) &&
-                        (strncmp(out, "ERROR", 5) != 0) &&
-                        (strncmp(out, "Usage:", 6) != 0) &&
-                        (strcmp(out, "Unknown feature.") != 0);
+      // The reply decides the verdict, by the one rule in
+      // System_CommandReply.h. A bare usage line is a refused command, not a
+      // result: without this it was stamped "OK:" and reached the web client
+      // as 200.
+      registrySuccess = !commandReplyIsFailure(out);
       logCommandExecutionPrepared(ctx, cmd, safeCommandForTrace,
                                   registrySuccess, out);
       stampOkStatus(out, outSize, registrySuccess);  // stamp AFTER audit so the log keeps the raw result
@@ -4516,7 +4515,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     appendAutoLogEntry("OUTPUT", logBuf);
   }
 
-  // Registry handlers use the uniform Error:/ERROR prefix contract. Reuse the
+  // Registry handlers use the uniform Error: prefix contract. Reuse the
   // same result that drives command audit and status stamping so a denied
   // targeted login/logout is never recorded as an authorization success.
   {

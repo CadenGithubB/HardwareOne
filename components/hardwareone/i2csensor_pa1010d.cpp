@@ -635,7 +635,7 @@ const char* cmd_gpsautostart(const String& argsInput) {
 // before another handler can replace its borrowed debug-buffer contents.
 static const char* gpsLogStepError(const char* result) {
   if (!result) return "Error: GPS logging command returned no result";
-  return strncmp(result, "Error", 5) == 0 ? result : nullptr;
+  return commandReplyIsFailure(result) ? result : nullptr;
 }
 
 // One-shot GPS track setup. Existing sessions and health capture keep their

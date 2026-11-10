@@ -176,7 +176,7 @@ add = code_only(function_body(automation, "const char* cmd_automation_add(const 
 load_guard = "if (!loadAutomationsStoreForEdit(json, !validateOnly))"
 assert add.count(load_guard) == 1 and add.count("loadAutomationsStoreForEdit(") == 1
 refusal = " ".join(function_body(add, load_guard)[1:-1].split())
-assert refusal == 'broadcastAutomationsReadError(); return "ERROR";', refusal
+assert refusal == 'return automationsReadErrorReply();', refusal
 for forbidden in ("readText(", "readAutomationsFile(", "readAutomationsJson(", "automationsEmptyStoreJson()"):
     assert forbidden not in add, f"cmd_automation_add must load only through loadAutomationsStoreForEdit ({forbidden})"
 edit_load = code_only(function_body(automation, "static bool loadAutomationsStoreForEdit(String& json, bool persistSeed)"))

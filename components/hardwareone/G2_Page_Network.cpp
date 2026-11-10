@@ -1411,7 +1411,7 @@ static void onBluetoothR1MenuRefreshDone(bool ok,
             (unsigned)cookie.menuGen, result ? result : "");
   // A refused connect never goes in flight, so drop the "connecting..."
   // overlay now instead of after the watchdog's kick-off grace.
-  if (!ok || (result && strncmp(result, "Error:", 6) == 0)) gRingPendingDeadlineMs = 0;
+  if (!ok) gRingPendingDeadlineMs = 0;
   (void)g2EnqueueRedraw(cookie, &showBluetoothR1Menu, "Bluetooth-R1-menu refresh");
 }
 

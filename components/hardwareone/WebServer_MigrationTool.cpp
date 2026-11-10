@@ -1221,7 +1221,7 @@ void startRestoreOnlyHttpServer() {
     config.send_wait_timeout = 60;
 
     if (httpd_start(&server, &config) != ESP_OK) {
-      broadcastOutput("ERROR: Failed to start restore HTTP server");
+      broadcastOutput("Error: Failed to start restore HTTP server");
       return;
     }
     broadcastOutput("HTTP server started (restore-only mode)");

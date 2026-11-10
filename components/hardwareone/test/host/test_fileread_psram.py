@@ -85,7 +85,8 @@ def main() -> None:
         harness = harness.replace(marker, production)
     with tempfile.TemporaryDirectory(prefix="hw1-fileread-host-") as temp:
         generated = Path(temp) / "fileread.cpp"
-        generated.write_text(harness)
+        (Path(temp) / "System_CommandReply.h").write_text(read("System_CommandReply.h"))
+        generated.write_text('#include "System_CommandReply.h"\n' + harness)
         for bluetooth in (0, 1):
             executable = Path(temp) / f"fileread_ble{bluetooth}"
             command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",

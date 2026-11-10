@@ -62,7 +62,7 @@ EXT_RAM_BSS_ATTR static struct { bool isSent; uint32_t msgId; uint8_t sendState;
 // only when the owner accepted the command.
 static bool oledEspNowRunOwnerCommand(const char* cmd, const char* failToast) {
   char out[160];
-  if (executeOLEDCommandWithResult(cmd, out, sizeof(out)) && strncmp(out, "Error", 5) != 0) return true;
+  if (executeOLEDCommandWithResult(cmd, out, sizeof(out))) return true;
   oledToastShow(strstr(out, "Admin access required") ? "Admin required" : failToast, 2500);
   return false;
 }

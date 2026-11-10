@@ -676,8 +676,10 @@ const char* cmd_files(const String& argsInput) {
                                   /*hideAdminPaths=*/!currentExecIsAdmin(), nullptr);
   if (!buffer.ok()) return "Error: Out of memory building file listing";
   if (!ok) {
-    broadcastOutput(buffer.c_str());
-    return "ERROR";
+    // The listing holds the reason ("Error: Cannot open directory ...").
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+    snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "%s", buffer.c_str());
+    return getDebugBuffer();
   }
 
   broadcastOutput(buffer.c_str());
@@ -826,11 +828,9 @@ const char* cmd_fileview(const String& argsInput) {
   // VFS::exists pair into one decision. If it denies we get the same
   // "not found" UX, with the actual reason in the [PERM] log.
   if (!VFS::existsGuarded(path, ctx)) {
-    if (ensureDebugBuffer()) {
-      snprintf(getDebugBuffer(), 1024, "Error: File not found or access denied: %s", path.c_str());
-      broadcastOutput(getDebugBuffer());
-    }
-    return "ERROR";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+    snprintf(getDebugBuffer(), 1024, "Error: File not found or access denied: %s", path.c_str());
+    return getDebugBuffer();
   }
 
   // Read cap 60000 B: under the pager's 64 KB uint16_t-offset ceiling with
@@ -839,11 +839,9 @@ const char* cmd_fileview(const String& argsInput) {
   const size_t kReadCap = 60000;
   String content;
   if (!readTextLimited(path.c_str(), content, kReadCap, ctx)) {
-    if (ensureDebugBuffer()) {
-      snprintf(getDebugBuffer(), 1024, "Error: Unable to open: %s", path.c_str());
-      broadcastOutput(getDebugBuffer());
-    }
-    return "ERROR";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+    snprintf(getDebugBuffer(), 1024, "Error: Unable to open: %s", path.c_str());
+    return getDebugBuffer();
   }
   const bool readCapHit = (content.length() >= kReadCap);
 
@@ -904,12 +902,10 @@ const char* cmd_fileview(const String& argsInput) {
 
   if (page > pageCount) {
     free(body);
-    if (ensureDebugBuffer()) {
-      snprintf(getDebugBuffer(), 1024, "Error: page %d out of range — %s has %d page%s",
-               page, path.c_str(), pageCount, pageCount == 1 ? "" : "s");
-      broadcastOutput(getDebugBuffer());
-    }
-    return "ERROR";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+    snprintf(getDebugBuffer(), 1024, "Error: page %d out of range — %s has %d page%s",
+             page, path.c_str(), pageCount, pageCount == 1 ? "" : "s");
+    return getDebugBuffer();
   }
 
   if (ensureDebugBuffer()) {

@@ -13,6 +13,7 @@
 #include "System_CLI.h"
 #include "System_Command.h"
 #include "System_CommandLookupCore.h"
+#include "System_CommandReply.h"
 #include "System_Debug.h"
 #include "System_Settings.h"
 #include "System_Utils.h"
@@ -186,9 +187,7 @@ String executeCommandThroughRegistry(const String& argsInput) {
     // If so, append the stored usage string if available
     if (result && found->usage) {
       String resultStr = String(result);
-      bool isError = resultStr.startsWith("Usage:") || 
-                     resultStr.startsWith("Error:") || 
-                     resultStr.startsWith("Invalid");
+      bool isError = commandReplyIsFailure(result);
       
       if (isError) {
         // Handler returned an error - append stored usage if not already present

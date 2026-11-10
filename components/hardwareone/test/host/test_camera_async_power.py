@@ -98,7 +98,7 @@ int main() {
   reset();
   gSettings.cameraEnabled = false;
   reply = cmd_camerastart("async");
-  CHECK(requests() == 0 && startsWith(reply, "ERROR: Camera is disabled"));
+  CHECK(requests() == 0 && startsWith(reply, "Error: Camera is disabled"));
   // cam_power could not take it (worker or queue unavailable): an error reply.
   reset();
   queueAccepts = false;
@@ -124,7 +124,7 @@ int main() {
   CHECK(startSync == 1 && lastWaitMs == 60000 && requests() == 1);
   reset();
   gSettings.cameraEnabled = false;
-  CHECK(startsWith(cmd_camerastart(""), "ERROR: Camera is disabled") && requests() == 0);
+  CHECK(startsWith(cmd_camerastart(""), "Error: Camera is disabled") && requests() == 0);
   reset();
   syncResult = false;
   CHECK(std::strcmp(cmd_camerastart(""), "Error: Camera not detected. Check the cable and retry.") == 0);

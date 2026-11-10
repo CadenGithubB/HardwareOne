@@ -223,7 +223,7 @@ static void onUserCmdDone(bool ok, const char* result,
     DEBUG_G2F("[G2-USERS] stale result ignored (token=%u)", (unsigned)token);
     return;
   }
-  const bool failed = !ok || (result && strncmp(result, "Error", 5) == 0);
+  const bool failed = !ok;
   setResultMessage(failed, result);
   // Publish only after the message is complete. If the lens redraw allocation
   // or enqueue fails, a tap on the pending row can safely recover the result.

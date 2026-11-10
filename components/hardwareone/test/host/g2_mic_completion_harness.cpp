@@ -274,8 +274,9 @@ int main() {
     CHECK(submittedCookie.menuGen == currentGeneration && submittedCookie.seq == cookie().seq);
     CHECK(teardownCalls == 0); dispatch(); CHECK(tick());
   }
-  for (const char* result : {"Error: refused", "ERROR: refused"}) {
-    reset(); onMicDetailRuntimeDone(true, result, cookie(), nullptr);
+  // The executor reports a refused command as ok=false, whatever its text.
+  for (const char* result : {"Error: refused", "Usage: openmic"}) {
+    reset(); onMicDetailRuntimeDone(false, result, cookie(), nullptr);
     CHECK(commands.empty()); dispatch(); CHECK(tick());
   }
   reset(); onMicDetailRuntimeDone(false, "no", cookie(), nullptr);

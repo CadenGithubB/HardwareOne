@@ -256,9 +256,8 @@ static void reset() {
 
 // cmd_exec runs the camera command the page submitted last: the registry
 // (authorized: the line reaches the owner), the owner's enable gate and
-// cam_power admission, then the page's completion with the owner's reply. A
-// disabled camera answers "ERROR: ..." with ok=true, as the executor reports
-// a handler that ran.
+// cam_power admission, then the page's completion with the owner's reply. The
+// executor reports every "Error: ..." reply as ok=false.
 static bool runCameraCommand(bool authorized = true) {
   if (submitted.empty() || !lastCallback) return false;
   const std::string line = submitted.back();
@@ -273,8 +272,10 @@ static bool runCameraCommand(bool authorized = true) {
     ok = false;
     reply = "Error: Guest accounts are view-only.";
   } else if (start && !cameraEnabled) {
-    reply = "ERROR: Camera is disabled - run 'cameraenabled 1' first";
+    ok = false;
+    reply = "Error: Camera is disabled - run 'cameraenabled 1' first";
   } else if (!camPwrAccepts) {
+    ok = false;
     reply = "Error: camera start not queued (camera power worker unavailable)";
   } else {
     ++(start ? ownerStarts : ownerStops);
@@ -450,7 +451,7 @@ static void testMicCompletionRefreshes() {
   // A failed runtime skips the persist but still refreshes the rows.
   const size_t commands = submitted.size();
   ctx = Ctx::CmdExec;
-  done(true, "Error: no source", lastCookie, lastUserData);
+  done(false, "Error: no source", lastCookie, lastUserData);
   ctx = Ctx::Tap;
   runApplier();
   settle();

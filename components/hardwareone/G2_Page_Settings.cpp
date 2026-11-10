@@ -601,17 +601,12 @@ static void settingsShowBannerThenEntries(const char* msg) {
 
 // Match executeCommand's result contract. Successful human results are
 // stamped "OK:" unless they already begin with SUCCESS; structured JSON is
-// deliberately left byte-exact. `ok` alone is insufficient because command
-// lookup currently returns true with an "Unknown command" result.
+// deliberately left byte-exact. `ok` is the executor's verdict; the checks
+// after it confirm the reply is a completed change, not a prompt.
 static bool settingsCommitSucceeded(bool ok, const char* result) {
   if (!ok || !result) return false;
   while (*result == ' ' || *result == '\t' || *result == '\r' || *result == '\n') result++;
   if (!result[0]) return false;
-  if (strncmp(result, "Error", 5) == 0 ||
-      strncmp(result, "ERROR", 5) == 0 ||
-      strncmp(result, "Unknown command", 15) == 0) {
-    return false;
-  }
   if (strncmp(result, "OK", 2) == 0 || strncmp(result, "SUCCESS", 7) == 0) {
     return true;
   }

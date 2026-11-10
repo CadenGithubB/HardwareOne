@@ -3922,9 +3922,8 @@ const char* cmd_user_list(const String& argsInput) {
   const RosterReadResult read = visitUserRoster(userListTextVisit, &userCount);
   if (read == RosterReadResult::Missing) return "No users found";
   if (read != RosterReadResult::Ok) {
-    broadcastOutput(read == RosterReadResult::Malformed ? "Error: Malformed users file"
-                                                        : "Error: Failed to read users file");
-    return "ERROR";
+    return read == RosterReadResult::Malformed ? "Error: Malformed users file"
+                                               : "Error: Failed to read users file";
   }
   if (userCount == 0) {
     broadcastOutput("Users:");
@@ -3951,8 +3950,7 @@ const char* cmd_pending_list(const String& argsInput) {
   if (!file) {
     if (jsonOutput) return "{\"schema\":1,\"pending\":[]}";
     ERROR_SESSIONF("Failed to read pending users file");
-    broadcastOutput("Error: Failed to read pending users file");
-    return "ERROR";
+    return "Error: Failed to read pending users file";
   }
 
   // Parse JSON array (1KB should be enough for pending users)
@@ -3963,8 +3961,7 @@ const char* cmd_pending_list(const String& argsInput) {
   if (error) {
     if (jsonOutput) return "{\"schema\":1,\"pending\":[]}";
     ERROR_SESSIONF("Malformed pending users file");
-    broadcastOutput("Error: Malformed pending users file");
-    return "ERROR";
+    return "Error: Malformed pending users file";
   }
 
   JsonArray pending = doc.as<JsonArray>();

@@ -241,7 +241,7 @@ static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
   if (editorIsRemote()) return commitRemoteSettingValue(entry, value);
   char out[128];
   bool ok = executeOLEDCommandWithResult(String(cmdName) + " " + value, out, sizeof(out));
-  if (!ok || strncmp(out, "Error", 5) == 0) {
+  if (!ok) {
     gSettingsEditor.errorMessage = (out[0] != '\0') ? String(out) : String("Save failed");
     gSettingsEditor.errorDisplayUntil = millis() + 2500;
     return false;

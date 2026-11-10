@@ -114,7 +114,7 @@ static void umDispatch(const String& cmd) {
     return;
   }
   FsLockGuard fsGuard("oled.user_manager.result");
-  if (!ok || strncmp(out, "Error", 5) == 0) {
+  if (!ok) {
     const char* m = out[0] ? out : "Failed";
     if (strncmp(m, "Error: ", 7) == 0) m += 7;
     umShowError(m);

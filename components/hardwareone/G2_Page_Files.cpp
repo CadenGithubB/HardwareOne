@@ -657,8 +657,7 @@ static void renderFilesResult() {
 // deleted/old name.
 static void onFilesMutateDone(bool ok, const char* result,
                               const G2CmdCookie& cookie, void* /*userData*/) {
-  // executeCommand reports ok=true even for handler "Error: ..." strings —
-  // judge by the result prefix, not the flag.
+  // A completed change carries the executor's "OK" stamp.
   const bool success = ok && result && strncmp(result, "OK", 2) == 0;
   const char* msg = (result && result[0]) ? result : (ok ? "Done" : "Failed");
   if (strncmp(msg, "OK: ", 4) == 0) msg += 4;  // back-row brevity

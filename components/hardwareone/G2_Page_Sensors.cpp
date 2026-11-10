@@ -1232,13 +1232,7 @@ static void onMicAutostartRuntimeDone(bool ok, const char* result,
                                       const G2CmdCookie& cookie,
                                       void* userData) {
   const bool wantOn = ((uintptr_t)userData) != 0;
-  bool runtimeOk = ok;
-  if (result && (strncmp(result, "Error", 5) == 0 ||
-                 strncmp(result, "ERROR", 5) == 0)) {
-    runtimeOk = false;
-  }
-
-  if (runtimeOk) {
+  if (ok) {
     char line[32];
     snprintf(line, sizeof(line), "micautostart %s", wantOn ? "on" : "off");
     if (!g2SubmitHijackCommand(line, cookie, nullptr, nullptr)) {
@@ -1266,9 +1260,7 @@ static void onMicAutostartRuntimeDone(bool ok, const char* result,
 static void onCameraRuntimeDone(bool ok, const char* result,
                                 const G2CmdCookie& cookie, void* userData) {
   const bool wantOn = ((uintptr_t)userData) != 0;
-  const bool admitted = ok && !(result && (strncmp(result, "Error", 5) == 0 ||
-                                           strncmp(result, "ERROR", 5) == 0));
-  if (admitted) {
+  if (ok) {
     char line[32];
     snprintf(line, sizeof(line), "cameraautostart %s", wantOn ? "on" : "off");
     if (!g2SubmitHijackCommand(line, cookie, nullptr, nullptr)) {
