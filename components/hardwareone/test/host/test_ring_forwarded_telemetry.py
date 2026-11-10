@@ -56,8 +56,12 @@ def generated(component: Path, source_dir: Path | None) -> str:
     types = [extract_block(protocol_h, "enum G2PbWire") + ";",
              extract_block(health_h, "enum G2HealthMetric") + ";",
              extract_block(ring, "struct R1TelemetryCache") + ";"]
+    # The bounded length-delimited reader is shared with the protocol parser
+    # (older sources kept ring-local copies, picked up by optional() below).
     protocol_parts = [definition(protocol, signature) for signature in (
-        "bool g2PbReadVarint(", "bool g2PbReadTag(", "bool g2PbSkipField(")]
+        "bool g2PbReadVarint(", "bool g2PbReadTag(",
+        *(("bool g2PbReadDelimited(",) if "\nbool g2PbReadDelimited(" in protocol else ()),
+        "bool g2PbSkipField(")]
     production = [*optional(ring, "static bool ringPbReadDelimited("),
                   *optional(ring, "static bool ringPbSkipField("),
                   definition(ring, "void g2RingNoteForwardedTelemetry(")]

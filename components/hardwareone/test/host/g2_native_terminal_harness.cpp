@@ -244,7 +244,7 @@ static std::vector<uint8_t> wireBody(const Sent& frame,uint32_t tag){
     if(field==tag){const uint8_t* data=nullptr;size_t n=0;
       assert(wire==G2_PB_WIRE_LEN_DELIM&&g2PbReadDelimited(frame.pb.data(),frame.pb.size(),&pos,&data,&n));
       return {data,data+n};}
-    assert(g2PbSkipFieldStrict(frame.pb.data(),frame.pb.size(),&pos,wire));
+    assert(g2PbSkipField(frame.pb.data(),frame.pb.size(),&pos,wire));
   }
   assert(false);return {};
 }
@@ -252,8 +252,8 @@ static uint32_t wireNumber(const Sent& frame,uint32_t tag,uint32_t wanted){
   const auto body=wireBody(frame,tag);size_t pos=0;uint32_t field;uint8_t wire;uint64_t value;
   while(pos<body.size()){
     assert(g2PbReadTagStrict(body.data(),body.size(),&pos,&field,&wire));
-    if(field==wanted){assert(wire==G2_PB_WIRE_VARINT&&g2PbReadVarintStrict(body.data(),body.size(),&pos,&value));return uint32_t(value);}
-    assert(g2PbSkipFieldStrict(body.data(),body.size(),&pos,wire));
+    if(field==wanted){assert(wire==G2_PB_WIRE_VARINT&&g2PbReadVarint(body.data(),body.size(),&pos,&value));return uint32_t(value);}
+    assert(g2PbSkipField(body.data(),body.size(),&pos,wire));
   }
   assert(false);return 0;
 }
@@ -264,7 +264,7 @@ static std::vector<uint8_t> queryOffer(const Sent& frame){
   while(pos<body.size()){
     const size_t start=pos;uint32_t field;uint8_t wire;
     assert(g2PbReadTagStrict(body.data(),body.size(),&pos,&field,&wire));
-    assert(g2PbSkipFieldStrict(body.data(),body.size(),&pos,wire));
+    assert(g2PbSkipField(body.data(),body.size(),&pos,wire));
     if(field!=1)offer.insert(offer.end(),body.begin()+start,body.begin()+pos);
   }
   return offer;

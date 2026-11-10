@@ -444,62 +444,9 @@ bool g2PbEndNested(uint8_t* buf, size_t cap, size_t* pos, size_t innerStart) {
   return true;
 }
 
-bool g2PbReadVarint(const uint8_t* buf, size_t len, size_t* pos, uint64_t* v) {
-  uint64_t acc = 0;
-  int shift = 0;
-  while (*pos < len) {
-    uint8_t b = buf[(*pos)++];
-    acc |= ((uint64_t)(b & 0x7F)) << shift;
-    if ((b & 0x80) == 0) {
-      *v = acc;
-      return true;
-    }
-    shift += 7;
-    if (shift >= 64) return false;
-  }
-  return false;
-}
-
-bool g2PbReadTag(const uint8_t* buf, size_t len, size_t* pos,
-                 uint32_t* field, uint8_t* wire) {
-  uint64_t tag = 0;
-  if (!g2PbReadVarint(buf, len, pos, &tag)) return false;
-  *field = (uint32_t)(tag >> 3);
-  *wire  = (uint8_t)(tag & 0x7);
-  return true;
-}
-
-bool g2PbSkipField(const uint8_t* buf, size_t len, size_t* pos, uint8_t wire) {
-  switch (wire) {
-    case G2_PB_WIRE_VARINT: {
-      uint64_t dummy;
-      return g2PbReadVarint(buf, len, pos, &dummy);
-    }
-    case G2_PB_WIRE_FIXED64:
-      if (*pos + 8 > len) return false;
-      *pos += 8;
-      return true;
-    case G2_PB_WIRE_LEN_DELIM: {
-      uint64_t sz;
-      if (!g2PbReadVarint(buf, len, pos, &sz)) return false;
-      if (*pos + sz > len) return false;
-      *pos += (size_t)sz;
-      return true;
-    }
-    case G2_PB_WIRE_FIXED32:
-      if (*pos + 4 > len) return false;
-      *pos += 4;
-      return true;
-    default:
-      return false;
-  }
-}
-
-// Bounded protobuf varint reader for parsers that make state decisions. The
-// shared legacy reader above is intentionally left API-compatible; this form
-// additionally rejects values that overflow uint64 in their tenth byte.
-static bool g2PbReadVarintStrict(const uint8_t* buf, size_t len, size_t* pos,
-                                 uint64_t* value) {
+// Bounded protobuf varint reader: at most ten bytes, and a tenth byte that
+// would overflow uint64 is rejected. `pos` only moves forward.
+bool g2PbReadVarint(const uint8_t* buf, size_t len, size_t* pos, uint64_t* value) {
   if (!buf || !pos || !value || *pos > len) return false;
   uint64_t result = 0;
   for (unsigned i = 0; i < 10; i++) {
@@ -515,11 +462,25 @@ static bool g2PbReadVarintStrict(const uint8_t* buf, size_t len, size_t* pos,
   return false;
 }
 
+// Tag reader that reports whatever field number the bytes carry, field 0
+// included; the caller decides what an unknown field means.
+bool g2PbReadTag(const uint8_t* buf, size_t len, size_t* pos,
+                 uint32_t* field, uint8_t* wire) {
+  if (!field || !wire) return false;
+  uint64_t tag = 0;
+  if (!g2PbReadVarint(buf, len, pos, &tag)) return false;
+  *field = (uint32_t)(tag >> 3);
+  *wire  = (uint8_t)(tag & 0x7);
+  return true;
+}
+
+// Tag reader for parsers that make state decisions: field 0 and field numbers
+// beyond protobuf's 29 bits are refused.
 static bool g2PbReadTagStrict(const uint8_t* buf, size_t len, size_t* pos,
                               uint32_t* field, uint8_t* wire) {
   if (!field || !wire) return false;
   uint64_t tag = 0;
-  if (!g2PbReadVarintStrict(buf, len, pos, &tag)) return false;
+  if (!g2PbReadVarint(buf, len, pos, &tag)) return false;
   const uint64_t decodedField = tag >> 3;
   if (decodedField == 0 || decodedField > 0x1FFFFFFFu) return false;
   *field = (uint32_t)decodedField;
@@ -527,13 +488,15 @@ static bool g2PbReadTagStrict(const uint8_t* buf, size_t len, size_t* pos,
   return true;
 }
 
-// Read one bounded length-delimited value without the `pos + length`
-// overflow hazard. The returned span aliases `buf`.
-static bool g2PbReadDelimited(const uint8_t* buf, size_t len, size_t* pos,
-                              const uint8_t** bytes, size_t* byteLen) {
+// Read one length-delimited value. The declared length is compared with the
+// bytes that remain rather than added to `pos`, so a ten-byte length near 2^64
+// is rejected instead of wrapping past the check and moving `pos` backwards.
+// The returned span aliases `buf`.
+bool g2PbReadDelimited(const uint8_t* buf, size_t len, size_t* pos,
+                       const uint8_t** bytes, size_t* byteLen) {
   if (!buf || !pos || !bytes || !byteLen || *pos > len) return false;
   uint64_t encodedLen = 0;
-  if (!g2PbReadVarintStrict(buf, len, pos, &encodedLen)) return false;
+  if (!g2PbReadVarint(buf, len, pos, &encodedLen)) return false;
   if (encodedLen > (uint64_t)(len - *pos)) return false;
   *bytes = buf + *pos;
   *byteLen = (size_t)encodedLen;
@@ -541,12 +504,13 @@ static bool g2PbReadDelimited(const uint8_t* buf, size_t len, size_t* pos,
   return true;
 }
 
-static bool g2PbSkipFieldStrict(const uint8_t* buf, size_t len, size_t* pos,
-                                uint8_t wire) {
+// Skip one field with the same remaining-bytes bounds; `pos` only moves
+// forward and stays <= len.
+bool g2PbSkipField(const uint8_t* buf, size_t len, size_t* pos, uint8_t wire) {
   switch (wire) {
     case G2_PB_WIRE_VARINT: {
       uint64_t ignored = 0;
-      return g2PbReadVarintStrict(buf, len, pos, &ignored);
+      return g2PbReadVarint(buf, len, pos, &ignored);
     }
     case G2_PB_WIRE_FIXED64:
       if (!pos || *pos > len || len - *pos < 8) return false;
@@ -799,7 +763,7 @@ bool g2ParseTerminalRx(const uint8_t* pb, size_t len, G2TerminalRx* out) {
     if (field == 1 || field == 2) {
       bool& seen = field == 1 ? commandSeen : magicSeen;
       if (seen || wire != G2_PB_WIRE_VARINT ||
-          !g2PbReadVarintStrict(pb, len, &pos, &value) || value > UINT8_MAX) return false;
+          !g2PbReadVarint(pb, len, &pos, &value) || value > UINT8_MAX) return false;
       seen = true;
       (field == 1 ? event.command : event.magic) = uint8_t(value);
     } else {
@@ -843,7 +807,7 @@ bool g2ParseTerminalRx(const uint8_t* pb, size_t len, G2TerminalRx* out) {
           !g2TerminalTextValid(reinterpret_cast<const char*>(word), n, 32)) return false;
       memcpy(event.thinkingWord, word, n); event.thinkingWord[n] = 0;
     } else {
-      if (wire != G2_PB_WIRE_VARINT || !g2PbReadVarintStrict(body, bodyLen, &pos, &value) ||
+      if (wire != G2_PB_WIRE_VARINT || !g2PbReadVarint(body, bodyLen, &pos, &value) ||
           value > ((boolMask & bit) ? 1u : (byteMask & bit) ? UINT8_MAX : UINT32_MAX)) return false;
       values[field - 1] = uint32_t(value);
     }
@@ -897,7 +861,7 @@ static bool g2ParseSyncInfoData(const uint8_t* data, size_t dataLen,
     if (field == 1 || field == 2) {
       if (wire != G2_PB_WIRE_VARINT) return false;
       uint64_t value = 0;
-      if (!g2PbReadVarintStrict(data, dataLen, &pos, &value)) return false;
+      if (!g2PbReadVarint(data, dataLen, &pos, &value)) return false;
       if (field == 1) {
         parsed->hasBackgroundAppId = true;
         parsed->backgroundAppId = g2PbDecodeInt32(value);
@@ -907,7 +871,7 @@ static bool g2ParseSyncInfoData(const uint8_t* data, size_t dataLen,
       }
       continue;
     }
-    if (!g2PbSkipFieldStrict(data, dataLen, &pos, wire)) return false;
+    if (!g2PbSkipField(data, dataLen, &pos, wire)) return false;
   }
   return true;
 }
@@ -930,7 +894,7 @@ bool g2ParseSyncInfo(const uint8_t* payload, size_t payloadLen,
     if (field == 1 || field == 2) {
       if (wire != G2_PB_WIRE_VARINT) return false;
       uint64_t value = 0;
-      if (!g2PbReadVarintStrict(payload, payloadLen, &pos, &value)) return false;
+      if (!g2PbReadVarint(payload, payloadLen, &pos, &value)) return false;
       if (field == 1) {
         parsed.hasCommand = true;
         parsed.command = (uint32_t)value;
@@ -955,7 +919,7 @@ bool g2ParseSyncInfo(const uint8_t* payload, size_t payloadLen,
       continue;
     }
 
-    if (!g2PbSkipFieldStrict(payload, payloadLen, &pos, wire)) return false;
+    if (!g2PbSkipField(payload, payloadLen, &pos, wire)) return false;
   }
 
   *out = parsed;
@@ -2426,7 +2390,7 @@ bool g2ParseSettingVersions(const uint8_t* payload, size_t payloadLen,
       return false;
     }
     if (field != G2_SET_F_REQ) {
-      if (!g2PbSkipFieldStrict(payload, payloadLen, &pos, wire)) return false;
+      if (!g2PbSkipField(payload, payloadLen, &pos, wire)) return false;
       continue;
     }
     if (wire != G2_PB_WIRE_LEN_DELIM) return false;
@@ -2465,7 +2429,7 @@ bool g2ParseSettingVersions(const uint8_t* payload, size_t payloadLen,
         }
         continue;
       }
-      if (!g2PbSkipFieldStrict(body, bodyLen, &bodyPos, innerWire)) return false;
+      if (!g2PbSkipField(body, bodyLen, &bodyPos, innerWire)) return false;
     }
   }
 
@@ -2610,7 +2574,7 @@ bool g2ParseSettingEcho(const uint8_t* payload, size_t payloadLen,
       bool& seen = field == G2_SET_F_CMD ? commandSeen : magicSeen;
       uint64_t value;
       if (seen || wire != G2_PB_WIRE_VARINT ||
-          !g2PbReadVarintStrict(payload, payloadLen, &pos, &value) ||
+          !g2PbReadVarint(payload, payloadLen, &pos, &value) ||
           value > UINT32_MAX) return false;
       seen = true;
       (field == G2_SET_F_CMD ? command : magic) = (uint32_t)value;
@@ -2623,7 +2587,7 @@ bool g2ParseSettingEcho(const uint8_t* payload, size_t payloadLen,
       if ((outMagic || outCommand) &&
           (field == G2_SET_F_INFO || field == G2_SET_F_SEND_INFO ||
            field == 6 || field == 7)) return false;
-      if (!g2PbSkipFieldStrict(payload, payloadLen, &pos, wire)) return false;
+      if (!g2PbSkipField(payload, payloadLen, &pos, wire)) return false;
       continue;
     }
     const uint8_t* body = nullptr;
@@ -2662,12 +2626,12 @@ bool g2ParseSettingEcho(const uint8_t* payload, size_t payloadLen,
         // f5/f6 are version strings. Unknown, well-formed fields are skipped.
         if ((innerField == G2_SET_REQ_F_VER_LEFT || innerField == G2_SET_REQ_F_VER_RIGHT) &&
             innerWire != G2_PB_WIRE_LEN_DELIM) return false;
-        if (!g2PbSkipFieldStrict(body, bodyLen, &bodyPos, innerWire)) return false;
+        if (!g2PbSkipField(body, bodyLen, &bodyPos, innerWire)) return false;
         continue;
       }
       uint64_t value;
       if (innerWire != G2_PB_WIRE_VARINT ||
-          !g2PbReadVarintStrict(body, bodyLen, &bodyPos, &value)) return false;
+          !g2PbReadVarint(body, bodyLen, &bodyPos, &value)) return false;
       // Retain the existing U8 representation policy; this parser does not
       // infer new firmware-specific setting ranges from a numeric snapshot.
       *target = value > UINT8_MAX ? UINT8_MAX : (uint8_t)value;
@@ -2702,7 +2666,7 @@ bool g2ParseSettingWriteAck(const uint8_t* payload, size_t payloadLen,
       bool& seen = field == G2_SET_F_CMD ? commandSeen : magicSeen;
       uint64_t v;
       if (seen || wire != G2_PB_WIRE_VARINT ||
-          !g2PbReadVarintStrict(payload, payloadLen, &pos, &v) ||
+          !g2PbReadVarint(payload, payloadLen, &pos, &v) ||
           v > UINT32_MAX) return false;
       seen = true;
       (field == G2_SET_F_CMD ? command : magic) = (uint32_t)v;
@@ -2738,7 +2702,7 @@ bool g2ParseSettingWriteAck(const uint8_t* payload, size_t payloadLen,
     uint64_t v;
     if (!g2PbReadTagStrict(leaf, leafLen, &leafPos, &leafNumber, &leafWire) ||
         leafNumber > UINT8_MAX || leafWire != G2_PB_WIRE_VARINT ||
-        !g2PbReadVarintStrict(leaf, leafLen, &leafPos, &v) ||
+        !g2PbReadVarint(leaf, leafLen, &leafPos, &v) ||
         v > UINT32_MAX || leafPos != leafLen) return false;
     innerField = (uint8_t)setting;
     leafField = (uint8_t)leafNumber;
@@ -2820,7 +2784,7 @@ bool g2ParseDevCfgRx(const uint8_t* payload, size_t payloadLen,
     if (field == G2_WRAP_F_CMD || field == G2_WRAP_F_MAGIC) {
       if (wire != G2_PB_WIRE_VARINT) return false;
       uint64_t value = 0;
-      if (!g2PbReadVarintStrict(payload, payloadLen, &pos, &value)) return false;
+      if (!g2PbReadVarint(payload, payloadLen, &pos, &value)) return false;
       if (field == G2_WRAP_F_CMD) {
         parsed.hasCommand = true;
         parsed.command = (uint32_t)value;
@@ -2845,7 +2809,7 @@ bool g2ParseDevCfgRx(const uint8_t* payload, size_t payloadLen,
       continue;
     }
 
-    if (!g2PbSkipFieldStrict(payload, payloadLen, &pos, wire)) return false;
+    if (!g2PbSkipField(payload, payloadLen, &pos, wire)) return false;
   }
 
   *out = parsed;

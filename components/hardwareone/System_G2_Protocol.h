@@ -396,9 +396,14 @@ bool g2PbBeginNested(uint8_t* buf, size_t cap, size_t* pos,
                      uint32_t field, size_t* innerStart);
 bool g2PbEndNested(uint8_t* buf, size_t cap, size_t* pos, size_t innerStart);
 
+// Readers for bytes a peer supplied. Every one is bounded by the bytes that
+// remain, `pos` only moves forward, and a failed read leaves the outputs alone.
 bool g2PbReadVarint(const uint8_t* buf, size_t len, size_t* pos, uint64_t* v);
 bool g2PbReadTag(const uint8_t* buf, size_t len, size_t* pos,
                  uint32_t* field, uint8_t* wire);
+// The returned span aliases `buf`.
+bool g2PbReadDelimited(const uint8_t* buf, size_t len, size_t* pos,
+                       const uint8_t** bytes, size_t* byteLen);
 bool g2PbSkipField(const uint8_t* buf, size_t len, size_t* pos, uint8_t wire);
 
 // Parse the common protobuf wrapper prefix `f1=commandId, f2=magicRandom`.

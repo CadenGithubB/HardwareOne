@@ -38,7 +38,7 @@
 #include "System_Microphone.h" // micRecordingBusy — real recording lifecycle
 #endif
 #include "System_R1_Protocol.h"  // R1Encoder + decoder (real wire format)
-#include "System_G2_Protocol.h"  // g2PbReadTag/g2PbReadVarint for forwarded RingDataPackage frames
+#include "System_G2_Protocol.h"  // the bounded protobuf readers for forwarded RingDataPackage frames
 #include "G2_Health.h"           // history append + daily backfill
 #include "R1_HealthHistoryStore.h" // `ring health` history/store status
 #include "System_SensorLogging.h"  // `ring health json`, `ring poll`
@@ -3039,48 +3039,6 @@ static void ringExtractTelemetryCache(const R1Decoded& d,
 // Forwarded-telemetry sink (called from G2_Glasses sid=0x90/0x91 RX)
 // =============================================================================
 
-// Length-delimited read for the temple-supplied frame below. A declared length
-// is compared with the bytes that remain rather than added to `pos`, so a
-// ten-byte length near 2^64 is rejected instead of wrapping past the check and
-// moving `pos` backwards. The returned span aliases `buf`.
-static bool ringPbReadDelimited(const uint8_t* buf, size_t len, size_t* pos,
-                                const uint8_t** bytes, size_t* byteLen) {
-  uint64_t encodedLen = 0;
-  if (!g2PbReadVarint(buf, len, pos, &encodedLen)) return false;
-  if (*pos > len || encodedLen > (uint64_t)(len - *pos)) return false;
-  *bytes = buf + *pos;
-  *byteLen = (size_t)encodedLen;
-  *pos += *byteLen;
-  return true;
-}
-
-// Skip one field of a temple-supplied frame with the same remaining-bytes
-// bounds as ringPbReadDelimited; `pos` only moves forward and stays <= len.
-static bool ringPbSkipField(const uint8_t* buf, size_t len, size_t* pos,
-                            uint8_t wire) {
-  switch (wire) {
-    case G2_PB_WIRE_VARINT: {
-      uint64_t ignored = 0;
-      return g2PbReadVarint(buf, len, pos, &ignored);
-    }
-    case G2_PB_WIRE_FIXED64:
-      if (*pos > len || len - *pos < 8) return false;
-      *pos += 8;
-      return true;
-    case G2_PB_WIRE_LEN_DELIM: {
-      const uint8_t* ignored = nullptr;
-      size_t ignoredLen = 0;
-      return ringPbReadDelimited(buf, len, pos, &ignored, &ignoredLen);
-    }
-    case G2_PB_WIRE_FIXED32:
-      if (*pos > len || len - *pos < 4) return false;
-      *pos += 4;
-      return true;
-    default:
-      return false;
-  }
-}
-
 // When a temple forwards RingDataPackage frames to us on sid=0x90
 // (UX_RING_ROW_DATA_ID), decode the protobuf wrapper, walk into the nested
 // RingRawData (field 4, wire-type 2), and copy each present field into
@@ -3110,9 +3068,9 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
       if (!g2PbReadVarint(pb, pbLen, &pos, &cmdId)) return;
       hasCmdId = true;
     } else if (field == 4 && wire == G2_PB_WIRE_LEN_DELIM) {
-      if (!ringPbReadDelimited(pb, pbLen, &pos, &raw, &rawLen)) return;
+      if (!g2PbReadDelimited(pb, pbLen, &pos, &raw, &rawLen)) return;
     } else {
-      if (!ringPbSkipField(pb, pbLen, &pos, wire)) return;
+      if (!g2PbSkipField(pb, pbLen, &pos, wire)) return;
     }
   }
   if (!raw || rawLen == 0) return;
@@ -3141,7 +3099,7 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
     uint32_t f; uint8_t w;
     if (!g2PbReadTag(raw, rawLen, &p, &f, &w)) return;
     if (w != G2_PB_WIRE_VARINT) {
-      if (!ringPbSkipField(raw, rawLen, &p, w)) return;
+      if (!g2PbSkipField(raw, rawLen, &p, w)) return;
       continue;
     }
     if (!g2PbReadVarint(raw, rawLen, &p, &v)) return;
