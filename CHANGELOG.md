@@ -23,8 +23,7 @@ everything user-visible since the v0.99.99.1 tag.
   model, the SD card apart from `/sd/stt/u*`, and on boards with a radio companion chip (P4) the
   WiFi network that chip last joined. Refused over the web, Bluetooth and MQTT and while a new
   firmware is in OTA health probation. Plain `factoryreset` is unchanged. Host-tested and compiled
-  for every board; not yet run on hardware (readiness G-80). The FeatherS3 image does not fit its
-  application partition with this change (see `KNOWN_ISSUES.md`, FeatherS3 build).
+  for every board; not yet run on hardware (readiness G-80).
 
 ### Fixed
 - R1 ring: an NTP reply that moves an already set device clock by more than a day is no longer
