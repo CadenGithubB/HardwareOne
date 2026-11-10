@@ -63,12 +63,6 @@
 #include "i2csensor_rda5807.h"             // fmRadioEnabled, radioInitialized, fmRadioBuildDataJSON
 #include "System_MemUtil.h"             // ps_alloc, AllocPref
 
-// External helpers
-extern void getClientIP(httpd_req_t* req, String& ipOut);
-extern const char* buildSensorStatusJson();
-extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
-extern void streamEndHtml(httpd_req_t* req);
-extern void streamChunk(httpd_req_t* req, const char* chunk);
 
 // streamSensorsContent() is now defined as inline in web_sensors.h with I2C_SENSORS_ENABLED conditional
 

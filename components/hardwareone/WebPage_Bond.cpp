@@ -27,13 +27,6 @@
 #include "System_FileManager.h"   // FILE_MANAGER_MAX_PATH (path buffer sizing)
 #include <freertos/semphr.h>
 
-// Forward declarations
-extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
-extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
-extern void streamEndHtml(httpd_req_t* req);
-
-extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
-extern String getEspNowDeviceName(const uint8_t* mac);
 
 
 // =============================================================================
@@ -1488,10 +1481,7 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
             transportSessionEpochIsLive(SOURCE_WEB, requestSessionEpoch));
   };
   if (!requestSessionLive()) {
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(
-        req, "{\"ok\":false,\"error\":\"web_session_changed\"}");
+    webSendSessionChanged(req);
     return ESP_OK;
   }
 
@@ -1566,10 +1556,7 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
     const bool ok = executeUnifiedWebCommand(req, ctx, remoteCmd, out);
     if (!requestSessionLive()) {
       results.clear();
-      httpd_resp_set_status(req, "401 Unauthorized");
-      httpd_resp_set_type(req, "application/json");
-      httpd_resp_sendstr(
-          req, "{\"ok\":false,\"error\":\"web_session_changed\"}");
+      webSendSessionChanged(req);
       return ESP_OK;
     }
     if (!ok && out.length() == 0) out = "Error: command delivery failed";
@@ -1618,29 +1605,21 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
 
   if (!requestSessionLive()) {
     results.clear();
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(
-        req, "{\"ok\":false,\"error\":\"web_session_changed\"}");
+    webSendSessionChanged(req);
     return ESP_OK;
   }
 
   respDoc["ok"] = true;
   respDoc["count"] = count;
   if (!resultsBuffered || respDoc.overflowed()) {
-    httpd_resp_set_status(req, "500 Internal Server Error");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"batch_response_oom\"}");
+    sendJsonStatus(req, "500 Internal Server Error", "{\"ok\":false,\"error\":\"batch_response_oom\"}");
     return ESP_OK;
   }
   String respStr;
   serializeJson(respDoc, respStr);
   if (!requestSessionLive()) {
     respStr = String();
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(
-        req, "{\"ok\":false,\"error\":\"web_session_changed\"}");
+    webSendSessionChanged(req);
     return ESP_OK;
   }
   httpd_resp_sendstr(req, respStr.c_str());

@@ -12,6 +12,7 @@
 #include "System_User.h"
 #include "System_UserSettings.h"
 #include "System_Settings.h"
+#include "System_VFS.h"
 #include <lwip/sockets.h>
 #include <esp_random.h>
 #include <memory>
@@ -430,6 +431,31 @@ esp_err_t sendJsonError(httpd_req_t* req, const String& message) {
   body += "}";
   return sendJsonResponse(req, body.c_str(), body.length());
 }
+
+#if ENABLE_HTTPS
+const char* const kHttpsCertPath = "/system/certs/https_server.crt";
+const char* const kHttpsKeyPath  = "/system/certs/https_server.key";  // a file path, not key material. secret-guard: allow
+
+bool webLoadHttpsCertPair(String& certOut, String& keyOut, const char* reason) {
+  certOut = "";
+  keyOut = "";
+  const AuthContext auth = VFS::systemAuth(VFS::Scopes::CERTS, reason);
+  if (!VFS::existsGuarded(kHttpsCertPath, auth) || !VFS::existsGuarded(kHttpsKeyPath, auth)) return false;
+  FsLockGuard fsGuard(reason);
+  File certFile = VFS::openGuarded(kHttpsCertPath, "r", auth);
+  File keyFile  = VFS::openGuarded(kHttpsKeyPath, "r", auth);
+  if (certFile && keyFile) {
+    certOut = certFile.readString();
+    keyOut  = keyFile.readString();
+  }
+  if (certFile) certFile.close();
+  if (keyFile) keyFile.close();
+  if (certOut.length() > 0 && keyOut.length() > 0) return true;
+  certOut = "";
+  keyOut = "";
+  return false;
+}
+#endif
 
 // ============================================================================
 // Guest HTTP access gate

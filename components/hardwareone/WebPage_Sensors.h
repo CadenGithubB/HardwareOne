@@ -75,10 +75,6 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username);
 #include "System_EdgeImpulse_Web.h"
 #endif
 
-// External auth check to get username (for disabled page)
-extern bool isAuthed(httpd_req_t* req, String& usernameOut);
-extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
-extern void streamEndHtml(httpd_req_t* req);
 
 // Top-level Sensors page content streamer (wrapper that conditionally shows sensors or disabled message)
 inline void streamSensorsContent(httpd_req_t* req, const String& username) {

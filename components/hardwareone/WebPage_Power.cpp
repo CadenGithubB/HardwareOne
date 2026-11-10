@@ -11,8 +11,6 @@
 #include "WebServer_Server.h"     // streamBeginHtml/EndHtml, streamPageWithContent, WEB_AUTH_OR_RETURN
 #include "WebServer_Utils.h"
 
-extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic,
-                            const String& username, const String& activePage);
 
 // ===========================================================================
 // /api/power/status — live snapshot

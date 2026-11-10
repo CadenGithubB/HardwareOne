@@ -307,7 +307,6 @@ esp_err_t handleFilesList(httpd_req_t* req);
 esp_err_t handleFilesStats(httpd_req_t* req);
 esp_err_t handleFilesCreate(httpd_req_t* req);
 esp_err_t handleFileView(httpd_req_t* req);
-esp_err_t handleFileDelete(httpd_req_t* req);
 
 // Admin handlers (Batch 4)
 esp_err_t handleAdminPending(httpd_req_t* req);
@@ -324,7 +323,6 @@ esp_err_t handleCameraStatus(httpd_req_t* req);
 esp_err_t handleCameraFrame(httpd_req_t* req);
 esp_err_t handleMicRecordingsList(httpd_req_t* req);
 esp_err_t handleMicRecordingFile(httpd_req_t* req);
-esp_err_t handleMicRecordingDelete(httpd_req_t* req);
 
 // logAuthAttempt / recordLoginAttempt now live in System_User.h — they are
 // transport-neutral and must stay available when ENABLE_HTTP_SERVER=0.

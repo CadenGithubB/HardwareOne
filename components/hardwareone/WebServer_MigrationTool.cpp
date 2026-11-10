@@ -358,9 +358,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   // reads below grant user_settings/ and certs/ to admins only.)
   if (!isAdminUser(ctx.user)) {
     DEBUG_HTTPF("[Backup] Denied: user '%s' is not an admin", ctx.user.c_str());
-    httpd_resp_set_status(req, "403 Forbidden");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"error\":\"Admin access required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonStatus(req, "403 Forbidden", "{\"error\":\"Admin access required\"}");
     return ESP_OK;
   }
 
@@ -896,9 +894,7 @@ static esp_err_t handleRestore(httpd_req_t* req) {
 
   // Gate 2: Check that we're actually accepting restores
   if (gFirstTimeSetupState != SETUP_IN_PROGRESS || !gAcceptingRestore) {
-    httpd_resp_set_status(req, "403 Forbidden");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"error\":\"Restore not available. Device must be in first-time setup with Import from Backup selected.\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonStatus(req, "403 Forbidden", "{\"error\":\"Restore not available. Device must be in first-time setup with Import from Backup selected.\"}");
     return ESP_OK;
   }
 
@@ -921,9 +917,7 @@ static esp_err_t handleRestore(httpd_req_t* req) {
 
   // Read POST body (backup payload can be large)
   if (req->content_len == 0 || req->content_len > kMigrationPayloadMax) {
-    httpd_resp_set_status(req, "400 Bad Request");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"error\":\"Invalid payload size\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonStatus(req, "400 Bad Request", "{\"error\":\"Invalid payload size\"}");
     return ESP_OK;
   }
 
@@ -933,9 +927,7 @@ static esp_err_t handleRestore(httpd_req_t* req) {
   char* buf = (char*)ps_calloc(req->content_len + 1, 1, AllocPref::PreferPSRAM,
                                "migrate.payload");
   if (!buf) {
-    httpd_resp_set_status(req, "500 Internal Server Error");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"error\":\"Out of memory\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonStatus(req, "500 Internal Server Error", "{\"error\":\"Out of memory\"}");
     return ESP_OK;
   }
 
@@ -944,9 +936,7 @@ static esp_err_t handleRestore(httpd_req_t* req) {
     int ret = httpd_req_recv(req, buf + totalReceived, req->content_len - totalReceived);
     if (ret <= 0) {
       free(buf);
-      httpd_resp_set_status(req, "400 Bad Request");
-      httpd_resp_set_type(req, "application/json");
-      httpd_resp_send(req, "{\"error\":\"Failed to receive payload\"}", HTTPD_RESP_USE_STRLEN);
+      sendJsonStatus(req, "400 Bad Request", "{\"error\":\"Failed to receive payload\"}");
       return ESP_OK;
     }
     totalReceived += ret;
@@ -969,9 +959,7 @@ static esp_err_t handleRestore(httpd_req_t* req) {
   const char* magic = doc["magic"];
   if (!magic || strcmp(magic, "HWBACKUP") != 0) {
     free(buf);
-    httpd_resp_set_status(req, "400 Bad Request");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"error\":\"Not a valid HWBACKUP file\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonStatus(req, "400 Bad Request", "{\"error\":\"Not a valid HWBACKUP file\"}");
     return ESP_OK;
   }
 
@@ -996,9 +984,7 @@ static esp_err_t handleRestore(httpd_req_t* req) {
                "{\"error\":\"Invalid backup formatVersion\",\"supported\":%lu}",
                (unsigned long)kBackupFormatVersion);
     }
-    httpd_resp_set_status(req, "400 Bad Request");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, reply, HTTPD_RESP_USE_STRLEN);
+    sendJsonStatus(req, "400 Bad Request", reply);
     return ESP_OK;
   }
 
@@ -1203,23 +1189,7 @@ void startRestoreOnlyHttpServer() {
 #if ENABLE_HTTPS
   // Try HTTPS if enabled and certs are present
   if (gSettings.httpsEnabled && filesystemReady) {
-    static const char* CERT_PATH = "/system/certs/https_server.crt";
-    static const char* KEY_PATH  = "/system/certs/https_server.key";
-    bool certsOk = false;
-    if (VFS::existsGuarded(CERT_PATH, VFS::systemAuth(VFS::Scopes::CERTS, "migration.restore_certs")) &&
-        VFS::existsGuarded(KEY_PATH, VFS::systemAuth(VFS::Scopes::CERTS, "migration.restore_certs"))) {
-      FsLockGuard fsGuard("migration.restore_certs");
-      File cf = VFS::openGuarded(CERT_PATH, "r", VFS::systemAuth(VFS::Scopes::CERTS, "migration.restore_certs"));
-      File kf = VFS::openGuarded(KEY_PATH, "r", VFS::systemAuth(VFS::Scopes::CERTS, "migration.restore_certs"));
-      if (cf && kf) {
-        sRestoreCertData = cf.readString();
-        sRestoreKeyData  = kf.readString();
-        cf.close(); kf.close();
-        if (sRestoreCertData.length() > 0 && sRestoreKeyData.length() > 0) certsOk = true;
-      }
-      if (cf) cf.close();
-      if (kf) kf.close();
-    }
+    const bool certsOk = webLoadHttpsCertPair(sRestoreCertData, sRestoreKeyData, "migration.restore_certs");
     if (certsOk) {
       httpd_ssl_config_t ssl = HTTPD_SSL_CONFIG_DEFAULT();
       ssl.httpd.max_uri_handlers = 8;

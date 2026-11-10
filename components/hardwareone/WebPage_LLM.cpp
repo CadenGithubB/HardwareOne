@@ -37,10 +37,6 @@
 #include "WebServer_Utils.h"
 #include "WebPage_LLM.h"
 
-// External helpers from WebServer_Server.cpp
-extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
-extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
-extern void streamEndHtml(httpd_req_t* req);
 
 // ============================================================================
 // Helper: read POST body into a stack buffer through the shared bounded

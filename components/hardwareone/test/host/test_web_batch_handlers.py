@@ -113,6 +113,8 @@ def main() -> None:
         extract_block(web_utils_header, "struct WebBodyBuffer") + ";",
         *reader_declarations,
         extract_block(web_utils_header, "inline esp_err_t sendJsonResponse("),
+        extract_block(web_utils_header, "inline esp_err_t sendJsonStatus("),
+        extract_block(web_utils_header, "inline esp_err_t webSendSessionChanged("),
         extract_block(web_utils, "WebBodyStatus webRecvRequestBody("),
         extract_block(web_utils, "WebBodyBuffer webReadRequestBody("),
         extract_block(web_utils, "esp_err_t webSendBodyReadError("),

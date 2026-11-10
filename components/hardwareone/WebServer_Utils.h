@@ -32,6 +32,7 @@ struct WebMirrorBuf {
 };
 
 extern WebMirrorBuf gWebMirror;
+extern volatile unsigned long gWebMirrorSeq;  // defined in HardwareOne.cpp
 extern size_t gWebMirrorCap;
 
 #if ENABLE_HTTP_SERVER
@@ -54,6 +55,17 @@ extern size_t gWebMirrorCap;
 inline esp_err_t sendJsonResponse(httpd_req_t* req, const char* body, ssize_t len = HTTPD_RESP_USE_STRLEN) {
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, body, len);
+}
+
+// The same with a status line other than 200, e.g. "400 Bad Request".
+inline esp_err_t sendJsonStatus(httpd_req_t* req, const char* status, const char* body) {
+  httpd_resp_set_status(req, status);
+  return sendJsonResponse(req, body);
+}
+
+// The batch handlers answer this when the session ended while they ran.
+inline esp_err_t webSendSessionChanged(httpd_req_t* req) {
+  return sendJsonStatus(req, "401 Unauthorized", "{\"ok\":false,\"error\":\"web_session_changed\"}");
 }
 
 // Guest role HTTP gate. After auth succeeds: guests may only hit an allowlist
@@ -158,6 +170,16 @@ esp_err_t webSendBodyReadError(httpd_req_t* req, WebBodyStatus status, bool json
 String webJsonString(const char* text);
 inline String webJsonString(const String& text) { return webJsonString(text.c_str()); }
 esp_err_t sendJsonError(httpd_req_t* req, const String& message);
+
+#if ENABLE_HTTPS
+// The HTTPS certificate and private key the web server presents. Both the
+// main server and the restore-only server read them through this one loader.
+extern const char* const kHttpsCertPath;
+extern const char* const kHttpsKeyPath;
+// Reads both PEM files under the filesystem lock. True only when both exist
+// and both are non-empty; on false the two strings are left empty.
+bool webLoadHttpsCertPair(String& certOut, String& keyOut, const char* reason);
+#endif
 
 // ============================================================================
 // Navigation HTML Generation

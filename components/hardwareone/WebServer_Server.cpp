@@ -46,6 +46,7 @@
 #include "System_AuthIdentity.h"  // ExecIdentityGuard — install web ctx into TLS before calling userChangePasswordCore
 #include "System_CLI.h"
 #include "System_CLIMode.h"
+#include "System_CommandTypes.h"
 #include "System_UserSettings.h"
 #include "System_FirstTimeSetup.h"
 #include "System_Utils.h"
@@ -120,9 +121,6 @@
 
 // filesystemReady is provided by System_Filesystem.h (included above).
 
-// External dependencies from .ino (httpd_handle_t server declared in WebServer_Server.h)
-extern void streamCommonCSS(httpd_req_t* req);
-extern void streamDebugFlush();
 
 // Track whether the running server is HTTPS (true) or HTTP (false)
 bool gServerIsHttps = false;
@@ -677,7 +675,6 @@ void clearSession(httpd_req_t* req, const char* logoutReason) {
 
 // Forward declarations for Basic Auth fallback
 bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& headerPresent);
-extern bool isValidUser(const String& username, const String& password);
 
 static void zeroizeString(String& value) {
   if (value.length() > 0) {
@@ -1554,34 +1551,12 @@ int webBroadcastSessionsHuman() {
 // ============================================================================
 
 // Page rendering and authentication dependencies.
-extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
-extern void streamSensorsContent(httpd_req_t* req, const String& username);
-extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
-extern const char* buildSensorStatusJson();
-// gSensorStatusSeq declared below
 extern void streamDashboardContent(httpd_req_t* req, const String& username);
 extern void streamSettingsContent(httpd_req_t* req, const String& username);
-// Note: gJsonResponseMutex is now in mutex_system.h
-extern char* gJsonResponseBuffer;
-// buildSettingsJsonDoc is declared in System_Settings.h (now a 3-arg signature).
-extern bool isAdminUser(const String& username);
-extern String getCookieSID(httpd_req_t* req);
-extern void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
-extern bool isAuthed(httpd_req_t* req, String& userOut);
-extern volatile uint32_t gOutputFlags;
 
 // Auth handler dependencies
-extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
-extern void streamEndHtml(httpd_req_t* req);
-extern void streamChunk(httpd_req_t* req, const char* chunk);
 extern String getLogoutReason(const String& ip);
-extern bool isValidUser(const String& username, const String& password);
-extern int findSessionIndexBySID(const String& sid);
-// gWebMirror defined in WebServer_Utils.h
-extern unsigned long gWebMirrorSeq;
 extern void appendCommandToFeed(const char* origin, const String& cmd, const String& user, const String& ip);
-// Command types from shared header
-#include "System_CommandTypes.h"
 extern bool gMeshActivitySuspended;
 // gBroadcastSkipSessionIdx declared in web_server.h
 
@@ -1613,9 +1588,6 @@ extern void streamCLIContent(httpd_req_t* req, const String& username);
 extern void streamAutomationsContent(httpd_req_t* req, const String& username);
 extern void streamFilesContent(httpd_req_t* req, const String& username);
 extern void streamLoggingContent(httpd_req_t* req, const String& username);
-// Streaming debug helpers from .ino
-extern void streamDebugReset(const char* tag);
-extern void streamDebugFlush();
 
 // Universal page streaming function (moved from .ino)
 void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&)) {
@@ -1672,11 +1644,6 @@ void streamPageWithContent(httpd_req_t* req, const String& activePage, const Str
 // Settings now included from settings.h
 // Note: gJsonResponseMutex and FsLockGuard are now in mutex_system.h
 
-// Sensor status sequence declared in header (volatile)
-
-// Logging helpers.
-extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
-extern void broadcastOutput(const String& s, const CommandContext& ctx);
 
 // handleSensorsPage moved to web_sensors.cpp
 
@@ -3476,9 +3443,7 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   unsigned long now = millis();
   if (now - lastCmdTime < 50) {  // 50ms minimum between commands
     DEBUG_CMD_FLOWF("[web.cli] rate limited: %lums since last command", now - lastCmdTime);
-    httpd_resp_set_status(req, "429 Too Many Requests");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"error\":\"Rate limited - commands too frequent\",\"retry_after_ms\":50}");
+    sendJsonStatus(req, "429 Too Many Requests", "{\"error\":\"Rate limited - commands too frequent\",\"retry_after_ms\":50}");
     return ESP_OK;
   }
   lastCmdTime = now;
@@ -4187,14 +4152,11 @@ esp_err_t handleRegisterSubmit(httpd_req_t* req) {
 // ============================================================================
 
 // File handler dependencies
-extern bool buildFilesListing(const String& inPath, String& out, bool asJson, const AuthContext& ctx, bool hideAdminPaths);
 extern bool ensureFileViewBuffers();
 extern char* gFileReadBuf;
 extern char* gFileOutBuf;
 extern const size_t kFileReadBufSize;
 extern const size_t kFileOutBufSize;
-extern void fsLock(const char* tag);
-extern void fsUnlock();
 
 esp_err_t handleFilesList(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
@@ -4928,9 +4890,6 @@ esp_err_t handleIconGet(httpd_req_t* req) {
 esp_err_t handleIconTestPage(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   
-  extern const size_t EMBEDDED_ICONS_COUNT;
-  extern const EmbeddedIcon EMBEDDED_ICONS[];
-  
   httpd_resp_set_type(req, "text/html; charset=utf-8");
   
   String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Icon Test</title>";
@@ -5046,7 +5005,8 @@ esp_err_t handleAdminPending(httpd_req_t* req) {
   return ESP_OK;
 }
 
-esp_err_t handleAdminApproveUser(httpd_req_t* req) {
+// Approve and reject share everything except the account operation.
+static esp_err_t handleAdminPendingAction(httpd_req_t* req, bool (*op)(const String&, String&)) {
   WEB_AUTH_OR_RETURN(req, ctx);
   if (!isAdminUser(ctx.user)) {
     sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin access required\"}");
@@ -5068,48 +5028,20 @@ esp_err_t handleAdminApproveUser(httpd_req_t* req) {
   }
 
   String err;
-  bool ok = approvePendingUserInternal(username, err);
-  httpd_resp_set_type(req, "application/json");
-  if (ok) {
-    httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
-  } else {
+  if (!op(username, err)) {
     sendJsonError(req, err);
+    return ESP_OK;
   }
+  sendJsonResponse(req, "{\"success\":true}");
   return ESP_OK;
 }
 
+esp_err_t handleAdminApproveUser(httpd_req_t* req) {
+  return handleAdminPendingAction(req, approvePendingUserInternal);
+}
+
 esp_err_t handleAdminDenyUser(httpd_req_t* req) {
-  WEB_AUTH_OR_RETURN(req, ctx);
-  // Preserve JSON error contract for this endpoint
-  if (!isAdminUser(ctx.user)) {
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin access required\"}");
-    return ESP_OK;
-  }
-
-  // Read the full body (one username) and decode
-  static constexpr size_t kAdminFormBodyMax = 1024;
-  if (req->content_len == 0) {
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"No data\"}");
-    return ESP_OK;
-  }
-  WebBodyBuffer bodyBuf = webReadRequestBody(req, kAdminFormBodyMax, "http.passwd");
-  if (!bodyBuf.ok()) return webSendBodyReadError(req, bodyBuf.status, /*json=*/true);
-  String body = String(bodyBuf.c_str());
-  String username = urlDecode(extractFormField(body, "username"));
-
-  if (username.length() == 0) {
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"Username required\"}");
-    return ESP_OK;
-  }
-
-  String err;
-  if (!denyPendingUserInternal(username, err)) {
-    sendJsonError(req, err);
-    return ESP_OK;
-  }
-
-  sendJsonResponse(req, "{\"success\":true}");
-  return ESP_OK;
+  return handleAdminPendingAction(req, denyPendingUserInternal);
 }
 
 #if ENABLE_AUTOMATION
@@ -5586,11 +5518,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
       (!ctx.sid.length() ||
        transportSessionEpochIsLive(SOURCE_WEB, batchSessionEpoch));
   if (!batchSessionStillLive) {
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(
-        req,
-        "{\"ok\":false,\"error\":\"web_session_changed\"}");
+    webSendSessionChanged(req);
     return ESP_OK;
   }
 
@@ -5622,10 +5550,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
   if (ctx.sid.length() &&
       !transportSessionEpochIsLive(SOURCE_WEB, batchSessionEpoch)) {
     respStr = String();
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_sendstr(
-        req,
-        "{\"ok\":false,\"error\":\"web_session_changed\"}");
+    webSendSessionChanged(req);
     return ESP_OK;
   }
   httpd_resp_sendstr(req, respStr.c_str());
@@ -5682,26 +5607,7 @@ void startHttpServer() {
 #if ENABLE_HTTPS
   // Try HTTPS if enabled at runtime and certs are present
   if (gSettings.httpsEnabled && filesystemReady) {
-    static const char* CERT_PATH = "/system/certs/https_server.crt";
-    static const char* KEY_PATH  = "/system/certs/https_server.key";
-
-    bool certsOk = false;
-    AuthContext sysHttps = VFS::systemAuth(VFS::Scopes::CERTS, "web.https.cert.load");
-    if (VFS::existsGuarded(CERT_PATH, sysHttps) && VFS::existsGuarded(KEY_PATH, sysHttps)) {
-      File certFile = VFS::openGuarded(CERT_PATH, "r", sysHttps);
-      File keyFile  = VFS::openGuarded(KEY_PATH,  "r", sysHttps);
-      if (certFile && keyFile) {
-        sHttpsCertData = certFile.readString();
-        sHttpsKeyData  = keyFile.readString();
-        certFile.close();
-        keyFile.close();
-        if (sHttpsCertData.length() > 0 && sHttpsKeyData.length() > 0) {
-          certsOk = true;
-        }
-      }
-      if (certFile) certFile.close();
-      if (keyFile) keyFile.close();
-    }
+    const bool certsOk = webLoadHttpsCertPair(sHttpsCertData, sHttpsKeyData, "web.https.cert.load");
 
     if (certsOk) {
       httpd_ssl_config_t sslConfig = HTTPD_SSL_CONFIG_DEFAULT();

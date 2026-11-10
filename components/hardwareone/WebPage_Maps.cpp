@@ -44,8 +44,6 @@ void streamMapsPageLodZoomConstants(httpd_req_t* req) {
   }
 }
 
-// Thread-safe waypoint operations using existing mutex
-extern SemaphoreHandle_t gJsonResponseMutex;
 // filesystemReady is provided by System_Filesystem.h (included above).
 
 // =============================================================================
@@ -353,10 +351,6 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
 // Maps Page Handler
 // =============================================================================
 
-// Forward declarations for streaming
-extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
-extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
-extern void streamEndHtml(httpd_req_t* req);
 
 static void streamMapsContent(httpd_req_t* req, const String& username) {
   streamBeginHtml(req, "Maps", false, username, "maps");

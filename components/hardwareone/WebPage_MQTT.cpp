@@ -15,9 +15,6 @@
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
 
-// Forward declarations
-extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
-extern void streamEndHtml(httpd_req_t* req);
 
 // Stream MQTT page inner content
 void streamMqttInner(httpd_req_t* req) {
