@@ -14,6 +14,11 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Fixed
+- Debug logging: a category turned off for good with `debug<x> 0` came back after a reboot when a
+  system-log mask was saved (`log start flags=`, the Settings grid), because log autostart applied
+  that saved mask as a whole. A persistent `debug<x> 0|1`, and the sub-flag commands, now update the
+  saved mask too; `temp` changes stay runtime-only. Host-tested; not yet tested on hardware
+  (readiness Section 8).
 - Seeed XIAO ESP32S3 without the Sense expansion can be built: `python3 tools/build_config.py build
   xiao-base`. Every ESP32-S3 build used to define `XIAO_ESP32S3_SENSE_ENABLED`, so the base board
   always got the Sense image. The flag is now set only in `System_BuildConfig.h` and its override

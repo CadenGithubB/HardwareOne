@@ -39,7 +39,13 @@ bool parseSystemLogFlags(const String& flagsStr, DebugFlagMask& out);
 void formatSystemLogFlags(DebugFlagMask mask, char* out, size_t outSize);
 String formatSystemLogFlags(DebugFlagMask mask);
 bool systemLogApplyPersistedFlags();
+bool systemLogFollowFlagChange(DebugFlagMask touched);
 void formatSystemLogStatus(char* out, size_t outSize);
+// Production setSetting also requests a save; the harness counts the writes.
+static int settingWrites = 0;
+static void setSetting(String& field, const String& value) {
+  if (field != value) { field = value; ++settingWrites; }
+}
 // INSERT_PRODUCTION
 
 static constexpr size_t kCliStatus = HW1_CLI_STATUS_BYTES;
@@ -165,6 +171,38 @@ int main() {
   gDebugFlags = live;
   gSettings.systemLogFlags = "zz";
   CHECK(systemLogApplyPersistedFlags() && gDebugFlags == DebugFlagMask(0));
+
+  // A persistent per-flag change follows into the saved mask, so the next
+  // boot's autostart does not bring a cleared category back.
+  const DebugFlagMask ring = DEBUG_BIT(224), http = DEBUG_BIT(3), parent = DEBUG_BIT(64);
+  gSettings.systemLogFlags = formatSystemLogFlags(ring | http | parent);
+  settingWrites = 0;
+  gDebugFlags = http | parent;  // `debugring 0` cleared the live bit
+  CHECK(systemLogFollowFlagChange(ring) && settingWrites == 1);
+  gDebugFlags = DebugFlagMask(0);  // reboot: the per-flag settings load, then autostart applies the saved mask
+  CHECK(systemLogApplyPersistedFlags() && gDebugFlags == (http | parent));
+  // Turning a category on reaches the saved mask too; other saved bits stay.
+  gDebugFlags = ring;
+  CHECK(systemLogFollowFlagChange(ring) && settingWrites == 2);
+  CHECK(systemLogApplyPersistedFlags() && gDebugFlags == (ring | http | parent));
+  // Only the touched bits are copied: live bits outside them never leak in,
+  // and a saved bit outside them is not dropped.
+  gDebugFlags = DEBUG_BIT(10);
+  CHECK(!systemLogFollowFlagChange(DEBUG_BIT(11)) && settingWrites == 2);
+  // A recomputed family parent travels with its member.
+  gDebugFlags = ring | http;
+  CHECK(systemLogFollowFlagChange(DEBUG_BIT(65) | parent) && settingWrites == 3);
+  CHECK(systemLogApplyPersistedFlags() && gDebugFlags == (ring | http));
+  // Already in agreement: no write.
+  CHECK(!systemLogFollowFlagChange(ring | http | parent) && settingWrites == 3);
+  // Nothing saved, or text that does not parse: the per-flag settings stand
+  // alone and nothing is written.
+  for (const char* none : {"", "0x"}) {
+    gSettings.systemLogFlags = none;
+    gDebugFlags = ring;
+    CHECK(!systemLogFollowFlagChange(ring) && settingWrites == 3);
+    CHECK(std::string(gSettings.systemLogFlags.c_str()) == none);
+  }
 
   std::fprintf(stderr, "checks=%d\n", checks);
   std::puts("SYSTEM_LOG_STATUS PASS");

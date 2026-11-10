@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Execute the shipping system-log status and flag formatters.
 
-formatSystemLogStatus, both formatSystemLogFlags overloads, parseSystemLogFlags
-and systemLogApplyPersistedFlags come from System_Debug.cpp; DebugFlagMask,
+formatSystemLogStatus, both formatSystemLogFlags overloads, parseSystemLogFlags,
+systemLogApplyPersistedFlags and systemLogFollowFlagChange come from
+System_Debug.cpp; DebugFlagMask,
 DEBUG_BIT and the MSG_ROUTE_* values from System_Debug.h, all unchanged. The
 buffer sizes are read from the production callers (CLI `log status`, the web
 status page and the flag messages), so a caller change fails here first.
@@ -48,6 +49,7 @@ def generate() -> str:
         "void formatSystemLogFlags(DebugFlagMask mask, char* out, size_t outSize)",
         "String formatSystemLogFlags(DebugFlagMask mask)",
         "bool systemLogApplyPersistedFlags()",
+        "bool systemLogFollowFlagChange(DebugFlagMask touched)",
         "static size_t systemLogMaxSizeBytes()",
         "static int systemLogMaxRotations()",
         "static bool systemLogBlockedByReserve(const String& path)",

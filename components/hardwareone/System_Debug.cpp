@@ -1578,6 +1578,15 @@ void dbgRecomputeParent(DbgFlagIdx root) {
   updateParentDebugFlag(kDbgMask[root], any);
 }
 
+// The bits of the aggregated family roots in a bank: a persistent toggle of
+// any family member may have recomputed them.
+static DebugFlagMask dbgFamilyRootMask(DbgBank bank) {
+  DebugFlagMask roots = (DebugFlagMask)0;
+  for (int i = 0; i < DBG_FLAG_COUNT; ++i)
+    if (kDbgBank[i] == bank && kDbgAggMode.m[i] != DBG_AGG_NONE) roots = roots | kDbgMask[i];
+  return roots;
+}
+
 void dbgRecomputeAllParents() {
   for (int i = 0; i < DBG_FLAG_COUNT; ++i)
     if (kDbgAggMode.m[i] != DBG_AGG_NONE) dbgRecomputeParent((DbgFlagIdx)i);
@@ -1696,6 +1705,7 @@ static const char* dbgFlagCmd(DbgFlagIdx idx, const String& argsInput) {
   setDebugSetting(*settingPtr, (bool)(v != 0));
   if (v) setDebugFlag(flagBit); else clearDebugFlag(flagBit);
   dbgApplyHook(idx, false, v, settingPtr);
+  systemLogFollowFlagChange(flagBit | dbgFamilyRootMask(kDbgBank[idx]));
   snprintf(buf, sizeof(buf), "%s %s (persistent)", name, *settingPtr ? "enabled" : "disabled");
   return buf;
 }
@@ -1722,6 +1732,7 @@ static const char* dbgSubCmd(DbgSubIdx sidx, const String& argsInput) {
     snprintf(buf, sizeof(buf), "%s %s (runtime only)", kDbgSubRetName[sidx], v ? "enabled" : "disabled");
     return buf;
   }
+  systemLogFollowFlagChange(kDbgMask[kDbgSubParentIdx[sidx]]);
   snprintf(buf, sizeof(buf), "%s %s (persistent)", kDbgSubRetName[sidx], *kDbgSubSettingPtr[sidx] ? "enabled" : "disabled");
   return buf;
 }
@@ -1877,6 +1888,22 @@ bool systemLogApplyPersistedFlags() {
   DebugFlagMask restored = (DebugFlagMask)0;
   if (!parseSystemLogFlags(gSettings.systemLogFlags, restored)) return false;
   gDebugFlags = restored;
+  return true;
+}
+
+// A persistent per-flag change (`debug<x> 0|1`) also lands in the saved
+// system-log mask, when one is saved. `log autostart` and a plain `log start`
+// apply that mask as a whole, so a category turned off for good came back at
+// the next boot. `touched` names the bits the command owns or may have
+// recomputed; their live values are copied. Runtime-only (`temp`) changes
+// never reach here.
+bool systemLogFollowFlagChange(DebugFlagMask touched) {
+  if (gSettings.systemLogFlags.length() == 0) return false;  // nothing saved: the per-flag settings stand alone
+  DebugFlagMask saved = (DebugFlagMask)0;
+  if (!parseSystemLogFlags(gSettings.systemLogFlags, saved)) return false;
+  const DebugFlagMask merged = (saved & ~touched) | (gDebugFlags & touched);
+  if (merged == saved) return false;
+  setSetting(gSettings.systemLogFlags, formatSystemLogFlags(merged));
   return true;
 }
 
@@ -2718,7 +2745,8 @@ void systemLogAutoStart() {
   gSystemLogCategoryTags = gSettings.systemLogCategoryTags;
 
   // Restore last-used category mask so autostart logs the same categories
-  // that were selected when system logging was last started.
+  // that were selected when system logging was last started. Persistent
+  // per-flag commands keep that mask current (systemLogFollowFlagChange).
   systemLogApplyPersistedFlags();
   
   // Ensure any previous file handle is closed (safety check)

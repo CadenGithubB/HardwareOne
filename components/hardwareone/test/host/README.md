@@ -205,13 +205,16 @@ spelling, the persistence request before the apply, no request for an unchanged
 value, refusals that change nothing, and the boot clamp into 0-3.
 
 `system_log_status` runs `formatSystemLogStatus`, both `formatSystemLogFlags`
-overloads, `parseSystemLogFlags` and `systemLogApplyPersistedFlags`. It reads the
+overloads, `parseSystemLogFlags`, `systemLogApplyPersistedFlags` and
+`systemLogFollowFlagChange`. It reads the
 CLI, web-page and flag-message buffer sizes from their callers, renders the three
 logging states into both status buffers, fills the web buffer to 511 bytes plus
 NUL for a long path, and checks null and zero-size outputs, the 70-byte minimum
 for the 69-character mask, a format/parse round trip of all 256 single-bit masks
-in both accepted forms, and the persisted-mask restore (empty or prefix-only text
-keeps the live flags; non-hex text currently parses as zero).
+in both accepted forms, the persisted-mask restore (empty or prefix-only text
+keeps the live flags; non-hex text currently parses as zero), and the saved mask
+following a persistent per-flag change (only the touched bits are copied, a
+recomputed parent travels with them, nothing is written without a saved mask).
 
 `command_feed` runs `originPrefix` and `appendCommandToFeed` from
 `HardwareOne.cpp`, with the CM5/live-audio classifiers, audit redaction and the
