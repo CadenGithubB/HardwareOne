@@ -58,6 +58,7 @@
 constexpr uint32_t CMD_EXEC_STACK_WORDS = 10240;    // 10 KB (was 8 KB; see the P1-8 block above). Automation add validates commands via findCommand.
 constexpr uint32_t BOOT_NET_STACK_WORDS = 8192;     // 8 KB, one boot only: runs the connect + NTP path `openwifi` runs on cmd_exec.
                                                      // Kept at the old cmd_exec size: it is transient and was not one of the tight stacks.
+constexpr uint32_t WIFI_REHUNT_STACK_WORDS = 8192;  // 8 KB, transient: the same connect hunt as boot_net, without NTP (wifiRehuntPoll).
 constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 4096;     // 4 KB (was annotated 16KB — 4x wrong). History below cites 4x-inflated HWMs:
                                                      // runtime task-stack reports flagged
                                                      // sensor_queue CRITICAL at ~79%

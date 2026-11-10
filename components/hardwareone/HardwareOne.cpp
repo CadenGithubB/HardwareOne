@@ -2693,6 +2693,9 @@ void hardwareone_loop() {
   // snapshotted on the arduino_events task (kept tiny-frame there; the
   // 256 B log line + SystemEvent local stack HERE instead).
   wifiEventLogDrain();
+  // A connection lost a minute ago and not restored by the driver: hunt across
+  // every saved network (the driver retries only the one that dropped).
+  wifiRehuntPoll();
 
   perfMarkSection(3);  // section 4: NETWORK MAINTENANCE
 

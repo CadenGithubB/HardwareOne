@@ -12,6 +12,8 @@
 #if ENABLE_WIFI
 
 #include "System_WiFi.h"
+#include "System_WiFiRehuntPolicy.h"  // when a lost connection is followed by a hunt
+#include "System_TaskUtils.h"  // xTaskCreateLogged, WIFI_REHUNT_STACK_WORDS
 #include "System_ESPNow.h"  // espnowOwnsRadio — radio ownership (stub when ESP-NOW is compiled out)
 #include "network/wifi/System_WiFiNetworksInternal.h"
 #include "System_Settings.h"      // Unified settings persistence
@@ -198,9 +200,14 @@ struct CoexConnectScope {
 }  // namespace
 #else
 namespace {
-// Records compiled out: the scan and connect sites keep their scopes.
+// Records compiled out: the scan and connect sites keep their scopes. The
+// connect scope still counts attempts in flight, which wifiRehuntPoll reads.
+std::atomic<uint8_t> sCoexConnectDepth{0};
 struct CoexScanOnAir { CoexScanOnAir() {} };
-struct CoexConnectScope { CoexConnectScope() {} };
+struct CoexConnectScope {
+  CoexConnectScope() { sCoexConnectDepth.fetch_add(1); }
+  ~CoexConnectScope() { sCoexConnectDepth.fetch_sub(1); }
+};
 }  // namespace
 #endif
 
@@ -798,7 +805,7 @@ bool connectToBestWiFiNetwork(uint32_t budgetMs, WifiConnectOrigin origin) {
     // and let that command decide what happens next.
     WifiRadioMutationGuard radioGuard;
     if (radioGuard.acquired()) esp_wifi_disconnect();
-    broadcastOutput("WiFi boot connect stopped by a WiFi command");
+    broadcastOutput("WiFi background connect stopped by a WiFi command");
     return false;
   }
 
@@ -1426,6 +1433,9 @@ const char* cmd_wifidrop(const String& argsInput) {
   if (!wifiSupersedeBackgroundConnect()) {
     return "Error: WiFi boot connect is still stopping; retry wifidisconnect";
   }
+  // The device is asked to stay unassociated: a hunt still pending from an
+  // earlier lost connection must not bring it back.
+  wifiRehuntCancel();
   wifi_mode_t mode;
   if (esp_wifi_get_mode(&mode) != ESP_OK) {
     return "Error: WiFi is not initialized";
@@ -2802,6 +2812,8 @@ static void wifiEventLogger(arduino_event_id_t event, arduino_event_info_t info)
 // Main-loop drain for the snapshot above. A disconnect during shutdown may
 // never get drained (esp_restart preempts the loop) — acceptable: that
 // teardown is commanded, and the reboot itself is already logged.
+static void wifiRehuntNoteDropped();
+
 void wifiEventLogDrain() {
   {
     char ip[sizeof(sWifiConnIp)];
@@ -2838,6 +2850,114 @@ void wifiEventLogDrain() {
   snprintf(det, sizeof(det), "reason=%d/%s (connected %lus)",
            reason, reasonName, (unsigned long)connSecs);
   systemEventPost(SYSEVT_WIFI_DISCONNECTED, ssid, det);
+  // ASSOC_LEAVE is what the device's own disconnects report (wifidrop,
+  // closewifi, a switch to another network); the driver does not retry after
+  // it either. Every other reason is a link the device still wants.
+  if (reason != WIFI_REASON_ASSOC_LEAVE) wifiRehuntNoteDropped();
+}
+
+// ----------------------------------------------------------------------------
+// Rehunt: a lost connection the driver has not restored is followed by a hunt
+// across every saved network (rules in System_WiFiRehuntPolicy.h). The hunt is
+// a BACKGROUND connect on its own short-lived task: no console reads, no NTP
+// (the clock was set when the lost connection was made), and every Wi-Fi
+// command supersedes it exactly as it supersedes the boot connect.
+static WifiRehuntPolicy sRehunt;
+static portMUX_TYPE sRehuntMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void wifiRehuntNoteDropped() {
+  portENTER_CRITICAL(&sRehuntMux);
+  sRehunt.noteDropped(millis());
+  portEXIT_CRITICAL(&sRehuntMux);
+}
+
+void wifiRehuntCancel() {
+  portENTER_CRITICAL(&sRehuntMux);
+  sRehunt.clear();
+  portEXIT_CRITICAL(&sRehuntMux);
+}
+
+static void wifiRehuntTask(void*) {
+  {
+    // A new task starts without the main task's SYSTEM identity.
+    SYSTEM_IDENTITY_SCOPE("wifi.rehunt");
+    // The driver may have rejoined between the poll and this task's first run.
+    bool connected = WiFi.isConnected();
+    bool hunted = false;
+    if (!connected && !wifiBackgroundConnectSuperseded()) {
+      hunted = true;
+      connected = connectToBestWiFiNetwork(WifiRehuntPolicy::kHuntBudgetMs,
+                                           WifiConnectOrigin::BACKGROUND);
+    }
+    const bool superseded = wifiBackgroundConnectSuperseded();
+    wifiBackgroundConnectReserve(false);
+    portENTER_CRITICAL(&sRehuntMux);
+    sRehunt.huntEnded(connected, superseded, millis());
+    const uint8_t failed = sRehunt.failures;
+    const uint32_t nextMs = sRehunt.waitMs();
+    portEXIT_CRITICAL(&sRehuntMux);
+    if (connected && hunted) {
+      logSystemEvent("WIFI", "back online on '%s' after a hunt across the saved networks",
+                     WiFi.SSID().c_str());
+    } else if (!connected && !superseded && failed == 1) {
+      // Once per outage: later hunts fail quietly so a long outage does not
+      // fill the event log.
+      logSystemEvent("WIFI", "no saved network in reach; hunting again in %lu s, then every %lu s at most",
+                     (unsigned long)(nextMs / 1000),
+                     (unsigned long)(WifiRehuntPolicy::kGapMs[2] / 1000));
+    }
+  }
+  const UBaseType_t freeBytes = uxTaskGetStackHighWaterMark(nullptr);
+  if (freeBytes < 1024) {
+    WARN_SYSTEMF("[STACK] wifi_rehunt: only %lu of %lu bytes never used",
+                 (unsigned long)freeBytes, (unsigned long)WIFI_REHUNT_STACK_WORDS);
+  }
+  vTaskDelete(nullptr);
+}
+
+void wifiRehuntPoll() {
+  static uint32_t sLastPollMs = 0;
+  const uint32_t now = millis();
+  if (uint32_t(now - sLastPollMs) < 1000) return;
+  sLastPollMs = now;
+
+  portENTER_CRITICAL(&sRehuntMux);
+  const bool waiting = sRehunt.wanted && !sRehunt.hunting;
+  portEXIT_CRITICAL(&sRehuntMux);
+  if (!waiting) return;
+
+  WifiRehuntPolicy::Inputs in;
+  in.connected = WiFi.isConnected();
+  // The same reading of "wants to reconnect" as the radio status line; the
+  // settings are checked too because closing Wi-Fi only clears the runtime flag.
+  in.armed = gSettings.wifiEnabled && gSettings.wifiAutoReconnect &&
+             wifiInitialized.load() && WiFi.getAutoReconnect();
+  // Not while a boot connect or a commanded connect has the radio, and not
+  // while the P4's radio companion is away (its restore reconnects by itself).
+  in.held = wifiBackgroundConnectActive() || sCoexConnectDepth.load() != 0 ||
+            !radioCompanionOnline();
+  in.savedCount = wifiNetworkCount();
+
+  portENTER_CRITICAL(&sRehuntMux);
+  const bool start = sRehunt.poll(in, now);
+  const bool first = sRehunt.failures == 0;
+  portEXIT_CRITICAL(&sRehuntMux);
+  if (!start) return;
+
+  if (first) {
+    logSystemEvent("WIFI", "still offline after %lu s; trying all %d saved networks",
+                   (unsigned long)(WifiRehuntPolicy::kFirstDelayMs / 1000), in.savedCount);
+  }
+  // Reserved before the task exists, so a command that arrives first still
+  // supersedes the hunt.
+  wifiBackgroundConnectReserve(true);
+  if (xTaskCreateLogged(wifiRehuntTask, "wifi_rehunt", WIFI_REHUNT_STACK_WORDS, nullptr,
+                        TASK_PRIORITY_LOW, nullptr, "wifi rehunt", PRO_CORE) != pdPASS) {
+    wifiBackgroundConnectReserve(false);
+    portENTER_CRITICAL(&sRehuntMux);
+    sRehunt.huntEnded(false, false, millis());
+    portEXIT_CRITICAL(&sRehuntMux);
+  }
 }
 
 // Ensure WiFi is initialized (lazy initialization to save ~32KB at boot)

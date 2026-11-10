@@ -61,6 +61,15 @@ set_target_properties(quicknote_policy_tests PROPERTIES
 target_compile_options(quicknote_policy_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# When a lost Wi-Fi connection is followed by a hunt across every saved network
+# (System_WiFiRehuntPolicy.h, driven by System_WiFi.cpp): delays, back-off, the
+# single-network rule and the ways it ends. Production dependency-free header.
+add_executable(wifi_rehunt_policy_tests test_wifi_rehunt_policy.cpp)
+set_target_properties(wifi_rehunt_policy_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(wifi_rehunt_policy_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # The packed atomic command-admission/lifecycle gate is the production header
 # used by System_MQTT.cpp. Exercise its deterministic transitions and the
 # command-vs-stop race without an Arduino or ESP-IDF shim.
@@ -1204,6 +1213,7 @@ add_test(NAME config_load_tests COMMAND config_load_tests)
 add_test(NAME g2_hold_gesture_tests COMMAND g2_hold_gesture_tests)
 add_test(NAME stt_raw_ring_tests COMMAND stt_raw_ring_tests)
 add_test(NAME quicknote_policy_tests COMMAND quicknote_policy_tests)
+add_test(NAME wifi_rehunt_policy_tests COMMAND wifi_rehunt_policy_tests)
 add_test(NAME mqtt_lifecycle_gate_tests COMMAND mqtt_lifecycle_gate_tests)
 add_test(NAME memutil_tests COMMAND memutil_tests)
 add_test(NAME memutil_no_psram COMMAND memutil_no_psram_tests)

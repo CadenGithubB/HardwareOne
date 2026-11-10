@@ -75,7 +75,10 @@ def generate(component: Path = COMPONENT) -> str:
         support.append("static bool huntBest(uint32_t, WifiConnectOrigin) "
                        "{ return connectToBestWiFiNetwork(); }")
     # The coexistence mirror counts every attempt as "connecting" while it runs.
-    support.extend(re.findall(r"^std::atomic<\w+> sCoex\w+\{.*;$", source, re.MULTILINE))
+    # Only the records-on branch: the records-off branch keeps its own depth counter.
+    coex_start = source.index("#if ENABLE_BLE_COEX_RECORDS\nnamespace {\n")
+    coex_state = source[coex_start:source.index("#else", coex_start)]
+    support.extend(re.findall(r"^std::atomic<\w+> sCoex\w+\{.*;$", coex_state, re.MULTILINE))
     support.append(extract_block(source, "struct CoexConnectScope") + ";")
     declarations = FORWARD_DECLARATIONS.findall(source)
     require(len(declarations) >= 2, "System_WiFi.cpp forward-declares the connect helpers")

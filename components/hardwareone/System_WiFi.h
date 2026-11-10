@@ -126,11 +126,13 @@ enum class WifiConnectOrigin : uint8_t {
   BOOT,         // the boot connect when setup itself waits for it
   // The boot connect on its own task while setup carries on. It never reads
   // the console (the main loop owns it), leaves NTP to the boot sequence that
-  // follows it, and an explicit radio command supersedes it (below).
+  // follows it, and an explicit radio command supersedes it (below). The hunt
+  // after a lost connection (wifiRehuntPoll) runs under the same rules.
   BACKGROUND,
 };
 
-// A BACKGROUND connect can still be hunting when a radio command arrives on
+// A BACKGROUND connect (the boot connect on its task, or the hunt that follows
+// a lost connection) can still be hunting when a radio command arrives on
 // the command executor. openwifi, closewifi, wifidisconnect, radiopower off and
 // the radio companion's procedures supersede it: this asks the hunt to stop and
 // waits for it to let go of the radio. Returns true once no background connect
@@ -192,6 +194,14 @@ bool connectToBestWiFiNetwork(uint32_t budgetMs = kWifiConnectHuntBudgetMs,
 // Main-loop drain for the disconnect snapshot captured on the arduino_events
 // task (wifiEventLogger keeps its stack frame tiny; the logging happens here).
 void wifiEventLogDrain();
+// Main-loop poll (cheap; acts once a second). After a connection is lost and
+// the driver has not rejoined it within a minute, starts a BACKGROUND hunt
+// across every saved network on a short-lived task, then again with back-off
+// (System_WiFiRehuntPolicy.h). Wi-Fi commands supersede that hunt like the
+// boot connect.
+void wifiRehuntPoll();
+// Drop a pending rehunt: the device was asked to stay unassociated.
+void wifiRehuntCancel();
 
 // Command registry (for System_CommandRegistry.cpp)
 struct CommandEntry;
