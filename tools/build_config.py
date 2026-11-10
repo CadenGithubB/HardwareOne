@@ -58,7 +58,9 @@ def editable_choices():
     names = re.findall(r"^\s*#define\s+(\w+)\s+\d+\b", editable, re.MULTILINE)
     return {name for name in names if name.startswith(("ENABLE_", "CUSTOM_ENABLE_"))
             or name.endswith("_FEATURE_LEVEL")
-            or name in ("DISPLAY_TYPE", "INPUT_DEVICE_TYPE")}
+            or name in ("DISPLAY_TYPE", "INPUT_DEVICE_TYPE",
+                        # XIAO assembly: 0 = base board, 1 = Sense expansion fitted.
+                        "XIAO_ESP32S3_SENSE_ENABLED")}
 
 
 def sdk_choices():

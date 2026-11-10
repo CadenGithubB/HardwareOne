@@ -726,12 +726,9 @@ if(HW_CFG_ENABLE_LOCAL_STT GREATER 0 AND IDF_TARGET STREQUAL "esp32p4")
     endif()
 endif()
 
-# Enable Sense features for ESP32-S3 boards (camera, mic, SD card on expansion board)
-# This enables SD_CS_PIN and other Sense-specific defines in System_BuildConfig.h
-if(CONFIG_IDF_TARGET_ESP32S3)
-    target_compile_definitions(${COMPONENT_LIB} PUBLIC XIAO_ESP32S3_SENSE_ENABLED=1)
-    message(STATUS "XIAO ESP32S3 Sense features ENABLED (mic, SD card)")
-endif()
+# XIAO_ESP32S3_SENSE_ENABLED (Sense expansion board fitted: camera, microphone,
+# SD card) is defined only in System_BuildConfig.h and its override headers.
+# A command-line definition here used to force it on for every ESP32-S3 build.
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error=format-truncation

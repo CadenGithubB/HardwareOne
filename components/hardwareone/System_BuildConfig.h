@@ -183,9 +183,13 @@
 // XIAO ESP32S3 Sense expansion: camera + PDM mic + microSD. The base XIAO and the
 // Sense share one Arduino variant (CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"), so this
 // define is the only thing that tells the board chain below which of the two is
-// actually wired up — see docs/BOARD_SWITCHING.md. Defined here rather than as a
-// -D compiler flag because menuconfig's extra-flags field is wiped by the
-// `fullclean` that switching boards requires anyway.
+// actually wired up — see docs/BOARD_SWITCHING.md. This header and its override
+// headers are the only place it is defined; the build passes no -D for it.
+//
+// A base XIAO (no expansion board) sets it to 0 together with
+// ENABLE_CAMERA_SENSOR 0 and ENABLE_MICROPHONE_SENSOR 0, as
+// configurations/xiao-base.json does. The check after the override headers
+// rejects a build that clears it and keeps the microphone.
 //
 // Harmless to leave set on other boards: every site that reads it is already
 // nested inside `defined(ARDUINO_XIAO_ESP32S3_DEV)`, so it goes inert on the
@@ -488,6 +492,18 @@
 #endif
 #ifdef HW1_FEATURE_CONFIG_HEADER
 #include HW1_FEATURE_CONFIG_HEADER
+#endif
+
+// A base XIAO ESP32S3 has no PDM microphone or camera: both sit on the Sense
+// expansion board. The two defaults above are resolved before the override
+// headers, so an override that clears the Sense flag must clear the sensors
+// too. The microphone pins exist only in the Sense board block, so that
+// combination is rejected here. The camera pins are fixed in
+// System_Camera_DVP.cpp and a Sense board built without its SD card and
+// microphone may keep the camera (experiments/camera_portable), so the camera
+// is left to the profile: a base XIAO sets ENABLE_CAMERA_SENSOR 0.
+#if defined(ARDUINO_XIAO_ESP32S3_DEV) && !defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) && !XIAO_ESP32S3_SENSE_ENABLED && ENABLE_MICROPHONE_SENSOR
+  #error "XIAO_ESP32S3_SENSE_ENABLED 0 needs ENABLE_MICROPHONE_SENSOR 0 (and ENABLE_CAMERA_SENSOR 0 on a base XIAO); see configurations/xiao-base.json"
 #endif
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -1181,7 +1197,7 @@
 
 // --- Seeed Studio XIAO ESP32S3 Sense (with camera/mic expansion) ---
 // Note: Sense uses same variant as base XIAO ESP32S3, expansion board is add-on hardware
-// To enable Sense-specific features, define XIAO_ESP32S3_SENSE_ENABLED in your build
+// XIAO_ESP32S3_SENSE_ENABLED (default 1, top of this file) selects this block.
 // IMPORTANT: This block MUST come before the base XIAO block so it matches first
 #elif defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && XIAO_ESP32S3_SENSE_ENABLED)
   #define BOARD_SUPPORTED       1
@@ -1244,8 +1260,8 @@
   #define UART_LINK_BAUD_MAX    3000000
 
 // --- Seeed Studio XIAO ESP32S3 (base board without expansion) ---
-// Set CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3" in menuconfig
-// Note: To use with Sense expansion board, define XIAO_ESP32S3_SENSE_ENABLED
+// Selected by XIAO_ESP32S3_SENSE_ENABLED 0 on the xiao_s3 board
+// (configurations/xiao-base.json). No camera, microphone or SD card.
 #elif defined(ARDUINO_XIAO_ESP32S3_DEV)
   #define BOARD_SUPPORTED       1
   #define BOARD_NAME            "Seeed XIAO ESP32S3"
@@ -1270,9 +1286,6 @@
   #define BATTERY_BACKEND_FUEL_GAUGE 0
 
   // UART host link — same wiring as the Sense block (UART0 on D6/D7).
-  // (This base-XIAO block is unreachable in practice: the build force-defines
-  // XIAO_ESP32S3_SENSE_ENABLED for every S3 target, so the Sense block above
-  // always matches first. Kept consistent anyway.)
   #define UART_LINK_PORT        Serial0
   #define UART_LINK_UART_NUM    0
   #define UART_LINK_TX_PIN      43

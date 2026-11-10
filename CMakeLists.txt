@@ -1330,11 +1330,6 @@ else()
     target_compile_definitions(${_hw1_app_component} PRIVATE HW1_OTA_LAYOUT=0)
 endif()
 
-# Add board-specific defines based on target (must be AFTER project())
-if(CONFIG_IDF_TARGET_ESP32S3)
-    add_compile_definitions(XIAO_ESP32S3_SENSE_ENABLED)
-endif()
-
 # arduino_events task stack, in BYTES (ESP-IDF xTaskCreate takes bytes, not
 # words). The vendored components/arduino is gitignored, so this tracked
 # override is the reviewable source of truth and survives a vendor resync

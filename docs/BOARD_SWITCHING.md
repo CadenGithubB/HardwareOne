@@ -130,8 +130,8 @@ them goes through the wrapper.
 |-------|------|-----------------|-------|
 | Adafruit QT Py ESP32 Pico | ESP32 | `adafruit_qtpy_esp32` | Built-in NeoPixel, Stemma QT |
 | Adafruit Feather ESP32 V2 | ESP32 | `adafruit_feather_esp32_v2` | Battery monitoring, built-in NeoPixel |
-| Seeed XIAO ESP32S3 (base, no Sense) | ESP32-S3 | `XIAO_ESP32S3` | **Not supported**: every ESP32-S3 build is a Sense build - see [KNOWN_ISSUES.md](../KNOWN_ISSUES.md) |
-| Seeed XIAO ESP32S3 Sense | ESP32-S3 | `XIAO_ESP32S3` + `XIAO_ESP32S3_SENSE_ENABLED` | Camera, mic, SD slot |
+| Seeed XIAO ESP32S3 (base, no Sense) | ESP32-S3 | `XIAO_ESP32S3` + `XIAO_ESP32S3_SENSE_ENABLED 0` | Saved configuration `xiao-base`; builds, not yet run on a board - see [KNOWN_ISSUES.md](../KNOWN_ISSUES.md) |
+| Seeed XIAO ESP32S3 Sense | ESP32-S3 | `XIAO_ESP32S3` + `XIAO_ESP32S3_SENSE_ENABLED 1` (default) | Camera, mic, SD slot |
 | Unexpected Maker FeatherS3[D] | ESP32-S3 | `um_feathers3` | 2× STEMMA QT, MAX17048G fuel gauge, **Quad** PSRAM |
 | Espressif ESP32-P4X-EYE | ESP32-P4 | `esp32p4` + `boards/p4x_eye.features.h` | LCD, wheel + 3 buttons, MIPI camera, PDM mic, battery; Wi-Fi/BLE via onboard C6 - see [P4X_EYE_PERIPHERALS.md](P4X_EYE_PERIPHERALS.md) |
 | Generic ESP32 | ESP32 | `esp32` | Fallback — verify pins manually |
@@ -267,12 +267,23 @@ change them with `tools/build_board.sh <board> menuconfig`.
 | **Flash Mode** | Serial flasher config → Flash mode | `DIO` |
 | **Bluetooth** | Component config → Bluetooth | `Bluedroid`, controller BLE-only (`CONFIG_BTDM_CTRL_MODE_BLE_ONLY`) |
 
-### Seeed XIAO ESP32S3 - Base (not supported)
+### Seeed XIAO ESP32S3 - Base (no Sense expansion)
 
-There is no base-XIAO build: every ESP32-S3 build defines
-`XIAO_ESP32S3_SENSE_ENABLED`, so a base XIAO gets the Sense build, whose
-camera, microphone and SD card expect the Sense expansion board. See
-[KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
+The base board and the Sense share one board definition (`xiao_s3`) and one
+Arduino variant; `XIAO_ESP32S3_SENSE_ENABLED` says which one the image is for.
+It is 1 by default. Build the base board with the saved configuration:
+
+```sh
+python3 tools/build_config.py build xiao-base
+```
+
+`configurations/xiao-base.json` sets `XIAO_ESP32S3_SENSE_ENABLED`,
+`ENABLE_CAMERA_SENSOR` and `ENABLE_MICROPHONE_SENSOR` to 0 (and Bluetooth and
+MQTT off, like `xiao-default`). The image has no camera, microphone or SD card,
+and the user LED on GPIO21 is available. A profile that clears the Sense flag
+and keeps the microphone does not compile. The SDK settings in the table below
+apply to both boards. The base image builds and is host-tested; it has not been
+run on a base board yet (see [KNOWN_ISSUES.md](../KNOWN_ISSUES.md)).
 
 ### Seeed XIAO ESP32S3 Sense (ESP32-S3)
 
@@ -286,7 +297,7 @@ camera, microphone and SD card expect the Sense expansion board. See
 | **Flash Mode** | Serial flasher config → Flash mode | `QIO` |
 | **Bluetooth** | Component config → Bluetooth | `Bluedroid` (BLE 5.0 only) |
 | **USB Mode** | Component config → USB-OTG | Enable for native USB |
-| **Sense Define** | `CMakeLists.txt` (every ESP32-S3 target) and `System_BuildConfig.h` | `XIAO_ESP32S3_SENSE_ENABLED 1`, always set |
+| **Sense Define** | `System_BuildConfig.h` (a saved configuration or profile may override it) | `XIAO_ESP32S3_SENSE_ENABLED 1` by default |
 
 ### Unexpected Maker FeatherS3[D] (ESP32-S3)
 
@@ -349,7 +360,7 @@ camera, microphone and SD card expect the Sense expansion board. See
 ## Board-Specific Features
 
 ### XIAO ESP32S3 Sense
-`XIAO_ESP32S3_SENSE_ENABLED` is 1 on every ESP32-S3 build, so the XIAO build configures:
+`XIAO_ESP32S3_SENSE_ENABLED` is 1 unless a configuration clears it (`xiao-base`), so the XIAO build configures:
 - **Camera**: OV2640 on expansion board (I2C on GPIO39/40)
 - **PDM Microphone**: CLK=GPIO42, DATA=GPIO41
 - **SD Card**: CS=GPIO21, SCK=GPIO7, MISO=GPIO8, MOSI=GPIO9
@@ -417,7 +428,7 @@ Verify `CONFIG_ARDUINO_VARIANT` in `build-<board>/sdkconfig` matches your board 
 The image was built with Octal PSRAM. Build it with `tools/build_board.sh feathers3`, which layers `CONFIG_SPIRAM_MODE_QUAD=y` from `boards/feathers3.defaults` and restores it on every configure.
 
 ### SD card not appearing on Sense
-Check that the image was built with `tools/build_board.sh xiao_s3`; ESP32-S3 builds always set `XIAO_ESP32S3_SENSE_ENABLED`, which configures the SD pins.
+Check that the image was built with `tools/build_board.sh xiao_s3` and not with the `xiao-base` configuration: `XIAO_ESP32S3_SENSE_ENABLED 1` (the default) configures the SD pins, and `sddiag` prints the value the image was built with.
 
 ### Battery monitor shows no data on the XIAO
 Expected — the XIAO ESP32-S3 boards have no battery ADC in this firmware.

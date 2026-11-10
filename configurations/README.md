@@ -17,6 +17,7 @@ python3 tools/build_config.py build waveshare-p4-bringup
 python3 tools/build_config.py build xiao-mqtt
 python3 tools/build_config.py build xiao-display
 python3 tools/build_config.py build xiao-no-bluetooth
+python3 tools/build_config.py build xiao-base
 python3 tools/build_config.py build qtpy-sensors
 python3 tools/build_config.py build qtpy-oled
 python3 tools/build_config.py build qtpy-espnow
@@ -85,6 +86,12 @@ independently; their bus and driver dependencies are checked at compile time.
 
 `xiao-no-bluetooth` disables application Bluetooth and its SDK stack. Bluetooth
 SDK policy now lives in `presets/`, separate from board hardware geometry.
+
+`xiao-base` is `xiao-default` for a XIAO ESP32S3 without the Sense expansion
+board: `XIAO_ESP32S3_SENSE_ENABLED`, `ENABLE_CAMERA_SENSOR` and
+`ENABLE_MICROPHONE_SENSOR` are 0, so the image has no camera, microphone or SD
+card and the user LED on GPIO21 is available. Every other XIAO configuration is
+for the Sense assembly. The image builds; it has not been run on a base board.
 
 `qtpy-sensors` targets the **Adafruit QT Py ESP32 Pico** (classic ESP32). It
 enables VL53L4CX ToF, the Seesaw gamepad, STHS34PF80 presence and PA1010D GPS,

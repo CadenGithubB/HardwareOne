@@ -15,10 +15,10 @@ COMPILER = shutil.which("c++")
 
 class XiaoPeripheralConfig(unittest.TestCase):
     def compile_config(self, features=None, checks=(), error=None, camera_port=1,
-                       hook="FEATURE"):
+                       hook="FEATURE", boards=("ARDUINO_XIAO_ESP32S3_DEV",
+                                               "ARDUINO_XIAO_ESP32S3_SENSE_DEV")):
         self.assertIsNotNone(COMPILER, "A host C++ compiler is required")
-        for board_macro in ("ARDUINO_XIAO_ESP32S3_DEV",
-                            "ARDUINO_XIAO_ESP32S3_SENSE_DEV"):
+        for board_macro in boards:
             with self.subTest(board=board_macro), tempfile.TemporaryDirectory() as temp:
                 directory = Path(temp)
                 (directory / "sdkconfig.h").write_text(
@@ -84,6 +84,30 @@ class XiaoPeripheralConfig(unittest.TestCase):
             "ENABLE_MICROPHONE_SENSOR == 1", "MIC_CLK_PIN == 42", "MIC_DATA_PIN == 41",
             "SD_CS_PIN == 21", "SD_SCK_PIN == 7", "SD_MISO_PIN == 8", "SD_MOSI_PIN == 9",
             "UART_LINK_TX_PIN == 43", "UART_LINK_RX_PIN == 44"])
+
+    def test_saved_base_example_selects_the_board_without_the_expansion(self):
+        # The build passes no -D for the Sense flag, so a saved configuration
+        # decides which of the two XIAO assemblies the image is for.
+        profile = json.loads((REPO / "configurations/xiao-base.json").read_text())
+        self.assertEqual(profile["board"], "xiao_s3")
+        base = ("ARDUINO_XIAO_ESP32S3_DEV",)
+        # BOARD_NAME is compared by size (with terminator): "Seeed XIAO ESP32S3"
+        # is 19, "Seeed XIAO ESP32S3 Sense" is 25.
+        self.compile_config(profile["features"], boards=base, checks=[
+            "XIAO_ESP32S3_SENSE_ENABLED == 0",
+            "sizeof(BOARD_NAME) == 19",
+            "ENABLE_CAMERA_SENSOR == 0", "ENABLE_MICROPHONE_SENSOR == 0",
+            "ENABLE_MICROPHONE == 0", "ENABLE_SD_CARD == 0",
+            "USER_LED_PIN == 21", "I2C_SDA_PIN_DEFAULT == 5", "I2C_SCL_PIN_DEFAULT == 6",
+            "UART_LINK_TX_PIN == 43", "UART_LINK_RX_PIN == 44"])
+        # Without the flag the same board macro is the Sense assembly.
+        self.compile_config(boards=base, checks=[
+            "XIAO_ESP32S3_SENSE_ENABLED == 1",
+            "sizeof(BOARD_NAME) == 25",
+            "USER_LED_PIN == -1", "SD_CS_PIN == 21"])
+        # Clearing the flag alone would keep a microphone that has no pins.
+        self.compile_config({"XIAO_ESP32S3_SENSE_ENABLED": 0}, boards=base,
+                            error="needs ENABLE_MICROPHONE_SENSOR 0")
 
     def test_camera_and_external_i2c_need_distinct_controllers(self):
         features = {"I2C_FEATURE_LEVEL": 1, "DISPLAY_TYPE": 1}

@@ -113,9 +113,12 @@ pending card qualification, not missing SDMMC silicon.
 Camera and PDM defaults use `XIAO_ESP32S3_SENSE_ENABLED` before override headers
 load. A later override selecting the base XIAO leaves those defaults enabled
 unless it also explicitly disables both features. The base board branch then
-has no microphone pins. In addition, [component CMake](../components/hardwareone/CMakeLists.txt#L738)
-and [root CMake](../CMakeLists.txt#L1221) define Sense selection for the whole S3
-target family. Most non-XIAO branches ignore it, but it is the wrong ownership.
+has no microphone pins. Since 2026-11-10 that combination stops the build with a
+message naming `configurations/xiao-base.json`, which clears all three; the
+camera default is still the profile's to clear. Until the same date the
+component and root CMake files also defined Sense selection on the command line
+for the whole S3 target family; `System_BuildConfig.h` and its override headers
+now own it alone.
 
 Resolve board and attachments first, requested features second, and derived
 requirements last. Keep existing assembly selections explicit during migration.

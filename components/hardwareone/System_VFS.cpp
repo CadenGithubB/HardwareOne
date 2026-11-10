@@ -1765,12 +1765,7 @@ static const char* cmd_sddiag(const String& argsInput) {
 #else
   pos = appendf(buf, buf_SIZE, pos, "=== SD Card Diagnostics ===\n");
   pos = appendf(buf, buf_SIZE, pos, "Build config: XIAO_ESP32S3_SENSE_ENABLED=%d\n",
-  #ifdef XIAO_ESP32S3_SENSE_ENABLED
-    1
-  #else
-    0
-  #endif
-  );
+                XIAO_ESP32S3_SENSE_ENABLED);
   
   // Current pin configuration from build
   pos = appendf(buf, buf_SIZE, pos, "\nConfigured Pins (System_BuildConfig.h):\n");
