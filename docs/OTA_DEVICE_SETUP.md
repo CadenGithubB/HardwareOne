@@ -276,7 +276,8 @@ ESPPORT="$HW1_PORT" idf.py -B "$HW1_MAIN_BUILD" littlefs-flash
 On `feathers3_fe` use `encrypted-littlefs-flash`; the plain target is refused
 there. Either writes the same blank image over `littlefs` and touches nothing else.
 Do not use `idf.py erase-flash` for this: on an OTA device it also erases the
-recovery updater (see "`idf.py erase-flash` wipes the recovery updater" below).
+recovery updater, and from an OTA build directory it is refused (see
+"`idf.py erase-flash` is refused" below).
 
 ## Verifying the result
 
@@ -298,28 +299,44 @@ updater in the factory slot, for example `1.1.0+<suffix>`; a manifest whose
 ## Known rough edges
 
 Checked 2026-11-08 by reading ESP-IDF 5.5.5's idf.py and the target graph of a
-configured OTA build. Not run on a device.
+configured OTA build; the erase refusal was run against that idf.py on
+2026-11-10 with no board attached. Not run on a device.
 
-**`idf.py erase-flash` wipes the recovery updater.** On this layout the build
+**`idf.py erase-flash` is refused.** On this layout the build
 refuses the stock flash and erase CMake targets (`flash`, `app-flash`,
 `bootloader-flash`, `partition-table-flash`, `erase-otadata`, the
 `erase_flash` CMake target and the rest). `idf.py flash` and
 `idf.py erase-otadata` run through those targets, so they stop with
 "Refusing stock ESP-IDF flash/erase target". `idf.py erase-flash` (and its
 old spelling `erase_flash`) is different: idf.py runs esptool's `erase_flash`
-itself and never builds a CMake target, so the refusal does not run. The
-command succeeds and erases the whole chip: bootloader, partition table, the
-`factory` recovery updater, `ota_0`, `otadata`, NVS (which holds the recovery
+itself and never builds a CMake target, so the CMake refusal does not run. It
+would erase the whole chip: bootloader, partition table, the `factory`
+recovery updater, `ota_0`, `otadata`, NVS (which holds the recovery
 credential) and `littlefs`.
 
-Do not run it on a provisioned OTA device. Use the targeted cable writes:
+The project's `idf_ext.py` therefore wraps both spellings. From a build
+directory configured for this layout (`hw1-layout-mode.txt` in the build
+directory says `recovery-ota` or names an OTA deployment) the command stops
+with "Refusing erase-flash" before esptool runs. Ordinary and factory-only
+builds erase as before. For a deliberate full erase, set the override:
+
+```sh
+HW1_ALLOW_FULL_ERASE=1 idf.py -B "$HW1_MAIN_BUILD" -p "$HW1_PORT" erase-flash
+```
+
+The refusal goes by the build directory, not by the attached device: an
+ordinary build directory pointed at an OTA device is not refused. A direct
+`esptool.py erase_flash` is outside idf.py and is not refused either, and the
+`updater/` project has no such guard.
+
+On a provisioned OTA device prefer the targeted cable writes:
 
 - To wipe only the filesystem, use `littlefs-flash` (`encrypted-littlefs-flash`
   on `feathers3_fe`; see above).
 - To replace only the recovery updater, use `factory-flash`
   (`encrypted-factory-flash` on `feathers3_fe`).
 
-If the chip was erased anyway, by `idf.py erase-flash` or by the 1.0 full-erase
+If the chip was erased, by esptool, with the override or by the 1.0 full-erase
 install in [COMPATIBILITY.md](COMPATIBILITY.md), it is now a blank chip.
 Nothing boots until it is provisioned again from
 [step 3](#3-run-the-guarded-migration-flash). `migration-flash` writes the

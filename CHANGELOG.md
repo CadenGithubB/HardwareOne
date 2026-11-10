@@ -19,6 +19,12 @@ everything user-visible since the v0.99.99.1 tag.
   that saved mask as a whole. A persistent `debug<x> 0|1`, and the sub-flag commands, now update the
   saved mask too; `temp` changes stay runtime-only. Host-tested; not yet tested on hardware
   (readiness Section 8).
+- Recovery OTA: `idf.py erase-flash` (and `erase_flash`) is refused from a recovery-OTA build
+  directory, like the stock flash and erase targets. idf.py runs esptool for it without a CMake
+  target, so the whole chip, recovery updater and recovery credential included, used to be erased.
+  The project's `idf_ext.py` now stops it; `HW1_ALLOW_FULL_ERASE=1` allows a deliberate full erase
+  (the 0.99.x to 1.0 install, a device handover). A direct `esptool.py erase_flash` and the
+  `updater/` project are not covered (readiness G-65).
 - Seeed XIAO ESP32S3 without the Sense expansion can be built: `python3 tools/build_config.py build
   xiao-base`. Every ESP32-S3 build used to define `XIAO_ESP32S3_SENSE_ENABLED`, so the base board
   always got the Sense image. The flag is now set only in `System_BuildConfig.h` and its override

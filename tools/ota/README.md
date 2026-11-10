@@ -70,7 +70,8 @@ python3 -m unittest discover -s tools/ota/tests -v
 ```
 
 The suite uses a temporary RSA-3072 key and synthetic ESP application descriptor
-for fixture tests. It does not connect to hardware.
+for fixture tests. It does not connect to hardware. `test_idf_ext.py` covers the
+project's `idf_ext.py`, which refuses `idf.py erase-flash` on a recovery-OTA build.
 
 ## Inspect the staged qualification contracts
 
