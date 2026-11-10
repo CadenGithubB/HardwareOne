@@ -2250,7 +2250,7 @@ static void sanitizeWaypointTextCopy(char* dst, size_t dstSize, const char* src,
 
 Waypoint* WaypointManager::_waypoints = nullptr;
 int WaypointManager::_selectedTarget = -1;
-bool WaypointManager::_waypointsLoadedOk = false;
+ConfigLoad::Status WaypointManager::_waypointsLoad = ConfigLoad::Status::NotLoaded;
 
 bool WaypointManager::ensureStorage() {
   if (_waypoints) return true;
@@ -2303,15 +2303,29 @@ bool WaypointManager::loadWaypoints() {
     // No waypoints file for this map — clear any stale data from a previous map
     if (_waypoints) memset(_waypoints, 0, MAX_WAYPOINTS * sizeof(Waypoint));
     _selectedTarget = -1;
-    _waypointsLoadedOk = true;   // absent is savable — this is how a map gets its first waypoint
+    _waypointsLoad = ConfigLoad::Status::AbsentOk;   // absent is savable — this is how a map gets its first waypoint
     return false;
   }
   
   char wpPath[128];
   strlcpy(wpPath, wpPathStr.c_str(), sizeof(wpPath));
   
+  // Every failed exit below clears the table BEFORE returning and records why.
+  // Otherwise the PREVIOUS map's waypoints stay live in _waypoints with its
+  // savable status, and saveWaypoints() would write them into THIS map's file:
+  // cross-map contamination on top of a wipe.
+  auto failLoad = [](ConfigLoad::Status why) {
+    if (_waypoints) memset(_waypoints, 0, MAX_WAYPOINTS * sizeof(Waypoint));
+    _selectedTarget = -1;
+    _waypointsLoad = why;
+    return false;
+  };
+
   File f = VFS::openGuarded(wpPath, "r", currentAuthContext());
-  if (!f) return false;
+  if (!f) {
+    WARN_MAPSF("Waypoint file would not open: %s", wpPath);
+    return failLoad(ConfigLoad::Status::OpenFailed);
+  }
 
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, f);
@@ -2319,23 +2333,16 @@ bool WaypointManager::loadWaypoints() {
   
   if (err) {
     WARN_MAPSF("Waypoint JSON parse error: %s", err.c_str());
-    // Clear BEFORE returning. This return sits above the memset below, so the
-    // PREVIOUS map's waypoints are still live in _waypoints — and saveWaypoints()
-    // would write them into THIS map's file. Cross-map contamination on top of a
-    // wipe.
-    if (_waypoints) memset(_waypoints, 0, MAX_WAYPOINTS * sizeof(Waypoint));
-    _selectedTarget = -1;
-    _waypointsLoadedOk = false;
-    return false;
+    return failLoad(ConfigLoad::classifyParse(err));
   }
   
-  if (!ensureStorage()) return false;
+  if (!ensureStorage()) return failLoad(ConfigLoad::Status::NoMemory);
 
   // Clear existing
   memset(_waypoints, 0, MAX_WAYPOINTS * sizeof(Waypoint));
   _selectedTarget = -1;
   
-  _waypointsLoadedOk = true;   // parsed cleanly
+  _waypointsLoad = ConfigLoad::Status::Ok;   // parsed cleanly
   JsonArray arr = doc["waypoints"].as<JsonArray>();
   int i = 0;
   for (JsonObject wp : arr) {
@@ -2375,8 +2382,9 @@ bool WaypointManager::loadWaypoints() {
 bool WaypointManager::saveWaypoints() {
   const LoadedMap& map = MapCore::getCurrentMap();
   if (!map.valid) return false;
-  if (!_waypointsLoadedOk) {
-    WARN_MAPSF("waypoint save REFUSED - this map's waypoint file never loaded cleanly");
+  if (!ConfigLoad::savable(_waypointsLoad)) {
+    WARN_MAPSF("waypoint save REFUSED - this map's waypoint file was not loaded (%s)",
+               ConfigLoad::statusName(_waypointsLoad));
     return false;
   }
 

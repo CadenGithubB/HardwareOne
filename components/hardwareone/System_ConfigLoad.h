@@ -21,19 +21,24 @@
 // operator is told to reboot or to quarantine — reading into a String first
 // collapses the two and would tell someone to throw away an intact file.
 //
-// INCLUDE PLACEMENT: put this include INSIDE the consumer's existing build gate
-// (after `#if ENABLE_ESPNOW`, after `#if ENABLE_HTTP_SERVER`), never at the top
-// of the file.
+// HOW A SITE USES IT: keep one Status per file, set it at every exit of the
+// loader, and have the saver return early unless savable(status). A loader that
+// finds damaged() bytes moves the file aside (quarantineCorruptFile in
+// System_Settings) and records AbsentOk, so the device recovers as a fresh one
+// does; if the move fails the damaged status stays and saves keep refusing.
+//
+// DEPENDENCY-FREE on purpose (only <stdint.h>): the host tests compile this
+// real header, and consumers can include it anywhere. classifyParse is a
+// template so the header does not need ArduinoJson to name its error type.
 
-#include <Arduino.h>
-#include <ArduinoJson.h>
-#include "System_Debug.h"    // logSystemEvent (declared here, not in System_Events.h)
-#include "System_Events.h"   // SYSEVT_CONFIG_FILE_CORRUPT, systemEventPost
+#include <stdint.h>
 
 namespace ConfigLoad {
 
 enum class Status : uint8_t {
-  Ok = 0,      // parsed clean, every entry accepted — the file is the truth
+  NotLoaded = 0,  // no load has run yet this boot. The zero value on purpose: a
+                  // status that nobody set must never read as savable.
+  Ok,          // parsed clean, every entry accepted — the file is the truth
   AbsentOk,    // no file on disk — first boot / post-erase; RAM is the truth
   NotMounted,  // filesystem not ready. Its OWN arm: folding it into AbsentOk is
                // literally the bug this header exists to prevent.
@@ -47,6 +52,7 @@ enum class Status : uint8_t {
 
 inline const char* statusName(Status s) {
   switch (s) {
+    case Status::NotLoaded:  return "not-loaded";
     case Status::Ok:         return "ok";
     case Status::AbsentOk:   return "absent";
     case Status::NotMounted: return "fs-not-mounted";
@@ -75,13 +81,23 @@ inline bool fileIsIntact(Status s) {
   return s == Status::NoMemory || s == Status::OpenFailed || s == Status::Partial;
 }
 
-inline Status classifyParse(DeserializationError err) {
+// True when the bytes on disk are bad and will stay bad on every boot. Leaving
+// such a file in place keeps its saver refusing forever, so the loader moves it
+// aside and carries on as AbsentOk. Never true for a fileIsIntact() status.
+inline bool damaged(Status s) {
+  return s == Status::EmptyFile || s == Status::Truncated || s == Status::Corrupt;
+}
+
+// ParseError is ArduinoJson's DeserializationError (a template so this header
+// stays free of includes).
+template <typename ParseError>
+inline Status classifyParse(const ParseError& err) {
   switch (err.code()) {
-    case DeserializationError::Ok:              return Status::Ok;
-    case DeserializationError::EmptyInput:      return Status::EmptyFile;
-    case DeserializationError::IncompleteInput: return Status::Truncated;
-    case DeserializationError::NoMemory:        return Status::NoMemory;
-    default:                                    return Status::Corrupt;  // InvalidInput, TooDeep
+    case ParseError::Ok:              return Status::Ok;
+    case ParseError::EmptyInput:      return Status::EmptyFile;
+    case ParseError::IncompleteInput: return Status::Truncated;
+    case ParseError::NoMemory:        return Status::NoMemory;
+    default:                          return Status::Corrupt;  // InvalidInput, TooDeep
   }
 }
 

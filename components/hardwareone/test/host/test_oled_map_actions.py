@@ -125,6 +125,7 @@ def waypoint_save_unit(component: Path) -> str:
     utils_h = (component / "System_Utils.h").read_text()
     types = [
         define_lines(maps_h, "MAX_WAYPOINT", "WAYPOINT_"),
+        (component / "System_ConfigLoad.h").read_text(),  # WaypointManager's load state type
         extract_block(maps_h, "struct Waypoint") + ";",
         extract_block(maps_h, "class WaypointManager") + ";",
         extract_block(command_h, "class CommandArgs") + ";",

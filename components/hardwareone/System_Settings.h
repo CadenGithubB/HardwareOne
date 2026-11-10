@@ -1291,12 +1291,16 @@ bool settingsFirmwareVersionRestampPending();
 // the parsed file rather than rebuilding it from RAM. Safe to call at boot;
 // writeSettingsJson() is not. No-op unless a re-stamp is pending.
 bool settingsRestampFirmwareVersion();
-// Mark this boot's settings state trustworthy for full-array rewrites when
-// there is no settings.json to load (first boot / post-erase). readSettingsJson
-// sets the same flag itself on a successful load; while unset, the save path
-// skips the wifi-networks rebuild so it can't wipe the file after a failed load.
+// Record that there is no settings.json to protect (first boot / post-erase),
+// which makes RAM the source for a full rewrite. readSettingsJson records its
+// own outcome; until the state is savable (System_ConfigLoad.h) the writer
+// refuses, so a failed load can't be followed by a save that wipes the file.
 void settingsMarkLoadedOk();
-void debugSettingsMarkLoadedOk();
+// Move a damaged config file aside as <path>.corrupt-1 (the newest three are
+// kept), leaving the path absent. The caller holds the filesystem lock and
+// never passes a file whose parse only ran out of memory.
+struct AuthContext;
+bool quarantineCorruptFile(const String& path, const AuthContext& auth, String& movedTo);
 bool writeDebugJson();   // persist the debug module to DEBUG_JSON_FILE
 bool readDebugJson();    // load the debug module from DEBUG_JSON_FILE
 

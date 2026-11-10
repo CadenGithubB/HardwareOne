@@ -24,6 +24,16 @@ set_target_properties(dictation_policy_tests PROPERTIES
 target_compile_options(dictation_policy_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# The load state that gates every config-file saver (System_ConfigLoad.h): the
+# production dependency-free header, with the vendored ArduinoJson supplying
+# real parse errors.
+add_executable(config_load_tests test_config_load.cpp)
+set_target_properties(config_load_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(config_load_tests PRIVATE ../..)
+target_include_directories(config_load_tests SYSTEM PRIVATE ../../../hardwareone_libs/ArduinoJson/src)
+target_compile_options(config_load_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # STT raw-input recorder ring (stt/stt_raw_ring.h, used by
 # System_STTRawCapture): SPSC order, whole-block drops and gap records.
 add_executable(stt_raw_ring_tests test_stt_raw_ring.cpp)
@@ -1190,6 +1200,7 @@ add_test(NAME sdmmc_lifecycle
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
+add_test(NAME config_load_tests COMMAND config_load_tests)
 add_test(NAME g2_hold_gesture_tests COMMAND g2_hold_gesture_tests)
 add_test(NAME stt_raw_ring_tests COMMAND stt_raw_ring_tests)
 add_test(NAME quicknote_policy_tests COMMAND quicknote_policy_tests)

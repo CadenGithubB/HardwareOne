@@ -233,7 +233,7 @@ bool initFilesystem() {
     // "/settings.json" removed: it is DEAD. The real path is "/system/settings.json"
     // and a repo-wide grep for this literal finds only this line — so settings.json
     // has never actually been validated here. Do NOT repoint it: settings already
-    // carries two strictly better guards (the gSettingsLoadedOk save refusal and the
+    // carries two strictly better guards (the gSettingsLoad save refusal and the
     // merge-read abort), and a first-character check cannot see truncation, which is
     // the dominant corruption mode.
     const char* criticalFiles[] = { "/system/debug.json", "/system/automations.json", "/system/users/users.json" };

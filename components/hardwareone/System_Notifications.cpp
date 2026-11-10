@@ -17,6 +17,7 @@
 
 #include "System_BuildConfig.h"
 #include "System_Settings.h"      // gSettings.notif* + SettingEntry/SettingsModule
+#include "System_ConfigLoad.h"    // ConfigLoad::Status — gates the policy file writer
 #include "System_Debug.h"         // BROADCAST_PRINTF, broadcastOutput, cliHint
 #include "System_Utils.h"         // RETURN_VALID_IF_VALIDATE_CSTR, readText/writeTextAtomic
 #include "System_User.h"          // isAdminUser, getUserIdByUsername, gLocalDisplay*
@@ -27,6 +28,9 @@
 #include "System_EventKindMask.h"
 #include "System_NotificationKindListCore.h"
 #include "System_VFS.h"           // VFS::systemAuth / Scopes for the policy file
+#include "System_Filesystem.h"    // filesystemReady
+#include "System_Mutex.h"         // FsLockGuard — policy file read
+#include "System_PollPause.h"     // PollPauseGuard — policy file read
 #if ENABLE_BLUETOOTH
 #include "Bluetooth.h"     // blePushNotification / bleGetAuthenticatedSessionInfo — app sink
 #include "BLE_Types.h"     // BLE_MAX_CONNECTIONS — bound on the app-sink session sweep
@@ -206,52 +210,80 @@ const char* notifLevelToken(uint8_t level) {
 
 uint32_t notifPrefsGeneration() { return gNotifPrefsGen; }
 
-// Set only when this boot either parsed the policy file cleanly or established
-// that it is legitimately ABSENT. notifPolicySave() refuses to write otherwise:
-// the locals below are zero-initialised, and all-zero masks are byte-identical
-// to "no policy file", so committing them after a failed parse and letting the
-// next `notifydevicekind` write them back silently erases every per-kind
-// override. Absent must stay savable or a fresh device could never create the
-// file at all.
-static bool gNotifLoadedOk = false;
+// How this boot's load of the policy file ended (System_ConfigLoad.h).
+// notifPolicySave() refuses to write unless it is savable: the locals below are
+// zero-initialised, and all-zero masks are byte-identical to "no policy file",
+// so committing them after a failed read and letting the next
+// `notifydevicekind` write them back silently erases every per-kind override.
+// Absent must stay savable or a fresh device could never create the file.
+static ConfigLoad::Status gNotifLoad = ConfigLoad::Status::NotLoaded;
 
 void notifPolicyLoad() {
   if (!gUserPrefsMutex) gUserPrefsMutex = xSemaphoreCreateMutex();
   uint32_t off[NOTIF_KIND_MASK_WORDS] = {0}, adm[NOTIF_KIND_MASK_WORDS] = {0};
-  String json;
-  if (readText(NOTIF_POLICY_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "notif.policy")) && json.length() > 0) {
-    PSRAM_JSON_DOC(doc);
-    DeserializationError perr = deserializeJson(doc, json);
-    if (perr) {
-      // Do NOT fall through to the commit below.
-      gNotifLoadedOk = false;
-      ERROR_STORAGEF("[notif] %s unreadable (%s) - keeping current masks, policy saves refused",
-                     NOTIF_POLICY_FILE, perr.c_str());
-      systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, NOTIF_POLICY_FILE, perr.c_str());
-      return;
-    }
-    {
-      JsonObjectConst kinds = doc["kinds"].as<JsonObjectConst>();
-      for (JsonPairConst kv : kinds) {
-        int k = systemEventKindFromName(kv.key().c_str());
-        if (k <= 0 || k >= NOTIF_KIND_MASK_BITS) continue;  // unknown name (renamed kind) — skip
-        const char* lvl = kv.value().as<const char*>();
-        if (!lvl) continue;
-        if (strcmp(lvl, "off") == 0)   off[k >> 5] |= (1UL << (k & 31));
-        if (strcmp(lvl, "admin") == 0) adm[k >> 5] |= (1UL << (k & 31));
+  const AuthContext auth = VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "notif.policy");
+  PSRAM_JSON_DOC(doc);
+  DeserializationError perr = DeserializationError::Ok;
+  bool quarantined = false;
+  String movedTo;
+  {
+    PollPauseGuard pollGuard;
+    FsLockGuard guard("notif.policy.load");
+    // Absence is decided by the exists() probe alone. A failed open or an
+    // unmounted filesystem is not "no file": the policy on disk is intact.
+    if (!filesystemReady) {
+      gNotifLoad = ConfigLoad::Status::NotMounted;
+    } else if (!VFS::existsGuarded(NOTIF_POLICY_FILE, auth)) {
+      gNotifLoad = ConfigLoad::Status::AbsentOk;
+    } else {
+      File f = VFS::openGuarded(NOTIF_POLICY_FILE, "r", auth);
+      if (!f) {
+        gNotifLoad = ConfigLoad::Status::OpenFailed;
+      } else {
+        perr = deserializeJson(doc, f);
+        f.close();
+        gNotifLoad = ConfigLoad::classifyParse(perr);
       }
+    }
+    if (ConfigLoad::damaged(gNotifLoad) && quarantineCorruptFile(NOTIF_POLICY_FILE, auth, movedTo)) {
+      quarantined = true;
+      gNotifLoad = ConfigLoad::Status::AbsentOk;  // the path is absent now; masks restart from defaults
+      doc.clear();
+    }
+  }
+  if (quarantined) {
+    ERROR_STORAGEF("[notif] %s unreadable (%s) - quarantined to %s, policy back on defaults",
+                   NOTIF_POLICY_FILE, perr.c_str(), movedTo.c_str());
+    systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, NOTIF_POLICY_FILE, "unparseable - quarantined, defaults loaded");
+  } else if (!ConfigLoad::savable(gNotifLoad)) {
+    // Do NOT fall through to the commit below.
+    ERROR_STORAGEF("[notif] %s not loaded (%s) - keeping current masks, policy saves refused",
+                   NOTIF_POLICY_FILE, ConfigLoad::statusName(gNotifLoad));
+    if (ConfigLoad::damaged(gNotifLoad)) {
+      systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, NOTIF_POLICY_FILE, "unparseable - quarantine failed");
+    }
+    return;
+  }
+  if (gNotifLoad == ConfigLoad::Status::Ok) {
+    JsonObjectConst kinds = doc["kinds"].as<JsonObjectConst>();
+    for (JsonPairConst kv : kinds) {
+      int k = systemEventKindFromName(kv.key().c_str());
+      if (k <= 0 || k >= NOTIF_KIND_MASK_BITS) continue;  // unknown name (renamed kind) — skip
+      const char* lvl = kv.value().as<const char*>();
+      if (!lvl) continue;
+      if (strcmp(lvl, "off") == 0)   off[k >> 5] |= (1UL << (k & 31));
+      if (strcmp(lvl, "admin") == 0) adm[k >> 5] |= (1UL << (k & 31));
     }
   }
   for (int i = 0; i < NOTIF_KIND_MASK_WORDS; i++) { gNotifOffMask[i] = off[i]; gNotifAdminMask[i] = adm[i]; }
-  gNotifLoadedOk = true;   // parsed cleanly, or the file is legitimately absent
   gNotifPrefsGen++;
 }
 
 // Serialize the current masks back to the policy file (non-default kinds only).
 static bool notifPolicySave() {
-  if (!gNotifLoadedOk) {
-    ERROR_STORAGEF("[notif] policy save REFUSED - %s never loaded cleanly this boot",
-                   NOTIF_POLICY_FILE);
+  if (!ConfigLoad::savable(gNotifLoad)) {
+    ERROR_STORAGEF("[notif] policy save REFUSED - %s was not loaded this boot (%s)",
+                   NOTIF_POLICY_FILE, ConfigLoad::statusName(gNotifLoad));
     return false;
   }
   PSRAM_JSON_DOC(doc);

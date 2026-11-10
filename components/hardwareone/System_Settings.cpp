@@ -2,6 +2,7 @@
 #include "System_InternalSecretString.h"        // Settings struct definition and function declarations
 #include "System_UserSettings.h"   // Per-user settings declarations + transaction contract
 #include "System_SettingsWriteBatchCore.h"
+#include "System_ConfigLoad.h"   // ConfigLoad::Status — the load state that gates each writer
 #include <cerrno>            // errno/ENOENT — distinguish absence from stat failure
 #include <cmath>             // floorf — whole-number check in settingsTypeAccepted
 #include <climits>           // INT_MIN/INT_MAX — same
@@ -1042,26 +1043,26 @@ static int gSecretLoadFailures = 0;
 
 int secretLoadFailureCount() { return gSecretLoadFailures; }
 
-// True once this boot's settings state is trustworthy as the source of truth
-// for full-array rewrites: either readSettingsJson() completed, or there was
-// no settings.json to load (first boot / post-erase — HardwareOne.cpp calls
-// settingsMarkLoadedOk before writing defaults). While false (load FAILED
-// mid-way), buildSettingsJsonDoc skips the wifi-networks rebuild so a save
+// How this boot's load of settings.json ended (System_ConfigLoad.h). RAM is a
+// trustworthy source for a full rewrite only when it is savable(): either
+// readSettingsJson() completed, or there is no settings.json (first boot,
+// post-erase, or a damaged file that was moved aside). Otherwise the writer
+// refuses, and buildSettingsJsonDoc skips the wifi-networks rebuild so a save
 // can't wipe the on-disk list with a half-loaded RAM copy.
-static bool gSettingsLoadedOk = false;
+static ConfigLoad::Status gSettingsLoad = ConfigLoad::Status::NotLoaded;
 
-void settingsMarkLoadedOk() { gSettingsLoadedOk = true; }
+void settingsMarkLoadedOk() { gSettingsLoad = ConfigLoad::Status::AbsentOk; }
 
-// Same contract as gSettingsLoadedOk, for debug.json. writeDebugJson() rebuilds
+// Same contract as gSettingsLoad, for debug.json. writeDebugJson() rebuilds
 // the whole file from gSettings RAM, which after a failed read holds nothing but
 // COMPILED DEFAULTS — so one corrupt debug.json plus one flag change silently
 // flattens the operator's entire flag set. Absent counts as loaded (RAM is
 // legitimately the truth on a fresh device), so bootstrap still works.
-// Consequence, matching the settings precedent: after a failed read the device
-// refuses debug saves until it reboots with a readable file. The damaged file is
-// preserved for inspection rather than being flattened.
-static bool gDebugLoadedOk = false;
-void debugSettingsMarkLoadedOk() { gDebugLoadedOk = true; }
+// Consequence, matching the settings precedent: a damaged file is moved aside
+// and the flags restart from defaults; a file that could not be read this boot
+// (open failure, out of memory) stays, and debug saves are refused until a boot
+// reads it.
+static ConfigLoad::Status gDebugLoad = ConfigLoad::Status::NotLoaded;
 
 // Guarded secret write: never replaces a stored "AES:" blob with "" after a
 // damaged load, and never persists an empty result from a FAILED encryption
@@ -1426,7 +1427,7 @@ bool buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFil
   // Only a completed load (or a confirmed absent file) makes RAM authoritative.
   // The owner also writes an empty list, so removing the last network persists,
   // and leaves the on-disk section intact when WiFi is unavailable.
-  if (gSettingsLoadedOk) {
+  if (ConfigLoad::savable(gSettingsLoad)) {
     if (!wifiNetworksWriteJson(doc, excludePasswords)) return false;
   }
   return true;
@@ -1526,7 +1527,7 @@ static bool writeSettingsSnapshot(const JsonDocument& doc,
 // Callers hold the filesystem lock and never quarantine a NoMemory parse (the
 // file is intact; this boot is short of heap).
 static constexpr unsigned kCorruptQuarantineKeep = 3;
-static bool quarantineCorruptFile(const String& path, const AuthContext& auth, String& movedTo) {
+bool quarantineCorruptFile(const String& path, const AuthContext& auth, String& movedTo) {
   auto slot = [&path](unsigned n) {
     char name[96];
     snprintf(name, sizeof(name), "%s.corrupt-%u", path.c_str(), n);
@@ -1558,9 +1559,9 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
   }
 
   // Refuse to rebuild the file from RAM when this boot never successfully read
-  // it. gSettingsLoadedOk means exactly "RAM is a trustworthy source for a full
-  // rewrite": set at the end of a successful load, and set explicitly by the
-  // no-file boot path where RAM legitimately IS the truth.
+  // it. A savable gSettingsLoad means exactly "RAM is a trustworthy source for a
+  // full rewrite": Ok at the end of a successful load, AbsentOk on the no-file
+  // boot path where RAM legitimately IS the truth.
   //
   // Without this, a single unreadable settings.json becomes permanent loss. RAM
   // holds nothing but compiled defaults, and buildSettingsJsonDoc() destroys
@@ -1580,12 +1581,14 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
   // settings until it reboots with a readable file. That is the intended trade
   // - the damaged file is preserved for recovery instead of being flattened -
   // and the refusal is logged every time rather than being silent.
-  if (!gSettingsLoadedOk) {
-    ERROR_STORAGEF("save REFUSED: this boot never loaded settings.json; "
-                   "writing defaults would destroy peers/meshes on disk");
+  if (!ConfigLoad::savable(gSettingsLoad)) {
+    ERROR_STORAGEF("save REFUSED: this boot never loaded settings.json (%s); "
+                   "writing defaults would destroy peers/meshes on disk",
+                   ConfigLoad::statusName(gSettingsLoad));
     logSystemEvent("SETTINGS",
-                   "save REFUSED - this boot never loaded settings.json; "
-                   "writing defaults would destroy peers/meshes on disk");
+                   "save REFUSED - this boot never loaded settings.json (%s); "
+                   "writing defaults would destroy peers/meshes on disk",
+                   ConfigLoad::statusName(gSettingsLoad));
     systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "load_failed",
                     "refused to overwrite an unread settings.json");
     return false;
@@ -1759,10 +1762,12 @@ bool writeDebugJson() {
     ERROR_STORAGEF("Could not acquire settings file writer lock for debug.json");
     return false;
   }
-  if (!gDebugLoadedOk) {
-    ERROR_STORAGEF("debug save REFUSED: this boot never loaded %s; writing compiled "
-                   "defaults would destroy the operator's flag set", DEBUG_JSON_FILE);
-    logSystemEvent("SETTINGS", "debug.json save REFUSED - this boot never loaded it");
+  if (!ConfigLoad::savable(gDebugLoad)) {
+    ERROR_STORAGEF("debug save REFUSED: this boot never loaded %s (%s); writing compiled "
+                   "defaults would destroy the operator's flag set", DEBUG_JSON_FILE,
+                   ConfigLoad::statusName(gDebugLoad));
+    logSystemEvent("SETTINGS", "debug.json save REFUSED - this boot never loaded it (%s)",
+                   ConfigLoad::statusName(gDebugLoad));
     systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "load_failed", DEBUG_JSON_FILE);
     return false;
   }
@@ -1789,11 +1794,14 @@ bool writeDebugJson() {
 }
 
 bool readDebugJson() {
-  if (!filesystemReady) return false;
+  if (!filesystemReady) {
+    gDebugLoad = ConfigLoad::Status::NotMounted;
+    return false;
+  }
   if (!VFS::existsGuarded(DEBUG_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.read"))) {
     // Absent is a SAVABLE state — RAM is legitimately the truth on a fresh
     // device, and without this the first save could never create the file.
-    gDebugLoadedOk = true;
+    gDebugLoad = ConfigLoad::Status::AbsentOk;
     return false;  // absent → debug stays on the defaults applied by settingsDefaults()
   }
   pollPause();
@@ -1801,6 +1809,7 @@ bool readDebugJson() {
   File file = VFS::openGuarded(DEBUG_JSON_FILE, "r", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.read"));
   if (!file) {
     ERROR_STORAGEF("Failed to open debug settings file");
+    gDebugLoad = ConfigLoad::Status::OpenFailed;
     pollResume();
     return false;
   }
@@ -1809,6 +1818,31 @@ bool readDebugJson() {
   file.close();
   if (error) {
     ERROR_STORAGEF("Debug JSON parse error: %s", error.c_str());
+    gDebugLoad = ConfigLoad::classifyParse(error);
+    if (ConfigLoad::damaged(gDebugLoad)) {
+      // Same recovery as settings.json: nothing has been read into RAM yet, so
+      // with the damaged bytes moved aside the flags run on defaults as on a
+      // fresh device and the caller seeds a new file.
+      String movedTo;
+      bool moved;
+      {
+        FsLockGuard guard("settings.quarantine");
+        moved = quarantineCorruptFile(
+            DEBUG_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.quarantine"), movedTo);
+      }
+      if (moved) {
+        gDebugLoad = ConfigLoad::Status::AbsentOk;
+        logSystemEvent("SETTINGS", "debug.json unparseable (%s) - quarantined to %s; "
+                       "debug flags on defaults", error.c_str(), movedTo.c_str());
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, DEBUG_JSON_FILE,
+                        "unparseable at boot - quarantined, defaults loaded");
+      } else {
+        logSystemEvent("SETTINGS", "debug.json unparseable (%s) - quarantine rename FAILED; "
+                       "file left in place", error.c_str());
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, DEBUG_JSON_FILE,
+                        "unparseable at boot - quarantine failed");
+      }
+    }
     pollResume();
     return false;
   }
@@ -1817,7 +1851,7 @@ bool readDebugJson() {
   size_t n = readRegisteredSettings(doc, DEBUG_JSON_FILE, /*allFiles=*/false);
   DEBUG_STORAGEF("[Settings] Applied %zu debug settings from debug.json", n);
 
-  gDebugLoadedOk = true;   // parsed cleanly — RAM is now a trustworthy source
+  gDebugLoad = ConfigLoad::Status::Ok;   // parsed cleanly — RAM is now a trustworthy source
   pollResume();
   return true;
 }
@@ -1960,6 +1994,7 @@ bool readSettingsJson() {
 
   if (!filesystemReady) {
     DEBUG_STORAGEF("[Settings] Filesystem not ready");
+    gSettingsLoad = ConfigLoad::Status::NotMounted;
     return false;
   }
 
@@ -1970,6 +2005,7 @@ bool readSettingsJson() {
 
   if (!VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.read"))) {
     DEBUG_STORAGEF("[Settings] File does not exist: %s", SETTINGS_JSON_FILE);
+    gSettingsLoad = ConfigLoad::Status::AbsentOk;
     pollResume();
     return false;
   }
@@ -1978,6 +2014,7 @@ bool readSettingsJson() {
   File file = VFS::openGuarded(SETTINGS_JSON_FILE, "r", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.read"));
   if (!file) {
     ERROR_STORAGEF("Failed to open settings file");
+    gSettingsLoad = ConfigLoad::Status::OpenFailed;
     pollResume();
     return false;
   }
@@ -1991,7 +2028,8 @@ bool readSettingsJson() {
 
   if (error) {
     ERROR_STORAGEF("JSON parse error: %s", error.c_str());
-    if (error == DeserializationError::NoMemory) {
+    gSettingsLoad = ConfigLoad::classifyParse(error);
+    if (!ConfigLoad::damaged(gSettingsLoad)) {
       ERROR_STORAGEF("JSON document too small (need more than 5120 bytes)");
     } else {
       // G-38: damaged bytes are quarantined so this boot runs on defaults
@@ -2082,7 +2120,7 @@ bool readSettingsJson() {
   gSecretLoadFailures += wifiNetworksReadJson(doc);
 
   DEBUG_STORAGEF("[Settings] Load complete");
-  gSettingsLoadedOk = true;  // full-array rewrites (wifi networks) now trusted
+  gSettingsLoad = ConfigLoad::Status::Ok;  // full-array rewrites (wifi networks) now trusted
   pollResume();
   return true;
 }

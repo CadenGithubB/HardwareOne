@@ -46,10 +46,10 @@ def generate(source: str) -> str:
     # G-38 quarantine helpers (absent from older trees, which --baseline and a
     # fail-without-fix replay compile unchanged).
     quarantine = ""
-    if "static bool quarantineCorruptFile(" in source:
+    if "bool quarantineCorruptFile(" in source:
         start_q = source.index("static constexpr unsigned kCorruptQuarantineKeep")
-        body = extract_block(source, "static bool quarantineCorruptFile(")
-        quarantine = source[start_q:source.index("static bool quarantineCorruptFile(")] + body
+        body = extract_block(source, "bool quarantineCorruptFile(")
+        quarantine = source[start_q:source.index("bool quarantineCorruptFile(")] + body
     user_markers = [
         "String getUserSettingsPath(", "bool loadUserSettings(",
         "struct UserPrefsInvalidateOnExit", "bool saveUserSettings(",
@@ -69,7 +69,7 @@ def generate(source: str) -> str:
     definitions = [extract_block(source, marker) for marker in (
         "void settingsMarkLoadedOk()", "bool readSettingsJson()",
         "static bool writeSettingsJsonImpl(", "bool writeSettingsJson(", "bool writeSettingsJsonForFactoryReset(", "static void buildDebugJsonDoc(",
-        "bool writeDebugJson(", "bool settingsFirmwareVersionRestampPending(",
+        "bool writeDebugJson(", "bool readDebugJson()", "bool settingsFirmwareVersionRestampPending(",
         "bool settingsRestampFirmwareVersion(")]
     harness = (HERE / "settings_file_writes_harness.cpp").read_text()
     for marker, text in {

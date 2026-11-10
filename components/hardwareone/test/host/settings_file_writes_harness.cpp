@@ -7,6 +7,7 @@
 #include "System_UserSettings.h"
 #include "System_PollPause.h"
 #include "System_SettingsWriteBatchCore.h"
+#include "System_ConfigLoad.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -258,7 +259,8 @@ static bool renameGuarded(const String& from, const String& to, AuthContext auth
 
 static const char* SETTINGS_JSON_FILE = "/system/settings.json";
 static const char* DEBUG_JSON_FILE = "/system/debug.json";
-static bool filesystemReady = true, gSettingsLoadedOk = true, gDebugLoadedOk = true;
+static bool filesystemReady = true;
+static ConfigLoad::Status gSettingsLoad = ConfigLoad::Status::Ok, gDebugLoad = ConfigLoad::Status::Ok;
 static bool gSettingsVersionRestampPending = false, builderFails = false, builderOverflows = false;
 static unsigned builds = 0, debugBuilds = 0, bondHashes = 0;
 static int liveValue = 17;
@@ -284,7 +286,10 @@ static void systemEventPost(int kind, const char* reason, const char* detail) {
 #define ERROR_STORAGEF(...) ((void)++diagnosticCalls)
 #define WARN_STORAGEF(...) ((void)++diagnosticCalls)
 #define INFO_STORAGEF(...) ((void)++diagnosticCalls)
-#define DEBUG_STORAGEF(...) ((void)++diagnosticCalls)
+// Names the arguments without evaluating them, so a value the shipping code
+// computes only for its debug line does not read as unused here.
+template <typename... Args> constexpr int debugArgsUsed(const Args&...) { return 0; }
+#define DEBUG_STORAGEF(...) ((void)sizeof(debugArgsUsed(__VA_ARGS__)), (void)++diagnosticCalls)
 namespace SelfDevice { static const char* firmwareVersion() { return "0.99.97.2"; } }
 static void clearSettingsWriteRetry(uint8_t mask) {
   check(writerDepth > 0 && !ownsFs && localPauseDepth == 0, "retry cleared before successful writer cleanup");
@@ -399,7 +404,7 @@ static void reset() {
   files.clear(); store(SETTINGS_JSON_FILE, oldMain); store(DEBUG_JSON_FILE, oldDebug);
   fault = Fault::None; readOpenFails = false; writerAvailable = true;
   gFsMutex = &fsMutex;
-  filesystemReady = gSettingsLoadedOk = gDebugLoadedOk = true;
+  filesystemReady = true; gSettingsLoad = gDebugLoad = ConfigLoad::Status::Ok;
   gSettingsVersionRestampPending = true; builderFails = builderOverflows = false;
   jsonAllocator.fail = false; retryMask = hw1_settings_batch::ALL; retains = 0;
   writeOpens = readOpens = directOpens = renameCalls = removeCalls = 0;
@@ -503,7 +508,7 @@ static void admissionAndBuildFailures() {
       reset();
       if (admission == 0) filesystemReady = false;
       if (admission == 1) writerAvailable = false;
-      if (admission == 2) { if (writer == Writer::Main) gSettingsLoadedOk = false; else if (writer == Writer::Debug) gDebugLoadedOk = false; else readOpenFails = true; }
+      if (admission == 2) { if (writer == Writer::Main) gSettingsLoad = ConfigLoad::Status::NotLoaded; else if (writer == Writer::Debug) gDebugLoad = ConfigLoad::Status::NotLoaded; else readOpenFails = true; }
       check(!run(writer), "unavailable/unsafe writer accepted save"); balanced();
       check(writeOpens == 0 && files.at(SETTINGS_JSON_FILE)->bytes == oldMain && files.at(DEBUG_JSON_FILE)->bytes == oldDebug, "admission failure mutated storage");
       check(bondHashes == 0 && retryMask == hw1_settings_batch::ALL && settingsFirmwareVersionRestampPending(), "admission failure discarded success state");
@@ -522,6 +527,69 @@ static void admissionAndBuildFailures() {
   }
   reset(); files.erase(SETTINGS_JSON_FILE);
   check(writeSettingsJson() && files.count(SETTINGS_JSON_FILE), "fresh-device main save refused absent destination"); balanced();
+}
+
+// debug.json follows the same load gate as settings.json: damaged bytes move
+// aside and the flags restart from defaults; a file that is intact but was not
+// read this boot stays, and the debug writer refuses to replace it.
+static bool debugBootLoad() {
+  FsLockGuard boot("test.boot");
+  return readDebugJson();
+}
+static void debugLoadGate() {
+  static const char* kDebugQuarantine1 = "/system/debug.json.corrupt-1";
+  auto corruptEvent = [] {
+    for (const auto& event : events)
+      if (event.kind == SYSEVT_CONFIG_FILE_CORRUPT && event.reason == DEBUG_JSON_FILE) return true;
+    return false;
+  };
+  for (const std::string& text : {std::string{}, std::string{"{\"truncated\":"}, std::string{"\xff\xfe garbage"}}) {
+    reset(); gDebugLoad = ConfigLoad::Status::NotLoaded; store(DEBUG_JSON_FILE, text);
+    check(!debugBootLoad(), "unparseable debug.json reported as loaded");
+    check(!files.count(DEBUG_JSON_FILE) && files.count(kDebugQuarantine1) &&
+          files.at(kDebugQuarantine1)->bytes == text, "unparseable debug.json was not quarantined byte-for-byte");
+    check(corruptEvent(), "debug.json quarantine posted no event");
+    check(files.at(SETTINGS_JSON_FILE)->bytes == oldMain, "debug.json quarantine touched settings.json");
+    events.clear();
+    check(writeDebugJson() && files.count(DEBUG_JSON_FILE), "debug save after the quarantine failed");
+    check(files.at(kDebugQuarantine1)->bytes == text, "later debug save touched the quarantine copy");
+    balanced();
+
+    // The move fails: the damaged bytes stay and nothing is written over them.
+    reset(); gDebugLoad = ConfigLoad::Status::NotLoaded; store(DEBUG_JSON_FILE, text); failRenameInto = ".corrupt-";
+    check(!debugBootLoad() && !ConfigLoad::savable(gDebugLoad), "failed debug.json quarantine opened the save gate");
+    check(corruptEvent(), "failed debug.json quarantine posted no event");
+    events.clear();
+    check(!writeDebugJson() && files.at(DEBUG_JSON_FILE)->bytes == text && writeOpens == 0,
+          "debug save after a failed quarantine overwrote the file");
+    balanced();
+  }
+
+  // Intact but unread this boot: out of memory, a failed open, no filesystem.
+  for (unsigned reason = 0; reason != 3; ++reason) {
+    reset(); gDebugLoad = ConfigLoad::Status::NotLoaded;
+    if (reason == 0) jsonAllocator.fail = true;
+    if (reason == 1) readOpenFails = true;
+    if (reason == 2) filesystemReady = false;
+    check(!debugBootLoad(), "debug.json load succeeded without its file");
+    jsonAllocator.fail = false; readOpenFails = false; filesystemReady = true;
+    check(files.at(DEBUG_JSON_FILE)->bytes == oldDebug && !files.count(kDebugQuarantine1) && !corruptEvent(),
+          "an intact debug.json was quarantined");
+    check(!writeDebugJson() && files.at(DEBUG_JSON_FILE)->bytes == oldDebug && writeOpens == 0,
+          "debug save after an unread load overwrote the file");
+    balanced();
+  }
+
+  // Absent is savable (first boot); a readable file loads and stays.
+  reset(); gDebugLoad = ConfigLoad::Status::NotLoaded; files.erase(DEBUG_JSON_FILE);
+  check(!debugBootLoad() && gDebugLoad == ConfigLoad::Status::AbsentOk, "an absent debug.json was not recorded as absent");
+  check(writeDebugJson() && files.count(DEBUG_JSON_FILE), "first debug save on a fresh device failed");
+  balanced();
+  reset(); gDebugLoad = ConfigLoad::Status::NotLoaded;
+  check(debugBootLoad() && gDebugLoad == ConfigLoad::Status::Ok && files.at(DEBUG_JSON_FILE)->bytes == oldDebug,
+        "a readable debug.json did not load normally");
+  check(writeDebugJson(), "debug save after a good load failed");
+  balanced();
 }
 
 // G-38: an unparseable settings.json is quarantined, not left to freeze the
@@ -548,7 +616,7 @@ static void corruptSettingsQuarantine() {
   for (const std::string& text : {std::string{}, std::string{"{\"truncated\":"}, std::string{"\xff\xfe garbage"}}) {
     // Boot: the damaged file moves aside, RAM stays on defaults, nothing is
     // read into it, and the save gate opens as on a fresh device.
-    reset(); gSettingsLoadedOk = false; store(SETTINGS_JSON_FILE, text);
+    reset(); gSettingsLoad = ConfigLoad::Status::NotLoaded; store(SETTINGS_JSON_FILE, text);
     check(!bootLoad(), "unparseable settings.json reported as loaded");
     check(!files.count(SETTINGS_JSON_FILE) && files.count(kQuarantine1) && files.at(kQuarantine1)->bytes == text,
           "unparseable settings.json was not quarantined byte-for-byte at boot");
@@ -584,7 +652,7 @@ static void corruptSettingsQuarantine() {
   }
 
   // Rotation keeps the newest three copies and never grows past them.
-  reset(); gSettingsLoadedOk = false; store(SETTINGS_JSON_FILE, "{bad");
+  reset(); gSettingsLoad = ConfigLoad::Status::NotLoaded; store(SETTINGS_JSON_FILE, "{bad");
   store("/system/settings.json.corrupt-1", "old1");
   store("/system/settings.json.corrupt-2", "old2");
   store("/system/settings.json.corrupt-3", "old3");
@@ -596,7 +664,7 @@ static void corruptSettingsQuarantine() {
   balanced();
 
   // Out of memory: the file is intact. It stays, and saves still refuse.
-  reset(); gSettingsLoadedOk = false; jsonAllocator.fail = true;
+  reset(); gSettingsLoad = ConfigLoad::Status::NotLoaded; jsonAllocator.fail = true;
   check(!bootLoad(), "boot load succeeded without memory");
   jsonAllocator.fail = false;
   check(files.at(SETTINGS_JSON_FILE)->bytes == oldMain && !files.count(kQuarantine1) && !corruptEventFor(SETTINGS_JSON_FILE),
@@ -611,7 +679,7 @@ static void corruptSettingsQuarantine() {
   balanced();
 
   // A readable file still loads normally and is not touched.
-  reset(); gSettingsLoadedOk = false;
+  reset(); gSettingsLoad = ConfigLoad::Status::NotLoaded;
   check(bootLoad() && sectionReads > 0 && files.at(SETTINGS_JSON_FILE)->bytes == oldMain && !files.count(kQuarantine1),
         "a readable settings.json did not load normally");
   check(writeSettingsJson(), "save after a good load failed");
@@ -630,8 +698,8 @@ static void corruptSettingsQuarantine() {
             events[0].reason == "merge_read_failed", "failed save-time quarantine posted no merge_read_failed event");
       balanced();
     }
-    reset(); gSettingsLoadedOk = false; store(SETTINGS_JSON_FILE, text); failRenameInto = ".corrupt-";
-    check(!bootLoad() && !gSettingsLoadedOk, "boot load opened the save gate after a failed quarantine");
+    reset(); gSettingsLoad = ConfigLoad::Status::NotLoaded; store(SETTINGS_JSON_FILE, text); failRenameInto = ".corrupt-";
+    check(!bootLoad() && !ConfigLoad::savable(gSettingsLoad), "boot load opened the save gate after a failed quarantine");
     check(files.at(SETTINGS_JSON_FILE)->bytes == text && !files.count(kQuarantine1) && sectionReads == 0,
           "a failed boot quarantine moved or read the file");
     check(events.size() == 1 && events[0].kind == SYSEVT_CONFIG_FILE_CORRUPT &&
@@ -1000,6 +1068,7 @@ int main(int argc, char** argv) {
         for (Fault injected : {Fault::Open, Fault::Directory, Fault::Short, Fault::Size, Fault::WriteError, Fault::Rename, Fault::Cleanup})
           failureCase(writer, injected);
       corruptSettingsQuarantine();
+      debugLoadGate();
     }
     if (selected == "all" || selected == "user" || selected == "user-parity") userSuccessCases(selected == "user-parity");
     if (selected == "all" || selected == "user") {

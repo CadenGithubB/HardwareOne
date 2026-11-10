@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "System_BuildConfig.h"
+#include "System_ConfigLoad.h"   // ConfigLoad::Status — waypoint file load state
 
 // =============================================================================
 // HardwareOne Map (.hwmap) File Format - VERSION 6 (TILED + SUBTYPES)
@@ -875,11 +876,11 @@ public:
 private:
   static Waypoint* _waypoints;
   static int _selectedTarget;  // -1 = none
-  // True when this map's waypoint file either parsed cleanly or is legitimately
-  // ABSENT. saveWaypoints() refuses otherwise: a parse error used to return with
-  // the PREVIOUS map's waypoints still live in _waypoints, and the next mutation
-  // wrote them into THIS map's file.
-  static bool _waypointsLoadedOk;
+  // How the load of the CURRENT map's waypoint file ended. saveWaypoints()
+  // refuses unless it is savable (parsed cleanly, or legitimately ABSENT): a
+  // failed load used to return with the PREVIOUS map's waypoints still live in
+  // _waypoints, and the next mutation wrote them into THIS map's file.
+  static ConfigLoad::Status _waypointsLoad;
 
   // Allocate the waypoint table on first map/waypoint use. Read-only paths
   // treat a null table as "no waypoints loaded".

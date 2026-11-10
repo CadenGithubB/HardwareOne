@@ -20,12 +20,12 @@ def source(name: str) -> str:
 
 settings = source("System_Settings.cpp")
 builder = extract_block(settings, "bool buildSettingsJsonDoc(")
-ready = extract_block(builder, "if (gSettingsLoadedOk)")
+ready = extract_block(builder, "if (ConfigLoad::savable(gSettingsLoad))")
 assert "if (!wifiNetworksWriteJson(doc, excludePasswords)) return false;" in ready
 loader = extract_block(settings, "bool readSettingsJson(")
 assert loader.index("selectDeviceKeyEpoch(doc)") < loader.index("wifiNetworksReadJson(doc)")
 assert "gSecretLoadFailures += wifiNetworksReadJson(doc);" in loader
-assert loader.index("wifiNetworksReadJson(doc)") < loader.index("gSettingsLoadedOk = true")
+assert loader.index("wifiNetworksReadJson(doc)") < loader.index("gSettingsLoad = ConfigLoad::Status::Ok")
 
 writer = extract_block(settings, "static bool writeSettingsJsonImpl(")
 failure = extract_block(writer, "if (!buildSettingsJsonDoc(")
