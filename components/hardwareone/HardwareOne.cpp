@@ -147,6 +147,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include <vector>
 #include <functional>
 #include "System_MemUtil.h"
+#include "System_Microphone.h"  // micRecordingRepairInterrupted
 #include "System_CommandLimits.h"  // CMD_INPUT_MAX / CMD_RESULT_MAX for the console buffers
 #include "System_MemTracker.h"
 
@@ -2202,6 +2203,9 @@ void hardwareone_setup() {
 #endif
 
 #if ENABLE_MICROPHONE
+  // Before anything can record: finish recordings a power cut interrupted.
+  micRecordingRepairInterrupted();
+
   // Microphone / ESP-SR auto-start. openmic self-guards on availability
   // (initMicrophone refuses when no source is present), so on a PDM-less board
   // with the glasses not yet connected this is a graceful no-op; the wearer can

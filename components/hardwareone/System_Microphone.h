@@ -160,6 +160,10 @@ MicRecordingOwnedOp deleteRecordingOwnedPublished(MicRecordingOwner owner,
 // Non-blocking source-loss hook for BLE/HAL callbacks. It never touches the
 // filesystem; the recorder task owns FINALIZING and publishes IDLE last.
 void microphoneNotifySourceLost();
+// Boot only, before anything can record: completes the header of a manual
+// recording cut short by a power loss or reset, and removes recorder files
+// that hold no audio. Walks /recordings and, when writable, /sd/recordings.
+void micRecordingRepairInterrupted();
 String getRecordingsList();
 bool deleteRecording(const char* filename);
 

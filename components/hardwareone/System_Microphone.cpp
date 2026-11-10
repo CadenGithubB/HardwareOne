@@ -48,6 +48,8 @@
 #define AUDIO_BUFFER_SIZE     1024
 #define RECORDING_CHUNK_SIZE  4096
 #define MAX_RECORDING_SEC     60
+// How often a manual recording commits its audio to storage while capturing.
+static constexpr uint32_t kRecCheckpointIntervalMs = 5000;
 
 // Defaults: new recordings go to SD when writable; legacy/internal copies may remain on LittleFS.
 static const char kMicRecLittleFS[] = "/recordings";
@@ -845,6 +847,148 @@ static bool writeWavHeader(File& f, uint32_t dataSize, uint32_t sampleRate) {
   return f.write((uint8_t*)&header, sizeof(header)) == sizeof(header);
 }
 
+// ---------------------------------------------------------------------------
+// Interrupted-recording repair
+//
+// A recording starts with a placeholder header (data length 0) and gets its
+// real header only when it stops. Manual recordings checkpoint their PCM to
+// storage every kRecCheckpointIntervalMs, so after a power cut or reset the
+// file holds a placeholder header followed by the audio captured up to the
+// last checkpoint. The boot pass below completes that header. A file with no
+// committed audio is removed, exactly as a recording with no PCM is at a
+// normal stop.
+// ---------------------------------------------------------------------------
+enum class MicWavRepairAction : uint8_t { LEAVE = 0, REMOVE, PATCH };
+
+struct MicWavRepairDecision {
+  MicWavRepairAction action;
+  uint32_t dataSize;  // PATCH only: PCM bytes the header must describe
+};
+
+// Pure: decides from the first bytes of a file and its size. Only a header
+// this recorder wrote as a placeholder is ever touched; a finished recording,
+// a foreign WAV or anything unrecognised is left alone.
+static MicWavRepairDecision micWavRepairDecide(const uint8_t* head, size_t headLen,
+                                               size_t fileSize) {
+  const MicWavRepairDecision leave{MicWavRepairAction::LEAVE, 0};
+  // The file was created but the placeholder header never reached storage.
+  if (fileSize == 0) return {MicWavRepairAction::REMOVE, 0};
+  if (!head || headLen < sizeof(WavHeader) || fileSize < sizeof(WavHeader)) return leave;
+  WavHeader h;
+  memcpy(static_cast<void*>(&h), head, sizeof(h));
+  if (memcmp(h.riff, "RIFF", 4) != 0 || memcmp(h.wave, "WAVE", 4) != 0 ||
+      memcmp(h.fmt, "fmt ", 4) != 0 || memcmp(h.data, "data", 4) != 0) return leave;
+  if (h.fmtSize != 16 || h.audioFormat != 1 || h.bitsPerSample != 16 ||
+      h.numChannels == 0 || h.blockAlign != h.numChannels * 2) return leave;
+  // Placeholder: data length 0 and the matching RIFF length.
+  if (h.dataSize != 0 || h.fileSize != sizeof(WavHeader) - 8) return leave;
+  size_t payload = fileSize - sizeof(WavHeader);
+  payload -= payload % h.blockAlign;
+  if (payload == 0) return {MicWavRepairAction::REMOVE, 0};
+  if (payload > UINT32_MAX - sizeof(WavHeader)) return leave;
+  return {MicWavRepairAction::PATCH, static_cast<uint32_t>(payload)};
+}
+
+// One power cut interrupts one recording; the cap only bounds a backlog of
+// empty leftovers, which later boots finish.
+static constexpr size_t kMicRepairMaxPerFolder = 8;
+
+struct MicWavRepairJob {
+  char path[96];
+  MicWavRepairDecision decision;
+  uint8_t head[sizeof(WavHeader)];
+};
+
+// Boot only: nothing can be recording yet, so no file here is in use.
+static void micRecordingRepairFolder(const char* folder, int& repaired, int& removed) {
+  const String folderPath(folder);
+  // trusted: recorder-owned files only, confined to the recordings tree of
+  // the tier the folder names.
+  const AuthContext auth =
+      VFS::systemAuth(VFS::recordingScopeFor(folderPath), "mic.record.repair");
+  MicWavRepairJob* jobs = nullptr;
+  size_t jobCount = 0;
+  {
+    // Decide while listing; act after the directory is closed, so no entry
+    // changes under the iterator.
+    FsLockGuard fsGuard("mic.record.repair.scan");
+    if (!VFS::existsGuarded(folderPath, auth)) return;
+    File dir = VFS::openGuarded(folderPath, "r", auth);
+    if (!dir || !dir.isDirectory()) return;
+    for (File f = dir.openNextFile(); f && jobCount < kMicRepairMaxPerFolder;
+         f = dir.openNextFile()) {
+      if (f.isDirectory()) continue;
+      const String name = f.name();
+      if (!name.startsWith("rec_") || !name.endsWith(".wav")) continue;
+      const size_t size = f.size();
+      uint8_t head[sizeof(WavHeader)];
+      const size_t got = size >= sizeof(head) ? f.read(head, sizeof(head)) : 0;
+      const MicWavRepairDecision d = micWavRepairDecide(head, got, size);
+      if (d.action == MicWavRepairAction::LEAVE) continue;
+      if (!jobs) {
+        jobs = static_cast<MicWavRepairJob*>(ps_calloc(
+            kMicRepairMaxPerFolder, sizeof(MicWavRepairJob),
+            AllocPolicy::PreferPSRAM, "mic.rec.repair"));
+        if (!jobs) break;
+      }
+      MicWavRepairJob& job = jobs[jobCount];
+      const int n = snprintf(job.path, sizeof(job.path), "%s/%s", folder, name.c_str());
+      if (n <= 0 || static_cast<size_t>(n) >= sizeof(job.path)) continue;
+      job.decision = d;
+      memcpy(job.head, head, sizeof(job.head));
+      ++jobCount;
+    }
+    dir.close();
+  }
+  for (size_t i = 0; i < jobCount; ++i) {
+    const MicWavRepairJob& job = jobs[i];
+    const String path(job.path);
+    FsLockGuard fsGuard("mic.record.repair");
+    if (job.decision.action == MicWavRepairAction::REMOVE) {
+      if (VFS::removeGuarded(path, auth)) {
+        ++removed;
+        logSystemEvent("MIC", "removed %s: interrupted recording with no audio saved",
+                       job.path);
+      }
+      continue;
+    }
+    WavHeader h;
+    memcpy(static_cast<void*>(&h), job.head, sizeof(h));
+    h.dataSize = job.decision.dataSize;
+    h.fileSize = job.decision.dataSize + sizeof(WavHeader) - 8;
+    // "r+" keeps the audio: only the header is rewritten.
+    File out = VFS::openGuarded(path, "r+", auth);
+    bool ok = static_cast<bool>(out);
+    if (ok) {
+      ok = out.seek(0) &&
+           out.write(reinterpret_cast<const uint8_t*>(&h), sizeof(h)) == sizeof(h);
+      out.flush();
+      ok = ok && !out.getWriteError();
+      out.close();
+    }
+    if (ok) {
+      ++repaired;
+      logSystemEvent("MIC", "repaired %s: recording cut short by a reset, %lu ms kept",
+                     job.path,
+                     static_cast<unsigned long>(
+                         h.byteRate ? static_cast<uint64_t>(h.dataSize) * 1000 / h.byteRate : 0));
+    } else {
+      logSystemEvent("MIC", "could not repair interrupted recording %s", job.path);
+    }
+  }
+  free(jobs);
+}
+
+void micRecordingRepairInterrupted() {
+  int repaired = 0, removed = 0;
+  micRecordingRepairFolder(kMicRecLittleFS, repaired, removed);
+  if (VFS::isSDWritable()) micRecordingRepairFolder(kMicRecSD, repaired, removed);
+  if (repaired || removed) {
+    INFO_MIC_LIFECYCLEF("Interrupted recordings: %d repaired, %d empty removed",
+                        repaired, removed);
+  }
+}
+
 static void micRecordingMarkFailed(const char* reason) {
   if (!gRecCaptureFailed) {
     gRecCaptureFailed = true;
@@ -1002,6 +1146,9 @@ static void recordingTask(void* param) {
   uint32_t maxSamples = gRecSampleRate * MAX_RECORDING_SEC;
   const uint32_t captureLoopStartedMs = millis();
   uint32_t lastPcmMs = captureLoopStartedMs;
+  // Power-cut checkpoint (see "Interrupted-recording repair").
+  uint32_t lastCheckpointMs = captureLoopStartedMs;
+  uint32_t checkpointSamples = 0;
   DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Max samples: %lu (sampleRate=%u, maxSec=%d)", maxSamples, (unsigned)gRecSampleRate, MAX_RECORDING_SEC);
   
   uint32_t loopCount = 0;
@@ -1250,6 +1397,18 @@ static void recordingTask(void* param) {
       // max-duration loop bound both read it and must keep advancing while
       // chunks are held back.
       recordingSamples += bytesRead / sizeof(int16_t);
+
+      // Commit the audio written so far, so a power cut loses at most one
+      // interval. Manual recordings only: a machine-owned capture is short and
+      // its owner consumes and deletes it. Runs under the write lock already
+      // held; unlike a header update, a flush does not rewrite the file.
+      if (shadowCapture.owner == MIC_RECORDING_OWNER_MANUAL && !gRecCaptureFailed &&
+          gRecWrittenSamples != checkpointSamples &&
+          (uint32_t)(millis() - lastCheckpointMs) >= kRecCheckpointIntervalMs) {
+        recordingFile.flush();
+        checkpointSamples = gRecWrittenSamples;
+        lastCheckpointMs = millis();
+      }
 
       // Log every 100 iterations
       if (loopCount % 100 == 0) {
