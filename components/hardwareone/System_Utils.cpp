@@ -220,93 +220,6 @@ String base64Decode(const String& input) {
 }
 
 // ============================================================================
-// JSON Parsing Helpers (moved from .ino)
-// ============================================================================
-
-bool parseJsonInt(const String& src, const char* key, int& out) {
-  char kBuf[64];
-  snprintf(kBuf, sizeof(kBuf), "\"%s\":", key);
-  int p = src.indexOf(kBuf);
-  if (p < 0) return false;
-  p += strlen(kBuf);
-  while (p < (int)src.length() && src[p] == ' ') p++;
-  if (p >= (int)src.length()) return false;
-  int end = p;
-  while (end < (int)src.length()) {
-    char c = src[end];
-    if ((c >= '0' && c <= '9') || c == '-') {
-      end++;
-      continue;
-    }
-    break;
-  }
-  if (end == p) return false;
-  out = src.substring(p, end).toInt();
-  return true;
-}
-
-bool parseJsonString(const String& src, const char* key, String& out) {
-  char kBuf[64];
-  snprintf(kBuf, sizeof(kBuf), "\"%s\":\"", key);
-  int p = src.indexOf(kBuf);
-  if (p < 0) return false;
-  p += strlen(kBuf);
-  int end = src.indexOf('\"', p);
-  if (end < 0) return false;
-  out = src.substring(p, end);
-  return true;
-}
-
-bool extractArrayByKey(const String& src, const char* key, String& outArray) {
-  char kBuf[64];
-  snprintf(kBuf, sizeof(kBuf), "\"%s\"", key);
-  int kLen = strlen(kBuf);
-  int keyPos = src.indexOf(kBuf);
-  if (keyPos < 0) return false;
-  int colon = src.indexOf(':', keyPos + kLen);
-  if (colon < 0) return false;
-  int lb = src.indexOf('[', colon);
-  if (lb < 0) return false;
-  int depth = 0;
-  for (int i = lb; i < (int)src.length(); ++i) {
-    char c = src[i];
-    if (c == '[') depth++;
-    else if (c == ']') {
-      depth--;
-      if (depth == 0) {
-        outArray = src.substring(lb + 1, i);
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-bool extractArrayItem(const String& arrayStr, int& pos, String& outItem) {
-  while (pos < arrayStr.length() && (arrayStr[pos] == ' ' || arrayStr[pos] == '\t' || arrayStr[pos] == '\n' || arrayStr[pos] == ',')) {
-    pos++;
-  }
-  if (pos >= arrayStr.length()) return false;
-  if (arrayStr[pos] == '{') {
-    int depth = 0;
-    int start = pos;
-    for (int i = pos; i < arrayStr.length(); ++i) {
-      char c = arrayStr[i];
-      if (c == '{') depth++;
-      else if (c == '}') {
-        depth--;
-        if (depth == 0) {
-          outItem = arrayStr.substring(start, i + 1);
-          pos = i + 1;
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
-// ============================================================================
 // URL Encoding/Decoding Utilities (moved from .ino)
 // ============================================================================
 
@@ -648,20 +561,7 @@ static void logCommandExecutionPrepared(const AuthContext& ctx,
   unsigned long ts = millis() / 1000;  // Seconds since boot
   
   // Command source
-  const char* source = "unknown";
-  switch (ctx.transport) {
-    case SOURCE_SERIAL: source = "serial"; break;
-    case SOURCE_WEB: source = "web"; break;
-    case SOURCE_ESPNOW: source = "espnow"; break;
-    case SOURCE_INTERNAL: source = "internal"; break;
-    case SOURCE_LOCAL_DISPLAY: source = "display"; break;
-    case SOURCE_BLUETOOTH: source = "bluetooth"; break;
-    case SOURCE_MQTT: source = "mqtt"; break;
-    case SOURCE_VOICE: source = "voice"; break;
-    case SOURCE_G2_GLASSES: source = "g2"; break;
-    case SOURCE_UART: source = "uart"; break;
-    default: source = "unknown"; break;
-  }
+  const char* source = commandSourceName(ctx.transport);
   
   // Status indicator
   const char* status = success ? "OK" : "FAIL";
@@ -1470,17 +1370,31 @@ bool argLeadingTokenIsJson(const String& args) {
 // rendered as "Unknown" over web / BLE / MQTT — and USB is the reason you get
 // from an ordinary reflash or replug, i.e. one of the most common of all.
 // Indices must stay aligned with esp_reset_reason_t.
-static const char* const kResetReasonLabels[] = {
-  "Unknown", "Power-on", "External", "Software", "Panic",
-  "Int WDT", "Task WDT", "WDT", "Deepsleep", "Brownout", "SDIO",
-  "USB", "JTAG", "eFuse", "Power glitch", "CPU lockup"
+// One row per reason: `name` is the stable form the event log and the crash
+// record store, `label` is what status output shows.
+struct ResetReasonText { const char* name; const char* label; };
+static const ResetReasonText kResetReasons[] = {
+  { "unknown",    "Unknown" },      { "poweron",    "Power-on" },
+  { "external",   "External" },     { "software",   "Software" },
+  { "panic",      "Panic" },        { "int_wdt",    "Int WDT" },
+  { "task_wdt",   "Task WDT" },     { "other_wdt",  "WDT" },
+  { "deepsleep",  "Deepsleep" },    { "brownout",   "Brownout" },
+  { "sdio",       "SDIO" },         { "usb",        "USB" },  // USB-Serial-JTAG reset (flash / replug)
+  { "jtag",       "JTAG" },         { "efuse",      "eFuse" },
+  { "pwr_glitch", "Power glitch" }, { "cpu_lockup", "CPU lockup" },
 };
-static const size_t kResetReasonLabelCount = sizeof(kResetReasonLabels) / sizeof(kResetReasonLabels[0]);
+static const size_t kResetReasonCount = sizeof(kResetReasons) / sizeof(kResetReasons[0]);
+static_assert(ESP_RST_UNKNOWN == 0 && ESP_RST_WDT == 7 && ESP_RST_SDIO == 10 &&
+              ESP_RST_USB == 11 && ESP_RST_CPU_LOCKUP == 15,
+              "kResetReasons is indexed by esp_reset_reason_t");
 
-// Single accessor so a future enum extension can't leave one consumer behind
+// Single accessors so a future enum extension can't leave one consumer behind
 // again (this is what let the two `reason < 11` sites drift out of sync).
-static const char* resetReasonLabel(uint32_t reason) {
-  return (reason < kResetReasonLabelCount) ? kResetReasonLabels[reason] : "Unknown";
+const char* resetReasonLabel(uint32_t reason) {
+  return (reason < kResetReasonCount) ? kResetReasons[reason].label : "Unknown";
+}
+const char* resetReasonName(uint32_t reason) {
+  return (reason < kResetReasonCount) ? kResetReasons[reason].name : "other";
 }
 
 // ---------------------------------------------------------------------------

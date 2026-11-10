@@ -45,6 +45,24 @@ enum CommandSource {
                      // activity and NEVER treated as physical presence.
 };
 
+// The stable lower-case name of a command source, as logs, events and replies
+// print it. `fallback` answers for a value outside the enum.
+inline const char* commandSourceName(CommandSource source, const char* fallback = "unknown") {
+  switch (source) {
+    case SOURCE_WEB:           return "web";
+    case SOURCE_SERIAL:        return "serial";
+    case SOURCE_INTERNAL:      return "internal";
+    case SOURCE_ESPNOW:        return "espnow";
+    case SOURCE_LOCAL_DISPLAY: return "display";
+    case SOURCE_BLUETOOTH:     return "bluetooth";
+    case SOURCE_MQTT:          return "mqtt";
+    case SOURCE_VOICE:         return "voice";
+    case SOURCE_G2_GLASSES:    return "g2";
+    case SOURCE_UART:          return "uart";
+  }
+  return fallback;
+}
+
 struct AuthContext {
   CommandSource transport;
   String path;   // URI for HTTP, command for CLI, view for TFT

@@ -252,15 +252,6 @@ const char* settingBoolToggle(bool& field, const String& arg, const char* label)
 String base64Decode(const String& input);
 
 // ============================================================================
-// JSON Parsing Helpers
-// ============================================================================
-
-bool parseJsonInt(const String& src, const char* key, int& out);
-bool parseJsonString(const String& src, const char* key, String& out);
-bool extractArrayByKey(const String& src, const char* key, String& outArray);
-bool extractArrayItem(const String& arrayStr, int& pos, String& outItem);
-
-// ============================================================================
 // URL Encoding/Decoding Utilities
 // ============================================================================
 
@@ -302,6 +293,12 @@ void getTimestampPrefixMsCached(char* out, size_t outSize);
 // Shared system-info JSON for CLI, HTTP, SSE and migration callers; available
 // without the HTTP server. Omit the I2C device list for compact CLI/MQTT replies.
 void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList = true);
+
+// Text for an esp_reset_reason_t value, both from one table in System_Utils.cpp.
+// resetReasonName() is the stable lower-case form ("task_wdt", "other" beyond the
+// table); resetReasonLabel() is the display form ("Task WDT", "Unknown" beyond it).
+const char* resetReasonName(uint32_t reason);
+const char* resetReasonLabel(uint32_t reason);
 
 // Print breakdown of connected device libraries (returns total via outTotal)
 void printConnectedDevicesLibraries(size_t& outTotal);

@@ -186,22 +186,6 @@ static void ensureVoiceArmMutex() {
   ensureSRMutex(gVoiceArmMutex);
 }
 
-static const char* transportToStableString(CommandSource t) {
-  switch (t) {
-    case SOURCE_WEB: return "web";
-    case SOURCE_SERIAL: return "serial";
-    case SOURCE_LOCAL_DISPLAY: return "display";
-    case SOURCE_BLUETOOTH: return "bluetooth";
-    case SOURCE_MQTT: return "mqtt";
-    case SOURCE_ESPNOW: return "espnow";
-    case SOURCE_INTERNAL: return "internal";
-    case SOURCE_VOICE: return "voice";
-    case SOURCE_G2_GLASSES: return "g2";
-    case SOURCE_UART: return "uart";
-    default: return "unknown";
-  }
-}
-
 static void voiceDisarmInternal() {
   bool wasArmed = gVoiceArmed;
   String prevUser = gVoiceArmedUser;
@@ -2993,7 +2977,7 @@ void buildESPSRStatusJson(String& output) {
   doc["voiceCliMappings"] = (int)gVoiceCliMappingCount;
   doc["voiceArmed"] = gVoiceArmed;
   doc["voiceArmedUser"] = gVoiceArmedUser;
-  doc["voiceArmedBy"] = transportToStableString(gVoiceArmedByTransport);
+  doc["voiceArmedBy"] = commandSourceName(gVoiceArmedByTransport);
   doc["rawOutput"] = gSrRawOutputEnabled;
   doc["autotuneActive"] = gSrAutoTuneActive;
   doc["autotuneStep"] = gSrAutoTuneStep;
@@ -3058,7 +3042,7 @@ const char* cmd_sr_start(const String& argsInput) {
 
   if (armed) {
     char msg[192];
-    snprintf(msg, sizeof(msg), "[VOICE] Armed as '%s' (by %s)", gVoiceArmedUser.c_str(), transportToStableString(gVoiceArmedByTransport));
+    snprintf(msg, sizeof(msg), "[VOICE] Armed as '%s' (by %s)", gVoiceArmedUser.c_str(), commandSourceName(gVoiceArmedByTransport));
     broadcastOutput(msg);
   }
 
@@ -3138,13 +3122,13 @@ static const char* cmd_voice_status_cli(const String& argsInput) {
       out = "voice: armed user='";
       out += gVoiceArmedUser;
       out += "' by=";
-      out += transportToStableString(gVoiceArmedByTransport);
+      out += commandSourceName(gVoiceArmedByTransport);
     }
     xSemaphoreGive(gVoiceArmMutex);
   } else {
     if (gVoiceArmed) {
       char buf[96];
-      snprintf(buf, sizeof(buf), "voice: armed user='%s' by=%s", gVoiceArmedUser.c_str(), transportToStableString(gVoiceArmedByTransport));
+      snprintf(buf, sizeof(buf), "voice: armed user='%s' by=%s", gVoiceArmedUser.c_str(), commandSourceName(gVoiceArmedByTransport));
       out = buf;
     } else {
       out = "voice: disarmed";

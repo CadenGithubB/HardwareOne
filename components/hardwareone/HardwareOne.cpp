@@ -1180,28 +1180,6 @@ void rebootStashReason(const char* reason, const char* who, uint8_t source) {
 }
 #define RTC_CRASH_MAGIC 0xC0FFEE42u
 
-static const char* resetReasonName(uint32_t r) {
-  switch ((esp_reset_reason_t)r) {
-    case ESP_RST_POWERON:   return "poweron";
-    case ESP_RST_EXT:       return "external";
-    case ESP_RST_SW:        return "software";
-    case ESP_RST_PANIC:     return "panic";
-    case ESP_RST_INT_WDT:   return "int_wdt";
-    case ESP_RST_TASK_WDT:  return "task_wdt";
-    case ESP_RST_WDT:       return "other_wdt";
-    case ESP_RST_DEEPSLEEP: return "deepsleep";
-    case ESP_RST_BROWNOUT:  return "brownout";
-    case ESP_RST_SDIO:      return "sdio";
-    case ESP_RST_USB:       return "usb";         // reset over the USB-Serial-JTAG peripheral (flash / replug)
-    case ESP_RST_JTAG:      return "jtag";
-    case ESP_RST_EFUSE:     return "efuse";
-    case ESP_RST_PWR_GLITCH: return "pwr_glitch";
-    case ESP_RST_CPU_LOCKUP: return "cpu_lockup";
-    case ESP_RST_UNKNOWN:   return "unknown";
-    default:                return "other";
-  }
-}
-
 // ============================================================================
 // Boot network bring-up
 // ============================================================================

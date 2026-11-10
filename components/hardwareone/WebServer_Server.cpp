@@ -5095,25 +5095,20 @@ esp_err_t handleAutomationsExport(httpd_req_t* req) {
         return sendAutomationsExportReadError(req, newerVersion);
       }
 
-      // Find specific automation using string parsing
-      int targetId = atoi(idParam);
-      String automationsArray;
-      if (!extractArrayByKey(json, "automations", automationsArray)) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No automations array found");
-        return ESP_OK;
-      }
-
-      // Parse automations array to find target
+      // Find the automation with this id; keep its JSON and its name.
+      const long targetId = atol(idParam);
       String targetAuto;
-      int pos = 0;
-      while (pos < (int)automationsArray.length()) {
-        String item;
-        if (!extractArrayItem(automationsArray, pos, item)) break;
-
-        // Check if this automation has the target ID
-        int autoId = 0;
-        if (parseJsonInt(item, "id", autoId) && autoId == targetId) {
-          targetAuto = item;
+      String name;
+      {
+        PSRAM_JSON_DOC(doc);
+        if (deserializeJson(doc, json) || !doc["automations"].is<JsonArray>()) {
+          httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No automations array found");
+          return ESP_OK;
+        }
+        for (JsonObject item : doc["automations"].as<JsonArray>()) {
+          if (!item["id"].is<long>() || item["id"].as<long>() != targetId) continue;
+          serializeJson(item, targetAuto);
+          name = item["name"] | "";
           break;
         }
       }
@@ -5123,11 +5118,8 @@ esp_err_t handleAutomationsExport(httpd_req_t* req) {
         return ESP_OK;
       }
 
-      // Generate filename from automation name
-      String name;
-      if (!parseJsonString(targetAuto, "name", name) || name.length() == 0) {
-        name = "automation";
-      }
+      // The download is named after the automation.
+      if (name.length() == 0) name = "automation";
       // httpd_resp_set_hdr keeps the pointer until httpd_resp_send, so the
       // value lives in this block, which ends after the send.
       char disposition[96];

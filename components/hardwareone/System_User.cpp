@@ -1786,24 +1786,12 @@ bool logoutTransportFromNamedSession(CommandSource target,
   return true;
 }
 
-static const char* transportEventLabel(CommandSource s) {
-  switch (s) {
-    case SOURCE_SERIAL:        return "serial";
-    case SOURCE_UART:          return "uart";
-    case SOURCE_LOCAL_DISPLAY: return "display";
-    case SOURCE_G2_GLASSES:    return "g2";
-    case SOURCE_BLUETOOTH:     return "bluetooth";
-    case SOURCE_WEB:           return "web";
-    default:                   return "internal";
-  }
-}
-
 void logoutTransport(CommandSource transport) {
   // Web logout posts from its own session table; every other transport posts
   // here so a sign-out reads the same whichever surface it came from.
   if (transport != SOURCE_WEB) {
     const String who = getTransportUser(transport);
-    if (who.length()) systemEventPost(SYSEVT_LOGOUT, who.c_str(), transportEventLabel(transport));
+    if (who.length()) systemEventPost(SYSEVT_LOGOUT, who.c_str(), commandSourceName(transport));
   }
   switch (transport) {
     case SOURCE_SERIAL:
@@ -3323,38 +3311,33 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
 // User Command Handlers
 // ============================================================================
 
-const char* cmd_user_approve(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
+// userapprove and userdeny: the same command around a different account
+// operation. `done` is the word the reply starts with.
+static const char* pendingUserCommand(const String& argsInput, const char* done,
+                                      bool (*op)(const String&, String&)) {
   if (!filesystemReady) return "Error: LittleFS not ready";
   String username = argsInput;
   username.trim();
-  DEBUG_USERSF("[users] CLI approve username=%s", username.c_str());
+  DEBUG_USERSF("[users] CLI %s username=%s", done, username.c_str());
   String err;
-  if (!approvePendingUserInternal(username, err)) {
+  if (!op(username, err)) {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     snprintf(getDebugBuffer(), 1024, "Error: %s", err.c_str());
     return getDebugBuffer();
   }
-  if (!ensureDebugBuffer()) return "Approved";
-  snprintf(getDebugBuffer(), 1024, "Approved user '%s'", username.c_str());
+  if (!ensureDebugBuffer()) return done;
+  snprintf(getDebugBuffer(), 1024, "%s user '%s'", done, username.c_str());
   return getDebugBuffer();
+}
+
+const char* cmd_user_approve(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return pendingUserCommand(argsInput, "Approved", approvePendingUserInternal);
 }
 
 const char* cmd_user_deny(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!filesystemReady) return "Error: LittleFS not ready";
-  String username = argsInput;
-  username.trim();
-  DEBUG_USERSF("[users] CLI deny username=%s", username.c_str());
-  String err;
-  if (!denyPendingUserInternal(username, err)) {
-    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    snprintf(getDebugBuffer(), 1024, "Error: %s", err.c_str());
-    return getDebugBuffer();
-  }
-  if (!ensureDebugBuffer()) return "Error: Denied";
-  snprintf(getDebugBuffer(), 1024, "Denied user '%s'", username.c_str());
-  return getDebugBuffer();
+  return pendingUserCommand(argsInput, "Denied", denyPendingUserInternal);
 }
 
 const char* cmd_user_promote(const String& argsInput) {
@@ -4785,15 +4768,7 @@ static const char* cmd_whoami(const String& argsInput) {
   }
   RETURN_VALID_IF_VALIDATE_CSTR();
   const AuthContext& auth = currentAuthContext();
-  const char* transport = "unknown";
-  switch (auth.transport) {
-    case SOURCE_SERIAL: transport = "serial"; break;
-    case SOURCE_UART: transport = "uart"; break;
-    case SOURCE_LOCAL_DISPLAY: transport = "display"; break;
-    case SOURCE_WEB: transport = "web"; break;
-    case SOURCE_BLUETOOTH: transport = "bluetooth"; break;
-    default: break;
-  }
+  const char* transport = commandSourceName(auth.transport);
   EXT_RAM_BSS_ATTR static char buf[128];
   const String& user = auth.user.length() ? auth.user : String("(unknown)");
   snprintf(buf, sizeof(buf), "You are %s%s on %s", user.c_str(),

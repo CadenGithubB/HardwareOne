@@ -117,38 +117,6 @@ bool readAutomationsJson(String& out, uint32_t* newerVersion) {
   out = gAutomations.c_str();
   return true;
 }
-bool extractArrayByKey(const String& src, const char* key, String& outArray) {
-  JsonDocument doc;
-  if (deserializeJson(doc, src.c_str())) return false;
-  if (!doc[key].is<JsonArray>()) return false;
-  std::string text;
-  serializeJson(doc[key], text);
-  outArray = text.c_str();
-  return true;
-}
-bool extractArrayItem(const String& arrayStr, int& pos, String& outItem) {
-  JsonDocument doc;
-  if (deserializeJson(doc, arrayStr.c_str())) return false;
-  JsonArray array = doc.as<JsonArray>();
-  if (pos < 0 || static_cast<size_t>(pos) >= array.size()) return false;
-  std::string text;
-  serializeJson(array[static_cast<size_t>(pos)], text);
-  outItem = text.c_str();
-  pos += 1;
-  return true;
-}
-bool parseJsonInt(const String& src, const char* key, int& out) {
-  JsonDocument doc;
-  if (deserializeJson(doc, src.c_str()) || !doc[key].is<int>()) return false;
-  out = doc[key].as<int>();
-  return true;
-}
-bool parseJsonString(const String& src, const char* key, String& out) {
-  JsonDocument doc;
-  if (deserializeJson(doc, src.c_str()) || !doc[key].is<const char*>()) return false;
-  out = doc[key].as<const char*>();
-  return true;
-}
 String redactAutomationsJsonForResponse(const String& json) { return json; }
 
 // ---- icon fixtures ----
