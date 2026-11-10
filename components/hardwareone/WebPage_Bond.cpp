@@ -940,11 +940,7 @@ void streamBondInner(httpd_req_t* req) {
 }
 
 static void streamBondContent(httpd_req_t* req, const String& username) {
-  streamBeginHtml(req, "Bonded Device", false, username, "bond");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamBondInner(req);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
+  streamCardPage(req, "Bonded Device", username, "bond", [&] { streamBondInner(req); });
 }
 
 static esp_err_t handleBondPage(httpd_req_t* req) {

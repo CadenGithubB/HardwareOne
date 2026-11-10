@@ -21,11 +21,7 @@
 #endif
 
 static void streamBluetoothContent(httpd_req_t* req, const String& username) {
-  streamBeginHtml(req, "Bluetooth", false, username, "bluetooth");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamBluetoothInner(req);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
+  streamCardPage(req, "Bluetooth", username, "bluetooth", [&] { streamBluetoothInner(req); });
 }
 
 esp_err_t handleBluetoothPage(httpd_req_t* req) {

@@ -13,11 +13,7 @@
 #endif
 
 static void streamSpeechContent(httpd_req_t* req, const String& username) {
-  streamBeginHtml(req, "Speech", false, username, "speech");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamSpeechInner(req);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
+  streamCardPage(req, "Speech", username, "speech", [&] { streamSpeechInner(req); });
 }
 
 esp_err_t handleSpeechPage(httpd_req_t* req) {

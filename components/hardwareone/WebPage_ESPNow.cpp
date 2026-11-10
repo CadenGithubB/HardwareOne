@@ -12,11 +12,7 @@
 #include "WebServer_Utils.h"
 
 static void streamEspNowContent(httpd_req_t* req, const String& username) {
-  streamBeginHtml(req, "ESP-NOW", false, username, "espnow");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamEspNowInner(req);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
+  streamCardPage(req, "ESP-NOW", username, "espnow", [&] { streamEspNowInner(req); });
 }
 
 static esp_err_t handleEspNowPage(httpd_req_t* req) {

@@ -1304,6 +1304,18 @@ void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic,
 // End HTML page (close content div, body, html; finalize chunked response)
 void streamEndHtml(httpd_req_t* req);
 
+// A signed-in page whose whole content is one card: the shell, the card
+// wrapper around what `inner()` streams, and the page end.
+template <typename Inner>
+void streamCardPage(httpd_req_t* req, const char* title, const String& username,
+                    const char* activePage, Inner inner) {
+  streamBeginHtml(req, title, /*isPublic=*/false, username, activePage);
+  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
+  inner();
+  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+  streamEndHtml(req);
+}
+
 
 // ============================================================================
 // CSS Streaming

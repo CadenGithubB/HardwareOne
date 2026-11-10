@@ -353,11 +353,7 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
 
 
 static void streamMapsContent(httpd_req_t* req, const String& username) {
-  streamBeginHtml(req, "Maps", false, username, "maps");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamMapsInner(req);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
+  streamCardPage(req, "Maps", username, "maps", [&] { streamMapsInner(req); });
 }
 
 static esp_err_t handleMapsPage(httpd_req_t* req) {

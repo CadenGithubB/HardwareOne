@@ -597,11 +597,7 @@ static esp_err_t handleLLMChatClear(httpd_req_t* req) {
 // GET /llm - Chat page
 // ============================================================================
 static void streamLLMContent(httpd_req_t* req, const String& username) {
-  streamBeginHtml(req, "LLM", false, username, "llm");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamLLMInner(req, username);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
+  streamCardPage(req, "LLM", username, "llm", [&] { streamLLMInner(req, username); });
 }
 
 static esp_err_t handleLLMPage(httpd_req_t* req) {

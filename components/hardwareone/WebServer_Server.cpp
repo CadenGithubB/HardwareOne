@@ -1785,13 +1785,7 @@ void clearLogoutReason(const String& ip) {
 
 // Streaming content for Dashboard page (moved from .ino)
 void streamDashboardContent(httpd_req_t* req, const String& username) {
-  // Begin streamed HTML shell (nav + content wrapper)
-  streamBeginHtml(req, "HardwareOne - Minimal", /*isPublic=*/false, username, "dashboard");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  // Delegate inner streaming to web_dashboard.h
-  streamDashboardInner(req, username);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
+  streamCardPage(req, "HardwareOne - Minimal", username, "dashboard", [&] { streamDashboardInner(req, username); });
 }
 
 // Streaming content for Settings page (moved from .ino)
@@ -1822,35 +1816,19 @@ void streamSettingsContent(httpd_req_t* req, const String& username) {
 }
 
 void streamFilesContent(httpd_req_t* req, const String& username) {
-  streamBeginHtml(req, "Files", false, username, "files");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamFilesInner(req);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
+  streamCardPage(req, "Files", username, "files", [&] { streamFilesInner(req); });
 }
 
 void streamLoggingContent(httpd_req_t* req, const String& username) {
-  streamBeginHtml(req, "Logging", false, username, "logging");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamLoggingInner(req);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
+  streamCardPage(req, "Logging", username, "logging", [&] { streamLoggingInner(req); });
 }
 
 void streamAutomationsContent(httpd_req_t* req, const String& username) {
-  streamBeginHtml(req, "Automations", false, username, "automations");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamAutomationsInner(req);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
+  streamCardPage(req, "Automations", username, "automations", [&] { streamAutomationsInner(req); });
 }
 
 void streamCLIContent(httpd_req_t* req, const String& username) {
-  streamBeginHtml(req, "CLI", false, username, "cli");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamCLIInner(req, username);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
+  streamCardPage(req, "CLI", username, "cli", [&] { streamCLIInner(req, username); });
 }
 
 static void streamPasswordChangeInner(httpd_req_t* req, const String& username, const String& errorMsg) {
