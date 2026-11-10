@@ -44,10 +44,13 @@ def model(root: Path) -> tuple[str, str]:
                        for name in ("System_R1_Protocol.h", "G2_Health.h")) +
              "\n#pragma GCC diagnostic pop\n")
     health = (root / "G2_Health.cpp").read_text()
+    # The validators start at the shared hourly record check where the source has one.
+    hourly_records = "template <typename Result>\nstatic bool hourlyRecordsValid("
+    validators = hourly_records if hourly_records in health else "static bool validateCommonDaily("
     parts = [between(health, "EXT_RAM_BSS_ATTR static R1HealthHistoryDay sHistoryDay;", "class SeriesLock"),
              between(health, "static uint32_t markHistoryChangedLocked()",
                      "bool g2HealthHistoryPeerCustodySelfTest("),
-             between(health, "static bool validateCommonDaily(", "static void rebuildOneTrendLocked("),
+             between(health, validators, "static void rebuildOneTrendLocked("),
              *(extract_block(health, marker) for marker in (
                  "static void historyResetForPeerSwitchLocked(", "void g2HealthHistoryFetchStarted(",
                  "void g2HealthHistoryFetchFinished(", "static bool historyKeyMatchesLocked(",

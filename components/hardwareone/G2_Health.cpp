@@ -1,5 +1,6 @@
 #include "G2_Health.h"
 #include "G2_HealthGraphCore.h"
+#include "G2_RenderTypes.h"   // the shared 4-bpp frame packer
 
 #if ENABLE_R1_HEALTH
 
@@ -511,6 +512,23 @@ void g2HealthApplyTrendDaily(G2HealthMetric metric,
             (unsigned)metric, (unsigned)n, (int)meta->avg);
 }
 
+// The per-record rules every hourly page shares (heart rate, SpO2, HRV): each
+// hour slot at most once, stamped with its own hour of the day, and a minimum,
+// average and maximum that are in order.
+template <typename Result>
+static bool hourlyRecordsValid(const Result& result) {
+  bool seen[R1_HEALTH_HOURLY_SLOTS] = {};
+  for (uint8_t i = 0; i < result.count; ++i) {
+    const auto& record = result.records[i];
+    if (record.hourSlot >= R1_HEALTH_HOURLY_SLOTS || seen[record.hourSlot] ||
+        record.bucketEpoch != result.dayStart + record.hourSlot * 3600u ||
+        record.minimum > record.average || record.average > record.maximum)
+      return false;
+    seen[record.hourSlot] = true;
+  }
+  return true;
+}
+
 static bool validateCommonDaily(const R1CommonDailyResult& result) {
   const uint8_t cmd = result.metric == R1_DAILY_METRIC_HEART_RATE
       ? R1_CMD_HEARTRATE
@@ -523,16 +541,7 @@ static bool validateCommonDaily(const R1CommonDailyResult& result) {
       result.timezoneMinutes > R1_HEALTH_TIMEZONE_MINUTES_MAX ||
       (result.metric != R1_DAILY_METRIC_HEART_RATE &&
        result.metric != R1_DAILY_METRIC_SPO2)) return false;
-  bool seen[R1_HEALTH_HOURLY_SLOTS] = {};
-  for (uint8_t i = 0; i < result.count; ++i) {
-    const R1CommonDailyRecord& record = result.records[i];
-    if (record.hourSlot >= R1_HEALTH_HOURLY_SLOTS || seen[record.hourSlot] ||
-        record.bucketEpoch != result.dayStart + record.hourSlot * 3600u ||
-        record.minimum > record.average || record.average > record.maximum)
-      return false;
-    seen[record.hourSlot] = true;
-  }
-  return true;
+  return hourlyRecordsValid(result);
 }
 
 static bool validateHrvDaily(const R1HrvDailyResult& result) {
@@ -542,16 +551,7 @@ static bool validateHrvDaily(const R1HrvDailyResult& result) {
       result.dayMode != R1_DAILY_DAY_EPOCH || result.dayStart == 0 ||
       result.timezoneMinutes < R1_HEALTH_TIMEZONE_MINUTES_MIN ||
       result.timezoneMinutes > R1_HEALTH_TIMEZONE_MINUTES_MAX) return false;
-  bool seen[R1_HEALTH_HOURLY_SLOTS] = {};
-  for (uint8_t i = 0; i < result.count; ++i) {
-    const R1HrvDailyRecord& record = result.records[i];
-    if (record.hourSlot >= R1_HEALTH_HOURLY_SLOTS || seen[record.hourSlot] ||
-        record.bucketEpoch != result.dayStart + record.hourSlot * 3600u ||
-        record.minimum > record.average || record.average > record.maximum)
-      return false;
-    seen[record.hourSlot] = true;
-  }
-  return true;
+  return hourlyRecordsValid(result);
 }
 
 static bool validateActivityDaily(const R1ActivityDailyResult& result) {
@@ -813,37 +813,11 @@ bool g2HealthApplySleepDaily(const R1SleepDailyResult& result) {
   return true;
 }
 
-static void applyCommonToDayLocked(const R1CommonDailyResult& result) {
-  R1HealthHourlyMetricDay* metric = result.metric == R1_DAILY_METRIC_HEART_RATE
-      ? &sHistoryDay.heartRate : &sHistoryDay.spo2;
-  metric->sourceSerial = result.sourceSerial;
-  metric->sourceCrc32 = result.sourceCrc32;
-  if (latestInDay(result.latestTimestamp, result.dayStart) &&
-      (!metric->latestValid ||
-       result.latestTimestamp >= metric->latestTimestamp)) {
-    metric->latestValid = true;
-    metric->latestTimestamp = result.latestTimestamp;
-    metric->latestValue = result.latestValue;
-  }
-  for (uint8_t i = 0; i < result.count; ++i) {
-    const R1CommonDailyRecord& src = result.records[i];
-    R1HealthHourlyBucket& dst = metric->slots[src.hourSlot];
-    dst.valid = true;
-    dst.hourSlot = src.hourSlot;
-    dst.average = src.average;
-    dst.minimum = src.minimum;
-    dst.maximum = src.maximum;
-    dst.bucketEpoch = src.bucketEpoch;
-  }
-  metric->count = 0;
-  for (size_t i = 0; i < R1_HEALTH_HOURLY_SLOTS; ++i) {
-    if (metric->slots[i].valid) ++metric->count;
-  }
-  metric->have = metric->count != 0;
-}
-
-static void applyHrvToDayLocked(const R1HrvDailyResult& result) {
-  R1HealthHourlyMetricDay& metric = sHistoryDay.hrv;
+// Fold one validated hourly page into its metric's day: slots it carries
+// replace the stored ones, slots it does not carry stay.
+template <typename Result>
+static void applyHourlyToDayLocked(R1HealthHourlyMetricDay& metric,
+                                   const Result& result) {
   metric.sourceSerial = result.sourceSerial;
   metric.sourceCrc32 = result.sourceCrc32;
   if (latestInDay(result.latestTimestamp, result.dayStart) &&
@@ -853,7 +827,7 @@ static void applyHrvToDayLocked(const R1HrvDailyResult& result) {
     metric.latestValue = result.latestValue;
   }
   for (uint8_t i = 0; i < result.count; ++i) {
-    const R1HrvDailyRecord& src = result.records[i];
+    const auto& src = result.records[i];
     R1HealthHourlyBucket& dst = metric.slots[src.hourSlot];
     dst.valid = true;
     dst.hourSlot = src.hourSlot;
@@ -867,6 +841,16 @@ static void applyHrvToDayLocked(const R1HrvDailyResult& result) {
     if (metric.slots[i].valid) ++metric.count;
   }
   metric.have = metric.count != 0;
+}
+
+static void applyCommonToDayLocked(const R1CommonDailyResult& result) {
+  applyHourlyToDayLocked(result.metric == R1_DAILY_METRIC_HEART_RATE
+                             ? sHistoryDay.heartRate : sHistoryDay.spo2,
+                         result);
+}
+
+static void applyHrvToDayLocked(const R1HrvDailyResult& result) {
+  applyHourlyToDayLocked(sHistoryDay.hrv, result);
 }
 
 static void applyActivityToDayLocked(const R1ActivityDailyResult& result) {
@@ -2850,38 +2834,6 @@ static void composeGrid(bool ringConnected) {
   }
 }
 
-static size_t healthPackBmp(uint8_t* out, size_t cap) {
-  const uint32_t w = HEALTH_TILE_W, h = HEALTH_TILE_H;
-  const uint32_t rowStride = ((w * 4 + 31) / 32) * 4;
-  const uint32_t pixelSize = rowStride * h;
-  const uint32_t headerSize = 14 + 40 + 64;
-  const uint32_t total = headerSize + pixelSize;
-  if (!out || total > cap) return 0;
-
-  auto wr16 = [](uint8_t* p, uint16_t v) { p[0] = v & 0xff; p[1] = (v >> 8) & 0xff; };
-  auto wr32 = [](uint8_t* p, uint32_t v) {
-    p[0] = v & 0xff; p[1] = (v >> 8) & 0xff; p[2] = (v >> 16) & 0xff; p[3] = (v >> 24) & 0xff;
-  };
-  out[0] = 'B'; out[1] = 'M';
-  wr32(out + 2, total); wr16(out + 6, 0); wr16(out + 8, 0); wr32(out + 10, headerSize);
-  wr32(out + 14, 40); wr32(out + 18, w); wr32(out + 22, (uint32_t)(-(int32_t)h));
-  wr16(out + 26, 1); wr16(out + 28, 4); wr32(out + 30, 0); wr32(out + 34, pixelSize);
-  wr32(out + 38, 2835); wr32(out + 42, 2835); wr32(out + 46, 16); wr32(out + 50, 0);
-  for (int i = 0; i < 16; i++) {
-    const uint8_t v = (uint8_t)((i * 255) / 15);
-    out[54 + i * 4 + 0] = v; out[54 + i * 4 + 1] = v; out[54 + i * 4 + 2] = v; out[54 + i * 4 + 3] = 0;
-  }
-  uint8_t* pixels = out + headerSize;
-  for (uint32_t y = 0; y < h; y++) {
-    uint8_t* dst = pixels + y * rowStride;
-    for (uint32_t x = 0; x < w; x += 2)
-      dst[x / 2] = (uint8_t)((sGrid[y][x] << 4) | (sGrid[y][x + 1] & 0x0f));
-    // Pad stride tail
-    for (uint32_t p = w / 2; p < rowStride; p++) dst[p] = 0;
-  }
-  return total;
-}
-
 size_t g2RenderHealthBmp(uint8_t* out, size_t cap) {
   if (sSelected == HEALTH_METRIC_OVERVIEW) return 0;
   // Snapshot ring state before taking sSeriesMutex. Direct notify ingestion
@@ -2892,12 +2844,11 @@ size_t g2RenderHealthBmp(uint8_t* out, size_t cap) {
   SeriesLock lock;
   if (!lock.locked()) return 0;
   composeGrid(telemetry.connected);
-  return healthPackBmp(out, cap);
+  return g2BuildBmp4bppFromShades(out, cap, &sGrid[0][0], HEALTH_TILE_W, HEALTH_TILE_H);
 }
 
 size_t g2HealthBmpCap(void) {
-  const uint32_t rowStride = ((HEALTH_TILE_W * 4 + 31) / 32) * 4;
-  return (size_t)(14 + 40 + 64) + (size_t)rowStride * HEALTH_TILE_H;
+  return g2Bmp4bppSize(HEALTH_TILE_W, HEALTH_TILE_H);
 }
 
 #endif  // ENABLE_R1_HEALTH

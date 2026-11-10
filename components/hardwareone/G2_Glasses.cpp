@@ -33719,13 +33719,14 @@ bool g2ShowBmpFile(const char* path, void (*onDone)()) {
 
 // Generic 4-bpp top-down BMP wrapper around a shade buffer (one byte per
 // pixel, 0..15). Core (unguarded): used by the keyboard pad on every build;
-// the ENABLE_MAPS map renderer delegates here for its 288x144 frames.
-static size_t g2BuildBmp4bppFromShades(uint8_t* out, size_t outCap,
-                                       const uint8_t* shades,
-                                       int32_t dstW, int32_t dstH) {
+// the ENABLE_MAPS map renderer delegates here for its 288x144 frames, and the
+// Health tile packs its graph through it. Declared in G2_RenderTypes.h.
+size_t g2BuildBmp4bppFromShades(uint8_t* out, size_t outCap,
+                                const uint8_t* shades,
+                                int32_t dstW, int32_t dstH) {
   const uint32_t rowStride  = ((uint32_t)dstW * 4 + 31) / 32 * 4;
   const uint32_t pixelSize  = rowStride * (uint32_t)dstH;
-  const uint32_t headerSize = 14 + 40 + 64;
+  const uint32_t headerSize = G2_BMP4_HEADER_SIZE;
   const uint32_t total      = headerSize + pixelSize;
   if (!out || !shades || total > outCap) return 0;
   auto wr16 = [](uint8_t* p, uint16_t v) {

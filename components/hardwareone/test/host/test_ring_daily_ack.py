@@ -107,8 +107,12 @@ def generated(component: Path, source_dir: Path | None) -> tuple[str, dict[str, 
     protocol_parts = [capabilities, ack_factory,
                       extract_block(protocol, "bool r1MakeDailyPacketAckDescriptor(")]
 
+    # Older sources carried the hourly record loop inside each validator.
+    hourly_records = "template <typename Result>\nstatic bool hourlyRecordsValid("
     production = [extract_block(health, marker) for marker in (
-        "static bool historyPeerIdValid(", "static bool validateCommonDaily(",
+        "static bool historyPeerIdValid(",
+        *((hourly_records,) if hourly_records in health else ()),
+        "static bool validateCommonDaily(",
         "static bool validateHrvDaily(", "static bool validateActivityDaily(",
         "static R1HealthHistoryLayout historyLayoutForProfile(", "static bool pendingKeyAcceptLocked(",
         "template <typename Result>\nstatic void mergePendingHourlyResult(",

@@ -1,6 +1,7 @@
 #ifndef G2_RENDER_TYPES_H
 #define G2_RENDER_TYPES_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 // Shared presentation data for page callers and wire builders. These types
@@ -114,5 +115,23 @@ struct G2TextChildSpec {
                                     // the Selection Patterns test bench's
                                     // canary for verification on 2.2.0.24.
 };
+
+// ── 4-bpp image frames ───────────────────────────────────────────────────────
+// The lens takes images as top-down 4-bpp BMPs with a 16-step gray palette:
+// a 14-byte file header, a 40-byte info header and 16 palette entries, then
+// rows padded to four bytes.
+static constexpr size_t G2_BMP4_HEADER_SIZE = 14 + 40 + 64;
+
+// Bytes one such frame needs, so a caller can size its buffer.
+constexpr size_t g2Bmp4bppSize(int32_t w, int32_t h) {
+  return G2_BMP4_HEADER_SIZE + (size_t)(((uint32_t)w * 4 + 31) / 32 * 4) * (size_t)h;
+}
+
+// Pack a shade buffer (one byte per pixel, 0..15, row-major) into that frame.
+// Returns the frame length, or 0 when `out` is too small. Defined in
+// G2_Glasses.cpp, so only builds with glasses support may call it.
+size_t g2BuildBmp4bppFromShades(uint8_t* out, size_t outCap,
+                                const uint8_t* shades,
+                                int32_t dstW, int32_t dstH);
 
 #endif // G2_RENDER_TYPES_H
