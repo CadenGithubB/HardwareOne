@@ -1246,12 +1246,11 @@ static esp_err_t handleBondStream(httpd_req_t* req) {
 
   // Parse POST body
   char buf[128];
-  int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
-  if (len <= 0) {
+  size_t len = 0;
+  if (webRecvRequestBody(req, buf, sizeof(buf), &len) != WebBodyStatus::Ok) {
     httpd_resp_send(req, "{\"success\":false,\"error\":\"No data\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  buf[len] = '\0';
 
   // Parse sensor and action
   char sensorParam[32] = {0};
@@ -1336,12 +1335,10 @@ static esp_err_t handleBondExec(httpd_req_t* req) {
     httpd_resp_send(req, "{\"success\":false,\"error\":\"Request too large\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
-  if (len <= 0) {
+  if (webRecvRequestBody(req, buf, sizeof(buf)) != WebBodyStatus::Ok) {
     httpd_resp_send(req, "{\"success\":false,\"error\":\"No data\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  buf[len] = '\0';
   
   // Parse command
   EXT_RAM_BSS_ATTR static char cmdParam[CMD_INPUT_MAX + 1];
@@ -1485,27 +1482,20 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
     httpd_resp_send(req, "{\"ok\":false,\"error\":\"Bonded master required\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  if (req->content_len == 0 || req->content_len > 32768) {
-    httpd_resp_send(req, "{\"ok\":false,\"error\":\"Invalid content length\"}", HTTPD_RESP_USE_STRLEN);
+  WebBodyBuffer body = webReadRequestBody(req, 32768, "http.bond.batch");
+  if (!body.ok()) {
+    const char* reply = "{\"ok\":false,\"error\":\"Request body incomplete\"}";
+    if (body.status == WebBodyStatus::Empty || body.status == WebBodyStatus::TooLarge) {
+      reply = "{\"ok\":false,\"error\":\"Invalid content length\"}";
+    } else if (body.status == WebBodyStatus::NoMemory) {
+      reply = "{\"ok\":false,\"error\":\"OOM\"}";
+    }
+    httpd_resp_send(req, reply, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-
-  std::unique_ptr<char, void(*)(void*)> buf(
-    (char*)ps_alloc(req->content_len + 1, AllocPref::PreferPSRAM, "http.bond.batch"), free);
-  if (!buf) {
-    httpd_resp_send(req, "{\"ok\":false,\"error\":\"OOM\"}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  int received = 0;
-  while (received < (int)req->content_len) {
-    int r = httpd_req_recv(req, buf.get() + received, req->content_len - received);
-    if (r <= 0) break;
-    received += r;
-  }
-  buf.get()[received] = '\0';
 
   PSRAM_JSON_DOC(doc);
-  DeserializationError jerr = deserializeJson(doc, buf.get(), received);
+  DeserializationError jerr = deserializeJson(doc, body.c_str(), body.len);
   if (jerr || !doc["commands"].is<JsonArray>()) {
     httpd_resp_send(req, "{\"ok\":false,\"error\":\"Expected {\\\"commands\\\":[...]} JSON body\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;

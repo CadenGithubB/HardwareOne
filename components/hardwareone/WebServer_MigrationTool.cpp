@@ -370,11 +370,8 @@ static esp_err_t handleBackup(httpd_req_t* req) {
 
   // Read POST body to get category selection
   char body[256] = {0};
-  int received = 0;
-  if (req->content_len > 0 && req->content_len < sizeof(body)) {
-    received = httpd_req_recv(req, body, req->content_len);
-    if (received > 0) body[received] = '\0';
-  }
+  size_t received = 0;
+  webRecvRequestBody(req, body, sizeof(body), &received);  // absent or unreadable: every category
 
   // Parse categories from body: { "categories": ["settings", "users", ...] }
   bool wantSettings = false, wantUsers = false, wantAutomations = false;

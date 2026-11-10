@@ -6,7 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from test_web_batch_handlers import extract_block
+from test_web_batch_handlers import extract_block, request_body_readers
 
 HERE=Path(__file__).resolve().parent
 COMPONENT=HERE.parents[1]
@@ -27,7 +27,7 @@ def main():
     definitions+='constexpr size_t STT_SPEAKER_HISTORY = 16;\n'+extract_block(metadata,'struct STTSpeakerEntry')+';\n'+extract_block(metadata,'struct STTSpeakerSnapshot')+';\n'
     for marker in ('enum class DictationState','struct DictationSnapshot','struct DictationTextReceipt','enum class DictationAppPurpose','struct DictationAppLease','struct DictationAppSnapshot'):
         definitions+=extract_block(types,marker)+';\n'
-    harness=(HERE/'transcription_web_harness.cpp').read_text().replace('// INSERT_PRODUCTION_TYPES',definitions).replace('// INSERT_PRODUCTION_HTTP',http)
+    harness=(HERE/'transcription_web_harness.cpp').read_text().replace('// INSERT_PRODUCTION_TYPES',definitions).replace('// INSERT_PRODUCTION_HTTP',request_body_readers(COMPONENT,allocating=False)+'\n'+http)
     header=(COMPONENT/'System_Transcription_Web.h').read_text()
     js=header.split('R"STTJS(\n<script>\n',1)[1].split('\n</script>\n)STTJS"',1)[0]
     mic=(COMPONENT/'System_Microphone_Web.h').read_text()

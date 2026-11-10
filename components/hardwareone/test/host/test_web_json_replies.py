@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, request_body_readers, require
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -109,6 +109,7 @@ def production() -> str:
     pieces += optional(server, "static esp_err_t sendAutomationsExportReadError(")
     pieces.append(required(server, "esp_err_t handleAutomationsExport("))
     pieces.append(required(server, "esp_err_t handleIconGet("))
+    pieces.append(request_body_readers(COMPONENT, allocating=False))
     pieces.append(required(server, "esp_err_t handleFilesCreate("))
     pieces += optional(sensors, "static String buildRecordingsListJson(")
     pieces.append(required(sensors, "esp_err_t handleMicRecordingsList("))

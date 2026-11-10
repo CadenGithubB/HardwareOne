@@ -74,6 +74,9 @@ AccountRequestResult submitAccountRequest(const String& username, const String& 
 typedef int esp_err_t;
 #define ESP_OK 0
 #define ESP_FAIL -1
+#define HTTPD_SOCK_ERR_TIMEOUT -3
+#define DEBUG_HTTPF(...) ((void)0)
+#define ERROR_MEMORYF(...) ((void)0)
 #define HTTPD_RESP_USE_STRLEN -1
 enum httpd_err_code_t { HTTPD_400_BAD_REQUEST = 400 };
 struct httpd_req_t {

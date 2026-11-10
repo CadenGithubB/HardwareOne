@@ -999,15 +999,11 @@ static esp_err_t handleTranscriptionPost(httpd_req_t* req) {
     return transcriptionWebError(req, "401 Unauthorized", "A live named web session is required");
   // Small fixed forms only; do not allocate based on an untrusted body length.
   char body[256] = {}, action[12] = {}, id[17] = {};
-  if (req->content_len <= 0 || req->content_len >= sizeof(body))
-    return transcriptionWebError(req, "400 Bad Request", "Invalid request body");
   size_t used = 0;
-  while (used < req->content_len) {
-    const int n = httpd_req_recv(req, body + used, req->content_len - used);
-    if (n <= 0) return transcriptionWebError(req, "400 Bad Request", "Incomplete request body");
-    used += static_cast<size_t>(n);
-  }
-  if (memchr(body, '\0', used))
+  const WebBodyStatus bodyRead = webRecvRequestBody(req, body, sizeof(body), &used);
+  if (bodyRead == WebBodyStatus::RecvFailed)
+    return transcriptionWebError(req, "400 Bad Request", "Incomplete request body");
+  if (bodyRead != WebBodyStatus::Ok || memchr(body, '\0', used))
     return transcriptionWebError(req, "400 Bad Request", "Invalid request body");
   const bool ack = strcmp(req->uri, "/api/transcription/ack") == 0;
   if (!ack && httpd_query_key_value(body, "action", action, sizeof(action)) != ESP_OK)

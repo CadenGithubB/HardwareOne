@@ -18,7 +18,8 @@ constexpr TransportSessionEpoch kNoTransportSessionEpoch=0;
 enum CommandSource {SOURCE_INTERNAL, SOURCE_WEB, SOURCE_LOCAL_DISPLAY, SOURCE_G2_GLASSES};
 // INSERT_PRODUCTION_TYPES
 using esp_err_t=int;
-constexpr int ESP_OK=0, ESP_FAIL=-1;
+constexpr int ESP_OK=0, ESP_FAIL=-1, HTTPD_SOCK_ERR_TIMEOUT=-3;
+#define DEBUG_HTTPF(...) ((void)0)
 struct httpd_req_t {
   const char* uri="/api/transcription";
   std::string input, query, output, status="200 OK";

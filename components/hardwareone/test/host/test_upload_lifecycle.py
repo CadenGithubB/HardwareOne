@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, request_body_readers, require
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -39,7 +39,7 @@ def main() -> None:
         "FsLockGuard::FsLockGuard(const char* owner, TickType_t timeoutTicks)",
         "FsLockGuard::~FsLockGuard()", "void fsLock(", "void fsUnlock("))
     handler = extract_block(source, "esp_err_t handleFileUpload(")
-    writer = extract_block(source, "esp_err_t handleFileWrite(")
+    writer = request_body_readers(COMPONENT) + "\n" + extract_block(source, "esp_err_t handleFileWrite(")
     utils = (COMPONENT / "System_Utils.cpp").read_text()
     decoders = "\n".join(extract_block(utils, marker) for marker in ("String urlDecode(", "String extractFormField("))
     vfs = (COMPONENT / "System_VFS.cpp").read_text()

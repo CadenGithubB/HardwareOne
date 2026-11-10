@@ -67,6 +67,27 @@ def extract_block(source: str, marker: str) -> str:
     raise AssertionError(f"unterminated production definition: {marker}")
 
 
+
+def request_body_readers(component: Path, allocating: bool = True) -> str:
+    """The shared request-body readers, for a harness whose handler calls them.
+
+    allocating=False leaves out the reader that owns its buffer (and with it the
+    need for a ps_alloc stand-in)."""
+    header = (component / "WebServer_Utils.h").read_text()
+    source = (component / "WebServer_Utils.cpp").read_text()
+    pieces = [
+        extract_block(header, "enum class WebBodyStatus") + ";",
+        "WebBodyStatus webRecvRequestBody(httpd_req_t* req, char* buf, size_t bufSize, size_t* outLen = nullptr);",
+        extract_block(source, "WebBodyStatus webRecvRequestBody("),
+    ]
+    if allocating:
+        pieces += [
+            extract_block(header, "struct WebBodyBuffer") + ";",
+            extract_block(source, "WebBodyBuffer webReadRequestBody("),
+        ]
+    return "\n".join(pieces)
+
+
 def web_command_types() -> str:
     """Use shipping context fields/defaults instead of a reduced test copy."""
     user = (COMPONENT / "System_User.h").read_text()

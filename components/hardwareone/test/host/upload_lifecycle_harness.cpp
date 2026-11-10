@@ -56,6 +56,7 @@ using std::min;
 #define INFO_WEBF(...) ((void)0)
 #define ERROR_WEBF(...) ((void)0)
 #define ERROR_MEMORYF(...) ((void)0)
+#define DEBUG_HTTPF(...) ((void)0)
 // The production form decoders (System_Utils.cpp) both handlers now share.
 // INSERT_FORM_DECODERS
 

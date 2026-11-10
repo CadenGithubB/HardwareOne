@@ -453,15 +453,12 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
       httpd_resp_send(req, "{\"success\":false,\"error\":\"OOM\"}", HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
     }
-    int ret = httpd_req_recv(req, buf, 511);
-    if (ret <= 0) {
+    if (webRecvRequestBody(req, buf, 512) != WebBodyStatus::Ok) {
       free(buf);
       httpd_resp_set_status(req, "400 Bad Request");
       httpd_resp_send(req, "{\"success\":false,\"error\":\"No data\"}", HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
     }
-    buf[ret] = '\0';
-    
     String data(buf);
     String action, name, notes, latStr, lonStr, indexStr;
     

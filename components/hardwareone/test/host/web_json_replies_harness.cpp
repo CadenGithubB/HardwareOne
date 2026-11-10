@@ -24,6 +24,7 @@
 using esp_err_t = int;
 constexpr esp_err_t ESP_OK = 0;
 constexpr esp_err_t ESP_FAIL = -1;
+constexpr int HTTPD_SOCK_ERR_TIMEOUT = -3;
 constexpr long HTTPD_RESP_USE_STRLEN = -1;
 enum httpd_err_code_t { HTTPD_404_NOT_FOUND = 404, HTTPD_500_INTERNAL_SERVER_ERROR = 500 };
 
@@ -232,6 +233,7 @@ static void caseFilesCreate() {
   for (const char* type : {"folder", "txt"}) {
     httpd_req_t req;
     req.recvBody = std::string("name=dir%2Fnote&type=") + type;
+    req.content_len = req.recvBody.size();
     gCommandOk = false;
     gCommandOut = error;
     check(handleFilesCreate(&req) == ESP_OK, "create returns ESP_OK");
@@ -241,6 +243,7 @@ static void caseFilesCreate() {
   httpd_req_t req;
   const std::string name = "d/" + std::string(150, 'x');
   req.recvBody = "name=" + name + "&type=txt";
+  req.content_len = req.recvBody.size();
   gCommandOk = true;
   gCommandOut.clear();
   check(handleFilesCreate(&req) == ESP_OK, "long create returns ESP_OK");

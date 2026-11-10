@@ -2049,47 +2049,19 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   }
 
   // Read body (form-urlencoded)
-  size_t contentLen = req->content_len;
-  DEBUG_STORAGEF("[handleFileWrite] Content-Length: %d bytes", contentLen);
-  if (contentLen == 0 || contentLen > 150 * 1024) {
-    ERROR_WEBF("Invalid content length: %d", contentLen);
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"Invalid content length\"}");
-    return ESP_OK;
-  }
-
-  char* body = (char*)ps_alloc(contentLen + 1, AllocPref::PreferPSRAM, "http.upload.body");
-  if (!body) {
-    ERROR_MEMORYF("Failed to allocate %d bytes for upload", contentLen + 1);
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"OOM\"}");
-    return ESP_OK;
-  }
-  DEBUG_STORAGEF("[handleFileWrite] Allocated %d bytes for body", contentLen + 1);
-
-  // Read the body in chunks (httpd_req_recv may not read everything at once)
-  size_t totalReceived = 0;
-  int recvAttempts = 0;
-  int idleTimeouts = 0;  // consecutive recv_wait_timeout results
-  while (totalReceived < contentLen) {
-    recvAttempts++;
-    int ret = httpd_req_recv(req, body + totalReceived, contentLen - totalReceived);
-    if (ret <= 0) {
-      // One idle wait is a slow client; two in a row is a half-open socket
-      // that would otherwise pin this httpd worker forever.
-      if (ret == HTTPD_SOCK_ERR_TIMEOUT && ++idleTimeouts < 2) {
-        DEBUG_STORAGEF("[handleFileWrite] Timeout on recv attempt %d, retrying...", recvAttempts);
-        continue;  // Retry on timeout
-      }
-      ERROR_WEBF("recv failed with code %d after %d attempts", ret, recvAttempts);
-      free(body);
-      sendJsonResponse(req, "{\"success\":false, \"error\":\"Error receiving data\"}");
-      return ESP_OK;
+  WebBodyBuffer body = webReadRequestBody(req, 150 * 1024, "http.upload.body");
+  if (!body.ok()) {
+    ERROR_WEBF("File write body not read: status=%d content_len=%u", (int)body.status, (unsigned)req->content_len);
+    const char* reply = "{\"success\":false, \"error\":\"Error receiving data\"}";
+    if (body.status == WebBodyStatus::Empty || body.status == WebBodyStatus::TooLarge) {
+      reply = "{\"success\":false, \"error\":\"Invalid content length\"}";
+    } else if (body.status == WebBodyStatus::NoMemory) {
+      reply = "{\"success\":false, \"error\":\"OOM\"}";
     }
-    idleTimeouts = 0;
-    totalReceived += ret;
-    DEBUG_STORAGEF("[handleFileWrite] Recv attempt %d: got %d bytes, total: %d/%d", recvAttempts, ret, totalReceived, contentLen);
+    sendJsonResponse(req, reply);
+    return ESP_OK;
   }
-  body[totalReceived] = '\0';
-  DEBUG_STORAGEF("[handleFileWrite] Received complete body: %d bytes in %d attempts", totalReceived, recvAttempts);
+  DEBUG_STORAGEF("[handleFileWrite] Received complete body: %u bytes", (unsigned)body.len);
 
   // The Files editor posts both fields through hw.postForm, which applies
   // encodeURIComponent to every value: decode the complete alphabet with the
@@ -2097,9 +2069,8 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   String name;
   String content;
   {
-    String s = String(body);
-    free(body);
-    DEBUG_STORAGEF("[handleFileWrite] Converted to String, length: %d", s.length());
+    String s = String(body.c_str());
+    body.data.reset();
     name = urlDecode(extractFormField(s, "name"));
     content = urlDecode(extractFormField(s, "content"));
   }
@@ -2688,39 +2659,20 @@ esp_err_t handlePasswordChangePage(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   if (req->method == HTTP_POST) {
-    int total_len = req->content_len;
-    if (total_len <= 0 || total_len > 4096) {
+    WebBodyBuffer bodyBuf = webReadRequestBody(req, 4096, "http.pwchg");
+    if (!bodyBuf.ok()) {
+      const char* problem = "Read error";
+      if (bodyBuf.status == WebBodyStatus::Empty || bodyBuf.status == WebBodyStatus::TooLarge) problem = "Invalid request";
+      else if (bodyBuf.status == WebBodyStatus::NoMemory) problem = "Out of memory";
       httpd_resp_set_type(req, "text/html");
       gMeshActivitySuspended = true;
-      streamPasswordChangeInner(req, ctx.user, String("Invalid request"));
+      streamPasswordChangeInner(req, ctx.user, String(problem));
       gMeshActivitySuspended = false;
       streamDebugFlush();
       return ESP_OK;
     }
-    std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(total_len + 1, AllocPref::PreferPSRAM, "http.pwchg"), free);
-    if (!buf) {
-      httpd_resp_set_type(req, "text/html");
-      gMeshActivitySuspended = true;
-      streamPasswordChangeInner(req, ctx.user, String("Out of memory"));
-      gMeshActivitySuspended = false;
-      streamDebugFlush();
-      return ESP_OK;
-    }
-    int received = 0;
-    while (received < total_len) {
-      int r = httpd_req_recv(req, buf.get() + received, total_len - received);
-      if (r <= 0) {
-        httpd_resp_set_type(req, "text/html");
-        gMeshActivitySuspended = true;
-        streamPasswordChangeInner(req, ctx.user, String("Read error"));
-        gMeshActivitySuspended = false;
-        streamDebugFlush();
-        return ESP_OK;
-      }
-      received += r;
-    }
-    buf.get()[received] = '\0';
-    String body(buf.get());
+    String body(bodyBuf.c_str());
+    bodyBuf.data.reset();
     String current = urlDecode(extractFormField(body, "currentPassword"));
     String newp = urlDecode(extractFormField(body, "newPassword"));
     String conf = urlDecode(extractFormField(body, "confirmPassword"));
@@ -2962,38 +2914,22 @@ esp_err_t handleUserSettingsSet(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  int total_len = req->content_len;
-  if (total_len <= 0 || total_len > 4096) {
-    DEBUG_HTTPF("[UserSettings] POST invalid content_len=%d user=%s userId=%u", total_len, ctx.user.c_str(), (unsigned)userId);
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"invalid_content_length\"}");
-    return ESP_OK;
-  }
-
-  std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(total_len + 1, AllocPref::PreferPSRAM, "http.user.settings"), free);
-  if (!buf) {
-    ERROR_MEMORYF("OOM for user settings POST: user=%s userId=%u", ctx.user.c_str(), (unsigned)userId);
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"oom\"}");
-    return ESP_OK;
-  }
-
-  int received = 0;
-  int idleTimeouts = 0;  // consecutive recv_wait_timeout results
-  while (received < total_len) {
-    int r = httpd_req_recv(req, buf.get() + received, total_len - received);
-    if (r <= 0) {
-      // Two consecutive idle waits mean a half-open socket; stop retrying.
-      if (r == HTTPD_SOCK_ERR_TIMEOUT && ++idleTimeouts < 2) continue;
-      DEBUG_HTTPF("[UserSettings] POST recv_failed r=%d user=%s userId=%u", r, ctx.user.c_str(), (unsigned)userId);
-      sendJsonResponse(req, "{\"success\":false, \"error\":\"recv_failed\"}");
-      return ESP_OK;
+  WebBodyBuffer body = webReadRequestBody(req, 4096, "http.user.settings");
+  if (!body.ok()) {
+    const char* reply = "{\"success\":false, \"error\":\"recv_failed\"}";
+    if (body.status == WebBodyStatus::Empty || body.status == WebBodyStatus::TooLarge) {
+      reply = "{\"success\":false, \"error\":\"invalid_content_length\"}";
+    } else if (body.status == WebBodyStatus::NoMemory) {
+      reply = "{\"success\":false, \"error\":\"oom\"}";
     }
-    idleTimeouts = 0;
-    received += r;
+    DEBUG_HTTPF("[UserSettings] POST body not read status=%d content_len=%d user=%s userId=%u",
+                (int)body.status, (int)req->content_len, ctx.user.c_str(), (unsigned)userId);
+    sendJsonResponse(req, reply);
+    return ESP_OK;
   }
-  buf.get()[received] = '\0';
 
   PSRAM_JSON_DOC(patch);
-  DeserializationError err = deserializeJson(patch, buf.get());
+  DeserializationError err = deserializeJson(patch, body.c_str());
   if (err) {
     DEBUG_HTTPF("[UserSettings] POST invalid_json user=%s userId=%u err=%s", ctx.user.c_str(), (unsigned)userId, err.c_str());
     httpd_resp_set_status(req, "400 Bad Request");
@@ -4026,32 +3962,18 @@ esp_err_t handleRegisterSubmit(httpd_req_t* req) {
     }
   }
 
-  int total_len = req->content_len;
-  if (total_len <= 0) {
-    recordFailedLogin(ip.c_str());
-    return sendRegisterFailPage(req, "All fields are required.");
-  }
-  if (total_len > 2048) {
-    recordFailedLogin(ip.c_str());
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
-    return ESP_FAIL;
-  }
-
   String body;
   {
-    std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(total_len + 1, AllocPref::PreferPSRAM, "http.reg.post"), free);
-    if (!buf) {
+    WebBodyBuffer bodyBuf = webReadRequestBody(req, 2048, "http.reg.post");
+    if (!bodyBuf.ok()) {
       recordFailedLogin(ip.c_str());
-      return sendRegisterFailPage(req, "Unable to process request.");
+      if (bodyBuf.status == WebBodyStatus::Empty) return sendRegisterFailPage(req, "All fields are required.");
+      if (bodyBuf.status == WebBodyStatus::NoMemory) return sendRegisterFailPage(req, "Unable to process request.");
+      httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                          bodyBuf.status == WebBodyStatus::TooLarge ? "Body too large" : "Request body incomplete");
+      return ESP_FAIL;
     }
-    int received = 0;
-    while (received < total_len) {
-      int ret = httpd_req_recv(req, buf.get() + received, total_len - received);
-      if (ret <= 0) break;
-      received += ret;
-    }
-    buf.get()[received] = '\0';
-    body = String(buf.get());
+    body = String(bodyBuf.c_str());
   }
 
   String username = urlDecode(extractFormField(body, "username"));
@@ -4209,12 +4131,10 @@ esp_err_t handleFilesStats(httpd_req_t* req) {
 esp_err_t handleFilesCreate(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   char buf[256];
-  int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
-  if (ret <= 0) {
+  if (webRecvRequestBody(req, buf, sizeof(buf)) != WebBodyStatus::Ok) {
     sendJsonResponse(req, "{\"success\":false, \"error\":\"No data received\"}");
     return ESP_OK;
   }
-  buf[ret] = '\0';
 
   String body = String(buf);
   String name = "";
@@ -5278,28 +5198,20 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
   }
   if (!webGuestAccessAllowed(req, ctx)) return ESP_OK;
 
-  if (req->content_len == 0 || req->content_len > 32768) {
+  WebBodyBuffer body = webReadRequestBody(req, 32768, "http.batch");
+  if (body.status == WebBodyStatus::Empty || body.status == WebBodyStatus::TooLarge) {
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"error\":\"Invalid content length\"}");
     return ESP_OK;
   }
-
-  std::unique_ptr<char, void(*)(void*)> buf(
-    (char*)ps_alloc(req->content_len + 1, AllocPref::PreferPSRAM, "http.batch"), free);
-  if (!buf) {
+  if (body.status == WebBodyStatus::NoMemory) {
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
     return ESP_FAIL;
   }
-  int received = 0;
-  while (received < (int)req->content_len) {
-    int r = httpd_req_recv(req, buf.get() + received, req->content_len - received);
-    if (r <= 0) break;
-    received += r;
-  }
-  buf.get()[received] = '\0';
+  if (!body.ok()) return webSendBodyReadError(req, body.status, /*json=*/true);
 
   PSRAM_JSON_DOC(doc);
-  DeserializationError jerr = deserializeJson(doc, buf.get(), received);
+  DeserializationError jerr = deserializeJson(doc, body.c_str(), body.len);
   if (jerr || !doc["commands"].is<JsonArray>()) {
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"error\":\"Expected {\\\"commands\\\":[...]} JSON body\"}");

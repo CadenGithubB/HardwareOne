@@ -40,7 +40,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, request_body_readers, require
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -127,6 +127,7 @@ def generate() -> tuple[str, bool]:
     pieces += [
         unique(utils, "String urlDecode(", "System_Utils.cpp"),
         unique(utils, "String extractFormField(", "System_Utils.cpp"),
+        request_body_readers(COMPONENT),
         unique(server, "static esp_err_t sendRegisterFailPage(", "WebServer_Server.cpp"),
         unique(server, "esp_err_t handleRegisterSubmit(", "WebServer_Server.cpp"),
     ]
