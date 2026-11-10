@@ -870,6 +870,21 @@ System_User id record are doubles (the record itself is covered by
 not covered. Run with
 `ctest --test-dir build -R '^factory_reset_wipe$' --output-on-failure`.
 
+## Ring clock confirmation
+
+`clock_confirm_policy_tests` runs `ClockConfirmPolicy.h`, the rule that decides
+which clock the R1 ring is given, against a fake device (wall clock plus
+monotonic time). Covered: no reference while the clock is unset; a first
+network sync and hourly corrections are accepted; a network step that moves a
+set clock by more than a day in either direction starts a hold, the hold
+continues over further forged replies and covers the window before the main
+loop has seen the step; a reply that agrees with the earlier clock, or any
+local source, ends it; a ring-adopted, carried-over or invalid manual clock is
+never a reference. The wiring in `System_Clock.cpp` (`Clock::confirmedNow()`)
+and its callers in `G2_Ring.cpp` and `G2_Health.cpp` are compiled by the ring
+runners with a stub that returns the wall clock; the hold itself is not
+exercised against the ring code, and nothing here has run on hardware.
+
 ## Command name uniqueness
 
 `command_name_uniqueness` scans every `CommandEntry` table that

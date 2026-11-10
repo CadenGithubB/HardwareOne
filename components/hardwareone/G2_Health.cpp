@@ -2505,7 +2505,7 @@ void g2HealthBuildTrendsOverviewText(char* out, size_t cap) {
   if (hrMeta.have   && hrMeta.endTs   > dayTs) dayTs = hrMeta.endTs;
   if (hrvMeta.have  && hrvMeta.endTs  > dayTs) dayTs = hrvMeta.endTs;
   if (spo2Meta.have && spo2Meta.endTs > dayTs) dayTs = spo2Meta.endTs;
-  if (!Clock::isValidEpoch((time_t)dayTs)) dayTs = (uint32_t)time(nullptr);
+  if (!Clock::isValidEpoch((time_t)dayTs)) dayTs = (uint32_t)Clock::confirmedNow();
   char day[16];
   fmtTrendDayLabel(day, sizeof(day), dayTs);
   G2HealthHistorySummary history;
@@ -2699,7 +2699,7 @@ void g2HealthBuildMetricText(char* out, size_t cap) {
     // Honest day label: the payload's own window end when it carries a real
     // date, else local now / "boot N" (fmtTrendDayLabel).
     uint32_t dayTs = (meta && meta->have) ? meta->endTs : 0;
-    if (!Clock::isValidEpoch((time_t)dayTs)) dayTs = (uint32_t)time(nullptr);
+    if (!Clock::isValidEpoch((time_t)dayTs)) dayTs = (uint32_t)Clock::confirmedNow();
     char day[16];
     fmtTrendDayLabel(day, sizeof(day), dayTs);
     char title[28];

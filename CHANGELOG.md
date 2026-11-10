@@ -14,6 +14,12 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Fixed
+- R1 ring: an NTP reply that moves an already set device clock by more than a day is no longer
+  passed to the ring, whose stored health days are keyed off that clock. The ring keeps the earlier
+  clock until `timeset`, a local time source (RTC, CM5), an NTP reply that agrees with the earlier
+  clock, or a restart; a TIME event is logged and `time` shows the hold. The device clock itself
+  still follows NTP, and the first sync after a start without a clock is taken as it arrives.
+  Host-tested; not yet tested on hardware (readiness G-79).
 - Debug logging: a category turned off for good with `debug<x> 0` came back after a reboot when a
   system-log mask was saved (`log start flags=`, the Settings grid), because log autostart applied
   that saved mask as a whole. A persistent `debug<x> 0|1`, and the sub-flag commands, now update the

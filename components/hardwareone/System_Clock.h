@@ -170,6 +170,18 @@ void clockDutiesTick();
 // before returning.
 void clockDutiesFlush();
 
+// ----- Confirmed clock (what the R1 ring is given) -------------------------
+//
+// SNTP replies are not authenticated, and the ring files its daily pages
+// under the clock it is given. confirmedNow() is time(nullptr) unless an SNTP
+// reply moved a clock that was already set this boot by more than a day and
+// nothing has confirmed the new time since; then it is the earlier clock,
+// carried forward by the monotonic timer. `timeset`, the RTC, the CM5, an
+// SNTP reply that agrees with the earlier clock, or a restart end the hold.
+// Rules and limits: ClockConfirmPolicy.h. Any task; not from an ISR.
+time_t confirmedNow();
+bool confirmedClockHeld();
+
 // Projection of "now" in epoch-us from the last step's reference point.
 // Sole intended consumer: the SNTP sync callback, which needs the PRE-step
 // clock after lwIP has already stepped the real one. 0 = never seeded.

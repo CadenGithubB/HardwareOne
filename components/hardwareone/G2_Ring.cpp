@@ -1358,7 +1358,7 @@ static bool ringQueueControlIntent(RingControlTarget control,
   intent.statusMethod = desired == G2_RING_PRESERVE
                             ? R1_STATUS_METHOD_GET
                             : R1_STATUS_METHOD_SET;
-  intent.epoch = (uint32_t)time(nullptr);
+  intent.epoch = (uint32_t)Clock::confirmedNow();
 
   G2RingTransactionHandle handle{};
   const bool queued = ringEnqueueIntent(intent, &handle,
@@ -1824,7 +1824,7 @@ static void ringNoteWear(uint8_t wear, uint32_t rxMs) {
 // Age in seconds for UI/JSON. Prefer ring epoch when both clocks look
 // synced (Clock::isValidEpoch); else millis since local receive. −1 = unknown.
 static int32_t ringSampleAgeSec(uint32_t ringTs, uint32_t rxMs) {
-  const time_t now = time(nullptr);
+  const time_t now = Clock::confirmedNow();  // the clock the ring was given
   if (Clock::isValidEpoch((time_t)ringTs) && Clock::isValidEpoch(now)) {
     int64_t a = (int64_t)now - (int64_t)ringTs;
     if (a < 0) a = 0;
@@ -2356,8 +2356,10 @@ void g2RingTimeSyncTick(void) {
   // of what the ring was last told by >2 min — covers the dark push trued
   // by NTP, a stale adoption-echo (ring's last MEASUREMENT time) trued by
   // NTP, and a manual timeset. Self-quenching: drift ≈ 0 after each push.
+  // The ring is given the confirmed clock: an SNTP reply that moved an
+  // already-set clock by more than a day is not passed on (readiness G-79).
   if (gRing.connected && sRingSetupDone && Clock::isSynced()) {
-    const time_t now = time(nullptr);
+    const time_t now = Clock::confirmedNow();
     const uint32_t pushedEpoch = sLastPushedEpoch;
     const uint32_t pushedAtMs  = sLastPushedAtMs;
     const int64_t expected = (int64_t)pushedEpoch +
@@ -2641,7 +2643,7 @@ static bool ringDeviceStatusPayloadValid(R1ProtocolProfile profile,
 
 static bool ringHealthTimestampPlausible(uint32_t timestamp) {
   if (!Clock::isPlausibleEpoch((time_t)timestamp)) return false;
-  const time_t now = time(nullptr);
+  const time_t now = Clock::confirmedNow();  // the clock the ring was given
   // Historical samples are expected; a sample more than a day in the future
   // is not. Skip the relative check until the host has an authoritative sync;
   // a merely plausible stale RTC value must not veto a good ring clock.
@@ -3093,7 +3095,7 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
   // Parse the nested RingRawData. Only update the cache for fields whose
   // values fall in the realistic range — drops obviously-corrupt frames.
   uint64_t v;
-  uint32_t now = (uint32_t)time(nullptr);
+  uint32_t now = (uint32_t)Clock::confirmedNow();
   size_t p = 0;
   while (p < rawLen) {
     uint32_t f; uint8_t w;
@@ -4494,7 +4496,7 @@ static void ringServiceSetup() {
   if (!sSetupOwner.active) return;
   if (ringDeadlinePassed(sSetupOwner.deadlineMs)) {
     const uint8_t error = sSetupOwner.stage == G2_RING_SETUP_TIME &&
-                                  !Clock::isValidEpoch(time(nullptr))
+                                  !Clock::isValidEpoch(Clock::confirmedNow())
                               ? G2_RING_ERR_CLOCK_UNAVAILABLE
                               : G2_RING_ERR_TIMEOUT;
     ringFinishSetup(false, error);
@@ -4510,7 +4512,7 @@ static void ringServiceSetup() {
         sSetupOwner.frame = gR1Encoder.buildDeviceInfoQuery();
         break;
       case G2_RING_SETUP_TIME: {
-        const time_t now = time(nullptr);
+        const time_t now = Clock::confirmedNow();
         if (!Clock::isValidEpoch(now)) {
           if (!ringSetupRingProvenDark()) {
             // Hold while soliciting the ring's clock; adoption on the main
@@ -4588,7 +4590,7 @@ static void ringServiceSetup() {
     if (result != RING_WRITE_OK) return;
     sSetupOwner.written = true;
     if (sSetupOwner.stage == G2_RING_SETUP_TIME) {
-      sLastPushedEpoch = (uint32_t)time(nullptr);
+      sLastPushedEpoch = (uint32_t)Clock::confirmedNow();
       sLastPushedAtMs = millis();
       // Record the tz the ritual just sent so the tick does not immediately
       // re-push it as a "timezone changed" correction. Connect-time: stable.

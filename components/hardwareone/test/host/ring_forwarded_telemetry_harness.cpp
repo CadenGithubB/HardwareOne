@@ -39,6 +39,10 @@ static std::vector<NotedSample> gSamples;
 static int gPrepareCalls = 0;
 
 static uint32_t millis() { return 4242u; }
+// The clock the ring was given; the same as the wall clock here.
+namespace Clock {
+static time_t confirmedNow() { return time(nullptr); }
+}
 
 static void g2HealthNoteSample(G2HealthMetric metric, int16_t value, uint32_t ringTs) {
   gSamples.push_back({metric, value, ringTs});

@@ -122,6 +122,7 @@ static void ensureHistoryInitializedLocked() {}
 
 namespace Clock {
 static bool isValidEpoch(time_t t) { return t >= 1577836800; }
+static time_t confirmedNow() { return time(nullptr); }
 }
 
 // INSERT_PROTOCOL

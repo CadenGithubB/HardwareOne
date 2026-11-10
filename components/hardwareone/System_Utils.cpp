@@ -1782,6 +1782,10 @@ const char* cmd_time(const String& argsInput) {
   // Show uptime in milliseconds
   unsigned long uptimeMs = millis();
   BROADCAST_PRINTF("Uptime: %lu ms", uptimeMs);
+  if (Clock::confirmedClockHeld()) {
+    broadcastOutput("Ring clock: kept at the earlier time; an NTP reply moved the device clock by more "
+                    "than a day. timeset or a restart ends the hold.");
+  }
   
   // Priority: RTC (primary) -> NTP (fallback)
 #if ENABLE_RTC_SENSOR

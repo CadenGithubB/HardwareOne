@@ -6,6 +6,7 @@
 #include <sys/time.h>  // gettimeofday — epochMillis()
 #include <esp_timer.h> // esp_timer_get_time — the projection reference
 
+#include "ClockConfirmPolicy.h" // which clock steps the ring is given
 #include "System_Settings.h"    // gSettings.tzOffsetMinutes, rtcTimeHasBeenSet
 #include "System_BuildConfig.h" // ENABLE_RTC_SENSOR gate for the write-back duty
 #include "System_Events.h"      // systemEventPost + SYSEVT_TIME_SYNCED (X-macro enum — cannot be forward-declared)
@@ -159,7 +160,38 @@ static constexpr uint8_t PEND_ANCHOR        = 1u << 1;  // writeBootAnchor (upse
 static constexpr uint8_t PEND_RESOLVE       = 1u << 2;  // resolvePendingUserCreationTimes
 static constexpr uint8_t PEND_STEPLOG       = 1u << 3;  // valid→valid step > 2 min diagnostic
 static constexpr uint8_t PEND_RTC_WRITEBACK = 1u << 4;  // push new time into the DS3231
+static constexpr uint8_t PEND_HOLD_START    = 1u << 5;  // an SNTP jump was kept from the ring
+static constexpr uint8_t PEND_HOLD_END      = 1u << 6;  // ... and a later step settled it
 static uint8_t sPending = 0;
+
+// The reference for the confirmed clock (ClockConfirmPolicy.h).
+static ClockConfirm::State sConfirm;
+
+static bool wallAndMonotonicUs(int64_t& wallUs, int64_t& monoUs) {
+  struct timeval tv;
+  if (gettimeofday(&tv, nullptr) != 0) return false;
+  monoUs = (int64_t)esp_timer_get_time();
+  wallUs = (int64_t)tv.tv_sec * 1000000LL + tv.tv_usec;
+  return true;
+}
+
+static ClockConfirm::State confirmState() {
+  portENTER_CRITICAL(&sClockMux);
+  const ClockConfirm::State state = sConfirm;
+  portEXIT_CRITICAL(&sClockMux);
+  return state;
+}
+
+time_t confirmedNow() {
+  int64_t wallUs = 0, monoUs = 0;
+  if (!wallAndMonotonicUs(wallUs, monoUs)) return time(nullptr);
+  return (time_t)(ClockConfirm::nowUs(confirmState(), wallUs, monoUs) / 1000000LL);
+}
+
+bool confirmedClockHeld() {
+  int64_t wallUs = 0, monoUs = 0;
+  return wallAndMonotonicUs(wallUs, monoUs) && ClockConfirm::disagrees(confirmState(), wallUs, monoUs);
+}
 
 SyncSource syncSource() { return sSource; }
 
@@ -220,6 +252,20 @@ void clockStepped(SyncSource src, time_t before) {
 
   uint8_t pend = 0;
   if (edge) pend |= PEND_MARKER | PEND_ANCHOR | PEND_RESOLVE;
+
+  // The ring's clock: an SNTP step far from a clock already set this boot is
+  // not passed on (ClockConfirmPolicy.h). A clock adopted from the ring is
+  // no reference for a later step, or the ring would vouch for itself.
+  int64_t wallUs = 0, monoUs = 0;
+  if (wallAndMonotonicUs(wallUs, monoUs)) {
+    const bool reference = nowValid && src != SYNC_RING && src != SYNC_NONE;
+    portENTER_CRITICAL(&sClockMux);
+    const ClockConfirm::Verdict verdict =
+        ClockConfirm::onStep(sConfirm, src == SYNC_NTP, reference, wallUs, monoUs);
+    portEXIT_CRITICAL(&sClockMux);
+    if (verdict == ClockConfirm::Verdict::HoldStarted) pend |= PEND_HOLD_START;
+    if (verdict == ClockConfirm::Verdict::HoldReleased) pend |= PEND_HOLD_END;
+  }
   // A big valid→valid correction deserves a diagnostic AND a re-anchor —
   // the old anchor's epoch was wrong by the same amount (upsert-safe).
   if (!edge && beforeValid && (delta > 120 || delta < -120)) {
@@ -255,6 +301,14 @@ static void drainDuties() {
   if (pend & PEND_STEPLOG) {
     logSystemEvent("TIME", "clock stepped %+lds by %s while already set — check drift",
                    delta, srcName);
+  }
+  if (pend & PEND_HOLD_START) {
+    logSystemEvent("TIME", "ntp moved the clock by more than a day (%+lds); the ring keeps the earlier "
+                           "clock until timeset, a local time source, an agreeing ntp reply or a restart",
+                   delta);
+  }
+  if (pend & PEND_HOLD_END) {
+    logSystemEvent("TIME", "the ring follows the device clock again (settled by %s)", srcName);
   }
   if (pend & PEND_MARKER)  logTimeSyncedMarkerIfReady(srcName);
   if (pend & PEND_ANCHOR)  writeBootAnchor();

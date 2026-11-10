@@ -24,6 +24,14 @@ set_target_properties(dictation_policy_tests PROPERTIES
 target_compile_options(dictation_policy_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# The clock the R1 ring is given (ClockConfirmPolicy.h): an SNTP step that
+# moves an already-set clock by more than a day is held back from the ring.
+add_executable(clock_confirm_policy_tests test_clock_confirm_policy.cpp)
+set_target_properties(clock_confirm_policy_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(clock_confirm_policy_tests PRIVATE ../..)
+target_compile_options(clock_confirm_policy_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # The load state that gates every config-file saver (System_ConfigLoad.h): the
 # production dependency-free header, with the vendored ArduinoJson supplying
 # real parse errors.
@@ -1209,6 +1217,7 @@ add_test(NAME sdmmc_lifecycle
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
+add_test(NAME clock_confirm_policy_tests COMMAND clock_confirm_policy_tests)
 add_test(NAME config_load_tests COMMAND config_load_tests)
 add_test(NAME g2_hold_gesture_tests COMMAND g2_hold_gesture_tests)
 add_test(NAME stt_raw_ring_tests COMMAND stt_raw_ring_tests)
