@@ -327,9 +327,6 @@ void g2RingNoteAudioWaitExpired(uint32_t waitedMs);
 void g2RingConnectMarkComplete();
 // Restarts the in-flight watchdog's clock when the queued job gets its turn.
 void g2RingConnectMarkRunning();
-// False once a ring disconnect, forget or teardown has cancelled the ring
-// connect generation a queued job captured (its cancelEpoch). 0 is current.
-bool g2RingConnectGenerationCurrent(uint32_t generation);
 
 // True while a ring connect job is queued or running on the BLE-connect
 // worker (producers set the flag before submitting; the worker clears it
@@ -542,13 +539,6 @@ void g2RingPollVitalForLogging(void);
 // self-throttled no-op in the steady state. Call next to timeAnchorsTick().
 void g2RingTimeSyncTick(void);
 
-// Bridge-progress hook. Called by parseSid80Rx() when a RING_CONNECT_INFO
-// poll arrives from either temple. The ring module does not use temple
-// bridge progress, so the report is ignored. Pass 0 / false for fields
-// that weren't present in the inbound payload.
-void g2RingNoteBridgePoll(uint64_t connRet, bool hasConnRet,
-                          uint64_t connectRing, bool hasConnectRing);
-
 // Forwarded-telemetry sink. Called by the G2 sid=0x90/0x91 RX handler when
 // a temple forwards RingDataPackage frames to us. Parses the protobuf
 // wrapper, extracts each populated RingRawData field (battery / hr / spo2 /
@@ -665,7 +655,6 @@ inline bool g2RingQueryDaily(uint8_t) { return false; }
 inline void g2RingPollVitalForLogging(void) {}
 inline void g2RingTimeSyncTick(void) {}
 inline void g2RingNoteForwardedTelemetry(const uint8_t*, size_t) {}
-inline void g2RingNoteBridgePoll(uint64_t, bool, uint64_t, bool) {}
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 #endif  // G2_RING_H

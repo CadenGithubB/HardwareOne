@@ -692,10 +692,8 @@ def all_blocks(path: str | Path) -> list[Block]:
 
 
 # The concatenated-literal corpus. Opt-in by name (see the module comment).
-# WebPage_Maps.cpp is NOT here: its only script region belongs to
-# handleWaypointsPage, which is unreachable dead code (never route-registered,
-# calls a function defined nowhere) -- gate dead code and every future editor
-# pays the parse bill for bytes no browser will ever run.
+# WebPage_Maps.cpp is NOT here: it has no inline script (the Maps page script
+# lives in WebPage_Maps.h).
 CONCAT_SOURCES = [
     "WebPage_Dashboard.h",
     "WebPage_Sensors.h",

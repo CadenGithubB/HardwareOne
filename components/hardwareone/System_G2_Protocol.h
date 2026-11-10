@@ -498,25 +498,12 @@ size_t g2BuildRebuildTextPb(uint32_t magic,
 // N selectable items instead of a TextContainer. Firmware draws a native
 // selection box around the focused item and routes touchpad gestures into
 // EvenCore event notifications. Reference: ListContainerProperty /
-// List_ItemContainerProperty in ble/gen/EvenHub_pb.ts; `captureEvents=true`
-// default in buildCreateStartUpPageContainer.
-size_t g2BuildCreateListPage(uint8_t seq, uint32_t magic,
-                             const char* containerName,
-                             const char* const* items, size_t itemCount,
-                             uint8_t* out, size_t outCap,
-                             uint32_t widgetId = 10000,
-                             const G2ContainerGeom& geom = G2_GEOM_LARGE);
-
-// pb-body-only variant of g2BuildCreateListPage — emits the EvenCore
-// CREATE_STARTUP_PAGE protobuf without wrapping it in an envelope. Caller
-// is responsible for transport, including fragmentation if the body
-// exceeds one envelope's u8 `len` byte (253 pb bytes per frag).
+// List_ItemContainerProperty in ble/gen/EvenHub_pb.ts.
 //
-// The single-fragment envelope ceiling is what limits the existing
-// g2BuildCreateListPage; lists with more than ~6–10 short rows can't fit.
-// This entry point is used by the multi-fragment send path
-// (G2_Glasses.cpp::sendPbFragmented) to support arbitrarily long
-// lists without hitting that wall.
+// pb body only, no envelope. The caller is responsible for transport,
+// including fragmentation if the body exceeds one envelope's u8 `len` byte
+// (253 pb bytes per frag; lists past ~6-10 short rows need several), which
+// G2_Glasses.cpp::sendPbFragmented handles.
 //
 // Returns the pb body byte count, or 0 on buffer overflow.
 size_t g2BuildCreateListPagePb(uint32_t magic,
@@ -588,7 +575,7 @@ size_t g2BuildCreateTextPagePb(uint32_t magic,
 // where each tap navigates / mutates the list contents in place.
 //
 // Note on geom: REBUILD reuses the rectangle the original CREATE established.
-// The geom param here is included for symmetry with g2BuildCreateListPage,
+// The geom param here is included for symmetry with g2BuildCreateListPagePb,
 // but the firmware ignores changes to it on the REBUILD path. To resize a
 // container you must SHUTDOWN+CREATE (which is what g2ShowListPage does).
 size_t g2BuildRebuildList(uint8_t seq, uint32_t magic,
@@ -748,32 +735,6 @@ struct G2ImageTile {
   uint32_t containerId;
   const char* containerName;
 };
-
-// REBUILD_PAGE (Cmd=7) carrying a single ImageObject — the untested
-// counterpart to g2BuildRebuildList/g2BuildRebuildText. Exists to answer one
-// question: can an already-CREATEd image container be MOVED (new x/y, same
-// w/h and ContainerID/Name) without a SHUTDOWN+CREATE?
-//
-// Why this is open: docs/G2_PROTOCOL.md:1665 says Cmd=7 is the command for
-// "change the container's geometry", but the empirical note on
-// g2BuildRebuildList above says the firmware IGNORES geom changes on the
-// REBUILD path (list case), and REBUILD-text on this firmware fails outright
-// (docs/G2_PROTOCOL.md:1821). The image case has never been tried, so the
-// three plausible outcomes are: moves (best), acks-but-ignores-geom (likely,
-// matching the list note), or wedges the EvenCore plugin task (worst — see
-// docs/G2_PROTOCOL.md:1813; recovery is a BLE reconnect).
-//
-// Wire shape mirrors g2BuildCreateImagePb exactly except Cmd/wrapper field
-// and no WidgetId (REBUILD targets the live page). Magic MUST be
-// G2_MAGIC_REBUILD — armRebuildSlot()/waitRebuildAck() hardcode it.
-//
-// Image REBUILD builder retained for experiments; the Q31 menu probe that
-// exercised it was retired (wedge risk). Do NOT wire into feature code
-// without a fresh on-device probe.
-size_t g2BuildRebuildImage(uint8_t seq, uint32_t magic,
-                           const char* containerName, uint32_t containerId,
-                           uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                           uint8_t* out, size_t outCap);
 
 size_t g2BuildCreateImageMultiPb(uint32_t magic,
                                  const G2ImageTile* tiles, size_t tileCount,
@@ -1038,7 +999,6 @@ void   g2statsRecordTx(uint8_t sid, uint8_t flag, size_t pbLen);
 void   g2statsRecordRx(uint8_t sid, uint8_t flag, const uint8_t* pb, size_t pbLen);
 size_t g2statsCount();
 const G2SidStat* g2statsAt(size_t idx);  // returns nullptr past the end
-void   g2statsReset();
 
 // Static reference: human-friendly name for each known sid. Returns
 // "Unknown" for ids we haven't catalogued.
@@ -1444,61 +1404,15 @@ size_t g2BuildNotifWhitelistDisable(uint8_t seq, uint32_t magic,
 bool g2ProtocolGoldenSelfTest();
 
 // =============================================================================
-// Ring data push (sid=0x90 UX_RING_ROW_DATA_ID)
+// Ring data SIDs (RingDataPackage, docs/g2_proto/ring.proto)
 // =============================================================================
-// **WARNING — direction matters.** sid=0x90 traffic in the official protocol
-// flows GLASSES → HOST only: once the right temple has bridged the ring
-// (via sid=0x80 cmd=6 RING_CONNECT_INFO; see `ringbridge` CLI), the temple
-// itself emits RingDataPackage frames on sid=0x90 and forwards them to us.
-// **Sending sid=0x90 in the OPPOSITE direction (host → temple) is silently
-// ignored** — verified empirically 2026-05-02 with 51-byte well-formed
-// RingDataPackage{rawData{...}} frames that produced zero ack, zero error,
-// and no UI change on firmware 2.2.0.24.
-//
-// `g2BuildRingRawDataPush()` is preserved for **custom display experiments**
-// (e.g. crafting frames the firmware might consume in some other context),
-// not for driving the official health UI. To drive that UI, use the
-// `ringbridge on` CLI which sends sid=0x80 cmd=6 RING_CONNECT_INFO and
-// hands the ring off to the temple's bridge firmware.
-//
-// Schema: see docs/g2_proto/ring.proto. We pack a `RingDataPackage` with
-// commandId=RAW_DATA(2), magicRandom set to a per-session correlation
-// token, and rawData populated with whatever fields the caller has fresh.
-//
-// Field-presence semantics: pass `_valid=false` to OMIT a field from the
-// proto entirely (proto3 default-suppression). The glasses' widget treats
-// missing fields as "no fresh value" and keeps the previous reading on
-// screen. So you can update HR every 30s and SpO2 every 5min by leaving
-// SpO2 invalid on the HR-only ticks.
-//
-// Timestamps are unix seconds. Values that exceed int32_t range or come
-// from "no data yet" cached state must be flagged invalid by the caller.
-//
-// SID and magic constants documented alongside the existing G2_SID_* /
-// G2_MAGIC_DEVCFG_* pairs.
+// sid=0x90 flows GLASSES -> HOST only: once the right temple has bridged the
+// ring it emits RingDataPackage frames on 0x90 and forwards them to us.
+// Sending 0x90 the other way (host -> temple) is silently ignored (verified
+// 2026-05-02 on firmware 2.2.0.24: no ack, no error, no UI change). The stock
+// Health panel is fed through sid 0x0E instead (G2_HealthPush).
 #define G2_SID_RING_RAW_DATA           0x90  // canonical SID for RingDataPackage rawData
 #define G2_SID_RING_DATA_RELAY         0x91  // canonical SID for RingDataPackage event
-#define G2_RING_CMD_NONE               0
-#define G2_RING_CMD_EVENT              1
-#define G2_RING_CMD_RAW_DATA           2
-#define G2_MAGIC_RING_RAW_PUSH         225   // chosen distinct from G2_MAGIC_DEVCFG_*
-
-struct G2RingPushFields {
-  // Each field is sent only when its `_valid` flag is true.
-  bool      battery_valid;       int32_t battery;
-  bool      chargeStates_valid;  int32_t chargeStates;
-  bool      hr_valid;            int32_t hr;            int32_t hrTs;
-  bool      spo2_valid;          int32_t spo2;          int32_t spo2Ts;
-  bool      hrv_valid;           int32_t hrv;           int32_t hrvTs;
-  bool      temp_valid;          int32_t temp;          int32_t tempTs;
-  bool      actKcal_valid;       int32_t actKcal;       int32_t actKcalTs;
-  bool      allKcal_valid;       int32_t allKcal;       int32_t allKcalTs;
-  bool      steps_valid;         int32_t steps;         int32_t stepsTs;
-};
-
-size_t g2BuildRingRawDataPush(uint8_t seq, uint32_t magic,
-                              const G2RingPushFields& f,
-                              uint8_t* out, size_t outCap);
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 #endif  // SYSTEM_G2_PROTOCOL_H

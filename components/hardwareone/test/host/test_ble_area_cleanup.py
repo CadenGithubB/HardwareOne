@@ -122,10 +122,9 @@ def symbol_failures(component: Path) -> list[str]:
     if not re.search(r"\bcmd_ringbridge\b", ring) and "f4cc542" not in ring:
         failures.append("G2_Ring.cpp dropped the ring bridge/spoof code without naming the commit "
                         "that still holds it (f4cc542), so nothing points to the experiment any more")
-    if "void g2RingNoteBridgePoll(" not in ring:
-        failures.append("G2_Ring.cpp no longer defines g2RingNoteBridgePoll (G2_Glasses.cpp calls it)")
-    if "void g2RingNoteBridgePoll(" not in ring_h:
-        failures.append("G2_Ring.h no longer declares g2RingNoteBridgePoll (G2_Glasses.cpp calls it)")
+    for name, text in (("G2_Ring.cpp", ring), ("G2_Ring.h", ring_h)):
+        if re.search(r"\bg2RingNoteBridgePoll\b", text):
+            failures.append(f"{name} still has g2RingNoteBridgePoll (a no-op hook for the removed temple bridge)")
     return failures
 
 

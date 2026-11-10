@@ -2469,9 +2469,6 @@ void g2RingConnectMarkRunning() {
   if (gRingConnectTaskActive) gRingConnectTaskSinceMs = millis();
   portEXIT_CRITICAL(&gRingConnectMux);
 }
-bool g2RingConnectGenerationCurrent(uint32_t generation) {
-  return generation == 0 || ringConnectGenerationCurrent(generation);
-}
 bool g2RingConnectInFlight() {
   portENTER_CRITICAL(&gRingConnectMux);
   const bool active = gRingConnectTaskActive;
@@ -7258,17 +7255,6 @@ static const char* cmd_ringquery(const String& args) {
            "RING: query '%s' queued (tx=%lu gen=%lu). Inspect status/log for the response.",
            tag, (unsigned long)handle.id, (unsigned long)handle.generation);
   return ret;
-}
-
-// Bridge-progress hook for sid=0x80 RING_CONNECT_INFO polls from a temple.
-// Nothing in this module consumes temple bridge progress, so the report is
-// ignored; the hook stays so the G2 receive path can keep calling it.
-void g2RingNoteBridgePoll(uint64_t connRet, bool hasConnRet,
-                          uint64_t connectRing, bool hasConnectRing) {
-  (void)connRet;
-  (void)hasConnRet;
-  (void)connectRing;
-  (void)hasConnectRing;
 }
 
 // The R1 health rows (health, poll, history) belong to the R1 health feature.

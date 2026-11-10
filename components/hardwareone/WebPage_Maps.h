@@ -2970,9 +2970,6 @@ esp_err_t handleMapFeaturesAPI(httpd_req_t* req);
 // GPS tracks API - load tracks, list files, live tracking
 esp_err_t handleGPSTracksAPI(httpd_req_t* req);
 
-// Waypoints page handler (merged from WebPage_Waypoints)
-esp_err_t handleWaypointsPage(httpd_req_t* req);
-
 // Waypoints API handler (merged from WebPage_Waypoints)
 esp_err_t handleWaypointsAPI(httpd_req_t* req);
 

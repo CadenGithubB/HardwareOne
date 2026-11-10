@@ -114,53 +114,6 @@ extern "C" {
 
 
 // ============================================================================
-// Task Execution Performance Monitoring Implementation
-// ============================================================================
-
-// Global task metrics instance
-TaskExecutionMetrics gTaskMetrics = {0, 0, 0, 0, 0};
-
-void taskOperationStart() {
-  // Currently just tracking at completion - could add start timestamps here if needed
-}
-
-void taskOperationComplete(uint32_t elapsedMs, uint32_t timeoutThresholdMs) {
-  gTaskMetrics.totalOperations++;
-  
-  // Update EWMA average (exponentially weighted moving average)
-  if (gTaskMetrics.totalOperations > 1) {
-    gTaskMetrics.avgExecutionMs = (gTaskMetrics.avgExecutionMs * 7 + elapsedMs) / 8;
-  } else {
-    gTaskMetrics.avgExecutionMs = elapsedMs;
-  }
-  
-  // Update peak timing
-  if (elapsedMs > gTaskMetrics.maxExecutionMs) {
-    gTaskMetrics.maxExecutionMs = elapsedMs;
-  }
-  
-  // Timeout detection
-  if (elapsedMs > timeoutThresholdMs) {
-    gTaskMetrics.timeoutCount++;
-    
-    // Log performance timeout
-    char buf[96];
-    snprintf(buf, sizeof(buf), "[TASK] TIMEOUT: elapsed=%lums, max=%lums (total_timeouts=%lu)",
-             (unsigned long)elapsedMs, (unsigned long)timeoutThresholdMs, 
-             (unsigned long)gTaskMetrics.timeoutCount);
-    broadcastOutput(buf);
-  }
-}
-
-void resetTaskMetrics() {
-  gTaskMetrics.totalOperations = 0;
-  gTaskMetrics.timeoutCount = 0;
-  gTaskMetrics.avgExecutionMs = 0;
-  gTaskMetrics.maxExecutionMs = 0;
-  gTaskMetrics.lastResetMs = millis();
-}
-
-// ============================================================================
 // Security Utilities
 // ============================================================================
 
@@ -246,40 +199,6 @@ extern bool appendLineWithCap(const char* path, const String& line, size_t capBy
 // Base64 Encoding (moved from .ino)
 // ============================================================================
 
-String base64Encode(const uint8_t* data, size_t len) {
-  static const char* table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  String out;
-  out.reserve(((len + 2) / 3) * 4);
-  size_t i = 0;
-  while (i + 3 <= len) {
-    uint32_t v = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
-    out += table[(v >> 18) & 0x3F];
-    out += table[(v >> 12) & 0x3F];
-    out += table[(v >> 6) & 0x3F];
-    out += table[v & 0x3F];
-    i += 3;
-  }
-  // Handle padding
-  if (i < len) {
-    uint32_t v = data[i] << 16;
-    if (i + 1 < len) {
-      // 2 remaining bytes = 16 bits = 3 base64 chars + 1 padding
-      v |= data[i + 1] << 8;
-      out += table[(v >> 18) & 0x3F];
-      out += table[(v >> 12) & 0x3F];
-      out += table[(v >> 6) & 0x3F];
-      out += '=';
-    } else {
-      // 1 remaining byte = 8 bits = 2 base64 chars + 2 padding
-      out += table[(v >> 18) & 0x3F];
-      out += table[(v >> 12) & 0x3F];
-      out += '=';
-      out += '=';
-    }
-  }
-  return out;
-}
-
 String base64Decode(const String& input) {
   const char* base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   String output = "";
@@ -305,33 +224,6 @@ String base64Decode(const String& input) {
 // JSON Parsing Helpers (moved from .ino)
 // ============================================================================
 
-bool parseJsonBool(const String& src, const char* key, bool& out) {
-  char kBuf[64];
-  snprintf(kBuf, sizeof(kBuf), "\"%s\":", key);
-  int p = src.indexOf(kBuf);
-  if (p < 0) return false;
-  p += strlen(kBuf);
-  while (p < (int)src.length() && src[p] == ' ') p++;
-  if (p >= (int)src.length()) return false;
-  if (src.startsWith("true", p)) {
-    out = true;
-    return true;
-  }
-  if (src.startsWith("false", p)) {
-    out = false;
-    return true;
-  }
-  if (src[p] == '1') {
-    out = true;
-    return true;
-  }
-  if (src[p] == '0') {
-    out = false;
-    return true;
-  }
-  return false;
-}
-
 bool parseJsonInt(const String& src, const char* key, int& out) {
   char kBuf[64];
   snprintf(kBuf, sizeof(kBuf), "\"%s\":", key);
@@ -354,46 +246,6 @@ bool parseJsonInt(const String& src, const char* key, int& out) {
   return true;
 }
 
-bool parseJsonFloat(const String& src, const char* key, float& out) {
-  char kBuf[64];
-  snprintf(kBuf, sizeof(kBuf), "\"%s\":", key);
-  int p = src.indexOf(kBuf);
-  if (p < 0) return false;
-  p += strlen(kBuf);
-  while (p < (int)src.length() && src[p] == ' ') p++;
-  if (p >= (int)src.length()) return false;
-  bool seenDigit = false, seenDot = false;
-  int end = p;
-  while (end < (int)src.length()) {
-    char c = src[end];
-    if (c >= '0' && c <= '9') {
-      seenDigit = true;
-      end++;
-      continue;
-    }
-    if (c == '-' && end == p) {
-      end++;
-      continue;
-    }
-    if (c == '.' && !seenDot) {
-      seenDot = true;
-      end++;
-      continue;
-    }
-    break;
-  }
-  if (!seenDigit) return false;
-  out = src.substring(p, end).toFloat();
-  return true;
-}
-
-bool parseJsonU16(const String& src, const char* key, uint16_t& out) {
-  int tmp = 0;
-  if (!parseJsonInt(src, key, tmp)) return false;
-  out = (uint16_t)tmp;
-  return true;
-}
-
 bool parseJsonString(const String& src, const char* key, String& out) {
   char kBuf[64];
   snprintf(kBuf, sizeof(kBuf), "\"%s\":\"", key);
@@ -403,29 +255,6 @@ bool parseJsonString(const String& src, const char* key, String& out) {
   int end = src.indexOf('\"', p);
   if (end < 0) return false;
   out = src.substring(p, end);
-  return true;
-}
-
-bool extractObjectByKey(const String& src, const char* key, String& outObj) {
-  char kBuf[64];
-  snprintf(kBuf, sizeof(kBuf), "\"%s\"", key);
-  int kLen = strlen(kBuf);
-  int keyPos = src.indexOf(kBuf);
-  if (keyPos < 0) return false;
-  int colon = src.indexOf(':', keyPos + kLen);
-  if (colon < 0) return false;
-  int openBrace = src.indexOf('{', colon);
-  if (openBrace < 0) return false;
-  int depth = 1;
-  int closeBrace = openBrace + 1;
-  while (closeBrace < (int)src.length() && depth > 0) {
-    char c = src[closeBrace];
-    if (c == '{') depth++;
-    else if (c == '}') depth--;
-    closeBrace++;
-  }
-  if (depth != 0) return false;
-  outObj = src.substring(openBrace, closeBrace);
   return true;
 }
 
@@ -481,28 +310,6 @@ bool extractArrayItem(const String& arrayStr, int& pos, String& outItem) {
 // ============================================================================
 // URL Encoding/Decoding Utilities (moved from .ino)
 // ============================================================================
-
-String urlEncode(const char* s) {
-  String out;
-  if (!s) return out;
-  out.reserve(strlen(s) * 3);
-  auto hex = [](uint8_t v) -> char {
-    const char* H = "0123456789ABCDEF";
-    return H[v & 0x0F];
-  };
-  for (const char* p = s; *p; ++p) {
-    char c = *p;
-    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
-      out += c;
-    } else {
-      uint8_t b = static_cast<uint8_t>(c);
-      out += '%';
-      out += hex((b >> 4) & 0x0F);
-      out += hex(b & 0x0F);
-    }
-  }
-  return out;
-}
 
 String urlDecode(const String& s) {
   String out;
@@ -593,20 +400,6 @@ int serializeJsonArrayWithRepair(JsonArray& arr, char* buf, size_t bufSize, cons
 // ============================================================================
 // Serial Input Helpers (moved from .ino)
 // ============================================================================
-
-String waitForSerialInput(unsigned long timeoutMs) {
-  unsigned long start = millis();
-  String input = "";
-  while (millis() - start < timeoutMs) {
-    if (Serial.available()) {
-      input = Serial.readStringUntil('\n');
-      input.trim();
-      return input;
-    }
-    delay(10);
-  }
-  return "";
-}
 
 // Wizard-input timeout state. When timeoutMs > 0, waitForSerialInputBlocking
 // gives up after `timeoutMs` of no input and sets the cancel flag. Callers
@@ -2954,28 +2747,6 @@ void printConnectedDevicesLibraries(size_t& outTotal) {
       }
     }
   }
-}
-
-// Calculate total estimated memory for sensor systems
-size_t calculateSensorSystemMemory() {
-  size_t total = 0;
-
-    // Add up all known sensors heap usage (use libraryHeapBytes as estimate)
-  for (int i = 0; i < connectedDeviceCount; i++) {
-    if (!connectedDevices[i].isConnected) continue;
-
-    for (size_t j = 0; j < i2cSensorsCount; j++) {
-      if (i2cSensors[j].address == connectedDevices[i].address && 
-          strcmp(i2cSensors[j].name, connectedDevices[i].name) == 0) {
-        if (isCompiledModuleName(i2cSensors[j].moduleName)) {
-          total += i2cSensors[j].libraryHeapBytes;
-        }
-        break;
-      }
-    }
-  }
-  
-  return total;
 }
 
 // ============================================================================

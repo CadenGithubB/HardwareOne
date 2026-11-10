@@ -38,7 +38,6 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #endif
 #include <LittleFS.h>
 #include "System_VFS.h"
-#include <Preferences.h>
 #include <time.h>
 #include <esp_timer.h>
 #include <esp_sleep.h>
@@ -158,33 +157,6 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include <ctype.h>
 #include <Wire.h>
 #include <string.h>
-#if ENABLE_GAMEPAD_SENSOR
-#include "Adafruit_seesaw.h"
-#endif
-#if ENABLE_IMU_SENSOR
-#include <Adafruit_Sensor.h>
-#include <Adafruit_BNO055.h>
-#include <utility/imumaths.h>
-#endif
-#if ENABLE_APDS_SENSOR
-#include "Adafruit_APDS9960.h"
-#endif
-#if ENABLE_TOF_SENSOR
-#include "vl53l4cx_class.h"
-#endif
-#if ENABLE_THERMAL_SENSOR
-#include <Adafruit_MLX90640.h>
-#endif
-#if ENABLE_OLED_DISPLAY
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
-#endif
-#if ENABLE_SERVO
-#include <Adafruit_PWMServoDriver.h>
-#endif
-#if ENABLE_GPS_SENSOR
-#include <Adafruit_GPS.h>
-#endif
 #include <vector>
 #include <functional>
 #include "System_MemUtil.h"
@@ -202,12 +174,6 @@ bool gamepadInit();
 // read by handlers through RETURN_VALID_IF_VALIDATE_CSTR, which run there.
 // Code that can run on any task reads currentCommandValidateOnly() instead.
 bool gCLIValidateOnly = false;
-
-// Helper: early-return for validate-only mode inside command branches
-#define RETURN_VALID_IF_VALIDATE() \
-  do { \
-    if (gCLIValidateOnly) return String("VALID"); \
-  } while (0)
 
 // Forward declarations for debug output sink used in macros
 void broadcastOutput(const String& s);
@@ -250,8 +216,6 @@ const char* AUTOMATIONS_JSON_FILE = "/system/automations.json";
 #include "HAL_Input.h"
 
 // Forward declarations
-class VL53L4CX;
-class Adafruit_BNO055;
 String setSession(httpd_req_t* req, const String& u);
 String getCookieSID(httpd_req_t* req);
 void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
@@ -283,8 +247,6 @@ extern bool gSkipNTPInWifiConnect;
 // Global variables forward declarations
 // filesystemReady is provided by System_Filesystem.h (included above).
 
-// Centralized command execution with AuthContext (transport-agnostic)
-static const char* originFrom(const AuthContext& ctx);
 // hasAdminPrivilege / hasSuperAdminPrivilege are declared in System_User.h.
 
 struct ExecReq;
@@ -374,12 +336,6 @@ void sensorStatusBump() {
 #if ENABLE_HTTP_SERVER
 httpd_handle_t server = NULL;
 #endif
-Preferences prefs;
-
-// Response buffer sizes for web handlers
-static const size_t TOF_RESPONSE_SIZE = 1024;      // 1KB sufficient for 4 ToF objects
-static const size_t IMU_RESPONSE_SIZE = 512;       // 512 bytes sufficient for IMU data (accel, gyro, ori, temp)
-static const size_t THERMAL_RESPONSE_SIZE = 8192;  // 8KB typically fits 32x24 frame; larger interpolated frames will fallback
 
 volatile unsigned long gWebMirrorSeq = 0;
 
@@ -406,43 +362,6 @@ extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, s
 }
 
 volatile uint32_t gOutputFlags = MSG_ROUTE_SERIAL;
-
-// Remove ANSI CSI escape sequences (e.g., ESC[2J, ESC[H, ESC[1;32m) for serial cleanliness
-static String stripANSICSI(const String& in) {
-  String out;
-  out.reserve(in.length());
-  size_t i = 0, n = in.length();
-  while (i < n) {
-    char c = in.charAt(i);
-    if (c == 0x1B) {  // ESC
-      // Handle CSI sequences that start with ESC '[' and end with a final byte @..~
-      if (i + 1 < n && in.charAt(i + 1) == '[') {
-        i += 2;  // skip ESC[
-        while (i < n) {
-          char d = in.charAt(i);
-          // Final byte in CSI is in range @ (0x40) to ~ (0x7E)
-          if (d >= '@' && d <= '~') {
-            i++;
-            break;
-          }
-          i++;
-        }
-        continue;  // skip entire CSI
-      } else {
-        // Skip solitary ESC or non-CSI sequences conservatively
-        i++;
-        continue;
-      }
-    }
-    out += c;
-    i++;
-  }
-  return out;
-}
-
-static inline void printToSerial(const String& s) {
-  broadcastOutput(stripANSICSI(s));
-}
 
 void appendCommandToFeed(const char* source, const String& cmd, const String& user = String(), const String& ip = String()) {
 #if ENABLE_HTTP_SERVER
@@ -539,26 +458,6 @@ static void broadcastCommandResultQueued(const String& prefix, const String& bod
 
 // applySettings() moved to settings.cpp
 
-// ==========================
-// URL query helpers
-// ==========================
-
-#if ENABLE_HTTP_SERVER
-static bool getQueryParam(httpd_req_t* req, const char* key, String& out) {
-  out = "";
-  size_t qlen = httpd_req_get_url_query_len(req);
-  if (qlen == 0) return false;
-  std::unique_ptr<char, void (*)(void*)> qbuf((char*)ps_alloc(qlen + 1, AllocPref::PreferPSRAM, "http.query"), free);
-  if (httpd_req_get_url_query_str(req, qbuf.get(), qlen + 1) != ESP_OK) return false;
-  char val[256];
-  if (httpd_query_key_value(qbuf.get(), key, val, sizeof(val)) == ESP_OK) {
-    out = String(val);
-    return true;
-  }
-  return false;
-}
-#endif // ENABLE_HTTP_SERVER
-
 // jsonEscape moved to system_utils.cpp
 
 // Output flags API
@@ -576,19 +475,6 @@ static bool getQueryParam(httpd_req_t* req, const char* key, String& out) {
 // Sensor JSON building functions moved to respective sensor files (thermal_sensor.cpp, tof_sensor.cpp, imu_sensor.cpp)
 
 // Note: handlePing moved to web_server.cpp
-
-static const char* originFrom(const AuthContext& ctx) {
-  // Only map known transports to stable strings; avoid assuming future ones exist
-  switch (ctx.transport) {
-    case SOURCE_WEB: return "web";
-    case SOURCE_SERIAL: return "serial";
-    case SOURCE_ESPNOW: return "espnow";
-    case SOURCE_INTERNAL: return "internal";
-    case SOURCE_MQTT: return "mqtt";
-    case SOURCE_VOICE: return "voice";
-    default: return "unknown";
-  }
-}
 
 extern bool isAdminUser(const String& who);
 

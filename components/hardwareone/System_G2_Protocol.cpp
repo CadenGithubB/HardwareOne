@@ -1254,7 +1254,7 @@ static bool writeListObjectWithItems(uint8_t* buf, size_t cap, size_t* pos,
 // REBUILD_PAGE (Cmd=7) carrying a fresh ListContainerProperty. Used by
 // stateful pages (file browser, settings editor) that need to swap the
 // list contents in place — the widget stays the same widgetId, but the
-// items inside change. Identical pb shape to g2BuildCreateListPage but
+// items inside change. Identical pb shape to g2BuildCreateListPagePb but
 // with Cmd=7 + wrapper field G2_WRAP_F_REBUILD instead of CREATE.
 //
 // Safe against the UPDATE_TEXT-on-ListContainer crash because we're
@@ -1301,24 +1301,6 @@ size_t g2BuildCreateListPagePb(uint32_t magic,
   if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
   if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
   return pos;
-}
-
-size_t g2BuildCreateListPage(uint8_t seq, uint32_t magic,
-                             const char* containerName,
-                             const char* const* items, size_t itemCount,
-                             uint8_t* out, size_t outCap,
-                             uint32_t widgetId,
-                             const G2ContainerGeom& geom) {
-  // Single-fragment build: builds pb into a stack buffer big enough for
-  // the largest list that still fits one envelope (≤253 pb bytes), then
-  // wraps. For larger lists, callers must use g2BuildCreateListPagePb +
-  // a fragmenting transport (see G2_Glasses.cpp::sendPbFragmented).
-  uint8_t payload[512];
-  size_t pbLen = g2BuildCreateListPagePb(magic, containerName, items, itemCount,
-                                          widgetId, geom, payload, sizeof(payload));
-  if (pbLen == 0) return 0;
-  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
-                         payload, pbLen, out, outCap);
 }
 
 size_t g2BuildUpdateText(uint8_t seq, uint32_t magic,
@@ -1576,39 +1558,6 @@ size_t g2BuildCreateImage(uint8_t seq, uint32_t magic,
   if (pbLen == 0) return 0;
   return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
                          payload, pbLen, out, outCap);
-}
-
-size_t g2BuildRebuildImage(uint8_t seq, uint32_t magic,
-                           const char* containerName, uint32_t containerId,
-                           uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                           uint8_t* out, size_t outCap) {
-  if (!containerName) return 0;
-
-  // Identical body to g2BuildCreateImagePb except: Cmd=7 REBUILD_PAGE,
-  // wrapper field G2_WRAP_F_REBUILD, and no WidgetId (a REBUILD targets the
-  // page that is already live). Field numbers inside ImageContainerProperty
-  // are unchanged — 1=X 2=Y 3=W 4=H 5=ContainerID 6=ContainerName.
-  uint8_t payload[256];
-  size_t pos = 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, G2_CMD_REBUILD_PAGE)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
-  size_t pageStart;
-  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_WRAP_F_REBUILD, &pageStart)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_PAGE_F_TOTAL, 1)) return 0;
-
-  size_t imgStart;
-  if (!g2PbBeginNested(payload, sizeof(payload), &pos, /*F_IMAGE_OBJ*/4, &imgStart)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 1, x)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 2, y)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 3, w)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 4, h)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 5, containerId)) return 0;
-  if (!g2PbWriteString(payload, sizeof(payload), &pos, 6, containerName)) return 0;
-  if (!g2PbEndNested(payload, sizeof(payload), &pos, imgStart)) return 0;
-
-  if (!g2PbEndNested(payload, sizeof(payload), &pos, pageStart)) return 0;
-  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
-                         payload, pos, out, outCap);
 }
 
 size_t g2BuildCreateImageMultiPb(uint32_t magic,
@@ -2236,10 +2185,6 @@ void g2statsRecordRx(uint8_t sid, uint8_t flag, const uint8_t* pb, size_t pbLen)
 size_t g2statsCount() { return gSidStatsCount; }
 const G2SidStat* g2statsAt(size_t idx) {
   return (idx < gSidStatsCount) ? &gSidStats[idx] : nullptr;
-}
-void g2statsReset() {
-  memset(gSidStats, 0, sizeof(gSidStats));
-  gSidStatsCount = 0;
 }
 
 const char* g2sidName(uint8_t sid) {
@@ -3636,100 +3581,6 @@ bool g2ProtocolGoldenSelfTest() {
       G2_RX_REASSEMBLY_REJECTED) return false;
 
   return true;
-}
-
-// g2BuildRingRawDataPush — synthesise a sid=0x90 RingDataPackage frame
-// =============================================================================
-// Field tag numbers for RingRawData (encoded as field<<3 | wire-type=0 for
-// varint = the byte value before the value bytes):
-#define G2_RING_RAW_F_BATTERY            ((1u  << 3) | 0)
-#define G2_RING_RAW_F_CHARGE_STATES      ((2u  << 3) | 0)
-#define G2_RING_RAW_F_HR                 ((3u  << 3) | 0)
-#define G2_RING_RAW_F_HR_TS              ((4u  << 3) | 0)
-#define G2_RING_RAW_F_SPO2               ((5u  << 3) | 0)
-#define G2_RING_RAW_F_SPO2_TS            ((6u  << 3) | 0)
-#define G2_RING_RAW_F_HRV                ((7u  << 3) | 0)
-#define G2_RING_RAW_F_HRV_TS             ((8u  << 3) | 0)
-#define G2_RING_RAW_F_TEMP               ((9u  << 3) | 0)
-#define G2_RING_RAW_F_TEMP_TS            ((10u << 3) | 0)
-#define G2_RING_RAW_F_ACT_KCAL           ((11u << 3) | 0)
-#define G2_RING_RAW_F_ACT_KCAL_TS        ((12u << 3) | 0)
-#define G2_RING_RAW_F_ALL_KCAL           ((13u << 3) | 0)
-#define G2_RING_RAW_F_ALL_KCAL_TS        ((14u << 3) | 0)
-#define G2_RING_RAW_F_STEPS              ((15u << 3) | 0)
-#define G2_RING_RAW_F_STEPS_TS           ((16u << 3) | 0)
-// Field tag numbers for the outer RingDataPackage:
-#define G2_RING_PKG_F_CMD                ((1u  << 3) | 0)
-#define G2_RING_PKG_F_MAGIC              ((2u  << 3) | 0)
-#define G2_RING_PKG_F_RAW_DATA           ((4u  << 3) | 2)  // wire-type 2 = length-delim
-
-size_t g2BuildRingRawDataPush(uint8_t seq, uint32_t magic,
-                              const G2RingPushFields& f,
-                              uint8_t* out, size_t outCap) {
-  uint8_t pb[160];
-  size_t pos = 0;
-
-  // Outer wrapper: commandId=2, magicRandom=N, rawData=<nested>
-  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_PKG_F_CMD,
-                       G2_RING_CMD_RAW_DATA)) return 0;
-  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_PKG_F_MAGIC, magic)) return 0;
-
-  // Nested RingRawData. Fields written only when *_valid is set.
-  size_t inner;
-  if (!g2PbBeginNested(pb, sizeof(pb), &pos,
-                       G2_RING_PKG_F_RAW_DATA, &inner)) return 0;
-  if (f.battery_valid &&
-      !g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_BATTERY,
-                       (uint32_t)f.battery)) return 0;
-  if (f.chargeStates_valid &&
-      !g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_CHARGE_STATES,
-                       (uint32_t)f.chargeStates)) return 0;
-  if (f.hr_valid) {
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_HR,
-                         (uint32_t)f.hr)) return 0;
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_HR_TS,
-                         (uint32_t)f.hrTs)) return 0;
-  }
-  if (f.spo2_valid) {
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_SPO2,
-                         (uint32_t)f.spo2)) return 0;
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_SPO2_TS,
-                         (uint32_t)f.spo2Ts)) return 0;
-  }
-  if (f.hrv_valid) {
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_HRV,
-                         (uint32_t)f.hrv)) return 0;
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_HRV_TS,
-                         (uint32_t)f.hrvTs)) return 0;
-  }
-  if (f.temp_valid) {
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_TEMP,
-                         (uint32_t)f.temp)) return 0;
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_TEMP_TS,
-                         (uint32_t)f.tempTs)) return 0;
-  }
-  if (f.actKcal_valid) {
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_ACT_KCAL,
-                         (uint32_t)f.actKcal)) return 0;
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_ACT_KCAL_TS,
-                         (uint32_t)f.actKcalTs)) return 0;
-  }
-  if (f.allKcal_valid) {
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_ALL_KCAL,
-                         (uint32_t)f.allKcal)) return 0;
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_ALL_KCAL_TS,
-                         (uint32_t)f.allKcalTs)) return 0;
-  }
-  if (f.steps_valid) {
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_STEPS,
-                         (uint32_t)f.steps)) return 0;
-    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_STEPS_TS,
-                         (uint32_t)f.stepsTs)) return 0;
-  }
-  if (!g2PbEndNested(pb, sizeof(pb), &pos, inner)) return 0;
-
-  return g2BuildEnvelope(seq, G2_SID_RING_RAW_DATA, G2_FLAG_REQUEST,
-                         pb, pos, out, outCap);
 }
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

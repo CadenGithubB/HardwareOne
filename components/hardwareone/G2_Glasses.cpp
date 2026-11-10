@@ -11499,9 +11499,6 @@ static void parseSid80Rx(G2Temple& t, const G2EnvelopeView& env,
                 t.side, name, (unsigned long long)magic, extra);
     }
 
-    // Mirror the connRet / connectRing values into the ring module so
-    // `ringbridge status` can display the most recent bridge-attempt state.
-    g2RingNoteBridgePoll(connRet, hasConnRet, connectRing, hasConnectRing);
     return;
   }
 

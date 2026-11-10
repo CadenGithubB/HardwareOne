@@ -80,7 +80,6 @@
 // External dependencies from main .ino - now in espnow_system.h
 extern bool isValidUser(const String& username, const String& password);
 extern bool isAdminUser(const String& username);
-extern void printToSerial(const String& s);
 extern bool gCLIValidateOnly;
 
 // Forward declaration — definition is further down near onEspNowRawRecv. Used

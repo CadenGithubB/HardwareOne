@@ -16,24 +16,8 @@
 #include "System_CommandRegistry.h"
 
 // ============================================================================
-// Task Execution Performance Monitoring
+// cmd_exec Saturation Diagnostic
 // ============================================================================
-
-// Task execution metrics (separate from I2C bus metrics for better architecture)
-struct TaskExecutionMetrics {
-  uint32_t totalOperations;    // Total sensor task operations tracked
-  uint32_t timeoutCount;       // Operations exceeding timeout threshold
-  uint32_t avgExecutionMs;     // EWMA of task execution times
-  uint32_t maxExecutionMs;     // Peak operation execution time
-  uint32_t lastResetMs;        // When metrics were last reset
-};
-
-extern TaskExecutionMetrics gTaskMetrics;
-
-// Task performance tracking API
-void taskOperationStart();
-void taskOperationComplete(uint32_t elapsedMs, uint32_t timeoutThresholdMs);
-void resetTaskMetrics();
 
 // Shared cmd_exec saturation diagnostic. The queue and BLE ingress pool have
 // different producer tasks, so all accesses go through this atomic API rather
@@ -263,19 +247,14 @@ const char* settingBoolToggle(bool& field, const String& arg, const char* label)
 // Base64 Encoding/Decoding
 // ============================================================================
 
-String base64Encode(const uint8_t* data, size_t len);
 String base64Decode(const String& input);
 
 // ============================================================================
 // JSON Parsing Helpers
 // ============================================================================
 
-bool parseJsonBool(const String& src, const char* key, bool& out);
 bool parseJsonInt(const String& src, const char* key, int& out);
-bool parseJsonFloat(const String& src, const char* key, float& out);
-bool parseJsonU16(const String& src, const char* key, uint16_t& out);
 bool parseJsonString(const String& src, const char* key, String& out);
-bool extractObjectByKey(const String& src, const char* key, String& outObj);
 bool extractArrayByKey(const String& src, const char* key, String& outArray);
 bool extractArrayItem(const String& arrayStr, int& pos, String& outItem);
 
@@ -283,7 +262,6 @@ bool extractArrayItem(const String& arrayStr, int& pos, String& outItem);
 // URL Encoding/Decoding Utilities
 // ============================================================================
 
-String urlEncode(const char* s);
 String urlDecode(const String& s);
 String extractFormField(const String& body, const String& key);
 String jsonEscape(const String& in);
@@ -304,7 +282,6 @@ int serializeJsonArrayWithRepair(JsonArray& arr, char* buf, size_t bufSize, cons
 // Serial Input Helpers
 // ============================================================================
 
-String waitForSerialInput(unsigned long timeoutMs);
 String waitForSerialInputBlocking();
 
 // ============================================================================
@@ -326,9 +303,6 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList = true);
 
 // Print breakdown of connected device libraries (returns total via outTotal)
 void printConnectedDevicesLibraries(size_t& outTotal);
-
-// Calculate total estimated memory usage for all sensor systems
-size_t calculateSensorSystemMemory();
 
 // System diagnostic commands - migrated from main .ino
 void printMemoryReport();

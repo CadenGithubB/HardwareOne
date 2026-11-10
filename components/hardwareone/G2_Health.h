@@ -58,13 +58,6 @@ void g2HealthOpen(void);
 void g2HealthTick(void);
 void g2HealthAction(uint32_t rowIdx);
 
-// True while HardwareOne Health logging is actively writing R1 vitals.
-bool g2HealthLoggingIsActive(void);
-
-// Selected metric. In Trends nav: OVERVIEW = Trends landing; HR/HRV/SPO2 =
-// day graphs. Live Temp/Battery are MAIN-only.
-G2HealthMetric g2HealthSelectedMetric(void);
-
 // True when the current view is list+text only (MAIN Overview or Trends landing).
 bool g2HealthWantTextOnlyShape(void);
 
@@ -177,12 +170,9 @@ struct G2HealthHistorySummary {
 };
 bool g2HealthHistorySnapshot(R1HealthHistoryDay& out);
 void g2HealthHistoryGetSummary(G2HealthHistorySummary& out);
-void g2HealthActivitySummary(R1HealthActivitySummary& out);
 // Main-loop coordinator: snapshots a dirty generation, stages it to the
 // secure store, then advances store recovery/commit. Never call from notify.
 void g2HealthHistoryCommitTick(void);
-
-void g2HealthBuildInfo(char* out, size_t cap);
 
 #else  // stubs
 
@@ -210,8 +200,6 @@ inline bool g2HealthInTrendsNav(void) { return false; }
 inline void g2HealthOpen(void) {}
 inline void g2HealthTick(void) {}
 inline void g2HealthAction(uint32_t) {}
-inline bool g2HealthLoggingIsActive(void) { return false; }
-inline G2HealthMetric g2HealthSelectedMetric(void) { return HEALTH_METRIC_OVERVIEW; }
 inline bool g2HealthWantTextOnlyShape(void) { return true; }
 inline bool g2HealthConsumePollRequest(void) { return false; }
 inline bool g2HealthConsumeLoggingToggleRequest(void) { return false; }
@@ -263,9 +251,7 @@ struct G2HealthHistorySummary {
 };
 inline bool g2HealthHistorySnapshot(R1HealthHistoryDay&) { return false; }
 inline void g2HealthHistoryGetSummary(G2HealthHistorySummary& out) { out = G2HealthHistorySummary{}; }
-inline void g2HealthActivitySummary(R1HealthActivitySummary& out) { out = R1HealthActivitySummary{}; }
 inline void g2HealthHistoryCommitTick(void) {}
-inline void g2HealthBuildInfo(char* out, size_t cap) { if (out && cap) out[0] = '\0'; }
 
 #endif  // ENABLE_R1_HEALTH
 #endif  // G2_HEALTH_H

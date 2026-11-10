@@ -1271,12 +1271,6 @@ void g2HealthHistoryGetSummary(G2HealthHistorySummary& out) {
   r1HealthHistorySleepSummary(sHistoryDay, out.sleep);
 }
 
-void g2HealthActivitySummary(R1HealthActivitySummary& out) {
-  G2HealthHistorySummary summary;
-  g2HealthHistoryGetSummary(summary);
-  out = summary.activity;
-}
-
 void g2HealthHistoryCommitTick(void) {
   const uint32_t dirtyGeneration =
       sHistoryDirtyGeneration.load(std::memory_order_acquire);
@@ -1426,10 +1420,6 @@ bool g2HealthWantTextOnlyShape(void) {
   return sSelected == HEALTH_METRIC_OVERVIEW ||
          sSelected == HEALTH_METRIC_ACTIVITY ||
          sSelected == HEALTH_METRIC_SLEEP;
-}
-
-bool g2HealthLoggingIsActive(void) {
-  return healthLoggingIsActive();
 }
 
 void g2HealthOpen(void) {
@@ -1597,8 +1587,6 @@ void g2HealthAction(uint32_t rowIdx) {
     default: break;
   }
 }
-
-G2HealthMetric g2HealthSelectedMetric(void) { return sSelected; }
 
 bool g2HealthConsumeLoggingToggleRequest(void) {
   if (!sLoggingToggleRequest) return false;
@@ -2910,37 +2898,6 @@ size_t g2RenderHealthBmp(uint8_t* out, size_t cap) {
 size_t g2HealthBmpCap(void) {
   const uint32_t rowStride = ((HEALTH_TILE_W * 4 + 31) / 32) * 4;
   return (size_t)(14 + 40 + 64) + (size_t)rowStride * HEALTH_TILE_H;
-}
-
-void g2HealthBuildInfo(char* out, size_t cap) {
-  if (!out || !cap) return;
-  G2RingTelemetry t;
-  g2RingGetTelemetry(t);
-  char temp[12];
-  char wear[16];
-  if (!t.tempValid) snprintf(temp, sizeof(temp), "?");
-  else snprintf(temp, sizeof(temp), "%d.%d",
-                (int)(t.tempTenths / 10),
-                (int)(t.tempTenths < 0 ? -(t.tempTenths % 10) : (t.tempTenths % 10)));
-  size_t hrCount = 0, hrvCount = 0, spo2Count = 0, tempCount = 0, batCount = 0;
-  {
-    SeriesLock lock;
-    if (lock.locked()) {
-      hrCount = sHr.count; hrvCount = sHrv.count; spo2Count = sSpo2.count;
-      tempCount = sTemp.count; batCount = sBat.count;
-    }
-  }
-  snprintf(out, cap,
-           "Health — %s\nHR %s%u  HRV %s%d\nSpO2 %s%u  T %s\nBat %s%u  %s\nn=%u/%u/%u/%u/%u",
-           t.connected ? "online" : "offline",
-           t.hrValid ? "" : "?", (unsigned)t.hr,
-           t.hrvValid ? "" : "?", (int)t.hrv,
-           t.spo2Valid ? "" : "?", (unsigned)t.spo2,
-           temp,
-           t.batteryValid ? "" : "?", (unsigned)t.battery,
-           wearLabel(t, wear, sizeof(wear)),
-           (unsigned)hrCount, (unsigned)hrvCount,
-           (unsigned)spo2Count, (unsigned)tempCount, (unsigned)batCount);
 }
 
 #endif  // ENABLE_R1_HEALTH
