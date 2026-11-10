@@ -79,6 +79,8 @@ struct SystemEvent { uint32_t seq; uint32_t tsMs; uint8_t kind; };
 static SystemEvent gEventRing[SYSEVT_RING_SIZE];
 static uint32_t gEventNextSeq = 1;
 static std::mutex gEventMux;
+using portMUX_TYPE = std::mutex;
+#define portMUX_INITIALIZER_UNLOCKED {}
 #define taskENTER_CRITICAL(mux) (mux)->lock()
 #define taskEXIT_CRITICAL(mux) (mux)->unlock()
 static uint32_t gEventRingSkipped = 0;
@@ -155,6 +157,8 @@ static void schedulerTickMinute() {
 // INSERT_SCHEDULER_API
 
 // INSERT_TRIGGER_SUMMARY
+
+// INSERT_RESCHEDULE
 
 static const char* emptyRules = R"({"version":2,"automations":[]})";
 static const char* futureRules = R"({"version":2,"automations":[{"id":1,"enabled":true,"triggers":[{"type":"interval","nextAt":101}]}]})";
@@ -629,6 +633,137 @@ static void fileFormatVersion() {
   stopAutomationScheduler();
 }
 
+// G-70: a short interval keeps its next run in RAM, so a fire writes nothing.
+static JsonDocument storeDoc() {
+  JsonDocument doc;
+  std::lock_guard<std::mutex> lock(storeMutex);
+  CHECK(!deserializeJson(doc, storeJson));
+  return doc;
+}
+
+static void shortIntervals() {
+  using Table = AutomationVolatileSchedule;
+  {
+    Table t;
+    CHECK(Table::covers(1) && Table::covers(5000) && Table::covers(899999));
+    CHECK(!Table::covers(0) && !Table::covers(900000));
+    CHECK(!t.set(7, 0, 900000, 500) && !t.set(0, 0, 5000, 500) && !t.set(7, 0, 5000, 0));
+    // No entry: a future or slightly late file value is used as it is.
+    CHECK(t.effective(7, 0, 5000, 1005, 1000, true) == 1005);
+    CHECK(t.effective(7, 0, 5000, 940, 1000, true) == 940);
+    CHECK(t.effective(7, 0, 5000, 0, 1000, true) == 0);
+    CHECK(t.effective(7, 0, 5000, 3, 1000, false) == 3);  // no clock: no restart
+    CHECK(t.effective(7, 0, 900000, 3, 5000, true) == 3);  // long interval: the file rules
+    CHECK(t.find(7, 0) == nullptr);
+    // A stale file value restarts the interval from now, once.
+    CHECK(t.effective(7, 0, 5000, 939, 1000, true) == 1005);
+    CHECK(t.effective(7, 0, 5000, 939, 1200, true) == 1005);  // a deferred run stays due
+    // Ten-minute interval: stale only after two intervals.
+    CHECK(t.effective(8, 0, 600000, 1000, 2200, true) == 1000);
+    CHECK(t.effective(8, 0, 600000, 1000, 2201, true) == 2801);
+    // After a fire the entry advances; the file value no longer matters.
+    CHECK(t.set(7, 0, 5000, 1210) && t.effective(7, 0, 5000, 939, 1206, true) == 1210);
+    CHECK(t.peek(7, 0, 5000, 939) == 1210 && t.peek(7, 1, 5000, 939) == 939);
+    // Positions in one automation are separate entries.
+    CHECK(t.set(7, 1, 5000, 1300) && t.effective(7, 0, 5000, 0, 1206, true) == 1210 &&
+          t.effective(7, 1, 5000, 0, 1206, true) == 1300);
+    // A later file value was written on purpose and wins.
+    CHECK(t.effective(7, 0, 5000, 1400, 1206, true) == 1400 && t.peek(7, 0, 5000, 0) == 1400);
+    // An edited interval drops the entry.
+    CHECK(t.peek(7, 0, 10000, 55) == 55);
+    CHECK(t.effective(7, 0, 10000, 1400, 1401, true) == 1400 && t.find(7, 0) == nullptr);
+    // Sweep keeps what was seen and what was set meanwhile.
+    t.beginSweep();
+    CHECK(t.effective(7, 1, 5000, 0, 1206, true) == 1300);
+    CHECK(t.set(9, 0, 5000, 1500));
+    t.endSweep();
+    CHECK(t.find(7, 1) && t.find(9, 0) && !t.find(8, 0));
+  }
+  {
+    Table t;
+    for (int i = 0; i < Table::kEntries; i++) CHECK(t.set(100 + i, 2, 5000, 2000));
+    CHECK(!t.set(999, 0, 5000, 2000));                         // full: the caller saves
+    CHECK(t.effective(999, 0, 5000, 100, 5000, true) == 100);  // and the file value stands
+    CHECK(t.set(100, 2, 5000, 2005) && t.find(100, 2)->nextAt == 2005);
+  }
+
+  // Through the scheduler's own code.
+  reset();
+  clockSeconds = 5000;
+  const char* quick = R"({"id":41,"enabled":true,"triggers":[{"type":"interval","intervalMs":5000,"nextAt":4999}]})";
+  const char* slow = R"({"id":42,"enabled":true,"triggers":[{"type":"interval","intervalMs":900000,"nextAt":4999}]})";
+  const char* mixed = R"({"id":43,"enabled":true,"triggers":[{"type":"event","on":"edge"},{"type":"interval","intervalMs":5000,"nextAt":4990},{"type":"interval","intervalMs":900000,"nextAt":9000}]})";
+  const char* off = R"({"id":44,"enabled":false,"triggers":[{"type":"interval","intervalMs":5000,"nextAt":100}]})";
+  replaceStore(String(R"({"version":2,"automations":[)") + quick + "," + slow + "," + mixed + "," + off + "]}");
+  Trigger parsed[MAX_TRIGGERS];
+  CHECK(triggersFromJson(quick, parsed, MAX_TRIGGERS) == 1 && parsed[0].nextAt == 4999 && parsed[0].slot == 0);
+
+  // A fire of the short interval writes nothing and still moves the schedule.
+  unsigned before = writes;
+  rescheduleAfterFire(41, quick, 5000, false);
+  CHECK(writes == before);
+  CHECK(triggersFromJson(quick, parsed, MAX_TRIGGERS) == 1 && parsed[0].nextAt == 5005);
+  CHECK(computeNextRunTime(quick, 5000) == 5005);
+  rescheduleAfterFire(41, quick, 5005, true);
+  CHECK(writes == before && computeNextRunTime(quick, 5005) == 5010);
+
+  // A 15-minute interval is saved as before.
+  rescheduleAfterFire(42, slow, 5000, false);
+  CHECK(writes == before + 1);
+  {
+    JsonDocument doc = storeDoc();
+    CHECK(doc["automations"][0]["triggers"][0]["nextAt"].as<long>() == 4999);  // file untouched
+    CHECK(doc["automations"][1]["triggers"][0]["nextAt"].as<long>() == 5900);
+  }
+
+  // Short and long together: only the long one causes a write, and the write
+  // carries the short one's RAM value.
+  rescheduleAfterFire(43, mixed, 5000, false);
+  CHECK(writes == before + 1);
+  CHECK(triggersFromJson(mixed, parsed, MAX_TRIGGERS) == 3 && parsed[1].slot == 1 &&
+        parsed[1].nextAt == 5005 && parsed[2].nextAt == 9000);
+  clockSeconds = 9000;
+  rescheduleAfterFire(43, mixed, 9000, false);
+  CHECK(writes == before + 2);
+  {
+    JsonDocument doc = storeDoc();
+    JsonArray triggers = doc["automations"][2]["triggers"];
+    CHECK(triggers[1]["nextAt"].as<long>() == 9005 && triggers[2]["nextAt"].as<long>() == 9900);
+  }
+
+  // The due cache and the client view use the RAM value. A disabled
+  // automation holds no entry and keeps its file value.
+  clockSeconds = 5006;
+  CHECK(startAutomationScheduler());
+  rebuildAutomationsCache();
+  CHECK(gAutomationsCacheCount == 4 && gAutomationsCache[0].id == 41 && gAutomationsCache[0].nextAt == 5010);
+  CHECK(gAutomationsCache[1].nextAt == 5900 && gAutomationsCache[2].nextAt == 9005);
+  CHECK(gAutomationsCache[3].nextAt == 100 && sVolatileSchedule.find(44, 0) == nullptr);
+  {
+    JsonDocument doc = storeDoc();
+    for (JsonObject automation : doc["automations"].as<JsonArray>()) {
+      automationApplyRuntimeSchedule(automation);
+    }
+    CHECK(doc["automations"][0]["triggers"][0]["nextAt"].as<long>() == 5010);
+    CHECK(doc["automations"][1]["triggers"][0]["nextAt"].as<long>() == 5900);
+    CHECK(doc["automations"][3]["triggers"][0]["nextAt"].as<long>() == 100);
+  }
+
+  // After a restart the table is empty: the stale file value restarts the
+  // interval instead of counting as a missed run.
+  sVolatileSchedule = Table{};
+  clockSeconds = 50000;
+  rebuildAutomationsCache();
+  CHECK(gAutomationsCache[0].nextAt == 50005 && computeNextRunTime(quick, 50000) == 50005);
+
+  // A removed automation gives its entry back.
+  CHECK(sVolatileSchedule.find(41, 0) != nullptr);
+  replaceStore(String(R"({"version":2,"automations":[)") + slow + "]}");
+  rebuildAutomationsCache();
+  CHECK(sVolatileSchedule.find(41, 0) == nullptr && sVolatileSchedule.find(43, 1) == nullptr);
+  stopAutomationScheduler();
+}
+
 int main() {
   eventDrainFromStart();
   summaries();
@@ -638,6 +773,7 @@ int main() {
   timing();
   invalidationAndOverlap();
   concurrentRequests();
+  shortIntervals();
   reset();
   std::printf("automation scheduler: %u summary, ownership, timing and overlap checks passed\n", checks.load());
 }

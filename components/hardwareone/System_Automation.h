@@ -63,6 +63,9 @@ bool sanitizeAutomationsJson(String& jsonRef);
 // Redact credential-bearing command strings in an automations JSON document
 // before it crosses a CLI/HTTP/log boundary. Returns an empty String on parse
 // failure so callers fail closed instead of echoing malformed raw storage.
+// The result also shows each short interval's next run as the scheduler holds
+// it in RAM; the file keeps an older value for those (see
+// AutomationVolatileSchedule in System_Automation.cpp).
 String redactAutomationsJsonForResponse(const String& json);
 // Reads automations.json. False when it is missing, unreadable or written by
 // newer firmware (a "version" above kAutomationsFileVersion): such a file is

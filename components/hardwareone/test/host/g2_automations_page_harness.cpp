@@ -56,6 +56,11 @@ static constexpr size_t SYSEVT_DETAIL_LEN = 80;
 static int systemEventKindFromName(const char* name) { return std::strcmp(name, "edge") == 0 ? 1 : -1; }
 static const char* systemEventKindName(uint8_t kind) { return kind == 1 ? "edge" : "?"; }
 
+// The scheduler's RAM schedule for short intervals is outside the page boundary.
+static time_t automationVolatileNextAt(long, uint8_t, uint32_t, time_t fileNextAt, time_t, bool) {
+  return fileNextAt;
+}
+
 // INSERT_OWNER_SUMMARY
 
 // --- Lens, page and command boundaries -------------------------------------

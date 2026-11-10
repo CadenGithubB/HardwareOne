@@ -87,6 +87,14 @@ def generated(component: Path) -> str:
     events = (component / "System_Events.cpp").read_text()
     ring = "\n".join(extract_block(events, signature) for signature in (
         "uint32_t systemEventLatestSeq()", "int systemEventFetchSince("))
+    # G-70: the post-fire path, which keeps a short interval's next run in RAM.
+    reschedule = "\n".join(extract_block(owner, signature) for signature in (
+        "static time_t nextFire(const Trigger& s, time_t from)",
+        "static bool onFired(Trigger& s, time_t firedAt)",
+        "static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt, bool notify) ",
+        "time_t computeNextRunTime(const char* automationJson, time_t fromTime) "))
+    require("automationVolatileSet(" in reschedule and "if (notify) notifyAutomationScheduler();" in reschedule,
+            "rescheduleAfterFire keeps short intervals in RAM and notifies without a write")
     summary = owner_summary(component)
     require(bool(summary), "System_Automation.cpp has no owner automation summary "
             "(automationCopySummaries); pages still parse automations.json themselves")
@@ -95,7 +103,8 @@ def generated(component: Path) -> str:
                                 "// INSERT_SCHEDULER_API": functions,
                                 "// INSERT_EVENT_RING": ring,
                                 "// INSERT_PENDING_EVENT_DRAIN": drain,
-                                "// INSERT_TRIGGER_SUMMARY": summary}.items():
+                                "// INSERT_TRIGGER_SUMMARY": summary,
+                                "// INSERT_RESCHEDULE": reschedule}.items():
         require(harness.count(marker) == 1, f"exactly one insertion marker: {marker}")
         harness = harness.replace(marker, replacement)
     return harness

@@ -263,6 +263,8 @@ static String redactAutomationCommandForAudit(const String& command) {
   return redactAutomationCommandForAuditImpl(command, 0);
 }
 
+static void automationApplyRuntimeSchedule(JsonObject automation);
+
 String redactAutomationsJsonForResponse(const String& json) {
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json)) return String();
@@ -280,6 +282,8 @@ String redactAutomationsJsonForResponse(const String& json) {
       obj["command"] = redactAutomationCommandForAudit(
           String(obj["command"].as<const char*>()));
     }
+    // A client sees the next run the scheduler will use.
+    automationApplyRuntimeSchedule(obj);
   };
 
   if (doc["automations"].is<JsonArray>()) {
@@ -868,6 +872,155 @@ static void releaseAutomationsCache() {
   }
 }
 
+// How late a clock trigger may be and still fire. Beyond this the occurrence
+// is treated as missed: the schedule advances but the commands do not run.
+// 15 min comfortably covers a slow boot or a busy main loop while still
+// suppressing the "device was off for hours" / "clock just jumped from 1970"
+// burst. Interval triggers shorter than this simply lose the stale occurrence,
+// which is what an interval means anyway.
+static constexpr time_t kMissedFireGraceSec = 15 * 60;
+
+// ---------------------------------------------------------------------------
+// Next run of short interval triggers, kept in RAM
+// ---------------------------------------------------------------------------
+// Every fire of an interval trigger used to save its next run time, which
+// rewrote automations.json once per fire: 17,000 times a day at 5 s. An
+// interval shorter than the missed-fire grace gains nothing from that record.
+// After a restart its stale occurrence is dropped and the interval starts
+// again, so its next run lives here and the file keeps the value it had.
+// Longer intervals and every other trigger type are still saved.
+//
+// An entry is found by automation id and the trigger's position in the
+// automation's "triggers" array. The table holds no lock of its own; the
+// functions below it take sVolatileScheduleMux around every call.
+struct AutomationVolatileSchedule {
+  static constexpr int kEntries = 16;
+  struct Entry {
+    uint32_t nextAt;      // epoch seconds
+    long     id;          // 0 = free
+    uint32_t intervalMs;  // the interval this entry was made for
+    uint8_t  slot;        // position in the triggers array
+    bool     seen;        // touched since the last sweep began
+  };
+  Entry entries[kEntries] = {};
+
+  static bool covers(uint32_t intervalMs) {
+    return intervalMs > 0 && intervalMs < (uint32_t)kMissedFireGraceSec * 1000UL;
+  }
+  static time_t stepOf(uint32_t intervalMs) {
+    const time_t step = (time_t)(intervalMs / 1000);
+    return step < 1 ? 1 : step;
+  }
+  Entry* find(long id, uint8_t slot) {
+    if (id == 0) return nullptr;
+    for (Entry& e : entries) {
+      if (e.id == id && e.slot == slot) return &e;
+    }
+    return nullptr;
+  }
+  // False when the trigger is not a short interval or the table is full; the
+  // caller then saves the value to the file as before.
+  bool set(long id, uint8_t slot, uint32_t intervalMs, time_t nextAt) {
+    if (id == 0 || nextAt <= 0 || !covers(intervalMs)) return false;
+    Entry* e = find(id, slot);
+    for (int i = 0; !e && i < kEntries; i++) {
+      if (entries[i].id == 0) e = &entries[i];
+    }
+    if (!e) return false;
+    e->nextAt = (uint32_t)nextAt;
+    e->id = id;
+    e->intervalMs = intervalMs;
+    e->slot = slot;
+    e->seen = true;
+    return true;
+  }
+  // The next run the scheduler should use for an interval trigger whose file
+  // value is `fileNextAt`.
+  time_t effective(long id, uint8_t slot, uint32_t intervalMs, time_t fileNextAt,
+                   time_t now, bool timeValid) {
+    if (id == 0 || !covers(intervalMs)) return fileNextAt;
+    Entry* e = find(id, slot);
+    if (e && e->intervalMs != intervalMs) {  // the interval was edited
+      *e = Entry{};
+      e = nullptr;
+    }
+    if (e) {
+      e->seen = true;
+      // A file value later than the entry was written on purpose (an edit, a
+      // recompute); the entry follows it.
+      if (fileNextAt > (time_t)e->nextAt) e->nextAt = (uint32_t)fileNextAt;
+      return (time_t)e->nextAt;
+    }
+    if (fileNextAt <= 0 || !timeValid) return fileNextAt;
+    // No entry: first sight since a restart. The file value is as old as the
+    // last save, so a clearly stale one restarts the interval from now
+    // instead of being reported as a missed run.
+    const time_t step = stepOf(intervalMs);
+    const time_t stale = (2 * step > 60) ? 2 * step : 60;
+    if (now - fileNextAt <= stale) return fileNextAt;
+    return set(id, slot, intervalMs, now + step) ? now + step : fileNextAt;
+  }
+  // The value to show a reader: the entry when there is one. Changes nothing.
+  time_t peek(long id, uint8_t slot, uint32_t intervalMs, time_t fileNextAt) {
+    Entry* e = find(id, slot);
+    if (!e || e->intervalMs != intervalMs) return fileNextAt;
+    return fileNextAt > (time_t)e->nextAt ? fileNextAt : (time_t)e->nextAt;
+  }
+  // Sweep: drop entries whose trigger is disabled or no longer in the file.
+  void beginSweep() {
+    for (Entry& e : entries) e.seen = false;
+  }
+  void endSweep() {
+    for (Entry& e : entries) {
+      if (e.id != 0 && !e.seen) e = Entry{};
+    }
+  }
+};
+
+static AutomationVolatileSchedule sVolatileSchedule;
+static portMUX_TYPE sVolatileScheduleMux = portMUX_INITIALIZER_UNLOCKED;
+
+static time_t automationVolatileNextAt(long id, uint8_t slot, uint32_t intervalMs,
+                                       time_t fileNextAt, time_t now, bool timeValid) {
+  taskENTER_CRITICAL(&sVolatileScheduleMux);
+  const time_t at = sVolatileSchedule.effective(id, slot, intervalMs, fileNextAt, now, timeValid);
+  taskEXIT_CRITICAL(&sVolatileScheduleMux);
+  return at;
+}
+
+static bool automationVolatileSet(long id, uint8_t slot, uint32_t intervalMs, time_t nextAt) {
+  taskENTER_CRITICAL(&sVolatileScheduleMux);
+  const bool kept = sVolatileSchedule.set(id, slot, intervalMs, nextAt);
+  taskEXIT_CRITICAL(&sVolatileScheduleMux);
+  return kept;
+}
+
+// An automation as a client should see it: a short interval shows the next
+// run the scheduler holds in RAM instead of the stale value in the file. The
+// web page reloads its list while a shown next run is in the past.
+static void automationApplyRuntimeSchedule(JsonObject automation) {
+  const long id = automation["id"] | 0L;
+  int slot = -1;
+  JsonArray triggers = automation["triggers"].as<JsonArray>();
+  for (JsonObject t : triggers) {
+    if (++slot >= 255) break;
+    if (strcmp(t["type"] | "", "interval") != 0) continue;
+    const uint32_t intervalMs = t["intervalMs"] | 0;
+    const unsigned long fileNextAt = t["nextAt"] | 0UL;
+    taskENTER_CRITICAL(&sVolatileScheduleMux);
+    const time_t at = sVolatileSchedule.peek(id, (uint8_t)slot, intervalMs, (time_t)fileNextAt);
+    taskEXIT_CRITICAL(&sVolatileScheduleMux);
+    if (at != (time_t)fileNextAt) t["nextAt"] = (unsigned long)at;
+  }
+}
+
+static void automationVolatileSweep(bool begin) {
+  taskENTER_CRITICAL(&sVolatileScheduleMux);
+  if (begin) sVolatileSchedule.beginSweep();
+  else sVolatileSchedule.endSweep();
+  taskEXIT_CRITICAL(&sVolatileScheduleMux);
+}
+
 // Re-read automations.json and refill the cache. Called at the end of the
 // full tick so post-fire nextAt updates are captured on the same pass.
 static void rebuildAutomationsCache() {
@@ -889,8 +1042,11 @@ static void rebuildAutomationsCache() {
   JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
   int n = 0;
   uint32_t evtMask[AUTOMATION_EVENT_MASK_WORDS]{};
+  const time_t now = time(nullptr);
+  bool sawAll = true;
+  automationVolatileSweep(true);
   for (JsonObjectConst a : autos) {
-    if (n >= AUTOMATIONS_CACHE_MAX) break;
+    if (n >= AUTOMATIONS_CACHE_MAX) { sawAll = false; break; }
     gAutomationsCache[n].id = a["id"].as<long>();
     gAutomationsCache[n].enabled = a["enabled"] | false;
     // Cache the min nextAt across the automation's triggers. 0 means nothing
@@ -899,7 +1055,9 @@ static void rebuildAutomationsCache() {
     time_t minAt = 0;
     JsonArrayConst triggers = a["triggers"].as<JsonArrayConst>();
     if (!triggers.isNull()) {
+      int slot = -1;
       for (JsonVariantConst t : triggers) {
+        slot++;
         bool isEventTrig = (strcmp(t["type"] | "", "event") == 0);
         // Event triggers never clock-fire; a stale hand-edited nextAt on one
         // would otherwise make automationsAnyDue() spin the full tick every
@@ -908,6 +1066,15 @@ static void rebuildAutomationsCache() {
         if (!isEventTrig) {
           unsigned long raw = t["nextAt"] | 0UL;
           time_t na = (time_t)raw;
+          // A short interval's next run is in RAM; the file value is stale.
+          // A disabled automation holds no entry, so enabling it restarts
+          // its interval.
+          if (gAutomationsCache[n].enabled && slot < 255 &&
+              strcmp(t["type"] | "", "interval") == 0) {
+            const uint32_t intervalMs = t["intervalMs"] | 0;
+            na = automationVolatileNextAt(gAutomationsCache[n].id, (uint8_t)slot, intervalMs,
+                                          na, now, now > 0);
+          }
           if (na > 0 && (minAt == 0 || na < minAt)) minAt = na;
         }
         if (gAutomationsCache[n].enabled && isEventTrig) {
@@ -919,6 +1086,9 @@ static void rebuildAutomationsCache() {
     gAutomationsCache[n].nextAt = minAt;
     n++;
   }
+  // Every trigger in the file was visited: entries left unseen belong to
+  // automations or triggers that were removed or disabled.
+  if (sawAll) automationVolatileSweep(false);
   gAutomationsCacheCount = n;
   for (size_t w = 0; w < AUTOMATION_EVENT_MASK_WORDS; ++w) {
     gAutomationEventKindMask[w] = evtMask[w];
@@ -941,13 +1111,6 @@ static void rebuildAutomationsCache() {
 // Ring buffer, same shape as the EVENT fire cooldown below.
 static constexpr int      kCondBlockSlots = 16;
 static constexpr uint32_t kCondBlockMs    = 5000;
-// How late a clock trigger may be and still fire. Beyond this the occurrence
-// is treated as missed: the schedule advances but the commands do not run.
-// 15 min comfortably covers a slow boot or a busy main loop while still
-// suppressing the "device was off for hours" / "clock just jumped from 1970"
-// burst. Interval triggers shorter than this simply lose the stale occurrence,
-// which is what an interval means anyway.
-static constexpr time_t kMissedFireGraceSec = 15 * 60;
 static long     sCondBlockId[kCondBlockSlots] = {};
 static uint32_t sCondBlockAtMs[kCondBlockSlots] = {};
 static int      sCondBlockNext = 0;
@@ -2540,8 +2703,11 @@ struct Trigger {
   uint8_t evtKind = 0;
   char evtMatch[SYSEVT_DETAIL_LEN + 1] = {};
 
-  // Scheduling state (persisted per-trigger inside the JSON)
+  // Scheduling state. Saved per trigger inside the JSON, except for a short
+  // interval, whose next run is kept in RAM (AutomationVolatileSchedule).
   time_t nextAt = 0;
+  // Position in the automation's "triggers" array.
+  uint8_t slot = 0;
 };
 
 // Convert "mon,wed,fri" (case-insensitive, any whitespace) to a 7-bit mask.
@@ -2664,11 +2830,24 @@ static int triggersFromJson(const char* automationJson, Trigger* out, int maxCou
   if (deserializeJson(doc, automationJson)) return 0;
   JsonArrayConst arr = doc["triggers"].as<JsonArrayConst>();
   if (arr.isNull()) return 0;
+  const long id = doc["id"] | 0L;
+  const time_t now = time(nullptr);
   int n = 0;
+  int slot = -1;
   for (JsonVariantConst t : arr) {
+    slot++;
     if (n >= maxCount) break;
     Trigger tmp;
     if (parseOneTrigger(t, tmp)) {
+      if (slot < 255) {
+        tmp.slot = (uint8_t)slot;
+        if (tmp.type == Trigger::INTERVAL) {
+          tmp.nextAt = automationVolatileNextAt(id, tmp.slot, tmp.intervalMs, tmp.nextAt,
+                                                now, now > 0);
+        }
+      } else {
+        tmp.slot = 255;  // never matches a RAM entry
+      }
       out[n++] = tmp;
     }
   }
@@ -2976,22 +3155,35 @@ static bool onFired(Trigger& s, time_t firedAt) {
 }
 
 // Unified post-fire helper. For each trigger whose nextAt was at or before
-// `firedAt`, compute a new nextAt (and maybe update anchor) and persist the
-// whole triggers array back to the JSON file.
+// `firedAt`, compute a new nextAt (and maybe update anchor). A short interval
+// keeps its new value in RAM; anything else is saved by writing the whole
+// triggers array back to the JSON file.
 static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt, bool notify) {
   Trigger triggers[MAX_TRIGGERS];
   int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS);
   if (n == 0) return;  // Malformed — scheduler will skip on next rebuild.
 
   // For each trigger that was due, advance it. Leave others untouched.
+  bool save = false;
   for (int i = 0; i < n; i++) {
     if (triggers[i].nextAt > 0 && triggers[i].nextAt <= firedAt) {
       onFired(triggers[i], firedAt);  // mutates anchor if needed
       triggers[i].nextAt = nextFire(triggers[i], firedAt);  // 0 = disarm
+      const bool inRam = triggers[i].type == Trigger::INTERVAL && triggers[i].slot < 255 &&
+                         automationVolatileSet(id, triggers[i].slot, triggers[i].intervalMs,
+                                               triggers[i].nextAt);
+      if (!inRam) save = true;
     }
   }
+  if (!save) {
+    // Nothing in the file changed. Outside a pass the scheduler still has to
+    // refresh its due cache from the new RAM values.
+    if (notify) notifyAutomationScheduler();
+    return;
+  }
 
-  // Rewrite the triggers array in the file.
+  // Rewrite the triggers array in the file. A short interval's entry carries
+  // its current RAM value along.
   String json;
   if (!readAutomationsJson(json)) return;
   PSRAM_JSON_DOC(doc);
