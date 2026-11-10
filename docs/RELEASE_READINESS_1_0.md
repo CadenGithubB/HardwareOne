@@ -449,10 +449,13 @@ the RC commit repeats all of it.
 | Host suite, parallel and serial | 373 of 373 passed both ways, `tree_hygiene_gate` and `esp_hosted_mempool` included. Not run: 4 browser suites (no Node.js on this Mac); 2 camera suites skipped |
 | Tool tests (`tools/ota`, `tools/webui`, `tools/model`) | OK |
 | Clean clone, vendor script, build | `feather_esp32_v2` only: builds, BUILD_INFO says "clean tree", no tracked file changed by the build |
+| Deployment contracts, trial build (OTA rows from the clean clone with a throwaway signing key) | `headless/feather_esp32_v2`: pair builds and passes the audit, main 3,608,576 B of a 4,194,304 B ceiling. `pocket_assistant/xiao_s3`: passes, 5,378,048 B, 520,192 B free. `handheld/p4x_eye`: builds, 6,557,200 B of 0x705000. `headless/feathers3`: pair builds, audit fails: main 4,198,400 B is 4,096 B over the contract ceiling of 4,194,304 B (its `ota_0` slot is 4,718,592 B) |
+| Tracked files after a deployment build | The updater lock files recorded ESP-IDF 5.5.1 and were rewritten by the build, which made the next deployment build refuse a dirty tree; fixed in c294d28e |
 | Tracked tree hygiene | passes after one home subnet in the appendix was replaced |
 
-Still open for the RC run: the browser suites, the clean-clone build of every stable row once the
-release matrix is decided, and every line above that needs a board (OTA PASS lines, QUICKSTART on
+Still open for the RC run: the browser suites, the release matrix decision (the `handheld/p4x_eye`
+contract still has local speech-to-text and microSD off, unlike the builds benched since October),
+the build of every stable row with the real signing key, and every line above that needs a board (OTA PASS lines, QUICKSTART on
 a used board, account recovery, the 24 h soak).
 
 ---
